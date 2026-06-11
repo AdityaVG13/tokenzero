@@ -6,13 +6,13 @@ members = [
     "crates/tokenzero-runtime",
     "crates/tokenzero-filters",
     "crates/tokenzero-mcp",
-    "crates/tokenzero-cli",
+    "crates/tokenzero",
     "crates/tokenzero-install",
     "crates/tokenzero-pulse",
 ]
 
 [workspace.package]
-version = "0.1.1"
+version = "1.0.0"
 edition = "2024"
 license = "MIT"
 repository = "https://github.com/AdityaVG13/tokenzero"

@@ -422,9 +422,9 @@ pub fn robot_docs_examples() -> &'static str {
 tokenzero capabilities --json | jq '.commands'
 tokenzero search TokenZero AGENTS.md --json
 tokenzero read Cargo.toml --json
-tokenzero tree crates/tokenzero-cli --json
+tokenzero tree crates/tokenzero --json
 tokenzero rn rustc --version --json
-tokenzero run --json -- cargo test -p tokenzero-cli
+tokenzero run --json -- cargo test -p tokenzero
 tokenzero doctor status --json
 tokenzero pulse stats --json
 tokenzero install status --json

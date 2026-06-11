@@ -5,7 +5,7 @@ target_dir="${CARGO_TARGET_DIR:-target/linux-docker}"
 bin="${target_dir}/release/tokenzero"
 mkdir -p results/current
 
-cargo build --release -p tokenzero-cli
+cargo build --release -p tokenzero
 
 measure() {
   local label="$1"

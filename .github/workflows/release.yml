@@ -48,7 +48,7 @@ jobs:
           TAG="${{ inputs.tag }}"
           TAG="${TAG#v}"
           VER="$(cargo metadata --no-deps --format-version 1 \
-                 | python3 -c 'import json,sys; data=json.load(sys.stdin); print(next(pkg["version"] for pkg in data["packages"] if pkg["name"] == "tokenzero-cli"))')"
+                 | python3 -c 'import json,sys; data=json.load(sys.stdin); print(next(pkg["version"] for pkg in data["packages"] if pkg["name"] == "tokenzero"))')"
           echo "input_tag=$TAG workspace_version=$VER"
           if [ "$TAG" != "$VER" ]; then
             echo "::error::tag v$TAG does not match workspace version $VER"; exit 1
@@ -135,7 +135,7 @@ jobs:
         with:
           targets: ${{ matrix.target }}
       - name: Build release binary
-        run: cargo build -p tokenzero-cli --locked --release --target "${{ matrix.target }}"
+        run: cargo build -p tokenzero --locked --release --target "${{ matrix.target }}"
       - name: Package Unix artifact
         if: ${{ runner.os != 'Windows' }}
         shell: bash
@@ -240,7 +240,7 @@ jobs:
           TAG="${{ inputs.tag }}"
           TAG="${TAG#v}"
           VER="$(cargo metadata --no-deps --format-version 1 \
-                 | python3 -c 'import json,sys; data=json.load(sys.stdin); print(next(pkg["version"] for pkg in data["packages"] if pkg["name"] == "tokenzero-cli"))')"
+                 | python3 -c 'import json,sys; data=json.load(sys.stdin); print(next(pkg["version"] for pkg in data["packages"] if pkg["name"] == "tokenzero"))')"
           echo "input_tag=$TAG workspace_version=$VER"
           if [ "$TAG" != "$VER" ]; then
             echo "::error::tag v$TAG does not match workspace version $VER"; exit 1
@@ -264,7 +264,7 @@ jobs:
             tokenzero-recovery \
             tokenzero-mcp \
             tokenzero-pulse \
-            tokenzero-cli; do
+            tokenzero; do
             echo "::group::publish $crate"
             # cargo publish waits for the index before returning, so dependents resolve
             cargo publish -p "$crate" --locked

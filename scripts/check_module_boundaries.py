@@ -32,10 +32,10 @@ EXTRACTED_MODULES = [
     "crates/tokenzero-install/src/package_audit/paths.rs",
     "crates/tokenzero-install/src/package_audit/tar.rs",
     "crates/tokenzero-install/src/package_audit/zip.rs",
-    "crates/tokenzero-cli/src/audits/bench.rs",
-    "crates/tokenzero-cli/src/audits/os_reach.rs",
-    "crates/tokenzero-cli/src/audits/recovery.rs",
-    "crates/tokenzero-cli/src/audits/release.rs",
+    "crates/tokenzero/src/audits/bench.rs",
+    "crates/tokenzero/src/audits/os_reach.rs",
+    "crates/tokenzero/src/audits/recovery.rs",
+    "crates/tokenzero/src/audits/release.rs",
 ]
 
 FACADE_CEILINGS = {
@@ -43,7 +43,7 @@ FACADE_CEILINGS = {
     "crates/tokenzero-mcp/src/lib.rs": 2500,
     "crates/tokenzero-install/src/lib.rs": 2500,
     "crates/tokenzero-install/src/package_audit.rs": 2500,
-    "crates/tokenzero-cli/src/main.rs": 2500,
+    "crates/tokenzero/src/main.rs": 2500,
 }
 
 # crate -> internal modules other crates must not path into

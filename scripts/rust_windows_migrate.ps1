@@ -262,7 +262,7 @@ try {
     },
     [ordered]@{
       id = "build_final_release_binary"
-      command = "cargo build --release -p tokenzero-cli --locked"
+      command = "cargo build --release -p tokenzero --locked"
       cwd = $CurrentCheckout
       skipped = $false
     },
@@ -369,7 +369,7 @@ try {
     -Name "build final release binary" `
     -WorkingDirectory $CurrentCheckout `
     -FileName "cargo" `
-    -Arguments @("build", "--release", "-p", "tokenzero-cli", "--locked")
+    -Arguments @("build", "--release", "-p", "tokenzero", "--locked")
 
   $completed += Invoke-Checked `
     -Name "preview global install" `

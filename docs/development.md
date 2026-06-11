@@ -7,7 +7,7 @@ this page is for contributors and from-source builds.
 ## Build
 
 ```bash
-cargo build --release -p tokenzero-cli
+cargo build --release -p tokenzero
 
 target/release/tokenzero doctor --json
 target/release/tokenzero read README.md --json
@@ -39,7 +39,7 @@ Eight Rust crates:
 | `tokenzero-runtime` | Runtime and session orchestration for the context layer |
 | `tokenzero-filters` | Content filters and selectors for compression |
 | `tokenzero-mcp` | MCP server exposing read/find/tree/expand/shell tools |
-| `tokenzero-cli` | The `tokenzero` binary |
+| `tokenzero` | The `tokenzero` binary |
 | `tokenzero-install` | Installer and agent-wiring (Claude/Codex/Grok/etc.) |
 | `tokenzero-pulse` | Pulse telemetry and forecasting |
 

@@ -14,7 +14,7 @@ rust-verify-report:
 	@scripts/rust_verify.sh --robot --output-json results/current/rust_verify.json
 
 rust-release-build:
-	@cargo build --release -p tokenzero-cli
+	@cargo build --release -p tokenzero
 
 rust-proof: rust-verify rust-release-build mcp-smoke mcp-soak shell-matrix install-smoke package-audit
 

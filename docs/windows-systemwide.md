@@ -17,7 +17,7 @@ Run from the Rust checkout:
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts/rust_windows_verify.ps1
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets --locked -- -D warnings
-cargo build --release -p tokenzero-cli --locked
+cargo build --release -p tokenzero --locked
 cargo test --workspace --locked
 cargo clippy --workspace --all-targets --locked -- -D warnings
 cargo build --workspace --locked --release
@@ -118,7 +118,7 @@ if you need to perform the steps by hand.
 3. Build the release binary:
 
    ```powershell
-   cargo build --release -p tokenzero-cli --locked
+   cargo build --release -p tokenzero --locked
    ```
 
    Running the remaining install commands copies a versioned runtime into

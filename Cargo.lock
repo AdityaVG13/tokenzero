@@ -1199,8 +1199,8 @@ dependencies = [
 ]
 
 [[package]]
-name = "tokenzero-cli"
-version = "0.1.1"
+name = "tokenzero"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "assert_cmd",
@@ -1220,7 +1220,7 @@ dependencies = [
 
 [[package]]
 name = "tokenzero-core"
-version = "0.1.1"
+version = "1.0.0"
 dependencies = [
  "criterion",
  "proptest",
@@ -1231,7 +1231,7 @@ dependencies = [
 
 [[package]]
 name = "tokenzero-filters"
-version = "0.1.1"
+version = "1.0.0"
 dependencies = [
  "regex",
  "serde",
@@ -1241,7 +1241,7 @@ dependencies = [
 
 [[package]]
 name = "tokenzero-install"
-version = "0.1.1"
+version = "1.0.0"
 dependencies = [
  "flate2",
  "fs4",
@@ -1255,7 +1255,7 @@ dependencies = [
 
 [[package]]
 name = "tokenzero-mcp"
-version = "0.1.1"
+version = "1.0.0"
 dependencies = [
  "assert_cmd",
  "globset",
@@ -1273,7 +1273,7 @@ dependencies = [
 
 [[package]]
 name = "tokenzero-pulse"
-version = "0.1.1"
+version = "1.0.0"
 dependencies = [
  "fs4",
  "proptest",
@@ -1287,7 +1287,7 @@ dependencies = [
 
 [[package]]
 name = "tokenzero-recovery"
-version = "0.1.1"
+version = "1.0.0"
 dependencies = [
  "criterion",
  "fs4",
@@ -1303,7 +1303,7 @@ dependencies = [
 
 [[package]]
 name = "tokenzero-runtime"
-version = "0.1.1"
+version = "1.0.0"
 dependencies = [
  "proptest",
  "serde",

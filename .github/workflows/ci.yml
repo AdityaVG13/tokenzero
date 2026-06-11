@@ -23,7 +23,7 @@ jobs:
       - name: Rust clippy
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - name: Rust shell matrix
-        run: cargo run --locked -p tokenzero-cli -- shell-matrix --output-json results/current/rust_shell_matrix_${{ matrix.os }}.json --json
+        run: cargo run --locked -p tokenzero -- shell-matrix --output-json results/current/rust_shell_matrix_${{ matrix.os }}.json --json
       - name: Windows verifier
         if: matrix.os == 'windows-latest'
         shell: pwsh
@@ -49,7 +49,7 @@ jobs:
         with:
           command: check
       - name: Build release binary
-        run: cargo build --release -p tokenzero-cli
+        run: cargo build --release -p tokenzero
       - name: Doctor
         run: target/release/tokenzero doctor --root . --runtime --json
       - name: Package audit

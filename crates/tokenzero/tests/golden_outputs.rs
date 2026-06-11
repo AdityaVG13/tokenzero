@@ -672,7 +672,7 @@ fn assert_golden(relative_path: &str, actual: &str) {
 
     let expected = std::fs::read_to_string(&golden_path).unwrap_or_else(|err| {
         panic!(
-            "Golden file missing: {}\n{err}\nRun with UPDATE_GOLDENS=1 cargo test -p tokenzero-cli --test golden_outputs",
+            "Golden file missing: {}\n{err}\nRun with UPDATE_GOLDENS=1 cargo test -p tokenzero --test golden_outputs",
             golden_path.display()
         )
     });
@@ -681,7 +681,7 @@ fn assert_golden(relative_path: &str, actual: &str) {
         let actual_path = golden_path.with_extension("actual");
         std::fs::write(&actual_path, actual).unwrap();
         panic!(
-            "GOLDEN MISMATCH: {relative_path}\n\n{}\n\nTo update: UPDATE_GOLDENS=1 cargo test -p tokenzero-cli --test golden_outputs\nTo review: diff -u {} {}",
+            "GOLDEN MISMATCH: {relative_path}\n\n{}\n\nTo update: UPDATE_GOLDENS=1 cargo test -p tokenzero --test golden_outputs\nTo review: diff -u {} {}",
             unified_diff(&expected, actual),
             golden_path.display(),
             actual_path.display()

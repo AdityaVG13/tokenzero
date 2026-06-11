@@ -1,5 +1,5 @@
 [package]
-name = "tokenzero-cli"
+name = "tokenzero"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -21,13 +21,13 @@ clap.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 tempfile.workspace = true
-tokenzero-core = { path = "../tokenzero-core", version = "0.1.1" }
-tokenzero-filters = { path = "../tokenzero-filters", version = "0.1.1" }
-tokenzero-install = { path = "../tokenzero-install", version = "0.1.1" }
-tokenzero-mcp = { path = "../tokenzero-mcp", version = "0.1.1" }
-tokenzero-pulse = { path = "../tokenzero-pulse", version = "0.1.1" }
-tokenzero-recovery = { path = "../tokenzero-recovery", version = "0.1.1" }
-tokenzero-runtime = { path = "../tokenzero-runtime", version = "0.1.1" }
+tokenzero-core = { path = "../tokenzero-core", version = "1.0.0" }
+tokenzero-filters = { path = "../tokenzero-filters", version = "1.0.0" }
+tokenzero-install = { path = "../tokenzero-install", version = "1.0.0" }
+tokenzero-mcp = { path = "../tokenzero-mcp", version = "1.0.0" }
+tokenzero-pulse = { path = "../tokenzero-pulse", version = "1.0.0" }
+tokenzero-recovery = { path = "../tokenzero-recovery", version = "1.0.0" }
+tokenzero-runtime = { path = "../tokenzero-runtime", version = "1.0.0" }
 
 [dev-dependencies]
 assert_cmd.workspace = true

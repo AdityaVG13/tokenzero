@@ -99,7 +99,7 @@ flowchart TD
     MCP["tokenzero-mcp<br/>stdio MCP server"] --> REC
     MCP --> RUN
     MCP --> FIL
-    CLI["tokenzero-cli<br/>the tokenzero binary"] --> MCP
+    CLI["tokenzero<br/>the tokenzero binary"] --> MCP
     CLI --> INST
     CLI --> PUL
 ```
@@ -113,7 +113,7 @@ flowchart TD
 | `tokenzero-install` | Agent integration (plan / apply / rollback), `doctor` diagnostics, archive `package-audit` |
 | `tokenzero-pulse` | Local telemetry ledger (JSONL ↔ SQLite) so savings are accounted honestly, after recovery |
 | `tokenzero-mcp` | The deterministic stdio MCP server: engine, tool dispatch, crash-transparent supervisor |
-| `tokenzero-cli` | The `tokenzero` binary and its command surface |
+| `tokenzero` | The `tokenzero` binary and its command surface |
 
 Building from source and the full workspace layout live in [`docs/development.md`](docs/development.md).
 

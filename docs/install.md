@@ -29,7 +29,7 @@ not required for the GitHub Release download path.
 ```bash
 git clone https://github.com/AdityaVG13/tokenzero.git
 cd tokenzero
-cargo build --release -p tokenzero-cli --locked
+cargo build --release -p tokenzero --locked
 target/release/tokenzero install --plan --json
 target/release/tokenzero doctor --json
 ```
@@ -218,7 +218,7 @@ Before publication, release-readiness verifies:
 cargo fmt --all -- --check
 cargo test --workspace --locked
 cargo clippy --workspace --all-targets --locked -- -D warnings
-cargo build --release -p tokenzero-cli --locked
+cargo build --release -p tokenzero --locked
 cargo package --workspace --locked
 target/release/tokenzero package-audit --dist target/release --json
 ```

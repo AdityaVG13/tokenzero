@@ -122,7 +122,7 @@ try {
   $script:TokenZeroExe = [System.IO.Path]::GetFullPath($TokenZeroExe)
 
   if (!(Test-Path -LiteralPath $script:TokenZeroExe) -and !$SkipBuild) {
-    cargo build --release -p tokenzero-cli --locked
+    cargo build --release -p tokenzero --locked
     if ($LASTEXITCODE -ne 0) {
       throw "cargo build failed with exit code $LASTEXITCODE"
     }

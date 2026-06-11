@@ -4,7 +4,7 @@ These goldens freeze canonical public JSON envelopes emitted by the `tokenzero`
 CLI. They were generated from deterministic local fixtures through:
 
 ```bash
-UPDATE_GOLDENS=1 cargo test -p tokenzero-cli --test golden_outputs
+UPDATE_GOLDENS=1 cargo test -p tokenzero --test golden_outputs
 ```
 
 Dynamic temp paths, TokenZero blob/file/search refs, capture byte counts, and
@@ -25,7 +25,7 @@ root are scrubbed before comparison.
 Review workflow:
 
 ```bash
-cargo test -p tokenzero-cli --test golden_outputs
-UPDATE_GOLDENS=1 cargo test -p tokenzero-cli --test golden_outputs
-git diff crates/tokenzero-cli/tests/golden/
+cargo test -p tokenzero --test golden_outputs
+UPDATE_GOLDENS=1 cargo test -p tokenzero --test golden_outputs
+git diff crates/tokenzero/tests/golden/
 ```

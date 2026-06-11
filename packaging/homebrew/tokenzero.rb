@@ -1,7 +1,7 @@
 class Tokenzero < Formula
   desc "Recovery-aware context compression runtime for AI coding agents"
   homepage "https://github.com/AdityaVG13/tokenzero"
-  version "0.1.1"
+  version "1.0.0"
   license "MIT"
 
   url "file://#{File.expand_path("../../target/release/tokenzero", __dir__)}"

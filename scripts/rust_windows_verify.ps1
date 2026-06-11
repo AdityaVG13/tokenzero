@@ -116,8 +116,8 @@ Run-Step "cargo test workspace" "results/current/rust_windows_cargo_test.log" {
   cargo test --workspace --locked
 }
 
-Run-Step "cargo build tokenzero-cli release" "results/current/rust_windows_cargo_build.log" {
-  cargo build -p tokenzero-cli --locked --release
+Run-Step "cargo build tokenzero release" "results/current/rust_windows_cargo_build.log" {
+  cargo build -p tokenzero --locked --release
 }
 
 $tokenzero = Join-Path (Get-Location) "$env:CARGO_TARGET_DIR\release\tokenzero.exe"
