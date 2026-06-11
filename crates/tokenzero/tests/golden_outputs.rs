@@ -49,10 +49,16 @@ fn cli_find_json_envelope_matches_golden() {
         // Pin the search backend so the golden telemetry does not depend on
         // whether rg is installed on the machine running the suite.
         .env("TOKENZERO_SEARCH_BACKEND", "internal")
+        // Run from inside the fixture dir and search a RELATIVE target so the
+        // emitted hit paths (and therefore raw_tokens) are byte-identical on
+        // every platform -- absolute temp paths differ in length across OSes
+        // (e.g. macOS /var/folders/... vs Linux /tmp/...), which would skew the
+        // pre-scrub token count the golden pins.
+        .current_dir(dir.path())
         .args([
             "find",
             "alpha",
-            file.to_str().unwrap(),
+            "sample.txt",
             "--cache-path",
             cache.to_str().unwrap(),
             "--allowed-root",

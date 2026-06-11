@@ -35,19 +35,23 @@ fn cli_grok_install_promised_invocations_plan_grok_targets() {
         row["path"]
             .as_str()
             .unwrap()
+            .replace('\\', "/")
             .ends_with("/.grok/config.toml")
     }));
     assert!(writes.iter().any(|row| {
         row["path"]
             .as_str()
             .unwrap()
+            .replace('\\', "/")
             .ends_with("/.config/tokenzero/agents/grok.mcp.json")
     }));
-    assert!(
-        !writes
-            .iter()
-            .any(|row| row["path"].as_str().unwrap().ends_with("/.claude.json"))
-    );
+    assert!(!writes.iter().any(|row| {
+        row["path"]
+            .as_str()
+            .unwrap()
+            .replace('\\', "/")
+            .ends_with("/.claude.json")
+    }));
 
     let init = Command::cargo_bin("tokenzero")
         .unwrap()
@@ -75,19 +79,23 @@ fn cli_grok_install_promised_invocations_plan_grok_targets() {
         row["path"]
             .as_str()
             .unwrap()
+            .replace('\\', "/")
             .ends_with("/.grok/config.toml")
     }));
     assert!(writes.iter().any(|row| {
         row["path"]
             .as_str()
             .unwrap()
+            .replace('\\', "/")
             .ends_with("/.config/tokenzero/agents/grok.mcp.json")
     }));
-    assert!(
-        !writes
-            .iter()
-            .any(|row| row["path"].as_str().unwrap().ends_with("/.claude.json"))
-    );
+    assert!(!writes.iter().any(|row| {
+        row["path"]
+            .as_str()
+            .unwrap()
+            .replace('\\', "/")
+            .ends_with("/.claude.json")
+    }));
 }
 
 #[test]
@@ -121,6 +129,7 @@ fn cli_install_hooks_and_shims_flags_plan_scoped_surfaces() {
         row["path"]
             .as_str()
             .unwrap()
+            .replace('\\', "/")
             .ends_with("/.claude/settings.json")
             && row["capability"] == "hooks"
             && row["action"] == "merge"
@@ -130,6 +139,7 @@ fn cli_install_hooks_and_shims_flags_plan_scoped_surfaces() {
         row["path"]
             .as_str()
             .unwrap()
+            .replace('\\', "/")
             .ends_with("/.tokenzero/shims/cat")
             && row["capability"] == "shim"
     }));
@@ -162,7 +172,11 @@ fn cli_install_hooks_and_shims_flags_plan_scoped_surfaces() {
             .as_array()
             .unwrap()
             .iter()
-            .any(|row| row["path"].as_str().unwrap().contains("/.claude")),
+            .any(|row| row["path"]
+                .as_str()
+                .unwrap()
+                .replace('\\', "/")
+                .contains("/.claude")),
         "{grok_json}"
     );
 }
@@ -199,6 +213,7 @@ fn cli_clients_docs_commands_are_wired_to_install_surfaces() {
             .any(|row| row["path"]
                 .as_str()
                 .unwrap()
+                .replace('\\', "/")
                 .ends_with("/.config/tokenzero/agents/codex.mcp.json"))
     );
 
@@ -250,13 +265,16 @@ fn cli_clients_docs_commands_are_wired_to_install_surfaces() {
         row["path"]
             .as_str()
             .unwrap()
+            .replace('\\', "/")
             .ends_with("/.grok/config.toml")
     }));
-    assert!(
-        !writes
-            .iter()
-            .any(|row| row["path"].as_str().unwrap().ends_with("/.claude.json"))
-    );
+    assert!(!writes.iter().any(|row| {
+        row["path"]
+            .as_str()
+            .unwrap()
+            .replace('\\', "/")
+            .ends_with("/.claude.json")
+    }));
 
     let doctor = Command::cargo_bin("tokenzero")
         .unwrap()
@@ -323,6 +341,7 @@ fn cli_clients_detect_rejects_broken_toml_command_despite_tokenzero_table() {
             row["path"]
                 .as_str()
                 .unwrap()
+                .replace('\\', "/")
                 .ends_with(".codex/config.toml")
         })
         .unwrap();
@@ -385,7 +404,13 @@ fn cli_clients_detect_reports_applied_grok_surfaces_as_installed() {
             .as_array()
             .unwrap()
             .iter()
-            .find(|row| row["path"].as_str().unwrap().ends_with(suffix))
+            .find(|row| {
+                row["path"]
+                    .as_str()
+                    .unwrap()
+                    .replace('\\', "/")
+                    .ends_with(suffix)
+            })
             .unwrap();
         assert_eq!(row["state"], "installed", "{suffix}: {row:#}");
         assert!(

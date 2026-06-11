@@ -1,21 +1,21 @@
 {
   "accounting": {
     "exact_ref_tokens": 28,
-    "raw_tokens": 42,
+    "raw_tokens": 14,
     "recovery_tokens": 0,
-    "visible_tokens": 42
+    "visible_tokens": 14
   },
   "content_type": "search_result",
   "mode": "auto",
   "refs": [
     {
-      "bytes": 160,
+      "bytes": 40,
       "kind": "blob",
       "live": true,
       "ref": "tz://blob/[BLOB_REF_1]"
     },
     {
-      "bytes": 160,
+      "bytes": 40,
       "kind": "file",
       "live": true,
       "ref": "tz://file/[FILE_REF_1]"
@@ -44,7 +44,7 @@
     "query": "alpha",
     "result_limit": 20,
     "roots": [
-      "[TMP]/sample.txt"
+      "sample.txt"
     ],
     "search_backend": "internal",
     "storage_error": null,
@@ -57,6 +57,6 @@
   "tool": "find",
   "visible": {
     "kind": "capsule",
-    "text": "[TMP]/sample.txt:1:alpha\n[TMP]/sample.txt:3:alphabet"
+    "text": "sample.txt:1:alpha\nsample.txt:3:alphabet"
   }
 }

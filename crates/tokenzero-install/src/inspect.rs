@@ -358,6 +358,28 @@ pub(crate) fn toml_mcp_surface_checks(
     )
 }
 
+/// Normalize path separators so a value round-tripped through an agent config
+/// matches the freshly-derived expectation regardless of separator style. The
+/// install writes and re-derives every path from the same root, so a `\` vs `/`
+/// difference (which only arises on Windows) must still read as a match. This is
+/// a no-op on Unix, where paths never contain a backslash separator.
+fn normalize_path_sep(value: &str) -> String {
+    value.replace('\\', "/")
+}
+
+fn path_str_matches(actual: Option<&str>, expected: &str) -> bool {
+    actual.map(normalize_path_sep) == Some(normalize_path_sep(expected))
+}
+
+fn path_args_match(actual: Option<&[String]>, expected: &[String]) -> bool {
+    let normalize = |args: &[String]| {
+        args.iter()
+            .map(|arg| normalize_path_sep(arg))
+            .collect::<Vec<_>>()
+    };
+    actual.map(normalize) == Some(normalize(expected))
+}
+
 pub(crate) fn mcp_server_checks(
     server_present: bool,
     command: Option<&str>,
@@ -379,22 +401,22 @@ pub(crate) fn mcp_server_checks(
         ),
         client_check(
             "mcp_command_targets_installed_runtime",
-            command == Some(expected_command.as_str()),
+            path_str_matches(command, &expected_command),
             format!("expected {expected_command}"),
         ),
         client_check(
             "mcp_args_match",
-            args == Some(expected_args.as_slice()),
+            path_args_match(args, &expected_args),
             format!("expected {:?}", expected_args),
         ),
         client_check(
             "mcp_allowed_roots_match",
-            allowed_roots == Some(expected_allowed_roots.as_str()),
+            path_str_matches(allowed_roots, &expected_allowed_roots),
             format!("expected {expected_allowed_roots}"),
         ),
         client_check(
             "mcp_cache_path_match",
-            cache == Some(expected_cache.as_str()),
+            path_str_matches(cache, &expected_cache),
             format!("expected {expected_cache}"),
         ),
     ]
