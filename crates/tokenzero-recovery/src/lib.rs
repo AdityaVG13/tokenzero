@@ -1054,9 +1054,16 @@ fn write_json_to_tmp(tmp: &Path, state: &RecoveryState) -> Result<(), RecoveryEr
         use std::os::unix::fs::OpenOptionsExt;
         options.mode(0o600);
     }
-    let mut file = options.open(tmp)?;
-    serde_json::to_writer(&mut file, state)?;
-    file.write_all(b"\n")?;
+    let file = options.open(tmp)?;
+    // Buffer the serializer: serde_json::to_writer on a raw File issues one
+    // write(2) per JSON fragment, which profiled as 95% of warm-op wall time
+    // (tests/artifacts/perf/2026-06-11-pushmax). Identical bytes, ~3 syscalls.
+    let mut writer = std::io::BufWriter::with_capacity(1 << 20, file);
+    serde_json::to_writer(&mut writer, state)?;
+    writer.write_all(b"\n")?;
+    let file = writer
+        .into_inner()
+        .map_err(std::io::IntoInnerError::into_error)?;
     file.sync_all()?;
     Ok(())
 }
