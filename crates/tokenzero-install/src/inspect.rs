@@ -36,11 +36,21 @@ pub(crate) fn client_surface_checks(
     match write.capability.as_str() {
         "mcp" => mcp_surface_checks(path, root, write.global),
         "cli-runtime" => runtime_binary_checks(path),
-        "cli" | "cli-shim" => text_surface_checks(
+        "cli" => text_surface_checks(
             path,
             &[
                 ("launcher_mentions_tokenzero", "tokenzero"),
                 ("launcher_targets_runtime", "tokenzero-runtime-"),
+            ],
+        ),
+        // The Windows POSIX shim (git-bash/WSL) delegates to tokenzero.cmd rather
+        // than embedding the runtime hash directly, so it targets the launcher,
+        // not the runtime binary.
+        "cli-shim" => text_surface_checks(
+            path,
+            &[
+                ("launcher_mentions_tokenzero", "tokenzero"),
+                ("shim_delegates_to_launcher", "tokenzero.cmd"),
             ],
         ),
         "runtime" => runtime_manifest_checks(path, root, write.global),
