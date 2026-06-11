@@ -650,6 +650,8 @@ struct ProcessGroup {
 
 impl ProcessGroup {
     fn for_child(child: &std::process::Child) -> Self {
+        #[cfg(not(unix))]
+        let _ = child;
         Self {
             #[cfg(unix)]
             pgid: child.id(),
