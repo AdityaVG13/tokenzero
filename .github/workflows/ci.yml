@@ -1,0 +1,69 @@
+name: CI
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  rust-core:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Rust format
+        run: cargo fmt --all -- --check
+      - name: Rust tests
+        run: cargo test --workspace --locked
+      - name: Rust clippy
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - name: Rust shell matrix
+        run: cargo run --locked -p tokenzero-cli -- shell-matrix --output-json results/current/rust_shell_matrix_${{ matrix.os }}.json --json
+      - name: Windows verifier
+        if: matrix.os == 'windows-latest'
+        shell: pwsh
+        run: .\scripts\rust_windows_verify.ps1
+
+  rust-release-gates:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: "3.3"
+      - name: Embedded test mod boundary
+        run: python3 scripts/check_embedded_tests.py
+      - name: Module boundaries
+        run: python3 scripts/check_module_boundaries.py
+      - name: Cargo deny (licenses, advisories, sources)
+        uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check
+      - name: Build release binary
+        run: cargo build --release -p tokenzero-cli
+      - name: Doctor
+        run: target/release/tokenzero doctor --root . --runtime --json
+      - name: Package audit
+        run: target/release/tokenzero package-audit --dist target/release --json
+      - name: Cargo package dry run
+        run: cargo package --workspace --locked
+      - name: npm wrapper smoke
+        run: PATH="${{ github.workspace }}/target/release:$PATH" node package/npm/bin/tokenzero.js --version
+      - name: npm package dry run
+        working-directory: package/npm
+        run: npm pack --dry-run
+      - name: Homebrew formula syntax
+        run: ruby -c packaging/homebrew/tokenzero.rb
+      - name: MCP smoke
+        run: target/release/tokenzero mcp-smoke --output-json results/current/rust_mcp_smoke_ci.json --json
+      - name: Install smoke
+        run: target/release/tokenzero install-smoke --output-json results/current/rust_install_smoke_ci.json --json

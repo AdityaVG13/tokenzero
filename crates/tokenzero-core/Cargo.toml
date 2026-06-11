@@ -1,0 +1,25 @@
+[package]
+name = "tokenzero-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Core compression model and content-addressed exact-recovery refs for TokenZero."
+homepage.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+
+[dev-dependencies]
+criterion = "0.5"
+proptest.workspace = true
+
+[[bench]]
+name = "hotpaths"
+harness = false

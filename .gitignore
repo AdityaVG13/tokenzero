@@ -1,0 +1,162 @@
+# Build outputs
+/target/
+/build/
+/dist/
+
+# Dependency and tool caches
+/.cache/
+/.pytest_cache/
+/.ruff_cache/
+/.mypy_cache/
+/.venv/
+/.uv-godzilla/
+/.repowise/
+/.graphify_detect.json
+/graphify-out/
+__pycache__/
+*.py[cod]
+
+# Secrets and local config
+.env
+.env.*
+!.env.example
+/.mcp.json
+.tokenzero/
+**/.tokenzero/
+/.factory/
+/.gpr/
+/.lean-ctx/
+/.codesight/
+/.cursor/
+/.opencode/
+/.deepseek/
+
+# Local agent instructions and sessions
+/AGENTS.md
+/CLAUDE.md
+/DROID.md
+/GEMINI.md
+/GROK.md
+/CODEX-TASKS.md
+/CODEX-TASKS-EXPANDED.md
+/CONTEXT.md
+/GOAL.md
+/REORG-PLAN.md
+/ROADMAP.md
+/TOKENZERO-MCP-SPEC.md
+/TOOL-DESIGN-EVIDENCE.md
+
+# Public docs allowlist
+/docs/*
+!/docs/command-coverage.md
+!/docs/core.md
+!/docs/development.md
+!/docs/install.md
+!/docs/mcp.md
+!/docs/pulse.md
+!/docs/benchmarks.md
+!/docs/pulse-recovery-runbook.md
+!/docs/pulse-sync-strategy.md
+!/docs/racc.md
+!/docs/routing.md
+!/docs/windows-systemwide.md
+
+# Local execution/handoff records
+/RECOVERY_RUNBOOK.md
+/SYNC_STRATEGY.md
+/UPGRADE_LOG.md
+/claude-upgrade-progress.json
+/docs/advanced-adr-execution-record.md
+
+# Public Rust fixtures allowlist
+/test-corpus/*
+!/test-corpus/*.rs
+
+# Local/generated outputs
+/codedb.snapshot
+/results/
+results/
+/refactor/artifacts/
+/tests/artifacts/perf/
+*.log
+*.actual
+*.local-stats.jsonl
+*.cache-dump.json
+*.raw-pr-dump.json
+*.scraped-issues.json
+
+# Non-release local material
+/archive/
+/audits/
+/cache_dumps/
+/data/
+/eval-suite/
+/experiments/
+/fork_snapshots/
+/grants/
+/literature/
+/paper/
+/raw_audit_repos/
+/raw_pr_dumps/
+/scraped_issues/
+/test-corpus/expanded/
+docs/external-audit*.md
+docs/publication-runbook.md
+docs/release-audit.md
+docs/session-runtime.md
+docs/theory-cards/
+
+# Large/generated assets
+*.bin
+*.db
+*.docx
+*.gif
+!/.github/assets/banner.gif
+*.gguf
+*.jpeg
+*.jpg
+*.onnx
+*.pdf
+*.pkl
+*.png
+*.pt
+*.pth
+*.safetensors
+*.sqlite
+*.sqlite3
+*.tar
+*.tar.gz
+*.tgz
+*.zip
+
+# macOS and editor noise
+.DS_Store
+NDH6SA~M
+
+# Public helper scripts allowlist
+/scripts/*
+!/scripts/benchmark_tokens.sh
+!/scripts/check_embedded_tests.py
+!/scripts/check_module_boundaries.py
+!/scripts/rust_linux_docker_verify.sh
+!/scripts/rust_linux_perf_budget.sh
+!/scripts/rust_verify.sh
+!/scripts/rust_adaptive_scorecard.ps1
+!/scripts/rust_windows_global_rehearsal.ps1
+!/scripts/rust_windows_migrate.ps1
+!/scripts/rust_windows_verify.ps1
+.code-upgrade/
+
+# bv (beads viewer) local config and caches
+.bv/
+
+# Local agent/tool workspaces
+.beads/
+.cargo/
+.codegraph/
+.codegraphrc.json
+.ntm/
+.optloop/
+
+# local audit artifacts (regenerable; never publish)
+.debloat/

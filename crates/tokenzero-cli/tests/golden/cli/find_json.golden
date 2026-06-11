@@ -1,0 +1,62 @@
+{
+  "accounting": {
+    "exact_ref_tokens": 28,
+    "raw_tokens": 42,
+    "recovery_tokens": 0,
+    "visible_tokens": 42
+  },
+  "content_type": "search_result",
+  "mode": "auto",
+  "refs": [
+    {
+      "bytes": 160,
+      "kind": "blob",
+      "live": true,
+      "ref": "tz://blob/[BLOB_REF_1]"
+    },
+    {
+      "bytes": 160,
+      "kind": "file",
+      "live": true,
+      "ref": "tz://file/[FILE_REF_1]"
+    },
+    {
+      "bytes": 0,
+      "kind": "search",
+      "live": true,
+      "ref": "tz://search/[SEARCH_REF_1]"
+    },
+    {
+      "bytes": 0,
+      "kind": "search",
+      "live": true,
+      "ref": "tz://search/[SEARCH_REF_2]"
+    }
+  ],
+  "schema_version": "tokenzero.cli.v1",
+  "status": "ok",
+  "telemetry": {
+    "degraded": false,
+    "exact_refs_available": true,
+    "matched_files": 1,
+    "matches": 2,
+    "output_strategy": "exact_first_search",
+    "query": "alpha",
+    "result_limit": 20,
+    "roots": [
+      "[TMP]/sample.txt"
+    ],
+    "search_backend": "internal",
+    "storage_error": null,
+    "transport_status": "ok",
+    "truncated_by_results": false,
+    "truncated_by_visit": false,
+    "visit_limit": 10000,
+    "visited_files": 1
+  },
+  "tool": "find",
+  "visible": {
+    "kind": "capsule",
+    "text": "[TMP]/sample.txt:1:alpha\n[TMP]/sample.txt:3:alphabet"
+  }
+}

@@ -1,0 +1,31 @@
+{
+  "accounting": {
+    "exact_ref_tokens": 14,
+    "raw_tokens": 2,
+    "recovery_tokens": 0,
+    "visible_tokens": 2
+  },
+  "content_type": "unknown",
+  "mode": "auto",
+  "refs": [
+    {
+      "bytes": 11,
+      "kind": "blob",
+      "live": true,
+      "ref": "tz://blob/[BLOB_REF_1]"
+    },
+    {
+      "bytes": 11,
+      "kind": "file",
+      "live": true,
+      "ref": "tz://file/[FILE_REF_1]"
+    }
+  ],
+  "schema_version": "tokenzero.cli.v1",
+  "status": "ok",
+  "tool": "read",
+  "visible": {
+    "kind": "capsule",
+    "text": "alpha\nbeta"
+  }
+}

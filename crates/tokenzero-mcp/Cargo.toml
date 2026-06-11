@@ -1,0 +1,28 @@
+[package]
+name = "tokenzero-mcp"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "MCP server exposing TokenZero read/find/tree/expand/shell tools."
+homepage.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+globset.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+similar.workspace = true
+thiserror.workspace = true
+tokenzero-core = { path = "../tokenzero-core", version = "0.1.1" }
+tokenzero-filters = { path = "../tokenzero-filters", version = "0.1.1" }
+tokenzero-recovery = { path = "../tokenzero-recovery", version = "0.1.1" }
+tokenzero-runtime = { path = "../tokenzero-runtime", version = "0.1.1" }
+
+[dev-dependencies]
+assert_cmd.workspace = true
+proptest.workspace = true
+tempfile.workspace = true

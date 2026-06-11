@@ -1,0 +1,713 @@
+use super::*;
+use proptest::prelude::*;
+use tempfile::tempdir;
+
+#[test]
+fn restart_expand_is_byte_exact() {
+    let dir = tempdir().unwrap();
+    let cache = dir.path().join("cache.json");
+    let text = "alpha\nbeta\ngamma\n";
+    let stored = {
+        let mut store = RecoveryStore::new(Some(cache.clone()));
+        store
+            .store_payload(text, ContentType::Code, None, None, None)
+            .unwrap()
+    };
+    let mut restarted = RecoveryStore::new(Some(cache));
+    let expanded = restarted.expand(&stored.blob_ref, Some("raw"), None, None, None, None);
+    assert!(expanded.found);
+    assert_eq!(expanded.content, text);
+}
+
+#[test]
+fn deferred_payloads_persist_in_one_batch() {
+    let dir = tempdir().unwrap();
+    let cache = dir.path().join("cache.json");
+    let (first, second) = {
+        let mut store = RecoveryStore::new(Some(cache.clone()));
+        let first = store.store_payload_deferred("alpha\n", ContentType::Unknown, None, None, None);
+        let second = store.store_payload_deferred("beta\n", ContentType::Unknown, None, None, None);
+        assert!(!cache.exists());
+        store.persist_pending().unwrap();
+        (first, second)
+    };
+
+    let mut restarted = RecoveryStore::new(Some(cache));
+    assert_eq!(
+        restarted
+            .expand(&first.blob_ref, Some("raw"), None, None, None, None)
+            .content,
+        "alpha\n"
+    );
+    assert_eq!(
+        restarted
+            .expand(&second.blob_ref, Some("raw"), None, None, None, None)
+            .content,
+        "beta\n"
+    );
+}
+
+#[test]
+fn shell_outcome_repeat_detection_tracks_content_and_exit_code() {
+    let mut store = RecoveryStore::new(None);
+    let first =
+        store.record_shell_outcome_deferred(Some("/repo"), "cargo test", "all ok\n", Some(0));
+    assert!(!first.unchanged);
+    assert_eq!(first.seen, 1);
+
+    let second =
+        store.record_shell_outcome_deferred(Some("/repo"), "cargo test", "all ok\n", Some(0));
+    assert!(second.unchanged);
+    assert_eq!(second.seen, 2);
+
+    let changed_output =
+        store.record_shell_outcome_deferred(Some("/repo"), "cargo test", "all ok v2\n", Some(0));
+    assert!(!changed_output.unchanged);
+    assert_eq!(changed_output.seen, 1);
+
+    let changed_exit =
+        store.record_shell_outcome_deferred(Some("/repo"), "cargo test", "all ok v2\n", Some(1));
+    assert!(!changed_exit.unchanged);
+
+    let other_scope =
+        store.record_shell_outcome_deferred(Some("/other"), "cargo test", "all ok v2\n", Some(1));
+    assert!(
+        !other_scope.unchanged,
+        "scope must partition repeat detection"
+    );
+}
+
+#[test]
+fn shell_outcomes_are_bounded_and_evict_oldest() {
+    let mut store = RecoveryStore::new(None);
+    for idx in 0..(MAX_SHELL_OUTCOMES + 40) {
+        store.record_shell_outcome_deferred(None, &format!("cmd-{idx}"), "out", Some(0));
+    }
+    assert!(store.state.shell_outcomes.len() <= MAX_SHELL_OUTCOMES);
+
+    let recent = store.record_shell_outcome_deferred(
+        None,
+        &format!("cmd-{}", MAX_SHELL_OUTCOMES + 39),
+        "out",
+        Some(0),
+    );
+    assert!(
+        recent.unchanged,
+        "most recent entries must survive eviction"
+    );
+
+    let evicted = store.record_shell_outcome_deferred(None, "cmd-0", "out", Some(0));
+    assert!(!evicted.unchanged, "oldest entry should have been evicted");
+}
+
+#[test]
+fn shell_outcomes_survive_persistence_roundtrip() {
+    let dir = tempdir().unwrap();
+    let cache = dir.path().join("cache.json");
+    {
+        let mut store = RecoveryStore::new(Some(cache.clone()));
+        let first = store
+            .record_shell_outcome(Some("/repo"), "git status", "clean\n", Some(0))
+            .unwrap();
+        assert!(!first.unchanged);
+    }
+
+    let mut restarted = RecoveryStore::new(Some(cache));
+    let repeat = restarted
+        .record_shell_outcome(Some("/repo"), "git status", "clean\n", Some(0))
+        .unwrap();
+    assert!(repeat.unchanged, "repeat state must survive a restart");
+    assert_eq!(repeat.seen, 2);
+}
+
+#[test]
+fn persist_compacts_duplicate_order_entries() {
+    let dir = tempdir().unwrap();
+    let cache = dir.path().join("cache.json");
+    {
+        let mut store = RecoveryStore::new(Some(cache.clone()));
+        for _ in 0..5 {
+            store.store_payload_deferred("same\n", ContentType::Unknown, None, None, None);
+        }
+        assert!(store.state.order.len() > 1);
+        store.persist_pending().unwrap();
+    }
+
+    let restarted = RecoveryStore::new(Some(cache));
+    let unique = restarted.state.order.iter().collect::<HashSet<_>>().len();
+    assert_eq!(restarted.state.order.len(), unique);
+}
+
+#[test]
+fn persist_lock_file_is_stable_anchor_not_deleted_on_drop() {
+    let dir = tempdir().unwrap();
+    let lock_path = dir.path().join("cache.json.lock");
+
+    {
+        let _lock = PersistLock::acquire(lock_path.clone()).unwrap();
+        assert!(lock_path.exists());
+        let err = match PersistLock::acquire_with_retries(lock_path.clone(), 1) {
+            Ok(_) => panic!("second lock acquisition should block while OS lock is held"),
+            Err(err) => err,
+        };
+        match err {
+            RecoveryError::Io(err) => assert_eq!(err.kind(), std::io::ErrorKind::TimedOut),
+            other => panic!("unexpected lock error: {other:?}"),
+        }
+    }
+
+    assert!(
+        lock_path.exists(),
+        "OS file locks must keep one stable lock anchor"
+    );
+    drop(PersistLock::acquire(lock_path.clone()).unwrap());
+    assert!(lock_path.exists());
+}
+
+#[test]
+fn concurrent_persistence_preserves_all_thread_payloads() {
+    let dir = tempdir().unwrap();
+    let cache = dir.path().join("cache.json");
+    let workers = 8usize;
+    let barrier = std::sync::Arc::new(std::sync::Barrier::new(workers));
+    let handles: Vec<_> = (0..workers)
+        .map(|worker| {
+            let cache = cache.clone();
+            let barrier = std::sync::Arc::clone(&barrier);
+            std::thread::spawn(move || {
+                let mut store = RecoveryStore::new(Some(cache));
+                barrier.wait();
+                let text = format!("payload-{worker}\n");
+                let stored = store
+                    .store_payload(&text, ContentType::Unknown, None, None, None)
+                    .unwrap();
+                (stored.blob_ref, text)
+            })
+        })
+        .collect();
+    let stored: Vec<_> = handles
+        .into_iter()
+        .map(|handle| handle.join().unwrap())
+        .collect();
+
+    let mut restarted = RecoveryStore::new(Some(cache));
+    for (blob_ref, text) in stored {
+        let expanded = restarted.expand(&blob_ref, Some("raw"), None, None, None, None);
+        assert!(expanded.found, "missing {blob_ref}");
+        assert_eq!(expanded.content, text);
+    }
+}
+
+#[test]
+fn persisted_cache_is_compact_json() {
+    let dir = tempdir().unwrap();
+    let cache = dir.path().join("cache.json");
+    let mut store = RecoveryStore::new(Some(cache.clone()));
+    store
+        .store_payload("alpha\n", ContentType::Unknown, None, None, None)
+        .unwrap();
+
+    let text = fs::read_to_string(cache).unwrap();
+    assert!(serde_json::from_str::<RecoveryState>(&text).is_ok());
+    assert_eq!(text.lines().count(), 1);
+}
+
+#[test]
+fn load_state_rejects_reader_growth_past_max_load_bytes() {
+    let state = RecoveryState::empty(&RecoveryConfig::default());
+    let json = serde_json::to_string(&state).unwrap();
+    assert!(json.len() > 8);
+
+    let text = read_limited_utf8(std::io::Cursor::new(json.as_bytes()), json.len() - 1).unwrap();
+
+    assert!(text.is_none());
+}
+
+#[test]
+fn load_state_ignores_invalid_utf8_cache() {
+    let text = read_limited_utf8(std::io::Cursor::new([0xff]), 16).unwrap();
+
+    assert!(text.is_none());
+}
+
+#[test]
+fn recovery_tmp_paths_are_unique_within_process() {
+    let dir = tempdir().unwrap();
+    let cache = dir.path().join("cache.json");
+
+    let first = recovery_tmp_path(&cache);
+    let second = recovery_tmp_path(&cache);
+
+    assert_ne!(first, second);
+    assert_eq!(first.parent(), Some(dir.path()));
+    assert_eq!(second.parent(), Some(dir.path()));
+}
+
+#[test]
+fn atomic_write_json_does_not_reuse_stale_temp_path() {
+    let dir = tempdir().unwrap();
+    let cache = dir.path().join("cache.json");
+    let stale_tmp = recovery_tmp_path(&cache);
+    fs::write(&stale_tmp, "stale temp").unwrap();
+
+    atomic_write_json(&cache, &RecoveryState::empty(&RecoveryConfig::default())).unwrap();
+
+    assert_eq!(fs::read_to_string(&stale_tmp).unwrap(), "stale temp");
+    let text = fs::read_to_string(cache).unwrap();
+    assert!(serde_json::from_str::<RecoveryState>(&text).is_ok());
+}
+
+#[test]
+fn evict_prefix_removes_fifo_victims_once() {
+    let mut items = BTreeMap::from([
+        ("tz://unit/a".to_string(), 1),
+        ("tz://unit/b".to_string(), 2),
+        ("tz://unit/c".to_string(), 3),
+        ("tz://unit/d".to_string(), 4),
+    ]);
+    let mut order = vec![
+        "tz://unit/a".to_string(),
+        "tz://unit/a".to_string(),
+        "tz://file/live".to_string(),
+        "tz://unit/b".to_string(),
+        "tz://unit/c".to_string(),
+        "tz://unit/d".to_string(),
+    ];
+
+    evict_prefix(&mut items, &mut order, "tz://unit/", 2);
+
+    assert_eq!(
+        items.keys().cloned().collect::<Vec<_>>(),
+        vec!["tz://unit/c".to_string(), "tz://unit/d".to_string(),]
+    );
+    assert_eq!(
+        order,
+        vec![
+            "tz://file/live".to_string(),
+            "tz://unit/c".to_string(),
+            "tz://unit/d".to_string(),
+        ]
+    );
+}
+
+#[test]
+fn evict_prefix_falls_back_to_key_order_without_order_entries() {
+    let mut items = BTreeMap::from([
+        ("tz://unit/a".to_string(), 1),
+        ("tz://unit/b".to_string(), 2),
+        ("tz://unit/c".to_string(), 3),
+    ]);
+    let mut order = Vec::new();
+
+    evict_prefix(&mut items, &mut order, "tz://unit/", 1);
+
+    assert_eq!(
+        items.keys().cloned().collect::<Vec<_>>(),
+        vec!["tz://unit/c".to_string()]
+    );
+    assert!(order.is_empty());
+}
+
+#[test]
+fn file_ref_reports_stale_after_source_changes() {
+    let dir = tempdir().unwrap();
+    let source = dir.path().join("a.txt");
+    fs::write(&source, "one\n").unwrap();
+    let cache = dir.path().join("cache.json");
+    let stored = {
+        let mut store = RecoveryStore::new(Some(cache.clone()));
+        store
+            .store_payload("one\n", ContentType::Unknown, Some(&source), None, None)
+            .unwrap()
+    };
+    fs::write(&source, "two\n").unwrap();
+    let mut restarted = RecoveryStore::new(Some(cache));
+    let expanded = restarted.expand(&stored.file_ref, Some("raw"), None, None, None, None);
+    assert!(!expanded.found);
+    assert_eq!(expanded.reason, "stale-ref");
+}
+
+#[test]
+fn stale_check_uses_native_path_identity_before_display_path() {
+    let dir = tempdir().unwrap();
+    let source = dir.path().join("source.txt");
+    fs::write(&source, "same\n").unwrap();
+    let source_fingerprint = source_fingerprint(&source).unwrap();
+    let ref_id = "tz://file/manual".to_string();
+    let mut store = RecoveryStore::with_config(None, RecoveryConfig::default());
+
+    store.state.files.insert(
+        ref_id.clone(),
+        StoredFile {
+            ref_id: ref_id.clone(),
+            path: Some(
+                dir.path()
+                    .join("missing-display-path.txt")
+                    .display()
+                    .to_string(),
+            ),
+            path_identity: Some(path_identity_text(&source)),
+            text: "same\n".to_string(),
+            content_type: ContentType::Unknown.to_string(),
+            source_fingerprint: Some(source_fingerprint),
+            source_start_line: None,
+            source_end_line: None,
+        },
+    );
+
+    assert!(
+        !store.file_ref_is_stale(&ref_id),
+        "native path identity must drive stale checks when display text is lossy"
+    );
+}
+
+#[test]
+fn line_range_payloads_skip_source_fingerprint() {
+    let dir = tempdir().unwrap();
+    let source = dir.path().join("large.txt");
+    fs::write(&source, "one\ntwo\n").unwrap();
+    let mut store = RecoveryStore::new(Some(dir.path().join("cache.json")));
+    let stored = store
+        .store_payload(
+            "one\n",
+            ContentType::Unknown,
+            Some(&source),
+            Some(1),
+            Some(1),
+        )
+        .unwrap();
+
+    assert!(
+        store
+            .state
+            .files
+            .get(&stored.file_ref)
+            .unwrap()
+            .source_fingerprint
+            .is_none()
+    );
+}
+
+#[test]
+fn virtual_paths_skip_source_fingerprint() {
+    let dir = tempdir().unwrap();
+    let mut store = RecoveryStore::new(Some(dir.path().join("cache.json")));
+    let stored = store
+        .store_payload(
+            "output\n",
+            ContentType::ShellOutput,
+            Some(Path::new("shell:stdout:test")),
+            None,
+            None,
+        )
+        .unwrap();
+
+    assert!(
+        store
+            .state
+            .files
+            .get(&stored.file_ref)
+            .unwrap()
+            .source_fingerprint
+            .is_none()
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn file_refs_distinguish_non_utf8_path_bytes() {
+    use std::ffi::OsString;
+    use std::os::unix::ffi::OsStringExt;
+
+    let path_a = PathBuf::from(OsString::from_vec(b"/tmp/source-\xff.rs".to_vec()));
+    let path_b = PathBuf::from(OsString::from_vec(b"/tmp/source-\xfe.rs".to_vec()));
+    let mut store = RecoveryStore::with_config(None, RecoveryConfig::default());
+
+    let stored_a = store
+        .store_payload("same\n", ContentType::Unknown, Some(&path_a), None, None)
+        .unwrap();
+    let stored_b = store
+        .store_payload("same\n", ContentType::Unknown, Some(&path_b), None, None)
+        .unwrap();
+    let (_, expected_a) = RecoveryStore::expected_refs("same\n", Some(&path_a));
+    let (_, expected_b) = RecoveryStore::expected_refs("same\n", Some(&path_b));
+
+    assert_eq!(stored_a.file_ref, expected_a);
+    assert_eq!(stored_b.file_ref, expected_b);
+    assert_ne!(stored_a.file_ref, stored_b.file_ref);
+}
+
+#[cfg(unix)]
+#[test]
+fn native_path_identity_round_trips_non_utf8_path_bytes() {
+    use std::ffi::OsString;
+    use std::os::unix::ffi::{OsStrExt, OsStringExt};
+
+    let path = PathBuf::from(OsString::from_vec(b"/tmp/source-\xff.rs".to_vec()));
+    let round_tripped = path_from_identity_text(&path_identity_text(&path)).unwrap();
+
+    assert_eq!(
+        round_tripped.as_os_str().as_bytes(),
+        path.as_os_str().as_bytes()
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn recovery_sidecar_paths_preserve_non_utf8_file_name_bytes() {
+    use std::ffi::OsString;
+    use std::os::unix::ffi::{OsStrExt, OsStringExt};
+
+    let dir = tempdir().unwrap();
+    let mut file_name = b"cache.".to_vec();
+    file_name.push(0xff);
+    let path = dir.path().join(OsString::from_vec(file_name.clone()));
+
+    let lock_name = recovery_lock_path(&path)
+        .file_name()
+        .expect("lock sidecar has file name")
+        .as_bytes()
+        .to_vec();
+    let tmp_name = recovery_tmp_path(&path)
+        .file_name()
+        .expect("tmp sidecar has file name")
+        .as_bytes()
+        .to_vec();
+    let plain_lock_name = recovery_lock_path(&dir.path().join("cache"))
+        .file_name()
+        .expect("plain lock sidecar has file name")
+        .as_bytes()
+        .to_vec();
+
+    let mut expected_lock = file_name.clone();
+    expected_lock.extend_from_slice(b".lock");
+    let mut expected_tmp_prefix = b".".to_vec();
+    expected_tmp_prefix.extend_from_slice(&file_name);
+    expected_tmp_prefix.push(b'.');
+
+    assert_eq!(lock_name, expected_lock);
+    assert_ne!(lock_name, plain_lock_name);
+    assert!(tmp_name.starts_with(&expected_tmp_prefix), "{tmp_name:?}");
+    assert!(tmp_name.ends_with(b".tmp"), "{tmp_name:?}");
+}
+
+#[test]
+fn range_fragment_selects_lines() {
+    let dir = tempdir().unwrap();
+    let cache = dir.path().join("cache.json");
+    let mut store = RecoveryStore::new(Some(cache));
+    let stored = store
+        .store_payload("a\nb\nc\n", ContentType::Unknown, None, None, None)
+        .unwrap();
+    let expanded = store.expand(
+        &format!("{}#L2-L3", stored.file_ref),
+        None,
+        None,
+        None,
+        None,
+        None,
+    );
+    assert_eq!(expanded.content, "b\nc\n");
+}
+
+#[test]
+fn around_selector_saturates_huge_line_and_radius() {
+    let selector = format!("around:L{}:{}", usize::MAX, usize::MAX);
+
+    let selected = select_content("a\nb\nc\n", Some(&selector), None, None, None, None);
+
+    assert_eq!(selected, "a\nb\nc\n");
+}
+
+#[test]
+fn expand_preserves_non_newline_terminated_content() {
+    // F-004 regression: exact recovery must not add a trailing newline.
+    let dir = tempdir().unwrap();
+    let cache = dir.path().join("cache.json");
+    let mut store = RecoveryStore::new(Some(cache));
+    let text = "no trailing newline";
+    let stored = store
+        .store_payload(text, ContentType::Unknown, None, None, None)
+        .unwrap();
+    let expanded = store.expand(&stored.blob_ref, Some("raw"), None, None, None, None);
+    assert_eq!(expanded.content, text);
+    let file = store.expand(&stored.file_ref, Some("raw"), None, None, None, None);
+    assert_eq!(file.content, text);
+}
+
+#[test]
+fn slice_preserves_trailing_blank_line() {
+    // F-001 regression: a slice ending on a blank line keeps that line's newline.
+    let dir = tempdir().unwrap();
+    let cache = dir.path().join("cache.json");
+    let mut store = RecoveryStore::new(Some(cache));
+    let stored = store
+        .store_payload("a\nb\n\nc\n", ContentType::Unknown, None, None, None)
+        .unwrap();
+    let expanded = store.expand(
+        &format!("{}#L1-L3", stored.file_ref),
+        None,
+        None,
+        None,
+        None,
+        None,
+    );
+    assert_eq!(expanded.content, "a\nb\n\n");
+}
+
+#[test]
+fn eviction_bounds_blob_count() {
+    let config = RecoveryConfig {
+        max_blobs: 1,
+        ..RecoveryConfig::default()
+    };
+    let mut store = RecoveryStore::with_config(None, config);
+    let first = store
+        .store_payload("first", ContentType::Unknown, None, None, None)
+        .unwrap();
+    let second = store
+        .store_payload("second", ContentType::Unknown, None, None, None)
+        .unwrap();
+    assert!(!store.has_ref(&first.blob_ref));
+    assert!(store.has_ref(&second.blob_ref));
+}
+
+#[test]
+fn file_refs_expand_after_their_blob_is_evicted() {
+    // Every ref kind stores its text inline; evicting a payload's blob
+    // must not dangle the sibling file ref. Pins the absence of
+    // inter-entry dependencies at expansion time.
+    let config = RecoveryConfig {
+        max_blobs: 1,
+        ..RecoveryConfig::default()
+    };
+    let mut store = RecoveryStore::with_config(None, config);
+    let first = store
+        .store_payload("first payload\n", ContentType::Unknown, None, None, None)
+        .unwrap();
+    let _second = store
+        .store_payload("second payload\n", ContentType::Unknown, None, None, None)
+        .unwrap();
+    assert!(!store.has_ref(&first.blob_ref));
+
+    let expanded = store.expand(&first.file_ref, Some("raw"), None, None, None, None);
+    assert!(expanded.found, "file ref must survive blob eviction");
+    assert_eq!(expanded.content, "first payload\n");
+}
+
+#[test]
+fn deferred_payload_enforces_limits_before_returning() {
+    let config = RecoveryConfig {
+        max_blobs: 1,
+        ..RecoveryConfig::default()
+    };
+    let mut store = RecoveryStore::with_config(None, config);
+
+    let first = store.store_payload_deferred("first", ContentType::Unknown, None, None, None);
+    let second = store.store_payload_deferred("second", ContentType::Unknown, None, None, None);
+
+    assert!(!store.has_ref(&first.blob_ref));
+    assert!(store.has_ref(&second.blob_ref));
+}
+
+#[test]
+fn batched_deferred_payloads_enforce_limits_on_persist_pending() {
+    let config = RecoveryConfig {
+        max_blobs: 1,
+        ..RecoveryConfig::default()
+    };
+    let mut store = RecoveryStore::with_config(None, config);
+
+    let first = store.store_payload_deferred_batch("first", ContentType::Unknown, None, None, None);
+    let second =
+        store.store_payload_deferred_batch("second", ContentType::Unknown, None, None, None);
+
+    assert!(store.has_ref(&first.blob_ref));
+    assert!(store.has_ref(&second.blob_ref));
+
+    store.persist_pending().unwrap();
+
+    assert!(!store.has_ref(&first.blob_ref));
+    assert!(store.has_ref(&second.blob_ref));
+}
+
+#[test]
+fn batched_deferred_payloads_match_immediate_final_live_refs() {
+    let config = RecoveryConfig {
+        max_blobs: 2,
+        max_files: 2,
+        max_units: 4,
+        max_bytes: 32_000,
+        ..RecoveryConfig::default()
+    };
+    let payloads = [
+        "alpha payload line one\nalpha payload line two\n",
+        "beta payload line one\nbeta payload line two\n",
+        "gamma payload line one\ngamma payload line two\n",
+        "delta payload line one\ndelta payload line two\n",
+    ];
+    let mut immediate = RecoveryStore::with_config(None, config.clone());
+    for payload in payloads {
+        immediate.store_payload_deferred(payload, ContentType::Unknown, None, None, None);
+    }
+
+    let mut batched = RecoveryStore::with_config(None, config);
+    for payload in payloads {
+        batched.store_payload_deferred_batch(payload, ContentType::Unknown, None, None, None);
+    }
+    batched.persist_pending().unwrap();
+
+    assert_eq!(
+        immediate.state.blobs.keys().collect::<Vec<_>>(),
+        batched.state.blobs.keys().collect::<Vec<_>>()
+    );
+    assert_eq!(
+        immediate.state.files.keys().collect::<Vec<_>>(),
+        batched.state.files.keys().collect::<Vec<_>>()
+    );
+    assert_eq!(
+        immediate.state.units.keys().collect::<Vec<_>>(),
+        batched.state.units.keys().collect::<Vec<_>>()
+    );
+    assert_eq!(immediate.state.order, batched.state.order);
+}
+
+#[test]
+fn deferred_search_output_enforces_limits_before_returning() {
+    let config = RecoveryConfig {
+        max_search_hits: 1,
+        ..RecoveryConfig::default()
+    };
+    let mut store = RecoveryStore::with_config(None, config);
+
+    let refs = store.store_search_output_deferred("needle one\nneedle two\n", Some("needle"));
+
+    assert_eq!(refs.len(), 2);
+    assert!(!store.has_ref(&refs[0]));
+    assert!(store.has_ref(&refs[1]));
+}
+
+proptest! {
+    #[test]
+    fn arbitrary_payload_roundtrips(text in ".*") {
+        let dir = tempdir().unwrap();
+        let cache = dir.path().join("cache.json");
+        let stored = {
+            let mut store = RecoveryStore::new(Some(cache.clone()));
+            store.store_payload(&text, ContentType::Unknown, None, None, None).unwrap()
+        };
+        let mut restarted = RecoveryStore::new(Some(cache));
+        let expanded = restarted.expand(&stored.blob_ref, Some("raw"), None, None, None, None);
+        prop_assert!(expanded.found);
+        prop_assert_eq!(expanded.content, text);
+    }
+
+    #[test]
+    fn generated_around_selectors_do_not_panic(line in any::<usize>(), radius in any::<usize>()) {
+        let selector = format!("around:L{line}:{radius}");
+
+        let selected = select_content("a\nb\nc\n", Some(&selector), None, None, None, None);
+
+        prop_assert!(selected.is_empty() || selected == "a\n" || selected == "a\nb\n" || selected == "a\nb\nc\n");
+    }
+}

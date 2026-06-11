@@ -1,0 +1,35 @@
+[package]
+name = "tokenzero-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "TokenZero CLI: token-efficient file read/search/shell with exact recovery."
+homepage.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "tokenzero"
+path = "src/main.rs"
+
+[dependencies]
+anyhow.workspace = true
+clap.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tempfile.workspace = true
+tokenzero-core = { path = "../tokenzero-core", version = "0.1.1" }
+tokenzero-filters = { path = "../tokenzero-filters", version = "0.1.1" }
+tokenzero-install = { path = "../tokenzero-install", version = "0.1.1" }
+tokenzero-mcp = { path = "../tokenzero-mcp", version = "0.1.1" }
+tokenzero-pulse = { path = "../tokenzero-pulse", version = "0.1.1" }
+tokenzero-recovery = { path = "../tokenzero-recovery", version = "0.1.1" }
+tokenzero-runtime = { path = "../tokenzero-runtime", version = "0.1.1" }
+
+[dev-dependencies]
+assert_cmd.workspace = true
+predicates.workspace = true
+tempfile.workspace = true

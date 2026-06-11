@@ -1,0 +1,34 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="184" viewBox="0 0 1200 184" fill="none" role="img" aria-label="Highlights: Compress aggressively, Recover exactly, Run anywhere">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1200" y2="184" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#0d1117"/>
+      <stop offset="1" stop-color="#0a0f1a"/>
+    </linearGradient>
+  </defs>
+
+  <rect x="1" y="1" width="1198" height="182" rx="10" fill="url(#bg)" stroke="#21262d" stroke-width="2"/>
+
+  <line x1="410" y1="34" x2="410" y2="150" stroke="#21262d" stroke-width="1.5"/>
+  <line x1="800" y1="34" x2="800" y2="150" stroke="#21262d" stroke-width="1.5"/>
+
+  <!-- Column 1 -->
+  <rect x="56" y="38" width="28" height="4" rx="2" fill="#58a6ff"/>
+  <text x="56" y="76" font-family="Segoe UI, Arial" font-weight="700" font-size="23" fill="#e6edf3">Compress aggressively</text>
+  <text x="56" y="108" font-family="Segoe UI, Arial" font-size="15" fill="#8b949e">Compact visible capsules reach the</text>
+  <text x="56" y="130" font-family="Segoe UI, Arial" font-size="15" fill="#8b949e">agent, not raw multi-thousand-token</text>
+  <text x="56" y="152" font-family="Segoe UI, Arial" font-size="15" fill="#8b949e">dumps.</text>
+
+  <!-- Column 2 -->
+  <rect x="446" y="38" width="28" height="4" rx="2" fill="#a371f7"/>
+  <text x="446" y="76" font-family="Segoe UI, Arial" font-weight="700" font-size="23" fill="#e6edf3">Recover exactly</text>
+  <text x="446" y="108" font-family="Segoe UI, Arial" font-size="15" fill="#8b949e">Every hidden byte stays one expand</text>
+  <text x="446" y="130" font-family="Segoe UI, Arial" font-size="15" fill="#8b949e">call away, addressed by a stable</text>
+  <text x="446" y="152" font-family="Segoe UI, Arial" font-size="15" fill="#8b949e">tz:// ref.</text>
+
+  <!-- Column 3 -->
+  <rect x="836" y="38" width="28" height="4" rx="2" fill="#3fb950"/>
+  <text x="836" y="76" font-family="Segoe UI, Arial" font-weight="700" font-size="23" fill="#e6edf3">Run anywhere</text>
+  <text x="836" y="108" font-family="Segoe UI, Arial" font-size="15" fill="#8b949e">One local binary. No daemon, API</text>
+  <text x="836" y="130" font-family="Segoe UI, Arial" font-size="15" fill="#8b949e">key, cloud account, vector DB, or</text>
+  <text x="836" y="152" font-family="Segoe UI, Arial" font-size="15" fill="#8b949e">pre-index.</text>
+</svg>

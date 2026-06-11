@@ -1,0 +1,24 @@
+[package]
+name = "tokenzero-install"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Installer and agent-wiring for TokenZero (Claude/Codex/Grok/etc.)."
+homepage.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+flate2.workspace = true
+fs4.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+toml.workspace = true
+tokenzero-core = { path = "../tokenzero-core", version = "0.1.1" }
+
+[dev-dependencies]
+tempfile.workspace = true

@@ -1,0 +1,580 @@
+use assert_cmd::prelude::*;
+use serde_json::Value;
+use std::process::Command;
+use tempfile::tempdir;
+
+mod common;
+use common::*;
+
+#[test]
+fn cli_bare_invocation_prints_useful_help() {
+    let output = Command::cargo_bin("tokenzero").unwrap().output().unwrap();
+
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("Usage: tokenzero [COMMAND]"));
+    assert!(stdout.contains("tokenzero capabilities --json"));
+    assert!(stdout.contains("tokenzero robot-docs guide"));
+    assert!(stdout.contains("tokenzero run --json -- <cmd>"));
+}
+
+#[test]
+fn cli_capabilities_json_exposes_agent_contract() {
+    let output = Command::cargo_bin("tokenzero")
+        .unwrap()
+        .args(["capabilities", "--json"])
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        output.stderr.is_empty(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let json: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(json["schema_version"], "tokenzero.capabilities.v1");
+    assert_eq!(json["tool"], "tokenzero");
+    assert_eq!(json["contract_version"], 1);
+    assert_eq!(json["stdout_contract"]["json_flag"], "--json");
+    let features = json["features"].as_array().unwrap();
+    assert!(features.iter().any(|feature| feature == "json_output"));
+    assert!(
+        features
+            .iter()
+            .any(|feature| feature == "non_tty_output_discipline")
+    );
+    assert_eq!(json["feature_flags"]["capabilities_json"], true);
+    assert_eq!(json["feature_flags"]["robot_docs_guide"], true);
+    assert_eq!(json["feature_flags"]["intent_inference_aliases"], true);
+    assert_eq!(
+        json["commands_by_name"]["run"]["primary_invocation"],
+        "tokenzero run --json -- <command>"
+    );
+    assert_eq!(
+        json["commands_by_name"]["install"]["description"],
+        "Plan or apply local integration writes with rollback data; --hooks wires the Claude Code PreToolUse hook, --shims installs the universal PATH shims, and install status recovers to clients detect."
+    );
+    assert_eq!(
+        json["output_schemas"]["capabilities"]["schema_version"],
+        "tokenzero.capabilities.v1"
+    );
+    assert!(
+        json["output_schemas"]["run"]["status_fields"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|field| field == "telemetry.command_success")
+    );
+    assert!(json["commands"].as_array().unwrap().iter().any(|row| {
+        row["name"] == "run"
+            && row["aliases"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|alias| alias == "shell")
+            && row["aliases"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|alias| alias == "rn")
+            && row["aliases"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|alias| alias == "--jason")
+            && row["primary_invocation"] == "tokenzero run --json -- <command>"
+    }));
+    assert!(json["commands"].as_array().unwrap().iter().any(|row| {
+        row["name"] == "find"
+            && row["aliases"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|alias| alias == "search")
+    }));
+    assert!(json["commands"].as_array().unwrap().iter().any(|row| {
+        row["name"] == "capabilities"
+            && row["json"] == true
+            && row["aliases"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|alias| alias == "--jason")
+    }));
+    assert!(json["commands"].as_array().unwrap().iter().any(|row| {
+        row["name"] == "robot-docs guide"
+            && row["mutates"] == false
+            && row["aliases"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|alias| alias == "robot-docs commands")
+    }));
+    assert!(json["commands"].as_array().unwrap().iter().any(|row| {
+        row["name"] == "doctor"
+            && row["aliases"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|alias| alias == "doctor statuz")
+    }));
+    assert!(json["commands"].as_array().unwrap().iter().any(|row| {
+        row["name"] == "pulse"
+            && row["aliases"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|alias| alias == "pulse stats")
+    }));
+    assert!(
+        json["exit_codes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|row| row["code"] == 2 && row["label"] == "usage")
+    );
+    assert!(
+        json["canonical_invocations"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| item == "tokenzero --robot-help")
+    );
+    assert!(
+        json["canonical_invocations"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| item == "tokenzero robot-help")
+    );
+    assert!(
+        json["canonical_invocations"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| item == "tokenzero robot-docs guide")
+    );
+    assert!(
+        json["canonical_invocations"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| item == "tokenzero search <query> <path> --json")
+    );
+    assert!(
+        json["canonical_invocations"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| item == "tokenzero install status --json")
+    );
+}
+
+#[test]
+fn cli_robot_docs_guide_is_paste_ready_for_agents() {
+    let output = Command::cargo_bin("tokenzero")
+        .unwrap()
+        .args(["robot-docs", "guide"])
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        output.stderr.is_empty(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("# TokenZero Robot Guide"));
+    assert!(stdout.contains("tokenzero capabilities --json"));
+    assert!(stdout.contains("tokenzero run --json -- <command>"));
+    assert!(stdout.contains("Stdout is data. Stderr is diagnostics."));
+    assert!(stdout.contains("telemetry.command_success"));
+}
+
+#[test]
+fn cli_agent_contract_outputs_are_deterministic_and_env_clean() {
+    let first = tokenzero_with_agent_env(&["capabilities", "--json"]);
+    let second = tokenzero_with_agent_env(&["capabilities", "--json"]);
+
+    assert!(
+        first.status.success(),
+        "{}",
+        String::from_utf8_lossy(&first.stderr)
+    );
+    assert!(
+        second.status.success(),
+        "{}",
+        String::from_utf8_lossy(&second.stderr)
+    );
+    assert!(first.stderr.is_empty());
+    assert!(second.stderr.is_empty());
+    assert_eq!(first.stdout, second.stdout);
+    assert_no_ansi(&first.stdout);
+    let json: Value = serde_json::from_slice(&first.stdout).unwrap();
+    assert_eq!(json["schema_version"], "tokenzero.capabilities.v1");
+    let features: Vec<&str> = json["features"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|feature| feature.as_str().unwrap())
+        .collect();
+    assert_eq!(
+        features,
+        vec![
+            "capabilities_json",
+            "exact_recovery_refs",
+            "intent_inference_aliases",
+            "json_output",
+            "non_tty_output_discipline",
+            "pipeline_rerun_guidance",
+            "robot_docs_guide",
+            "status_truth_shell"
+        ]
+    );
+}
+
+#[test]
+fn cli_robot_docs_read_search_and_run_are_env_clean() {
+    let dir = tempdir().unwrap();
+    let sample = dir.path().join("sample.txt");
+    std::fs::write(&sample, "TokenZero\n").unwrap();
+    let allowed_root = dir.path().to_str().unwrap();
+    let sample = sample.to_str().unwrap();
+
+    for args in [
+        &["robot-docs", "guide"][..],
+        &["robot-docs", "commands"][..],
+        &["robot-docs", "examples"][..],
+        &["read", sample, "--allowed-root", allowed_root, "--json"][..],
+        &[
+            "search",
+            "TokenZero",
+            sample,
+            "--allowed-root",
+            allowed_root,
+            "--json",
+        ][..],
+        &["run", "--json", "rustc", "--version"][..],
+    ] {
+        let output = tokenzero_with_agent_env(args);
+        assert!(
+            output.status.success(),
+            "{args:?}\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_no_ansi(&output.stdout);
+        assert_no_ansi(&output.stderr);
+        if args.contains(&"--json") {
+            serde_json::from_slice::<Value>(&output.stdout).unwrap_or_else(|err| {
+                panic!(
+                    "{args:?}: {err}\n{}",
+                    String::from_utf8_lossy(&output.stdout)
+                )
+            });
+        }
+    }
+}
+
+#[test]
+fn cli_agent_contract_aliases_recover_common_wrong_invocations() {
+    let capabilities = Command::cargo_bin("tokenzero")
+        .unwrap()
+        .args(["capabilites", "--json"])
+        .output()
+        .unwrap();
+
+    assert!(
+        capabilities.status.success(),
+        "{}",
+        String::from_utf8_lossy(&capabilities.stderr)
+    );
+    let json: Value = serde_json::from_slice(&capabilities.stdout).unwrap();
+    assert_eq!(json["schema_version"], "tokenzero.capabilities.v1");
+    assert!(json["commands"].as_array().unwrap().iter().any(|row| {
+        row["name"] == "capabilities"
+            && row["aliases"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|alias| alias == "capabilites")
+    }));
+
+    let robot_docs = Command::cargo_bin("tokenzero")
+        .unwrap()
+        .args(["robot-doc", "manual"])
+        .output()
+        .unwrap();
+
+    assert!(
+        robot_docs.status.success(),
+        "{}",
+        String::from_utf8_lossy(&robot_docs.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&robot_docs.stdout);
+    assert!(stdout.contains("# TokenZero Robot Guide"));
+    assert!(stdout.contains("tokenzero capabilities --json"));
+
+    let robot_help = Command::cargo_bin("tokenzero")
+        .unwrap()
+        .arg("--robot-help")
+        .output()
+        .unwrap();
+
+    assert!(
+        robot_help.status.success(),
+        "{}",
+        String::from_utf8_lossy(&robot_help.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&robot_help.stdout);
+    assert!(stdout.contains("# TokenZero Robot Guide"));
+    assert!(stdout.contains("tokenzero robot-docs guide"));
+
+    let robot_help_command = Command::cargo_bin("tokenzero")
+        .unwrap()
+        .arg("robot-help")
+        .output()
+        .unwrap();
+
+    assert!(
+        robot_help_command.status.success(),
+        "{}",
+        String::from_utf8_lossy(&robot_help_command.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&robot_help_command.stdout);
+    assert!(stdout.contains("# TokenZero Robot Guide"));
+    assert!(stdout.contains("tokenzero robot-docs commands"));
+
+    let robot_commands = Command::cargo_bin("tokenzero")
+        .unwrap()
+        .args(["robot-docs", "commands"])
+        .output()
+        .unwrap();
+
+    assert!(
+        robot_commands.status.success(),
+        "{}",
+        String::from_utf8_lossy(&robot_commands.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&robot_commands.stdout);
+    assert!(stdout.contains("# TokenZero Robot Commands"));
+    assert!(stdout.contains("tokenzero search <query> <path> --json"));
+
+    let robot_examples = Command::cargo_bin("tokenzero")
+        .unwrap()
+        .args(["robot-docs", "examples"])
+        .output()
+        .unwrap();
+
+    assert!(
+        robot_examples.status.success(),
+        "{}",
+        String::from_utf8_lossy(&robot_examples.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&robot_examples.stdout);
+    assert!(stdout.contains("# TokenZero Robot Examples"));
+    assert!(stdout.contains("tokenzero rn rustc --version --json"));
+}
+
+#[test]
+fn cli_safe_subcommand_recoveries_choose_read_or_plan_surfaces() {
+    let dir = tempdir().unwrap();
+    let root = dir.path().to_str().unwrap();
+    let cache = dir.path().join("cache.json");
+    let cache = cache.to_str().unwrap();
+
+    let cache_status = Command::cargo_bin("tokenzero")
+        .unwrap()
+        .args(["cache", "statuz", "--root", root, "--json"])
+        .output()
+        .unwrap();
+    assert!(
+        cache_status.status.success(),
+        "{}",
+        String::from_utf8_lossy(&cache_status.stderr)
+    );
+    let json: Value = serde_json::from_slice(&cache_status.stdout).unwrap();
+    assert_eq!(json["tool"], "mem");
+    assert_eq!(json["status"], "ok");
+
+    let pulse_stats = Command::cargo_bin("tokenzero")
+        .unwrap()
+        .args(["pulse", "--root", root, "--json", "stats"])
+        .output()
+        .unwrap();
+    assert!(
+        pulse_stats.status.success(),
+        "{}",
+        String::from_utf8_lossy(&pulse_stats.stderr)
+    );
+    let json: Value = serde_json::from_slice(&pulse_stats.stdout).unwrap();
+    assert!(json["event_count"].is_number());
+
+    for subcommand in ["status", "statuz"] {
+        let doctor = Command::cargo_bin("tokenzero")
+            .unwrap()
+            .args([
+                "doctor",
+                subcommand,
+                "--root",
+                root,
+                "--cache-path",
+                cache,
+                "--json",
+            ])
+            .output()
+            .unwrap();
+        assert!(
+            doctor.status.success(),
+            "{subcommand}: {}",
+            String::from_utf8_lossy(&doctor.stderr)
+        );
+        let json: Value = serde_json::from_slice(&doctor.stdout).unwrap();
+        assert_eq!(json["schema_version"], "tokenzero.doctor.health.v1");
+        assert_eq!(json["status"], "ok");
+    }
+
+    let install_plan = Command::cargo_bin("tokenzero")
+        .unwrap()
+        .args([
+            "install", "plan", "--root", root, "--mcp", "--agent", "codex", "--json",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        install_plan.status.success(),
+        "{}",
+        String::from_utf8_lossy(&install_plan.stderr)
+    );
+    let json: Value = serde_json::from_slice(&install_plan.stdout).unwrap();
+    assert_eq!(json["status"], "planned");
+    assert_eq!(json["dry_run"], true);
+    assert!(!json["writes"].as_array().unwrap().is_empty());
+
+    let install_status = Command::cargo_bin("tokenzero")
+        .unwrap()
+        .args([
+            "install", "status", "--global", "--mcp", "--root", root, "--agent", "codex", "--json",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        install_status.status.success(),
+        "{}",
+        String::from_utf8_lossy(&install_status.stderr)
+    );
+    let json: Value = serde_json::from_slice(&install_status.stdout).unwrap();
+    assert_eq!(json["schema_version"], "tokenzero.clients.v1");
+    assert_eq!(json["command"], "clients detect");
+    assert_eq!(json["agents"].as_array().unwrap()[0], "codex");
+}
+
+#[test]
+fn cli_run_recovers_common_wrong_json_and_timeout_invocations() {
+    let cases: &[&[&str]] = &[
+        &["run", "--jsno", "rustc", "--version"],
+        &["run", "--jason", "rustc", "--version"],
+        &["run", "--json", "rustc", "--version"],
+        &["run", "rustc", "--version", "--json"],
+        &["shell", "rustc", "--version", "--jason"],
+        &["rn", "rustc", "--version", "--json"],
+        &["run", "--timout", "30", "rustc", "--version", "--json"],
+    ];
+
+    for args in cases {
+        let output = Command::cargo_bin("tokenzero")
+            .unwrap()
+            .args(*args)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{args:?}\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let json: Value = serde_json::from_slice(&output.stdout).unwrap_or_else(|err| {
+            panic!(
+                "{args:?}: {err}\n{}",
+                String::from_utf8_lossy(&output.stdout)
+            )
+        });
+        assert_eq!(json["status"], "ok", "{args:?}");
+        assert_eq!(json["telemetry"]["command_success"], true, "{args:?}");
+        assert!(
+            json["telemetry"]["argv"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|arg| arg == "rustc"),
+            "{args:?}"
+        );
+    }
+}
+
+#[test]
+fn cli_search_and_capabilities_json_typo_aliases_recover() {
+    let capabilities_cases: &[&[&str]] =
+        &[&["capabilities", "--jsno"], &["capabilities", "--jason"]];
+
+    for args in capabilities_cases {
+        let output = Command::cargo_bin("tokenzero")
+            .unwrap()
+            .args(*args)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{args:?}\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let json: Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(json["schema_version"], "tokenzero.capabilities.v1");
+    }
+
+    let search = Command::cargo_bin("tokenzero")
+        .unwrap()
+        .args(["search", "TokenZero", "AGENTS.md", "--json"])
+        .output()
+        .unwrap();
+
+    assert!(
+        search.status.success(),
+        "{}",
+        String::from_utf8_lossy(&search.stderr)
+    );
+    let json: Value = serde_json::from_slice(&search.stdout).unwrap();
+    assert_eq!(json["status"], "ok");
+    assert_eq!(json["tool"], "find");
+}
+
+#[test]
+fn cli_help_discovers_agent_surfaces() {
+    let output = Command::cargo_bin("tokenzero")
+        .unwrap()
+        .arg("--help")
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("capabilities"));
+    assert!(stdout.contains("robot-docs"));
+    assert!(stdout.contains("Agent surfaces:"));
+}
