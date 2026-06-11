@@ -1137,7 +1137,7 @@ fn auto_backend_without_rg_falls_back_to_internal_with_telemetry() {
     let telemetry = response.telemetry.as_ref().unwrap();
     assert_eq!(telemetry["search_backend"], "internal");
     assert_eq!(telemetry["fallback_reason"], "rg_not_found");
-    let flat = expanded_flat_output(&engine, &response);
+    let flat = expanded_flat_output(&engine, &response).replace('\\', "/");
     assert!(flat.contains("sub/beta.rs:1:needle here"));
 }
 
@@ -1695,12 +1695,14 @@ fn mcp_envelope_is_text_only_by_default() {
     // Reads carry their recovery refs in a text footer instead of a
     // structured envelope.
     fs::write(dir.path().join("sample.txt"), "alpha\nbeta\n").unwrap();
+    // JSON-encode the path so Windows backslashes survive the raw envelope.
+    let sample_path =
+        serde_json::to_string(&dir.path().join("sample.txt").display().to_string()).unwrap();
     let read: Value = serde_json::from_str(
             &handle_jsonrpc(
                 &engine,
                 &format!(
-                    r#"{{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{{"name":"read","arguments":{{"path":"{}"}}}}}}"#,
-                    dir.path().join("sample.txt").display()
+                    r#"{{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{{"name":"read","arguments":{{"path":{sample_path}}}}}}}"#,
                 ),
             )
             .unwrap(),

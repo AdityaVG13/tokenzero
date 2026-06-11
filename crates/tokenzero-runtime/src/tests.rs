@@ -128,7 +128,9 @@ fn generated_multi_arg_shell_literal_metacharacters_stay_data() {
 fn quoted_operator_literals_stay_argv() {
     assert!(!contains_shell_syntax("rg 'a|b' ."));
     assert!(contains_shell_syntax("rg a | head"));
-    let argv = split_command_string("rg 'a|b' .");
+    // Pin POSIX tokenization to match the pinned linux plan: the
+    // platform-current splitter keeps single quotes literal on Windows.
+    let argv = split_command_string_for_platform("rg 'a|b' .", "linux");
     let plan = plan_command_for_platform(&argv, None, false, "linux").unwrap();
     assert_eq!(plan.execution_mode, ExecutionMode::Argv);
     assert_eq!(plan.argv, vec!["rg", "a|b", "."]);

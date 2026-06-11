@@ -50,7 +50,13 @@ fn arg_command_quotes_argv_metacharacters_for_display() {
     let args = json!({"argv": ["rg", "error|warning", "src/lib.rs"]});
     let (command, argv) = arg_command(&args).unwrap();
 
-    assert_eq!(command, "rg 'error|warning' src/lib.rs");
+    // Display quoting is platform-styled: cmd has no single quotes.
+    let expected = if cfg!(windows) {
+        r#"rg "error|warning" src/lib.rs"#
+    } else {
+        "rg 'error|warning' src/lib.rs"
+    };
+    assert_eq!(command, expected);
     assert_eq!(
         argv.unwrap(),
         vec![
