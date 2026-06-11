@@ -352,6 +352,15 @@ fn mcp_tool_response(response: ToolResponse) -> Value {
             text.push('\n');
         }
         text.push_str(&footer);
+        // Steer edits at the moment of reading: a tz_read does not satisfy
+        // harness read-before-Edit checks, and agents that learn that from
+        // a failed Edit tend to retry it blindly. Tied to the refs footer so
+        // tiny passthrough renders stay exactly as cheap as raw.
+        if response.status != "error" && response.tool == "read" {
+            text.push_str(
+                "\nedit: tz_edit applies find/replace hunks directly; native Edit tools require a prior native bounded read",
+            );
+        }
     }
     let mut result = json!({
         "content": [{"type": "text", "text": text}],

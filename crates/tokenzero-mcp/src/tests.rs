@@ -1715,6 +1715,13 @@ fn mcp_envelope_is_text_only_by_default() {
     let read_text = read["result"]["content"][0]["text"].as_str().unwrap();
     assert!(read_text.contains("alpha"), "{read_text}");
     assert!(read_text.contains("refs: tz://blob/"), "{read_text}");
+    // The edit hint rides the refs footer on read responses only: it steers
+    // agents to tz_edit instead of a doomed native-Edit-after-tz_read loop.
+    assert!(read_text.contains("edit: tz_edit"), "{read_text}");
+    assert!(
+        !text.contains("edit: tz_edit"),
+        "shell responses must not carry the read edit hint: {text}"
+    );
 
     // The opt-in compact envelope still prunes payload duplicates and
     // forensic telemetry.
