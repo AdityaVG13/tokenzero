@@ -2,21 +2,17 @@ name: Release
 
 # MANUAL ONLY (workflow_dispatch). Per repo policy, no automatic triggers on
 # push/tags/PRs. Run this from the Actions tab and supply the tag to release.
-# Builds downloadable GitHub Release artifacts from the supplied tag. Crates.io
-# publishing is optional and must be requested explicitly.
+# Builds downloadable GitHub Release artifacts from the supplied tag. TokenZero
+# is not published to crates.io; install via the release binaries, Homebrew tap,
+# npm, or `cargo install --git`.
 
 on:
   workflow_dispatch:
     inputs:
       tag:
-        description: 'Version tag to release (e.g., v0.1.0). Must match the workspace version.'
+        description: 'Version tag to release (e.g., v1.0.0). Must match the workspace version.'
         required: true
         type: string
-      publish_crates:
-        description: 'Also publish workspace crates to crates.io. Requires CARGO_REGISTRY_TOKEN.'
-        required: false
-        default: false
-        type: boolean
       prerelease:
         description: 'Mark the GitHub Release as a prerelease.'
         required: false
@@ -190,8 +186,6 @@ jobs:
           tokenzero install --global --apply --mcp --shell --cli --json
           tokenzero doctor --json
           ```
-
-          Crates.io publishing was not part of this release unless the workflow was run with `publish_crates=true`.
           EOF
       - name: Create or update release
         env:
@@ -215,58 +209,7 @@ jobs:
             echo "## TokenZero ${{ inputs.tag }}"
             echo
             echo "- GitHub Release: created/updated"
-            echo "- Crates.io requested: ${{ inputs.publish_crates }}"
             echo
             echo "### Assets"
             find dist -maxdepth 1 -type f -printf -- "- %f\n" | sort
           } >> "$GITHUB_STEP_SUMMARY"
-
-  publish-crates:
-    name: Publish to crates.io
-    needs: [release, windows-release]
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-    if: ${{ inputs.publish_crates && !contains(inputs.tag, '-') }}
-    env:
-      CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          ref: ${{ inputs.tag }}
-      - uses: dtolnay/rust-toolchain@stable
-
-      - name: Verify input tag matches workspace version
-        run: |
-          TAG="${{ inputs.tag }}"
-          TAG="${TAG#v}"
-          VER="$(cargo metadata --no-deps --format-version 1 \
-                 | python3 -c 'import json,sys; data=json.load(sys.stdin); print(next(pkg["version"] for pkg in data["packages"] if pkg["name"] == "tokenzero"))')"
-          echo "input_tag=$TAG workspace_version=$VER"
-          if [ "$TAG" != "$VER" ]; then
-            echo "::error::tag v$TAG does not match workspace version $VER"; exit 1
-          fi
-
-      - name: Require crates.io token
-        if: ${{ env.CARGO_REGISTRY_TOKEN == '' }}
-        run: |
-          echo "::error::publish_crates=true requires the CARGO_REGISTRY_TOKEN repository secret."
-          exit 1
-
-      - name: Publish in dependency order
-        run: |
-          set -euo pipefail
-          # dependency-topological order: deps before dependents
-          for crate in \
-            tokenzero-core \
-            tokenzero-runtime \
-            tokenzero-filters \
-            tokenzero-install \
-            tokenzero-recovery \
-            tokenzero-mcp \
-            tokenzero-pulse \
-            tokenzero; do
-            echo "::group::publish $crate"
-            # cargo publish waits for the index before returning, so dependents resolve
-            cargo publish -p "$crate" --locked
-            echo "::endgroup::"
-          done
