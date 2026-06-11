@@ -59,6 +59,32 @@ and read the `accounting` block:
 Hot paths are measured, not asserted — `cargo bench` pins token counting, capsule
 framing, and shell rendering at microsecond scale on the workspace's criterion suite.
 
+#### End-to-end benchmark
+
+The same seven operations, run raw and through TokenZero on this repository
+(tokens estimated as chars÷4 on both sides; every capsule's exact-recovery
+round-trip verified byte-identical against the original):
+
+| Operation | Raw tokens | TokenZero | Savings |
+| :-- | --: | --: | --: |
+| Read a ~1,300-line Rust source file | 10,592 | 229 | **97.8%** |
+| Read a second large source file | 10,520 | 210 | **98.0%** |
+| Search the repo for an identifier | 2,375 | 50 | **97.9%** |
+| Directory tree of `crates/` | 988 | 128 | **87.0%** |
+| `git log --stat -30` | 6,062 | 278 | **95.4%** |
+| `cargo check --workspace` (warm) | 238 | 51 | **78.6%** |
+| Glob `**/*.rs` (paths don't compress — passthrough) | 919 | 899 | 2.2% |
+| **Total** | **31,694** | **1,845** | **94.2%** |
+
+#### Measured in production
+
+Across **~20,000 routed tool calls** from real agent sessions on one
+development machine (six days, multiple AI harnesses): raw tool output
+totalled **38.1M tokens**; **17.9M of them (47%) never entered the model's
+context**. Counting back every token agents later recovered with `expand`,
+net savings were **30%** — that recovery-adjusted number is the honest one,
+and it is the one TokenZero's own telemetry reports (`tokenzero pulse stats`).
+
 <h3 id="how-racc-works"><img src=".github/assets/h-how.svg" alt="How RACC works" width="100%"></h3>
 
 **RACC -- Recovery-Aware Context Compression.** The goal is not the shortest possible
