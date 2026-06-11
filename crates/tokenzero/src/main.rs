@@ -981,8 +981,10 @@ fn handle_cache(args: CacheArgs) -> Result<()> {
             let cache = args
                 .cache_path
                 .unwrap_or_else(|| root.join(".tokenzero/recovery-cache.json"));
-            let mut store = tokenzero_recovery::RecoveryStore::new(Some(cache));
-            let report = store.prune_stale(!args.apply)?;
+            let dry_run = !args.apply;
+            let mut store = tokenzero_recovery::RecoveryStore::new(Some(cache.clone()));
+            let mut report = store.prune_stale(dry_run)?;
+            report["maintenance"] = tokenzero_mcp::cache_maintenance(&cache, dry_run);
             emit_value(report, args.json)?;
         }
     }

@@ -804,6 +804,100 @@ impl SpillWriter {
     }
 }
 
+/// Age after which a spill file is reclaimable: spills back `spill_path`
+/// pointers inside a session; a day later the session that knew the path is
+/// gone.
+pub const DEFAULT_SPILL_TTL: Duration = Duration::from_secs(24 * 60 * 60);
+/// Ceiling for the total bytes a spill directory may hold after an age pass;
+/// oldest spills are reclaimed first until the directory fits.
+pub const DEFAULT_SPILL_MAX_TOTAL_BYTES: u64 = 256 * 1024 * 1024;
+
+/// Outcome of a spill-directory prune. With `dry_run`, `removed_*` counts
+/// what would be reclaimed without unlinking anything.
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct SpillPruneReport {
+    pub dir: String,
+    pub dry_run: bool,
+    pub scanned_files: usize,
+    pub removed_files: usize,
+    pub removed_bytes: u64,
+    pub kept_files: usize,
+    pub kept_bytes: u64,
+    pub failed_removals: usize,
+}
+
+/// Reclaim spill files written by `SpillWriter`: everything older than
+/// `max_age`, then oldest-first until the directory holds at most
+/// `max_total_bytes`. Only `tokenzero-*.log` files are considered, per-file
+/// failures are counted rather than fatal, and a missing directory is an
+/// empty report — callers may invoke this fail-open on every startup.
+pub fn prune_spill_dir(
+    dir: &Path,
+    max_age: Duration,
+    max_total_bytes: u64,
+    dry_run: bool,
+) -> SpillPruneReport {
+    let mut report = SpillPruneReport {
+        dir: dir.display().to_string(),
+        dry_run,
+        ..SpillPruneReport::default()
+    };
+    let Ok(entries) = fs::read_dir(dir) else {
+        return report;
+    };
+    let now = SystemTime::now();
+    let mut fresh: Vec<(SystemTime, u64, PathBuf)> = Vec::new();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+            continue;
+        };
+        if !name.starts_with("tokenzero-") || !name.ends_with(".log") {
+            continue;
+        }
+        let Ok(meta) = entry.metadata() else {
+            continue;
+        };
+        if !meta.is_file() {
+            continue;
+        }
+        report.scanned_files += 1;
+        let modified = meta.modified().unwrap_or(now);
+        let expired = now
+            .duration_since(modified)
+            .map(|age| age > max_age)
+            .unwrap_or(false);
+        if expired {
+            remove_spill_file(&path, meta.len(), dry_run, &mut report);
+        } else {
+            fresh.push((modified, meta.len(), path));
+        }
+    }
+    fresh.sort_by_key(|(modified, _, _)| *modified);
+    let mut fresh_bytes: u64 = fresh.iter().map(|(_, len, _)| *len).sum();
+    let mut evict_until = 0;
+    while fresh_bytes > max_total_bytes && evict_until < fresh.len() {
+        let (_, len, path) = &fresh[evict_until];
+        remove_spill_file(path, *len, dry_run, &mut report);
+        fresh_bytes = fresh_bytes.saturating_sub(*len);
+        evict_until += 1;
+    }
+    for (_, len, _) in &fresh[evict_until..] {
+        report.kept_files += 1;
+        report.kept_bytes += *len;
+    }
+    report
+}
+
+fn remove_spill_file(path: &Path, len: u64, dry_run: bool, report: &mut SpillPruneReport) {
+    if dry_run || fs::remove_file(path).is_ok() {
+        report.removed_files += 1;
+        report.removed_bytes += len;
+    } else {
+        report.failed_removals += 1;
+    }
+}
+
 fn command_for_argv(
     program: &str,
     args: &[String],

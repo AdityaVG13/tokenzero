@@ -711,3 +711,71 @@ proptest! {
         prop_assert!(selected.is_empty() || selected == "a\n" || selected == "a\nb\n" || selected == "a\nb\nc\n");
     }
 }
+
+fn write_aged_file(path: &Path, bytes: usize, age: Duration) {
+    fs::write(path, vec![b'x'; bytes]).unwrap();
+    OpenOptions::new()
+        .write(true)
+        .open(path)
+        .unwrap()
+        .set_modified(SystemTime::now() - age)
+        .unwrap();
+}
+
+#[test]
+fn tmp_sweep_reclaims_stale_orphans_of_both_shapes_only() {
+    let dir = tempdir().unwrap();
+    let cache = dir.path().join("recovery-cache.json");
+    let stale_age = STALE_TMP_MAX_AGE * 2;
+    let hidden = dir.path().join(".recovery-cache.json.123.7.tmp");
+    let legacy = dir.path().join("recovery-cache.json.456.a1b2c3.tmp");
+    let fresh = dir.path().join(".recovery-cache.json.789.8.tmp");
+    let lock = dir.path().join("recovery-cache.json.lock");
+    let unrelated = dir.path().join("other-file.tmp");
+    write_aged_file(&hidden, 5, stale_age);
+    write_aged_file(&legacy, 7, stale_age);
+    write_aged_file(&fresh, 3, Duration::from_secs(1));
+    write_aged_file(&lock, 2, stale_age);
+    write_aged_file(&unrelated, 9, stale_age);
+    let report = sweep_stale_tmp_files(&cache, STALE_TMP_MAX_AGE, false);
+    assert!(
+        !hidden.exists(),
+        "stale hidden-shape orphan must be reclaimed"
+    );
+    assert!(
+        !legacy.exists(),
+        "stale legacy-shape orphan must be reclaimed"
+    );
+    assert!(
+        fresh.exists(),
+        "an in-flight writer's temp file must survive"
+    );
+    assert!(lock.exists(), "the lock anchor must never be touched");
+    assert!(unrelated.exists(), "unrelated temp files must survive");
+    assert_eq!(report.scanned, 3);
+    assert_eq!(report.removed, 2);
+    assert_eq!(report.removed_bytes, 12);
+    assert_eq!(report.failed, 0);
+}
+
+#[test]
+fn tmp_sweep_dry_run_counts_without_unlinking() {
+    let dir = tempdir().unwrap();
+    let cache = dir.path().join("recovery-cache.json");
+    let orphan = dir.path().join(".recovery-cache.json.123.7.tmp");
+    write_aged_file(&orphan, 5, STALE_TMP_MAX_AGE * 2);
+    let report = sweep_stale_tmp_files(&cache, STALE_TMP_MAX_AGE, true);
+    assert!(orphan.exists(), "dry run must not unlink");
+    assert!(report.dry_run);
+    assert_eq!(report.removed, 1);
+    assert_eq!(report.removed_bytes, 5);
+}
+
+#[test]
+fn tmp_sweep_missing_dir_is_empty_report() {
+    let dir = tempdir().unwrap();
+    let cache = dir.path().join("missing").join("recovery-cache.json");
+    let report = sweep_stale_tmp_files(&cache, STALE_TMP_MAX_AGE, false);
+    assert_eq!(report.scanned, 0);
+    assert_eq!(report.removed, 0);
+}

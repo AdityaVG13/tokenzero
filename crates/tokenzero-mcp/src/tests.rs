@@ -3,6 +3,39 @@ use tempfile::tempdir;
 use tokenzero_core::MCP_SCHEMA_VERSION;
 
 #[test]
+fn engine_construction_reclaims_orphan_tmp_and_aged_spills() {
+    let dir = tempdir().unwrap();
+    let cache = dir.path().join("recovery-cache.json");
+    let set_age = |path: &Path, secs: u64| {
+        fs::OpenOptions::new()
+            .write(true)
+            .open(path)
+            .unwrap()
+            .set_modified(std::time::SystemTime::now() - std::time::Duration::from_secs(secs))
+            .unwrap();
+    };
+    let orphan_tmp = dir.path().join("recovery-cache.json.999.dead.tmp");
+    fs::write(&orphan_tmp, "orphan").unwrap();
+    set_age(&orphan_tmp, 2 * 60 * 60);
+    let spill_dir = shell_spill_dir(&cache);
+    fs::create_dir_all(&spill_dir).unwrap();
+    let aged_spill = spill_dir.join("tokenzero-1-1-stdout.log");
+    fs::write(&aged_spill, "spill").unwrap();
+    set_age(&aged_spill, 48 * 60 * 60);
+    let fresh_spill = spill_dir.join("tokenzero-2-2-stdout.log");
+    fs::write(&fresh_spill, "spill").unwrap();
+
+    let _engine = TokenZeroEngine::new(EngineConfig {
+        cache_path: cache,
+        ..EngineConfig::for_root(dir.path())
+    });
+
+    assert!(!orphan_tmp.exists(), "orphan tmp must be swept on startup");
+    assert!(!aged_spill.exists(), "aged spill must be pruned on startup");
+    assert!(fresh_spill.exists(), "fresh spill must survive startup");
+}
+
+#[test]
 fn read_expand_roundtrip_via_engine() {
     let dir = tempdir().unwrap();
     let file = dir.path().join("a.txt");

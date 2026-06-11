@@ -576,3 +576,116 @@ fn quoting_preserves_spaces() {
         "\"C:\\Program Files\\tz\""
     );
 }
+
+fn write_spill_aged(dir: &Path, name: &str, bytes: usize, age: Duration) -> PathBuf {
+    let path = dir.join(name);
+    fs::write(&path, vec![b'x'; bytes]).unwrap();
+    File::options()
+        .write(true)
+        .open(&path)
+        .unwrap()
+        .set_modified(SystemTime::now() - age)
+        .unwrap();
+    path
+}
+
+#[test]
+fn spill_prune_reclaims_expired_and_keeps_fresh_and_foreign_files() {
+    let dir = tempfile::tempdir().unwrap();
+    let old = write_spill_aged(
+        dir.path(),
+        "tokenzero-1-1-stdout.log",
+        10,
+        Duration::from_secs(48 * 60 * 60),
+    );
+    let fresh = write_spill_aged(
+        dir.path(),
+        "tokenzero-2-2-stderr.log",
+        20,
+        Duration::from_secs(60),
+    );
+    let foreign = write_spill_aged(
+        dir.path(),
+        "user-notes.log",
+        30,
+        Duration::from_secs(48 * 60 * 60),
+    );
+    let report = prune_spill_dir(
+        dir.path(),
+        DEFAULT_SPILL_TTL,
+        DEFAULT_SPILL_MAX_TOTAL_BYTES,
+        false,
+    );
+    assert!(!old.exists(), "expired spill must be reclaimed");
+    assert!(fresh.exists(), "fresh spill must survive");
+    assert!(foreign.exists(), "non-spill files must never be touched");
+    assert_eq!(report.scanned_files, 2);
+    assert_eq!(report.removed_files, 1);
+    assert_eq!(report.removed_bytes, 10);
+    assert_eq!(report.kept_files, 1);
+    assert_eq!(report.kept_bytes, 20);
+    assert_eq!(report.failed_removals, 0);
+}
+
+#[test]
+fn spill_prune_byte_ceiling_evicts_oldest_first() {
+    let dir = tempfile::tempdir().unwrap();
+    let oldest = write_spill_aged(
+        dir.path(),
+        "tokenzero-1-1-stdout.log",
+        60,
+        Duration::from_secs(300),
+    );
+    let middle = write_spill_aged(
+        dir.path(),
+        "tokenzero-2-2-stdout.log",
+        60,
+        Duration::from_secs(200),
+    );
+    let newest = write_spill_aged(
+        dir.path(),
+        "tokenzero-3-3-stdout.log",
+        60,
+        Duration::from_secs(100),
+    );
+    let report = prune_spill_dir(dir.path(), DEFAULT_SPILL_TTL, 130, false);
+    assert!(!oldest.exists(), "oldest spill must be evicted first");
+    assert!(middle.exists());
+    assert!(newest.exists());
+    assert_eq!(report.removed_files, 1);
+    assert_eq!(report.kept_bytes, 120);
+}
+
+#[test]
+fn spill_prune_dry_run_counts_without_unlinking() {
+    let dir = tempfile::tempdir().unwrap();
+    let old = write_spill_aged(
+        dir.path(),
+        "tokenzero-1-1-stdout.log",
+        10,
+        Duration::from_secs(48 * 60 * 60),
+    );
+    let report = prune_spill_dir(
+        dir.path(),
+        DEFAULT_SPILL_TTL,
+        DEFAULT_SPILL_MAX_TOTAL_BYTES,
+        true,
+    );
+    assert!(old.exists(), "dry run must not unlink");
+    assert!(report.dry_run);
+    assert_eq!(report.removed_files, 1);
+    assert_eq!(report.removed_bytes, 10);
+}
+
+#[test]
+fn spill_prune_missing_dir_is_empty_report() {
+    let dir = tempfile::tempdir().unwrap();
+    let report = prune_spill_dir(
+        &dir.path().join("does-not-exist"),
+        DEFAULT_SPILL_TTL,
+        DEFAULT_SPILL_MAX_TOTAL_BYTES,
+        false,
+    );
+    assert_eq!(report.scanned_files, 0);
+    assert_eq!(report.removed_files, 0);
+}

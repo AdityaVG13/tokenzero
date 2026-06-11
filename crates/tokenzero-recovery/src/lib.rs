@@ -1179,6 +1179,81 @@ fn recovery_tmp_path(path: &Path) -> PathBuf {
     parent.join(tmp_name)
 }
 
+/// Age after which an abandoned atomic-write temp file is reclaimable. A
+/// live persist holds its temp file for milliseconds; an hour-old one belongs
+/// to a process that died mid-write.
+pub const STALE_TMP_MAX_AGE: Duration = Duration::from_secs(60 * 60);
+
+/// Outcome of a stale temp-file sweep. With `dry_run`, `removed*` counts what
+/// would be reclaimed without unlinking anything.
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct TmpSweepReport {
+    pub dry_run: bool,
+    pub scanned: usize,
+    pub removed: usize,
+    pub removed_bytes: u64,
+    pub failed: usize,
+}
+
+/// Remove abandoned atomic-write temp files left beside the recovery cache by
+/// processes that died mid-persist. Both the current hidden
+/// `.{name}.{pid}.{n}.tmp` shape and the pre-1.0 visible `{name}.*.tmp` shape
+/// are matched; the `.lock` anchor never is. Only files older than `max_age`
+/// are touched, so an in-flight writer is never raced. Fail-open: per-file
+/// failures are counted, a missing directory is an empty report.
+pub fn sweep_stale_tmp_files(
+    cache_path: &Path,
+    max_age: Duration,
+    dry_run: bool,
+) -> TmpSweepReport {
+    let mut report = TmpSweepReport {
+        dry_run,
+        ..TmpSweepReport::default()
+    };
+    let Some(parent) = cache_path.parent() else {
+        return report;
+    };
+    let Some(cache_name) = cache_path.file_name().and_then(|name| name.to_str()) else {
+        return report;
+    };
+    let Ok(entries) = fs::read_dir(parent) else {
+        return report;
+    };
+    let now = SystemTime::now();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+            continue;
+        };
+        if !name.ends_with(".tmp") || !name.contains(cache_name) {
+            continue;
+        }
+        let Ok(meta) = entry.metadata() else {
+            continue;
+        };
+        if !meta.is_file() {
+            continue;
+        }
+        report.scanned += 1;
+        let expired = meta
+            .modified()
+            .ok()
+            .and_then(|modified| now.duration_since(modified).ok())
+            .map(|age| age > max_age)
+            .unwrap_or(false);
+        if !expired {
+            continue;
+        }
+        if dry_run || fs::remove_file(&path).is_ok() {
+            report.removed += 1;
+            report.removed_bytes += meta.len();
+        } else {
+            report.failed += 1;
+        }
+    }
+    report
+}
+
 fn append_file_name_suffix(path: &Path, suffix: &str) -> PathBuf {
     let parent = path.parent().unwrap_or_else(|| Path::new("."));
     let mut file_name = path
