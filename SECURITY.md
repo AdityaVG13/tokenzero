@@ -2,7 +2,7 @@
 
 ## Supported Versions
 
-The public release branch supports the current `0.x` line.
+The public release branch supports the current `1.x` line. Older pre-1.0 builds are not supported.
 
 ## Reporting a Vulnerability
 
