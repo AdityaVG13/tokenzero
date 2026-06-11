@@ -83,7 +83,9 @@ function Invoke-McpInitialize {
   # Line-delimited JSON-RPC with the full required initialize params
   # (capabilities and clientInfo are mandatory, not optional).
   $request = '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"windows-rehearsal","version":"1.0.0"}}}'
-  $proc.StandardInput.Write("$request`n")
+  $bytes = [System.Text.UTF8Encoding]::new($false).GetBytes("$request`n")
+  $proc.StandardInput.BaseStream.Write($bytes, 0, $bytes.Length)
+  $proc.StandardInput.BaseStream.Flush()
   $proc.StandardInput.Close()
 
   if (!$proc.WaitForExit(30000)) {

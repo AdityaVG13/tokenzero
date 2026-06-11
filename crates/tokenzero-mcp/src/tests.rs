@@ -1020,9 +1020,10 @@ fn rg_and_internal_backends_return_identical_search_output() {
     let internal_flat = expanded_flat_output(&internal_engine, &internal);
     let rg_flat = expanded_flat_output(&rg_engine, &rg);
     assert_eq!(internal_flat, rg_flat);
-    assert!(internal_flat.contains("alpha.rs:2:let needle = 1;"));
-    assert!(internal_flat.contains("sub/beta.rs:1:needle here"));
-    assert!(internal_flat.contains("sub/beta.rs:3:needle again"));
+    let normalized_flat = internal_flat.replace('\\', "/");
+    assert!(normalized_flat.contains("alpha.rs:2:let needle = 1;"));
+    assert!(normalized_flat.contains("sub/beta.rs:1:needle here"));
+    assert!(normalized_flat.contains("sub/beta.rs:3:needle again"));
     // Both backends skip hidden entries (including the recovery cache
     // dir) and the target/__pycache__ build dirs.
     assert!(!rg_flat.contains(".hidden"));
@@ -1049,7 +1050,10 @@ fn grep_treats_pattern_as_regex_under_rg_backend() {
     assert_eq!(response.status, "ok");
     assert_eq!(response.telemetry.as_ref().unwrap()["search_backend"], "rg");
     let flat = expanded_flat_output(&engine, &response);
-    assert!(flat.contains("sub/beta.rs:1:needle here"));
+    assert!(
+        flat.replace('\\', "/")
+            .contains("sub/beta.rs:1:needle here")
+    );
 
     // Zero-hit notes render identically under the rg backend.
     let zero = engine.grep(
