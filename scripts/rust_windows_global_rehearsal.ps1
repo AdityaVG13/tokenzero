@@ -80,8 +80,10 @@ function Invoke-McpInitialize {
   $psi.UseShellExecute = $false
 
   $proc = [System.Diagnostics.Process]::Start($psi)
-  $request = '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18"}}'
-  $proc.StandardInput.Write("Content-Length: $($request.Length)`r`n`r`n$request")
+  # Line-delimited JSON-RPC with the full required initialize params
+  # (capabilities and clientInfo are mandatory, not optional).
+  $request = '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"windows-rehearsal","version":"1.0.0"}}}'
+  $proc.StandardInput.Write("$request`n")
   $proc.StandardInput.Close()
 
   if (!$proc.WaitForExit(30000)) {
