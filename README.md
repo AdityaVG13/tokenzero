@@ -21,6 +21,7 @@ A local-first Rust runtime that shrinks what AI agents see, while keeping a
 
 <a href="#highlights">Highlights</a> &nbsp;·&nbsp;
 <a href="#how-racc-works">How it works</a> &nbsp;·&nbsp;
+<a href="#architecture">Architecture</a> &nbsp;·&nbsp;
 <a href="#download--install">Install</a> &nbsp;·&nbsp;
 <a href="#commands">Commands</a> &nbsp;·&nbsp;
 <a href="#mcp">MCP</a> &nbsp;·&nbsp;
@@ -43,6 +44,20 @@ A local-first Rust runtime that shrinks what AI agents see, while keeping a
 > silently loses a detail it turns out to need. TokenZero returns a compact capsule
 > *now* and keeps the omitted bytes behind an exact local ref. Savings are counted
 > **after** any recovery, not from visible-token shrinkage alone.
+
+Small reads pass through untouched; large reads collapse to a capsule — both stay
+**byte-exact recoverable**. Reproduce any row with `tokenzero read <file> --json`
+and read the `accounting` block:
+
+| Input | Raw tokens | Visible | Result |
+| :-- | --: | --: | :-- |
+| 237-line source file | 1,992 | 1,992 | returned whole — a capsule never costs more than raw |
+| 1,728-line source file | 13,764 | 203 | **98.5%** smaller, exact bytes one `expand` away |
+| 2,301-line source file | 16,712 | 150 | **99.1%** smaller, exact bytes one `expand` away |
+| noisy shell output | 1,012 | 435 | **57%** smaller, full stream recoverable |
+
+Hot paths are measured, not asserted — `cargo bench` pins token counting, capsule
+framing, and shell rendering at microsecond scale on the workspace's criterion suite.
 
 <h3 id="how-racc-works"><img src=".github/assets/h-how.svg" alt="How RACC works" width="100%"></h3>
 
@@ -67,10 +82,42 @@ mode explicitly declares lossy compression and reports that recovery may be need
 Exact refs are local handles, not model-readable payloads -- so honest evaluation
 counts any later `expand` output the agent actually uses.
 
-<h3 id="download--install"><img src=".github/assets/h-download.svg" alt="Download & Install" width="100%"></h3>
+<h3 id="architecture"><img src=".github/assets/h-architecture.svg" alt="Architecture" width="100%"></h3>
 
-> ⚠️ **Pre-launch.** This checkout builds and verifies locally. No public releases,
-> remote pushes, or global mutations without explicit approval.
+TokenZero is a layered Rust workspace of eight focused crates. Everything builds on a
+single foundation crate; the MCP server and CLI compose the rest. The dependency graph
+is acyclic — no crate reaches back up a layer.
+
+```mermaid
+flowchart TD
+    CORE["tokenzero-core<br/>capsules · shell rendering · token accounting · recovery refs"]
+    REC[tokenzero-recovery] --> CORE
+    RUN[tokenzero-runtime] --> CORE
+    FIL[tokenzero-filters] --> CORE
+    INST[tokenzero-install] --> CORE
+    PUL[tokenzero-pulse] --> CORE
+    MCP["tokenzero-mcp<br/>stdio MCP server"] --> REC
+    MCP --> RUN
+    MCP --> FIL
+    CLI["tokenzero-cli<br/>the tokenzero binary"] --> MCP
+    CLI --> INST
+    CLI --> PUL
+```
+
+| Crate | Responsibility |
+| :-- | :-- |
+| `tokenzero-core` | Capsules, adaptive shell rendering, token accounting, content typing — the foundation every other crate depends on |
+| `tokenzero-recovery` | Content-addressed, byte-exact store behind `tz://` refs; bounded eviction and crash-safe persistence |
+| `tokenzero-runtime` | Cross-platform process execution with stream capture and disk spill |
+| `tokenzero-filters` | Conservative command rewriting and destructive-command safety verdicts |
+| `tokenzero-install` | Agent integration (plan / apply / rollback), `doctor` diagnostics, archive `package-audit` |
+| `tokenzero-pulse` | Local telemetry ledger (JSONL ↔ SQLite) so savings are accounted honestly, after recovery |
+| `tokenzero-mcp` | The deterministic stdio MCP server: engine, tool dispatch, crash-transparent supervisor |
+| `tokenzero-cli` | The `tokenzero` binary and its command surface |
+
+Building from source and the full workspace layout live in [`docs/development.md`](docs/development.md).
+
+<h3 id="download--install"><img src=".github/assets/h-download.svg" alt="Download & Install" width="100%"></h3>
 
 Download the archive for your OS from the [latest Release](https://github.com/AdityaVG13/tokenzero/releases):
 
@@ -89,6 +136,9 @@ tokenzero install --global --apply --mcp --shell --cli --json   # apply safe loc
 tokenzero doctor --json                                         # confirm health
 ```
 
+Every install step plans before it writes and records rollback data; replay it with
+`tokenzero install --rollback <id>` to reverse an apply.
+
 <details>
 <summary><b>Prefer to let your AI agent do it?</b> Paste this prompt.</summary>
 
@@ -104,9 +154,13 @@ tokenzero doctor --json and show me the result.
 
 </details>
 
-Cargo, Homebrew, and npm channels land here at launch. Building from source? See [`docs/development.md`](docs/development.md).
+Cargo, Homebrew, and npm channels ship alongside the GitHub Releases. Building from
+source? See [`docs/development.md`](docs/development.md).
 
 <h3 id="commands"><img src=".github/assets/h-commands.svg" alt="Commands" width="100%"></h3>
+
+Every command takes `--json` for a stable, schema-versioned envelope. Aliases match the
+MCP tool names below.
 
 <table>
 <tr>
@@ -115,34 +169,41 @@ Cargo, Homebrew, and npm channels land here at launch. Building from source? See
 **Read & search**
 
 - `read <path>` -- compact visible output + exact refs
-- `find <query> [path]` -- search local roots, recoverable hits
+- `find <query> [path]` -- recoverable content search
+- `grep <pattern> [path]` -- exact-first regex / literal search
+- `glob <pattern>` -- match file paths, no contents
 - `tree [path] --depth N` -- bounded repo shape
 - `run -- <command>` -- shell / test / log capture
 
-**Recover & inspect**
+**Recover & transform**
 
 - `expand <ref>` -- recover payloads, ranges, symbols, anchors
+- `recall <query>` -- full-text search across the cache
+- `fetch <url>` -- cached HTTP fetch behind a ref
 - `ingest --stdin --kind <k>` -- store external output behind refs
-- `mem` -- inspect recovery / cache state
-- `rewrite-command <cmd>` -- conservative rewrite decisions
-- `discover` -- command / filter / runtime readiness
+- `edit <path>` -- multi-hunk, all-or-nothing file edits
 
 </td>
 <td valign="top" width="50%">
 
-**Install & health**
+**Measure & inspect**
+
+- `stats` -- savings accounting (raw vs visible, after recovery)
+- `pulse` -- telemetry ledger sync, export, doctor
+- `mem` -- inspect recovery / cache state
+- `cache` -- cache status and pruning
+- `cache-pack` -- compact a session into a portable pack
+- `discover` -- command / filter / runtime readiness
+- `rewrite-command <cmd>` -- conservative rewrite decisions
+
+**Install, health & MCP**
 
 - `doctor --json` -- core health + config boundaries
-- `install --plan --json` -- plan setup, no writes
-- `install --apply --json` -- apply safe setup, with rollback
-
-**MCP & checks**
-
+- `install --plan` / `--apply` / `--rollback <id>` -- planned setup with rollback
+- `clients --json` -- detect installed AI agents
 - `mcp-server` -- run the Rust stdio MCP server
-- `mcp-smoke --json` -- MCP conformance smoke
-- `mcp-soak --json` -- restart / chaos durability
-- `shell-matrix --json` -- non-interactive shell behavior
-- `package-audit --json` -- release-only packaging audit
+- `mcp-smoke` / `mcp-soak --json` -- conformance + chaos durability
+- `package-audit --json` -- release packaging audit
 
 </td>
 </tr>
@@ -150,40 +211,52 @@ Cargo, Homebrew, and npm channels land here at launch. Building from source? See
 
 <h3 id="mcp"><img src=".github/assets/h-mcp.svg" alt="MCP" width="100%"></h3>
 
-`tokenzero mcp-server` exposes deterministic stdio tools, each with a short alias.
+`tokenzero mcp-server` exposes deterministic stdio tools, each with a short alias. The
+canonical `tz_*` name and the alias are interchangeable.
 
 | Tool | Alias | | Tool | Alias |
 | :-- | :-- | :-: | :-- | :-- |
 | `tz_read` | `read` | | `tz_ingest` | `ingest` |
 | `tz_find` | `find` | | `tz_expand` | `expand` |
+| `tz_grep` | `grep` | | `tz_recall` | `recall` |
+| `tz_glob` | `glob` | | `tz_fetch` | `fetch` |
 | `tz_tree` | `tree` | | `tz_mem` | `mem` |
-| `tz_shell` | `shell` | | `tz_rewrite` | `rewrite` |
-| `tz_discover` | `discover` | | | |
+| `tz_shell` | `shell` | | `tz_cache_pack` | `cache_pack` |
+| `tz_edit` | `edit` | | `tz_rewrite` | `rewrite` |
+| `tz_batch` | `batch` | | `tz_discover` | `discover` |
 
-The server supports the legacy MCP flow and the current `2026-07-28`
-release-candidate shape. Malformed JSON and cancelled or failed calls return
-structured errors **without terminating the server**.
+The server negotiates the MCP protocol across `2025-03-26`, `2025-06-18` (default), and
+the `2026-07-28` release candidate. Malformed JSON and cancelled or failed calls return
+structured errors **without terminating the server**; a crash-transparent supervisor
+restarts a faulted worker mid-session.
 
 <h3 id="docs"><img src=".github/assets/h-docs.svg" alt="Docs" width="100%"></h3>
 
 | Doc | Covers |
 | :-- | :-- |
 | [`docs/core.md`](docs/core.md) | Core command surfaces |
-| [`docs/racc.md`](docs/racc.md) | RACC contract and accounting |
-| [`docs/mcp.md`](docs/mcp.md) | MCP server contract |
+| [`docs/racc.md`](docs/racc.md) | RACC contract and savings accounting |
+| [`docs/benchmarks.md`](docs/benchmarks.md) | Reproducible savings + microbenchmarks |
+| [`docs/mcp.md`](docs/mcp.md) | MCP server contract and protocol versions |
 | [`docs/install.md`](docs/install.md) | Install, plan, apply, rollback |
+| [`docs/pulse.md`](docs/pulse.md) | Telemetry ledger and savings measurement |
+| [`docs/pulse-sync-strategy.md`](docs/pulse-sync-strategy.md) | JSONL ↔ SQLite sync design |
+| [`docs/pulse-recovery-runbook.md`](docs/pulse-recovery-runbook.md) | Ledger recovery runbook |
+| [`docs/routing.md`](docs/routing.md) | Agent / client routing |
+| [`docs/command-coverage.md`](docs/command-coverage.md) | Command surface coverage |
 | [`docs/development.md`](docs/development.md) | Build from source, test, verify, workspace |
 | [`docs/windows-systemwide.md`](docs/windows-systemwide.md) | Windows systemwide migration runbook |
 
 <h3 id="contributing"><img src=".github/assets/h-contributing.svg" alt="Contributing" width="100%"></h3>
 
 See [`CONTRIBUTING.md`](CONTRIBUTING.md) for the build/verify loop and
-[`SECURITY.md`](SECURITY.md) for disclosure. Pre-launch: no public releases,
-remote pushes, or global mutations without explicit approval.
+[`SECURITY.md`](SECURITY.md) for disclosure. The verify gate is
+`cargo test --workspace`, `cargo clippy --workspace --all-targets -- -D warnings`, and
+`cargo fmt --all -- --check`.
 
 <h3 id="license"><img src=".github/assets/h-license.svg" alt="License" width="100%"></h3>
 
-[MIT](LICENSE) © TokenZero
+[MIT](LICENSE) © AdityaVG13
 
 ---
 

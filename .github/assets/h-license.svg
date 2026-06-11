@@ -15,8 +15,8 @@
       <stop offset="1" stop-color="#a371f7" stop-opacity="0"/>
     </linearGradient>
     <clipPath id="subclip">
-      <rect x="1047" y="64" width="0" height="32">
-        <animate attributeName="width" values="0;0;129;129" keyTimes="0;0.1111;0.3333;1" dur="2.7s" repeatCount="indefinite"/>
+      <rect x="1018" y="64" width="0" height="32">
+        <animate attributeName="width" values="0;0;158;158" keyTimes="0;0.1111;0.3333;1" dur="2.7s" repeatCount="indefinite"/>
       </rect>
     </clipPath>
   </defs>
