@@ -37,16 +37,20 @@ fn windows_mcp_initialize_writes_bom_free_utf8_to_stdin() {
             "{script} must encode MCP initialize as BOM-free UTF-8 bytes"
         );
         assert!(
-            function.contains("$proc.StandardInput.BaseStream.Write($bytes, 0, $bytes.Length)"),
-            "{script} must write raw bytes to stdin BaseStream"
+            function.contains("[System.IO.File]::WriteAllBytes"),
+            "{script} must persist MCP initialize bytes before launching the server"
         );
         assert!(
-            function.contains("$proc.StandardInput.BaseStream.Flush()"),
-            "{script} must flush raw MCP initialize bytes before closing stdin"
+            function.contains("< $(Quote-"),
+            "{script} must redirect stdin from the BOM-free request file"
         );
         assert!(
             !function.contains("$proc.StandardInput.Write("),
             "{script} must not use StreamWriter.Write for MCP initialize; Windows PowerShell 5.1 can prepend encoding bytes"
+        );
+        assert!(
+            !function.contains("RedirectStandardInput = $true"),
+            "{script} must not use .NET redirected stdin for MCP initialize on Windows runners"
         );
     }
 }

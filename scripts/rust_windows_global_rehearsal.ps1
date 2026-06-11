@@ -71,46 +71,51 @@ function Invoke-McpInitialize {
     [string]$CachePath
   )
 
-  $psi = [System.Diagnostics.ProcessStartInfo]::new()
-  $psi.FileName = $Command
-  $psi.Arguments = "mcp-server --allowed-root $(Quote-CmdArg $AllowedRoot) --cache-path $(Quote-CmdArg $CachePath)"
-  $psi.RedirectStandardInput = $true
-  $psi.RedirectStandardOutput = $true
-  $psi.RedirectStandardError = $true
-  $psi.UseShellExecute = $false
-
-  $proc = [System.Diagnostics.Process]::Start($psi)
   # Line-delimited JSON-RPC with the full required initialize params
   # (capabilities and clientInfo are mandatory, not optional).
   $request = '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"windows-rehearsal","version":"1.0.0"}}}'
-  $bytes = [System.Text.UTF8Encoding]::new($false).GetBytes("$request`n")
-  $proc.StandardInput.BaseStream.Write($bytes, 0, $bytes.Length)
-  $proc.StandardInput.BaseStream.Flush()
-  $proc.StandardInput.Close()
+  $requestPath = Join-Path ([System.IO.Path]::GetTempPath()) ("tokenzero-mcp-initialize-" + [Guid]::NewGuid().ToString("N") + ".jsonl")
+  [System.IO.File]::WriteAllBytes(
+    $requestPath,
+    [System.Text.UTF8Encoding]::new($false).GetBytes("$request`n")
+  )
 
-  if (!$proc.WaitForExit(30000)) {
-    $proc.Kill()
-    return [ordered]@{
-      ok = $false
-      command = $Command
-      exit_code = $null
-      timed_out = $true
-      stdout_preview = ""
-      stderr_preview = ""
+  try {
+    $psi = [System.Diagnostics.ProcessStartInfo]::new()
+    $psi.FileName = if ($env:ComSpec) { $env:ComSpec } else { "cmd.exe" }
+    $commandLine = "$(Quote-CmdArg $Command) mcp-server --allowed-root $(Quote-CmdArg $AllowedRoot) --cache-path $(Quote-CmdArg $CachePath) < $(Quote-CmdArg $requestPath)"
+    $psi.Arguments = '/D /C "' + $commandLine + '"'
+    $psi.RedirectStandardOutput = $true
+    $psi.RedirectStandardError = $true
+    $psi.UseShellExecute = $false
+
+    $proc = [System.Diagnostics.Process]::Start($psi)
+    if (!$proc.WaitForExit(30000)) {
+      $proc.Kill()
+      return [ordered]@{
+        ok = $false
+        command = $Command
+        exit_code = $null
+        timed_out = $true
+        stdout_preview = ""
+        stderr_preview = ""
+      }
     }
-  }
 
-  $stdout = $proc.StandardOutput.ReadToEnd()
-  $stderr = $proc.StandardError.ReadToEnd()
-  $ok = ($proc.ExitCode -eq 0) -and $stdout.Replace(" ", "").Contains('"name":"tokenzero"')
+    $stdout = $proc.StandardOutput.ReadToEnd()
+    $stderr = $proc.StandardError.ReadToEnd()
+    $ok = ($proc.ExitCode -eq 0) -and $stdout.Replace(" ", "").Contains('"name":"tokenzero"')
 
-  return [ordered]@{
-    ok = $ok
-    command = $Command
-    exit_code = $proc.ExitCode
-    timed_out = $false
-    stdout_preview = $stdout.Substring(0, [Math]::Min(300, $stdout.Length))
-    stderr_preview = $stderr.Substring(0, [Math]::Min(300, $stderr.Length))
+    return [ordered]@{
+      ok = $ok
+      command = $Command
+      exit_code = $proc.ExitCode
+      timed_out = $false
+      stdout_preview = $stdout.Substring(0, [Math]::Min(300, $stdout.Length))
+      stderr_preview = $stderr.Substring(0, [Math]::Min(300, $stderr.Length))
+    }
+  } finally {
+    Remove-Item -LiteralPath $requestPath -Force -ErrorAction SilentlyContinue
   }
 }
 

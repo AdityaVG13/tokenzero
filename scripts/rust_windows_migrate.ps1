@@ -116,46 +116,45 @@ function Invoke-McpInitialize {
     [string]$CachePath
   )
 
-  $psi = [System.Diagnostics.ProcessStartInfo]::new()
-  $psi.FileName = $RuntimeExe
-  $psi.Arguments = (@(
-    "mcp-server",
-    "--allowed-root",
-    $AllowedRoot,
-    "--cache-path",
-    $CachePath
-  ) | ForEach-Object { Quote-ProcessArg $_ }) -join " "
-  $psi.RedirectStandardInput = $true
-  $psi.RedirectStandardOutput = $true
-  $psi.RedirectStandardError = $true
-  $psi.UseShellExecute = $false
-
-  $proc = [System.Diagnostics.Process]::Start($psi)
   # Line-delimited JSON-RPC with the full required initialize params
   # (capabilities and clientInfo are mandatory, not optional).
   $body = '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"windows-migrate","version":"1.0.0"}}}'
-  $bytes = [System.Text.UTF8Encoding]::new($false).GetBytes("$body`n")
-  $proc.StandardInput.BaseStream.Write($bytes, 0, $bytes.Length)
-  $proc.StandardInput.BaseStream.Flush()
-  $proc.StandardInput.Close()
+  $requestPath = Join-Path ([System.IO.Path]::GetTempPath()) ("tokenzero-mcp-initialize-" + [Guid]::NewGuid().ToString("N") + ".jsonl")
+  [System.IO.File]::WriteAllBytes(
+    $requestPath,
+    [System.Text.UTF8Encoding]::new($false).GetBytes("$body`n")
+  )
 
-  if (!$proc.WaitForExit(10000)) {
-    $proc.Kill()
-    throw "MCP initialize timed out"
-  }
+  try {
+    $psi = [System.Diagnostics.ProcessStartInfo]::new()
+    $psi.FileName = if ($env:ComSpec) { $env:ComSpec } else { "cmd.exe" }
+    $commandLine = "$(Quote-ProcessArg $RuntimeExe) mcp-server --allowed-root $(Quote-ProcessArg $AllowedRoot) --cache-path $(Quote-ProcessArg $CachePath) < $(Quote-ProcessArg $requestPath)"
+    $psi.Arguments = '/D /C "' + $commandLine + '"'
+    $psi.RedirectStandardOutput = $true
+    $psi.RedirectStandardError = $true
+    $psi.UseShellExecute = $false
 
-  $stdout = $proc.StandardOutput.ReadToEnd()
-  $stderr = $proc.StandardError.ReadToEnd()
-  $ok = ($proc.ExitCode -eq 0) -and $stdout.Replace(" ", "").Contains('"name":"tokenzero"')
-  if (!$ok) {
-    throw "MCP initialize failed with exit code $($proc.ExitCode)`n$stdout`n$stderr"
-  }
+    $proc = [System.Diagnostics.Process]::Start($psi)
+    if (!$proc.WaitForExit(10000)) {
+      $proc.Kill()
+      throw "MCP initialize timed out"
+    }
 
-  return [ordered]@{
-    name = "mcp initialize"
-    exit_code = $proc.ExitCode
-    stdout_preview = $stdout.Substring(0, [Math]::Min(500, $stdout.Length))
-    stderr_preview = $stderr.Substring(0, [Math]::Min(500, $stderr.Length))
+    $stdout = $proc.StandardOutput.ReadToEnd()
+    $stderr = $proc.StandardError.ReadToEnd()
+    $ok = ($proc.ExitCode -eq 0) -and $stdout.Replace(" ", "").Contains('"name":"tokenzero"')
+    if (!$ok) {
+      throw "MCP initialize failed with exit code $($proc.ExitCode)`n$stdout`n$stderr"
+    }
+
+    return [ordered]@{
+      name = "mcp initialize"
+      exit_code = $proc.ExitCode
+      stdout_preview = $stdout.Substring(0, [Math]::Min(500, $stdout.Length))
+      stderr_preview = $stderr.Substring(0, [Math]::Min(500, $stderr.Length))
+    }
+  } finally {
+    Remove-Item -LiteralPath $requestPath -Force -ErrorAction SilentlyContinue
   }
 }
 
