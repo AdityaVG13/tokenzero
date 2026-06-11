@@ -72,12 +72,12 @@ fn object_entry<'a>(
         .ok_or_else(|| Error::new(ErrorKind::InvalidData, format!("{what} must be an object")))
 }
 
-/// Replace the TokenZero-owned entry in the `hooks.<key>` array, leaving
+/// Replace the TokenZero-owned entries in the `hooks.<key>` array, leaving
 /// every foreign entry untouched.
-fn upsert_tokenzero_hook(
+fn upsert_tokenzero_hooks(
     hooks_object: &mut Map<String, Value>,
     key: &str,
-    entry: Value,
+    new_entries: Vec<Value>,
 ) -> std::io::Result<()> {
     let entries = hooks_object
         .entry(key)
@@ -90,7 +90,7 @@ fn upsert_tokenzero_hook(
             )
         })?;
     entries.retain(|entry| !is_tokenzero_hook_entry(entry));
-    entries.push(entry);
+    entries.extend(new_entries);
     Ok(())
 }
 
@@ -113,22 +113,34 @@ pub(crate) fn merge_json_mcp(previous: &str, root: &Path, global: bool) -> std::
 pub(crate) fn merge_json_hooks(previous: &str, hook_command: &str) -> std::io::Result<String> {
     let mut object = parse_json_object(previous, "Claude settings JSON")?;
     let hooks_object = object_entry(&mut object, "hooks", "Claude settings hooks field")?;
-    upsert_tokenzero_hook(
+    upsert_tokenzero_hooks(
         hooks_object,
         "PreToolUse",
-        serde_json::json!({
-            "matcher": "Bash",
-            "hooks": [{
-                "type": "command",
-                "command": hook_command,
-                "timeout": 10,
-            }]
-        }),
+        vec![
+            serde_json::json!({
+                "matcher": "Bash",
+                "hooks": [{
+                    "type": "command",
+                    "command": hook_command,
+                    "timeout": 10,
+                }]
+            }),
+            // Same adapter command: the hook dispatches on tool_name, so the
+            // Read matcher reuses it for the unbounded-large-Read guard.
+            serde_json::json!({
+                "matcher": "Read",
+                "hooks": [{
+                    "type": "command",
+                    "command": hook_command,
+                    "timeout": 10,
+                }]
+            }),
+        ],
     )?;
-    upsert_tokenzero_hook(
+    upsert_tokenzero_hooks(
         hooks_object,
         "SessionStart",
-        serde_json::json!({
+        vec![serde_json::json!({
             "hooks": [{
                 "type": "command",
                 // `<launcher> hook claude-code` + suffix = the SessionStart
@@ -136,7 +148,7 @@ pub(crate) fn merge_json_hooks(previous: &str, hook_command: &str) -> std::io::R
                 "command": format!("{hook_command}-session-start"),
                 "timeout": 10,
             }]
-        }),
+        })],
     )?;
     Ok(serde_json::to_string_pretty(&Value::Object(object))? + "\n")
 }

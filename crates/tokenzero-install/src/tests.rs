@@ -811,15 +811,20 @@ fn global_hooks_merge_preserves_foreign_hooks_and_is_idempotent() {
         .collect();
     assert_eq!(
         tokenzero_entries.len(),
-        1,
+        2,
         "second apply must not duplicate"
     );
-    let entry = tokenzero_entries[0];
-    assert_eq!(entry["matcher"], "Bash");
-    let hook = &entry["hooks"][0];
-    assert_eq!(hook["type"], "command");
-    assert_eq!(hook["timeout"], 10);
-    assert_eq!(hook["command"].as_str().unwrap(), hook_command(&root, true));
+    let matchers: Vec<&str> = tokenzero_entries
+        .iter()
+        .map(|entry| entry["matcher"].as_str().unwrap())
+        .collect();
+    assert_eq!(matchers, ["Bash", "Read"]);
+    for entry in tokenzero_entries {
+        let hook = &entry["hooks"][0];
+        assert_eq!(hook["type"], "command");
+        assert_eq!(hook["timeout"], 10);
+        assert_eq!(hook["command"].as_str().unwrap(), hook_command(&root, true));
+    }
 }
 
 #[test]
