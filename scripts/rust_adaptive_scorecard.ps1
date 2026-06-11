@@ -213,9 +213,11 @@ $cacheFile = Join-Path ([System.IO.Path]::GetTempPath()) ("tokenzero-cache-read-
 try {
   New-Item -ItemType Directory -Force $cacheDir | Out-Null
   "alpha" | Out-File -Encoding utf8 $cacheFile
+  # Split-Path keeps the root free of a trailing backslash, which would
+  # otherwise escape the closing quote when the argv line is built.
   $cacheDegrade = Invoke-TokenZeroJson `
     -Name "cache write degrade" `
-    -Arguments @("read", $cacheFile, "--allowed-root", ([System.IO.Path]::GetTempPath()), "--cache-path", $cacheDir, "--json")
+    -Arguments @("read", $cacheFile, "--allowed-root", (Split-Path -Parent $cacheFile), "--cache-path", $cacheDir, "--json")
   $cacheDegradeRow = Accounting-Row -Case $cacheDegrade -Expectation "read still returns compressed output when recovery cache persistence fails"
   $cacheDegradeRow.ok = (
     $cacheDegrade.exit_code -eq 0 -and
