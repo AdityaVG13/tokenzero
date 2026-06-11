@@ -366,7 +366,13 @@ fn scrub_value(value: &mut Value, temp_root: &Path, refs: &mut RefScrubber) {
 fn scrub_temp_path(text: &str, temp_root: &Path) -> String {
     let temp = normalize_path(&temp_root.to_string_lossy());
     let workspace = normalize_path(&workspace_root().to_string_lossy());
+    // The CLI under test reports its own binary path (current_exe), which
+    // moves with CARGO_TARGET_DIR (e.g. target/windows-verify on the Windows
+    // verifier); pin the exact binary path to the default layout first so the
+    // golden stays stable under custom target dirs.
+    let current_exe = normalize_path(env!("CARGO_BIN_EXE_tokenzero"));
     normalize_path(text)
+        .replace(&current_exe, "[WORKSPACE]/target/debug/tokenzero")
         .replace(&temp, "[TMP]")
         .replace(&workspace, "[WORKSPACE]")
         // The runtime's own binary (current_exe) carries a `.exe` suffix on
