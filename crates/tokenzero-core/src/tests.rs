@@ -516,9 +516,16 @@ fn shell_c_wrappers_detect_masked_inner_pipeline_failures() {
                 .is_some_and(|warning| warning.contains("mask")),
             "{command}: {status:?}"
         );
+        // pipeline_rerun_command suggests a bash rerun, which is suppressed
+        // on Windows where bash is not assumed to exist.
+        let expected_rerun = if cfg!(windows) {
+            None
+        } else {
+            Some("bash -o pipefail -c 'false | true'")
+        };
         assert_eq!(
             status.pipeline_rerun_command.as_deref(),
-            Some("bash -o pipefail -c 'false | true'"),
+            expected_rerun,
             "{command}"
         );
     }

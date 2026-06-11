@@ -621,11 +621,10 @@ fn deadline_from(start: Instant, timeout: Duration) -> Instant {
 
 fn process_io_shutdown_grace() -> Duration {
     // After terminating the group, give the IO workers room to observe the pipe
-    // close and drain. A heavily loaded CI runner can take noticeably longer than
-    // a quiet desktop to propagate the kill and unblock the reader, so this stays
-    // generous while remaining well under any realistic background-descendant
-    // sleep so cleanup is still demonstrably prompt.
-    Duration::from_secs(5)
+    // close and drain. Kept well under the 5s descendant sleeps in the runtime
+    // tests so a regression in the group kill fails loudly instead of being
+    // absorbed by the grace window.
+    Duration::from_secs(2)
 }
 
 /// IO wait after the main child has already EXITED: an exited process
@@ -676,9 +675,13 @@ fn terminate_unix_process_group(pgid: u32) {
     if pgid == 0 {
         return;
     }
+    // The "--" separator is load-bearing: Ubuntu's procps kill accepts
+    // `kill -TERM -<pgid>` with exit 0 yet signals nothing, so the group
+    // kill silently no-ops without it (Debian and macOS tolerate both).
     let target = format!("-{pgid}");
     let _ = Command::new("kill")
         .arg("-TERM")
+        .arg("--")
         .arg(&target)
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -686,6 +689,7 @@ fn terminate_unix_process_group(pgid: u32) {
     thread::sleep(Duration::from_millis(50));
     let _ = Command::new("kill")
         .arg("-KILL")
+        .arg("--")
         .arg(target)
         .stdout(Stdio::null())
         .stderr(Stdio::null())
