@@ -17,10 +17,10 @@ serde.workspace = true
 serde_json.workspace = true
 similar.workspace = true
 thiserror.workspace = true
-tokenzero-core = { path = "../tokenzero-core", version = "1.0.0" }
-tokenzero-filters = { path = "../tokenzero-filters", version = "1.0.0" }
-tokenzero-recovery = { path = "../tokenzero-recovery", version = "1.0.0" }
-tokenzero-runtime = { path = "../tokenzero-runtime", version = "1.0.0" }
+tokenzero-core = { path = "../tokenzero-core", version = "1.0.1" }
+tokenzero-filters = { path = "../tokenzero-filters", version = "1.0.1" }
+tokenzero-recovery = { path = "../tokenzero-recovery", version = "1.0.1" }
+tokenzero-runtime = { path = "../tokenzero-runtime", version = "1.0.1" }
 
 [dev-dependencies]
 assert_cmd.workspace = true

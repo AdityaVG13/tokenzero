@@ -15,4 +15,4 @@ rust-version.workspace = true
 regex.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-tokenzero-core = { path = "../tokenzero-core", version = "1.0.0" }
+tokenzero-core = { path = "../tokenzero-core", version = "1.0.1" }
