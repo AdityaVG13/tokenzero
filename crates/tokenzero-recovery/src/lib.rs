@@ -1080,7 +1080,10 @@ fn atomic_write_json(path: &Path, state: &RecoveryState) -> Result<(), RecoveryE
                     let _ = fs::remove_file(&tmp);
                     return Err(err.into());
                 }
-                sync_parent_dir(path)?;
+                // No parent-dir fsync after rename: see write_json_to_tmp.
+                // Atomicity (no torn read) is provided by rename itself;
+                // power-loss durability of the rename is out of scope for a
+                // reconstructible cache.
                 return Ok(());
             }
             Err(RecoveryError::Io(err)) if err.kind() == std::io::ErrorKind::AlreadyExists => {
@@ -1126,21 +1129,28 @@ fn write_json_to_tmp(tmp: &Path, state: &RecoveryState) -> Result<(), RecoveryEr
     let file = writer
         .into_inner()
         .map_err(std::io::IntoInnerError::into_error)?;
-    file.sync_all()?;
+    // sync_data, not sync_all: the cache is reconstructible working state
+    // (a lost entry reports dangling-ref on expand, never wrong bytes; see
+    // docs/racc.md), so file metadata durability is not required — only that
+    // the tmp file's *bytes* are on disk before the rename publishes it, so a
+    // reader can never observe a torn/partial cache. On macOS sync_all maps to
+    // F_FULLFSYNC (full device flush, ~8ms pair); sync_data is fdatasync and
+    // skips it (~16x faster) while still ordering the data write ahead of the
+    // rename.
+    file.sync_data()?;
     Ok(())
 }
 
-#[cfg(unix)]
-fn sync_parent_dir(path: &Path) -> Result<(), RecoveryError> {
-    let parent = path.parent().unwrap_or_else(|| Path::new("."));
-    fs::File::open(parent)?.sync_all()?;
-    Ok(())
-}
-
-#[cfg(not(unix))]
-fn sync_parent_dir(_path: &Path) -> Result<(), RecoveryError> {
-    Ok(())
-}
+// No sync_parent_dir: the directory entry created by rename is not flushed.
+// Crash *consistency* does not need it — rename is atomic within a single
+// directory, so a concurrent or post-crash reader sees either the old inode or
+// the new one, never a torn file. Only power-loss *durability* of the rename
+// would need a parent-dir fsync, and that is explicitly out of scope here: the
+// cache is reconstructible working state. On macOS this fsync was a second
+// F_FULLFSYNC, doubling persist cost for a guarantee the cache does not claim.
+// Accepted power-loss window: a crash in the unflushed interval can revert the
+// cache to the previous consistent state, degrading affected refs to
+// dangling-ref — the designed-safe outcome (docs/racc.md), never wrong bytes.
 
 fn recovery_file_ref(text: &str, path: Option<&Path>) -> String {
     let path_identity = path.map(path_identity_text).unwrap_or_default();
