@@ -408,8 +408,10 @@ fn expected_false_pipeline_segments_do_not_trigger_masking_warnings() {
                 .is_some_and(|warning| warning.contains("mask")),
             "{command}: {rendered:?}"
         );
-        assert!(
+        // The bash pipefail rerun suggestion is suppressed on Windows.
+        assert_eq!(
             rendered.command_status.pipeline_rerun_command.is_some(),
+            !cfg!(windows),
             "{command}: {rendered:?}"
         );
     }
