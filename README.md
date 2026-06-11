@@ -1,6 +1,6 @@
 <div align="center">
 
-<img src=".github/assets/banner.gif" alt="TokenZero -- Recovery-Aware Context Compression" width="100%">
+<img src=".github/assets/banner.gif" alt="TokenZero: Recovery-Aware Context Compression" width="100%">
 
 <br/>
 <br/>
@@ -45,36 +45,39 @@ A local-first Rust runtime that shrinks what AI agents see, while keeping a
 > *now* and keeps the omitted bytes behind an exact local ref. Savings are counted
 > **after** any recovery, not from visible-token shrinkage alone.
 
-Small reads pass through untouched; large reads collapse to a capsule — both stay
+Small reads pass through untouched; large reads collapse to a capsule, and both stay
 **byte-exact recoverable**. Reproduce any row with `tokenzero read <file> --json`
 and read the `accounting` block:
 
 | Input | Raw tokens | Visible | Result |
 | :-- | --: | --: | :-- |
-| 237-line source file | 1,992 | 1,992 | returned whole — a capsule never costs more than raw |
+| 237-line source file | 1,992 | 1,992 | returned whole; a capsule never costs more than raw |
 | 1,728-line source file | 13,764 | 203 | **98.5%** smaller, exact bytes one `expand` away |
 | 2,301-line source file | 16,712 | 150 | **99.1%** smaller, exact bytes one `expand` away |
 | noisy shell output | 1,012 | 435 | **57%** smaller, full stream recoverable |
 
-Hot paths are measured, not asserted — `cargo bench` pins token counting, capsule
+Hot paths are measured, not asserted: `cargo bench` pins token counting, capsule
 framing, and shell rendering at microsecond scale on the workspace's criterion suite.
 
 #### End-to-end benchmark
 
-The same seven operations, run raw and through TokenZero on this repository
-(tokens estimated as chars÷4 on both sides; every capsule's exact-recovery
-round-trip verified byte-identical against the original):
+Six real workloads on this repository, run raw and through TokenZero. Both
+sides are counted with the same tokenizer (TokenZero's own accounting), and
+every TokenZero row keeps exact `tz://` refs, so nothing hidden is more than
+one `expand` away. Reproduce any row with `scripts/benchmark_tokens.sh`:
 
-| Operation | Raw tokens | TokenZero | Savings |
+| Workload | Raw tokens | TokenZero | Savings |
 | :-- | --: | --: | --: |
-| Read a ~1,300-line Rust source file | 10,592 | 229 | **97.8%** |
-| Read a second large source file | 10,520 | 210 | **98.0%** |
-| Search the repo for an identifier | 2,375 | 50 | **97.9%** |
-| Directory tree of `crates/` | 988 | 128 | **87.0%** |
-| `git log --stat -30` | 6,062 | 278 | **95.4%** |
-| `cargo check --workspace` (warm) | 238 | 51 | **78.6%** |
-| Glob `**/*.rs` (paths don't compress — passthrough) | 919 | 899 | 2.2% |
-| **Total** | **31,694** | **1,845** | **94.2%** |
+| Read a 2,301-line Rust source file | 16,712 | 150 | **99.1%** |
+| Re-read the same file (session dedup) | 16,712 | 45 | **99.7%** |
+| Repo-wide grep (`fn ` across `crates/`) | 47,206 | 508 | **98.9%** |
+| `cargo test` run (tokenzero-filters suite) | 233 | 80 | **65.7%** |
+| Directory listing (`find` vs `tree`, depth 3) | 1,289 | 340 | **73.6%** |
+| Re-find stored content (`recall` vs re-running the grep) | 47,206 | 46 | **99.9%** |
+| **Total** | **129,358** | **1,169** | **99.1%** |
+
+Path-only outputs like `glob` pass through nearly unchanged: there is nothing
+to hide, and a capsule never costs more than raw.
 
 #### Measured in production
 
@@ -82,13 +85,14 @@ Across **~20,000 routed tool calls** from real agent sessions on one
 development machine (six days, multiple AI harnesses): raw tool output
 totalled **38.1M tokens**; **17.9M of them (47%) never entered the model's
 context**. Counting back every token agents later recovered with `expand`,
-net savings were **30%** — that recovery-adjusted number is the honest one,
+net savings were **30%**. That recovery-adjusted number is the honest one,
 and it is the one TokenZero's own telemetry reports (`tokenzero pulse stats`).
 
 <h3 id="how-racc-works"><img src=".github/assets/h-how.svg" alt="How RACC works" width="100%"></h3>
 
-**RACC -- Recovery-Aware Context Compression.** The goal is not the shortest possible
-response; it is the **lowest total task cost** while exact recovery stays one call away.
+**RACC** is short for **Recovery-Aware Context Compression**. The goal is not the
+shortest possible response; it is the **lowest total task cost** while exact recovery
+stays one call away.
 
 ```mermaid
 flowchart LR
@@ -105,14 +109,24 @@ flowchart LR
 TokenZero may omit text from the visible capsule **only** when it is already
 represented by a protected anchor, recoverable through an exact local ref, or the
 mode explicitly declares lossy compression and reports that recovery may be needed.
-Exact refs are local handles, not model-readable payloads -- so honest evaluation
+Exact refs are local handles, not model-readable payloads, so honest evaluation
 counts any later `expand` output the agent actually uses.
+
+**Why recovery-aware beats lossy summarization.** A summarizer makes an
+irreversible bet: it decides, before the task is finished, which details the
+agent will never need. When it bets wrong, the agent re-reads files, re-runs
+commands, or quietly fills the gap with a guess. RACC never has to bet.
+It hides aggressively because hiding is reversible: every omitted byte stays
+addressable behind a local `tz://` ref, and an agent that needs one gets the
+exact original bytes back in a single call. The accounting follows the same
+principle: tokens an agent later recovers are subtracted from claimed savings,
+because compression you had to undo was never a saving at all.
 
 <h3 id="architecture"><img src=".github/assets/h-architecture.svg" alt="Architecture" width="100%"></h3>
 
 TokenZero is a layered Rust workspace of eight focused crates. Everything builds on a
 single foundation crate; the MCP server and CLI compose the rest. The dependency graph
-is acyclic — no crate reaches back up a layer.
+is acyclic; no crate reaches back up a layer.
 
 ```mermaid
 flowchart TD
@@ -132,7 +146,7 @@ flowchart TD
 
 | Crate | Responsibility |
 | :-- | :-- |
-| `tokenzero-core` | Capsules, adaptive shell rendering, token accounting, content typing — the foundation every other crate depends on |
+| `tokenzero-core` | Capsules, adaptive shell rendering, token accounting, content typing: the foundation every other crate depends on |
 | `tokenzero-recovery` | Content-addressed, byte-exact store behind `tz://` refs; bounded eviction and crash-safe persistence |
 | `tokenzero-runtime` | Cross-platform process execution with stream capture and disk spill |
 | `tokenzero-filters` | Conservative command rewriting and destructive-command safety verdicts |
@@ -194,42 +208,42 @@ MCP tool names below.
 
 **Read & search**
 
-- `read <path>` -- compact visible output + exact refs
-- `find <query> [path]` -- recoverable content search
-- `grep <pattern> [path]` -- exact-first regex / literal search
-- `glob <pattern>` -- match file paths, no contents
-- `tree [path] --depth N` -- bounded repo shape
-- `run -- <command>` -- shell / test / log capture
+- `read <path>`: compact visible output + exact refs
+- `find <query> [path]`: recoverable content search
+- `grep <pattern> [path]`: exact-first regex / literal search
+- `glob <pattern>`: match file paths, no contents
+- `tree [path] --depth N`: bounded repo shape
+- `run -- <command>`: shell / test / log capture
 
 **Recover & transform**
 
-- `expand <ref>` -- recover payloads, ranges, symbols, anchors
-- `recall <query>` -- full-text search across the cache
-- `fetch <url>` -- cached HTTP fetch behind a ref
-- `ingest --stdin --kind <k>` -- store external output behind refs
-- `edit <path>` -- multi-hunk, all-or-nothing file edits
+- `expand <ref>`: recover payloads, ranges, symbols, anchors
+- `recall <query>`: full-text search across the cache
+- `fetch <url>`: cached HTTP fetch behind a ref
+- `ingest --stdin --kind <k>`: store external output behind refs
+- `edit <path>`: multi-hunk, all-or-nothing file edits
 
 </td>
 <td valign="top" width="50%">
 
 **Measure & inspect**
 
-- `stats` -- savings accounting (raw vs visible, after recovery)
-- `pulse` -- telemetry ledger sync, export, doctor
-- `mem` -- inspect recovery / cache state
-- `cache` -- cache status and pruning
-- `cache-pack` -- compact a session into a portable pack
-- `discover` -- command / filter / runtime readiness
-- `rewrite-command <cmd>` -- conservative rewrite decisions
+- `stats`: savings accounting (raw vs visible, after recovery)
+- `pulse`: telemetry ledger sync, export, doctor
+- `mem`: inspect recovery / cache state
+- `cache`: cache status and pruning
+- `cache-pack`: compact a session into a portable pack
+- `discover`: command / filter / runtime readiness
+- `rewrite-command <cmd>`: conservative rewrite decisions
 
 **Install, health & MCP**
 
-- `doctor --json` -- core health + config boundaries
-- `install --plan` / `--apply` / `--rollback <id>` -- planned setup with rollback
-- `clients --json` -- detect installed AI agents
-- `mcp-server` -- run the Rust stdio MCP server
-- `mcp-smoke` / `mcp-soak --json` -- conformance + chaos durability
-- `package-audit --json` -- release packaging audit
+- `doctor --json`: core health + config boundaries
+- `install --plan` / `--apply` / `--rollback <id>`: planned setup with rollback
+- `clients --json`: detect installed AI agents
+- `mcp-server`: run the Rust stdio MCP server
+- `mcp-smoke` / `mcp-soak --json`: conformance + chaos durability
+- `package-audit --json`: release packaging audit
 
 </td>
 </tr>

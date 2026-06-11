@@ -160,3 +160,6 @@ NDH6SA~M
 
 # local audit artifacts (regenerable; never publish)
 .debloat/
+
+# local-only release tooling config
+deny.toml
