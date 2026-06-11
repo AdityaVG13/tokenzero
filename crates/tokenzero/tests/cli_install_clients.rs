@@ -394,7 +394,11 @@ fn cli_clients_detect_reports_applied_grok_surfaces_as_installed() {
         String::from_utf8_lossy(&output.stderr)
     );
     let json: Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert_eq!(json["status"], "installed");
+    assert_eq!(
+        json["status"], "installed",
+        "detect status not installed; surfaces: {:#}",
+        json["surfaces"]
+    );
     assert_eq!(json["summary"]["raw_bypass_risk"], false);
     for suffix in [
         ".config/tokenzero/agents/grok.mcp.json",

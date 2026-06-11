@@ -360,10 +360,8 @@ fn has_shell_operators(command: &str) -> bool {
                 }
             }
             // Command substitution still runs inside double quotes.
-            Some('"') => {
-                if ch == '`' || (ch == '$' && chars.peek() == Some(&'(')) {
-                    return true;
-                }
+            Some('"') if ch == '`' || (ch == '$' && chars.peek() == Some(&'(')) => {
+                return true;
             }
             _ => {}
         }
