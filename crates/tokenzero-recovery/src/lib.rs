@@ -204,8 +204,54 @@ pub struct RecoveryStore {
     pub persistence_path: Option<PathBuf>,
     state: RecoveryState,
     session_refs: Vec<String>,
+    /// Identity of the cache file as last written by this store, captured
+    /// while still holding the persist lock. `None` until the first persist;
+    /// also reset to `None` whenever a write fails, so the next persist must
+    /// take the full reload+merge path.
+    disk_identity: Option<DiskIdentity>,
     pub recovery_count: usize,
     pub recovery_tokens: usize,
+}
+
+/// Cache-file identity used to detect foreign writes between persists.
+/// `atomic_write_json` always replaces the file via rename, so any cooperating
+/// writer changes the inode — mtime alone is never trusted (its granularity
+/// can be a full second on some filesystems). Captured only under the persist
+/// lock; any uncertainty (missing file, unreadable metadata) must yield `None`
+/// and force the full reload+merge path.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct DiskIdentity {
+    len: u64,
+    modified: SystemTime,
+    #[cfg(unix)]
+    dev: u64,
+    #[cfg(unix)]
+    ino: u64,
+}
+
+impl DiskIdentity {
+    fn capture(path: &Path) -> Option<Self> {
+        let meta = fs::metadata(path).ok()?;
+        if !meta.is_file() {
+            return None;
+        }
+        let modified = meta.modified().ok()?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            Some(Self {
+                len: meta.len(),
+                modified,
+                dev: meta.dev(),
+                ino: meta.ino(),
+            })
+        }
+        #[cfg(not(unix))]
+        Some(Self {
+            len: meta.len(),
+            modified,
+        })
+    }
 }
 
 impl RecoveryStore {
@@ -223,6 +269,10 @@ impl RecoveryStore {
             persistence_path,
             state,
             session_refs: Vec::new(),
+            // The constructor's load runs without the persist lock, so the
+            // file could be replaced between read and stat; the identity is
+            // only ever captured under the lock, after our own write.
+            disk_identity: None,
             recovery_count: 0,
             recovery_tokens: 0,
         }
@@ -707,12 +757,24 @@ impl RecoveryStore {
             fs::create_dir_all(parent)?;
         }
         let _lock = PersistLock::acquire(recovery_lock_path(&path))?;
-        let existing =
-            load_state(&path, &self.config)?.unwrap_or_else(|| RecoveryState::empty(&self.config));
-        let current = std::mem::replace(&mut self.state, RecoveryState::empty(&self.config));
-        self.state = merge_states(existing, current, &self.session_refs, &self.config);
+        // Skip the reload+merge only when the file is byte-identical to our
+        // last write under this lock: in-memory state is then a superset of
+        // disk and authoritative. Any mismatch — another process persisted,
+        // the file vanished, metadata is unreadable — falls back to the full
+        // merge so multi-process semantics are preserved exactly.
+        let unchanged_since_last_write = self
+            .disk_identity
+            .is_some_and(|identity| DiskIdentity::capture(&path) == Some(identity));
+        if !unchanged_since_last_write {
+            let existing = load_state(&path, &self.config)?
+                .unwrap_or_else(|| RecoveryState::empty(&self.config));
+            let current = std::mem::replace(&mut self.state, RecoveryState::empty(&self.config));
+            self.state = merge_states(existing, current, &self.session_refs, &self.config);
+        }
         self.evict();
+        self.disk_identity = None;
         atomic_write_json(&path, &self.state)?;
+        self.disk_identity = DiskIdentity::capture(&path);
         self.session_refs.clear();
         Ok(())
     }

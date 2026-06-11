@@ -199,6 +199,75 @@ fn concurrent_persistence_preserves_all_thread_payloads() {
 }
 
 #[test]
+fn alternating_writers_on_one_cache_path_still_merge() {
+    // Two live stores on the same cache file: each persist by one store
+    // changes the file identity the other captured, so the other's next
+    // persist must detect the foreign write and take the reload+merge path.
+    // Skipping the merge here would silently drop the peer's refs.
+    let dir = tempdir().unwrap();
+    let cache = dir.path().join("cache.json");
+    let mut left = RecoveryStore::new(Some(cache.clone()));
+    let mut right = RecoveryStore::new(Some(cache.clone()));
+
+    let mut expected = Vec::new();
+    for round in 0..4 {
+        let text = format!("left-{round}\n");
+        let stored = left
+            .store_payload(&text, ContentType::Unknown, None, None, None)
+            .unwrap();
+        expected.push((stored.blob_ref, text));
+        let text = format!("right-{round}\n");
+        let stored = right
+            .store_payload(&text, ContentType::Unknown, None, None, None)
+            .unwrap();
+        expected.push((stored.blob_ref, text));
+    }
+
+    // One persist each picks up the peer's final round from disk.
+    left.persist_pending().unwrap();
+    right.persist_pending().unwrap();
+
+    let mut restarted = RecoveryStore::new(Some(cache));
+    for (blob_ref, text) in &expected {
+        for store in [&mut left, &mut right, &mut restarted] {
+            let expanded = store.expand(blob_ref, Some("raw"), None, None, None, None);
+            assert!(expanded.found, "missing {blob_ref}");
+            assert_eq!(&expanded.content, text);
+        }
+    }
+}
+
+#[test]
+fn single_writer_repeat_persists_skip_reload_and_stay_byte_exact() {
+    // With no foreign writes between persists, the second and later persists
+    // take the skip path (identity captured under the lock still matches);
+    // a restart must still expand every ref byte-exactly from the file the
+    // skip path wrote.
+    let dir = tempdir().unwrap();
+    let cache = dir.path().join("cache.json");
+    let mut store = RecoveryStore::new(Some(cache.clone()));
+
+    let mut expected = Vec::new();
+    for round in 0..4 {
+        let text = format!("solo-{round}\n");
+        let stored = store
+            .store_payload(&text, ContentType::Unknown, None, None, None)
+            .unwrap();
+        expected.push((stored.blob_ref, text));
+        // The skip precondition must hold between single-writer persists.
+        let identity = store.disk_identity.expect("identity captured after write");
+        assert_eq!(DiskIdentity::capture(&cache), Some(identity));
+    }
+
+    let mut restarted = RecoveryStore::new(Some(cache));
+    for (blob_ref, text) in &expected {
+        let expanded = restarted.expand(blob_ref, Some("raw"), None, None, None, None);
+        assert!(expanded.found, "missing {blob_ref}");
+        assert_eq!(&expanded.content, text);
+    }
+}
+
+#[test]
 fn persisted_cache_is_compact_json() {
     let dir = tempdir().unwrap();
     let cache = dir.path().join("cache.json");
