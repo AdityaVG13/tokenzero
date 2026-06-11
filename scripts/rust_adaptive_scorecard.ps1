@@ -19,7 +19,8 @@ function Quote-ProcessArg {
 function Invoke-TokenZeroJson {
   param(
     [string]$Name,
-    [string[]]$Arguments
+    [string[]]$Arguments,
+    [hashtable]$Environment = @{}
   )
 
   $psi = [System.Diagnostics.ProcessStartInfo]::new()
@@ -29,6 +30,9 @@ function Invoke-TokenZeroJson {
   $psi.RedirectStandardOutput = $true
   $psi.RedirectStandardError = $true
   $psi.UseShellExecute = $false
+  foreach ($key in $Environment.Keys) {
+    $psi.EnvironmentVariables[$key] = $Environment[$key]
+  }
 
   $timer = [System.Diagnostics.Stopwatch]::StartNew()
   $process = [System.Diagnostics.Process]::Start($psi)
@@ -117,7 +121,7 @@ try {
   "ok" | Out-File -Encoding utf8 $tinyReadFile
   $tinyRead = Invoke-TokenZeroJson `
     -Name "tiny read long label" `
-    -Arguments @("read", $tinyReadFile, "--max-visible-tokens", "20", "--json")
+    -Arguments @("read", $tinyReadFile, "--allowed-root", $tinyReadDir, "--max-visible-tokens", "20", "--json")
   $tinyReadRow = Accounting-Row -Case $tinyRead -Expectation "long path labels do not hide tiny payloads"
   $tinyReadRow.ok = (
     $tinyRead.exit_code -eq 0 -and
@@ -180,9 +184,12 @@ try {
     "hay" | Out-File -Encoding utf8 (Join-Path $searchDir ("a{0:D3}.txt" -f $_))
   }
   "needle" | Out-File -Encoding utf8 (Join-Path $searchDir "zmatch.txt")
+  # The internal backend reports traversal counts; rg only reports matched
+  # files, which would make the visited_files floor meaningless.
   $deepSearch = Invoke-TokenZeroJson `
     -Name "deep search traversal" `
-    -Arguments @("find", "needle", $searchDir, "--json")
+    -Arguments @("find", "needle", $searchDir, "--allowed-root", $searchDir, "--json") `
+    -Environment @{ TOKENZERO_SEARCH_BACKEND = "internal" }
   $deepSearchRow = Accounting-Row -Case $deepSearch -Expectation "search traverses beyond the visible result limit before declaring sparse output"
   $deepSearchRow.ok = (
     $deepSearch.exit_code -eq 0 -and
@@ -208,7 +215,7 @@ try {
   "alpha" | Out-File -Encoding utf8 $cacheFile
   $cacheDegrade = Invoke-TokenZeroJson `
     -Name "cache write degrade" `
-    -Arguments @("read", $cacheFile, "--cache-path", $cacheDir, "--json")
+    -Arguments @("read", $cacheFile, "--allowed-root", ([System.IO.Path]::GetTempPath()), "--cache-path", $cacheDir, "--json")
   $cacheDegradeRow = Accounting-Row -Case $cacheDegrade -Expectation "read still returns compressed output when recovery cache persistence fails"
   $cacheDegradeRow.ok = (
     $cacheDegrade.exit_code -eq 0 -and
@@ -237,8 +244,8 @@ if (![string]::IsNullOrWhiteSpace($env:USERPROFILE)) {
     $homeLines | Out-File -Encoding utf8 $homeReadFile
     $homeRead = Invoke-TokenZeroJson `
       -Name "home allowed root read" `
-      -Arguments @("read", $homeReadFile, "--max-visible-tokens", "120", "--json")
-    $homeReadRow = Accounting-Row -Case $homeRead -Expectation "default allowed roots include home and read budgets are honored"
+      -Arguments @("read", $homeReadFile, "--allowed-root", $env:USERPROFILE, "--max-visible-tokens", "120", "--json")
+    $homeReadRow = Accounting-Row -Case $homeRead -Expectation "explicit home allowed root grants reads and budgets are honored"
     $homeReadRow.ok = (
       $homeRead.exit_code -eq 0 -and
       $null -eq $homeRead.parse_error -and
@@ -248,14 +255,14 @@ if (![string]::IsNullOrWhiteSpace($env:USERPROFILE)) {
       $homeRead.json.accounting.visible_tokens -le 120
     )
     if (!$homeReadRow.ok) {
-      $failures += "home directory read was still blocked by allowed roots"
+      $failures += "home directory read failed despite an explicit home allowed root"
     }
     $cases += $homeReadRow
 
     "# home-ok`n`nmarkdown body" | Out-File -Encoding utf8 $homeMarkdownFile
     $markdownRead = Invoke-TokenZeroJson `
       -Name "markdown content type" `
-      -Arguments @("read", $homeMarkdownFile, "--json")
+      -Arguments @("read", $homeMarkdownFile, "--allowed-root", $env:USERPROFILE, "--json")
     $markdownReadRow = Accounting-Row -Case $markdownRead -Expectation "read reports detected Markdown content type"
     $markdownReadRow.ok = (
       $markdownRead.exit_code -eq 0 -and
