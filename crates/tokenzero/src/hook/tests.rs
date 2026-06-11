@@ -166,7 +166,7 @@ fn decision_preserves_sibling_tool_input_keys() {
 fn decision_passes_through_non_bash_and_malformed_payloads() {
     let non_bash = json!({
         "hook_event_name": "PreToolUse",
-        "tool_name": "Read",
+        "tool_name": "Write",
         "tool_input": {"file_path": "/tmp/x"}
     })
     .to_string();
@@ -206,6 +206,73 @@ fn guide_mode_denies_with_reason_and_no_updated_input() {
 fn guide_mode_passes_through_skip_cases() {
     assert!(claude_code_decision("guide", &bash_payload("cd /tmp"), EXE, false).is_none());
     assert!(claude_code_decision("guide", &bash_payload("vim x"), EXE, false).is_none());
+}
+
+fn read_payload(path: &str, extra: Value) -> String {
+    let mut tool_input = json!({"file_path": path});
+    if let (Some(input), Some(extra)) = (tool_input.as_object_mut(), extra.as_object()) {
+        input.extend(extra.clone());
+    }
+    json!({
+        "hook_event_name": "PreToolUse",
+        "tool_name": "Read",
+        "tool_input": tool_input,
+    })
+    .to_string()
+}
+
+fn large_file(dir: &tempfile::TempDir) -> String {
+    let path = dir.path().join("large.txt");
+    std::fs::write(&path, "x".repeat(READ_GUARD_DEFAULT_MAX_BYTES as usize + 1)).unwrap();
+    path.display().to_string()
+}
+
+#[test]
+fn read_guard_denies_unbounded_large_reads_in_both_modes() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = large_file(&dir);
+    for mode in ["rewrite", "guide"] {
+        let decision = claude_code_decision(mode, &read_payload(&path, json!({})), EXE, false)
+            .expect("large unbounded read must be denied");
+        let output = &decision["hookSpecificOutput"];
+        assert_eq!(output["permissionDecision"], "deny");
+        let reason = output["permissionDecisionReason"].as_str().unwrap();
+        assert!(reason.contains("tz_read"));
+        assert!(reason.contains("limit/offset"));
+    }
+}
+
+#[test]
+fn read_guard_passes_through_bounded_small_missing_and_disabled() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = large_file(&dir);
+    // Bounded reads stay native: Edit requires a prior native Read.
+    let bounded = read_payload(&path, json!({"limit": 100}));
+    assert!(claude_code_decision("rewrite", &bounded, EXE, false).is_none());
+    let offset_only = read_payload(&path, json!({"offset": 5000}));
+    assert!(claude_code_decision("rewrite", &offset_only, EXE, false).is_none());
+    // Small file, missing file, no-wrap opt-out, and off/unknown modes.
+    let small = dir.path().join("small.txt");
+    std::fs::write(&small, "hello").unwrap();
+    let small = read_payload(&small.display().to_string(), json!({}));
+    assert!(claude_code_decision("rewrite", &small, EXE, false).is_none());
+    let missing = read_payload(&dir.path().join("nope").display().to_string(), json!({}));
+    assert!(claude_code_decision("rewrite", &missing, EXE, false).is_none());
+    let unbounded = read_payload(&path, json!({}));
+    assert!(claude_code_decision("rewrite", &unbounded, EXE, true).is_none());
+    assert!(claude_code_decision("off", &unbounded, EXE, false).is_none());
+    assert!(claude_code_decision("rewirte", &unbounded, EXE, false).is_none());
+}
+
+#[test]
+fn read_guard_threshold_parses_env_override() {
+    assert_eq!(read_guard_threshold(None), READ_GUARD_DEFAULT_MAX_BYTES);
+    assert_eq!(
+        read_guard_threshold(Some("garbage".into())),
+        READ_GUARD_DEFAULT_MAX_BYTES
+    );
+    assert_eq!(read_guard_threshold(Some("1024".into())), 1024);
+    assert_eq!(read_guard_threshold(Some("0".into())), u64::MAX);
 }
 
 #[test]

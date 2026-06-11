@@ -103,19 +103,27 @@ fn run_claude_code_hook(mode: &str) {
 }
 
 /// Pure decision core, unit-testable without process state. Returns `None`
-/// for every pass-through (malformed payload, non-Bash tool, skip rules,
+/// for every pass-through (malformed payload, unknown tools, skip rules,
 /// `off` mode, and unknown `--mode` values — a misconfigured flag must not
 /// change Bash behavior).
 fn claude_code_decision(mode: &str, input: &str, self_exe: &str, no_wrap: bool) -> Option<Value> {
     let payload: Value = serde_json::from_str(input).ok()?;
-    if payload.get("tool_name")?.as_str()? != "Bash" {
+    let tool_name = payload.get("tool_name")?.as_str()?;
+    if no_wrap {
+        return None;
+    }
+    if tool_name == "Read" {
+        if !matches!(mode, "rewrite" | "guide") {
+            return None;
+        }
+        let threshold = read_guard_threshold(std::env::var("TOKENZERO_READ_GUARD_MAX_BYTES").ok());
+        return read_guard_decision(payload.get("tool_input")?.as_object()?, threshold);
+    }
+    if tool_name != "Bash" {
         return None;
     }
     let tool_input = payload.get("tool_input")?.as_object()?;
     let command = tool_input.get("command")?.as_str()?;
-    if no_wrap {
-        return None;
-    }
     match mode {
         "rewrite" => {
             let rewritten = rewrite_decision(command, self_exe)?;
@@ -144,6 +152,51 @@ fn claude_code_decision(mode: &str, input: &str, self_exe: &str, no_wrap: bool) 
             }))
         }
         _ => None,
+    }
+}
+
+/// Unbounded native `Read` of a large file dumps the whole body into model
+/// context with no compression and no exact ref. Deny it with a redirect to
+/// `tz_read`, while keeping every bounded read (`limit`/`offset` present)
+/// native — `Edit` requires a prior native `Read`, so slices must always
+/// pass. Fail-open like every other path: missing file, unreadable
+/// metadata, or a small file all mean `None`.
+fn read_guard_decision(
+    tool_input: &serde_json::Map<String, Value>,
+    threshold: u64,
+) -> Option<Value> {
+    if tool_input.contains_key("limit") || tool_input.contains_key("offset") {
+        return None;
+    }
+    let file_path = tool_input.get("file_path")?.as_str()?;
+    let size = std::fs::metadata(file_path).ok()?.len();
+    if size <= threshold {
+        return None;
+    }
+    Some(json!({
+        "hookSpecificOutput": {
+            "hookEventName": "PreToolUse",
+            "permissionDecision": "deny",
+            "permissionDecisionReason": format!(
+                "TokenZero routing: this file is {} KB; an unbounded Read would put roughly {} tokens in context with no recovery ref. Use tz_read on the tokenzero MCP server for a compact capsule with exact refs, or re-call Read with limit/offset for just the slice you need (a bounded native Read is always allowed, and is required before Edit).",
+                size / 1024,
+                size / 4
+            ),
+        }
+    }))
+}
+
+/// Default 64 KiB (~16k tokens raw): large enough that ordinary source
+/// files pass untouched, small enough to catch the dumps worth compacting.
+const READ_GUARD_DEFAULT_MAX_BYTES: u64 = 65536;
+
+/// `TOKENZERO_READ_GUARD_MAX_BYTES` override; `0` disables the guard
+/// entirely, and an unset or malformed value keeps the default.
+fn read_guard_threshold(value: Option<String>) -> u64 {
+    match value.as_deref().map(str::parse::<u64>) {
+        Some(Ok(0)) => u64::MAX,
+        Some(Ok(bytes)) => bytes,
+        _ => READ_GUARD_DEFAULT_MAX_BYTES,
     }
 }
 
