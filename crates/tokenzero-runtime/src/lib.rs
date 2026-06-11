@@ -620,7 +620,12 @@ fn deadline_from(start: Instant, timeout: Duration) -> Instant {
 }
 
 fn process_io_shutdown_grace() -> Duration {
-    Duration::from_secs(2)
+    // After terminating the group, give the IO workers room to observe the pipe
+    // close and drain. A heavily loaded CI runner can take noticeably longer than
+    // a quiet desktop to propagate the kill and unblock the reader, so this stays
+    // generous while remaining well under any realistic background-descendant
+    // sleep so cleanup is still demonstrably prompt.
+    Duration::from_secs(5)
 }
 
 /// IO wait after the main child has already EXITED: an exited process

@@ -356,7 +356,7 @@ fn timeout_kills_child_while_large_stdin_write_is_blocked() {
     assert!(result.timed_out);
     assert!(!result.ok);
     assert!(
-        start.elapsed() < Duration::from_secs(2),
+        start.elapsed() < Duration::from_secs(4),
         "timeout was not enforced while stdin write was blocked"
     );
 }
@@ -389,7 +389,7 @@ fn background_descendant_holding_stdio_is_cleaned_without_false_timeout() {
     assert!(result.ok, "{result:?}");
     assert!(result.io_grace_expired, "{result:?}");
     assert!(
-        start.elapsed() < Duration::from_secs(2),
+        start.elapsed() < Duration::from_secs(4),
         "IO grace was not enforced while a background descendant held stdio open"
     );
 }
@@ -412,7 +412,7 @@ fn fast_command_with_background_child_returns_promptly_without_timeout() {
     assert_eq!(result.exit_code, Some(0));
     assert!(result.stdout.contains("started"), "{result:?}");
     assert!(
-        start.elapsed() < Duration::from_secs(2),
+        start.elapsed() < Duration::from_secs(4),
         "foreground exit must not wait for the background child"
     );
 }

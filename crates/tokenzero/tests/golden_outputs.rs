@@ -369,6 +369,12 @@ fn scrub_temp_path(text: &str, temp_root: &Path) -> String {
     normalize_path(text)
         .replace(&temp, "[TMP]")
         .replace(&workspace, "[WORKSPACE]")
+        // The runtime's own binary (current_exe) carries a `.exe` suffix on
+        // Windows; normalize that workspace target path so the golden (generated
+        // on Unix) is platform-stable. Scoped to the build target path so the
+        // intentional `tokenzero.exe` command literals in the output stay intact.
+        .replace("/target/debug/tokenzero.exe", "/target/debug/tokenzero")
+        .replace("/target/release/tokenzero.exe", "/target/release/tokenzero")
 }
 
 fn normalize_path(text: &str) -> String {
