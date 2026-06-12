@@ -2933,3 +2933,51 @@ mod session_props {
         }
     }
 }
+
+#[test]
+fn prune_dead_refs_drops_evicted_handles_and_reports_incomplete() {
+    let mut store = RecoveryStore::new(None);
+    let stored = store
+        .store_payload("live payload\n", ContentType::Unknown, None, None, None)
+        .unwrap();
+
+    let mut refs = vec![
+        ref_record("blob", stored.blob_ref.clone(), 13),
+        ref_record("blob", "tz://blob/bdeadbeefdeadbeef".to_string(), 99),
+    ];
+    assert!(
+        !prune_dead_refs(&store, &mut refs),
+        "a dead ref must be reported"
+    );
+    assert_eq!(refs.len(), 1);
+    assert_eq!(refs[0].ref_id, stored.blob_ref);
+
+    let mut live_only = vec![ref_record("blob", stored.blob_ref.clone(), 13)];
+    assert!(prune_dead_refs(&store, &mut live_only));
+    assert_eq!(live_only.len(), 1);
+}
+
+#[test]
+fn response_never_advertises_a_ref_evicted_during_its_own_persist() {
+    // A payload larger than the cache budget is evicted by the persist that
+    // the serving call itself runs; the advertised refs must disappear with
+    // it rather than dangle.
+    let config = tokenzero_recovery::RecoveryConfig {
+        max_bytes: 64,
+        ..tokenzero_recovery::RecoveryConfig::default()
+    };
+    let mut store = RecoveryStore::with_config(None, config);
+    let oversized = "x".repeat(4096);
+    let stored = store.store_payload_deferred(&oversized, ContentType::Unknown, None, None, None);
+    store.persist_pending().unwrap();
+
+    let mut refs = vec![
+        ref_record("blob", stored.blob_ref.clone(), oversized.len()),
+        ref_record("file", stored.file_ref.clone(), oversized.len()),
+    ];
+    assert!(!prune_dead_refs(&store, &mut refs));
+    assert!(
+        refs.is_empty(),
+        "refs evicted by the persist must not be advertised"
+    );
+}

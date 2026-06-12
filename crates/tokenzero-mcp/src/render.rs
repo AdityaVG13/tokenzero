@@ -51,6 +51,19 @@ pub(crate) fn exact_ref_token_count(refs: &[tokenzero_core::RefRecord]) -> usize
     refs.iter().map(|record| count_tokens(&record.ref_id)).sum()
 }
 
+/// Re-verify advertised refs after a persist: the persist's cache merge can
+/// evict entries under byte/count pressure (including refs stored earlier in
+/// the same call), and a response must never advertise a ref that can no
+/// longer be expanded. Returns true when every ref survived.
+pub(crate) fn prune_dead_refs(
+    store: &RecoveryStore,
+    refs: &mut Vec<tokenzero_core::RefRecord>,
+) -> bool {
+    let before = refs.len();
+    refs.retain(|record| store.has_ref(&record.ref_id));
+    refs.len() == before
+}
+
 pub(crate) struct AppliedEdits {
     pub(crate) text: String,
     pub(crate) diff: String,

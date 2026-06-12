@@ -449,10 +449,12 @@ impl TokenZeroEngine {
                 refs.clear();
             }
         }
+        let refs_complete = prune_dead_refs(&store, &mut refs);
         // Dedup/diff notes advertise refs in place of content: apply them
-        // only when persistence succeeded. Degraded storage always serves
-        // full — the bytes are in the text, which is unconditionally safe.
-        if storage_errors.is_empty() {
+        // only when persistence succeeded AND every ref survived eviction.
+        // Degraded storage always serves full — the bytes are in the text,
+        // which is unconditionally safe.
+        if storage_errors.is_empty() && refs_complete {
             for substitution in substitutions {
                 match substitution {
                     PendingSubstitution::Dedup {
@@ -513,8 +515,9 @@ impl TokenZeroEngine {
         if let Some(extra) = summary.telemetry() {
             merge_telemetry(&mut response, extra);
         }
-        // A serve whose refs failed to persist must not become a dedup base.
-        if storage_errors.is_empty() {
+        // A serve whose refs failed to persist (or were evicted before the
+        // response returned) must not become a dedup base.
+        if storage_errors.is_empty() && refs_complete {
             self.session_apply(pending, &summary);
         }
         // Raw reads keep the verbatim slice contract even when it is empty;
@@ -656,6 +659,7 @@ impl TokenZeroEngine {
             }
             Err(err) => storage_error = Some(err.to_string()),
         }
+        let refs_complete = prune_dead_refs(&store, &mut refs);
         if !dry_run {
             if let Err(err) = write_atomic(path, applied.text.as_bytes()) {
                 return ToolResponse::error(
@@ -670,7 +674,11 @@ impl TokenZeroEngine {
             // re-paying the hunks as a diff. Same persistence rule as
             // read/search serves: refs that failed to persist never become a
             // dedup base.
-            if storage_error.is_none() && self.config.session_dedup && !applied.text.is_empty() {
+            if storage_error.is_none()
+                && refs_complete
+                && self.config.session_dedup
+                && !applied.text.is_empty()
+            {
                 self.session_apply(
                     vec![(
                         ServeKey::File {
@@ -773,6 +781,7 @@ impl TokenZeroEngine {
                 storage_error = Some(err.to_string());
             }
         }
+        prune_dead_refs(&store, &mut refs);
         let exact_ref_tokens = exact_ref_token_count(&refs);
         let mut response = ToolResponse::ok(
             "ingest",
@@ -1005,6 +1014,7 @@ impl TokenZeroEngine {
             }
             Err(err) => storage_error = Some(err.to_string()),
         }
+        let refs_complete = prune_dead_refs(&store, &mut refs);
         let exact_ref_tokens = exact_ref_token_count(&refs);
         let exact_refs_available = !refs.is_empty();
         let capsule = make_capsule_with_raw_tokens(
@@ -1025,7 +1035,11 @@ impl TokenZeroEngine {
         // results are never diffed. Skipped entirely when this call's refs
         // failed to persist: a note must never advertise unrecoverable refs,
         // and a serve whose refs died must not become a dedup base.
-        if self.config.session_dedup && !output.is_empty() && storage_error.is_none() {
+        if self.config.session_dedup
+            && !output.is_empty()
+            && storage_error.is_none()
+            && refs_complete
+        {
             let mut canonical_roots: Vec<PathBuf> =
                 roots.iter().map(|root| comparable_path(root)).collect();
             canonical_roots.sort();
@@ -1447,7 +1461,7 @@ impl TokenZeroEngine {
         if let Err(err) = store.persist_pending() {
             return degraded_shell_response(command, mode, &output, err.to_string());
         }
-        let refs = vec![
+        let mut refs = vec![
             ref_record(
                 "stdout",
                 stdout_stored.blob_ref.clone(),
@@ -1465,6 +1479,7 @@ impl TokenZeroEngine {
                 capture_text.len(),
             ),
         ];
+        prune_dead_refs(&store, &mut refs);
         let raw_tokens = count_tokens(&output);
         let visible_tokens = count_tokens(&render.visible);
         let mut response = ToolResponse::ok(
@@ -1791,7 +1806,10 @@ impl TokenZeroEngine {
             }
             Err(err) => storage_error = Some(err.to_string()),
         }
-        if !cache_hit && storage_error.is_none() {
+        let refs_complete = prune_dead_refs(&store, &mut refs);
+        // An evicted blob must not enter the fetch index: a later cache hit
+        // would advertise a ref that cannot be expanded.
+        if !cache_hit && storage_error.is_none() && refs_complete {
             record_fetch(index_path, url, &stored.blob_ref, body.len());
         }
         let capsule = make_capsule_with_raw_tokens(
@@ -1945,6 +1963,16 @@ impl TokenZeroEngine {
                 Some("fix recovery cache permissions".to_string()),
             );
         }
+        // The manifest embeds these refs; if eviction dropped either during
+        // the persist, fail loud instead of publishing dead handles.
+        if !store.has_ref(&stable_stored.blob_ref) || !store.has_ref(&volatile_stored.blob_ref) {
+            return ToolResponse::error(
+                "cache-pack",
+                "cache_evicted",
+                "cache pack payload was evicted from the recovery cache before it could be advertised",
+                Some("increase recovery cache max_bytes or reduce the pack scope".to_string()),
+            );
+        }
         let cacheable_tokens = count_tokens(&stable_text);
         let volatile_tokens = count_tokens(&volatile_text);
         let invalidation_count = if invalidation_reason == "unchanged" {
@@ -2074,6 +2102,7 @@ impl TokenZeroEngine {
             }
             Err(err) => storage_error = Some(err.to_string()),
         }
+        prune_dead_refs(&store, &mut refs);
         let exact_ref_tokens = exact_ref_token_count(&refs);
         let capsule = match rendered {
             Some(text) => make_capsule_with_raw_tokens(
