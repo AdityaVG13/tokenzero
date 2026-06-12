@@ -421,6 +421,13 @@ fn recover_child(
         // every individual spawn succeeds.
         *consecutive_failures += 1;
     }
+    // The message that never reached the dead child will be re-sent and
+    // answered for real, so it must NOT also get a retryable error here:
+    // emitting both would hand the client two replies for one id (a protocol
+    // violation strict clients tear the session down over). Pull its ids out
+    // of the outstanding set first, preserving their original framing for the
+    // resend below.
+    let resend_framing = take_resend_framing(pending_resend.as_deref(), outstanding);
     for (key, framed) in outstanding.drain() {
         let id = serde_json::from_str::<Value>(&key).unwrap_or(Value::Null);
         let response = jsonrpc_error(
@@ -449,7 +456,7 @@ fn recover_child(
     };
     *child = new_child;
     if let Some(line) = pending_resend.take() {
-        track_resend_framing(&line, outstanding);
+        reinstate_resend_framing(&line, &resend_framing, outstanding);
         if write_child_line(child, &line).is_err() {
             *pending_resend = Some(line);
             return recover_child(
@@ -470,18 +477,48 @@ fn recover_child(
     true
 }
 
-/// Re-registers a re-sent message's ids; framing was already recorded when it
-/// first arrived, but the crash recovery drained the outstanding set.
-fn track_resend_framing(line: &str, outstanding: &mut HashMap<String, bool>) {
-    let mut cached_initialize = None;
-    let mut cached_initialized = None;
-    track_client_message(
-        line,
-        false,
-        &mut cached_initialize,
-        &mut cached_initialized,
-        outstanding,
-    );
+/// Removes the resent message's ids from the outstanding set (so the failover
+/// drain does not emit a retryable error for them) and returns their original
+/// framing, keyed by id, for re-registration when the message is resent.
+fn take_resend_framing(
+    pending_resend: Option<&str>,
+    outstanding: &mut HashMap<String, bool>,
+) -> HashMap<String, bool> {
+    match pending_resend {
+        Some(line) => message_id_keys(line)
+            .into_iter()
+            .filter_map(|key| outstanding.remove(&key).map(|framed| (key, framed)))
+            .collect(),
+        None => HashMap::new(),
+    }
+}
+
+/// Every request id carried by a (possibly batched) client message.
+fn message_id_keys(line: &str) -> Vec<String> {
+    let Ok(parsed) = serde_json::from_str::<Value>(line) else {
+        return Vec::new();
+    };
+    match &parsed {
+        Value::Array(batch) => batch
+            .iter()
+            .filter_map(|item| id_key(item.get("id")))
+            .collect(),
+        value => id_key(value.get("id")).into_iter().collect(),
+    }
+}
+
+/// Re-registers a re-sent message's ids ahead of writing it to the new child,
+/// restoring the framing each id arrived with so the eventual response is
+/// framed the way the client expects.
+fn reinstate_resend_framing(
+    line: &str,
+    resend_framing: &HashMap<String, bool>,
+    outstanding: &mut HashMap<String, bool>,
+) {
+    for key in message_id_keys(line) {
+        let framed = resend_framing.get(&key).copied().unwrap_or(false);
+        outstanding.insert(key, framed);
+    }
 }
 
 fn start_child(
