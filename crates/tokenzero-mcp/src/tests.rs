@@ -2580,6 +2580,8 @@ fn fetch_caches_within_ttl_and_refetches_when_fresh() {
     fs::set_permissions(&fake_curl, fs::Permissions::from_mode(0o755)).unwrap();
     let mut config = EngineConfig::for_root(dir.path());
     config.curl_path_override = Some(fake_curl);
+    config.fetch_enabled = true;
+    config.fetch_allow_hosts = vec!["example.com".to_string()];
     let engine = TokenZeroEngine::new(config);
 
     let first = engine.fetch("https://example.com/doc", None, false, Mode::Auto, 4000);
@@ -2620,7 +2622,9 @@ fn fetch_caches_within_ttl_and_refetches_when_fresh() {
 #[test]
 fn fetch_rejects_non_http_and_reports_curl_failures() {
     let dir = tempdir().unwrap();
-    let engine = TokenZeroEngine::new(EngineConfig::for_root(dir.path()));
+    let mut config = EngineConfig::for_root(dir.path());
+    config.fetch_enabled = true;
+    let engine = TokenZeroEngine::new(config);
     let bad = engine.fetch("file:///etc/passwd", None, false, Mode::Auto, 4000);
     assert_eq!(bad.error.as_ref().unwrap().code, "invalid_url");
 
@@ -2636,6 +2640,8 @@ fn fetch_rejects_non_http_and_reports_curl_failures() {
         fs::set_permissions(&failing, fs::Permissions::from_mode(0o755)).unwrap();
         let mut config = EngineConfig::for_root(dir.path());
         config.curl_path_override = Some(failing);
+        config.fetch_enabled = true;
+        config.fetch_allow_hosts = vec!["nope.invalid".to_string()];
         let engine = TokenZeroEngine::new(config);
         let response = engine.fetch("https://nope.invalid/x", None, false, Mode::Auto, 4000);
         let error = response.error.as_ref().unwrap();
@@ -2645,6 +2651,56 @@ fn fetch_rejects_non_http_and_reports_curl_failures() {
             "{error:?}"
         );
     }
+}
+
+#[test]
+fn fetch_is_disabled_by_default() {
+    let dir = tempdir().unwrap();
+    let engine = TokenZeroEngine::new(EngineConfig {
+        fetch_enabled: false,
+        ..EngineConfig::for_root(dir.path())
+    });
+    let response = engine.fetch("https://example.com/", None, false, Mode::Auto, 4000);
+    let error = response.error.as_ref().unwrap();
+    assert_eq!(error.code, "fetch_disabled");
+}
+
+#[cfg(unix)]
+#[test]
+fn fetch_blocks_internal_targets_before_any_network_call() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = tempdir().unwrap();
+    let fake_curl = dir.path().join("fake-curl");
+    let marker = dir.path().join("invocations.log");
+    fs::write(
+        &fake_curl,
+        format!(
+            "#!/bin/sh\necho invoked >> {}\nprintf 'body'\n",
+            marker.display()
+        ),
+    )
+    .unwrap();
+    fs::set_permissions(&fake_curl, fs::Permissions::from_mode(0o755)).unwrap();
+    let mut config = EngineConfig::for_root(dir.path());
+    config.curl_path_override = Some(fake_curl);
+    config.fetch_enabled = true;
+    let engine = TokenZeroEngine::new(config);
+
+    for url in [
+        "http://169.254.169.254/latest/meta-data/",
+        "http://127.0.0.1:8080/admin",
+        "http://10.0.0.5/",
+        "http://localhost:9999/",
+    ] {
+        let response = engine.fetch(url, None, false, Mode::Auto, 4000);
+        let error = response.error.as_ref().unwrap();
+        assert_eq!(error.code, "fetch_blocked", "{url}");
+    }
+    assert!(
+        !marker.exists(),
+        "curl must never be invoked for blocked targets"
+    );
 }
 
 #[test]

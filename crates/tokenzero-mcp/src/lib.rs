@@ -2,6 +2,7 @@
 
 mod catalog;
 mod diff;
+mod fetch_guard;
 mod jsonrpc;
 mod recall;
 mod resources;
@@ -15,6 +16,7 @@ pub use jsonrpc::handle_jsonrpc;
 pub use stdio::run_stdio;
 pub use supervisor::run_supervised_stdio;
 
+use fetch_guard::{FETCH_META_MARKER, split_fetch_meta, validate_fetch_target};
 use globset::{GlobBuilder, GlobMatcher};
 pub(crate) use jsonrpc::{JsonRpcErrorData, handle_jsonrpc_value, jsonrpc_error};
 pub(crate) use resources::read_resource;
@@ -106,6 +108,14 @@ pub struct EngineConfig {
     /// Explicit curl binary for `tz_fetch` (`TOKENZERO_CURL_PATH`); tests set
     /// this field directly instead of mutating process-global env.
     pub curl_path_override: Option<PathBuf>,
+    /// `tz_fetch` network access is off by default (SSRF surface); opt in
+    /// with `TOKENZERO_FETCH=on`. Tests set this field directly.
+    pub fetch_enabled: bool,
+    /// Hosts (suffix match) explicitly trusted for fetch; they bypass the
+    /// post-DNS IP checks. From `TOKENZERO_FETCH_ALLOW`, comma-separated.
+    pub fetch_allow_hosts: Vec<String>,
+    /// Hosts (suffix match) always refused. From `TOKENZERO_FETCH_DENY`.
+    pub fetch_deny_hosts: Vec<String>,
 }
 
 impl EngineConfig {
@@ -125,8 +135,35 @@ impl EngineConfig {
             session_dedup: session_dedup_default(),
             diff_reads: diff_reads_default(),
             curl_path_override: std::env::var_os(CURL_PATH_ENV).map(PathBuf::from),
+            fetch_enabled: env_opt_in(FETCH_ENABLED_ENV),
+            fetch_allow_hosts: env_host_list(FETCH_ALLOW_ENV),
+            fetch_deny_hosts: env_host_list(FETCH_DENY_ENV),
         }
     }
+}
+
+pub const FETCH_ENABLED_ENV: &str = "TOKENZERO_FETCH";
+pub const FETCH_ALLOW_ENV: &str = "TOKENZERO_FETCH_ALLOW";
+pub const FETCH_DENY_ENV: &str = "TOKENZERO_FETCH_DENY";
+
+/// Opt-in toggle parse: only `1`/`on`/`true`/`yes` (case-insensitive) enable.
+fn env_opt_in(name: &str) -> bool {
+    match std::env::var(name) {
+        Ok(value) => matches!(
+            value.trim().to_ascii_lowercase().as_str(),
+            "1" | "on" | "true" | "yes"
+        ),
+        Err(_) => false,
+    }
+}
+
+fn env_host_list(name: &str) -> Vec<String> {
+    std::env::var(name)
+        .unwrap_or_default()
+        .split(',')
+        .map(|entry| entry.trim().to_ascii_lowercase())
+        .filter(|entry| !entry.is_empty())
+        .collect()
 }
 
 const CURL_PATH_ENV: &str = "TOKENZERO_CURL_PATH";
@@ -1710,6 +1747,16 @@ impl TokenZeroEngine {
                 None,
             );
         }
+        if !self.config.fetch_enabled {
+            return ToolResponse::error(
+                "fetch",
+                "fetch_disabled",
+                "network fetches are disabled by default",
+                Some(format!(
+                    "set {FETCH_ENABLED_ENV}=on (optionally {FETCH_ALLOW_ENV}=host1,host2) to enable"
+                )),
+            );
+        }
         let ttl_secs = ttl_seconds.unwrap_or(24 * 60 * 60) as u64;
         let index_path = fetch_index_path(&self.config.cache_path);
         if !fresh {
@@ -1739,53 +1786,99 @@ impl TokenZeroEngine {
             .curl_path_override
             .clone()
             .unwrap_or_else(|| PathBuf::from("curl"));
-        let argv: Vec<String> = vec![
-            curl.display().to_string(),
-            "-sS".to_string(),
-            "-L".to_string(),
-            "--max-time".to_string(),
-            "30".to_string(),
-            url.to_string(),
-        ];
-        let mut child_env = BTreeMap::new();
-        child_env.insert("TOKENZERO_INNER".to_string(), "1".to_string());
-        let output_policy = RunOutputPolicy {
-            per_stream_capture_bytes: self.config.shell_capture_bytes,
-            spill_threshold_bytes: self.config.shell_spill_bytes,
-            spill_dir: Some(shell_spill_dir(&self.config.cache_path)),
-        }
-        .normalized();
-        let result = match run_command_with_policy(
-            &argv,
-            None,
-            Some(&child_env),
-            None,
-            Duration::from_secs(45),
-            false,
-            output_policy,
-        ) {
-            Ok(result) => result,
-            Err(err) => {
+        // Redirects are followed manually so every hop's target is validated
+        // (and pinned) like the entry URL — a redirect to an internal address
+        // is the classic SSRF bypass.
+        const MAX_FETCH_REDIRECTS: usize = 5;
+        let mut current_url = url.to_string();
+        let mut redirect_hops = 0usize;
+        let body = loop {
+            let target = match validate_fetch_target(
+                &current_url,
+                &self.config.fetch_allow_hosts,
+                &self.config.fetch_deny_hosts,
+            ) {
+                Ok(target) => target,
+                Err(blocked) => {
+                    return ToolResponse::error(
+                        "fetch",
+                        blocked.code,
+                        blocked.message,
+                        blocked.repair,
+                    );
+                }
+            };
+            let mut argv: Vec<String> = vec![
+                curl.display().to_string(),
+                "-sS".to_string(),
+                "--max-time".to_string(),
+                "30".to_string(),
+                "--proto".to_string(),
+                "=http,https".to_string(),
+                "-w".to_string(),
+                format!("\n{FETCH_META_MARKER} %{{http_code}} %{{redirect_url}}"),
+            ];
+            if let Some(ip) = target.pinned_ip {
+                argv.push("--resolve".to_string());
+                argv.push(format!("{}:{}:{}", target.host, target.port, ip));
+            }
+            argv.push(current_url.clone());
+            let mut child_env = BTreeMap::new();
+            child_env.insert("TOKENZERO_INNER".to_string(), "1".to_string());
+            let output_policy = RunOutputPolicy {
+                per_stream_capture_bytes: self.config.shell_capture_bytes,
+                spill_threshold_bytes: self.config.shell_spill_bytes,
+                spill_dir: Some(shell_spill_dir(&self.config.cache_path)),
+            }
+            .normalized();
+            let result = match run_command_with_policy(
+                &argv,
+                None,
+                Some(&child_env),
+                None,
+                Duration::from_secs(45),
+                false,
+                output_policy,
+            ) {
+                Ok(result) => result,
+                Err(err) => {
+                    return ToolResponse::error(
+                        "fetch",
+                        "fetch_failed",
+                        format!("could not run curl: {err}"),
+                        Some("install curl or set TOKENZERO_CURL_PATH".to_string()),
+                    );
+                }
+            };
+            if !result.ok || result.exit_code != Some(0) {
+                let stderr: String = result.stderr.trim().chars().take(300).collect();
                 return ToolResponse::error(
                     "fetch",
                     "fetch_failed",
-                    format!("could not run curl: {err}"),
-                    Some("install curl or set TOKENZERO_CURL_PATH".to_string()),
+                    format!("curl exited with {:?}: {stderr}", result.exit_code),
+                    Some("check the URL and network access".to_string()),
                 );
             }
+            let (body, http_code, redirect_url) = split_fetch_meta(&result.stdout);
+            match (http_code, redirect_url) {
+                (Some(code), Some(next)) if (300..400).contains(&code) => {
+                    redirect_hops += 1;
+                    if redirect_hops > MAX_FETCH_REDIRECTS {
+                        return ToolResponse::error(
+                            "fetch",
+                            "too_many_redirects",
+                            format!("more than {MAX_FETCH_REDIRECTS} redirects from {url}"),
+                            None,
+                        );
+                    }
+                    current_url = next;
+                }
+                _ => break body,
+            }
         };
-        if !result.ok || result.exit_code != Some(0) {
-            let stderr: String = result.stderr.trim().chars().take(300).collect();
-            return ToolResponse::error(
-                "fetch",
-                "fetch_failed",
-                format!("curl exited with {:?}: {stderr}", result.exit_code),
-                Some("check the URL and network access".to_string()),
-            );
-        }
         self.fetch_response(
             url,
-            &result.stdout,
+            &body,
             mode,
             max_visible_tokens,
             false,
