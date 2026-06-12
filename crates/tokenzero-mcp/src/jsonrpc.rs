@@ -304,7 +304,12 @@ fn handle_jsonrpc_request(engine: &TokenZeroEngine, parsed: Value) -> Option<Val
                 Ok(args) => args,
                 Err(error) => return Some(error),
             };
-            match call_tool(engine, name, &args) {
+            let call_id = match &id {
+                Value::Null => None,
+                Value::String(text) => Some(text.clone()),
+                other => Some(other.to_string()),
+            };
+            match call_tool(engine, name, &args, call_id) {
                 Ok(value) => value,
                 Err(error) => {
                     return Some(jsonrpc_invalid_params_error(id, error));

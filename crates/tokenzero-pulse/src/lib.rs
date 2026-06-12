@@ -32,6 +32,17 @@ pub struct PulseEvent {
     pub exact_ref_count: usize,
     pub latency_ms: u128,
     pub source_hash: Option<String>,
+    /// Stable id of the serving session (e.g. one MCP server session), so
+    /// expand-time recovery can be attributed back to the original serve.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
+    /// Id of the individual call within the session (e.g. JSON-RPC id).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub call_id: Option<String>,
+    /// tz:// refs advertised by a serve, or the ref expanded by an expand
+    /// call — the join key between the two sides of RACC accounting.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub ref_ids: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -118,7 +129,23 @@ impl PulseEvent {
             exact_ref_count,
             latency_ms,
             source_hash: source_hint.map(hash_hint),
+            session_id: None,
+            call_id: None,
+            ref_ids: Vec::new(),
         }
+    }
+
+    /// Attach attribution ids to an event (builder style).
+    pub fn with_attribution(
+        mut self,
+        session_id: Option<String>,
+        call_id: Option<String>,
+        ref_ids: Vec<String>,
+    ) -> Self {
+        self.session_id = session_id;
+        self.call_id = call_id;
+        self.ref_ids = ref_ids;
+        self
     }
 
     pub fn expand_call(ref_kind: &str, tokens: usize, found: bool, latency_ms: u128) -> Self {
@@ -138,6 +165,9 @@ impl PulseEvent {
             exact_ref_count: 0,
             latency_ms,
             source_hash: None,
+            session_id: None,
+            call_id: None,
+            ref_ids: Vec::new(),
         }
     }
 }
@@ -393,6 +423,22 @@ fn remove_sqlite_cache_files(path: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
+/// JSON-encode ref ids for the sqlite sidecar; NULL when empty.
+fn ref_ids_to_column(ref_ids: &[String]) -> std::io::Result<Option<String>> {
+    if ref_ids.is_empty() {
+        Ok(None)
+    } else {
+        serde_json::to_string(ref_ids).map(Some).map_err(io_other)
+    }
+}
+
+fn ref_ids_from_column(column: Option<String>) -> Vec<String> {
+    column
+        .as_deref()
+        .and_then(|text| serde_json::from_str(text).ok())
+        .unwrap_or_default()
+}
+
 fn sqlite_sidecar_path(path: &Path, suffix: &str) -> PathBuf {
     let mut target = path.as_os_str().to_os_string();
     target.push(suffix);
@@ -419,6 +465,9 @@ fn init_sqlite(conn: &Connection) -> std::io::Result<()> {
             exact_ref_count INTEGER NOT NULL,
             latency_ms INTEGER NOT NULL,
             source_hash TEXT,
+            session_id TEXT,
+            call_id TEXT,
+            ref_ids TEXT,
             record_hash TEXT NOT NULL
         );
         CREATE TABLE IF NOT EXISTS meta (
@@ -432,6 +481,16 @@ fn init_sqlite(conn: &Connection) -> std::io::Result<()> {
         ",
     )
     .map_err(sqlite_error)?;
+    // Self-migration for sidecars created before the attribution columns
+    // existed. The events table is rebuilt from JSONL on every sync, so
+    // adding the columns is sufficient; an error means they already exist.
+    for ddl in [
+        "ALTER TABLE events ADD COLUMN session_id TEXT",
+        "ALTER TABLE events ADD COLUMN call_id TEXT",
+        "ALTER TABLE events ADD COLUMN ref_ids TEXT",
+    ] {
+        let _ = conn.execute(ddl, []);
+    }
     Ok(())
 }
 
@@ -456,8 +515,8 @@ fn write_sqlite_events_from_jsonl(
                     line_no, schema_version, event, timestamp_unix, tool, mode,
                     raw_tokens, visible_tokens, recovery_tokens, task_lossless,
                     cache_hit, retry_count, failure, exact_ref_count, latency_ms,
-                    source_hash, record_hash
-                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)
+                    source_hash, session_id, call_id, ref_ids, record_hash
+                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20)
                 ",
             )
             .map_err(sqlite_error)?;
@@ -481,6 +540,9 @@ fn write_sqlite_events_from_jsonl(
                 clamp_i64(event.exact_ref_count),
                 clamp_u128_i64(event.latency_ms),
                 event.source_hash.as_deref(),
+                event.session_id.as_deref(),
+                event.call_id.as_deref(),
+                ref_ids_to_column(&event.ref_ids)?,
                 hash_event(event)?,
             ])
             .map_err(sqlite_error)?;
@@ -719,7 +781,7 @@ fn atomic_export_sqlite_jsonl(sqlite_path: &Path, output: &Path) -> std::io::Res
             SELECT schema_version, event, timestamp_unix, tool, mode,
                    raw_tokens, visible_tokens, recovery_tokens, task_lossless,
                    cache_hit, retry_count, failure, exact_ref_count, latency_ms,
-                   source_hash
+                   source_hash, session_id, call_id, ref_ids
             FROM events
             ORDER BY line_no ASC
             ",
@@ -745,6 +807,9 @@ fn atomic_export_sqlite_jsonl(sqlite_path: &Path, output: &Path) -> std::io::Res
                     exact_ref_count: i64_usize(row.get(12)?),
                     latency_ms: i64_u128(row.get(13)?),
                     source_hash: row.get(14)?,
+                    session_id: row.get(15)?,
+                    call_id: row.get(16)?,
+                    ref_ids: ref_ids_from_column(row.get(17)?),
                 })
             })
             .map_err(sqlite_error)?;

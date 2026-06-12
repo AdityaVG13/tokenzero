@@ -15,7 +15,7 @@ fn batch_combines_ops_with_sections_and_unioned_refs() {
         ]
     });
 
-    let result = call_tool(&engine, "batch", &args).unwrap();
+    let result = call_tool(&engine, "batch", &args, None).unwrap();
     let text = result["content"][0]["text"].as_str().unwrap();
     assert!(text.contains("## 1 read"), "{text}");
     assert!(text.contains("alpha contents"), "{text}");
@@ -37,12 +37,12 @@ fn batch_ops_accept_json_encoded_string_and_reject_empty() {
         .unwrap()
     });
 
-    let result = call_tool(&engine, "tz_batch", &stringly).unwrap();
+    let result = call_tool(&engine, "tz_batch", &stringly, None).unwrap();
     let text = result["content"][0]["text"].as_str().unwrap();
     assert!(text.contains("alpha contents"), "{text}");
 
-    assert!(call_tool(&engine, "batch", &json!({"ops": []})).is_err());
-    assert!(call_tool(&engine, "batch", &json!({})).is_err());
+    assert!(call_tool(&engine, "batch", &json!({"ops": []}), None).is_err());
+    assert!(call_tool(&engine, "batch", &json!({}), None).is_err());
 }
 
 #[test]

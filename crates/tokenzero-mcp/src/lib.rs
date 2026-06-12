@@ -135,6 +135,14 @@ pub(crate) fn session_dedup_default() -> bool {
     env_toggle_enabled(SESSION_DEDUP_ENV)
 }
 
+fn new_session_id() -> String {
+    let nanos = SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_nanos())
+        .unwrap_or_default();
+    format!("tz-{}-{nanos:x}", std::process::id())
+}
+
 pub(crate) fn diff_reads_default() -> bool {
     env_toggle_enabled(DIFF_READS_ENV)
 }
@@ -209,6 +217,9 @@ pub struct TokenZeroEngine {
     /// Session-lifetime seen-set for the redundancy layer (docs/routing.md
     /// §5). In-memory only; dies with the server process by design.
     session: Mutex<SessionMemory>,
+    /// Stable id for Pulse attribution of every call this engine serves
+    /// (one engine per MCP session or CLI command).
+    session_id: String,
 }
 
 impl TokenZeroEngine {
@@ -221,7 +232,12 @@ impl TokenZeroEngine {
             config,
             rg_binary: OnceLock::new(),
             session: Mutex::new(SessionMemory::default()),
+            session_id: new_session_id(),
         }
+    }
+
+    pub fn session_id(&self) -> &str {
+        &self.session_id
     }
 
     /// Fail-open lookup: a poisoned session mutex reads as a miss (full

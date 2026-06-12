@@ -1527,7 +1527,7 @@ fn shell_accepts_common_command_argument_aliases() {
         json!({"args": ["echo", "one", "&&", "echo", "two"]}),
         json!(["echo", "array"]),
     ] {
-        let response = call_tool(&engine, "shell", &args).unwrap();
+        let response = call_tool(&engine, "shell", &args, None).unwrap();
         assert!(
             response.get("isError").is_none(),
             "alias args must execute successfully: {response}"
@@ -2932,6 +2932,64 @@ mod session_props {
             );
         }
     }
+}
+
+#[test]
+fn mcp_tool_calls_are_pulse_accounted_with_attribution() {
+    let dir = tempdir().unwrap();
+    let file = dir.path().join("sample.txt");
+    fs::write(&file, "line one\nline two\n").unwrap();
+    let engine = TokenZeroEngine::new(EngineConfig::for_root(dir.path()));
+
+    let read_request = serde_json::json!({
+        "jsonrpc": "2.0", "id": 7, "method": "tools/call",
+        "params": {"name": "tz_read", "arguments": {"path": file.display().to_string()}}
+    });
+    let read_response = handle_jsonrpc(&engine, &read_request.to_string()).unwrap();
+    let parsed: serde_json::Value = serde_json::from_str(&read_response).unwrap();
+    let text = parsed["result"]["content"][0]["text"].as_str().unwrap();
+    let ref_id = text
+        .split_whitespace()
+        .find(|word| word.starts_with("tz://blob/"))
+        .expect("read response advertises a blob ref")
+        .to_string();
+
+    let expand_request = serde_json::json!({
+        "jsonrpc": "2.0", "id": "call-8", "method": "tools/call",
+        "params": {"name": "tz_expand", "arguments": {"ref": ref_id}}
+    });
+    handle_jsonrpc(&engine, &expand_request.to_string()).unwrap();
+
+    let ledger = tokenzero_pulse::default_ledger_path(dir.path());
+    let lines: Vec<tokenzero_pulse::PulseEvent> = fs::read_to_string(&ledger)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    assert_eq!(lines.len(), 2, "one event per tools/call");
+
+    let read_event = &lines[0];
+    assert_eq!(read_event.tool, "read");
+    assert_eq!(read_event.session_id.as_deref(), Some(engine.session_id()));
+    assert_eq!(read_event.call_id.as_deref(), Some("7"));
+    assert!(read_event.ref_ids.contains(&ref_id));
+    assert!(read_event.raw_tokens > 0);
+
+    let expand_event = &lines[1];
+    assert_eq!(expand_event.tool, "expand");
+    assert_eq!(expand_event.call_id.as_deref(), Some("call-8"));
+    assert_eq!(
+        expand_event.session_id.as_deref(),
+        Some(engine.session_id())
+    );
+    assert!(
+        expand_event.ref_ids.contains(&ref_id),
+        "expand event must carry the expanded ref for attribution"
+    );
+    assert!(
+        expand_event.recovery_tokens > 0,
+        "recovery tokens must be charged on the MCP surface"
+    );
 }
 
 #[test]

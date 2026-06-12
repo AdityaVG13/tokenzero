@@ -1267,6 +1267,7 @@ dependencies = [
  "thiserror",
  "tokenzero-core",
  "tokenzero-filters",
+ "tokenzero-pulse",
  "tokenzero-recovery",
  "tokenzero-runtime",
 ]
