@@ -1258,6 +1258,7 @@ name = "tokenzero-mcp"
 version = "1.0.1"
 dependencies = [
  "assert_cmd",
+ "fs4",
  "globset",
  "proptest",
  "serde",

@@ -24,8 +24,8 @@ use serde_json::{Value, json};
 use session::{DiffTelemetry, SeenState, ServeKey, ServedRecord, SessionMemory, SessionSummary};
 use std::collections::BTreeMap;
 use std::ffi::OsString;
-use std::fs;
-use std::io::{BufRead, BufReader};
+use std::fs::{self, OpenOptions};
+use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, SystemTime};
@@ -2424,6 +2424,16 @@ fn epoch_secs() -> u64 {
 
 fn record_fetch(path: &Path, url: &str, blob_ref: &str, bytes: usize) {
     const MAX_FETCH_INDEX_ENTRIES: usize = 200;
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    // Hold an exclusive advisory lock across the whole read-modify-write so
+    // two concurrent fetches (the 4-worker MCP pool, or two processes sharing
+    // a cache) cannot each load the same index, insert, and clobber the
+    // other's entry. Fail-open: a lock we cannot take only costs a re-fetch.
+    let Some(_lock) = FetchIndexLock::acquire(path) else {
+        return;
+    };
     let mut index = load_fetch_index(path);
     index.entries.insert(
         url.to_string(),
@@ -2446,11 +2456,82 @@ fn record_fetch(path: &Path, url: &str, blob_ref: &str, bytes: usize) {
             None => break,
         }
     }
-    if let Some(parent) = path.parent() {
-        let _ = std::fs::create_dir_all(parent);
+    // Atomic temp+rename so a crash mid-write can never leave a truncated
+    // index that load_fetch_index would parse as empty (mass-invalidating
+    // every prior cached fetch). A reader sees the old file or the new one.
+    let _ = atomic_write_fetch_index(path, &index);
+}
+
+/// Process-wide counter so concurrent same-PID writers never collide on a
+/// temp-file name (a shared name would let them interleave bytes).
+static FETCH_TMP_COUNTER: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+fn atomic_write_fetch_index(path: &Path, index: &FetchIndex) -> std::io::Result<()> {
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    let nonce = FETCH_TMP_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let tmp = parent.join(format!(
+        ".fetch-cache.json.{}.{nonce}.tmp",
+        std::process::id()
+    ));
+    let serialized = serde_json::to_string(index).map_err(std::io::Error::other)?;
+    {
+        let mut options = OpenOptions::new();
+        options.write(true).create_new(true);
+        let mut file = options.open(&tmp)?;
+        if let Err(err) = file
+            .write_all(serialized.as_bytes())
+            .and_then(|()| file.sync_data())
+        {
+            let _ = fs::remove_file(&tmp);
+            return Err(err);
+        }
     }
-    if let Ok(serialized) = serde_json::to_string(&index) {
-        let _ = std::fs::write(path, serialized);
+    if let Err(err) = fs::rename(&tmp, path) {
+        let _ = fs::remove_file(&tmp);
+        return Err(err);
+    }
+    Ok(())
+}
+
+/// RAII exclusive lock over a sibling lock file for the fetch index.
+struct FetchIndexLock {
+    _file: fs::File,
+}
+
+impl FetchIndexLock {
+    fn acquire(index_path: &Path) -> Option<Self> {
+        use fs4::FileExt;
+        let parent = index_path.parent().unwrap_or_else(|| Path::new("."));
+        let lock_path = parent.join("fetch-cache.json.lock");
+        let file = OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(&lock_path)
+            .ok()?;
+        // Bounded wait so a stuck holder cannot hang the fetch path, but
+        // generous: the critical section is a small read-modify-write, so
+        // normal contention clears in milliseconds. ~3s only trips on a
+        // genuinely wedged holder, where fail-open (a dropped index update,
+        // costing a re-fetch) is the right outcome.
+        const LOCK_ATTEMPTS: usize = 300;
+        for attempt in 0..LOCK_ATTEMPTS {
+            match FileExt::try_lock(&file) {
+                Ok(()) => return Some(Self { _file: file }),
+                Err(_) if attempt + 1 < LOCK_ATTEMPTS => {
+                    std::thread::sleep(Duration::from_millis(10))
+                }
+                Err(_) => return None,
+            }
+        }
+        None
+    }
+}
+
+impl Drop for FetchIndexLock {
+    fn drop(&mut self) {
+        use fs4::FileExt;
+        let _ = FileExt::unlock(&self._file);
     }
 }
 

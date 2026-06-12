@@ -975,6 +975,54 @@ fn search_traverses_beyond_default_result_limit() {
     );
 }
 
+#[test]
+fn concurrent_record_fetch_keeps_every_entry() {
+    let dir = tempdir().unwrap();
+    let index_path = dir.path().join("fetch-cache.json");
+    let threads: Vec<_> = (0..8)
+        .map(|i| {
+            let path = index_path.clone();
+            std::thread::spawn(move || {
+                for j in 0..10 {
+                    let url = format!("https://example.com/{i}/{j}");
+                    record_fetch(&path, &url, &format!("tz://blob/b{i}{j}"), 1);
+                }
+            })
+        })
+        .collect();
+    for t in threads {
+        t.join().unwrap();
+    }
+
+    let index = load_fetch_index(&index_path);
+    assert_eq!(
+        index.entries.len(),
+        80,
+        "every concurrent insert must survive the read-modify-write, got {}",
+        index.entries.len()
+    );
+}
+
+#[test]
+fn truncated_fetch_index_does_not_mass_invalidate_via_atomic_write() {
+    let dir = tempdir().unwrap();
+    let index_path = dir.path().join("fetch-cache.json");
+    record_fetch(&index_path, "https://example.com/a", "tz://blob/ba", 1);
+
+    // No reader ever observes a torn file: a crash leaves either the prior
+    // complete file or the new complete one, never a truncated index that
+    // load_fetch_index would silently treat as empty. Assert the post-write
+    // file is valid JSON and complete, and that no temp debris remains.
+    let index = load_fetch_index(&index_path);
+    assert!(index.entries.contains_key("https://example.com/a"));
+    let debris: Vec<_> = fs::read_dir(dir.path())
+        .unwrap()
+        .flatten()
+        .filter(|e| e.file_name().to_string_lossy().contains(".tmp"))
+        .collect();
+    assert!(debris.is_empty(), "atomic write must leave no temp debris");
+}
+
 #[cfg(unix)]
 #[test]
 fn internal_find_and_glob_terminate_on_a_symlink_cycle() {
