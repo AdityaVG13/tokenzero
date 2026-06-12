@@ -1,4 +1,5 @@
 use super::*;
+use std::sync::Arc;
 use tempfile::tempdir;
 use tokenzero_core::MCP_SCHEMA_VERSION;
 
@@ -972,6 +973,50 @@ fn search_traverses_beyond_default_result_limit() {
     assert_eq!(
         response.telemetry.as_ref().unwrap()["truncated_by_visit"],
         false
+    );
+}
+
+#[test]
+fn pipelined_identical_reads_dedup_exactly_once() {
+    // Two reads of the same file issued concurrently on a shared engine must
+    // not both serve full: the single-flight gate makes the second wait for
+    // the first to record, so it dedups. Before the fix both raced the
+    // seen-set and both served full (the unreproducible repeat-read bench).
+    let dir = tempdir().unwrap();
+    let file = dir.path().join("big.rs");
+    let body: String = (0..400)
+        .map(|i| format!("line {i} content here\n"))
+        .collect();
+    fs::write(&file, &body).unwrap();
+
+    let engine = Arc::new(TokenZeroEngine::new(EngineConfig::for_root(dir.path())));
+    let barrier = Arc::new(std::sync::Barrier::new(2));
+    let handles: Vec<_> = (0..2)
+        .map(|_| {
+            let engine = Arc::clone(&engine);
+            let barrier = Arc::clone(&barrier);
+            let path = file.clone();
+            std::thread::spawn(move || {
+                barrier.wait();
+                engine.read(&[path], Mode::Auto, None, None, false, 20, 4000)
+            })
+        })
+        .collect();
+    let responses: Vec<ToolResponse> = handles.into_iter().map(|h| h.join().unwrap()).collect();
+
+    let dedup_notes = responses
+        .iter()
+        .filter(|r| {
+            r.telemetry
+                .as_ref()
+                .and_then(|t| t.get("output_strategy"))
+                .and_then(|v| v.as_str())
+                .is_some_and(|s| s.contains("seen_set_dedup"))
+        })
+        .count();
+    assert_eq!(
+        dedup_notes, 1,
+        "exactly one of two concurrent identical reads must dedup"
     );
 }
 

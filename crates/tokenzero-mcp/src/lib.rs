@@ -22,12 +22,12 @@ pub(crate) use jsonrpc::{JsonRpcErrorData, handle_jsonrpc_value, jsonrpc_error};
 pub(crate) use resources::read_resource;
 use serde_json::{Value, json};
 use session::{DiffTelemetry, SeenState, ServeKey, ServedRecord, SessionMemory, SessionSummary};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::ffi::OsString;
 use std::fs::{self, OpenOptions};
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Condvar, Mutex, OnceLock};
 use std::time::{Duration, SystemTime};
 use tokenzero_core::{
     Accounting, CLI_SCHEMA_VERSION, ContentType, Mode, ShellRenderInput, ToolResponse,
@@ -172,6 +172,28 @@ pub(crate) fn session_dedup_default() -> bool {
     env_toggle_enabled(SESSION_DEDUP_ENV)
 }
 
+/// RAII guard releasing a set of in-flight ServeKeys when the serve finishes
+/// (or unwinds), waking any request waiting on those keys.
+struct ServeFlight<'a> {
+    engine: &'a TokenZeroEngine,
+    keys: Vec<ServeKey>,
+}
+
+impl Drop for ServeFlight<'_> {
+    fn drop(&mut self) {
+        if self.keys.is_empty() {
+            return;
+        }
+        let (lock, cvar) = &self.engine.in_flight;
+        let mut set = lock.lock().unwrap_or_else(|p| p.into_inner());
+        for key in &self.keys {
+            set.remove(key);
+        }
+        drop(set);
+        cvar.notify_all();
+    }
+}
+
 fn new_session_id() -> String {
     let nanos = SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -254,6 +276,13 @@ pub struct TokenZeroEngine {
     /// Session-lifetime seen-set for the redundancy layer (docs/routing.md
     /// §5). In-memory only; dies with the server process by design.
     session: Mutex<SessionMemory>,
+    /// Single-flight gate: ServeKeys currently being served, with a condvar
+    /// to wake waiters. Two pipelined identical reads on the 4-worker pool
+    /// would otherwise both miss the seen-set (the first has not recorded its
+    /// serve yet) and both serve full — the dedup race behind the
+    /// unreproducible repeat-read benchmark. A second request for a key in
+    /// flight waits for the first to record, then dedups.
+    in_flight: (Mutex<HashSet<ServeKey>>, Condvar),
     /// Stable id for Pulse attribution of every call this engine serves
     /// (one engine per MCP session or CLI command).
     session_id: String,
@@ -269,6 +298,7 @@ impl TokenZeroEngine {
             config,
             rg_binary: OnceLock::new(),
             session: Mutex::new(SessionMemory::default()),
+            in_flight: (Mutex::new(HashSet::new()), Condvar::new()),
             session_id: new_session_id(),
         }
     }
@@ -295,6 +325,27 @@ impl TokenZeroEngine {
             memory.record(key, record);
         }
         memory.absorb(summary);
+    }
+
+    /// Claim a set of ServeKeys for single-flight serving. Blocks until none
+    /// of `keys` is already in flight, then marks them all in flight and
+    /// returns a guard that releases them (and wakes waiters) on drop. An
+    /// empty key set (dedup off, or nothing dedupable) is a no-op.
+    fn begin_serve_flight(&self, keys: Vec<ServeKey>) -> ServeFlight<'_> {
+        if !keys.is_empty() {
+            let (lock, cvar) = &self.in_flight;
+            let mut set = lock.lock().unwrap_or_else(|p| p.into_inner());
+            // Wait until every requested key is free, then claim them all at
+            // once. Claiming atomically avoids a livelock between two calls
+            // whose key sets overlap in opposite order.
+            while keys.iter().any(|key| set.contains(key)) {
+                set = cvar.wait(set).unwrap_or_else(|p| p.into_inner());
+            }
+            for key in &keys {
+                set.insert(key.clone());
+            }
+        }
+        ServeFlight { engine: self, keys }
     }
 
     fn session_rollup(&self) -> Value {
@@ -355,6 +406,25 @@ impl TokenZeroEngine {
         max_visible_tokens: usize,
         options: ServeOptions,
     ) -> ToolResponse {
+        // Single-flight the serve so a second pipelined identical read waits
+        // for this one to record its serve before it looks up the seen-set
+        // (otherwise both miss and both serve full). Keyed per path+range, so
+        // disjoint reads still run fully concurrently. Held until after
+        // session_apply via the guard's lifetime.
+        let _flight = if self.config.session_dedup {
+            let keys = paths
+                .iter()
+                .take(max_files)
+                .map(|path| ServeKey::File {
+                    path: comparable_path(path),
+                    start: start_line,
+                    end: end_line,
+                })
+                .collect();
+            self.begin_serve_flight(keys)
+        } else {
+            self.begin_serve_flight(Vec::new())
+        };
         let mut store = RecoveryStore::new(Some(self.config.cache_path.clone()));
         let mut visible_parts = Vec::new();
         let mut refs = Vec::new();
@@ -965,6 +1035,21 @@ impl TokenZeroEngine {
                 );
             }
         }
+        // Single-flight identical searches so a second pipelined call dedups
+        // against the first's recorded serve instead of racing it. Same key
+        // the session block uses below; held until after session_apply.
+        let _flight = if self.config.session_dedup {
+            let mut canonical_roots: Vec<PathBuf> =
+                roots.iter().map(|root| comparable_path(root)).collect();
+            canonical_roots.sort();
+            self.begin_serve_flight(vec![ServeKey::Output {
+                tool: tool.to_string(),
+                query: query.to_string(),
+                roots: canonical_roots,
+            }])
+        } else {
+            self.begin_serve_flight(Vec::new())
+        };
         let max_visited_files = max_search_visited_files(max_files);
         let run_internal = |stats: &mut SearchStats, matches: &mut Vec<SearchMatch>| {
             for root in roots {
