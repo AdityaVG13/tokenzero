@@ -974,6 +974,7 @@ impl TokenZeroEngine {
                     query,
                     max_files,
                     max_visited_files,
+                    collect::MAX_WALK_DEPTH,
                     stats,
                     matches,
                 );
@@ -1233,6 +1234,7 @@ impl TokenZeroEngine {
                 pattern.contains('/'),
                 include_hidden,
                 max_files,
+                collect::MAX_WALK_DEPTH,
                 &mut paths,
             );
         }

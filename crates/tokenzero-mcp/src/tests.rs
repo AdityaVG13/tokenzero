@@ -975,6 +975,47 @@ fn search_traverses_beyond_default_result_limit() {
     );
 }
 
+#[cfg(unix)]
+#[test]
+fn internal_find_and_glob_terminate_on_a_symlink_cycle() {
+    use std::os::unix::fs::symlink;
+
+    let dir = tempdir().unwrap();
+    fs::create_dir_all(dir.path().join("sub")).unwrap();
+    fs::write(dir.path().join("sub/file.rs"), "needle here\n").unwrap();
+    // A directory symlink pointing back at its own parent: following it would
+    // recurse forever (sub/loop/loop/loop/...).
+    symlink(dir.path().join("sub"), dir.path().join("sub/loop")).unwrap();
+
+    let engine = engine_with_backend(dir.path(), SearchBackend::Internal);
+
+    // The bug was unbounded recursion / stack overflow; reaching these
+    // assertions at all is the proof it terminates.
+    let found = engine.find("needle", &[dir.path().to_path_buf()], Mode::Auto, 20, 4000);
+    assert_eq!(found.status, "ok");
+    let found_text = expanded_flat_output(&engine, &found);
+    assert!(found_text.contains("needle"), "real file still matched");
+    assert!(
+        !found_text.contains("loop/loop"),
+        "the symlink cycle must not be traversed: {found_text}"
+    );
+
+    let globbed = engine.glob(
+        "**/*.rs",
+        &[dir.path().to_path_buf()],
+        false,
+        Mode::Auto,
+        20,
+        4000,
+    );
+    assert_eq!(globbed.status, "ok");
+    let glob_text = expanded_flat_output(&engine, &globbed);
+    assert!(
+        !glob_text.contains("loop/loop"),
+        "glob must not descend the symlink cycle: {glob_text}"
+    );
+}
+
 fn engine_with_backend(root: &Path, backend: SearchBackend) -> TokenZeroEngine {
     let mut config = EngineConfig::for_root(root);
     config.search_backend = backend;

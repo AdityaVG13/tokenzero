@@ -12,6 +12,19 @@ pub(crate) struct SearchStats {
     pub(crate) unparsed_rows: usize,
 }
 
+/// Hard recursion bound for the internal directory walkers. Deep enough for
+/// any real source tree; a backstop so a symlink cycle cannot blow the stack
+/// even if the per-entry symlink skip is ever bypassed.
+pub(crate) const MAX_WALK_DEPTH: usize = 64;
+
+/// True when the path is a symlink. The walkers must not follow symlinks: a
+/// cycle inside an allowed root would otherwise recurse until the stack or
+/// the wall-clock budget is exhausted (`collect_tree` is depth-bounded; these
+/// walkers historically were not). symlink_metadata does not traverse.
+pub(crate) fn is_symlink(path: &Path) -> bool {
+    fs::symlink_metadata(path).is_ok_and(|meta| meta.file_type().is_symlink())
+}
+
 pub(crate) fn max_search_visited_files(max_results: usize) -> usize {
     if max_results == 0 {
         return 0;
@@ -174,12 +187,14 @@ pub(crate) fn merge_telemetry(response: &mut ToolResponse, extra: Value) {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn collect_search(
     base: &Path,
     current: &Path,
     query: &str,
     max_results: usize,
     max_visited_files: usize,
+    depth: usize,
     stats: &mut SearchStats,
     matches: &mut Vec<SearchMatch>,
 ) {
@@ -189,6 +204,9 @@ pub(crate) fn collect_search(
     }
     if stats.visited_files >= max_visited_files {
         stats.truncated_by_visit = true;
+        return;
+    }
+    if depth == 0 {
         return;
     }
     if current.is_file() {
@@ -233,7 +251,7 @@ pub(crate) fn collect_search(
         .collect::<Vec<_>>();
     entries.sort();
     for path in entries {
-        if should_skip(&path, false) {
+        if should_skip(&path, false) || is_symlink(&path) {
             continue;
         }
         collect_search(
@@ -242,6 +260,7 @@ pub(crate) fn collect_search(
             query,
             max_results,
             max_visited_files,
+            depth - 1,
             stats,
             matches,
         );
@@ -490,6 +509,7 @@ pub(crate) fn collect_tree(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn collect_glob(
     root: &Path,
     current: &Path,
@@ -497,9 +517,10 @@ pub(crate) fn collect_glob(
     pattern_has_separator: bool,
     include_hidden: bool,
     max_files: usize,
+    depth: usize,
     rows: &mut Vec<PathBuf>,
 ) {
-    if rows.len() >= max_files {
+    if rows.len() >= max_files || depth == 0 {
         return;
     }
     if current.is_file() {
@@ -514,7 +535,7 @@ pub(crate) fn collect_glob(
     let mut entries = entries.flatten().map(|e| e.path()).collect::<Vec<_>>();
     entries.sort();
     for path in entries {
-        if rows.len() >= max_files || should_skip(&path, include_hidden) {
+        if rows.len() >= max_files || should_skip(&path, include_hidden) || is_symlink(&path) {
             continue;
         }
         if path.is_dir() {
@@ -525,6 +546,7 @@ pub(crate) fn collect_glob(
                 pattern_has_separator,
                 include_hidden,
                 max_files,
+                depth - 1,
                 rows,
             );
         } else if glob_matches(root, &path, matcher, pattern_has_separator) {
