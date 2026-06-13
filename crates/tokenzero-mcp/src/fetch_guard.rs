@@ -51,19 +51,13 @@ pub(crate) fn validate_fetch_target(
     deny_hosts: &[String],
 ) -> Result<FetchTarget, FetchBlocked> {
     let (host, port) = parse_host_port(url)?;
-    if deny_hosts
-        .iter()
-        .any(|pattern| host_matches(&host, pattern))
-    {
+    if host_is_listed(&host, deny_hosts) {
         return Err(FetchBlocked::new(
             "fetch_blocked",
             format!("host {host} is denied by TOKENZERO_FETCH_DENY"),
         ));
     }
-    if allow_hosts
-        .iter()
-        .any(|pattern| host_matches(&host, pattern))
-    {
+    if host_is_listed(&host, allow_hosts) {
         return Ok(FetchTarget {
             host,
             port,
@@ -209,6 +203,10 @@ fn parse_hostname_authority(
 fn parse_port(text: &str, url: &str) -> Result<u16, FetchBlocked> {
     text.parse::<u16>()
         .map_err(|_| FetchBlocked::new("invalid_url", format!("invalid port in {url}")))
+}
+
+fn host_is_listed(host: &str, patterns: &[String]) -> bool {
+    patterns.iter().any(|pattern| host_matches(host, pattern))
 }
 
 /// Suffix match: `example.com` matches `example.com` and `api.example.com`.
