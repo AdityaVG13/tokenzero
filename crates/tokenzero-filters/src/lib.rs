@@ -173,13 +173,17 @@ pub fn rewrite_command(command: &str, mode: &str, enabled: bool) -> RewriteResul
         "docker" | "kubectl" => Some(command.to_string()),
         _ => None,
     };
+    finish_rewrite(command, &family, rewritten)
+}
+
+fn finish_rewrite(command: &str, family: &str, rewritten: Option<String>) -> RewriteResult {
     match rewritten {
         Some(value) if value != command => result(
             command,
             &value,
             true,
             "bounded tokenzero-safe rewrite",
-            &family,
+            family,
             true,
         ),
         Some(_) => result(
@@ -187,7 +191,7 @@ pub fn rewrite_command(command: &str, mode: &str, enabled: bool) -> RewriteResul
             command,
             false,
             "already bounded or passthrough",
-            &family,
+            family,
             true,
         ),
         None => result(
@@ -195,7 +199,7 @@ pub fn rewrite_command(command: &str, mode: &str, enabled: bool) -> RewriteResul
             command,
             false,
             "unsupported command family",
-            &family,
+            family,
             false,
         ),
     }
