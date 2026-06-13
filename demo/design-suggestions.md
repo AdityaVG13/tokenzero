@@ -2,7 +2,7 @@
 
 > **Prompt that generated this review** (verbatim):
 >
-> *"I am big believer in good design. Key elements I care about are (1) anything we do we do in 1 palace, so similar code is not scattered around, (2) we concentrate complexity/decision making in 1 place and don't scatter this around. (3) no magic numbers in the code (mostly) (4) modularity and ownership - well defined methods control access to things owned by the module."*
+> *"I am big believer in good design. Key elements I care about are (1) anything we do we do in 1 place, so similar code is not scattered around, (2) we concentrate complexity/decision making in 1 place and don't scatter this around. (3) no magic numbers in the code (mostly) (4) modularity and ownership - well defined methods control access to things owned by the module."*
 
 A design review of the `tokenzero` workspace against four principles:
 
@@ -40,7 +40,30 @@ The promise of the product is **byte-exact recovery with honest accounting**. Ev
 
 ---
 
-## 2. Principle 1 — one place for any given concern
+## 2. The wider framing — SOLID in plain English
+
+The four principles above are a tight, opinionated version of an older idea: **SOLID**. SOLID is five rules that, between them, decide whether code stays easy to change as a system grows. In plain English:
+
+- **S — Single Responsibility.** Each module / class / function should have *one* reason to change. If `EngineConfig` changes when the routing policy changes *and* when the cache layout changes *and* when a new env var is added, it has three reasons to change — and three teams stepping on each other.
+- **O — Open for extension, closed for modification.** You should be able to add a new behaviour (e.g., a new search backend, a new MCP transport, a new client type for `install`) *without editing existing files*. Today adding a new subcommand grows `main.rs`; that's the opposite — every extension forces a modification.
+- **L — Liskov Substitution.** If a function takes a `SearchBackend`, any backend (`Auto`, `Rg`, `Internal`) must work the same way from the caller's point of view. Don't add subtype-specific quirks that surprise callers — e.g., one backend silently dropping results when over a limit while another errors.
+- **I — Interface Segregation.** Don't force callers to depend on things they don't use. A struct with 14 `pub` fields makes every caller "depend on" all 14, even if they only read one — and changing any field ripples to all of them.
+- **D — Dependency Inversion.** High-level code (the engine) should depend on small abstractions (a `RoutingPolicy` interface), not on concrete low-level details (env-var parsing scattered through six files). When the engine reads env vars itself, the abstraction is inverted: high-level depends on low-level.
+
+**How SOLID maps to my four principles:**
+
+| My principle | SOLID it leans on | Why |
+|---|---|---|
+| One place | **S** | Two helpers doing the same job = two modules sharing one responsibility. |
+| Concentrate decisions | **S** + **D** | One responsibility (routing), one abstraction (the policy) that everything else depends on. |
+| No magic numbers | **O** | Named constants in one place let you extend (tune) without modifying business logic. |
+| Modularity / ownership | **I** + **O** | Methods (not fields) keep callers depending on a small, stable surface — internals can change without breaking them. |
+
+The findings below are mostly the same finding seen through both lenses at once.
+
+---
+
+## 3. Principle 1 — one place for any given concern
 
 ### Evidence
 
@@ -65,6 +88,8 @@ Each crate independently needed to answer "what is the real absolute path of som
 
 ### Why this matters
 
+**SOLID lens: this is the Single Responsibility principle.** "Canonicalise a user-typed path" is one responsibility, and right now it has two owners — install and mcp — each free to drift.
+
 If the two canonicalisation helpers ever drift — say, on how they handle Windows long-paths or symlinks with trailing `..` — the install and mcp crates will disagree about what "the same path" means, and a path that looked safe to one will read as unsafe to the other. Sooner or later the wrong one becomes the basis for an access decision.
 
 For env parsing, "mostly identical" is the problem. When a user reports "I set `TOKENZERO_SHELL_TIMEOUT_SECS=0` and it ignored me," nobody can answer "intentional or bug?" without reading all ten copies. One helper makes the answer come from one place; as a side benefit, you can grep for `env::parsed(` and instantly enumerate every supported environment variable.
@@ -76,7 +101,7 @@ For env parsing, "mostly identical" is the problem. When a user reports "I set `
 
 ---
 
-## 3. Principle 2 — concentrate complexity and decision-making
+## 4. Principle 2 — concentrate complexity and decision-making
 
 ### Evidence
 
@@ -94,6 +119,8 @@ The "routing policy" — *when to dedupe, diff-read, expand, spill, fall back to
 There's no single struct anywhere you can point a new engineer at and say "this is the policy."
 
 ### Why this matters
+
+**SOLID lens: this is Single Responsibility + Dependency Inversion.** The routing rules are one responsibility (one team, one doc). Today the engine reaches *down* into env-parsing and into per-crate defaults; with a `RoutingPolicy`, the engine depends on a small abstraction instead, and the abstraction owns the messy details.
 
 If product says "let's dedupe more aggressively when context is over 80 % full," the engineer making that change has to find, read, and update three files in three crates, and hope they found them all. Worse, when two of those defaults get out of sync (say, the spill threshold ends up larger than the capture threshold), the only place that detects it is `RunOutputPolicy::normalized()`, a function nobody is required to call.
 
@@ -119,7 +146,7 @@ impl RoutingPolicy {
 
 ---
 
-## 4. Principle 3 — no magic numbers
+## 5. Principle 3 — no magic numbers
 
 ### Evidence (worst offenders)
 
@@ -136,6 +163,8 @@ impl RoutingPolicy {
 
 ### Why this matters
 
+**SOLID lens: this is the Open/Closed principle.** A named constant is a *tuning knob* — you can extend (re-tune) the system without modifying the business code that uses it. An inline literal forces a modification every time, and the same number in two files becomes two independent decisions that can silently disagree.
+
 In a perf-oriented codebase, every byte limit, every retry count, every clamp is a tuning knob. When the cache config inlines six numbers, the next reader has no idea whether they're arbitrary or tuned against benchmarks. The project has no single place to look at the cache's memory budget — you have to multiply six numbers in your head to estimate worst case.
 
 The most dangerous current example is `mcp/lib.rs:1682` where `unwrap_or(24 * 60 * 60)` reinvents a TTL that already exists as `DEFAULT_SPILL_TTL` in the runtime crate. They happen to agree today. They will not necessarily agree six months from now, and when they diverge the bug will be *"old spilled files are getting cleaned up faster than the engine expects, so `expand` sometimes returns 'gone'"* — a recovery-correctness bug, the exact category that breaks the product's core promise.
@@ -146,7 +175,7 @@ Every crate gets a `consts.rs` module; **no inline byte/time literals in busines
 
 ---
 
-## 5. Principle 4 — ownership through methods, not fields
+## 6. Principle 4 — ownership through methods, not fields
 
 ### Evidence
 
@@ -159,6 +188,8 @@ Almost every public struct in the workspace is a bag of `pub` fields. Concrete l
 - **`RuntimePlan`, `RunResult`, `StreamCapture`** (`runtime/lib.rs:39, 108, 57`) — these are result types serialised to JSON; OK to be records, but should derive `#[non_exhaustive]` so adding fields isn't a breaking change.
 
 ### Why this matters
+
+**SOLID lens: this is Interface Segregation + Open/Closed.** A struct with 14 `pub` fields forces every caller to depend on all 14 (any field rename ripples to all of them). Methods give callers a small, stable surface; you can change the internal layout (the *closed* part) without breaking them (the *open-for-extension* part).
 
 `TokenZeroEngine.config` being `pub` means the contract *"`allowed_roots` is the security boundary"* is enforced only by social convention and grep. The first time someone writes a feature that mutates that vec from a request handler, the security model has a hole and you'll never see it in code review unless the reviewer happens to remember that this field is special.
 
@@ -182,7 +213,7 @@ Three lib.rs files are bags-of-things:
 
 ---
 
-## 6. Why these four principles, here
+## 7. Why these four principles, here
 
 TokenZero is a **trust product**. Agents only use it because they trust that compressed output is recoverable, that `allowed_roots` actually means allowed-roots, and that the token accounting is honest. Every duplicated helper, every scattered decision, every magic literal, every `pub` field on a security- or correctness-critical type is a place where that trust depends on the author having remembered to do the right thing — instead of on the structure of the code making the wrong thing impossible.
 
@@ -190,7 +221,7 @@ Applied here, these four principles convert *"we did the right thing this time"*
 
 ---
 
-## 7. Recommended first PR
+## 8. Recommended first PR
 
 If you want to land this incrementally, the highest-leverage single change is:
 
