@@ -422,27 +422,7 @@ pub(crate) fn parse_rg_line(line: &str, base: &str) -> Option<SearchMatch> {
     // prefer the first whose prefix exists as a file under the root — the
     // only reliable disambiguator; fall back to the first parseable
     // boundary when nothing verifies (deleted-mid-search files).
-    let root = Path::new(base);
-    let mut search_from = 0usize;
-    let mut chosen: Option<(usize, usize, usize)> = None;
-    while let Some(offset) = tail[search_from..].find(':') {
-        let rel_end = search_from + offset;
-        let after = &tail[rel_end + 1..];
-        if let Some(second) = after.find(':') {
-            if let Ok(line_number) = after[..second].parse::<usize>() {
-                let text_start = rel_end + 1 + second + 1;
-                if chosen.is_none() {
-                    chosen = Some((rel_end, line_number, text_start));
-                }
-                if root.join(&tail[..rel_end]).is_file() {
-                    chosen = Some((rel_end, line_number, text_start));
-                    break;
-                }
-            }
-        }
-        search_from = rel_end + 1;
-    }
-    let (rel_end, line_number, text_start) = chosen?;
+    let (rel_end, line_number, text_start) = find_rg_field_boundary(tail, Path::new(base))?;
     let rel = &tail[..rel_end];
     let path_end = line.len() - tail.len() + rel.len();
     Some(SearchMatch {
@@ -452,6 +432,32 @@ pub(crate) fn parse_rg_line(line: &str, base: &str) -> Option<SearchMatch> {
         line: line_number,
         text: tail[text_start..].to_string(),
     })
+}
+
+fn find_rg_field_boundary(tail: &str, root: &Path) -> Option<(usize, usize, usize)> {
+    let mut search_from = 0usize;
+    let mut chosen: Option<(usize, usize, usize)> = None;
+    while let Some(offset) = tail[search_from..].find(':') {
+        let rel_end = search_from + offset;
+        if let Some(candidate) = parse_rg_boundary(tail, rel_end) {
+            if chosen.is_none() {
+                chosen = Some(candidate);
+            }
+            if root.join(&tail[..rel_end]).is_file() {
+                return Some(candidate);
+            }
+        }
+        search_from = rel_end + 1;
+    }
+    chosen
+}
+
+fn parse_rg_boundary(tail: &str, rel_end: usize) -> Option<(usize, usize, usize)> {
+    let after = &tail[rel_end + 1..];
+    let second = after.find(':')?;
+    let line_number = after[..second].parse::<usize>().ok()?;
+    let text_start = rel_end + 1 + second + 1;
+    Some((rel_end, line_number, text_start))
 }
 
 pub(crate) struct TreeEntry {
