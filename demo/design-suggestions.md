@@ -63,7 +63,53 @@ The findings below are mostly the same finding seen through both lenses at once.
 
 ---
 
-## 3. Principle 1 — one place for any given concern
+## 3. The practical tactic — cyclomatic complexity reduction
+
+SOLID and the four principles tell you *what* good structure looks like. **Cyclomatic complexity** is a single number that tells you *where* the current code is bad — and the standard ways to reduce it are the day-to-day refactoring moves that get you to good structure.
+
+### What the number is
+
+Cyclomatic complexity counts the distinct execution paths through one function. A rough formula:
+
+```
+complexity = 1
+           + (# of if / else if)
+           + (# of && / || inside conditions)
+           + (# of case arms in match / switch)
+           + (# of for / while loops)
+           + (# of catch arms or ? error forks)
+```
+
+A straight-line function = 1. Add a single `if` → 2. A function with five branches and a loop → 7. Anything above ~10 is hard to fully test; above ~15 is hard to safely refactor; above ~25 is unmaintainable in practice.
+
+### Why the number matters
+
+- It's roughly **the minimum number of tests** you need to cover every path. A function with complexity 12 needs at least 12 test cases to be sure no branch is unexercised.
+- It correlates with how much a reader has to hold in their head at once.
+- Empirically, functions above ~10 ship more bugs.
+
+### Five moves that reduce it
+
+1. **Guard clauses / early return.** Replace deep nesting (`if (ok) { if (also_ok) { do(); } }`) with early returns (`if (!ok) return; if (!also_ok) return; do();`). Same logic, flatter, easier to read.
+2. **Extract method.** Pull a chunk of nested logic into its own named function. Caller's complexity drops; the new function's is bounded.
+3. **Lookup table instead of `match`.** A 26-arm `match cmd { Read(a) => handle_read(a), … }` is complexity 26 in one function. A `HashMap<Cmd, fn>` or a `commands/` module per arm is complexity 1.
+4. **Name your booleans.** `if (x > 0 && y < max && z.is_valid() && !banned)` → `if (is_acceptable(x, y, z))`. The branch logic moves into a focused, separately-testable predicate.
+5. **Strategy / state object.** When a function branches on "what mode are we in," lift the mode into an object that owns the right behaviour. The `if mode == ...` chain disappears from the caller.
+
+### Where to apply this in tokenzero (concrete)
+
+- **`tokenzero/src/main.rs`** (1,637 LOC, 26 `handle_*` functions, one giant `match` on `cli.command`). Splitting each `handle_*` into `commands/<name>.rs` is **move #3**: it drops `main.rs`'s complexity from ~30 to ~3 (just the dispatch). Each command file becomes independently testable.
+- **`TokenZeroEngine` routing decisions** scattered through inline `if env_var == ... && file_size > ... && !banned` chains. Extracting `RoutingPolicy::should_dedupe(ctx)`, `should_diff_read(prev, next)`, etc., is **move #4 + move #5**: each branch becomes a named predicate or a strategy method, and the engine's call sites drop to complexity 1.
+- **`RunOutputPolicy::normalized()`** has nested conditionals on zero-checks and clamps. **Move #1** (guard clauses) collapses them.
+- **`recovery/lib.rs`** persist / lock / sweep paths share retry-loop scaffolding around inner conditionals. **Move #2** (extract method) gives each its own focused function.
+
+### How this fits with everything else
+
+SOLID and the four principles tell you **where** complexity is collecting (usually in the module that violates Single Responsibility). Cyclomatic complexity reduction is the actual **toolbox** for spreading that complexity back out across well-named functions, modules, and abstractions. Use them together: SOLID for the diagnosis, CC reduction for the fix.
+
+---
+
+## 4. Principle 1 — one place for any given concern
 
 ### Evidence
 
@@ -101,7 +147,7 @@ For env parsing, "mostly identical" is the problem. When a user reports "I set `
 
 ---
 
-## 4. Principle 2 — concentrate complexity and decision-making
+## 5. Principle 2 — concentrate complexity and decision-making
 
 ### Evidence
 
@@ -146,7 +192,7 @@ impl RoutingPolicy {
 
 ---
 
-## 5. Principle 3 — no magic numbers
+## 6. Principle 3 — no magic numbers
 
 ### Evidence (worst offenders)
 
@@ -175,7 +221,7 @@ Every crate gets a `consts.rs` module; **no inline byte/time literals in busines
 
 ---
 
-## 6. Principle 4 — ownership through methods, not fields
+## 7. Principle 4 — ownership through methods, not fields
 
 ### Evidence
 
@@ -213,7 +259,7 @@ Three lib.rs files are bags-of-things:
 
 ---
 
-## 7. Why these four principles, here
+## 8. Why these four principles, here
 
 TokenZero is a **trust product**. Agents only use it because they trust that compressed output is recoverable, that `allowed_roots` actually means allowed-roots, and that the token accounting is honest. Every duplicated helper, every scattered decision, every magic literal, every `pub` field on a security- or correctness-critical type is a place where that trust depends on the author having remembered to do the right thing — instead of on the structure of the code making the wrong thing impossible.
 
@@ -221,7 +267,7 @@ Applied here, these four principles convert *"we did the right thing this time"*
 
 ---
 
-## 8. Recommended first PR
+## 9. Recommended first PR
 
 If you want to land this incrementally, the highest-leverage single change is:
 
