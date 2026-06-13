@@ -2753,6 +2753,49 @@ fn fetch_caches_within_ttl_and_refetches_when_fresh() {
     assert_eq!(fs::read_to_string(&marker).unwrap().lines().count(), 2);
 }
 
+#[cfg(unix)]
+#[test]
+fn fetch_cache_hits_still_obey_current_deny_policy() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = tempdir().unwrap();
+    let fake_curl = dir.path().join("fake-curl");
+    let marker = dir.path().join("invocations.log");
+    fs::write(
+        &fake_curl,
+        format!(
+            "#!/bin/sh\necho invoked >> {}\nprintf 'cached sensitive body\\n'\n",
+            marker.display()
+        ),
+    )
+    .unwrap();
+    fs::set_permissions(&fake_curl, fs::Permissions::from_mode(0o755)).unwrap();
+    let mut config = EngineConfig::for_root(dir.path());
+    config.curl_path_override = Some(fake_curl);
+    config.fetch_enabled = true;
+    config.fetch_allow_hosts = vec!["example.com".to_string()];
+    let engine = TokenZeroEngine::new(config.clone());
+
+    let first = engine.fetch("https://example.com/doc", None, false, Mode::Auto, 4000);
+    assert_eq!(first.status, "ok");
+    assert_eq!(fs::read_to_string(&marker).unwrap().lines().count(), 1);
+
+    config.fetch_deny_hosts = vec!["example.com".to_string()];
+    let denied_engine = TokenZeroEngine::new(config);
+    let denied = denied_engine.fetch("https://example.com/doc", None, false, Mode::Auto, 4000);
+    let error = denied.error.as_ref().unwrap();
+    assert_eq!(error.code, "fetch_blocked");
+    assert!(
+        denied.visible.is_none(),
+        "a fresh TTL cache hit must not bypass the current deny policy"
+    );
+    assert_eq!(
+        fs::read_to_string(&marker).unwrap().lines().count(),
+        1,
+        "denied cached fetch must not re-enter curl"
+    );
+}
+
 #[test]
 fn fetch_rejects_non_http_and_reports_curl_failures() {
     let dir = tempdir().unwrap();
@@ -3149,6 +3192,11 @@ fn mcp_tool_calls_are_pulse_accounted_with_attribution() {
         "params": {"name": "tz_expand", "arguments": {"ref": ref_id}}
     });
     handle_jsonrpc(&engine, &expand_request.to_string()).unwrap();
+    let string_id_request = serde_json::json!({
+        "jsonrpc": "2.0", "id": "7", "method": "tools/call",
+        "params": {"name": "tz_read", "arguments": {"path": file.display().to_string(), "fresh": true}}
+    });
+    handle_jsonrpc(&engine, &string_id_request.to_string()).unwrap();
 
     let ledger = tokenzero_pulse::default_ledger_path(dir.path());
     let lines: Vec<tokenzero_pulse::PulseEvent> = fs::read_to_string(&ledger)
@@ -3156,7 +3204,7 @@ fn mcp_tool_calls_are_pulse_accounted_with_attribution() {
         .lines()
         .map(|line| serde_json::from_str(line).unwrap())
         .collect();
-    assert_eq!(lines.len(), 2, "one event per tools/call");
+    assert_eq!(lines.len(), 3, "one event per tools/call");
 
     let read_event = &lines[0];
     assert_eq!(read_event.tool, "read");
@@ -3167,7 +3215,7 @@ fn mcp_tool_calls_are_pulse_accounted_with_attribution() {
 
     let expand_event = &lines[1];
     assert_eq!(expand_event.tool, "expand");
-    assert_eq!(expand_event.call_id.as_deref(), Some("call-8"));
+    assert_eq!(expand_event.call_id.as_deref(), Some("\"call-8\""));
     assert_eq!(
         expand_event.session_id.as_deref(),
         Some(engine.session_id())
@@ -3175,6 +3223,14 @@ fn mcp_tool_calls_are_pulse_accounted_with_attribution() {
     assert!(
         expand_event.ref_ids.contains(&ref_id),
         "expand event must carry the expanded ref for attribution"
+    );
+
+    let string_id_event = &lines[2];
+    assert_eq!(string_id_event.tool, "read");
+    assert_eq!(string_id_event.call_id.as_deref(), Some("\"7\""));
+    assert_ne!(
+        read_event.call_id, string_id_event.call_id,
+        "numeric JSON-RPC id 7 and string id \"7\" must not collide"
     );
     assert!(
         expand_event.recovery_tokens > 0,

@@ -306,7 +306,6 @@ fn handle_jsonrpc_request(engine: &TokenZeroEngine, parsed: Value) -> Option<Val
             };
             let call_id = match &id {
                 Value::Null => None,
-                Value::String(text) => Some(text.clone()),
                 other => Some(other.to_string()),
             };
             match call_tool(engine, name, &args, call_id) {

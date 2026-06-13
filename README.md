@@ -131,10 +131,11 @@ Run the self-contained RACC demo from the repo root:
 pwsh -File ./demo/run_demo.ps1 -OpenViz
 ```
 
-The demo resolves `tokenzero` from `PATH`, reuses `demo/.tokenzero-bin/`, or
-downloads the matching release asset for Windows, Linux, or macOS. It writes
-`demo/demo_results.json` and `demo/demo_viz.html`, then shows raw tokens,
-visible tokens, recovery-aware savings, and byte-exact expansion proof.
+The demo requires PowerShell 7+ (`pwsh`) on Windows, Linux, or macOS. It
+resolves `tokenzero` from `PATH`, reuses `demo/.tokenzero-bin/`, or downloads
+the matching release asset for the current OS. It writes `demo/demo_results.json`
+and `demo/demo_viz.html`, then shows raw tokens, visible tokens,
+recovery-aware savings, and byte-exact expansion proof.
 
 For live agent runs:
 

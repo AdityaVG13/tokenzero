@@ -427,6 +427,7 @@ impl TokenZeroEngine {
         };
         let mut store = RecoveryStore::new(Some(self.config.cache_path.clone()));
         let mut visible_parts = Vec::new();
+        let mut raw_visible_parts = Vec::new();
         let mut refs = Vec::new();
         let mut raw_tokens = 0usize;
         let mut visible_tokens = 0usize;
@@ -564,6 +565,7 @@ impl TokenZeroEngine {
             }
             raw_tokens += capsule.raw_tokens;
             visible_tokens += part_tokens;
+            raw_visible_parts.push(text.trim_end().to_string());
             visible_parts.push(part_text);
         }
         if !refs.is_empty() {
@@ -573,6 +575,10 @@ impl TokenZeroEngine {
             }
         }
         let refs_complete = prune_dead_refs(&store, &mut refs);
+        if !refs_complete {
+            visible_parts = raw_visible_parts;
+            visible_tokens = raw_tokens;
+        }
         // Dedup/diff notes advertise refs in place of content: apply them
         // only when persistence succeeded AND every ref survived eviction.
         // Degraded storage always serves full — the bytes are in the text,
@@ -846,13 +852,24 @@ impl TokenZeroEngine {
         } else {
             format!("{header}\n{}", applied.diff)
         };
-        let capsule = make_capsule_with_raw_tokens(
-            &assembled,
-            count_tokens(&assembled),
-            mode,
-            max_visible_tokens,
-            Some(&format!("edit {}", path.display())),
-        );
+        let assembled_tokens = count_tokens(&assembled);
+        let capsule = if refs_complete {
+            make_capsule_with_raw_tokens(
+                &assembled,
+                assembled_tokens,
+                mode,
+                max_visible_tokens,
+                Some(&format!("edit {}", path.display())),
+            )
+        } else {
+            tokenzero_core::Capsule {
+                text: assembled.trim_end().to_string(),
+                raw_tokens: assembled_tokens,
+                visible_tokens: assembled_tokens,
+                omitted_lines: 0,
+                mode,
+            }
+        };
         let exact_ref_tokens = exact_ref_token_count(&refs);
         let exact_refs_available = !refs.is_empty();
         let mut response = ToolResponse::ok(
@@ -892,7 +909,6 @@ impl TokenZeroEngine {
 
     pub fn ingest(&self, text: &str, kind: ContentType, mode: Mode, source: &str) -> ToolResponse {
         let mut store = RecoveryStore::new(Some(self.config.cache_path.clone()));
-        let capsule = make_capsule(text, mode, self.config.max_visible_tokens, Some(source));
         let mut refs = Vec::new();
         let mut storage_error = None;
         match store.store_payload(text, kind, None, None, None) {
@@ -904,7 +920,19 @@ impl TokenZeroEngine {
                 storage_error = Some(err.to_string());
             }
         }
-        prune_dead_refs(&store, &mut refs);
+        let refs_complete = prune_dead_refs(&store, &mut refs);
+        let capsule = if refs_complete {
+            make_capsule(text, mode, self.config.max_visible_tokens, Some(source))
+        } else {
+            let raw_tokens = count_tokens(text);
+            tokenzero_core::Capsule {
+                text: text.trim_end().to_string(),
+                raw_tokens,
+                visible_tokens: raw_tokens,
+                omitted_lines: 0,
+                mode,
+            }
+        };
         let exact_ref_tokens = exact_ref_token_count(&refs);
         let mut response = ToolResponse::ok(
             "ingest",
@@ -1156,13 +1184,23 @@ impl TokenZeroEngine {
         let refs_complete = prune_dead_refs(&store, &mut refs);
         let exact_ref_tokens = exact_ref_token_count(&refs);
         let exact_refs_available = !refs.is_empty();
-        let capsule = make_capsule_with_raw_tokens(
-            visible_source,
-            stored.raw_tokens,
-            mode,
-            max_visible_tokens,
-            Some(&format!("{tool} {query}")),
-        );
+        let capsule = if refs_complete {
+            make_capsule_with_raw_tokens(
+                visible_source,
+                stored.raw_tokens,
+                mode,
+                max_visible_tokens,
+                Some(&format!("{tool} {query}")),
+            )
+        } else {
+            tokenzero_core::Capsule {
+                text: output.trim_end().to_string(),
+                raw_tokens: stored.raw_tokens,
+                visible_tokens: stored.raw_tokens,
+                omitted_lines: 0,
+                mode,
+            }
+        };
         let mut visible_text = capsule.text;
         let mut final_visible_tokens = capsule.visible_tokens;
         let mut summary = SessionSummary::default();
@@ -1619,9 +1657,18 @@ impl TokenZeroEngine {
                 capture_text.len(),
             ),
         ];
-        prune_dead_refs(&store, &mut refs);
+        let refs_complete = prune_dead_refs(&store, &mut refs);
         let raw_tokens = count_tokens(&output);
-        let visible_tokens = count_tokens(&render.visible);
+        let visible_text = if refs_complete {
+            render.visible.clone()
+        } else {
+            output.trim_end().to_string()
+        };
+        let visible_tokens = if refs_complete {
+            count_tokens(&visible_text)
+        } else {
+            raw_tokens
+        };
         let mut response = ToolResponse::ok(
             "shell",
             render
@@ -1629,7 +1676,7 @@ impl TokenZeroEngine {
                 .policy
                 .parse()
                 .unwrap_or(mode.effective_policy()),
-            render.visible,
+            visible_text,
             refs,
             Accounting {
                 raw_tokens,
@@ -1846,6 +1893,13 @@ impl TokenZeroEngine {
         }
         let ttl_secs = ttl_seconds.unwrap_or(24 * 60 * 60) as u64;
         let index_path = fetch_index_path(&self.config.cache_path);
+        if let Err(blocked) = validate_fetch_target(
+            url,
+            &self.config.fetch_allow_hosts,
+            &self.config.fetch_deny_hosts,
+        ) {
+            return ToolResponse::error("fetch", blocked.code, blocked.message, blocked.repair);
+        }
         if !fresh {
             if let Some(entry) = load_fetch_index(&index_path).entries.get(url) {
                 let age = epoch_secs().saturating_sub(entry.fetched_at_secs);
@@ -2008,13 +2062,23 @@ impl TokenZeroEngine {
         if !cache_hit && storage_error.is_none() && refs_complete {
             record_fetch(index_path, url, &stored.blob_ref, body.len());
         }
-        let capsule = make_capsule_with_raw_tokens(
-            body,
-            stored.raw_tokens,
-            mode,
-            max_visible_tokens,
-            Some(&format!("fetch {}", zero_hit_label(url))),
-        );
+        let capsule = if refs_complete {
+            make_capsule_with_raw_tokens(
+                body,
+                stored.raw_tokens,
+                mode,
+                max_visible_tokens,
+                Some(&format!("fetch {}", zero_hit_label(url))),
+            )
+        } else {
+            tokenzero_core::Capsule {
+                text: body.trim_end().to_string(),
+                raw_tokens: stored.raw_tokens,
+                visible_tokens: stored.raw_tokens,
+                omitted_lines: 0,
+                mode,
+            }
+        };
         let exact_ref_tokens = exact_ref_token_count(&refs);
         let mut response = ToolResponse::ok(
             "fetch",
@@ -2298,22 +2362,32 @@ impl TokenZeroEngine {
             }
             Err(err) => storage_error = Some(err.to_string()),
         }
-        prune_dead_refs(&store, &mut refs);
+        let refs_complete = prune_dead_refs(&store, &mut refs);
         let exact_ref_tokens = exact_ref_token_count(&refs);
-        let capsule = match rendered {
-            Some(text) => make_capsule_with_raw_tokens(
-                text,
-                stored.raw_tokens,
+        let capsule = if refs_complete {
+            match rendered {
+                Some(text) => make_capsule_with_raw_tokens(
+                    text,
+                    stored.raw_tokens,
+                    mode,
+                    max_visible_tokens,
+                    Some(&format!("{tool} {key}")),
+                ),
+                None => make_capsule(
+                    output,
+                    mode,
+                    max_visible_tokens,
+                    Some(&format!("{tool} {key}")),
+                ),
+            }
+        } else {
+            tokenzero_core::Capsule {
+                text: output.trim_end().to_string(),
+                raw_tokens: stored.raw_tokens,
+                visible_tokens: stored.raw_tokens,
+                omitted_lines: 0,
                 mode,
-                max_visible_tokens,
-                Some(&format!("{tool} {key}")),
-            ),
-            None => make_capsule(
-                output,
-                mode,
-                max_visible_tokens,
-                Some(&format!("{tool} {key}")),
-            ),
+            }
         };
         let mut response = ToolResponse::ok(
             tool,
