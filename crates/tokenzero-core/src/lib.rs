@@ -1215,24 +1215,18 @@ pub fn classify_command_status(
 ) -> CommandStatus {
     let search_no_match = is_search_no_match(command, stdout, stderr, exit_code);
     let expected_false_exit = is_expected_false_exit(command, stdout, stderr, exit_code);
-    let mut command_success =
-        (exit_code == Some(0) || search_no_match || expected_false_exit) && !timed_out;
     let failed_segment = failed_segment(command, stdout, stderr, exit_code);
     let pipeline_masking_warning = masking_warning(command, stdout, stderr, exit_code);
     let pipeline_rerun_command = pipeline_rerun_command(command, pipeline_masking_warning.as_ref());
-    if timed_out || failed_segment.is_some() && exit_code == Some(0) {
-        command_success = false;
-    }
-    let status_label = if timed_out {
-        "command_timeout"
-    } else if command_success {
-        "command_success"
-    } else if exit_code.is_none() {
-        "command_unknown"
-    } else {
-        "command_failed"
-    }
-    .to_string();
+    let command_success = command_succeeded(
+        exit_code,
+        timed_out,
+        search_no_match,
+        expected_false_exit,
+        failed_segment.is_some(),
+    );
+    let status_label = command_status_label(exit_code, timed_out, command_success).to_string();
+
     CommandStatus {
         transport_status: "ok".to_string(),
         command_success,
@@ -1242,6 +1236,34 @@ pub fn classify_command_status(
         pipeline_rerun_command,
         shell_syntax_summary: shell_syntax_summary_for_status(command, stdout, stderr, exit_code),
         status_label,
+    }
+}
+
+fn command_succeeded(
+    exit_code: Option<i32>,
+    timed_out: bool,
+    search_no_match: bool,
+    expected_false_exit: bool,
+    failed_segment: bool,
+) -> bool {
+    !timed_out
+        && !failed_segment
+        && (exit_code == Some(0) || search_no_match || expected_false_exit)
+}
+
+fn command_status_label(
+    exit_code: Option<i32>,
+    timed_out: bool,
+    command_success: bool,
+) -> &'static str {
+    if timed_out {
+        "command_timeout"
+    } else if command_success {
+        "command_success"
+    } else if exit_code.is_none() {
+        "command_unknown"
+    } else {
+        "command_failed"
     }
 }
 
