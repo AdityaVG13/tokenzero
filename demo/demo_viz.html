@@ -1,0 +1,575 @@
+﻿<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>TokenZero demo &mdash; visualisation</title>
+<style>
+  :root {
+    --bg: #0d1117;
+    --bg-elev: #161b22;
+    --bg-row: #1c222b;
+    --fg: #e6edf3;
+    --fg-dim: #8b949e;
+    --accent: #3fb950;
+    --accent-dim: #265d36;
+    --raw: #f97583;
+    --visible: #3fb950;
+    --warn: #d29922;
+    --warn-bg: #2a210a;
+    --border: #30363d;
+    --link: #58a6ff;
+  }
+  @media (prefers-color-scheme: light) {
+    :root {
+      --bg: #ffffff;
+      --bg-elev: #f6f8fa;
+      --bg-row: #f0f3f6;
+      --fg: #1f2328;
+      --fg-dim: #57606a;
+      --accent: #1f883d;
+      --accent-dim: #cfe7d4;
+      --raw: #cf222e;
+      --visible: #1f883d;
+      --warn: #9a6700;
+      --warn-bg: #fff8c5;
+      --border: #d0d7de;
+      --link: #0969da;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    padding: 32px 24px 64px;
+    background: var(--bg);
+    color: var(--fg);
+    font: 15px/1.55 -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+  }
+  .wrap { max-width: 1040px; margin: 0 auto; }
+  header.page h1 {
+    margin: 0 0 4px;
+    font-size: 28px;
+    letter-spacing: -0.01em;
+  }
+  header.page p.sub {
+    margin: 0;
+    color: var(--fg-dim);
+    font-size: 13px;
+  }
+  .hero {
+    display: grid;
+    grid-template-columns: 220px 1fr;
+    gap: 32px;
+    align-items: center;
+    background: var(--bg-elev);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 24px 28px;
+    margin: 24px 0 16px;
+  }
+  .hero .donut { position: relative; width: 200px; height: 200px; }
+  .hero .donut .pct {
+    position: absolute; inset: 0;
+    display: flex; align-items: center; justify-content: center;
+    flex-direction: column;
+    font-weight: 600;
+  }
+  .hero .donut .pct .big   { font-size: 36px; letter-spacing: -0.02em; }
+  .hero .donut .pct .small { font-size: 11px; color: var(--fg-dim); text-transform: uppercase; letter-spacing: 0.08em; }
+  .hero .stats { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; }
+  .hero .stats div { background: var(--bg-row); border-radius: 8px; padding: 14px; }
+  .hero .stats div .num { font-size: 20px; font-weight: 600; letter-spacing: -0.01em; }
+  .hero .stats div .lbl { color: var(--fg-dim); font-size: 11px; text-transform: uppercase; letter-spacing: 0.06em; margin-top: 2px; }
+  .hero-badges { grid-column: 1 / -1; display: flex; gap: 8px; flex-wrap: wrap; margin-top: 8px; }
+  .hero-badge { font-size: 12px; padding: 4px 10px; border-radius: 999px; font-weight: 600; }
+  .hero-badge.ok   { background: var(--accent-dim); color: var(--accent); }
+  .hero-badge.fail { background: var(--warn-bg);    color: var(--warn); }
+  .callout {
+    border-radius: 10px;
+    padding: 12px 16px;
+    margin: 12px 0;
+    font-size: 13px;
+    line-height: 1.55;
+  }
+  .callout.warn { background: var(--warn-bg); border: 1px solid var(--warn); color: var(--fg); }
+  section.scenarios { display: grid; gap: 12px; margin-top: 24px; }
+  article.row {
+    background: var(--bg-elev);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 16px 18px;
+  }
+  article.row header {
+    display: flex; align-items: center; justify-content: space-between; gap: 12px;
+    margin-bottom: 10px;
+  }
+  article.row h3 { margin: 0; font-size: 14px; font-weight: 600; }
+  .badge { font-size: 11px; padding: 3px 9px; border-radius: 999px; font-weight: 600; white-space: nowrap; }
+  .badge.savings    { background: var(--accent-dim); color: var(--accent); }
+  .badge.passthrough{ background: var(--bg-row);     color: var(--fg-dim); }
+  .badge.recovery   { background: var(--accent-dim); color: var(--accent); }
+  .bars { display: grid; gap: 6px; margin-top: 6px; }
+  .bar-row {
+    display: grid;
+    grid-template-columns: 56px 1fr 90px;
+    align-items: center; gap: 10px;
+  }
+  .bar-label { font-size: 11px; color: var(--fg-dim); text-transform: uppercase; letter-spacing: 0.05em; }
+  .bar { height: 14px; border-radius: 4px; min-width: 2px; }
+  .bar.raw     { background: var(--raw); }
+  .bar.visible { background: var(--visible); }
+  .bar-value   { font-size: 12px; color: var(--fg-dim); text-align: right; font-variant-numeric: tabular-nums; }
+  .note { margin: 8px 0 0; font-size: 12px; color: var(--fg-dim); }
+  footer.page { margin-top: 32px; font-size: 11px; color: var(--fg-dim); }
+  footer.page code { font-size: 11px; }
+  a { color: var(--link); }
+
+  /* --- Gap report section ------------------------------------------------ */
+  section.gaps { margin-top: 40px; }
+  section.gaps > header { display: flex; align-items: baseline; gap: 12px; margin-bottom: 16px; }
+  section.gaps > header h2 { margin: 0; font-size: 22px; letter-spacing: -0.01em; }
+  section.gaps > header .sub { color: var(--fg-dim); font-size: 13px; }
+  .sev-summary { display: flex; gap: 8px; flex-wrap: wrap; margin: 0 0 18px; }
+  .sev-count {
+    display: inline-flex; align-items: baseline; gap: 6px;
+    padding: 4px 10px; border-radius: 999px; font-size: 12px; font-weight: 600;
+    border: 1px solid var(--border);
+  }
+  .sev-count .n { font-size: 13px; font-weight: 700; }
+  .sev-critical { background: rgba(248,81,73,0.12);  color: #f85149; border-color: rgba(248,81,73,0.4); }
+  .sev-high     { background: rgba(210,153,34,0.12); color: var(--warn); border-color: rgba(210,153,34,0.4); }
+  .sev-medium   { background: rgba(88,166,255,0.10); color: var(--link); border-color: rgba(88,166,255,0.35); }
+  .sev-low      { background: rgba(139,148,158,0.10); color: var(--fg-dim); border-color: var(--border); }
+  details.finding {
+    background: var(--bg-elev);
+    border: 1px solid var(--border);
+    border-left: 4px solid var(--border);
+    border-radius: 8px;
+    padding: 10px 14px;
+    margin-bottom: 8px;
+  }
+  details.finding[data-sev="critical"] { border-left-color: #f85149; }
+  details.finding[data-sev="high"]     { border-left-color: var(--warn); }
+  details.finding[data-sev="medium"]   { border-left-color: var(--link); }
+  details.finding[data-sev="low"]      { border-left-color: var(--fg-dim); }
+  details.finding > summary {
+    cursor: pointer; list-style: none;
+    display: grid;
+    grid-template-columns: 36px 90px 1fr;
+    gap: 10px; align-items: baseline;
+  }
+  details.finding > summary::-webkit-details-marker { display: none; }
+  details.finding > summary .rank { color: var(--fg-dim); font-size: 12px; font-variant-numeric: tabular-nums; }
+  details.finding > summary .sev  { font-size: 10px; padding: 2px 8px; border-radius: 999px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.06em; text-align: center; }
+  details.finding > summary .ttl  { font-size: 14px; font-weight: 600; }
+  details.finding[open] > summary .ttl { color: var(--fg); }
+  .finding-body { margin-top: 12px; padding-top: 12px; border-top: 1px dashed var(--border); display: grid; gap: 10px; font-size: 13px; }
+  .finding-body .row-label { color: var(--fg-dim); font-size: 11px; text-transform: uppercase; letter-spacing: 0.06em; margin-bottom: 2px; }
+  .finding-body code,
+  .finding-body pre { background: var(--bg-row); padding: 1px 6px; border-radius: 4px; font-size: 12px; }
+  .finding-body pre { padding: 10px 12px; overflow-x: auto; white-space: pre-wrap; }
+  .finding-body .contradicts {
+    background: var(--warn-bg); color: var(--warn);
+    border-left: 3px solid var(--warn);
+    padding: 6px 10px; font-size: 12px; border-radius: 0 4px 4px 0;
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<header class="page">
+  <h1>TokenZero demo &mdash; visualisation</h1>
+  <p class="sub">tokenzero 1.0.1 &middot; generated 2026-06-12 14:09 +05:30 &middot; <code>&lt;repo&gt;</code></p>
+</header>
+
+<section class="hero">
+  <div class="donut">
+    <svg viewBox="0 0 200 200" width="200" height="200" aria-hidden="true">
+      <circle cx="100" cy="100" r="90" stroke="var(--bg-row)" stroke-width="18" fill="none"></circle>
+      <circle cx="100" cy="100" r="90" stroke="var(--accent)" stroke-width="18" fill="none"
+              stroke-dasharray="562.09 3.39" stroke-dashoffset="0"
+              transform="rotate(-90 100 100)" stroke-linecap="round"></circle>
+    </svg>
+    <div class="pct">
+      <div class="big">99.4%</div>
+      <div class="small">tokens hidden</div>
+    </div>
+  </div>
+  <div class="stats">
+    <div><div class="num">193,137</div><div class="lbl">Raw tokens (across runs)</div></div>
+    <div><div class="num">1,224</div><div class="lbl">Visible to agent</div></div>
+    <div><div class="num">99.4%</div><div class="lbl">Recovery-aware savings</div></div>
+    <div class="hero-badges">
+      <span class="hero-badge ok">byte-exact recovery: PASS</span>
+      <span class="hero-badge ok">isolated cache &middot; same tokenizer both sides</span>
+      <a class="hero-badge fail" href="#gaps" style="text-decoration:none">16 bugs flagged (3 critical / 6 high / 3 medium / 4 low) &rarr;</a>
+    </div>
+  </div>
+</section>
+
+<div class="callout warn"><strong>Observed gap (MCP session dedup).</strong> Second 16977-token read returned 185 visible tokens (savings 98.9%) -- first read was 150 (99.1%). README claims ~99.7%; observed dedup did not fire. See gap finding #9.</div>
+
+<section class="scenarios">
+<article class="row">
+  <header>
+    <h3>small read (Cargo.toml)</h3>
+    <span class="badge passthrough">pass-through</span>
+  </header>
+  <div class="bars">
+    <div class="bar-row">
+      <span class="bar-label">raw</span>
+      <div class="bar raw" style="width:51.24%"></div>
+      <span class="bar-value">324</span>
+    </div>
+    <div class="bar-row">
+      <span class="bar-label">visible</span>
+      <div class="bar visible" style="width:51.24%"></div>
+      <span class="bar-value">324</span>
+    </div>
+  </div>
+  <p class="note">pass-through; capsule never costs more than raw</p>
+</article>
+<article class="row">
+  <header>
+    <h3>large read (crates\tokenzero-mcp\src\lib.rs)</h3>
+    <span class="badge savings">99.1% saved</span>
+  </header>
+  <div class="bars">
+    <div class="bar-row">
+      <span class="bar-label">raw</span>
+      <div class="bar raw" style="width:86.32%"></div>
+      <span class="bar-value">16,977</span>
+    </div>
+    <div class="bar-row">
+      <span class="bar-label">visible</span>
+      <div class="bar visible" style="width:44.41%"></div>
+      <span class="bar-value">150</span>
+    </div>
+  </div>
+  <p class="note">ref: tz://blob/bcd0df05e78a5c055</p>
+</article>
+<article class="row">
+  <header>
+    <h3>re-read same file (MCP dedup)</h3>
+    <span class="badge savings">98.9% saved</span>
+  </header>
+  <div class="bars">
+    <div class="bar-row">
+      <span class="bar-label">raw</span>
+      <div class="bar raw" style="width:86.32%"></div>
+      <span class="bar-value">16,977</span>
+    </div>
+    <div class="bar-row">
+      <span class="bar-label">visible</span>
+      <div class="bar visible" style="width:46.27%"></div>
+      <span class="bar-value">185</span>
+    </div>
+  </div>
+  <p class="note">second call routed through seen-set in same MCP session</p>
+</article>
+<article class="row">
+  <header>
+    <h3>grep &#39;fn &#39; across crates\</h3>
+    <span class="badge savings">99.4% saved</span>
+  </header>
+  <div class="bars">
+    <div class="bar-row">
+      <span class="bar-label">raw</span>
+      <div class="bar raw" style="width:100.00%"></div>
+      <span class="bar-value">79,424</span>
+    </div>
+    <div class="bar-row">
+      <span class="bar-label">visible</span>
+      <div class="bar visible" style="width:55.22%"></div>
+      <span class="bar-value">508</span>
+    </div>
+  </div>
+  <p class="note">1865 matching lines</p>
+</article>
+<article class="row">
+  <header>
+    <h3>expand round-trip (large file)</h3>
+    <span class="badge recovery">byte-exact: recovered == original</span>
+  </header>
+</article>
+<article class="row">
+  <header>
+    <h3>recall &#39;fn main&#39; vs re-grep</h3>
+    <span class="badge savings">99.9% saved</span>
+  </header>
+  <div class="bars">
+    <div class="bar-row">
+      <span class="bar-label">raw</span>
+      <div class="bar raw" style="width:100.00%"></div>
+      <span class="bar-value">79,424</span>
+    </div>
+    <div class="bar-row">
+      <span class="bar-label">visible</span>
+      <div class="bar visible" style="width:33.93%"></div>
+      <span class="bar-value">46</span>
+    </div>
+  </div>
+  <p class="note">reuses cached payloads; no filesystem rescan</p>
+</article>
+<article class="row">
+  <header>
+    <h3>run -- git --version</h3>
+    <span class="badge passthrough">pass-through</span>
+  </header>
+  <div class="bars">
+    <div class="bar-row">
+      <span class="bar-label">raw</span>
+      <div class="bar raw" style="width:21.25%"></div>
+      <span class="bar-value">11</span>
+    </div>
+    <div class="bar-row">
+      <span class="bar-label">visible</span>
+      <div class="bar visible" style="width:21.25%"></div>
+      <span class="bar-value">11</span>
+    </div>
+  </div>
+  <p class="note">process capture + recoverable stream</p>
+</article>
+
+</section>
+
+<section class="gaps" id="gaps">
+  <header>
+    <h2>Bugs flagged for the developer</h2>
+    <span class="sub">16 findings &middot; sources: design review (rubber-duck agent, Sonnet), code review (code-review agent), empirical run of v1.0.1 release binary on this machine</span>
+  </header>
+  <div class="sev-summary">
+    <span class="sev-count sev-critical"><span class="n">3</span>critical</span>
+    <span class="sev-count sev-high"><span class="n">6</span>high</span>
+    <span class="sev-count sev-medium"><span class="n">3</span>medium</span>
+    <span class="sev-count sev-low"><span class="n">4</span>low</span>
+  </div>
+  <details class="finding" data-sev="critical" id="bug-win-path-wipe">
+    <summary>
+      <span class="rank">#1</span>
+      <span class="sev sev-critical">critical</span>
+      <span class="ttl">Windows installer silently wipes HKCU\Environment\Path when value name is not exactly &#39;Path&#39;</span>
+    </summary>
+    <div class="finding-body">
+      <div><div class="row-label">Impact</div>Data loss: existing user PATH entries are replaced by a single-entry value; rollback then *deletes* the value entirely instead of restoring it.</div>
+      <div class="contradicts"><strong>Contradicts:</strong> install docs &#39;records rollback data&#39;</div>
+      <div><div class="row-label">Evidence</div><code>windows_path.rs:69-88 (case-sensitive strip_prefix(&#39;Path&#39;)); install/lib.rs:518-583 (apply blindly uses None); install/lib.rs:628-637 (rollback enters delete branch because existed:false was persisted in the manifest).</code></div>
+      <div><div class="row-label">Repro</div>On a machine where HKCU\Environment\Path was previously written by `setx PATH ...` from CMD (stored as PATH or path), run `tokenzero install --apply` then `tokenzero install --rollback latest`. User PATH is empty.</div>
+      <div><div class="row-label">Fix sketch</div>Match the value name case-insensitively; treat parse-miss with exit-0 as fatal abort; in rollback() re-check live registry state before deleting when entry.existed is false.</div>
+      <div><div class="row-label">Source</div>code review #1 + #5</div>
+    </div>
+  </details>
+  <details class="finding" data-sev="critical" id="bug-ref-id-collision">
+    <summary>
+      <span class="rank">#2</span>
+      <span class="sev sev-critical">critical</span>
+      <span class="ttl">tz:// refs use only 64 bits of SHA-256 and overwrite on collision</span>
+    </summary>
+    <div class="finding-body">
+      <div><div class="row-label">Impact</div>`expand` can silently return wrong bytes for a valid ref, breaking the core &#39;byte-exact recoverable&#39; invariant.</div>
+      <div class="contradicts"><strong>Contradicts:</strong> docs/racc.md:45 &#39;dangling refs never return wrong bytes&#39;</div>
+      <div><div class="row-label">Evidence</div><code>core/lib.rs:1528-1536 truncates SHA-256 to 8 bytes; recovery/lib.rs:559-562 inserts by id with no length/hash verification.</code></div>
+      <div><div class="row-label">Fix sketch</div>Store full SHA-256 hash + length alongside the ref id; verify on expand; collision bucket or refuse to serve on detected collision.</div>
+      <div><div class="row-label">Source</div>design review #5</div>
+    </div>
+  </details>
+  <details class="finding" data-sev="critical" id="bug-refs-evicted-before-emit">
+    <summary>
+      <span class="rank">#3</span>
+      <span class="sev sev-critical">critical</span>
+      <span class="ttl">Refs can be evicted before the response that advertises them returns</span>
+    </summary>
+    <div class="finding-body">
+      <div><div class="row-label">Impact</div>A single large payload or cache-pressure event can hand the agent a `tz://` it cannot expand. Capsule-level liveness check happens before the persist, eviction happens after.</div>
+      <div class="contradicts"><strong>Contradicts:</strong> README &#39;byte-exact recoverable&#39;; docs/racc.md:55 &#39;exact refs with no dangling handles&#39;</div>
+      <div><div class="row-label">Evidence</div><code>mcp/lib.rs:355-356, :446-490 (refs pushed before persist_pending, no re-check); recovery/lib.rs:681-779 (evict runs before write, drops oldest live refs while over max_bytes).</code></div>
+      <div><div class="row-label">Fix sketch</div>Pin the current response&#39;s refs through persist, or re-verify with has_ref after eviction; if they can&#39;t fit, return degraded output with no refs or atomically expand capacity for the current call.</div>
+      <div><div class="row-label">Source</div>design review #2</div>
+    </div>
+  </details>
+  <details class="finding" data-sev="high" id="bug-mcp-not-pulse-accounted">
+    <summary>
+      <span class="rank">#4</span>
+      <span class="sev sev-high">high</span>
+      <span class="ttl">MCP traffic is not Pulse-accounted; &#39;savings after recovery&#39; is untrue on the main integration surface</span>
+    </summary>
+    <div class="finding-body">
+      <div><div class="row-label">Impact</div>`tz_expand` calls over MCP never charge recovery tokens back to the original serve, so the headline RACC accounting claim does not hold for agent-routed usage (the only real-world surface).</div>
+      <div class="contradicts"><strong>Contradicts:</strong> README &#39;Savings are counted after any recovery&#39;</div>
+      <div><div class="row-label">Evidence</div><code>mcp/tools.rs:14-21 (MCP dispatch returns response with no Pulse write); CLI commands DO call record_tool_pulse at tokenzero/src/main.rs:448, :719; pulse events lack session/call ids (pulse/src/lib.rs:19-35; docs/pulse.md:220-223).</code></div>
+      <div><div class="row-label">Fix sketch</div>Instrument Pulse at the MCP tools/call boundary (including tz_expand); include stable session/call/ref ids so recovery can be attributed back to the original serve.</div>
+      <div><div class="row-label">Source</div>design review #1</div>
+    </div>
+  </details>
+  <details class="finding" data-sev="high" id="bug-tz-fetch-ssrf">
+    <summary>
+      <span class="rank">#5</span>
+      <span class="sev sev-high">high</span>
+      <span class="ttl">`tz_fetch` is an unrestricted SSRF / exfiltration primitive</span>
+    </summary>
+    <div class="finding-body">
+      <div><div class="row-label">Impact</div>Any MCP-capable agent can fetch arbitrary http(s) URLs (loopback, link-local, cloud metadata endpoints, internal services) and cache the bodies behind refs.</div>
+      <div><div class="row-label">Evidence</div><code>mcp/tools.rs:201-209 (fetch exposed unconditionally); mcp/lib.rs:1674-1718 (only checks http(s) prefix, then invokes `curl -sS -L`).</code></div>
+      <div><div class="row-label">Fix sketch</div>Default to network-off; add allow/deny lists; block loopback, RFC1918, link-local, and metadata IPs after DNS resolution; cap redirects; log fetches as security-relevant telemetry.</div>
+      <div><div class="row-label">Source</div>design review #4</div>
+    </div>
+  </details>
+  <details class="finding" data-sev="high" id="bug-supervisor-double-reply">
+    <summary>
+      <span class="rank">#6</span>
+      <span class="sev sev-high">high</span>
+      <span class="ttl">Supervisor can send both a retryable error and a real response for the same JSON-RPC id</span>
+    </summary>
+    <div class="finding-body">
+      <div><div class="row-label">Impact</div>Strict MCP clients may treat duplicate replies as protocol violations and tear down the session; resent reply also hardcodes framed=false.</div>
+      <div class="contradicts"><strong>Contradicts:</strong> README &#39;crash-transparent supervisor&#39;</div>
+      <div><div class="row-label">Evidence</div><code>mcp/supervisor.rs:157-166 (tracks request, stores as pending_resend on failed write), :424-438 (drains all outstanding ids with retryable errors), :451-453 + :475-484 (resend with framed=false).</code></div>
+      <div><div class="row-label">Fix sketch</div>For a message known not to reach the child, remove its id from outstanding before emitting retryable errors; preserve original framing on resend; return either an error or a replay, never both.</div>
+      <div><div class="row-label">Source</div>design review #3</div>
+    </div>
+  </details>
+  <details class="finding" data-sev="high" id="bug-symlink-loop-walker">
+    <summary>
+      <span class="rank">#7</span>
+      <span class="sev sev-high">high</span>
+      <span class="ttl">`collect_search` / `collect_glob` recurse forever on symlink loops inside an allowed root</span>
+    </summary>
+    <div class="finding-body">
+      <div><div class="row-label">Impact</div>Single `tz_find` or `tz_glob` against a tree with a symlink cycle → stack overflow / wall-clock DoS. `collect_tree` is depth-bounded; these two aren&#39;t, which makes the asymmetry hard to spot in review.</div>
+      <div><div class="row-label">Evidence</div><code>mcp/collect.rs:177-251 (collect_search), :493-534 (collect_glob); both call path.is_dir() which follows links; no visited-set, no depth bound. max_files only stops when results vector is full.</code></div>
+      <div><div class="row-label">Fix sketch</div>Mirror collect_tree&#39;s depth bound; skip entries where file_type.is_symlink(); or switch to walkdir::WalkDir::new().follow_links(false).max_depth(N).</div>
+      <div><div class="row-label">Source</div>code review #3</div>
+    </div>
+  </details>
+  <details class="finding" data-sev="high" id="bug-fetch-index-corruption">
+    <summary>
+      <span class="rank">#8</span>
+      <span class="sev sev-high">high</span>
+      <span class="ttl">`record_fetch` corrupts/loses the fetch index under any concurrency or crash</span>
+    </summary>
+    <div class="finding-body">
+      <div><div class="row-label">Impact</div>Two concurrent tz_fetch calls (4-worker MCP pool or two processes against the same cache) silently lose entries; a crash mid-write leaves truncated JSON and load_fetch_index then returns default(), mass-invalidating all previously cached fetches.</div>
+      <div><div class="row-label">Evidence</div><code>mcp/lib.rs:2285-2315 uses std::fs::write (truncate+write) with no lock, no atomic temp+rename, no sync_data; load_fetch_index at :2271-2276 swallows parse errors.</code></div>
+      <div><div class="row-label">Fix sketch</div>Reuse the recovery crate&#39;s atomic_write_json pattern (sibling-tmp + fs4 lock + sync_data + rename + counter-nonce tmp name).</div>
+      <div><div class="row-label">Source</div>code review #2</div>
+    </div>
+  </details>
+  <details class="finding" data-sev="high" id="bug-mcp-dedup-race">
+    <summary>
+      <span class="rank">#9</span>
+      <span class="sev sev-high">high</span>
+      <span class="ttl">MCP session dedup race — README&#39;s headline 99.7% repeat-read benchmark does not reproduce</span>
+    </summary>
+    <div class="finding-body">
+      <div><div class="row-label">Impact</div>The &#39;session dedup&#39; feature exists (SessionMemory + unchanged_read_note, on by default) but is not enforced across pipelined requests in the 4-worker pool. README benchmark row &#39;16,712 → 45 (99.7%)&#39; is unreproducible.</div>
+      <div class="contradicts"><strong>Contradicts:</strong> README benchmark row &#39;Re-read the same file (session dedup): 16,712 → 45 tokens, 99.7%&#39;</div>
+      <div><div class="row-label">Evidence</div><code>EMPIRICAL: two pipelined `tools/call read` requests on the same MCP session return byte-identical 732-char responses (185 vs 150 visible tokens — observed in this demo). Feature: session.rs:22-92, lib.rs:380-405. Worker pool: stdio.rs:37-44, :93-103. First read does not update session memory until persist completes (lib.rs:446-519). Benchmark harness uses `sleep 1` instead of response-gated send: scripts/benchmark_tokens.sh:52-63.</code></div>
+      <div><div class="row-label">Fix sketch</div>Serialize same-key reads via an in-flight-serve table keyed by ServeKey; second identical request waits for the first to persist, then emits unchanged note. Fix the benchmark to await response id=2 before sending id=3. Re-run README numbers from the fixed harness.</div>
+      <div><div class="row-label">Source</div>design review #10 (added after my empirical observation)</div>
+    </div>
+  </details>
+  <details class="finding" data-sev="medium" id="bug-quiet-rewrite-lossy">
+    <summary>
+      <span class="rank">#10</span>
+      <span class="sev sev-medium">medium</span>
+      <span class="ttl">Command rewriting (-q / --silent) makes &#39;byte-exact recoverable&#39; untrue for build/test logs</span>
+    </summary>
+    <div class="finding-body">
+      <div><div class="row-label">Impact</div>What&#39;s cached is the rewritten command&#39;s bytes, not the user&#39;s original command. Test failures hidden by -q can&#39;t be recovered.</div>
+      <div><div class="row-label">Evidence</div><code>filters/lib.rs:170-172, :300-323 add quiet flags to build/test/package commands by default.</code></div>
+      <div><div class="row-label">Fix sketch</div>Do not rewrite output semantics by default; if quiet rewriting stays, mark explicitly lossy and exclude from exact-output claims.</div>
+      <div><div class="row-label">Source</div>design review #6</div>
+    </div>
+  </details>
+  <details class="finding" data-sev="medium" id="bug-rollback-id-collision">
+    <summary>
+      <span class="rank">#11</span>
+      <span class="sev sev-medium">medium</span>
+      <span class="ttl">Rollback manifests can collide within one second</span>
+    </summary>
+    <div class="finding-body">
+      <div><div class="row-label">Impact</div>Two applies within the same second share an id/path; the second overwrites the first manifest, destroying the ability to restore the true prior state.</div>
+      <div><div class="row-label">Evidence</div><code>install/lib.rs:929-931 (id is seconds-only); install/lib.rs:565-569 (writes without uniqueness enforcement).</code></div>
+      <div><div class="row-label">Fix sketch</div>Nanoseconds + random suffix; OpenOptions::create_new; fail/retry on collision; include apply-transaction id in every verification row.</div>
+      <div><div class="row-label">Source</div>design review #7</div>
+    </div>
+  </details>
+  <details class="finding" data-sev="medium" id="bug-tz-edit-race">
+    <summary>
+      <span class="rank">#12</span>
+      <span class="sev sev-medium">medium</span>
+      <span class="ttl">`tz_edit` write race + missing fsync; doc claim overstates crash safety</span>
+    </summary>
+    <div class="finding-body">
+      <div><div class="row-label">Impact</div>Two same-PID workers editing the same path interleave bytes in the shared tmp file; no fsync/parent-sync means power loss between rename and data-flush can leave the user&#39;s file truncated.</div>
+      <div><div class="row-label">Evidence</div><code>mcp/render.rs:253-271 — tmp is `.{file}.tz-edit-{pid}` (no per-call nonce), no create_new, no advisory lock; fs::write with no sync_data. Compare recovery/lib.rs:1069+:1248-1259 which uses AtomicUsize+create_new+sync_data.</code></div>
+      <div><div class="row-label">Fix sketch</div>Add process-wide AtomicUsize counter for tmp suffix; create_new(true); sync_data before rename; best-effort parent-dir sync_all.</div>
+      <div><div class="row-label">Source</div>code review #4</div>
+    </div>
+  </details>
+  <details class="finding" data-sev="low" id="bug-jsonrpc-notif-reply">
+    <summary>
+      <span class="rank">#13</span>
+      <span class="sev sev-low">low</span>
+      <span class="ttl">JSON-RPC error replies emitted for malformed notifications (spec violation)</span>
+    </summary>
+    <div class="finding-body">
+      <div><div class="row-label">Impact</div>Server replies with id:null for notifications that fail params/method/jsonrpc validation; strict clients treat unexpected responses as protocol violations.</div>
+      <div><div class="row-label">Evidence</div><code>mcp/jsonrpc.rs:91-141 — checks at :91, :102, :113, :126 all reply before the notification short-circuit at :139.</code></div>
+      <div><div class="row-label">Fix sketch</div>Hoist `if !object.contains_key(&#39;id&#39;) { return None; }` to the top of handle_jsonrpc_request.</div>
+      <div><div class="row-label">Source</div>code review #6</div>
+    </div>
+  </details>
+  <details class="finding" data-sev="low" id="bug-ingest-no-cap">
+    <summary>
+      <span class="rank">#14</span>
+      <span class="sev sev-low">low</span>
+      <span class="ttl">`ingest --stdin` has no input cap</span>
+    </summary>
+    <div class="finding-body">
+      <div><div class="row-label">Impact</div>Malicious or accidental large stdin exhausts memory before capsule/cache limits apply.</div>
+      <div><div class="row-label">Evidence</div><code>tokenzero/src/main.rs:659-663 uses unbounded read_to_string; cli_args.rs:302-310 exposes no max-input flag.</code></div>
+      <div><div class="row-label">Fix sketch</div>Default byte cap with streaming/spill path; explicit --max-input-bytes / --allow-large to opt out.</div>
+      <div><div class="row-label">Source</div>design review #8</div>
+    </div>
+  </details>
+  <details class="finding" data-sev="low" id="bug-install-no-parent-sync">
+    <summary>
+      <span class="rank">#15</span>
+      <span class="sev sev-low">low</span>
+      <span class="ttl">Install `atomic_write` is missing parent-directory fsync</span>
+    </summary>
+    <div class="finding-body">
+      <div><div class="row-label">Impact</div>Same crash window as #12 for install manifests; power loss after user-observed &#39;install ok&#39; can leave the file pointing at no entry.</div>
+      <div><div class="row-label">Evidence</div><code>install/lib.rs:883-911 calls sync_all on data file but never on the parent dir. pulse/src/lib.rs:814 has sync_parent helper — install could mirror it.</code></div>
+      <div><div class="row-label">Fix sketch</div>After rename, best-effort open the parent dir and sync_all (no-op on Windows).</div>
+      <div><div class="row-label">Source</div>code review #7</div>
+    </div>
+  </details>
+  <details class="finding" data-sev="low" id="bug-protocol-version-drift">
+    <summary>
+      <span class="rank">#16</span>
+      <span class="sev sev-low">low</span>
+      <span class="ttl">MCP protocol-version docs and implementation disagree</span>
+    </summary>
+    <div class="finding-body">
+      <div><div class="row-label">Impact</div>Clients may negotiate versions not documented in the README.</div>
+      <div><div class="row-label">Evidence</div><code>README.md:268-271 lists 2025-03-26, 2025-06-18, 2026-07-28-RC; mcp/jsonrpc.rs:7-14 also accepts 2024-11-05 and DRAFT-2026-v1.</code></div>
+      <div><div class="row-label">Fix sketch</div>Align docs and code; document fallback behavior for unsupported versions.</div>
+      <div><div class="row-label">Source</div>design review #9</div>
+    </div>
+  </details>
+</section>
+
+
+<footer class="page">
+  Bars use a log-base-10 scale so 11-token and 79,000-token rows are both
+  legible. Source: <code>demo/demo_results.json</code> + <code>demo/gap_report.json</code>.
+  Regenerate with <code>pwsh -File demo\run_demo.ps1</code> then
+  <code>pwsh -File demo\build_viz.ps1 -Open</code>.
+</footer>
+
+</div>
+</body>
+</html>

@@ -164,3 +164,10 @@ NDH6SA~M
 
 # skill-loop working state
 .skill-loop-progress.md
+
+# demo/ per-machine artifacts (regenerable by demo scripts)
+/demo/.cache/
+/demo/.tokenzero/
+/demo/.tokenzero-bin/
+/demo/tokenzero-mcp.json
+/demo/agent_runs/

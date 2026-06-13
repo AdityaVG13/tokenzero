@@ -1,0 +1,146 @@
+{
+  "meta": {
+    "task": "jsonrpc_errors",
+    "model": "gpt-5-mini",
+    "replicates": 3,
+    "conditions": [
+      "baseline",
+      "tokenzero"
+    ],
+    "repo": "<repo>",
+    "started_at": "2026-06-12 15:04:31"
+  },
+  "totals": {
+    "done": 6,
+    "failed": 0,
+    "running": 0,
+    "total": 6,
+    "elapsed_ms": 853241
+  },
+  "summary": {
+    "baseline": {
+      "n": 3,
+      "mean_tool_output_tokens": 51823.0,
+      "stddev_tool_output_tokens": 30418.81044682714,
+      "mean_tool_calls": 19.666666666666668,
+      "mean_wall_ms": 176392.0,
+      "mean_api_ms": 152565.66666666666,
+      "mean_input_tokens": null,
+      "mean_output_tokens": 10937.333333333334
+    },
+    "tokenzero": {
+      "n": 3,
+      "mean_tool_output_tokens": 3786.0,
+      "stddev_tool_output_tokens": 3090.162293472626,
+      "mean_tool_calls": 10.0,
+      "mean_wall_ms": 105068.66666666667,
+      "mean_api_ms": 83539.33333333333,
+      "mean_input_tokens": null,
+      "mean_output_tokens": 5171.333333333333
+    }
+  },
+  "runs": [
+    {
+      "index": 1,
+      "condition": "baseline",
+      "replicate": 1,
+      "status": "done",
+      "wall_ms": 224328,
+      "api_ms": 198776,
+      "input_tokens": null,
+      "output_tokens": 14344.0,
+      "tool_calls": 37,
+      "tool_output_tokens": 85011,
+      "exit_code": 0,
+      "note": "live: 2318 events, 37 tool calls, 18 msgs (223s)",
+      "jsonl_path": "<repo>/demo/agent_runs/baseline-r1.jsonl",
+      "session_ms": 220031,
+      "premium_requests": 0
+    },
+    {
+      "index": 2,
+      "condition": "tokenzero",
+      "replicate": 1,
+      "status": "done",
+      "wall_ms": 80360,
+      "api_ms": 59369,
+      "input_tokens": null,
+      "output_tokens": 3506.0,
+      "tool_calls": 9,
+      "tool_output_tokens": 1427,
+      "exit_code": 0,
+      "note": "live: 86 events, 9 tool calls, 3 msgs (78s)",
+      "jsonl_path": "<repo>/demo/agent_runs/tokenzero-r1.jsonl",
+      "session_ms": 68452,
+      "premium_requests": 0
+    },
+    {
+      "index": 3,
+      "condition": "baseline",
+      "replicate": 2,
+      "status": "done",
+      "wall_ms": 173076,
+      "api_ms": 150073,
+      "input_tokens": null,
+      "output_tokens": 9650.0,
+      "tool_calls": 6,
+      "tool_output_tokens": 45190,
+      "exit_code": 0,
+      "note": "live: 1933 events, 6 tool calls, 4 msgs (173s)",
+      "jsonl_path": "<repo>/demo/agent_runs/baseline-r2.jsonl",
+      "session_ms": 167126,
+      "premium_requests": 0
+    },
+    {
+      "index": 4,
+      "condition": "tokenzero",
+      "replicate": 2,
+      "status": "done",
+      "wall_ms": 99445,
+      "api_ms": 78446,
+      "input_tokens": null,
+      "output_tokens": 5108.0,
+      "tool_calls": 7,
+      "tool_output_tokens": 2647,
+      "exit_code": 0,
+      "note": "live: 341 events, 7 tool calls, 7 msgs (99s)",
+      "jsonl_path": "<repo>/demo/agent_runs/tokenzero-r2.jsonl",
+      "session_ms": 93183,
+      "premium_requests": 0
+    },
+    {
+      "index": 5,
+      "condition": "baseline",
+      "replicate": 3,
+      "status": "done",
+      "wall_ms": 131772,
+      "api_ms": 108848,
+      "input_tokens": null,
+      "output_tokens": 8818.0,
+      "tool_calls": 16,
+      "tool_output_tokens": 25268,
+      "exit_code": 0,
+      "note": "live: 1710 events, 16 tool calls, 4 msgs (130s)",
+      "jsonl_path": "<repo>/demo/agent_runs/baseline-r3.jsonl",
+      "session_ms": 126920,
+      "premium_requests": 0
+    },
+    {
+      "index": 6,
+      "condition": "tokenzero",
+      "replicate": 3,
+      "status": "done",
+      "wall_ms": 135401,
+      "api_ms": 112803,
+      "input_tokens": null,
+      "output_tokens": 6900.0,
+      "tool_calls": 14,
+      "tool_output_tokens": 7284,
+      "exit_code": 0,
+      "note": "live: 968 events, 14 tool calls, 12 msgs (135s)",
+      "jsonl_path": "<repo>/demo/agent_runs/tokenzero-r3.jsonl",
+      "session_ms": 126264,
+      "premium_requests": 0
+    }
+  ]
+}
