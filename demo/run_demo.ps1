@@ -1,7 +1,7 @@
 #requires -Version 5.1
 <#
 .SYNOPSIS
-    Self-contained TokenZero demo for Windows.
+    Self-contained TokenZero demo for Windows, macOS, and Linux.
 
 .DESCRIPTION
     Walks an AI agent's "tool day in the life" through TokenZero and counts
@@ -12,8 +12,8 @@
       1. Resolves a `tokenzero` binary
            - if -BinaryPath is given, uses it
            - else if `tokenzero` is on PATH, uses that
-           - else downloads the latest GitHub Release for x86_64-pc-windows-msvc
-             into demo\.tokenzero-bin\, verifies SHA256, and runs from there.
+           - else downloads the GitHub Release asset for the current OS/CPU
+             into demo/.tokenzero-bin/, verifies SHA256, and runs from there.
       2. Uses an isolated cache file under demo\.cache\ so the demo never
          touches the user's real TokenZero state.
       3. Runs five real scenarios against THIS REPO:
@@ -28,7 +28,7 @@
       5. Prints a Markdown summary table and writes demo\demo_results.json.
 
 .PARAMETER BinaryPath
-    Optional explicit path to tokenzero.exe. If omitted, falls back to PATH
+    Optional explicit path to tokenzero. If omitted, falls back to PATH
     and then to a downloaded release binary.
 
 .PARAMETER ReleaseTag
@@ -84,13 +84,15 @@ function Resolve-TokenZeroBinary {
     $onPath = Get-Command tokenzero -ErrorAction SilentlyContinue
     if ($onPath) { return $onPath.Source }
 
-    $cached = Join-Path $BinDir 'tokenzero.exe'
+    $exeName = Get-TokenZeroExecutableName
+    $cached = Join-Path $BinDir $exeName
     if (Test-Path -LiteralPath $cached) { return $cached }
 
     if ($NoDownload) { throw 'tokenzero binary not found and -SkipDownload was set.' }
 
-    Write-Host "==> Downloading TokenZero $Tag (Windows x86_64) into $BinDir" -ForegroundColor Cyan
-    $asset = "tokenzero-$Tag-x86_64-pc-windows-msvc.zip"
+    $assetInfo = Get-TokenZeroReleaseAsset -Tag $Tag
+    Write-Host "==> Downloading TokenZero $Tag ($($assetInfo.Rid)) into $BinDir" -ForegroundColor Cyan
+    $asset = $assetInfo.Name
     $base  = "https://github.com/AdityaVG13/tokenzero/releases/download/$Tag"
     $zip   = Join-Path $BinDir $asset
     $sha   = "$zip.sha256"
@@ -106,11 +108,53 @@ function Resolve-TokenZeroBinary {
 
     $extract = Join-Path $BinDir 'extract'
     if (Test-Path -LiteralPath $extract) { Remove-Item -Recurse -Force $extract }
-    Expand-Archive -LiteralPath $zip -DestinationPath $extract -Force
-    $exe = Get-ChildItem -Path $extract -Recurse -Filter 'tokenzero.exe' | Select-Object -First 1
-    if (-not $exe) { throw "tokenzero.exe not found inside $asset" }
+    if ($assetInfo.Extension -eq '.zip') {
+        Expand-Archive -LiteralPath $zip -DestinationPath $extract -Force
+    } else {
+        $null = New-Item -ItemType Directory -Force -Path $extract
+        & tar -xzf $zip -C $extract
+        if ($LASTEXITCODE -ne 0) { throw "tar failed to extract $asset" }
+    }
+    $exe = Get-ChildItem -Path $extract -Recurse -Filter $exeName | Select-Object -First 1
+    if (-not $exe) { throw "$exeName not found inside $asset" }
     Copy-Item -LiteralPath $exe.FullName -Destination $cached -Force
     return $cached
+}
+
+function Test-IsWindows {
+    return ($PSVersionTable.PSEdition -eq 'Desktop' -or [System.Environment]::OSVersion.Platform -eq [System.PlatformID]::Win32NT)
+}
+
+function Get-TokenZeroExecutableName {
+    if (Test-IsWindows) { return 'tokenzero.exe' }
+    return 'tokenzero'
+}
+
+function Get-TokenZeroReleaseAsset {
+    param([Parameter(Mandatory)][string]$Tag)
+
+    $isWindows = Test-IsWindows
+    if ($isWindows) {
+        $arch = if ([Environment]::Is64BitOperatingSystem) { 'x64' } else { 'x86' }
+        $isMac = $false
+        $isLinux = $false
+    } else {
+        $arch = [System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture.ToString().ToLowerInvariant()
+        $isMac = [System.Runtime.InteropServices.RuntimeInformation]::IsOSPlatform([System.Runtime.InteropServices.OSPlatform]::OSX)
+        $isLinux = [System.Runtime.InteropServices.RuntimeInformation]::IsOSPlatform([System.Runtime.InteropServices.OSPlatform]::Linux)
+    }
+
+    if ($isWindows -and $arch -eq 'x64') { $rid = 'x86_64-pc-windows-msvc'; $ext = '.zip' }
+    elseif ($isLinux -and $arch -eq 'x64') { $rid = 'x86_64-unknown-linux-gnu'; $ext = '.tar.gz' }
+    elseif ($isMac -and $arch -eq 'arm64') { $rid = 'aarch64-apple-darwin'; $ext = '.tar.gz' }
+    elseif ($isMac -and $arch -eq 'x64') { $rid = 'x86_64-apple-darwin'; $ext = '.tar.gz' }
+    else { throw "unsupported platform for release download: OS=$([System.Environment]::OSVersion.Platform) ARCH=$arch" }
+
+    [pscustomobject]@{
+        Rid = $rid
+        Extension = $ext
+        Name = "tokenzero-$Tag-$rid$ext"
+    }
 }
 
 $Tz = Resolve-TokenZeroBinary -Explicit $BinaryPath -Tag $ReleaseTag -NoDownload:$SkipDownload
@@ -140,6 +184,18 @@ function ConvertTo-Win32CommandLineArg {
     return $sb.ToString()
 }
 
+function Set-ProcessArguments {
+    param(
+        [Parameter(Mandatory)] [System.Diagnostics.ProcessStartInfo] $ProcessStartInfo,
+        [Parameter(Mandatory)] [string[]] $ArgList
+    )
+    if ($ProcessStartInfo.PSObject.Properties.Name -contains 'ArgumentList') {
+        foreach ($a in $ArgList) { [void]$ProcessStartInfo.ArgumentList.Add($a) }
+    } else {
+        $ProcessStartInfo.Arguments = ($ArgList | ForEach-Object { ConvertTo-Win32CommandLineArg $_ }) -join ' '
+    }
+}
+
 function Invoke-Tz {
     [CmdletBinding()]
     param([Parameter(Mandatory)][string[]]$ArgList, [string]$StdIn)
@@ -148,7 +204,7 @@ function Invoke-Tz {
     # Windows PowerShell 5.1 (.NET Framework, no ArgumentList) and pwsh 7+.
     $psi = New-Object System.Diagnostics.ProcessStartInfo
     $psi.FileName               = $Tz
-    $psi.Arguments              = ($ArgList | ForEach-Object { ConvertTo-Win32CommandLineArg $_ }) -join ' '
+    Set-ProcessArguments -ProcessStartInfo $psi -ArgList $ArgList
     $psi.RedirectStandardInput  = $true
     $psi.RedirectStandardOutput = $true
     $psi.RedirectStandardError  = $true
@@ -217,9 +273,9 @@ Write-Host "Cache (isolated): $CachePath"
 Write-Host ''
 
 # 1. Small file pass-through (capsule-never-costs-more guarantee)
-$smallFile = 'crates\tokenzero\Cargo.toml'
+$smallFile = Join-Path 'crates' (Join-Path 'tokenzero' 'Cargo.toml')
 if (Test-Path -LiteralPath $smallFile) {
-    Write-Host "[1/6] small read  : $smallFile"
+    Write-Host "[1/7] small read  : $smallFile"
     $raw      = (Get-Content -LiteralPath $smallFile -Raw)
     $rawTok   = Get-RawTokens $raw
     $resJson  = Invoke-Tz -ArgList @('read', $smallFile, '--json', '--cache-path', $CachePath)
@@ -228,10 +284,10 @@ if (Test-Path -LiteralPath $smallFile) {
 }
 
 # 2. Large file read (heavy savings + tz:// refs)
-$largeFile = 'crates\tokenzero-mcp\src\lib.rs'
+$largeFile = Join-Path 'crates' (Join-Path 'tokenzero-mcp' (Join-Path 'src' 'lib.rs'))
 $largeRef  = $null
 if (Test-Path -LiteralPath $largeFile) {
-    Write-Host "[2/6] large read  : $largeFile"
+    Write-Host "[2/7] large read  : $largeFile"
     $raw      = (Get-Content -LiteralPath $largeFile -Raw)
     $rawTok   = Get-RawTokens $raw
     $resJson  = Invoke-Tz -ArgList @('read', $largeFile, '--json', '--cache-path', $CachePath)
@@ -247,7 +303,7 @@ if (Test-Path -LiteralPath $largeFile) {
 #    replicate scripts/benchmark_tokens.sh and JSON-RPC against `mcp-server`
 #    twice within the same stdio session.
 if (Test-Path -LiteralPath $largeFile) {
-    Write-Host "[3/6] re-read     : $largeFile (MCP session dedup)"
+    Write-Host "[3/7] re-read     : $largeFile (MCP session dedup)"
 
     $absLarge = (Resolve-Path -LiteralPath $largeFile).Path
     $pathArg  = $absLarge -replace '\\','\\'  # JSON-escape backslashes
@@ -283,7 +339,7 @@ if (Test-Path -LiteralPath $largeFile) {
 }
 
 # 4. Repo-wide grep (recoverable hit set)
-Write-Host "[4/6] grep        : 'fn ' across crates\"
+Write-Host "[4/7] grep        : 'fn ' across crates/"
 $rawGrepLines = @()
 Get-ChildItem -Path 'crates' -Recurse -File -Filter '*.rs' -ErrorAction SilentlyContinue |
     ForEach-Object {
@@ -297,11 +353,11 @@ $rawGrep  = ($rawGrepLines -join "`n")
 $rawTok   = Get-RawTokens $rawGrep
 $resJson  = Invoke-Tz -ArgList @('grep', 'fn ', 'crates', '--json', '--max-files', '200', '--cache-path', $CachePath)
 $visTok   = Get-VisibleTokens $resJson
-Add-Row "grep 'fn ' across crates\" $rawTok $visTok ("{0} matching lines" -f $rawGrepLines.Count)
+Add-Row "grep 'fn ' across crates/" $rawTok $visTok ("{0} matching lines" -f $rawGrepLines.Count)
 
 # 5. Recovery round-trip: expand the large-read blob and byte-compare
 if ($largeRef) {
-    Write-Host "[5/6] expand      : $largeRef (byte-exact check)"
+    Write-Host "[5/7] expand      : $largeRef (byte-exact check)"
     $recovered = Invoke-Tz -ArgList @('expand', $largeRef, '--raw', '--cache-path', $CachePath)
     $original  = [System.IO.File]::ReadAllText((Resolve-Path -LiteralPath $largeFile).Path)
     # Tolerate a single trailing newline that stdout streams sometimes add.
@@ -315,7 +371,7 @@ if ($largeRef) {
 }
 
 # 6. Recall: re-find content already in the cache without re-scanning
-Write-Host "[6/6] recall      : 'fn main' (no re-grep)"
+Write-Host "[6/7] recall      : 'fn main' (no re-grep)"
 $resJson  = Invoke-Tz -ArgList @('recall', 'fn main', '--max-hits', '10', '--json', '--cache-path', $CachePath)
 $visTok   = Get-VisibleTokens $resJson
 # Same baseline as scenario 4 — we are showing recall vs re-running that grep.
@@ -323,7 +379,13 @@ Add-Row "recall 'fn main' vs re-grep" $rawTok $visTok 'reuses cached payloads; n
 
 # 7. Shell capture (always works even if cargo missing)
 Write-Host "[7/7] run         : capture a small shell command"
-$probeCmd = if (Get-Command git -ErrorAction SilentlyContinue) { @('git','--version') } else { @('cmd','/c','ver') }
+$probeCmd = if (Get-Command git -ErrorAction SilentlyContinue) {
+    @('git','--version')
+} elseif (Test-IsWindows) {
+    @('cmd','/c','ver')
+} else {
+    @('uname','-a')
+}
 try {
     $rawOut  = & $probeCmd[0] @($probeCmd[1..($probeCmd.Length-1)]) 2>&1 | Out-String
     $rawTok  = Get-RawTokens $rawOut
@@ -385,7 +447,14 @@ if (-not $NoViz) {
                      '-ResultsPath', $ResultsPath,
                      '-OutPath',     (Join-Path $DemoDir 'demo_viz.html'))
         if ($OpenViz) { $vizArgs += '-Open' }
-        & powershell @vizArgs
+        $psHost = if ((Get-Command pwsh -ErrorAction SilentlyContinue)) {
+            (Get-Command pwsh).Source
+        } elseif ((Get-Command powershell -ErrorAction SilentlyContinue)) {
+            (Get-Command powershell).Source
+        } else {
+            throw 'PowerShell host not found for rendering visualization.'
+        }
+        & $psHost @vizArgs
     } else {
         Write-Warning "build_viz.ps1 not found at $vizScript; skipping visualization."
     }

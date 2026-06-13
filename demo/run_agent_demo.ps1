@@ -60,16 +60,14 @@ $McpCfgPath  = Join-Path $DemoDir 'tokenzero-mcp.json'
 
 New-Item -ItemType Directory -Force -Path $RunsDir, $CacheDir | Out-Null
 
+function Test-IsWindows {
+    return ($PSVersionTable.PSEdition -eq 'Desktop' -or [System.Environment]::OSVersion.Platform -eq [System.PlatformID]::Win32NT)
+}
+
 # --- resolve binaries -------------------------------------------------------
 if (-not $BinaryPath) {
-    $cand = @(
-        Join-Path $env:USERPROFILE '.copilot\session-state\cfe34fed-2c6f-4464-a63c-f2d324670497\files\tokenzero\extracted\tokenzero-v1.0.1-x86_64-pc-windows-msvc\tokenzero.exe'
-    )
-    foreach ($p in $cand) { if (Test-Path $p) { $BinaryPath = $p; break } }
-    if (-not $BinaryPath) {
-        $cmd = Get-Command tokenzero -ErrorAction SilentlyContinue
-        if ($cmd) { $BinaryPath = $cmd.Source }
-    }
+    $cmd = Get-Command tokenzero -ErrorAction SilentlyContinue
+    if ($cmd) { $BinaryPath = $cmd.Source }
 }
 if (-not $BinaryPath -or -not (Test-Path $BinaryPath)) {
     throw "tokenzero binary not found. Pass -BinaryPath."
@@ -106,14 +104,31 @@ function ConvertTo-Win32CommandLineArg {
     return $sb.ToString()
 }
 
+function Set-ProcessArguments {
+    param(
+        [Parameter(Mandatory)] [System.Diagnostics.ProcessStartInfo] $ProcessStartInfo,
+        [Parameter(Mandatory)] [string[]] $ArgList
+    )
+    if ($ProcessStartInfo.PSObject.Properties.Name -contains 'ArgumentList') {
+        foreach ($a in $ArgList) { [void]$ProcessStartInfo.ArgumentList.Add($a) }
+    } else {
+        $ProcessStartInfo.Arguments = ($ArgList | ForEach-Object { ConvertTo-Win32CommandLineArg $_ }) -join ' '
+    }
+}
+
+function ConvertTo-JsonStringLiteralValue {
+    param([Parameter(Mandatory)][AllowEmptyString()][string]$Value)
+    return ($Value -replace '\\','\\' -replace '"','\"')
+}
+
 # --- emit MCP config from template -----------------------------------------
 $tplPath = Join-Path $DemoDir 'tokenzero-mcp.template.json'
 $cacheFile = Join-Path $CacheDir 'agent-tokenzero.json'
 $tpl = Get-Content -LiteralPath $tplPath -Raw
 $cfg = $tpl `
-    -replace '__TOKENZERO_BIN__', ($BinaryPath -replace '\\','\\') `
-    -replace '__REPO__',          ($RepoDir    -replace '\\','\\') `
-    -replace '__CACHE__',         ($cacheFile  -replace '\\','\\')
+    -replace '__TOKENZERO_BIN__', (ConvertTo-JsonStringLiteralValue $BinaryPath) `
+    -replace '__REPO__',          (ConvertTo-JsonStringLiteralValue $RepoDir) `
+    -replace '__CACHE__',         (ConvertTo-JsonStringLiteralValue $cacheFile)
 Set-Content -LiteralPath $McpCfgPath -Value $cfg -Encoding UTF8
 Write-Host "wrote MCP config: $McpCfgPath"
 
@@ -326,8 +341,16 @@ function Invoke-CopilotRun {
             try { & $OnTick $sw.ElapsedMilliseconds $JsonlPath } catch {}
         }
         if ($sw.Elapsed.TotalSeconds -gt $PerRunTimeoutSec) {
-            try { $proc.Kill($true) } catch {}
-            $proc.WaitForExit()
+            try {
+                if ($proc.PSObject.Methods.Name -contains 'Kill') {
+                    try { $proc.Kill($true) } catch { $proc.Kill() }
+                }
+            } catch {
+                try { Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue } catch {}
+            }
+            if (-not $proc.WaitForExit(5000)) {
+                throw "timed out waiting for process $($proc.Id) to exit after kill"
+            }
             $sw.Stop()
             $stderrTo = if (Test-Path $stderrPath) { Get-Content -LiteralPath $stderrPath -Raw } else { '' }
             return @{
@@ -424,7 +447,7 @@ function Parse-RunMetrics {
         try {
             $psi = New-Object System.Diagnostics.ProcessStartInfo
             $psi.FileName = $BinaryPath
-            foreach ($a in @('ingest','--stdin','--json','--cache-path',$cachePath)) { $psi.ArgumentList.Add($a) }
+            Set-ProcessArguments -ProcessStartInfo $psi -ArgList @('ingest','--stdin','--json','--cache-path',$cachePath)
             $psi.RedirectStandardInput  = $true
             $psi.RedirectStandardOutput = $true
             $psi.RedirectStandardError  = $true

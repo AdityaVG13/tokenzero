@@ -1,9 +1,5 @@
 # TokenZero — design suggestions
 
-> **Prompt that generated this review** (verbatim):
->
-> *"I am big believer in good design. Key elements I care about are (1) anything we do we do in 1 place, so similar code is not scattered around, (2) we concentrate complexity/decision making in 1 place and don't scatter this around. (3) no magic numbers in the code (mostly) (4) modularity and ownership - well defined methods control access to things owned by the module."*
-
 A design review of the `tokenzero` workspace against four principles:
 
 1. **One place.** Anything we do, we do in one place — similar code is not scattered around.

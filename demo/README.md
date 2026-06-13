@@ -1,3 +1,9 @@
+<div align="center">
+
+<img src="../.github/assets/banner.gif" alt="TokenZero: Recovery-Aware Context Compression" width="100%">
+
+</div>
+
 # TokenZero demo
 
 A self-contained, byte-honest demo that walks an AI agent's "day in the life"
@@ -6,7 +12,7 @@ actually fed back to the agent.
 
 ## What it shows
 
-Six real scenarios run against this repository's own source tree:
+Seven real scenarios run against this repository's own source tree:
 
 | # | Scenario | What you should see |
 | -: | :-- | :-- |
@@ -30,7 +36,7 @@ The driver writes `demo_results.json` and then renders a fully self-contained
 have it pop in your default browser at the end:
 
 ```powershell
-pwsh -File .\demo\run_demo.ps1 -OpenViz
+pwsh -File ./demo/run_demo.ps1 -OpenViz
 ```
 
 The page has two sections:
@@ -51,43 +57,45 @@ the review pass that surfaced it. The header includes a `N bugs flagged
 Re-render without re-running the demo:
 
 ```powershell
-pwsh -File .\demo\build_viz.ps1 -Open
+pwsh -File ./demo/build_viz.ps1 -Open
 ```
 
 Re-render against a custom gap report:
 
 ```powershell
-pwsh -File .\demo\build_viz.ps1 -GapReportPath .\my_gaps.json -Open
+pwsh -File ./demo/build_viz.ps1 -GapReportPath ./my_gaps.json -Open
 ```
 
 Skip the viz entirely (just write `demo_results.json`):
 
 ```powershell
-pwsh -File .\demo\run_demo.ps1 -NoViz
+pwsh -File ./demo/run_demo.ps1 -NoViz
 ```
 
 ## Run it
 
 ```powershell
 # from the repo root
-pwsh -File .\demo\run_demo.ps1
+pwsh -File ./demo/run_demo.ps1
 ```
 
 The script will:
 
 1. Use `tokenzero` from `PATH` if present;
-2. else reuse `demo\.tokenzero-bin\tokenzero.exe` if it's already there;
-3. else download `tokenzero-v1.0.1-x86_64-pc-windows-msvc.zip` from the
-   GitHub Release, verify the published SHA256, and extract it into
-   `demo\.tokenzero-bin\`.
+2. else reuse `demo/.tokenzero-bin/tokenzero` (or `tokenzero.exe` on Windows)
+   if it's already there;
+3. else download the `v1.0.1` GitHub Release asset for the current OS/CPU
+   (`x86_64-pc-windows-msvc.zip`, `x86_64-unknown-linux-gnu.tar.gz`,
+   `aarch64-apple-darwin.tar.gz`, or `x86_64-apple-darwin.tar.gz`), verify
+   the published SHA256, and extract it into `demo/.tokenzero-bin/`.
 
-All runtime state lives under `demo\.cache\` (deleted at the top of every
+All runtime state lives under `demo/.cache/` (deleted at the top of every
 run) so the demo never touches your real TokenZero cache or telemetry.
 
 ### Options
 
 ```text
--BinaryPath <path>   Use a specific tokenzero.exe (skip PATH/download)
+-BinaryPath <path>   Use a specific tokenzero binary (skip PATH/download)
 -ReleaseTag <vX.Y.Z> Release to download if no binary is found (default: v1.0.1)
 -SkipDownload        Fail instead of downloading when no binary is found
 ```

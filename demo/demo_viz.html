@@ -180,7 +180,7 @@
 
 <header class="page">
   <h1>TokenZero demo &mdash; visualisation</h1>
-  <p class="sub">tokenzero 1.0.1 &middot; generated 2026-06-12 14:09 +05:30 &middot; <code>C:\Users\charun\OneDrive - Microsoft\Desktop\CodeProjects\tokenzero</code></p>
+  <p class="sub">tokenzero 1.0.1 &middot; generated 2026-06-12 14:09 +05:30 &middot; <code>&lt;repo&gt;</code></p>
 </header>
 
 <section class="hero">
@@ -436,7 +436,7 @@
       <span class="ttl">`collect_search` / `collect_glob` recurse forever on symlink loops inside an allowed root</span>
     </summary>
     <div class="finding-body">
-      <div><div class="row-label">Impact</div>Single `tz_find` or `tz_glob` against a tree with a symlink cycle â†’ stack overflow / wall-clock DoS. `collect_tree` is depth-bounded; these two aren&#39;t, which makes the asymmetry hard to spot in review.</div>
+      <div><div class="row-label">Impact</div>Single `tz_find` or `tz_glob` against a tree with a symlink cycle → stack overflow / wall-clock DoS. `collect_tree` is depth-bounded; these two aren&#39;t, which makes the asymmetry hard to spot in review.</div>
       <div><div class="row-label">Evidence</div><code>mcp/collect.rs:177-251 (collect_search), :493-534 (collect_glob); both call path.is_dir() which follows links; no visited-set, no depth bound. max_files only stops when results vector is full.</code></div>
       <div><div class="row-label">Fix sketch</div>Mirror collect_tree&#39;s depth bound; skip entries where file_type.is_symlink(); or switch to walkdir::WalkDir::new().follow_links(false).max_depth(N).</div>
       <div><div class="row-label">Source</div>code review #3</div>
@@ -459,12 +459,12 @@
     <summary>
       <span class="rank">#9</span>
       <span class="sev sev-high">high</span>
-      <span class="ttl">MCP session dedup race â€” README&#39;s headline 99.7% repeat-read benchmark does not reproduce</span>
+      <span class="ttl">MCP session dedup race — README&#39;s headline 99.7% repeat-read benchmark does not reproduce</span>
     </summary>
     <div class="finding-body">
-      <div><div class="row-label">Impact</div>The &#39;session dedup&#39; feature exists (SessionMemory + unchanged_read_note, on by default) but is not enforced across pipelined requests in the 4-worker pool. README benchmark row &#39;16,712 â†’ 45 (99.7%)&#39; is unreproducible.</div>
-      <div class="contradicts"><strong>Contradicts:</strong> README benchmark row &#39;Re-read the same file (session dedup): 16,712 â†’ 45 tokens, 99.7%&#39;</div>
-      <div><div class="row-label">Evidence</div><code>EMPIRICAL: two pipelined `tools/call read` requests on the same MCP session return byte-identical 732-char responses (185 vs 150 visible tokens â€” observed in this demo). Feature: session.rs:22-92, lib.rs:380-405. Worker pool: stdio.rs:37-44, :93-103. First read does not update session memory until persist completes (lib.rs:446-519). Benchmark harness uses `sleep 1` instead of response-gated send: scripts/benchmark_tokens.sh:52-63.</code></div>
+      <div><div class="row-label">Impact</div>The &#39;session dedup&#39; feature exists (SessionMemory + unchanged_read_note, on by default) but is not enforced across pipelined requests in the 4-worker pool. README benchmark row &#39;16,712 → 45 (99.7%)&#39; is unreproducible.</div>
+      <div class="contradicts"><strong>Contradicts:</strong> README benchmark row &#39;Re-read the same file (session dedup): 16,712 → 45 tokens, 99.7%&#39;</div>
+      <div><div class="row-label">Evidence</div><code>EMPIRICAL: two pipelined `tools/call read` requests on the same MCP session return byte-identical 732-char responses (185 vs 150 visible tokens — observed in this demo). Feature: session.rs:22-92, lib.rs:380-405. Worker pool: stdio.rs:37-44, :93-103. First read does not update session memory until persist completes (lib.rs:446-519). Benchmark harness uses `sleep 1` instead of response-gated send: scripts/benchmark_tokens.sh:52-63.</code></div>
       <div><div class="row-label">Fix sketch</div>Serialize same-key reads via an in-flight-serve table keyed by ServeKey; second identical request waits for the first to persist, then emits unchanged note. Fix the benchmark to await response id=2 before sending id=3. Re-run README numbers from the fixed harness.</div>
       <div><div class="row-label">Source</div>design review #10 (added after my empirical observation)</div>
     </div>
@@ -503,7 +503,7 @@
     </summary>
     <div class="finding-body">
       <div><div class="row-label">Impact</div>Two same-PID workers editing the same path interleave bytes in the shared tmp file; no fsync/parent-sync means power loss between rename and data-flush can leave the user&#39;s file truncated.</div>
-      <div><div class="row-label">Evidence</div><code>mcp/render.rs:253-271 â€” tmp is `.{file}.tz-edit-{pid}` (no per-call nonce), no create_new, no advisory lock; fs::write with no sync_data. Compare recovery/lib.rs:1069+:1248-1259 which uses AtomicUsize+create_new+sync_data.</code></div>
+      <div><div class="row-label">Evidence</div><code>mcp/render.rs:253-271 — tmp is `.{file}.tz-edit-{pid}` (no per-call nonce), no create_new, no advisory lock; fs::write with no sync_data. Compare recovery/lib.rs:1069+:1248-1259 which uses AtomicUsize+create_new+sync_data.</code></div>
       <div><div class="row-label">Fix sketch</div>Add process-wide AtomicUsize counter for tmp suffix; create_new(true); sync_data before rename; best-effort parent-dir sync_all.</div>
       <div><div class="row-label">Source</div>code review #4</div>
     </div>
@@ -516,7 +516,7 @@
     </summary>
     <div class="finding-body">
       <div><div class="row-label">Impact</div>Server replies with id:null for notifications that fail params/method/jsonrpc validation; strict clients treat unexpected responses as protocol violations.</div>
-      <div><div class="row-label">Evidence</div><code>mcp/jsonrpc.rs:91-141 â€” checks at :91, :102, :113, :126 all reply before the notification short-circuit at :139.</code></div>
+      <div><div class="row-label">Evidence</div><code>mcp/jsonrpc.rs:91-141 — checks at :91, :102, :113, :126 all reply before the notification short-circuit at :139.</code></div>
       <div><div class="row-label">Fix sketch</div>Hoist `if !object.contains_key(&#39;id&#39;) { return None; }` to the top of handle_jsonrpc_request.</div>
       <div><div class="row-label">Source</div>code review #6</div>
     </div>
@@ -542,7 +542,7 @@
     </summary>
     <div class="finding-body">
       <div><div class="row-label">Impact</div>Same crash window as #12 for install manifests; power loss after user-observed &#39;install ok&#39; can leave the file pointing at no entry.</div>
-      <div><div class="row-label">Evidence</div><code>install/lib.rs:883-911 calls sync_all on data file but never on the parent dir. pulse/src/lib.rs:814 has sync_parent helper â€” install could mirror it.</code></div>
+      <div><div class="row-label">Evidence</div><code>install/lib.rs:883-911 calls sync_all on data file but never on the parent dir. pulse/src/lib.rs:814 has sync_parent helper — install could mirror it.</code></div>
       <div><div class="row-label">Fix sketch</div>After rename, best-effort open the parent dir and sync_all (no-op on Windows).</div>
       <div><div class="row-label">Source</div>code review #7</div>
     </div>

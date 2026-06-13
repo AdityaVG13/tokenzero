@@ -12,6 +12,7 @@ param(
     [string] $OutPath,
     [string] $DataPath = 'agent_results.json',
     [int]    $RefreshMs = 1500,
+    [int]    $Port = 8765,
     [switch] $Open
 )
 $ErrorActionPreference = 'Stop'
@@ -128,6 +129,11 @@ const DATA_URL = "__DATA_URL__";
 const REFRESH_MS = __REFRESH_MS__;
 const fmt = n => (n == null || n === '') ? '\u2014'
                 : (typeof n === 'number' ? n.toLocaleString() : String(n));
+const esc = v => String(v == null ? '' : v)
+  .replace(/&/g, '&amp;').replace(/</g, '&lt;')
+  .replace(/>/g, '&gt;').replace(/"/g, '&quot;')
+  .replace(/'/g, '&#39;');
+const css = v => String(v || '').replace(/[^a-z0-9_-]/gi, '');
 const fmtTime = ms => {
   if (ms == null) return '\u2014';
   if (ms < 1000) return ms + ' ms';
@@ -165,9 +171,9 @@ function render(j) {
     ['Elapsed', fmtTime(totals.elapsed_ms || 0), meta.started_at || '']
   ];
   byId('cards').innerHTML = cards.map(c =>
-    '<div class="card"><div class="lbl">' + c[0] + '</div>' +
-    '<div class="num">' + c[1] + '</div>' +
-    (c[2] ? '<div class="sub">' + c[2] + '</div>' : '') + '</div>'
+    '<div class="card"><div class="lbl">' + esc(c[0]) + '</div>' +
+    '<div class="num">' + esc(c[1]) + '</div>' +
+    (c[2] ? '<div class="sub">' + esc(c[2]) + '</div>' : '') + '</div>'
   ).join('');
 
   const summary = j.summary || {baseline:{}, tokenzero:{}};
@@ -200,21 +206,22 @@ function render(j) {
     return;
   }
   byId('rows').innerHTML = runs.map(r => {
-    const cls = r.status || 'pending';
+    const cls = css(r.status || 'pending');
+    const condition = css(r.condition || '');
     const statusBadge = r.status === 'running'
       ? '<span class="spinner"></span><span class="pill running">running</span>'
-      : '<span class="pill ' + cls + '">' + cls + '</span>';
+      : '<span class="pill ' + cls + '">' + esc(r.status || 'pending') + '</span>';
     return '<tr class="' + cls + '">' +
-      '<td>' + (r.index != null ? r.index : '') + '</td>' +
-      '<td><span class="pill ' + (r.condition || '') + '">' + (r.condition || '') + '</span></td>' +
+      '<td>' + esc(r.index != null ? r.index : '') + '</td>' +
+      '<td><span class="pill ' + condition + '">' + esc(r.condition || '') + '</span></td>' +
       '<td>' + statusBadge + '</td>' +
-      '<td>' + fmtTime(r.wall_ms) + '</td>' +
-      '<td>' + fmt(r.input_tokens) + '</td>' +
-      '<td>' + fmt(r.output_tokens) + '</td>' +
-      '<td>' + fmt(r.tool_calls) + '</td>' +
-      '<td>' + fmt(r.tool_output_tokens) + '</td>' +
-      '<td>' + fmt(r.api_ms) + '</td>' +
-      '<td class="muted">' + (r.note || '') + '</td>' +
+      '<td>' + esc(fmtTime(r.wall_ms)) + '</td>' +
+      '<td>' + esc(fmt(r.input_tokens)) + '</td>' +
+      '<td>' + esc(fmt(r.output_tokens)) + '</td>' +
+      '<td>' + esc(fmt(r.tool_calls)) + '</td>' +
+      '<td>' + esc(fmt(r.tool_output_tokens)) + '</td>' +
+      '<td>' + esc(fmt(r.api_ms)) + '</td>' +
+      '<td class="muted">' + esc(r.note || '') + '</td>' +
     '</tr>';
   }).join('');
 }
@@ -231,4 +238,14 @@ $html = $html.Replace('__DATA_URL__', $DataPath).Replace('__REFRESH_MS__', "$Ref
 
 Set-Content -LiteralPath $OutPath -Value $html -Encoding UTF8
 Write-Host "Wrote: $OutPath"
-if ($Open) { Start-Process $OutPath }
+if ($Open) {
+    $py = Get-Command python3 -ErrorAction SilentlyContinue
+    if (-not $py) { $py = Get-Command python -ErrorAction SilentlyContinue }
+    if ($py) {
+        $null = Start-Process -FilePath $py.Source -ArgumentList @('-m','http.server',"$Port",'--bind','127.0.0.1') -WorkingDirectory $DemoDir -PassThru
+        Start-Sleep -Milliseconds 400
+        Start-Process ("http://127.0.0.1:$Port/" + [System.IO.Path]::GetFileName($OutPath))
+    } else {
+        Write-Warning 'python3/python not found; open the viewer through a local HTTP server so fetch(agent_results.json) works.'
+    }
+}
