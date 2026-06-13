@@ -21,6 +21,7 @@ A local-first Rust runtime that shrinks what AI agents see, while keeping a
 
 <a href="#highlights">Highlights</a> &nbsp;·&nbsp;
 <a href="#how-racc-works">How it works</a> &nbsp;·&nbsp;
+<a href="#demo">Demo</a> &nbsp;·&nbsp;
 <a href="#architecture">Architecture</a> &nbsp;·&nbsp;
 <a href="#download--install">Install</a> &nbsp;·&nbsp;
 <a href="#commands">Commands</a> &nbsp;·&nbsp;
@@ -121,6 +122,27 @@ addressable behind a local `tz://` ref, and an agent that needs one gets the
 exact original bytes back in a single call. The accounting follows the same
 principle: tokens an agent later recovers are subtracted from claimed savings,
 because compression you had to undo was never a saving at all.
+
+<h3 id="demo"><img src=".github/assets/banner.gif" alt="TokenZero demo" width="100%"></h3>
+
+Run the self-contained RACC demo from the repo root:
+
+```bash
+pwsh -File ./demo/run_demo.ps1 -OpenViz
+```
+
+The demo resolves `tokenzero` from `PATH`, reuses `demo/.tokenzero-bin/`, or
+downloads the matching release asset for Windows, Linux, or macOS. It writes
+`demo/demo_results.json` and `demo/demo_viz.html`, then shows raw tokens,
+visible tokens, recovery-aware savings, and byte-exact expansion proof.
+
+For live agent runs:
+
+```bash
+pwsh -File ./demo/run_agent_demo.ps1 -Replicates 3
+```
+
+See [`demo/README.md`](demo/README.md) for options and the generated viewers.
 
 <h3 id="architecture"><img src=".github/assets/h-architecture.svg" alt="Architecture" width="100%"></h3>
 
