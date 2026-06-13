@@ -120,6 +120,15 @@ fn blocked_ip_error(host: &str, ip: IpAddr, reason: &str) -> FetchBlocked {
 /// Extract (host, port) from an http(s) URL. Rejects userinfo to rule out
 /// `http://trusted.com@evil.com/` confusion.
 fn parse_host_port(url: &str) -> Result<(String, u16), FetchBlocked> {
+    let (authority, default_port) = fetch_authority(url)?;
+    reject_userinfo(authority)?;
+    if authority.starts_with('[') {
+        return parse_bracketed_ipv6_authority(authority, default_port, url);
+    }
+    parse_hostname_authority(authority, default_port, url)
+}
+
+fn fetch_authority(url: &str) -> Result<(&str, u16), FetchBlocked> {
     let (rest, default_port) = if let Some(rest) = url.strip_prefix("https://") {
         (rest, 443u16)
     } else if let Some(rest) = url.strip_prefix("http://") {
@@ -141,32 +150,50 @@ fn parse_host_port(url: &str) -> Result<(String, u16), FetchBlocked> {
             format!("URL has no host: {url}"),
         ));
     }
+    Ok((authority, default_port))
+}
+
+fn reject_userinfo(authority: &str) -> Result<(), FetchBlocked> {
     if authority.contains('@') {
-        return Err(FetchBlocked::new(
+        Err(FetchBlocked::new(
             "invalid_url",
             "userinfo in fetch URLs is not supported".to_string(),
-        ));
+        ))
+    } else {
+        Ok(())
     }
-    if let Some(rest) = authority.strip_prefix('[') {
-        // bracketed IPv6 literal, optionally followed by :port
-        let Some((host, after)) = rest.split_once(']') else {
+}
+
+fn parse_bracketed_ipv6_authority(
+    authority: &str,
+    default_port: u16,
+    url: &str,
+) -> Result<(String, u16), FetchBlocked> {
+    let rest = authority.strip_prefix('[').expect("checked by caller");
+    let Some((host, after)) = rest.split_once(']') else {
+        return Err(FetchBlocked::new(
+            "invalid_url",
+            format!("unterminated IPv6 literal in {url}"),
+        ));
+    };
+    let port = match after.strip_prefix(':') {
+        None if after.is_empty() => default_port,
+        Some(port_text) => parse_port(port_text, url)?,
+        None => {
             return Err(FetchBlocked::new(
                 "invalid_url",
-                format!("unterminated IPv6 literal in {url}"),
+                format!("malformed authority in {url}"),
             ));
-        };
-        let port = match after.strip_prefix(':') {
-            None if after.is_empty() => default_port,
-            Some(port_text) => parse_port(port_text, url)?,
-            None => {
-                return Err(FetchBlocked::new(
-                    "invalid_url",
-                    format!("malformed authority in {url}"),
-                ));
-            }
-        };
-        return Ok((format!("[{}]", host.to_ascii_lowercase()), port));
-    }
+        }
+    };
+    Ok((format!("[{}]", host.to_ascii_lowercase()), port))
+}
+
+fn parse_hostname_authority(
+    authority: &str,
+    default_port: u16,
+    url: &str,
+) -> Result<(String, u16), FetchBlocked> {
     match authority.split_once(':') {
         Some((host, port_text)) if !port_text.contains(':') => {
             Ok((host.to_ascii_lowercase(), parse_port(port_text, url)?))
