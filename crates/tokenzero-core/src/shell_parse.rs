@@ -21,6 +21,8 @@ pub(crate) fn failed_segment(
     if let Some(segment) = masked_pipeline_failure_segment(command, stdout, stderr, exit_code) {
         return Some(segment);
     }
+
+    let segments = split_shell_segments(command);
     let combined = format!("{stdout}\n{stderr}").to_ascii_lowercase();
     let stderr_lower = stderr.to_ascii_lowercase();
     let failure_output = if exit_code == Some(0) {
@@ -28,40 +30,43 @@ pub(crate) fn failed_segment(
     } else {
         combined.as_str()
     };
-    for segment in split_shell_segments(command) {
-        let lower = segment.to_ascii_lowercase();
-        if is_explicit_false_segment(&segment) {
-            return Some(segment);
+
+    for segment in &segments {
+        if is_explicit_false_segment(segment) {
+            return Some(segment.clone());
         }
-        if lower.starts_with("cd ")
-            && (exit_code.is_some_and(|code| code != 0)
-                || failure_output.contains("can't cd")
-                || failure_output.contains("no such file")
-                || failure_output.contains("not a directory"))
-        {
-            return Some(segment);
+        if is_cd_failure_segment(segment, exit_code, failure_output) {
+            return Some(segment.clone());
         }
-        if (failure_output.contains("command not found") || failure_output.contains("not found"))
-            && !segment.is_empty()
-        {
-            return Some(segment);
+        if is_command_not_found_segment(segment, failure_output) {
+            return Some(segment.clone());
         }
     }
     if exit_code.is_some_and(|code| code != 0) && looks_diagnostic(&combined) {
-        for segment in split_shell_segments(command) {
-            if is_diagnostic_failure_segment(&segment, stdout, stderr) {
-                return Some(segment);
+        for segment in &segments {
+            if is_diagnostic_failure_segment(segment, stdout, stderr) {
+                return Some(segment.clone());
             }
         }
     }
     if exit_code.is_some_and(|code| code != 0) {
-        split_shell_segments(command)
-            .last()
-            .cloned()
-            .filter(|v| !v.is_empty())
+        segments.last().cloned().filter(|v| !v.is_empty())
     } else {
         None
     }
+}
+
+fn is_cd_failure_segment(segment: &str, exit_code: Option<i32>, failure_output: &str) -> bool {
+    segment.to_ascii_lowercase().starts_with("cd ")
+        && (exit_code.is_some_and(|code| code != 0)
+            || failure_output.contains("can't cd")
+            || failure_output.contains("no such file")
+            || failure_output.contains("not a directory"))
+}
+
+fn is_command_not_found_segment(segment: &str, failure_output: &str) -> bool {
+    !segment.is_empty()
+        && (failure_output.contains("command not found") || failure_output.contains("not found"))
 }
 
 pub(crate) fn is_diagnostic_failure_segment(segment: &str, stdout: &str, stderr: &str) -> bool {
