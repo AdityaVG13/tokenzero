@@ -264,8 +264,6 @@ pub fn run_command_with_policy(
 ) -> Result<RunResult, RuntimeError> {
     let output_policy = output_policy.normalized();
     let plan = plan_command(argv, cwd, explicit_shell)?;
-    let execution_mode = plan.execution_mode;
-    let alias_dependency = plan.alias_dependency;
     let command_display = command_display_for_plan(argv, &plan);
     let start = Instant::now();
     let mut command = match plan.execution_mode {
@@ -328,29 +326,17 @@ pub fn run_command_with_policy(
                 process_group,
                 false,
             )?;
-            let allocator_pressure_relief = allocator_pressure_relief_after_large_capture(
-                &process_io.stdout.capture,
-                &process_io.stderr.capture,
-            );
-            return Ok(RunResult {
-                ok: false,
-                command: command_display.clone(),
-                argv: plan.argv,
-                execution_mode,
-                alias_dependency,
-                cwd: cwd.map(|p| p.display().to_string()),
-                exit_code: status.code(),
-                stdout: process_io.stdout.text,
-                stderr: process_io.stderr.text,
-                stdout_capture: process_io.stdout.capture,
-                stderr_capture: process_io.stderr.capture,
-                capture_limit_bytes: output_policy.per_stream_capture_bytes,
-                spill_threshold_bytes: output_policy.spill_threshold_bytes,
-                allocator_pressure_relief,
-                timed_out: true,
-                io_grace_expired: process_io.io_grace_expired,
-                duration_ms: start.elapsed().as_millis(),
-            });
+            return Ok(build_run_result(
+                false,
+                command_display.clone(),
+                plan,
+                cwd,
+                status.code(),
+                process_io,
+                output_policy,
+                true,
+                start,
+            ));
         }
     };
     let process_io = collect_process_io(
@@ -363,18 +349,44 @@ pub fn run_command_with_policy(
         process_group,
         true,
     )?;
+    let ok = !process_io.timed_out && status.success();
+    Ok(build_run_result(
+        ok,
+        command_display,
+        plan,
+        cwd,
+        status.code(),
+        process_io,
+        output_policy,
+        false,
+        start,
+    ))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn build_run_result(
+    ok: bool,
+    command: String,
+    plan: RuntimePlan,
+    cwd: Option<&Path>,
+    exit_code: Option<i32>,
+    process_io: ProcessIo,
+    output_policy: RunOutputPolicy,
+    force_timed_out: bool,
+    start: Instant,
+) -> RunResult {
     let allocator_pressure_relief = allocator_pressure_relief_after_large_capture(
         &process_io.stdout.capture,
         &process_io.stderr.capture,
     );
-    Ok(RunResult {
-        ok: !process_io.timed_out && status.success(),
-        command: command_display,
+    RunResult {
+        ok,
+        command,
         argv: plan.argv,
-        execution_mode,
-        alias_dependency,
+        execution_mode: plan.execution_mode,
+        alias_dependency: plan.alias_dependency,
         cwd: cwd.map(|p| p.display().to_string()),
-        exit_code: status.code(),
+        exit_code,
         stdout: process_io.stdout.text,
         stderr: process_io.stderr.text,
         stdout_capture: process_io.stdout.capture,
@@ -382,10 +394,10 @@ pub fn run_command_with_policy(
         capture_limit_bytes: output_policy.per_stream_capture_bytes,
         spill_threshold_bytes: output_policy.spill_threshold_bytes,
         allocator_pressure_relief,
-        timed_out: process_io.timed_out,
+        timed_out: force_timed_out || process_io.timed_out,
         io_grace_expired: process_io.io_grace_expired,
         duration_ms: start.elapsed().as_millis(),
-    })
+    }
 }
 
 fn command_display_for_plan(input_argv: &[String], plan: &RuntimePlan) -> String {
