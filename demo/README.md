@@ -35,8 +35,14 @@ The driver writes `demo_results.json` and then renders a fully self-contained
 `demo_viz.html` (inline CSS + inline SVG, no CDN, no JS). Pass `-OpenViz` to
 have it pop in your default browser at the end:
 
-```powershell
+```bash
+# macOS / Linux (PowerShell 7+, install: brew install --cask powershell)
 pwsh -File ./demo/run_demo.ps1 -OpenViz
+```
+
+```powershell
+# Windows (PowerShell 7+ recommended; Windows PowerShell 5.1 also works)
+pwsh -File .\demo\run_demo.ps1 -OpenViz
 ```
 
 The page has two sections:
@@ -56,27 +62,48 @@ the review pass that surfaced it. The header includes a `N bugs flagged
 
 Re-render without re-running the demo:
 
-```powershell
+```bash
+# macOS / Linux
 pwsh -File ./demo/build_viz.ps1 -Open
+# Windows
+pwsh -File .\demo\build_viz.ps1 -Open
 ```
 
 Re-render against a custom gap report:
 
-```powershell
+```bash
+# macOS / Linux
 pwsh -File ./demo/build_viz.ps1 -GapReportPath ./my_gaps.json -Open
+# Windows
+pwsh -File .\demo\build_viz.ps1 -GapReportPath .\my_gaps.json -Open
 ```
 
 Skip the viz entirely (just write `demo_results.json`):
 
-```powershell
+```bash
+# macOS / Linux
 pwsh -File ./demo/run_demo.ps1 -NoViz
+# Windows
+pwsh -File .\demo\run_demo.ps1 -NoViz
 ```
 
 ## Run it
 
-```powershell
-# from the repo root
+The demo is a single PowerShell script that runs identically on every OS.
+Install PowerShell 7+ first if you do not have it (`pwsh`):
+
+- macOS: `brew install --cask powershell`
+- Linux: see https://learn.microsoft.com/powershell/scripting/install/installing-powershell-on-linux
+- Windows: ships with `pwsh` (PowerShell 7+) or the built-in `powershell` (5.1)
+
+```bash
+# macOS / Linux, from the repo root
 pwsh -File ./demo/run_demo.ps1
+```
+
+```powershell
+# Windows, from the repo root
+pwsh -File .\demo\run_demo.ps1
 ```
 
 The script will:
@@ -103,7 +130,8 @@ run) so the demo never touches your real TokenZero cache or telemetry.
 ## What the output looks like
 
 You'll get a Markdown-friendly table on stdout, plus a machine-readable
-`demo\demo_results.json` you can diff between runs or post-process:
+`demo/demo_results.json` (`demo\demo_results.json` on Windows) you can diff
+between runs or post-process:
 
 ```json
 {
