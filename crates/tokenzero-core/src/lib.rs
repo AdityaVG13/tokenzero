@@ -1176,34 +1176,67 @@ pub fn decide_shell_policy(
     let expected_false_exit = is_expected_false_exit(command, stdout, stderr, exit_code);
     let status_hazard = failed_segment(command, stdout, stderr, exit_code).is_some()
         || masking_warning(command, stdout, stderr, exit_code).is_some();
-    let policy = if is_repo_inventory_command(command) {
-        ("structured", "repo inventory command")
-    } else if family == "diff" {
-        ("diff-aware", "diff-like output")
-    } else if family == "search" && !status_hazard && (exit_code == Some(0) || search_no_match) {
-        ("structured", "search output")
-    } else if expected_false_exit {
-        ("structured", "expected false predicate exit")
-    } else if matches!(
-        family.as_str(),
-        "test" | "build" | "lint" | "python-test" | "go-test"
-    ) || status_hazard
-        || exit_code.is_some_and(|code| code != 0)
-        || looks_diagnostic(&combined)
-    {
-        ("diagnostic", "failure or diagnostic family")
-    } else if matches!(family.as_str(), "search" | "structured" | "status") {
-        ("structured", "structured/status output")
-    } else if repeated_line_count(&combined) >= 3 || combined.lines().count() > 120 {
-        ("dedupe", "repeated or long log")
-    } else {
-        ("passthrough", "small low-risk output")
-    };
+    let policy = auto_shell_policy(
+        command,
+        &family,
+        &combined,
+        exit_code,
+        search_no_match,
+        expected_false_exit,
+        status_hazard,
+    );
     PolicyDecision {
         policy: policy.0.to_string(),
         reason: policy.1.to_string(),
         family,
     }
+}
+
+fn auto_shell_policy(
+    command: &str,
+    family: &str,
+    combined: &str,
+    exit_code: Option<i32>,
+    search_no_match: bool,
+    expected_false_exit: bool,
+    status_hazard: bool,
+) -> (&'static str, &'static str) {
+    if is_repo_inventory_command(command) {
+        return ("structured", "repo inventory command");
+    }
+    if family == "diff" {
+        return ("diff-aware", "diff-like output");
+    }
+    if family == "search" && !status_hazard && (exit_code == Some(0) || search_no_match) {
+        return ("structured", "search output");
+    }
+    if expected_false_exit {
+        return ("structured", "expected false predicate exit");
+    }
+    if is_diagnostic_shell_policy(family, combined, exit_code, status_hazard) {
+        return ("diagnostic", "failure or diagnostic family");
+    }
+    if matches!(family, "search" | "structured" | "status") {
+        return ("structured", "structured/status output");
+    }
+    if repeated_line_count(combined) >= 3 || combined.lines().count() > 120 {
+        return ("dedupe", "repeated or long log");
+    }
+    ("passthrough", "small low-risk output")
+}
+
+fn is_diagnostic_shell_policy(
+    family: &str,
+    combined: &str,
+    exit_code: Option<i32>,
+    status_hazard: bool,
+) -> bool {
+    matches!(
+        family,
+        "test" | "build" | "lint" | "python-test" | "go-test"
+    ) || status_hazard
+        || exit_code.is_some_and(|code| code != 0)
+        || looks_diagnostic(combined)
 }
 
 pub fn classify_command_status(
