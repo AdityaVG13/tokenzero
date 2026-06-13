@@ -90,38 +90,39 @@ pub fn enforce_token_budget_with_ref(
     // (keep-1)th newline after the first kept line, which is the end of
     // the joined prefix. This avoids allocating a `Vec<&str>`.
     let start = first_start.expect("keep > 0 implies first_start set");
-    let end = if keep > 1 {
-        let mut newlines_seen = 0usize;
-        let target = keep - 1;
-        let mut found = None;
-        for (i, b) in text[start..].bytes().enumerate() {
-            if b == b'\n' {
-                newlines_seen += 1;
-                if newlines_seen == target {
-                    found = Some(start + i);
-                    break;
-                }
-            }
-        }
-        found.unwrap_or(text.len())
-    } else {
-        // keep == 1: the prefix is exactly the first line; find the first
-        // '\n' after `start` (or the end of `text`).
-        let mut first_end = text.len();
-        for (i, b) in text[start..].bytes().enumerate() {
-            if b == b'\n' {
-                first_end = start + i;
-                break;
-            }
-        }
-        first_end
-    };
+    let end = prefix_end_for_kept_lines(text, start, keep);
     let prefix = &text[..end];
     let mut out = String::with_capacity(prefix.len() + 1 + marker.len());
     out.push_str(prefix);
     out.push('\n');
     out.push_str(marker);
     out
+}
+
+fn prefix_end_for_kept_lines(text: &str, start: usize, keep: usize) -> usize {
+    if keep == 1 {
+        return next_newline_or_end(text, start);
+    }
+    let target = keep - 1;
+    let mut newlines_seen = 0usize;
+    for (i, b) in text[start..].bytes().enumerate() {
+        if b == b'\n' {
+            newlines_seen += 1;
+            if newlines_seen == target {
+                return start + i;
+            }
+        }
+    }
+    text.len()
+}
+
+fn next_newline_or_end(text: &str, start: usize) -> usize {
+    for (i, b) in text[start..].bytes().enumerate() {
+        if b == b'\n' {
+            return start + i;
+        }
+    }
+    text.len()
 }
 
 /// Per-byte classification for the ASCII fast path of `count_tokens`.
