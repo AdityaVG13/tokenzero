@@ -1335,58 +1335,86 @@ pub fn shell_family(command: &str, stdout: &str, stderr: &str) -> String {
     if is_repo_inventory_command(command) || is_repo_inventory_command(&analysis_command) {
         return "repo-inventory".to_string();
     }
-    if first == "diff"
-        || first == "git" && matches!(second, "diff" | "show")
-        || combined.starts_with("diff --git")
-        || combined.contains("\n@@ ")
-    {
+    if is_diff_family(&first, second, &combined) {
         return "diff".to_string();
     }
-    if matches!(first.as_str(), "test" | "[" | "[[" | "cmp") {
+    if is_predicate_family(&first) {
         return "predicate".to_string();
     }
-    if first == "cargo" && matches!(second, "test" | "build" | "check" | "clippy") {
-        return if second == "test" { "test" } else { "build" }.to_string();
+    if let Some(family) = cargo_family(&first, second) {
+        return family.to_string();
     }
     if is_search_command(&first) {
         return "search".to_string();
     }
-    if first == "pytest"
-        || first == "unittest"
-        || command.contains("python -m pytest")
-        || command.contains("python -m unittest")
-    {
+    if is_python_test_family(&first, command) {
         return "python-test".to_string();
     }
     if first == "go" && second == "test" {
         return "go-test".to_string();
     }
-    if matches!(first.as_str(), "jest" | "vitest")
-        || matches!(first.as_str(), "npm" | "pnpm" | "yarn") && second == "test"
-    {
+    if is_js_test_family(&first, second) {
         return "test".to_string();
     }
-    if matches!(
-        first.as_str(),
-        "eslint" | "tsc" | "ruff" | "mypy" | "clippy"
-    ) {
+    if is_lint_family(&first) {
         return "lint".to_string();
     }
-    if matches!(first.as_str(), "docker" | "kubectl") || looks_status_table(&combined) {
+    if is_status_family(&first, &combined) {
         return "status".to_string();
     }
-    if serde_json::from_str::<serde_json::Value>(stdout.trim()).is_ok()
-        || combined.contains("<testsuite")
-        || combined
-            .lines()
-            .any(|l| l.starts_with("ok ") || l.starts_with("not ok "))
-    {
+    if is_structured_family(stdout, &combined) {
         return "structured".to_string();
     }
     if looks_diagnostic(&combined) {
         return "diagnostic".to_string();
     }
     "generic".to_string()
+}
+
+fn is_diff_family(first: &str, second: &str, combined: &str) -> bool {
+    first == "diff"
+        || first == "git" && matches!(second, "diff" | "show")
+        || combined.starts_with("diff --git")
+        || combined.contains("\n@@ ")
+}
+
+fn is_predicate_family(first: &str) -> bool {
+    matches!(first, "test" | "[" | "[[" | "cmp")
+}
+
+fn cargo_family(first: &str, second: &str) -> Option<&'static str> {
+    if first == "cargo" && matches!(second, "test" | "build" | "check" | "clippy") {
+        Some(if second == "test" { "test" } else { "build" })
+    } else {
+        None
+    }
+}
+
+fn is_python_test_family(first: &str, command: &str) -> bool {
+    matches!(first, "pytest" | "unittest")
+        || command.contains("python -m pytest")
+        || command.contains("python -m unittest")
+}
+
+fn is_js_test_family(first: &str, second: &str) -> bool {
+    matches!(first, "jest" | "vitest")
+        || matches!(first, "npm" | "pnpm" | "yarn") && second == "test"
+}
+
+fn is_lint_family(first: &str) -> bool {
+    matches!(first, "eslint" | "tsc" | "ruff" | "mypy" | "clippy")
+}
+
+fn is_status_family(first: &str, combined: &str) -> bool {
+    matches!(first, "docker" | "kubectl") || looks_status_table(combined)
+}
+
+fn is_structured_family(stdout: &str, combined: &str) -> bool {
+    serde_json::from_str::<serde_json::Value>(stdout.trim()).is_ok()
+        || combined.contains("<testsuite")
+        || combined
+            .lines()
+            .any(|l| l.starts_with("ok ") || l.starts_with("not ok "))
 }
 
 pub fn diff_summary(text: &str, max_lines: usize) -> String {
