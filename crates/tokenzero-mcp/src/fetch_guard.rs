@@ -196,50 +196,54 @@ fn host_matches(host: &str, pattern: &str) -> bool {
 /// Why an IP must not be fetched, or None when it is publicly routable.
 fn blocked_ip_reason(ip: IpAddr) -> Option<&'static str> {
     match ip {
-        IpAddr::V4(v4) => {
-            let octets = v4.octets();
-            if v4.is_unspecified() || octets[0] == 0 {
-                Some("unspecified")
-            } else if v4.is_loopback() {
-                Some("loopback")
-            } else if v4.is_private() {
-                Some("private (RFC1918)")
-            } else if v4.is_link_local() {
-                // includes the 169.254.169.254 cloud metadata endpoint
-                Some("link-local")
-            } else if v4.is_broadcast() {
-                Some("broadcast")
-            } else if octets[0] == 100 && (octets[1] & 0xC0) == 64 {
-                Some("carrier-grade NAT (100.64/10)")
-            } else if octets[0] == 192 && octets[1] == 0 && octets[2] == 0 {
-                Some("IETF protocol assignments (192.0.0/24)")
-            } else if octets[0] >= 224 && octets[0] < 240 {
-                Some("multicast (224.0.0.0/4)")
-            } else if octets[0] >= 240 {
-                Some("reserved (240.0.0.0/4)")
-            } else if octets[0] == 198 && (octets[1] == 18 || octets[1] == 19) {
-                Some("benchmark/documentation (198.18.0.0/15)")
-            } else {
-                None
-            }
-        }
-        IpAddr::V6(v6) => {
-            if let Some(mapped) = v6.to_ipv4_mapped() {
-                return blocked_ip_reason(IpAddr::V4(mapped));
-            }
-            let segments = v6.segments();
-            if v6.is_unspecified() {
-                Some("unspecified")
-            } else if v6.is_loopback() {
-                Some("loopback")
-            } else if (segments[0] & 0xffc0) == 0xfe80 {
-                Some("link-local")
-            } else if (segments[0] & 0xfe00) == 0xfc00 {
-                Some("unique-local (fc00::/7)")
-            } else {
-                None
-            }
-        }
+        IpAddr::V4(v4) => blocked_ipv4_reason(v4),
+        IpAddr::V6(v6) => blocked_ipv6_reason(v6),
+    }
+}
+
+fn blocked_ipv4_reason(ip: std::net::Ipv4Addr) -> Option<&'static str> {
+    let octets = ip.octets();
+    if ip.is_unspecified() || octets[0] == 0 {
+        Some("unspecified")
+    } else if ip.is_loopback() {
+        Some("loopback")
+    } else if ip.is_private() {
+        Some("private (RFC1918)")
+    } else if ip.is_link_local() {
+        // includes the 169.254.169.254 cloud metadata endpoint
+        Some("link-local")
+    } else if ip.is_broadcast() {
+        Some("broadcast")
+    } else if octets[0] == 100 && (octets[1] & 0xC0) == 64 {
+        Some("carrier-grade NAT (100.64/10)")
+    } else if octets[0] == 192 && octets[1] == 0 && octets[2] == 0 {
+        Some("IETF protocol assignments (192.0.0/24)")
+    } else if octets[0] >= 224 && octets[0] < 240 {
+        Some("multicast (224.0.0.0/4)")
+    } else if octets[0] >= 240 {
+        Some("reserved (240.0.0.0/4)")
+    } else if octets[0] == 198 && (octets[1] == 18 || octets[1] == 19) {
+        Some("benchmark/documentation (198.18.0.0/15)")
+    } else {
+        None
+    }
+}
+
+fn blocked_ipv6_reason(ip: std::net::Ipv6Addr) -> Option<&'static str> {
+    if let Some(mapped) = ip.to_ipv4_mapped() {
+        return blocked_ipv4_reason(mapped);
+    }
+    let segments = ip.segments();
+    if ip.is_unspecified() {
+        Some("unspecified")
+    } else if ip.is_loopback() {
+        Some("loopback")
+    } else if (segments[0] & 0xffc0) == 0xfe80 {
+        Some("link-local")
+    } else if (segments[0] & 0xfe00) == 0xfc00 {
+        Some("unique-local (fc00::/7)")
+    } else {
+        None
     }
 }
 
