@@ -411,6 +411,27 @@ pub(crate) fn private_benchmark_path(suite: &str) -> PathBuf {
         .join(format!("{suite}.json"))
 }
 
+pub(crate) fn run_matrix_row(label: &str, command: &mut Command) -> serde_json::Value {
+    let start = Instant::now();
+    match command.output() {
+        Ok(output) => {
+            let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+            json!({
+                "label": label,
+                "ok": output.status.success() && stdout.contains("ok"),
+                "exit_code": output.status.code(),
+                "stdout": stdout,
+                "stderr": String::from_utf8_lossy(&output.stderr).to_string(),
+                "duration_ms": start.elapsed().as_millis(),
+                "alias_dependency": false
+            })
+        }
+        Err(err) => {
+            json!({"label": label, "ok": false, "error": err.to_string(), "alias_dependency": false})
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -444,26 +465,5 @@ mod tests {
         assert_eq!(aggregate["harm_gate_pass"], false);
         assert_eq!(aggregate["harm_rate"], 0.5);
         assert_eq!(aggregate["safe_savings"], 0.0);
-    }
-}
-
-pub(crate) fn run_matrix_row(label: &str, command: &mut Command) -> serde_json::Value {
-    let start = Instant::now();
-    match command.output() {
-        Ok(output) => {
-            let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-            json!({
-                "label": label,
-                "ok": output.status.success() && stdout.contains("ok"),
-                "exit_code": output.status.code(),
-                "stdout": stdout,
-                "stderr": String::from_utf8_lossy(&output.stderr).to_string(),
-                "duration_ms": start.elapsed().as_millis(),
-                "alias_dependency": false
-            })
-        }
-        Err(err) => {
-            json!({"label": label, "ok": false, "error": err.to_string(), "alias_dependency": false})
-        }
     }
 }
