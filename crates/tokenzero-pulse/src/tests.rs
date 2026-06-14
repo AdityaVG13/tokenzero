@@ -52,6 +52,23 @@ fn aggregates_recovery_adjusted_savings() {
     assert!(report.visible_savings > report.recovery_adjusted_savings);
 }
 
+#[test]
+fn aggregate_saturates_like_file_backed_report() {
+    let mut first =
+        PulseEvent::tool_call("read", "hybrid", usize::MAX, usize::MAX - 1, 10, 1, 0, None);
+    first.task_lossless = true;
+    first.exact_ref_count = usize::MAX;
+    let mut second = PulseEvent::tool_call("expand", "hybrid", 10, 10, 10, 1, 1, None);
+    second.task_lossless = true;
+
+    let report = aggregate(&[first, second]);
+    assert_eq!(report.raw_tokens, usize::MAX);
+    assert_eq!(report.visible_tokens, usize::MAX);
+    assert_eq!(report.recovery_tokens, 20);
+    assert_eq!(report.task_lossless_tokens, usize::MAX);
+    assert_eq!(report.exact_ref_count, usize::MAX);
+}
+
 // Skipped under Miri: this test relies on POSIX O_APPEND kernel atomicity
 // (concurrent small writes land whole at EOF), which Miri does not model — it
 // shims append as seek+write, so records can interleave under Miri even though

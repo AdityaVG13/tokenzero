@@ -260,14 +260,21 @@ pub fn doctor_jsonl_sqlite(path: &Path) -> std::io::Result<PulseDoctorReport> {
 }
 
 pub fn aggregate(events: &[PulseEvent]) -> PulseReport {
-    let raw_tokens: usize = events.iter().map(|e| e.raw_tokens).sum();
-    let visible_tokens: usize = events.iter().map(|e| e.visible_tokens).sum();
-    let recovery_tokens: usize = events.iter().map(|e| e.recovery_tokens).sum();
-    let task_lossless_tokens: usize = events
+    let raw_tokens = events
+        .iter()
+        .fold(0usize, |sum, event| sum.saturating_add(event.raw_tokens));
+    let visible_tokens = events.iter().fold(0usize, |sum, event| {
+        sum.saturating_add(event.visible_tokens)
+    });
+    let recovery_tokens = events.iter().fold(0usize, |sum, event| {
+        sum.saturating_add(event.recovery_tokens)
+    });
+    let task_lossless_tokens = events
         .iter()
         .filter(|e| e.task_lossless && !e.failure)
-        .map(|e| e.visible_tokens + e.recovery_tokens)
-        .sum();
+        .fold(0usize, |sum, event| {
+            sum.saturating_add(event.visible_tokens.saturating_add(event.recovery_tokens))
+        });
     PulseReport {
         schema_version: PULSE_SCHEMA_VERSION.to_string(),
         status: "ok".to_string(),
@@ -278,9 +285,14 @@ pub fn aggregate(events: &[PulseEvent]) -> PulseReport {
         task_lossless_tokens,
         failures: events.iter().filter(|e| e.failure).count(),
         cache_hits: events.iter().filter(|e| e.cache_hit).count(),
-        exact_ref_count: events.iter().map(|e| e.exact_ref_count).sum(),
+        exact_ref_count: events.iter().fold(0usize, |sum, event| {
+            sum.saturating_add(event.exact_ref_count)
+        }),
         visible_savings: savings_ratio(raw_tokens, visible_tokens),
-        recovery_adjusted_savings: savings_ratio(raw_tokens, visible_tokens + recovery_tokens),
+        recovery_adjusted_savings: savings_ratio(
+            raw_tokens,
+            visible_tokens.saturating_add(recovery_tokens),
+        ),
         skipped_lines: 0,
     }
 }
@@ -1073,7 +1085,10 @@ fn aggregate_for_path(path: &Path) -> std::io::Result<PulseReport> {
         cache_hits,
         exact_ref_count,
         visible_savings: savings_ratio(raw_tokens, visible_tokens),
-        recovery_adjusted_savings: savings_ratio(raw_tokens, visible_tokens + recovery_tokens),
+        recovery_adjusted_savings: savings_ratio(
+            raw_tokens,
+            visible_tokens.saturating_add(recovery_tokens),
+        ),
         skipped_lines: scan.skipped_lines,
     })
 }
