@@ -921,8 +921,10 @@ fn command_for_argv(
         let resolved = resolve_windows_program(program, cwd, env_overrides);
         if is_windows_batch_file(&resolved) {
             let mut cmd = Command::new("cmd");
-            cmd.arg("/D").arg("/C").arg("call").arg(resolved);
-            cmd.args(args);
+            cmd.arg("/D")
+                .arg("/S")
+                .arg("/C")
+                .arg(windows_batch_call_command(&resolved, args));
             return cmd;
         }
         let mut cmd = Command::new(resolved);
@@ -937,6 +939,17 @@ fn command_for_argv(
         cmd.args(args);
         cmd
     }
+}
+
+#[cfg(windows)]
+fn windows_batch_call_command(resolved: &Path, args: &[String]) -> String {
+    std::iter::once("call".to_string())
+        .chain(std::iter::once(quote_windows_cmd(
+            &resolved.display().to_string(),
+        )))
+        .chain(args.iter().map(|arg| quote_windows_cmd(arg)))
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 #[cfg(windows)]
@@ -1452,11 +1465,22 @@ pub fn quote_windows_cmd(value: &str) -> String {
     }
     if value
         .chars()
-        .all(|c| c.is_ascii_alphanumeric() || "-_./:\\@%+=".contains(c))
+        .all(|c| c.is_ascii_alphanumeric() || "-_./:\\@+=".contains(c))
     {
         value.to_string()
     } else {
-        format!("\"{}\"", value.replace('"', "\\\""))
+        let mut quoted = String::with_capacity(value.len() + 2);
+        quoted.push('"');
+        for ch in value.chars() {
+            match ch {
+                '"' => quoted.push_str("\\\""),
+                '%' => quoted.push_str("%%"),
+                '^' => quoted.push_str("^^"),
+                _ => quoted.push(ch),
+            }
+        }
+        quoted.push('"');
+        quoted
     }
 }
 

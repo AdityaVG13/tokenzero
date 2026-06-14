@@ -575,6 +575,9 @@ fn quoting_preserves_spaces() {
         quote_windows_cmd("C:\\Program Files\\tz"),
         "\"C:\\Program Files\\tz\""
     );
+    assert_eq!(quote_windows_cmd("%PATH%"), "\"%%PATH%%\"");
+    assert_eq!(quote_windows_cmd("a^b"), "\"a^^b\"");
+    assert_eq!(quote_windows_cmd("a\"b"), "\"a\\\"b\"");
 }
 
 fn write_spill_aged(dir: &Path, name: &str, bytes: usize, age: Duration) -> PathBuf {
