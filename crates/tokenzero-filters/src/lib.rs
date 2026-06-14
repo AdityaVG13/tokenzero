@@ -248,7 +248,7 @@ fn rewrite_tree(command: &str) -> Option<String> {
     let parts = split_words(command);
     match parts.first().map(String::as_str) {
         Some("tree") => {
-            if parts.iter().any(|p| p == "-L" || p.starts_with("--depth")) {
+            if parts.iter().any(|p| is_tree_depth_flag(p)) {
                 Some(command.to_string())
             } else {
                 Some(format!("{command} -L 2"))
@@ -266,12 +266,12 @@ fn rewrite_git(command: &str) -> Option<String> {
         return None;
     }
     match parts.get(1).map(String::as_str) {
-        Some("log")
-            if !parts
-                .iter()
-                .any(|p| p.starts_with("-n") || p == "--max-count") =>
-        {
-            Some(format!("{command} -n 80"))
+        Some("log") => {
+            if parts.iter().any(|p| is_git_log_count_flag(p)) {
+                Some(command.to_string())
+            } else {
+                Some(format!("{command} -n 80"))
+            }
         }
         Some("clone" | "fetch" | "pull") => {
             Some(inject_quiet_flag(command).unwrap_or_else(|| command.to_string()))
@@ -283,6 +283,22 @@ fn rewrite_git(command: &str) -> Option<String> {
 
 /// Verbosity tokens that mean the caller already chose an output level; the
 /// quiet injector never overrides an explicit choice.
+fn is_tree_depth_flag(part: &str) -> bool {
+    part == "-L"
+        || part.starts_with("--depth")
+        || part
+            .strip_prefix("-L")
+            .is_some_and(|value| !value.is_empty() && value.chars().all(|ch| ch.is_ascii_digit()))
+}
+
+fn is_git_log_count_flag(part: &str) -> bool {
+    part == "--max-count"
+        || part.starts_with("--max-count=")
+        || part
+            .strip_prefix("-n")
+            .is_some_and(|value| value.is_empty() || value.chars().all(|ch| ch.is_ascii_digit()))
+}
+
 fn has_explicit_verbosity(parts: &[String]) -> bool {
     parts.iter().any(|p| {
         matches!(
@@ -356,7 +372,7 @@ fn has_shell_operators(command: &str) -> bool {
                     quote = Some(ch);
                     continue;
                 }
-                if matches!(ch, '|' | ';' | '&' | '>' | '<' | '`') {
+                if matches!(ch, '\n' | '\r' | '|' | ';' | '&' | '>' | '<' | '`') {
                     return true;
                 }
                 if ch == '$' && chars.peek() == Some(&'(') {
@@ -436,7 +452,9 @@ fn unsafe_reason(command: &str) -> Option<String> {
 fn is_destructive_first(first: &str) -> bool {
     matches!(
         first,
-        "rm" | "mv"
+        "rm" | "rmdir"
+            | "unlink"
+            | "mv"
             | "cp"
             | "chmod"
             | "chown"
@@ -499,6 +517,9 @@ fn is_git_mutation(first: &str, second: &str) -> bool {
                 | "cherry-pick"
                 | "revert"
                 | "stash"
+                | "tag"
+                | "branch"
+                | "remote"
         )
 }
 
@@ -509,6 +530,8 @@ fn is_docker_mutation(first: &str, second: &str, parts: &[String]) -> bool {
     if matches!(
         second,
         "rm" | "rmi"
+            | "cp"
+            | "import"
             | "stop"
             | "kill"
             | "push"
@@ -567,6 +590,7 @@ fn is_kubectl_mutation(first: &str, second: &str) -> bool {
                 | "annotate"
                 | "label"
                 | "taint"
+                | "cp"
         )
 }
 
@@ -588,6 +612,7 @@ fn is_package_mutation(first: &str, second: &str) -> bool {
                 | "exec"
                 | "dlx"
                 | "create"
+                | "ci"
         ) | (
             "cargo",
             "publish" | "install" | "login" | "add" | "remove" | "update" | "yank" | "owner"
