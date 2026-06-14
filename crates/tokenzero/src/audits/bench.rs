@@ -252,11 +252,13 @@ pub(crate) fn aggregate_bench_rows(rows: &[serde_json::Value]) -> serde_json::Va
                 + row["recovery_tokens"].as_f64().unwrap_or(0.0)
         })
         .sum();
-    let gates_pass = tokenzero_rows.iter().all(|row| {
-        row["byte_perfect_recovery"] == true
-            && row["task_success"] == true
-            && row["harm_rate"].as_f64().unwrap_or(1.0) == 0.0
-    });
+    let byte_perfect_recovery_pass = tokenzero_rows
+        .iter()
+        .all(|row| row["byte_perfect_recovery"] == true);
+    let task_success_pass = tokenzero_rows.iter().all(|row| row["task_success"] == true);
+    let harm_rate = average_harm_rate(&tokenzero_rows);
+    let harm_gate_pass = harm_rate == 0.0;
+    let gates_pass = byte_perfect_recovery_pass && task_success_pass && harm_gate_pass;
     let recovery_adjusted_savings = if raw == 0.0 {
         0.0
     } else {
@@ -271,13 +273,25 @@ pub(crate) fn aggregate_bench_rows(rows: &[serde_json::Value]) -> serde_json::Va
         "raw_tokens": raw as u64,
         "visible_plus_recovery_tokens": visible_recovery as u64,
         "recovery_adjusted_savings": recovery_adjusted_savings,
-        "byte_perfect_recovery_pass": gates_pass,
-        "task_success_pass": gates_pass,
-        "harm_gate_pass": gates_pass,
+        "byte_perfect_recovery_pass": byte_perfect_recovery_pass,
+        "task_success_pass": task_success_pass,
+        "harm_rate": harm_rate,
+        "harm_gate_pass": harm_gate_pass,
         "safe_savings": safe_savings,
         "target_safe_savings": 0.70,
         "target_met": safe_savings >= 0.70
     })
+}
+
+fn average_harm_rate(rows: &[&serde_json::Value]) -> f64 {
+    if rows.is_empty() {
+        return 0.0;
+    }
+    let misses = rows
+        .iter()
+        .filter(|row| row["harm_rate"].as_f64().unwrap_or(1.0) > 0.0)
+        .count();
+    misses as f64 / rows.len() as f64
 }
 
 pub(crate) fn run_tokenzero_bench_row(
@@ -350,14 +364,9 @@ pub(crate) fn run_tokenzero_bench_row(
     };
     let command_success = telemetry["command_success"].as_bool().unwrap_or(false);
     let task_success = command_success == expected_success;
-    let harm_rate = if parsed["visible"]["text"]
-        .as_str()
-        .is_some_and(|text| text.contains("error") || combined_ref.starts_with("tz://"))
-    {
-        0.0
-    } else {
-        1.0
-    };
+    // Per-row harm is a miss rate over this row's oracle: any mismatch
+    // between observed and expected command success is one harmful miss.
+    let harm_rate = if task_success { 0.0 } else { 1.0 };
     let safe_savings = if byte_perfect && task_success && harm_rate == 0.0 {
         recovery_adjusted_savings.max(0.0)
     } else {
@@ -379,6 +388,7 @@ pub(crate) fn run_tokenzero_bench_row(
         "expected_command_success": expected_success,
         "observed_command_success": command_success,
         "harm_rate": harm_rate,
+        "harm_gate_pass": harm_rate == 0.0,
         "latency_overhead_ms": latency_ms,
         "host_coverage": ["cli"],
         "interception_depth": "explicit_cli",
@@ -399,6 +409,42 @@ pub(crate) fn private_benchmark_path(suite: &str) -> PathBuf {
         .join(".tokenzero-private-benchmarks")
         .join("matrix-current")
         .join(format!("{suite}.json"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn aggregate_tracks_gates_independently() {
+        let rows = vec![
+            json!({
+                "tool": "tokenzero",
+                "raw_tokens": 100.0,
+                "visible_tokens": 10.0,
+                "recovery_tokens": 5.0,
+                "byte_perfect_recovery": true,
+                "task_success": true,
+                "harm_rate": 0.0
+            }),
+            json!({
+                "tool": "tokenzero",
+                "raw_tokens": 100.0,
+                "visible_tokens": 10.0,
+                "recovery_tokens": 5.0,
+                "byte_perfect_recovery": true,
+                "task_success": false,
+                "harm_rate": 1.0
+            }),
+        ];
+
+        let aggregate = aggregate_bench_rows(&rows);
+        assert_eq!(aggregate["byte_perfect_recovery_pass"], true);
+        assert_eq!(aggregate["task_success_pass"], false);
+        assert_eq!(aggregate["harm_gate_pass"], false);
+        assert_eq!(aggregate["harm_rate"], 0.5);
+        assert_eq!(aggregate["safe_savings"], 0.0);
+    }
 }
 
 pub(crate) fn run_matrix_row(label: &str, command: &mut Command) -> serde_json::Value {
