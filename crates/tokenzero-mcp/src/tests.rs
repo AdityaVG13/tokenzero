@@ -1542,6 +1542,31 @@ fn shell_command_strings_preserve_shell_operators() {
 }
 
 #[test]
+fn shell_rejects_cwd_outside_allowed_roots() {
+    let allowed = tempdir().unwrap();
+    let outside = tempdir().unwrap();
+    let engine = TokenZeroEngine::new(EngineConfig::for_root(allowed.path()));
+
+    let response = engine.shell(
+        "echo nope",
+        None,
+        Some(outside.path()),
+        Mode::Auto,
+        None,
+        false,
+        None,
+        None,
+        None,
+    );
+
+    assert_eq!(response.status, "error");
+    assert_eq!(
+        response.error.as_ref().unwrap().code,
+        "path_outside_allowed_roots"
+    );
+}
+
+#[test]
 fn shell_capture_record_is_compact_json() {
     let dir = tempdir().unwrap();
     let engine = TokenZeroEngine::new(EngineConfig::for_root(dir.path()));

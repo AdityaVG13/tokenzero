@@ -1486,6 +1486,16 @@ impl TokenZeroEngine {
         stdin: Option<&str>,
         timeout_override: Option<Duration>,
     ) -> ToolResponse {
+        if let Some(cwd) = cwd {
+            if !self.path_allowed(cwd) {
+                return ToolResponse::error(
+                    "shell",
+                    "path_outside_allowed_roots",
+                    format!("cwd is outside allowed roots: {}", cwd.display()),
+                    Some("set cwd under an allowed root".to_string()),
+                );
+            }
+        }
         let rewrite_mode = rewrite.unwrap_or("off");
         let rewrite_result =
             rewrite_command(command, rewrite_mode, !no_rewrite && rewrite_mode != "off");
