@@ -80,6 +80,8 @@ fn cli_claim_audit_blocks_public_claims_without_release_approval() {
     let json: Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(json["schema_version"], "tokenzero.claim_audit.v1");
     assert_eq!(json["public_claims_approved"], false);
+    assert_eq!(json["transport_status"], "ok");
+    assert_eq!(json["claim_status"], "blocked");
     assert_eq!(json["release_publication_allowed"], false);
     assert_eq!(json["gate_passes"]["release_approval"], false);
     assert_eq!(json["gate_passes"]["benchmark_artifact"], false);
