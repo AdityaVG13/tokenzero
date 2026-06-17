@@ -175,6 +175,12 @@ pub fn resource_specs() -> Vec<ResourceSpec> {
             "application/json",
         ),
         (
+            "resource://tokenzero/metrics",
+            "TokenZero tool metrics",
+            "Read per-tool call counts, error counts, slow-call counts, and latency (this session plus cross-session cumulative).",
+            "application/json",
+        ),
+        (
             "resource://tokenzero/shell-contract",
             "TokenZero shell contract",
             "Read the shell transport, command-success, exact-ref, timeout, and retry semantics.",
