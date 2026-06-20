@@ -1,4 +1,5 @@
 use super::*;
+use std::sync::Arc;
 use tempfile::tempdir;
 use tokenzero_core::MCP_SCHEMA_VERSION;
 
@@ -975,6 +976,139 @@ fn search_traverses_beyond_default_result_limit() {
     );
 }
 
+#[test]
+fn pipelined_identical_reads_dedup_exactly_once() {
+    // Two reads of the same file issued concurrently on a shared engine must
+    // not both serve full: the single-flight gate makes the second wait for
+    // the first to record, so it dedups. Before the fix both raced the
+    // seen-set and both served full (the unreproducible repeat-read bench).
+    let dir = tempdir().unwrap();
+    let file = dir.path().join("big.rs");
+    let body: String = (0..400)
+        .map(|i| format!("line {i} content here\n"))
+        .collect();
+    fs::write(&file, &body).unwrap();
+
+    let engine = Arc::new(TokenZeroEngine::new(EngineConfig::for_root(dir.path())));
+    let barrier = Arc::new(std::sync::Barrier::new(2));
+    let handles: Vec<_> = (0..2)
+        .map(|_| {
+            let engine = Arc::clone(&engine);
+            let barrier = Arc::clone(&barrier);
+            let path = file.clone();
+            std::thread::spawn(move || {
+                barrier.wait();
+                engine.read(&[path], Mode::Auto, None, None, false, 20, 4000)
+            })
+        })
+        .collect();
+    let responses: Vec<ToolResponse> = handles.into_iter().map(|h| h.join().unwrap()).collect();
+
+    let dedup_notes = responses
+        .iter()
+        .filter(|r| {
+            r.telemetry
+                .as_ref()
+                .and_then(|t| t.get("output_strategy"))
+                .and_then(|v| v.as_str())
+                .is_some_and(|s| s.contains("seen_set_dedup"))
+        })
+        .count();
+    assert_eq!(
+        dedup_notes, 1,
+        "exactly one of two concurrent identical reads must dedup"
+    );
+}
+
+#[test]
+fn concurrent_record_fetch_keeps_every_entry() {
+    let dir = tempdir().unwrap();
+    let index_path = dir.path().join("fetch-cache.json");
+    let threads: Vec<_> = (0..8)
+        .map(|i| {
+            let path = index_path.clone();
+            std::thread::spawn(move || {
+                for j in 0..10 {
+                    let url = format!("https://example.com/{i}/{j}");
+                    record_fetch(&path, &url, &format!("tz://blob/b{i}{j}"), 1);
+                }
+            })
+        })
+        .collect();
+    for t in threads {
+        t.join().unwrap();
+    }
+
+    let index = load_fetch_index(&index_path);
+    assert_eq!(
+        index.entries.len(),
+        80,
+        "every concurrent insert must survive the read-modify-write, got {}",
+        index.entries.len()
+    );
+}
+
+#[test]
+fn truncated_fetch_index_does_not_mass_invalidate_via_atomic_write() {
+    let dir = tempdir().unwrap();
+    let index_path = dir.path().join("fetch-cache.json");
+    record_fetch(&index_path, "https://example.com/a", "tz://blob/ba", 1);
+
+    // No reader ever observes a torn file: a crash leaves either the prior
+    // complete file or the new complete one, never a truncated index that
+    // load_fetch_index would silently treat as empty. Assert the post-write
+    // file is valid JSON and complete, and that no temp debris remains.
+    let index = load_fetch_index(&index_path);
+    assert!(index.entries.contains_key("https://example.com/a"));
+    let debris: Vec<_> = fs::read_dir(dir.path())
+        .unwrap()
+        .flatten()
+        .filter(|e| e.file_name().to_string_lossy().contains(".tmp"))
+        .collect();
+    assert!(debris.is_empty(), "atomic write must leave no temp debris");
+}
+
+#[cfg(unix)]
+#[test]
+fn internal_find_and_glob_terminate_on_a_symlink_cycle() {
+    use std::os::unix::fs::symlink;
+
+    let dir = tempdir().unwrap();
+    fs::create_dir_all(dir.path().join("sub")).unwrap();
+    fs::write(dir.path().join("sub/file.rs"), "needle here\n").unwrap();
+    // A directory symlink pointing back at its own parent: following it would
+    // recurse forever (sub/loop/loop/loop/...).
+    symlink(dir.path().join("sub"), dir.path().join("sub/loop")).unwrap();
+
+    let engine = engine_with_backend(dir.path(), SearchBackend::Internal);
+
+    // The bug was unbounded recursion / stack overflow; reaching these
+    // assertions at all is the proof it terminates.
+    let found = engine.find("needle", &[dir.path().to_path_buf()], Mode::Auto, 20, 4000);
+    assert_eq!(found.status, "ok");
+    let found_text = expanded_flat_output(&engine, &found);
+    assert!(found_text.contains("needle"), "real file still matched");
+    assert!(
+        !found_text.contains("loop/loop"),
+        "the symlink cycle must not be traversed: {found_text}"
+    );
+
+    let globbed = engine.glob(
+        "**/*.rs",
+        &[dir.path().to_path_buf()],
+        false,
+        Mode::Auto,
+        20,
+        4000,
+    );
+    assert_eq!(globbed.status, "ok");
+    let glob_text = expanded_flat_output(&engine, &globbed);
+    assert!(
+        !glob_text.contains("loop/loop"),
+        "glob must not descend the symlink cycle: {glob_text}"
+    );
+}
+
 fn engine_with_backend(root: &Path, backend: SearchBackend) -> TokenZeroEngine {
     let mut config = EngineConfig::for_root(root);
     config.search_backend = backend;
@@ -1527,7 +1661,7 @@ fn shell_accepts_common_command_argument_aliases() {
         json!({"args": ["echo", "one", "&&", "echo", "two"]}),
         json!(["echo", "array"]),
     ] {
-        let response = call_tool(&engine, "shell", &args).unwrap();
+        let response = call_tool(&engine, "shell", &args, None).unwrap();
         assert!(
             response.get("isError").is_none(),
             "alias args must execute successfully: {response}"
@@ -2580,6 +2714,8 @@ fn fetch_caches_within_ttl_and_refetches_when_fresh() {
     fs::set_permissions(&fake_curl, fs::Permissions::from_mode(0o755)).unwrap();
     let mut config = EngineConfig::for_root(dir.path());
     config.curl_path_override = Some(fake_curl);
+    config.fetch_enabled = true;
+    config.fetch_allow_hosts = vec!["example.com".to_string()];
     let engine = TokenZeroEngine::new(config);
 
     let first = engine.fetch("https://example.com/doc", None, false, Mode::Auto, 4000);
@@ -2617,10 +2753,55 @@ fn fetch_caches_within_ttl_and_refetches_when_fresh() {
     assert_eq!(fs::read_to_string(&marker).unwrap().lines().count(), 2);
 }
 
+#[cfg(unix)]
+#[test]
+fn fetch_cache_hits_still_obey_current_deny_policy() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = tempdir().unwrap();
+    let fake_curl = dir.path().join("fake-curl");
+    let marker = dir.path().join("invocations.log");
+    fs::write(
+        &fake_curl,
+        format!(
+            "#!/bin/sh\necho invoked >> {}\nprintf 'cached sensitive body\\n'\n",
+            marker.display()
+        ),
+    )
+    .unwrap();
+    fs::set_permissions(&fake_curl, fs::Permissions::from_mode(0o755)).unwrap();
+    let mut config = EngineConfig::for_root(dir.path());
+    config.curl_path_override = Some(fake_curl);
+    config.fetch_enabled = true;
+    config.fetch_allow_hosts = vec!["example.com".to_string()];
+    let engine = TokenZeroEngine::new(config.clone());
+
+    let first = engine.fetch("https://example.com/doc", None, false, Mode::Auto, 4000);
+    assert_eq!(first.status, "ok");
+    assert_eq!(fs::read_to_string(&marker).unwrap().lines().count(), 1);
+
+    config.fetch_deny_hosts = vec!["example.com".to_string()];
+    let denied_engine = TokenZeroEngine::new(config);
+    let denied = denied_engine.fetch("https://example.com/doc", None, false, Mode::Auto, 4000);
+    let error = denied.error.as_ref().unwrap();
+    assert_eq!(error.code, "fetch_blocked");
+    assert!(
+        denied.visible.is_none(),
+        "a fresh TTL cache hit must not bypass the current deny policy"
+    );
+    assert_eq!(
+        fs::read_to_string(&marker).unwrap().lines().count(),
+        1,
+        "denied cached fetch must not re-enter curl"
+    );
+}
+
 #[test]
 fn fetch_rejects_non_http_and_reports_curl_failures() {
     let dir = tempdir().unwrap();
-    let engine = TokenZeroEngine::new(EngineConfig::for_root(dir.path()));
+    let mut config = EngineConfig::for_root(dir.path());
+    config.fetch_enabled = true;
+    let engine = TokenZeroEngine::new(config);
     let bad = engine.fetch("file:///etc/passwd", None, false, Mode::Auto, 4000);
     assert_eq!(bad.error.as_ref().unwrap().code, "invalid_url");
 
@@ -2636,6 +2817,8 @@ fn fetch_rejects_non_http_and_reports_curl_failures() {
         fs::set_permissions(&failing, fs::Permissions::from_mode(0o755)).unwrap();
         let mut config = EngineConfig::for_root(dir.path());
         config.curl_path_override = Some(failing);
+        config.fetch_enabled = true;
+        config.fetch_allow_hosts = vec!["nope.invalid".to_string()];
         let engine = TokenZeroEngine::new(config);
         let response = engine.fetch("https://nope.invalid/x", None, false, Mode::Auto, 4000);
         let error = response.error.as_ref().unwrap();
@@ -2645,6 +2828,56 @@ fn fetch_rejects_non_http_and_reports_curl_failures() {
             "{error:?}"
         );
     }
+}
+
+#[test]
+fn fetch_is_disabled_by_default() {
+    let dir = tempdir().unwrap();
+    let engine = TokenZeroEngine::new(EngineConfig {
+        fetch_enabled: false,
+        ..EngineConfig::for_root(dir.path())
+    });
+    let response = engine.fetch("https://example.com/", None, false, Mode::Auto, 4000);
+    let error = response.error.as_ref().unwrap();
+    assert_eq!(error.code, "fetch_disabled");
+}
+
+#[cfg(unix)]
+#[test]
+fn fetch_blocks_internal_targets_before_any_network_call() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = tempdir().unwrap();
+    let fake_curl = dir.path().join("fake-curl");
+    let marker = dir.path().join("invocations.log");
+    fs::write(
+        &fake_curl,
+        format!(
+            "#!/bin/sh\necho invoked >> {}\nprintf 'body'\n",
+            marker.display()
+        ),
+    )
+    .unwrap();
+    fs::set_permissions(&fake_curl, fs::Permissions::from_mode(0o755)).unwrap();
+    let mut config = EngineConfig::for_root(dir.path());
+    config.curl_path_override = Some(fake_curl);
+    config.fetch_enabled = true;
+    let engine = TokenZeroEngine::new(config);
+
+    for url in [
+        "http://169.254.169.254/latest/meta-data/",
+        "http://127.0.0.1:8080/admin",
+        "http://10.0.0.5/",
+        "http://localhost:9999/",
+    ] {
+        let response = engine.fetch(url, None, false, Mode::Auto, 4000);
+        let error = response.error.as_ref().unwrap();
+        assert_eq!(error.code, "fetch_blocked", "{url}");
+    }
+    assert!(
+        !marker.exists(),
+        "curl must never be invoked for blocked targets"
+    );
 }
 
 #[test]
@@ -2932,4 +3165,123 @@ mod session_props {
             );
         }
     }
+}
+
+#[test]
+fn mcp_tool_calls_are_pulse_accounted_with_attribution() {
+    let dir = tempdir().unwrap();
+    let file = dir.path().join("sample.txt");
+    fs::write(&file, "line one\nline two\n").unwrap();
+    let engine = TokenZeroEngine::new(EngineConfig::for_root(dir.path()));
+
+    let read_request = serde_json::json!({
+        "jsonrpc": "2.0", "id": 7, "method": "tools/call",
+        "params": {"name": "tz_read", "arguments": {"path": file.display().to_string()}}
+    });
+    let read_response = handle_jsonrpc(&engine, &read_request.to_string()).unwrap();
+    let parsed: serde_json::Value = serde_json::from_str(&read_response).unwrap();
+    let text = parsed["result"]["content"][0]["text"].as_str().unwrap();
+    let ref_id = text
+        .split_whitespace()
+        .find(|word| word.starts_with("tz://blob/"))
+        .expect("read response advertises a blob ref")
+        .to_string();
+
+    let expand_request = serde_json::json!({
+        "jsonrpc": "2.0", "id": "call-8", "method": "tools/call",
+        "params": {"name": "tz_expand", "arguments": {"ref": ref_id}}
+    });
+    handle_jsonrpc(&engine, &expand_request.to_string()).unwrap();
+    let string_id_request = serde_json::json!({
+        "jsonrpc": "2.0", "id": "7", "method": "tools/call",
+        "params": {"name": "tz_read", "arguments": {"path": file.display().to_string(), "fresh": true}}
+    });
+    handle_jsonrpc(&engine, &string_id_request.to_string()).unwrap();
+
+    let ledger = tokenzero_pulse::default_ledger_path(dir.path());
+    let lines: Vec<tokenzero_pulse::PulseEvent> = fs::read_to_string(&ledger)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    assert_eq!(lines.len(), 3, "one event per tools/call");
+
+    let read_event = &lines[0];
+    assert_eq!(read_event.tool, "read");
+    assert_eq!(read_event.session_id.as_deref(), Some(engine.session_id()));
+    assert_eq!(read_event.call_id.as_deref(), Some("7"));
+    assert!(read_event.ref_ids.contains(&ref_id));
+    assert!(read_event.raw_tokens > 0);
+
+    let expand_event = &lines[1];
+    assert_eq!(expand_event.tool, "expand");
+    assert_eq!(expand_event.call_id.as_deref(), Some("\"call-8\""));
+    assert_eq!(
+        expand_event.session_id.as_deref(),
+        Some(engine.session_id())
+    );
+    assert!(
+        expand_event.ref_ids.contains(&ref_id),
+        "expand event must carry the expanded ref for attribution"
+    );
+
+    let string_id_event = &lines[2];
+    assert_eq!(string_id_event.tool, "read");
+    assert_eq!(string_id_event.call_id.as_deref(), Some("\"7\""));
+    assert_ne!(
+        read_event.call_id, string_id_event.call_id,
+        "numeric JSON-RPC id 7 and string id \"7\" must not collide"
+    );
+    assert!(
+        expand_event.recovery_tokens > 0,
+        "recovery tokens must be charged on the MCP surface"
+    );
+}
+
+#[test]
+fn prune_dead_refs_drops_evicted_handles_and_reports_incomplete() {
+    let mut store = RecoveryStore::new(None);
+    let stored = store
+        .store_payload("live payload\n", ContentType::Unknown, None, None, None)
+        .unwrap();
+
+    let mut refs = vec![
+        ref_record("blob", stored.blob_ref.clone(), 13),
+        ref_record("blob", "tz://blob/bdeadbeefdeadbeef".to_string(), 99),
+    ];
+    assert!(
+        !prune_dead_refs(&store, &mut refs),
+        "a dead ref must be reported"
+    );
+    assert_eq!(refs.len(), 1);
+    assert_eq!(refs[0].ref_id, stored.blob_ref);
+
+    let mut live_only = vec![ref_record("blob", stored.blob_ref.clone(), 13)];
+    assert!(prune_dead_refs(&store, &mut live_only));
+    assert_eq!(live_only.len(), 1);
+}
+
+#[test]
+fn response_never_advertises_a_ref_evicted_during_its_own_persist() {
+    // A payload larger than the cache budget is evicted by the persist that
+    // the serving call itself runs; the advertised refs must disappear with
+    // it rather than dangle.
+    let config = tokenzero_recovery::RecoveryConfig {
+        max_bytes: 64,
+        ..tokenzero_recovery::RecoveryConfig::default()
+    };
+    let mut store = RecoveryStore::with_config(None, config);
+    let oversized = "x".repeat(4096);
+    let stored = store.store_payload_deferred(&oversized, ContentType::Unknown, None, None, None);
+    store.persist_pending().unwrap();
+
+    let mut refs = vec![
+        ref_record("blob", stored.blob_ref.clone(), oversized.len()),
+        ref_record("file", stored.file_ref.clone(), oversized.len()),
+    ];
+    assert!(!prune_dead_refs(&store, &mut refs));
+    assert!(
+        refs.is_empty(),
+        "refs evicted by the persist must not be advertised"
+    );
 }

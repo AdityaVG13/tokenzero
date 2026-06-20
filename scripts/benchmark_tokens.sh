@@ -50,14 +50,40 @@ VIS=$("$TZ_BIN" read "$FILE" --json --cache-path "$BENCH_CACHE" | visible_of)
 row "read large source file ($FILE)" "$RAW" "$VIS"; add_totals "$RAW" "$VIS"
 
 # --- 2. Repeat read: session dedup through the MCP server ------------------
+# Response-gated, NOT timing-gated: id=3 is sent only after id=2's response
+# has landed, so the second read is guaranteed to find the first's recorded
+# serve and dedup. (A bare `sleep` raced the 4-worker pool and made this row
+# unreproducible.) The server's single-flight gate also enforces this, but
+# the harness must not depend on that to measure the steady-state behaviour.
 MCP_OUT="$WORK/mcp-dedup.jsonl"
-{
-    printf '%s\n' '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"bench","version":"0"}}}'
-    printf '%s\n' '{"jsonrpc":"2.0","method":"notifications/initialized"}'
-    printf '%s\n' "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/call\",\"params\":{\"name\":\"read\",\"arguments\":{\"path\":\"$FILE\"}}}"
-    sleep 1
-    printf '%s\n' "{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"tools/call\",\"params\":{\"name\":\"read\",\"arguments\":{\"path\":\"$FILE\"}}}"
-} | "$TZ_BIN" mcp-server --allowed-root "$ROOT" --cache-path "$BENCH_CACHE" > "$MCP_OUT"
+MCP_IN="$WORK/mcp-in.fifo"
+mkfifo "$MCP_IN"
+"$TZ_BIN" mcp-server --allowed-root "$ROOT" --cache-path "$BENCH_CACHE" \
+    < "$MCP_IN" > "$MCP_OUT" &
+MCP_PID=$!
+# Hold the FIFO open for writing on fd 3 so the server does not see EOF
+# between sends.
+exec 3> "$MCP_IN"
+printf '%s\n' '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"bench","version":"0"}}}' >&3
+printf '%s\n' '{"jsonrpc":"2.0","method":"notifications/initialized"}' >&3
+printf '%s\n' "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/call\",\"params\":{\"name\":\"read\",\"arguments\":{\"path\":\"$FILE\"}}}" >&3
+# Wait for id=2's response before issuing id=3.
+waited=0
+while ! grep -q '"id":2' "$MCP_OUT" 2>/dev/null; do
+    sleep 0.05
+    waited=$((waited + 1))
+    [ "$waited" -gt 600 ] && { echo "timed out waiting for id=2 response" >&2; break; }
+done
+printf '%s\n' "{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"tools/call\",\"params\":{\"name\":\"read\",\"arguments\":{\"path\":\"$FILE\"}}}" >&3
+waited=0
+while ! grep -q '"id":3' "$MCP_OUT" 2>/dev/null; do
+    sleep 0.05
+    waited=$((waited + 1))
+    [ "$waited" -gt 600 ] && { echo "timed out waiting for id=3 response" >&2; break; }
+done
+exec 3>&-
+wait "$MCP_PID" 2>/dev/null || true
+rm -f "$MCP_IN"
 SECOND=$(jq -r 'select(.id==3) | .result.content[0].text' "$MCP_OUT")
 VIS=$(printf '%s' "$SECOND" | count_tokens)
 row "re-read same file (seen-set dedup)" "$RAW" "$VIS"; add_totals "$RAW" "$VIS"

@@ -202,6 +202,51 @@ fn wait_for_output(output: &SharedOutput, needle: &str) {
 }
 
 #[test]
+fn resend_id_is_pulled_from_the_failover_drain_so_it_gets_no_retryable_error() {
+    // The resent message (never reached the dead child) will be answered for
+    // real after respawn; emitting a retryable error for its id here too would
+    // be a double reply. take_resend_framing must remove it from the set that
+    // the failover drain turns into -32603 errors, and hand back its framing.
+    let mut outstanding = HashMap::new();
+    outstanding.insert("2".to_string(), false); // genuinely in-flight (framed=false)
+    outstanding.insert("3".to_string(), true); // the resent request (framed=true)
+
+    let ping = r#"{"jsonrpc":"2.0","id":3,"method":"ping"}"#;
+    let resend_framing = take_resend_framing(Some(ping), &mut outstanding);
+
+    assert_eq!(
+        resend_framing.get("3").copied(),
+        Some(true),
+        "original framing of the resent id must be preserved"
+    );
+    assert!(
+        !outstanding.contains_key("3"),
+        "resent id must not remain in the drain set"
+    );
+    assert!(
+        outstanding.contains_key("2"),
+        "genuinely in-flight ids must still receive their retryable error"
+    );
+
+    // Re-registration before the resend restores the framing the id arrived
+    // with, not a hardcoded default.
+    reinstate_resend_framing(ping, &resend_framing, &mut outstanding);
+    assert_eq!(outstanding.get("3").copied(), Some(true));
+}
+
+#[test]
+fn take_resend_framing_is_a_noop_without_a_pending_resend() {
+    let mut outstanding = HashMap::new();
+    outstanding.insert("5".to_string(), false);
+    let resend_framing = take_resend_framing(None, &mut outstanding);
+    assert!(resend_framing.is_empty());
+    assert!(
+        outstanding.contains_key("5"),
+        "with no resend, every in-flight id still drains to an error"
+    );
+}
+
+#[test]
 fn supervisor_gives_up_after_repeated_spawn_failures() {
     let spawner = || Err(std::io::Error::other("spawn always fails in this test"));
     let (event_tx, event_rx) = mpsc::channel();

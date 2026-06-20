@@ -2,6 +2,7 @@
 
 mod catalog;
 mod diff;
+mod fetch_guard;
 mod jsonrpc;
 mod recall;
 mod resources;
@@ -15,17 +16,18 @@ pub use jsonrpc::handle_jsonrpc;
 pub use stdio::run_stdio;
 pub use supervisor::run_supervised_stdio;
 
+use fetch_guard::{FETCH_META_MARKER, split_fetch_meta, validate_fetch_target};
 use globset::{GlobBuilder, GlobMatcher};
 pub(crate) use jsonrpc::{JsonRpcErrorData, handle_jsonrpc_value, jsonrpc_error};
 pub(crate) use resources::read_resource;
 use serde_json::{Value, json};
 use session::{DiffTelemetry, SeenState, ServeKey, ServedRecord, SessionMemory, SessionSummary};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::ffi::OsString;
-use std::fs;
-use std::io::{BufRead, BufReader};
+use std::fs::{self, OpenOptions};
+use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Condvar, Mutex, OnceLock};
 use std::time::{Duration, SystemTime};
 use tokenzero_core::{
     Accounting, CLI_SCHEMA_VERSION, ContentType, Mode, ShellRenderInput, ToolResponse,
@@ -106,6 +108,14 @@ pub struct EngineConfig {
     /// Explicit curl binary for `tz_fetch` (`TOKENZERO_CURL_PATH`); tests set
     /// this field directly instead of mutating process-global env.
     pub curl_path_override: Option<PathBuf>,
+    /// `tz_fetch` network access is off by default (SSRF surface); opt in
+    /// with `TOKENZERO_FETCH=on`. Tests set this field directly.
+    pub fetch_enabled: bool,
+    /// Hosts (suffix match) explicitly trusted for fetch; they bypass the
+    /// post-DNS IP checks. From `TOKENZERO_FETCH_ALLOW`, comma-separated.
+    pub fetch_allow_hosts: Vec<String>,
+    /// Hosts (suffix match) always refused. From `TOKENZERO_FETCH_DENY`.
+    pub fetch_deny_hosts: Vec<String>,
 }
 
 impl EngineConfig {
@@ -125,14 +135,71 @@ impl EngineConfig {
             session_dedup: session_dedup_default(),
             diff_reads: diff_reads_default(),
             curl_path_override: std::env::var_os(CURL_PATH_ENV).map(PathBuf::from),
+            fetch_enabled: env_opt_in(FETCH_ENABLED_ENV),
+            fetch_allow_hosts: env_host_list(FETCH_ALLOW_ENV),
+            fetch_deny_hosts: env_host_list(FETCH_DENY_ENV),
         }
     }
+}
+
+pub const FETCH_ENABLED_ENV: &str = "TOKENZERO_FETCH";
+pub const FETCH_ALLOW_ENV: &str = "TOKENZERO_FETCH_ALLOW";
+pub const FETCH_DENY_ENV: &str = "TOKENZERO_FETCH_DENY";
+
+/// Opt-in toggle parse: only `1`/`on`/`true`/`yes` (case-insensitive) enable.
+fn env_opt_in(name: &str) -> bool {
+    match std::env::var(name) {
+        Ok(value) => matches!(
+            value.trim().to_ascii_lowercase().as_str(),
+            "1" | "on" | "true" | "yes"
+        ),
+        Err(_) => false,
+    }
+}
+
+fn env_host_list(name: &str) -> Vec<String> {
+    std::env::var(name)
+        .unwrap_or_default()
+        .split(',')
+        .map(|entry| entry.trim().to_ascii_lowercase())
+        .filter(|entry| !entry.is_empty())
+        .collect()
 }
 
 const CURL_PATH_ENV: &str = "TOKENZERO_CURL_PATH";
 
 pub(crate) fn session_dedup_default() -> bool {
     env_toggle_enabled(SESSION_DEDUP_ENV)
+}
+
+/// RAII guard releasing a set of in-flight ServeKeys when the serve finishes
+/// (or unwinds), waking any request waiting on those keys.
+struct ServeFlight<'a> {
+    engine: &'a TokenZeroEngine,
+    keys: Vec<ServeKey>,
+}
+
+impl Drop for ServeFlight<'_> {
+    fn drop(&mut self) {
+        if self.keys.is_empty() {
+            return;
+        }
+        let (lock, cvar) = &self.engine.in_flight;
+        let mut set = lock.lock().unwrap_or_else(|p| p.into_inner());
+        for key in &self.keys {
+            set.remove(key);
+        }
+        drop(set);
+        cvar.notify_all();
+    }
+}
+
+fn new_session_id() -> String {
+    let nanos = SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_nanos())
+        .unwrap_or_default();
+    format!("tz-{}-{nanos:x}", std::process::id())
 }
 
 pub(crate) fn diff_reads_default() -> bool {
@@ -209,6 +276,16 @@ pub struct TokenZeroEngine {
     /// Session-lifetime seen-set for the redundancy layer (docs/routing.md
     /// §5). In-memory only; dies with the server process by design.
     session: Mutex<SessionMemory>,
+    /// Single-flight gate: ServeKeys currently being served, with a condvar
+    /// to wake waiters. Two pipelined identical reads on the 4-worker pool
+    /// would otherwise both miss the seen-set (the first has not recorded its
+    /// serve yet) and both serve full — the dedup race behind the
+    /// unreproducible repeat-read benchmark. A second request for a key in
+    /// flight waits for the first to record, then dedups.
+    in_flight: (Mutex<HashSet<ServeKey>>, Condvar),
+    /// Stable id for Pulse attribution of every call this engine serves
+    /// (one engine per MCP session or CLI command).
+    session_id: String,
 }
 
 impl TokenZeroEngine {
@@ -221,7 +298,13 @@ impl TokenZeroEngine {
             config,
             rg_binary: OnceLock::new(),
             session: Mutex::new(SessionMemory::default()),
+            in_flight: (Mutex::new(HashSet::new()), Condvar::new()),
+            session_id: new_session_id(),
         }
+    }
+
+    pub fn session_id(&self) -> &str {
+        &self.session_id
     }
 
     /// Fail-open lookup: a poisoned session mutex reads as a miss (full
@@ -242,6 +325,27 @@ impl TokenZeroEngine {
             memory.record(key, record);
         }
         memory.absorb(summary);
+    }
+
+    /// Claim a set of ServeKeys for single-flight serving. Blocks until none
+    /// of `keys` is already in flight, then marks them all in flight and
+    /// returns a guard that releases them (and wakes waiters) on drop. An
+    /// empty key set (dedup off, or nothing dedupable) is a no-op.
+    fn begin_serve_flight(&self, keys: Vec<ServeKey>) -> ServeFlight<'_> {
+        if !keys.is_empty() {
+            let (lock, cvar) = &self.in_flight;
+            let mut set = lock.lock().unwrap_or_else(|p| p.into_inner());
+            // Wait until every requested key is free, then claim them all at
+            // once. Claiming atomically avoids a livelock between two calls
+            // whose key sets overlap in opposite order.
+            while keys.iter().any(|key| set.contains(key)) {
+                set = cvar.wait(set).unwrap_or_else(|p| p.into_inner());
+            }
+            for key in &keys {
+                set.insert(key.clone());
+            }
+        }
+        ServeFlight { engine: self, keys }
     }
 
     fn session_rollup(&self) -> Value {
@@ -302,8 +406,28 @@ impl TokenZeroEngine {
         max_visible_tokens: usize,
         options: ServeOptions,
     ) -> ToolResponse {
+        // Single-flight the serve so a second pipelined identical read waits
+        // for this one to record its serve before it looks up the seen-set
+        // (otherwise both miss and both serve full). Keyed per path+range, so
+        // disjoint reads still run fully concurrently. Held until after
+        // session_apply via the guard's lifetime.
+        let _flight = if self.config.session_dedup {
+            let keys = paths
+                .iter()
+                .take(max_files)
+                .map(|path| ServeKey::File {
+                    path: comparable_path(path),
+                    start: start_line,
+                    end: end_line,
+                })
+                .collect();
+            self.begin_serve_flight(keys)
+        } else {
+            self.begin_serve_flight(Vec::new())
+        };
         let mut store = RecoveryStore::new(Some(self.config.cache_path.clone()));
         let mut visible_parts = Vec::new();
+        let mut raw_visible_parts = Vec::new();
         let mut refs = Vec::new();
         let mut raw_tokens = 0usize;
         let mut visible_tokens = 0usize;
@@ -441,6 +565,7 @@ impl TokenZeroEngine {
             }
             raw_tokens += capsule.raw_tokens;
             visible_tokens += part_tokens;
+            raw_visible_parts.push(text.trim_end().to_string());
             visible_parts.push(part_text);
         }
         if !refs.is_empty() {
@@ -449,10 +574,16 @@ impl TokenZeroEngine {
                 refs.clear();
             }
         }
+        let refs_complete = prune_dead_refs(&store, &mut refs);
+        if !refs_complete {
+            visible_parts = raw_visible_parts;
+            visible_tokens = raw_tokens;
+        }
         // Dedup/diff notes advertise refs in place of content: apply them
-        // only when persistence succeeded. Degraded storage always serves
-        // full — the bytes are in the text, which is unconditionally safe.
-        if storage_errors.is_empty() {
+        // only when persistence succeeded AND every ref survived eviction.
+        // Degraded storage always serves full — the bytes are in the text,
+        // which is unconditionally safe.
+        if storage_errors.is_empty() && refs_complete {
             for substitution in substitutions {
                 match substitution {
                     PendingSubstitution::Dedup {
@@ -513,8 +644,9 @@ impl TokenZeroEngine {
         if let Some(extra) = summary.telemetry() {
             merge_telemetry(&mut response, extra);
         }
-        // A serve whose refs failed to persist must not become a dedup base.
-        if storage_errors.is_empty() {
+        // A serve whose refs failed to persist (or were evicted before the
+        // response returned) must not become a dedup base.
+        if storage_errors.is_empty() && refs_complete {
             self.session_apply(pending, &summary);
         }
         // Raw reads keep the verbatim slice contract even when it is empty;
@@ -656,6 +788,7 @@ impl TokenZeroEngine {
             }
             Err(err) => storage_error = Some(err.to_string()),
         }
+        let refs_complete = prune_dead_refs(&store, &mut refs);
         if !dry_run {
             if let Err(err) = write_atomic(path, applied.text.as_bytes()) {
                 return ToolResponse::error(
@@ -670,7 +803,11 @@ impl TokenZeroEngine {
             // re-paying the hunks as a diff. Same persistence rule as
             // read/search serves: refs that failed to persist never become a
             // dedup base.
-            if storage_error.is_none() && self.config.session_dedup && !applied.text.is_empty() {
+            if storage_error.is_none()
+                && refs_complete
+                && self.config.session_dedup
+                && !applied.text.is_empty()
+            {
                 self.session_apply(
                     vec![(
                         ServeKey::File {
@@ -715,13 +852,24 @@ impl TokenZeroEngine {
         } else {
             format!("{header}\n{}", applied.diff)
         };
-        let capsule = make_capsule_with_raw_tokens(
-            &assembled,
-            count_tokens(&assembled),
-            mode,
-            max_visible_tokens,
-            Some(&format!("edit {}", path.display())),
-        );
+        let assembled_tokens = count_tokens(&assembled);
+        let capsule = if refs_complete {
+            make_capsule_with_raw_tokens(
+                &assembled,
+                assembled_tokens,
+                mode,
+                max_visible_tokens,
+                Some(&format!("edit {}", path.display())),
+            )
+        } else {
+            tokenzero_core::Capsule {
+                text: assembled.trim_end().to_string(),
+                raw_tokens: assembled_tokens,
+                visible_tokens: assembled_tokens,
+                omitted_lines: 0,
+                mode,
+            }
+        };
         let exact_ref_tokens = exact_ref_token_count(&refs);
         let exact_refs_available = !refs.is_empty();
         let mut response = ToolResponse::ok(
@@ -761,7 +909,6 @@ impl TokenZeroEngine {
 
     pub fn ingest(&self, text: &str, kind: ContentType, mode: Mode, source: &str) -> ToolResponse {
         let mut store = RecoveryStore::new(Some(self.config.cache_path.clone()));
-        let capsule = make_capsule(text, mode, self.config.max_visible_tokens, Some(source));
         let mut refs = Vec::new();
         let mut storage_error = None;
         match store.store_payload(text, kind, None, None, None) {
@@ -773,6 +920,19 @@ impl TokenZeroEngine {
                 storage_error = Some(err.to_string());
             }
         }
+        let refs_complete = prune_dead_refs(&store, &mut refs);
+        let capsule = if refs_complete {
+            make_capsule(text, mode, self.config.max_visible_tokens, Some(source))
+        } else {
+            let raw_tokens = count_tokens(text);
+            tokenzero_core::Capsule {
+                text: text.trim_end().to_string(),
+                raw_tokens,
+                visible_tokens: raw_tokens,
+                omitted_lines: 0,
+                mode,
+            }
+        };
         let exact_ref_tokens = exact_ref_token_count(&refs);
         let mut response = ToolResponse::ok(
             "ingest",
@@ -903,6 +1063,21 @@ impl TokenZeroEngine {
                 );
             }
         }
+        // Single-flight identical searches so a second pipelined call dedups
+        // against the first's recorded serve instead of racing it. Same key
+        // the session block uses below; held until after session_apply.
+        let _flight = if self.config.session_dedup {
+            let mut canonical_roots: Vec<PathBuf> =
+                roots.iter().map(|root| comparable_path(root)).collect();
+            canonical_roots.sort();
+            self.begin_serve_flight(vec![ServeKey::Output {
+                tool: tool.to_string(),
+                query: query.to_string(),
+                roots: canonical_roots,
+            }])
+        } else {
+            self.begin_serve_flight(Vec::new())
+        };
         let max_visited_files = max_search_visited_files(max_files);
         let run_internal = |stats: &mut SearchStats, matches: &mut Vec<SearchMatch>| {
             for root in roots {
@@ -912,6 +1087,7 @@ impl TokenZeroEngine {
                     query,
                     max_files,
                     max_visited_files,
+                    collect::MAX_WALK_DEPTH,
                     stats,
                     matches,
                 );
@@ -1005,15 +1181,26 @@ impl TokenZeroEngine {
             }
             Err(err) => storage_error = Some(err.to_string()),
         }
+        let refs_complete = prune_dead_refs(&store, &mut refs);
         let exact_ref_tokens = exact_ref_token_count(&refs);
         let exact_refs_available = !refs.is_empty();
-        let capsule = make_capsule_with_raw_tokens(
-            visible_source,
-            stored.raw_tokens,
-            mode,
-            max_visible_tokens,
-            Some(&format!("{tool} {query}")),
-        );
+        let capsule = if refs_complete {
+            make_capsule_with_raw_tokens(
+                visible_source,
+                stored.raw_tokens,
+                mode,
+                max_visible_tokens,
+                Some(&format!("{tool} {query}")),
+            )
+        } else {
+            tokenzero_core::Capsule {
+                text: output.trim_end().to_string(),
+                raw_tokens: stored.raw_tokens,
+                visible_tokens: stored.raw_tokens,
+                omitted_lines: 0,
+                mode,
+            }
+        };
         let mut visible_text = capsule.text;
         let mut final_visible_tokens = capsule.visible_tokens;
         let mut summary = SessionSummary::default();
@@ -1025,7 +1212,11 @@ impl TokenZeroEngine {
         // results are never diffed. Skipped entirely when this call's refs
         // failed to persist: a note must never advertise unrecoverable refs,
         // and a serve whose refs died must not become a dedup base.
-        if self.config.session_dedup && !output.is_empty() && storage_error.is_none() {
+        if self.config.session_dedup
+            && !output.is_empty()
+            && storage_error.is_none()
+            && refs_complete
+        {
             let mut canonical_roots: Vec<PathBuf> =
                 roots.iter().map(|root| comparable_path(root)).collect();
             canonical_roots.sort();
@@ -1166,6 +1357,7 @@ impl TokenZeroEngine {
                 pattern.contains('/'),
                 include_hidden,
                 max_files,
+                collect::MAX_WALK_DEPTH,
                 &mut paths,
             );
         }
@@ -1447,7 +1639,7 @@ impl TokenZeroEngine {
         if let Err(err) = store.persist_pending() {
             return degraded_shell_response(command, mode, &output, err.to_string());
         }
-        let refs = vec![
+        let mut refs = vec![
             ref_record(
                 "stdout",
                 stdout_stored.blob_ref.clone(),
@@ -1465,8 +1657,18 @@ impl TokenZeroEngine {
                 capture_text.len(),
             ),
         ];
+        let refs_complete = prune_dead_refs(&store, &mut refs);
         let raw_tokens = count_tokens(&output);
-        let visible_tokens = count_tokens(&render.visible);
+        let visible_text = if refs_complete {
+            render.visible.clone()
+        } else {
+            output.trim_end().to_string()
+        };
+        let visible_tokens = if refs_complete {
+            count_tokens(&visible_text)
+        } else {
+            raw_tokens
+        };
         let mut response = ToolResponse::ok(
             "shell",
             render
@@ -1474,7 +1676,7 @@ impl TokenZeroEngine {
                 .policy
                 .parse()
                 .unwrap_or(mode.effective_policy()),
-            render.visible,
+            visible_text,
             refs,
             Accounting {
                 raw_tokens,
@@ -1679,8 +1881,25 @@ impl TokenZeroEngine {
                 None,
             );
         }
+        if !self.config.fetch_enabled {
+            return ToolResponse::error(
+                "fetch",
+                "fetch_disabled",
+                "network fetches are disabled by default",
+                Some(format!(
+                    "set {FETCH_ENABLED_ENV}=on (optionally {FETCH_ALLOW_ENV}=host1,host2) to enable"
+                )),
+            );
+        }
         let ttl_secs = ttl_seconds.unwrap_or(24 * 60 * 60) as u64;
         let index_path = fetch_index_path(&self.config.cache_path);
+        if let Err(blocked) = validate_fetch_target(
+            url,
+            &self.config.fetch_allow_hosts,
+            &self.config.fetch_deny_hosts,
+        ) {
+            return ToolResponse::error("fetch", blocked.code, blocked.message, blocked.repair);
+        }
         if !fresh {
             if let Some(entry) = load_fetch_index(&index_path).entries.get(url) {
                 let age = epoch_secs().saturating_sub(entry.fetched_at_secs);
@@ -1708,53 +1927,99 @@ impl TokenZeroEngine {
             .curl_path_override
             .clone()
             .unwrap_or_else(|| PathBuf::from("curl"));
-        let argv: Vec<String> = vec![
-            curl.display().to_string(),
-            "-sS".to_string(),
-            "-L".to_string(),
-            "--max-time".to_string(),
-            "30".to_string(),
-            url.to_string(),
-        ];
-        let mut child_env = BTreeMap::new();
-        child_env.insert("TOKENZERO_INNER".to_string(), "1".to_string());
-        let output_policy = RunOutputPolicy {
-            per_stream_capture_bytes: self.config.shell_capture_bytes,
-            spill_threshold_bytes: self.config.shell_spill_bytes,
-            spill_dir: Some(shell_spill_dir(&self.config.cache_path)),
-        }
-        .normalized();
-        let result = match run_command_with_policy(
-            &argv,
-            None,
-            Some(&child_env),
-            None,
-            Duration::from_secs(45),
-            false,
-            output_policy,
-        ) {
-            Ok(result) => result,
-            Err(err) => {
+        // Redirects are followed manually so every hop's target is validated
+        // (and pinned) like the entry URL — a redirect to an internal address
+        // is the classic SSRF bypass.
+        const MAX_FETCH_REDIRECTS: usize = 5;
+        let mut current_url = url.to_string();
+        let mut redirect_hops = 0usize;
+        let body = loop {
+            let target = match validate_fetch_target(
+                &current_url,
+                &self.config.fetch_allow_hosts,
+                &self.config.fetch_deny_hosts,
+            ) {
+                Ok(target) => target,
+                Err(blocked) => {
+                    return ToolResponse::error(
+                        "fetch",
+                        blocked.code,
+                        blocked.message,
+                        blocked.repair,
+                    );
+                }
+            };
+            let mut argv: Vec<String> = vec![
+                curl.display().to_string(),
+                "-sS".to_string(),
+                "--max-time".to_string(),
+                "30".to_string(),
+                "--proto".to_string(),
+                "=http,https".to_string(),
+                "-w".to_string(),
+                format!("\n{FETCH_META_MARKER} %{{http_code}} %{{redirect_url}}"),
+            ];
+            if let Some(ip) = target.pinned_ip {
+                argv.push("--resolve".to_string());
+                argv.push(format!("{}:{}:{}", target.host, target.port, ip));
+            }
+            argv.push(current_url.clone());
+            let mut child_env = BTreeMap::new();
+            child_env.insert("TOKENZERO_INNER".to_string(), "1".to_string());
+            let output_policy = RunOutputPolicy {
+                per_stream_capture_bytes: self.config.shell_capture_bytes,
+                spill_threshold_bytes: self.config.shell_spill_bytes,
+                spill_dir: Some(shell_spill_dir(&self.config.cache_path)),
+            }
+            .normalized();
+            let result = match run_command_with_policy(
+                &argv,
+                None,
+                Some(&child_env),
+                None,
+                Duration::from_secs(45),
+                false,
+                output_policy,
+            ) {
+                Ok(result) => result,
+                Err(err) => {
+                    return ToolResponse::error(
+                        "fetch",
+                        "fetch_failed",
+                        format!("could not run curl: {err}"),
+                        Some("install curl or set TOKENZERO_CURL_PATH".to_string()),
+                    );
+                }
+            };
+            if !result.ok || result.exit_code != Some(0) {
+                let stderr: String = result.stderr.trim().chars().take(300).collect();
                 return ToolResponse::error(
                     "fetch",
                     "fetch_failed",
-                    format!("could not run curl: {err}"),
-                    Some("install curl or set TOKENZERO_CURL_PATH".to_string()),
+                    format!("curl exited with {:?}: {stderr}", result.exit_code),
+                    Some("check the URL and network access".to_string()),
                 );
             }
+            let (body, http_code, redirect_url) = split_fetch_meta(&result.stdout);
+            match (http_code, redirect_url) {
+                (Some(code), Some(next)) if (300..400).contains(&code) => {
+                    redirect_hops += 1;
+                    if redirect_hops > MAX_FETCH_REDIRECTS {
+                        return ToolResponse::error(
+                            "fetch",
+                            "too_many_redirects",
+                            format!("more than {MAX_FETCH_REDIRECTS} redirects from {url}"),
+                            None,
+                        );
+                    }
+                    current_url = next;
+                }
+                _ => break body,
+            }
         };
-        if !result.ok || result.exit_code != Some(0) {
-            let stderr: String = result.stderr.trim().chars().take(300).collect();
-            return ToolResponse::error(
-                "fetch",
-                "fetch_failed",
-                format!("curl exited with {:?}: {stderr}", result.exit_code),
-                Some("check the URL and network access".to_string()),
-            );
-        }
         self.fetch_response(
             url,
-            &result.stdout,
+            &body,
             mode,
             max_visible_tokens,
             false,
@@ -1791,16 +2056,29 @@ impl TokenZeroEngine {
             }
             Err(err) => storage_error = Some(err.to_string()),
         }
-        if !cache_hit && storage_error.is_none() {
+        let refs_complete = prune_dead_refs(&store, &mut refs);
+        // An evicted blob must not enter the fetch index: a later cache hit
+        // would advertise a ref that cannot be expanded.
+        if !cache_hit && storage_error.is_none() && refs_complete {
             record_fetch(index_path, url, &stored.blob_ref, body.len());
         }
-        let capsule = make_capsule_with_raw_tokens(
-            body,
-            stored.raw_tokens,
-            mode,
-            max_visible_tokens,
-            Some(&format!("fetch {}", zero_hit_label(url))),
-        );
+        let capsule = if refs_complete {
+            make_capsule_with_raw_tokens(
+                body,
+                stored.raw_tokens,
+                mode,
+                max_visible_tokens,
+                Some(&format!("fetch {}", zero_hit_label(url))),
+            )
+        } else {
+            tokenzero_core::Capsule {
+                text: body.trim_end().to_string(),
+                raw_tokens: stored.raw_tokens,
+                visible_tokens: stored.raw_tokens,
+                omitted_lines: 0,
+                mode,
+            }
+        };
         let exact_ref_tokens = exact_ref_token_count(&refs);
         let mut response = ToolResponse::ok(
             "fetch",
@@ -1945,6 +2223,16 @@ impl TokenZeroEngine {
                 Some("fix recovery cache permissions".to_string()),
             );
         }
+        // The manifest embeds these refs; if eviction dropped either during
+        // the persist, fail loud instead of publishing dead handles.
+        if !store.has_ref(&stable_stored.blob_ref) || !store.has_ref(&volatile_stored.blob_ref) {
+            return ToolResponse::error(
+                "cache-pack",
+                "cache_evicted",
+                "cache pack payload was evicted from the recovery cache before it could be advertised",
+                Some("increase recovery cache max_bytes or reduce the pack scope".to_string()),
+            );
+        }
         let cacheable_tokens = count_tokens(&stable_text);
         let volatile_tokens = count_tokens(&volatile_text);
         let invalidation_count = if invalidation_reason == "unchanged" {
@@ -2074,21 +2362,32 @@ impl TokenZeroEngine {
             }
             Err(err) => storage_error = Some(err.to_string()),
         }
+        let refs_complete = prune_dead_refs(&store, &mut refs);
         let exact_ref_tokens = exact_ref_token_count(&refs);
-        let capsule = match rendered {
-            Some(text) => make_capsule_with_raw_tokens(
-                text,
-                stored.raw_tokens,
+        let capsule = if refs_complete {
+            match rendered {
+                Some(text) => make_capsule_with_raw_tokens(
+                    text,
+                    stored.raw_tokens,
+                    mode,
+                    max_visible_tokens,
+                    Some(&format!("{tool} {key}")),
+                ),
+                None => make_capsule(
+                    output,
+                    mode,
+                    max_visible_tokens,
+                    Some(&format!("{tool} {key}")),
+                ),
+            }
+        } else {
+            tokenzero_core::Capsule {
+                text: output.trim_end().to_string(),
+                raw_tokens: stored.raw_tokens,
+                visible_tokens: stored.raw_tokens,
+                omitted_lines: 0,
                 mode,
-                max_visible_tokens,
-                Some(&format!("{tool} {key}")),
-            ),
-            None => make_capsule(
-                output,
-                mode,
-                max_visible_tokens,
-                Some(&format!("{tool} {key}")),
-            ),
+            }
         };
         let mut response = ToolResponse::ok(
             tool,
@@ -2284,6 +2583,16 @@ fn epoch_secs() -> u64 {
 
 fn record_fetch(path: &Path, url: &str, blob_ref: &str, bytes: usize) {
     const MAX_FETCH_INDEX_ENTRIES: usize = 200;
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    // Hold an exclusive advisory lock across the whole read-modify-write so
+    // two concurrent fetches (the 4-worker MCP pool, or two processes sharing
+    // a cache) cannot each load the same index, insert, and clobber the
+    // other's entry. Fail-open: a lock we cannot take only costs a re-fetch.
+    let Some(_lock) = FetchIndexLock::acquire(path) else {
+        return;
+    };
     let mut index = load_fetch_index(path);
     index.entries.insert(
         url.to_string(),
@@ -2306,11 +2615,82 @@ fn record_fetch(path: &Path, url: &str, blob_ref: &str, bytes: usize) {
             None => break,
         }
     }
-    if let Some(parent) = path.parent() {
-        let _ = std::fs::create_dir_all(parent);
+    // Atomic temp+rename so a crash mid-write can never leave a truncated
+    // index that load_fetch_index would parse as empty (mass-invalidating
+    // every prior cached fetch). A reader sees the old file or the new one.
+    let _ = atomic_write_fetch_index(path, &index);
+}
+
+/// Process-wide counter so concurrent same-PID writers never collide on a
+/// temp-file name (a shared name would let them interleave bytes).
+static FETCH_TMP_COUNTER: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+fn atomic_write_fetch_index(path: &Path, index: &FetchIndex) -> std::io::Result<()> {
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    let nonce = FETCH_TMP_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let tmp = parent.join(format!(
+        ".fetch-cache.json.{}.{nonce}.tmp",
+        std::process::id()
+    ));
+    let serialized = serde_json::to_string(index).map_err(std::io::Error::other)?;
+    {
+        let mut options = OpenOptions::new();
+        options.write(true).create_new(true);
+        let mut file = options.open(&tmp)?;
+        if let Err(err) = file
+            .write_all(serialized.as_bytes())
+            .and_then(|()| file.sync_data())
+        {
+            let _ = fs::remove_file(&tmp);
+            return Err(err);
+        }
     }
-    if let Ok(serialized) = serde_json::to_string(&index) {
-        let _ = std::fs::write(path, serialized);
+    if let Err(err) = fs::rename(&tmp, path) {
+        let _ = fs::remove_file(&tmp);
+        return Err(err);
+    }
+    Ok(())
+}
+
+/// RAII exclusive lock over a sibling lock file for the fetch index.
+struct FetchIndexLock {
+    _file: fs::File,
+}
+
+impl FetchIndexLock {
+    fn acquire(index_path: &Path) -> Option<Self> {
+        use fs4::FileExt;
+        let parent = index_path.parent().unwrap_or_else(|| Path::new("."));
+        let lock_path = parent.join("fetch-cache.json.lock");
+        let file = OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(&lock_path)
+            .ok()?;
+        // Bounded wait so a stuck holder cannot hang the fetch path, but
+        // generous: the critical section is a small read-modify-write, so
+        // normal contention clears in milliseconds. ~3s only trips on a
+        // genuinely wedged holder, where fail-open (a dropped index update,
+        // costing a re-fetch) is the right outcome.
+        const LOCK_ATTEMPTS: usize = 300;
+        for attempt in 0..LOCK_ATTEMPTS {
+            match FileExt::try_lock(&file) {
+                Ok(()) => return Some(Self { _file: file }),
+                Err(_) if attempt + 1 < LOCK_ATTEMPTS => {
+                    std::thread::sleep(Duration::from_millis(10))
+                }
+                Err(_) => return None,
+            }
+        }
+        None
+    }
+}
+
+impl Drop for FetchIndexLock {
+    fn drop(&mut self) {
+        use fs4::FileExt;
+        let _ = FileExt::unlock(&self._file);
     }
 }
 

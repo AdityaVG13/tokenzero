@@ -12,6 +12,7 @@ categories.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+fs4.workspace = true
 globset.workspace = true
 serde.workspace = true
 serde_json.workspace = true
@@ -19,6 +20,7 @@ similar.workspace = true
 thiserror.workspace = true
 tokenzero-core = { path = "../tokenzero-core", version = "1.0.1" }
 tokenzero-filters = { path = "../tokenzero-filters", version = "1.0.1" }
+tokenzero-pulse = { path = "../tokenzero-pulse", version = "1.0.1" }
 tokenzero-recovery = { path = "../tokenzero-recovery", version = "1.0.1" }
 tokenzero-runtime = { path = "../tokenzero-runtime", version = "1.0.1" }
 

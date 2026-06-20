@@ -197,6 +197,17 @@ repeat fetches inside the TTL (default 24h) serve the stored body without
 touching the network, `fresh=true` re-fetches, and every serve — cached or
 fresh — carries exact blob/file refs.
 
+Network access for `tz_fetch` is **off by default** (it is an SSRF surface
+for any MCP-capable agent): enable it with `TOKENZERO_FETCH=on`. When
+enabled, targets are validated after DNS resolution — loopback, RFC1918,
+link-local (including cloud metadata endpoints), carrier-grade NAT, and
+IPv6 unique-local/link-local addresses are refused, the resolved IP is
+pinned for the connection, and redirects (max 5) are re-validated per hop.
+`TOKENZERO_FETCH_ALLOW=host1,host2` (suffix match) explicitly trusts hosts
+and bypasses the IP checks for them — the escape hatch for intentionally
+reachable private hosts; `TOKENZERO_FETCH_DENY` always refuses matching
+hosts and wins over the allowlist.
+
 `tz_recall` is the redundancy layer's retrieval half: it searches every
 payload TokenZero has stored for this workspace (earlier reads, search
 output, shell captures) as a literal case-insensitive substring match. Every

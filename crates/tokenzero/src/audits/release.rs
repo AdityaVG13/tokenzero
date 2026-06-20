@@ -399,6 +399,9 @@ pub(crate) fn run_security_privacy_audit(
             exact_ref_count: 1,
             latency_ms: 1,
             source_hash: Some("sha256:redacted-local-source".to_string()),
+            session_id: None,
+            call_id: None,
+            ref_ids: Vec::new(),
         },
     )?;
     let pulse_text = fs::read_to_string(&pulse_path)?;

@@ -15,10 +15,56 @@ pub(crate) fn call_tool(
     engine: &TokenZeroEngine,
     name: &str,
     args: &Value,
+    call_id: Option<String>,
 ) -> Result<Value, JsonRpcErrorData> {
     let canonical = canonical_tool(name);
     let response = dispatch_tool(engine, canonical, name, args)?;
+    record_mcp_pulse(engine, canonical, args, &response, call_id);
     Ok(mcp_tool_response(response))
+}
+
+/// Pulse-account every MCP `tools/call`, including `tz_expand`. Without this
+/// the MCP surface — the main integration surface — wrote no Pulse events,
+/// so expand-time recovery was never charged back to the original serve and
+/// "savings after recovery" did not hold for agent-routed usage. Session,
+/// call, and ref ids make that attribution joinable. Best-effort: accounting
+/// must never fail the call.
+fn record_mcp_pulse(
+    engine: &TokenZeroEngine,
+    canonical: &str,
+    args: &Value,
+    response: &ToolResponse,
+    call_id: Option<String>,
+) {
+    let Some(root) = engine.config.allowed_roots.first() else {
+        return;
+    };
+    let Some(accounting) = response.accounting.as_ref() else {
+        return;
+    };
+    let mut ref_ids: Vec<String> = response
+        .refs
+        .iter()
+        .map(|record| record.ref_id.clone())
+        .collect();
+    if canonical == "expand" {
+        if let Some(ref_id) = args.get("ref").and_then(Value::as_str) {
+            ref_ids.push(ref_id.to_string());
+        }
+    }
+    let mut event = tokenzero_pulse::PulseEvent::tool_call(
+        canonical,
+        response.mode.as_deref().unwrap_or("hybrid"),
+        accounting.raw_tokens,
+        accounting.visible_tokens,
+        accounting.recovery_tokens,
+        response.refs.len(),
+        0,
+        None,
+    )
+    .with_attribution(Some(engine.session_id().to_string()), call_id, ref_ids);
+    event.failure = response.error.is_some();
+    let _ = tokenzero_pulse::record_event(&tokenzero_pulse::default_ledger_path(root), &event);
 }
 
 /// Tool dispatch shared by direct calls and `tz_batch` sub-ops.
