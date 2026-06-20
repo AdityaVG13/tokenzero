@@ -3196,9 +3196,7 @@ mod session_props {
 fn mcp_tool_calls_are_pulse_accounted_with_attribution() {
     let dir = tempdir().unwrap();
     let file = dir.path().join("sample.txt");
-    fs::write(&file, "line one
-line two
-").unwrap();
+    fs::write(&file, "line one\nline two\n").unwrap();
     let engine = TokenZeroEngine::new(EngineConfig::for_root(dir.path()));
 
     let read_request = serde_json::json!({
@@ -3242,7 +3240,7 @@ line two
 
     let expand_event = &lines[1];
     assert_eq!(expand_event.tool, "expand");
-    assert_eq!(expand_event.call_id.as_deref(), Some(""call-8""));
+    assert_eq!(expand_event.call_id.as_deref(), Some("\"call-8\""));
     assert_eq!(
         expand_event.session_id.as_deref(),
         Some(engine.session_id())
@@ -3254,10 +3252,10 @@ line two
 
     let string_id_event = &lines[2];
     assert_eq!(string_id_event.tool, "read");
-    assert_eq!(string_id_event.call_id.as_deref(), Some(""7""));
+    assert_eq!(string_id_event.call_id.as_deref(), Some("\"7\""));
     assert_ne!(
         read_event.call_id, string_id_event.call_id,
-        "numeric JSON-RPC id 7 and string id "7" must not collide"
+        "numeric JSON-RPC id 7 and string id \"7\" must not collide"
     );
     assert!(
         expand_event.recovery_tokens > 0,
@@ -3269,8 +3267,7 @@ line two
 fn prune_dead_refs_drops_evicted_handles_and_reports_incomplete() {
     let mut store = RecoveryStore::new(None);
     let stored = store
-        .store_payload("live payload
-", ContentType::Unknown, None, None, None)
+        .store_payload("live payload\n", ContentType::Unknown, None, None, None)
         .unwrap();
 
     let mut refs = vec![
@@ -3291,6 +3288,9 @@ fn prune_dead_refs_drops_evicted_handles_and_reports_incomplete() {
 
 #[test]
 fn response_never_advertises_a_ref_evicted_during_its_own_persist() {
+    // A payload larger than the cache budget is evicted by the persist that
+    // the serving call itself runs; the advertised refs must disappear with
+    // it rather than dangle.
     let config = tokenzero_recovery::RecoveryConfig {
         max_bytes: 64,
         ..tokenzero_recovery::RecoveryConfig::default()
@@ -3315,8 +3315,7 @@ fn response_never_advertises_a_ref_evicted_during_its_own_persist() {
 fn tool_metrics_records_session_calls() {
     let dir = tempdir().unwrap();
     let file = dir.path().join("hello.txt");
-    std::fs::write(&file, "hello metrics
-").unwrap();
+    std::fs::write(&file, "hello metrics\n").unwrap();
     let engine = TokenZeroEngine::new(EngineConfig::for_root(dir.path()));
 
     for _ in 0..3 {
@@ -3324,6 +3323,7 @@ fn tool_metrics_records_session_calls() {
             &engine,
             "read",
             &json!({ "path": file.display().to_string() }),
+            None,
         )
         .unwrap();
     }
@@ -3342,8 +3342,7 @@ fn tool_metrics_records_session_calls() {
 fn tool_metrics_persist_across_engine_instances() {
     let dir = tempdir().unwrap();
     let file = dir.path().join("hello.txt");
-    std::fs::write(&file, "hello metrics
-").unwrap();
+    std::fs::write(&file, "hello metrics\n").unwrap();
 
     {
         let engine = TokenZeroEngine::new(EngineConfig::for_root(dir.path()));
@@ -3351,10 +3350,12 @@ fn tool_metrics_persist_across_engine_instances() {
             &engine,
             "read",
             &json!({ "path": file.display().to_string() }),
+            None,
         )
         .unwrap();
     }
 
+    // A fresh engine on the same root rehydrates cumulative counters from the sidecar.
     let engine = TokenZeroEngine::new(EngineConfig::for_root(dir.path()));
     let snap = engine.tool_metrics_snapshot();
     assert!(
@@ -3382,7 +3383,5 @@ fn tool_metrics_resource_is_served() {
     assert!(
         response.contains("cumulative") && response.contains("slow_threshold_ms"),
         "metrics resource is discoverable and served"
-    );
-}
     );
 }
