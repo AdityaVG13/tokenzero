@@ -213,6 +213,12 @@ fn blocked_ip_reason(ip: IpAddr) -> Option<&'static str> {
                 Some("carrier-grade NAT (100.64/10)")
             } else if octets[0] == 192 && octets[1] == 0 && octets[2] == 0 {
                 Some("IETF protocol assignments (192.0.0/24)")
+            } else if octets[0] >= 224 && octets[0] < 240 {
+                Some("multicast (224.0.0.0/4)")
+            } else if octets[0] >= 240 {
+                Some("reserved (240.0.0.0/4)")
+            } else if octets[0] == 198 && (octets[1] == 18 || octets[1] == 19) {
+                Some("benchmark/documentation (198.18.0.0/15)")
             } else {
                 None
             }
@@ -279,6 +285,9 @@ mod tests {
             "http://[::1]/",
             "http://[fe80::1]/",
             "http://[fd00::2]/",
+            "http://224.0.0.1/",
+            "http://240.0.0.1/",
+            "http://198.18.0.1/",
             "http://[::ffff:127.0.0.1]/",
         ] {
             let blocked = validate(url).err().unwrap_or_else(|| {
