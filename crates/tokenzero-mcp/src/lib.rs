@@ -1,31 +1,45 @@
 #![forbid(unsafe_code)]
 
+mod cache_maintenance;
+mod cache_pack;
 mod catalog;
+mod collect;
 mod diff;
+mod fetch_cache;
 mod fetch_guard;
 mod jsonrpc;
+mod paths;
 mod recall;
+mod render;
 mod resources;
 mod session;
 mod stdio;
 mod supervisor;
 mod tools;
 
+pub use cache_maintenance::{cache_maintenance, session_pack, shell_spill_dir};
 pub use catalog::{ResourceSpec, ToolSpec, resource_specs, tool_specs};
 pub use jsonrpc::handle_jsonrpc;
+pub use render::{cli_json, render_text};
 pub use stdio::run_stdio;
 pub use supervisor::run_supervised_stdio;
 
+use cache_pack::{
+    cache_pack_manifest_path, cache_pack_sources, previous_cache_digest, read_line_range_from_file,
+};
+use collect::*;
+use fetch_cache::{epoch_secs, fetch_index_path, load_fetch_index, record_fetch};
 use fetch_guard::{FETCH_META_MARKER, split_fetch_meta, validate_fetch_target};
 use globset::{GlobBuilder, GlobMatcher};
 pub(crate) use jsonrpc::{JsonRpcErrorData, handle_jsonrpc_value, jsonrpc_error};
+use paths::*;
+use render::*;
 pub(crate) use resources::read_resource;
 use serde_json::{Value, json};
 use session::{DiffTelemetry, SeenState, ServeKey, ServedRecord, SessionMemory, SessionSummary};
 use std::collections::{BTreeMap, HashSet};
 use std::ffi::OsString;
-use std::fs::{self, OpenOptions};
-use std::io::{BufRead, BufReader, Write};
+use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::{Condvar, Mutex, OnceLock};
 use std::time::{Duration, SystemTime};
@@ -1486,6 +1500,16 @@ impl TokenZeroEngine {
         stdin: Option<&str>,
         timeout_override: Option<Duration>,
     ) -> ToolResponse {
+        if let Some(cwd) = cwd {
+            if !self.path_allowed(cwd) {
+                return ToolResponse::error(
+                    "shell",
+                    "path_outside_allowed_roots",
+                    format!("cwd is outside allowed roots: {}", cwd.display()),
+                    Some("set cwd under an allowed root".to_string()),
+                );
+            }
+        }
         let rewrite_mode = rewrite.unwrap_or("off");
         let rewrite_result =
             rewrite_command(command, rewrite_mode, !no_rewrite && rewrite_mode != "off");
@@ -2437,272 +2461,6 @@ impl TokenZeroEngine {
         })
     }
 }
-
-fn cache_pack_sources(root: &Path, scope: &str) -> Vec<PathBuf> {
-    let mut paths = Vec::new();
-    let common = [
-        "AGENTS.md",
-        "CLAUDE.md",
-        "GEMINI.md",
-        "README.md",
-        "Cargo.toml",
-        "docs/core.md",
-        "docs/mcp.md",
-        "docs/command-coverage.md",
-    ];
-    for rel in common {
-        let path = root.join(rel);
-        if path.exists() {
-            paths.push(path);
-        }
-    }
-    if scope == "agent" || scope == "goal" {
-        let goals = root.join("docs/goals");
-        if let Ok(entries) = fs::read_dir(goals) {
-            for entry in entries.flatten() {
-                let path = entry.path();
-                if path.extension().and_then(|v| v.to_str()) == Some("md") {
-                    paths.push(path);
-                }
-            }
-        }
-    }
-    paths
-}
-
-fn cache_pack_manifest_path(cache_path: &Path, scope: &str) -> PathBuf {
-    cache_path
-        .parent()
-        .unwrap_or_else(|| Path::new("."))
-        .join("cache-packs")
-        .join(format!("{scope}.json"))
-}
-
-fn previous_cache_digest(path: &Path) -> Option<String> {
-    let text = fs::read_to_string(path).ok()?;
-    let value: Value = serde_json::from_str(&text).ok()?;
-    value
-        .get("content_digest")
-        .and_then(Value::as_str)
-        .map(str::to_string)
-}
-
-fn read_line_range_from_file(path: &Path, start: usize, end: usize) -> std::io::Result<String> {
-    let start = start.max(1);
-    let end = end.max(start);
-    let file = fs::File::open(path)?;
-    let reader = BufReader::new(file);
-    let mut out = String::new();
-    for (idx, line) in reader.lines().enumerate() {
-        let line_no = idx + 1;
-        if line_no < start {
-            continue;
-        }
-        if line_no > end {
-            break;
-        }
-        out.push_str(&line?);
-        out.push('\n');
-    }
-    Ok(out.trim_end().to_string())
-}
-
-/// The disk-spill directory for shell streams, beside the recovery cache.
-pub fn shell_spill_dir(cache_path: &Path) -> PathBuf {
-    cache_path
-        .parent()
-        .unwrap_or_else(|| Path::new("."))
-        .join("shell-spills")
-}
-
-/// Reclaim storage that outlived its session: abandoned recovery-cache temp
-/// files (crashed mid-persist) and shell spills past their TTL or the
-/// directory byte ceiling. Runs automatically on engine construction;
-/// `tokenzero cache prune` runs it explicitly and reports the result.
-pub fn cache_maintenance(cache_path: &Path, dry_run: bool) -> Value {
-    let tmp_sweep = tokenzero_recovery::sweep_stale_tmp_files(
-        cache_path,
-        tokenzero_recovery::STALE_TMP_MAX_AGE,
-        dry_run,
-    );
-    let spill_prune = tokenzero_runtime::prune_spill_dir(
-        &shell_spill_dir(cache_path),
-        tokenzero_runtime::DEFAULT_SPILL_TTL,
-        tokenzero_runtime::DEFAULT_SPILL_MAX_TOTAL_BYTES,
-        dry_run,
-    );
-    json!({
-        "tmp_sweep": tmp_sweep,
-        "spill_prune": spill_prune,
-    })
-}
-
-/// Build the post-compaction session pack over a workspace's recovery
-/// cache: the most recently served payloads with exact refs, token-budgeted.
-/// `None` when there is nothing to restore.
-pub fn session_pack(cache_path: &Path, max_tokens: usize) -> Option<String> {
-    recall::build_session_pack(cache_path, max_tokens)
-}
-
-/// `tz_fetch`'s TTL index: url → (blob ref, fetch time). Lives beside the
-/// recovery cache; bodies themselves are in the content-addressed store.
-/// All IO here is fail-open — a lost index only costs a re-fetch.
-#[derive(serde::Serialize, serde::Deserialize, Default)]
-struct FetchIndex {
-    #[serde(default)]
-    entries: BTreeMap<String, FetchIndexEntry>,
-}
-
-#[derive(serde::Serialize, serde::Deserialize, Clone)]
-struct FetchIndexEntry {
-    blob_ref: String,
-    fetched_at_secs: u64,
-    bytes: usize,
-}
-
-fn fetch_index_path(cache_path: &Path) -> PathBuf {
-    cache_path
-        .parent()
-        .map(|dir| dir.join("fetch-cache.json"))
-        .unwrap_or_else(|| PathBuf::from("fetch-cache.json"))
-}
-
-fn load_fetch_index(path: &Path) -> FetchIndex {
-    std::fs::read_to_string(path)
-        .ok()
-        .and_then(|raw| serde_json::from_str(&raw).ok())
-        .unwrap_or_default()
-}
-
-fn epoch_secs() -> u64 {
-    SystemTime::now()
-        .duration_since(SystemTime::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs()
-}
-
-fn record_fetch(path: &Path, url: &str, blob_ref: &str, bytes: usize) {
-    const MAX_FETCH_INDEX_ENTRIES: usize = 200;
-    if let Some(parent) = path.parent() {
-        let _ = std::fs::create_dir_all(parent);
-    }
-    // Hold an exclusive advisory lock across the whole read-modify-write so
-    // two concurrent fetches (the 4-worker MCP pool, or two processes sharing
-    // a cache) cannot each load the same index, insert, and clobber the
-    // other's entry. Fail-open: a lock we cannot take only costs a re-fetch.
-    let Some(_lock) = FetchIndexLock::acquire(path) else {
-        return;
-    };
-    let mut index = load_fetch_index(path);
-    index.entries.insert(
-        url.to_string(),
-        FetchIndexEntry {
-            blob_ref: blob_ref.to_string(),
-            fetched_at_secs: epoch_secs(),
-            bytes,
-        },
-    );
-    while index.entries.len() > MAX_FETCH_INDEX_ENTRIES {
-        let oldest = index
-            .entries
-            .iter()
-            .min_by_key(|(_, entry)| entry.fetched_at_secs)
-            .map(|(url, _)| url.clone());
-        match oldest {
-            Some(url) => {
-                index.entries.remove(&url);
-            }
-            None => break,
-        }
-    }
-    // Atomic temp+rename so a crash mid-write can never leave a truncated
-    // index that load_fetch_index would parse as empty (mass-invalidating
-    // every prior cached fetch). A reader sees the old file or the new one.
-    let _ = atomic_write_fetch_index(path, &index);
-}
-
-/// Process-wide counter so concurrent same-PID writers never collide on a
-/// temp-file name (a shared name would let them interleave bytes).
-static FETCH_TMP_COUNTER: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
-
-fn atomic_write_fetch_index(path: &Path, index: &FetchIndex) -> std::io::Result<()> {
-    let parent = path.parent().unwrap_or_else(|| Path::new("."));
-    let nonce = FETCH_TMP_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let tmp = parent.join(format!(
-        ".fetch-cache.json.{}.{nonce}.tmp",
-        std::process::id()
-    ));
-    let serialized = serde_json::to_string(index).map_err(std::io::Error::other)?;
-    {
-        let mut options = OpenOptions::new();
-        options.write(true).create_new(true);
-        let mut file = options.open(&tmp)?;
-        if let Err(err) = file
-            .write_all(serialized.as_bytes())
-            .and_then(|()| file.sync_data())
-        {
-            let _ = fs::remove_file(&tmp);
-            return Err(err);
-        }
-    }
-    if let Err(err) = fs::rename(&tmp, path) {
-        let _ = fs::remove_file(&tmp);
-        return Err(err);
-    }
-    Ok(())
-}
-
-/// RAII exclusive lock over a sibling lock file for the fetch index.
-struct FetchIndexLock {
-    _file: fs::File,
-}
-
-impl FetchIndexLock {
-    fn acquire(index_path: &Path) -> Option<Self> {
-        use fs4::FileExt;
-        let parent = index_path.parent().unwrap_or_else(|| Path::new("."));
-        let lock_path = parent.join("fetch-cache.json.lock");
-        let file = OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(false)
-            .open(&lock_path)
-            .ok()?;
-        // Bounded wait so a stuck holder cannot hang the fetch path, but
-        // generous: the critical section is a small read-modify-write, so
-        // normal contention clears in milliseconds. ~3s only trips on a
-        // genuinely wedged holder, where fail-open (a dropped index update,
-        // costing a re-fetch) is the right outcome.
-        const LOCK_ATTEMPTS: usize = 300;
-        for attempt in 0..LOCK_ATTEMPTS {
-            match FileExt::try_lock(&file) {
-                Ok(()) => return Some(Self { _file: file }),
-                Err(_) if attempt + 1 < LOCK_ATTEMPTS => {
-                    std::thread::sleep(Duration::from_millis(10))
-                }
-                Err(_) => return None,
-            }
-        }
-        None
-    }
-}
-
-impl Drop for FetchIndexLock {
-    fn drop(&mut self) {
-        use fs4::FileExt;
-        let _ = FileExt::unlock(&self._file);
-    }
-}
-
-mod collect;
-mod paths;
-mod render;
-
-use collect::*;
-use paths::*;
-use render::*;
-
-pub use render::{cli_json, render_text};
 
 #[cfg(test)]
 mod tests;

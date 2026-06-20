@@ -132,10 +132,17 @@ pub(crate) fn run_claim_audit(
             }
         }
     }
+    let claim_status = if public_claims_approved {
+        "approved"
+    } else {
+        "blocked"
+    };
     let report = json!({
         "schema_version": "tokenzero.claim_audit.v1",
         "release_candidate_id": release_candidate_id(),
         "status": "ok",
+        "transport_status": "ok",
+        "claim_status": claim_status,
         "ok": true,
         "public_claims_approved": public_claims_approved,
         "release_publication_allowed": release_publication_allowed,

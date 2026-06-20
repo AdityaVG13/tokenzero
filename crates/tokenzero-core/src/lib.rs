@@ -1155,185 +1155,6 @@ fn has_protected_failure_context(text: &str) -> bool {
         || lower.contains("traceback")
 }
 
-pub fn decide_shell_policy(
-    command: &str,
-    stdout: &str,
-    stderr: &str,
-    exit_code: Option<i32>,
-    mode: Mode,
-) -> PolicyDecision {
-    let requested = mode.effective_policy();
-    if requested != Mode::Auto {
-        return PolicyDecision {
-            policy: requested.to_string(),
-            reason: "explicit user mode".to_string(),
-            family: shell_family(command, stdout, stderr),
-        };
-    }
-    let family = shell_family(command, stdout, stderr);
-    let combined = format!("{stdout}\n{stderr}");
-    let search_no_match = is_search_no_match(command, stdout, stderr, exit_code);
-    let expected_false_exit = is_expected_false_exit(command, stdout, stderr, exit_code);
-    let status_hazard = failed_segment(command, stdout, stderr, exit_code).is_some()
-        || masking_warning(command, stdout, stderr, exit_code).is_some();
-    let policy = if is_repo_inventory_command(command) {
-        ("structured", "repo inventory command")
-    } else if family == "diff" {
-        ("diff-aware", "diff-like output")
-    } else if family == "search" && !status_hazard && (exit_code == Some(0) || search_no_match) {
-        ("structured", "search output")
-    } else if expected_false_exit {
-        ("structured", "expected false predicate exit")
-    } else if matches!(
-        family.as_str(),
-        "test" | "build" | "lint" | "python-test" | "go-test"
-    ) || status_hazard
-        || exit_code.is_some_and(|code| code != 0)
-        || looks_diagnostic(&combined)
-    {
-        ("diagnostic", "failure or diagnostic family")
-    } else if matches!(family.as_str(), "search" | "structured" | "status") {
-        ("structured", "structured/status output")
-    } else if repeated_line_count(&combined) >= 3 || combined.lines().count() > 120 {
-        ("dedupe", "repeated or long log")
-    } else {
-        ("passthrough", "small low-risk output")
-    };
-    PolicyDecision {
-        policy: policy.0.to_string(),
-        reason: policy.1.to_string(),
-        family,
-    }
-}
-
-pub fn classify_command_status(
-    command: &str,
-    stdout: &str,
-    stderr: &str,
-    exit_code: Option<i32>,
-    timed_out: bool,
-) -> CommandStatus {
-    let search_no_match = is_search_no_match(command, stdout, stderr, exit_code);
-    let expected_false_exit = is_expected_false_exit(command, stdout, stderr, exit_code);
-    let mut command_success =
-        (exit_code == Some(0) || search_no_match || expected_false_exit) && !timed_out;
-    let failed_segment = failed_segment(command, stdout, stderr, exit_code);
-    let pipeline_masking_warning = masking_warning(command, stdout, stderr, exit_code);
-    let pipeline_rerun_command = pipeline_rerun_command(command, pipeline_masking_warning.as_ref());
-    if timed_out || failed_segment.is_some() && exit_code == Some(0) {
-        command_success = false;
-    }
-    let status_label = if timed_out {
-        "command_timeout"
-    } else if command_success {
-        "command_success"
-    } else if exit_code.is_none() {
-        "command_unknown"
-    } else {
-        "command_failed"
-    }
-    .to_string();
-    CommandStatus {
-        transport_status: "ok".to_string(),
-        command_success,
-        exit_code,
-        failed_segment,
-        pipeline_masking_warning,
-        pipeline_rerun_command,
-        shell_syntax_summary: shell_syntax_summary_for_status(command, stdout, stderr, exit_code),
-        status_label,
-    }
-}
-
-pub fn shell_combined_output(
-    command: &str,
-    exit_code: Option<i32>,
-    stdout: &str,
-    stderr: &str,
-) -> String {
-    format!(
-        "$ {command}\nexit_code: {}\nstdout:\n{stdout}{}{}",
-        exit_code
-            .map(|v| v.to_string())
-            .unwrap_or_else(|| "null".to_string()),
-        if stderr.is_empty() { "" } else { "\nstderr:\n" },
-        stderr
-    )
-}
-
-pub fn shell_family(command: &str, stdout: &str, stderr: &str) -> String {
-    let analysis_command = shell_analysis_command(command);
-    let first_words = split_shell_words(&analysis_command);
-    let first = first_words
-        .first()
-        .map(|word| shell_command_basename(word))
-        .unwrap_or_default();
-    let git_subcommand = (first == "git")
-        .then(|| git_subcommand_index(&first_words))
-        .flatten();
-    let second = git_subcommand
-        .and_then(|index| first_words.get(index))
-        .or_else(|| first_words.get(1))
-        .map(String::as_str)
-        .unwrap_or_default();
-    let combined = format!("{stdout}\n{stderr}");
-    if is_repo_inventory_command(command) || is_repo_inventory_command(&analysis_command) {
-        return "repo-inventory".to_string();
-    }
-    if first == "diff"
-        || first == "git" && matches!(second, "diff" | "show")
-        || combined.starts_with("diff --git")
-        || combined.contains("\n@@ ")
-    {
-        return "diff".to_string();
-    }
-    if matches!(first.as_str(), "test" | "[" | "[[" | "cmp") {
-        return "predicate".to_string();
-    }
-    if first == "cargo" && matches!(second, "test" | "build" | "check" | "clippy") {
-        return if second == "test" { "test" } else { "build" }.to_string();
-    }
-    if is_search_command(&first) {
-        return "search".to_string();
-    }
-    if first == "pytest"
-        || first == "unittest"
-        || command.contains("python -m pytest")
-        || command.contains("python -m unittest")
-    {
-        return "python-test".to_string();
-    }
-    if first == "go" && second == "test" {
-        return "go-test".to_string();
-    }
-    if matches!(first.as_str(), "jest" | "vitest")
-        || matches!(first.as_str(), "npm" | "pnpm" | "yarn") && second == "test"
-    {
-        return "test".to_string();
-    }
-    if matches!(
-        first.as_str(),
-        "eslint" | "tsc" | "ruff" | "mypy" | "clippy"
-    ) {
-        return "lint".to_string();
-    }
-    if matches!(first.as_str(), "docker" | "kubectl") || looks_status_table(&combined) {
-        return "status".to_string();
-    }
-    if serde_json::from_str::<serde_json::Value>(stdout.trim()).is_ok()
-        || combined.contains("<testsuite")
-        || combined
-            .lines()
-            .any(|l| l.starts_with("ok ") || l.starts_with("not ok "))
-    {
-        return "structured".to_string();
-    }
-    if looks_diagnostic(&combined) {
-        return "diagnostic".to_string();
-    }
-    "generic".to_string()
-}
-
 pub fn diff_summary(text: &str, max_lines: usize) -> String {
     let mut out = Vec::new();
     for line in text.lines() {
@@ -1576,7 +1397,9 @@ pub fn ref_record(kind: &str, ref_id: String, bytes: usize) -> RefRecord {
 
 mod render;
 mod shell_display;
+mod shell_family;
 mod shell_parse;
+mod shell_policy;
 mod tokens;
 
 use render::domain::*;
@@ -1591,6 +1414,8 @@ pub use render::domain::{
 pub use shell_display::{
     shell_display_command_from_argv, shell_display_command_from_argv_for_platform,
 };
+pub use shell_family::shell_family;
+pub use shell_policy::{classify_command_status, decide_shell_policy, shell_combined_output};
 pub use tokens::{
     count_tokens, enforce_token_budget, enforce_token_budget_with_ref, savings_ratio, sha256_hex,
 };

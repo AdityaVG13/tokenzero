@@ -173,13 +173,17 @@ pub fn rewrite_command(command: &str, mode: &str, enabled: bool) -> RewriteResul
         "docker" | "kubectl" => Some(command.to_string()),
         _ => None,
     };
+    finish_rewrite(command, &family, rewritten)
+}
+
+fn finish_rewrite(command: &str, family: &str, rewritten: Option<String>) -> RewriteResult {
     match rewritten {
         Some(value) if value != command => result(
             command,
             &value,
             true,
             "bounded tokenzero-safe rewrite",
-            &family,
+            family,
             true,
         ),
         Some(_) => result(
@@ -187,7 +191,7 @@ pub fn rewrite_command(command: &str, mode: &str, enabled: bool) -> RewriteResul
             command,
             false,
             "already bounded or passthrough",
-            &family,
+            family,
             true,
         ),
         None => result(
@@ -195,7 +199,7 @@ pub fn rewrite_command(command: &str, mode: &str, enabled: bool) -> RewriteResul
             command,
             false,
             "unsupported command family",
-            &family,
+            family,
             false,
         ),
     }
@@ -244,7 +248,7 @@ fn rewrite_tree(command: &str) -> Option<String> {
     let parts = split_words(command);
     match parts.first().map(String::as_str) {
         Some("tree") => {
-            if parts.iter().any(|p| p == "-L" || p.starts_with("--depth")) {
+            if parts.iter().any(|p| is_tree_depth_flag(p)) {
                 Some(command.to_string())
             } else {
                 Some(format!("{command} -L 2"))
@@ -262,12 +266,12 @@ fn rewrite_git(command: &str) -> Option<String> {
         return None;
     }
     match parts.get(1).map(String::as_str) {
-        Some("log")
-            if !parts
-                .iter()
-                .any(|p| p.starts_with("-n") || p == "--max-count") =>
-        {
-            Some(format!("{command} -n 80"))
+        Some("log") => {
+            if parts.iter().any(|p| is_git_log_count_flag(p)) {
+                Some(command.to_string())
+            } else {
+                Some(format!("{command} -n 80"))
+            }
         }
         Some("clone" | "fetch" | "pull") => {
             Some(inject_quiet_flag(command).unwrap_or_else(|| command.to_string()))
@@ -279,6 +283,22 @@ fn rewrite_git(command: &str) -> Option<String> {
 
 /// Verbosity tokens that mean the caller already chose an output level; the
 /// quiet injector never overrides an explicit choice.
+fn is_tree_depth_flag(part: &str) -> bool {
+    part == "-L"
+        || part.starts_with("--depth")
+        || part
+            .strip_prefix("-L")
+            .is_some_and(|value| !value.is_empty() && value.chars().all(|ch| ch.is_ascii_digit()))
+}
+
+fn is_git_log_count_flag(part: &str) -> bool {
+    part == "--max-count"
+        || part.starts_with("--max-count=")
+        || part
+            .strip_prefix("-n")
+            .is_some_and(|value| value.is_empty() || value.chars().all(|ch| ch.is_ascii_digit()))
+}
+
 fn has_explicit_verbosity(parts: &[String]) -> bool {
     parts.iter().any(|p| {
         matches!(
@@ -352,7 +372,7 @@ fn has_shell_operators(command: &str) -> bool {
                     quote = Some(ch);
                     continue;
                 }
-                if matches!(ch, '|' | ';' | '&' | '>' | '<' | '`') {
+                if matches!(ch, '\n' | '\r' | '|' | ';' | '&' | '>' | '<' | '`') {
                     return true;
                 }
                 if ch == '$' && chars.peek() == Some(&'(') {
@@ -373,42 +393,10 @@ fn unsafe_reason(command: &str) -> Option<String> {
     let parts = split_words(command);
     let first = parts.first().map(String::as_str).unwrap_or_default();
     let second = parts.get(1).map(String::as_str).unwrap_or_default();
-    let destructive_first = [
-        "rm",
-        "mv",
-        "cp",
-        "chmod",
-        "chown",
-        "dd",
-        "shutdown",
-        "reboot",
-        "shred",
-        "truncate",
-        "wipefs",
-        "parted",
-        "fdisk",
-        "mount",
-        "umount",
-        "ln",
-        "rsync",
-        "systemctl",
-        "service",
-        "launchctl",
-        "iptables",
-        "nft",
-        "ufw",
-        "crontab",
-    ];
-    if destructive_first.contains(&first) || first.starts_with("mkfs") {
+    if is_destructive_first(first) {
         return Some("unsafe destructive mutation left unmodified".to_string());
     }
-    // Wrappers that run another command: safety is the inner command's, which
-    // the single-command parser cannot see (`xargs rm`, `eval $(curl ...)`).
-    let dispatchers = [
-        "xargs", "eval", "exec", "source", "env", "sudo", "doas", "nohup", "timeout", "watch",
-        "npx",
-    ];
-    if dispatchers.contains(&first) {
+    if is_command_dispatcher(first) {
         return Some(
             "command dispatcher left unmodified; safety depends on the dispatched command"
                 .to_string(),
@@ -443,106 +431,196 @@ fn unsafe_reason(command: &str) -> Option<String> {
     {
         return Some("find with side effects left unmodified".to_string());
     }
-    if first == "git"
-        && [
-            "push",
-            "reset",
-            "clean",
-            "checkout",
-            "switch",
-            "rebase",
-            "merge",
-            "commit",
-            "restore",
-            "rm",
-            "mv",
-            "apply",
-            "am",
-            "cherry-pick",
-            "revert",
-            "stash",
-        ]
-        .contains(&second)
-    {
+    if is_git_mutation(first, second) {
         return Some("git mutation left unmodified".to_string());
     }
-    if first == "docker"
-        && [
-            "rm", "rmi", "stop", "kill", "push", "login", "run", "exec", "build", "prune",
-            "system", "restart", "update",
-        ]
-        .contains(&second)
-    {
+    if is_docker_mutation(first, second, &parts) {
         return Some("docker mutation left unmodified".to_string());
     }
-    if first == "docker"
-        && second == "compose"
-        && parts.iter().skip(2).any(|p| {
-            matches!(
-                p.as_str(),
-                "up" | "down"
-                    | "rm"
-                    | "run"
-                    | "exec"
-                    | "build"
-                    | "pull"
-                    | "push"
-                    | "restart"
-                    | "start"
-                    | "stop"
-                    | "kill"
-                    | "create"
-            )
-        })
-    {
-        return Some("docker mutation left unmodified".to_string());
-    }
-    if first == "kubectl"
-        && [
-            "delete", "apply", "replace", "scale", "patch", "create", "exec", "edit", "drain",
-            "cordon", "uncordon", "rollout", "annotate", "label", "taint",
-        ]
-        .contains(&second)
-    {
+    if is_kubectl_mutation(first, second) {
         return Some("kubectl mutation left unmodified".to_string());
     }
-    if ["npm", "pnpm", "yarn"].contains(&first)
-        && [
-            "install",
-            "add",
-            "publish",
-            "login",
-            "uninstall",
-            "remove",
-            "update",
-            "upgrade",
-            "link",
-            "unlink",
-            "exec",
-            "dlx",
-            "create",
-        ]
-        .contains(&second)
-    {
-        return Some("package/network mutation left unmodified".to_string());
-    }
-    if first == "cargo"
-        && [
-            "publish", "install", "login", "add", "remove", "update", "yank", "owner",
-        ]
-        .contains(&second)
-    {
-        return Some("package/network mutation left unmodified".to_string());
-    }
-    if first == "uv"
-        && ["pip", "add", "remove", "sync", "tool", "publish", "venv"].contains(&second)
-    {
+    if is_package_mutation(first, second) {
         return Some("package/network mutation left unmodified".to_string());
     }
     if ["curl", "wget"].contains(&first) {
         return Some("network command left unmodified".to_string());
     }
     None
+}
+
+fn is_destructive_first(first: &str) -> bool {
+    matches!(
+        first,
+        "rm" | "rmdir"
+            | "unlink"
+            | "mv"
+            | "cp"
+            | "chmod"
+            | "chown"
+            | "dd"
+            | "shutdown"
+            | "reboot"
+            | "shred"
+            | "truncate"
+            | "wipefs"
+            | "parted"
+            | "fdisk"
+            | "mount"
+            | "umount"
+            | "ln"
+            | "rsync"
+            | "systemctl"
+            | "service"
+            | "launchctl"
+            | "iptables"
+            | "nft"
+            | "ufw"
+            | "crontab"
+    ) || first.starts_with("mkfs")
+}
+
+fn is_command_dispatcher(first: &str) -> bool {
+    matches!(
+        first,
+        "xargs"
+            | "eval"
+            | "exec"
+            | "source"
+            | "env"
+            | "sudo"
+            | "doas"
+            | "nohup"
+            | "timeout"
+            | "watch"
+            | "npx"
+    )
+}
+
+fn is_git_mutation(first: &str, second: &str) -> bool {
+    first == "git"
+        && matches!(
+            second,
+            "push"
+                | "reset"
+                | "clean"
+                | "checkout"
+                | "switch"
+                | "rebase"
+                | "merge"
+                | "commit"
+                | "restore"
+                | "rm"
+                | "mv"
+                | "apply"
+                | "am"
+                | "cherry-pick"
+                | "revert"
+                | "stash"
+                | "tag"
+                | "branch"
+                | "remote"
+        )
+}
+
+fn is_docker_mutation(first: &str, second: &str, parts: &[String]) -> bool {
+    if first != "docker" {
+        return false;
+    }
+    if matches!(
+        second,
+        "rm" | "rmi"
+            | "cp"
+            | "import"
+            | "stop"
+            | "kill"
+            | "push"
+            | "login"
+            | "run"
+            | "exec"
+            | "build"
+            | "prune"
+            | "system"
+            | "restart"
+            | "update"
+    ) {
+        return true;
+    }
+    second == "compose"
+        && parts
+            .iter()
+            .skip(2)
+            .any(|part| is_docker_compose_mutation(part))
+}
+
+fn is_docker_compose_mutation(part: &str) -> bool {
+    matches!(
+        part,
+        "up" | "down"
+            | "rm"
+            | "run"
+            | "exec"
+            | "build"
+            | "pull"
+            | "push"
+            | "restart"
+            | "start"
+            | "stop"
+            | "kill"
+            | "create"
+    )
+}
+
+fn is_kubectl_mutation(first: &str, second: &str) -> bool {
+    first == "kubectl"
+        && matches!(
+            second,
+            "delete"
+                | "apply"
+                | "replace"
+                | "scale"
+                | "patch"
+                | "create"
+                | "exec"
+                | "edit"
+                | "drain"
+                | "cordon"
+                | "uncordon"
+                | "rollout"
+                | "annotate"
+                | "label"
+                | "taint"
+                | "cp"
+        )
+}
+
+fn is_package_mutation(first: &str, second: &str) -> bool {
+    matches!(
+        (first, second),
+        (
+            "npm" | "pnpm" | "yarn",
+            "install"
+                | "add"
+                | "publish"
+                | "login"
+                | "uninstall"
+                | "remove"
+                | "update"
+                | "upgrade"
+                | "link"
+                | "unlink"
+                | "exec"
+                | "dlx"
+                | "create"
+                | "ci"
+        ) | (
+            "cargo",
+            "publish" | "install" | "login" | "add" | "remove" | "update" | "yank" | "owner"
+        ) | (
+            "uv",
+            "pip" | "add" | "remove" | "sync" | "tool" | "publish" | "venv"
+        )
+    )
 }
 
 fn split_words(command: &str) -> Vec<String> {

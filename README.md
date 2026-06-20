@@ -65,17 +65,18 @@ framing, and shell rendering at microsecond scale on the workspace's criterion s
 Six real workloads on this repository, run raw and through TokenZero. Both
 sides are counted with the same tokenizer (TokenZero's own accounting), and
 every TokenZero row keeps exact `tz://` refs, so nothing hidden is more than
-one `expand` away. Reproduce any row with `scripts/benchmark_tokens.sh`:
+one `expand` away. The current reproducible demo artifact is
+`demo/demo_results.json`:
 
 | Workload | Raw tokens | TokenZero | Savings |
 | :-- | --: | --: | --: |
-| Read a 2,301-line Rust source file | 16,712 | 150 | **99.1%** |
-| Re-read the same file (session dedup) | 16,712 | 45 | **99.7%** |
-| Repo-wide grep (`fn ` across `crates/`) | 47,206 | 508 | **98.9%** |
-| `cargo test` run (tokenzero-filters suite) | 233 | 80 | **65.7%** |
-| Directory listing (`find` vs `tree`, depth 3) | 1,289 | 340 | **73.6%** |
-| Re-find stored content (`recall` vs re-running the grep) | 47,206 | 46 | **99.9%** |
-| **Total** | **129,358** | **1,169** | **99.1%** |
+| Small read (`Cargo.toml`) | 324 | 324 | **0%** |
+| Large read (`crates/tokenzero-mcp/src/lib.rs`) | 16,977 | 150 | **99.1%** |
+| Re-read the same file (MCP dedup) | 16,977 | 185 | **98.9%** |
+| Repo-wide grep (`fn ` across `crates/`) | 79,424 | 508 | **99.4%** |
+| Re-find stored content (`recall` vs re-running the grep) | 79,424 | 46 | **99.9%** |
+| `run -- git --version` | 11 | 11 | **0%** |
+| **Total** | **193,137** | **1,224** | **99.4%** |
 
 Path-only outputs like `glob` pass through nearly unchanged: there is nothing
 to hide, and a capsule never costs more than raw.
@@ -86,8 +87,9 @@ Across **~20,000 routed tool calls** from real agent sessions on one
 development machine (six days, multiple AI harnesses): raw tool output
 totalled **38.1M tokens**; **17.9M of them (47%) never entered the model's
 context**. Counting back every token agents later recovered with `expand`,
-net savings were **30%**. That recovery-adjusted number is the honest one,
-and it is the one TokenZero's own telemetry reports (`tokenzero pulse stats`).
+net savings were **30%** in that local Pulse ledger. Treat this as deployment
+telemetry, not a release claim; release-facing claims are gated by
+`tokenzero claim-audit` artifacts.
 
 <h3 id="how-racc-works"><img src=".github/assets/h-how.svg" alt="How RACC works" width="100%"></h3>
 

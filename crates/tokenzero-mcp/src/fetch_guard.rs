@@ -51,19 +51,13 @@ pub(crate) fn validate_fetch_target(
     deny_hosts: &[String],
 ) -> Result<FetchTarget, FetchBlocked> {
     let (host, port) = parse_host_port(url)?;
-    if deny_hosts
-        .iter()
-        .any(|pattern| host_matches(&host, pattern))
-    {
+    if host_is_listed(&host, deny_hosts) {
         return Err(FetchBlocked::new(
             "fetch_blocked",
             format!("host {host} is denied by TOKENZERO_FETCH_DENY"),
         ));
     }
-    if allow_hosts
-        .iter()
-        .any(|pattern| host_matches(&host, pattern))
-    {
+    if host_is_listed(&host, allow_hosts) {
         return Ok(FetchTarget {
             host,
             port,
@@ -120,6 +114,15 @@ fn blocked_ip_error(host: &str, ip: IpAddr, reason: &str) -> FetchBlocked {
 /// Extract (host, port) from an http(s) URL. Rejects userinfo to rule out
 /// `http://trusted.com@evil.com/` confusion.
 fn parse_host_port(url: &str) -> Result<(String, u16), FetchBlocked> {
+    let (authority, default_port) = fetch_authority(url)?;
+    reject_userinfo(authority)?;
+    if authority.starts_with('[') {
+        return parse_bracketed_ipv6_authority(authority, default_port, url);
+    }
+    parse_hostname_authority(authority, default_port, url)
+}
+
+fn fetch_authority(url: &str) -> Result<(&str, u16), FetchBlocked> {
     let (rest, default_port) = if let Some(rest) = url.strip_prefix("https://") {
         (rest, 443u16)
     } else if let Some(rest) = url.strip_prefix("http://") {
@@ -141,32 +144,50 @@ fn parse_host_port(url: &str) -> Result<(String, u16), FetchBlocked> {
             format!("URL has no host: {url}"),
         ));
     }
+    Ok((authority, default_port))
+}
+
+fn reject_userinfo(authority: &str) -> Result<(), FetchBlocked> {
     if authority.contains('@') {
-        return Err(FetchBlocked::new(
+        Err(FetchBlocked::new(
             "invalid_url",
             "userinfo in fetch URLs is not supported".to_string(),
-        ));
+        ))
+    } else {
+        Ok(())
     }
-    if let Some(rest) = authority.strip_prefix('[') {
-        // bracketed IPv6 literal, optionally followed by :port
-        let Some((host, after)) = rest.split_once(']') else {
+}
+
+fn parse_bracketed_ipv6_authority(
+    authority: &str,
+    default_port: u16,
+    url: &str,
+) -> Result<(String, u16), FetchBlocked> {
+    let rest = authority.strip_prefix('[').expect("checked by caller");
+    let Some((host, after)) = rest.split_once(']') else {
+        return Err(FetchBlocked::new(
+            "invalid_url",
+            format!("unterminated IPv6 literal in {url}"),
+        ));
+    };
+    let port = match after.strip_prefix(':') {
+        None if after.is_empty() => default_port,
+        Some(port_text) => parse_port(port_text, url)?,
+        None => {
             return Err(FetchBlocked::new(
                 "invalid_url",
-                format!("unterminated IPv6 literal in {url}"),
+                format!("malformed authority in {url}"),
             ));
-        };
-        let port = match after.strip_prefix(':') {
-            None if after.is_empty() => default_port,
-            Some(port_text) => parse_port(port_text, url)?,
-            None => {
-                return Err(FetchBlocked::new(
-                    "invalid_url",
-                    format!("malformed authority in {url}"),
-                ));
-            }
-        };
-        return Ok((format!("[{}]", host.to_ascii_lowercase()), port));
-    }
+        }
+    };
+    Ok((format!("[{}]", host.to_ascii_lowercase()), port))
+}
+
+fn parse_hostname_authority(
+    authority: &str,
+    default_port: u16,
+    url: &str,
+) -> Result<(String, u16), FetchBlocked> {
     match authority.split_once(':') {
         Some((host, port_text)) if !port_text.contains(':') => {
             Ok((host.to_ascii_lowercase(), parse_port(port_text, url)?))
@@ -184,6 +205,10 @@ fn parse_port(text: &str, url: &str) -> Result<u16, FetchBlocked> {
         .map_err(|_| FetchBlocked::new("invalid_url", format!("invalid port in {url}")))
 }
 
+fn host_is_listed(host: &str, patterns: &[String]) -> bool {
+    patterns.iter().any(|pattern| host_matches(host, pattern))
+}
+
 /// Suffix match: `example.com` matches `example.com` and `api.example.com`.
 fn host_matches(host: &str, pattern: &str) -> bool {
     let pattern = pattern.trim().to_ascii_lowercase();
@@ -196,50 +221,54 @@ fn host_matches(host: &str, pattern: &str) -> bool {
 /// Why an IP must not be fetched, or None when it is publicly routable.
 fn blocked_ip_reason(ip: IpAddr) -> Option<&'static str> {
     match ip {
-        IpAddr::V4(v4) => {
-            let octets = v4.octets();
-            if v4.is_unspecified() || octets[0] == 0 {
-                Some("unspecified")
-            } else if v4.is_loopback() {
-                Some("loopback")
-            } else if v4.is_private() {
-                Some("private (RFC1918)")
-            } else if v4.is_link_local() {
-                // includes the 169.254.169.254 cloud metadata endpoint
-                Some("link-local")
-            } else if v4.is_broadcast() {
-                Some("broadcast")
-            } else if octets[0] == 100 && (octets[1] & 0xC0) == 64 {
-                Some("carrier-grade NAT (100.64/10)")
-            } else if octets[0] == 192 && octets[1] == 0 && octets[2] == 0 {
-                Some("IETF protocol assignments (192.0.0/24)")
-            } else if octets[0] >= 224 && octets[0] < 240 {
-                Some("multicast (224.0.0.0/4)")
-            } else if octets[0] >= 240 {
-                Some("reserved (240.0.0.0/4)")
-            } else if octets[0] == 198 && (octets[1] == 18 || octets[1] == 19) {
-                Some("benchmark/documentation (198.18.0.0/15)")
-            } else {
-                None
-            }
-        }
-        IpAddr::V6(v6) => {
-            if let Some(mapped) = v6.to_ipv4_mapped() {
-                return blocked_ip_reason(IpAddr::V4(mapped));
-            }
-            let segments = v6.segments();
-            if v6.is_unspecified() {
-                Some("unspecified")
-            } else if v6.is_loopback() {
-                Some("loopback")
-            } else if (segments[0] & 0xffc0) == 0xfe80 {
-                Some("link-local")
-            } else if (segments[0] & 0xfe00) == 0xfc00 {
-                Some("unique-local (fc00::/7)")
-            } else {
-                None
-            }
-        }
+        IpAddr::V4(v4) => blocked_ipv4_reason(v4),
+        IpAddr::V6(v6) => blocked_ipv6_reason(v6),
+    }
+}
+
+fn blocked_ipv4_reason(ip: std::net::Ipv4Addr) -> Option<&'static str> {
+    let octets = ip.octets();
+    if ip.is_unspecified() || octets[0] == 0 {
+        Some("unspecified")
+    } else if ip.is_loopback() {
+        Some("loopback")
+    } else if ip.is_private() {
+        Some("private (RFC1918)")
+    } else if ip.is_link_local() {
+        // includes the 169.254.169.254 cloud metadata endpoint
+        Some("link-local")
+    } else if ip.is_broadcast() {
+        Some("broadcast")
+    } else if octets[0] == 100 && (octets[1] & 0xC0) == 64 {
+        Some("carrier-grade NAT (100.64/10)")
+    } else if octets[0] == 192 && octets[1] == 0 && octets[2] == 0 {
+        Some("IETF protocol assignments (192.0.0/24)")
+    } else if octets[0] >= 224 && octets[0] < 240 {
+        Some("multicast (224.0.0.0/4)")
+    } else if octets[0] >= 240 {
+        Some("reserved (240.0.0.0/4)")
+    } else if octets[0] == 198 && (octets[1] == 18 || octets[1] == 19) {
+        Some("benchmark/documentation (198.18.0.0/15)")
+    } else {
+        None
+    }
+}
+
+fn blocked_ipv6_reason(ip: std::net::Ipv6Addr) -> Option<&'static str> {
+    if let Some(mapped) = ip.to_ipv4_mapped() {
+        return blocked_ipv4_reason(mapped);
+    }
+    let segments = ip.segments();
+    if ip.is_unspecified() {
+        Some("unspecified")
+    } else if ip.is_loopback() {
+        Some("loopback")
+    } else if (segments[0] & 0xffc0) == 0xfe80 {
+        Some("link-local")
+    } else if (segments[0] & 0xfe00) == 0xfc00 {
+        Some("unique-local (fc00::/7)")
+    } else {
+        None
     }
 }
 

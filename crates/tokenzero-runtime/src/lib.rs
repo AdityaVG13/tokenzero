@@ -129,6 +129,69 @@ pub struct RunResult {
     pub duration_ms: u128,
 }
 
+#[derive(Debug)]
+struct RunResultBuilder {
+    command: String,
+    argv: Vec<String>,
+    execution_mode: ExecutionMode,
+    alias_dependency: bool,
+    cwd: Option<String>,
+    capture_limit_bytes: usize,
+    spill_threshold_bytes: usize,
+}
+
+impl RunResultBuilder {
+    fn from_plan(
+        command: String,
+        plan: &RuntimePlan,
+        cwd: Option<&Path>,
+        output_policy: &RunOutputPolicy,
+    ) -> Self {
+        Self {
+            command,
+            argv: plan.argv.clone(),
+            execution_mode: plan.execution_mode,
+            alias_dependency: plan.alias_dependency,
+            cwd: cwd.map(|p| p.display().to_string()),
+            capture_limit_bytes: output_policy.per_stream_capture_bytes,
+            spill_threshold_bytes: output_policy.spill_threshold_bytes,
+        }
+    }
+
+    fn finish(
+        self,
+        ok: bool,
+        exit_code: Option<i32>,
+        process_io: ProcessIo,
+        force_timed_out: bool,
+        start: Instant,
+    ) -> RunResult {
+        let allocator_pressure_relief = allocator_pressure_relief_after_large_capture(
+            &process_io.stdout.capture,
+            &process_io.stderr.capture,
+        );
+        RunResult {
+            ok,
+            command: self.command,
+            argv: self.argv,
+            execution_mode: self.execution_mode,
+            alias_dependency: self.alias_dependency,
+            cwd: self.cwd,
+            exit_code,
+            stdout: process_io.stdout.text,
+            stderr: process_io.stderr.text,
+            stdout_capture: process_io.stdout.capture,
+            stderr_capture: process_io.stderr.capture,
+            capture_limit_bytes: self.capture_limit_bytes,
+            spill_threshold_bytes: self.spill_threshold_bytes,
+            allocator_pressure_relief,
+            timed_out: force_timed_out || process_io.timed_out,
+            io_grace_expired: process_io.io_grace_expired,
+            duration_ms: start.elapsed().as_millis(),
+        }
+    }
+}
+
 pub fn current_platform() -> &'static str {
     if cfg!(windows) { "windows" } else { "posix" }
 }
@@ -264,9 +327,9 @@ pub fn run_command_with_policy(
 ) -> Result<RunResult, RuntimeError> {
     let output_policy = output_policy.normalized();
     let plan = plan_command(argv, cwd, explicit_shell)?;
-    let execution_mode = plan.execution_mode;
-    let alias_dependency = plan.alias_dependency;
     let command_display = command_display_for_plan(argv, &plan);
+    let result_builder =
+        RunResultBuilder::from_plan(command_display.clone(), &plan, cwd, &output_policy);
     let start = Instant::now();
     let mut command = match plan.execution_mode {
         ExecutionMode::Argv => {
@@ -328,29 +391,7 @@ pub fn run_command_with_policy(
                 process_group,
                 false,
             )?;
-            let allocator_pressure_relief = allocator_pressure_relief_after_large_capture(
-                &process_io.stdout.capture,
-                &process_io.stderr.capture,
-            );
-            return Ok(RunResult {
-                ok: false,
-                command: command_display.clone(),
-                argv: plan.argv,
-                execution_mode,
-                alias_dependency,
-                cwd: cwd.map(|p| p.display().to_string()),
-                exit_code: status.code(),
-                stdout: process_io.stdout.text,
-                stderr: process_io.stderr.text,
-                stdout_capture: process_io.stdout.capture,
-                stderr_capture: process_io.stderr.capture,
-                capture_limit_bytes: output_policy.per_stream_capture_bytes,
-                spill_threshold_bytes: output_policy.spill_threshold_bytes,
-                allocator_pressure_relief,
-                timed_out: true,
-                io_grace_expired: process_io.io_grace_expired,
-                duration_ms: start.elapsed().as_millis(),
-            });
+            return Ok(result_builder.finish(false, status.code(), process_io, true, start));
         }
     };
     let process_io = collect_process_io(
@@ -363,29 +404,13 @@ pub fn run_command_with_policy(
         process_group,
         true,
     )?;
-    let allocator_pressure_relief = allocator_pressure_relief_after_large_capture(
-        &process_io.stdout.capture,
-        &process_io.stderr.capture,
-    );
-    Ok(RunResult {
-        ok: !process_io.timed_out && status.success(),
-        command: command_display,
-        argv: plan.argv,
-        execution_mode,
-        alias_dependency,
-        cwd: cwd.map(|p| p.display().to_string()),
-        exit_code: status.code(),
-        stdout: process_io.stdout.text,
-        stderr: process_io.stderr.text,
-        stdout_capture: process_io.stdout.capture,
-        stderr_capture: process_io.stderr.capture,
-        capture_limit_bytes: output_policy.per_stream_capture_bytes,
-        spill_threshold_bytes: output_policy.spill_threshold_bytes,
-        allocator_pressure_relief,
-        timed_out: process_io.timed_out,
-        io_grace_expired: process_io.io_grace_expired,
-        duration_ms: start.elapsed().as_millis(),
-    })
+    Ok(result_builder.finish(
+        !process_io.timed_out && status.success(),
+        status.code(),
+        process_io,
+        false,
+        start,
+    ))
 }
 
 fn command_display_for_plan(input_argv: &[String], plan: &RuntimePlan) -> String {
@@ -909,8 +934,10 @@ fn command_for_argv(
         let resolved = resolve_windows_program(program, cwd, env_overrides);
         if is_windows_batch_file(&resolved) {
             let mut cmd = Command::new("cmd");
-            cmd.arg("/D").arg("/C").arg("call").arg(resolved);
-            cmd.args(args);
+            cmd.arg("/D")
+                .arg("/S")
+                .arg("/C")
+                .arg(windows_batch_call_command(&resolved, args));
             return cmd;
         }
         let mut cmd = Command::new(resolved);
@@ -925,6 +952,17 @@ fn command_for_argv(
         cmd.args(args);
         cmd
     }
+}
+
+#[cfg(windows)]
+fn windows_batch_call_command(resolved: &Path, args: &[String]) -> String {
+    std::iter::once("call".to_string())
+        .chain(std::iter::once(quote_windows_cmd(
+            &resolved.display().to_string(),
+        )))
+        .chain(args.iter().map(|arg| quote_windows_cmd(arg)))
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 #[cfg(windows)]
@@ -1440,11 +1478,22 @@ pub fn quote_windows_cmd(value: &str) -> String {
     }
     if value
         .chars()
-        .all(|c| c.is_ascii_alphanumeric() || "-_./:\\@%+=".contains(c))
+        .all(|c| c.is_ascii_alphanumeric() || "-_./:\\@+=".contains(c))
     {
         value.to_string()
     } else {
-        format!("\"{}\"", value.replace('"', "\\\""))
+        let mut quoted = String::with_capacity(value.len() + 2);
+        quoted.push('"');
+        for ch in value.chars() {
+            match ch {
+                '"' => quoted.push_str("\\\""),
+                '%' => quoted.push_str("%%"),
+                '^' => quoted.push_str("^^"),
+                _ => quoted.push(ch),
+            }
+        }
+        quoted.push('"');
+        quoted
     }
 }
 

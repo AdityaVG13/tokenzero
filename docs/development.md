@@ -45,17 +45,21 @@ Eight Rust crates:
 
 ## Verification artifacts
 
-Proof artifacts are written under ignored `results/current/` paths:
+Proof artifacts are written under `results/current/` when a local or CI
+verification run emits them:
 
 | Artifact | Proves |
 | --- | --- |
-| `rust_cli_verification.json` | CLI read/expand byte-exact check |
 | `rust_mcp_smoke.json` | MCP tool and alias smoke |
-| `rust_mcp_soak.json` | Accelerated malformed/restart durability soak |
-| `rust_shell_matrix_local.json` | Local shell/runtime matrix |
-| `rust_perf_budget.json` | Release binary latency budget |
-| `rust_install_smoke.json` | Isolated install/rollback smoke |
-| `rust_package_audit.json` | Release-only Rust package audit |
+| `tokenzero_exact_recovery_audit.json` | CLI/MCP exact recovery checks, including degraded-cache rows |
+| `tokenzero_protected_anchor_audit.json` | Protected failure/warning anchor recall |
+| `tokenzero_shell_matrix.json` | Local shell/runtime matrix for this host |
+| `tokenzero_os_reach_audit.json` | OS-scoped evidence and install-smoke status |
+| `tokenzero_source_currency.json` | Public-claim source freshness gate |
+| `tokenzero_claim_audit.json` | Release/public-claim gate summary |
+
+Some release jobs additionally upload platform-specific artifacts outside the
+repo checkout; do not infer those from a local `results/current/` listing.
 
 ## Release boundaries
 

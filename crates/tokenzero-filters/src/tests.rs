@@ -38,6 +38,8 @@ fn compound_commands_are_left_unmodified() {
         "ls -la; git status",
         "make build && make test",
         "grep -r needle . || true",
+        "git status\nrm -rf /tmp/x",
+        "git status\rrm -rf /tmp/x",
     ] {
         let result = rewrite_command(command, "safe", true);
         assert!(!result.applied, "{command}");
@@ -100,11 +102,17 @@ fn expanded_destructive_commands_are_flagged() {
         "find . -name '*.log' -exec rm {} +",
         "git restore .",
         "git stash drop",
+        "git tag v1.0.0",
+        "git remote add origin https://example.com/repo.git",
         "docker run --rm image",
         "docker compose up -d",
+        "docker cp file container:/tmp/file",
+        "docker import image.tar repo:tag",
         "kubectl exec -it pod -- sh",
+        "kubectl cp file pod:/tmp/file",
         "cargo add serde",
         "npm uninstall left-pad",
+        "npm ci",
         "uv pip install requests",
     ] {
         let result = rewrite_command(command, "safe", true);
@@ -186,6 +194,23 @@ fn quiet_flags_injected_for_noisy_toolchains() {
         assert!(result.applied, "{command}");
         assert!(result.safe, "{command}");
         assert_eq!(result.rewritten_command, expected, "{command}");
+    }
+}
+
+#[test]
+fn bounded_rewrites_respect_existing_limits() {
+    for command in [
+        "tree -L 0",
+        "tree -L2 src",
+        "tree --depth=4 src",
+        "git log --max-count=5",
+        "git log -n5",
+        "git log -n 5",
+    ] {
+        let result = rewrite_command(command, "safe", true);
+        assert_eq!(result.rewritten_command, command, "{command}");
+        assert!(!result.applied, "{command}");
+        assert!(result.safe, "{command}");
     }
 }
 

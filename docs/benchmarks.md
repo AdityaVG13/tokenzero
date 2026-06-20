@@ -14,18 +14,18 @@ savings are **lossless** — nothing in the saved column is unrecoverable.
 
 ## Raw tool output vs TokenZero-visible output
 
-Measured 2026-06-10 on this repository (Apple Silicon macOS, release build,
-cold benchmark cache):
+Measured by `demo/demo_results.json` for TokenZero 1.0.1 on this repository:
 
 | Workload | Raw tokens | TokenZero visible | Savings |
 | --- | ---: | ---: | ---: |
-| Read a 5k-line source file | 52,016 | 177 | 99% |
-| Re-read the same file (seen-set dedup) | 52,016 | 45 | 99% |
-| Repo-wide grep (`fn ` across crates/) | 44,862 | 493 | 98% |
-| `cargo test` run (filters suite) | 246 | 147 | 40% |
-| Directory listing (find vs `tree --depth 3`) | 802 | 224 | 72% |
-| Re-find stored content (`recall` vs re-grep) | 44,862 | 209 | 99% |
-| **Total** | **194,804** | **1,295** | **99.3%** |
+| Small read (`Cargo.toml`) | 324 | 324 | 0% |
+| Large read (`crates/tokenzero-mcp/src/lib.rs`) | 16,977 | 150 | 99.1% |
+| Re-read the same file (MCP dedup) | 16,977 | 185 | 98.9% |
+| Repo-wide grep (`fn ` across crates/) | 79,424 | 508 | 99.4% |
+| Expand round-trip (large file) | 0 | 0 | byte-exact |
+| Re-find stored content (`recall` vs re-grep) | 79,424 | 46 | 99.9% |
+| `run -- git --version` | 11 | 11 | 0% |
+| **Total** | **193,137** | **1,224** | **99.4%** |
 
 How to read this honestly:
 
@@ -38,7 +38,8 @@ How to read this honestly:
   whenever framing would cost more than the payload, so savings are never
   negative. The `cargo test` row (40%) is the floor doing its job.
 - The dedup and recall rows are the redundancy layer: the second serve of
-  content an agent already saw costs a two-line note (~45 tokens) instead of
+  content an agent already saw costs a compact note (185 visible tokens in
+  the current demo) instead of
   the payload, and re-finding stored content never re-runs the original
   command.
 - Tool results dominate agent context, and every token here is also paid on
@@ -53,7 +54,7 @@ was removed).
 
 | Tool | Mechanism | Published claim | Fidelity contract |
 | --- | --- | --- | --- |
-| TokenZero (this repo) | compress at source, capsule + exact refs | 99.3% on the mixed suite above (measured, reproducible) | Lossless: exact bytes one `tz_expand` away; anchor recall 1.0 audited in CI |
+| TokenZero (this repo) | compress at source, capsule + exact refs | 99.4% on the mixed suite above (measured in `demo/demo_results.json`) | Lossless: exact bytes one `tz_expand` away; anchor recall 1.0 audited in CI |
 | context-mode | sandbox execution + BM25 retrieval against a stated intent | "315 KB becomes 5.4 KB. 98% reduction." | Lossy: a retrieval miss is invisible to the model; no recovery audit |
 | opencode-dynamic-context-pruning | rewrite conversation history with summaries | (history-dependent; no single headline figure) | Lossy summaries; self-reported prompt-cache hit drop 90%→85% from mutating history |
 
