@@ -30,3 +30,10 @@ pub fn cache_maintenance(cache_path: &Path, dry_run: bool) -> Value {
         "spill_prune": spill_prune,
     })
 }
+
+/// Build the post-compaction session pack over a workspace's recovery
+/// cache: the most recently served payloads with exact refs, token-budgeted.
+/// `None` when there is nothing to restore.
+pub fn session_pack(cache_path: &Path, max_tokens: usize) -> Option<String> {
+    crate::recall::build_session_pack(cache_path, max_tokens)
+}

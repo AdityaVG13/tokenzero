@@ -1,5 +1,6 @@
 use serde_json::Value;
-use std::fs;
+use std::fs::{self, File};
+use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 
 pub(crate) fn cache_pack_sources(root: &Path, scope: &str) -> Vec<PathBuf> {
@@ -49,4 +50,28 @@ pub(crate) fn previous_cache_digest(path: &Path) -> Option<String> {
         .get("content_digest")
         .and_then(Value::as_str)
         .map(str::to_string)
+}
+
+pub(crate) fn read_line_range_from_file(
+    path: &Path,
+    start: usize,
+    end: usize,
+) -> std::io::Result<String> {
+    let start = start.max(1);
+    let end = end.max(start);
+    let file = File::open(path)?;
+    let reader = BufReader::new(file);
+    let mut out = String::new();
+    for (idx, line) in reader.lines().enumerate() {
+        let line_no = idx + 1;
+        if line_no < start {
+            continue;
+        }
+        if line_no > end {
+            break;
+        }
+        out.push_str(&line?);
+        out.push('\n');
+    }
+    Ok(out.trim_end().to_string())
 }

@@ -3,35 +3,43 @@
 mod cache_maintenance;
 mod cache_pack;
 mod catalog;
+mod collect;
 mod diff;
 mod fetch_cache;
 mod fetch_guard;
 mod jsonrpc;
+mod paths;
 mod recall;
+mod render;
 mod resources;
 mod session;
 mod stdio;
 mod supervisor;
 mod tools;
 
-pub use cache_maintenance::{cache_maintenance, shell_spill_dir};
+pub use cache_maintenance::{cache_maintenance, session_pack, shell_spill_dir};
 pub use catalog::{ResourceSpec, ToolSpec, resource_specs, tool_specs};
 pub use jsonrpc::handle_jsonrpc;
+pub use render::{cli_json, render_text};
 pub use stdio::run_stdio;
 pub use supervisor::run_supervised_stdio;
 
-use cache_pack::{cache_pack_manifest_path, cache_pack_sources, previous_cache_digest};
+use cache_pack::{
+    cache_pack_manifest_path, cache_pack_sources, previous_cache_digest, read_line_range_from_file,
+};
+use collect::*;
 use fetch_cache::{epoch_secs, fetch_index_path, load_fetch_index, record_fetch};
 use fetch_guard::{FETCH_META_MARKER, split_fetch_meta, validate_fetch_target};
 use globset::{GlobBuilder, GlobMatcher};
 pub(crate) use jsonrpc::{JsonRpcErrorData, handle_jsonrpc_value, jsonrpc_error};
+use paths::*;
+use render::*;
 pub(crate) use resources::read_resource;
 use serde_json::{Value, json};
 use session::{DiffTelemetry, SeenState, ServeKey, ServedRecord, SessionMemory, SessionSummary};
 use std::collections::{BTreeMap, HashSet};
 use std::ffi::OsString;
 use std::fs;
-use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::sync::{Condvar, Mutex, OnceLock};
 use std::time::{Duration, SystemTime};
@@ -2453,43 +2461,6 @@ impl TokenZeroEngine {
         })
     }
 }
-
-fn read_line_range_from_file(path: &Path, start: usize, end: usize) -> std::io::Result<String> {
-    let start = start.max(1);
-    let end = end.max(start);
-    let file = fs::File::open(path)?;
-    let reader = BufReader::new(file);
-    let mut out = String::new();
-    for (idx, line) in reader.lines().enumerate() {
-        let line_no = idx + 1;
-        if line_no < start {
-            continue;
-        }
-        if line_no > end {
-            break;
-        }
-        out.push_str(&line?);
-        out.push('\n');
-    }
-    Ok(out.trim_end().to_string())
-}
-
-/// Build the post-compaction session pack over a workspace's recovery
-/// cache: the most recently served payloads with exact refs, token-budgeted.
-/// `None` when there is nothing to restore.
-pub fn session_pack(cache_path: &Path, max_tokens: usize) -> Option<String> {
-    recall::build_session_pack(cache_path, max_tokens)
-}
-
-mod collect;
-mod paths;
-mod render;
-
-use collect::*;
-use paths::*;
-use render::*;
-
-pub use render::{cli_json, render_text};
 
 #[cfg(test)]
 mod tests;
