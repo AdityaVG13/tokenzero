@@ -8,6 +8,7 @@ mod diff;
 mod fetch_cache;
 mod fetch_guard;
 mod jsonrpc;
+mod metrics;
 mod paths;
 mod recall;
 mod render;
@@ -300,6 +301,9 @@ pub struct TokenZeroEngine {
     /// Stable id for Pulse attribution of every call this engine serves
     /// (one engine per MCP session or CLI command).
     session_id: String,
+    /// Per-tool call observability; session counters plus a cross-session
+    /// sidecar next to the recovery cache.
+    metrics: metrics::ToolMetrics,
 }
 
 impl TokenZeroEngine {
@@ -308,17 +312,34 @@ impl TokenZeroEngine {
         // command) reclaims abandoned temp files and aged spills, so users
         // never have to run cache maintenance by hand.
         let _ = cache_maintenance(&config.cache_path, false);
+        let metrics = metrics::ToolMetrics::new(&config.cache_path);
         Self {
             config,
             rg_binary: OnceLock::new(),
             session: Mutex::new(SessionMemory::default()),
             in_flight: (Mutex::new(HashSet::new()), Condvar::new()),
             session_id: new_session_id(),
+            metrics,
         }
     }
 
     pub fn session_id(&self) -> &str {
         &self.session_id
+    }
+
+    /// Record one tool-call outcome for observability. Fail-open.
+    pub(crate) fn record_tool_call(
+        &self,
+        tool: &str,
+        elapsed: std::time::Duration,
+        is_error: bool,
+    ) {
+        self.metrics.record(tool, elapsed, is_error);
+    }
+
+    /// Snapshot served by `resource://tokenzero/metrics`.
+    pub(crate) fn tool_metrics_snapshot(&self) -> Value {
+        self.metrics.snapshot()
     }
 
     /// Fail-open lookup: a poisoned session mutex reads as a miss (full

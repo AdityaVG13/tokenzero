@@ -18,7 +18,10 @@ pub(crate) fn call_tool(
     call_id: Option<String>,
 ) -> Result<Value, JsonRpcErrorData> {
     let canonical = canonical_tool(name);
-    let response = dispatch_tool(engine, canonical, name, args)?;
+    let started = std::time::Instant::now();
+    let result = dispatch_tool(engine, canonical, name, args);
+    engine.record_tool_call(canonical, started.elapsed(), result.is_err());
+    let response = result?;
     record_mcp_pulse(engine, canonical, args, &response, call_id);
     Ok(mcp_tool_response(response))
 }

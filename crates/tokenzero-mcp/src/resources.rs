@@ -96,6 +96,7 @@ pub(crate) fn read_resource(
             "mcp_idle_timeout_seconds": engine.config.mcp_idle_timeout.map(|timeout| timeout.as_secs()),
             "privacy": "Raw payloads stay local behind tz:// refs; this resource does not expose cached payload text."
         }),
+        "resource://tokenzero/metrics" => engine.tool_metrics_snapshot(),
         "resource://tokenzero/shell-contract" => {
             return Ok(resource_read_result(
                 &resource.uri,

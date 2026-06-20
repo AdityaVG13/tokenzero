@@ -219,6 +219,23 @@ fn handle_jsonrpc_request(engine: &TokenZeroEngine, parsed: Value) -> Option<Val
                 "cacheScope": "workspace"
             })
         }
+        "resources/templates/list" => {
+            let params = match object_params(object, &id, "resources/templates/list") {
+                Ok(params) => params,
+                Err(error) => return Some(error),
+            };
+            if let Err(error) =
+                ensure_optional_cursor_param(params, &id, "resources/templates/list")
+            {
+                return Some(error);
+            }
+            json!({
+                "resourceTemplates": [],
+                "resultType": "complete",
+                "ttlMs": 60000,
+                "cacheScope": "workspace"
+            })
+        }
         "resources/read" => {
             let params = match object_params(object, &id, "resources/read") {
                 Ok(Some(params)) => params,
@@ -687,6 +704,7 @@ const JSONRPC_METHODS: &[&str] = &[
     "ping",
     "server/discover",
     "resources/list",
+    "resources/templates/list",
     "resources/read",
     "prompts/list",
     "logging/setLevel",

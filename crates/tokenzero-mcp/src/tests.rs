@@ -3310,3 +3310,78 @@ fn response_never_advertises_a_ref_evicted_during_its_own_persist() {
         "refs evicted by the persist must not be advertised"
     );
 }
+
+#[test]
+fn tool_metrics_records_session_calls() {
+    let dir = tempdir().unwrap();
+    let file = dir.path().join("hello.txt");
+    std::fs::write(&file, "hello metrics\n").unwrap();
+    let engine = TokenZeroEngine::new(EngineConfig::for_root(dir.path()));
+
+    for _ in 0..3 {
+        call_tool(
+            &engine,
+            "read",
+            &json!({ "path": file.display().to_string() }),
+            None,
+        )
+        .unwrap();
+    }
+
+    let snap = engine.tool_metrics_snapshot();
+    assert_eq!(snap["status"], "ok");
+    assert!(snap["slow_threshold_ms"].as_u64().unwrap() > 0);
+    assert_eq!(
+        snap["session"]["tools"]["read"]["calls"].as_u64().unwrap(),
+        3,
+        "session counters track each read call"
+    );
+}
+
+#[test]
+fn tool_metrics_persist_across_engine_instances() {
+    let dir = tempdir().unwrap();
+    let file = dir.path().join("hello.txt");
+    std::fs::write(&file, "hello metrics\n").unwrap();
+
+    {
+        let engine = TokenZeroEngine::new(EngineConfig::for_root(dir.path()));
+        call_tool(
+            &engine,
+            "read",
+            &json!({ "path": file.display().to_string() }),
+            None,
+        )
+        .unwrap();
+    }
+
+    // A fresh engine on the same root rehydrates cumulative counters from the sidecar.
+    let engine = TokenZeroEngine::new(EngineConfig::for_root(dir.path()));
+    let snap = engine.tool_metrics_snapshot();
+    assert!(
+        snap["cumulative"]["tools"]["read"]["calls"]
+            .as_u64()
+            .unwrap()
+            >= 1,
+        "cumulative counters persist across sessions via the sidecar"
+    );
+    assert!(
+        snap["session"]["tools"].get("read").is_none(),
+        "a fresh process starts with empty session counters"
+    );
+}
+
+#[test]
+fn tool_metrics_resource_is_served() {
+    let dir = tempdir().unwrap();
+    let engine = TokenZeroEngine::new(EngineConfig::for_root(dir.path()));
+    let response = handle_jsonrpc(
+        &engine,
+        r#"{"jsonrpc":"2.0","id":1,"method":"resources/read","params":{"uri":"resource://tokenzero/metrics"}}"#,
+    )
+    .unwrap();
+    assert!(
+        response.contains("cumulative") && response.contains("slow_threshold_ms"),
+        "metrics resource is discoverable and served"
+    );
+}

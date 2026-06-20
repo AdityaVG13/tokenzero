@@ -756,6 +756,12 @@ fn mcp_method_params_conformance_matrix() {
             "invalid_params",
         ),
         (
+            "MCP-2025-06-18-RESOURCES-TEMPLATES-LIST-PARAMS-001",
+            "resources/templates/list params must be an object when present",
+            json!({"jsonrpc":"2.0","id":"resources-templates-list-array","method":"resources/templates/list","params":[]}),
+            "invalid_params",
+        ),
+        (
             "MCP-2025-06-18-PROMPTS-LIST-PARAMS-001",
             "prompts/list params must be an object when present",
             json!({"jsonrpc":"2.0","id":"prompts-list-array","method":"prompts/list","params":[]}),
@@ -801,6 +807,12 @@ fn mcp_method_params_conformance_matrix() {
             "MCP-2025-06-18-RESOURCES-LIST-CURSOR-001",
             "resources/list params.cursor must be a string when present",
             json!({"jsonrpc":"2.0","id":"resources-list-cursor-number","method":"resources/list","params":{"cursor":7}}),
+            "invalid_params",
+        ),
+        (
+            "MCP-2025-06-18-RESOURCES-TEMPLATES-LIST-CURSOR-001",
+            "resources/templates/list params.cursor must be a string when present",
+            json!({"jsonrpc":"2.0","id":"resources-templates-list-cursor-number","method":"resources/templates/list","params":{"cursor":7}}),
             "invalid_params",
         ),
         (
@@ -855,6 +867,23 @@ fn mcp_result_shape_conformance_matrix() {
             assert_non_empty_string(description, "resources/list resource.description");
         }
     }
+
+    let resource_templates = response_json(
+        &engine,
+        json!({"jsonrpc":"2.0","id":"resource-templates-shape","method":"resources/templates/list","params":{}}),
+    );
+    assert_list_result_shape(
+        &resource_templates,
+        "resourceTemplates",
+        "resources/templates/list",
+    );
+    assert!(
+        resource_templates["result"]["resourceTemplates"]
+            .as_array()
+            .unwrap()
+            .is_empty(),
+        "TokenZero exposes concrete resources, not URI templates: {resource_templates}"
+    );
 
     let prompts = response_json(
         &engine,
