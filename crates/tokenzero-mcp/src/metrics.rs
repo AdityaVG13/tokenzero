@@ -76,6 +76,9 @@ pub(crate) struct ToolMetrics {
     slow_ms: u64,
     /// This process's counters; resets when the server exits.
     session: Mutex<BTreeMap<String, ToolStat>>,
+    /// In-memory mirror of the sidecar; updated on every record so
+    /// snapshots stay accurate even when disk writes fail (fail-open).
+    persisted: Mutex<BTreeMap<String, ToolStat>>,
 }
 
 impl ToolMetrics {
@@ -86,10 +89,12 @@ impl ToolMetrics {
             .and_then(|raw| raw.trim().parse::<u64>().ok())
             .filter(|ms| *ms > 0)
             .unwrap_or(DEFAULT_SLOW_TOOL_MS);
+        let persisted = load_persisted_from_path(&path);
         Self {
             path,
             slow_ms,
             session: Mutex::new(BTreeMap::new()),
+            persisted: Mutex::new(persisted),
         }
     }
 
@@ -105,18 +110,25 @@ impl ToolMetrics {
                 .record(ms, is_error, slow);
         }
 
-        // Merge this single call into the persistent sidecar.
+        // Merge this single call into the persistent sidecar. Reload from
+        // disk first so concurrent server processes can accumulate.
         let mut persisted = self.load_persisted();
         persisted
             .entry(tool.to_string())
             .or_default()
             .record(ms, is_error, slow);
+        if let Ok(mut mirror) = self.persisted.lock() {
+            *mirror = persisted.clone();
+        }
         let _ = self.write_persisted(&persisted);
     }
 
     /// Snapshot for `resource://tokenzero/metrics`.
     pub(crate) fn snapshot(&self) -> Value {
-        let cumulative = Self::map_to_json(&self.load_persisted());
+        let cumulative = match self.persisted.lock() {
+            Ok(persisted) => Self::map_to_json(&persisted),
+            Err(_) => Self::map_to_json(&self.load_persisted()),
+        };
         let session = match self.session.lock() {
             Ok(session) => Self::map_to_json(&session),
             Err(_) => json!({}),
@@ -152,19 +164,7 @@ impl ToolMetrics {
     }
 
     fn load_persisted(&self) -> BTreeMap<String, ToolStat> {
-        let mut out = BTreeMap::new();
-        let Ok(text) = std::fs::read_to_string(&self.path) else {
-            return out;
-        };
-        let Ok(value) = serde_json::from_str::<Value>(&text) else {
-            return out; // corrupt sidecar: start fresh rather than fail
-        };
-        if let Some(tools) = value.get("tools").and_then(Value::as_object) {
-            for (name, stat) in tools {
-                out.insert(name.clone(), ToolStat::from_json(stat));
-            }
-        }
-        out
+        load_persisted_from_path(&self.path)
     }
 
     fn write_persisted(&self, stats: &BTreeMap<String, ToolStat>) -> std::io::Result<()> {
@@ -185,6 +185,28 @@ impl ToolMetrics {
             .path
             .with_extension(format!("tmp-{}", std::process::id()));
         std::fs::write(&tmp, body.as_bytes())?;
-        std::fs::rename(&tmp, &self.path)
+        match std::fs::rename(&tmp, &self.path) {
+            Ok(()) => Ok(()),
+            Err(err) => {
+                let _ = std::fs::remove_file(&tmp);
+                Err(err)
+            }
+        }
     }
+}
+
+fn load_persisted_from_path(path: &Path) -> BTreeMap<String, ToolStat> {
+    let mut out = BTreeMap::new();
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return out;
+    };
+    let Ok(value) = serde_json::from_str::<Value>(&text) else {
+        return out; // corrupt sidecar: start fresh rather than fail
+    };
+    if let Some(tools) = value.get("tools").and_then(Value::as_object) {
+        for (name, stat) in tools {
+            out.insert(name.clone(), ToolStat::from_json(stat));
+        }
+    }
+    out
 }
