@@ -167,6 +167,15 @@ const COMMANDS: &[CommandSurface] = &[
         description: "Emit the machine-readable CLI contract for agents.",
     },
     CommandSurface {
+        name: "codemode",
+        aliases: &[],
+        category: "agent-contract",
+        mutates: false,
+        json: true,
+        primary_invocation: "tokenzero codemode --json --plan '<plan>'",
+        description: "Run a JS-like CodeMode plan: compose TokenZero ops in one call with search/describe discovery.",
+    },
+    CommandSurface {
         name: "robot-docs guide",
         aliases: &[
             "robot-doc guide",
@@ -208,6 +217,7 @@ const EXIT_CODES: &[ExitCode] = &[
 
 const FEATURES: &[&str] = &[
     "capabilities_json",
+    "codemode_surface",
     "exact_recovery_refs",
     "intent_inference_aliases",
     "json_output",
@@ -244,6 +254,7 @@ pub fn capabilities_json() -> serde_json::Value {
             "pipeline_rerun_guidance": true,
             "intent_inference_aliases": true,
             "capabilities_json": true,
+            "codemode_surface": true,
             "robot_docs_guide": true
         },
         "commands": COMMANDS,
@@ -311,6 +322,19 @@ pub fn capabilities_json() -> serde_json::Value {
             "tokenzero install --shims --plan --json",
             "tokenzero hook claude-code"
         ],
+        "codemode": {
+            "schema": "tokenzero.codemode.v1",
+            "cli": "tokenzero codemode --json --plan '<plan>'",
+            "mcp_tool": "tz_codemode",
+            "discovery": [
+                "tokenzero codemode 'search:read'",
+                "tokenzero codemode 'describe:zero.read'"
+            ],
+            "cache_default": "codemode-recovery.json",
+            "cache_note": "Separate from MCP/CLI recovery-cache.json unless --cache-path is shared.",
+            "pattern": "https://developers.cloudflare.com/agents/tools/codemode/",
+            "when_to_use": "Compose multi-step TokenZero workflows in one plan; fewer round trips than per-tool MCP calls."
+        },
         "dangerous_operations": [
             {
                 "command": "install",
@@ -332,7 +356,8 @@ pub fn capabilities_json() -> serde_json::Value {
             "If you type `tokenzero rn true --json`, TokenZero recovers to `tokenzero run --json -- true`.",
             "`tokenzero doctor status --json`, `tokenzero pulse stats --json`, `tokenzero cache statuz --json`, and `tokenzero install plan --json` recover to safe read-side or plan surfaces.",
             "`tokenzero install status --json` recovers to `tokenzero clients detect --json`.",
-            "Use `tokenzero run --json -- <command>` for command telemetry; inspect `command_success`, not only process exit."
+            "Use `tokenzero run --json -- <command>` for command telemetry; inspect `command_success`, not only process exit.",
+            "Optional CodeMode: `tokenzero codemode --json --plan '<plan>'` or MCP `tz_codemode` for composed multi-step plans; keep using per-tool MCP when your client already routes tz_* tools."
         ]
     })
 }
@@ -396,6 +421,17 @@ Stdout is data. Stderr is diagnostics. JSON commands include `schema_version` or
 `tokenzero codemode` runs JS-like plans against the TokenZero engine (`zero.read`, `zero.find`, `zero.compact`, etc.). Discovery helpers: `tokenzero codemode 'search:read'` and `tokenzero codemode 'describe:zero.read'`.
 
 Cache boundary: CodeMode defaults to a dedicated recovery file (`codemode-recovery.json` under `.tokenzero/` or `.zerostack/tokenzero/`). Refs created inside a CodeMode plan round-trip within that plan, but `tokenzero expand` / MCP use the main `recovery-cache.json` unless you pass the same `--cache-path` to both surfaces.
+
+## When to use MCP vs CodeMode
+
+| Goal | Prefer |
+|------|--------|
+| Standard MCP client integration (Claude Desktop, Cursor, etc.) | Per-tool MCP (`tz_read`, `tz_find`, …) |
+| One round trip for a composed workflow (read → search → compact) | CodeMode (`tokenzero codemode` or `tz_codemode`) |
+| Progressive method discovery in-plan | CodeMode `search:` / `describe:` prefixes |
+| Minimal change to an existing MCP harness | Keep MCP; CodeMode is additive |
+
+MCP is the default integration surface. CodeMode is an upgraded workflow pattern for harnesses that can run a short JS-like plan — same TokenZero engine, fewer tokens and fewer round trips when steps depend on each other.
 "#
 }
 
@@ -416,11 +452,12 @@ tokenzero doctor status --json
 tokenzero pulse stats --json
 tokenzero install status --json
 tokenzero codemode --json --plan 'await zero.compact("payload")'
+tokenzero codemode 'search:read'
 ```
 
 Recoveries: `capability`, `capabilites`, `robot-help`, `--robot-help`, `rn`, `shell`, `search`, `--jsno`, `--jason`, `--timout`, `cache statuz`, `doctor status`, `doctor statuz`, `pulse stats`, `pulse status`, `install plan`, and `install status` redirect to safe canonical surfaces.
 
-CodeMode uses `codemode-recovery.json` by default; share `--cache-path` with `expand`/MCP when refs must cross surfaces.
+CodeMode uses `codemode-recovery.json` by default; share `--cache-path` with `expand`/MCP when refs must cross surfaces. MCP clients can call `tz_codemode` with the same plan string.
 "#
 }
 
@@ -437,8 +474,10 @@ tokenzero run --json -- cargo test -p tokenzero
 tokenzero doctor status --json
 tokenzero pulse stats --json
 tokenzero install status --json
+tokenzero codemode --json --plan 'const t = await zero.read("README.md"); return t'
 ```
 
 For `run`, inspect `telemetry.command_success`, `telemetry.failed_segment`, and `telemetry.pipeline_rerun_command`.
+For CodeMode, inspect the `value` field in the JSON envelope; use `search:` / `describe:` for in-plan discovery.
 "#
 }

@@ -11,6 +11,5 @@ mod result;
 #[cfg(test)]
 mod tests;
 
-pub use result::CodeModeStatus;
-pub(crate) use result::CodeModeOptions;
-pub(crate) use exec::execute_codemode_with_options;
+pub use exec::execute_codemode_with_options;
+pub use result::{CodeModeOptions, CodeModeResult, CodeModeStatus, CODEMODE_SCHEMA};

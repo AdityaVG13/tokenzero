@@ -5,9 +5,9 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 use tokenzero_core::{Mode, ToolResponse, count_tokens, detect_content_type};
-use tokenzero_mcp::{EditHunk, EngineConfig, TokenZeroEngine, shell_timeout_from_secs};
+use crate::{EditHunk, EngineConfig, TokenZeroEngine, shell_timeout_from_secs};
 
-use crate::zerostack_store::{default_codemode_recovery_cache_path, allowed_roots_for_workspace, tokenzero_work_root};
+use crate::workspace::{allowed_roots_for_workspace, default_codemode_recovery_cache_path, tokenzero_work_root};
 
 use super::catalog::{describe_method, search_catalog};
 use super::parser::{MethodCall, Statement, parse_plan, resolve_expr, resolve_return};
@@ -38,7 +38,7 @@ pub fn execute_codemode(plan: &str) -> CodeModeResult {
     execute_codemode_with_options(plan, CodeModeOptions::default())
 }
 
-pub(crate) fn execute_codemode_with_options(
+pub fn execute_codemode_with_options(
     plan: &str,
     options: CodeModeOptions,
 ) -> CodeModeResult {

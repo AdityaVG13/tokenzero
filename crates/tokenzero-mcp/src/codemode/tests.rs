@@ -239,7 +239,7 @@ fn codemode_engine_uses_dedicated_cache_and_repo_scope() {
     assert_eq!(engine.config.allowed_roots, vec![root.clone()]);
     assert_eq!(
         engine.config.cache_path,
-        crate::zerostack_store::default_codemode_recovery_cache_path(&root)
+        crate::workspace::default_codemode_recovery_cache_path(&root)
     );
     assert!(engine.config.cache_path.ends_with("codemode-recovery.json"));
 }

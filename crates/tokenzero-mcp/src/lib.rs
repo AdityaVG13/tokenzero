@@ -6,6 +6,7 @@
 mod cache_maintenance;
 mod cache_pack;
 mod catalog;
+mod codemode;
 mod collect;
 mod config;
 mod diff;
@@ -31,9 +32,13 @@ mod session;
 mod stdio;
 mod supervisor;
 mod tools;
+mod workspace;
 
 pub use cache_maintenance::{cache_maintenance, session_pack, shell_spill_dir};
 pub use catalog::{ResourceSpec, ToolSpec, resource_specs, tool_specs};
+pub use codemode::{
+    execute_codemode_with_options, CodeModeOptions, CodeModeResult, CodeModeStatus, CODEMODE_SCHEMA,
+};
 pub use jsonrpc::handle_jsonrpc;
 pub use render::{cli_json, render_text};
 pub use stdio::run_stdio;

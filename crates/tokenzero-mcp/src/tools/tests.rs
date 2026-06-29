@@ -1,6 +1,29 @@
 use super::*;
 
 #[test]
+fn codemode_search_prefix_via_mcp_tool() {
+    let dir = tempfile::tempdir().unwrap();
+    let engine = crate::TokenZeroEngine::new(crate::EngineConfig::for_root(dir.path()));
+    let result = call_tool(
+        &engine,
+        "tz_codemode",
+        &json!({"plan": "search:read"}),
+        None,
+    )
+    .unwrap();
+    let text = result["content"][0]["text"].as_str().unwrap();
+    assert!(text.contains("zero.read"), "{text}");
+    assert_eq!(result.get("isError"), None);
+}
+
+#[test]
+fn codemode_rejects_missing_plan() {
+    let dir = tempfile::tempdir().unwrap();
+    let engine = crate::TokenZeroEngine::new(crate::EngineConfig::for_root(dir.path()));
+    assert!(call_tool(&engine, "codemode", &json!({}), None).is_err());
+}
+
+#[test]
 fn batch_combines_ops_with_sections_and_unioned_refs() {
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(dir.path().join("a.txt"), "alpha contents\n").unwrap();

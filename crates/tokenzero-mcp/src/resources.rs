@@ -41,7 +41,14 @@ pub(crate) fn read_resource(
                 "cache_pack": "tz_cache_pack",
                 "cache-pack": "tz_cache_pack",
                 "rewrite": "tz_rewrite",
-                "discover": "tz_discover"
+                "discover": "tz_discover",
+                "codemode": "tz_codemode"
+            },
+            "codemode": {
+                "schema": "tokenzero.codemode.v1",
+                "mcp_tool": "tz_codemode",
+                "cli": "tokenzero codemode --json --plan '<plan>'",
+                "note": "Additive to per-tool MCP; compose multi-step plans when round trips matter."
             },
             "resources": resource_specs(),
             "next_actions": [

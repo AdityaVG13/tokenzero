@@ -36,12 +36,12 @@ pub struct CodeModeTelemetry {
 }
 
 #[derive(Debug, Clone)]
-pub(crate) struct CodeModeOptions {
-    pub(crate) root: Option<PathBuf>,
-    pub(crate) allowed_roots: Vec<PathBuf>,
-    pub(crate) cache_path: Option<PathBuf>,
-    pub(crate) max_visible_tokens: usize,
-    pub(crate) timeout_seconds: Option<u64>,
+pub struct CodeModeOptions {
+    pub root: Option<PathBuf>,
+    pub allowed_roots: Vec<PathBuf>,
+    pub cache_path: Option<PathBuf>,
+    pub max_visible_tokens: usize,
+    pub timeout_seconds: Option<u64>,
 }
 
 impl Default for CodeModeOptions {
@@ -57,7 +57,7 @@ impl Default for CodeModeOptions {
 }
 
 impl CodeModeResult {
-    pub(crate) fn completed(value: Value, refs: Vec<String>, ops: usize, visible: usize, raw: usize) -> Self {
+    pub fn completed(value: Value, refs: Vec<String>, ops: usize, visible: usize, raw: usize) -> Self {
         Self {
             schema: CODEMODE_SCHEMA,
             status: CodeModeStatus::Completed,
@@ -72,7 +72,7 @@ impl CodeModeResult {
         }
     }
 
-    pub(crate) fn error(msg: impl Into<String>, ops: usize) -> Self {
+    pub fn error(msg: impl Into<String>, ops: usize) -> Self {
         Self {
             schema: CODEMODE_SCHEMA,
             status: CodeModeStatus::Error,

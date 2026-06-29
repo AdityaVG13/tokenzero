@@ -16,12 +16,12 @@ use tokenzero_core::{
 };
 use tokenzero_filters::{discover, rewrite_command};
 use tokenzero_install as install;
+use tokenzero_mcp::{CodeModeOptions, CodeModeStatus, execute_codemode_with_options};
 
 mod agent_surfaces;
 mod artifact_contracts;
 mod claim_actions;
 mod cli_args;
-mod codemode;
 mod competitor_adapters;
 mod completion_handoff;
 mod hook;
@@ -228,9 +228,9 @@ fn main() -> Result<()> {
             args.json,
         )?,
         Commands::CodeMode(args) => {
-            let result = codemode::execute_codemode_with_options(
+            let result = execute_codemode_with_options(
                 args.plan_text(),
-                codemode::CodeModeOptions {
+                CodeModeOptions {
                     root: args.root.clone(),
                     allowed_roots: args.allowed_root.clone(),
                     cache_path: args.cache_path.clone(),
@@ -238,7 +238,7 @@ fn main() -> Result<()> {
                     timeout_seconds: args.timeout_seconds,
                 },
             );
-            let failed = result.status == codemode::CodeModeStatus::Error;
+            let failed = result.status == CodeModeStatus::Error;
             if args.json {
                 println!("{}", serde_json::to_string(&result)?);
             } else {
