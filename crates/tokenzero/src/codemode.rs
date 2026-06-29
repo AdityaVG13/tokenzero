@@ -1096,13 +1096,19 @@ fn exec_edit(engine: &TokenZeroEngine, args: &[Value]) -> Result<Value, Box<Code
             )));
         }
     };
-    let edits: Vec<EditHunk> = edits_val
-        .iter()
-        .filter_map(|v| serde_json::from_value(v.clone()).ok())
-        .collect();
+    let mut edits = Vec::with_capacity(edits_val.len());
+    for (idx, value) in edits_val.iter().enumerate() {
+        let hunk: EditHunk = serde_json::from_value(value.clone()).map_err(|err| {
+            Box::new(CodeModeResult::error(
+                format!("zero.edit: invalid hunk at index {idx}: {err}"),
+                0,
+            ))
+        })?;
+        edits.push(hunk);
+    }
     if edits.is_empty() {
         return Err(Box::new(CodeModeResult::error(
-            "zero.edit: no valid hunks parsed from edits array",
+            "zero.edit: no edit hunks provided",
             0,
         )));
     }
@@ -1116,9 +1122,25 @@ fn exec_edit(engine: &TokenZeroEngine, args: &[Value]) -> Result<Value, Box<Code
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
 
-    let resp = engine.edit(&path, &edits, create, dry_run, Mode::Auto, 4000);
+    let resp = engine.edit(
+        &path,
+        &edits,
+        create,
+        dry_run,
+        Mode::Auto,
+        engine.config.max_visible_tokens,
+    );
+    let hunks_applied = if resp.status == "ok" {
+        resp.telemetry
+            .as_ref()
+            .and_then(|t| t.get("hunks"))
+            .and_then(|v| v.as_u64())
+            .unwrap_or(edits.len() as u64)
+    } else {
+        0
+    };
     let mut val = tool_response_to_value(&resp);
-    val["hunks_applied"] = json!(edits.len());
+    val["hunks_applied"] = json!(hunks_applied);
     Ok(val)
 }
 
@@ -1297,6 +1319,7 @@ fn execute_plan_in_token(plan: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
 
     #[test]
     fn empty_plan_returns_error() {
@@ -1426,6 +1449,49 @@ mod tests {
             crate::zerostack_store::default_codemode_recovery_cache_path(&root)
         );
         assert!(engine.config.cache_path.ends_with("codemode-recovery.json"));
+    }
+
+    #[test]
+    fn edit_rejects_partially_invalid_hunks_without_writing() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("sample.txt");
+        fs::write(&path, "hello\n").unwrap();
+        let engine = make_engine_for_root(dir.path().to_path_buf());
+        let args = vec![
+            serde_json::json!(path.to_string_lossy().to_string()),
+            serde_json::json!([
+                {"find": "hello", "replace": "bye"},
+                {"find": "hello"}
+            ]),
+        ];
+
+        let err = exec_edit(&engine, &args).unwrap_err();
+        assert!(
+            err.error
+                .as_deref()
+                .unwrap()
+                .contains("invalid hunk at index 1"),
+            "{:?}",
+            err.error
+        );
+        assert_eq!(fs::read_to_string(&path).unwrap(), "hello\n");
+    }
+
+    #[test]
+    fn edit_reports_zero_hunks_applied_on_engine_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("sample.txt");
+        fs::write(&path, "hello\n").unwrap();
+        let engine = make_engine_for_root(dir.path().to_path_buf());
+        let args = vec![
+            serde_json::json!(path.to_string_lossy().to_string()),
+            serde_json::json!([{ "find": "missing", "replace": "bye" }]),
+        ];
+
+        let val = exec_edit(&engine, &args).unwrap();
+        assert_eq!(val["status"], "error");
+        assert_eq!(val["hunks_applied"], 0);
+        assert_eq!(fs::read_to_string(&path).unwrap(), "hello\n");
     }
 
     #[test]
