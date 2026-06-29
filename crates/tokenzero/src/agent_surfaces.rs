@@ -390,6 +390,12 @@ Stdout is data. Stderr is diagnostics. JSON commands include `schema_version` or
 ## Safe Mutation Defaults
 
 `tokenzero install` defaults to a plan. Use `tokenzero install --plan --json` before any `--apply`. `tokenzero cache prune --json` is a dry run unless `--apply` is supplied.
+
+## CodeMode
+
+`tokenzero codemode` runs JS-like plans against the TokenZero engine (`zero.read`, `zero.find`, `zero.compact`, etc.). Discovery helpers: `tokenzero codemode 'search:read'` and `tokenzero codemode 'describe:zero.read'`.
+
+Cache boundary: CodeMode defaults to a dedicated recovery file (`codemode-recovery.json` under `.tokenzero/` or `.zerostack/tokenzero/`). Refs created inside a CodeMode plan round-trip within that plan, but `tokenzero expand` / MCP use the main `recovery-cache.json` unless you pass the same `--cache-path` to both surfaces.
 "#
 }
 
@@ -409,9 +415,12 @@ tokenzero doctor --json
 tokenzero doctor status --json
 tokenzero pulse stats --json
 tokenzero install status --json
+tokenzero codemode --json --plan 'await zero.compact("payload")'
 ```
 
 Recoveries: `capability`, `capabilites`, `robot-help`, `--robot-help`, `rn`, `shell`, `search`, `--jsno`, `--jason`, `--timout`, `cache statuz`, `doctor status`, `doctor statuz`, `pulse stats`, `pulse status`, `install plan`, and `install status` redirect to safe canonical surfaces.
+
+CodeMode uses `codemode-recovery.json` by default; share `--cache-path` with `expand`/MCP when refs must cross surfaces.
 "#
 }
 

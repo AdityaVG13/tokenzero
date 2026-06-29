@@ -101,7 +101,11 @@ pub(crate) enum Commands {
     ExactRecoveryAudit(ExactRecoveryAuditArgs),
     #[command(
         name = "codemode",
-        about = "Run a CodeMode-style plan for the TokenZero zero.token.* surface"
+        about = "Run a CodeMode-style plan for the TokenZero zero.token.* surface",
+        long_about = "Execute JS-like CodeMode plans (zero.read, zero.compact, zero.shell, ...).\n\n\
+            Discovery: tokenzero codemode 'search:read' | tokenzero codemode 'describe:zero.read'\n\n\
+            Cache: defaults to codemode-recovery.json (separate from MCP/CLI recovery-cache.json). \
+            Pass the same --cache-path to codemode and expand when refs must cross surfaces."
     )]
     CodeMode(CodeModeArgs),
     #[command(name = "harm-eval")]
