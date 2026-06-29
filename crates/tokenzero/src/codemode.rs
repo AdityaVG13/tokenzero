@@ -437,11 +437,15 @@ fn parse_expr(s: &str) -> Result<Expr, String> {
         return Ok(Expr::FloatLit(n));
     }
 
-    if (s.starts_with('"') && s.ends_with('"'))
-        || (s.starts_with('\'') && s.ends_with('\''))
-        || (s.starts_with('`') && s.ends_with('`'))
+    if s.len() >= 2
+        && ((s.starts_with('"') && s.ends_with('"'))
+            || (s.starts_with('\'') && s.ends_with('\''))
+            || (s.starts_with('`') && s.ends_with('`')))
     {
         return Ok(Expr::StringLit(unescape_string(&s[1..s.len() - 1])));
+    }
+    if matches!(s, "\"" | "'" | "`") {
+        return Err(format!("unterminated string literal: {s}"));
     }
 
     if s.starts_with('[') && s.ends_with(']') {
@@ -1334,6 +1338,13 @@ fn execute_plan_in_token(plan: &str) -> String {
 mod tests {
     use super::*;
     use std::fs;
+
+    #[test]
+    fn parser_rejects_lone_quote_without_panicking() {
+        let err = parse_expr("\"").unwrap_err();
+        assert!(err.contains("unterminated string literal"));
+        assert!(parse_plan("return \"").is_err());
+    }
 
     #[test]
     fn parser_object_numeric_options_resolve_as_u64() {
