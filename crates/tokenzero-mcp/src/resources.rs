@@ -3,6 +3,7 @@ use tokenzero_core::MCP_SCHEMA_VERSION;
 
 use crate::TokenZeroEngine;
 use crate::catalog::{canonical_tool_names_for_surface, resource_specs, tool_clusters, tool_docs};
+use crate::codemode::catalog::codemode_method_catalog;
 use crate::jsonrpc::{JsonRpcErrorData, SUPPORTED_PROTOCOL_VERSIONS, tool_filter_discovery};
 
 pub(crate) fn read_resource(
@@ -58,6 +59,7 @@ pub(crate) fn read_resource(
                 "Inspect tool text output: shell reports command_success inline and other tools carry a refs: footer; set TOKENZERO_MCP_ENVELOPE=compact|full for structuredContent envelopes."
             ]
         }),
+        "resource://tokenzero/codemode" => codemode_method_catalog(),
         "resource://tokenzero/tools" => json!({
             "schema_version": MCP_SCHEMA_VERSION,
             "status": "ok",

@@ -5,9 +5,10 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 use tokenzero_core::{Mode, ToolResponse, count_tokens, detect_content_type};
-use crate::{EditHunk, EngineConfig, TokenZeroEngine, shell_timeout_from_secs};
+use tokenzero_filters::{discover, rewrite_command};
 
 use crate::workspace::{allowed_roots_for_workspace, default_recovery_cache_path, tokenzero_work_root};
+use crate::{EditHunk, EngineConfig, TokenZeroEngine, shell_timeout_from_secs};
 
 use super::catalog::{describe_method, search_catalog};
 use super::parser::{MethodCall, Statement, parse_plan, resolve_expr, resolve_return};
@@ -149,6 +150,12 @@ fn dispatch(
         "zero.token.compact" | "zero.compact" | "compact" => exec_compact(engine, &args),
         "zero.ingest" | "ingest" => exec_ingest(engine, &args),
         "zero.mem" | "mem" => exec_mem(engine),
+        "zero.recall" | "recall" => exec_recall(engine, &args),
+        "zero.fetch" | "fetch" => exec_fetch(engine, &args),
+        "zero.cache_pack" | "cache_pack" | "cache-pack" => exec_cache_pack(engine, &args),
+        "zero.rewrite" | "rewrite" => exec_rewrite(&args),
+        "zero.discover" | "discover" => exec_discover(),
+        "zero.batch" | "batch" => exec_batch(engine, &args),
         "codemode.search" | "search" => {
             let query = args.first().and_then(|v| v.as_str()).unwrap_or("");
             Ok(OpOutcome::from_catalog(search_catalog(query)))
@@ -556,6 +563,87 @@ fn exec_ingest(engine: &TokenZeroEngine, args: &[Value]) -> Result<OpOutcome, Bo
 fn exec_mem(engine: &TokenZeroEngine) -> Result<OpOutcome, Box<CodeModeResult>> {
     let resp = engine.mem();
     Ok(OpOutcome::from_tool_response(&resp))
+}
+
+fn exec_recall(engine: &TokenZeroEngine, args: &[Value]) -> Result<OpOutcome, Box<CodeModeResult>> {
+    let query = require_str_arg(args, 0, "zero.recall requires a query string as first argument")?;
+    let opts = Opts::from_arg(args, 1);
+    let mode = opts.mode_or("mode", Mode::Auto);
+    let max_hits = opts.usize("max_hits").unwrap_or(50);
+    let max_visible = opts
+        .usize("max_visible_tokens")
+        .unwrap_or(engine.config.max_visible_tokens);
+    let resp = engine.recall(query, max_hits, mode, max_visible);
+    Ok(OpOutcome::from_tool_response(&resp))
+}
+
+fn exec_fetch(engine: &TokenZeroEngine, args: &[Value]) -> Result<OpOutcome, Box<CodeModeResult>> {
+    let url = require_str_arg(args, 0, "zero.fetch requires an http(s) URL as first argument")?;
+    let opts = Opts::from_arg(args, 1);
+    let mode = opts.mode_or("mode", Mode::Auto);
+    let ttl_seconds = opts.usize("ttl_seconds");
+    let fresh = opts.bool("fresh").unwrap_or(false);
+    let max_visible = opts
+        .usize("max_visible_tokens")
+        .unwrap_or(engine.config.max_visible_tokens);
+    let resp = engine.fetch(url, ttl_seconds, fresh, mode, max_visible);
+    Ok(OpOutcome::from_tool_response(&resp))
+}
+
+fn exec_cache_pack(engine: &TokenZeroEngine, args: &[Value]) -> Result<OpOutcome, Box<CodeModeResult>> {
+    let opts = Opts::from_arg(args, 0);
+    let scope = opts.str("scope").unwrap_or("agent");
+    let resp = engine.cache_pack(scope);
+    Ok(OpOutcome::from_tool_response(&resp))
+}
+
+fn exec_rewrite(args: &[Value]) -> Result<OpOutcome, Box<CodeModeResult>> {
+    let command = require_str_arg(
+        args,
+        0,
+        "zero.rewrite requires a command string as first argument",
+    )?;
+    let opts = Opts::from_arg(args, 1);
+    let mode = opts.str("mode").unwrap_or("safe");
+    let value = serde_json::to_value(rewrite_command(command, mode, true)).map_err(|err| {
+        Box::new(CodeModeResult::error(format!("zero.rewrite failed: {err}"), 0))
+    })?;
+    Ok(OpOutcome::from_catalog(value))
+}
+
+fn exec_discover() -> Result<OpOutcome, Box<CodeModeResult>> {
+    Ok(OpOutcome::from_catalog(
+        serde_json::to_value(discover()).unwrap_or(Value::Null),
+    ))
+}
+
+fn exec_batch(engine: &TokenZeroEngine, args: &[Value]) -> Result<OpOutcome, Box<CodeModeResult>> {
+    let ops = match args.first() {
+        Some(Value::Array(items)) => items.clone(),
+        Some(Value::String(text)) => serde_json::from_str(text).map_err(|err| {
+            Box::new(CodeModeResult::error(
+                format!("zero.batch ops is not valid JSON: {err}"),
+                0,
+            ))
+        })?,
+        _ => {
+            return Err(Box::new(CodeModeResult::error(
+                "zero.batch requires an array of {tool, args} objects as first argument",
+                0,
+            )));
+        }
+    };
+    if ops.is_empty() {
+        return Err(Box::new(CodeModeResult::error(
+            "zero.batch requires at least one op",
+            0,
+        )));
+    }
+    let wrapped = json!({"ops": ops, "mode": "auto"});
+    match crate::tools::batch_response(engine, &wrapped) {
+        Ok(resp) => Ok(OpOutcome::from_tool_response(&resp)),
+        Err(error) => Err(Box::new(CodeModeResult::error(error.message_text(), 0))),
+    }
 }
 
 fn collect_refs(value: &Value, refs: &mut Vec<String>) {

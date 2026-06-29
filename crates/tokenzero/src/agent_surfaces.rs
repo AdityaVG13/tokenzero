@@ -357,7 +357,8 @@ pub fn capabilities_json() -> serde_json::Value {
             "`tokenzero doctor status --json`, `tokenzero pulse stats --json`, `tokenzero cache statuz --json`, and `tokenzero install plan --json` recover to safe read-side or plan surfaces.",
             "`tokenzero install status --json` recovers to `tokenzero clients detect --json`.",
             "Use `tokenzero run --json -- <command>` for command telemetry; inspect `command_success`, not only process exit.",
-            "Optional CodeMode: `tokenzero codemode --json --plan '<plan>'` or MCP `tz_codemode` for composed multi-step plans; keep using per-tool MCP when your client already routes tz_* tools."
+            "Read resource://tokenzero/codemode for the full CodeMode method catalog.",
+            "Install --surface codemode for the upgrade; --surface classic for per-tool MCP. See docs/codemode.md."
         ]
     })
 }

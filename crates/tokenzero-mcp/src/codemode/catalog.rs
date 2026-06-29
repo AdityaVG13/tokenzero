@@ -91,6 +91,42 @@ const METHOD_CATALOG: &[MethodDef] = &[
         signature: "zero.mem(): Promise<{ text: string }>",
     },
     MethodDef {
+        path: "zero.recall",
+        connector: "zero",
+        description: "Search payloads already stored in the recovery cache",
+        signature: "zero.recall(query: string, opts?: { max_hits?, mode?, max_visible_tokens? }): Promise<{ text: string, ref: string, status: string }>",
+    },
+    MethodDef {
+        path: "zero.fetch",
+        connector: "zero",
+        description: "Fetch an http(s) URL via curl with TTL cache and exact refs",
+        signature: "zero.fetch(url: string, opts?: { ttl_seconds?, fresh?, mode?, max_visible_tokens? }): Promise<{ text: string, ref: string, status: string }>",
+    },
+    MethodDef {
+        path: "zero.cache_pack",
+        connector: "zero",
+        description: "Build a daemonless prompt-cache pack with stable prefix and volatile refs",
+        signature: "zero.cache_pack(opts?: { scope? }): Promise<{ text: string, ref: string }>",
+    },
+    MethodDef {
+        path: "zero.rewrite",
+        connector: "zero",
+        description: "Plan a conservative shell command rewrite without executing it",
+        signature: "zero.rewrite(command: string, opts?: { mode? }): Promise<{ text: string }>",
+    },
+    MethodDef {
+        path: "zero.discover",
+        connector: "zero",
+        description: "Report TokenZero filter and runtime readiness metadata",
+        signature: "zero.discover(): Promise<{ filters: object, runtime: object }>",
+    },
+    MethodDef {
+        path: "zero.batch",
+        connector: "zero",
+        description: "Run several independent TokenZero ops in one step (max 16)",
+        signature: "zero.batch(ops: Array<{ tool: string, args: object }>): Promise<{ text: string, refs: string[] }>",
+    },
+    MethodDef {
         path: "codemode.search",
         connector: "codemode",
         description: "Search available methods by keyword",
@@ -155,4 +191,26 @@ pub(crate) fn describe_method(path: &str) -> Value {
             "available": METHOD_CATALOG.iter().map(|m| m.path).collect::<Vec<_>>(),
         })
     }
+}
+
+pub(crate) fn codemode_method_catalog() -> Value {
+    json!({
+        "schema_version": "tokenzero.codemode.catalog.v1",
+        "methods": METHOD_CATALOG.iter().map(|m| json!({
+            "path": m.path,
+            "connector": m.connector,
+            "description": m.description,
+            "signature": m.signature,
+        })).collect::<Vec<_>>(),
+        "discovery": {
+            "search_prefix": "search:<query>",
+            "describe_prefix": "describe:<method>",
+            "in_plan": ["codemode.search(query)", "codemode.describe(path)"]
+        },
+        "next_actions": [
+            "Call tz_codemode with plan search:read to rank methods by keyword.",
+            "Call tz_codemode with plan describe:zero.read for full signatures.",
+            "Compose multi-step workflows with const bindings and return."
+        ]
+    })
 }

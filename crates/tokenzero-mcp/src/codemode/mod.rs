@@ -3,7 +3,7 @@
 //! plans; the executor parses, dispatches through TokenZeroEngine, and returns
 //! only the final shaped result. Classic MCP and CodeMode are mutually exclusive install surfaces.
 
-mod catalog;
+pub(crate) mod catalog;
 mod exec;
 mod parser;
 mod result;

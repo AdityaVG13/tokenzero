@@ -4,6 +4,7 @@ use super::result::{CodeModeOptions, CodeModeResult, CodeModeStatus};
 use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
+use tokenzero_core::Mode;
 
 fn execute_plan_in_token(plan: &str) -> String {
 execute_codemode(plan).to_line()
@@ -339,6 +340,29 @@ fn expand_without_tz_prefix_is_rejected() {
     let r = execute_codemode(r#"await zero.expand("not-a-ref")"#);
     assert_eq!(r.status, CodeModeStatus::Error);
     assert!(r.error.as_ref().unwrap().contains("tz://"));
+}
+
+#[test]
+fn recall_method_is_discoverable_and_dispatchable() {
+    let r = execute_codemode("describe:zero.recall");
+    assert_eq!(r.status, CodeModeStatus::Completed);
+    assert!(r.value.as_ref().unwrap()["types"]
+        .as_str()
+        .unwrap()
+        .contains("zero.recall"));
+    let search = execute_codemode("search:recall");
+    assert!(search.value.as_ref().unwrap()["results"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|hit| hit["path"] == "zero.recall"));
+}
+
+#[test]
+fn codemode_method_catalog_resource_shape() {
+    let catalog = crate::codemode::catalog::codemode_method_catalog();
+    assert_eq!(catalog["schema_version"], "tokenzero.codemode.catalog.v1");
+    assert!(catalog["methods"].as_array().unwrap().iter().any(|m| m["path"] == "zero.recall"));
 }
 
 #[test]

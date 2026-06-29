@@ -193,6 +193,12 @@ pub fn resource_specs() -> Vec<ResourceSpec> {
             "application/json",
         ),
         (
+            "resource://tokenzero/codemode",
+            "TokenZero CodeMode catalog",
+            "Full CodeMode method catalog with signatures and discovery prefixes.",
+            "application/json",
+        ),
+        (
             "resource://tokenzero/cache",
             "TokenZero cache state",
             "Discover local recovery-cache and shell-output retention configuration without exposing payloads.",

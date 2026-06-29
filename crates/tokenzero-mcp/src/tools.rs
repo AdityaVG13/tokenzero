@@ -25,7 +25,12 @@ pub(crate) fn call_tool(
     let started = std::time::Instant::now();
     if canonical == "codemode" {
         let result = codemode_from_args(engine, args).map_err(JsonRpcErrorData::from)?;
-        engine.record_tool_call(canonical, started.elapsed(), result.status == CodeModeStatus::Error);
+        engine.record_tool_call(
+            canonical,
+            started.elapsed(),
+            result.status == CodeModeStatus::Error,
+        );
+        record_codemode_pulse(engine, &result, call_id, started.elapsed());
         return Ok(codemode_tool_response(result));
     }
     if !canonical_allowed_on_surface(engine.config.tool_surface, canonical) {
@@ -79,6 +84,34 @@ fn record_mcp_pulse(
     )
     .with_attribution(Some(engine.session_id().to_string()), call_id, ref_ids);
     event.failure = response.error.is_some();
+    let _ = tokenzero_pulse::record_event(&tokenzero_pulse::default_ledger_path(root), &event);
+}
+
+fn record_codemode_pulse(
+    engine: &TokenZeroEngine,
+    result: &CodeModeResult,
+    call_id: Option<String>,
+    elapsed: Duration,
+) {
+    let Some(root) = engine.config.allowed_roots.first() else {
+        return;
+    };
+    let mut event = tokenzero_pulse::PulseEvent::tool_call(
+        "codemode",
+        "plan",
+        result.telemetry.raw_tokens,
+        result.telemetry.visible_tokens,
+        0,
+        result.refs.len(),
+        elapsed.as_millis(),
+        None,
+    )
+    .with_attribution(
+        Some(engine.session_id().to_string()),
+        call_id,
+        result.refs.clone(),
+    );
+    event.failure = result.status == CodeModeStatus::Error;
     let _ = tokenzero_pulse::record_event(&tokenzero_pulse::default_ledger_path(root), &event);
 }
 
@@ -274,15 +307,11 @@ fn dispatch_tool(
     Ok(response)
 }
 
-/// `tz_batch`: several read-side ops in one call — one combined capsule with
-/// per-op sections, unioned refs, and summed raw accounting. Best-effort: a
-/// failing op renders its error inline and the rest still run. Nested
-/// batches are rejected per op.
-fn batch_response(
+pub(crate) fn batch_response(
     engine: &TokenZeroEngine,
     args: &Value,
 ) -> Result<ToolResponse, JsonRpcErrorData> {
-    let ops = batch_ops(args)?;
+    let ops = batch_ops(args).map_err(JsonRpcErrorData::from)?;
     let mut sections = Vec::with_capacity(ops.len());
     let mut refs: Vec<tokenzero_core::RefRecord> = Vec::new();
     let mut listed: std::collections::HashSet<String> = std::collections::HashSet::new();
