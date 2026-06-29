@@ -2,11 +2,41 @@
 
 use std::path::{Path, PathBuf};
 
-/// Workspace root for TokenZero persistence (matches CLI `root_from` / CodeMode).
+/// Workspace root for TokenZero persistence (CLI, CodeMode, MCP).
 pub fn tokenzero_work_root(explicit_root: Option<PathBuf>) -> PathBuf {
     explicit_root
         .or_else(|| std::env::var_os("TOKENZERO_ROOT").map(PathBuf::from))
         .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")))
+}
+
+/// Default single-root allowlist for a workspace.
+pub fn default_allowed_roots(root: &Path) -> Vec<PathBuf> {
+    vec![root.to_path_buf()]
+}
+
+fn push_unique_path(paths: &mut Vec<PathBuf>, candidate: PathBuf) {
+    let candidate_cmp = candidate
+        .canonicalize()
+        .unwrap_or_else(|_| candidate.clone());
+    let exists = paths.iter().any(|path| {
+        path.canonicalize()
+            .unwrap_or_else(|_| path.clone())
+            == candidate_cmp
+    });
+    if !exists {
+        paths.push(candidate);
+    }
+}
+
+/// Merge explicit allowed roots with the workspace root, deduplicating by canonical path.
+pub fn allowed_roots_for_workspace(root: &Path, explicit: &[PathBuf]) -> Vec<PathBuf> {
+    let mut roots = if explicit.is_empty() {
+        default_allowed_roots(root)
+    } else {
+        explicit.to_vec()
+    };
+    push_unique_path(&mut roots, root.to_path_buf());
+    roots
 }
 
 fn zerostack_store_or_detect(repo_root: &Path) -> Option<PathBuf> {

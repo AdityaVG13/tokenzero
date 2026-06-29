@@ -7,7 +7,7 @@ use std::time::Duration;
 use tokenzero_core::{Mode, ToolResponse, count_tokens, detect_content_type};
 use tokenzero_mcp::{EditHunk, EngineConfig, TokenZeroEngine, shell_timeout_from_secs};
 
-use crate::zerostack_store::{default_codemode_recovery_cache_path, tokenzero_work_root};
+use crate::zerostack_store::{default_codemode_recovery_cache_path, allowed_roots_for_workspace, tokenzero_work_root};
 
 use super::catalog::{describe_method, search_catalog};
 use super::parser::{MethodCall, Statement, parse_plan, resolve_expr, resolve_return};
@@ -24,25 +24,13 @@ fn make_engine_for_root_with_options(root: PathBuf, options: &CodeModeOptions) -
         .clone()
         .unwrap_or_else(|| default_codemode_recovery_cache_path(&root));
     TokenZeroEngine::new(EngineConfig {
-        allowed_roots: codemode_allowed_roots(&root, &options.allowed_roots),
+        allowed_roots: allowed_roots_for_workspace(&root, &options.allowed_roots),
         cache_path,
         max_visible_tokens: options.max_visible_tokens,
         mode: Mode::Auto,
         shell_timeout: shell_timeout_from_secs(options.timeout_seconds),
         ..EngineConfig::for_root(&root)
     })
-}
-
-fn codemode_allowed_roots(root: &Path, explicit: &[PathBuf]) -> Vec<PathBuf> {
-    let mut roots = if explicit.is_empty() {
-        vec![root.to_path_buf()]
-    } else {
-        explicit.to_vec()
-    };
-    if !roots.iter().any(|candidate| candidate == root) {
-        roots.push(root.to_path_buf());
-    }
-    roots
 }
 
 #[cfg(test)]
