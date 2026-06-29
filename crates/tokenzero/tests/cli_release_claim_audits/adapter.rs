@@ -3,8 +3,6 @@ use serde_json::Value;
 use std::process::Command;
 use tempfile::tempdir;
 
-
-
 #[test]
 fn cli_claim_audit_requires_adapter_approval_artifact_for_public_claims() {
     let dir = tempdir().unwrap();

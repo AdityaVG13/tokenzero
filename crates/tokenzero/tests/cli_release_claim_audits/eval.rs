@@ -3,8 +3,6 @@ use serde_json::Value;
 use std::process::Command;
 use tempfile::tempdir;
 
-
-
 #[test]
 fn cli_one_shot_eval_reports_zero_critical_misses_with_refs() {
     let dir = tempdir().unwrap();

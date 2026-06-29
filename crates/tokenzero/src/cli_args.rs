@@ -99,6 +99,11 @@ pub(crate) enum Commands {
     ExactRecoveryShell(ExactRecoveryShellArgs),
     #[command(name = "exact-recovery-audit")]
     ExactRecoveryAudit(ExactRecoveryAuditArgs),
+    #[command(
+        name = "codemode",
+        about = "Run CodeMode plan for token.* surface (compact, expand, refs; Cloudflare-style)"
+    )]
+    CodeMode(CodeModeArgs),
     #[command(name = "harm-eval")]
     HarmEval(ArtifactArgs),
     #[command(name = "protected-anchor-audit")]
@@ -967,6 +972,27 @@ pub(crate) struct QuoteArgs {
     pub(crate) args: Vec<String>,
     #[arg(long)]
     pub(crate) json: bool,
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct CodeModeArgs {
+    /// CodeMode plan (JS-style zero.token.compact / expand) as a positional argument.
+    #[arg(value_name = "PLAN")]
+    pub(crate) plan: Option<String>,
+    /// CodeMode plan as an explicit flag; kept for router compatibility.
+    #[arg(short = 'p', long = "plan", value_name = "PLAN")]
+    pub(crate) plan_flag: Option<String>,
+    #[arg(long)]
+    pub(crate) json: bool,
+}
+
+impl CodeModeArgs {
+    pub(crate) fn plan_text(&self) -> &str {
+        self.plan_flag
+            .as_deref()
+            .or(self.plan.as_deref())
+            .unwrap_or("")
+    }
 }
 
 #[cfg(test)]

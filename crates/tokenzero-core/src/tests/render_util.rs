@@ -1,6 +1,5 @@
 use super::*;
 
-
 #[test]
 fn summarize_tokens_keeps_critical_lines_even_over_budget() {
     let mut lines: Vec<String> = (0..300).map(|idx| format!("noise line {idx}")).collect();

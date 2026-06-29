@@ -5,8 +5,6 @@ use tempfile::tempdir;
 
 use super::common::*;
 
-
-
 #[test]
 fn cli_claim_audit_blocks_public_claims_without_release_approval() {
     let dir = tempdir().unwrap();

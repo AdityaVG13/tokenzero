@@ -1,7 +1,10 @@
 use super::*;
 
-
-pub(crate) fn success_input<'a>(command: &'a str, stdout: &'a str, stderr: &'a str) -> ShellRenderInput<'a> {
+pub(crate) fn success_input<'a>(
+    command: &'a str,
+    stdout: &'a str,
+    stderr: &'a str,
+) -> ShellRenderInput<'a> {
     ShellRenderInput {
         command,
         stdout,

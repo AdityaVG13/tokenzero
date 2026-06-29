@@ -5,7 +5,6 @@ use tokenzero_core::MCP_SCHEMA_VERSION;
 
 use super::support::*;
 
-
 #[test]
 fn edit_applies_multi_hunk_batches_byte_exact() {
     let dir = tempdir().unwrap();

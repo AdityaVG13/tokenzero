@@ -5,7 +5,6 @@ use tokenzero_core::MCP_SCHEMA_VERSION;
 
 use super::support::*;
 
-
 #[test]
 fn passthrough_zero_matches_keeps_verbatim_empty_payload() {
     let dir = tempdir().unwrap();

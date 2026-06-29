@@ -2,7 +2,6 @@ use super::*;
 
 use super::support::*;
 
-
 #[test]
 fn repeat_render_collapses_verified_unchanged_success() {
     let stdout = (0..40)

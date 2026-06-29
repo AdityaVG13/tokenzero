@@ -2,7 +2,6 @@ use super::*;
 
 use super::support::*;
 
-
 #[test]
 fn cargo_cold_build_success_collapses_compile_noise_into_counts() {
     let stderr = (0..50)

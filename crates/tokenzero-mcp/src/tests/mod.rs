@@ -3,8 +3,6 @@ use std::sync::Arc;
 use tempfile::tempdir;
 use tokenzero_core::MCP_SCHEMA_VERSION;
 
-
-mod support;
 mod edit;
 mod expand;
 mod fetch;
@@ -14,3 +12,4 @@ mod read;
 mod search;
 mod session;
 mod shell;
+mod support;

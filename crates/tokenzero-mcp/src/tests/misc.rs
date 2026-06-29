@@ -5,7 +5,6 @@ use tokenzero_core::MCP_SCHEMA_VERSION;
 
 use super::support::*;
 
-
 #[test]
 fn engine_construction_reclaims_orphan_tmp_and_aged_spills() {
     let dir = tempdir().unwrap();

@@ -5,7 +5,6 @@ use tokenzero_core::MCP_SCHEMA_VERSION;
 
 use super::support::*;
 
-
 #[test]
 fn malformed_json_returns_error_and_does_not_panic() {
     let dir = tempdir().unwrap();
@@ -13,7 +12,6 @@ fn malformed_json_returns_error_and_does_not_panic() {
     let response = handle_jsonrpc(&engine, "{bad").unwrap();
     assert!(response.contains("Parse error"));
 }
-
 
 #[test]
 fn tools_list_includes_aliases() {

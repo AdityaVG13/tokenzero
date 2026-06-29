@@ -21,6 +21,7 @@ mod agent_surfaces;
 mod artifact_contracts;
 mod claim_actions;
 mod cli_args;
+mod codemode;
 mod competitor_adapters;
 mod completion_handoff;
 mod hook;
@@ -28,6 +29,7 @@ mod mcp_artifact;
 mod reach;
 mod release_claims;
 mod source_currency;
+mod zerostack_store;
 use agent_surfaces::{capabilities_json, robot_docs_guide};
 use artifact_contracts::{json_artifact_path, release_candidate_id};
 use cli_args::*;
@@ -49,6 +51,7 @@ use tokenzero_runtime::{
     ExecutionMode, contains_platform_shell_syntax, env_map, plan_command_for_platform, quote_for,
     split_command_string,
 };
+use zerostack_store::resolve_recovery_cache_path;
 
 fn main() -> Result<()> {
     let cli = Cli::parse_from(normalize_agent_invocation_args(std::env::args_os()));
@@ -221,6 +224,14 @@ fn main() -> Result<()> {
             run_ws_skeleton(args.output_json, args.output_md)?,
             args.json,
         )?,
+        Commands::CodeMode(args) => {
+            let result = codemode::execute_codemode(args.plan_text());
+            if args.json {
+                println!("{}", serde_json::to_string(&result)?);
+            } else {
+                println!("{}", result.to_line());
+            }
+        }
         Commands::Quote(args) => handle_quote(args)?,
     }
     Ok(())
@@ -696,10 +707,7 @@ fn handle_expand(args: ExpandArgs) -> Result<EmitResponse> {
     let root = root_from(None);
     let config = EngineConfig {
         allowed_roots: default_allowed_roots(&root),
-        cache_path: args
-            .cache_path
-            .clone()
-            .unwrap_or_else(|| root.join(".tokenzero/recovery-cache.json")),
+        cache_path: resolve_recovery_cache_path(&root, args.cache_path.clone()),
         max_visible_tokens: 4000,
         mode: Mode::Exact,
         shell_timeout: default_shell_timeout(),
@@ -978,9 +986,7 @@ fn handle_cache(args: CacheArgs) -> Result<()> {
         }
         CacheCommand::Prune(args) => {
             let root = root_from(args.root);
-            let cache = args
-                .cache_path
-                .unwrap_or_else(|| root.join(".tokenzero/recovery-cache.json"));
+            let cache = resolve_recovery_cache_path(&root, args.cache_path);
             let dry_run = !args.apply;
             let mut store = tokenzero_recovery::RecoveryStore::new(Some(cache.clone()));
             let mut report = store.prune_stale(dry_run)?;
@@ -995,10 +1001,7 @@ fn handle_cache_pack(args: CachePackArgs) -> Result<()> {
     let root = root_from(args.root.clone());
     let engine = TokenZeroEngine::new(EngineConfig {
         allowed_roots: default_allowed_roots(&root),
-        cache_path: args
-            .cache_path
-            .clone()
-            .unwrap_or_else(|| root.join(".tokenzero/recovery-cache.json")),
+        cache_path: resolve_recovery_cache_path(&root, args.cache_path.clone()),
         max_visible_tokens: 4000,
         mode: Mode::Structured,
         shell_timeout: default_shell_timeout(),
@@ -1223,10 +1226,7 @@ fn engine_from_tool(args: &ToolArgs) -> Result<TokenZeroEngine> {
     let root = root_from(None);
     Ok(TokenZeroEngine::new(EngineConfig {
         allowed_roots: tool_allowed_roots(&root, &args.allowed_root),
-        cache_path: args
-            .cache_path
-            .clone()
-            .unwrap_or_else(|| root.join(".tokenzero/recovery-cache.json")),
+        cache_path: resolve_recovery_cache_path(&root, args.cache_path.clone()),
         max_visible_tokens: args.budget.unwrap_or(4000),
         mode: parse_mode(&args.mode)?,
         shell_timeout: shell_timeout_from_secs(args.timeout_seconds),
@@ -1239,10 +1239,7 @@ fn engine_from_common(args: &CommonArgs) -> TokenZeroEngine {
     let root = root_from(args.root.clone());
     TokenZeroEngine::new(EngineConfig {
         allowed_roots: default_allowed_roots(&root),
-        cache_path: args
-            .cache_path
-            .clone()
-            .unwrap_or_else(|| root.join(".tokenzero/recovery-cache.json")),
+        cache_path: resolve_recovery_cache_path(&root, args.cache_path.clone()),
         max_visible_tokens: 4000,
         mode: Mode::Auto,
         shell_timeout: default_shell_timeout(),
@@ -1259,10 +1256,7 @@ fn engine_config_for_mcp(args: &McpServerArgs) -> Result<EngineConfig> {
         } else {
             args.allowed_root.clone()
         },
-        cache_path: args
-            .cache_path
-            .clone()
-            .unwrap_or_else(|| root.join(".tokenzero/recovery-cache.json")),
+        cache_path: resolve_recovery_cache_path(&root, args.cache_path.clone()),
         max_visible_tokens: 4000,
         mode: parse_mode(&args.default_mode)?,
         shell_timeout: shell_timeout_from_secs(args.shell_timeout_seconds),

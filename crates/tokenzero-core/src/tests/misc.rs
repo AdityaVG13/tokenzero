@@ -1,6 +1,5 @@
 use super::*;
 
-
 #[test]
 fn long_labels_do_not_crowd_out_tiny_payloads() {
     let c = make_capsule(
@@ -26,7 +25,6 @@ fn line_and_symbol_selectors_work() {
     assert_eq!(line_range(text, 1, 2), "fn alpha() {\n  call();");
     assert!(symbol_block(text, "alpha").contains("call"));
 }
-
 
 #[test]
 fn mode_aliases_map_to_new_policy_names() {
