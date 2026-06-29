@@ -63,7 +63,7 @@ const METHOD_CATALOG: &[MethodDef] = &[
     MethodDef {
         path: "zero.token.compact",
         connector: "zero.token",
-        description: "Store arbitrary text/data behind a content-addressed tz://blob ref",
+        description: "Store arbitrary text/data behind a tz:// recovery ref via ingest",
         signature: "zero.token.compact(data: string): Promise<{ ref: string, raw_tokens: number }>",
     },
     MethodDef {
@@ -75,7 +75,7 @@ const METHOD_CATALOG: &[MethodDef] = &[
     MethodDef {
         path: "zero.compact",
         connector: "zero",
-        description: "Store arbitrary text/data behind a content-addressed tz://blob ref (compatibility alias for zero.token.compact)",
+        description: "Store arbitrary text/data behind a tz:// recovery ref via ingest (compatibility alias for zero.token.compact)",
         signature: "zero.compact(data: string): Promise<{ ref: string, raw_tokens: number }>",
     },
     MethodDef {

@@ -199,6 +199,8 @@ pub(crate) fn parse_expr(s: &str) -> Result<Expr, String> {
         return Ok(Expr::VarRef(s.to_string()));
     }
 
+    // Lenient fallback: unrecognized bare tokens become string literals so simple
+    // plan fragments degrade instead of failing early on minor syntax drift.
     Ok(Expr::StringLit(s.to_string()))
 }
 

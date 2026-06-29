@@ -156,4 +156,13 @@ mod tests {
         fs::write(&legacy, "{}\n").unwrap();
         assert_eq!(default_codemode_recovery_cache_path(root), legacy);
     }
+
+    #[test]
+    fn allowed_roots_dedupes_canonical_workspace_paths() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        let alias = dir.path().join(".");
+        let roots = allowed_roots_for_workspace(root, &[alias]);
+        assert_eq!(roots.len(), 1);
+    }
 }
