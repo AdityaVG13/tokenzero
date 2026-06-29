@@ -409,6 +409,7 @@ fn global_mcp_plan_can_target_grok_only() {
         true,
         &["mcp".to_string()],
         &["grok".to_string()],
+        McpToolSurface::Classic,
     );
     let paths: Vec<_> = report
         .writes
@@ -543,6 +544,7 @@ fn client_surface_inspection_rejects_tokenzero_substring_without_valid_toml_comm
         true,
         &["mcp".to_string()],
         &["codex".to_string()],
+        McpToolSurface::Classic,
     );
     let row = report
         .writes
@@ -564,6 +566,23 @@ fn client_surface_inspection_rejects_tokenzero_substring_without_valid_toml_comm
 }
 
 #[test]
+fn codemode_surface_install_writes_tool_surface_env() {
+    let dir = tempdir().unwrap();
+    apply_for_agents(
+        dir.path(),
+        true,
+        &["mcp".to_string()],
+        &["grok".to_string()],
+        McpToolSurface::Codemode,
+    )
+    .unwrap();
+    let path = dir.path().join(".grok/config.toml");
+    let text = fs::read_to_string(path).unwrap();
+    assert!(text.contains("TOKENZERO_MCP_TOOL_SURFACE"));
+    assert!(text.contains("codemode"));
+}
+
+#[test]
 fn client_surface_inspection_accepts_applied_grok_json_and_toml_configs() {
     let dir = tempdir().unwrap();
     apply_for_agents(
@@ -571,6 +590,7 @@ fn client_surface_inspection_accepts_applied_grok_json_and_toml_configs() {
         true,
         &["mcp".to_string()],
         &["grok".to_string()],
+        McpToolSurface::Classic,
     )
     .unwrap();
     let report = plan_for_agents(
@@ -578,6 +598,7 @@ fn client_surface_inspection_accepts_applied_grok_json_and_toml_configs() {
         true,
         &["mcp".to_string()],
         &["grok".to_string()],
+        McpToolSurface::Classic,
     );
     for suffix in [
         ".config/tokenzero/agents/grok.mcp.json",
@@ -734,7 +755,7 @@ fn hooks_plan_is_scoped_to_claude_agents() {
     let hooks = vec!["hooks".to_string()];
 
     for agents in [Vec::new(), vec!["claude".to_string()]] {
-        let report = plan_for_agents(dir.path(), true, &hooks, &agents);
+        let report = plan_for_agents(dir.path(), true, &hooks, &agents, McpToolSurface::Classic);
         assert!(
             report.writes.iter().any(|write| {
                 write
@@ -752,7 +773,7 @@ fn hooks_plan_is_scoped_to_claude_agents() {
 
     // The grok exclusion contract: agent-scoped plans for other agents
     // must never list a .claude path (mirrors cli_contract.rs).
-    let grok = plan_for_agents(dir.path(), true, &hooks, &["grok".to_string()]);
+    let grok = plan_for_agents(dir.path(), true, &hooks, &["grok".to_string()], McpToolSurface::Classic);
     assert!(
         !grok
             .writes
@@ -789,8 +810,8 @@ fn global_hooks_merge_preserves_foreign_hooks_and_is_idempotent() {
     let hooks = vec!["hooks".to_string()];
     let claude = vec!["claude".to_string()];
 
-    apply_for_agents(&root, true, &hooks, &claude).unwrap();
-    apply_for_agents(&root, true, &hooks, &claude).unwrap();
+    apply_for_agents(&root, true, &hooks, &claude, McpToolSurface::Classic).unwrap();
+    apply_for_agents(&root, true, &hooks, &claude, McpToolSurface::Classic).unwrap();
     let merged: Value = serde_json::from_str(&fs::read_to_string(&settings).unwrap()).unwrap();
 
     assert_eq!(merged["model"], "opus");
@@ -846,6 +867,7 @@ fn hooks_merge_rejects_invalid_settings_without_touching_the_file() {
         true,
         &["hooks".to_string()],
         &["claude".to_string()],
+        McpToolSurface::Classic,
     );
     assert!(result.is_err());
     // Phase 1 snapshots and merges before any write, so a parse failure
@@ -858,7 +880,7 @@ fn hooks_surface_inspection_reports_installed_after_apply() {
     let dir = tempdir().unwrap();
     let hooks = vec!["hooks".to_string()];
     let claude = vec!["claude".to_string()];
-    let report = plan_for_agents(dir.path(), true, &hooks, &claude);
+    let report = plan_for_agents(dir.path(), true, &hooks, &claude, McpToolSurface::Classic);
     let row = report
         .writes
         .iter()
@@ -868,7 +890,7 @@ fn hooks_surface_inspection_reports_installed_after_apply() {
     let before = inspect_client_surface(row, dir.path());
     assert_eq!(before.state, "missing");
 
-    apply_for_agents(dir.path(), true, &hooks, &claude).unwrap();
+    apply_for_agents(dir.path(), true, &hooks, &claude, McpToolSurface::Classic).unwrap();
     let after = inspect_client_surface(row, dir.path());
     assert_eq!(after.state, "installed", "{after:#?}");
     assert!(

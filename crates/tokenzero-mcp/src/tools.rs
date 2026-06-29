@@ -13,6 +13,7 @@ use crate::{
     CodeModeOptions, CodeModeResult, CodeModeStatus, EditHunk, ServeOptions, TokenZeroEngine,
     execute_codemode_with_options, shell_timeout_from_secs,
 };
+use crate::catalog::canonical_allowed_on_surface;
 
 pub(crate) fn call_tool(
     engine: &TokenZeroEngine,
@@ -26,6 +27,9 @@ pub(crate) fn call_tool(
         let result = codemode_from_args(engine, args).map_err(JsonRpcErrorData::from)?;
         engine.record_tool_call(canonical, started.elapsed(), result.status == CodeModeStatus::Error);
         return Ok(codemode_tool_response(result));
+    }
+    if !canonical_allowed_on_surface(engine.config.tool_surface, canonical) {
+        return Err(JsonRpcErrorData::unknown_tool(name));
     }
     let result = dispatch_tool(engine, canonical, name, args);
     engine.record_tool_call(canonical, started.elapsed(), result.is_err());
@@ -403,7 +407,8 @@ fn codemode_from_args(engine: &TokenZeroEngine, args: &Value) -> Result<CodeMode
     let cache_path = args
         .get("cache_path")
         .and_then(Value::as_str)
-        .map(PathBuf::from);
+        .map(PathBuf::from)
+        .or_else(|| Some(engine.config.cache_path.clone()));
     let timeout_seconds = arg_u64(args, "timeout_seconds").map(|seconds| seconds as u64);
     Ok(execute_codemode_with_options(
         plan,

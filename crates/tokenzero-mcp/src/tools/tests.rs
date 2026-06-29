@@ -1,6 +1,26 @@
 use super::*;
 
 #[test]
+fn codemode_surface_lists_only_codemode_tools() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut config = crate::EngineConfig::for_root(dir.path());
+    config.tool_surface = tokenzero_core::McpToolSurface::Codemode;
+    let engine = crate::TokenZeroEngine::new(config);
+    let result = call_tool(
+        &engine,
+        "tz_read",
+        &json!({"path": "README.md"}),
+        None,
+    );
+    assert!(result.is_err());
+    let list = crate::catalog::tool_specs_for_filter(None, true, tokenzero_core::McpToolSurface::Codemode);
+    let names: Vec<_> = list.iter().map(|tool| tool.name.as_str()).collect();
+    assert!(names.contains(&"tz_codemode"));
+    assert!(names.contains(&"tz_expand"));
+    assert!(!names.contains(&"tz_read"));
+}
+
+#[test]
 fn codemode_search_prefix_via_mcp_tool() {
     let dir = tempfile::tempdir().unwrap();
     let engine = crate::TokenZeroEngine::new(crate::EngineConfig::for_root(dir.path()));

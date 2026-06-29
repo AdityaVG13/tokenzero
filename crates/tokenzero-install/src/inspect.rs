@@ -1,4 +1,5 @@
 use crate::*;
+use tokenzero_core::McpToolSurface;
 
 pub fn inspect_client_surface(write: &InstallWrite, root: &Path) -> ClientSurfaceStatus {
     let path = PathBuf::from(&write.path);
@@ -314,6 +315,8 @@ pub(crate) fn json_mcp_surface_checks(
             .and_then(Value::as_str),
         env.and_then(|env| env.get("TOKENZERO_CACHE_PATH"))
             .and_then(Value::as_str),
+        env.and_then(|env| env.get(McpToolSurface::ENV))
+            .and_then(Value::as_str),
         root,
         global,
     )
@@ -363,6 +366,8 @@ pub(crate) fn toml_mcp_surface_checks(
             .and_then(toml::Value::as_str),
         env.and_then(|env| env.get("TOKENZERO_CACHE_PATH"))
             .and_then(toml::Value::as_str),
+        env.and_then(|env| env.get(McpToolSurface::ENV))
+            .and_then(toml::Value::as_str),
         root,
         global,
     )
@@ -396,6 +401,7 @@ pub(crate) fn mcp_server_checks(
     args: Option<&[String]>,
     allowed_roots: Option<&str>,
     cache: Option<&str>,
+    tool_surface: Option<&str>,
     root: &Path,
     global: bool,
 ) -> Vec<ClientSurfaceCheck> {
@@ -403,6 +409,7 @@ pub(crate) fn mcp_server_checks(
     let expected_args = mcp_args(root);
     let expected_allowed_roots = root.display().to_string();
     let expected_cache = cache_path(root).display().to_string();
+    let parsed_surface = tool_surface.and_then(|value| value.parse::<McpToolSurface>().ok());
     vec![
         client_check(
             "mcp_tokenzero_server_present",
@@ -428,6 +435,14 @@ pub(crate) fn mcp_server_checks(
             "mcp_cache_path_match",
             path_str_matches(cache, &expected_cache),
             format!("expected {expected_cache}"),
+        ),
+        client_check(
+            "mcp_tool_surface_valid",
+            parsed_surface.is_some(),
+            format!(
+                "expected {} to be classic or codemode",
+                McpToolSurface::ENV
+            ),
         ),
     ]
 }

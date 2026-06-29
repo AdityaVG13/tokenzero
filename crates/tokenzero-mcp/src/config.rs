@@ -8,7 +8,7 @@ use crate::{
 };
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
-use tokenzero_core::Mode;
+use tokenzero_core::{McpToolSurface, Mode};
 use tokenzero_runtime::RunOutputPolicy;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -62,6 +62,8 @@ pub struct EngineConfig {
     pub fetch_allow_hosts: Vec<String>,
     /// Hosts (suffix match) always refused. From `TOKENZERO_FETCH_DENY`.
     pub fetch_deny_hosts: Vec<String>,
+    /// Installed MCP tool surface (`TOKENZERO_MCP_TOOL_SURFACE`).
+    pub tool_surface: McpToolSurface,
 }
 
 impl EngineConfig {
@@ -84,8 +86,16 @@ impl EngineConfig {
             fetch_enabled: env_opt_in(FETCH_ENABLED_ENV),
             fetch_allow_hosts: env_host_list(FETCH_ALLOW_ENV),
             fetch_deny_hosts: env_host_list(FETCH_DENY_ENV),
+            tool_surface: mcp_tool_surface_from_env(),
         }
     }
+}
+
+pub fn mcp_tool_surface_from_env() -> McpToolSurface {
+    std::env::var(McpToolSurface::ENV)
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or_default()
 }
 
 pub const FETCH_ENABLED_ENV: &str = "TOKENZERO_FETCH";

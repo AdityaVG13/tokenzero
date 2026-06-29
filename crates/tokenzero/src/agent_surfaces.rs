@@ -330,8 +330,8 @@ pub fn capabilities_json() -> serde_json::Value {
                 "tokenzero codemode 'search:read'",
                 "tokenzero codemode 'describe:zero.read'"
             ],
-            "cache_default": "codemode-recovery.json",
-            "cache_note": "Separate from MCP/CLI recovery-cache.json unless --cache-path is shared.",
+            "cache_default": "recovery-cache.json",
+            "cache_note": "CodeMode plans share the MCP recovery cache by default.",
             "pattern": "https://developers.cloudflare.com/agents/tools/codemode/",
             "when_to_use": "Compose multi-step TokenZero workflows in one plan; fewer round trips than per-tool MCP calls."
         },
@@ -422,16 +422,14 @@ Stdout is data. Stderr is diagnostics. JSON commands include `schema_version` or
 
 Cache boundary: CodeMode defaults to a dedicated recovery file (`codemode-recovery.json` under `.tokenzero/` or `.zerostack/tokenzero/`). Refs created inside a CodeMode plan round-trip within that plan, but `tokenzero expand` / MCP use the main `recovery-cache.json` unless you pass the same `--cache-path` to both surfaces.
 
-## When to use MCP vs CodeMode
+## Classic vs CodeMode install
 
-| Goal | Prefer |
-|------|--------|
-| Standard MCP client integration (Claude Desktop, Cursor, etc.) | Per-tool MCP (`tz_read`, `tz_find`, …) |
-| One round trip for a composed workflow (read → search → compact) | CodeMode (`tokenzero codemode` or `tz_codemode`) |
-| Progressive method discovery in-plan | CodeMode `search:` / `describe:` prefixes |
-| Minimal change to an existing MCP harness | Keep MCP; CodeMode is additive |
+| Install surface | When to use |
+|-----------------|-------------|
+| **Classic** (`install --surface classic`) | Default. Full per-tool MCP (`tz_read`, `tz_find`, …). Works everywhere out of the box. |
+| **CodeMode** (`install --surface codemode`) | Upgrade for harnesses that accept it: one MCP tool (`tz_codemode`), compose in-plan, progressive `search:`/`describe:` discovery. |
 
-MCP is the default integration surface. CodeMode is an upgraded workflow pattern for harnesses that can run a short JS-like plan — same TokenZero engine, fewer tokens and fewer round trips when steps depend on each other.
+Do not mix surfaces in one client config. Pick classic or codemode at install time.
 "#
 }
 

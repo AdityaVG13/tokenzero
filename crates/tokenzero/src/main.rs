@@ -16,7 +16,12 @@ use tokenzero_core::{
 };
 use tokenzero_filters::{discover, rewrite_command};
 use tokenzero_install as install;
-use tokenzero_mcp::{CodeModeOptions, CodeModeStatus, execute_codemode_with_options};
+use tokenzero_core::McpToolSurface;
+use tokenzero_mcp::{
+    CodeModeOptions, CodeModeStatus, EditHunk, EngineConfig, TokenZeroEngine, cli_json,
+    default_shell_timeout, execute_codemode_with_options, mcp_idle_timeout_from_secs,
+    mcp_tool_surface_from_env, render_text, shell_timeout_from_secs,
+};
 
 mod agent_surfaces;
 mod artifact_contracts;
@@ -39,10 +44,6 @@ use competitor_adapters::{
 use mcp_artifact::run_mcp_artifact;
 use reach::{installed_tokenzero_command_audit, run_reach};
 use release_claims::{ClaimEvidenceInputs, run_claim_audit};
-use tokenzero_mcp::{
-    EditHunk, EngineConfig, TokenZeroEngine, cli_json, default_shell_timeout,
-    mcp_idle_timeout_from_secs, render_text, shell_timeout_from_secs,
-};
 use tokenzero_pulse::{
     PulseEvent, default_ledger_path, doctor_jsonl_sqlite, export_jsonl, import_jsonl, record_event,
     report_for_path, sync_jsonl_to_sqlite,
@@ -1041,17 +1042,18 @@ fn handle_bench(args: BenchArgs) -> Result<()> {
 fn handle_install(args: InstallArgs) -> Result<()> {
     let agents = install_agents(&args.agents, args.grok)?;
     let capabilities = install_capabilities(&args);
+    let surface = parse_mcp_surface(&args.surface)?;
     let root = install_root(args.root.clone(), args.global);
     if let Some(id) = args.rollback {
         emit_value(install::rollback(&root, &id)?, args.json)?;
     } else if args.apply {
         emit_value(
-            install::apply_for_agents(&root, args.global, &capabilities, &agents)?,
+            install::apply_for_agents(&root, args.global, &capabilities, &agents, surface)?,
             args.json,
         )?;
     } else {
         emit_value(
-            install::plan_for_agents(&root, args.global, &capabilities, &agents),
+            install::plan_for_agents(&root, args.global, &capabilities, &agents, surface),
             args.json,
         )?;
     }
@@ -1062,15 +1064,16 @@ fn handle_init(args: InitArgs) -> Result<()> {
     let _plan_requested = args.plan;
     let agents = install_agents(&args.agents, false)?;
     let capabilities = init_capabilities(&args);
+    let surface = parse_mcp_surface(&args.surface)?;
     let root = install_root(args.root.clone(), args.global);
     if args.apply {
         emit_value(
-            install::apply_for_agents(&root, args.global, &capabilities, &agents)?,
+            install::apply_for_agents(&root, args.global, &capabilities, &agents, surface)?,
             args.json,
         )?;
     } else {
         emit_value(
-            install::plan_for_agents(&root, args.global, &capabilities, &agents),
+            install::plan_for_agents(&root, args.global, &capabilities, &agents, surface),
             args.json,
         )?;
     }
@@ -1135,7 +1138,13 @@ fn handle_clients_plan(args: ClientsPlanArgs) -> Result<()> {
     let agents = install_agents(&args.agents, args.grok)?;
     let root = install_root(args.root.clone(), true);
     let capabilities = clients_capabilities(&profile);
-    let plan = install::plan_for_agents(&root, true, &capabilities, &agents);
+    let plan = install::plan_for_agents(
+        &root,
+        true,
+        &capabilities,
+        &agents,
+        clients_mcp_surface(&profile),
+    );
     let mut value = serde_json::to_value(plan)?;
     if let Some(object) = value.as_object_mut() {
         object.insert(
@@ -1267,6 +1276,12 @@ fn engine_from_common(args: &CommonArgs) -> TokenZeroEngine {
 
 fn engine_config_for_mcp(args: &McpServerArgs) -> Result<EngineConfig> {
     let root = tokenzero_work_root(None);
+    let tool_surface = args
+        .tool_surface
+        .as_deref()
+        .map(parse_mcp_surface)
+        .transpose()?
+        .unwrap_or_else(mcp_tool_surface_from_env);
     Ok(EngineConfig {
         allowed_roots: if args.allowed_root.is_empty() {
             default_allowed_roots(&root)
@@ -1278,6 +1293,7 @@ fn engine_config_for_mcp(args: &McpServerArgs) -> Result<EngineConfig> {
         mode: parse_mode(&args.default_mode)?,
         shell_timeout: shell_timeout_from_secs(args.shell_timeout_seconds),
         mcp_idle_timeout: mcp_idle_timeout_from_secs(args.idle_timeout_seconds),
+        tool_surface,
         ..EngineConfig::for_root(&root)
     })
 }
@@ -1300,6 +1316,10 @@ fn supervised_child_args(args: &McpServerArgs) -> Vec<std::ffi::OsString> {
     if let Some(seconds) = args.shell_timeout_seconds {
         child_args.push("--shell-timeout-seconds".into());
         child_args.push(seconds.to_string().into());
+    }
+    if let Some(surface) = &args.tool_surface {
+        child_args.push("--tool-surface".into());
+        child_args.push(surface.clone().into());
     }
     child_args.push("--idle-timeout-seconds".into());
     child_args.push("0".into());
@@ -1473,17 +1493,31 @@ fn clients_profile(raw: &str) -> Result<String> {
     let profile = raw.trim().to_ascii_lowercase();
     match profile.as_str() {
         "standard" | "" => Ok("standard".to_string()),
+        "codemode" | "code-mode" => Ok("codemode".to_string()),
         other => anyhow::bail!(
-            "unsupported clients profile '{other}'; currently only 'standard' is supported"
+            "unsupported clients profile '{other}'; supported profiles: standard, codemode"
         ),
     }
 }
 
-fn clients_capabilities(_profile: &str) -> Vec<String> {
-    // The standard profile wires MCP plus the Claude Code hook. The PATH shim
-    // layer stays opt-in (`tokenzero install --shims`): it mutates PATH-visible
-    // binaries, which is a bigger footprint than client config merges.
-    vec!["mcp".to_string(), "hooks".to_string()]
+fn clients_capabilities(profile: &str) -> Vec<String> {
+    let mut caps = vec!["mcp".to_string(), "hooks".to_string()];
+    if profile == "codemode" {
+        caps.push("instructions".to_string());
+    }
+    caps
+}
+
+fn clients_mcp_surface(profile: &str) -> McpToolSurface {
+    match profile {
+        "codemode" => McpToolSurface::Codemode,
+        _ => McpToolSurface::Classic,
+    }
+}
+
+fn parse_mcp_surface(raw: &str) -> Result<McpToolSurface> {
+    raw.parse()
+        .map_err(|message: String| anyhow::anyhow!(message))
 }
 
 fn clients_agent_labels(agents: &[String]) -> Vec<String> {
@@ -1500,7 +1534,7 @@ fn client_status_report(
     command: &str,
 ) -> Result<serde_json::Value> {
     let capabilities = clients_capabilities("standard");
-    let plan = install::plan_for_agents(root, true, &capabilities, agents);
+    let plan = install::plan_for_agents(root, true, &capabilities, agents, McpToolSurface::Classic);
     let surfaces: Vec<serde_json::Value> = plan
         .writes
         .iter()

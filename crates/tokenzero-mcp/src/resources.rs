@@ -2,7 +2,7 @@ use serde_json::{Value, json};
 use tokenzero_core::MCP_SCHEMA_VERSION;
 
 use crate::TokenZeroEngine;
-use crate::catalog::{canonical_tool_names, resource_specs, tool_clusters, tool_docs};
+use crate::catalog::{canonical_tool_names_for_surface, resource_specs, tool_clusters, tool_docs};
 use crate::jsonrpc::{JsonRpcErrorData, SUPPORTED_PROTOCOL_VERSIONS, tool_filter_discovery};
 
 pub(crate) fn read_resource(
@@ -22,8 +22,9 @@ pub(crate) fn read_resource(
             "version": env!("CARGO_PKG_VERSION"),
             "protocolVersions": SUPPORTED_PROTOCOL_VERSIONS,
             "tool_clusters": tool_clusters(),
-            "toolFiltering": tool_filter_discovery(),
-            "canonical_tools": canonical_tool_names(),
+            "toolFiltering": tool_filter_discovery(engine.config.tool_surface),
+            "tool_surface": engine.config.tool_surface.as_str(),
+            "canonical_tools": canonical_tool_names_for_surface(engine.config.tool_surface),
             "aliases": {
                 "read": "tz_read",
                 "find": "tz_find",
@@ -48,7 +49,7 @@ pub(crate) fn read_resource(
                 "schema": "tokenzero.codemode.v1",
                 "mcp_tool": "tz_codemode",
                 "cli": "tokenzero codemode --json --plan '<plan>'",
-                "note": "Additive to per-tool MCP; compose multi-step plans when round trips matter."
+                "note": "CodeMode upgrade surface; install with --surface codemode. Classic per-tool MCP uses --surface classic."
             },
             "resources": resource_specs(),
             "next_actions": [
@@ -62,7 +63,7 @@ pub(crate) fn read_resource(
             "status": "ok",
             "tools": tool_docs(),
             "tool_clusters": tool_clusters(),
-            "toolFiltering": tool_filter_discovery(),
+            "toolFiltering": tool_filter_discovery(engine.config.tool_surface),
             "next_actions": ["Use canonical tz_* names in durable instructions; aliases exist for client ergonomics."]
         }),
         "resource://tokenzero/roots" => json!({

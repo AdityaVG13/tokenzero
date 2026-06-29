@@ -1,7 +1,7 @@
 use serde_json::{Value, json};
-use tokenzero_core::MCP_SCHEMA_VERSION;
+use tokenzero_core::{McpToolSurface, MCP_SCHEMA_VERSION};
 
-use crate::catalog::{tool_cluster_names, tool_specs_for_filter};
+use crate::catalog::{canonical_allowed_on_surface, tool_cluster_names, tool_specs_for_filter};
 use crate::{TokenZeroEngine, call_tool, read_resource, resource_specs, tool_specs};
 
 const DEFAULT_PROTOCOL_VERSION: &str = "2025-06-18";
@@ -161,7 +161,7 @@ fn handle_jsonrpc_request(engine: &TokenZeroEngine, parsed: Value) -> Option<Val
                     "prompts": {"listChanged": false}
                 },
                 "serverInfo": {"name": "tokenzero", "version": env!("CARGO_PKG_VERSION")},
-                "instructions": "TokenZero compacts tool output and stores exact bytes behind tz:// refs; recover them with tz_expand. Short tool names (read, find, grep, glob, tree, shell, ingest, expand, mem, cache_pack, rewrite, discover) are aliases of the tz_* tools. Full per-tool docs: resources/read resource://tokenzero/tools.",
+                "instructions": mcp_initialize_instructions(engine.config.tool_surface),
                 "_meta": {
                     "tokenzero/protocolNegotiation": {
                         "requestedProtocolVersion": requested,
@@ -190,18 +190,18 @@ fn handle_jsonrpc_request(engine: &TokenZeroEngine, parsed: Value) -> Option<Val
                     "prompts": {"listChanged": false}
                 },
                 "serverInfo": {"name": "tokenzero", "version": env!("CARGO_PKG_VERSION")},
-                "instructions": "Use tools/list for JSON Schema input contracts, resources/list for discovery resources, and tool text output (refs: footers, shell command_success) after tools/call.",
+                "instructions": mcp_discover_instructions(engine.config.tool_surface),
                 "ttlMs": 60000,
                 "cacheScope": "workspace",
                 "_meta": {
                     "schema_version": MCP_SCHEMA_VERSION,
                     "status": "ok",
                     "protocolVersions": SUPPORTED_PROTOCOL_VERSIONS,
-                    "toolFiltering": tool_filter_discovery(),
+                    "toolFiltering": tool_filter_discovery(engine.config.tool_surface),
                     "clientMetaAccepted": params.and_then(|params| params.get("_meta")).is_some()
                 },
                 "protocolVersions": SUPPORTED_PROTOCOL_VERSIONS,
-                "toolFiltering": tool_filter_discovery()
+                "toolFiltering": tool_filter_discovery(engine.config.tool_surface)
             })
         }
         "resources/list" => {
@@ -290,7 +290,11 @@ fn handle_jsonrpc_request(engine: &TokenZeroEngine, parsed: Value) -> Option<Val
                 Ok(filter) => filter,
                 Err(error) => return Some(jsonrpc_invalid_params_error(id, error)),
             };
-            let tools = tool_specs_for_filter(filter.cluster.as_deref(), filter.include_aliases);
+            let tools = tool_specs_for_filter(
+                filter.cluster.as_deref(),
+                filter.include_aliases,
+                engine.config.tool_surface,
+            );
             let tool_count = tools.len();
             json!({
                 "tools": tools,
@@ -552,32 +556,74 @@ impl ToolListFilter {
     }
 }
 
-pub(crate) fn tool_filter_discovery() -> Value {
-    json!({
-        "default": {
-            "profile": "full",
-            "cluster": "all",
-            "includeAliases": true
-        },
-        "recommended": [
-            {
-                "profile": "material",
-                "params": {"_meta": {"tokenzero/toolCluster": "material"}},
-                "description": "Read, search, tree, glob, and exact-ref recovery tools."
+pub(crate) fn tool_filter_discovery(surface: McpToolSurface) -> Value {
+    match surface {
+        McpToolSurface::Classic => json!({
+            "surface": "classic",
+            "default": {
+                "profile": "full",
+                "cluster": "all",
+                "includeAliases": true
             },
-            {
-                "profile": "execution",
-                "params": {"_meta": {"tokenzero/toolCluster": "execution"}},
-                "description": "Shell, ingest, cache, rewrite, discovery, and memory tools."
+            "recommended": [
+                {
+                    "profile": "material",
+                    "params": {"_meta": {"tokenzero/toolCluster": "material"}},
+                    "description": "Read, search, tree, glob, and exact-ref recovery tools."
+                },
+                {
+                    "profile": "execution",
+                    "params": {"_meta": {"tokenzero/toolCluster": "execution"}},
+                    "description": "Shell, ingest, cache, rewrite, discovery, and memory tools."
+                }
+            ],
+            "acceptedParams": {
+                "_meta.tokenzero/toolCluster": tool_cluster_names(),
+                "_meta.tokenzero/includeAliases": "boolean, defaults false when a cluster is selected",
+                "cluster": "top-level compatibility alias for tokenzero/toolCluster",
+                "profile": "top-level compatibility alias; accepted values are full, all, material, execution, codemode"
             }
-        ],
-        "acceptedParams": {
-            "_meta.tokenzero/toolCluster": tool_cluster_names(),
-            "_meta.tokenzero/includeAliases": "boolean, defaults false when a cluster is selected",
-            "cluster": "top-level compatibility alias for tokenzero/toolCluster",
-            "profile": "top-level compatibility alias; accepted values are full, all, material, execution"
-        }
-    })
+        }),
+        McpToolSurface::Codemode => json!({
+            "surface": "codemode",
+            "default": {
+                "profile": "codemode",
+                "cluster": "codemode",
+                "includeAliases": true
+            },
+            "recommended": [
+                {
+                    "profile": "codemode",
+                    "params": {"_meta": {"tokenzero/toolCluster": "codemode"}},
+                    "description": "CodeMode upgrade surface: tz_codemode composes TokenZero ops in one plan; tz_expand recovers refs."
+                }
+            ],
+            "acceptedParams": {
+                "_meta.tokenzero/toolCluster": ["codemode"],
+                "_meta.tokenzero/includeAliases": "boolean",
+                "cluster": "codemode",
+                "profile": "codemode"
+            },
+            "next_actions": [
+                "Call tz_codemode with plan prefixes search:read or describe:zero.read to discover methods.",
+                "Compose dependent steps in one plan; use zero.expand or tz_expand for ref recovery."
+            ]
+        }),
+    }
+}
+
+fn mcp_initialize_instructions(surface: McpToolSurface) -> &'static str {
+    match surface {
+        McpToolSurface::Classic => "TokenZero compacts tool output and stores exact bytes behind tz:// refs; recover them with tz_expand. Short tool names (read, find, grep, glob, tree, shell, ingest, expand, mem, cache_pack, rewrite, discover) are aliases of the tz_* tools. Full per-tool docs: resources/read resource://tokenzero/tools.",
+        McpToolSurface::Codemode => "TokenZero CodeMode surface: call tz_codemode with JS-like plans (await zero.read(...), bindings, return). Discover methods with plan prefixes search:query or describe:zero.read. Recover exact bytes with zero.expand inside plans or tz_expand for direct ref recovery.",
+    }
+}
+
+fn mcp_discover_instructions(surface: McpToolSurface) -> &'static str {
+    match surface {
+        McpToolSurface::Classic => "Use tools/list for JSON Schema input contracts, resources/list for discovery resources, and tool text output (refs: footers, shell command_success) after tools/call.",
+        McpToolSurface::Codemode => "CodeMode surface: tools/list exposes tz_codemode (+ tz_expand). Start with tz_codemode plan search:read or describe:zero.read, then compose multi-step plans in one call.",
+    }
 }
 
 fn tool_list_filter(
@@ -638,6 +684,7 @@ fn normalize_tool_cluster(raw: &str) -> Result<Option<String>, JsonRpcErrorData>
             Ok(Some("material".to_string()))
         }
         "execution" | "exec" | "runtime" | "run" | "shell" => Ok(Some("execution".to_string())),
+        "codemode" | "code-mode" | "code_mode" | "code" => Ok(Some("codemode".to_string())),
         other => Err(JsonRpcErrorData::unknown_tool_cluster(other)),
     }
 }

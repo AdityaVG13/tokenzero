@@ -1,24 +1,24 @@
 use crate::*;
+use tokenzero_core::McpToolSurface;
 
 pub(crate) fn content_for(
     row: &InstallWrite,
     root: &Path,
     previous: Option<&str>,
+    mcp_surface: McpToolSurface,
 ) -> std::io::Result<PendingContent> {
     match row.capability.as_str() {
         "mcp" => {
             let path = Path::new(&row.path);
             if path.extension().and_then(|ext| ext.to_str()) == Some("toml") {
-                merge_toml_mcp(previous.unwrap_or_default(), root, path, row.global)
+                merge_toml_mcp(previous.unwrap_or_default(), root, path, row.global, mcp_surface)
                     .map(PendingContent::Text)
             } else {
-                merge_json_mcp(previous.unwrap_or_default(), root, row.global)
+                merge_json_mcp(previous.unwrap_or_default(), root, row.global, mcp_surface)
                     .map(PendingContent::Text)
             }
         }
-        "instructions" => Ok(PendingContent::Text(
-            "<!-- tokenzero:rust-core:start -->\nUse `tokenzero read/find/tree/run/expand` or MCP aliases. Rust Core runs as a standalone binary for normal use.\n<!-- tokenzero:rust-core:end -->\n".to_string(),
-        )),
+        "instructions" => Ok(PendingContent::Text(instructions_content(mcp_surface))),
         "shell" => Ok(PendingContent::Text(shell_launcher_content(root, row.global))),
         "cli" => Ok(PendingContent::Text(cli_launcher_content(root, row.global))),
         "cli-runtime" => current_exe_bytes().map(PendingContent::Bytes),
@@ -94,14 +94,22 @@ fn upsert_tokenzero_hooks(
     Ok(())
 }
 
-pub(crate) fn merge_json_mcp(previous: &str, root: &Path, global: bool) -> std::io::Result<String> {
+pub(crate) fn merge_json_mcp(
+    previous: &str,
+    root: &Path,
+    global: bool,
+    mcp_surface: McpToolSurface,
+) -> std::io::Result<String> {
     let mut object = parse_json_object(previous, "JSON MCP config")?;
     let servers = object_entry(
         &mut object,
         "mcpServers",
         "JSON MCP config mcpServers field",
     )?;
-    servers.insert("tokenzero".to_string(), mcp_server_json(root, global));
+    servers.insert(
+        "tokenzero".to_string(),
+        mcp_server_json(root, global, mcp_surface),
+    );
     Ok(serde_json::to_string_pretty(&Value::Object(object))? + "\n")
 }
 
@@ -253,6 +261,7 @@ pub(crate) fn merge_toml_mcp(
     root: &Path,
     path: &Path,
     global: bool,
+    mcp_surface: McpToolSurface,
 ) -> std::io::Result<String> {
     let without_managed = strip_managed_toml_block(previous);
     let without_old_tokenzero = strip_tokenzero_toml_tables(&without_managed);
@@ -260,18 +269,26 @@ pub(crate) fn merge_toml_mcp(
     if !merged.is_empty() {
         merged.push_str("\n\n");
     }
-    merged.push_str(&toml_mcp_block(root, path, global));
+    merged.push_str(&toml_mcp_block(root, path, global, mcp_surface));
     toml::from_str::<toml::Value>(&merged)
         .map_err(|err| Error::new(ErrorKind::InvalidData, format!("invalid TOML: {err}")))?;
     Ok(merged)
 }
 
-pub(crate) fn mcp_server_json(root: &Path, global: bool) -> Value {
+fn instructions_content(surface: McpToolSurface) -> String {
+    let body = match surface {
+        McpToolSurface::Classic => "Use `tokenzero read/find/tree/run/expand` or MCP aliases. Rust Core runs as a standalone binary for normal use.",
+        McpToolSurface::Codemode => "TokenZero CodeMode surface: call MCP `tz_codemode` with JS-like plans (`await zero.read(...)`, bindings, `return`). Discover methods with plan prefixes `search:read` or `describe:zero.read`. Recover refs with `zero.expand` inside plans or `tz_expand`.",
+    };
+    format!("<!-- tokenzero:rust-core:start -->\n{body}\n<!-- tokenzero:rust-core:end -->\n")
+}
+
+pub(crate) fn mcp_server_json(root: &Path, global: bool, mcp_surface: McpToolSurface) -> Value {
     serde_json::json!({
         "type": "stdio",
         "command": mcp_command(root, global),
         "args": mcp_args(root),
-        "env": mcp_env(root)
+        "env": mcp_env(root, mcp_surface)
     })
 }
 
@@ -286,7 +303,7 @@ pub(crate) fn mcp_args(root: &Path) -> Vec<String> {
     ]
 }
 
-pub(crate) fn mcp_env(root: &Path) -> Map<String, Value> {
+pub(crate) fn mcp_env(root: &Path, mcp_surface: McpToolSurface) -> Map<String, Value> {
     let mut env = Map::new();
     env.insert(
         "TOKENZERO_ALLOWED_ROOTS".to_string(),
@@ -301,8 +318,8 @@ pub(crate) fn mcp_env(root: &Path) -> Map<String, Value> {
         Value::String("auto".to_string()),
     );
     env.insert(
-        "TOKENZERO_MCP_TOOL_SURFACE".to_string(),
-        Value::String("aliases".to_string()),
+        McpToolSurface::ENV.to_string(),
+        Value::String(mcp_surface.as_str().to_string()),
     );
     env.insert(
         "TOKENZERO_MAX_OUTPUT_BYTES".to_string(),
@@ -329,7 +346,12 @@ pub(crate) fn mcp_env(root: &Path) -> Map<String, Value> {
     env
 }
 
-pub(crate) fn toml_mcp_block(root: &Path, path: &Path, global: bool) -> String {
+pub(crate) fn toml_mcp_block(
+    root: &Path,
+    path: &Path,
+    global: bool,
+    mcp_surface: McpToolSurface,
+) -> String {
     let include_codex_tool_approvals = path
         .components()
         .any(|component| component.as_os_str() == ".codex");
@@ -344,10 +366,14 @@ pub(crate) fn toml_mcp_block(root: &Path, path: &Path, global: bool) -> String {
          [mcp_servers.tokenzero.env]\n{}\n",
         toml_string(&mcp_command(root, global)),
         toml_string_array(&mcp_args(root)),
-        toml_env_lines(root)
+        toml_env_lines(root, mcp_surface)
     );
     if include_codex_tool_approvals {
-        for tool in ["shell", "read", "find", "tree"] {
+        let tools: &[&str] = match mcp_surface {
+            McpToolSurface::Classic => &["shell", "read", "find", "tree"],
+            McpToolSurface::Codemode => &["codemode", "expand"],
+        };
+        for tool in tools {
             block.push_str(&format!(
                 "\n[mcp_servers.tokenzero.tools.{tool}]\napproval_mode = \"approve\"\n"
             ));
@@ -357,8 +383,8 @@ pub(crate) fn toml_mcp_block(root: &Path, path: &Path, global: bool) -> String {
     block
 }
 
-pub(crate) fn toml_env_lines(root: &Path) -> String {
-    let env = mcp_env(root);
+pub(crate) fn toml_env_lines(root: &Path, mcp_surface: McpToolSurface) -> String {
+    let env = mcp_env(root, mcp_surface);
     env.into_iter()
         .map(|(key, value)| {
             let value = value.as_str().unwrap_or_default();

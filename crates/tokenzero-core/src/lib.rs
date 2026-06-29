@@ -74,6 +74,48 @@ impl Mode {
     }
 }
 
+/// MCP tool surface selected at install time: classic per-tool MCP or CodeMode upgrade.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum McpToolSurface {
+    /// Full `tz_*` tool catalog (default, maximum compatibility).
+    #[default]
+    Classic,
+    /// CodeMode upgrade: `tz_codemode` (+ `tz_expand`) with in-plan discovery.
+    Codemode,
+}
+
+impl McpToolSurface {
+    pub const ENV: &'static str = "TOKENZERO_MCP_TOOL_SURFACE";
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Classic => "classic",
+            Self::Codemode => "codemode",
+        }
+    }
+}
+
+impl std::str::FromStr for McpToolSurface {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value.trim().to_ascii_lowercase().replace(['_', ' '], "-").as_str() {
+            "" | "classic" | "aliases" | "full" => Ok(Self::Classic),
+            "codemode" | "code-mode" => Ok(Self::Codemode),
+            other => Err(format!(
+                "unsupported MCP tool surface '{other}'; use classic or codemode"
+            )),
+        }
+    }
+}
+
+impl fmt::Display for McpToolSurface {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ContentType {

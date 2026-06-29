@@ -74,6 +74,15 @@ fn resolve_default_cache_path(repo_root: &Path, unified_relative: &str, legacy_r
     }
 }
 
+/// Default recovery cache when `--cache-path` is omitted.
+pub fn default_recovery_cache_path(repo_root: &Path) -> PathBuf {
+    resolve_default_cache_path(
+        repo_root,
+        "tokenzero/recovery-cache.json",
+        ".tokenzero/recovery-cache.json",
+    )
+}
+
 /// CodeMode compact/expand recovery store (unified or legacy layout).
 pub fn default_codemode_recovery_cache_path(repo_root: &Path) -> PathBuf {
     resolve_default_cache_path(
