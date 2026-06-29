@@ -191,6 +191,53 @@ fn tool_response_to_value(resp: &ToolResponse) -> Value {
     obj
 }
 
+struct Opts<'a>(Option<&'a serde_json::Map<String, Value>>);
+
+impl<'a> Opts<'a> {
+    fn from_arg(args: &'a [Value], index: usize) -> Self {
+        Self(args.get(index).and_then(|v| v.as_object()))
+    }
+
+    fn usize(&self, key: &str) -> Option<usize> {
+        self.0?.get(key)?.as_u64().map(|n| n as usize)
+    }
+
+    fn bool(&self, key: &str) -> Option<bool> {
+        self.0?.get(key)?.as_bool()
+    }
+
+    fn str(&self, key: &str) -> Option<&str> {
+        self.0?.get(key)?.as_str()
+    }
+
+    fn mode_or(&self, key: &str, default: Mode) -> Mode {
+        self.str(key)
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(default)
+    }
+}
+
+fn require_str_arg<'a>(
+    args: &'a [Value],
+    index: usize,
+    message: &str,
+) -> Result<&'a str, Box<CodeModeResult>> {
+    args.get(index)
+        .and_then(|value| value.as_str())
+        .ok_or_else(|| Box::new(CodeModeResult::error(message.to_string(), 0)))
+}
+
+fn paths_from_arg(args: &[Value], index: usize, default: PathBuf) -> Vec<PathBuf> {
+    match args.get(index) {
+        Some(Value::String(path)) => vec![PathBuf::from(path)],
+        Some(Value::Array(items)) => items
+            .iter()
+            .filter_map(|value| value.as_str().map(PathBuf::from))
+            .collect(),
+        _ => vec![default],
+    }
+}
+
 fn exec_read(engine: &TokenZeroEngine, args: &[Value]) -> Result<Value, Box<CodeModeResult>> {
     let paths = match args.first() {
         Some(Value::String(s)) => vec![PathBuf::from(s)],
@@ -205,24 +252,12 @@ fn exec_read(engine: &TokenZeroEngine, args: &[Value]) -> Result<Value, Box<Code
             )));
         }
     };
-    let opts = args.get(1).and_then(|v| v.as_object());
-    let mode = opts
-        .and_then(|o| o.get("mode"))
-        .and_then(|v| v.as_str())
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(Mode::Auto);
-    let start_line = opts
-        .and_then(|o| o.get("start_line"))
-        .and_then(|v| v.as_u64())
-        .map(|n| n as usize);
-    let end_line = opts
-        .and_then(|o| o.get("end_line"))
-        .and_then(|v| v.as_u64())
-        .map(|n| n as usize);
+    let opts = Opts::from_arg(args, 1);
+    let mode = opts.mode_or("mode", Mode::Auto);
+    let start_line = opts.usize("start_line");
+    let end_line = opts.usize("end_line");
     let max_visible = opts
-        .and_then(|o| o.get("max_visible_tokens"))
-        .and_then(|v| v.as_u64())
-        .map(|n| n as usize)
+        .usize("max_visible_tokens")
         .unwrap_or(engine.config.max_visible_tokens);
 
     let resp = engine.read(&paths, mode, start_line, end_line, false, 20, max_visible);
@@ -235,38 +270,17 @@ fn exec_find(
     args: &[Value],
     exact: bool,
 ) -> Result<Value, Box<CodeModeResult>> {
-    let pattern = match args.first().and_then(|v| v.as_str()) {
-        Some(p) => p,
-        None => {
-            return Err(Box::new(CodeModeResult::error(
-                "zero.find/grep requires a pattern string as first argument",
-                0,
-            )));
-        }
-    };
-    let paths: Vec<PathBuf> = match args.get(1) {
-        Some(Value::String(s)) => vec![PathBuf::from(s)],
-        Some(Value::Array(arr)) => arr
-            .iter()
-            .filter_map(|v| v.as_str().map(PathBuf::from))
-            .collect(),
-        _ => vec![work_root.to_path_buf()],
-    };
-    let opts = args.get(2).and_then(|v| v.as_object());
-    let mode = opts
-        .and_then(|o| o.get("mode"))
-        .and_then(|v| v.as_str())
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(Mode::Auto);
-    let max_files = opts
-        .and_then(|o| o.get("max_files"))
-        .and_then(|v| v.as_u64())
-        .map(|n| n as usize)
-        .unwrap_or(20);
+    let pattern = require_str_arg(
+        args,
+        0,
+        "zero.find/grep requires a pattern string as first argument",
+    )?;
+    let paths = paths_from_arg(args, 1, work_root.to_path_buf());
+    let opts = Opts::from_arg(args, 2);
+    let mode = opts.mode_or("mode", Mode::Auto);
+    let max_files = opts.usize("max_files").unwrap_or(20);
     let max_visible = opts
-        .and_then(|o| o.get("max_visible_tokens"))
-        .and_then(|v| v.as_u64())
-        .map(|n| n as usize)
+        .usize("max_visible_tokens")
         .unwrap_or(engine.config.max_visible_tokens);
 
     let resp = if exact {
@@ -278,30 +292,13 @@ fn exec_find(
 }
 
 fn exec_glob(engine: &TokenZeroEngine, work_root: &Path, args: &[Value]) -> Result<Value, Box<CodeModeResult>> {
-    let pattern = match args.first().and_then(|v| v.as_str()) {
-        Some(p) => p,
-        None => {
-            return Err(Box::new(CodeModeResult::error(
-                "zero.glob requires a pattern string as first argument",
-                0,
-            )));
-        }
-    };
-    let paths: Vec<PathBuf> = match args.get(1) {
-        Some(Value::String(s)) => vec![PathBuf::from(s)],
-        Some(Value::Array(arr)) => arr
-            .iter()
-            .filter_map(|v| v.as_str().map(PathBuf::from))
-            .collect(),
-        _ => vec![work_root.to_path_buf()],
-    };
-    let max_files = args
-        .get(2)
-        .and_then(|v| v.as_object())
-        .and_then(|o| o.get("max_files"))
-        .and_then(|v| v.as_u64())
-        .map(|n| n as usize)
-        .unwrap_or(200);
+    let pattern = require_str_arg(
+        args,
+        0,
+        "zero.glob requires a pattern string as first argument",
+    )?;
+    let paths = paths_from_arg(args, 1, work_root.to_path_buf());
+    let max_files = Opts::from_arg(args, 2).usize("max_files").unwrap_or(200);
 
     let resp = engine.glob(
         pattern,
@@ -321,21 +318,10 @@ fn exec_tree(engine: &TokenZeroEngine, work_root: &Path, args: &[Value]) -> Resu
             .map(PathBuf::from)
             .unwrap_or_else(|| work_root.to_path_buf()),
     ];
-    let opts = args.get(1).and_then(|v| v.as_object());
-    let depth = opts
-        .and_then(|o| o.get("depth"))
-        .and_then(|v| v.as_u64())
-        .map(|n| n as usize)
-        .unwrap_or(3);
-    let include_hidden = opts
-        .and_then(|o| o.get("include_hidden"))
-        .and_then(|v| v.as_bool())
-        .unwrap_or(false);
-    let max_files = opts
-        .and_then(|o| o.get("max_files"))
-        .and_then(|v| v.as_u64())
-        .map(|n| n as usize)
-        .unwrap_or(200);
+    let opts = Opts::from_arg(args, 1);
+    let depth = opts.usize("depth").unwrap_or(3);
+    let include_hidden = opts.bool("include_hidden").unwrap_or(false);
+    let max_files = opts.usize("max_files").unwrap_or(200);
 
     let resp = engine.tree(
         &roots,
@@ -349,29 +335,17 @@ fn exec_tree(engine: &TokenZeroEngine, work_root: &Path, args: &[Value]) -> Resu
 }
 
 fn exec_shell(engine: &TokenZeroEngine, args: &[Value]) -> Result<Value, Box<CodeModeResult>> {
-    let command = match args.first().and_then(|v| v.as_str()) {
-        Some(c) => c,
-        None => {
-            return Err(Box::new(CodeModeResult::error(
-                "zero.shell requires a command string as first argument",
-                0,
-            )));
-        }
-    };
-    let opts = args.get(1).and_then(|v| v.as_object());
-    let cwd = opts
-        .and_then(|o| o.get("cwd"))
-        .and_then(|v| v.as_str())
-        .map(PathBuf::from);
-    let mode = opts
-        .and_then(|o| o.get("mode"))
-        .and_then(|v| v.as_str())
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(Mode::Auto);
+    let command = require_str_arg(
+        args,
+        0,
+        "zero.shell requires a command string as first argument",
+    )?;
+    let opts = Opts::from_arg(args, 1);
+    let cwd = opts.str("cwd").map(PathBuf::from);
+    let mode = opts.mode_or("mode", Mode::Auto);
     let timeout = opts
-        .and_then(|o| o.get("timeout_seconds"))
-        .and_then(|v| v.as_u64())
-        .map(Duration::from_secs);
+        .usize("timeout_seconds")
+        .map(|secs| Duration::from_secs(secs as u64));
 
     let resp = engine.shell(
         command,
@@ -398,15 +372,11 @@ fn exec_shell(engine: &TokenZeroEngine, args: &[Value]) -> Result<Value, Box<Cod
 }
 
 pub(crate) fn exec_edit(engine: &TokenZeroEngine, args: &[Value]) -> Result<Value, Box<CodeModeResult>> {
-    let path = match args.first().and_then(|v| v.as_str()) {
-        Some(p) => PathBuf::from(p),
-        None => {
-            return Err(Box::new(CodeModeResult::error(
-                "zero.edit requires a path string as first argument",
-                0,
-            )));
-        }
-    };
+    let path = PathBuf::from(require_str_arg(
+        args,
+        0,
+        "zero.edit requires a path string as first argument",
+    )?);
     let edits_val = match args.get(1) {
         Some(Value::Array(arr)) => arr,
         _ => {
@@ -432,15 +402,9 @@ pub(crate) fn exec_edit(engine: &TokenZeroEngine, args: &[Value]) -> Result<Valu
             0,
         )));
     }
-    let opts = args.get(2).and_then(|v| v.as_object());
-    let dry_run = opts
-        .and_then(|o| o.get("dry_run"))
-        .and_then(|v| v.as_bool())
-        .unwrap_or(false);
-    let create = opts
-        .and_then(|o| o.get("create"))
-        .and_then(|v| v.as_bool())
-        .unwrap_or(false);
+    let opts = Opts::from_arg(args, 2);
+    let dry_run = opts.bool("dry_run").unwrap_or(false);
+    let create = opts.bool("create").unwrap_or(false);
 
     let resp = engine.edit(
         &path,
@@ -465,34 +429,21 @@ pub(crate) fn exec_edit(engine: &TokenZeroEngine, args: &[Value]) -> Result<Valu
 }
 
 fn exec_expand(engine: &TokenZeroEngine, args: &[Value]) -> Result<Value, Box<CodeModeResult>> {
-    let ref_id = match args.first().and_then(|v| v.as_str()) {
-        Some(r) => r,
-        None => {
-            return Err(Box::new(CodeModeResult::error(
-                "zero.token.expand/zero.expand requires a tz:// ref string as first argument",
-                0,
-            )));
-        }
-    };
+    let ref_id = require_str_arg(
+        args,
+        0,
+        "zero.token.expand/zero.expand requires a tz:// ref string as first argument",
+    )?;
     if !ref_id.starts_with("tz://") {
         return Err(Box::new(CodeModeResult::error(
             format!("zero.token.expand/zero.expand: ref must start with tz://, got: {ref_id}"),
             0,
         )));
     }
-    let opts = args.get(1).and_then(|v| v.as_object());
-    let start_line = opts
-        .and_then(|o| o.get("start_line"))
-        .and_then(|v| v.as_u64())
-        .map(|n| n as usize);
-    let end_line = opts
-        .and_then(|o| o.get("end_line"))
-        .and_then(|v| v.as_u64())
-        .map(|n| n as usize);
-    let selector = opts
-        .and_then(|o| o.get("selector"))
-        .and_then(|v| v.as_str())
-        .map(|s| s.to_string());
+    let opts = Opts::from_arg(args, 1);
+    let start_line = opts.usize("start_line");
+    let end_line = opts.usize("end_line");
+    let selector = opts.str("selector").map(str::to_string);
 
     let resp = engine.expand(
         ref_id,
@@ -524,25 +475,10 @@ fn exec_compact(engine: &TokenZeroEngine, args: &[Value]) -> Result<Value, Box<C
 }
 
 fn exec_ingest(engine: &TokenZeroEngine, args: &[Value]) -> Result<Value, Box<CodeModeResult>> {
-    let text = match args.first().and_then(|v| v.as_str()) {
-        Some(t) => t,
-        None => {
-            return Err(Box::new(CodeModeResult::error(
-                "zero.ingest requires text as first argument",
-                0,
-            )));
-        }
-    };
-    let opts = args.get(1).and_then(|v| v.as_object());
-    let mode = opts
-        .and_then(|o| o.get("mode"))
-        .and_then(|v| v.as_str())
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(Mode::Auto);
-    let source = opts
-        .and_then(|o| o.get("source"))
-        .and_then(|v| v.as_str())
-        .unwrap_or("codemode-ingest");
+    let text = require_str_arg(args, 0, "zero.ingest requires text as first argument")?;
+    let opts = Opts::from_arg(args, 1);
+    let mode = opts.mode_or("mode", Mode::Auto);
+    let source = opts.str("source").unwrap_or("codemode-ingest");
     let content_type = detect_content_type(text, None);
 
     let resp = engine.ingest(text, content_type, mode, source);
