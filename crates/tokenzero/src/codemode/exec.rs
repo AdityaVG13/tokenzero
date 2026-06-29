@@ -238,20 +238,34 @@ fn paths_from_arg(args: &[Value], index: usize, default: PathBuf) -> Vec<PathBuf
     }
 }
 
-fn exec_read(engine: &TokenZeroEngine, args: &[Value]) -> Result<Value, Box<CodeModeResult>> {
-    let paths = match args.first() {
-        Some(Value::String(s)) => vec![PathBuf::from(s)],
-        Some(Value::Array(arr)) => arr
-            .iter()
-            .filter_map(|v| v.as_str().map(PathBuf::from))
-            .collect(),
-        _ => {
-            return Err(Box::new(CodeModeResult::error(
-                "zero.read requires a path string or array as first argument",
-                0,
-            )));
+fn require_paths_from_arg(
+    args: &[Value],
+    index: usize,
+    message: &str,
+) -> Result<Vec<PathBuf>, Box<CodeModeResult>> {
+    match args.get(index) {
+        Some(Value::String(path)) => Ok(vec![PathBuf::from(path)]),
+        Some(Value::Array(items)) => {
+            let paths: Vec<PathBuf> = items
+                .iter()
+                .filter_map(|value| value.as_str().map(PathBuf::from))
+                .collect();
+            if paths.is_empty() {
+                Err(Box::new(CodeModeResult::error(message.to_string(), 0)))
+            } else {
+                Ok(paths)
+            }
         }
-    };
+        _ => Err(Box::new(CodeModeResult::error(message.to_string(), 0))),
+    }
+}
+
+fn exec_read(engine: &TokenZeroEngine, args: &[Value]) -> Result<Value, Box<CodeModeResult>> {
+    let paths = require_paths_from_arg(
+        args,
+        0,
+        "zero.read requires a path string or array as first argument",
+    )?;
     let opts = Opts::from_arg(args, 1);
     let mode = opts.mode_or("mode", Mode::Auto);
     let start_line = opts.usize("start_line");

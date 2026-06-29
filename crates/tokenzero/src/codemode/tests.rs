@@ -9,8 +9,44 @@ fn execute_plan_in_token(plan: &str) -> String {
 execute_codemode(plan).to_line()
 }
 
-#[test]
-fn pathless_tree_uses_configured_root_not_cwd() {
+    #[test]
+    fn read_honors_start_and_end_line_options() {
+        let work = tempfile::tempdir().unwrap();
+        let path = work.path().join("lines.txt");
+        let content: String = (1..=20)
+            .map(|line| format!("LINE_{line}\n"))
+            .collect();
+        fs::write(&path, content).unwrap();
+
+        let quoted = serde_json::to_string(path.to_str().unwrap()).unwrap();
+        let plan = format!("await zero.read({quoted}, {{ start_line: 2, end_line: 3 }})");
+        let result = execute_codemode_with_options(
+            &plan,
+            CodeModeOptions {
+                root: Some(work.path().to_path_buf()),
+                ..Default::default()
+            },
+        );
+        assert_eq!(
+            result.status,
+            CodeModeStatus::Completed,
+            "{:?}",
+            result.error
+        );
+        let text = result
+            .value
+            .as_ref()
+            .and_then(|value| value.get("text"))
+            .and_then(|value| value.as_str())
+            .unwrap_or("");
+        assert!(text.contains("LINE_2"), "expected bounded read: {text}");
+        assert!(text.contains("LINE_3"), "expected bounded read: {text}");
+        assert!(!text.contains("LINE_1"), "start_line should exclude earlier lines: {text}");
+        assert!(!text.contains("LINE_4"), "end_line should exclude later lines: {text}");
+    }
+
+    #[test]
+    fn pathless_tree_uses_configured_root_not_cwd() {
     let work = tempfile::tempdir().unwrap();
     fs::write(work.path().join("marker.txt"), "present\n").unwrap();
     let cwd = std::env::current_dir().unwrap();
