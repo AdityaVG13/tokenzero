@@ -1,5 +1,4 @@
 use super::*;
-use proptest::prelude::*;
 
 
 pub(crate) fn success_input<'a>(command: &'a str, stdout: &'a str, stderr: &'a str) -> ShellRenderInput<'a> {

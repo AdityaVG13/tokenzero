@@ -1,5 +1,4 @@
 use super::*;
-use proptest::prelude::*;
 
 use super::support::*;
 
