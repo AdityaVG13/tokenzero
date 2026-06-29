@@ -18,7 +18,7 @@ serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
 toml.workspace = true
-tokenzero-core = { path = "../tokenzero-core", version = "1.0.1" }
+tokenzero-core = { path = "../tokenzero-core", version = "1.0.2" }
 
 [dev-dependencies]
 tempfile.workspace = true
