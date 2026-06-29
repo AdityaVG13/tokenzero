@@ -30,23 +30,36 @@ fn zerostack_store_or_detect(repo_root: &Path) -> Option<PathBuf> {
     }
 }
 
-/// Default recovery cache when `--cache-path` is omitted.
-pub fn default_recovery_cache_path(repo_root: &Path) -> PathBuf {
+fn resolve_default_cache_path(repo_root: &Path, unified_relative: &str, legacy_relative: &str) -> PathBuf {
+    let legacy = repo_root.join(legacy_relative);
     if let Some(store) = zerostack_store_or_detect(repo_root) {
-        store.join("tokenzero/recovery-cache.json")
+        let unified = store.join(unified_relative);
+        if unified.exists() || !legacy.exists() {
+            unified
+        } else {
+            legacy
+        }
     } else {
-        repo_root.join(".tokenzero/recovery-cache.json")
+        legacy
     }
 }
 
+/// Default recovery cache when `--cache-path` is omitted.
+pub fn default_recovery_cache_path(repo_root: &Path) -> PathBuf {
+    resolve_default_cache_path(
+        repo_root,
+        "tokenzero/recovery-cache.json",
+        ".tokenzero/recovery-cache.json",
+    )
+}
+
 /// CodeMode compact/expand recovery store (unified or legacy layout).
-#[allow(dead_code)]
 pub fn default_codemode_recovery_cache_path(repo_root: &Path) -> PathBuf {
-    if let Some(store) = zerostack_store_or_detect(repo_root) {
-        store.join("tokenzero/codemode-recovery.json")
-    } else {
-        repo_root.join(".tokenzero/codemode-recovery.json")
-    }
+    resolve_default_cache_path(
+        repo_root,
+        "tokenzero/codemode-recovery.json",
+        ".tokenzero/codemode-recovery.json",
+    )
 }
 
 /// Honor explicit `--cache-path`; otherwise apply unified-root or legacy default.
@@ -82,6 +95,17 @@ mod tests {
     }
 
     #[test]
+    fn unified_recovery_falls_back_to_legacy_when_only_legacy_exists() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        fs::create_dir_all(root.join(".zerostack/tokenzero")).unwrap();
+        let legacy = root.join(".tokenzero/recovery-cache.json");
+        fs::create_dir_all(legacy.parent().unwrap()).unwrap();
+        fs::write(&legacy, "{}\n").unwrap();
+        assert_eq!(default_recovery_cache_path(root), legacy);
+    }
+
+    #[test]
     fn unified_codemode_cache_under_tokenzero_subdir() {
         let dir = tempdir().unwrap();
         let root = dir.path();
@@ -90,5 +114,16 @@ mod tests {
             default_codemode_recovery_cache_path(root),
             root.join(".zerostack/tokenzero/codemode-recovery.json")
         );
+    }
+
+    #[test]
+    fn unified_codemode_cache_falls_back_to_legacy_when_only_legacy_exists() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        fs::create_dir_all(root.join(".zerostack")).unwrap();
+        let legacy = root.join(".tokenzero/codemode-recovery.json");
+        fs::create_dir_all(legacy.parent().unwrap()).unwrap();
+        fs::write(&legacy, "{}\n").unwrap();
+        assert_eq!(default_codemode_recovery_cache_path(root), legacy);
     }
 }
