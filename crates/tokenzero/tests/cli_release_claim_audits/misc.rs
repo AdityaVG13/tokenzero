@@ -3,9 +3,8 @@ use serde_json::Value;
 use std::process::Command;
 use tempfile::tempdir;
 
-#[path = "../common/mod.rs"]
-mod common;
-use common::*;
+use super::common::*;
+
 
 
 #[test]

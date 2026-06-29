@@ -1,8 +1,5 @@
-use assert_cmd::prelude::*;
-use serde_json::Value;
-use std::process::Command;
-use tempfile::tempdir;
-
+#[path = "../common/mod.rs"]
+mod common;
 
 mod adapter;
 mod artifact;
