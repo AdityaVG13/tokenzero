@@ -691,10 +691,6 @@ fn split_top_level_commas(s: &str) -> Vec<&str> {
 
 // ─── Executor ───────────────────────────────────────────────────────────────
 
-fn make_engine_with_options(options: &CodeModeOptions) -> TokenZeroEngine {
-    make_engine_for_root_with_options(tokenzero_work_root(options.root.clone()), options)
-}
-
 #[cfg(test)]
 fn make_engine_for_root(root: PathBuf) -> TokenZeroEngine {
     make_engine_for_root_with_options(root, &CodeModeOptions::default())
@@ -759,7 +755,8 @@ pub(crate) fn execute_codemode_with_options(
         Err(e) => return CodeModeResult::error(e, 0),
     };
 
-    let engine = make_engine_with_options(&options);
+    let work_root = tokenzero_work_root(options.root.clone());
+    let engine = make_engine_for_root_with_options(work_root.clone(), &options);
     let mut scope: HashMap<String, Value> = HashMap::new();
     let mut all_refs: Vec<String> = Vec::new();
     let mut ops: usize = 0;
@@ -771,7 +768,7 @@ pub(crate) fn execute_codemode_with_options(
         match stmt {
             Statement::Binding { name, call } => {
                 ops += 1;
-                let result = match dispatch(&engine, call, &scope) {
+                let result = match dispatch(&engine, &work_root, call, &scope) {
                     Ok(v) => v,
                     Err(mut e) => {
                         e.telemetry.operations = ops;
@@ -786,7 +783,7 @@ pub(crate) fn execute_codemode_with_options(
             }
             Statement::Call(call) => {
                 ops += 1;
-                let result = match dispatch(&engine, call, &scope) {
+                let result = match dispatch(&engine, &work_root, call, &scope) {
                     Ok(v) => v,
                     Err(mut e) => {
                         e.telemetry.operations = ops;
@@ -818,6 +815,7 @@ pub(crate) fn execute_codemode_with_options(
 
 fn dispatch(
     engine: &TokenZeroEngine,
+    work_root: &Path,
     call: &MethodCall,
     scope: &HashMap<String, Value>,
 ) -> Result<Value, Box<CodeModeResult>> {
@@ -826,10 +824,10 @@ fn dispatch(
 
     match method {
         "zero.read" | "read" => exec_read(engine, &args),
-        "zero.find" | "find" => exec_find(engine, &args, false),
-        "zero.grep" | "grep" => exec_find(engine, &args, true),
-        "zero.glob" | "glob" => exec_glob(engine, &args),
-        "zero.tree" | "tree" => exec_tree(engine, &args),
+        "zero.find" | "find" => exec_find(engine, work_root, &args, false),
+        "zero.grep" | "grep" => exec_find(engine, work_root, &args, true),
+        "zero.glob" | "glob" => exec_glob(engine, work_root, &args),
+        "zero.tree" | "tree" => exec_tree(engine, work_root, &args),
         "zero.shell" | "shell" => exec_shell(engine, &args),
         "zero.edit" | "edit" => exec_edit(engine, &args),
         "zero.token.expand" | "zero.expand" | "expand" => exec_expand(engine, &args),
@@ -923,6 +921,7 @@ fn exec_read(engine: &TokenZeroEngine, args: &[Value]) -> Result<Value, Box<Code
 
 fn exec_find(
     engine: &TokenZeroEngine,
+    work_root: &Path,
     args: &[Value],
     exact: bool,
 ) -> Result<Value, Box<CodeModeResult>> {
@@ -941,7 +940,7 @@ fn exec_find(
             .iter()
             .filter_map(|v| v.as_str().map(PathBuf::from))
             .collect(),
-        _ => vec![tokenzero_work_root(None)],
+        _ => vec![work_root.to_path_buf()],
     };
     let opts = args.get(2).and_then(|v| v.as_object());
     let mode = opts
@@ -968,7 +967,7 @@ fn exec_find(
     Ok(tool_response_to_value(&resp))
 }
 
-fn exec_glob(engine: &TokenZeroEngine, args: &[Value]) -> Result<Value, Box<CodeModeResult>> {
+fn exec_glob(engine: &TokenZeroEngine, work_root: &Path, args: &[Value]) -> Result<Value, Box<CodeModeResult>> {
     let pattern = match args.first().and_then(|v| v.as_str()) {
         Some(p) => p,
         None => {
@@ -984,7 +983,7 @@ fn exec_glob(engine: &TokenZeroEngine, args: &[Value]) -> Result<Value, Box<Code
             .iter()
             .filter_map(|v| v.as_str().map(PathBuf::from))
             .collect(),
-        _ => vec![tokenzero_work_root(None)],
+        _ => vec![work_root.to_path_buf()],
     };
     let max_files = args
         .get(2)
@@ -1005,12 +1004,12 @@ fn exec_glob(engine: &TokenZeroEngine, args: &[Value]) -> Result<Value, Box<Code
     Ok(tool_response_to_value(&resp))
 }
 
-fn exec_tree(engine: &TokenZeroEngine, args: &[Value]) -> Result<Value, Box<CodeModeResult>> {
+fn exec_tree(engine: &TokenZeroEngine, work_root: &Path, args: &[Value]) -> Result<Value, Box<CodeModeResult>> {
     let roots = vec![
         args.first()
             .and_then(|v| v.as_str())
             .map(PathBuf::from)
-            .unwrap_or_else(|| tokenzero_work_root(None)),
+            .unwrap_or_else(|| work_root.to_path_buf()),
     ];
     let opts = args.get(1).and_then(|v| v.as_object());
     let depth = opts
@@ -1338,6 +1337,38 @@ fn execute_plan_in_token(plan: &str) -> String {
 mod tests {
     use super::*;
     use std::fs;
+
+    #[test]
+    fn pathless_tree_uses_configured_root_not_cwd() {
+        let work = tempfile::tempdir().unwrap();
+        fs::write(work.path().join("marker.txt"), "present\n").unwrap();
+        let cwd = std::env::current_dir().unwrap();
+        assert_ne!(work.path(), cwd.as_path());
+
+        let result = execute_codemode_with_options(
+            "await zero.tree()",
+            CodeModeOptions {
+                root: Some(work.path().to_path_buf()),
+                ..Default::default()
+            },
+        );
+        assert_eq!(
+            result.status,
+            CodeModeStatus::Completed,
+            "{:?}",
+            result.error
+        );
+        let text = result
+            .value
+            .as_ref()
+            .and_then(|v| v.get("text"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        assert!(
+            text.contains("marker.txt"),
+            "tree should search configured --root, not process cwd: {text}"
+        );
+    }
 
     #[test]
     fn parser_rejects_lone_quote_without_panicking() {
