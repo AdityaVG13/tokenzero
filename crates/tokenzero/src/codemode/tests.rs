@@ -281,9 +281,9 @@ fn edit_reports_zero_hunks_applied_on_engine_error() {
         serde_json::json!([{ "find": "missing", "replace": "bye" }]),
     ];
 
-    let val = exec_edit(&engine, &args).unwrap();
-    assert_eq!(val["status"], "error");
-    assert_eq!(val["hunks_applied"], 0);
+        let outcome = exec_edit(&engine, &args).unwrap();
+        assert_eq!(outcome.as_value()["status"], "error");
+        assert_eq!(outcome.as_value()["hunks_applied"], 0);
     assert_eq!(fs::read_to_string(&path).unwrap(), "hello\n");
 }
 

@@ -78,32 +78,28 @@ pub(crate) fn execute_codemode_with_options(
         match stmt {
             Statement::Binding { name, call } => {
                 ops += 1;
-                let result = match dispatch(&engine, &work_root, call, &scope) {
-                    Ok(v) => v,
+                let outcome = match dispatch(&engine, &work_root, call, &scope) {
+                    Ok(outcome) => outcome,
                     Err(mut e) => {
                         e.telemetry.operations = ops;
                         return *e;
                     }
                 };
-                collect_refs(&result, &mut all_refs);
-                total_visible += result_visible_tokens(&result);
-                total_raw += result_raw_tokens(&result);
-                last_value = result.clone();
-                scope.insert(name.clone(), result);
+                record_outcome(&outcome, &mut all_refs, &mut total_visible, &mut total_raw);
+                last_value = outcome.as_value().clone();
+                scope.insert(name.clone(), outcome.into_value());
             }
             Statement::Call(call) => {
                 ops += 1;
-                let result = match dispatch(&engine, &work_root, call, &scope) {
-                    Ok(v) => v,
+                let outcome = match dispatch(&engine, &work_root, call, &scope) {
+                    Ok(outcome) => outcome,
                     Err(mut e) => {
                         e.telemetry.operations = ops;
                         return *e;
                     }
                 };
-                collect_refs(&result, &mut all_refs);
-                total_visible += result_visible_tokens(&result);
-                total_raw += result_raw_tokens(&result);
-                last_value = result;
+                record_outcome(&outcome, &mut all_refs, &mut total_visible, &mut total_raw);
+                last_value = outcome.into_value();
             }
             Statement::Return(expr) => {
                 let value = match resolve_return(expr, &scope) {
@@ -131,7 +127,7 @@ fn dispatch(
     work_root: &Path,
     call: &MethodCall,
     scope: &HashMap<String, Value>,
-) -> Result<Value, Box<CodeModeResult>> {
+) -> Result<OpOutcome, Box<CodeModeResult>> {
     let method = call.method.as_str();
     let args: Vec<Value> = call
         .args
@@ -155,11 +151,11 @@ fn dispatch(
         "zero.mem" | "mem" => exec_mem(engine),
         "codemode.search" | "search" => {
             let query = args.first().and_then(|v| v.as_str()).unwrap_or("");
-            Ok(search_catalog(query))
+            Ok(OpOutcome::from_catalog(search_catalog(query)))
         }
         "codemode.describe" | "describe" => {
             let path = args.first().and_then(|v| v.as_str()).unwrap_or("");
-            Ok(describe_method(path))
+            Ok(OpOutcome::from_catalog(describe_method(path)))
         }
         _ => Err(Box::new(CodeModeResult::error(
             format!(
@@ -198,6 +194,55 @@ fn tool_response_to_value(resp: &ToolResponse) -> Value {
         obj["error"] = json!(err.message);
     }
     obj
+}
+
+#[derive(Debug)]
+pub(crate) struct OpOutcome {
+    value: Value,
+}
+
+impl OpOutcome {
+    fn from_tool_response(resp: &ToolResponse) -> Self {
+        Self {
+            value: tool_response_to_value(resp),
+        }
+    }
+
+    fn from_catalog(value: Value) -> Self {
+        Self { value }
+    }
+
+    pub(crate) fn into_value(self) -> Value {
+        self.value
+    }
+
+    pub(crate) fn as_value(&self) -> &Value {
+        &self.value
+    }
+
+    fn with_value(mut self, update: impl FnOnce(&mut Value)) -> Self {
+        update(&mut self.value);
+        self
+    }
+
+    fn visible_tokens(&self) -> usize {
+        result_visible_tokens(&self.value)
+    }
+
+    fn raw_tokens(&self) -> usize {
+        result_raw_tokens(&self.value)
+    }
+}
+
+fn record_outcome(
+    outcome: &OpOutcome,
+    all_refs: &mut Vec<String>,
+    total_visible: &mut usize,
+    total_raw: &mut usize,
+) {
+    collect_refs(&outcome.value, all_refs);
+    *total_visible += outcome.visible_tokens();
+    *total_raw += outcome.raw_tokens();
 }
 
 struct Opts<'a>(Option<&'a serde_json::Map<String, Value>>);
@@ -269,7 +314,7 @@ fn require_paths_from_arg(
     }
 }
 
-fn exec_read(engine: &TokenZeroEngine, args: &[Value]) -> Result<Value, Box<CodeModeResult>> {
+fn exec_read(engine: &TokenZeroEngine, args: &[Value]) -> Result<OpOutcome, Box<CodeModeResult>> {
     let paths = require_paths_from_arg(
         args,
         0,
@@ -284,7 +329,7 @@ fn exec_read(engine: &TokenZeroEngine, args: &[Value]) -> Result<Value, Box<Code
         .unwrap_or(engine.config.max_visible_tokens);
 
     let resp = engine.read(&paths, mode, start_line, end_line, false, 20, max_visible);
-    Ok(tool_response_to_value(&resp))
+    Ok(OpOutcome::from_tool_response(&resp))
 }
 
 fn exec_find(
@@ -292,7 +337,7 @@ fn exec_find(
     work_root: &Path,
     args: &[Value],
     exact: bool,
-) -> Result<Value, Box<CodeModeResult>> {
+) -> Result<OpOutcome, Box<CodeModeResult>> {
     let pattern = require_str_arg(
         args,
         0,
@@ -311,10 +356,10 @@ fn exec_find(
     } else {
         engine.find(pattern, &paths, mode, max_files, max_visible)
     };
-    Ok(tool_response_to_value(&resp))
+    Ok(OpOutcome::from_tool_response(&resp))
 }
 
-fn exec_glob(engine: &TokenZeroEngine, work_root: &Path, args: &[Value]) -> Result<Value, Box<CodeModeResult>> {
+fn exec_glob(engine: &TokenZeroEngine, work_root: &Path, args: &[Value]) -> Result<OpOutcome, Box<CodeModeResult>> {
     let pattern = require_str_arg(
         args,
         0,
@@ -331,10 +376,10 @@ fn exec_glob(engine: &TokenZeroEngine, work_root: &Path, args: &[Value]) -> Resu
         max_files,
         engine.config.max_visible_tokens,
     );
-    Ok(tool_response_to_value(&resp))
+    Ok(OpOutcome::from_tool_response(&resp))
 }
 
-fn exec_tree(engine: &TokenZeroEngine, work_root: &Path, args: &[Value]) -> Result<Value, Box<CodeModeResult>> {
+fn exec_tree(engine: &TokenZeroEngine, work_root: &Path, args: &[Value]) -> Result<OpOutcome, Box<CodeModeResult>> {
     let roots = vec![
         args.first()
             .and_then(|v| v.as_str())
@@ -354,10 +399,10 @@ fn exec_tree(engine: &TokenZeroEngine, work_root: &Path, args: &[Value]) -> Resu
         max_files,
         engine.config.max_visible_tokens,
     );
-    Ok(tool_response_to_value(&resp))
+    Ok(OpOutcome::from_tool_response(&resp))
 }
 
-fn exec_shell(engine: &TokenZeroEngine, args: &[Value]) -> Result<Value, Box<CodeModeResult>> {
+fn exec_shell(engine: &TokenZeroEngine, args: &[Value]) -> Result<OpOutcome, Box<CodeModeResult>> {
     let command = require_str_arg(
         args,
         0,
@@ -382,19 +427,19 @@ fn exec_shell(engine: &TokenZeroEngine, args: &[Value]) -> Result<Value, Box<Cod
         timeout,
     );
 
-    let mut val = tool_response_to_value(&resp);
-    if let Some(telem) = &resp.telemetry {
-        if let Some(exit) = telem.get("exit_code") {
-            val["exit_code"] = exit.clone();
+    Ok(OpOutcome::from_tool_response(&resp).with_value(|value| {
+        if let Some(telem) = &resp.telemetry {
+            if let Some(exit) = telem.get("exit_code") {
+                value["exit_code"] = exit.clone();
+            }
+            if let Some(success) = telem.get("command_success") {
+                value["success"] = success.clone();
+            }
         }
-        if let Some(success) = telem.get("command_success") {
-            val["success"] = success.clone();
-        }
-    }
-    Ok(val)
+    }))
 }
 
-pub(crate) fn exec_edit(engine: &TokenZeroEngine, args: &[Value]) -> Result<Value, Box<CodeModeResult>> {
+pub(crate) fn exec_edit(engine: &TokenZeroEngine, args: &[Value]) -> Result<OpOutcome, Box<CodeModeResult>> {
     let path = PathBuf::from(require_str_arg(
         args,
         0,
@@ -446,12 +491,12 @@ pub(crate) fn exec_edit(engine: &TokenZeroEngine, args: &[Value]) -> Result<Valu
     } else {
         0
     };
-    let mut val = tool_response_to_value(&resp);
-    val["hunks_applied"] = json!(hunks_applied);
-    Ok(val)
+    Ok(OpOutcome::from_tool_response(&resp).with_value(|value| {
+        value["hunks_applied"] = json!(hunks_applied);
+    }))
 }
 
-fn exec_expand(engine: &TokenZeroEngine, args: &[Value]) -> Result<Value, Box<CodeModeResult>> {
+fn exec_expand(engine: &TokenZeroEngine, args: &[Value]) -> Result<OpOutcome, Box<CodeModeResult>> {
     let ref_id = require_str_arg(
         args,
         0,
@@ -476,10 +521,10 @@ fn exec_expand(engine: &TokenZeroEngine, args: &[Value]) -> Result<Value, Box<Co
         None,
         None,
     );
-    Ok(tool_response_to_value(&resp))
+    Ok(OpOutcome::from_tool_response(&resp))
 }
 
-fn exec_compact(engine: &TokenZeroEngine, args: &[Value]) -> Result<Value, Box<CodeModeResult>> {
+fn exec_compact(engine: &TokenZeroEngine, args: &[Value]) -> Result<OpOutcome, Box<CodeModeResult>> {
     let data = match args.first() {
         Some(Value::String(s)) => s.clone(),
         Some(other) => serde_json::to_string(other).unwrap_or_default(),
@@ -492,12 +537,12 @@ fn exec_compact(engine: &TokenZeroEngine, args: &[Value]) -> Result<Value, Box<C
     };
     let content_type = detect_content_type(&data, None);
     let resp = engine.ingest(&data, content_type, Mode::Auto, "codemode-compact");
-    let mut val = tool_response_to_value(&resp);
-    val["raw_tokens"] = json!(count_tokens(&data));
-    Ok(val)
+    Ok(OpOutcome::from_tool_response(&resp).with_value(|value| {
+        value["raw_tokens"] = json!(count_tokens(&data));
+    }))
 }
 
-fn exec_ingest(engine: &TokenZeroEngine, args: &[Value]) -> Result<Value, Box<CodeModeResult>> {
+fn exec_ingest(engine: &TokenZeroEngine, args: &[Value]) -> Result<OpOutcome, Box<CodeModeResult>> {
     let text = require_str_arg(args, 0, "zero.ingest requires text as first argument")?;
     let opts = Opts::from_arg(args, 1);
     let mode = opts.mode_or("mode", Mode::Auto);
@@ -505,12 +550,12 @@ fn exec_ingest(engine: &TokenZeroEngine, args: &[Value]) -> Result<Value, Box<Co
     let content_type = detect_content_type(text, None);
 
     let resp = engine.ingest(text, content_type, mode, source);
-    Ok(tool_response_to_value(&resp))
+    Ok(OpOutcome::from_tool_response(&resp))
 }
 
-fn exec_mem(engine: &TokenZeroEngine) -> Result<Value, Box<CodeModeResult>> {
+fn exec_mem(engine: &TokenZeroEngine) -> Result<OpOutcome, Box<CodeModeResult>> {
     let resp = engine.mem();
-    Ok(tool_response_to_value(&resp))
+    Ok(OpOutcome::from_tool_response(&resp))
 }
 
 fn collect_refs(value: &Value, refs: &mut Vec<String>) {
