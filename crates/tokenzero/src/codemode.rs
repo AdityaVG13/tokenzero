@@ -297,7 +297,8 @@ struct MethodCall {
 #[derive(Debug, Clone)]
 enum Expr {
     StringLit(String),
-    NumberLit(f64),
+    IntLit(i64),
+    FloatLit(f64),
     BoolLit(bool),
     Null,
     Array(Vec<Expr>),
@@ -426,8 +427,14 @@ fn parse_expr(s: &str) -> Result<Expr, String> {
         return Ok(Expr::BoolLit(false));
     }
 
+    if let Ok(n) = s.parse::<i64>() {
+        return Ok(Expr::IntLit(n));
+    }
     if let Ok(n) = s.parse::<f64>() {
-        return Ok(Expr::NumberLit(n));
+        if !n.is_finite() {
+            return Err(format!("invalid number literal: {s}"));
+        }
+        return Ok(Expr::FloatLit(n));
     }
 
     if (s.starts_with('"') && s.ends_with('"'))
@@ -1239,7 +1246,14 @@ fn exec_mem(engine: &TokenZeroEngine) -> Result<Value, Box<CodeModeResult>> {
 fn resolve_expr(expr: &Expr, scope: &HashMap<String, Value>) -> Value {
     match expr {
         Expr::StringLit(s) => Value::String(s.clone()),
-        Expr::NumberLit(n) => json!(n),
+        Expr::IntLit(n) => {
+            if *n >= 0 {
+                json!(*n as u64)
+            } else {
+                json!(*n)
+            }
+        }
+        Expr::FloatLit(n) => json!(*n),
         Expr::BoolLit(b) => json!(b),
         Expr::Null => Value::Null,
         Expr::Array(items) => Value::Array(items.iter().map(|e| resolve_expr(e, scope)).collect()),
@@ -1320,6 +1334,23 @@ fn execute_plan_in_token(plan: &str) -> String {
 mod tests {
     use super::*;
     use std::fs;
+
+    #[test]
+    fn parser_object_numeric_options_resolve_as_u64() {
+        let scope = HashMap::new();
+        let expr = parse_expr("{ start_line: 1, end_line: 10, max_files: 5 }").unwrap();
+        let value = resolve_expr(&expr, &scope);
+        let obj = value.as_object().unwrap();
+        assert_eq!(obj.get("start_line").and_then(|v| v.as_u64()), Some(1));
+        assert_eq!(obj.get("end_line").and_then(|v| v.as_u64()), Some(10));
+        assert_eq!(obj.get("max_files").and_then(|v| v.as_u64()), Some(5));
+    }
+
+    #[test]
+    fn parser_rejects_non_finite_number_literals() {
+        assert!(parse_expr("inf").is_err());
+        assert!(parse_expr("nan").is_err());
+    }
 
     #[test]
     fn empty_plan_returns_error() {
