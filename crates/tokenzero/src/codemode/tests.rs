@@ -10,6 +10,19 @@ execute_codemode(plan).to_line()
 }
 
     #[test]
+    fn undefined_variable_in_return_is_plan_error() {
+        let result = execute_codemode("return missing_binding");
+        assert_eq!(result.status, CodeModeStatus::Error);
+        assert!(
+            result
+                .error
+                .as_deref()
+                .unwrap()
+                .contains("undefined variable: missing_binding")
+        );
+    }
+
+    #[test]
     fn read_honors_start_and_end_line_options() {
         let work = tempfile::tempdir().unwrap();
         let path = work.path().join("lines.txt");
@@ -88,7 +101,7 @@ fn parser_rejects_lone_quote_without_panicking() {
 fn parser_object_numeric_options_resolve_as_u64() {
     let scope = HashMap::new();
     let expr = parse_expr("{ start_line: 1, end_line: 10, max_files: 5 }").unwrap();
-    let value = resolve_expr(&expr, &scope);
+        let value = resolve_expr(&expr, &scope).unwrap();
     let obj = value.as_object().unwrap();
     assert_eq!(obj.get("start_line").and_then(|v| v.as_u64()), Some(1));
     assert_eq!(obj.get("end_line").and_then(|v| v.as_u64()), Some(10));

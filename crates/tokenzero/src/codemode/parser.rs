@@ -413,52 +413,71 @@ fn split_top_level_commas(s: &str) -> Vec<&str> {
     parts
 }
 
-pub(crate) fn resolve_expr(expr: &Expr, scope: &HashMap<String, Value>) -> Value {
+pub(crate) fn resolve_expr(expr: &Expr, scope: &HashMap<String, Value>) -> Result<Value, String> {
     match expr {
-        Expr::StringLit(s) => Value::String(s.clone()),
+        Expr::StringLit(s) => Ok(Value::String(s.clone())),
         Expr::IntLit(n) => {
             if *n >= 0 {
-                json!(*n as u64)
+                Ok(json!(*n as u64))
             } else {
-                json!(*n)
+                Ok(json!(*n))
             }
         }
-        Expr::FloatLit(n) => json!(*n),
-        Expr::BoolLit(b) => json!(b),
-        Expr::Null => Value::Null,
-        Expr::Array(items) => Value::Array(items.iter().map(|e| resolve_expr(e, scope)).collect()),
+        Expr::FloatLit(n) => Ok(json!(*n)),
+        Expr::BoolLit(b) => Ok(json!(b)),
+        Expr::Null => Ok(Value::Null),
+        Expr::Array(items) => Ok(Value::Array(
+            items
+                .iter()
+                .map(|item| resolve_expr(item, scope))
+                .collect::<Result<Vec<_>, _>>()?,
+        )),
         Expr::Object(fields) => {
             let obj: serde_json::Map<String, Value> = fields
                 .iter()
-                .map(|(k, v)| (k.clone(), resolve_expr(v, scope)))
-                .collect();
-            Value::Object(obj)
+                .map(|(key, value)| resolve_expr(value, scope).map(|resolved| (key.clone(), resolved)))
+                .collect::<Result<_, _>>()?;
+            Ok(Value::Object(obj))
         }
-        Expr::VarRef(name) => scope.get(name).cloned().unwrap_or(Value::Null),
-        Expr::PropAccess(obj, prop) => scope
-            .get(obj)
-            .and_then(|v| v.get(prop))
+        Expr::VarRef(name) => scope
+            .get(name)
             .cloned()
-            .unwrap_or(Value::Null),
+            .ok_or_else(|| format!("undefined variable: {name}")),
+        Expr::PropAccess(obj, prop) => {
+            let value = scope
+                .get(obj)
+                .ok_or_else(|| format!("undefined variable: {obj}"))?;
+            value
+                .get(prop)
+                .cloned()
+                .ok_or_else(|| format!("undefined property: {obj}.{prop}"))
+        }
     }
 }
 
-pub(crate) fn resolve_return(expr: &ReturnExpr, scope: &HashMap<String, Value>) -> Value {
+pub(crate) fn resolve_return(expr: &ReturnExpr, scope: &HashMap<String, Value>) -> Result<Value, String> {
     match expr {
-        ReturnExpr::Var(name) => scope.get(name).cloned().unwrap_or(Value::Null),
-        ReturnExpr::PropAccess(obj, prop) => scope
-            .get(obj)
-            .and_then(|v| v.get(prop))
+        ReturnExpr::Var(name) => scope
+            .get(name)
             .cloned()
-            .unwrap_or(Value::Null),
+            .ok_or_else(|| format!("undefined variable: {name}")),
+        ReturnExpr::PropAccess(obj, prop) => {
+            let value = scope
+                .get(obj)
+                .ok_or_else(|| format!("undefined variable: {obj}"))?;
+            value
+                .get(prop)
+                .cloned()
+                .ok_or_else(|| format!("undefined property: {obj}.{prop}"))
+        }
         ReturnExpr::Object(fields) => {
             let obj: serde_json::Map<String, Value> = fields
                 .iter()
-                .map(|(k, v)| (k.clone(), resolve_expr(v, scope)))
-                .collect();
-            Value::Object(obj)
+                .map(|(key, value)| resolve_expr(value, scope).map(|resolved| (key.clone(), resolved)))
+                .collect::<Result<_, _>>()?;
+            Ok(Value::Object(obj))
         }
-        ReturnExpr::Expr(e) => resolve_expr(e, scope),
+        ReturnExpr::Expr(expression) => resolve_expr(expression, scope),
     }
 }
 

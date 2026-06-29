@@ -106,7 +106,10 @@ pub(crate) fn execute_codemode_with_options(
                 last_value = result;
             }
             Statement::Return(expr) => {
-                let value = resolve_return(expr, &scope);
+                let value = match resolve_return(expr, &scope) {
+                    Ok(value) => value,
+                    Err(message) => return CodeModeResult::error(message, ops),
+                };
                 let vis = count_tokens(&serde_json::to_string(&value).unwrap_or_default());
                 return CodeModeResult::completed(
                     value,
@@ -130,7 +133,13 @@ fn dispatch(
     scope: &HashMap<String, Value>,
 ) -> Result<Value, Box<CodeModeResult>> {
     let method = call.method.as_str();
-    let args: Vec<Value> = call.args.iter().map(|a| resolve_expr(a, scope)).collect();
+    let args: Vec<Value> = call
+        .args
+        .iter()
+        .map(|arg| {
+            resolve_expr(arg, scope).map_err(|message| Box::new(CodeModeResult::error(message, 0)))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
 
     match method {
         "zero.read" | "read" => exec_read(engine, &args),
