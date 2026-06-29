@@ -101,7 +101,7 @@ pub(crate) enum Commands {
     ExactRecoveryAudit(ExactRecoveryAuditArgs),
     #[command(
         name = "codemode",
-        about = "Run CodeMode plan for token.* surface (compact, expand, refs; Cloudflare-style)"
+        about = "Run a CodeMode-style plan for the TokenZero zero.token.* surface"
     )]
     CodeMode(CodeModeArgs),
     #[command(name = "harm-eval")]
@@ -982,6 +982,20 @@ pub(crate) struct CodeModeArgs {
     /// CodeMode plan as an explicit flag; kept for router compatibility.
     #[arg(short = 'p', long = "plan", value_name = "PLAN")]
     pub(crate) plan_flag: Option<String>,
+    /// Workspace root used for CodeMode file, shell, and recovery-cache boundaries.
+    #[arg(long)]
+    pub(crate) root: Option<PathBuf>,
+    /// Additional allowed roots for plans that must intentionally cross the workspace boundary.
+    #[arg(long)]
+    pub(crate) allowed_root: Vec<PathBuf>,
+    /// Override the CodeMode recovery cache path.
+    #[arg(long)]
+    pub(crate) cache_path: Option<PathBuf>,
+    /// Maximum visible tokens for each underlying TokenZero operation.
+    #[arg(long, default_value_t = 4000)]
+    pub(crate) max_visible_tokens: usize,
+    #[arg(long, alias = "timeout", alias = "timout", value_name = "SECONDS")]
+    pub(crate) timeout_seconds: Option<u64>,
     #[arg(long)]
     pub(crate) json: bool,
 }

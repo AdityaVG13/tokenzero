@@ -1,17 +1,17 @@
-//! TokenZero CodeMode surface — a Cloudflare-style code-plan executor that
-//! exposes all TokenZero operations as typed methods. Models write JS-like
+//! TokenZero CodeMode surface — a CodeMode-style code-plan executor that
+//! exposes TokenZero operations as typed methods. Models write JS-like
 //! plans; the executor parses, dispatches through TokenZeroEngine, and returns
 //! only the final shaped result. Additive to MCP, never replaces it.
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 use tokenzero_core::{Mode, ToolResponse, count_tokens, detect_content_type};
-use tokenzero_mcp::{EditHunk, EngineConfig, TokenZeroEngine};
+use tokenzero_mcp::{EditHunk, EngineConfig, TokenZeroEngine, shell_timeout_from_secs};
 
-use crate::zerostack_store::{resolve_recovery_cache_path, tokenzero_work_root};
+use crate::zerostack_store::{default_codemode_recovery_cache_path, tokenzero_work_root};
 
 pub const CODEMODE_SCHEMA: &str = "tokenzero.codemode.v1";
 
@@ -42,6 +42,27 @@ pub struct CodeModeTelemetry {
     pub operations: usize,
     pub visible_tokens: usize,
     pub raw_tokens: usize,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct CodeModeOptions {
+    pub(crate) root: Option<PathBuf>,
+    pub(crate) allowed_roots: Vec<PathBuf>,
+    pub(crate) cache_path: Option<PathBuf>,
+    pub(crate) max_visible_tokens: usize,
+    pub(crate) timeout_seconds: Option<u64>,
+}
+
+impl Default for CodeModeOptions {
+    fn default() -> Self {
+        Self {
+            root: None,
+            allowed_roots: Vec::new(),
+            cache_path: None,
+            max_visible_tokens: 4000,
+            timeout_seconds: None,
+        }
+    }
 }
 
 impl CodeModeResult {
@@ -123,19 +144,19 @@ const METHOD_CATALOG: &[MethodDef] = &[
         path: "zero.find",
         connector: "zero",
         description: "Search file contents for a pattern (regex or literal) with compact results",
-        signature: "zero.find(pattern: string, path?: string | string[], opts?: { mode?, max_files?, max_visible_tokens? }): Promise<{ text: string, ref: string, hits: number }>",
+        signature: "zero.find(pattern: string, path?: string | string[], opts?: { mode?, max_files?, max_visible_tokens? }): Promise<{ text: string, ref: string, status: string, visible_tokens?: number, raw_tokens?: number }>",
     },
     MethodDef {
         path: "zero.grep",
         connector: "zero",
         description: "Exact literal substring search (no regex interpretation)",
-        signature: "zero.grep(pattern: string, path?: string | string[], opts?: { mode?, max_files?, max_visible_tokens? }): Promise<{ text: string, ref: string, hits: number }>",
+        signature: "zero.grep(pattern: string, path?: string | string[], opts?: { mode?, max_files?, max_visible_tokens? }): Promise<{ text: string, ref: string, status: string, visible_tokens?: number, raw_tokens?: number }>",
     },
     MethodDef {
         path: "zero.glob",
         connector: "zero",
         description: "List file paths matching a glob pattern (no file contents)",
-        signature: "zero.glob(pattern: string, path?: string | string[], opts?: { max_files? }): Promise<{ text: string, ref: string, files: number }>",
+        signature: "zero.glob(pattern: string, path?: string | string[], opts?: { max_files? }): Promise<{ text: string, ref: string, status: string, visible_tokens?: number, raw_tokens?: number }>",
     },
     MethodDef {
         path: "zero.tree",
@@ -156,15 +177,27 @@ const METHOD_CATALOG: &[MethodDef] = &[
         signature: "zero.edit(path: string, edits: Array<{ find: string, replace: string, replace_all?: boolean }>, opts?: { dry_run?, create? }): Promise<{ text: string, ref: string, hunks_applied: number }>",
     },
     MethodDef {
+        path: "zero.token.expand",
+        connector: "zero.token",
+        description: "Recover exact bytes from a tz:// ref",
+        signature: "zero.token.expand(ref: string, opts?: { start_line?, end_line?, selector? }): Promise<{ text: string, status: string, ref?: string, visible_tokens?: number, raw_tokens?: number }>",
+    },
+    MethodDef {
+        path: "zero.token.compact",
+        connector: "zero.token",
+        description: "Store arbitrary text/data behind a content-addressed tz://blob ref",
+        signature: "zero.token.compact(data: string): Promise<{ ref: string, raw_tokens: number }>",
+    },
+    MethodDef {
         path: "zero.expand",
         connector: "zero",
-        description: "Recover exact bytes from a tz:// ref",
-        signature: "zero.expand(ref: string, opts?: { start_line?, end_line?, selector? }): Promise<{ text: string, found: boolean }>",
+        description: "Recover exact bytes from a tz:// ref (compatibility alias for zero.token.expand)",
+        signature: "zero.expand(ref: string, opts?: { start_line?, end_line?, selector? }): Promise<{ text: string, status: string, ref?: string, visible_tokens?: number, raw_tokens?: number }>",
     },
     MethodDef {
         path: "zero.compact",
         connector: "zero",
-        description: "Store arbitrary text/data behind a content-addressed tz://blob ref",
+        description: "Store arbitrary text/data behind a content-addressed tz://blob ref (compatibility alias for zero.token.compact)",
         signature: "zero.compact(data: string): Promise<{ ref: string, raw_tokens: number }>",
     },
     MethodDef {
@@ -647,27 +680,51 @@ fn split_top_level_commas(s: &str) -> Vec<&str> {
 
 // ─── Executor ───────────────────────────────────────────────────────────────
 
-fn make_engine() -> TokenZeroEngine {
-    let root = tokenzero_work_root(None);
-    let cache_path = resolve_recovery_cache_path(&root, None);
-    let mut allowed = vec![root.clone()];
-    if let Ok(home) = std::env::var("HOME") {
-        let home_path = PathBuf::from(&home);
-        if home_path != root {
-            allowed.push(home_path);
-        }
-    }
+fn make_engine_with_options(options: &CodeModeOptions) -> TokenZeroEngine {
+    make_engine_for_root_with_options(tokenzero_work_root(options.root.clone()), options)
+}
+
+#[cfg(test)]
+fn make_engine_for_root(root: PathBuf) -> TokenZeroEngine {
+    make_engine_for_root_with_options(root, &CodeModeOptions::default())
+}
+
+fn make_engine_for_root_with_options(root: PathBuf, options: &CodeModeOptions) -> TokenZeroEngine {
+    let cache_path = options
+        .cache_path
+        .clone()
+        .unwrap_or_else(|| default_codemode_recovery_cache_path(&root));
     TokenZeroEngine::new(EngineConfig {
-        allowed_roots: allowed,
+        allowed_roots: codemode_allowed_roots(&root, &options.allowed_roots),
         cache_path,
-        max_visible_tokens: 4000,
+        max_visible_tokens: options.max_visible_tokens,
         mode: Mode::Auto,
-        shell_timeout: Duration::from_secs(60),
+        shell_timeout: shell_timeout_from_secs(options.timeout_seconds),
         ..EngineConfig::for_root(&root)
     })
 }
 
+fn codemode_allowed_roots(root: &Path, explicit: &[PathBuf]) -> Vec<PathBuf> {
+    let mut roots = if explicit.is_empty() {
+        vec![root.to_path_buf()]
+    } else {
+        explicit.to_vec()
+    };
+    if !roots.iter().any(|candidate| candidate == root) {
+        roots.push(root.to_path_buf());
+    }
+    roots
+}
+
+#[cfg(test)]
 pub fn execute_codemode(plan: &str) -> CodeModeResult {
+    execute_codemode_with_options(plan, CodeModeOptions::default())
+}
+
+pub(crate) fn execute_codemode_with_options(
+    plan: &str,
+    options: CodeModeOptions,
+) -> CodeModeResult {
     let plan = plan.trim();
     if plan.is_empty() {
         return CodeModeResult::error("empty plan", 0);
@@ -691,7 +748,7 @@ pub fn execute_codemode(plan: &str) -> CodeModeResult {
         Err(e) => return CodeModeResult::error(e, 0),
     };
 
-    let engine = make_engine();
+    let engine = make_engine_with_options(&options);
     let mut scope: HashMap<String, Value> = HashMap::new();
     let mut all_refs: Vec<String> = Vec::new();
     let mut ops: usize = 0;
@@ -764,8 +821,8 @@ fn dispatch(
         "zero.tree" | "tree" => exec_tree(engine, &args),
         "zero.shell" | "shell" => exec_shell(engine, &args),
         "zero.edit" | "edit" => exec_edit(engine, &args),
-        "zero.expand" | "expand" => exec_expand(engine, &args),
-        "zero.compact" | "compact" => exec_compact(engine, &args),
+        "zero.token.expand" | "zero.expand" | "expand" => exec_expand(engine, &args),
+        "zero.token.compact" | "zero.compact" | "compact" => exec_compact(engine, &args),
         "zero.ingest" | "ingest" => exec_ingest(engine, &args),
         "zero.mem" | "mem" => exec_mem(engine),
         "codemode.search" | "search" => {
@@ -847,7 +904,7 @@ fn exec_read(engine: &TokenZeroEngine, args: &[Value]) -> Result<Value, Box<Code
         .and_then(|o| o.get("max_visible_tokens"))
         .and_then(|v| v.as_u64())
         .map(|n| n as usize)
-        .unwrap_or(4000);
+        .unwrap_or(engine.config.max_visible_tokens);
 
     let resp = engine.read(&paths, mode, start_line, end_line, false, 20, max_visible);
     Ok(tool_response_to_value(&resp))
@@ -890,7 +947,7 @@ fn exec_find(
         .and_then(|o| o.get("max_visible_tokens"))
         .and_then(|v| v.as_u64())
         .map(|n| n as usize)
-        .unwrap_or(4000);
+        .unwrap_or(engine.config.max_visible_tokens);
 
     let resp = if exact {
         engine.grep(pattern, &paths, mode, max_files, max_visible)
@@ -926,7 +983,14 @@ fn exec_glob(engine: &TokenZeroEngine, args: &[Value]) -> Result<Value, Box<Code
         .map(|n| n as usize)
         .unwrap_or(200);
 
-    let resp = engine.glob(pattern, &paths, false, Mode::Auto, max_files, 4000);
+    let resp = engine.glob(
+        pattern,
+        &paths,
+        false,
+        Mode::Auto,
+        max_files,
+        engine.config.max_visible_tokens,
+    );
     Ok(tool_response_to_value(&resp))
 }
 
@@ -953,7 +1017,14 @@ fn exec_tree(engine: &TokenZeroEngine, args: &[Value]) -> Result<Value, Box<Code
         .map(|n| n as usize)
         .unwrap_or(200);
 
-    let resp = engine.tree(&roots, depth, include_hidden, Mode::Auto, max_files, 4000);
+    let resp = engine.tree(
+        &roots,
+        depth,
+        include_hidden,
+        Mode::Auto,
+        max_files,
+        engine.config.max_visible_tokens,
+    );
     Ok(tool_response_to_value(&resp))
 }
 
@@ -987,7 +1058,7 @@ fn exec_shell(engine: &TokenZeroEngine, args: &[Value]) -> Result<Value, Box<Cod
         None,
         cwd.as_deref(),
         mode,
-        None,
+        Some("safe"),
         false,
         None,
         None,
@@ -1056,14 +1127,14 @@ fn exec_expand(engine: &TokenZeroEngine, args: &[Value]) -> Result<Value, Box<Co
         Some(r) => r,
         None => {
             return Err(Box::new(CodeModeResult::error(
-                "zero.expand requires a tz:// ref string as first argument",
+                "zero.token.expand/zero.expand requires a tz:// ref string as first argument",
                 0,
             )));
         }
     };
     if !ref_id.starts_with("tz://") {
         return Err(Box::new(CodeModeResult::error(
-            format!("zero.expand: ref must start with tz://, got: {ref_id}"),
+            format!("zero.token.expand/zero.expand: ref must start with tz://, got: {ref_id}"),
             0,
         )));
     }
@@ -1098,7 +1169,7 @@ fn exec_compact(engine: &TokenZeroEngine, args: &[Value]) -> Result<Value, Box<C
         Some(other) => serde_json::to_string(other).unwrap_or_default(),
         None => {
             return Err(Box::new(CodeModeResult::error(
-                "zero.compact requires data as first argument",
+                "zero.token.compact/zero.compact requires data as first argument",
                 0,
             )));
         }
@@ -1313,6 +1384,48 @@ mod tests {
         let val2 = r2.value.as_ref().unwrap();
         let text = val2["text"].as_str().unwrap_or("");
         assert!(text.contains("test payload for codemode"));
+    }
+
+    #[test]
+    fn token_namespace_compact_roundtrip_through_codemode() {
+        let r = execute_codemode(r#"await zero.token.compact("token namespace payload")"#);
+        assert_eq!(r.status, CodeModeStatus::Completed, "{:?}", r.error);
+        let val = r.value.as_ref().unwrap();
+        let ref_id = val["ref"].as_str().unwrap();
+        assert!(ref_id.starts_with("tz://"));
+
+        let expand_plan = format!(r#"await zero.token.expand("{ref_id}")"#);
+        let r2 = execute_codemode(&expand_plan);
+        assert_eq!(r2.status, CodeModeStatus::Completed, "{:?}", r2.error);
+        let val2 = r2.value.as_ref().unwrap();
+        let text = val2["text"].as_str().unwrap_or("");
+        assert!(text.contains("token namespace payload"));
+    }
+
+    #[test]
+    fn describe_token_namespace_returns_signature() {
+        let r = execute_codemode("describe:zero.token.compact");
+        assert_eq!(r.status, CodeModeStatus::Completed);
+        let val = r.value.unwrap();
+        assert_eq!(val["path"], "zero.token.compact");
+        assert!(
+            val["types"]
+                .as_str()
+                .unwrap()
+                .contains("zero.token.compact")
+        );
+    }
+
+    #[test]
+    fn codemode_engine_uses_dedicated_cache_and_repo_scope() {
+        let root = PathBuf::from("/tmp/tokenzero-codemode-root");
+        let engine = make_engine_for_root(root.clone());
+        assert_eq!(engine.config.allowed_roots, vec![root.clone()]);
+        assert_eq!(
+            engine.config.cache_path,
+            crate::zerostack_store::default_codemode_recovery_cache_path(&root)
+        );
+        assert!(engine.config.cache_path.ends_with("codemode-recovery.json"));
     }
 
     #[test]

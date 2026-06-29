@@ -5,7 +5,7 @@ use clap::{CommandFactory, Parser};
 use serde_json::json;
 use std::ffi::OsString;
 use std::fs;
-use std::io::Read;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Instant;
@@ -225,11 +225,25 @@ fn main() -> Result<()> {
             args.json,
         )?,
         Commands::CodeMode(args) => {
-            let result = codemode::execute_codemode(args.plan_text());
+            let result = codemode::execute_codemode_with_options(
+                args.plan_text(),
+                codemode::CodeModeOptions {
+                    root: args.root.clone(),
+                    allowed_roots: args.allowed_root.clone(),
+                    cache_path: args.cache_path.clone(),
+                    max_visible_tokens: args.max_visible_tokens,
+                    timeout_seconds: args.timeout_seconds,
+                },
+            );
+            let failed = result.status == codemode::CodeModeStatus::Error;
             if args.json {
                 println!("{}", serde_json::to_string(&result)?);
             } else {
                 println!("{}", result.to_line());
+            }
+            if failed {
+                std::io::stdout().flush()?;
+                std::process::exit(1);
             }
         }
         Commands::Quote(args) => handle_quote(args)?,
