@@ -127,6 +127,24 @@ const METHOD_CATALOG: &[MethodDef] = &[
         signature: "zero.batch(ops: Array<{ tool: string, args: object }>): Promise<{ text: string, refs: string[] }>",
     },
     MethodDef {
+        path: "zero.pipe",
+        connector: "zero",
+        description: "Execute a sequence of operations with result threading (_prev auto-binding)",
+        signature: "zero.pipe(steps: Array<{ method: string, args?: any[] }>): Promise<{ steps: number, results: any[], last: any }>",
+    },
+    MethodDef {
+        path: "zero.pick",
+        connector: "zero",
+        description: "Extract specific keys from an object value",
+        signature: "zero.pick(source: object, keys: string[] | ...string): Promise<object>",
+    },
+    MethodDef {
+        path: "zero.filter_lines",
+        connector: "zero",
+        description: "Filter lines in a text value by substring match",
+        signature: "zero.filter_lines(source: { text: string } | string, pattern: string): Promise<{ text: string, lines: number, pattern: string }>",
+    },
+    MethodDef {
         path: "codemode.search",
         connector: "codemode",
         description: "Search available methods by keyword",

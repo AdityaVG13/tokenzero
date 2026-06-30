@@ -33,6 +33,9 @@ pub struct CodeModeTelemetry {
     pub operations: usize,
     pub visible_tokens: usize,
     pub raw_tokens: usize,
+    /// How many individual MCP tool calls this plan replaced (ops + plan overhead).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub equivalent_calls: Option<usize>,
 }
 
 #[derive(Debug, Clone)]
@@ -73,6 +76,7 @@ impl CodeModeResult {
                 operations: ops,
                 visible_tokens: visible,
                 raw_tokens: raw,
+                equivalent_calls: Some(ops.saturating_add(1)),
             },
             error: None,
         }
@@ -88,6 +92,7 @@ impl CodeModeResult {
                 operations: ops,
                 visible_tokens: 0,
                 raw_tokens: 0,
+                equivalent_calls: None,
             },
             error: Some(msg.into()),
         }

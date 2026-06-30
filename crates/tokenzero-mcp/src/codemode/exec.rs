@@ -13,7 +13,7 @@ use crate::workspace::{
 use crate::{EditHunk, EngineConfig, TokenZeroEngine, shell_timeout_from_secs};
 
 use super::catalog::{describe_method, search_catalog};
-use super::parser::{MethodCall, Statement, parse_plan, resolve_expr, resolve_return};
+use super::parser::{Expr, MethodCall, Statement, parse_plan, resolve_expr, resolve_return};
 use super::result::{CodeModeOptions, CodeModeResult};
 
 #[cfg(test)]
@@ -155,6 +155,9 @@ fn dispatch(
         "zero.rewrite" | "rewrite" => exec_rewrite(&args),
         "zero.discover" | "discover" => exec_discover(),
         "zero.batch" | "batch" => exec_batch(engine, &args),
+        "zero.pipe" | "pipe" => exec_pipe(engine, work_root, &args),
+        "zero.pick" | "pick" => exec_pick(&args),
+        "zero.filter_lines" | "filter_lines" => exec_filter_lines(&args),
         "codemode.search" | "search" => {
             let query = args.first().and_then(|v| v.as_str()).unwrap_or("");
             Ok(OpOutcome::from_catalog(search_catalog(query)))
@@ -672,6 +675,142 @@ fn exec_batch(engine: &TokenZeroEngine, args: &[Value]) -> Result<OpOutcome, Box
         Err(error) => Err(Box::new(CodeModeResult::error(error.message_text(), 0))),
     }
 }
+
+// ─── Composition built-ins ──────────────────────────────────────────────────
+
+/// Execute a sequence of operations, threading each result into `_prev`.
+/// Input: array of {method: string, args?: array} objects.
+/// Returns: array of operation results in order.
+fn exec_pipe(
+    engine: &TokenZeroEngine,
+    work_root: &Path,
+    args: &[Value],
+) -> Result<OpOutcome, Box<CodeModeResult>> {
+    let steps = match args.first() {
+        Some(Value::Array(items)) => items.clone(),
+        Some(Value::String(text)) => serde_json::from_str(text).map_err(|err| {
+            Box::new(CodeModeResult::error(
+                format!("zero.pipe: steps is not valid JSON array: {err}"),
+                0,
+            ))
+        })?,
+        _ => {
+            return Err(Box::new(CodeModeResult::error(
+                "zero.pipe requires an array of {method, args} steps",
+                0,
+            )));
+        }
+    };
+    if steps.is_empty() {
+        return Err(Box::new(CodeModeResult::error(
+            "zero.pipe requires at least one step",
+            0,
+        )));
+    }
+    let mut results: Vec<Value> = Vec::with_capacity(steps.len());
+    let mut pipe_scope: HashMap<String, Value> = HashMap::new();
+    for (idx, step) in steps.iter().enumerate() {
+        let method = step.get("method").and_then(|v| v.as_str()).ok_or_else(|| {
+            Box::new(CodeModeResult::error(
+                format!("zero.pipe: step {idx} missing 'method' string"),
+                0,
+            ))
+        })?;
+        let step_args: Vec<Expr> = match step.get("args") {
+            Some(Value::Array(arr)) => arr
+                .iter()
+                .map(|v| match v {
+                    Value::String(s) if s == "_prev" => Expr::VarRef("_prev".to_string()),
+                    _ => Expr::StringLit(serde_json::to_string(v).unwrap_or_default()),
+                })
+                .collect(),
+            _ => Vec::new(),
+        };
+        let call = MethodCall {
+            method: method.to_string(),
+            args: step_args,
+        };
+        let outcome = dispatch(engine, work_root, &call, &pipe_scope)?;
+        let val = outcome.into_value();
+        pipe_scope.insert("_prev".to_string(), val.clone());
+        pipe_scope.insert(format!("_step{idx}"), val.clone());
+        results.push(val);
+    }
+    Ok(OpOutcome::from_catalog(json!({
+        "steps": results.len(),
+        "results": results,
+        "last": results.last().cloned().unwrap_or(Value::Null),
+    })))
+}
+
+/// Extract specific keys from an object value.
+/// Args: (value_or_var, keys_array) or (value_or_var, "key1", "key2", ...)
+fn exec_pick(args: &[Value]) -> Result<OpOutcome, Box<CodeModeResult>> {
+    let source = args.first().ok_or_else(|| {
+        Box::new(CodeModeResult::error(
+            "zero.pick requires a source object as first argument",
+            0,
+        ))
+    })?;
+    let obj = source.as_object().ok_or_else(|| {
+        Box::new(CodeModeResult::error(
+            "zero.pick: first argument must be an object",
+            0,
+        ))
+    })?;
+    let keys: Vec<&str> = match args.get(1) {
+        Some(Value::Array(arr)) => arr.iter().filter_map(|v| v.as_str()).collect(),
+        Some(Value::String(k)) => {
+            let mut ks = vec![k.as_str()];
+            for arg in args.iter().skip(2) {
+                if let Some(s) = arg.as_str() {
+                    ks.push(s);
+                }
+            }
+            ks
+        }
+        _ => {
+            return Err(Box::new(CodeModeResult::error(
+                "zero.pick: second argument must be an array of keys or key strings",
+                0,
+            )));
+        }
+    };
+    let picked: serde_json::Map<String, Value> = keys
+        .into_iter()
+        .filter_map(|key| obj.get(key).map(|v| (key.to_string(), v.clone())))
+        .collect();
+    Ok(OpOutcome::from_catalog(Value::Object(picked)))
+}
+
+/// Filter lines in a text value by a substring pattern.
+/// Args: (value_with_text_field, pattern) or (string_value, pattern)
+fn exec_filter_lines(args: &[Value]) -> Result<OpOutcome, Box<CodeModeResult>> {
+    let source = args.first().ok_or_else(|| {
+        Box::new(CodeModeResult::error(
+            "zero.filter_lines requires a source as first argument",
+            0,
+        ))
+    })?;
+    let text = source
+        .as_str()
+        .or_else(|| source.get("text").and_then(|v| v.as_str()))
+        .unwrap_or("");
+    let pattern = args.get(1).and_then(|v| v.as_str()).ok_or_else(|| {
+        Box::new(CodeModeResult::error(
+            "zero.filter_lines requires a pattern string as second argument",
+            0,
+        ))
+    })?;
+    let filtered: Vec<&str> = text.lines().filter(|line| line.contains(pattern)).collect();
+    Ok(OpOutcome::from_catalog(json!({
+        "text": filtered.join("\n"),
+        "lines": filtered.len(),
+        "pattern": pattern,
+    })))
+}
+
+// ─── Utilities ──────────────────────────────────────────────────────────────
 
 fn collect_refs(value: &Value, refs: &mut Vec<String>) {
     if let Some(r) = value.get("ref").and_then(|v| v.as_str()) {

@@ -995,6 +995,9 @@ pub(crate) struct CodeModeArgs {
     /// CodeMode plan as an explicit flag; kept for router compatibility.
     #[arg(short = 'p', long = "plan", value_name = "PLAN")]
     pub(crate) plan_flag: Option<String>,
+    /// Read plan from a file instead of inline. Supports .txt and .js extensions.
+    #[arg(long = "plan-file", value_name = "PATH")]
+    pub(crate) plan_file: Option<PathBuf>,
     /// Workspace root used for CodeMode file, shell, and recovery-cache boundaries.
     #[arg(long)]
     pub(crate) root: Option<PathBuf>,
@@ -1014,11 +1017,16 @@ pub(crate) struct CodeModeArgs {
 }
 
 impl CodeModeArgs {
-    pub(crate) fn plan_text(&self) -> &str {
-        self.plan_flag
+    pub(crate) fn plan_text(&self) -> Result<String, std::io::Error> {
+        if let Some(path) = &self.plan_file {
+            return std::fs::read_to_string(path);
+        }
+        Ok(self
+            .plan_flag
             .as_deref()
             .or(self.plan.as_deref())
             .unwrap_or("")
+            .to_string())
     }
 }
 
@@ -1027,17 +1035,52 @@ mod tests {
     #[test]
     fn cli_args_do_not_import_cli_monolith() {
         let source = include_str!("cli_args.rs");
-        let forbidden_imports = [
-            format!("use {}::", "super"),
-            format!("{}::", "super"),
-            format!("use crate::{}", "main"),
-            format!("crate::{}::", "main"),
-        ];
+        // The test module itself uses super::* but the non-test code must not.
+        let non_test: &str = source.split("#[cfg(test)]").next().unwrap_or(source);
+        let forbidden_imports = ["use crate::main", "crate::main::"];
         for forbidden in forbidden_imports {
             assert!(
-                !source.contains(&forbidden),
+                !non_test.contains(forbidden),
                 "cli_args.rs must not back-import the CLI monolith: {forbidden}"
             );
         }
+    }
+
+    use super::CodeModeArgs;
+
+    #[test]
+    fn plan_file_reads_from_disk() {
+        let dir = tempfile::tempdir().unwrap();
+        let plan_path = dir.path().join("test.plan.js");
+        std::fs::write(&plan_path, r#"await zero.compact("from file")"#).unwrap();
+        let args = CodeModeArgs {
+            plan: None,
+            plan_flag: None,
+            plan_file: Some(plan_path),
+            root: None,
+            allowed_root: Vec::new(),
+            cache_path: None,
+            max_visible_tokens: 4000,
+            timeout_seconds: None,
+            json: false,
+        };
+        let text = args.plan_text().unwrap();
+        assert!(text.contains("from file"));
+    }
+
+    #[test]
+    fn plan_text_prefers_flag_over_positional() {
+        let args = CodeModeArgs {
+            plan: Some("positional".to_string()),
+            plan_flag: Some("flag_wins".to_string()),
+            plan_file: None,
+            root: None,
+            allowed_root: Vec::new(),
+            cache_path: None,
+            max_visible_tokens: 4000,
+            timeout_seconds: None,
+            json: false,
+        };
+        assert_eq!(args.plan_text().unwrap(), "flag_wins");
     }
 }

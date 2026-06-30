@@ -229,8 +229,9 @@ fn main() -> Result<()> {
             args.json,
         )?,
         Commands::CodeMode(args) => {
+            let plan = args.plan_text()?;
             let result = execute_codemode_with_options(
-                args.plan_text(),
+                &plan,
                 CodeModeOptions {
                     root: args.root.clone(),
                     allowed_roots: args.allowed_root.clone(),

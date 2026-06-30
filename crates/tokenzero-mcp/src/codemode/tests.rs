@@ -399,3 +399,132 @@ fn legacy_line_api_still_works() {
     let line = execute_plan_in_token(r#"await zero.compact("legacy")"#);
     assert!(line.starts_with("codemode:ok"));
 }
+
+// ─── Composition engine tests ───────────────────────────────────────────────
+
+#[test]
+fn pipe_sequential_composition() {
+    let plan = r#"await zero.pipe([{"method": "zero.compact", "args": ["step one"]}, {"method": "zero.compact", "args": ["step two"]}])"#;
+    let r = execute_codemode(plan);
+    assert_eq!(r.status, CodeModeStatus::Completed, "{:?}", r.error);
+    let val = r.value.unwrap();
+    assert_eq!(val["steps"], 2);
+    let results = val["results"].as_array().unwrap();
+    assert_eq!(results.len(), 2);
+    assert!(results[0]["ref"].as_str().unwrap().starts_with("tz://"));
+    assert!(results[1]["ref"].as_str().unwrap().starts_with("tz://"));
+}
+
+#[test]
+fn pipe_empty_steps_rejected() {
+    let r = execute_codemode(r#"await zero.pipe([])"#);
+    assert_eq!(r.status, CodeModeStatus::Error);
+    assert!(r.error.as_ref().unwrap().contains("at least one step"));
+}
+
+#[test]
+fn pick_extracts_keys_from_result() {
+    let plan = r#"
+        const data = await zero.compact("payload for pick test");
+        const picked = await zero.pick(data, ["ref", "status"]);
+        return picked
+    "#;
+    let r = execute_codemode(plan);
+    assert_eq!(r.status, CodeModeStatus::Completed, "{:?}", r.error);
+    let val = r.value.unwrap();
+    assert!(val["ref"].as_str().unwrap().starts_with("tz://"));
+    assert_eq!(val["status"], "ok");
+    assert!(val.get("text").is_none(), "text should be excluded by pick");
+}
+
+#[test]
+fn filter_lines_narrows_text() {
+    let plan = r#"
+        const data = await zero.compact("alpha line\nbeta match\ngamma line\ndelta match");
+        const expanded = await zero.expand(data.ref);
+        const filtered = await zero.filter_lines(expanded, "match");
+        return filtered
+    "#;
+    let r = execute_codemode(plan);
+    assert_eq!(r.status, CodeModeStatus::Completed, "{:?}", r.error);
+    let val = r.value.unwrap();
+    assert_eq!(val["lines"], 2);
+    let text = val["text"].as_str().unwrap();
+    assert!(text.contains("beta match"));
+    assert!(text.contains("delta match"));
+    assert!(!text.contains("alpha"));
+}
+
+#[test]
+fn telemetry_reports_equivalent_calls() {
+    let plan = r#"
+        const a = await zero.compact("first");
+        const b = await zero.compact("second");
+        const c = await zero.expand(a.ref);
+        return { a_ref: a.ref, b_ref: b.ref, c_text: c.text }
+    "#;
+    let r = execute_codemode(plan);
+    assert_eq!(r.status, CodeModeStatus::Completed, "{:?}", r.error);
+    assert_eq!(r.telemetry.operations, 3);
+    assert_eq!(r.telemetry.equivalent_calls, Some(4));
+}
+
+#[test]
+fn multi_step_dataflow_with_intermediate_binding() {
+    let work = tempfile::tempdir().unwrap();
+    let path = work.path().join("data.txt");
+    fs::write(&path, "line1 important\nline2 noise\nline3 important\n").unwrap();
+
+    let quoted = serde_json::to_string(path.to_str().unwrap()).unwrap();
+    let plan = format!(
+        r#"const content = await zero.read({quoted});
+        const filtered = await zero.filter_lines(content, "important");
+        return {{ lines: filtered.lines, text: filtered.text }}"#
+    );
+    let r = execute_codemode_with_options(
+        &plan,
+        CodeModeOptions {
+            root: Some(work.path().to_path_buf()),
+            ..Default::default()
+        },
+    );
+    assert_eq!(r.status, CodeModeStatus::Completed, "{:?}", r.error);
+    let val = r.value.unwrap();
+    assert_eq!(val["lines"], 2);
+    assert!(val["text"].as_str().unwrap().contains("important"));
+    assert!(!val["text"].as_str().unwrap().contains("noise"));
+    assert_eq!(r.telemetry.operations, 2);
+    assert_eq!(r.telemetry.equivalent_calls, Some(3));
+}
+
+#[test]
+fn pipe_and_pick_composition() {
+    let plan = r#"
+        const piped = await zero.pipe([{"method": "zero.compact", "args": ["piped data"]}]);
+        const picked = await zero.pick(piped, ["steps", "last"]);
+        return picked
+    "#;
+    let r = execute_codemode(plan);
+    assert_eq!(r.status, CodeModeStatus::Completed, "{:?}", r.error);
+    let val = r.value.unwrap();
+    assert_eq!(val["steps"], 1);
+    assert!(val["last"].is_object());
+}
+
+#[test]
+fn new_composition_methods_discoverable() {
+    let r = execute_codemode("search:pipe");
+    let val = r.value.unwrap();
+    let results = val["results"].as_array().unwrap();
+    assert!(results.iter().any(|hit| hit["path"] == "zero.pipe"));
+
+    let r = execute_codemode("search:pick");
+    let val = r.value.unwrap();
+    let results = val["results"].as_array().unwrap();
+    assert!(results.iter().any(|hit| hit["path"] == "zero.pick"));
+
+    let r = execute_codemode("search:filter");
+    let val = r.value.unwrap();
+    let results = val["results"].as_array().unwrap();
+    assert!(results.iter().any(|hit| hit["path"] == "zero.filter_lines"));
+}
