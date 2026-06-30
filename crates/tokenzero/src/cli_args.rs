@@ -101,8 +101,8 @@ pub(crate) enum Commands {
     ExactRecoveryAudit(ExactRecoveryAuditArgs),
     #[command(
         name = "codemode",
-        about = "Run a CodeMode-style plan for the TokenZero zero.token.* surface",
-        long_about = "Execute JS-like CodeMode plans (zero.read, zero.compact, zero.shell, ...).\n\n\
+        about = "Compose multi-step plans on the same base tools as MCP (fewer round-trips, Cloudflare-style)",
+        long_about = "Execute JS-like plans that compose the same TokenZero operations as MCP (zero.read, zero.find, zero.shell, ...) in one call for faster multi-step workflows.\n\n\
             Discovery: tokenzero codemode 'search:read' | tokenzero codemode 'describe:zero.read'\n\n\
             Cache: defaults to codemode-recovery.json (separate from MCP/CLI recovery-cache.json). \
             Pass the same --cache-path to codemode and expand when refs must cross surfaces."
@@ -583,7 +583,7 @@ pub(crate) struct InstallArgs {
     pub(crate) agents: Vec<String>,
     #[arg(long)]
     pub(crate) grok: bool,
-    /// MCP tool surface: `classic` (per-tool MCP) or `codemode` (CodeMode upgrade).
+    /// MCP tool surface profile (always `classic`; CodeMode is a separate execution layer).
     #[arg(long, value_name = "SURFACE", default_value = "classic")]
     pub(crate) surface: String,
     #[arg(long)]
@@ -616,7 +616,7 @@ pub(crate) struct InitArgs {
     pub(crate) apply: bool,
     #[arg(long)]
     pub(crate) plan: bool,
-    /// MCP tool surface: `classic` (per-tool MCP) or `codemode` (CodeMode upgrade).
+    /// MCP tool surface profile (always `classic`; CodeMode is a separate execution layer).
     #[arg(long, value_name = "SURFACE", default_value = "classic")]
     pub(crate) surface: String,
     #[arg(long)]
@@ -716,7 +716,7 @@ pub(crate) struct McpServerArgs {
     /// and automatically respawns the inner MCP server if it ever dies.
     #[arg(long)]
     pub(crate) supervise: bool,
-    /// MCP tool surface override: `classic` or `codemode`.
+    /// MCP tool surface override (always `classic`; CodeMode is separate).
     #[arg(long, value_name = "SURFACE")]
     pub(crate) tool_surface: Option<String>,
 }

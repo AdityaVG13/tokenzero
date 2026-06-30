@@ -435,7 +435,9 @@ pub(crate) fn resolve_expr(expr: &Expr, scope: &HashMap<String, Value>) -> Resul
         Expr::Object(fields) => {
             let obj: serde_json::Map<String, Value> = fields
                 .iter()
-                .map(|(key, value)| resolve_expr(value, scope).map(|resolved| (key.clone(), resolved)))
+                .map(|(key, value)| {
+                    resolve_expr(value, scope).map(|resolved| (key.clone(), resolved))
+                })
                 .collect::<Result<_, _>>()?;
             Ok(Value::Object(obj))
         }
@@ -455,7 +457,10 @@ pub(crate) fn resolve_expr(expr: &Expr, scope: &HashMap<String, Value>) -> Resul
     }
 }
 
-pub(crate) fn resolve_return(expr: &ReturnExpr, scope: &HashMap<String, Value>) -> Result<Value, String> {
+pub(crate) fn resolve_return(
+    expr: &ReturnExpr,
+    scope: &HashMap<String, Value>,
+) -> Result<Value, String> {
     match expr {
         ReturnExpr::Var(name) => scope
             .get(name)
@@ -473,11 +478,12 @@ pub(crate) fn resolve_return(expr: &ReturnExpr, scope: &HashMap<String, Value>) 
         ReturnExpr::Object(fields) => {
             let obj: serde_json::Map<String, Value> = fields
                 .iter()
-                .map(|(key, value)| resolve_expr(value, scope).map(|resolved| (key.clone(), resolved)))
+                .map(|(key, value)| {
+                    resolve_expr(value, scope).map(|resolved| (key.clone(), resolved))
+                })
                 .collect::<Result<_, _>>()?;
             Ok(Value::Object(obj))
         }
         ReturnExpr::Expr(expression) => resolve_expr(expression, scope),
     }
 }
-

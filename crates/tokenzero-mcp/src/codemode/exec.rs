@@ -7,7 +7,9 @@ use std::time::Duration;
 use tokenzero_core::{Mode, ToolResponse, count_tokens, detect_content_type};
 use tokenzero_filters::{discover, rewrite_command};
 
-use crate::workspace::{allowed_roots_for_workspace, default_codemode_recovery_cache_path, tokenzero_work_root};
+use crate::workspace::{
+    allowed_roots_for_workspace, default_codemode_recovery_cache_path, tokenzero_work_root,
+};
 use crate::{EditHunk, EngineConfig, TokenZeroEngine, shell_timeout_from_secs};
 
 use super::catalog::{describe_method, search_catalog};
@@ -39,10 +41,7 @@ pub fn execute_codemode(plan: &str) -> CodeModeResult {
     execute_codemode_with_options(plan, CodeModeOptions::default())
 }
 
-pub fn execute_codemode_with_options(
-    plan: &str,
-    options: CodeModeOptions,
-) -> CodeModeResult {
+pub fn execute_codemode_with_options(plan: &str, options: CodeModeOptions) -> CodeModeResult {
     let plan = plan.trim();
     if plan.is_empty() {
         return CodeModeResult::error("empty plan", 0);
@@ -366,7 +365,11 @@ fn exec_find(
     Ok(OpOutcome::from_tool_response(&resp))
 }
 
-fn exec_glob(engine: &TokenZeroEngine, work_root: &Path, args: &[Value]) -> Result<OpOutcome, Box<CodeModeResult>> {
+fn exec_glob(
+    engine: &TokenZeroEngine,
+    work_root: &Path,
+    args: &[Value],
+) -> Result<OpOutcome, Box<CodeModeResult>> {
     let pattern = require_str_arg(
         args,
         0,
@@ -386,7 +389,11 @@ fn exec_glob(engine: &TokenZeroEngine, work_root: &Path, args: &[Value]) -> Resu
     Ok(OpOutcome::from_tool_response(&resp))
 }
 
-fn exec_tree(engine: &TokenZeroEngine, work_root: &Path, args: &[Value]) -> Result<OpOutcome, Box<CodeModeResult>> {
+fn exec_tree(
+    engine: &TokenZeroEngine,
+    work_root: &Path,
+    args: &[Value],
+) -> Result<OpOutcome, Box<CodeModeResult>> {
     let roots = vec![
         args.first()
             .and_then(|v| v.as_str())
@@ -446,7 +453,10 @@ fn exec_shell(engine: &TokenZeroEngine, args: &[Value]) -> Result<OpOutcome, Box
     }))
 }
 
-pub(crate) fn exec_edit(engine: &TokenZeroEngine, args: &[Value]) -> Result<OpOutcome, Box<CodeModeResult>> {
+pub(crate) fn exec_edit(
+    engine: &TokenZeroEngine,
+    args: &[Value],
+) -> Result<OpOutcome, Box<CodeModeResult>> {
     let path = PathBuf::from(require_str_arg(
         args,
         0,
@@ -531,7 +541,10 @@ fn exec_expand(engine: &TokenZeroEngine, args: &[Value]) -> Result<OpOutcome, Bo
     Ok(OpOutcome::from_tool_response(&resp))
 }
 
-fn exec_compact(engine: &TokenZeroEngine, args: &[Value]) -> Result<OpOutcome, Box<CodeModeResult>> {
+fn exec_compact(
+    engine: &TokenZeroEngine,
+    args: &[Value],
+) -> Result<OpOutcome, Box<CodeModeResult>> {
     let data = match args.first() {
         Some(Value::String(s)) => s.clone(),
         Some(other) => serde_json::to_string(other).unwrap_or_default(),
@@ -566,7 +579,11 @@ fn exec_mem(engine: &TokenZeroEngine) -> Result<OpOutcome, Box<CodeModeResult>> 
 }
 
 fn exec_recall(engine: &TokenZeroEngine, args: &[Value]) -> Result<OpOutcome, Box<CodeModeResult>> {
-    let query = require_str_arg(args, 0, "zero.recall requires a query string as first argument")?;
+    let query = require_str_arg(
+        args,
+        0,
+        "zero.recall requires a query string as first argument",
+    )?;
     let opts = Opts::from_arg(args, 1);
     let mode = opts.mode_or("mode", Mode::Auto);
     let max_hits = opts.usize("max_hits").unwrap_or(50);
@@ -578,7 +595,11 @@ fn exec_recall(engine: &TokenZeroEngine, args: &[Value]) -> Result<OpOutcome, Bo
 }
 
 fn exec_fetch(engine: &TokenZeroEngine, args: &[Value]) -> Result<OpOutcome, Box<CodeModeResult>> {
-    let url = require_str_arg(args, 0, "zero.fetch requires an http(s) URL as first argument")?;
+    let url = require_str_arg(
+        args,
+        0,
+        "zero.fetch requires an http(s) URL as first argument",
+    )?;
     let opts = Opts::from_arg(args, 1);
     let mode = opts.mode_or("mode", Mode::Auto);
     let ttl_seconds = opts.usize("ttl_seconds");
@@ -590,7 +611,10 @@ fn exec_fetch(engine: &TokenZeroEngine, args: &[Value]) -> Result<OpOutcome, Box
     Ok(OpOutcome::from_tool_response(&resp))
 }
 
-fn exec_cache_pack(engine: &TokenZeroEngine, args: &[Value]) -> Result<OpOutcome, Box<CodeModeResult>> {
+fn exec_cache_pack(
+    engine: &TokenZeroEngine,
+    args: &[Value],
+) -> Result<OpOutcome, Box<CodeModeResult>> {
     let opts = Opts::from_arg(args, 0);
     let scope = opts.str("scope").unwrap_or("agent");
     let resp = engine.cache_pack(scope);
@@ -606,7 +630,10 @@ fn exec_rewrite(args: &[Value]) -> Result<OpOutcome, Box<CodeModeResult>> {
     let opts = Opts::from_arg(args, 1);
     let mode = opts.str("mode").unwrap_or("safe");
     let value = serde_json::to_value(rewrite_command(command, mode, true)).map_err(|err| {
-        Box::new(CodeModeResult::error(format!("zero.rewrite failed: {err}"), 0))
+        Box::new(CodeModeResult::error(
+            format!("zero.rewrite failed: {err}"),
+            0,
+        ))
     })?;
     Ok(OpOutcome::from_catalog(value))
 }
@@ -674,4 +701,3 @@ fn result_raw_tokens(value: &Value) -> usize {
         .and_then(|v| v.as_u64())
         .unwrap_or(0) as usize
 }
-

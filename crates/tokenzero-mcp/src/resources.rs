@@ -44,13 +44,11 @@ pub(crate) fn read_resource(
                 "cache-pack": "tz_cache_pack",
                 "rewrite": "tz_rewrite",
                 "discover": "tz_discover",
-                "codemode": "tz_codemode"
             },
             "codemode": {
                 "schema": "tokenzero.codemode.v1",
-                "mcp_tool": "tz_codemode",
                 "cli": "tokenzero codemode --json --plan '<plan>'",
-                "note": "CodeMode upgrade surface; install with --surface codemode. Classic per-tool MCP uses --surface classic."
+                "note": "CodeMode is a separate plan-based execution layer on the same base tools/engine (Cloudflare-style, fewer round-trips). Use `tokenzero codemode` or resource://tokenzero/codemode for discovery."
             },
             "resources": resource_specs(),
             "next_actions": [

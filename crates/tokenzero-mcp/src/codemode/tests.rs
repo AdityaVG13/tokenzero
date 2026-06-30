@@ -1,5 +1,7 @@
-use super::exec::{exec_edit, execute_codemode, execute_codemode_with_options, make_engine_for_root};
-use super::parser::{parse_expr, parse_plan, resolve_expr, Statement};
+use super::exec::{
+    exec_edit, execute_codemode, execute_codemode_with_options, make_engine_for_root,
+};
+use super::parser::{Statement, parse_expr, parse_plan, resolve_expr};
 use super::result::{CodeModeOptions, CodeModeResult, CodeModeStatus};
 use std::collections::HashMap;
 use std::fs;
@@ -7,60 +9,64 @@ use std::path::PathBuf;
 use tokenzero_core::Mode;
 
 fn execute_plan_in_token(plan: &str) -> String {
-execute_codemode(plan).to_line()
+    execute_codemode(plan).to_line()
 }
 
-    #[test]
-    fn undefined_variable_in_return_is_plan_error() {
-        let result = execute_codemode("return missing_binding");
-        assert_eq!(result.status, CodeModeStatus::Error);
-        assert!(
-            result
-                .error
-                .as_deref()
-                .unwrap()
-                .contains("undefined variable: missing_binding")
-        );
-    }
+#[test]
+fn undefined_variable_in_return_is_plan_error() {
+    let result = execute_codemode("return missing_binding");
+    assert_eq!(result.status, CodeModeStatus::Error);
+    assert!(
+        result
+            .error
+            .as_deref()
+            .unwrap()
+            .contains("undefined variable: missing_binding")
+    );
+}
 
-    #[test]
-    fn read_honors_start_and_end_line_options() {
-        let work = tempfile::tempdir().unwrap();
-        let path = work.path().join("lines.txt");
-        let content: String = (1..=20)
-            .map(|line| format!("LINE_{line}\n"))
-            .collect();
-        fs::write(&path, content).unwrap();
+#[test]
+fn read_honors_start_and_end_line_options() {
+    let work = tempfile::tempdir().unwrap();
+    let path = work.path().join("lines.txt");
+    let content: String = (1..=20).map(|line| format!("LINE_{line}\n")).collect();
+    fs::write(&path, content).unwrap();
 
-        let quoted = serde_json::to_string(path.to_str().unwrap()).unwrap();
-        let plan = format!("await zero.read({quoted}, {{ start_line: 2, end_line: 3 }})");
-        let result = execute_codemode_with_options(
-            &plan,
-            CodeModeOptions {
-                root: Some(work.path().to_path_buf()),
-                ..Default::default()
-            },
-        );
-        assert_eq!(
-            result.status,
-            CodeModeStatus::Completed,
-            "{:?}",
-            result.error
-        );
-        let text = result
-            .value
-            .as_ref()
-            .and_then(|value| value.get("text"))
-            .and_then(|value| value.as_str())
-            .unwrap_or("");
-        assert!(text.contains("LINE_2"), "expected bounded read: {text}");
-        assert!(text.contains("LINE_3"), "expected bounded read: {text}");
-        assert!(!text.contains("LINE_1"), "start_line should exclude earlier lines: {text}");
-        assert!(!text.contains("LINE_4"), "end_line should exclude later lines: {text}");
-    }
+    let quoted = serde_json::to_string(path.to_str().unwrap()).unwrap();
+    let plan = format!("await zero.read({quoted}, {{ start_line: 2, end_line: 3 }})");
+    let result = execute_codemode_with_options(
+        &plan,
+        CodeModeOptions {
+            root: Some(work.path().to_path_buf()),
+            ..Default::default()
+        },
+    );
+    assert_eq!(
+        result.status,
+        CodeModeStatus::Completed,
+        "{:?}",
+        result.error
+    );
+    let text = result
+        .value
+        .as_ref()
+        .and_then(|value| value.get("text"))
+        .and_then(|value| value.as_str())
+        .unwrap_or("");
+    assert!(text.contains("LINE_2"), "expected bounded read: {text}");
+    assert!(text.contains("LINE_3"), "expected bounded read: {text}");
+    assert!(
+        !text.contains("LINE_1"),
+        "start_line should exclude earlier lines: {text}"
+    );
+    assert!(
+        !text.contains("LINE_4"),
+        "end_line should exclude later lines: {text}"
+    );
+}
 
-    #[test]
-    fn pathless_tree_uses_configured_root_not_cwd() {
+#[test]
+fn pathless_tree_uses_configured_root_not_cwd() {
     let work = tempfile::tempdir().unwrap();
     fs::write(work.path().join("marker.txt"), "present\n").unwrap();
     let cwd = std::env::current_dir().unwrap();
@@ -102,7 +108,7 @@ fn parser_rejects_lone_quote_without_panicking() {
 fn parser_object_numeric_options_resolve_as_u64() {
     let scope = HashMap::new();
     let expr = parse_expr("{ start_line: 1, end_line: 10, max_files: 5 }").unwrap();
-        let value = resolve_expr(&expr, &scope).unwrap();
+    let value = resolve_expr(&expr, &scope).unwrap();
     let obj = value.as_object().unwrap();
     assert_eq!(obj.get("start_line").and_then(|v| v.as_u64()), Some(1));
     assert_eq!(obj.get("end_line").and_then(|v| v.as_u64()), Some(10));
@@ -174,10 +180,9 @@ fn parser_splits_multiline_plan() {
 
 #[test]
 fn parser_handles_object_args() {
-    let stmts = parse_plan(
-        r#"zero.read("src/main.rs", { mode: "auto", start_line: 1, end_line: 10 })"#,
-    )
-    .unwrap();
+    let stmts =
+        parse_plan(r#"zero.read("src/main.rs", { mode: "auto", start_line: 1, end_line: 10 })"#)
+            .unwrap();
     assert_eq!(stmts.len(), 1);
     if let Statement::Call(call) = &stmts[0] {
         assert_eq!(call.method, "zero.read");
@@ -242,7 +247,13 @@ fn codemode_engine_uses_codemode_recovery_cache_and_repo_scope() {
         engine.config.cache_path,
         crate::workspace::default_codemode_recovery_cache_path(&root)
     );
-    assert!(engine.config.cache_path.to_string_lossy().contains("codemode-recovery.json"));
+    assert!(
+        engine
+            .config
+            .cache_path
+            .to_string_lossy()
+            .contains("codemode-recovery.json")
+    );
 }
 
 #[test]
@@ -282,9 +293,9 @@ fn edit_reports_zero_hunks_applied_on_engine_error() {
         serde_json::json!([{ "find": "missing", "replace": "bye" }]),
     ];
 
-        let outcome = exec_edit(&engine, &args).unwrap();
-        assert_eq!(outcome.as_value()["status"], "error");
-        assert_eq!(outcome.as_value()["hunks_applied"], 0);
+    let outcome = exec_edit(&engine, &args).unwrap();
+    assert_eq!(outcome.as_value()["status"], "error");
+    assert_eq!(outcome.as_value()["hunks_applied"], 0);
     assert_eq!(fs::read_to_string(&path).unwrap(), "hello\n");
 }
 
@@ -346,23 +357,33 @@ fn expand_without_tz_prefix_is_rejected() {
 fn recall_method_is_discoverable_and_dispatchable() {
     let r = execute_codemode("describe:zero.recall");
     assert_eq!(r.status, CodeModeStatus::Completed);
-    assert!(r.value.as_ref().unwrap()["types"]
-        .as_str()
-        .unwrap()
-        .contains("zero.recall"));
+    assert!(
+        r.value.as_ref().unwrap()["types"]
+            .as_str()
+            .unwrap()
+            .contains("zero.recall")
+    );
     let search = execute_codemode("search:recall");
-    assert!(search.value.as_ref().unwrap()["results"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .any(|hit| hit["path"] == "zero.recall"));
+    assert!(
+        search.value.as_ref().unwrap()["results"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|hit| hit["path"] == "zero.recall")
+    );
 }
 
 #[test]
 fn codemode_method_catalog_resource_shape() {
     let catalog = crate::codemode::catalog::codemode_method_catalog();
     assert_eq!(catalog["schema_version"], "tokenzero.codemode.catalog.v1");
-    assert!(catalog["methods"].as_array().unwrap().iter().any(|m| m["path"] == "zero.recall"));
+    assert!(
+        catalog["methods"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|m| m["path"] == "zero.recall")
+    );
 }
 
 #[test]

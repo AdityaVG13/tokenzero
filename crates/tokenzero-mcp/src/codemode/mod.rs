@@ -12,4 +12,4 @@ mod result;
 mod tests;
 
 pub use exec::execute_codemode_with_options;
-pub use result::{CodeModeOptions, CodeModeResult, CodeModeStatus, CODEMODE_SCHEMA};
+pub use result::{CODEMODE_SCHEMA, CodeModeOptions, CodeModeResult, CodeModeStatus};

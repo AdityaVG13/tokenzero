@@ -18,11 +18,9 @@ fn push_unique_path(paths: &mut Vec<PathBuf>, candidate: PathBuf) {
     let candidate_cmp = candidate
         .canonicalize()
         .unwrap_or_else(|_| candidate.clone());
-    let exists = paths.iter().any(|path| {
-        path.canonicalize()
-            .unwrap_or_else(|_| path.clone())
-            == candidate_cmp
-    });
+    let exists = paths
+        .iter()
+        .any(|path| path.canonicalize().unwrap_or_else(|_| path.clone()) == candidate_cmp);
     if !exists {
         paths.push(candidate);
     }
@@ -60,7 +58,11 @@ fn zerostack_store_or_detect(repo_root: &Path) -> Option<PathBuf> {
     }
 }
 
-fn resolve_default_cache_path(repo_root: &Path, unified_relative: &str, legacy_relative: &str) -> PathBuf {
+fn resolve_default_cache_path(
+    repo_root: &Path,
+    unified_relative: &str,
+    legacy_relative: &str,
+) -> PathBuf {
     let legacy = repo_root.join(legacy_relative);
     if let Some(store) = zerostack_store_or_detect(repo_root) {
         let unified = store.join(unified_relative);

@@ -8,12 +8,9 @@ use tokenzero_core::{
 use tokenzero_filters::{discover, rewrite_command};
 use tokenzero_runtime::{ExecutionMode, plan_command_for_platform};
 
-use crate::jsonrpc::JsonRpcErrorData;
-use crate::{
-    CodeModeOptions, CodeModeResult, CodeModeStatus, EditHunk, ServeOptions, TokenZeroEngine,
-    execute_codemode_with_options, shell_timeout_from_secs,
-};
 use crate::catalog::canonical_allowed_on_surface;
+use crate::jsonrpc::JsonRpcErrorData;
+use crate::{EditHunk, ServeOptions, TokenZeroEngine, shell_timeout_from_secs};
 
 pub(crate) fn call_tool(
     engine: &TokenZeroEngine,
@@ -23,16 +20,6 @@ pub(crate) fn call_tool(
 ) -> Result<Value, JsonRpcErrorData> {
     let canonical = canonical_tool(name);
     let started = std::time::Instant::now();
-    if canonical == "codemode" {
-        let result = codemode_from_args(engine, args).map_err(JsonRpcErrorData::from)?;
-        engine.record_tool_call(
-            canonical,
-            started.elapsed(),
-            result.status == CodeModeStatus::Error,
-        );
-        record_codemode_pulse(engine, &result, call_id, started.elapsed());
-        return Ok(codemode_tool_response(result));
-    }
     if !canonical_allowed_on_surface(engine.config.tool_surface, canonical) {
         return Err(JsonRpcErrorData::unknown_tool(name));
     }
@@ -84,34 +71,6 @@ fn record_mcp_pulse(
     )
     .with_attribution(Some(engine.session_id().to_string()), call_id, ref_ids);
     event.failure = response.error.is_some();
-    let _ = tokenzero_pulse::record_event(&tokenzero_pulse::default_ledger_path(root), &event);
-}
-
-fn record_codemode_pulse(
-    engine: &TokenZeroEngine,
-    result: &CodeModeResult,
-    call_id: Option<String>,
-    elapsed: Duration,
-) {
-    let Some(root) = engine.config.allowed_roots.first() else {
-        return;
-    };
-    let mut event = tokenzero_pulse::PulseEvent::tool_call(
-        "codemode",
-        "plan",
-        result.telemetry.raw_tokens,
-        result.telemetry.visible_tokens,
-        0,
-        result.refs.len(),
-        elapsed.as_millis(),
-        None,
-    )
-    .with_attribution(
-        Some(engine.session_id().to_string()),
-        call_id,
-        result.refs.clone(),
-    );
-    event.failure = result.status == CodeModeStatus::Error;
     let _ = tokenzero_pulse::record_event(&tokenzero_pulse::default_ledger_path(root), &event);
 }
 
@@ -419,59 +378,6 @@ fn batch_ops(args: &Value) -> Result<Vec<(String, Value)>, String> {
             Ok((tool.to_string(), op_args))
         })
         .collect()
-}
-
-fn codemode_from_args(engine: &TokenZeroEngine, args: &Value) -> Result<CodeModeResult, String> {
-    let plan = arg_string_any(args, &["plan"])?;
-    let root = args
-        .get("root")
-        .and_then(Value::as_str)
-        .map(PathBuf::from)
-        .or_else(|| engine.config.allowed_roots.first().cloned());
-    let allowed_roots = if args.get("allowed_root").is_some() {
-        arg_path_list(args, "allowed_root")?
-    } else {
-        Vec::new()
-    };
-    let cache_path = args
-        .get("cache_path")
-        .and_then(Value::as_str)
-        .map(PathBuf::from)
-        .or_else(|| Some(engine.config.cache_path.clone()));
-    let timeout_seconds = arg_u64(args, "timeout_seconds").map(|seconds| seconds as u64);
-    Ok(execute_codemode_with_options(
-        plan,
-        CodeModeOptions {
-            root,
-            allowed_roots,
-            cache_path,
-            max_visible_tokens: arg_u64(args, "max_visible_tokens").unwrap_or(4000),
-            timeout_seconds,
-        },
-    ))
-}
-
-fn codemode_tool_response(result: CodeModeResult) -> Value {
-    let text = serde_json::to_string_pretty(&result).unwrap_or_default();
-    let is_error = result.status == CodeModeStatus::Error;
-    let mut response = json!({
-        "content": [{"type": "text", "text": text}],
-        "resultType": "complete"
-    });
-    match envelope_mode() {
-        EnvelopeMode::None => {}
-        EnvelopeMode::Compact | EnvelopeMode::Full => {
-            response["structuredContent"] = json!({
-                "schema_version": MCP_SCHEMA_VERSION,
-                "tool": "codemode",
-                "codemode": serde_json::to_value(&result).unwrap_or(Value::Null)
-            });
-        }
-    }
-    if is_error {
-        response["isError"] = json!(true);
-    }
-    response
 }
 
 fn mcp_tool_response(response: ToolResponse) -> Value {

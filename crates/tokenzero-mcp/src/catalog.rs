@@ -23,7 +23,6 @@ const TOOL_ALIASES: &[(&str, &str)] = &[
     ("cache-pack", "tz_cache_pack"),
     ("rewrite", "tz_rewrite"),
     ("discover", "tz_discover"),
-    ("codemode", "tz_codemode"),
 ];
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -99,18 +98,13 @@ pub(crate) fn tool_specs_for_filter(
     specs
 }
 
-pub(crate) fn surface_includes_canonical(surface: McpToolSurface, name: &str) -> bool {
-    match surface {
-        McpToolSurface::Classic => name != "tz_codemode",
-        McpToolSurface::Codemode => matches!(name, "tz_codemode" | "tz_expand"),
-    }
+pub(crate) fn surface_includes_canonical(_surface: McpToolSurface, name: &str) -> bool {
+    // MCP always exposes the full catalog; tz_codemode is no longer an MCP tool.
+    name != "tz_codemode"
 }
 
-pub(crate) fn canonical_allowed_on_surface(surface: McpToolSurface, canonical: &str) -> bool {
-    match surface {
-        McpToolSurface::Classic => canonical != "codemode",
-        McpToolSurface::Codemode => matches!(canonical, "codemode" | "expand"),
-    }
+pub(crate) fn canonical_allowed_on_surface(_surface: McpToolSurface, canonical: &str) -> bool {
+    canonical != "codemode"
 }
 
 /// Aliases advertise a permissive stub instead of repeating the canonical
@@ -475,21 +469,6 @@ fn canonical_tool_specs() -> Vec<ToolSpecSeed> {
             input_schema: no_args_schema(),
             arg_aliases: json!({}),
         },
-        ToolSpecSeed {
-            name: "tz_codemode",
-            cluster: "codemode",
-            summary: "Run a JS-like CodeMode plan: compose TokenZero ops in one call with search/describe discovery.",
-            doc: tool_description(
-                "Execute a CodeMode plan against the TokenZero engine.",
-                "plan: JS-like statements (`await zero.read(...)`, bindings, `return`). Prefix `search:query` or `describe:zero.read` for discovery. root/cache_path/allowed_root override engine defaults.",
-                "Use when several TokenZero steps depend on each other and one round trip beats N MCP tool calls. NOT a replacement for per-tool MCP when the client already routes tz_* tools.",
-                "Do use `search:` / `describe:` to discover methods in-plan. Do share `cache_path` with expand when refs must cross surfaces. Don't expect MCP tool schemas inside the plan — use `zero.*` methods.",
-                "Common mistakes: empty plan; undefined variables (strict scope errors); assuming codemode-recovery refs appear in the main MCP cache without a shared cache_path.",
-                "Idempotency follows the underlying ops (edits mutate). Parse/dispatch errors fail the call; tool-level path errors return completed with value.status error.",
-            ),
-            input_schema: codemode_schema(),
-            arg_aliases: json!({}),
-        },
     ]
 }
 
@@ -809,24 +788,6 @@ fn rewrite_schema() -> Value {
             "mode": {"type": "string", "default": "safe", "description": "Rewrite policy mode."}
         }),
         &[],
-    )
-}
-
-fn codemode_schema() -> Value {
-    object_schema(
-        json!({
-            "plan": {
-                "type": "string",
-                "minLength": 1,
-                "description": "CodeMode plan text, or `search:<query>` / `describe:<method>` for discovery."
-            },
-            "root": {"type": "string", "description": "Workspace root; defaults to the engine's first allowed root."},
-            "cache_path": {"type": "string", "description": "Recovery cache path; defaults to codemode-recovery.json under the workspace."},
-            "allowed_root": path_value("Extra allowed roots merged with root."),
-            "max_visible_tokens": positive_usize(4000),
-            "timeout_seconds": {"type": "integer", "minimum": 1, "description": "Shell timeout override for zero.shell in the plan."}
-        }),
-        &["plan"],
     )
 }
 

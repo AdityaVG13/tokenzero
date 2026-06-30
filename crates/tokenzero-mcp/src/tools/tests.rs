@@ -1,45 +1,31 @@
 use super::*;
 
 #[test]
-fn codemode_surface_lists_only_codemode_tools() {
-    let dir = tempfile::tempdir().unwrap();
-    let mut config = crate::EngineConfig::for_root(dir.path());
-    config.tool_surface = tokenzero_core::McpToolSurface::Codemode;
-    let engine = crate::TokenZeroEngine::new(config);
-    let result = call_tool(
-        &engine,
-        "tz_read",
-        &json!({"path": "README.md"}),
-        None,
-    );
-    assert!(result.is_err());
-    let list = crate::catalog::tool_specs_for_filter(None, true, tokenzero_core::McpToolSurface::Codemode);
+fn codemode_not_exposed_as_mcp_tool() {
+    let list =
+        crate::catalog::tool_specs_for_filter(None, true, tokenzero_core::McpToolSurface::Classic);
     let names: Vec<_> = list.iter().map(|tool| tool.name.as_str()).collect();
-    assert!(names.contains(&"tz_codemode"));
+    assert!(
+        !names.contains(&"tz_codemode"),
+        "tz_codemode must not appear in MCP tool list"
+    );
+    assert!(names.contains(&"tz_read"));
     assert!(names.contains(&"tz_expand"));
-    assert!(!names.contains(&"tz_read"));
 }
 
 #[test]
-fn codemode_search_prefix_via_mcp_tool() {
+fn codemode_call_returns_unknown_tool() {
     let dir = tempfile::tempdir().unwrap();
     let engine = crate::TokenZeroEngine::new(crate::EngineConfig::for_root(dir.path()));
-    let result = call_tool(
-        &engine,
-        "tz_codemode",
-        &json!({"plan": "search:read"}),
-        None,
-    )
-    .unwrap();
-    let text = result["content"][0]["text"].as_str().unwrap();
-    assert!(text.contains("zero.read"), "{text}");
-    assert_eq!(result.get("isError"), None);
-}
-
-#[test]
-fn codemode_rejects_missing_plan() {
-    let dir = tempfile::tempdir().unwrap();
-    let engine = crate::TokenZeroEngine::new(crate::EngineConfig::for_root(dir.path()));
+    assert!(
+        call_tool(
+            &engine,
+            "tz_codemode",
+            &json!({"plan": "search:read"}),
+            None
+        )
+        .is_err()
+    );
     assert!(call_tool(&engine, "codemode", &json!({}), None).is_err());
 }
 

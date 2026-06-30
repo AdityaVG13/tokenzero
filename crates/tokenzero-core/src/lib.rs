@@ -74,15 +74,14 @@ impl Mode {
     }
 }
 
-/// MCP tool surface selected at install time: classic per-tool MCP or CodeMode upgrade.
+/// MCP tool surface profile. Always exposes the full `tz_*` catalog.
+/// CodeMode is a separate CLI/execution layer, not an MCP surface.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum McpToolSurface {
-    /// Full `tz_*` tool catalog (default, maximum compatibility).
+    /// Full `tz_*` tool catalog (default, only surface).
     #[default]
     Classic,
-    /// CodeMode upgrade: `tz_codemode` (+ `tz_expand`) with in-plan discovery.
-    Codemode,
 }
 
 impl McpToolSurface {
@@ -91,7 +90,6 @@ impl McpToolSurface {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Classic => "classic",
-            Self::Codemode => "codemode",
         }
     }
 }
@@ -100,11 +98,17 @@ impl std::str::FromStr for McpToolSurface {
     type Err = String;
 
     fn from_str(value: &str) -> Result<Self, Self::Err> {
-        match value.trim().to_ascii_lowercase().replace(['_', ' '], "-").as_str() {
+        match value
+            .trim()
+            .to_ascii_lowercase()
+            .replace(['_', ' '], "-")
+            .as_str()
+        {
             "" | "classic" | "aliases" | "full" => Ok(Self::Classic),
-            "codemode" | "code-mode" => Ok(Self::Codemode),
+            // Backward compat: "codemode" no longer creates a separate MCP surface.
+            "codemode" | "code-mode" => Ok(Self::Classic),
             other => Err(format!(
-                "unsupported MCP tool surface '{other}'; use classic or codemode"
+                "unsupported MCP tool surface '{other}'; use classic"
             )),
         }
     }

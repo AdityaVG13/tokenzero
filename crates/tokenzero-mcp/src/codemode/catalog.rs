@@ -208,9 +208,10 @@ pub(crate) fn codemode_method_catalog() -> Value {
             "in_plan": ["codemode.search(query)", "codemode.describe(path)"]
         },
         "next_actions": [
-            "Call tz_codemode with plan search:read to rank methods by keyword.",
-            "Call tz_codemode with plan describe:zero.read for full signatures.",
-            "Compose multi-step workflows with const bindings and return."
+            "Run `tokenzero codemode 'search:read'` to rank methods by keyword.",
+            "Run `tokenzero codemode 'describe:zero.read'` for full signatures.",
+            "Compose multi-step workflows with const bindings and return.",
+            "Same tools/engine as MCP tz_* surface; CodeMode composes them in one plan for fewer round-trips."
         ]
     })
 }

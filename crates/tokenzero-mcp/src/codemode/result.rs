@@ -57,7 +57,13 @@ impl Default for CodeModeOptions {
 }
 
 impl CodeModeResult {
-    pub fn completed(value: Value, refs: Vec<String>, ops: usize, visible: usize, raw: usize) -> Self {
+    pub fn completed(
+        value: Value,
+        refs: Vec<String>,
+        ops: usize,
+        visible: usize,
+        raw: usize,
+    ) -> Self {
         Self {
             schema: CODEMODE_SCHEMA,
             status: CodeModeStatus::Completed,

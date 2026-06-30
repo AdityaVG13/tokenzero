@@ -10,13 +10,13 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Instant;
 use tempfile::tempdir;
+use tokenzero_core::McpToolSurface;
 use tokenzero_core::{
     Accounting, ContentType, Mode, ToolResponse, count_tokens, detect_content_type,
     shell_display_command_from_argv_for_platform,
 };
 use tokenzero_filters::{discover, rewrite_command};
 use tokenzero_install as install;
-use tokenzero_core::McpToolSurface;
 use tokenzero_mcp::{
     CodeModeOptions, CodeModeStatus, EditHunk, EngineConfig, TokenZeroEngine, cli_json,
     default_shell_timeout, execute_codemode_with_options, mcp_idle_timeout_from_secs,
@@ -1508,11 +1508,9 @@ fn clients_capabilities(profile: &str) -> Vec<String> {
     caps
 }
 
-fn clients_mcp_surface(profile: &str) -> McpToolSurface {
-    match profile {
-        "codemode" => McpToolSurface::Codemode,
-        _ => McpToolSurface::Classic,
-    }
+fn clients_mcp_surface(_profile: &str) -> McpToolSurface {
+    // MCP always uses the full classic tool surface regardless of profile.
+    McpToolSurface::Classic
 }
 
 fn parse_mcp_surface(raw: &str) -> Result<McpToolSurface> {

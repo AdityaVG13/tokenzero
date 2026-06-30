@@ -126,7 +126,10 @@ fn cli_capabilities_json_exposes_agent_contract() {
             && row["primary_invocation"] == "tokenzero codemode --json --plan '<plan>'"
     }));
     assert_eq!(json["codemode"]["schema"], "tokenzero.codemode.v1");
-    assert_eq!(json["codemode"]["mcp_tool"], "tz_codemode");
+    assert!(
+        json["codemode"].get("mcp_tool").is_none(),
+        "codemode must not advertise an mcp_tool"
+    );
     assert!(json["commands"].as_array().unwrap().iter().any(|row| {
         row["name"] == "doctor"
             && row["aliases"]

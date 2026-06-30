@@ -566,20 +566,20 @@ fn client_surface_inspection_rejects_tokenzero_substring_without_valid_toml_comm
 }
 
 #[test]
-fn codemode_surface_install_writes_tool_surface_env() {
+fn surface_install_always_writes_classic() {
     let dir = tempdir().unwrap();
     apply_for_agents(
         dir.path(),
         true,
         &["mcp".to_string()],
         &["grok".to_string()],
-        McpToolSurface::Codemode,
+        McpToolSurface::Classic,
     )
     .unwrap();
     let path = dir.path().join(".grok/config.toml");
     let text = fs::read_to_string(path).unwrap();
     assert!(text.contains("TOKENZERO_MCP_TOOL_SURFACE"));
-    assert!(text.contains("codemode"));
+    assert!(text.contains("classic"));
 }
 
 #[test]
@@ -773,7 +773,13 @@ fn hooks_plan_is_scoped_to_claude_agents() {
 
     // The grok exclusion contract: agent-scoped plans for other agents
     // must never list a .claude path (mirrors cli_contract.rs).
-    let grok = plan_for_agents(dir.path(), true, &hooks, &["grok".to_string()], McpToolSurface::Classic);
+    let grok = plan_for_agents(
+        dir.path(),
+        true,
+        &hooks,
+        &["grok".to_string()],
+        McpToolSurface::Classic,
+    );
     assert!(
         !grok
             .writes

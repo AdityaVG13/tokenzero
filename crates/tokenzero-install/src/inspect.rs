@@ -440,10 +440,7 @@ pub(crate) fn mcp_server_checks(
         client_check(
             "mcp_tool_surface_valid",
             parsed_surface.is_some(),
-            format!(
-                "expected {} to be classic or codemode",
-                McpToolSurface::ENV
-            ),
+            format!("expected {} to be classic", McpToolSurface::ENV),
         ),
     ]
 }

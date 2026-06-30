@@ -11,15 +11,23 @@ pub(crate) fn content_for(
         "mcp" => {
             let path = Path::new(&row.path);
             if path.extension().and_then(|ext| ext.to_str()) == Some("toml") {
-                merge_toml_mcp(previous.unwrap_or_default(), root, path, row.global, mcp_surface)
-                    .map(PendingContent::Text)
+                merge_toml_mcp(
+                    previous.unwrap_or_default(),
+                    root,
+                    path,
+                    row.global,
+                    mcp_surface,
+                )
+                .map(PendingContent::Text)
             } else {
                 merge_json_mcp(previous.unwrap_or_default(), root, row.global, mcp_surface)
                     .map(PendingContent::Text)
             }
         }
         "instructions" => Ok(PendingContent::Text(instructions_content(mcp_surface))),
-        "shell" => Ok(PendingContent::Text(shell_launcher_content(root, row.global))),
+        "shell" => Ok(PendingContent::Text(shell_launcher_content(
+            root, row.global,
+        ))),
         "cli" => Ok(PendingContent::Text(cli_launcher_content(root, row.global))),
         "cli-runtime" => current_exe_bytes().map(PendingContent::Bytes),
         "cli-shim" => Ok(PendingContent::Text(windows_posix_cli_shim_content())),
@@ -29,16 +37,18 @@ pub(crate) fn content_for(
         )
         .map(PendingContent::Text),
         "shim" => shim_content(Path::new(&row.path), root, row.global).map(PendingContent::Text),
-        _ => Ok(PendingContent::Text(serde_json::json!({
-            "schema_version": "tokenzero.runtime_manifest.v1",
-            "runtime": "rust",
-            "external_runtime_required": false,
-            "binary": runtime_manifest_binary(root, row.global),
-            "source_binary": current_exe_string(),
-            "global_launcher": tokenzero_command(root, row.global)
-        })
-        .to_string()
-            + "\n")),
+        _ => Ok(PendingContent::Text(
+            serde_json::json!({
+                "schema_version": "tokenzero.runtime_manifest.v1",
+                "runtime": "rust",
+                "external_runtime_required": false,
+                "binary": runtime_manifest_binary(root, row.global),
+                "source_binary": current_exe_string(),
+                "global_launcher": tokenzero_command(root, row.global)
+            })
+            .to_string()
+                + "\n",
+        )),
     }
 }
 
@@ -275,11 +285,8 @@ pub(crate) fn merge_toml_mcp(
     Ok(merged)
 }
 
-fn instructions_content(surface: McpToolSurface) -> String {
-    let body = match surface {
-        McpToolSurface::Classic => "Use `tokenzero read/find/tree/run/expand` or MCP aliases. Rust Core runs as a standalone binary for normal use.",
-        McpToolSurface::Codemode => "TokenZero CodeMode surface: call MCP `tz_codemode` with JS-like plans (`await zero.read(...)`, bindings, `return`). Discover methods with plan prefixes `search:read` or `describe:zero.read`. Recover refs with `zero.expand` inside plans or `tz_expand`.",
-    };
+fn instructions_content(_surface: McpToolSurface) -> String {
+    let body = "Use `tokenzero read/find/tree/run/expand` or MCP aliases. Rust Core runs as a standalone binary for normal use.";
     format!("<!-- tokenzero:rust-core:start -->\n{body}\n<!-- tokenzero:rust-core:end -->\n")
 }
 
@@ -369,10 +376,7 @@ pub(crate) fn toml_mcp_block(
         toml_env_lines(root, mcp_surface)
     );
     if include_codex_tool_approvals {
-        let tools: &[&str] = match mcp_surface {
-            McpToolSurface::Classic => &["shell", "read", "find", "tree"],
-            McpToolSurface::Codemode => &["codemode", "expand"],
-        };
+        let tools: &[&str] = &["shell", "read", "find", "tree"];
         for tool in tools {
             block.push_str(&format!(
                 "\n[mcp_servers.tokenzero.tools.{tool}]\napproval_mode = \"approve\"\n"

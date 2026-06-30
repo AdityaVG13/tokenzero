@@ -173,7 +173,7 @@ const COMMANDS: &[CommandSurface] = &[
         mutates: false,
         json: true,
         primary_invocation: "tokenzero codemode --json --plan '<plan>'",
-        description: "Run a JS-like CodeMode plan: compose TokenZero ops in one call with search/describe discovery.",
+        description: "Compose multi-step plans on the same base tools as MCP, fewer round-trips. Cloudflare-style plan execution with progressive discovery.",
     },
     CommandSurface {
         name: "robot-docs guide",
@@ -325,7 +325,6 @@ pub fn capabilities_json() -> serde_json::Value {
         "codemode": {
             "schema": "tokenzero.codemode.v1",
             "cli": "tokenzero codemode --json --plan '<plan>'",
-            "mcp_tool": "tz_codemode",
             "discovery": [
                 "tokenzero codemode 'search:read'",
                 "tokenzero codemode 'describe:zero.read'"
@@ -333,7 +332,7 @@ pub fn capabilities_json() -> serde_json::Value {
             "cache_default": "recovery-cache.json",
             "cache_note": "CodeMode plans share the MCP recovery cache by default.",
             "pattern": "https://developers.cloudflare.com/agents/tools/codemode/",
-            "when_to_use": "Compose multi-step TokenZero workflows in one plan; fewer round trips than per-tool MCP calls."
+            "when_to_use": "Compose multi-step workflows on the same base tools as MCP but faster (fewer round-trips, composition via plans, progressive search:/describe: discovery). Not an MCP tool."
         },
         "dangerous_operations": [
             {
@@ -358,7 +357,7 @@ pub fn capabilities_json() -> serde_json::Value {
             "`tokenzero install status --json` recovers to `tokenzero clients detect --json`.",
             "Use `tokenzero run --json -- <command>` for command telemetry; inspect `command_success`, not only process exit.",
             "Read resource://tokenzero/codemode for the full CodeMode method catalog.",
-            "Install --surface codemode for the upgrade; --surface classic for per-tool MCP. See docs/codemode.md."
+            "CodeMode is a separate plan-based execution layer on the same base tools/engine. Faster for multi-step workflows (fewer round-trips). Use `tokenzero codemode --plan`."
         ]
     })
 }
@@ -417,20 +416,19 @@ Stdout is data. Stderr is diagnostics. JSON commands include `schema_version` or
 
 `tokenzero install` defaults to a plan. Use `tokenzero install --plan --json` before any `--apply`. `tokenzero cache prune --json` is a dry run unless `--apply` is supplied.
 
-## CodeMode
+## CodeMode (separate plan-based execution)
 
-`tokenzero codemode` runs JS-like plans against the TokenZero engine (`zero.read`, `zero.find`, `zero.compact`, etc.). Discovery helpers: `tokenzero codemode 'search:read'` and `tokenzero codemode 'describe:zero.read'`.
+CodeMode is a separate execution implementation that uses the **same base tools and engine** as MCP but composes them in Cloudflare-style plans for faster, more efficient multi-step workflows (fewer round-trips).
 
-Cache boundary: CodeMode defaults to a dedicated recovery file (`codemode-recovery.json` under `.tokenzero/` or `.zerostack/tokenzero/`). Refs created inside a CodeMode plan round-trip within that plan, but `tokenzero expand` / MCP use the main `recovery-cache.json` unless you pass the same `--cache-path` to both surfaces.
+```bash
+tokenzero codemode --json --plan 'const t = await zero.read("src/main.rs"); return t'
+tokenzero codemode 'search:read'
+tokenzero codemode 'describe:zero.read'
+```
 
-## Classic vs CodeMode install
+MCP is the base surface (full `tz_*` tools, one call per operation). CodeMode composes the same operations in one plan call with progressive `search:`/`describe:` discovery.
 
-| Install surface | When to use |
-|-----------------|-------------|
-| **Classic** (`install --surface classic`) | Default. Full per-tool MCP (`tz_read`, `tz_find`, …). Works everywhere out of the box. |
-| **CodeMode** (`install --surface codemode`) | Upgrade for harnesses that accept it: one MCP tool (`tz_codemode`), compose in-plan, progressive `search:`/`describe:` discovery. |
-
-Do not mix surfaces in one client config. Pick classic or codemode at install time.
+Cache: CodeMode defaults to `codemode-recovery.json` (under `.tokenzero/` or `.zerostack/tokenzero/`). Share `--cache-path` with `expand`/MCP when refs must cross surfaces. `tz_expand` works with refs from either surface.
 "#
 }
 
@@ -456,7 +454,7 @@ tokenzero codemode 'search:read'
 
 Recoveries: `capability`, `capabilites`, `robot-help`, `--robot-help`, `rn`, `shell`, `search`, `--jsno`, `--jason`, `--timout`, `cache statuz`, `doctor status`, `doctor statuz`, `pulse stats`, `pulse status`, `install plan`, and `install status` redirect to safe canonical surfaces.
 
-CodeMode uses `codemode-recovery.json` by default; share `--cache-path` with `expand`/MCP when refs must cross surfaces. MCP clients can call `tz_codemode` with the same plan string.
+CodeMode uses `codemode-recovery.json` by default; share `--cache-path` with `expand`/MCP when refs must cross surfaces. CodeMode is a separate plan-based execution on the same base tools (not an MCP tool).
 "#
 }
 
