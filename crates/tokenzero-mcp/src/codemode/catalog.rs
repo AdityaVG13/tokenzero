@@ -151,6 +151,18 @@ const METHOD_CATALOG: &[MethodDef] = &[
         signature: "zero.compact_max(data: string | any): Promise<{ text: string, ref: string, raw_tokens: number, visible_tokens: number, compression_strategy: string, savings_pct: string }>",
     },
     MethodDef {
+        path: "zero.count_tokens",
+        connector: "zero",
+        description: "Count tokens, bytes, and lines in a value without storing it (introspection helper)",
+        signature: "zero.count_tokens(data: string | any): Promise<{ tokens: number, bytes: number, lines: number }>",
+    },
+    MethodDef {
+        path: "zero.assert",
+        connector: "zero",
+        description: "Fail the plan immediately if condition is falsy (plan-level guard)",
+        signature: "zero.assert(condition: any, message?: string): Promise<{ ok: true }>",
+    },
+    MethodDef {
         path: "codemode.search",
         connector: "codemode",
         description: "Search available methods by keyword",
@@ -189,11 +201,68 @@ pub(crate) fn search_catalog(query: &str) -> Value {
             "path": m.path,
             "connector": m.connector,
             "description": m.description,
+            "signature": m.signature,
+            "example": make_example(m.path),
             "score": score,
         })).collect::<Vec<_>>(),
         "total": results.len(),
         "truncated": false,
+        "hint": "Use describe:<path> for full details, or call the method directly in your plan."
     })
+}
+
+fn make_example(path: &str) -> &'static str {
+    match path {
+        "zero.read" => r#"const f = await zero.read("src/main.rs"); return f"#,
+        "zero.find" => r#"await zero.find("TODO", "src/")"#,
+        "zero.grep" => r#"await zero.grep("fn main", "crates/")"#,
+        "zero.glob" => r#"await zero.glob("**/*.rs", "crates/")"#,
+        "zero.tree" => r#"await zero.tree("src", { depth: 2 })"#,
+        "zero.shell" => r#"await zero.shell("cargo test --quiet")"#,
+        "zero.edit" => r#"await zero.edit("src/lib.rs", [{ find: "old", replace: "new" }])"#,
+        "zero.expand" | "zero.token.expand" => r#"await zero.expand("tz://blob/abc123")"#,
+        "zero.compact" | "zero.token.compact" => r#"await zero.compact(large_output)"#,
+        "zero.compact_max" => r#"await zero.compact_max(large_output)"#,
+        "zero.ingest" => r#"await zero.ingest("large text payload")"#,
+        "zero.pipe" => {
+            r#"await zero.pipe([{ method: "zero.read", args: ["f.rs"] }, { method: "zero.compact", args: ["_prev.text"] }])"#
+        }
+        "zero.pick" => r#"const r = await zero.read("f.rs"); await zero.pick(r, ["text", "ref"])"#,
+        "zero.filter_lines" => {
+            r#"const r = await zero.grep("fn", "src/"); await zero.filter_lines(r.text, "pub")"#
+        }
+        "zero.batch" => {
+            r#"await zero.batch([{ tool: "read", args: { path: "a.rs" } }, { tool: "read", args: { path: "b.rs" } }])"#
+        }
+        "zero.recall" => r#"await zero.recall("fn main")"#,
+        "zero.fetch" => r#"await zero.fetch("https://example.com/api")"#,
+        "zero.mem" => r#"await zero.mem()"#,
+        "zero.rewrite" => r#"await zero.rewrite("find . -name '*.rs'")"#,
+        "zero.discover" => r#"await zero.discover()"#,
+        "zero.cache_pack" => r#"await zero.cache_pack()"#,
+        _ => "(no example available)",
+    }
+}
+
+fn related_methods(path: &str) -> Vec<&'static str> {
+    match path {
+        "zero.read" => vec!["zero.expand", "zero.find", "zero.compact"],
+        "zero.find" | "zero.grep" => vec!["zero.filter_lines", "zero.recall", "zero.read"],
+        "zero.glob" => vec!["zero.tree", "zero.read"],
+        "zero.tree" => vec!["zero.glob", "zero.read"],
+        "zero.shell" => vec!["zero.compact", "zero.filter_lines"],
+        "zero.edit" => vec!["zero.read", "zero.find"],
+        "zero.expand" | "zero.token.expand" => vec!["zero.compact", "zero.read"],
+        "zero.compact" | "zero.token.compact" | "zero.compact_max" => {
+            vec!["zero.expand", "zero.ingest"]
+        }
+        "zero.pipe" => vec!["zero.batch", "zero.pick", "zero.filter_lines"],
+        "zero.pick" => vec!["zero.pipe", "zero.filter_lines"],
+        "zero.filter_lines" => vec!["zero.find", "zero.pick", "zero.pipe"],
+        "zero.batch" => vec!["zero.pipe"],
+        "zero.recall" => vec!["zero.find", "zero.expand"],
+        _ => vec![],
+    }
 }
 
 pub(crate) fn describe_method(path: &str) -> Value {
@@ -205,7 +274,9 @@ pub(crate) fn describe_method(path: &str) -> Value {
         json!({
             "path": m.path,
             "description": m.description,
-            "types": m.signature,
+            "signature": m.signature,
+            "example": make_example(m.path),
+            "related": related_methods(m.path),
             "kind": "method",
         })
     } else {

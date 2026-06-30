@@ -159,6 +159,8 @@ fn dispatch(
         "zero.pipe" | "pipe" => exec_pipe(engine, work_root, &args),
         "zero.pick" | "pick" => exec_pick(&args),
         "zero.filter_lines" | "filter_lines" => exec_filter_lines(&args),
+        "zero.count_tokens" | "count_tokens" => exec_count_tokens(&args),
+        "zero.assert" | "assert" => exec_assert(&args),
         "codemode.search" | "search" => {
             let query = args.first().and_then(|v| v.as_str()).unwrap_or("");
             Ok(OpOutcome::from_catalog(search_catalog(query)))
@@ -871,6 +873,48 @@ fn exec_filter_lines(args: &[Value]) -> Result<OpOutcome, Box<CodeModeResult>> {
         "lines": filtered.len(),
         "pattern": pattern,
     })))
+}
+
+fn exec_count_tokens(args: &[Value]) -> Result<OpOutcome, Box<CodeModeResult>> {
+    let text = match args.first() {
+        Some(Value::String(s)) => s.clone(),
+        Some(other) => serde_json::to_string(other).unwrap_or_default(),
+        None => {
+            return Err(Box::new(CodeModeResult::error(
+                "zero.count_tokens requires data as first argument",
+                0,
+            )));
+        }
+    };
+    let tokens = count_tokens(&text);
+    Ok(OpOutcome::from_catalog(json!({
+        "tokens": tokens,
+        "bytes": text.len(),
+        "lines": text.lines().count(),
+    })))
+}
+
+fn exec_assert(args: &[Value]) -> Result<OpOutcome, Box<CodeModeResult>> {
+    let condition = args.first().and_then(|v| v.as_bool()).unwrap_or_else(|| {
+        // Truthy: non-null, non-false, non-empty-string, non-zero
+        match args.first() {
+            Some(Value::Null) | None => false,
+            Some(Value::Bool(b)) => *b,
+            Some(Value::String(s)) => !s.is_empty(),
+            Some(Value::Number(n)) => n.as_f64().unwrap_or(0.0) != 0.0,
+            Some(Value::Array(a)) => !a.is_empty(),
+            Some(Value::Object(o)) => !o.is_empty(),
+        }
+    });
+    let message = args
+        .get(1)
+        .and_then(|v| v.as_str())
+        .unwrap_or("assertion failed");
+    if condition {
+        Ok(OpOutcome::from_catalog(json!({ "ok": true })))
+    } else {
+        Err(Box::new(CodeModeResult::error(message.to_string(), 0)))
+    }
 }
 
 // ─── Utilities ──────────────────────────────────────────────────────────────

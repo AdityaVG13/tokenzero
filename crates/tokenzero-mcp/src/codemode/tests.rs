@@ -143,7 +143,7 @@ fn describe_returns_signature() {
     let r = execute_codemode("describe:zero.read");
     assert_eq!(r.status, CodeModeStatus::Completed);
     let val = r.value.unwrap();
-    assert!(val["types"].as_str().unwrap().contains("Promise"));
+    assert!(val["signature"].as_str().unwrap().contains("Promise"));
 }
 
 #[test]
@@ -231,7 +231,7 @@ fn describe_token_namespace_returns_signature() {
     let val = r.value.unwrap();
     assert_eq!(val["path"], "zero.token.compact");
     assert!(
-        val["types"]
+        val["signature"]
             .as_str()
             .unwrap()
             .contains("zero.token.compact")
@@ -358,7 +358,7 @@ fn recall_method_is_discoverable_and_dispatchable() {
     let r = execute_codemode("describe:zero.recall");
     assert_eq!(r.status, CodeModeStatus::Completed);
     assert!(
-        r.value.as_ref().unwrap()["types"]
+        r.value.as_ref().unwrap()["signature"]
             .as_str()
             .unwrap()
             .contains("zero.recall")
@@ -629,4 +629,175 @@ fn compact_max_discoverable() {
     let val = r.value.unwrap();
     let results = val["results"].as_array().unwrap();
     assert!(results.iter().any(|hit| hit["path"] == "zero.compact_max"));
+}
+
+// --- Plan vs direct execution parity tests ---
+
+#[test]
+fn parity_read_plan_vs_direct_identical_output() {
+    let work = tempfile::tempdir().unwrap();
+    let path = work.path().join("test.txt");
+    fs::write(&path, "line one\nline two\nline three\n").unwrap();
+    let quoted = serde_json::to_string(path.to_str().unwrap()).unwrap();
+    let opts = CodeModeOptions {
+        root: Some(work.path().to_path_buf()),
+        ..Default::default()
+    };
+
+    // Direct single-call
+    let direct =
+        execute_codemode_with_options(&format!(r#"await zero.read({quoted})"#), opts.clone());
+    // Plan with binding
+    let plan = execute_codemode_with_options(
+        &format!(r#"const r = await zero.read({quoted}); return r"#),
+        opts.clone(),
+    );
+
+    assert_eq!(direct.status, CodeModeStatus::Completed);
+    assert_eq!(plan.status, CodeModeStatus::Completed);
+    let d_val = direct.value.unwrap();
+    let p_val = plan.value.unwrap();
+    // Same text content
+    assert_eq!(d_val["text"], p_val["text"], "read text must be identical");
+    // Same ref
+    assert_eq!(d_val["ref"], p_val["ref"], "recovery ref must be identical");
+    // Same token accounting
+    assert_eq!(d_val["visible_tokens"], p_val["visible_tokens"]);
+    assert_eq!(d_val["raw_tokens"], p_val["raw_tokens"]);
+}
+
+#[test]
+fn parity_grep_plan_vs_direct_identical_matches() {
+    let work = tempfile::tempdir().unwrap();
+    let src = work.path().join("code.rs");
+    fs::write(&src, "fn main() {}\nfn helper() {}\nstruct Foo;\n").unwrap();
+    let dir = serde_json::to_string(work.path().to_str().unwrap()).unwrap();
+    let opts = CodeModeOptions {
+        root: Some(work.path().to_path_buf()),
+        ..Default::default()
+    };
+
+    let direct =
+        execute_codemode_with_options(&format!(r#"await zero.grep("fn", {dir})"#), opts.clone());
+    let plan = execute_codemode_with_options(
+        &format!(r#"const g = await zero.grep("fn", {dir}); return g"#),
+        opts.clone(),
+    );
+
+    assert_eq!(direct.status, CodeModeStatus::Completed);
+    assert_eq!(plan.status, CodeModeStatus::Completed);
+    let d_val = direct.value.unwrap();
+    let p_val = plan.value.unwrap();
+    assert_eq!(
+        d_val["text"], p_val["text"],
+        "grep results must be identical"
+    );
+    assert_eq!(d_val["ref"], p_val["ref"]);
+}
+
+#[test]
+fn parity_shell_plan_vs_direct_identical_capture() {
+    let opts = CodeModeOptions::default();
+
+    let direct =
+        execute_codemode_with_options(r#"await zero.shell("echo hello world")"#, opts.clone());
+    let plan = execute_codemode_with_options(
+        r#"const s = await zero.shell("echo hello world"); return s"#,
+        opts.clone(),
+    );
+
+    assert_eq!(direct.status, CodeModeStatus::Completed);
+    assert_eq!(plan.status, CodeModeStatus::Completed);
+    let d_val = direct.value.unwrap();
+    let p_val = plan.value.unwrap();
+    assert_eq!(
+        d_val["text"], p_val["text"],
+        "shell output must be identical"
+    );
+    assert_eq!(d_val["exit_code"], p_val["exit_code"]);
+    assert_eq!(d_val["success"], p_val["success"]);
+}
+
+#[test]
+fn parity_edit_plan_vs_direct_identical_result() {
+    let work = tempfile::tempdir().unwrap();
+    let path1 = work.path().join("a.txt");
+    let path2 = work.path().join("b.txt");
+    fs::write(&path1, "hello world").unwrap();
+    fs::write(&path2, "hello world").unwrap();
+    let opts = CodeModeOptions {
+        root: Some(work.path().to_path_buf()),
+        ..Default::default()
+    };
+
+    let q1 = serde_json::to_string(path1.to_str().unwrap()).unwrap();
+    let q2 = serde_json::to_string(path2.to_str().unwrap()).unwrap();
+
+    let direct = execute_codemode_with_options(
+        &format!(r#"await zero.edit({q1}, [{{ "find": "hello", "replace": "goodbye" }}])"#),
+        opts.clone(),
+    );
+    let plan = execute_codemode_with_options(
+        &format!(
+            r#"const e = await zero.edit({q2}, [{{ "find": "hello", "replace": "goodbye" }}]); return e"#
+        ),
+        opts.clone(),
+    );
+
+    assert_eq!(direct.status, CodeModeStatus::Completed);
+    assert_eq!(plan.status, CodeModeStatus::Completed);
+    let d_val = direct.value.unwrap();
+    let p_val = plan.value.unwrap();
+    assert_eq!(d_val["hunks_applied"], p_val["hunks_applied"]);
+    assert_eq!(d_val["status"], p_val["status"]);
+    // Both files should now have identical content
+    assert_eq!(
+        fs::read_to_string(&path1).unwrap(),
+        fs::read_to_string(&path2).unwrap()
+    );
+}
+
+// --- New helper tests ---
+
+#[test]
+fn count_tokens_returns_metrics() {
+    let r = execute_codemode(r#"await zero.count_tokens("hello world this is a test")"#);
+    assert_eq!(r.status, CodeModeStatus::Completed);
+    let val = r.value.unwrap();
+    assert!(val["tokens"].as_u64().unwrap() > 0);
+    assert_eq!(val["bytes"].as_u64().unwrap(), 26);
+    assert_eq!(val["lines"].as_u64().unwrap(), 1);
+}
+
+#[test]
+fn assert_passes_on_truthy() {
+    let r = execute_codemode(r#"await zero.assert(true, "should pass")"#);
+    assert_eq!(r.status, CodeModeStatus::Completed);
+    assert_eq!(r.value.unwrap()["ok"], true);
+}
+
+#[test]
+fn assert_fails_on_falsy_with_message() {
+    let r = execute_codemode(r#"await zero.assert(false, "expected failure")"#);
+    assert_eq!(r.status, CodeModeStatus::Error);
+    assert!(r.error.unwrap().contains("expected failure"));
+}
+
+#[test]
+fn search_includes_signatures_and_examples() {
+    let r = execute_codemode("search:read");
+    let val = r.value.unwrap();
+    let results = val["results"].as_array().unwrap();
+    let hit = results.iter().find(|h| h["path"] == "zero.read").unwrap();
+    assert!(hit["signature"].as_str().unwrap().contains("path: string"));
+    assert!(hit["example"].as_str().unwrap().contains("await"));
+}
+
+#[test]
+fn describe_includes_related_methods() {
+    let r = execute_codemode("describe:zero.read");
+    let val = r.value.unwrap();
+    let related = val["related"].as_array().unwrap();
+    assert!(!related.is_empty());
+    assert!(related.iter().any(|r| r.as_str() == Some("zero.expand")));
 }
