@@ -329,8 +329,8 @@ pub fn capabilities_json() -> serde_json::Value {
                 "tokenzero codemode 'search:read'",
                 "tokenzero codemode 'describe:zero.read'"
             ],
-            "cache_default": "recovery-cache.json",
-            "cache_note": "CodeMode plans share the MCP recovery cache by default.",
+            "cache_default": "codemode-recovery.json",
+            "cache_note": "CodeMode uses a separate recovery cache by default; pass --cache-path when refs must cross CLI/MCP surfaces.",
             "pattern": "https://developers.cloudflare.com/agents/tools/codemode/",
             "when_to_use": "Compose multi-step workflows on the same base tools as MCP but faster (fewer round-trips, composition via plans, progressive search:/describe: discovery). Not an MCP tool."
         },

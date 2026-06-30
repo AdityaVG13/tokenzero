@@ -161,6 +161,8 @@ NDH6SA~M
 
 # local audit artifacts (regenerable; never publish)
 .debloat/
+.math-review/
+.github/assets/how-racc-works.mmd
 
 # skill-loop working state
 .skill-loop-progress.md
