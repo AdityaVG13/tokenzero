@@ -127,6 +127,12 @@ const METHOD_CATALOG: &[MethodDef] = &[
         signature: "zero.batch(ops: Array<{ tool: string, args: object }>): Promise<{ text: string, refs: string[] }>",
     },
     MethodDef {
+        path: "zero.compact_max",
+        connector: "zero",
+        description: "Max compression with guaranteed byte-exact recovery: content-type-aware aggressive compaction with tz:// ref",
+        signature: "zero.compact_max(data: string | any): Promise<{ text: string, ref: string, raw_tokens: number, visible_tokens: number, compression_strategy: string, savings_pct: string }>",
+    },
+    MethodDef {
         path: "codemode.search",
         connector: "codemode",
         description: "Search available methods by keyword",
