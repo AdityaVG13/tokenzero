@@ -5,7 +5,6 @@ use tokenzero_core::MCP_SCHEMA_VERSION;
 
 use super::support::*;
 
-
 #[test]
 fn grep_keeps_own_tool_name_and_exact_refs() {
     let dir = tempdir().unwrap();
@@ -82,7 +81,6 @@ fn zero_hit_note_clamps_multiline_and_long_queries() {
         format!("# grep {}... — 0 matches", "x".repeat(48))
     );
 }
-
 
 #[test]
 fn glob_zero_result_budget_notes_truncated_scan() {

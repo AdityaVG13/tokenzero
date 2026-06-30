@@ -5,17 +5,23 @@ use clap::{CommandFactory, Parser};
 use serde_json::json;
 use std::ffi::OsString;
 use std::fs;
-use std::io::Read;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Instant;
 use tempfile::tempdir;
+use tokenzero_core::McpToolSurface;
 use tokenzero_core::{
     Accounting, ContentType, Mode, ToolResponse, count_tokens, detect_content_type,
     shell_display_command_from_argv_for_platform,
 };
 use tokenzero_filters::{discover, rewrite_command};
 use tokenzero_install as install;
+use tokenzero_mcp::{
+    CodeModeOptions, CodeModeStatus, EditHunk, EngineConfig, TokenZeroEngine, cli_json,
+    default_shell_timeout, execute_codemode_with_options, mcp_idle_timeout_from_secs,
+    mcp_tool_surface_from_env, render_text, shell_timeout_from_secs,
+};
 
 mod agent_surfaces;
 mod artifact_contracts;
@@ -28,6 +34,7 @@ mod mcp_artifact;
 mod reach;
 mod release_claims;
 mod source_currency;
+mod zerostack_store;
 use agent_surfaces::{capabilities_json, robot_docs_guide};
 use artifact_contracts::{json_artifact_path, release_candidate_id};
 use cli_args::*;
@@ -37,10 +44,6 @@ use competitor_adapters::{
 use mcp_artifact::run_mcp_artifact;
 use reach::{installed_tokenzero_command_audit, run_reach};
 use release_claims::{ClaimEvidenceInputs, run_claim_audit};
-use tokenzero_mcp::{
-    EditHunk, EngineConfig, TokenZeroEngine, cli_json, default_shell_timeout,
-    mcp_idle_timeout_from_secs, render_text, shell_timeout_from_secs,
-};
 use tokenzero_pulse::{
     PulseEvent, default_ledger_path, doctor_jsonl_sqlite, export_jsonl, import_jsonl, record_event,
     report_for_path, sync_jsonl_to_sqlite,
@@ -48,6 +51,10 @@ use tokenzero_pulse::{
 use tokenzero_runtime::{
     ExecutionMode, contains_platform_shell_syntax, env_map, plan_command_for_platform, quote_for,
     split_command_string,
+};
+use zerostack_store::{
+    allowed_roots_for_workspace, default_allowed_roots, resolve_recovery_cache_path,
+    tokenzero_work_root,
 };
 
 fn main() -> Result<()> {
@@ -221,6 +228,28 @@ fn main() -> Result<()> {
             run_ws_skeleton(args.output_json, args.output_md)?,
             args.json,
         )?,
+        Commands::CodeMode(args) => {
+            let result = execute_codemode_with_options(
+                args.plan_text(),
+                CodeModeOptions {
+                    root: args.root.clone(),
+                    allowed_roots: args.allowed_root.clone(),
+                    cache_path: args.cache_path.clone(),
+                    max_visible_tokens: args.max_visible_tokens,
+                    timeout_seconds: args.timeout_seconds,
+                },
+            );
+            let failed = result.status == CodeModeStatus::Error;
+            if args.json {
+                println!("{}", serde_json::to_string(&result)?);
+            } else {
+                println!("{}", result.to_line());
+            }
+            if failed {
+                std::io::stdout().flush()?;
+                std::process::exit(1);
+            }
+        }
         Commands::Quote(args) => handle_quote(args)?,
     }
     Ok(())
@@ -408,8 +437,8 @@ fn is_run_json_alias(value: &str) -> bool {
 fn handle_read(args: ReadArgs) -> Result<EmitResponse> {
     let mut paths = args.path;
     if let Some(paths_from) = args.paths_from {
-        let root = root_from(None);
-        let allowed_roots = tool_allowed_roots(&root, &args.tool.allowed_root);
+        let root = tokenzero_work_root(None);
+        let allowed_roots = allowed_roots_for_workspace(&root, &args.tool.allowed_root);
         if !existing_path_is_within_allowed_roots(&paths_from, &allowed_roots) {
             return Ok(EmitResponse {
                 response: ToolResponse::error(
@@ -445,7 +474,7 @@ fn handle_read(args: ReadArgs) -> Result<EmitResponse> {
         args.max_files,
         args.max_visible_tokens,
     );
-    record_tool_pulse(&response, root_from(None), "read")?;
+    record_tool_pulse(&response, tokenzero_work_root(None), "read")?;
     Ok(EmitResponse {
         response,
         json: args.tool.json,
@@ -467,7 +496,7 @@ fn handle_find(args: FindArgs) -> Result<EmitResponse> {
         args.max_files,
         args.max_visible_tokens,
     );
-    record_tool_pulse(&response, root_from(None), "find")?;
+    record_tool_pulse(&response, tokenzero_work_root(None), "find")?;
     Ok(EmitResponse {
         response,
         json: args.tool.json,
@@ -478,7 +507,7 @@ fn handle_recall(args: RecallArgs) -> Result<EmitResponse> {
     let engine = engine_from_tool(&args.tool)?;
     let mode = parse_mode(&args.tool.mode)?;
     let response = engine.recall(&args.query, args.max_hits, mode, args.max_visible_tokens);
-    record_tool_pulse(&response, root_from(None), "recall")?;
+    record_tool_pulse(&response, tokenzero_work_root(None), "recall")?;
     Ok(EmitResponse {
         response,
         json: args.tool.json,
@@ -495,7 +524,7 @@ fn handle_fetch(args: FetchArgs) -> Result<EmitResponse> {
         mode,
         args.max_visible_tokens,
     );
-    record_tool_pulse(&response, root_from(None), "fetch")?;
+    record_tool_pulse(&response, tokenzero_work_root(None), "fetch")?;
     Ok(EmitResponse {
         response,
         json: args.tool.json,
@@ -517,7 +546,7 @@ fn handle_grep(args: FindArgs) -> Result<EmitResponse> {
         args.max_files,
         args.max_visible_tokens,
     );
-    record_tool_pulse(&response, root_from(None), "grep")?;
+    record_tool_pulse(&response, tokenzero_work_root(None), "grep")?;
     Ok(EmitResponse {
         response,
         json: args.tool.json,
@@ -540,7 +569,7 @@ fn handle_glob(args: GlobArgs) -> Result<EmitResponse> {
         args.max_files,
         args.max_visible_tokens,
     );
-    record_tool_pulse(&response, root_from(None), "glob")?;
+    record_tool_pulse(&response, tokenzero_work_root(None), "glob")?;
     Ok(EmitResponse {
         response,
         json: args.tool.json,
@@ -563,7 +592,7 @@ fn handle_tree(args: TreeArgs) -> Result<EmitResponse> {
         args.max_files,
         args.max_visible_tokens,
     );
-    record_tool_pulse(&response, root_from(None), "tree")?;
+    record_tool_pulse(&response, tokenzero_work_root(None), "tree")?;
     Ok(EmitResponse {
         response,
         json: args.tool.json,
@@ -595,7 +624,7 @@ fn handle_edit(args: EditArgs) -> Result<EmitResponse> {
         mode,
         args.max_visible_tokens,
     );
-    record_tool_pulse(&response, root_from(None), "edit")?;
+    record_tool_pulse(&response, tokenzero_work_root(None), "edit")?;
     Ok(EmitResponse {
         response,
         json: args.tool.json,
@@ -642,7 +671,7 @@ fn handle_run(args: RunArgs) -> Result<EmitResponse> {
         stdin_payload.as_deref(),
         None,
     );
-    record_tool_pulse(&response, root_from(None), "shell")?;
+    record_tool_pulse(&response, tokenzero_work_root(None), "shell")?;
     Ok(EmitResponse {
         response,
         json: args.tool.json,
@@ -672,7 +701,7 @@ fn handle_ingest(args: IngestArgs) -> Result<EmitResponse> {
         .map(|p| p.display().to_string())
         .unwrap_or_else(|| "stdin".to_string());
     let response = engine.ingest(&text, kind, mode, &source);
-    record_tool_pulse(&response, root_from(None), "ingest")?;
+    record_tool_pulse(&response, tokenzero_work_root(None), "ingest")?;
     Ok(EmitResponse {
         response,
         json: args.tool.json,
@@ -693,13 +722,10 @@ fn handle_expand(args: ExpandArgs) -> Result<EmitResponse> {
     let Some(ref_id) = refs.first() else {
         anyhow::bail!("expand requires a ref");
     };
-    let root = root_from(None);
+    let root = tokenzero_work_root(None);
     let config = EngineConfig {
         allowed_roots: default_allowed_roots(&root),
-        cache_path: args
-            .cache_path
-            .clone()
-            .unwrap_or_else(|| root.join(".tokenzero/recovery-cache.json")),
+        cache_path: resolve_recovery_cache_path(&root, args.cache_path.clone()),
         max_visible_tokens: 4000,
         mode: Mode::Exact,
         shell_timeout: default_shell_timeout(),
@@ -747,7 +773,7 @@ fn emit_rewrite(args: RewriteArgs) -> Result<()> {
 }
 
 fn doctor_report(args: &DoctorArgs) -> serde_json::Value {
-    let root = root_from(args.root.clone());
+    let root = tokenzero_work_root(args.root.clone());
     let mut report = install::doctor(&root, args.cache_path.as_deref());
     if args.runtime {
         let argv = vec!["echo".to_string(), "ok".to_string()];
@@ -762,7 +788,7 @@ fn handle_doctor(args: DoctorArgs) -> Result<()> {
         Some(DoctorCommand::Capabilities) => emit_doctor_json(install::doctor_capabilities()),
         Some(DoctorCommand::Health) => emit_doctor_health(&args),
         Some(DoctorCommand::Fix) => {
-            let root = root_from(args.root.clone());
+            let root = tokenzero_work_root(args.root.clone());
             emit_doctor_json(install::doctor_fix(
                 &root,
                 args.cache_path.as_deref(),
@@ -770,11 +796,11 @@ fn handle_doctor(args: DoctorArgs) -> Result<()> {
             ))
         }
         Some(DoctorCommand::Undo { run_id }) => {
-            let root = root_from(args.root.clone());
+            let root = tokenzero_work_root(args.root.clone());
             emit_doctor_json(install::doctor_undo(&root, &run_id))
         }
         Some(DoctorCommand::Ls) => {
-            let root = root_from(args.root.clone());
+            let root = tokenzero_work_root(args.root.clone());
             emit_doctor_json(install::doctor_ls(&root))
         }
         Some(DoctorCommand::RobotDocs) => {
@@ -782,7 +808,7 @@ fn handle_doctor(args: DoctorArgs) -> Result<()> {
             Ok(())
         }
         Some(DoctorCommand::Explain { finding_id }) => {
-            let root = root_from(args.root.clone());
+            let root = tokenzero_work_root(args.root.clone());
             emit_doctor_json(install::doctor_explain(
                 &root,
                 args.cache_path.as_deref(),
@@ -790,7 +816,7 @@ fn handle_doctor(args: DoctorArgs) -> Result<()> {
             ))
         }
         Some(DoctorCommand::Diagnose) | None => {
-            let root = root_from(args.root.clone());
+            let root = tokenzero_work_root(args.root.clone());
             if args.fix {
                 return emit_doctor_json(install::doctor_fix(
                     &root,
@@ -874,13 +900,13 @@ fn doctor_exit_code(value: &serde_json::Value) -> i32 {
 }
 
 fn handle_stats(args: CommonArgs) -> Result<serde_json::Value> {
-    let root = root_from(args.root);
+    let root = tokenzero_work_root(args.root);
     let report = report_for_path(&default_ledger_path(&root))?;
     Ok(serde_json::to_value(report)?)
 }
 
 fn handle_pulse(args: PulseArgs) -> Result<()> {
-    let root = root_from(args.root);
+    let root = tokenzero_work_root(args.root);
     let ledger_path = default_ledger_path(&root);
     match args.command {
         Some(PulseCommand::Sync) => {
@@ -977,10 +1003,8 @@ fn handle_cache(args: CacheArgs) -> Result<()> {
             emit_with_json(engine.mem(), args.json)?;
         }
         CacheCommand::Prune(args) => {
-            let root = root_from(args.root);
-            let cache = args
-                .cache_path
-                .unwrap_or_else(|| root.join(".tokenzero/recovery-cache.json"));
+            let root = tokenzero_work_root(args.root);
+            let cache = resolve_recovery_cache_path(&root, args.cache_path);
             let dry_run = !args.apply;
             let mut store = tokenzero_recovery::RecoveryStore::new(Some(cache.clone()));
             let mut report = store.prune_stale(dry_run)?;
@@ -992,13 +1016,10 @@ fn handle_cache(args: CacheArgs) -> Result<()> {
 }
 
 fn handle_cache_pack(args: CachePackArgs) -> Result<()> {
-    let root = root_from(args.root.clone());
+    let root = tokenzero_work_root(args.root.clone());
     let engine = TokenZeroEngine::new(EngineConfig {
         allowed_roots: default_allowed_roots(&root),
-        cache_path: args
-            .cache_path
-            .clone()
-            .unwrap_or_else(|| root.join(".tokenzero/recovery-cache.json")),
+        cache_path: resolve_recovery_cache_path(&root, args.cache_path.clone()),
         max_visible_tokens: 4000,
         mode: Mode::Structured,
         shell_timeout: default_shell_timeout(),
@@ -1021,17 +1042,18 @@ fn handle_bench(args: BenchArgs) -> Result<()> {
 fn handle_install(args: InstallArgs) -> Result<()> {
     let agents = install_agents(&args.agents, args.grok)?;
     let capabilities = install_capabilities(&args);
+    let surface = parse_mcp_surface(&args.surface)?;
     let root = install_root(args.root.clone(), args.global);
     if let Some(id) = args.rollback {
         emit_value(install::rollback(&root, &id)?, args.json)?;
     } else if args.apply {
         emit_value(
-            install::apply_for_agents(&root, args.global, &capabilities, &agents)?,
+            install::apply_for_agents(&root, args.global, &capabilities, &agents, surface)?,
             args.json,
         )?;
     } else {
         emit_value(
-            install::plan_for_agents(&root, args.global, &capabilities, &agents),
+            install::plan_for_agents(&root, args.global, &capabilities, &agents, surface),
             args.json,
         )?;
     }
@@ -1042,15 +1064,16 @@ fn handle_init(args: InitArgs) -> Result<()> {
     let _plan_requested = args.plan;
     let agents = install_agents(&args.agents, false)?;
     let capabilities = init_capabilities(&args);
+    let surface = parse_mcp_surface(&args.surface)?;
     let root = install_root(args.root.clone(), args.global);
     if args.apply {
         emit_value(
-            install::apply_for_agents(&root, args.global, &capabilities, &agents)?,
+            install::apply_for_agents(&root, args.global, &capabilities, &agents, surface)?,
             args.json,
         )?;
     } else {
         emit_value(
-            install::plan_for_agents(&root, args.global, &capabilities, &agents),
+            install::plan_for_agents(&root, args.global, &capabilities, &agents, surface),
             args.json,
         )?;
     }
@@ -1115,7 +1138,13 @@ fn handle_clients_plan(args: ClientsPlanArgs) -> Result<()> {
     let agents = install_agents(&args.agents, args.grok)?;
     let root = install_root(args.root.clone(), true);
     let capabilities = clients_capabilities(&profile);
-    let plan = install::plan_for_agents(&root, true, &capabilities, &agents);
+    let plan = install::plan_for_agents(
+        &root,
+        true,
+        &capabilities,
+        &agents,
+        clients_mcp_surface(&profile),
+    );
     let mut value = serde_json::to_value(plan)?;
     if let Some(object) = value.as_object_mut() {
         object.insert(
@@ -1188,7 +1217,7 @@ fn handle_robot_docs(args: RobotDocsArgs) {
 }
 
 fn handle_package_audit(args: PackageAuditArgs) -> serde_json::Value {
-    let root = root_from(None);
+    let root = tokenzero_work_root(None);
     let artifacts = if args.dist.as_path() == Path::new(".") {
         Vec::new()
     } else if args.dist.exists() && args.dist.is_file() {
@@ -1220,13 +1249,10 @@ fn handle_quote(args: QuoteArgs) -> Result<()> {
 }
 
 fn engine_from_tool(args: &ToolArgs) -> Result<TokenZeroEngine> {
-    let root = root_from(None);
+    let root = tokenzero_work_root(None);
     Ok(TokenZeroEngine::new(EngineConfig {
-        allowed_roots: tool_allowed_roots(&root, &args.allowed_root),
-        cache_path: args
-            .cache_path
-            .clone()
-            .unwrap_or_else(|| root.join(".tokenzero/recovery-cache.json")),
+        allowed_roots: allowed_roots_for_workspace(&root, &args.allowed_root),
+        cache_path: resolve_recovery_cache_path(&root, args.cache_path.clone()),
         max_visible_tokens: args.budget.unwrap_or(4000),
         mode: parse_mode(&args.mode)?,
         shell_timeout: shell_timeout_from_secs(args.timeout_seconds),
@@ -1236,13 +1262,10 @@ fn engine_from_tool(args: &ToolArgs) -> Result<TokenZeroEngine> {
 }
 
 fn engine_from_common(args: &CommonArgs) -> TokenZeroEngine {
-    let root = root_from(args.root.clone());
+    let root = tokenzero_work_root(args.root.clone());
     TokenZeroEngine::new(EngineConfig {
         allowed_roots: default_allowed_roots(&root),
-        cache_path: args
-            .cache_path
-            .clone()
-            .unwrap_or_else(|| root.join(".tokenzero/recovery-cache.json")),
+        cache_path: resolve_recovery_cache_path(&root, args.cache_path.clone()),
         max_visible_tokens: 4000,
         mode: Mode::Auto,
         shell_timeout: default_shell_timeout(),
@@ -1252,21 +1275,25 @@ fn engine_from_common(args: &CommonArgs) -> TokenZeroEngine {
 }
 
 fn engine_config_for_mcp(args: &McpServerArgs) -> Result<EngineConfig> {
-    let root = root_from(None);
+    let root = tokenzero_work_root(None);
+    let tool_surface = args
+        .tool_surface
+        .as_deref()
+        .map(parse_mcp_surface)
+        .transpose()?
+        .unwrap_or_else(mcp_tool_surface_from_env);
     Ok(EngineConfig {
         allowed_roots: if args.allowed_root.is_empty() {
             default_allowed_roots(&root)
         } else {
             args.allowed_root.clone()
         },
-        cache_path: args
-            .cache_path
-            .clone()
-            .unwrap_or_else(|| root.join(".tokenzero/recovery-cache.json")),
+        cache_path: resolve_recovery_cache_path(&root, args.cache_path.clone()),
         max_visible_tokens: 4000,
         mode: parse_mode(&args.default_mode)?,
         shell_timeout: shell_timeout_from_secs(args.shell_timeout_seconds),
         mcp_idle_timeout: mcp_idle_timeout_from_secs(args.idle_timeout_seconds),
+        tool_surface,
         ..EngineConfig::for_root(&root)
     })
 }
@@ -1290,28 +1317,13 @@ fn supervised_child_args(args: &McpServerArgs) -> Vec<std::ffi::OsString> {
         child_args.push("--shell-timeout-seconds".into());
         child_args.push(seconds.to_string().into());
     }
+    if let Some(surface) = &args.tool_surface {
+        child_args.push("--tool-surface".into());
+        child_args.push(surface.clone().into());
+    }
     child_args.push("--idle-timeout-seconds".into());
     child_args.push("0".into());
     child_args
-}
-
-fn root_from(root: Option<PathBuf>) -> PathBuf {
-    root.or_else(|| std::env::var_os("TOKENZERO_ROOT").map(PathBuf::from))
-        .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")))
-}
-
-fn default_allowed_roots(root: &Path) -> Vec<PathBuf> {
-    vec![root.to_path_buf()]
-}
-
-fn tool_allowed_roots(root: &Path, explicit: &[PathBuf]) -> Vec<PathBuf> {
-    let mut roots = if explicit.is_empty() {
-        default_allowed_roots(root)
-    } else {
-        explicit.to_vec()
-    };
-    push_unique_path(&mut roots, root.to_path_buf());
-    roots
 }
 
 fn existing_path_is_within_allowed_roots(path: &Path, allowed_roots: &[PathBuf]) -> bool {
@@ -1324,18 +1336,6 @@ fn existing_path_is_within_allowed_roots(path: &Path, allowed_roots: &[PathBuf])
     })
 }
 
-fn push_unique_path(paths: &mut Vec<PathBuf>, candidate: PathBuf) {
-    let candidate_cmp = candidate
-        .canonicalize()
-        .unwrap_or_else(|_| candidate.clone());
-    let exists = paths
-        .iter()
-        .any(|path| path.canonicalize().unwrap_or_else(|_| path.clone()) == candidate_cmp);
-    if !exists {
-        paths.push(candidate);
-    }
-}
-
 fn install_root(root: Option<PathBuf>, global: bool) -> PathBuf {
     if let Some(root) = root {
         return root;
@@ -1345,7 +1345,7 @@ fn install_root(root: Option<PathBuf>, global: bool) -> PathBuf {
             return home;
         }
     }
-    root_from(None)
+    tokenzero_work_root(None)
 }
 
 fn platform_home_dir() -> Option<PathBuf> {
@@ -1493,17 +1493,29 @@ fn clients_profile(raw: &str) -> Result<String> {
     let profile = raw.trim().to_ascii_lowercase();
     match profile.as_str() {
         "standard" | "" => Ok("standard".to_string()),
+        "codemode" | "code-mode" => Ok("codemode".to_string()),
         other => anyhow::bail!(
-            "unsupported clients profile '{other}'; currently only 'standard' is supported"
+            "unsupported clients profile '{other}'; supported profiles: standard, codemode"
         ),
     }
 }
 
-fn clients_capabilities(_profile: &str) -> Vec<String> {
-    // The standard profile wires MCP plus the Claude Code hook. The PATH shim
-    // layer stays opt-in (`tokenzero install --shims`): it mutates PATH-visible
-    // binaries, which is a bigger footprint than client config merges.
-    vec!["mcp".to_string(), "hooks".to_string()]
+fn clients_capabilities(profile: &str) -> Vec<String> {
+    let mut caps = vec!["mcp".to_string(), "hooks".to_string()];
+    if profile == "codemode" {
+        caps.push("instructions".to_string());
+    }
+    caps
+}
+
+fn clients_mcp_surface(_profile: &str) -> McpToolSurface {
+    // MCP always uses the full classic tool surface regardless of profile.
+    McpToolSurface::Classic
+}
+
+fn parse_mcp_surface(raw: &str) -> Result<McpToolSurface> {
+    raw.parse()
+        .map_err(|message: String| anyhow::anyhow!(message))
 }
 
 fn clients_agent_labels(agents: &[String]) -> Vec<String> {
@@ -1520,7 +1532,7 @@ fn client_status_report(
     command: &str,
 ) -> Result<serde_json::Value> {
     let capabilities = clients_capabilities("standard");
-    let plan = install::plan_for_agents(root, true, &capabilities, agents);
+    let plan = install::plan_for_agents(root, true, &capabilities, agents, McpToolSurface::Classic);
     let surfaces: Vec<serde_json::Value> = plan
         .writes
         .iter()

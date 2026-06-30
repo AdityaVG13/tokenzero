@@ -1,4 +1,5 @@
 use super::*;
+use crate::zerostack_store::allowed_roots_for_workspace;
 
 fn env_lookup(pairs: &[(&str, &str)], name: &str) -> Option<OsString> {
     pairs
@@ -43,7 +44,8 @@ fn unix_global_home_uses_home() {
 
 #[test]
 fn explicit_tool_allowed_roots_include_workspace_root() {
-    let roots = tool_allowed_roots(Path::new("C:\\repo"), &[PathBuf::from("C:\\Users\\Ada")]);
+    let roots =
+        allowed_roots_for_workspace(Path::new("C:\\repo"), &[PathBuf::from("C:\\Users\\Ada")]);
 
     assert!(roots.contains(&PathBuf::from("C:\\Users\\Ada")));
     assert!(roots.contains(&PathBuf::from("C:\\repo")));

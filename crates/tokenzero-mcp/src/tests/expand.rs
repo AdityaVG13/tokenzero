@@ -5,7 +5,6 @@ use tokenzero_core::MCP_SCHEMA_VERSION;
 
 use super::support::*;
 
-
 #[test]
 fn recall_finds_previously_served_payloads() {
     let dir = tempdir().unwrap();
@@ -52,7 +51,6 @@ fn recall_unreadable_cache_degrades_cleanly() {
         "recall_cache_unreadable"
     );
 }
-
 
 #[test]
 fn recall_caps_hits_and_reports_truncation() {

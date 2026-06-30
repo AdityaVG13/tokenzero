@@ -2,7 +2,8 @@ use serde_json::{Value, json};
 use tokenzero_core::MCP_SCHEMA_VERSION;
 
 use crate::TokenZeroEngine;
-use crate::catalog::{canonical_tool_names, resource_specs, tool_clusters, tool_docs};
+use crate::catalog::{canonical_tool_names_for_surface, resource_specs, tool_clusters, tool_docs};
+use crate::codemode::catalog::codemode_method_catalog;
 use crate::jsonrpc::{JsonRpcErrorData, SUPPORTED_PROTOCOL_VERSIONS, tool_filter_discovery};
 
 pub(crate) fn read_resource(
@@ -22,8 +23,9 @@ pub(crate) fn read_resource(
             "version": env!("CARGO_PKG_VERSION"),
             "protocolVersions": SUPPORTED_PROTOCOL_VERSIONS,
             "tool_clusters": tool_clusters(),
-            "toolFiltering": tool_filter_discovery(),
-            "canonical_tools": canonical_tool_names(),
+            "toolFiltering": tool_filter_discovery(engine.config.tool_surface),
+            "tool_surface": engine.config.tool_surface.as_str(),
+            "canonical_tools": canonical_tool_names_for_surface(engine.config.tool_surface),
             "aliases": {
                 "read": "tz_read",
                 "find": "tz_find",
@@ -41,7 +43,12 @@ pub(crate) fn read_resource(
                 "cache_pack": "tz_cache_pack",
                 "cache-pack": "tz_cache_pack",
                 "rewrite": "tz_rewrite",
-                "discover": "tz_discover"
+                "discover": "tz_discover",
+            },
+            "codemode": {
+                "schema": "tokenzero.codemode.v1",
+                "cli": "tokenzero codemode --json --plan '<plan>'",
+                "note": "CodeMode is a separate plan-based execution layer on the same base tools/engine (Cloudflare-style, fewer round-trips). Use `tokenzero codemode` or resource://tokenzero/codemode for discovery."
             },
             "resources": resource_specs(),
             "next_actions": [
@@ -50,12 +57,13 @@ pub(crate) fn read_resource(
                 "Inspect tool text output: shell reports command_success inline and other tools carry a refs: footer; set TOKENZERO_MCP_ENVELOPE=compact|full for structuredContent envelopes."
             ]
         }),
+        "resource://tokenzero/codemode" => codemode_method_catalog(),
         "resource://tokenzero/tools" => json!({
             "schema_version": MCP_SCHEMA_VERSION,
             "status": "ok",
             "tools": tool_docs(),
             "tool_clusters": tool_clusters(),
-            "toolFiltering": tool_filter_discovery(),
+            "toolFiltering": tool_filter_discovery(engine.config.tool_surface),
             "next_actions": ["Use canonical tz_* names in durable instructions; aliases exist for client ergonomics."]
         }),
         "resource://tokenzero/roots" => json!({

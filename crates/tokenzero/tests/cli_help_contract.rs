@@ -53,6 +53,7 @@ fn cli_capabilities_json_exposes_agent_contract() {
             .any(|feature| feature == "non_tty_output_discipline")
     );
     assert_eq!(json["feature_flags"]["capabilities_json"], true);
+    assert_eq!(json["feature_flags"]["codemode_surface"], true);
     assert_eq!(json["feature_flags"]["robot_docs_guide"], true);
     assert_eq!(json["feature_flags"]["intent_inference_aliases"], true);
     assert_eq!(
@@ -119,6 +120,16 @@ fn cli_capabilities_json_exposes_agent_contract() {
                 .iter()
                 .any(|alias| alias == "robot-docs commands")
     }));
+    assert!(json["commands"].as_array().unwrap().iter().any(|row| {
+        row["name"] == "codemode"
+            && row["json"] == true
+            && row["primary_invocation"] == "tokenzero codemode --json --plan '<plan>'"
+    }));
+    assert_eq!(json["codemode"]["schema"], "tokenzero.codemode.v1");
+    assert!(
+        json["codemode"].get("mcp_tool").is_none(),
+        "codemode must not advertise an mcp_tool"
+    );
     assert!(json["commands"].as_array().unwrap().iter().any(|row| {
         row["name"] == "doctor"
             && row["aliases"]
@@ -236,6 +247,7 @@ fn cli_agent_contract_outputs_are_deterministic_and_env_clean() {
         features,
         vec![
             "capabilities_json",
+            "codemode_surface",
             "exact_recovery_refs",
             "intent_inference_aliases",
             "json_output",

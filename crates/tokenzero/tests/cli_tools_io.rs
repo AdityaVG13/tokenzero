@@ -198,6 +198,95 @@ fn cli_grep_and_glob_are_exact_first_surfaces() {
 }
 
 #[test]
+fn cli_codemode_token_namespace_roundtrip_uses_explicit_cache() {
+    let dir = tempdir().unwrap();
+    let cache = dir.path().join("codemode-cache.json");
+    let plan = r#"const c = await zero.token.compact("cli codemode payload"); const e = await zero.token.expand(c.ref); return { ref: c.ref, text: e.text }"#;
+
+    let output = Command::cargo_bin("tokenzero")
+        .unwrap()
+        .args([
+            "codemode",
+            "--root",
+            dir.path().to_str().unwrap(),
+            "--cache-path",
+            cache.to_str().unwrap(),
+            "--json",
+            "--plan",
+            plan,
+        ])
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "stdout={}\nstderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let json: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(json["status"], "completed");
+    assert!(json["value"]["ref"].as_str().unwrap().starts_with("tz://"));
+    assert!(
+        json["value"]["text"]
+            .as_str()
+            .unwrap()
+            .contains("cli codemode payload")
+    );
+    assert!(cache.exists(), "explicit CodeMode cache should be written");
+}
+
+#[test]
+fn cli_codemode_rejects_outside_root_without_leaking_contents() {
+    let root = tempdir().unwrap();
+    let outside_dir = tempdir().unwrap();
+    let outside = outside_dir.path().join("secret.txt");
+    fs::write(&outside, "CODEMODE_OUTSIDE_ROOT_SENTINEL\n").unwrap();
+    let quoted_path = serde_json::to_string(outside.to_str().unwrap()).unwrap();
+    let plan = format!("await zero.read({quoted_path})");
+
+    let output = Command::cargo_bin("tokenzero")
+        .unwrap()
+        .current_dir(root.path())
+        .args(["codemode", "--json", "--plan", &plan])
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "tool-level errors remain plan values; stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let json: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(json["status"], "completed");
+    assert_eq!(json["value"]["status"], "error");
+    assert_eq!(
+        json["value"]["error"],
+        "path is outside allowed roots: ".to_owned() + outside.to_str().unwrap()
+    );
+    assert!(
+        !String::from_utf8_lossy(&output.stdout).contains("CODEMODE_OUTSIDE_ROOT_SENTINEL"),
+        "{}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+}
+
+#[test]
+fn cli_codemode_plan_error_exits_nonzero() {
+    let output = Command::cargo_bin("tokenzero")
+        .unwrap()
+        .args(["codemode", "--json", "--plan", "await zero.nope()"])
+        .output()
+        .unwrap();
+
+    assert!(!output.status.success());
+    let json: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(json["status"], "error");
+    assert!(json["error"].as_str().unwrap().contains("unknown method"));
+}
+
+#[test]
 fn cli_cache_pack_is_schemaed_and_deterministic() {
     let dir = tempdir().unwrap();
     std::fs::write(dir.path().join("AGENTS.md"), "stable\n").unwrap();

@@ -1,6 +1,35 @@
 use super::*;
 
 #[test]
+fn codemode_not_exposed_as_mcp_tool() {
+    let list =
+        crate::catalog::tool_specs_for_filter(None, true, tokenzero_core::McpToolSurface::Classic);
+    let names: Vec<_> = list.iter().map(|tool| tool.name.as_str()).collect();
+    assert!(
+        !names.contains(&"tz_codemode"),
+        "tz_codemode must not appear in MCP tool list"
+    );
+    assert!(names.contains(&"tz_read"));
+    assert!(names.contains(&"tz_expand"));
+}
+
+#[test]
+fn codemode_call_returns_unknown_tool() {
+    let dir = tempfile::tempdir().unwrap();
+    let engine = crate::TokenZeroEngine::new(crate::EngineConfig::for_root(dir.path()));
+    assert!(
+        call_tool(
+            &engine,
+            "tz_codemode",
+            &json!({"plan": "search:read"}),
+            None
+        )
+        .is_err()
+    );
+    assert!(call_tool(&engine, "codemode", &json!({}), None).is_err());
+}
+
+#[test]
 fn batch_combines_ops_with_sections_and_unioned_refs() {
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(dir.path().join("a.txt"), "alpha contents\n").unwrap();

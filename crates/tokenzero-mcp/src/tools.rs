@@ -8,6 +8,7 @@ use tokenzero_core::{
 use tokenzero_filters::{discover, rewrite_command};
 use tokenzero_runtime::{ExecutionMode, plan_command_for_platform};
 
+use crate::catalog::canonical_allowed_on_surface;
 use crate::jsonrpc::JsonRpcErrorData;
 use crate::{EditHunk, ServeOptions, TokenZeroEngine, shell_timeout_from_secs};
 
@@ -19,6 +20,9 @@ pub(crate) fn call_tool(
 ) -> Result<Value, JsonRpcErrorData> {
     let canonical = canonical_tool(name);
     let started = std::time::Instant::now();
+    if !canonical_allowed_on_surface(engine.config.tool_surface, canonical) {
+        return Err(JsonRpcErrorData::unknown_tool(name));
+    }
     let result = dispatch_tool(engine, canonical, name, args);
     engine.record_tool_call(canonical, started.elapsed(), result.is_err());
     let response = result?;
@@ -262,15 +266,11 @@ fn dispatch_tool(
     Ok(response)
 }
 
-/// `tz_batch`: several read-side ops in one call — one combined capsule with
-/// per-op sections, unioned refs, and summed raw accounting. Best-effort: a
-/// failing op renders its error inline and the rest still run. Nested
-/// batches are rejected per op.
-fn batch_response(
+pub(crate) fn batch_response(
     engine: &TokenZeroEngine,
     args: &Value,
 ) -> Result<ToolResponse, JsonRpcErrorData> {
-    let ops = batch_ops(args)?;
+    let ops = batch_ops(args).map_err(JsonRpcErrorData::from)?;
     let mut sections = Vec::with_capacity(ops.len());
     let mut refs: Vec<tokenzero_core::RefRecord> = Vec::new();
     let mut listed: std::collections::HashSet<String> = std::collections::HashSet::new();

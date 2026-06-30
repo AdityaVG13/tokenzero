@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
+use tokenzero_core::McpToolSurface;
 
 use crate::DEFAULT_SHELL_TIMEOUT_SECS;
 
@@ -54,13 +55,18 @@ pub struct ResourceSpec {
 }
 
 pub fn tool_specs() -> Vec<ToolSpec> {
-    tool_specs_for_filter(None, true)
+    tool_specs_for_filter(None, true, McpToolSurface::Classic)
 }
 
-pub(crate) fn tool_specs_for_filter(cluster: Option<&str>, include_aliases: bool) -> Vec<ToolSpec> {
+pub(crate) fn tool_specs_for_filter(
+    cluster: Option<&str>,
+    include_aliases: bool,
+    surface: McpToolSurface,
+) -> Vec<ToolSpec> {
     let canonical = canonical_tool_specs();
     let mut specs = canonical
         .iter()
+        .filter(|seed| surface_includes_canonical(surface, seed.name))
         .filter(|seed| cluster.is_none_or(|cluster| seed.cluster == cluster))
         .map(|seed| ToolSpec {
             name: seed.name.to_string(),
@@ -74,6 +80,9 @@ pub(crate) fn tool_specs_for_filter(cluster: Option<&str>, include_aliases: bool
     }
 
     for &(alias, target) in TOOL_ALIASES {
+        if !surface_includes_canonical(surface, target) {
+            continue;
+        }
         if let Some(seed) = canonical.iter().find(|seed| seed.name == target) {
             if cluster.is_some_and(|cluster| seed.cluster != cluster) {
                 continue;
@@ -87,6 +96,15 @@ pub(crate) fn tool_specs_for_filter(cluster: Option<&str>, include_aliases: bool
     }
 
     specs
+}
+
+pub(crate) fn surface_includes_canonical(_surface: McpToolSurface, name: &str) -> bool {
+    // MCP always exposes the full catalog; tz_codemode is no longer an MCP tool.
+    name != "tz_codemode"
+}
+
+pub(crate) fn canonical_allowed_on_surface(_surface: McpToolSurface, canonical: &str) -> bool {
+    canonical != "codemode"
 }
 
 /// Aliases advertise a permissive stub instead of repeating the canonical
@@ -166,6 +184,12 @@ pub fn resource_specs() -> Vec<ResourceSpec> {
             "resource://tokenzero/modes",
             "TokenZero render modes",
             "Discover accepted mode values for compacting, diagnostics, exact recovery, and pass-through output.",
+            "application/json",
+        ),
+        (
+            "resource://tokenzero/codemode",
+            "TokenZero CodeMode catalog",
+            "Full CodeMode method catalog with signatures and discovery prefixes.",
             "application/json",
         ),
         (
@@ -448,10 +472,19 @@ fn canonical_tool_specs() -> Vec<ToolSpecSeed> {
     ]
 }
 
+#[allow(dead_code)]
 pub(crate) fn canonical_tool_names() -> Vec<&'static str> {
     canonical_tool_specs()
         .into_iter()
         .map(|seed| seed.name)
+        .collect()
+}
+
+pub(crate) fn canonical_tool_names_for_surface(surface: McpToolSurface) -> Vec<String> {
+    canonical_tool_specs()
+        .into_iter()
+        .filter(|seed| surface_includes_canonical(surface, seed.name))
+        .map(|seed| seed.name.to_string())
         .collect()
 }
 

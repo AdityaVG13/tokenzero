@@ -3,8 +3,6 @@ use serde_json::Value;
 use std::process::Command;
 use tempfile::tempdir;
 
-
-
 #[test]
 fn cli_claim_audit_rejects_benchmark_rows_missing_public_claim_fields() {
     let dir = tempdir().unwrap();

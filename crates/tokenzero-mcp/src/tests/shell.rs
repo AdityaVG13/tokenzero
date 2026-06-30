@@ -5,7 +5,6 @@ use tokenzero_core::MCP_SCHEMA_VERSION;
 
 use super::support::*;
 
-
 #[test]
 fn compact_shell_text_render_omits_ref_footer() {
     let mut response = ToolResponse::ok(

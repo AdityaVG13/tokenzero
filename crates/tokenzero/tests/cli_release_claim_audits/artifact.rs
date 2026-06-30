@@ -3,8 +3,6 @@ use serde_json::Value;
 use std::process::Command;
 use tempfile::tempdir;
 
-
-
 #[test]
 fn cli_source_currency_audit_records_competitive_ledger_and_blocks_public_claims() {
     let dir = tempdir().unwrap();

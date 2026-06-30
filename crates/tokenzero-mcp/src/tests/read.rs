@@ -5,7 +5,6 @@ use tokenzero_core::MCP_SCHEMA_VERSION;
 
 use super::support::*;
 
-
 #[test]
 fn read_expand_roundtrip_via_engine() {
     let dir = tempdir().unwrap();

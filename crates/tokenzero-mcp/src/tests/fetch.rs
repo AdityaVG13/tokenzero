@@ -5,7 +5,6 @@ use tokenzero_core::MCP_SCHEMA_VERSION;
 
 use super::support::*;
 
-
 #[test]
 fn concurrent_record_fetch_keeps_every_entry() {
     let dir = tempdir().unwrap();

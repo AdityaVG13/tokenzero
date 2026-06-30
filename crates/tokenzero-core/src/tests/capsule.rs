@@ -1,6 +1,5 @@
 use super::*;
 
-
 #[test]
 fn token_count_is_nonzero_for_text() {
     assert!(count_tokens("hello world") >= 2);

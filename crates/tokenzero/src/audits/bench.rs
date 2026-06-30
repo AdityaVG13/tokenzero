@@ -403,7 +403,7 @@ pub(crate) fn run_tokenzero_bench_row(
 }
 
 pub(crate) fn private_benchmark_path(suite: &str) -> PathBuf {
-    let root = root_from(None);
+    let root = crate::zerostack_store::tokenzero_work_root(None);
     let ai_root = root.parent().unwrap_or(root.as_path());
     ai_root
         .join(".tokenzero-private-benchmarks")

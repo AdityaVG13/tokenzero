@@ -2,7 +2,6 @@ use super::*;
 
 use super::support::*;
 
-
 #[test]
 fn shell_minimal_header_when_telemetry_dominates_small_success() {
     let stdout = "";

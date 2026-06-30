@@ -1,6 +1,5 @@
 use super::*;
 
-
 pub(crate) fn hunk(find: &str, replace: &str, replace_all: bool) -> EditHunk {
     EditHunk {
         find: find.to_string(),

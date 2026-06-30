@@ -6,6 +6,7 @@
 mod cache_maintenance;
 mod cache_pack;
 mod catalog;
+mod codemode;
 mod collect;
 mod config;
 mod diff;
@@ -31,9 +32,13 @@ mod session;
 mod stdio;
 mod supervisor;
 mod tools;
+mod workspace;
 
 pub use cache_maintenance::{cache_maintenance, session_pack, shell_spill_dir};
 pub use catalog::{ResourceSpec, ToolSpec, resource_specs, tool_specs};
+pub use codemode::{
+    CODEMODE_SCHEMA, CodeModeOptions, CodeModeResult, CodeModeStatus, execute_codemode_with_options,
+};
 pub use jsonrpc::handle_jsonrpc;
 pub use render::{cli_json, render_text};
 pub use stdio::run_stdio;
@@ -94,7 +99,7 @@ const DIFF_MAX_LINES: usize = 50_000;
 pub use config::{
     EngineConfig, FETCH_ALLOW_ENV, FETCH_DENY_ENV, FETCH_ENABLED_ENV, SearchBackend,
     default_mcp_idle_timeout, default_shell_timeout, mcp_idle_timeout_from_secs,
-    shell_timeout_from_secs,
+    mcp_tool_surface_from_env, shell_timeout_from_secs,
 };
 
 /// One find/replace hunk for [`TokenZeroEngine::edit`]. `find` must match the

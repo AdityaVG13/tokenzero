@@ -13,7 +13,7 @@ use std::path::{Path, PathBuf};
 #[cfg(windows)]
 use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
-use tokenzero_core::INSTALL_SCHEMA_VERSION;
+use tokenzero_core::{INSTALL_SCHEMA_VERSION, McpToolSurface};
 
 #[cfg(windows)]
 const WINDOWS_USER_PATH_REGISTRY: &str = "HKCU\\Environment\\Path";
@@ -59,6 +59,7 @@ pub struct InstallPlan {
     pub status: String,
     pub dry_run: bool,
     pub detected_surfaces: Vec<String>,
+    pub mcp_surface: McpToolSurface,
     pub writes: Vec<InstallWrite>,
     pub rollback: RollbackInfo,
     pub global_writes_allowed: bool,
@@ -122,7 +123,7 @@ impl PendingContent {
 }
 
 pub fn plan(root: &Path, global: bool, capabilities: &[String]) -> InstallPlan {
-    plan_for_agents(root, global, capabilities, &[])
+    plan_for_agents(root, global, capabilities, &[], McpToolSurface::Classic)
 }
 
 pub fn plan_for_agents(
@@ -130,6 +131,7 @@ pub fn plan_for_agents(
     global: bool,
     capabilities: &[String],
     agents: &[String],
+    mcp_surface: McpToolSurface,
 ) -> InstallPlan {
     let rollback_id = rollback_id();
     let rollback_path = root
@@ -183,6 +185,7 @@ pub fn plan_for_agents(
         status: "planned".to_string(),
         dry_run: true,
         detected_surfaces: selected,
+        mcp_surface,
         writes,
         rollback: RollbackInfo {
             id: rollback_id,
@@ -493,7 +496,7 @@ pub fn apply(
     global: bool,
     capabilities: &[String],
 ) -> std::io::Result<AppliedInstall> {
-    apply_for_agents(root, global, capabilities, &[])
+    apply_for_agents(root, global, capabilities, &[], McpToolSurface::Classic)
 }
 
 pub fn apply_for_agents(
@@ -501,8 +504,9 @@ pub fn apply_for_agents(
     global: bool,
     capabilities: &[String],
     agents: &[String],
+    mcp_surface: McpToolSurface,
 ) -> std::io::Result<AppliedInstall> {
-    let mut plan = plan_for_agents(root, global, capabilities, agents);
+    let mut plan = plan_for_agents(root, global, capabilities, agents, mcp_surface);
     plan.dry_run = false;
     let mut manifest = RollbackManifest {
         schema_version: "tokenzero.rollback.v1".to_string(),
@@ -532,7 +536,7 @@ pub fn apply_for_agents(
         let content = if path_write {
             PendingContent::Text(windows_path_with_tokenzero_bin(root, previous.as_deref()))
         } else {
-            content_for(row, root, previous.as_deref())?
+            content_for(row, root, previous.as_deref(), plan.mcp_surface)?
         };
         let existing_bytes = if !path_write && binary_write {
             fs::read(&path).ok()

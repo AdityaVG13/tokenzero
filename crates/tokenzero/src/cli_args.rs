@@ -99,6 +99,15 @@ pub(crate) enum Commands {
     ExactRecoveryShell(ExactRecoveryShellArgs),
     #[command(name = "exact-recovery-audit")]
     ExactRecoveryAudit(ExactRecoveryAuditArgs),
+    #[command(
+        name = "codemode",
+        about = "Compose multi-step plans on the same base tools as MCP (fewer round-trips, Cloudflare-style)",
+        long_about = "Execute JS-like plans that compose the same TokenZero operations as MCP (zero.read, zero.find, zero.shell, ...) in one call for faster multi-step workflows.\n\n\
+            Discovery: tokenzero codemode 'search:read' | tokenzero codemode 'describe:zero.read'\n\n\
+            Cache: defaults to codemode-recovery.json (separate from MCP/CLI recovery-cache.json). \
+            Pass the same --cache-path to codemode and expand when refs must cross surfaces."
+    )]
+    CodeMode(CodeModeArgs),
     #[command(name = "harm-eval")]
     HarmEval(ArtifactArgs),
     #[command(name = "protected-anchor-audit")]
@@ -574,6 +583,9 @@ pub(crate) struct InstallArgs {
     pub(crate) agents: Vec<String>,
     #[arg(long)]
     pub(crate) grok: bool,
+    /// MCP tool surface profile (always `classic`; CodeMode is a separate execution layer).
+    #[arg(long, value_name = "SURFACE", default_value = "classic")]
+    pub(crate) surface: String,
     #[arg(long)]
     pub(crate) json: bool,
 }
@@ -604,6 +616,9 @@ pub(crate) struct InitArgs {
     pub(crate) apply: bool,
     #[arg(long)]
     pub(crate) plan: bool,
+    /// MCP tool surface profile (always `classic`; CodeMode is a separate execution layer).
+    #[arg(long, value_name = "SURFACE", default_value = "classic")]
+    pub(crate) surface: String,
     #[arg(long)]
     pub(crate) json: bool,
 }
@@ -701,6 +716,9 @@ pub(crate) struct McpServerArgs {
     /// and automatically respawns the inner MCP server if it ever dies.
     #[arg(long)]
     pub(crate) supervise: bool,
+    /// MCP tool surface override (always `classic`; CodeMode is separate).
+    #[arg(long, value_name = "SURFACE")]
+    pub(crate) tool_surface: Option<String>,
 }
 
 #[derive(Debug, Args)]
@@ -967,6 +985,41 @@ pub(crate) struct QuoteArgs {
     pub(crate) args: Vec<String>,
     #[arg(long)]
     pub(crate) json: bool,
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct CodeModeArgs {
+    /// CodeMode plan (JS-style zero.token.compact / expand) as a positional argument.
+    #[arg(value_name = "PLAN")]
+    pub(crate) plan: Option<String>,
+    /// CodeMode plan as an explicit flag; kept for router compatibility.
+    #[arg(short = 'p', long = "plan", value_name = "PLAN")]
+    pub(crate) plan_flag: Option<String>,
+    /// Workspace root used for CodeMode file, shell, and recovery-cache boundaries.
+    #[arg(long)]
+    pub(crate) root: Option<PathBuf>,
+    /// Additional allowed roots for plans that must intentionally cross the workspace boundary.
+    #[arg(long)]
+    pub(crate) allowed_root: Vec<PathBuf>,
+    /// Override the CodeMode recovery cache path.
+    #[arg(long)]
+    pub(crate) cache_path: Option<PathBuf>,
+    /// Maximum visible tokens for each underlying TokenZero operation.
+    #[arg(long, default_value_t = 4000)]
+    pub(crate) max_visible_tokens: usize,
+    #[arg(long, alias = "timeout", alias = "timout", value_name = "SECONDS")]
+    pub(crate) timeout_seconds: Option<u64>,
+    #[arg(long)]
+    pub(crate) json: bool,
+}
+
+impl CodeModeArgs {
+    pub(crate) fn plan_text(&self) -> &str {
+        self.plan_flag
+            .as_deref()
+            .or(self.plan.as_deref())
+            .unwrap_or("")
+    }
 }
 
 #[cfg(test)]

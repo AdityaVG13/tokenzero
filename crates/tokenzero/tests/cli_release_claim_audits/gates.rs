@@ -3,8 +3,6 @@ use serde_json::Value;
 use std::process::Command;
 use tempfile::tempdir;
 
-
-
 #[test]
 fn cli_completion_audit_summarizes_current_claim_gate_snapshot() {
     let dir = tempdir().unwrap();
