@@ -234,15 +234,15 @@ fn describe_token_namespace_returns_signature() {
 }
 
 #[test]
-fn codemode_engine_uses_shared_recovery_cache_and_repo_scope() {
+fn codemode_engine_uses_codemode_recovery_cache_and_repo_scope() {
     let root = PathBuf::from("/tmp/tokenzero-codemode-root");
     let engine = make_engine_for_root(root.clone());
     assert_eq!(engine.config.allowed_roots, vec![root.clone()]);
     assert_eq!(
         engine.config.cache_path,
-        crate::workspace::default_recovery_cache_path(&root)
+        crate::workspace::default_codemode_recovery_cache_path(&root)
     );
-    assert!(engine.config.cache_path.ends_with("recovery-cache.json"));
+    assert!(engine.config.cache_path.to_string_lossy().contains("codemode-recovery.json"));
 }
 
 #[test]

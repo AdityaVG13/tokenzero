@@ -395,6 +395,7 @@ fn path_args_match(actual: Option<&[String]>, expected: &[String]) -> bool {
     actual.map(normalize) == Some(normalize(expected))
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn mcp_server_checks(
     server_present: bool,
     command: Option<&str>,

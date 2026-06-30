@@ -7,7 +7,7 @@ use std::time::Duration;
 use tokenzero_core::{Mode, ToolResponse, count_tokens, detect_content_type};
 use tokenzero_filters::{discover, rewrite_command};
 
-use crate::workspace::{allowed_roots_for_workspace, default_recovery_cache_path, tokenzero_work_root};
+use crate::workspace::{allowed_roots_for_workspace, default_codemode_recovery_cache_path, tokenzero_work_root};
 use crate::{EditHunk, EngineConfig, TokenZeroEngine, shell_timeout_from_secs};
 
 use super::catalog::{describe_method, search_catalog};
@@ -23,7 +23,7 @@ fn make_engine_for_root_with_options(root: PathBuf, options: &CodeModeOptions) -
     let cache_path = options
         .cache_path
         .clone()
-        .unwrap_or_else(|| default_recovery_cache_path(&root));
+        .unwrap_or_else(|| default_codemode_recovery_cache_path(&root));
     TokenZeroEngine::new(EngineConfig {
         allowed_roots: allowed_roots_for_workspace(&root, &options.allowed_roots),
         cache_path,

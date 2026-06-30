@@ -84,6 +84,7 @@ pub fn default_recovery_cache_path(repo_root: &Path) -> PathBuf {
 }
 
 /// CodeMode compact/expand recovery store (unified or legacy layout).
+#[allow(dead_code)]
 pub fn default_codemode_recovery_cache_path(repo_root: &Path) -> PathBuf {
     resolve_default_cache_path(
         repo_root,

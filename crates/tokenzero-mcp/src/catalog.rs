@@ -493,6 +493,7 @@ fn canonical_tool_specs() -> Vec<ToolSpecSeed> {
     ]
 }
 
+#[allow(dead_code)]
 pub(crate) fn canonical_tool_names() -> Vec<&'static str> {
     canonical_tool_specs()
         .into_iter()

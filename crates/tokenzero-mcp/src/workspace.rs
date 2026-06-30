@@ -75,6 +75,7 @@ fn resolve_default_cache_path(repo_root: &Path, unified_relative: &str, legacy_r
 }
 
 /// Default recovery cache when `--cache-path` is omitted.
+#[allow(dead_code)]
 pub fn default_recovery_cache_path(repo_root: &Path) -> PathBuf {
     resolve_default_cache_path(
         repo_root,
@@ -84,6 +85,7 @@ pub fn default_recovery_cache_path(repo_root: &Path) -> PathBuf {
 }
 
 /// CodeMode compact/expand recovery store (unified or legacy layout).
+#[allow(dead_code)] // used via re-export or tests in dependent crates; keep for API symmetry
 pub fn default_codemode_recovery_cache_path(repo_root: &Path) -> PathBuf {
     resolve_default_cache_path(
         repo_root,
