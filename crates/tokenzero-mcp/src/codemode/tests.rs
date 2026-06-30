@@ -528,3 +528,105 @@ fn new_composition_methods_discoverable() {
     let results = val["results"].as_array().unwrap();
     assert!(results.iter().any(|hit| hit["path"] == "zero.filter_lines"));
 }
+
+// --- Recovery-aware compression tests ---
+
+#[test]
+fn compact_content_aware_produces_ref_and_savings() {
+    let large_code = (0..500)
+        .map(|i| format!("pub fn handler_{i}(ctx: &Context, request: Request<Body>) -> Result<Response<Body>, Error> {{ log::info!(\"handling request {i}\"); Ok(Response::new(Body::empty())) }}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let plan = format!(
+        r#"await zero.compact({})"#,
+        serde_json::to_string(&large_code).unwrap()
+    );
+    let r = execute_codemode(&plan);
+    assert_eq!(r.status, CodeModeStatus::Completed, "{:?}", r.error);
+    let val = r.value.unwrap();
+    assert!(val["ref"].as_str().unwrap().starts_with("tz://"));
+    assert_eq!(val["compression_strategy"], "content_aware");
+    assert!(val["visible_tokens"].as_u64().unwrap() < val["raw_tokens"].as_u64().unwrap());
+}
+
+#[test]
+fn compact_max_aggressive_compression_with_recovery() {
+    let large_logs = (0..200)
+        .map(|i| {
+            if i % 20 == 0 {
+                format!("ERROR: something failed at step {i}")
+            } else {
+                format!("INFO: processing item {i} successfully")
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    let plan = format!(
+        r#"await zero.compact_max({})"#,
+        serde_json::to_string(&large_logs).unwrap()
+    );
+    let r = execute_codemode(&plan);
+    assert_eq!(r.status, CodeModeStatus::Completed, "{:?}", r.error);
+    let val = r.value.unwrap();
+    let ref_id = val["ref"].as_str().unwrap();
+    assert!(ref_id.starts_with("tz://"));
+    assert_eq!(val["compression_strategy"], "content_aware_max");
+    // Aggressive should compress significantly more
+    let vis = val["visible_tokens"].as_u64().unwrap();
+    let raw = val["raw_tokens"].as_u64().unwrap();
+    assert!(
+        vis < raw / 2,
+        "aggressive should save >50%: vis={vis} raw={raw}"
+    );
+}
+
+#[test]
+fn compact_max_roundtrip_recovery_is_byte_exact() {
+    let payload = "exact recovery test: special chars !@#$%^&*()\nnewlines\ttabs\n";
+    let plan = format!(
+        r#"const c = await zero.compact_max({}); const e = await zero.expand(c.ref); return {{ original_ref: c.ref, recovered: e.text }}"#,
+        serde_json::to_string(payload).unwrap()
+    );
+    let r = execute_codemode(&plan);
+    assert_eq!(r.status, CodeModeStatus::Completed, "{:?}", r.error);
+    let val = r.value.unwrap();
+    let recovered = val["recovered"].as_str().unwrap();
+    assert_eq!(recovered, payload, "recovery must be byte-exact");
+}
+
+#[test]
+fn content_aware_logs_prioritizes_errors() {
+    let logs = (0..500)
+        .map(|i| {
+            if i == 42 {
+                "FATAL: database connection lost at 2024-01-15T10:30:00Z host=prod-db-1 stack=main".to_string()
+            } else if i == 77 {
+                "ERROR: timeout exceeded after 30s waiting for upstream response from gateway".to_string()
+            } else {
+                format!("DEBUG: routine operation {i} completed successfully in 2ms status=200 bytes=1024")
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    let plan = format!(
+        r#"await zero.compact_max({})"#,
+        serde_json::to_string(&logs).unwrap()
+    );
+    let r = execute_codemode(&plan);
+    assert_eq!(r.status, CodeModeStatus::Completed, "{:?}", r.error);
+    let val = r.value.unwrap();
+    let text = val["text"].as_str().unwrap();
+    // Content-aware should surface errors in visible output
+    assert!(
+        text.contains("FATAL") || text.contains("ERROR"),
+        "content-aware compression should surface errors: {text}"
+    );
+}
+
+#[test]
+fn compact_max_discoverable() {
+    let r = execute_codemode("search:compact_max");
+    let val = r.value.unwrap();
+    let results = val["results"].as_array().unwrap();
+    assert!(results.iter().any(|hit| hit["path"] == "zero.compact_max"));
+}

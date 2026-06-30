@@ -147,6 +147,7 @@ fn dispatch(
         "zero.edit" | "edit" => exec_edit(engine, &args),
         "zero.token.expand" | "zero.expand" | "expand" => exec_expand(engine, &args),
         "zero.token.compact" | "zero.compact" | "compact" => exec_compact(engine, &args),
+        "zero.compact_max" | "compact_max" => exec_compact_max(engine, &args),
         "zero.ingest" | "ingest" => exec_ingest(engine, &args),
         "zero.mem" | "mem" => exec_mem(engine),
         "zero.recall" | "recall" => exec_recall(engine, &args),
@@ -548,6 +549,21 @@ fn exec_compact(
     engine: &TokenZeroEngine,
     args: &[Value],
 ) -> Result<OpOutcome, Box<CodeModeResult>> {
+    exec_compact_inner(engine, args, false)
+}
+
+fn exec_compact_max(
+    engine: &TokenZeroEngine,
+    args: &[Value],
+) -> Result<OpOutcome, Box<CodeModeResult>> {
+    exec_compact_inner(engine, args, true)
+}
+
+fn exec_compact_inner(
+    engine: &TokenZeroEngine,
+    args: &[Value],
+    aggressive: bool,
+) -> Result<OpOutcome, Box<CodeModeResult>> {
     let data = match args.first() {
         Some(Value::String(s)) => s.clone(),
         Some(other) => serde_json::to_string(other).unwrap_or_default(),
@@ -559,10 +575,57 @@ fn exec_compact(
         }
     };
     let content_type = detect_content_type(&data, None);
-    let resp = engine.ingest(&data, content_type, Mode::Auto, "codemode-compact");
-    Ok(OpOutcome::from_tool_response(&resp).with_value(|value| {
-        value["raw_tokens"] = json!(count_tokens(&data));
-    }))
+    let raw_tokens = count_tokens(&data);
+    // Store for recovery first
+    let mut store = tokenzero_recovery::RecoveryStore::new(Some(engine.config.cache_path.clone()));
+    let stored = store
+        .store_payload(&data, content_type, None, None, None)
+        .ok();
+    let recovery_ref = stored.as_ref().map(|s| s.blob_ref.as_str());
+    // Use content-aware compression
+    let capsule = tokenzero_core::make_capsule_content_aware(
+        &data,
+        raw_tokens,
+        content_type,
+        engine.config.max_visible_tokens,
+        Some("compact"),
+        recovery_ref,
+        aggressive,
+    );
+    let mut refs_out = Vec::new();
+    if let Some(s) = &stored {
+        refs_out.push(tokenzero_core::ref_record(
+            "blob",
+            s.blob_ref.clone(),
+            data.len(),
+        ));
+        refs_out.push(tokenzero_core::ref_record(
+            "file",
+            s.file_ref.clone(),
+            data.len(),
+        ));
+    }
+    let strategy = if aggressive {
+        "content_aware_max"
+    } else {
+        "content_aware"
+    };
+    let ref_id = stored.as_ref().map(|s| s.blob_ref.as_str()).unwrap_or("");
+    let mut value = json!({
+        "text": capsule.text,
+        "status": "ok",
+        "raw_tokens": raw_tokens,
+        "visible_tokens": capsule.visible_tokens,
+        "compression_strategy": strategy,
+        "savings_pct": format!("{:.0}%", tokenzero_core::savings_ratio(raw_tokens, capsule.visible_tokens) * 100.0),
+    });
+    if !ref_id.is_empty() {
+        value["ref"] = json!(ref_id);
+    }
+    if refs_out.len() > 1 {
+        value["refs"] = json!(refs_out.iter().map(|r| &r.ref_id).collect::<Vec<_>>());
+    }
+    Ok(OpOutcome { value })
 }
 
 fn exec_ingest(engine: &TokenZeroEngine, args: &[Value]) -> Result<OpOutcome, Box<CodeModeResult>> {
