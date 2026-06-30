@@ -81,6 +81,24 @@ one `expand` away. The current reproducible demo artifact is
 Path-only outputs like `glob` pass through nearly unchanged: there is nothing
 to hide, and a capsule never costs more than raw.
 
+#### Plan composition benchmark
+
+CodeMode executes multi-step plans in a single call, eliminating per-operation
+round-trips. The same engine and tokenizer measure both sides; the "Direct"
+column is the sum of running each step individually:
+
+| Workload | Plan (visible) | Direct (visible) | Savings |
+| :-- | --: | --: | --: |
+| File + search + transform | 775 | 2,843 | **72.7%** |
+| Shell multi-step (3 commands) | 949 | 1,227 | **22.7%** |
+| Pipe composition (read + compact) | 261 | 1,266 | **79.4%** |
+| Mixed exploration (tree + glob + read) | 917 | 1,733 | **47.1%** |
+| **Total** | **2,902** | **7,069** | **58.9%** |
+
+Reproducible: `scripts/benchmark_composition.sh` or
+`cargo test -p tokenzero-mcp -- codemode::bench_tests::run_composition_benchmark`.
+Artifact: `demo/composition_benchmark.json`.
+
 #### Measured in production
 
 Across **~20,000 routed tool calls** from real agent sessions on one

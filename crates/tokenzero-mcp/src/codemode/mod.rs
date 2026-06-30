@@ -8,6 +8,10 @@ mod exec;
 mod parser;
 mod result;
 
+#[allow(dead_code)]
+pub mod bench;
+#[cfg(test)]
+mod bench_tests;
 #[cfg(test)]
 mod tests;
 

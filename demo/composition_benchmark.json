@@ -1,0 +1,58 @@
+{
+  "version": "1.0.2",
+  "description": "CodeMode plan composition benchmark: one-plan execution vs equivalent sequences of direct calls",
+  "methodology": "Same TokenZeroEngine instance, same tokenizer (count_tokens), same cache. Plan execution dispatches all ops in one call; direct calls execute each op separately. Visible tokens include return-value framing for plans.",
+  "workloads": [
+    {
+      "workload": "file-search-transform",
+      "description": "Read a file, grep for pattern, filter results, compact output",
+      "plan_ops": 3,
+      "equivalent_direct_calls": 3,
+      "plan_visible_tokens": 775,
+      "plan_raw_tokens": 1182,
+      "direct_visible_tokens": 2843,
+      "direct_raw_tokens": 1896,
+      "composition_savings_pct": 72.7
+    },
+    {
+      "workload": "shell-multi-step",
+      "description": "Run multiple shell commands and aggregate results in one plan",
+      "plan_ops": 3,
+      "equivalent_direct_calls": 3,
+      "plan_visible_tokens": 949,
+      "plan_raw_tokens": 335,
+      "direct_visible_tokens": 1227,
+      "direct_raw_tokens": 335,
+      "composition_savings_pct": 22.7
+    },
+    {
+      "workload": "pipe-composition",
+      "description": "Pipe: read then compact then expand, demonstrating zero-roundtrip chaining",
+      "plan_ops": 1,
+      "equivalent_direct_calls": 2,
+      "plan_visible_tokens": 261,
+      "plan_raw_tokens": 0,
+      "direct_visible_tokens": 1266,
+      "direct_raw_tokens": 474,
+      "composition_savings_pct": 79.4
+    },
+    {
+      "workload": "mixed-exploration",
+      "description": "Explore project structure: tree + glob + targeted reads in one plan",
+      "plan_ops": 3,
+      "equivalent_direct_calls": 3,
+      "plan_visible_tokens": 917,
+      "plan_raw_tokens": 867,
+      "direct_visible_tokens": 1733,
+      "direct_raw_tokens": 867,
+      "composition_savings_pct": 47.1
+    }
+  ],
+  "totals": {
+    "total_plan_visible": 2902,
+    "total_plan_raw": 2384,
+    "total_direct_visible": 7069,
+    "total_direct_raw": 3572,
+    "overall_composition_savings_pct": 58.9
+  }
+}
