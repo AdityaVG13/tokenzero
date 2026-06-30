@@ -9,6 +9,10 @@ mod parser;
 mod result;
 
 #[allow(dead_code)]
+pub mod audit;
+#[cfg(test)]
+mod audit_tests;
+#[allow(dead_code)]
 pub mod bench;
 #[cfg(test)]
 mod bench_tests;

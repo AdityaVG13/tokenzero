@@ -1,0 +1,138 @@
+{
+  "schema_version": "tokenzero.codemode_audit.v1",
+  "status": "pass",
+  "recovery_evidence": {
+    "cases": [
+      {
+        "label": "small_text",
+        "input_bytes": 25,
+        "ref_produced": "tz://blob/b01c6654a60282f1f",
+        "expand_recovered": true,
+        "byte_exact": true
+      },
+      {
+        "label": "special_chars",
+        "input_bytes": 24,
+        "ref_produced": "tz://blob/b61fcf8792cd9b3a2",
+        "expand_recovered": true,
+        "byte_exact": true
+      },
+      {
+        "label": "code_block",
+        "input_bytes": 37,
+        "ref_produced": "tz://blob/b5c65ceda73d9ecc2",
+        "expand_recovered": true,
+        "byte_exact": true
+      },
+      {
+        "label": "large_repetitive",
+        "input_bytes": 2200,
+        "ref_produced": "tz://blob/b8fa54e0151f4f912",
+        "expand_recovered": true,
+        "byte_exact": true
+      }
+    ],
+    "all_byte_exact": true,
+    "total_refs_checked": 4
+  },
+  "cost_evidence": {
+    "benchmark": {
+      "version": "1.0.2",
+      "workloads": [
+        {
+          "workload": "file-search-transform",
+          "description": "Read a file, grep for pattern, filter results, compact output",
+          "plan_ops": 3,
+          "equivalent_direct_calls": 3,
+          "plan_visible_tokens": 775,
+          "plan_raw_tokens": 1182,
+          "direct_visible_tokens": 2843,
+          "direct_raw_tokens": 1896,
+          "plan_duration_ms": 216,
+          "direct_duration_ms": 310,
+          "composition_savings_pct": 72.7,
+          "round_trip_savings_pct": 37.7
+        },
+        {
+          "workload": "shell-multi-step",
+          "description": "Run multiple shell commands and aggregate results in one plan",
+          "plan_ops": 3,
+          "equivalent_direct_calls": 3,
+          "plan_visible_tokens": 964,
+          "plan_raw_tokens": 342,
+          "direct_visible_tokens": 1242,
+          "direct_raw_tokens": 342,
+          "plan_duration_ms": 97,
+          "direct_duration_ms": 96,
+          "composition_savings_pct": 22.4,
+          "round_trip_savings_pct": 0.0
+        },
+        {
+          "workload": "pipe-composition",
+          "description": "Pipe: read then compact then expand, demonstrating zero-roundtrip chaining",
+          "plan_ops": 1,
+          "equivalent_direct_calls": 2,
+          "plan_visible_tokens": 261,
+          "plan_raw_tokens": 0,
+          "direct_visible_tokens": 1266,
+          "direct_raw_tokens": 474,
+          "plan_duration_ms": 28,
+          "direct_duration_ms": 48,
+          "composition_savings_pct": 79.4,
+          "round_trip_savings_pct": 100.0
+        },
+        {
+          "workload": "mixed-exploration",
+          "description": "Explore project structure: tree + glob + targeted reads in one plan",
+          "plan_ops": 3,
+          "equivalent_direct_calls": 3,
+          "plan_visible_tokens": 917,
+          "plan_raw_tokens": 867,
+          "direct_visible_tokens": 1733,
+          "direct_raw_tokens": 867,
+          "plan_duration_ms": 75,
+          "direct_duration_ms": 75,
+          "composition_savings_pct": 47.1,
+          "round_trip_savings_pct": 0.0
+        }
+      ],
+      "totals": {
+        "total_plan_visible": 2917,
+        "total_plan_raw": 2391,
+        "total_direct_visible": 7084,
+        "total_direct_raw": 3579,
+        "overall_composition_savings_pct": 58.8
+      }
+    },
+    "plan_always_cheaper_or_equal": true
+  },
+  "cross_surface_evidence": {
+    "cases": [
+      {
+        "operation": "read",
+        "plan_text": "line one\nline two\nline three",
+        "plan_ref": "tz://blob/bbce2aeea9e6fc31f",
+        "direct_text": "line one\nline two\nline three",
+        "direct_ref": "tz://blob/bbce2aeea9e6fc31f",
+        "text_identical": true,
+        "ref_identical": true
+      },
+      {
+        "operation": "shell",
+        "plan_text": "parity",
+        "plan_ref": "tz://blob/b7f825d63320dbd67",
+        "direct_text": "parity",
+        "direct_ref": "tz://blob/b7f825d63320dbd67",
+        "text_identical": true,
+        "ref_identical": true
+      }
+    ],
+    "all_identical": true
+  },
+  "summary": {
+    "recovery_pass": true,
+    "cost_pass": true,
+    "parity_pass": true,
+    "overall_pass": true
+  }
+}
