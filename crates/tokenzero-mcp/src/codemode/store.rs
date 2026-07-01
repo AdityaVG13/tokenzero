@@ -116,7 +116,11 @@ pub fn execution_id(code: &str, started_ms: u128) -> String {
 
 pub fn execution_ref(id: &str, suffix: &str) -> String {
     let normalized = id.strip_prefix("cm://exec/").unwrap_or(id);
-    format!("codemode/execution/{normalized}/{suffix}")
+    if suffix.is_empty() {
+        format!("codemode/execution/{normalized}")
+    } else {
+        format!("codemode/execution/{normalized}/{suffix}")
+    }
 }
 
 pub struct ExecutionStore {
@@ -139,6 +143,12 @@ impl ExecutionStore {
         self.store
             .store_payload(text, content_type, None, None, None)
             .map(|stored| stored.blob_ref.as_str().to_string())
+            .map_err(|err| err.to_string())
+    }
+
+    pub fn alias(&mut self, logical_ref: &str, target_ref: &str) -> Result<(), String> {
+        self.store
+            .store_alias(logical_ref, target_ref)
             .map_err(|err| err.to_string())
     }
 }
@@ -198,13 +208,20 @@ pub fn finalize_result(
             .ok()
     });
 
+    let execution_logical_ref = execution_ref(&id, "");
+    let code_logical_ref = execution_ref(&id, "code");
+    let steps_logical_ref = execution_ref(&id, "steps");
+    let telemetry_logical_ref = execution_ref(&id, "telemetry");
+    let result_logical_ref = execution_ref(&id, "result");
+    let error_logical_ref = execution_ref(&id, "error");
+
     let logical_refs = json!({
-        "execution": execution_ref(&id, ""),
-        "code": execution_ref(&id, "code"),
-        "steps": execution_ref(&id, "steps"),
-        "telemetry": execution_ref(&id, "telemetry"),
-        "result": execution_ref(&id, "result"),
-        "error": execution_ref(&id, "error"),
+        "execution": execution_logical_ref,
+        "code": code_logical_ref,
+        "steps": steps_logical_ref,
+        "telemetry": telemetry_logical_ref,
+        "result": result_logical_ref,
+        "error": error_logical_ref,
         "stored": {
             "code": code_ref,
             "steps": steps_ref,
@@ -218,17 +235,28 @@ pub fn finalize_result(
         kind: kind.to_string(),
         status: status_str.to_string(),
         visible_ack: result.visible_ack.clone(),
-        code_ref,
-        steps_ref,
-        telemetry_ref,
-        result_ref,
-        error_ref,
+        code_ref: code_ref.clone(),
+        steps_ref: steps_ref.clone(),
+        telemetry_ref: telemetry_ref.clone(),
+        result_ref: result_ref.clone(),
+        error_ref: error_ref.clone(),
         refs: result.refs.clone(),
     };
     let record_value = serde_json::to_value(&record).unwrap_or(Value::Null);
     let execution_record_ref = store
         .store_json(&record_value)
         .unwrap_or_else(|err| format!("store-error:{err}"));
+
+    let _ = store.alias(&execution_logical_ref, &execution_record_ref);
+    let _ = store.alias(&code_logical_ref, &code_ref);
+    let _ = store.alias(&steps_logical_ref, &steps_ref);
+    let _ = store.alias(&telemetry_logical_ref, &telemetry_ref);
+    if let Some(stored) = result_ref.as_deref() {
+        let _ = store.alias(&result_logical_ref, stored);
+    }
+    if let Some(stored) = error_ref.as_deref() {
+        let _ = store.alias(&error_logical_ref, stored);
+    }
 
     if result.refs.len() < limits.max_refs_emitted {
         result.refs.push(execution_record_ref);

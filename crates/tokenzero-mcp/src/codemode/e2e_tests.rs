@@ -1,3 +1,4 @@
+use super::exec::make_engine_for_root;
 use super::{CodeModeOptions, CodeModeStatus, execute_codemode_with_options};
 use serde_json::json;
 
@@ -46,6 +47,56 @@ fn codemode_records_execution_refs_for_recipe() {
     );
     assert_eq!(result.telemetry.kind.as_deref(), Some("recipe"));
     assert_eq!(result.telemetry.raw_leak, Some(false));
+}
+
+#[test]
+fn logical_execution_refs_expand_directly() {
+    let work = tempfile::tempdir().unwrap();
+    let result = execute_codemode_with_options(
+        "compact: logical ref payload",
+        CodeModeOptions {
+            root: Some(work.path().to_path_buf()),
+            ..Default::default()
+        },
+    );
+    assert_eq!(
+        result.status,
+        CodeModeStatus::Completed,
+        "{:?}",
+        result.error
+    );
+    let refs = result.execution_refs.as_ref().unwrap();
+    let engine = make_engine_for_root(work.path().to_path_buf());
+
+    let code = engine.expand(refs["code"].as_str().unwrap(), None, None, None, None, None);
+    assert_eq!(code.status, "ok");
+    let code_text = code.visible.unwrap().text;
+    assert!(
+        code_text.contains("logical ref payload"),
+        "expanded code ref contained: {code_text:?}"
+    );
+
+    let telemetry = engine.expand(
+        refs["telemetry"].as_str().unwrap(),
+        None,
+        None,
+        None,
+        None,
+        None,
+    );
+    assert_eq!(telemetry.status, "ok");
+    assert!(telemetry.visible.unwrap().text.contains("logical_ops"));
+
+    let execution = engine.expand(
+        refs["execution"].as_str().unwrap(),
+        None,
+        None,
+        None,
+        None,
+        None,
+    );
+    assert_eq!(execution.status, "ok");
+    assert!(execution.visible.unwrap().text.contains("cm://exec/"));
 }
 
 #[test]
@@ -118,6 +169,10 @@ fn sandbox_denies_network_and_process_capabilities() {
         "process.env",
         "require('fs')",
         "setTimeout(() => 1, 1)",
+        "await zero.edit('file.txt', [])",
+        "store.put('x')",
+        "db.query('select 1')",
+        "indexedDB.open('x')",
     ] {
         let result = execute_codemode_with_options(plan, CodeModeOptions::default());
         assert_eq!(

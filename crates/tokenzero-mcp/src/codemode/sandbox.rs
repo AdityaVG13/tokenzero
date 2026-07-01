@@ -1,8 +1,9 @@
 //! Sandboxed JavaScript plan admission and lowering.
 //!
 //! V1 intentionally exposes a constrained JavaScript subset: no ambient host
-//! objects, no imports, no timers, no network, no process/env, and no raw FS.
-//! Accepted code is lowered onto the native CodeMode dispatcher so execution
+//! objects, no imports, no timers, no network, no process/env, no raw FS, no
+//! direct store/DB access, and no mutating bindings until transaction rollback
+//! is implemented. Accepted code is lowered onto the native CodeMode dispatcher so execution
 //! remains direct-to-TokenZeroEngine, never MCP self-calls.
 
 use super::store::CodeModeLimits;
@@ -18,6 +19,17 @@ const DENIED_TOKENS: &[(&str, &str)] = &[
     ("import(", "native module loading denied"),
     ("import ", "native module loading denied"),
     ("fs.", "raw host FS denied"),
+    ("store.", "direct store denied"),
+    ("db.", "direct DB denied"),
+    ("indexedDB", "direct DB denied"),
+    (
+        ".edit(",
+        "mutating binding denied without transaction support",
+    ),
+    (
+        " edit(",
+        "mutating binding denied without transaction support",
+    ),
     ("node:", "native module loading denied"),
     ("child_process", "process/spawn denied"),
     ("spawn", "process/spawn denied"),
