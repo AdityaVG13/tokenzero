@@ -416,19 +416,30 @@ Stdout is data. Stderr is diagnostics. JSON commands include `schema_version` or
 
 `tokenzero install` defaults to a plan. Use `tokenzero install --plan --json` before any `--apply`. `tokenzero cache prune --json` is a dry run unless `--apply` is supplied.
 
-## CodeMode (separate plan-based execution)
+## CodeMode (plan-based execution on the same engine)
 
-CodeMode is a separate execution implementation that uses the **same base tools and engine** as MCP but composes them in Cloudflare-style plans for faster, more efficient multi-step workflows (fewer round-trips).
+CodeMode dispatches through the **exact same TokenZeroEngine and tool implementations** as the MCP `tz_*` surface. The difference is execution shape: instead of one round-trip per operation, you compose multi-step workflows in a single plan call.
 
 ```bash
-tokenzero codemode --json --plan 'const t = await zero.read("src/main.rs"); return t'
-tokenzero codemode 'search:read'
-tokenzero codemode 'describe:zero.read'
+# Multi-step in one call (3 ops, 1 round-trip)
+tokenzero codemode --json --plan 'const f = await zero.read("src/main.rs"); const hits = await zero.grep("TODO", "src/"); return { file: f.ref, todos: hits.text }'
+
+# Progressive discovery
+tokenzero codemode 'search:read'        # find methods by keyword (includes signatures + examples)
+tokenzero codemode 'describe:zero.read'  # full signature, example, related methods
 ```
 
-MCP is the base surface (full `tz_*` tools, one call per operation). CodeMode composes the same operations in one plan call with progressive `search:`/`describe:` discovery.
+Plan-level helpers (not in MCP, only available within plans):
+- `zero.pipe(steps)` — sequential composition with auto-threaded `_prev`
+- `zero.pick(obj, keys)` — project specific keys from a result
+- `zero.filter_lines(text, pattern)` — filter output lines in-plan
+- `zero.count_tokens(data)` — introspect token/byte/line count without storing
+- `zero.assert(condition, msg)` — fail-fast guard within a plan
+- `zero.compact_max(data)` — aggressive content-aware compression with recovery
 
-Cache: CodeMode defaults to `codemode-recovery.json` (under `.tokenzero/` or `.zerostack/tokenzero/`). Share `--cache-path` with `expand`/MCP when refs must cross surfaces. `tz_expand` works with refs from either surface.
+All `zero.*` methods that touch files, shell, or cache dispatch through the same code path as `tz_read`, `tz_find`, `tz_shell`, etc. Refs from one surface work in the other (`tz_expand` accepts refs from CodeMode plans and vice versa).
+
+Cache: CodeMode defaults to `codemode-recovery.json` (under `.tokenzero/` or `.zerostack/tokenzero/`). Share `--cache-path` with `expand`/MCP when refs must cross surfaces.
 "#
 }
 

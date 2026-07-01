@@ -143,7 +143,7 @@ fn describe_returns_signature() {
     let r = execute_codemode("describe:zero.read");
     assert_eq!(r.status, CodeModeStatus::Completed);
     let val = r.value.unwrap();
-    assert!(val["types"].as_str().unwrap().contains("Promise"));
+    assert!(val["signature"].as_str().unwrap().contains("Promise"));
 }
 
 #[test]
@@ -231,7 +231,7 @@ fn describe_token_namespace_returns_signature() {
     let val = r.value.unwrap();
     assert_eq!(val["path"], "zero.token.compact");
     assert!(
-        val["types"]
+        val["signature"]
             .as_str()
             .unwrap()
             .contains("zero.token.compact")
@@ -358,7 +358,7 @@ fn recall_method_is_discoverable_and_dispatchable() {
     let r = execute_codemode("describe:zero.recall");
     assert_eq!(r.status, CodeModeStatus::Completed);
     assert!(
-        r.value.as_ref().unwrap()["types"]
+        r.value.as_ref().unwrap()["signature"]
             .as_str()
             .unwrap()
             .contains("zero.recall")
@@ -398,4 +398,401 @@ fn search_all_methods_discoverable() {
 fn legacy_line_api_still_works() {
     let line = execute_plan_in_token(r#"await zero.compact("legacy")"#);
     assert!(line.starts_with("codemode:ok"));
+}
+
+// ─── Composition engine tests ───────────────────────────────────────────────
+
+#[test]
+fn pipe_sequential_composition() {
+    let plan = r#"await zero.pipe([{"method": "zero.compact", "args": ["step one"]}, {"method": "zero.compact", "args": ["step two"]}])"#;
+    let r = execute_codemode(plan);
+    assert_eq!(r.status, CodeModeStatus::Completed, "{:?}", r.error);
+    let val = r.value.unwrap();
+    assert_eq!(val["steps"], 2);
+    let results = val["results"].as_array().unwrap();
+    assert_eq!(results.len(), 2);
+    assert!(results[0]["ref"].as_str().unwrap().starts_with("tz://"));
+    assert!(results[1]["ref"].as_str().unwrap().starts_with("tz://"));
+}
+
+#[test]
+fn pipe_empty_steps_rejected() {
+    let r = execute_codemode(r#"await zero.pipe([])"#);
+    assert_eq!(r.status, CodeModeStatus::Error);
+    assert!(r.error.as_ref().unwrap().contains("at least one step"));
+}
+
+#[test]
+fn pick_extracts_keys_from_result() {
+    let plan = r#"
+        const data = await zero.compact("payload for pick test");
+        const picked = await zero.pick(data, ["ref", "status"]);
+        return picked
+    "#;
+    let r = execute_codemode(plan);
+    assert_eq!(r.status, CodeModeStatus::Completed, "{:?}", r.error);
+    let val = r.value.unwrap();
+    assert!(val["ref"].as_str().unwrap().starts_with("tz://"));
+    assert_eq!(val["status"], "ok");
+    assert!(val.get("text").is_none(), "text should be excluded by pick");
+}
+
+#[test]
+fn filter_lines_narrows_text() {
+    let plan = r#"
+        const data = await zero.compact("alpha line\nbeta match\ngamma line\ndelta match");
+        const expanded = await zero.expand(data.ref);
+        const filtered = await zero.filter_lines(expanded, "match");
+        return filtered
+    "#;
+    let r = execute_codemode(plan);
+    assert_eq!(r.status, CodeModeStatus::Completed, "{:?}", r.error);
+    let val = r.value.unwrap();
+    assert_eq!(val["lines"], 2);
+    let text = val["text"].as_str().unwrap();
+    assert!(text.contains("beta match"));
+    assert!(text.contains("delta match"));
+    assert!(!text.contains("alpha"));
+}
+
+#[test]
+fn telemetry_reports_equivalent_calls() {
+    let plan = r#"
+        const a = await zero.compact("first");
+        const b = await zero.compact("second");
+        const c = await zero.expand(a.ref);
+        return { a_ref: a.ref, b_ref: b.ref, c_text: c.text }
+    "#;
+    let r = execute_codemode(plan);
+    assert_eq!(r.status, CodeModeStatus::Completed, "{:?}", r.error);
+    assert_eq!(r.telemetry.operations, 3);
+    assert_eq!(r.telemetry.equivalent_calls, Some(4));
+}
+
+#[test]
+fn multi_step_dataflow_with_intermediate_binding() {
+    let work = tempfile::tempdir().unwrap();
+    let path = work.path().join("data.txt");
+    fs::write(&path, "line1 important\nline2 noise\nline3 important\n").unwrap();
+
+    let quoted = serde_json::to_string(path.to_str().unwrap()).unwrap();
+    let plan = format!(
+        r#"const content = await zero.read({quoted});
+        const filtered = await zero.filter_lines(content, "important");
+        return {{ lines: filtered.lines, text: filtered.text }}"#
+    );
+    let r = execute_codemode_with_options(
+        &plan,
+        CodeModeOptions {
+            root: Some(work.path().to_path_buf()),
+            ..Default::default()
+        },
+    );
+    assert_eq!(r.status, CodeModeStatus::Completed, "{:?}", r.error);
+    let val = r.value.unwrap();
+    assert_eq!(val["lines"], 2);
+    assert!(val["text"].as_str().unwrap().contains("important"));
+    assert!(!val["text"].as_str().unwrap().contains("noise"));
+    assert_eq!(r.telemetry.operations, 2);
+    assert_eq!(r.telemetry.equivalent_calls, Some(3));
+}
+
+#[test]
+fn pipe_and_pick_composition() {
+    let plan = r#"
+        const piped = await zero.pipe([{"method": "zero.compact", "args": ["piped data"]}]);
+        const picked = await zero.pick(piped, ["steps", "last"]);
+        return picked
+    "#;
+    let r = execute_codemode(plan);
+    assert_eq!(r.status, CodeModeStatus::Completed, "{:?}", r.error);
+    let val = r.value.unwrap();
+    assert_eq!(val["steps"], 1);
+    assert!(val["last"].is_object());
+}
+
+#[test]
+fn new_composition_methods_discoverable() {
+    let r = execute_codemode("search:pipe");
+    let val = r.value.unwrap();
+    let results = val["results"].as_array().unwrap();
+    assert!(results.iter().any(|hit| hit["path"] == "zero.pipe"));
+
+    let r = execute_codemode("search:pick");
+    let val = r.value.unwrap();
+    let results = val["results"].as_array().unwrap();
+    assert!(results.iter().any(|hit| hit["path"] == "zero.pick"));
+
+    let r = execute_codemode("search:filter");
+    let val = r.value.unwrap();
+    let results = val["results"].as_array().unwrap();
+    assert!(results.iter().any(|hit| hit["path"] == "zero.filter_lines"));
+}
+
+// --- Recovery-aware compression tests ---
+
+#[test]
+fn compact_content_aware_produces_ref_and_savings() {
+    let large_code = (0..200)
+        .map(|i| format!("pub fn handler_{i}(ctx: &Context, request: Request<Body>) -> Result<Response<Body>, Error> {{ log::info!(\"handling request {i}\"); Ok(Response::new(Body::empty())) }}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let plan = format!(
+        r#"await zero.compact({})"#,
+        serde_json::to_string(&large_code).unwrap()
+    );
+    let r = execute_codemode(&plan);
+    assert_eq!(r.status, CodeModeStatus::Completed, "{:?}", r.error);
+    let val = r.value.unwrap();
+    assert!(val["ref"].as_str().unwrap().starts_with("tz://"));
+    assert_eq!(val["compression_strategy"], "content_aware");
+    assert!(val["visible_tokens"].as_u64().unwrap() < val["raw_tokens"].as_u64().unwrap());
+}
+
+#[test]
+fn compact_max_aggressive_compression_with_recovery() {
+    let large_logs = (0..200)
+        .map(|i| {
+            if i % 20 == 0 {
+                format!("ERROR: something failed at step {i}")
+            } else {
+                format!("INFO: processing item {i} successfully")
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    let plan = format!(
+        r#"await zero.compact_max({})"#,
+        serde_json::to_string(&large_logs).unwrap()
+    );
+    let r = execute_codemode(&plan);
+    assert_eq!(r.status, CodeModeStatus::Completed, "{:?}", r.error);
+    let val = r.value.unwrap();
+    let ref_id = val["ref"].as_str().unwrap();
+    assert!(ref_id.starts_with("tz://"));
+    assert_eq!(val["compression_strategy"], "content_aware_max");
+    // Aggressive should compress significantly more
+    let vis = val["visible_tokens"].as_u64().unwrap();
+    let raw = val["raw_tokens"].as_u64().unwrap();
+    assert!(
+        vis < raw / 2,
+        "aggressive should save >50%: vis={vis} raw={raw}"
+    );
+}
+
+#[test]
+fn compact_max_roundtrip_recovery_is_byte_exact() {
+    let payload = "exact recovery test: special chars !@#$%^&*()\nnewlines\ttabs\n";
+    let plan = format!(
+        r#"const c = await zero.compact_max({}); const e = await zero.expand(c.ref); return {{ original_ref: c.ref, recovered: e.text }}"#,
+        serde_json::to_string(payload).unwrap()
+    );
+    let r = execute_codemode(&plan);
+    assert_eq!(r.status, CodeModeStatus::Completed, "{:?}", r.error);
+    let val = r.value.unwrap();
+    let recovered = val["recovered"].as_str().unwrap();
+    assert_eq!(recovered, payload, "recovery must be byte-exact");
+}
+
+#[test]
+fn content_aware_logs_prioritizes_errors() {
+    let logs = (0..500)
+        .map(|i| {
+            if i == 42 {
+                "FATAL: database connection lost at 2024-01-15T10:30:00Z host=prod-db-1 stack=main".to_string()
+            } else if i == 77 {
+                "ERROR: timeout exceeded after 30s waiting for upstream response from gateway".to_string()
+            } else {
+                format!("DEBUG: routine operation {i} completed successfully in 2ms status=200 bytes=1024")
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    let plan = format!(
+        r#"await zero.compact_max({})"#,
+        serde_json::to_string(&logs).unwrap()
+    );
+    let r = execute_codemode(&plan);
+    assert_eq!(r.status, CodeModeStatus::Completed, "{:?}", r.error);
+    let val = r.value.unwrap();
+    let text = val["text"].as_str().unwrap();
+    // Content-aware should surface errors in visible output
+    assert!(
+        text.contains("FATAL") || text.contains("ERROR"),
+        "content-aware compression should surface errors: {text}"
+    );
+}
+
+#[test]
+fn compact_max_discoverable() {
+    let r = execute_codemode("search:compact_max");
+    let val = r.value.unwrap();
+    let results = val["results"].as_array().unwrap();
+    assert!(results.iter().any(|hit| hit["path"] == "zero.compact_max"));
+}
+
+// --- Plan vs direct execution parity tests ---
+
+#[test]
+fn parity_read_plan_vs_direct_identical_output() {
+    let work = tempfile::tempdir().unwrap();
+    let path = work.path().join("test.txt");
+    fs::write(&path, "line one\nline two\nline three\n").unwrap();
+    let quoted = serde_json::to_string(path.to_str().unwrap()).unwrap();
+    let opts = CodeModeOptions {
+        root: Some(work.path().to_path_buf()),
+        ..Default::default()
+    };
+
+    // Direct single-call
+    let direct =
+        execute_codemode_with_options(&format!(r#"await zero.read({quoted})"#), opts.clone());
+    // Plan with binding
+    let plan = execute_codemode_with_options(
+        &format!(r#"const r = await zero.read({quoted}); return r"#),
+        opts.clone(),
+    );
+
+    assert_eq!(direct.status, CodeModeStatus::Completed);
+    assert_eq!(plan.status, CodeModeStatus::Completed);
+    let d_val = direct.value.unwrap();
+    let p_val = plan.value.unwrap();
+    // Same text content
+    assert_eq!(d_val["text"], p_val["text"], "read text must be identical");
+    // Same ref
+    assert_eq!(d_val["ref"], p_val["ref"], "recovery ref must be identical");
+    // Same token accounting
+    assert_eq!(d_val["visible_tokens"], p_val["visible_tokens"]);
+    assert_eq!(d_val["raw_tokens"], p_val["raw_tokens"]);
+}
+
+#[test]
+fn parity_grep_plan_vs_direct_identical_matches() {
+    let work = tempfile::tempdir().unwrap();
+    let src = work.path().join("code.rs");
+    fs::write(&src, "fn main() {}\nfn helper() {}\nstruct Foo;\n").unwrap();
+    let dir = serde_json::to_string(work.path().to_str().unwrap()).unwrap();
+    let opts = CodeModeOptions {
+        root: Some(work.path().to_path_buf()),
+        ..Default::default()
+    };
+
+    let direct =
+        execute_codemode_with_options(&format!(r#"await zero.grep("fn", {dir})"#), opts.clone());
+    let plan = execute_codemode_with_options(
+        &format!(r#"const g = await zero.grep("fn", {dir}); return g"#),
+        opts.clone(),
+    );
+
+    assert_eq!(direct.status, CodeModeStatus::Completed);
+    assert_eq!(plan.status, CodeModeStatus::Completed);
+    let d_val = direct.value.unwrap();
+    let p_val = plan.value.unwrap();
+    assert_eq!(
+        d_val["text"], p_val["text"],
+        "grep results must be identical"
+    );
+    assert_eq!(d_val["ref"], p_val["ref"]);
+}
+
+#[test]
+fn parity_shell_plan_vs_direct_identical_capture() {
+    let opts = CodeModeOptions::default();
+
+    let direct =
+        execute_codemode_with_options(r#"await zero.shell("echo hello world")"#, opts.clone());
+    let plan = execute_codemode_with_options(
+        r#"const s = await zero.shell("echo hello world"); return s"#,
+        opts.clone(),
+    );
+
+    assert_eq!(direct.status, CodeModeStatus::Completed);
+    assert_eq!(plan.status, CodeModeStatus::Completed);
+    let d_val = direct.value.unwrap();
+    let p_val = plan.value.unwrap();
+    assert_eq!(
+        d_val["text"], p_val["text"],
+        "shell output must be identical"
+    );
+    assert_eq!(d_val["exit_code"], p_val["exit_code"]);
+    assert_eq!(d_val["success"], p_val["success"]);
+}
+
+#[test]
+fn parity_edit_plan_vs_direct_identical_result() {
+    let work = tempfile::tempdir().unwrap();
+    let path1 = work.path().join("a.txt");
+    let path2 = work.path().join("b.txt");
+    fs::write(&path1, "hello world").unwrap();
+    fs::write(&path2, "hello world").unwrap();
+    let opts = CodeModeOptions {
+        root: Some(work.path().to_path_buf()),
+        ..Default::default()
+    };
+
+    let q1 = serde_json::to_string(path1.to_str().unwrap()).unwrap();
+    let q2 = serde_json::to_string(path2.to_str().unwrap()).unwrap();
+
+    let direct = execute_codemode_with_options(
+        &format!(r#"await zero.edit({q1}, [{{ "find": "hello", "replace": "goodbye" }}])"#),
+        opts.clone(),
+    );
+    let plan = execute_codemode_with_options(
+        &format!(
+            r#"const e = await zero.edit({q2}, [{{ "find": "hello", "replace": "goodbye" }}]); return e"#
+        ),
+        opts.clone(),
+    );
+
+    assert_eq!(direct.status, CodeModeStatus::Error);
+    assert_eq!(plan.status, CodeModeStatus::Error);
+    assert_eq!(direct.error.as_ref().unwrap().kind, "policy");
+    assert_eq!(plan.error.as_ref().unwrap().kind, "policy");
+    assert_eq!(fs::read_to_string(&path1).unwrap(), "hello world");
+    assert_eq!(fs::read_to_string(&path2).unwrap(), "hello world");
+}
+
+// --- New helper tests ---
+
+#[test]
+fn count_tokens_returns_metrics() {
+    let r = execute_codemode(r#"await zero.count_tokens("hello world this is a test")"#);
+    assert_eq!(r.status, CodeModeStatus::Completed);
+    let val = r.value.unwrap();
+    assert!(val["tokens"].as_u64().unwrap() > 0);
+    assert_eq!(val["bytes"].as_u64().unwrap(), 26);
+    assert_eq!(val["lines"].as_u64().unwrap(), 1);
+}
+
+#[test]
+fn assert_passes_on_truthy() {
+    let r = execute_codemode(r#"await zero.assert(true, "should pass")"#);
+    assert_eq!(r.status, CodeModeStatus::Completed);
+    assert_eq!(r.value.unwrap()["ok"], true);
+}
+
+#[test]
+fn assert_fails_on_falsy_with_message() {
+    let r = execute_codemode(r#"await zero.assert(false, "expected failure")"#);
+    assert_eq!(r.status, CodeModeStatus::Error);
+    assert!(r.error.unwrap().contains("expected failure"));
+}
+
+#[test]
+fn search_includes_signatures_and_examples() {
+    let r = execute_codemode("search:read");
+    let val = r.value.unwrap();
+    let results = val["results"].as_array().unwrap();
+    let hit = results.iter().find(|h| h["path"] == "zero.read").unwrap();
+    assert!(hit["signature"].as_str().unwrap().contains("path: string"));
+    assert!(hit["example"].as_str().unwrap().contains("await"));
+}
+
+#[test]
+fn describe_includes_related_methods() {
+    let r = execute_codemode("describe:zero.read");
+    let val = r.value.unwrap();
+    let related = val["related"].as_array().unwrap();
+    assert!(!related.is_empty());
+    assert!(related.iter().any(|r| r.as_str() == Some("zero.expand")));
 }

@@ -152,6 +152,8 @@ pub(crate) struct RecoveryState {
     pub files: BTreeMap<String, StoredFile>,
     pub units: BTreeMap<String, StoredUnit>,
     pub search_hits: BTreeMap<String, StoredUnit>,
+    #[serde(default)]
+    pub aliases: BTreeMap<String, String>,
     pub order: Vec<String>,
     #[serde(default)]
     pub shell_outcomes: BTreeMap<String, ShellOutcome>,
@@ -191,6 +193,7 @@ impl RecoveryState {
             files: BTreeMap::new(),
             units: BTreeMap::new(),
             search_hits: BTreeMap::new(),
+            aliases: BTreeMap::new(),
             order: Vec::new(),
             shell_outcomes: BTreeMap::new(),
             shell_outcome_seq: 0,
@@ -341,6 +344,13 @@ impl RecoveryStore {
         self.persist()
     }
 
+    pub fn store_alias(&mut self, alias: &str, target_ref: &str) -> Result<(), RecoveryError> {
+        self.state
+            .aliases
+            .insert(alias.to_string(), target_ref.to_string());
+        self.persist()
+    }
+
     pub fn expected_refs(text: &str, path: Option<&Path>) -> (String, String) {
         let blob_ref = format!("tz://blob/{}", id_for('b', text));
         let file_ref = recovery_file_ref(text, path);
@@ -401,9 +411,13 @@ impl RecoveryStore {
         symbol: Option<&str>,
     ) -> ExpansionResult {
         self.recovery_count += 1;
-        let Some(parsed) = parse_ref(ref_id) else {
+        let requested_ref = ref_id.to_string();
+        let ref_id = self
+            .resolve_alias_chain(ref_id)
+            .unwrap_or_else(|| ref_id.to_string());
+        let Some(parsed) = parse_ref(&ref_id) else {
             return ExpansionResult::missing(
-                ref_id.to_string(),
+                requested_ref,
                 selector.map(str::to_string),
                 "invalid-ref",
             );
@@ -417,14 +431,14 @@ impl RecoveryStore {
         }
         let Some(content) = self.resolve_ref(&parsed.kind, &parsed.bare) else {
             return ExpansionResult::missing(
-                ref_id.to_string(),
+                requested_ref,
                 selector.map(str::to_string),
                 "dangling-ref",
             );
         };
         if parsed.kind == "file" && self.file_ref_is_stale(&parsed.bare) {
             return ExpansionResult::missing(
-                ref_id.to_string(),
+                requested_ref,
                 selector.map(str::to_string),
                 "stale-ref",
             );
@@ -438,7 +452,18 @@ impl RecoveryStore {
             symbol,
         );
         self.recovery_tokens += count_tokens(&selected);
-        ExpansionResult::ok(ref_id.to_string(), selector.map(str::to_string), selected)
+        ExpansionResult::ok(requested_ref, selector.map(str::to_string), selected)
+    }
+
+    fn resolve_alias_chain(&self, ref_id: &str) -> Option<String> {
+        let mut current = ref_id;
+        for _ in 0..8 {
+            let Some(next) = self.state.aliases.get(current) else {
+                return (current != ref_id).then(|| current.to_string());
+            };
+            current = next;
+        }
+        None
     }
 
     pub fn has_ref(&self, ref_id: &str) -> bool {
@@ -793,8 +818,25 @@ fn parse_ref(ref_id: &str) -> Option<ParsedRef> {
         .map_or((ref_id, None), |(b, f)| (b, Some(f.to_string())));
     let rest = bare.strip_prefix("tz://")?;
     let (kind, id) = rest.split_once('/')?;
-    if !matches!(kind, "blob" | "file" | "unit" | "search") || id.is_empty() {
+    if id.is_empty() {
         return None;
+    }
+    if !matches!(kind, "blob" | "file" | "unit" | "search" | "codemode") {
+        return None;
+    }
+    if kind == "codemode" {
+        let mut parts = id.split('/');
+        if parts.next() != Some("execution") {
+            return None;
+        }
+        let _safe_id = parts.next()?;
+        if !matches!(
+            parts.next(),
+            Some("code" | "steps" | "telemetry" | "result" | "error")
+        ) || parts.next().is_some()
+        {
+            return None;
+        }
     }
     Some(ParsedRef {
         kind: kind.to_string(),
@@ -991,6 +1033,9 @@ fn merge_states(
         if session.contains(ref_id.as_str()) || merged.search_hits.contains_key(&ref_id) {
             merged.search_hits.insert(ref_id, value);
         }
+    }
+    for (alias, target) in current.aliases {
+        merged.aliases.insert(alias, target);
     }
     merged.order.extend(session_refs.iter().cloned());
     let mut seen = HashSet::new();

@@ -74,14 +74,14 @@ impl Mode {
     }
 }
 
-/// MCP tool surface profile. Always exposes the full `tz_*` catalog.
-/// CodeMode is a separate CLI/execution layer, not an MCP surface.
+/// MCP launch-mode selected tool surface. Classic is the default per-op MCP catalog;
+/// CodeMode exposes only the three contract tools.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum McpToolSurface {
-    /// Full `tz_*` tool catalog (default, only surface).
     #[default]
     Classic,
+    CodeMode,
 }
 
 impl McpToolSurface {
@@ -89,7 +89,8 @@ impl McpToolSurface {
 
     pub fn as_str(self) -> &'static str {
         match self {
-            Self::Classic => "classic",
+            Self::Classic => "mcp",
+            Self::CodeMode => "codemode",
         }
     }
 }
@@ -104,11 +105,10 @@ impl std::str::FromStr for McpToolSurface {
             .replace(['_', ' '], "-")
             .as_str()
         {
-            "" | "classic" | "aliases" | "full" => Ok(Self::Classic),
-            // Backward compat: "codemode" no longer creates a separate MCP surface.
-            "codemode" | "code-mode" => Ok(Self::Classic),
+            "" | "mcp" | "classic" | "aliases" | "full" => Ok(Self::Classic),
+            "codemode" | "code-mode" => Ok(Self::CodeMode),
             other => Err(format!(
-                "unsupported MCP tool surface '{other}'; use classic"
+                "unsupported MCP launch mode '{other}'; use mcp or codemode"
             )),
         }
     }
@@ -375,6 +375,231 @@ pub fn make_capsule_with_recovery_ref(
         text: visible,
         mode,
     }
+}
+
+/// Content-type-aware capsule creation. Uses domain knowledge to produce
+/// a more useful visible summary while guaranteeing byte-exact recovery
+/// through the provided `recovery_ref`.
+pub fn make_capsule_content_aware(
+    text: &str,
+    raw_tokens: usize,
+    content_type: ContentType,
+    max_visible_tokens: usize,
+    label: Option<&str>,
+    recovery_ref: Option<&str>,
+    aggressive: bool,
+) -> Capsule {
+    if !aggressive && max_visible_tokens == 0 {
+        return make_capsule_with_recovery_ref(
+            text,
+            raw_tokens,
+            Mode::Auto,
+            max_visible_tokens,
+            label,
+            recovery_ref,
+        );
+    }
+    // For non-aggressive, check if raw fits budget
+    if !aggressive && raw_tokens <= max_visible_tokens {
+        return make_capsule_with_recovery_ref(
+            text,
+            raw_tokens,
+            Mode::Auto,
+            max_visible_tokens,
+            label,
+            recovery_ref,
+        );
+    }
+    let prefix = capsule_prefix(label, max_visible_tokens, raw_tokens);
+    let budget = if aggressive {
+        max_visible_tokens / 3
+    } else {
+        max_visible_tokens
+    };
+    let visible = match content_type {
+        ContentType::Code => summarize_code(text, budget, &prefix),
+        ContentType::Logs | ContentType::ShellOutput => summarize_logs(text, budget, &prefix),
+        ContentType::JsonConfig => summarize_json(text, budget, &prefix),
+        ContentType::Diff => summarize_lines(text, 12, 8, &prefix),
+        ContentType::SearchResult => summarize_lines(text, 20, 5, &prefix),
+        _ => summarize_lines(text, 18, 12, &prefix),
+    };
+    let visible = enforce_token_budget_with_ref(&visible, max_visible_tokens, recovery_ref);
+    let visible_tokens = count_tokens(&visible);
+    Capsule {
+        text: visible,
+        raw_tokens,
+        visible_tokens,
+        omitted_lines: text.lines().count().saturating_sub(visible_tokens),
+        mode: if aggressive { Mode::Exact } else { Mode::Auto },
+    }
+}
+
+/// Summarize code: show first N lines (imports/signatures) + last M lines.
+fn summarize_code(text: &str, budget_tokens: usize, prefix: &str) -> String {
+    let lines: Vec<&str> = text.lines().collect();
+    let total = lines.len();
+    if total <= 30 {
+        return format!("{prefix}{}", text.trim_end());
+    }
+    // Show signatures/declarations and tail
+    let sig_lines: Vec<&str> = lines
+        .iter()
+        .take(total.min(80))
+        .filter(|l| {
+            let t = l.trim();
+            t.starts_with("pub ")
+                || t.starts_with("fn ")
+                || t.starts_with("struct ")
+                || t.starts_with("enum ")
+                || t.starts_with("impl ")
+                || t.starts_with("trait ")
+                || t.starts_with("class ")
+                || t.starts_with("def ")
+                || t.starts_with("function ")
+                || t.starts_with("export ")
+                || t.starts_with("import ")
+                || t.starts_with("use ")
+                || t.starts_with("#[")
+        })
+        .copied()
+        .collect();
+    let head = 8.min(total);
+    let tail = 6.min(total.saturating_sub(head));
+    let mut out = String::new();
+    out.push_str(prefix);
+    out.push_str(&lines[..head].join("\n"));
+    if !sig_lines.is_empty() {
+        out.push_str("\n\n# declarations/signatures:\n");
+        for line in sig_lines.iter().take(budget_tokens / 8) {
+            out.push_str(line);
+            out.push('\n');
+        }
+    }
+    out.push_str(&format!(
+        "\n... omitted {} lines; exact ref available ...\n\n",
+        total.saturating_sub(head + tail)
+    ));
+    out.push_str(&lines[total - tail..].join("\n"));
+    out
+}
+
+/// Summarize logs: prioritize errors/warnings, then head+tail.
+fn summarize_logs(text: &str, budget_tokens: usize, prefix: &str) -> String {
+    let lines: Vec<&str> = text.lines().collect();
+    let total = lines.len();
+    let error_lines: Vec<&str> = lines
+        .iter()
+        .filter(|l| {
+            let lower = l.to_ascii_lowercase();
+            lower.contains("error")
+                || lower.contains("fatal")
+                || lower.contains("panic")
+                || lower.contains("failed")
+                || lower.contains("traceback")
+        })
+        .copied()
+        .collect();
+    let warning_lines: Vec<&str> = lines
+        .iter()
+        .filter(|l| {
+            let lower = l.to_ascii_lowercase();
+            lower.contains("warn") && !lower.contains("error")
+        })
+        .copied()
+        .collect();
+    let max_entries = budget_tokens / 6;
+    let mut out = String::new();
+    out.push_str(prefix);
+    if !error_lines.is_empty() {
+        out.push_str(&format!("# {} error(s):\n", error_lines.len()));
+        for line in error_lines.iter().take(max_entries) {
+            out.push_str(line);
+            out.push('\n');
+        }
+    }
+    if !warning_lines.is_empty() {
+        out.push_str(&format!("# {} warning(s):\n", warning_lines.len()));
+        for line in warning_lines.iter().take(max_entries / 2) {
+            out.push_str(line);
+            out.push('\n');
+        }
+    }
+    if error_lines.is_empty() && warning_lines.is_empty() {
+        let head = 6.min(total);
+        let tail = 4.min(total.saturating_sub(head));
+        out.push_str(&lines[..head].join("\n"));
+        if total > head + tail {
+            out.push_str(&format!(
+                "\n... omitted {} lines ...\n",
+                total.saturating_sub(head + tail)
+            ));
+        }
+        if tail > 0 {
+            out.push_str(&lines[total - tail..].join("\n"));
+        }
+    } else {
+        out.push_str(&format!("# {total} total lines; exact ref available"));
+    }
+    out
+}
+
+/// Summarize JSON: show schema shape (keys, types, array lengths).
+fn summarize_json(text: &str, _budget_tokens: usize, prefix: &str) -> String {
+    let mut out = String::new();
+    out.push_str(prefix);
+    match serde_json::from_str::<serde_json::Value>(text.trim()) {
+        Ok(serde_json::Value::Object(map)) => {
+            out.push_str(&format!("json_object: {} keys\n", map.len()));
+            for (key, val) in map.iter().take(25) {
+                let kind = match val {
+                    serde_json::Value::Null => "null",
+                    serde_json::Value::Bool(_) => "bool",
+                    serde_json::Value::Number(_) => "number",
+                    serde_json::Value::String(s) => {
+                        if s.len() > 100 {
+                            "string(long)"
+                        } else {
+                            "string"
+                        }
+                    }
+                    serde_json::Value::Array(a) => {
+                        if a.is_empty() {
+                            "array(0)"
+                        } else {
+                            "array"
+                        }
+                    }
+                    serde_json::Value::Object(o) => {
+                        if o.is_empty() {
+                            "object(0)"
+                        } else {
+                            "object"
+                        }
+                    }
+                };
+                out.push_str(&format!("  {key}: {kind}\n"));
+            }
+        }
+        Ok(serde_json::Value::Array(items)) => {
+            out.push_str(&format!("json_array: {} items\n", items.len()));
+            if let Some(first) = items.first() {
+                out.push_str(&format!(
+                    "  sample: {}\n",
+                    serde_json::to_string(first)
+                        .unwrap_or_default()
+                        .chars()
+                        .take(200)
+                        .collect::<String>()
+                ));
+            }
+        }
+        _ => {
+            return summarize_lines(text, 12, 8, prefix);
+        }
+    }
+    out.push_str("# exact ref available for full content");
+    out
 }
 
 pub fn summarize_lines(text: &str, head: usize, tail: usize, prefix: &str) -> String {
@@ -1427,9 +1652,27 @@ pub fn detect_content_type(text: &str, path: Option<&Path>) -> ContentType {
         ContentType::Diff
     } else if text.contains("Traceback") || text.contains("FAILED") || text.contains("error:") {
         ContentType::ShellOutput
+    } else if looks_like_logs(text) {
+        ContentType::Logs
     } else {
         ContentType::Unknown
     }
+}
+
+fn looks_like_logs(text: &str) -> bool {
+    let sample: Vec<&str> = text.lines().take(20).collect();
+    if sample.len() < 5 {
+        return false;
+    }
+    let log_prefixes = ["DEBUG", "INFO", "WARN", "ERROR", "FATAL", "TRACE"];
+    let matching = sample
+        .iter()
+        .filter(|line| {
+            let upper = line.to_ascii_uppercase();
+            log_prefixes.iter().any(|p| upper.contains(p))
+        })
+        .count();
+    matching > sample.len() / 3
 }
 
 pub fn ref_record(kind: &str, ref_id: String, bytes: usize) -> RefRecord {

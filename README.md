@@ -81,6 +81,43 @@ one `expand` away. The current reproducible demo artifact is
 Path-only outputs like `glob` pass through nearly unchanged: there is nothing
 to hide, and a capsule never costs more than raw.
 
+#### Plan composition benchmark
+
+CodeMode executes multi-step plans in a single call, eliminating per-operation
+round-trips. The same engine and tokenizer measure both sides; the "Direct"
+column is the sum of running each step individually:
+
+| Workload | Plan (visible) | Direct (visible) | Savings |
+| :-- | --: | --: | --: |
+| File + search + transform | 775 | 2,843 | **72.7%** |
+| Shell multi-step (3 commands) | 949 | 1,227 | **22.7%** |
+| Pipe composition (read + compact) | 261 | 1,266 | **79.4%** |
+| Mixed exploration (tree + glob + read) | 917 | 1,733 | **47.1%** |
+| **Total** | **2,902** | **7,069** | **58.9%** |
+
+Reproducible: `scripts/benchmark_composition.sh` or
+`cargo test -p tokenzero-mcp -- codemode::bench_tests::run_composition_benchmark`.
+Artifact: `demo/composition_benchmark.json`.
+
+Dogfood from OMP / ZeroStack router:
+
+```text
+zero_execute root=/path/to/repo plan='const out = await zero.token.compact("payload"); return { ref: out.ref };'
+```
+
+Dogfood locally without OMP:
+
+```bash
+tokenzero codemode --json --root . --plan '{"steps":[{"id":"c","method":"zero.token.compact","args":["payload"]},{"id":"e","method":"zero.token.expand","args":["$c.ref"]}],"return":{"text":"$e.text","ref":"$c.ref"}}'
+```
+
+MCP launch mode is explicit:
+
+- `tokenzero mcp-server --mode=mcp` (default) exposes only the per-operation tools (`tz_read`, `tz_find`, `tz_expand`, ...).
+- `tokenzero mcp-server --mode=codemode` exposes exactly `tz_execute_code`, `tz_codemode_search`, and `tz_codemode_describe`; per-operation tools are hidden in that process.
+
+`tokenzero codemode` remains the local CLI entry point for the same native executor.
+
 #### Measured in production
 
 Across **~20,000 routed tool calls** from real agent sessions on one

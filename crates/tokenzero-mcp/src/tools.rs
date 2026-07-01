@@ -74,6 +74,144 @@ fn record_mcp_pulse(
     let _ = tokenzero_pulse::record_event(&tokenzero_pulse::default_ledger_path(root), &event);
 }
 
+fn json_tool_response(name: &str, value: Value) -> Result<ToolResponse, JsonRpcErrorData> {
+    let text = serde_json::to_string(&value).map_err(|err| err.to_string())?;
+    let tokens = count_tokens(&text);
+    Ok(ToolResponse::ok(
+        name,
+        Mode::Structured,
+        text,
+        Vec::new(),
+        Accounting {
+            raw_tokens: tokens,
+            visible_tokens: tokens,
+            recovery_tokens: 0,
+            exact_ref_tokens: None,
+        },
+    ))
+}
+
+fn exec_codemode_tool(
+    engine: &TokenZeroEngine,
+    name: &str,
+    args: &Value,
+) -> Result<ToolResponse, JsonRpcErrorData> {
+    let plan = arg_string_any(args, &["plan"])?;
+    let mut options = crate::CodeModeOptions {
+        allowed_roots: engine.config.allowed_roots.clone(),
+        cache_path: Some(engine.config.cache_path.clone()),
+        max_visible_tokens: engine.config.max_visible_tokens,
+        ..Default::default()
+    };
+    if let Some(root) = engine.config.allowed_roots.first() {
+        options.root = Some(root.clone());
+    }
+    if let Some(limits) = args.get("limits").and_then(Value::as_object) {
+        if let Some(value) = limits.get("max_output_bytes").and_then(Value::as_u64) {
+            options.max_output_bytes = value as usize;
+        }
+        if let Some(value) = limits.get("max_refs_emitted").and_then(Value::as_u64) {
+            options.max_refs_emitted = value as usize;
+        }
+        if let Some(value) = limits.get("max_logical_ops").and_then(Value::as_u64) {
+            options.max_logical_ops = value as usize;
+        }
+        if let Some(value) = limits.get("max_physical_ops").and_then(Value::as_u64) {
+            options.max_physical_ops = value as usize;
+        }
+        if let Some(value) = limits.get("max_microtasks").and_then(Value::as_u64) {
+            options.max_microtasks = value as usize;
+        }
+        if let Some(value) = limits.get("max_memory_bytes").and_then(Value::as_u64) {
+            options.max_memory_bytes = value as usize;
+        }
+        if let Some(value) = limits.get("max_code_bytes").and_then(Value::as_u64) {
+            options.max_code_bytes = value as usize;
+        }
+    }
+    let result = crate::execute_codemode_with_options(plan, options);
+    json_tool_response(name, codemode_contract_payload(&result))
+}
+
+fn exec_codemode_search_tool(name: &str, args: &Value) -> Result<ToolResponse, JsonRpcErrorData> {
+    let query = arg_string_any(args, &["query"])?;
+    let mut value = crate::search_codemode_catalog(query);
+    if let Some(limit) = arg_u64(args, "limit") {
+        if let Some(items) = value.as_array_mut() {
+            items.truncate(limit.min(50));
+        }
+    }
+    json_tool_response(name, value)
+}
+
+fn exec_codemode_describe_tool(name: &str, args: &Value) -> Result<ToolResponse, JsonRpcErrorData> {
+    let target = arg_string_any(args, &["name"])?;
+    let value = if target == "capabilities" {
+        codemode_capabilities_manifest()
+    } else {
+        crate::describe_codemode_method(target)
+    };
+    json_tool_response(name, value)
+}
+
+fn codemode_capabilities_manifest() -> Value {
+    json!({
+        "contract_version": "1.0",
+        "ns": "tz",
+        "mutation": "denied",
+        "plan_forms": ["recipe", "json", "js"],
+        "limits": {
+            "max_logical_ops": crate::CodeModeLimits::default().max_logical_ops,
+            "max_microtasks": crate::CodeModeLimits::default().max_microtasks,
+            "max_output_bytes": crate::CodeModeLimits::default().max_output_bytes,
+            "max_code_bytes": crate::CodeModeLimits::default().max_code_bytes
+        }
+    })
+}
+
+fn codemode_contract_payload(result: &crate::CodeModeResult) -> Value {
+    let ack = result.visible_ack.clone();
+    let mut refs = serde_json::Map::new();
+    if let Some(execution_refs) = result.execution_refs.as_ref().and_then(Value::as_object) {
+        for key in ["code", "steps", "telemetry"] {
+            if let Some(value) = execution_refs.get(key) {
+                refs.insert(key.to_string(), value.clone());
+            }
+        }
+        match result.status {
+            crate::CodeModeStatus::Completed => {
+                if let Some(value) = execution_refs.get("result") {
+                    refs.insert("result".to_string(), value.clone());
+                }
+            }
+            crate::CodeModeStatus::Error => {
+                if let Some(value) = execution_refs.get("error") {
+                    refs.insert("error".to_string(), value.clone());
+                }
+            }
+        }
+    }
+    let mut payload = json!({
+        "ack": ack,
+        "execution_id": result.execution_id,
+        "refs": refs,
+        "telemetry": result.telemetry,
+    });
+    if matches!(result.status, crate::CodeModeStatus::Completed) {
+        if let Some(value) = &result.value {
+            payload["value"] = value.clone();
+        }
+    } else {
+        if let Some(error) = &result.error {
+            payload["error"] = json!(error);
+        }
+        if let Some(error_ref) = payload.pointer("/refs/error").cloned() {
+            payload["error_ref"] = error_ref;
+        }
+    }
+    payload
+}
+
 /// Tool dispatch shared by direct calls and `tz_batch` sub-ops.
 fn dispatch_tool(
     engine: &TokenZeroEngine,
@@ -82,6 +220,9 @@ fn dispatch_tool(
     args: &Value,
 ) -> Result<ToolResponse, JsonRpcErrorData> {
     let response = match canonical {
+        "execute_code" => exec_codemode_tool(engine, name, args)?,
+        "codemode_search" => exec_codemode_search_tool(name, args)?,
+        "codemode_describe" => exec_codemode_describe_tool(name, args)?,
         "read" => {
             let path = arg_path_list(args, "path")?;
             engine.read_with_options(

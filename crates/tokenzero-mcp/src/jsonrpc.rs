@@ -584,15 +584,39 @@ pub(crate) fn tool_filter_discovery(surface: McpToolSurface) -> Value {
                 "profile": "top-level compatibility alias; accepted values are full, all, material, execution"
             }
         }),
+        McpToolSurface::CodeMode => json!({
+            "surface": "codemode",
+            "default": {"profile": "codemode", "cluster": "codemode", "includeAliases": false},
+            "recommended": [{
+                "profile": "codemode",
+                "params": {},
+                "description": "Exactly tz_execute_code, tz_codemode_search, and tz_codemode_describe."
+            }],
+            "acceptedParams": {}
+        }),
     }
 }
 
-fn mcp_initialize_instructions(_surface: McpToolSurface) -> &'static str {
-    "TokenZero compacts tool output and stores exact bytes behind tz:// refs; recover them with tz_expand. Short tool names (read, find, grep, glob, tree, shell, ingest, expand, mem, cache_pack, rewrite, discover) are aliases of the tz_* tools. Full per-tool docs: resources/read resource://tokenzero/tools."
+fn mcp_initialize_instructions(surface: McpToolSurface) -> &'static str {
+    match surface {
+        McpToolSurface::Classic => {
+            "TokenZero compacts tool output and stores exact bytes behind tz:// refs; recover them with tz_expand. Short tool names (read, find, grep, glob, tree, shell, ingest, expand, mem, cache_pack, rewrite, discover) are aliases of the tz_* tools. Full per-tool docs: resources/read resource://tokenzero/tools."
+        }
+        McpToolSurface::CodeMode => {
+            "TokenZero CodeMode exposes exactly tz_execute_code, tz_codemode_search, and tz_codemode_describe. Per-op MCP tools are unavailable in this mode."
+        }
+    }
 }
 
-fn mcp_discover_instructions(_surface: McpToolSurface) -> &'static str {
-    "Use tools/list for JSON Schema input contracts, resources/list for discovery resources, and tool text output (refs: footers, shell command_success) after tools/call."
+fn mcp_discover_instructions(surface: McpToolSurface) -> &'static str {
+    match surface {
+        McpToolSurface::Classic => {
+            "Use tools/list for JSON Schema input contracts, resources/list for discovery resources, and tool text output (refs: footers, shell command_success) after tools/call."
+        }
+        McpToolSurface::CodeMode => {
+            "Use tz_codemode_describe name=capabilities, tz_codemode_search for methods, then tz_execute_code for recipe/json/js plans."
+        }
+    }
 }
 
 fn tool_list_filter(

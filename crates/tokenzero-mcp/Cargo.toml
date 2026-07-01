@@ -14,8 +14,10 @@ rust-version.workspace = true
 [dependencies]
 fs4.workspace = true
 globset.workspace = true
+rquickjs.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+sha2.workspace = true
 similar.workspace = true
 thiserror.workspace = true
 tokenzero-core = { path = "../tokenzero-core", version = "1.0.2" }

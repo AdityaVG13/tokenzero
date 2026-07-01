@@ -19,8 +19,8 @@ use tokenzero_filters::{discover, rewrite_command};
 use tokenzero_install as install;
 use tokenzero_mcp::{
     CodeModeOptions, CodeModeStatus, EditHunk, EngineConfig, TokenZeroEngine, cli_json,
-    default_shell_timeout, execute_codemode_with_options, mcp_idle_timeout_from_secs,
-    mcp_tool_surface_from_env, render_text, shell_timeout_from_secs,
+    default_shell_timeout, execute_codemode_with_options, mcp_idle_timeout_from_secs, render_text,
+    shell_timeout_from_secs,
 };
 
 mod agent_surfaces;
@@ -229,14 +229,16 @@ fn main() -> Result<()> {
             args.json,
         )?,
         Commands::CodeMode(args) => {
+            let plan = args.plan_text()?;
             let result = execute_codemode_with_options(
-                args.plan_text(),
+                &plan,
                 CodeModeOptions {
                     root: args.root.clone(),
                     allowed_roots: args.allowed_root.clone(),
                     cache_path: args.cache_path.clone(),
                     max_visible_tokens: args.max_visible_tokens,
                     timeout_seconds: args.timeout_seconds,
+                    ..Default::default()
                 },
             );
             let failed = result.status == CodeModeStatus::Error;
@@ -270,6 +272,17 @@ where
             OsString::from("robot-docs"),
             OsString::from("guide"),
         ];
+    }
+
+    if argv[1]
+        .to_str()
+        .is_some_and(|arg| arg == "--mode" || arg.starts_with("--mode="))
+    {
+        let mut normalized = Vec::with_capacity(argv.len() + 1);
+        normalized.push(argv[0].clone());
+        normalized.push(OsString::from("mcp-server"));
+        normalized.extend(argv[1..].iter().cloned());
+        return normalized;
     }
 
     if argv[1].to_str() == Some("rn") {
@@ -1279,9 +1292,9 @@ fn engine_config_for_mcp(args: &McpServerArgs) -> Result<EngineConfig> {
     let tool_surface = args
         .tool_surface
         .as_deref()
-        .map(parse_mcp_surface)
-        .transpose()?
-        .unwrap_or_else(mcp_tool_surface_from_env);
+        .unwrap_or(&args.mode)
+        .parse::<McpToolSurface>()
+        .map_err(anyhow::Error::msg)?;
     Ok(EngineConfig {
         allowed_roots: if args.allowed_root.is_empty() {
             default_allowed_roots(&root)
@@ -1302,7 +1315,11 @@ fn engine_config_for_mcp(args: &McpServerArgs) -> Result<EngineConfig> {
 /// same configuration, no --supervise (one supervisor only), and idle exit
 /// pinned off because the supervisor owns the session lifecycle.
 fn supervised_child_args(args: &McpServerArgs) -> Vec<std::ffi::OsString> {
-    let mut child_args: Vec<std::ffi::OsString> = vec!["mcp-server".into()];
+    let mut child_args: Vec<std::ffi::OsString> = vec![
+        "mcp-server".into(),
+        "--mode".into(),
+        args.mode.clone().into(),
+    ];
     for root in &args.allowed_root {
         child_args.push("--allowed-root".into());
         child_args.push(root.clone().into_os_string());
