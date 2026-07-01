@@ -15,6 +15,8 @@ use crate::{EditHunk, EngineConfig, TokenZeroEngine, shell_timeout_from_secs};
 use super::catalog::{describe_method, search_catalog};
 use super::parser::{Expr, MethodCall, Statement, parse_plan, resolve_expr, resolve_return};
 use super::result::{CodeModeOptions, CodeModeResult};
+use super::sandbox::lower_code_plan;
+use super::store::{CodeModeLimits, ExecutionStep, ExecutionStore, finalize_result, now_ms};
 
 #[cfg(test)]
 pub(crate) fn make_engine_for_root(root: PathBuf) -> TokenZeroEngine {
@@ -43,27 +45,130 @@ pub fn execute_codemode(plan: &str) -> CodeModeResult {
 
 pub fn execute_codemode_with_options(plan: &str, options: CodeModeOptions) -> CodeModeResult {
     let plan = plan.trim();
-    if plan.is_empty() {
-        return CodeModeResult::error("empty plan", 0);
-    }
+    let started_ms = now_ms();
+    let limits = limits_from_options(&options);
 
+    if plan.is_empty() {
+        return finalize_codemode_result(
+            CodeModeResult::error("empty plan", 0),
+            "code",
+            plan,
+            started_ms,
+            &options,
+            &limits,
+            Vec::new(),
+        );
+    }
     if let Some(query) = plan.strip_prefix("search:") {
         let result = search_catalog(query.trim());
         let text = serde_json::to_string_pretty(&result).unwrap_or_default();
         let tokens = count_tokens(&text);
-        return CodeModeResult::completed(result, Vec::new(), 1, tokens, tokens);
+        return finalize_codemode_result(
+            CodeModeResult::completed(result, Vec::new(), 1, tokens, tokens),
+            "recipe",
+            plan,
+            started_ms,
+            &options,
+            &limits,
+            vec![ExecutionStep {
+                id: "search".to_string(),
+                method: "codemode.search".to_string(),
+                status: "completed".to_string(),
+                refs: Vec::new(),
+            }],
+        );
     }
     if let Some(target) = plan.strip_prefix("describe:") {
         let result = describe_method(target.trim());
         let text = serde_json::to_string_pretty(&result).unwrap_or_default();
         let tokens = count_tokens(&text);
-        return CodeModeResult::completed(result, Vec::new(), 1, tokens, tokens);
+        return finalize_codemode_result(
+            CodeModeResult::completed(result, Vec::new(), 1, tokens, tokens),
+            "recipe",
+            plan,
+            started_ms,
+            &options,
+            &limits,
+            vec![ExecutionStep {
+                id: "describe".to_string(),
+                method: "codemode.describe".to_string(),
+                status: "completed".to_string(),
+                refs: Vec::new(),
+            }],
+        );
     }
 
+    if let Some(recipe) = lower_recipe_plan(plan) {
+        return execute_lowered_plan(&recipe, options, &limits, "recipe", started_ms);
+    }
+    if plan.starts_with('{') || plan.starts_with('[') {
+        return execute_json_plan(plan, options, &limits, started_ms);
+    }
+
+    let lowered = match lower_code_plan(plan, &limits) {
+        Ok(lowered) => lowered,
+        Err(message) => {
+            return finalize_codemode_result(
+                CodeModeResult::error(message, 0),
+                "code",
+                plan,
+                started_ms,
+                &options,
+                &limits,
+                Vec::new(),
+            );
+        }
+    };
+    execute_lowered_plan(&lowered, options, &limits, "code", started_ms)
+}
+
+fn limits_from_options(options: &CodeModeOptions) -> CodeModeLimits {
+    CodeModeLimits {
+        max_output_bytes: options.max_output_bytes,
+        max_refs_emitted: options.max_refs_emitted,
+        max_logical_ops: options.max_logical_ops,
+        max_physical_ops: options.max_physical_ops,
+        max_code_bytes: options.max_code_bytes,
+        ..Default::default()
+    }
+}
+
+fn execute_lowered_plan(
+    plan: &str,
+    options: CodeModeOptions,
+    limits: &CodeModeLimits,
+    kind: &str,
+    started_ms: u128,
+) -> CodeModeResult {
     let statements = match parse_plan(plan) {
         Ok(s) => s,
-        Err(e) => return CodeModeResult::error(e, 0),
+        Err(e) => {
+            return finalize_codemode_result(
+                CodeModeResult::error(e, 0),
+                kind,
+                plan,
+                started_ms,
+                &options,
+                limits,
+                Vec::new(),
+            );
+        }
     };
+
+    if statements.len() > limits.max_logical_ops {
+        return finalize_codemode_result(
+            CodeModeResult::error(
+                format!("plan exceeds max_logical_ops {}", limits.max_logical_ops),
+                0,
+            ),
+            kind,
+            plan,
+            started_ms,
+            &options,
+            limits,
+            Vec::new(),
+        );
+    }
 
     let work_root = tokenzero_work_root(options.root.clone());
     let engine = make_engine_for_root_with_options(work_root.clone(), &options);
@@ -73,6 +178,7 @@ pub fn execute_codemode_with_options(plan: &str, options: CodeModeOptions) -> Co
     let mut total_visible: usize = 0;
     let mut total_raw: usize = 0;
     let mut last_value: Value = Value::Null;
+    let mut steps: Vec<ExecutionStep> = Vec::new();
 
     for stmt in &statements {
         match stmt {
@@ -82,9 +188,17 @@ pub fn execute_codemode_with_options(plan: &str, options: CodeModeOptions) -> Co
                     Ok(outcome) => outcome,
                     Err(mut e) => {
                         e.telemetry.operations = ops;
-                        return *e;
+                        return finalize_codemode_result(
+                            *e, kind, plan, started_ms, &options, limits, steps,
+                        );
                     }
                 };
+                steps.push(ExecutionStep {
+                    id: name.clone(),
+                    method: call.method.clone(),
+                    status: "completed".to_string(),
+                    refs: refs_from_value(outcome.as_value()),
+                });
                 record_outcome(&outcome, &mut all_refs, &mut total_visible, &mut total_raw);
                 last_value = outcome.as_value().clone();
                 scope.insert(name.clone(), outcome.into_value());
@@ -95,31 +209,381 @@ pub fn execute_codemode_with_options(plan: &str, options: CodeModeOptions) -> Co
                     Ok(outcome) => outcome,
                     Err(mut e) => {
                         e.telemetry.operations = ops;
-                        return *e;
+                        return finalize_codemode_result(
+                            *e, kind, plan, started_ms, &options, limits, steps,
+                        );
                     }
                 };
+                steps.push(ExecutionStep {
+                    id: format!("step{ops}"),
+                    method: call.method.clone(),
+                    status: "completed".to_string(),
+                    refs: refs_from_value(outcome.as_value()),
+                });
                 record_outcome(&outcome, &mut all_refs, &mut total_visible, &mut total_raw);
                 last_value = outcome.into_value();
             }
             Statement::Return(expr) => {
                 let value = match resolve_return(expr, &scope) {
                     Ok(value) => value,
-                    Err(message) => return CodeModeResult::error(message, ops),
+                    Err(message) => {
+                        return finalize_codemode_result(
+                            CodeModeResult::error(message, ops),
+                            kind,
+                            plan,
+                            started_ms,
+                            &options,
+                            limits,
+                            steps,
+                        );
+                    }
                 };
                 let vis = count_tokens(&serde_json::to_string(&value).unwrap_or_default());
-                return CodeModeResult::completed(
-                    value,
-                    all_refs,
-                    ops,
-                    total_visible + vis,
-                    total_raw,
+                return finalize_codemode_result(
+                    CodeModeResult::completed(value, all_refs, ops, total_visible + vis, total_raw),
+                    kind,
+                    plan,
+                    started_ms,
+                    &options,
+                    limits,
+                    steps,
                 );
             }
         }
     }
 
     let vis = count_tokens(&serde_json::to_string(&last_value).unwrap_or_default());
-    CodeModeResult::completed(last_value, all_refs, ops, total_visible + vis, total_raw)
+    finalize_codemode_result(
+        CodeModeResult::completed(last_value, all_refs, ops, total_visible + vis, total_raw),
+        kind,
+        plan,
+        started_ms,
+        &options,
+        limits,
+        steps,
+    )
+}
+
+fn finalize_codemode_result(
+    mut result: CodeModeResult,
+    kind: &str,
+    plan: &str,
+    started_ms: u128,
+    options: &CodeModeOptions,
+    limits: &CodeModeLimits,
+    steps: Vec<ExecutionStep>,
+) -> CodeModeResult {
+    let work_root = tokenzero_work_root(options.root.clone());
+    let engine = make_engine_for_root_with_options(work_root, options);
+    result.telemetry.logical_ops = Some(result.telemetry.operations);
+    result.telemetry.physical_ops = Some(physical_ops_for(&result));
+    result.telemetry.batched_ops =
+        Some(if result.telemetry.operations > physical_ops_for(&result) {
+            1
+        } else {
+            0
+        });
+    result.telemetry.internal_actions = Some(
+        result
+            .telemetry
+            .operations
+            .saturating_add(result.refs.len()),
+    );
+    result.telemetry.refs_count = Some(result.refs.len());
+    finalize_result(
+        result,
+        kind,
+        plan,
+        started_ms,
+        now_ms(),
+        ExecutionStore::new(engine.config.cache_path.clone()),
+        limits,
+        steps,
+    )
+}
+
+fn physical_ops_for(result: &CodeModeResult) -> usize {
+    result
+        .telemetry
+        .physical_ops
+        .unwrap_or(result.telemetry.operations)
+}
+
+fn lower_recipe_plan(plan: &str) -> Option<String> {
+    let plan = plan.trim();
+    if let Some(data) = plan.strip_prefix("compact:") {
+        let quoted = serde_json::to_string(data.trim()).ok()?;
+        return Some(format!("await zero.token.compact({quoted})"));
+    }
+    if let Some(ref_id) = plan
+        .strip_prefix("expand:")
+        .or_else(|| plan.strip_prefix("expand-pack:"))
+    {
+        let quoted = serde_json::to_string(ref_id.trim()).ok()?;
+        return Some(format!("await zero.token.expand({quoted})"));
+    }
+    if let Some(refs) = plan.strip_prefix("dedupe:") {
+        let arr = refs
+            .split(',')
+            .map(|s| Value::String(s.trim().to_string()))
+            .collect::<Vec<_>>();
+        let quoted = serde_json::to_string(&arr).ok()?;
+        return Some(format!("await zero.token.dedupe({quoted})"));
+    }
+    if plan == "pack" || plan.starts_with("pack:") {
+        return Some("await zero.cache_pack()".to_string());
+    }
+    None
+}
+
+fn execute_json_plan(
+    plan: &str,
+    options: CodeModeOptions,
+    limits: &CodeModeLimits,
+    started_ms: u128,
+) -> CodeModeResult {
+    let parsed: Value = match serde_json::from_str(plan) {
+        Ok(value) => value,
+        Err(err) => {
+            return finalize_codemode_result(
+                CodeModeResult::error(format!("json plan parse error: {err}"), 0),
+                "json",
+                plan,
+                started_ms,
+                &options,
+                limits,
+                Vec::new(),
+            );
+        }
+    };
+    let steps_value = if let Some(steps) = parsed.get("steps") {
+        steps.clone()
+    } else {
+        parsed.clone()
+    };
+    let steps_arr = match steps_value.as_array() {
+        Some(steps) => steps,
+        None => {
+            return finalize_codemode_result(
+                CodeModeResult::error("json plan requires a steps array".to_string(), 0),
+                "json",
+                plan,
+                started_ms,
+                &options,
+                limits,
+                Vec::new(),
+            );
+        }
+    };
+    if steps_arr.len() > limits.max_logical_ops {
+        return finalize_codemode_result(
+            CodeModeResult::error(
+                format!(
+                    "json plan exceeds max_logical_ops {}",
+                    limits.max_logical_ops
+                ),
+                0,
+            ),
+            "json",
+            plan,
+            started_ms,
+            &options,
+            limits,
+            Vec::new(),
+        );
+    }
+
+    let work_root = tokenzero_work_root(options.root.clone());
+    let engine = make_engine_for_root_with_options(work_root.clone(), &options);
+    let mut scope: HashMap<String, Value> = HashMap::new();
+    let mut all_refs = Vec::new();
+    let mut total_visible = 0usize;
+    let mut total_raw = 0usize;
+    let mut executed = Vec::new();
+    let mut last = Value::Null;
+
+    for (idx, step) in steps_arr.iter().enumerate() {
+        let id = step
+            .get("id")
+            .and_then(|v| v.as_str())
+            .map(str::to_string)
+            .unwrap_or_else(|| format!("step{idx}"));
+        let method = match step
+            .get("method")
+            .or_else(|| step.get("tool"))
+            .and_then(|v| v.as_str())
+        {
+            Some(method) => method.to_string(),
+            None => {
+                return finalize_codemode_result(
+                    CodeModeResult::error(format!("json plan step {idx} missing method"), idx),
+                    "json",
+                    plan,
+                    started_ms,
+                    &options,
+                    limits,
+                    executed,
+                );
+            }
+        };
+        let args = match json_args_to_exprs(step.get("args"), &scope) {
+            Ok(args) => args,
+            Err(message) => {
+                return finalize_codemode_result(
+                    CodeModeResult::error(message, idx),
+                    "json",
+                    plan,
+                    started_ms,
+                    &options,
+                    limits,
+                    executed,
+                );
+            }
+        };
+        let call = MethodCall {
+            method: method.clone(),
+            args,
+        };
+        let outcome = match dispatch(&engine, &work_root, &call, &scope) {
+            Ok(outcome) => outcome,
+            Err(mut err) => {
+                err.telemetry.operations = idx + 1;
+                return finalize_codemode_result(
+                    *err, "json", plan, started_ms, &options, limits, executed,
+                );
+            }
+        };
+        let refs = refs_from_value(outcome.as_value());
+        executed.push(ExecutionStep {
+            id: id.clone(),
+            method,
+            status: "completed".to_string(),
+            refs,
+        });
+        record_outcome(&outcome, &mut all_refs, &mut total_visible, &mut total_raw);
+        last = outcome.into_value();
+        scope.insert(id, last.clone());
+    }
+
+    let value = parsed
+        .get("return")
+        .and_then(|return_value| resolve_json_return(return_value, &scope).ok())
+        .unwrap_or(last);
+    let vis = count_tokens(&serde_json::to_string(&value).unwrap_or_default());
+    let mut result = CodeModeResult::completed(
+        value,
+        all_refs,
+        steps_arr.len(),
+        total_visible + vis,
+        total_raw,
+    );
+    result.telemetry.parallel_groups = Some(count_parallel_groups(steps_arr));
+    result.telemetry.physical_ops = Some(estimate_physical_ops(steps_arr));
+    finalize_codemode_result(result, "json", plan, started_ms, &options, limits, executed)
+}
+
+fn json_args_to_exprs(
+    value: Option<&Value>,
+    scope: &HashMap<String, Value>,
+) -> Result<Vec<Expr>, String> {
+    let Some(value) = value else {
+        return Ok(Vec::new());
+    };
+    let arr = value
+        .as_array()
+        .ok_or_else(|| "json plan step args must be an array".to_string())?;
+    arr.iter()
+        .map(|value| json_value_to_expr(resolve_json_binding(value, scope)?))
+        .collect()
+}
+
+fn resolve_json_return(value: &Value, scope: &HashMap<String, Value>) -> Result<Value, String> {
+    resolve_json_binding(value, scope)
+}
+
+fn resolve_json_binding(value: &Value, scope: &HashMap<String, Value>) -> Result<Value, String> {
+    match value {
+        Value::String(s) if s.starts_with('$') => resolve_binding_string(s, scope),
+        Value::Array(items) => items
+            .iter()
+            .map(|item| resolve_json_binding(item, scope))
+            .collect::<Result<Vec<_>, _>>()
+            .map(Value::Array),
+        Value::Object(map) => map
+            .iter()
+            .map(|(key, value)| resolve_json_binding(value, scope).map(|v| (key.clone(), v)))
+            .collect::<Result<serde_json::Map<String, Value>, _>>()
+            .map(Value::Object),
+        other => Ok(other.clone()),
+    }
+}
+
+fn resolve_binding_string(s: &str, scope: &HashMap<String, Value>) -> Result<Value, String> {
+    let path = s.trim_start_matches('$');
+    if path.is_empty() {
+        return Err("empty json binding".to_string());
+    }
+    let mut parts = path.split('.');
+    let first = parts.next().unwrap();
+    let mut value = scope
+        .get(first)
+        .cloned()
+        .ok_or_else(|| format!("undefined json binding: ${first}"))?;
+    for part in parts {
+        value = value
+            .get(part)
+            .cloned()
+            .ok_or_else(|| format!("undefined json binding property: ${path}"))?;
+    }
+    Ok(value)
+}
+
+fn json_value_to_expr(value: Value) -> Result<Expr, String> {
+    match value {
+        Value::String(s) => Ok(Expr::StringLit(s)),
+        Value::Number(n) => {
+            if let Some(i) = n.as_i64() {
+                Ok(Expr::IntLit(i))
+            } else if let Some(f) = n.as_f64() {
+                Ok(Expr::FloatLit(f))
+            } else {
+                Ok(Expr::Null)
+            }
+        }
+        Value::Bool(b) => Ok(Expr::BoolLit(b)),
+        Value::Null => Ok(Expr::Null),
+        Value::Array(items) => items
+            .into_iter()
+            .map(json_value_to_expr)
+            .collect::<Result<Vec<_>, _>>()
+            .map(Expr::Array),
+        Value::Object(map) => map
+            .into_iter()
+            .map(|(key, value)| json_value_to_expr(value).map(|expr| (key, expr)))
+            .collect::<Result<Vec<_>, _>>()
+            .map(Expr::Object),
+    }
+}
+
+fn count_parallel_groups(steps: &[Value]) -> usize {
+    steps
+        .iter()
+        .filter(|step| {
+            step.get("needs")
+                .is_some_and(|needs| needs.as_array().is_some_and(|arr| arr.len() > 1))
+        })
+        .count()
+}
+
+fn estimate_physical_ops(steps: &[Value]) -> usize {
+    // V1 exposes explicit batch methods, so every JSON step is one native dispatch.
+    steps.len()
+}
+
+fn refs_from_value(value: &Value) -> Vec<String> {
+    let mut refs = Vec::new();
+    collect_refs(value, &mut refs);
+    refs
 }
 
 fn dispatch(
@@ -146,7 +610,16 @@ fn dispatch(
         "zero.shell" | "shell" => exec_shell(engine, &args),
         "zero.edit" | "edit" => exec_edit(engine, &args),
         "zero.token.expand" | "zero.expand" | "expand" => exec_expand(engine, &args),
-        "zero.token.compact" | "zero.compact" | "compact" => exec_compact(engine, &args),
+        "zero.token.expandMany" | "zero.expandMany" | "expandMany" | "expand_many" => {
+            exec_expand_many(engine, &args)
+        }
+        "zero.token.compact" | "zero.compact" | "compact" | "zero.ref" | "ref" => {
+            exec_compact(engine, &args)
+        }
+        "zero.token.compactMany" | "zero.compactMany" | "compactMany" | "compact_many" => {
+            exec_compact_many(engine, &args)
+        }
+        "zero.token.dedupe" | "zero.dedupe" | "dedupe" => exec_dedupe(&args),
         "zero.compact_max" | "compact_max" => exec_compact_max(engine, &args),
         "zero.ingest" | "ingest" => exec_ingest(engine, &args),
         "zero.mem" | "mem" => exec_mem(engine),
@@ -168,6 +641,9 @@ fn dispatch(
         "codemode.describe" | "describe" => {
             let path = args.first().and_then(|v| v.as_str()).unwrap_or("");
             Ok(OpOutcome::from_catalog(describe_method(path)))
+        }
+        "codemode.limits" | "limits" => {
+            Ok(OpOutcome::from_catalog(CodeModeLimits::default().as_json()))
         }
         _ => Err(Box::new(CodeModeResult::error(
             format!(
@@ -547,11 +1023,86 @@ fn exec_expand(engine: &TokenZeroEngine, args: &[Value]) -> Result<OpOutcome, Bo
     Ok(OpOutcome::from_tool_response(&resp))
 }
 
+fn exec_expand_many(
+    engine: &TokenZeroEngine,
+    args: &[Value],
+) -> Result<OpOutcome, Box<CodeModeResult>> {
+    let refs = match args.first() {
+        Some(Value::Array(items)) => items.iter().filter_map(|v| v.as_str()).collect::<Vec<_>>(),
+        _ => {
+            return Err(Box::new(CodeModeResult::error(
+                "zero.token.expandMany requires an array of tz:// refs",
+                0,
+            )));
+        }
+    };
+    let mut results = Vec::with_capacity(refs.len());
+    for ref_id in refs {
+        let outcome = exec_expand(engine, &[Value::String(ref_id.to_string())])?;
+        results.push(outcome.into_value());
+    }
+    Ok(OpOutcome::from_catalog(json!({
+        "items": results,
+        "count": results.len(),
+    })))
+}
+
 fn exec_compact(
     engine: &TokenZeroEngine,
     args: &[Value],
 ) -> Result<OpOutcome, Box<CodeModeResult>> {
     exec_compact_inner(engine, args, false)
+}
+
+fn exec_compact_many(
+    engine: &TokenZeroEngine,
+    args: &[Value],
+) -> Result<OpOutcome, Box<CodeModeResult>> {
+    let items = match args.first() {
+        Some(Value::Array(items)) => items.clone(),
+        _ => {
+            return Err(Box::new(CodeModeResult::error(
+                "zero.token.compactMany requires an array of payloads",
+                0,
+            )));
+        }
+    };
+    let mut results = Vec::with_capacity(items.len());
+    let mut refs = Vec::new();
+    for item in items {
+        let outcome = exec_compact_inner(engine, &[item], false)?;
+        collect_refs(outcome.as_value(), &mut refs);
+        results.push(outcome.into_value());
+    }
+    Ok(OpOutcome::from_catalog(json!({
+        "items": results,
+        "count": results.len(),
+        "refs": refs,
+    })))
+}
+
+fn exec_dedupe(args: &[Value]) -> Result<OpOutcome, Box<CodeModeResult>> {
+    let items = match args.first() {
+        Some(Value::Array(items)) => items,
+        _ => {
+            return Err(Box::new(CodeModeResult::error(
+                "zero.token.dedupe requires an array",
+                0,
+            )));
+        }
+    };
+    let mut seen = std::collections::BTreeSet::new();
+    let mut unique = Vec::new();
+    for item in items {
+        let key = serde_json::to_string(item).unwrap_or_default();
+        if seen.insert(key) {
+            unique.push(item.clone());
+        }
+    }
+    Ok(OpOutcome::from_catalog(json!({
+        "items": unique,
+        "count": unique.len(),
+    })))
 }
 
 fn exec_compact_max(

@@ -7,6 +7,8 @@ pub(crate) mod catalog;
 mod exec;
 mod parser;
 mod result;
+mod sandbox;
+mod store;
 
 #[allow(dead_code)]
 pub mod audit;
@@ -17,7 +19,10 @@ pub mod bench;
 #[cfg(test)]
 mod bench_tests;
 #[cfg(test)]
+mod e2e_tests;
+#[cfg(test)]
 mod tests;
 
 pub use exec::execute_codemode_with_options;
 pub use result::{CODEMODE_SCHEMA, CodeModeOptions, CodeModeResult, CodeModeStatus};
+pub use store::{CODEMODE_LIMITS_SCHEMA, CodeModeLimits};

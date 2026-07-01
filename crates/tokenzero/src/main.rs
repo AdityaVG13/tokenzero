@@ -238,6 +238,7 @@ fn main() -> Result<()> {
                     cache_path: args.cache_path.clone(),
                     max_visible_tokens: args.max_visible_tokens,
                     timeout_seconds: args.timeout_seconds,
+                    ..Default::default()
                 },
             );
             let failed = result.status == CodeModeStatus::Error;
