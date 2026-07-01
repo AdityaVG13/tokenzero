@@ -23,7 +23,7 @@ pub struct CodeModeResult {
     pub execution_refs: Option<Value>,
     pub telemetry: CodeModeTelemetry,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub error: Option<String>,
+    pub error: Option<CodeModeError>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -33,52 +33,78 @@ pub enum CodeModeStatus {
     Error,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CodeModeError {
+    pub kind: String,
+    pub message: String,
+    pub retryable: bool,
+}
+
+impl CodeModeError {
+    pub fn new(kind: impl Into<String>, message: impl Into<String>, retryable: bool) -> Self {
+        Self {
+            kind: kind.into(),
+            message: message.into(),
+            retryable,
+        }
+    }
+
+    pub fn contains(&self, needle: &str) -> bool {
+        self.message.contains(needle)
+    }
+}
+
+impl std::ops::Deref for CodeModeError {
+    type Target = str;
+
+    fn deref(&self) -> &Self::Target {
+        &self.message
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CodeModeTelemetry {
+    #[serde(skip)]
     pub operations: usize,
+    #[serde(skip)]
     pub visible_tokens: usize,
+    #[serde(skip)]
     pub raw_tokens: usize,
-    /// How many individual MCP tool calls this plan replaced (ops + plan overhead).
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub equivalent_calls: Option<usize>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub execution_id: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub kind: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub status: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub visible_ack: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(skip)]
     pub steps_run: Option<usize>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub logical_ops: Option<usize>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub physical_ops: Option<usize>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub batched_ops: Option<usize>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub cache_hits: Option<usize>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub cache_misses: Option<usize>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub store_writes: Option<usize>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub internal_actions: Option<usize>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(skip)]
     pub parallel_groups: Option<usize>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(skip)]
     pub refs_count: Option<usize>,
+    #[serde(skip)]
+    pub equivalent_calls: Option<usize>,
+    pub kind: String,
+    pub status: String,
+    pub logical_ops: usize,
+    pub physical_ops: usize,
+    pub batched_ops: usize,
+    pub internal_actions: usize,
+    pub cache_hits: usize,
+    pub cache_misses: usize,
+    pub store_writes: usize,
+    pub wall_ms: u64,
+    pub bytes_materialized: usize,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub bytes_materialized: Option<usize>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub raw_leak: Option<bool>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub wall_ms: Option<u64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub started_at_ms: Option<u128>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub finished_at_ms: Option<u128>,
+    pub extra: Option<Value>,
+}
+
+impl CodeModeTelemetry {
+    pub fn operations(&self) -> usize {
+        self.operations
+    }
+
+    pub fn visible_tokens(&self) -> usize {
+        self.visible_tokens
+    }
+
+    pub fn raw_tokens(&self) -> usize {
+        self.raw_tokens
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -137,32 +163,46 @@ impl CodeModeResult {
                 operations: ops,
                 visible_tokens: visible,
                 raw_tokens: raw,
-                equivalent_calls: Some(ops.saturating_add(1)),
-                execution_id: None,
-                kind: None,
-                status: None,
-                visible_ack: None,
                 steps_run: None,
-                logical_ops: Some(ops),
-                physical_ops: Some(ops),
-                batched_ops: Some(0),
-                cache_hits: Some(0),
-                cache_misses: Some(ops),
-                store_writes: Some(refs_len),
-                internal_actions: Some(ops),
                 parallel_groups: Some(0),
                 refs_count: Some(refs_len),
-                bytes_materialized: Some(raw),
-                raw_leak: Some(false),
-                wall_ms: None,
-                started_at_ms: None,
-                finished_at_ms: None,
+                equivalent_calls: Some(ops.saturating_add(1)),
+                kind: "codemode.execute".to_string(),
+                status: "ok".to_string(),
+                logical_ops: ops,
+                physical_ops: ops,
+                batched_ops: 0,
+                internal_actions: ops,
+                cache_hits: 0,
+                cache_misses: ops,
+                store_writes: refs_len,
+                wall_ms: 0,
+                bytes_materialized: raw,
+                extra: Some(serde_json::json!({
+                    "operations": ops,
+                    "visible_tokens": visible,
+                    "raw_tokens": raw,
+                    "equivalent_calls": ops.saturating_add(1),
+                    "refs_count": refs_len,
+                    "parallel_groups": 0
+                })),
             },
             error: None,
         }
     }
 
     pub fn error(msg: impl Into<String>, ops: usize) -> Self {
+        let message = msg.into();
+        let kind = classify_error_kind(&message);
+        Self::error_with_kind(kind, message, ops, false)
+    }
+
+    pub fn error_with_kind(
+        kind: impl Into<String>,
+        msg: impl Into<String>,
+        ops: usize,
+        retryable: bool,
+    ) -> Self {
         Self {
             schema: CODEMODE_SCHEMA,
             status: CodeModeStatus::Error,
@@ -175,28 +215,30 @@ impl CodeModeResult {
                 operations: ops,
                 visible_tokens: 0,
                 raw_tokens: 0,
-                equivalent_calls: None,
-                execution_id: None,
-                kind: None,
-                status: None,
-                visible_ack: None,
                 steps_run: None,
-                logical_ops: Some(ops),
-                physical_ops: Some(ops),
-                batched_ops: Some(0),
-                cache_hits: Some(0),
-                cache_misses: Some(ops),
-                store_writes: Some(0),
-                internal_actions: Some(ops),
                 parallel_groups: Some(0),
                 refs_count: Some(0),
-                bytes_materialized: Some(0),
-                raw_leak: Some(false),
-                wall_ms: None,
-                started_at_ms: None,
-                finished_at_ms: None,
+                equivalent_calls: None,
+                kind: "codemode.execute".to_string(),
+                status: "error".to_string(),
+                logical_ops: ops,
+                physical_ops: ops,
+                batched_ops: 0,
+                internal_actions: ops,
+                cache_hits: 0,
+                cache_misses: ops,
+                store_writes: 0,
+                wall_ms: 0,
+                bytes_materialized: 0,
+                extra: Some(serde_json::json!({
+                    "operations": ops,
+                    "visible_tokens": 0,
+                    "raw_tokens": 0,
+                    "refs_count": 0,
+                    "parallel_groups": 0
+                })),
             },
-            error: Some(msg.into()),
+            error: Some(CodeModeError::new(kind, msg, retryable)),
         }
     }
 
@@ -210,19 +252,52 @@ impl CodeModeResult {
                 };
                 format!(
                     "codemode:ok C ops={} visible_tokens={} raw_tokens={}{}",
-                    self.telemetry.operations,
-                    self.telemetry.visible_tokens,
-                    self.telemetry.raw_tokens,
+                    self.telemetry.operations(),
+                    self.telemetry.visible_tokens(),
+                    self.telemetry.raw_tokens(),
                     refs_part,
                 )
             }
             CodeModeStatus::Error => {
                 format!(
                     "codemode:error X0 ops={} {}",
-                    self.telemetry.operations,
-                    self.error.as_deref().unwrap_or("unknown"),
+                    self.telemetry.operations(),
+                    self.error
+                        .as_ref()
+                        .map(|error| error.message.as_str())
+                        .unwrap_or("unknown"),
                 )
             }
         }
+    }
+}
+
+fn classify_error_kind(message: &str) -> &'static str {
+    let lower = message.to_ascii_lowercase();
+    if lower.contains("mutating binding denied")
+        || lower.contains("mutation")
+        || lower.contains("edit denied")
+    {
+        "policy"
+    } else if lower.starts_with("sandbox:") || lower.contains("denied") || lower.contains("quickjs")
+    {
+        "sandbox"
+    } else if lower.contains("parse error")
+        || lower.contains("invalid json")
+        || lower.contains("empty plan")
+        || lower.contains("missing method")
+        || lower.contains("requires a steps array")
+        || lower.contains("missing") && lower.contains("argument")
+    {
+        "validation"
+    } else if lower.contains("outside allowed roots")
+        || lower.contains("not found")
+        || lower.contains("no such")
+        || lower.contains("missing target")
+        || lower.contains("missing_target")
+    {
+        "substrate"
+    } else {
+        "runtime"
     }
 }

@@ -533,7 +533,7 @@ fn new_composition_methods_discoverable() {
 
 #[test]
 fn compact_content_aware_produces_ref_and_savings() {
-    let large_code = (0..500)
+    let large_code = (0..200)
         .map(|i| format!("pub fn handler_{i}(ctx: &Context, request: Request<Body>) -> Result<Response<Body>, Error> {{ log::info!(\"handling request {i}\"); Ok(Response::new(Body::empty())) }}"))
         .collect::<Vec<_>>()
         .join("\n");
@@ -744,17 +744,12 @@ fn parity_edit_plan_vs_direct_identical_result() {
         opts.clone(),
     );
 
-    assert_eq!(direct.status, CodeModeStatus::Completed);
-    assert_eq!(plan.status, CodeModeStatus::Completed);
-    let d_val = direct.value.unwrap();
-    let p_val = plan.value.unwrap();
-    assert_eq!(d_val["hunks_applied"], p_val["hunks_applied"]);
-    assert_eq!(d_val["status"], p_val["status"]);
-    // Both files should now have identical content
-    assert_eq!(
-        fs::read_to_string(&path1).unwrap(),
-        fs::read_to_string(&path2).unwrap()
-    );
+    assert_eq!(direct.status, CodeModeStatus::Error);
+    assert_eq!(plan.status, CodeModeStatus::Error);
+    assert_eq!(direct.error.as_ref().unwrap().kind, "policy");
+    assert_eq!(plan.error.as_ref().unwrap().kind, "policy");
+    assert_eq!(fs::read_to_string(&path1).unwrap(), "hello world");
+    assert_eq!(fs::read_to_string(&path2).unwrap(), "hello world");
 }
 
 // --- New helper tests ---

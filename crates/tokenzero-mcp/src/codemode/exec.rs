@@ -63,6 +63,23 @@ pub fn execute_codemode_with_options(plan: &str, options: CodeModeOptions) -> Co
     let started_ms = now_ms();
     let limits = limits_from_options(&options);
 
+    if plan.len() > limits.max_code_bytes {
+        return finalize_codemode_result(
+            CodeModeResult::error_with_kind(
+                "validation",
+                format!("plan exceeds max_code_bytes {}", limits.max_code_bytes),
+                0,
+                false,
+            ),
+            "code",
+            plan,
+            started_ms,
+            &options,
+            &limits,
+            Vec::new(),
+        );
+    }
+
     if plan.is_empty() {
         return finalize_codemode_result(
             CodeModeResult::error("empty plan", 0),
@@ -160,6 +177,8 @@ fn should_run_quickjs(plan: &str) -> bool {
     trimmed.starts_with("export default")
         || trimmed.starts_with("async function")
         || trimmed.starts_with("function")
+        || trimmed.starts_with("return zero.")
+        || trimmed.starts_with("return ctx.")
         || plan.contains("=>")
         || plan.contains("Promise")
         || plan.contains('`')
@@ -173,10 +192,13 @@ fn quickjs_plan_requests_mutation(plan: &str) -> bool {
 #[derive(Default)]
 struct JsExecutionState {
     ops: usize,
+    physical_ops: usize,
     visible_tokens: usize,
     raw_tokens: usize,
     refs: Vec<String>,
     steps: Vec<ExecutionStep>,
+    started_ms: u128,
+    limits: CodeModeLimits,
 }
 
 fn execute_quickjs_plan(
@@ -190,7 +212,11 @@ fn execute_quickjs_plan(
         work_root.clone(),
         &options,
     ));
-    let state = Rc::new(RefCell::new(JsExecutionState::default()));
+    let state = Rc::new(RefCell::new(JsExecutionState {
+        started_ms,
+        limits: limits.clone(),
+        ..JsExecutionState::default()
+    }));
 
     let runtime = match Runtime::new() {
         Ok(runtime) => runtime,
@@ -301,6 +327,39 @@ fn execute_quickjs_plan(
 
     let mut drained = 0;
     while runtime.is_job_pending() {
+        if now_ms().saturating_sub(started_ms) as u64 > limits.hard_max_wall_ms {
+            let state = state.borrow();
+            return finalize_codemode_result(
+                CodeModeResult::error(
+                    format!(
+                        "runtime: hard_max_wall_ms exceeded {}",
+                        limits.hard_max_wall_ms
+                    ),
+                    state.ops,
+                ),
+                "code",
+                plan,
+                started_ms,
+                &options,
+                limits,
+                state.steps.clone(),
+            );
+        }
+        if now_ms().saturating_sub(started_ms) as u64 > limits.max_wall_ms {
+            let state = state.borrow();
+            return finalize_codemode_result(
+                CodeModeResult::error(
+                    format!("runtime: max_wall_ms exceeded {}", limits.max_wall_ms),
+                    state.ops,
+                ),
+                "code",
+                plan,
+                started_ms,
+                &options,
+                limits,
+                state.steps.clone(),
+            );
+        }
         if drained >= limits.max_microtasks {
             let state = state.borrow();
             return finalize_codemode_result(
@@ -355,14 +414,16 @@ fn execute_quickjs_plan(
         .unwrap_or(Value::Null);
     let visible =
         state.visible_tokens + count_tokens(&serde_json::to_string(&value).unwrap_or_default());
+    let mut result = CodeModeResult::completed(
+        value,
+        state.refs.clone(),
+        state.ops,
+        visible,
+        state.raw_tokens,
+    );
+    result.telemetry.physical_ops = state.physical_ops;
     finalize_codemode_result(
-        CodeModeResult::completed(
-            value,
-            state.refs.clone(),
-            state.ops,
-            visible,
-            state.raw_tokens,
-        ),
+        result,
         "code",
         plan,
         started_ms,
@@ -433,11 +494,39 @@ fn invoke_js_binding(
     args: Vec<Value>,
     state: &Rc<RefCell<JsExecutionState>>,
 ) -> String {
+    {
+        let state_ref = state.borrow();
+        if now_ms().saturating_sub(state_ref.started_ms) as u64 > state_ref.limits.hard_max_wall_ms
+        {
+            return serde_json::to_string(&json!({
+                "__tz_error": format!("runtime: hard_max_wall_ms exceeded {}", state_ref.limits.hard_max_wall_ms)
+            }))
+            .unwrap_or_else(|_| "{\"__tz_error\":\"hard wall clock exceeded\"}".to_string());
+        }
+        if now_ms().saturating_sub(state_ref.started_ms) as u64 > state_ref.limits.max_wall_ms {
+            return serde_json::to_string(&json!({
+                "__tz_error": format!("runtime: max_wall_ms exceeded {}", state_ref.limits.max_wall_ms)
+            }))
+            .unwrap_or_else(|_| "{\"__tz_error\":\"wall clock exceeded\"}".to_string());
+        }
+        if state_ref.ops >= state_ref.limits.max_logical_ops {
+            return serde_json::to_string(&json!({
+                "__tz_error": format!("runtime: max_logical_ops exceeded {}", state_ref.limits.max_logical_ops)
+            }))
+            .unwrap_or_else(|_| "{\"__tz_error\":\"logical op cap exceeded\"}".to_string());
+        }
+        if state_ref.physical_ops >= state_ref.limits.max_physical_ops {
+            return serde_json::to_string(&json!({
+                "__tz_error": format!("runtime: max_physical_ops exceeded {}", state_ref.limits.max_physical_ops)
+            }))
+            .unwrap_or_else(|_| "{\"__tz_error\":\"physical op cap exceeded\"}".to_string());
+        }
+    }
     let outcome = match dispatch_values(engine, work_root, method, &args) {
         Ok(outcome) => outcome,
         Err(error) => {
             return serde_json::to_string(&json!({
-                "__tz_error": error.error.as_deref().unwrap_or("unknown error")
+                "__tz_error": error.error.as_ref().map(|error| error.message.as_str()).unwrap_or("unknown error")
             }))
             .unwrap_or_else(|_| "{\"__tz_error\":\"unknown error\"}".to_string());
         }
@@ -445,7 +534,19 @@ fn invoke_js_binding(
     let value = outcome.into_value();
     let refs = refs_from_value(&value);
     let mut state = state.borrow_mut();
-    state.ops = state.ops.saturating_add(1);
+    let logical_width = if matches!(
+        method,
+        "zero.token.compactMany" | "zero.token.expandMany" | "zero.token.dedupe"
+    ) {
+        args.first()
+            .and_then(Value::as_array)
+            .map(|items| items.len().max(1))
+            .unwrap_or(1)
+    } else {
+        1
+    };
+    state.ops = state.ops.saturating_add(logical_width);
+    state.physical_ops = state.physical_ops.saturating_add(1);
     state.visible_tokens = state
         .visible_tokens
         .saturating_add(result_visible_tokens(&value));
@@ -492,6 +593,7 @@ fn js_prelude() -> &'static str {
           filter_lines: (...args) => __tz_call('zero.filter_lines', args),
           count_tokens: (...args) => __tz_call('zero.count_tokens', args),
           assert: (...args) => __tz_call('zero.assert', args),
+          queryMany: (items) => __tz_parse(__tz_compact_many_json(JSON.stringify(items))),
           token: Object.freeze({
             compact: (text) => __tz_parse(__tz_compact_json(String(text))),
             expand: (ref) => __tz_parse(__tz_expand_json(String(ref))),
@@ -524,7 +626,7 @@ fn wrap_js_plan(plan: &str) -> String {
             const value = await (async () => {{ {body} }})();
             globalThis.__tz_result = JSON.stringify(value === undefined ? null : value);
           }} catch (err) {{
-            globalThis.__tz_error = String((err && (err.stack || err.message)) || err);
+            globalThis.__tz_error = String((err && (err.message || err.stack)) || err);
           }}
         }})();
         "#
@@ -598,7 +700,13 @@ fn execute_lowered_plan(
                 let outcome = match dispatch(&engine, &work_root, call, &scope) {
                     Ok(outcome) => outcome,
                     Err(mut e) => {
+                        if let Some(extra) =
+                            e.telemetry.extra.as_mut().and_then(Value::as_object_mut)
+                        {
+                            extra.insert("operations".to_string(), json!(ops));
+                        }
                         e.telemetry.operations = ops;
+                        e.telemetry.logical_ops = ops;
                         return finalize_codemode_result(
                             *e, kind, plan, started_ms, &options, limits, steps,
                         );
@@ -619,7 +727,13 @@ fn execute_lowered_plan(
                 let outcome = match dispatch(&engine, &work_root, call, &scope) {
                     Ok(outcome) => outcome,
                     Err(mut e) => {
+                        if let Some(extra) =
+                            e.telemetry.extra.as_mut().and_then(Value::as_object_mut)
+                        {
+                            extra.insert("operations".to_string(), json!(ops));
+                        }
                         e.telemetry.operations = ops;
+                        e.telemetry.logical_ops = ops;
                         return finalize_codemode_result(
                             *e, kind, plan, started_ms, &options, limits, steps,
                         );
@@ -686,20 +800,21 @@ fn finalize_codemode_result(
 ) -> CodeModeResult {
     let work_root = tokenzero_work_root(options.root.clone());
     let engine = make_engine_for_root_with_options(work_root, options);
-    result.telemetry.logical_ops = Some(result.telemetry.operations);
-    result.telemetry.physical_ops = Some(physical_ops_for(&result));
-    result.telemetry.batched_ops =
-        Some(if result.telemetry.operations > physical_ops_for(&result) {
-            1
-        } else {
-            0
-        });
-    result.telemetry.internal_actions = Some(
-        result
-            .telemetry
-            .operations
-            .saturating_add(result.refs.len()),
-    );
+    let operations = result.telemetry.operations();
+    let physical_ops = physical_ops_for(&result);
+    result.telemetry.operations = operations;
+    result.telemetry.logical_ops = operations;
+    result.telemetry.physical_ops = physical_ops;
+    result.telemetry.batched_ops = if operations > physical_ops { 1 } else { 0 };
+    result.telemetry.internal_actions = operations.saturating_add(result.refs.len());
+    if let Some(extra) = result
+        .telemetry
+        .extra
+        .as_mut()
+        .and_then(Value::as_object_mut)
+    {
+        extra.insert("refs_count".to_string(), json!(result.refs.len()));
+    }
     result.telemetry.refs_count = Some(result.refs.len());
     finalize_result(
         result,
@@ -714,10 +829,7 @@ fn finalize_codemode_result(
 }
 
 fn physical_ops_for(result: &CodeModeResult) -> usize {
-    result
-        .telemetry
-        .physical_ops
-        .unwrap_or(result.telemetry.operations)
+    result.telemetry.physical_ops
 }
 
 fn lower_recipe_plan(plan: &str) -> Option<String> {
@@ -858,7 +970,11 @@ fn execute_json_plan(
         let outcome = match dispatch(&engine, &work_root, &call, &scope) {
             Ok(outcome) => outcome,
             Err(mut err) => {
+                if let Some(extra) = err.telemetry.extra.as_mut().and_then(Value::as_object_mut) {
+                    extra.insert("operations".to_string(), json!(idx + 1));
+                }
                 err.telemetry.operations = idx + 1;
+                err.telemetry.logical_ops = idx + 1;
                 return finalize_codemode_result(
                     *err, "json", plan, started_ms, &options, limits, executed,
                 );
@@ -888,8 +1004,19 @@ fn execute_json_plan(
         total_visible + vis,
         total_raw,
     );
+    if let Some(extra) = result
+        .telemetry
+        .extra
+        .as_mut()
+        .and_then(Value::as_object_mut)
+    {
+        extra.insert(
+            "parallel_groups".to_string(),
+            json!(count_parallel_groups(steps_arr)),
+        );
+    }
     result.telemetry.parallel_groups = Some(count_parallel_groups(steps_arr));
-    result.telemetry.physical_ops = Some(estimate_physical_ops(steps_arr));
+    result.telemetry.physical_ops = estimate_physical_ops(steps_arr);
     finalize_codemode_result(result, "json", plan, started_ms, &options, limits, executed)
 }
 
@@ -1026,7 +1153,12 @@ fn dispatch_values(
         "zero.glob" | "glob" => exec_glob(engine, work_root, args),
         "zero.tree" | "tree" => exec_tree(engine, work_root, args),
         "zero.shell" | "shell" => exec_shell(engine, args),
-        "zero.edit" | "edit" => exec_edit(engine, args),
+        "zero.edit" | "edit" => Err(Box::new(CodeModeResult::error_with_kind(
+            "policy",
+            "mutating binding denied without transaction support",
+            0,
+            false,
+        ))),
         "zero.token.expand" | "zero.expand" | "expand" => exec_expand(engine, args),
         "zero.token.expandMany" | "zero.expandMany" | "expandMany" | "expand_many" => {
             exec_expand_many(engine, args)
@@ -1235,6 +1367,25 @@ fn exec_read(engine: &TokenZeroEngine, args: &[Value]) -> Result<OpOutcome, Box<
         .unwrap_or(engine.config.max_visible_tokens);
 
     let resp = engine.read(&paths, mode, start_line, end_line, false, 20, max_visible);
+    if resp.status == "error" {
+        let message = resp
+            .error
+            .as_ref()
+            .map(|error| error.message.clone())
+            .unwrap_or_else(|| "zero.read failed".to_string());
+        let lower = message.to_ascii_lowercase();
+        if lower.contains("__zerostack_missing_target__")
+            || lower.contains("not found")
+            || lower.contains("no such")
+        {
+            return Err(Box::new(CodeModeResult::error_with_kind(
+                "substrate",
+                message,
+                0,
+                false,
+            )));
+        }
+    }
     Ok(OpOutcome::from_tool_response(&resp))
 }
 
@@ -1353,6 +1504,7 @@ fn exec_shell(engine: &TokenZeroEngine, args: &[Value]) -> Result<OpOutcome, Box
     }))
 }
 
+#[allow(dead_code)]
 pub(crate) fn exec_edit(
     engine: &TokenZeroEngine,
     args: &[Value],

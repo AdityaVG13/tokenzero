@@ -11,7 +11,7 @@ use super::result::{CodeModeResult, CodeModeStatus};
 pub const CODEMODE_LIMITS_SCHEMA: &str = "tokenzero.codemode.limits.v1";
 pub const DEFAULT_MAX_LOGICAL_OPS: usize = 1000;
 pub const DEFAULT_MAX_PHYSICAL_OPS: usize = 256;
-pub const DEFAULT_MAX_WALL_MS: u64 = 250;
+pub const DEFAULT_MAX_WALL_MS: u64 = 5000;
 pub const HARD_MAX_WALL_MS: u64 = 5000;
 pub const DEFAULT_MAX_MICROTASKS: usize = 4096;
 pub const DEFAULT_MAX_MEMORY_BYTES: usize = 32 * 1024 * 1024;
@@ -117,9 +117,9 @@ pub fn execution_id(code: &str, started_ms: u128) -> String {
 pub fn execution_ref(id: &str, suffix: &str) -> String {
     let normalized = id.strip_prefix("cm://exec/").unwrap_or(id);
     if suffix.is_empty() {
-        format!("codemode/execution/{normalized}")
+        format!("tz://codemode/execution/{normalized}")
     } else {
-        format!("codemode/execution/{normalized}/{suffix}")
+        format!("tz://codemode/execution/{normalized}/{suffix}")
     }
 }
 
@@ -174,15 +174,26 @@ pub fn finalize_result(
         CodeModeStatus::Completed => "C".to_string(),
         CodeModeStatus::Error => "X0".to_string(),
     };
-    result.telemetry.execution_id = Some(id.clone());
-    result.telemetry.kind = Some(kind.to_string());
-    result.telemetry.status = Some(status_str.to_string());
-    result.telemetry.visible_ack = Some(result.visible_ack.clone());
+    result.telemetry.kind = "codemode.execute".to_string();
+    result.telemetry.status = if matches!(result.status, CodeModeStatus::Completed) {
+        "ok".to_string()
+    } else {
+        "error".to_string()
+    };
+    result.telemetry.wall_ms = finished_ms.saturating_sub(started_ms) as u64;
     result.telemetry.steps_run = Some(steps.len());
-    result.telemetry.raw_leak = Some(false);
-    result.telemetry.wall_ms = Some(finished_ms.saturating_sub(started_ms) as u64);
-    result.telemetry.started_at_ms = Some(started_ms);
-    result.telemetry.finished_at_ms = Some(finished_ms);
+    let mut extra = result
+        .telemetry
+        .extra
+        .take()
+        .and_then(|value| value.as_object().cloned())
+        .unwrap_or_default();
+    extra.insert("execution_id".to_string(), json!(id.clone()));
+    extra.insert("visible_ack".to_string(), json!(result.visible_ack.clone()));
+    extra.insert("steps_run".to_string(), json!(steps.len()));
+    extra.insert("started_at_ms".to_string(), json!(started_ms));
+    extra.insert("finished_at_ms".to_string(), json!(finished_ms));
+    result.telemetry.extra = Some(Value::Object(extra));
 
     let code_ref = store
         .store_text(plan, ContentType::Code)
@@ -194,19 +205,16 @@ pub fn finalize_result(
         .store_json(&json!(result.telemetry))
         .unwrap_or_else(|err| format!("store-error:{err}"));
 
-    let result_ref = result
-        .value
-        .as_ref()
-        .and_then(|value| store.store_json(value).ok());
-    let error_ref = result.error.as_ref().and_then(|message| {
-        store
-            .store_json(&json!({
-                "kind": "runtime",
-                "message": message,
-                "recovery_hint": "Expand this error ref, fix the plan, and rerun CodeMode.",
-            }))
+    let result_ref = result.value.as_ref().and_then(|value| {
+        serde_json::to_vec(value)
             .ok()
+            .filter(|bytes| bytes.len() <= limits.max_result_ref_bytes)
+            .and_then(|_| store.store_json(value).ok())
     });
+    let error_ref = result
+        .error
+        .as_ref()
+        .and_then(|error| store.store_json(&json!(error)).ok());
 
     let execution_logical_ref = execution_ref(&id, "");
     let code_logical_ref = execution_ref(&id, "code");
@@ -269,7 +277,6 @@ pub fn finalize_result(
 fn guard_visible_output(result: &mut CodeModeResult, limits: &CodeModeLimits) {
     if result.refs.len() > limits.max_refs_emitted {
         result.refs.truncate(limits.max_refs_emitted);
-        result.telemetry.raw_leak = Some(false);
     }
     if let Some(value) = &result.value {
         let bytes = serde_json::to_vec(value)
@@ -282,6 +289,14 @@ fn guard_visible_output(result: &mut CodeModeResult, limits: &CodeModeLimits) {
                 "bytes": bytes,
             }));
             result.telemetry.visible_tokens = count_tokens("C");
+            if let Some(extra) = result
+                .telemetry
+                .extra
+                .as_mut()
+                .and_then(Value::as_object_mut)
+            {
+                extra.insert("visible_tokens".to_string(), json!(count_tokens("C")));
+            }
         }
     }
 }

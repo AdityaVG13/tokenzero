@@ -702,6 +702,9 @@ pub(crate) enum RobotDocsCommand {
 
 #[derive(Debug, Args)]
 pub(crate) struct McpServerArgs {
+    /// Launch mode: mcp exposes per-op tools; codemode exposes exactly the three CodeMode tools.
+    #[arg(long, default_value = "mcp", value_name = "MODE")]
+    pub(crate) mode: String,
     #[arg(long)]
     pub(crate) allowed_root: Vec<PathBuf>,
     #[arg(long)]
@@ -716,7 +719,7 @@ pub(crate) struct McpServerArgs {
     /// and automatically respawns the inner MCP server if it ever dies.
     #[arg(long)]
     pub(crate) supervise: bool,
-    /// MCP tool surface override (always `classic`; CodeMode is separate).
+    /// Backward-compatible alias for --mode.
     #[arg(long, value_name = "SURFACE")]
     pub(crate) tool_surface: Option<String>,
 }

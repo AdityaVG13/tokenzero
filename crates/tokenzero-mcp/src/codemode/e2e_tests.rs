@@ -31,7 +31,7 @@ fn codemode_records_execution_refs_for_recipe() {
         refs["execution"]
             .as_str()
             .unwrap()
-            .starts_with("codemode/execution/")
+            .starts_with("tz://codemode/execution/")
     );
     assert!(
         refs["stored"]["code"]
@@ -45,8 +45,18 @@ fn codemode_records_execution_refs_for_recipe() {
             .unwrap()
             .starts_with("tz://")
     );
-    assert_eq!(result.telemetry.kind.as_deref(), Some("recipe"));
-    assert_eq!(result.telemetry.raw_leak, Some(false));
+    assert_eq!(
+        Some(result.telemetry.kind.as_str()),
+        Some("codemode.execute")
+    );
+    assert_eq!(
+        result
+            .telemetry
+            .extra
+            .as_ref()
+            .and_then(|extra| extra.get("raw_leak")),
+        None
+    );
 }
 
 #[test]
@@ -131,7 +141,10 @@ fn json_dag_compacts_then_expands_by_binding() {
             .contains("json dag payload")
     );
     assert!(value["ref"].as_str().unwrap().starts_with("tz://"));
-    assert_eq!(result.telemetry.kind.as_deref(), Some("json"));
+    assert_eq!(
+        Some(result.telemetry.kind.as_str()),
+        Some("codemode.execute")
+    );
     assert_eq!(result.telemetry.steps_run, Some(2));
 }
 
@@ -159,7 +172,10 @@ fn sandboxed_js_function_runs_against_token_namespace() {
     );
     let value = result.value.as_ref().unwrap();
     assert!(value["ref"].as_str().unwrap().starts_with("tz://"));
-    assert_eq!(result.telemetry.kind.as_deref(), Some("code"));
+    assert_eq!(
+        Some(result.telemetry.kind.as_str()),
+        Some("codemode.execute")
+    );
 }
 
 #[test]
@@ -201,7 +217,12 @@ fn quickjs_enforces_microtask_cap() {
     );
     assert_eq!(result.status, CodeModeStatus::Error);
     assert!(
-        result.error.as_deref().unwrap().contains("microtask cap"),
+        result
+            .error
+            .as_ref()
+            .unwrap()
+            .message
+            .contains("microtask cap"),
         "unexpected error: {:?}",
         result.error
     );
@@ -227,7 +248,7 @@ fn sandbox_denies_network_and_process_capabilities() {
         );
         assert_eq!(result.visible_ack, "X0");
         assert!(
-            result.error.as_deref().unwrap().contains("sandbox"),
+            result.error.as_ref().unwrap().message.contains("sandbox"),
             "unexpected error: {:?}",
             result.error
         );
@@ -260,8 +281,8 @@ fn batch_compact_many_reports_coalesced_telemetry() {
         result.error
     );
     assert_eq!(result.value.as_ref().unwrap().as_u64(), Some(100));
-    assert_eq!(result.telemetry.logical_ops, Some(1));
-    assert_eq!(result.telemetry.physical_ops, Some(1));
+    assert_eq!(result.telemetry.logical_ops, 1);
+    assert_eq!(result.telemetry.physical_ops, 1);
     assert_eq!(result.visible_ack, "C");
 }
 
@@ -282,6 +303,13 @@ fn output_guard_keeps_large_result_behind_refs() {
     );
     let value = result.value.as_ref().unwrap();
     assert_eq!(value["truncated"].as_bool(), Some(true));
-    assert_eq!(result.telemetry.raw_leak, Some(false));
+    assert_eq!(
+        result
+            .telemetry
+            .extra
+            .as_ref()
+            .and_then(|extra| extra.get("raw_leak")),
+        None
+    );
     assert!(result.execution_refs.is_some());
 }

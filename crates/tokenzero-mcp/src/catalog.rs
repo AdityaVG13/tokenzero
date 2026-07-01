@@ -98,13 +98,32 @@ pub(crate) fn tool_specs_for_filter(
     specs
 }
 
-pub(crate) fn surface_includes_canonical(_surface: McpToolSurface, name: &str) -> bool {
-    // MCP always exposes the full catalog; tz_codemode is no longer an MCP tool.
-    name != "tz_codemode"
+pub(crate) fn surface_includes_canonical(surface: McpToolSurface, name: &str) -> bool {
+    match surface {
+        McpToolSurface::Classic => !matches!(
+            name,
+            "tz_execute_code"
+                | "tz_codemode_search"
+                | "tz_codemode_describe"
+                | "tz_codemode"
+                | "execute_code"
+                | "codemode_search"
+                | "codemode_describe"
+        ),
+        McpToolSurface::CodeMode => matches!(
+            name,
+            "tz_execute_code"
+                | "tz_codemode_search"
+                | "tz_codemode_describe"
+                | "execute_code"
+                | "codemode_search"
+                | "codemode_describe"
+        ),
+    }
 }
 
-pub(crate) fn canonical_allowed_on_surface(_surface: McpToolSurface, canonical: &str) -> bool {
-    canonical != "codemode"
+pub(crate) fn canonical_allowed_on_surface(surface: McpToolSurface, canonical: &str) -> bool {
+    surface_includes_canonical(surface, canonical)
 }
 
 /// Aliases advertise a permissive stub instead of repeating the canonical
@@ -223,6 +242,73 @@ pub fn resource_specs() -> Vec<ResourceSpec> {
 
 fn canonical_tool_specs() -> Vec<ToolSpecSeed> {
     vec![
+        ToolSpecSeed {
+            name: "tz_execute_code",
+            cluster: "codemode",
+            summary: "Execute a TokenZero CodeMode recipe, JSON plan, or JavaScript plan.",
+            doc: tool_description(
+                "Execute a CodeMode plan through the native TokenZero executor.",
+                "plan: source text. form: recipe, json, js, or auto. limits: optional integer overrides.",
+                "Use only when the server is launched with --mode=codemode.",
+                "Do keep visible results small; large outputs are stored behind refs.",
+                "Common mistakes: launching the server in default mcp mode; mixing per-op tools with CodeMode tools.",
+                "Read-only/mutation-denied over workspace state; execution records are persisted as refs.",
+            ),
+            input_schema: json!({
+                "type": "object",
+                "required": ["plan"],
+                "additionalProperties": false,
+                "properties": {
+                    "plan": {"type": "string", "maxLength": 65536},
+                    "form": {"type": "string", "enum": ["recipe", "json", "js", "auto"]},
+                    "limits": {"type": "object", "additionalProperties": {"type": "integer", "minimum": 0}}
+                }
+            }),
+            arg_aliases: json!({}),
+        },
+        ToolSpecSeed {
+            name: "tz_codemode_search",
+            cluster: "codemode",
+            summary: "Search the TokenZero CodeMode method catalog.",
+            doc: tool_description(
+                "Search CodeMode methods by keyword.",
+                "query: non-empty search text. limit: maximum hits, 1-50.",
+                "Use for progressive CodeMode discovery.",
+                "Do search before asking for full descriptions.",
+                "Common mistakes: empty query; expecting workspace file search.",
+                "Read-only.",
+            ),
+            input_schema: json!({
+                "type": "object",
+                "required": ["query"],
+                "additionalProperties": false,
+                "properties": {
+                    "query": {"type": "string", "minLength": 1},
+                    "limit": {"type": "integer", "minimum": 1, "maximum": 50}
+                }
+            }),
+            arg_aliases: json!({}),
+        },
+        ToolSpecSeed {
+            name: "tz_codemode_describe",
+            cluster: "codemode",
+            summary: "Describe a TokenZero CodeMode method or capabilities manifest.",
+            doc: tool_description(
+                "Describe CodeMode capabilities or a specific method.",
+                "name: capabilities or a method name such as zero.read.",
+                "Use name=capabilities for the ZeroStack contract manifest.",
+                "Do inspect capabilities before relying on optional limits.",
+                "Common mistakes: using this in mcp mode where CodeMode tools are hidden.",
+                "Read-only.",
+            ),
+            input_schema: json!({
+                "type": "object",
+                "required": ["name"],
+                "additionalProperties": false,
+                "properties": {"name": {"type": "string", "minLength": 1}}
+            }),
+            arg_aliases: json!({}),
+        },
         ToolSpecSeed {
             name: "tz_read",
             cluster: "material",

@@ -37,7 +37,8 @@ mod workspace;
 pub use cache_maintenance::{cache_maintenance, session_pack, shell_spill_dir};
 pub use catalog::{ResourceSpec, ToolSpec, resource_specs, tool_specs};
 pub use codemode::{
-    CODEMODE_SCHEMA, CodeModeOptions, CodeModeResult, CodeModeStatus, execute_codemode_with_options,
+    CODEMODE_SCHEMA, CodeModeLimits, CodeModeOptions, CodeModeResult, CodeModeStatus,
+    describe_codemode_method, execute_codemode_with_options, search_codemode_catalog,
 };
 pub use jsonrpc::handle_jsonrpc;
 pub use render::{cli_json, render_text};

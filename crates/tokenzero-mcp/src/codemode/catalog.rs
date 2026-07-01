@@ -202,7 +202,7 @@ const METHOD_CATALOG: &[MethodDef] = &[
     },
 ];
 
-pub(crate) fn search_catalog(query: &str) -> Value {
+pub fn search_catalog(query: &str) -> Value {
     let query_lower = query.to_lowercase();
     let mut results: Vec<(f64, &MethodDef)> = METHOD_CATALOG
         .iter()
@@ -297,7 +297,7 @@ fn related_methods(path: &str) -> Vec<&'static str> {
     }
 }
 
-pub(crate) fn describe_method(path: &str) -> Value {
+pub fn describe_method(path: &str) -> Value {
     let path_lower = path.to_lowercase();
     if let Some(m) = METHOD_CATALOG
         .iter()
@@ -313,8 +313,7 @@ pub(crate) fn describe_method(path: &str) -> Value {
             "mutability": if m.path == "zero.edit" { "mutating" } else { "read_only" },
             "limits": CodeModeLimits::default().as_json(),
             "safety": {
-                "sandbox": "fresh isolated context per execution; no network/env/process/raw-fs/module/timer capabilities",
-                "raw_leak": false
+                "sandbox": "fresh isolated context per execution; no network/env/process/raw-fs/module/timer capabilities"
             }
         })
     } else {

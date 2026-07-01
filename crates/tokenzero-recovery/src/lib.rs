@@ -818,8 +818,25 @@ fn parse_ref(ref_id: &str) -> Option<ParsedRef> {
         .map_or((ref_id, None), |(b, f)| (b, Some(f.to_string())));
     let rest = bare.strip_prefix("tz://")?;
     let (kind, id) = rest.split_once('/')?;
-    if !matches!(kind, "blob" | "file" | "unit" | "search") || id.is_empty() {
+    if id.is_empty() {
         return None;
+    }
+    if !matches!(kind, "blob" | "file" | "unit" | "search" | "codemode") {
+        return None;
+    }
+    if kind == "codemode" {
+        let mut parts = id.split('/');
+        if parts.next() != Some("execution") {
+            return None;
+        }
+        let _safe_id = parts.next()?;
+        if !matches!(
+            parts.next(),
+            Some("code" | "steps" | "telemetry" | "result" | "error")
+        ) || parts.next().is_some()
+        {
+            return None;
+        }
     }
     Some(ParsedRef {
         kind: kind.to_string(),

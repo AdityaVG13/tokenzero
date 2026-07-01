@@ -111,7 +111,12 @@ Dogfood locally without OMP:
 tokenzero codemode --json --root . --plan '{"steps":[{"id":"c","method":"zero.token.compact","args":["payload"]},{"id":"e","method":"zero.token.expand","args":["$c.ref"]}],"return":{"text":"$e.text","ref":"$c.ref"}}'
 ```
 
-MCP remains the per-operation surface (`tz_read`, `tz_find`, `tz_expand`, ...). CodeMode is a separate one-call execution surface and is not listed as an MCP tool.
+MCP launch mode is explicit:
+
+- `tokenzero mcp-server --mode=mcp` (default) exposes only the per-operation tools (`tz_read`, `tz_find`, `tz_expand`, ...).
+- `tokenzero mcp-server --mode=codemode` exposes exactly `tz_execute_code`, `tz_codemode_search`, and `tz_codemode_describe`; per-operation tools are hidden in that process.
+
+`tokenzero codemode` remains the local CLI entry point for the same native executor.
 
 #### Measured in production
 
