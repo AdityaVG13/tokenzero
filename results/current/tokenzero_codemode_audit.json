@@ -48,8 +48,8 @@
           "plan_raw_tokens": 1182,
           "direct_visible_tokens": 2843,
           "direct_raw_tokens": 1896,
-          "plan_duration_ms": 216,
-          "direct_duration_ms": 310,
+          "plan_duration_ms": 2287,
+          "direct_duration_ms": 5255,
           "composition_savings_pct": 72.7,
           "round_trip_savings_pct": 37.7
         },
@@ -58,13 +58,13 @@
           "description": "Run multiple shell commands and aggregate results in one plan",
           "plan_ops": 3,
           "equivalent_direct_calls": 3,
-          "plan_visible_tokens": 964,
-          "plan_raw_tokens": 342,
-          "direct_visible_tokens": 1242,
-          "direct_raw_tokens": 342,
-          "plan_duration_ms": 97,
-          "direct_duration_ms": 96,
-          "composition_savings_pct": 22.4,
+          "plan_visible_tokens": 318,
+          "plan_raw_tokens": 177,
+          "direct_visible_tokens": 596,
+          "direct_raw_tokens": 177,
+          "plan_duration_ms": 2195,
+          "direct_duration_ms": 3742,
+          "composition_savings_pct": 46.6,
           "round_trip_savings_pct": 0.0
         },
         {
@@ -76,8 +76,8 @@
           "plan_raw_tokens": 0,
           "direct_visible_tokens": 1266,
           "direct_raw_tokens": 474,
-          "plan_duration_ms": 28,
-          "direct_duration_ms": 48,
+          "plan_duration_ms": 425,
+          "direct_duration_ms": 3106,
           "composition_savings_pct": 79.4,
           "round_trip_savings_pct": 100.0
         },
@@ -90,18 +90,18 @@
           "plan_raw_tokens": 867,
           "direct_visible_tokens": 1733,
           "direct_raw_tokens": 867,
-          "plan_duration_ms": 75,
-          "direct_duration_ms": 75,
+          "plan_duration_ms": 1435,
+          "direct_duration_ms": 5224,
           "composition_savings_pct": 47.1,
           "round_trip_savings_pct": 0.0
         }
       ],
       "totals": {
-        "total_plan_visible": 2917,
-        "total_plan_raw": 2391,
-        "total_direct_visible": 7084,
-        "total_direct_raw": 3579,
-        "overall_composition_savings_pct": 58.8
+        "total_plan_visible": 2271,
+        "total_plan_raw": 2226,
+        "total_direct_visible": 6438,
+        "total_direct_raw": 3414,
+        "overall_composition_savings_pct": 64.7
       }
     },
     "plan_always_cheaper_or_equal": true

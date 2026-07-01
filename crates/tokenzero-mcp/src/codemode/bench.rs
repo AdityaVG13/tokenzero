@@ -3,7 +3,6 @@
 //! Measures end-to-end efficiency of plan-based execution versus equivalent
 //! sequences of individual operations. Produces machine-readable JSON output.
 
-
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::path::PathBuf;
@@ -75,14 +74,12 @@ pub fn workloads_for_root(root: &std::path::Path) -> Vec<Workload> {
             description: "Run multiple shell commands and aggregate results in one plan"
                 .to_string(),
             plan: format!(
-                r#"const v = await zero.shell("git --version"); const s = await zero.shell("git -C {root_str} log --oneline -5"); const d = await zero.shell("git -C {root_str} diff --stat HEAD~1 2>/dev/null || echo 'no diff'"); return {{ git_version: v.text, log: s.text, diff: d.text }}"#,
+                r#"const v = await zero.shell("git --version"); const s = await zero.shell("git -C {root_str} log --oneline -5"); const d = await zero.shell("git -C {root_str} rev-parse --short HEAD"); return {{ git_version: v.text, log: s.text, diff: d.text }}"#,
             ),
             direct_calls: vec![
                 r#"await zero.shell("git --version")"#.to_string(),
                 format!(r#"await zero.shell("git -C {root_str} log --oneline -5")"#),
-                format!(
-                    r#"await zero.shell("git -C {root_str} diff --stat HEAD~1 2>/dev/null || echo 'no diff'")"#
-                ),
+                format!(r#"await zero.shell("git -C {root_str} rev-parse --short HEAD")"#),
             ],
         },
         // Workload 3: Pipe composition (sequential with auto-binding)
