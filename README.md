@@ -99,6 +99,20 @@ Reproducible: `scripts/benchmark_composition.sh` or
 `cargo test -p tokenzero-mcp -- codemode::bench_tests::run_composition_benchmark`.
 Artifact: `demo/composition_benchmark.json`.
 
+Dogfood from OMP / ZeroStack router:
+
+```text
+zero_execute root=/path/to/repo plan='const out = await zero.token.compact("payload"); return { ref: out.ref };'
+```
+
+Dogfood locally without OMP:
+
+```bash
+tokenzero codemode --json --root . --plan '{"steps":[{"id":"c","method":"zero.token.compact","args":["payload"]},{"id":"e","method":"zero.token.expand","args":["$c.ref"]}],"return":{"text":"$e.text","ref":"$c.ref"}}'
+```
+
+MCP remains the per-operation surface (`tz_read`, `tz_find`, `tz_expand`, ...). CodeMode is a separate one-call execution surface and is not listed as an MCP tool.
+
 #### Measured in production
 
 Across **~20,000 routed tool calls** from real agent sessions on one
