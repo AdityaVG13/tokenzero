@@ -92,6 +92,8 @@ pub struct CodeModeOptions {
     pub max_refs_emitted: usize,
     pub max_logical_ops: usize,
     pub max_physical_ops: usize,
+    pub max_microtasks: usize,
+    pub max_memory_bytes: usize,
     pub max_code_bytes: usize,
 }
 
@@ -107,6 +109,8 @@ impl Default for CodeModeOptions {
             max_refs_emitted: super::store::DEFAULT_MAX_REFS_EMITTED,
             max_logical_ops: super::store::DEFAULT_MAX_LOGICAL_OPS,
             max_physical_ops: super::store::DEFAULT_MAX_PHYSICAL_OPS,
+            max_microtasks: super::store::DEFAULT_MAX_MICROTASKS,
+            max_memory_bytes: super::store::DEFAULT_MAX_MEMORY_BYTES,
             max_code_bytes: super::store::DEFAULT_MAX_CODE_BYTES,
         }
     }

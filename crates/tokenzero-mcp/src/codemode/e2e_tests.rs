@@ -163,13 +163,58 @@ fn sandboxed_js_function_runs_against_token_namespace() {
 }
 
 #[test]
+fn quickjs_executes_real_js_syntax_and_drains_promises() {
+    let work = tempfile::tempdir().unwrap();
+    let plan = r#"
+        const payloads = ["a", "b", "c"].map((x, i) => `${i}:${x}`);
+        const stored = await zero.token.compactMany(payloads);
+        const echoed = await Promise.resolve(stored.items.map((item) => item.text).join("|"));
+        return { echoed, count: stored.count };
+    "#;
+    let result = execute_codemode_with_options(
+        plan,
+        CodeModeOptions {
+            root: Some(work.path().to_path_buf()),
+            ..Default::default()
+        },
+    );
+    assert_eq!(
+        result.status,
+        CodeModeStatus::Completed,
+        "{:?}",
+        result.error
+    );
+    let value = result.value.as_ref().unwrap();
+    assert_eq!(value["echoed"].as_str(), Some("0:a|1:b|2:c"));
+    assert_eq!(value["count"].as_u64(), Some(3));
+    assert_eq!(result.telemetry.steps_run, Some(1));
+}
+
+#[test]
+fn quickjs_enforces_microtask_cap() {
+    let result = execute_codemode_with_options(
+        "return await Promise.resolve(1)",
+        CodeModeOptions {
+            max_microtasks: 0,
+            ..Default::default()
+        },
+    );
+    assert_eq!(result.status, CodeModeStatus::Error);
+    assert!(
+        result.error.as_deref().unwrap().contains("microtask cap"),
+        "unexpected error: {:?}",
+        result.error
+    );
+}
+
+#[test]
 fn sandbox_denies_network_and_process_capabilities() {
     for plan in [
         "await fetch('https://example.com')",
         "process.env",
         "require('fs')",
         "setTimeout(() => 1, 1)",
-        "await zero.edit('file.txt', [])",
+        "const f = () => zero.edit('file.txt', []); return f();",
         "store.put('x')",
         "db.query('select 1')",
         "indexedDB.open('x')",

@@ -1,8 +1,11 @@
 //! CodeMode plan executor and TokenZero operation dispatch.
 
+use rquickjs::{Context, Runtime, function::Func};
 use serde_json::{Value, json};
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
 use std::time::Duration;
 use tokenzero_core::{Mode, ToolResponse, count_tokens, detect_content_type};
 use tokenzero_filters::{discover, rewrite_command};
@@ -40,7 +43,19 @@ fn make_engine_for_root_with_options(root: PathBuf, options: &CodeModeOptions) -
 
 #[cfg(test)]
 pub fn execute_codemode(plan: &str) -> CodeModeResult {
-    execute_codemode_with_options(plan, CodeModeOptions::default())
+    let thread_id = format!("{:?}", std::thread::current().id())
+        .chars()
+        .filter(|ch| ch.is_ascii_alphanumeric())
+        .collect::<String>();
+    execute_codemode_with_options(
+        plan,
+        CodeModeOptions {
+            cache_path: Some(
+                std::env::temp_dir().join(format!("tokenzero-codemode-test-{thread_id}.json")),
+            ),
+            ..CodeModeOptions::default()
+        },
+    )
 }
 
 pub fn execute_codemode_with_options(plan: &str, options: CodeModeOptions) -> CodeModeResult {
@@ -119,7 +134,401 @@ pub fn execute_codemode_with_options(plan: &str, options: CodeModeOptions) -> Co
             );
         }
     };
-    execute_lowered_plan(&lowered, options, &limits, "code", started_ms)
+    if should_run_quickjs(plan) {
+        if quickjs_plan_requests_mutation(plan) {
+            return finalize_codemode_result(
+                CodeModeResult::error(
+                    "sandbox: mutating binding denied without transaction support".to_string(),
+                    0,
+                ),
+                "code",
+                plan,
+                started_ms,
+                &options,
+                &limits,
+                Vec::new(),
+            );
+        }
+        execute_quickjs_plan(plan, options, &limits, started_ms)
+    } else {
+        execute_lowered_plan(&lowered, options, &limits, "code", started_ms)
+    }
+}
+
+fn should_run_quickjs(plan: &str) -> bool {
+    let trimmed = plan.trim_start();
+    trimmed.starts_with("export default")
+        || trimmed.starts_with("async function")
+        || trimmed.starts_with("function")
+        || plan.contains("=>")
+        || plan.contains("Promise")
+        || plan.contains('`')
+}
+
+fn quickjs_plan_requests_mutation(plan: &str) -> bool {
+    let scanned = plan.replace(['\'', '"', '`'], " ");
+    scanned.contains(".edit(") || scanned.contains(" edit(")
+}
+
+#[derive(Default)]
+struct JsExecutionState {
+    ops: usize,
+    visible_tokens: usize,
+    raw_tokens: usize,
+    refs: Vec<String>,
+    steps: Vec<ExecutionStep>,
+}
+
+fn execute_quickjs_plan(
+    plan: &str,
+    options: CodeModeOptions,
+    limits: &CodeModeLimits,
+    started_ms: u128,
+) -> CodeModeResult {
+    let work_root = tokenzero_work_root(options.root.clone());
+    let engine = Rc::new(make_engine_for_root_with_options(
+        work_root.clone(),
+        &options,
+    ));
+    let state = Rc::new(RefCell::new(JsExecutionState::default()));
+
+    let runtime = match Runtime::new() {
+        Ok(runtime) => runtime,
+        Err(err) => {
+            return finalize_codemode_result(
+                CodeModeResult::error(format!("sandbox: QuickJS runtime init failed: {err}"), 0),
+                "code",
+                plan,
+                started_ms,
+                &options,
+                limits,
+                Vec::new(),
+            );
+        }
+    };
+    runtime.set_memory_limit(limits.max_memory_bytes);
+    runtime.set_max_stack_size(512 * 1024);
+    let context = match Context::full(&runtime) {
+        Ok(context) => context,
+        Err(err) => {
+            return finalize_codemode_result(
+                CodeModeResult::error(format!("sandbox: QuickJS context init failed: {err}"), 0),
+                "code",
+                plan,
+                started_ms,
+                &options,
+                limits,
+                Vec::new(),
+            );
+        }
+    };
+
+    let setup = context.with(|ctx| {
+        let globals = ctx.globals();
+        install_js_generic_binding(
+            &globals,
+            Rc::clone(&engine),
+            work_root.clone(),
+            Rc::clone(&state),
+        )?;
+        install_js_binding(
+            &globals,
+            "__tz_compact_json",
+            "zero.token.compact",
+            Rc::clone(&engine),
+            work_root.clone(),
+            Rc::clone(&state),
+        )?;
+        install_js_binding(
+            &globals,
+            "__tz_expand_json",
+            "zero.token.expand",
+            Rc::clone(&engine),
+            work_root.clone(),
+            Rc::clone(&state),
+        )?;
+        install_js_binding_json_arg(
+            &globals,
+            "__tz_compact_many_json",
+            "zero.token.compactMany",
+            Rc::clone(&engine),
+            work_root.clone(),
+            Rc::clone(&state),
+        )?;
+        install_js_binding_json_arg(
+            &globals,
+            "__tz_expand_many_json",
+            "zero.token.expandMany",
+            Rc::clone(&engine),
+            work_root.clone(),
+            Rc::clone(&state),
+        )?;
+        install_js_binding_json_arg(
+            &globals,
+            "__tz_dedupe_json",
+            "zero.token.dedupe",
+            Rc::clone(&engine),
+            work_root.clone(),
+            Rc::clone(&state),
+        )?;
+        ctx.eval::<(), _>(js_prelude())
+    });
+    if let Err(err) = setup {
+        return finalize_codemode_result(
+            CodeModeResult::error(format!("sandbox: QuickJS binding setup failed: {err}"), 0),
+            "code",
+            plan,
+            started_ms,
+            &options,
+            limits,
+            Vec::new(),
+        );
+    }
+
+    let script = wrap_js_plan(plan);
+    if let Err(err) = context.with(|ctx| ctx.eval::<(), _>(script.as_str())) {
+        let ops = state.borrow().ops;
+        return finalize_codemode_result(
+            CodeModeResult::error(format!("sandbox: QuickJS eval failed: {err}"), ops),
+            "code",
+            plan,
+            started_ms,
+            &options,
+            limits,
+            state.borrow().steps.clone(),
+        );
+    }
+
+    let mut drained = 0;
+    while runtime.is_job_pending() {
+        if drained >= limits.max_microtasks {
+            let state = state.borrow();
+            return finalize_codemode_result(
+                CodeModeResult::error(
+                    format!("sandbox: microtask cap exceeded {}", limits.max_microtasks),
+                    state.ops,
+                ),
+                "code",
+                plan,
+                started_ms,
+                &options,
+                limits,
+                state.steps.clone(),
+            );
+        }
+        if let Err(err) = runtime.execute_pending_job() {
+            let state = state.borrow();
+            return finalize_codemode_result(
+                CodeModeResult::error(format!("sandbox: QuickJS job failed: {err}"), state.ops),
+                "code",
+                plan,
+                started_ms,
+                &options,
+                limits,
+                state.steps.clone(),
+            );
+        }
+        drained += 1;
+    }
+
+    let (result_json, error): (Option<String>, Option<String>) = context
+        .with(|ctx| {
+            let globals = ctx.globals();
+            Ok::<_, rquickjs::Error>((globals.get("__tz_result")?, globals.get("__tz_error")?))
+        })
+        .unwrap_or((None, Some("sandbox: result extraction failed".to_string())));
+
+    let state = state.borrow();
+    if let Some(error) = error {
+        return finalize_codemode_result(
+            CodeModeResult::error(error, state.ops),
+            "code",
+            plan,
+            started_ms,
+            &options,
+            limits,
+            state.steps.clone(),
+        );
+    }
+    let value = result_json
+        .and_then(|text| serde_json::from_str::<Value>(&text).ok())
+        .unwrap_or(Value::Null);
+    let visible =
+        state.visible_tokens + count_tokens(&serde_json::to_string(&value).unwrap_or_default());
+    finalize_codemode_result(
+        CodeModeResult::completed(
+            value,
+            state.refs.clone(),
+            state.ops,
+            visible,
+            state.raw_tokens,
+        ),
+        "code",
+        plan,
+        started_ms,
+        &options,
+        limits,
+        state.steps.clone(),
+    )
+}
+
+fn install_js_generic_binding<'js>(
+    globals: &rquickjs::Object<'js>,
+    engine: Rc<TokenZeroEngine>,
+    work_root: PathBuf,
+    state: Rc<RefCell<JsExecutionState>>,
+) -> rquickjs::Result<()> {
+    globals.set(
+        "__tz_call_json",
+        Func::from(move |method: String, args_json: String| {
+            let args = serde_json::from_str::<Vec<Value>>(&args_json).unwrap_or_default();
+            invoke_js_binding(&engine, &work_root, &method, args, &state)
+        }),
+    )
+}
+
+fn install_js_binding<'js>(
+    globals: &rquickjs::Object<'js>,
+    name: &str,
+    method: &'static str,
+    engine: Rc<TokenZeroEngine>,
+    work_root: PathBuf,
+    state: Rc<RefCell<JsExecutionState>>,
+) -> rquickjs::Result<()> {
+    globals.set(
+        name,
+        Func::from(move |arg: String| {
+            invoke_js_binding(
+                &engine,
+                &work_root,
+                method,
+                vec![Value::String(arg)],
+                &state,
+            )
+        }),
+    )
+}
+
+fn install_js_binding_json_arg<'js>(
+    globals: &rquickjs::Object<'js>,
+    name: &str,
+    method: &'static str,
+    engine: Rc<TokenZeroEngine>,
+    work_root: PathBuf,
+    state: Rc<RefCell<JsExecutionState>>,
+) -> rquickjs::Result<()> {
+    globals.set(
+        name,
+        Func::from(move |arg_json: String| {
+            let arg = serde_json::from_str::<Value>(&arg_json).unwrap_or(Value::Null);
+            invoke_js_binding(&engine, &work_root, method, vec![arg], &state)
+        }),
+    )
+}
+
+fn invoke_js_binding(
+    engine: &TokenZeroEngine,
+    work_root: &Path,
+    method: &str,
+    args: Vec<Value>,
+    state: &Rc<RefCell<JsExecutionState>>,
+) -> String {
+    let outcome = match dispatch_values(engine, work_root, method, &args) {
+        Ok(outcome) => outcome,
+        Err(error) => {
+            return serde_json::to_string(&json!({
+                "__tz_error": error.error.as_deref().unwrap_or("unknown error")
+            }))
+            .unwrap_or_else(|_| "{\"__tz_error\":\"unknown error\"}".to_string());
+        }
+    };
+    let value = outcome.into_value();
+    let refs = refs_from_value(&value);
+    let mut state = state.borrow_mut();
+    state.ops = state.ops.saturating_add(1);
+    state.visible_tokens = state
+        .visible_tokens
+        .saturating_add(result_visible_tokens(&value));
+    state.raw_tokens = state.raw_tokens.saturating_add(result_raw_tokens(&value));
+    state.refs.extend(refs.iter().cloned());
+    let op = state.ops;
+    state.steps.push(ExecutionStep {
+        id: format!("js_step{op}"),
+        method: method.to_string(),
+        status: "completed".to_string(),
+        refs,
+    });
+    serde_json::to_string(&value).unwrap_or_else(|_| "null".to_string())
+}
+
+fn js_prelude() -> &'static str {
+    r#"
+        const __tz_parse = (text) => {
+          const value = JSON.parse(text);
+          if (value && value.__tz_error) throw new Error(value.__tz_error);
+          return value;
+        };
+        const __tz_call = (method, args) => __tz_parse(__tz_call_json(method, JSON.stringify(args)));
+        const zero = Object.freeze({
+          read: (...args) => __tz_call('zero.read', args),
+          find: (...args) => __tz_call('zero.find', args),
+          grep: (...args) => __tz_call('zero.grep', args),
+          glob: (...args) => __tz_call('zero.glob', args),
+          tree: (...args) => __tz_call('zero.tree', args),
+          shell: (...args) => __tz_call('zero.shell', args),
+          expand: (...args) => __tz_call('zero.token.expand', args),
+          compact: (...args) => __tz_call('zero.token.compact', args),
+          compact_max: (...args) => __tz_call('zero.compact_max', args),
+          ingest: (...args) => __tz_call('zero.ingest', args),
+          mem: (...args) => __tz_call('zero.mem', args),
+          recall: (...args) => __tz_call('zero.recall', args),
+          fetch: (...args) => __tz_call('zero.fetch', args),
+          cache_pack: (...args) => __tz_call('zero.cache_pack', args),
+          rewrite: (...args) => __tz_call('zero.rewrite', args),
+          discover: (...args) => __tz_call('zero.discover', args),
+          batch: (...args) => __tz_call('zero.batch', args),
+          pipe: (...args) => __tz_call('zero.pipe', args),
+          pick: (...args) => __tz_call('zero.pick', args),
+          filter_lines: (...args) => __tz_call('zero.filter_lines', args),
+          count_tokens: (...args) => __tz_call('zero.count_tokens', args),
+          assert: (...args) => __tz_call('zero.assert', args),
+          token: Object.freeze({
+            compact: (text) => __tz_parse(__tz_compact_json(String(text))),
+            expand: (ref) => __tz_parse(__tz_expand_json(String(ref))),
+            compactMany: (items) => __tz_parse(__tz_compact_many_json(JSON.stringify(items))),
+            expandMany: (refs) => __tz_parse(__tz_expand_many_json(JSON.stringify(refs))),
+            dedupe: (items) => __tz_parse(__tz_dedupe_json(JSON.stringify(items))),
+          }),
+          ref: (value) => __tz_parse(__tz_compact_json(typeof value === 'string' ? value : JSON.stringify(value))),
+        });
+        const token = zero.token;
+        const ctx = Object.freeze({ ref: zero.ref, step: async (_name, fn) => await fn() });
+    "#
+}
+
+fn wrap_js_plan(plan: &str) -> String {
+    let body = if plan.trim_start().starts_with("export default") {
+        let fn_expr = plan.replacen("export default", "", 1);
+        format!("return await ({fn_expr})({{ token, zero, ctx }});")
+    } else if plan.trim_start().starts_with("async function")
+        || plan.trim_start().starts_with("function")
+    {
+        format!("return await ({plan})({{ token, zero, ctx }});")
+    } else {
+        plan.to_string()
+    };
+    format!(
+        r#"
+        (async () => {{
+          try {{
+            const value = await (async () => {{ {body} }})();
+            globalThis.__tz_result = JSON.stringify(value === undefined ? null : value);
+          }} catch (err) {{
+            globalThis.__tz_error = String((err && (err.stack || err.message)) || err);
+          }}
+        }})();
+        "#
+    )
 }
 
 fn limits_from_options(options: &CodeModeOptions) -> CodeModeLimits {
@@ -128,6 +537,8 @@ fn limits_from_options(options: &CodeModeOptions) -> CodeModeLimits {
         max_refs_emitted: options.max_refs_emitted,
         max_logical_ops: options.max_logical_ops,
         max_physical_ops: options.max_physical_ops,
+        max_microtasks: options.max_microtasks,
+        max_memory_bytes: options.max_memory_bytes,
         max_code_bytes: options.max_code_bytes,
         ..Default::default()
     }
@@ -592,7 +1003,6 @@ fn dispatch(
     call: &MethodCall,
     scope: &HashMap<String, Value>,
 ) -> Result<OpOutcome, Box<CodeModeResult>> {
-    let method = call.method.as_str();
     let args: Vec<Value> = call
         .args
         .iter()
@@ -600,40 +1010,48 @@ fn dispatch(
             resolve_expr(arg, scope).map_err(|message| Box::new(CodeModeResult::error(message, 0)))
         })
         .collect::<Result<Vec<_>, _>>()?;
+    dispatch_values(engine, work_root, &call.method, &args)
+}
 
+fn dispatch_values(
+    engine: &TokenZeroEngine,
+    work_root: &Path,
+    method: &str,
+    args: &[Value],
+) -> Result<OpOutcome, Box<CodeModeResult>> {
     match method {
-        "zero.read" | "read" => exec_read(engine, &args),
-        "zero.find" | "find" => exec_find(engine, work_root, &args, false),
-        "zero.grep" | "grep" => exec_find(engine, work_root, &args, true),
-        "zero.glob" | "glob" => exec_glob(engine, work_root, &args),
-        "zero.tree" | "tree" => exec_tree(engine, work_root, &args),
-        "zero.shell" | "shell" => exec_shell(engine, &args),
-        "zero.edit" | "edit" => exec_edit(engine, &args),
-        "zero.token.expand" | "zero.expand" | "expand" => exec_expand(engine, &args),
+        "zero.read" | "read" => exec_read(engine, args),
+        "zero.find" | "find" => exec_find(engine, work_root, args, false),
+        "zero.grep" | "grep" => exec_find(engine, work_root, args, true),
+        "zero.glob" | "glob" => exec_glob(engine, work_root, args),
+        "zero.tree" | "tree" => exec_tree(engine, work_root, args),
+        "zero.shell" | "shell" => exec_shell(engine, args),
+        "zero.edit" | "edit" => exec_edit(engine, args),
+        "zero.token.expand" | "zero.expand" | "expand" => exec_expand(engine, args),
         "zero.token.expandMany" | "zero.expandMany" | "expandMany" | "expand_many" => {
-            exec_expand_many(engine, &args)
+            exec_expand_many(engine, args)
         }
         "zero.token.compact" | "zero.compact" | "compact" | "zero.ref" | "ref" => {
-            exec_compact(engine, &args)
+            exec_compact(engine, args)
         }
         "zero.token.compactMany" | "zero.compactMany" | "compactMany" | "compact_many" => {
-            exec_compact_many(engine, &args)
+            exec_compact_many(engine, args)
         }
-        "zero.token.dedupe" | "zero.dedupe" | "dedupe" => exec_dedupe(&args),
-        "zero.compact_max" | "compact_max" => exec_compact_max(engine, &args),
-        "zero.ingest" | "ingest" => exec_ingest(engine, &args),
+        "zero.token.dedupe" | "zero.dedupe" | "dedupe" => exec_dedupe(args),
+        "zero.compact_max" | "compact_max" => exec_compact_max(engine, args),
+        "zero.ingest" | "ingest" => exec_ingest(engine, args),
         "zero.mem" | "mem" => exec_mem(engine),
-        "zero.recall" | "recall" => exec_recall(engine, &args),
-        "zero.fetch" | "fetch" => exec_fetch(engine, &args),
-        "zero.cache_pack" | "cache_pack" | "cache-pack" => exec_cache_pack(engine, &args),
-        "zero.rewrite" | "rewrite" => exec_rewrite(&args),
+        "zero.recall" | "recall" => exec_recall(engine, args),
+        "zero.fetch" | "fetch" => exec_fetch(engine, args),
+        "zero.cache_pack" | "cache_pack" | "cache-pack" => exec_cache_pack(engine, args),
+        "zero.rewrite" | "rewrite" => exec_rewrite(args),
         "zero.discover" | "discover" => exec_discover(),
-        "zero.batch" | "batch" => exec_batch(engine, &args),
-        "zero.pipe" | "pipe" => exec_pipe(engine, work_root, &args),
-        "zero.pick" | "pick" => exec_pick(&args),
-        "zero.filter_lines" | "filter_lines" => exec_filter_lines(&args),
-        "zero.count_tokens" | "count_tokens" => exec_count_tokens(&args),
-        "zero.assert" | "assert" => exec_assert(&args),
+        "zero.batch" | "batch" => exec_batch(engine, args),
+        "zero.pipe" | "pipe" => exec_pipe(engine, work_root, args),
+        "zero.pick" | "pick" => exec_pick(args),
+        "zero.filter_lines" | "filter_lines" => exec_filter_lines(args),
+        "zero.count_tokens" | "count_tokens" => exec_count_tokens(args),
+        "zero.assert" | "assert" => exec_assert(args),
         "codemode.search" | "search" => {
             let query = args.first().and_then(|v| v.as_str()).unwrap_or("");
             Ok(OpOutcome::from_catalog(search_catalog(query)))

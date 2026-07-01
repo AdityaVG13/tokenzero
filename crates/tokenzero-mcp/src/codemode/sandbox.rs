@@ -22,14 +22,6 @@ const DENIED_TOKENS: &[(&str, &str)] = &[
     ("store.", "direct store denied"),
     ("db.", "direct DB denied"),
     ("indexedDB", "direct DB denied"),
-    (
-        ".edit(",
-        "mutating binding denied without transaction support",
-    ),
-    (
-        " edit(",
-        "mutating binding denied without transaction support",
-    ),
     ("node:", "native module loading denied"),
     ("child_process", "process/spawn denied"),
     ("spawn", "process/spawn denied"),
