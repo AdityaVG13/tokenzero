@@ -60,7 +60,7 @@ const METHOD_CATALOG: &[MethodDef] = &[
         path: "zero.token.expand",
         connector: "zero.token",
         description: "Recover exact bytes from a tz:// ref",
-        signature: "zero.token.expand(ref: string, opts?: { start_line?, end_line?, selector? }): Promise<{ text: string, status: string, ref?: string, visible_tokens?: number, raw_tokens?: number }>",
+        signature: "zero.token.expand(ref: string, opts?: { start_line?, end_line?, selector?, symbol?, anchor_kind?, since?, fresh? }): Promise<{ text: string, status: string, ref?: string, visible_tokens?: number, raw_tokens?: number }>",
     },
     MethodDef {
         path: "zero.token.compact",
@@ -78,7 +78,7 @@ const METHOD_CATALOG: &[MethodDef] = &[
         path: "zero.token.expandMany",
         connector: "zero.token",
         description: "Batch expand many tz:// refs in one CodeMode step",
-        signature: "zero.token.expandMany(refs: string[]): Promise<{ items: Array<{ text: string }>, count: number }>",
+        signature: "zero.token.expandMany(items: Array<string | { ref, start_line?, end_line?, selector?, symbol?, since?, fresh? }>): Promise<{ items: Array<{ text: string }>, count: number }>",
     },
     MethodDef {
         path: "zero.token.dedupe",

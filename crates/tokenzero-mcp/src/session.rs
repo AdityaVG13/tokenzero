@@ -30,6 +30,16 @@ pub(crate) enum ServeKey {
         query: String,
         roots: Vec<PathBuf>,
     },
+    /// Ref-based delivery (expand / CodeMode expand): keyed by ref + window +
+    /// selector/symbol normalization.
+    Expand {
+        ref_id: String,
+        start_line: Option<usize>,
+        end_line: Option<usize>,
+        selector_norm: String,
+        symbol_norm: String,
+        anchor_kind_norm: String,
+    },
 }
 
 /// What was served for a key. `content_sha256` is the hash of the exact

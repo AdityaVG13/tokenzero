@@ -8,6 +8,7 @@ use tokenzero_core::{
 use tokenzero_filters::{discover, rewrite_command};
 use tokenzero_runtime::{ExecutionMode, plan_command_for_platform};
 
+use crate::expand_params::ExpandParams;
 use crate::catalog::canonical_allowed_on_surface;
 use crate::jsonrpc::JsonRpcErrorData;
 use crate::{EditHunk, ServeOptions, TokenZeroEngine, shell_timeout_from_secs};
@@ -338,18 +339,8 @@ fn dispatch_tool(
             engine.ingest(text, ContentType::Unknown, arg_mode(args), "mcp-ingest")
         }
         "expand" => {
-            let ref_id = args
-                .get("ref")
-                .and_then(Value::as_str)
-                .ok_or_else(|| "missing ref".to_string())?;
-            engine.expand(
-                ref_id,
-                args.get("selector").and_then(Value::as_str),
-                arg_u64(args, "start_line"),
-                arg_u64(args, "end_line"),
-                args.get("anchor_kind").and_then(Value::as_str),
-                args.get("symbol").and_then(Value::as_str),
-            )
+            let params = ExpandParams::from_tool_args(args)?;
+            engine.expand_with_params(params)
         }
         "mem" => engine.mem(),
         "cache_pack" => {

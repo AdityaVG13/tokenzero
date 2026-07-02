@@ -11,6 +11,7 @@ mod collect;
 mod config;
 mod diff;
 mod engine_edit;
+mod expand_params;
 mod engine_expand;
 mod engine_fetch;
 mod engine_find;
