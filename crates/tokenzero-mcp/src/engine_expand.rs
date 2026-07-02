@@ -222,40 +222,14 @@ impl TokenZeroEngine {
             Err(resp) => return resp,
         };
 
-        let bypass_dedup = params.fresh || !self.config.session_dedup;
-        if !bypass_dedup {
-            let content_sha256 = sha256_hex(&target.content);
-            match self.session_lookup(&key, &content_sha256) {
-                SeenState::Unchanged { serve_count } => {
-                    let note = identical_expand_ack(&params.ref_id);
-                    let note_tokens = count_tokens(&note);
-                    if note_tokens < target.tokens {
-                        summary.note_dedup(serve_count + 1, target.tokens.saturating_sub(note_tokens));
-                        let mut response = ToolResponse::ok(
-                            "expand",
-                            Mode::Exact,
-                            note,
-                            Vec::new(),
-                            Accounting {
-                                raw_tokens: note_tokens,
-                                visible_tokens: note_tokens,
-                                recovery_tokens: store.recovery_tokens,
-                                exact_ref_tokens: Some(count_tokens(&params.ref_id)),
-                            },
-                        );
-                        if let Some(telemetry) = summary.telemetry() {
-                            response.telemetry = Some(telemetry);
-                        }
-                        if self.config.session_dedup {
-                            pending.push(self.pending_expand_record(&params, &target.content, &mut store));
-                        }
-                        self.session_apply(pending, &summary);
-                        return response;
-                    }
-                }
-                _ => {}
-            }
-        }
+        // Explicit expand is the recovery contract: it ALWAYS returns exact
+        // bytes. Replacing content with an "identical to … (unchanged)" ack
+        // here broke byte-exact recovery (release-claim audits) and forced a
+        // fresh re-call exactly when the model had decided it needed the
+        // bytes — the capability-loss the compression doctrine forbids.
+        // Seen-set economics stay on the implicit serve paths (read/find
+        // spills) and on explicit `since=` diffs; serves are still RECORDED
+        // below so those paths keep learning from expands.
 
         let mut response = expansion_response(target.clone(), store.recovery_tokens);
         if self.config.session_dedup {
