@@ -68,7 +68,13 @@ fn recall_caps_hits_and_reports_truncation() {
 }
 
 #[test]
-fn expand_second_identical_slice_returns_unchanged_ack() {
+fn expand_repeated_serves_stay_byte_exact() {
+    // Contract (recovery doctrine): an EXPLICIT expand always returns exact
+    // bytes — never a dedup ack. The seen-set still records the serve for
+    // the implicit read/find dedup paths and `since=` diffs, but the
+    // page-fault handler must never come back empty-handed. (This test
+    // previously asserted the opposite; that behavior broke the byte-exact
+    // release-claim audits and cost a forced re-call with `fresh`.)
     let dir = tempdir().unwrap();
     let file = dir.path().join("sample.rs");
     let content = dedup_fixture_content();
@@ -88,10 +94,7 @@ fn expand_second_identical_slice_returns_unchanged_ack() {
     assert_eq!(first.visible.as_ref().unwrap().text, content);
     let second = engine.expand(&blob_ref, Some("raw"), None, None, None, None);
     assert_eq!(second.status, "ok");
-    assert_eq!(
-        second.visible.as_ref().unwrap().text,
-        format!("identical to {blob_ref} (unchanged)")
-    );
+    assert_eq!(second.visible.as_ref().unwrap().text, content);
 }
 
 #[test]
@@ -252,7 +255,7 @@ fn expand_changed_content_serves_full() {
 }
 
 #[test]
-fn expand_dedup_survives_fresh_engine_same_store() {
+fn expand_across_engine_respawn_stays_byte_exact() {
     let dir = tempdir().unwrap();
     let file = dir.path().join("sample.rs");
     let content = dedup_fixture_content();
@@ -271,20 +274,16 @@ fn expand_dedup_survives_fresh_engine_same_store() {
         let first = engine.expand(&blob_ref, Some("raw"), None, None, None, None);
         assert_eq!(first.visible.as_ref().unwrap().text, content);
         let second = engine.expand(&blob_ref, Some("raw"), None, None, None, None);
-        assert_eq!(
-            second.visible.as_ref().unwrap().text,
-            format!("identical to {blob_ref} (unchanged)")
-        );
+        // Explicit expand always returns bytes (recovery contract).
+        assert_eq!(second.visible.as_ref().unwrap().text, content);
         blob_ref
     };
+    // A fresh engine on the same store must also recover exact bytes: the
+    // persisted seen-set informs read/find dedup, never expand delivery.
     let engine2 = TokenZeroEngine::new(config);
     let third = engine2.expand(&blob_ref, Some("raw"), None, None, None, None);
     assert_eq!(third.status, "ok");
-    assert_eq!(
-        third.visible.as_ref().unwrap().text,
-        format!("identical to {blob_ref} (unchanged)"),
-        "persisted seen-set should dedup across engine respawn"
-    );
+    assert_eq!(third.visible.as_ref().unwrap().text, content);
 }
 
 #[test]
@@ -316,6 +315,16 @@ fn expand_stale_persisted_sha_serves_full_after_payload_mutation() {
     assert_eq!(entry.as_str().unwrap(), "version_one\n");
     *entry = serde_json::Value::String("version_two\n".to_string());
     fs::write(&cache_path, serde_json::to_string_pretty(&state).unwrap()).unwrap();
+    // The persisted state is snapshot ⊕ journal since the journaled-persist
+    // change; drop the journal so the hand-mutated snapshot IS the effective
+    // state (otherwise replay restores the original payload and defeats the
+    // mutation this test simulates).
+    let journal = {
+        let mut os = cache_path.clone().into_os_string();
+        os.push(".journal");
+        std::path::PathBuf::from(os)
+    };
+    let _ = fs::remove_file(journal);
 
     let engine2 = TokenZeroEngine::new(config);
     let resp = engine2.expand_with_params(crate::expand_params::ExpandParams {

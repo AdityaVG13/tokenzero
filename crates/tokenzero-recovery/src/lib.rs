@@ -603,7 +603,20 @@ impl RecoveryStore {
 
     fn put_blob(&mut self, text: &str) -> String {
         let ref_id = format!("tz://blob/{}", id_for('b', text));
-        self.state.blobs.insert(ref_id.clone(), text.to_string());
+        // Multi-MB payloads (shell captures are the usual offender) stored
+        // inline multiply every snapshot serialize, journal append, and load
+        // parse, and sit in RAM for the process lifetime (bead tz8). Above
+        // the threshold, durable stores divert the bytes to a content-
+        // addressed sidecar file and keep a tiny marker as the value; the
+        // marker travels through journal/merge/delta untouched and is only
+        // resolved on expand. Fail-open: if the sidecar write fails, the
+        // text stays inline.
+        let value = self
+            .persistence_path
+            .as_deref()
+            .and_then(|cache| externalize_blob_value(cache, text))
+            .unwrap_or_else(|| text.to_string());
+        self.state.blobs.insert(ref_id.clone(), value);
         self.remember_ref(&ref_id);
         ref_id
     }
@@ -689,7 +702,9 @@ impl RecoveryStore {
 
     fn resolve_ref(&self, kind: &str, bare: &str) -> Option<String> {
         match kind {
-            "blob" => self.state.blobs.get(bare).cloned(),
+            "blob" => self.state.blobs.get(bare).and_then(|v| {
+                resolve_blob_value(self.persistence_path.as_deref(), v)
+            }),
             "file" => self.state.files.get(bare).map(|f| f.text.clone()),
             "unit" => self.state.units.get(bare).map(|u| u.text.clone()),
             "search" => self.state.search_hits.get(bare).map(|u| u.text.clone()),
@@ -781,7 +796,9 @@ impl RecoveryStore {
     }
 
     fn approx_bytes(&self) -> usize {
-        let blob_bytes: usize = self.state.blobs.values().map(|v| v.len()).sum();
+        // Externalized blob markers account at their original payload size so
+        // eviction pressure reflects real content, not marker bytes.
+        let blob_bytes: usize = self.state.blobs.values().map(|v| blob_value_len(v)).sum();
         let file_bytes: usize = self
             .state
             .files
@@ -1040,6 +1057,60 @@ fn load_state(
     Ok(Some(apply_journal(state, path, config)))
 }
 
+/// Externalized-blob sidecar (bead tz8). Values >= this many bytes are
+/// written to `<cache>.blobs/<sha256>.txt` and replaced by a marker string:
+/// `\u{0}tzx:v1:<sha256hex>:<len>:`. Content-addressed: reads verify the
+/// hash, so a torn or tampered sidecar is a cache miss, never bad bytes.
+/// A leading NUL keeps collisions with real tool output implausible, and a
+/// malformed marker is treated as literal text (fail-open both ways).
+const BLOB_EXTERNALIZE_MIN_BYTES: usize = 64 * 1024;
+const BLOB_MARKER_PREFIX: &str = "\u{0}tzx:v1:";
+
+fn blob_sidecar_dir(cache_path: &Path) -> PathBuf {
+    let mut os: OsString = cache_path.as_os_str().to_owned();
+    os.push(".blobs");
+    PathBuf::from(os)
+}
+
+fn externalize_blob_value(cache_path: &Path, text: &str) -> Option<String> {
+    if text.len() < BLOB_EXTERNALIZE_MIN_BYTES {
+        return None;
+    }
+    let hash = sha256_hex(text);
+    let dir = blob_sidecar_dir(cache_path);
+    fs::create_dir_all(&dir).ok()?;
+    let path = dir.join(format!("{hash}.txt"));
+    // Content-addressed: an existing file already holds these exact bytes.
+    if !path.exists() {
+        fs::write(&path, text).ok()?;
+    }
+    Some(format!("{BLOB_MARKER_PREFIX}{hash}:{}:", text.len()))
+}
+
+fn parse_blob_marker(value: &str) -> Option<(&str, usize)> {
+    let rest = value.strip_prefix(BLOB_MARKER_PREFIX)?;
+    let (hash, rest) = rest.split_at_checked(64)?;
+    if !hash.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return None;
+    }
+    let len: usize = rest.strip_prefix(':')?.strip_suffix(':')?.parse().ok()?;
+    Some((hash, len))
+}
+
+fn blob_value_len(value: &str) -> usize {
+    parse_blob_marker(value).map_or(value.len(), |(_, len)| len)
+}
+
+fn resolve_blob_value(cache_path: Option<&Path>, value: &str) -> Option<String> {
+    let Some((hash, _)) = parse_blob_marker(value) else {
+        return Some(value.to_string());
+    };
+    let cache_path = cache_path?;
+    let path = blob_sidecar_dir(cache_path).join(format!("{hash}.txt"));
+    let text = fs::read_to_string(path).ok()?;
+    (sha256_hex(&text) == hash).then_some(text)
+}
+
 /// Journal sibling of the snapshot: `recovery-cache.json.journal`. Each line
 /// is one persisted session delta (a `JournalEntry`); load replays them onto
 /// the snapshot through `merge_states`, so on-disk state is always
@@ -1079,12 +1150,12 @@ fn session_delta(
             delta.search_hits.insert(ref_id.clone(), value.clone());
         }
     }
-    let session: HashSet<&str> = session_refs.iter().map(String::as_str).collect();
-    for (alias, target) in &state.aliases {
-        if session.contains(alias.as_str()) || session.contains(target.as_str()) {
-            delta.aliases.insert(alias.clone(), target.clone());
-        }
-    }
+    // Aliases must travel wholesale: an alias is often stored AFTER the
+    // persist that carried its target (persist clears session_refs), so any
+    // session-ref filter silently drops it from the journal — codemode's
+    // logical execution refs died exactly this way. The map is small and
+    // merge_states upserts aliases unconditionally, so replay stays exact.
+    delta.aliases = state.aliases.clone();
     // Shell outcomes are a small capped map merged "current wins per key";
     // carrying the whole map keeps replay exact without change tracking.
     delta.shell_outcomes = state.shell_outcomes.clone();

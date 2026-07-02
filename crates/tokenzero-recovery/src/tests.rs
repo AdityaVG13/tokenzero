@@ -943,6 +943,74 @@ fn corrupt_journal_tail_keeps_complete_entries() {
 }
 
 #[test]
+fn big_blob_externalizes_to_sidecar_and_roundtrips() {
+    let dir = tempdir().unwrap();
+    let cache = dir.path().join("cache.json");
+    let big = "x".repeat(200 * 1024);
+    let stored = {
+        let mut store = RecoveryStore::new(Some(cache.clone()));
+        store
+            .store_payload(&big, ContentType::Unknown, None, None, None)
+            .unwrap()
+    };
+    let sidecar = blob_sidecar_dir(&cache);
+    assert!(sidecar.is_dir(), "sidecar dir must exist");
+    assert!(
+        fs::read_dir(&sidecar).unwrap().count() >= 1,
+        "sidecar must hold the payload"
+    );
+    // The BLOBS map must hold a marker, not the payload. (The files/units
+    // maps still inline their copies — beads tokenzero-ocx/a73 own that.)
+    let snapshot: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&cache).unwrap()).unwrap();
+    let blob_value = snapshot["blobs"][&stored.blob_ref].as_str().unwrap();
+    assert!(
+        blob_value.starts_with('\u{0}'),
+        "blob value must be an externalized marker"
+    );
+    assert!(blob_value.len() < 128, "marker must be tiny");
+    let mut restarted = RecoveryStore::new(Some(cache));
+    let expanded = restarted.expand(&stored.blob_ref, Some("raw"), None, None, None, None);
+    assert!(expanded.found);
+    assert_eq!(expanded.content, big);
+}
+
+#[test]
+fn small_blob_stays_inline() {
+    let dir = tempdir().unwrap();
+    let cache = dir.path().join("cache.json");
+    let mut store = RecoveryStore::new(Some(cache.clone()));
+    store
+        .store_payload("small\n", ContentType::Unknown, None, None, None)
+        .unwrap();
+    assert!(!blob_sidecar_dir(&cache).exists(), "no sidecar for small payloads");
+}
+
+#[test]
+fn corrupt_blob_sidecar_is_a_miss_not_bad_bytes() {
+    let dir = tempdir().unwrap();
+    let cache = dir.path().join("cache.json");
+    let big = "y".repeat(200 * 1024);
+    let stored = {
+        let mut store = RecoveryStore::new(Some(cache.clone()));
+        store
+            .store_payload(&big, ContentType::Unknown, None, None, None)
+            .unwrap()
+    };
+    for entry in fs::read_dir(blob_sidecar_dir(&cache)).unwrap() {
+        fs::write(entry.unwrap().path(), "tampered").unwrap();
+    }
+    let mut restarted = RecoveryStore::new(Some(cache));
+    let expanded = restarted.expand(&stored.blob_ref, Some("raw"), None, None, None, None);
+    assert!(
+        !expanded.found || expanded.content != big,
+        "tampered sidecar must never serve as the original"
+    );
+    assert!(!expanded.content.contains("tampered") || !expanded.found,
+        "tampered bytes must not be served as blob content");
+}
+
+#[test]
 fn oversized_journal_compacts_into_fresh_snapshot() {
     let dir = tempdir().unwrap();
     let cache = dir.path().join("cache.json");
