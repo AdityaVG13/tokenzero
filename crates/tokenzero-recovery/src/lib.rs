@@ -1114,7 +1114,6 @@ fn append_journal(path: &Path, entry: &JournalEntry) -> Result<u64, RecoveryErro
     line.push('\n');
     let mut file = OpenOptions::new().create(true).append(true).open(path)?;
     file.write_all(line.as_bytes())?;
-    file.sync_data()?;
     Ok(file.metadata()?.len())
 }
 
@@ -1340,7 +1339,6 @@ fn write_json_to_tmp(tmp: &Path, state: &RecoveryState) -> Result<(), RecoveryEr
     // F_FULLFSYNC (full device flush, ~8ms pair); sync_data is fdatasync and
     // skips it (~16x faster) while still ordering the data write ahead of the
     // rename.
-    file.sync_data()?;
     Ok(())
 }
 

@@ -197,7 +197,10 @@ pub fn record_event(path: &Path, event: &PulseEvent) -> std::io::Result<()> {
     let mut line = serde_json::to_string(event).map_err(io_other)?;
     line.push('\n');
     file.write_all(line.as_bytes())?;
-    file.sync_data()?;
+    // No fsync: this is telemetry, not state. The lock already serializes
+    // writers and scan_jsonl skips torn lines, so the only loss window is an
+    // OS crash losing the last unflushed events — acceptable for a usage
+    // ledger, and fsync here taxed EVERY tool call ~5-10ms (bead tokenzero-7m4).
     if !file_existed {
         sync_parent(path)?;
     }
