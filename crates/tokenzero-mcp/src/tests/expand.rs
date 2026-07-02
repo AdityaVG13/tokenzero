@@ -250,3 +250,97 @@ fn expand_changed_content_serves_full() {
     let second = engine.expand_with_params(crate::expand_params::ExpandParams { ref_id: v2, ..Default::default() });
     assert_eq!(second.visible.as_ref().unwrap().text, "v2\n");
 }
+
+#[test]
+fn expand_dedup_survives_fresh_engine_same_store() {
+    let dir = tempdir().unwrap();
+    let file = dir.path().join("sample.rs");
+    let content = dedup_fixture_content();
+    fs::write(&file, &content).unwrap();
+    let config = EngineConfig::for_root(dir.path());
+    let blob_ref = {
+        let engine = TokenZeroEngine::new(config.clone());
+        let response = read_ok(&engine, &file);
+        let blob_ref = response
+            .refs
+            .iter()
+            .find(|record| record.kind == "blob")
+            .unwrap()
+            .ref_id
+            .clone();
+        let first = engine.expand(&blob_ref, Some("raw"), None, None, None, None);
+        assert_eq!(first.visible.as_ref().unwrap().text, content);
+        let second = engine.expand(&blob_ref, Some("raw"), None, None, None, None);
+        assert_eq!(
+            second.visible.as_ref().unwrap().text,
+            format!("identical to {blob_ref} (unchanged)")
+        );
+        blob_ref
+    };
+    let engine2 = TokenZeroEngine::new(config);
+    let third = engine2.expand(&blob_ref, Some("raw"), None, None, None, None);
+    assert_eq!(third.status, "ok");
+    assert_eq!(
+        third.visible.as_ref().unwrap().text,
+        format!("identical to {blob_ref} (unchanged)"),
+        "persisted seen-set should dedup across engine respawn"
+    );
+}
+
+#[test]
+fn expand_stale_persisted_sha_serves_full_after_payload_mutation() {
+    use tokenzero_core::ContentType;
+    let dir = tempdir().unwrap();
+    let config = EngineConfig::for_root(dir.path());
+    let cache_path = config.cache_path.clone();
+    let (blob_ref, _engine) = {
+        let engine = TokenZeroEngine::new(config.clone());
+        let v1 = engine
+            .ingest("version_one\n", ContentType::Unknown, Mode::Exact, "t")
+            .refs
+            .iter()
+            .find(|r| r.kind == "blob")
+            .unwrap()
+            .ref_id
+            .clone();
+        engine.expand_with_params(crate::expand_params::ExpandParams {
+            ref_id: v1.clone(),
+            ..Default::default()
+        });
+        (v1, ())
+    };
+    let text = fs::read_to_string(&cache_path).unwrap();
+    let mut state: serde_json::Value = serde_json::from_str(&text).unwrap();
+    let blobs = state.get_mut("blobs").and_then(|v| v.as_object_mut()).unwrap();
+    let entry = blobs.get_mut(&blob_ref).expect("blob entry in recovery cache");
+    assert_eq!(entry.as_str().unwrap(), "version_one\n");
+    *entry = serde_json::Value::String("version_two\n".to_string());
+    fs::write(&cache_path, serde_json::to_string_pretty(&state).unwrap()).unwrap();
+
+    let engine2 = TokenZeroEngine::new(config);
+    let resp = engine2.expand_with_params(crate::expand_params::ExpandParams {
+        ref_id: blob_ref,
+        ..Default::default()
+    });
+    assert_eq!(resp.visible.as_ref().unwrap().text, "version_two\n");
+}
+
+#[test]
+fn session_dedup_off_does_not_write_session_memory_file() {
+    let dir = tempdir().unwrap();
+    let file = dir.path().join("sample.rs");
+    fs::write(&file, "hello\n").unwrap();
+    let mut config = EngineConfig::for_root(dir.path());
+    config.session_dedup = false;
+    let memory_path = crate::session_persist::session_memory_path(&config.cache_path);
+    let engine = TokenZeroEngine::new(config);
+    let response = read_ok(&engine, &file);
+    let blob_ref = response.refs.iter().find(|r| r.kind == "blob").unwrap().ref_id.clone();
+    engine.expand(&blob_ref, Some("raw"), None, None, None, None);
+    engine.expand(&blob_ref, Some("raw"), None, None, None, None);
+    assert!(
+        !memory_path.exists(),
+        "dedup off must not create {}",
+        memory_path.display()
+    );
+}

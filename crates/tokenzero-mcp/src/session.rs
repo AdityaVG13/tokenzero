@@ -3,12 +3,11 @@
 //! per search output. The content hash of the exact served payload is the
 //! only invalidation source; mtime is never consulted.
 //!
-//! The map is process-memory only, by design: a sidecar surviving restart
-//! would assert "served earlier this session" to a fresh session whose
-//! context never contained the bytes, and two agents sharing one repo would
-//! cross-contaminate. Supervisor respawn loses the map and degrades to full
-//! serves — never wrong, only un-optimized. Lock poisoning fails open the
-//! same way.
+//! When `session_dedup` is on, the map is also persisted under the store
+//! root (`session-memory.json`, scoped by `TOKENZERO_SESSION_SCOPE`) so MCP
+//! process respawn can still dedup. Dedup always re-checks `content_sha256`
+//! against the current payload before suppressing. Lock poisoning fails open
+//! the same way (full serve, no persist on that path).
 
 use serde_json::{Value, json};
 use std::collections::HashMap;
@@ -115,6 +114,36 @@ impl SessionMemory {
         self.diff_hits += summary.diff_serves;
         self.visible_tokens_saved += summary.visible_saved;
         self.diff_tokens_saved += summary.diff_saved;
+    }
+
+
+    /// Restore disk-backed seen-set for this scope (dedup on only).
+    pub(crate) fn restore_from_persist(
+        &mut self,
+        records: HashMap<ServeKey, ServedRecord>,
+        dedup_hits: usize,
+        diff_hits: usize,
+        visible_tokens_saved: usize,
+        diff_tokens_saved: usize,
+    ) {
+        self.records = records;
+        self.dedup_hits = dedup_hits;
+        self.diff_hits = diff_hits;
+        self.visible_tokens_saved = visible_tokens_saved;
+        self.diff_tokens_saved = diff_tokens_saved;
+    }
+
+    pub(crate) fn records_snapshot(&self) -> &HashMap<ServeKey, ServedRecord> {
+        &self.records
+    }
+
+    pub(crate) fn rollup_counters(&self) -> (usize, usize, usize, usize) {
+        (
+            self.dedup_hits,
+            self.diff_hits,
+            self.visible_tokens_saved,
+            self.diff_tokens_saved,
+        )
     }
 
     pub fn rollup(&self) -> Value {

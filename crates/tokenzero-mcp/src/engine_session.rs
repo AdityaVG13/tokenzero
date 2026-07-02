@@ -16,6 +16,7 @@ use super::render::*;
 use super::session::{
     DiffTelemetry, SeenState, ServeKey, ServedRecord, SessionMemory, SessionSummary,
 };
+use super::session_persist::SessionPersistence;
 use super::{
     Accounting, ContentType, DEFAULT_MCP_IDLE_TIMEOUT_SECS, DEFAULT_SHELL_TIMEOUT_SECS,
     DIFF_MAX_BYTES, DIFF_MAX_LINES, DIFF_READS_ENV, EditHunk, MAX_MCP_IDLE_TIMEOUT_SECS,
@@ -48,13 +49,19 @@ impl TokenZeroEngine {
         // never have to run cache maintenance by hand.
         let _ = cache_maintenance(&config.cache_path, false);
         let metrics = metrics::ToolMetrics::new(&config.cache_path);
+        let session_persist = SessionPersistence::for_cache(&config.cache_path, config.session_dedup);
+        let mut session_memory = SessionMemory::default();
+        if let Some(ref persist) = session_persist {
+            persist.load_into(&mut session_memory);
+        }
         Self {
             config,
             rg_binary: OnceLock::new(),
-            session: Mutex::new(SessionMemory::default()),
+            session: Mutex::new(session_memory),
             in_flight: (Mutex::new(HashSet::new()), Condvar::new()),
             session_id: new_session_id(),
             metrics,
+            session_persist,
         }
     }
 
@@ -99,6 +106,9 @@ impl TokenZeroEngine {
             memory.record(key, record);
         }
         memory.absorb(summary);
+        if let Some(ref persist) = self.session_persist {
+            persist.persist(&memory);
+        }
     }
 
     /// Claim a set of ServeKeys for single-flight serving. Blocks until none
