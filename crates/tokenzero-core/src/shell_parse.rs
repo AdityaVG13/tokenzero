@@ -90,7 +90,7 @@ pub(crate) fn masked_or_failure_segment(
     if segment.is_empty() || is_expected_false_segment(segment, stdout, stderr) {
         return None;
     }
-    if looks_masked_failure_output(stdout, stderr) {
+    if looks_masked_failure_evidence(stdout, stderr, Some(segment)) {
         Some(segment.to_string())
     } else {
         None
@@ -108,7 +108,11 @@ pub(crate) fn masked_pipeline_failure_segment(
         return None;
     }
     if !shell_operator_features(command).contains(&"pipeline")
-        || !looks_masked_failure_output(stdout, stderr)
+        || !looks_masked_failure_evidence(
+            stdout,
+            stderr,
+            first_nonempty_shell_segment(command).as_deref(),
+        )
     {
         return None;
     }
@@ -141,18 +145,29 @@ pub(crate) fn masking_warning(
     if !has_masking_syntax {
         return None;
     }
-    let combined = format!("{stdout}\n{stderr}").to_ascii_lowercase();
-    let likely_failure = split_shell_segments(command)
-        .iter()
-        .any(|segment| is_explicit_false_segment(segment))
-        || combined.contains("not found")
-        || combined.contains("no such file")
-        || combined.contains("permission denied")
-        || combined.contains("unrecognized option")
-        || combined.contains("invalid option")
-        || combined.contains("usage:")
-        || combined.contains("error");
-    if exit_code == Some(0) || likely_failure {
+    let should_warn = if exit_code == Some(0) {
+        split_shell_segments(command)
+            .iter()
+            .any(|segment| is_explicit_false_segment(segment))
+            || looks_masked_failure_evidence(
+                stdout,
+                stderr,
+                first_nonempty_shell_segment(command).as_deref(),
+            )
+    } else {
+        let combined = format!("{stdout}\n{stderr}").to_ascii_lowercase();
+        split_shell_segments(command)
+            .iter()
+            .any(|segment| is_explicit_false_segment(segment))
+            || combined.contains("not found")
+            || combined.contains("no such file")
+            || combined.contains("permission denied")
+            || combined.contains("unrecognized option")
+            || combined.contains("invalid option")
+            || combined.contains("usage:")
+            || combined.contains("error")
+    };
+    if should_warn {
         Some("compound or pipeline syntax can mask upstream failure; inspect refs or rerun with pipefail".to_string())
     } else {
         None
@@ -197,17 +212,72 @@ pub(crate) fn first_or_list_lhs(command: &str) -> Option<String> {
     None
 }
 
+pub(crate) fn first_nonempty_shell_segment(command: &str) -> Option<String> {
+    split_shell_segments(command)
+        .into_iter()
+        .find(|segment| !segment.is_empty())
+}
+
+fn line_has_structured_masked_failure_evidence(line: &str) -> bool {
+    let trimmed = line.trim();
+    if trimmed.is_empty() {
+        return false;
+    }
+    let lower = trimmed.to_ascii_lowercase();
+    lower.starts_with("error:")
+        || lower.starts_with("error[")
+        || lower.starts_with("warning:")
+        || lower.contains("panic")
+        || lower.contains("traceback")
+        || lower.contains("command not found")
+        || lower.contains("no such file or directory")
+        || lower.contains("permission denied")
+        || lower.contains("assertion failed")
+        || lower.starts_with("fatal:")
+        || lower.contains("unrecognized option")
+        || lower.contains("invalid option")
+        || lower.contains("usage:")
+}
+
+fn stderr_has_masked_failure_evidence(stderr: &str) -> bool {
+    !stderr.trim().is_empty()
+        && stderr
+            .lines()
+            .any(line_has_structured_masked_failure_evidence)
+}
+
+fn stdout_has_structured_masked_failure_evidence(stdout: &str) -> bool {
+    !stdout.trim().is_empty()
+        && stdout
+            .lines()
+            .any(line_has_structured_masked_failure_evidence)
+}
+
+/// Strict masked-failure evidence for exit-code-0 compound/pipeline paths.
+/// Bare substrings like `failed` in data lines are not evidence.
+pub(crate) fn looks_masked_failure_evidence(
+    stdout: &str,
+    stderr: &str,
+    command_head: Option<&str>,
+) -> bool {
+    if stderr_has_masked_failure_evidence(stderr) {
+        return true;
+    }
+    if let Some(head) = command_head {
+        let analysis = shell_analysis_command(head);
+        if split_shell_words(&analysis)
+            .first()
+            .is_some_and(|word| is_search_command(word))
+        {
+            return false;
+        }
+    }
+    stdout_has_structured_masked_failure_evidence(stdout)
+}
+
+#[allow(dead_code)]
 pub(crate) fn looks_masked_failure_output(stdout: &str, stderr: &str) -> bool {
-    let combined = format!("{stdout}\n{stderr}");
-    let lower = combined.to_ascii_lowercase();
-    !combined.trim().is_empty()
-        && (looks_diagnostic(&combined)
-            || lower.contains("not found")
-            || lower.contains("no such file")
-            || lower.contains("permission denied")
-            || lower.contains("unrecognized option")
-            || lower.contains("invalid option")
-            || lower.contains("usage:"))
+    looks_masked_failure_evidence(stdout, stderr, None)
 }
 
 pub(crate) fn shell_syntax_summary_for_status(

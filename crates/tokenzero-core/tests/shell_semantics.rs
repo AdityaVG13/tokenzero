@@ -442,6 +442,84 @@ fn and_list_failure_reports_diagnostic_segment_not_unreached_tail() {
 }
 
 #[test]
+fn cd_grep_failed_word_pipeline_exit_zero_is_success() {
+    let command = "cd /Users/aditya/AI/tokenzero && grep -rn \"failed_segment\" crates/tokenzero-core/src/shell_parse.rs | head";
+    let stdout = "crates/tokenzero-core/src/shell_parse.rs:93:    if looks_masked_failure_evidence(stdout, stderr, Some(segment)) {\n";
+    let rendered = render_shell(ShellRenderInput {
+        command,
+        stdout,
+        stderr: "",
+        exit_code: Some(0),
+        timed_out: false,
+        mode: Mode::Auto,
+        max_visible_tokens: 4000,
+        stdout_ref: Some("tz://blob/stdout"),
+        stderr_ref: Some("tz://blob/stderr"),
+        combined_ref: Some("tz://blob/combined"),
+    });
+
+    assert!(rendered.command_status.command_success, "{rendered:?}");
+    assert_eq!(rendered.command_status.status_label, "command_success");
+    assert!(rendered.command_status.failed_segment.is_none());
+    assert!(rendered.command_status.pipeline_masking_warning.is_none());
+    assert_eq!(rendered.command_status.exit_code, Some(0));
+}
+
+#[test]
+fn masked_pipeline_stdout_line_start_error_still_flags_failure() {
+    let command = "failing_tool 2>&1 | head";
+    let stdout = "error: something broke\n";
+    let rendered = render_shell(ShellRenderInput {
+        command,
+        stdout,
+        stderr: "",
+        exit_code: Some(0),
+        timed_out: false,
+        mode: Mode::Auto,
+        max_visible_tokens: 4000,
+        stdout_ref: Some("tz://blob/stdout"),
+        stderr_ref: Some("tz://blob/stderr"),
+        combined_ref: Some("tz://blob/combined"),
+    });
+
+    assert!(!rendered.command_status.command_success, "{rendered:?}");
+    assert_eq!(rendered.command_status.status_label, "command_failed");
+    assert_eq!(
+        rendered.command_status.failed_segment.as_deref(),
+        Some("failing_tool 2>&1")
+    );
+    assert!(
+        rendered
+            .command_status
+            .pipeline_masking_warning
+            .as_deref()
+            .is_some_and(|w| w.contains("mask"))
+    );
+}
+
+#[test]
+fn grep_match_lines_with_error_prefix_stay_success() {
+    let command = "rg -n 'error:' src";
+    let stdout = "src/lib.rs:10:error: legacy marker in comment\n";
+    let rendered = render_shell(ShellRenderInput {
+        command,
+        stdout,
+        stderr: "",
+        exit_code: Some(0),
+        timed_out: false,
+        mode: Mode::Auto,
+        max_visible_tokens: 4000,
+        stdout_ref: Some("tz://blob/stdout"),
+        stderr_ref: Some("tz://blob/stderr"),
+        combined_ref: Some("tz://blob/combined"),
+    });
+
+    assert!(rendered.command_status.command_success, "{rendered:?}");
+    assert!(rendered.command_status.failed_segment.is_none());
+    assert!(rendered.command_status.pipeline_masking_warning.is_none());
+}
+
+#[test]
 fn env_chdir_failure_is_not_reported_as_inner_shell_pipeline_failure() {
     for command in [
         "env -C missing-dir bash -lc 'false | true'",

@@ -118,7 +118,7 @@ pub(crate) fn is_search_shell_command(command: &str) -> bool {
 pub(crate) fn is_search_command(command: &str) -> bool {
     matches!(
         shell_command_basename(command).as_str(),
-        "rg" | "grep" | "findstr"
+        "rg" | "grep" | "egrep" | "fgrep" | "ag" | "ack" | "findstr"
     )
 }
 
