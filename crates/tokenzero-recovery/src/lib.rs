@@ -212,6 +212,11 @@ pub struct RecoveryStore {
     /// also reset to `None` whenever a write fails, so the next persist must
     /// take the full reload+merge path.
     disk_identity: Option<DiskIdentity>,
+    /// Identity of the journal sibling at our last write (`None` = we left no
+    /// journal). Checked together with `disk_identity`: a foreign append to
+    /// the journal must force the reload+merge path just like a foreign
+    /// snapshot rewrite.
+    journal_identity: Option<DiskIdentity>,
     pub recovery_count: usize,
     pub recovery_tokens: usize,
 }
@@ -263,19 +268,34 @@ impl RecoveryStore {
     }
 
     pub fn with_config(persistence_path: Option<PathBuf>, config: RecoveryConfig) -> Self {
-        let state = persistence_path
+        let loaded = persistence_path
             .as_ref()
-            .and_then(|path| load_state(path, &config).ok().flatten())
-            .unwrap_or_else(|| RecoveryState::empty(&config));
+            .and_then(|path| load_state(path, &config).ok().flatten());
+        // Capture disk identity right after a successful load (read first,
+        // stat second). This lets the FIRST persist of a fresh process take
+        // the journal fast path — critical for CLI invocations, which are one
+        // process per call and would otherwise rewrite the whole snapshot
+        // every time. The capture runs without the persist lock, but that is
+        // safe: persist re-captures under the lock and any mismatch falls
+        // back to the full reload+merge. If a foreign write lands between our
+        // read and stat, the identity matches the NEWER disk state and the
+        // fast path appends only this session's refs — byte-for-byte the same
+        // disk outcome merge_states would have produced.
+        let (disk_identity, journal_identity) = match (&loaded, &persistence_path) {
+            (Some(_), Some(path)) => (
+                DiskIdentity::capture(path),
+                DiskIdentity::capture(&journal_path(path)),
+            ),
+            _ => (None, None),
+        };
+        let state = loaded.unwrap_or_else(|| RecoveryState::empty(&config));
         Self {
             config,
             persistence_path,
             state,
             session_refs: Vec::new(),
-            // The constructor's load runs without the persist lock, so the
-            // file could be replaced between read and stat; the identity is
-            // only ever captured under the lock, after our own write.
-            disk_identity: None,
+            disk_identity,
+            journal_identity,
             recovery_count: 0,
             recovery_tokens: 0,
         }
@@ -787,9 +807,12 @@ impl RecoveryStore {
         // disk and authoritative. Any mismatch — another process persisted,
         // the file vanished, metadata is unreadable — falls back to the full
         // merge so multi-process semantics are preserved exactly.
-        let unchanged_since_last_write = self
+        let snap_unchanged = self
             .disk_identity
             .is_some_and(|identity| DiskIdentity::capture(&path) == Some(identity));
+        let journal_unchanged =
+            self.journal_identity == DiskIdentity::capture(&journal_path(&path));
+        let unchanged_since_last_write = snap_unchanged && journal_unchanged;
         if !unchanged_since_last_write {
             let existing = load_state(&path, &self.config)?
                 .unwrap_or_else(|| RecoveryState::empty(&self.config));
@@ -797,8 +820,32 @@ impl RecoveryStore {
             self.state = merge_states(existing, current, &self.session_refs, &self.config);
         }
         self.evict();
+        // Fast path: disk is byte-identical to our last write, so everything
+        // new since then is exactly `session_refs`. Append that delta to the
+        // journal sibling instead of rewriting the whole snapshot — persist
+        // cost becomes O(new data this session), not O(entire store). The
+        // delta line replays through `merge_states` at load, so merge
+        // semantics are inherited, never re-implemented. Any append error or
+        // an oversized journal falls through to the full snapshot rewrite.
+        if unchanged_since_last_write {
+            let delta = session_delta(&self.state, &self.session_refs, &self.config);
+            let entry = JournalEntry {
+                refs: std::mem::take(&mut self.session_refs),
+                state: delta,
+            };
+            let snap_len = self.disk_identity.map_or(0, |identity| identity.len);
+            if let Ok(journal_len) = append_journal(&journal_path(&path), &entry) {
+                if journal_len <= journal_compact_threshold(snap_len) {
+                    self.journal_identity = DiskIdentity::capture(&journal_path(&path));
+                    return Ok(());
+                }
+            }
+            // fall through: compact journal into a fresh snapshot
+        }
         self.disk_identity = None;
         atomic_write_json(&path, &self.state)?;
+        let _ = fs::remove_file(journal_path(&path));
+        self.journal_identity = None;
         self.disk_identity = DiskIdentity::capture(&path);
         self.session_refs.clear();
         Ok(())
@@ -990,7 +1037,118 @@ fn load_state(
     state.max_units = config.max_units;
     state.max_search_hits = config.max_search_hits;
     state.max_bytes = config.max_bytes;
-    Ok(Some(state))
+    Ok(Some(apply_journal(state, path, config)))
+}
+
+/// Journal sibling of the snapshot: `recovery-cache.json.journal`. Each line
+/// is one persisted session delta (a `JournalEntry`); load replays them onto
+/// the snapshot through `merge_states`, so on-disk state is always
+/// `snapshot ⊕ journal` and merge semantics have a single implementation.
+fn journal_path(path: &Path) -> PathBuf {
+    let mut os: OsString = path.as_os_str().to_owned();
+    os.push(".journal");
+    PathBuf::from(os)
+}
+
+/// One persist's worth of new data: the refs stored this session plus a
+/// minimal `RecoveryState` carrying only their entries (and the session's
+/// aliases/shell outcomes, which merge unconditionally).
+#[derive(Debug, Serialize, Deserialize)]
+struct JournalEntry {
+    refs: Vec<String>,
+    state: RecoveryState,
+}
+
+fn session_delta(
+    state: &RecoveryState,
+    session_refs: &[String],
+    config: &RecoveryConfig,
+) -> RecoveryState {
+    let mut delta = RecoveryState::empty(config);
+    for ref_id in session_refs {
+        if let Some(value) = state.blobs.get(ref_id) {
+            delta.blobs.insert(ref_id.clone(), value.clone());
+        }
+        if let Some(value) = state.files.get(ref_id) {
+            delta.files.insert(ref_id.clone(), value.clone());
+        }
+        if let Some(value) = state.units.get(ref_id) {
+            delta.units.insert(ref_id.clone(), value.clone());
+        }
+        if let Some(value) = state.search_hits.get(ref_id) {
+            delta.search_hits.insert(ref_id.clone(), value.clone());
+        }
+    }
+    let session: HashSet<&str> = session_refs.iter().map(String::as_str).collect();
+    for (alias, target) in &state.aliases {
+        if session.contains(alias.as_str()) || session.contains(target.as_str()) {
+            delta.aliases.insert(alias.clone(), target.clone());
+        }
+    }
+    // Shell outcomes are a small capped map merged "current wins per key";
+    // carrying the whole map keeps replay exact without change tracking.
+    delta.shell_outcomes = state.shell_outcomes.clone();
+    delta.shell_outcome_seq = state.shell_outcome_seq;
+    delta.order = session_refs
+        .iter()
+        .filter(|ref_id| {
+            delta.blobs.contains_key(*ref_id)
+                || delta.files.contains_key(*ref_id)
+                || delta.units.contains_key(*ref_id)
+                || delta.search_hits.contains_key(*ref_id)
+        })
+        .cloned()
+        .collect();
+    delta
+}
+
+/// Compact once the journal outgrows the snapshot (with a floor so tiny
+/// stores don't compact on every persist). Bounds disk and load cost at
+/// ~2× snapshot while keeping persist amortized O(new data).
+fn journal_compact_threshold(snapshot_len: u64) -> u64 {
+    snapshot_len.max(64 * 1024)
+}
+
+fn append_journal(path: &Path, entry: &JournalEntry) -> Result<u64, RecoveryError> {
+    let mut line = serde_json::to_string(entry)?;
+    line.push('\n');
+    let mut file = OpenOptions::new().create(true).append(true).open(path)?;
+    file.write_all(line.as_bytes())?;
+    file.sync_data()?;
+    Ok(file.metadata()?.len())
+}
+
+/// Replay journal lines onto a loaded snapshot. Fail-open at every step: a
+/// missing/oversized/corrupt journal simply yields the snapshot (the cache is
+/// reconstructible by design). A parse failure stops replay at that line so a
+/// torn tail write can never poison earlier, complete entries.
+fn apply_journal(mut state: RecoveryState, path: &Path, config: &RecoveryConfig) -> RecoveryState {
+    let journal = journal_path(path);
+    let Ok(file) = fs::File::open(&journal) else {
+        return state;
+    };
+    if file
+        .metadata()
+        .map(|meta| !meta.is_file() || meta.len() > config.max_load_bytes as u64)
+        .unwrap_or(true)
+    {
+        return state;
+    }
+    let Ok(Some(text)) = read_limited_utf8(file, config.max_load_bytes) else {
+        return state;
+    };
+    for line in text.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let Ok(entry) = serde_json::from_str::<JournalEntry>(line) else {
+            break;
+        };
+        let accumulated = std::mem::replace(&mut state, RecoveryState::empty(config));
+        state = merge_states(accumulated, entry.state, &entry.refs, config);
+    }
+    state
 }
 
 fn read_limited_utf8<R: Read>(
