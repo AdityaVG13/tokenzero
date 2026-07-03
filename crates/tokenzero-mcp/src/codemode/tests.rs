@@ -845,3 +845,33 @@ fn denied_token_guard_requires_identifier_boundary() {
         assert!(err.contains(token), "expected {token} denial, got: {err}");
     }
 }
+
+#[test]
+fn alias_rewrites_skip_string_literals_and_identifier_tails() {
+    use super::sandbox::lower_code_plan;
+    use super::store::CodeModeLimits;
+    let limits = CodeModeLimits::default();
+
+    let lowered = lower_code_plan(
+        "const p = \"/tmp/fab-api.txt\"; const q = 'ctx.ref in a string'; return p",
+        &limits,
+    )
+    .unwrap();
+    assert!(lowered.contains("/tmp/fab-api.txt"), "string literal corrupted: {lowered}");
+    assert!(lowered.contains("ctx.ref in a string"), "string literal corrupted: {lowered}");
+
+    let lowered = lower_code_plan("const myapi = 1; return myapi.foo", &limits).unwrap();
+    assert!(lowered.contains("myapi.foo"), "identifier tail corrupted: {lowered}");
+
+    let lowered = lower_code_plan("return api.read(\"a.txt\")", &limits).unwrap();
+    assert!(lowered.contains("zero.read("), "api alias not rewritten: {lowered}");
+
+    let lowered = lower_code_plan("return token.compact(x)", &limits).unwrap();
+    assert!(lowered.contains("zero.token.compact(x)"), "token alias not rewritten: {lowered}");
+
+    let lowered = lower_code_plan("return zero.token.compact(x)", &limits).unwrap();
+    assert!(
+        lowered.contains("zero.token.compact(x)") && !lowered.contains("zero.zero."),
+        "double prefix: {lowered}"
+    );
+}

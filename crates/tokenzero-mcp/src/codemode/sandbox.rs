@@ -57,20 +57,41 @@ pub(crate) fn lower_code_plan(plan: &str, limits: &CodeModeLimits) -> Result<Str
     if is_function_plan {
         code = extract_function_body(&code)?;
     }
-    code = code
-        .replace(" token.compactMany", " zero.token.compactMany")
-        .replace(" token.expandMany", " zero.token.expandMany")
-        .replace(" token.compact", " zero.token.compact")
-        .replace(" token.expand", " zero.token.expand")
-        .replace("=token.compactMany", "=zero.token.compactMany")
-        .replace("=token.expandMany", "=zero.token.expandMany")
-        .replace("=token.compact", "=zero.token.compact")
-        .replace("=token.expand", "=zero.token.expand")
-        .replace("ctx.ref", "zero.token.compact")
-        .replace("ctx.step", "zero.step")
-        .replace("api.", "zero.")
-        .replace("zero.zero.", "zero.");
+    for (token, replacement) in [
+        ("token.", "zero.token."),
+        ("ctx.ref", "zero.token.compact"),
+        ("ctx.step", "zero.step"),
+        ("api.", "zero."),
+        ("zero.zero.", "zero."),
+    ] {
+        code = rewrite_outside_strings(&code, token, replacement);
+    }
     Ok(code)
+}
+
+/// Rewrite alias tokens onto their `zero.*` bindings without touching string
+/// literals (`"/tmp/fab-api.txt"` must survive) or identifier tails
+/// (`myapi.` must not become `myzero.`).
+fn rewrite_outside_strings(code: &str, token: &str, replacement: &str) -> String {
+    let masked = mask_string_literals(code);
+    let bytes = masked.as_bytes();
+    let mut out = String::with_capacity(code.len());
+    let mut cursor = 0;
+    let mut search_from = 0;
+    while let Some(rel) = masked[search_from..].find(token) {
+        let start = search_from + rel;
+        let boundary_before = start == 0 || !is_identifier_byte(bytes[start - 1]);
+        let already_prefixed = replacement.ends_with(token)
+            && masked[..start].ends_with(&replacement[..replacement.len() - token.len()]);
+        if boundary_before && !already_prefixed {
+            out.push_str(&code[cursor..start]);
+            out.push_str(replacement);
+            cursor = start + token.len();
+        }
+        search_from = start + token.len().max(1);
+    }
+    out.push_str(&code[cursor..]);
+    out
 }
 
 /// Match a denied token only where it starts (and, if it ends with an
