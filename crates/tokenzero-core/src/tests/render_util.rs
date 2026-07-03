@@ -15,6 +15,64 @@ fn summarize_tokens_keeps_critical_lines_even_over_budget() {
 }
 
 #[test]
+fn critical_lines_marks_every_gap_instead_of_silently_dropping() {
+    let mut lines: Vec<String> = (0..180).map(|idx| format!("pattern-{idx}")).collect();
+    lines[82] = "*.actual".to_string();
+    let text = lines.join("\n");
+    let view = critical_lines(&text, 3);
+
+    assert!(view.contains("*.actual"));
+    assert!(
+        view.contains("... omitted 79 lines; exact ref available ..."),
+        "leading gap must be marked: {view}"
+    );
+    assert!(
+        view.contains("... omitted 94 lines; exact ref available ..."),
+        "trailing gap must be marked: {view}"
+    );
+    assert_eq!(view.lines().count(), 9, "7 kept + 2 markers: {view}");
+}
+
+#[test]
+fn critical_lines_interior_gap_and_no_marker_when_nothing_elided() {
+    let text = "error: one\nnoise\nnoise\nnoise\nerror: two";
+    let full = critical_lines(text, 3);
+    assert_eq!(full, text, "all lines kept must be marker-free");
+
+    let mut lines: Vec<String> = (0..20).map(|idx| format!("n{idx}")).collect();
+    lines[0] = "error: head".to_string();
+    lines[19] = "error: tail".to_string();
+    let gapped = critical_lines(&lines.join("\n"), 1);
+    assert!(gapped.contains("... omitted 16 lines; exact ref available ..."));
+
+    assert_eq!(critical_lines("just noise\nmore noise", 3), "");
+}
+
+#[test]
+fn error_block_marks_gaps_like_critical_lines() {
+    let mut lines: Vec<String> = (0..30).map(|idx| format!("n{idx}")).collect();
+    lines[15] = "assertion failed: left == right".to_string();
+    let view = error_block(&lines.join("\n"), 2);
+    assert!(view.contains("assertion failed"));
+    assert!(view.contains("... omitted 13 lines; exact ref available ..."));
+    assert!(view.contains("... omitted 12 lines; exact ref available ..."));
+}
+
+#[test]
+fn diagnostic_shell_view_never_silently_elides() {
+    let mut lines: Vec<String> = (0..181)
+        .map(|idx| format!("ignore-pattern-{idx}"))
+        .collect();
+    lines[82] = "*.actual".to_string();
+    let view = diagnostic_shell_view(&lines.join("\n"), "", 700);
+    assert!(view.contains("*.actual"));
+    assert!(
+        view.contains("omitted") && view.contains("exact ref available"),
+        "elision must be visible: {view}"
+    );
+}
+
+#[test]
 fn structural_dedupe_collapses_digit_varying_runs_but_not_criticals() {
     let text = (0..40)
         .map(|idx| format!("Receiving chunk {idx} of 40 (eta {idx}s)"))

@@ -1521,31 +1521,24 @@ fn mask_secret_line(line: &str) -> String {
 }
 
 pub fn critical_lines(text: &str, radius: usize) -> String {
-    let lines: Vec<&str> = text.lines().collect();
-    let mut keep = vec![false; lines.len()];
-    for (idx, line) in lines.iter().enumerate() {
-        if looks_critical_line(line) {
-            let start = idx.saturating_sub(radius);
-            let end = (idx + radius + 1).min(lines.len());
-            for slot in keep.iter_mut().take(end).skip(start) {
-                *slot = true;
-            }
-        }
-    }
-    lines
-        .iter()
-        .zip(keep)
-        .filter_map(|(line, keep)| keep.then_some(*line))
-        .collect::<Vec<_>>()
-        .join("\n")
+    keyword_window_view(text, radius, looks_critical_line)
 }
 
 pub fn error_block(text: &str, radius: usize) -> String {
+    keyword_window_view(text, radius, |line| regex_like_error(&line))
+}
+
+/// Keep radius windows around lines flagged by `is_hit`, and mark every gap
+/// (leading, interior, trailing) with an explicit elision line so the visible
+/// view never silently drops content. If nothing is elided the output is the
+/// byte-exact join of all lines, marker-free.
+fn keyword_window_view(text: &str, radius: usize, is_hit: impl Fn(&str) -> bool) -> String {
     let lines: Vec<&str> = text.lines().collect();
-    let re = regex_like_error;
     let mut keep = vec![false; lines.len()];
+    let mut any_hit = false;
     for (idx, line) in lines.iter().enumerate() {
-        if re(line) {
+        if is_hit(line) {
+            any_hit = true;
             let start = idx.saturating_sub(radius);
             let end = (idx + radius + 1).min(lines.len());
             for slot in keep.iter_mut().take(end).skip(start) {
@@ -1553,12 +1546,27 @@ pub fn error_block(text: &str, radius: usize) -> String {
             }
         }
     }
-    lines
-        .iter()
-        .zip(keep)
-        .filter_map(|(line, keep)| keep.then_some(*line))
-        .collect::<Vec<_>>()
-        .join("\n")
+    if !any_hit {
+        return String::new();
+    }
+    let mut out: Vec<String> = Vec::new();
+    let mut idx = 0usize;
+    while idx < lines.len() {
+        if keep[idx] {
+            out.push(lines[idx].to_string());
+            idx += 1;
+        } else {
+            let start = idx;
+            while idx < lines.len() && !keep[idx] {
+                idx += 1;
+            }
+            out.push(format!(
+                "... omitted {} lines; exact ref available ...",
+                idx - start
+            ));
+        }
+    }
+    out.join("\n")
 }
 
 fn regex_like_error(line: &&str) -> bool {
