@@ -48,7 +48,7 @@ pub(crate) fn lower_code_plan(plan: &str, limits: &CodeModeLimits) -> Result<Str
     }
     let scanned = mask_string_literals(plan);
     for (token, reason) in DENIED_TOKENS {
-        if scanned.contains(token) {
+        if contains_token_at_identifier_boundary(&scanned, token) {
             return Err(format!("sandbox: {reason}: {token}"));
         }
     }
@@ -71,6 +71,35 @@ pub(crate) fn lower_code_plan(plan: &str, limits: &CodeModeLimits) -> Result<Str
         .replace("api.", "zero.")
         .replace("zero.zero.", "zero.");
     Ok(code)
+}
+
+/// Match a denied token only where it starts (and, if it ends with an
+/// identifier character, also ends) at an identifier boundary, so `refs.`
+/// does not trip the `fs.` guard and `subprocess`/`respawn` do not trip
+/// `process`/`spawn`.
+fn contains_token_at_identifier_boundary(haystack: &str, token: &str) -> bool {
+    let bytes = haystack.as_bytes();
+    let token_ends_with_ident = token
+        .as_bytes()
+        .last()
+        .is_some_and(|b| is_identifier_byte(*b));
+    let mut search_from = 0;
+    while let Some(rel) = haystack[search_from..].find(token) {
+        let start = search_from + rel;
+        let end = start + token.len();
+        let boundary_before = start == 0 || !is_identifier_byte(bytes[start - 1]);
+        let boundary_after =
+            !token_ends_with_ident || end >= bytes.len() || !is_identifier_byte(bytes[end]);
+        if boundary_before && boundary_after {
+            return true;
+        }
+        search_from = start + 1;
+    }
+    false
+}
+
+fn is_identifier_byte(b: u8) -> bool {
+    b.is_ascii_alphanumeric() || b == b'_' || b == b'$'
 }
 
 fn mask_string_literals(code: &str) -> String {

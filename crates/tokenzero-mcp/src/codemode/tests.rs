@@ -814,3 +814,34 @@ fn describe_includes_related_methods() {
     assert!(!related.is_empty());
     assert!(related.iter().any(|r| r.as_str() == Some("zero.expand")));
 }
+
+#[test]
+fn denied_token_guard_requires_identifier_boundary() {
+    use super::sandbox::lower_code_plan;
+    use super::store::CodeModeLimits;
+    let limits = CodeModeLimits::default();
+
+    for plan in [
+        "const f = await zero.read(\"a.txt\"); return f.refs.length",
+        "const r = await zero.shell(\"ls\"); return r.refs.stdout",
+        "const subprocess_count = 1; return subprocess_count",
+        "const respawned = true; return respawned",
+        "const restored = await zero.expand(\"tz://blob/x\"); return restored",
+    ] {
+        assert!(
+            lower_code_plan(plan, &limits).is_ok(),
+            "false positive for plan: {plan}"
+        );
+    }
+
+    for (plan, token) in [
+        ("return fs.readFileSync(\"/etc/passwd\")", "fs."),
+        ("const x = a.fs.read()", "fs."),
+        ("return process.env.HOME", "process"),
+        ("spawn(\"sh\")", "spawn"),
+        ("return db.query(\"x\")", "db."),
+    ] {
+        let err = lower_code_plan(plan, &limits).expect_err(plan);
+        assert!(err.contains(token), "expected {token} denial, got: {err}");
+    }
+}
