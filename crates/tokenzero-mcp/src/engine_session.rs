@@ -49,7 +49,8 @@ impl TokenZeroEngine {
         // never have to run cache maintenance by hand.
         let _ = cache_maintenance(&config.cache_path, false);
         let metrics = metrics::ToolMetrics::new(&config.cache_path);
-        let session_persist = SessionPersistence::for_cache(&config.cache_path, config.session_dedup);
+        let session_persist =
+            SessionPersistence::for_cache(&config.cache_path, config.session_dedup);
         let mut session_memory = SessionMemory::default();
         if let Some(ref persist) = session_persist {
             persist.load_into(&mut session_memory);

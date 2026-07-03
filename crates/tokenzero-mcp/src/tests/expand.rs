@@ -152,7 +152,14 @@ fn expand_since_unchanged_and_diff() {
         ..Default::default()
     });
     assert_eq!(unchanged.status, "ok");
-    assert!(unchanged.visible.as_ref().unwrap().text.contains("unchanged since"));
+    assert!(
+        unchanged
+            .visible
+            .as_ref()
+            .unwrap()
+            .text
+            .contains("unchanged since")
+    );
     let diffed = engine.expand_with_params(crate::expand_params::ExpandParams {
         ref_id: target_ref,
         since: Some(since_ref),
@@ -162,6 +169,49 @@ fn expand_since_unchanged_and_diff() {
     let text = &diffed.visible.as_ref().unwrap().text;
     assert!(text.contains("diff since"));
     assert!(text.contains("-beta") || text.contains("+BETA"));
+}
+
+#[test]
+fn expand_fresh_with_since_returns_full_content() {
+    use tokenzero_core::ContentType;
+    let dir = tempdir().unwrap();
+    let engine = TokenZeroEngine::new(EngineConfig::for_root(dir.path()));
+    let base_ref = engine
+        .ingest(
+            "alpha\nbeta\n",
+            ContentType::Unknown,
+            Mode::Exact,
+            "test-since",
+        )
+        .refs
+        .iter()
+        .find(|r| r.kind == "blob")
+        .unwrap()
+        .ref_id
+        .clone();
+    let target_ref = engine
+        .ingest(
+            "alpha\nBETA\n",
+            ContentType::Unknown,
+            Mode::Exact,
+            "test-target",
+        )
+        .refs
+        .iter()
+        .find(|r| r.kind == "blob")
+        .unwrap()
+        .ref_id
+        .clone();
+
+    let response = engine.expand_with_params(crate::expand_params::ExpandParams {
+        ref_id: target_ref,
+        since: Some(base_ref),
+        fresh: true,
+        ..Default::default()
+    });
+
+    assert_eq!(response.status, "ok");
+    assert_eq!(response.visible.as_ref().unwrap().text, "alpha\nBETA\n");
 }
 
 #[test]
@@ -192,7 +242,13 @@ fn codemode_expand_passes_symbol() {
     fs::write(&file, "fn alpha() {}\nfn beta() {}\n").unwrap();
     let engine = TokenZeroEngine::new(EngineConfig::for_root(dir.path()));
     let read = read_ok(&engine, &file);
-    let blob_ref = read.refs.iter().find(|r| r.kind == "blob").unwrap().ref_id.clone();
+    let blob_ref = read
+        .refs
+        .iter()
+        .find(|r| r.kind == "blob")
+        .unwrap()
+        .ref_id
+        .clone();
     let resp = engine.expand_with_params(crate::expand_params::ExpandParams {
         ref_id: blob_ref,
         symbol: Some("alpha".to_string()),
@@ -209,7 +265,13 @@ fn codemode_expand_many_mixed_windows() {
     fs::write(&file, "one\ntwo\nthree\n").unwrap();
     let engine = TokenZeroEngine::new(EngineConfig::for_root(dir.path()));
     let read = read_ok(&engine, &file);
-    let blob_ref = read.refs.iter().find(|r| r.kind == "blob").unwrap().ref_id.clone();
+    let blob_ref = read
+        .refs
+        .iter()
+        .find(|r| r.kind == "blob")
+        .unwrap()
+        .ref_id
+        .clone();
     let r1 = engine.expand_with_params(crate::expand_params::ExpandParams {
         ref_id: blob_ref.clone(),
         start_line: Some(1),
@@ -235,7 +297,13 @@ fn expand_dedup_off_serves_full_twice() {
     config.session_dedup = false;
     let engine = TokenZeroEngine::new(config);
     let response = read_ok(&engine, &file);
-    let blob_ref = response.refs.iter().find(|r| r.kind == "blob").unwrap().ref_id.clone();
+    let blob_ref = response
+        .refs
+        .iter()
+        .find(|r| r.kind == "blob")
+        .unwrap()
+        .ref_id
+        .clone();
     for _ in 0..2 {
         let expanded = engine.expand(&blob_ref, Some("raw"), None, None, None, None);
         assert_eq!(expanded.status, "ok");
@@ -247,10 +315,30 @@ fn expand_changed_content_serves_full() {
     use tokenzero_core::ContentType;
     let dir = tempdir().unwrap();
     let engine = TokenZeroEngine::new(EngineConfig::for_root(dir.path()));
-    let v1 = engine.ingest("v1\n", ContentType::Unknown, Mode::Exact, "t").refs.iter().find(|r| r.kind == "blob").unwrap().ref_id.clone();
-    engine.expand_with_params(crate::expand_params::ExpandParams { ref_id: v1.clone(), ..Default::default() });
-    let v2 = engine.ingest("v2\n", ContentType::Unknown, Mode::Exact, "t2").refs.iter().find(|r| r.kind == "blob").unwrap().ref_id.clone();
-    let second = engine.expand_with_params(crate::expand_params::ExpandParams { ref_id: v2, ..Default::default() });
+    let v1 = engine
+        .ingest("v1\n", ContentType::Unknown, Mode::Exact, "t")
+        .refs
+        .iter()
+        .find(|r| r.kind == "blob")
+        .unwrap()
+        .ref_id
+        .clone();
+    engine.expand_with_params(crate::expand_params::ExpandParams {
+        ref_id: v1.clone(),
+        ..Default::default()
+    });
+    let v2 = engine
+        .ingest("v2\n", ContentType::Unknown, Mode::Exact, "t2")
+        .refs
+        .iter()
+        .find(|r| r.kind == "blob")
+        .unwrap()
+        .ref_id
+        .clone();
+    let second = engine.expand_with_params(crate::expand_params::ExpandParams {
+        ref_id: v2,
+        ..Default::default()
+    });
     assert_eq!(second.visible.as_ref().unwrap().text, "v2\n");
 }
 
@@ -310,8 +398,13 @@ fn expand_stale_persisted_sha_serves_full_after_payload_mutation() {
     };
     let text = fs::read_to_string(&cache_path).unwrap();
     let mut state: serde_json::Value = serde_json::from_str(&text).unwrap();
-    let blobs = state.get_mut("blobs").and_then(|v| v.as_object_mut()).unwrap();
-    let entry = blobs.get_mut(&blob_ref).expect("blob entry in recovery cache");
+    let blobs = state
+        .get_mut("blobs")
+        .and_then(|v| v.as_object_mut())
+        .unwrap();
+    let entry = blobs
+        .get_mut(&blob_ref)
+        .expect("blob entry in recovery cache");
     assert_eq!(entry.as_str().unwrap(), "version_one\n");
     *entry = serde_json::Value::String("version_two\n".to_string());
     fs::write(&cache_path, serde_json::to_string_pretty(&state).unwrap()).unwrap();
@@ -344,7 +437,13 @@ fn session_dedup_off_does_not_write_session_memory_file() {
     let memory_path = crate::session_persist::session_memory_path(&config.cache_path);
     let engine = TokenZeroEngine::new(config);
     let response = read_ok(&engine, &file);
-    let blob_ref = response.refs.iter().find(|r| r.kind == "blob").unwrap().ref_id.clone();
+    let blob_ref = response
+        .refs
+        .iter()
+        .find(|r| r.kind == "blob")
+        .unwrap()
+        .ref_id
+        .clone();
     engine.expand(&blob_ref, Some("raw"), None, None, None, None);
     engine.expand(&blob_ref, Some("raw"), None, None, None, None);
     assert!(

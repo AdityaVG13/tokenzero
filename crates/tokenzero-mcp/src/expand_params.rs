@@ -23,12 +23,24 @@ impl ExpandParams {
             .to_string();
         Ok(Self {
             ref_id,
-            selector: args.get("selector").and_then(Value::as_str).map(str::to_string),
+            selector: args
+                .get("selector")
+                .and_then(Value::as_str)
+                .map(str::to_string),
             start_line: arg_u64(args, "start_line"),
             end_line: arg_u64(args, "end_line"),
-            anchor_kind: args.get("anchor_kind").and_then(Value::as_str).map(str::to_string),
-            symbol: args.get("symbol").and_then(Value::as_str).map(str::to_string),
-            since: args.get("since").and_then(Value::as_str).map(str::to_string),
+            anchor_kind: args
+                .get("anchor_kind")
+                .and_then(Value::as_str)
+                .map(str::to_string),
+            symbol: args
+                .get("symbol")
+                .and_then(Value::as_str)
+                .map(str::to_string),
+            since: args
+                .get("since")
+                .and_then(Value::as_str)
+                .map(str::to_string),
             fresh: arg_bool(args, "fresh"),
         })
     }
@@ -38,17 +50,36 @@ impl ExpandParams {
             .first()
             .and_then(Value::as_str)
             .ok_or_else(|| {
-                "zero.token.expand/zero.expand requires a tz:// ref string as first argument".to_string()
+                "zero.token.expand/zero.expand requires a tz:// ref string as first argument"
+                    .to_string()
             })?
             .to_string();
         let opts = args.get(1).and_then(Value::as_object);
-        let mut params = Self { ref_id, ..Default::default() };
+        let mut params = Self {
+            ref_id,
+            ..Default::default()
+        };
         if let Some(map) = opts {
-            params.selector = map.get("selector").and_then(Value::as_str).map(str::to_string);
-            params.start_line = map.get("start_line").and_then(coerce_u64).and_then(|n| usize::try_from(n).ok());
-            params.end_line = map.get("end_line").and_then(coerce_u64).and_then(|n| usize::try_from(n).ok());
-            params.anchor_kind = map.get("anchor_kind").and_then(Value::as_str).map(str::to_string);
-            params.symbol = map.get("symbol").and_then(Value::as_str).map(str::to_string);
+            params.selector = map
+                .get("selector")
+                .and_then(Value::as_str)
+                .map(str::to_string);
+            params.start_line = map
+                .get("start_line")
+                .and_then(coerce_u64)
+                .and_then(|n| usize::try_from(n).ok());
+            params.end_line = map
+                .get("end_line")
+                .and_then(coerce_u64)
+                .and_then(|n| usize::try_from(n).ok());
+            params.anchor_kind = map
+                .get("anchor_kind")
+                .and_then(Value::as_str)
+                .map(str::to_string);
+            params.symbol = map
+                .get("symbol")
+                .and_then(Value::as_str)
+                .map(str::to_string);
             params.since = map.get("since").and_then(Value::as_str).map(str::to_string);
             params.fresh = map.get("fresh").map(arg_bool_value).unwrap_or(false);
         }
@@ -57,17 +88,41 @@ impl ExpandParams {
 
     pub fn from_expand_many_item(item: &Value) -> Result<Self, String> {
         if let Some(ref_id) = item.as_str() {
-            return Ok(Self { ref_id: ref_id.to_string(), ..Default::default() });
+            return Ok(Self {
+                ref_id: ref_id.to_string(),
+                ..Default::default()
+            });
         }
-        let map = item.as_object().ok_or_else(|| "expandMany item must be a tz:// ref string or object".to_string())?;
-        let ref_id = map.get("ref").and_then(Value::as_str).ok_or_else(|| "expandMany item object requires ref".to_string())?.to_string();
+        let map = item
+            .as_object()
+            .ok_or_else(|| "expandMany item must be a tz:// ref string or object".to_string())?;
+        let ref_id = map
+            .get("ref")
+            .and_then(Value::as_str)
+            .ok_or_else(|| "expandMany item object requires ref".to_string())?
+            .to_string();
         Ok(Self {
             ref_id,
-            selector: map.get("selector").and_then(Value::as_str).map(str::to_string),
-            start_line: map.get("start_line").and_then(coerce_u64).and_then(|n| usize::try_from(n).ok()),
-            end_line: map.get("end_line").and_then(coerce_u64).and_then(|n| usize::try_from(n).ok()),
-            anchor_kind: map.get("anchor_kind").and_then(Value::as_str).map(str::to_string),
-            symbol: map.get("symbol").and_then(Value::as_str).map(str::to_string),
+            selector: map
+                .get("selector")
+                .and_then(Value::as_str)
+                .map(str::to_string),
+            start_line: map
+                .get("start_line")
+                .and_then(coerce_u64)
+                .and_then(|n| usize::try_from(n).ok()),
+            end_line: map
+                .get("end_line")
+                .and_then(coerce_u64)
+                .and_then(|n| usize::try_from(n).ok()),
+            anchor_kind: map
+                .get("anchor_kind")
+                .and_then(Value::as_str)
+                .map(str::to_string),
+            symbol: map
+                .get("symbol")
+                .and_then(Value::as_str)
+                .map(str::to_string),
             since: map.get("since").and_then(Value::as_str).map(str::to_string),
             fresh: map.get("fresh").map(arg_bool_value).unwrap_or(false),
         })
@@ -93,7 +148,10 @@ fn arg_bool(args: &Value, key: &str) -> bool {
 fn arg_bool_value(value: &Value) -> bool {
     match value {
         Value::Bool(v) => *v,
-        Value::String(text) => matches!(text.trim().to_ascii_lowercase().as_str(), "true" | "1" | "yes"),
+        Value::String(text) => matches!(
+            text.trim().to_ascii_lowercase().as_str(),
+            "true" | "1" | "yes"
+        ),
         _ => false,
     }
 }

@@ -8,8 +8,8 @@ use tokenzero_core::{
 use tokenzero_filters::{discover, rewrite_command};
 use tokenzero_runtime::{ExecutionMode, plan_command_for_platform};
 
-use crate::expand_params::ExpandParams;
 use crate::catalog::canonical_allowed_on_surface;
+use crate::expand_params::ExpandParams;
 use crate::jsonrpc::JsonRpcErrorData;
 use crate::{EditHunk, ServeOptions, TokenZeroEngine, shell_timeout_from_secs};
 

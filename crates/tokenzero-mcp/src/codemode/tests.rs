@@ -686,7 +686,12 @@ fn parity_grep_plan_vs_direct_identical_matches() {
             ..Default::default()
         };
         let result = execute_codemode_with_options(&plan_tpl.replace("{dir}", &dir), opts);
-        assert_eq!(result.status, CodeModeStatus::Completed, "{:?}", result.error);
+        assert_eq!(
+            result.status,
+            CodeModeStatus::Completed,
+            "{:?}",
+            result.error
+        );
         let val = result.value.unwrap();
         let root = work.path().to_str().unwrap().to_string();
         (val, root)

@@ -15,12 +15,12 @@ use crate::workspace::{
 };
 use crate::{EditHunk, EngineConfig, TokenZeroEngine, shell_timeout_from_secs};
 
-use crate::expand_params::ExpandParams;
 use super::catalog::{describe_method, search_catalog};
 use super::parser::{Expr, MethodCall, Statement, parse_plan, resolve_expr, resolve_return};
 use super::result::{CodeModeOptions, CodeModeResult};
 use super::sandbox::lower_code_plan;
 use super::store::{CodeModeLimits, ExecutionStep, ExecutionStore, finalize_result, now_ms};
+use crate::expand_params::ExpandParams;
 
 #[cfg(test)]
 pub(crate) fn make_engine_for_root(root: PathBuf) -> TokenZeroEngine {
@@ -1567,12 +1567,14 @@ pub(crate) fn exec_edit(
 }
 
 fn exec_expand(engine: &TokenZeroEngine, args: &[Value]) -> Result<OpOutcome, Box<CodeModeResult>> {
-    let params = ExpandParams::from_codemode_args(args).map_err(|message| {
-        Box::new(CodeModeResult::error(message, 0))
-    })?;
+    let params = ExpandParams::from_codemode_args(args)
+        .map_err(|message| Box::new(CodeModeResult::error(message, 0)))?;
     if !params.ref_id.starts_with("tz://") {
         return Err(Box::new(CodeModeResult::error(
-            format!("zero.token.expand/zero.expand: ref must start with tz://, got: {}", params.ref_id),
+            format!(
+                "zero.token.expand/zero.expand: ref must start with tz://, got: {}",
+                params.ref_id
+            ),
             0,
         )));
     }
@@ -1595,12 +1597,14 @@ fn exec_expand_many(
     };
     let mut results = Vec::with_capacity(items.len());
     for item in items {
-        let params = ExpandParams::from_expand_many_item(item).map_err(|message| {
-            Box::new(CodeModeResult::error(message, 0))
-        })?;
+        let params = ExpandParams::from_expand_many_item(item)
+            .map_err(|message| Box::new(CodeModeResult::error(message, 0)))?;
         if !params.ref_id.starts_with("tz://") {
             return Err(Box::new(CodeModeResult::error(
-                format!("zero.token.expandMany: ref must start with tz://, got: {}", params.ref_id),
+                format!(
+                    "zero.token.expandMany: ref must start with tz://, got: {}",
+                    params.ref_id
+                ),
                 0,
             )));
         }

@@ -230,6 +230,31 @@ fn successful_shell_with_stderr_command_not_found_still_reports_failure() {
 }
 
 #[test]
+fn masked_search_diagnostics_redirected_to_stdout_stay_failures() {
+    let stdout = "rg: regex parse error:\n    (?:[)\n       ^\nerror: unclosed character class\n";
+    let rendered = render_shell(ShellRenderInput {
+        command: "rg '[' 2>&1 | head",
+        stdout,
+        stderr: "",
+        exit_code: Some(0),
+        timed_out: false,
+        mode: Mode::Auto,
+        max_visible_tokens: 4000,
+        stdout_ref: Some("tz://blob/stdout"),
+        stderr_ref: Some("tz://blob/stderr"),
+        combined_ref: Some("tz://blob/combined"),
+    });
+
+    assert!(!rendered.command_status.command_success, "{rendered:?}");
+    assert_eq!(rendered.command_status.status_label, "command_failed");
+    assert_eq!(
+        rendered.command_status.failed_segment.as_deref(),
+        Some("rg '[' 2>&1")
+    );
+    assert!(rendered.command_status.pipeline_masking_warning.is_some());
+}
+
+#[test]
 fn masked_hard_failures_stay_failures_even_when_or_true_exits_zero() {
     for (command, stderr, expected_segment) in [
         (
@@ -443,7 +468,7 @@ fn and_list_failure_reports_diagnostic_segment_not_unreached_tail() {
 
 #[test]
 fn cd_grep_failed_word_pipeline_exit_zero_is_success() {
-    let command = "cd /Users/aditya/AI/tokenzero && grep -rn \"failed_segment\" crates/tokenzero-core/src/shell_parse.rs | head";
+    let command = "cd /tmp/tokenzero && grep -rn \"failed_segment\" crates/tokenzero-core/src/shell_parse.rs | head";
     let stdout = "crates/tokenzero-core/src/shell_parse.rs:93:    if looks_masked_failure_evidence(stdout, stderr, Some(segment)) {\n";
     let rendered = render_shell(ShellRenderInput {
         command,

@@ -116,7 +116,6 @@ impl SessionMemory {
         self.diff_tokens_saved += summary.diff_saved;
     }
 
-
     /// Restore disk-backed seen-set for this scope (dedup on only).
     pub(crate) fn restore_from_persist(
         &mut self,

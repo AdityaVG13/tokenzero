@@ -386,4 +386,3 @@ fn served_record_from_persisted(record: &PersistedServedRecord) -> ServedRecord 
         serve_count: record.serve_count,
     }
 }
-

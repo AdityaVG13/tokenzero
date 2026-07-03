@@ -702,9 +702,11 @@ impl RecoveryStore {
 
     fn resolve_ref(&self, kind: &str, bare: &str) -> Option<String> {
         match kind {
-            "blob" => self.state.blobs.get(bare).and_then(|v| {
-                resolve_blob_value(self.persistence_path.as_deref(), v)
-            }),
+            "blob" => self
+                .state
+                .blobs
+                .get(bare)
+                .and_then(|v| resolve_blob_value(self.persistence_path.as_deref(), v)),
             "file" => self.state.files.get(bare).map(|f| f.text.clone()),
             "unit" => self.state.units.get(bare).map(|u| u.text.clone()),
             "search" => self.state.search_hits.get(bare).map(|u| u.text.clone()),
@@ -1399,7 +1401,7 @@ fn write_json_to_tmp(tmp: &Path, state: &RecoveryState) -> Result<(), RecoveryEr
     let mut writer = std::io::BufWriter::with_capacity(1 << 20, file);
     serde_json::to_writer(&mut writer, state)?;
     writer.write_all(b"\n")?;
-    let file = writer
+    let _file = writer
         .into_inner()
         .map_err(std::io::IntoInnerError::into_error)?;
     // sync_data, not sync_all: the cache is reconstructible working state

@@ -61,7 +61,7 @@ fn expand_serve_key(params: &ExpandParams) -> ServeKey {
 fn resolve_slice(
     store: &mut RecoveryStore,
     params: &ExpandParams,
-) -> Result<ExpansionResult, ToolResponse> {
+) -> Result<ExpansionResult, Box<ToolResponse>> {
     let selector = params.selector.as_deref().or(Some("raw"));
     let anchor = params.anchor_kind.as_deref();
     let symbol = params.symbol.as_deref();
@@ -76,7 +76,7 @@ fn resolve_slice(
     if result.found {
         Ok(result)
     } else {
-        Err(expansion_response(result, store.recovery_tokens))
+        Err(Box::new(expansion_response(result, store.recovery_tokens)))
     }
 }
 
@@ -102,7 +102,7 @@ impl TokenZeroEngine {
         let mut summary = SessionSummary::default();
         let mut pending: Vec<(ServeKey, ServedRecord)> = Vec::new();
 
-        if let Some(since_ref) = params.since.as_deref() {
+        if let Some(since_ref) = params.since.as_deref().filter(|_| !params.fresh) {
             if !since_ref.starts_with("tz://") {
                 return ToolResponse::error(
                     "expand",
@@ -134,7 +134,7 @@ impl TokenZeroEngine {
             }
             let target = match resolve_slice(&mut store, &params) {
                 Ok(t) => t,
-                Err(resp) => return resp,
+                Err(resp) => return *resp,
             };
             if since_result.content == target.content {
                 let text = unchanged_since_expand_ack(since_ref);
@@ -166,7 +166,11 @@ impl TokenZeroEngine {
                     let text = unchanged_since_expand_ack(since_ref);
                     let tokens = count_tokens(&text);
                     if self.config.session_dedup {
-                        pending.push(self.pending_expand_record(&params, &target.content, &mut store));
+                        pending.push(self.pending_expand_record(
+                            &params,
+                            &target.content,
+                            &mut store,
+                        ));
                     }
                     let response = ToolResponse::ok(
                         "expand",
@@ -219,7 +223,7 @@ impl TokenZeroEngine {
 
         let target = match resolve_slice(&mut store, &params) {
             Ok(t) => t,
-            Err(resp) => return resp,
+            Err(resp) => return *resp,
         };
 
         // Explicit expand is the recovery contract: it ALWAYS returns exact
@@ -233,7 +237,7 @@ impl TokenZeroEngine {
 
         let mut response = expansion_response(target.clone(), store.recovery_tokens);
         if self.config.session_dedup {
-                pending.push(self.pending_expand_record(&params, &target.content, &mut store));
+            pending.push(self.pending_expand_record(&params, &target.content, &mut store));
         }
         if let Some(telemetry) = summary.telemetry() {
             response.telemetry = Some(telemetry);

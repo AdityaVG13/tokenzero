@@ -253,6 +253,28 @@ fn stdout_has_structured_masked_failure_evidence(stdout: &str) -> bool {
             .any(line_has_structured_masked_failure_evidence)
 }
 
+fn search_stdout_has_masked_failure_evidence(stdout: &str) -> bool {
+    !stdout.trim().is_empty() && stdout.lines().any(search_stdout_line_is_diagnostic)
+}
+
+fn search_stdout_line_is_diagnostic(line: &str) -> bool {
+    let trimmed = line.trim_start();
+    let lower = trimmed.to_ascii_lowercase();
+    lower.starts_with("error:")
+        || lower.starts_with("warning:")
+        || lower.starts_with("fatal:")
+        || lower.starts_with("panic")
+        || lower.starts_with("traceback")
+        || lower.starts_with("rg:")
+        || lower.starts_with("grep:")
+        || lower.starts_with("ripgrep:")
+        || lower.contains("regex parse error")
+        || lower.contains("unrecognized option")
+        || lower.contains("invalid option")
+        || lower.contains("permission denied")
+        || lower.contains("no such file or directory")
+}
+
 /// Strict masked-failure evidence for exit-code-0 compound/pipeline paths.
 /// Bare substrings like `failed` in data lines are not evidence.
 pub(crate) fn looks_masked_failure_evidence(
@@ -269,7 +291,7 @@ pub(crate) fn looks_masked_failure_evidence(
             .first()
             .is_some_and(|word| is_search_command(word))
         {
-            return false;
+            return search_stdout_has_masked_failure_evidence(stdout);
         }
     }
     stdout_has_structured_masked_failure_evidence(stdout)

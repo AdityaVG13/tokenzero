@@ -909,7 +909,11 @@ fn foreign_journal_append_forces_merge_and_nothing_is_lost() {
     let mut restarted = RecoveryStore::new(Some(cache));
     for (stored, text) in [(&from_b, "from-b\n"), (&from_a, "from-a\n")] {
         let expanded = restarted.expand(&stored.blob_ref, Some("raw"), None, None, None, None);
-        assert!(expanded.found, "lost {} after concurrent persists", stored.blob_ref);
+        assert!(
+            expanded.found,
+            "lost {} after concurrent persists",
+            stored.blob_ref
+        );
         assert_eq!(expanded.content, text);
     }
 }
@@ -938,7 +942,10 @@ fn corrupt_journal_tail_keeps_complete_entries() {
 
     let mut restarted = RecoveryStore::new(Some(cache));
     let expanded = restarted.expand(&good.blob_ref, Some("raw"), None, None, None, None);
-    assert!(expanded.found, "complete journal entry poisoned by torn tail");
+    assert!(
+        expanded.found,
+        "complete journal entry poisoned by torn tail"
+    );
     assert_eq!(expanded.content, "good\n");
 }
 
@@ -983,7 +990,10 @@ fn small_blob_stays_inline() {
     store
         .store_payload("small\n", ContentType::Unknown, None, None, None)
         .unwrap();
-    assert!(!blob_sidecar_dir(&cache).exists(), "no sidecar for small payloads");
+    assert!(
+        !blob_sidecar_dir(&cache).exists(),
+        "no sidecar for small payloads"
+    );
 }
 
 #[test]
@@ -1006,8 +1016,10 @@ fn corrupt_blob_sidecar_is_a_miss_not_bad_bytes() {
         !expanded.found || expanded.content != big,
         "tampered sidecar must never serve as the original"
     );
-    assert!(!expanded.content.contains("tampered") || !expanded.found,
-        "tampered bytes must not be served as blob content");
+    assert!(
+        !expanded.content.contains("tampered") || !expanded.found,
+        "tampered bytes must not be served as blob content"
+    );
 }
 
 #[test]
