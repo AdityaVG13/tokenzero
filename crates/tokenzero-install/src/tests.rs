@@ -579,7 +579,8 @@ fn surface_install_always_writes_classic() {
     let path = dir.path().join(".grok/config.toml");
     let text = fs::read_to_string(path).unwrap();
     assert!(text.contains("TOKENZERO_MCP_TOOL_SURFACE"));
-    assert!(text.contains("classic"));
+    // Classic surface serializes as "mcp" (McpToolSurface::as_str).
+    assert!(text.contains("TOKENZERO_MCP_TOOL_SURFACE = \"mcp\""));
 }
 
 #[test]

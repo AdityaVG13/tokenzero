@@ -20,6 +20,7 @@ use super::parser::{Expr, MethodCall, Statement, parse_plan, resolve_expr, resol
 use super::result::{CodeModeOptions, CodeModeResult};
 use super::sandbox::lower_code_plan;
 use super::store::{CodeModeLimits, ExecutionStep, ExecutionStore, finalize_result, now_ms};
+use crate::expand_params::ExpandParams;
 
 #[cfg(test)]
 pub(crate) fn make_engine_for_root(root: PathBuf) -> TokenZeroEngine {
@@ -1566,30 +1567,18 @@ pub(crate) fn exec_edit(
 }
 
 fn exec_expand(engine: &TokenZeroEngine, args: &[Value]) -> Result<OpOutcome, Box<CodeModeResult>> {
-    let ref_id = require_str_arg(
-        args,
-        0,
-        "zero.token.expand/zero.expand requires a tz:// ref string as first argument",
-    )?;
-    if !ref_id.starts_with("tz://") {
+    let params = ExpandParams::from_codemode_args(args)
+        .map_err(|message| Box::new(CodeModeResult::error(message, 0)))?;
+    if !params.ref_id.starts_with("tz://") {
         return Err(Box::new(CodeModeResult::error(
-            format!("zero.token.expand/zero.expand: ref must start with tz://, got: {ref_id}"),
+            format!(
+                "zero.token.expand/zero.expand: ref must start with tz://, got: {}",
+                params.ref_id
+            ),
             0,
         )));
     }
-    let opts = Opts::from_arg(args, 1);
-    let start_line = opts.usize("start_line");
-    let end_line = opts.usize("end_line");
-    let selector = opts.str("selector").map(str::to_string);
-
-    let resp = engine.expand(
-        ref_id,
-        selector.as_deref(),
-        start_line,
-        end_line,
-        None,
-        None,
-    );
+    let resp = engine.expand_with_params(params);
     Ok(OpOutcome::from_tool_response(&resp))
 }
 
@@ -1597,19 +1586,30 @@ fn exec_expand_many(
     engine: &TokenZeroEngine,
     args: &[Value],
 ) -> Result<OpOutcome, Box<CodeModeResult>> {
-    let refs = match args.first() {
-        Some(Value::Array(items)) => items.iter().filter_map(|v| v.as_str()).collect::<Vec<_>>(),
+    let items = match args.first() {
+        Some(Value::Array(items)) => items,
         _ => {
             return Err(Box::new(CodeModeResult::error(
-                "zero.token.expandMany requires an array of tz:// refs",
+                "zero.token.expandMany requires an array of tz:// refs or item objects",
                 0,
             )));
         }
     };
-    let mut results = Vec::with_capacity(refs.len());
-    for ref_id in refs {
-        let outcome = exec_expand(engine, &[Value::String(ref_id.to_string())])?;
-        results.push(outcome.into_value());
+    let mut results = Vec::with_capacity(items.len());
+    for item in items {
+        let params = ExpandParams::from_expand_many_item(item)
+            .map_err(|message| Box::new(CodeModeResult::error(message, 0)))?;
+        if !params.ref_id.starts_with("tz://") {
+            return Err(Box::new(CodeModeResult::error(
+                format!(
+                    "zero.token.expandMany: ref must start with tz://, got: {}",
+                    params.ref_id
+                ),
+                0,
+            )));
+        }
+        let resp = engine.expand_with_params(params);
+        results.push(OpOutcome::from_tool_response(&resp).into_value());
     }
     Ok(OpOutcome::from_catalog(json!({
         "items": results,

@@ -848,3 +848,208 @@ fn tmp_sweep_missing_dir_is_empty_report() {
     assert_eq!(report.scanned, 0);
     assert_eq!(report.removed, 0);
 }
+
+#[test]
+fn second_process_persist_appends_journal_without_snapshot_rewrite() {
+    let dir = tempdir().unwrap();
+    let cache = dir.path().join("cache.json");
+    let first = {
+        let mut store = RecoveryStore::new(Some(cache.clone()));
+        store
+            .store_payload("alpha\n", ContentType::Unknown, None, None, None)
+            .unwrap()
+    };
+    let snapshot_before = fs::read(&cache).unwrap();
+
+    // Fresh process: loads the snapshot, captures identity, and its persist
+    // must take the journal append path instead of rewriting the snapshot.
+    let second = {
+        let mut store = RecoveryStore::new(Some(cache.clone()));
+        store
+            .store_payload("beta\n", ContentType::Unknown, None, None, None)
+            .unwrap()
+    };
+    assert_eq!(
+        fs::read(&cache).unwrap(),
+        snapshot_before,
+        "snapshot must be untouched by a journaled persist"
+    );
+    assert!(journal_path(&cache).exists(), "journal sibling must exist");
+
+    let mut restarted = RecoveryStore::new(Some(cache));
+    for (stored, text) in [(&first, "alpha\n"), (&second, "beta\n")] {
+        let expanded = restarted.expand(&stored.blob_ref, Some("raw"), None, None, None, None);
+        assert!(expanded.found);
+        assert_eq!(expanded.content, text);
+    }
+}
+
+#[test]
+fn foreign_journal_append_forces_merge_and_nothing_is_lost() {
+    let dir = tempdir().unwrap();
+    let cache = dir.path().join("cache.json");
+    {
+        let mut store = RecoveryStore::new(Some(cache.clone()));
+        store
+            .store_payload("base\n", ContentType::Unknown, None, None, None)
+            .unwrap();
+    }
+    // Two processes load the same disk state...
+    let mut a = RecoveryStore::new(Some(cache.clone()));
+    let mut b = RecoveryStore::new(Some(cache.clone()));
+    // ...b persists first (journal append). a's identity is now stale, so
+    // a's persist must detect the foreign append and take the merge path.
+    let from_b = b
+        .store_payload("from-b\n", ContentType::Unknown, None, None, None)
+        .unwrap();
+    let from_a = a
+        .store_payload("from-a\n", ContentType::Unknown, None, None, None)
+        .unwrap();
+
+    let mut restarted = RecoveryStore::new(Some(cache));
+    for (stored, text) in [(&from_b, "from-b\n"), (&from_a, "from-a\n")] {
+        let expanded = restarted.expand(&stored.blob_ref, Some("raw"), None, None, None, None);
+        assert!(
+            expanded.found,
+            "lost {} after concurrent persists",
+            stored.blob_ref
+        );
+        assert_eq!(expanded.content, text);
+    }
+}
+
+#[test]
+fn corrupt_journal_tail_keeps_complete_entries() {
+    let dir = tempdir().unwrap();
+    let cache = dir.path().join("cache.json");
+    {
+        let mut store = RecoveryStore::new(Some(cache.clone()));
+        store
+            .store_payload("alpha\n", ContentType::Unknown, None, None, None)
+            .unwrap();
+    }
+    let good = {
+        let mut store = RecoveryStore::new(Some(cache.clone()));
+        store
+            .store_payload("good\n", ContentType::Unknown, None, None, None)
+            .unwrap()
+    };
+    // Simulate a torn append: garbage after the last complete line.
+    let journal = journal_path(&cache);
+    let mut bytes = fs::read(&journal).unwrap();
+    bytes.extend_from_slice(b"{\"refs\":[\"tz://blob/torn");
+    fs::write(&journal, bytes).unwrap();
+
+    let mut restarted = RecoveryStore::new(Some(cache));
+    let expanded = restarted.expand(&good.blob_ref, Some("raw"), None, None, None, None);
+    assert!(
+        expanded.found,
+        "complete journal entry poisoned by torn tail"
+    );
+    assert_eq!(expanded.content, "good\n");
+}
+
+#[test]
+fn big_blob_externalizes_to_sidecar_and_roundtrips() {
+    let dir = tempdir().unwrap();
+    let cache = dir.path().join("cache.json");
+    let big = "x".repeat(200 * 1024);
+    let stored = {
+        let mut store = RecoveryStore::new(Some(cache.clone()));
+        store
+            .store_payload(&big, ContentType::Unknown, None, None, None)
+            .unwrap()
+    };
+    let sidecar = blob_sidecar_dir(&cache);
+    assert!(sidecar.is_dir(), "sidecar dir must exist");
+    assert!(
+        fs::read_dir(&sidecar).unwrap().count() >= 1,
+        "sidecar must hold the payload"
+    );
+    // The BLOBS map must hold a marker, not the payload. (The files/units
+    // maps still inline their copies — beads tokenzero-ocx/a73 own that.)
+    let snapshot: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&cache).unwrap()).unwrap();
+    let blob_value = snapshot["blobs"][&stored.blob_ref].as_str().unwrap();
+    assert!(
+        blob_value.starts_with('\u{0}'),
+        "blob value must be an externalized marker"
+    );
+    assert!(blob_value.len() < 128, "marker must be tiny");
+    let mut restarted = RecoveryStore::new(Some(cache));
+    let expanded = restarted.expand(&stored.blob_ref, Some("raw"), None, None, None, None);
+    assert!(expanded.found);
+    assert_eq!(expanded.content, big);
+}
+
+#[test]
+fn small_blob_stays_inline() {
+    let dir = tempdir().unwrap();
+    let cache = dir.path().join("cache.json");
+    let mut store = RecoveryStore::new(Some(cache.clone()));
+    store
+        .store_payload("small\n", ContentType::Unknown, None, None, None)
+        .unwrap();
+    assert!(
+        !blob_sidecar_dir(&cache).exists(),
+        "no sidecar for small payloads"
+    );
+}
+
+#[test]
+fn corrupt_blob_sidecar_is_a_miss_not_bad_bytes() {
+    let dir = tempdir().unwrap();
+    let cache = dir.path().join("cache.json");
+    let big = "y".repeat(200 * 1024);
+    let stored = {
+        let mut store = RecoveryStore::new(Some(cache.clone()));
+        store
+            .store_payload(&big, ContentType::Unknown, None, None, None)
+            .unwrap()
+    };
+    for entry in fs::read_dir(blob_sidecar_dir(&cache)).unwrap() {
+        fs::write(entry.unwrap().path(), "tampered").unwrap();
+    }
+    let mut restarted = RecoveryStore::new(Some(cache));
+    let expanded = restarted.expand(&stored.blob_ref, Some("raw"), None, None, None, None);
+    assert!(
+        !expanded.found || expanded.content != big,
+        "tampered sidecar must never serve as the original"
+    );
+    assert!(
+        !expanded.content.contains("tampered") || !expanded.found,
+        "tampered bytes must not be served as blob content"
+    );
+}
+
+#[test]
+fn oversized_journal_compacts_into_fresh_snapshot() {
+    let dir = tempdir().unwrap();
+    let cache = dir.path().join("cache.json");
+    let small = {
+        let mut store = RecoveryStore::new(Some(cache.clone()));
+        store
+            .store_payload("tiny\n", ContentType::Unknown, None, None, None)
+            .unwrap()
+    };
+    // Snapshot is tiny, so the compaction threshold is the 64KB floor; a
+    // payload larger than that must fold journal + snapshot into a fresh
+    // snapshot and remove the journal.
+    let big_text = "x".repeat(80 * 1024);
+    let big = {
+        let mut store = RecoveryStore::new(Some(cache.clone()));
+        store
+            .store_payload(&big_text, ContentType::Unknown, None, None, None)
+            .unwrap()
+    };
+    assert!(
+        !journal_path(&cache).exists(),
+        "journal must be removed after compaction"
+    );
+    let mut restarted = RecoveryStore::new(Some(cache));
+    for (stored, text) in [(&small, "tiny\n"), (&big, big_text.as_str())] {
+        let expanded = restarted.expand(&stored.blob_ref, Some("raw"), None, None, None, None);
+        assert!(expanded.found);
+        assert_eq!(expanded.content, text);
+    }
+}

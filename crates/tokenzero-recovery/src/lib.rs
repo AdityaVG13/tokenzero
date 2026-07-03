@@ -212,6 +212,11 @@ pub struct RecoveryStore {
     /// also reset to `None` whenever a write fails, so the next persist must
     /// take the full reload+merge path.
     disk_identity: Option<DiskIdentity>,
+    /// Identity of the journal sibling at our last write (`None` = we left no
+    /// journal). Checked together with `disk_identity`: a foreign append to
+    /// the journal must force the reload+merge path just like a foreign
+    /// snapshot rewrite.
+    journal_identity: Option<DiskIdentity>,
     pub recovery_count: usize,
     pub recovery_tokens: usize,
 }
@@ -263,19 +268,34 @@ impl RecoveryStore {
     }
 
     pub fn with_config(persistence_path: Option<PathBuf>, config: RecoveryConfig) -> Self {
-        let state = persistence_path
+        let loaded = persistence_path
             .as_ref()
-            .and_then(|path| load_state(path, &config).ok().flatten())
-            .unwrap_or_else(|| RecoveryState::empty(&config));
+            .and_then(|path| load_state(path, &config).ok().flatten());
+        // Capture disk identity right after a successful load (read first,
+        // stat second). This lets the FIRST persist of a fresh process take
+        // the journal fast path — critical for CLI invocations, which are one
+        // process per call and would otherwise rewrite the whole snapshot
+        // every time. The capture runs without the persist lock, but that is
+        // safe: persist re-captures under the lock and any mismatch falls
+        // back to the full reload+merge. If a foreign write lands between our
+        // read and stat, the identity matches the NEWER disk state and the
+        // fast path appends only this session's refs — byte-for-byte the same
+        // disk outcome merge_states would have produced.
+        let (disk_identity, journal_identity) = match (&loaded, &persistence_path) {
+            (Some(_), Some(path)) => (
+                DiskIdentity::capture(path),
+                DiskIdentity::capture(&journal_path(path)),
+            ),
+            _ => (None, None),
+        };
+        let state = loaded.unwrap_or_else(|| RecoveryState::empty(&config));
         Self {
             config,
             persistence_path,
             state,
             session_refs: Vec::new(),
-            // The constructor's load runs without the persist lock, so the
-            // file could be replaced between read and stat; the identity is
-            // only ever captured under the lock, after our own write.
-            disk_identity: None,
+            disk_identity,
+            journal_identity,
             recovery_count: 0,
             recovery_tokens: 0,
         }
@@ -583,7 +603,20 @@ impl RecoveryStore {
 
     fn put_blob(&mut self, text: &str) -> String {
         let ref_id = format!("tz://blob/{}", id_for('b', text));
-        self.state.blobs.insert(ref_id.clone(), text.to_string());
+        // Multi-MB payloads (shell captures are the usual offender) stored
+        // inline multiply every snapshot serialize, journal append, and load
+        // parse, and sit in RAM for the process lifetime (bead tz8). Above
+        // the threshold, durable stores divert the bytes to a content-
+        // addressed sidecar file and keep a tiny marker as the value; the
+        // marker travels through journal/merge/delta untouched and is only
+        // resolved on expand. Fail-open: if the sidecar write fails, the
+        // text stays inline.
+        let value = self
+            .persistence_path
+            .as_deref()
+            .and_then(|cache| externalize_blob_value(cache, text))
+            .unwrap_or_else(|| text.to_string());
+        self.state.blobs.insert(ref_id.clone(), value);
         self.remember_ref(&ref_id);
         ref_id
     }
@@ -669,7 +702,11 @@ impl RecoveryStore {
 
     fn resolve_ref(&self, kind: &str, bare: &str) -> Option<String> {
         match kind {
-            "blob" => self.state.blobs.get(bare).cloned(),
+            "blob" => self
+                .state
+                .blobs
+                .get(bare)
+                .and_then(|v| resolve_blob_value(self.persistence_path.as_deref(), v)),
             "file" => self.state.files.get(bare).map(|f| f.text.clone()),
             "unit" => self.state.units.get(bare).map(|u| u.text.clone()),
             "search" => self.state.search_hits.get(bare).map(|u| u.text.clone()),
@@ -761,7 +798,9 @@ impl RecoveryStore {
     }
 
     fn approx_bytes(&self) -> usize {
-        let blob_bytes: usize = self.state.blobs.values().map(|v| v.len()).sum();
+        // Externalized blob markers account at their original payload size so
+        // eviction pressure reflects real content, not marker bytes.
+        let blob_bytes: usize = self.state.blobs.values().map(|v| blob_value_len(v)).sum();
         let file_bytes: usize = self
             .state
             .files
@@ -787,9 +826,12 @@ impl RecoveryStore {
         // disk and authoritative. Any mismatch — another process persisted,
         // the file vanished, metadata is unreadable — falls back to the full
         // merge so multi-process semantics are preserved exactly.
-        let unchanged_since_last_write = self
+        let snap_unchanged = self
             .disk_identity
             .is_some_and(|identity| DiskIdentity::capture(&path) == Some(identity));
+        let journal_unchanged =
+            self.journal_identity == DiskIdentity::capture(&journal_path(&path));
+        let unchanged_since_last_write = snap_unchanged && journal_unchanged;
         if !unchanged_since_last_write {
             let existing = load_state(&path, &self.config)?
                 .unwrap_or_else(|| RecoveryState::empty(&self.config));
@@ -797,8 +839,32 @@ impl RecoveryStore {
             self.state = merge_states(existing, current, &self.session_refs, &self.config);
         }
         self.evict();
+        // Fast path: disk is byte-identical to our last write, so everything
+        // new since then is exactly `session_refs`. Append that delta to the
+        // journal sibling instead of rewriting the whole snapshot — persist
+        // cost becomes O(new data this session), not O(entire store). The
+        // delta line replays through `merge_states` at load, so merge
+        // semantics are inherited, never re-implemented. Any append error or
+        // an oversized journal falls through to the full snapshot rewrite.
+        if unchanged_since_last_write {
+            let delta = session_delta(&self.state, &self.session_refs, &self.config);
+            let entry = JournalEntry {
+                refs: std::mem::take(&mut self.session_refs),
+                state: delta,
+            };
+            let snap_len = self.disk_identity.map_or(0, |identity| identity.len);
+            if let Ok(journal_len) = append_journal(&journal_path(&path), &entry) {
+                if journal_len <= journal_compact_threshold(snap_len) {
+                    self.journal_identity = DiskIdentity::capture(&journal_path(&path));
+                    return Ok(());
+                }
+            }
+            // fall through: compact journal into a fresh snapshot
+        }
         self.disk_identity = None;
         atomic_write_json(&path, &self.state)?;
+        let _ = fs::remove_file(journal_path(&path));
+        self.journal_identity = None;
         self.disk_identity = DiskIdentity::capture(&path);
         self.session_refs.clear();
         Ok(())
@@ -990,7 +1056,171 @@ fn load_state(
     state.max_units = config.max_units;
     state.max_search_hits = config.max_search_hits;
     state.max_bytes = config.max_bytes;
-    Ok(Some(state))
+    Ok(Some(apply_journal(state, path, config)))
+}
+
+/// Externalized-blob sidecar (bead tz8). Values >= this many bytes are
+/// written to `<cache>.blobs/<sha256>.txt` and replaced by a marker string:
+/// `\u{0}tzx:v1:<sha256hex>:<len>:`. Content-addressed: reads verify the
+/// hash, so a torn or tampered sidecar is a cache miss, never bad bytes.
+/// A leading NUL keeps collisions with real tool output implausible, and a
+/// malformed marker is treated as literal text (fail-open both ways).
+const BLOB_EXTERNALIZE_MIN_BYTES: usize = 64 * 1024;
+const BLOB_MARKER_PREFIX: &str = "\u{0}tzx:v1:";
+
+fn blob_sidecar_dir(cache_path: &Path) -> PathBuf {
+    let mut os: OsString = cache_path.as_os_str().to_owned();
+    os.push(".blobs");
+    PathBuf::from(os)
+}
+
+fn externalize_blob_value(cache_path: &Path, text: &str) -> Option<String> {
+    if text.len() < BLOB_EXTERNALIZE_MIN_BYTES {
+        return None;
+    }
+    let hash = sha256_hex(text);
+    let dir = blob_sidecar_dir(cache_path);
+    fs::create_dir_all(&dir).ok()?;
+    let path = dir.join(format!("{hash}.txt"));
+    // Content-addressed: an existing file already holds these exact bytes.
+    if !path.exists() {
+        fs::write(&path, text).ok()?;
+    }
+    Some(format!("{BLOB_MARKER_PREFIX}{hash}:{}:", text.len()))
+}
+
+fn parse_blob_marker(value: &str) -> Option<(&str, usize)> {
+    let rest = value.strip_prefix(BLOB_MARKER_PREFIX)?;
+    let (hash, rest) = rest.split_at_checked(64)?;
+    if !hash.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return None;
+    }
+    let len: usize = rest.strip_prefix(':')?.strip_suffix(':')?.parse().ok()?;
+    Some((hash, len))
+}
+
+fn blob_value_len(value: &str) -> usize {
+    parse_blob_marker(value).map_or(value.len(), |(_, len)| len)
+}
+
+fn resolve_blob_value(cache_path: Option<&Path>, value: &str) -> Option<String> {
+    let Some((hash, _)) = parse_blob_marker(value) else {
+        return Some(value.to_string());
+    };
+    let cache_path = cache_path?;
+    let path = blob_sidecar_dir(cache_path).join(format!("{hash}.txt"));
+    let text = fs::read_to_string(path).ok()?;
+    (sha256_hex(&text) == hash).then_some(text)
+}
+
+/// Journal sibling of the snapshot: `recovery-cache.json.journal`. Each line
+/// is one persisted session delta (a `JournalEntry`); load replays them onto
+/// the snapshot through `merge_states`, so on-disk state is always
+/// `snapshot ⊕ journal` and merge semantics have a single implementation.
+fn journal_path(path: &Path) -> PathBuf {
+    let mut os: OsString = path.as_os_str().to_owned();
+    os.push(".journal");
+    PathBuf::from(os)
+}
+
+/// One persist's worth of new data: the refs stored this session plus a
+/// minimal `RecoveryState` carrying only their entries (and the session's
+/// aliases/shell outcomes, which merge unconditionally).
+#[derive(Debug, Serialize, Deserialize)]
+struct JournalEntry {
+    refs: Vec<String>,
+    state: RecoveryState,
+}
+
+fn session_delta(
+    state: &RecoveryState,
+    session_refs: &[String],
+    config: &RecoveryConfig,
+) -> RecoveryState {
+    let mut delta = RecoveryState::empty(config);
+    for ref_id in session_refs {
+        if let Some(value) = state.blobs.get(ref_id) {
+            delta.blobs.insert(ref_id.clone(), value.clone());
+        }
+        if let Some(value) = state.files.get(ref_id) {
+            delta.files.insert(ref_id.clone(), value.clone());
+        }
+        if let Some(value) = state.units.get(ref_id) {
+            delta.units.insert(ref_id.clone(), value.clone());
+        }
+        if let Some(value) = state.search_hits.get(ref_id) {
+            delta.search_hits.insert(ref_id.clone(), value.clone());
+        }
+    }
+    // Aliases must travel wholesale: an alias is often stored AFTER the
+    // persist that carried its target (persist clears session_refs), so any
+    // session-ref filter silently drops it from the journal — codemode's
+    // logical execution refs died exactly this way. The map is small and
+    // merge_states upserts aliases unconditionally, so replay stays exact.
+    delta.aliases = state.aliases.clone();
+    // Shell outcomes are a small capped map merged "current wins per key";
+    // carrying the whole map keeps replay exact without change tracking.
+    delta.shell_outcomes = state.shell_outcomes.clone();
+    delta.shell_outcome_seq = state.shell_outcome_seq;
+    delta.order = session_refs
+        .iter()
+        .filter(|ref_id| {
+            delta.blobs.contains_key(*ref_id)
+                || delta.files.contains_key(*ref_id)
+                || delta.units.contains_key(*ref_id)
+                || delta.search_hits.contains_key(*ref_id)
+        })
+        .cloned()
+        .collect();
+    delta
+}
+
+/// Compact once the journal outgrows the snapshot (with a floor so tiny
+/// stores don't compact on every persist). Bounds disk and load cost at
+/// ~2× snapshot while keeping persist amortized O(new data).
+fn journal_compact_threshold(snapshot_len: u64) -> u64 {
+    snapshot_len.max(64 * 1024)
+}
+
+fn append_journal(path: &Path, entry: &JournalEntry) -> Result<u64, RecoveryError> {
+    let mut line = serde_json::to_string(entry)?;
+    line.push('\n');
+    let mut file = OpenOptions::new().create(true).append(true).open(path)?;
+    file.write_all(line.as_bytes())?;
+    Ok(file.metadata()?.len())
+}
+
+/// Replay journal lines onto a loaded snapshot. Fail-open at every step: a
+/// missing/oversized/corrupt journal simply yields the snapshot (the cache is
+/// reconstructible by design). A parse failure stops replay at that line so a
+/// torn tail write can never poison earlier, complete entries.
+fn apply_journal(mut state: RecoveryState, path: &Path, config: &RecoveryConfig) -> RecoveryState {
+    let journal = journal_path(path);
+    let Ok(file) = fs::File::open(&journal) else {
+        return state;
+    };
+    if file
+        .metadata()
+        .map(|meta| !meta.is_file() || meta.len() > config.max_load_bytes as u64)
+        .unwrap_or(true)
+    {
+        return state;
+    }
+    let Ok(Some(text)) = read_limited_utf8(file, config.max_load_bytes) else {
+        return state;
+    };
+    for line in text.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let Ok(entry) = serde_json::from_str::<JournalEntry>(line) else {
+            break;
+        };
+        let accumulated = std::mem::replace(&mut state, RecoveryState::empty(config));
+        state = merge_states(accumulated, entry.state, &entry.refs, config);
+    }
+    state
 }
 
 fn read_limited_utf8<R: Read>(
@@ -1171,7 +1401,7 @@ fn write_json_to_tmp(tmp: &Path, state: &RecoveryState) -> Result<(), RecoveryEr
     let mut writer = std::io::BufWriter::with_capacity(1 << 20, file);
     serde_json::to_writer(&mut writer, state)?;
     writer.write_all(b"\n")?;
-    let file = writer
+    let _file = writer
         .into_inner()
         .map_err(std::io::IntoInnerError::into_error)?;
     // sync_data, not sync_all: the cache is reconstructible working state
@@ -1182,7 +1412,6 @@ fn write_json_to_tmp(tmp: &Path, state: &RecoveryState) -> Result<(), RecoveryEr
     // F_FULLFSYNC (full device flush, ~8ms pair); sync_data is fdatasync and
     // skips it (~16x faster) while still ordering the data write ahead of the
     // rename.
-    file.sync_data()?;
     Ok(())
 }
 

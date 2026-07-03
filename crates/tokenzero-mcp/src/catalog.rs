@@ -847,7 +847,9 @@ fn expand_schema() -> Value {
             "start_line": line_property(),
             "end_line": line_property(),
             "anchor_kind": {"type": "string", "description": "Anchor kind for symbol-aware recovery."},
-            "symbol": {"type": "string", "description": "Symbol name for symbol-aware recovery."}
+            "symbol": {"type": "string", "description": "Symbol name for symbol-aware recovery."},
+            "since": {"type": "string", "pattern": "^tz://", "description": "tz:// ref baseline for unified diff; errors if not recoverable."},
+            "fresh": fresh_property()
         }),
         &["ref"],
     )

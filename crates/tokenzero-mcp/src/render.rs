@@ -33,6 +33,17 @@ pub(crate) fn expansion_response(result: ExpansionResult, recovery_tokens: usize
     )
 }
 
+pub(crate) fn unchanged_since_expand_ack(since_ref: &str) -> String {
+    format!("unchanged since {since_ref}")
+}
+
+pub(crate) fn expand_since_diff_text(since_ref: &str, target_ref: &str, diff_body: &str) -> String {
+    format!(
+        "# expand {target_ref} — diff since {since_ref}
+{diff_body}"
+    )
+}
+
 pub(crate) fn common_content_type(content_types: &[ContentType]) -> ContentType {
     let Some(first) = content_types.first().copied() else {
         return ContentType::Unknown;

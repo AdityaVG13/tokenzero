@@ -20,6 +20,7 @@ mod engine_read;
 mod engine_search;
 mod engine_session;
 mod engine_shell;
+mod expand_params;
 mod fetch_cache;
 mod fetch_guard;
 mod jsonrpc;
@@ -29,6 +30,7 @@ mod recall;
 mod render;
 mod resources;
 mod session;
+mod session_persist;
 mod stdio;
 mod supervisor;
 mod tools;
@@ -129,7 +131,7 @@ pub struct TokenZeroEngine {
     /// Resolved rg binary, looked up once per engine instance.
     rg_binary: OnceLock<Option<PathBuf>>,
     /// Session-lifetime seen-set for the redundancy layer (docs/routing.md
-    /// §5). In-memory only; dies with the server process by design.
+    /// §5). Loaded from `session-memory.json` when dedup is enabled.
     session: Mutex<SessionMemory>,
     /// Single-flight gate: ServeKeys currently being served, with a condvar
     /// to wake waiters. Two pipelined identical reads on the 4-worker pool
@@ -144,6 +146,8 @@ pub struct TokenZeroEngine {
     /// Per-tool call observability; session counters plus a cross-session
     /// sidecar next to the recovery cache.
     metrics: metrics::ToolMetrics,
+    /// Disk-backed seen-set; `None` when session dedup is off.
+    session_persist: Option<session_persist::SessionPersistence>,
 }
 
 #[cfg(test)]

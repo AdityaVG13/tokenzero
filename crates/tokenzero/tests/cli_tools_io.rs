@@ -283,7 +283,15 @@ fn cli_codemode_plan_error_exits_nonzero() {
     assert!(!output.status.success());
     let json: Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(json["status"], "error");
-    assert!(json["error"].as_str().unwrap().contains("unknown method"));
+    // Structured error contract: { kind, message, retryable } — the message
+    // stays INLINE (judgment path: an agent must see why the plan failed
+    // without an extra expand round-trip).
+    assert!(
+        json["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("unknown method")
+    );
 }
 
 #[test]

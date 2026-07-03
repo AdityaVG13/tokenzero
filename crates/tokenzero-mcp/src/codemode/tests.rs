@@ -668,31 +668,49 @@ fn parity_read_plan_vs_direct_identical_output() {
 
 #[test]
 fn parity_grep_plan_vs_direct_identical_matches() {
-    let work = tempfile::tempdir().unwrap();
-    let src = work.path().join("code.rs");
-    fs::write(&src, "fn main() {}\nfn helper() {}\nstruct Foo;\n").unwrap();
-    let dir = serde_json::to_string(work.path().to_str().unwrap()).unwrap();
-    let opts = CodeModeOptions {
-        root: Some(work.path().to_path_buf()),
-        ..Default::default()
+    // Parity is about MARSHALING (statement form vs plan form), not session
+    // economics: running both against one shared store makes the second
+    // serve a legitimate seen-set dedup and the comparison meaningless.
+    // Isolate each form in its own root with identical content and compare
+    // modulo the root path.
+    let run = |plan_tpl: &str| {
+        let work = tempfile::tempdir().unwrap();
+        fs::write(
+            work.path().join("code.rs"),
+            "fn main() {}\nfn helper() {}\nstruct Foo;\n",
+        )
+        .unwrap();
+        let dir = serde_json::to_string(work.path().to_str().unwrap()).unwrap();
+        let opts = CodeModeOptions {
+            root: Some(work.path().to_path_buf()),
+            ..Default::default()
+        };
+        let result = execute_codemode_with_options(&plan_tpl.replace("{dir}", &dir), opts);
+        assert_eq!(
+            result.status,
+            CodeModeStatus::Completed,
+            "{:?}",
+            result.error
+        );
+        let val = result.value.unwrap();
+        let root = work.path().to_str().unwrap().to_string();
+        (val, root)
     };
 
-    let direct =
-        execute_codemode_with_options(&format!(r#"await zero.grep("fn", {dir})"#), opts.clone());
-    let plan = execute_codemode_with_options(
-        &format!(r#"const g = await zero.grep("fn", {dir}); return g"#),
-        opts.clone(),
-    );
+    let (d_val, d_root) = run(r#"await zero.grep("fn", {dir})"#);
+    let (p_val, p_root) = run(r#"const g = await zero.grep("fn", {dir}); return g"#);
 
-    assert_eq!(direct.status, CodeModeStatus::Completed);
-    assert_eq!(plan.status, CodeModeStatus::Completed);
-    let d_val = direct.value.unwrap();
-    let p_val = plan.value.unwrap();
+    let normalize = |val: &serde_json::Value, root: &str| {
+        val["text"]
+            .as_str()
+            .unwrap_or_default()
+            .replace(root, "<ROOT>")
+    };
     assert_eq!(
-        d_val["text"], p_val["text"],
-        "grep results must be identical"
+        normalize(&d_val, &d_root),
+        normalize(&p_val, &p_root),
+        "grep results must be identical modulo root path"
     );
-    assert_eq!(d_val["ref"], p_val["ref"]);
 }
 
 #[test]

@@ -44,13 +44,13 @@
           "description": "Read a file, grep for pattern, filter results, compact output",
           "plan_ops": 3,
           "equivalent_direct_calls": 3,
-          "plan_visible_tokens": 800,
+          "plan_visible_tokens": 134,
           "plan_raw_tokens": 1207,
-          "direct_visible_tokens": 2900,
+          "direct_visible_tokens": 870,
           "direct_raw_tokens": 1921,
-          "plan_duration_ms": 2213,
-          "direct_duration_ms": 5932,
-          "composition_savings_pct": 72.4,
+          "plan_duration_ms": 1689,
+          "direct_duration_ms": 2300,
+          "composition_savings_pct": 84.6,
           "round_trip_savings_pct": 37.2
         },
         {
@@ -58,13 +58,13 @@
           "description": "Run multiple shell commands and aggregate results in one plan",
           "plan_ops": 3,
           "equivalent_direct_calls": 3,
-          "plan_visible_tokens": 270,
-          "plan_raw_tokens": 153,
-          "direct_visible_tokens": 548,
-          "direct_raw_tokens": 153,
-          "plan_duration_ms": 3573,
-          "direct_duration_ms": 4328,
-          "composition_savings_pct": 50.7,
+          "plan_visible_tokens": 203,
+          "plan_raw_tokens": 173,
+          "direct_visible_tokens": 546,
+          "direct_raw_tokens": 173,
+          "plan_duration_ms": 86,
+          "direct_duration_ms": 131,
+          "composition_savings_pct": 62.8,
           "round_trip_savings_pct": 0.0
         },
         {
@@ -74,11 +74,11 @@
           "equivalent_direct_calls": 2,
           "plan_visible_tokens": 261,
           "plan_raw_tokens": 0,
-          "direct_visible_tokens": 1323,
+          "direct_visible_tokens": 283,
           "direct_raw_tokens": 499,
-          "plan_duration_ms": 1519,
-          "direct_duration_ms": 4570,
-          "composition_savings_pct": 80.3,
+          "plan_duration_ms": 44,
+          "direct_duration_ms": 50,
+          "composition_savings_pct": 7.8,
           "round_trip_savings_pct": 100.0
         },
         {
@@ -86,22 +86,22 @@
           "description": "Explore project structure: tree + glob + targeted reads in one plan",
           "plan_ops": 3,
           "equivalent_direct_calls": 3,
-          "plan_visible_tokens": 942,
+          "plan_visible_tokens": 507,
           "plan_raw_tokens": 892,
-          "direct_visible_tokens": 1790,
+          "direct_visible_tokens": 750,
           "direct_raw_tokens": 892,
-          "plan_duration_ms": 3133,
-          "direct_duration_ms": 4328,
-          "composition_savings_pct": 47.4,
+          "plan_duration_ms": 71,
+          "direct_duration_ms": 79,
+          "composition_savings_pct": 32.4,
           "round_trip_savings_pct": 0.0
         }
       ],
       "totals": {
-        "total_plan_visible": 2273,
-        "total_plan_raw": 2252,
-        "total_direct_visible": 6561,
-        "total_direct_raw": 3465,
-        "overall_composition_savings_pct": 65.4
+        "total_plan_visible": 1105,
+        "total_plan_raw": 2272,
+        "total_direct_visible": 2449,
+        "total_direct_raw": 3485,
+        "overall_composition_savings_pct": 54.9
       }
     },
     "plan_always_cheaper_or_equal": true
