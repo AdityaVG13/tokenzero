@@ -1084,6 +1084,15 @@ pub fn split_command_string_for_platform(command: &str, platform: &str) -> Vec<S
             continue;
         }
         if ch == '\\' && quote != Some('\'') && !preserve_backslashes {
+            // POSIX: inside double quotes a backslash is literal unless it
+            // precedes $, `, ", or \ — so "a\|b" must stay a\|b (BRE
+            // alternation), not collapse to a|b.
+            if quote == Some('"') && !matches!(chars.peek().copied(), Some('$' | '`' | '"' | '\\'))
+            {
+                current.push('\\');
+                token_started = true;
+                continue;
+            }
             escaped = true;
             token_started = true;
             continue;
@@ -1154,38 +1163,63 @@ fn contains_shell_syntax_with_single_quotes(value: &str, single_quote_groups: bo
     }
     let mut quote: Option<char> = None;
     let mut escaped = false;
+    let mut at_word_start = true;
     let chars: Vec<char> = value.chars().collect();
     let mut index = 0;
     while index < chars.len() {
         let ch = chars[index];
         if escaped {
             escaped = false;
+            at_word_start = false;
             index += 1;
             continue;
         }
         if ch == '\\' && quote != Some('\'') {
             escaped = true;
+            at_word_start = false;
             index += 1;
             continue;
         }
         if Some(ch) == quote {
             quote = None;
+            at_word_start = false;
             index += 1;
             continue;
         }
         if quote.is_none() && (ch == '"' || ch == '\'' && single_quote_groups) {
             quote = Some(ch);
+            at_word_start = false;
             index += 1;
             continue;
         }
+        let next = chars.get(index + 1).copied();
+        // Parameter expansion happens in unquoted and double-quoted contexts:
+        // routing $VAR/${...}/$( through a real shell preserves expansion
+        // instead of direct-exec'ing the literal bytes.
+        if quote != Some('\'')
+            && ch == '$'
+            && next.is_some_and(|next| {
+                next == '(' || next == '{' || next == '_' || next.is_ascii_alphabetic()
+            })
+        {
+            return true;
+        }
         if quote.is_none() {
-            let next = chars.get(index + 1).copied();
-            if matches!(ch, '|' | ';' | '>' | '<' | '`' | '\n')
-                || ch == '&' && next == Some('&')
-                || ch == '$' && next == Some('(')
+            if matches!(ch, '|' | ';' | '>' | '<' | '`' | '\n') || ch == '&' && next == Some('&') {
+                return true;
+            }
+            // Tilde expansion only applies to an unquoted word-leading ~.
+            if ch == '~'
+                && at_word_start
+                && next.is_none_or(|next| {
+                    next == '/' || next.is_whitespace() || next.is_ascii_alphanumeric()
+                })
             {
                 return true;
             }
+            at_word_start = ch.is_whitespace();
+        } else {
+            at_word_start = false;
         }
         index += 1;
     }

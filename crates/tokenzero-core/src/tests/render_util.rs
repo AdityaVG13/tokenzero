@@ -15,6 +15,70 @@ fn summarize_tokens_keeps_critical_lines_even_over_budget() {
 }
 
 #[test]
+fn repo_inventory_requires_inventory_only_segments() {
+    assert!(is_repo_inventory_command("ls -la src"));
+    assert!(is_repo_inventory_command(
+        "find . -type f | sort | wc -l && find . -type f | sort"
+    ));
+    // "ls -" substring inside another word is not an inventory command.
+    assert!(!is_repo_inventory_command("tools -v"));
+    // A non-lister segment means its output would be swallowed as paths.
+    assert!(!is_repo_inventory_command(
+        "ls -d .graphzero; graphzero index ."
+    ));
+    assert!(!is_repo_inventory_command("ls src && cargo build"));
+}
+
+#[test]
+fn mixed_multi_command_never_takes_search_view() {
+    // A non-search segment's output must not be labeled as search matches.
+    assert!(!crate::render::domain::is_search_shell_command(
+        "grep -rn foo src/; ls crates/"
+    ));
+    assert!(!crate::render::domain::is_search_shell_command(
+        "ls crates && grep -rln foo crates"
+    ));
+    assert!(!crate::render::domain::is_search_shell_command(
+        "grep foo file | xargs rm"
+    ));
+    // Pure search plus line filters keeps the search view.
+    assert!(crate::render::domain::is_search_shell_command(
+        "grep -rn foo src/ | head -20"
+    ));
+    assert!(crate::render::domain::is_search_shell_command(
+        "rg foo | sort | uniq -c | tail -5"
+    ));
+    assert!(crate::render::domain::is_search_shell_command(
+        "grep foo a.txt"
+    ));
+    // Filters alone are not a search.
+    assert!(!crate::render::domain::is_search_shell_command(
+        "head -5 a.txt"
+    ));
+
+    let structured = structured_shell_view(
+        "grep -rn foo src/; ls crates/",
+        "src/a.rs:1:foo\ncrate-a\ncrate-b",
+        "",
+    );
+    assert!(
+        !structured.starts_with("search_summary:"),
+        "mixed command must not render as search matches: {structured}"
+    );
+
+    let family = shell_family(
+        "grep -rn foo src/; ls crates/",
+        "src/a.rs:1:foo\ncrate-a",
+        "",
+    );
+    assert_ne!(family, "search");
+    assert_eq!(
+        shell_family("grep -rn foo src/", "src/a.rs:1:foo", ""),
+        "search"
+    );
+}
+
+#[test]
 fn critical_lines_marks_every_gap_instead_of_silently_dropping() {
     let mut lines: Vec<String> = (0..180).map(|idx| format!("pattern-{idx}")).collect();
     lines[82] = "*.actual".to_string();
