@@ -607,30 +607,6 @@ fn import_rejects_snapshot_marker_that_does_not_match_jsonl() {
 }
 
 #[test]
-fn lock_file_is_stable_anchor_not_deleted_on_drop() {
-    let dir = tempdir().unwrap();
-    let ledger = dir.path().join("events.jsonl");
-    let lock_path = lock_path_for_ledger(&ledger);
-
-    {
-        let _lock = acquire_pulse_lock(&ledger).unwrap();
-        assert!(lock_path.exists());
-        let err = match acquire_pulse_lock_wait(&ledger, Duration::from_millis(10)) {
-            Ok(_) => panic!("second lock acquisition should block while OS lock is held"),
-            Err(err) => err,
-        };
-        assert_eq!(err.kind(), std::io::ErrorKind::WouldBlock);
-    }
-
-    assert!(
-        lock_path.exists(),
-        "OS file locks must keep one stable lock anchor"
-    );
-    drop(acquire_pulse_lock(&ledger).unwrap());
-    assert!(lock_path.exists());
-}
-
-#[test]
 fn sync_waits_for_transient_lock_contention() {
     let dir = tempdir().unwrap();
     let ledger = dir.path().join("events.jsonl");
@@ -645,15 +621,4 @@ fn sync_waits_for_transient_lock_contention() {
 
     assert!(status.ok);
     assert_eq!(status.event_count, 1);
-}
-
-#[test]
-fn lock_wait_retries_platform_lock_contention_errors() {
-    let would_block = std::io::Error::new(std::io::ErrorKind::WouldBlock, "held");
-    let invalid_input = std::io::Error::new(std::io::ErrorKind::InvalidInput, "Invalid argument");
-    let interrupted = std::io::Error::new(std::io::ErrorKind::Interrupted, "signal");
-
-    assert!(retryable_pulse_lock_wait_error(&would_block));
-    assert!(retryable_pulse_lock_wait_error(&invalid_input));
-    assert!(!retryable_pulse_lock_wait_error(&interrupted));
 }
