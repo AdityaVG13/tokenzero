@@ -243,7 +243,7 @@ pub(crate) fn push_archive_member_name_uninspectable(
         "path": artifact,
         "member": member,
         "reason": reason,
-        "detail": archive_member_uninspectable_detail(reason)
+        "detail": archive_uninspectable_detail(reason, "member name")
     }));
 }
 
@@ -262,21 +262,14 @@ pub(crate) fn push_archive_link_target_uninspectable(
         "link_target": target,
         "link_kind": kind.as_str(),
         "reason": reason,
-        "detail": archive_link_target_uninspectable_detail(reason)
+        "detail": archive_uninspectable_detail(reason, "link target")
     }));
 }
 
-pub(crate) fn archive_member_uninspectable_detail(reason: &str) -> &'static str {
+pub(crate) fn archive_uninspectable_detail(reason: &str, label: &str) -> String {
     match reason {
-        "invalid_utf8" => "archive member name is not valid UTF-8; package-audit fails closed",
-        _ => "archive member name contains a control character; package-audit fails closed",
-    }
-}
-
-pub(crate) fn archive_link_target_uninspectable_detail(reason: &str) -> &'static str {
-    match reason {
-        "invalid_utf8" => "archive link target is not valid UTF-8; package-audit fails closed",
-        _ => "archive link target contains a control character; package-audit fails closed",
+        "invalid_utf8" => format!("archive {label} is not valid UTF-8; package-audit fails closed"),
+        _ => format!("archive {label} contains a control character; package-audit fails closed"),
     }
 }
 

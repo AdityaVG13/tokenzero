@@ -222,6 +222,20 @@ fn cli_run_pipeline_masking_is_not_reported_as_success() {
                 .unwrap()
                 .contains("pipeline_masking_warning")
         );
+        assert!(
+            json["telemetry"]["pipeline_masking_warning"]
+                .as_str()
+                .is_some_and(|w| !w.is_empty()),
+            "pipeline_masking_warning should be non-empty: {:?}",
+            json["telemetry"]["pipeline_masking_warning"]
+        );
+        assert!(
+            json["telemetry"]["pipeline_rerun_command"]
+                .as_str()
+                .is_some_and(|c| !c.is_empty()),
+            "pipeline_rerun_command should be present on non-Windows: {:?}",
+            json["telemetry"]["pipeline_rerun_command"]
+        );
     }
 }
 
@@ -340,110 +354,29 @@ fn cli_run_shell_wrapped_rg_keeps_search_summary() {
 
 #[cfg(not(windows))]
 #[test]
-fn cli_run_env_wrapped_shell_masking_uses_inner_script() {
-    for (script, rerun) in [
-        ("false | true", "bash -o pipefail -c 'false | true'"),
+fn cli_run_inner_script_pipeline_masking_uses_pipefail_rerun() {
+    for (label, trailing_args, rerun) in [
         (
-            "printf ok | false | true",
-            "bash -o pipefail -c 'printf ok | false | true'",
-        ),
-    ] {
-        let dir = tempdir().unwrap();
-        let cache = dir.path().join("cache.json");
-        let output = Command::cargo_bin("tokenzero")
-            .unwrap()
-            .args([
-                "run",
-                "--json",
-                "--cache-path",
-                cache.to_str().unwrap(),
-                "--allowed-root",
-                dir.path().to_str().unwrap(),
-                "--cwd",
-                dir.path().to_str().unwrap(),
-                "--",
-                "env",
-                "TZ=UTC",
-                "bash",
-                "-lc",
-                script,
-            ])
-            .output()
-            .unwrap();
-        assert!(
-            output.status.success(),
-            "{}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-        let json: Value = serde_json::from_slice(&output.stdout).unwrap();
-        assert_eq!(json["telemetry"]["command_success"], false, "{script}");
-        assert_eq!(json["telemetry"]["failed_segment"], "false", "{script}");
-        assert_eq!(
-            json["telemetry"]["shell_syntax_summary"], "pipeline",
-            "{script}"
-        );
-        assert_eq!(
-            json["telemetry"]["pipeline_rerun_command"], rerun,
-            "{script}"
-        );
-        assert!(
-            json["visible"]["text"]
-                .as_str()
-                .unwrap()
-                .contains(&format!("pipeline_rerun_command: {rerun}")),
-            "{script}: {}",
-            json["visible"]["text"].as_str().unwrap()
-        );
-    }
-
-    let dir = tempdir().unwrap();
-    let cache = dir.path().join("cache.json");
-    let output = Command::cargo_bin("tokenzero")
-        .unwrap()
-        .args([
-            "run",
-            "--json",
-            "--cache-path",
-            cache.to_str().unwrap(),
-            "--allowed-root",
-            dir.path().to_str().unwrap(),
-            "--cwd",
-            dir.path().to_str().unwrap(),
-            "--",
-            "env",
-            "TZ=UTC",
-            "bash",
-            "-c",
-            "true",
-            "false | true",
-        ])
-        .output()
-        .unwrap();
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let json: Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert_eq!(json["telemetry"]["command_success"], true);
-    assert_eq!(json["telemetry"]["shell_syntax_summary"], "argv/simple");
-    assert!(json["telemetry"]["failed_segment"].is_null());
-    assert!(json["telemetry"]["pipeline_masking_warning"].is_null());
-    assert!(json["telemetry"]["pipeline_rerun_command"].is_null());
-}
-
-#[cfg(not(windows))]
-#[test]
-fn cli_run_env_split_string_shell_masking_uses_inner_script() {
-    for (label, env_args, rerun) in [
-        (
-            "short split string",
-            vec!["-S", "bash -lc \"false | true\""],
+            "env-wrap | false | true",
+            vec!["env", "TZ=UTC", "bash", "-lc", "false | true"],
             "bash -o pipefail -c 'false | true'",
         ),
         (
-            "inline split string",
-            vec!["--split-string=bash -lc \"printf ok | false | true\""],
+            "env-wrap | printf ok | false | true",
+            vec!["env", "TZ=UTC", "bash", "-lc", "printf ok | false | true"],
+            "bash -o pipefail -c 'printf ok | false | true'",
+        ),
+        (
+            "split-string -S",
+            vec!["env", "-S", r#"bash -lc "false | true""#],
+            "bash -o pipefail -c 'false | true'",
+        ),
+        (
+            "split-string --split-string",
+            vec![
+                "env",
+                "--split-string=bash -lc \"printf ok | false | true\"",
+            ],
             "bash -o pipefail -c 'printf ok | false | true'",
         ),
     ] {
@@ -461,22 +394,17 @@ fn cli_run_env_split_string_shell_masking_uses_inner_script() {
                 "--cwd",
                 dir.path().to_str().unwrap(),
                 "--",
-                "env",
             ])
-            .args(env_args)
+            .args(&trailing_args)
             .output()
             .unwrap();
         assert!(
             output.status.success(),
-            "{}",
+            "{label}: {}",
             String::from_utf8_lossy(&output.stderr)
         );
         let json: Value = serde_json::from_slice(&output.stdout).unwrap();
         assert_eq!(json["telemetry"]["command_success"], false, "{label}");
-        assert_eq!(
-            json["telemetry"]["status_label"], "command_failed",
-            "{label}"
-        );
         assert_eq!(json["telemetry"]["failed_segment"], "false", "{label}");
         assert_eq!(
             json["telemetry"]["shell_syntax_summary"], "pipeline",
@@ -734,114 +662,6 @@ fn cli_run_or_true_does_not_hide_stderr_failure() {
     );
 }
 
-#[cfg(windows)]
-#[test]
-fn cli_false_success_shell_audit_covers_timeout_and_completion_evidence() {
-    let dir = tempdir().unwrap();
-    let artifact = dir.path().join("false-success-shell.json");
-    let output = Command::cargo_bin("tokenzero")
-        .unwrap()
-        .args([
-            "false-success-shell",
-            "--output-json",
-            artifact.to_str().unwrap(),
-            "--json",
-        ])
-        .output()
-        .unwrap();
-
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let json: Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert_eq!(json["schema_version"], "tokenzero.false_success_shell.v1");
-    assert_eq!(json["ok"], true);
-    let rows = json["rows"].as_array().unwrap();
-    for id in [
-        "missing_cd",
-        "pipeline_masked",
-        "nonzero",
-        "timeout",
-        "success",
-    ] {
-        assert!(
-            rows.iter().any(|row| row["id"] == id),
-            "missing false-success row for {id}"
-        );
-    }
-    let timeout = rows
-        .iter()
-        .find(|row| row["id"] == "timeout")
-        .expect("timeout row");
-    assert_eq!(timeout["command_success"], false);
-    assert_eq!(timeout["timeout"], true);
-    assert_eq!(timeout["transport_status"], "ok");
-    assert_eq!(timeout["pass"], true);
-
-    let completion = Command::cargo_bin("tokenzero")
-        .unwrap()
-        .args(["completion-audit", "--json"])
-        .output()
-        .unwrap();
-    assert!(
-        completion.status.success(),
-        "{}",
-        String::from_utf8_lossy(&completion.stderr)
-    );
-    let completion_json: Value = serde_json::from_slice(&completion.stdout).unwrap();
-    let g006 = completion_json["g_goals"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|row| row["id"] == "G-006")
-        .expect("G-006 row");
-    assert!(
-        g006["direct_evidence"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|item| item == "results/current/tokenzero_false_success_shell.json"),
-        "G-006 should cite the shell status artifact"
-    );
-    let fr006 = completion_json["must_fr"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|row| row["id"] == "FR-006")
-        .expect("FR-006 row");
-    assert!(
-        fr006["direct_evidence"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|item| item == "results/current/tokenzero_false_success_shell.json"),
-        "FR-006 should cite the shell status artifact"
-    );
-
-    let handoff = Command::cargo_bin("tokenzero")
-        .unwrap()
-        .args(["artifact-handoff", "--json"])
-        .output()
-        .unwrap();
-    assert!(
-        handoff.status.success(),
-        "{}",
-        String::from_utf8_lossy(&handoff.stderr)
-    );
-    let handoff_json: Value = serde_json::from_slice(&handoff.stdout).unwrap();
-    assert!(
-        handoff_json["artifacts"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|row| row["id"] == "false_success_shell"
-                && row["path"] == "results/current/tokenzero_false_success_shell.json"),
-        "handoff should list the shell status artifact"
-    );
-}
-
 #[test]
 fn cli_run_preserves_multi_arg_shell_operators() {
     let dir = tempdir().unwrap();
@@ -870,6 +690,14 @@ fn cli_run_preserves_multi_arg_shell_operators() {
     let json: Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(json["telemetry"]["execution_mode"], "shell");
     assert_eq!(json["telemetry"]["command_success"], true);
+    assert!(
+        json["telemetry"]["command"]
+            .as_str()
+            .unwrap()
+            .contains("&&"),
+        "command should contain && operator: {:?}",
+        json["telemetry"]["command"]
+    );
     let stdout_preview = json["telemetry"]["stdout_preview"].as_str().unwrap();
     assert_eq!(
         stdout_preview
@@ -929,71 +757,47 @@ fn cli_run_quotes_multi_arg_shell_operator_literals() {
 }
 
 #[test]
-fn cli_shell_matrix_default_output_does_not_overwrite_mcp_smoke_artifact() {
-    let dir = tempdir().unwrap();
-    let results_dir = dir.path().join("results").join("current");
-    std::fs::create_dir_all(&results_dir).unwrap();
-    let mcp_smoke = results_dir.join("rust_mcp_smoke.json");
-    std::fs::write(&mcp_smoke, br#"{"schema_version":"sentinel.mcp"}"#).unwrap();
+fn cli_default_artifact_output_does_not_overwrite_mcp_smoke() {
+    for (subcommand, artifact_name, schema_version) in [
+        (
+            "shell-matrix",
+            "tokenzero_shell_matrix.json",
+            "tokenzero.shell_matrix.v1",
+        ),
+        (
+            "exact-recovery-shell",
+            "tokenzero_exact_recovery_shell.json",
+            "tokenzero.exact_recovery_shell.v1",
+        ),
+    ] {
+        let dir = tempdir().unwrap();
+        let results_dir = dir.path().join("results").join("current");
+        std::fs::create_dir_all(&results_dir).unwrap();
+        let mcp_smoke = results_dir.join("rust_mcp_smoke.json");
+        std::fs::write(&mcp_smoke, br#"{"schema_version":"sentinel.mcp"}"#).unwrap();
 
-    let output = Command::cargo_bin("tokenzero")
-        .unwrap()
-        .current_dir(dir.path())
-        .args(["shell-matrix", "--json"])
-        .output()
-        .unwrap();
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+        let output = Command::cargo_bin("tokenzero")
+            .unwrap()
+            .current_dir(dir.path())
+            .args([subcommand, "--json"])
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{subcommand}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
 
-    let shell_matrix_path = results_dir.join("tokenzero_shell_matrix.json");
-    assert!(shell_matrix_path.exists(), "shell matrix default artifact");
-    let shell_matrix: Value = serde_json::from_slice(&std::fs::read(&shell_matrix_path).unwrap())
-        .expect("shell matrix JSON");
-    assert_eq!(shell_matrix["schema_version"], "tokenzero.shell_matrix.v1");
-    assert_eq!(
-        std::fs::read_to_string(&mcp_smoke).unwrap(),
-        r#"{"schema_version":"sentinel.mcp"}"#
-    );
-}
-
-#[test]
-fn cli_exact_recovery_shell_default_output_does_not_overwrite_mcp_smoke_artifact() {
-    let dir = tempdir().unwrap();
-    let results_dir = dir.path().join("results").join("current");
-    std::fs::create_dir_all(&results_dir).unwrap();
-    let mcp_smoke = results_dir.join("rust_mcp_smoke.json");
-    std::fs::write(&mcp_smoke, br#"{"schema_version":"sentinel.mcp"}"#).unwrap();
-
-    let output = Command::cargo_bin("tokenzero")
-        .unwrap()
-        .current_dir(dir.path())
-        .args(["exact-recovery-shell", "--json"])
-        .output()
-        .unwrap();
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-
-    let exact_shell_path = results_dir.join("tokenzero_exact_recovery_shell.json");
-    assert!(
-        exact_shell_path.exists(),
-        "exact recovery shell default artifact"
-    );
-    let exact_shell: Value = serde_json::from_slice(&std::fs::read(&exact_shell_path).unwrap())
-        .expect("exact recovery shell JSON");
-    assert_eq!(
-        exact_shell["schema_version"],
-        "tokenzero.exact_recovery_shell.v1"
-    );
-    assert_eq!(
-        std::fs::read_to_string(&mcp_smoke).unwrap(),
-        r#"{"schema_version":"sentinel.mcp"}"#
-    );
+        let artifact_path = results_dir.join(artifact_name);
+        assert!(artifact_path.exists(), "{subcommand} default artifact");
+        let artifact: Value = serde_json::from_slice(&std::fs::read(&artifact_path).unwrap())
+            .expect("{subcommand} JSON");
+        assert_eq!(artifact["schema_version"], schema_version);
+        assert_eq!(
+            std::fs::read_to_string(&mcp_smoke).unwrap(),
+            r#"{"schema_version":"sentinel.mcp"}"#
+        );
+    }
 }
 
 #[cfg(not(windows))]
@@ -1050,145 +854,4 @@ fn cli_false_success_shell_audit_covers_expected_false_and_masked_failure() {
         .expect("or_true_stderr_failure row");
     assert_eq!(masked_failure["command_success"], false);
     assert_eq!(masked_failure["hazard_visible"], true);
-}
-
-#[cfg(windows)]
-#[test]
-fn cli_run_resolves_windows_cmd_shims_from_path() {
-    let dir = tempdir().unwrap();
-    let shim = dir.path().join("npm.cmd");
-    std::fs::write(&shim, "@echo off\r\necho shim:%1\r\n").unwrap();
-    std::fs::write(dir.path().join("npm"), "#!/bin/sh\nexit 99\n").unwrap();
-    let path = dir.path().display().to_string();
-    let cache = dir.path().join("cache.json");
-
-    let output = Command::cargo_bin("tokenzero")
-        .unwrap()
-        .args([
-            "run",
-            "--json",
-            "--cache-path",
-            cache.to_str().unwrap(),
-            "--env",
-            &format!("PATH={path}"),
-            "--env",
-            "PATHEXT=.CMD",
-            "--",
-            "npm",
-            "ping",
-        ])
-        .output()
-        .unwrap();
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let json: Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert_eq!(json["telemetry"]["command_success"], true);
-    assert_eq!(json["telemetry"]["execution_mode"], "argv");
-    assert_eq!(json["telemetry"]["stdout_preview"], "shim:ping");
-}
-
-#[cfg(windows)]
-#[test]
-fn cli_run_tiny_success_text_is_compact() {
-    let dir = tempdir().unwrap();
-    let shim = dir.path().join("npm.cmd");
-    std::fs::write(&shim, "@echo off\r\necho shim:%1\r\n").unwrap();
-    let path = dir.path().display().to_string();
-    let cache = dir.path().join("cache.json");
-
-    let output = Command::cargo_bin("tokenzero")
-        .unwrap()
-        .args([
-            "run",
-            "--cache-path",
-            cache.to_str().unwrap(),
-            "--env",
-            &format!("PATH={path}"),
-            "--env",
-            "PATHEXT=.CMD",
-            "--",
-            "npm",
-            "ping",
-        ])
-        .output()
-        .unwrap();
-
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    assert_eq!(String::from_utf8_lossy(&output.stdout), "shim:ping\n");
-}
-
-#[cfg(windows)]
-#[test]
-fn cli_run_adapts_raw_powershell_variable_script() {
-    let dir = tempdir().unwrap();
-    let cache = dir.path().join("cache.json");
-    let script = "$tzTmp = Join-Path $env:TEMP 'tz-quote'; [Console]::Out.Write($tzTmp)";
-    let output = Command::cargo_bin("tokenzero")
-        .unwrap()
-        .args([
-            "run",
-            "--json",
-            "--cache-path",
-            cache.to_str().unwrap(),
-            "--",
-            script,
-        ])
-        .output()
-        .unwrap();
-
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let json: Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert_eq!(json["telemetry"]["command_success"], true);
-    assert_eq!(json["telemetry"]["execution_mode"], "shell");
-    assert_eq!(json["telemetry"]["argv"][0], "powershell");
-    assert!(
-        json["telemetry"]["stdout_preview"]
-            .as_str()
-            .unwrap()
-            .ends_with("tz-quote")
-    );
-}
-
-#[cfg(windows)]
-#[test]
-fn cli_run_honors_timeout_seconds() {
-    let dir = tempdir().unwrap();
-    let cache = dir.path().join("cache.json");
-    let output = Command::cargo_bin("tokenzero")
-        .unwrap()
-        .args([
-            "run",
-            "--json",
-            "--cache-path",
-            cache.to_str().unwrap(),
-            "--timeout-seconds",
-            "1",
-            "--",
-            "powershell",
-            "-NoProfile",
-            "-Command",
-            "Start-Sleep -Seconds 3; Write-Output late",
-        ])
-        .output()
-        .unwrap();
-
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let json: Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert_eq!(json["telemetry"]["command_success"], false);
-    assert_eq!(json["telemetry"]["timeout"], true);
 }

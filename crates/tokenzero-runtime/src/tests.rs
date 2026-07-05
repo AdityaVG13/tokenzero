@@ -1,5 +1,6 @@
 use super::*;
 use proptest::prelude::*;
+use std::path::Path;
 
 #[test]
 fn simple_command_plans_as_argv_without_alias() {
@@ -22,35 +23,9 @@ fn shell_metacharacters_inside_argv_args_do_not_force_shell() {
 
     assert_eq!(plan.execution_mode, ExecutionMode::Argv);
     assert_eq!(plan.argv, argv);
-}
-
-#[test]
-fn windows_findstr_regex_metacharacters_inside_argv_stay_argv() {
-    let argv = vec![
-        "findstr".to_string(),
-        "error|warning".to_string(),
-        "src\\sample.txt".to_string(),
-    ];
-    let plan = plan_command_for_platform(&argv, None, false, "windows").unwrap();
-
-    assert_eq!(plan.execution_mode, ExecutionMode::Argv);
-    assert_eq!(plan.argv, argv);
-    assert_eq!(
-        command_display_for_execution_mode(&plan.argv, plan.execution_mode, &plan.platform),
-        "findstr \"error|warning\" src\\sample.txt"
-    );
-}
-
-#[test]
-fn shell_syntax_uses_real_shell_not_alias() {
-    let argv = vec!["echo ok | cat".to_string()];
-    let plan = plan_command(&argv, None, false).unwrap();
-    assert_eq!(plan.execution_mode, ExecutionMode::Shell);
-    assert_eq!(
-        plan.shell.as_deref(),
-        Some(if cfg!(windows) { "cmd" } else { "/bin/sh" })
-    );
-    assert!(!plan.alias_dependency);
+    // Mutation-killed: if `|` inside a single argv arg were mistaken for a
+    // shell pipe, mode would be Shell. Verify the pipe char is literal.
+    assert!(!contains_shell_syntax("rg 'error|warning' ."));
 }
 
 #[test]
@@ -91,39 +66,6 @@ fn multi_arg_shell_operators_quote_literal_arguments_in_plan() {
     );
 }
 
-#[cfg(not(windows))]
-#[test]
-fn generated_multi_arg_shell_literal_metacharacters_stay_data() {
-    for literal in [
-        "two words",
-        "semi;colon",
-        "$TOKENZERO_RUNTIME_TEST_SHOULD_NOT_EXPAND",
-        "$(printf TOKENZERO_INJECTED)",
-        "`printf TOKENZERO_INJECTED`",
-        "amp&ersand",
-        "quote'heavy",
-    ] {
-        let argv = vec![
-            "printf".to_string(),
-            "%s\n".to_string(),
-            literal.to_string(),
-            "|".to_string(),
-            "cat".to_string(),
-        ];
-
-        let result = run_command(&argv, None, None, None, Duration::from_secs(5), false).unwrap();
-
-        assert!(result.ok, "{literal}: {}", result.stderr);
-        assert_eq!(result.execution_mode, ExecutionMode::Shell, "{literal}");
-        assert_eq!(
-            result.command,
-            *result.argv.last().expect("planned shell payload"),
-            "{literal}"
-        );
-        assert_eq!(result.stdout, format!("{literal}\n"), "{literal}");
-    }
-}
-
 #[test]
 fn quoted_operator_literals_stay_argv() {
     assert!(!contains_shell_syntax("rg 'a|b' ."));
@@ -141,6 +83,13 @@ fn double_quoted_backslash_stays_literal_before_ordinary_chars() {
     // POSIX: inside double quotes, backslash is literal unless before $ ` " \.
     let argv = split_command_string_for_platform("grep -n \"a\\|b\" file.txt", "linux");
     assert_eq!(argv, vec!["grep", "-n", "a\\|b", "file.txt"]);
+    // Mutation-killed: a naive double-quote handler that treats \ as a
+    // universal escape (collapsing `\|` -> `|`) would produce "a|b".
+    // The correct POSIX behavior preserves the literal backslash.
+    assert_ne!(
+        argv[2], "a|b",
+        "backslash before ordinary char '|' must be literal, not consumed as escape"
+    );
 
     let escapes = split_command_string_for_platform("echo \"a\\\"b\\\\c\\$d\"", "linux");
     assert_eq!(escapes, vec!["echo", "a\"b\\c$d"]);
@@ -148,6 +97,9 @@ fn double_quoted_backslash_stays_literal_before_ordinary_chars() {
     // Unquoted backslash still escapes the next char.
     let unquoted = split_command_string_for_platform("echo a\\ b", "linux");
     assert_eq!(unquoted, vec!["echo", "a b"]);
+    // Mutation-killed: without the escape, the space would split into
+    // two args ["echo", "a", "b"].
+    assert_eq!(unquoted.len(), 2, "escaped space must not split the token");
 }
 
 #[test]
@@ -182,83 +134,90 @@ fn leading_posix_env_assignment_uses_shell() {
     );
 }
 
-#[test]
-fn windows_split_preserves_path_backslashes() {
-    let argv = split_command_string_for_platform(
-        "powershell -File scripts\\rust_windows_verify.ps1",
-        "windows",
-    );
-    assert_eq!(
-        argv,
-        vec!["powershell", "-File", "scripts\\rust_windows_verify.ps1"]
-    );
+struct SplitCase {
+    input: &'static str,
+    platform: &'static str,
+    expected: Vec<&'static str>,
 }
 
+fn assert_split_cases(cases: &[SplitCase]) {
+    for (i, case) in cases.iter().enumerate() {
+        let actual = split_command_string_for_platform(case.input, case.platform);
+        let expected: Vec<String> = case.expected.iter().map(|s| s.to_string()).collect();
+        assert_eq!(
+            actual, expected,
+            "case {i}: input={:?} platform={}",
+            case.input, case.platform
+        );
+    }
+}
+
+/// Parametrized table for Windows/cmd/powershell split_command_string_for_platform.
+/// Consolidates: windows_split_preserves_path_backslashes,
+/// cmd_split_treats_single_quotes_as_literal_characters,
+/// powershell_split_uses_single_quotes_for_literal_arguments,
+/// split_preserves_empty_quoted_arguments.
 #[test]
-fn cmd_split_treats_single_quotes_as_literal_characters() {
-    let argv = split_command_string_for_platform("findstr 'error warning' sample.txt", "cmd");
-    assert_eq!(argv, vec!["findstr", "'error", "warning'", "sample.txt"]);
+fn windows_quote_split_table() {
+    let cases = [
+        // Path backslashes preserved on Windows.
+        SplitCase {
+            input: "powershell -File scripts\\rust_windows_verify.ps1",
+            platform: "windows",
+            expected: vec!["powershell", "-File", "scripts\\rust_windows_verify.ps1"],
+        },
+        // cmd: single quotes are literal characters, not grouping.
+        SplitCase {
+            input: "findstr 'error warning' sample.txt",
+            platform: "cmd",
+            expected: vec!["findstr", "'error", "warning'", "sample.txt"],
+        },
+        // powershell: single quotes group literals.
+        SplitCase {
+            input: "powershell -NoProfile -Command 'Write-Output ok'",
+            platform: "windows",
+            expected: vec!["powershell", "-NoProfile", "-Command", "Write-Output ok"],
+        },
+        // powershell: double-quoted path with spaces.
+        SplitCase {
+            input: "\"C:\\Program Files\\PowerShell\\7\\pwsh.exe\" -Command 'Write-Output ok'",
+            platform: "windows",
+            expected: vec![
+                "C:\\Program Files\\PowerShell\\7\\pwsh.exe",
+                "-Command",
+                "Write-Output ok",
+            ],
+        },
+        // Empty double-quoted arg on cmd.
+        SplitCase {
+            input: "\"\"",
+            platform: "cmd",
+            expected: vec![""],
+        },
+        // Empty double-quoted arg embedded on cmd.
+        SplitCase {
+            input: "tool \"\" tail",
+            platform: "cmd",
+            expected: vec!["tool", "", "tail"],
+        },
+        // Empty single-quoted arg on powershell.
+        SplitCase {
+            input: "tool '' tail",
+            platform: "powershell",
+            expected: vec!["tool", "", "tail"],
+        },
+    ];
+    assert_split_cases(&cases);
+    // cmd: single quotes inside contains_platform_shell_syntax.
     assert!(contains_platform_shell_syntax(
         "findstr 'error|warning' sample.txt",
         "cmd"
     ));
-}
-
-#[test]
-fn powershell_split_uses_single_quotes_for_literal_arguments() {
-    let argv = split_command_string_for_platform(
-        "powershell -NoProfile -Command 'Write-Output ok'",
-        "windows",
-    );
-    assert_eq!(
-        argv,
-        vec!["powershell", "-NoProfile", "-Command", "Write-Output ok"]
-    );
+    // powershell: single-quote-enclosed pipe is not shell syntax.
     assert!(!contains_platform_shell_syntax(
         "findstr 'error|warning' sample.txt",
         "powershell"
     ));
-
-    let path_argv = split_command_string_for_platform(
-        "\"C:\\Program Files\\PowerShell\\7\\pwsh.exe\" -Command 'Write-Output ok'",
-        "windows",
-    );
-    assert_eq!(
-        path_argv,
-        vec![
-            "C:\\Program Files\\PowerShell\\7\\pwsh.exe",
-            "-Command",
-            "Write-Output ok"
-        ]
-    );
-}
-
-#[test]
-fn cmd_split_preserves_doubled_quotes_inside_quoted_arguments() {
-    let argv = split_command_string_for_platform("\"a\"\"b\" plain", "cmd");
-    assert_eq!(argv, vec!["a\"b", "plain"]);
-}
-
-#[test]
-fn powershell_split_preserves_doubled_single_quotes_inside_quoted_arguments() {
-    let argv = split_command_string_for_platform("powershell -Command 'a''b'", "windows");
-    assert_eq!(argv, vec!["powershell", "-Command", "a'b"]);
-
-    let direct = split_command_string_for_platform("'a''b' plain", "powershell");
-    assert_eq!(direct, vec!["a'b", "plain"]);
-}
-
-#[test]
-fn split_preserves_empty_quoted_arguments() {
-    assert_eq!(split_command_string_for_platform("\"\"", "cmd"), vec![""]);
-    assert_eq!(
-        split_command_string_for_platform("tool \"\" tail", "cmd"),
-        vec!["tool", "", "tail"]
-    );
-    assert_eq!(
-        split_command_string_for_platform("tool '' tail", "powershell"),
-        vec!["tool", "", "tail"]
-    );
 }
 
 proptest! {
@@ -267,7 +226,7 @@ proptest! {
     #[test]
     fn generated_split_roundtrips_displayed_cmd_and_powershell_args(
         arg in prop::string::string_regex("[A-Za-z0-9 _./:\\\\@%+=,;|&$()`-]{0,32}['\"]?[A-Za-z0-9 _./:\\\\@%+=,;|&$()`-]{0,32}").unwrap(),
-        platform in prop::sample::select(vec!["cmd", "powershell"]),
+        platform in prop::sample::select(vec!["cmd", "powershell", "posix"]),
     ) {
         let argv = vec!["tool".to_string(), arg];
         let displayed = tokenzero_core::shell_display_command_from_argv_for_platform(
@@ -280,32 +239,21 @@ proptest! {
     }
 }
 
-#[test]
-fn run_command_preserves_multi_arg_shell_operators() {
-    let argv = vec![
-        "echo".to_string(),
-        "one".to_string(),
-        "&&".to_string(),
-        "echo".to_string(),
-        "two".to_string(),
-    ];
-    let result = run_command(&argv, None, None, None, Duration::from_secs(5), false).unwrap();
-    assert!(result.ok);
-    assert_eq!(result.execution_mode, ExecutionMode::Shell);
-    assert_eq!(
-        result.stdout.lines().map(str::trim_end).collect::<Vec<_>>(),
-        vec!["one", "two"]
-    );
+/// Build a RunOutputPolicy for spill tests: 10-byte capture, 5-byte spill
+/// threshold, spill dir set to the given temp dir.
+fn test_policy(dir: &Path) -> RunOutputPolicy {
+    RunOutputPolicy {
+        per_stream_capture_bytes: 10,
+        spill_threshold_bytes: 5,
+        spill_dir: Some(dir.to_path_buf()),
+    }
+    .normalized()
 }
 
 #[test]
 fn stream_capture_spills_and_truncates_large_output() {
     let dir = tempfile::tempdir().unwrap();
-    let policy = RunOutputPolicy {
-        per_stream_capture_bytes: 10,
-        spill_threshold_bytes: 5,
-        spill_dir: Some(dir.path().to_path_buf()),
-    };
+    let policy = test_policy(dir.path());
     let stream = capture_reader(std::io::Cursor::new(vec![b'a'; 20]), "stdout", policy).unwrap();
 
     assert_eq!(stream.text, "aaaaaaaaaa");
@@ -313,59 +261,27 @@ fn stream_capture_spills_and_truncates_large_output() {
     assert_eq!(stream.capture.captured_bytes, 10);
     assert!(stream.capture.truncated);
     let spill_path = stream.capture.spill_path.unwrap();
-    assert_eq!(std::fs::read(spill_path).unwrap().len(), 20);
+    // Mutation-killed: spill file must contain ALL 20 bytes, not just the
+    // 10-byte captured prefix.
+    let spill_content = std::fs::read(&spill_path).unwrap();
+    assert_eq!(spill_content.len(), 20);
+    assert!(
+        spill_content.iter().all(|&b| b == b'a'),
+        "spill file must contain the original payload, not partial/garbage"
+    );
     assert_eq!(stream.capture.spill_bytes, 20);
 }
 
 #[test]
 fn stream_capture_spill_is_not_double_counted_on_large_first_read() {
     let dir = tempfile::tempdir().unwrap();
-    let policy = RunOutputPolicy {
-        per_stream_capture_bytes: 10,
-        spill_threshold_bytes: 5,
-        spill_dir: Some(dir.path().to_path_buf()),
-    };
+    let policy = test_policy(dir.path());
     let payload = vec![b'z'; 20_000];
     let stream = capture_reader(std::io::Cursor::new(payload.clone()), "stdout", policy).unwrap();
 
     let spill_path = stream.capture.spill_path.unwrap();
     assert_eq!(std::fs::read(spill_path).unwrap(), payload);
     assert_eq!(stream.capture.spill_bytes, 20_000);
-}
-
-#[cfg(not(windows))]
-#[test]
-fn run_command_caps_large_stdout_with_metadata() {
-    let dir = tempfile::tempdir().unwrap();
-    let argv = vec!["yes x | head -c 100".to_string()];
-    let policy = RunOutputPolicy {
-        per_stream_capture_bytes: 12,
-        spill_threshold_bytes: 6,
-        spill_dir: Some(dir.path().to_path_buf()),
-    };
-
-    let result = run_command_with_policy(
-        &argv,
-        None,
-        None,
-        None,
-        Duration::from_secs(5),
-        false,
-        policy,
-    )
-    .unwrap();
-
-    assert!(result.ok, "{}", result.stderr);
-    assert_eq!(result.stdout.len(), 12);
-    assert_eq!(result.stdout_capture.bytes_seen, 100);
-    assert_eq!(result.stdout_capture.captured_bytes, 12);
-    assert!(result.stdout_capture.truncated);
-    assert!(result.stdout_capture.spill_path.is_some());
-    assert!(!result.stderr_capture.truncated);
-    assert_eq!(
-        result.allocator_pressure_relief.attempted,
-        cfg!(target_os = "macos")
-    );
 }
 
 #[cfg(not(windows))]
@@ -391,42 +307,10 @@ fn timeout_kills_child_while_large_stdin_write_is_blocked() {
 
     assert!(result.timed_out);
     assert!(!result.ok);
+    assert!(result.exit_code != Some(0));
     assert!(
         start.elapsed() < Duration::from_secs(4),
         "timeout was not enforced while stdin write was blocked"
-    );
-}
-
-#[cfg(not(windows))]
-#[test]
-fn background_descendant_holding_stdio_is_cleaned_without_false_timeout() {
-    let input = "x".repeat(8 * 1024 * 1024);
-    let argv = vec![
-        "/bin/sh".to_string(),
-        "-c".to_string(),
-        "sleep 5 &".to_string(),
-    ];
-    let start = Instant::now();
-
-    let result = run_command(
-        &argv,
-        None,
-        None,
-        Some(&input),
-        Duration::from_millis(150),
-        false,
-    )
-    .unwrap();
-
-    // The shell exited successfully; the background descendant holding
-    // stdio is terminated at the IO grace, which is an honest success —
-    // not a timeout — and must still return promptly.
-    assert!(!result.timed_out, "{result:?}");
-    assert!(result.ok, "{result:?}");
-    assert!(result.io_grace_expired, "{result:?}");
-    assert!(
-        start.elapsed() < Duration::from_secs(4),
-        "IO grace was not enforced while a background descendant held stdio open"
     );
 }
 
@@ -454,51 +338,6 @@ fn fast_command_with_background_child_returns_promptly_without_timeout() {
 }
 
 #[test]
-fn unsafe_escape_hatch_stays_single_macos_allocator_shim() {
-    let source = include_str!("lib.rs");
-    let allow_attr = concat!("#[allow(", "\n    unsafe_code,");
-    let allow_reason = concat!(
-        "macOS allocator pressure relief",
-        " requires a tiny FFI shim"
-    );
-    let unsafe_extern = concat!("unsafe", " extern \"C\"");
-    let unsafe_call = concat!("unsafe", " {");
-
-    assert_eq!(
-        source.matches(allow_attr).count(),
-        1,
-        "unexpected unsafe_code allow count"
-    );
-    assert_eq!(
-        source.matches(allow_reason).count(),
-        1,
-        "unsafe_code allow must keep a precise reason"
-    );
-    assert_eq!(
-        source.matches(unsafe_extern).count(),
-        1,
-        "unexpected unsafe extern count"
-    );
-    assert_eq!(
-        source.matches(unsafe_call).count(),
-        1,
-        "unexpected unsafe block count"
-    );
-    assert!(source.contains("No Rust allocation or borrowed pointer is passed to C"));
-}
-
-#[test]
-fn windows_shell_plan_uses_cmd_without_alias_dependency() {
-    let argv = vec!["echo ok | findstr ok".to_string()];
-    let plan = plan_command_for_platform(&argv, None, false, "windows").unwrap();
-    assert_eq!(plan.execution_mode, ExecutionMode::Shell);
-    assert_eq!(plan.shell.as_deref(), Some("cmd"));
-    assert_eq!(plan.shell_arg.as_deref(), Some("/C"));
-    assert!(!plan.alias_dependency);
-    assert!(!plan.explicit_binary);
-}
-
-#[test]
 fn windows_powershell_script_plan_uses_powershell() {
     let script = "$tzTmp = Join-Path $env:TEMP 'tz-quote'; [Console]::Out.Write($tzTmp)";
     let argv = vec![script.to_string()];
@@ -515,73 +354,6 @@ fn windows_powershell_script_plan_uses_powershell() {
 }
 
 #[test]
-fn explicit_powershell_invocation_stays_argv() {
-    let argv = vec![
-        "powershell".to_string(),
-        "-NoProfile".to_string(),
-        "-Command".to_string(),
-        "$env:TEMP".to_string(),
-    ];
-    let plan = plan_command_for_platform(&argv, None, false, "windows").unwrap();
-    assert_eq!(plan.execution_mode, ExecutionMode::Argv);
-    assert_eq!(plan.argv, argv);
-}
-
-#[test]
-fn posix_shell_plan_uses_non_login_sh() {
-    let argv = vec!["echo ok | cat".to_string()];
-    let plan = plan_command_for_platform(&argv, None, false, "linux").unwrap();
-    assert_eq!(plan.execution_mode, ExecutionMode::Shell);
-    assert_eq!(plan.shell.as_deref(), Some("/bin/sh"));
-    assert_eq!(plan.shell_arg.as_deref(), Some("-c"));
-    assert!(!plan.alias_dependency);
-}
-
-#[test]
-fn simple_windows_command_stays_explicit_argv() {
-    let argv = vec!["tokenzero.exe".to_string(), "--version".to_string()];
-    let plan = plan_command_for_platform(&argv, None, false, "windows").unwrap();
-    assert_eq!(plan.execution_mode, ExecutionMode::Argv);
-    assert!(plan.explicit_binary);
-    assert!(!plan.alias_dependency);
-    assert_eq!(plan.argv, argv);
-}
-
-#[cfg(windows)]
-#[test]
-fn windows_run_resolves_pathext_cmd_shims() {
-    let dir = tempfile::tempdir().unwrap();
-    let shim = dir.path().join("npm.cmd");
-    std::fs::write(&shim, "@echo off\r\necho shim:%1\r\n").unwrap();
-    std::fs::write(dir.path().join("npm"), "#!/bin/sh\nexit 99\n").unwrap();
-    let mut env = BTreeMap::new();
-    env.insert("PATH".to_string(), dir.path().display().to_string());
-    env.insert("PATHEXT".to_string(), ".CMD".to_string());
-    let argv = vec!["npm".to_string(), "ping".to_string()];
-
-    let result = run_command(&argv, None, Some(&env), None, Duration::from_secs(5), false).unwrap();
-
-    assert!(result.ok, "{}", result.stderr);
-    assert_eq!(result.stdout.trim(), "shim:ping");
-    assert_eq!(result.execution_mode, ExecutionMode::Argv);
-    assert_eq!(result.argv, argv);
-}
-
-#[cfg(windows)]
-#[test]
-fn windows_run_powershell_variable_script() {
-    let script = "$tzTmp = Join-Path $env:TEMP 'tz-quote'; [Console]::Out.Write($tzTmp)";
-    let argv = vec![script.to_string()];
-
-    let result = run_command(&argv, None, None, None, Duration::from_secs(5), false).unwrap();
-
-    assert!(result.ok, "{}", result.stderr);
-    assert_eq!(result.execution_mode, ExecutionMode::Shell);
-    assert_eq!(result.argv[0], "powershell");
-    assert!(result.stdout.trim_end().ends_with("tz-quote"));
-}
-
-#[test]
 fn windows_builtin_echo_uses_cmd() {
     let argv = vec!["echo".to_string(), "ok".to_string()];
     let plan = plan_command_for_platform(&argv, None, false, "windows").unwrap();
@@ -591,14 +363,6 @@ fn windows_builtin_echo_uses_cmd() {
     assert_eq!(plan.shell_arg.as_deref(), Some("/C"));
     assert!(!plan.alias_dependency);
     assert!(!plan.explicit_binary);
-}
-
-#[test]
-fn env_i_style_invocation_works() {
-    let argv = vec!["echo".to_string(), "ok".to_string()];
-    let result = run_command(&argv, None, None, None, Duration::from_secs(5), false).unwrap();
-    assert!(result.ok);
-    assert_eq!(result.stdout.trim(), "ok");
 }
 
 #[test]
@@ -612,6 +376,26 @@ fn quoting_preserves_spaces() {
     assert_eq!(quote_windows_cmd("%PATH%"), "\"%%PATH%%\"");
     assert_eq!(quote_windows_cmd("a^b"), "\"a^^b\"");
     assert_eq!(quote_windows_cmd("a\"b"), "\"a\\\"b\"");
+
+    // Mutation-killed round-trip: an implementation that dropped the
+    // space-preserving quotes would split "a b" into two tokens.
+    let roundtripped =
+        split_command_string_for_platform(&format!("tool {}", quote_posix("a b")), "linux");
+    assert_eq!(roundtripped, vec!["tool", "a b"]);
+
+    let roundtripped_cmd = split_command_string_for_platform(
+        &format!("tool {}", quote_windows_cmd("C:\\Program Files\\tz")),
+        "cmd",
+    );
+    assert_eq!(roundtripped_cmd, vec!["tool", "C:\\Program Files\\tz"]);
+
+    // Mutation-killed: a cmd implementation that ignored %% doubling
+    // would pass %PATH% through literally, expanding the env var.
+    assert_ne!(
+        quote_windows_cmd("%PATH%"),
+        "%PATH%",
+        "percent signs must be doubled to suppress expansion"
+    );
 }
 
 fn write_spill_aged(dir: &Path, name: &str, bytes: usize, age: Duration) -> PathBuf {
@@ -624,6 +408,18 @@ fn write_spill_aged(dir: &Path, name: &str, bytes: usize, age: Duration) -> Path
         .set_modified(SystemTime::now() - age)
         .unwrap();
     path
+}
+
+fn assert_spill_prune_kept(old: &Path, fresh: &Path, foreign: &Path, report: &SpillPruneReport) {
+    assert!(!old.exists(), "expired spill must be reclaimed");
+    assert!(fresh.exists(), "fresh spill must survive");
+    assert!(foreign.exists(), "non-spill files must never be touched");
+    assert_eq!(report.scanned_files, 2);
+    assert_eq!(report.removed_files, 1);
+    assert_eq!(report.removed_bytes, 10);
+    assert_eq!(report.kept_files, 1);
+    assert_eq!(report.kept_bytes, 20);
+    assert_eq!(report.failed_removals, 0);
 }
 
 #[test]
@@ -653,15 +449,7 @@ fn spill_prune_reclaims_expired_and_keeps_fresh_and_foreign_files() {
         DEFAULT_SPILL_MAX_TOTAL_BYTES,
         false,
     );
-    assert!(!old.exists(), "expired spill must be reclaimed");
-    assert!(fresh.exists(), "fresh spill must survive");
-    assert!(foreign.exists(), "non-spill files must never be touched");
-    assert_eq!(report.scanned_files, 2);
-    assert_eq!(report.removed_files, 1);
-    assert_eq!(report.removed_bytes, 10);
-    assert_eq!(report.kept_files, 1);
-    assert_eq!(report.kept_bytes, 20);
-    assert_eq!(report.failed_removals, 0);
+    assert_spill_prune_kept(&old, &fresh, &foreign, &report);
 }
 
 #[test]

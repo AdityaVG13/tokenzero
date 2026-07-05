@@ -21,7 +21,13 @@ pub const DEFAULT_MAX_REFS_EMITTED: usize = 256;
 pub const DEFAULT_MAX_PARALLEL_WIDTH: usize = 16;
 pub const DEFAULT_MAX_CODE_BYTES: usize = 64 * 1024;
 
+// serde(default): tool callers send PARTIAL limits objects (the documented
+// contract — e.g. {"max_output_bytes": 1024}); without per-field defaults a
+// partial object fails deserialization and tools.rs's `if let Ok` silently
+// DROPS the caller's limits (observed in PR 16 review — the exact
+// silent-failure class this codebase hunts).
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct CodeModeLimits {
     pub max_logical_ops: usize,
     pub max_physical_ops: usize,

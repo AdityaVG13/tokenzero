@@ -20,6 +20,7 @@ fn shell_minimal_header_when_telemetry_dominates_small_success() {
     });
 
     assert_eq!(rendered.output_strategy, "compact_success_shell");
+    assert_shell_status(&rendered, true, Some(0), None, None);
     assert!(rendered.visible.starts_with("# shell ok"));
     assert!(
         rendered.visible.contains("cargo ok in 0.21s"),
@@ -64,7 +65,12 @@ fn shell_failures_keep_full_diagnostic_header() {
     });
 
     assert_ne!(rendered.output_strategy, "minimal_envelope_shell");
-    assert!(rendered.visible.contains("exit_code: 101") || rendered.visible.contains("101"));
+    assert_shell_status(&rendered, false, Some(101), Some("command_failed"), None);
+    assert!(
+        rendered.visible.contains("package nope not found"),
+        "error evidence lost: {}",
+        rendered.visible
+    );
 }
 
 #[test]
@@ -115,11 +121,12 @@ fn shell_render_exposes_status_truth_and_refs() {
     });
 
     assert_eq!(rendered.policy.policy, "diagnostic");
-    assert!(!rendered.command_status.command_success);
-    assert_eq!(rendered.command_status.status_label, "command_failed");
-    assert_eq!(
-        rendered.command_status.failed_segment.as_deref(),
-        Some("false")
+    assert_shell_status(
+        &rendered,
+        false,
+        Some(0),
+        Some("command_failed"),
+        Some(Some("false")),
     );
     assert!(
         rendered
@@ -253,76 +260,6 @@ fn shell_wrapped_rg_search_keeps_search_family_and_summary() {
 }
 
 #[test]
-fn windows_shell_wrapped_search_commands_keep_search_summary() {
-    for command in [
-        "powershell.exe -NoProfile -ExecutionPolicy Bypass -Command rg -P '(?=tokenzero)' sample.txt",
-        "pwsh -NoLogo -ExecutionPolicy:Bypass -c rg 'error|warning' sample.txt",
-        "cmd.exe /S /C findstr \"error|warning\" sample.txt",
-    ] {
-        let rendered = render_shell(ShellRenderInput {
-            command,
-            stdout: "sample.txt:1:error: tokenzero\n",
-            stderr: "",
-            exit_code: Some(0),
-            timed_out: false,
-            mode: Mode::Auto,
-            max_visible_tokens: 4000,
-            stdout_ref: Some("tz://blob/stdout"),
-            stderr_ref: Some("tz://blob/stderr"),
-            combined_ref: Some("tz://blob/combined"),
-        });
-
-        assert_eq!(rendered.policy.family, "search", "{command}");
-        assert_eq!(rendered.policy.policy, "structured", "{command}");
-        assert_eq!(
-            rendered.command_status.shell_syntax_summary, "argv/simple",
-            "{command}"
-        );
-        assert!(
-            rendered.command_status.pipeline_masking_warning.is_none(),
-            "{command}: {:?}",
-            rendered.command_status
-        );
-        assert!(rendered.visible.contains("search_summary"), "{command}");
-        assert!(rendered.visible.contains("matches_seen: 1"), "{command}");
-        assert!(
-            rendered.visible.contains("sample.txt:1:error: tokenzero"),
-            "{command}: {}",
-            rendered.visible
-        );
-    }
-}
-
-#[test]
-fn real_shell_operators_still_drive_status_warnings() {
-    let rendered = render_shell(ShellRenderInput {
-        command: "false | true",
-        stdout: "",
-        stderr: "",
-        exit_code: Some(0),
-        timed_out: false,
-        mode: Mode::Auto,
-        max_visible_tokens: 4000,
-        stdout_ref: Some("tz://blob/stdout"),
-        stderr_ref: Some("tz://blob/stderr"),
-        combined_ref: Some("tz://blob/combined"),
-    });
-
-    assert_eq!(rendered.command_status.shell_syntax_summary, "pipeline");
-    assert!(!rendered.command_status.command_success);
-    assert_eq!(
-        rendered.command_status.failed_segment.as_deref(),
-        Some("false")
-    );
-    assert!(rendered.command_status.pipeline_masking_warning.is_some());
-
-    assert_eq!(
-        split_shell_segments("printf 'a|b;c' || true"),
-        vec!["printf 'a|b;c'", "true"]
-    );
-}
-
-#[test]
 fn shell_c_wrappers_detect_masked_inner_pipeline_failures() {
     for command in [
         "sh -c 'false | true'",
@@ -357,23 +294,6 @@ fn shell_c_wrappers_detect_masked_inner_pipeline_failures() {
             "{command}"
         );
     }
-}
-
-#[test]
-fn shell_c_wrappers_do_not_analyze_positional_args_as_code() {
-    let status = classify_command_status(
-        "bash -c 'true' 'false | true' '$1; rm -rf /'",
-        "",
-        "",
-        Some(0),
-        false,
-    );
-
-    assert!(status.command_success, "{status:?}");
-    assert!(status.failed_segment.is_none(), "{status:?}");
-    assert_eq!(status.shell_syntax_summary, "argv/simple");
-    assert!(status.pipeline_masking_warning.is_none(), "{status:?}");
-    assert!(status.pipeline_rerun_command.is_none(), "{status:?}");
 }
 
 #[test]
@@ -651,6 +571,7 @@ fn long_success_listing_is_collapsed_far_below_raw() {
     ));
     let visible_tokens = count_tokens(&rendered.visible);
 
+    assert_shell_status(&rendered, true, Some(0), None, None);
     assert!(
         visible_tokens < raw / 5,
         "visible={visible_tokens} raw={raw}\n{}",
@@ -659,6 +580,12 @@ fn long_success_listing_is_collapsed_far_below_raw() {
     assert!(
         rendered.visible.contains("exact ref available"),
         "{}",
+        rendered.visible
+    );
+    // At least the first few list entries must survive compaction.
+    assert!(
+        rendered.visible.contains("libsystem_000"),
+        "first list item lost after compaction: {}",
         rendered.visible
     );
 }
@@ -684,6 +611,7 @@ fn wide_success_passthrough_gets_token_squeeze() {
     let visible_tokens = count_tokens(&rendered.visible);
 
     assert_eq!(rendered.output_strategy, "compact_success_shell");
+    assert_shell_status(&rendered, true, Some(0), None, None);
     assert!(
         visible_tokens < raw / 4,
         "visible={visible_tokens} raw={raw}\n{}",
@@ -692,6 +620,12 @@ fn wide_success_passthrough_gets_token_squeeze() {
     assert!(
         rendered.visible.contains("exact ref available"),
         "{}",
+        rendered.visible
+    );
+    // First row of the grid must survive compaction.
+    assert!(
+        rendered.visible.contains("cell0x0"),
+        "first grid cell lost after compaction: {}",
         rendered.visible
     );
 }

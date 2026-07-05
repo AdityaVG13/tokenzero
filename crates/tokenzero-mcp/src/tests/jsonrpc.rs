@@ -7,21 +7,44 @@ use super::support::*;
 
 #[test]
 fn malformed_json_returns_error_and_does_not_panic() {
-    let dir = tempdir().unwrap();
-    let engine = TokenZeroEngine::new(EngineConfig::for_root(dir.path()));
+    let (_dir, engine) = test_engine();
     let response = handle_jsonrpc(&engine, "{bad").unwrap();
-    assert!(response.contains("Parse error"));
+    let parsed = response_json(&response);
+    // JSON-RPC §4.2: -32700 is "Parse error".
+    assert_structured_error(&parsed, -32700, None);
+    assert!(
+        parsed["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("Parse error"),
+        "{parsed:#}"
+    );
 }
 
 #[test]
-fn tools_list_includes_aliases() {
-    let names: Vec<_> = tool_specs().into_iter().map(|t| t.name).collect();
-    assert!(names.contains(&"tz_read".to_string()));
-    assert!(names.contains(&"read".to_string()));
-    assert!(names.contains(&"tz_grep".to_string()));
-    assert!(names.contains(&"grep".to_string()));
-    assert!(names.contains(&"tz_glob".to_string()));
-    assert!(names.contains(&"glob".to_string()));
+fn tools_list_includes_aliases_with_stub_schema() {
+    let specs = tool_specs();
+    let by_name = |name: &str| -> &ToolSpec { specs.iter().find(|s| s.name == name).unwrap() };
+
+    // Every canonical tool has a matching alias.
+    for (canonical, alias) in [
+        ("tz_read", "read"),
+        ("tz_grep", "grep"),
+        ("tz_glob", "glob"),
+    ] {
+        let c = by_name(canonical);
+        let a = by_name(alias);
+        // Canonical schema has real properties; alias advertises a permissive stub.
+        assert!(
+            c.input_schema["properties"].is_object(),
+            "{canonical} must have real schema properties"
+        );
+        assert_eq!(
+            a.input_schema,
+            json!({"type": "object"}),
+            "{alias} must advertise a stub schema"
+        );
+    }
 }
 
 #[test]
@@ -109,6 +132,34 @@ fn mcp_idle_timeout_zero_disables_and_large_values_clamp() {
     assert_eq!(DEFAULT_MCP_IDLE_TIMEOUT_SECS, 0);
 }
 
+/// Find a tool by name in a tools array.
+fn find_tool_by_name<'a>(tools: &'a [Value], name: &str) -> &'a Value {
+    tools
+        .iter()
+        .find(|tool| tool["name"] == name)
+        .unwrap_or_else(|| panic!("tool {name} not found in tools list"))
+}
+
+/// Find a tool by name in a tools/list response.
+fn find_tool<'a>(listed: &'a Value, name: &str) -> &'a Value {
+    find_tool_by_name(listed["result"]["tools"].as_array().unwrap(), name)
+}
+
+/// Assert no tool in a tools/list result advertises top-level schema combinators.
+fn assert_no_schema_combinators(listed: &Value) {
+    for tool in listed["result"]["tools"].as_array().unwrap() {
+        let schema = &tool["inputSchema"];
+        assert_eq!(schema["type"], "object", "tool {}", tool["name"]);
+        for key in ["anyOf", "oneOf", "allOf"] {
+            assert!(
+                schema.get(key).is_none(),
+                "tool {} advertises top-level {key}",
+                tool["name"]
+            );
+        }
+    }
+}
+
 #[test]
 fn mcp_lists_and_calls_cache_pack_tool() {
     let dir = tempdir().unwrap();
@@ -131,12 +182,7 @@ fn mcp_lists_and_calls_cache_pack_tool() {
     assert!(names.contains(&"tz_cache_pack"));
     assert!(names.contains(&"cache_pack"));
 
-    let read_tool = listed["result"]["tools"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|tool| tool["name"] == "tz_read")
-        .unwrap();
+    let read_tool = find_tool(&listed, "tz_read");
     assert!(
         read_tool["inputSchema"].get("$schema").is_none(),
         "tools/list schemas stay lean; the dialect is implied"
@@ -161,12 +207,7 @@ fn mcp_lists_and_calls_cache_pack_tool() {
         .unwrap();
     let docs_text = docs["result"]["contents"][0]["text"].as_str().unwrap();
     let docs_payload: Value = serde_json::from_str(docs_text).unwrap();
-    let read_doc = docs_payload["tools"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|tool| tool["name"] == "tz_read")
-        .unwrap();
+    let read_doc = find_tool_by_name(docs_payload["tools"].as_array().unwrap(), "tz_read");
     let read_doc_description = read_doc["description"].as_str().unwrap();
     for required_section in [
         "Discovery",
@@ -182,44 +223,19 @@ fn mcp_lists_and_calls_cache_pack_tool() {
         );
     }
 
-    let alias_tool = listed["result"]["tools"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|tool| tool["name"] == "read")
-        .unwrap();
+    let alias_tool = find_tool(&listed, "read");
     // Aliases advertise a permissive stub on the wire; the canonical schema
     // stays recoverable from the catalog resource.
     assert_eq!(alias_tool["inputSchema"], json!({"type": "object"}));
-    let alias_doc = docs_payload["tools"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|tool| tool["name"] == "read")
-        .unwrap();
+    let alias_doc = find_tool_by_name(docs_payload["tools"].as_array().unwrap(), "read");
     assert_eq!(alias_doc["inputSchema"], read_tool["inputSchema"]);
 
-    let shell_tool = listed["result"]["tools"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|tool| tool["name"] == "tz_shell")
-        .unwrap();
+    let shell_tool = find_tool(&listed, "tz_shell");
     assert_eq!(shell_tool["inputSchema"]["additionalProperties"], false);
     // Top-level schema combinators make some MCP clients (Claude Code
     // among them) drop the tool from the model's tool list entirely;
     // every advertised schema must stay a plain object.
-    for tool in listed["result"]["tools"].as_array().unwrap() {
-        let schema = &tool["inputSchema"];
-        assert_eq!(schema["type"], "object", "tool {}", tool["name"]);
-        for key in ["anyOf", "oneOf", "allOf"] {
-            assert!(
-                schema.get(key).is_none(),
-                "tool {} advertises top-level {key}",
-                tool["name"]
-            );
-        }
-    }
+    assert_no_schema_combinators(&listed);
 
     let called: Value = serde_json::from_str(
             &handle_jsonrpc(
@@ -607,15 +623,23 @@ fn mcp_tool_calls_are_pulse_accounted_with_attribution() {
 
 #[test]
 fn tool_metrics_resource_is_served() {
-    let dir = tempdir().unwrap();
-    let engine = TokenZeroEngine::new(EngineConfig::for_root(dir.path()));
+    let (_dir, engine) = test_engine();
     let response = handle_jsonrpc(
         &engine,
         r#"{"jsonrpc":"2.0","id":1,"method":"resources/read","params":{"uri":"resource://tokenzero/metrics"}}"#,
     )
     .unwrap();
+    let parsed = response_json(&response);
+    let text = parsed["result"]["contents"][0]["text"].as_str().unwrap();
+    let metrics: Value = serde_json::from_str(text).unwrap();
+    // The metrics payload must expose cumulative counters and the slow
+    // threshold, not merely contain those words somewhere in the response.
     assert!(
-        response.contains("cumulative") && response.contains("slow_threshold_ms"),
-        "metrics resource is discoverable and served"
+        metrics["cumulative"].is_object(),
+        "missing cumulative in metrics: {metrics:#}"
+    );
+    assert!(
+        metrics["slow_threshold_ms"].as_u64().unwrap() > 0,
+        "slow_threshold_ms must be positive: {metrics:#}"
     );
 }

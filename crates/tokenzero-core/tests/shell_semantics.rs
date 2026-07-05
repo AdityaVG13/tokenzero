@@ -1,5 +1,116 @@
 use tokenzero_core::{Mode, ShellRenderInput, render_shell};
 
+fn render(
+    command: &str,
+    stdout: &str,
+    stderr: &str,
+    exit_code: Option<i32>,
+) -> tokenzero_core::ShellRender {
+    render_shell(ShellRenderInput {
+        command,
+        stdout,
+        stderr,
+        exit_code,
+        timed_out: false,
+        mode: Mode::Auto,
+        max_visible_tokens: 4000,
+        stdout_ref: Some("tz://blob/stdout"),
+        stderr_ref: Some("tz://blob/stderr"),
+        combined_ref: Some("tz://blob/combined"),
+    })
+}
+
+fn assert_success(r: &tokenzero_core::ShellRender, ctx: &str) {
+    assert!(r.command_status.command_success, "{ctx}: {r:?}");
+    assert_eq!(
+        r.command_status.status_label, "command_success",
+        "{ctx}: {r:?}"
+    );
+    assert!(r.command_status.failed_segment.is_none(), "{ctx}: {r:?}");
+}
+
+fn assert_failure(r: &tokenzero_core::ShellRender, ctx: &str) {
+    assert!(!r.command_status.command_success, "{ctx}: {r:?}");
+    assert_eq!(
+        r.command_status.status_label, "command_failed",
+        "{ctx}: {r:?}"
+    );
+}
+
+fn assert_no_masking(r: &tokenzero_core::ShellRender, ctx: &str) {
+    assert!(
+        r.command_status.pipeline_masking_warning.is_none(),
+        "{ctx}: {r:?}"
+    );
+}
+
+fn assert_has_masking(r: &tokenzero_core::ShellRender, ctx: &str) {
+    assert!(
+        r.command_status
+            .pipeline_masking_warning
+            .as_deref()
+            .is_some_and(|w| w.contains("mask")),
+        "{ctx}: {r:?}"
+    );
+}
+
+fn assert_no_rerun(r: &tokenzero_core::ShellRender, ctx: &str) {
+    assert!(
+        r.command_status.pipeline_rerun_command.is_none(),
+        "{ctx}: {r:?}"
+    );
+}
+
+fn assert_false_predicate_success(command: &str, stdout: &str) {
+    let r = render(command, stdout, "", Some(1));
+    assert_success(&r, command);
+    assert_eq!(r.command_status.exit_code, Some(1));
+}
+
+fn assert_false_predicate_failure(
+    command: &str,
+    stdout: &str,
+    stderr: &str,
+    exit_code: Option<i32>,
+) {
+    let r = render(command, stdout, stderr, exit_code);
+    assert_failure(&r, command);
+}
+
+fn assert_pipeline_success(command: &str, stdout: &str) {
+    let r = render(command, stdout, "", Some(0));
+    assert_success(&r, command);
+    assert_no_masking(&r, command);
+    assert_no_rerun(&r, command);
+    assert_eq!(r.command_status.exit_code, Some(0));
+    assert_eq!(
+        r.command_status.shell_syntax_summary, "pipeline",
+        "{command}: {r:?}"
+    );
+}
+
+fn assert_pipeline_failure(
+    command: &str,
+    stdout: &str,
+    stderr: &str,
+    exit_code: Option<i32>,
+    expected_segment: &str,
+) {
+    let r = render(command, stdout, stderr, exit_code);
+    assert_failure(&r, command);
+    assert_eq!(
+        r.command_status.failed_segment.as_deref(),
+        Some(expected_segment),
+        "{command}: {r:?}"
+    );
+    assert_has_masking(&r, command);
+    assert_eq!(
+        r.command_status.pipeline_rerun_command.is_some(),
+        !cfg!(windows),
+        "{command}: {r:?}"
+    );
+}
+
 #[test]
 fn false_predicate_exit_one_is_not_a_command_failure() {
     for (command, stdout) in [
@@ -23,32 +134,7 @@ fn false_predicate_exit_one_is_not_a_command_failure() {
             "diff --git a/file b/file\n@@ -1 +1 @@\n-left\n+right\n",
         ),
     ] {
-        let rendered = render_shell(ShellRenderInput {
-            command,
-            stdout,
-            stderr: "",
-            exit_code: Some(1),
-            timed_out: false,
-            mode: Mode::Auto,
-            max_visible_tokens: 4000,
-            stdout_ref: Some("tz://blob/stdout"),
-            stderr_ref: Some("tz://blob/stderr"),
-            combined_ref: Some("tz://blob/combined"),
-        });
-
-        assert!(
-            rendered.command_status.command_success,
-            "{command}: {rendered:?}"
-        );
-        assert_eq!(
-            rendered.command_status.status_label, "command_success",
-            "{command}: {rendered:?}"
-        );
-        assert!(
-            rendered.command_status.failed_segment.is_none(),
-            "{command}: {rendered:?}"
-        );
-        assert_eq!(rendered.command_status.exit_code, Some(1));
+        assert_false_predicate_success(command, stdout);
     }
 
     for (command, stdout, stderr, exit_code) in [
@@ -79,27 +165,7 @@ fn false_predicate_exit_one_is_not_a_command_failure() {
             Some(101),
         ),
     ] {
-        let rendered = render_shell(ShellRenderInput {
-            command,
-            stdout,
-            stderr,
-            exit_code,
-            timed_out: false,
-            mode: Mode::Auto,
-            max_visible_tokens: 4000,
-            stdout_ref: Some("tz://blob/stdout"),
-            stderr_ref: Some("tz://blob/stderr"),
-            combined_ref: Some("tz://blob/combined"),
-        });
-
-        assert!(
-            !rendered.command_status.command_success,
-            "{command}: {rendered:?}"
-        );
-        assert_eq!(
-            rendered.command_status.status_label, "command_failed",
-            "{command}: {rendered:?}"
-        );
+        assert_false_predicate_failure(command, stdout, stderr, exit_code);
     }
 }
 
@@ -328,43 +394,7 @@ fn expected_false_pipeline_segments_do_not_trigger_masking_warnings() {
             "diff --git a/file b/file\n@@ -1 +1 @@\n-left\n+right\n",
         ),
     ] {
-        let rendered = render_shell(ShellRenderInput {
-            command,
-            stdout,
-            stderr: "",
-            exit_code: Some(0),
-            timed_out: false,
-            mode: Mode::Auto,
-            max_visible_tokens: 4000,
-            stdout_ref: Some("tz://blob/stdout"),
-            stderr_ref: Some("tz://blob/stderr"),
-            combined_ref: Some("tz://blob/combined"),
-        });
-
-        assert!(
-            rendered.command_status.command_success,
-            "{command}: {rendered:?}"
-        );
-        assert_eq!(
-            rendered.command_status.status_label, "command_success",
-            "{command}: {rendered:?}"
-        );
-        assert!(
-            rendered.command_status.failed_segment.is_none(),
-            "{command}: {rendered:?}"
-        );
-        assert!(
-            rendered.command_status.pipeline_masking_warning.is_none(),
-            "{command}: {rendered:?}"
-        );
-        assert!(
-            rendered.command_status.pipeline_rerun_command.is_none(),
-            "{command}: {rendered:?}"
-        );
-        assert_eq!(
-            rendered.command_status.shell_syntax_summary, "pipeline",
-            "{command}: {rendered:?}"
-        );
+        assert_pipeline_success(command, stdout);
     }
 
     for (command, stdout, stderr, exit_code, expected_segment) in [
@@ -399,46 +429,7 @@ fn expected_false_pipeline_segments_do_not_trigger_masking_warnings() {
         ),
         ("false | test -f missing-file", "", "", Some(1), "false"),
     ] {
-        let rendered = render_shell(ShellRenderInput {
-            command,
-            stdout,
-            stderr,
-            exit_code,
-            timed_out: false,
-            mode: Mode::Auto,
-            max_visible_tokens: 4000,
-            stdout_ref: Some("tz://blob/stdout"),
-            stderr_ref: Some("tz://blob/stderr"),
-            combined_ref: Some("tz://blob/combined"),
-        });
-
-        assert!(
-            !rendered.command_status.command_success,
-            "{command}: {rendered:?}"
-        );
-        assert_eq!(
-            rendered.command_status.status_label, "command_failed",
-            "{command}: {rendered:?}"
-        );
-        assert_eq!(
-            rendered.command_status.failed_segment.as_deref(),
-            Some(expected_segment),
-            "{command}: {rendered:?}"
-        );
-        assert!(
-            rendered
-                .command_status
-                .pipeline_masking_warning
-                .as_deref()
-                .is_some_and(|warning| warning.contains("mask")),
-            "{command}: {rendered:?}"
-        );
-        // The bash pipefail rerun suggestion is suppressed on Windows.
-        assert_eq!(
-            rendered.command_status.pipeline_rerun_command.is_some(),
-            !cfg!(windows),
-            "{command}: {rendered:?}"
-        );
+        assert_pipeline_failure(command, stdout, stderr, exit_code, expected_segment);
     }
 }
 

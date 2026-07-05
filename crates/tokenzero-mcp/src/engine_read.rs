@@ -129,13 +129,26 @@ impl TokenZeroEngine {
             } else {
                 fs::read_to_string(path)
             };
-            let Ok(text) = text_result else {
-                return ToolResponse::error(
-                    "read",
-                    "read_failed",
-                    format!("could not read {}", path.display()),
-                    None,
-                );
+            let text = match text_result {
+                Ok(text) => text,
+                Err(err) => {
+                    // "could not read X (read_failed)" with no cause stranded
+                    // live sessions guessing between missing file, directory,
+                    // and permissions. Name the reason and the obvious next op.
+                    let hint = if path.is_dir() {
+                        " (path is a directory - use tree)"
+                    } else if !path.exists() {
+                        " (no such file)"
+                    } else {
+                        ""
+                    };
+                    return ToolResponse::error(
+                        "read",
+                        "read_failed",
+                        format!("could not read {}: {err}{hint}", path.display()),
+                        None,
+                    );
+                }
             };
             bytes_read += text.len();
             let ctype = detect_content_type(&text, Some(path));

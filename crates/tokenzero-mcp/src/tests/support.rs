@@ -83,3 +83,45 @@ pub(crate) fn visible_text(response: &ToolResponse) -> String {
 pub(crate) fn visible_tokens(response: &ToolResponse) -> usize {
     response.accounting.as_ref().unwrap().visible_tokens
 }
+
+/// Create a tempdir + default engine. The `TempDir` must be kept alive
+/// for the duration of the test; the engine borrows its path.
+pub(crate) fn test_engine() -> (tempfile::TempDir, TokenZeroEngine) {
+    let dir = tempfile::tempdir().unwrap();
+    let engine = TokenZeroEngine::new(EngineConfig::for_root(dir.path()));
+    (dir, engine)
+}
+
+/// Create an engine whose recovery cache path is a directory (unwritable
+/// as a file), forcing every tool into degraded mode.
+pub(crate) fn engine_with_unwritable_cache(root: &Path) -> TokenZeroEngine {
+    let cache_dir = root.join("cache-as-directory");
+    fs::create_dir_all(&cache_dir).unwrap();
+    let mut config = EngineConfig::for_root(root);
+    config.cache_path = cache_dir;
+    TokenZeroEngine::new(config)
+}
+
+/// Parse a JSON-RPC response string into a serde_json::Value.
+pub(crate) fn response_json(raw: &str) -> Value {
+    serde_json::from_str(raw).unwrap_or_else(|e| panic!("invalid JSON-RPC response: {e}\n{raw}"))
+}
+
+/// Assert that a parsed JSON-RPC response carries an error with the
+/// expected code and optional `data.error_type`. Returns the `data` object
+/// for further site-specific assertions.
+pub(crate) fn assert_structured_error<'a>(
+    parsed: &'a Value,
+    expected_code: i64,
+    expected_error_type: Option<&str>,
+) -> &'a Value {
+    assert_eq!(
+        parsed["error"]["code"], expected_code,
+        "unexpected error code in {parsed:#}"
+    );
+    let data = &parsed["error"]["data"];
+    if let Some(et) = expected_error_type {
+        assert_eq!(data["error_type"], et, "unexpected error_type in {data:#}");
+    }
+    data
+}

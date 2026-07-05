@@ -980,18 +980,13 @@ fn select_content(
         Some(value) if value.starts_with("symbol:") => {
             selected_symbol = Some(value["symbol:".len()..].to_string())
         }
-        Some(value) if value.starts_with("range:") => {
-            let (start, end) = parse_line_fragment(&value["range:".len()..]);
-            selected_start = start;
-            selected_end = end;
-        }
-        Some(value) if value.starts_with("lines:") => {
-            let (start, end) = parse_line_fragment(&value["lines:".len()..]);
-            selected_start = start;
-            selected_end = end;
-        }
-        Some(value) if value.starts_with("line:") => {
-            let (start, end) = parse_line_fragment(&value["line:".len()..]);
+        Some(value)
+            if value.starts_with("range:")
+                || value.starts_with("lines:")
+                || value.starts_with("line:") =>
+        {
+            let prefix_len = value.find(':').map_or(0, |n| n + 1);
+            let (start, end) = parse_line_fragment(&value[prefix_len..]);
             selected_start = start;
             selected_end = end;
         }

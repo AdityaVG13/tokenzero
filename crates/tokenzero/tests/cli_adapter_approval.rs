@@ -1,3 +1,6 @@
+mod common;
+use common::*;
+
 use assert_cmd::prelude::*;
 use serde_json::Value;
 use std::process::Command;
@@ -22,12 +25,15 @@ fn cli_adapter_approval_audit_blocks_execution_without_reviewed_commands() {
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
+    // stdout and on-disk JSON both parse and agree on schema_version
+    let stdout_report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
     let report: serde_json::Value =
         serde_json::from_slice(&std::fs::read(&output_json).unwrap()).unwrap();
     assert_eq!(
         report["schema_version"],
         "tokenzero.adapter_approval_audit.v1"
     );
+    assert_eq!(stdout_report["schema_version"], report["schema_version"]);
     assert_eq!(report["execution_allowed"], false);
     assert_eq!(report["blind_install_attempted"], false);
     assert_eq!(report["public_claims_approved"], false);
@@ -55,24 +61,12 @@ fn cli_adapter_approval_audit_blocks_execution_without_reviewed_commands() {
                 .unwrap()
                 .contains("reviewed competitor commands missing"))
     );
-    for tool in [
-        "rtk",
-        "ztk",
-        "lean-ctx",
-        "tokenpak",
-        "tokenjuice",
-        "context-mode",
-        "caveman",
-        "headroom",
-        "claw",
-        "compresh",
-        "context-gateway",
-    ] {
+    for tool in required_adapter_tools() {
         let row = report["adapters"]
             .as_array()
             .unwrap()
             .iter()
-            .find(|row| row["tool"] == tool)
+            .find(|row| row["tool"] == *tool)
             .unwrap_or_else(|| panic!("missing adapter approval row for {tool}"));
         assert_eq!(row["execution_allowed"], false, "{tool}");
         assert_eq!(row["approval_status"], "missing_reviewed_command", "{tool}");
@@ -153,28 +147,16 @@ fn cli_adapter_approval_template_prepares_reviewed_commands_without_execution() 
 fn cli_adapter_approval_audit_rejects_malformed_approval_file() {
     let dir = tempdir().unwrap();
     let approval_file = dir.path().join("approval.json");
-    let commands = [
-        "rtk",
-        "ztk",
-        "lean-ctx",
-        "tokenpak",
-        "tokenjuice",
-        "context-mode",
-        "caveman",
-        "headroom",
-        "claw",
-        "compresh",
-        "context-gateway",
-    ]
-    .into_iter()
-    .map(|tool| {
-        serde_json::json!({
-            "tool": tool,
-            "reviewed": true,
-            "command": format!("{tool} --version")
+    let commands = required_adapter_tools()
+        .iter()
+        .map(|tool| {
+            serde_json::json!({
+                "tool": tool,
+                "reviewed": true,
+                "command": format!("{tool} --version")
+            })
         })
-    })
-    .collect::<Vec<_>>();
+        .collect::<Vec<_>>();
     std::fs::write(
         &approval_file,
         serde_json::to_vec(&serde_json::json!({
@@ -223,28 +205,16 @@ fn cli_adapter_approval_audit_rejects_malformed_approval_file() {
 fn cli_adapter_approval_audit_allows_reviewed_commands_only_with_explicit_approval() {
     let dir = tempdir().unwrap();
     let approval_file = dir.path().join("approval.json");
-    let commands = [
-        "rtk",
-        "ztk",
-        "lean-ctx",
-        "tokenpak",
-        "tokenjuice",
-        "context-mode",
-        "caveman",
-        "headroom",
-        "claw",
-        "compresh",
-        "context-gateway",
-    ]
-    .into_iter()
-    .map(|tool| {
-        serde_json::json!({
-            "tool": tool,
-            "reviewed": true,
-            "command": format!("{tool} --version")
+    let commands = required_adapter_tools()
+        .iter()
+        .map(|tool| {
+            serde_json::json!({
+                "tool": tool,
+                "reviewed": true,
+                "command": format!("{tool} --version")
+            })
         })
-    })
-    .collect::<Vec<_>>();
+        .collect::<Vec<_>>();
     std::fs::write(
         &approval_file,
         serde_json::to_vec(&serde_json::json!({
@@ -297,32 +267,20 @@ fn cli_adapter_approval_audit_allows_reviewed_commands_only_with_explicit_approv
 fn cli_adapter_approval_audit_rejects_install_side_effect_commands() {
     let dir = tempdir().unwrap();
     let approval_file = dir.path().join("approval.json");
-    let commands = [
-        "rtk",
-        "ztk",
-        "lean-ctx",
-        "tokenpak",
-        "tokenjuice",
-        "context-mode",
-        "caveman",
-        "headroom",
-        "claw",
-        "compresh",
-        "context-gateway",
-    ]
-    .into_iter()
-    .map(|tool| {
-        serde_json::json!({
-            "tool": tool,
-            "reviewed": true,
-            "command": if tool == "rtk" {
-                "npm install rtk && rtk --version".to_string()
-            } else {
-                format!("{tool} --version")
-            }
+    let commands = required_adapter_tools()
+        .iter()
+        .map(|tool| {
+            serde_json::json!({
+                "tool": tool,
+                "reviewed": true,
+                "command": if *tool == "rtk" {
+                    "npm install rtk && rtk --version".to_string()
+                } else {
+                    format!("{tool} --version")
+                }
+            })
         })
-    })
-    .collect::<Vec<_>>();
+        .collect::<Vec<_>>();
     std::fs::write(
         &approval_file,
         serde_json::to_vec(&serde_json::json!({
@@ -358,6 +316,7 @@ fn cli_adapter_approval_audit_rejects_install_side_effect_commands() {
     assert_eq!(report["execution_allowed"], false);
     assert_eq!(report["public_claims_approved"], false);
     assert_eq!(report["unsafe_command_count"], 1);
+    assert_eq!(report["reviewed_command_count"], 10);
     let rtk = report["adapters"]
         .as_array()
         .unwrap()
@@ -382,28 +341,16 @@ fn cli_adapter_approval_audit_rejects_install_side_effect_commands() {
 fn cli_adapter_approval_audit_rejects_duplicate_tool_commands() {
     let dir = tempdir().unwrap();
     let approval_file = dir.path().join("approval.json");
-    let mut commands = [
-        "rtk",
-        "ztk",
-        "lean-ctx",
-        "tokenpak",
-        "tokenjuice",
-        "context-mode",
-        "caveman",
-        "headroom",
-        "claw",
-        "compresh",
-        "context-gateway",
-    ]
-    .into_iter()
-    .map(|tool| {
-        serde_json::json!({
-            "tool": tool,
-            "reviewed": true,
-            "command": format!("{tool} --version")
+    let mut commands = required_adapter_tools()
+        .iter()
+        .map(|tool| {
+            serde_json::json!({
+                "tool": tool,
+                "reviewed": true,
+                "command": format!("{tool} --version")
+            })
         })
-    })
-    .collect::<Vec<_>>();
+        .collect::<Vec<_>>();
     commands.push(serde_json::json!({
         "tool": "rtk",
         "reviewed": true,
@@ -447,6 +394,11 @@ fn cli_adapter_approval_audit_rejects_duplicate_tool_commands() {
         .find(|row| row["tool"] == "rtk")
         .unwrap();
     assert_eq!(rtk["approval_status"], "duplicate_command");
+    // duplicate row has reviewed_command field (present as null for duplicates)
+    assert!(
+        rtk.get("reviewed_command").is_some(),
+        "duplicate row for rtk should have reviewed_command field"
+    );
     assert!(
         report["blocked_reasons"]
             .as_array()

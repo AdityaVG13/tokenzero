@@ -35,177 +35,199 @@ enum BatchExpected {
     Error { id: Value, code: i64 },
 }
 
+/// Shorthand constructor for `ConformanceCase`.
+fn cc(
+    id: &'static str,
+    section: &'static str,
+    level: RequirementLevel,
+    description: &'static str,
+    input: CaseInput,
+    expected: Expected,
+) -> ConformanceCase {
+    ConformanceCase {
+        id,
+        section,
+        level,
+        description,
+        input,
+        expected,
+    }
+}
+
+/// Build a JSON-RPC request `Value` from method and params.
+fn mcp_req(id: &str, method: &str, params: Value) -> Value {
+    json!({"jsonrpc": "2.0", "id": id, "method": method, "params": params})
+}
+
 fn jsonrpc_cases() -> Vec<ConformanceCase> {
     vec![
-        ConformanceCase {
-            id: "JSONRPC-2.0-PARSE-001",
-            section: "JSON-RPC 2.0 Parse",
-            level: RequirementLevel::Must,
-            description: "Malformed JSON returns a parse error with null id",
-            input: CaseInput::Raw("{bad"),
-            expected: Expected::Error {
+        cc(
+            "JSONRPC-2.0-PARSE-001",
+            "JSON-RPC 2.0 Parse",
+            RequirementLevel::Must,
+            "Malformed JSON returns a parse error with null id",
+            CaseInput::Raw("{bad"),
+            Expected::Error {
                 id: Value::Null,
                 code: -32700,
             },
-        },
-        ConformanceCase {
-            id: "JSONRPC-2.0-REQ-001",
-            section: "JSON-RPC 2.0 Request Object",
-            level: RequirementLevel::Must,
-            description: "A valid request object returns a response with the same id",
-            input: CaseInput::Json(json!({"jsonrpc":"2.0","id":1,"method":"ping"})),
-            expected: Expected::Result { id: json!(1) },
-        },
-        ConformanceCase {
-            id: "JSONRPC-2.0-REQ-002",
-            section: "JSON-RPC 2.0 Request Object",
-            level: RequirementLevel::Must,
-            description: "The jsonrpc member must be exactly 2.0",
-            input: CaseInput::Json(json!({"jsonrpc":"1.0","id":"bad-version","method":"ping"})),
-            expected: Expected::Error {
+        ),
+        cc(
+            "JSONRPC-2.0-REQ-001",
+            "JSON-RPC 2.0 Request Object",
+            RequirementLevel::Must,
+            "A valid request object returns a response with the same id",
+            CaseInput::Json(json!({"jsonrpc":"2.0","id":1,"method":"ping"})),
+            Expected::Result { id: json!(1) },
+        ),
+        cc(
+            "JSONRPC-2.0-REQ-002",
+            "JSON-RPC 2.0 Request Object",
+            RequirementLevel::Must,
+            "The jsonrpc member must be exactly 2.0",
+            CaseInput::Json(json!({"jsonrpc":"1.0","id":"bad-version","method":"ping"})),
+            Expected::Error {
                 id: json!("bad-version"),
                 code: -32600,
             },
-        },
-        ConformanceCase {
-            id: "JSONRPC-2.0-REQ-003",
-            section: "JSON-RPC 2.0 Request Object",
-            level: RequirementLevel::Must,
-            description: "A missing jsonrpc member is an invalid request",
-            input: CaseInput::Json(json!({"id":"missing-version","method":"ping"})),
-            expected: Expected::Error {
+        ),
+        cc(
+            "JSONRPC-2.0-REQ-003",
+            "JSON-RPC 2.0 Request Object",
+            RequirementLevel::Must,
+            "A missing jsonrpc member is an invalid request",
+            CaseInput::Json(json!({"id":"missing-version","method":"ping"})),
+            Expected::Error {
                 id: json!("missing-version"),
                 code: -32600,
             },
-        },
-        ConformanceCase {
-            id: "JSONRPC-2.0-REQ-004",
-            section: "JSON-RPC 2.0 Request Object",
-            level: RequirementLevel::Must,
-            description: "A request must be a JSON object",
-            input: CaseInput::Json(json!(1)),
-            expected: Expected::Error {
+        ),
+        cc(
+            "JSONRPC-2.0-REQ-004",
+            "JSON-RPC 2.0 Request Object",
+            RequirementLevel::Must,
+            "A request must be a JSON object",
+            CaseInput::Json(json!(1)),
+            Expected::Error {
                 id: Value::Null,
                 code: -32600,
             },
-        },
-        ConformanceCase {
-            id: "JSONRPC-2.0-REQ-005",
-            section: "JSON-RPC 2.0 Request Object",
-            level: RequirementLevel::Must,
-            description: "The method member must be a string",
-            input: CaseInput::Json(json!({"jsonrpc":"2.0","id":"bad-method","method":7})),
-            expected: Expected::Error {
+        ),
+        cc(
+            "JSONRPC-2.0-REQ-005",
+            "JSON-RPC 2.0 Request Object",
+            RequirementLevel::Must,
+            "The method member must be a string",
+            CaseInput::Json(json!({"jsonrpc":"2.0","id":"bad-method","method":7})),
+            Expected::Error {
                 id: json!("bad-method"),
                 code: -32600,
             },
-        },
-        ConformanceCase {
-            id: "JSONRPC-2.0-REQ-006",
-            section: "JSON-RPC 2.0 Request Object",
-            level: RequirementLevel::Must,
-            description: "The id member must be a string, number, or null",
-            input: CaseInput::Json(json!({"jsonrpc":"2.0","id":{"not":"valid"},"method":"ping"})),
-            expected: Expected::Error {
+        ),
+        cc(
+            "JSONRPC-2.0-REQ-006",
+            "JSON-RPC 2.0 Request Object",
+            RequirementLevel::Must,
+            "The id member must be a string, number, or null",
+            CaseInput::Json(json!({"jsonrpc":"2.0","id":{"not":"valid"},"method":"ping"})),
+            Expected::Error {
                 id: Value::Null,
                 code: -32600,
             },
-        },
-        ConformanceCase {
-            id: "JSONRPC-2.0-REQ-007",
-            section: "JSON-RPC 2.0 Request Object",
-            level: RequirementLevel::Should,
-            description: "The params member should be an object or array when present",
-            input: CaseInput::Json(
+        ),
+        cc(
+            "JSONRPC-2.0-REQ-007",
+            "JSON-RPC 2.0 Request Object",
+            RequirementLevel::Should,
+            "The params member should be an object or array when present",
+            CaseInput::Json(
                 json!({"jsonrpc":"2.0","id":"bad-params","method":"ping","params":true}),
             ),
-            expected: Expected::Error {
+            Expected::Error {
                 id: json!("bad-params"),
                 code: -32600,
             },
-        },
-        ConformanceCase {
-            id: "JSONRPC-2.0-NOTIF-001",
-            section: "JSON-RPC 2.0 Notifications",
-            level: RequirementLevel::Must,
-            description: "A request object without id is a notification and gets no response",
-            input: CaseInput::Json(json!({"jsonrpc":"2.0","method":"ping"})),
-            expected: Expected::NoResponse,
-        },
-        ConformanceCase {
-            id: "JSONRPC-2.0-NOTIF-002",
-            section: "JSON-RPC 2.0 Notifications",
-            level: RequirementLevel::Must,
-            description: "Unknown notification methods still get no response",
-            input: CaseInput::Json(json!({"jsonrpc":"2.0","method":"unknown/notification"})),
-            expected: Expected::NoResponse,
-        },
-        ConformanceCase {
-            id: "MCP-2025-06-18-INITIALIZED-NOTIF-001",
-            section: "MCP 2025-06-18 Initialized Notification",
-            level: RequirementLevel::Must,
-            description: "notifications/initialized is a notification and gets no response",
-            input: CaseInput::Json(json!({"jsonrpc":"2.0","method":"notifications/initialized"})),
-            expected: Expected::NoResponse,
-        },
-        ConformanceCase {
-            id: "JSONRPC-2.0-METHOD-001",
-            section: "JSON-RPC 2.0 Method Dispatch",
-            level: RequirementLevel::Must,
-            description: "Unknown request methods return Method not found",
-            input: CaseInput::Json(
-                json!({"jsonrpc":"2.0","id":"unknown","method":"unknown/request"}),
-            ),
-            expected: Expected::Error {
+        ),
+        cc(
+            "JSONRPC-2.0-NOTIF-001",
+            "JSON-RPC 2.0 Notifications",
+            RequirementLevel::Must,
+            "A request object without id is a notification and gets no response",
+            CaseInput::Json(json!({"jsonrpc":"2.0","method":"ping"})),
+            Expected::NoResponse,
+        ),
+        cc(
+            "JSONRPC-2.0-NOTIF-002",
+            "JSON-RPC 2.0 Notifications",
+            RequirementLevel::Must,
+            "Unknown notification methods still get no response",
+            CaseInput::Json(json!({"jsonrpc":"2.0","method":"unknown/notification"})),
+            Expected::NoResponse,
+        ),
+        cc(
+            "MCP-2025-06-18-INITIALIZED-NOTIF-001",
+            "MCP 2025-06-18 Initialized Notification",
+            RequirementLevel::Must,
+            "notifications/initialized is a notification and gets no response",
+            CaseInput::Json(json!({"jsonrpc":"2.0","method":"notifications/initialized"})),
+            Expected::NoResponse,
+        ),
+        cc(
+            "JSONRPC-2.0-METHOD-001",
+            "JSON-RPC 2.0 Method Dispatch",
+            RequirementLevel::Must,
+            "Unknown request methods return Method not found",
+            CaseInput::Json(json!({"jsonrpc":"2.0","id":"unknown","method":"unknown/request"})),
+            Expected::Error {
                 id: json!("unknown"),
                 code: -32601,
             },
-        },
-        ConformanceCase {
-            id: "JSONRPC-2.0-BATCH-001",
-            section: "JSON-RPC 2.0 Batch",
-            level: RequirementLevel::Must,
-            description: "A batch returns responses only for requests, not notifications",
-            input: CaseInput::Json(json!([
+        ),
+        cc(
+            "JSONRPC-2.0-BATCH-001",
+            "JSON-RPC 2.0 Batch",
+            RequirementLevel::Must,
+            "A batch returns responses only for requests, not notifications",
+            CaseInput::Json(json!([
                 {"jsonrpc":"2.0","id":"batch-ping","method":"ping"},
                 {"jsonrpc":"2.0","method":"ping"}
             ])),
-            expected: Expected::Batch(vec![BatchExpected::Result {
+            Expected::Batch(vec![BatchExpected::Result {
                 id: json!("batch-ping"),
             }]),
-        },
-        ConformanceCase {
-            id: "JSONRPC-2.0-BATCH-002",
-            section: "JSON-RPC 2.0 Batch",
-            level: RequirementLevel::Must,
-            description: "An empty batch is an invalid request",
-            input: CaseInput::Json(json!([])),
-            expected: Expected::Error {
+        ),
+        cc(
+            "JSONRPC-2.0-BATCH-002",
+            "JSON-RPC 2.0 Batch",
+            RequirementLevel::Must,
+            "An empty batch is an invalid request",
+            CaseInput::Json(json!([])),
+            Expected::Error {
                 id: Value::Null,
                 code: -32600,
             },
-        },
-        ConformanceCase {
-            id: "JSONRPC-2.0-BATCH-003",
-            section: "JSON-RPC 2.0 Batch",
-            level: RequirementLevel::Must,
-            description: "A batch containing only notifications gets no response",
-            input: CaseInput::Json(json!([
+        ),
+        cc(
+            "JSONRPC-2.0-BATCH-003",
+            "JSON-RPC 2.0 Batch",
+            RequirementLevel::Must,
+            "A batch containing only notifications gets no response",
+            CaseInput::Json(json!([
                 {"jsonrpc":"2.0","method":"ping"},
                 {"jsonrpc":"2.0","method":"unknown/notification"}
             ])),
-            expected: Expected::NoResponse,
-        },
-        ConformanceCase {
-            id: "JSONRPC-2.0-BATCH-004",
-            section: "JSON-RPC 2.0 Batch",
-            level: RequirementLevel::Must,
-            description: "Invalid batch elements return invalid request errors alongside valid responses",
-            input: CaseInput::Json(json!([
+            Expected::NoResponse,
+        ),
+        cc(
+            "JSONRPC-2.0-BATCH-004",
+            "JSON-RPC 2.0 Batch",
+            RequirementLevel::Must,
+            "Invalid batch elements return invalid request errors alongside valid responses",
+            CaseInput::Json(json!([
                 1,
                 {"jsonrpc":"2.0","id":"batch-valid","method":"ping"}
             ])),
-            expected: Expected::Batch(vec![
+            Expected::Batch(vec![
                 BatchExpected::Error {
                     id: Value::Null,
                     code: -32600,
@@ -214,7 +236,7 @@ fn jsonrpc_cases() -> Vec<ConformanceCase> {
                     id: json!("batch-valid"),
                 },
             ]),
-        },
+        ),
     ]
 }
 
@@ -393,6 +415,29 @@ fn jsonrpc_protocol_errors_include_structured_data() {
     }
 }
 
+/// Assert that an initialize result has the expected shape and capabilities.
+fn assert_init_result(result: &Value, protocol_version: &str) {
+    assert_eq!(result["protocolVersion"], protocol_version);
+    assert!(result["capabilities"]["logging"].is_object());
+    assert!(result["capabilities"]["tools"].is_object());
+    assert!(result["capabilities"]["resources"].is_object());
+    assert!(result["capabilities"]["prompts"].is_object());
+    assert_eq!(result["serverInfo"]["name"], "tokenzero");
+    assert!(
+        result["serverInfo"]["version"]
+            .as_str()
+            .is_some_and(|version| !version.is_empty()),
+        "{result}"
+    );
+}
+
+/// Assert protocol negotiation metadata.
+fn assert_init_negotiation(negotiation: &Value, requested: &str, negotiated: &str, fallback: bool) {
+    assert_eq!(negotiation["requestedProtocolVersion"], requested);
+    assert_eq!(negotiation["negotiatedProtocolVersion"], negotiated);
+    assert_eq!(negotiation["fallback"], fallback);
+}
+
 #[test]
 fn mcp_initialize_conformance_matrix() {
     let dir = tempdir().unwrap();
@@ -407,24 +452,12 @@ fn mcp_initialize_conformance_matrix() {
             "params": initialize_params("2025-06-18")
         }),
     );
-    assert_eq!(stable["result"]["protocolVersion"], "2025-06-18");
-    let stable_negotiation = &stable["result"]["_meta"]["tokenzero/protocolNegotiation"];
-    assert_eq!(stable_negotiation["requestedProtocolVersion"], "2025-06-18");
-    assert_eq!(
-        stable_negotiation["negotiatedProtocolVersion"],
-        "2025-06-18"
-    );
-    assert_eq!(stable_negotiation["fallback"], false);
-    assert!(stable["result"]["capabilities"]["logging"].is_object());
-    assert!(stable["result"]["capabilities"]["tools"].is_object());
-    assert!(stable["result"]["capabilities"]["resources"].is_object());
-    assert!(stable["result"]["capabilities"]["prompts"].is_object());
-    assert_eq!(stable["result"]["serverInfo"]["name"], "tokenzero");
-    assert!(
-        stable["result"]["serverInfo"]["version"]
-            .as_str()
-            .is_some_and(|version| !version.is_empty()),
-        "{stable}"
+    assert_init_result(&stable["result"], "2025-06-18");
+    assert_init_negotiation(
+        &stable["result"]["_meta"]["tokenzero/protocolNegotiation"],
+        "2025-06-18",
+        "2025-06-18",
+        false,
     );
 
     let initialized_with_id = response_json(
@@ -447,17 +480,9 @@ fn mcp_initialize_conformance_matrix() {
             "params": initialize_params("1900-01-01")
         }),
     );
-    assert_eq!(unsupported["result"]["protocolVersion"], "2025-06-18");
+    assert_init_result(&unsupported["result"], "2025-06-18");
     let unsupported_negotiation = &unsupported["result"]["_meta"]["tokenzero/protocolNegotiation"];
-    assert_eq!(
-        unsupported_negotiation["requestedProtocolVersion"],
-        "1900-01-01"
-    );
-    assert_eq!(
-        unsupported_negotiation["negotiatedProtocolVersion"],
-        "2025-06-18"
-    );
-    assert_eq!(unsupported_negotiation["fallback"], true);
+    assert_init_negotiation(unsupported_negotiation, "1900-01-01", "2025-06-18", true);
     assert!(
         unsupported_negotiation["supportedProtocolVersions"]
             .as_array()
@@ -824,23 +849,31 @@ fn mcp_method_params_conformance_matrix() {
     ];
 
     for (case_id, description, input, expected_kind) in cases {
-        let response = handle_jsonrpc(&engine, &input.to_string())
-            .unwrap_or_else(|| panic!("{case_id}: expected protocol error response"));
-        let actual: Value = serde_json::from_str(&response).unwrap();
+        let actual = response_json(&engine, input);
+        assert_invalid_params_kind(&actual, expected_kind, case_id, description);
+    }
+}
 
+/// Assert every item in a resources/list response has the required fields.
+fn assert_resource_entries(resources: &[Value], label: &str) {
+    for resource in resources {
+        assert_non_empty_string(&resource["uri"], &format!("{label} resource.uri"));
+        assert_non_empty_string(&resource["name"], &format!("{label} resource.name"));
+        assert_non_empty_string(&resource["mimeType"], &format!("{label} resource.mimeType"));
+        if let Some(description) = resource.get("description") {
+            assert_non_empty_string(description, &format!("{label} resource.description"));
+        }
+    }
+}
+
+/// Assert every item in a tools/list response has the required fields.
+fn assert_tool_entries(tools: &[Value], label: &str) {
+    for tool in tools {
+        assert_non_empty_string(&tool["name"], "{label} tool.name");
+        assert_non_empty_string(&tool["description"], "{label} tool.description");
         assert_eq!(
-            actual["error"]["code"], -32602,
-            "{case_id}: {description}: {actual}"
-        );
-        assert_eq!(
-            actual["error"]["data"]["kind"], expected_kind,
-            "{case_id}: {description}: {actual}"
-        );
-        assert!(
-            actual["error"]["data"]["reason"]
-                .as_str()
-                .is_some_and(|reason| !reason.is_empty()),
-            "{case_id}: missing reason in {actual}"
+            tool["inputSchema"]["type"], "object",
+            "{label} tool.inputSchema must be an object schema: {tool}"
         );
     }
 }
@@ -854,23 +887,20 @@ fn mcp_result_shape_conformance_matrix() {
 
     let resources = response_json(
         &engine,
-        json!({"jsonrpc":"2.0","id":"resources-shape","method":"resources/list","params":{}}),
+        mcp_req("resources-shape", "resources/list", json!({})),
     );
     assert_list_result_shape(&resources, "resources", "resources/list");
     let resources_array = resources["result"]["resources"].as_array().unwrap();
     assert!(!resources_array.is_empty(), "{resources}");
-    for resource in resources_array {
-        assert_non_empty_string(&resource["uri"], "resources/list resource.uri");
-        assert_non_empty_string(&resource["name"], "resources/list resource.name");
-        assert_non_empty_string(&resource["mimeType"], "resources/list resource.mimeType");
-        if let Some(description) = resource.get("description") {
-            assert_non_empty_string(description, "resources/list resource.description");
-        }
-    }
+    assert_resource_entries(resources_array, "resources/list");
 
     let resource_templates = response_json(
         &engine,
-        json!({"jsonrpc":"2.0","id":"resource-templates-shape","method":"resources/templates/list","params":{}}),
+        mcp_req(
+            "resource-templates-shape",
+            "resources/templates/list",
+            json!({}),
+        ),
     );
     assert_list_result_shape(
         &resource_templates,
@@ -885,31 +915,22 @@ fn mcp_result_shape_conformance_matrix() {
         "TokenZero exposes concrete resources, not URI templates: {resource_templates}"
     );
 
-    let prompts = response_json(
-        &engine,
-        json!({"jsonrpc":"2.0","id":"prompts-shape","method":"prompts/list","params":{}}),
-    );
+    let prompts = response_json(&engine, mcp_req("prompts-shape", "prompts/list", json!({})));
     assert_list_result_shape(&prompts, "prompts", "prompts/list");
 
-    let tools = response_json(
-        &engine,
-        json!({"jsonrpc":"2.0","id":"tools-shape","method":"tools/list","params":{}}),
-    );
+    let tools = response_json(&engine, mcp_req("tools-shape", "tools/list", json!({})));
     assert_list_result_shape(&tools, "tools", "tools/list");
     let tools_array = tools["result"]["tools"].as_array().unwrap();
     assert!(!tools_array.is_empty(), "{tools}");
-    for tool in tools_array {
-        assert_non_empty_string(&tool["name"], "tools/list tool.name");
-        assert_non_empty_string(&tool["description"], "tools/list tool.description");
-        assert_eq!(
-            tool["inputSchema"]["type"], "object",
-            "tools/list tool.inputSchema must be an object schema: {tool}"
-        );
-    }
+    assert_tool_entries(tools_array, "tools/list");
 
     let resource_read = response_json(
         &engine,
-        json!({"jsonrpc":"2.0","id":"read-resource-shape","method":"resources/read","params":{"uri":"resource://tokenzero/capabilities"}}),
+        mcp_req(
+            "read-resource-shape",
+            "resources/read",
+            json!({"uri":"resource://tokenzero/capabilities"}),
+        ),
     );
     assert!(
         resource_read["result"].get("contents").is_some(),
@@ -925,12 +946,11 @@ fn mcp_result_shape_conformance_matrix() {
 
     let tool_call = response_json(
         &engine,
-        json!({
-            "jsonrpc":"2.0",
-            "id":"tool-call-shape",
-            "method":"tools/call",
-            "params":{"name":"read","arguments":{"path":fixture_path.display().to_string(),"raw":true}}
-        }),
+        mcp_req(
+            "tool-call-shape",
+            "tools/call",
+            json!({"name":"read","arguments":{"path":fixture_path.display().to_string(),"raw":true}}),
+        ),
     );
     assert!(tool_call.get("error").is_none(), "{tool_call}");
     let result = &tool_call["result"];
@@ -1323,6 +1343,25 @@ fn assert_invalid_params_kind(
         .unwrap_or_else(|reason| panic!("{case_id}: {description}: {reason}"));
 }
 
+fn assert_batch_responses(expected: &[BatchExpected], actual: &[Value]) -> Result<(), String> {
+    if actual.len() != expected.len() {
+        return Err(format!(
+            "expected {} batch responses, got {}: {actual:?}",
+            expected.len(),
+            actual.len()
+        ));
+    }
+    for (index, (expected, actual)) in expected.iter().zip(actual.iter()).enumerate() {
+        match expected {
+            BatchExpected::Result { id } => assert_result_response(actual, id)
+                .map_err(|reason| format!("batch[{index}]: {reason}"))?,
+            BatchExpected::Error { id, code } => assert_error_response(actual, id, *code)
+                .map_err(|reason| format!("batch[{index}]: {reason}"))?,
+        }
+    }
+    Ok(())
+}
+
 fn run_case(engine: &TokenZeroEngine, case: &ConformanceCase) -> Result<(), String> {
     let payload = match &case.input {
         CaseInput::Json(value) => value.to_string(),
@@ -1340,24 +1379,7 @@ fn run_case(engine: &TokenZeroEngine, case: &ConformanceCase) -> Result<(), Stri
         (Expected::Error { id, code }, Some(actual)) => assert_error_response(&actual, id, *code),
         (Expected::Error { .. }, None) => Err("expected error response, got no response".into()),
         (Expected::Batch(expected), Some(Value::Array(actual))) => {
-            if actual.len() != expected.len() {
-                return Err(format!(
-                    "expected {} batch responses, got {}: {actual:?}",
-                    expected.len(),
-                    actual.len()
-                ));
-            }
-            for (index, (expected, actual)) in expected.iter().zip(actual.iter()).enumerate() {
-                match expected {
-                    BatchExpected::Result { id } => assert_result_response(actual, id)
-                        .map_err(|reason| format!("batch[{index}]: {reason}"))?,
-                    BatchExpected::Error { id, code } => {
-                        assert_error_response(actual, id, *code)
-                            .map_err(|reason| format!("batch[{index}]: {reason}"))?
-                    }
-                }
-            }
-            Ok(())
+            assert_batch_responses(expected, &actual)
         }
         (Expected::Batch(_), Some(actual)) => Err(format!("expected batch array, got {actual}")),
         (Expected::Batch(_), None) => Err("expected batch response, got no response".into()),

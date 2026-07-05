@@ -179,6 +179,3 @@ pub fn shell_combined_output(
         stderr
     )
 }
-
-#[cfg(test)]
-mod tables;

@@ -79,6 +79,10 @@ fn cli_read_default_root_rejects_absolute_path_outside_cwd() {
     assert_eq!(json["status"], "error");
     assert_eq!(json["error"]["code"], "path_not_allowed");
     assert!(
+        json["error"]["message"].as_str().unwrap().len() >= 10,
+        "error message should be descriptive"
+    );
+    assert!(
         !String::from_utf8_lossy(&output.stdout).contains("do-not-leak"),
         "{}",
         String::from_utf8_lossy(&output.stdout)
@@ -154,6 +158,13 @@ fn cli_grep_and_glob_are_exact_first_surfaces() {
     );
     let grep_json: Value = serde_json::from_slice(&grep.stdout).unwrap();
     assert_eq!(grep_json["tool"], "grep");
+    assert!(
+        grep_json["visible"]["text"]
+            .as_str()
+            .unwrap()
+            .contains("alpha"),
+        "grep result must contain the search term"
+    );
     assert!(
         grep_json["refs"]
             .as_array()
@@ -325,6 +336,14 @@ fn cli_cache_pack_is_schemaed_and_deterministic() {
     let second_json: Value = serde_json::from_slice(&second.stdout).unwrap();
     assert_eq!(first_json["tool"], "cache-pack");
     assert_eq!(first_json["telemetry"]["daemon_required"], false);
+    assert!(
+        first_json["telemetry"]["content_digest"]
+            .as_str()
+            .unwrap()
+            .len()
+            >= 16,
+        "digest should be a meaningful hash"
+    );
     assert_eq!(
         first_json["telemetry"]["content_digest"],
         second_json["telemetry"]["content_digest"]

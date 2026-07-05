@@ -73,11 +73,7 @@ fn read_degrades_when_recovery_cache_is_unwritable() {
     let dir = tempdir().unwrap();
     let file = dir.path().join("sample.rs");
     fs::write(&file, "fn alpha() {}\n").unwrap();
-    let cache_dir = dir.path().join("cache-as-directory");
-    fs::create_dir_all(&cache_dir).unwrap();
-    let mut config = EngineConfig::for_root(dir.path());
-    config.cache_path = cache_dir;
-    let engine = TokenZeroEngine::new(config);
+    let engine = engine_with_unwritable_cache(dir.path());
 
     let response = engine.read(&[file], Mode::Auto, None, None, false, 20, 4000);
 
@@ -93,11 +89,7 @@ fn read_degrades_when_recovery_cache_is_unwritable() {
 #[test]
 fn ingest_degrades_when_recovery_cache_is_unwritable() {
     let dir = tempdir().unwrap();
-    let cache_dir = dir.path().join("cache-as-directory");
-    fs::create_dir_all(&cache_dir).unwrap();
-    let mut config = EngineConfig::for_root(dir.path());
-    config.cache_path = cache_dir;
-    let engine = TokenZeroEngine::new(config);
+    let engine = engine_with_unwritable_cache(dir.path());
 
     let response = engine.ingest("alpha\nbeta\n", ContentType::Logs, Mode::Auto, "logs");
 

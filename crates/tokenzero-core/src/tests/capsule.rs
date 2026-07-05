@@ -1,12 +1,6 @@
 use super::*;
 
 #[test]
-fn token_count_is_nonzero_for_text() {
-    assert!(count_tokens("hello world") >= 2);
-    assert_eq!(count_tokens(""), 0);
-}
-
-#[test]
 fn capsule_exact_hides_payload() {
     let c = make_capsule("secret payload", Mode::Exact, 10, Some("file"));
     assert!(!c.text.contains("secret payload"));

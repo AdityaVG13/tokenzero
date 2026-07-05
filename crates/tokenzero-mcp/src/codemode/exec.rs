@@ -152,7 +152,12 @@ pub fn execute_codemode_with_options(plan: &str, options: CodeModeOptions) -> Co
             );
         }
     };
-    if should_run_quickjs(plan) {
+    // The lowered mini-interpreter only understands a small statement grammar;
+    // anything it cannot FULLY parse (optional chaining, ??, computed calls)
+    // must run in the real QuickJS sandbox instead of degrading — the old
+    // lenient parser turned unknown expressions into source-text strings.
+    let use_quickjs = should_run_quickjs(plan) || parse_plan(&lowered).is_err();
+    if use_quickjs {
         if quickjs_plan_requests_mutation(plan) {
             return finalize_codemode_result(
                 CodeModeResult::error(
@@ -601,6 +606,18 @@ fn js_prelude() -> &'static str {
             compactMany: (items) => __tz_parse(__tz_compact_many_json(JSON.stringify(items))),
             expandMany: (refs) => __tz_parse(__tz_expand_many_json(JSON.stringify(refs))),
             dedupe: (items) => __tz_parse(__tz_dedupe_json(JSON.stringify(items))),
+            // Op parity for routed callers that address this substrate as
+            // zero.token.* (the router's namespaced surface): same engine
+            // ops as the top-level zero.* bindings, same policy machinery.
+            shell: (...args) => __tz_call('zero.shell', args),
+            read: (...args) => __tz_call('zero.read', args),
+            find: (...args) => __tz_call('zero.find', args),
+            grep: (...args) => __tz_call('zero.grep', args),
+            glob: (...args) => __tz_call('zero.glob', args),
+            tree: (...args) => __tz_call('zero.tree', args),
+            rewrite: (...args) => __tz_call('zero.rewrite', args),
+            mem: (...args) => __tz_call('zero.mem', args),
+            recall: (...args) => __tz_call('zero.recall', args),
           }),
           ref: (value) => __tz_parse(__tz_compact_json(typeof value === 'string' ? value : JSON.stringify(value))),
         });
@@ -1147,13 +1164,15 @@ fn dispatch_values(
     method: &str,
     args: &[Value],
 ) -> Result<OpOutcome, Box<CodeModeResult>> {
+    // zero.token.* aliases: the router's namespaced surface addresses this
+    // substrate as zero.token.<op>; both spellings hit the same engine ops.
     match method {
-        "zero.read" | "read" => exec_read(engine, args),
-        "zero.find" | "find" => exec_find(engine, work_root, args, false),
-        "zero.grep" | "grep" => exec_find(engine, work_root, args, true),
-        "zero.glob" | "glob" => exec_glob(engine, work_root, args),
-        "zero.tree" | "tree" => exec_tree(engine, work_root, args),
-        "zero.shell" | "shell" => exec_shell(engine, args),
+        "zero.read" | "read" | "zero.token.read" => exec_read(engine, args),
+        "zero.find" | "find" | "zero.token.find" => exec_find(engine, work_root, args, false),
+        "zero.grep" | "grep" | "zero.token.grep" => exec_find(engine, work_root, args, true),
+        "zero.glob" | "glob" | "zero.token.glob" => exec_glob(engine, work_root, args),
+        "zero.tree" | "tree" | "zero.token.tree" => exec_tree(engine, work_root, args),
+        "zero.shell" | "shell" | "zero.token.shell" => exec_shell(engine, args),
         "zero.edit" | "edit" => Err(Box::new(CodeModeResult::error_with_kind(
             "policy",
             "mutating binding denied without transaction support",
@@ -1173,11 +1192,11 @@ fn dispatch_values(
         "zero.token.dedupe" | "zero.dedupe" | "dedupe" => exec_dedupe(args),
         "zero.compact_max" | "compact_max" => exec_compact_max(engine, args),
         "zero.ingest" | "ingest" => exec_ingest(engine, args),
-        "zero.mem" | "mem" => exec_mem(engine),
-        "zero.recall" | "recall" => exec_recall(engine, args),
+        "zero.mem" | "mem" | "zero.token.mem" => exec_mem(engine),
+        "zero.recall" | "recall" | "zero.token.recall" => exec_recall(engine, args),
         "zero.fetch" | "fetch" => exec_fetch(engine, args),
         "zero.cache_pack" | "cache_pack" | "cache-pack" => exec_cache_pack(engine, args),
-        "zero.rewrite" | "rewrite" => exec_rewrite(args),
+        "zero.rewrite" | "rewrite" | "zero.token.rewrite" => exec_rewrite(args),
         "zero.discover" | "discover" => exec_discover(),
         "zero.batch" | "batch" => exec_batch(engine, args),
         "zero.pipe" | "pipe" => exec_pipe(engine, work_root, args),

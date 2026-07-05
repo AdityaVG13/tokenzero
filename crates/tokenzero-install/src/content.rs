@@ -273,9 +273,9 @@ pub(crate) fn merge_toml_mcp(
     global: bool,
     mcp_surface: McpToolSurface,
 ) -> std::io::Result<String> {
-    let without_managed = strip_managed_toml_block(previous);
-    let without_old_tokenzero = strip_tokenzero_toml_tables(&without_managed);
-    let mut merged = without_old_tokenzero.trim_end().to_string();
+    let mut merged = strip_tokenzero_managed_toml(previous)
+        .trim_end()
+        .to_string();
     if !merged.is_empty() {
         merged.push_str("\n\n");
     }
@@ -398,32 +398,19 @@ pub(crate) fn toml_env_lines(root: &Path, mcp_surface: McpToolSurface) -> String
         .join("\n")
 }
 
-pub(crate) fn strip_managed_toml_block(input: &str) -> String {
+pub(crate) fn strip_tokenzero_managed_toml(input: &str) -> String {
     let mut output = Vec::new();
     let mut skipping = false;
     for line in input.lines() {
-        match line.trim() {
-            "# tokenzero:mcp:start" => {
-                skipping = true;
-            }
-            "# tokenzero:mcp:end" => {
-                skipping = false;
-            }
-            _ if !skipping => output.push(line),
-            _ => {}
+        let trimmed = line.trim();
+        if trimmed == "# tokenzero:mcp:start" {
+            skipping = true;
+            continue;
         }
-    }
-    let mut text = output.join("\n");
-    if input.ends_with('\n') && !text.is_empty() {
-        text.push('\n');
-    }
-    text
-}
-
-pub(crate) fn strip_tokenzero_toml_tables(input: &str) -> String {
-    let mut output = Vec::new();
-    let mut skipping = false;
-    for line in input.lines() {
+        if trimmed == "# tokenzero:mcp:end" {
+            skipping = false;
+            continue;
+        }
         if let Some(table) = toml_table_name(line) {
             skipping =
                 table == "mcp_servers.tokenzero" || table.starts_with("mcp_servers.tokenzero.");

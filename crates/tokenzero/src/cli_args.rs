@@ -47,9 +47,8 @@ pub(crate) enum Commands {
     #[command(about = "Inspect recovery-cache state")]
     Mem(CommonArgs),
     #[command(about = "Rewrite a shell command with TokenZero-safe routing")]
+    #[command(alias = "rewrite-command")]
     Rewrite(RewriteArgs),
-    #[command(name = "rewrite-command", about = "Alias for rewrite")]
-    RewriteCommand(RewriteArgs),
     #[command(about = "Agent-harness hook adapters: stdin JSON in, decision JSON out")]
     Hook(HookArgs),
     #[command(about = "List local TokenZero tool-discovery metadata")]
