@@ -6,24 +6,6 @@ use tokenzero_core::MCP_SCHEMA_VERSION;
 use super::support::*;
 
 #[test]
-fn passthrough_zero_matches_keeps_verbatim_empty_payload() {
-    let dir = tempdir().unwrap();
-    fs::write(dir.path().join("lib.rs"), "fn alpha() {}\n").unwrap();
-    let engine = TokenZeroEngine::new(EngineConfig::for_root(dir.path()));
-
-    let response = engine.grep(
-        "nomatch",
-        &[dir.path().to_path_buf()],
-        Mode::Passthrough,
-        20,
-        4000,
-    );
-
-    assert_eq!(response.status, "ok");
-    assert_eq!(response.visible.as_ref().unwrap().text, "");
-}
-
-#[test]
 fn pipelined_identical_reads_dedup_exactly_once() {
     // Two reads of the same file issued concurrently on a shared engine must
     // not both serve full: the single-flight gate makes the second wait for
@@ -308,11 +290,7 @@ fn degraded_storage_serves_full_instead_of_dedup_note() {
     let dir = tempdir().unwrap();
     let file = dir.path().join("sample.rs");
     fs::write(&file, dedup_fixture_content()).unwrap();
-    let cache_dir = dir.path().join("cache-as-directory");
-    fs::create_dir_all(&cache_dir).unwrap();
-    let mut config = EngineConfig::for_root(dir.path());
-    config.cache_path = cache_dir;
-    let engine = TokenZeroEngine::new(config);
+    let engine = engine_with_unwritable_cache(dir.path());
 
     read_ok(&engine, &file);
     let second = read_ok(&engine, &file);

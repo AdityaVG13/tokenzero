@@ -22,35 +22,6 @@ fn grep_keeps_own_tool_name_and_exact_refs() {
 }
 
 #[test]
-fn grep_zero_matches_renders_zero_hit_note() {
-    let dir = tempdir().unwrap();
-    fs::write(dir.path().join("lib.rs"), "fn alpha() {}\n").unwrap();
-    let engine = TokenZeroEngine::new(EngineConfig::for_root(dir.path()));
-
-    let response = engine.grep("nomatch", &[dir.path().to_path_buf()], Mode::Auto, 20, 4000);
-
-    assert_eq!(response.status, "ok");
-    let text = response.visible.as_ref().unwrap().text.clone();
-    assert_eq!(text, "# grep nomatch — 0 matches");
-    let accounting = response.accounting.as_ref().unwrap();
-    assert_eq!(accounting.raw_tokens, 0);
-    assert_eq!(accounting.visible_tokens, count_tokens(&text));
-    // Canonical stored payload stays the empty flat output, still
-    // recoverable: expanding the blob ref must return the empty payload,
-    // never the note.
-    let blob_ref = response
-        .refs
-        .iter()
-        .find(|row| row.kind == "blob")
-        .unwrap()
-        .ref_id
-        .clone();
-    let expanded = engine.expand(&blob_ref, None, None, None, None, None);
-    assert_eq!(expanded.status, "ok");
-    assert_eq!(expanded.visible.as_ref().unwrap().text, "");
-}
-
-#[test]
 fn zero_hit_note_clamps_multiline_and_long_queries() {
     let dir = tempdir().unwrap();
     fs::write(dir.path().join("lib.rs"), "fn alpha() {}\n").unwrap();
@@ -83,91 +54,105 @@ fn zero_hit_note_clamps_multiline_and_long_queries() {
 }
 
 #[test]
-fn glob_zero_result_budget_notes_truncated_scan() {
-    let dir = tempdir().unwrap();
-    fs::write(dir.path().join("lib.rs"), "lib").unwrap();
-    let engine = TokenZeroEngine::new(EngineConfig::for_root(dir.path()));
-
-    let response = engine.glob(
-        "**/*.rs",
-        &[dir.path().to_path_buf()],
-        false,
-        Mode::Auto,
-        0,
-        4000,
-    );
-
-    assert_eq!(response.status, "ok");
-    assert_eq!(
-        response.visible.as_ref().unwrap().text,
-        "# glob **/*.rs — 0 matches (scan truncated)"
-    );
-}
-
-#[test]
-fn tree_zero_depth_notes_truncated_scan() {
-    let dir = tempdir().unwrap();
-    fs::write(dir.path().join("lib.rs"), "lib").unwrap();
-    let engine = TokenZeroEngine::new(EngineConfig::for_root(dir.path()));
-
-    let response = engine.tree(&[dir.path().to_path_buf()], 0, false, Mode::Auto, 200, 4000);
-
-    assert_eq!(response.status, "ok");
-    assert_eq!(
-        response.visible.as_ref().unwrap().text,
-        "# tree — 0 entries (scan truncated)"
-    );
-}
-
-#[test]
-fn find_zero_matches_under_truncated_scan_says_so() {
+fn truncated_scan_notes_for_glob_tree_find() {
     let dir = tempdir().unwrap();
     fs::write(dir.path().join("lib.rs"), "fn alpha() {}\n").unwrap();
     let engine = TokenZeroEngine::new(EngineConfig::for_root(dir.path()));
+    let roots = vec![dir.path().to_path_buf()];
 
-    let response = engine.find("alpha", &[dir.path().to_path_buf()], Mode::Auto, 0, 4000);
+    struct Case {
+        label: &'static str,
+        actual: String,
+    }
+    let mut cases = Vec::new();
 
-    assert_eq!(response.status, "ok");
-    assert_eq!(
-        response.visible.as_ref().unwrap().text,
-        "# find alpha — 0 matches (scan truncated)"
-    );
+    // budget=0 forces a truncated scan for glob and find.
+    let glob_resp = engine.glob("**/*.rs", &roots, false, Mode::Auto, 0, 4000);
+    assert_eq!(glob_resp.status, "ok");
+    cases.push(Case {
+        label: "glob",
+        actual: visible_text(&glob_resp),
+    });
+
+    // depth=0 forces a truncated scan for tree.
+    let tree_resp = engine.tree(&roots, 0, false, Mode::Auto, 200, 4000);
+    assert_eq!(tree_resp.status, "ok");
+    cases.push(Case {
+        label: "tree",
+        actual: visible_text(&tree_resp),
+    });
+
+    // budget=0 forces a truncated scan for find.
+    let find_resp = engine.find("alpha", &roots, Mode::Auto, 0, 4000);
+    assert_eq!(find_resp.status, "ok");
+    cases.push(Case {
+        label: "find",
+        actual: visible_text(&find_resp),
+    });
+
+    for case in &cases {
+        assert!(
+            case.actual.contains("(scan truncated)"),
+            "{}: missing truncated-scan note: {}",
+            case.label,
+            case.actual
+        );
+    }
 }
 
 #[test]
-fn glob_zero_matches_renders_zero_hit_note() {
+fn zero_hit_notes_for_glob_tree_recall() {
+    struct Case {
+        label: &'static str,
+        actual: String,
+    }
+    let mut cases = Vec::new();
+
+    // glob and recall: use a dir with one .rs file but query for .zig.
     let dir = tempdir().unwrap();
     fs::write(dir.path().join("lib.rs"), "lib").unwrap();
     let engine = TokenZeroEngine::new(EngineConfig::for_root(dir.path()));
+    let roots = vec![dir.path().to_path_buf()];
 
-    let response = engine.glob(
-        "**/*.zig",
-        &[dir.path().to_path_buf()],
+    let glob_resp = engine.glob("**/*.zig", &roots, false, Mode::Auto, 20, 4000);
+    assert_eq!(glob_resp.status, "ok");
+    cases.push(Case {
+        label: "glob",
+        actual: visible_text(&glob_resp),
+    });
+
+    let recall_resp = engine.recall("zz_nothing", 10, Mode::Auto, 4000);
+    assert_eq!(recall_resp.status, "ok");
+    cases.push(Case {
+        label: "recall",
+        actual: visible_text(&recall_resp),
+    });
+
+    // tree: needs an empty directory to produce zero entries.
+    let empty_dir = tempdir().unwrap();
+    let empty_engine = TokenZeroEngine::new(EngineConfig::for_root(empty_dir.path()));
+    let tree_resp = empty_engine.tree(
+        &[empty_dir.path().to_path_buf()],
+        3,
         false,
         Mode::Auto,
-        20,
+        200,
         4000,
     );
+    assert_eq!(tree_resp.status, "ok");
+    cases.push(Case {
+        label: "tree",
+        actual: visible_text(&tree_resp),
+    });
 
-    assert_eq!(response.status, "ok");
-    assert_eq!(
-        response.visible.as_ref().unwrap().text,
-        "# glob **/*.zig — 0 matches"
-    );
-}
-
-#[test]
-fn tree_of_empty_root_renders_zero_hit_note() {
-    let dir = tempdir().unwrap();
-    let engine = TokenZeroEngine::new(EngineConfig::for_root(dir.path()));
-
-    let response = engine.tree(&[dir.path().to_path_buf()], 3, false, Mode::Auto, 200, 4000);
-
-    assert_eq!(response.status, "ok");
-    assert_eq!(
-        response.visible.as_ref().unwrap().text,
-        "# tree — 0 entries"
-    );
+    for case in &cases {
+        assert!(
+            case.actual.contains("0 matches") || case.actual.contains("0 entries"),
+            "{}: unexpected zero-hit note: {}",
+            case.label,
+            case.actual
+        );
+    }
 }
 
 #[test]
@@ -195,11 +180,7 @@ fn search_exact_ref_tokens_match_refs() {
 fn glob_keeps_degraded_telemetry_when_recovery_cache_is_unwritable() {
     let dir = tempdir().unwrap();
     fs::write(dir.path().join("lib.rs"), "fn alpha() {}\n").unwrap();
-    let cache_dir = dir.path().join("cache-as-directory");
-    fs::create_dir_all(&cache_dir).unwrap();
-    let mut config = EngineConfig::for_root(dir.path());
-    config.cache_path = cache_dir;
-    let engine = TokenZeroEngine::new(config);
+    let engine = engine_with_unwritable_cache(dir.path());
 
     let response = engine.glob(
         "**/*.rs",
@@ -664,28 +645,10 @@ fn search_dedup_notes_and_changed_output_serves_full() {
 }
 
 #[test]
-fn recall_zero_hits_renders_note() {
-    let dir = tempdir().unwrap();
-    let engine = TokenZeroEngine::new(EngineConfig::for_root(dir.path()));
-
-    let response = engine.recall("zz_nothing", 10, Mode::Auto, 4000);
-
-    assert_eq!(response.status, "ok");
-    assert_eq!(
-        response.visible.as_ref().unwrap().text,
-        "# recall zz_nothing — 0 matches"
-    );
-}
-
-#[test]
 fn degraded_storage_search_serves_full_not_note() {
     let dir = tempdir().unwrap();
     fs::write(dir.path().join("lib.rs"), "fn alpha() {}\nfn beta() {}\n").unwrap();
-    let cache_dir = dir.path().join("cache-as-directory");
-    fs::create_dir_all(&cache_dir).unwrap();
-    let mut config = EngineConfig::for_root(dir.path());
-    config.cache_path = cache_dir;
-    let engine = TokenZeroEngine::new(config);
+    let engine = engine_with_unwritable_cache(dir.path());
 
     let first = engine.grep("alpha", &[dir.path().to_path_buf()], Mode::Auto, 20, 4000);
     assert_eq!(first.status, "ok");

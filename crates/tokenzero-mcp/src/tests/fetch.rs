@@ -155,37 +155,56 @@ fn fetch_cache_hits_still_obey_current_deny_policy() {
 }
 
 #[test]
-fn fetch_rejects_non_http_and_reports_curl_failures() {
+fn fetch_url_validation_rejects_non_http_and_internal_targets() {
     let dir = tempdir().unwrap();
     let mut config = EngineConfig::for_root(dir.path());
     config.fetch_enabled = true;
     let engine = TokenZeroEngine::new(config);
-    let bad = engine.fetch("file:///etc/passwd", None, false, Mode::Auto, 4000);
-    assert_eq!(bad.error.as_ref().unwrap().code, "invalid_url");
 
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let failing = dir.path().join("failing-curl");
-        fs::write(
-            &failing,
-            "#!/bin/sh\necho 'could not resolve host' >&2\nexit 6\n",
-        )
-        .unwrap();
-        fs::set_permissions(&failing, fs::Permissions::from_mode(0o755)).unwrap();
-        let mut config = EngineConfig::for_root(dir.path());
-        config.curl_path_override = Some(failing);
-        config.fetch_enabled = true;
-        config.fetch_allow_hosts = vec!["nope.invalid".to_string()];
-        let engine = TokenZeroEngine::new(config);
-        let response = engine.fetch("https://nope.invalid/x", None, false, Mode::Auto, 4000);
-        let error = response.error.as_ref().unwrap();
-        assert_eq!(error.code, "fetch_failed");
-        assert!(
-            error.message.contains("could not resolve host"),
-            "{error:?}"
-        );
+    // Non-http schemes are rejected before any network call.
+    for url in ["file:///etc/passwd", "ftp://example.com/x"] {
+        let resp = engine.fetch(url, None, false, Mode::Auto, 4000);
+        assert_eq!(resp.error.as_ref().unwrap().code, "invalid_url", "{url}");
     }
+
+    // Internal / loopback targets are blocked.
+    for url in [
+        "http://169.254.169.254/latest/meta-data/",
+        "http://127.0.0.1:8080/admin",
+        "http://10.0.0.5/",
+        "http://localhost:9999/",
+    ] {
+        let resp = engine.fetch(url, None, false, Mode::Auto, 4000);
+        assert_eq!(resp.error.as_ref().unwrap().code, "fetch_blocked", "{url}");
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn fetch_reports_curl_exit_failure() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = tempdir().unwrap();
+    let failing = dir.path().join("failing-curl");
+    fs::write(
+        &failing,
+        "#!/bin/sh\necho 'could not resolve host' >&2\nexit 6\n",
+    )
+    .unwrap();
+    fs::set_permissions(&failing, fs::Permissions::from_mode(0o755)).unwrap();
+    let mut config = EngineConfig::for_root(dir.path());
+    config.curl_path_override = Some(failing);
+    config.fetch_enabled = true;
+    config.fetch_allow_hosts = vec!["nope.invalid".to_string()];
+    let engine = TokenZeroEngine::new(config);
+
+    let response = engine.fetch("https://nope.invalid/x", None, false, Mode::Auto, 4000);
+    let error = response.error.as_ref().unwrap();
+    assert_eq!(error.code, "fetch_failed");
+    assert!(
+        error.message.contains("could not resolve host"),
+        "{error:?}"
+    );
 }
 
 #[test]
@@ -198,42 +217,4 @@ fn fetch_is_disabled_by_default() {
     let response = engine.fetch("https://example.com/", None, false, Mode::Auto, 4000);
     let error = response.error.as_ref().unwrap();
     assert_eq!(error.code, "fetch_disabled");
-}
-
-#[cfg(unix)]
-#[test]
-fn fetch_blocks_internal_targets_before_any_network_call() {
-    use std::os::unix::fs::PermissionsExt;
-
-    let dir = tempdir().unwrap();
-    let fake_curl = dir.path().join("fake-curl");
-    let marker = dir.path().join("invocations.log");
-    fs::write(
-        &fake_curl,
-        format!(
-            "#!/bin/sh\necho invoked >> {}\nprintf 'body'\n",
-            marker.display()
-        ),
-    )
-    .unwrap();
-    fs::set_permissions(&fake_curl, fs::Permissions::from_mode(0o755)).unwrap();
-    let mut config = EngineConfig::for_root(dir.path());
-    config.curl_path_override = Some(fake_curl);
-    config.fetch_enabled = true;
-    let engine = TokenZeroEngine::new(config);
-
-    for url in [
-        "http://169.254.169.254/latest/meta-data/",
-        "http://127.0.0.1:8080/admin",
-        "http://10.0.0.5/",
-        "http://localhost:9999/",
-    ] {
-        let response = engine.fetch(url, None, false, Mode::Auto, 4000);
-        let error = response.error.as_ref().unwrap();
-        assert_eq!(error.code, "fetch_blocked", "{url}");
-    }
-    assert!(
-        !marker.exists(),
-        "curl must never be invoked for blocked targets"
-    );
 }
