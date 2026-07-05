@@ -1,5 +1,37 @@
 use super::*;
 
+// ── Helpers ──────────────────────────────────────────────────────────────────
+
+/// Assert a command was NOT rewritten (applied=false, command unchanged).
+fn assert_not_rewritten(result: &RewriteResult) {
+    assert!(
+        !result.applied,
+        "expected no rewrite for '{}'",
+        result.command
+    );
+    assert_eq!(
+        result.rewritten_command, result.command,
+        "rewrite must leave '{}' unchanged",
+        result.command
+    );
+}
+
+/// Assert a command WAS rewritten to the expected output (applied=true).
+fn assert_rewritten_to(result: &RewriteResult, expected: &str) {
+    assert!(result.applied, "expected rewrite for '{}'", result.command);
+    assert_eq!(
+        result.rewritten_command, expected,
+        "'{}' rewrite mismatch",
+        result.command
+    );
+}
+
+// ── Discovery ────────────────────────────────────────────────────────────────
+
+const EXPECTED_FAMILIES: &[&str] = &[
+    "read", "search", "tree", "git", "test", "build", "docker", "kubectl", "package", "config",
+];
+
 #[test]
 fn discovers_launch_critical_families() {
     let report = discover();
@@ -8,165 +40,209 @@ fn discovers_launch_critical_families() {
     assert!(report.install_ready, "install_ready must be true");
     assert!(report.mcp_ready, "mcp_ready must be true");
     assert!(report.shell_ready, "shell_ready must be true");
-
-    // Structural invariants on every discovered filter.
     assert!(
-        !report.supported_filters.is_empty(),
-        "must discover at least one filter family"
+        report.os_warnings.is_empty(),
+        "no OS warnings on this platform"
+    );
+
+    // Every discovered filter must be structurally valid.
+    assert_eq!(
+        report.supported_filters.len(),
+        EXPECTED_FAMILIES.len(),
+        "filter count must match EXPECTED_FAMILIES"
     );
     for f in &report.supported_filters {
         assert!(f.supported, "family '{}' must be supported", f.family);
+        assert!(f.exact_refs, "family '{}' must have exact_refs", f.family);
+        assert!(
+            !f.commands.is_empty(),
+            "family '{}' must list at least one command",
+            f.family
+        );
     }
 
-    // Weak presence check for major families.
+    // Every expected family must be present.
     let families: Vec<_> = report
         .supported_filters
         .iter()
         .map(|f| f.family.as_str())
         .collect();
-    for family in ["read", "search", "tree", "git"] {
+    for &family in EXPECTED_FAMILIES {
         assert!(
             families.contains(&family),
-            "major family '{family}' must be present"
+            "family '{family}' must be present"
         );
     }
 }
 
-#[test]
-fn destructive_commands_are_unmodified() {
-    let result = rewrite_command("git push origin main", "safe", true);
-    assert!(!result.applied);
-    assert!(!result.safe);
-    assert_eq!(result.rewritten_command, "git push origin main");
-}
+// ── Compound / shell-operator commands ───────────────────────────────────────
 
 #[test]
 fn compound_commands_are_left_unmodified() {
+    // Pipes, sequences, logical operators, redirects, newlines, and
+    // command substitution forms $(…), `…`, $((…)) all count as compound.
     for command in [
+        // Pipes, sequences, logical operators
         "cat foo.txt | grep bar",
         "cargo test --workspace 2>&1 | tail -40",
         "ls -la; git status",
         "make build && make test",
         "grep -r needle . || true",
+        // Newline / carriage-return separators
         "git status\nrm -rf /tmp/x",
         "git status\rrm -rf /tmp/x",
-    ] {
-        let result = rewrite_command(command, "safe", true);
-        assert!(!result.applied, "{command}");
-        assert_eq!(result.rewritten_command, command);
-        assert_eq!(result.reason, "compound command left unmodified");
-        assert!(!result.safe, "compounds are never vouched: {command}");
-    }
-}
-
-#[test]
-fn command_substitution_counts_as_compound() {
-    for command in [
+        // Command substitution $(…) and backticks
         "cat foo $(rm -rf /tmp/x)",
         "echo \"today is $(date)\"",
         "echo \"`uname -a`\"",
+        // Arithmetic expansion $((…))
         "cat $((1+1)).txt",
     ] {
-        let result = rewrite_command(command, "safe", true);
-        assert!(!result.applied, "{command}");
-        assert_eq!(
-            result.reason, "compound command left unmodified",
-            "{command}"
-        );
-        assert!(!result.safe, "{command}");
+        let r = rewrite_command(command, "safe", true);
+        assert_not_rewritten(&r);
+        assert_eq!(r.reason, "compound command left unmodified");
+        assert!(!r.safe, "compounds are never vouched: {command}");
     }
 }
 
 #[test]
-fn dispatchers_and_remote_execution_are_never_vouched() {
-    for (command, fragment) in [
+fn quoted_operators_do_not_count_as_compound() {
+    let r = rewrite_command("cat 'a|b.txt'", "safe", true);
+    assert_rewritten_to(&r, "tokenzero read 'a|b.txt'");
+    assert!(r.safe);
+    assert_eq!(r.family, "read");
+}
+
+// ── Destructive / unsafe ─────────────────────────────────────────────────────
+
+/// Covers all `unsafe_reason` categories: destructive first-words, git
+/// mutations, sed/perl in-place edits, find with side effects, docker/kubectl
+/// mutations, package mutations, network commands, dispatchers, and remote
+/// execution.  The previous `destructive_commands_are_unmodified` test (which
+/// tested only `git push` + `rm`) was a pure subset and has been deleted.
+#[test]
+fn expanded_destructive_commands_are_flagged() {
+    for (command, expected_reason_fragment) in [
+        // Destructive first-words
+        ("rm -rf /tmp/x", "destructive"),
+        ("shred -u secrets.txt", "destructive"),
+        ("truncate -s 0 log.txt", "destructive"),
+        ("mkfs.ext4 /dev/sda1", "destructive"),
+        ("mount /dev/sda1 /mnt", "destructive"),
+        ("rsync --delete src/ dst/", "destructive"),
+        // In-place file edits
+        ("sed -i s/a/b/ file.txt", "in-place file edit"),
+        ("perl -pi -e s/a/b/ file.txt", "in-place file edit"),
+        // find with side effects
+        ("find . -name '*.tmp' -delete", "find with side effects"),
+        (
+            "find . -name '*.log' -exec rm {} +",
+            "find with side effects",
+        ),
+        // Git mutations
+        ("git push origin main", "git mutation"),
+        ("git restore .", "git mutation"),
+        ("git stash drop", "git mutation"),
+        ("git tag v1.0.0", "git mutation"),
+        (
+            "git remote add origin https://example.com/repo.git",
+            "git mutation",
+        ),
+        // Docker mutations
+        ("docker run --rm image", "docker mutation"),
+        ("docker compose up -d", "docker mutation"),
+        ("docker cp file container:/tmp/file", "docker mutation"),
+        ("docker import image.tar repo:tag", "docker mutation"),
+        // kubectl mutations
+        ("kubectl exec -it pod -- sh", "kubectl mutation"),
+        ("kubectl cp file pod:/tmp/file", "kubectl mutation"),
+        // Package mutations
+        ("cargo add serde", "package"),
+        ("npm uninstall left-pad", "package"),
+        ("npm ci", "package"),
+        ("uv pip install requests", "package"),
+        // Dispatchers
         ("xargs rm -rf /tmp/foo", "dispatcher"),
         ("eval ls", "dispatcher"),
         ("sudo ls", "dispatcher"),
         ("npx some-package", "dispatcher"),
+        // Remote execution
         ("ssh host uptime", "remote execution"),
         ("scp file host:/tmp/", "remote execution"),
     ] {
-        let result = rewrite_command(command, "safe", true);
-        assert!(!result.applied, "{command}");
-        assert!(!result.safe, "{command}");
+        let r = rewrite_command(command, "safe", true);
+        assert_not_rewritten(&r);
+        assert!(!r.safe, "{command}");
         assert!(
-            result.reason.contains(fragment),
-            "{command}: {}",
-            result.reason
+            r.reason.contains(expected_reason_fragment),
+            "{command}: expected '{expected_reason_fragment}' in reason, got '{}'",
+            r.reason
         );
-    }
-}
-
-#[test]
-fn expanded_destructive_commands_are_flagged() {
-    for command in [
-        "shred -u secrets.txt",
-        "truncate -s 0 log.txt",
-        "mkfs.ext4 /dev/sda1",
-        "mount /dev/sda1 /mnt",
-        "rsync --delete src/ dst/",
-        "sed -i s/a/b/ file.txt",
-        "perl -pi -e s/a/b/ file.txt",
-        "find . -name '*.tmp' -delete",
-        "find . -name '*.log' -exec rm {} +",
-        "git restore .",
-        "git stash drop",
-        "git tag v1.0.0",
-        "git remote add origin https://example.com/repo.git",
-        "docker run --rm image",
-        "docker compose up -d",
-        "docker cp file container:/tmp/file",
-        "docker import image.tar repo:tag",
-        "kubectl exec -it pod -- sh",
-        "kubectl cp file pod:/tmp/file",
-        "cargo add serde",
-        "npm uninstall left-pad",
-        "npm ci",
-        "uv pip install requests",
-    ] {
-        let result = rewrite_command(command, "safe", true);
-        assert!(!result.applied, "{command}");
-        assert!(!result.safe, "{command}");
-        assert_eq!(result.rewritten_command, command, "{command}");
     }
 }
 
 #[test]
 fn unknown_families_are_not_vouched() {
-    let result = rewrite_command("frobnicate --all", "safe", true);
-    assert!(!result.applied);
-    assert_eq!(result.reason, "unsupported command family");
-    assert!(!result.safe);
+    let r = rewrite_command("frobnicate --all", "safe", true);
+    assert_not_rewritten(&r);
+    assert_eq!(r.reason, "unsupported command family");
+    assert!(!r.safe);
+    assert_eq!(r.family, "unknown");
 }
 
 #[test]
 fn disabled_mode_reports_honest_safety() {
+    // Destructive: detected as unsafe before the disabled-mode path,
+    // so probe.safe=false propagates through.
     let dangerous = rewrite_command("rm -rf /tmp/x", "off", false);
-    assert!(!dangerous.applied);
     assert_eq!(dangerous.reason, "disabled");
-    assert!(!dangerous.safe);
+    assert!(
+        !dangerous.safe,
+        "unsafe command stays unsafe even in disabled mode"
+    );
 
+    // Benign read command: safe even when rewrites are disabled.
     let benign = rewrite_command("cat README.md", "off", false);
-    assert!(!benign.applied);
     assert_eq!(benign.reason, "disabled");
-    assert!(benign.safe);
+    assert!(benign.safe, "read command stays safe even in disabled mode");
+    assert_eq!(benign.family, "read");
+
+    // Git mutation: unsafe even in disabled mode.
+    let git_mut = rewrite_command("git push origin main", "off", false);
+    assert_eq!(git_mut.reason, "disabled");
+    assert!(
+        !git_mut.safe,
+        "git mutation stays unsafe even in disabled mode"
+    );
 }
+
+// ── Read-only / passthrough ──────────────────────────────────────────────────
 
 #[test]
 fn read_only_finds_and_passthroughs_stay_vouched() {
-    for command in [
-        "find . -name '*.rs'",
-        "git status",
-        "docker ps",
-        "kubectl get pods",
-        "head -n 5 foo.txt",
+    // Passthrough commands: vouched AND unchanged.
+    for (command, expected_family) in [
+        ("head -n 5 foo.txt", "read"),
+        ("find . -name '*.rs'", "tree"),
+        ("git status", "git"),
+        ("git diff", "git"),
+        ("docker ps", "docker"),
+        ("kubectl get pods", "kubectl"),
     ] {
-        let result = rewrite_command(command, "safe", true);
-        assert!(result.safe, "{command}");
-        assert_eq!(result.rewritten_command, command, "{command}");
+        let r = rewrite_command(command, "safe", true);
+        assert!(r.safe, "{command} must be vouched");
+        assert_eq!(r.family, expected_family, "{command} family mismatch");
+        assert_eq!(r.rewritten_command, command, "{command} must be unchanged");
     }
+
+    // cat is rewritten to tokenzero read but still vouched.
+    let r = rewrite_command("cat README.md", "safe", true);
+    assert!(r.safe, "cat must be vouched");
+    assert_eq!(r.family, "read");
+    assert_rewritten_to(&r, "tokenzero read README.md");
 }
+
+// ── split_words / has_shell_operators ─────────────────────────────────────────
 
 #[cfg(not(windows))]
 #[test]
@@ -180,6 +256,8 @@ fn backslash_escaped_quotes_split_correctly() {
     // An escaped operator is not an operator.
     assert!(!has_shell_operators(r"cat foo\;bar.txt"));
 }
+
+// ── Quiet flag injection ─────────────────────────────────────────────────────
 
 #[test]
 fn quiet_flags_injected_for_noisy_toolchains() {
@@ -200,10 +278,9 @@ fn quiet_flags_injected_for_noisy_toolchains() {
         ("npm test", "npm test --silent"),
         ("npm run build", "npm run build --silent"),
     ] {
-        let result = rewrite_command(command, "safe", true);
-        assert!(result.applied, "{command}");
-        assert!(result.safe, "{command}");
-        assert_eq!(result.rewritten_command, expected, "{command}");
+        let r = rewrite_command(command, "safe", true);
+        assert_rewritten_to(&r, expected);
+        assert!(r.safe, "{command}");
     }
 }
 
@@ -217,10 +294,9 @@ fn bounded_rewrites_respect_existing_limits() {
         "git log -n5",
         "git log -n 5",
     ] {
-        let result = rewrite_command(command, "safe", true);
-        assert_eq!(result.rewritten_command, command, "{command}");
-        assert!(!result.applied, "{command}");
-        assert!(result.safe, "{command}");
+        let r = rewrite_command(command, "safe", true);
+        assert_not_rewritten(&r);
+        assert!(r.safe, "{command}");
     }
 }
 
@@ -238,9 +314,8 @@ fn quiet_injection_respects_explicit_verbosity_and_passthrough_separators() {
         "yarn test",
         "go test ./...",
     ] {
-        let result = rewrite_command(command, "safe", true);
-        assert_eq!(result.rewritten_command, command, "{command}");
-        assert!(!result.applied, "{command}");
+        let r = rewrite_command(command, "safe", true);
+        assert_not_rewritten(&r);
     }
 }
 
@@ -253,15 +328,7 @@ fn quiet_injection_never_touches_mutations_or_compounds() {
         "cargo build && cargo test",
         "git pull origin main || true",
     ] {
-        let result = rewrite_command(command, "safe", true);
-        assert_eq!(result.rewritten_command, command, "{command}");
-        assert!(!result.applied, "{command}");
+        let r = rewrite_command(command, "safe", true);
+        assert_not_rewritten(&r);
     }
-}
-
-#[test]
-fn quoted_operators_do_not_count_as_compound() {
-    let result = rewrite_command("cat 'a|b.txt'", "safe", true);
-    assert!(result.applied);
-    assert_eq!(result.rewritten_command, "tokenzero read 'a|b.txt'");
 }
