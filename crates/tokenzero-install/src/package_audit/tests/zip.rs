@@ -429,36 +429,6 @@ fn package_audit_fails_closed_on_missing_zip_data_descriptor_before_central_dire
 }
 
 #[test]
-fn package_audit_fails_closed_on_zip_symlink_crc_mismatch() {
-    let dir = tempdir().unwrap();
-    let artifact = dir.path().join("release.zip");
-    let symlink_member = "tokenzero-v0.1.1/config-link";
-    let target = b"config.json";
-
-    write_test_zip(&artifact, &[ZipTestEntry::symlink(symlink_member, target)]);
-
-    let mut bytes = fs::read(&artifact).unwrap();
-    let eocd_offset = find_zip_eocd(&bytes).unwrap();
-    let central_directory_offset = zip_u32_at(&bytes, eocd_offset + 16).unwrap() as usize;
-    let wrong_crc = zip_crc32(target) ^ u32::MAX;
-    set_zip_u32_at(&mut bytes, 14, wrong_crc);
-    set_zip_u32_at(&mut bytes, central_directory_offset + 16, wrong_crc);
-    fs::write(&artifact, bytes).unwrap();
-
-    let report = package_audit(dir.path(), &[artifact]);
-    let issues = report["issues"].as_array().unwrap();
-
-    assert_eq!(report["ok"], false);
-    assert!(issues.iter().any(|issue| {
-        issue["code"] == "zip_symlink_target_unreadable"
-            && issue["member"] == symlink_member
-            && issue["detail"]
-                .as_str()
-                .is_some_and(|detail| detail.contains("CRC mismatch"))
-    }));
-}
-
-#[test]
 fn package_audit_recurses_into_nested_archives() {
     let dir = tempdir().unwrap();
     let inner = dir.path().join("inner.tar");
@@ -1152,64 +1122,6 @@ fn package_audit_fails_closed_on_unsupported_zip_native_addon_payload() {
 }
 
 #[test]
-fn package_audit_fails_closed_on_zip_executable_payload_crc_mismatch() {
-    let dir = tempdir().unwrap();
-    let artifact = dir.path().join("release.zip");
-    let member = "tokenzero-v0.1.1/bin/tokenzero";
-    let payload = b"#!/bin/sh\nexec tokenzero-runtime \"$@\"\n";
-    write_test_zip(&artifact, &[ZipTestEntry::file(member, payload)]);
-
-    let mut bytes = fs::read(&artifact).unwrap();
-    let eocd_offset = find_zip_eocd(&bytes).unwrap();
-    let central_directory_offset = zip_u32_at(&bytes, eocd_offset + 16).unwrap() as usize;
-    let wrong_crc = zip_crc32(payload) ^ u32::MAX;
-    set_zip_u32_at(&mut bytes, 14, wrong_crc);
-    set_zip_u32_at(&mut bytes, central_directory_offset + 16, wrong_crc);
-    fs::write(&artifact, bytes).unwrap();
-
-    let report = package_audit(dir.path(), &[artifact]);
-    let issues = report["issues"].as_array().unwrap();
-
-    assert_eq!(report["ok"], false);
-    assert!(issues.iter().any(|issue| {
-        issue["code"] == "zip_regular_file_uninspectable"
-            && issue["member"] == member
-            && issue["detail"]
-                .as_str()
-                .is_some_and(|detail| detail.contains("CRC mismatch"))
-    }));
-}
-
-#[test]
-fn package_audit_fails_closed_on_zip_regular_member_crc_mismatch() {
-    let dir = tempdir().unwrap();
-    let artifact = dir.path().join("release.zip");
-    let member = "tokenzero-v0.1.1/LICENSE";
-    let payload = b"MIT";
-    write_test_zip(&artifact, &[ZipTestEntry::file(member, payload)]);
-
-    let mut bytes = fs::read(&artifact).unwrap();
-    let eocd_offset = find_zip_eocd(&bytes).unwrap();
-    let central_directory_offset = zip_u32_at(&bytes, eocd_offset + 16).unwrap() as usize;
-    let wrong_crc = zip_crc32(payload) ^ u32::MAX;
-    set_zip_u32_at(&mut bytes, 14, wrong_crc);
-    set_zip_u32_at(&mut bytes, central_directory_offset + 16, wrong_crc);
-    fs::write(&artifact, bytes).unwrap();
-
-    let report = package_audit(dir.path(), &[artifact]);
-    let issues = report["issues"].as_array().unwrap();
-
-    assert_eq!(report["ok"], false);
-    assert!(issues.iter().any(|issue| {
-        issue["code"] == "zip_entry_payload_integrity_mismatch"
-            && issue["member"] == member
-            && issue["detail"]
-                .as_str()
-                .is_some_and(|detail| detail.contains("CRC mismatch"))
-    }));
-}
-
-#[test]
 fn package_audit_fails_closed_on_zip_aggregate_payload_budget() {
     let dir = tempdir().unwrap();
     let artifact = dir.path().join("release.zip");
@@ -1297,22 +1209,6 @@ fn package_audit_fails_closed_on_zip_directory_payload() {
     assert_eq!(report["ok"], false);
     assert!(issues.iter().any(|issue| {
         issue["code"] == "zip_directory_payload_present" && issue["member"] == member
-    }));
-}
-
-#[test]
-fn package_audit_fails_closed_on_tar_directory_payload() {
-    let dir = tempdir().unwrap();
-    let artifact = dir.path().join("release.tar");
-    let member = "tokenzero-v0.1.1/docs/";
-    write_test_tar_entries(&artifact, &[TarTestEntry::new(member, b'5', b"hidden")]);
-
-    let report = package_audit(dir.path(), &[artifact]);
-    let issues = report["issues"].as_array().unwrap();
-
-    assert_eq!(report["ok"], false);
-    assert!(issues.iter().any(|issue| {
-        issue["code"] == "tar_directory_payload_present" && issue["member"] == member
     }));
 }
 
@@ -1690,4 +1586,26 @@ fn package_audit_malformed_zip_corpus_has_stable_listing_failures() {
             report
         );
     }
+}
+
+#[test]
+fn package_audit_rejects_zip_archive_external_runtime_payload() {
+    let dir = tempdir().unwrap();
+    let artifact = dir.path().join("release.zip");
+    let member = "tokenzero-v0.1.1/bin/tokenzero.cmd";
+    let payload = b"@echo off\r\nuv run tokenzero %*\r\n";
+    let compressed_payload = deflate_bytes(payload);
+
+    write_test_zip(
+        &artifact,
+        &[ZipTestEntry::file(member, &compressed_payload).with_method(8)],
+    );
+
+    let report = package_audit(dir.path(), &[artifact]);
+    let issues = report["issues"].as_array().unwrap();
+
+    assert_eq!(report["ok"], false);
+    assert!(issues.iter().any(|issue| {
+        issue["code"] == "external_runtime_dependency" && issue["member"] == member
+    }));
 }

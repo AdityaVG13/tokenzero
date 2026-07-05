@@ -22,28 +22,6 @@ fn package_audit_rejects_tar_archive_dev_target_launcher_payload() {
 }
 
 #[test]
-fn package_audit_rejects_zip_archive_external_runtime_payload() {
-    let dir = tempdir().unwrap();
-    let artifact = dir.path().join("release.zip");
-    let member = "tokenzero-v0.1.1/bin/tokenzero.cmd";
-    let payload = b"@echo off\r\nuv run tokenzero %*\r\n";
-    let compressed_payload = deflate_bytes(payload);
-
-    write_test_zip(
-        &artifact,
-        &[ZipTestEntry::file(member, &compressed_payload).with_method(8)],
-    );
-
-    let report = package_audit(dir.path(), &[artifact]);
-    let issues = report["issues"].as_array().unwrap();
-
-    assert_eq!(report["ok"], false);
-    assert!(issues.iter().any(|issue| {
-        issue["code"] == "external_runtime_dependency" && issue["member"] == member
-    }));
-}
-
-#[test]
 fn package_audit_fails_closed_on_archive_link_target_control_characters() {
     let dir = tempdir().unwrap();
     let artifact = dir.path().join("release.tar");
@@ -1132,5 +1110,20 @@ fn package_audit_fails_closed_on_conflicting_tar_link_overrides() {
         issue["code"] == "private_tool_state_link_target"
             && issue["member"] == symlink_member
             && issue["link_target"] == private_pax_target
+    }));
+}
+#[test]
+fn package_audit_fails_closed_on_tar_directory_payload() {
+    let dir = tempdir().unwrap();
+    let artifact = dir.path().join("release.tar");
+    let member = "tokenzero-v0.1.1/docs/";
+    write_test_tar_entries(&artifact, &[TarTestEntry::new(member, b'5', b"hidden")]);
+
+    let report = package_audit(dir.path(), &[artifact]);
+    let issues = report["issues"].as_array().unwrap();
+
+    assert_eq!(report["ok"], false);
+    assert!(issues.iter().any(|issue| {
+        issue["code"] == "tar_directory_payload_present" && issue["member"] == member
     }));
 }
