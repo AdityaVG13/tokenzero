@@ -22,6 +22,27 @@ fn undefined_variable_in_return_is_plan_error() {
 }
 
 #[test]
+fn partial_limits_objects_deserialize_with_defaults() {
+    // Tool callers send PARTIAL limits (the documented contract:
+    // {"max_output_bytes": 1024}). Plain derive made every field required,
+    // so tools.rs's `if let Ok` silently DROPPED the caller's limits — a
+    // silent-failure regression caught in PR 16 review. serde(default)
+    // restores the contract: given fields apply, missing fields default.
+    let limits: crate::CodeModeLimits =
+        serde_json::from_value(serde_json::json!({ "max_output_bytes": 1024 }))
+            .expect("partial limits object MUST deserialize");
+    assert_eq!(limits.max_output_bytes, 1024);
+    assert_eq!(
+        limits.max_logical_ops,
+        crate::CodeModeLimits::default().max_logical_ops,
+        "missing fields take defaults"
+    );
+    // Empty object = all defaults (the degenerate partial).
+    let empty: crate::CodeModeLimits = serde_json::from_value(serde_json::json!({})).unwrap();
+    assert_eq!(empty.max_code_bytes, crate::CodeModeLimits::default().max_code_bytes);
+}
+
+#[test]
 fn read_honors_start_and_end_line_options() {
     let work = tempfile::tempdir().unwrap();
     let path = work.path().join("lines.txt");
