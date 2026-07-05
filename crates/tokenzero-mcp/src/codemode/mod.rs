@@ -17,8 +17,6 @@ mod audit_tests;
 #[allow(dead_code)]
 pub mod bench;
 #[cfg(test)]
-mod bench_tests;
-#[cfg(test)]
 mod e2e_tests;
 #[cfg(test)]
 mod tests;

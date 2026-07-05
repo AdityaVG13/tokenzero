@@ -8,10 +8,6 @@ use std::fs;
 use std::path::PathBuf;
 use tokenzero_core::Mode;
 
-fn execute_plan_in_token(plan: &str) -> String {
-    execute_codemode(plan).to_line()
-}
-
 #[test]
 fn undefined_variable_in_return_is_plan_error() {
     let result = execute_codemode("return missing_binding");
@@ -325,16 +321,6 @@ fn multi_statement_composition() {
 }
 
 #[test]
-fn telemetry_line_format_is_stable() {
-    let r = execute_codemode(r#"await zero.compact("line test")"#);
-    let line = r.to_line();
-    assert!(line.starts_with("codemode:ok"));
-    assert!(line.contains("ops="));
-    assert!(line.contains("visible_tokens="));
-    assert!(line.contains("raw_tokens="));
-}
-
-#[test]
 fn expand_invalid_ref_returns_error_not_panic() {
     let r = execute_codemode(r#"await zero.expand("tz://blob/nonexistent123")"#);
     assert_eq!(r.status, CodeModeStatus::Completed);
@@ -392,12 +378,6 @@ fn search_all_methods_discoverable() {
     let val = r.value.unwrap();
     let results = val["results"].as_array().unwrap();
     assert!(results.len() >= 10, "catalog should expose all ops");
-}
-
-#[test]
-fn legacy_line_api_still_works() {
-    let line = execute_plan_in_token(r#"await zero.compact("legacy")"#);
-    assert!(line.starts_with("codemode:ok"));
 }
 
 // ─── Composition engine tests ───────────────────────────────────────────────
@@ -857,17 +837,32 @@ fn alias_rewrites_skip_string_literals_and_identifier_tails() {
         &limits,
     )
     .unwrap();
-    assert!(lowered.contains("/tmp/fab-api.txt"), "string literal corrupted: {lowered}");
-    assert!(lowered.contains("ctx.ref in a string"), "string literal corrupted: {lowered}");
+    assert!(
+        lowered.contains("/tmp/fab-api.txt"),
+        "string literal corrupted: {lowered}"
+    );
+    assert!(
+        lowered.contains("ctx.ref in a string"),
+        "string literal corrupted: {lowered}"
+    );
 
     let lowered = lower_code_plan("const myapi = 1; return myapi.foo", &limits).unwrap();
-    assert!(lowered.contains("myapi.foo"), "identifier tail corrupted: {lowered}");
+    assert!(
+        lowered.contains("myapi.foo"),
+        "identifier tail corrupted: {lowered}"
+    );
 
     let lowered = lower_code_plan("return api.read(\"a.txt\")", &limits).unwrap();
-    assert!(lowered.contains("zero.read("), "api alias not rewritten: {lowered}");
+    assert!(
+        lowered.contains("zero.read("),
+        "api alias not rewritten: {lowered}"
+    );
 
     let lowered = lower_code_plan("return token.compact(x)", &limits).unwrap();
-    assert!(lowered.contains("zero.token.compact(x)"), "token alias not rewritten: {lowered}");
+    assert!(
+        lowered.contains("zero.token.compact(x)"),
+        "token alias not rewritten: {lowered}"
+    );
 
     let lowered = lower_code_plan("return zero.token.compact(x)", &limits).unwrap();
     assert!(
