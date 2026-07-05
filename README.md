@@ -295,16 +295,17 @@ canonical `tz_*` name and the alias are interchangeable.
 | `tz_edit` | `edit` | | `tz_rewrite` | `rewrite` |
 | `tz_batch` | `batch` | | `tz_discover` | `discover` |
 
-The server is built on **FastMCP** — same tools, schemas, and payloads, with a
-construction that bakes in production-grade failure semantics:
+The server is built on **FastMCP**: same tools, schemas, and payloads, with a
+construction that bakes in production-grade failure semantics.
 
 - **Request budgets.** Every call carries a timeout budget. A hung operation returns a
   clean budget-exceeded error, not an agent stall.
 - **Cancel-correct.** A client disconnect cannot leave a half-written result. The
   server cancels in-flight work atomically; the next call sees a consistent state.
 - **4-valued outcomes.** Every invocation resolves to exactly `success`, `cancelled`,
-  `failed`, or `panicked`. Cancelled ≠ failed ≠ panicked — the harness can branch on
-  the distinction instead of guessing from a catch-all error string.
+  `failed`, or `panicked`. Cancelled is not failed, and failed is not panicked;
+  the harness can branch on the distinction instead of guessing from a
+  catch-all error string.
 
 The server negotiates the MCP protocol across `2025-03-26`, `2025-06-18` (default), and
 the `2026-07-28` release candidate. Malformed JSON and cancelled or failed calls return
@@ -313,24 +314,35 @@ restarts a faulted worker mid-session.
 
 Launch flags are unchanged:
 
-- `tokenzero mcp-server --mode=mcp` (default) — per-operation tools.
-- `tokenzero mcp-server --mode=codemode` — the single `zero_execute` tool.
+- `tokenzero mcp-server --mode=mcp` (default): the per-operation tools.
+- `tokenzero mcp-server --mode=codemode`: the single executor tool.
 
 Per-tool documentation lives at `resource://tokenzero/tools`.
 
-<h3 id="codemode">CodeMode</h3>
+<h3 id="codemode"><img src=".github/assets/h-codemode.svg" alt="CodeMode" width="100%"></h3>
 
-CodeMode exposes **one executor tool** (`zero_execute`). You write a plan —
-a short program that composes N operations server-side — and get back one
-result with one round-trip. Refs flow between steps: the output of a `read`
-becomes the input of a `compact`, and only the final ref surfaces to the
-model. Intermediates stay on the server, invisible and free.
+The tables above shrink what each operation **returns**. CodeMode shrinks how
+many operations you **pay for**. The two multiply.
+
+In MCP mode, a five-step task costs five round-trips, and every intermediate
+result lands in the model's context whether the model needs it or not. In
+CodeMode the server exposes a single executor tool, `tz_execute_code`. The
+agent submits a short plan; the server runs every step; only the final result
+and its refs enter context. Three properties fall out of that:
+
+1. **Intermediates are free.** A `read` that only feeds a `compact` never
+   surfaces. The model never spends tokens on data it was going to transform
+   anyway.
+2. **One round-trip per task, not per step.** Latency and tool-call overhead
+   are paid once.
+3. **Refs pipe between steps.** `$c.ref` from step one is a valid input to
+   step two, server-side, with no model in the loop.
 
 #### Plan composition benchmark
 
-CodeMode executes multi-step plans in a single call, eliminating per-operation
-round-trips. The same engine and tokenizer measure both sides; the "Direct"
-column is the sum of running each step individually:
+Every number in the "Direct" column is *already RACC-compressed*. This table
+measures the additional saving from composition, on top of the 99% table
+above, with the same engine and tokenizer on both sides:
 
 | Workload | Plan (visible) | Direct (visible) | Savings |
 | :-- | --: | --: | --: |
@@ -344,29 +356,24 @@ Reproducible: `scripts/benchmark_composition.sh` or
 `cargo test -p tokenzero-mcp -- codemode::bench_tests::run_composition_benchmark`.
 Artifact: `demo/composition_benchmark.json`.
 
-Dogfood from OMP / ZeroStack router:
-
-```text
-zero_execute root=/path/to/repo plan='const out = await zero.token.compact("payload"); return { ref: out.ref };'
-```
-
-Dogfood locally without OMP:
+Run a plan locally without any harness:
 
 ```bash
 tokenzero codemode --json --root . --plan '{"steps":[{"id":"c","method":"zero.token.compact","args":["payload"]},{"id":"e","method":"zero.token.expand","args":["$c.ref"]}],"return":{"text":"$e.text","ref":"$c.ref"}}'
 ```
 
-<h3 id="choosing-a-mode">Choosing a mode</h3>
+<h3 id="choosing-a-mode"><img src=".github/assets/h-choosing.svg" alt="Choosing a mode" width="100%"></h3>
 
-TokenZero offers two MCP surfaces built on the same operation set and recovery
-store. Pick one per harness — running both re-inflates what plans compress:
+TokenZero offers two MCP surfaces built on the same operation set and the same
+recovery store. Pick one per harness. Running both doubles the tool surface
+and re-inflates what plans compress.
 
 | | MCP mode | CodeMode |
 | :-- | :-- | :-- |
-| **Surface** | 18 per-operation tools (`tz_read`, `tz_find`, …) | 1 executor tool (`tz_execute_code`; `zero_execute` on the unified hub) |
+| **Surface** | 18 per-operation tools (`tz_read`, `tz_find`, ...) | 1 executor tool (`tz_execute_code`) |
 | **Pattern** | Standard MCP: one tool call per operation | Plans: N operations in one call |
 | **Round-trips** | One per operation | One per plan |
-| **Target** | Any MCP harness (Claude, Codex, Cursor, …) | Power users, native agents, ZeroStack |
+| **Best for** | Any MCP harness (Claude, Codex, Cursor, ...) | Harnesses that can write plans; ZeroStack |
 | **Launch** | `--mode=mcp` (the default) | `--mode=codemode` |
 
 <div align="center">
@@ -375,10 +382,10 @@ store. Pick one per harness — running both re-inflates what plans compress:
 
 </div>
 
-<h3 id="zerostack">ZeroStack</h3>
+<h3 id="zerostack"><img src=".github/assets/h-zerostack.svg" alt="ZeroStack" width="100%"></h3>
 
-TokenZero is the context runtime in the **ZeroStack** suite — three engines,
-one unified `zero.*` surface:
+TokenZero is the context runtime in the **ZeroStack** suite: three engines,
+one unified `zero.*` surface.
 
 | Engine | Role | Status |
 | :-- | :-- | :-- |
@@ -386,13 +393,13 @@ one unified `zero.*` surface:
 | [**FSZero**](https://github.com/AdityaVG13/FSZero) | Executable filesystem + repo RAG + access memory | coming soon, hardening |
 | [**GraphZero**](https://github.com/AdityaVG13/graphzero) | Code graph + causality + decision memory | coming soon, hardening |
 
-The engines share a common blob identity: `tz://`, `fz://`, and `gz://` refs
-are interchangeable — a file compressed by TokenZero can be opened by FSZero,
-and a graph query can reference a TokenZero capsule. Everything lives under
-the unified [`zero.*`](https://github.com/AdityaVG13/ZeroStack) surface.
+The engines share content-addressed blob identity: the same bytes hash to the
+same ref whether it was minted as `tz://`, `fz://`, or `gz://`, so a ref
+produced by one engine can be expanded by another inside a single plan.
 
-The [ZeroStack hub repo](https://github.com/AdityaVG13/ZeroStack) ships the
-unified server (`zerostack serve`) and the combined benchmark suite.
+The [ZeroStack hub](https://github.com/AdityaVG13/ZeroStack) ships the unified
+CodeMode server (one `zero_execute` tool spanning all three engines), an
+agent-executable install runbook, and the combined benchmark suite.
 
 <h3 id="docs"><img src=".github/assets/h-docs.svg" alt="Docs" width="100%"></h3>
 
