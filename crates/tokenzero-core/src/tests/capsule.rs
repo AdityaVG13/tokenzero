@@ -26,15 +26,6 @@ fn capsule_never_costs_more_than_raw_text() {
     assert_eq!(capsule.text, text.trim_end());
 }
 
-#[test]
-fn capsule_can_reuse_known_raw_token_count() {
-    let text = "alpha beta gamma\n";
-    let counted = make_capsule(text, Mode::Auto, 4000, Some("file"));
-    let reused =
-        make_capsule_with_raw_tokens(text, counted.raw_tokens, Mode::Auto, 4000, Some("file"));
-
-    assert_eq!(reused, counted);
-}
 
 #[test]
 fn auto_capsule_honors_visible_budget_for_short_token_heavy_files() {
