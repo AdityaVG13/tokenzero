@@ -54,6 +54,7 @@ fn cli_claim_audit_rejects_benchmark_rows_missing_public_claim_fields() {
             .any(|reason| reason == "benchmark row missing public-claim field: raw_tokens")
     );
     assert_eq!(json["public_claims_approved"], false);
+    assert!(benchmark_gate["details"].is_object());
 }
 
 #[test]
@@ -136,6 +137,7 @@ fn cli_claim_audit_rejects_public_benchmark_rows_missing_byte_perfect_recovery()
                 == "benchmark row missing public-claim field: byte_perfect_recovery")
     );
     assert_eq!(json["public_claims_approved"], false);
+    assert!(benchmark_gate["details"].is_object());
 }
 
 #[test]
@@ -225,6 +227,8 @@ fn cli_claim_audit_rejects_public_benchmark_rows_with_ref_less_expand_checks() {
             .any(|reason| reason == "benchmark row exact expand check missing ref")
     );
     assert_eq!(json["public_claims_approved"], false);
+    assert!(benchmark_gate["details"].is_object());
+    assert!(!json["blocked_reasons"].as_array().unwrap().is_empty());
 }
 
 #[test]
@@ -314,6 +318,7 @@ fn cli_claim_audit_rejects_public_benchmark_with_unavailable_competitor_rows() {
         "fixture adapter is not executed without review"
     );
     assert_eq!(json["public_claims_approved"], false);
+    assert!(benchmark_gate["details"].is_object());
 }
 
 #[test]
@@ -494,4 +499,5 @@ fn cli_claim_audit_rejects_unavailable_benchmark_rows_missing_availability_reaso
             .any(|reason| reason == "benchmark unavailable row missing availability_reason")
     );
     assert_eq!(json["public_claims_approved"], false);
+    assert!(!json["blocked_reasons"].as_array().unwrap().is_empty());
 }

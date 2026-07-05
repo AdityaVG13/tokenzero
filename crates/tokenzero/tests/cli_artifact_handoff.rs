@@ -1,3 +1,6 @@
+mod common;
+use common::*;
+
 use assert_cmd::prelude::*;
 use serde_json::Value;
 use std::process::Command;
@@ -257,6 +260,11 @@ fn cli_artifact_handoff_packet_lists_next_actions_and_stop_gates() {
         !next_actions
             .iter()
             .any(|row| row["id"] == "source_currency_refresh")
+    );
+    let stop_before = json["stop_before"].as_array().unwrap();
+    assert!(
+        !stop_before.is_empty(),
+        "stop_before should contain at least one gate"
     );
     let vp_rows = json["verification_plan_matrix"].as_array().unwrap();
     let vp3 = vp_rows
@@ -802,27 +810,6 @@ fn cli_artifact_handoff_uses_current_residual_actions_after_source_and_linux_evi
     assert!(!fr007_residual.contains("Linux/macOS"));
 }
 
-fn write_json_fixture(path: &std::path::Path, value: serde_json::Value) {
-    std::fs::write(path, serde_json::to_vec(&value).unwrap()).unwrap();
-}
-
-fn write_minimal_handoff_completion_audit(
-    results_dir: &std::path::Path,
-    release_candidate_id: &str,
-) {
-    write_json_fixture(
-        &results_dir.join("tokenzero_completion_audit.json"),
-        serde_json::json!({
-            "schema_version": "tokenzero.completion_audit.v1",
-            "release_candidate_id": release_candidate_id,
-            "completion_achieved": false,
-            "public_claims_approved": false,
-            "release_publication_allowed": false,
-            "residual_gate_matrix": []
-        }),
-    );
-}
-
 fn run_artifact_handoff_json(root: &std::path::Path, release_candidate_id: &str) -> Value {
     let output = Command::cargo_bin("tokenzero")
         .unwrap()
@@ -861,18 +848,6 @@ fn handoff_verification_evidence_row<'a>(
         .unwrap_or_else(|| panic!("{verification_id} {artifact_id} evidence link"))
 }
 
-fn assert_reason(row: &Value, expected_reason: &str) {
-    assert!(
-        row["reasons"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|reason| reason == expected_reason),
-        "missing reason {expected_reason:?} in {}",
-        row["reasons"]
-    );
-}
-
 #[test]
 fn cli_artifact_handoff_rejects_mismatched_release_candidate_artifacts() {
     let dir = tempdir().unwrap();
@@ -881,7 +856,7 @@ fn cli_artifact_handoff_rejects_mismatched_release_candidate_artifacts() {
     write_minimal_handoff_completion_audit(&results_dir, "rc-current");
     write_json_fixture(
         &results_dir.join("tokenzero_source_currency.json"),
-        serde_json::json!({
+        &serde_json::json!({
             "schema_version": "tokenzero.source_currency.v1",
             "release_candidate_id": "rc-other"
         }),
@@ -906,7 +881,7 @@ fn cli_artifact_handoff_rejects_swapped_and_malformed_schema_bound_artifacts() {
     write_minimal_handoff_completion_audit(&results_dir, "rc-current");
     write_json_fixture(
         &results_dir.join("tokenzero_claim_audit.json"),
-        serde_json::json!({
+        &serde_json::json!({
             "schema_version": "tokenzero.source_currency.v1",
             "release_candidate_id": "rc-current"
         }),
@@ -951,6 +926,8 @@ fn cli_artifact_handoff_rejects_swapped_and_malformed_schema_bound_artifacts() {
     assert_eq!(vp5_bench["status"], "invalid");
     assert_eq!(vp5_bench["valid"], false);
     assert_reason(vp5_bench, "artifact JSON unreadable");
+    // Malformed/unreadable artifacts are treated as not present
+    assert_eq!(json["all_verification_evidence_artifacts_present"], false);
     assert_eq!(json["all_verification_evidence_artifacts_valid"], false);
 }
 
@@ -962,13 +939,13 @@ fn cli_artifact_handoff_rejects_missing_schema_and_release_candidate_fields() {
     write_minimal_handoff_completion_audit(&results_dir, "rc-current");
     write_json_fixture(
         &results_dir.join("tokenzero_claim_audit.json"),
-        serde_json::json!({
+        &serde_json::json!({
             "release_candidate_id": "rc-current"
         }),
     );
     write_json_fixture(
         &results_dir.join("tokenzero_source_currency.json"),
-        serde_json::json!({
+        &serde_json::json!({
             "schema_version": "tokenzero.source_currency.v1"
         }),
     );

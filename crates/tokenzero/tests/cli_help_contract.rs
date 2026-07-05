@@ -20,6 +20,14 @@ fn cli_bare_invocation_prints_useful_help() {
     assert!(stdout.contains("tokenzero capabilities --json"));
     assert!(stdout.contains("tokenzero robot-docs guide"));
     assert!(stdout.contains("tokenzero run --json -- <cmd>"));
+    assert!(
+        stdout.lines().count() >= 3,
+        "help should have multiple lines"
+    );
+    assert!(
+        stdout.contains("COMMAND") || stdout.contains("command"),
+        "help should mention commands"
+    );
 }
 
 #[test]
@@ -188,6 +196,10 @@ fn cli_capabilities_json_exposes_agent_contract() {
             .iter()
             .any(|item| item == "tokenzero install status --json")
     );
+    assert!(
+        json["commands"].as_array().unwrap().len() >= 10,
+        "should list many commands"
+    );
 }
 
 #[test]
@@ -214,6 +226,14 @@ fn cli_robot_docs_guide_is_paste_ready_for_agents() {
     assert!(stdout.contains("tokenzero run --json -- <command>"));
     assert!(stdout.contains("Stdout is data. Stderr is diagnostics."));
     assert!(stdout.contains("telemetry.command_success"));
+    assert!(
+        stdout.lines().count() >= 10,
+        "robot docs guide should be substantial"
+    );
+    assert!(
+        stdout.contains("--json"),
+        "robot docs should mention --json flag"
+    );
 }
 
 #[test]
