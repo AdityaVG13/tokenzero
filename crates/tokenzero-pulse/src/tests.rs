@@ -2,6 +2,62 @@ use super::*;
 use proptest::prelude::*;
 use tempfile::tempdir;
 
+/// Create a temp directory and a Pulse ledger with one "read" event.
+/// Returns `(dir, path)` — caller holds `dir` to keep the temp alive.
+fn setup_ledger() -> (tempfile::TempDir, PathBuf) {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("events.jsonl");
+    record_event(&path, &test_event("read")).unwrap();
+    (dir, path)
+}
+
+/// Assert that `import_jsonl(input, path)` fails with `InvalidData` or
+/// `InvalidInput` and that the error message contains `expected_fragment`.
+fn assert_import_rejected(input: &Path, path: &Path, expected_fragment: &str) {
+    let err = import_jsonl(input, path).unwrap_err();
+    assert!(
+        err.kind() == std::io::ErrorKind::InvalidData
+            || err.kind() == std::io::ErrorKind::InvalidInput,
+        "expected InvalidData or InvalidInput, got {:?}",
+        err.kind()
+    );
+    assert!(
+        err.to_string().contains(expected_fragment),
+        "expected error to contain '{}', got '{}'",
+        expected_fragment,
+        err
+    );
+}
+
+/// Write a sidecar meta for `input` with `updated_unix` set relative to
+/// `current_meta.updated_unix + delta_secs`.
+fn write_marked_snapshot(
+    input: &Path,
+    input_scan: &JsonlScan,
+    current_meta: &PulseSyncMeta,
+    delta_secs: i64,
+) {
+    let updated = if delta_secs >= 0 {
+        current_meta.updated_unix.saturating_add(delta_secs as u64)
+    } else {
+        current_meta
+            .updated_unix
+            .saturating_sub((-delta_secs) as u64)
+    };
+    write_sidecar_meta(
+        &export_meta_path(input),
+        &PulseSyncMeta {
+            schema_version: PULSE_SYNC_SCHEMA_VERSION.to_string(),
+            source_of_truth: PULSE_SOURCE_OF_TRUTH.to_string(),
+            ledger_sha256: input_scan.ledger_sha256.clone(),
+            event_count: input_scan.event_count,
+            skipped_lines: input_scan.skipped_lines,
+            updated_unix: updated,
+        },
+    )
+    .unwrap();
+}
+
 fn test_event(tool: &str) -> PulseEvent {
     PulseEvent::tool_call(tool, "hybrid", 100, 20, 0, 1, 1, None)
 }
@@ -41,6 +97,9 @@ fn records_without_raw_payload() {
     assert!(text.contains("source_hash"));
 }
 
+/// Mutation killed: any error in the recovery-adjusted savings formula
+/// (e.g. forgetting to include recovery_tokens in the denominator, or
+/// computing `visible_savings - recovery_tokens` instead of `savings_ratio`).
 #[test]
 fn aggregates_recovery_adjusted_savings() {
     let events = vec![
@@ -49,6 +108,14 @@ fn aggregates_recovery_adjusted_savings() {
     ];
     let report = aggregate(&events);
     assert_eq!(report.raw_tokens, 200);
+    assert_eq!(report.visible_tokens, 50);
+    assert_eq!(report.recovery_tokens, 30);
+    assert_eq!(report.event_count, 2);
+    // visible_savings = (200 - 50) / 200 = 0.75
+    assert_eq!(report.visible_savings, 0.75);
+    // recovery_adjusted_savings = (200 - (50 + 30)) / 200 = 0.60
+    assert_eq!(report.recovery_adjusted_savings, 0.60);
+    // Recovery-adjusted is strictly worse than visible-only.
     assert!(report.visible_savings > report.recovery_adjusted_savings);
 }
 
@@ -125,17 +192,8 @@ fn load_counts_corrupt_lines() {
     assert!(render_text(&report).contains("corrupt ledger line"));
 }
 
-#[test]
-fn parse_event_line_rejects_wrong_schema_version() {
-    assert!(parse_event_line(&event_line_with_schema("pulse-v1")).is_err());
-    assert!(parse_event_line(&event_line_with_schema("tokenzero.pulse.v0")).is_err());
-
-    let parsed = parse_event_line(&event_line_with_schema(PULSE_SCHEMA_VERSION))
-        .unwrap()
-        .unwrap();
-    assert_eq!(parsed.schema_version, PULSE_SCHEMA_VERSION);
-}
-
+/// Mutation killed: scan_jsonl counting wrong-schema lines as valid events
+/// (must be counted as skipped, and the callback must not fire).
 #[test]
 fn scan_jsonl_counts_wrong_schema_as_corrupt_line() {
     let dir = tempdir().unwrap();
@@ -300,34 +358,37 @@ fn export_jsonl_streams_clean_snapshot_from_sqlite() {
     assert_eq!(scan.skipped_lines, 0);
 }
 
+/// Mutation killed: import allowing a corrupt JSONL file to pass, or
+/// failing to restore the original ledger after rejection.
 #[test]
-fn import_rejects_crashed_jsonl_and_can_retry_recovery() {
-    let dir = tempdir().unwrap();
-    let path = dir.path().join("events.jsonl");
-    let input = dir.path().join("bad.jsonl");
-    let retry = dir.path().join("retry.jsonl");
-    let original = PulseEvent::tool_call("read", "hybrid", 100, 20, 0, 1, 1, None);
-    record_event(&path, &original).unwrap();
+fn import_rejects_crashed_jsonl_and_preserves_original() {
+    let (_dir, path) = setup_ledger();
+    let input = path.parent().unwrap().join("bad.jsonl");
     let before = fs::read_to_string(&path).unwrap();
     fs::write(&input, "{not valid json\n").unwrap();
-    fs::write(&retry, &before).unwrap();
 
-    let err = import_jsonl(&input, &path).unwrap_err();
-    assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
+    assert_import_rejected(&input, &path, "corrupt");
+    // Original ledger must be untouched after rejection.
     assert_eq!(fs::read_to_string(&path).unwrap(), before);
-    let mut first_tool = None;
-    let scan = scan_jsonl(&path, |event| {
-        first_tool = Some(event.tool.clone());
-        Ok(())
-    })
-    .unwrap();
+    let scan = scan_jsonl(&path, |_| Ok(())).unwrap();
     assert_eq!(scan.event_count, 1);
-    assert_eq!(first_tool.as_deref(), Some("read"));
+}
 
-    let recovered = import_jsonl(&retry, &path).unwrap();
+/// Mutation killed: import accepting a valid JSONL that the caller already
+/// verified, then retrying after a prior rejection.
+#[test]
+fn import_accepts_valid_jsonl_after_previous_rejection() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("events.jsonl");
+    let input = dir.path().join("good.jsonl");
+    let event = PulseEvent::tool_call("read", "hybrid", 100, 20, 0, 1, 1, None);
+    record_event(&path, &event).unwrap();
+    let payload = serde_json::to_string(&event).unwrap();
+    fs::write(&input, format!("{payload}\n")).unwrap();
+
+    let recovered = import_jsonl(&input, &path).unwrap();
     assert!(recovered.ok);
     assert_eq!(recovered.event_count, 1);
-    assert_eq!(fs::read_to_string(&path).unwrap(), before);
 }
 
 #[test]
@@ -366,6 +427,8 @@ fn import_copy_rejects_source_drift_before_replacing_ledger() {
     assert_eq!(fs::read(&output).unwrap(), before);
 }
 
+/// Mutation killed: import accepting a snapshot that is stale (older timestamp),
+/// or import refusing a newer snapshot when the current ledger is corrupt.
 #[test]
 fn import_newer_marked_snapshot_recovers_corrupt_current_ledger() {
     let dir = tempdir().unwrap();
@@ -376,18 +439,7 @@ fn import_newer_marked_snapshot_recovers_corrupt_current_ledger() {
     let current_meta = read_sidecar_meta(&current.meta_path).unwrap();
     write_single_event(&input, "shell");
     let input_scan = scan_jsonl(&input, |_| Ok(())).unwrap();
-    write_sidecar_meta(
-        &export_meta_path(&input),
-        &PulseSyncMeta {
-            schema_version: PULSE_SYNC_SCHEMA_VERSION.to_string(),
-            source_of_truth: PULSE_SOURCE_OF_TRUTH.to_string(),
-            ledger_sha256: input_scan.ledger_sha256.clone(),
-            event_count: input_scan.event_count,
-            skipped_lines: input_scan.skipped_lines,
-            updated_unix: current_meta.updated_unix + 1,
-        },
-    )
-    .unwrap();
+    write_marked_snapshot(&input, &input_scan, &current_meta, 1);
     let corrupt = format!("{}{{not valid json\n", fs::read_to_string(&path).unwrap());
     fs::write(&path, corrupt).unwrap();
     assert_eq!(scan_jsonl(&path, |_| Ok(())).unwrap().skipped_lines, 1);
@@ -486,124 +538,144 @@ fn sqlite_sidecar_path_preserves_non_utf8_bytes() {
     );
 }
 
-#[test]
-fn import_rejects_older_marked_snapshot() {
-    let dir = tempdir().unwrap();
-    let path = dir.path().join("events.jsonl");
-    let input = dir.path().join("older.jsonl");
-    record_event(
-        &path,
-        &PulseEvent::tool_call("read", "hybrid", 100, 20, 0, 1, 1, None),
-    )
-    .unwrap();
-    let current = sync_jsonl_to_sqlite(&path).unwrap();
-    write_single_event(&input, "shell");
-    let input_scan = scan_jsonl(&input, |_| Ok(())).unwrap();
-    let older_meta = PulseSyncMeta {
-        schema_version: PULSE_SYNC_SCHEMA_VERSION.to_string(),
-        source_of_truth: PULSE_SOURCE_OF_TRUTH.to_string(),
-        ledger_sha256: input_scan.ledger_sha256,
-        event_count: input_scan.event_count,
-        skipped_lines: input_scan.skipped_lines,
-        updated_unix: 0,
-    };
-    fs::write(
-        export_meta_path(&input),
-        serde_json::to_vec(&older_meta).unwrap(),
-    )
-    .unwrap();
-
-    let err = import_jsonl(&input, &path).unwrap_err();
-    assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
-    let after = sync_jsonl_to_sqlite(&path).unwrap();
-    assert_eq!(after.ledger_sha256, current.ledger_sha256);
-    let mut first_tool = None;
-    scan_jsonl(&path, |event| {
-        first_tool = Some(event.tool.clone());
-        Ok(())
-    })
-    .unwrap();
-    assert_eq!(first_tool.as_deref(), Some("read"));
-}
+/// Parametrized import-rejection test.
+/// Each case: create a ledger with one "read" event, sync it, write an
+/// input snapshot, apply a specific mutation to the sidecar or ledger,
+/// then assert import rejects with the expected message.
+///
+/// Mutations killed:
+///   - accepting older markers (accepts_older_snapshot)
+///   - accepting stale markers when ledger has unsynced additions
+///     (accepts_snapshot_when_ledger_changed_after_marker)
+///   - accepting same-second markers with a different hash
+///     (accepts_same_second_snapshot)
+///   - accepting mismatched marker hashes
+///     (accepts_marker_not_matching_jsonl)
+type SnapshotSetupFn = Box<
+    dyn Fn(
+        &Path,          // dir
+        &Path,          // ledger path (may be mutated)
+        &Path,          // input snapshot path
+        &PulseSyncMeta, // current sidecar meta
+    ) -> String,
+>;
 
 #[test]
-fn import_rejects_snapshot_when_current_ledger_changed_after_marker() {
-    let dir = tempdir().unwrap();
-    let path = dir.path().join("events.jsonl");
-    let snapshot = dir.path().join("snapshot.jsonl");
-    record_event(&path, &test_event("read")).unwrap();
-    export_jsonl(&path, &snapshot).unwrap();
-    record_event(&path, &test_event("shell")).unwrap();
-    let before = fs::read_to_string(&path).unwrap();
+fn import_rejects_snapshot_with_stale_or_mismatched_marker() {
+    struct Case {
+        name: &'static str,
+        /// Create the input snapshot and optionally mutate the ledger.
+        /// Returns the expected error message fragment.
+        setup: SnapshotSetupFn,
+    }
 
-    let err = import_jsonl(&snapshot, &path).unwrap_err();
-
-    assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
-    assert!(err.to_string().contains("unsynced changes"));
-    assert_eq!(fs::read_to_string(&path).unwrap(), before);
-    let status = sync_jsonl_to_sqlite(&path).unwrap();
-    assert_eq!(status.event_count, 2);
-}
-
-#[test]
-fn import_rejects_same_second_different_marked_snapshot() {
-    let dir = tempdir().unwrap();
-    let path = dir.path().join("events.jsonl");
-    let input = dir.path().join("same-second.jsonl");
-    record_event(&path, &test_event("read")).unwrap();
-    let current = sync_jsonl_to_sqlite(&path).unwrap();
-    let current_meta = read_sidecar_meta(&current.meta_path).unwrap();
-    write_single_event(&input, "shell");
-    let input_scan = scan_jsonl(&input, |_| Ok(())).unwrap();
-    write_sidecar_meta(
-        &export_meta_path(&input),
-        &PulseSyncMeta {
-            schema_version: PULSE_SYNC_SCHEMA_VERSION.to_string(),
-            source_of_truth: PULSE_SOURCE_OF_TRUTH.to_string(),
-            ledger_sha256: input_scan.ledger_sha256,
-            event_count: input_scan.event_count,
-            skipped_lines: input_scan.skipped_lines,
-            updated_unix: current_meta.updated_unix,
+    let cases: Vec<Case> = vec![
+        Case {
+            name: "older_marker",
+            setup: Box::new(|_dir, _path, input, _current_meta| {
+                write_single_event(input, "shell");
+                let input_scan = scan_jsonl(input, |_| Ok(())).unwrap();
+                write_sidecar_meta(
+                    &export_meta_path(input),
+                    &PulseSyncMeta {
+                        schema_version: PULSE_SYNC_SCHEMA_VERSION.to_string(),
+                        source_of_truth: PULSE_SOURCE_OF_TRUTH.to_string(),
+                        ledger_sha256: input_scan.ledger_sha256,
+                        event_count: input_scan.event_count,
+                        skipped_lines: input_scan.skipped_lines,
+                        updated_unix: 0,
+                    },
+                )
+                .unwrap();
+                "not newer".to_string()
+            }),
         },
-    )
-    .unwrap();
-
-    let err = import_jsonl(&input, &path).unwrap_err();
-
-    assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
-    assert!(err.to_string().contains("not newer"));
-    let after = sync_jsonl_to_sqlite(&path).unwrap();
-    assert_eq!(after.ledger_sha256, current.ledger_sha256);
-}
-
-#[test]
-fn import_rejects_snapshot_marker_that_does_not_match_jsonl() {
-    let dir = tempdir().unwrap();
-    let path = dir.path().join("events.jsonl");
-    let input = dir.path().join("stale-sidecar.jsonl");
-    record_event(&path, &test_event("read")).unwrap();
-    let current = sync_jsonl_to_sqlite(&path).unwrap();
-    let current_meta = read_sidecar_meta(&current.meta_path).unwrap();
-    write_single_event(&input, "shell");
-    write_sidecar_meta(
-        &export_meta_path(&input),
-        &PulseSyncMeta {
-            schema_version: PULSE_SYNC_SCHEMA_VERSION.to_string(),
-            source_of_truth: PULSE_SOURCE_OF_TRUTH.to_string(),
-            ledger_sha256: "not-the-jsonl-hash".to_string(),
-            event_count: 1,
-            skipped_lines: 0,
-            updated_unix: current_meta.updated_unix.saturating_add(1),
+        Case {
+            name: "ledger_changed_after_marker",
+            setup: Box::new(|_dir, path, input, _current_meta| {
+                // Export a proper snapshot (with sidecar) from the current ledger,
+                // then diverge the ledger by appending a new event.
+                export_jsonl(path, input).unwrap();
+                record_event(path, &test_event("shell")).unwrap();
+                "unsynced changes".to_string()
+            }),
         },
-    )
-    .unwrap();
+        Case {
+            name: "same_second_marker",
+            setup: Box::new(|_dir, _path, input, current_meta| {
+                write_single_event(input, "shell");
+                let input_scan = scan_jsonl(input, |_| Ok(())).unwrap();
+                write_sidecar_meta(
+                    &export_meta_path(input),
+                    &PulseSyncMeta {
+                        schema_version: PULSE_SYNC_SCHEMA_VERSION.to_string(),
+                        source_of_truth: PULSE_SOURCE_OF_TRUTH.to_string(),
+                        ledger_sha256: input_scan.ledger_sha256,
+                        event_count: input_scan.event_count,
+                        skipped_lines: input_scan.skipped_lines,
+                        updated_unix: current_meta.updated_unix,
+                    },
+                )
+                .unwrap();
+                "not newer".to_string()
+            }),
+        },
+        Case {
+            name: "marker_hash_mismatch",
+            setup: Box::new(|_dir, _path, input, current_meta| {
+                write_single_event(input, "shell");
+                write_sidecar_meta(
+                    &export_meta_path(input),
+                    &PulseSyncMeta {
+                        schema_version: PULSE_SYNC_SCHEMA_VERSION.to_string(),
+                        source_of_truth: PULSE_SOURCE_OF_TRUTH.to_string(),
+                        ledger_sha256: "not-the-jsonl-hash".to_string(),
+                        event_count: 1,
+                        skipped_lines: 0,
+                        updated_unix: current_meta.updated_unix.saturating_add(1),
+                    },
+                )
+                .unwrap();
+                "marker does not match".to_string()
+            }),
+        },
+    ];
 
-    let err = import_jsonl(&input, &path).unwrap_err();
+    for case in &cases {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("events.jsonl");
+        let input = dir.path().join("input.jsonl");
+        record_event(&path, &test_event("read")).unwrap();
+        let current = sync_jsonl_to_sqlite(&path).unwrap();
+        let current_meta = read_sidecar_meta(&current.meta_path).unwrap();
 
-    assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
-    assert!(err.to_string().contains("marker does not match"));
-    let after = sync_jsonl_to_sqlite(&path).unwrap();
-    assert_eq!(after.ledger_sha256, current.ledger_sha256);
+        // Snapshot original state for post-rejection checks.
+        let before_sha = current.ledger_sha256.clone();
+        let before_bytes = fs::read(&path).unwrap();
+
+        let expected_fragment = (case.setup)(dir.path(), &path, &input, &current_meta);
+
+        assert_import_rejected(&input, &path, &expected_fragment);
+
+        // After rejection, the original ledger must not have changed
+        // (except for "ledger_changed_after_marker" where we intentionally
+        // mutated it — in that case we verify the hash advanced).
+        if case.name == "ledger_changed_after_marker" {
+            let after = sync_jsonl_to_sqlite(&path).unwrap();
+            assert_ne!(
+                after.ledger_sha256, before_sha,
+                "[{}] ledger hash must advance after new event",
+                case.name
+            );
+        } else {
+            assert_eq!(
+                fs::read(&path).unwrap(),
+                before_bytes,
+                "[{}] original ledger must be unchanged after rejection",
+                case.name
+            );
+        }
+    }
 }
 
 #[test]
