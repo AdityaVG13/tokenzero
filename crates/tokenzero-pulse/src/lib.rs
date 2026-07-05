@@ -147,41 +147,10 @@ impl PulseEvent {
         self.ref_ids = ref_ids;
         self
     }
-
-    pub fn expand_call(ref_kind: &str, tokens: usize, found: bool, latency_ms: u128) -> Self {
-        Self {
-            schema_version: PULSE_SCHEMA_VERSION.to_string(),
-            event: "expand_call".to_string(),
-            timestamp_unix: now_unix(),
-            tool: "expand".to_string(),
-            mode: ref_kind.to_string(),
-            raw_tokens: tokens,
-            visible_tokens: tokens,
-            recovery_tokens: tokens,
-            task_lossless: found,
-            cache_hit: found,
-            retry_count: 0,
-            failure: !found,
-            exact_ref_count: 0,
-            latency_ms,
-            source_hash: None,
-            session_id: None,
-            call_id: None,
-            ref_ids: Vec::new(),
-        }
-    }
 }
 
 pub fn default_ledger_path(root: &Path) -> PathBuf {
     root.join(".tokenzero/pulse/events.jsonl")
-}
-
-pub fn default_sqlite_path(root: &Path) -> PathBuf {
-    root.join(".tokenzero/pulse/events.sqlite")
-}
-
-pub fn default_meta_path(root: &Path) -> PathBuf {
-    root.join(".tokenzero/pulse/events.meta.json")
 }
 
 pub fn record_event(path: &Path, event: &PulseEvent) -> std::io::Result<()> {
@@ -260,44 +229,6 @@ pub fn doctor_jsonl_sqlite(path: &Path) -> std::io::Result<PulseDoctorReport> {
         marker_match,
         hot_index_used,
     })
-}
-
-pub fn aggregate(events: &[PulseEvent]) -> PulseReport {
-    let raw_tokens = events
-        .iter()
-        .fold(0usize, |sum, event| sum.saturating_add(event.raw_tokens));
-    let visible_tokens = events.iter().fold(0usize, |sum, event| {
-        sum.saturating_add(event.visible_tokens)
-    });
-    let recovery_tokens = events.iter().fold(0usize, |sum, event| {
-        sum.saturating_add(event.recovery_tokens)
-    });
-    let task_lossless_tokens = events
-        .iter()
-        .filter(|e| e.task_lossless && !e.failure)
-        .fold(0usize, |sum, event| {
-            sum.saturating_add(event.visible_tokens.saturating_add(event.recovery_tokens))
-        });
-    PulseReport {
-        schema_version: PULSE_SCHEMA_VERSION.to_string(),
-        status: "ok".to_string(),
-        event_count: events.len(),
-        raw_tokens,
-        visible_tokens,
-        recovery_tokens,
-        task_lossless_tokens,
-        failures: events.iter().filter(|e| e.failure).count(),
-        cache_hits: events.iter().filter(|e| e.cache_hit).count(),
-        exact_ref_count: events.iter().fold(0usize, |sum, event| {
-            sum.saturating_add(event.exact_ref_count)
-        }),
-        visible_savings: savings_ratio(raw_tokens, visible_tokens),
-        recovery_adjusted_savings: savings_ratio(
-            raw_tokens,
-            visible_tokens.saturating_add(recovery_tokens),
-        ),
-        skipped_lines: 0,
-    }
 }
 
 pub fn report_for_path(path: &Path) -> std::io::Result<PulseReport> {

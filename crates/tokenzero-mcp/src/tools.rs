@@ -107,27 +107,15 @@ fn exec_codemode_tool(
     if let Some(root) = engine.config.allowed_roots.first() {
         options.root = Some(root.clone());
     }
-    if let Some(limits) = args.get("limits").and_then(Value::as_object) {
-        if let Some(value) = limits.get("max_output_bytes").and_then(Value::as_u64) {
-            options.max_output_bytes = value as usize;
-        }
-        if let Some(value) = limits.get("max_refs_emitted").and_then(Value::as_u64) {
-            options.max_refs_emitted = value as usize;
-        }
-        if let Some(value) = limits.get("max_logical_ops").and_then(Value::as_u64) {
-            options.max_logical_ops = value as usize;
-        }
-        if let Some(value) = limits.get("max_physical_ops").and_then(Value::as_u64) {
-            options.max_physical_ops = value as usize;
-        }
-        if let Some(value) = limits.get("max_microtasks").and_then(Value::as_u64) {
-            options.max_microtasks = value as usize;
-        }
-        if let Some(value) = limits.get("max_memory_bytes").and_then(Value::as_u64) {
-            options.max_memory_bytes = value as usize;
-        }
-        if let Some(value) = limits.get("max_code_bytes").and_then(Value::as_u64) {
-            options.max_code_bytes = value as usize;
+    if let Some(limits) = args.get("limits") {
+        if let Ok(limits) = serde_json::from_value::<crate::CodeModeLimits>(limits.clone()) {
+            options.max_output_bytes = limits.max_output_bytes;
+            options.max_refs_emitted = limits.max_refs_emitted;
+            options.max_logical_ops = limits.max_logical_ops;
+            options.max_physical_ops = limits.max_physical_ops;
+            options.max_microtasks = limits.max_microtasks;
+            options.max_memory_bytes = limits.max_memory_bytes;
+            options.max_code_bytes = limits.max_code_bytes;
         }
     }
     let result = crate::execute_codemode_with_options(plan, options);

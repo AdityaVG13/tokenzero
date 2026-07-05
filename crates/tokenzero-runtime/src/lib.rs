@@ -2,7 +2,6 @@
 
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
-use std::ffi::OsString;
 use std::fs::{self, File};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
@@ -1549,10 +1548,6 @@ pub fn quote_for(platform: &str, args: &[String]) -> String {
         .join(" ")
 }
 
-pub fn executable_path_from_current() -> Option<PathBuf> {
-    std::env::current_exe().ok()
-}
-
 pub fn env_map(pairs: &[String]) -> Result<BTreeMap<String, String>, RuntimeError> {
     let mut out = BTreeMap::new();
     for pair in pairs {
@@ -1565,10 +1560,6 @@ pub fn env_map(pairs: &[String]) -> Result<BTreeMap<String, String>, RuntimeErro
         out.insert(key.to_string(), value.to_string());
     }
     Ok(out)
-}
-
-pub fn os_string_vec(values: &[String]) -> Vec<OsString> {
-    values.iter().map(OsString::from).collect()
 }
 
 #[cfg(test)]

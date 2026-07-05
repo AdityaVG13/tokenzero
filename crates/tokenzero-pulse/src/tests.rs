@@ -68,6 +68,18 @@ fn write_single_event(path: &Path, tool: &str) {
     fs::write(path, line).unwrap();
 }
 
+/// Compute the same report the public `report_for_path` produces, but from
+/// an in-memory event slice rather than requiring callers to write a temp
+/// ledger in every aggregate assertion.
+fn aggregate(events: &[PulseEvent]) -> PulseReport {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("events.jsonl");
+    for event in events {
+        record_event(&path, event).unwrap();
+    }
+    report_for_path(&path).unwrap()
+}
+
 fn write_sidecar_with_scan(input: &Path, input_scan: &JsonlScan, updated_unix: u64) {
     write_sidecar_meta(
         &export_meta_path(input),

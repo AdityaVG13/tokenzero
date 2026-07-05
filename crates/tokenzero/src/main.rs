@@ -12,7 +12,7 @@ use std::time::Instant;
 use tempfile::tempdir;
 use tokenzero_core::McpToolSurface;
 use tokenzero_core::{
-    Accounting, ContentType, Mode, ToolResponse, count_tokens, detect_content_type,
+    ContentType, Mode, ToolResponse, detect_content_type,
     shell_display_command_from_argv_for_platform,
 };
 use tokenzero_filters::{discover, rewrite_command};
@@ -77,7 +77,7 @@ fn main() -> Result<()> {
         Commands::Ingest(args) => emit(handle_ingest(args)?)?,
         Commands::Expand(args) => emit(handle_expand(args)?)?,
         Commands::Mem(args) => emit_with_json(engine_from_common(&args).mem(), args.json)?,
-        Commands::Rewrite(args) | Commands::RewriteCommand(args) => emit_rewrite(args)?,
+        Commands::Rewrite(args) => emit_rewrite(args)?,
         // Fail-open hook contract: handle_hook never errors and never sets a
         // nonzero exit; a failing hook would degrade the harness's Bash tool.
         Commands::Hook(args) => hook::handle_hook(args),
@@ -1730,22 +1730,6 @@ fn record_tool_pulse(response: &ToolResponse, root: PathBuf, tool: &str) -> Resu
         let _ = record_event(&default_ledger_path(&root), &event);
     }
     Ok(())
-}
-
-#[allow(dead_code)]
-fn response_from_text(tool: &str, text: String) -> ToolResponse {
-    ToolResponse::ok(
-        tool,
-        Mode::Hybrid,
-        text.clone(),
-        Vec::new(),
-        Accounting {
-            raw_tokens: count_tokens(&text),
-            visible_tokens: count_tokens(&text),
-            recovery_tokens: 0,
-            exact_ref_tokens: Some(0),
-        },
-    )
 }
 
 mod audits;
