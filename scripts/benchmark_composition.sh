@@ -1,12 +1,15 @@
 #!/bin/sh
-# CodeMode plan composition benchmark: measures one-plan execution vs equivalent
-# sequences of direct calls. Produces JSON to stdout.
+# CodeMode composition benchmark: measures one-plan execution against raw
+# subprocess output and equivalent classic per-op tool calls. Produces JSON to stdout.
 #
 # Usage: scripts/benchmark_composition.sh
-# Runs from the repo root. Requires a built tokenzero-mcp binary.
+# Runs from the repo root.
 set -eu
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 
-cargo test -p tokenzero-mcp --quiet -- codemode::bench_harness::run_composition_benchmark --nocapture 2>/dev/null
+OUT="${TMPDIR:-/tmp}/tokenzero-composition-benchmark-$$.json"
+trap 'rm -f "$OUT"' EXIT HUP INT TERM
+TOKENZERO_COMPOSITION_BENCHMARK_OUT="$OUT"   cargo test -p tokenzero-mcp --quiet -- codemode::bench::bench_harness::run_composition_benchmark --nocapture >/dev/null
+cat "$OUT"

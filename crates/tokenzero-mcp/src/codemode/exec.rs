@@ -17,7 +17,7 @@ use crate::{EditHunk, EngineConfig, TokenZeroEngine, shell_timeout_from_secs};
 
 use super::catalog::{describe_method, search_catalog};
 use super::parser::{Expr, MethodCall, Statement, parse_plan, resolve_expr, resolve_return};
-use super::result::{CodeModeOptions, CodeModeResult};
+use super::result::{CodeModeOptions, CodeModeResult, CodeModeStatus};
 use super::sandbox::lower_code_plan;
 use super::store::{CodeModeLimits, ExecutionStep, ExecutionStore, finalize_result, now_ms};
 use crate::expand_params::ExpandParams;
@@ -576,7 +576,26 @@ fn js_prelude() -> &'static str {
           return value;
         };
         const __tz_call = (method, args) => __tz_parse(__tz_call_json(method, JSON.stringify(args)));
+        const __tz_truthy = (value) => {
+          if (typeof value === 'function') return Boolean(value());
+          if (Array.isArray(value)) return value.length > 0;
+          if (value && typeof value === 'object') return Object.keys(value).length > 0;
+          return Boolean(value);
+        };
+        const __tz_lines = (value) => {
+          const text = typeof value === 'string' ? value : (value && typeof value.text === 'string' ? value.text : '');
+          return text.length === 0 ? [] : text.split(/\r?\n/);
+        };
         const zero = Object.freeze({
+          raw: (value) => ({ __tz_raw: true, value }),
+          count: (value) => Array.isArray(value) ? value.length : __tz_lines(value).length,
+          first: (value, n = 1) => {
+            const take = Math.max(1, Number(n) || 1);
+            if (Array.isArray(value)) return take === 1 ? value[0] : value.slice(0, take);
+            const lines = __tz_lines(value).slice(0, take);
+            return take === 1 ? (lines[0] || '') : lines.join('\n');
+          },
+          verdict: (ok, detail = '') => ({ ok: __tz_truthy(ok), detail: String(detail).split(/\r?\n/)[0] }),
           read: (...args) => __tz_call('zero.read', args),
           find: (...args) => __tz_call('zero.find', args),
           grep: (...args) => __tz_call('zero.grep', args),
@@ -807,6 +826,89 @@ fn execute_lowered_plan(
     )
 }
 
+fn ref_first_final_value(
+    engine: &TokenZeroEngine,
+    value: Value,
+    options: &CodeModeOptions,
+) -> (Value, Vec<String>) {
+    if !options.ref_first {
+        return (unwrap_raw_value(value), Vec::new());
+    }
+    let mut store = tokenzero_recovery::RecoveryStore::new(Some(engine.config.cache_path.clone()));
+    let mut refs = Vec::new();
+    let value = ref_first_value(value, options.ref_first_budget, &mut store, &mut refs);
+    (value, refs)
+}
+
+fn ref_first_value(
+    value: Value,
+    budget_tokens: usize,
+    store: &mut tokenzero_recovery::RecoveryStore,
+    refs: &mut Vec<String>,
+) -> Value {
+    match value {
+        Value::String(text) => {
+            if count_tokens(&text) > budget_tokens {
+                let content_type = detect_content_type(&text, None);
+                if let Ok(stored) = store.store_payload(&text, content_type, None, None, None) {
+                    let ref_id = stored.blob_ref.as_str().to_string();
+                    if !refs.contains(&ref_id) {
+                        refs.push(ref_id.clone());
+                    }
+                    return json!({
+                        "ref": ref_id,
+                        "preview": first_line_preview(&text),
+                    });
+                }
+            }
+            Value::String(text)
+        }
+        Value::Array(items) => Value::Array(
+            items
+                .into_iter()
+                .map(|item| ref_first_value(item, budget_tokens, store, refs))
+                .collect(),
+        ),
+        Value::Object(mut map) => {
+            if map
+                .get("__tz_raw")
+                .and_then(Value::as_bool)
+                .unwrap_or(false)
+            {
+                return map.remove("value").unwrap_or(Value::Null);
+            }
+            Value::Object(
+                map.into_iter()
+                    .map(|(key, value)| (key, ref_first_value(value, budget_tokens, store, refs)))
+                    .collect(),
+            )
+        }
+        other => other,
+    }
+}
+
+fn unwrap_raw_value(value: Value) -> Value {
+    match value {
+        Value::Object(mut map)
+            if map
+                .get("__tz_raw")
+                .and_then(Value::as_bool)
+                .unwrap_or(false) =>
+        {
+            map.remove("value").unwrap_or(Value::Null)
+        }
+        other => other,
+    }
+}
+
+fn first_line_preview(text: &str) -> String {
+    let mut preview = text.lines().next().unwrap_or("").trim().to_string();
+    if preview.chars().count() > 32 {
+        preview = preview.chars().take(32).collect();
+    }
+    preview
+}
+
 fn finalize_codemode_result(
     mut result: CodeModeResult,
     kind: &str,
@@ -818,6 +920,28 @@ fn finalize_codemode_result(
 ) -> CodeModeResult {
     let work_root = tokenzero_work_root(options.root.clone());
     let engine = make_engine_for_root_with_options(work_root, options);
+    if matches!(result.status, CodeModeStatus::Completed) {
+        if let Some(value) = result.value.take() {
+            let (value, refs) = ref_first_final_value(&engine, value, options);
+            for ref_id in refs {
+                if !result.refs.contains(&ref_id) {
+                    result.refs.push(ref_id);
+                }
+            }
+            result.value = Some(value);
+        }
+    }
+    let payload_tokens = result
+        .value
+        .as_ref()
+        .map(|value| count_tokens(&serde_json::to_string(value).unwrap_or_default()))
+        .unwrap_or_else(|| {
+            result
+                .error
+                .as_ref()
+                .map(|error| count_tokens(&error.message))
+                .unwrap_or(0)
+        });
     let operations = result.telemetry.operations();
     let physical_ops = physical_ops_for(&result);
     result.telemetry.operations = operations;
@@ -825,6 +949,8 @@ fn finalize_codemode_result(
     result.telemetry.physical_ops = physical_ops;
     result.telemetry.batched_ops = if operations > physical_ops { 1 } else { 0 };
     result.telemetry.internal_actions = operations.saturating_add(result.refs.len());
+    result.telemetry.payload_tokens = payload_tokens;
+    result.telemetry.envelope_tokens = count_tokens(&result.visible_ack);
     if let Some(extra) = result
         .telemetry
         .extra
@@ -832,6 +958,14 @@ fn finalize_codemode_result(
         .and_then(Value::as_object_mut)
     {
         extra.insert("refs_count".to_string(), json!(result.refs.len()));
+        extra.insert(
+            "payload_tokens".to_string(),
+            json!(result.telemetry.payload_tokens),
+        );
+        extra.insert(
+            "envelope_tokens".to_string(),
+            json!(result.telemetry.envelope_tokens),
+        );
     }
     result.telemetry.refs_count = Some(result.refs.len());
     finalize_result(
@@ -1202,6 +1336,10 @@ fn dispatch_values(
         "zero.pipe" | "pipe" => exec_pipe(engine, work_root, args),
         "zero.pick" | "pick" => exec_pick(args),
         "zero.filter_lines" | "filter_lines" => exec_filter_lines(args),
+        "zero.count" | "count" => exec_count(args),
+        "zero.first" | "first" => exec_first(args),
+        "zero.verdict" | "verdict" => exec_verdict(args),
+        "zero.raw" | "raw" => exec_raw(args),
         "zero.count_tokens" | "count_tokens" => exec_count_tokens(args),
         "zero.assert" | "assert" => exec_assert(args),
         "codemode.search" | "search" => {
@@ -1926,6 +2064,7 @@ fn exec_pipe(
                 .iter()
                 .map(|v| match v {
                     Value::String(s) if s == "_prev" => Expr::VarRef("_prev".to_string()),
+                    Value::String(s) => Expr::StringLit(s.clone()),
                     _ => Expr::StringLit(serde_json::to_string(v).unwrap_or_default()),
                 })
                 .collect(),
@@ -1941,10 +2080,34 @@ fn exec_pipe(
         pipe_scope.insert(format!("_step{idx}"), val.clone());
         results.push(val);
     }
-    Ok(OpOutcome::from_catalog(json!({
+    let full = json!({
         "steps": results.len(),
         "results": results,
         "last": results.last().cloned().unwrap_or(Value::Null),
+    });
+    if args
+        .get(1)
+        .and_then(Value::as_object)
+        .and_then(|opts| opts.get("raw"))
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+    {
+        return Ok(OpOutcome::from_catalog(full));
+    }
+    let text = serde_json::to_string(&full).unwrap_or_default();
+    let content_type = detect_content_type(&text, None);
+    let mut store = tokenzero_recovery::RecoveryStore::new(Some(engine.config.cache_path.clone()));
+    let stored = store.store_payload(&text, content_type, None, None, None).ok();
+    let ref_id = stored
+        .as_ref()
+        .map(|s| s.blob_ref.as_str().to_string())
+        .unwrap_or_default();
+    if ref_id.is_empty() {
+        return Ok(OpOutcome::from_catalog(full));
+    }
+    Ok(OpOutcome::from_catalog(json!({
+        "ref": ref_id,
+        "preview": first_line_preview(&text),
     })))
 }
 
@@ -2013,6 +2176,90 @@ fn exec_filter_lines(args: &[Value]) -> Result<OpOutcome, Box<CodeModeResult>> {
         "lines": filtered.len(),
         "pattern": pattern,
     })))
+}
+
+fn exec_count(args: &[Value]) -> Result<OpOutcome, Box<CodeModeResult>> {
+    let value = args.first().ok_or_else(|| {
+        Box::new(CodeModeResult::error(
+            "zero.count requires a value as first argument",
+            0,
+        ))
+    })?;
+    let count = if let Some(items) = value.as_array() {
+        items.len()
+    } else {
+        text_from_value(value)
+            .map(|text| text.lines().count())
+            .unwrap_or(0)
+    };
+    Ok(OpOutcome::from_catalog(json!(count)))
+}
+
+fn exec_first(args: &[Value]) -> Result<OpOutcome, Box<CodeModeResult>> {
+    let value = args.first().ok_or_else(|| {
+        Box::new(CodeModeResult::error(
+            "zero.first requires a value as first argument",
+            0,
+        ))
+    })?;
+    let n = args.get(1).and_then(Value::as_u64).unwrap_or(1).max(1) as usize;
+    if let Some(items) = value.as_array() {
+        if n == 1 {
+            return Ok(OpOutcome::from_catalog(
+                items.first().cloned().unwrap_or(Value::Null),
+            ));
+        }
+        return Ok(OpOutcome::from_catalog(Value::Array(
+            items.iter().take(n).cloned().collect(),
+        )));
+    }
+    let text = text_from_value(value).unwrap_or("");
+    let lines = text.lines().take(n).collect::<Vec<_>>();
+    let out = if n == 1 {
+        lines.first().copied().unwrap_or("").to_string()
+    } else {
+        lines.join("\n")
+    };
+    Ok(OpOutcome::from_catalog(json!(out)))
+}
+
+fn exec_verdict(args: &[Value]) -> Result<OpOutcome, Box<CodeModeResult>> {
+    let ok = args.first().map(value_truthy).unwrap_or(false);
+    let detail = args
+        .get(1)
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .lines()
+        .next()
+        .unwrap_or("")
+        .to_string();
+    Ok(OpOutcome::from_catalog(
+        json!({ "ok": ok, "detail": detail }),
+    ))
+}
+
+fn exec_raw(args: &[Value]) -> Result<OpOutcome, Box<CodeModeResult>> {
+    let value = args.first().cloned().unwrap_or(Value::Null);
+    Ok(OpOutcome::from_catalog(
+        json!({ "__tz_raw": true, "value": value }),
+    ))
+}
+
+fn text_from_value(value: &Value) -> Option<&str> {
+    value
+        .as_str()
+        .or_else(|| value.get("text").and_then(Value::as_str))
+}
+
+fn value_truthy(value: &Value) -> bool {
+    match value {
+        Value::Null => false,
+        Value::Bool(b) => *b,
+        Value::Number(n) => n.as_f64().unwrap_or(0.0) != 0.0,
+        Value::String(s) => !s.is_empty(),
+        Value::Array(items) => !items.is_empty(),
+        Value::Object(map) => !map.is_empty(),
+    }
 }
 
 fn exec_count_tokens(args: &[Value]) -> Result<OpOutcome, Box<CodeModeResult>> {

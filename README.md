@@ -134,7 +134,7 @@ because compression you had to undo was never a saving at all.
 
 Run the self-contained RACC demo from the repo root:
 
-```bash
+```powershell
 pwsh -File ./demo/run_demo.ps1 -OpenViz
 ```
 
@@ -146,7 +146,7 @@ recovery-aware savings, and byte-exact expansion proof.
 
 For live agent runs:
 
-```bash
+```powershell
 pwsh -File ./demo/run_agent_demo.ps1 -Replicates 3
 ```
 

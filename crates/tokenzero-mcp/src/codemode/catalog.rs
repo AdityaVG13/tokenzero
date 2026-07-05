@@ -171,6 +171,30 @@ const METHOD_CATALOG: &[MethodDef] = &[
         signature: "zero.compact_max(data: string | any): Promise<{ text: string, ref: string, raw_tokens: number, visible_tokens: number, compression_strategy: string, savings_pct: string }>",
     },
     MethodDef {
+        path: "zero.count",
+        connector: "zero",
+        description: "Count lines in a text value or items in an array without materializing extra payload",
+        signature: "zero.count(x: string | { text: string } | any[]): number",
+    },
+    MethodDef {
+        path: "zero.first",
+        connector: "zero",
+        description: "Return the first line or array item, or the first n lines/items",
+        signature: "zero.first(x: string | { text: string } | any[], n?: number): any",
+    },
+    MethodDef {
+        path: "zero.verdict",
+        connector: "zero",
+        description: "Return a compact one-line verdict object",
+        signature: "zero.verdict(ok: any | (() => any), detail?: string): { ok: boolean, detail: string }",
+    },
+    MethodDef {
+        path: "zero.raw",
+        connector: "zero",
+        description: "Opt one final-return value out of automatic ref-first compaction",
+        signature: "zero.raw<T>(value: T): T",
+    },
+    MethodDef {
         path: "zero.count_tokens",
         connector: "zero",
         description: "Count tokens, bytes, and lines in a value without storing it (introspection helper)",

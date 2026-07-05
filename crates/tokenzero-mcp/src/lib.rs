@@ -7,7 +7,6 @@ mod cache_maintenance;
 mod cache_pack;
 mod catalog;
 mod codemode;
-mod fastmcp_mode;
 mod collect;
 mod config;
 mod diff;
@@ -22,6 +21,7 @@ mod engine_search;
 mod engine_session;
 mod engine_shell;
 mod expand_params;
+mod fastmcp_mode;
 mod fetch_cache;
 mod fetch_guard;
 mod jsonrpc;
@@ -43,9 +43,9 @@ pub use codemode::{
     CODEMODE_SCHEMA, CodeModeLimits, CodeModeOptions, CodeModeResult, CodeModeStatus,
     describe_codemode_method, execute_codemode_with_options, search_codemode_catalog,
 };
+pub use fastmcp_mode::{fastmcp_codemode_instructions, fastmcp_instructions, run_fastmcp_stdio};
 pub use jsonrpc::handle_jsonrpc;
 pub use render::{cli_json, render_text};
-pub use fastmcp_mode::{fastmcp_codemode_instructions, fastmcp_instructions, run_fastmcp_stdio};
 pub use stdio::run_stdio;
 pub use supervisor::run_supervised_stdio;
 

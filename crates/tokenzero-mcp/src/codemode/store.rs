@@ -229,7 +229,7 @@ pub fn finalize_result(
     let result_logical_ref = execution_ref(&id, "result");
     let error_logical_ref = execution_ref(&id, "error");
 
-    let logical_refs = json!({
+    let mut logical_refs = json!({
         "execution": execution_logical_ref,
         "code": code_logical_ref,
         "steps": steps_logical_ref,
@@ -261,6 +261,34 @@ pub fn finalize_result(
         .store_json(&record_value)
         .unwrap_or_else(|err| format!("store-error:{err}"));
 
+    let envelope_logical_ref = execution_ref(&id, "envelope");
+    let envelope_bundle = json!({
+        "schema": "tokenzero.codemode.envelope.v2",
+        "execution_id": id.clone(),
+        "status": status_str,
+        "ack": result.visible_ack.clone(),
+        "telemetry": result.telemetry.clone(),
+        "refs": result.refs.clone(),
+        "execution_refs": logical_refs.clone(),
+        "store": {
+            "code_ref": code_ref.clone(),
+            "steps_ref": steps_ref.clone(),
+            "telemetry_ref": telemetry_ref.clone(),
+            "result_ref": result_ref.clone(),
+            "error_ref": error_ref.clone(),
+            "execution_record_ref": execution_record_ref.clone(),
+        }
+    });
+    let envelope_ref = store
+        .store_json(&envelope_bundle)
+        .unwrap_or_else(|err| format!("store-error:{err}"));
+    if let Some(obj) = logical_refs.as_object_mut() {
+        obj.insert("envelope".to_string(), json!(envelope_logical_ref.clone()));
+        if let Some(stored) = obj.get_mut("stored").and_then(Value::as_object_mut) {
+            stored.insert("envelope".to_string(), json!(envelope_ref.clone()));
+        }
+    }
+
     let _ = store.alias(&execution_logical_ref, &execution_record_ref);
     let _ = store.alias(&code_logical_ref, &code_ref);
     let _ = store.alias(&steps_logical_ref, &steps_ref);
@@ -271,6 +299,7 @@ pub fn finalize_result(
     if let Some(stored) = error_ref.as_deref() {
         let _ = store.alias(&error_logical_ref, stored);
     }
+    let _ = store.alias(&envelope_logical_ref, &envelope_ref);
 
     if result.refs.len() < limits.max_refs_emitted {
         result.refs.push(execution_record_ref);

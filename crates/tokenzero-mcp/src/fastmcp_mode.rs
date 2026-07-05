@@ -1,11 +1,14 @@
-use fastmcp_rust::prelude::*;
 use fastmcp_rust::McpErrorCode;
-use fastmcp_rust::ToolHandler;
 use fastmcp_rust::ResourceHandler;
+use fastmcp_rust::ToolHandler;
+use fastmcp_rust::prelude::*;
 use serde_json::Value;
+use tokenzero_core::count_tokens;
 use std::sync::{Arc, Mutex};
 
-use crate::catalog::{TOOL_ALIASES, canonical_tool_specs, resource_specs, surface_includes_canonical};
+use crate::catalog::{
+    TOOL_ALIASES, canonical_tool_specs, resource_specs, surface_includes_canonical,
+};
 use crate::resources::build_resource_payload;
 use crate::{EngineConfig, TokenZeroEngine, call_tool_fastmcp};
 use tokenzero_core::McpToolSurface;
@@ -17,6 +20,71 @@ struct EngineTool {
     description: String,
     schema: Value,
     engine: Arc<Mutex<TokenZeroEngine>>,
+}
+
+pub(crate) fn fastmcp_content_texts_from_tool_result(
+    result: &Value,
+) -> Result<Vec<String>, String> {
+    let is_error = result
+        .get("isError")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    if is_error {
+        let err_text = result
+            .get("content")
+            .and_then(|c| c.get(0))
+            .and_then(|c| c.get("text"))
+            .and_then(Value::as_str)
+            .unwrap_or("tool error");
+        return Err(err_text.to_string());
+    }
+    let primary_text = result
+        .get("content")
+        .and_then(|c| c.get(0))
+        .and_then(|c| c.get("text"))
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    if let Some(sc) = result.get("structuredContent") {
+        if let Some(folded) = scalar_folded_codemode_v2(primary_text, sc) {
+            return Ok(vec![folded]);
+        }
+        let meta_json = serde_json::to_string(sc).unwrap_or_default();
+        if meta_json != "null" {
+            return Ok(vec![primary_text.to_string(), meta_json]);
+        }
+        return Ok(vec![primary_text.to_string()]);
+    }
+    let mut contents = vec![primary_text.to_string()];
+    if primary_text.starts_with("ok tz") || primary_text.starts_with("err ") {
+        return Ok(contents);
+    }
+    let mut meta = serde_json::Map::new();
+    if let Some(rt) = result.get("resultType").and_then(Value::as_str) {
+        meta.insert("resultType".into(), Value::String(rt.to_string()));
+    }
+    let meta_json = serde_json::to_string(&Value::Object(meta)).unwrap_or_default();
+    if meta_json != "{}" {
+        contents.push(meta_json);
+    }
+    Ok(contents)
+}
+
+fn scalar_folded_codemode_v2(primary_text: &str, structured: &Value) -> Option<String> {
+    let object = structured.as_object()?;
+    let value = object.get("value")?;
+    if !(value.is_string() || value.is_number() || value.is_boolean()) {
+        return None;
+    }
+    let value_text = serde_json::to_string(value).ok()?;
+    if count_tokens(&value_text) > 16 {
+        return None;
+    }
+    let ack = object
+        .get("ack")
+        .and_then(Value::as_str)
+        .unwrap_or(primary_text);
+    let (prefix, suffix) = ack.rsplit_once(" t:")?;
+    Some(format!("{prefix} ={value_text} t:{suffix}"))
 }
 
 impl ToolHandler for EngineTool {
@@ -43,39 +111,10 @@ impl ToolHandler for EngineTool {
                 // fields FastMCP cannot carry natively (resultType, refs).
                 // Errors — tool-level isError or dispatch-level — map to
                 // Err(McpError) so fastmcp sets the envelope isError: true.
-                let is_error = result.get("isError").and_then(Value::as_bool).unwrap_or(false);
-                if is_error {
-                    let err_text = result
-                        .get("content")
-                        .and_then(|c| c.get(0))
-                        .and_then(|c| c.get("text"))
-                        .and_then(Value::as_str)
-                        .unwrap_or("tool error");
-                    return Err(McpError::new(
-                        McpErrorCode::Custom(-32000),
-                        err_text.to_string(),
-                    ));
+                match fastmcp_content_texts_from_tool_result(&result) {
+                    Ok(contents) => Ok(contents.into_iter().map(Content::text).collect()),
+                    Err(message) => Err(McpError::new(McpErrorCode::Custom(-32000), message)),
                 }
-                let primary_text = result
-                    .get("content")
-                    .and_then(|c| c.get(0))
-                    .and_then(|c| c.get("text"))
-                    .and_then(Value::as_str)
-                    .unwrap_or("");
-                let mut meta = serde_json::Map::new();
-                if let Some(rt) = result.get("resultType").and_then(Value::as_str) {
-                    meta.insert("resultType".into(), Value::String(rt.to_string()));
-                }
-                if let Some(sc) = result.get("structuredContent") {
-                    meta.insert("structuredContent".into(), sc.clone());
-                }
-                let meta_json =
-                    serde_json::to_string(&Value::Object(meta)).unwrap_or_default();
-                let mut contents = vec![Content::text(primary_text)];
-                if meta_json != "{}" {
-                    contents.push(Content::text(meta_json));
-                }
-                Ok(contents)
             }
             Err(err) => {
                 let message = err.message_text();
@@ -153,8 +192,8 @@ pub fn run_fastmcp_stdio(config: EngineConfig) -> ! {
         McpToolSurface::CodeMode => fastmcp_codemode_instructions(),
         McpToolSurface::Classic => fastmcp_instructions(),
     };
-    let mut builder = Server::new("TokenZero", env!("CARGO_PKG_VERSION"))
-        .instructions(instructions);
+    let mut builder =
+        Server::new("TokenZero", env!("CARGO_PKG_VERSION")).instructions(instructions);
 
     for seed in canonical_tool_specs() {
         if !surface_includes_canonical(surface, seed.name) {

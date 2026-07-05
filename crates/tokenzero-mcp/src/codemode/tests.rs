@@ -9,6 +9,127 @@ use std::path::PathBuf;
 use tokenzero_core::Mode;
 
 #[test]
+fn codemode_v2_one_token_answer_stays_tiny_on_wire() {
+    let work = tempfile::tempdir().unwrap();
+    let engine = crate::TokenZeroEngine::new(crate::EngineConfig {
+        allowed_roots: vec![work.path().to_path_buf()],
+        cache_path: super::exec::make_engine_for_root(work.path().to_path_buf())
+            .config
+            .cache_path,
+        ..crate::EngineConfig::for_root(work.path())
+    });
+    let response = crate::call_tool_fastmcp(
+        &engine,
+        "execute_code",
+        &serde_json::json!({"plan": "return await Promise.resolve(1)"}),
+        None,
+    )
+    .unwrap();
+    let text = response
+        .pointer("/content/0/text")
+        .and_then(serde_json::Value::as_str)
+        .unwrap();
+    assert!(text.starts_with("ok tz0 "), "v2 ack was {text:?}");
+    assert!(response.get("structuredContent").is_none());
+    assert!(text.contains(" =1 t:"), "v2 ack was {text:?}");
+    let visible_tokens = tokenzero_core::count_tokens(text);
+    assert!(
+        visible_tokens <= 14,
+        "ack should fit the v2 visible budget, got {visible_tokens}: {text}"
+    );
+}
+
+#[test]
+fn ref_first_large_final_string_recovers_byte_exactly() {
+    let work = tempfile::tempdir().unwrap();
+    let payload = "x ".repeat(2500);
+    let plan = format!("return {}", serde_json::to_string(&payload).unwrap());
+    let result = execute_codemode_with_options(
+        &plan,
+        CodeModeOptions {
+            root: Some(work.path().to_path_buf()),
+            ..Default::default()
+        },
+    );
+    assert_eq!(
+        result.status,
+        CodeModeStatus::Completed,
+        "{:?}",
+        result.error
+    );
+    let value = result.value.as_ref().unwrap();
+    let ref_id = value["ref"]
+        .as_str()
+        .expect("large string should be ref-first");
+    assert!(ref_id.starts_with("tz://"));
+    assert_eq!(
+        value["preview"].as_str(),
+        Some("x x x x x x x x x x x x x x x x ")
+    );
+
+    let engine = make_engine_for_root(work.path().to_path_buf());
+    let expanded = engine.expand(ref_id, None, None, None, None, None);
+    assert_eq!(expanded.status, "ok");
+    assert_eq!(expanded.visible.unwrap().text, payload);
+}
+
+#[test]
+fn v1_envelope_escape_hatch_keeps_legacy_payload_shape() {
+    let work = tempfile::tempdir().unwrap();
+    let engine = crate::TokenZeroEngine::new(crate::EngineConfig {
+        allowed_roots: vec![work.path().to_path_buf()],
+        cache_path: super::exec::make_engine_for_root(work.path().to_path_buf())
+            .config
+            .cache_path,
+        ..crate::EngineConfig::for_root(work.path())
+    });
+    let response = crate::call_tool_fastmcp(
+        &engine,
+        "execute_code",
+        &serde_json::json!({"plan": "return await Promise.resolve(1)", "envelope": "v1"}),
+        None,
+    )
+    .unwrap();
+    assert!(response.get("structuredContent").is_none());
+    let text = response
+        .pointer("/content/0/text")
+        .and_then(serde_json::Value::as_str)
+        .unwrap();
+    let payload: serde_json::Value = serde_json::from_str(text).unwrap();
+    assert_eq!(payload["ack"], "C");
+    assert_eq!(payload["value"], 1);
+    assert!(payload.get("telemetry").is_some());
+}
+
+#[test]
+fn quiet_combinators_handle_edge_cases_compactly() {
+    let result = execute_codemode_with_options(
+        r#"
+        const empty_count = zero.count("");
+        const array_count = zero.count([1, 2, 3]);
+        const missing_first = zero.first([]);
+        const first_two = zero.first("a\nb\nc", 2);
+        const verdict = zero.verdict(false, "bad\nverbose");
+        return { empty_count, array_count, missing_first, first_two, verdict };
+        "#,
+        CodeModeOptions::default(),
+    );
+    assert_eq!(
+        result.status,
+        CodeModeStatus::Completed,
+        "{:?}",
+        result.error
+    );
+    let value = result.value.as_ref().unwrap();
+    assert_eq!(value["empty_count"].as_u64(), Some(0));
+    assert_eq!(value["array_count"].as_u64(), Some(3));
+    assert!(value["missing_first"].is_null());
+    assert_eq!(value["first_two"].as_str(), Some("a\nb"));
+    assert_eq!(value["verdict"]["ok"].as_bool(), Some(false));
+    assert_eq!(value["verdict"]["detail"].as_str(), Some("bad"));
+}
+
+#[test]
 fn undefined_variable_in_return_is_plan_error() {
     let result = execute_codemode("return missing_binding");
     assert_eq!(result.status, CodeModeStatus::Error);
@@ -39,7 +160,10 @@ fn partial_limits_objects_deserialize_with_defaults() {
     );
     // Empty object = all defaults (the degenerate partial).
     let empty: crate::CodeModeLimits = serde_json::from_value(serde_json::json!({})).unwrap();
-    assert_eq!(empty.max_code_bytes, crate::CodeModeLimits::default().max_code_bytes);
+    assert_eq!(
+        empty.max_code_bytes,
+        crate::CodeModeLimits::default().max_code_bytes
+    );
 }
 
 #[test]
@@ -405,7 +529,7 @@ fn search_all_methods_discoverable() {
 
 #[test]
 fn pipe_sequential_composition() {
-    let plan = r#"await zero.pipe([{"method": "zero.compact", "args": ["step one"]}, {"method": "zero.compact", "args": ["step two"]}])"#;
+    let plan = r#"await zero.pipe([{"method": "zero.compact", "args": ["step one"]}, {"method": "zero.compact", "args": ["step two"]}], {"raw": true})"#;
     let r = execute_codemode(plan);
     assert_eq!(r.status, CodeModeStatus::Completed, "{:?}", r.error);
     let val = r.value.unwrap();
@@ -501,7 +625,7 @@ fn multi_step_dataflow_with_intermediate_binding() {
 #[test]
 fn pipe_and_pick_composition() {
     let plan = r#"
-        const piped = await zero.pipe([{"method": "zero.compact", "args": ["piped data"]}]);
+        const piped = await zero.pipe([{"method": "zero.compact", "args": ["piped data"]}], {"raw": true});
         const picked = await zero.pick(piped, ["steps", "last"]);
         return picked
     "#;

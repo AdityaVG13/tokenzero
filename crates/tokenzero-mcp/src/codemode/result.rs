@@ -89,6 +89,8 @@ pub struct CodeModeTelemetry {
     pub store_writes: usize,
     pub wall_ms: u64,
     pub bytes_materialized: usize,
+    pub envelope_tokens: usize,
+    pub payload_tokens: usize,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub extra: Option<Value>,
 }
@@ -121,6 +123,9 @@ pub struct CodeModeOptions {
     pub max_microtasks: usize,
     pub max_memory_bytes: usize,
     pub max_code_bytes: usize,
+    pub envelope: Option<String>,
+    pub ref_first: bool,
+    pub ref_first_budget: usize,
 }
 
 impl Default for CodeModeOptions {
@@ -138,6 +143,9 @@ impl Default for CodeModeOptions {
             max_microtasks: super::store::DEFAULT_MAX_MICROTASKS,
             max_memory_bytes: super::store::DEFAULT_MAX_MEMORY_BYTES,
             max_code_bytes: super::store::DEFAULT_MAX_CODE_BYTES,
+            envelope: None,
+            ref_first: true,
+            ref_first_budget: 64,
         }
     }
 }
@@ -178,13 +186,17 @@ impl CodeModeResult {
                 store_writes: refs_len,
                 wall_ms: 0,
                 bytes_materialized: raw,
+                envelope_tokens: 0,
+                payload_tokens: visible,
                 extra: Some(serde_json::json!({
                     "operations": ops,
                     "visible_tokens": visible,
                     "raw_tokens": raw,
                     "equivalent_calls": ops.saturating_add(1),
                     "refs_count": refs_len,
-                    "parallel_groups": 0
+                    "parallel_groups": 0,
+                    "envelope_tokens": 0,
+                    "payload_tokens": visible
                 })),
             },
             error: None,
@@ -230,12 +242,16 @@ impl CodeModeResult {
                 store_writes: 0,
                 wall_ms: 0,
                 bytes_materialized: 0,
+                envelope_tokens: 0,
+                payload_tokens: 0,
                 extra: Some(serde_json::json!({
                     "operations": ops,
                     "visible_tokens": 0,
                     "raw_tokens": 0,
                     "refs_count": 0,
-                    "parallel_groups": 0
+                    "parallel_groups": 0,
+                    "envelope_tokens": 0,
+                    "payload_tokens": 0
                 })),
             },
             error: Some(CodeModeError::new(kind, msg, retryable)),

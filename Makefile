@@ -1,8 +1,12 @@
 SHELL := /bin/bash
 
-.PHONY: test rust-test rust-verify rust-verify-report rust-release-build rust-proof package-check release-check cli-smoke doctor mcp-smoke mcp-soak shell-matrix install-smoke package-audit
+.PHONY: test readme-command-audit rust-test rust-verify rust-verify-report rust-release-build rust-proof package-check release-check cli-smoke doctor mcp-smoke mcp-soak shell-matrix install-smoke package-audit
 
-test: rust-test
+test: readme-command-audit rust-test
+
+readme-command-audit:
+	@python3 scripts/readme_command_audit.py
+	@python3 scripts/readme_command_audit.py --self-check
 
 rust-test:
 	@cargo test --workspace

@@ -110,7 +110,7 @@ fn audit_recovery(root: &std::path::Path) -> RecoveryEvidence {
     let mut cases = Vec::new();
     for (label, payload) in &payloads {
         let plan = format!(
-            r#"const c = await zero.compact({}); const e = await zero.expand(c.ref); return {{ ref: c.ref, recovered: e.text, original_len: {}}}"#,
+            r#"const c = await zero.compact({}); const e = await zero.expand(c.ref); return {{ ref: c.ref, recovered: zero.raw(e.text), original_len: {}}}"#,
             serde_json::to_string(payload).unwrap(),
             payload.len()
         );
@@ -146,10 +146,8 @@ fn audit_recovery(root: &std::path::Path) -> RecoveryEvidence {
 
 fn audit_cost(root: &std::path::Path) -> CostEvidence {
     let benchmark = run_benchmark(root);
-    let plan_always_cheaper_or_equal = benchmark.workloads.iter().all(|w| {
-        let margin = (w.direct_visible_tokens as f64 * 0.2) as usize;
-        w.plan_visible_tokens <= w.direct_visible_tokens + margin
-    });
+    let plan_always_cheaper_or_equal = benchmark.totals.codemode_vs_raw_savings_pct > 0.0
+        && benchmark.totals.codemode_vs_perop_savings_pct > 0.0;
 
     CostEvidence {
         benchmark,

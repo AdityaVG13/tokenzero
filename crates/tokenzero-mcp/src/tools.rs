@@ -136,8 +136,21 @@ fn exec_codemode_tool(
             options.max_code_bytes = limits.max_code_bytes;
         }
     }
-    let result = crate::execute_codemode_with_options(plan, options);
-    json_tool_response(name, codemode_contract_payload(&result))
+    if let Some(envelope) = args.get("envelope").and_then(Value::as_str) {
+        options.envelope = Some(envelope.to_string());
+    }
+    if let Some(ref_first) = args.get("ref_first").and_then(Value::as_bool) {
+        options.ref_first = ref_first;
+    }
+    if let Some(budget) = args.get("ref_first_budget").and_then(Value::as_u64) {
+        options.ref_first_budget = budget as usize;
+    }
+    let result = crate::execute_codemode_with_options(plan, options.clone());
+    if codemode_envelope_version(args, &options) == "v1" {
+        json_tool_response(name, codemode_contract_payload_v1(&result))
+    } else {
+        codemode_v2_tool_response(name, &result)
+    }
 }
 
 fn exec_codemode_search_tool(name: &str, args: &Value) -> Result<ToolResponse, JsonRpcErrorData> {
@@ -176,7 +189,206 @@ fn codemode_capabilities_manifest() -> Value {
     })
 }
 
-fn codemode_contract_payload(result: &crate::CodeModeResult) -> Value {
+fn codemode_envelope_version(args: &Value, options: &crate::CodeModeOptions) -> String {
+    if let Some(value) = options
+        .envelope
+        .as_deref()
+        .or_else(|| args.get("envelope").and_then(Value::as_str))
+    {
+        return value.to_ascii_lowercase();
+    }
+    std::env::var("ZERO_ENVELOPE")
+        .unwrap_or_else(|_| "v2".to_string())
+        .to_ascii_lowercase()
+}
+
+fn codemode_envelope_ref(result: &crate::CodeModeResult) -> Option<String> {
+    result
+        .execution_refs
+        .as_ref()
+        .and_then(|refs| {
+            refs.pointer("/stored/envelope")
+                .or_else(|| refs.get("envelope"))
+        })
+        .and_then(Value::as_str)
+        .map(str::to_string)
+}
+
+fn codemode_v2_ack(result: &crate::CodeModeResult, telemetry_ref: &str) -> String {
+    match result.status {
+        crate::CodeModeStatus::Completed => {
+            let ops = result.telemetry.logical_ops;
+            let pct = if result.telemetry.raw_tokens > 0 {
+                format!(
+                    "{:.0}%",
+                    tokenzero_core::savings_ratio(
+                        result.telemetry.raw_tokens,
+                        result.telemetry.envelope_tokens + result.telemetry.payload_tokens,
+                    ) * 100.0
+                )
+            } else {
+                "-".to_string()
+            };
+            format!("ok tz{ops} {pct} t:{telemetry_ref}")
+        }
+        crate::CodeModeStatus::Error => {
+            let (kind, retryable, message) = result
+                .error
+                .as_ref()
+                .map(|error| {
+                    (
+                        error.kind.as_str(),
+                        if error.retryable {
+                            "retryable"
+                        } else {
+                            "final"
+                        },
+                        error.message.as_str(),
+                    )
+                })
+                .unwrap_or(("runtime", "final", "unknown error"));
+            let first = message.chars().take(80).collect::<String>();
+            format!("err {kind} {retryable} {first} t:{telemetry_ref}")
+        }
+    }
+}
+
+
+fn scalar_folded_codemode_v2_ack(ack: &str, value: &Value) -> Option<String> {
+    if !(value.is_string() || value.is_number() || value.is_boolean()) {
+        return None;
+    }
+    let value_text = serde_json::to_string(value).ok()?;
+    if count_tokens(&value_text) > 16 {
+        return None;
+    }
+    let (prefix, suffix) = ack.rsplit_once(" t:")?;
+    Some(format!("{prefix} ={value_text} t:{suffix}"))
+}
+
+fn refs_referenced_by_value(value: Option<&Value>, ordered_refs: &[String]) -> Vec<String> {
+    fn collect(value: &Value, refs: &mut std::collections::HashSet<String>) {
+        match value {
+            Value::String(text) => {
+                if text.starts_with("tz://") {
+                    refs.insert(text.clone());
+                }
+            }
+            Value::Array(items) => {
+                for item in items {
+                    collect(item, refs);
+                }
+            }
+            Value::Object(map) => {
+                for value in map.values() {
+                    collect(value, refs);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    let mut referenced = std::collections::HashSet::new();
+    if let Some(value) = value {
+        collect(value, &mut referenced);
+    }
+    ordered_refs
+        .iter()
+        .filter(|ref_id| referenced.contains(*ref_id))
+        .cloned()
+        .collect()
+}
+
+fn codemode_v2_structured(result: &crate::CodeModeResult, ack: &str, telemetry_ref: &str) -> Value {
+    let mut object = serde_json::Map::new();
+    object.insert("ack".to_string(), json!(ack));
+    match result.status {
+        crate::CodeModeStatus::Completed => {
+            if let Some(value) = &result.value {
+                object.insert("value".to_string(), value.clone());
+            }
+        }
+        crate::CodeModeStatus::Error => {
+            if let Some(error_ref) = result
+                .execution_refs
+                .as_ref()
+                .and_then(|refs| refs.pointer("/stored/error"))
+                .and_then(Value::as_str)
+            {
+                object.insert("ref".to_string(), json!(error_ref));
+            }
+        }
+    }
+    object.insert("ref".to_string(), json!(telemetry_ref));
+    let value_refs = refs_referenced_by_value(result.value.as_ref(), &result.refs);
+    if !value_refs.is_empty() {
+        object.insert("refs".to_string(), json!(value_refs));
+    }
+    Value::Object(object)
+}
+
+fn codemode_v2_tool_response(
+    name: &str,
+    result: &crate::CodeModeResult,
+) -> Result<ToolResponse, JsonRpcErrorData> {
+    let telemetry_ref =
+        codemode_envelope_ref(result).unwrap_or_else(|| "tz://missing-envelope".to_string());
+    let mut ack = codemode_v2_ack(result, &telemetry_ref);
+    let mut structured = codemode_v2_structured(result, &ack, &telemetry_ref);
+    let folded_scalar = matches!(result.status, crate::CodeModeStatus::Completed)
+        && result
+            .value
+            .as_ref()
+            .and_then(|value| scalar_folded_codemode_v2_ack(&ack, value))
+            .map(|folded| {
+                ack = folded;
+                structured = Value::Null;
+            })
+            .is_some();
+    let structured_tokens = if folded_scalar {
+        0
+    } else {
+        count_tokens(&serde_json::to_string(&structured).unwrap_or_default())
+    };
+    let envelope_tokens = count_tokens(&ack) + structured_tokens;
+    let mut response = ToolResponse::ok(
+        name,
+        Mode::Structured,
+        ack,
+        Vec::new(),
+        Accounting {
+            raw_tokens: result.telemetry.raw_tokens,
+            visible_tokens: envelope_tokens,
+            recovery_tokens: 0,
+            exact_ref_tokens: None,
+        },
+    );
+    response.telemetry = if folded_scalar {
+        Some(json!({
+            "envelope_tokens": envelope_tokens,
+            "payload_tokens": result.telemetry.payload_tokens,
+            "telemetry_ref": telemetry_ref,
+        }))
+    } else {
+        Some(json!({
+            "structuredContent": structured,
+            "envelope_tokens": envelope_tokens,
+            "payload_tokens": result.telemetry.payload_tokens,
+            "telemetry_ref": telemetry_ref,
+        }))
+    };
+    if matches!(result.status, crate::CodeModeStatus::Error) {
+        response.status = "error".to_string();
+        response.error = result.error.as_ref().map(|error| tokenzero_core::CliError {
+            code: error.kind.clone(),
+            message: error.message.clone(),
+            repair: None,
+        });
+    }
+    Ok(response)
+}
+
+fn codemode_contract_payload_v1(result: &crate::CodeModeResult) -> Value {
     let ack = result.visible_ack.clone();
     let mut refs = serde_json::Map::new();
     if let Some(execution_refs) = result.execution_refs.as_ref().and_then(Value::as_object) {
@@ -336,13 +548,18 @@ pub(crate) fn dispatch_tool(
                 ),
             )
         }
-        "ingest" => {
+        "ingest" | "compact" => {
             let text = args
                 .get("text")
                 .and_then(Value::as_str)
                 .or_else(|| args.get("input").and_then(Value::as_str))
                 .ok_or_else(|| "missing text".to_string())?;
-            engine.ingest(text, ContentType::Unknown, arg_mode(args), "mcp-ingest")
+            let tool = if canonical == "compact" {
+                "compact"
+            } else {
+                "mcp-ingest"
+            };
+            engine.ingest(text, ContentType::Unknown, arg_mode(args), tool)
         }
         "expand" => {
             let params = ExpandParams::from_tool_args(args)?;
@@ -518,7 +735,7 @@ fn batch_ops(args: &Value) -> Result<Vec<(String, Value)>, String> {
         .collect()
 }
 
-fn mcp_tool_response(response: ToolResponse) -> Value {
+pub(crate) fn mcp_tool_response(response: ToolResponse) -> Value {
     let is_error = response.status == "error";
     let mut text = response
         .visible
@@ -553,6 +770,15 @@ fn mcp_tool_response(response: ToolResponse) -> Value {
         "content": [{"type": "text", "text": text}],
         "resultType": "complete"
     });
+    if let Some(structured) = response
+        .telemetry
+        .as_ref()
+        .and_then(|telemetry| telemetry.get("structuredContent"))
+        .cloned()
+    {
+        result["structuredContent"] = structured;
+        return result;
+    }
     // structuredContent diverging from the text block makes several MCP
     // clients render the JSON envelope instead of the tool text, and it
     // roughly doubles the per-call context cost. Default is text-only; the
@@ -688,6 +914,7 @@ pub(crate) fn compact_cli_envelope(response: &ToolResponse) -> Value {
 fn canonical_tool(name: &str) -> &str {
     match name.strip_prefix("tz_").unwrap_or(name) {
         "cache-pack" => "cache_pack",
+        "compact" => "compact",
         other => other,
     }
 }
