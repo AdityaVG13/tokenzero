@@ -1,6 +1,60 @@
 use super::fixtures::*;
 use super::*;
 
+/// Assert the standard symlink escape issues for `../.env` targeting `symlink_member`.
+fn assert_symlink_escape_issues(issues: &[serde_json::Value], symlink_member: &str) {
+    assert!(issues.iter().any(|issue| {
+        issue["code"] == "archive_link_target_escape"
+            && issue["member"] == symlink_member
+            && issue["link_kind"] == "symlink"
+            && issue["reason"] == "parent_directory"
+    }));
+    assert!(issues.iter().any(|issue| {
+        issue["code"] == "sensitive_link_target"
+            && issue["member"] == symlink_member
+            && issue["link_target"] == "../.env"
+    }));
+}
+
+/// Build a zip with a `../.env` symlink using the given encoding variant,
+/// run `package_audit`, and assert the standard escape issues.
+fn symlink_escape_encoding_variant<F>(build_entry: F)
+where
+    F: FnOnce(ZipTestEntry<'_>) -> ZipTestEntry<'_>,
+{
+    let dir = tempdir().unwrap();
+    let artifact = dir.path().join("release.zip");
+    let symlink_member = "tokenzero-v0.1.1/bin/tokenzero";
+    let base = ZipTestEntry::symlink(symlink_member, b"../.env");
+    write_test_zip(&artifact, &[build_entry(base)]);
+
+    let report = package_audit(dir.path(), &[artifact]);
+    assert_eq!(report["ok"], false);
+    assert_symlink_escape_issues(report["issues"].as_array().unwrap(), symlink_member);
+}
+
+/// Write a zip with a data-descriptor symlink, tamper bytes in-place, and return
+/// the audit report. Keeps the data-descriptor CRC/size tests DRY.
+fn tamper_zip_data_descriptor<F>(tamper: F) -> serde_json::Value
+where
+    F: FnOnce(&mut Vec<u8>, &std::path::Path),
+{
+    let dir = tempdir().unwrap();
+    let artifact = dir.path().join("release.zip");
+    let symlink_member = "tokenzero-v0.1.1/bin/tokenzero-link";
+    let target = b"bin/tokenzero";
+    write_test_zip(
+        &artifact,
+        &[ZipTestEntry::symlink(symlink_member, target).with_data_descriptor()],
+    );
+
+    let mut bytes = fs::read(&artifact).unwrap();
+    tamper(&mut bytes, &artifact);
+    fs::write(&artifact, &bytes).unwrap();
+
+    package_audit(dir.path(), &[artifact])
+}
+
 #[test]
 fn package_audit_rejects_zip_symlink_target_escape() {
     let dir = tempdir().unwrap();
@@ -54,84 +108,59 @@ fn package_audit_fails_closed_on_unreadable_zip_symlink_target() {
 }
 
 #[test]
-fn package_audit_rejects_deflated_zip_symlink_target_escape() {
+fn symlink_escape_detects_deflated_encoding() {
     let dir = tempdir().unwrap();
     let artifact = dir.path().join("release.zip");
     let symlink_member = "tokenzero-v0.1.1/bin/tokenzero";
     let compressed_target = deflate_bytes(b"../.env");
-
     write_test_zip(
         &artifact,
         &[ZipTestEntry::symlink(symlink_member, &compressed_target).with_method(8)],
     );
 
     let report = package_audit(dir.path(), &[artifact]);
-    let issues = report["issues"].as_array().unwrap();
-
     assert_eq!(report["ok"], false);
-    assert!(issues.iter().any(|issue| {
-        issue["code"] == "archive_link_target_escape"
-            && issue["member"] == symlink_member
-            && issue["link_kind"] == "symlink"
-            && issue["reason"] == "parent_directory"
-    }));
-    assert!(issues.iter().any(|issue| {
-        issue["code"] == "sensitive_link_target"
-            && issue["member"] == symlink_member
-            && issue["link_target"] == "../.env"
-    }));
+    assert_symlink_escape_issues(report["issues"].as_array().unwrap(), symlink_member);
 }
 
 #[test]
-fn package_audit_reads_zip_symlink_target_with_data_descriptor() {
+fn symlink_escape_detects_data_descriptor_encoding() {
+    symlink_escape_encoding_variant(|entry| entry.with_data_descriptor());
+}
+
+#[test]
+fn symlink_escape_detects_unsigned_data_descriptor_encoding() {
     let dir = tempdir().unwrap();
     let artifact = dir.path().join("release.zip");
     let symlink_member = "tokenzero-v0.1.1/bin/tokenzero";
-
     write_test_zip(
         &artifact,
-        &[ZipTestEntry::symlink(symlink_member, b"../.env").with_data_descriptor()],
+        &[ZipTestEntry::symlink(symlink_member, b"../.env").with_unsigned_data_descriptor()],
     );
 
     let report = package_audit(dir.path(), &[artifact]);
     let issues = report["issues"].as_array().unwrap();
-
     assert_eq!(report["ok"], false);
-    assert!(issues.iter().any(|issue| {
-        issue["code"] == "archive_link_target_escape"
-            && issue["member"] == symlink_member
-            && issue["reason"] == "parent_directory"
-    }));
-    assert!(issues.iter().any(|issue| {
-        issue["code"] == "sensitive_link_target"
-            && issue["member"] == symlink_member
-            && issue["link_target"] == "../.env"
-    }));
+    assert_symlink_escape_issues(issues, symlink_member);
+    // Unsigned descriptor must not trigger a spurious CRC mismatch.
+    assert!(
+        !issues
+            .iter()
+            .any(|issue| issue["code"] == "zip_data_descriptor_mismatch")
+    );
 }
 
 #[test]
-fn package_audit_fails_closed_on_zip_data_descriptor_crc_mismatch() {
-    let dir = tempdir().unwrap();
-    let artifact = dir.path().join("release.zip");
+fn data_descriptor_crc_mismatch_is_rejected() {
     let symlink_member = "tokenzero-v0.1.1/bin/tokenzero-link";
-    let target = b"bin/tokenzero";
-
-    write_test_zip(
-        &artifact,
-        &[ZipTestEntry::symlink(symlink_member, target).with_data_descriptor()],
-    );
-
-    let mut bytes = fs::read(&artifact).unwrap();
-    let local_header = zip_local_header(&bytes, 0)
-        .unwrap_or_else(|error| panic!("{}", zip_payload_error_detail(error)));
-    let descriptor_crc_offset = local_header.data_start + target.len() + 4;
-    let wrong_crc = zip_crc32(target) ^ u32::MAX;
-    set_zip_u32_at(&mut bytes, descriptor_crc_offset, wrong_crc);
-    fs::write(&artifact, bytes).unwrap();
-
-    let report = package_audit(dir.path(), &[artifact]);
+    let report = tamper_zip_data_descriptor(|bytes, _path| {
+        let local_header = zip_local_header(bytes, 0)
+            .unwrap_or_else(|error| panic!("{}", zip_payload_error_detail(error)));
+        let descriptor_crc_offset = local_header.data_start + b"bin/tokenzero".len() + 4;
+        let wrong_crc = zip_crc32(b"bin/tokenzero") ^ u32::MAX;
+        set_zip_u32_at(bytes, descriptor_crc_offset, wrong_crc);
+    });
     let issues = report["issues"].as_array().unwrap();
-
     assert_eq!(report["ok"], false);
     assert!(issues.iter().any(|issue| {
         issue["code"] == "zip_data_descriptor_mismatch"
@@ -143,35 +172,23 @@ fn package_audit_fails_closed_on_zip_data_descriptor_crc_mismatch() {
 }
 
 #[test]
-fn package_audit_fails_closed_on_zip_data_descriptor_local_size_disagreement() {
-    let dir = tempdir().unwrap();
-    let artifact = dir.path().join("release.zip");
+fn data_descriptor_local_size_mismatch_is_rejected() {
     let symlink_member = "tokenzero-v0.1.1/bin/tokenzero-link";
-    let target = b"bin/tokenzero";
-
-    write_test_zip(
-        &artifact,
-        &[ZipTestEntry::symlink(symlink_member, target).with_data_descriptor()],
-    );
-
-    let mut bytes = fs::read(&artifact).unwrap();
-    let wrong_size = u32::try_from(target.len() + 1).unwrap();
-    set_zip_u32_at(&mut bytes, 18, wrong_size);
-    set_zip_u32_at(&mut bytes, 22, wrong_size);
-    fs::write(&artifact, bytes).unwrap();
-
-    let report = package_audit(dir.path(), &[artifact]);
+    let report = tamper_zip_data_descriptor(|bytes, _path| {
+        let wrong_size = u32::try_from(b"bin/tokenzero".len() + 1).unwrap();
+        set_zip_u32_at(bytes, 18, wrong_size);
+        set_zip_u32_at(bytes, 22, wrong_size);
+    });
     let issues = report["issues"].as_array().unwrap();
-
     assert_eq!(report["ok"], false);
     assert!(issues.iter().any(|issue| {
         issue["code"] == "zip_local_header_metadata_mismatch"
             && issue["member"] == symlink_member
             && issue["field"] == "data_descriptor_sizes"
-            && issue["central_compressed_size"] == target.len()
-            && issue["local_compressed_size"] == wrong_size
-            && issue["central_uncompressed_size"] == target.len()
-            && issue["local_uncompressed_size"] == wrong_size
+            && issue["central_compressed_size"] == b"bin/tokenzero".len()
+            && issue["local_compressed_size"] == b"bin/tokenzero".len() + 1
+            && issue["central_uncompressed_size"] == b"bin/tokenzero".len()
+            && issue["local_uncompressed_size"] == b"bin/tokenzero".len() + 1
     }));
 }
 
@@ -216,38 +233,6 @@ fn package_audit_fails_closed_on_zip64_data_descriptor_size_mismatch() {
                 .as_str()
                 .is_some_and(|detail| detail.contains("zip64 descriptor"))
     }));
-}
-
-#[test]
-fn package_audit_reads_zip_symlink_target_with_unsigned_data_descriptor() {
-    let dir = tempdir().unwrap();
-    let artifact = dir.path().join("release.zip");
-    let symlink_member = "tokenzero-v0.1.1/bin/tokenzero";
-
-    write_test_zip(
-        &artifact,
-        &[ZipTestEntry::symlink(symlink_member, b"../.env").with_unsigned_data_descriptor()],
-    );
-
-    let report = package_audit(dir.path(), &[artifact]);
-    let issues = report["issues"].as_array().unwrap();
-
-    assert_eq!(report["ok"], false);
-    assert!(issues.iter().any(|issue| {
-        issue["code"] == "archive_link_target_escape"
-            && issue["member"] == symlink_member
-            && issue["reason"] == "parent_directory"
-    }));
-    assert!(issues.iter().any(|issue| {
-        issue["code"] == "sensitive_link_target"
-            && issue["member"] == symlink_member
-            && issue["link_target"] == "../.env"
-    }));
-    assert!(
-        !issues
-            .iter()
-            .any(|issue| issue["code"] == "zip_data_descriptor_mismatch")
-    );
 }
 
 #[test]
@@ -540,45 +525,35 @@ fn package_audit_fails_closed_on_zip_local_header_name_mismatch() {
 }
 
 #[test]
-fn package_audit_rejects_zip_central_unicode_path_extra_private_member() {
-    let dir = tempdir().unwrap();
-    let artifact = dir.path().join("release.zip");
+fn unicode_path_extra_rejects_private_member_in_central_and_local() {
     let visible_member = "tokenzero-v0.1.1/config.json";
     let unicode_member = "tokenzero-v0.1.1/.tokenzero/config.json";
 
-    write_test_zip(
-        &artifact,
-        &[ZipTestEntry::file(visible_member, b"{}").with_central_unicode_path(unicode_member)],
-    );
+    for (label, build_entry) in [
+        (
+            "central",
+            ZipTestEntry::file(visible_member, b"{}").with_central_unicode_path(unicode_member),
+        ),
+        (
+            "local",
+            ZipTestEntry::file(visible_member, b"{}").with_local_unicode_path(unicode_member),
+        ),
+    ] {
+        let dir = tempdir().unwrap();
+        let artifact = dir.path().join("release.zip");
+        write_test_zip(&artifact, &[build_entry]);
 
-    let report = package_audit(dir.path(), &[artifact]);
-    let issues = report["issues"].as_array().unwrap();
+        let report = package_audit(dir.path(), &[artifact]);
+        let issues = report["issues"].as_array().unwrap();
 
-    assert_eq!(report["ok"], false);
-    assert!(issues.iter().any(|issue| {
-        issue["code"] == "private_tool_state_member" && issue["member"] == unicode_member
-    }));
-}
-
-#[test]
-fn package_audit_rejects_zip_local_unicode_path_extra_private_member() {
-    let dir = tempdir().unwrap();
-    let artifact = dir.path().join("release.zip");
-    let visible_member = "tokenzero-v0.1.1/config.json";
-    let unicode_member = "tokenzero-v0.1.1/.tokenzero/config.json";
-
-    write_test_zip(
-        &artifact,
-        &[ZipTestEntry::file(visible_member, b"{}").with_local_unicode_path(unicode_member)],
-    );
-
-    let report = package_audit(dir.path(), &[artifact]);
-    let issues = report["issues"].as_array().unwrap();
-
-    assert_eq!(report["ok"], false);
-    assert!(issues.iter().any(|issue| {
-        issue["code"] == "private_tool_state_member" && issue["member"] == unicode_member
-    }));
+        assert_eq!(report["ok"], false, "{label} unicode path must reject");
+        assert!(
+            issues.iter().any(|issue| {
+                issue["code"] == "private_tool_state_member" && issue["member"] == unicode_member
+            }),
+            "{label}: missing private_tool_state_member for {unicode_member}"
+        );
+    }
 }
 
 #[test]
