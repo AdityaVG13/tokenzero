@@ -199,9 +199,12 @@ pub(crate) fn parse_expr(s: &str) -> Result<Expr, String> {
         return Ok(Expr::VarRef(s.to_string()));
     }
 
-    // Lenient fallback: unrecognized bare tokens become string literals so simple
-    // plan fragments degrade instead of failing early on minor syntax drift.
-    Ok(Expr::StringLit(s.to_string()))
+    // NO lenient fallback: turning unrecognized expressions into string
+    // literals of their own SOURCE TEXT silently corrupted results (observed
+    // live: `s.text ?? s.stdout` surfaced as the literal string
+    // "s.text ?? s.stdout"). Failing here routes the plan to the full
+    // QuickJS sandbox, which evaluates real JavaScript.
+    Err(format!("unsupported expression for lowered plan: {s}"))
 }
 
 fn parse_object_fields(s: &str) -> Result<Vec<(String, Expr)>, String> {

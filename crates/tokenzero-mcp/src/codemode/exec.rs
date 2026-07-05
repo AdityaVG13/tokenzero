@@ -152,7 +152,12 @@ pub fn execute_codemode_with_options(plan: &str, options: CodeModeOptions) -> Co
             );
         }
     };
-    if should_run_quickjs(plan) {
+    // The lowered mini-interpreter only understands a small statement grammar;
+    // anything it cannot FULLY parse (optional chaining, ??, computed calls)
+    // must run in the real QuickJS sandbox instead of degrading — the old
+    // lenient parser turned unknown expressions into source-text strings.
+    let use_quickjs = should_run_quickjs(plan) || parse_plan(&lowered).is_err();
+    if use_quickjs {
         if quickjs_plan_requests_mutation(plan) {
             return finalize_codemode_result(
                 CodeModeResult::error(
