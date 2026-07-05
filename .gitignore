@@ -180,3 +180,4 @@ NDH6SA~M
 .graphzero/
 .verification-purpose/
 .asgrep/
+.cyclomatic-reduction/
