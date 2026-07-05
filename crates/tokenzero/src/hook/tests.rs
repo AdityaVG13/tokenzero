@@ -1,4 +1,5 @@
 use super::*;
+use proptest::prelude::*;
 
 const EXE: &str = "/opt/tz/tokenzero";
 
@@ -320,4 +321,37 @@ fn session_start_restores_pack_only_after_compact_or_resume() {
     })
     .to_string();
     assert!(session_start_decision(&empty, 400).is_none());
+}
+
+proptest! {
+    #[test]
+    fn single_quote_round_trips_arbitrary_strings_with_quotes(
+        prefix in "[a-zA-Z0-9]*",
+        suffix in "[a-zA-Z0-9]*",
+        num_quotes in 0usize..=4,
+    ) {
+        // Build a string guaranteed to contain single quotes.
+        let inner = format!("{}{}{}", prefix, "'".repeat(num_quotes), suffix);
+        let quoted = single_quote(&inner);
+
+        // The output must start and end with single quotes.
+        assert!(quoted.starts_with('\''), "missing leading quote: {quoted}");
+        assert!(quoted.ends_with('\''), "missing trailing quote: {quoted}");
+
+        // Stripping the outer quotes and unescaping the '"'"'"' escape
+        // sequence must yield the original string.
+        let body = &quoted[1..quoted.len() - 1];
+        let restored = body.replace("'\"'\"'", "'");
+        assert_eq!(restored, inner, "round-trip failed for: {inner:?}");
+
+        // The quoted form must NOT contain an unescaped single quote that
+        // would allow shell injection (i.e., every internal ' must appear
+        // as the '"'"'"' escape sequence).
+        let inner_quotes = &quoted[1..quoted.len() - 1];
+        // After removing all '"'"'"' sequences, no single quotes remain.
+        assert!(
+            inner_quotes.replace("'\"'\"'", "").chars().all(|c| c != '\''),
+            "unescaped single quote in: {quoted}"
+        );
+    }
 }

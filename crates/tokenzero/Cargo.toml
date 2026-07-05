@@ -32,4 +32,5 @@ tokenzero-runtime = { path = "../tokenzero-runtime", version = "1.0.2" }
 [dev-dependencies]
 assert_cmd.workspace = true
 predicates.workspace = true
+proptest.workspace = true
 tempfile.workspace = true
