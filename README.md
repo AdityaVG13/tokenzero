@@ -324,11 +324,16 @@ Per-tool documentation lives at `resource://tokenzero/tools`.
 The tables above shrink what each operation **returns**. CodeMode shrinks how
 many operations you **pay for**. The two multiply.
 
+CodeMode is built into TokenZero itself. It needs nothing but this repo:
+`tokenzero mcp-server --mode=codemode` turns the same 18 operations into a
+single executor tool, `tz_execute_code`. (FSZero and GraphZero each ship the
+same mode for their own surfaces, and the optional ZeroStack hub unifies all
+three; none of that is required to use CodeMode here.)
+
 In MCP mode, a five-step task costs five round-trips, and every intermediate
 result lands in the model's context whether the model needs it or not. In
-CodeMode the server exposes a single executor tool, `tz_execute_code`. The
-agent submits a short plan; the server runs every step; only the final result
-and its refs enter context. Three properties fall out of that:
+CodeMode the agent submits a short plan; the server runs every step; only the
+final result and its refs enter context. Three properties fall out of that:
 
 1. **Intermediates are free.** A `read` that only feeds a `compact` never
    surfaces. The model never spends tokens on data it was going to transform
@@ -373,7 +378,7 @@ and re-inflates what plans compress.
 | **Surface** | 18 per-operation tools (`tz_read`, `tz_find`, ...) | 1 executor tool (`tz_execute_code`) |
 | **Pattern** | Standard MCP: one tool call per operation | Plans: N operations in one call |
 | **Round-trips** | One per operation | One per plan |
-| **Best for** | Any MCP harness (Claude, Codex, Cursor, ...) | Harnesses that can write plans; ZeroStack |
+| **Best for** | Any MCP harness (Claude, Codex, Cursor, ...) | Any harness whose agent can write a short plan |
 | **Launch** | `--mode=mcp` (the default) | `--mode=codemode` |
 
 <div align="center">
@@ -384,8 +389,10 @@ and re-inflates what plans compress.
 
 <h3 id="zerostack"><img src=".github/assets/h-zerostack.svg" alt="ZeroStack" width="100%"></h3>
 
-TokenZero is the context runtime in the **ZeroStack** suite: three engines,
-one unified `zero.*` surface.
+TokenZero is complete on its own; everything above works with this repo
+alone. It is also the context runtime of the **ZeroStack** suite: three
+engines that each stand alone, plus an optional hub that unifies them under
+one `zero.*` surface for users who want all three.
 
 | Engine | Role | Status |
 | :-- | :-- | :-- |
