@@ -345,17 +345,26 @@ final result and its refs enter context. Three properties fall out of that:
 
 #### Plan composition benchmark
 
-Every number in the "Direct" column is *already RACC-compressed*. This table
-measures the additional saving from composition, on top of the 99% table
-above, with the same engine and tokenizer on both sides:
+Three legs, same workloads, same tokenizer. **Raw** is what an agent without
+ZeroStack consumes: the actual subprocess and file bytes. **Per-op** is
+TokenZero's own MCP tools, already RACC-compressed. **CodeMode** is the v2
+plan wire.
 
-| Workload | Plan (visible) | Direct (visible) | Savings |
-| :-- | --: | --: | --: |
-| File + search + transform | 775 | 2,843 | **72.7%** |
-| Shell multi-step (3 commands) | 949 | 1,227 | **22.7%** |
-| Pipe composition (read + compact) | 261 | 1,266 | **79.4%** |
-| Mixed exploration (tree + glob + read) | 917 | 1,733 | **47.1%** |
-| **Total** | **2,902** | **7,069** | **58.9%** |
+| Workload | Raw | Per-op | CodeMode | vs raw | vs per-op |
+| :-- | --: | --: | --: | --: | --: |
+| File + search + transform | 1,985 | 145 | 93 | **95.3%** | 35.9% |
+| Shell multi-step (3 commands) | 145 | 192 | 122 | **15.9%** | 36.5% |
+| Pipe composition (read + compact) | 537 | 126 | 103 | **80.8%** | 18.3% |
+| Mixed exploration (tree + glob + read) | 1,283 | 273 | 147 | **88.5%** | 46.2% |
+| Diff review (multi-file) | 4,798 | 3,277 | 107 | **97.8%** | 96.7% |
+| Multi-file exploration (grep + 3 reads) | 30,128 | 240 | 264 | **99.1%** | -10.0% |
+| Log summarize (100 commits to verdict) | 1,560 | 299 | 21 | **98.7%** | 93.0% |
+| **Total** | **40,436** | **4,552** | **857** | **97.9%** | **81.2%** |
+
+Two honest notes. On toy chains with tiny raw output (three short git
+commands) CodeMode saves little, because there is little to save. And one
+workload reads cheaper through per-op tools than through a plan; CodeMode
+earns its keep on real work: diff review, wide exploration, log summarization.
 
 Reproducible: `scripts/benchmark_composition.sh` or
 `cargo test -p tokenzero-mcp -- codemode::bench_tests::run_composition_benchmark`.
