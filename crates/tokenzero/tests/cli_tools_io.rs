@@ -61,6 +61,63 @@ fn cli_read_expand_json_roundtrip() {
 }
 
 #[test]
+fn cli_expand_recovers_blob_across_roots_via_ref_index() {
+    let root_a = tempdir().unwrap();
+    let root_b = tempdir().unwrap();
+    let index_dir = tempdir().unwrap();
+    let file = root_a.path().join("sample.txt");
+    fs::write(&file, "cross\nroot\nbytes\n").unwrap();
+    let cache_a = root_a.path().join("cache.json");
+
+    let output = Command::cargo_bin("tokenzero")
+        .unwrap()
+        .env("TOKENZERO_REF_INDEX_PATH", index_dir.path())
+        .args([
+            "read",
+            file.to_str().unwrap(),
+            "--cache-path",
+            cache_a.to_str().unwrap(),
+            "--allowed-root",
+            root_a.path().to_str().unwrap(),
+            "--json",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let json: Value = serde_json::from_slice(&output.stdout).unwrap();
+    let blob_ref = json["refs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["kind"] == "blob")
+        .unwrap()["ref"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let expanded = Command::cargo_bin("tokenzero")
+        .unwrap()
+        .current_dir(root_b.path())
+        .env("TOKENZERO_REF_INDEX_PATH", index_dir.path())
+        .args(["expand", &blob_ref, "--raw"])
+        .output()
+        .unwrap();
+    assert!(
+        expanded.status.success(),
+        "{}",
+        String::from_utf8_lossy(&expanded.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&expanded.stdout),
+        "cross\nroot\nbytes\n"
+    );
+}
+
+#[test]
 fn cli_read_default_root_rejects_absolute_path_outside_cwd() {
     let root = tempdir().unwrap();
     let outside_dir = tempdir().unwrap();

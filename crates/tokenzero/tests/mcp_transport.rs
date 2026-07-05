@@ -102,7 +102,11 @@ fn mcp_server_handles_ndjson_transcript() {
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     let lines: Vec<&str> = stdout.lines().collect();
-    assert!(lines.len() >= 2, "expected at least 2 NDJSON lines, got {}", lines.len());
+    assert!(
+        lines.len() >= 2,
+        "expected at least 2 NDJSON lines, got {}",
+        lines.len()
+    );
 
     // First line: initialize response
     let first: Value = serde_json::from_str(lines[0]).unwrap();

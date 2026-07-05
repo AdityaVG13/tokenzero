@@ -5,6 +5,7 @@ use regex::Regex;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, HashSet};
+use std::env;
 use std::ffi::OsString;
 use std::fs::{self, OpenOptions};
 use std::io::{Read, Write};
@@ -22,6 +23,9 @@ const LOCK_RETRIES: usize = 240;
 const MAX_SHELL_OUTCOMES: usize = 256;
 const LOCK_RETRY_DELAY: Duration = Duration::from_millis(25);
 const TMP_RETRIES: usize = 16;
+const REF_INDEX_MAX_BYTES: u64 = 1_048_576;
+const REF_INDEX_DISABLE_ENV: &str = "TOKENZERO_REF_INDEX";
+const REF_INDEX_PATH_ENV: &str = "TOKENZERO_REF_INDEX_PATH";
 
 /// `file:line[:col]` matcher for search-output ingestion. Compiled once on first
 /// use — the pattern is a compile-time literal, so `expect` can only fire on a
@@ -178,6 +182,29 @@ pub(crate) struct ShellOutcome {
 pub struct ShellRepeat {
     pub unchanged: bool,
     pub seen: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct RefIndexEntry {
+    ref_id: String,
+    store_path: String,
+    ts: u128,
+}
+
+#[cfg(test)]
+thread_local! {
+    static REF_INDEX_TEST_OVERRIDE: std::cell::RefCell<Option<(bool, PathBuf)>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(test)]
+fn set_ref_index_test_override(value: Option<(bool, PathBuf)>) -> Option<(bool, PathBuf)> {
+    REF_INDEX_TEST_OVERRIDE.with(|slot| std::mem::replace(&mut *slot.borrow_mut(), value))
+}
+
+#[cfg(test)]
+fn ref_index_test_override() -> Option<(bool, PathBuf)> {
+    REF_INDEX_TEST_OVERRIDE.with(|slot| slot.borrow().clone())
 }
 
 impl RecoveryState {
@@ -449,11 +476,11 @@ impl RecoveryStore {
             selected_start = start;
             selected_end = end;
         }
-        let Some(content) = self.resolve_ref(&parsed.kind, &parsed.bare) else {
+        let Some(content) = self.resolve_ref_with_index(&parsed.kind, &parsed.bare) else {
             return ExpansionResult::missing(
                 requested_ref,
                 selector.map(str::to_string),
-                "dangling-ref",
+                ref_not_found_reason(&parsed.kind),
             );
         };
         if parsed.kind == "file" && self.file_ref_is_stale(&parsed.bare) {
@@ -714,6 +741,16 @@ impl RecoveryStore {
         }
     }
 
+    fn resolve_ref_with_index(&self, kind: &str, bare: &str) -> Option<String> {
+        if let Some(content) = self.resolve_ref(kind, bare) {
+            return Some(content);
+        }
+        if kind != "blob" {
+            return None;
+        }
+        resolve_blob_from_ref_index(bare, &self.config)
+    }
+
     fn file_ref_is_stale(&self, bare: &str) -> bool {
         let Some(stored) = self.state.files.get(bare) else {
             return false;
@@ -856,6 +893,7 @@ impl RecoveryStore {
             if let Ok(journal_len) = append_journal(&journal_path(&path), &entry) {
                 if journal_len <= journal_compact_threshold(snap_len) {
                     self.journal_identity = DiskIdentity::capture(&journal_path(&path));
+                    append_blob_refs_to_ref_index(&path, &entry.refs);
                     return Ok(());
                 }
             }
@@ -866,6 +904,7 @@ impl RecoveryStore {
         let _ = fs::remove_file(journal_path(&path));
         self.journal_identity = None;
         self.disk_identity = DiskIdentity::capture(&path);
+        append_blob_refs_to_ref_index(&path, &self.session_refs);
         self.session_refs.clear();
         Ok(())
     }
@@ -1020,6 +1059,296 @@ fn select_content(
             .join("\n");
     }
     content.to_string()
+}
+
+fn ref_not_found_reason(kind: &str) -> String {
+    if kind == "blob" && ref_index_enabled() {
+        "ref-not-found; tiers tried: explicit/env cache, current-root store, per-user ref-index"
+            .to_string()
+    } else if kind == "blob" {
+        "ref-not-found; tiers tried: explicit/env cache, current-root store (per-user ref-index disabled)".to_string()
+    } else {
+        "ref-not-found; tiers tried: explicit/env cache, current-root store".to_string()
+    }
+}
+
+fn ref_index_enabled() -> bool {
+    #[cfg(test)]
+    if let Some((enabled, _)) = ref_index_test_override() {
+        return enabled;
+    }
+    env::var(REF_INDEX_DISABLE_ENV)
+        .map(|value| value.trim() != "0")
+        .unwrap_or(true)
+}
+
+fn ref_index_root() -> Option<PathBuf> {
+    #[cfg(test)]
+    if let Some((enabled, path)) = ref_index_test_override() {
+        return enabled.then_some(path);
+    }
+    if !ref_index_enabled() {
+        return None;
+    }
+    if let Some(path) = env::var_os(REF_INDEX_PATH_ENV).filter(|value| !value.is_empty()) {
+        return Some(PathBuf::from(path));
+    }
+    env::var_os("HOME")
+        .filter(|value| !value.is_empty())
+        .map(|home| PathBuf::from(home).join(".tokenzero").join("ref-index"))
+}
+
+fn create_ref_index_dir(path: &Path) -> std::io::Result<()> {
+    fs::create_dir_all(path)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = fs::set_permissions(path, fs::Permissions::from_mode(0o700));
+    }
+    Ok(())
+}
+
+fn ref_index_id_part(ref_id: &str) -> Option<&str> {
+    ref_id
+        .rsplit_once('/')
+        .map(|(_, id)| id)
+        .filter(|id| !id.is_empty())
+}
+
+fn ref_index_shard_name(ref_id: &str) -> String {
+    let id = ref_index_id_part(ref_id).unwrap_or(ref_id);
+    let mut chars = id.chars();
+    let first = chars.next().unwrap_or('x');
+    let second = chars.next().unwrap_or('x');
+    format!("{first}{second}.ndjson")
+}
+
+fn ref_index_shard_path(root: &Path, ref_id: &str) -> PathBuf {
+    root.join(ref_index_shard_name(ref_id))
+}
+
+fn ref_index_lock_path(shard: &Path) -> PathBuf {
+    append_file_name_suffix(shard, ".lock")
+}
+
+fn append_blob_refs_to_ref_index(store_path: &Path, refs: &[String]) {
+    let Some(root) = ref_index_root() else {
+        return;
+    };
+    let Ok(store_path) = store_path
+        .canonicalize()
+        .or_else(|_| Ok::<_, std::io::Error>(store_path.to_path_buf()))
+    else {
+        return;
+    };
+    let blob_refs: Vec<&String> = refs
+        .iter()
+        .filter(|ref_id| ref_id.starts_with("tz://blob/"))
+        .collect();
+    if blob_refs.is_empty() || create_ref_index_dir(&root).is_err() {
+        return;
+    }
+    let ts = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
+        .unwrap_or_default();
+    for ref_id in blob_refs {
+        let shard = ref_index_shard_path(&root, ref_id);
+        let Ok(_lock) =
+            PersistLock::acquire_with_retries(ref_index_lock_path(&shard), LOCK_RETRIES)
+        else {
+            continue;
+        };
+        if append_ref_index_line(&shard, ref_id, &store_path, ts).is_ok()
+            && fs::metadata(&shard)
+                .map(|meta| meta.len() > REF_INDEX_MAX_BYTES)
+                .unwrap_or(false)
+        {
+            let _ = compact_ref_index_shard(&shard);
+        }
+    }
+}
+
+fn append_ref_index_line(
+    shard: &Path,
+    ref_id: &str,
+    store_path: &Path,
+    ts: u128,
+) -> Result<(), RecoveryError> {
+    let Some(parent) = shard.parent() else {
+        return Ok(());
+    };
+    create_ref_index_dir(parent)?;
+    let entry = RefIndexEntry {
+        ref_id: ref_id.to_string(),
+        store_path: store_path.to_string_lossy().into_owned(),
+        ts,
+    };
+    let mut line = serde_json::to_string(&entry)?;
+    line.push('\n');
+    let mut options = OpenOptions::new();
+    options.create(true).append(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut file = options.open(shard)?;
+    file.write_all(line.as_bytes())?;
+    Ok(())
+}
+
+fn compact_ref_index_shard(shard: &Path) -> Result<(), RecoveryError> {
+    let file = match fs::File::open(shard) {
+        Ok(file) => file,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(err) => return Err(err.into()),
+    };
+    let Some(text) = read_limited_utf8(file, (REF_INDEX_MAX_BYTES as usize).saturating_mul(4))?
+    else {
+        return Ok(());
+    };
+    let entries = newest_ref_index_entries(&text, None);
+    write_ref_index_entries(shard, entries.values())
+}
+
+fn prune_ref_index_stale_entries(ref_id: &str, stale_store_paths: &HashSet<String>) {
+    if stale_store_paths.is_empty() {
+        return;
+    }
+    let Some(root) = ref_index_root() else {
+        return;
+    };
+    let shard = ref_index_shard_path(&root, ref_id);
+    let Ok(_lock) = PersistLock::acquire_with_retries(ref_index_lock_path(&shard), LOCK_RETRIES)
+    else {
+        return;
+    };
+    let Ok(file) = fs::File::open(&shard) else {
+        return;
+    };
+    let Ok(Some(text)) = read_limited_utf8(file, (REF_INDEX_MAX_BYTES as usize).saturating_mul(4))
+    else {
+        return;
+    };
+    let mut entries = Vec::new();
+    for line in text.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let Ok(entry) = serde_json::from_str::<RefIndexEntry>(line) else {
+            break;
+        };
+        if entry.ref_id == ref_id && stale_store_paths.contains(&entry.store_path) {
+            continue;
+        }
+        entries.push(entry);
+    }
+    let _ = write_ref_index_entries(&shard, entries.iter());
+}
+
+fn ref_index_entries_for_ref(text: &str, ref_id: &str) -> Vec<RefIndexEntry> {
+    let mut entries = Vec::new();
+    for line in text.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let Ok(entry) = serde_json::from_str::<RefIndexEntry>(line) else {
+            break;
+        };
+        if entry.ref_id == ref_id {
+            entries.push(entry);
+        }
+    }
+    entries.sort_by(|a, b| b.ts.cmp(&a.ts));
+    entries
+}
+
+fn newest_ref_index_entries(text: &str, skip_ref: Option<&str>) -> BTreeMap<String, RefIndexEntry> {
+    let mut entries = BTreeMap::new();
+    for line in text.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let Ok(entry) = serde_json::from_str::<RefIndexEntry>(line) else {
+            break;
+        };
+        if skip_ref == Some(entry.ref_id.as_str()) {
+            continue;
+        }
+        let replace = entries
+            .get(&entry.ref_id)
+            .map(|existing: &RefIndexEntry| entry.ts >= existing.ts)
+            .unwrap_or(true);
+        if replace {
+            entries.insert(entry.ref_id.clone(), entry);
+        }
+    }
+    entries
+}
+
+fn write_ref_index_entries<'a>(
+    shard: &Path,
+    entries: impl IntoIterator<Item = &'a RefIndexEntry>,
+) -> Result<(), RecoveryError> {
+    let parent = shard.parent().unwrap_or_else(|| Path::new("."));
+    create_ref_index_dir(parent)?;
+    let tmp = recovery_tmp_path(shard);
+    {
+        let mut options = OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let mut file = options.open(&tmp)?;
+        for entry in entries {
+            let mut line = serde_json::to_string(entry)?;
+            line.push('\n');
+            file.write_all(line.as_bytes())?;
+        }
+    }
+    fs::rename(&tmp, shard).map_err(RecoveryError::from)
+}
+
+fn resolve_blob_from_ref_index(ref_id: &str, config: &RecoveryConfig) -> Option<String> {
+    let root = ref_index_root()?;
+    let shard = ref_index_shard_path(&root, ref_id);
+    let file = fs::File::open(&shard).ok()?;
+    let text = read_limited_utf8(file, (REF_INDEX_MAX_BYTES as usize).saturating_mul(4))
+        .ok()
+        .flatten()?;
+    let entries = ref_index_entries_for_ref(&text, ref_id);
+    let mut stale_store_paths = HashSet::new();
+    for entry in entries {
+        let store_path = PathBuf::from(&entry.store_path);
+        if !store_path.is_file() {
+            stale_store_paths.insert(entry.store_path);
+            continue;
+        }
+        let content = load_state(&store_path, config)
+            .ok()
+            .flatten()
+            .and_then(|state| {
+                state
+                    .blobs
+                    .get(ref_id)
+                    .and_then(|value| resolve_blob_value(Some(&store_path), value))
+            });
+        if let Some(content) = content {
+            if !stale_store_paths.is_empty() {
+                prune_ref_index_stale_entries(ref_id, &stale_store_paths);
+            }
+            return Some(content);
+        }
+        stale_store_paths.insert(entry.store_path);
+    }
+    prune_ref_index_stale_entries(ref_id, &stale_store_paths);
+    None
 }
 
 fn load_state(

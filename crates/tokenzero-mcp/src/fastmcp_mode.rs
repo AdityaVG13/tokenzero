@@ -3,8 +3,8 @@ use fastmcp_rust::ResourceHandler;
 use fastmcp_rust::ToolHandler;
 use fastmcp_rust::prelude::*;
 use serde_json::Value;
-use tokenzero_core::count_tokens;
 use std::sync::{Arc, Mutex};
+use tokenzero_core::count_tokens;
 
 use crate::catalog::{
     TOOL_ALIASES, canonical_tool_specs, resource_specs, surface_includes_canonical,

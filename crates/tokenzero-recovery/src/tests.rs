@@ -1,5 +1,7 @@
 use super::*;
 use proptest::prelude::*;
+use std::panic::{AssertUnwindSafe, catch_unwind, resume_unwind};
+use std::sync::{LazyLock, Mutex};
 use tempfile::tempdir;
 
 // ---------------------------------------------------------------------------
@@ -13,6 +15,36 @@ fn temp_store() -> (RecoveryStore, PathBuf, tempfile::TempDir) {
     let cache = dir.path().join("cache.json");
     let store = RecoveryStore::new(Some(cache.clone()));
     (store, cache, dir)
+}
+
+static REF_INDEX_ENV_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
+
+struct RefIndexEnvGuard {
+    old: Option<(bool, PathBuf)>,
+}
+
+impl RefIndexEnvGuard {
+    fn set(index_path: &Path, enabled: bool) -> Self {
+        let old = set_ref_index_test_override(Some((enabled, index_path.to_path_buf())));
+        Self { old }
+    }
+}
+
+impl Drop for RefIndexEnvGuard {
+    fn drop(&mut self) {
+        let _ = set_ref_index_test_override(self.old.take());
+    }
+}
+
+fn with_ref_index_env<R>(index_path: &Path, enabled: bool, f: impl FnOnce() -> R) -> R {
+    let _lock = REF_INDEX_ENV_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let _guard = RefIndexEnvGuard::set(index_path, enabled);
+    match catch_unwind(AssertUnwindSafe(f)) {
+        Ok(value) => value,
+        Err(payload) => resume_unwind(payload),
+    }
 }
 
 /// Create an in-memory RecoveryStore (no persistence) with custom config.
@@ -103,6 +135,128 @@ fn restart_expand_is_byte_exact() {
     let expanded = restarted.expand(&stored.blob_ref, Some("raw"), None, None, None, None);
     assert!(expanded.found);
     assert_eq!(expanded.content, text);
+}
+
+#[test]
+fn ref_index_expands_blob_across_cache_roots() {
+    let index_dir = tempdir().unwrap();
+    with_ref_index_env(index_dir.path(), true, || {
+        let dir_a = tempdir().unwrap();
+        let dir_b = tempdir().unwrap();
+        let cache_a = dir_a.path().join("recovery-cache.json");
+        let cache_b = dir_b.path().join("recovery-cache.json");
+        let text = "alpha\nbeta\nbytes exact\n";
+        let stored = {
+            let mut store = RecoveryStore::new(Some(cache_a));
+            store
+                .store_payload(text, ContentType::Unknown, None, None, None)
+                .unwrap()
+        };
+
+        let mut other_root = RecoveryStore::new(Some(cache_b));
+        let expanded = other_root.expand(&stored.blob_ref, Some("raw"), None, None, None, None);
+        assert!(expanded.found);
+        assert_eq!(expanded.content, text);
+    });
+}
+
+#[test]
+fn ref_index_disabled_preserves_local_only_miss() {
+    let index_dir = tempdir().unwrap();
+    with_ref_index_env(index_dir.path(), false, || {
+        let dir_a = tempdir().unwrap();
+        let dir_b = tempdir().unwrap();
+        let stored = {
+            let mut store = RecoveryStore::new(Some(dir_a.path().join("cache.json")));
+            store
+                .store_payload("hidden\n", ContentType::Unknown, None, None, None)
+                .unwrap()
+        };
+
+        let mut other = RecoveryStore::new(Some(dir_b.path().join("cache.json")));
+        let expanded = other.expand(&stored.blob_ref, Some("raw"), None, None, None, None);
+        assert!(!expanded.found);
+        assert!(expanded.reason.contains("per-user ref-index disabled"));
+    });
+}
+
+#[test]
+fn stale_ref_index_entry_is_pruned_and_reports_tiers() {
+    let index_dir = tempdir().unwrap();
+    with_ref_index_env(index_dir.path(), true, || {
+        let dir_a = tempdir().unwrap();
+        let dir_b = tempdir().unwrap();
+        let cache_a = dir_a.path().join("cache.json");
+        let stored = {
+            let mut store = RecoveryStore::new(Some(cache_a.clone()));
+            store
+                .store_payload("gone\n", ContentType::Unknown, None, None, None)
+                .unwrap()
+        };
+        fs::remove_file(&cache_a).unwrap();
+
+        let mut other = RecoveryStore::new(Some(dir_b.path().join("cache.json")));
+        let expanded = other.expand(&stored.blob_ref, Some("raw"), None, None, None, None);
+        assert!(!expanded.found);
+        assert!(expanded.reason.contains("explicit/env cache"));
+        assert!(expanded.reason.contains("current-root store"));
+        assert!(expanded.reason.contains("per-user ref-index"));
+
+        let shard = ref_index_shard_path(index_dir.path(), &stored.blob_ref);
+        let text = fs::read_to_string(shard).unwrap_or_default();
+        assert!(!text.contains(&stored.blob_ref));
+    });
+}
+
+#[test]
+fn ref_index_compaction_keeps_newest_entry_per_ref() {
+    let dir = tempdir().unwrap();
+    let shard = dir.path().join("ba.ndjson");
+    let ref_id = "tz://blob/ba_ref";
+    append_ref_index_line(&shard, ref_id, Path::new("/old-store.json"), 1).unwrap();
+    append_ref_index_line(
+        &shard,
+        "tz://blob/ba_other",
+        Path::new("/other-store.json"),
+        1,
+    )
+    .unwrap();
+    append_ref_index_line(&shard, ref_id, Path::new("/new-store.json"), 2).unwrap();
+
+    compact_ref_index_shard(&shard).unwrap();
+
+    let text = fs::read_to_string(shard).unwrap();
+    assert!(text.contains("/new-store.json"));
+    assert!(text.contains("/other-store.json"));
+    assert!(!text.contains("/old-store.json"));
+    assert_eq!(text.lines().count(), 2);
+}
+
+#[test]
+fn ref_index_concurrent_append_smoke() {
+    let index_dir = tempdir().unwrap();
+    with_ref_index_env(index_dir.path(), true, || {
+        let store_path = index_dir.path().join("store.json");
+        let threads: Vec<_> = (0..16)
+            .map(|idx| {
+                let store_path = store_path.clone();
+                let index_path = index_dir.path().to_path_buf();
+                thread::spawn(move || {
+                    let _old = set_ref_index_test_override(Some((true, index_path)));
+                    let ref_id = format!("tz://blob/ba{idx:030}");
+                    append_blob_refs_to_ref_index(&store_path, &[ref_id]);
+                })
+            })
+            .collect();
+        for thread in threads {
+            thread.join().unwrap();
+        }
+
+        let shard = index_dir.path().join("ba.ndjson");
+        let text = fs::read_to_string(shard).unwrap();
+        let entries = newest_ref_index_entries(&text, None);
+        assert_eq!(entries.len(), 16);
+    });
 }
 
 #[test]

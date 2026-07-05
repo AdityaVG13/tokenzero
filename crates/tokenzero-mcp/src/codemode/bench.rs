@@ -123,7 +123,9 @@ pub fn workloads_for_root(root: &std::path::Path) -> Vec<Workload> {
 
     let diff_fallback = "printf 'diff --git a/crates/tokenzero-mcp/src/codemode/bench.rs b/crates/tokenzero-mcp/src/codemode/bench.rs\n+TODO: synthetic review line\n+fixme: synthetic review line\ndiff --git a/crates/tokenzero-mcp/src/codemode/exec.rs b/crates/tokenzero-mcp/src/codemode/exec.rs\n+TODO: synthetic exec line\n'";
     let diff_cmd = format!("git -C {root_str} diff HEAD~3..HEAD || {diff_fallback}");
-    let grep_cmd = format!("git -C {root_str} grep -n CodeMode -- crates | head -60; cat {bench_rs} {exec_rs} {result_rs}");
+    let grep_cmd = format!(
+        "git -C {root_str} grep -n CodeMode -- crates | head -60; cat {bench_rs} {exec_rs} {result_rs}"
+    );
     let log_cmd = format!("git -C {root_str} log --oneline -100");
     let diff_cmd_json = serde_json::to_string(&diff_cmd).unwrap();
     let log_cmd_json = serde_json::to_string(&log_cmd).unwrap();
@@ -247,11 +249,19 @@ fn benchmark_root(root: &Path) -> PathBuf {
 }
 
 fn direct(name: &'static str, canonical: &'static str, args: Value) -> DirectCall {
-    DirectCall { name, canonical, args, text_from_previous: None }
+    DirectCall {
+        name,
+        canonical,
+        args,
+        text_from_previous: None,
+    }
 }
 
 fn raw_sh(command: String) -> RawCommand {
-    RawCommand { program: "sh", args: vec!["-lc".to_string(), command] }
+    RawCommand {
+        program: "sh",
+        args: vec!["-lc".to_string(), command],
+    }
 }
 
 const BENCHMARK_REPORT_VERSION: &str = "1.3.0";
@@ -370,7 +380,11 @@ fn measure_plan_leg(engine: &TokenZeroEngine, plan: &str) -> PlanMeasurement {
         &json!({"plan": plan, "envelope": "v2", "ref_first": true}),
     )
     .expect("plan leg dispatch");
-    let raw_tokens = response.accounting.as_ref().map(|a| a.raw_tokens).unwrap_or(0);
+    let raw_tokens = response
+        .accounting
+        .as_ref()
+        .map(|a| a.raw_tokens)
+        .unwrap_or(0);
     let mcp = mcp_tool_response(response);
     let wire_texts = fastmcp_content_texts_from_tool_result(&mcp).expect("fastmcp render");
     let primary = wire_texts.first().cloned().unwrap_or_default();
@@ -420,11 +434,19 @@ fn measure_perop_leg(engine: &TokenZeroEngine, workload: &Workload) -> PerOpMeas
             args[key] = Value::String(previous_text.clone());
         }
         args_tokens += count_tokens(&serde_json::to_string(&args).unwrap_or_default());
-        let response = dispatch_tool(engine, call.canonical, call.name, &args).expect("per-op call");
-        raw_tokens += response.accounting.as_ref().map(|a| a.raw_tokens).unwrap_or(0);
+        let response =
+            dispatch_tool(engine, call.canonical, call.name, &args).expect("per-op call");
+        raw_tokens += response
+            .accounting
+            .as_ref()
+            .map(|a| a.raw_tokens)
+            .unwrap_or(0);
         let mcp = mcp_tool_response(response);
         let contents = fastmcp_content_texts_from_tool_result(&mcp).expect("per-op fastmcp render");
-        visible_tokens += contents.iter().map(|text| count_tokens(text)).sum::<usize>();
+        visible_tokens += contents
+            .iter()
+            .map(|text| count_tokens(text))
+            .sum::<usize>();
         previous_text = contents.first().cloned().unwrap_or_default();
         wire_chunks.push(contents.join("\n"));
     }
@@ -452,7 +474,10 @@ fn measure_raw_leg(root: &Path, workload: &Workload) -> RawMeasurement {
         visible_tokens += count_tokens(&text);
         chunks.push(text);
     }
-    RawMeasurement { visible_tokens, wire_text: chunks.join("\n") }
+    RawMeasurement {
+        visible_tokens,
+        wire_text: chunks.join("\n"),
+    }
 }
 
 #[cfg(test)]
@@ -522,10 +547,22 @@ mod bench_harness {
         assert_eq!(report.version, BENCHMARK_REPORT_VERSION);
         for workload in &report.workloads {
             assert!(workload.raw_visible_tokens > 0, "{} raw", workload.workload);
-            assert!(workload.perop_visible_tokens > 0, "{} per-op", workload.workload);
-            assert!(workload.plan_visible_tokens > 0, "{} plan", workload.workload);
+            assert!(
+                workload.perop_visible_tokens > 0,
+                "{} per-op",
+                workload.workload
+            );
+            assert!(
+                workload.plan_visible_tokens > 0,
+                "{} plan",
+                workload.workload
+            );
             assert!(workload.payload_tokens > 0, "{} payload", workload.workload);
-            assert!(workload.envelope_tokens > 0, "{} envelope", workload.workload);
+            assert!(
+                workload.envelope_tokens > 0,
+                "{} envelope",
+                workload.workload
+            );
             assert_eq!(
                 workload.payload_tokens + workload.envelope_tokens,
                 workload.plan_visible_tokens,
@@ -535,19 +572,35 @@ mod bench_harness {
         }
         assert_eq!(
             report.totals.total_raw_visible,
-            report.workloads.iter().map(|r| r.raw_visible_tokens).sum::<usize>()
+            report
+                .workloads
+                .iter()
+                .map(|r| r.raw_visible_tokens)
+                .sum::<usize>()
         );
         assert_eq!(
             report.totals.total_perop_visible,
-            report.workloads.iter().map(|r| r.perop_visible_tokens).sum::<usize>()
+            report
+                .workloads
+                .iter()
+                .map(|r| r.perop_visible_tokens)
+                .sum::<usize>()
         );
         assert_eq!(
             report.totals.total_perop_args,
-            report.workloads.iter().map(|r| r.perop_args_tokens).sum::<usize>()
+            report
+                .workloads
+                .iter()
+                .map(|r| r.perop_args_tokens)
+                .sum::<usize>()
         );
         assert_eq!(
             report.totals.total_plan_visible,
-            report.workloads.iter().map(|r| r.plan_visible_tokens).sum::<usize>()
+            report
+                .workloads
+                .iter()
+                .map(|r| r.plan_visible_tokens)
+                .sum::<usize>()
         );
         assert_eq!(
             report.totals.total_plan_visible,
@@ -572,7 +625,10 @@ mod bench_harness {
         let measured = measure_plan_leg(&engine, &workload.plan);
         assert_eq!(
             measured.visible_tokens,
-            rendered.iter().map(|text| count_tokens(text)).sum::<usize>()
+            rendered
+                .iter()
+                .map(|text| count_tokens(text))
+                .sum::<usize>()
         );
     }
 
@@ -602,8 +658,14 @@ mod bench_harness {
     fn codemode_v2_refs_are_capped_to_returned_value_refs() {
         let root = std::env::current_dir().unwrap();
         let engine = engine_for_leg(&root, hermetic_cache_path(0, "refs-cap", "plan"));
-        let big = (0..300).map(|index| format!("word{index}")).collect::<Vec<_>>().join(" ");
-        let plan = format!("return {{ kept: {} }}", serde_json::to_string(&big).unwrap());
+        let big = (0..300)
+            .map(|index| format!("word{index}"))
+            .collect::<Vec<_>>()
+            .join(" ");
+        let plan = format!(
+            "return {{ kept: {} }}",
+            serde_json::to_string(&big).unwrap()
+        );
         let response = dispatch_tool(
             &engine,
             "execute_code",

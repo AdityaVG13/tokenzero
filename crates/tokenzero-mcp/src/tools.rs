@@ -253,7 +253,6 @@ fn codemode_v2_ack(result: &crate::CodeModeResult, telemetry_ref: &str) -> Strin
     }
 }
 
-
 fn scalar_folded_codemode_v2_ack(ack: &str, value: &Value) -> Option<String> {
     if !(value.is_string() || value.is_number() || value.is_boolean()) {
         return None;

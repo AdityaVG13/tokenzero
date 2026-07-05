@@ -26,7 +26,6 @@ fn capsule_never_costs_more_than_raw_text() {
     assert_eq!(capsule.text, text.trim_end());
 }
 
-
 #[test]
 fn auto_capsule_honors_visible_budget_for_short_token_heavy_files() {
     let text = (0..40)

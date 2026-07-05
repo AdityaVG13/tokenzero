@@ -138,7 +138,8 @@ pub(crate) fn run_mcp_artifact(
         }
         // resources/read resource://tokenzero/tools must return full tool docs JSON.
         let read_id = idx + 1300;
-        if !mcp_stdout_has_resource_content(&stdout, read_id, "resource://tokenzero/tools", "tools") {
+        if !mcp_stdout_has_resource_content(&stdout, read_id, "resource://tokenzero/tools", "tools")
+        {
             missing_resource_tools_read += 1;
         }
         // Initial resources/list check — did we get a valid response at all?
@@ -294,7 +295,9 @@ fn mcp_stdout_has_resource_uri(stdout: &str, id: usize, expected_uri: &str) -> b
         }
         let resources = &payload["result"]["resources"];
         if let Some(arr) = resources.as_array() {
-            return arr.iter().any(|r| r.get("uri") == Some(&Value::String(expected_uri.to_string())));
+            return arr
+                .iter()
+                .any(|r| r.get("uri") == Some(&Value::String(expected_uri.to_string())));
         }
         return false;
     }

@@ -2097,7 +2097,9 @@ fn exec_pipe(
     let text = serde_json::to_string(&full).unwrap_or_default();
     let content_type = detect_content_type(&text, None);
     let mut store = tokenzero_recovery::RecoveryStore::new(Some(engine.config.cache_path.clone()));
-    let stored = store.store_payload(&text, content_type, None, None, None).ok();
+    let stored = store
+        .store_payload(&text, content_type, None, None, None)
+        .ok();
     let ref_id = stored
         .as_ref()
         .map(|s| s.blob_ref.as_str().to_string())
