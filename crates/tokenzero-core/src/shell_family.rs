@@ -1,5 +1,6 @@
 use crate::render::domain::{
-    git_subcommand_index, is_repo_inventory_command, is_search_command, shell_command_basename,
+    git_subcommand_index, is_repo_inventory_command, is_search_shell_command,
+    shell_command_basename,
 };
 use crate::shell_parse::{
     looks_diagnostic, looks_status_table, shell_analysis_command, split_shell_words,
@@ -37,7 +38,7 @@ pub fn shell_family(command: &str, stdout: &str, stderr: &str) -> String {
     if first == "cargo" && matches!(second, "test" | "build" | "check" | "clippy") {
         return if second == "test" { "test" } else { "build" }.to_string();
     }
-    if is_search_command(&first) {
+    if is_search_shell_command(command) {
         return "search".to_string();
     }
     if first == "pytest"

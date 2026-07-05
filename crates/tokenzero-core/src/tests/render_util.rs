@@ -15,6 +15,128 @@ fn summarize_tokens_keeps_critical_lines_even_over_budget() {
 }
 
 #[test]
+fn repo_inventory_requires_inventory_only_segments() {
+    assert!(is_repo_inventory_command("ls -la src"));
+    assert!(is_repo_inventory_command(
+        "find . -type f | sort | wc -l && find . -type f | sort"
+    ));
+    // "ls -" substring inside another word is not an inventory command.
+    assert!(!is_repo_inventory_command("tools -v"));
+    // A non-lister segment means its output would be swallowed as paths.
+    assert!(!is_repo_inventory_command(
+        "ls -d .graphzero; graphzero index ."
+    ));
+    assert!(!is_repo_inventory_command("ls src && cargo build"));
+}
+
+#[test]
+fn mixed_multi_command_never_takes_search_view() {
+    // A non-search segment's output must not be labeled as search matches.
+    assert!(!crate::render::domain::is_search_shell_command(
+        "grep -rn foo src/; ls crates/"
+    ));
+    assert!(!crate::render::domain::is_search_shell_command(
+        "ls crates && grep -rln foo crates"
+    ));
+    assert!(!crate::render::domain::is_search_shell_command(
+        "grep foo file | xargs rm"
+    ));
+    // Pure search plus line filters keeps the search view.
+    assert!(crate::render::domain::is_search_shell_command(
+        "grep -rn foo src/ | head -20"
+    ));
+    assert!(crate::render::domain::is_search_shell_command(
+        "rg foo | sort | uniq -c | tail -5"
+    ));
+    assert!(crate::render::domain::is_search_shell_command(
+        "grep foo a.txt"
+    ));
+    // Filters alone are not a search.
+    assert!(!crate::render::domain::is_search_shell_command(
+        "head -5 a.txt"
+    ));
+
+    let structured = structured_shell_view(
+        "grep -rn foo src/; ls crates/",
+        "src/a.rs:1:foo\ncrate-a\ncrate-b",
+        "",
+    );
+    assert!(
+        !structured.starts_with("search_summary:"),
+        "mixed command must not render as search matches: {structured}"
+    );
+
+    let family = shell_family(
+        "grep -rn foo src/; ls crates/",
+        "src/a.rs:1:foo\ncrate-a",
+        "",
+    );
+    assert_ne!(family, "search");
+    assert_eq!(
+        shell_family("grep -rn foo src/", "src/a.rs:1:foo", ""),
+        "search"
+    );
+}
+
+#[test]
+fn critical_lines_marks_every_gap_instead_of_silently_dropping() {
+    let mut lines: Vec<String> = (0..180).map(|idx| format!("pattern-{idx}")).collect();
+    lines[82] = "*.actual".to_string();
+    let text = lines.join("\n");
+    let view = critical_lines(&text, 3);
+
+    assert!(view.contains("*.actual"));
+    assert!(
+        view.contains("... omitted 79 lines; exact ref available ..."),
+        "leading gap must be marked: {view}"
+    );
+    assert!(
+        view.contains("... omitted 94 lines; exact ref available ..."),
+        "trailing gap must be marked: {view}"
+    );
+    assert_eq!(view.lines().count(), 9, "7 kept + 2 markers: {view}");
+}
+
+#[test]
+fn critical_lines_interior_gap_and_no_marker_when_nothing_elided() {
+    let text = "error: one\nnoise\nnoise\nnoise\nerror: two";
+    let full = critical_lines(text, 3);
+    assert_eq!(full, text, "all lines kept must be marker-free");
+
+    let mut lines: Vec<String> = (0..20).map(|idx| format!("n{idx}")).collect();
+    lines[0] = "error: head".to_string();
+    lines[19] = "error: tail".to_string();
+    let gapped = critical_lines(&lines.join("\n"), 1);
+    assert!(gapped.contains("... omitted 16 lines; exact ref available ..."));
+
+    assert_eq!(critical_lines("just noise\nmore noise", 3), "");
+}
+
+#[test]
+fn error_block_marks_gaps_like_critical_lines() {
+    let mut lines: Vec<String> = (0..30).map(|idx| format!("n{idx}")).collect();
+    lines[15] = "assertion failed: left == right".to_string();
+    let view = error_block(&lines.join("\n"), 2);
+    assert!(view.contains("assertion failed"));
+    assert!(view.contains("... omitted 13 lines; exact ref available ..."));
+    assert!(view.contains("... omitted 12 lines; exact ref available ..."));
+}
+
+#[test]
+fn diagnostic_shell_view_never_silently_elides() {
+    let mut lines: Vec<String> = (0..181)
+        .map(|idx| format!("ignore-pattern-{idx}"))
+        .collect();
+    lines[82] = "*.actual".to_string();
+    let view = diagnostic_shell_view(&lines.join("\n"), "", 700);
+    assert!(view.contains("*.actual"));
+    assert!(
+        view.contains("omitted") && view.contains("exact ref available"),
+        "elision must be visible: {view}"
+    );
+}
+
+#[test]
 fn structural_dedupe_collapses_digit_varying_runs_but_not_criticals() {
     let text = (0..40)
         .map(|idx| format!("Receiving chunk {idx} of 40 (eta {idx}s)"))

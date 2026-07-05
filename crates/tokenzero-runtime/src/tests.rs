@@ -137,6 +137,40 @@ fn quoted_operator_literals_stay_argv() {
 }
 
 #[test]
+fn double_quoted_backslash_stays_literal_before_ordinary_chars() {
+    // POSIX: inside double quotes, backslash is literal unless before $ ` " \.
+    let argv = split_command_string_for_platform("grep -n \"a\\|b\" file.txt", "linux");
+    assert_eq!(argv, vec!["grep", "-n", "a\\|b", "file.txt"]);
+
+    let escapes = split_command_string_for_platform("echo \"a\\\"b\\\\c\\$d\"", "linux");
+    assert_eq!(escapes, vec!["echo", "a\"b\\c$d"]);
+
+    // Unquoted backslash still escapes the next char.
+    let unquoted = split_command_string_for_platform("echo a\\ b", "linux");
+    assert_eq!(unquoted, vec!["echo", "a b"]);
+}
+
+#[test]
+fn variable_and_tilde_expansion_route_through_shell() {
+    assert!(contains_shell_syntax("cat \"$HOME/.zshrc\""));
+    assert!(contains_shell_syntax("cat $HOME/.zshrc"));
+    assert!(contains_shell_syntax("echo ${PATH}"));
+    assert!(contains_shell_syntax("cat ~/notes.txt"));
+    assert!(contains_shell_syntax("ls ~"));
+    assert!(contains_shell_syntax("ls ~bob/dir"));
+
+    // Single quotes suppress expansion; literal cost must not route to shell.
+    assert!(!contains_shell_syntax("echo '$HOME'"));
+    assert!(!contains_shell_syntax("rg '~/x' ."));
+    // Non-word-start tilde (git revision syntax) is not expansion.
+    assert!(!contains_shell_syntax("git show HEAD~1"));
+    // Escaped dollar is literal.
+    assert!(!contains_shell_syntax("echo \\$HOME"));
+    // Trailing bare dollar is literal.
+    assert!(!contains_shell_syntax("echo a$"));
+}
+
+#[test]
 fn leading_posix_env_assignment_uses_shell() {
     let command = "TOKENZERO_SHELL_CAPTURE_BYTES=12 tokenzero --version";
     assert!(contains_shell_syntax(command));

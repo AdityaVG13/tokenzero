@@ -1,13 +1,56 @@
+use crate::shell_parse::split_shell_segments;
 use crate::*;
 
 pub fn is_repo_inventory_command(command: &str) -> bool {
     let lower = command.to_ascii_lowercase();
-    (lower.contains("find ") || lower.contains(" tree") || lower.starts_with("tree"))
-        && (lower.contains("echo") || lower.contains("wc -l") || lower.contains("sort"))
-        || lower.contains("find . -type f")
-        || lower.contains("get-childitem")
-        || lower.contains("gci ")
-        || lower.contains("ls -")
+    let inventory_shape =
+        (lower.contains("find ") || lower.contains(" tree") || lower.starts_with("tree"))
+            && (lower.contains("echo") || lower.contains("wc -l") || lower.contains("sort"))
+            || lower.contains("find . -type f")
+            || lower.contains("get-childitem")
+            || lower.contains("gci ")
+            || segment_is_bare_ls(&lower);
+    // The inventory view renders ALL output lines as file paths, so every
+    // segment must be a lister or a pure filter; `ls -d x; other-tool run`
+    // must not have other-tool's output swallowed as sample paths (and
+    // "tools -v" must not match the "ls -" substring at all).
+    inventory_shape && all_segments_inventory_safe(command)
+}
+
+fn segment_is_bare_ls(lower: &str) -> bool {
+    split_shell_segments(lower)
+        .iter()
+        .any(|segment| segment == "ls" || segment.starts_with("ls -") || segment.starts_with("ls "))
+}
+
+fn all_segments_inventory_safe(command: &str) -> bool {
+    split_shell_segments(command).iter().all(|segment| {
+        split_shell_words(segment)
+            .first()
+            .map(|word| shell_command_basename(word))
+            .is_some_and(|first| {
+                matches!(
+                    first.as_str(),
+                    "ls" | "find"
+                        | "tree"
+                        | "dir"
+                        | "gci"
+                        | "get-childitem"
+                        | "sort"
+                        | "wc"
+                        | "head"
+                        | "tail"
+                        | "uniq"
+                        | "cut"
+                        | "echo"
+                        | "cat"
+                        | "sort-object"
+                        | "select-object"
+                        | "where-object"
+                        | "measure-object"
+                )
+            })
+    })
 }
 
 pub fn repo_inventory_view(command: &str, output: &str) -> String {
@@ -108,11 +151,34 @@ pub fn structured_shell_view(command: &str, stdout: &str, stderr: &str) -> Strin
     summarize_lines(&combined, 20, 12, "")
 }
 
+/// True only when EVERY top-level segment is a search command or a pure
+/// line filter. `search_shell_view` labels all stdout lines as matches, so a
+/// mixed command like `grep X; ls Y` must never take the search view: the
+/// ls output would be presented as grep matches.
 pub(crate) fn is_search_shell_command(command: &str) -> bool {
-    let command = shell_analysis_command(command);
-    split_shell_words(&command)
-        .first()
-        .is_some_and(|first| is_search_command(first))
+    let segments = split_shell_segments(command);
+    let mut any_search = false;
+    for segment in &segments {
+        let Some(first) = split_shell_words(segment)
+            .first()
+            .map(|word| shell_command_basename(word))
+        else {
+            return false;
+        };
+        if is_search_command(&first) {
+            any_search = true;
+        } else if !is_search_pipeline_filter(&first) {
+            return false;
+        }
+    }
+    any_search
+}
+
+fn is_search_pipeline_filter(basename: &str) -> bool {
+    matches!(
+        basename,
+        "head" | "tail" | "sort" | "uniq" | "wc" | "cut" | "tr" | "cat" | "tee"
+    )
 }
 
 pub(crate) fn is_search_command(command: &str) -> bool {

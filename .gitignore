@@ -173,4 +173,8 @@ NDH6SA~M
 /demo/.tokenzero-bin/
 /demo/tokenzero-mcp.json
 /demo/agent_runs/
+
+# ZeroStack engine state (consolidated + per-engine)
+.zerostack/
 .fszero/
+.graphzero/
