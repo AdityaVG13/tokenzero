@@ -130,7 +130,7 @@ exact original bytes back in a single call. The accounting follows the same
 principle: tokens an agent later recovers are subtracted from claimed savings,
 because compression you had to undo was never a saving at all.
 
-<h3 id="demo"><img src=".github/assets/banner.gif" alt="TokenZero demo" width="100%"></h3>
+<h3 id="demo"><img src=".github/assets/h-demo.svg" alt="Demo" width="100%"></h3>
 
 Run the self-contained RACC demo from the repo root:
 
