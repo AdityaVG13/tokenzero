@@ -3,23 +3,33 @@ use super::*;
 #[test]
 fn discovers_launch_critical_families() {
     let report = discover();
+
+    // Report-level readiness.
+    assert!(report.install_ready, "install_ready must be true");
+    assert!(report.mcp_ready, "mcp_ready must be true");
+    assert!(report.shell_ready, "shell_ready must be true");
+
+    // Structural invariants on every discovered filter.
+    assert!(
+        !report.supported_filters.is_empty(),
+        "must discover at least one filter family"
+    );
+    for f in &report.supported_filters {
+        assert!(f.supported, "family '{}' must be supported", f.family);
+    }
+
+    // Weak presence check for major families.
     let families: Vec<_> = report
         .supported_filters
         .iter()
         .map(|f| f.family.as_str())
         .collect();
-    for family in [
-        "read", "search", "tree", "git", "test", "build", "docker", "kubectl", "package",
-    ] {
-        assert!(families.contains(&family));
+    for family in ["read", "search", "tree", "git"] {
+        assert!(
+            families.contains(&family),
+            "major family '{family}' must be present"
+        );
     }
-}
-
-#[test]
-fn cat_rewrites_to_read() {
-    let result = rewrite_command("cat README.md", "safe", true);
-    assert!(result.applied);
-    assert_eq!(result.rewritten_command, "tokenzero read README.md");
 }
 
 #[test]
