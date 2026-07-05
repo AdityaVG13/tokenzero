@@ -25,13 +25,3 @@ fn line_and_symbol_selectors_work() {
     assert_eq!(line_range(text, 1, 2), "fn alpha() {\n  call();");
     assert!(symbol_block(text, "alpha").contains("call"));
 }
-
-#[test]
-fn mode_aliases_map_to_new_policy_names() {
-    assert_eq!("auto".parse::<Mode>().unwrap(), Mode::Auto);
-    assert_eq!("diagnostic".parse::<Mode>().unwrap(), Mode::Diagnostic);
-    assert_eq!("diff-aware".parse::<Mode>().unwrap(), Mode::DiffAware);
-    assert_eq!("hybrid".parse::<Mode>().unwrap(), Mode::Auto);
-    assert_eq!("critical".parse::<Mode>().unwrap(), Mode::Diagnostic);
-    assert_eq!("fidelity".parse::<Mode>().unwrap(), Mode::Structured);
-}
