@@ -4,6 +4,18 @@ use std::fs;
 use std::process::Command;
 use tempfile::tempdir;
 
+fn first_ref_with_kind(json: &Value, kind: &str) -> String {
+    json["refs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["kind"] == kind)
+        .unwrap_or_else(|| panic!("missing ref kind {kind}: {json}"))["ref"]
+        .as_str()
+        .unwrap()
+        .to_string()
+}
+
 #[test]
 fn cli_read_expand_json_roundtrip() {
     let dir = tempdir().unwrap();
@@ -114,6 +126,179 @@ fn cli_expand_recovers_blob_across_roots_via_ref_index() {
     assert_eq!(
         String::from_utf8_lossy(&expanded.stdout),
         "cross\nroot\nbytes\n"
+    );
+}
+
+#[test]
+fn cli_run_ref_expands_across_roots_via_ref_index() {
+    let root_a = tempdir().unwrap();
+    let root_b = tempdir().unwrap();
+    let index_dir = tempdir().unwrap();
+    let expected = "R".repeat(28 * 1024);
+
+    let output = Command::cargo_bin("tokenzero")
+        .unwrap()
+        .current_dir(root_a.path())
+        .env("TOKENZERO_REF_INDEX_PATH", index_dir.path())
+        .args([
+            "run",
+            "--json",
+            "--",
+            "python3",
+            "-c",
+            &format!("import sys; sys.stdout.write({expected:?})"),
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "stdout={}\nstderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let json: Value = serde_json::from_slice(&output.stdout).unwrap();
+    let stdout_ref = first_ref_with_kind(&json, "stdout");
+
+    let expanded = Command::cargo_bin("tokenzero")
+        .unwrap()
+        .current_dir(root_b.path())
+        .env("TOKENZERO_REF_INDEX_PATH", index_dir.path())
+        .args(["expand", &stdout_ref, "--raw"])
+        .output()
+        .unwrap();
+    assert!(
+        expanded.status.success(),
+        "{}",
+        String::from_utf8_lossy(&expanded.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&expanded.stdout), expected);
+}
+
+#[test]
+fn cli_run_ref_with_env_cache_path_expands_across_roots_via_ref_index() {
+    let root_a = tempdir().unwrap();
+    let root_b = tempdir().unwrap();
+    let index_dir = tempdir().unwrap();
+    let cache_a = root_a.path().join("scoped-cache.json");
+    let expected = "E".repeat(28 * 1024);
+
+    let output = Command::cargo_bin("tokenzero")
+        .unwrap()
+        .current_dir(root_a.path())
+        .env("TOKENZERO_REF_INDEX_PATH", index_dir.path())
+        .env("TOKENZERO_CACHE_PATH", &cache_a)
+        .args([
+            "run",
+            "--json",
+            "--",
+            "python3",
+            "-c",
+            &format!("import sys; sys.stdout.write({expected:?})"),
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "stdout={}\nstderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        cache_a.exists(),
+        "TOKENZERO_CACHE_PATH should choose the store"
+    );
+    let json: Value = serde_json::from_slice(&output.stdout).unwrap();
+    let stdout_ref = first_ref_with_kind(&json, "stdout");
+
+    let expanded = Command::cargo_bin("tokenzero")
+        .unwrap()
+        .current_dir(root_b.path())
+        .env("TOKENZERO_REF_INDEX_PATH", index_dir.path())
+        .args(["expand", &stdout_ref, "--raw"])
+        .output()
+        .unwrap();
+    assert!(
+        expanded.status.success(),
+        "{}",
+        String::from_utf8_lossy(&expanded.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&expanded.stdout), expected);
+}
+
+#[test]
+fn cli_expand_not_found_names_all_lookup_tiers() {
+    let root = tempdir().unwrap();
+    let index_dir = tempdir().unwrap();
+    let output = Command::cargo_bin("tokenzero")
+        .unwrap()
+        .current_dir(root.path())
+        .env("TOKENZERO_REF_INDEX_PATH", index_dir.path())
+        .args(["expand", "tz://blob/bb_missing_ref", "--json"])
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    let json: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(json["error"]["code"], "ref_not_found");
+    let message = json["error"]["message"].as_str().unwrap();
+    assert!(message.contains("explicit/env cache"), "{message}");
+    assert!(message.contains("current-root store"), "{message}");
+    assert!(message.contains("per-user ref-index"), "{message}");
+}
+
+#[test]
+fn cli_expand_decode_failure_keeps_expand_failed_taxonomy() {
+    let root = tempdir().unwrap();
+    let cache = root.path().join("cache.json");
+    let expected = "D".repeat(70 * 1024);
+    let output = Command::cargo_bin("tokenzero")
+        .unwrap()
+        .current_dir(root.path())
+        .args([
+            "run",
+            "--cache-path",
+            cache.to_str().unwrap(),
+            "--json",
+            "--",
+            "python3",
+            "-c",
+            &format!("import sys; sys.stdout.write({expected:?})"),
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "stdout={}\nstderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let json: Value = serde_json::from_slice(&output.stdout).unwrap();
+    let stdout_ref = first_ref_with_kind(&json, "stdout");
+    let sidecar_dir = root.path().join("cache.json.blobs");
+    assert!(sidecar_dir.is_dir(), "large blob should be externalized");
+    for entry in fs::read_dir(&sidecar_dir).unwrap() {
+        fs::remove_file(entry.unwrap().path()).unwrap();
+    }
+
+    let expanded = Command::cargo_bin("tokenzero")
+        .unwrap()
+        .current_dir(root.path())
+        .args([
+            "expand",
+            &stdout_ref,
+            "--cache-path",
+            cache.to_str().unwrap(),
+            "--json",
+        ])
+        .output()
+        .unwrap();
+    assert!(!expanded.status.success());
+    let json: Value = serde_json::from_slice(&expanded.stdout).unwrap();
+    assert_eq!(json["error"]["code"], "expand_failed");
+    assert!(
+        json["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("could not be decoded")
     );
 }
 

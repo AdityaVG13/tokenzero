@@ -22,6 +22,8 @@ use super::sandbox::lower_code_plan;
 use super::store::{CodeModeLimits, ExecutionStep, ExecutionStore, finalize_result, now_ms};
 use crate::expand_params::ExpandParams;
 
+const EXACT_EXPAND_MARKER: &str = "__tz_exact_expand";
+
 #[cfg(test)]
 pub(crate) fn make_engine_for_root(root: PathBuf) -> TokenZeroEngine {
     make_engine_for_root_with_options(root, &CodeModeOptions::default())
@@ -836,7 +838,10 @@ fn ref_first_final_value(
     }
     let mut store = tokenzero_recovery::RecoveryStore::new(Some(engine.config.cache_path.clone()));
     let mut refs = Vec::new();
-    let value = ref_first_value(value, options.ref_first_budget, &mut store, &mut refs);
+    let budget_tokens = options
+        .ref_first_budget
+        .max(crate::shell_inline_budget_from_env());
+    let value = ref_first_value(value, budget_tokens, &mut store, &mut refs);
     (value, refs)
 }
 
@@ -877,6 +882,13 @@ fn ref_first_value(
             {
                 return map.remove("value").unwrap_or(Value::Null);
             }
+            if map
+                .get(EXACT_EXPAND_MARKER)
+                .and_then(Value::as_bool)
+                .unwrap_or(false)
+            {
+                return Value::Object(map);
+            }
             Value::Object(
                 map.into_iter()
                     .map(|(key, value)| (key, ref_first_value(value, budget_tokens, store, refs)))
@@ -896,6 +908,10 @@ fn unwrap_raw_value(value: Value) -> Value {
                 .unwrap_or(false) =>
         {
             map.remove("value").unwrap_or(Value::Null)
+        }
+        Value::Object(mut map) => {
+            map.remove(EXACT_EXPAND_MARKER);
+            Value::Object(map)
         }
         other => other,
     }
@@ -1376,7 +1392,11 @@ fn tool_response_to_value(resp: &ToolResponse) -> Value {
         "text": text,
         "status": resp.status,
     });
-    if !refs.is_empty() {
+    if resp.tool == "shell" {
+        for record in &resp.refs {
+            obj[format!("{}_ref", record.kind)] = json!(record.ref_id);
+        }
+    } else if !refs.is_empty() {
         obj["ref"] = json!(refs[0]);
         if refs.len() > 1 {
             obj["refs"] = json!(refs);
@@ -1418,6 +1438,13 @@ impl OpOutcome {
 
     fn with_value(mut self, update: impl FnOnce(&mut Value)) -> Self {
         update(&mut self.value);
+        self
+    }
+
+    fn mark_exact_expand(mut self) -> Self {
+        if let Value::Object(map) = &mut self.value {
+            map.insert(EXACT_EXPAND_MARKER.to_string(), Value::Bool(true));
+        }
         self
     }
 
@@ -1736,7 +1763,7 @@ fn exec_expand(engine: &TokenZeroEngine, args: &[Value]) -> Result<OpOutcome, Bo
         )));
     }
     let resp = engine.expand_with_params(params);
-    Ok(OpOutcome::from_tool_response(&resp))
+    Ok(OpOutcome::from_tool_response(&resp).mark_exact_expand())
 }
 
 fn exec_expand_many(
@@ -1766,7 +1793,11 @@ fn exec_expand_many(
             )));
         }
         let resp = engine.expand_with_params(params);
-        results.push(OpOutcome::from_tool_response(&resp).into_value());
+        results.push(
+            OpOutcome::from_tool_response(&resp)
+                .mark_exact_expand()
+                .into_value(),
+        );
     }
     Ok(OpOutcome::from_catalog(json!({
         "items": results,

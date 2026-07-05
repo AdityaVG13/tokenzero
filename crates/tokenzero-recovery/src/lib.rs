@@ -289,6 +289,13 @@ impl DiskIdentity {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum RefResolve {
+    Found(String),
+    NotFound,
+    DecodeFailed,
+}
+
 impl RecoveryStore {
     pub fn new(persistence_path: Option<PathBuf>) -> Self {
         Self::with_config(persistence_path, RecoveryConfig::default())
@@ -476,12 +483,22 @@ impl RecoveryStore {
             selected_start = start;
             selected_end = end;
         }
-        let Some(content) = self.resolve_ref_with_index(&parsed.kind, &parsed.bare) else {
-            return ExpansionResult::missing(
-                requested_ref,
-                selector.map(str::to_string),
-                ref_not_found_reason(&parsed.kind),
-            );
+        let content = match self.resolve_ref_with_index(&parsed.kind, &parsed.bare) {
+            RefResolve::Found(content) => content,
+            RefResolve::NotFound => {
+                return ExpansionResult::missing(
+                    requested_ref,
+                    selector.map(str::to_string),
+                    ref_not_found_reason(&parsed.kind),
+                );
+            }
+            RefResolve::DecodeFailed => {
+                return ExpansionResult::missing(
+                    requested_ref,
+                    selector.map(str::to_string),
+                    "decode-failed",
+                );
+            }
         };
         if parsed.kind == "file" && self.file_ref_is_stale(&parsed.bare) {
             return ExpansionResult::missing(
@@ -727,26 +744,44 @@ impl RecoveryStore {
         ref_id
     }
 
-    fn resolve_ref(&self, kind: &str, bare: &str) -> Option<String> {
+    fn resolve_ref(&self, kind: &str, bare: &str) -> RefResolve {
         match kind {
-            "blob" => self
+            "blob" => match self.state.blobs.get(bare) {
+                Some(value) => resolve_blob_value(self.persistence_path.as_deref(), value)
+                    .map(RefResolve::Found)
+                    .unwrap_or(RefResolve::DecodeFailed),
+                None => RefResolve::NotFound,
+            },
+            "file" => self
                 .state
-                .blobs
+                .files
                 .get(bare)
-                .and_then(|v| resolve_blob_value(self.persistence_path.as_deref(), v)),
-            "file" => self.state.files.get(bare).map(|f| f.text.clone()),
-            "unit" => self.state.units.get(bare).map(|u| u.text.clone()),
-            "search" => self.state.search_hits.get(bare).map(|u| u.text.clone()),
-            _ => None,
+                .map(|f| RefResolve::Found(f.text.clone()))
+                .unwrap_or(RefResolve::NotFound),
+            "unit" => self
+                .state
+                .units
+                .get(bare)
+                .map(|u| RefResolve::Found(u.text.clone()))
+                .unwrap_or(RefResolve::NotFound),
+            "search" => self
+                .state
+                .search_hits
+                .get(bare)
+                .map(|u| RefResolve::Found(u.text.clone()))
+                .unwrap_or(RefResolve::NotFound),
+            _ => RefResolve::NotFound,
         }
     }
 
-    fn resolve_ref_with_index(&self, kind: &str, bare: &str) -> Option<String> {
-        if let Some(content) = self.resolve_ref(kind, bare) {
-            return Some(content);
+    fn resolve_ref_with_index(&self, kind: &str, bare: &str) -> RefResolve {
+        match self.resolve_ref(kind, bare) {
+            RefResolve::Found(content) => return RefResolve::Found(content),
+            RefResolve::DecodeFailed => return RefResolve::DecodeFailed,
+            RefResolve::NotFound => {}
         }
         if kind != "blob" {
-            return None;
+            return RefResolve::NotFound;
         }
         resolve_blob_from_ref_index(bare, &self.config)
     }
@@ -1159,6 +1194,11 @@ fn append_blob_refs_to_ref_index(store_path: &Path, refs: &[String]) {
         else {
             continue;
         };
+        if newest_ref_index_store_path(&shard, ref_id).as_deref()
+            == Some(store_path.to_string_lossy().as_ref())
+        {
+            continue;
+        }
         if append_ref_index_line(&shard, ref_id, &store_path, ts).is_ok()
             && fs::metadata(&shard)
                 .map(|meta| meta.len() > REF_INDEX_MAX_BYTES)
@@ -1248,6 +1288,17 @@ fn prune_ref_index_stale_entries(ref_id: &str, stale_store_paths: &HashSet<Strin
     let _ = write_ref_index_entries(&shard, entries.iter());
 }
 
+fn newest_ref_index_store_path(shard: &Path, ref_id: &str) -> Option<String> {
+    let file = fs::File::open(shard).ok()?;
+    let text = read_limited_utf8(file, (REF_INDEX_MAX_BYTES as usize).saturating_mul(4))
+        .ok()
+        .flatten()?;
+    ref_index_entries_for_ref(&text, ref_id)
+        .into_iter()
+        .next()
+        .map(|entry| entry.store_path)
+}
+
 fn ref_index_entries_for_ref(text: &str, ref_id: &str) -> Vec<RefIndexEntry> {
     let mut entries = Vec::new();
     for line in text.lines() {
@@ -1315,13 +1366,18 @@ fn write_ref_index_entries<'a>(
     fs::rename(&tmp, shard).map_err(RecoveryError::from)
 }
 
-fn resolve_blob_from_ref_index(ref_id: &str, config: &RecoveryConfig) -> Option<String> {
-    let root = ref_index_root()?;
+fn resolve_blob_from_ref_index(ref_id: &str, config: &RecoveryConfig) -> RefResolve {
+    let Some(root) = ref_index_root() else {
+        return RefResolve::NotFound;
+    };
     let shard = ref_index_shard_path(&root, ref_id);
-    let file = fs::File::open(&shard).ok()?;
-    let text = read_limited_utf8(file, (REF_INDEX_MAX_BYTES as usize).saturating_mul(4))
-        .ok()
-        .flatten()?;
+    let Ok(file) = fs::File::open(&shard) else {
+        return RefResolve::NotFound;
+    };
+    let Ok(Some(text)) = read_limited_utf8(file, (REF_INDEX_MAX_BYTES as usize).saturating_mul(4))
+    else {
+        return RefResolve::NotFound;
+    };
     let entries = ref_index_entries_for_ref(&text, ref_id);
     let mut stale_store_paths = HashSet::new();
     for entry in entries {
@@ -1330,25 +1386,33 @@ fn resolve_blob_from_ref_index(ref_id: &str, config: &RecoveryConfig) -> Option<
             stale_store_paths.insert(entry.store_path);
             continue;
         }
-        let content = load_state(&store_path, config)
+        let resolved = load_state(&store_path, config)
             .ok()
             .flatten()
-            .and_then(|state| {
-                state
-                    .blobs
-                    .get(ref_id)
-                    .and_then(|value| resolve_blob_value(Some(&store_path), value))
+            .and_then(|state| state.blobs.get(ref_id).cloned())
+            .map(|value| {
+                resolve_blob_value(Some(&store_path), &value)
+                    .map(RefResolve::Found)
+                    .unwrap_or(RefResolve::DecodeFailed)
             });
-        if let Some(content) = content {
-            if !stale_store_paths.is_empty() {
-                prune_ref_index_stale_entries(ref_id, &stale_store_paths);
+        match resolved {
+            Some(RefResolve::Found(content)) => {
+                if !stale_store_paths.is_empty() {
+                    prune_ref_index_stale_entries(ref_id, &stale_store_paths);
+                }
+                return RefResolve::Found(content);
             }
-            return Some(content);
-        }
-        stale_store_paths.insert(entry.store_path);
+            Some(RefResolve::DecodeFailed) => {
+                if !stale_store_paths.is_empty() {
+                    prune_ref_index_stale_entries(ref_id, &stale_store_paths);
+                }
+                return RefResolve::DecodeFailed;
+            }
+            Some(RefResolve::NotFound) | None => stale_store_paths.insert(entry.store_path),
+        };
     }
     prune_ref_index_stale_entries(ref_id, &stale_store_paths);
-    None
+    RefResolve::NotFound
 }
 
 fn load_state(

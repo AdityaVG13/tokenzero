@@ -102,9 +102,10 @@ const DIFF_MAX_BYTES: usize = 2 * 1024 * 1024;
 const DIFF_MAX_LINES: usize = 50_000;
 
 pub use config::{
-    EngineConfig, FETCH_ALLOW_ENV, FETCH_DENY_ENV, FETCH_ENABLED_ENV, SearchBackend,
-    default_mcp_idle_timeout, default_shell_timeout, mcp_idle_timeout_from_secs,
-    mcp_tool_surface_from_env, shell_timeout_from_secs,
+    DEFAULT_SHELL_INLINE_BUDGET, EngineConfig, FETCH_ALLOW_ENV, FETCH_DENY_ENV, FETCH_ENABLED_ENV,
+    SHELL_INLINE_BUDGET_ENV, SearchBackend, default_mcp_idle_timeout, default_shell_timeout,
+    mcp_idle_timeout_from_secs, mcp_tool_surface_from_env, shell_inline_budget_from_env,
+    shell_timeout_from_secs,
 };
 
 /// One find/replace hunk for [`TokenZeroEngine::edit`]. `find` must match the

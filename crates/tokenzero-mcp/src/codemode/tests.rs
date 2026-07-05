@@ -39,6 +39,38 @@ fn codemode_v2_one_token_answer_stays_tiny_on_wire() {
     );
 }
 
+#[cfg(not(windows))]
+#[test]
+fn fastmcp_shell_refs_are_role_labeled_not_anonymous_array() {
+    let work = tempfile::tempdir().unwrap();
+    fs::write(work.path().join("small.txt"), "tok ".repeat(200)).unwrap();
+    let engine = crate::TokenZeroEngine::new(crate::EngineConfig {
+        allowed_roots: vec![work.path().to_path_buf()],
+        cache_path: super::exec::make_engine_for_root(work.path().to_path_buf())
+            .config
+            .cache_path,
+        ..crate::EngineConfig::for_root(work.path())
+    });
+    let cwd = serde_json::to_string(work.path().to_str().unwrap()).unwrap();
+    let plan = format!(r#"return await zero.shell("cat small.txt", {{ cwd: {cwd} }})"#);
+    let response = crate::call_tool_fastmcp(
+        &engine,
+        "execute_code",
+        &serde_json::json!({"plan": plan}),
+        None,
+    )
+    .unwrap();
+    let value = response
+        .pointer("/structuredContent/value")
+        .expect("structuredContent.value");
+    assert!(value["combined_ref"].as_str().unwrap().starts_with("tz://"));
+    assert!(value["capture_ref"].as_str().unwrap().starts_with("tz://"));
+    assert!(
+        response.pointer("/structuredContent/refs").is_none(),
+        "shell refs must not be an anonymous refs array: {response}"
+    );
+}
+
 #[test]
 fn ref_first_large_final_string_recovers_byte_exactly() {
     let work = tempfile::tempdir().unwrap();
@@ -71,6 +103,186 @@ fn ref_first_large_final_string_recovers_byte_exactly() {
     let expanded = engine.expand(ref_id, None, None, None, None, None);
     assert_eq!(expanded.status, "ok");
     assert_eq!(expanded.visible.unwrap().text, payload);
+}
+
+#[test]
+fn explicit_expand_always_returns_exact_bytes_dda8627() {
+    let work = tempfile::tempdir().unwrap();
+    let payload = "deep".repeat(1250);
+    assert_eq!(payload.len(), 5000);
+    let quoted = serde_json::to_string(&payload).unwrap();
+    let plan = format!(
+        "const c = await zero.token.compact({quoted}); return await zero.token.expand(c.ref);"
+    );
+    let result = execute_codemode_with_options(
+        &plan,
+        CodeModeOptions {
+            root: Some(work.path().to_path_buf()),
+            ..Default::default()
+        },
+    );
+    assert_eq!(
+        result.status,
+        CodeModeStatus::Completed,
+        "{:?}",
+        result.error
+    );
+    let value = result.value.as_ref().unwrap();
+    assert_eq!(value["text"].as_str(), Some(payload.as_str()));
+    assert!(
+        value.get("preview").is_none(),
+        "expand must not preview-wrap: {value}"
+    );
+    assert!(
+        value.get("ref").is_none(),
+        "expand must not ref-wrap: {value}"
+    );
+    assert!(
+        value.get("__tz_exact_expand").is_none(),
+        "internal marker leaked: {value}"
+    );
+}
+
+#[test]
+fn budget_capped_expand_appends_windowing_hint() {
+    let work = tempfile::tempdir().unwrap();
+    let payload = "line\n".repeat(2000);
+    let quoted = serde_json::to_string(&payload).unwrap();
+    let plan = format!(
+        "const c = await zero.token.compact({quoted}); return await zero.token.expand(c.ref);"
+    );
+    let result = execute_codemode_with_options(
+        &plan,
+        CodeModeOptions {
+            root: Some(work.path().to_path_buf()),
+            max_output_bytes: 900,
+            ..Default::default()
+        },
+    );
+    assert_eq!(
+        result.status,
+        CodeModeStatus::Completed,
+        "{:?}",
+        result.error
+    );
+    let text = result.value.as_ref().unwrap()["text"].as_str().unwrap();
+    assert!(
+        text.contains("tokenzero expand truncated"),
+        "missing truncation line: {text:?}"
+    );
+    assert!(
+        text.contains("start_line/end_line"),
+        "missing windowing opts: {text:?}"
+    );
+    assert!(
+        !result.value.as_ref().unwrap()["truncated"]
+            .as_bool()
+            .unwrap_or(false)
+    );
+}
+
+#[cfg(not(windows))]
+#[test]
+fn shell_inline_threshold_keeps_refs_and_ref_wraps_large_text() {
+    let work = tempfile::tempdir().unwrap();
+    let small = "tok ".repeat(200);
+    let large = "tok ".repeat(400);
+    fs::write(work.path().join("small.txt"), &small).unwrap();
+    fs::write(work.path().join("large.txt"), &large).unwrap();
+
+    let cwd = serde_json::to_string(work.path().to_str().unwrap()).unwrap();
+    let small_plan = format!(r#"return await zero.shell("cat small.txt", {{ cwd: {cwd} }})"#);
+    let small_result = execute_codemode_with_options(
+        &small_plan,
+        CodeModeOptions {
+            root: Some(work.path().to_path_buf()),
+            ..Default::default()
+        },
+    );
+    assert_eq!(
+        small_result.status,
+        CodeModeStatus::Completed,
+        "{:?}",
+        small_result.error
+    );
+    let small_value = small_result.value.as_ref().unwrap();
+    let small_text = small_value["text"]
+        .as_str()
+        .expect("small shell text should inline");
+    assert!(
+        small_text.contains(small.trim_end()),
+        "small shell output missing: {small_text}"
+    );
+    assert!(
+        small_value["combined_ref"]
+            .as_str()
+            .unwrap()
+            .starts_with("tz://")
+    );
+    assert!(
+        small_value["capture_ref"]
+            .as_str()
+            .unwrap()
+            .starts_with("tz://")
+    );
+    assert!(
+        small_value.get("refs").is_none(),
+        "shell refs must be role-labeled fields: {small_value}"
+    );
+
+    let large_plan = format!(r#"return await zero.shell("cat large.txt", {{ cwd: {cwd} }})"#);
+    let large_result = execute_codemode_with_options(
+        &large_plan,
+        CodeModeOptions {
+            root: Some(work.path().to_path_buf()),
+            ..Default::default()
+        },
+    );
+    assert_eq!(
+        large_result.status,
+        CodeModeStatus::Completed,
+        "{:?}",
+        large_result.error
+    );
+    let large_value = large_result.value.as_ref().unwrap();
+    assert!(
+        large_value["text"]["ref"]
+            .as_str()
+            .unwrap()
+            .starts_with("tz://")
+    );
+    assert!(large_value["text"]["preview"].as_str().is_some());
+    assert!(
+        large_value["combined_ref"]
+            .as_str()
+            .unwrap()
+            .starts_with("tz://")
+    );
+    assert!(
+        large_value.get("refs").is_none(),
+        "shell refs must be role-labeled fields: {large_value}"
+    );
+}
+
+#[test]
+fn ref_first_recurses_to_leaf_strings_not_whole_objects() {
+    let result = execute_codemode(
+        r#"return { status: "ok", text: "tok ".repeat(1500), nested: { keep: "shape" } }"#,
+    );
+    assert_eq!(
+        result.status,
+        CodeModeStatus::Completed,
+        "{:?}",
+        result.error
+    );
+    let value = result.value.as_ref().unwrap();
+    assert_eq!(value["status"].as_str(), Some("ok"));
+    assert_eq!(value["nested"]["keep"].as_str(), Some("shape"));
+    assert!(value["text"]["ref"].as_str().unwrap().starts_with("tz://"));
+    assert!(
+        value.get("ref").is_none(),
+        "object itself must not be ref-wrapped: {value}"
+    );
 }
 
 #[test]

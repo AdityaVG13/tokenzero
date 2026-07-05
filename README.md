@@ -352,19 +352,21 @@ plan wire.
 
 | Workload | Raw | Per-op | CodeMode | vs raw | vs per-op |
 | :-- | --: | --: | --: | --: | --: |
-| File + search + transform | 1,985 | 145 | 93 | **95.3%** | 35.9% |
-| Shell multi-step (3 commands) | 145 | 192 | 122 | **15.9%** | 36.5% |
+| File + search + transform | 1,985 | 361 | 93 | **95.3%** | 74.2% |
+| Shell multi-step (3 commands) | 144 | 198 | 264 | **-83.3%** | -33.3% |
 | Pipe composition (read + compact) | 537 | 126 | 103 | **80.8%** | 18.3% |
-| Mixed exploration (tree + glob + read) | 1,283 | 273 | 147 | **88.5%** | 46.2% |
-| Diff review (multi-file) | 4,798 | 3,277 | 107 | **97.8%** | 96.7% |
-| Multi-file exploration (grep + 3 reads) | 30,128 | 240 | 264 | **99.1%** | -10.0% |
-| Log summarize (100 commits to verdict) | 1,560 | 299 | 21 | **98.7%** | 93.0% |
-| **Total** | **40,436** | **4,552** | **857** | **97.9%** | **81.2%** |
+| Mixed exploration (tree + glob + read) | 1,283 | 273 | 310 | **75.8%** | -13.6% |
+| Diff review (multi-file) | 12,358 | 3,559 | 107 | **99.1%** | 97.0% |
+| Multi-file exploration (grep + 3 reads) | 30,311 | 2,685 | 251 | **99.2%** | 90.7% |
+| Log summarize (100 commits to verdict) | 1,567 | 299 | 21 | **98.7%** | 93.0% |
+| **Total** | **48,185** | **7,501** | **1,149** | **97.6%** | **84.7%** |
 
-Two honest notes. On toy chains with tiny raw output (three short git
-commands) CodeMode saves little, because there is little to save. And one
-workload reads cheaper through per-op tools than through a plan; CodeMode
-earns its keep on real work: diff review, wide exploration, log summarization.
+Two honest notes. On toy chains with tiny raw output, CodeMode can cost more
+visible tokens than raw: small shell outputs arrive inline by design, because
+hiding 200 tokens behind a ref costs an agent several round-trips to recover
+them. And one workload reads cheaper through per-op tools than through a
+plan. CodeMode earns its keep on real work: diff review, wide exploration,
+log summarization.
 
 Reproducible: `scripts/benchmark_composition.sh` or
 `cargo test -p tokenzero-mcp -- codemode::bench_tests::run_composition_benchmark`.

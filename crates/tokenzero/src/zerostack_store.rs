@@ -1,5 +1,7 @@
 //! Unified `.zerostack/` store-root resolution for TokenZero cache paths.
 
+use std::env;
+use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
 /// Workspace root for TokenZero persistence (CLI, CodeMode, MCP).
@@ -95,9 +97,23 @@ pub fn default_codemode_recovery_cache_path(repo_root: &Path) -> PathBuf {
     )
 }
 
-/// Honor explicit `--cache-path`; otherwise apply unified-root or legacy default.
+/// Honor explicit `--cache-path`, then TOKENZERO_CACHE_PATH, then the default cache.
 pub fn resolve_recovery_cache_path(repo_root: &Path, explicit: Option<PathBuf>) -> PathBuf {
-    explicit.unwrap_or_else(|| default_recovery_cache_path(repo_root))
+    resolve_recovery_cache_path_with_env(repo_root, explicit, env::var_os("TOKENZERO_CACHE_PATH"))
+}
+
+fn resolve_recovery_cache_path_with_env(
+    repo_root: &Path,
+    explicit: Option<PathBuf>,
+    env_value: Option<OsString>,
+) -> PathBuf {
+    explicit
+        .or_else(|| {
+            env_value
+                .filter(|value| !value.is_empty())
+                .map(PathBuf::from)
+        })
+        .unwrap_or_else(|| default_recovery_cache_path(repo_root))
 }
 
 #[cfg(test)]
@@ -136,6 +152,30 @@ mod tests {
         fs::create_dir_all(legacy.parent().unwrap()).unwrap();
         fs::write(&legacy, "{}\n").unwrap();
         assert_eq!(default_recovery_cache_path(root), legacy);
+    }
+
+    #[test]
+    fn recovery_cache_path_honors_env_between_explicit_and_default() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        let explicit = root.join("explicit.json");
+        let env_path = root.join("env.json");
+        assert_eq!(
+            resolve_recovery_cache_path_with_env(
+                root,
+                Some(explicit.clone()),
+                Some(env_path.clone().into_os_string()),
+            ),
+            explicit
+        );
+        assert_eq!(
+            resolve_recovery_cache_path_with_env(
+                root,
+                None,
+                Some(env_path.clone().into_os_string())
+            ),
+            env_path
+        );
     }
 
     #[test]

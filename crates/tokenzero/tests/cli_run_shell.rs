@@ -39,6 +39,48 @@ fn cli_run_has_no_alias_dependency() {
     }
 }
 
+#[cfg(not(windows))]
+#[test]
+fn shell_inline_budget_zero_disables_small_output_inlining() {
+    let dir = tempdir().unwrap();
+    let cache = dir.path().join("cache.json");
+    let output_file = dir.path().join("small.txt");
+    std::fs::write(&output_file, "tok ".repeat(200)).unwrap();
+    let output = Command::cargo_bin("tokenzero")
+        .unwrap()
+        .env("TOKENZERO_SHELL_INLINE_BUDGET", "0")
+        .args([
+            "run",
+            "--json",
+            "--cache-path",
+            cache.to_str().unwrap(),
+            "--allowed-root",
+            dir.path().to_str().unwrap(),
+            "--cwd",
+            dir.path().to_str().unwrap(),
+            "--",
+            "cat",
+            "small.txt",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let json: Value = serde_json::from_slice(&output.stdout).unwrap();
+    let visible = json["visible"]["text"].as_str().unwrap();
+    assert!(
+        visible.contains("combined_ref:"),
+        "visible should point at refs: {visible}"
+    );
+    assert!(
+        !visible.contains("tok tok tok tok tok tok tok tok tok tok"),
+        "env override disabled inline shell payloads: {visible}"
+    );
+}
+
 #[test]
 fn cli_run_has_status_truth_stream_refs_and_expand() {
     let dir = tempdir().unwrap();

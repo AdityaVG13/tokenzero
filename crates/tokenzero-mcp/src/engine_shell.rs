@@ -17,14 +17,14 @@ use super::session::{
     DiffTelemetry, SeenState, ServeKey, ServedRecord, SessionMemory, SessionSummary,
 };
 use super::{
-    Accounting, ContentType, DEFAULT_MCP_IDLE_TIMEOUT_SECS, DEFAULT_SHELL_TIMEOUT_SECS,
-    DIFF_MAX_BYTES, DIFF_MAX_LINES, DIFF_READS_ENV, EditHunk, MAX_MCP_IDLE_TIMEOUT_SECS,
-    MAX_SEARCH_VISITED_FILES, MAX_SHELL_TIMEOUT_SECS, MIN_SEARCH_VISITED_FILES, Mode, RG_PATH_ENV,
-    SEARCH_BACKEND_ENV, SEARCH_VISIT_MULTIPLIER, SESSION_DEDUP_ENV, SearchBackend, ServeOptions,
-    ShellRenderInput, TokenZeroEngine, ToolResponse, cache_maintenance, count_tokens,
-    detect_content_type, make_capsule, make_capsule_with_raw_tokens, ref_record, render_shell,
-    sha256_hex, shell_combined_output, shell_spill_dir, shell_timeout_from_secs,
-    split_command_string,
+    Accounting, ContentType, DEFAULT_MCP_IDLE_TIMEOUT_SECS, DEFAULT_SHELL_INLINE_BUDGET,
+    DEFAULT_SHELL_TIMEOUT_SECS, DIFF_MAX_BYTES, DIFF_MAX_LINES, DIFF_READS_ENV, EditHunk,
+    MAX_MCP_IDLE_TIMEOUT_SECS, MAX_SEARCH_VISITED_FILES, MAX_SHELL_TIMEOUT_SECS,
+    MIN_SEARCH_VISITED_FILES, Mode, RG_PATH_ENV, SEARCH_BACKEND_ENV, SEARCH_VISIT_MULTIPLIER,
+    SESSION_DEDUP_ENV, SearchBackend, ServeOptions, ShellRenderInput, TokenZeroEngine,
+    ToolResponse, cache_maintenance, count_tokens, detect_content_type, make_capsule,
+    make_capsule_with_raw_tokens, ref_record, render_shell, sha256_hex, shell_combined_output,
+    shell_spill_dir, shell_timeout_from_secs, split_command_string,
 };
 use crate::recall;
 use globset::{GlobBuilder, GlobMatcher};
@@ -238,15 +238,42 @@ impl TokenZeroEngine {
         ];
         let refs_complete = prune_dead_refs(&store, &mut refs);
         let raw_tokens = count_tokens(&output);
-        let visible_text = if refs_complete {
+        let inline_shell_output = refs_complete
+            && !streams_truncated
+            && render.command_status.command_success
+            && self.config.shell_inline_budget > 0
+            && raw_tokens <= self.config.shell_inline_budget;
+        let visible_text = if inline_shell_output {
+            let trimmed = output.trim_end();
+            if trimmed.is_empty() {
+                format!("combined_ref: {}", combined_stored.blob_ref)
+            } else {
+                format!("{trimmed}\ncombined_ref: {}", combined_stored.blob_ref)
+            }
+        } else if refs_complete
+            && self.config.shell_inline_budget == 0
+            && !streams_truncated
+            && raw_tokens <= DEFAULT_SHELL_INLINE_BUDGET
+            && render.command_status.command_success
+        {
+            format!("# shell ok\ncombined_ref: {}", combined_stored.blob_ref)
+        } else if refs_complete {
             render.visible.clone()
         } else {
             output.trim_end().to_string()
         };
-        let visible_tokens = if refs_complete {
+        let visible_tokens = if inline_shell_output || refs_complete {
             count_tokens(&visible_text)
         } else {
             raw_tokens
+        };
+        let output_strategy = if inline_shell_output {
+            "inline_shell".to_string()
+        } else {
+            capture["parser_metadata"]["output_strategy"]
+                .as_str()
+                .unwrap_or(&render.output_strategy)
+                .to_string()
         };
         let mut response = ToolResponse::ok(
             "shell",
@@ -312,8 +339,7 @@ impl TokenZeroEngine {
             "stdout_ref": stdout_stored.blob_ref,
             "stderr_ref": stderr_stored.blob_ref,
             "combined_ref": combined_stored.blob_ref,
-            "output_strategy": capture["parser_metadata"]["output_strategy"]
-        }));
+            "output_strategy": output_strategy        }));
         response.safety = Some(json!({
             "schema_version": "tokenzero.shell_safety.v1",
             "secret_masking": render.policy.policy != "exact" && render.policy.policy != "passthrough",

@@ -313,6 +313,21 @@ fn guard_visible_output(result: &mut CodeModeResult, limits: &CodeModeLimits) {
     if result.refs.len() > limits.max_refs_emitted {
         result.refs.truncate(limits.max_refs_emitted);
     }
+    if let Some(value) = &mut result.value {
+        if cap_exact_expand_value(value, limits.max_output_bytes) {
+            let visible = count_tokens(&serde_json::to_string(value).unwrap_or_default());
+            result.telemetry.visible_tokens = visible;
+            if let Some(extra) = result
+                .telemetry
+                .extra
+                .as_mut()
+                .and_then(Value::as_object_mut)
+            {
+                extra.insert("visible_tokens".to_string(), json!(visible));
+            }
+        }
+        strip_exact_expand_markers(value);
+    }
     if let Some(value) = &result.value {
         let bytes = serde_json::to_vec(value)
             .map(|bytes| bytes.len())
@@ -333,5 +348,74 @@ fn guard_visible_output(result: &mut CodeModeResult, limits: &CodeModeLimits) {
                 extra.insert("visible_tokens".to_string(), json!(count_tokens("C")));
             }
         }
+    }
+}
+
+fn cap_exact_expand_value(value: &mut Value, max_output_bytes: usize) -> bool {
+    match value {
+        Value::Object(map) => {
+            if map
+                .get("__tz_exact_expand")
+                .and_then(Value::as_bool)
+                .unwrap_or(false)
+            {
+                let Some(original) = map.get("text").and_then(Value::as_str).map(str::to_string)
+                else {
+                    return false;
+                };
+                if serde_json::to_vec(value)
+                    .map(|bytes| bytes.len() <= max_output_bytes)
+                    .unwrap_or(true)
+                {
+                    return false;
+                }
+                let note = "\n[tokenzero expand truncated: output exceeded CodeMode max_output_bytes; rerun expand with start_line/end_line windowing opts]\n";
+                let mut kept = original.clone();
+                loop {
+                    if let Value::Object(map) = value {
+                        map.insert("text".to_string(), Value::String(format!("{kept}{note}")));
+                    }
+                    if serde_json::to_vec(value)
+                        .map(|bytes| bytes.len() <= max_output_bytes)
+                        .unwrap_or(false)
+                    {
+                        return true;
+                    }
+                    if kept.is_empty() {
+                        return true;
+                    }
+                    let new_len = kept
+                        .char_indices()
+                        .nth(kept.chars().count().saturating_mul(3) / 4)
+                        .map(|(idx, _)| idx)
+                        .unwrap_or(0);
+                    kept.truncate(new_len);
+                }
+            }
+            map.values_mut().fold(false, |changed, item| {
+                cap_exact_expand_value(item, max_output_bytes) || changed
+            })
+        }
+        Value::Array(items) => items.iter_mut().fold(false, |changed, item| {
+            cap_exact_expand_value(item, max_output_bytes) || changed
+        }),
+        _ => false,
+    }
+}
+
+fn strip_exact_expand_markers(value: &mut Value) {
+    match value {
+        Value::Object(map) => {
+            map.remove("__tz_exact_expand");
+            for value in map.values_mut() {
+                strip_exact_expand_markers(value);
+            }
+        }
+        Value::Array(items) => {
+            for value in items {
+                strip_exact_expand_markers(value);
+            }
+        }
+        _ => {}
     }
 }

@@ -38,6 +38,7 @@ pub struct EngineConfig {
     pub shell_timeout: Duration,
     pub shell_capture_bytes: usize,
     pub shell_spill_bytes: usize,
+    pub shell_inline_budget: usize,
     pub mcp_idle_timeout: Option<Duration>,
     pub search_backend: SearchBackend,
     /// Explicit rg binary path (`TOKENZERO_RG_PATH`); skips the PATH lookup.
@@ -77,6 +78,7 @@ impl EngineConfig {
             shell_timeout: default_shell_timeout(),
             shell_capture_bytes: output_policy.per_stream_capture_bytes,
             shell_spill_bytes: output_policy.spill_threshold_bytes,
+            shell_inline_budget: shell_inline_budget_from_env(),
             mcp_idle_timeout: default_mcp_idle_timeout(),
             search_backend: SearchBackend::from_env(),
             rg_path_override: std::env::var_os(RG_PATH_ENV).map(PathBuf::from),
@@ -101,6 +103,8 @@ pub fn mcp_tool_surface_from_env() -> McpToolSurface {
 pub const FETCH_ENABLED_ENV: &str = "TOKENZERO_FETCH";
 pub const FETCH_ALLOW_ENV: &str = "TOKENZERO_FETCH_ALLOW";
 pub const FETCH_DENY_ENV: &str = "TOKENZERO_FETCH_DENY";
+pub const SHELL_INLINE_BUDGET_ENV: &str = "TOKENZERO_SHELL_INLINE_BUDGET";
+pub const DEFAULT_SHELL_INLINE_BUDGET: usize = 256;
 
 /// Opt-in toggle parse: only `1`/`on`/`true`/`yes` (case-insensitive) enable.
 pub(crate) fn env_opt_in(name: &str) -> bool {
@@ -160,6 +164,13 @@ pub(crate) fn new_session_id() -> String {
 
 pub(crate) fn diff_reads_default() -> bool {
     env_toggle_enabled(DIFF_READS_ENV)
+}
+
+pub fn shell_inline_budget_from_env() -> usize {
+    std::env::var(SHELL_INLINE_BUDGET_ENV)
+        .ok()
+        .and_then(|value| value.trim().parse::<usize>().ok())
+        .unwrap_or(DEFAULT_SHELL_INLINE_BUDGET)
 }
 
 /// Opt-out toggle parse: unset means enabled; `0`/`off`/`false`/`no`

@@ -4,17 +4,25 @@ pub(crate) fn expansion_response(result: ExpansionResult, recovery_tokens: usize
     if !result.found {
         return ToolResponse::error(
             "expand",
-            match result.reason.as_str() {
-                "stale-ref" => "ref_stale",
-                "dangling-ref" => "ref_not_found",
-                "invalid-ref" => "invalid_ref",
-                _ => "expand_failed",
+            if result.reason.starts_with("ref-not-found") || result.reason == "dangling-ref" {
+                "ref_not_found"
+            } else {
+                match result.reason.as_str() {
+                    "stale-ref" => "ref_stale",
+                    "invalid-ref" => "invalid_ref",
+                    _ => "expand_failed",
+                }
             },
-            match result.reason.as_str() {
-                "stale-ref" => "ref is no longer recoverable",
-                "dangling-ref" => "ref is not present in the recovery cache",
-                "invalid-ref" => "ref is not a valid tz:// recovery handle",
-                _ => "ref expansion failed",
+            if result.reason.starts_with("ref-not-found") {
+                result.reason.clone()
+            } else {
+                match result.reason.as_str() {
+                    "stale-ref" => "ref is no longer recoverable".to_string(),
+                    "dangling-ref" => "ref is not present in the recovery cache".to_string(),
+                    "invalid-ref" => "ref is not a valid tz:// recovery handle".to_string(),
+                    "decode-failed" => "ref was found but could not be decoded".to_string(),
+                    _ => "ref expansion failed".to_string(),
+                }
             },
             Some("rerun the original read/find/tree/shell command".to_string()),
         );

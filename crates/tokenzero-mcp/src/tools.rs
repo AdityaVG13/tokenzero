@@ -298,6 +298,18 @@ fn refs_referenced_by_value(value: Option<&Value>, ordered_refs: &[String]) -> V
         .collect()
 }
 
+fn value_has_role_labeled_shell_refs(value: &Value) -> bool {
+    value.as_object().is_some_and(|map| {
+        ["stdout_ref", "stderr_ref", "combined_ref", "capture_ref"]
+            .iter()
+            .any(|key| {
+                map.get(*key)
+                    .and_then(Value::as_str)
+                    .is_some_and(|text| text.starts_with("tz://"))
+            })
+    })
+}
+
 fn codemode_v2_structured(result: &crate::CodeModeResult, ack: &str, telemetry_ref: &str) -> Value {
     let mut object = serde_json::Map::new();
     object.insert("ack".to_string(), json!(ack));
@@ -320,7 +332,12 @@ fn codemode_v2_structured(result: &crate::CodeModeResult, ack: &str, telemetry_r
     }
     object.insert("ref".to_string(), json!(telemetry_ref));
     let value_refs = refs_referenced_by_value(result.value.as_ref(), &result.refs);
-    if !value_refs.is_empty() {
+    if !value_refs.is_empty()
+        && !result
+            .value
+            .as_ref()
+            .is_some_and(value_has_role_labeled_shell_refs)
+    {
         object.insert("refs".to_string(), json!(value_refs));
     }
     Value::Object(object)

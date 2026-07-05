@@ -233,6 +233,35 @@ fn ref_index_compaction_keeps_newest_entry_per_ref() {
 }
 
 #[test]
+fn repeated_persist_of_same_blob_ref_does_not_duplicate_newest_store_entry() {
+    let index_dir = tempdir().unwrap();
+    with_ref_index_env(index_dir.path(), true, || {
+        let dir = tempdir().unwrap();
+        let cache = dir.path().join("cache.json");
+        let text = "same ref repeated\n";
+        let mut store = RecoveryStore::new(Some(cache));
+        let stored = store
+            .store_payload(text, ContentType::Unknown, None, None, None)
+            .unwrap();
+        let repeated = store
+            .store_payload(text, ContentType::Unknown, None, None, None)
+            .unwrap();
+        assert_eq!(stored.blob_ref, repeated.blob_ref);
+
+        let shard = ref_index_shard_path(index_dir.path(), &stored.blob_ref);
+        let shard_text = fs::read_to_string(shard).unwrap();
+        let matching = shard_text
+            .lines()
+            .filter(|line| line.contains(&stored.blob_ref))
+            .count();
+        assert_eq!(
+            matching, 1,
+            "newest same-store entry should be append-deduped"
+        );
+    });
+}
+
+#[test]
 fn ref_index_concurrent_append_smoke() {
     let index_dir = tempdir().unwrap();
     with_ref_index_env(index_dir.path(), true, || {

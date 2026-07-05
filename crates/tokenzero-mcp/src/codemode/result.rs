@@ -145,7 +145,7 @@ impl Default for CodeModeOptions {
             max_code_bytes: super::store::DEFAULT_MAX_CODE_BYTES,
             envelope: None,
             ref_first: true,
-            ref_first_budget: 64,
+            ref_first_budget: crate::DEFAULT_SHELL_INLINE_BUDGET,
         }
     }
 }
