@@ -814,3 +814,64 @@ fn describe_includes_related_methods() {
     assert!(!related.is_empty());
     assert!(related.iter().any(|r| r.as_str() == Some("zero.expand")));
 }
+
+#[test]
+fn denied_token_guard_requires_identifier_boundary() {
+    use super::sandbox::lower_code_plan;
+    use super::store::CodeModeLimits;
+    let limits = CodeModeLimits::default();
+
+    for plan in [
+        "const f = await zero.read(\"a.txt\"); return f.refs.length",
+        "const r = await zero.shell(\"ls\"); return r.refs.stdout",
+        "const subprocess_count = 1; return subprocess_count",
+        "const respawned = true; return respawned",
+        "const restored = await zero.expand(\"tz://blob/x\"); return restored",
+    ] {
+        assert!(
+            lower_code_plan(plan, &limits).is_ok(),
+            "false positive for plan: {plan}"
+        );
+    }
+
+    for (plan, token) in [
+        ("return fs.readFileSync(\"/etc/passwd\")", "fs."),
+        ("const x = a.fs.read()", "fs."),
+        ("return process.env.HOME", "process"),
+        ("spawn(\"sh\")", "spawn"),
+        ("return db.query(\"x\")", "db."),
+    ] {
+        let err = lower_code_plan(plan, &limits).expect_err(plan);
+        assert!(err.contains(token), "expected {token} denial, got: {err}");
+    }
+}
+
+#[test]
+fn alias_rewrites_skip_string_literals_and_identifier_tails() {
+    use super::sandbox::lower_code_plan;
+    use super::store::CodeModeLimits;
+    let limits = CodeModeLimits::default();
+
+    let lowered = lower_code_plan(
+        "const p = \"/tmp/fab-api.txt\"; const q = 'ctx.ref in a string'; return p",
+        &limits,
+    )
+    .unwrap();
+    assert!(lowered.contains("/tmp/fab-api.txt"), "string literal corrupted: {lowered}");
+    assert!(lowered.contains("ctx.ref in a string"), "string literal corrupted: {lowered}");
+
+    let lowered = lower_code_plan("const myapi = 1; return myapi.foo", &limits).unwrap();
+    assert!(lowered.contains("myapi.foo"), "identifier tail corrupted: {lowered}");
+
+    let lowered = lower_code_plan("return api.read(\"a.txt\")", &limits).unwrap();
+    assert!(lowered.contains("zero.read("), "api alias not rewritten: {lowered}");
+
+    let lowered = lower_code_plan("return token.compact(x)", &limits).unwrap();
+    assert!(lowered.contains("zero.token.compact(x)"), "token alias not rewritten: {lowered}");
+
+    let lowered = lower_code_plan("return zero.token.compact(x)", &limits).unwrap();
+    assert!(
+        lowered.contains("zero.token.compact(x)") && !lowered.contains("zero.zero."),
+        "double prefix: {lowered}"
+    );
+}
