@@ -68,6 +68,64 @@ fn write_single_event(path: &Path, tool: &str) {
     fs::write(path, line).unwrap();
 }
 
+fn write_sidecar_with_scan(input: &Path, input_scan: &JsonlScan, updated_unix: u64) {
+    write_sidecar_meta(
+        &export_meta_path(input),
+        &PulseSyncMeta {
+            schema_version: PULSE_SYNC_SCHEMA_VERSION.to_string(),
+            source_of_truth: PULSE_SOURCE_OF_TRUTH.to_string(),
+            ledger_sha256: input_scan.ledger_sha256.clone(),
+            event_count: input_scan.event_count,
+            skipped_lines: input_scan.skipped_lines,
+            updated_unix,
+        },
+    )
+    .unwrap();
+}
+
+fn setup_import_test() -> (
+    tempfile::TempDir,
+    PathBuf,
+    PathBuf,
+    PulseSyncMeta,
+    String,
+    Vec<u8>,
+) {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("events.jsonl");
+    let input = dir.path().join("input.jsonl");
+    record_event(&path, &test_event("read")).unwrap();
+    let current = sync_jsonl_to_sqlite(&path).unwrap();
+    let current_meta = read_sidecar_meta(&current.meta_path).unwrap();
+    let before_sha = current.ledger_sha256.clone();
+    let before_bytes = fs::read(&path).unwrap();
+    (dir, path, input, current_meta, before_sha, before_bytes)
+}
+
+fn assert_import_post_rejection(
+    case_name: &str,
+    path: &Path,
+    ledger_changed: bool,
+    before_sha: &str,
+    before_bytes: &[u8],
+) {
+    if ledger_changed {
+        let after = sync_jsonl_to_sqlite(path).unwrap();
+        assert_ne!(
+            after.ledger_sha256, before_sha,
+            "[{}] ledger hash must advance after new event",
+            case_name
+        );
+    } else {
+        assert_eq!(
+            fs::read(path).unwrap(),
+            before_bytes,
+            "[{}] original ledger must be unchanged after rejection",
+            case_name
+        );
+    }
+}
+
 fn event_line_with_schema(schema_version: &str) -> Vec<u8> {
     let mut event = test_event("read");
     event.schema_version = schema_version.to_string();
@@ -564,37 +622,25 @@ type SnapshotSetupFn = Box<
 fn import_rejects_snapshot_with_stale_or_mismatched_marker() {
     struct Case {
         name: &'static str,
-        /// Create the input snapshot and optionally mutate the ledger.
-        /// Returns the expected error message fragment.
+        ledger_changed: bool,
         setup: SnapshotSetupFn,
     }
 
     let cases: Vec<Case> = vec![
         Case {
             name: "older_marker",
+            ledger_changed: false,
             setup: Box::new(|_dir, _path, input, _current_meta| {
                 write_single_event(input, "shell");
                 let input_scan = scan_jsonl(input, |_| Ok(())).unwrap();
-                write_sidecar_meta(
-                    &export_meta_path(input),
-                    &PulseSyncMeta {
-                        schema_version: PULSE_SYNC_SCHEMA_VERSION.to_string(),
-                        source_of_truth: PULSE_SOURCE_OF_TRUTH.to_string(),
-                        ledger_sha256: input_scan.ledger_sha256,
-                        event_count: input_scan.event_count,
-                        skipped_lines: input_scan.skipped_lines,
-                        updated_unix: 0,
-                    },
-                )
-                .unwrap();
+                write_sidecar_with_scan(input, &input_scan, 0);
                 "not newer".to_string()
             }),
         },
         Case {
             name: "ledger_changed_after_marker",
+            ledger_changed: true,
             setup: Box::new(|_dir, path, input, _current_meta| {
-                // Export a proper snapshot (with sidecar) from the current ledger,
-                // then diverge the ledger by appending a new event.
                 export_jsonl(path, input).unwrap();
                 record_event(path, &test_event("shell")).unwrap();
                 "unsynced changes".to_string()
@@ -602,26 +648,17 @@ fn import_rejects_snapshot_with_stale_or_mismatched_marker() {
         },
         Case {
             name: "same_second_marker",
+            ledger_changed: false,
             setup: Box::new(|_dir, _path, input, current_meta| {
                 write_single_event(input, "shell");
                 let input_scan = scan_jsonl(input, |_| Ok(())).unwrap();
-                write_sidecar_meta(
-                    &export_meta_path(input),
-                    &PulseSyncMeta {
-                        schema_version: PULSE_SYNC_SCHEMA_VERSION.to_string(),
-                        source_of_truth: PULSE_SOURCE_OF_TRUTH.to_string(),
-                        ledger_sha256: input_scan.ledger_sha256,
-                        event_count: input_scan.event_count,
-                        skipped_lines: input_scan.skipped_lines,
-                        updated_unix: current_meta.updated_unix,
-                    },
-                )
-                .unwrap();
+                write_sidecar_with_scan(input, &input_scan, current_meta.updated_unix);
                 "not newer".to_string()
             }),
         },
         Case {
             name: "marker_hash_mismatch",
+            ledger_changed: false,
             setup: Box::new(|_dir, _path, input, current_meta| {
                 write_single_event(input, "shell");
                 write_sidecar_meta(
@@ -642,39 +679,16 @@ fn import_rejects_snapshot_with_stale_or_mismatched_marker() {
     ];
 
     for case in &cases {
-        let dir = tempdir().unwrap();
-        let path = dir.path().join("events.jsonl");
-        let input = dir.path().join("input.jsonl");
-        record_event(&path, &test_event("read")).unwrap();
-        let current = sync_jsonl_to_sqlite(&path).unwrap();
-        let current_meta = read_sidecar_meta(&current.meta_path).unwrap();
-
-        // Snapshot original state for post-rejection checks.
-        let before_sha = current.ledger_sha256.clone();
-        let before_bytes = fs::read(&path).unwrap();
-
-        let expected_fragment = (case.setup)(dir.path(), &path, &input, &current_meta);
-
+        let (_dir, path, input, current_meta, before_sha, before_bytes) = setup_import_test();
+        let expected_fragment = (case.setup)(_dir.path(), &path, &input, &current_meta);
         assert_import_rejected(&input, &path, &expected_fragment);
-
-        // After rejection, the original ledger must not have changed
-        // (except for "ledger_changed_after_marker" where we intentionally
-        // mutated it — in that case we verify the hash advanced).
-        if case.name == "ledger_changed_after_marker" {
-            let after = sync_jsonl_to_sqlite(&path).unwrap();
-            assert_ne!(
-                after.ledger_sha256, before_sha,
-                "[{}] ledger hash must advance after new event",
-                case.name
-            );
-        } else {
-            assert_eq!(
-                fs::read(&path).unwrap(),
-                before_bytes,
-                "[{}] original ledger must be unchanged after rejection",
-                case.name
-            );
-        }
+        assert_import_post_rejection(
+            case.name,
+            &path,
+            case.ledger_changed,
+            &before_sha,
+            &before_bytes,
+        );
     }
 }
 

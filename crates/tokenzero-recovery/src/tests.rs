@@ -30,6 +30,60 @@ fn write_aged_file(path: &Path, bytes: usize, age: Duration) {
         .unwrap();
 }
 
+fn setup_tmp_sweep_files(
+    dir: &Path,
+    cache_name: &str,
+    stale_age: Duration,
+) -> (PathBuf, PathBuf, PathBuf, PathBuf, PathBuf) {
+    let _cache = dir.join(cache_name);
+    let hidden = dir.join(format!(".{cache_name}.123.7.tmp"));
+    let legacy = dir.join(format!("{cache_name}.456.a1b2c3.tmp"));
+    let fresh = dir.join(format!(".{cache_name}.789.8.tmp"));
+    let lock = dir.join(format!("{cache_name}.lock"));
+    let unrelated = dir.join("other-file.tmp");
+    write_aged_file(&hidden, 5, stale_age);
+    write_aged_file(&legacy, 7, stale_age);
+    write_aged_file(&fresh, 3, Duration::from_secs(1));
+    write_aged_file(&lock, 2, stale_age);
+    write_aged_file(&unrelated, 9, stale_age);
+    (hidden, legacy, fresh, lock, unrelated)
+}
+
+fn assert_tmp_sweep_report(
+    report: &TmpSweepReport,
+    dry_run: bool,
+    hidden: &Path,
+    legacy: &Path,
+    fresh: &Path,
+    lock: &Path,
+    unrelated: &Path,
+) {
+    assert_eq!(report.dry_run, dry_run);
+    assert_eq!(report.scanned, 3);
+    assert_eq!(report.removed, 2);
+    assert_eq!(report.removed_bytes, 12);
+    assert_eq!(report.failed, 0);
+    if dry_run {
+        assert!(hidden.exists(), "dry run must not unlink");
+        assert!(legacy.exists(), "dry run must not unlink");
+    } else {
+        assert!(
+            !hidden.exists(),
+            "stale hidden-shape orphan must be reclaimed"
+        );
+        assert!(
+            !legacy.exists(),
+            "stale legacy-shape orphan must be reclaimed"
+        );
+    }
+    assert!(
+        fresh.exists(),
+        "an in-flight writer's temp file must survive"
+    );
+    assert!(lock.exists(), "the lock anchor must never be touched");
+    assert!(unrelated.exists(), "unrelated temp files must survive");
+}
+
 // ---------------------------------------------------------------------------
 // Roundtrip / persistence
 // ---------------------------------------------------------------------------
@@ -469,6 +523,22 @@ fn do_deferred(store: &mut RecoveryStore, text: &str) -> StoredPayload {
     store.store_payload_deferred(text, ContentType::Unknown, None, None, None)
 }
 
+fn assert_state_keys_match(a: &RecoveryStore, b: &RecoveryStore) {
+    assert_eq!(
+        a.state.blobs.keys().collect::<Vec<_>>(),
+        b.state.blobs.keys().collect::<Vec<_>>()
+    );
+    assert_eq!(
+        a.state.files.keys().collect::<Vec<_>>(),
+        b.state.files.keys().collect::<Vec<_>>()
+    );
+    assert_eq!(
+        a.state.units.keys().collect::<Vec<_>>(),
+        b.state.units.keys().collect::<Vec<_>>()
+    );
+    assert_eq!(a.state.order, b.state.order);
+}
+
 test_eviction_on_overflow!(eviction_bounds_blob_count, do_store);
 test_eviction_on_overflow!(
     deferred_payload_enforces_limits_before_returning,
@@ -522,19 +592,7 @@ fn batched_deferred_payloads_match_immediate_final_live_refs() {
     }
     batched.persist_pending().unwrap();
 
-    assert_eq!(
-        immediate.state.blobs.keys().collect::<Vec<_>>(),
-        batched.state.blobs.keys().collect::<Vec<_>>()
-    );
-    assert_eq!(
-        immediate.state.files.keys().collect::<Vec<_>>(),
-        batched.state.files.keys().collect::<Vec<_>>()
-    );
-    assert_eq!(
-        immediate.state.units.keys().collect::<Vec<_>>(),
-        batched.state.units.keys().collect::<Vec<_>>()
-    );
-    assert_eq!(immediate.state.order, batched.state.order);
+    assert_state_keys_match(&immediate, &batched);
 }
 
 #[test]
@@ -692,43 +750,12 @@ fn tmp_sweep_fixture(dry_run: bool) {
     let dir = tempdir().unwrap();
     let cache = dir.path().join("recovery-cache.json");
     let stale_age = STALE_TMP_MAX_AGE * 2;
-    let hidden = dir.path().join(".recovery-cache.json.123.7.tmp");
-    let legacy = dir.path().join("recovery-cache.json.456.a1b2c3.tmp");
-    let fresh = dir.path().join(".recovery-cache.json.789.8.tmp");
-    let lock = dir.path().join("recovery-cache.json.lock");
-    let unrelated = dir.path().join("other-file.tmp");
-    write_aged_file(&hidden, 5, stale_age);
-    write_aged_file(&legacy, 7, stale_age);
-    write_aged_file(&fresh, 3, Duration::from_secs(1));
-    write_aged_file(&lock, 2, stale_age);
-    write_aged_file(&unrelated, 9, stale_age);
+    let (hidden, legacy, fresh, lock, unrelated) =
+        setup_tmp_sweep_files(dir.path(), "recovery-cache.json", stale_age);
     let report = sweep_stale_tmp_files(&cache, STALE_TMP_MAX_AGE, dry_run);
-
-    assert_eq!(report.dry_run, dry_run);
-    assert_eq!(report.scanned, 3);
-    assert_eq!(report.removed, 2);
-    assert_eq!(report.removed_bytes, 12);
-    assert_eq!(report.failed, 0);
-
-    if dry_run {
-        assert!(hidden.exists(), "dry run must not unlink");
-        assert!(legacy.exists(), "dry run must not unlink");
-    } else {
-        assert!(
-            !hidden.exists(),
-            "stale hidden-shape orphan must be reclaimed"
-        );
-        assert!(
-            !legacy.exists(),
-            "stale legacy-shape orphan must be reclaimed"
-        );
-    }
-    assert!(
-        fresh.exists(),
-        "an in-flight writer\'s temp file must survive"
+    assert_tmp_sweep_report(
+        &report, dry_run, &hidden, &legacy, &fresh, &lock, &unrelated,
     );
-    assert!(lock.exists(), "the lock anchor must never be touched");
-    assert!(unrelated.exists(), "unrelated temp files must survive");
 }
 
 #[test]

@@ -134,66 +134,13 @@ fn leading_posix_env_assignment_uses_shell() {
     );
 }
 
-/// Parametrized table for Windows/cmd/powershell split_command_string_for_platform.
-/// Consolidates: windows_split_preserves_path_backslashes,
-/// cmd_split_treats_single_quotes_as_literal_characters,
-/// powershell_split_uses_single_quotes_for_literal_arguments,
-/// split_preserves_empty_quoted_arguments.
-#[test]
-fn windows_quote_split_table() {
-    struct Case {
-        input: &'static str,
-        platform: &'static str,
-        expected: Vec<&'static str>,
-    }
-    let cases = [
-        // Path backslashes preserved on Windows.
-        Case {
-            input: "powershell -File scripts\\rust_windows_verify.ps1",
-            platform: "windows",
-            expected: vec!["powershell", "-File", "scripts\\rust_windows_verify.ps1"],
-        },
-        // cmd: single quotes are literal characters, not grouping.
-        Case {
-            input: "findstr 'error warning' sample.txt",
-            platform: "cmd",
-            expected: vec!["findstr", "'error", "warning'", "sample.txt"],
-        },
-        // powershell: single quotes group literals.
-        Case {
-            input: "powershell -NoProfile -Command 'Write-Output ok'",
-            platform: "windows",
-            expected: vec!["powershell", "-NoProfile", "-Command", "Write-Output ok"],
-        },
-        // powershell: double-quoted path with spaces.
-        Case {
-            input: "\"C:\\Program Files\\PowerShell\\7\\pwsh.exe\" -Command 'Write-Output ok'",
-            platform: "windows",
-            expected: vec![
-                "C:\\Program Files\\PowerShell\\7\\pwsh.exe",
-                "-Command",
-                "Write-Output ok",
-            ],
-        },
-        // Empty double-quoted arg on cmd.
-        Case {
-            input: "\"\"",
-            platform: "cmd",
-            expected: vec![""],
-        },
-        // Empty double-quoted arg embedded on cmd.
-        Case {
-            input: "tool \"\" tail",
-            platform: "cmd",
-            expected: vec!["tool", "", "tail"],
-        },
-        // Empty single-quoted arg on powershell.
-        Case {
-            input: "tool '' tail",
-            platform: "powershell",
-            expected: vec!["tool", "", "tail"],
-        },
-    ];
+struct SplitCase {
+    input: &'static str,
+    platform: &'static str,
+    expected: Vec<&'static str>,
+}
+
+fn assert_split_cases(cases: &[SplitCase]) {
     for (i, case) in cases.iter().enumerate() {
         let actual = split_command_string_for_platform(case.input, case.platform);
         let expected: Vec<String> = case.expected.iter().map(|s| s.to_string()).collect();
@@ -203,6 +150,64 @@ fn windows_quote_split_table() {
             case.input, case.platform
         );
     }
+}
+
+/// Parametrized table for Windows/cmd/powershell split_command_string_for_platform.
+/// Consolidates: windows_split_preserves_path_backslashes,
+/// cmd_split_treats_single_quotes_as_literal_characters,
+/// powershell_split_uses_single_quotes_for_literal_arguments,
+/// split_preserves_empty_quoted_arguments.
+#[test]
+fn windows_quote_split_table() {
+    let cases = [
+        // Path backslashes preserved on Windows.
+        SplitCase {
+            input: "powershell -File scripts\\rust_windows_verify.ps1",
+            platform: "windows",
+            expected: vec!["powershell", "-File", "scripts\\rust_windows_verify.ps1"],
+        },
+        // cmd: single quotes are literal characters, not grouping.
+        SplitCase {
+            input: "findstr 'error warning' sample.txt",
+            platform: "cmd",
+            expected: vec!["findstr", "'error", "warning'", "sample.txt"],
+        },
+        // powershell: single quotes group literals.
+        SplitCase {
+            input: "powershell -NoProfile -Command 'Write-Output ok'",
+            platform: "windows",
+            expected: vec!["powershell", "-NoProfile", "-Command", "Write-Output ok"],
+        },
+        // powershell: double-quoted path with spaces.
+        SplitCase {
+            input: "\"C:\\Program Files\\PowerShell\\7\\pwsh.exe\" -Command 'Write-Output ok'",
+            platform: "windows",
+            expected: vec![
+                "C:\\Program Files\\PowerShell\\7\\pwsh.exe",
+                "-Command",
+                "Write-Output ok",
+            ],
+        },
+        // Empty double-quoted arg on cmd.
+        SplitCase {
+            input: "\"\"",
+            platform: "cmd",
+            expected: vec![""],
+        },
+        // Empty double-quoted arg embedded on cmd.
+        SplitCase {
+            input: "tool \"\" tail",
+            platform: "cmd",
+            expected: vec!["tool", "", "tail"],
+        },
+        // Empty single-quoted arg on powershell.
+        SplitCase {
+            input: "tool '' tail",
+            platform: "powershell",
+            expected: vec!["tool", "", "tail"],
+        },
+    ];
+    assert_split_cases(&cases);
     // cmd: single quotes inside contains_platform_shell_syntax.
     assert!(contains_platform_shell_syntax(
         "findstr 'error|warning' sample.txt",
@@ -405,6 +410,18 @@ fn write_spill_aged(dir: &Path, name: &str, bytes: usize, age: Duration) -> Path
     path
 }
 
+fn assert_spill_prune_kept(old: &Path, fresh: &Path, foreign: &Path, report: &SpillPruneReport) {
+    assert!(!old.exists(), "expired spill must be reclaimed");
+    assert!(fresh.exists(), "fresh spill must survive");
+    assert!(foreign.exists(), "non-spill files must never be touched");
+    assert_eq!(report.scanned_files, 2);
+    assert_eq!(report.removed_files, 1);
+    assert_eq!(report.removed_bytes, 10);
+    assert_eq!(report.kept_files, 1);
+    assert_eq!(report.kept_bytes, 20);
+    assert_eq!(report.failed_removals, 0);
+}
+
 #[test]
 fn spill_prune_reclaims_expired_and_keeps_fresh_and_foreign_files() {
     let dir = tempfile::tempdir().unwrap();
@@ -432,15 +449,7 @@ fn spill_prune_reclaims_expired_and_keeps_fresh_and_foreign_files() {
         DEFAULT_SPILL_MAX_TOTAL_BYTES,
         false,
     );
-    assert!(!old.exists(), "expired spill must be reclaimed");
-    assert!(fresh.exists(), "fresh spill must survive");
-    assert!(foreign.exists(), "non-spill files must never be touched");
-    assert_eq!(report.scanned_files, 2);
-    assert_eq!(report.removed_files, 1);
-    assert_eq!(report.removed_bytes, 10);
-    assert_eq!(report.kept_files, 1);
-    assert_eq!(report.kept_bytes, 20);
-    assert_eq!(report.failed_removals, 0);
+    assert_spill_prune_kept(&old, &fresh, &foreign, &report);
 }
 
 #[test]
