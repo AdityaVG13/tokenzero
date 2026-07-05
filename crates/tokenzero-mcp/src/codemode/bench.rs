@@ -115,8 +115,20 @@ pub fn workloads_for_root(root: &std::path::Path) -> Vec<Workload> {
 
 pub fn run_benchmark(root: &std::path::Path) -> BenchmarkReport {
     let workloads = workloads_for_root(root);
+    // Hermetic per-invocation recovery cache: the default cache path is
+    // durable per root, so a second run in the same process (or a re-run of
+    // the shell script) sees the first run's seen-set and dedups payloads,
+    // making token counts non-deterministic (804 vs 136 observed).
+    static BENCH_RUN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let run_id = BENCH_RUN.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let cache_path = std::env::temp_dir().join(format!(
+        "tokenzero-bench-cache-{}-{run_id}.json",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_file(&cache_path);
     let options_base = CodeModeOptions {
         root: Some(root.to_path_buf()),
+        cache_path: Some(cache_path),
         ..Default::default()
     };
 
