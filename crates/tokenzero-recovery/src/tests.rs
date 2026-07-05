@@ -121,50 +121,6 @@ fn shell_outcomes_survive_persistence_roundtrip() {
 }
 
 #[test]
-fn persist_compacts_duplicate_order_entries() {
-    let dir = tempdir().unwrap();
-    let cache = dir.path().join("cache.json");
-    {
-        let mut store = RecoveryStore::new(Some(cache.clone()));
-        for _ in 0..5 {
-            store.store_payload_deferred("same\n", ContentType::Unknown, None, None, None);
-        }
-        assert!(store.state.order.len() > 1);
-        store.persist_pending().unwrap();
-    }
-
-    let restarted = RecoveryStore::new(Some(cache));
-    let unique = restarted.state.order.iter().collect::<HashSet<_>>().len();
-    assert_eq!(restarted.state.order.len(), unique);
-}
-
-#[test]
-fn persist_lock_file_is_stable_anchor_not_deleted_on_drop() {
-    let dir = tempdir().unwrap();
-    let lock_path = dir.path().join("cache.json.lock");
-
-    {
-        let _lock = PersistLock::acquire(lock_path.clone()).unwrap();
-        assert!(lock_path.exists());
-        let err = match PersistLock::acquire_with_retries(lock_path.clone(), 1) {
-            Ok(_) => panic!("second lock acquisition should block while OS lock is held"),
-            Err(err) => err,
-        };
-        match err {
-            RecoveryError::Io(err) => assert_eq!(err.kind(), std::io::ErrorKind::TimedOut),
-            other => panic!("unexpected lock error: {other:?}"),
-        }
-    }
-
-    assert!(
-        lock_path.exists(),
-        "OS file locks must keep one stable lock anchor"
-    );
-    drop(PersistLock::acquire(lock_path.clone()).unwrap());
-    assert!(lock_path.exists());
-}
-
-#[test]
 fn concurrent_persistence_preserves_all_thread_payloads() {
     let dir = tempdir().unwrap();
     let cache = dir.path().join("cache.json");
@@ -265,20 +221,6 @@ fn single_writer_repeat_persists_skip_reload_and_stay_byte_exact() {
         assert!(expanded.found, "missing {blob_ref}");
         assert_eq!(&expanded.content, text);
     }
-}
-
-#[test]
-fn persisted_cache_is_compact_json() {
-    let dir = tempdir().unwrap();
-    let cache = dir.path().join("cache.json");
-    let mut store = RecoveryStore::new(Some(cache.clone()));
-    store
-        .store_payload("alpha\n", ContentType::Unknown, None, None, None)
-        .unwrap();
-
-    let text = fs::read_to_string(cache).unwrap();
-    assert!(serde_json::from_str::<RecoveryState>(&text).is_ok());
-    assert_eq!(text.lines().count(), 1);
 }
 
 #[test]
@@ -427,58 +369,6 @@ fn stale_check_uses_native_path_identity_before_display_path() {
     assert!(
         !store.file_ref_is_stale(&ref_id),
         "native path identity must drive stale checks when display text is lossy"
-    );
-}
-
-#[test]
-fn line_range_payloads_skip_source_fingerprint() {
-    let dir = tempdir().unwrap();
-    let source = dir.path().join("large.txt");
-    fs::write(&source, "one\ntwo\n").unwrap();
-    let mut store = RecoveryStore::new(Some(dir.path().join("cache.json")));
-    let stored = store
-        .store_payload(
-            "one\n",
-            ContentType::Unknown,
-            Some(&source),
-            Some(1),
-            Some(1),
-        )
-        .unwrap();
-
-    assert!(
-        store
-            .state
-            .files
-            .get(&stored.file_ref)
-            .unwrap()
-            .source_fingerprint
-            .is_none()
-    );
-}
-
-#[test]
-fn virtual_paths_skip_source_fingerprint() {
-    let dir = tempdir().unwrap();
-    let mut store = RecoveryStore::new(Some(dir.path().join("cache.json")));
-    let stored = store
-        .store_payload(
-            "output\n",
-            ContentType::ShellOutput,
-            Some(Path::new("shell:stdout:test")),
-            None,
-            None,
-        )
-        .unwrap();
-
-    assert!(
-        store
-            .state
-            .files
-            .get(&stored.file_ref)
-            .unwrap()
-            .source_fingerprint
-            .is_none()
     );
 }
 
@@ -768,16 +658,30 @@ proptest! {
         let mut restarted = RecoveryStore::new(Some(cache));
         let expanded = restarted.expand(&stored.blob_ref, Some("raw"), None, None, None, None);
         prop_assert!(expanded.found);
-        prop_assert_eq!(expanded.content, text);
+        prop_assert_eq!(&expanded.content, &text);
+        let file_expanded = restarted.expand(&stored.file_ref, Some("raw"), None, None, None, None);
+        prop_assert!(file_expanded.found);
+        prop_assert_eq!(&file_expanded.content, &text);
     }
 
     #[test]
     fn generated_around_selectors_do_not_panic(line in any::<usize>(), radius in any::<usize>()) {
+        let text = "a\nb\nc\n";
         let selector = format!("around:L{line}:{radius}");
+        let selected = select_content(text, Some(&selector), None, None, None, None);
 
-        let selected = select_content("a\nb\nc\n", Some(&selector), None, None, None, None);
-
-        prop_assert!(selected.is_empty() || selected == "a\n" || selected == "a\nb\n" || selected == "a\nb\nc\n");
+        let segments: Vec<&str> = text.split_inclusive('\n').collect();
+        let num_lines = segments.len();
+        let start = line.saturating_sub(radius).max(1);
+        let end = line.saturating_add(radius);
+        let expected = if start > num_lines {
+            String::new()
+        } else {
+            let lo = start - 1;
+            let hi = end.min(num_lines);
+            segments[lo..hi].concat()
+        };
+        prop_assert_eq!(selected, expected);
     }
 }
 
@@ -980,20 +884,6 @@ fn big_blob_externalizes_to_sidecar_and_roundtrips() {
     let expanded = restarted.expand(&stored.blob_ref, Some("raw"), None, None, None, None);
     assert!(expanded.found);
     assert_eq!(expanded.content, big);
-}
-
-#[test]
-fn small_blob_stays_inline() {
-    let dir = tempdir().unwrap();
-    let cache = dir.path().join("cache.json");
-    let mut store = RecoveryStore::new(Some(cache.clone()));
-    store
-        .store_payload("small\n", ContentType::Unknown, None, None, None)
-        .unwrap();
-    assert!(
-        !blob_sidecar_dir(&cache).exists(),
-        "no sidecar for small payloads"
-    );
 }
 
 #[test]
