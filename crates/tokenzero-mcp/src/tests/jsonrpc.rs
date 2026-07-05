@@ -132,6 +132,34 @@ fn mcp_idle_timeout_zero_disables_and_large_values_clamp() {
     assert_eq!(DEFAULT_MCP_IDLE_TIMEOUT_SECS, 0);
 }
 
+/// Find a tool by name in a tools array.
+fn find_tool_by_name<'a>(tools: &'a [Value], name: &str) -> &'a Value {
+    tools
+        .iter()
+        .find(|tool| tool["name"] == name)
+        .unwrap_or_else(|| panic!("tool {name} not found in tools list"))
+}
+
+/// Find a tool by name in a tools/list response.
+fn find_tool<'a>(listed: &'a Value, name: &str) -> &'a Value {
+    find_tool_by_name(listed["result"]["tools"].as_array().unwrap(), name)
+}
+
+/// Assert no tool in a tools/list result advertises top-level schema combinators.
+fn assert_no_schema_combinators(listed: &Value) {
+    for tool in listed["result"]["tools"].as_array().unwrap() {
+        let schema = &tool["inputSchema"];
+        assert_eq!(schema["type"], "object", "tool {}", tool["name"]);
+        for key in ["anyOf", "oneOf", "allOf"] {
+            assert!(
+                schema.get(key).is_none(),
+                "tool {} advertises top-level {key}",
+                tool["name"]
+            );
+        }
+    }
+}
+
 #[test]
 fn mcp_lists_and_calls_cache_pack_tool() {
     let dir = tempdir().unwrap();
@@ -154,12 +182,7 @@ fn mcp_lists_and_calls_cache_pack_tool() {
     assert!(names.contains(&"tz_cache_pack"));
     assert!(names.contains(&"cache_pack"));
 
-    let read_tool = listed["result"]["tools"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|tool| tool["name"] == "tz_read")
-        .unwrap();
+    let read_tool = find_tool(&listed, "tz_read");
     assert!(
         read_tool["inputSchema"].get("$schema").is_none(),
         "tools/list schemas stay lean; the dialect is implied"
@@ -184,12 +207,7 @@ fn mcp_lists_and_calls_cache_pack_tool() {
         .unwrap();
     let docs_text = docs["result"]["contents"][0]["text"].as_str().unwrap();
     let docs_payload: Value = serde_json::from_str(docs_text).unwrap();
-    let read_doc = docs_payload["tools"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|tool| tool["name"] == "tz_read")
-        .unwrap();
+    let read_doc = find_tool_by_name(docs_payload["tools"].as_array().unwrap(), "tz_read");
     let read_doc_description = read_doc["description"].as_str().unwrap();
     for required_section in [
         "Discovery",
@@ -205,44 +223,19 @@ fn mcp_lists_and_calls_cache_pack_tool() {
         );
     }
 
-    let alias_tool = listed["result"]["tools"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|tool| tool["name"] == "read")
-        .unwrap();
+    let alias_tool = find_tool(&listed, "read");
     // Aliases advertise a permissive stub on the wire; the canonical schema
     // stays recoverable from the catalog resource.
     assert_eq!(alias_tool["inputSchema"], json!({"type": "object"}));
-    let alias_doc = docs_payload["tools"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|tool| tool["name"] == "read")
-        .unwrap();
+    let alias_doc = find_tool_by_name(docs_payload["tools"].as_array().unwrap(), "read");
     assert_eq!(alias_doc["inputSchema"], read_tool["inputSchema"]);
 
-    let shell_tool = listed["result"]["tools"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|tool| tool["name"] == "tz_shell")
-        .unwrap();
+    let shell_tool = find_tool(&listed, "tz_shell");
     assert_eq!(shell_tool["inputSchema"]["additionalProperties"], false);
     // Top-level schema combinators make some MCP clients (Claude Code
     // among them) drop the tool from the model's tool list entirely;
     // every advertised schema must stay a plain object.
-    for tool in listed["result"]["tools"].as_array().unwrap() {
-        let schema = &tool["inputSchema"];
-        assert_eq!(schema["type"], "object", "tool {}", tool["name"]);
-        for key in ["anyOf", "oneOf", "allOf"] {
-            assert!(
-                schema.get(key).is_none(),
-                "tool {} advertises top-level {key}",
-                tool["name"]
-            );
-        }
-    }
+    assert_no_schema_combinators(&listed);
 
     let called: Value = serde_json::from_str(
             &handle_jsonrpc(
