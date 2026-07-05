@@ -107,7 +107,7 @@ fn main() -> Result<()> {
                     supervised_child_args(&args),
                 ))
             }
-            std::process::exit(tokenzero_mcp::run_stdio(engine_config_for_mcp(&args)?))
+            tokenzero_mcp::run_fastmcp_stdio(engine_config_for_mcp(&args)?)
         }
         Commands::McpSmoke(args) => emit_value(
             run_mcp_artifact(args.output_json, args.output_md, 1)?,

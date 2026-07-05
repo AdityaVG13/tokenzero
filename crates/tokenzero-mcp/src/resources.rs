@@ -6,11 +6,13 @@ use crate::catalog::{canonical_tool_names_for_surface, resource_specs, tool_clus
 use crate::codemode::catalog::codemode_method_catalog;
 use crate::jsonrpc::{JsonRpcErrorData, SUPPORTED_PROTOCOL_VERSIONS, tool_filter_discovery};
 
-pub(crate) fn read_resource(
+/// Build the JSON payload string for a resource URI. Used by both the
+/// hand-rolled resources/read dispatch and the FastMCP ResourceHandler impls.
+pub(crate) fn build_resource_payload(
     engine: &TokenZeroEngine,
     uri: &str,
-) -> Result<Value, JsonRpcErrorData> {
-    let resource = resource_specs()
+) -> Result<String, JsonRpcErrorData> {
+    let _resource = resource_specs()
         .into_iter()
         .find(|resource| resource.uri == uri)
         .ok_or_else(|| JsonRpcErrorData::unknown_resource(uri))?;
@@ -106,28 +108,39 @@ pub(crate) fn read_resource(
         }),
         "resource://tokenzero/metrics" => engine.tool_metrics_snapshot(),
         "resource://tokenzero/shell-contract" => {
-            return Ok(resource_read_result(
-                &resource.uri,
-                &resource.mime_type,
-                [
-                    "# TokenZero Shell Contract",
-                    "",
-                    "- MCP transport success is separate from child command success.",
-                    "- Inspect `command_success`, `exit_code`, and `status_label` in the shell text output (or `structuredContent.cli.telemetry` with TOKENZERO_MCP_ENVELOPE=compact|full).",
-                    "- Stdout, stderr, combined output, and capture records are stored behind refs when available.",
-                    "- Use `cwd` instead of shell `cd` when choosing a working directory.",
-                    "- Use read-only commands for safe retries; mutating commands are not generally idempotent.",
-                ]
-                .join("\n"),
-            ));
+            return Ok([
+                "# TokenZero Shell Contract",
+                "",
+                "- MCP transport success is separate from child command success.",
+                "- Inspect `command_success`, `exit_code`, and `status_label` in the shell text output (or `structuredContent.cli.telemetry` with TOKENZERO_MCP_ENVELOPE=compact|full).",
+                "- Stdout, stderr, combined output, and capture records are stored behind refs when available.",
+                "- Use `cwd` instead of shell `cd` when choosing a working directory.",
+                "- Use read-only commands for safe retries; mutating commands are not generally idempotent.",
+            ]
+            .join("\n"));
         }
         _ => unreachable!("resource was already resolved"),
     };
 
+    let text = serde_json::to_string_pretty(&payload).unwrap_or_else(|_| "{}".to_string());
+    Ok(text)
+}
+
+pub(crate) fn read_resource(
+    engine: &TokenZeroEngine,
+    uri: &str,
+) -> Result<Value, JsonRpcErrorData> {
+    let resource = resource_specs()
+        .into_iter()
+        .find(|resource| resource.uri == uri)
+        .ok_or_else(|| JsonRpcErrorData::unknown_resource(uri))?;
+
+    let text = build_resource_payload(engine, uri)?;
+
     Ok(resource_read_result(
         &resource.uri,
         &resource.mime_type,
-        serde_json::to_string_pretty(&payload).unwrap_or_else(|_| "{}".to_string()),
+        text,
     ))
 }
 

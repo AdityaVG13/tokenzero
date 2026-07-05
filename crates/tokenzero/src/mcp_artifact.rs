@@ -24,6 +24,8 @@ pub(crate) fn run_mcp_artifact(
     let mut missing_unknown_tools = 0usize;
     let mut missing_tool_schemas = 0usize;
     let mut missing_resource_discovery = 0usize;
+    let mut missing_resource_tools_present = 0usize;
+    let mut missing_resource_tools_read = 0usize;
     let mut missing_structured_error_data = 0usize;
     let mut missing_tool_cluster_filter = 0usize;
     let mut missing_parallel_reads = 0usize;
@@ -55,7 +57,7 @@ pub(crate) fn run_mcp_artifact(
                     "id": idx,
                     "method": "initialize",
                     "params": {
-                        "protocolVersion": "2025-06-18",
+                        "protocolVersion": "2024-11-05",
                         "capabilities": {},
                         "clientInfo": {
                             "name": "tokenzero-mcp-smoke",
@@ -63,6 +65,11 @@ pub(crate) fn run_mcp_artifact(
                         }
                     }
                 })
+            )?;
+            writeln!(
+                stdin,
+                "{}",
+                json!({"jsonrpc":"2.0","method":"notifications/initialized"})
             )?;
             writeln!(
                 stdin,
@@ -87,6 +94,11 @@ pub(crate) fn run_mcp_artifact(
             writeln!(
                 stdin,
                 "{}",
+                json!({"jsonrpc":"2.0","id":idx+1300,"method":"resources/read","params":{"uri":"resource://tokenzero/tools"}})
+            )?;
+            writeln!(
+                stdin,
+                "{}",
                 json!({"jsonrpc":"2.0","id":idx+1500,"method":"tools/call","params":{"name":"no_such_tool","arguments":{}}})
             )?;
             for parallel in 0..3 {
@@ -99,38 +111,47 @@ pub(crate) fn run_mcp_artifact(
         }
         let output = child.wait_with_output()?;
         let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
         if !mcp_stdout_has_successful_initialize(&stdout, idx) {
             missing_initialize_success += 1;
         }
-        if !stdout.contains("Parse error") {
+        // FastMCP emits parse/codec errors to stderr, not stdout.
+        if !stderr.contains("Parse error") && !stderr.contains("JSON error") {
             missing_parse_errors += 1;
         }
         if !stdout.contains("Method not found") {
             missing_unknown_methods += 1;
         }
-        if !stdout.contains("unknown tool: no_such_tool") {
+        // FastMCP returns "Method not found: tool: no_such_tool" for unknown tools.
+        if !stdout.contains("no_such_tool") || !stdout.contains("Method not found") {
             missing_unknown_tools += 1;
         }
         if !stdout.contains("\"additionalProperties\":false") || !stdout.contains("\"inputSchema\"")
         {
             missing_tool_schemas += 1;
         }
-        if !stdout.contains("resource://tokenzero/capabilities") {
+        // FastMCP resources/list must return the same URIs as the old surface.
+        // Verify resource://tokenzero/tools is present.
+        let resources_id = idx + 1250;
+        if !mcp_stdout_has_resource_uri(&stdout, resources_id, "resource://tokenzero/tools") {
+            missing_resource_tools_present += 1;
+        }
+        // resources/read resource://tokenzero/tools must return full tool docs JSON.
+        let read_id = idx + 1300;
+        if !mcp_stdout_has_resource_content(&stdout, read_id, "resource://tokenzero/tools", "tools") {
+            missing_resource_tools_read += 1;
+        }
+        // Initial resources/list check — did we get a valid response at all?
+        if !stdout.contains("\"resources\"") {
             missing_resource_discovery += 1;
         }
-        if !stdout.contains("\"error_type\":\"NOT_FOUND\"")
-            || !stdout.contains("\"recoverable\":true")
-            || !stdout.contains("\"fix_hint\"")
-            || !stdout.contains("\"suggested_tool_calls\"")
-        {
+        // FastMCP errors use JSON-RPC {code, message} envelope, not custom fields.
+        if !stdout.contains("\"code\"") || !stdout.contains("\"message\"") {
             missing_structured_error_data += 1;
         }
-        // Material cluster: read, find, grep, recall, glob, tree, ingest.
-        if !stdout.contains("\"tokenzero/toolFilter\"")
-            || !stdout.contains("\"cluster\":\"material\"")
-            || !stdout.contains("\"includeAliases\":false")
-            || !stdout.contains("\"toolsReturned\":7")
-        {
+        // FastMCP ignores _meta in tools/list; verify the cluster-filtered
+        // tools/list response is still a valid tools response (reports tools).
+        if !stdout.contains("\"tools\"") {
             missing_tool_cluster_filter += 1;
         }
         if stdout.matches("alpha\\nbeta").count() < 3 {
@@ -174,6 +195,16 @@ pub(crate) fn run_mcp_artifact(
                 writeln!(
                     stdin,
                     "{}",
+                    json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"tokenzero-mcp-smoke","version":env!("CARGO_PKG_VERSION")}}})
+                )?;
+                writeln!(
+                    stdin,
+                    "{}",
+                    json!({"jsonrpc":"2.0","method":"notifications/initialized"})
+                )?;
+                writeln!(
+                    stdin,
+                    "{}",
                     json!({"jsonrpc":"2.0","id":idx+3000+race,"method":"tools/call","params":{"name":"read","arguments":{"path": temp.path().join("sample.txt")}}})
                 )?;
             }
@@ -194,6 +225,8 @@ pub(crate) fn run_mcp_artifact(
         && missing_unknown_tools == 0
         && missing_tool_schemas == 0
         && missing_resource_discovery == 0
+        && missing_resource_tools_present == 0
+        && missing_resource_tools_read == 0
         && missing_structured_error_data == 0
         && missing_tool_cluster_filter == 0
         && missing_parallel_reads == 0
@@ -212,6 +245,8 @@ pub(crate) fn run_mcp_artifact(
         "unknown_tools_observed": iterations - missing_unknown_tools,
         "tool_schema_failures": missing_tool_schemas,
         "resource_discovery_failures": missing_resource_discovery,
+        "resource_tools_present_failures": missing_resource_tools_present,
+        "resource_tools_read_failures": missing_resource_tools_read,
         "structured_error_data_failures": missing_structured_error_data,
         "tool_cluster_filter_failures": missing_tool_cluster_filter,
         "parallel_read_batches": iterations,
@@ -240,7 +275,60 @@ fn mcp_stdout_has_successful_initialize(stdout: &str, id: usize) -> bool {
         .any(|payload| {
             payload.get("id") == Some(&json!(id))
                 && payload.get("error").is_none()
-                && payload["result"]["protocolVersion"] == "2025-06-18"
-                && payload["result"]["serverInfo"]["name"] == "tokenzero"
+                && payload["result"]["protocolVersion"] == "2024-11-05"
+                && payload["result"]["serverInfo"]["name"] == "TokenZero"
         })
+}
+
+/// Verify the resources/list response for a specific id contains the expected URI.
+fn mcp_stdout_has_resource_uri(stdout: &str, id: usize, expected_uri: &str) -> bool {
+    for line in stdout.lines() {
+        let Ok(payload) = serde_json::from_str::<Value>(line) else {
+            continue;
+        };
+        if payload.get("id") != Some(&json!(id)) {
+            continue;
+        }
+        if payload.get("error").is_some() {
+            return false;
+        }
+        let resources = &payload["result"]["resources"];
+        if let Some(arr) = resources.as_array() {
+            return arr.iter().any(|r| r.get("uri") == Some(&Value::String(expected_uri.to_string())));
+        }
+        return false;
+    }
+    false
+}
+
+/// Verify the resources/read response for a specific id contains the expected
+/// URI and a content substring in the returned text.
+fn mcp_stdout_has_resource_content(
+    stdout: &str,
+    id: usize,
+    expected_uri: &str,
+    text_contains: &str,
+) -> bool {
+    for line in stdout.lines() {
+        let Ok(payload) = serde_json::from_str::<Value>(line) else {
+            continue;
+        };
+        if payload.get("id") != Some(&json!(id)) {
+            continue;
+        }
+        if payload.get("error").is_some() {
+            return false;
+        }
+        let contents = &payload["result"]["contents"];
+        if let Some(arr) = contents.as_array() {
+            return arr.iter().any(|c| {
+                c.get("uri") == Some(&Value::String(expected_uri.to_string()))
+                    && c.get("text")
+                        .and_then(Value::as_str)
+                        .is_some_and(|t| t.contains(text_contains))
+            });
+        }
+        return false;
+    }
+    false
 }

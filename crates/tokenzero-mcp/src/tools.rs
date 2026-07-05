@@ -31,6 +31,24 @@ pub(crate) fn call_tool(
     Ok(mcp_tool_response(response))
 }
 
+/// FastMCP variant: identical to `call_tool` but omits the tool-surface gate
+/// so that all tools (including codemode) are available through one server.
+/// The surface split is a CLI-mode concern, not a per-call gate for FastMCP.
+pub(crate) fn call_tool_fastmcp(
+    engine: &TokenZeroEngine,
+    name: &str,
+    args: &Value,
+    call_id: Option<String>,
+) -> Result<Value, JsonRpcErrorData> {
+    let canonical = canonical_tool(name);
+    let started = std::time::Instant::now();
+    let result = dispatch_tool(engine, canonical, name, args);
+    engine.record_tool_call(canonical, started.elapsed(), result.is_err());
+    let response = result?;
+    record_mcp_pulse(engine, canonical, args, &response, call_id);
+    Ok(mcp_tool_response(response))
+}
+
 /// Pulse-account every MCP `tools/call`, including `tz_expand`. Without this
 /// the MCP surface — the main integration surface — wrote no Pulse events,
 /// so expand-time recovery was never charged back to the original serve and
@@ -202,7 +220,7 @@ fn codemode_contract_payload(result: &crate::CodeModeResult) -> Value {
 }
 
 /// Tool dispatch shared by direct calls and `tz_batch` sub-ops.
-fn dispatch_tool(
+pub(crate) fn dispatch_tool(
     engine: &TokenZeroEngine,
     canonical: &str,
     name: &str,

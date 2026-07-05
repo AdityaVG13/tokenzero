@@ -7,6 +7,7 @@ mod cache_maintenance;
 mod cache_pack;
 mod catalog;
 mod codemode;
+mod fastmcp_mode;
 mod collect;
 mod config;
 mod diff;
@@ -44,6 +45,7 @@ pub use codemode::{
 };
 pub use jsonrpc::handle_jsonrpc;
 pub use render::{cli_json, render_text};
+pub use fastmcp_mode::{fastmcp_codemode_instructions, fastmcp_instructions, run_fastmcp_stdio};
 pub use stdio::run_stdio;
 pub use supervisor::run_supervised_stdio;
 
@@ -57,7 +59,7 @@ use globset::{GlobBuilder, GlobMatcher};
 pub(crate) use jsonrpc::{JsonRpcErrorData, handle_jsonrpc_value, jsonrpc_error};
 use paths::*;
 use render::*;
-pub(crate) use resources::read_resource;
+pub(crate) use resources::{build_resource_payload, read_resource};
 use serde_json::{Value, json};
 use session::{DiffTelemetry, SeenState, ServeKey, ServedRecord, SessionMemory, SessionSummary};
 use std::collections::{BTreeMap, HashSet};
@@ -77,7 +79,7 @@ use tokenzero_runtime::{
     RunOutputPolicy, StreamCapture, contains_platform_shell_syntax, run_command_with_policy,
     split_command_string,
 };
-pub(crate) use tools::call_tool;
+pub(crate) use tools::{call_tool, call_tool_fastmcp};
 
 pub const DEFAULT_SHELL_TIMEOUT_SECS: u64 = 60;
 pub const MAX_SHELL_TIMEOUT_SECS: u64 = 3600;

@@ -5,7 +5,7 @@ use tokenzero_core::McpToolSurface;
 
 use crate::DEFAULT_SHELL_TIMEOUT_SECS;
 
-const TOOL_ALIASES: &[(&str, &str)] = &[
+pub(crate) const TOOL_ALIASES: &[(&str, &str)] = &[
     ("read", "tz_read"),
     ("find", "tz_find"),
     ("grep", "tz_grep"),
@@ -34,15 +34,15 @@ pub struct ToolSpec {
 }
 
 #[derive(Debug, Clone)]
-struct ToolSpecSeed {
-    name: &'static str,
-    cluster: &'static str,
-    summary: &'static str,
-    doc: String,
-    input_schema: Value,
+pub(crate) struct ToolSpecSeed {
+    pub(crate) name: &'static str,
+    pub(crate) cluster: &'static str,
+    pub(crate) summary: &'static str,
+    pub(crate) doc: String,
+    pub(crate) input_schema: Value,
     /// Server-accepted argument aliases kept out of the advertised schema;
     /// published via `resource://tokenzero/tools` so the contract stays discoverable.
-    arg_aliases: Value,
+    pub(crate) arg_aliases: Value,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -240,7 +240,7 @@ pub fn resource_specs() -> Vec<ResourceSpec> {
     .collect()
 }
 
-fn canonical_tool_specs() -> Vec<ToolSpecSeed> {
+pub(crate) fn canonical_tool_specs() -> Vec<ToolSpecSeed> {
     vec![
         ToolSpecSeed {
             name: "tz_execute_code",
@@ -584,7 +584,7 @@ pub(crate) fn tool_cluster_names() -> Vec<&'static str> {
     clusters
 }
 
-fn alias_summary(target: &str) -> String {
+pub(crate) fn alias_summary(target: &str) -> String {
     format!("Alias of `{target}`; same schema and behavior.")
 }
 

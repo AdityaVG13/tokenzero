@@ -18,6 +18,7 @@ fn mcp_server_survives_malformed_json() {
         ])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
         .spawn()
         .unwrap();
     {
@@ -26,19 +27,36 @@ fn mcp_server_survives_malformed_json() {
         writeln!(
             stdin,
             "{}",
-            serde_json::json!({"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}})
+            serde_json::json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"tokenzero-mcp-smoke","version":"1.0.0"}}})
+        )
+        .unwrap();
+        writeln!(
+            stdin,
+            "{}",
+            serde_json::json!({"jsonrpc":"2.0","method":"notifications/initialized"})
+        )
+        .unwrap();
+        writeln!(
+            stdin,
+            "{}",
+            serde_json::json!({"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}})
         )
         .unwrap();
     }
     let output = child.wait_with_output().unwrap();
     assert!(output.status.success());
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("Parse error"));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    // FastMCP emits parse/codec errors to stderr, not stdout.
+    assert!(
+        stderr.contains("Parse error") || stderr.contains("JSON error"),
+        "expected parse error in stderr, got: {stderr}"
+    );
     assert!(stdout.contains("tools"));
 }
 
 #[test]
-fn mcp_server_handles_mixed_framed_and_unframed_transcript() {
+fn mcp_server_handles_ndjson_transcript() {
     let dir = tempdir().unwrap();
     let mut child = Command::cargo_bin("tokenzero")
         .unwrap()
@@ -51,17 +69,27 @@ fn mcp_server_handles_mixed_framed_and_unframed_transcript() {
         ])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
         .spawn()
         .unwrap();
     {
         let stdin = child.stdin.as_mut().unwrap();
-        let framed = serde_json::json!({"jsonrpc":"2.0","id":"framed","method":"ping"});
-        let framed = framed.to_string();
-        write!(stdin, "Content-Length: {}\r\n\r\n{}", framed.len(), framed).unwrap();
         writeln!(
             stdin,
             "{}",
-            serde_json::json!({"jsonrpc":"2.0","id":"line","method":"tools/list","params":{}})
+            serde_json::json!({"jsonrpc":"2.0","id":"first","method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"tokenzero-mcp-smoke","version":"1.0.0"}}})
+        )
+        .unwrap();
+        writeln!(
+            stdin,
+            "{}",
+            serde_json::json!({"jsonrpc":"2.0","method":"notifications/initialized"})
+        )
+        .unwrap();
+        writeln!(
+            stdin,
+            "{}",
+            serde_json::json!({"jsonrpc":"2.0","id":"second","method":"tools/list","params":{}})
         )
         .unwrap();
     }
@@ -72,26 +100,20 @@ fn mcp_server_handles_mixed_framed_and_unframed_transcript() {
         String::from_utf8_lossy(&output.stderr)
     );
 
-    let marker = b"\r\n\r\n";
-    let header_end = output
-        .stdout
-        .windows(marker.len())
-        .position(|window| window == marker)
-        .expect("missing framed response header terminator");
-    let header = std::str::from_utf8(&output.stdout[..header_end]).unwrap();
-    let length = header
-        .strip_prefix("Content-Length: ")
-        .and_then(|value| value.parse::<usize>().ok())
-        .unwrap_or_else(|| panic!("invalid framed response header: {header}"));
-    let body_start = header_end + marker.len();
-    let body_end = body_start + length;
-    let framed: Value = serde_json::from_slice(&output.stdout[body_start..body_end]).unwrap();
-    assert_eq!(framed["id"], "framed");
-    assert!(framed["result"].is_object());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let lines: Vec<&str> = stdout.lines().collect();
+    assert!(lines.len() >= 2, "expected at least 2 NDJSON lines, got {}", lines.len());
 
-    let line: Value = serde_json::from_slice(&output.stdout[body_end..]).unwrap();
-    assert_eq!(line["id"], "line");
-    assert!(line["result"]["tools"].as_array().unwrap().len() > 5);
+    // First line: initialize response
+    let first: Value = serde_json::from_str(lines[0]).unwrap();
+    assert_eq!(first["id"], "first");
+    assert!(first["result"].is_object());
+    assert_eq!(first["result"]["protocolVersion"], "2024-11-05");
+
+    // Second line: tools/list response
+    let second: Value = serde_json::from_str(lines[1]).unwrap();
+    assert_eq!(second["id"], "second");
+    assert!(second["result"]["tools"].as_array().unwrap().len() > 5);
 }
 
 #[test]
