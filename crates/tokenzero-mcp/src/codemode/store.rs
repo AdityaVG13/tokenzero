@@ -328,6 +328,29 @@ fn guard_visible_output(result: &mut CodeModeResult, limits: &CodeModeLimits) {
         }
         strip_exact_expand_markers(value);
     }
+    if let Some(value) = &mut result.value {
+        if let Value::String(text) = value.clone() {
+            if text.len() > limits.max_output_bytes && super::exec::is_exact_expand_value(value) {
+                let note = "\n[tokenzero expand truncated: output exceeded CodeMode max_output_bytes; rerun expand with start_line/end_line windowing opts]\n";
+                let mut kept: String = text;
+                loop {
+                    let candidate = format!("{kept}{note}");
+                    let serialized_len = serde_json::to_string(&candidate)
+                        .map(|s| s.len())
+                        .unwrap_or(usize::MAX);
+                    if serialized_len <= limits.max_output_bytes || kept.is_empty() {
+                        super::exec::record_exact_expand_payload(&candidate);
+                        *value = Value::String(candidate);
+                        break;
+                    }
+                    let keep_chars = kept.chars().count().saturating_mul(3) / 4;
+                    kept = kept.chars().take(keep_chars).collect();
+                }
+                let visible = count_tokens(&serde_json::to_string(value).unwrap_or_default());
+                result.telemetry.visible_tokens = visible;
+            }
+        }
+    }
     if let Some(value) = &result.value {
         let bytes = serde_json::to_vec(value)
             .map(|bytes| bytes.len())
@@ -379,9 +402,19 @@ fn cap_exact_expand_value(value: &mut Value, max_output_bytes: usize) -> bool {
                         .map(|bytes| bytes.len() <= max_output_bytes)
                         .unwrap_or(false)
                     {
+                        if let Value::Object(map) = value {
+                            if let Some(text) = map.get("text").and_then(Value::as_str) {
+                                super::exec::record_exact_expand_payload(text);
+                            }
+                        }
                         return true;
                     }
                     if kept.is_empty() {
+                        if let Value::Object(map) = value {
+                            if let Some(text) = map.get("text").and_then(Value::as_str) {
+                                super::exec::record_exact_expand_payload(text);
+                            }
+                        }
                         return true;
                     }
                     let new_len = kept

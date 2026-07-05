@@ -121,19 +121,84 @@ pub fn workloads_for_root(root: &std::path::Path) -> Vec<Workload> {
     let _exec_rs = format!("{root_str}/crates/tokenzero-mcp/src/codemode/exec.rs");
     let _result_rs = format!("{root_str}/crates/tokenzero-mcp/src/codemode/result.rs");
 
-    // Deterministic synthetic data for scale workloads (no live git state)
-    let diff_data = "diff --git a/src/main.rs b/src/main.rs\n+TODO: synthetic review line\n+fixme: synthetic review line\ndiff --git a/src/lib.rs b/src/lib.rs\n+TODO: synthetic exec line\n".to_string();
-    let grep_data = "src/main.rs:5:    // TODO: implement the main entry point\nsrc/main.rs:9:mod CodeMode {\nsrc/main.rs:10:    // CodeMode: the execution substrate\nsrc/lib.rs:9:// fixme: add error handling\nsrc/lib.rs:10:// TODO: CodeMode v2 migration";
-    let log_data = (1..=20).map(|i| {
-        let hash = format!("{:x}{:x}{:x}{:x}{:x}{:x}{:x}", i,i,i,i,i,i,i);
-        let prefix = match i % 4 { 0 => "feat", 1 => "fix", 2 => "docs", _ => "chore" };
-        format!("{} {}: synthetic commit {}", hash, prefix, i)
-    }).collect::<Vec<_>>().join("\n");
-    let diff_cmd = format!("printf '%s' '{}'", diff_data);
+    // Deterministic synthetic corpus for scale workloads (no live git state).
+    // Content is a pure function of loop indices and is written to a fixed
+    // temp-dir path, so every run on a machine is byte-identical. Sizes are
+    // calibrated to the real transcripts these workloads represent: a
+    // multi-file diff review (~1,100 lines), a wide symbol exploration
+    // (300 hits), and a 100-commit log.
+    let corpus_dir = std::env::temp_dir().join("tokenzero-bench-corpus-v1");
+    let _ = std::fs::create_dir_all(&corpus_dir);
+    let corpus = corpus_dir.to_string_lossy().to_string();
+    {
+        let mut diff_data = String::new();
+        for file_idx in 0..36 {
+            diff_data.push_str(&format!(
+                "diff --git a/crates/pkg{file_idx}/src/module.rs b/crates/pkg{file_idx}/src/module.rs\n@@ -{},{} +{},{} @@ fn handler_{file_idx}()\n",
+                file_idx * 11 + 1, 24, file_idx * 11 + 1, 27,
+            ));
+            for line_idx in 0..30 {
+                let marker = match (file_idx + line_idx) % 9 {
+                    0 => "TODO: tighten error handling for the retry path",
+                    3 => "fixme: this clone is avoidable once the borrow is restructured",
+                    _ => "let outcome = dispatch(engine, canonical, name, args)?;",
+                };
+                let sign = if line_idx % 5 == 0 {
+                    '+'
+                } else if line_idx % 7 == 0 {
+                    '-'
+                } else {
+                    ' '
+                };
+                diff_data.push_str(&format!(
+                    "{sign}    {marker} // L{}\n",
+                    file_idx * 30 + line_idx
+                ));
+            }
+        }
+        let mut explore_src = String::new();
+        for line_idx in 0..1500 {
+            let line = match line_idx % 5 {
+                0 => format!("    // CodeMode checkpoint {line_idx}: execution substrate marker"),
+                1 => format!(
+                    "    let handler_{line_idx} = dispatch_table.get({});",
+                    line_idx % 64
+                ),
+                2 => format!("    outcome_{line_idx}.record(telemetry.visible_tokens);"),
+                3 => format!(
+                    "    if budget.remaining() < {} {{ return Err(Budget); }}",
+                    line_idx % 900
+                ),
+                _ => format!("    store.alias(logical_ref_{line_idx}, blob_ref);"),
+            };
+            explore_src.push_str(&line);
+            explore_src.push('\n');
+        }
+        let log_data = (1..=100u32)
+            .map(|i| {
+                let hash = format!("{:07x}", i.wrapping_mul(2654435761) % 0x0fff_ffff);
+                let prefix = match i % 4 {
+                    0 => "feat",
+                    1 => "fix",
+                    2 => "docs",
+                    _ => "chore",
+                };
+                format!(
+                    "{hash} {prefix}: synthetic commit {i} adjusting subsystem {}",
+                    i % 12
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        let _ = std::fs::write(corpus_dir.join("review.patch"), &diff_data);
+        let _ = std::fs::write(corpus_dir.join("explore-src.rs"), &explore_src);
+        let _ = std::fs::write(corpus_dir.join("git-log.txt"), &log_data);
+    }
+    let diff_cmd = format!("cat {corpus}/review.patch");
     let diff_cmd_json = serde_json::to_string(&diff_cmd).unwrap();
-    let log_cmd = format!("printf '%s' '{}'", log_data);
+    let log_cmd = format!("cat {corpus}/git-log.txt");
     let log_cmd_json = serde_json::to_string(&log_cmd).unwrap();
-    let grep_cmd = format!("printf '%s' '{}'; printf '\n'", grep_data);
+    let grep_cmd = format!("grep -n CodeMode {corpus}/explore-src.rs");
     let grep_cmd_json = serde_json::to_string(&grep_cmd).unwrap();
 
     vec![
@@ -204,8 +269,8 @@ pub fn workloads_for_root(root: &std::path::Path) -> Vec<Workload> {
             raw_commands: vec![raw_sh(diff_cmd.clone())],
             perop_calls: vec![
                 direct("tz_shell", "shell", json!({"command": diff_cmd})),
-                direct("tz_shell", "shell", json!({"command": format!("printf '%s' '{}' | grep -c TODO || echo 0", diff_data)})),
-                direct("tz_shell", "shell", json!({"command": format!("printf '%s' '{}' | grep -c fixme || echo 0", diff_data)})),
+                direct("tz_shell", "shell", json!({"command": format!("grep -c TODO {corpus}/review.patch")})),
+                direct("tz_shell", "shell", json!({"command": format!("grep -c fixme {corpus}/review.patch")})),
             ],
         },
         Workload {
@@ -266,8 +331,6 @@ fn raw_sh(command: String) -> RawCommand {
 }
 
 const BENCHMARK_REPORT_VERSION: &str = "1.3.0";
-
-
 
 pub fn run_benchmark(root: &std::path::Path) -> BenchmarkReport {
     let root_buf = benchmark_root(root);
@@ -690,7 +753,6 @@ mod bench_harness {
         assert!(!value_text.contains(telemetry_ref));
     }
 
-
     #[test]
     fn benchmark_double_run_identity() {
         // Two consecutive runs must produce identical plan-text tokens and
@@ -709,7 +771,11 @@ mod bench_harness {
         for (i, (w1, w2)) in run1.workloads.iter().zip(run2.workloads.iter()).enumerate() {
             assert_eq!(w1.workload, w2.workload, "workload {} name mismatch", i);
             // Plan string is byte-stable between runs
-            assert_eq!(w1.plan_text_tokens, w2.plan_text_tokens, "{} plan_text", w1.workload);
+            assert_eq!(
+                w1.plan_text_tokens, w2.plan_text_tokens,
+                "{} plan_text",
+                w1.workload
+            );
             assert_eq!(w1.plan_ops, w2.plan_ops, "{} plan_ops", w1.workload);
         }
 
@@ -717,6 +783,7 @@ mod bench_harness {
         assert_eq!(run1.totals.total_plan_text, run2.totals.total_plan_text);
     }
 
+    #[test]
     fn run_composition_benchmark() {
         let report = run_benchmark(&std::env::current_dir().unwrap());
         let document = json!({

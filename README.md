@@ -352,21 +352,22 @@ plan wire.
 
 | Workload | Raw | Per-op | CodeMode | vs raw | vs per-op |
 | :-- | --: | --: | --: | --: | --: |
-| File + search + transform | 1,985 | 361 | 93 | **95.3%** | 74.2% |
-| Shell multi-step (3 commands) | 144 | 198 | 264 | **-83.3%** | -33.3% |
+| File + search + transform | 1,985 | 145 | 93 | **95.3%** | 35.9% |
+| Shell multi-step (3 commands) | 85 | 139 | 209 | **-145.9%** | -50.4% |
 | Pipe composition (read + compact) | 537 | 126 | 103 | **80.8%** | 18.3% |
-| Mixed exploration (tree + glob + read) | 1,283 | 273 | 310 | **75.8%** | -13.6% |
-| Diff review (multi-file) | 12,358 | 3,559 | 107 | **99.1%** | 97.0% |
-| Multi-file exploration (grep + 3 reads) | 30,311 | 2,685 | 251 | **99.2%** | 90.7% |
-| Log summarize (100 commits to verdict) | 1,567 | 299 | 21 | **98.7%** | 93.0% |
-| **Total** | **48,185** | **7,501** | **1,149** | **97.6%** | **84.7%** |
+| Mixed exploration (tree + glob + read) | 1,315 | 273 | 310 | **76.4%** | -13.6% |
+| Diff review (multi-file) | 20,139 | 3,131 | 107 | **99.5%** | 96.6% |
+| Multi-file exploration (300 hits) | 3,332 | 344 | 114 | **96.6%** | 66.9% |
+| Log summarize (100 commits to verdict) | 929 | 218 | 21 | **97.7%** | 90.4% |
+| **Total** | **28,322** | **4,376** | **957** | **96.6%** | **78.1%** |
 
 Two honest notes. On toy chains with tiny raw output, CodeMode can cost more
 visible tokens than raw: small shell outputs arrive inline by design, because
 hiding 200 tokens behind a ref costs an agent several round-trips to recover
-them. And one workload reads cheaper through per-op tools than through a
+them. And two toy workloads read cheaper through per-op tools than through a
 plan. CodeMode earns its keep on real work: diff review, wide exploration,
-log summarization.
+log summarization. The scale workloads run against a byte-stable synthetic
+corpus, so two consecutive runs produce identical token counts.
 
 Reproducible: `scripts/benchmark_composition.sh` or
 `cargo test -p tokenzero-mcp -- codemode::bench_tests::run_composition_benchmark`.

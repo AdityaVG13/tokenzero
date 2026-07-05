@@ -74,7 +74,7 @@ fn resolve_default_cache_path(
     }
 }
 
-/// Default recovery cache when `--cache-path` is omitted.
+/// Default recovery cache when --cache-path is omitted.
 #[allow(dead_code)]
 pub fn default_recovery_cache_path(repo_root: &Path) -> PathBuf {
     resolve_default_cache_path(
@@ -104,13 +104,10 @@ mod tests {
     fn cwd_dot_zerostack_does_not_contaminate_tempdir_resolution() {
         let dir = tempdir().unwrap();
         let root = dir.path();
-        // Create .zerostack in cwd to simulate a real repo root that has one
-        let cwd_zerostack = std::env::current_dir().unwrap().join(".zerostack");
-        let _cwd_guard = if !cwd_zerostack.exists() {
-            fs::create_dir_all(cwd_zerostack.join("tokenzero")).ok()
-        } else {
-            None
-        };
+        // Create .zerostack in an unrelated tempdir to confirm resolution
+        // uses ONLY the passed repo_root, never cwd or any other directory.
+        let unrelated = tempdir().unwrap();
+        let _ = fs::create_dir_all(unrelated.path().join(".zerostack/tokenzero"));
         // Resolution MUST derive from the passed repo_root only
         assert_eq!(
             default_recovery_cache_path(root),

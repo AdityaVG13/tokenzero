@@ -247,7 +247,7 @@ fn codemode_v2_ack(result: &crate::CodeModeResult, telemetry_ref: &str) -> Strin
                     )
                 })
                 .unwrap_or(("runtime", "final", "unknown error"));
-            let first = message.chars().take(80).collect::<String>();
+            let first = message.chars().take(120).collect::<String>();
             format!("err {kind} {retryable} {first} t:{telemetry_ref}")
         }
     }

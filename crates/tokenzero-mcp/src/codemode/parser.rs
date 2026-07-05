@@ -281,7 +281,8 @@ fn parse_return_expr(s: &str) -> Result<ReturnExpr, String> {
 fn is_identifier(s: &str) -> bool {
     !s.is_empty()
         && s.starts_with(|c: char| c.is_alphabetic() || c == '_' || c == '$')
-        && s.chars().all(|c| c.is_alphanumeric() || c == '_' || c == '$')
+        && s.chars()
+            .all(|c| c.is_alphanumeric() || c == '_' || c == '$')
 }
 
 fn unescape_string(s: &str) -> String {
@@ -531,5 +532,4 @@ mod tests {
             other => panic!("expected Return(Expr(BoolLit(true))), got {:?}", other),
         }
     }
-
 }

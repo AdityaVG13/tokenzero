@@ -24,6 +24,47 @@ use crate::expand_params::ExpandParams;
 
 const EXACT_EXPAND_MARKER: &str = "__tz_exact_expand";
 
+thread_local! {
+    /// Payload identity registry for the current execution: hashes of exact
+    /// expand payloads (raw text and, when the payload parses as JSON, the
+    /// canonical serialization). Values matching an entry are exempt from
+    /// ref-first compaction so "explicit expand ALWAYS returns exact bytes"
+    /// (dda8627) survives the JS-side envelope unwrap.
+    static EXACT_EXPAND_REGISTRY: std::cell::RefCell<std::collections::HashSet<u64>> =
+        std::cell::RefCell::new(std::collections::HashSet::new());
+}
+
+fn exact_expand_hash(text: &str) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    text.hash(&mut hasher);
+    hasher.finish()
+}
+
+pub(crate) fn record_exact_expand_payload(text: &str) {
+    EXACT_EXPAND_REGISTRY.with(|registry| {
+        let mut registry = registry.borrow_mut();
+        registry.insert(exact_expand_hash(text));
+        if let Ok(parsed) = serde_json::from_str::<Value>(text) {
+            if let Ok(canonical) = serde_json::to_string(&parsed) {
+                registry.insert(exact_expand_hash(&canonical));
+            }
+        }
+    });
+}
+
+pub(crate) fn is_exact_expand_value(value: &Value) -> bool {
+    let key = match value {
+        Value::String(text) => exact_expand_hash(text),
+        Value::Object(_) | Value::Array(_) => match serde_json::to_string(value) {
+            Ok(canonical) => exact_expand_hash(&canonical),
+            Err(_) => return false,
+        },
+        _ => return false,
+    };
+    EXACT_EXPAND_REGISTRY.with(|registry| registry.borrow().contains(&key))
+}
+
 #[cfg(test)]
 pub(crate) fn make_engine_for_root(root: PathBuf) -> TokenZeroEngine {
     make_engine_for_root_with_options(root, &CodeModeOptions::default())
@@ -62,6 +103,7 @@ pub fn execute_codemode(plan: &str) -> CodeModeResult {
 }
 
 pub fn execute_codemode_with_options(plan: &str, options: CodeModeOptions) -> CodeModeResult {
+    EXACT_EXPAND_REGISTRY.with(|registry| registry.borrow_mut().clear());
     let plan = plan.trim();
     let started_ms = now_ms();
     let limits = limits_from_options(&options);
@@ -573,7 +615,7 @@ fn invoke_js_binding(
 fn js_prelude() -> &'static str {
     r#"
         const __tz_parse = (text) => {
-          const value = JSON.parse(text);
+          const value = JSON.parse(text); if (value && value.__tz_exact_expand) { try { return JSON.parse(value.text); } catch (_) { return value.text; } }
           if (value && value.__tz_error) throw new Error(value.__tz_error);
           return value;
         };
@@ -851,6 +893,9 @@ fn ref_first_value(
     store: &mut tokenzero_recovery::RecoveryStore,
     refs: &mut Vec<String>,
 ) -> Value {
+    if is_exact_expand_value(&value) {
+        return value;
+    }
     match value {
         Value::String(text) => {
             if count_tokens(&text) > budget_tokens {
@@ -887,6 +932,7 @@ fn ref_first_value(
                 .and_then(Value::as_bool)
                 .unwrap_or(false)
             {
+                map.remove(EXACT_EXPAND_MARKER);
                 return Value::Object(map);
             }
             Value::Object(
@@ -1443,6 +1489,9 @@ impl OpOutcome {
 
     fn mark_exact_expand(mut self) -> Self {
         if let Value::Object(map) = &mut self.value {
+            if let Some(text) = map.get("text").and_then(Value::as_str) {
+                record_exact_expand_payload(text);
+            }
             map.insert(EXACT_EXPAND_MARKER.to_string(), Value::Bool(true));
         }
         self

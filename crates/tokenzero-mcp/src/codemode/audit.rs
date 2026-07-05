@@ -110,7 +110,7 @@ fn audit_recovery(root: &std::path::Path) -> RecoveryEvidence {
     let mut cases = Vec::new();
     for (label, payload) in &payloads {
         let plan = format!(
-            r#"const c = await zero.compact({}); const e = await zero.expand(c.ref); return {{ ref: c.ref, recovered: zero.raw(e.text), original_len: {}}}"#,
+            r#"const c = await zero.compact({}); const e = await zero.expand(c.ref); return {{ ref: c.ref, recovered: zero.raw(e), original_len: {}}}"#,
             serde_json::to_string(payload).unwrap(),
             payload.len()
         );

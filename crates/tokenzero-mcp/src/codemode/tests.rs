@@ -127,19 +127,13 @@ fn explicit_expand_always_returns_exact_bytes_dda8627() {
         "{:?}",
         result.error
     );
+    // Payload-direct contract: expand returns the exact bytes, not an
+    // envelope, and ref-first must never wrap it (dda8627).
     let value = result.value.as_ref().unwrap();
-    assert_eq!(value["text"].as_str(), Some(payload.as_str()));
-    assert!(
-        value.get("preview").is_none(),
-        "expand must not preview-wrap: {value}"
-    );
-    assert!(
-        value.get("ref").is_none(),
-        "expand must not ref-wrap: {value}"
-    );
-    assert!(
-        value.get("__tz_exact_expand").is_none(),
-        "internal marker leaked: {value}"
+    assert_eq!(
+        value.as_str(),
+        Some(payload.as_str()),
+        "expand must return exact bytes: {value}"
     );
 }
 
@@ -165,7 +159,9 @@ fn budget_capped_expand_appends_windowing_hint() {
         "{:?}",
         result.error
     );
-    let text = result.value.as_ref().unwrap()["text"].as_str().unwrap();
+    // Payload-direct contract: the capped expand is the string itself with
+    // an explicit truncation line naming the windowing options.
+    let text = result.value.as_ref().unwrap().as_str().unwrap();
     assert!(
         text.contains("tokenzero expand truncated"),
         "missing truncation line: {text:?}"
@@ -174,14 +170,8 @@ fn budget_capped_expand_appends_windowing_hint() {
         text.contains("start_line/end_line"),
         "missing windowing opts: {text:?}"
     );
-    assert!(
-        !result.value.as_ref().unwrap()["truncated"]
-            .as_bool()
-            .unwrap_or(false)
-    );
 }
 
-#[cfg(not(windows))]
 #[test]
 fn shell_inline_threshold_keeps_refs_and_ref_wraps_large_text() {
     let work = tempfile::tempdir().unwrap();
@@ -579,23 +569,32 @@ fn token_namespace_compact_roundtrip_through_codemode() {
 
 #[test]
 fn compact_object_json_serializes_and_roundtrips_exactly() {
-    // Verifier probe: compact+expand of an object must JSON-serialize it,
-    // not produce "[object Object]". Includes a 9000-byte blob for stress.
+    // Verifier probe: compact+expand of an object must round-trip to the
+    // PARSED object in plan context (property access works), never
+    // "[object Object]" and never an envelope.
     let blob = "x".repeat(9000);
     let plan = format!(
-        r#"const obj = {{ nested: {{ blob: "{}", answer: 42 }} }}; const c = await zero.token.compact(obj); const e = await zero.token.expand(c.ref); return {{ ref: c.ref, text: e.text, original_blob_len: obj.nested.blob.length }}"#,
+        r#"const obj = {{ nested: {{ blob: "{}", answer: 42 }} }}; const c = await zero.token.compact(obj); const e = await zero.token.expand(c.ref); return {{ blob_len: e.nested.blob.length, answer: e.nested.answer, exact: JSON.stringify(e) === JSON.stringify(obj) }}"#,
         blob
     );
     let r = execute_codemode(&plan);
     assert_eq!(r.status, CodeModeStatus::Completed, "{:?}", r.error);
     let val = r.value.as_ref().unwrap();
-    let text = val["text"].as_str().unwrap_or("");
-    // Must contain actual object data, not "[object Object]"
-    assert!(!text.contains("[object Object]"), "got: {}", text);
-    assert!(text.contains(r#""answer":42"#) || text.contains(r#""answer": 42"#), "got: {}", text);
-    // Round-trip must preserve the blob
-    assert!(text.contains(&blob[..100]), "blob prefix missing from: {}", &text[..200]);
-    assert_eq!(val["original_blob_len"].as_u64().unwrap_or(0), 9000);
+    assert_eq!(
+        val["blob_len"].as_u64(),
+        Some(9000),
+        "blob length via property access: {val}"
+    );
+    assert_eq!(
+        val["answer"].as_u64(),
+        Some(42),
+        "answer via property access: {val}"
+    );
+    assert_eq!(
+        val["exact"].as_bool(),
+        Some(true),
+        "parsed object must deep-equal the original: {val}"
+    );
 }
 
 #[test]
