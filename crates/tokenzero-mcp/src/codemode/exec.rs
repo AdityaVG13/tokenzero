@@ -605,8 +605,8 @@ fn js_prelude() -> &'static str {
           tree: (...args) => __tz_call('zero.tree', args),
           shell: (...args) => __tz_call('zero.shell', args),
           expand: (...args) => __tz_call('zero.token.expand', args),
-          compact: (...args) => __tz_call('zero.token.compact', args),
-          compact_max: (...args) => __tz_call('zero.compact_max', args),
+          compact: (...args) => __tz_call('zero.token.compact', args.map(a => typeof a === 'string' ? a : JSON.stringify(a))),
+          compact_max: (...args) => __tz_call('zero.compact_max', args.map(a => typeof a === 'string' ? a : JSON.stringify(a))),
           ingest: (...args) => __tz_call('zero.ingest', args),
           mem: (...args) => __tz_call('zero.mem', args),
           recall: (...args) => __tz_call('zero.recall', args),
@@ -622,7 +622,7 @@ fn js_prelude() -> &'static str {
           assert: (...args) => __tz_call('zero.assert', args),
           queryMany: (items) => __tz_parse(__tz_compact_many_json(JSON.stringify(items))),
           token: Object.freeze({
-            compact: (text) => __tz_parse(__tz_compact_json(String(text))),
+            compact: (text) => __tz_parse(__tz_compact_json(typeof text === 'string' ? text : JSON.stringify(text))),
             expand: (ref) => __tz_parse(__tz_expand_json(String(ref))),
             compactMany: (items) => __tz_parse(__tz_compact_many_json(JSON.stringify(items))),
             expandMany: (refs) => __tz_parse(__tz_expand_many_json(JSON.stringify(refs))),
@@ -1756,7 +1756,7 @@ fn exec_expand(engine: &TokenZeroEngine, args: &[Value]) -> Result<OpOutcome, Bo
     if !params.ref_id.starts_with("tz://") {
         return Err(Box::new(CodeModeResult::error(
             format!(
-                "zero.token.expand/zero.expand: ref must start with tz://, got: {}",
+                "expand takes a tz:// fz:// gz:// ref; to read a file use zero.fs.compound('read',{{path}}) -- got: {}",
                 params.ref_id
             ),
             0,
@@ -1786,7 +1786,7 @@ fn exec_expand_many(
         if !params.ref_id.starts_with("tz://") {
             return Err(Box::new(CodeModeResult::error(
                 format!(
-                    "zero.token.expandMany: ref must start with tz://, got: {}",
+                    "expandMany takes a tz:// fz:// gz:// ref; to read a file use zero.fs.compound('read',{{path}}) -- got: {}",
                     params.ref_id
                 ),
                 0,

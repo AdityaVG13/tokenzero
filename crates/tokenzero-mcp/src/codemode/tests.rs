@@ -578,6 +578,27 @@ fn token_namespace_compact_roundtrip_through_codemode() {
 }
 
 #[test]
+fn compact_object_json_serializes_and_roundtrips_exactly() {
+    // Verifier probe: compact+expand of an object must JSON-serialize it,
+    // not produce "[object Object]". Includes a 9000-byte blob for stress.
+    let blob = "x".repeat(9000);
+    let plan = format!(
+        r#"const obj = {{ nested: {{ blob: "{}", answer: 42 }} }}; const c = await zero.token.compact(obj); const e = await zero.token.expand(c.ref); return {{ ref: c.ref, text: e.text, original_blob_len: obj.nested.blob.length }}"#,
+        blob
+    );
+    let r = execute_codemode(&plan);
+    assert_eq!(r.status, CodeModeStatus::Completed, "{:?}", r.error);
+    let val = r.value.as_ref().unwrap();
+    let text = val["text"].as_str().unwrap_or("");
+    // Must contain actual object data, not "[object Object]"
+    assert!(!text.contains("[object Object]"), "got: {}", text);
+    assert!(text.contains(r#""answer":42"#) || text.contains(r#""answer": 42"#), "got: {}", text);
+    // Round-trip must preserve the blob
+    assert!(text.contains(&blob[..100]), "blob prefix missing from: {}", &text[..200]);
+    assert_eq!(val["original_blob_len"].as_u64().unwrap_or(0), 9000);
+}
+
+#[test]
 fn describe_token_namespace_returns_signature() {
     let r = execute_codemode("describe:zero.token.compact");
     assert_eq!(r.status, CodeModeStatus::Completed);

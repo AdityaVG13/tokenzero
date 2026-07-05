@@ -269,15 +269,19 @@ fn parse_return_expr(s: &str) -> Result<ReturnExpr, String> {
             }
         }
     }
-    if is_identifier(s) {
-        return Ok(ReturnExpr::Var(s.to_string()));
-    }
+    // Delegate to parse_expr which handles booleans, numbers, strings,
+    // null, and identifiers in the correct precedence order.
     let expr = parse_expr(s)?;
-    Ok(ReturnExpr::Expr(expr))
+    match expr {
+        Expr::VarRef(name) => Ok(ReturnExpr::Var(name)),
+        _ => Ok(ReturnExpr::Expr(expr)),
+    }
 }
 
 fn is_identifier(s: &str) -> bool {
-    !s.is_empty() && s.chars().all(|c| c.is_alphanumeric() || c == '_')
+    !s.is_empty()
+        && s.starts_with(|c: char| c.is_alphabetic() || c == '_' || c == '$')
+        && s.chars().all(|c| c.is_alphanumeric() || c == '_' || c == '$')
 }
 
 fn unescape_string(s: &str) -> String {
@@ -489,4 +493,43 @@ pub(crate) fn resolve_return(
         }
         ReturnExpr::Expr(expression) => resolve_expr(expression, scope),
     }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn return_literal_int_folds_correctly() {
+        let plan = "return 12345;";
+        let stmts = parse_plan(plan).unwrap();
+        assert_eq!(stmts.len(), 1);
+        match &stmts[0] {
+            Statement::Return(ReturnExpr::Expr(Expr::IntLit(n))) => assert_eq!(*n, 12345),
+            other => panic!("expected Return(Expr(IntLit(12345))), got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn return_literal_string_folds_correctly() {
+        let plan = r#"return "hello";"#;
+        let stmts = parse_plan(plan).unwrap();
+        assert_eq!(stmts.len(), 1);
+        match &stmts[0] {
+            Statement::Return(ReturnExpr::Expr(Expr::StringLit(s))) => assert_eq!(s, "hello"),
+            other => panic!("expected Return(Expr(StringLit(hello))), got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn return_literal_bool_folds_correctly() {
+        let plan = "return true;";
+        let stmts = parse_plan(plan).unwrap();
+        assert_eq!(stmts.len(), 1);
+        match &stmts[0] {
+            Statement::Return(ReturnExpr::Expr(Expr::BoolLit(b))) => assert!(b),
+            other => panic!("expected Return(Expr(BoolLit(true))), got {:?}", other),
+        }
+    }
+
 }

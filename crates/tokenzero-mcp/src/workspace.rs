@@ -45,9 +45,7 @@ fn zerostack_store_or_detect(repo_root: &Path) -> Option<PathBuf> {
         return Some(if path.is_absolute() {
             path
         } else {
-            std::env::current_dir()
-                .unwrap_or_else(|_| repo_root.to_path_buf())
-                .join(path)
+            repo_root.join(path)
         });
     }
     let candidate = repo_root.join(".zerostack");
@@ -94,4 +92,29 @@ pub fn default_codemode_recovery_cache_path(repo_root: &Path) -> PathBuf {
         "tokenzero/codemode-recovery.json",
         ".tokenzero/codemode-recovery.json",
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+    use tempfile::tempdir;
+
+    #[test]
+    fn cwd_dot_zerostack_does_not_contaminate_tempdir_resolution() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        // Create .zerostack in cwd to simulate a real repo root that has one
+        let cwd_zerostack = std::env::current_dir().unwrap().join(".zerostack");
+        let _cwd_guard = if !cwd_zerostack.exists() {
+            fs::create_dir_all(cwd_zerostack.join("tokenzero")).ok()
+        } else {
+            None
+        };
+        // Resolution MUST derive from the passed repo_root only
+        assert_eq!(
+            default_recovery_cache_path(root),
+            root.join(".tokenzero/recovery-cache.json")
+        );
+    }
 }
