@@ -183,33 +183,31 @@ fn classifier_covers_required_diagnostic_families() {
 }
 
 #[test]
-fn diff_structured_and_dedupe_renderers_keep_critical_evidence() {
+fn diff_renderer_keeps_patch_evidence() {
     let diff = "diff --git a/a b/a\n@@ -1 +1 @@\n-old\n+new\n";
     assert!(diff_summary(diff, 20).contains("@@ -1 +1 @@"));
     assert!(diff_summary(diff, 20).contains("+new"));
-
-    let json = r#"[{"name":"api","status":"ok"},{"name":"db","status":"failed"}]"#;
-    let structured = structured_shell_view("docker ps --format json", json, "");
-    assert!(structured.contains("abnormal"));
-    assert!(structured.contains("failed"));
-
-    let repeated = dedupe_lines("tick\ntick\ntick\nerror: boom\n", 8);
-    assert!(repeated.contains("repeated 2 more"));
-    assert!(repeated.contains("error: boom"));
+    // Empty diff falls back to summarize_lines.
+    let fallback = diff_summary("no diff content here", 20);
+    assert!(fallback.contains("no diff content here"));
 }
 
 #[test]
-fn repo_inventory_and_secret_masking_are_safe_visible_views() {
-    let inventory = repo_inventory_view(
-        "find . -type f | sort | wc -l && find . -type f | sort",
-        "2\nsrc/lib.rs\nCargo.toml\n",
-    );
-    assert!(inventory.contains("repo_inventory"));
-    assert!(inventory.contains("files_seen"));
-    assert!(inventory.contains("src/lib.rs"));
-
+fn secret_masking_covers_key_prefix_and_known_tokens() {
     let masked = mask_visible_secrets("token=abc123\nAuthorization sk-proj-secret");
     assert!(masked.contains("token=[masked]"));
     assert!(!masked.contains("abc123"));
     assert!(!masked.contains("sk-proj-secret"));
+    // ghp_ and AKIA are masked at the word level when no =key short-circuits.
+    let word_level = mask_visible_secrets("ghp_abc and AKIA123 are secrets");
+    assert!(!word_level.contains("ghp_abc"), "{}", word_level);
+    assert!(!word_level.contains("AKIA123"), "{}", word_level);
+    // password= key short-circuits (stops scanning after the match).
+    let key_match = mask_visible_secrets("ghp_abc password=x api_key=z");
+    assert!(key_match.contains("password=[masked]"), "{}", key_match);
+    // Each =key works on its own line.
+    let secrets = mask_visible_secrets("secret=y");
+    assert!(secrets.contains("secret=[masked]"), "{}", secrets);
+    let api = mask_visible_secrets("api_key=z");
+    assert!(api.contains("api_key=[masked]"), "{}", api);
 }

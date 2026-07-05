@@ -20,6 +20,7 @@ fn shell_minimal_header_when_telemetry_dominates_small_success() {
     });
 
     assert_eq!(rendered.output_strategy, "compact_success_shell");
+    assert_shell_status(&rendered, true, Some(0), None, None);
     assert!(rendered.visible.starts_with("# shell ok"));
     assert!(
         rendered.visible.contains("cargo ok in 0.21s"),
@@ -64,7 +65,12 @@ fn shell_failures_keep_full_diagnostic_header() {
     });
 
     assert_ne!(rendered.output_strategy, "minimal_envelope_shell");
-    assert!(rendered.visible.contains("exit_code: 101") || rendered.visible.contains("101"));
+    assert_shell_status(&rendered, false, Some(101), Some("command_failed"), None);
+    assert!(
+        rendered.visible.contains("package nope not found"),
+        "error evidence lost: {}",
+        rendered.visible
+    );
 }
 
 #[test]
@@ -115,11 +121,12 @@ fn shell_render_exposes_status_truth_and_refs() {
     });
 
     assert_eq!(rendered.policy.policy, "diagnostic");
-    assert!(!rendered.command_status.command_success);
-    assert_eq!(rendered.command_status.status_label, "command_failed");
-    assert_eq!(
-        rendered.command_status.failed_segment.as_deref(),
-        Some("false")
+    assert_shell_status(
+        &rendered,
+        false,
+        Some(0),
+        Some("command_failed"),
+        Some(Some("false")),
     );
     assert!(
         rendered
@@ -564,6 +571,7 @@ fn long_success_listing_is_collapsed_far_below_raw() {
     ));
     let visible_tokens = count_tokens(&rendered.visible);
 
+    assert_shell_status(&rendered, true, Some(0), None, None);
     assert!(
         visible_tokens < raw / 5,
         "visible={visible_tokens} raw={raw}\n{}",
@@ -572,6 +580,12 @@ fn long_success_listing_is_collapsed_far_below_raw() {
     assert!(
         rendered.visible.contains("exact ref available"),
         "{}",
+        rendered.visible
+    );
+    // At least the first few list entries must survive compaction.
+    assert!(
+        rendered.visible.contains("libsystem_000"),
+        "first list item lost after compaction: {}",
         rendered.visible
     );
 }
@@ -597,6 +611,7 @@ fn wide_success_passthrough_gets_token_squeeze() {
     let visible_tokens = count_tokens(&rendered.visible);
 
     assert_eq!(rendered.output_strategy, "compact_success_shell");
+    assert_shell_status(&rendered, true, Some(0), None, None);
     assert!(
         visible_tokens < raw / 4,
         "visible={visible_tokens} raw={raw}\n{}",
@@ -605,6 +620,12 @@ fn wide_success_passthrough_gets_token_squeeze() {
     assert!(
         rendered.visible.contains("exact ref available"),
         "{}",
+        rendered.visible
+    );
+    // First row of the grid must survive compaction.
+    assert!(
+        rendered.visible.contains("cell0x0"),
+        "first grid cell lost after compaction: {}",
         rendered.visible
     );
 }
