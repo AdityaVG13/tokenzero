@@ -224,8 +224,33 @@ tokenzero doctor --json and show me the result.
 
 </details>
 
-Cargo, Homebrew, and npm channels ship alongside the GitHub Releases. Building from
-source? See [`docs/development.md`](docs/development.md).
+A Homebrew tap (AdityaVG13/homebrew-zerostack) is being prepared; source builds
+are the supported channel today. See [`docs/development.md`](docs/development.md).
+
+## Install / Build
+
+```bash
+git clone https://github.com/AdityaVG13/tokenzero
+cd tokenzero
+cargo build --release
+```
+
+`rust-toolchain.toml` pins the nightly toolchain automatically. The binary lands at
+`target/release/tokenzero`.
+
+## Easy start (agents)
+
+Paste this into your AI agent and it will set TokenZero up end to end:
+
+```text
+Set up TokenZero from https://github.com/AdityaVG13/tokenzero for me:
+1. Clone it and run `cargo build --release` (rust-toolchain.toml pins the toolchain).
+2. Register `target/release/tokenzero mcp-server --mode=mcp` as a stdio MCP server named "TokenZero" in my agent config.
+3. If my harness supports ZeroStack CodeMode plan execution, register `target/release/tokenzero mcp-server --mode=codemode` INSTEAD and never both.
+4. Verify: call `tokenzero read README.md --json` against this repo and report the response envelope plus token savings.
+```
+
+One ZeroStack-wide prompt will ship when the unified ZeroStack meta-release lands; until then each engine sets up standalone.
 
 <h3 id="commands"><img src=".github/assets/h-commands.svg" alt="Commands" width="100%"></h3>
 
