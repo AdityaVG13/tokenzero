@@ -71,6 +71,12 @@ pub(crate) fn build_resource_payload(
         "resource://tokenzero/roots" => json!({
             "schema_version": MCP_SCHEMA_VERSION,
             "status": "ok",
+            "effective_allowed_roots": engine
+                .config
+                .allowed_roots
+                .iter()
+                .map(|path| path.display().to_string())
+                .collect::<Vec<_>>(),
             "allowed_roots": engine
                 .config
                 .allowed_roots
@@ -78,7 +84,8 @@ pub(crate) fn build_resource_payload(
                 .map(|path| path.display().to_string())
                 .collect::<Vec<_>>(),
             "path_rule": "read/find/grep/glob/tree paths and shell cwd must stay under one allowed root.",
-            "next_actions": ["Use tree or glob under one allowed root before reading files."]
+            "allowlist_algorithm": "effective roots = call root (CodeMode options.root / CLI --root / zero_execute root) union configured --allowed-root entries, deduped by canonical path. Relative paths join to the execute root; absolute paths under that root are allowed; paths outside every effective root are denied.",
+            "next_actions": ["Use tree or glob under one allowed root before reading files.", "Pass root= on tz_execute_code / tokenzero codemode --root for foreign workspaces."]
         }),
         "resource://tokenzero/modes" => json!({
             "schema_version": MCP_SCHEMA_VERSION,

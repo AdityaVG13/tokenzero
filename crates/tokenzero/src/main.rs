@@ -788,6 +788,17 @@ fn emit_rewrite(args: RewriteArgs) -> Result<()> {
 fn doctor_report(args: &DoctorArgs) -> serde_json::Value {
     let root = tokenzero_work_root(args.root.clone());
     let mut report = install::doctor(&root, args.cache_path.as_deref());
+    // wqw.5: doctor exposes effective allowed roots for the workspace root.
+    let effective = allowed_roots_for_workspace(&root, &[]);
+    report["effective_allowed_roots"] = json!(
+        effective
+            .iter()
+            .map(|p| p.display().to_string())
+            .collect::<Vec<_>>()
+    );
+    report["allowlist_algorithm"] = json!(
+        "effective roots = doctor/call root union configured --allowed-root entries, deduped by canonical path. Relative CodeMode paths join to execute root."
+    );
     if args.runtime {
         let argv = vec!["echo".to_string(), "ok".to_string()];
         let plan = tokenzero_runtime::plan_command(&argv, Some(&root), false).ok();

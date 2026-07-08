@@ -127,8 +127,33 @@ fn exec_codemode_tool(
         max_visible_tokens: engine.config.max_visible_tokens,
         ..Default::default()
     };
-    if let Some(root) = engine.config.allowed_roots.first() {
+    // wqw.5: plan-level root / allowed_root follow zero_execute-style call root.
+    // Prefer explicit args.root, else first configured allowed root.
+    if let Ok(root) = arg_string_any(args, &["root", "cwd", "workspace"]) {
+        let root_path = std::path::PathBuf::from(root);
+        options.root = Some(root_path.clone());
+        // Ensure the execute root is on the allowlist for this plan.
+        if !options.allowed_roots.iter().any(|r| r == &root_path) {
+            options.allowed_roots.push(root_path);
+        }
+    } else if let Some(root) = engine.config.allowed_roots.first() {
         options.root = Some(root.clone());
+    }
+    if let Some(extra) = args
+        .get("allowed_root")
+        .or_else(|| args.get("allowed_roots"))
+    {
+        match extra {
+            Value::String(path) => options.allowed_roots.push(std::path::PathBuf::from(path)),
+            Value::Array(items) => {
+                for item in items {
+                    if let Some(path) = item.as_str() {
+                        options.allowed_roots.push(std::path::PathBuf::from(path));
+                    }
+                }
+            }
+            _ => {}
+        }
     }
     if let Some(limits) = args.get("limits") {
         if let Ok(limits) = serde_json::from_value::<crate::CodeModeLimits>(limits.clone()) {

@@ -1366,7 +1366,7 @@ fn dispatch_values(
     // zero.token.* aliases: the router's namespaced surface addresses this
     // substrate as zero.token.<op>; both spellings hit the same engine ops.
     match method {
-        "zero.read" | "read" | "zero.token.read" => exec_read(engine, args),
+        "zero.read" | "read" | "zero.token.read" => exec_read(engine, work_root, args),
         "zero.find" | "find" | "zero.token.find" => exec_find(engine, work_root, args, false),
         "zero.grep" | "grep" | "zero.token.grep" => exec_find(engine, work_root, args, true),
         "zero.glob" | "glob" | "zero.token.glob" => exec_glob(engine, work_root, args),
@@ -1556,15 +1556,18 @@ fn require_str_arg<'a>(
         .ok_or_else(|| Box::new(CodeModeResult::error(message.to_string(), 0)))
 }
 
-fn paths_from_arg(args: &[Value], index: usize, default: PathBuf) -> Vec<PathBuf> {
-    match args.get(index) {
+/// Collect path args, joining relative entries to `work_root` (wqw.5).
+/// When the path arg is omitted, returns `[work_root]`.
+fn paths_from_arg(args: &[Value], index: usize, work_root: PathBuf) -> Vec<PathBuf> {
+    let raw = match args.get(index) {
         Some(Value::String(path)) => vec![PathBuf::from(path)],
         Some(Value::Array(items)) => items
             .iter()
             .filter_map(|value| value.as_str().map(PathBuf::from))
             .collect(),
-        _ => vec![default],
-    }
+        _ => return vec![work_root],
+    };
+    resolve_paths_against_work_root(raw, &work_root)
 }
 
 fn require_paths_from_arg(
@@ -1589,12 +1592,42 @@ fn require_paths_from_arg(
     }
 }
 
-fn exec_read(engine: &TokenZeroEngine, args: &[Value]) -> Result<OpOutcome, Box<CodeModeResult>> {
+/// Resolve plan paths against the CodeMode execute root (wqw.5).
+///
+/// Allowlist algorithm: effective roots = `allowed_roots_for_workspace(execute_root,
+/// explicit_allowlist)` — always includes the call `root`, plus any configured
+/// `--allowed-root` entries, deduped by canonical path. Relative paths are joined
+/// to `work_root` (the execute root); absolute paths are kept as-is and still must
+/// fall under an effective root. Paths outside every effective root are denied.
+pub(crate) fn resolve_paths_against_work_root(
+    paths: Vec<PathBuf>,
+    work_root: &Path,
+) -> Vec<PathBuf> {
+    paths
+        .into_iter()
+        .map(|path| {
+            if path.as_os_str().is_empty() {
+                work_root.to_path_buf()
+            } else if path.is_absolute() {
+                path
+            } else {
+                work_root.join(path)
+            }
+        })
+        .collect()
+}
+
+fn exec_read(
+    engine: &TokenZeroEngine,
+    work_root: &Path,
+    args: &[Value],
+) -> Result<OpOutcome, Box<CodeModeResult>> {
     let paths = require_paths_from_arg(
         args,
         0,
         "zero.read requires a path string or array as first argument",
     )?;
+    let paths = resolve_paths_against_work_root(paths, work_root);
     let opts = Opts::from_arg(args, 1);
     let mode = opts.mode_or("mode", Mode::Auto);
     let start_line = opts.usize("start_line");
@@ -1610,7 +1643,21 @@ fn exec_read(engine: &TokenZeroEngine, args: &[Value]) -> Result<OpOutcome, Box<
             .as_ref()
             .map(|error| error.message.clone())
             .unwrap_or_else(|| "zero.read failed".to_string());
+        let code = resp
+            .error
+            .as_ref()
+            .map(|error| error.code.as_str())
+            .unwrap_or("");
         let lower = message.to_ascii_lowercase();
+        // wqw.5: outside allowlist is a hard plan error (clear deny), not a soft capsule.
+        if code == "path_not_allowed" || lower.contains("outside allowed roots") {
+            return Err(Box::new(CodeModeResult::error_with_kind(
+                "path_not_allowed",
+                message,
+                0,
+                false,
+            )));
+        }
         if lower.contains("__zerostack_missing_target__")
             || lower.contains("not found")
             || lower.contains("no such")
@@ -1682,12 +1729,15 @@ fn exec_tree(
     work_root: &Path,
     args: &[Value],
 ) -> Result<OpOutcome, Box<CodeModeResult>> {
-    let roots = vec![
-        args.first()
-            .and_then(|v| v.as_str())
-            .map(PathBuf::from)
-            .unwrap_or_else(|| work_root.to_path_buf()),
-    ];
+    let roots = resolve_paths_against_work_root(
+        vec![
+            args.first()
+                .and_then(|v| v.as_str())
+                .map(PathBuf::from)
+                .unwrap_or_else(|| work_root.to_path_buf()),
+        ],
+        work_root,
+    );
     let opts = Opts::from_arg(args, 1);
     let depth = opts.usize("depth").unwrap_or(3);
     let include_hidden = opts.bool("include_hidden").unwrap_or(false);
@@ -1711,7 +1761,24 @@ fn exec_shell(engine: &TokenZeroEngine, args: &[Value]) -> Result<OpOutcome, Box
         "zero.shell requires a command string as first argument",
     )?;
     let opts = Opts::from_arg(args, 1);
-    let cwd = opts.str("cwd").map(PathBuf::from);
+    // Relative cwd is resolved against allowed roots via path_allowed after
+    // engine comparable_path (cwd-based). Prefer absolute or omit cwd so the
+    // engine uses the execute-root workspace. When callers pass a relative cwd,
+    // join against the first allowed root (execute root).
+    let cwd = opts.str("cwd").map(|raw| {
+        let path = PathBuf::from(raw);
+        if path.is_absolute() {
+            path
+        } else {
+            engine
+                .config
+                .allowed_roots
+                .first()
+                .cloned()
+                .unwrap_or_else(|| PathBuf::from("."))
+                .join(path)
+        }
+    });
     let mode = opts.mode_or("mode", Mode::Auto);
     let timeout = opts
         .usize("timeout_seconds")

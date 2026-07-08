@@ -1,5 +1,6 @@
 use super::exec::{
     exec_edit, execute_codemode, execute_codemode_with_options, make_engine_for_root,
+    resolve_paths_against_work_root,
 };
 use super::parser::{Statement, parse_expr, parse_plan, resolve_expr};
 use super::result::{CodeModeOptions, CodeModeResult, CodeModeStatus};
@@ -1306,4 +1307,114 @@ fn alias_rewrites_skip_string_literals_and_identifier_tails() {
         lowered.contains("zero.token.compact(x)") && !lowered.contains("zero.zero."),
         "double prefix: {lowered}"
     );
+}
+
+#[test]
+fn foreign_root_token_read_relative_and_absolute() {
+    // wqw.5: execute root becomes the allowlist base; relative + absolute under
+    // that root succeed; outside is denied.
+    let foreign = tempfile::tempdir().unwrap();
+    let changelog = foreign.path().join("CHANGELOG.md");
+    std::fs::write(&changelog, "# foreign changelog\nwqw5-marker\n").unwrap();
+    let outside = tempfile::tempdir().unwrap();
+    std::fs::write(outside.path().join("secret.txt"), "nope\n").unwrap();
+
+    let result = execute_codemode_with_options(
+        r#"return await zero.token.read("CHANGELOG.md")"#,
+        CodeModeOptions {
+            root: Some(foreign.path().to_path_buf()),
+            allowed_roots: vec![],
+            cache_path: Some(foreign.path().join(".tokenzero/recovery-cache.json")),
+            ..Default::default()
+        },
+    );
+    assert_eq!(
+        result.status,
+        CodeModeStatus::Completed,
+        "{:?}",
+        result.error
+    );
+    let text = serde_json::to_string(&result.value).unwrap_or_default();
+    assert!(
+        text.contains("wqw5-marker") || result.to_line().contains("wqw5-marker"),
+        "relative read under foreign root: {:?}",
+        result
+    );
+
+    let abs = changelog.display().to_string().replace('\\', "\\\\");
+    let plan_abs = format!(r#"return await zero.token.read("{abs}")"#);
+    let abs_result = execute_codemode_with_options(
+        &plan_abs,
+        CodeModeOptions {
+            root: Some(foreign.path().to_path_buf()),
+            allowed_roots: vec![],
+            cache_path: Some(foreign.path().join(".tokenzero/recovery-cache.json")),
+            ..Default::default()
+        },
+    );
+    assert_eq!(
+        abs_result.status,
+        CodeModeStatus::Completed,
+        "absolute under root: {:?}",
+        abs_result.error
+    );
+
+    let outside_file = outside.path().join("secret.txt");
+    let outside_plan = format!(
+        r#"return await zero.token.read("{}")"#,
+        outside_file.display().to_string().replace('\\', "\\\\")
+    );
+    let denied = execute_codemode_with_options(
+        &outside_plan,
+        CodeModeOptions {
+            root: Some(foreign.path().to_path_buf()),
+            allowed_roots: vec![],
+            cache_path: Some(foreign.path().join(".tokenzero/recovery-cache.json")),
+            ..Default::default()
+        },
+    );
+    assert_eq!(denied.status, CodeModeStatus::Error, "outside must deny");
+    let err = denied
+        .error
+        .as_ref()
+        .map(|e| e.message.clone())
+        .unwrap_or_default();
+    assert!(
+        err.contains("outside allowed roots") || err.to_ascii_lowercase().contains("not allowed"),
+        "deny message: {err}"
+    );
+}
+
+#[test]
+fn default_root_token_read_still_works() {
+    let work = tempfile::tempdir().unwrap();
+    std::fs::write(work.path().join("README.md"), "default-root-ok\n").unwrap();
+    let result = execute_codemode_with_options(
+        r#"return await zero.token.read("README.md")"#,
+        CodeModeOptions {
+            root: Some(work.path().to_path_buf()),
+            cache_path: Some(work.path().join(".tokenzero/recovery-cache.json")),
+            ..Default::default()
+        },
+    );
+    assert_eq!(
+        result.status,
+        CodeModeStatus::Completed,
+        "{:?}",
+        result.error
+    );
+}
+
+#[test]
+fn resolve_paths_against_work_root_joins_relative() {
+    let root = std::path::PathBuf::from("/tmp/foreign-proj");
+    let resolved = resolve_paths_against_work_root(
+        vec![
+            std::path::PathBuf::from("CHANGELOG.md"),
+            std::path::PathBuf::from("/abs/file.txt"),
+        ],
+        &root,
+    );
+    assert_eq!(resolved[0], root.join("CHANGELOG.md"));
+    assert_eq!(resolved[1], std::path::PathBuf::from("/abs/file.txt"));
 }
