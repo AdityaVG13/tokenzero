@@ -103,8 +103,9 @@ pub(crate) enum Commands {
         about = "Compose multi-step plans on the same base tools as MCP (fewer round-trips, Cloudflare-style)",
         long_about = "Execute JS-like plans that compose the same TokenZero operations as MCP (zero.read, zero.find, zero.shell, ...) in one call for faster multi-step workflows.\n\n\
             Discovery: tokenzero codemode 'search:read' | tokenzero codemode 'describe:zero.read'\n\n\
-            Cache: defaults to codemode-recovery.json (separate from MCP/CLI recovery-cache.json). \
-            Pass the same --cache-path to codemode and expand when refs must cross surfaces."
+            Cache: defaults to the same recovery-cache.json as CLI expand/MCP so refs mintable \
+            by codemode expand on the next call. Override with --cache-path / TOKENZERO_CACHE_PATH \
+            when using an isolated store (wrong root yields store_mismatch naming both paths)."
     )]
     CodeMode(CodeModeArgs),
     #[command(name = "harm-eval")]

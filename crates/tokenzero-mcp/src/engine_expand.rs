@@ -61,6 +61,7 @@ fn expand_serve_key(params: &ExpandParams) -> ServeKey {
 fn resolve_slice(
     store: &mut RecoveryStore,
     params: &ExpandParams,
+    active_cache: &Path,
 ) -> Result<ExpansionResult, Box<ToolResponse>> {
     let selector = params.selector.as_deref().or(Some("raw"));
     let anchor = params.anchor_kind.as_deref();
@@ -76,8 +77,83 @@ fn resolve_slice(
     if result.found {
         Ok(result)
     } else {
-        Err(Box::new(expansion_response(result, store.recovery_tokens)))
+        Err(Box::new(annotate_expand_miss(
+            expansion_response(result, store.recovery_tokens),
+            &params.ref_id,
+            active_cache,
+        )))
     }
+}
+
+/// When expand misses, name the active store and any alternate store that
+/// actually holds the ref (wrong STORE_ROOT / --cache-path mismatch — wqw.8).
+fn annotate_expand_miss(mut response: ToolResponse, ref_id: &str, active_cache: &Path) -> ToolResponse {
+    let Some(err) = response.error.as_mut() else {
+        return response;
+    };
+    if err.code != "ref_not_found" && err.code != "expand_failed" {
+        return response;
+    }
+    let active = active_cache.display().to_string();
+    let mut message = format!("{} [store: {active}]", err.message);
+    if let Some((other_path, found)) = probe_alternate_store_for_ref(ref_id, active_cache) {
+        if found {
+            message = format!(
+                "store_mismatch: ref present in {other} but not in active store {active} (pass the same --cache-path / TOKENZERO_CACHE_PATH / ZEROSTACK_STORE_ROOT used when the ref was minted); original: {}",
+                err.message,
+                other = other_path.display(),
+                active = active,
+            );
+            err.code = "store_mismatch".to_string();
+        } else {
+            message.push_str(&format!(
+                " [also checked alternate store: {}]",
+                other_path.display()
+            ));
+        }
+    }
+    err.message = message;
+    response
+}
+
+fn probe_alternate_store_for_ref(ref_id: &str, active_cache: &Path) -> Option<(PathBuf, bool)> {
+    let parent = active_cache.parent()?;
+    let name = active_cache.file_name()?.to_string_lossy();
+    // Probe the historical split: codemode-recovery.json vs recovery-cache.json
+    let candidates: Vec<PathBuf> = if name.contains("codemode-recovery") {
+        vec![
+            parent.join("recovery-cache.json"),
+            parent.join("tokenzero").join("recovery-cache.json"),
+        ]
+    } else if name.contains("recovery-cache") {
+        vec![
+            parent.join("codemode-recovery.json"),
+            parent.join("tokenzero").join("codemode-recovery.json"),
+        ]
+    } else {
+        vec![
+            parent.join("recovery-cache.json"),
+            parent.join("codemode-recovery.json"),
+        ]
+    };
+    let mut first_existing: Option<PathBuf> = None;
+    for candidate in candidates {
+        if candidate == *active_cache || !candidate.is_file() {
+            continue;
+        }
+        let mut other = RecoveryStore::new(Some(candidate.clone()));
+        let hit = other.has_ref(ref_id)
+            || other
+                .expand(ref_id, Some("raw"), None, None, None, None)
+                .found;
+        if hit {
+            return Some((candidate, true));
+        }
+        if first_existing.is_none() {
+            first_existing = Some(candidate);
+        }
+    }
+    first_existing.map(|path| (path, false))
 }
 
 impl TokenZeroEngine {
@@ -135,7 +211,7 @@ impl TokenZeroEngine {
                     None,
                 );
             }
-            let target = match resolve_slice(&mut store, &params) {
+            let target = match resolve_slice(&mut store, &params, &self.config.cache_path) {
                 Ok(t) => t,
                 Err(resp) => return *resp,
             };
@@ -224,7 +300,7 @@ impl TokenZeroEngine {
             return response;
         }
 
-        let target = match resolve_slice(&mut store, &params) {
+        let target = match resolve_slice(&mut store, &params, &self.config.cache_path) {
             Ok(t) => t,
             Err(resp) => return *resp,
         };

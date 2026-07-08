@@ -329,8 +329,8 @@ pub fn capabilities_json() -> serde_json::Value {
                 "tokenzero codemode 'search:read'",
                 "tokenzero codemode 'describe:zero.read'"
             ],
-            "cache_default": "codemode-recovery.json",
-            "cache_note": "CodeMode uses a separate recovery cache by default; pass --cache-path when refs must cross CLI/MCP surfaces.",
+            "cache_default": "recovery-cache.json",
+            "cache_note": "CodeMode shares the default recovery-cache.json with CLI expand/MCP so refs expand without re-running the producer. Pass --cache-path only for an isolated store.",
             "pattern": "https://developers.cloudflare.com/agents/tools/codemode/",
             "when_to_use": "Compose multi-step workflows on the same base tools as MCP but faster (fewer round-trips, composition via plans, progressive search:/describe: discovery). Not an MCP tool."
         },
@@ -439,7 +439,7 @@ Plan-level helpers (not in MCP, only available within plans):
 
 All `zero.*` methods that touch files, shell, or cache dispatch through the same code path as `tz_read`, `tz_find`, `tz_shell`, etc. Refs from one surface work in the other (`tz_expand` accepts refs from CodeMode plans and vice versa).
 
-Cache: CodeMode defaults to `codemode-recovery.json` (under `.tokenzero/` or `.zerostack/tokenzero/`). Share `--cache-path` with `expand`/MCP when refs must cross surfaces.
+Cache: CodeMode defaults to the same `recovery-cache.json` as CLI expand/MCP (under `.tokenzero/` or `.zerostack/tokenzero/`). Isolated stores require matching `--cache-path` on both mint and expand.
 "#
 }
 
@@ -465,7 +465,7 @@ tokenzero codemode 'search:read'
 
 Recoveries: `capability`, `capabilites`, `robot-help`, `--robot-help`, `rn`, `shell`, `search`, `--jsno`, `--jason`, `--timout`, `cache statuz`, `doctor status`, `doctor statuz`, `pulse stats`, `pulse status`, `install plan`, and `install status` redirect to safe canonical surfaces.
 
-CodeMode uses `codemode-recovery.json` by default; share `--cache-path` with `expand`/MCP when refs must cross surfaces. CodeMode is a separate plan-based execution on the same base tools (not an MCP tool).
+CodeMode shares `recovery-cache.json` with expand/MCP by default. CodeMode is a separate plan-based execution on the same base tools (not an MCP tool).
 "#
 }
 

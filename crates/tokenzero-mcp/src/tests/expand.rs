@@ -513,6 +513,125 @@ fn expand_missing_fz_blob_error_includes_full_ref() {
 }
 
 #[test]
+fn same_session_codemode_default_store_expands_without_rerun() {
+    // wqw.8: mint via codemode engine (shared default store) then expand on a
+    // fresh engine pointed at the same cache_path — no re-run of producer.
+    let dir = tempdir().unwrap();
+    let root = dir.path().to_path_buf();
+    let cache = crate::workspace::default_recovery_cache_path(&root);
+    let mint_engine = {
+        let mut config = EngineConfig::for_root(&root);
+        config.cache_path = cache.clone();
+        TokenZeroEngine::new(config)
+    };
+    let mint = mint_engine.ingest(
+        "same-session payload hello",
+        tokenzero_core::ContentType::Unknown,
+        Mode::Auto,
+        "test",
+    );
+    assert_eq!(mint.status, "ok", "{:?}", mint.error);
+    let blob_ref = mint
+        .refs
+        .iter()
+        .find(|r| r.kind == "blob")
+        .expect("blob ref")
+        .ref_id
+        .clone();
+    drop(mint_engine);
+
+    let expand_engine = {
+        let mut config = EngineConfig::for_root(&root);
+        config.cache_path = cache;
+        TokenZeroEngine::new(config)
+    };
+    let expanded = expand_engine.expand(&blob_ref, Some("raw"), None, None, None, None);
+    assert_eq!(expanded.status, "ok", "{:?}", expanded.error);
+    assert_eq!(
+        expanded.visible.as_ref().unwrap().text,
+        "same-session payload hello"
+    );
+}
+
+#[test]
+fn wrong_cache_path_names_both_stores_on_miss() {
+    // wqw.8: producer and consumer on different cache files → store_mismatch.
+    // Write the producer cache as raw JSON (no RecoveryStore persist) so the
+    // per-user ref-index is not updated; that isolates dual-root messaging.
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    let consumer_cache = root.join("recovery-cache.json");
+    let sibling = root.join("codemode-recovery.json");
+    let payload = "mismatch-payload";
+    let blob_id = tokenzero_core::id_for('b', payload);
+    let blob_ref = format!("tz://blob/{blob_id}");
+    let producer_state = serde_json::json!({
+        "version": 1,
+        "max_blobs": 1024,
+        "max_files": 1024,
+        "max_units": 1024,
+        "max_search_hits": 1024,
+        "max_bytes": 64 * 1024 * 1024,
+        "blobs": { blob_ref.clone(): payload },
+        "files": {},
+        "units": {},
+        "search_hits": {},
+        "aliases": {},
+        "order": [blob_ref.clone()],
+        "shell_outcomes": {},
+        "shell_outcome_seq": 0
+    });
+    fs::write(
+        &sibling,
+        serde_json::to_vec_pretty(&producer_state).unwrap(),
+    )
+    .unwrap();
+    // Empty consumer store file (exists so probe sees both paths as files).
+    fs::write(
+        &consumer_cache,
+        serde_json::to_vec_pretty(&serde_json::json!({
+            "version": 1,
+            "max_blobs": 1024,
+            "max_files": 1024,
+            "max_units": 1024,
+            "max_search_hits": 1024,
+            "max_bytes": 64 * 1024 * 1024,
+            "blobs": {},
+            "files": {},
+            "units": {},
+            "search_hits": {},
+            "aliases": {},
+            "order": [],
+            "shell_outcomes": {},
+            "shell_outcome_seq": 0
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+
+    let mut consumer = EngineConfig::for_root(root);
+    consumer.cache_path = consumer_cache.clone();
+    let expand_engine = TokenZeroEngine::new(consumer);
+    let response = expand_engine.expand(&blob_ref, Some("raw"), None, None, None, None);
+
+    assert_eq!(response.status, "error", "{:?}", response);
+    let err = response.error.as_ref().unwrap();
+    assert_eq!(err.code, "store_mismatch", "{err:?}");
+    assert!(
+        err.message.contains(sibling.to_string_lossy().as_ref())
+            || err.message.contains("codemode-recovery"),
+        "must name producer store: {}",
+        err.message
+    );
+    assert!(
+        err.message.contains(consumer_cache.to_string_lossy().as_ref())
+            || err.message.contains("recovery-cache"),
+        "must name consumer store: {}",
+        err.message
+    );
+}
+
+#[test]
 fn windowed_expand_same_store_and_oob_code() {
     // zq9: same-store window is exact; OOB is window_out_of_range not ref_not_found.
     let dir = tempdir().unwrap();
