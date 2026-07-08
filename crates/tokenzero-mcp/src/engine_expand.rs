@@ -87,7 +87,11 @@ fn resolve_slice(
 
 /// When expand misses, name the active store and any alternate store that
 /// actually holds the ref (wrong STORE_ROOT / --cache-path mismatch — wqw.8).
-fn annotate_expand_miss(mut response: ToolResponse, ref_id: &str, active_cache: &Path) -> ToolResponse {
+fn annotate_expand_miss(
+    mut response: ToolResponse,
+    ref_id: &str,
+    active_cache: &Path,
+) -> ToolResponse {
     let Some(err) = response.error.as_mut() else {
         return response;
     };
@@ -158,6 +162,16 @@ fn probe_alternate_store_for_ref(ref_id: &str, active_cache: &Path) -> Option<(P
 
 impl TokenZeroEngine {
     pub fn expand_with_params(&self, params: ExpandParams) -> ToolResponse {
+        let response = self.expand_with_params_inner(params);
+        let ok = response.error.is_none();
+        let code = response.error.as_ref().map(|err| err.code.as_str());
+        // Health probe for crash-only unlock (wqw.9). invalid_ref is a client
+        // mistake and does not open recovery.
+        self.surface_health().record_expand_outcome(ok, code);
+        response
+    }
+
+    fn expand_with_params_inner(&self, params: ExpandParams) -> ToolResponse {
         if !is_expandable_ref(&params.ref_id) {
             return ToolResponse::error(
                 "expand",

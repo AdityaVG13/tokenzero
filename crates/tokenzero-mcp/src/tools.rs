@@ -8,7 +8,6 @@ use tokenzero_core::{
 use tokenzero_filters::{discover, rewrite_command};
 use tokenzero_runtime::{ExecutionMode, plan_command_for_platform};
 
-use crate::catalog::canonical_allowed_on_surface;
 use crate::expand_params::ExpandParams;
 use crate::jsonrpc::JsonRpcErrorData;
 use crate::{EditHunk, ServeOptions, TokenZeroEngine, shell_timeout_from_secs};
@@ -21,12 +20,18 @@ pub(crate) fn call_tool(
 ) -> Result<Value, JsonRpcErrorData> {
     let canonical = canonical_tool(name);
     let started = std::time::Instant::now();
-    if !canonical_allowed_on_surface(engine.config.tool_surface, canonical) {
-        return Err(JsonRpcErrorData::unknown_tool(name));
+    // Crash-only gate (wqw.9): on CodeMode, expand/read stay locked while the
+    // primary surface is healthy; unlock only after expand X0 / substrate_down.
+    if let Err(policy_msg) = engine
+        .surface_health()
+        .allow_tool_call(engine.config.tool_surface, name)
+    {
+        return Err(JsonRpcErrorData::policy_refusal(name, policy_msg));
     }
     let result = dispatch_tool(engine, canonical, name, args);
     engine.record_tool_call(canonical, started.elapsed(), result.is_err());
     let response = result?;
+    // Expand health is recorded inside expand_with_params (CLI + CodeMode + MCP).
     record_mcp_pulse(engine, canonical, args, &response, call_id);
     Ok(mcp_tool_response(response))
 }
@@ -146,6 +151,25 @@ fn exec_codemode_tool(
         options.ref_first_budget = budget as usize;
     }
     let result = crate::execute_codemode_with_options(plan, options.clone());
+    // wqw.9: expand/read X0 opens crash-only recovery; never claim healthy after.
+    if matches!(result.status, crate::CodeModeStatus::Error) {
+        let plan_l = plan.to_ascii_lowercase();
+        let expandish = plan_l.contains("expand")
+            || plan_l.contains("zero.token.read")
+            || plan_l.contains("zero.read");
+        let kind = result
+            .error
+            .as_ref()
+            .map(|e| e.kind.as_str())
+            .unwrap_or("codemode_error");
+        if expandish || kind == "substrate_down" {
+            if kind == "substrate_down" {
+                engine.surface_health().record_substrate_down();
+            } else {
+                engine.surface_health().record_codemode_expand_x0();
+            }
+        }
+    }
     if codemode_envelope_version(args, &options) == "v1" {
         json_tool_response(name, codemode_contract_payload_v1(&result))
     } else {

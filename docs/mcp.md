@@ -383,6 +383,25 @@ Common refs:
 - `tz://file/<id>#Lx-Ly` for file-like ranges.
 - `tz://search/<id>` for stored search hits.
 
+### Crash-only unlock ladder (CodeMode surface)
+
+When the server runs in CodeMode (`TOKENZERO_MCP_TOOL_SURFACE=codemode` /
+`--mode=codemode`), only `tz_execute_code`, `tz_codemode_search`, and
+`tz_codemode_describe` are advertised while the primary surface is healthy.
+
+1. Prefer `zero.token.expand` / `zero.token.read` inside `tz_execute_code`.
+2. If expand fails with X0 (or substrate_down), session surface health marks
+   the primary surface **unhealthy** and unlocks **only** crash-only recovery
+   tools `tz_expand` and `tz_read` so bytes can be recovered without native
+   Read. Write/shell stay locked.
+3. Successful expand/read clears the failure streak; recovery re-locks.
+4. Policy refusals never print "primary surface healthy" after expand X0.
+5. Telemetry: `resource://tokenzero/metrics` → `surface_health` with
+   `blocked_count` / `unlocked_count`.
+
+CLI `tokenzero expand` / `tokenzero read` remain available outside MCP as the
+same recovery path.
+
 ## Shell Contract
 
 MCP `shell` defaults to auto policy and uses the same renderer as

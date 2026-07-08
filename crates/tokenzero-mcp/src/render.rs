@@ -32,7 +32,9 @@ pub(crate) fn expansion_response(result: ExpansionResult, recovery_tokens: usize
                     "invalid-ref" => format!(
                         "ref is not a valid tz://, fz://, or gz:// recovery handle: {full_ref}"
                     ),
-                    "decode-failed" => format!("ref was found but could not be decoded: {full_ref}"),
+                    "decode-failed" => {
+                        format!("ref was found but could not be decoded: {full_ref}")
+                    }
                     _ => format!("ref expansion failed: {full_ref}"),
                 }
             },

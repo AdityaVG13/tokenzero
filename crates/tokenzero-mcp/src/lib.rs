@@ -34,6 +34,7 @@ mod session;
 mod session_persist;
 mod stdio;
 mod supervisor;
+mod surface_health;
 mod tools;
 mod workspace;
 
@@ -151,6 +152,8 @@ pub struct TokenZeroEngine {
     metrics: metrics::ToolMetrics,
     /// Disk-backed seen-set; `None` when session dedup is off.
     session_persist: Option<session_persist::SessionPersistence>,
+    /// Expand/read surface health + crash-only recovery unlock (wqw.9).
+    surface_health: surface_health::SurfaceHealth,
 }
 
 #[cfg(test)]

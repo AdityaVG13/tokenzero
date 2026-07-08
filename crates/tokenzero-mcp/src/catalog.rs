@@ -63,10 +63,30 @@ pub(crate) fn tool_specs_for_filter(
     include_aliases: bool,
     surface: McpToolSurface,
 ) -> Vec<ToolSpec> {
+    tool_specs_for_filter_with_health(cluster, include_aliases, surface, false)
+}
+
+/// Like [`tool_specs_for_filter`], but when `recovery_unlocked` is true on
+/// CodeMode, advertise crash-only recovery tools (`tz_expand` / `tz_read`).
+pub(crate) fn tool_specs_for_filter_with_health(
+    cluster: Option<&str>,
+    include_aliases: bool,
+    surface: McpToolSurface,
+    recovery_unlocked: bool,
+) -> Vec<ToolSpec> {
+    let includes = |name: &str| -> bool {
+        if surface_includes_canonical(surface, name) {
+            return true;
+        }
+        if recovery_unlocked && surface == McpToolSurface::CodeMode {
+            return matches!(name, "expand" | "tz_expand" | "read" | "tz_read");
+        }
+        false
+    };
     let canonical = canonical_tool_specs();
     let mut specs = canonical
         .iter()
-        .filter(|seed| surface_includes_canonical(surface, seed.name))
+        .filter(|seed| includes(seed.name))
         .filter(|seed| cluster.is_none_or(|cluster| seed.cluster == cluster))
         .map(|seed| ToolSpec {
             name: seed.name.to_string(),
@@ -80,7 +100,7 @@ pub(crate) fn tool_specs_for_filter(
     }
 
     for &(alias, target) in TOOL_ALIASES {
-        if !surface_includes_canonical(surface, target) {
+        if !includes(target) {
             continue;
         }
         if let Some(seed) = canonical.iter().find(|seed| seed.name == target) {
@@ -122,6 +142,9 @@ pub(crate) fn surface_includes_canonical(surface: McpToolSurface, name: &str) ->
     }
 }
 
+/// Static surface membership (no health). Prefer engine crash-only gate for
+/// tools/call; this remains for FastMCP / docs that need the static matrix.
+#[allow(dead_code)]
 pub(crate) fn canonical_allowed_on_surface(surface: McpToolSurface, canonical: &str) -> bool {
     surface_includes_canonical(surface, canonical)
 }

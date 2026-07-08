@@ -63,11 +63,17 @@ impl TokenZeroEngine {
             session_id: new_session_id(),
             metrics,
             session_persist,
+            surface_health: crate::surface_health::SurfaceHealth::new(),
         }
     }
 
     pub fn session_id(&self) -> &str {
         &self.session_id
+    }
+
+    /// Crash-only recovery health for CodeMode expand/read (wqw.9).
+    pub(crate) fn surface_health(&self) -> &crate::surface_health::SurfaceHealth {
+        &self.surface_health
     }
 
     /// Record one tool-call outcome for observability. Fail-open.
@@ -82,7 +88,14 @@ impl TokenZeroEngine {
 
     /// Snapshot served by `resource://tokenzero/metrics`.
     pub(crate) fn tool_metrics_snapshot(&self) -> Value {
-        self.metrics.snapshot()
+        let mut snap = self.metrics.snapshot();
+        if let Some(obj) = snap.as_object_mut() {
+            obj.insert(
+                "surface_health".to_string(),
+                self.surface_health.telemetry(),
+            );
+        }
+        snap
     }
 
     /// Fail-open lookup: a poisoned session mutex reads as a miss (full

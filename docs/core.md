@@ -73,6 +73,10 @@ tokenzero expand tz://file/<id> --around 55:5
 tokenzero expand --refs-from refs.txt --summary --json
 ```
 
+### Crash-only recovery ladder (CodeMode)
+
+On `--mode=codemode`, per-op tools stay crash-only while the primary surface is healthy. Prefer `zero.token.expand` inside `tz_execute_code`. If expand returns X0 or the substrate is down, surface health unlocks **only** `tz_expand` / `tz_read` (and CLI `tokenzero expand` / `tokenzero read`) so agents recover bytes without native Read. Write/shell stay locked. After a successful expand, recovery re-locks. Telemetry: `resource://tokenzero/metrics` → `surface_health` (`blocked_count` / `unlocked_count`). Never claim "primary surface healthy" after expand X0.
+
 ## Ingest
 
 `tokenzero ingest` turns external tool output, repo packs, logs, diffs, or copied payloads into TokenZero capsules with exact refs. Use it when another tool is useful but you still want TokenZero to own recovery:

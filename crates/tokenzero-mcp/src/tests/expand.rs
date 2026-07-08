@@ -624,7 +624,8 @@ fn wrong_cache_path_names_both_stores_on_miss() {
         err.message
     );
     assert!(
-        err.message.contains(consumer_cache.to_string_lossy().as_ref())
+        err.message
+            .contains(consumer_cache.to_string_lossy().as_ref())
             || err.message.contains("recovery-cache"),
         "must name consumer store: {}",
         err.message
@@ -674,4 +675,143 @@ fn windowed_expand_same_store_and_oob_code() {
         err
     );
     assert!(err.message.contains(&blob_ref), "{}", err.message);
+}
+
+#[test]
+fn crash_only_expand_blocked_when_codemode_healthy() {
+    use tokenzero_core::McpToolSurface;
+    let dir = tempdir().unwrap();
+    let mut config = EngineConfig::for_root(dir.path());
+    config.tool_surface = McpToolSurface::CodeMode;
+    let engine = TokenZeroEngine::new(config);
+    assert!(engine.surface_health().is_healthy());
+    assert!(engine.surface_health().primary_surface_healthy_claim());
+
+    let blocked = handle_jsonrpc(
+        &engine,
+        &json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": {"name": "tz_expand", "arguments": {"ref": "tz://blob/dead"}}
+        })
+        .to_string(),
+    )
+    .unwrap();
+    let parsed: Value = serde_json::from_str(&blocked).unwrap();
+    let data = &parsed["error"]["data"];
+    let msg = data["message"].as_str().unwrap_or_default();
+    assert!(
+        msg.contains("primary surface is healthy"),
+        "blocked message: {parsed}"
+    );
+    assert_eq!(data["kind"], "policy_refusal");
+    assert_eq!(
+        engine.surface_health().telemetry()["telemetry"]["blocked_count"],
+        1
+    );
+    // Write/shell never unlock from health alone.
+    let shell_blocked = handle_jsonrpc(
+        &engine,
+        &json!({
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "tools/call",
+            "params": {"name": "tz_shell", "arguments": {"command": "true"}}
+        })
+        .to_string(),
+    )
+    .unwrap();
+    let shell_parsed: Value = serde_json::from_str(&shell_blocked).unwrap();
+    assert_eq!(shell_parsed["error"]["data"]["kind"], "policy_refusal");
+    assert!(
+        shell_parsed["error"]["data"]["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("never unlocked"),
+        "{shell_parsed}"
+    );
+}
+
+#[test]
+fn crash_only_expand_unlocks_after_expand_x0_and_recovers_bytes() {
+    use tokenzero_core::McpToolSurface;
+    let dir = tempdir().unwrap();
+    let file = dir.path().join("payload.txt");
+    fs::write(&file, "recovery-ladder-bytes-wqw9\n").unwrap();
+    let mut config = EngineConfig::for_root(dir.path());
+    config.tool_surface = McpToolSurface::CodeMode;
+    // Same cache path for seed + recovery engine so expand finds the blob.
+    let cache = dir.path().join(".tokenzero/recovery-cache.json");
+    config.cache_path = cache.clone();
+    let engine = TokenZeroEngine::new(config);
+
+    let mut seed_cfg = EngineConfig::for_root(dir.path());
+    seed_cfg.cache_path = cache;
+    let seed = TokenZeroEngine::new(seed_cfg);
+    let served = read_ok(&seed, &file);
+    let blob_ref = served
+        .refs
+        .iter()
+        .find(|r| r.kind == "blob" || r.kind == "file")
+        .expect("read emits a recovery ref")
+        .ref_id
+        .clone();
+
+    // Force expand surface unhealthy (mocked expand X0); healthy claim must be false.
+    engine.surface_health().record_codemode_expand_x0();
+    assert!(!engine.surface_health().is_healthy());
+    assert!(!engine.surface_health().primary_surface_healthy_claim());
+
+    // Recovery path allowed — recover bytes without native Read.
+    let unlocked = handle_jsonrpc(
+        &engine,
+        &json!({
+            "jsonrpc": "2.0",
+            "id": 3,
+            "method": "tools/call",
+            "params": {
+                "name": "tz_expand",
+                "arguments": {"ref": blob_ref, "selector": "raw"}
+            }
+        })
+        .to_string(),
+    )
+    .unwrap();
+    assert!(
+        unlocked.contains("recovery-ladder-bytes-wqw9"),
+        "must recover exact bytes via unlocked expand: {unlocked}"
+    );
+    assert!(
+        engine.surface_health().telemetry()["telemetry"]["unlocked_count"]
+            .as_u64()
+            .unwrap_or(0)
+            >= 1
+    );
+}
+
+#[test]
+fn crash_only_healthy_claim_false_after_ref_not_found_surface_error() {
+    use tokenzero_core::McpToolSurface;
+    let dir = tempdir().unwrap();
+    let mut config = EngineConfig::for_root(dir.path());
+    config.tool_surface = McpToolSurface::CodeMode;
+    let engine = TokenZeroEngine::new(config);
+    // Direct expand of missing blob records surface failure (not invalid_ref).
+    let miss = engine.expand(
+        "tz://blob/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        Some("raw"),
+        None,
+        None,
+        None,
+        None,
+    );
+    assert_eq!(miss.status, "error");
+    assert!(!engine.surface_health().primary_surface_healthy_claim());
+    assert_eq!(
+        engine
+            .surface_health()
+            .decide(McpToolSurface::CodeMode, "expand"),
+        crate::surface_health::CrashOnlyDecision::Unlocked
+    );
 }
