@@ -3,6 +3,7 @@
 // import what they need directly after the impl split.
 #![allow(unused_imports)]
 
+mod binary_resolve;
 mod cache_maintenance;
 mod cache_pack;
 mod catalog;
@@ -38,6 +39,11 @@ mod surface_health;
 mod tools;
 mod workspace;
 
+pub use binary_resolve::{
+    BinaryResolution, TOKENZERO_BIN_ENV, TOKENZERO_CURL_PATH_ENV, TOKENZERO_RG_PATH_ENV,
+    engine_binaries_json, resolve_all_engine_binaries, resolve_curl_binary, resolve_rg_binary,
+    resolve_tokenzero_binary,
+};
 pub use cache_maintenance::{cache_maintenance, session_pack, shell_spill_dir};
 pub use catalog::{ResourceSpec, ToolSpec, resource_specs, tool_specs};
 pub use codemode::{

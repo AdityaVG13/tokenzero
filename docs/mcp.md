@@ -41,6 +41,15 @@ env `ZEROSTACK_STORE_ROOT` does not collate unrelated projects unless
 `--cache-path` / `TOKENZERO_CACHE_PATH` for explicit stores. Inspect
 `resource://tokenzero/cache` for the active path and isolation note.
 
+### Portable binary discovery (wqw.3)
+
+Prefer `command: "tokenzero"` on PATH in MCP client configs (see
+`docs/examples/mcp-tokenzero.portable.json`). Optional env overrides:
+`TOKENZERO_BIN`, `TOKENZERO_RG_PATH`, `TOKENZERO_CURL_PATH`. Discovery order:
+env → PATH → well-known layouts → clear error. Never hardcode personal
+`/Users/.../AI/*/target/release` paths. `tokenzero doctor --json` reports
+`engine_binaries`.
+
 ### Connection hardening
 
 The server is built to stay connected for the full life of an agent session:

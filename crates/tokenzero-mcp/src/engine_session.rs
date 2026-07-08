@@ -162,9 +162,14 @@ impl TokenZeroEngine {
 
     pub(crate) fn rg_binary(&self) -> Option<&Path> {
         self.rg_binary
-            .get_or_init(|| match &self.config.rg_path_override {
-                Some(path) => path.is_file().then(|| path.clone()),
-                None => find_rg_in_path(),
+            .get_or_init(|| {
+                // Prefer engine config override, else portable resolver
+                // (env TOKENZERO_RG_PATH → PATH → well-known).
+                match &self.config.rg_path_override {
+                    Some(path) if path.is_file() => Some(path.clone()),
+                    Some(_) => None,
+                    None => find_rg_in_path(),
+                }
             })
             .as_deref()
     }

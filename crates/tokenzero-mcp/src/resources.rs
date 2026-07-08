@@ -114,6 +114,7 @@ pub(crate) fn build_resource_payload(
             "privacy": "Raw payloads stay local behind tz:// refs; this resource does not expose cached payload text.",
             "store_isolation": "Default store is per call root (wqw.2). ZEROSTACK_STORE_ROOT is honored only with TOKENZERO_SHARED_STORE/ZEROSTACK_SHARED_STORE opt-in; otherwise each project uses root/.zerostack or root/.tokenzero.",
             "shared_store_opt_in_envs": ["TOKENZERO_SHARED_STORE", "ZEROSTACK_SHARED_STORE"],
+            "engine_binaries": crate::engine_binaries_json(),
         }),
         "resource://tokenzero/metrics" => engine.tool_metrics_snapshot(),
         "resource://tokenzero/shell-contract" => {

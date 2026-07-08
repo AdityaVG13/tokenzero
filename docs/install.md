@@ -24,6 +24,35 @@ tokenzero doctor --json
 Crates.io, npm, and Homebrew publication are separate gated channels and are
 not required for the GitHub Release download path.
 
+## Multi-machine / portable binaries (wqw.3)
+
+TokenZero never requires host-absolute personal checkout paths
+(e.g. `/Users/you/AI/tokenzero/target/release/tokenzero`) in client configs.
+
+**Binary discovery order** for `tokenzero`, `rg`, and `curl`:
+
+1. **Env override** — `TOKENZERO_BIN`, `TOKENZERO_RG_PATH`, `TOKENZERO_CURL_PATH`
+2. **PATH**
+3. **Well-known layouts** — `~/.tokenzero/bin`, `~/.cargo/bin`, `~/.local/bin`,
+   `/opt/homebrew/bin`, `/usr/local/bin`, `/usr/bin` (plus `current_exe` for
+   the running TokenZero process)
+4. **Clear error** with install/PATH guidance
+
+**Recommended multi-machine setup:**
+
+1. Install a release binary on each machine (`tokenzero install --global` or
+   put the release binary on `PATH`).
+2. Wire MCP with a portable config — use `command: "tokenzero"` (PATH), not a
+   personal absolute path. See `docs/examples/mcp-tokenzero.portable.json`.
+3. Inspect resolved paths: `tokenzero doctor --json` → `engine_binaries`.
+
+Optional overrides when PATH cannot be controlled (CI, restricted shells):
+
+```bash
+export TOKENZERO_BIN=/usr/local/bin/tokenzero
+export TOKENZERO_RG_PATH=/usr/local/bin/rg
+```
+
 ## Developer Install
 
 ```bash

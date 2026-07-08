@@ -280,20 +280,9 @@ pub(crate) enum RgFailure {
     Unavailable(String),
 }
 
-/// Which-style PATH lookup for the rg binary.
+/// Portable rg discovery: env → PATH → well-known layouts (wqw.3).
 pub(crate) fn find_rg_in_path() -> Option<PathBuf> {
-    let path_var = std::env::var_os("PATH")?;
-    let name = if cfg!(windows) { "rg.exe" } else { "rg" };
-    for dir in std::env::split_paths(&path_var) {
-        if dir.as_os_str().is_empty() {
-            continue;
-        }
-        let candidate = dir.join(name);
-        if candidate.is_file() {
-            return Some(candidate);
-        }
-    }
-    None
+    crate::binary_resolve::resolve_rg_binary().path
 }
 
 /// Run ripgrep per root and map its `path:line:text` output onto the same

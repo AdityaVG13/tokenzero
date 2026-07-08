@@ -810,6 +810,8 @@ fn doctor_report(args: &DoctorArgs) -> serde_json::Value {
             .map(|p| p.display().to_string())
     );
     report["effective_cache_path"] = json!(store.effective_cache_path.display().to_string());
+    // wqw.3: portable engine binary discovery (env → PATH → well-known).
+    report["engine_binaries"] = tokenzero_mcp::engine_binaries_json();
     if let Some(summary) = &store.mismatch_summary {
         let severity = if store.store_project_mismatch {
             "warning"
