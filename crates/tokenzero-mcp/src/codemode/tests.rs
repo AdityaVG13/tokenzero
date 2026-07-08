@@ -1160,6 +1160,8 @@ fn parity_shell_plan_vs_direct_identical_capture() {
 
 #[test]
 fn parity_edit_plan_vs_direct_identical_result() {
+    // wqw.12: zero.edit is a first-class binding (no longer hard policy-denied).
+    // Both direct and plan forms must complete and mutate files identically.
     let work = tempfile::tempdir().unwrap();
     let path1 = work.path().join("a.txt");
     let path2 = work.path().join("b.txt");
@@ -1167,6 +1169,7 @@ fn parity_edit_plan_vs_direct_identical_result() {
     fs::write(&path2, "hello world").unwrap();
     let opts = CodeModeOptions {
         root: Some(work.path().to_path_buf()),
+        cache_path: Some(work.path().join(".tokenzero/recovery-cache.json")),
         ..Default::default()
     };
 
@@ -1184,12 +1187,34 @@ fn parity_edit_plan_vs_direct_identical_result() {
         opts.clone(),
     );
 
-    assert_eq!(direct.status, CodeModeStatus::Error);
-    assert_eq!(plan.status, CodeModeStatus::Error);
-    assert_eq!(direct.error.as_ref().unwrap().kind, "policy");
-    assert_eq!(plan.error.as_ref().unwrap().kind, "policy");
-    assert_eq!(fs::read_to_string(&path1).unwrap(), "hello world");
-    assert_eq!(fs::read_to_string(&path2).unwrap(), "hello world");
+    assert_eq!(
+        direct.status,
+        CodeModeStatus::Completed,
+        "direct edit: {:?}",
+        direct.error
+    );
+    assert_eq!(
+        plan.status,
+        CodeModeStatus::Completed,
+        "plan edit: {:?}",
+        plan.error
+    );
+    assert_eq!(fs::read_to_string(&path1).unwrap(), "goodbye world");
+    assert_eq!(fs::read_to_string(&path2).unwrap(), "goodbye world");
+}
+
+#[test]
+fn quickjs_freeform_edit_denied_includes_write_ladder() {
+    // Arrow / free-form JS still hits sandbox mutation deny, but must include
+    // the write recovery ladder (wqw.12) so agents are not stuck.
+    let r = execute_codemode("const f = () => zero.edit('file.txt', []); return f();");
+    assert_eq!(r.status, CodeModeStatus::Error);
+    let msg = r.error.as_ref().map(|e| e.message.as_str()).unwrap_or("");
+    assert!(msg.contains("sandbox"), "{msg}");
+    assert!(
+        msg.contains("Write recovery ladder") || msg.contains("tz_report_tool_issue"),
+        "expected ladder: {msg}"
+    );
 }
 
 // --- New helper tests ---

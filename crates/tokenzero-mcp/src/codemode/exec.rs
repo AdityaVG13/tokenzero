@@ -206,11 +206,16 @@ pub fn execute_codemode_with_options(plan: &str, options: CodeModeOptions) -> Co
     let use_quickjs = should_run_quickjs(plan) || parse_plan(&lowered).is_err();
     if use_quickjs {
         if quickjs_plan_requests_mutation(plan) {
+            // QuickJS sandbox still blocks free-form mutation (transaction
+            // safety). Surface the write recovery ladder so agents are not
+            // stuck on "use CodeMode" alone (wqw.12).
+            let msg = crate::annotate_write_failure(
+                "sandbox: mutating binding denied without transaction support \
+                 (use the lowered zero.edit / tz_edit path, not free-form JS mutation)",
+                false,
+            );
             return finalize_codemode_result(
-                CodeModeResult::error(
-                    "sandbox: mutating binding denied without transaction support".to_string(),
-                    0,
-                ),
+                CodeModeResult::error_with_kind("sandbox", msg, 0, false),
                 "code",
                 plan,
                 started_ms,
