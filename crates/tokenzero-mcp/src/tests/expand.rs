@@ -511,3 +511,48 @@ fn expand_missing_fz_blob_error_includes_full_ref() {
         err.message
     );
 }
+
+#[test]
+fn windowed_expand_same_store_and_oob_code() {
+    // zq9: same-store window is exact; OOB is window_out_of_range not ref_not_found.
+    let dir = tempdir().unwrap();
+    let file = dir.path().join("lines.txt");
+    let mut body = String::new();
+    for i in 1..=200 {
+        body.push_str(&format!("line-{i}\n"));
+    }
+    fs::write(&file, &body).unwrap();
+    let engine = TokenZeroEngine::new(EngineConfig::for_root(dir.path()));
+    let response = read_ok(&engine, &file);
+    let blob_ref = response
+        .refs
+        .iter()
+        .find(|record| record.kind == "blob")
+        .unwrap()
+        .ref_id
+        .clone();
+
+    let window = engine.expand(&blob_ref, Some("raw"), Some(120), Some(190), None, None);
+    assert_eq!(window.status, "ok", "{:?}", window.error);
+    let text = window.visible.as_ref().unwrap().text.clone();
+    assert!(text.starts_with("line-120\n"), "{text}");
+    assert!(text.contains("line-190\n"), "{text}");
+    assert!(!text.contains("line-119\n"));
+    let win_tokens = window.accounting.as_ref().unwrap().visible_tokens;
+    let full = engine.expand(&blob_ref, Some("raw"), None, None, None, None);
+    let full_tokens = full.accounting.as_ref().unwrap().visible_tokens;
+    assert!(
+        win_tokens < full_tokens / 2,
+        "window tokens {win_tokens} vs full {full_tokens}"
+    );
+
+    let oob = engine.expand(&blob_ref, Some("raw"), Some(500), Some(510), None, None);
+    assert_eq!(oob.status, "error");
+    let err = oob.error.as_ref().unwrap();
+    assert_eq!(
+        err.code, "window_out_of_range",
+        "OOB must not be ref_not_found: {:?}",
+        err
+    );
+    assert!(err.message.contains(&blob_ref), "{}", err.message);
+}

@@ -748,6 +748,32 @@ fn expand_cross_scheme_fz_blob_in_one_plan() {
 }
 
 #[test]
+fn windowed_expand_same_session_codemode_blob() {
+    // zq9: same-session codemode blob is window-expandable (shared cache_path).
+    let plan = r#"
+        const lines = Array.from({length: 200}, (_, i) => "line-" + (i + 1)).join("\n") + "\n";
+        const data = await zero.compact(lines);
+        const win = await zero.expand(data.ref, { start_line: 120, end_line: 190 });
+        const text = typeof win === "string" ? win : (win && win.text) || "";
+        return {
+            ref: data.ref,
+            starts: String(text).startsWith("line-120"),
+            has190: String(text).includes("line-190"),
+            no119: !String(text).includes("line-119"),
+            no191: !String(text).includes("line-191"),
+            text
+        }
+    "#;
+    let r = execute_codemode(plan);
+    assert_eq!(r.status, CodeModeStatus::Completed, "{:?}", r.error);
+    let val = r.value.unwrap();
+    assert_eq!(val["starts"], true, "{val}");
+    assert_eq!(val["has190"], true, "{val}");
+    assert_eq!(val["no119"], true, "{val}");
+    assert_eq!(val["no191"], true, "{val}");
+}
+
+#[test]
 fn recall_method_is_discoverable_and_dispatchable() {
     let r = execute_codemode("describe:zero.recall");
     assert_eq!(r.status, CodeModeStatus::Completed);

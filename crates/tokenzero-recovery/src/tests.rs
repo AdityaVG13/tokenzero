@@ -1270,3 +1270,141 @@ fn canonicalize_and_is_expandable_helpers() {
     );
     assert!(canonicalize_expand_ref("http://nope").is_none());
 }
+
+// ---------------------------------------------------------------------------
+// Windowed expand (zq9) — same-store line windows
+// ---------------------------------------------------------------------------
+
+fn multi_line_fixture(n: usize) -> String {
+    (1..=n)
+        .map(|i| format!("line-{i}"))
+        .collect::<Vec<_>>()
+        .join("\n")
+        + "\n"
+}
+
+#[test]
+fn windowed_expand_middle_edges_and_full() {
+    let (mut store, _cache, _dir) = temp_store();
+    let payload = multi_line_fixture(200);
+    let stored = store
+        .store_payload(&payload, ContentType::Unknown, None, None, None)
+        .unwrap();
+
+    let full = store.expand(&stored.blob_ref, Some("raw"), None, None, None, None);
+    assert!(full.found);
+    assert_eq!(full.content, payload);
+
+    // Middle window 120..=190 (1-based inclusive) — field verify path
+    let mid = store.expand(
+        &stored.blob_ref,
+        Some("raw"),
+        Some(120),
+        Some(190),
+        None,
+        None,
+    );
+    assert!(mid.found, "{}", mid.reason);
+    let expected: String = payload
+        .split_inclusive('\n')
+        .skip(119)
+        .take(71)
+        .collect();
+    assert_eq!(mid.content, expected);
+    assert!(mid.content.starts_with("line-120\n"));
+    assert!(mid.content.contains("line-190\n"));
+    assert!(!mid.content.contains("line-119\n"));
+    assert!(!mid.content.contains("line-191\n"));
+
+    // Edges
+    let first = store.expand(
+        &stored.blob_ref,
+        Some("raw"),
+        Some(1),
+        Some(1),
+        None,
+        None,
+    );
+    assert_eq!(first.content, "line-1\n");
+    let last = store.expand(
+        &stored.blob_ref,
+        Some("raw"),
+        Some(200),
+        Some(200),
+        None,
+        None,
+    );
+    assert_eq!(last.content, "line-200\n");
+}
+
+#[test]
+fn windowed_expand_oob_is_structured_not_ref_not_found() {
+    let (mut store, _cache, _dir) = temp_store();
+    let payload = multi_line_fixture(50);
+    let stored = store
+        .store_payload(&payload, ContentType::Unknown, None, None, None)
+        .unwrap();
+    let oob = store.expand(
+        &stored.blob_ref,
+        Some("raw"),
+        Some(500),
+        Some(510),
+        None,
+        None,
+    );
+    assert!(!oob.found);
+    assert!(
+        oob.reason.starts_with("window-out-of-range"),
+        "got {}",
+        oob.reason
+    );
+    assert!(
+        !oob.reason.contains("ref-not-found"),
+        "OOB must not look like missing ref: {}",
+        oob.reason
+    );
+    assert_eq!(oob.ref_id, stored.blob_ref);
+
+    let inverted = store.expand(
+        &stored.blob_ref,
+        Some("raw"),
+        Some(10),
+        Some(5),
+        None,
+        None,
+    );
+    assert!(!inverted.found);
+    assert!(inverted.reason.starts_with("window-out-of-range"));
+}
+
+#[test]
+fn windowed_expand_visible_tokens_much_less_than_full() {
+    let (mut store, _cache, _dir) = temp_store();
+    // ~200 lines × ~8 tokens-ish → full multi-k; 50-line window << full
+    let payload = multi_line_fixture(200);
+    let stored = store
+        .store_payload(&payload, ContentType::Unknown, None, None, None)
+        .unwrap();
+    store.recovery_tokens = 0;
+    let full = store.expand(&stored.blob_ref, Some("raw"), None, None, None, None);
+    let full_tokens = full.tokens;
+    store.recovery_tokens = 0;
+    let window = store.expand(
+        &stored.blob_ref,
+        Some("raw"),
+        Some(120),
+        Some(169), // 50 lines
+        None,
+        None,
+    );
+    assert!(window.found);
+    let window_tokens = window.tokens;
+    assert!(
+        window_tokens < full_tokens / 2,
+        "50-line window tokens ({window_tokens}) should be << full ({full_tokens})"
+    );
+    assert!(
+        window_tokens * 3 < full_tokens,
+        "window {window_tokens} vs full {full_tokens}"
+    );
+}

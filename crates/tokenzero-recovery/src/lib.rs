@@ -541,6 +541,34 @@ impl RecoveryStore {
                 "stale-ref",
             );
         }
+        // Explicit line windows: OOB is a structured error, never ref_not_found
+        // (zq9). 1-based inclusive; start past last line or end < start fails.
+        if let Some(start) = selected_start {
+            let line_count = content_line_count(&content);
+            if start == 0 || start > line_count {
+                return ExpansionResult::missing(
+                    requested_ref,
+                    selector.map(str::to_string),
+                    format!(
+                        "window-out-of-range; start={start} end={} lines={line_count}",
+                        selected_end
+                            .map(|e| e.to_string())
+                            .unwrap_or_else(|| start.to_string())
+                    ),
+                );
+            }
+            if let Some(end) = selected_end {
+                if end < start {
+                    return ExpansionResult::missing(
+                        requested_ref,
+                        selector.map(str::to_string),
+                        format!(
+                            "window-out-of-range; start={start} end={end} lines={line_count}"
+                        ),
+                    );
+                }
+            }
+        }
         let selected = select_content(
             &content,
             selector,
@@ -1061,11 +1089,23 @@ fn parse_around_selector(value: &str) -> (Option<usize>, Option<usize>) {
     )
 }
 
+/// Line count for window validation (split_inclusive so a trailing newline
+/// still counts as a line segment, matching `line_slice_exact`).
+fn content_line_count(text: &str) -> usize {
+    if text.is_empty() {
+        0
+    } else {
+        text.split_inclusive('\n').count()
+    }
+}
+
 /// Exact line slice for recovery: returns the verbatim bytes of lines
 /// `start..=end` (1-based, inclusive), preserving each line's trailing
 /// newline — including a trailing blank line — so `expand` is byte-exact.
 /// Unlike `tokenzero_core::line_range` (display: drops trailing newlines),
 /// this is the recovery path and must reproduce the original bytes.
+/// Caller must validate OOB via `content_line_count` before calling when a
+/// structured `window-out-of-range` error is required.
 fn line_slice_exact(text: &str, start: usize, end: usize) -> String {
     let start = start.max(1);
     let end = end.max(start);
