@@ -1190,3 +1190,83 @@ proptest! {
         prop_assert_eq!(selected, expected);
     }
 }
+
+// ---------------------------------------------------------------------------
+// Cross-scheme expand (fz:// / gz:// shared blob identity) — wqw.1
+// ---------------------------------------------------------------------------
+
+#[test]
+fn cross_scheme_fz_and_gz_blob_expand_byte_exact() {
+    let (mut store, _cache, _dir) = temp_store();
+    let payload = "cross-scheme payload\nline two\n";
+    let stored = store
+        .store_payload(payload, ContentType::Unknown, None, None, None)
+        .unwrap();
+    assert!(stored.blob_ref.starts_with("tz://blob/"));
+    let id = stored.blob_ref.strip_prefix("tz://blob/").unwrap();
+    let fz = format!("fz://blob/{id}");
+    let gz = format!("gz://blob/{id}");
+
+    for scheme_ref in [&fz, &gz, &stored.blob_ref] {
+        let expanded = store.expand(scheme_ref, Some("raw"), None, None, None, None);
+        assert!(
+            expanded.found,
+            "scheme ref must expand: {scheme_ref} reason={}",
+            expanded.reason
+        );
+        assert_eq!(expanded.content, payload);
+        assert_eq!(expanded.ref_id, *scheme_ref);
+    }
+}
+
+#[test]
+fn cross_scheme_codemode_error_alias_expands_via_fz() {
+    let (mut store, _cache, _dir) = temp_store();
+    let err_body = r#"{"kind":"runtime","message":"boom from plan"}"#;
+    let stored = store
+        .store_payload(err_body, ContentType::JsonConfig, None, None, None)
+        .unwrap();
+    let logical = "tz://codemode/execution/test-exec-1/error";
+    store.store_alias(logical, &stored.blob_ref).unwrap();
+
+    let via_fz = "fz://codemode/execution/test-exec-1/error";
+    let expanded = store.expand(via_fz, Some("raw"), None, None, None, None);
+    assert!(
+        expanded.found,
+        "fz codemode error ref must expand: {}",
+        expanded.reason
+    );
+    assert_eq!(expanded.content, err_body);
+    assert_eq!(expanded.ref_id, via_fz);
+}
+
+#[test]
+fn garbage_scheme_is_invalid_ref_with_full_id_preserved() {
+    let (mut store, _cache, _dir) = temp_store();
+    let long = "xx://blob/b0123456789abcdef0123456789abcdef_extra_hash_tail";
+    let expanded = store.expand(long, Some("raw"), None, None, None, None);
+    assert!(!expanded.found);
+    assert_eq!(expanded.reason, "invalid-ref");
+    assert_eq!(
+        expanded.ref_id, long,
+        "requested ref must be preserved in full (no mid-hash truncation)"
+    );
+}
+
+#[test]
+fn canonicalize_and_is_expandable_helpers() {
+    assert!(is_expandable_ref("tz://blob/babc"));
+    assert!(is_expandable_ref("fz://blob/babc"));
+    assert!(is_expandable_ref("gz://blob/babc"));
+    assert!(!is_expandable_ref("http://blob/babc"));
+    assert!(!is_expandable_ref("not-a-ref"));
+    assert_eq!(
+        canonicalize_expand_ref("fz://blob/babc").as_deref(),
+        Some("tz://blob/babc")
+    );
+    assert_eq!(
+        canonicalize_expand_ref("gz://codemode/execution/x/error").as_deref(),
+        Some("tz://codemode/execution/x/error")
+    );
+    assert!(canonicalize_expand_ref("http://nope").is_none());
+}

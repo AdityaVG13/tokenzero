@@ -27,6 +27,30 @@ const REF_INDEX_MAX_BYTES: u64 = 1_048_576;
 const REF_INDEX_DISABLE_ENV: &str = "TOKENZERO_REF_INDEX";
 const REF_INDEX_PATH_ENV: &str = "TOKENZERO_REF_INDEX_PATH";
 
+/// ZeroStack schemes accepted by expand. Shared content-addressed blob identity:
+/// `fz://blob/<id>` and `gz://blob/<id>` resolve the same payload as `tz://blob/<id>`.
+pub const EXPAND_REF_SCHEMES: &[&str] = &["tz://", "fz://", "gz://"];
+
+/// True when `ref_id` starts with a scheme expand can recover (`tz://`, `fz://`, `gz://`).
+pub fn is_expandable_ref(ref_id: &str) -> bool {
+    EXPAND_REF_SCHEMES.iter().any(|scheme| ref_id.starts_with(scheme))
+}
+
+/// Rewrite `fz://` / `gz://` to `tz://` for store and alias lookup.
+/// Returns `None` for unknown schemes (caller should surface `invalid-ref` with the full ref).
+pub fn canonicalize_expand_ref(ref_id: &str) -> Option<String> {
+    if ref_id.starts_with("tz://") {
+        return Some(ref_id.to_string());
+    }
+    if let Some(rest) = ref_id.strip_prefix("fz://") {
+        return Some(format!("tz://{rest}"));
+    }
+    if let Some(rest) = ref_id.strip_prefix("gz://") {
+        return Some(format!("tz://{rest}"));
+    }
+    None
+}
+
 /// `file:line[:col]` matcher for search-output ingestion. Compiled once on first
 /// use — the pattern is a compile-time literal, so `expect` can only fire on a
 /// programmer typo (caught by the unit tests below), never on user input. The
@@ -466,9 +490,19 @@ impl RecoveryStore {
     ) -> ExpansionResult {
         self.recovery_count += 1;
         let requested_ref = ref_id.to_string();
+        // Shared blob identity: fz://blob/X and gz://blob/X look up tz://blob/X.
+        // Canonicalize before alias resolution so codemode logical refs minted as
+        // tz://codemode/... are found when expanded via fz://codemode/....
+        let Some(lookup_ref) = canonicalize_expand_ref(ref_id) else {
+            return ExpansionResult::missing(
+                requested_ref,
+                selector.map(str::to_string),
+                "invalid-ref",
+            );
+        };
         let ref_id = self
-            .resolve_alias_chain(ref_id)
-            .unwrap_or_else(|| ref_id.to_string());
+            .resolve_alias_chain(&lookup_ref)
+            .unwrap_or(lookup_ref);
         let Some(parsed) = parse_ref(&ref_id) else {
             return ExpansionResult::missing(
                 requested_ref,
@@ -531,7 +565,13 @@ impl RecoveryStore {
     }
 
     pub fn has_ref(&self, ref_id: &str) -> bool {
-        let Some(parsed) = parse_ref(ref_id) else {
+        let Some(lookup) = canonicalize_expand_ref(ref_id) else {
+            return false;
+        };
+        let lookup = self
+            .resolve_alias_chain(&lookup)
+            .unwrap_or(lookup);
+        let Some(parsed) = parse_ref(&lookup) else {
             return false;
         };
         match parsed.kind.as_str() {
@@ -956,7 +996,11 @@ fn parse_ref(ref_id: &str) -> Option<ParsedRef> {
     let (bare, fragment) = ref_id
         .split_once('#')
         .map_or((ref_id, None), |(b, f)| (b, Some(f.to_string())));
-    let rest = bare.strip_prefix("tz://")?;
+    // Accept tz/fz/gz; store keys are always under the tz:// scheme (shared identity).
+    let rest = bare
+        .strip_prefix("tz://")
+        .or_else(|| bare.strip_prefix("fz://"))
+        .or_else(|| bare.strip_prefix("gz://"))?;
     let (kind, id) = rest.split_once('/')?;
     if id.is_empty() {
         return None;
@@ -978,9 +1022,11 @@ fn parse_ref(ref_id: &str) -> Option<ParsedRef> {
             return None;
         }
     }
+    // Canonical bare for RecoveryStore maps: always tz://…
+    let bare = format!("tz://{rest}");
     Some(ParsedRef {
         kind: kind.to_string(),
-        bare: bare.to_string(),
+        bare,
         fragment,
     })
 }

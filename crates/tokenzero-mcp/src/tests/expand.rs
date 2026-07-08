@@ -452,3 +452,62 @@ fn session_dedup_off_does_not_write_session_memory_file() {
         memory_path.display()
     );
 }
+
+#[test]
+fn expand_cross_scheme_fz_and_gz_blob_byte_exact() {
+    // wqw.1: engine expand accepts fz:// and gz:// with shared blob identity.
+    let dir = tempdir().unwrap();
+    let file = dir.path().join("cross.txt");
+    let content = "engine cross-scheme body\nsecond line\n";
+    fs::write(&file, content).unwrap();
+    let engine = TokenZeroEngine::new(EngineConfig::for_root(dir.path()));
+    let response = read_ok(&engine, &file);
+    let blob_ref = response
+        .refs
+        .iter()
+        .find(|record| record.kind == "blob")
+        .unwrap()
+        .ref_id
+        .clone();
+    let id = blob_ref.strip_prefix("tz://blob/").unwrap();
+    for scheme_ref in [
+        blob_ref.clone(),
+        format!("fz://blob/{id}"),
+        format!("gz://blob/{id}"),
+    ] {
+        let expanded = engine.expand(&scheme_ref, Some("raw"), None, None, None, None);
+        assert_eq!(expanded.status, "ok", "{scheme_ref}: {:?}", expanded.error);
+        assert_eq!(expanded.visible.as_ref().unwrap().text, content);
+    }
+}
+
+#[test]
+fn expand_garbage_scheme_error_keeps_full_ref() {
+    let dir = tempdir().unwrap();
+    let engine = TokenZeroEngine::new(EngineConfig::for_root(dir.path()));
+    let long = "xx://blob/bdeadbeefcafebabe0123456789abcdef_long_hash_tail_for_truncation_check";
+    let response = engine.expand(long, Some("raw"), None, None, None, None);
+    assert_eq!(response.status, "error");
+    let err = response.error.as_ref().expect("error payload");
+    assert_eq!(err.code, "invalid_ref");
+    assert!(
+        err.message.contains(long),
+        "error must include full ref (no mid-hash truncation): {}",
+        err.message
+    );
+}
+
+#[test]
+fn expand_missing_fz_blob_error_includes_full_ref() {
+    let dir = tempdir().unwrap();
+    let engine = TokenZeroEngine::new(EngineConfig::for_root(dir.path()));
+    let missing = "fz://blob/b0123456789abcdef";
+    let response = engine.expand(missing, Some("raw"), None, None, None, None);
+    assert_eq!(response.status, "error");
+    let err = response.error.as_ref().expect("error payload");
+    assert!(
+        err.message.contains(missing),
+        "missing-ref error must name full ref: {}",
+        err.message
+    );
+}

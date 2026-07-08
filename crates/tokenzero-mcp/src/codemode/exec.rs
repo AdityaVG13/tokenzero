@@ -1802,7 +1802,7 @@ pub(crate) fn exec_edit(
 fn exec_expand(engine: &TokenZeroEngine, args: &[Value]) -> Result<OpOutcome, Box<CodeModeResult>> {
     let params = ExpandParams::from_codemode_args(args)
         .map_err(|message| Box::new(CodeModeResult::error(message, 0)))?;
-    if !params.ref_id.starts_with("tz://") {
+    if !tokenzero_recovery::is_expandable_ref(&params.ref_id) {
         return Err(Box::new(CodeModeResult::error(
             format!(
                 "expand takes a tz:// fz:// gz:// ref; to read a file use zero.fs.compound('read',{{path}}) -- got: {}",
@@ -1823,7 +1823,7 @@ fn exec_expand_many(
         Some(Value::Array(items)) => items,
         _ => {
             return Err(Box::new(CodeModeResult::error(
-                "zero.token.expandMany requires an array of tz:// refs or item objects",
+                "zero.token.expandMany requires an array of tz://, fz://, or gz:// refs or item objects",
                 0,
             )));
         }
@@ -1832,7 +1832,7 @@ fn exec_expand_many(
     for item in items {
         let params = ExpandParams::from_expand_many_item(item)
             .map_err(|message| Box::new(CodeModeResult::error(message, 0)))?;
-        if !params.ref_id.starts_with("tz://") {
+        if !tokenzero_recovery::is_expandable_ref(&params.ref_id) {
             return Err(Box::new(CodeModeResult::error(
                 format!(
                     "expandMany takes a tz:// fz:// gz:// ref; to read a file use zero.fs.compound('read',{{path}}) -- got: {}",

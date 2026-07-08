@@ -38,7 +38,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Condvar, Mutex, OnceLock};
 use std::time::{Duration, SystemTime};
 use tokenzero_filters::rewrite_command;
-use tokenzero_recovery::{ExpansionResult, RecoveryStore, StoredPayload};
+use tokenzero_recovery::{ExpansionResult, RecoveryStore, StoredPayload, is_expandable_ref};
 use tokenzero_runtime::{
     RunOutputPolicy, StreamCapture, contains_platform_shell_syntax, run_command_with_policy,
 };
@@ -82,11 +82,14 @@ fn resolve_slice(
 
 impl TokenZeroEngine {
     pub fn expand_with_params(&self, params: ExpandParams) -> ToolResponse {
-        if !params.ref_id.starts_with("tz://") {
+        if !is_expandable_ref(&params.ref_id) {
             return ToolResponse::error(
                 "expand",
                 "invalid_ref",
-                format!("ref must start with tz://, got: {}", params.ref_id),
+                format!(
+                    "ref must start with tz://, fz://, or gz://, got: {}",
+                    params.ref_id
+                ),
                 None,
             );
         }
@@ -103,11 +106,11 @@ impl TokenZeroEngine {
         let mut pending: Vec<(ServeKey, ServedRecord)> = Vec::new();
 
         if let Some(since_ref) = params.since.as_deref().filter(|_| !params.fresh) {
-            if !since_ref.starts_with("tz://") {
+            if !is_expandable_ref(since_ref) {
                 return ToolResponse::error(
                     "expand",
                     "invalid_ref",
-                    format!("since must start with tz://, got: {since_ref}"),
+                    format!("since must start with tz://, fz://, or gz://, got: {since_ref}"),
                     None,
                 );
             }

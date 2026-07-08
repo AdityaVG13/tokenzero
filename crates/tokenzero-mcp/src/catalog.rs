@@ -483,10 +483,10 @@ pub(crate) fn canonical_tool_specs() -> Vec<ToolSpecSeed> {
         ToolSpecSeed {
             name: "tz_expand",
             cluster: "material",
-            summary: "Recover exact bytes from a tz:// ref, optionally narrowed by line range, selector, or symbol.",
+            summary: "Recover exact bytes from a tz://, fz://, or gz:// ref, optionally narrowed by line range, selector, or symbol.",
             doc: tool_description(
-                "Recover exact content from `tz://` refs with optional ranges or anchors.",
-                "ref: copy a ref returned by read/find/tree/shell/ingest. selector/start_line/end_line: use only when narrowing recovery.",
+                "Recover exact content from `tz://`, `fz://`, or `gz://` refs (shared blob identity) with optional ranges or anchors.",
+                "ref: copy a ref returned by read/find/tree/shell/ingest or sibling ZeroStack engines. selector/start_line/end_line: use only when narrowing recovery.",
                 "Use whenever compact output omitted needed detail. NOT for arbitrary file paths; use `read`.",
                 "Do expand refs instead of re-running expensive commands. Do use line ranges for large file refs. Don't invent refs.",
                 "Common mistakes: passing `path` instead of `ref`; using stale refs from another workspace; expanding whole huge refs unnecessarily.",
@@ -842,13 +842,13 @@ fn text_schema(description: &str) -> Value {
 fn expand_schema() -> Value {
     object_schema(
         json!({
-            "ref": {"type": "string", "pattern": "^tz://", "description": "Exact recovery ref returned by a TokenZero tool."},
+            "ref": {"type": "string", "pattern": "^(tz|fz|gz)://", "description": "Exact recovery ref (tz://, fz://, or gz:// — shared blob identity)."},
             "selector": {"type": "string", "description": "Recovery-store-specific selector."},
             "start_line": line_property(),
             "end_line": line_property(),
             "anchor_kind": {"type": "string", "description": "Anchor kind for symbol-aware recovery."},
             "symbol": {"type": "string", "description": "Symbol name for symbol-aware recovery."},
-            "since": {"type": "string", "pattern": "^tz://", "description": "tz:// ref baseline for unified diff; errors if not recoverable."},
+            "since": {"type": "string", "pattern": "^(tz|fz|gz)://", "description": "tz/fz/gz ref baseline for unified diff; errors if not recoverable."},
             "fresh": fresh_property()
         }),
         &["ref"],

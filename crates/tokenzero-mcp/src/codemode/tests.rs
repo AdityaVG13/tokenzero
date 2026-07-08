@@ -717,6 +717,37 @@ fn expand_without_tz_prefix_is_rejected() {
 }
 
 #[test]
+fn expand_cross_scheme_fz_blob_in_one_plan() {
+    // wqw.1 Verify: mint via compact, expand via fz:// rewrite of same id in ONE plan.
+    // Exact expand unwraps to the raw payload string (not {text: ...}).
+    let plan = r#"
+        const data = await zero.compact("codemode cross-scheme body");
+        const id = String(data.ref).replace("tz://blob/", "");
+        const via_fz = "fz://blob/" + id;
+        const via_gz = "gz://blob/" + id;
+        const a = await zero.expand(via_fz);
+        const b = await zero.expand(via_gz);
+        return {
+            tz: data.ref,
+            fz_text: a,
+            gz_text: b,
+            match: a === b && String(a).includes("cross-scheme")
+        }
+    "#;
+    let r = execute_codemode(plan);
+    assert_eq!(r.status, CodeModeStatus::Completed, "{:?}", r.error);
+    let val = r.value.unwrap();
+    assert_eq!(val["match"], true, "{val}");
+    assert!(
+        val["fz_text"]
+            .as_str()
+            .unwrap()
+            .contains("codemode cross-scheme body"),
+        "{val}"
+    );
+}
+
+#[test]
 fn recall_method_is_discoverable_and_dispatchable() {
     let r = execute_codemode("describe:zero.recall");
     assert_eq!(r.status, CodeModeStatus::Completed);
