@@ -125,3 +125,28 @@ fn tool_metrics_persist_across_engine_instances() {
         "a fresh process starts with empty session counters"
     );
 }
+
+#[test]
+fn report_tool_issue_accepts_zero_execute_via_mcp_dispatch() {
+    use tokenzero_core::McpToolSurface;
+    let dir = tempdir().unwrap();
+    let mut config = EngineConfig::for_root(dir.path());
+    config.tool_surface = McpToolSurface::Classic;
+    let engine = TokenZeroEngine::new(config);
+    let ok = call_tool(
+        &engine,
+        "report_tool_issue",
+        &json!({
+            "tool": "zero_execute",
+            "summary": "expand X0 for fz blob under foreign root",
+            "detail": "wqw.6 field"
+        }),
+        None,
+    )
+    .expect("zero_execute must be reportable");
+    let text = ok.to_string();
+    assert!(text.contains("accepted") || text.contains("zero_execute"), "{text}");
+    assert!(crate::is_reportable_tool_name("zero_execute"));
+    assert!(crate::is_reportable_tool_name("zerostack"));
+    assert!(crate::is_reportable_tool_name("tz_execute_code"));
+}

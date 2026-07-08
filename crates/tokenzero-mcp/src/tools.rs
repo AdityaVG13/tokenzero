@@ -672,6 +672,47 @@ pub(crate) fn dispatch_tool(
                 },
             )
         }
+        "report_tool_issue" => {
+            let tool = arg_string_any(args, &["tool", "name", "tool_name", "surface"])
+                .map_err(JsonRpcErrorData::from)?;
+            let summary = arg_string_any(args, &["summary", "message", "title"])
+                .map_err(JsonRpcErrorData::from)?;
+            let detail = args
+                .get("detail")
+                .or_else(|| args.get("body"))
+                .or_else(|| args.get("repro"))
+                .or_else(|| args.get("context"))
+                .and_then(Value::as_str);
+            match crate::record_tool_issue(
+                &engine.config.cache_path,
+                tool,
+                summary,
+                detail,
+                Some(engine.session_id()),
+            ) {
+                Ok(report) => {
+                    let text = serde_json::to_string_pretty(&report).unwrap_or_default();
+                    ToolResponse::ok(
+                        "report_tool_issue",
+                        Mode::Structured,
+                        text.clone(),
+                        Vec::new(),
+                        Accounting {
+                            raw_tokens: count_tokens(&text),
+                            visible_tokens: count_tokens(&text),
+                            recovery_tokens: 0,
+                            exact_ref_tokens: Some(0),
+                        },
+                    )
+                }
+                Err(message) => ToolResponse::error(
+                    "report_tool_issue",
+                    "not_reportable",
+                    message,
+                    Some("use tool=zero_execute (or tz_execute_code / zero.token.*) for CodeMode failures".into()),
+                ),
+            }
+        }
         "batch" => batch_response(engine, args)?,
         "fetch" => {
             let url = arg_string_any(args, &["url", "uri"])?;
@@ -982,6 +1023,7 @@ fn canonical_tool(name: &str) -> &str {
     match name.strip_prefix("tz_").unwrap_or(name) {
         "cache-pack" => "cache_pack",
         "compact" => "compact",
+        "report-tool-issue" => "report_tool_issue",
         other => other,
     }
 }

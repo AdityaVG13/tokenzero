@@ -30,6 +30,7 @@ mod metrics;
 mod paths;
 mod recall;
 mod render;
+mod report_tool;
 mod resources;
 mod session;
 mod session_persist;
@@ -53,6 +54,7 @@ pub use codemode::{
 pub use fastmcp_mode::{fastmcp_codemode_instructions, fastmcp_instructions, run_fastmcp_stdio};
 pub use jsonrpc::handle_jsonrpc;
 pub use render::{cli_json, render_text};
+pub use report_tool::{build_tool_issue_report, is_reportable_tool_name, record_tool_issue};
 pub use stdio::run_stdio;
 pub use supervisor::run_supervised_stdio;
 

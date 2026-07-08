@@ -23,6 +23,8 @@ pub(crate) const TOOL_ALIASES: &[(&str, &str)] = &[
     ("cache-pack", "tz_cache_pack"),
     ("rewrite", "tz_rewrite"),
     ("discover", "tz_discover"),
+    ("report_tool_issue", "tz_report_tool_issue"),
+    ("report-tool-issue", "tz_report_tool_issue"),
 ];
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -577,6 +579,34 @@ pub(crate) fn canonical_tool_specs() -> Vec<ToolSpecSeed> {
             ),
             input_schema: no_args_schema(),
             arg_aliases: json!({}),
+        },
+        ToolSpecSeed {
+            name: "tz_report_tool_issue",
+            cluster: "execution",
+            summary: "Record a field issue against a CodeMode/TokenZero tool name (accepts zero_execute).",
+            doc: tool_description(
+                "Record a field issue for expand/root/shell/CodeMode failures without leaving the harness.",
+                "tool: reportable surface name (zero_execute, zerostack, tz_execute_code, zero.token.*, tz_* …). summary: short description. detail: optional context.",
+                "Use when CodeMode expand/root/shell fails and you need a durable field report. NOT for filing GitHub issues.",
+                "Do pass tool=zero_execute for unified ZeroStack CodeMode failures. Don't invent unlisted harness tool names.",
+                "Common mistakes: omitting tool or summary; using Browser/native-only names.",
+                "Idempotent per call (writes a new timestamped report file).",
+            ),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "tool": {"type": "string", "minLength": 1, "description": "Tool/surface name (zero_execute accepted)."},
+                    "summary": {"type": "string", "minLength": 1, "description": "Short issue summary."},
+                    "detail": {"type": "string", "description": "Optional detail / repro."}
+                },
+                "required": ["tool", "summary"],
+                "additionalProperties": true
+            }),
+            arg_aliases: json!({
+                "tool": ["name", "tool_name", "surface"],
+                "summary": ["message", "title"],
+                "detail": ["body", "repro", "context"]
+            }),
         },
     ]
 }

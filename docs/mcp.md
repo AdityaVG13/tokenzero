@@ -182,6 +182,14 @@ diff_tokens_saved}`.
 
 ## Tools
 
+### Field issue reports (wqw.6)
+
+`tz_report_tool_issue` / `report_tool_issue` accepts **`zero_execute`** (and aliases:
+`zerostack`, `tz_execute_code`, `zero.token.*`, `zero.fs.*`, `tz_*`) so expand/root/shell
+failures can be recorded without leaving the harness. Reports land under
+`.tokenzero/tool-issues/` next to the recovery cache.
+
+
 | Tool | Purpose |
 | --- | --- |
 | `tz_read` | compact local file reads with exact refs |
