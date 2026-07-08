@@ -92,6 +92,20 @@ Kind hints include `shell`, `diff`, `log`, `markdown`, `json`, `code`, `pack`, `
 
 Core uses bounded local recovery state. Pulse records counts, refs, cache flags, latency, and health flags. It does not record raw payloads by default. Exact, digest, capsule, and Pulse cache state can be inspected and cleared explicitly without starting a daemon.
 
+### Multi-project store isolation (wqw.2)
+
+Default recovery / CodeMode store paths are **per call root**, not a process-global pin:
+
+1. If `root/.zerostack` exists → use `root/.zerostack/tokenzero/...`.
+2. Else if **shared-store opt-in** is on and `ZEROSTACK_STORE_ROOT` (or `ZERO_STACK_STORE_ROOT`) is set → use that shared/meta store.
+3. Else → legacy `root/.tokenzero/...`.
+
+**Shared store is opt-in only.** Set `TOKENZERO_SHARED_STORE=1` or `ZEROSTACK_SHARED_STORE=1` (`on`/`true`/`yes` also work) to honor a global `ZEROSTACK_STORE_ROOT` pin for meta-workspaces. Without opt-in, a set `ZEROSTACK_STORE_ROOT` is **ignored** so unrelated projects never collate recovery caches.
+
+Precedence above defaults: explicit `--cache-path` / `TOKENZERO_CACHE_PATH`.
+
+`tokenzero doctor --json` reports `store_resolution` / `effective_cache_path` and emits findings when a global pin is ignored or when shared opt-in places the store outside the project root.
+
 `tokenzero cache-pack --scope agent --json` builds a daemonless prompt-cache
 pack from stable instruction files, docs, repo map, and MCP tool schema. The
 response includes `cache_key`, `content_digest`, `cacheable_tokens`,

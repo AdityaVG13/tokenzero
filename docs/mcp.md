@@ -33,6 +33,14 @@ The MCP server is a foreground Rust stdio tool bridge launched by the client. It
 does not start watchers, indexers, background services, or helper runtimes.
 Clients should reuse one launched stdio process while the session is connected.
 
+### Multi-project store isolation
+
+Recovery cache paths default **per allowed root** (see docs/core.md). A process
+env `ZEROSTACK_STORE_ROOT` does not collate unrelated projects unless
+`TOKENZERO_SHARED_STORE=1` or `ZEROSTACK_SHARED_STORE=1` is set. Prefer
+`--cache-path` / `TOKENZERO_CACHE_PATH` for explicit stores. Inspect
+`resource://tokenzero/cache` for the active path and isolation note.
+
 ### Connection hardening
 
 The server is built to stay connected for the full life of an agent session:
