@@ -44,7 +44,7 @@ env `ZEROSTACK_STORE_ROOT` does not collate unrelated projects unless
 ### Portable binary discovery (wqw.3)
 
 Prefer `command: "tokenzero"` on PATH in MCP client configs (see
-`docs/examples/mcp-tokenzero.portable.json`). Optional env overrides:
+`docs/mcp-tokenzero.portable.json`). Optional env overrides:
 `TOKENZERO_BIN`, `TOKENZERO_RG_PATH`, `TOKENZERO_CURL_PATH`. Discovery order:
 env → PATH → well-known layouts → clear error. Never hardcode personal
 `/Users/.../AI/*/target/release` paths. `tokenzero doctor --json` reports

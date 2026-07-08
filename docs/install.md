@@ -43,7 +43,7 @@ TokenZero never requires host-absolute personal checkout paths
 1. Install a release binary on each machine (`tokenzero install --global` or
    put the release binary on `PATH`).
 2. Wire MCP with a portable config — use `command: "tokenzero"` (PATH), not a
-   personal absolute path. See `docs/examples/mcp-tokenzero.portable.json`.
+   personal absolute path. See `docs/mcp-tokenzero.portable.json`.
 3. Inspect resolved paths: `tokenzero doctor --json` → `engine_binaries`.
 
 Optional overrides when PATH cannot be controlled (CI, restricted shells):
