@@ -94,8 +94,19 @@ pub fn run_codemode_audit(root: &std::path::Path) -> CodeModeAuditReport {
 }
 
 fn audit_recovery(root: &std::path::Path) -> RecoveryEvidence {
+    // Hermetic cache: package-suite concurrency must not share workspace
+    // recovery-cache.json (parallel expand/compact races → false recover fails).
+    let cache_path = std::env::temp_dir().join(format!(
+        "tokenzero-codemode-audit-recovery-{}-{}.json",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0)
+    ));
     let opts = CodeModeOptions {
         root: Some(root.to_path_buf()),
+        cache_path: Some(cache_path),
         ..Default::default()
     };
 

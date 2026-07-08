@@ -433,7 +433,11 @@ fn hermetic_cache_path(index: usize, workload: &str, leg: &str) -> PathBuf {
 }
 
 fn engine_for_leg(root: &Path, cache_path: PathBuf) -> TokenZeroEngine {
-    let mut config = EngineConfig::for_root(root);
+    // Workloads use absolute paths under the workspace (via benchmark_root).
+    // Package-cwd engines (crates/tokenzero-mcp) would deny those paths after
+    // wqw.5 hard path_not_allowed — always allowlist the workspace root.
+    let workspace = benchmark_root(root);
+    let mut config = EngineConfig::for_root(&workspace);
     config.cache_path = cache_path;
     TokenZeroEngine::new(config)
 }
