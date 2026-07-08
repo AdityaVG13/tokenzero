@@ -164,6 +164,8 @@ fn exec_codemode_tool(
             options.max_microtasks = limits.max_microtasks;
             options.max_memory_bytes = limits.max_memory_bytes;
             options.max_code_bytes = limits.max_code_bytes;
+            options.max_wall_ms = limits.max_wall_ms;
+            options.hard_max_wall_ms = limits.hard_max_wall_ms;
         }
     }
     if let Some(envelope) = args.get("envelope").and_then(Value::as_str) {

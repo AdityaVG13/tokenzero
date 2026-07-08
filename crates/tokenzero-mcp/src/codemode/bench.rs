@@ -443,11 +443,22 @@ fn engine_for_leg(root: &Path, cache_path: PathBuf) -> TokenZeroEngine {
 }
 
 fn measure_plan_leg(engine: &TokenZeroEngine, plan: &str) -> PlanMeasurement {
+    // Bench plans (esp. scale-* with shell + compact) can exceed the product
+    // 5s hard wall under parallel package-suite load, zeroing payload tokens
+    // and flaking matrix_integrity. Raise wall for measurement only.
     let response = dispatch_tool(
         engine,
         "execute_code",
         "tz_execute_code",
-        &json!({"plan": plan, "envelope": "v2", "ref_first": true}),
+        &json!({
+            "plan": plan,
+            "envelope": "v2",
+            "ref_first": true,
+            "limits": {
+                "max_wall_ms": 60_000,
+                "hard_max_wall_ms": 60_000
+            }
+        }),
     )
     .expect("plan leg dispatch");
     let raw_tokens = response

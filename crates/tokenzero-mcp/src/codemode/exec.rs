@@ -726,6 +726,8 @@ fn limits_from_options(options: &CodeModeOptions) -> CodeModeLimits {
         max_microtasks: options.max_microtasks,
         max_memory_bytes: options.max_memory_bytes,
         max_code_bytes: options.max_code_bytes,
+        max_wall_ms: options.max_wall_ms,
+        hard_max_wall_ms: options.hard_max_wall_ms.max(options.max_wall_ms),
         ..Default::default()
     }
 }

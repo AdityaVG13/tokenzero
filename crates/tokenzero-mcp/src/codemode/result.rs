@@ -123,6 +123,10 @@ pub struct CodeModeOptions {
     pub max_microtasks: usize,
     pub max_memory_bytes: usize,
     pub max_code_bytes: usize,
+    /// Soft plan wall clock (ms). Defaults match product CodeModeLimits.
+    pub max_wall_ms: u64,
+    /// Hard plan wall clock (ms); plans abort past this even if soft is higher.
+    pub hard_max_wall_ms: u64,
     pub envelope: Option<String>,
     pub ref_first: bool,
     pub ref_first_budget: usize,
@@ -143,6 +147,8 @@ impl Default for CodeModeOptions {
             max_microtasks: super::store::DEFAULT_MAX_MICROTASKS,
             max_memory_bytes: super::store::DEFAULT_MAX_MEMORY_BYTES,
             max_code_bytes: super::store::DEFAULT_MAX_CODE_BYTES,
+            max_wall_ms: super::store::DEFAULT_MAX_WALL_MS,
+            hard_max_wall_ms: super::store::HARD_MAX_WALL_MS,
             envelope: None,
             ref_first: true,
             ref_first_budget: crate::DEFAULT_SHELL_INLINE_BUDGET,
