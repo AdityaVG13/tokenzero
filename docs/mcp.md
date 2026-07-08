@@ -411,6 +411,23 @@ envelope — policy, policy reason, command family, accounting, refs, and the
 command-status truth model under `structuredContent.cli` — is available with
 `TOKENZERO_MCP_ENVELOPE=compact|full`.
 
+### Timeout and process-group kill (wqw.4)
+
+Default shell timeout is 60s (`TOKENZERO_SHELL_TIMEOUT_SECS`,
+`tokenzero mcp-server --shell-timeout-seconds`, or per-call
+`timeout_seconds` / CodeMode `timeout_seconds`). On timeout the runtime
+sends **SIGTERM then SIGKILL to the whole process group** (Unix
+`process_group(0)`), returns partial captured stdout/stderr, and sets
+`timed_out` / shell timeout status. Test proof of no orphans:
+`timeout_process_group_kill_leaves_no_orphans_and_keeps_partial_stdout`
+in `tokenzero-runtime`.
+
+**Background cancel gap:** CodeMode/router `zero.token.shell({ background: true })`
+async job cancel is tracked separately as bead
+`tokenzero-shell-background-inert-3vv` (background option ignored / unwired
+on some orchestrated paths). Foreground timeout process-group kill is fixed
+here; do not assume background cancel reaps orphans until 3vv lands.
+
 Shell responses distinguish tool transport from the child command:
 `transport_status` can be `ok` while `command_success` is `false`. Nonzero
 exits, missing `cd` paths, and likely pipeline-masked failures expose
