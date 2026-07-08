@@ -1374,12 +1374,7 @@ fn dispatch_values(
         "zero.glob" | "glob" | "zero.token.glob" => exec_glob(engine, work_root, args),
         "zero.tree" | "tree" | "zero.token.tree" => exec_tree(engine, work_root, args),
         "zero.shell" | "shell" | "zero.token.shell" => exec_shell(engine, args),
-        "zero.edit" | "edit" => Err(Box::new(CodeModeResult::error_with_kind(
-            "policy",
-            "mutating binding denied without transaction support",
-            0,
-            false,
-        ))),
+        "zero.edit" | "edit" | "zero.token.edit" => exec_edit(engine, work_root, args),
         "zero.token.expand" | "zero.expand" | "expand" => exec_expand(engine, args),
         "zero.token.expandMany" | "zero.expandMany" | "expandMany" | "expand_many" => {
             exec_expand_many(engine, args)
@@ -1810,9 +1805,9 @@ fn exec_shell(engine: &TokenZeroEngine, args: &[Value]) -> Result<OpOutcome, Box
     }))
 }
 
-#[allow(dead_code)]
 pub(crate) fn exec_edit(
     engine: &TokenZeroEngine,
+    work_root: &Path,
     args: &[Value],
 ) -> Result<OpOutcome, Box<CodeModeResult>> {
     let path = PathBuf::from(require_str_arg(
@@ -1849,6 +1844,12 @@ pub(crate) fn exec_edit(
     let dry_run = opts.bool("dry_run").unwrap_or(false);
     let create = opts.bool("create").unwrap_or(false);
 
+    // Resolve relative edit paths against the execute root (same as read).
+    let path = resolve_paths_against_work_root(vec![path], work_root)
+        .into_iter()
+        .next()
+        .unwrap_or_else(|| work_root.to_path_buf());
+
     let resp = engine.edit(
         &path,
         &edits,
@@ -1857,15 +1858,30 @@ pub(crate) fn exec_edit(
         Mode::Auto,
         engine.config.max_visible_tokens,
     );
-    let hunks_applied = if resp.status == "ok" {
-        resp.telemetry
+    if resp.status == "error" {
+        let message = resp
+            .error
             .as_ref()
-            .and_then(|t| t.get("hunks"))
-            .and_then(|v| v.as_u64())
-            .unwrap_or(edits.len() as u64)
-    } else {
-        0
-    };
+            .map(|e| e.message.clone())
+            .unwrap_or_else(|| "zero.edit failed".to_string());
+        let substrate_down = engine.surface_health().recovery_unlocked();
+        let annotated = crate::annotate_write_failure(&message, substrate_down);
+        return Err(Box::new(CodeModeResult::error_with_kind(
+            resp.error
+                .as_ref()
+                .map(|e| e.code.as_str())
+                .unwrap_or("edit_failed"),
+            annotated,
+            0,
+            false,
+        )));
+    }
+    let hunks_applied = resp
+        .telemetry
+        .as_ref()
+        .and_then(|t| t.get("hunks"))
+        .and_then(|v| v.as_u64())
+        .unwrap_or(edits.len() as u64);
     Ok(OpOutcome::from_tool_response(&resp).with_value(|value| {
         value["hunks_applied"] = json!(hunks_applied);
     }))

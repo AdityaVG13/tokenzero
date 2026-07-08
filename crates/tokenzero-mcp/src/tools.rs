@@ -584,14 +584,22 @@ pub(crate) fn dispatch_tool(
                 .and_then(Value::as_str)
                 .ok_or_else(|| "missing path".to_string())?;
             let edits = arg_edit_hunks(args)?;
-            engine.edit(
+            let mut resp = engine.edit(
                 Path::new(path),
                 &edits,
                 arg_bool(args, "create"),
                 arg_bool(args, "dry_run"),
                 arg_mode(args),
                 arg_u64(args, "max_visible_tokens").unwrap_or(4000),
-            )
+            );
+            // wqw.12: annotate mutation failures with write recovery ladder.
+            if resp.status == "error" {
+                if let Some(err) = resp.error.as_mut() {
+                    let substrate_down = engine.surface_health().recovery_unlocked();
+                    err.message = crate::annotate_write_failure(&err.message, substrate_down);
+                }
+            }
+            resp
         }
         "shell" => {
             let (command, argv) = arg_command(args)?;

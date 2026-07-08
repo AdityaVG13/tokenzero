@@ -647,7 +647,7 @@ fn edit_rejects_partially_invalid_hunks_without_writing() {
         ]),
     ];
 
-    let err = exec_edit(&engine, &args).unwrap_err();
+    let err = exec_edit(&engine, dir.path(), &args).unwrap_err();
     assert!(
         err.error
             .as_deref()
@@ -660,7 +660,7 @@ fn edit_rejects_partially_invalid_hunks_without_writing() {
 }
 
 #[test]
-fn edit_reports_zero_hunks_applied_on_engine_error() {
+fn edit_failure_includes_write_recovery_ladder() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("sample.txt");
     fs::write(&path, "hello\n").unwrap();
@@ -670,9 +670,13 @@ fn edit_reports_zero_hunks_applied_on_engine_error() {
         serde_json::json!([{ "find": "missing", "replace": "bye" }]),
     ];
 
-    let outcome = exec_edit(&engine, &args).unwrap();
-    assert_eq!(outcome.as_value()["status"], "error");
-    assert_eq!(outcome.as_value()["hunks_applied"], 0);
+    // wqw.12: mutation failures surface a recovery ladder (not only "use CodeMode").
+    let err = exec_edit(&engine, dir.path(), &args).unwrap_err();
+    let msg = err.error.as_deref().unwrap_or("");
+    assert!(
+        msg.contains("Write recovery ladder") || msg.contains("tz_report_tool_issue"),
+        "expected write ladder in error: {msg}"
+    );
     assert_eq!(fs::read_to_string(&path).unwrap(), "hello\n");
 }
 

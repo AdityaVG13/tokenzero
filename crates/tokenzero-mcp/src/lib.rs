@@ -39,6 +39,7 @@ mod supervisor;
 mod surface_health;
 mod tools;
 mod workspace;
+mod write_ladder;
 
 pub use binary_resolve::{
     BinaryResolution, TOKENZERO_BIN_ENV, TOKENZERO_CURL_PATH_ENV, TOKENZERO_RG_PATH_ENV,
@@ -57,6 +58,9 @@ pub use render::{cli_json, render_text};
 pub use report_tool::{build_tool_issue_report, is_reportable_tool_name, record_tool_issue};
 pub use stdio::run_stdio;
 pub use supervisor::run_supervised_stdio;
+pub use write_ladder::{
+    WRITE_ESCAPE_ENV, WRITE_RECOVERY_LADDER, annotate_write_failure, write_escape_ack_active,
+};
 
 use cache_pack::{
     cache_pack_manifest_path, cache_pack_sources, previous_cache_digest, read_line_range_from_file,

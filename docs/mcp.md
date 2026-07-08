@@ -182,6 +182,14 @@ diff_tokens_saved}`.
 
 ## Tools
 
+### Write recovery ladder (wqw.12)
+
+When CodeMode `zero.edit` / `tz_edit` fails, the error includes a **write recovery
+ladder**: prefer CodeMode edit under allowed roots → check roots/doctor → if the
+write substrate is down (or `TOKENZERO_WRITE_ESCAPE=1`), harnesses may use a
+**bounded native Write for that failure only** → record via `tz_report_tool_issue`.
+Native Write is not the default while CodeMode works.
+
 ### Field issue reports (wqw.6)
 
 `tz_report_tool_issue` / `report_tool_issue` accepts **`zero_execute`** (and aliases:
