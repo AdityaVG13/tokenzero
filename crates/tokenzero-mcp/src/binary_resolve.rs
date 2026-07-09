@@ -89,7 +89,7 @@ pub fn find_on_path(name: &str) -> Option<PathBuf> {
         }
         for n in &names {
             let candidate = dir.join(n);
-            if candidate.is_file() {
+            if is_executable_file(&candidate) {
                 return Some(candidate);
             }
         }
@@ -137,8 +137,16 @@ pub fn resolve_binary_with_env(name: &str, env_override: Option<&Path>) -> Binar
     if let Some(path) = env_override {
         if path.as_os_str().is_empty() {
             // fall through
-        } else if path.is_file() {
+        } else if is_executable_file(path) {
             return BinaryResolution::ok(name, path.to_path_buf(), "env");
+        } else if path.is_file() {
+            return BinaryResolution::missing(
+                name,
+                format!(
+                    "env override is not executable: {} (check TOKENZERO_*_PATH / TOKENZERO_BIN)",
+                    path.display()
+                ),
+            );
         } else {
             return BinaryResolution::missing(
                 name,
@@ -255,6 +263,24 @@ mod tests {
         let err = res.error.unwrap();
         assert!(err.contains("missing file"), "{err}");
         assert!(err.contains("TOKENZERO"), "{err}");
+    }
+
+    #[test]
+    fn non_executable_env_override_is_clear_error() {
+        #[cfg(unix)]
+        {
+            let dir = tempdir().unwrap();
+            let fake = dir.path().join("rg");
+            fs::write(&fake, b"x").unwrap();
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = fs::metadata(&fake).unwrap().permissions();
+            perms.set_mode(0o644);
+            fs::set_permissions(&fake, perms).unwrap();
+            let res = resolve_binary_with_env("rg", Some(&fake));
+            assert!(res.path.is_none());
+            let err = res.error.unwrap();
+            assert!(err.contains("not executable"), "{err}");
+        }
     }
 
     #[test]
