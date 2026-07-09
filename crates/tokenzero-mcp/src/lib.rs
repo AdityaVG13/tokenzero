@@ -58,6 +58,13 @@ pub use render::{cli_json, render_text};
 pub use report_tool::{build_tool_issue_report, is_reportable_tool_name, record_tool_issue};
 pub use stdio::run_stdio;
 pub use supervisor::run_supervised_stdio;
+pub use workspace::{
+    SHARED_STORE_OPT_IN_ENVS, STORE_ROOT_ENVS, StoreResolutionReport, allowed_roots_for_workspace,
+    default_allowed_roots, default_recovery_cache_path, resolve_recovery_cache_path,
+    resolve_recovery_cache_path_with_env, resolve_store_root_with_env, shared_store_opt_in_from_env,
+    store_is_under_project_root, store_resolution_json, store_resolution_report,
+    store_resolution_report_with_env, tokenzero_work_root,
+};
 pub use write_ladder::{
     WRITE_ESCAPE_ENV, WRITE_RECOVERY_LADDER, annotate_write_failure, write_escape_ack_active,
 };

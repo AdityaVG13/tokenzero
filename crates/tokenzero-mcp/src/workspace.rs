@@ -1,4 +1,4 @@
-//! Workspace root and cache-path resolution shared by CodeMode and MCP.
+//! Workspace root and cache-path resolution shared by CodeMode, MCP, and CLI.
 //!
 //! Multi-project isolation (wqw.2): process-global `ZEROSTACK_STORE_ROOT` does
 //! **not** pin every call root into one store by default. Shared/meta store
@@ -122,7 +122,8 @@ fn resolve_default_cache_path(
 }
 
 /// Default recovery cache when --cache-path is omitted.
-#[allow(dead_code)]
+///
+/// After wqw.8 this is the single shared store for CLI expand and CodeMode.
 pub fn default_recovery_cache_path(repo_root: &Path) -> PathBuf {
     resolve_default_cache_path(
         repo_root,
@@ -131,22 +132,146 @@ pub fn default_recovery_cache_path(repo_root: &Path) -> PathBuf {
     )
 }
 
-/// CodeMode compact/expand recovery store (unified or legacy layout).
-#[allow(dead_code)] // used via re-export or tests in dependent crates; keep for API symmetry
-pub fn default_codemode_recovery_cache_path(repo_root: &Path) -> PathBuf {
-    resolve_default_cache_path(
-        repo_root,
-        "tokenzero/codemode-recovery.json",
-        ".tokenzero/codemode-recovery.json",
-    )
+/// Honor explicit --cache-path, then TOKENZERO_CACHE_PATH, then the default cache.
+pub fn resolve_recovery_cache_path(repo_root: &Path, explicit: Option<PathBuf>) -> PathBuf {
+    resolve_recovery_cache_path_with_env(repo_root, explicit, env::var_os("TOKENZERO_CACHE_PATH"))
+}
+
+pub fn resolve_recovery_cache_path_with_env(
+    repo_root: &Path,
+    explicit: Option<PathBuf>,
+    env_value: Option<OsString>,
+) -> PathBuf {
+    explicit
+        .or_else(|| {
+            env_value
+                .filter(|value| !value.is_empty())
+                .map(PathBuf::from)
+        })
+        .unwrap_or_else(|| default_recovery_cache_path(repo_root))
 }
 
 /// Whether `store` is under `root` (same project).
-#[allow(dead_code)] // public API for doctor/status callers; mirrored on CLI crate
 pub fn store_is_under_project_root(store: &Path, root: &Path) -> bool {
     let store_cmp = store.canonicalize().unwrap_or_else(|_| store.to_path_buf());
     let root_cmp = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
     store_cmp.starts_with(&root_cmp)
+}
+
+/// Doctor / status snapshot of effective store resolution for a root.
+#[derive(Debug, Clone)]
+pub struct StoreResolutionReport {
+    pub effective_cache_path: PathBuf,
+    pub effective_store_root: Option<PathBuf>,
+    pub shared_store_opt_in: bool,
+    pub global_pin_set: bool,
+    pub global_pin_value: Option<PathBuf>,
+    pub isolation_mode: &'static str,
+    /// True when effective store is not under the project root (shared meta).
+    pub store_project_mismatch: bool,
+    pub mismatch_summary: Option<String>,
+}
+
+/// Pure resolution report for tests and doctor.
+pub fn store_resolution_report_with_env(
+    repo_root: &Path,
+    explicit_cache: Option<PathBuf>,
+    tokenzero_cache_path: Option<OsString>,
+    store_root_pin: Option<OsString>,
+    shared_opt_in: bool,
+) -> StoreResolutionReport {
+    let global_pin_set = store_root_pin.as_ref().is_some_and(|v| !v.is_empty());
+    let global_pin_value = store_root_pin
+        .as_ref()
+        .filter(|v| !v.is_empty())
+        .map(PathBuf::from);
+    let store = resolve_store_root_with_env(repo_root, store_root_pin.as_deref(), shared_opt_in);
+    let had_explicit =
+        explicit_cache.is_some() || tokenzero_cache_path.as_ref().is_some_and(|v| !v.is_empty());
+    let effective_cache_path =
+        resolve_recovery_cache_path_with_env(repo_root, explicit_cache, tokenzero_cache_path);
+    let effective_store_root = store.clone();
+    let isolation_mode = if had_explicit {
+        "explicit_cache"
+    } else if shared_opt_in
+        && global_pin_set
+        && store
+            .as_ref()
+            .is_some_and(|s| !store_is_under_project_root(s, repo_root))
+    {
+        "shared_opt_in"
+    } else {
+        "per_root"
+    };
+
+    let store_project_mismatch = match &store {
+        Some(s) if shared_opt_in && global_pin_set => !store_is_under_project_root(s, repo_root),
+        _ => false,
+    };
+    let mismatch_summary = if store_project_mismatch {
+        Some(format!(
+            "effective store {} is outside project root {} (shared store opt-in active; TOKENZERO_SHARED_STORE / ZEROSTACK_SHARED_STORE). Unrelated projects sharing this store will collate recovery caches.",
+            store
+                .as_ref()
+                .map(|p| p.display().to_string())
+                .unwrap_or_default(),
+            repo_root.display()
+        ))
+    } else if global_pin_set && !shared_opt_in {
+        Some(format!(
+            "ZEROSTACK_STORE_ROOT is set but ignored for isolation (wqw.2). Default store is under project root {}. Set TOKENZERO_SHARED_STORE=1 (or ZEROSTACK_SHARED_STORE=1) to opt into the shared/meta store.",
+            repo_root.display()
+        ))
+    } else {
+        None
+    };
+
+    StoreResolutionReport {
+        effective_cache_path,
+        effective_store_root,
+        shared_store_opt_in: shared_opt_in,
+        global_pin_set,
+        global_pin_value,
+        isolation_mode,
+        store_project_mismatch,
+        mismatch_summary,
+    }
+}
+
+/// Live-env doctor snapshot for a project root.
+pub fn store_resolution_report(
+    repo_root: &Path,
+    explicit_cache: Option<PathBuf>,
+) -> StoreResolutionReport {
+    store_resolution_report_with_env(
+        repo_root,
+        explicit_cache,
+        env::var_os("TOKENZERO_CACHE_PATH"),
+        first_env(STORE_ROOT_ENVS),
+        shared_store_opt_in_from_env(),
+    )
+}
+
+/// JSON fragment for doctor / status surfaces.
+pub fn store_resolution_json(
+    repo_root: &Path,
+    explicit_cache: Option<PathBuf>,
+) -> serde_json::Value {
+    let r = store_resolution_report(repo_root, explicit_cache);
+    serde_json::json!({
+        "schema_version": "tokenzero.store_resolution.v1",
+        "effective_cache_path": r.effective_cache_path.display().to_string(),
+        "effective_store_root": r.effective_store_root.as_ref().map(|p| p.display().to_string()),
+        "shared_store_opt_in": r.shared_store_opt_in,
+        "global_pin_set": r.global_pin_set,
+        "global_pin_value": r.global_pin_value.as_ref().map(|p| p.display().to_string()),
+        "isolation_mode": r.isolation_mode,
+        "store_project_mismatch": r.store_project_mismatch,
+        "mismatch_summary": r.mismatch_summary,
+        "algorithm": "1) repo_root/.zerostack if present; 2) else ZEROSTACK_STORE_ROOT only when TOKENZERO_SHARED_STORE/ZEROSTACK_SHARED_STORE opt-in; 3) else legacy repo_root/.tokenzero/. Explicit --cache-path / TOKENZERO_CACHE_PATH always win.",
+        "opt_in_envs": SHARED_STORE_OPT_IN_ENVS,
+        "store_root_envs": STORE_ROOT_ENVS,
+    })
 }
 
 #[cfg(test)]
@@ -159,11 +284,8 @@ mod tests {
     fn cwd_dot_zerostack_does_not_contaminate_tempdir_resolution() {
         let dir = tempdir().unwrap();
         let root = dir.path();
-        // Create .zerostack in an unrelated tempdir to confirm resolution
-        // uses ONLY the passed repo_root, never cwd or any other directory.
         let unrelated = tempdir().unwrap();
         let _ = fs::create_dir_all(unrelated.path().join(".zerostack/tokenzero"));
-        // Resolution MUST derive from the passed repo_root only
         assert_eq!(
             default_recovery_cache_path(root),
             root.join(".tokenzero/recovery-cache.json")
@@ -199,5 +321,63 @@ mod tests {
         );
         assert!(default_recovery_cache_path(a.path()).starts_with(a.path()));
         assert!(default_recovery_cache_path(b.path()).starts_with(b.path()));
+    }
+
+    #[test]
+    fn unified_recovery_default_when_dot_zerostack_exists() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        fs::create_dir_all(root.join(".zerostack/tokenzero")).unwrap();
+        assert_eq!(
+            default_recovery_cache_path(root),
+            root.join(".zerostack/tokenzero/recovery-cache.json")
+        );
+    }
+
+    #[test]
+    fn recovery_cache_path_honors_env_between_explicit_and_default() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        let explicit = root.join("explicit.json");
+        let env_path = root.join("env.json");
+        assert_eq!(
+            resolve_recovery_cache_path_with_env(
+                root,
+                Some(explicit.clone()),
+                Some(env_path.clone().into_os_string()),
+            ),
+            explicit
+        );
+        assert_eq!(
+            resolve_recovery_cache_path_with_env(
+                root,
+                None,
+                Some(env_path.clone().into_os_string())
+            ),
+            env_path
+        );
+    }
+
+    #[test]
+    fn doctor_report_flags_ignored_global_pin() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        let pin = root.join("shared-store");
+        let report = store_resolution_report_with_env(
+            root,
+            None,
+            None,
+            Some(pin.clone().into_os_string()),
+            false,
+        );
+        assert!(!report.shared_store_opt_in);
+        assert!(report.global_pin_set);
+        assert_eq!(report.isolation_mode, "per_root");
+        assert!(
+            report
+                .mismatch_summary
+                .as_ref()
+                .is_some_and(|s| s.contains("ignored for isolation"))
+        );
     }
 }
