@@ -85,8 +85,9 @@ fn resolve_slice(
     }
 }
 
-/// When expand misses, name the active store and any alternate store that
-/// actually holds the ref (wrong STORE_ROOT / --cache-path mismatch — wqw.8).
+/// When expand misses, name the active store. If a historical sibling
+/// (`codemode-recovery.json` ↔ `recovery-cache.json`) still holds the ref,
+/// upgrade to `store_mismatch` so agents can align `--cache-path` (wqw.8).
 fn annotate_expand_miss(
     mut response: ToolResponse,
     ref_id: &str,
@@ -99,65 +100,43 @@ fn annotate_expand_miss(
         return response;
     }
     let active = active_cache.display().to_string();
-    let mut message = format!("{} [store: {active}]", err.message);
-    if let Some((other_path, found)) = probe_alternate_store_for_ref(ref_id, active_cache) {
-        if found {
-            message = format!(
-                "store_mismatch: ref present in {other} but not in active store {active} (pass the same --cache-path / TOKENZERO_CACHE_PATH / ZEROSTACK_STORE_ROOT used when the ref was minted); original: {}",
-                err.message,
-                other = other_path.display(),
-                active = active,
-            );
-            err.code = "store_mismatch".to_string();
-        } else {
-            message.push_str(&format!(
-                " [also checked alternate store: {}]",
-                other_path.display()
-            ));
-        }
+    if let Some(other_path) = legacy_sibling_holding_ref(ref_id, active_cache) {
+        err.code = "store_mismatch".to_string();
+        err.message = format!(
+            "store_mismatch: ref present in {other} but not in active store {active} \
+(mint and expand must share --cache-path / TOKENZERO_CACHE_PATH); original: {}",
+            err.message,
+            other = other_path.display(),
+        );
+    } else {
+        err.message = format!(
+            "{} [store: {active}; mint and expand must share --cache-path]",
+            err.message
+        );
     }
-    err.message = message;
     response
 }
 
-fn probe_alternate_store_for_ref(ref_id: &str, active_cache: &Path) -> Option<(PathBuf, bool)> {
+/// One-shot migration probe for the pre-wqw.8 dual-filename split only.
+fn legacy_sibling_holding_ref(ref_id: &str, active_cache: &Path) -> Option<PathBuf> {
     let parent = active_cache.parent()?;
     let name = active_cache.file_name()?.to_string_lossy();
-    // Probe the historical split: codemode-recovery.json vs recovery-cache.json
-    let candidates: Vec<PathBuf> = if name.contains("codemode-recovery") {
-        vec![
-            parent.join("recovery-cache.json"),
-            parent.join("tokenzero").join("recovery-cache.json"),
-        ]
+    let sibling = if name.contains("codemode-recovery") {
+        parent.join("recovery-cache.json")
     } else if name.contains("recovery-cache") {
-        vec![
-            parent.join("codemode-recovery.json"),
-            parent.join("tokenzero").join("codemode-recovery.json"),
-        ]
+        parent.join("codemode-recovery.json")
     } else {
-        vec![
-            parent.join("recovery-cache.json"),
-            parent.join("codemode-recovery.json"),
-        ]
+        return None;
     };
-    let mut first_existing: Option<PathBuf> = None;
-    for candidate in candidates {
-        if candidate == *active_cache || !candidate.is_file() {
-            continue;
-        }
-        let mut other = RecoveryStore::new(Some(candidate.clone()));
-        let hit = other.has_ref(ref_id)
-            || other
-                .expand(ref_id, Some("raw"), None, None, None, None)
-                .found;
-        if hit {
-            return Some((candidate, true));
-        }
-        if first_existing.is_none() {
-            first_existing = Some(candidate);
-        }
+    if sibling == *active_cache || !sibling.is_file() {
+        return None;
     }
-    first_existing.map(|path| (path, false))
+    let other = RecoveryStore::new(Some(sibling.clone()));
+    if other.has_ref(ref_id) {
+        Some(sibling)
+    } else {
+        None
+    }
 }
 
 impl TokenZeroEngine {
