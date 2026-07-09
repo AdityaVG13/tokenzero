@@ -72,15 +72,15 @@ pub(crate) fn tool_specs_for_filter(
 /// CodeMode, advertise crash-only recovery tools (`tz_expand` / `tz_read`).
 ///
 /// Membership comes from [`crate::surface_health::tool_listed_on_surface`] —
-/// the same policy that gates `tools/call`.
+/// the same policy that gates `tools/call` via `gate_tools_call`.
 pub(crate) fn tool_specs_for_filter_with_health(
     cluster: Option<&str>,
     include_aliases: bool,
     surface: McpToolSurface,
     recovery_unlocked: bool,
 ) -> Vec<ToolSpec> {
-    let includes =
-        |name: &str| crate::surface_health::tool_listed_on_surface(surface, name, recovery_unlocked);
+    use crate::surface_health::tool_listed_on_surface;
+    let includes = |name: &str| tool_listed_on_surface(surface, name, recovery_unlocked);
     let canonical = canonical_tool_specs();
     let mut specs = canonical
         .iter()
@@ -114,12 +114,6 @@ pub(crate) fn tool_specs_for_filter_with_health(
     }
 
     specs
-}
-
-/// Static surface membership (healthy CodeMode = recovery hidden).
-/// Delegates to the single policy owner in `surface_health`.
-pub(crate) fn surface_includes_canonical(surface: McpToolSurface, name: &str) -> bool {
-    crate::surface_health::surface_includes(surface, name)
 }
 
 /// Aliases advertise a permissive stub instead of repeating the canonical
@@ -591,9 +585,10 @@ pub(crate) fn canonical_tool_names() -> Vec<&'static str> {
 }
 
 pub(crate) fn canonical_tool_names_for_surface(surface: McpToolSurface) -> Vec<String> {
+    use crate::surface_health::surface_includes;
     canonical_tool_specs()
         .into_iter()
-        .filter(|seed| surface_includes_canonical(surface, seed.name))
+        .filter(|seed| surface_includes(surface, seed.name))
         .map(|seed| seed.name.to_string())
         .collect()
 }

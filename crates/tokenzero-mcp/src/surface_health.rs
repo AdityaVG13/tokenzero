@@ -46,11 +46,10 @@ pub enum CrashOnlyDecision {
     NotGated,
 }
 
-/// Canonical tool class after stripping `tz_` / hyphen aliases.
-///
 /// Single source of truth for CodeMode membership + crash-only gating.
 /// Catalog `tools/list`, JSON-RPC `tools/call`, and FastMCP registration all
-/// consult this classification (via [`list_includes`] / [`admit_tools_call`]).
+/// consult this classification (via [`tool_listed_on_surface`] /
+/// [`SurfaceHealth::gate_tools_call`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ToolClass {
     /// Always listed/callable on CodeMode (`execute_code`, report, …).
@@ -68,6 +67,24 @@ pub(crate) enum CallAdmission {
     UnknownTool,
     /// Proceed to crash-only [`SurfaceHealth::allow_tool_call`].
     Proceed,
+}
+
+/// How strictly to gate a tools/call.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum GateMode {
+    /// JSON-RPC: membership + crash-only health.
+    Strict,
+    /// FastMCP: health only. Registration already filters by surface; the call
+    /// helper stays membership-open so one process can host both surfaces and
+    /// unit tests can exercise CodeMode plans on a Classic-configured engine.
+    HealthOnly,
+}
+
+/// Refusal from [`SurfaceHealth::gate_tools_call`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum GateRefusal {
+    UnknownTool,
+    Policy(String),
 }
 
 pub(crate) fn tool_class(tool_name: &str) -> ToolClass {
@@ -285,6 +302,22 @@ impl SurfaceHealth {
                  Use zero.token.* inside tz_execute_code."
             )),
         }
+    }
+
+    /// Single entry for tools/call: optional membership admit, then crash-only health.
+    pub(crate) fn gate_tools_call(
+        &self,
+        surface: McpToolSurface,
+        tool_name: &str,
+        mode: GateMode,
+    ) -> Result<CrashOnlyDecision, GateRefusal> {
+        if mode == GateMode::Strict
+            && matches!(admit_tools_call(surface, tool_name), CallAdmission::UnknownTool)
+        {
+            return Err(GateRefusal::UnknownTool);
+        }
+        self.allow_tool_call(surface, tool_name)
+            .map_err(GateRefusal::Policy)
     }
 
     /// Whether tools/list should advertise `tool_name` given current health.
@@ -535,5 +568,32 @@ mod tests {
             admit_tools_call(McpToolSurface::CodeMode, "tz_shell"),
             CallAdmission::Proceed
         );
+    }
+
+    #[test]
+    fn gate_tools_call_strict_vs_health_only() {
+        let h = SurfaceHealth::new();
+        assert_eq!(
+            h.gate_tools_call(
+                McpToolSurface::Classic,
+                "tz_execute_code",
+                GateMode::Strict
+            ),
+            Err(GateRefusal::UnknownTool)
+        );
+        // HealthOnly skips membership so FastMCP / tests can still dispatch.
+        assert!(
+            h.gate_tools_call(
+                McpToolSurface::Classic,
+                "tz_execute_code",
+                GateMode::HealthOnly
+            )
+            .is_ok()
+        );
+        // CodeMode expand is blocked while healthy under both modes.
+        let blocked = h
+            .gate_tools_call(McpToolSurface::CodeMode, "tz_expand", GateMode::Strict)
+            .unwrap_err();
+        assert!(matches!(blocked, GateRefusal::Policy(_)));
     }
 }

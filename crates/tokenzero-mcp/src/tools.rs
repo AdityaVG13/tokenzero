@@ -18,51 +18,52 @@ pub(crate) fn call_tool(
     args: &Value,
     call_id: Option<String>,
 ) -> Result<Value, JsonRpcErrorData> {
-    let canonical = canonical_tool(name);
-    let started = std::time::Instant::now();
-    // One policy owner: admit_tools_call (membership) then allow_tool_call
-    // (crash-only health). Classic CodeMode exclusives → unknown_tool;
-    // CodeMode recovery/locked → policy_refusal with ladder / never-unlocked.
-    if matches!(
-        crate::surface_health::admit_tools_call(engine.config.tool_surface, name),
-        crate::surface_health::CallAdmission::UnknownTool
-    ) {
-        return Err(JsonRpcErrorData::unknown_tool(name));
-    }
-    if let Err(policy_msg) = engine
-        .surface_health()
-        .allow_tool_call(engine.config.tool_surface, name)
-    {
-        return Err(JsonRpcErrorData::policy_refusal(name, policy_msg));
-    }
-    let result = dispatch_tool(engine, canonical, name, args);
-    engine.record_tool_call(canonical, started.elapsed(), result.is_err());
-    let response = result?;
-    // Expand health is recorded inside expand_with_params (CLI + CodeMode + MCP).
-    record_mcp_pulse(engine, canonical, args, &response, call_id);
-    Ok(mcp_tool_response(response))
+    dispatch_gated_tool(engine, name, args, call_id, crate::surface_health::GateMode::Strict)
 }
 
-/// FastMCP variant: omits the Classic/CodeMode *membership* gate so one server
-/// can expose both surfaces (FastMCP product contract). Still applies the
-/// crash-only health gate when the engine is configured for CodeMode.
+/// FastMCP variant: health gate only ([`GateMode::HealthOnly`]). Registration
+/// already filters by surface; membership stays open at call time for the
+/// unified FastMCP product contract and existing CodeMode plan tests.
 pub(crate) fn call_tool_fastmcp(
     engine: &TokenZeroEngine,
     name: &str,
     args: &Value,
     call_id: Option<String>,
 ) -> Result<Value, JsonRpcErrorData> {
+    dispatch_gated_tool(
+        engine,
+        name,
+        args,
+        call_id,
+        crate::surface_health::GateMode::HealthOnly,
+    )
+}
+
+fn dispatch_gated_tool(
+    engine: &TokenZeroEngine,
+    name: &str,
+    args: &Value,
+    call_id: Option<String>,
+    mode: crate::surface_health::GateMode,
+) -> Result<Value, JsonRpcErrorData> {
     let canonical = canonical_tool(name);
     let started = std::time::Instant::now();
-    if let Err(policy_msg) = engine
+    match engine
         .surface_health()
-        .allow_tool_call(engine.config.tool_surface, name)
+        .gate_tools_call(engine.config.tool_surface, name, mode)
     {
-        return Err(JsonRpcErrorData::policy_refusal(name, policy_msg));
+        Ok(_) => {}
+        Err(crate::surface_health::GateRefusal::UnknownTool) => {
+            return Err(JsonRpcErrorData::unknown_tool(name));
+        }
+        Err(crate::surface_health::GateRefusal::Policy(msg)) => {
+            return Err(JsonRpcErrorData::policy_refusal(name, msg));
+        }
     }
     let result = dispatch_tool(engine, canonical, name, args);
     engine.record_tool_call(canonical, started.elapsed(), result.is_err());
     let response = result?;
+    // Expand health is recorded inside expand_with_params (CLI + CodeMode + MCP).
     record_mcp_pulse(engine, canonical, args, &response, call_id);
     Ok(mcp_tool_response(response))
 }
