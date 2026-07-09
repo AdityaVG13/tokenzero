@@ -18,7 +18,13 @@ pub(crate) fn call_tool(
     args: &Value,
     call_id: Option<String>,
 ) -> Result<Value, JsonRpcErrorData> {
-    dispatch_gated_tool(engine, name, args, call_id, crate::surface_health::GateMode::Strict)
+    dispatch_gated_tool(
+        engine,
+        name,
+        args,
+        call_id,
+        crate::surface_health::GateMode::Strict,
+    )
 }
 
 /// FastMCP variant: health gate only ([`GateMode::HealthOnly`]). Registration
@@ -221,11 +227,7 @@ fn exec_codemode_tool(
     // wqw.9: expand outcomes are recorded on the shared SurfaceHealth inside
     // expand_with_params. Only substrate_down (no expand call) needs a bridge.
     if matches!(result.status, crate::CodeModeStatus::Error) {
-        let kind = result
-            .error
-            .as_ref()
-            .map(|e| e.kind.as_str())
-            .unwrap_or("");
+        let kind = result.error.as_ref().map(|e| e.kind.as_str()).unwrap_or("");
         if kind == "substrate_down" || kind == "substrate" {
             engine.surface_health().record_substrate_down();
         }

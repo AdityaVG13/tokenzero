@@ -200,7 +200,11 @@ fn mcp_execute_root_cannot_escape_server_allowlist() {
     use tokenzero_core::McpToolSurface;
     let server = tempdir().unwrap();
     let foreign = tempdir().unwrap();
-    std::fs::write(foreign.path().join("secret.txt"), "ALLOWLIST-BYPASS-MARKER\n").unwrap();
+    std::fs::write(
+        foreign.path().join("secret.txt"),
+        "ALLOWLIST-BYPASS-MARKER\n",
+    )
+    .unwrap();
     let mut config = EngineConfig::for_root(server.path());
     config.tool_surface = McpToolSurface::CodeMode;
     let engine = TokenZeroEngine::new(config);

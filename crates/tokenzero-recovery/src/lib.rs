@@ -33,7 +33,9 @@ pub const EXPAND_REF_SCHEMES: &[&str] = &["tz://", "fz://", "gz://"];
 
 /// True when `ref_id` starts with a scheme expand can recover (`tz://`, `fz://`, `gz://`).
 pub fn is_expandable_ref(ref_id: &str) -> bool {
-    EXPAND_REF_SCHEMES.iter().any(|scheme| ref_id.starts_with(scheme))
+    EXPAND_REF_SCHEMES
+        .iter()
+        .any(|scheme| ref_id.starts_with(scheme))
 }
 
 /// Rewrite `fz://` / `gz://` to `tz://` for store and alias lookup.
@@ -500,9 +502,7 @@ impl RecoveryStore {
                 "invalid-ref",
             );
         };
-        let ref_id = self
-            .resolve_alias_chain(&lookup_ref)
-            .unwrap_or(lookup_ref);
+        let ref_id = self.resolve_alias_chain(&lookup_ref).unwrap_or(lookup_ref);
         let Some(parsed) = parse_ref(&ref_id) else {
             return ExpansionResult::missing(
                 requested_ref,
@@ -566,9 +566,7 @@ impl RecoveryStore {
                     return ExpansionResult::missing(
                         requested_ref,
                         selector.map(str::to_string),
-                        format!(
-                            "window-out-of-range; start={start} end={end} lines={line_count}"
-                        ),
+                        format!("window-out-of-range; start={start} end={end} lines={line_count}"),
                     );
                 }
             }
@@ -600,9 +598,7 @@ impl RecoveryStore {
         let Some(lookup) = canonicalize_expand_ref(ref_id) else {
             return false;
         };
-        let lookup = self
-            .resolve_alias_chain(&lookup)
-            .unwrap_or(lookup);
+        let lookup = self.resolve_alias_chain(&lookup).unwrap_or(lookup);
         let Some(parsed) = parse_ref(&lookup) else {
             return false;
         };

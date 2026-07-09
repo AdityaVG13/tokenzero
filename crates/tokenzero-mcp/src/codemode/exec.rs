@@ -89,7 +89,9 @@ fn make_engine_for_root_with_options(root: PathBuf, options: &CodeModeOptions) -
     // Share session crash-only health when the MCP call path provided one so
     // expand X0 inside a plan unlocks tz_expand on the same gate (wqw.9).
     match &options.surface_health {
-        Some(health) => TokenZeroEngine::with_shared_surface_health(config, std::sync::Arc::clone(health)),
+        Some(health) => {
+            TokenZeroEngine::with_shared_surface_health(config, std::sync::Arc::clone(health))
+        }
         None => TokenZeroEngine::new(config),
     }
 }

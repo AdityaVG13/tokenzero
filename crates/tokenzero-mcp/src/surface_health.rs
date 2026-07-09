@@ -119,20 +119,21 @@ fn is_codemode_exclusive(tool_name: &str) -> bool {
 pub(crate) fn tool_listed_on_surface(
     surface: McpToolSurface,
     tool_name: &str,
-    recovery_unlocked: bool,
+    _recovery_unlocked: bool,
 ) -> bool {
     match surface {
         McpToolSurface::Classic => !is_codemode_exclusive(tool_name),
         McpToolSurface::CodeMode => match tool_class(tool_name) {
             ToolClass::Primary => true,
-            ToolClass::Recovery => recovery_unlocked,
+            // The server declares tools.listChanged=false and FastMCP registers
+            // handlers once. Keep recovery discoverable; calls remain gated.
+            ToolClass::Recovery => true,
             ToolClass::Locked => false,
         },
     }
 }
 
-/// Static membership (healthy CodeMode = recovery hidden). Prefer
-/// [`tool_listed_on_surface`] when health is known.
+/// Static membership used by one-time FastMCP registration.
 pub(crate) fn surface_includes(surface: McpToolSurface, tool_name: &str) -> bool {
     tool_listed_on_surface(surface, tool_name, false)
 }
@@ -312,7 +313,10 @@ impl SurfaceHealth {
         mode: GateMode,
     ) -> Result<CrashOnlyDecision, GateRefusal> {
         if mode == GateMode::Strict
-            && matches!(admit_tools_call(surface, tool_name), CallAdmission::UnknownTool)
+            && matches!(
+                admit_tools_call(surface, tool_name),
+                CallAdmission::UnknownTool
+            )
         {
             return Err(GateRefusal::UnknownTool);
         }
@@ -542,13 +546,13 @@ mod tests {
             admit_tools_call(McpToolSurface::Classic, "tz_execute_code"),
             CallAdmission::UnknownTool
         );
-        // CodeMode lists report always; recovery only when unlocked.
+        // CodeMode lists report and recovery stably; health gates calls.
         assert!(tool_listed_on_surface(
             McpToolSurface::CodeMode,
             "tz_report_tool_issue",
             false
         ));
-        assert!(!tool_listed_on_surface(
+        assert!(tool_listed_on_surface(
             McpToolSurface::CodeMode,
             "tz_expand",
             false
@@ -574,11 +578,7 @@ mod tests {
     fn gate_tools_call_strict_vs_health_only() {
         let h = SurfaceHealth::new();
         assert_eq!(
-            h.gate_tools_call(
-                McpToolSurface::Classic,
-                "tz_execute_code",
-                GateMode::Strict
-            ),
+            h.gate_tools_call(McpToolSurface::Classic, "tz_execute_code", GateMode::Strict),
             Err(GateRefusal::UnknownTool)
         );
         // HealthOnly skips membership so FastMCP / tests can still dispatch.

@@ -419,8 +419,10 @@ Common refs:
 ### Crash-only unlock ladder (CodeMode surface)
 
 When the server runs in CodeMode (`TOKENZERO_MCP_TOOL_SURFACE=codemode` /
-`--mode=codemode`), only `tz_execute_code`, `tz_codemode_search`, and
-`tz_codemode_describe` are advertised while the primary surface is healthy.
+`--mode=codemode`), the primary tools, field-report tool, and crash-only
+`tz_expand` / `tz_read` recovery tools are advertised for the whole session.
+Recovery calls remain policy-gated while the primary surface is healthy. The
+stable list matches the server's `tools.listChanged=false` capability.
 
 1. Prefer `zero.token.expand` / `zero.token.read` inside `tz_execute_code`.
 2. If expand fails with X0 (or substrate_down), session surface health marks

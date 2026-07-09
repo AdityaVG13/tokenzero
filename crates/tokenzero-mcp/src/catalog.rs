@@ -68,8 +68,8 @@ pub(crate) fn tool_specs_for_filter(
     tool_specs_for_filter_with_health(cluster, include_aliases, surface, false)
 }
 
-/// Like [`tool_specs_for_filter`], but when `recovery_unlocked` is true on
-/// CodeMode, advertise crash-only recovery tools (`tz_expand` / `tz_read`).
+/// Like [`tool_specs_for_filter`], with crash-only recovery tools advertised
+/// stably because the server declares `tools.listChanged=false`.
 ///
 /// Membership comes from [`crate::surface_health::tool_listed_on_surface`] —
 /// the same policy that gates `tools/call` via `gate_tools_call`.
