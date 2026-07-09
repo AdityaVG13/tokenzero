@@ -9,47 +9,36 @@ use serde_json::{Value, json};
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-/// Primary ZeroStack / TokenZero CodeMode surface names agents may report.
+/// Exact surface / tool names that are not covered by the prefix rules below.
 const REPORTABLE_EXACT: &[&str] = &[
     "zero_execute",
     "zero-execute",
     "zerostack",
     "zero_search",
     "zero_describe",
-    "tz_execute_code",
     "execute_code",
-    "tz_codemode_search",
     "codemode_search",
-    "tz_codemode_describe",
     "codemode_describe",
-    "tz_read",
     "read",
-    "tz_expand",
     "expand",
-    "tz_shell",
     "shell",
-    "tz_edit",
     "edit",
-    "tz_find",
     "find",
-    "tz_grep",
     "grep",
-    "tz_tree",
     "tree",
-    "tz_glob",
     "glob",
 ];
 
-/// Prefixes accepted for namespaced engine ops (zero.token.*, zero.fs.*, …).
+/// Namespaced engine / product prefixes (tightened vs open `zero_` / `tz_` alone).
 const REPORTABLE_PREFIXES: &[&str] = &[
+    "zero.token.",
+    "zero.fs.",
+    "zero.graph.",
     "zero.",
-    "zero_",
     "tz_",
     "tokenzero",
     "fszero",
     "graphzero",
-    "fz_",
-    "gz_",
 ];
 
 /// Returns true if `name` is a reportable tool/surface for field issue reports.
@@ -60,6 +49,10 @@ pub fn is_reportable_tool_name(name: &str) -> bool {
     }
     let lower = trimmed.to_ascii_lowercase();
     if REPORTABLE_EXACT.iter().any(|n| *n == lower) {
+        return true;
+    }
+    // zero_execute / zero_search style (underscore, not dotted namespaces).
+    if lower.starts_with("zero_") {
         return true;
     }
     REPORTABLE_PREFIXES
@@ -171,6 +164,9 @@ mod tests {
         assert!(!is_reportable_tool_name("   "));
         assert!(!is_reportable_tool_name("definitely_not_a_tz_tool_xyz"));
         assert!(!is_reportable_tool_name("Browser"));
+        // Open prefixes like bare "fz_" / "gz_" must not accept arbitrary noise.
+        assert!(!is_reportable_tool_name("fz_random_noise"));
+        assert!(!is_reportable_tool_name("gz_not_a_tool"));
     }
 
     #[test]
