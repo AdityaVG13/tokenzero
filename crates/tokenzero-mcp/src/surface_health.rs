@@ -47,14 +47,30 @@ pub enum CrashOnlyDecision {
 }
 
 /// Canonical tool class after stripping `tz_` / hyphen aliases.
+///
+/// Single source of truth for CodeMode membership + crash-only gating.
+/// Catalog `tools/list`, JSON-RPC `tools/call`, and FastMCP registration all
+/// consult this classification (via [`list_includes`] / [`admit_tools_call`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ToolClass {
+pub(crate) enum ToolClass {
+    /// Always listed/callable on CodeMode (`execute_code`, report, …).
     Primary,
+    /// Crash-only recovery shims (`expand` / `read`).
     Recovery,
+    /// Never unlocked by expand health (shell/edit/write/…).
     Locked,
 }
 
-fn tool_class(tool_name: &str) -> ToolClass {
+/// Whether a `tools/call` name is even a candidate on this surface.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CallAdmission {
+    /// Surface does not own this tool (e.g. Classic calling `tz_execute_code`).
+    UnknownTool,
+    /// Proceed to crash-only [`SurfaceHealth::allow_tool_call`].
+    Proceed,
+}
+
+pub(crate) fn tool_class(tool_name: &str) -> ToolClass {
     let canonical = strip_tool_alias(tool_name);
     match canonical {
         "execute_code" | "codemode_search" | "codemode_describe" | "codemode"
@@ -70,6 +86,47 @@ fn strip_tool_alias(name: &str) -> &str {
     match bare {
         "report-tool-issue" => "report_tool_issue",
         other => other,
+    }
+}
+
+/// CodeMode-exclusive primaries (not listed/callable on Classic).
+/// `report_tool_issue` is intentionally available on both surfaces.
+fn is_codemode_exclusive(tool_name: &str) -> bool {
+    matches!(
+        strip_tool_alias(tool_name),
+        "execute_code" | "codemode_search" | "codemode_describe" | "codemode"
+    )
+}
+
+/// Whether `tools/list` (and FastMCP registration) should advertise `tool_name`.
+pub(crate) fn tool_listed_on_surface(
+    surface: McpToolSurface,
+    tool_name: &str,
+    recovery_unlocked: bool,
+) -> bool {
+    match surface {
+        McpToolSurface::Classic => !is_codemode_exclusive(tool_name),
+        McpToolSurface::CodeMode => match tool_class(tool_name) {
+            ToolClass::Primary => true,
+            ToolClass::Recovery => recovery_unlocked,
+            ToolClass::Locked => false,
+        },
+    }
+}
+
+/// Static membership (healthy CodeMode = recovery hidden). Prefer
+/// [`tool_listed_on_surface`] when health is known.
+pub(crate) fn surface_includes(surface: McpToolSurface, tool_name: &str) -> bool {
+    tool_listed_on_surface(surface, tool_name, false)
+}
+
+/// Admit a `tools/call` before the crash-only health gate.
+pub(crate) fn admit_tools_call(surface: McpToolSurface, tool_name: &str) -> CallAdmission {
+    match surface {
+        McpToolSurface::Classic if is_codemode_exclusive(tool_name) => CallAdmission::UnknownTool,
+        // CodeMode: Primary/Recovery/Locked all reach allow_tool_call so agents
+        // get policy_refusal (ladder / never-unlocked) instead of unknown_tool.
+        _ => CallAdmission::Proceed,
     }
 }
 
@@ -232,10 +289,7 @@ impl SurfaceHealth {
 
     /// Whether tools/list should advertise `tool_name` given current health.
     pub fn list_includes(&self, surface: McpToolSurface, tool_name: &str) -> bool {
-        match self.decide(surface, tool_name) {
-            CrashOnlyDecision::NotGated | CrashOnlyDecision::Unlocked => true,
-            CrashOnlyDecision::Blocked | CrashOnlyDecision::PermanentlyLocked => false,
-        }
+        tool_listed_on_surface(surface, tool_name, self.recovery_unlocked())
     }
 
     pub fn telemetry(&self) -> Value {
@@ -441,5 +495,45 @@ mod tests {
         assert_eq!(tool_class("tz_shell"), ToolClass::Locked);
         assert_eq!(tool_class("report-tool-issue"), ToolClass::Primary);
         assert_eq!(tool_class("tz_execute_code"), ToolClass::Primary);
+    }
+
+    #[test]
+    fn list_and_call_share_one_policy() {
+        // Classic never lists CodeMode execute.
+        assert!(!tool_listed_on_surface(
+            McpToolSurface::Classic,
+            "tz_execute_code",
+            false
+        ));
+        assert_eq!(
+            admit_tools_call(McpToolSurface::Classic, "tz_execute_code"),
+            CallAdmission::UnknownTool
+        );
+        // CodeMode lists report always; recovery only when unlocked.
+        assert!(tool_listed_on_surface(
+            McpToolSurface::CodeMode,
+            "tz_report_tool_issue",
+            false
+        ));
+        assert!(!tool_listed_on_surface(
+            McpToolSurface::CodeMode,
+            "tz_expand",
+            false
+        ));
+        assert!(tool_listed_on_surface(
+            McpToolSurface::CodeMode,
+            "tz_expand",
+            true
+        ));
+        // Locked tools are never listed but still admit to the health gate.
+        assert!(!tool_listed_on_surface(
+            McpToolSurface::CodeMode,
+            "tz_shell",
+            true
+        ));
+        assert_eq!(
+            admit_tools_call(McpToolSurface::CodeMode, "tz_shell"),
+            CallAdmission::Proceed
+        );
     }
 }

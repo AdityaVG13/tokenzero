@@ -20,14 +20,13 @@ pub(crate) fn call_tool(
 ) -> Result<Value, JsonRpcErrorData> {
     let canonical = canonical_tool(name);
     let started = std::time::Instant::now();
-    // Surface membership first: Classic must not dispatch CodeMode execute
-    // (and vice versa). On CodeMode, recovery + permanently-locked tools still
-    // reach the health gate so agents get policy_refusal (ladder / never-
-    // unlocked) instead of unknown_tool.
-    if !crate::catalog::canonical_allowed_on_surface(engine.config.tool_surface, canonical)
-        && !crate::catalog::canonical_allowed_on_surface(engine.config.tool_surface, name)
-        && !codemode_health_gated_candidate(engine.config.tool_surface, canonical, name)
-    {
+    // One policy owner: admit_tools_call (membership) then allow_tool_call
+    // (crash-only health). Classic CodeMode exclusives → unknown_tool;
+    // CodeMode recovery/locked → policy_refusal with ladder / never-unlocked.
+    if matches!(
+        crate::surface_health::admit_tools_call(engine.config.tool_surface, name),
+        crate::surface_health::CallAdmission::UnknownTool
+    ) {
         return Err(JsonRpcErrorData::unknown_tool(name));
     }
     if let Err(policy_msg) = engine
@@ -66,22 +65,6 @@ pub(crate) fn call_tool_fastmcp(
     let response = result?;
     record_mcp_pulse(engine, canonical, args, &response, call_id);
     Ok(mcp_tool_response(response))
-}
-
-fn codemode_health_gated_candidate(
-    surface: tokenzero_core::McpToolSurface,
-    canonical: &str,
-    name: &str,
-) -> bool {
-    if surface != tokenzero_core::McpToolSurface::CodeMode {
-        return false;
-    }
-    // Anything SurfaceHealth::decide classifies (recovery / permanently locked /
-    // report) should reach allow_tool_call for the structured policy message.
-    !matches!(
-        crate::surface_health::decide_static(surface, name, false),
-        crate::surface_health::CrashOnlyDecision::NotGated
-    ) || matches!(canonical, "expand" | "read" | "report_tool_issue" | "shell" | "edit" | "write")
 }
 
 /// Reject MCP-supplied roots that escape the server's configured allowlist.

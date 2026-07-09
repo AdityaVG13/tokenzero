@@ -70,21 +70,17 @@ pub(crate) fn tool_specs_for_filter(
 
 /// Like [`tool_specs_for_filter`], but when `recovery_unlocked` is true on
 /// CodeMode, advertise crash-only recovery tools (`tz_expand` / `tz_read`).
+///
+/// Membership comes from [`crate::surface_health::tool_listed_on_surface`] —
+/// the same policy that gates `tools/call`.
 pub(crate) fn tool_specs_for_filter_with_health(
     cluster: Option<&str>,
     include_aliases: bool,
     surface: McpToolSurface,
     recovery_unlocked: bool,
 ) -> Vec<ToolSpec> {
-    let includes = |name: &str| -> bool {
-        if surface_includes_canonical(surface, name) {
-            return true;
-        }
-        if recovery_unlocked && surface == McpToolSurface::CodeMode {
-            return matches!(name, "expand" | "tz_expand" | "read" | "tz_read");
-        }
-        false
-    };
+    let includes =
+        |name: &str| crate::surface_health::tool_listed_on_surface(surface, name, recovery_unlocked);
     let canonical = canonical_tool_specs();
     let mut specs = canonical
         .iter()
@@ -120,36 +116,10 @@ pub(crate) fn tool_specs_for_filter_with_health(
     specs
 }
 
+/// Static surface membership (healthy CodeMode = recovery hidden).
+/// Delegates to the single policy owner in `surface_health`.
 pub(crate) fn surface_includes_canonical(surface: McpToolSurface, name: &str) -> bool {
-    match surface {
-        McpToolSurface::Classic => !matches!(
-            name,
-            "tz_execute_code"
-                | "tz_codemode_search"
-                | "tz_codemode_describe"
-                | "tz_codemode"
-                | "execute_code"
-                | "codemode_search"
-                | "codemode_describe"
-        ),
-        McpToolSurface::CodeMode => matches!(
-            name,
-            "tz_execute_code"
-                | "tz_codemode_search"
-                | "tz_codemode_describe"
-                | "execute_code"
-                | "codemode_search"
-                | "codemode_describe"
-                | "report_tool_issue"
-                | "tz_report_tool_issue"
-        ),
-    }
-}
-
-/// Static surface membership (no health). Prefer engine crash-only gate for
-/// tools/call; this remains for FastMCP / docs that need the static matrix.
-pub(crate) fn canonical_allowed_on_surface(surface: McpToolSurface, canonical: &str) -> bool {
-    surface_includes_canonical(surface, canonical)
+    crate::surface_health::surface_includes(surface, name)
 }
 
 /// Aliases advertise a permissive stub instead of repeating the canonical
