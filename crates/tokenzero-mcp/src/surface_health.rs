@@ -24,42 +24,6 @@ const DEFAULT_FAIL_THRESHOLD: u32 = 1;
 /// Default unlock window after the last failure (5 minutes).
 const DEFAULT_WINDOW: Duration = Duration::from_secs(300);
 
-/// Recovery tools that may unlock when expand/read health is bad.
-const RECOVERY_TOOLS: &[&str] = &["expand", "tz_expand", "read", "tz_read"];
-
-/// Mutation / shell tools — never unlocked by expand health.
-const PERMANENTLY_LOCKED_CODEMODE: &[&str] = &[
-    "shell",
-    "tz_shell",
-    "edit",
-    "tz_edit",
-    "write",
-    "find",
-    "tz_find",
-    "grep",
-    "tz_grep",
-    "glob",
-    "tz_glob",
-    "tree",
-    "tz_tree",
-    "ingest",
-    "tz_ingest",
-    "fetch",
-    "tz_fetch",
-    "batch",
-    "tz_batch",
-    "mem",
-    "tz_mem",
-    "cache_pack",
-    "tz_cache_pack",
-    "rewrite",
-    "tz_rewrite",
-    "discover",
-    "tz_discover",
-    "recall",
-    "tz_recall",
-];
-
 /// Documented recovery ladder (docs + skill + close reasons).
 pub const RECOVERY_LADDER: &str = "\
 CodeMode recovery ladder (expand/read only):\n\
@@ -80,6 +44,33 @@ pub enum CrashOnlyDecision {
     PermanentlyLocked,
     /// Not subject to crash-only gate (classic surface or codemode primary tools).
     NotGated,
+}
+
+/// Canonical tool class after stripping `tz_` / hyphen aliases.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ToolClass {
+    Primary,
+    Recovery,
+    Locked,
+}
+
+fn tool_class(tool_name: &str) -> ToolClass {
+    let canonical = strip_tool_alias(tool_name);
+    match canonical {
+        "execute_code" | "codemode_search" | "codemode_describe" | "codemode"
+        | "report_tool_issue" => ToolClass::Primary,
+        "expand" | "read" => ToolClass::Recovery,
+        // Everything else on CodeMode is permanently locked (shell/edit/write/…).
+        _ => ToolClass::Locked,
+    }
+}
+
+fn strip_tool_alias(name: &str) -> &str {
+    let bare = name.strip_prefix("tz_").unwrap_or(name);
+    match bare {
+        "report-tool-issue" => "report_tool_issue",
+        other => other,
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -130,7 +121,6 @@ impl HealthInner {
 
     fn record_success(&mut self) {
         self.consecutive_failures = 0;
-        // Keep last_failure_* for forensics; window no longer applies once cleared.
     }
 }
 
@@ -178,8 +168,8 @@ impl SurfaceHealth {
         !self.is_healthy()
     }
 
-    /// Record an expand-path failure that indicates surface unhealth.
-    /// Client mistakes (`invalid_ref`) do not unlock.
+    /// Record an expand/read surface outcome. Client mistakes (`invalid_ref`)
+    /// do not unlock. Success clears the failure window.
     pub fn record_expand_outcome(&self, ok: bool, code: Option<&str>) {
         let now = Instant::now();
         let mut inner = self.lock();
@@ -196,22 +186,11 @@ impl SurfaceHealth {
 
     /// Codemode plan ended in X0 while expand/read was in the plan.
     pub fn record_codemode_expand_x0(&self) {
-        let now = Instant::now();
-        self.lock().record_failure("expand_x0", now);
+        self.record_expand_outcome(false, Some("expand_x0"));
     }
 
     pub fn record_substrate_down(&self) {
-        let now = Instant::now();
-        self.lock().record_failure("substrate_down", now);
-    }
-
-    #[allow(dead_code)]
-    pub fn record_read_outcome(&self, ok: bool, code: Option<&str>) {
-        // Read failures contribute to the same recovery unlock ladder.
-        self.record_expand_outcome(
-            ok,
-            code.map(|c| if c.is_empty() { "read_failed" } else { c }),
-        );
+        self.record_expand_outcome(false, Some("substrate_down"));
     }
 
     /// Never claim "primary surface healthy" when unhealthy.
@@ -220,24 +199,7 @@ impl SurfaceHealth {
     }
 
     pub fn decide(&self, surface: McpToolSurface, tool_name: &str) -> CrashOnlyDecision {
-        if surface != McpToolSurface::CodeMode {
-            return CrashOnlyDecision::NotGated;
-        }
-        let canonical = strip_tz_prefix(tool_name);
-        if is_codemode_primary(canonical) || is_codemode_primary(tool_name) {
-            return CrashOnlyDecision::NotGated;
-        }
-        if is_permanently_locked(canonical) || is_permanently_locked(tool_name) {
-            return CrashOnlyDecision::PermanentlyLocked;
-        }
-        if is_recovery_tool(canonical) || is_recovery_tool(tool_name) {
-            if self.recovery_unlocked() {
-                return CrashOnlyDecision::Unlocked;
-            }
-            return CrashOnlyDecision::Blocked;
-        }
-        // Unknown non-primary tools on CodeMode stay locked.
-        CrashOnlyDecision::PermanentlyLocked
+        decide_static(surface, tool_name, self.recovery_unlocked())
     }
 
     /// Gate a tools/call: Ok(decision) when allowed, Err(policy message) when refused.
@@ -299,38 +261,8 @@ impl SurfaceHealth {
     }
 }
 
-fn strip_tz_prefix(name: &str) -> &str {
-    name.strip_prefix("tz_").unwrap_or(name)
-}
-
-fn is_recovery_tool(name: &str) -> bool {
-    RECOVERY_TOOLS.iter().any(|t| *t == name)
-}
-
-fn is_permanently_locked(name: &str) -> bool {
-    PERMANENTLY_LOCKED_CODEMODE.iter().any(|t| *t == name)
-}
-
-fn is_codemode_primary(name: &str) -> bool {
-    matches!(
-        name,
-        "tz_execute_code"
-            | "execute_code"
-            | "tz_codemode_search"
-            | "codemode_search"
-            | "tz_codemode_describe"
-            | "codemode_describe"
-            | "tz_codemode"
-            | "codemode"
-            // Field reports must work on CodeMode where expand/root/shell fail (wqw.6).
-            | "report_tool_issue"
-            | "tz_report_tool_issue"
-            | "report-tool-issue"
-    )
-}
-
 fn blocked_message(tool_name: &str) -> String {
-    let short = strip_tz_prefix(tool_name);
+    let short = strip_tool_alias(tool_name);
     format!(
         "Policy: tz_{short} is a crash-only recovery tool; the CodeMode primary surface is healthy. \
          Use zero.token.{short} via tz_execute_code. If expand fails with X0 or substrate_down, \
@@ -339,7 +271,7 @@ fn blocked_message(tool_name: &str) -> String {
     )
 }
 
-/// Pure policy helper for unit tests without engine state.
+/// Pure policy helper (tests + call-path membership checks without engine state).
 pub fn decide_static(
     surface: McpToolSurface,
     tool_name: &str,
@@ -348,20 +280,17 @@ pub fn decide_static(
     if surface != McpToolSurface::CodeMode {
         return CrashOnlyDecision::NotGated;
     }
-    let canonical = strip_tz_prefix(tool_name);
-    if is_codemode_primary(canonical) || is_codemode_primary(tool_name) {
-        return CrashOnlyDecision::NotGated;
-    }
-    if is_permanently_locked(canonical) || is_permanently_locked(tool_name) {
-        return CrashOnlyDecision::PermanentlyLocked;
-    }
-    if is_recovery_tool(canonical) || is_recovery_tool(tool_name) {
-        if recovery_unlocked {
-            return CrashOnlyDecision::Unlocked;
+    match tool_class(tool_name) {
+        ToolClass::Primary => CrashOnlyDecision::NotGated,
+        ToolClass::Locked => CrashOnlyDecision::PermanentlyLocked,
+        ToolClass::Recovery => {
+            if recovery_unlocked {
+                CrashOnlyDecision::Unlocked
+            } else {
+                CrashOnlyDecision::Blocked
+            }
         }
-        return CrashOnlyDecision::Blocked;
     }
-    CrashOnlyDecision::PermanentlyLocked
 }
 
 #[cfg(test)]
@@ -403,7 +332,6 @@ mod tests {
                 .is_ok()
         );
         assert_eq!(h.telemetry()["telemetry"]["unlocked_count"], 1);
-        // Refusal path must not claim healthy after X0.
         assert_eq!(h.telemetry()["primary_surface_healthy"], false);
     }
 
@@ -504,5 +432,14 @@ mod tests {
             h.allow_tool_call(McpToolSurface::CodeMode, "report_tool_issue")
                 .is_ok()
         );
+    }
+
+    #[test]
+    fn tool_class_uses_canonical_names() {
+        assert_eq!(tool_class("tz_expand"), ToolClass::Recovery);
+        assert_eq!(tool_class("expand"), ToolClass::Recovery);
+        assert_eq!(tool_class("tz_shell"), ToolClass::Locked);
+        assert_eq!(tool_class("report-tool-issue"), ToolClass::Primary);
+        assert_eq!(tool_class("tz_execute_code"), ToolClass::Primary);
     }
 }
