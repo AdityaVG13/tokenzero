@@ -68,7 +68,7 @@ fn is_executable_file(path: &Path) -> bool {
         use std::os::unix::fs::PermissionsExt;
         path.metadata()
             .map(|m| m.permissions().mode() & 0o111 != 0)
-            .unwrap_or(true)
+            .unwrap_or(false)
     }
     #[cfg(not(unix))]
     {
@@ -129,9 +129,7 @@ fn well_known_candidates(name: &str) -> Vec<PathBuf> {
 }
 
 fn first_existing(candidates: impl IntoIterator<Item = PathBuf>) -> Option<PathBuf> {
-    candidates
-        .into_iter()
-        .find(|p| is_executable_file(p) || p.is_file())
+    candidates.into_iter().find(|p| is_executable_file(p))
 }
 
 /// Pure resolution: env path → PATH → well-known → None.
@@ -266,9 +264,31 @@ mod tests {
         fs::create_dir_all(&bin_dir).unwrap();
         let fake = bin_dir.join("rg");
         fs::write(&fake, b"x").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = fs::metadata(&fake).unwrap().permissions();
+            perms.set_mode(0o755);
+            fs::set_permissions(&fake, perms).unwrap();
+        }
         // Simulate well-known by calling first_existing directly.
         let found = first_existing([fake.clone()]);
         assert_eq!(found, Some(fake));
+    }
+
+    #[test]
+    fn well_known_skips_non_executable_on_unix() {
+        #[cfg(unix)]
+        {
+            let dir = tempdir().unwrap();
+            let fake = dir.path().join("rg");
+            fs::write(&fake, b"x").unwrap();
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = fs::metadata(&fake).unwrap().permissions();
+            perms.set_mode(0o644);
+            fs::set_permissions(&fake, perms).unwrap();
+            assert!(first_existing([fake]).is_none());
+        }
     }
 
     #[test]
