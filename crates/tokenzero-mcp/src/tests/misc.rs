@@ -196,3 +196,31 @@ fn codemode_report_tool_issue_is_not_permanently_locked() {
 }
 
 #[test]
+
+[test]
+fn mcp_execute_root_cannot_escape_server_allowlist() {
+    use tokenzero_core::McpToolSurface;
+    let server = tempdir().unwrap();
+    let foreign = tempdir().unwrap();
+    std::fs::write(foreign.path().join("secret.txt"), "ALLOWLIST-BYPASS-MARKER\n").unwrap();
+    let mut config = EngineConfig::for_root(server.path());
+    config.tool_surface = McpToolSurface::CodeMode;
+    let engine = TokenZeroEngine::new(config);
+    let err = call_tool(
+        &engine,
+        "tz_execute_code",
+        &json!({
+            "plan": "return zero.read('secret.txt')",
+            "root": foreign.path().display().to_string()
+        }),
+        None,
+    )
+    .expect_err("foreign root must be refused");
+    let msg = err.message_text();
+    assert!(
+        msg.contains("path_not_allowed") || msg.contains("outside"),
+        "{msg}"
+    );
+}
+
+#[test]

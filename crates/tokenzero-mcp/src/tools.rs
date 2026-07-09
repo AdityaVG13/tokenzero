@@ -84,6 +84,23 @@ fn codemode_health_gated_candidate(
     ) || matches!(canonical, "expand" | "read" | "report_tool_issue" | "shell" | "edit" | "write")
 }
 
+/// Reject MCP-supplied roots that escape the server's configured allowlist.
+fn ensure_path_under_server_allowlist(
+    engine: &TokenZeroEngine,
+    path: &Path,
+) -> Result<(), JsonRpcErrorData> {
+    if engine.path_allowed(path) {
+        return Ok(());
+    }
+    Err(JsonRpcErrorData::policy_refusal(
+        "execute_code",
+        format!(
+            "path_not_allowed: {} is outside the MCP server allowed roots",
+            path.display()
+        ),
+    ))
+}
+
 /// Pulse-account every MCP `tools/call`, including `tz_expand`. Without this
 /// the MCP surface — the main integration surface — wrote no Pulse events,
 /// so expand-time recovery was never charged back to the original serve and
@@ -157,15 +174,12 @@ fn exec_codemode_tool(
         max_visible_tokens: engine.config.max_visible_tokens,
         ..Default::default()
     };
-    // wqw.5: plan-level root / allowed_root follow zero_execute-style call root.
-    // Prefer explicit args.root, else first configured allowed root.
+    // wqw.5: plan-level root follows execute root, but MCP args must not expand
+    // the allowlist past the server's configured roots (agent-controlled).
     if let Ok(root) = arg_string_any(args, &["root", "cwd", "workspace"]) {
         let root_path = std::path::PathBuf::from(root);
-        options.root = Some(root_path.clone());
-        // Ensure the execute root is on the allowlist for this plan.
-        if !options.allowed_roots.iter().any(|r| r == &root_path) {
-            options.allowed_roots.push(root_path);
-        }
+        ensure_path_under_server_allowlist(engine, &root_path)?;
+        options.root = Some(root_path);
     } else if let Some(root) = engine.config.allowed_roots.first() {
         options.root = Some(root.clone());
     }
@@ -174,11 +188,21 @@ fn exec_codemode_tool(
         .or_else(|| args.get("allowed_roots"))
     {
         match extra {
-            Value::String(path) => options.allowed_roots.push(std::path::PathBuf::from(path)),
+            Value::String(path) => {
+                let path = std::path::PathBuf::from(path);
+                ensure_path_under_server_allowlist(engine, &path)?;
+                if !options.allowed_roots.iter().any(|r| r == &path) {
+                    options.allowed_roots.push(path);
+                }
+            }
             Value::Array(items) => {
                 for item in items {
                     if let Some(path) = item.as_str() {
-                        options.allowed_roots.push(std::path::PathBuf::from(path));
+                        let path = std::path::PathBuf::from(path);
+                        ensure_path_under_server_allowlist(engine, &path)?;
+                        if !options.allowed_roots.iter().any(|r| r == &path) {
+                            options.allowed_roots.push(path);
+                        }
                     }
                 }
             }
