@@ -702,7 +702,7 @@ pub(crate) enum RobotDocsCommand {
 
 #[derive(Debug, Args)]
 pub(crate) struct McpServerArgs {
-    /// Launch mode: mcp exposes per-op tools; codemode exposes exactly the three CodeMode tools.
+    /// Launch mode: mcp exposes per-op tools; codemode exposes primary, report, and gated recovery tools.
     #[arg(long, default_value = "mcp", value_name = "MODE")]
     pub(crate) mode: String,
     #[arg(long)]

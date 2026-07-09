@@ -81,7 +81,10 @@ fn codemode_health_gated_candidate(
     !matches!(
         crate::surface_health::decide_static(surface, name, false),
         crate::surface_health::CrashOnlyDecision::NotGated
-    ) || matches!(canonical, "expand" | "read" | "report_tool_issue" | "shell" | "edit" | "write")
+    ) || matches!(
+        canonical,
+        "expand" | "read" | "report_tool_issue" | "shell" | "edit" | "write"
+    )
 }
 
 /// Reject MCP-supplied roots that escape the server's configured allowlist.
@@ -213,6 +216,9 @@ fn exec_codemode_tool(
     }
     if let Some(limits) = args.get("limits") {
         if let Ok(limits) = serde_json::from_value::<crate::CodeModeLimits>(limits.clone()) {
+            // MCP callers may shorten the wall clock, but the server-owned
+            // hard ceiling is not caller-expandable.
+            let server_hard_max_wall_ms = options.hard_max_wall_ms;
             options.max_output_bytes = limits.max_output_bytes;
             options.max_refs_emitted = limits.max_refs_emitted;
             options.max_logical_ops = limits.max_logical_ops;
@@ -220,8 +226,8 @@ fn exec_codemode_tool(
             options.max_microtasks = limits.max_microtasks;
             options.max_memory_bytes = limits.max_memory_bytes;
             options.max_code_bytes = limits.max_code_bytes;
-            options.max_wall_ms = limits.max_wall_ms;
-            options.hard_max_wall_ms = limits.hard_max_wall_ms;
+            options.hard_max_wall_ms = limits.hard_max_wall_ms.min(server_hard_max_wall_ms);
+            options.max_wall_ms = limits.max_wall_ms.min(options.hard_max_wall_ms);
         }
     }
     if let Some(envelope) = args.get("envelope").and_then(Value::as_str) {
@@ -237,12 +243,8 @@ fn exec_codemode_tool(
     // wqw.9: expand outcomes are recorded on the shared SurfaceHealth inside
     // expand_with_params. Only substrate_down (no expand call) needs a bridge.
     if matches!(result.status, crate::CodeModeStatus::Error) {
-        let kind = result
-            .error
-            .as_ref()
-            .map(|e| e.kind.as_str())
-            .unwrap_or("");
-        if kind == "substrate_down" || kind == "substrate" {
+        let kind = result.error.as_ref().map(|e| e.kind.as_str()).unwrap_or("");
+        if kind == "substrate_down" {
             engine.surface_health().record_substrate_down();
         }
     }
@@ -644,8 +646,9 @@ pub(crate) fn dispatch_tool(
             // wqw.12: annotate mutation failures with write recovery ladder.
             if resp.status == "error" {
                 if let Some(err) = resp.error.as_mut() {
-                    let substrate_down = engine.surface_health().recovery_unlocked();
-                    err.message = crate::annotate_write_failure(&err.message, substrate_down);
+                    // Expand/read recovery health does not prove the write
+                    // substrate is down and must not authorize native Write.
+                    err.message = crate::annotate_write_failure(&err.message, false);
                 }
             }
             resp

@@ -68,19 +68,21 @@ pub(crate) fn tool_specs_for_filter(
     tool_specs_for_filter_with_health(cluster, include_aliases, surface, false)
 }
 
-/// Like [`tool_specs_for_filter`], but when `recovery_unlocked` is true on
-/// CodeMode, advertise crash-only recovery tools (`tz_expand` / `tz_read`).
+/// Like [`tool_specs_for_filter`], with crash-only recovery tools advertised
+/// on CodeMode so MCP clients can discover them before health changes. Calls
+/// remain health-gated; the server declares `tools.listChanged=false`, so the
+/// list itself must stay stable for the session.
 pub(crate) fn tool_specs_for_filter_with_health(
     cluster: Option<&str>,
     include_aliases: bool,
     surface: McpToolSurface,
-    recovery_unlocked: bool,
+    _recovery_unlocked: bool,
 ) -> Vec<ToolSpec> {
     let includes = |name: &str| -> bool {
         if surface_includes_canonical(surface, name) {
             return true;
         }
-        if recovery_unlocked && surface == McpToolSurface::CodeMode {
+        if surface == McpToolSurface::CodeMode {
             return matches!(name, "expand" | "tz_expand" | "read" | "tz_read");
         }
         false
@@ -142,6 +144,10 @@ pub(crate) fn surface_includes_canonical(surface: McpToolSurface, name: &str) ->
                 | "codemode_describe"
                 | "report_tool_issue"
                 | "tz_report_tool_issue"
+                | "expand"
+                | "tz_expand"
+                | "read"
+                | "tz_read"
         ),
     }
 }
@@ -267,6 +273,7 @@ pub fn resource_specs() -> Vec<ResourceSpec> {
 }
 
 pub(crate) fn canonical_tool_specs() -> Vec<ToolSpecSeed> {
+    let hard_max_wall_ms = crate::CodeModeLimits::default().hard_max_wall_ms;
     vec![
         ToolSpecSeed {
             name: "tz_execute_code",
@@ -274,11 +281,11 @@ pub(crate) fn canonical_tool_specs() -> Vec<ToolSpecSeed> {
             summary: "Execute a TokenZero CodeMode recipe, JSON plan, or JavaScript plan.",
             doc: tool_description(
                 "Execute a CodeMode plan through the native TokenZero executor.",
-                "plan: source text. form: recipe, json, js, or auto. limits: optional integer overrides.",
+                "plan: source text. form: recipe, json, js, or auto. root/allowed_roots: bounded workspace selection. limits: optional integer overrides.",
                 "Use only when the server is launched with --mode=codemode.",
                 "Do keep visible results small; large outputs are stored behind refs.",
                 "Common mistakes: launching the server in default mcp mode; mixing per-op tools with CodeMode tools.",
-                "Read-only/mutation-denied over workspace state; execution records are persisted as refs.",
+                "May mutate only through explicit lowered operations such as zero.edit/zero.shell; free-form QuickJS mutation stays denied. Execution records are persisted as refs.",
             ),
             input_schema: json!({
                 "type": "object",
@@ -287,7 +294,29 @@ pub(crate) fn canonical_tool_specs() -> Vec<ToolSpecSeed> {
                 "properties": {
                     "plan": {"type": "string", "maxLength": 65536},
                     "form": {"type": "string", "enum": ["recipe", "json", "js", "auto"]},
-                    "limits": {"type": "object", "additionalProperties": {"type": "integer", "minimum": 0}}
+                    "root": {"type": "string", "description": "Execute root; must remain under the server allowlist."},
+                    "cwd": {"type": "string", "description": "Alias for root."},
+                    "workspace": {"type": "string", "description": "Alias for root."},
+                    "allowed_root": {
+                        "oneOf": [
+                            {"type": "string"},
+                            {"type": "array", "items": {"type": "string"}}
+                        ]
+                    },
+                    "allowed_roots": {
+                        "oneOf": [
+                            {"type": "string"},
+                            {"type": "array", "items": {"type": "string"}}
+                        ]
+                    },
+                    "limits": {
+                        "type": "object",
+                        "properties": {
+                            "max_wall_ms": {"type": "integer", "minimum": 0, "maximum": hard_max_wall_ms},
+                            "hard_max_wall_ms": {"type": "integer", "minimum": 0, "maximum": hard_max_wall_ms}
+                        },
+                        "additionalProperties": {"type": "integer", "minimum": 0}
+                    }
                 }
             }),
             arg_aliases: json!({}),
@@ -726,6 +755,48 @@ fn fresh_property() -> Value {
         "default": false,
         "description": "Bypass session dedup/diff for this call and always return the full render."
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn codemode_recovery_tools_are_stably_advertised() {
+        let healthy =
+            tool_specs_for_filter_with_health(None, true, McpToolSurface::CodeMode, false);
+        let unhealthy =
+            tool_specs_for_filter_with_health(None, true, McpToolSurface::CodeMode, true);
+        let healthy_names = healthy.iter().map(|spec| &spec.name).collect::<Vec<_>>();
+        let unhealthy_names = unhealthy.iter().map(|spec| &spec.name).collect::<Vec<_>>();
+        assert_eq!(healthy_names, unhealthy_names);
+        assert!(
+            healthy_names
+                .iter()
+                .any(|name| name.as_str() == "tz_expand")
+        );
+        assert!(healthy_names.iter().any(|name| name.as_str() == "tz_read"));
+        assert!(surface_includes_canonical(
+            McpToolSurface::CodeMode,
+            "tz_expand"
+        ));
+    }
+
+    #[test]
+    fn execute_schema_exposes_bounded_root_and_wall_controls() {
+        let specs = canonical_tool_specs();
+        let execute = specs
+            .iter()
+            .find(|spec| spec.name == "tz_execute_code")
+            .unwrap();
+        let properties = &execute.input_schema["properties"];
+        assert!(properties.get("root").is_some());
+        assert!(properties.get("allowed_roots").is_some());
+        assert_eq!(
+            properties["limits"]["properties"]["hard_max_wall_ms"]["maximum"].as_u64(),
+            Some(crate::CodeModeLimits::default().hard_max_wall_ms)
+        );
+    }
 }
 
 fn read_schema() -> Value {

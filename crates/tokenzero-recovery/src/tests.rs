@@ -1305,11 +1305,7 @@ fn windowed_expand_middle_edges_and_full() {
         None,
     );
     assert!(mid.found, "{}", mid.reason);
-    let expected: String = payload
-        .split_inclusive('\n')
-        .skip(119)
-        .take(71)
-        .collect();
+    let expected: String = payload.split_inclusive('\n').skip(119).take(71).collect();
     assert_eq!(mid.content, expected);
     assert!(mid.content.starts_with("line-120\n"));
     assert!(mid.content.contains("line-190\n"));
@@ -1317,14 +1313,7 @@ fn windowed_expand_middle_edges_and_full() {
     assert!(!mid.content.contains("line-191\n"));
 
     // Edges
-    let first = store.expand(
-        &stored.blob_ref,
-        Some("raw"),
-        Some(1),
-        Some(1),
-        None,
-        None,
-    );
+    let first = store.expand(&stored.blob_ref, Some("raw"), Some(1), Some(1), None, None);
     assert_eq!(first.content, "line-1\n");
     let last = store.expand(
         &stored.blob_ref,
@@ -1365,16 +1354,24 @@ fn windowed_expand_oob_is_structured_not_ref_not_found() {
     );
     assert_eq!(oob.ref_id, stored.blob_ref);
 
-    let inverted = store.expand(
+    let inverted = store.expand(&stored.blob_ref, Some("raw"), Some(10), Some(5), None, None);
+    assert!(!inverted.found);
+    assert!(inverted.reason.starts_with("window-out-of-range"));
+
+    let end_past_last_line = store.expand(
         &stored.blob_ref,
         Some("raw"),
-        Some(10),
-        Some(5),
+        Some(40),
+        Some(60),
         None,
         None,
     );
-    assert!(!inverted.found);
-    assert!(inverted.reason.starts_with("window-out-of-range"));
+    assert!(!end_past_last_line.found);
+    assert!(
+        end_past_last_line.reason.starts_with("window-out-of-range"),
+        "got {}",
+        end_past_last_line.reason
+    );
 }
 
 #[test]
@@ -1409,6 +1406,21 @@ fn selector_lines_oob_is_structured_not_empty_success() {
     );
     assert!(!around.found);
     assert!(around.reason.starts_with("window-out-of-range"));
+
+    let end_past_last_line = store.expand(
+        &stored.blob_ref,
+        Some("lines:40-60"),
+        None,
+        None,
+        None,
+        None,
+    );
+    assert!(!end_past_last_line.found);
+    assert!(
+        end_past_last_line.reason.starts_with("window-out-of-range"),
+        "got {}",
+        end_past_last_line.reason
+    );
 }
 
 #[test]
