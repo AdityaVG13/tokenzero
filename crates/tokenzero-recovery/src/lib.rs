@@ -1025,14 +1025,12 @@ struct ParsedRef {
 }
 
 fn parse_ref(ref_id: &str) -> Option<ParsedRef> {
+    // Callers canonicalize fz:// / gz:// → tz:// before parse_ref. Accept only
+    // the store scheme here so scheme rewriting lives in one place.
     let (bare, fragment) = ref_id
         .split_once('#')
         .map_or((ref_id, None), |(b, f)| (b, Some(f.to_string())));
-    // Accept tz/fz/gz; store keys are always under the tz:// scheme (shared identity).
-    let rest = bare
-        .strip_prefix("tz://")
-        .or_else(|| bare.strip_prefix("fz://"))
-        .or_else(|| bare.strip_prefix("gz://"))?;
+    let rest = bare.strip_prefix("tz://")?;
     let (kind, id) = rest.split_once('/')?;
     if id.is_empty() {
         return None;
@@ -1054,11 +1052,9 @@ fn parse_ref(ref_id: &str) -> Option<ParsedRef> {
             return None;
         }
     }
-    // Canonical bare for RecoveryStore maps: always tz://…
-    let bare = format!("tz://{rest}");
     Some(ParsedRef {
         kind: kind.to_string(),
-        bare,
+        bare: format!("tz://{rest}"),
         fragment,
     })
 }
