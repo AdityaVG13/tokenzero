@@ -269,7 +269,6 @@ impl SurfaceHealth {
     }
 
     /// Whether tools/list should advertise `tool_name` given current health.
-    #[allow(dead_code)]
     pub fn list_includes(&self, surface: McpToolSurface, tool_name: &str) -> bool {
         match self.decide(surface, tool_name) {
             CrashOnlyDecision::NotGated | CrashOnlyDecision::Unlocked => true,
@@ -323,6 +322,10 @@ fn is_codemode_primary(name: &str) -> bool {
             | "codemode_describe"
             | "tz_codemode"
             | "codemode"
+            // Field reports must work on CodeMode where expand/root/shell fail (wqw.6).
+            | "report_tool_issue"
+            | "tz_report_tool_issue"
+            | "report-tool-issue"
     )
 }
 
@@ -488,5 +491,18 @@ mod tests {
         assert!(RECOVERY_LADDER.contains("tz_expand"));
         assert!(RECOVERY_LADDER.contains("not native Read"));
         assert!(RECOVERY_LADDER.contains("Write/shell"));
+    }
+
+    #[test]
+    fn report_tool_issue_not_gated_on_codemode() {
+        let h = SurfaceHealth::new();
+        assert_eq!(
+            h.decide(McpToolSurface::CodeMode, "tz_report_tool_issue"),
+            CrashOnlyDecision::NotGated
+        );
+        assert!(
+            h.allow_tool_call(McpToolSurface::CodeMode, "report_tool_issue")
+                .is_ok()
+        );
     }
 }

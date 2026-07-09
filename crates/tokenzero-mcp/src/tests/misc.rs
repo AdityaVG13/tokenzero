@@ -153,3 +153,46 @@ fn report_tool_issue_accepts_zero_execute_via_mcp_dispatch() {
     assert!(crate::is_reportable_tool_name("zerostack"));
     assert!(crate::is_reportable_tool_name("tz_execute_code"));
 }
+
+[test]
+fn classic_surface_rejects_tz_execute_code() {
+    use tokenzero_core::McpToolSurface;
+    let dir = tempdir().unwrap();
+    let mut config = EngineConfig::for_root(dir.path());
+    config.tool_surface = McpToolSurface::Classic;
+    let engine = TokenZeroEngine::new(config);
+    let err = call_tool(
+        &engine,
+        "tz_execute_code",
+        &json!({ "plan": "return 1" }),
+        None,
+    )
+    .expect_err("Classic must not dispatch CodeMode execute");
+    let msg = err.message_text();
+    assert!(
+        msg.contains("unknown") || msg.to_ascii_lowercase().contains("tz_execute_code"),
+        "{msg}"
+    );
+}
+
+#[test]
+fn codemode_report_tool_issue_is_not_permanently_locked() {
+    use tokenzero_core::McpToolSurface;
+    let dir = tempdir().unwrap();
+    let mut config = EngineConfig::for_root(dir.path());
+    config.tool_surface = McpToolSurface::CodeMode;
+    let engine = TokenZeroEngine::new(config);
+    let ok = call_tool(
+        &engine,
+        "tz_report_tool_issue",
+        &json!({
+            "tool": "zero_execute",
+            "summary": "codemode field report must be accepted"
+        }),
+        None,
+    )
+    .expect("report_tool_issue must be NotGated on CodeMode");
+    assert!(ok.to_string().contains("accepted") || ok.to_string().contains("zero_execute"));
+}
+
+#[test]

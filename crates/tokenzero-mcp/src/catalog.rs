@@ -140,13 +140,14 @@ pub(crate) fn surface_includes_canonical(surface: McpToolSurface, name: &str) ->
                 | "execute_code"
                 | "codemode_search"
                 | "codemode_describe"
+                | "report_tool_issue"
+                | "tz_report_tool_issue"
         ),
     }
 }
 
 /// Static surface membership (no health). Prefer engine crash-only gate for
 /// tools/call; this remains for FastMCP / docs that need the static matrix.
-#[allow(dead_code)]
 pub(crate) fn canonical_allowed_on_surface(surface: McpToolSurface, canonical: &str) -> bool {
     surface_includes_canonical(surface, canonical)
 }

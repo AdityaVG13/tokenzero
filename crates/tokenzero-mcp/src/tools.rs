@@ -20,8 +20,16 @@ pub(crate) fn call_tool(
 ) -> Result<Value, JsonRpcErrorData> {
     let canonical = canonical_tool(name);
     let started = std::time::Instant::now();
-    // Crash-only gate (wqw.9): on CodeMode, expand/read stay locked while the
-    // primary surface is healthy; unlock only after expand X0 / substrate_down.
+    // Surface membership first: Classic must not dispatch CodeMode execute
+    // (and vice versa). On CodeMode, recovery + permanently-locked tools still
+    // reach the health gate so agents get policy_refusal (ladder / never-
+    // unlocked) instead of unknown_tool.
+    if !crate::catalog::canonical_allowed_on_surface(engine.config.tool_surface, canonical)
+        && !crate::catalog::canonical_allowed_on_surface(engine.config.tool_surface, name)
+        && !codemode_health_gated_candidate(engine.config.tool_surface, canonical, name)
+    {
+        return Err(JsonRpcErrorData::unknown_tool(name));
+    }
     if let Err(policy_msg) = engine
         .surface_health()
         .allow_tool_call(engine.config.tool_surface, name)
@@ -36,9 +44,9 @@ pub(crate) fn call_tool(
     Ok(mcp_tool_response(response))
 }
 
-/// FastMCP variant: identical to `call_tool` but omits the tool-surface gate
-/// so that all tools (including codemode) are available through one server.
-/// The surface split is a CLI-mode concern, not a per-call gate for FastMCP.
+/// FastMCP variant: omits the Classic/CodeMode *membership* gate so one server
+/// can expose both surfaces (FastMCP product contract). Still applies the
+/// crash-only health gate when the engine is configured for CodeMode.
 pub(crate) fn call_tool_fastmcp(
     engine: &TokenZeroEngine,
     name: &str,
@@ -47,11 +55,33 @@ pub(crate) fn call_tool_fastmcp(
 ) -> Result<Value, JsonRpcErrorData> {
     let canonical = canonical_tool(name);
     let started = std::time::Instant::now();
+    if let Err(policy_msg) = engine
+        .surface_health()
+        .allow_tool_call(engine.config.tool_surface, name)
+    {
+        return Err(JsonRpcErrorData::policy_refusal(name, policy_msg));
+    }
     let result = dispatch_tool(engine, canonical, name, args);
     engine.record_tool_call(canonical, started.elapsed(), result.is_err());
     let response = result?;
     record_mcp_pulse(engine, canonical, args, &response, call_id);
     Ok(mcp_tool_response(response))
+}
+
+fn codemode_health_gated_candidate(
+    surface: tokenzero_core::McpToolSurface,
+    canonical: &str,
+    name: &str,
+) -> bool {
+    if surface != tokenzero_core::McpToolSurface::CodeMode {
+        return false;
+    }
+    // Anything SurfaceHealth::decide classifies (recovery / permanently locked /
+    // report) should reach allow_tool_call for the structured policy message.
+    !matches!(
+        crate::surface_health::decide_static(surface, name, false),
+        crate::surface_health::CrashOnlyDecision::NotGated
+    ) || matches!(canonical, "expand" | "read" | "report_tool_issue" | "shell" | "edit" | "write")
 }
 
 /// Pulse-account every MCP `tools/call`, including `tz_expand`. Without this
