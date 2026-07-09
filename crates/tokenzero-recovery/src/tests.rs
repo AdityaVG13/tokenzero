@@ -1378,6 +1378,40 @@ fn windowed_expand_oob_is_structured_not_ref_not_found() {
 }
 
 #[test]
+fn selector_lines_oob_is_structured_not_empty_success() {
+    let (mut store, _cache, _dir) = temp_store();
+    let payload = multi_line_fixture(50);
+    let stored = store
+        .store_payload(&payload, ContentType::Unknown, None, None, None)
+        .unwrap();
+    let oob = store.expand(
+        &stored.blob_ref,
+        Some("lines:500-510"),
+        None,
+        None,
+        None,
+        None,
+    );
+    assert!(!oob.found, "selector OOB must not succeed empty");
+    assert!(
+        oob.reason.starts_with("window-out-of-range"),
+        "got {}",
+        oob.reason
+    );
+
+    let around = store.expand(
+        &stored.blob_ref,
+        Some("around:L500:2"),
+        None,
+        None,
+        None,
+        None,
+    );
+    assert!(!around.found);
+    assert!(around.reason.starts_with("window-out-of-range"));
+}
+
+#[test]
 fn windowed_expand_visible_tokens_much_less_than_full() {
     let (mut store, _cache, _dir) = temp_store();
     // ~200 lines × ~8 tokens-ish → full multi-k; 50-line window << full

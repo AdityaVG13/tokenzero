@@ -517,6 +517,9 @@ impl RecoveryStore {
             selected_start = start;
             selected_end = end;
         }
+        // Resolve lines:/range:/around: before OOB so selector windows get the
+        // same structured error as explicit start_line/end_line (zq9).
+        resolve_selector_line_window(selector, &mut selected_start, &mut selected_end);
         let content = match self.resolve_ref_with_index(&parsed.kind, &parsed.bare) {
             RefResolve::Found(content) => content,
             RefResolve::NotFound => {
@@ -541,8 +544,9 @@ impl RecoveryStore {
                 "stale-ref",
             );
         }
-        // Explicit line windows: OOB is a structured error, never ref_not_found
-        // (zq9). 1-based inclusive; start past last line or end < start fails.
+        // Explicit / selector line windows: OOB is a structured error, never
+        // ref_not_found (zq9). 1-based inclusive; start past last line or end <
+        // start fails.
         if let Some(start) = selected_start {
             let line_count = content_line_count(&content);
             if start == 0 || start > line_count {
@@ -1118,6 +1122,33 @@ fn line_slice_exact(text: &str, start: usize, end: usize) -> String {
     segments[lo..hi].concat()
 }
 
+/// Parse line-window selectors into start/end. Non-window selectors leave the
+/// existing start/end untouched.
+fn resolve_selector_line_window(
+    selector: Option<&str>,
+    selected_start: &mut Option<usize>,
+    selected_end: &mut Option<usize>,
+) {
+    match selector {
+        Some(value)
+            if value.starts_with("range:")
+                || value.starts_with("lines:")
+                || value.starts_with("line:") =>
+        {
+            let prefix_len = value.find(':').map_or(0, |n| n + 1);
+            let (start, end) = parse_line_fragment(&value[prefix_len..]);
+            *selected_start = start;
+            *selected_end = end;
+        }
+        Some(value) if value.starts_with("around:") => {
+            let (start, end) = parse_around_selector(&value["around:".len()..]);
+            *selected_start = start;
+            *selected_end = end;
+        }
+        _ => {}
+    }
+}
+
 fn select_content(
     content: &str,
     selector: Option<&str>,
@@ -1143,17 +1174,11 @@ fn select_content(
         Some(value)
             if value.starts_with("range:")
                 || value.starts_with("lines:")
-                || value.starts_with("line:") =>
+                || value.starts_with("line:")
+                || value.starts_with("around:") =>
         {
-            let prefix_len = value.find(':').map_or(0, |n| n + 1);
-            let (start, end) = parse_line_fragment(&value[prefix_len..]);
-            selected_start = start;
-            selected_end = end;
-        }
-        Some(value) if value.starts_with("around:") => {
-            let (start, end) = parse_around_selector(&value["around:".len()..]);
-            selected_start = start;
-            selected_end = end;
+            // Already resolved by resolve_selector_line_window before OOB.
+            resolve_selector_line_window(selector, &mut selected_start, &mut selected_end);
         }
         Some(_) => {}
     }
