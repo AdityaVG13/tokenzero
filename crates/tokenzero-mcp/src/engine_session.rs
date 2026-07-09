@@ -63,8 +63,18 @@ impl TokenZeroEngine {
             session_id: new_session_id(),
             metrics,
             session_persist,
-            surface_health: crate::surface_health::SurfaceHealth::new(),
+            surface_health: std::sync::Arc::new(crate::surface_health::SurfaceHealth::new()),
         }
+    }
+
+    /// Build an engine that shares crash-only health with a parent session.
+    pub(crate) fn with_shared_surface_health(
+        config: EngineConfig,
+        surface_health: std::sync::Arc<crate::surface_health::SurfaceHealth>,
+    ) -> Self {
+        let mut engine = Self::new(config);
+        engine.surface_health = surface_health;
+        engine
     }
 
     pub fn session_id(&self) -> &str {
@@ -74,6 +84,12 @@ impl TokenZeroEngine {
     /// Crash-only recovery health for CodeMode expand/read (wqw.9).
     pub(crate) fn surface_health(&self) -> &crate::surface_health::SurfaceHealth {
         &self.surface_health
+    }
+
+    pub(crate) fn surface_health_handle(
+        &self,
+    ) -> std::sync::Arc<crate::surface_health::SurfaceHealth> {
+        std::sync::Arc::clone(&self.surface_health)
     }
 
     /// Record one tool-call outcome for observability. Fail-open.

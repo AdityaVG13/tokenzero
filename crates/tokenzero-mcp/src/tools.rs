@@ -172,6 +172,8 @@ fn exec_codemode_tool(
         allowed_roots: engine.config.allowed_roots.clone(),
         cache_path: Some(engine.config.cache_path.clone()),
         max_visible_tokens: engine.config.max_visible_tokens,
+        // Share session health so plan expand outcomes unlock recovery here.
+        surface_health: Some(engine.surface_health_handle()),
         ..Default::default()
     };
     // wqw.5: plan-level root follows execute root, but MCP args must not expand
@@ -232,23 +234,16 @@ fn exec_codemode_tool(
         options.ref_first_budget = budget as usize;
     }
     let result = crate::execute_codemode_with_options(plan, options.clone());
-    // wqw.9: expand/read X0 opens crash-only recovery; never claim healthy after.
+    // wqw.9: expand outcomes are recorded on the shared SurfaceHealth inside
+    // expand_with_params. Only substrate_down (no expand call) needs a bridge.
     if matches!(result.status, crate::CodeModeStatus::Error) {
-        let plan_l = plan.to_ascii_lowercase();
-        let expandish = plan_l.contains("expand")
-            || plan_l.contains("zero.token.read")
-            || plan_l.contains("zero.read");
         let kind = result
             .error
             .as_ref()
             .map(|e| e.kind.as_str())
-            .unwrap_or("codemode_error");
-        if expandish || kind == "substrate_down" {
-            if kind == "substrate_down" {
-                engine.surface_health().record_substrate_down();
-            } else {
-                engine.surface_health().record_codemode_expand_x0();
-            }
+            .unwrap_or("");
+        if kind == "substrate_down" || kind == "substrate" {
+            engine.surface_health().record_substrate_down();
         }
     }
     if codemode_envelope_version(args, &options) == "v1" {

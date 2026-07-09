@@ -130,6 +130,9 @@ pub struct CodeModeOptions {
     pub envelope: Option<String>,
     pub ref_first: bool,
     pub ref_first_budget: usize,
+    /// Session crash-only health shared with the MCP engine (wqw.9).
+    /// When set, plan expand/read outcomes update the same gate as tools/call.
+    pub surface_health: Option<std::sync::Arc<crate::surface_health::SurfaceHealth>>,
 }
 
 impl Default for CodeModeOptions {
@@ -152,6 +155,7 @@ impl Default for CodeModeOptions {
             envelope: None,
             ref_first: true,
             ref_first_budget: crate::DEFAULT_SHELL_INLINE_BUDGET,
+            surface_health: None,
         }
     }
 }

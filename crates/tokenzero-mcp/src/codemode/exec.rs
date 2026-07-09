@@ -78,14 +78,20 @@ fn make_engine_for_root_with_options(root: PathBuf, options: &CodeModeOptions) -
         .cache_path
         .clone()
         .unwrap_or_else(|| default_recovery_cache_path(&root));
-    TokenZeroEngine::new(EngineConfig {
+    let config = EngineConfig {
         allowed_roots: allowed_roots_for_workspace(&root, &options.allowed_roots),
         cache_path,
         max_visible_tokens: options.max_visible_tokens,
         mode: Mode::Auto,
         shell_timeout: shell_timeout_from_secs(options.timeout_seconds),
         ..EngineConfig::for_root(&root)
-    })
+    };
+    // Share session crash-only health when the MCP call path provided one so
+    // expand X0 inside a plan unlocks tz_expand on the same gate (wqw.9).
+    match &options.surface_health {
+        Some(health) => TokenZeroEngine::with_shared_surface_health(config, std::sync::Arc::clone(health)),
+        None => TokenZeroEngine::new(config),
+    }
 }
 
 #[cfg(test)]
@@ -1650,9 +1656,8 @@ fn exec_read(
             .as_ref()
             .map(|error| error.code.as_str())
             .unwrap_or("");
-        let lower = message.to_ascii_lowercase();
         // wqw.5: outside allowlist is a hard plan error (clear deny), not a soft capsule.
-        if code == "path_not_allowed" || lower.contains("outside allowed roots") {
+        if code == "path_not_allowed" || code == "path_outside_allowed_roots" {
             return Err(Box::new(CodeModeResult::error_with_kind(
                 "path_not_allowed",
                 message,
@@ -1660,6 +1665,7 @@ fn exec_read(
                 false,
             )));
         }
+        let lower = message.to_ascii_lowercase();
         if lower.contains("__zerostack_missing_target__")
             || lower.contains("not found")
             || lower.contains("no such")
@@ -1904,6 +1910,8 @@ fn exec_expand(engine: &TokenZeroEngine, args: &[Value]) -> Result<OpOutcome, Bo
             0,
         )));
     }
+    // Soft capsule on expand miss/error: plan continues with status in value.
+    // Shared SurfaceHealth is updated inside expand_with_params (wqw.9).
     let resp = engine.expand_with_params(params);
     Ok(OpOutcome::from_tool_response(&resp).mark_exact_expand())
 }

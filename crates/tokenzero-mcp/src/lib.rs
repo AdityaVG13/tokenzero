@@ -165,7 +165,8 @@ pub struct TokenZeroEngine {
     /// Disk-backed seen-set; `None` when session dedup is off.
     session_persist: Option<session_persist::SessionPersistence>,
     /// Expand/read surface health + crash-only recovery unlock (wqw.9).
-    surface_health: surface_health::SurfaceHealth,
+    /// Shared with CodeMode plan engines so expand outcomes update the same gate.
+    surface_health: std::sync::Arc<surface_health::SurfaceHealth>,
 }
 
 #[cfg(test)]

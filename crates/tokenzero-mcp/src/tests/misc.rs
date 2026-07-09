@@ -154,7 +154,7 @@ fn report_tool_issue_accepts_zero_execute_via_mcp_dispatch() {
     assert!(crate::is_reportable_tool_name("tz_execute_code"));
 }
 
-[test]
+#[test]
 fn classic_surface_rejects_tz_execute_code() {
     use tokenzero_core::McpToolSurface;
     let dir = tempdir().unwrap();
@@ -196,8 +196,6 @@ fn codemode_report_tool_issue_is_not_permanently_locked() {
 }
 
 #[test]
-
-[test]
 fn mcp_execute_root_cannot_escape_server_allowlist() {
     use tokenzero_core::McpToolSurface;
     let server = tempdir().unwrap();
@@ -224,3 +222,51 @@ fn mcp_execute_root_cannot_escape_server_allowlist() {
 }
 
 #[test]
+fn plan_string_expand_does_not_unlock_without_expand_op() {
+    use tokenzero_core::McpToolSurface;
+    let dir = tempdir().unwrap();
+    let mut config = EngineConfig::for_root(dir.path());
+    config.tool_surface = McpToolSurface::CodeMode;
+    let engine = TokenZeroEngine::new(config);
+    assert!(engine.surface_health().is_healthy());
+    let _ = call_tool(
+        &engine,
+        "tz_execute_code",
+        &json!({
+            "plan": "const note = \"please expand later\"; throw new Error(\"boom\")"
+        }),
+        None,
+    );
+    assert!(
+        engine.surface_health().is_healthy(),
+        "plan text mentioning expand must not unlock recovery"
+    );
+}
+
+#[test]
+fn shared_health_unlocks_after_plan_expand_miss() {
+    use tokenzero_core::McpToolSurface;
+    let dir = tempdir().unwrap();
+    let mut config = EngineConfig::for_root(dir.path());
+    config.tool_surface = McpToolSurface::CodeMode;
+    let engine = TokenZeroEngine::new(config);
+    assert!(engine.surface_health().is_healthy());
+    let _ = call_tool(
+        &engine,
+        "tz_execute_code",
+        &json!({
+            "plan": "return await zero.expand(\"tz://blob/nonexistent123\")"
+        }),
+        None,
+    );
+    assert!(
+        !engine.surface_health().is_healthy(),
+        "expand miss inside plan must update shared session health"
+    );
+    assert!(
+        engine
+            .surface_health()
+            .allow_tool_call(McpToolSurface::CodeMode, "tz_expand")
+            .is_ok()
+    );
+}
