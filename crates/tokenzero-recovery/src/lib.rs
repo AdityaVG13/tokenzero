@@ -74,6 +74,166 @@ pub enum RecoveryError {
     Json(#[from] serde_json::Error),
 }
 
+/// ZeroRef v1 contract error taxonomy for portable blob refs.
+/// Stable error labels used by `parse_zeroref_v1_blob` and the v1 test suite.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ZeroRefError {
+    /// Ref string is not structurally a ZeroRef v1 blob ref.
+    Malformed,
+    /// Scope is not a portable blob ref (e.g. file, unit, session, execution, index).
+    Unsupported,
+    /// Object missing from the store (not found after a valid parse).
+    Missing,
+    /// Underlying storage or network read failed.
+    Io,
+    /// Complete-object digest verification failed.
+    Corruption,
+    /// Policy denied access/expansion.
+    Policy,
+    /// Ref version is incompatible with this consumer.
+    IncompatibleVersion,
+    /// Legacy short/prefix ID cannot be disambiguated under v1 rules.
+    LegacyAmbiguity,
+}
+
+impl std::fmt::Display for ZeroRefError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let label = match self {
+            Self::Malformed => "malformed",
+            Self::Unsupported => "unsupported",
+            Self::Missing => "missing",
+            Self::Io => "io",
+            Self::Corruption => "corruption",
+            Self::Policy => "policy",
+            Self::IncompatibleVersion => "incompatible_version",
+            Self::LegacyAmbiguity => "legacy_ambiguity",
+        };
+        write!(f, "{label}")
+    }
+}
+
+impl std::error::Error for ZeroRefError {}
+
+/// Parsed components of a ZeroRef v1 portable blob ref.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ZeroRefV1Blob {
+    pub scheme: String,
+    pub hash: String,
+    pub fragment: Option<ZeroRefFragment>,
+}
+
+/// Fragment selector for a ZeroRef v1 blob ref.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ZeroRefFragment {
+    /// Zero-based half-open byte range `start..end`. `start == end` is allowed.
+    Byte { start: usize, end: usize },
+    /// One-based inclusive line range `start..=end`. Exact newline retention.
+    Line { start: usize, end: usize },
+}
+
+/// Parse and validate a ZeroRef v1 portable blob ref.
+///
+/// Portable scope is `(tz|fz|gz)://blob/<full-hash>` only. Execution/error/session/file/graph/index
+/// refs remain engine-specific and are rejected with `ZeroRefError::Unsupported`.
+///
+/// Identity is the full lowercase 64-hex SHA-256 of the complete unfragmented bytes. The parser
+/// emits the full hash and rejects short, prefix, uppercase, non-hex, or extra-segment IDs.
+///
+/// Fragments:
+/// - `#Bstart-end`: zero-based half-open byte range, checked arithmetic; `start == end` allowed;
+///   reversed (`start > end`) or `end > byte_length` rejected with `Malformed`.
+/// - `#Lstart-end`: one-based inclusive line range, exact newline retention; `start == 0`,
+///   reversed, or out-of-bounds rejected with `Malformed`.
+///
+/// Legacy 17-character short IDs (prefix + 8 hex bytes) are rejected by this v1 parser; callers
+/// that need backward compatibility should detect `LegacyAmbiguity` and fall back to the existing
+/// `parse_ref`/`canonicalize_expand_ref` path.
+pub fn parse_zeroref_v1_blob(ref_id: &str, byte_length: Option<usize>) -> Result<ZeroRefV1Blob, ZeroRefError> {
+    let (bare, fragment_str) = ref_id
+        .split_once('#')
+        .map_or((ref_id, None), |(b, f)| (b, Some(f)));
+
+    // Scheme must be one of the three portable blob schemes and the path must be exactly `blob/<hash>`.
+    let scheme = if bare.starts_with("tz://blob/") {
+        "tz"
+    } else if bare.starts_with("fz://blob/") {
+        "fz"
+    } else if bare.starts_with("gz://blob/") {
+        "gz"
+    } else {
+        return Err(ZeroRefError::Unsupported);
+    };
+    let hash = bare
+        .strip_prefix(&format!("{scheme}://blob/"))
+        .expect("prefix checked above");
+
+    if hash.is_empty() {
+        return Err(ZeroRefError::Malformed);
+    }
+    if hash.contains('/') {
+        return Err(ZeroRefError::Malformed);
+    }
+    if hash.len() != 64 {
+        // 17-char short IDs (prefix + 8 hex bytes) are a legacy format, not v1.
+        return Err(ZeroRefError::LegacyAmbiguity);
+    }
+    if hash.chars().any(|c| !c.is_ascii_hexdigit() || c.is_ascii_uppercase()) {
+        return Err(ZeroRefError::Malformed);
+    }
+
+    let fragment = fragment_str
+        .map(|f| parse_zeroref_v1_fragment(f, byte_length))
+        .transpose()?;
+
+    Ok(ZeroRefV1Blob {
+        scheme: scheme.to_string(),
+        hash: hash.to_string(),
+        fragment,
+    })
+}
+
+fn parse_zeroref_v1_fragment(fragment: &str, byte_length: Option<usize>) -> Result<ZeroRefFragment, ZeroRefError> {
+    if fragment.is_empty() {
+        return Err(ZeroRefError::Malformed);
+    }
+    match fragment.chars().next() {
+        Some('B') => parse_zeroref_v1_byte_fragment(&fragment[1..], byte_length),
+        Some('L') => parse_zeroref_v1_line_fragment(&fragment[1..]),
+        _ => Err(ZeroRefError::Malformed),
+    }
+}
+
+fn parse_zeroref_v1_byte_fragment(value: &str, byte_length: Option<usize>) -> Result<ZeroRefFragment, ZeroRefError> {
+    let (start, end) = value
+        .split_once('-')
+        .ok_or(ZeroRefError::Malformed)?;
+    let start = start.parse::<usize>().map_err(|_| ZeroRefError::Malformed)?;
+    let end = end.parse::<usize>().map_err(|_| ZeroRefError::Malformed)?;
+    if start > end {
+        return Err(ZeroRefError::Malformed);
+    }
+    if let Some(len) = byte_length {
+        if end > len {
+            return Err(ZeroRefError::Malformed);
+        }
+    }
+    Ok(ZeroRefFragment::Byte { start, end })
+}
+
+fn parse_zeroref_v1_line_fragment(value: &str) -> Result<ZeroRefFragment, ZeroRefError> {
+    let (start, end) = value
+        .split_once('-')
+        .ok_or(ZeroRefError::Malformed)?;
+    let start = start.parse::<usize>().map_err(|_| ZeroRefError::Malformed)?;
+    let end = end.parse::<usize>().map_err(|_| ZeroRefError::Malformed)?;
+    if start == 0 || start > end {
+        return Err(ZeroRefError::Malformed);
+    }
+    Ok(ZeroRefFragment::Line { start, end })
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RecoveryConfig {
     pub max_blobs: usize,

@@ -1630,3 +1630,102 @@ fn ref_index_records_content_class_on_persist() {
         assert!(line.contains("\"expanded\":false"));
     });
 }
+
+// ---------------------------------------------------------------------------
+// ZeroRef v1 contract
+// ---------------------------------------------------------------------------
+
+const FULL_HASH: &str = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
+
+#[test]
+fn zeroref_v1_round_trips_canonical_blob_refs() {
+    for (scheme, expected) in [("tz", "tz"), ("fz", "fz"), ("gz", "gz")] {
+        let input = format!("{scheme}://blob/{FULL_HASH}");
+        let parsed = parse_zeroref_v1_blob(&input, None).unwrap();
+        assert_eq!(parsed.scheme, expected);
+        assert_eq!(parsed.hash, FULL_HASH);
+        assert!(parsed.fragment.is_none());
+    }
+}
+
+#[test]
+fn zeroref_v1_round_trips_fragment_selectors() {
+    let line_ref = format!("tz://blob/{FULL_HASH}#L2-L5");
+    let parsed = parse_zeroref_v1_blob(&line_ref, None).unwrap();
+    assert_eq!(
+        parsed.fragment,
+        Some(ZeroRefFragment::Line { start: 2, end: 5 })
+    );
+
+    let byte_ref = format!("fz://blob/{FULL_HASH}#B0-64");
+    let parsed = parse_zeroref_v1_blob(&byte_ref, Some(64)).unwrap();
+    assert_eq!(
+        parsed.fragment,
+        Some(ZeroRefFragment::Byte { start: 0, end: 64 })
+    );
+
+    let empty_byte_ref = format!("gz://blob/{FULL_HASH}#B7-7");
+    let parsed = parse_zeroref_v1_blob(&empty_byte_ref, Some(128)).unwrap();
+    assert_eq!(
+        parsed.fragment,
+        Some(ZeroRefFragment::Byte { start: 7, end: 7 })
+    );
+}
+
+#[test]
+fn zeroref_v1_rejects_golden_negative_vectors() {
+    let cases = vec![
+        ("tz://blob/ba_e3b0c44298fc1c149", ZeroRefError::LegacyAmbiguity),
+        (
+            "tz://blob/E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855",
+            ZeroRefError::Malformed,
+        ),
+        (
+            "tz://blob/e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b85g",
+            ZeroRefError::Malformed,
+        ),
+        (
+            "tz://blob/e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855/extra",
+            ZeroRefError::Malformed,
+        ),
+        ("tz://blob/", ZeroRefError::Malformed),
+        (
+            "tz://blob/e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855#B10-5",
+            ZeroRefError::Malformed,
+        ),
+        (
+            "tz://blob/e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855#L0-L3",
+            ZeroRefError::Malformed,
+        ),
+        (
+            "tz://file/e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            ZeroRefError::Unsupported,
+        ),
+    ];
+    for (input, expected) in cases {
+        let err = parse_zeroref_v1_blob(input, None).unwrap_err();
+        assert_eq!(err, expected, "{input} should yield {expected:?}");
+    }
+}
+
+#[test]
+fn zeroref_v1_byte_oob_respects_byte_length() {
+    let input = format!("tz://blob/{FULL_HASH}#B0-100");
+    assert_eq!(
+        parse_zeroref_v1_blob(&input, Some(64)).unwrap_err(),
+        ZeroRefError::Malformed
+    );
+    assert_eq!(
+        parse_zeroref_v1_blob(&input, Some(100)).unwrap().fragment,
+        Some(ZeroRefFragment::Byte { start: 0, end: 100 })
+    );
+    assert!(parse_zeroref_v1_blob(&input, None).is_ok());
+}
+
+#[test]
+fn zeroref_v1_legacy_short_ids_parsed_by_existing_parse_ref() {
+    let short = "tz://blob/ba_e3b0c44298fc1c149";
+    assert_eq!(parse_zeroref_v1_blob(short, None).unwrap_err(), ZeroRefError::LegacyAmbiguity);
+    let canonicalized = canonicalize_expand_ref(short).unwrap();
+    assert!(parse_ref(&canonicalized).is_some(), "legacy short IDs remain parseable via existing parse_ref");
+}
