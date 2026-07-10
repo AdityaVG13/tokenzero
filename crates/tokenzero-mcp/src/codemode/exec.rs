@@ -1037,6 +1037,19 @@ fn finalize_codemode_result(
     result.telemetry.internal_actions = operations.saturating_add(result.refs.len());
     result.telemetry.payload_tokens = payload_tokens;
     result.telemetry.envelope_tokens = count_tokens(&result.visible_ack);
+    // Granular token attribution buckets (6ot).
+    result.telemetry.ack_tokens = count_tokens(&result.visible_ack);
+    let ref_strings: String = result.refs.iter().cloned().collect::<Vec<_>>().join(" ");
+    result.telemetry.ref_string_tokens = count_tokens(&ref_strings);
+    // Framing = envelope minus ack and ref strings (JSON keys, punctuation, structure).
+    result.telemetry.framing_tokens = result
+        .telemetry
+        .envelope_tokens
+        .saturating_sub(result.telemetry.ack_tokens)
+        .saturating_sub(result.telemetry.ref_string_tokens);
+    // Preview = payload minus ref strings (inline text the model sees directly).
+    result.telemetry.preview_tokens =
+        payload_tokens.saturating_sub(result.telemetry.ref_string_tokens);
     if let Some(extra) = result
         .telemetry
         .extra
@@ -1051,6 +1064,19 @@ fn finalize_codemode_result(
         extra.insert(
             "envelope_tokens".to_string(),
             json!(result.telemetry.envelope_tokens),
+        );
+        extra.insert("ack_tokens".to_string(), json!(result.telemetry.ack_tokens));
+        extra.insert(
+            "ref_string_tokens".to_string(),
+            json!(result.telemetry.ref_string_tokens),
+        );
+        extra.insert(
+            "framing_tokens".to_string(),
+            json!(result.telemetry.framing_tokens),
+        );
+        extra.insert(
+            "preview_tokens".to_string(),
+            json!(result.telemetry.preview_tokens),
         );
     }
     result.telemetry.refs_count = Some(result.refs.len());

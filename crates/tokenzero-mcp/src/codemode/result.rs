@@ -91,6 +91,11 @@ pub struct CodeModeTelemetry {
     pub bytes_materialized: usize,
     pub envelope_tokens: usize,
     pub payload_tokens: usize,
+    /// Token attribution buckets for envelope overhead audit (6ot).
+    pub ack_tokens: usize,
+    pub ref_string_tokens: usize,
+    pub framing_tokens: usize,
+    pub preview_tokens: usize,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub extra: Option<Value>,
 }
@@ -198,6 +203,10 @@ impl CodeModeResult {
                 bytes_materialized: raw,
                 envelope_tokens: 0,
                 payload_tokens: visible,
+                ack_tokens: 0,
+                ref_string_tokens: 0,
+                framing_tokens: 0,
+                preview_tokens: 0,
                 extra: Some(serde_json::json!({
                     "operations": ops,
                     "visible_tokens": visible,
@@ -254,6 +263,10 @@ impl CodeModeResult {
                 bytes_materialized: 0,
                 envelope_tokens: 0,
                 payload_tokens: 0,
+                ack_tokens: 0,
+                ref_string_tokens: 0,
+                framing_tokens: 0,
+                preview_tokens: 0,
                 extra: Some(serde_json::json!({
                     "operations": ops,
                     "visible_tokens": 0,
