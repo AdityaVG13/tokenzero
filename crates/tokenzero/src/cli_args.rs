@@ -59,6 +59,11 @@ pub(crate) enum Commands {
     Stats(CommonArgs),
     #[command(about = "Inspect or sync local Pulse telemetry")]
     Pulse(PulseArgs),
+    #[command(
+        about = "Session cost ledger: per-session, per-repo, per-agent mass × turns accounting",
+        alias = "ledger"
+    )]
+    SessionLedger(SessionLedgerArgs),
     #[command(about = "Inspect or prune TokenZero recovery-cache state")]
     Cache(CacheArgs),
     #[command(about = "Plan or apply local integration writes with rollback data")]
@@ -491,6 +496,26 @@ pub(crate) struct PulseExportArgs {
 pub(crate) struct PulseImportArgs {
     #[arg(value_name = "INPUT")]
     pub(crate) input: PathBuf,
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct SessionLedgerArgs {
+    #[arg(long, global = true)]
+    pub(crate) root: Option<PathBuf>,
+    #[arg(long, global = true)]
+    pub(crate) json: bool,
+    #[command(subcommand)]
+    pub(crate) command: Option<SessionLedgerCommand>,
+}
+
+#[derive(Debug, Subcommand)]
+pub(crate) enum SessionLedgerCommand {
+    #[command(about = "Print per-session cost breakdown (mass × turns)")]
+    Stats,
+    #[command(about = "Export ledger as JSON array")]
+    Export,
+    #[command(about = "Print the stable schema for the session ledger")]
+    Schema,
 }
 
 #[derive(Debug, Args)]

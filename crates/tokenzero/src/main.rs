@@ -45,7 +45,7 @@ use mcp_artifact::run_mcp_artifact;
 use reach::{installed_tokenzero_command_audit, run_reach};
 use release_claims::{ClaimEvidenceInputs, run_claim_audit};
 use tokenzero_pulse::{
-    PulseEvent, default_ledger_path, doctor_jsonl_sqlite, export_jsonl, import_jsonl, record_event,
+    PulseEvent, SessionLedgerReport, default_ledger_path, doctor_jsonl_sqlite, export_jsonl, import_jsonl, record_event,
     report_for_path, sync_jsonl_to_sqlite,
 };
 use tokenzero_runtime::{
@@ -88,6 +88,7 @@ fn main() -> Result<()> {
             emit_value(handle_stats(args)?, as_json)?;
         }
         Commands::Pulse(args) => handle_pulse(args)?,
+        Commands::SessionLedger(args) => handle_session_ledger(args)?,
         Commands::Cache(args) => handle_cache(args)?,
         Commands::Install(args) => handle_install(args)?,
         Commands::Init(args) => handle_init(args)?,
@@ -1009,6 +1010,30 @@ fn handle_pulse(args: PulseArgs) -> Result<()> {
                 println!("{}", serde_json::to_string_pretty(&report)?);
             } else {
                 print!("{}", tokenzero_pulse::render_text(&report));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn handle_session_ledger(args: SessionLedgerArgs) -> Result<()> {
+    let root = tokenzero_work_root(args.root);
+    let ledger_path = default_ledger_path(&root);
+    match args.command {
+        Some(SessionLedgerCommand::Schema) => {
+            let schema = SessionLedgerReport::schema_json();
+            println!("{}", serde_json::to_string_pretty(&schema)?);
+        }
+        Some(SessionLedgerCommand::Export) => {
+            let report = SessionLedgerReport::from_ledger(&ledger_path)?;
+            println!("{}", serde_json::to_string_pretty(&report)?);
+        }
+        Some(SessionLedgerCommand::Stats) | None => {
+            let report = SessionLedgerReport::from_ledger(&ledger_path)?;
+            if args.json {
+                println!("{}", serde_json::to_string_pretty(&report)?);
+            } else {
+                print!("{}", report.render_text());
             }
         }
     }

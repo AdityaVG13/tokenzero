@@ -1,4 +1,5 @@
 use super::*;
+use super::*;
 use proptest::prelude::*;
 use tempfile::tempdir;
 
@@ -719,4 +720,67 @@ fn sync_waits_for_transient_lock_contention() {
 
     assert!(status.ok);
     assert_eq!(status.event_count, 1);
+}
+
+// ---------------------------------------------------------------------------
+// Session Ledger (bfu)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn session_ledger_groups_by_session_id() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("events.jsonl");
+    let mut e1 = test_event("read");
+    e1.session_id = Some("sess-a".to_string());
+    let mut e2 = test_event("expand");
+    e2.session_id = Some("sess-a".to_string());
+    let mut e3 = test_event("read");
+    e3.session_id = Some("sess-b".to_string());
+    record_event(&path, &e1).unwrap();
+    record_event(&path, &e2).unwrap();
+    record_event(&path, &e3).unwrap();
+
+    let report = SessionLedgerReport::from_ledger(&path).unwrap();
+    assert_eq!(report.total_sessions, 2);
+    assert_eq!(report.total_turns, 3);
+    assert_eq!(report.schema_version, "session-ledger-v1");
+    let sess_a = report
+        .sessions
+        .iter()
+        .find(|s| s.session_id == "sess-a")
+        .unwrap();
+    assert_eq!(sess_a.turns, 2);
+    assert_eq!(sess_a.tools.get("read"), Some(&1));
+    assert_eq!(sess_a.tools.get("expand"), Some(&1));
+}
+
+#[test]
+fn session_ledger_handles_no_session_id() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("events.jsonl");
+    record_event(&path, &test_event("read")).unwrap();
+    let report = SessionLedgerReport::from_ledger(&path).unwrap();
+    assert_eq!(report.total_sessions, 1);
+    assert_eq!(report.sessions[0].session_id, "unknown");
+}
+
+#[test]
+fn session_ledger_empty_ledger() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("nonexistent.jsonl");
+    let report = SessionLedgerReport::from_ledger(&path).unwrap();
+    assert_eq!(report.total_sessions, 0);
+    assert_eq!(report.total_turns, 0);
+}
+
+#[test]
+fn session_ledger_schema_json_has_expected_fields() {
+    let schema = SessionLedgerReport::schema_json();
+    assert_eq!(
+        schema["schema_version"],
+        serde_json::json!("session-ledger-v1")
+    );
+    assert!(schema["entry"].is_object());
+    assert!(schema["report"].is_object());
+    assert!(schema["cli"].is_object());
 }

@@ -4,6 +4,7 @@ use fs4::{FileExt, TryLockError};
 use rusqlite::{Connection, params};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use std::collections::BTreeMap;
 use std::fs::{self, OpenOptions};
 use std::io::{BufRead, BufReader, BufWriter, Write};
 use std::path::{Path, PathBuf};
@@ -1113,6 +1114,162 @@ fn io_other(err: serde_json::Error) -> std::io::Error {
 
 fn sqlite_error(err: rusqlite::Error) -> std::io::Error {
     std::io::Error::new(std::io::ErrorKind::InvalidData, err)
+}
+
+// ---------------------------------------------------------------------------
+// Session Ledger (bfu): per-session, per-repo, per-agent mass × turns accounting
+// ---------------------------------------------------------------------------
+
+/// Stable schema version for the session ledger.
+pub const SESSION_LEDGER_SCHEMA_VERSION: &str = "session-ledger-v1";
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SessionLedgerEntry {
+    pub session_id: String,
+    pub turns: usize,
+    pub raw_tokens: usize,
+    pub visible_tokens: usize,
+    pub recovery_tokens: usize,
+    pub exact_ref_count: usize,
+    pub failures: usize,
+    pub cache_hits: usize,
+    pub tools: BTreeMap<String, usize>,
+    pub source_hash: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SessionLedgerReport {
+    pub schema_version: String,
+    pub total_sessions: usize,
+    pub total_turns: usize,
+    pub total_raw_tokens: usize,
+    pub total_visible_tokens: usize,
+    pub total_recovery_tokens: usize,
+    pub total_exact_refs: usize,
+    pub total_failures: usize,
+    pub total_cache_hits: usize,
+    pub sessions: Vec<SessionLedgerEntry>,
+}
+
+impl SessionLedgerReport {
+    pub fn from_ledger(path: &Path) -> std::io::Result<Self> {
+        let mut sessions: BTreeMap<String, SessionLedgerEntry> = BTreeMap::new();
+        scan_jsonl(path, |event| {
+            let sid = event.session_id.clone().unwrap_or_else(|| "unknown".to_string());
+            let entry = sessions.entry(sid.clone()).or_insert(SessionLedgerEntry {
+                session_id: sid,
+                turns: 0,
+                raw_tokens: 0,
+                visible_tokens: 0,
+                recovery_tokens: 0,
+                exact_ref_count: 0,
+                failures: 0,
+                cache_hits: 0,
+                tools: BTreeMap::new(),
+                source_hash: event.source_hash.clone(),
+            });
+            entry.turns += 1;
+            entry.raw_tokens += event.raw_tokens;
+            entry.visible_tokens += event.visible_tokens;
+            entry.recovery_tokens += event.recovery_tokens;
+            entry.exact_ref_count += event.exact_ref_count;
+            if event.failure {
+                entry.failures += 1;
+            }
+            if event.cache_hit {
+                entry.cache_hits += 1;
+            }
+            *entry.tools.entry(event.tool.clone()).or_insert(0) += 1;
+            Ok(())
+        })?;
+        let sessions_vec: Vec<SessionLedgerEntry> = sessions.into_values().collect();
+        let total_turns: usize = sessions_vec.iter().map(|s| s.turns).sum();
+        let total_raw: usize = sessions_vec.iter().map(|s| s.raw_tokens).sum();
+        let total_visible: usize = sessions_vec.iter().map(|s| s.visible_tokens).sum();
+        let total_recovery: usize = sessions_vec.iter().map(|s| s.recovery_tokens).sum();
+        let total_refs: usize = sessions_vec.iter().map(|s| s.exact_ref_count).sum();
+        let total_failures: usize = sessions_vec.iter().map(|s| s.failures).sum();
+        let total_cache_hits: usize = sessions_vec.iter().map(|s| s.cache_hits).sum();
+        Ok(Self {
+            schema_version: SESSION_LEDGER_SCHEMA_VERSION.to_string(),
+            total_sessions: sessions_vec.len(),
+            total_turns,
+            total_raw_tokens: total_raw,
+            total_visible_tokens: total_visible,
+            total_recovery_tokens: total_recovery,
+            total_exact_refs: total_refs,
+            total_failures,
+            total_cache_hits,
+            sessions: sessions_vec,
+        })
+    }
+
+    pub fn schema_json() -> serde_json::Value {
+        serde_json::json!({
+            "schema_version": SESSION_LEDGER_SCHEMA_VERSION,
+            "description": "Per-session cost ledger: mass × turns accounting per session, per repo, per agent",
+            "entry": {
+                "session_id": "string — stable session identifier (MCP session id or 'unknown')",
+                "turns": "usize — number of tool calls in this session",
+                "raw_tokens": "usize — total raw (uncompressed) tokens across all turns",
+                "visible_tokens": "usize — total visible (compressed) tokens across all turns",
+                "recovery_tokens": "usize — tokens recovered via expand (charged back to original serve)",
+                "exact_ref_count": "usize — total exact refs emitted across all turns",
+                "failures": "usize — number of failed tool calls",
+                "cache_hits": "usize — number of cache-hit serves",
+                "tools": "BTreeMap<String, usize> — per-tool call counts",
+                "source_hash": "Option<String> — repo source hash if available"
+            },
+            "report": {
+                "schema_version": "string — session-ledger-v1",
+                "total_sessions": "usize — number of distinct sessions",
+                "total_turns": "usize — total tool calls across all sessions",
+                "total_raw_tokens": "usize",
+                "total_visible_tokens": "usize",
+                "total_recovery_tokens": "usize",
+                "total_exact_refs": "usize",
+                "total_failures": "usize",
+                "total_cache_hits": "usize",
+                "sessions": "Vec<SessionLedgerEntry>"
+            },
+            "cli": {
+                "stats": "tokenzero session-ledger stats [--json] [--root PATH]",
+                "export": "tokenzero session-ledger export [--json] [--root PATH]",
+                "schema": "tokenzero session-ledger schema"
+            }
+        })
+    }
+
+    pub fn render_text(&self) -> String {
+        let mut out = String::new();
+        out.push_str("Session Cost Ledger (session-ledger-v1)\n");
+        out.push_str("═══════════════════════════════════════\n\n");
+        out.push_str(&format!(
+            "Sessions: {}  Turns: {}  Raw: {}  Visible: {}  Refs: {}  Failures: {}\n\n",
+            self.total_sessions,
+            self.total_turns,
+            self.total_raw_tokens,
+            self.total_visible_tokens,
+            self.total_exact_refs,
+            self.total_failures,
+        ));
+        out.push_str("Per-session breakdown:\n");
+        out.push_str("───────────────────────────────────────\n");
+        for s in &self.sessions {
+            let savings = if s.raw_tokens > 0 {
+                ((s.raw_tokens - s.visible_tokens) as f64 / s.raw_tokens as f64) * 100.0
+            } else {
+                0.0
+            };
+            out.push_str(&format!(
+                "  {} — turns={} raw={} visible={} (savings {:.1}%) refs={} failures={}\n",
+                s.session_id, s.turns, s.raw_tokens, s.visible_tokens, savings, s.exact_ref_count, s.failures
+            ));
+            let tools: Vec<String> = s.tools.iter().map(|(k, v)| format!("{k}:{v}")).collect();
+            out.push_str(&format!("    tools: {}\n", tools.join(", ")));
+        }
+        out
+    }
 }
 
 #[cfg(test)]
