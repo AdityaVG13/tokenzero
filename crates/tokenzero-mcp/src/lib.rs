@@ -6,6 +6,7 @@
 mod binary_resolve;
 mod cache_maintenance;
 mod cache_pack;
+mod capability_descriptor;
 mod catalog;
 mod codemode;
 mod collect;
