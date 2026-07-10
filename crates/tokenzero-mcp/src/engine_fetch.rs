@@ -105,20 +105,17 @@ impl TokenZeroEngine {
         }
         let curl = match self.config.curl_path_override.clone() {
             Some(path) => path,
-            None => {
-                let resolution = resolve_curl_binary();
-                let Some(path) = resolution.path else {
+            None => match resolve_curl_binary() {
+                Ok(resolved) => resolved.path,
+                Err(err) => {
                     return ToolResponse::error(
                         "fetch",
                         "fetch_failed",
-                        resolution
-                            .error
-                            .unwrap_or_else(|| "curl not found".to_string()),
+                        err.message,
                         Some("install curl or set TOKENZERO_CURL_PATH".to_string()),
                     );
-                };
-                path
-            }
+                }
+            },
         };
         // Redirects are followed manually so every hop's target is validated
         // (and pinned) like the entry URL — a redirect to an internal address
