@@ -8,7 +8,6 @@ use tokenzero_core::{
 use tokenzero_filters::{discover, rewrite_command};
 use tokenzero_runtime::{ExecutionMode, plan_command_for_platform};
 
-use crate::catalog::canonical_allowed_on_surface;
 use crate::expand_params::ExpandParams;
 use crate::jsonrpc::JsonRpcErrorData;
 use crate::{EditHunk, ServeOptions, TokenZeroEngine, shell_timeout_from_secs};
@@ -21,19 +20,33 @@ pub(crate) fn call_tool(
 ) -> Result<Value, JsonRpcErrorData> {
     let canonical = canonical_tool(name);
     let started = std::time::Instant::now();
-    if !canonical_allowed_on_surface(engine.config.tool_surface, canonical) {
+    // Surface membership first: Classic must not dispatch CodeMode execute
+    // (and vice versa). On CodeMode, recovery + permanently-locked tools still
+    // reach the health gate so agents get policy_refusal (ladder / never-
+    // unlocked) instead of unknown_tool.
+    if !crate::catalog::canonical_allowed_on_surface(engine.config.tool_surface, canonical)
+        && !crate::catalog::canonical_allowed_on_surface(engine.config.tool_surface, name)
+        && !codemode_health_gated_candidate(engine.config.tool_surface, canonical, name)
+    {
         return Err(JsonRpcErrorData::unknown_tool(name));
+    }
+    if let Err(policy_msg) = engine
+        .surface_health()
+        .allow_tool_call(engine.config.tool_surface, name)
+    {
+        return Err(JsonRpcErrorData::policy_refusal(name, policy_msg));
     }
     let result = dispatch_tool(engine, canonical, name, args);
     engine.record_tool_call(canonical, started.elapsed(), result.is_err());
     let response = result?;
+    // Expand health is recorded inside expand_with_params (CLI + CodeMode + MCP).
     record_mcp_pulse(engine, canonical, args, &response, call_id);
     Ok(mcp_tool_response(response))
 }
 
-/// FastMCP variant: identical to `call_tool` but omits the tool-surface gate
-/// so that all tools (including codemode) are available through one server.
-/// The surface split is a CLI-mode concern, not a per-call gate for FastMCP.
+/// FastMCP variant: omits the Classic/CodeMode *membership* gate so one server
+/// can expose both surfaces (FastMCP product contract). Still applies the
+/// crash-only health gate when the engine is configured for CodeMode.
 pub(crate) fn call_tool_fastmcp(
     engine: &TokenZeroEngine,
     name: &str,
@@ -42,11 +55,53 @@ pub(crate) fn call_tool_fastmcp(
 ) -> Result<Value, JsonRpcErrorData> {
     let canonical = canonical_tool(name);
     let started = std::time::Instant::now();
+    if let Err(policy_msg) = engine
+        .surface_health()
+        .allow_tool_call(engine.config.tool_surface, name)
+    {
+        return Err(JsonRpcErrorData::policy_refusal(name, policy_msg));
+    }
     let result = dispatch_tool(engine, canonical, name, args);
     engine.record_tool_call(canonical, started.elapsed(), result.is_err());
     let response = result?;
     record_mcp_pulse(engine, canonical, args, &response, call_id);
     Ok(mcp_tool_response(response))
+}
+
+fn codemode_health_gated_candidate(
+    surface: tokenzero_core::McpToolSurface,
+    canonical: &str,
+    name: &str,
+) -> bool {
+    if surface != tokenzero_core::McpToolSurface::CodeMode {
+        return false;
+    }
+    // Anything SurfaceHealth::decide classifies (recovery / permanently locked /
+    // report) should reach allow_tool_call for the structured policy message.
+    !matches!(
+        crate::surface_health::decide_static(surface, name, false),
+        crate::surface_health::CrashOnlyDecision::NotGated
+    ) || matches!(
+        canonical,
+        "expand" | "read" | "report_tool_issue" | "shell" | "edit" | "write"
+    )
+}
+
+/// Reject MCP-supplied roots that escape the server's configured allowlist.
+fn ensure_path_under_server_allowlist(
+    engine: &TokenZeroEngine,
+    path: &Path,
+) -> Result<(), JsonRpcErrorData> {
+    if engine.path_allowed(path) {
+        return Ok(());
+    }
+    Err(JsonRpcErrorData::policy_refusal(
+        "execute_code",
+        format!(
+            "path_not_allowed: {} is outside the MCP server allowed roots",
+            path.display()
+        ),
+    ))
 }
 
 /// Pulse-account every MCP `tools/call`, including `tz_expand`. Without this
@@ -120,13 +175,50 @@ fn exec_codemode_tool(
         allowed_roots: engine.config.allowed_roots.clone(),
         cache_path: Some(engine.config.cache_path.clone()),
         max_visible_tokens: engine.config.max_visible_tokens,
+        // Share session health so plan expand outcomes unlock recovery here.
+        surface_health: Some(engine.surface_health_handle()),
         ..Default::default()
     };
-    if let Some(root) = engine.config.allowed_roots.first() {
+    // wqw.5: plan-level root follows execute root, but MCP args must not expand
+    // the allowlist past the server's configured roots (agent-controlled).
+    if let Ok(root) = arg_string_any(args, &["root", "cwd", "workspace"]) {
+        let root_path = std::path::PathBuf::from(root);
+        ensure_path_under_server_allowlist(engine, &root_path)?;
+        options.root = Some(root_path);
+    } else if let Some(root) = engine.config.allowed_roots.first() {
         options.root = Some(root.clone());
+    }
+    if let Some(extra) = args
+        .get("allowed_root")
+        .or_else(|| args.get("allowed_roots"))
+    {
+        match extra {
+            Value::String(path) => {
+                let path = std::path::PathBuf::from(path);
+                ensure_path_under_server_allowlist(engine, &path)?;
+                if !options.allowed_roots.iter().any(|r| r == &path) {
+                    options.allowed_roots.push(path);
+                }
+            }
+            Value::Array(items) => {
+                for item in items {
+                    if let Some(path) = item.as_str() {
+                        let path = std::path::PathBuf::from(path);
+                        ensure_path_under_server_allowlist(engine, &path)?;
+                        if !options.allowed_roots.iter().any(|r| r == &path) {
+                            options.allowed_roots.push(path);
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
     }
     if let Some(limits) = args.get("limits") {
         if let Ok(limits) = serde_json::from_value::<crate::CodeModeLimits>(limits.clone()) {
+            // MCP callers may shorten the wall clock, but the server-owned
+            // hard ceiling is not caller-expandable.
+            let server_hard_max_wall_ms = options.hard_max_wall_ms;
             options.max_output_bytes = limits.max_output_bytes;
             options.max_refs_emitted = limits.max_refs_emitted;
             options.max_logical_ops = limits.max_logical_ops;
@@ -134,6 +226,8 @@ fn exec_codemode_tool(
             options.max_microtasks = limits.max_microtasks;
             options.max_memory_bytes = limits.max_memory_bytes;
             options.max_code_bytes = limits.max_code_bytes;
+            options.hard_max_wall_ms = limits.hard_max_wall_ms.min(server_hard_max_wall_ms);
+            options.max_wall_ms = limits.max_wall_ms.min(options.hard_max_wall_ms);
         }
     }
     if let Some(envelope) = args.get("envelope").and_then(Value::as_str) {
@@ -146,6 +240,14 @@ fn exec_codemode_tool(
         options.ref_first_budget = budget as usize;
     }
     let result = crate::execute_codemode_with_options(plan, options.clone());
+    // wqw.9: expand outcomes are recorded on the shared SurfaceHealth inside
+    // expand_with_params. Only substrate_down (no expand call) needs a bridge.
+    if matches!(result.status, crate::CodeModeStatus::Error) {
+        let kind = result.error.as_ref().map(|e| e.kind.as_str()).unwrap_or("");
+        if kind == "substrate_down" {
+            engine.surface_health().record_substrate_down();
+        }
+    }
     if codemode_envelope_version(args, &options) == "v1" {
         json_tool_response(name, codemode_contract_payload_v1(&result))
     } else {
@@ -533,14 +635,23 @@ pub(crate) fn dispatch_tool(
                 .and_then(Value::as_str)
                 .ok_or_else(|| "missing path".to_string())?;
             let edits = arg_edit_hunks(args)?;
-            engine.edit(
+            let mut resp = engine.edit(
                 Path::new(path),
                 &edits,
                 arg_bool(args, "create"),
                 arg_bool(args, "dry_run"),
                 arg_mode(args),
                 arg_u64(args, "max_visible_tokens").unwrap_or(4000),
-            )
+            );
+            // wqw.12: annotate mutation failures with write recovery ladder.
+            if resp.status == "error" {
+                if let Some(err) = resp.error.as_mut() {
+                    // Expand/read recovery health does not prove the write
+                    // substrate is down and must not authorize native Write.
+                    err.message = crate::annotate_write_failure(&err.message, false);
+                }
+            }
+            resp
         }
         "shell" => {
             let (command, argv) = arg_command(args)?;
@@ -620,6 +731,47 @@ pub(crate) fn dispatch_tool(
                     exact_ref_tokens: Some(0),
                 },
             )
+        }
+        "report_tool_issue" => {
+            let tool = arg_string_any(args, &["tool", "name", "tool_name", "surface"])
+                .map_err(JsonRpcErrorData::from)?;
+            let summary = arg_string_any(args, &["summary", "message", "title"])
+                .map_err(JsonRpcErrorData::from)?;
+            let detail = args
+                .get("detail")
+                .or_else(|| args.get("body"))
+                .or_else(|| args.get("repro"))
+                .or_else(|| args.get("context"))
+                .and_then(Value::as_str);
+            match crate::record_tool_issue(
+                &engine.config.cache_path,
+                tool,
+                summary,
+                detail,
+                Some(engine.session_id()),
+            ) {
+                Ok(report) => {
+                    let text = serde_json::to_string_pretty(&report).unwrap_or_default();
+                    ToolResponse::ok(
+                        "report_tool_issue",
+                        Mode::Structured,
+                        text.clone(),
+                        Vec::new(),
+                        Accounting {
+                            raw_tokens: count_tokens(&text),
+                            visible_tokens: count_tokens(&text),
+                            recovery_tokens: 0,
+                            exact_ref_tokens: Some(0),
+                        },
+                    )
+                }
+                Err(message) => ToolResponse::error(
+                    "report_tool_issue",
+                    "not_reportable",
+                    message,
+                    Some("use tool=zero_execute (or tz_execute_code / zero.token.*) for CodeMode failures".into()),
+                ),
+            }
         }
         "batch" => batch_response(engine, args)?,
         "fetch" => {
@@ -931,6 +1083,7 @@ fn canonical_tool(name: &str) -> &str {
     match name.strip_prefix("tz_").unwrap_or(name) {
         "cache-pack" => "cache_pack",
         "compact" => "compact",
+        "report-tool-issue" => "report_tool_issue",
         other => other,
     }
 }

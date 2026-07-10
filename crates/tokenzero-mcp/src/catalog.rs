@@ -23,6 +23,8 @@ pub(crate) const TOOL_ALIASES: &[(&str, &str)] = &[
     ("cache-pack", "tz_cache_pack"),
     ("rewrite", "tz_rewrite"),
     ("discover", "tz_discover"),
+    ("report_tool_issue", "tz_report_tool_issue"),
+    ("report-tool-issue", "tz_report_tool_issue"),
 ];
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -63,10 +65,32 @@ pub(crate) fn tool_specs_for_filter(
     include_aliases: bool,
     surface: McpToolSurface,
 ) -> Vec<ToolSpec> {
+    tool_specs_for_filter_with_health(cluster, include_aliases, surface, false)
+}
+
+/// Like [`tool_specs_for_filter`], with crash-only recovery tools advertised
+/// on CodeMode so MCP clients can discover them before health changes. Calls
+/// remain health-gated; the server declares `tools.listChanged=false`, so the
+/// list itself must stay stable for the session.
+pub(crate) fn tool_specs_for_filter_with_health(
+    cluster: Option<&str>,
+    include_aliases: bool,
+    surface: McpToolSurface,
+    _recovery_unlocked: bool,
+) -> Vec<ToolSpec> {
+    let includes = |name: &str| -> bool {
+        if surface_includes_canonical(surface, name) {
+            return true;
+        }
+        if surface == McpToolSurface::CodeMode {
+            return matches!(name, "expand" | "tz_expand" | "read" | "tz_read");
+        }
+        false
+    };
     let canonical = canonical_tool_specs();
     let mut specs = canonical
         .iter()
-        .filter(|seed| surface_includes_canonical(surface, seed.name))
+        .filter(|seed| includes(seed.name))
         .filter(|seed| cluster.is_none_or(|cluster| seed.cluster == cluster))
         .map(|seed| ToolSpec {
             name: seed.name.to_string(),
@@ -80,7 +104,7 @@ pub(crate) fn tool_specs_for_filter(
     }
 
     for &(alias, target) in TOOL_ALIASES {
-        if !surface_includes_canonical(surface, target) {
+        if !includes(target) {
             continue;
         }
         if let Some(seed) = canonical.iter().find(|seed| seed.name == target) {
@@ -118,10 +142,18 @@ pub(crate) fn surface_includes_canonical(surface: McpToolSurface, name: &str) ->
                 | "execute_code"
                 | "codemode_search"
                 | "codemode_describe"
+                | "report_tool_issue"
+                | "tz_report_tool_issue"
+                | "expand"
+                | "tz_expand"
+                | "read"
+                | "tz_read"
         ),
     }
 }
 
+/// Static surface membership (no health). Prefer engine crash-only gate for
+/// tools/call; this remains for FastMCP / docs that need the static matrix.
 pub(crate) fn canonical_allowed_on_surface(surface: McpToolSurface, canonical: &str) -> bool {
     surface_includes_canonical(surface, canonical)
 }
@@ -241,6 +273,7 @@ pub fn resource_specs() -> Vec<ResourceSpec> {
 }
 
 pub(crate) fn canonical_tool_specs() -> Vec<ToolSpecSeed> {
+    let hard_max_wall_ms = crate::CodeModeLimits::default().hard_max_wall_ms;
     vec![
         ToolSpecSeed {
             name: "tz_execute_code",
@@ -248,11 +281,11 @@ pub(crate) fn canonical_tool_specs() -> Vec<ToolSpecSeed> {
             summary: "Execute a TokenZero CodeMode recipe, JSON plan, or JavaScript plan.",
             doc: tool_description(
                 "Execute a CodeMode plan through the native TokenZero executor.",
-                "plan: source text. form: recipe, json, js, or auto. limits: optional integer overrides.",
+                "plan: source text. form: recipe, json, js, or auto. root/allowed_roots: bounded workspace selection. limits: optional integer overrides.",
                 "Use only when the server is launched with --mode=codemode.",
                 "Do keep visible results small; large outputs are stored behind refs.",
                 "Common mistakes: launching the server in default mcp mode; mixing per-op tools with CodeMode tools.",
-                "Read-only/mutation-denied over workspace state; execution records are persisted as refs.",
+                "May mutate only through explicit lowered operations such as zero.edit/zero.shell; free-form QuickJS mutation stays denied. Execution records are persisted as refs.",
             ),
             input_schema: json!({
                 "type": "object",
@@ -261,7 +294,29 @@ pub(crate) fn canonical_tool_specs() -> Vec<ToolSpecSeed> {
                 "properties": {
                     "plan": {"type": "string", "maxLength": 65536},
                     "form": {"type": "string", "enum": ["recipe", "json", "js", "auto"]},
-                    "limits": {"type": "object", "additionalProperties": {"type": "integer", "minimum": 0}}
+                    "root": {"type": "string", "description": "Execute root; must remain under the server allowlist."},
+                    "cwd": {"type": "string", "description": "Alias for root."},
+                    "workspace": {"type": "string", "description": "Alias for root."},
+                    "allowed_root": {
+                        "oneOf": [
+                            {"type": "string"},
+                            {"type": "array", "items": {"type": "string"}}
+                        ]
+                    },
+                    "allowed_roots": {
+                        "oneOf": [
+                            {"type": "string"},
+                            {"type": "array", "items": {"type": "string"}}
+                        ]
+                    },
+                    "limits": {
+                        "type": "object",
+                        "properties": {
+                            "max_wall_ms": {"type": "integer", "minimum": 0, "maximum": hard_max_wall_ms},
+                            "hard_max_wall_ms": {"type": "integer", "minimum": 0, "maximum": hard_max_wall_ms}
+                        },
+                        "additionalProperties": {"type": "integer", "minimum": 0}
+                    }
                 }
             }),
             arg_aliases: json!({}),
@@ -483,10 +538,10 @@ pub(crate) fn canonical_tool_specs() -> Vec<ToolSpecSeed> {
         ToolSpecSeed {
             name: "tz_expand",
             cluster: "material",
-            summary: "Recover exact bytes from a tz:// ref, optionally narrowed by line range, selector, or symbol.",
+            summary: "Recover exact bytes from a tz://, fz://, or gz:// ref, optionally narrowed by line range, selector, or symbol.",
             doc: tool_description(
-                "Recover exact content from `tz://` refs with optional ranges or anchors.",
-                "ref: copy a ref returned by read/find/tree/shell/ingest. selector/start_line/end_line: use only when narrowing recovery.",
+                "Recover exact content from `tz://`, `fz://`, or `gz://` refs (shared blob identity) with optional ranges or anchors.",
+                "ref: copy a ref returned by read/find/tree/shell/ingest or sibling ZeroStack engines. selector/start_line/end_line: use only when narrowing recovery.",
                 "Use whenever compact output omitted needed detail. NOT for arbitrary file paths; use `read`.",
                 "Do expand refs instead of re-running expensive commands. Do use line ranges for large file refs. Don't invent refs.",
                 "Common mistakes: passing `path` instead of `ref`; using stale refs from another workspace; expanding whole huge refs unnecessarily.",
@@ -554,6 +609,34 @@ pub(crate) fn canonical_tool_specs() -> Vec<ToolSpecSeed> {
             ),
             input_schema: no_args_schema(),
             arg_aliases: json!({}),
+        },
+        ToolSpecSeed {
+            name: "tz_report_tool_issue",
+            cluster: "execution",
+            summary: "Record a field issue against a CodeMode/TokenZero tool name (accepts zero_execute).",
+            doc: tool_description(
+                "Record a field issue for expand/root/shell/CodeMode failures without leaving the harness.",
+                "tool: reportable surface name (zero_execute, zerostack, tz_execute_code, zero.token.*, tz_* …). summary: short description. detail: optional context.",
+                "Use when CodeMode expand/root/shell fails and you need a durable field report. NOT for filing GitHub issues.",
+                "Do pass tool=zero_execute for unified ZeroStack CodeMode failures. Don't invent unlisted harness tool names.",
+                "Common mistakes: omitting tool or summary; using Browser/native-only names.",
+                "Idempotent per call (writes a new timestamped report file).",
+            ),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "tool": {"type": "string", "minLength": 1, "description": "Tool/surface name (zero_execute accepted)."},
+                    "summary": {"type": "string", "minLength": 1, "description": "Short issue summary."},
+                    "detail": {"type": "string", "description": "Optional detail / repro."}
+                },
+                "required": ["tool", "summary"],
+                "additionalProperties": true
+            }),
+            arg_aliases: json!({
+                "tool": ["name", "tool_name", "surface"],
+                "summary": ["message", "title"],
+                "detail": ["body", "repro", "context"]
+            }),
         },
     ]
 }
@@ -672,6 +755,48 @@ fn fresh_property() -> Value {
         "default": false,
         "description": "Bypass session dedup/diff for this call and always return the full render."
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn codemode_recovery_tools_are_stably_advertised() {
+        let healthy =
+            tool_specs_for_filter_with_health(None, true, McpToolSurface::CodeMode, false);
+        let unhealthy =
+            tool_specs_for_filter_with_health(None, true, McpToolSurface::CodeMode, true);
+        let healthy_names = healthy.iter().map(|spec| &spec.name).collect::<Vec<_>>();
+        let unhealthy_names = unhealthy.iter().map(|spec| &spec.name).collect::<Vec<_>>();
+        assert_eq!(healthy_names, unhealthy_names);
+        assert!(
+            healthy_names
+                .iter()
+                .any(|name| name.as_str() == "tz_expand")
+        );
+        assert!(healthy_names.iter().any(|name| name.as_str() == "tz_read"));
+        assert!(surface_includes_canonical(
+            McpToolSurface::CodeMode,
+            "tz_expand"
+        ));
+    }
+
+    #[test]
+    fn execute_schema_exposes_bounded_root_and_wall_controls() {
+        let specs = canonical_tool_specs();
+        let execute = specs
+            .iter()
+            .find(|spec| spec.name == "tz_execute_code")
+            .unwrap();
+        let properties = &execute.input_schema["properties"];
+        assert!(properties.get("root").is_some());
+        assert!(properties.get("allowed_roots").is_some());
+        assert_eq!(
+            properties["limits"]["properties"]["hard_max_wall_ms"]["maximum"].as_u64(),
+            Some(crate::CodeModeLimits::default().hard_max_wall_ms)
+        );
+    }
 }
 
 fn read_schema() -> Value {
@@ -842,13 +967,13 @@ fn text_schema(description: &str) -> Value {
 fn expand_schema() -> Value {
     object_schema(
         json!({
-            "ref": {"type": "string", "pattern": "^tz://", "description": "Exact recovery ref returned by a TokenZero tool."},
+            "ref": {"type": "string", "pattern": "^(tz|fz|gz)://", "description": "Exact recovery ref (tz://, fz://, or gz:// — shared blob identity)."},
             "selector": {"type": "string", "description": "Recovery-store-specific selector."},
             "start_line": line_property(),
             "end_line": line_property(),
             "anchor_kind": {"type": "string", "description": "Anchor kind for symbol-aware recovery."},
             "symbol": {"type": "string", "description": "Symbol name for symbol-aware recovery."},
-            "since": {"type": "string", "pattern": "^tz://", "description": "tz:// ref baseline for unified diff; errors if not recoverable."},
+            "since": {"type": "string", "pattern": "^(tz|fz|gz)://", "description": "tz/fz/gz ref baseline for unified diff; errors if not recoverable."},
             "fresh": fresh_property()
         }),
         &["ref"],

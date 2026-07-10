@@ -3,6 +3,7 @@
 // import what they need directly after the impl split.
 #![allow(unused_imports)]
 
+mod binary_resolve;
 mod cache_maintenance;
 mod cache_pack;
 mod catalog;
@@ -29,14 +30,22 @@ mod metrics;
 mod paths;
 mod recall;
 mod render;
+mod report_tool;
 mod resources;
 mod session;
 mod session_persist;
 mod stdio;
 mod supervisor;
+mod surface_health;
 mod tools;
 mod workspace;
+mod write_ladder;
 
+pub use binary_resolve::{
+    BinaryResolution, TOKENZERO_BIN_ENV, TOKENZERO_CURL_PATH_ENV, TOKENZERO_RG_PATH_ENV,
+    engine_binaries_json, resolve_all_engine_binaries, resolve_curl_binary, resolve_rg_binary,
+    resolve_tokenzero_binary,
+};
 pub use cache_maintenance::{cache_maintenance, session_pack, shell_spill_dir};
 pub use catalog::{ResourceSpec, ToolSpec, resource_specs, tool_specs};
 pub use codemode::{
@@ -46,8 +55,19 @@ pub use codemode::{
 pub use fastmcp_mode::{fastmcp_codemode_instructions, fastmcp_instructions, run_fastmcp_stdio};
 pub use jsonrpc::handle_jsonrpc;
 pub use render::{cli_json, render_text};
+pub use report_tool::{build_tool_issue_report, is_reportable_tool_name, record_tool_issue};
 pub use stdio::run_stdio;
 pub use supervisor::run_supervised_stdio;
+pub use workspace::{
+    SHARED_STORE_OPT_IN_ENVS, STORE_ROOT_ENVS, StoreResolutionReport, allowed_roots_for_workspace,
+    default_allowed_roots, default_recovery_cache_path, resolve_recovery_cache_path,
+    resolve_recovery_cache_path_with_env, resolve_store_root_with_env,
+    shared_store_opt_in_from_env, store_is_under_project_root, store_resolution_json,
+    store_resolution_report, store_resolution_report_with_env, tokenzero_work_root,
+};
+pub use write_ladder::{
+    WRITE_ESCAPE_ENV, WRITE_RECOVERY_LADDER, annotate_write_failure, write_escape_ack_active,
+};
 
 use cache_pack::{
     cache_pack_manifest_path, cache_pack_sources, previous_cache_digest, read_line_range_from_file,
@@ -151,6 +171,9 @@ pub struct TokenZeroEngine {
     metrics: metrics::ToolMetrics,
     /// Disk-backed seen-set; `None` when session dedup is off.
     session_persist: Option<session_persist::SessionPersistence>,
+    /// Expand/read surface health + crash-only recovery unlock (wqw.9).
+    /// Shared with CodeMode plan engines so expand outcomes update the same gate.
+    surface_health: std::sync::Arc<surface_health::SurfaceHealth>,
 }
 
 #[cfg(test)]

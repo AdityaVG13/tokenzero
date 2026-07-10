@@ -63,7 +63,7 @@ diff hunks, prompts, and status hazards remain visible or have exact refs.
 
 ## Expand
 
-`tokenzero expand <ref>` recovers exact payloads, ranges, search hits, anchors, summaries, and symbols from `tz://` refs. Exact refs are not counted as model-readable context until expanded.
+`tokenzero expand <ref>` recovers exact payloads, ranges, search hits, anchors, summaries, and symbols from `tz://`, `fz://`, or `gz://` refs (shared content-addressed blob identity across ZeroStack engines). Exact refs are not counted as model-readable context until expanded.
 
 Selectors support raw, `error_block`, `summary`, `lines:N-M`, `around:N:R`, `anchor:<kind>`, and `symbol:<name>`. Batch recovery uses multiple refs or `--refs-from`:
 
@@ -72,6 +72,10 @@ tokenzero expand tz://file/<id> --lines 20-40
 tokenzero expand tz://file/<id> --around 55:5
 tokenzero expand --refs-from refs.txt --summary --json
 ```
+
+### Crash-only recovery ladder (CodeMode)
+
+On `--mode=codemode`, per-op tools stay crash-only while the primary surface is healthy. Prefer `zero.token.expand` inside `tz_execute_code`. If expand returns X0 or the substrate is down, surface health unlocks **only** `tz_expand` / `tz_read` (and CLI `tokenzero expand` / `tokenzero read`) so agents recover bytes without native Read. Write/shell stay locked. After a successful expand, recovery re-locks. Telemetry: `resource://tokenzero/metrics` → `surface_health` (`blocked_count` / `unlocked_count`). Never claim "primary surface healthy" after expand X0.
 
 ## Ingest
 
@@ -87,6 +91,20 @@ Kind hints include `shell`, `diff`, `log`, `markdown`, `json`, `code`, `pack`, `
 ## Cache And Pulse
 
 Core uses bounded local recovery state. Pulse records counts, refs, cache flags, latency, and health flags. It does not record raw payloads by default. Exact, digest, capsule, and Pulse cache state can be inspected and cleared explicitly without starting a daemon.
+
+### Multi-project store isolation (wqw.2)
+
+Default recovery / CodeMode store paths are **per call root**, not a process-global pin:
+
+1. If `root/.zerostack` exists → use `root/.zerostack/tokenzero/...`.
+2. Else if **shared-store opt-in** is on and `ZEROSTACK_STORE_ROOT` (or `ZERO_STACK_STORE_ROOT`) is set → use that shared/meta store.
+3. Else → legacy `root/.tokenzero/...`.
+
+**Shared store is opt-in only.** Set `TOKENZERO_SHARED_STORE=1` or `ZEROSTACK_SHARED_STORE=1` (`on`/`true`/`yes` also work) to honor a global `ZEROSTACK_STORE_ROOT` pin for meta-workspaces. Without opt-in, a set `ZEROSTACK_STORE_ROOT` is **ignored** so unrelated projects never collate recovery caches.
+
+Precedence above defaults: explicit `--cache-path` / `TOKENZERO_CACHE_PATH`.
+
+`tokenzero doctor --json` reports `store_resolution` / `effective_cache_path` and emits findings when a global pin is ignored or when shared opt-in places the store outside the project root.
 
 `tokenzero cache-pack --scope agent --json` builds a daemonless prompt-cache
 pack from stable instruction files, docs, repo map, and MCP tool schema. The

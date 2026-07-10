@@ -176,7 +176,8 @@ pub fn fastmcp_instructions() -> &'static str {
 /// CodeMode-mode instruction text for FastMCP .instructions().
 pub fn fastmcp_codemode_instructions() -> &'static str {
     "TokenZero CodeMode surface. Tools: tz_execute_code, tz_codemode_search, \
-     tz_codemode_describe (plus execute_code/codemode_search/codemode_describe aliases). \
+     tz_codemode_describe, tz_report_tool_issue, plus crash-only tz_expand/tz_read. \
+     Recovery tools are listed but policy-gated while the primary surface is healthy. \
      Write plans against the `zero` surface. Use tz_codemode_describe name=capabilities \
      for the full contract manifest. \
      Per-op MCP tools (read, find, shell, etc.) are unavailable in this mode."

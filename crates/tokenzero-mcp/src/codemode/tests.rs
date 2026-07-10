@@ -1,5 +1,6 @@
 use super::exec::{
-    exec_edit, execute_codemode, execute_codemode_with_options, make_engine_for_root,
+    exec_edit, execute_codemode, execute_codemode_with_options, limits_from_options,
+    make_engine_for_root, resolve_paths_against_work_root,
 };
 use super::parser::{Statement, parse_expr, parse_plan, resolve_expr};
 use super::result::{CodeModeOptions, CodeModeResult, CodeModeStatus};
@@ -612,21 +613,43 @@ fn describe_token_namespace_returns_signature() {
 }
 
 #[test]
-fn codemode_engine_uses_codemode_recovery_cache_and_repo_scope() {
+fn codemode_engine_uses_shared_recovery_cache_and_repo_scope() {
+    // wqw.8: codemode default store must match CLI expand (recovery-cache.json).
     let root = PathBuf::from("/tmp/tokenzero-codemode-root");
     let engine = make_engine_for_root(root.clone());
     assert_eq!(engine.config.allowed_roots, vec![root.clone()]);
     assert_eq!(
         engine.config.cache_path,
-        crate::workspace::default_codemode_recovery_cache_path(&root)
+        crate::workspace::default_recovery_cache_path(&root)
     );
     assert!(
         engine
             .config
             .cache_path
             .to_string_lossy()
-            .contains("codemode-recovery.json")
+            .contains("recovery-cache.json"),
+        "{}",
+        engine.config.cache_path.display()
     );
+}
+
+#[test]
+fn caller_soft_wall_cannot_raise_hard_wall() {
+    let limits = limits_from_options(&CodeModeOptions {
+        max_wall_ms: 60_000,
+        hard_max_wall_ms: 5_000,
+        ..Default::default()
+    });
+    assert_eq!(limits.max_wall_ms, 5_000);
+    assert_eq!(limits.hard_max_wall_ms, 5_000);
+
+    let trusted = limits_from_options(&CodeModeOptions {
+        max_wall_ms: 60_000,
+        hard_max_wall_ms: 60_000,
+        ..Default::default()
+    });
+    assert_eq!(trusted.max_wall_ms, 60_000);
+    assert_eq!(trusted.hard_max_wall_ms, 60_000);
 }
 
 #[test]
@@ -643,7 +666,7 @@ fn edit_rejects_partially_invalid_hunks_without_writing() {
         ]),
     ];
 
-    let err = exec_edit(&engine, &args).unwrap_err();
+    let err = exec_edit(&engine, dir.path(), &args).unwrap_err();
     assert!(
         err.error
             .as_deref()
@@ -656,19 +679,28 @@ fn edit_rejects_partially_invalid_hunks_without_writing() {
 }
 
 #[test]
-fn edit_reports_zero_hunks_applied_on_engine_error() {
+fn edit_failure_includes_write_recovery_ladder() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("sample.txt");
     fs::write(&path, "hello\n").unwrap();
     let engine = make_engine_for_root(dir.path().to_path_buf());
+    engine.surface_health().record_substrate_down();
     let args = vec![
         serde_json::json!(path.to_string_lossy().to_string()),
         serde_json::json!([{ "find": "missing", "replace": "bye" }]),
     ];
 
-    let outcome = exec_edit(&engine, &args).unwrap();
-    assert_eq!(outcome.as_value()["status"], "error");
-    assert_eq!(outcome.as_value()["hunks_applied"], 0);
+    // wqw.12: mutation failures surface a recovery ladder (not only "use CodeMode").
+    let err = exec_edit(&engine, dir.path(), &args).unwrap_err();
+    let msg = err.error.as_deref().unwrap_or("");
+    assert!(
+        msg.contains("Write recovery ladder") || msg.contains("tz_report_tool_issue"),
+        "expected write ladder in error: {msg}"
+    );
+    assert!(
+        !msg.contains("write_escape_ack"),
+        "expand/read health must not authorize native writes: {msg}"
+    );
     assert_eq!(fs::read_to_string(&path).unwrap(), "hello\n");
 }
 
@@ -714,6 +746,63 @@ fn expand_without_tz_prefix_is_rejected() {
     let r = execute_codemode(r#"await zero.expand("not-a-ref")"#);
     assert_eq!(r.status, CodeModeStatus::Error);
     assert!(r.error.as_ref().unwrap().contains("tz://"));
+}
+
+#[test]
+fn expand_cross_scheme_fz_blob_in_one_plan() {
+    // wqw.1 Verify: mint via compact, expand via fz:// rewrite of same id in ONE plan.
+    // Exact expand unwraps to the raw payload string (not {text: ...}).
+    let plan = r#"
+        const data = await zero.compact("codemode cross-scheme body");
+        const id = String(data.ref).replace("tz://blob/", "");
+        const via_fz = "fz://blob/" + id;
+        const via_gz = "gz://blob/" + id;
+        const a = await zero.expand(via_fz);
+        const b = await zero.expand(via_gz);
+        return {
+            tz: data.ref,
+            fz_text: a,
+            gz_text: b,
+            match: a === b && String(a).includes("cross-scheme")
+        }
+    "#;
+    let r = execute_codemode(plan);
+    assert_eq!(r.status, CodeModeStatus::Completed, "{:?}", r.error);
+    let val = r.value.unwrap();
+    assert_eq!(val["match"], true, "{val}");
+    assert!(
+        val["fz_text"]
+            .as_str()
+            .unwrap()
+            .contains("codemode cross-scheme body"),
+        "{val}"
+    );
+}
+
+#[test]
+fn windowed_expand_same_session_codemode_blob() {
+    // zq9: same-session codemode blob is window-expandable (shared cache_path).
+    let plan = r#"
+        const lines = Array.from({length: 200}, (_, i) => "line-" + (i + 1)).join("\n") + "\n";
+        const data = await zero.compact(lines);
+        const win = await zero.expand(data.ref, { start_line: 120, end_line: 190 });
+        const text = typeof win === "string" ? win : (win && win.text) || "";
+        return {
+            ref: data.ref,
+            starts: String(text).startsWith("line-120"),
+            has190: String(text).includes("line-190"),
+            no119: !String(text).includes("line-119"),
+            no191: !String(text).includes("line-191"),
+            text
+        }
+    "#;
+    let r = execute_codemode(plan);
+    assert_eq!(r.status, CodeModeStatus::Completed, "{:?}", r.error);
+    let val = r.value.unwrap();
+    assert_eq!(val["starts"], true, "{val}");
+    assert_eq!(val["has190"], true, "{val}");
+    assert_eq!(val["no119"], true, "{val}");
+    assert_eq!(val["no191"], true, "{val}");
 }
 
 #[test]
@@ -1095,6 +1184,8 @@ fn parity_shell_plan_vs_direct_identical_capture() {
 
 #[test]
 fn parity_edit_plan_vs_direct_identical_result() {
+    // wqw.12: zero.edit is a first-class binding (no longer hard policy-denied).
+    // Both direct and plan forms must complete and mutate files identically.
     let work = tempfile::tempdir().unwrap();
     let path1 = work.path().join("a.txt");
     let path2 = work.path().join("b.txt");
@@ -1102,6 +1193,7 @@ fn parity_edit_plan_vs_direct_identical_result() {
     fs::write(&path2, "hello world").unwrap();
     let opts = CodeModeOptions {
         root: Some(work.path().to_path_buf()),
+        cache_path: Some(work.path().join(".tokenzero/recovery-cache.json")),
         ..Default::default()
     };
 
@@ -1119,12 +1211,34 @@ fn parity_edit_plan_vs_direct_identical_result() {
         opts.clone(),
     );
 
-    assert_eq!(direct.status, CodeModeStatus::Error);
-    assert_eq!(plan.status, CodeModeStatus::Error);
-    assert_eq!(direct.error.as_ref().unwrap().kind, "policy");
-    assert_eq!(plan.error.as_ref().unwrap().kind, "policy");
-    assert_eq!(fs::read_to_string(&path1).unwrap(), "hello world");
-    assert_eq!(fs::read_to_string(&path2).unwrap(), "hello world");
+    assert_eq!(
+        direct.status,
+        CodeModeStatus::Completed,
+        "direct edit: {:?}",
+        direct.error
+    );
+    assert_eq!(
+        plan.status,
+        CodeModeStatus::Completed,
+        "plan edit: {:?}",
+        plan.error
+    );
+    assert_eq!(fs::read_to_string(&path1).unwrap(), "goodbye world");
+    assert_eq!(fs::read_to_string(&path2).unwrap(), "goodbye world");
+}
+
+#[test]
+fn quickjs_freeform_edit_denied_includes_write_ladder() {
+    // Arrow / free-form JS still hits sandbox mutation deny, but must include
+    // the write recovery ladder (wqw.12) so agents are not stuck.
+    let r = execute_codemode("const f = () => zero.edit('file.txt', []); return f();");
+    assert_eq!(r.status, CodeModeStatus::Error);
+    let msg = r.error.as_ref().map(|e| e.message.as_str()).unwrap_or("");
+    assert!(msg.contains("sandbox"), "{msg}");
+    assert!(
+        msg.contains("Write recovery ladder") || msg.contains("tz_report_tool_issue"),
+        "expected ladder: {msg}"
+    );
 }
 
 // --- New helper tests ---
@@ -1246,4 +1360,145 @@ fn alias_rewrites_skip_string_literals_and_identifier_tails() {
         lowered.contains("zero.token.compact(x)") && !lowered.contains("zero.zero."),
         "double prefix: {lowered}"
     );
+}
+
+#[test]
+fn foreign_root_token_read_relative_and_absolute() {
+    // wqw.5: execute root becomes the allowlist base; relative + absolute under
+    // that root succeed; outside is denied.
+    let foreign = tempfile::tempdir().unwrap();
+    let changelog = foreign.path().join("CHANGELOG.md");
+    std::fs::write(&changelog, "# foreign changelog\nwqw5-marker\n").unwrap();
+    let outside = tempfile::tempdir().unwrap();
+    std::fs::write(outside.path().join("secret.txt"), "nope\n").unwrap();
+
+    let result = execute_codemode_with_options(
+        r#"return await zero.token.read("CHANGELOG.md")"#,
+        CodeModeOptions {
+            root: Some(foreign.path().to_path_buf()),
+            allowed_roots: vec![],
+            cache_path: Some(foreign.path().join(".tokenzero/recovery-cache.json")),
+            ..Default::default()
+        },
+    );
+    assert_eq!(
+        result.status,
+        CodeModeStatus::Completed,
+        "{:?}",
+        result.error
+    );
+    let text = serde_json::to_string(&result.value).unwrap_or_default();
+    assert!(
+        text.contains("wqw5-marker") || result.to_line().contains("wqw5-marker"),
+        "relative read under foreign root: {:?}",
+        result
+    );
+
+    let abs = changelog.display().to_string().replace('\\', "\\\\");
+    let plan_abs = format!(r#"return await zero.token.read("{abs}")"#);
+    let abs_result = execute_codemode_with_options(
+        &plan_abs,
+        CodeModeOptions {
+            root: Some(foreign.path().to_path_buf()),
+            allowed_roots: vec![],
+            cache_path: Some(foreign.path().join(".tokenzero/recovery-cache.json")),
+            ..Default::default()
+        },
+    );
+    assert_eq!(
+        abs_result.status,
+        CodeModeStatus::Completed,
+        "absolute under root: {:?}",
+        abs_result.error
+    );
+
+    let outside_file = outside.path().join("secret.txt");
+    let outside_plan = format!(
+        r#"return await zero.token.read("{}")"#,
+        outside_file.display().to_string().replace('\\', "\\\\")
+    );
+    let denied = execute_codemode_with_options(
+        &outside_plan,
+        CodeModeOptions {
+            root: Some(foreign.path().to_path_buf()),
+            allowed_roots: vec![],
+            cache_path: Some(foreign.path().join(".tokenzero/recovery-cache.json")),
+            ..Default::default()
+        },
+    );
+    assert_eq!(denied.status, CodeModeStatus::Error, "outside must deny");
+    let err = denied
+        .error
+        .as_ref()
+        .map(|e| e.message.clone())
+        .unwrap_or_default();
+    assert!(
+        err.contains("outside allowed roots") || err.to_ascii_lowercase().contains("not allowed"),
+        "deny message: {err}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn relative_shell_cwd_is_anchored_to_execute_root() {
+    let root = tempfile::tempdir().unwrap();
+    let extra = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(root.path().join("sub")).unwrap();
+    std::fs::create_dir_all(extra.path().join("sub")).unwrap();
+
+    let result = execute_codemode_with_options(
+        r#"return await zero.shell("pwd", { cwd: "sub" })"#,
+        CodeModeOptions {
+            root: Some(root.path().to_path_buf()),
+            allowed_roots: vec![extra.path().to_path_buf()],
+            cache_path: Some(root.path().join(".tokenzero/recovery-cache.json")),
+            ..Default::default()
+        },
+    );
+    assert_eq!(
+        result.status,
+        CodeModeStatus::Completed,
+        "{:?}",
+        result.error
+    );
+    let rendered = serde_json::to_string(&result.value).unwrap_or_default();
+    let expected = root.path().join("sub").display().to_string();
+    assert!(
+        rendered.contains(expected.as_str()),
+        "relative cwd escaped execute root: {rendered}"
+    );
+}
+
+#[test]
+fn default_root_token_read_still_works() {
+    let work = tempfile::tempdir().unwrap();
+    std::fs::write(work.path().join("README.md"), "default-root-ok\n").unwrap();
+    let result = execute_codemode_with_options(
+        r#"return await zero.token.read("README.md")"#,
+        CodeModeOptions {
+            root: Some(work.path().to_path_buf()),
+            cache_path: Some(work.path().join(".tokenzero/recovery-cache.json")),
+            ..Default::default()
+        },
+    );
+    assert_eq!(
+        result.status,
+        CodeModeStatus::Completed,
+        "{:?}",
+        result.error
+    );
+}
+
+#[test]
+fn resolve_paths_against_work_root_joins_relative() {
+    let root = std::path::PathBuf::from("/tmp/foreign-proj");
+    let resolved = resolve_paths_against_work_root(
+        vec![
+            std::path::PathBuf::from("CHANGELOG.md"),
+            std::path::PathBuf::from("/abs/file.txt"),
+        ],
+        &root,
+    );
+    assert_eq!(resolved[0], root.join("CHANGELOG.md"));
+    assert_eq!(resolved[1], std::path::PathBuf::from("/abs/file.txt"));
 }

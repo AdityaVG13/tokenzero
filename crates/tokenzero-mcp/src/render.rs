@@ -2,10 +2,16 @@ use crate::*;
 
 pub(crate) fn expansion_response(result: ExpansionResult, recovery_tokens: usize) -> ToolResponse {
     if !result.found {
+        // Always include the full requested ref in the error message — never
+        // truncate mid-hash (field: truncated refs made agents invent new ids).
+        let full_ref = &result.ref_id;
+        let is_window_oob = result.reason.starts_with("window-out-of-range");
         return ToolResponse::error(
             "expand",
             if result.reason.starts_with("ref-not-found") || result.reason == "dangling-ref" {
                 "ref_not_found"
+            } else if is_window_oob {
+                "window_out_of_range"
             } else {
                 match result.reason.as_str() {
                     "stale-ref" => "ref_stale",
@@ -14,17 +20,30 @@ pub(crate) fn expansion_response(result: ExpansionResult, recovery_tokens: usize
                 }
             },
             if result.reason.starts_with("ref-not-found") {
-                result.reason.clone()
+                format!("{} (ref: {full_ref})", result.reason)
+            } else if is_window_oob {
+                format!("{} (ref: {full_ref})", result.reason)
             } else {
                 match result.reason.as_str() {
-                    "stale-ref" => "ref is no longer recoverable".to_string(),
-                    "dangling-ref" => "ref is not present in the recovery cache".to_string(),
-                    "invalid-ref" => "ref is not a valid tz:// recovery handle".to_string(),
-                    "decode-failed" => "ref was found but could not be decoded".to_string(),
-                    _ => "ref expansion failed".to_string(),
+                    "stale-ref" => format!("ref is no longer recoverable: {full_ref}"),
+                    "dangling-ref" => {
+                        format!("ref is not present in the recovery cache: {full_ref}")
+                    }
+                    "invalid-ref" => format!(
+                        "ref is not a valid tz://, fz://, or gz:// recovery handle: {full_ref}"
+                    ),
+                    "decode-failed" => {
+                        format!("ref was found but could not be decoded: {full_ref}")
+                    }
+                    _ => format!("ref expansion failed: {full_ref}"),
                 }
             },
-            Some("rerun the original read/find/tree/shell command".to_string()),
+            Some(if is_window_oob {
+                "choose start_line/end_line within the stored payload line count (1-based inclusive)"
+                    .to_string()
+            } else {
+                "rerun the original read/find/tree/shell command".to_string()
+            }),
         );
     }
     ToolResponse::ok(

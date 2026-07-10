@@ -125,3 +125,152 @@ fn tool_metrics_persist_across_engine_instances() {
         "a fresh process starts with empty session counters"
     );
 }
+
+#[test]
+fn report_tool_issue_accepts_zero_execute_via_mcp_dispatch() {
+    use tokenzero_core::McpToolSurface;
+    let dir = tempdir().unwrap();
+    let mut config = EngineConfig::for_root(dir.path());
+    config.tool_surface = McpToolSurface::Classic;
+    let engine = TokenZeroEngine::new(config);
+    let ok = call_tool(
+        &engine,
+        "report_tool_issue",
+        &json!({
+            "tool": "zero_execute",
+            "summary": "expand X0 for fz blob under foreign root",
+            "detail": "wqw.6 field"
+        }),
+        None,
+    )
+    .expect("zero_execute must be reportable");
+    let text = ok.to_string();
+    assert!(
+        text.contains("accepted") || text.contains("zero_execute"),
+        "{text}"
+    );
+    assert!(crate::is_reportable_tool_name("zero_execute"));
+    assert!(crate::is_reportable_tool_name("zerostack"));
+    assert!(crate::is_reportable_tool_name("tz_execute_code"));
+}
+
+#[test]
+fn classic_surface_rejects_tz_execute_code() {
+    use tokenzero_core::McpToolSurface;
+    let dir = tempdir().unwrap();
+    let mut config = EngineConfig::for_root(dir.path());
+    config.tool_surface = McpToolSurface::Classic;
+    let engine = TokenZeroEngine::new(config);
+    let err = call_tool(
+        &engine,
+        "tz_execute_code",
+        &json!({ "plan": "return 1" }),
+        None,
+    )
+    .expect_err("Classic must not dispatch CodeMode execute");
+    let msg = err.message_text();
+    assert!(
+        msg.contains("unknown") || msg.to_ascii_lowercase().contains("tz_execute_code"),
+        "{msg}"
+    );
+}
+
+#[test]
+fn codemode_report_tool_issue_is_not_permanently_locked() {
+    use tokenzero_core::McpToolSurface;
+    let dir = tempdir().unwrap();
+    let mut config = EngineConfig::for_root(dir.path());
+    config.tool_surface = McpToolSurface::CodeMode;
+    let engine = TokenZeroEngine::new(config);
+    let ok = call_tool(
+        &engine,
+        "tz_report_tool_issue",
+        &json!({
+            "tool": "zero_execute",
+            "summary": "codemode field report must be accepted"
+        }),
+        None,
+    )
+    .expect("report_tool_issue must be NotGated on CodeMode");
+    assert!(ok.to_string().contains("accepted") || ok.to_string().contains("zero_execute"));
+}
+
+#[test]
+fn mcp_execute_root_cannot_escape_server_allowlist() {
+    use tokenzero_core::McpToolSurface;
+    let server = tempdir().unwrap();
+    let foreign = tempdir().unwrap();
+    std::fs::write(
+        foreign.path().join("secret.txt"),
+        "ALLOWLIST-BYPASS-MARKER\n",
+    )
+    .unwrap();
+    let mut config = EngineConfig::for_root(server.path());
+    config.tool_surface = McpToolSurface::CodeMode;
+    let engine = TokenZeroEngine::new(config);
+    let err = call_tool(
+        &engine,
+        "tz_execute_code",
+        &json!({
+            "plan": "return zero.read('secret.txt')",
+            "root": foreign.path().display().to_string()
+        }),
+        None,
+    )
+    .expect_err("foreign root must be refused");
+    let msg = err.message_text();
+    assert!(
+        msg.contains("path_not_allowed") || msg.contains("outside"),
+        "{msg}"
+    );
+}
+
+#[test]
+fn plan_string_expand_does_not_unlock_without_expand_op() {
+    use tokenzero_core::McpToolSurface;
+    let dir = tempdir().unwrap();
+    let mut config = EngineConfig::for_root(dir.path());
+    config.tool_surface = McpToolSurface::CodeMode;
+    let engine = TokenZeroEngine::new(config);
+    assert!(engine.surface_health().is_healthy());
+    let _ = call_tool(
+        &engine,
+        "tz_execute_code",
+        &json!({
+            "plan": "const note = \"please expand later\"; throw new Error(\"boom\")"
+        }),
+        None,
+    );
+    assert!(
+        engine.surface_health().is_healthy(),
+        "plan text mentioning expand must not unlock recovery"
+    );
+}
+
+#[test]
+fn shared_health_unlocks_after_plan_expand_miss() {
+    use tokenzero_core::McpToolSurface;
+    let dir = tempdir().unwrap();
+    let mut config = EngineConfig::for_root(dir.path());
+    config.tool_surface = McpToolSurface::CodeMode;
+    let engine = TokenZeroEngine::new(config);
+    assert!(engine.surface_health().is_healthy());
+    let _ = call_tool(
+        &engine,
+        "tz_execute_code",
+        &json!({
+            "plan": "return await zero.expand(\"tz://blob/nonexistent123\")"
+        }),
+        None,
+    );
+    assert!(
+        !engine.surface_health().is_healthy(),
+        "expand miss inside plan must update shared session health"
+    );
+    assert!(
+        engine
+            .surface_health()
+            .allow_tool_call(McpToolSurface::CodeMode, "tz_expand")
+            .is_ok()
+    );
+}

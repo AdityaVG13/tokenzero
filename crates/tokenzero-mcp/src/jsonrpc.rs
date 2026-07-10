@@ -1,7 +1,7 @@
 use serde_json::{Value, json};
 use tokenzero_core::{MCP_SCHEMA_VERSION, McpToolSurface};
 
-use crate::catalog::{canonical_allowed_on_surface, tool_cluster_names, tool_specs_for_filter};
+use crate::catalog::{tool_cluster_names, tool_specs_for_filter_with_health};
 use crate::{TokenZeroEngine, call_tool, read_resource, resource_specs, tool_specs};
 
 const DEFAULT_PROTOCOL_VERSION: &str = "2025-06-18";
@@ -290,10 +290,12 @@ fn handle_jsonrpc_request(engine: &TokenZeroEngine, parsed: Value) -> Option<Val
                 Ok(filter) => filter,
                 Err(error) => return Some(jsonrpc_invalid_params_error(id, error)),
             };
-            let tools = tool_specs_for_filter(
+            let recovery_unlocked = engine.surface_health().recovery_unlocked();
+            let tools = tool_specs_for_filter_with_health(
                 filter.cluster.as_deref(),
                 filter.include_aliases,
                 engine.config.tool_surface,
+                recovery_unlocked,
             );
             let tool_count = tools.len();
             json!({
@@ -865,6 +867,29 @@ impl JsonRpcErrorData {
                 "suggestions": suggestions,
                 "suggested_tool_calls": [
                     {"method": "tools/list", "params": {}}
+                ]
+            }),
+        }
+    }
+
+    /// Crash-only / surface-health policy refusal (wqw.9). Distinct from
+    /// unknown_tool so agents see the recovery ladder instead of "not found".
+    pub(crate) fn policy_refusal(name: &str, message: String) -> Self {
+        Self {
+            value: json!({
+                "kind": "policy_refusal",
+                "error_type": "POLICY",
+                "message": message,
+                "recoverable": true,
+                "entity_type": "tool",
+                "provided": name,
+                "tool": name,
+                "reason": message,
+                "fix_hint": "When primary surface is healthy use zero.token.* via tz_execute_code. After expand X0, tz_expand/tz_read unlock for recovery only.",
+                "policy": "crash_only_recovery",
+                "suggested_tool_calls": [
+                    {"method": "tools/call", "params": {"name": "tz_execute_code", "arguments": {"plan": "return await zero.token.expand('<ref>')"}}},
+                    {"method": "resources/read", "params": {"uri": "resource://tokenzero/metrics"}}
                 ]
             }),
         }

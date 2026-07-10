@@ -11,7 +11,7 @@ use tokenzero_core::{Mode, ToolResponse, count_tokens, detect_content_type};
 use tokenzero_filters::{discover, rewrite_command};
 
 use crate::workspace::{
-    allowed_roots_for_workspace, default_codemode_recovery_cache_path, tokenzero_work_root,
+    allowed_roots_for_workspace, resolve_recovery_cache_path, tokenzero_work_root,
 };
 use crate::{EditHunk, EngineConfig, TokenZeroEngine, shell_timeout_from_secs};
 
@@ -71,18 +71,29 @@ pub(crate) fn make_engine_for_root(root: PathBuf) -> TokenZeroEngine {
 }
 
 fn make_engine_for_root_with_options(root: PathBuf, options: &CodeModeOptions) -> TokenZeroEngine {
-    let cache_path = options
-        .cache_path
-        .clone()
-        .unwrap_or_else(|| default_codemode_recovery_cache_path(&root));
-    TokenZeroEngine::new(EngineConfig {
+    // Same default store as CLI expand / MCP (wqw.8): refs minted by codemode
+    // must expand on the next call without re-running the producer. Explicit
+    // --cache-path / CodeModeOptions.cache_path still override.
+    let cache_path = options.cache_path.clone().map_or_else(
+        || resolve_recovery_cache_path(&root, None),
+        |path| resolve_recovery_cache_path(&root, Some(path)),
+    );
+    let config = EngineConfig {
         allowed_roots: allowed_roots_for_workspace(&root, &options.allowed_roots),
         cache_path,
         max_visible_tokens: options.max_visible_tokens,
         mode: Mode::Auto,
         shell_timeout: shell_timeout_from_secs(options.timeout_seconds),
         ..EngineConfig::for_root(&root)
-    })
+    };
+    // Share session crash-only health when the MCP call path provided one so
+    // expand X0 inside a plan unlocks tz_expand on the same gate (wqw.9).
+    match &options.surface_health {
+        Some(health) => {
+            TokenZeroEngine::with_shared_surface_health(config, std::sync::Arc::clone(health))
+        }
+        None => TokenZeroEngine::new(config),
+    }
 }
 
 #[cfg(test)]
@@ -203,11 +214,16 @@ pub fn execute_codemode_with_options(plan: &str, options: CodeModeOptions) -> Co
     let use_quickjs = should_run_quickjs(plan) || parse_plan(&lowered).is_err();
     if use_quickjs {
         if quickjs_plan_requests_mutation(plan) {
+            // QuickJS sandbox still blocks free-form mutation (transaction
+            // safety). Surface the write recovery ladder so agents are not
+            // stuck on "use CodeMode" alone (wqw.12).
+            let msg = crate::annotate_write_failure(
+                "sandbox: mutating binding denied without transaction support \
+                 (use the lowered zero.edit / tz_edit path, not free-form JS mutation)",
+                false,
+            );
             return finalize_codemode_result(
-                CodeModeResult::error(
-                    "sandbox: mutating binding denied without transaction support".to_string(),
-                    0,
-                ),
+                CodeModeResult::error_with_kind("sandbox", msg, 0, false),
                 "code",
                 plan,
                 started_ms,
@@ -714,7 +730,13 @@ fn wrap_js_plan(plan: &str) -> String {
     )
 }
 
-fn limits_from_options(options: &CodeModeOptions) -> CodeModeLimits {
+pub(super) fn limits_from_options(options: &CodeModeOptions) -> CodeModeLimits {
+    // `hard_max_wall_ms` is a real ceiling. A larger soft limit must never
+    // raise it, otherwise caller-controlled limits can disable the sandbox
+    // wall-clock guard. Internal callers that need a larger ceiling must set
+    // both fields explicitly.
+    let hard_max_wall_ms = options.hard_max_wall_ms;
+    let max_wall_ms = options.max_wall_ms.min(hard_max_wall_ms);
     CodeModeLimits {
         max_output_bytes: options.max_output_bytes,
         max_refs_emitted: options.max_refs_emitted,
@@ -723,6 +745,8 @@ fn limits_from_options(options: &CodeModeOptions) -> CodeModeLimits {
         max_microtasks: options.max_microtasks,
         max_memory_bytes: options.max_memory_bytes,
         max_code_bytes: options.max_code_bytes,
+        max_wall_ms,
+        hard_max_wall_ms,
         ..Default::default()
     }
 }
@@ -1363,18 +1387,13 @@ fn dispatch_values(
     // zero.token.* aliases: the router's namespaced surface addresses this
     // substrate as zero.token.<op>; both spellings hit the same engine ops.
     match method {
-        "zero.read" | "read" | "zero.token.read" => exec_read(engine, args),
+        "zero.read" | "read" | "zero.token.read" => exec_read(engine, work_root, args),
         "zero.find" | "find" | "zero.token.find" => exec_find(engine, work_root, args, false),
         "zero.grep" | "grep" | "zero.token.grep" => exec_find(engine, work_root, args, true),
         "zero.glob" | "glob" | "zero.token.glob" => exec_glob(engine, work_root, args),
         "zero.tree" | "tree" | "zero.token.tree" => exec_tree(engine, work_root, args),
-        "zero.shell" | "shell" | "zero.token.shell" => exec_shell(engine, args),
-        "zero.edit" | "edit" => Err(Box::new(CodeModeResult::error_with_kind(
-            "policy",
-            "mutating binding denied without transaction support",
-            0,
-            false,
-        ))),
+        "zero.shell" | "shell" | "zero.token.shell" => exec_shell(engine, work_root, args),
+        "zero.edit" | "edit" | "zero.token.edit" => exec_edit(engine, work_root, args),
         "zero.token.expand" | "zero.expand" | "expand" => exec_expand(engine, args),
         "zero.token.expandMany" | "zero.expandMany" | "expandMany" | "expand_many" => {
             exec_expand_many(engine, args)
@@ -1553,15 +1572,18 @@ fn require_str_arg<'a>(
         .ok_or_else(|| Box::new(CodeModeResult::error(message.to_string(), 0)))
 }
 
-fn paths_from_arg(args: &[Value], index: usize, default: PathBuf) -> Vec<PathBuf> {
-    match args.get(index) {
+/// Collect path args, joining relative entries to `work_root` (wqw.5).
+/// When the path arg is omitted, returns `[work_root]`.
+fn paths_from_arg(args: &[Value], index: usize, work_root: PathBuf) -> Vec<PathBuf> {
+    let raw = match args.get(index) {
         Some(Value::String(path)) => vec![PathBuf::from(path)],
         Some(Value::Array(items)) => items
             .iter()
             .filter_map(|value| value.as_str().map(PathBuf::from))
             .collect(),
-        _ => vec![default],
-    }
+        _ => return vec![work_root],
+    };
+    resolve_paths_against_work_root(raw, &work_root)
 }
 
 fn require_paths_from_arg(
@@ -1586,12 +1608,42 @@ fn require_paths_from_arg(
     }
 }
 
-fn exec_read(engine: &TokenZeroEngine, args: &[Value]) -> Result<OpOutcome, Box<CodeModeResult>> {
+/// Resolve plan paths against the CodeMode execute root (wqw.5).
+///
+/// Allowlist algorithm: effective roots = `allowed_roots_for_workspace(execute_root,
+/// explicit_allowlist)` — always includes the call `root`, plus any configured
+/// `--allowed-root` entries, deduped by canonical path. Relative paths are joined
+/// to `work_root` (the execute root); absolute paths are kept as-is and still must
+/// fall under an effective root. Paths outside every effective root are denied.
+pub(crate) fn resolve_paths_against_work_root(
+    paths: Vec<PathBuf>,
+    work_root: &Path,
+) -> Vec<PathBuf> {
+    paths
+        .into_iter()
+        .map(|path| {
+            if path.as_os_str().is_empty() {
+                work_root.to_path_buf()
+            } else if path.is_absolute() {
+                path
+            } else {
+                work_root.join(path)
+            }
+        })
+        .collect()
+}
+
+fn exec_read(
+    engine: &TokenZeroEngine,
+    work_root: &Path,
+    args: &[Value],
+) -> Result<OpOutcome, Box<CodeModeResult>> {
     let paths = require_paths_from_arg(
         args,
         0,
         "zero.read requires a path string or array as first argument",
     )?;
+    let paths = resolve_paths_against_work_root(paths, work_root);
     let opts = Opts::from_arg(args, 1);
     let mode = opts.mode_or("mode", Mode::Auto);
     let start_line = opts.usize("start_line");
@@ -1607,6 +1659,20 @@ fn exec_read(engine: &TokenZeroEngine, args: &[Value]) -> Result<OpOutcome, Box<
             .as_ref()
             .map(|error| error.message.clone())
             .unwrap_or_else(|| "zero.read failed".to_string());
+        let code = resp
+            .error
+            .as_ref()
+            .map(|error| error.code.as_str())
+            .unwrap_or("");
+        // wqw.5: outside allowlist is a hard plan error (clear deny), not a soft capsule.
+        if code == "path_not_allowed" || code == "path_outside_allowed_roots" {
+            return Err(Box::new(CodeModeResult::error_with_kind(
+                "path_not_allowed",
+                message,
+                0,
+                false,
+            )));
+        }
         let lower = message.to_ascii_lowercase();
         if lower.contains("__zerostack_missing_target__")
             || lower.contains("not found")
@@ -1679,12 +1745,15 @@ fn exec_tree(
     work_root: &Path,
     args: &[Value],
 ) -> Result<OpOutcome, Box<CodeModeResult>> {
-    let roots = vec![
-        args.first()
-            .and_then(|v| v.as_str())
-            .map(PathBuf::from)
-            .unwrap_or_else(|| work_root.to_path_buf()),
-    ];
+    let roots = resolve_paths_against_work_root(
+        vec![
+            args.first()
+                .and_then(|v| v.as_str())
+                .map(PathBuf::from)
+                .unwrap_or_else(|| work_root.to_path_buf()),
+        ],
+        work_root,
+    );
     let opts = Opts::from_arg(args, 1);
     let depth = opts.usize("depth").unwrap_or(3);
     let include_hidden = opts.bool("include_hidden").unwrap_or(false);
@@ -1701,14 +1770,28 @@ fn exec_tree(
     Ok(OpOutcome::from_tool_response(&resp))
 }
 
-fn exec_shell(engine: &TokenZeroEngine, args: &[Value]) -> Result<OpOutcome, Box<CodeModeResult>> {
+fn exec_shell(
+    engine: &TokenZeroEngine,
+    work_root: &Path,
+    args: &[Value],
+) -> Result<OpOutcome, Box<CodeModeResult>> {
     let command = require_str_arg(
         args,
         0,
         "zero.shell requires a command string as first argument",
     )?;
     let opts = Opts::from_arg(args, 1);
-    let cwd = opts.str("cwd").map(PathBuf::from);
+    // Relative cwd is always anchored to this plan's execute root. Explicit
+    // allowed roots may precede the execute root in engine configuration, so
+    // using allowed_roots.first() can silently run in the wrong project.
+    let cwd = opts.str("cwd").map(|raw| {
+        let path = PathBuf::from(raw);
+        if path.is_absolute() {
+            path
+        } else {
+            work_root.join(path)
+        }
+    });
     let mode = opts.mode_or("mode", Mode::Auto);
     let timeout = opts
         .usize("timeout_seconds")
@@ -1738,9 +1821,9 @@ fn exec_shell(engine: &TokenZeroEngine, args: &[Value]) -> Result<OpOutcome, Box
     }))
 }
 
-#[allow(dead_code)]
 pub(crate) fn exec_edit(
     engine: &TokenZeroEngine,
+    work_root: &Path,
     args: &[Value],
 ) -> Result<OpOutcome, Box<CodeModeResult>> {
     let path = PathBuf::from(require_str_arg(
@@ -1777,6 +1860,12 @@ pub(crate) fn exec_edit(
     let dry_run = opts.bool("dry_run").unwrap_or(false);
     let create = opts.bool("create").unwrap_or(false);
 
+    // Resolve relative edit paths against the execute root (same as read).
+    let path = resolve_paths_against_work_root(vec![path], work_root)
+        .into_iter()
+        .next()
+        .unwrap_or_else(|| work_root.to_path_buf());
+
     let resp = engine.edit(
         &path,
         &edits,
@@ -1785,15 +1874,32 @@ pub(crate) fn exec_edit(
         Mode::Auto,
         engine.config.max_visible_tokens,
     );
-    let hunks_applied = if resp.status == "ok" {
-        resp.telemetry
+    if resp.status == "error" {
+        let message = resp
+            .error
             .as_ref()
-            .and_then(|t| t.get("hunks"))
-            .and_then(|v| v.as_u64())
-            .unwrap_or(edits.len() as u64)
-    } else {
-        0
-    };
+            .map(|e| e.message.clone())
+            .unwrap_or_else(|| "zero.edit failed".to_string());
+        // Expand/read health is intentionally independent of write health.
+        // A missing ref must never authorize a native-write escape for an
+        // unrelated edit failure.
+        let annotated = crate::annotate_write_failure(&message, false);
+        return Err(Box::new(CodeModeResult::error_with_kind(
+            resp.error
+                .as_ref()
+                .map(|e| e.code.as_str())
+                .unwrap_or("edit_failed"),
+            annotated,
+            0,
+            false,
+        )));
+    }
+    let hunks_applied = resp
+        .telemetry
+        .as_ref()
+        .and_then(|t| t.get("hunks"))
+        .and_then(|v| v.as_u64())
+        .unwrap_or(edits.len() as u64);
     Ok(OpOutcome::from_tool_response(&resp).with_value(|value| {
         value["hunks_applied"] = json!(hunks_applied);
     }))
@@ -1802,7 +1908,7 @@ pub(crate) fn exec_edit(
 fn exec_expand(engine: &TokenZeroEngine, args: &[Value]) -> Result<OpOutcome, Box<CodeModeResult>> {
     let params = ExpandParams::from_codemode_args(args)
         .map_err(|message| Box::new(CodeModeResult::error(message, 0)))?;
-    if !params.ref_id.starts_with("tz://") {
+    if !tokenzero_recovery::is_expandable_ref(&params.ref_id) {
         return Err(Box::new(CodeModeResult::error(
             format!(
                 "expand takes a tz:// fz:// gz:// ref; to read a file use zero.fs.compound('read',{{path}}) -- got: {}",
@@ -1811,6 +1917,8 @@ fn exec_expand(engine: &TokenZeroEngine, args: &[Value]) -> Result<OpOutcome, Bo
             0,
         )));
     }
+    // Soft capsule on expand miss/error: plan continues with status in value.
+    // Shared SurfaceHealth is updated inside expand_with_params (wqw.9).
     let resp = engine.expand_with_params(params);
     Ok(OpOutcome::from_tool_response(&resp).mark_exact_expand())
 }
@@ -1823,7 +1931,7 @@ fn exec_expand_many(
         Some(Value::Array(items)) => items,
         _ => {
             return Err(Box::new(CodeModeResult::error(
-                "zero.token.expandMany requires an array of tz:// refs or item objects",
+                "zero.token.expandMany requires an array of tz://, fz://, or gz:// refs or item objects",
                 0,
             )));
         }
@@ -1832,7 +1940,7 @@ fn exec_expand_many(
     for item in items {
         let params = ExpandParams::from_expand_many_item(item)
             .map_err(|message| Box::new(CodeModeResult::error(message, 0)))?;
-        if !params.ref_id.starts_with("tz://") {
+        if !tokenzero_recovery::is_expandable_ref(&params.ref_id) {
             return Err(Box::new(CodeModeResult::error(
                 format!(
                     "expandMany takes a tz:// fz:// gz:// ref; to read a file use zero.fs.compound('read',{{path}}) -- got: {}",

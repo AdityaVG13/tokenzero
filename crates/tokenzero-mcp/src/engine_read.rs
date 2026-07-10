@@ -77,6 +77,34 @@ impl TokenZeroEngine {
         max_visible_tokens: usize,
         options: ServeOptions,
     ) -> ToolResponse {
+        let response = self.read_with_options_inner(
+            paths,
+            mode,
+            start_line,
+            end_line,
+            raw,
+            max_files,
+            max_visible_tokens,
+            options,
+        );
+        let ok = response.error.is_none();
+        let code = response.error.as_ref().map(|err| err.code.as_str());
+        self.surface_health().record_read_outcome(ok, code);
+        response
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn read_with_options_inner(
+        &self,
+        paths: &[PathBuf],
+        mode: Mode,
+        start_line: Option<usize>,
+        end_line: Option<usize>,
+        raw: bool,
+        max_files: usize,
+        max_visible_tokens: usize,
+        options: ServeOptions,
+    ) -> ToolResponse {
         // Single-flight the serve so a second pipelined identical read waits
         // for this one to record its serve before it looks up the seen-set
         // (otherwise both miss and both serve full). Keyed per path+range, so

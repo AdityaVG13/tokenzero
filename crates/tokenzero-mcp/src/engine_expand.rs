@@ -38,7 +38,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Condvar, Mutex, OnceLock};
 use std::time::{Duration, SystemTime};
 use tokenzero_filters::rewrite_command;
-use tokenzero_recovery::{ExpansionResult, RecoveryStore, StoredPayload};
+use tokenzero_recovery::{ExpansionResult, RecoveryStore, StoredPayload, is_expandable_ref};
 use tokenzero_runtime::{
     RunOutputPolicy, StreamCapture, contains_platform_shell_syntax, run_command_with_policy,
 };
@@ -61,6 +61,7 @@ fn expand_serve_key(params: &ExpandParams) -> ServeKey {
 fn resolve_slice(
     store: &mut RecoveryStore,
     params: &ExpandParams,
+    active_cache: &Path,
 ) -> Result<ExpansionResult, Box<ToolResponse>> {
     let selector = params.selector.as_deref().or(Some("raw"));
     let anchor = params.anchor_kind.as_deref();
@@ -76,17 +77,88 @@ fn resolve_slice(
     if result.found {
         Ok(result)
     } else {
-        Err(Box::new(expansion_response(result, store.recovery_tokens)))
+        Err(Box::new(annotate_expand_miss(
+            expansion_response(result, store.recovery_tokens),
+            &params.ref_id,
+            active_cache,
+        )))
+    }
+}
+
+/// When expand misses, name the active store. If a historical sibling
+/// (`codemode-recovery.json` ↔ `recovery-cache.json`) still holds the ref,
+/// upgrade to `store_mismatch` so agents can align `--cache-path` (wqw.8).
+fn annotate_expand_miss(
+    mut response: ToolResponse,
+    ref_id: &str,
+    active_cache: &Path,
+) -> ToolResponse {
+    let Some(err) = response.error.as_mut() else {
+        return response;
+    };
+    if err.code != "ref_not_found" && err.code != "expand_failed" {
+        return response;
+    }
+    let active = active_cache.display().to_string();
+    if let Some(other_path) = legacy_sibling_holding_ref(ref_id, active_cache) {
+        err.code = "store_mismatch".to_string();
+        err.message = format!(
+            "store_mismatch: ref present in {other} but not in active store {active} \
+(mint and expand must share --cache-path / TOKENZERO_CACHE_PATH); original: {}",
+            err.message,
+            other = other_path.display(),
+        );
+    } else {
+        err.message = format!(
+            "{} [store: {active}; mint and expand must share --cache-path]",
+            err.message
+        );
+    }
+    response
+}
+
+/// One-shot migration probe for the pre-wqw.8 dual-filename split only.
+fn legacy_sibling_holding_ref(ref_id: &str, active_cache: &Path) -> Option<PathBuf> {
+    let parent = active_cache.parent()?;
+    let name = active_cache.file_name()?.to_string_lossy();
+    let sibling = if name.contains("codemode-recovery") {
+        parent.join("recovery-cache.json")
+    } else if name.contains("recovery-cache") {
+        parent.join("codemode-recovery.json")
+    } else {
+        return None;
+    };
+    if sibling == *active_cache || !sibling.is_file() {
+        return None;
+    }
+    let other = RecoveryStore::new(Some(sibling.clone()));
+    if other.has_ref(ref_id) {
+        Some(sibling)
+    } else {
+        None
     }
 }
 
 impl TokenZeroEngine {
     pub fn expand_with_params(&self, params: ExpandParams) -> ToolResponse {
-        if !params.ref_id.starts_with("tz://") {
+        let response = self.expand_with_params_inner(params);
+        let ok = response.error.is_none();
+        let code = response.error.as_ref().map(|err| err.code.as_str());
+        // Health probe for crash-only unlock (wqw.9). invalid_ref is a client
+        // mistake and does not open recovery.
+        self.surface_health().record_expand_outcome(ok, code);
+        response
+    }
+
+    fn expand_with_params_inner(&self, params: ExpandParams) -> ToolResponse {
+        if !is_expandable_ref(&params.ref_id) {
             return ToolResponse::error(
                 "expand",
                 "invalid_ref",
-                format!("ref must start with tz://, got: {}", params.ref_id),
+                format!(
+                    "ref must start with tz://, fz://, or gz://, got: {}",
+                    params.ref_id
+                ),
                 None,
             );
         }
@@ -103,11 +175,11 @@ impl TokenZeroEngine {
         let mut pending: Vec<(ServeKey, ServedRecord)> = Vec::new();
 
         if let Some(since_ref) = params.since.as_deref().filter(|_| !params.fresh) {
-            if !since_ref.starts_with("tz://") {
+            if !is_expandable_ref(since_ref) {
                 return ToolResponse::error(
                     "expand",
                     "invalid_ref",
-                    format!("since must start with tz://, got: {since_ref}"),
+                    format!("since must start with tz://, fz://, or gz://, got: {since_ref}"),
                     None,
                 );
             }
@@ -132,7 +204,7 @@ impl TokenZeroEngine {
                     None,
                 );
             }
-            let target = match resolve_slice(&mut store, &params) {
+            let target = match resolve_slice(&mut store, &params, &self.config.cache_path) {
                 Ok(t) => t,
                 Err(resp) => return *resp,
             };
@@ -221,7 +293,7 @@ impl TokenZeroEngine {
             return response;
         }
 
-        let target = match resolve_slice(&mut store, &params) {
+        let target = match resolve_slice(&mut store, &params, &self.config.cache_path) {
             Ok(t) => t,
             Err(resp) => return *resp,
         };

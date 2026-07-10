@@ -337,6 +337,95 @@ fn fast_command_with_background_child_returns_promptly_without_timeout() {
     );
 }
 
+/// wqw.4: on shell timeout the whole process group is SIGTERM then SIGKILL —
+/// no orphan children remain, and partial stdout captured before the timeout
+/// is returned with timed_out=true.
+#[cfg(unix)]
+#[test]
+fn timeout_process_group_kill_leaves_no_orphans_and_keeps_partial_stdout() {
+    use std::fs;
+    use std::process::Command as SysCommand;
+    use tempfile::tempdir;
+
+    let dir = tempdir().unwrap();
+    let pidfile = dir.path().join("grandchild.pid");
+    let pidfile_str = pidfile.display().to_string();
+    // Print partial bytes, spawn a long-lived grandchild, then sleep past timeout.
+    // The grandchild PID is recorded so we can prove the group kill reaped it.
+    let script = format!(
+        r#"
+set -e
+echo 'partial-before-timeout-wqw4'
+(sleep 120) &
+echo $! > '{pidfile_str}'
+sleep 120
+"#
+    );
+    let argv = vec!["/bin/sh".to_string(), "-c".to_string(), script];
+    let start = Instant::now();
+    let result = run_command(&argv, None, None, None, Duration::from_millis(250), false).unwrap();
+
+    assert!(result.timed_out, "must report timeout: {result:?}");
+    assert!(!result.ok, "{result:?}");
+    assert!(
+        result.stdout.contains("partial-before-timeout-wqw4"),
+        "partial stdout must be returned: {:?}",
+        result.stdout
+    );
+    assert!(
+        start.elapsed() < Duration::from_secs(5),
+        "timeout must not wait for sleep 120"
+    );
+
+    // Allow kill escalation (TERM → brief wait → KILL) and reaping.
+    std::thread::sleep(Duration::from_millis(200));
+    let grandchild_pid: Option<u32> = fs::read_to_string(&pidfile)
+        .ok()
+        .and_then(|s| s.trim().parse().ok());
+    if let Some(pid) = grandchild_pid {
+        // kill -0 succeeds only if the process still exists.
+        let still_alive = SysCommand::new("kill")
+            .args(["-0", &pid.to_string()])
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
+        assert!(
+            !still_alive,
+            "grandchild pid {pid} must not be an orphan after process-group timeout kill"
+        );
+    } else {
+        // If the pidfile never landed (killed before write), prove via ps that
+        // no sleep 120 from this test script remains keyed by our marker path.
+        let ps = SysCommand::new("ps")
+            .args(["-axo", "pid=,command="])
+            .output()
+            .expect("ps");
+        let listing = String::from_utf8_lossy(&ps.stdout);
+        assert!(
+            !listing.contains(&pidfile_str),
+            "no process should still reference the pidfile path: {listing}"
+        );
+    }
+}
+
+/// Timeout duration is caller-configurable (engine shell_timeout /
+/// TOKENZERO_SHELL_TIMEOUT_SECS / timeout_seconds on tools/call).
+#[cfg(unix)]
+#[test]
+fn shell_timeout_is_configurable_short_vs_long() {
+    let argv = vec![
+        "/bin/sh".to_string(),
+        "-c".to_string(),
+        "sleep 2".to_string(),
+    ];
+    let short = run_command(&argv, None, None, None, Duration::from_millis(100), false).unwrap();
+    assert!(short.timed_out, "100ms timeout must fire on sleep 2");
+
+    let long = run_command(&argv, None, None, None, Duration::from_secs(10), false).unwrap();
+    assert!(!long.timed_out, "10s budget must allow sleep 2: {long:?}");
+    assert!(long.ok, "{long:?}");
+}
+
 #[test]
 fn windows_powershell_script_plan_uses_powershell() {
     let script = "$tzTmp = Join-Path $env:TEMP 'tz-quote'; [Console]::Out.Write($tzTmp)";

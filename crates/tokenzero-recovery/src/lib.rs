@@ -27,6 +27,32 @@ const REF_INDEX_MAX_BYTES: u64 = 1_048_576;
 const REF_INDEX_DISABLE_ENV: &str = "TOKENZERO_REF_INDEX";
 const REF_INDEX_PATH_ENV: &str = "TOKENZERO_REF_INDEX_PATH";
 
+/// ZeroStack schemes accepted by expand. Shared content-addressed blob identity:
+/// `fz://blob/<id>` and `gz://blob/<id>` resolve the same payload as `tz://blob/<id>`.
+pub const EXPAND_REF_SCHEMES: &[&str] = &["tz://", "fz://", "gz://"];
+
+/// True when `ref_id` starts with a scheme expand can recover (`tz://`, `fz://`, `gz://`).
+pub fn is_expandable_ref(ref_id: &str) -> bool {
+    EXPAND_REF_SCHEMES
+        .iter()
+        .any(|scheme| ref_id.starts_with(scheme))
+}
+
+/// Rewrite `fz://` / `gz://` to `tz://` for store and alias lookup.
+/// Returns `None` for unknown schemes (caller should surface `invalid-ref` with the full ref).
+pub fn canonicalize_expand_ref(ref_id: &str) -> Option<String> {
+    if ref_id.starts_with("tz://") {
+        return Some(ref_id.to_string());
+    }
+    if let Some(rest) = ref_id.strip_prefix("fz://") {
+        return Some(format!("tz://{rest}"));
+    }
+    if let Some(rest) = ref_id.strip_prefix("gz://") {
+        return Some(format!("tz://{rest}"));
+    }
+    None
+}
+
 /// `file:line[:col]` matcher for search-output ingestion. Compiled once on first
 /// use — the pattern is a compile-time literal, so `expect` can only fire on a
 /// programmer typo (caught by the unit tests below), never on user input. The
@@ -466,9 +492,17 @@ impl RecoveryStore {
     ) -> ExpansionResult {
         self.recovery_count += 1;
         let requested_ref = ref_id.to_string();
-        let ref_id = self
-            .resolve_alias_chain(ref_id)
-            .unwrap_or_else(|| ref_id.to_string());
+        // Shared blob identity: fz://blob/X and gz://blob/X look up tz://blob/X.
+        // Canonicalize before alias resolution so codemode logical refs minted as
+        // tz://codemode/... are found when expanded via fz://codemode/....
+        let Some(lookup_ref) = canonicalize_expand_ref(ref_id) else {
+            return ExpansionResult::missing(
+                requested_ref,
+                selector.map(str::to_string),
+                "invalid-ref",
+            );
+        };
+        let ref_id = self.resolve_alias_chain(&lookup_ref).unwrap_or(lookup_ref);
         let Some(parsed) = parse_ref(&ref_id) else {
             return ExpansionResult::missing(
                 requested_ref,
@@ -483,6 +517,9 @@ impl RecoveryStore {
             selected_start = start;
             selected_end = end;
         }
+        // Resolve lines:/range:/around: before OOB so selector windows get the
+        // same structured error as explicit start_line/end_line (zq9).
+        resolve_selector_line_window(selector, &mut selected_start, &mut selected_end);
         let content = match self.resolve_ref_with_index(&parsed.kind, &parsed.bare) {
             RefResolve::Found(content) => content,
             RefResolve::NotFound => {
@@ -506,6 +543,33 @@ impl RecoveryStore {
                 selector.map(str::to_string),
                 "stale-ref",
             );
+        }
+        // Explicit / selector line windows: OOB is a structured error, never
+        // ref_not_found (zq9). 1-based inclusive; start past last line or end <
+        // start fails.
+        if let Some(start) = selected_start {
+            let line_count = content_line_count(&content);
+            if start == 0 || start > line_count {
+                return ExpansionResult::missing(
+                    requested_ref,
+                    selector.map(str::to_string),
+                    format!(
+                        "window-out-of-range; start={start} end={} lines={line_count}",
+                        selected_end
+                            .map(|e| e.to_string())
+                            .unwrap_or_else(|| start.to_string())
+                    ),
+                );
+            }
+            if let Some(end) = selected_end {
+                if end < start || end > line_count {
+                    return ExpansionResult::missing(
+                        requested_ref,
+                        selector.map(str::to_string),
+                        format!("window-out-of-range; start={start} end={end} lines={line_count}"),
+                    );
+                }
+            }
         }
         let selected = select_content(
             &content,
@@ -531,7 +595,11 @@ impl RecoveryStore {
     }
 
     pub fn has_ref(&self, ref_id: &str) -> bool {
-        let Some(parsed) = parse_ref(ref_id) else {
+        let Some(lookup) = canonicalize_expand_ref(ref_id) else {
+            return false;
+        };
+        let lookup = self.resolve_alias_chain(&lookup).unwrap_or(lookup);
+        let Some(parsed) = parse_ref(&lookup) else {
             return false;
         };
         match parsed.kind.as_str() {
@@ -953,6 +1021,8 @@ struct ParsedRef {
 }
 
 fn parse_ref(ref_id: &str) -> Option<ParsedRef> {
+    // Callers canonicalize fz:// / gz:// → tz:// before parse_ref. Accept only
+    // the store scheme here so scheme rewriting lives in one place.
     let (bare, fragment) = ref_id
         .split_once('#')
         .map_or((ref_id, None), |(b, f)| (b, Some(f.to_string())));
@@ -980,7 +1050,7 @@ fn parse_ref(ref_id: &str) -> Option<ParsedRef> {
     }
     Some(ParsedRef {
         kind: kind.to_string(),
-        bare: bare.to_string(),
+        bare: format!("tz://{rest}"),
         fragment,
     })
 }
@@ -1015,11 +1085,23 @@ fn parse_around_selector(value: &str) -> (Option<usize>, Option<usize>) {
     )
 }
 
+/// Line count for window validation (split_inclusive so a trailing newline
+/// still counts as a line segment, matching `line_slice_exact`).
+fn content_line_count(text: &str) -> usize {
+    if text.is_empty() {
+        0
+    } else {
+        text.split_inclusive('\n').count()
+    }
+}
+
 /// Exact line slice for recovery: returns the verbatim bytes of lines
 /// `start..=end` (1-based, inclusive), preserving each line's trailing
 /// newline — including a trailing blank line — so `expand` is byte-exact.
 /// Unlike `tokenzero_core::line_range` (display: drops trailing newlines),
 /// this is the recovery path and must reproduce the original bytes.
+/// Caller must validate OOB via `content_line_count` before calling when a
+/// structured `window-out-of-range` error is required.
 fn line_slice_exact(text: &str, start: usize, end: usize) -> String {
     let start = start.max(1);
     let end = end.max(start);
@@ -1030,6 +1112,33 @@ fn line_slice_exact(text: &str, start: usize, end: usize) -> String {
     let lo = start - 1;
     let hi = end.min(segments.len());
     segments[lo..hi].concat()
+}
+
+/// Parse line-window selectors into start/end. Non-window selectors leave the
+/// existing start/end untouched.
+fn resolve_selector_line_window(
+    selector: Option<&str>,
+    selected_start: &mut Option<usize>,
+    selected_end: &mut Option<usize>,
+) {
+    match selector {
+        Some(value)
+            if value.starts_with("range:")
+                || value.starts_with("lines:")
+                || value.starts_with("line:") =>
+        {
+            let prefix_len = value.find(':').map_or(0, |n| n + 1);
+            let (start, end) = parse_line_fragment(&value[prefix_len..]);
+            *selected_start = start;
+            *selected_end = end;
+        }
+        Some(value) if value.starts_with("around:") => {
+            let (start, end) = parse_around_selector(&value["around:".len()..]);
+            *selected_start = start;
+            *selected_end = end;
+        }
+        _ => {}
+    }
 }
 
 fn select_content(
@@ -1057,17 +1166,11 @@ fn select_content(
         Some(value)
             if value.starts_with("range:")
                 || value.starts_with("lines:")
-                || value.starts_with("line:") =>
+                || value.starts_with("line:")
+                || value.starts_with("around:") =>
         {
-            let prefix_len = value.find(':').map_or(0, |n| n + 1);
-            let (start, end) = parse_line_fragment(&value[prefix_len..]);
-            selected_start = start;
-            selected_end = end;
-        }
-        Some(value) if value.starts_with("around:") => {
-            let (start, end) = parse_around_selector(&value["around:".len()..]);
-            selected_start = start;
-            selected_end = end;
+            // Already resolved by resolve_selector_line_window before OOB.
+            resolve_selector_line_window(selector, &mut selected_start, &mut selected_end);
         }
         Some(_) => {}
     }

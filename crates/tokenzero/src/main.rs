@@ -788,6 +788,66 @@ fn emit_rewrite(args: RewriteArgs) -> Result<()> {
 fn doctor_report(args: &DoctorArgs) -> serde_json::Value {
     let root = tokenzero_work_root(args.root.clone());
     let mut report = install::doctor(&root, args.cache_path.as_deref());
+    // wqw.5: doctor exposes effective allowed roots for the workspace root.
+    let effective = allowed_roots_for_workspace(&root, &[]);
+    report["effective_allowed_roots"] = json!(
+        effective
+            .iter()
+            .map(|p| p.display().to_string())
+            .collect::<Vec<_>>()
+    );
+    report["allowlist_algorithm"] = json!(
+        "effective roots = doctor/call root union configured --allowed-root entries, deduped by canonical path. Relative CodeMode paths join to execute root."
+    );
+    // wqw.2: multi-project store isolation status + mismatch findings.
+    let store = zerostack_store::store_resolution_report(&root, args.cache_path.clone());
+    report["store_resolution"] =
+        zerostack_store::store_resolution_json(&root, args.cache_path.clone());
+    report["effective_store_root"] = json!(
+        store
+            .effective_store_root
+            .as_ref()
+            .map(|p| p.display().to_string())
+    );
+    report["effective_cache_path"] = json!(store.effective_cache_path.display().to_string());
+    // wqw.3: portable engine binary discovery (env → PATH → well-known).
+    report["engine_binaries"] = tokenzero_mcp::engine_binaries_json();
+    if let Some(summary) = &store.mismatch_summary {
+        let severity = if store.store_project_mismatch {
+            "warning"
+        } else {
+            "info"
+        };
+        let finding = json!({
+            "id": if store.store_project_mismatch {
+                "tz-store-project-mismatch"
+            } else {
+                "tz-store-global-pin-ignored"
+            },
+            "severity": severity,
+            "status": "detected",
+            "check": "store_resolution",
+            "summary": summary,
+            "evidence": {
+                "project_root": root.display().to_string(),
+                "effective_cache_path": store.effective_cache_path.display().to_string(),
+                "effective_store_root": store.effective_store_root.as_ref().map(|p| p.display().to_string()),
+                "shared_store_opt_in": store.shared_store_opt_in,
+                "global_pin_set": store.global_pin_set,
+                "isolation_mode": store.isolation_mode,
+            },
+            "auto_fix": false,
+            "fix_supported": false,
+            "next_step": if store.store_project_mismatch {
+                "Use a per-project store (unset TOKENZERO_SHARED_STORE / ZEROSTACK_SHARED_STORE) or pass --cache-path under the project root."
+            } else {
+                "Default is per-project isolation (wqw.2). Set TOKENZERO_SHARED_STORE=1 only for intentional meta-workspace sharing."
+            }
+        });
+        if let Some(findings) = report.get_mut("findings").and_then(|v| v.as_array_mut()) {
+            findings.push(finding);
+        }
+    }
     if args.runtime {
         let argv = vec!["echo".to_string(), "ok".to_string()];
         let plan = tokenzero_runtime::plan_command(&argv, Some(&root), false).ok();
@@ -1288,7 +1348,7 @@ fn engine_from_common(args: &CommonArgs) -> TokenZeroEngine {
 }
 
 fn engine_config_for_mcp(args: &McpServerArgs) -> Result<EngineConfig> {
-    let root = tokenzero_work_root(None);
+    let root = mcp_work_root(&args.allowed_root);
     let tool_surface = args
         .tool_surface
         .as_deref()
@@ -1296,11 +1356,7 @@ fn engine_config_for_mcp(args: &McpServerArgs) -> Result<EngineConfig> {
         .parse::<McpToolSurface>()
         .map_err(anyhow::Error::msg)?;
     Ok(EngineConfig {
-        allowed_roots: if args.allowed_root.is_empty() {
-            default_allowed_roots(&root)
-        } else {
-            args.allowed_root.clone()
-        },
+        allowed_roots: allowed_roots_for_workspace(&root, &args.allowed_root),
         cache_path: resolve_recovery_cache_path(&root, args.cache_path.clone()),
         max_visible_tokens: 4000,
         mode: parse_mode(&args.default_mode)?,
@@ -1309,6 +1365,10 @@ fn engine_config_for_mcp(args: &McpServerArgs) -> Result<EngineConfig> {
         tool_surface,
         ..EngineConfig::for_root(&root)
     })
+}
+
+fn mcp_work_root(allowed_roots: &[PathBuf]) -> PathBuf {
+    tokenzero_work_root(allowed_roots.first().cloned())
 }
 
 /// Rebuilds the mcp-server invocation for the supervised inner child:

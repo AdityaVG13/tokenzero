@@ -33,6 +33,23 @@ The MCP server is a foreground Rust stdio tool bridge launched by the client. It
 does not start watchers, indexers, background services, or helper runtimes.
 Clients should reuse one launched stdio process while the session is connected.
 
+### Multi-project store isolation
+
+Recovery cache paths default **per allowed root** (see docs/core.md). A process
+env `ZEROSTACK_STORE_ROOT` does not collate unrelated projects unless
+`TOKENZERO_SHARED_STORE=1` or `ZEROSTACK_SHARED_STORE=1` is set. Prefer
+`--cache-path` / `TOKENZERO_CACHE_PATH` for explicit stores. Inspect
+`resource://tokenzero/cache` for the active path and isolation note.
+
+### Portable binary discovery (wqw.3)
+
+Prefer `command: "tokenzero"` on PATH in MCP client configs (see
+`docs/mcp-tokenzero.portable.json`). Optional env overrides:
+`TOKENZERO_BIN`, `TOKENZERO_RG_PATH`, `TOKENZERO_CURL_PATH`. Discovery order:
+env → PATH → well-known layouts → clear error. Never hardcode personal
+`/Users/.../AI/*/target/release` paths. `tokenzero doctor --json` reports
+`engine_binaries`.
+
 ### Connection hardening
 
 The server is built to stay connected for the full life of an agent session:
@@ -165,6 +182,22 @@ diff_tokens_saved}`.
 
 ## Tools
 
+### Write recovery ladder (wqw.12)
+
+When CodeMode `zero.edit` / `tz_edit` fails, the error includes a **write recovery
+ladder**: prefer CodeMode edit under allowed roots → check roots/doctor → if the
+write substrate is down (or `TOKENZERO_WRITE_ESCAPE=1`), harnesses may use a
+**bounded native Write for that failure only** → record via `tz_report_tool_issue`.
+Native Write is not the default while CodeMode works.
+
+### Field issue reports (wqw.6)
+
+`tz_report_tool_issue` / `report_tool_issue` accepts **`zero_execute`** (and aliases:
+`zerostack`, `tz_execute_code`, `zero.token.*`, `zero.fs.*`, `tz_*`) so expand/root/shell
+failures can be recorded without leaving the harness. Reports land under
+`.tokenzero/tool-issues/` next to the recovery cache.
+
+
 | Tool | Purpose |
 | --- | --- |
 | `tz_read` | compact local file reads with exact refs |
@@ -178,7 +211,7 @@ diff_tokens_saved}`.
 | `tz_fetch` | TTL-cached http(s) fetch via curl with exact refs |
 | `tz_shell` | compressed shell/test/log output |
 | `tz_ingest` | external payload ingest with exact refs |
-| `tz_expand` | exact recovery from `tz://` refs |
+| `tz_expand` | exact recovery from `tz://`, `fz://`, or `gz://` refs (shared blob identity) |
 | `tz_mem` | recovery/cache/config state |
 | `tz_cache_pack` | daemonless prompt-cache pack generation |
 | `tz_rewrite` | conservative command rewrite planning |
@@ -383,6 +416,28 @@ Common refs:
 - `tz://file/<id>#Lx-Ly` for file-like ranges.
 - `tz://search/<id>` for stored search hits.
 
+### Crash-only unlock ladder (CodeMode surface)
+
+When the server runs in CodeMode (`TOKENZERO_MCP_TOOL_SURFACE=codemode` /
+`--mode=codemode`), the primary tools, field-report tool, and crash-only
+`tz_expand` / `tz_read` recovery tools are advertised for the whole session.
+Recovery calls remain policy-gated while the primary surface is healthy. The
+stable list matches the server's `tools.listChanged=false` capability.
+
+1. Prefer `zero.token.expand` / `zero.token.read` inside `tz_execute_code`.
+2. If expand fails with a recovery error, or read reports a substrate error,
+   session surface health marks
+   the primary surface **unhealthy** and unlocks **only** crash-only recovery
+   tools `tz_expand` and `tz_read` so bytes can be recovered without native
+   Read. Write/shell stay locked.
+3. Successful expand/read clears the failure streak; recovery re-locks.
+4. Policy refusals never print "primary surface healthy" after expand X0.
+5. Telemetry: `resource://tokenzero/metrics` → `surface_health` with
+   `blocked_count` / `unlocked_count`.
+
+CLI `tokenzero expand` / `tokenzero read` remain available outside MCP as the
+same recovery path.
+
 ## Shell Contract
 
 MCP `shell` defaults to auto policy and uses the same renderer as
@@ -391,6 +446,23 @@ headers with `command_success`, `exit_code`, and ref lines); the CLI response
 envelope — policy, policy reason, command family, accounting, refs, and the
 command-status truth model under `structuredContent.cli` — is available with
 `TOKENZERO_MCP_ENVELOPE=compact|full`.
+
+### Timeout and process-group kill (wqw.4)
+
+Default shell timeout is 60s (`TOKENZERO_SHELL_TIMEOUT_SECS`,
+`tokenzero mcp-server --shell-timeout-seconds`, or per-call
+`timeout_seconds` / CodeMode `timeout_seconds`). On timeout the runtime
+sends **SIGTERM then SIGKILL to the whole process group** (Unix
+`process_group(0)`), returns partial captured stdout/stderr, and sets
+`timed_out` / shell timeout status. Test proof of no orphans:
+`timeout_process_group_kill_leaves_no_orphans_and_keeps_partial_stdout`
+in `tokenzero-runtime`.
+
+**Background cancel gap:** CodeMode/router `zero.token.shell({ background: true })`
+async job cancel is tracked separately as bead
+`tokenzero-shell-background-inert-3vv` (background option ignored / unwired
+on some orchestrated paths). Foreground timeout process-group kill is fixed
+here; do not assume background cancel reaps orphans until 3vv lands.
 
 Shell responses distinguish tool transport from the child command:
 `transport_status` can be `ok` while `command_success` is `false`. Nonzero

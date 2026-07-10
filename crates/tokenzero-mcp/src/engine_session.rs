@@ -63,11 +63,33 @@ impl TokenZeroEngine {
             session_id: new_session_id(),
             metrics,
             session_persist,
+            surface_health: std::sync::Arc::new(crate::surface_health::SurfaceHealth::new()),
         }
+    }
+
+    /// Build an engine that shares crash-only health with a parent session.
+    pub(crate) fn with_shared_surface_health(
+        config: EngineConfig,
+        surface_health: std::sync::Arc<crate::surface_health::SurfaceHealth>,
+    ) -> Self {
+        let mut engine = Self::new(config);
+        engine.surface_health = surface_health;
+        engine
     }
 
     pub fn session_id(&self) -> &str {
         &self.session_id
+    }
+
+    /// Crash-only recovery health for CodeMode expand/read (wqw.9).
+    pub(crate) fn surface_health(&self) -> &crate::surface_health::SurfaceHealth {
+        &self.surface_health
+    }
+
+    pub(crate) fn surface_health_handle(
+        &self,
+    ) -> std::sync::Arc<crate::surface_health::SurfaceHealth> {
+        std::sync::Arc::clone(&self.surface_health)
     }
 
     /// Record one tool-call outcome for observability. Fail-open.
@@ -82,7 +104,14 @@ impl TokenZeroEngine {
 
     /// Snapshot served by `resource://tokenzero/metrics`.
     pub(crate) fn tool_metrics_snapshot(&self) -> Value {
-        self.metrics.snapshot()
+        let mut snap = self.metrics.snapshot();
+        if let Some(obj) = snap.as_object_mut() {
+            obj.insert(
+                "surface_health".to_string(),
+                self.surface_health.telemetry(),
+            );
+        }
+        snap
     }
 
     /// Fail-open lookup: a poisoned session mutex reads as a miss (full
@@ -149,9 +178,14 @@ impl TokenZeroEngine {
 
     pub(crate) fn rg_binary(&self) -> Option<&Path> {
         self.rg_binary
-            .get_or_init(|| match &self.config.rg_path_override {
-                Some(path) => path.is_file().then(|| path.clone()),
-                None => find_rg_in_path(),
+            .get_or_init(|| {
+                // Prefer engine config override, else portable resolver
+                // (env TOKENZERO_RG_PATH → PATH → well-known).
+                match &self.config.rg_path_override {
+                    Some(path) if path.is_file() => Some(path.clone()),
+                    Some(_) => None,
+                    None => find_rg_in_path(),
+                }
             })
             .as_deref()
     }

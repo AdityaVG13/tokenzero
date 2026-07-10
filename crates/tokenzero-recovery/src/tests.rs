@@ -1190,3 +1190,267 @@ proptest! {
         prop_assert_eq!(selected, expected);
     }
 }
+
+// ---------------------------------------------------------------------------
+// Cross-scheme expand (fz:// / gz:// shared blob identity) — wqw.1
+// ---------------------------------------------------------------------------
+
+#[test]
+fn cross_scheme_fz_and_gz_blob_expand_byte_exact() {
+    let (mut store, _cache, _dir) = temp_store();
+    let payload = "cross-scheme payload\nline two\n";
+    let stored = store
+        .store_payload(payload, ContentType::Unknown, None, None, None)
+        .unwrap();
+    assert!(stored.blob_ref.starts_with("tz://blob/"));
+    let id = stored.blob_ref.strip_prefix("tz://blob/").unwrap();
+    let fz = format!("fz://blob/{id}");
+    let gz = format!("gz://blob/{id}");
+
+    for scheme_ref in [&fz, &gz, &stored.blob_ref] {
+        let expanded = store.expand(scheme_ref, Some("raw"), None, None, None, None);
+        assert!(
+            expanded.found,
+            "scheme ref must expand: {scheme_ref} reason={}",
+            expanded.reason
+        );
+        assert_eq!(expanded.content, payload);
+        assert_eq!(expanded.ref_id, *scheme_ref);
+    }
+}
+
+#[test]
+fn cross_scheme_codemode_error_alias_expands_via_fz() {
+    let (mut store, _cache, _dir) = temp_store();
+    let err_body = r#"{"kind":"runtime","message":"boom from plan"}"#;
+    let stored = store
+        .store_payload(err_body, ContentType::JsonConfig, None, None, None)
+        .unwrap();
+    let logical = "tz://codemode/execution/test-exec-1/error";
+    store.store_alias(logical, &stored.blob_ref).unwrap();
+
+    let via_fz = "fz://codemode/execution/test-exec-1/error";
+    let expanded = store.expand(via_fz, Some("raw"), None, None, None, None);
+    assert!(
+        expanded.found,
+        "fz codemode error ref must expand: {}",
+        expanded.reason
+    );
+    assert_eq!(expanded.content, err_body);
+    assert_eq!(expanded.ref_id, via_fz);
+}
+
+#[test]
+fn garbage_scheme_is_invalid_ref_with_full_id_preserved() {
+    let (mut store, _cache, _dir) = temp_store();
+    let long = "xx://blob/b0123456789abcdef0123456789abcdef_extra_hash_tail";
+    let expanded = store.expand(long, Some("raw"), None, None, None, None);
+    assert!(!expanded.found);
+    assert_eq!(expanded.reason, "invalid-ref");
+    assert_eq!(
+        expanded.ref_id, long,
+        "requested ref must be preserved in full (no mid-hash truncation)"
+    );
+}
+
+#[test]
+fn canonicalize_and_is_expandable_helpers() {
+    assert!(is_expandable_ref("tz://blob/babc"));
+    assert!(is_expandable_ref("fz://blob/babc"));
+    assert!(is_expandable_ref("gz://blob/babc"));
+    assert!(!is_expandable_ref("http://blob/babc"));
+    assert!(!is_expandable_ref("not-a-ref"));
+    assert_eq!(
+        canonicalize_expand_ref("fz://blob/babc").as_deref(),
+        Some("tz://blob/babc")
+    );
+    assert_eq!(
+        canonicalize_expand_ref("gz://codemode/execution/x/error").as_deref(),
+        Some("tz://codemode/execution/x/error")
+    );
+    assert!(canonicalize_expand_ref("http://nope").is_none());
+}
+
+// ---------------------------------------------------------------------------
+// Windowed expand (zq9) — same-store line windows
+// ---------------------------------------------------------------------------
+
+fn multi_line_fixture(n: usize) -> String {
+    (1..=n)
+        .map(|i| format!("line-{i}"))
+        .collect::<Vec<_>>()
+        .join("\n")
+        + "\n"
+}
+
+#[test]
+fn windowed_expand_middle_edges_and_full() {
+    let (mut store, _cache, _dir) = temp_store();
+    let payload = multi_line_fixture(200);
+    let stored = store
+        .store_payload(&payload, ContentType::Unknown, None, None, None)
+        .unwrap();
+
+    let full = store.expand(&stored.blob_ref, Some("raw"), None, None, None, None);
+    assert!(full.found);
+    assert_eq!(full.content, payload);
+
+    // Middle window 120..=190 (1-based inclusive) — field verify path
+    let mid = store.expand(
+        &stored.blob_ref,
+        Some("raw"),
+        Some(120),
+        Some(190),
+        None,
+        None,
+    );
+    assert!(mid.found, "{}", mid.reason);
+    let expected: String = payload.split_inclusive('\n').skip(119).take(71).collect();
+    assert_eq!(mid.content, expected);
+    assert!(mid.content.starts_with("line-120\n"));
+    assert!(mid.content.contains("line-190\n"));
+    assert!(!mid.content.contains("line-119\n"));
+    assert!(!mid.content.contains("line-191\n"));
+
+    // Edges
+    let first = store.expand(&stored.blob_ref, Some("raw"), Some(1), Some(1), None, None);
+    assert_eq!(first.content, "line-1\n");
+    let last = store.expand(
+        &stored.blob_ref,
+        Some("raw"),
+        Some(200),
+        Some(200),
+        None,
+        None,
+    );
+    assert_eq!(last.content, "line-200\n");
+}
+
+#[test]
+fn windowed_expand_oob_is_structured_not_ref_not_found() {
+    let (mut store, _cache, _dir) = temp_store();
+    let payload = multi_line_fixture(50);
+    let stored = store
+        .store_payload(&payload, ContentType::Unknown, None, None, None)
+        .unwrap();
+    let oob = store.expand(
+        &stored.blob_ref,
+        Some("raw"),
+        Some(500),
+        Some(510),
+        None,
+        None,
+    );
+    assert!(!oob.found);
+    assert!(
+        oob.reason.starts_with("window-out-of-range"),
+        "got {}",
+        oob.reason
+    );
+    assert!(
+        !oob.reason.contains("ref-not-found"),
+        "OOB must not look like missing ref: {}",
+        oob.reason
+    );
+    assert_eq!(oob.ref_id, stored.blob_ref);
+
+    let inverted = store.expand(&stored.blob_ref, Some("raw"), Some(10), Some(5), None, None);
+    assert!(!inverted.found);
+    assert!(inverted.reason.starts_with("window-out-of-range"));
+
+    let end_past_last_line = store.expand(
+        &stored.blob_ref,
+        Some("raw"),
+        Some(40),
+        Some(60),
+        None,
+        None,
+    );
+    assert!(!end_past_last_line.found);
+    assert!(
+        end_past_last_line.reason.starts_with("window-out-of-range"),
+        "got {}",
+        end_past_last_line.reason
+    );
+}
+
+#[test]
+fn selector_lines_oob_is_structured_not_empty_success() {
+    let (mut store, _cache, _dir) = temp_store();
+    let payload = multi_line_fixture(50);
+    let stored = store
+        .store_payload(&payload, ContentType::Unknown, None, None, None)
+        .unwrap();
+    let oob = store.expand(
+        &stored.blob_ref,
+        Some("lines:500-510"),
+        None,
+        None,
+        None,
+        None,
+    );
+    assert!(!oob.found, "selector OOB must not succeed empty");
+    assert!(
+        oob.reason.starts_with("window-out-of-range"),
+        "got {}",
+        oob.reason
+    );
+
+    let around = store.expand(
+        &stored.blob_ref,
+        Some("around:L500:2"),
+        None,
+        None,
+        None,
+        None,
+    );
+    assert!(!around.found);
+    assert!(around.reason.starts_with("window-out-of-range"));
+
+    let end_past_last_line = store.expand(
+        &stored.blob_ref,
+        Some("lines:40-60"),
+        None,
+        None,
+        None,
+        None,
+    );
+    assert!(!end_past_last_line.found);
+    assert!(
+        end_past_last_line.reason.starts_with("window-out-of-range"),
+        "got {}",
+        end_past_last_line.reason
+    );
+}
+
+#[test]
+fn windowed_expand_visible_tokens_much_less_than_full() {
+    let (mut store, _cache, _dir) = temp_store();
+    // ~200 lines × ~8 tokens-ish → full multi-k; 50-line window << full
+    let payload = multi_line_fixture(200);
+    let stored = store
+        .store_payload(&payload, ContentType::Unknown, None, None, None)
+        .unwrap();
+    store.recovery_tokens = 0;
+    let full = store.expand(&stored.blob_ref, Some("raw"), None, None, None, None);
+    let full_tokens = full.tokens;
+    store.recovery_tokens = 0;
+    let window = store.expand(
+        &stored.blob_ref,
+        Some("raw"),
+        Some(120),
+        Some(169), // 50 lines
+        None,
+        None,
+    );
+    assert!(window.found);
+    let window_tokens = window.tokens;
+    assert!(
+        window_tokens < full_tokens / 2,
+        "50-line window tokens ({window_tokens}) should be << full ({full_tokens})"
+    );
+    assert!(
+        window_tokens * 3 < full_tokens,
+        "window {window_tokens} vs full {full_tokens}"
+    );
+}

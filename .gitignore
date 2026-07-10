@@ -60,6 +60,7 @@ __pycache__/
 !/docs/racc.md
 !/docs/routing.md
 !/docs/windows-systemwide.md
+!/docs/mcp-tokenzero.portable.json
 
 # Local execution/handoff records
 /RECOVERY_RUNBOOK.md
