@@ -282,7 +282,9 @@ pub(crate) enum RgFailure {
 
 /// Portable rg discovery: env → PATH → well-known layouts (wqw.3).
 pub(crate) fn find_rg_in_path() -> Option<PathBuf> {
-    crate::binary_resolve::resolve_rg_binary().path
+    crate::binary_resolve::resolve_rg_binary()
+        .ok()
+        .map(|resolved| resolved.path)
 }
 
 /// Run ripgrep per root and map its `path:line:text` output onto the same

@@ -24,41 +24,67 @@ pub const TOKENZERO_RG_PATH_ENV: &str = "TOKENZERO_RG_PATH";
 /// Env override for curl (fetch).
 pub const TOKENZERO_CURL_PATH_ENV: &str = "TOKENZERO_CURL_PATH";
 
+/// Successful binary discovery: path plus how it was found.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct BinaryResolution {
+pub struct ResolvedBinary {
     pub name: String,
-    pub path: Option<PathBuf>,
+    pub path: PathBuf,
     pub source: &'static str,
-    pub error: Option<String>,
 }
 
-impl BinaryResolution {
-    pub fn ok(name: impl Into<String>, path: PathBuf, source: &'static str) -> Self {
-        Self {
-            name: name.into(),
-            path: Some(path),
-            source,
-            error: None,
-        }
-    }
+/// Failed binary discovery with a clear operator-facing message.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolveError {
+    pub name: String,
+    pub message: String,
+}
 
-    pub fn missing(name: impl Into<String>, error: impl Into<String>) -> Self {
+/// Typed resolution outcome (replaces the old path+error Option pair).
+pub type BinaryResolution = Result<ResolvedBinary, ResolveError>;
+
+impl ResolvedBinary {
+    pub fn new(name: impl Into<String>, path: PathBuf, source: &'static str) -> Self {
         Self {
             name: name.into(),
-            path: None,
-            source: "unresolved",
-            error: Some(error.into()),
+            path,
+            source,
         }
     }
 
     pub fn to_json(&self) -> serde_json::Value {
         serde_json::json!({
             "name": self.name,
-            "path": self.path.as_ref().map(|p| p.display().to_string()),
+            "path": self.path.display().to_string(),
             "source": self.source,
-            "error": self.error,
-            "ok": self.path.is_some(),
+            "error": null,
+            "ok": true,
         })
+    }
+}
+
+impl ResolveError {
+    pub fn new(name: impl Into<String>, message: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            message: message.into(),
+        }
+    }
+
+    pub fn to_json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "name": self.name,
+            "path": null,
+            "source": "unresolved",
+            "error": self.message,
+            "ok": false,
+        })
+    }
+}
+
+fn resolution_to_json(res: &BinaryResolution) -> serde_json::Value {
+    match res {
+        Ok(ok) => ok.to_json(),
+        Err(err) => err.to_json(),
     }
 }
 
@@ -186,38 +212,38 @@ pub fn resolve_binary_with_env(name: &str, env_override: Option<&Path>) -> Binar
         if path.as_os_str().is_empty() {
             // fall through
         } else if is_executable_file(path) {
-            return BinaryResolution::ok(name, path.to_path_buf(), "env");
+            return Ok(ResolvedBinary::new(name, path.to_path_buf(), "env"));
         } else if path.is_file() {
-            return BinaryResolution::missing(
+            return Err(ResolveError::new(
                 name,
                 format!(
                     "env override is not executable: {} (check TOKENZERO_*_PATH / TOKENZERO_BIN)",
                     path.display()
                 ),
-            );
+            ));
         } else {
-            return BinaryResolution::missing(
+            return Err(ResolveError::new(
                 name,
                 format!(
                     "env override points to missing file: {} (check TOKENZERO_*_PATH / TOKENZERO_BIN)",
                     path.display()
                 ),
-            );
+            ));
         }
     }
     if let Some(path) = find_on_path(name) {
-        return BinaryResolution::ok(name, path, "path");
+        return Ok(ResolvedBinary::new(name, path, "path"));
     }
     if let Some(path) = first_existing(well_known_candidates(name)) {
-        return BinaryResolution::ok(name, path, "well_known");
+        return Ok(ResolvedBinary::new(name, path, "well_known"));
     }
-    BinaryResolution::missing(
+    Err(ResolveError::new(
         name,
         format!(
             "{name} not found: set env override, put `{name}` on PATH, or install under \
              ~/.tokenzero/bin, ~/.cargo/bin, /opt/homebrew/bin, or /usr/local/bin"
         ),
-    )
+    ))
 }
 
 /// Resolve the TokenZero entry binary (CLI / MCP host).
@@ -225,22 +251,20 @@ pub fn resolve_binary_with_env(name: &str, env_override: Option<&Path>) -> Binar
 /// Order: `TOKENZERO_BIN` → PATH `tokenzero` → well-known → `current_exe` (if set).
 pub fn resolve_tokenzero_binary() -> BinaryResolution {
     let env_path = env::var_os(TOKENZERO_BIN_ENV).map(PathBuf::from);
-    let mut res = resolve_binary_with_env("tokenzero", env_path.as_deref());
-    if res.path.is_some() {
-        return res;
+    if let Ok(ok) = resolve_binary_with_env("tokenzero", env_path.as_deref()) {
+        return Ok(ok);
     }
     // Fallback: current process executable (running binary is a valid discovery).
     if let Ok(exe) = env::current_exe() {
         if exe.is_file() {
-            return BinaryResolution::ok("tokenzero", exe, "current_exe");
+            return Ok(ResolvedBinary::new("tokenzero", exe, "current_exe"));
         }
     }
-    res.error = Some(
+    Err(ResolveError::new(
+        "tokenzero",
         "tokenzero binary not found: set TOKENZERO_BIN, put `tokenzero` on PATH, \
-         or run `tokenzero install --global` (installs under ~/.tokenzero/bin)"
-            .into(),
-    );
-    res
+         or run `tokenzero install --global` (installs under ~/.tokenzero/bin)",
+    ))
 }
 
 /// Resolve ripgrep. Order: `TOKENZERO_RG_PATH` → PATH → well-known.
@@ -274,7 +298,7 @@ pub fn engine_binaries_json() -> serde_json::Value {
             "rg": TOKENZERO_RG_PATH_ENV,
             "curl": TOKENZERO_CURL_PATH_ENV,
         },
-        "binaries": bins.iter().map(BinaryResolution::to_json).collect::<Vec<_>>(),
+        "binaries": bins.iter().map(resolution_to_json).collect::<Vec<_>>(),
         "note": "No host-absolute personal AI checkout paths are used. Multi-machine: install tokenzero on PATH or under $HOME/.tokenzero/bin; use TOKENZERO_BIN / TOKENZERO_RG_PATH when needed.",
     })
 }
@@ -298,19 +322,18 @@ mod tests {
             fs::set_permissions(&fake, perms).unwrap();
         }
         let res = resolve_binary_with_env("rg", Some(&fake));
-        assert_eq!(res.source, "env");
-        assert_eq!(res.path.as_deref(), Some(fake.as_path()));
+        let ok = res.expect("env override should resolve");
+        assert_eq!(ok.source, "env");
+        assert_eq!(ok.path, fake);
     }
 
     #[test]
     fn missing_env_override_is_clear_error() {
         let missing = PathBuf::from("/no/such/tokenzero-wqw3-rg-binary-xyz");
         let res = resolve_binary_with_env("rg", Some(&missing));
-        assert!(res.path.is_none());
-        assert_eq!(res.source, "unresolved");
-        let err = res.error.unwrap();
-        assert!(err.contains("missing file"), "{err}");
-        assert!(err.contains("TOKENZERO"), "{err}");
+        let err = res.expect_err("missing env override");
+        assert!(err.message.contains("missing file"), "{}", err.message);
+        assert!(err.message.contains("TOKENZERO"), "{}", err.message);
     }
 
     #[cfg(unix)]
@@ -381,9 +404,8 @@ mod tests {
             perms.set_mode(0o644);
             fs::set_permissions(&fake, perms).unwrap();
             let res = resolve_binary_with_env("rg", Some(&fake));
-            assert!(res.path.is_none());
-            let err = res.error.unwrap();
-            assert!(err.contains("not executable"), "{err}");
+            let err = res.expect_err("non-executable env override");
+            assert!(err.message.contains("not executable"), "{}", err.message);
         }
     }
 
@@ -454,13 +476,10 @@ mod tests {
     fn tokenzero_resolution_has_fallback_or_path() {
         // Running under cargo test: current_exe is available as last resort.
         let res = resolve_tokenzero_binary();
+        let ok = res.expect("expected tokenzero resolve via path/well_known/current_exe");
         assert!(
-            res.path.is_some(),
-            "expected tokenzero resolve via path/well_known/current_exe: {res:?}"
-        );
-        assert!(
-            matches!(res.source, "env" | "path" | "well_known" | "current_exe"),
-            "{res:?}"
+            matches!(ok.source, "env" | "path" | "well_known" | "current_exe"),
+            "{ok:?}"
         );
     }
 }

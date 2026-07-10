@@ -42,9 +42,9 @@ mod workspace;
 mod write_ladder;
 
 pub use binary_resolve::{
-    BinaryResolution, TOKENZERO_BIN_ENV, TOKENZERO_CURL_PATH_ENV, TOKENZERO_RG_PATH_ENV,
-    engine_binaries_json, resolve_all_engine_binaries, resolve_curl_binary, resolve_rg_binary,
-    resolve_tokenzero_binary,
+    BinaryResolution, ResolveError, ResolvedBinary, TOKENZERO_BIN_ENV, TOKENZERO_CURL_PATH_ENV,
+    TOKENZERO_RG_PATH_ENV, engine_binaries_json, resolve_all_engine_binaries, resolve_curl_binary,
+    resolve_rg_binary, resolve_tokenzero_binary,
 };
 pub use cache_maintenance::{cache_maintenance, session_pack, shell_spill_dir};
 pub use catalog::{ResourceSpec, ToolSpec, resource_specs, tool_specs};

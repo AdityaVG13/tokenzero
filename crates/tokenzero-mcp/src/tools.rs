@@ -18,23 +18,53 @@ pub(crate) fn call_tool(
     args: &Value,
     call_id: Option<String>,
 ) -> Result<Value, JsonRpcErrorData> {
+    dispatch_gated_tool(
+        engine,
+        name,
+        args,
+        call_id,
+        crate::surface_health::GateMode::Strict,
+    )
+}
+
+/// FastMCP variant: health gate only ([`GateMode::HealthOnly`]). Registration
+/// already filters by surface; membership stays open at call time for the
+/// unified FastMCP product contract and existing CodeMode plan tests.
+pub(crate) fn call_tool_fastmcp(
+    engine: &TokenZeroEngine,
+    name: &str,
+    args: &Value,
+    call_id: Option<String>,
+) -> Result<Value, JsonRpcErrorData> {
+    dispatch_gated_tool(
+        engine,
+        name,
+        args,
+        call_id,
+        crate::surface_health::GateMode::HealthOnly,
+    )
+}
+
+fn dispatch_gated_tool(
+    engine: &TokenZeroEngine,
+    name: &str,
+    args: &Value,
+    call_id: Option<String>,
+    mode: crate::surface_health::GateMode,
+) -> Result<Value, JsonRpcErrorData> {
     let canonical = canonical_tool(name);
     let started = std::time::Instant::now();
-    // Surface membership first: Classic must not dispatch CodeMode execute
-    // (and vice versa). On CodeMode, recovery + permanently-locked tools still
-    // reach the health gate so agents get policy_refusal (ladder / never-
-    // unlocked) instead of unknown_tool.
-    if !crate::catalog::canonical_allowed_on_surface(engine.config.tool_surface, canonical)
-        && !crate::catalog::canonical_allowed_on_surface(engine.config.tool_surface, name)
-        && !codemode_health_gated_candidate(engine.config.tool_surface, canonical, name)
-    {
-        return Err(JsonRpcErrorData::unknown_tool(name));
-    }
-    if let Err(policy_msg) = engine
+    match engine
         .surface_health()
-        .allow_tool_call(engine.config.tool_surface, name)
+        .gate_tools_call(engine.config.tool_surface, name, mode)
     {
-        return Err(JsonRpcErrorData::policy_refusal(name, policy_msg));
+        Ok(_) => {}
+        Err(crate::surface_health::GateRefusal::UnknownTool) => {
+            return Err(JsonRpcErrorData::unknown_tool(name));
+        }
+        Err(crate::surface_health::GateRefusal::Policy(msg)) => {
+            return Err(JsonRpcErrorData::policy_refusal(name, msg));
+        }
     }
     let result = dispatch_tool(engine, canonical, name, args);
     engine.record_tool_call(canonical, started.elapsed(), result.is_err());
@@ -42,49 +72,6 @@ pub(crate) fn call_tool(
     // Expand health is recorded inside expand_with_params (CLI + CodeMode + MCP).
     record_mcp_pulse(engine, canonical, args, &response, call_id);
     Ok(mcp_tool_response(response))
-}
-
-/// FastMCP variant: omits the Classic/CodeMode *membership* gate so one server
-/// can expose both surfaces (FastMCP product contract). Still applies the
-/// crash-only health gate when the engine is configured for CodeMode.
-pub(crate) fn call_tool_fastmcp(
-    engine: &TokenZeroEngine,
-    name: &str,
-    args: &Value,
-    call_id: Option<String>,
-) -> Result<Value, JsonRpcErrorData> {
-    let canonical = canonical_tool(name);
-    let started = std::time::Instant::now();
-    if let Err(policy_msg) = engine
-        .surface_health()
-        .allow_tool_call(engine.config.tool_surface, name)
-    {
-        return Err(JsonRpcErrorData::policy_refusal(name, policy_msg));
-    }
-    let result = dispatch_tool(engine, canonical, name, args);
-    engine.record_tool_call(canonical, started.elapsed(), result.is_err());
-    let response = result?;
-    record_mcp_pulse(engine, canonical, args, &response, call_id);
-    Ok(mcp_tool_response(response))
-}
-
-fn codemode_health_gated_candidate(
-    surface: tokenzero_core::McpToolSurface,
-    canonical: &str,
-    name: &str,
-) -> bool {
-    if surface != tokenzero_core::McpToolSurface::CodeMode {
-        return false;
-    }
-    // Anything SurfaceHealth::decide classifies (recovery / permanently locked /
-    // report) should reach allow_tool_call for the structured policy message.
-    !matches!(
-        crate::surface_health::decide_static(surface, name, false),
-        crate::surface_health::CrashOnlyDecision::NotGated
-    ) || matches!(
-        canonical,
-        "expand" | "read" | "report_tool_issue" | "shell" | "edit" | "write"
-    )
 }
 
 /// Reject MCP-supplied roots that escape the server's configured allowlist.

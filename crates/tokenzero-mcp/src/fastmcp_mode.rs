@@ -6,10 +6,9 @@ use serde_json::Value;
 use std::sync::{Arc, Mutex};
 use tokenzero_core::count_tokens;
 
-use crate::catalog::{
-    TOOL_ALIASES, canonical_tool_specs, resource_specs, surface_includes_canonical,
-};
+use crate::catalog::{TOOL_ALIASES, canonical_tool_specs, resource_specs};
 use crate::resources::build_resource_payload;
+use crate::surface_health::surface_includes;
 use crate::{EngineConfig, TokenZeroEngine, call_tool_fastmcp};
 use tokenzero_core::McpToolSurface;
 
@@ -197,7 +196,9 @@ pub fn run_fastmcp_stdio(config: EngineConfig) -> ! {
         Server::new("TokenZero", env!("CARGO_PKG_VERSION")).instructions(instructions);
 
     for seed in canonical_tool_specs() {
-        if !surface_includes_canonical(surface, seed.name) {
+        // Same policy owner as tools/list / tools/call; recovery is registered
+        // once and remains health-gated at call time.
+        if !surface_includes(surface, seed.name) {
             continue;
         }
         let handler = EngineTool {
@@ -212,7 +213,7 @@ pub fn run_fastmcp_stdio(config: EngineConfig) -> ! {
     // Register alias tool names (read -> tz_read, etc.) so clients see them in tools/list.
     // Only include aliases whose target is on the active surface.
     for &(alias, target) in TOOL_ALIASES {
-        if !surface_includes_canonical(surface, target) {
+        if !surface_includes(surface, target) {
             continue;
         }
         let handler = EngineTool {
