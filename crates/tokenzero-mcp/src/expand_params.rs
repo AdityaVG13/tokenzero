@@ -12,6 +12,10 @@ pub struct ExpandParams {
     pub symbol: Option<String>,
     pub since: Option<String>,
     pub fresh: bool,
+    /// When true, return full body (byte-exact). When false (default) and no
+    /// window/selector is specified, return a capsule (preview + ref + estimates)
+    /// instead of the full payload (wqw.13).
+    pub raw: bool,
 }
 
 impl ExpandParams {
@@ -42,6 +46,7 @@ impl ExpandParams {
                 .and_then(Value::as_str)
                 .map(str::to_string),
             fresh: arg_bool(args, "fresh"),
+            raw: arg_bool(args, "raw"),
         })
     }
 
@@ -82,6 +87,7 @@ impl ExpandParams {
                 .map(str::to_string);
             params.since = map.get("since").and_then(Value::as_str).map(str::to_string);
             params.fresh = map.get("fresh").map(arg_bool_value).unwrap_or(false);
+            params.raw = map.get("raw").map(arg_bool_value).unwrap_or(false);
         }
         Ok(params)
     }
@@ -125,6 +131,7 @@ impl ExpandParams {
                 .map(str::to_string),
             since: map.get("since").and_then(Value::as_str).map(str::to_string),
             fresh: map.get("fresh").map(arg_bool_value).unwrap_or(false),
+            raw: map.get("raw").map(arg_bool_value).unwrap_or(false),
         })
     }
 }

@@ -307,6 +307,54 @@ impl TokenZeroEngine {
         // spills) and on explicit `since=` diffs; serves are still RECORDED
         // below so those paths keep learning from expands.
 
+        // Capsule-default expand (wqw.13): when no raw:true, no window
+        // (start_line/end_line), and no explicit selector is requested,
+        // return a capsule (preview + ref + byte/token estimate) instead of
+        // the full payload. This prevents agents from materializing large
+        // payloads they may not need. The recovery contract is preserved:
+        // raw:true always returns byte-exact content.
+        let is_windowed = params.start_line.is_some()
+            || params.end_line.is_some()
+            || params.selector.is_some()
+            || params.anchor_kind.is_some()
+            || params.symbol.is_some();
+        let content_tokens = count_tokens(&target.content);
+        const CAPSULE_TOKEN_THRESHOLD: usize = 200;
+        if !params.raw && !is_windowed && content_tokens > CAPSULE_TOKEN_THRESHOLD {
+            // Return a capsule: preview (first 12 lines) + ref + estimates.
+            let preview = tokenzero_core::summarize_lines(&target.content, 12, 8, "");
+            let byte_count = target.content.len();
+            let capsule = format!(
+                "{preview}\n\n[capsule: {byte_count} bytes, ~{content_tokens} tokens — expand with raw:true for full body]"
+            );
+            let capsule_tokens = count_tokens(&capsule);
+            let mut response = ToolResponse::ok(
+                "expand",
+                Mode::Exact,
+                capsule,
+                vec![tokenzero_core::RefRecord {
+                    kind: "blob".to_string(),
+                    ref_id: params.ref_id.clone(),
+                    bytes: target.content.len(),
+                    live: true,
+                }],
+                Accounting {
+                    raw_tokens: content_tokens,
+                    visible_tokens: capsule_tokens,
+                    recovery_tokens: store.recovery_tokens,
+                    exact_ref_tokens: Some(count_tokens(&params.ref_id)),
+                },
+            );
+            if self.config.session_dedup {
+                pending.push(self.pending_expand_record(&params, &target.content, &mut store));
+            }
+            if let Some(telemetry) = summary.telemetry() {
+                response.telemetry = Some(telemetry);
+            }
+            self.session_apply(pending, &summary);
+            return response;
+        }
+
         let mut response = expansion_response(target.clone(), store.recovery_tokens);
         if self.config.session_dedup {
             pending.push(self.pending_expand_record(&params, &target.content, &mut store));
@@ -365,6 +413,7 @@ impl TokenZeroEngine {
             symbol: symbol.map(str::to_string),
             since: None,
             fresh: false,
+            raw: false,
         })
     }
 

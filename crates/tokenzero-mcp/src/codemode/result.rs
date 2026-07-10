@@ -109,6 +109,9 @@ pub struct CodeModeTelemetry {
     /// from available accounting (raw vs. visible tokens, plus exact expand
     /// payload bytes); see exec.rs for the counterfactual methodology.
     pub prevented_read_bytes: usize,
+    /// Count of expand calls that returned a capsule instead of the full body (wqw.13).
+    #[serde(default)]
+    pub prevented_full_body_count: usize,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub extra: Option<Value>,
 }
@@ -223,6 +226,7 @@ impl CodeModeResult {
                 framing_tokens: 0,
                 preview_tokens: 0,
                 prevented_read_bytes: 0,
+                prevented_full_body_count: 0,
                 extra: Some(serde_json::json!({
                     "operations": ops,
                     "visible_tokens": visible,
@@ -287,6 +291,7 @@ impl CodeModeResult {
                 framing_tokens: 0,
                 preview_tokens: 0,
                 prevented_read_bytes: 0,
+                prevented_full_body_count: 0,
                 extra: Some(serde_json::json!({
                     "operations": ops,
                     "visible_tokens": 0,
