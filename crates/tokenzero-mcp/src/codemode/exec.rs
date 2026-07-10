@@ -6,6 +6,7 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
+use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 use tokenzero_core::{Mode, ToolResponse, count_tokens, detect_content_type};
 use tokenzero_filters::{discover, rewrite_command};
@@ -23,6 +24,18 @@ use super::store::{CodeModeLimits, ExecutionStep, ExecutionStore, finalize_resul
 use crate::expand_params::ExpandParams;
 
 const EXACT_EXPAND_MARKER: &str = "__tz_exact_expand";
+
+/// Per-session previous visible output keyed by resolved recovery cache path.
+/// Used to estimate prefix-cache hits when the provider does not expose one.
+static PREVIOUS_OUTPUT_BY_SESSION: OnceLock<Mutex<HashMap<PathBuf, String>>> = OnceLock::new();
+
+fn previous_output_by_session() -> &'static Mutex<HashMap<PathBuf, String>> {
+    PREVIOUS_OUTPUT_BY_SESSION.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// Approximate bytes per token for prevented-read counterfactuals. Used
+/// only when the visible text gives no better per-token byte ratio.
+const PREVENTED_READ_BYTES_PER_TOKEN: usize = 4;
 
 thread_local! {
     /// Payload identity registry for the current execution: hashes of exact
@@ -261,6 +274,7 @@ struct JsExecutionState {
     physical_ops: usize,
     visible_tokens: usize,
     raw_tokens: usize,
+    prevented_read_bytes: usize,
     refs: Vec<String>,
     steps: Vec<ExecutionStep>,
     started_ms: u128,
@@ -488,6 +502,18 @@ fn execute_quickjs_plan(
         state.raw_tokens,
     );
     result.telemetry.physical_ops = state.physical_ops;
+    result.telemetry.prevented_read_bytes = state.prevented_read_bytes;
+    if let Some(extra) = result
+        .telemetry
+        .extra
+        .as_mut()
+        .and_then(Value::as_object_mut)
+    {
+        extra.insert(
+            "prevented_read_bytes".to_string(),
+            json!(state.prevented_read_bytes),
+        );
+    }
     finalize_codemode_result(
         result,
         "code",
@@ -597,6 +623,7 @@ fn invoke_js_binding(
             .unwrap_or_else(|_| "{\"__tz_error\":\"unknown error\"}".to_string());
         }
     };
+    let prevented_read_bytes = outcome.prevented_read_bytes();
     let value = outcome.into_value();
     let refs = refs_from_value(&value);
     let mut state = state.borrow_mut();
@@ -617,6 +644,9 @@ fn invoke_js_binding(
         .visible_tokens
         .saturating_add(result_visible_tokens(&value));
     state.raw_tokens = state.raw_tokens.saturating_add(result_raw_tokens(&value));
+    state.prevented_read_bytes = state
+        .prevented_read_bytes
+        .saturating_add(prevented_read_bytes);
     state.refs.extend(refs.iter().cloned());
     let op = state.ops;
     state.steps.push(ExecutionStep {
@@ -795,6 +825,7 @@ fn execute_lowered_plan(
     let mut ops: usize = 0;
     let mut total_visible: usize = 0;
     let mut total_raw: usize = 0;
+    let mut total_prevented: usize = 0;
     let mut last_value: Value = Value::Null;
     let mut steps: Vec<ExecutionStep> = Vec::new();
 
@@ -823,7 +854,13 @@ fn execute_lowered_plan(
                     status: "completed".to_string(),
                     refs: refs_from_value(outcome.as_value()),
                 });
-                record_outcome(&outcome, &mut all_refs, &mut total_visible, &mut total_raw);
+                record_outcome(
+                    &outcome,
+                    &mut all_refs,
+                    &mut total_visible,
+                    &mut total_raw,
+                    &mut total_prevented,
+                );
                 last_value = outcome.as_value().clone();
                 scope.insert(name.clone(), outcome.into_value());
             }
@@ -850,7 +887,13 @@ fn execute_lowered_plan(
                     status: "completed".to_string(),
                     refs: refs_from_value(outcome.as_value()),
                 });
-                record_outcome(&outcome, &mut all_refs, &mut total_visible, &mut total_raw);
+                record_outcome(
+                    &outcome,
+                    &mut all_refs,
+                    &mut total_visible,
+                    &mut total_raw,
+                    &mut total_prevented,
+                );
                 last_value = outcome.into_value();
             }
             Statement::Return(expr) => {
@@ -869,29 +912,37 @@ fn execute_lowered_plan(
                     }
                 };
                 let vis = count_tokens(&serde_json::to_string(&value).unwrap_or_default());
+                let mut result =
+                    CodeModeResult::completed(value, all_refs, ops, total_visible + vis, total_raw);
+                result.telemetry.prevented_read_bytes = total_prevented;
+                if let Some(extra) = result
+                    .telemetry
+                    .extra
+                    .as_mut()
+                    .and_then(Value::as_object_mut)
+                {
+                    extra.insert("prevented_read_bytes".to_string(), json!(total_prevented));
+                }
                 return finalize_codemode_result(
-                    CodeModeResult::completed(value, all_refs, ops, total_visible + vis, total_raw),
-                    kind,
-                    plan,
-                    started_ms,
-                    &options,
-                    limits,
-                    steps,
+                    result, kind, plan, started_ms, &options, limits, steps,
                 );
             }
         }
     }
 
     let vis = count_tokens(&serde_json::to_string(&last_value).unwrap_or_default());
-    finalize_codemode_result(
-        CodeModeResult::completed(last_value, all_refs, ops, total_visible + vis, total_raw),
-        kind,
-        plan,
-        started_ms,
-        &options,
-        limits,
-        steps,
-    )
+    let mut result =
+        CodeModeResult::completed(last_value, all_refs, ops, total_visible + vis, total_raw);
+    result.telemetry.prevented_read_bytes = total_prevented;
+    if let Some(extra) = result
+        .telemetry
+        .extra
+        .as_mut()
+        .and_then(Value::as_object_mut)
+    {
+        extra.insert("prevented_read_bytes".to_string(), json!(total_prevented));
+    }
+    finalize_codemode_result(result, kind, plan, started_ms, &options, limits, steps)
 }
 
 fn ref_first_final_value(
@@ -1050,6 +1101,27 @@ fn finalize_codemode_result(
     // Preview = payload minus ref strings (inline text the model sees directly).
     result.telemetry.preview_tokens =
         payload_tokens.saturating_sub(result.telemetry.ref_string_tokens);
+
+    // Provider-exposed cached_tokens take priority when available; byte-prefix
+    // comparison is the fallback estimate.
+    let current_output = serde_json::to_string(result.value.as_ref().unwrap_or(&Value::Null))
+        .unwrap_or_default();
+    let (cached_tokens, total_output_tokens) = {
+        let cache_path = engine.config.cache_path.clone();
+        let mut map = previous_output_by_session().lock().unwrap();
+        let n = map
+            .get(&cache_path)
+            .map(|prev| common_prefix_len(&current_output, prev))
+            .unwrap_or(0);
+        let matched = &current_output[..n];
+        let cached = count_tokens(matched);
+        let total = count_tokens(&current_output);
+        map.insert(cache_path, current_output);
+        (cached, total)
+    };
+    result.telemetry.prefix_cache_hits = result.telemetry.prefix_cache_hits.saturating_add(cached_tokens);
+    result.telemetry.prefix_cache_total = result.telemetry.prefix_cache_total.saturating_add(total_output_tokens);
+
     if let Some(extra) = result
         .telemetry
         .extra
@@ -1077,6 +1149,27 @@ fn finalize_codemode_result(
         extra.insert(
             "preview_tokens".to_string(),
             json!(result.telemetry.preview_tokens),
+        );
+        extra.insert(
+            "prevented_read_bytes".to_string(),
+            json!(result.telemetry.prevented_read_bytes),
+        );
+        extra.insert(
+            "prefix_cache_hits".to_string(),
+            json!(result.telemetry.prefix_cache_hits),
+        );
+        extra.insert(
+            "prefix_cache_total".to_string(),
+            json!(result.telemetry.prefix_cache_total),
+        );
+        extra.insert(
+            "prefix_cache_hit_rate".to_string(),
+            json!(if result.telemetry.prefix_cache_total == 0 {
+                0.0
+            } else {
+                result.telemetry.prefix_cache_hits as f64
+                    / result.telemetry.prefix_cache_total as f64
+            }),
         );
     }
     result.telemetry.refs_count = Some(result.refs.len());
@@ -1186,6 +1279,7 @@ fn execute_json_plan(
     let mut all_refs = Vec::new();
     let mut total_visible = 0usize;
     let mut total_raw = 0usize;
+    let mut total_prevented = 0usize;
     let mut executed = Vec::new();
     let mut last = Value::Null;
 
@@ -1251,7 +1345,13 @@ fn execute_json_plan(
             status: "completed".to_string(),
             refs,
         });
-        record_outcome(&outcome, &mut all_refs, &mut total_visible, &mut total_raw);
+        record_outcome(
+            &outcome,
+            &mut all_refs,
+            &mut total_visible,
+            &mut total_raw,
+            &mut total_prevented,
+        );
         last = outcome.into_value();
         scope.insert(id, last.clone());
     }
@@ -1268,6 +1368,7 @@ fn execute_json_plan(
         total_visible + vis,
         total_raw,
     );
+    result.telemetry.prevented_read_bytes = total_prevented;
     if let Some(extra) = result
         .telemetry
         .extra
@@ -1278,6 +1379,7 @@ fn execute_json_plan(
             "parallel_groups".to_string(),
             json!(count_parallel_groups(steps_arr)),
         );
+        extra.insert("prevented_read_bytes".to_string(), json!(total_prevented));
     }
     result.telemetry.parallel_groups = Some(count_parallel_groups(steps_arr));
     result.telemetry.physical_ops = estimate_physical_ops(steps_arr);
@@ -1503,20 +1605,69 @@ fn tool_response_to_value(resp: &ToolResponse) -> Value {
     obj
 }
 
+/// Counterfactual estimate of bytes that a full read would have cost but
+/// that were avoided because graph queries, search hits, or ref expansion
+/// satisfied the request without reading the whole source.
+///
+/// Methodology (honest, lower-bound):
+/// - For search/glob/tree (graph-guided sufficiency and search precision),
+///   the engine exposes `raw_tokens` (the full underlying output) and
+///   `visible_tokens` (the compact summary actually shown). The difference is
+///   the tokens we did not have to materialize in the response. We convert
+///   those tokens to bytes using the visible text's actual bytes-per-token
+///   ratio when available, otherwise a conservative 4 bytes/token fallback.
+/// - For expand (demand paging), the exact payload bytes are counted as
+///   prevented because the content was recovered from the cache/ref store
+///   instead of re-reading the source file.
+/// This is a counterfactual estimate: it assumes the agent would otherwise
+/// have requested the full underlying content, and it does not include
+/// unread files that produced no matches.
+fn estimate_prevented_read_bytes(resp: &ToolResponse) -> usize {
+    let accounting = match &resp.accounting {
+        Some(acc) => acc,
+        None => return 0,
+    };
+    let visible_text = resp.visible.as_ref().map(|v| v.text.as_str()).unwrap_or("");
+    let mut prevented = 0usize;
+    match resp.tool.as_str() {
+        "find" | "grep" | "glob" | "tree" => {
+            let bytes_per_token = if accounting.visible_tokens > 0 {
+                (visible_text.len() / accounting.visible_tokens).max(1)
+            } else {
+                PREVENTED_READ_BYTES_PER_TOKEN
+            };
+            prevented = accounting
+                .raw_tokens
+                .saturating_sub(accounting.visible_tokens)
+                .saturating_mul(bytes_per_token);
+        }
+        "expand" | "expand_many" => {
+            prevented = visible_text.len();
+        }
+        _ => {}
+    }
+    prevented
+}
+
 #[derive(Debug)]
 pub(crate) struct OpOutcome {
     value: Value,
+    prevented_read_bytes: usize,
 }
 
 impl OpOutcome {
     fn from_tool_response(resp: &ToolResponse) -> Self {
         Self {
             value: tool_response_to_value(resp),
+            prevented_read_bytes: estimate_prevented_read_bytes(resp),
         }
     }
 
     fn from_catalog(value: Value) -> Self {
-        Self { value }
+        Self {
+            value,
+            prevented_read_bytes: 0,
+        }
     }
 
     pub(crate) fn into_value(self) -> Value {
@@ -1549,6 +1700,15 @@ impl OpOutcome {
     fn raw_tokens(&self) -> usize {
         result_raw_tokens(&self.value)
     }
+
+    fn prevented_read_bytes(&self) -> usize {
+        self.prevented_read_bytes
+    }
+
+    fn with_prevented_read_bytes(mut self, bytes: usize) -> Self {
+        self.prevented_read_bytes = bytes;
+        self
+    }
 }
 
 fn record_outcome(
@@ -1556,10 +1716,12 @@ fn record_outcome(
     all_refs: &mut Vec<String>,
     total_visible: &mut usize,
     total_raw: &mut usize,
+    total_prevented_read_bytes: &mut usize,
 ) {
     collect_refs(&outcome.value, all_refs);
     *total_visible += outcome.visible_tokens();
     *total_raw += outcome.raw_tokens();
+    *total_prevented_read_bytes += outcome.prevented_read_bytes();
 }
 
 struct Opts<'a>(Option<&'a serde_json::Map<String, Value>>);
@@ -1963,6 +2125,7 @@ fn exec_expand_many(
         }
     };
     let mut results = Vec::with_capacity(items.len());
+    let mut prevented = 0usize;
     for item in items {
         let params = ExpandParams::from_expand_many_item(item)
             .map_err(|message| Box::new(CodeModeResult::error(message, 0)))?;
@@ -1976,6 +2139,7 @@ fn exec_expand_many(
             )));
         }
         let resp = engine.expand_with_params(params);
+        prevented = prevented.saturating_add(estimate_prevented_read_bytes(&resp));
         results.push(
             OpOutcome::from_tool_response(&resp)
                 .mark_exact_expand()
@@ -1985,7 +2149,8 @@ fn exec_expand_many(
     Ok(OpOutcome::from_catalog(json!({
         "items": results,
         "count": results.len(),
-    })))
+    }))
+    .with_prevented_read_bytes(prevented))
 }
 
 fn exec_compact(
@@ -2119,7 +2284,10 @@ fn exec_compact_inner(
     if refs_out.len() > 1 {
         value["refs"] = json!(refs_out.iter().map(|r| &r.ref_id).collect::<Vec<_>>());
     }
-    Ok(OpOutcome { value })
+    Ok(OpOutcome {
+        value,
+        prevented_read_bytes: 0,
+    })
 }
 
 fn exec_ingest(engine: &TokenZeroEngine, args: &[Value]) -> Result<OpOutcome, Box<CodeModeResult>> {
@@ -2266,6 +2434,7 @@ fn exec_pipe(
     }
     let mut results: Vec<Value> = Vec::with_capacity(steps.len());
     let mut pipe_scope: HashMap<String, Value> = HashMap::new();
+    let mut prevented = 0usize;
     for (idx, step) in steps.iter().enumerate() {
         let method = step.get("method").and_then(|v| v.as_str()).ok_or_else(|| {
             Box::new(CodeModeResult::error(
@@ -2289,6 +2458,7 @@ fn exec_pipe(
             args: step_args,
         };
         let outcome = dispatch(engine, work_root, &call, &pipe_scope)?;
+        prevented = prevented.saturating_add(outcome.prevented_read_bytes());
         let val = outcome.into_value();
         pipe_scope.insert("_prev".to_string(), val.clone());
         pipe_scope.insert(format!("_step{idx}"), val.clone());
@@ -2306,7 +2476,7 @@ fn exec_pipe(
         .and_then(Value::as_bool)
         .unwrap_or(false)
     {
-        return Ok(OpOutcome::from_catalog(full));
+        return Ok(OpOutcome::from_catalog(full).with_prevented_read_bytes(prevented));
     }
     let text = serde_json::to_string(&full).unwrap_or_default();
     let content_type = detect_content_type(&text, None);
@@ -2319,12 +2489,13 @@ fn exec_pipe(
         .map(|s| s.blob_ref.as_str().to_string())
         .unwrap_or_default();
     if ref_id.is_empty() {
-        return Ok(OpOutcome::from_catalog(full));
+        return Ok(OpOutcome::from_catalog(full).with_prevented_read_bytes(prevented));
     }
     Ok(OpOutcome::from_catalog(json!({
         "ref": ref_id,
         "preview": first_line_preview(&text),
-    })))
+    }))
+    .with_prevented_read_bytes(prevented))
 }
 
 /// Extract specific keys from an object value.
@@ -2549,4 +2720,17 @@ fn result_raw_tokens(value: &Value) -> usize {
         .get("raw_tokens")
         .and_then(|v| v.as_u64())
         .unwrap_or(0) as usize
+}
+
+/// Byte-stable prefix length aligned to char boundaries, used for the
+/// per-session prefix-cache hit-rate fallback estimate.
+fn common_prefix_len(a: &str, b: &str) -> usize {
+    let mut len = 0usize;
+    for ((idx, ca), (_, cb)) in a.char_indices().zip(b.char_indices()) {
+        if ca != cb {
+            break;
+        }
+        len = idx + ca.len_utf8();
+    }
+    len
 }
