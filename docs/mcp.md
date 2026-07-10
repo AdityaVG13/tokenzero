@@ -425,7 +425,8 @@ Recovery calls remain policy-gated while the primary surface is healthy. The
 stable list matches the server's `tools.listChanged=false` capability.
 
 1. Prefer `zero.token.expand` / `zero.token.read` inside `tz_execute_code`.
-2. If expand fails with X0 (or substrate_down), session surface health marks
+2. If expand fails with a recovery error, or read reports a substrate error,
+   session surface health marks
    the primary surface **unhealthy** and unlocks **only** crash-only recovery
    tools `tz_expand` and `tz_read` so bytes can be recovered without native
    Read. Write/shell stay locked.

@@ -11,7 +11,7 @@ use tokenzero_core::{Mode, ToolResponse, count_tokens, detect_content_type};
 use tokenzero_filters::{discover, rewrite_command};
 
 use crate::workspace::{
-    allowed_roots_for_workspace, default_recovery_cache_path, tokenzero_work_root,
+    allowed_roots_for_workspace, resolve_recovery_cache_path, tokenzero_work_root,
 };
 use crate::{EditHunk, EngineConfig, TokenZeroEngine, shell_timeout_from_secs};
 
@@ -74,10 +74,10 @@ fn make_engine_for_root_with_options(root: PathBuf, options: &CodeModeOptions) -
     // Same default store as CLI expand / MCP (wqw.8): refs minted by codemode
     // must expand on the next call without re-running the producer. Explicit
     // --cache-path / CodeModeOptions.cache_path still override.
-    let cache_path = options
-        .cache_path
-        .clone()
-        .unwrap_or_else(|| default_recovery_cache_path(&root));
+    let cache_path = options.cache_path.clone().map_or_else(
+        || resolve_recovery_cache_path(&root, None),
+        |path| resolve_recovery_cache_path(&root, Some(path)),
+    );
     let config = EngineConfig {
         allowed_roots: allowed_roots_for_workspace(&root, &options.allowed_roots),
         cache_path,
@@ -730,7 +730,13 @@ fn wrap_js_plan(plan: &str) -> String {
     )
 }
 
-fn limits_from_options(options: &CodeModeOptions) -> CodeModeLimits {
+pub(super) fn limits_from_options(options: &CodeModeOptions) -> CodeModeLimits {
+    // `hard_max_wall_ms` is a real ceiling. A larger soft limit must never
+    // raise it, otherwise caller-controlled limits can disable the sandbox
+    // wall-clock guard. Internal callers that need a larger ceiling must set
+    // both fields explicitly.
+    let hard_max_wall_ms = options.hard_max_wall_ms;
+    let max_wall_ms = options.max_wall_ms.min(hard_max_wall_ms);
     CodeModeLimits {
         max_output_bytes: options.max_output_bytes,
         max_refs_emitted: options.max_refs_emitted,
@@ -739,8 +745,8 @@ fn limits_from_options(options: &CodeModeOptions) -> CodeModeLimits {
         max_microtasks: options.max_microtasks,
         max_memory_bytes: options.max_memory_bytes,
         max_code_bytes: options.max_code_bytes,
-        max_wall_ms: options.max_wall_ms,
-        hard_max_wall_ms: options.hard_max_wall_ms.max(options.max_wall_ms),
+        max_wall_ms,
+        hard_max_wall_ms,
         ..Default::default()
     }
 }
@@ -1386,7 +1392,7 @@ fn dispatch_values(
         "zero.grep" | "grep" | "zero.token.grep" => exec_find(engine, work_root, args, true),
         "zero.glob" | "glob" | "zero.token.glob" => exec_glob(engine, work_root, args),
         "zero.tree" | "tree" | "zero.token.tree" => exec_tree(engine, work_root, args),
-        "zero.shell" | "shell" | "zero.token.shell" => exec_shell(engine, args),
+        "zero.shell" | "shell" | "zero.token.shell" => exec_shell(engine, work_root, args),
         "zero.edit" | "edit" | "zero.token.edit" => exec_edit(engine, work_root, args),
         "zero.token.expand" | "zero.expand" | "expand" => exec_expand(engine, args),
         "zero.token.expandMany" | "zero.expandMany" | "expandMany" | "expand_many" => {
@@ -1764,29 +1770,26 @@ fn exec_tree(
     Ok(OpOutcome::from_tool_response(&resp))
 }
 
-fn exec_shell(engine: &TokenZeroEngine, args: &[Value]) -> Result<OpOutcome, Box<CodeModeResult>> {
+fn exec_shell(
+    engine: &TokenZeroEngine,
+    work_root: &Path,
+    args: &[Value],
+) -> Result<OpOutcome, Box<CodeModeResult>> {
     let command = require_str_arg(
         args,
         0,
         "zero.shell requires a command string as first argument",
     )?;
     let opts = Opts::from_arg(args, 1);
-    // Relative cwd is resolved against allowed roots via path_allowed after
-    // engine comparable_path (cwd-based). Prefer absolute or omit cwd so the
-    // engine uses the execute-root workspace. When callers pass a relative cwd,
-    // join against the first allowed root (execute root).
+    // Relative cwd is always anchored to this plan's execute root. Explicit
+    // allowed roots may precede the execute root in engine configuration, so
+    // using allowed_roots.first() can silently run in the wrong project.
     let cwd = opts.str("cwd").map(|raw| {
         let path = PathBuf::from(raw);
         if path.is_absolute() {
             path
         } else {
-            engine
-                .config
-                .allowed_roots
-                .first()
-                .cloned()
-                .unwrap_or_else(|| PathBuf::from("."))
-                .join(path)
+            work_root.join(path)
         }
     });
     let mode = opts.mode_or("mode", Mode::Auto);
@@ -1877,8 +1880,10 @@ pub(crate) fn exec_edit(
             .as_ref()
             .map(|e| e.message.clone())
             .unwrap_or_else(|| "zero.edit failed".to_string());
-        let substrate_down = engine.surface_health().recovery_unlocked();
-        let annotated = crate::annotate_write_failure(&message, substrate_down);
+        // Expand/read health is intentionally independent of write health.
+        // A missing ref must never authorize a native-write escape for an
+        // unrelated edit failure.
+        let annotated = crate::annotate_write_failure(&message, false);
         return Err(Box::new(CodeModeResult::error_with_kind(
             resp.error
                 .as_ref()

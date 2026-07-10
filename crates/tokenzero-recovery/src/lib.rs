@@ -562,7 +562,7 @@ impl RecoveryStore {
                 );
             }
             if let Some(end) = selected_end {
-                if end < start {
+                if end < start || end > line_count {
                     return ExpansionResult::missing(
                         requested_ref,
                         selector.map(str::to_string),

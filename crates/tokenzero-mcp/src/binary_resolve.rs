@@ -12,7 +12,10 @@
 //! `$HOME/.tokenzero/bin`.
 
 use std::env;
+use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
+
+const WINDOWS_EXECUTABLE_EXTENSIONS: [&str; 4] = [".COM", ".EXE", ".BAT", ".CMD"];
 
 /// Env override for the TokenZero CLI / MCP entry binary.
 pub const TOKENZERO_BIN_ENV: &str = "TOKENZERO_BIN";
@@ -102,17 +105,48 @@ fn is_executable_file(path: &Path) -> bool {
     }
 }
 
-/// PATH lookup for `name` (also tries `.exe` on Windows).
-pub fn find_on_path(name: &str) -> Option<PathBuf> {
-    let path_var = env::var_os("PATH")?;
+fn binary_candidate_names(name: &str, windows: bool, pathext: Option<&OsStr>) -> Vec<String> {
     let mut names = vec![name.to_string()];
-    if cfg!(windows) && !name.ends_with(".exe") {
-        names.push(format!("{name}.exe"));
+    if !windows || Path::new(name).extension().is_some() {
+        return names;
     }
-    for dir in env::split_paths(&path_var) {
-        if dir.as_os_str().is_empty() {
-            continue;
+
+    let mut extensions = Vec::new();
+    if let Some(pathext) = pathext {
+        for extension in pathext.to_string_lossy().split(';') {
+            let extension = extension.trim();
+            if extension.is_empty() {
+                continue;
+            }
+            if extension.starts_with('.') {
+                extensions.push(extension.to_string());
+            } else {
+                extensions.push(format!(".{extension}"));
+            }
         }
+    }
+    extensions.extend(WINDOWS_EXECUTABLE_EXTENSIONS.map(str::to_string));
+
+    for extension in extensions {
+        let candidate = format!("{name}{extension}");
+        if !names
+            .iter()
+            .any(|existing| existing.eq_ignore_ascii_case(&candidate))
+        {
+            names.push(candidate);
+        }
+    }
+    names
+}
+
+fn find_on_paths(
+    name: &str,
+    dirs: &[PathBuf],
+    windows: bool,
+    pathext: Option<&OsStr>,
+) -> Option<PathBuf> {
+    let names = binary_candidate_names(name, windows, pathext);
+    for dir in dirs {
         for n in &names {
             let candidate = dir.join(n);
             if is_executable_file(&candidate) {
@@ -123,35 +157,49 @@ pub fn find_on_path(name: &str) -> Option<PathBuf> {
     None
 }
 
+/// PATH lookup for `name` (honors `PATHEXT` and standard script extensions on Windows).
+pub fn find_on_path(name: &str) -> Option<PathBuf> {
+    let path_var = env::var_os("PATH")?;
+    let dirs: Vec<PathBuf> = env::split_paths(&path_var)
+        .filter(|dir| !dir.as_os_str().is_empty())
+        .collect();
+    let pathext = env::var_os("PATHEXT");
+    find_on_paths(name, &dirs, cfg!(windows), pathext.as_deref())
+}
+
 fn home_dir() -> Option<PathBuf> {
     env::var_os("HOME")
         .or_else(|| env::var_os("USERPROFILE"))
         .map(PathBuf::from)
 }
 
-/// Well-known layout candidates for a binary base name (no dir).
-fn well_known_candidates(name: &str) -> Vec<PathBuf> {
-    let mut out = Vec::new();
-    if let Some(home) = home_dir() {
-        out.push(home.join(".tokenzero").join("bin").join(name));
-        out.push(home.join(".cargo").join("bin").join(name));
-        out.push(home.join(".local").join("bin").join(name));
+fn well_known_candidates_for(
+    name: &str,
+    home: Option<&Path>,
+    windows: bool,
+    pathext: Option<&OsStr>,
+) -> Vec<PathBuf> {
+    let mut dirs = Vec::new();
+    if let Some(home) = home {
+        dirs.push(home.join(".tokenzero").join("bin"));
+        dirs.push(home.join(".cargo").join("bin"));
+        dirs.push(home.join(".local").join("bin"));
     }
     // Homebrew / system layouts (never personal AI checkouts).
     for prefix in ["/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin"] {
-        out.push(PathBuf::from(prefix).join(name));
+        dirs.push(PathBuf::from(prefix));
     }
-    if cfg!(windows) {
-        if let Some(home) = home_dir() {
-            out.push(
-                home.join(".tokenzero")
-                    .join("bin")
-                    .join(format!("{name}.exe")),
-            );
-            out.push(home.join(".cargo").join("bin").join(format!("{name}.exe")));
-        }
-    }
-    out
+    let names = binary_candidate_names(name, windows, pathext);
+    dirs.into_iter()
+        .flat_map(|dir| names.iter().map(move |candidate| dir.join(candidate)))
+        .collect()
+}
+
+/// Well-known layout candidates for a binary base name (no dir).
+fn well_known_candidates(name: &str) -> Vec<PathBuf> {
+    let home = home_dir();
+    let pathext = env::var_os("PATHEXT");
+    well_known_candidates_for(name, home.as_deref(), cfg!(windows), pathext.as_deref())
 }
 
 fn first_existing(candidates: impl IntoIterator<Item = PathBuf>) -> Option<PathBuf> {
@@ -286,6 +334,62 @@ mod tests {
         let err = res.expect_err("missing env override");
         assert!(err.message.contains("missing file"), "{}", err.message);
         assert!(err.message.contains("TOKENZERO"), "{}", err.message);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn path_lookup_skips_non_executable_files() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempdir().unwrap();
+        let fake = dir.path().join("rg");
+        fs::write(&fake, b"not executable").unwrap();
+        fs::set_permissions(&fake, fs::Permissions::from_mode(0o644)).unwrap();
+
+        assert!(
+            find_on_paths("rg", &[dir.path().to_path_buf()], false, None).is_none(),
+            "PATH lookup must not select a non-executable file"
+        );
+    }
+
+    #[test]
+    fn windows_candidates_honor_pathext_and_include_script_launchers() {
+        let names = binary_candidate_names("tokenzero", true, Some(OsStr::new(".PY;.EXE")));
+        for expected in [
+            "tokenzero.PY",
+            "tokenzero.EXE",
+            "tokenzero.COM",
+            "tokenzero.BAT",
+            "tokenzero.CMD",
+        ] {
+            assert!(
+                names.iter().any(|name| name == expected),
+                "missing {expected}"
+            );
+        }
+        assert_eq!(
+            names
+                .iter()
+                .filter(|name| name.eq_ignore_ascii_case("tokenzero.exe"))
+                .count(),
+            1,
+            "PATHEXT and standard fallbacks must be deduplicated"
+        );
+    }
+
+    #[test]
+    fn windows_well_known_candidates_include_installer_cmd() {
+        let home = Path::new("test-home");
+        let candidates = well_known_candidates_for("tokenzero", Some(home), true, None);
+        assert!(candidates.contains(&home.join(".tokenzero").join("bin").join("tokenzero.CMD")));
+    }
+
+    #[test]
+    fn unix_candidates_do_not_add_windows_extensions() {
+        assert_eq!(
+            binary_candidate_names("tokenzero", false, Some(OsStr::new(".CMD"))),
+            vec!["tokenzero"]
+        );
     }
 
     #[test]

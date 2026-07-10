@@ -6,6 +6,8 @@
 //! MCP/CLI entry that records a structured field report.
 
 use serde_json::{Value, json};
+use std::fs::OpenOptions;
+use std::io::{ErrorKind, Write};
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -100,6 +102,41 @@ pub fn build_tool_issue_report(
     }))
 }
 
+fn tool_issue_stem(ts: u64, tool: &str) -> String {
+    let safe_tool: String = tool
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '_' || c == '-' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    format!("issue-{ts}-{safe_tool}")
+}
+
+fn write_unique_report(dir: &Path, stem: &str, text: &str) -> Result<std::path::PathBuf, String> {
+    for suffix in 0_u64.. {
+        let file_name = if suffix == 0 {
+            format!("{stem}.json")
+        } else {
+            format!("{stem}-{suffix}.json")
+        };
+        let path = dir.join(file_name);
+        match OpenOptions::new().write(true).create_new(true).open(&path) {
+            Ok(mut file) => {
+                file.write_all(text.as_bytes())
+                    .map_err(|e| format!("write report: {e}"))?;
+                return Ok(path);
+            }
+            Err(err) if err.kind() == ErrorKind::AlreadyExists => continue,
+            Err(err) => return Err(format!("create report: {err}")),
+        }
+    }
+    unreachable!("u64 report suffix space exhausted")
+}
+
 /// Persist a field report under the recovery-cache parent `.tokenzero/tool-issues/`.
 pub fn record_tool_issue(
     cache_path: &Path,
@@ -118,19 +155,8 @@ pub fn record_tool_issue(
         .get("recorded_at_unix")
         .and_then(Value::as_u64)
         .unwrap_or(0);
-    let safe_tool: String = tool
-        .chars()
-        .map(|c| {
-            if c.is_ascii_alphanumeric() || c == '_' || c == '-' {
-                c
-            } else {
-                '_'
-            }
-        })
-        .collect();
-    let path = dir.join(format!("issue-{ts}-{safe_tool}.json"));
     let text = serde_json::to_string_pretty(&report).map_err(|e| e.to_string())?;
-    std::fs::write(&path, text).map_err(|e| format!("write report: {e}"))?;
+    let path = write_unique_report(&dir, &tool_issue_stem(ts, tool), &text)?;
     report["report_path"] = json!(path.display().to_string());
     Ok(report)
 }
@@ -207,5 +233,20 @@ mod tests {
         let body = std::fs::read_to_string(path).unwrap();
         assert!(body.contains("zero_execute"));
         assert!(body.contains("shell timeout"));
+    }
+
+    #[test]
+    fn colliding_report_names_never_overwrite() {
+        let dir = tempdir().unwrap();
+        let dotted = tool_issue_stem(123, "zero.token.fetch");
+        let underscored = tool_issue_stem(123, "zero_token_fetch");
+        assert_eq!(dotted, underscored, "fixture must sanitize to one stem");
+
+        let first = write_unique_report(dir.path(), &dotted, "first").unwrap();
+        let second = write_unique_report(dir.path(), &underscored, "second").unwrap();
+
+        assert_ne!(first, second);
+        assert_eq!(std::fs::read_to_string(first).unwrap(), "first");
+        assert_eq!(std::fs::read_to_string(second).unwrap(), "second");
     }
 }

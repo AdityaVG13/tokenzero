@@ -1357,6 +1357,21 @@ fn windowed_expand_oob_is_structured_not_ref_not_found() {
     let inverted = store.expand(&stored.blob_ref, Some("raw"), Some(10), Some(5), None, None);
     assert!(!inverted.found);
     assert!(inverted.reason.starts_with("window-out-of-range"));
+
+    let end_past_last_line = store.expand(
+        &stored.blob_ref,
+        Some("raw"),
+        Some(40),
+        Some(60),
+        None,
+        None,
+    );
+    assert!(!end_past_last_line.found);
+    assert!(
+        end_past_last_line.reason.starts_with("window-out-of-range"),
+        "got {}",
+        end_past_last_line.reason
+    );
 }
 
 #[test]
@@ -1391,6 +1406,21 @@ fn selector_lines_oob_is_structured_not_empty_success() {
     );
     assert!(!around.found);
     assert!(around.reason.starts_with("window-out-of-range"));
+
+    let end_past_last_line = store.expand(
+        &stored.blob_ref,
+        Some("lines:40-60"),
+        None,
+        None,
+        None,
+        None,
+    );
+    assert!(!end_past_last_line.found);
+    assert!(
+        end_past_last_line.reason.starts_with("window-out-of-range"),
+        "got {}",
+        end_past_last_line.reason
+    );
 }
 
 #[test]

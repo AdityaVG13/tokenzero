@@ -1348,7 +1348,7 @@ fn engine_from_common(args: &CommonArgs) -> TokenZeroEngine {
 }
 
 fn engine_config_for_mcp(args: &McpServerArgs) -> Result<EngineConfig> {
-    let root = tokenzero_work_root(None);
+    let root = mcp_work_root(&args.allowed_root);
     let tool_surface = args
         .tool_surface
         .as_deref()
@@ -1356,11 +1356,7 @@ fn engine_config_for_mcp(args: &McpServerArgs) -> Result<EngineConfig> {
         .parse::<McpToolSurface>()
         .map_err(anyhow::Error::msg)?;
     Ok(EngineConfig {
-        allowed_roots: if args.allowed_root.is_empty() {
-            default_allowed_roots(&root)
-        } else {
-            args.allowed_root.clone()
-        },
+        allowed_roots: allowed_roots_for_workspace(&root, &args.allowed_root),
         cache_path: resolve_recovery_cache_path(&root, args.cache_path.clone()),
         max_visible_tokens: 4000,
         mode: parse_mode(&args.default_mode)?,
@@ -1369,6 +1365,10 @@ fn engine_config_for_mcp(args: &McpServerArgs) -> Result<EngineConfig> {
         tool_surface,
         ..EngineConfig::for_root(&root)
     })
+}
+
+fn mcp_work_root(allowed_roots: &[PathBuf]) -> PathBuf {
+    tokenzero_work_root(allowed_roots.first().cloned())
 }
 
 /// Rebuilds the mcp-server invocation for the supervised inner child:

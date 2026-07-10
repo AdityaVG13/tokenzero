@@ -23,8 +23,8 @@ use super::{
     SEARCH_BACKEND_ENV, SEARCH_VISIT_MULTIPLIER, SESSION_DEDUP_ENV, SearchBackend, ServeOptions,
     ShellRenderInput, TokenZeroEngine, ToolResponse, cache_maintenance, count_tokens,
     detect_content_type, make_capsule, make_capsule_with_raw_tokens, ref_record, render_shell,
-    sha256_hex, shell_combined_output, shell_spill_dir, shell_timeout_from_secs,
-    split_command_string,
+    resolve_curl_binary, sha256_hex, shell_combined_output, shell_spill_dir,
+    shell_timeout_from_secs, split_command_string,
 };
 use crate::recall;
 use globset::{GlobBuilder, GlobMatcher};
@@ -32,7 +32,7 @@ use serde_json::{Value, json};
 use std::collections::{BTreeMap, HashSet};
 use std::ffi::OsString;
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::{Condvar, Mutex, OnceLock};
 use std::time::{Duration, SystemTime};
 use tokenzero_filters::rewrite_command;
@@ -103,11 +103,23 @@ impl TokenZeroEngine {
                 }
             }
         }
-        let curl = self
-            .config
-            .curl_path_override
-            .clone()
-            .unwrap_or_else(|| PathBuf::from("curl"));
+        let curl = match self.config.curl_path_override.clone() {
+            Some(path) => path,
+            None => {
+                let resolution = resolve_curl_binary();
+                let Some(path) = resolution.path else {
+                    return ToolResponse::error(
+                        "fetch",
+                        "fetch_failed",
+                        resolution
+                            .error
+                            .unwrap_or_else(|| "curl not found".to_string()),
+                        Some("install curl or set TOKENZERO_CURL_PATH".to_string()),
+                    );
+                };
+                path
+            }
+        };
         // Redirects are followed manually so every hop's target is validated
         // (and pinned) like the entry URL — a redirect to an internal address
         // is the classic SSRF bypass.

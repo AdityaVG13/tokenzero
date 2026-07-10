@@ -7,7 +7,7 @@
 //! 1. Prefer CodeMode `zero.edit` / `tz_edit` (find/replace hunks) or full-file
 //!    write APIs when available on the FS substrate.
 //! 2. Retry with explicit create/dry_run options; check allowed roots / doctor.
-//! 3. If the write substrate is **down** (session surface unhealthy /
+//! 3. If the write substrate is **down** (independently verified, or
 //!    `TOKENZERO_WRITE_ESCAPE=1` with explicit ack), harnesses may use a
 //!    **bounded native Write** for that failure only — never as the default.
 //! 4. Report the failure with `tz_report_tool_issue` (`tool=zero_execute` or
@@ -57,11 +57,10 @@ bounded native Write is allowed for this failure only (not default routing).",
     out
 }
 
-/// True when surface health says recovery is unlocked (expand/read unhealthy)
-/// or explicit write-escape env is set — used only for ladder ack text, not to
-/// permanently weaken write crash-only policy.
-pub fn write_escape_ack_active(surface_recovery_unlocked: bool) -> bool {
-    surface_recovery_unlocked || write_escape_enabled()
+/// True when the write substrate is independently known down or the explicit
+/// write-escape env is set. Expand/read health is not write-health evidence.
+pub fn write_escape_ack_active(write_substrate_down: bool) -> bool {
+    write_substrate_down || write_escape_enabled()
 }
 
 #[cfg(test)]
@@ -75,6 +74,7 @@ mod tests {
         assert!(msg.contains("Write recovery ladder"));
         assert!(msg.contains("tz_report_tool_issue"));
         assert!(msg.contains("zero.edit"));
+        assert!(!msg.contains("write_escape_ack"));
         let again = annotate_write_failure(&msg, false);
         assert_eq!(
             again.matches("Write recovery ladder").count(),

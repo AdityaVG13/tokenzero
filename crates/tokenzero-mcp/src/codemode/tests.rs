@@ -1,6 +1,6 @@
 use super::exec::{
-    exec_edit, execute_codemode, execute_codemode_with_options, make_engine_for_root,
-    resolve_paths_against_work_root,
+    exec_edit, execute_codemode, execute_codemode_with_options, limits_from_options,
+    make_engine_for_root, resolve_paths_against_work_root,
 };
 use super::parser::{Statement, parse_expr, parse_plan, resolve_expr};
 use super::result::{CodeModeOptions, CodeModeResult, CodeModeStatus};
@@ -634,6 +634,25 @@ fn codemode_engine_uses_shared_recovery_cache_and_repo_scope() {
 }
 
 #[test]
+fn caller_soft_wall_cannot_raise_hard_wall() {
+    let limits = limits_from_options(&CodeModeOptions {
+        max_wall_ms: 60_000,
+        hard_max_wall_ms: 5_000,
+        ..Default::default()
+    });
+    assert_eq!(limits.max_wall_ms, 5_000);
+    assert_eq!(limits.hard_max_wall_ms, 5_000);
+
+    let trusted = limits_from_options(&CodeModeOptions {
+        max_wall_ms: 60_000,
+        hard_max_wall_ms: 60_000,
+        ..Default::default()
+    });
+    assert_eq!(trusted.max_wall_ms, 60_000);
+    assert_eq!(trusted.hard_max_wall_ms, 60_000);
+}
+
+#[test]
 fn edit_rejects_partially_invalid_hunks_without_writing() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("sample.txt");
@@ -665,6 +684,7 @@ fn edit_failure_includes_write_recovery_ladder() {
     let path = dir.path().join("sample.txt");
     fs::write(&path, "hello\n").unwrap();
     let engine = make_engine_for_root(dir.path().to_path_buf());
+    engine.surface_health().record_substrate_down();
     let args = vec![
         serde_json::json!(path.to_string_lossy().to_string()),
         serde_json::json!([{ "find": "missing", "replace": "bye" }]),
@@ -676,6 +696,10 @@ fn edit_failure_includes_write_recovery_ladder() {
     assert!(
         msg.contains("Write recovery ladder") || msg.contains("tz_report_tool_issue"),
         "expected write ladder in error: {msg}"
+    );
+    assert!(
+        !msg.contains("write_escape_ack"),
+        "expand/read health must not authorize native writes: {msg}"
     );
     assert_eq!(fs::read_to_string(&path).unwrap(), "hello\n");
 }
@@ -1411,6 +1435,37 @@ fn foreign_root_token_read_relative_and_absolute() {
     assert!(
         err.contains("outside allowed roots") || err.to_ascii_lowercase().contains("not allowed"),
         "deny message: {err}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn relative_shell_cwd_is_anchored_to_execute_root() {
+    let root = tempfile::tempdir().unwrap();
+    let extra = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(root.path().join("sub")).unwrap();
+    std::fs::create_dir_all(extra.path().join("sub")).unwrap();
+
+    let result = execute_codemode_with_options(
+        r#"return await zero.shell("pwd", { cwd: "sub" })"#,
+        CodeModeOptions {
+            root: Some(root.path().to_path_buf()),
+            allowed_roots: vec![extra.path().to_path_buf()],
+            cache_path: Some(root.path().join(".tokenzero/recovery-cache.json")),
+            ..Default::default()
+        },
+    );
+    assert_eq!(
+        result.status,
+        CodeModeStatus::Completed,
+        "{:?}",
+        result.error
+    );
+    let rendered = serde_json::to_string(&result.value).unwrap_or_default();
+    let expected = root.path().join("sub").display().to_string();
+    assert!(
+        rendered.contains(expected.as_str()),
+        "relative cwd escaped execute root: {rendered}"
     );
 }
 

@@ -243,8 +243,8 @@ impl SurfaceHealth {
         !self.is_healthy()
     }
 
-    /// Record an expand/read surface outcome. Client mistakes (`invalid_ref`)
-    /// do not unlock. Success clears the failure window.
+    /// Record an expand-path failure that indicates surface unhealth.
+    /// Client/precondition errors do not unlock the recovery surface.
     pub fn record_expand_outcome(&self, ok: bool, code: Option<&str>) {
         let now = Instant::now();
         let mut inner = self.lock();
@@ -253,7 +253,15 @@ impl SurfaceHealth {
             return;
         }
         let kind = code.unwrap_or("expand_failed");
-        if kind == "invalid_ref" {
+        if !matches!(
+            kind,
+            "expand_failed"
+                | "ref_not_found"
+                | "ref_stale"
+                | "store_mismatch"
+                | "substrate_down"
+                | "expand_x0"
+        ) {
             return;
         }
         inner.record_failure(kind, now);
@@ -266,6 +274,14 @@ impl SurfaceHealth {
 
     pub fn record_substrate_down(&self) {
         self.record_expand_outcome(false, Some("substrate_down"));
+    }
+
+    pub fn record_read_outcome(&self, ok: bool, code: Option<&str>) {
+        if ok {
+            self.record_expand_outcome(true, None);
+        } else if matches!(code, Some("read_substrate_down" | "substrate_down")) {
+            self.record_substrate_down();
+        }
     }
 
     /// Never claim "primary surface healthy" when unhealthy.
@@ -466,6 +482,24 @@ mod tests {
     fn invalid_ref_does_not_unlock() {
         let h = SurfaceHealth::new();
         h.record_expand_outcome(false, Some("invalid_ref"));
+        assert!(h.is_healthy());
+    }
+
+    #[test]
+    fn out_of_range_window_does_not_unlock() {
+        let h = SurfaceHealth::new();
+        h.record_expand_outcome(false, Some("window_out_of_range"));
+        assert!(h.is_healthy());
+    }
+
+    #[test]
+    fn read_health_distinguishes_client_errors_from_substrate_failures() {
+        let h = SurfaceHealth::new();
+        h.record_read_outcome(false, Some("read_failed"));
+        assert!(h.is_healthy());
+        h.record_read_outcome(false, Some("read_substrate_down"));
+        assert!(h.recovery_unlocked());
+        h.record_read_outcome(true, None);
         assert!(h.is_healthy());
     }
 

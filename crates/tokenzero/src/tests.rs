@@ -30,3 +30,9 @@ fn default_allowed_roots_are_current_root_only() {
 
     assert_eq!(roots, vec![PathBuf::from(".")]);
 }
+
+#[test]
+fn mcp_work_root_prefers_first_explicit_allowed_root() {
+    let explicit = PathBuf::from("C:\\repo");
+    assert_eq!(mcp_work_root(std::slice::from_ref(&explicit)), explicit);
+}
