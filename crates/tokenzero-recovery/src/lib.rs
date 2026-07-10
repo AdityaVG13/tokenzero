@@ -117,6 +117,125 @@ impl std::fmt::Display for ZeroRefError {
 
 impl std::error::Error for ZeroRefError {}
 
+/// Typed error for `#B`/`#L` fragment parsing and evaluation (cqr.5).
+///
+/// Used by `parse_fragment_spec` and the `expand` fragment path to surface
+/// structured rejection instead of falling back to the full payload.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FragmentError {
+    /// Fragment string is not structurally valid (non-numeric, missing `-`, empty).
+    Malformed,
+    /// `start > end` for a `#B` or `#L` range.
+    Reversed,
+    /// `end > content.len()` (`#B`) or `start/end > line_count` (`#L`).
+    OutOfRange,
+    /// `#L` requested on content whose line bytes are not valid UTF-8.
+    /// The current String-based store cannot produce this, but the contract
+    /// requires the variant so future raw-byte stores can signal it without
+    /// changing the error type.
+    NonUtf8Line,
+    /// Fragment kind is not `B` or `L`.
+    UnknownKind,
+    /// Fragment string contains a second `#` (e.g. `#B0-5#L1-3`).
+    DuplicateFragment,
+}
+
+impl std::fmt::Display for FragmentError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let label = match self {
+            Self::Malformed => "malformed",
+            Self::Reversed => "reversed",
+            Self::OutOfRange => "out_of_range",
+            Self::NonUtf8Line => "non_utf8_line_fragment",
+            Self::UnknownKind => "unknown_kind",
+            Self::DuplicateFragment => "duplicate_fragment",
+        };
+        write!(f, "{label}")
+    }
+}
+
+impl std::error::Error for FragmentError {}
+
+/// Internal parsed fragment spec produced by `parse_fragment_spec`.
+enum FragmentSpec {
+    /// Zero-based half-open byte range `start..end`.
+    Byte { start: usize, end: usize },
+    /// One-based inclusive line range `start..=end`.
+    Line { start: usize, end: usize },
+}
+
+/// Parse a `#B`/`#L` fragment string into a [`FragmentSpec`].
+///
+/// Fragment syntax (after the leading `#` stripped by `parse_ref`):
+/// - `Bstart-end` — zero-based half-open byte range; `start == end` allowed.
+/// - `Bn`         — single byte position `n..n` (empty).
+/// - `Lstart-end` — one-based inclusive line range.
+/// - `Ln`         — single line `n`.
+///
+/// Reversed (`start > end`), zero-line (`#L0`), duplicate (`#` inside
+/// fragment), unknown kind, and non-numeric values are rejected with typed
+/// [`FragmentError`]s. Out-of-range checks that need content length are
+/// deferred to the caller.
+fn parse_fragment_spec(fragment: &str) -> Result<FragmentSpec, FragmentError> {
+    if fragment.is_empty() {
+        return Err(FragmentError::Malformed);
+    }
+    if fragment.contains('#') {
+        return Err(FragmentError::DuplicateFragment);
+    }
+    let kind = &fragment[..1];
+    let rest = &fragment[1..];
+    match kind {
+        "B" => {
+            let (start_str, end_str) = rest.split_once('-').unwrap_or((rest, rest));
+            let start = start_str
+                .trim_start_matches('B')
+                .parse::<usize>()
+                .map_err(|_| FragmentError::Malformed)?;
+            let end = end_str
+                .trim_start_matches('B')
+                .parse::<usize>()
+                .map_err(|_| FragmentError::Malformed)?;
+            if start > end {
+                return Err(FragmentError::Reversed);
+            }
+            Ok(FragmentSpec::Byte { start, end })
+        }
+        "L" => {
+            let (start_str, end_str) = rest.split_once('-').unwrap_or((rest, rest));
+            let start = start_str
+                .trim_start_matches('L')
+                .parse::<usize>()
+                .map_err(|_| FragmentError::Malformed)?;
+            let end = end_str
+                .trim_start_matches('L')
+                .parse::<usize>()
+                .map_err(|_| FragmentError::Malformed)?;
+            if start == 0 {
+                return Err(FragmentError::Malformed);
+            }
+            if start > end {
+                return Err(FragmentError::Reversed);
+            }
+            Ok(FragmentSpec::Line { start, end })
+        }
+        _ => Err(FragmentError::UnknownKind),
+    }
+}
+
+/// Stable reason string for a [`FragmentError`] used in `ExpansionResult::reason`.
+fn fragment_error_reason(err: FragmentError) -> String {
+    match err {
+        FragmentError::Malformed => "fragment-malformed".to_string(),
+        FragmentError::Reversed => "fragment-reversed".to_string(),
+        FragmentError::OutOfRange => "fragment-out-of-range".to_string(),
+        FragmentError::NonUtf8Line => "non_utf8_line_fragment".to_string(),
+        FragmentError::UnknownKind => "fragment-unknown-kind".to_string(),
+        FragmentError::DuplicateFragment => "fragment-duplicate".to_string(),
+    }
+}
+
 /// Parsed components of a ZeroRef v1 portable blob ref.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ZeroRefV1Blob {
@@ -736,23 +855,20 @@ impl RecoveryStore {
         };
         let mut selected_start = start_line;
         let mut selected_end = end_line;
-        // Detect unsupported #B (byte-range) fragments before store lookup.
-        // #B is not yet implemented — never return the full payload when a #B
-        // fragment is present; return a stable unsupported_fragment error with
-        // the complete untruncated ref (cqr.1).
-        if let Some(fragment) = parsed.fragment.as_deref() {
-            if fragment.starts_with('B') {
-                return ExpansionResult::missing(
-                    requested_ref,
-                    selector.map(str::to_string),
-                    "unsupported_fragment: #B (byte-range) is not yet implemented; use #L for line ranges or expand without a fragment for the full payload",
-                );
-            }
+        // Parse fragment spec early to catch malformed/duplicate/unknown
+        // before store lookup (cqr.5). #B and #L are both supported; no
+        // fallback to the full payload for a fragment request.
+        let fragment_spec = parsed.fragment.as_deref().map(parse_fragment_spec);
+        if let Some(Err(err)) = &fragment_spec {
+            return ExpansionResult::missing(
+                requested_ref,
+                selector.map(str::to_string),
+                fragment_error_reason(*err),
+            );
         }
-        if let Some(fragment) = parsed.fragment.as_deref().filter(|f| f.starts_with('L')) {
-            let (start, end) = parse_line_fragment(fragment);
-            selected_start = start;
-            selected_end = end;
+        if let Some(Ok(FragmentSpec::Line { start, end })) = &fragment_spec {
+            selected_start = Some(*start);
+            selected_end = Some(*end);
         }
         // Resolve lines:/range:/around: before OOB so selector windows get the
         // same structured error as explicit start_line/end_line (zq9).
@@ -780,6 +896,33 @@ impl RecoveryStore {
                 selector.map(str::to_string),
                 "stale-ref",
             );
+        }
+        // Apply #B byte-range fragment after content resolution (cqr.5).
+        // Zero-based half-open: content[start..end]. start == end → empty.
+        // Reversed was already caught by parse_fragment_spec; only OOB remains.
+        if let Some(Ok(FragmentSpec::Byte { start, end })) = &fragment_spec {
+            let bytes = content.as_bytes();
+            if *end > bytes.len() {
+                return ExpansionResult::missing(
+                    requested_ref,
+                    selector.map(str::to_string),
+                    format!(
+                        "fragment-out-of-range; start={start} end={end} len={}",
+                        bytes.len()
+                    ),
+                );
+            }
+            let sliced = String::from_utf8_lossy(&bytes[*start..*end]).into_owned();
+            self.recovery_tokens += count_tokens(&sliced);
+            if let Some(store_path) = self.persistence_path.as_ref() {
+                let content_class = self
+                    .ref_classes
+                    .get(&ref_id)
+                    .copied()
+                    .unwrap_or_else(|| classify_ref(&ref_id, None));
+                record_ref_index_expanded(store_path, &ref_id, content_class);
+            }
+            return ExpansionResult::ok(requested_ref, selector.map(str::to_string), sliced);
         }
         // Explicit / selector line windows: OOB is a structured error, never
         // ref_not_found (zq9). 1-based inclusive; start past last line or end <

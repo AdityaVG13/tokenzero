@@ -1291,33 +1291,278 @@ fn canonicalize_and_is_expandable_helpers() {
 }
 
 // ---------------------------------------------------------------------------
-// #B fragment: unsupported, must not return full payload (cqr.1)
+// #B/#L fragment algebra (cqr.5)
 // ---------------------------------------------------------------------------
 
 #[test]
-fn b_fragment_returns_unsupported_not_full_payload() {
+fn b_fragment_returns_empty_for_zero_range() {
+    let (mut store, _cache, _dir) = temp_store();
+    let payload = "hello world\n";
+    let stored = store
+        .store_payload(payload, ContentType::Unknown, None, None, None)
+        .unwrap();
+    let b_ref = format!("{}#B0-0", stored.blob_ref);
+    let expanded = store.expand(&b_ref, Some("raw"), None, None, None, None);
+    assert!(expanded.found, "#B0-0 must succeed: {}", expanded.reason);
+    assert_eq!(expanded.content, "");
+    assert_eq!(expanded.ref_id, b_ref);
+}
+
+#[test]
+fn b_fragment_returns_first_n_bytes() {
+    let (mut store, _cache, _dir) = temp_store();
+    let payload = "hello world\n";
+    let stored = store
+        .store_payload(payload, ContentType::Unknown, None, None, None)
+        .unwrap();
+    let b_ref = format!("{}#B0-5", stored.blob_ref);
+    let expanded = store.expand(&b_ref, Some("raw"), None, None, None, None);
+    assert!(expanded.found, "#B0-5 must succeed: {}", expanded.reason);
+    assert_eq!(expanded.content, "hello");
+}
+
+#[test]
+fn b_fragment_returns_middle_slice() {
+    let (mut store, _cache, _dir) = temp_store();
+    let payload = "hello world\n";
+    let stored = store
+        .store_payload(payload, ContentType::Unknown, None, None, None)
+        .unwrap();
+    let b_ref = format!("{}#B6-11", stored.blob_ref);
+    let expanded = store.expand(&b_ref, Some("raw"), None, None, None, None);
+    assert!(expanded.found, "#B6-11 must succeed: {}", expanded.reason);
+    assert_eq!(expanded.content, "world");
+}
+
+#[test]
+fn b_fragment_reversed_returns_error() {
+    let (mut store, _cache, _dir) = temp_store();
+    let payload = "hello\n";
+    let stored = store
+        .store_payload(payload, ContentType::Unknown, None, None, None)
+        .unwrap();
+    let b_ref = format!("{}#B5-1", stored.blob_ref);
+    let expanded = store.expand(&b_ref, Some("raw"), None, None, None, None);
+    assert!(!expanded.found, "#B reversed must not succeed");
+    assert_eq!(expanded.reason, "fragment-reversed");
+    assert_eq!(expanded.ref_id, b_ref);
+    assert!(expanded.content.is_empty());
+}
+
+#[test]
+fn b_fragment_oob_returns_error() {
+    let (mut store, _cache, _dir) = temp_store();
+    let payload = "hello\n";
+    let stored = store
+        .store_payload(payload, ContentType::Unknown, None, None, None)
+        .unwrap();
+    let b_ref = format!("{}#B0-100", stored.blob_ref);
+    let expanded = store.expand(&b_ref, Some("raw"), None, None, None, None);
+    assert!(!expanded.found, "#B oob must not succeed");
+    assert!(
+        expanded.reason.starts_with("fragment-out-of-range"),
+        "got: {}",
+        expanded.reason
+    );
+    assert_eq!(expanded.ref_id, b_ref);
+    assert!(expanded.content.is_empty());
+}
+
+#[test]
+fn b_fragment_malformed_returns_error() {
+    let (mut store, _cache, _dir) = temp_store();
+    let payload = "hello\n";
+    let stored = store
+        .store_payload(payload, ContentType::Unknown, None, None, None)
+        .unwrap();
+    let b_ref = format!("{}#Babc", stored.blob_ref);
+    let expanded = store.expand(&b_ref, Some("raw"), None, None, None, None);
+    assert!(!expanded.found);
+    assert_eq!(expanded.reason, "fragment-malformed");
+}
+
+#[test]
+fn b_fragment_preserves_ref_id_in_error() {
+    let (mut store, _cache, _dir) = temp_store();
+    let payload = "hello\n";
+    let stored = store
+        .store_payload(payload, ContentType::Unknown, None, None, None)
+        .unwrap();
+    let b_ref = format!("{}#B5-1", stored.blob_ref);
+    let expanded = store.expand(&b_ref, Some("raw"), None, None, None, None);
+    assert_eq!(expanded.ref_id, b_ref);
+}
+
+#[test]
+fn b_fragment_full_range_returns_all_bytes() {
+    let (mut store, _cache, _dir) = temp_store();
+    let payload = "hello world\n";
+    let stored = store
+        .store_payload(payload, ContentType::Unknown, None, None, None)
+        .unwrap();
+    let b_ref = format!("{}#B0-{}", stored.blob_ref, payload.len());
+    let expanded = store.expand(&b_ref, Some("raw"), None, None, None, None);
+    assert!(expanded.found);
+    assert_eq!(expanded.content, payload);
+}
+
+#[test]
+fn l_fragment_returns_first_three_lines() {
+    let (mut store, _cache, _dir) = temp_store();
+    let payload = "a\nb\nc\nd\ne\n";
+    let stored = store
+        .store_payload(payload, ContentType::Unknown, None, None, None)
+        .unwrap();
+    let l_ref = format!("{}#L1-L3", stored.blob_ref);
+    let expanded = store.expand(&l_ref, Some("raw"), None, None, None, None);
+    assert!(expanded.found, "#L1-L3 must succeed: {}", expanded.reason);
+    assert_eq!(expanded.content, "a\nb\nc\n");
+}
+
+#[test]
+fn l_fragment_zero_line_returns_error() {
+    let (mut store, _cache, _dir) = temp_store();
+    let payload = "a\nb\nc\n";
+    let stored = store
+        .store_payload(payload, ContentType::Unknown, None, None, None)
+        .unwrap();
+    let l_ref = format!("{}#L0", stored.blob_ref);
+    let expanded = store.expand(&l_ref, Some("raw"), None, None, None, None);
+    assert!(!expanded.found, "#L0 must not succeed");
+    assert_eq!(expanded.reason, "fragment-malformed");
+    assert_eq!(expanded.ref_id, l_ref);
+}
+
+#[test]
+fn l_fragment_reversed_returns_error() {
+    let (mut store, _cache, _dir) = temp_store();
+    let payload = "a\nb\nc\n";
+    let stored = store
+        .store_payload(payload, ContentType::Unknown, None, None, None)
+        .unwrap();
+    let l_ref = format!("{}#L5-L2", stored.blob_ref);
+    let expanded = store.expand(&l_ref, Some("raw"), None, None, None, None);
+    assert!(!expanded.found, "#L reversed must not succeed");
+    assert_eq!(expanded.reason, "fragment-reversed");
+    assert_eq!(expanded.ref_id, l_ref);
+}
+
+#[test]
+fn l_fragment_oob_returns_error() {
+    let (mut store, _cache, _dir) = temp_store();
+    let payload = "a\nb\nc\n";
+    let stored = store
+        .store_payload(payload, ContentType::Unknown, None, None, None)
+        .unwrap();
+    let l_ref = format!("{}#L1-L100", stored.blob_ref);
+    let expanded = store.expand(&l_ref, Some("raw"), None, None, None, None);
+    assert!(!expanded.found, "#L oob must not succeed");
+    assert!(
+        expanded.reason.starts_with("window-out-of-range"),
+        "got: {}",
+        expanded.reason
+    );
+}
+
+#[test]
+fn l_fragment_empty_file_returns_error() {
+    let (mut store, _cache, _dir) = temp_store();
+    let payload = "";
+    let stored = store
+        .store_payload(payload, ContentType::Unknown, None, None, None)
+        .unwrap();
+    let l_ref = format!("{}#L1", stored.blob_ref);
+    let expanded = store.expand(&l_ref, Some("raw"), None, None, None, None);
+    assert!(!expanded.found, "#L1 on empty file must not succeed");
+    assert!(
+        expanded.reason.starts_with("window-out-of-range"),
+        "got: {}",
+        expanded.reason
+    );
+}
+
+#[test]
+fn l_fragment_preserves_crlf() {
+    let (mut store, _cache, _dir) = temp_store();
+    let payload = "a\r\nb\r\nc\r\n";
+    let stored = store
+        .store_payload(payload, ContentType::Unknown, None, None, None)
+        .unwrap();
+    let l_ref = format!("{}#L1-L2", stored.blob_ref);
+    let expanded = store.expand(&l_ref, Some("raw"), None, None, None, None);
+    assert!(expanded.found, "#L1-L2 CRLF must succeed: {}", expanded.reason);
+    assert_eq!(expanded.content, "a\r\nb\r\n");
+}
+
+#[test]
+fn l_fragment_preserves_trailing_newline() {
+    let (mut store, _cache, _dir) = temp_store();
+    let payload = "a\nb\n";
+    let stored = store
+        .store_payload(payload, ContentType::Unknown, None, None, None)
+        .unwrap();
+    let l_ref = format!("{}#L1-L2", stored.blob_ref);
+    let expanded = store.expand(&l_ref, Some("raw"), None, None, None, None);
+    assert!(expanded.found);
+    assert_eq!(expanded.content, "a\nb\n");
+    assert!(
+        expanded.content.ends_with('\n'),
+        "trailing newline must be preserved"
+    );
+}
+
+#[test]
+fn l_fragment_single_line_returns_one_line() {
+    let (mut store, _cache, _dir) = temp_store();
+    let payload = "a\nb\nc\n";
+    let stored = store
+        .store_payload(payload, ContentType::Unknown, None, None, None)
+        .unwrap();
+    let l_ref = format!("{}#L2", stored.blob_ref);
+    let expanded = store.expand(&l_ref, Some("raw"), None, None, None, None);
+    assert!(expanded.found);
+    assert_eq!(expanded.content, "b\n");
+}
+
+#[test]
+fn unknown_fragment_kind_returns_error() {
+    let (mut store, _cache, _dir) = temp_store();
+    let payload = "hello\n";
+    let stored = store
+        .store_payload(payload, ContentType::Unknown, None, None, None)
+        .unwrap();
+    let x_ref = format!("{}#X1-3", stored.blob_ref);
+    let expanded = store.expand(&x_ref, Some("raw"), None, None, None, None);
+    assert!(!expanded.found);
+    assert_eq!(expanded.reason, "fragment-unknown-kind");
+}
+
+#[test]
+fn duplicate_fragment_returns_error() {
+    let (mut store, _cache, _dir) = temp_store();
+    let payload = "hello\n";
+    let stored = store
+        .store_payload(payload, ContentType::Unknown, None, None, None)
+        .unwrap();
+    let dup_ref = format!("{}#B0-3#L1-2", stored.blob_ref);
+    let expanded = store.expand(&dup_ref, Some("raw"), None, None, None, None);
+    assert!(!expanded.found);
+    assert_eq!(expanded.reason, "fragment-duplicate");
+}
+
+#[test]
+fn b_fragment_no_fallback_to_full_payload() {
     let (mut store, _cache, _dir) = temp_store();
     let payload = "byte-range payload\nline two\n";
     let stored = store
         .store_payload(payload, ContentType::Unknown, None, None, None)
         .unwrap();
-    // Append #B0-1 fragment to the stored blob ref
+    // #B0-1 should return only 1 byte, not the full payload
     let b_ref = format!("{}#B0-1", stored.blob_ref);
     let expanded = store.expand(&b_ref, Some("raw"), None, None, None, None);
-    assert!(!expanded.found, "#B must not return found=true");
-    assert!(
-        expanded.reason.starts_with("unsupported_fragment"),
-        "reason must be unsupported_fragment, got: {}",
-        expanded.reason
-    );
-    assert_eq!(
-        expanded.ref_id, b_ref,
-        "requested ref must be preserved in full (no truncation)"
-    );
-    assert!(
-        expanded.content.is_empty(),
-        "#B must never return the full payload"
-    );
+    assert!(expanded.found);
+    assert_eq!(expanded.content, "b");
+    assert_ne!(expanded.content, payload);
 }
 
 // ---------------------------------------------------------------------------
