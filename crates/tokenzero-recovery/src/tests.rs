@@ -1,5 +1,6 @@
 use super::*;
 use proptest::prelude::*;
+use std::collections::BTreeMap;
 use std::panic::{AssertUnwindSafe, catch_unwind, resume_unwind};
 use std::sync::{LazyLock, Mutex};
 use tempfile::tempdir;
@@ -213,15 +214,33 @@ fn ref_index_compaction_keeps_newest_entry_per_ref() {
     let dir = tempdir().unwrap();
     let shard = dir.path().join("ba.ndjson");
     let ref_id = "tz://blob/ba_ref";
-    append_ref_index_line(&shard, ref_id, Path::new("/old-store.json"), 1).unwrap();
+    append_ref_index_line(
+        &shard,
+        ref_id,
+        Path::new("/old-store.json"),
+        1,
+        ContentClass::Unknown,
+        false,
+    )
+    .unwrap();
     append_ref_index_line(
         &shard,
         "tz://blob/ba_other",
         Path::new("/other-store.json"),
         1,
+        ContentClass::Unknown,
+        false,
     )
     .unwrap();
-    append_ref_index_line(&shard, ref_id, Path::new("/new-store.json"), 2).unwrap();
+    append_ref_index_line(
+        &shard,
+        ref_id,
+        Path::new("/new-store.json"),
+        2,
+        ContentClass::Unknown,
+        false,
+    )
+    .unwrap();
 
     compact_ref_index_shard(&shard).unwrap();
 
@@ -273,7 +292,7 @@ fn ref_index_concurrent_append_smoke() {
                 thread::spawn(move || {
                     let _old = set_ref_index_test_override(Some((true, index_path)));
                     let ref_id = format!("tz://blob/ba{idx:030}");
-                    append_blob_refs_to_ref_index(&store_path, &[ref_id]);
+                    append_blob_refs_to_ref_index(&store_path, &[ref_id], None);
                 })
             })
             .collect();
@@ -1503,4 +1522,111 @@ fn windowed_expand_visible_tokens_much_less_than_full() {
         window_tokens * 3 < full_tokens,
         "window {window_tokens} vs full {full_tokens}"
     );
+}
+
+#[test]
+fn classify_ref_maps_kind_and_content_type() {
+    assert_eq!(
+        classify_ref("tz://file/abc", Some(ContentType::Unknown)),
+        ContentClass::SourceFile
+    );
+    assert_eq!(
+        classify_ref("tz://search/abc", Some(ContentType::Unknown)),
+        ContentClass::SearchHits
+    );
+    assert_eq!(
+        classify_ref("tz://unit/abc", Some(ContentType::Diff)),
+        ContentClass::Diff
+    );
+    assert_eq!(
+        classify_ref("tz://unit/abc", Some(ContentType::ShellOutput)),
+        ContentClass::ShellOutput
+    );
+    assert_eq!(
+        classify_ref("tz://blob/abc", Some(ContentType::Code)),
+        ContentClass::SourceFile
+    );
+    assert_eq!(
+        classify_ref("tz://blob/abc", Some(ContentType::Diff)),
+        ContentClass::Diff
+    );
+    assert_eq!(
+        classify_ref("tz://blob/abc", Some(ContentType::ShellOutput)),
+        ContentClass::ShellOutput
+    );
+    assert_eq!(
+        classify_ref("tz://blob/abc", Some(ContentType::Markdown)),
+        ContentClass::Doc
+    );
+    assert_eq!(
+        classify_ref("tz://blob/abc", Some(ContentType::Unknown)),
+        ContentClass::BinaryPreview
+    );
+    assert_eq!(
+        classify_ref("tz://codemode/execution/x/code", None),
+        ContentClass::Unknown
+    );
+}
+
+#[test]
+fn export_class_stats_reports_per_class_rates() {
+    let dir = tempdir().unwrap();
+    with_ref_index_env(dir.path(), true, || {
+        let store_path = dir.path().join("store.json");
+        let refs = vec![
+            "tz://blob/codeblob".to_string(),
+            "tz://blob/diffblob".to_string(),
+            "tz://blob/diffblob".to_string(), // duplicate store entry
+            "tz://blob/unknownblob".to_string(),
+        ];
+        let mut classes = BTreeMap::new();
+        classes.insert("tz://blob/codeblob".to_string(), ContentClass::SourceFile);
+        classes.insert("tz://blob/diffblob".to_string(), ContentClass::Diff);
+        append_blob_refs_to_ref_index(&store_path, &refs, Some(&classes));
+
+        record_ref_index_expanded(&store_path, "tz://blob/codeblob", ContentClass::SourceFile);
+
+        let stats = export_class_stats();
+        let classes = stats["classes"].as_array().unwrap();
+        let source = classes
+            .iter()
+            .find(|c| c["content_class"] == "SourceFile")
+            .unwrap();
+        assert_eq!(source["total"], 1);
+        assert_eq!(source["expanded"], 1);
+        assert_eq!(source["rate"], 1.0);
+        let diff = classes
+            .iter()
+            .find(|c| c["content_class"] == "Diff")
+            .unwrap();
+        assert_eq!(diff["total"], 1);
+        assert_eq!(diff["expanded"], 0);
+        let binary = classes
+            .iter()
+            .find(|c| c["content_class"] == "BinaryPreview")
+            .unwrap();
+        assert_eq!(binary["total"], 1);
+        assert_eq!(binary["expanded"], 0);
+        assert_eq!(stats["total_refs"], 3);
+        assert_eq!(stats["total_expanded"], 1);
+    });
+}
+
+#[test]
+fn ref_index_records_content_class_on_persist() {
+    let index_dir = tempdir().unwrap();
+    with_ref_index_env(index_dir.path(), true, || {
+        let dir = tempdir().unwrap();
+        let cache = dir.path().join("cache.json");
+        let mut store = RecoveryStore::new(Some(cache));
+        let stored = store
+            .store_payload("fn main() {}", ContentType::Code, None, None, None)
+            .unwrap();
+
+        let shard = ref_index_shard_path(index_dir.path(), &stored.blob_ref);
+        let text = fs::read_to_string(shard).unwrap();
+        let line = text.lines().find(|l| l.contains(&stored.blob_ref)).unwrap();
+        assert!(line.contains("SourceFile"));
+        assert!(line.contains("\"expanded\":false"));
+    });
 }

@@ -213,11 +213,59 @@ pub struct ShellRepeat {
     pub seen: u32,
 }
 
+#[derive(
+    Debug, Default, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize,
+)]
+#[serde(rename_all = "PascalCase")]
+pub enum ContentClass {
+    SourceFile,
+    Diff,
+    ShellOutput,
+    SearchHits,
+    Doc,
+    BinaryPreview,
+    #[default]
+    Unknown,
+}
+
+/// Infer a coarse content class from the ref kind and the original content type.
+/// Used to tag ref-index entries so a predictor can learn per-class expansion rates.
+fn classify_ref(ref_id: &str, content_type: Option<ContentType>) -> ContentClass {
+    let Some(parsed) = parse_ref(ref_id) else {
+        return ContentClass::Unknown;
+    };
+    match parsed.kind.as_str() {
+        "file" => ContentClass::SourceFile,
+        "search" => ContentClass::SearchHits,
+        "unit" => match content_type {
+            Some(ContentType::Diff) => ContentClass::Diff,
+            Some(ContentType::ShellOutput) => ContentClass::ShellOutput,
+            _ => ContentClass::Unknown,
+        },
+        "blob" => match content_type {
+            Some(ContentType::Code) => ContentClass::SourceFile,
+            Some(ContentType::Diff) => ContentClass::Diff,
+            Some(ContentType::ShellOutput) => ContentClass::ShellOutput,
+            Some(ContentType::Markdown)
+            | Some(ContentType::Logs)
+            | Some(ContentType::Tree)
+            | Some(ContentType::JsonConfig) => ContentClass::Doc,
+            Some(ContentType::SearchResult) => ContentClass::SearchHits,
+            _ => ContentClass::BinaryPreview,
+        },
+        _ => ContentClass::Unknown,
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct RefIndexEntry {
     ref_id: String,
     store_path: String,
     ts: u128,
+    #[serde(default)]
+    content_class: ContentClass,
+    #[serde(default)]
+    expanded: bool,
 }
 
 #[cfg(test)]
@@ -263,6 +311,10 @@ pub struct RecoveryStore {
     pub persistence_path: Option<PathBuf>,
     state: RecoveryState,
     session_refs: Vec<String>,
+    /// Transient mapping from ref id to the content class inferred at store time.
+    /// Used only to seed ref-index entries with a class before the state is persisted;
+    /// it is not itself persisted and re-derives from `classify_ref` when absent.
+    ref_classes: BTreeMap<String, ContentClass>,
     /// Identity of the cache file as last written by this store, captured
     /// while still holding the persist lock. `None` until the first persist;
     /// also reset to `None` whenever a write fails, so the next persist must
@@ -357,6 +409,7 @@ impl RecoveryStore {
             persistence_path,
             state,
             session_refs: Vec::new(),
+            ref_classes: BTreeMap::new(),
             disk_identity,
             journal_identity,
             recovery_count: 0,
@@ -410,7 +463,7 @@ impl RecoveryStore {
         source_start_line: Option<usize>,
         source_end_line: Option<usize>,
     ) -> StoredPayload {
-        let blob_ref = self.put_blob(text);
+        let blob_ref = self.put_blob(text, content_type);
         let file_ref = self.put_file(text, content_type, path, source_start_line, source_end_line);
         let unit_refs = self.index_units(text, content_type, &file_ref);
         StoredPayload {
@@ -466,6 +519,10 @@ impl RecoveryStore {
             }
             let hit_id = id_for('h', &format!("search:{idx}:{line}"));
             let ref_id = format!("tz://search/{hit_id}");
+            self.ref_classes.insert(
+                ref_id.clone(),
+                classify_ref(&ref_id, Some(ContentType::SearchResult)),
+            );
             self.state.search_hits.insert(
                 ref_id.clone(),
                 StoredUnit {
@@ -598,6 +655,14 @@ impl RecoveryStore {
             symbol,
         );
         self.recovery_tokens += count_tokens(&selected);
+        if let Some(store_path) = self.persistence_path.as_ref() {
+            let content_class = self
+                .ref_classes
+                .get(&ref_id)
+                .copied()
+                .unwrap_or_else(|| classify_ref(&ref_id, None));
+            record_ref_index_expanded(store_path, &ref_id, content_class);
+        }
         ExpansionResult::ok(requested_ref, selector.map(str::to_string), selected)
     }
 
@@ -731,8 +796,10 @@ impl RecoveryStore {
         ShellRepeat { unchanged, seen }
     }
 
-    fn put_blob(&mut self, text: &str) -> String {
+    fn put_blob(&mut self, text: &str, content_type: ContentType) -> String {
         let ref_id = format!("tz://blob/{}", id_for('b', text));
+        self.ref_classes
+            .insert(ref_id.clone(), classify_ref(&ref_id, Some(content_type)));
         // Multi-MB payloads (shell captures are the usual offender) stored
         // inline multiply every snapshot serialize, journal append, and load
         // parse, and sit in RAM for the process lifetime (bead tz8). Above
@@ -760,6 +827,8 @@ impl RecoveryStore {
         source_end_line: Option<usize>,
     ) -> String {
         let ref_id = recovery_file_ref(text, path);
+        self.ref_classes
+            .insert(ref_id.clone(), classify_ref(&ref_id, Some(content_type)));
         self.state.files.insert(
             ref_id.clone(),
             StoredFile {
@@ -815,6 +884,8 @@ impl RecoveryStore {
         end_line: Option<usize>,
     ) -> String {
         let ref_id = format!("tz://unit/{}", id_for('u', text));
+        self.ref_classes
+            .insert(ref_id.clone(), classify_ref(&ref_id, Some(content_type)));
         self.state
             .units
             .entry(ref_id.clone())
@@ -1014,7 +1085,7 @@ impl RecoveryStore {
             if let Ok(journal_len) = append_journal(&journal_path(&path), &entry) {
                 if journal_len <= journal_compact_threshold(snap_len) {
                     self.journal_identity = DiskIdentity::capture(&journal_path(&path));
-                    append_blob_refs_to_ref_index(&path, &entry.refs);
+                    append_blob_refs_to_ref_index(&path, &entry.refs, Some(&self.ref_classes));
                     return Ok(());
                 }
             }
@@ -1025,7 +1096,7 @@ impl RecoveryStore {
         let _ = fs::remove_file(journal_path(&path));
         self.journal_identity = None;
         self.disk_identity = DiskIdentity::capture(&path);
-        append_blob_refs_to_ref_index(&path, &self.session_refs);
+        append_blob_refs_to_ref_index(&path, &self.session_refs, Some(&self.ref_classes));
         self.session_refs.clear();
         Ok(())
     }
@@ -1287,7 +1358,11 @@ fn ref_index_lock_path(shard: &Path) -> PathBuf {
     append_file_name_suffix(shard, ".lock")
 }
 
-fn append_blob_refs_to_ref_index(store_path: &Path, refs: &[String]) {
+fn append_blob_refs_to_ref_index(
+    store_path: &Path,
+    refs: &[String],
+    classes: Option<&BTreeMap<String, ContentClass>>,
+) {
     let Some(root) = ref_index_root() else {
         return;
     };
@@ -1320,7 +1395,11 @@ fn append_blob_refs_to_ref_index(store_path: &Path, refs: &[String]) {
         {
             continue;
         }
-        if append_ref_index_line(&shard, ref_id, &store_path, ts).is_ok()
+        let content_class = classes
+            .and_then(|m| m.get(ref_id.as_str()))
+            .copied()
+            .unwrap_or_else(|| classify_ref(ref_id, None));
+        if append_ref_index_line(&shard, ref_id, &store_path, ts, content_class, false).is_ok()
             && fs::metadata(&shard)
                 .map(|meta| meta.len() > REF_INDEX_MAX_BYTES)
                 .unwrap_or(false)
@@ -1335,6 +1414,8 @@ fn append_ref_index_line(
     ref_id: &str,
     store_path: &Path,
     ts: u128,
+    content_class: ContentClass,
+    expanded: bool,
 ) -> Result<(), RecoveryError> {
     let Some(parent) = shard.parent() else {
         return Ok(());
@@ -1344,6 +1425,8 @@ fn append_ref_index_line(
         ref_id: ref_id.to_string(),
         store_path: store_path.to_string_lossy().into_owned(),
         ts,
+        content_class,
+        expanded,
     };
     let mut line = serde_json::to_string(&entry)?;
     line.push('\n');
@@ -1434,7 +1517,7 @@ fn ref_index_entries_for_ref(text: &str, ref_id: &str) -> Vec<RefIndexEntry> {
             entries.push(entry);
         }
     }
-    entries.sort_by(|a, b| b.ts.cmp(&a.ts));
+    entries.sort_by_key(|b| std::cmp::Reverse(b.ts));
     entries
 }
 
@@ -1456,7 +1539,13 @@ fn newest_ref_index_entries(text: &str, skip_ref: Option<&str>) -> BTreeMap<Stri
             .map(|existing: &RefIndexEntry| entry.ts >= existing.ts)
             .unwrap_or(true);
         if replace {
+            let mut entry = entry;
+            if let Some(existing) = entries.get(&entry.ref_id) {
+                entry.expanded |= existing.expanded;
+            }
             entries.insert(entry.ref_id.clone(), entry);
+        } else if let Some(existing) = entries.get_mut(&entry.ref_id) {
+            existing.expanded |= entry.expanded;
         }
     }
     entries
@@ -1534,6 +1623,157 @@ fn resolve_blob_from_ref_index(ref_id: &str, config: &RecoveryConfig) -> RefReso
     }
     prune_ref_index_stale_entries(ref_id, &stale_store_paths);
     RefResolve::NotFound
+}
+
+/// Append an expansion outcome to the per-user ref index. Preserves the
+/// content class from an existing entry for the same ref when available,
+/// so a ref expanded in a later session keeps the class it was stored with.
+fn record_ref_index_expanded(store_path: &Path, ref_id: &str, fallback_class: ContentClass) {
+    let Some(root) = ref_index_root() else {
+        return;
+    };
+    let Ok(store_path) = store_path
+        .canonicalize()
+        .or_else(|_| Ok::<_, std::io::Error>(store_path.to_path_buf()))
+    else {
+        return;
+    };
+    let shard = ref_index_shard_path(&root, ref_id);
+    let Ok(_lock) = PersistLock::acquire_with_retries(ref_index_lock_path(&shard), LOCK_RETRIES)
+    else {
+        return;
+    };
+    let existing = if let Ok(file) = fs::File::open(&shard) {
+        read_limited_utf8(file, (REF_INDEX_MAX_BYTES as usize).saturating_mul(4))
+            .ok()
+            .flatten()
+            .and_then(|text| ref_index_entries_for_ref(&text, ref_id).into_iter().next())
+    } else {
+        None
+    };
+    let content_class = existing
+        .as_ref()
+        .map(|entry| entry.content_class)
+        .unwrap_or(fallback_class);
+    // Avoid rewriting the shard when the ref is already marked expanded.
+    // The expanded flag is sticky across sessions.
+    if existing
+        .as_ref()
+        .map(|entry| entry.expanded)
+        .unwrap_or(false)
+    {
+        return;
+    }
+    let ts = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
+        .unwrap_or_default();
+    let _ = append_ref_index_line(&shard, ref_id, &store_path, ts, content_class, true);
+    if fs::metadata(&shard)
+        .map(|meta| meta.len() > REF_INDEX_MAX_BYTES)
+        .unwrap_or(false)
+    {
+        let _ = compact_ref_index_shard(&shard);
+    }
+}
+
+/// Export per-content-class expansion rates from the per-user ref index.
+/// Returns a JSON summary with total refs, expanded refs, and the expansion
+/// rate for each content class. The `expanded` flag is sticky across sessions.
+pub fn export_class_stats() -> serde_json::Value {
+    let empty = serde_json::json!({
+        "schema_version": "tokenzero.recovery.class-stats.v1",
+        "classes": Vec::<serde_json::Value>::new(),
+        "total_refs": 0,
+        "total_expanded": 0,
+    });
+    let Some(root) = ref_index_root() else {
+        return empty.clone();
+    };
+    let mut all_entries = Vec::new();
+    let Ok(entries) = fs::read_dir(&root) else {
+        return empty;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) != Some("ndjson") {
+            continue;
+        }
+        let Ok(file) = fs::File::open(&path) else {
+            continue;
+        };
+        let Ok(Some(text)) =
+            read_limited_utf8(file, (REF_INDEX_MAX_BYTES as usize).saturating_mul(4))
+        else {
+            continue;
+        };
+        for line in text.lines() {
+            let line = line.trim();
+            if line.is_empty() {
+                continue;
+            }
+            if let Ok(entry) = serde_json::from_str::<RefIndexEntry>(line) {
+                all_entries.push(entry);
+            }
+        }
+    }
+    let mut per_ref: BTreeMap<String, (u128, ContentClass, bool)> = BTreeMap::new();
+    for entry in all_entries {
+        match per_ref.entry(entry.ref_id.clone()) {
+            std::collections::btree_map::Entry::Vacant(slot) => {
+                slot.insert((entry.ts, entry.content_class, entry.expanded));
+            }
+            std::collections::btree_map::Entry::Occupied(mut slot) => {
+                let (ts, class, expanded) = slot.get_mut();
+                *expanded |= entry.expanded;
+                if entry.ts > *ts {
+                    *ts = entry.ts;
+                    *class = entry.content_class;
+                }
+            }
+        }
+    }
+    let mut totals: BTreeMap<ContentClass, (usize, usize)> = BTreeMap::new();
+    for (_, class, expanded) in per_ref.values() {
+        let (total, expanded_count) = totals.entry(*class).or_insert((0, 0));
+        *total += 1;
+        if *expanded {
+            *expanded_count += 1;
+        }
+    }
+    let mut classes = Vec::new();
+    let mut total_refs = 0usize;
+    let mut total_expanded = 0usize;
+    for class in [
+        ContentClass::SourceFile,
+        ContentClass::Diff,
+        ContentClass::ShellOutput,
+        ContentClass::SearchHits,
+        ContentClass::Doc,
+        ContentClass::BinaryPreview,
+        ContentClass::Unknown,
+    ] {
+        let (total, expanded) = totals.remove(&class).unwrap_or((0, 0));
+        let rate = if total > 0 {
+            expanded as f64 / total as f64
+        } else {
+            0.0
+        };
+        classes.push(serde_json::json!({
+            "content_class": class,
+            "total": total,
+            "expanded": expanded,
+            "rate": rate,
+        }));
+        total_refs += total;
+        total_expanded += expanded;
+    }
+    serde_json::json!({
+        "schema_version": "tokenzero.recovery.class-stats.v1",
+        "classes": classes,
+        "total_refs": total_refs,
+        "total_expanded": total_expanded,
+    })
 }
 
 fn load_state(
