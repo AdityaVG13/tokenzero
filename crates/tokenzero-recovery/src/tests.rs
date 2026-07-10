@@ -1,4 +1,5 @@
 use super::*;
+use crate::shared_cas::SharedCas;
 use proptest::prelude::*;
 use std::collections::BTreeMap;
 use std::panic::{AssertUnwindSafe, catch_unwind, resume_unwind};
@@ -1239,26 +1240,14 @@ fn same_store_scheme_alias_fz_gz_blob_expand_byte_exact() {
 }
 
 #[test]
-fn same_store_scheme_alias_codemode_error_via_fz() {
+fn foreign_non_blob_ref_is_not_reinterpreted_as_tokenzero_key() {
     let (mut store, _cache, _dir) = temp_store();
-    let err_body = r#"{"kind":"runtime","message":"boom from plan"}"#;
-    let stored = store
-        .store_payload(err_body, ContentType::JsonConfig, None, None, None)
-        .unwrap();
-    let logical = "tz://codemode/execution/test-exec-1/error";
-    store.store_alias(logical, &stored.blob_ref).unwrap();
-
     let via_fz = "fz://codemode/execution/test-exec-1/error";
     let expanded = store.expand(via_fz, Some("raw"), None, None, None, None);
-    assert!(
-        expanded.found,
-        "fz codemode error ref must expand: {}",
-        expanded.reason
-    );
-    assert_eq!(expanded.content, err_body);
+    assert!(!expanded.found);
+    assert_eq!(expanded.reason, "unsupported-ref-kind");
     assert_eq!(expanded.ref_id, via_fz);
 }
-
 #[test]
 fn garbage_scheme_is_invalid_ref_with_full_id_preserved() {
     let (mut store, _cache, _dir) = temp_store();
@@ -1283,16 +1272,125 @@ fn canonicalize_and_is_expandable_helpers() {
         canonicalize_expand_ref("fz://blob/babc").as_deref(),
         Some("tz://blob/babc")
     );
-    assert_eq!(
-        canonicalize_expand_ref("gz://codemode/execution/x/error").as_deref(),
-        Some("tz://codemode/execution/x/error")
-    );
+    assert!(canonicalize_expand_ref("gz://codemode/execution/x/error").is_none());
     assert!(canonicalize_expand_ref("http://nope").is_none());
+}
+
+fn canonical_shared_store() -> (RecoveryStore, PathBuf, tempfile::TempDir, SharedCas) {
+    let dir = tempdir().unwrap();
+    let root = dir.path().join(".zerostack");
+    fs::create_dir_all(root.join("blobs").join("sha256")).unwrap();
+    let cache_dir = root.join("tokenzero");
+    fs::create_dir_all(&cache_dir).unwrap();
+    let cache = cache_dir.join("recovery-cache.json");
+    let cas = SharedCas::new(root.clone());
+    let store = RecoveryStore::new(Some(cache.clone()));
+    (store, cache, dir, cas)
 }
 
 // ---------------------------------------------------------------------------
 // #B/#L fragment algebra (cqr.5)
 // ---------------------------------------------------------------------------
+
+#[test]
+fn canonical_shared_store_serves_full_refs_and_fragments() {
+    let (mut store, _cache, _dir, cas) = canonical_shared_store();
+    let payload = b"alpha
+beta
+gamma
+";
+    let full_hash = cas.publish(payload).unwrap();
+    let tz = format!("tz://blob/{full_hash}");
+    let fz = format!("fz://blob/{full_hash}");
+    let gz = format!("gz://blob/{full_hash}");
+
+    for scheme in [&tz, &fz, &gz] {
+        let expanded = store.expand(scheme, Some("raw"), None, None, None, None);
+        assert!(expanded.found);
+        assert_eq!(expanded.content.as_bytes(), payload);
+        assert_eq!(expanded.ref_id, *scheme);
+    }
+
+    let b_ref = format!("{tz}#B0-5");
+    let expanded_b = store.expand(&b_ref, Some("raw"), None, None, None, None);
+    assert!(expanded_b.found);
+    assert_eq!(expanded_b.content, "alpha");
+    assert_eq!(expanded_b.ref_id, b_ref);
+
+    let l_ref = format!("{tz}#L2-2");
+    let expanded_l = store.expand(&l_ref, Some("raw"), None, None, None, None);
+    assert!(expanded_l.found);
+    assert_eq!(
+        expanded_l.content,
+        "beta
+"
+    );
+    assert_eq!(expanded_l.ref_id, l_ref);
+}
+
+#[test]
+fn shared_cas_missing_on_disjoint_roots() {
+    let text = "alpha
+beta
+gamma
+";
+    let (mut producer, _cache, _dir, cas) = canonical_shared_store();
+    let full_hash = cas.publish(text.as_bytes()).unwrap();
+    let full_ref = format!("fz://blob/{full_hash}");
+    let (mut consumer, _consumer_cache, _consumer_dir, _consumer_cas) = canonical_shared_store();
+
+    let missing = consumer.expand(&full_ref, Some("raw"), None, None, None, None);
+    assert!(!missing.found);
+    assert_eq!(missing.reason, "shared-cas-missing");
+    assert_eq!(missing.ref_id, full_ref);
+
+    let present = producer.expand(&full_ref, Some("raw"), None, None, None, None);
+    assert!(present.found);
+    assert_eq!(present.content, text);
+    assert_eq!(present.ref_id, full_ref);
+}
+
+#[test]
+fn shared_cas_corruption_is_detected_via_fragment() {
+    let (mut store, _cache, _dir, cas) = canonical_shared_store();
+    let payload = b"alpha
+beta
+gamma
+";
+    let full_hash = cas.publish(payload).unwrap();
+    let prefix = &full_hash[..2];
+    let object_path = cas
+        .root()
+        .join("blobs")
+        .join("sha256")
+        .join(prefix)
+        .join(&full_hash);
+    fs::write(&object_path, b"corrupted").unwrap();
+
+    let fragment = format!("tz://blob/{full_hash}#B0-5");
+    let expanded = store.expand(&fragment, Some("raw"), None, None, None, None);
+    assert!(!expanded.found);
+    assert_eq!(expanded.reason, "shared-cas-corruption");
+    assert_eq!(expanded.ref_id, fragment);
+    assert!(expanded.content.is_empty());
+}
+
+#[test]
+fn shared_cas_rejects_malformed_hashes() {
+    let (mut store, _cache, _dir, _cas) = canonical_shared_store();
+    let uppercase_ref = format!("tz://blob/{}", "A".repeat(64));
+    let invalid_refs = vec!["tz://blob/abc".to_string(), uppercase_ref];
+
+    for (invalid_ref, reason) in invalid_refs
+        .into_iter()
+        .zip(["zeroref-legacy_ambiguity", "zeroref-malformed"])
+    {
+        let expanded = store.expand(&invalid_ref, Some("raw"), None, None, None, None);
+        assert!(!expanded.found);
+        assert_eq!(expanded.reason, reason);
+        assert_eq!(expanded.ref_id, invalid_ref);
+    }
+}
 
 #[test]
 fn b_fragment_returns_empty_for_zero_range() {
@@ -1490,7 +1588,11 @@ fn l_fragment_preserves_crlf() {
         .unwrap();
     let l_ref = format!("{}#L1-L2", stored.blob_ref);
     let expanded = store.expand(&l_ref, Some("raw"), None, None, None, None);
-    assert!(expanded.found, "#L1-L2 CRLF must succeed: {}", expanded.reason);
+    assert!(
+        expanded.found,
+        "#L1-L2 CRLF must succeed: {}",
+        expanded.reason
+    );
     assert_eq!(expanded.content, "a\r\nb\r\n");
 }
 
@@ -1920,7 +2022,10 @@ fn zeroref_v1_round_trips_fragment_selectors() {
 #[test]
 fn zeroref_v1_rejects_golden_negative_vectors() {
     let cases = vec![
-        ("tz://blob/ba_e3b0c44298fc1c149", ZeroRefError::LegacyAmbiguity),
+        (
+            "tz://blob/ba_e3b0c44298fc1c149",
+            ZeroRefError::LegacyAmbiguity,
+        ),
         (
             "tz://blob/E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855",
             ZeroRefError::Malformed,
@@ -1970,7 +2075,13 @@ fn zeroref_v1_byte_oob_respects_byte_length() {
 #[test]
 fn zeroref_v1_legacy_short_ids_parsed_by_existing_parse_ref() {
     let short = "tz://blob/ba_e3b0c44298fc1c149";
-    assert_eq!(parse_zeroref_v1_blob(short, None).unwrap_err(), ZeroRefError::LegacyAmbiguity);
+    assert_eq!(
+        parse_zeroref_v1_blob(short, None).unwrap_err(),
+        ZeroRefError::LegacyAmbiguity
+    );
     let canonicalized = canonicalize_expand_ref(short).unwrap();
-    assert!(parse_ref(&canonicalized).is_some(), "legacy short IDs remain parseable via existing parse_ref");
+    assert!(
+        parse_ref(&canonicalized).is_some(),
+        "legacy short IDs remain parseable via existing parse_ref"
+    );
 }

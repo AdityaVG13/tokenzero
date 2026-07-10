@@ -19,6 +19,8 @@ use std::time::{Duration, SystemTime};
 use thiserror::Error;
 use tokenzero_core::{ContentType, count_tokens, error_block, id_for, sha256_hex, symbol_block};
 
+use crate::shared_cas::{SharedCas, SharedCasError};
+
 pub mod shared_cas;
 
 const LOCK_RETRIES: usize = 240;
@@ -29,11 +31,9 @@ const REF_INDEX_MAX_BYTES: u64 = 1_048_576;
 const REF_INDEX_DISABLE_ENV: &str = "TOKENZERO_REF_INDEX";
 const REF_INDEX_PATH_ENV: &str = "TOKENZERO_REF_INDEX_PATH";
 
-/// ZeroStack schemes accepted by expand. These are **same-store scheme aliases**:
-/// `fz://blob/<id>` and `gz://blob/<id>` are rewritten to `tz://blob/<id>` and looked
-/// up in the TokenZero store. This is NOT cross-engine expansion — refs produced by
-/// FSZero or GraphZero through their own stores will not resolve here until a verified
-/// shared-CAS adapter exists (tracked by tokenzero-zeroref-v1-shared-cas-cqr.3).
+/// ZeroStack schemes accepted by expand. Full-hash portable blob refs first use the
+/// configured canonical shared CAS. Legacy short blob refs retain a clearly separated
+/// same-store alias tier when no shared object is available.
 pub const EXPAND_REF_SCHEMES: &[&str] = &["tz://", "fz://", "gz://"];
 
 /// True when `ref_id` starts with a scheme expand can recover (`tz://`, `fz://`, `gz://`).
@@ -43,19 +43,34 @@ pub fn is_expandable_ref(ref_id: &str) -> bool {
         .any(|scheme| ref_id.starts_with(scheme))
 }
 
-/// Rewrite `fz://` / `gz://` to `tz://` for store and alias lookup (same-store alias).
-/// Returns `None` for unknown schemes (caller should surface `invalid-ref` with the full ref).
+/// Rewrite portable `fz://blob/` / `gz://blob/` refs to `tz://blob/` for the
+/// legacy same-store alias tier. Foreign non-blob refs remain engine-owned and
+/// are rejected instead of being reinterpreted as TokenZero keys.
 pub fn canonicalize_expand_ref(ref_id: &str) -> Option<String> {
     if ref_id.starts_with("tz://") {
         return Some(ref_id.to_string());
     }
-    if let Some(rest) = ref_id.strip_prefix("fz://") {
-        return Some(format!("tz://{rest}"));
+    if let Some(rest) = ref_id.strip_prefix("fz://blob/") {
+        return Some(format!("tz://blob/{rest}"));
     }
-    if let Some(rest) = ref_id.strip_prefix("gz://") {
-        return Some(format!("tz://{rest}"));
+    if let Some(rest) = ref_id.strip_prefix("gz://blob/") {
+        return Some(format!("tz://blob/{rest}"));
     }
     None
+}
+
+fn is_legacy_same_store_blob_ref(ref_id: &str) -> bool {
+    let bare = ref_id.split_once('#').map_or(ref_id, |(bare, _)| bare);
+    let hash = ["tz://blob/", "fz://blob/", "gz://blob/"]
+        .iter()
+        .find_map(|prefix| bare.strip_prefix(prefix));
+    hash.is_some_and(|hash| {
+        hash.len() == 17
+            && hash.starts_with('b')
+            && hash[1..]
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    })
 }
 
 /// `file:line[:col]` matcher for search-output ingestion. Compiled once on first
@@ -606,6 +621,10 @@ pub struct RecoveryStore {
     /// the journal must force the reload+merge path just like a foreign
     /// snapshot rewrite.
     journal_identity: Option<DiskIdentity>,
+    /// Canonical immutable store shared with FSZero/GraphZero. Attached only
+    /// for unified `<store-root>/tokenzero/...` cache paths whose `blobs/`
+    /// directory already exists.
+    shared_cas: Option<SharedCas>,
     pub recovery_count: usize,
     pub recovery_tokens: usize,
 }
@@ -685,6 +704,9 @@ impl RecoveryStore {
             _ => (None, None),
         };
         let state = loaded.unwrap_or_else(|| RecoveryState::empty(&config));
+        let shared_cas = persistence_path
+            .as_deref()
+            .and_then(SharedCas::detect_from_cache_path);
         Self {
             config,
             persistence_path,
@@ -693,6 +715,7 @@ impl RecoveryStore {
             ref_classes: BTreeMap::new(),
             disk_identity,
             journal_identity,
+            shared_cas,
             recovery_count: 0,
             recovery_tokens: 0,
         }
@@ -833,11 +856,83 @@ impl RecoveryStore {
     ) -> ExpansionResult {
         self.recovery_count += 1;
         let requested_ref = ref_id.to_string();
-        // Same-store scheme alias: fz://blob/X and gz://blob/X are rewritten to
-        // tz://blob/X and looked up in the TokenZero store. This is NOT cross-engine
-        // expansion — foreign-store refs will not resolve (cqr.1).
-        // Canonicalize before alias resolution so codemode logical refs minted as
-        // tz://codemode/... are found when expanded via fz://codemode/....
+        // Full-hash portable blobs use the canonical shared CAS before the
+        // legacy TokenZero JSON tier. The original scheme and complete digest
+        // stay intact for routing, verification, and errors.
+        let portable = match parse_zeroref_v1_blob(ref_id, None) {
+            Ok(parsed) => Some(parsed),
+            Err(ZeroRefError::Unsupported) => None,
+            Err(ZeroRefError::LegacyAmbiguity) if is_legacy_same_store_blob_ref(ref_id) => None,
+            Err(err) => {
+                return ExpansionResult::missing(
+                    requested_ref,
+                    selector.map(str::to_string),
+                    format!("zeroref-{err}"),
+                );
+            }
+        };
+        if portable.is_none()
+            && (ref_id.starts_with("fz://") || ref_id.starts_with("gz://"))
+            && !ref_id.starts_with("fz://blob/")
+            && !ref_id.starts_with("gz://blob/")
+        {
+            return ExpansionResult::missing(
+                requested_ref,
+                selector.map(str::to_string),
+                "unsupported-ref-kind",
+            );
+        }
+        let shared_content = match (&portable, &self.shared_cas) {
+            (Some(portable), Some(cas)) => match cas.resolve(&portable.hash) {
+                Ok(bytes) => match String::from_utf8(bytes) {
+                    Ok(content) => Some(content),
+                    Err(_) => {
+                        return ExpansionResult::missing(
+                            requested_ref,
+                            selector.map(str::to_string),
+                            "shared-cas-non-utf8",
+                        );
+                    }
+                },
+                Err(SharedCasError::NotFound) if portable.scheme == "tz" => None,
+                Err(SharedCasError::NotFound) => {
+                    return ExpansionResult::missing(
+                        requested_ref,
+                        selector.map(str::to_string),
+                        "shared-cas-missing",
+                    );
+                }
+                Err(SharedCasError::Corruption) => {
+                    return ExpansionResult::missing(
+                        requested_ref,
+                        selector.map(str::to_string),
+                        "shared-cas-corruption",
+                    );
+                }
+                Err(SharedCasError::Policy) => {
+                    return ExpansionResult::missing(
+                        requested_ref,
+                        selector.map(str::to_string),
+                        "shared-cas-policy",
+                    );
+                }
+                Err(SharedCasError::Io(_)) => {
+                    return ExpansionResult::missing(
+                        requested_ref,
+                        selector.map(str::to_string),
+                        "shared-cas-io",
+                    );
+                }
+                Err(SharedCasError::InvalidHash(_)) => {
+                    return ExpansionResult::missing(
+                        requested_ref,
+                        selector.map(str::to_string),
+                        "zeroref-malformed",
+                    );
+                }
+            },
+            _ => None,
+        };
         let Some(lookup_ref) = canonicalize_expand_ref(ref_id) else {
             return ExpansionResult::missing(
                 requested_ref,
@@ -873,21 +968,25 @@ impl RecoveryStore {
         // Resolve lines:/range:/around: before OOB so selector windows get the
         // same structured error as explicit start_line/end_line (zq9).
         resolve_selector_line_window(selector, &mut selected_start, &mut selected_end);
-        let content = match self.resolve_ref_with_index(&parsed.kind, &parsed.bare) {
-            RefResolve::Found(content) => content,
-            RefResolve::NotFound => {
-                return ExpansionResult::missing(
-                    requested_ref,
-                    selector.map(str::to_string),
-                    ref_not_found_reason(&parsed.kind),
-                );
-            }
-            RefResolve::DecodeFailed => {
-                return ExpansionResult::missing(
-                    requested_ref,
-                    selector.map(str::to_string),
-                    "decode-failed",
-                );
+        let content = if let Some(content) = shared_content {
+            content
+        } else {
+            match self.resolve_ref_with_index(&parsed.kind, &parsed.bare) {
+                RefResolve::Found(content) => content,
+                RefResolve::NotFound => {
+                    return ExpansionResult::missing(
+                        requested_ref,
+                        selector.map(str::to_string),
+                        ref_not_found_reason(&parsed.kind),
+                    );
+                }
+                RefResolve::DecodeFailed => {
+                    return ExpansionResult::missing(
+                        requested_ref,
+                        selector.map(str::to_string),
+                        "decode-failed",
+                    );
+                }
             }
         };
         if parsed.kind == "file" && self.file_ref_is_stale(&parsed.bare) {

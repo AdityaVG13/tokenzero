@@ -48,6 +48,25 @@ impl SharedCas {
         Self { root }
     }
 
+    /// Detect the canonical shared CAS from a TokenZero cache path.
+    ///
+    /// Unified stores place the recovery cache at
+    /// `<store-root>/tokenzero/recovery-cache.json` and immutable objects at
+    /// `<store-root>/blobs/...`. Legacy project-private `.tokenzero` caches do
+    /// not imply shared-CAS access. The `blobs/` directory must already exist;
+    /// its presence is the explicit attachment used by sibling engines.
+    pub fn detect_from_cache_path(cache_path: &Path) -> Option<Self> {
+        let engine_dir = cache_path.parent()?;
+        if engine_dir.file_name()? != "tokenzero" {
+            return None;
+        }
+        let store_root = engine_dir.parent()?;
+        store_root
+            .join("blobs")
+            .is_dir()
+            .then(|| Self::new(store_root.to_path_buf()))
+    }
+
     /// Return the effective root path.
     pub fn root(&self) -> &Path {
         &self.root
@@ -250,7 +269,10 @@ mod tests {
             .join(&hash);
         fs::write(&path, b"tampered bytes").unwrap();
 
-        assert!(matches!(cas.resolve(&hash), Err(SharedCasError::Corruption)));
+        assert!(matches!(
+            cas.resolve(&hash),
+            Err(SharedCasError::Corruption)
+        ));
     }
 
     #[test]
@@ -268,7 +290,10 @@ mod tests {
             .join(&hash);
         fs::write(&path, b"different bytes").unwrap();
 
-        assert!(matches!(cas.publish(bytes), Err(SharedCasError::Corruption)));
+        assert!(matches!(
+            cas.publish(bytes),
+            Err(SharedCasError::Corruption)
+        ));
     }
 
     #[test]
@@ -296,6 +321,9 @@ mod tests {
         let cas = SharedCas::new(dir.path().to_path_buf());
         let missing = "0000000000000000000000000000000000000000000000000000000000000000";
 
-        assert!(matches!(cas.resolve(missing), Err(SharedCasError::NotFound)));
+        assert!(matches!(
+            cas.resolve(missing),
+            Err(SharedCasError::NotFound)
+        ));
     }
 }
