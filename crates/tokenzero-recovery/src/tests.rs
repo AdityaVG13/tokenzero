@@ -1192,11 +1192,11 @@ proptest! {
 }
 
 // ---------------------------------------------------------------------------
-// Cross-scheme expand (fz:// / gz:// shared blob identity) — wqw.1
+// Same-store scheme alias expand (fz:// / gz:// rewritten to tz://) — cqr.1
 // ---------------------------------------------------------------------------
 
 #[test]
-fn cross_scheme_fz_and_gz_blob_expand_byte_exact() {
+fn same_store_scheme_alias_fz_gz_blob_expand_byte_exact() {
     let (mut store, _cache, _dir) = temp_store();
     let payload = "cross-scheme payload\nline two\n";
     let stored = store
@@ -1220,7 +1220,7 @@ fn cross_scheme_fz_and_gz_blob_expand_byte_exact() {
 }
 
 #[test]
-fn cross_scheme_codemode_error_alias_expands_via_fz() {
+fn same_store_scheme_alias_codemode_error_via_fz() {
     let (mut store, _cache, _dir) = temp_store();
     let err_body = r#"{"kind":"runtime","message":"boom from plan"}"#;
     let stored = store
@@ -1269,6 +1269,56 @@ fn canonicalize_and_is_expandable_helpers() {
         Some("tz://codemode/execution/x/error")
     );
     assert!(canonicalize_expand_ref("http://nope").is_none());
+}
+
+// ---------------------------------------------------------------------------
+// #B fragment: unsupported, must not return full payload (cqr.1)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn b_fragment_returns_unsupported_not_full_payload() {
+    let (mut store, _cache, _dir) = temp_store();
+    let payload = "byte-range payload\nline two\n";
+    let stored = store
+        .store_payload(payload, ContentType::Unknown, None, None, None)
+        .unwrap();
+    // Append #B0-1 fragment to the stored blob ref
+    let b_ref = format!("{}#B0-1", stored.blob_ref);
+    let expanded = store.expand(&b_ref, Some("raw"), None, None, None, None);
+    assert!(!expanded.found, "#B must not return found=true");
+    assert!(
+        expanded.reason.starts_with("unsupported_fragment"),
+        "reason must be unsupported_fragment, got: {}",
+        expanded.reason
+    );
+    assert_eq!(
+        expanded.ref_id, b_ref,
+        "requested ref must be preserved in full (no truncation)"
+    );
+    assert!(
+        expanded.content.is_empty(),
+        "#B must never return the full payload"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Negative fixture: valid foreign full SHA-256 hash absent from TokenZero
+// ---------------------------------------------------------------------------
+
+#[test]
+fn same_store_scheme_alias_foreign_full_hash_absent_returns_missing() {
+    let (mut store, _cache, _dir) = temp_store();
+    // A valid 64-hex-char SHA-256 that was never stored in TokenZero.
+    // Simulates a ref produced by a foreign engine (FSZero/GraphZero) through
+    // its own store — TokenZero cannot resolve it (same-store alias only).
+    let foreign_ref = "fz://blob/abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789";
+    let expanded = store.expand(foreign_ref, Some("raw"), None, None, None, None);
+    assert!(!expanded.found);
+    assert_eq!(expanded.reason, "ref-not-found");
+    assert_eq!(
+        expanded.ref_id, foreign_ref,
+        "foreign ref must be preserved in full (no truncation)"
+    );
 }
 
 // ---------------------------------------------------------------------------

@@ -498,7 +498,7 @@ pub(crate) fn canonical_tool_specs() -> Vec<ToolSpecSeed> {
             cluster: "material",
             summary: "Recover exact bytes from a tz://, fz://, or gz:// ref, optionally narrowed by line range, selector, or symbol.",
             doc: tool_description(
-                "Recover exact content from `tz://`, `fz://`, or `gz://` refs (shared blob identity) with optional ranges or anchors.",
+                "Recover exact content from `tz://`, `fz://`, or `gz://` refs (same-store scheme alias; cross-engine expansion pending ZeroRef v1) with optional ranges or anchors.",
                 "ref: copy a ref returned by read/find/tree/shell/ingest or sibling ZeroStack engines. selector/start_line/end_line: use only when narrowing recovery.",
                 "Use whenever compact output omitted needed detail. NOT for arbitrary file paths; use `read`.",
                 "Do expand refs instead of re-running expensive commands. Do use line ranges for large file refs. Don't invent refs.",
@@ -926,7 +926,7 @@ fn text_schema(description: &str) -> Value {
 fn expand_schema() -> Value {
     object_schema(
         json!({
-            "ref": {"type": "string", "pattern": "^(tz|fz|gz)://", "description": "Exact recovery ref (tz://, fz://, or gz:// — shared blob identity)."},
+            "ref": {"type": "string", "pattern": "^(tz|fz|gz)://", "description": "Exact recovery ref (tz://, fz://, or gz:// — same-store scheme alias; cross-engine expansion pending ZeroRef v1)."},
             "selector": {"type": "string", "description": "Recovery-store-specific selector."},
             "start_line": line_property(),
             "end_line": line_property(),

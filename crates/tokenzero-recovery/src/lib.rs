@@ -27,8 +27,11 @@ const REF_INDEX_MAX_BYTES: u64 = 1_048_576;
 const REF_INDEX_DISABLE_ENV: &str = "TOKENZERO_REF_INDEX";
 const REF_INDEX_PATH_ENV: &str = "TOKENZERO_REF_INDEX_PATH";
 
-/// ZeroStack schemes accepted by expand. Shared content-addressed blob identity:
-/// `fz://blob/<id>` and `gz://blob/<id>` resolve the same payload as `tz://blob/<id>`.
+/// ZeroStack schemes accepted by expand. These are **same-store scheme aliases**:
+/// `fz://blob/<id>` and `gz://blob/<id>` are rewritten to `tz://blob/<id>` and looked
+/// up in the TokenZero store. This is NOT cross-engine expansion — refs produced by
+/// FSZero or GraphZero through their own stores will not resolve here until a verified
+/// shared-CAS adapter exists (tracked by tokenzero-zeroref-v1-shared-cas-cqr.3).
 pub const EXPAND_REF_SCHEMES: &[&str] = &["tz://", "fz://", "gz://"];
 
 /// True when `ref_id` starts with a scheme expand can recover (`tz://`, `fz://`, `gz://`).
@@ -38,7 +41,7 @@ pub fn is_expandable_ref(ref_id: &str) -> bool {
         .any(|scheme| ref_id.starts_with(scheme))
 }
 
-/// Rewrite `fz://` / `gz://` to `tz://` for store and alias lookup.
+/// Rewrite `fz://` / `gz://` to `tz://` for store and alias lookup (same-store alias).
 /// Returns `None` for unknown schemes (caller should surface `invalid-ref` with the full ref).
 pub fn canonicalize_expand_ref(ref_id: &str) -> Option<String> {
     if ref_id.starts_with("tz://") {
@@ -492,7 +495,9 @@ impl RecoveryStore {
     ) -> ExpansionResult {
         self.recovery_count += 1;
         let requested_ref = ref_id.to_string();
-        // Shared blob identity: fz://blob/X and gz://blob/X look up tz://blob/X.
+        // Same-store scheme alias: fz://blob/X and gz://blob/X are rewritten to
+        // tz://blob/X and looked up in the TokenZero store. This is NOT cross-engine
+        // expansion — foreign-store refs will not resolve (cqr.1).
         // Canonicalize before alias resolution so codemode logical refs minted as
         // tz://codemode/... are found when expanded via fz://codemode/....
         let Some(lookup_ref) = canonicalize_expand_ref(ref_id) else {
@@ -512,6 +517,19 @@ impl RecoveryStore {
         };
         let mut selected_start = start_line;
         let mut selected_end = end_line;
+        // Detect unsupported #B (byte-range) fragments before store lookup.
+        // #B is not yet implemented — never return the full payload when a #B
+        // fragment is present; return a stable unsupported_fragment error with
+        // the complete untruncated ref (cqr.1).
+        if let Some(fragment) = parsed.fragment.as_deref() {
+            if fragment.starts_with('B') {
+                return ExpansionResult::missing(
+                    requested_ref,
+                    selector.map(str::to_string),
+                    "unsupported_fragment: #B (byte-range) is not yet implemented; use #L for line ranges or expand without a fragment for the full payload",
+                );
+            }
+        }
         if let Some(fragment) = parsed.fragment.as_deref().filter(|f| f.starts_with('L')) {
             let (start, end) = parse_line_fragment(fragment);
             selected_start = start;
@@ -1021,8 +1039,8 @@ struct ParsedRef {
 }
 
 fn parse_ref(ref_id: &str) -> Option<ParsedRef> {
-    // Callers canonicalize fz:// / gz:// → tz:// before parse_ref. Accept only
-    // the store scheme here so scheme rewriting lives in one place.
+    // Callers canonicalize fz:// / gz:// → tz:// before parse_ref (same-store alias).
+    // Accept only the store scheme here so scheme rewriting lives in one place.
     let (bare, fragment) = ref_id
         .split_once('#')
         .map_or((ref_id, None), |(b, f)| (b, Some(f.to_string())));

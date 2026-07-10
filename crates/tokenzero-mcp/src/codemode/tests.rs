@@ -749,8 +749,8 @@ fn expand_without_tz_prefix_is_rejected() {
 }
 
 #[test]
-fn expand_cross_scheme_fz_blob_in_one_plan() {
-    // wqw.1 Verify: mint via compact, expand via fz:// rewrite of same id in ONE plan.
+fn expand_same_store_scheme_alias_fz_gz_in_one_plan() {
+    // cqr.1 Verify: mint via compact, expand via fz:// rewrite of same id in ONE plan.
     // Exact expand unwraps to the raw payload string (not {text: ...}).
     let plan = r#"
         const data = await zero.compact("codemode cross-scheme body");

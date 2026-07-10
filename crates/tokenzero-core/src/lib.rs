@@ -1625,6 +1625,9 @@ fn leading_ws(line: &str) -> usize {
     line.chars().take_while(|c| *c == ' ' || *c == '\t').count()
 }
 
+/// Generate a short TokenZero ref ID: `<prefix>` + 16 hex chars (first 8 SHA-256 bytes).
+/// These are TokenZero legacy refs, NOT portable full SHA-256 ZeroRef v1 IDs.
+/// Full-hash migration is tracked by the ZeroRef v1 epic.
 pub fn id_for(prefix: char, text: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(text.as_bytes());

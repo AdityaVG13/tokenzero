@@ -343,6 +343,38 @@ fn expand_changed_content_serves_full() {
 }
 
 #[test]
+fn expand_b_fragment_returns_unsupported_not_full_payload() {
+    // cqr.1: #B fragment must not return the full payload; must return unsupported_fragment.
+    let dir = tempdir().unwrap();
+    let file = dir.path().join("bfrag.txt");
+    let content = "byte-range test\nline two\n";
+    fs::write(&file, content).unwrap();
+    let engine = TokenZeroEngine::new(EngineConfig::for_root(dir.path()));
+    let response = read_ok(&engine, &file);
+    let blob_ref = response
+        .refs
+        .iter()
+        .find(|record| record.kind == "blob")
+        .unwrap()
+        .ref_id
+        .clone();
+    let b_ref = format!("{blob_ref}#B0-1");
+    let expanded = engine.expand(&b_ref, Some("raw"), None, None, None, None);
+    assert_eq!(expanded.status, "error");
+    let err = expanded.error.as_ref().expect("error payload");
+    assert!(
+        err.message.contains("unsupported_fragment"),
+        "must contain unsupported_fragment: {}",
+        err.message
+    );
+    assert!(
+        err.message.contains(&b_ref),
+        "must preserve full ref: {}",
+        err.message
+    );
+}
+
+#[test]
 fn expand_across_engine_respawn_stays_byte_exact() {
     let dir = tempdir().unwrap();
     let file = dir.path().join("sample.rs");
@@ -454,8 +486,8 @@ fn session_dedup_off_does_not_write_session_memory_file() {
 }
 
 #[test]
-fn expand_cross_scheme_fz_and_gz_blob_byte_exact() {
-    // wqw.1: engine expand accepts fz:// and gz:// with shared blob identity.
+fn expand_same_store_scheme_alias_fz_gz_byte_exact() {
+    // cqr.1: engine expand accepts fz:// and gz:// as same-store scheme aliases.
     let dir = tempdir().unwrap();
     let file = dir.path().join("cross.txt");
     let content = "engine cross-scheme body\nsecond line\n";
