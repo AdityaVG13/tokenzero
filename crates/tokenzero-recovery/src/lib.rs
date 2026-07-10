@@ -19,6 +19,8 @@ use std::time::{Duration, SystemTime};
 use thiserror::Error;
 use tokenzero_core::{ContentType, count_tokens, error_block, id_for, sha256_hex, symbol_block};
 
+pub mod shared_cas;
+
 const LOCK_RETRIES: usize = 240;
 const MAX_SHELL_OUTCOMES: usize = 256;
 const LOCK_RETRY_DELAY: Duration = Duration::from_millis(25);
