@@ -1717,7 +1717,10 @@ pub use shell_display::{
 pub use shell_family::shell_family;
 pub use shell_policy::{classify_command_status, decide_shell_policy, shell_combined_output};
 pub use tokens::{
-    count_tokens, enforce_token_budget, enforce_token_budget_with_ref, savings_ratio, sha256_hex,
+    TokenizerFamily, TokenizerMetadata, active_model_id, active_tokenizer_metadata, count_tokens,
+    count_tokens_for_model, enforce_token_budget, enforce_token_budget_with_ref,
+    pack_to_token_boundary, pack_to_token_boundary_for_model,
+    pack_to_token_boundary_with_char_limit, savings_ratio, sha256_hex, tokenizer_metadata,
 };
 
 #[cfg(test)]

@@ -8,7 +8,9 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
-use tokenzero_core::{Mode, ToolResponse, count_tokens, detect_content_type};
+use tokenzero_core::{
+    Mode, ToolResponse, count_tokens, detect_content_type, pack_to_token_boundary_with_char_limit,
+};
 use tokenzero_filters::{discover, rewrite_command};
 
 use crate::workspace::{
@@ -1387,9 +1389,10 @@ fn ref_first_value(
                     if !refs.contains(&ref_id) {
                         refs.push(ref_id.clone());
                     }
+                    let preview_budget = budget_tokens.saturating_sub(count_tokens(&ref_id));
                     return json!({
                         "ref": ref_id,
-                        "preview": first_line_preview(&text),
+                        "preview": first_line_preview(&text, preview_budget),
                     });
                 }
             }
@@ -1445,12 +1448,9 @@ fn unwrap_raw_value(value: Value) -> Value {
     }
 }
 
-fn first_line_preview(text: &str) -> String {
-    let mut preview = text.lines().next().unwrap_or("").trim().to_string();
-    if preview.chars().count() > 32 {
-        preview = preview.chars().take(32).collect();
-    }
-    preview
+fn first_line_preview(text: &str, max_tokens: usize) -> String {
+    let line = text.lines().next().unwrap_or("").trim();
+    pack_to_token_boundary_with_char_limit(line, max_tokens, 32).to_string()
 }
 
 fn finalize_codemode_result(
