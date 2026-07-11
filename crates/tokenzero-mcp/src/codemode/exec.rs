@@ -788,48 +788,152 @@ pub(super) fn limits_from_options(options: &CodeModeOptions) -> CodeModeLimits {
     }
 }
 
-fn lower_mutating_plan_to_json(
+fn is_journaled_edit(method: &str) -> bool {
+    matches!(
+        method,
+        "zero.edit" | "edit" | "zero.token.edit" | "tz_edit"
+    )
+}
+
+fn prepare_lowered_transaction(
+    engine: &TokenZeroEngine,
+    work_root: &Path,
     statements: &[Statement],
-    original_plan: &str,
+    plan: &str,
     started_ms: u128,
-) -> Result<Option<String>, String> {
-    let mut calls = Vec::new();
-    let mut needs_policy_envelope = false;
+) -> Result<(Option<JournalTransaction>, Option<String>, bool), String> {
+    let empty_scope = HashMap::new();
+    let mut steps = Vec::new();
     for (index, statement) in statements.iter().enumerate() {
         let (id, call) = match statement {
             Statement::Binding { name, call } => (name.clone(), call),
             Statement::Call(call) => (format!("step{index}"), call),
             Statement::Return(_) => continue,
         };
-        needs_policy_envelope |= classify_method(&call.method) != OperationClass::ReadOnly;
-        calls.push((id, call));
-    }
-    if !needs_policy_envelope {
-        return Ok(None);
-    }
-    let empty_scope = HashMap::new();
-    let mut steps = Vec::with_capacity(calls.len());
-    for (id, call) in calls {
-        let args = call
-            .args
-            .iter()
-            .map(|arg| resolve_expr(arg, &empty_scope))
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(|message| {
-                format!(
-                    "transactional lowered plans require literal mutation inputs so all preconditions can be journaled before apply: {message}"
-                )
-            })?;
+        let args = if is_journaled_edit(&call.method) {
+            call.args
+                .iter()
+                .map(|arg| resolve_expr(arg, &empty_scope))
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|message| {
+                    format!(
+                        "journaled edits require literal path and hunk inputs before apply: {message}"
+                    )
+                })?
+        } else {
+            Vec::new()
+        };
         steps.push(json!({"id": id, "method": call.method, "args": args}));
     }
-    serde_json::to_string(&json!({
+    let parsed = json!({
         "atomic": false,
-        "plan_id": sha256_bytes(original_plan.as_bytes()),
-        "execution_id": execution_id(original_plan, started_ms),
-        "steps": steps,
-    }))
-    .map(Some)
-    .map_err(|err| format!("serialize transactional lowered plan: {err}"))
+        "plan_id": sha256_bytes(plan.as_bytes()),
+        "execution_id": execution_id(plan, started_ms),
+    });
+    prepare_json_transaction(engine, work_root, &parsed, &steps, plan, started_ms)
+}
+
+fn dispatch_lowered_journaled(
+    engine: &TokenZeroEngine,
+    work_root: &Path,
+    call: &MethodCall,
+    scope: &HashMap<String, Value>,
+    transaction: &mut Option<JournalTransaction>,
+    journal_index: usize,
+) -> Result<OpOutcome, Box<CodeModeResult>> {
+    let reversible = classify_method(&call.method) == OperationClass::ReversibleStoreMutation;
+    let replayed_target_edit = reversible
+        && transaction.as_ref().is_some_and(|tx| {
+            tx.journal().operations.get(journal_index).is_some_and(|operation| {
+                operation.target.is_some() && !tx.step_needs_apply(journal_index)
+            })
+        });
+    if reversible && !replayed_target_edit {
+        if let Some(tx) = transaction.as_mut() {
+            if let Err(original) = tx.mark_applying(journal_index) {
+                let cache_path = engine.config.cache_path.clone();
+                let combined = tx
+                    .rollback(original.clone(), |operation| {
+                        rollback_journal_operation(&cache_path, operation)
+                    })
+                    .err()
+                    .map(|error| error.to_string())
+                    .unwrap_or(original);
+                return Err(Box::new(CodeModeResult::error_with_kind(
+                    "transaction", combined, journal_index, false,
+                )));
+            }
+        }
+    }
+    let outcome = if replayed_target_edit {
+        OpOutcome::from_catalog(json!({
+            "idempotent_replay": true,
+            "idempotency_key": transaction.as_ref()
+                .and_then(|tx| tx.journal().operations.get(journal_index))
+                .map(|operation| operation.idempotency_key.clone()),
+        }))
+    } else {
+        match dispatch(engine, work_root, call, scope) {
+            Ok(outcome) => outcome,
+            Err(mut error) => {
+                if let Some(tx) = transaction.as_mut() {
+                    let original = error.error.as_ref()
+                        .map(|detail| detail.message.clone())
+                        .unwrap_or_else(|| "operation failed".to_string());
+                    let cache_path = engine.config.cache_path.clone();
+                    if let Err(combined) = tx.rollback(original, |operation| {
+                        rollback_journal_operation(&cache_path, operation)
+                    }) {
+                        if let Some(detail) = error.error.as_mut() {
+                            detail.message = combined.to_string();
+                        }
+                    }
+                }
+                return Err(error);
+            }
+        }
+    };
+    if reversible && !replayed_target_edit {
+        if let Some(tx) = transaction.as_mut() {
+            let postcondition = tx.journal().operations.get(journal_index)
+                .and_then(|operation| operation.target.as_deref())
+                .map(Path::new)
+                .map(current_digest)
+                .transpose()
+                .map_err(|error| Box::new(CodeModeResult::error_with_kind(
+                    "transaction", format!("read postcondition: {error}"), journal_index + 1, false,
+                )))?
+                .flatten();
+            let compensation_refs = refs_from_value(outcome.as_value());
+            tx.mark_applied(journal_index, postcondition, compensation_refs)
+                .map_err(|message| Box::new(CodeModeResult::error_with_kind(
+                    "transaction", message, journal_index + 1, false,
+                )))?;
+        }
+    }
+    Ok(outcome)
+}
+
+fn finish_lowered_transaction(
+    result: &mut CodeModeResult,
+    transaction: Option<JournalTransaction>,
+    downgrade: Option<&str>,
+) -> Result<(), String> {
+    if let Some(reason) = downgrade {
+        if let Some(extra) = result.telemetry.extra.as_mut().and_then(Value::as_object_mut) {
+            extra.insert("transaction_atomic".to_string(), json!(false));
+            extra.insert("transaction_downgrade".to_string(), json!(reason));
+        }
+    }
+    if let Some(tx) = transaction {
+        let journal = tx.commit()?;
+        if let Some(extra) = result.telemetry.extra.as_mut().and_then(Value::as_object_mut) {
+            extra.insert("transaction_atomic".to_string(), json!(true));
+            extra.insert("plan_journal_version".to_string(), json!(journal.version));
+            extra.insert("journal_state".to_string(), json!(journal.state));
+        }
+    }
+    Ok(())
 }
 
 fn execute_lowered_plan(
@@ -854,24 +958,6 @@ fn execute_lowered_plan(
         }
     };
 
-    match lower_mutating_plan_to_json(&statements, plan, started_ms) {
-        Ok(Some(json_plan)) => {
-            return execute_json_plan(&json_plan, options, limits, started_ms);
-        }
-        Ok(None) => {}
-        Err(message) => {
-            return finalize_codemode_result(
-                CodeModeResult::error_with_kind("transaction", message, 0, false),
-                kind,
-                plan,
-                started_ms,
-                &options,
-                limits,
-                Vec::new(),
-            );
-        }
-    }
-
     if statements.len() > limits.max_logical_ops {
         return finalize_codemode_result(
             CodeModeResult::error(
@@ -889,6 +975,25 @@ fn execute_lowered_plan(
 
     let work_root = tokenzero_work_root(options.root.clone());
     let engine = make_engine_for_root_with_options(work_root.clone(), &options);
+    let (mut transaction, transaction_downgrade, already_committed) =
+        match prepare_lowered_transaction(&engine, &work_root, &statements, plan, started_ms) {
+            Ok(value) => value,
+            Err(message) => {
+                return finalize_codemode_result(
+                    CodeModeResult::error_with_kind("transaction", message, 0, false),
+                    kind, plan, started_ms, &options, limits, Vec::new(),
+                );
+            }
+        };
+    if already_committed {
+        return finalize_codemode_result(
+            CodeModeResult::completed(
+                json!({"transaction": "already_committed", "idempotent_replay": true}),
+                Vec::new(), 0, 0, 0,
+            ),
+            kind, plan, started_ms, &options, limits, Vec::new(),
+        );
+    }
     let mut scope: HashMap<String, Value> = HashMap::new();
     let mut all_refs: Vec<String> = Vec::new();
     let mut ops: usize = 0;
@@ -897,12 +1002,15 @@ fn execute_lowered_plan(
     let mut total_prevented: usize = 0;
     let mut last_value: Value = Value::Null;
     let mut steps: Vec<ExecutionStep> = Vec::new();
+    let mut journal_index = 0usize;
 
     for stmt in &statements {
         match stmt {
             Statement::Binding { name, call } => {
                 ops += 1;
-                let outcome = match dispatch(&engine, &work_root, call, &scope) {
+                let outcome = match dispatch_lowered_journaled(
+                    &engine, &work_root, call, &scope, &mut transaction, journal_index,
+                ) {
                     Ok(outcome) => outcome,
                     Err(mut e) => {
                         if let Some(extra) =
@@ -917,6 +1025,7 @@ fn execute_lowered_plan(
                         );
                     }
                 };
+                journal_index += 1;
                 steps.push(ExecutionStep {
                     id: name.clone(),
                     method: call.method.clone(),
@@ -935,7 +1044,9 @@ fn execute_lowered_plan(
             }
             Statement::Call(call) => {
                 ops += 1;
-                let outcome = match dispatch(&engine, &work_root, call, &scope) {
+                let outcome = match dispatch_lowered_journaled(
+                    &engine, &work_root, call, &scope, &mut transaction, journal_index,
+                ) {
                     Ok(outcome) => outcome,
                     Err(mut e) => {
                         if let Some(extra) =
@@ -950,6 +1061,7 @@ fn execute_lowered_plan(
                         );
                     }
                 };
+                journal_index += 1;
                 steps.push(ExecutionStep {
                     id: format!("step{ops}"),
                     method: call.method.clone(),
@@ -992,6 +1104,14 @@ fn execute_lowered_plan(
                 {
                     extra.insert("prevented_read_bytes".to_string(), json!(total_prevented));
                 }
+                if let Err(message) = finish_lowered_transaction(
+                    &mut result, transaction, transaction_downgrade.as_deref(),
+                ) {
+                    return finalize_codemode_result(
+                        CodeModeResult::error_with_kind("transaction", message, ops, false),
+                        kind, plan, started_ms, &options, limits, steps,
+                    );
+                }
                 return finalize_codemode_result(
                     result, kind, plan, started_ms, &options, limits, steps,
                 );
@@ -1010,6 +1130,14 @@ fn execute_lowered_plan(
         .and_then(Value::as_object_mut)
     {
         extra.insert("prevented_read_bytes".to_string(), json!(total_prevented));
+    }
+    if let Err(message) = finish_lowered_transaction(
+        &mut result, transaction, transaction_downgrade.as_deref(),
+    ) {
+        return finalize_codemode_result(
+            CodeModeResult::error_with_kind("transaction", message, ops, false),
+            kind, plan, started_ms, &options, limits, steps,
+        );
     }
     finalize_codemode_result(result, kind, plan, started_ms, &options, limits, steps)
 }
@@ -1387,10 +1515,7 @@ fn prepare_json_transaction(
             size: None,
         };
         if classify_method(&method) == OperationClass::ReversibleStoreMutation
-            && matches!(
-                method.as_str(),
-                "zero.edit" | "edit" | "zero.token.edit" | "tz_edit"
-            )
+            && is_journaled_edit(&method)
         {
             let path = step
                 .get("args")
