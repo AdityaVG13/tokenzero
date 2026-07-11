@@ -1,0 +1,87 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://zerostack.dev/schemas/shared-cas-gc/v1/lease-record.schema.json",
+  "title": "ZeroStack shared-CAS active-operation lease v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "record_type",
+    "engine",
+    "project_id",
+    "operation_id",
+    "epoch",
+    "owner",
+    "started_at",
+    "expires_at",
+    "grace_seconds",
+    "blob_hashes"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "zerostack.cas-gc.v1"
+    },
+    "record_type": {
+      "const": "lease"
+    },
+    "engine": {
+      "enum": [
+        "tokenzero",
+        "fszero",
+        "graphzero"
+      ]
+    },
+    "project_id": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "operation_id": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"
+    },
+    "epoch": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "owner": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "pid",
+        "host"
+      ],
+      "properties": {
+        "pid": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "host": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 255
+        }
+      }
+    },
+    "started_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "expires_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "grace_seconds": {
+      "type": "integer",
+      "minimum": 60
+    },
+    "blob_hashes": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": {
+        "type": "string",
+        "pattern": "^[0-9a-f]{64}$"
+      }
+    }
+  }
+}

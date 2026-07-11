@@ -1,0 +1,39 @@
+{
+  "contract_point": "stale-lease-grace",
+  "evaluated_at": "2026-07-11T12:00:00Z",
+  "cases": [
+    {
+      "file": "expired-inside-grace.json",
+      "schema": "lease-record.schema.json",
+      "schema_valid": true,
+      "owner_status": "dead",
+      "store_path": "gc/leases/tokenzero/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/op-inside-grace.json",
+      "verdict": "retain",
+      "reason_codes": [
+        "stale-lease-grace"
+      ]
+    },
+    {
+      "file": "expired-after-grace-dead-owner.json",
+      "schema": "lease-record.schema.json",
+      "schema_valid": true,
+      "owner_status": "dead",
+      "store_path": "gc/leases/tokenzero/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/op-dead.json",
+      "verdict": "collect",
+      "reason_codes": [
+        "no-live-reference"
+      ]
+    },
+    {
+      "file": "expired-after-grace-unknown-owner.json",
+      "schema": "lease-record.schema.json",
+      "schema_valid": true,
+      "owner_status": "unknown",
+      "store_path": "gc/leases/tokenzero/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/op-unknown.json",
+      "verdict": "retain-uncertain",
+      "reason_codes": [
+        "uncertain-metadata"
+      ]
+    }
+  ]
+}

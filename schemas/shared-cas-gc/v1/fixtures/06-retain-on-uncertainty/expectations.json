@@ -1,0 +1,23 @@
+{
+  "contract_point": "conservative-retain-on-uncertainty",
+  "cases": [
+    {
+      "file": "uncertainty-report.json",
+      "schema": "dry-run-report.schema.json",
+      "schema_valid": true,
+      "verdict": "retain-uncertain",
+      "reason_codes": [
+        "uncertain-metadata"
+      ]
+    },
+    {
+      "file": "bad-verdict.invalid.json",
+      "schema": "dry-run-report.schema.json",
+      "schema_valid": false,
+      "verdict": "retain-uncertain",
+      "reason_codes": [
+        "uncertain-metadata"
+      ]
+    }
+  ]
+}
