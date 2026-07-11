@@ -232,6 +232,43 @@ fn file_backed_blob_reports_stale_when_source_changes_or_disappears() {
 }
 
 #[test]
+fn source_backed_payload_avoids_inline_file_copy_and_detects_staleness() {
+    let dir = tempdir().unwrap();
+    let source = dir.path().join("large.txt");
+    let cache = dir.path().join("cache.json");
+    let text = format!("{}\n", "stable payload ".repeat(8_000));
+    fs::write(&source, &text).unwrap();
+
+    let stored = {
+        let mut store = RecoveryStore::new(Some(cache.clone()));
+        let stored =
+            store.store_source_backed_payload_deferred_batch(&text, ContentType::Unknown, &source);
+        store.persist_pending().unwrap();
+        stored
+    };
+    let snapshot: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&cache).unwrap()).unwrap();
+    assert!(snapshot["blobs"][&stored.blob_ref].is_object());
+    assert_eq!(snapshot["files"][&stored.file_ref]["source_backed"], true);
+    assert_eq!(snapshot["files"][&stored.file_ref]["text"], "");
+
+    let mut restarted = RecoveryStore::new(Some(cache.clone()));
+    for ref_id in [&stored.blob_ref, &stored.file_ref] {
+        let expanded = restarted.expand(ref_id, Some("raw"), None, None, None, None);
+        assert!(expanded.found);
+        assert_eq!(expanded.content, text);
+    }
+
+    fs::write(&source, "changed\n").unwrap();
+    let mut changed = RecoveryStore::new(Some(cache));
+    for ref_id in [&stored.blob_ref, &stored.file_ref] {
+        let expanded = changed.expand(ref_id, Some("raw"), None, None, None, None);
+        assert!(!expanded.found);
+        assert_eq!(expanded.reason, "stale-ref");
+    }
+}
+
+#[test]
 fn inline_blob_survives_source_deletion() {
     let dir = tempdir().unwrap();
     let source = dir.path().join("ephemeral.txt");
@@ -971,6 +1008,7 @@ fn stale_check_uses_native_path_identity_before_display_path() {
                     .to_string(),
             ),
             path_identity: Some(path_identity_text(&source)),
+            source_backed: false,
             text: "same\n".to_string(),
             content_type: ContentType::Unknown.to_string(),
             source_fingerprint: Some(source_fingerprint),

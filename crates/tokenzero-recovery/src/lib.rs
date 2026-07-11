@@ -441,6 +441,8 @@ pub struct StoredFile {
     pub path: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub path_identity: Option<String>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub source_backed: bool,
     pub text: String,
     pub content_type: String,
     pub source_fingerprint: Option<SourceFingerprint>,
@@ -832,27 +834,16 @@ impl RecoveryStore {
             .into());
         }
         let text = line_slice_exact(&source, source_start_line, source_end_line);
-        let canonical_ref = format!("tz://blob/{}", sha256_hex(&text));
-        self.ref_classes.insert(
-            canonical_ref.clone(),
-            classify_ref(&canonical_ref, Some(content_type)),
+        let ref_id = self.put_file_backed_blob(
+            &text,
+            path,
+            source_start_line,
+            source_end_line,
+            content_type,
         );
-        let legacy_ref = format!("tz://blob/{}", id_for('b', &text));
-        if legacy_ref != canonical_ref {
-            self.state.aliases.insert(legacy_ref, canonical_ref.clone());
-        }
-        self.state.blobs.insert(
-            canonical_ref.clone(),
-            BlobEntry::FileRef {
-                path: path.to_path_buf(),
-                source_start_line,
-                source_end_line,
-            },
-        );
-        self.remember_ref(&canonical_ref);
         self.evict();
         self.persist()?;
-        Ok(canonical_ref)
+        Ok(ref_id)
     }
 
     pub fn store_payload(
@@ -911,6 +902,31 @@ impl RecoveryStore {
             raw_tokens: count_tokens(text),
             source_start_line,
             source_end_line,
+        }
+    }
+
+    /// Admit an already-read complete source file without duplicating its payload.
+    ///
+    /// Recovery stores path/range pointers plus a content fingerprint and
+    /// revalidates the source on expansion. Ordinary payload admission remains
+    /// self-contained for ephemeral and ranged content.
+    pub fn store_source_backed_payload_deferred_batch(
+        &mut self,
+        text: &str,
+        content_type: ContentType,
+        path: &Path,
+    ) -> StoredPayload {
+        let source_end_line = content_line_count(text);
+        let blob_ref = self.put_file_backed_blob(text, path, 1, source_end_line, content_type);
+        let file_ref = self.put_source_backed_file(text, content_type, path);
+        let unit_refs = self.index_units(text, content_type, &file_ref);
+        StoredPayload {
+            blob_ref,
+            file_ref,
+            unit_refs,
+            raw_tokens: count_tokens(text),
+            source_start_line: None,
+            source_end_line: None,
         }
     }
 
@@ -1476,6 +1492,35 @@ impl RecoveryStore {
         ShellRepeat { unchanged, seen }
     }
 
+    fn put_file_backed_blob(
+        &mut self,
+        text: &str,
+        path: &Path,
+        source_start_line: usize,
+        source_end_line: usize,
+        content_type: ContentType,
+    ) -> String {
+        let canonical_ref = format!("tz://blob/{}", sha256_hex(text));
+        self.ref_classes.insert(
+            canonical_ref.clone(),
+            classify_ref(&canonical_ref, Some(content_type)),
+        );
+        let legacy_ref = format!("tz://blob/{}", id_for('b', text));
+        if legacy_ref != canonical_ref {
+            self.state.aliases.insert(legacy_ref, canonical_ref.clone());
+        }
+        self.state.blobs.insert(
+            canonical_ref.clone(),
+            BlobEntry::FileRef {
+                path: path.to_path_buf(),
+                source_start_line,
+                source_end_line,
+            },
+        );
+        self.remember_ref(&canonical_ref);
+        canonical_ref
+    }
+
     fn put_blob(&mut self, text: &str, content_type: ContentType) -> String {
         let full_hash = sha256_hex(text);
         let canonical_ref = format!("tz://blob/{full_hash}");
@@ -1541,6 +1586,7 @@ impl RecoveryStore {
                 ref_id: ref_id.clone(),
                 path: path.map(|p| p.to_string_lossy().to_string()),
                 path_identity: path.map(path_identity_text),
+                source_backed: false,
                 text: text.to_string(),
                 content_type: content_type.to_string(),
                 source_fingerprint: fingerprint_for_stored_payload(
@@ -1550,6 +1596,33 @@ impl RecoveryStore {
                 ),
                 source_start_line,
                 source_end_line,
+            },
+        );
+        self.remember_ref(&ref_id);
+        ref_id
+    }
+
+    fn put_source_backed_file(
+        &mut self,
+        text: &str,
+        content_type: ContentType,
+        path: &Path,
+    ) -> String {
+        let ref_id = recovery_file_ref(text, Some(path));
+        self.ref_classes
+            .insert(ref_id.clone(), classify_ref(&ref_id, Some(content_type)));
+        self.state.files.insert(
+            ref_id.clone(),
+            StoredFile {
+                ref_id: ref_id.clone(),
+                path: Some(path.to_string_lossy().to_string()),
+                path_identity: Some(path_identity_text(path)),
+                source_backed: true,
+                text: String::new(),
+                content_type: content_type.to_string(),
+                source_fingerprint: source_fingerprint_from_text(path, text),
+                source_start_line: None,
+                source_end_line: None,
             },
         );
         self.remember_ref(&ref_id);
@@ -1620,7 +1693,7 @@ impl RecoveryStore {
                 .state
                 .files
                 .get(bare)
-                .map(|f| RefResolve::Found(f.text.clone()))
+                .map(resolve_file_value)
                 .unwrap_or(RefResolve::NotFound),
             "unit" => self
                 .state
@@ -2594,6 +2667,30 @@ fn blob_content_matches_ref(ref_id: &str, text: &str) -> bool {
     }
 }
 
+fn resolve_file_value(stored: &StoredFile) -> RefResolve {
+    if !stored.source_backed {
+        return RefResolve::Found(stored.text.clone());
+    }
+    let Some(path_text) = stored.path.as_deref() else {
+        return RefResolve::DecodeFailed;
+    };
+    let path = stored
+        .path_identity
+        .as_deref()
+        .and_then(path_from_identity_text)
+        .unwrap_or_else(|| PathBuf::from(path_text));
+    let Ok(text) = fs::read_to_string(&path) else {
+        return RefResolve::Stale;
+    };
+    let Some(expected) = stored.source_fingerprint.as_ref() else {
+        return RefResolve::DecodeFailed;
+    };
+    if source_fingerprint_from_text(&path, &text).as_ref() != Some(expected) {
+        return RefResolve::Stale;
+    }
+    RefResolve::Found(text)
+}
+
 fn resolve_blob_value(cache_path: Option<&Path>, ref_id: &str, value: &BlobEntry) -> RefResolve {
     match value {
         BlobEntry::Inline(value) => {
@@ -3244,16 +3341,38 @@ fn fingerprint_for_stored_payload(
     source_fingerprint(path)
 }
 
+fn source_fingerprint_from_text(path: &Path, text: &str) -> Option<SourceFingerprint> {
+    let meta = fs::metadata(path).ok()?;
+    if !meta.is_file() {
+        return None;
+    }
+    source_fingerprint_from_parts(meta, Sha256::digest(text.as_bytes()))
+}
+
 fn source_fingerprint(path: &Path) -> Option<SourceFingerprint> {
     let meta = fs::metadata(path).ok()?;
     if !meta.is_file() {
         return None;
     }
-    let bytes = fs::read(path).ok()?;
+    let mut file = fs::File::open(path).ok()?;
     let mut hasher = Sha256::new();
-    hasher.update(&bytes);
-    let digest = hasher.finalize();
+    let mut buffer = [0_u8; 64 * 1024];
+    loop {
+        let read = file.read(&mut buffer).ok()?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+    }
+    source_fingerprint_from_parts(meta, hasher.finalize())
+}
+
+fn source_fingerprint_from_parts(
+    meta: fs::Metadata,
+    digest: impl AsRef<[u8]>,
+) -> Option<SourceFingerprint> {
     let sha256 = digest
+        .as_ref()
         .iter()
         .map(|b| format!("{b:02x}"))
         .collect::<String>();

@@ -158,7 +158,7 @@ impl TokenZeroEngine {
             } else {
                 fs::read_to_string(path)
             };
-            let text = match text_result {
+            let mut text = match text_result {
                 Ok(text) => text,
                 Err(err) => {
                     // "could not read X (read_failed)" with no cause stranded
@@ -194,13 +194,21 @@ impl TokenZeroEngine {
             }
             let ctype = detect_content_type(&text, Some(path));
             content_types.push(ctype);
-            let stored = store.store_payload_deferred_batch(
-                &text,
-                ctype,
-                Some(path),
-                source_start,
-                source_end,
-            );
+            let stored = if paths.len() == 1
+                && source_start.is_none()
+                && source_end.is_none()
+                && text.len() >= 64 * 1024
+            {
+                store.store_source_backed_payload_deferred_batch(&text, ctype, path)
+            } else {
+                store.store_payload_deferred_batch(
+                    &text,
+                    ctype,
+                    Some(path),
+                    source_start,
+                    source_end,
+                )
+            };
             refs.push(ref_record("blob", stored.blob_ref.clone(), text.len()));
             refs.push(ref_record("file", stored.file_ref.clone(), text.len()));
             let capsule = if raw {
@@ -290,7 +298,11 @@ impl TokenZeroEngine {
             }
             raw_tokens += capsule.raw_tokens;
             visible_tokens += part_tokens;
-            raw_visible_parts.push(text.trim_end().to_string());
+            if !raw {
+                let trimmed_len = text.trim_end().len();
+                text.truncate(trimmed_len);
+                raw_visible_parts.push(text);
+            }
             visible_parts.push(part_text);
         }
         if !refs.is_empty() {
@@ -300,7 +312,7 @@ impl TokenZeroEngine {
             }
         }
         let refs_complete = prune_dead_refs(&store, &mut refs);
-        if !refs_complete {
+        if !refs_complete && !raw {
             visible_parts = raw_visible_parts;
             visible_tokens = raw_tokens;
         }

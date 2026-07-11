@@ -1,0 +1,98 @@
+{
+  "budget": {
+    "single_100mb_max_rss_bytes": 805306368
+  },
+  "environment": {
+    "binary": "target/release/tokenzero",
+    "binary_mtime_ns": 1783760770971816553,
+    "binary_provenance": "guarded cargo build -p tokenzero --release from this working tree immediately before measurement",
+    "binary_sha256": "5ca244f4d18d312441a9bdfb4b410ef97c9de49872ee65bde3397f8ac0694844",
+    "commit": "cf777a5afa35c9ff6fcb6a333fa8724dff8f3883",
+    "logical_cpus": 18,
+    "machine": "arm64",
+    "os": "macOS-26.5-arm64-arm-64bit-Mach-O",
+    "time_command": "/usr/bin/time -l"
+  },
+  "label": "candidate",
+  "method": {
+    "analysis": "One materialized UTF-8 payload is required for response processing; a second inline recovery payload is not required when path and exact range are stable. mmap was rejected because response ownership still materializes and truncation safety would add complexity without reducing that allocation.",
+    "concurrent_command": "four simultaneous /usr/bin/time -l tokenzero subprocesses, separate recovery caches",
+    "corpus": "deterministic repeated UTF-8 lines; exact byte lengths",
+    "corpus_bytes": [
+      1048576,
+      10485760,
+      104857600
+    ],
+    "single_command": "tokenzero read <file> --json under /usr/bin/time -l; stdout discarded"
+  },
+  "schema": "tokenzero.large-read-rss.v1",
+  "workloads": {
+    "concurrent_4x_100mb": {
+      "ceiling_definition": "sum of /usr/bin/time -l per-process maxima; conservative because peaks may not coincide",
+      "max_process_rss_bytes": 430014464,
+      "observed_wall_seconds": 0.690486,
+      "per_process": [
+        {
+          "cpu_seconds": 0.54,
+          "max_rss_bytes": 429981696,
+          "observed_wall_seconds": 0,
+          "system_seconds": 0.03,
+          "user_seconds": 0.51,
+          "wall_seconds": 0.58
+        },
+        {
+          "cpu_seconds": 0.5700000000000001,
+          "max_rss_bytes": 429981696,
+          "observed_wall_seconds": 0,
+          "system_seconds": 0.03,
+          "user_seconds": 0.54,
+          "wall_seconds": 0.67
+        },
+        {
+          "cpu_seconds": 0.56,
+          "max_rss_bytes": 429998080,
+          "observed_wall_seconds": 0,
+          "system_seconds": 0.03,
+          "user_seconds": 0.53,
+          "wall_seconds": 0.68
+        },
+        {
+          "cpu_seconds": 0.56,
+          "max_rss_bytes": 430014464,
+          "observed_wall_seconds": 0,
+          "system_seconds": 0.03,
+          "user_seconds": 0.53,
+          "wall_seconds": 0.65
+        }
+      ],
+      "processes": 4,
+      "sum_process_max_rss_bytes": 1719975936
+    },
+    "single_reads": {
+      "1048576": {
+        "cpu_seconds": 0.0,
+        "max_rss_bytes": 15597568,
+        "observed_wall_seconds": 0.03452,
+        "system_seconds": 0.0,
+        "user_seconds": 0.0,
+        "wall_seconds": 0.03
+      },
+      "10485760": {
+        "cpu_seconds": 0.05,
+        "max_rss_bytes": 52445184,
+        "observed_wall_seconds": 0.068838,
+        "system_seconds": 0.0,
+        "user_seconds": 0.05,
+        "wall_seconds": 0.06
+      },
+      "104857600": {
+        "cpu_seconds": 0.53,
+        "max_rss_bytes": 429981696,
+        "observed_wall_seconds": 0.569637,
+        "system_seconds": 0.02,
+        "user_seconds": 0.51,
+        "wall_seconds": 0.56
+      }
+    }
+  }
+}
