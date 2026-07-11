@@ -4,7 +4,7 @@
 
 use std::time::Duration;
 
-use criterion::{Criterion, black_box, criterion_group, criterion_main};
+use criterion::{black_box, criterion_group, criterion_main, Criterion};
 use tempfile::TempDir;
 use tokenzero_core::ContentType;
 use tokenzero_recovery::{RecoveryConfig, RecoveryStore};
@@ -237,10 +237,87 @@ fn measure_repeat_read_220kb_cache_bytes(c: &mut Criterion) {
     });
 }
 
+/// Measures the put_blob deduplication lever by storing the same deterministic
+/// ~220 KiB payload repeatedly before one durable persist. The evidence compares
+/// one stored payload with REPEATS stored payloads; Criterion measures the full
+/// repeated deferred-store plus persist path on a fresh store per iteration.
+fn persist_same_payload_repeated(c: &mut Criterion) {
+    const TARGET_PAYLOAD_BYTES: usize = 220 * 1024;
+    const REPEATS: usize = 8;
+
+    let payload = synthetic_payload(0, TARGET_PAYLOAD_BYTES);
+    let dir = TempDir::new().expect("temp dir");
+    let single_cache = dir.path().join("persist-same-payload-single.json");
+    let repeated_cache = dir.path().join("persist-same-payload-repeated.json");
+
+    let mut single_store = RecoveryStore::with_config(Some(single_cache.clone()), roomy_config());
+    single_store.store_payload_deferred(&payload, ContentType::Code, None, None, None);
+    single_store
+        .persist_pending()
+        .expect("persist single payload");
+
+    let mut repeated_store =
+        RecoveryStore::with_config(Some(repeated_cache.clone()), roomy_config());
+    for _ in 0..REPEATS {
+        repeated_store.store_payload_deferred(&payload, ContentType::Code, None, None, None);
+    }
+    repeated_store
+        .persist_pending()
+        .expect("persist repeated payload");
+
+    let payload_bytes = payload.len();
+    let single_cache_bytes = cache_footprint(&single_cache);
+    let repeated_cache_bytes = cache_footprint(&repeated_cache);
+    let naive_repeated_payload_bytes = payload_bytes * REPEATS;
+    assert!(
+        repeated_cache_bytes < naive_repeated_payload_bytes as u64,
+        "deduplicated footprint {repeated_cache_bytes} must be below naive repeated payload bytes {naive_repeated_payload_bytes}"
+    );
+
+    let evidence = serde_json::json!({
+        "schema": "tokenzero.persist-same-payload-repeated.v1",
+        "payload_bytes": payload_bytes,
+        "repeats": REPEATS,
+        "single_cache_bytes": single_cache_bytes,
+        "repeated_cache_bytes": repeated_cache_bytes,
+        "naive_repeated_payload_bytes": naive_repeated_payload_bytes,
+        "measurement": "snapshot plus content-addressed sidecar files"
+    });
+    let evidence_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("benches/perf_hotspots/persist_same_payload_repeated.json");
+    std::fs::write(
+        evidence_path,
+        serde_json::to_vec_pretty(&evidence).expect("serialize evidence"),
+    )
+    .expect("write evidence");
+
+    let mut iteration = 0usize;
+    c.bench_function("persist_same_payload_repeated", |b| {
+        b.iter(|| {
+            let cache = dir
+                .path()
+                .join(format!("persist-same-payload-bench-{iteration}.json"));
+            iteration += 1;
+            let mut store = RecoveryStore::with_config(Some(cache), roomy_config());
+            for _ in 0..REPEATS {
+                store.store_payload_deferred(
+                    black_box(&payload),
+                    ContentType::Code,
+                    None,
+                    None,
+                    None,
+                );
+            }
+            black_box(store.persist_pending()).expect("persist repeated payload")
+        })
+    });
+}
+
 criterion_group!(
     benches,
     bench_persist,
     bench_persist_path,
-    measure_repeat_read_220kb_cache_bytes
+    measure_repeat_read_220kb_cache_bytes,
+    persist_same_payload_repeated
 );
 criterion_main!(benches);
