@@ -2,7 +2,7 @@ use super::exec::{
     exec_edit, execute_codemode, execute_codemode_with_options, limits_from_options,
     make_engine_for_root, resolve_paths_against_work_root,
 };
-use super::parser::{Statement, parse_expr, parse_plan, resolve_expr};
+use super::parser::{parse_expr, parse_plan, resolve_expr, Statement};
 use super::result::{CodeModeOptions, CodeModeResult, CodeModeStatus};
 use std::collections::HashMap;
 use std::fs;
@@ -204,18 +204,14 @@ fn shell_inline_threshold_keeps_refs_and_ref_wraps_large_text() {
         small_text.contains(small.trim_end()),
         "small shell output missing: {small_text}"
     );
-    assert!(
-        small_value["combined_ref"]
-            .as_str()
-            .unwrap()
-            .starts_with("tz://")
-    );
-    assert!(
-        small_value["capture_ref"]
-            .as_str()
-            .unwrap()
-            .starts_with("tz://")
-    );
+    assert!(small_value["combined_ref"]
+        .as_str()
+        .unwrap()
+        .starts_with("tz://"));
+    assert!(small_value["capture_ref"]
+        .as_str()
+        .unwrap()
+        .starts_with("tz://"));
     assert!(
         small_value.get("refs").is_none(),
         "shell refs must be role-labeled fields: {small_value}"
@@ -236,19 +232,15 @@ fn shell_inline_threshold_keeps_refs_and_ref_wraps_large_text() {
         large_result.error
     );
     let large_value = large_result.value.as_ref().unwrap();
-    assert!(
-        large_value["text"]["ref"]
-            .as_str()
-            .unwrap()
-            .starts_with("tz://")
-    );
+    assert!(large_value["text"]["ref"]
+        .as_str()
+        .unwrap()
+        .starts_with("tz://"));
     assert!(large_value["text"]["preview"].as_str().is_some());
-    assert!(
-        large_value["combined_ref"]
-            .as_str()
-            .unwrap()
-            .starts_with("tz://")
-    );
+    assert!(large_value["combined_ref"]
+        .as_str()
+        .unwrap()
+        .starts_with("tz://"));
     assert!(
         large_value.get("refs").is_none(),
         "shell refs must be role-labeled fields: {large_value}"
@@ -336,13 +328,11 @@ fn quiet_combinators_handle_edge_cases_compactly() {
 fn undefined_variable_in_return_is_plan_error() {
     let result = execute_codemode("return missing_binding");
     assert_eq!(result.status, CodeModeStatus::Error);
-    assert!(
-        result
-            .error
-            .as_deref()
-            .unwrap()
-            .contains("undefined variable: missing_binding")
-    );
+    assert!(result
+        .error
+        .as_deref()
+        .unwrap()
+        .contains("undefined variable: missing_binding"));
 }
 
 #[test]
@@ -604,12 +594,10 @@ fn describe_token_namespace_returns_signature() {
     assert_eq!(r.status, CodeModeStatus::Completed);
     let val = r.value.unwrap();
     assert_eq!(val["path"], "zero.token.compact");
-    assert!(
-        val["signature"]
-            .as_str()
-            .unwrap()
-            .contains("zero.token.compact")
-    );
+    assert!(val["signature"]
+        .as_str()
+        .unwrap()
+        .contains("zero.token.compact"));
 }
 
 #[test]
@@ -888,33 +876,27 @@ fn windowed_expand_same_session_codemode_blob() {
 fn recall_method_is_discoverable_and_dispatchable() {
     let r = execute_codemode("describe:zero.recall");
     assert_eq!(r.status, CodeModeStatus::Completed);
-    assert!(
-        r.value.as_ref().unwrap()["signature"]
-            .as_str()
-            .unwrap()
-            .contains("zero.recall")
-    );
+    assert!(r.value.as_ref().unwrap()["signature"]
+        .as_str()
+        .unwrap()
+        .contains("zero.recall"));
     let search = execute_codemode("search:recall");
-    assert!(
-        search.value.as_ref().unwrap()["results"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|hit| hit["path"] == "zero.recall")
-    );
+    assert!(search.value.as_ref().unwrap()["results"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|hit| hit["path"] == "zero.recall"));
 }
 
 #[test]
 fn codemode_method_catalog_resource_shape() {
     let catalog = crate::codemode::catalog::codemode_method_catalog();
     assert_eq!(catalog["schema_version"], "tokenzero.codemode.catalog.v1");
-    assert!(
-        catalog["methods"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|m| m["path"] == "zero.recall")
-    );
+    assert!(catalog["methods"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|m| m["path"] == "zero.recall"));
 }
 
 #[test]
@@ -1569,7 +1551,7 @@ fn default_root_token_read_still_works() {
 }
 
 #[test]
-fn resolve_paths_against_work_root_joins_relative() {
+fn recipe_registry_contracts_and_resolve_paths_against_work_root() {
     let root = std::path::PathBuf::from("/tmp/foreign-proj");
     let resolved = resolve_paths_against_work_root(
         vec![
@@ -1580,4 +1562,141 @@ fn resolve_paths_against_work_root_joins_relative() {
     );
     assert_eq!(resolved[0], root.join("CHANGELOG.md"));
     assert_eq!(resolved[1], std::path::PathBuf::from("/abs/file.txt"));
+
+    let work = tempfile::tempdir().unwrap();
+    let recipe_options = |cache_path: PathBuf| CodeModeOptions {
+        root: Some(work.path().to_path_buf()),
+        cache_path: Some(cache_path),
+        ..Default::default()
+    };
+    let recipe_assert_completed = |result: &CodeModeResult| {
+        assert_eq!(
+            result.status,
+            CodeModeStatus::Completed,
+            "{:?}",
+            result.error
+        );
+    };
+
+    let cache = work.path().join("recipe-happy.json");
+    recipe_assert_completed(&execute_codemode_with_options(
+        r#"return zero.register("zeta", "return args.value;")"#,
+        recipe_options(cache.clone()),
+    ));
+    recipe_assert_completed(&execute_codemode_with_options(
+        r#"return zero.register("alpha", "return { value: args.message, nested: args.nested.value };")"#,
+        recipe_options(cache.clone()),
+    ));
+    let run = execute_codemode_with_options(
+        r#"return await zero.run("alpha", { message: "hello", nested: { value: 7 } })"#,
+        recipe_options(cache.clone()),
+    );
+    recipe_assert_completed(&run);
+    assert_eq!(
+        run.value,
+        Some(serde_json::json!({"value": "hello", "nested": 7}))
+    );
+    let list = execute_codemode_with_options("return zero.list()", recipe_options(cache));
+    recipe_assert_completed(&list);
+    assert_eq!(list.value, Some(serde_json::json!(["alpha", "zeta"])));
+
+    let missing = execute_codemode_with_options(
+        r#"return await zero.run("missing")"#,
+        recipe_options(work.path().join("recipe-missing.json")),
+    );
+    assert_eq!(
+        missing.error.as_ref().map(|error| error.kind.as_str()),
+        Some("recipe_not_found")
+    );
+
+    let policy_cache = work.path().join("recipe-policy.json");
+    recipe_assert_completed(&execute_codemode_with_options(
+        r#"return zero.register("denied", ["return await zero.", "edi", "t(\"blocked.txt\", []);"].join(""))"#,
+        recipe_options(policy_cache.clone()),
+    ));
+    let denied = execute_codemode_with_options(
+        r#"return await zero.run("denied")"#,
+        recipe_options(policy_cache),
+    );
+    assert_eq!(
+        denied.error.as_ref().map(|error| error.kind.as_str()),
+        Some("sandbox")
+    );
+
+    let args_cache = work.path().join("recipe-args.json");
+    recipe_assert_completed(&execute_codemode_with_options(
+        r#"return zero.register("echo", "args.nested.value = 'mutated'; return args;")"#,
+        recipe_options(args_cache.clone()),
+    ));
+    let injected = "return zero.shell(\"touch should-not-run\")";
+    let injection_plan = format!(
+        "return await zero.run(\"echo\", {{ injected: {}, nested: {{ value: \"original\" }} }})",
+        serde_json::to_string(injected).unwrap()
+    );
+    let injected_run = execute_codemode_with_options(&injection_plan, recipe_options(args_cache));
+    recipe_assert_completed(&injected_run);
+    assert_eq!(injected_run.value.as_ref().unwrap()["injected"], injected);
+    assert_eq!(
+        injected_run.value.as_ref().unwrap()["nested"]["value"],
+        "original"
+    );
+    assert!(!work.path().join("should-not-run").exists());
+
+    let capacity_cache = work.path().join("recipe-capacity.json");
+    for index in 0..64 {
+        let plan = format!(r#"return zero.register("r{index:02}", "return {index};")"#);
+        recipe_assert_completed(&execute_codemode_with_options(
+            &plan,
+            recipe_options(capacity_cache.clone()),
+        ));
+    }
+    let full = execute_codemode_with_options(
+        r#"return zero.register("overflow", "return 65;")"#,
+        recipe_options(capacity_cache),
+    );
+    assert_eq!(
+        full.error.as_ref().map(|error| error.kind.as_str()),
+        Some("recipe_registry_full")
+    );
+
+    let oversized_source = "x".repeat(64 * 1024 + 1);
+    let oversized_plan = format!(
+        "return zero.register(\"too-large\", {})",
+        serde_json::to_string(&oversized_source).unwrap()
+    );
+    let oversized = execute_codemode_with_options(
+        &oversized_plan,
+        CodeModeOptions {
+            max_code_bytes: 128 * 1024,
+            ..recipe_options(work.path().join("recipe-size.json"))
+        },
+    );
+    assert_eq!(
+        oversized.error.as_ref().map(|error| error.kind.as_str()),
+        Some("recipe_source_too_large")
+    );
+
+    let first_cache = work.path().join("recipe-session-00.json");
+    for index in 0..33 {
+        let cache_path = work.path().join(format!("recipe-session-{index:02}.json"));
+        recipe_assert_completed(&execute_codemode_with_options(
+            r#"return zero.register("only", "return 1;")"#,
+            recipe_options(cache_path),
+        ));
+    }
+    let evicted = execute_codemode_with_options(
+        r#"return await zero.run("only")"#,
+        recipe_options(first_cache),
+    );
+    assert_eq!(
+        evicted.error.as_ref().map(|error| error.kind.as_str()),
+        Some("recipe_not_found")
+    );
+
+    let representative = r#"const inventory = await zero.tree("crates", { depth: 4 }); const matches = await zero.find("dispatch_values", "crates/tokenzero-mcp/src"); return { inventory, matches };"#;
+    let invocation = r#"return await zero.run("inventory", { depth: 4 })"#;
+    let source_tokens = tokenzero_core::count_tokens(representative);
+    let invocation_tokens = tokenzero_core::count_tokens(invocation);
+    println!("recipe token comparison: source={source_tokens} invocation={invocation_tokens}");
+    assert!(invocation_tokens < source_tokens);
 }

@@ -3,7 +3,7 @@
 use rquickjs::{function::Func, Context, Runtime};
 use serde_json::{json, Value};
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::{Mutex, OnceLock};
@@ -43,6 +43,8 @@ struct PreviousOutputLru {
     entries: HashMap<PathBuf, String>,
     oldest_first: std::collections::VecDeque<PathBuf>,
     stored_bytes: usize,
+    recipes: HashMap<PathBuf, HashMap<String, String>>,
+    recipe_oldest_first: VecDeque<PathBuf>,
 }
 
 impl PreviousOutputLru {
@@ -75,6 +77,62 @@ impl PreviousOutputLru {
             }
         }
         matched
+    }
+    const RECIPE_MAX_SESSIONS: usize = 32;
+    const RECIPE_MAX_PER_SESSION: usize = 64;
+    const RECIPE_MAX_SOURCE_BYTES: usize = 64 * 1024;
+
+    fn touch_recipe_session(&mut self, cache_path: &Path) {
+        if let Some(position) = self
+            .recipe_oldest_first
+            .iter()
+            .position(|key| key == cache_path)
+        {
+            self.recipe_oldest_first.remove(position);
+        }
+        self.recipe_oldest_first.push_back(cache_path.to_path_buf());
+    }
+
+    fn recipe_session_mut(&mut self, cache_path: &Path) -> &mut HashMap<String, String> {
+        if !self.recipes.contains_key(cache_path) {
+            while self.recipes.len() >= Self::RECIPE_MAX_SESSIONS {
+                let Some(oldest) = self.recipe_oldest_first.pop_front() else {
+                    break;
+                };
+                self.recipes.remove(&oldest);
+            }
+            self.recipes
+                .insert(cache_path.to_path_buf(), HashMap::new());
+        }
+        self.touch_recipe_session(cache_path);
+        self.recipes
+            .get_mut(cache_path)
+            .expect("recipe session inserted above")
+    }
+
+    fn recipe_source(&mut self, cache_path: &Path, name: &str) -> Option<String> {
+        let source = self
+            .recipes
+            .get(cache_path)
+            .and_then(|recipes| recipes.get(name))
+            .cloned();
+        if source.is_some() {
+            self.touch_recipe_session(cache_path);
+        }
+        source
+    }
+
+    fn recipe_names(&mut self, cache_path: &Path) -> Vec<String> {
+        let mut names: Vec<String> = self
+            .recipes
+            .get(cache_path)
+            .map(|recipes| recipes.keys().cloned().collect())
+            .unwrap_or_default();
+        if self.recipes.contains_key(cache_path) {
+            self.touch_recipe_session(cache_path);
+        }
+        names.sort();
+        names
     }
 }
 
@@ -310,6 +368,10 @@ fn execute_codemode_uncontained(plan: &str, options: CodeModeOptions) -> CodeMod
 }
 
 fn should_run_quickjs(plan: &str) -> bool {
+    if plan.contains("zero.register(") || plan.contains("zero.run(") || plan.contains("zero.list(")
+    {
+        return true;
+    }
     let trimmed = plan.trim_start();
     trimmed.starts_with("export default")
         || trimmed.starts_with("async function")
@@ -528,17 +590,31 @@ fn execute_quickjs_plan(
         drained += 1;
     }
 
-    let (result_json, error): (Option<String>, Option<String>) = context
-        .with(|ctx| {
-            let globals = ctx.globals();
-            Ok::<_, rquickjs::Error>((globals.get("__tz_result")?, globals.get("__tz_error")?))
-        })
-        .unwrap_or((None, Some("sandbox: result extraction failed".to_string())));
+    let (result_json, error, error_kind): (Option<String>, Option<String>, Option<String>) =
+        context
+            .with(|ctx| {
+                let globals = ctx.globals();
+                Ok::<_, rquickjs::Error>((
+                    globals.get("__tz_result")?,
+                    globals.get("__tz_error")?,
+                    globals.get("__tz_error_kind")?,
+                ))
+            })
+            .unwrap_or((
+                None,
+                Some("sandbox: result extraction failed".to_string()),
+                Some("sandbox".to_string()),
+            ));
 
     let state = state.borrow();
     if let Some(error) = error {
         return finalize_codemode_result(
-            CodeModeResult::error(error, state.ops),
+            CodeModeResult::error_with_kind(
+                error_kind.as_deref().unwrap_or("sandbox"),
+                error,
+                state.ops,
+                false,
+            ),
             "code",
             plan,
             started_ms,
@@ -641,9 +717,12 @@ fn invoke_js_binding(
     engine: &TokenZeroEngine,
     work_root: &Path,
     method: &str,
-    args: Vec<Value>,
+    mut args: Vec<Value>,
     state: &Rc<RefCell<JsExecutionState>>,
 ) -> String {
+    if matches!(method, "codemode.recipeRun" | "recipeRun" | "recipe_run") {
+        args.push(json!(state.borrow().limits.max_code_bytes));
+    }
     {
         let state_ref = state.borrow();
         if now_ms().saturating_sub(state_ref.started_ms) as u64 > state_ref.limits.hard_max_wall_ms
@@ -676,9 +755,10 @@ fn invoke_js_binding(
         Ok(outcome) => outcome,
         Err(error) => {
             return serde_json::to_string(&json!({
-                "__tz_error": error.error.as_ref().map(|error| error.message.as_str()).unwrap_or("unknown error")
-            }))
-            .unwrap_or_else(|_| "{\"__tz_error\":\"unknown error\"}".to_string());
+                            "__tz_error": error.error.as_ref().map(|error| error.message.as_str()).unwrap_or("unknown error"),
+                            "__tz_error_kind": error.error.as_ref().map(|error| error.kind.as_str()).unwrap_or("runtime"),
+                        }))
+                        .unwrap_or_else(|_| "{\"__tz_error\":\"unknown error\",\"__tz_error_kind\":\"runtime\"}".to_string());
         }
     };
     let prevented_read_bytes = outcome.prevented_read_bytes();
@@ -720,7 +800,7 @@ fn js_prelude() -> &'static str {
     r#"
         const __tz_parse = (text) => {
           const value = JSON.parse(text); if (value && value.__tz_exact_expand) { try { return JSON.parse(value.text); } catch (_) { return value.text; } }
-          if (value && value.__tz_error) throw new Error(value.__tz_error);
+          if (value && value.__tz_error) { const error = new Error(value.__tz_error); error.__tz_error_kind = value.__tz_error_kind || 'runtime'; throw error; }
           return value;
         };
         const __tz_call = (method, args) => __tz_parse(__tz_call_json(method, JSON.stringify(args)));
@@ -734,6 +814,20 @@ fn js_prelude() -> &'static str {
           const text = typeof value === 'string' ? value : (value && typeof value.text === 'string' ? value.text : '');
           return text.length === 0 ? [] : text.split(/\r?\n/);
         };
+        const __tz_deep_freeze = (value) => {
+          if (value && typeof value === 'object' && !Object.isFrozen(value)) {
+            for (const child of Object.values(value)) __tz_deep_freeze(child);
+            Object.freeze(value);
+          }
+          return value;
+        };
+        const __tz_run_recipe = async (name, args = {}) => {
+          const recipe = __tz_call('codemode.recipeRun', [String(name)]);
+          const frozenArgs = __tz_deep_freeze(args === undefined ? {} : args);
+          const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor;
+          const invoke = new AsyncFunction('args', 'zero', 'ctx', 'token', recipe.source);
+          return await invoke(frozenArgs, zero, ctx, token);
+        };
         const zero = Object.freeze({
           raw: (value) => ({ __tz_raw: true, value }),
           count: (value) => Array.isArray(value) ? value.length : __tz_lines(value).length,
@@ -744,6 +838,9 @@ fn js_prelude() -> &'static str {
             return take === 1 ? (lines[0] || '') : lines.join('\n');
           },
           verdict: (ok, detail = '') => ({ ok: __tz_truthy(ok), detail: String(detail).split(/\r?\n/)[0] }),
+          register: (name, source) => __tz_call('codemode.recipeRegister', [name, source]),
+          run: (name, args = {}) => __tz_run_recipe(name, args),
+          list: () => __tz_call('codemode.recipeList', []),
           read: (...args) => __tz_call('zero.read', args),
           find: (...args) => __tz_call('zero.find', args),
           grep: (...args) => __tz_call('zero.grep', args),
@@ -773,9 +870,6 @@ fn js_prelude() -> &'static str {
             compactMany: (items) => __tz_parse(__tz_compact_many_json(JSON.stringify(items))),
             expandMany: (refs) => __tz_parse(__tz_expand_many_json(JSON.stringify(refs))),
             dedupe: (items) => __tz_parse(__tz_dedupe_json(JSON.stringify(items))),
-            // Op parity for routed callers that address this substrate as
-            // zero.token.* (the router's namespaced surface): same engine
-            // ops as the top-level zero.* bindings, same policy machinery.
             shell: (...args) => __tz_call('zero.shell', args),
             job: (...args) => __tz_call('zero.token.job', args),
             read: (...args) => __tz_call('zero.read', args),
@@ -813,6 +907,7 @@ fn wrap_js_plan(plan: &str) -> String {
             globalThis.__tz_result = JSON.stringify(value === undefined ? null : value);
           }} catch (err) {{
             globalThis.__tz_error = String((err && (err.message || err.stack)) || err);
+            globalThis.__tz_error_kind = String((err && err.__tz_error_kind) || 'sandbox');
           }}
         }})();
         "#
@@ -2269,6 +2364,105 @@ fn dispatch_values(
     method: &str,
     args: &[Value],
 ) -> Result<OpOutcome, Box<CodeModeResult>> {
+    if matches!(
+        method,
+        "codemode.recipeRegister" | "recipeRegister" | "recipe_register"
+    ) {
+        let name = require_str_arg(args, 0, "recipe register requires a name string")?;
+        let source = require_str_arg(args, 1, "recipe register requires a source string")?;
+        if source.trim().is_empty() {
+            return Err(Box::new(CodeModeResult::error_with_kind(
+                "validation",
+                "recipe source must not be empty",
+                0,
+                false,
+            )));
+        }
+        if source.len() > PreviousOutputLru::RECIPE_MAX_SOURCE_BYTES {
+            return Err(Box::new(CodeModeResult::error_with_kind(
+                "recipe_source_too_large",
+                format!(
+                    "recipe source exceeds {} bytes",
+                    PreviousOutputLru::RECIPE_MAX_SOURCE_BYTES
+                ),
+                0,
+                false,
+            )));
+        }
+        let mut registry = previous_output_by_session()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let recipes = registry.recipe_session_mut(&engine.config.cache_path);
+        if !recipes.contains_key(name) && recipes.len() >= PreviousOutputLru::RECIPE_MAX_PER_SESSION
+        {
+            return Err(Box::new(CodeModeResult::error_with_kind(
+                "recipe_registry_full",
+                format!(
+                    "recipe registry is limited to {} recipes per session",
+                    PreviousOutputLru::RECIPE_MAX_PER_SESSION
+                ),
+                0,
+                false,
+            )));
+        }
+        recipes.insert(name.to_string(), source.to_string());
+        return Ok(OpOutcome::from_catalog(
+            json!({"name": name, "registered": true}),
+        ));
+    }
+    if matches!(method, "codemode.recipeList" | "recipeList" | "recipe_list") {
+        let mut registry = previous_output_by_session()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        return Ok(OpOutcome::from_catalog(json!(
+            registry.recipe_names(&engine.config.cache_path)
+        )));
+    }
+    if matches!(method, "codemode.recipeRun" | "recipeRun" | "recipe_run") {
+        let name = require_str_arg(args, 0, "recipe run requires a name string")?;
+        let max_code_bytes = args
+            .get(1)
+            .and_then(Value::as_u64)
+            .and_then(|value| usize::try_from(value).ok())
+            .unwrap_or_else(|| CodeModeLimits::default().max_code_bytes);
+        let source = previous_output_by_session()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .recipe_source(&engine.config.cache_path, name)
+            .ok_or_else(|| {
+                Box::new(CodeModeResult::error_with_kind(
+                    "recipe_not_found",
+                    format!("recipe not found: {name}"),
+                    0,
+                    false,
+                ))
+            })?;
+        if source.trim().is_empty() {
+            return Err(Box::new(CodeModeResult::error_with_kind(
+                "validation",
+                "recipe source must not be empty",
+                0,
+                false,
+            )));
+        }
+        if source.len() > max_code_bytes {
+            return Err(Box::new(CodeModeResult::error_with_kind(
+                "validation",
+                format!("recipe exceeds max_code_bytes {max_code_bytes}"),
+                0,
+                false,
+            )));
+        }
+        if quickjs_plan_requests_mutation(&source) {
+            return Err(Box::new(CodeModeResult::error_with_kind(
+                "sandbox",
+                "sandbox: mutating binding denied without transaction support",
+                0,
+                false,
+            )));
+        }
+        return Ok(OpOutcome::from_catalog(json!({"source": source})));
+    }
     // zero.token.* aliases: the router's namespaced surface addresses this
     // substrate as zero.token.<op>; both spellings hit the same engine ops.
     match method {
