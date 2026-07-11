@@ -1,44 +1,87 @@
 //! CodeMode plan executor and TokenZero operation dispatch.
 
-use rquickjs::{Context, Runtime, function::Func};
-use serde_json::{Value, json};
+use rquickjs::{function::Func, Context, Runtime};
+use serde_json::{json, Value};
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
-use tokenzero_core::{Mode, ToolResponse, count_tokens, detect_content_type};
+use tokenzero_core::{count_tokens, detect_content_type, Mode, ToolResponse};
 use tokenzero_filters::{discover, rewrite_command};
 
 use crate::workspace::{
     allowed_roots_for_workspace, resolve_recovery_cache_path, tokenzero_work_root,
 };
-use crate::{EditHunk, EngineConfig, TokenZeroEngine, shell_timeout_from_secs};
+use crate::{shell_timeout_from_secs, EditHunk, EngineConfig, TokenZeroEngine};
 
 use super::catalog::{describe_method, search_catalog};
 use super::journal::{
+    atomic_write as journal_atomic_write, begin_plan, classify_method, current_digest,
+    doctor_json as journal_doctor_json, inspect as inspect_journal, open_unresolved, sha256_bytes,
     BeginOutcome, JournalOperation, JournalState, JournalTransaction, OperationClass,
-    OperationSpec, atomic_write as journal_atomic_write, begin_plan, classify_method,
-    current_digest, doctor_json as journal_doctor_json, inspect as inspect_journal,
-    open_unresolved, sha256_bytes,
+    OperationSpec,
 };
-use super::parser::{Expr, MethodCall, Statement, parse_plan, resolve_expr, resolve_return};
+use super::parser::{parse_plan, resolve_expr, resolve_return, Expr, MethodCall, Statement};
 use super::result::{CodeModeOptions, CodeModeResult, CodeModeStatus};
 use super::sandbox::lower_code_plan;
 use super::store::{
-    CodeModeLimits, ExecutionStep, ExecutionStore, execution_id, finalize_result, now_ms,
+    execution_id, finalize_result, now_ms, CodeModeLimits, ExecutionStep, ExecutionStore,
 };
 use crate::expand_params::ExpandParams;
 
 const EXACT_EXPAND_MARKER: &str = "__tz_exact_expand";
 
-/// Per-session previous visible output keyed by resolved recovery cache path.
-/// Used to estimate prefix-cache hits when the provider does not expose one.
-static PREVIOUS_OUTPUT_BY_SESSION: OnceLock<Mutex<HashMap<PathBuf, String>>> = OnceLock::new();
+/// Maximum number of recovery-cache sessions retained for fallback prefix telemetry.
+const PREVIOUS_OUTPUT_MAX_SESSIONS: usize = 32;
+/// Only the leading bytes can contribute to a future common-prefix hit.
+const PREVIOUS_OUTPUT_MAX_PREFIX_BYTES: usize = 64 * 1024;
 
-fn previous_output_by_session() -> &'static Mutex<HashMap<PathBuf, String>> {
-    PREVIOUS_OUTPUT_BY_SESSION.get_or_init(|| Mutex::new(HashMap::new()))
+#[derive(Debug, Default)]
+struct PreviousOutputLru {
+    entries: HashMap<PathBuf, String>,
+    oldest_first: std::collections::VecDeque<PathBuf>,
+    stored_bytes: usize,
+}
+
+impl PreviousOutputLru {
+    fn observe(&mut self, cache_path: PathBuf, current: &str) -> usize {
+        let matched = self
+            .entries
+            .get(&cache_path)
+            .map(|previous| common_prefix_len(current, previous))
+            .unwrap_or(0);
+        if let Some(position) = self.oldest_first.iter().position(|key| key == &cache_path) {
+            self.oldest_first.remove(position);
+        }
+        if let Some(previous) = self.entries.remove(&cache_path) {
+            self.stored_bytes = self.stored_bytes.saturating_sub(previous.len());
+        }
+        let mut end = current.len().min(PREVIOUS_OUTPUT_MAX_PREFIX_BYTES);
+        while !current.is_char_boundary(end) {
+            end -= 1;
+        }
+        let prefix = current[..end].to_owned();
+        self.stored_bytes = self.stored_bytes.saturating_add(prefix.len());
+        self.entries.insert(cache_path.clone(), prefix);
+        self.oldest_first.push_back(cache_path);
+        while self.entries.len() > PREVIOUS_OUTPUT_MAX_SESSIONS {
+            let Some(oldest) = self.oldest_first.pop_front() else {
+                break;
+            };
+            if let Some(previous) = self.entries.remove(&oldest) {
+                self.stored_bytes = self.stored_bytes.saturating_sub(previous.len());
+            }
+        }
+        matched
+    }
+}
+
+static PREVIOUS_OUTPUT_BY_SESSION: OnceLock<Mutex<PreviousOutputLru>> = OnceLock::new();
+
+fn previous_output_by_session() -> &'static Mutex<PreviousOutputLru> {
+    PREVIOUS_OUTPUT_BY_SESSION.get_or_init(|| Mutex::new(PreviousOutputLru::default()))
 }
 
 /// Approximate bytes per token for prevented-read counterfactuals. Used
@@ -1386,15 +1429,10 @@ fn finalize_codemode_result(
         serde_json::to_string(result.value.as_ref().unwrap_or(&Value::Null)).unwrap_or_default();
     let (cached_tokens, total_output_tokens) = {
         let cache_path = engine.config.cache_path.clone();
-        let mut map = previous_output_by_session().lock().unwrap();
-        let n = map
-            .get(&cache_path)
-            .map(|prev| common_prefix_len(&current_output, prev))
-            .unwrap_or(0);
-        let matched = &current_output[..n];
-        let cached = count_tokens(matched);
+        let mut outputs = previous_output_by_session().lock().unwrap();
+        let matched_bytes = outputs.observe(cache_path, &current_output);
+        let cached = count_tokens(&current_output[..matched_bytes]);
         let total = count_tokens(&current_output);
-        map.insert(cache_path, current_output);
         (cached, total)
     };
     result.telemetry.prefix_cache_hits = result
@@ -2759,12 +2797,11 @@ fn exec_tree(
     args: &[Value],
 ) -> Result<OpOutcome, Box<CodeModeResult>> {
     let roots = resolve_paths_against_work_root(
-        vec![
-            args.first()
-                .and_then(|v| v.as_str())
-                .map(PathBuf::from)
-                .unwrap_or_else(|| work_root.to_path_buf()),
-        ],
+        vec![args
+            .first()
+            .and_then(|v| v.as_str())
+            .map(PathBuf::from)
+            .unwrap_or_else(|| work_root.to_path_buf())],
         work_root,
     );
     let opts = Opts::from_arg(args, 1);
@@ -3583,4 +3620,47 @@ fn common_prefix_len(a: &str, b: &str) -> usize {
         len = idx + ca.len_utf8();
     }
     len
+}
+
+#[cfg(test)]
+mod accumulator_bounds {
+    use super::*;
+
+    #[test]
+    fn previous_output_lru_bounds_entries_and_bytes() {
+        let mut outputs = PreviousOutputLru::default();
+        let payload = "x".repeat(PREVIOUS_OUTPUT_MAX_PREFIX_BYTES + 1024);
+        let first = PathBuf::from("session-0");
+        assert_eq!(outputs.observe(first.clone(), &payload), 0);
+        for index in 1..PREVIOUS_OUTPUT_MAX_SESSIONS {
+            assert_eq!(
+                outputs.observe(PathBuf::from(format!("session-{index}")), &payload),
+                0
+            );
+        }
+        assert_eq!(
+            outputs.observe(first.clone(), &payload),
+            PREVIOUS_OUTPUT_MAX_PREFIX_BYTES
+        );
+        outputs.observe(
+            PathBuf::from(format!("session-{}", PREVIOUS_OUTPUT_MAX_SESSIONS)),
+            &payload,
+        );
+        assert_eq!(outputs.entries.len(), PREVIOUS_OUTPUT_MAX_SESSIONS);
+        assert!(
+            outputs.stored_bytes <= PREVIOUS_OUTPUT_MAX_SESSIONS * PREVIOUS_OUTPUT_MAX_PREFIX_BYTES
+        );
+        assert!(outputs.entries.contains_key(&first));
+        assert!(!outputs.entries.contains_key(&PathBuf::from("session-1")));
+    }
+
+    #[test]
+    fn exact_expand_registry_is_execution_scoped() {
+        let stale = Value::String("stale exact payload".to_string());
+        record_exact_expand_payload(stale.as_str().unwrap());
+        assert!(is_exact_expand_value(&stale));
+        let result = execute_codemode("return 'fresh'");
+        assert_eq!(result.status, CodeModeStatus::Completed);
+        assert!(!is_exact_expand_value(&stale));
+    }
 }

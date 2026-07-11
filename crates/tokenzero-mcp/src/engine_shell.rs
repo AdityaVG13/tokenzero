@@ -6,10 +6,10 @@ use super::cache_pack::{
 };
 use super::collect::*;
 use super::config::{
-    EngineConfig, FETCH_ALLOW_ENV, FETCH_DENY_ENV, FETCH_ENABLED_ENV, ServeFlight, new_session_id,
+    new_session_id, EngineConfig, ServeFlight, FETCH_ALLOW_ENV, FETCH_DENY_ENV, FETCH_ENABLED_ENV,
 };
 use super::fetch_cache::{epoch_secs, fetch_index_path, load_fetch_index, record_fetch};
-use super::fetch_guard::{FETCH_META_MARKER, split_fetch_meta, validate_fetch_target};
+use super::fetch_guard::{split_fetch_meta, validate_fetch_target, FETCH_META_MARKER};
 use super::metrics;
 use super::paths::*;
 use super::render::*;
@@ -17,18 +17,18 @@ use super::session::{
     DiffTelemetry, SeenState, ServeKey, ServedRecord, SessionMemory, SessionSummary,
 };
 use super::{
-    Accounting, ContentType, DEFAULT_MCP_IDLE_TIMEOUT_SECS, DEFAULT_SHELL_INLINE_BUDGET,
-    DEFAULT_SHELL_TIMEOUT_SECS, DIFF_MAX_BYTES, DIFF_MAX_LINES, DIFF_READS_ENV, EditHunk,
-    MAX_MCP_IDLE_TIMEOUT_SECS, MAX_SEARCH_VISITED_FILES, MAX_SHELL_TIMEOUT_SECS,
-    MIN_SEARCH_VISITED_FILES, Mode, RG_PATH_ENV, SEARCH_BACKEND_ENV, SEARCH_VISIT_MULTIPLIER,
-    SESSION_DEDUP_ENV, SearchBackend, ServeOptions, ShellRenderInput, TokenZeroEngine,
-    ToolResponse, cache_maintenance, count_tokens, detect_content_type, make_capsule,
+    cache_maintenance, count_tokens, detect_content_type, make_capsule,
     make_capsule_with_raw_tokens, ref_record, render_shell, sha256_hex, shell_combined_output,
-    shell_spill_dir, shell_timeout_from_secs, split_command_string,
+    shell_spill_dir, shell_timeout_from_secs, split_command_string, Accounting, ContentType,
+    EditHunk, Mode, SearchBackend, ServeOptions, ShellRenderInput, TokenZeroEngine, ToolResponse,
+    DEFAULT_MCP_IDLE_TIMEOUT_SECS, DEFAULT_SHELL_INLINE_BUDGET, DEFAULT_SHELL_TIMEOUT_SECS,
+    DIFF_MAX_BYTES, DIFF_MAX_LINES, DIFF_READS_ENV, MAX_MCP_IDLE_TIMEOUT_SECS,
+    MAX_SEARCH_VISITED_FILES, MAX_SHELL_TIMEOUT_SECS, MIN_SEARCH_VISITED_FILES, RG_PATH_ENV,
+    SEARCH_BACKEND_ENV, SEARCH_VISIT_MULTIPLIER, SESSION_DEDUP_ENV,
 };
 use crate::recall;
 use globset::{GlobBuilder, GlobMatcher};
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 use std::collections::{BTreeMap, HashSet};
 use std::ffi::OsString;
 use std::fs;
@@ -40,8 +40,8 @@ use std::time::{Duration, SystemTime};
 use tokenzero_filters::rewrite_command;
 use tokenzero_recovery::{ExpansionResult, RecoveryStore, StoredPayload};
 use tokenzero_runtime::{
-    RunOutputPolicy, StreamCapture, contains_platform_shell_syntax,
-    run_command_with_policy_observer,
+    contains_platform_shell_syntax, run_command_with_policy_observer, RunOutputPolicy,
+    StreamCapture,
 };
 
 #[derive(Debug)]
@@ -52,11 +52,24 @@ struct BackgroundJobState {
     exit_code: Option<i32>,
 }
 
+const MAX_BACKGROUND_JOBS: usize = 256;
+
 #[derive(Debug)]
 struct BackgroundJob {
     id: String,
+    sequence: u64,
     log: PathBuf,
     state: Mutex<BackgroundJobState>,
+}
+
+fn background_job_is_complete(job: &BackgroundJob) -> bool {
+    matches!(
+        job.state
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .status,
+        "exited" | "failed"
+    )
 }
 
 #[derive(Debug, Default)]
@@ -72,6 +85,28 @@ fn background_jobs() -> &'static BackgroundJobRegistry {
 }
 
 impl BackgroundJobRegistry {
+    fn insert_bounded(&self, job: Arc<BackgroundJob>) -> Result<(), String> {
+        let mut jobs = self
+            .jobs
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        while jobs.len() >= MAX_BACKGROUND_JOBS {
+            let oldest_completed = jobs
+                .iter()
+                .filter(|(_, existing)| background_job_is_complete(existing))
+                .min_by_key(|(_, existing)| existing.sequence)
+                .map(|(id, _)| id.clone());
+            let Some(oldest_completed) = oldest_completed else {
+                return Err(format!(
+                    "background job registry is full ({MAX_BACKGROUND_JOBS} running jobs)"
+                ));
+            };
+            jobs.remove(&oldest_completed);
+        }
+        jobs.insert(job.id.clone(), job);
+        Ok(())
+    }
+
     fn start(
         &self,
         argv: Vec<String>,
@@ -87,6 +122,7 @@ impl BackgroundJobRegistry {
         fs::write(&log, []).map_err(|err| format!("create background log: {err}"))?;
         let job = Arc::new(BackgroundJob {
             id: id.clone(),
+            sequence,
             log: log.clone(),
             state: Mutex::new(BackgroundJobState {
                 status: "running",
@@ -95,10 +131,10 @@ impl BackgroundJobRegistry {
                 exit_code: None,
             }),
         });
-        self.jobs
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner())
-            .insert(id.clone(), Arc::clone(&job));
+        if let Err(error) = self.insert_bounded(Arc::clone(&job)) {
+            let _ = fs::remove_file(&log);
+            return Err(error);
+        }
         crate::codemode::containment::reserve_background_job(&id);
         let worker_id = id.clone();
         let spawn = thread::Builder::new()
@@ -623,5 +659,49 @@ mod background_tests {
             .status()
             .is_ok_and(|status| status.success());
         assert!(!alive, "background child {pid} survived registry drop");
+    }
+}
+
+#[cfg(test)]
+mod accumulator_bounds {
+    use super::*;
+
+    fn job(sequence: u64, status: &'static str) -> Arc<BackgroundJob> {
+        Arc::new(BackgroundJob {
+            id: format!("job-{sequence}"),
+            sequence,
+            log: PathBuf::from(format!("job-{sequence}.log")),
+            state: Mutex::new(BackgroundJobState {
+                status,
+                pid: None,
+                pgid: None,
+                exit_code: None,
+            }),
+        })
+    }
+
+    #[test]
+    fn background_registry_evicts_completed_and_rejects_all_running() {
+        let registry = BackgroundJobRegistry::default();
+        for sequence in 0..MAX_BACKGROUND_JOBS as u64 {
+            registry.insert_bounded(job(sequence, "exited")).unwrap();
+        }
+        registry
+            .insert_bounded(job(MAX_BACKGROUND_JOBS as u64, "exited"))
+            .unwrap();
+        let retained = registry.jobs.lock().unwrap();
+        assert_eq!(retained.len(), MAX_BACKGROUND_JOBS);
+        assert!(!retained.contains_key("job-0"));
+        drop(retained);
+
+        let running = BackgroundJobRegistry::default();
+        for sequence in 0..MAX_BACKGROUND_JOBS as u64 {
+            running.insert_bounded(job(sequence, "running")).unwrap();
+        }
+        let error = running
+            .insert_bounded(job(MAX_BACKGROUND_JOBS as u64, "running"))
+            .unwrap_err();
+        assert!(error.contains("registry is full"));
+        assert_eq!(running.jobs.lock().unwrap().len(), MAX_BACKGROUND_JOBS);
     }
 }
