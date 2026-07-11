@@ -202,18 +202,23 @@ impl TokenZeroEngine {
         &self,
         pending: Vec<(ServeKey, ServedRecord)>,
         summary: &SessionSummary,
-    ) {
+    ) -> (u64, u64) {
         let Ok(mut slot) = self.session.lock() else {
-            return;
+            return (0, 0);
         };
         let memory = Self::load_session_memory(&mut slot, self.session_persist.as_ref());
         for (key, record) in pending {
             memory.record(key, record);
         }
         memory.absorb(summary);
+        if let (Some(full), Some(delta)) = (summary.full_bytes, summary.delta_bytes) {
+            memory.note_bytes(full, delta);
+        }
+        let watermark = memory.advance_hwm();
         if let Some(ref persist) = self.session_persist {
             persist.persist(memory);
         }
+        watermark
     }
 
     /// Claim a set of ServeKeys for single-flight serving. Blocks until none

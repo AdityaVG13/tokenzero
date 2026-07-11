@@ -1,33 +1,33 @@
 //! CodeMode plan executor and TokenZero operation dispatch.
 
-use rquickjs::{function::Func, Context, Runtime};
-use serde_json::{json, Value};
+use rquickjs::{Context, Runtime, function::Func};
+use serde_json::{Value, json};
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
-use tokenzero_core::{count_tokens, detect_content_type, Mode, ToolResponse};
+use tokenzero_core::{Mode, ToolResponse, count_tokens, detect_content_type};
 use tokenzero_filters::{discover, rewrite_command};
 
 use crate::workspace::{
     allowed_roots_for_workspace, resolve_recovery_cache_path, tokenzero_work_root,
 };
-use crate::{shell_timeout_from_secs, EditHunk, EngineConfig, TokenZeroEngine};
+use crate::{EditHunk, EngineConfig, TokenZeroEngine, shell_timeout_from_secs};
 
 use super::catalog::{describe_method, search_catalog};
 use super::journal::{
-    atomic_write as journal_atomic_write, begin_plan, classify_method, current_digest,
-    doctor_json as journal_doctor_json, inspect as inspect_journal, open_unresolved, sha256_bytes,
     BeginOutcome, JournalOperation, JournalState, JournalTransaction, OperationClass,
-    OperationSpec,
+    OperationSpec, atomic_write as journal_atomic_write, begin_plan, classify_method,
+    current_digest, doctor_json as journal_doctor_json, inspect as inspect_journal,
+    open_unresolved, sha256_bytes,
 };
-use super::parser::{parse_plan, resolve_expr, resolve_return, Expr, MethodCall, Statement};
+use super::parser::{Expr, MethodCall, Statement, parse_plan, resolve_expr, resolve_return};
 use super::result::{CodeModeOptions, CodeModeResult, CodeModeStatus};
 use super::sandbox::lower_code_plan;
 use super::store::{
-    execution_id, finalize_result, now_ms, CodeModeLimits, ExecutionStep, ExecutionStore,
+    CodeModeLimits, ExecutionStep, ExecutionStore, execution_id, finalize_result, now_ms,
 };
 use crate::expand_params::ExpandParams;
 
@@ -2759,11 +2759,12 @@ fn exec_tree(
     args: &[Value],
 ) -> Result<OpOutcome, Box<CodeModeResult>> {
     let roots = resolve_paths_against_work_root(
-        vec![args
-            .first()
-            .and_then(|v| v.as_str())
-            .map(PathBuf::from)
-            .unwrap_or_else(|| work_root.to_path_buf())],
+        vec![
+            args.first()
+                .and_then(|v| v.as_str())
+                .map(PathBuf::from)
+                .unwrap_or_else(|| work_root.to_path_buf()),
+        ],
         work_root,
     );
     let opts = Opts::from_arg(args, 1);

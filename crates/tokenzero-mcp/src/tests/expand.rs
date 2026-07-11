@@ -532,6 +532,12 @@ fn expand_missing_fz_blob_error_includes_full_ref() {
         "missing-ref error must name full ref: {}",
         err.message
     );
+    assert!(
+        err.message
+            .starts_with(&format!("-{missing} (unavailable)")),
+        "missing recoverable refs must emit a tombstone line: {}",
+        err.message
+    );
 }
 
 #[test]

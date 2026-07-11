@@ -1,0 +1,60 @@
+{
+  "baseline": {
+    "session_delta": false,
+    "total_bytes": 10575,
+    "turn_bytes": [
+      3525,
+      3525,
+      3525
+    ]
+  },
+  "candidate": {
+    "session_delta": true,
+    "total_bytes": 4753,
+    "turn_bytes": [
+      3659,
+      547,
+      547
+    ]
+  },
+  "fixture": {
+    "delta_line_bytes": 155,
+    "full_payload_bytes": 3199,
+    "turns": 3
+  },
+  "losses": [
+    "turn 1 adds 134 bytes (3.801%) for watermark and byte telemetry"
+  ],
+  "method": "byte-stable compact JSON serialization of identical deterministic read envelopes; only TOKENZERO_MCP_DEDUP semantics differ",
+  "schema": "tokenzero.session-delta-measurement.v1",
+  "serializer": "json.dumps(sort_keys=True,separators=(',',':')) + newline; UTF-8 length",
+  "turn_2_plus": {
+    "baseline_bytes": 7050,
+    "candidate_bytes": 1094,
+    "drop_bytes": 5956,
+    "drop_pct": 84.482
+  },
+  "turns": [
+    {
+      "baseline_bytes": 3525,
+      "candidate_bytes": 3659,
+      "change_bytes": 134,
+      "change_pct": 3.801,
+      "turn": 1
+    },
+    {
+      "baseline_bytes": 3525,
+      "candidate_bytes": 547,
+      "change_bytes": -2978,
+      "change_pct": -84.482,
+      "turn": 2
+    },
+    {
+      "baseline_bytes": 3525,
+      "candidate_bytes": 547,
+      "change_bytes": -2978,
+      "change_pct": -84.482,
+      "turn": 3
+    }
+  ]
+}

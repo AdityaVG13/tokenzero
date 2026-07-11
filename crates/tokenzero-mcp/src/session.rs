@@ -85,6 +85,9 @@ pub(crate) struct SessionMemory {
     diff_hits: usize,
     visible_tokens_saved: usize,
     diff_tokens_saved: usize,
+    session_hwm: u64,
+    full_bytes: usize,
+    delta_bytes: usize,
 }
 
 impl SessionMemory {
@@ -124,16 +127,41 @@ impl SessionMemory {
         diff_hits: usize,
         visible_tokens_saved: usize,
         diff_tokens_saved: usize,
+        session_hwm: u64,
+        full_bytes: usize,
+        delta_bytes: usize,
     ) {
         self.records = records;
         self.dedup_hits = dedup_hits;
         self.diff_hits = diff_hits;
         self.visible_tokens_saved = visible_tokens_saved;
         self.diff_tokens_saved = diff_tokens_saved;
+        self.session_hwm = session_hwm;
+        self.full_bytes = full_bytes;
+        self.delta_bytes = delta_bytes;
     }
 
     pub(crate) fn records_snapshot(&self) -> &HashMap<ServeKey, ServedRecord> {
         &self.records
+    }
+
+    pub(crate) fn session_hwm(&self) -> u64 {
+        self.session_hwm
+    }
+
+    pub(crate) fn advance_hwm(&mut self) -> (u64, u64) {
+        let from = self.session_hwm;
+        self.session_hwm = self.session_hwm.saturating_add(1);
+        (from, self.session_hwm)
+    }
+
+    pub(crate) fn note_bytes(&mut self, full: usize, delta: usize) {
+        self.full_bytes = self.full_bytes.saturating_add(full);
+        self.delta_bytes = self.delta_bytes.saturating_add(delta);
+    }
+
+    pub(crate) fn byte_rollup(&self) -> (usize, usize) {
+        (self.full_bytes, self.delta_bytes)
     }
 
     pub(crate) fn rollup_counters(&self) -> (usize, usize, usize, usize) {
@@ -151,7 +179,10 @@ impl SessionMemory {
             "dedup_hits": self.dedup_hits,
             "diff_hits": self.diff_hits,
             "visible_tokens_saved": self.visible_tokens_saved,
-            "diff_tokens_saved": self.diff_tokens_saved
+            "diff_tokens_saved": self.diff_tokens_saved,
+            "session_hwm": self.session_hwm,
+            "full_bytes": self.full_bytes,
+            "delta_bytes": self.delta_bytes
         })
     }
 }
@@ -167,6 +198,10 @@ pub(crate) struct SessionSummary {
     pub diff_saved: usize,
     pub serve_count: usize,
     pub diff: Option<DiffTelemetry>,
+    pub full_bytes: Option<usize>,
+    pub delta_bytes: Option<usize>,
+    pub from_hwm: u64,
+    pub to_hwm: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -190,6 +225,16 @@ impl SessionSummary {
         self.diff = Some(info);
     }
 
+    pub fn note_wire_bytes(&mut self, full_bytes: usize, delta_bytes: usize) {
+        self.full_bytes = Some(full_bytes);
+        self.delta_bytes = Some(delta_bytes);
+    }
+
+    pub fn set_watermark(&mut self, from_hwm: u64, to_hwm: u64) {
+        self.from_hwm = from_hwm;
+        self.to_hwm = to_hwm;
+    }
+
     /// Telemetry fragment to merge into the tool response, or `None` when
     /// the call served everything full.
     pub fn telemetry(&self) -> Option<Value> {
@@ -197,12 +242,22 @@ impl SessionSummary {
             (true, true) => "seen_set_dedup+diff_since_served",
             (true, false) => "seen_set_dedup",
             (false, true) => "diff_since_served",
+            (false, false) if self.full_bytes.is_some() => "full",
             (false, false) => return None,
         };
         let mut value = json!({
             "output_strategy": strategy,
-            "cache_hit": true
+            "cache_hit": self.dedup_notes > 0 || self.diff_serves > 0
         });
+        if let (Some(full_bytes), Some(delta_bytes)) = (self.full_bytes, self.delta_bytes) {
+            value["session_delta"] = json!({
+                "from_hwm": self.from_hwm,
+                "to_hwm": self.to_hwm,
+                "full_bytes": full_bytes,
+                "delta_bytes": delta_bytes,
+                "saved_bytes": full_bytes.saturating_sub(delta_bytes)
+            });
+        }
         if self.dedup_notes > 0 {
             value["dedup"] = json!({
                 "hits": self.dedup_notes,
@@ -219,5 +274,29 @@ impl SessionSummary {
             });
         }
         Some(value)
+    }
+}
+
+#[cfg(test)]
+mod delta_tests {
+    use super::*;
+    #[test]
+    fn telemetry_reports_watermark_and_wire_bytes() {
+        let mut summary = SessionSummary::default();
+        summary.note_wire_bytes(240, 32);
+        summary.set_watermark(7, 8);
+        let telemetry = summary.telemetry().expect("delta telemetry");
+        assert_eq!(telemetry["session_delta"]["from_hwm"], 7);
+        assert_eq!(telemetry["session_delta"]["to_hwm"], 8);
+        assert_eq!(telemetry["session_delta"]["full_bytes"], 240);
+        assert_eq!(telemetry["session_delta"]["delta_bytes"], 32);
+        assert_eq!(telemetry["session_delta"]["saved_bytes"], 208);
+    }
+    #[test]
+    fn watermark_is_monotonic() {
+        let mut memory = SessionMemory::default();
+        assert_eq!(memory.advance_hwm(), (0, 1));
+        assert_eq!(memory.advance_hwm(), (1, 2));
+        assert_eq!(memory.session_hwm(), 2);
     }
 }

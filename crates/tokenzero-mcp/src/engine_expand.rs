@@ -114,6 +114,7 @@ fn annotate_expand_miss(
             err.message
         );
     }
+    err.message = format!("-{ref_id} (unavailable)\n{}", err.message);
     response
 }
 

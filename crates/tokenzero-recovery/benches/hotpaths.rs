@@ -4,7 +4,7 @@
 
 use std::time::Duration;
 
-use criterion::{black_box, criterion_group, criterion_main, Criterion};
+use criterion::{Criterion, black_box, criterion_group, criterion_main};
 use tempfile::TempDir;
 use tokenzero_core::ContentType;
 use tokenzero_recovery::{RecoveryConfig, RecoveryStore};

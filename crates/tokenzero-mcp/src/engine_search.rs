@@ -201,6 +201,7 @@ impl TokenZeroEngine {
                 mode,
             }
         };
+        let full_bytes = capsule.text.len();
         let mut visible_text = capsule.text;
         let mut final_visible_tokens = capsule.visible_tokens;
         let mut summary = SessionSummary::default();
@@ -299,12 +300,20 @@ impl TokenZeroEngine {
             telemetry["rg_unparsed_rows"] = json!(stats.unparsed_rows);
         }
         response.telemetry = Some(telemetry);
+        if self.config.session_dedup {
+            let delta_bytes = response
+                .visible
+                .as_ref()
+                .map_or(0, |visible| visible.text.len());
+            summary.note_wire_bytes(full_bytes, delta_bytes);
+        }
+        let (from_hwm, to_hwm) = self.session_apply(pending, &summary);
+        summary.set_watermark(from_hwm, to_hwm);
         // Merge — never overwrite — so backend/storage telemetry survives a
         // dedup serve in the same response.
         if let Some(extra) = summary.telemetry() {
             merge_telemetry(&mut response, extra);
         }
-        self.session_apply(pending, &summary);
         if matches.is_empty() {
             let suffix = if stats.truncated_by_results || stats.truncated_by_visit {
                 " (scan truncated)"

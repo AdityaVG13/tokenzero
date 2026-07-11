@@ -316,6 +316,8 @@ impl TokenZeroEngine {
             visible_parts = raw_visible_parts;
             visible_tokens = raw_tokens;
         }
+        let full_bytes = visible_parts.iter().map(String::len).sum::<usize>()
+            + visible_parts.len().saturating_sub(1) * 2;
         // Dedup/diff notes advertise refs in place of content: apply them
         // only when persistence succeeded AND every ref survived eviction.
         // Degraded storage always serves full — the bytes are in the text,
@@ -348,6 +350,11 @@ impl TokenZeroEngine {
                 }
             }
         }
+        if self.config.session_dedup {
+            let delta_bytes = visible_parts.iter().map(String::len).sum::<usize>()
+                + visible_parts.len().saturating_sub(1) * 2;
+            summary.note_wire_bytes(full_bytes, delta_bytes);
+        }
         let exact_refs_available = !refs.is_empty();
         let exact_ref_tokens = exact_ref_token_count(&refs);
         let mut response = ToolResponse::ok(
@@ -376,15 +383,16 @@ impl TokenZeroEngine {
                 "exact_refs_available": exact_refs_available
             }));
         }
+        // A serve whose refs failed to persist (or were evicted before the
+        // response returned) must not become a dedup base.
+        if storage_errors.is_empty() && refs_complete {
+            let (from_hwm, to_hwm) = self.session_apply(pending, &summary);
+            summary.set_watermark(from_hwm, to_hwm);
+        }
         // Merge — never overwrite — so degraded-storage markers survive a
         // dedup/diff serve in the same response.
         if let Some(extra) = summary.telemetry() {
             merge_telemetry(&mut response, extra);
-        }
-        // A serve whose refs failed to persist (or were evicted before the
-        // response returned) must not become a dedup base.
-        if storage_errors.is_empty() && refs_complete {
-            self.session_apply(pending, &summary);
         }
         if !raw && !matches!(mode, Mode::Passthrough) {
             if let Some(anchor) = working_set_anchor {

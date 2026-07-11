@@ -86,7 +86,8 @@ fn tiny_file_roi_guard_serves_full() {
     let second = read_ok(&engine, &file);
     assert_eq!(visible_text(&second), "hi");
     // The rejected note leaves no dedup telemetry behind.
-    assert!(second.telemetry.is_none(), "{:?}", second.telemetry);
+    let delta = &second.telemetry.as_ref().unwrap()["session_delta"];
+    assert_eq!(delta["full_bytes"], delta["delta_bytes"]);
 }
 
 #[test]
@@ -416,6 +417,85 @@ fn session_boot_is_bounded_and_itemized() {
         engine.session_boot_snapshot()["demand_paging"]["working_set_loaded"],
         true
     );
+}
+
+#[test]
+fn turn_two_reports_smaller_delta_and_monotonic_watermark() {
+    let dir = tempdir().unwrap();
+    let file = dir.path().join("delta.rs");
+    fs::write(&file, dedup_fixture_content()).unwrap();
+    let engine = TokenZeroEngine::new(EngineConfig::for_root(dir.path()));
+    let first = read_ok(&engine, &file);
+    let second = read_ok(&engine, &file);
+    let first_delta = &first.telemetry.as_ref().unwrap()["session_delta"];
+    let second_delta = &second.telemetry.as_ref().unwrap()["session_delta"];
+    assert_eq!(first_delta["from_hwm"], 0);
+    assert_eq!(first_delta["to_hwm"], 1);
+    assert_eq!(second_delta["from_hwm"], 1);
+    assert_eq!(second_delta["to_hwm"], 2);
+    assert!(
+        second_delta["delta_bytes"].as_u64().unwrap()
+            < second_delta["full_bytes"].as_u64().unwrap()
+    );
+    let rollup = engine.session_rollup();
+    assert_eq!(rollup["session_hwm"], 2);
+    assert!(rollup["delta_bytes"].as_u64().unwrap() < rollup["full_bytes"].as_u64().unwrap());
+}
+
+#[test]
+fn v1_session_state_resumes_with_zero_watermark() {
+    let dir = tempdir().unwrap();
+    let file = dir.path().join("resume.rs");
+    fs::write(&file, dedup_fixture_content()).unwrap();
+    let config = EngineConfig::for_root(dir.path());
+    {
+        let engine = TokenZeroEngine::new(config.clone());
+        read_ok(&engine, &file);
+    }
+    let memory_path = crate::session_persist::session_memory_path(&config.cache_path);
+    let mut state: Value =
+        serde_json::from_str(&fs::read_to_string(&memory_path).unwrap()).unwrap();
+    state["version"] = json!(1);
+    for scope in state["scopes"].as_object_mut().unwrap().values_mut() {
+        scope.as_object_mut().unwrap().remove("session_hwm");
+        if let Some(rollup) = scope["rollup"].as_object_mut() {
+            rollup.remove("full_bytes");
+            rollup.remove("delta_bytes");
+        }
+    }
+    fs::write(&memory_path, serde_json::to_vec_pretty(&state).unwrap()).unwrap();
+    let resumed = TokenZeroEngine::new(config);
+    let response = read_ok(&resumed, &file);
+    assert!(
+        !visible_text(&response).contains("unchanged:"),
+        "v1 state without a watermark must resend full"
+    );
+    assert!(visible_text(&response).contains("line 01"));
+    let delta = &response.telemetry.as_ref().unwrap()["session_delta"];
+    assert_eq!(delta["from_hwm"], 0);
+    assert_eq!(delta["to_hwm"], 1);
+}
+
+#[test]
+fn resume_revalidates_gced_refs_and_resends_full() {
+    let dir = tempdir().unwrap();
+    let file = dir.path().join("gc.rs");
+    fs::write(&file, dedup_fixture_content()).unwrap();
+    let config = EngineConfig::for_root(dir.path());
+    {
+        let engine = TokenZeroEngine::new(config.clone());
+        read_ok(&engine, &file);
+    }
+    fs::remove_file(&config.cache_path).unwrap();
+    let mut journal = config.cache_path.clone().into_os_string();
+    journal.push(".journal");
+    let _ = fs::remove_file(std::path::PathBuf::from(journal));
+    let resumed = TokenZeroEngine::new(config);
+    let response = read_ok(&resumed, &file);
+    assert!(!visible_text(&response).contains("unchanged:"));
+    assert!(visible_text(&response).contains("line 01"));
+    let delta = &response.telemetry.as_ref().unwrap()["session_delta"];
+    assert_eq!(delta["full_bytes"], delta["delta_bytes"]);
 }
 
 #[test]

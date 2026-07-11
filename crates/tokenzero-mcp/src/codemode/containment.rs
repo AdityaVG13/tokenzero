@@ -1,7 +1,7 @@
 //! Hard containment for expensive CodeMode execution.
 
 use serde::Serialize;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::cell::Cell;
 use std::collections::HashMap;
@@ -780,11 +780,12 @@ mod tests {
             }
             thread::sleep(Duration::from_millis(1));
         }
-        assert!(c
-            .lock()
-            .flights
-            .values()
-            .any(|flight| { flight.followers.load(Ordering::Acquire) == 1 }));
+        assert!(
+            c.lock()
+                .flights
+                .values()
+                .any(|flight| { flight.followers.load(Ordering::Acquire) == 1 })
+        );
         let rejected = c.execute(&heavy(19), &CodeModeOptions::default(), || {
             panic!("clone ran")
         });
@@ -792,11 +793,13 @@ mod tests {
             rejected.error.as_ref().map(|e| e.kind.as_str()),
             Some("busy")
         );
-        assert!(rejected
-            .error
-            .unwrap()
-            .message
-            .contains("dedup_followers_full"));
+        assert!(
+            rejected
+                .error
+                .unwrap()
+                .message
+                .contains("dedup_followers_full")
+        );
         *gate.0.lock().unwrap() = true;
         gate.1.notify_all();
         assert!(leader.join().unwrap().error.is_none());
@@ -841,12 +844,13 @@ mod tests {
     fn containment_error_and_panic_release_permit() {
         let p = temp("release");
         let c = ctl(p.clone(), 1);
-        assert!(c
-            .execute(&heavy(1), &CodeModeOptions::default(), || {
+        assert!(
+            c.execute(&heavy(1), &CodeModeOptions::default(), || {
                 CodeModeResult::error("injected", 0)
             })
             .error
-            .is_some());
+            .is_some()
+        );
         assert!(!p.exists());
         assert_eq!(
             c.execute(&heavy(2), &CodeModeOptions::default(), || panic!(
@@ -912,12 +916,13 @@ mod tests {
         }
         drop(e);
         let start = Instant::now();
-        assert!(c
-            .execute("status", &CodeModeOptions::default(), || {
+        assert!(
+            c.execute("status", &CodeModeOptions::default(), || {
                 CodeModeResult::completed(json!(true), vec![], 0, 1, 1)
             })
             .error
-            .is_none());
+            .is_none()
+        );
         assert!(start.elapsed() < Duration::from_millis(20));
         *gate.0.lock().unwrap() = true;
         gate.1.notify_all();

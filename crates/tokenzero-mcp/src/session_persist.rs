@@ -2,7 +2,7 @@
 //!
 //! Gated on `EngineConfig::session_dedup`; `TOKENZERO_MCP_DEDUP=off` skips load
 //! and persist entirely. Scoped by `TOKENZERO_SESSION_SCOPE` when set, else a
-//! per-store-root global bucket so unrelated consumers do not cross-suppress.
+//! per-cache-store bucket so unrelated engine configurations do not cross-suppress.
 
 use crate::session::{ServeKey, ServedRecord, SessionMemory};
 use fs4::FileExt;
@@ -19,11 +19,12 @@ pub const MAX_SESSION_MEMORY_RECORDS: usize = 2048;
 
 const LOCK_RETRIES: usize = 240;
 const LOCK_RETRY_DELAY: Duration = Duration::from_millis(25);
-const STATE_VERSION: u32 = 1;
+const STATE_VERSION: u32 = 2;
 
 #[derive(Debug, Clone)]
 pub(crate) struct SessionPersistence {
     path: PathBuf,
+    cache_path: PathBuf,
     scope_id: String,
 }
 
@@ -34,7 +35,11 @@ impl SessionPersistence {
         }
         let path = session_memory_path(cache_path);
         let scope_id = session_scope_id(cache_path);
-        Some(Self { path, scope_id })
+        Some(Self {
+            path,
+            cache_path: cache_path.to_path_buf(),
+            scope_id,
+        })
     }
 
     pub(crate) fn load_into(&self, memory: &mut SessionMemory) {
@@ -44,10 +49,22 @@ impl SessionPersistence {
         let Some(scope) = state.scopes.get(&self.scope_id) else {
             return;
         };
+        let store = tokenzero_recovery::RecoveryStore::new(Some(self.cache_path.clone()));
         let mut records = HashMap::new();
-        for entry in &scope.records {
-            let key = serve_key_from_persisted(&entry.key);
-            records.insert(key, served_record_from_persisted(&entry.record));
+        // v1 has no watermark, so its first resumed turn must serve full. A
+        // legacy state remains readable, but its unwatermarked seen-set is not
+        // promoted into the v2 delta stream.
+        if state.version >= STATE_VERSION {
+            for entry in &scope.records {
+                // Resume validation is fail-safe: if either advertised ref was
+                // GC'd, forget the entry and force a full resend.
+                if !store.has_ref(&entry.record.blob_ref) || !store.has_ref(&entry.record.file_ref)
+                {
+                    continue;
+                }
+                let key = serve_key_from_persisted(&entry.key);
+                records.insert(key, served_record_from_persisted(&entry.record));
+            }
         }
         memory.restore_from_persist(
             records,
@@ -55,6 +72,9 @@ impl SessionPersistence {
             scope.rollup.diff_hits,
             scope.rollup.visible_tokens_saved,
             scope.rollup.diff_tokens_saved,
+            scope.session_hwm,
+            scope.rollup.full_bytes,
+            scope.rollup.delta_bytes,
         );
     }
 
@@ -73,8 +93,10 @@ impl SessionPersistence {
             diff_hits: memory.rollup_counters().1,
             visible_tokens_saved: memory.rollup_counters().2,
             diff_tokens_saved: memory.rollup_counters().3,
+            full_bytes: memory.byte_rollup().0,
+            delta_bytes: memory.byte_rollup().1,
         };
-        let records: Vec<PersistedRecordEntry> = memory
+        let mut records: Vec<PersistedRecordEntry> = memory
             .records_snapshot()
             .iter()
             .enumerate()
@@ -84,10 +106,16 @@ impl SessionPersistence {
                 seq: idx as u64 + 1,
             })
             .collect();
+        records.sort_by_key(|entry| serde_json::to_string(&entry.key).unwrap_or_default());
+        for (idx, entry) in records.iter_mut().enumerate() {
+            entry.seq = idx as u64 + 1;
+        }
         let mut merged: HashMap<PersistedServeKey, PersistedRecordEntry> = HashMap::new();
-        if let Some(existing) = state.scopes.get(&self.scope_id) {
-            for entry in &existing.records {
-                merged.insert(entry.key.clone(), entry.clone());
+        if state.version >= STATE_VERSION {
+            if let Some(existing) = state.scopes.get(&self.scope_id) {
+                for entry in &existing.records {
+                    merged.insert(entry.key.clone(), entry.clone());
+                }
             }
         }
         for entry in records {
@@ -96,7 +124,11 @@ impl SessionPersistence {
         let mut scoped = PersistedScope {
             records: merged.into_values().collect(),
             rollup,
+            session_hwm: memory.session_hwm(),
         };
+        scoped
+            .records
+            .sort_by_key(|entry| serde_json::to_string(&entry.key).unwrap_or_default());
         evict_scope_records(&mut scoped, MAX_SESSION_MEMORY_RECORDS);
         state.scopes.insert(self.scope_id.clone(), scoped);
         atomic_write_json(&self.path, &state)
@@ -114,11 +146,7 @@ pub(crate) fn session_scope_id(cache_path: &Path) -> String {
             return trimmed.to_string();
         }
     }
-    let store_root = cache_path
-        .parent()
-        .map(|p| p.to_string_lossy().to_string())
-        .unwrap_or_else(|| cache_path.to_string_lossy().to_string());
-    format!("__store_global__:{store_root}")
+    format!("__store_global__:{}", cache_path.to_string_lossy())
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -143,6 +171,9 @@ struct PersistedScope {
     records: Vec<PersistedRecordEntry>,
     #[serde(default)]
     rollup: PersistedRollup,
+    /// Monotonic per-scope turn watermark. Missing in v1 means 0/full resend.
+    #[serde(default)]
+    session_hwm: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -195,6 +226,10 @@ struct PersistedRollup {
     diff_hits: usize,
     visible_tokens_saved: usize,
     diff_tokens_saved: usize,
+    #[serde(default)]
+    full_bytes: usize,
+    #[serde(default)]
+    delta_bytes: usize,
 }
 
 fn load_state(path: &Path) -> std::io::Result<Option<SessionMemoryState>> {
