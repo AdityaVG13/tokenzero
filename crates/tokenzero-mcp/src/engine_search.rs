@@ -71,7 +71,7 @@ impl TokenZeroEngine {
                 roots.iter().map(|root| comparable_path(root)).collect();
             canonical_roots.sort();
             self.begin_serve_flight(vec![ServeKey::Output {
-                tool: tool.to_string(),
+                tool: format!("{tool}:{:?}", self.config.search_backend),
                 query: query.to_string(),
                 roots: canonical_roots,
             }])
@@ -221,7 +221,7 @@ impl TokenZeroEngine {
                 roots.iter().map(|root| comparable_path(root)).collect();
             canonical_roots.sort();
             let key = ServeKey::Output {
-                tool: tool.to_string(),
+                tool: format!("{tool}:{:?}", self.config.search_backend),
                 query: query.to_string(),
                 roots: canonical_roots,
             };

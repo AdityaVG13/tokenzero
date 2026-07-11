@@ -343,7 +343,7 @@ fn expand_changed_content_serves_full() {
 }
 
 #[test]
-fn expand_b_fragment_returns_unsupported_not_full_payload() {
+fn expand_b_fragment_returns_exact_byte_window() {
     // cqr.1: #B fragment must not return the full payload; must return unsupported_fragment.
     let dir = tempdir().unwrap();
     let file = dir.path().join("bfrag.txt");
@@ -360,18 +360,8 @@ fn expand_b_fragment_returns_unsupported_not_full_payload() {
         .clone();
     let b_ref = format!("{blob_ref}#B0-1");
     let expanded = engine.expand(&b_ref, Some("raw"), None, None, None, None);
-    assert_eq!(expanded.status, "error");
-    let err = expanded.error.as_ref().expect("error payload");
-    assert!(
-        err.message.contains("unsupported_fragment"),
-        "must contain unsupported_fragment: {}",
-        err.message
-    );
-    assert!(
-        err.message.contains(&b_ref),
-        "must preserve full ref: {}",
-        err.message
-    );
+    assert_eq!(expanded.status, "ok");
+    assert_eq!(expanded.visible.as_ref().unwrap().text, &content[0..1]);
 }
 
 #[test]

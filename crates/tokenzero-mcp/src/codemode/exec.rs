@@ -17,12 +17,13 @@ use crate::workspace::{
 use crate::{EditHunk, EngineConfig, TokenZeroEngine, shell_timeout_from_secs};
 
 use super::catalog::{describe_method, search_catalog};
-use super::parser::{Expr, MethodCall, Statement, parse_plan, resolve_expr, resolve_return};
 use super::journal::{
-    BeginOutcome, JournalOperation, JournalState, JournalTransaction, OperationClass, OperationSpec,
-    atomic_write as journal_atomic_write, begin_plan, classify_method, current_digest,
-    doctor_json as journal_doctor_json, inspect as inspect_journal, open_unresolved, sha256_bytes,
+    BeginOutcome, JournalOperation, JournalState, JournalTransaction, OperationClass,
+    OperationSpec, atomic_write as journal_atomic_write, begin_plan, classify_method,
+    current_digest, doctor_json as journal_doctor_json, inspect as inspect_journal,
+    open_unresolved, sha256_bytes,
 };
+use super::parser::{Expr, MethodCall, Statement, parse_plan, resolve_expr, resolve_return};
 use super::result::{CodeModeOptions, CodeModeResult, CodeModeStatus};
 use super::sandbox::lower_code_plan;
 use super::store::{
@@ -789,10 +790,7 @@ pub(super) fn limits_from_options(options: &CodeModeOptions) -> CodeModeLimits {
 }
 
 fn is_journaled_edit(method: &str) -> bool {
-    matches!(
-        method,
-        "zero.edit" | "edit" | "zero.token.edit" | "tz_edit"
-    )
+    matches!(method, "zero.edit" | "edit" | "zero.token.edit" | "tz_edit")
 }
 
 fn prepare_lowered_transaction(
@@ -844,9 +842,12 @@ fn dispatch_lowered_journaled(
     let reversible = classify_method(&call.method) == OperationClass::ReversibleStoreMutation;
     let replayed_target_edit = reversible
         && transaction.as_ref().is_some_and(|tx| {
-            tx.journal().operations.get(journal_index).is_some_and(|operation| {
-                operation.target.is_some() && !tx.step_needs_apply(journal_index)
-            })
+            tx.journal()
+                .operations
+                .get(journal_index)
+                .is_some_and(|operation| {
+                    operation.target.is_some() && !tx.step_needs_apply(journal_index)
+                })
         });
     if reversible && !replayed_target_edit {
         if let Some(tx) = transaction.as_mut() {
@@ -860,7 +861,10 @@ fn dispatch_lowered_journaled(
                     .map(|error| error.to_string())
                     .unwrap_or(original);
                 return Err(Box::new(CodeModeResult::error_with_kind(
-                    "transaction", combined, journal_index, false,
+                    "transaction",
+                    combined,
+                    journal_index,
+                    false,
                 )));
             }
         }
@@ -877,7 +881,9 @@ fn dispatch_lowered_journaled(
             Ok(outcome) => outcome,
             Err(mut error) => {
                 if let Some(tx) = transaction.as_mut() {
-                    let original = error.error.as_ref()
+                    let original = error
+                        .error
+                        .as_ref()
                         .map(|detail| detail.message.clone())
                         .unwrap_or_else(|| "operation failed".to_string());
                     let cache_path = engine.config.cache_path.clone();
@@ -895,20 +901,33 @@ fn dispatch_lowered_journaled(
     };
     if reversible && !replayed_target_edit {
         if let Some(tx) = transaction.as_mut() {
-            let postcondition = tx.journal().operations.get(journal_index)
+            let postcondition = tx
+                .journal()
+                .operations
+                .get(journal_index)
                 .and_then(|operation| operation.target.as_deref())
                 .map(Path::new)
                 .map(current_digest)
                 .transpose()
-                .map_err(|error| Box::new(CodeModeResult::error_with_kind(
-                    "transaction", format!("read postcondition: {error}"), journal_index + 1, false,
-                )))?
+                .map_err(|error| {
+                    Box::new(CodeModeResult::error_with_kind(
+                        "transaction",
+                        format!("read postcondition: {error}"),
+                        journal_index + 1,
+                        false,
+                    ))
+                })?
                 .flatten();
             let compensation_refs = refs_from_value(outcome.as_value());
             tx.mark_applied(journal_index, postcondition, compensation_refs)
-                .map_err(|message| Box::new(CodeModeResult::error_with_kind(
-                    "transaction", message, journal_index + 1, false,
-                )))?;
+                .map_err(|message| {
+                    Box::new(CodeModeResult::error_with_kind(
+                        "transaction",
+                        message,
+                        journal_index + 1,
+                        false,
+                    ))
+                })?;
         }
     }
     Ok(outcome)
@@ -920,14 +939,24 @@ fn finish_lowered_transaction(
     downgrade: Option<&str>,
 ) -> Result<(), String> {
     if let Some(reason) = downgrade {
-        if let Some(extra) = result.telemetry.extra.as_mut().and_then(Value::as_object_mut) {
+        if let Some(extra) = result
+            .telemetry
+            .extra
+            .as_mut()
+            .and_then(Value::as_object_mut)
+        {
             extra.insert("transaction_atomic".to_string(), json!(false));
             extra.insert("transaction_downgrade".to_string(), json!(reason));
         }
     }
     if let Some(tx) = transaction {
         let journal = tx.commit()?;
-        if let Some(extra) = result.telemetry.extra.as_mut().and_then(Value::as_object_mut) {
+        if let Some(extra) = result
+            .telemetry
+            .extra
+            .as_mut()
+            .and_then(Value::as_object_mut)
+        {
             extra.insert("transaction_atomic".to_string(), json!(true));
             extra.insert("plan_journal_version".to_string(), json!(journal.version));
             extra.insert("journal_state".to_string(), json!(journal.state));
@@ -981,7 +1010,12 @@ fn execute_lowered_plan(
             Err(message) => {
                 return finalize_codemode_result(
                     CodeModeResult::error_with_kind("transaction", message, 0, false),
-                    kind, plan, started_ms, &options, limits, Vec::new(),
+                    kind,
+                    plan,
+                    started_ms,
+                    &options,
+                    limits,
+                    Vec::new(),
                 );
             }
         };
@@ -989,9 +1023,17 @@ fn execute_lowered_plan(
         return finalize_codemode_result(
             CodeModeResult::completed(
                 json!({"transaction": "already_committed", "idempotent_replay": true}),
-                Vec::new(), 0, 0, 0,
+                Vec::new(),
+                0,
+                0,
+                0,
             ),
-            kind, plan, started_ms, &options, limits, Vec::new(),
+            kind,
+            plan,
+            started_ms,
+            &options,
+            limits,
+            Vec::new(),
         );
     }
     let mut scope: HashMap<String, Value> = HashMap::new();
@@ -1009,7 +1051,12 @@ fn execute_lowered_plan(
             Statement::Binding { name, call } => {
                 ops += 1;
                 let outcome = match dispatch_lowered_journaled(
-                    &engine, &work_root, call, &scope, &mut transaction, journal_index,
+                    &engine,
+                    &work_root,
+                    call,
+                    &scope,
+                    &mut transaction,
+                    journal_index,
                 ) {
                     Ok(outcome) => outcome,
                     Err(mut e) => {
@@ -1045,7 +1092,12 @@ fn execute_lowered_plan(
             Statement::Call(call) => {
                 ops += 1;
                 let outcome = match dispatch_lowered_journaled(
-                    &engine, &work_root, call, &scope, &mut transaction, journal_index,
+                    &engine,
+                    &work_root,
+                    call,
+                    &scope,
+                    &mut transaction,
+                    journal_index,
                 ) {
                     Ok(outcome) => outcome,
                     Err(mut e) => {
@@ -1105,11 +1157,18 @@ fn execute_lowered_plan(
                     extra.insert("prevented_read_bytes".to_string(), json!(total_prevented));
                 }
                 if let Err(message) = finish_lowered_transaction(
-                    &mut result, transaction, transaction_downgrade.as_deref(),
+                    &mut result,
+                    transaction,
+                    transaction_downgrade.as_deref(),
                 ) {
                     return finalize_codemode_result(
                         CodeModeResult::error_with_kind("transaction", message, ops, false),
-                        kind, plan, started_ms, &options, limits, steps,
+                        kind,
+                        plan,
+                        started_ms,
+                        &options,
+                        limits,
+                        steps,
                     );
                 }
                 return finalize_codemode_result(
@@ -1131,12 +1190,17 @@ fn execute_lowered_plan(
     {
         extra.insert("prevented_read_bytes".to_string(), json!(total_prevented));
     }
-    if let Err(message) = finish_lowered_transaction(
-        &mut result, transaction, transaction_downgrade.as_deref(),
-    ) {
+    if let Err(message) =
+        finish_lowered_transaction(&mut result, transaction, transaction_downgrade.as_deref())
+    {
         return finalize_codemode_result(
             CodeModeResult::error_with_kind("transaction", message, ops, false),
-            kind, plan, started_ms, &options, limits, steps,
+            kind,
+            plan,
+            started_ms,
+            &options,
+            limits,
+            steps,
         );
     }
     finalize_codemode_result(result, kind, plan, started_ms, &options, limits, steps)
@@ -1255,7 +1319,12 @@ fn finalize_codemode_result(
     let work_root = tokenzero_work_root(options.root.clone());
     let engine = make_engine_for_root_with_options(work_root, options);
     let journal_health = journal_doctor_json(&engine.config.cache_path);
-    if let Some(extra) = result.telemetry.extra.as_mut().and_then(Value::as_object_mut) {
+    if let Some(extra) = result
+        .telemetry
+        .extra
+        .as_mut()
+        .and_then(Value::as_object_mut)
+    {
         extra.insert("plan_journals".to_string(), journal_health);
     }
     if matches!(result.status, CodeModeStatus::Completed) {
@@ -1291,7 +1360,7 @@ fn finalize_codemode_result(
     result.telemetry.envelope_tokens = count_tokens(&result.visible_ack);
     // Granular token attribution buckets (6ot).
     result.telemetry.ack_tokens = count_tokens(&result.visible_ack);
-    let ref_strings: String = result.refs.iter().cloned().collect::<Vec<_>>().join(" ");
+    let ref_strings = result.refs.join(" ");
     result.telemetry.ref_string_tokens = count_tokens(&ref_strings);
     // Framing = envelope minus ack and ref strings (JSON keys, punctuation, structure).
     result.telemetry.framing_tokens = result
@@ -1305,8 +1374,8 @@ fn finalize_codemode_result(
 
     // Provider-exposed cached_tokens take priority when available; byte-prefix
     // comparison is the fallback estimate.
-    let current_output = serde_json::to_string(result.value.as_ref().unwrap_or(&Value::Null))
-        .unwrap_or_default();
+    let current_output =
+        serde_json::to_string(result.value.as_ref().unwrap_or(&Value::Null)).unwrap_or_default();
     let (cached_tokens, total_output_tokens) = {
         let cache_path = engine.config.cache_path.clone();
         let mut map = previous_output_by_session().lock().unwrap();
@@ -1320,8 +1389,14 @@ fn finalize_codemode_result(
         map.insert(cache_path, current_output);
         (cached, total)
     };
-    result.telemetry.prefix_cache_hits = result.telemetry.prefix_cache_hits.saturating_add(cached_tokens);
-    result.telemetry.prefix_cache_total = result.telemetry.prefix_cache_total.saturating_add(total_output_tokens);
+    result.telemetry.prefix_cache_hits = result
+        .telemetry
+        .prefix_cache_hits
+        .saturating_add(cached_tokens);
+    result.telemetry.prefix_cache_total = result
+        .telemetry
+        .prefix_cache_total
+        .saturating_add(total_output_tokens);
 
     if let Some(extra) = result
         .telemetry
@@ -1422,27 +1497,54 @@ fn predict_edit_postimage(text: &str, edits: &[Value], create: bool) -> Result<S
         if edits.len() != 1 {
             return Err("create=true requires exactly one edit hunk".to_string());
         }
-        let hunk = edits[0].as_object().ok_or_else(|| "edit hunk must be an object".to_string())?;
-        if hunk.get("find").and_then(Value::as_str).unwrap_or("") != "" {
+        let hunk = edits[0]
+            .as_object()
+            .ok_or_else(|| "edit hunk must be an object".to_string())?;
+        if !hunk
+            .get("find")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .is_empty()
+        {
             return Err("create=true requires an empty find".to_string());
         }
-        return hunk.get("replace").and_then(Value::as_str).map(str::to_string)
+        return hunk
+            .get("replace")
+            .and_then(Value::as_str)
+            .map(str::to_string)
             .ok_or_else(|| "edit hunk requires replace text".to_string());
     }
     let mut next = text.to_string();
     for (index, value) in edits.iter().enumerate() {
-        let hunk = value.as_object().ok_or_else(|| format!("edit hunk {index} must be an object"))?;
-        let find = hunk.get("find").and_then(Value::as_str)
+        let hunk = value
+            .as_object()
+            .ok_or_else(|| format!("edit hunk {index} must be an object"))?;
+        let find = hunk
+            .get("find")
+            .and_then(Value::as_str)
             .ok_or_else(|| format!("edit hunk {index} requires find text"))?;
-        let replace = hunk.get("replace").and_then(Value::as_str)
+        let replace = hunk
+            .get("replace")
+            .and_then(Value::as_str)
             .ok_or_else(|| format!("edit hunk {index} requires replace text"))?;
-        let replace_all = hunk.get("replace_all").and_then(Value::as_bool).unwrap_or(false);
+        let replace_all = hunk
+            .get("replace_all")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
         let matches = next.match_indices(find).count();
-        if matches == 0 { return Err(format!("edit hunk {index} find text not found")); }
-        if !replace_all && matches != 1 {
-            return Err(format!("edit hunk {index} is ambiguous ({matches} matches)"));
+        if matches == 0 {
+            return Err(format!("edit hunk {index} find text not found"));
         }
-        next = if replace_all { next.replace(find, replace) } else { next.replacen(find, replace, 1) };
+        if !replace_all && matches != 1 {
+            return Err(format!(
+                "edit hunk {index} is ambiguous ({matches} matches)"
+            ));
+        }
+        next = if replace_all {
+            next.replace(find, replace)
+        } else {
+            next.replacen(find, replace, 1)
+        };
     }
     Ok(next)
 }
@@ -1540,14 +1642,14 @@ fn prepare_json_transaction(
             let (exists, bytes) = match std::fs::read(&path) {
                 Ok(bytes) => (true, bytes),
                 Err(err) if err.kind() == std::io::ErrorKind::NotFound => (false, Vec::new()),
-                Err(err) => return Err(format!("read edit precondition {}: {err}", path.display())),
+                Err(err) => {
+                    return Err(format!("read edit precondition {}: {err}", path.display()));
+                }
             };
-            let text = String::from_utf8(bytes.clone()).map_err(|_| {
-                format!("journaled edit target {} is not UTF-8", path.display())
-            })?;
-            let mut store = tokenzero_recovery::RecoveryStore::new(Some(
-                engine.config.cache_path.clone(),
-            ));
+            let text = String::from_utf8(bytes.clone())
+                .map_err(|_| format!("journaled edit target {} is not UTF-8", path.display()))?;
+            let mut store =
+                tokenzero_recovery::RecoveryStore::new(Some(engine.config.cache_path.clone()));
             let stored = store
                 .store_payload(
                     &text,
@@ -1557,11 +1659,20 @@ fn prepare_json_transaction(
                     None,
                 )
                 .map_err(|err| format!("persist edit undo pre-image: {err}"))?;
-            let args = step.get("args").and_then(Value::as_array).expect("path came from args");
-            let edits = args.get(1).and_then(Value::as_array)
+            let args = step
+                .get("args")
+                .and_then(Value::as_array)
+                .expect("path came from args");
+            let edits = args
+                .get(1)
+                .and_then(Value::as_array)
                 .ok_or_else(|| format!("journaled edit step {index} requires an edit array"))?;
-            let create = args.get(2).and_then(Value::as_object)
-                .and_then(|opts| opts.get("create")).and_then(Value::as_bool).unwrap_or(false);
+            let create = args
+                .get(2)
+                .and_then(Value::as_object)
+                .and_then(|opts| opts.get("create"))
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
             let postimage = predict_edit_postimage(&text, edits, create)?;
             spec.target = Some(path);
             spec.precondition_digest = exists.then(|| sha256_bytes(&bytes));
@@ -1583,7 +1694,7 @@ fn prepare_json_transaction(
         BeginOutcome::Disabled => Ok((None, None, false)),
         BeginOutcome::Downgraded { reason } => Ok((None, Some(reason), false)),
         BeginOutcome::AlreadyCommitted => Ok((None, None, true)),
-        BeginOutcome::Transaction(tx) => Ok((Some(tx), None, false)),
+        BeginOutcome::Transaction(tx) => Ok((Some(*tx), None, false)),
     }
 }
 
@@ -1623,7 +1734,10 @@ fn rollback_journal_operation(
     let mut store = tokenzero_recovery::RecoveryStore::new(Some(cache_path.to_path_buf()));
     let expanded = store.expand(undo_ref, None, None, None, None, None);
     if !expanded.found {
-        return Err(format!("undo ref {undo_ref} unavailable: {}", expanded.reason));
+        return Err(format!(
+            "undo ref {undo_ref} unavailable: {}",
+            expanded.reason
+        ));
     }
     journal_atomic_write(path, expanded.content.as_bytes())
         .map_err(|err| format!("restore {target}: {err}"))
@@ -1780,13 +1894,20 @@ fn execute_json_plan(
                 if let Err(message) = tx.mark_applying(idx) {
                     let cache_path = engine.config.cache_path.clone();
                     let combined = tx
-                        .rollback(message.clone(), |op| rollback_journal_operation(&cache_path, op))
+                        .rollback(message.clone(), |op| {
+                            rollback_journal_operation(&cache_path, op)
+                        })
                         .err()
                         .map(|err| err.to_string())
                         .unwrap_or(message);
                     return finalize_codemode_result(
                         CodeModeResult::error_with_kind("transaction", combined, idx, false),
-                        "json", plan, started_ms, &options, limits, executed,
+                        "json",
+                        plan,
+                        started_ms,
+                        &options,
+                        limits,
+                        executed,
                     );
                 }
             }
@@ -1803,19 +1924,22 @@ fn execute_json_plan(
             match dispatch(&engine, &work_root, &call, &scope) {
                 Ok(outcome) => outcome,
                 Err(mut err) => {
-                    if let Some(extra) = err.telemetry.extra.as_mut().and_then(Value::as_object_mut) {
+                    if let Some(extra) = err.telemetry.extra.as_mut().and_then(Value::as_object_mut)
+                    {
                         extra.insert("operations".to_string(), json!(idx + 1));
                     }
                     err.telemetry.operations = idx + 1;
                     err.telemetry.logical_ops = idx + 1;
                     if let Some(tx) = transaction.as_mut() {
-                        let original = err.error.as_ref()
+                        let original = err
+                            .error
+                            .as_ref()
                             .map(|detail| detail.message.clone())
                             .unwrap_or_else(|| "operation failed".to_string());
                         let cache_path = engine.config.cache_path.clone();
-                        if let Err(combined) = tx.rollback(original, |op| {
-                            rollback_journal_operation(&cache_path, op)
-                        }) {
+                        if let Err(combined) =
+                            tx.rollback(original, |op| rollback_journal_operation(&cache_path, op))
+                        {
                             if let Some(detail) = err.error.as_mut() {
                                 detail.message = combined.to_string();
                             }
@@ -1843,13 +1967,25 @@ fn execute_json_plan(
                     Err(message) => {
                         let cache_path = engine.config.cache_path.clone();
                         let combined = tx
-                            .rollback(message.clone(), |op| rollback_journal_operation(&cache_path, op))
+                            .rollback(message.clone(), |op| {
+                                rollback_journal_operation(&cache_path, op)
+                            })
                             .err()
                             .map(|err| err.to_string())
                             .unwrap_or(message);
                         return finalize_codemode_result(
-                            CodeModeResult::error_with_kind("transaction", combined, idx + 1, false),
-                            "json", plan, started_ms, &options, limits, executed,
+                            CodeModeResult::error_with_kind(
+                                "transaction",
+                                combined,
+                                idx + 1,
+                                false,
+                            ),
+                            "json",
+                            plan,
+                            started_ms,
+                            &options,
+                            limits,
+                            executed,
                         );
                     }
                 };
@@ -1857,13 +1993,20 @@ fn execute_json_plan(
                 if let Err(message) = tx.mark_applied(idx, postcondition, compensation_refs) {
                     let cache_path = engine.config.cache_path.clone();
                     let combined = tx
-                        .rollback(message.clone(), |op| rollback_journal_operation(&cache_path, op))
+                        .rollback(message.clone(), |op| {
+                            rollback_journal_operation(&cache_path, op)
+                        })
                         .err()
                         .map(|err| err.to_string())
                         .unwrap_or(message);
                     return finalize_codemode_result(
                         CodeModeResult::error_with_kind("transaction", combined, idx + 1, false),
-                        "json", plan, started_ms, &options, limits, executed,
+                        "json",
+                        plan,
+                        started_ms,
+                        &options,
+                        limits,
+                        executed,
                     );
                 }
             }
@@ -1914,7 +2057,12 @@ fn execute_json_plan(
     result.telemetry.parallel_groups = Some(count_parallel_groups(steps_arr));
     result.telemetry.physical_ops = estimate_physical_ops(steps_arr);
     if let Some(reason) = transaction_downgrade {
-        if let Some(extra) = result.telemetry.extra.as_mut().and_then(Value::as_object_mut) {
+        if let Some(extra) = result
+            .telemetry
+            .extra
+            .as_mut()
+            .and_then(Value::as_object_mut)
+        {
             extra.insert("transaction_atomic".to_string(), json!(false));
             extra.insert("transaction_downgrade".to_string(), json!(reason));
         }
@@ -1922,7 +2070,12 @@ fn execute_json_plan(
     if let Some(tx) = transaction {
         match tx.commit() {
             Ok(journal) => {
-                if let Some(extra) = result.telemetry.extra.as_mut().and_then(Value::as_object_mut) {
+                if let Some(extra) = result
+                    .telemetry
+                    .extra
+                    .as_mut()
+                    .and_then(Value::as_object_mut)
+                {
                     extra.insert("transaction_atomic".to_string(), json!(true));
                     extra.insert("plan_journal_version".to_string(), json!(journal.version));
                     extra.insert("journal_state".to_string(), json!(journal.state));
@@ -1931,7 +2084,12 @@ fn execute_json_plan(
             Err(message) => {
                 return finalize_codemode_result(
                     CodeModeResult::error_with_kind("transaction", message, steps_arr.len(), false),
-                    "json", plan, started_ms, &options, limits, executed,
+                    "json",
+                    plan,
+                    started_ms,
+                    &options,
+                    limits,
+                    executed,
                 );
             }
         }
@@ -2115,9 +2273,9 @@ fn dispatch_values(
         "codemode.limits" | "limits" => {
             Ok(OpOutcome::from_catalog(CodeModeLimits::default().as_json()))
         }
-        "codemode.journalDoctor" | "journalDoctor" | "journal_doctor" => {
-            Ok(OpOutcome::from_catalog(journal_doctor_json(&engine.config.cache_path)))
-        }
+        "codemode.journalDoctor" | "journalDoctor" | "journal_doctor" => Ok(
+            OpOutcome::from_catalog(journal_doctor_json(&engine.config.cache_path)),
+        ),
         "codemode.journalInspect" | "journalInspect" | "journal_inspect" => {
             exec_journal_inspect(engine, args)
         }
@@ -2150,9 +2308,14 @@ fn exec_journal_inspect(
     inspect_journal(&engine.config.cache_path, execution_id)
         .and_then(|journal| serde_json::to_value(journal).map_err(|err| err.to_string()))
         .map(OpOutcome::from_catalog)
-        .map_err(|message| Box::new(CodeModeResult::error_with_kind(
-            "journal_inspect", message, 0, false,
-        )))
+        .map_err(|message| {
+            Box::new(CodeModeResult::error_with_kind(
+                "journal_inspect",
+                message,
+                0,
+                false,
+            ))
+        })
 }
 
 fn exec_journal_resume(
@@ -2160,10 +2323,14 @@ fn exec_journal_resume(
     args: &[Value],
 ) -> Result<OpOutcome, Box<CodeModeResult>> {
     let execution_id = journal_execution_arg(args)?;
-    let journal = inspect_journal(&engine.config.cache_path, execution_id)
-        .map_err(|message| Box::new(CodeModeResult::error_with_kind(
-            "journal_resume", message, 0, false,
-        )))?;
+    let journal = inspect_journal(&engine.config.cache_path, execution_id).map_err(|message| {
+        Box::new(CodeModeResult::error_with_kind(
+            "journal_resume",
+            message,
+            0,
+            false,
+        ))
+    })?;
     if journal.state.is_resolved() {
         return Err(Box::new(CodeModeResult::error_with_kind(
             "journal_resume",
@@ -2184,22 +2351,36 @@ fn exec_journal_rollback(
     args: &[Value],
 ) -> Result<OpOutcome, Box<CodeModeResult>> {
     let execution_id = journal_execution_arg(args)?;
-    let mut transaction = open_unresolved(&engine.config.cache_path, execution_id)
-        .map_err(|message| Box::new(CodeModeResult::error_with_kind(
-            "journal_rollback", message, 0, false,
-        )))?;
+    let mut transaction =
+        open_unresolved(&engine.config.cache_path, execution_id).map_err(|message| {
+            Box::new(CodeModeResult::error_with_kind(
+                "journal_rollback",
+                message,
+                0,
+                false,
+            ))
+        })?;
     let cache_path = engine.config.cache_path.clone();
     transaction
         .rollback("manual rollback requested", |operation| {
             rollback_journal_operation(&cache_path, operation)
         })
-        .map_err(|error| Box::new(CodeModeResult::error_with_kind(
-            "journal_rollback", error.to_string(), 0, false,
-        )))?;
-    let journal = inspect_journal(&engine.config.cache_path, execution_id)
-        .map_err(|message| Box::new(CodeModeResult::error_with_kind(
-            "journal_rollback", message, 0, false,
-        )))?;
+        .map_err(|error| {
+            Box::new(CodeModeResult::error_with_kind(
+                "journal_rollback",
+                error.to_string(),
+                0,
+                false,
+            ))
+        })?;
+    let journal = inspect_journal(&engine.config.cache_path, execution_id).map_err(|message| {
+        Box::new(CodeModeResult::error_with_kind(
+            "journal_rollback",
+            message,
+            0,
+            false,
+        ))
+    })?;
     Ok(OpOutcome::from_catalog(json!({
         "execution_id": execution_id,
         "state": journal.state,
@@ -2253,6 +2434,7 @@ fn tool_response_to_value(resp: &ToolResponse) -> Value {
 /// - For expand (demand paging), the exact payload bytes are counted as
 ///   prevented because the content was recovered from the cache/ref store
 ///   instead of re-reading the source file.
+///
 /// This is a counterfactual estimate: it assumes the agent would otherwise
 /// have requested the full underlying content, and it does not include
 /// unread files that produced no matches.
@@ -2265,11 +2447,11 @@ fn estimate_prevented_read_bytes(resp: &ToolResponse) -> usize {
     let mut prevented = 0usize;
     match resp.tool.as_str() {
         "find" | "grep" | "glob" | "tree" => {
-            let bytes_per_token = if accounting.visible_tokens > 0 {
-                (visible_text.len() / accounting.visible_tokens).max(1)
-            } else {
-                PREVENTED_READ_BYTES_PER_TOKEN
-            };
+            let bytes_per_token = visible_text
+                .len()
+                .checked_div(accounting.visible_tokens)
+                .unwrap_or(PREVENTED_READ_BYTES_PER_TOKEN)
+                .max(1);
             prevented = accounting
                 .raw_tokens
                 .saturating_sub(accounting.visible_tokens)
@@ -2742,7 +2924,21 @@ fn exec_expand(engine: &TokenZeroEngine, args: &[Value]) -> Result<OpOutcome, Bo
     // Soft capsule on expand miss/error: plan continues with status in value.
     // Shared SurfaceHealth is updated inside expand_with_params (wqw.9).
     let resp = engine.expand_with_params(params);
-    Ok(OpOutcome::from_tool_response(&resp).mark_exact_expand())
+    // Strict ZeroRef parsing can classify a missing legacy-shaped blob as malformed.
+    // In CodeMode that is still an expand-surface miss for crash-only recovery (wqw.9).
+    if resp
+        .error
+        .as_ref()
+        .is_some_and(|error| error.code == "zeroref_malformed")
+    {
+        engine.surface_health().record_codemode_expand_x0();
+    }
+    let outcome = OpOutcome::from_tool_response(&resp);
+    if resp.error.is_none() {
+        Ok(outcome.mark_exact_expand())
+    } else {
+        Ok(outcome)
+    }
 }
 
 fn exec_expand_many(
