@@ -161,6 +161,10 @@ impl TokenZeroEngine {
                 "surface_health".to_string(),
                 self.surface_health.telemetry(),
             );
+            obj.insert(
+                "codemode_containment".to_string(),
+                crate::codemode::containment_snapshot(),
+            );
             let working_set = self
                 .working_set
                 .lock()

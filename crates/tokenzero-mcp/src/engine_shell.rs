@@ -38,7 +38,8 @@ use std::time::{Duration, SystemTime};
 use tokenzero_filters::rewrite_command;
 use tokenzero_recovery::{ExpansionResult, RecoveryStore, StoredPayload};
 use tokenzero_runtime::{
-    RunOutputPolicy, StreamCapture, contains_platform_shell_syntax, run_command_with_policy,
+    RunOutputPolicy, StreamCapture, contains_platform_shell_syntax,
+    run_command_with_policy_observer,
 };
 
 impl TokenZeroEngine {
@@ -94,7 +95,7 @@ impl TokenZeroEngine {
             spill_dir: Some(shell_spill_dir(&self.config.cache_path)),
         }
         .normalized();
-        let result = match run_command_with_policy(
+        let result = match run_command_with_policy_observer(
             &run_argv,
             cwd,
             Some(&child_env),
@@ -102,9 +103,11 @@ impl TokenZeroEngine {
             timeout_override.unwrap_or(self.config.shell_timeout),
             false,
             output_policy,
+            crate::codemode::containment::note_child,
         ) {
             Ok(result) => result,
             Err(err) => {
+                crate::codemode::containment::note_child(None, None, "spawn_failed");
                 return ToolResponse::error(
                     "shell",
                     "spawn_failed",

@@ -135,6 +135,13 @@ pub fn execute_codemode(plan: &str) -> CodeModeResult {
 }
 
 pub fn execute_codemode_with_options(plan: &str, options: CodeModeOptions) -> CodeModeResult {
+    let containment_options = options.clone();
+    super::containment::execute(plan, &containment_options, move || {
+        execute_codemode_uncontained(plan, options)
+    })
+}
+
+fn execute_codemode_uncontained(plan: &str, options: CodeModeOptions) -> CodeModeResult {
     EXACT_EXPAND_REGISTRY.with(|registry| registry.borrow_mut().clear());
     let plan = plan.trim();
     let started_ms = now_ms();

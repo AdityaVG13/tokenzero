@@ -4,6 +4,7 @@
 //! only the final shaped result. Classic MCP and CodeMode are mutually exclusive install surfaces.
 
 pub(crate) mod catalog;
+pub(crate) mod containment;
 mod exec;
 pub(crate) mod journal;
 mod parser;
@@ -25,6 +26,7 @@ mod tests;
 pub use catalog::{
     describe_method as describe_codemode_method, search_catalog as search_codemode_catalog,
 };
+pub(crate) use containment::snapshot as containment_snapshot;
 pub use exec::execute_codemode_with_options;
 pub use result::{CODEMODE_SCHEMA, CodeModeOptions, CodeModeResult, CodeModeStatus};
 pub use store::{CODEMODE_LIMITS_SCHEMA, CodeModeLimits};

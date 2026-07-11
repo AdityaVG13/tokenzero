@@ -366,6 +366,7 @@ impl SurfaceHealth {
             "recovery_ladder": RECOVERY_LADDER,
             "unlocks": ["expand", "read"],
             "never_unlocks": ["shell", "edit", "write"],
+            "codemode_containment": crate::codemode::containment_snapshot(),
         })
     }
 }
