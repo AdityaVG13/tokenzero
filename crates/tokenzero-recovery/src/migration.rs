@@ -187,8 +187,8 @@ impl MigrationManifest {
     pub fn load(path: &Path) -> Result<Self, MigrationErrorCode> {
         match fs::read_to_string(path) {
             Ok(text) => {
-                let mf: Self = serde_json::from_str(&text)
-                    .map_err(|_| MigrationErrorCode::ManifestCorrupt)?;
+                let mf: Self =
+                    serde_json::from_str(&text).map_err(|_| MigrationErrorCode::ManifestCorrupt)?;
                 if mf.version.as_str() != MIGRATION_MANIFEST_VERSION {
                     return Err(MigrationErrorCode::ManifestNewerVersion);
                 }
@@ -215,8 +215,8 @@ impl MigrationManifest {
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent).map_err(|_| MigrationErrorCode::ManifestSave)?;
         }
-        let text = serde_json::to_string_pretty(self)
-            .map_err(|_| MigrationErrorCode::ManifestSave)?;
+        let text =
+            serde_json::to_string_pretty(self).map_err(|_| MigrationErrorCode::ManifestSave)?;
         let mut last_err = None;
         for attempt in 0..TMP_RETRIES {
             let tmp = tmp_manifest_path(path, attempt);
@@ -377,9 +377,11 @@ impl MigrationReport {
             self.verified,
         ));
         if !self.aliases.is_empty() {
-            out.push_str("
+            out.push_str(
+                "
 aliases:
-");
+",
+            );
             for entry in &self.aliases {
                 out.push_str(&format!(
                     "  {} → {}  [{}]
@@ -395,18 +397,25 @@ aliases:
                     }
                 ));
                 if let Some(err) = &entry.error {
-                    out.push_str(&format!("    error: {err}
-"));
+                    out.push_str(&format!(
+                        "    error: {err}
+"
+                    ));
                 }
             }
         }
         if !self.errors.is_empty() {
-            out.push_str("
+            out.push_str(
+                "
 errors:
-");
+",
+            );
             for err in &self.errors {
-                out.push_str(&format!("  [{}] {}
-", err.code, err.message));
+                out.push_str(&format!(
+                    "  [{}] {}
+",
+                    err.code, err.message
+                ));
             }
         }
         out
@@ -456,7 +465,7 @@ impl<'a> LegacyMigration<'a> {
 
     pub fn run(&mut self, dry_run: bool) -> MigrationReport {
         let mut report = MigrationReport::new("migrate", dry_run);
-                let manifest = match self.manifest_path.as_ref() {
+        let manifest = match self.manifest_path.as_ref() {
             Some(p) => match MigrationManifest::load(p) {
                 Ok(mf) => mf,
                 Err(MigrationErrorCode::ManifestMissing) => MigrationManifest::empty(),
@@ -528,7 +537,13 @@ impl<'a> LegacyMigration<'a> {
         }
 
         for short_ref in &legacy_refs {
-            self.migrate_one(short_ref, &mut report, &manifest, &mut updated_manifest, dry_run);
+            self.migrate_one(
+                short_ref,
+                &mut report,
+                &manifest,
+                &mut updated_manifest,
+                dry_run,
+            );
         }
 
         // Persist store changes and manifest.
@@ -662,7 +677,7 @@ impl<'a> LegacyMigration<'a> {
             }
         }
 
-           // Check manifest for idempotent resume.
+        // Check manifest for idempotent resume.
         // Before treating a manifest entry as skipped, resolve and byte-verify
         // the CAS object to ensure the manifest proof is still valid.
         if let Some(existing) = manifest.entries.get(short_ref) {
@@ -670,7 +685,9 @@ impl<'a> LegacyMigration<'a> {
                 // Byte-verify the CAS object before skipping.
                 let cas_ok = self.cas.contains(&full_hash) && {
                     match self.cas.resolve(&full_hash) {
-                        Ok(bytes) => full_sha256_hex(&bytes) == full_hash && bytes.len() as u64 == size,
+                        Ok(bytes) => {
+                            full_sha256_hex(&bytes) == full_hash && bytes.len() as u64 == size
+                        }
                         Err(_) => false,
                     }
                 };
@@ -693,7 +710,9 @@ impl<'a> LegacyMigration<'a> {
                             let mut entry = existing.clone();
                             entry.resumed = true;
                             entry.owner_alias = true;
-                            updated_manifest.entries.insert(short_ref.to_string(), entry);
+                            updated_manifest
+                                .entries
+                                .insert(short_ref.to_string(), entry);
                             return;
                         }
                         Err(_err) => {
@@ -743,7 +762,9 @@ impl<'a> LegacyMigration<'a> {
                             let mut entry = existing.clone();
                             entry.resumed = true;
                             entry.owner_alias = true;
-                            updated_manifest.entries.insert(short_ref.to_string(), entry);
+                            updated_manifest
+                                .entries
+                                .insert(short_ref.to_string(), entry);
                             return;
                         }
                         Err(_err) => {
@@ -831,7 +852,7 @@ impl<'a> LegacyMigration<'a> {
                 });
                 return;
             }
-        }        // Check for existing alias conflict.
+        } // Check for existing alias conflict.
         if let Some(existing_target) = self.store.alias_target(short_ref) {
             if existing_target == full_ref {
                 let cas_ok = self.cas.contains(&full_hash) && {
@@ -1191,8 +1212,7 @@ impl<'a> LegacyMigration<'a> {
                     report.failed += 1;
                     let idx = report.aliases.len() - 1;
                     report.aliases[idx].status = AliasStatus::Failed;
-                    report.aliases[idx].error =
-                        Some("alias targets wrong ref".to_string());
+                    report.aliases[idx].error = Some("alias targets wrong ref".to_string());
                     report.aliases[idx].error_code = Some("alias-conflict".to_string());
                     report.errors.push(MigrationError {
                         code: "alias-conflict".to_string(),
@@ -1272,7 +1292,9 @@ impl<'a> LegacyMigration<'a> {
 
             if !source_verified {
                 report.failed += 1;
-                let msg = format!("{short_ref}: legacy source hash/size mismatch, cannot verify rollback safety");
+                let msg = format!(
+                    "{short_ref}: legacy source hash/size mismatch, cannot verify rollback safety"
+                );
                 report.aliases.push(AliasEntry {
                     short_ref: short_ref.clone(),
                     full_ref: format!("{BLOB_REF_PREFIX}{}", entry.full_hash),
@@ -1438,7 +1460,9 @@ impl<'a> LegacyMigration<'a> {
                 continue;
             }
             let cas_match = match self.cas.resolve(&entry.full_hash) {
-                Ok(bytes) => full_sha256_hex(&bytes) == entry.full_hash && bytes.len() as u64 == entry.size,
+                Ok(bytes) => {
+                    full_sha256_hex(&bytes) == entry.full_hash && bytes.len() as u64 == entry.size
+                }
                 Err(_) => false,
             };
             if !cas_match {
@@ -1493,7 +1517,7 @@ impl<'a> LegacyMigration<'a> {
 
         report
     }
-}// ── RecoveryStore adapter ─────────────────────────────────────────────────
+} // ── RecoveryStore adapter ─────────────────────────────────────────────────
 
 /// Adapter that wraps a `RecoveryStore` to implement `MigrationStore`.
 pub struct RecoveryStoreAdapter<'a> {
@@ -1601,8 +1625,7 @@ mod tests {
         }
 
         fn store_alias_deferred(&mut self, alias: &str, target: &str) {
-            self.aliases
-                .insert(alias.to_string(), target.to_string());
+            self.aliases.insert(alias.to_string(), target.to_string());
         }
 
         fn remove_alias(&mut self, alias: &str) {
@@ -1614,8 +1637,7 @@ mod tests {
         }
 
         fn mark_ambiguous(&mut self, short_ref: &str) {
-            self.ambiguous
-                .insert(short_ref.to_string(), true);
+            self.ambiguous.insert(short_ref.to_string(), true);
         }
 
         fn is_ambiguous(&self, short_ref: &str) -> bool {
@@ -2113,11 +2135,7 @@ mod tests {
         let mut m2 = LegacyMigration::new(&mut store, &cas, Some(manifest.clone()));
         let rr = m2.rollback(true);
         assert_eq!(rr.failed, 1);
-        assert!(
-            rr.errors
-                .iter()
-                .any(|e| e.code == "rollback-source-gone")
-        );
+        assert!(rr.errors.iter().any(|e| e.code == "rollback-source-gone"));
         assert!(store.alias_target(&short_ref).is_some());
     }
 
@@ -2237,8 +2255,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let (mut store, cas, manifest) = test_setup(dir.path());
 
-        let bad =
-            r#"{"version": "tokenzero.migration.v99", "entries": {}, "completed": false}"#;
+        let bad = r#"{"version": "tokenzero.migration.v99", "entries": {}, "completed": false}"#;
         fs::write(&manifest, bad).unwrap();
 
         let mut migration = LegacyMigration::new(&mut store, &cas, Some(manifest.clone()));
@@ -2377,7 +2394,11 @@ mod tests {
         let published_hash = full_hash.clone();
 
         assert_eq!(published_hash.len(), 64);
-        assert!(published_hash.chars().all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()));
+        assert!(
+            published_hash
+                .chars()
+                .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase())
+        );
         assert_eq!(published_hash, full_hash);
 
         // Resolve after restart (new CAS instance)
@@ -2699,5 +2720,4 @@ mod tests {
         assert!(!json_str.contains("/blobs/"));
         assert!(state.get("legacy_compat_supported_until").is_some());
     }
-
 }
