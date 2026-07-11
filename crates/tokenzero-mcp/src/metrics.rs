@@ -128,7 +128,11 @@ impl ToolMetrics {
         let _ = self.write_persisted(&persisted);
         let engine_us = u64::try_from(elapsed.as_micros()).unwrap_or(u64::MAX);
         let persist_us = u64::try_from(persist_started.elapsed().as_micros()).unwrap_or(u64::MAX);
-        self.record_attribution(tool, Duration::from_micros(engine_us), Duration::from_micros(persist_us));
+        self.record_attribution(
+            tool,
+            Duration::from_micros(engine_us),
+            Duration::from_micros(persist_us),
+        );
     }
 
     pub(crate) fn record_attribution(&self, tool: &str, engine: Duration, persist: Duration) {
@@ -156,7 +160,10 @@ impl ToolMetrics {
                 samples
                     .iter()
                     .map(|(tool, (engine_us, persist_us))| {
-                        (tool.clone(), json!({ "engine_us": engine_us, "persist_us": persist_us }))
+                        (
+                            tool.clone(),
+                            json!({ "engine_us": engine_us, "persist_us": persist_us }),
+                        )
                     })
                     .collect::<serde_json::Map<String, Value>>()
             })

@@ -180,12 +180,7 @@ impl Controller {
     fn lock(&self) -> std::sync::MutexGuard<'_, State> {
         self.state.lock().unwrap_or_else(|p| p.into_inner())
     }
-    fn note_child(
-        &self,
-        pid: Option<u32>,
-        pgid: Option<u32>,
-        cancellation_state: &'static str,
-    ) {
+    fn note_child(&self, pid: Option<u32>, pgid: Option<u32>, cancellation_state: &'static str) {
         let mut state = self.lock();
         if state.active_heavy > 0 {
             state.child_pid = pid;
@@ -660,24 +655,42 @@ mod tests {
         let follower = {
             let c = Arc::clone(&c);
             thread::spawn(move || {
-                c.execute(&heavy(19), &CodeModeOptions::default(), || panic!("follower ran"))
+                c.execute(&heavy(19), &CodeModeOptions::default(), || {
+                    panic!("follower ran")
+                })
             })
         };
         let deadline = Instant::now() + Duration::from_secs(1);
         while Instant::now() < deadline {
-            if c.lock().flights.values().any(|flight| {
-                flight.followers.load(Ordering::Acquire) == 1
-            }) {
+            if c.lock()
+                .flights
+                .values()
+                .any(|flight| flight.followers.load(Ordering::Acquire) == 1)
+            {
                 break;
             }
             thread::sleep(Duration::from_millis(1));
         }
-        assert!(c.lock().flights.values().any(|flight| {
-            flight.followers.load(Ordering::Acquire) == 1
-        }));
-        let rejected = c.execute(&heavy(19), &CodeModeOptions::default(), || panic!("clone ran"));
-        assert_eq!(rejected.error.as_ref().map(|e| e.kind.as_str()), Some("busy"));
-        assert!(rejected.error.unwrap().message.contains("dedup_followers_full"));
+        assert!(
+            c.lock()
+                .flights
+                .values()
+                .any(|flight| { flight.followers.load(Ordering::Acquire) == 1 })
+        );
+        let rejected = c.execute(&heavy(19), &CodeModeOptions::default(), || {
+            panic!("clone ran")
+        });
+        assert_eq!(
+            rejected.error.as_ref().map(|e| e.kind.as_str()),
+            Some("busy")
+        );
+        assert!(
+            rejected
+                .error
+                .unwrap()
+                .message
+                .contains("dedup_followers_full")
+        );
         *gate.0.lock().unwrap() = true;
         gate.1.notify_all();
         assert!(leader.join().unwrap().error.is_none());
@@ -841,7 +854,10 @@ mod tests {
 
     #[cfg(unix)]
     fn assert_process_group_dead(id: u32) {
-        assert!(!process_alive(id), "synthetic child {id} survived containment cleanup");
+        assert!(
+            !process_alive(id),
+            "synthetic child {id} survived containment cleanup"
+        );
     }
 
     #[cfg(unix)]
@@ -895,5 +911,4 @@ mod tests {
         assert_process_group_dead(id);
         assert_eq!(c.snapshot().active_heavy, 0)
     }
-
 }
