@@ -1321,6 +1321,86 @@ fn corrupt_blob_sidecar_is_a_miss_not_bad_bytes() {
     );
 }
 
+#[test]
+fn streaming_chunk_boundary_preserves_exact_utf8_and_file_ref_bytes() {
+    let dir = tempdir().unwrap();
+    let payload_path = dir.path().join("boundary.txt");
+    let mut payload = "a".repeat(STREAM_READ_BUFFER_BYTES - 1);
+    payload.push('é');
+    payload.push_str(&"z".repeat(STREAM_READ_BUFFER_BYTES + 3));
+    fs::write(&payload_path, &payload).unwrap();
+
+    let (streamed, hash) = read_utf8_hashed(&payload_path, Some(payload.len())).unwrap();
+    assert_eq!(streamed, payload);
+    assert_eq!(hash, sha256_hex(&payload));
+
+    let line_path = dir.path().join("lines.txt");
+    let first = "x".repeat(STREAM_READ_BUFFER_BYTES - 2);
+    let selected = format!("{}\nthird\n", "y".repeat(STREAM_READ_BUFFER_BYTES + 7));
+    fs::write(&line_path, format!("{first}\n{selected}tail")).unwrap();
+    let (streamed_lines, line_hash) = read_utf8_line_range_hashed(&line_path, 2, 3).unwrap();
+    assert_eq!(streamed_lines, selected);
+    assert_eq!(line_hash, sha256_hex(&selected));
+}
+
+#[test]
+fn streaming_corrupt_sidecar_is_rejected_as_decode_failure() {
+    let dir = tempdir().unwrap();
+    let cache = dir.path().join("cache.json");
+    let payload = "verified".repeat(BLOB_EXTERNALIZE_MIN_BYTES / 4);
+    let stored = {
+        let mut store = RecoveryStore::new(Some(cache.clone()));
+        store
+            .store_payload(&payload, ContentType::Unknown, None, None, None)
+            .unwrap()
+    };
+    let sidecar = fs::read_dir(blob_sidecar_dir(&cache))
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path();
+    fs::write(sidecar, "tampered").unwrap();
+
+    let expanded = RecoveryStore::new(Some(cache)).expand(
+        &stored.blob_ref,
+        Some("raw"),
+        None,
+        None,
+        None,
+        None,
+    );
+    assert!(!expanded.found);
+    assert_eq!(expanded.reason, "decode-failed");
+    assert!(expanded.content.is_empty());
+}
+
+#[test]
+fn streaming_externalization_threshold_keeps_small_payload_inline() {
+    let dir = tempdir().unwrap();
+    let cache = dir.path().join("cache.json");
+    let small = "s".repeat(BLOB_EXTERNALIZE_MIN_BYTES - 1);
+    let at_threshold = "b".repeat(BLOB_EXTERNALIZE_MIN_BYTES);
+    let mut store = RecoveryStore::new(Some(cache));
+    let small_ref = store
+        .store_payload(&small, ContentType::Unknown, None, None, None)
+        .unwrap()
+        .blob_ref;
+    let big_ref = store
+        .store_payload(&at_threshold, ContentType::Unknown, None, None, None)
+        .unwrap()
+        .blob_ref;
+
+    assert_eq!(
+        store.state.blobs.get(&small_ref),
+        Some(&BlobEntry::Inline(small))
+    );
+    let Some(BlobEntry::Inline(marker)) = store.state.blobs.get(&big_ref) else {
+        panic!("threshold payload must use an inline sidecar marker");
+    };
+    assert!(marker.starts_with(BLOB_MARKER_PREFIX));
+}
+
 // ---------------------------------------------------------------------------
 // Proptest
 // ---------------------------------------------------------------------------
@@ -1347,7 +1427,7 @@ proptest! {
     fn generated_around_selectors_do_not_panic(line in any::<usize>(), radius in any::<usize>()) {
         let text = "a\nb\nc\n";
         let selector = format!("around:L{line}:{radius}");
-        let selected = select_content(text, Some(&selector), None, None, None, None);
+        let selected = select_content(text.to_string(), Some(&selector), None, None, None, None);
 
         let segments: Vec<&str> = text.split_inclusive('\n').collect();
         let num_lines = segments.len();

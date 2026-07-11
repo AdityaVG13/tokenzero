@@ -1350,7 +1350,7 @@ impl RecoveryStore {
             }
         }
         let selected = select_content(
-            &content,
+            content,
             selector,
             selected_start,
             selected_end,
@@ -2060,7 +2060,7 @@ fn resolve_selector_line_window(
 }
 
 fn select_content(
-    content: &str,
+    content: String,
     selector: Option<&str>,
     start_line: Option<usize>,
     end_line: Option<usize>,
@@ -2073,8 +2073,8 @@ fn select_content(
     let mut selected_anchor = anchor_kind.map(str::to_string);
     match selector {
         Some("raw") | None => {}
-        Some("error_block") => return error_block(content, 3),
-        Some("summary") => return tokenzero_core::summarize_lines(content, 12, 8, ""),
+        Some("error_block") => return error_block(&content, 3),
+        Some("summary") => return tokenzero_core::summarize_lines(&content, 12, 8, ""),
         Some(value) if value.starts_with("anchor:") => {
             selected_anchor = Some(value["anchor:".len()..].to_string())
         }
@@ -2093,10 +2093,10 @@ fn select_content(
         Some(_) => {}
     }
     if let Some(start) = selected_start {
-        return line_slice_exact(content, start, selected_end.unwrap_or(start));
+        return line_slice_exact(&content, start, selected_end.unwrap_or(start));
     }
     if let Some(symbol) = selected_symbol {
-        return symbol_block(content, &symbol);
+        return symbol_block(&content, &symbol);
     }
     if selected_anchor.is_some() {
         return content
@@ -2114,7 +2114,7 @@ fn select_content(
             .collect::<Vec<_>>()
             .join("\n");
     }
-    content.to_string()
+    content
 }
 
 fn ref_not_found_reason(kind: &str) -> String {
@@ -2641,6 +2641,7 @@ fn load_state(
 /// A leading NUL keeps collisions with real tool output implausible, and a
 /// malformed marker is treated as literal text (fail-open both ways).
 const BLOB_EXTERNALIZE_MIN_BYTES: usize = 64 * 1024;
+const STREAM_READ_BUFFER_BYTES: usize = 64 * 1024;
 const BLOB_MARKER_PREFIX: &str = "\u{0}tzx:v1:";
 
 fn blob_sidecar_dir(cache_path: &Path) -> PathBuf {
@@ -2682,15 +2683,106 @@ fn blob_value_len(value: &BlobEntry) -> usize {
     }
 }
 
-fn blob_content_matches_ref(ref_id: &str, text: &str) -> bool {
-    let Some(hash) = ref_id.strip_prefix("tz://blob/") else {
-        return false;
-    };
-    if hash.len() == 64 {
-        sha256_hex(text) == hash
-    } else {
-        id_for('b', text) == hash
+fn digest_hex(hasher: Sha256) -> String {
+    hasher
+        .finalize()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
+/// Read UTF-8 through a fixed buffer while hashing exact bytes. The Vec becomes
+/// the returned String without copying, so a contiguous response has one payload allocation.
+fn read_utf8_hashed(path: &Path, expected_len: Option<usize>) -> std::io::Result<(String, String)> {
+    let mut file = fs::File::open(path)?;
+    let capacity = expected_len
+        .or_else(|| file.metadata().ok()?.len().try_into().ok())
+        .unwrap_or(STREAM_READ_BUFFER_BYTES);
+    let mut bytes = Vec::with_capacity(capacity);
+    let mut hasher = Sha256::new();
+    let mut buffer = [0_u8; STREAM_READ_BUFFER_BYTES];
+    loop {
+        let read = file.read(&mut buffer)?;
+        if read == 0 {
+            break;
+        }
+        if expected_len.is_some_and(|len| bytes.len().saturating_add(read) > len) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "streamed payload exceeds its recorded length",
+            ));
+        }
+        hasher.update(&buffer[..read]);
+        bytes.extend_from_slice(&buffer[..read]);
     }
+    if expected_len.is_some_and(|len| bytes.len() != len) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "streamed payload does not match its recorded length",
+        ));
+    }
+    let text = String::from_utf8(bytes)
+        .map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidData, err))?;
+    Ok((text, digest_hex(hasher)))
+}
+
+/// Stream one-based inclusive lines without materializing the rest of the file.
+/// Hashing covers the exact selected bytes used to derive the blob ref.
+fn read_utf8_line_range_hashed(
+    path: &Path,
+    start_line: usize,
+    end_line: usize,
+) -> std::io::Result<(String, String)> {
+    let mut file = fs::File::open(path)?;
+    let mut selected = Vec::new();
+    let mut hasher = Sha256::new();
+    let mut buffer = [0_u8; STREAM_READ_BUFFER_BYTES];
+    let mut line = 1_usize;
+    let mut bytes_seen = 0_usize;
+    let mut newline_count = 0_usize;
+    let mut last_byte = None;
+    loop {
+        let read = file.read(&mut buffer)?;
+        if read == 0 {
+            break;
+        }
+        bytes_seen += read;
+        let mut selected_from = None;
+        for (index, byte) in buffer[..read].iter().copied().enumerate() {
+            if line >= start_line && line <= end_line && selected_from.is_none() {
+                selected_from = Some(index);
+            }
+            if byte == b'\n' {
+                newline_count += 1;
+                if line == end_line {
+                    if let Some(from) = selected_from.take() {
+                        hasher.update(&buffer[from..=index]);
+                        selected.extend_from_slice(&buffer[from..=index]);
+                    }
+                }
+                line += 1;
+            }
+            last_byte = Some(byte);
+        }
+        if let Some(from) = selected_from {
+            hasher.update(&buffer[from..read]);
+            selected.extend_from_slice(&buffer[from..read]);
+        }
+    }
+    let line_count = if bytes_seen == 0 {
+        0
+    } else {
+        newline_count + usize::from(last_byte != Some(b'\n'))
+    };
+    if start_line == 0 || start_line > end_line || end_line > line_count {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "streamed line range is outside the source",
+        ));
+    }
+    let text = String::from_utf8(selected)
+        .map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidData, err))?;
+    Ok((text, digest_hex(hasher)))
 }
 
 fn resolve_file_value(stored: &StoredFile) -> RefResolve {
@@ -2705,13 +2797,16 @@ fn resolve_file_value(stored: &StoredFile) -> RefResolve {
         .as_deref()
         .and_then(path_from_identity_text)
         .unwrap_or_else(|| PathBuf::from(path_text));
-    let Ok(text) = fs::read_to_string(&path) else {
-        return RefResolve::Stale;
-    };
     let Some(expected) = stored.source_fingerprint.as_ref() else {
         return RefResolve::DecodeFailed;
     };
-    if source_fingerprint_from_text(&path, &text).as_ref() != Some(expected) {
+    let Ok(expected_len) = usize::try_from(expected.size) else {
+        return RefResolve::Stale;
+    };
+    let Ok((text, sha256)) = read_utf8_hashed(&path, Some(expected_len)) else {
+        return RefResolve::Stale;
+    };
+    if source_fingerprint_from_sha256(&path, &sha256).as_ref() != Some(expected) {
         return RefResolve::Stale;
     }
     RefResolve::Found(text)
@@ -2720,17 +2815,17 @@ fn resolve_file_value(stored: &StoredFile) -> RefResolve {
 fn resolve_blob_value(cache_path: Option<&Path>, ref_id: &str, value: &BlobEntry) -> RefResolve {
     match value {
         BlobEntry::Inline(value) => {
-            let Some((hash, _)) = parse_blob_marker(value) else {
+            let Some((hash, expected_len)) = parse_blob_marker(value) else {
                 return RefResolve::Found(value.clone());
             };
             let Some(cache_path) = cache_path else {
                 return RefResolve::DecodeFailed;
             };
             let path = blob_sidecar_dir(cache_path).join(format!("{hash}.txt"));
-            let Ok(text) = fs::read_to_string(path) else {
+            let Ok((text, actual_hash)) = read_utf8_hashed(&path, Some(expected_len)) else {
                 return RefResolve::DecodeFailed;
             };
-            if sha256_hex(&text) == hash {
+            if actual_hash == hash {
                 RefResolve::Found(text)
             } else {
                 RefResolve::DecodeFailed
@@ -2741,18 +2836,19 @@ fn resolve_blob_value(cache_path: Option<&Path>, ref_id: &str, value: &BlobEntry
             source_start_line,
             source_end_line,
         } => {
-            let Ok(source) = fs::read_to_string(path) else {
+            let Ok((text, sha256)) =
+                read_utf8_line_range_hashed(path, *source_start_line, *source_end_line)
+            else {
                 return RefResolve::Stale;
             };
-            let line_count = content_line_count(&source);
-            if *source_start_line == 0
-                || source_start_line > source_end_line
-                || *source_end_line > line_count
-            {
-                return RefResolve::Stale;
-            }
-            let text = line_slice_exact(&source, *source_start_line, *source_end_line);
-            if blob_content_matches_ref(ref_id, &text) {
+            let hash_matches = ref_id.strip_prefix("tz://blob/").is_some_and(|hash| {
+                if hash.len() == 64 {
+                    sha256 == hash
+                } else {
+                    id_for('b', &text) == hash
+                }
+            });
+            if hash_matches {
                 RefResolve::Found(text)
             } else {
                 RefResolve::Stale
@@ -3390,14 +3486,6 @@ fn source_fingerprint_from_sha256(path: &Path, sha256: &str) -> Option<SourceFin
         mtime_ns,
         sha256: sha256.to_string(),
     })
-}
-
-fn source_fingerprint_from_text(path: &Path, text: &str) -> Option<SourceFingerprint> {
-    let meta = fs::metadata(path).ok()?;
-    if !meta.is_file() {
-        return None;
-    }
-    source_fingerprint_from_parts(meta, Sha256::digest(text.as_bytes()))
 }
 
 fn source_fingerprint(path: &Path) -> Option<SourceFingerprint> {

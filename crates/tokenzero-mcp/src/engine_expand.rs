@@ -310,10 +310,10 @@ impl TokenZeroEngine {
         // spills) and on explicit `since=` diffs; serves are still RECORDED
         // below so those paths keep learning from expands.
 
-        let mut response = expansion_response(target.clone(), store.recovery_tokens);
         if self.config.session_dedup {
             pending.push(self.pending_expand_record(&params, &target.content, &mut store));
         }
+        let mut response = expansion_response(target, store.recovery_tokens);
         if let Some(telemetry) = summary.telemetry() {
             response.telemetry = Some(telemetry);
         }
