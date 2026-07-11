@@ -6,28 +6,28 @@
       {
         "label": "small_text",
         "input_bytes": 25,
-        "ref_produced": "tz://blob/b01c6654a60282f1f",
+        "ref_produced": "tz://blob/01c6654a60282f1f1dbcfdab351681ca84ba5334c2fee26380cf74d8bc90ab27",
         "expand_recovered": true,
         "byte_exact": true
       },
       {
         "label": "special_chars",
         "input_bytes": 24,
-        "ref_produced": "tz://blob/b61fcf8792cd9b3a2",
+        "ref_produced": "tz://blob/61fcf8792cd9b3a2e7299ebb6898bd9813c476bd29140e3e01cce2a1c449c036",
         "expand_recovered": true,
         "byte_exact": true
       },
       {
         "label": "code_block",
         "input_bytes": 37,
-        "ref_produced": "tz://blob/b5c65ceda73d9ecc2",
+        "ref_produced": "tz://blob/5c65ceda73d9ecc2438305ab3f76f5d3243e12d07706a7bffe7f2c8a7c2af247",
         "expand_recovered": true,
         "byte_exact": true
       },
       {
         "label": "large_repetitive",
         "input_bytes": 2200,
-        "ref_produced": "tz://blob/b8fa54e0151f4f912",
+        "ref_produced": "tz://blob/8fa54e0151f4f912fd5543a7847b620c157565456b1a14207b47c19060b777f0",
         "expand_recovered": true,
         "byte_exact": true
       }
@@ -47,19 +47,19 @@
           "equivalent_perop_calls": 3,
           "raw_command_count": 1,
           "raw_visible_tokens": 2513,
-          "perop_visible_tokens": 385,
+          "perop_visible_tokens": 157,
           "perop_args_tokens": 104,
           "perop_raw_tokens": 1948,
-          "plan_visible_tokens": 93,
+          "plan_visible_tokens": 116,
           "plan_text_tokens": 107,
-          "payload_tokens": 40,
+          "payload_tokens": 63,
           "envelope_tokens": 53,
           "plan_raw_tokens": 1234,
-          "plan_duration_ms": 742,
-          "perop_duration_ms": 808,
-          "raw_duration_ms": 20,
-          "codemode_vs_raw_savings_pct": 96.3,
-          "codemode_vs_perop_savings_pct": 75.8
+          "plan_duration_ms": 197,
+          "perop_duration_ms": 334,
+          "raw_duration_ms": 10,
+          "codemode_vs_raw_savings_pct": 95.4,
+          "codemode_vs_perop_savings_pct": 26.1
         },
         {
           "workload": "shell-multi-step",
@@ -77,9 +77,9 @@
           "payload_tokens": 154,
           "envelope_tokens": 55,
           "plan_raw_tokens": 85,
-          "plan_duration_ms": 163,
-          "perop_duration_ms": 34,
-          "raw_duration_ms": 39,
+          "plan_duration_ms": 58,
+          "perop_duration_ms": 21,
+          "raw_duration_ms": 20,
           "codemode_vs_raw_savings_pct": -145.9,
           "codemode_vs_perop_savings_pct": -50.4
         },
@@ -99,9 +99,9 @@
           "payload_tokens": 36,
           "envelope_tokens": 67,
           "plan_raw_tokens": 0,
-          "plan_duration_ms": 86,
+          "plan_duration_ms": 26,
           "perop_duration_ms": 4,
-          "raw_duration_ms": 13,
+          "raw_duration_ms": 8,
           "codemode_vs_raw_savings_pct": 81.2,
           "codemode_vs_perop_savings_pct": 31.3
         },
@@ -121,9 +121,9 @@
           "payload_tokens": 269,
           "envelope_tokens": 53,
           "plan_raw_tokens": 919,
-          "plan_duration_ms": 37,
-          "perop_duration_ms": 41,
-          "raw_duration_ms": 33,
+          "plan_duration_ms": 31,
+          "perop_duration_ms": 12,
+          "raw_duration_ms": 15,
           "codemode_vs_raw_savings_pct": 83.1,
           "codemode_vs_perop_savings_pct": -8.4
         },
@@ -143,9 +143,9 @@
           "payload_tokens": 38,
           "envelope_tokens": 69,
           "plan_raw_tokens": 23161,
-          "plan_duration_ms": 52,
-          "perop_duration_ms": 67,
-          "raw_duration_ms": 9,
+          "plan_duration_ms": 55,
+          "perop_duration_ms": 50,
+          "raw_duration_ms": 8,
           "codemode_vs_raw_savings_pct": 99.5,
           "codemode_vs_perop_savings_pct": 96.6
         },
@@ -165,8 +165,8 @@
           "payload_tokens": 61,
           "envelope_tokens": 53,
           "plan_raw_tokens": 3334,
-          "plan_duration_ms": 72,
-          "perop_duration_ms": 10,
+          "plan_duration_ms": 36,
+          "perop_duration_ms": 14,
           "raw_duration_ms": 8,
           "codemode_vs_raw_savings_pct": 96.6,
           "codemode_vs_perop_savings_pct": 66.9
@@ -187,8 +187,8 @@
           "payload_tokens": 7,
           "envelope_tokens": 14,
           "plan_raw_tokens": 931,
-          "plan_duration_ms": 53,
-          "perop_duration_ms": 10,
+          "plan_duration_ms": 32,
+          "perop_duration_ms": 13,
           "raw_duration_ms": 7,
           "codemode_vs_raw_savings_pct": 97.7,
           "codemode_vs_perop_savings_pct": 90.4
@@ -196,17 +196,17 @@
       ],
       "totals": {
         "total_raw_visible": 29450,
-        "total_perop_visible": 4664,
+        "total_perop_visible": 4436,
         "total_perop_args": 553,
         "total_perop_raw": 28002,
-        "total_plan_visible": 969,
+        "total_plan_visible": 992,
         "total_plan_text": 885,
-        "total_payload": 605,
+        "total_payload": 628,
         "total_envelope": 364,
         "total_plan_raw": 29664,
-        "codemode_vs_raw_savings_pct": 96.7,
-        "codemode_vs_perop_savings_pct": 79.2,
-        "headline_savings_pct": 96.7
+        "codemode_vs_raw_savings_pct": 96.6,
+        "codemode_vs_perop_savings_pct": 77.6,
+        "headline_savings_pct": 96.6
       }
     },
     "plan_always_cheaper_or_equal": true
@@ -216,17 +216,17 @@
       {
         "operation": "read",
         "plan_text": "line one\nline two\nline three",
-        "plan_ref": "tz://blob/bbce2aeea9e6fc31f",
+        "plan_ref": "tz://blob/bce2aeea9e6fc31f09b164dbaf832b013ee75fbd323262cbee9d42b8b51077b1",
         "direct_text": "line one\nline two\nline three",
-        "direct_ref": "tz://blob/bbce2aeea9e6fc31f",
+        "direct_ref": "tz://blob/bce2aeea9e6fc31f09b164dbaf832b013ee75fbd323262cbee9d42b8b51077b1",
         "text_identical": true,
         "ref_identical": true
       },
       {
         "operation": "shell",
-        "plan_text": "$ echo parity\nexit_code: 0\nstdout:\nparity\ncombined_ref: tz://blob/b519375379bc9626a",
+        "plan_text": "$ echo parity\nexit_code: 0\nstdout:\nparity\ncombined_ref: tz://blob/519375379bc9626a8e58fb4da49f2a8de493a8a10195d6deec6d695fc7dee889",
         "plan_ref": "",
-        "direct_text": "$ echo parity\nexit_code: 0\nstdout:\nparity\ncombined_ref: tz://blob/b519375379bc9626a",
+        "direct_text": "$ echo parity\nexit_code: 0\nstdout:\nparity\ncombined_ref: tz://blob/519375379bc9626a8e58fb4da49f2a8de493a8a10195d6deec6d695fc7dee889",
         "direct_ref": "",
         "text_identical": true,
         "ref_identical": true
