@@ -67,10 +67,19 @@ fn dispatch_gated_tool(
         }
     }
     let result = dispatch_tool(engine, canonical, name, args);
-    engine.record_tool_call(canonical, started.elapsed(), result.is_err());
-    let response = result?;
+    let engine_elapsed = started.elapsed();
+    let persist_started = std::time::Instant::now();
+    engine.record_tool_call(canonical, engine_elapsed, result.is_err());
+    let response = match result {
+        Ok(response) => response,
+        Err(error) => {
+            engine.record_tool_attribution(canonical, engine_elapsed, persist_started.elapsed());
+            return Err(error);
+        }
+    };
     // Expand health is recorded inside expand_with_params (CLI + CodeMode + MCP).
     record_mcp_pulse(engine, canonical, args, &response, call_id);
+    engine.record_tool_attribution(canonical, engine_elapsed, persist_started.elapsed());
     Ok(mcp_tool_response(response))
 }
 

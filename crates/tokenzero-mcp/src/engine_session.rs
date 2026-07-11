@@ -152,6 +152,15 @@ impl TokenZeroEngine {
         self.metrics.record(tool, elapsed, is_error);
     }
 
+    pub(crate) fn record_tool_attribution(
+        &self,
+        tool: &str,
+        engine: std::time::Duration,
+        persist: std::time::Duration,
+    ) {
+        self.metrics.record_attribution(tool, engine, persist);
+    }
+
     /// Snapshot served by `resource://tokenzero/metrics`.
     pub(crate) fn tool_metrics_snapshot(&self) -> Value {
         let mut snap = self.metrics.snapshot();

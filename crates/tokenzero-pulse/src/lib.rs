@@ -870,8 +870,10 @@ fn acquire_pulse_lock(path: &Path) -> std::io::Result<PulseLock> {
     writeln!(file, "token={token}")?;
     writeln!(file, "pid={}", std::process::id())?;
     writeln!(file, "created_unix={}", now_unix())?;
-    file.sync_all()?;
-    sync_parent(&lock_path)?;
+    // The advisory file lock, not its diagnostic metadata, is the concurrency
+    // boundary. Flushing this metadata on every acquisition put two durability
+    // barriers on every MCP tool call even though Pulse events are explicitly
+    // crash-loss-tolerant. Leave metadata buffered like the event append.
     Ok(PulseLock { file })
 }
 

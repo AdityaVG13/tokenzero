@@ -14,7 +14,7 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
 use tokenzero_core::MCP_SCHEMA_VERSION;
@@ -79,6 +79,9 @@ pub(crate) struct ToolMetrics {
     /// In-memory mirror of the sidecar; updated on every record so
     /// snapshots stay accurate even when disk writes fail (fail-open).
     persisted: Mutex<BTreeMap<String, ToolStat>>,
+    /// Most recent in-process engine/persistence split per canonical tool.
+    /// Exposed only through the metrics resource for measurement and diagnosis.
+    last_attribution_us: Mutex<BTreeMap<String, (u64, u64)>>,
 }
 
 impl ToolMetrics {
@@ -95,6 +98,7 @@ impl ToolMetrics {
             slow_ms,
             session: Mutex::new(BTreeMap::new()),
             persisted: Mutex::new(persisted),
+            last_attribution_us: Mutex::new(BTreeMap::new()),
         }
     }
 
@@ -112,6 +116,7 @@ impl ToolMetrics {
 
         // Merge this single call into the persistent sidecar. Reload from
         // disk first so concurrent server processes can accumulate.
+        let persist_started = Instant::now();
         let mut persisted = self.load_persisted();
         persisted
             .entry(tool.to_string())
@@ -121,6 +126,17 @@ impl ToolMetrics {
             *mirror = persisted.clone();
         }
         let _ = self.write_persisted(&persisted);
+        let engine_us = u64::try_from(elapsed.as_micros()).unwrap_or(u64::MAX);
+        let persist_us = u64::try_from(persist_started.elapsed().as_micros()).unwrap_or(u64::MAX);
+        self.record_attribution(tool, Duration::from_micros(engine_us), Duration::from_micros(persist_us));
+    }
+
+    pub(crate) fn record_attribution(&self, tool: &str, engine: Duration, persist: Duration) {
+        let engine_us = u64::try_from(engine.as_micros()).unwrap_or(u64::MAX);
+        let persist_us = u64::try_from(persist.as_micros()).unwrap_or(u64::MAX);
+        if let Ok(mut attribution) = self.last_attribution_us.lock() {
+            attribution.insert(tool.to_string(), (engine_us, persist_us));
+        }
     }
 
     /// Snapshot for `resource://tokenzero/metrics`.
@@ -133,6 +149,18 @@ impl ToolMetrics {
             Ok(session) => Self::map_to_json(&session),
             Err(_) => json!({}),
         };
+        let last_attribution_us = self
+            .last_attribution_us
+            .lock()
+            .map(|samples| {
+                samples
+                    .iter()
+                    .map(|(tool, (engine_us, persist_us))| {
+                        (tool.clone(), json!({ "engine_us": engine_us, "persist_us": persist_us }))
+                    })
+                    .collect::<serde_json::Map<String, Value>>()
+            })
+            .unwrap_or_default();
         json!({
             "schema_version": MCP_SCHEMA_VERSION,
             "status": "ok",
@@ -140,6 +168,7 @@ impl ToolMetrics {
             "persistent_path": self.path.display().to_string(),
             "cumulative": cumulative,
             "session": session,
+            "last_attribution_us": last_attribution_us,
             "next_actions": [
                 "cumulative counts persist across sessions in the sidecar next to the recovery cache; session counts reset when the server process exits.",
                 "Set TOKENZERO_SLOW_TOOL_MS to change the slow-call threshold."
