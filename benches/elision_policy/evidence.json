@@ -1,0 +1,268 @@
+{
+  "corpus": {
+    "evidence_files": 25,
+    "explicitly_labeled_rows": 0,
+    "holdout_rows": 0,
+    "recorded_session_replay_rows": 48,
+    "training_rows": 0
+  },
+  "environment": {
+    "commit": "48ca6f1eba29cb0a6bf9dee3912102dec5acb829",
+    "machine": "arm64",
+    "os": "macOS-26.5-arm64-arm-64bit-Mach-O",
+    "python": "3.14.6",
+    "script_sha256": "360e16b021f20377ce4ab76a311cfffb6f47355534a725bf31d23386be99d293"
+  },
+  "findings": {
+    "adaptive_crossover_decision": "do-not-implement",
+    "learned_classes": [],
+    "negative_result_reasons": [
+      "recorded evidence contains no eligible per-call raw_tokens/visible_tokens/recovery_tokens rows with a source content class",
+      "expansion-miss rate is unmeasurable without labeled holdout rows"
+    ],
+    "robust_win": false
+  },
+  "holdout_evaluation": {
+    "observations": 0,
+    "overall": {
+      "candidate_expansion_miss_rate": null,
+      "candidate_ledger_token_turns": 0,
+      "candidate_minus_static_token_turns": 0,
+      "static_expansion_miss_rate": null,
+      "static_ledger_token_turns": 0
+    },
+    "per_class": {}
+  },
+  "inputs": [
+    {
+      "bytes": 392,
+      "path": "benches/ledger_gate/baseline.json",
+      "sha256": "8266266040d919cf7896c49f5cd3f0566417d5033c7f20c40414bf19342feaeb"
+    },
+    {
+      "bytes": 4217,
+      "path": "benches/ledger_gate/corpus.json",
+      "sha256": "bb1e8c8b379ceea4f3569e929c72601704e2bee37c669b152f2fba427d4a6c02"
+    },
+    {
+      "bytes": 10654,
+      "path": "crates/tokenzero-mcp/benches/codemode_rss/baseline.json",
+      "sha256": "fcda92c914e4234e5f5916c8767b885c3e7d0844876b684aeefce876635c7dbf"
+    },
+    {
+      "bytes": 10656,
+      "path": "crates/tokenzero-mcp/benches/codemode_rss/candidate.json",
+      "sha256": "669c4f3726adbe7d7b293526caaf97fa2807868675e42f6a2a6085a6b3e9a096"
+    },
+    {
+      "bytes": 21772,
+      "path": "crates/tokenzero-mcp/benches/codemode_rss/comparison.json",
+      "sha256": "ed18f1b86fa7b7b3cc98506faf983eaaffa0590078c24666bcb1b650b17b05fb"
+    },
+    {
+      "bytes": 12527,
+      "path": "crates/tokenzero-mcp/benches/expand_latency/evidence-streaming-candidate.json",
+      "sha256": "d30fd5a633d55bea1bb3327464552545468040bbcfd0bbc378d00b3392493e52"
+    },
+    {
+      "bytes": 51078,
+      "path": "crates/tokenzero-mcp/benches/expand_latency/evidence.json",
+      "sha256": "62059cc8a13bb1cf6d6c06983574b8b18f0a4e0e55adfcc06547d22932dad47a"
+    },
+    {
+      "bytes": 3323,
+      "path": "crates/tokenzero-mcp/benches/ledger_curve/tokenzero.ledger-curve.v1.schema.json",
+      "sha256": "e23faf6bdfa3927662efde415f646113bb927dc914ca71fa31c0401a773f54ff"
+    },
+    {
+      "bytes": 32430,
+      "path": "crates/tokenzero-mcp/benches/mcp_latency/baseline.json",
+      "sha256": "8a01fb5afbb8c1a76df1fac6ff64df59c8cea9b4e18d96b8746e6c6640236d4f"
+    },
+    {
+      "bytes": 32254,
+      "path": "crates/tokenzero-mcp/benches/mcp_latency/candidate.json",
+      "sha256": "c015ad9e5dc2cdc91b8b8bcaf490b0aca8b19cfd1701afcc807b903a6b8efcf8"
+    },
+    {
+      "bytes": 2811,
+      "path": "crates/tokenzero-mcp/benches/mcp_latency/comparison.json",
+      "sha256": "6fda51311f7bc06903f67a59fe134e0c668d6ce514effc58483b33473e89ae56"
+    },
+    {
+      "bytes": 6507,
+      "path": "crates/tokenzero-mcp/benches/prefix_conformance/evidence.json",
+      "sha256": "03c5aa7740e6472d8d64d02511e70b808111ab9af78bb4134e7df55c72ec0594"
+    },
+    {
+      "bytes": 24346,
+      "path": "crates/tokenzero-mcp/benches/session_delta/evidence.json",
+      "sha256": "badd79f6e8cf5da8ee08bf943d7b0ace5a24629899d34bb657bfa75d299a1569"
+    },
+    {
+      "bytes": 3567,
+      "path": "crates/tokenzero-mcp/benches/session_observatory/replayed.json",
+      "sha256": "f17b92e9bc8a57b3309bee04d4c5ae628bbb8aca9ca62e7374d8ad5292157afe"
+    },
+    {
+      "bytes": 3465,
+      "path": "crates/tokenzero-mcp/benches/session_observatory/tokenzero.observatory.v1.schema.json",
+      "sha256": "c1821091bd0033e349874ae11ee8745614911667f8ab81ee542585b11da53a84"
+    },
+    {
+      "bytes": 214738,
+      "path": "crates/tokenzero-mcp/benches/small_payload_compaction/evidence.json",
+      "sha256": "47fa61d05991810fc42c90d82a79a83a674b4f00c00267651fe28c6e2a61db1a"
+    },
+    {
+      "bytes": 3272,
+      "path": "crates/tokenzero-recovery/benches/large_read_rss/baseline.json",
+      "sha256": "e5dd246219d9a57312f786072e04056e501f7428ac45e09dde5e6dc801b02349"
+    },
+    {
+      "bytes": 3577,
+      "path": "crates/tokenzero-recovery/benches/large_read_rss/candidate.json",
+      "sha256": "21d78644395a121413607e7a1bf5b462a4799663e740579839be9f9b11ee2d38"
+    },
+    {
+      "bytes": 6198,
+      "path": "crates/tokenzero-recovery/benches/large_read_rss/comparison.json",
+      "sha256": "4f5ce3026226ed18e704878d35f01fae4fed81c4f5d1bb2060872997f570efb7"
+    },
+    {
+      "bytes": 2564,
+      "path": "crates/tokenzero-recovery/benches/perf_hotspots/attribution.json",
+      "sha256": "bfb2923b6a88326d624d8b2223ce6ae4be7ea12c55ecdf7dc451f54d5ceb4594"
+    },
+    {
+      "bytes": 18288,
+      "path": "crates/tokenzero-recovery/benches/perf_hotspots/baseline.json",
+      "sha256": "1286b0c2841d034e9968d781c5a69a23d8c9b98da46c81076199ad47cc81f191"
+    },
+    {
+      "bytes": 18295,
+      "path": "crates/tokenzero-recovery/benches/perf_hotspots/candidate.json",
+      "sha256": "da8bd134e8c3d01e951f2eeb7a47e2cf6ef3d1321fdc5b4f9b39ed84deb59f4d"
+    },
+    {
+      "bytes": 4039,
+      "path": "crates/tokenzero-recovery/benches/perf_hotspots/comparison.json",
+      "sha256": "8cb0167963de3328ae9bd60b802ba42348421c9d393537bab0e835276bf859fa"
+    },
+    {
+      "bytes": 278,
+      "path": "crates/tokenzero-recovery/benches/perf_hotspots/persist_same_payload_repeated.json",
+      "sha256": "80f8649baf91cb20a288263613f42e542089fc649a5eaec8eaf726cea6240612"
+    },
+    {
+      "bytes": 226,
+      "path": "crates/tokenzero-recovery/benches/perf_hotspots/repeat_read_220kb_cache_bytes.json",
+      "sha256": "62243e6b5dc0c5fd5d8475e4217f14fb9cdf8ea70d4c546fcebd5eba56586007"
+    }
+  ],
+  "losses_and_limits": [
+    "No synthetic labels are introduced when recorded evidence lacks expansion outcomes.",
+    "Byte-accounted session-delta rows are not converted to tokens; only fallback equality is reported for them.",
+    "recovery_tokens can include internally charged recovery, so future corpora should record an explicit agent_requested_expand field.",
+    "This evaluation cannot justify adaptive product behavior when robust_win is false."
+  ],
+  "methodology": {
+    "feature": "explicit content_class, operation, tool, or family; normalized aliases only",
+    "label": "per-call recovery_tokens > 0; expand calls themselves are excluded",
+    "ledger": "visible preview tokens multiplied by remaining turns, plus one full raw-token recovery on an expansion miss",
+    "predictor": "per-class table: zero when no training row expands, max expanded length when all expand, otherwise nearest-rank q75 of expanded raw_tokens",
+    "promotion": "at least 30 labeled holdout rows, net ledger win, no class above 2.0% regression, and no expansion-miss-rate regression",
+    "rejected_proxies": [
+      "repeat",
+      "cache_hit",
+      "compression win",
+      "latency win"
+    ],
+    "sparse_class_fallback": "static 256-token preview until at least 4 training rows",
+    "split": "stable source/path order within class; first 70% train, remaining 30% holdout; singleton has no holdout"
+  },
+  "predictor": {
+    "minimum_training_rows_per_class": 4,
+    "per_class": {
+      "git": {
+        "expansion_rate": null,
+        "learned": false,
+        "preview_tokens": 256,
+        "reason": "no-explicit-expansion-labels",
+        "recorded_expansions": 0,
+        "training_observations": 0
+      },
+      "read": {
+        "expansion_rate": null,
+        "learned": false,
+        "preview_tokens": 256,
+        "reason": "no-explicit-expansion-labels",
+        "recorded_expansions": 0,
+        "training_observations": 0
+      },
+      "search": {
+        "expansion_rate": null,
+        "learned": false,
+        "preview_tokens": 256,
+        "reason": "no-explicit-expansion-labels",
+        "recorded_expansions": 0,
+        "training_observations": 0
+      },
+      "tree": {
+        "expansion_rate": null,
+        "learned": false,
+        "preview_tokens": 256,
+        "reason": "no-explicit-expansion-labels",
+        "recorded_expansions": 0,
+        "training_observations": 0
+      }
+    },
+    "quantile": 0.75,
+    "static_preview_tokens": 256
+  },
+  "recorded_session_replay": {
+    "candidate_visible_byte_turns": 261588,
+    "note": "Recorded session-delta evidence is byte-accounted and carries no expansion labels. It verifies fallback equality only; it is not converted to tokens.",
+    "observations": 48,
+    "per_class": {
+      "git": {
+        "candidate_minus_static_byte_turns": 0,
+        "candidate_status": "static-fallback",
+        "candidate_visible_byte_turns": 58477,
+        "outcome": "tie",
+        "raw_byte_turns": 2519689,
+        "recorded_samples": 12,
+        "static_visible_byte_turns": 58477
+      },
+      "read": {
+        "candidate_minus_static_byte_turns": 0,
+        "candidate_status": "static-fallback",
+        "candidate_visible_byte_turns": 85845,
+        "outcome": "tie",
+        "raw_byte_turns": 10684719,
+        "recorded_samples": 12,
+        "static_visible_byte_turns": 85845
+      },
+      "search": {
+        "candidate_minus_static_byte_turns": 0,
+        "candidate_status": "static-fallback",
+        "candidate_visible_byte_turns": 68305,
+        "outcome": "tie",
+        "raw_byte_turns": 3988039,
+        "recorded_samples": 12,
+        "static_visible_byte_turns": 68305
+      },
+      "tree": {
+        "candidate_minus_static_byte_turns": 0,
+        "candidate_status": "static-fallback",
+        "candidate_visible_byte_turns": 48961,
+        "outcome": "tie",
+        "raw_byte_turns": 3163969,
+        "recorded_samples": 12,
+        "static_visible_byte_turns": 48961
+      }
+    },
+    "static_visible_byte_turns": 261588
+  },
+  "schema": "tokenzero.elision-policy-evaluation.v1"
+}
