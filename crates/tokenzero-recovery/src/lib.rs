@@ -429,8 +429,6 @@ impl Default for RecoveryConfig {
             legacy_compat_deadline: None,
         }
     }
-
-
 }
 
 fn default_legacy_compat() -> bool {
@@ -513,6 +511,20 @@ impl ExpansionResult {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum BlobEntry {
+    /// Full text stored directly in recovery state. Legacy string-valued caches
+    /// deserialize into this variant and serialize back to the same JSON shape.
+    Inline(String),
+    /// Pointer to an exact, one-based inclusive source line range.
+    FileRef {
+        path: PathBuf,
+        source_start_line: usize,
+        source_end_line: usize,
+    },
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct RecoveryState {
     pub version: u32,
@@ -521,7 +533,7 @@ pub(crate) struct RecoveryState {
     pub max_units: usize,
     pub max_search_hits: usize,
     pub max_bytes: usize,
-    pub blobs: BTreeMap<String, String>,
+    pub blobs: BTreeMap<String, BlobEntry>,
     pub files: BTreeMap<String, StoredFile>,
     pub units: BTreeMap<String, StoredUnit>,
     pub search_hits: BTreeMap<String, StoredUnit>,
@@ -730,6 +742,7 @@ impl DiskIdentity {
 enum RefResolve {
     Found(String),
     NotFound,
+    Stale,
     DecodeFailed,
 }
 
@@ -791,6 +804,55 @@ impl RecoveryStore {
         self.evict();
         self.persist()?;
         Ok(ref_id)
+    }
+
+    /// Persist a blob as a pointer to an exact source-file line range.
+    ///
+    /// This is an explicit opt-in path; ordinary blob writers remain inline so
+    /// ephemeral stdin, shell, and slice content survives source deletion.
+    pub fn store_file_backed_blob(
+        &mut self,
+        path: &Path,
+        source_start_line: usize,
+        source_end_line: usize,
+        content_type: ContentType,
+    ) -> Result<String, RecoveryError> {
+        let source = fs::read_to_string(path)?;
+        let line_count = content_line_count(&source);
+        if source_start_line == 0
+            || source_start_line > source_end_line
+            || source_end_line > line_count
+        {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!(
+                    "invalid source line range {source_start_line}..={source_end_line}; file has {line_count} lines"
+                ),
+            )
+            .into());
+        }
+        let text = line_slice_exact(&source, source_start_line, source_end_line);
+        let canonical_ref = format!("tz://blob/{}", sha256_hex(&text));
+        self.ref_classes.insert(
+            canonical_ref.clone(),
+            classify_ref(&canonical_ref, Some(content_type)),
+        );
+        let legacy_ref = format!("tz://blob/{}", id_for('b', &text));
+        if legacy_ref != canonical_ref {
+            self.state.aliases.insert(legacy_ref, canonical_ref.clone());
+        }
+        self.state.blobs.insert(
+            canonical_ref.clone(),
+            BlobEntry::FileRef {
+                path: path.to_path_buf(),
+                source_start_line,
+                source_end_line,
+            },
+        );
+        self.remember_ref(&canonical_ref);
+        self.evict();
+        self.persist()?;
+        Ok(canonical_ref)
     }
 
     pub fn store_payload(
@@ -907,13 +969,15 @@ impl RecoveryStore {
         self.state.blobs.keys().cloned().collect()
     }
 
-    /// Resolve a blob's content by its full ref ID (e.g. `tz://blob/b<hex>`).
-    /// Returns `None` if not found or if the externalized sidecar cannot be resolved.
+    /// Resolve a blob's content by its full ref ID.
+    /// Returns None if not found or if the stored value cannot be resolved.
     pub(crate) fn resolve_blob_content(&self, ref_id: &str) -> Option<String> {
-        self.state
-            .blobs
-            .get(ref_id)
-            .and_then(|value| resolve_blob_value(self.persistence_path.as_deref(), value))
+        self.state.blobs.get(ref_id).and_then(|value| {
+            match resolve_blob_value(self.persistence_path.as_deref(), ref_id, value) {
+                RefResolve::Found(content) => Some(content),
+                RefResolve::NotFound | RefResolve::Stale | RefResolve::DecodeFailed => None,
+            }
+        })
     }
 
     /// Insert a raw blob entry with a caller-specified ref ID (test only).
@@ -921,10 +985,9 @@ impl RecoveryStore {
     pub(crate) fn insert_test_blob(&mut self, ref_id: &str, content: &str) {
         self.state
             .blobs
-            .insert(ref_id.to_string(), content.to_string());
+            .insert(ref_id.to_string(), BlobEntry::Inline(content.to_string()));
         self.remember_ref(ref_id);
     }
-
 
     /// Return migration/compatibility state for doctor JSON output.
     /// Contains no payload content or filesystem paths.
@@ -1139,7 +1202,8 @@ impl RecoveryStore {
             },
             _ => None,
         };
-        let ref_id = resolved_ref;        let Some(parsed) = parse_ref(&ref_id) else {
+        let ref_id = resolved_ref;
+        let Some(parsed) = parse_ref(&ref_id) else {
             return ExpansionResult::missing(
                 requested_ref,
                 selector.map(str::to_string),
@@ -1171,6 +1235,13 @@ impl RecoveryStore {
         } else {
             match self.resolve_ref_with_index(&parsed.kind, &parsed.bare) {
                 RefResolve::Found(content) => content,
+                RefResolve::Stale => {
+                    return ExpansionResult::missing(
+                        requested_ref,
+                        selector.map(str::to_string),
+                        "stale-ref",
+                    );
+                }
                 RefResolve::NotFound => {
                     let reason = if requested_ref.starts_with("fz://blob/")
                         || requested_ref.starts_with("gz://blob/")
@@ -1408,8 +1479,10 @@ impl RecoveryStore {
     fn put_blob(&mut self, text: &str, content_type: ContentType) -> String {
         let full_hash = sha256_hex(text);
         let canonical_ref = format!("tz://blob/{full_hash}");
-        self.ref_classes
-            .insert(canonical_ref.clone(), classify_ref(&canonical_ref, Some(content_type)));
+        self.ref_classes.insert(
+            canonical_ref.clone(),
+            classify_ref(&canonical_ref, Some(content_type)),
+        );
 
         // Publish to the canonical shared CAS when attached. On success the
         // canonical ref is served from the immutable CAS and the payload is
@@ -1425,9 +1498,7 @@ impl RecoveryStore {
         // callers using legacy refs can resolve through the alias chain.
         let legacy_ref = format!("tz://blob/{}", id_for('b', text));
         if legacy_ref != canonical_ref {
-            self.state
-                .aliases
-                .insert(legacy_ref, canonical_ref.clone());
+            self.state.aliases.insert(legacy_ref, canonical_ref.clone());
         }
 
         if !cas_published {
@@ -1444,7 +1515,10 @@ impl RecoveryStore {
                 .as_deref()
                 .and_then(|cache| externalize_blob_value(cache, text, &full_hash))
                 .unwrap_or_else(|| text.to_string());
-            self.state.blobs.insert(canonical_ref.clone(), value);
+            // Sidecar markers are inline metadata, never source-file pointers.
+            self.state
+                .blobs
+                .insert(canonical_ref.clone(), BlobEntry::Inline(value));
         }
         self.remember_ref(&canonical_ref);
         canonical_ref
@@ -1535,12 +1609,13 @@ impl RecoveryStore {
 
     fn resolve_ref(&self, kind: &str, bare: &str) -> RefResolve {
         match kind {
-            "blob" => match self.state.blobs.get(bare) {
-                Some(value) => resolve_blob_value(self.persistence_path.as_deref(), value)
-                    .map(RefResolve::Found)
-                    .unwrap_or(RefResolve::DecodeFailed),
-                None => RefResolve::NotFound,
-            },
+            "blob" => self
+                .state
+                .blobs
+                .get(bare)
+                .map_or(RefResolve::NotFound, |value| {
+                    resolve_blob_value(self.persistence_path.as_deref(), bare, value)
+                }),
             "file" => self
                 .state
                 .files
@@ -1566,6 +1641,7 @@ impl RecoveryStore {
     fn resolve_ref_with_index(&self, kind: &str, bare: &str) -> RefResolve {
         match self.resolve_ref(kind, bare) {
             RefResolve::Found(content) => return RefResolve::Found(content),
+            RefResolve::Stale => return RefResolve::Stale,
             RefResolve::DecodeFailed => return RefResolve::DecodeFailed,
             RefResolve::NotFound => {}
         }
@@ -1661,7 +1737,7 @@ impl RecoveryStore {
     fn approx_bytes(&self) -> usize {
         // Externalized blob markers account at their original payload size so
         // eviction pressure reflects real content, not marker bytes.
-        let blob_bytes: usize = self.state.blobs.values().map(|v| blob_value_len(v)).sum();
+        let blob_bytes: usize = self.state.blobs.values().map(blob_value_len).sum();
         let file_bytes: usize = self
             .state
             .files
@@ -2254,11 +2330,7 @@ fn resolve_blob_from_ref_index(ref_id: &str, config: &RecoveryConfig) -> RefReso
             .ok()
             .flatten()
             .and_then(|state| state.blobs.get(ref_id).cloned())
-            .map(|value| {
-                resolve_blob_value(Some(&store_path), &value)
-                    .map(RefResolve::Found)
-                    .unwrap_or(RefResolve::DecodeFailed)
-            });
+            .map(|value| resolve_blob_value(Some(&store_path), ref_id, &value));
         match resolved {
             Some(RefResolve::Found(content)) => {
                 if !stale_store_paths.is_empty() {
@@ -2266,6 +2338,7 @@ fn resolve_blob_from_ref_index(ref_id: &str, config: &RecoveryConfig) -> RefReso
                 }
                 return RefResolve::Found(content);
             }
+            Some(RefResolve::Stale) => return RefResolve::Stale,
             Some(RefResolve::DecodeFailed) => {
                 if !stale_store_paths.is_empty() {
                     prune_ref_index_stale_entries(ref_id, &stale_store_paths);
@@ -2501,18 +2574,68 @@ fn parse_blob_marker(value: &str) -> Option<(&str, usize)> {
     Some((hash, len))
 }
 
-fn blob_value_len(value: &str) -> usize {
-    parse_blob_marker(value).map_or(value.len(), |(_, len)| len)
+fn blob_value_len(value: &BlobEntry) -> usize {
+    match value {
+        BlobEntry::Inline(text) => parse_blob_marker(text).map_or(text.len(), |(_, len)| len),
+        BlobEntry::FileRef { path, .. } => {
+            std::mem::size_of::<BlobEntry>() + path.as_os_str().len()
+        }
+    }
 }
 
-fn resolve_blob_value(cache_path: Option<&Path>, value: &str) -> Option<String> {
-    let Some((hash, _)) = parse_blob_marker(value) else {
-        return Some(value.to_string());
+fn blob_content_matches_ref(ref_id: &str, text: &str) -> bool {
+    let Some(hash) = ref_id.strip_prefix("tz://blob/") else {
+        return false;
     };
-    let cache_path = cache_path?;
-    let path = blob_sidecar_dir(cache_path).join(format!("{hash}.txt"));
-    let text = fs::read_to_string(path).ok()?;
-    (sha256_hex(&text) == hash).then_some(text)
+    if hash.len() == 64 {
+        sha256_hex(text) == hash
+    } else {
+        id_for('b', text) == hash
+    }
+}
+
+fn resolve_blob_value(cache_path: Option<&Path>, ref_id: &str, value: &BlobEntry) -> RefResolve {
+    match value {
+        BlobEntry::Inline(value) => {
+            let Some((hash, _)) = parse_blob_marker(value) else {
+                return RefResolve::Found(value.clone());
+            };
+            let Some(cache_path) = cache_path else {
+                return RefResolve::DecodeFailed;
+            };
+            let path = blob_sidecar_dir(cache_path).join(format!("{hash}.txt"));
+            let Ok(text) = fs::read_to_string(path) else {
+                return RefResolve::DecodeFailed;
+            };
+            if sha256_hex(&text) == hash {
+                RefResolve::Found(text)
+            } else {
+                RefResolve::DecodeFailed
+            }
+        }
+        BlobEntry::FileRef {
+            path,
+            source_start_line,
+            source_end_line,
+        } => {
+            let Ok(source) = fs::read_to_string(path) else {
+                return RefResolve::Stale;
+            };
+            let line_count = content_line_count(&source);
+            if *source_start_line == 0
+                || source_start_line > source_end_line
+                || *source_end_line > line_count
+            {
+                return RefResolve::Stale;
+            }
+            let text = line_slice_exact(&source, *source_start_line, *source_end_line);
+            if blob_content_matches_ref(ref_id, &text) {
+                RefResolve::Found(text)
+            } else {
+                RefResolve::Stale
+            }
+        }
+    }
 }
 
 /// Journal sibling of the snapshot: `recovery-cache.json.journal`. Each line

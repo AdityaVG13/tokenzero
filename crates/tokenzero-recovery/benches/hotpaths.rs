@@ -58,6 +58,7 @@ fn roomy_config() -> RecoveryConfig {
         max_search_hits: 100_000,
         max_bytes: 64_000_000,
         max_load_bytes: 128_000_000,
+        ..RecoveryConfig::default()
     }
 }
 
@@ -168,5 +169,78 @@ fn bench_persist_path(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, bench_persist, bench_persist_path);
+fn cache_footprint(path: &std::path::Path) -> u64 {
+    let mut bytes = std::fs::metadata(path).map_or(0, |meta| meta.len());
+    let mut sidecar_os = path.as_os_str().to_owned();
+    sidecar_os.push(".blobs");
+    let sidecar = std::path::PathBuf::from(sidecar_os);
+    if let Ok(entries) = std::fs::read_dir(sidecar) {
+        bytes += entries
+            .filter_map(Result::ok)
+            .filter_map(|entry| entry.metadata().ok())
+            .filter(|meta| meta.is_file())
+            .map(|meta| meta.len())
+            .sum::<u64>();
+    }
+    bytes
+}
+
+/// Measures the durable cache footprint of repeatedly storing one deterministic
+/// 220 KiB source as an explicit FileRef versus the ordinary Inline path.
+fn measure_repeat_read_220kb_cache_bytes(c: &mut Criterion) {
+    const PAYLOAD_BYTES: usize = 220 * 1024;
+    const REPEATS: usize = 8;
+    let dir = TempDir::new().expect("temp dir");
+    let source = dir.path().join("repeat-read-220kb.txt");
+    let file_cache = dir.path().join("file-ref-cache.json");
+    let inline_cache = dir.path().join("inline-cache.json");
+    std::fs::write(&source, vec![b'x'; PAYLOAD_BYTES]).expect("write deterministic source");
+
+    let mut file_store = RecoveryStore::new(Some(file_cache.clone()));
+    for _ in 0..REPEATS {
+        file_store
+            .store_file_backed_blob(&source, 1, 1, ContentType::Unknown)
+            .expect("store FileRef");
+    }
+    let mut inline_store = RecoveryStore::new(Some(inline_cache.clone()));
+    let payload = std::fs::read_to_string(&source).expect("read deterministic source");
+    for _ in 0..REPEATS {
+        inline_store
+            .store_blob(&payload, ContentType::Unknown)
+            .expect("store Inline");
+    }
+
+    let file_ref_cache_bytes = cache_footprint(&file_cache);
+    let inline_cache_bytes = cache_footprint(&inline_cache);
+    assert!(
+        file_ref_cache_bytes < inline_cache_bytes,
+        "FileRef footprint {file_ref_cache_bytes} must be below Inline {inline_cache_bytes}"
+    );
+    let evidence = serde_json::json!({
+        "schema": "tokenzero.repeat-read-cache-bytes.v1",
+        "payload_bytes": PAYLOAD_BYTES,
+        "repeats": REPEATS,
+        "file_ref_cache_bytes": file_ref_cache_bytes,
+        "inline_cache_bytes": inline_cache_bytes,
+        "measurement": "snapshot plus content-addressed sidecar files"
+    });
+    let evidence_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("benches/perf_hotspots/repeat_read_220kb_cache_bytes.json");
+    std::fs::write(
+        evidence_path,
+        serde_json::to_vec_pretty(&evidence).expect("serialize evidence"),
+    )
+    .expect("write evidence");
+
+    c.bench_function("measure_repeat_read_220kb_cache_bytes", |b| {
+        b.iter(|| black_box((file_ref_cache_bytes, inline_cache_bytes)))
+    });
+}
+
+criterion_group!(
+    benches,
+    bench_persist,
+    bench_persist_path,
+    measure_repeat_read_220kb_cache_bytes
+);
 criterion_main!(benches);

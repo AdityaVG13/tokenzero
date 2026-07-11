@@ -140,6 +140,121 @@ fn restart_expand_is_byte_exact() {
 }
 
 #[test]
+fn old_string_blob_cache_round_trips_without_shape_rewrite() {
+    let dir = tempdir().unwrap();
+    let cache = dir.path().join("cache.json");
+    let text = "legacy
+bytes
+";
+    let ref_id = format!("tz://blob/{}", sha256_hex(text));
+    let mut json = serde_json::to_value(RecoveryState::empty(&RecoveryConfig::default())).unwrap();
+    json["blobs"][&ref_id] = serde_json::Value::String(text.to_string());
+    json["order"] = serde_json::json!([ref_id]);
+    fs::write(&cache, serde_json::to_vec(&json).unwrap()).unwrap();
+
+    let mut store = RecoveryStore::new(Some(cache.clone()));
+    let expanded = store.expand(&ref_id, Some("raw"), None, None, None, None);
+    assert!(expanded.found);
+    assert_eq!(expanded.content, text);
+    store.persist_pending().unwrap();
+
+    let persisted: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(cache).unwrap()).unwrap();
+    assert_eq!(persisted["blobs"][&ref_id].as_str(), Some(text));
+}
+
+#[test]
+fn file_backed_blob_resolves_exact_source_slice_after_restart() {
+    let dir = tempdir().unwrap();
+    let source = dir.path().join("source.txt");
+    let cache = dir.path().join("cache.json");
+    fs::write(
+        &source,
+        "one
+two
+three
+",
+    )
+    .unwrap();
+    let ref_id = {
+        let mut store = RecoveryStore::new(Some(cache.clone()));
+        store
+            .store_file_backed_blob(&source, 2, 3, ContentType::Code)
+            .unwrap()
+    };
+    let snapshot: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&cache).unwrap()).unwrap();
+    assert!(snapshot["blobs"][&ref_id].is_object());
+
+    let mut restarted = RecoveryStore::new(Some(cache));
+    let expanded = restarted.expand(&ref_id, Some("raw"), None, None, None, None);
+    assert!(expanded.found);
+    assert_eq!(
+        expanded.content,
+        "two
+three
+"
+    );
+}
+
+#[test]
+fn file_backed_blob_reports_stale_when_source_changes_or_disappears() {
+    let dir = tempdir().unwrap();
+    let source = dir.path().join("source.txt");
+    let cache = dir.path().join("cache.json");
+    fs::write(
+        &source, "stable
+",
+    )
+    .unwrap();
+    let ref_id = {
+        let mut store = RecoveryStore::new(Some(cache.clone()));
+        store
+            .store_file_backed_blob(&source, 1, 1, ContentType::Unknown)
+            .unwrap()
+    };
+
+    fs::write(
+        &source, "changed
+",
+    )
+    .unwrap();
+    let mut changed = RecoveryStore::new(Some(cache.clone()));
+    let expanded = changed.expand(&ref_id, Some("raw"), None, None, None, None);
+    assert!(!expanded.found);
+    assert_eq!(expanded.reason, "stale-ref");
+
+    fs::remove_file(&source).unwrap();
+    let mut missing = RecoveryStore::new(Some(cache));
+    let expanded = missing.expand(&ref_id, Some("raw"), None, None, None, None);
+    assert!(!expanded.found);
+    assert_eq!(expanded.reason, "stale-ref");
+}
+
+#[test]
+fn inline_blob_survives_source_deletion() {
+    let dir = tempdir().unwrap();
+    let source = dir.path().join("ephemeral.txt");
+    let cache = dir.path().join("cache.json");
+    let text = "ephemeral bytes
+";
+    fs::write(&source, text).unwrap();
+    let blob_ref = {
+        let mut store = RecoveryStore::new(Some(cache.clone()));
+        store
+            .store_payload(text, ContentType::Unknown, Some(&source), None, None)
+            .unwrap()
+            .blob_ref
+    };
+    fs::remove_file(source).unwrap();
+
+    let mut restarted = RecoveryStore::new(Some(cache));
+    let expanded = restarted.expand(&blob_ref, Some("raw"), None, None, None, None);
+    assert!(expanded.found);
+    assert_eq!(expanded.content, text);
+}
+
+#[test]
 fn ref_index_expands_blob_across_cache_roots() {
     let index_dir = tempdir().unwrap();
     with_ref_index_env(index_dir.path(), true, || {
