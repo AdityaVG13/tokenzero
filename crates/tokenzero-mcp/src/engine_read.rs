@@ -134,6 +134,7 @@ impl TokenZeroEngine {
         let mut content_types = Vec::new();
         let mut bytes_read = 0usize;
         let mut summary = SessionSummary::default();
+        let mut working_set_anchor = None;
         // Serve records are applied only after every path succeeded: an
         // error response serves nothing, so nothing may be marked as seen.
         let mut pending: Vec<(ServeKey, ServedRecord)> = Vec::new();
@@ -179,6 +180,18 @@ impl TokenZeroEngine {
                 }
             };
             bytes_read += text.len();
+            if paths.len() == 1 {
+                let anchor_start = source_start.unwrap_or(1);
+                let anchor_end = source_end.unwrap_or_else(|| {
+                    anchor_start.saturating_add(text.lines().count().saturating_sub(1))
+                });
+                working_set_anchor = Some(tokenzero_recovery::working_set::SpanAnchor {
+                    path: path.clone(),
+                    symbol: None,
+                    start_line: anchor_start,
+                    end_line: anchor_end,
+                });
+            }
             let ctype = detect_content_type(&text, Some(path));
             content_types.push(ctype);
             let stored = store.store_payload_deferred_batch(
@@ -360,6 +373,11 @@ impl TokenZeroEngine {
         // response returned) must not become a dedup base.
         if storage_errors.is_empty() && refs_complete {
             self.session_apply(pending, &summary);
+        }
+        if !raw && !matches!(mode, Mode::Passthrough) {
+            if let Some(anchor) = working_set_anchor {
+                self.admit_working_set_response(&mut response, anchor);
+            }
         }
         // Raw reads keep the verbatim slice contract even when it is empty;
         // raw=true does not imply Mode::Passthrough, so guard it explicitly.

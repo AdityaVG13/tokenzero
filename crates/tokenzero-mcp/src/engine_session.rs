@@ -70,6 +70,9 @@ impl TokenZeroEngine {
             config,
             rg_binary: OnceLock::new(),
             session: Mutex::new(None),
+            working_set: Mutex::new(tokenzero_recovery::working_set::WorkingSet::new(
+                tokenzero_recovery::working_set::DEFAULT_WORKING_SET_TOKENS,
+            )),
             in_flight: (Mutex::new(HashSet::new()), Condvar::new()),
             session_id: new_session_id(),
             metrics,
@@ -158,6 +161,15 @@ impl TokenZeroEngine {
                 "surface_health".to_string(),
                 self.surface_health.telemetry(),
             );
+            let working_set = self
+                .working_set
+                .lock()
+                .map(|state| state.telemetry())
+                .unwrap_or_default();
+            obj.insert(
+                "working_set".to_string(),
+                serde_json::to_value(working_set).unwrap_or_else(|_| json!({})),
+            );
         }
         snap
     }
@@ -223,6 +235,65 @@ impl TokenZeroEngine {
             }
             memory
         })
+    }
+
+    pub(crate) fn admit_working_set_response(
+        &self,
+        response: &mut ToolResponse,
+        anchor: tokenzero_recovery::working_set::SpanAnchor,
+    ) {
+        let Some(text) = response
+            .visible
+            .as_ref()
+            .map(|visible| visible.text.clone())
+        else {
+            return;
+        };
+        if text.is_empty() {
+            return;
+        }
+        let mut store = RecoveryStore::new(Some(self.config.cache_path.clone()));
+        let Ok(mut working_set) = self.working_set.lock() else {
+            return;
+        };
+        let Ok(admission) = working_set.admit(&mut store, text, anchor) else {
+            return;
+        };
+        if let Some(replacement) = admission.replacement {
+            if let Some(visible) = response.visible.as_mut() {
+                visible.text = replacement;
+            }
+            if let Some(accounting) = response.accounting.as_mut() {
+                accounting.visible_tokens = response
+                    .visible
+                    .as_ref()
+                    .map(|visible| count_tokens(&visible.text))
+                    .unwrap_or(0);
+            }
+        }
+        if !admission.evicted.is_empty() {
+            for eviction in &admission.evicted {
+                if !response
+                    .refs
+                    .iter()
+                    .any(|record| record.ref_id == eviction.ref_id)
+                {
+                    response.refs.push(ref_record(
+                        "blob",
+                        eviction.ref_id.clone(),
+                        eviction.bytes_evicted,
+                    ));
+                }
+            }
+            merge_telemetry(
+                response,
+                json!({
+                    "working_set_eviction": {
+                        "replacements": admission.evicted.iter().map(|entry| &entry.replacement).collect::<Vec<_>>()
+                    }
+                }),
+            );
+        }
     }
 
     pub(crate) fn session_rollup(&self) -> Value {

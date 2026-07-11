@@ -159,6 +159,8 @@ pub struct TokenZeroEngine {
     // None until a tool actually needs the persisted working set. Session boot must not
     // deserialize session-memory.json on the compatible manifest+delta path.
     session: Mutex<Option<SessionMemory>>,
+    /// Prompt-resident spans; bodies page to durable refs under budget pressure.
+    working_set: Mutex<tokenzero_recovery::working_set::WorkingSet>,
     /// Single-flight gate: ServeKeys currently being served, with a condvar
     /// to wake waiters. Two pipelined identical reads on the 4-worker pool
     /// would otherwise both miss the seen-set (the first has not recorded its

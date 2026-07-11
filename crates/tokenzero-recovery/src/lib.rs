@@ -24,6 +24,7 @@ use crate::shared_cas::{SharedCas, SharedCasError};
 pub mod boot;
 pub mod migration;
 pub mod shared_cas;
+pub mod working_set;
 
 const LOCK_RETRIES: usize = 240;
 const MAX_SHELL_OUTCOMES: usize = 256;
@@ -777,6 +778,19 @@ impl RecoveryStore {
             pending_blob_deletions: BTreeSet::new(),
             pending_alias_deletions: BTreeSet::new(),
         }
+    }
+
+    /// Persist exact bytes as a durable content-addressed blob without
+    /// creating file/unit index entries. Used when prompt spans are paged out.
+    pub fn store_blob(
+        &mut self,
+        text: &str,
+        content_type: ContentType,
+    ) -> Result<String, RecoveryError> {
+        let ref_id = self.put_blob(text, content_type);
+        self.evict();
+        self.persist()?;
+        Ok(ref_id)
     }
 
     pub fn store_payload(
