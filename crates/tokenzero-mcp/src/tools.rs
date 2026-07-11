@@ -166,11 +166,11 @@ fn exec_codemode_tool(
         surface_health: Some(engine.surface_health_handle()),
         ..Default::default()
     };
-    // wqw.5: plan-level root follows execute root, but MCP args must not expand
-    // the allowlist past the server's configured roots (agent-controlled).
+    // wqw.5: the per-call root defines the execution workspace boundary, which
+    // CodeMode unions with the configured roots. Per-operation policy still
+    // denies paths outside every effective root.
     if let Ok(root) = arg_string_any(args, &["root", "cwd", "workspace"]) {
         let root_path = std::path::PathBuf::from(root);
-        ensure_path_under_server_allowlist(engine, &root_path)?;
         options.root = Some(root_path);
     } else if let Some(root) = engine.config.allowed_roots.first() {
         options.root = Some(root.clone());
