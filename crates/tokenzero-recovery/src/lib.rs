@@ -917,8 +917,15 @@ impl RecoveryStore {
         path: &Path,
     ) -> StoredPayload {
         let source_end_line = content_line_count(text);
-        let blob_ref = self.put_file_backed_blob(text, path, 1, source_end_line, content_type);
-        let file_ref = self.put_source_backed_file(text, content_type, path);
+        let source_sha256 = sha256_hex(text);
+        let blob_ref = self.put_file_backed_blob_hashed(
+            path,
+            1,
+            source_end_line,
+            content_type,
+            &source_sha256,
+        );
+        let file_ref = self.put_source_backed_file(text, content_type, path, &source_sha256);
         let unit_refs = self.index_units(text, content_type, &file_ref);
         StoredPayload {
             blob_ref,
@@ -1500,12 +1507,30 @@ impl RecoveryStore {
         source_end_line: usize,
         content_type: ContentType,
     ) -> String {
-        let canonical_ref = format!("tz://blob/{}", sha256_hex(text));
+        let full_hash = sha256_hex(text);
+        self.put_file_backed_blob_hashed(
+            path,
+            source_start_line,
+            source_end_line,
+            content_type,
+            &full_hash,
+        )
+    }
+
+    fn put_file_backed_blob_hashed(
+        &mut self,
+        path: &Path,
+        source_start_line: usize,
+        source_end_line: usize,
+        content_type: ContentType,
+        full_hash: &str,
+    ) -> String {
+        let canonical_ref = format!("tz://blob/{full_hash}");
         self.ref_classes.insert(
             canonical_ref.clone(),
             classify_ref(&canonical_ref, Some(content_type)),
         );
-        let legacy_ref = format!("tz://blob/{}", id_for('b', text));
+        let legacy_ref = format!("tz://blob/b{}", &full_hash[..16]);
         if legacy_ref != canonical_ref {
             self.state.aliases.insert(legacy_ref, canonical_ref.clone());
         }
@@ -1607,6 +1632,7 @@ impl RecoveryStore {
         text: &str,
         content_type: ContentType,
         path: &Path,
+        source_sha256: &str,
     ) -> String {
         let ref_id = recovery_file_ref(text, Some(path));
         self.ref_classes
@@ -1620,7 +1646,7 @@ impl RecoveryStore {
                 source_backed: true,
                 text: String::new(),
                 content_type: content_type.to_string(),
-                source_fingerprint: source_fingerprint_from_text(path, text),
+                source_fingerprint: source_fingerprint_from_sha256(path, source_sha256),
                 source_start_line: None,
                 source_end_line: None,
             },
@@ -3072,10 +3098,17 @@ fn write_json_to_tmp(tmp: &Path, state: &RecoveryState) -> Result<(), RecoveryEr
 
 fn recovery_file_ref(text: &str, path: Option<&Path>) -> String {
     let path_identity = path.map(path_identity_text).unwrap_or_default();
-    format!(
-        "tz://file/{}",
-        id_for('f', &format!("{path_identity}:{text}"))
-    )
+    let mut hasher = Sha256::new();
+    hasher.update(path_identity.as_bytes());
+    hasher.update(b":");
+    hasher.update(text.as_bytes());
+    let digest = hasher.finalize();
+    let short_hash = digest
+        .iter()
+        .take(8)
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    format!("tz://file/f{short_hash}")
 }
 
 #[cfg(unix)]
@@ -3339,6 +3372,24 @@ fn fingerprint_for_stored_payload(
         return None;
     }
     source_fingerprint(path)
+}
+
+fn source_fingerprint_from_sha256(path: &Path, sha256: &str) -> Option<SourceFingerprint> {
+    let meta = fs::metadata(path).ok()?;
+    if !meta.is_file() {
+        return None;
+    }
+    let mtime_ns = meta
+        .modified()
+        .ok()
+        .and_then(|m| m.duration_since(SystemTime::UNIX_EPOCH).ok())
+        .map(|d| d.as_nanos())
+        .unwrap_or_default();
+    Some(SourceFingerprint {
+        size: meta.len(),
+        mtime_ns,
+        sha256: sha256.to_string(),
+    })
 }
 
 fn source_fingerprint_from_text(path: &Path, text: &str) -> Option<SourceFingerprint> {

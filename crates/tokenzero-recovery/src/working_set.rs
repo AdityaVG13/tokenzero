@@ -110,10 +110,8 @@ impl PrefetchHook for SameFileNeighborPrefetch {
             .min_by_key(|candidate| {
                 let distance = if candidate.anchor.start_line > fault.end_line {
                     candidate.anchor.start_line - fault.end_line
-                } else if fault.start_line > candidate.anchor.end_line {
-                    fault.start_line - candidate.anchor.end_line
                 } else {
-                    0
+                    fault.start_line.saturating_sub(candidate.anchor.end_line)
                 };
                 (distance, candidate.id)
             })

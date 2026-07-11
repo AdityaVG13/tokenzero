@@ -4,9 +4,9 @@
   },
   "environment": {
     "binary": "target/release/tokenzero",
-    "binary_mtime_ns": 1783760770971816553,
-    "binary_provenance": "guarded cargo build -p tokenzero --release from this working tree immediately before measurement",
-    "binary_sha256": "5ca244f4d18d312441a9bdfb4b410ef97c9de49872ee65bde3397f8ac0694844",
+    "binary_mtime_ns": 1783766829811779979,
+    "binary_provenance": "guarded follow-up cargo build -p tokenzero --release after SHA reuse; 100MiB single and 4-way rows refreshed; 1/10MiB rows retain prior candidate run",
+    "binary_sha256": "3a3f9260b1197d3723118a3fd5e4691dce3ddefd21252b2d7db40f78097b4629",
     "commit": "cf777a5afa35c9ff6fcb6a333fa8724dff8f3883",
     "logical_cpus": 18,
     "machine": "arm64",
@@ -23,50 +23,51 @@
       10485760,
       104857600
     ],
+    "refresh_scope": "100MiB single and 4x100MiB rows rerun once after reusing canonical SHA-256 for fingerprint/legacy alias and incrementally hashing file refs; 1/10MiB rows unchanged from prior candidate",
     "single_command": "tokenzero read <file> --json under /usr/bin/time -l; stdout discarded"
   },
   "schema": "tokenzero.large-read-rss.v1",
   "workloads": {
     "concurrent_4x_100mb": {
       "ceiling_definition": "sum of /usr/bin/time -l per-process maxima; conservative because peaks may not coincide",
-      "max_process_rss_bytes": 430014464,
-      "observed_wall_seconds": 0.690486,
+      "max_process_rss_bytes": 429883392,
+      "observed_wall_seconds": 0.632006,
       "per_process": [
         {
-          "cpu_seconds": 0.54,
-          "max_rss_bytes": 429981696,
+          "cpu_seconds": 0.49,
+          "max_rss_bytes": 429883392,
           "observed_wall_seconds": 0,
           "system_seconds": 0.03,
-          "user_seconds": 0.51,
-          "wall_seconds": 0.58
+          "user_seconds": 0.46,
+          "wall_seconds": 0.6
         },
         {
-          "cpu_seconds": 0.5700000000000001,
-          "max_rss_bytes": 429981696,
+          "cpu_seconds": 0.48,
+          "max_rss_bytes": 429834240,
           "observed_wall_seconds": 0,
           "system_seconds": 0.03,
-          "user_seconds": 0.54,
-          "wall_seconds": 0.67
+          "user_seconds": 0.45,
+          "wall_seconds": 0.51
         },
         {
-          "cpu_seconds": 0.56,
-          "max_rss_bytes": 429998080,
+          "cpu_seconds": 0.48,
+          "max_rss_bytes": 429850624,
           "observed_wall_seconds": 0,
           "system_seconds": 0.03,
-          "user_seconds": 0.53,
-          "wall_seconds": 0.68
+          "user_seconds": 0.45,
+          "wall_seconds": 0.61
         },
         {
-          "cpu_seconds": 0.56,
-          "max_rss_bytes": 430014464,
+          "cpu_seconds": 0.49,
+          "max_rss_bytes": 429801472,
           "observed_wall_seconds": 0,
           "system_seconds": 0.03,
-          "user_seconds": 0.53,
-          "wall_seconds": 0.65
+          "user_seconds": 0.46,
+          "wall_seconds": 0.62
         }
       ],
       "processes": 4,
-      "sum_process_max_rss_bytes": 1719975936
+      "sum_process_max_rss_bytes": 1719369728
     },
     "single_reads": {
       "1048576": {
@@ -86,12 +87,12 @@
         "wall_seconds": 0.06
       },
       "104857600": {
-        "cpu_seconds": 0.53,
-        "max_rss_bytes": 429981696,
-        "observed_wall_seconds": 0.569637,
-        "system_seconds": 0.02,
-        "user_seconds": 0.51,
-        "wall_seconds": 0.56
+        "cpu_seconds": 0.44999999999999996,
+        "max_rss_bytes": 429801472,
+        "observed_wall_seconds": 0.525321,
+        "system_seconds": 0.03,
+        "user_seconds": 0.42,
+        "wall_seconds": 0.51
       }
     }
   }
