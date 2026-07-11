@@ -374,6 +374,11 @@ where
     if let Some(cwd) = cwd {
         command.current_dir(cwd);
     }
+    // This seam launches caller-selected commands only. Engine-internal helpers
+    // (supervisors, containment signals, and I/O workers) do not pass through it
+    // and retain their orchestration environment. Explicit overrides are applied
+    // afterward as the existing opt-in (including the INNER shim guard).
+    scrub_inherited_orchestration_env(&mut command);
     if let Some(env) = env_overrides {
         command.envs(env);
     }
@@ -967,6 +972,21 @@ fn remove_spill_file(path: &Path, len: u64, dry_run: bool, report: &mut SpillPru
         report.removed_bytes += len;
     } else {
         report.failed_removals += 1;
+    }
+}
+
+const ORCHESTRATION_ENV_PREFIXES: [&str; 4] = ["TOKENZERO_", "ZEROSTACK_", "FSZERO_", "GRAPHZERO_"];
+
+fn scrub_inherited_orchestration_env(command: &mut Command) {
+    for (key, _) in std::env::vars_os() {
+        let orchestration_only = key.to_str().is_some_and(|name| {
+            ORCHESTRATION_ENV_PREFIXES
+                .iter()
+                .any(|prefix| name.starts_with(prefix))
+        });
+        if orchestration_only {
+            command.env_remove(key);
+        }
     }
 }
 
