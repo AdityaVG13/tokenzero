@@ -386,6 +386,7 @@ pub(crate) enum PendingSubstitution {
         note_tokens: usize,
         full_tokens: usize,
         serve_count: usize,
+        cross_session: bool,
     },
     Diff {
         idx: usize,

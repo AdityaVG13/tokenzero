@@ -62,6 +62,7 @@ __pycache__/
 !/docs/windows-systemwide.md
 !/docs/easy-start.tokenzero.md
 !/docs/mcp-tokenzero.portable.json
+!/docs/privacy-and-scoping.md
 
 # Local execution/handoff records
 /RECOVERY_RUNBOOK.md

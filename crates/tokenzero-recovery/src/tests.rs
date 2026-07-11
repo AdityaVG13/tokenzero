@@ -315,6 +315,59 @@ fn ref_index_expands_blob_across_cache_roots() {
 }
 
 #[test]
+fn ref_index_pay_once_reuses_one_user_cas_object_across_sessions() {
+    let index_dir = tempdir().unwrap();
+    with_ref_index_env(index_dir.path(), true, || {
+        let dir_a = tempdir().unwrap();
+        let dir_b = tempdir().unwrap();
+        let cache_a = dir_a.path().join("cache.json");
+        let cache_b = dir_b.path().join("cache.json");
+        let payload = "pay once across sessions
+with exact bytes
+";
+
+        let first = {
+            let mut store = RecoveryStore::new(Some(cache_a.clone()));
+            store
+                .store_payload(payload, ContentType::Unknown, None, None, None)
+                .unwrap()
+        };
+        let second = {
+            let mut store = RecoveryStore::new(Some(cache_b.clone()));
+            store
+                .store_payload(payload, ContentType::Unknown, None, None, None)
+                .unwrap()
+        };
+
+        assert_eq!(first.blob_ref, second.blob_ref);
+        let hash = ref_index_id_part(&first.blob_ref).unwrap();
+        let cas = SharedCas::new(index_dir.path().to_path_buf());
+        assert!(cas.contains(hash));
+        let object_dir = index_dir
+            .path()
+            .join("blobs")
+            .join("sha256")
+            .join(&hash[..2]);
+        assert_eq!(fs::read_dir(object_dir).unwrap().count(), 1);
+
+        for cache in [&cache_a, &cache_b] {
+            let snapshot: serde_json::Value =
+                serde_json::from_str(&fs::read_to_string(cache).unwrap()).unwrap();
+            assert_eq!(snapshot["blobs"].as_object().unwrap().len(), 0);
+        }
+
+        let shard = ref_index_shard_path(index_dir.path(), &first.blob_ref);
+        let entries =
+            ref_index_entries_for_ref(&fs::read_to_string(shard).unwrap(), &first.blob_ref);
+        assert_eq!(entries.len(), 2);
+        assert!(matches!(
+            resolve_blob_from_ref_index(&first.blob_ref, &RecoveryConfig::default()),
+            RefResolve::Found(content) if content == payload
+        ));
+    });
+}
+
+#[test]
 fn ref_index_disabled_preserves_local_only_miss() {
     let index_dir = tempdir().unwrap();
     with_ref_index_env(index_dir.path(), false, || {
@@ -348,6 +401,8 @@ fn stale_ref_index_entry_is_pruned_and_reports_tiers() {
                 .unwrap()
         };
         fs::remove_file(&cache_a).unwrap();
+        // Remove the SharedCas blob so expansion can only reach the ref index.
+        let _ = fs::remove_dir_all(index_dir.path().join("blobs"));
 
         let mut other = RecoveryStore::new(Some(dir_b.path().join("cache.json")));
         let expanded = other.expand(&stored.blob_ref, Some("raw"), None, None, None, None);
@@ -1140,12 +1195,7 @@ fn tmp_sweep_missing_dir_is_empty_report() {
 // Journal / compaction
 // ---------------------------------------------------------------------------
 
-fn rotated_journal_fixture() -> (
-    tempfile::TempDir,
-    PathBuf,
-    StoredPayload,
-    StoredPayload,
-) {
+fn rotated_journal_fixture() -> (tempfile::TempDir, PathBuf, StoredPayload, StoredPayload) {
     let dir = tempdir().unwrap();
     let cache = dir.path().join("cache.json");
     {
@@ -1157,8 +1207,7 @@ fn rotated_journal_fixture() -> (
 
     let make_entry = |text: &str| {
         let mut store = RecoveryStore::new(Some(cache.clone()));
-        let stored =
-            store.store_payload_deferred(text, ContentType::Unknown, None, None, None);
+        let stored = store.store_payload_deferred(text, ContentType::Unknown, None, None, None);
         let entry = JournalEntry {
             refs: store.session_refs.clone(),
             state: session_delta(&store.state, &store.session_refs, &store.config),

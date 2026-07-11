@@ -191,13 +191,16 @@ fn fully_rewritten_file_serves_full() {
 #[test]
 fn missing_diff_base_falls_back_to_full() {
     let dir = tempdir().unwrap();
+    let ref_index = dir.path().join("ref-index");
+    tokenzero_recovery::set_ref_index_root_override(Some(ref_index.clone()));
     let file = dir.path().join("sample.rs");
     fs::write(&file, dedup_fixture_content()).unwrap();
     let engine = TokenZeroEngine::new(EngineConfig::for_root(dir.path()));
 
     read_ok(&engine, &file);
-    // Prune the recovery cache: the diff base is gone.
+    // Prune the recovery cache AND shared CAS: the diff base is gone.
     fs::remove_file(&engine.config.cache_path).unwrap();
+    let _ = fs::remove_dir_all(&ref_index);
     let changed = dedup_fixture_content().replace("line 20:", "line 20 (changed):");
     fs::write(&file, &changed).unwrap();
     let second = read_ok(&engine, &file);
@@ -479,6 +482,8 @@ fn v1_session_state_resumes_with_zero_watermark() {
 #[test]
 fn resume_revalidates_gced_refs_and_resends_full() {
     let dir = tempdir().unwrap();
+    let ref_index = dir.path().join("ref-index");
+    tokenzero_recovery::set_ref_index_root_override(Some(ref_index.clone()));
     let file = dir.path().join("gc.rs");
     fs::write(&file, dedup_fixture_content()).unwrap();
     let config = EngineConfig::for_root(dir.path());
@@ -486,10 +491,16 @@ fn resume_revalidates_gced_refs_and_resends_full() {
         let engine = TokenZeroEngine::new(config.clone());
         read_ok(&engine, &file);
     }
+    // Remove all persistent state: cache, session memory, and shared CAS.
     fs::remove_file(&config.cache_path).unwrap();
     let mut journal = config.cache_path.clone().into_os_string();
     journal.push(".journal");
     let _ = fs::remove_file(std::path::PathBuf::from(journal));
+    let mem_path = crate::session_persist::session_memory_path(&config.cache_path);
+    let _ = fs::remove_file(&mem_path);
+    let _ = fs::remove_dir_all(&ref_index);
+    let _ = fs::remove_dir_all(dir.path().join("blobs"));
+    // Keep override at the now-empty dir so we don't fall through to HOME.
     let resumed = TokenZeroEngine::new(config);
     let response = read_ok(&resumed, &file);
     assert!(!visible_text(&response).contains("unchanged:"));
@@ -523,4 +534,42 @@ fn tool_metrics_records_session_calls() {
         3,
         "session counters track each read call"
     );
+}
+
+#[test]
+fn persisted_memory_is_user_scoped_and_reports_cross_session_savings() {
+    let project = tempdir().unwrap();
+    let user_a = tempdir().unwrap();
+    let user_b = tempdir().unwrap();
+    let file = project.path().join("conversation.rs");
+    fs::write(&file, dedup_fixture_content()).unwrap();
+    let config = EngineConfig::for_root(project.path());
+
+    crate::session_persist::with_session_root(user_a.path(), || {
+        let first_session = TokenZeroEngine::new(config.clone());
+        let first = read_ok(&first_session, &file);
+        assert!(!visible_text(&first).starts_with("unchanged:"));
+    });
+
+    crate::session_persist::with_session_root(user_b.path(), || {
+        let other_user = TokenZeroEngine::new(config.clone());
+        let response = read_ok(&other_user, &file);
+        assert!(!visible_text(&response).starts_with("unchanged:"));
+        assert_eq!(
+            response.telemetry.as_ref().unwrap()["dedup"]["cross_session_hits"],
+            Value::Null
+        );
+    });
+
+    crate::session_persist::with_session_root(user_a.path(), || {
+        let resumed = TokenZeroEngine::new(config.clone());
+        let response = read_ok(&resumed, &file);
+        assert!(visible_text(&response).starts_with("unchanged:"));
+        let dedup = &response.telemetry.as_ref().unwrap()["dedup"];
+        assert_eq!(dedup["cross_session_hits"], 1);
+        assert!(dedup["cross_session_bytes_saved"].as_u64().unwrap() > 0);
+    });
+
+    assert!(user_a.path().join("session-memory.json").is_file());
+    assert!(user_b.path().join("session-memory.json").is_file());
 }

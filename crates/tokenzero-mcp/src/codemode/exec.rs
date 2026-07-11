@@ -3575,7 +3575,7 @@ fn exec_pipe(
     }
     Ok(OpOutcome::from_catalog(json!({
         "ref": ref_id,
-        "preview": first_line_preview(&text),
+        "preview": first_line_preview(&text, 256usize.saturating_sub(count_tokens(&ref_id))),
     }))
     .with_prevented_read_bytes(prevented))
 }

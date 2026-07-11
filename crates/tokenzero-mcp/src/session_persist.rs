@@ -14,6 +14,8 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 pub const SESSION_SCOPE_ENV: &str = "TOKENZERO_SESSION_SCOPE";
+#[cfg(not(test))]
+const REF_INDEX_PATH_ENV: &str = "TOKENZERO_REF_INDEX_PATH";
 /// Max served-payload records per scope (aligned with recovery `max_units`).
 pub const MAX_SESSION_MEMORY_RECORDS: usize = 2048;
 
@@ -56,10 +58,10 @@ impl SessionPersistence {
         // promoted into the v2 delta stream.
         if state.version >= STATE_VERSION {
             for entry in &scope.records {
-                // Resume validation is fail-safe: if either advertised ref was
-                // GC'd, forget the entry and force a full resend.
-                if !store.has_ref(&entry.record.blob_ref) || !store.has_ref(&entry.record.file_ref)
-                {
+                // Resume validation is fail-safe: if the content blob was
+                // GC'd, forget the entry and force a full resend. The file ref
+                // is diagnostic only and may be project-local.
+                if !store.has_ref(&entry.record.blob_ref) {
                     continue;
                 }
                 let key = serve_key_from_persisted(&entry.key);
@@ -136,17 +138,78 @@ impl SessionPersistence {
 }
 
 pub(crate) fn session_memory_path(cache_path: &Path) -> PathBuf {
-    cache_path.with_file_name("session-memory.json")
+    user_memory_root(cache_path).join("session-memory.json")
 }
 
-pub(crate) fn session_scope_id(cache_path: &Path) -> String {
+fn user_memory_root(cache_path: &Path) -> PathBuf {
+    #[cfg(test)]
+    {
+        if let Some(path) = SESSION_ROOT_TEST_OVERRIDE.with(|slot| slot.borrow().clone()) {
+            return path;
+        }
+        return cache_path
+            .parent()
+            .unwrap_or_else(|| Path::new("."))
+            .to_path_buf();
+    }
+    #[cfg(not(test))]
+    {
+        user_memory_root_from(
+            cache_path,
+            std::env::var_os(REF_INDEX_PATH_ENV),
+            std::env::var_os("HOME"),
+        )
+    }
+}
+
+#[cfg(not(test))]
+fn user_memory_root_from(
+    cache_path: &Path,
+    ref_index_path: Option<std::ffi::OsString>,
+    home: Option<std::ffi::OsString>,
+) -> PathBuf {
+    ref_index_path
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| {
+            home.filter(|value| !value.is_empty())
+                .map(|home| PathBuf::from(home).join(".tokenzero").join("ref-index"))
+        })
+        .unwrap_or_else(|| {
+            cache_path
+                .parent()
+                .unwrap_or_else(|| Path::new("."))
+                .to_path_buf()
+        })
+}
+
+pub(crate) fn session_scope_id(_cache_path: &Path) -> String {
     if let Ok(value) = std::env::var(SESSION_SCOPE_ENV) {
         let trimmed = value.trim();
         if !trimmed.is_empty() {
             return trimmed.to_string();
         }
     }
-    format!("__store_global__:{}", cache_path.to_string_lossy())
+    "__user_global__".to_string()
+}
+
+#[cfg(test)]
+thread_local! {
+    static SESSION_ROOT_TEST_OVERRIDE: std::cell::RefCell<Option<PathBuf>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(test)]
+pub(crate) fn with_session_root<R>(root: &Path, f: impl FnOnce() -> R) -> R {
+    SESSION_ROOT_TEST_OVERRIDE.with(|slot| {
+        let previous = slot.replace(Some(root.to_path_buf()));
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f));
+        slot.replace(previous);
+        match result {
+            Ok(value) => value,
+            Err(payload) => std::panic::resume_unwind(payload),
+        }
+    })
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -260,12 +323,27 @@ fn evict_scope_records(scope: &mut PersistedScope, limit: usize) {
 fn atomic_write_json(path: &Path, state: &SessionMemoryState) -> std::io::Result<()> {
     let parent = path.parent().unwrap_or_else(|| Path::new("."));
     fs::create_dir_all(parent)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(parent, fs::Permissions::from_mode(0o700))?;
+    }
     let tmp = path.with_extension(format!("tmp-{}", std::process::id()));
     let body = serde_json::to_string_pretty(&SessionMemoryState {
         version: STATE_VERSION,
         scopes: state.scopes.clone(),
     })?;
-    fs::write(&tmp, body.as_bytes())?;
+    let mut options = OpenOptions::new();
+    options.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut tmp_file = options.open(&tmp)?;
+    tmp_file.write_all(body.as_bytes())?;
+    tmp_file.flush()?;
+    drop(tmp_file);
     match fs::rename(&tmp, path) {
         Ok(()) => Ok(()),
         Err(err) => {
@@ -274,7 +352,6 @@ fn atomic_write_json(path: &Path, state: &SessionMemoryState) -> std::io::Result
         }
     }
 }
-
 fn session_lock_path(path: &Path) -> PathBuf {
     let mut name = path
         .file_name()

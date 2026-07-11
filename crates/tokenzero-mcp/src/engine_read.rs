@@ -247,7 +247,10 @@ impl TokenZeroEngine {
                 // record the serve below so later calls can dedup.
                 let bypass = raw || matches!(mode, Mode::Passthrough) || options.fresh;
                 match self.session_lookup(&key, &content_sha256) {
-                    SeenState::Unchanged { serve_count } if !bypass => {
+                    SeenState::Unchanged {
+                        serve_count,
+                        cross_session,
+                    } if !bypass => {
                         let note = unchanged_read_note(path, &text, &stored);
                         let note_tokens = count_tokens(&note);
                         // ROI guard: a note that costs as much as the full
@@ -259,6 +262,7 @@ impl TokenZeroEngine {
                                 note_tokens,
                                 full_tokens: part_tokens,
                                 serve_count: serve_count + 1,
+                                cross_session,
                             });
                         }
                     }
@@ -331,8 +335,9 @@ impl TokenZeroEngine {
                         note_tokens,
                         full_tokens,
                         serve_count,
+                        cross_session,
                     } => {
-                        summary.note_dedup(serve_count, full_tokens - note_tokens);
+                        summary.note_dedup(serve_count, full_tokens - note_tokens, cross_session);
                         visible_tokens -= full_tokens - note_tokens;
                         visible_parts[idx] = note;
                     }

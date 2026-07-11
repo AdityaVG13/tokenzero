@@ -228,7 +228,10 @@ impl TokenZeroEngine {
             };
             let content_sha256 = sha256_hex(&output);
             let bypass = matches!(mode, Mode::Passthrough) || options.fresh;
-            if let SeenState::Unchanged { serve_count } = self.session_lookup(&key, &content_sha256)
+            if let SeenState::Unchanged {
+                serve_count,
+                cross_session,
+            } = self.session_lookup(&key, &content_sha256)
             {
                 if !bypass {
                     let note = unchanged_search_note(tool, query, &output, &stored);
@@ -236,7 +239,11 @@ impl TokenZeroEngine {
                     // ROI guard: emit only when strictly cheaper than the
                     // full render.
                     if note_tokens < final_visible_tokens {
-                        summary.note_dedup(serve_count + 1, final_visible_tokens - note_tokens);
+                        summary.note_dedup(
+                            serve_count + 1,
+                            final_visible_tokens - note_tokens,
+                            cross_session,
+                        );
                         visible_text = note;
                         final_visible_tokens = note_tokens;
                     }

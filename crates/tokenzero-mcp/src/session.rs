@@ -10,7 +10,7 @@
 //! the same way (full serve, no persist on that path).
 
 use serde_json::{Value, json};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::time::SystemTime;
 
@@ -70,6 +70,7 @@ pub(crate) enum SeenState {
     /// Identical content already served; `serve_count` counts prior serves.
     Unchanged {
         serve_count: usize,
+        cross_session: bool,
     },
     /// Same key, different content: the previously served record, used as
     /// the diff base.
@@ -81,6 +82,7 @@ pub(crate) enum SeenState {
 #[derive(Debug, Default)]
 pub(crate) struct SessionMemory {
     records: HashMap<ServeKey, ServedRecord>,
+    restored_content_hashes: HashSet<String>,
     dedup_hits: usize,
     diff_hits: usize,
     visible_tokens_saved: usize,
@@ -92,14 +94,26 @@ pub(crate) struct SessionMemory {
 
 impl SessionMemory {
     pub fn lookup(&self, key: &ServeKey, content_sha256: &str) -> SeenState {
+        let cross_session = self.restored_content_hashes.contains(content_sha256);
         match self.records.get(key) {
-            None => SeenState::Miss,
             Some(record) if record.content_sha256 == content_sha256 => SeenState::Unchanged {
                 serve_count: record.serve_count,
+                cross_session,
             },
             Some(record) => SeenState::Changed {
                 previous: record.clone(),
             },
+            None => self
+                .records
+                .values()
+                .filter(|record| record.content_sha256 == content_sha256)
+                .map(|record| record.serve_count)
+                .max()
+                .map(|serve_count| SeenState::Unchanged {
+                    serve_count,
+                    cross_session,
+                })
+                .unwrap_or(SeenState::Miss),
         }
     }
 
@@ -131,6 +145,10 @@ impl SessionMemory {
         full_bytes: usize,
         delta_bytes: usize,
     ) {
+        self.restored_content_hashes = records
+            .values()
+            .map(|record| record.content_sha256.clone())
+            .collect();
         self.records = records;
         self.dedup_hits = dedup_hits;
         self.diff_hits = diff_hits;
@@ -197,6 +215,7 @@ pub(crate) struct SessionSummary {
     pub visible_saved: usize,
     pub diff_saved: usize,
     pub serve_count: usize,
+    pub cross_session_hits: usize,
     pub diff: Option<DiffTelemetry>,
     pub full_bytes: Option<usize>,
     pub delta_bytes: Option<usize>,
@@ -213,10 +232,11 @@ pub(crate) struct DiffTelemetry {
 }
 
 impl SessionSummary {
-    pub fn note_dedup(&mut self, serve_count: usize, saved: usize) {
+    pub fn note_dedup(&mut self, serve_count: usize, saved: usize, cross_session: bool) {
         self.dedup_notes += 1;
         self.serve_count = serve_count;
         self.visible_saved += saved;
+        self.cross_session_hits += usize::from(cross_session);
     }
 
     pub fn note_diff(&mut self, info: DiffTelemetry, saved: usize) {
@@ -259,10 +279,20 @@ impl SessionSummary {
             });
         }
         if self.dedup_notes > 0 {
+            let cross_session_bytes_saved = if self.cross_session_hits > 0 {
+                self.full_bytes
+                    .zip(self.delta_bytes)
+                    .map(|(full, delta)| full.saturating_sub(delta))
+                    .unwrap_or(0)
+            } else {
+                0
+            };
             value["dedup"] = json!({
                 "hits": self.dedup_notes,
                 "serve_count": self.serve_count,
-                "visible_tokens_saved": self.visible_saved
+                "visible_tokens_saved": self.visible_saved,
+                "cross_session_hits": self.cross_session_hits,
+                "cross_session_bytes_saved": cross_session_bytes_saved
             });
         }
         if let Some(diff) = &self.diff {

@@ -32,6 +32,7 @@ const LOCK_RETRY_DELAY: Duration = Duration::from_millis(25);
 const TMP_RETRIES: usize = 16;
 const REF_INDEX_MAX_BYTES: u64 = 1_048_576;
 const REF_INDEX_DISABLE_ENV: &str = "TOKENZERO_REF_INDEX";
+#[cfg(not(test))]
 const REF_INDEX_PATH_ENV: &str = "TOKENZERO_REF_INDEX_PATH";
 const JOURNAL_MAX_SEALED_SEGMENTS: usize = 4;
 
@@ -778,7 +779,8 @@ impl RecoveryStore {
         let state = loaded.unwrap_or_else(|| RecoveryState::empty(&config));
         let shared_cas = persistence_path
             .as_deref()
-            .and_then(SharedCas::detect_from_cache_path);
+            .and_then(SharedCas::detect_from_cache_path)
+            .or_else(|| ref_index_root().map(SharedCas::new));
         Self {
             config,
             persistence_path,
@@ -1390,7 +1392,20 @@ impl RecoveryStore {
             return false;
         };
         match parsed.kind.as_str() {
-            "blob" => self.state.blobs.contains_key(&parsed.bare),
+            "blob" => {
+                self.state.blobs.contains_key(&parsed.bare)
+                    || self
+                        .shared_cas
+                        .as_ref()
+                        .and_then(|cas| {
+                            ref_index_id_part(&parsed.bare).map(|hash| cas.contains(hash))
+                        })
+                        .unwrap_or(false)
+                    || matches!(
+                        resolve_blob_from_ref_index(&parsed.bare, &self.config),
+                        RefResolve::Found(_)
+                    )
+            }
             "file" => self.state.files.contains_key(&parsed.bare),
             "unit" => self.state.units.contains_key(&parsed.bare),
             "search" => self.state.search_hits.contains_key(&parsed.bare),
@@ -2143,20 +2158,45 @@ fn ref_index_enabled() -> bool {
         .unwrap_or(true)
 }
 
+use std::sync::OnceLock;
+
+/// Test-only hook: override the ref index root directory.
+/// Call with `Some(path)` to redirect, `None` to clear.
+#[doc(hidden)]
+pub fn set_ref_index_root_override(path: Option<PathBuf>) {
+    REF_INDEX_ROOT_OVERRIDE
+        .get_or_init(|| std::sync::Mutex::new(None))
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .clone_from(&path);
+}
+
+static REF_INDEX_ROOT_OVERRIDE: OnceLock<std::sync::Mutex<Option<PathBuf>>> = OnceLock::new();
+
 fn ref_index_root() -> Option<PathBuf> {
+    if let Some(lock) = REF_INDEX_ROOT_OVERRIDE.get() {
+        if let Some(ref path) = *lock.lock().unwrap_or_else(|p| p.into_inner()) {
+            return Some(path.clone());
+        }
+    }
     #[cfg(test)]
     if let Some((enabled, path)) = ref_index_test_override() {
         return enabled.then_some(path);
     }
-    if !ref_index_enabled() {
-        return None;
+    #[cfg(test)]
+    return None;
+    #[cfg(not(test))]
+    {
+        if !ref_index_enabled() {
+            return None;
+        }
+        if let Some(path) = env::var_os(REF_INDEX_PATH_ENV).filter(|value| !value.is_empty()) {
+            return Some(PathBuf::from(path));
+        }
+        env::var_os("HOME")
+            .filter(|value| !value.is_empty())
+            .map(|home| PathBuf::from(home).join(".tokenzero").join("ref-index"))
     }
-    if let Some(path) = env::var_os(REF_INDEX_PATH_ENV).filter(|value| !value.is_empty()) {
-        return Some(PathBuf::from(path));
-    }
-    env::var_os("HOME")
-        .filter(|value| !value.is_empty())
-        .map(|home| PathBuf::from(home).join(".tokenzero").join("ref-index"))
 }
 
 fn create_ref_index_dir(path: &Path) -> std::io::Result<()> {
@@ -2423,6 +2463,19 @@ fn resolve_blob_from_ref_index(ref_id: &str, config: &RecoveryConfig) -> RefReso
         return RefResolve::NotFound;
     };
     let entries = ref_index_entries_for_ref(&text, ref_id);
+    if !entries.is_empty() {
+        if let Some(hash) = ref_index_id_part(ref_id) {
+            match SharedCas::new(root.clone()).resolve(hash) {
+                Ok(bytes) => {
+                    return String::from_utf8(bytes)
+                        .map(RefResolve::Found)
+                        .unwrap_or(RefResolve::DecodeFailed);
+                }
+                Err(SharedCasError::Corruption) => return RefResolve::DecodeFailed,
+                Err(_) => {}
+            }
+        }
+    }
     let mut stale_store_paths = HashSet::new();
     for entry in entries {
         let store_path = PathBuf::from(&entry.store_path);
