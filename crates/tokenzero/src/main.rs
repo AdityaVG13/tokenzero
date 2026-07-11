@@ -1109,6 +1109,32 @@ fn handle_cache(args: CacheArgs) -> Result<()> {
             report["maintenance"] = tokenzero_mcp::cache_maintenance(&cache, dry_run);
             emit_value(report, args.json)?;
         }
+        CacheCommand::MigrateRefs(args) => {
+            let root = tokenzero_work_root(args.root);
+            let cache = resolve_recovery_cache_path(&root, args.cache_path);
+            let cas_root = cache
+                .parent()
+                .unwrap_or(&cache)
+                .to_path_buf();
+            let cas = tokenzero_recovery::shared_cas::SharedCas::new(cas_root);
+            let manifest = cache
+                .parent()
+                .unwrap_or(&cache)
+                .join("migration-manifest.json");
+            let mut store = tokenzero_recovery::RecoveryStore::new(Some(cache));
+            let mut migration =
+                tokenzero_recovery::migration::LegacyMigration::new(
+                    &mut store,
+                    &cas,
+                    Some(manifest),
+                );
+            let report = migration.run(args.dry_run);
+            if args.json {
+                println!("{}", report.to_json());
+            } else {
+                println!("{}", report.to_text());
+            }
+        }
     }
     Ok(())
 }

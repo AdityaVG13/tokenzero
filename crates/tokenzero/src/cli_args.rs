@@ -564,6 +564,7 @@ pub(crate) enum CacheCommand {
     #[command(alias = "statuz")]
     Status(CommonArgs),
     Prune(CachePruneArgs),
+    MigrateRefs(CacheMigrateRefsArgs),
 }
 
 #[derive(Debug, Args)]
@@ -574,6 +575,19 @@ pub(crate) struct CachePruneArgs {
     pub(crate) cache_path: Option<PathBuf>,
     #[arg(long)]
     pub(crate) apply: bool,
+    #[arg(long)]
+    pub(crate) json: bool,
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct CacheMigrateRefsArgs {
+    #[arg(long)]
+    pub(crate) root: Option<PathBuf>,
+    #[arg(long)]
+    pub(crate) cache_path: Option<PathBuf>,
+    /// Report only; do not write to CAS, store, or manifest.
+    #[arg(long)]
+    pub(crate) dry_run: bool,
     #[arg(long)]
     pub(crate) json: bool,
 }

@@ -21,6 +21,7 @@ use tokenzero_core::{ContentType, count_tokens, error_block, id_for, sha256_hex,
 
 use crate::shared_cas::{SharedCas, SharedCasError};
 
+pub mod migration;
 pub mod shared_cas;
 
 const LOCK_RETRIES: usize = 240;
@@ -286,7 +287,10 @@ pub enum ZeroRefFragment {
 /// Legacy 17-character short IDs (prefix + 8 hex bytes) are rejected by this v1 parser; callers
 /// that need backward compatibility should detect `LegacyAmbiguity` and fall back to the existing
 /// `parse_ref`/`canonicalize_expand_ref` path.
-pub fn parse_zeroref_v1_blob(ref_id: &str, byte_length: Option<usize>) -> Result<ZeroRefV1Blob, ZeroRefError> {
+pub fn parse_zeroref_v1_blob(
+    ref_id: &str,
+    byte_length: Option<usize>,
+) -> Result<ZeroRefV1Blob, ZeroRefError> {
     let (bare, fragment_str) = ref_id
         .split_once('#')
         .map_or((ref_id, None), |(b, f)| (b, Some(f)));
@@ -315,7 +319,10 @@ pub fn parse_zeroref_v1_blob(ref_id: &str, byte_length: Option<usize>) -> Result
         // 17-char short IDs (prefix + 8 hex bytes) are a legacy format, not v1.
         return Err(ZeroRefError::LegacyAmbiguity);
     }
-    if hash.chars().any(|c| !c.is_ascii_hexdigit() || c.is_ascii_uppercase()) {
+    if hash
+        .chars()
+        .any(|c| !c.is_ascii_hexdigit() || c.is_ascii_uppercase())
+    {
         return Err(ZeroRefError::Malformed);
     }
 
@@ -330,7 +337,10 @@ pub fn parse_zeroref_v1_blob(ref_id: &str, byte_length: Option<usize>) -> Result
     })
 }
 
-fn parse_zeroref_v1_fragment(fragment: &str, byte_length: Option<usize>) -> Result<ZeroRefFragment, ZeroRefError> {
+fn parse_zeroref_v1_fragment(
+    fragment: &str,
+    byte_length: Option<usize>,
+) -> Result<ZeroRefFragment, ZeroRefError> {
     if fragment.is_empty() {
         return Err(ZeroRefError::Malformed);
     }
@@ -341,11 +351,14 @@ fn parse_zeroref_v1_fragment(fragment: &str, byte_length: Option<usize>) -> Resu
     }
 }
 
-fn parse_zeroref_v1_byte_fragment(value: &str, byte_length: Option<usize>) -> Result<ZeroRefFragment, ZeroRefError> {
-    let (start, end) = value
-        .split_once('-')
-        .ok_or(ZeroRefError::Malformed)?;
-    let start = start.parse::<usize>().map_err(|_| ZeroRefError::Malformed)?;
+fn parse_zeroref_v1_byte_fragment(
+    value: &str,
+    byte_length: Option<usize>,
+) -> Result<ZeroRefFragment, ZeroRefError> {
+    let (start, end) = value.split_once('-').ok_or(ZeroRefError::Malformed)?;
+    let start = start
+        .parse::<usize>()
+        .map_err(|_| ZeroRefError::Malformed)?;
     let end = end.parse::<usize>().map_err(|_| ZeroRefError::Malformed)?;
     if start > end {
         return Err(ZeroRefError::Malformed);
@@ -359,10 +372,10 @@ fn parse_zeroref_v1_byte_fragment(value: &str, byte_length: Option<usize>) -> Re
 }
 
 fn parse_zeroref_v1_line_fragment(value: &str) -> Result<ZeroRefFragment, ZeroRefError> {
-    let (start, end) = value
-        .split_once('-')
-        .ok_or(ZeroRefError::Malformed)?;
-    let start = start.parse::<usize>().map_err(|_| ZeroRefError::Malformed)?;
+    let (start, end) = value.split_once('-').ok_or(ZeroRefError::Malformed)?;
+    let start = start
+        .parse::<usize>()
+        .map_err(|_| ZeroRefError::Malformed)?;
     let end = end.parse::<usize>().map_err(|_| ZeroRefError::Malformed)?;
     if start == 0 || start > end {
         return Err(ZeroRefError::Malformed);
@@ -789,6 +802,48 @@ impl RecoveryStore {
             .aliases
             .insert(alias.to_string(), target_ref.to_string());
         self.persist()
+    }
+
+    /// Store an alias without persisting. Caller must call `persist_pending()`.
+    pub(crate) fn store_alias_deferred(&mut self, alias: &str, target_ref: &str) {
+        self.state
+            .aliases
+            .insert(alias.to_string(), target_ref.to_string());
+    }
+
+    /// Return the target ref for an existing alias, if any.
+    pub(crate) fn alias_target(&self, alias: &str) -> Option<String> {
+        self.state.aliases.get(alias).cloned()
+    }
+
+    /// Return all blob ref IDs currently in the store (for migration scanning).
+    pub(crate) fn blob_ref_ids(&self) -> Vec<String> {
+        self.state.blobs.keys().cloned().collect()
+    }
+
+    /// Resolve a blob's content by its full ref ID (e.g. `tz://blob/b<hex>`).
+    /// Returns `None` if not found or if the externalized sidecar cannot be resolved.
+    pub(crate) fn resolve_blob_content(&self, ref_id: &str) -> Option<String> {
+        self.state
+            .blobs
+            .get(ref_id)
+            .and_then(|value| resolve_blob_value(self.persistence_path.as_deref(), value))
+    }
+
+    /// Insert a raw blob entry with a caller-specified ref ID (test only).
+    #[cfg(test)]
+    pub(crate) fn insert_test_blob(&mut self, ref_id: &str, content: &str) {
+        self.state
+            .blobs
+            .insert(ref_id.to_string(), content.to_string());
+    }
+
+    /// Directly insert an alias (test only).
+    #[cfg(test)]
+    pub(crate) fn insert_test_alias(&mut self, alias: &str, target: &str) {
+        self.state
+            .aliases
+            .insert(alias.to_string(), target.to_string());
     }
 
     pub fn expected_refs(text: &str, path: Option<&Path>) -> (String, String) {
