@@ -1140,6 +1140,100 @@ fn tmp_sweep_missing_dir_is_empty_report() {
 // Journal / compaction
 // ---------------------------------------------------------------------------
 
+fn rotated_journal_fixture() -> (
+    tempfile::TempDir,
+    PathBuf,
+    StoredPayload,
+    StoredPayload,
+) {
+    let dir = tempdir().unwrap();
+    let cache = dir.path().join("cache.json");
+    {
+        let mut store = RecoveryStore::new(Some(cache.clone()));
+        store
+            .store_payload("base\n", ContentType::Unknown, None, None, None)
+            .unwrap();
+    }
+
+    let make_entry = |text: &str| {
+        let mut store = RecoveryStore::new(Some(cache.clone()));
+        let stored =
+            store.store_payload_deferred(text, ContentType::Unknown, None, None, None);
+        let entry = JournalEntry {
+            refs: store.session_refs.clone(),
+            state: session_delta(&store.state, &store.session_refs, &store.config),
+            deleted_blob_refs: Vec::new(),
+            deleted_aliases: Vec::new(),
+        };
+        (stored, entry)
+    };
+    let (first, first_entry) = make_entry("sealed\n");
+    let (second, second_entry) = make_entry("active\n");
+    let first_len = serde_json::to_vec(&first_entry).unwrap().len() as u64 + 1;
+    let second_len = serde_json::to_vec(&second_entry).unwrap().len() as u64 + 1;
+    let segment_limit = first_len.max(second_len);
+
+    assert_eq!(
+        append_journal(&cache, &first_entry, segment_limit).unwrap(),
+        JournalAppend::Appended
+    );
+    assert_eq!(
+        append_journal(&cache, &second_entry, segment_limit).unwrap(),
+        JournalAppend::Appended
+    );
+    (dir, cache, first, second)
+}
+
+#[test]
+fn journal_rotates_when_active_segment_reaches_limit() {
+    let (_dir, cache, _first, _second) = rotated_journal_fixture();
+    assert!(
+        journal_segment_path(&cache, 1).exists(),
+        "full active segment must be sealed"
+    );
+    assert!(
+        journal_path(&cache).exists(),
+        "rotation must leave a writable active segment"
+    );
+    assert!(
+        !journal_segment_path(&cache, 2).exists(),
+        "one rotation must create exactly one sealed segment"
+    );
+}
+
+#[test]
+fn journal_replays_sealed_segments_before_active_segment() {
+    let (_dir, cache, sealed, active) = rotated_journal_fixture();
+    let mut restarted = RecoveryStore::new(Some(cache));
+    for (stored, text) in [(&sealed, "sealed\n"), (&active, "active\n")] {
+        let expanded = restarted.expand(&stored.blob_ref, Some("raw"), None, None, None, None);
+        assert!(expanded.found, "journal segment lost {}", stored.blob_ref);
+        assert_eq!(expanded.content, text);
+    }
+}
+
+#[test]
+fn journal_torn_tail_in_newest_segment_preserves_all_complete_segments() {
+    let (_dir, cache, sealed, active) = rotated_journal_fixture();
+    let mut file = OpenOptions::new()
+        .append(true)
+        .open(journal_path(&cache))
+        .unwrap();
+    file.write_all(b"{\"refs\":[\"tz://blob/torn").unwrap();
+    drop(file);
+
+    let mut restarted = RecoveryStore::new(Some(cache));
+    for (stored, text) in [(&sealed, "sealed\n"), (&active, "active\n")] {
+        let expanded = restarted.expand(&stored.blob_ref, Some("raw"), None, None, None, None);
+        assert!(
+            expanded.found,
+            "torn newest tail poisoned {}",
+            stored.blob_ref
+        );
+        assert_eq!(expanded.content, text);
+    }
+}
+
 #[test]
 fn second_process_persist_appends_journal_without_snapshot_rewrite() {
     let dir = tempdir().unwrap();

@@ -33,6 +33,7 @@ const TMP_RETRIES: usize = 16;
 const REF_INDEX_MAX_BYTES: u64 = 1_048_576;
 const REF_INDEX_DISABLE_ENV: &str = "TOKENZERO_REF_INDEX";
 const REF_INDEX_PATH_ENV: &str = "TOKENZERO_REF_INDEX_PATH";
+const JOURNAL_MAX_SEALED_SEGMENTS: usize = 4;
 
 /// ZeroStack schemes accepted by expand. Full-hash portable blob refs first use the
 /// configured canonical shared CAS. Legacy short blob refs retain a clearly separated
@@ -1907,20 +1908,24 @@ impl RecoveryStore {
                 deleted_aliases: self.pending_alias_deletions.iter().cloned().collect(),
             };
             let snap_len = self.disk_identity.map_or(0, |identity| identity.len);
-            if let Ok(journal_len) = append_journal(&journal_path(&path), &entry) {
-                if journal_len <= journal_compact_threshold(snap_len) {
+            let segment_limit = journal_compact_threshold(snap_len);
+            match append_journal(&path, &entry, segment_limit) {
+                Ok(JournalAppend::Appended) => {
                     self.journal_identity = DiskIdentity::capture(&journal_path(&path));
                     append_blob_refs_to_ref_index(&path, &entry.refs, Some(&self.ref_classes));
                     self.pending_blob_deletions.clear();
                     self.pending_alias_deletions.clear();
                     return Ok(());
                 }
+                Ok(JournalAppend::NeedsCompaction) | Err(_) => {
+                    self.session_refs = entry.refs;
+                }
             }
             // fall through: compact journal into a fresh snapshot
         }
         self.disk_identity = None;
         atomic_write_json(&path, &self.state)?;
-        let _ = fs::remove_file(journal_path(&path));
+        remove_journal_segments(&path);
         self.journal_identity = None;
         self.disk_identity = DiskIdentity::capture(&path);
         append_blob_refs_to_ref_index(&path, &self.session_refs, Some(&self.ref_classes));
@@ -2925,19 +2930,62 @@ fn session_delta(
     delta
 }
 
-/// Compact once the journal outgrows the snapshot (with a floor so tiny
-/// stores don't compact on every persist). Bounds disk and load cost at
-/// ~2× snapshot while keeping persist amortized O(new data).
+/// Rotate an active journal once it reaches this size. The snapshot is
+/// compacted instead of discarding a fifth sealed segment, so bounded journal
+/// storage never sacrifices live recovery data.
 fn journal_compact_threshold(snapshot_len: u64) -> u64 {
     snapshot_len.max(64 * 1024)
 }
 
-fn append_journal(path: &Path, entry: &JournalEntry) -> Result<u64, RecoveryError> {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum JournalAppend {
+    Appended,
+    NeedsCompaction,
+}
+
+fn journal_segment_path(path: &Path, generation: usize) -> PathBuf {
+    let mut os: OsString = journal_path(path).into_os_string();
+    os.push(format!(".{generation}"));
+    PathBuf::from(os)
+}
+
+fn remove_journal_segments(path: &Path) {
+    let _ = fs::remove_file(journal_path(path));
+    for generation in 1..=JOURNAL_MAX_SEALED_SEGMENTS {
+        let _ = fs::remove_file(journal_segment_path(path, generation));
+    }
+}
+
+fn append_journal(
+    snapshot_path: &Path,
+    entry: &JournalEntry,
+    segment_limit: u64,
+) -> Result<JournalAppend, RecoveryError> {
     let mut line = serde_json::to_string(entry)?;
     line.push('\n');
-    let mut file = OpenOptions::new().create(true).append(true).open(path)?;
+    let line_len = line.len() as u64;
+    if line_len > segment_limit {
+        return Ok(JournalAppend::NeedsCompaction);
+    }
+
+    let active = journal_path(snapshot_path);
+    let active_len = fs::metadata(&active).map(|meta| meta.len()).unwrap_or(0);
+    if active_len > 0 && active_len.saturating_add(line_len) > segment_limit {
+        if journal_segment_path(snapshot_path, JOURNAL_MAX_SEALED_SEGMENTS).exists() {
+            return Ok(JournalAppend::NeedsCompaction);
+        }
+        for generation in (1..JOURNAL_MAX_SEALED_SEGMENTS).rev() {
+            let from = journal_segment_path(snapshot_path, generation);
+            if from.exists() {
+                fs::rename(from, journal_segment_path(snapshot_path, generation + 1))?;
+            }
+        }
+        fs::rename(&active, journal_segment_path(snapshot_path, 1))?;
+    }
+
+    let mut file = OpenOptions::new().create(true).append(true).open(active)?;
     file.write_all(line.as_bytes())?;
-    Ok(file.metadata()?.len())
+    Ok(JournalAppend::Appended)
 }
 
 /// Replay journal lines onto a loaded snapshot. Fail-open at every step: a
@@ -2945,42 +2993,57 @@ fn append_journal(path: &Path, entry: &JournalEntry) -> Result<u64, RecoveryErro
 /// reconstructible by design). A parse failure stops replay at that line so a
 /// torn tail write can never poison earlier, complete entries.
 fn apply_journal(mut state: RecoveryState, path: &Path, config: &RecoveryConfig) -> RecoveryState {
-    let journal = journal_path(path);
-    let Ok(file) = fs::File::open(&journal) else {
-        return state;
-    };
-    if file
-        .metadata()
-        .map(|meta| !meta.is_file() || meta.len() > config.max_load_bytes as u64)
-        .unwrap_or(true)
-    {
-        return state;
+    let mut journal_paths = Vec::with_capacity(JOURNAL_MAX_SEALED_SEGMENTS + 1);
+    for generation in (1..=JOURNAL_MAX_SEALED_SEGMENTS).rev() {
+        journal_paths.push((journal_segment_path(path, generation), false));
     }
-    let Ok(Some(text)) = read_limited_utf8(file, config.max_load_bytes) else {
-        return state;
-    };
-    for line in text.lines() {
-        let line = line.trim();
-        if line.is_empty() {
-            continue;
-        }
-        let Ok(entry) = serde_json::from_str::<JournalEntry>(line) else {
-            break;
+    journal_paths.push((journal_path(path), true));
+
+    let mut remaining = config.max_load_bytes as u64;
+    for (journal, newest) in journal_paths {
+        let file = match fs::File::open(&journal) {
+            Ok(file) => file,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(_) => return state,
         };
-        let JournalEntry {
-            refs,
-            state: delta,
-            deleted_blob_refs,
-            deleted_aliases,
-        } = entry;
-        let accumulated = std::mem::replace(&mut state, RecoveryState::empty(config));
-        state = merge_states(accumulated, delta, &refs, config);
-        for alias in deleted_aliases {
-            state.aliases.remove(&alias);
-            state.ambiguous_aliases.remove(&alias);
+        let Ok(meta) = file.metadata() else {
+            return state;
+        };
+        if !meta.is_file() || meta.len() > remaining {
+            return state;
         }
-        for ref_id in deleted_blob_refs {
-            state.blobs.remove(&ref_id);
+        remaining -= meta.len();
+        let Ok(Some(text)) = read_limited_utf8(file, meta.len() as usize) else {
+            return state;
+        };
+        for line in text.lines() {
+            let line = line.trim();
+            if line.is_empty() {
+                continue;
+            }
+            let Ok(entry) = serde_json::from_str::<JournalEntry>(line) else {
+                // Only the active (newest) segment can be torn by an
+                // interrupted append. Earlier complete entries remain valid.
+                if newest {
+                    return state;
+                }
+                return state;
+            };
+            let JournalEntry {
+                refs,
+                state: delta,
+                deleted_blob_refs,
+                deleted_aliases,
+            } = entry;
+            let accumulated = std::mem::replace(&mut state, RecoveryState::empty(config));
+            state = merge_states(accumulated, delta, &refs, config);
+            for alias in deleted_aliases {
+                state.aliases.remove(&alias);
+                state.ambiguous_aliases.remove(&alias);
+            }
+            for ref_id in deleted_blob_refs {
+                state.blobs.remove(&ref_id);
+            }
         }
     }
     state
