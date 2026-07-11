@@ -21,7 +21,7 @@ from pathlib import Path
 from typing import Any
 
 REPO = Path(__file__).resolve().parents[3]
-BIN = REPO / "target/debug/tokenzero"
+BIN = Path(os.environ.get("TOKENZERO_EXPAND_BENCH_BIN", REPO / "target/debug/tokenzero"))
 EVIDENCE = Path(__file__).with_suffix("") / "evidence.json"
 SIZE_CLASSES = (
     ("1KB", 1 * 1024, 50),
@@ -97,6 +97,7 @@ class McpClient:
             env=child_env,
         )
         self.next_id = 1
+        self.peak_rss_bytes = 0
         self.request("initialize", {"protocolVersion": "2024-11-05", "capabilities": {}, "clientInfo": {"name": "expand-latency", "version": "1"}})
         self.notify("notifications/initialized", {})
 
@@ -110,6 +111,7 @@ class McpClient:
         self.child.stdin.flush()
         line = self.child.stdout.readline()
         wall_ms = (time.perf_counter_ns() - started) / 1_000_000
+        self.sample_rss()
         if not line:
             raise RuntimeError(f"MCP server exited unexpectedly: {self.child.poll()}")
         response = json.loads(line)
@@ -118,6 +120,16 @@ class McpClient:
         if "error" in response:
             raise RuntimeError(f"MCP error: {response['error']}")
         return response, wall_ms, len(line.encode())
+
+    def sample_rss(self) -> None:
+        measured = subprocess.run(
+            ["ps", "-o", "rss=", "-p", str(self.child.pid)],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if measured.returncode == 0 and measured.stdout.strip().isdigit():
+            self.peak_rss_bytes = max(self.peak_rss_bytes, int(measured.stdout.strip()) * 1024)
 
     def notify(self, method: str, params: dict[str, Any]) -> None:
         assert self.child.stdin is not None
@@ -171,6 +183,7 @@ def operation_summary(rows: list[dict[str, float | int]]) -> dict[str, Any]:
 def run(
     size_classes: tuple[tuple[str, int, int], ...] = SIZE_CLASSES,
     merge_existing: bool = False,
+    output_path: Path = EVIDENCE,
 ) -> Path:
     if not BIN.is_file():
         raise SystemExit("target/debug/tokenzero missing; refusing to build under this measurement harness")
@@ -196,6 +209,7 @@ def run(
                 # One unmeasured expansion faults any lazy store state in before sampling.
                 client.tool("tz_expand", {"ref": ref})
                 expand_rows: list[dict[str, float | int]] = []
+                client.peak_rss_bytes = 0
                 for _ in range(samples):
                     _, row = attributed_row(client, "tz_expand", "expand", {"ref": ref})
                     if int(row["response_wire_bytes"]) < size_bytes:
@@ -210,12 +224,13 @@ def run(
                     "samples_n": samples,
                     "ingest_to_ref": operation_summary([ingest_row]),
                     "expand_round_trip": operation_summary(expand_rows),
+                    "server_peak_rss_bytes": client.peak_rss_bytes,
                 })
         finally:
             client.close()
 
-    if merge_existing and EVIDENCE.is_file():
-        previous = json.loads(EVIDENCE.read_text()).get("results", [])
+    if merge_existing and output_path.is_file():
+        previous = json.loads(output_path.read_text()).get("results", [])
         measured_labels = {item["size_class"] for item in results}
         results = [item for item in previous if item["size_class"] not in measured_labels] + results
         order = {label: index for index, (label, _, _) in enumerate(SIZE_CLASSES)}
@@ -276,7 +291,8 @@ def run(
             "framing_scope": "JSON serialization, response formatting, pipe scheduling, response bytes, and client overhead; JSON parsing occurs after the wall timer",
             "percentile": "linear interpolation at (n-1)*q",
             "payload": "deterministic repeated SHA-256 hex line, exact byte length; temporary directory removed automatically",
-            "limitations": "engine_us is the existing server engine timer and may include store lookup in addition to byte materialization; 100MB uses n=3 by resource directive, so its p95/p99 are descriptive interpolations",
+            "rss": "server RSS sampled with ps immediately after each expand response; peak is the maximum observed sample for the size class and may understate a transient serialization peak",
+            "limitations": "engine_us is the existing server engine timer and may include store lookup in addition to byte materialization; RSS is sampled rather than an OS high-water mark; small-n p95/p99 are descriptive interpolations",
         },
         "results": results,
         "table": table,
@@ -288,18 +304,23 @@ def run(
         ],
         "close_note_draft": "Measured ingest-to-ref and warm expand round-trip latency at 1KB, 100KB, 1MB, 10MB, and 100MB using the existing debug binary and MCP per-op telemetry. See table and conclusion in crates/tokenzero-mcp/benches/expand_latency/evidence.json; no product code or cargo invocation.",
     }
-    EVIDENCE.parent.mkdir(parents=True, exist_ok=True)
-    EVIDENCE.write_text(json.dumps(evidence, indent=2, sort_keys=True) + "\n")
-    print(EVIDENCE.relative_to(REPO))
-    return EVIDENCE
-
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_text(json.dumps(evidence, indent=2, sort_keys=True) + '\n')
+    print(output_path)
+    return output_path
 
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--only", choices=[label for label, _, _ in SIZE_CLASSES])
+    parser.add_argument("--samples", type=int, help="override samples for the selected size class")
+    parser.add_argument("--output", type=Path, default=EVIDENCE)
     args = parser.parse_args()
     selected = SIZE_CLASSES if args.only is None else tuple(row for row in SIZE_CLASSES if row[0] == args.only)
-    run(selected, merge_existing=args.only is not None)
+    if args.samples is not None:
+        if args.only is None or args.samples < 1:
+            parser.error("--samples requires --only and a positive count")
+        selected = tuple((label, size, args.samples) for label, size, _ in selected)
+    run(selected, merge_existing=args.only is not None, output_path=args.output)
     return 0
 
 
