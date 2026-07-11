@@ -192,7 +192,7 @@ impl SharedCas {
         if full_hash.len() != 64
             || full_hash
                 .bytes()
-                .any(|b| !(b'0'..=b'9').contains(&b) && !(b'a'..=b'f').contains(&b))
+                .any(|b| !b.is_ascii_digit() && !(b'a'..=b'f').contains(&b))
         {
             return Err(SharedCasError::InvalidHash(full_hash.to_string()));
         }

@@ -722,48 +722,6 @@ fn fresh_property() -> Value {
     })
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn codemode_recovery_tools_are_stably_advertised() {
-        let healthy =
-            tool_specs_for_filter_with_health(None, true, McpToolSurface::CodeMode, false);
-        let unhealthy =
-            tool_specs_for_filter_with_health(None, true, McpToolSurface::CodeMode, true);
-        let healthy_names = healthy.iter().map(|spec| &spec.name).collect::<Vec<_>>();
-        let unhealthy_names = unhealthy.iter().map(|spec| &spec.name).collect::<Vec<_>>();
-        assert_eq!(healthy_names, unhealthy_names);
-        assert!(
-            healthy_names
-                .iter()
-                .any(|name| name.as_str() == "tz_expand")
-        );
-        assert!(healthy_names.iter().any(|name| name.as_str() == "tz_read"));
-        assert!(crate::surface_health::surface_includes(
-            McpToolSurface::CodeMode,
-            "tz_expand"
-        ));
-    }
-
-    #[test]
-    fn execute_schema_exposes_bounded_root_and_wall_controls() {
-        let specs = canonical_tool_specs();
-        let execute = specs
-            .iter()
-            .find(|spec| spec.name == "tz_execute_code")
-            .unwrap();
-        let properties = &execute.input_schema["properties"];
-        assert!(properties.get("root").is_some());
-        assert!(properties.get("allowed_roots").is_some());
-        assert_eq!(
-            properties["limits"]["properties"]["hard_max_wall_ms"]["maximum"].as_u64(),
-            Some(crate::CodeModeLimits::default().hard_max_wall_ms)
-        );
-    }
-}
-
 fn read_schema() -> Value {
     object_schema(
         json!({
@@ -981,4 +939,46 @@ pub(crate) fn tool_clusters() -> Value {
             .map(|(cluster, tools)| json!({"cluster": cluster, "tools": tools}))
             .collect::<Vec<_>>()
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn codemode_recovery_tools_are_stably_advertised() {
+        let healthy =
+            tool_specs_for_filter_with_health(None, true, McpToolSurface::CodeMode, false);
+        let unhealthy =
+            tool_specs_for_filter_with_health(None, true, McpToolSurface::CodeMode, true);
+        let healthy_names = healthy.iter().map(|spec| &spec.name).collect::<Vec<_>>();
+        let unhealthy_names = unhealthy.iter().map(|spec| &spec.name).collect::<Vec<_>>();
+        assert_eq!(healthy_names, unhealthy_names);
+        assert!(
+            healthy_names
+                .iter()
+                .any(|name| name.as_str() == "tz_expand")
+        );
+        assert!(healthy_names.iter().any(|name| name.as_str() == "tz_read"));
+        assert!(crate::surface_health::surface_includes(
+            McpToolSurface::CodeMode,
+            "tz_expand"
+        ));
+    }
+
+    #[test]
+    fn execute_schema_exposes_bounded_root_and_wall_controls() {
+        let specs = canonical_tool_specs();
+        let execute = specs
+            .iter()
+            .find(|spec| spec.name == "tz_execute_code")
+            .unwrap();
+        let properties = &execute.input_schema["properties"];
+        assert!(properties.get("root").is_some());
+        assert!(properties.get("allowed_roots").is_some());
+        assert_eq!(
+            properties["limits"]["properties"]["hard_max_wall_ms"]["maximum"].as_u64(),
+            Some(crate::CodeModeLimits::default().hard_max_wall_ms)
+        );
+    }
 }

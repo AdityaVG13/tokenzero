@@ -10,6 +10,8 @@ fn cli_doctor_json_exposes_agent_contract() {
 
     let output = Command::cargo_bin("tokenzero")
         .unwrap()
+        .env_remove("ZEROSTACK_STORE_ROOT")
+        .env_remove("ZERO_STACK_STORE_ROOT")
         .args([
             "doctor",
             "--root",

@@ -248,7 +248,6 @@ fn mcp_execute_root_honors_foreign_workspace_and_denies_outside() {
     );
 }
 
-
 #[test]
 fn codemode_report_tool_issue_is_not_permanently_locked() {
     use tokenzero_core::McpToolSurface;

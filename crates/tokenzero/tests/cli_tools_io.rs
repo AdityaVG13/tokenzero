@@ -233,7 +233,11 @@ fn cli_expand_not_found_names_all_lookup_tiers() {
         .unwrap()
         .current_dir(root.path())
         .env("TOKENZERO_REF_INDEX_PATH", index_dir.path())
-        .args(["expand", "tz://blob/bb_missing_ref", "--json"])
+        .args([
+            "expand",
+            "tz://blob/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            "--json",
+        ])
         .output()
         .unwrap();
     assert!(!output.status.success());
@@ -506,16 +510,16 @@ fn cli_codemode_rejects_outside_root_without_leaking_contents() {
         .unwrap();
 
     assert!(
-        output.status.success(),
-        "tool-level errors remain plan values; stdout={} stderr={}",
+        !output.status.success(),
+        "outside-root reads must fail the plan; stdout={} stderr={}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
     let json: Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert_eq!(json["status"], "completed");
-    assert_eq!(json["value"]["status"], "error");
+    assert_eq!(json["status"], "error");
+    assert_eq!(json["error"]["kind"], "path_not_allowed");
     assert_eq!(
-        json["value"]["error"],
+        json["error"]["message"],
         "path is outside allowed roots: ".to_owned() + outside.to_str().unwrap()
     );
     assert!(

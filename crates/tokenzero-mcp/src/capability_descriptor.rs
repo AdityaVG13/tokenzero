@@ -2,16 +2,16 @@
 //! capabilities, and ZeroRef v1 features served by `resource://tokenzero/capabilities`.
 
 use serde::Serialize;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::collections::BTreeMap;
-use tokenzero_core::{McpToolSurface, MCP_SCHEMA_VERSION};
+use tokenzero_core::{MCP_SCHEMA_VERSION, McpToolSurface};
 
-use crate::codemode::journal::{classify_descriptor_tool, OperationClass};
 use crate::catalog::{
-    canonical_tool_names_for_surface, canonical_tool_specs, resource_specs, tool_clusters,
-    ResourceSpec,
+    ResourceSpec, canonical_tool_names_for_surface, canonical_tool_specs, resource_specs,
+    tool_clusters,
 };
-use crate::jsonrpc::{tool_filter_discovery, SUPPORTED_PROTOCOL_VERSIONS};
+use crate::codemode::journal::{OperationClass, classify_descriptor_tool};
+use crate::jsonrpc::{SUPPORTED_PROTOCOL_VERSIONS, tool_filter_discovery};
 
 /// PR18 policy descriptor revision. Bump whenever the tool or capability
 /// contract changes.

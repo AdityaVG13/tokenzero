@@ -1155,7 +1155,10 @@ impl SessionLedgerReport {
     pub fn from_ledger(path: &Path) -> std::io::Result<Self> {
         let mut sessions: BTreeMap<String, SessionLedgerEntry> = BTreeMap::new();
         scan_jsonl(path, |event| {
-            let sid = event.session_id.clone().unwrap_or_else(|| "unknown".to_string());
+            let sid = event
+                .session_id
+                .clone()
+                .unwrap_or_else(|| "unknown".to_string());
             let entry = sessions.entry(sid.clone()).or_insert(SessionLedgerEntry {
                 session_id: sid,
                 turns: 0,
@@ -1263,7 +1266,13 @@ impl SessionLedgerReport {
             };
             out.push_str(&format!(
                 "  {} — turns={} raw={} visible={} (savings {:.1}%) refs={} failures={}\n",
-                s.session_id, s.turns, s.raw_tokens, s.visible_tokens, savings, s.exact_ref_count, s.failures
+                s.session_id,
+                s.turns,
+                s.raw_tokens,
+                s.visible_tokens,
+                savings,
+                s.exact_ref_count,
+                s.failures
             ));
             let tools: Vec<String> = s.tools.iter().map(|(k, v)| format!("{k}:{v}")).collect();
             out.push_str(&format!("    tools: {}\n", tools.join(", ")));

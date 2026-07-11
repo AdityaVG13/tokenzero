@@ -1344,7 +1344,7 @@ impl<'a> LegacyMigration<'a> {
             if let Err(_err) = self.store.persist_pending() {
                 report.errors.push(MigrationError {
                     code: "store-persist".to_string(),
-                    message: format!("persist failed: rollback incomplete"),
+                    message: "persist failed: rollback incomplete".to_string(),
                     short_ref: None,
                 });
                 // Don't delete manifest if persist failed
@@ -1494,7 +1494,7 @@ impl<'a> LegacyMigration<'a> {
             report.migrated += 1;
             report.aliases.push(AliasEntry {
                 short_ref: short_ref.clone(),
-                full_ref: full_ref,
+                full_ref,
                 size: entry.size,
                 status: AliasStatus::Migrated,
                 error: None,
@@ -1509,7 +1509,7 @@ impl<'a> LegacyMigration<'a> {
                 report.migrated = 0;
                 report.errors.push(MigrationError {
                     code: "store-persist".to_string(),
-                    message: format!("persist failed: cleanup incomplete"),
+                    message: "persist failed: cleanup incomplete".to_string(),
                     short_ref: None,
                 });
             }
@@ -2483,8 +2483,10 @@ mod tests {
         std::fs::create_dir_all(&engine_dir).unwrap();
         let cache = engine_dir.join("recovery-cache.json");
 
-        let mut config = crate::RecoveryConfig::default();
-        config.legacy_compat = false;
+        let config = crate::RecoveryConfig {
+            legacy_compat: false,
+            ..crate::RecoveryConfig::default()
+        };
         let mut store = crate::RecoveryStore::with_config(Some(cache.clone()), config);
 
         let text = "disabled legacy";

@@ -45,8 +45,8 @@ use mcp_artifact::run_mcp_artifact;
 use reach::{installed_tokenzero_command_audit, run_reach};
 use release_claims::{ClaimEvidenceInputs, run_claim_audit};
 use tokenzero_pulse::{
-    PulseEvent, SessionLedgerReport, default_ledger_path, doctor_jsonl_sqlite, export_jsonl, import_jsonl, record_event,
-    report_for_path, sync_jsonl_to_sqlite,
+    PulseEvent, SessionLedgerReport, default_ledger_path, doctor_jsonl_sqlite, export_jsonl,
+    import_jsonl, record_event, report_for_path, sync_jsonl_to_sqlite,
 };
 use tokenzero_runtime::{
     ExecutionMode, contains_platform_shell_syntax, env_map, plan_command_for_platform, quote_for,
@@ -1136,14 +1136,12 @@ fn handle_cache(args: CacheArgs) -> Result<()> {
             let cas = tokenzero_recovery::shared_cas::SharedCas::new(
                 tokenzero_recovery::shared_cas::SharedCas::attach_root_for_cache_path(&cache),
             );
-            let mut adapter =
-                tokenzero_recovery::migration::RecoveryStoreAdapter::new(&mut store);
-            let mut migration =
-                tokenzero_recovery::migration::LegacyMigration::new(
-                    &mut adapter,
-                    &cas,
-                    Some(manifest),
-                );
+            let mut adapter = tokenzero_recovery::migration::RecoveryStoreAdapter::new(&mut store);
+            let mut migration = tokenzero_recovery::migration::LegacyMigration::new(
+                &mut adapter,
+                &cas,
+                Some(manifest),
+            );
             let dry_run = !args.apply;
             let report = migration.run(dry_run);
             if args.json {
@@ -1163,14 +1161,12 @@ fn handle_cache(args: CacheArgs) -> Result<()> {
             let cas = tokenzero_recovery::shared_cas::SharedCas::new(
                 tokenzero_recovery::shared_cas::SharedCas::attach_root_for_cache_path(&cache),
             );
-            let mut adapter =
-                tokenzero_recovery::migration::RecoveryStoreAdapter::new(&mut store);
-            let migration =
-                tokenzero_recovery::migration::LegacyMigration::new(
-                    &mut adapter,
-                    &cas,
-                    Some(manifest),
-                );
+            let mut adapter = tokenzero_recovery::migration::RecoveryStoreAdapter::new(&mut store);
+            let migration = tokenzero_recovery::migration::LegacyMigration::new(
+                &mut adapter,
+                &cas,
+                Some(manifest),
+            );
             let report = migration.verify();
             if args.json {
                 println!("{}", report.to_json());
@@ -1189,14 +1185,12 @@ fn handle_cache(args: CacheArgs) -> Result<()> {
             let cas = tokenzero_recovery::shared_cas::SharedCas::new(
                 tokenzero_recovery::shared_cas::SharedCas::attach_root_for_cache_path(&cache),
             );
-            let mut adapter =
-                tokenzero_recovery::migration::RecoveryStoreAdapter::new(&mut store);
-            let mut migration =
-                tokenzero_recovery::migration::LegacyMigration::new(
-                    &mut adapter,
-                    &cas,
-                    Some(manifest),
-                );
+            let mut adapter = tokenzero_recovery::migration::RecoveryStoreAdapter::new(&mut store);
+            let mut migration = tokenzero_recovery::migration::LegacyMigration::new(
+                &mut adapter,
+                &cas,
+                Some(manifest),
+            );
             let report = migration.rollback(args.apply);
             if args.json {
                 println!("{}", report.to_json());
@@ -1215,14 +1209,12 @@ fn handle_cache(args: CacheArgs) -> Result<()> {
             let cas = tokenzero_recovery::shared_cas::SharedCas::new(
                 tokenzero_recovery::shared_cas::SharedCas::attach_root_for_cache_path(&cache),
             );
-            let mut adapter =
-                tokenzero_recovery::migration::RecoveryStoreAdapter::new(&mut store);
-            let mut migration =
-                tokenzero_recovery::migration::LegacyMigration::new(
-                    &mut adapter,
-                    &cas,
-                    Some(manifest),
-                );
+            let mut adapter = tokenzero_recovery::migration::RecoveryStoreAdapter::new(&mut store);
+            let mut migration = tokenzero_recovery::migration::LegacyMigration::new(
+                &mut adapter,
+                &cas,
+                Some(manifest),
+            );
             let report = migration.cleanup(args.apply, args.confirm_cleanup);
             if args.json {
                 println!("{}", report.to_json());

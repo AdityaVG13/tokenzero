@@ -9,8 +9,8 @@ pub use tokenzero_mcp::{
 };
 #[cfg(test)]
 use tokenzero_mcp::{
-    default_recovery_cache_path, resolve_recovery_cache_path_with_env,
-    resolve_store_root_with_env, store_resolution_report_with_env,
+    default_recovery_cache_path, resolve_recovery_cache_path_with_env, resolve_store_root_with_env,
+    store_resolution_report_with_env,
 };
 
 #[cfg(test)]
