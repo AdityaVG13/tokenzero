@@ -4,7 +4,7 @@ use fs4::{FileExt, TryLockError};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::env;
 use std::ffi::OsString;
 use std::fs::{self, OpenOptions};
@@ -204,7 +204,10 @@ fn parse_fragment_spec(fragment: &str) -> Result<FragmentSpec, FragmentError> {
     let rest = &fragment[1..];
     match kind {
         "B" => {
-            let (start_str, end_str) = rest.split_once('-').unwrap_or((rest, rest));
+            let (start_str, end_str) = rest
+                .split_once('-')
+                .or_else(|| rest.split_once(','))
+                .unwrap_or((rest, rest));
             let start = start_str
                 .trim_start_matches('B')
                 .parse::<usize>()
@@ -355,14 +358,7 @@ fn parse_zeroref_v1_byte_fragment(
     value: &str,
     byte_length: Option<usize>,
 ) -> Result<ZeroRefFragment, ZeroRefError> {
-    let (start, end) = value.split_once('-').ok_or(ZeroRefError::Malformed)?;
-    let start = start
-        .parse::<usize>()
-        .map_err(|_| ZeroRefError::Malformed)?;
-    let end = end.parse::<usize>().map_err(|_| ZeroRefError::Malformed)?;
-    if start > end {
-        return Err(ZeroRefError::Malformed);
-    }
+    let (start, end) = parse_zeroref_v1_fragment_bounds(value, 'B', false)?;
     if let Some(len) = byte_length {
         if end > len {
             return Err(ZeroRefError::Malformed);
@@ -372,15 +368,33 @@ fn parse_zeroref_v1_byte_fragment(
 }
 
 fn parse_zeroref_v1_line_fragment(value: &str) -> Result<ZeroRefFragment, ZeroRefError> {
-    let (start, end) = value.split_once('-').ok_or(ZeroRefError::Malformed)?;
+    let (start, end) = parse_zeroref_v1_fragment_bounds(value, 'L', true)?;
+    Ok(ZeroRefFragment::Line { start, end })
+}
+
+fn parse_zeroref_v1_fragment_bounds(
+    value: &str,
+    repeated_kind: char,
+    allow_single: bool,
+) -> Result<(usize, usize), ZeroRefError> {
+    let separated = value.split_once(',').or_else(|| value.split_once('-'));
+    let (start, end) = match separated {
+        Some((start, end)) => (start, end),
+        None if allow_single => (value, value),
+        None => return Err(ZeroRefError::Malformed),
+    };
     let start = start
         .parse::<usize>()
         .map_err(|_| ZeroRefError::Malformed)?;
-    let end = end.parse::<usize>().map_err(|_| ZeroRefError::Malformed)?;
-    if start == 0 || start > end {
+    let end = end
+        .strip_prefix(repeated_kind)
+        .unwrap_or(end)
+        .parse::<usize>()
+        .map_err(|_| ZeroRefError::Malformed)?;
+    if (repeated_kind == 'L' && start == 0) || start > end {
         return Err(ZeroRefError::Malformed);
     }
-    Ok(ZeroRefFragment::Line { start, end })
+    Ok((start, end))
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -391,6 +405,13 @@ pub struct RecoveryConfig {
     pub max_search_hits: usize,
     pub max_bytes: usize,
     pub max_load_bytes: usize,
+    /// When true, legacy short-ref lookups resolve through the alias tier.
+    /// When false, legacy short refs fail with a typed "legacy-ref-disabled" reason.
+    #[serde(default = "default_legacy_compat")]
+    pub legacy_compat: bool,
+    /// Optional Unix timestamp after which legacy compatibility may be removed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub legacy_compat_deadline: Option<u64>,
 }
 
 impl Default for RecoveryConfig {
@@ -402,8 +423,16 @@ impl Default for RecoveryConfig {
             max_search_hits: 1024,
             max_bytes: 8_000_000,
             max_load_bytes: 16_000_000,
+            legacy_compat: true,
+            legacy_compat_deadline: None,
         }
     }
+
+
+}
+
+fn default_legacy_compat() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -501,6 +530,9 @@ pub(crate) struct RecoveryState {
     pub shell_outcomes: BTreeMap<String, ShellOutcome>,
     #[serde(default)]
     pub shell_outcome_seq: u64,
+    /// Short refs whose 16-hex prefix maps to multiple distinct full hashes.
+    #[serde(default)]
+    pub ambiguous_aliases: BTreeSet<String>,
 }
 
 /// Last observed result of a shell command, keyed by scope+command hash, so
@@ -610,6 +642,7 @@ impl RecoveryState {
             order: Vec::new(),
             shell_outcomes: BTreeMap::new(),
             shell_outcome_seq: 0,
+            ambiguous_aliases: BTreeSet::new(),
         }
     }
 }
@@ -640,6 +673,14 @@ pub struct RecoveryStore {
     shared_cas: Option<SharedCas>,
     pub recovery_count: usize,
     pub recovery_tokens: usize,
+    /// Count of legacy short-ref lookups resolved via alias this session.
+    pub legacy_read_count: usize,
+    /// Transient set of blob refs pending deletion. Applied by persist() and
+    /// cleared only after successful authoritative snapshot write.
+    pending_blob_deletions: BTreeSet<String>,
+    /// Transient set of alias short refs pending deletion. Applied by
+    /// persist() and cleared only after successful authoritative snapshot write.
+    pending_alias_deletions: BTreeSet<String>,
 }
 
 /// Cache-file identity used to detect foreign writes between persists.
@@ -731,6 +772,9 @@ impl RecoveryStore {
             shared_cas,
             recovery_count: 0,
             recovery_tokens: 0,
+            legacy_read_count: 0,
+            pending_blob_deletions: BTreeSet::new(),
+            pending_alias_deletions: BTreeSet::new(),
         }
     }
 
@@ -805,19 +849,46 @@ impl RecoveryStore {
     }
 
     /// Store an alias without persisting. Caller must call `persist_pending()`.
-    pub(crate) fn store_alias_deferred(&mut self, alias: &str, target_ref: &str) {
+    pub fn store_alias_deferred(&mut self, alias: &str, target_ref: &str) {
         self.state
             .aliases
             .insert(alias.to_string(), target_ref.to_string());
     }
 
+    /// Remove an alias. Caller must call `persist_pending()`.
+    /// Marks a tombstone; persist() applies the actual removal after merging
+    /// concurrent disk state so external additions are preserved.
+    pub(crate) fn remove_alias(&mut self, alias: &str) {
+        self.state.aliases.remove(alias);
+        self.state.ambiguous_aliases.remove(alias);
+        self.pending_alias_deletions.insert(alias.to_string());
+    }
+
+    /// Remove a blob from the store. Caller must call `persist_pending()`.
+    /// Marks a tombstone; persist() applies the actual removal after merging
+    /// concurrent disk state so external additions are preserved.
+    pub(crate) fn remove_blob(&mut self, ref_id: &str) {
+        self.state.blobs.remove(ref_id);
+        self.pending_blob_deletions.insert(ref_id.to_string());
+    }
+
+    /// Mark a short ref as ambiguous (maps to multiple full hashes).
+    pub fn mark_ambiguous(&mut self, short_ref: &str) {
+        self.state.ambiguous_aliases.insert(short_ref.to_string());
+    }
+
+    /// Check whether a short ref has been marked as ambiguous.
+    pub fn is_alias_ambiguous(&self, short_ref: &str) -> bool {
+        self.state.ambiguous_aliases.contains(short_ref)
+    }
+
     /// Return the target ref for an existing alias, if any.
-    pub(crate) fn alias_target(&self, alias: &str) -> Option<String> {
+    pub fn alias_target(&self, alias: &str) -> Option<String> {
         self.state.aliases.get(alias).cloned()
     }
 
     /// Return all blob ref IDs currently in the store (for migration scanning).
-    pub(crate) fn blob_ref_ids(&self) -> Vec<String> {
+    pub fn blob_ref_ids(&self) -> Vec<String> {
         self.state.blobs.keys().cloned().collect()
     }
 
@@ -836,18 +907,31 @@ impl RecoveryStore {
         self.state
             .blobs
             .insert(ref_id.to_string(), content.to_string());
+        self.remember_ref(ref_id);
     }
 
-    /// Directly insert an alias (test only).
-    #[cfg(test)]
-    pub(crate) fn insert_test_alias(&mut self, alias: &str, target: &str) {
-        self.state
-            .aliases
-            .insert(alias.to_string(), target.to_string());
-    }
 
+    /// Return migration/compatibility state for doctor JSON output.
+    /// Contains no payload content or filesystem paths.
+    pub fn migration_state(&self) -> serde_json::Value {
+        serde_json::json!({
+            "legacy_compat_enabled": self.config.legacy_compat,
+            "legacy_compat_deadline": self.config.legacy_compat_deadline,
+            "legacy_compat_supported_until": "tokenzero-v2.0",
+            "legacy_blob_count": self.state.blobs.keys()
+                .filter(|k| crate::migration::is_legacy_blob_ref(k))
+                .count(),
+            "canonical_blob_count": self.state.blobs.keys()
+                .filter(|k| k.starts_with("tz://blob/") && k.len() == 74)
+                .count(),
+            "alias_count": self.state.aliases.len(),
+            "ambiguous_alias_count": self.state.ambiguous_aliases.len(),
+            "shared_cas_attached": self.shared_cas.is_some(),
+            "legacy_read_count_session": self.legacy_read_count,
+        })
+    }
     pub fn expected_refs(text: &str, path: Option<&Path>) -> (String, String) {
-        let blob_ref = format!("tz://blob/{}", id_for('b', text));
+        let blob_ref = format!("tz://blob/{}", sha256_hex(text));
         let file_ref = recovery_file_ref(text, path);
         (blob_ref, file_ref)
     }
@@ -911,6 +995,17 @@ impl RecoveryStore {
     ) -> ExpansionResult {
         self.recovery_count += 1;
         let requested_ref = ref_id.to_string();
+        // Validate fragments before the ZeroRef structural parser so fragment
+        // failures retain their dedicated error taxonomy.
+        if let Some((_, fragment)) = ref_id.split_once('#') {
+            if let Err(err) = parse_fragment_spec(fragment) {
+                return ExpansionResult::missing(
+                    requested_ref,
+                    selector.map(str::to_string),
+                    fragment_error_reason(err),
+                );
+            }
+        }
         // Full-hash portable blobs use the canonical shared CAS before the
         // legacy TokenZero JSON tier. The original scheme and complete digest
         // stay intact for routing, verification, and errors.
@@ -937,7 +1032,48 @@ impl RecoveryStore {
                 "unsupported-ref-kind",
             );
         }
-        let shared_content = match (&portable, &self.shared_cas) {
+        let Some(lookup_ref) = canonicalize_expand_ref(ref_id) else {
+            return ExpansionResult::missing(
+                requested_ref,
+                selector.map(str::to_string),
+                "invalid-ref",
+            );
+        };
+
+        // Check legacy_compat and ambiguous-aliases gates on the
+        // canonicalized requested ref BEFORE alias traversal. This ensures
+        // disabled legacy refs and ambiguous short IDs fail immediately
+        // regardless of whether an alias exists.
+        if is_legacy_same_store_blob_ref(&lookup_ref) {
+            if !self.config.legacy_compat {
+                return ExpansionResult::missing(
+                    requested_ref,
+                    selector.map(str::to_string),
+                    "legacy-ref-disabled",
+                );
+            }
+            if self.state.ambiguous_aliases.contains(&lookup_ref) {
+                return ExpansionResult::missing(
+                    requested_ref,
+                    selector.map(str::to_string),
+                    "legacy-ambiguous",
+                );
+            }
+            self.legacy_read_count += 1;
+        }
+
+        // Resolve alias chain AFTER the legacy gates so migrated short refs
+        // route to their canonical full-hash target before CAS dispatch.
+        let resolved_ref = self.resolve_alias_chain(&lookup_ref).unwrap_or(lookup_ref);
+
+        // Re-parse the resolved (aliased) ref for shared CAS dispatch.
+        let portable_resolved = match parse_zeroref_v1_blob(&resolved_ref, None) {
+            Ok(parsed) => Some(parsed),
+            Err(ZeroRefError::LegacyAmbiguity) | Err(ZeroRefError::Unsupported) => None,
+            Err(_) => None,
+        };
+
+        let shared_content = match (&portable_resolved, &self.shared_cas) {
             (Some(portable), Some(cas)) => match cas.resolve(&portable.hash) {
                 Ok(bytes) => match String::from_utf8(bytes) {
                     Ok(content) => Some(content),
@@ -949,7 +1085,7 @@ impl RecoveryStore {
                         );
                     }
                 },
-                Err(SharedCasError::NotFound) if portable.scheme == "tz" => None,
+                Err(SharedCasError::NotFound) if requested_ref.starts_with("tz://") => None,
                 Err(SharedCasError::NotFound) => {
                     return ExpansionResult::missing(
                         requested_ref,
@@ -988,15 +1124,7 @@ impl RecoveryStore {
             },
             _ => None,
         };
-        let Some(lookup_ref) = canonicalize_expand_ref(ref_id) else {
-            return ExpansionResult::missing(
-                requested_ref,
-                selector.map(str::to_string),
-                "invalid-ref",
-            );
-        };
-        let ref_id = self.resolve_alias_chain(&lookup_ref).unwrap_or(lookup_ref);
-        let Some(parsed) = parse_ref(&ref_id) else {
+        let ref_id = resolved_ref;        let Some(parsed) = parse_ref(&ref_id) else {
             return ExpansionResult::missing(
                 requested_ref,
                 selector.map(str::to_string),
@@ -1029,10 +1157,17 @@ impl RecoveryStore {
             match self.resolve_ref_with_index(&parsed.kind, &parsed.bare) {
                 RefResolve::Found(content) => content,
                 RefResolve::NotFound => {
+                    let reason = if requested_ref.starts_with("fz://blob/")
+                        || requested_ref.starts_with("gz://blob/")
+                    {
+                        "ref-not-found".to_string()
+                    } else {
+                        ref_not_found_reason(&parsed.kind)
+                    };
                     return ExpansionResult::missing(
                         requested_ref,
                         selector.map(str::to_string),
-                        ref_not_found_reason(&parsed.kind),
+                        reason,
                     );
                 }
                 RefResolve::DecodeFailed => {
@@ -1256,25 +1391,48 @@ impl RecoveryStore {
     }
 
     fn put_blob(&mut self, text: &str, content_type: ContentType) -> String {
-        let ref_id = format!("tz://blob/{}", id_for('b', text));
+        let full_hash = sha256_hex(text);
+        let canonical_ref = format!("tz://blob/{full_hash}");
         self.ref_classes
-            .insert(ref_id.clone(), classify_ref(&ref_id, Some(content_type)));
-        // Multi-MB payloads (shell captures are the usual offender) stored
-        // inline multiply every snapshot serialize, journal append, and load
-        // parse, and sit in RAM for the process lifetime (bead tz8). Above
-        // the threshold, durable stores divert the bytes to a content-
-        // addressed sidecar file and keep a tiny marker as the value; the
-        // marker travels through journal/merge/delta untouched and is only
-        // resolved on expand. Fail-open: if the sidecar write fails, the
-        // text stays inline.
-        let value = self
-            .persistence_path
-            .as_deref()
-            .and_then(|cache| externalize_blob_value(cache, text))
-            .unwrap_or_else(|| text.to_string());
-        self.state.blobs.insert(ref_id.clone(), value);
-        self.remember_ref(&ref_id);
-        ref_id
+            .insert(canonical_ref.clone(), classify_ref(&canonical_ref, Some(content_type)));
+
+        // Publish to the canonical shared CAS when attached. On success the
+        // canonical ref is served from the immutable CAS and the payload is
+        // not duplicated in local recovery state. On publish failure, store
+        // the full-hash payload locally so the emitted ref remains readable.
+        let cas_published = if let Some(cas) = &self.shared_cas {
+            cas.publish(text.as_bytes()).is_ok()
+        } else {
+            false
+        };
+
+        // Always compute and store the legacy short ref as an alias so existing
+        // callers using legacy refs can resolve through the alias chain.
+        let legacy_ref = format!("tz://blob/{}", id_for('b', text));
+        if legacy_ref != canonical_ref {
+            self.state
+                .aliases
+                .insert(legacy_ref, canonical_ref.clone());
+        }
+
+        if !cas_published {
+            // Multi-MB payloads (shell captures are the usual offender) stored
+            // inline multiply every snapshot serialize, journal append, and load
+            // parse, and sit in RAM for the process lifetime (bead tz8). Above
+            // the threshold, durable stores divert the bytes to a content-
+            // addressed sidecar file and keep a tiny marker as the value; the
+            // marker travels through journal/merge/delta untouched and is only
+            // resolved on expand. Fail-open: if the sidecar write fails, the
+            // text stays inline.
+            let value = self
+                .persistence_path
+                .as_deref()
+                .and_then(|cache| externalize_blob_value(cache, text))
+                .unwrap_or_else(|| text.to_string());
+            self.state.blobs.insert(canonical_ref.clone(), value);
+        }
+        self.remember_ref(&canonical_ref);
+        canonical_ref
     }
 
     fn put_file(
@@ -1527,6 +1685,20 @@ impl RecoveryStore {
             self.state = merge_states(existing, current, &self.session_refs, &self.config);
         }
         self.evict();
+        // Apply pending deletions to in-memory state. Tombstones are kept
+        // until the authoritative write succeeds so a crash-and-restart
+        // retries the deletion. Drain to owned vecs to avoid borrow issues
+        // with concurrent mutation of self.state and self.pending_*.
+        let pending_aliases: Vec<String> = self.pending_alias_deletions.iter().cloned().collect();
+        let pending_blobs: Vec<String> = self.pending_blob_deletions.iter().cloned().collect();
+        for alias in &pending_aliases {
+            self.state.aliases.remove(alias);
+            self.state.ambiguous_aliases.remove(alias);
+        }
+        for ref_id in &pending_blobs {
+            self.state.blobs.remove(ref_id);
+        }
+        let has_pending_deletions = !pending_aliases.is_empty() || !pending_blobs.is_empty();
         // Fast path: disk is byte-identical to our last write, so everything
         // new since then is exactly `session_refs`. Append that delta to the
         // journal sibling instead of rewriting the whole snapshot — persist
@@ -1534,17 +1706,23 @@ impl RecoveryStore {
         // delta line replays through `merge_states` at load, so merge
         // semantics are inherited, never re-implemented. Any append error or
         // an oversized journal falls through to the full snapshot rewrite.
-        if unchanged_since_last_write {
+        // Journal tombstones make deletions durable and replayable without
+        // rewriting the snapshot; old journal entries cannot resurrect them.
+        if unchanged_since_last_write && !has_pending_deletions {
             let delta = session_delta(&self.state, &self.session_refs, &self.config);
             let entry = JournalEntry {
                 refs: std::mem::take(&mut self.session_refs),
                 state: delta,
+                deleted_blob_refs: self.pending_blob_deletions.iter().cloned().collect(),
+                deleted_aliases: self.pending_alias_deletions.iter().cloned().collect(),
             };
             let snap_len = self.disk_identity.map_or(0, |identity| identity.len);
             if let Ok(journal_len) = append_journal(&journal_path(&path), &entry) {
                 if journal_len <= journal_compact_threshold(snap_len) {
                     self.journal_identity = DiskIdentity::capture(&journal_path(&path));
                     append_blob_refs_to_ref_index(&path, &entry.refs, Some(&self.ref_classes));
+                    self.pending_blob_deletions.clear();
+                    self.pending_alias_deletions.clear();
                     return Ok(());
                 }
             }
@@ -1557,6 +1735,8 @@ impl RecoveryStore {
         self.disk_identity = DiskIdentity::capture(&path);
         append_blob_refs_to_ref_index(&path, &self.session_refs, Some(&self.ref_classes));
         self.session_refs.clear();
+        self.pending_blob_deletions.clear();
+        self.pending_alias_deletions.clear();
         Ok(())
     }
 }
@@ -2338,6 +2518,10 @@ fn journal_path(path: &Path) -> PathBuf {
 struct JournalEntry {
     refs: Vec<String>,
     state: RecoveryState,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    deleted_blob_refs: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    deleted_aliases: Vec<String>,
 }
 
 fn session_delta(
@@ -2370,6 +2554,8 @@ fn session_delta(
     // carrying the whole map keeps replay exact without change tracking.
     delta.shell_outcomes = state.shell_outcomes.clone();
     delta.shell_outcome_seq = state.shell_outcome_seq;
+    // Ambiguous aliases must travel wholesale — same rationale as aliases.
+    delta.ambiguous_aliases = state.ambiguous_aliases.clone();
     delta.order = session_refs
         .iter()
         .filter(|ref_id| {
@@ -2425,8 +2611,21 @@ fn apply_journal(mut state: RecoveryState, path: &Path, config: &RecoveryConfig)
         let Ok(entry) = serde_json::from_str::<JournalEntry>(line) else {
             break;
         };
+        let JournalEntry {
+            refs,
+            state: delta,
+            deleted_blob_refs,
+            deleted_aliases,
+        } = entry;
         let accumulated = std::mem::replace(&mut state, RecoveryState::empty(config));
-        state = merge_states(accumulated, entry.state, &entry.refs, config);
+        state = merge_states(accumulated, delta, &refs, config);
+        for alias in deleted_aliases {
+            state.aliases.remove(&alias);
+            state.ambiguous_aliases.remove(&alias);
+        }
+        for ref_id in deleted_blob_refs {
+            state.blobs.remove(&ref_id);
+        }
     }
     state
 }
@@ -2497,6 +2696,9 @@ fn merge_states(
             }
             None => break,
         }
+    }
+    for alias in current.ambiguous_aliases {
+        merged.ambiguous_aliases.insert(alias);
     }
     merged.max_blobs = config.max_blobs;
     merged.max_files = config.max_files;

@@ -48,23 +48,38 @@ impl SharedCas {
         Self { root }
     }
 
-    /// Detect the canonical shared CAS from a TokenZero cache path.
-    ///
-    /// Unified stores place the recovery cache at
-    /// `<store-root>/tokenzero/recovery-cache.json` and immutable objects at
-    /// `<store-root>/blobs/...`. Legacy project-private `.tokenzero` caches do
-    /// not imply shared-CAS access. The `blobs/` directory must already exist;
-    /// its presence is the explicit attachment used by sibling engines.
-    pub fn detect_from_cache_path(cache_path: &Path) -> Option<Self> {
+    /// Resolve the shared CAS store root from a TokenZero cache path, without
+    /// requiring the `blobs/` directory to already exist. Unified stores place
+    /// the recovery cache at `<store-root>/tokenzero/recovery-cache.json` and
+    /// immutable objects at `<store-root>/blobs/...`. Legacy project-private
+    /// `.tokenzero` caches do not imply shared-CAS access. Returns `None` for
+    /// flat/legacy private caches.
+    pub fn resolve_cache_root(cache_path: &Path) -> Option<PathBuf> {
         let engine_dir = cache_path.parent()?;
         if engine_dir.file_name()? != "tokenzero" {
             return None;
         }
         let store_root = engine_dir.parent()?;
-        store_root
-            .join("blobs")
-            .is_dir()
-            .then(|| Self::new(store_root.to_path_buf()))
+        Some(store_root.to_path_buf())
+    }
+
+    /// Derive the CAS attachment root for any explicit recovery cache path.
+    /// Unified caches use `<store-root>`; flat caches use the cache parent.
+    pub fn attach_root_for_cache_path(cache_path: &Path) -> PathBuf {
+        Self::resolve_cache_root(cache_path)
+            .or_else(|| cache_path.parent().map(Path::to_path_buf))
+            .unwrap_or_else(|| cache_path.to_path_buf())
+    }
+
+    /// Detect the canonical shared CAS for a recovery cache path. Unified
+    /// stores attach before `blobs/` exists; flat caches attach once migration
+    /// has materialized the CAS directory beside the cache.
+    pub fn detect_from_cache_path(cache_path: &Path) -> Option<Self> {
+        let unified_root = Self::resolve_cache_root(cache_path);
+        let root = unified_root
+            .clone()
+            .unwrap_or_else(|| Self::attach_root_for_cache_path(cache_path));
+        (unified_root.is_some() || root.join("blobs").is_dir()).then(|| Self::new(root))
     }
 
     /// Return the effective root path.
@@ -79,6 +94,9 @@ impl SharedCas {
     /// the destination already exists, its content is verified against the
     /// expected digest and length; idempotent success is returned, otherwise
     /// `Corruption`.
+    ///
+    /// Parent directories are created lazily on first publish so that a
+    /// `SharedCas` can be attached to a store root before any `blobs/` exist.
     pub fn publish(&self, bytes: &[u8]) -> Result<String, SharedCasError> {
         let full_hash = sha256_hex(bytes);
         let path = self.object_path(&full_hash);
@@ -325,5 +343,43 @@ mod tests {
             cas.resolve(missing),
             Err(SharedCasError::NotFound)
         ));
+    }
+
+    #[test]
+    fn resolve_cache_root_unified_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let engine_dir = dir.path().join("tokenzero");
+        fs::create_dir_all(&engine_dir).unwrap();
+        let cache = engine_dir.join("recovery-cache.json");
+        // blobs/ does not exist yet — resolver should still work
+        let root = SharedCas::resolve_cache_root(&cache);
+        assert!(root.is_some());
+        assert_eq!(root.unwrap(), dir.path().to_path_buf());
+    }
+
+    #[test]
+    fn resolve_cache_root_legacy_flat_returns_none() {
+        let dir = tempfile::tempdir().unwrap();
+        let legacy = dir.path().join(".tokenzero");
+        fs::create_dir_all(&legacy).unwrap();
+        let cache = legacy.join("recovery-cache.json");
+        let root = SharedCas::resolve_cache_root(&cache);
+        assert!(root.is_none());
+    }
+
+    #[test]
+    fn detect_without_blobs_dir_works() {
+        let dir = tempfile::tempdir().unwrap();
+        let engine_dir = dir.path().join("tokenzero");
+        fs::create_dir_all(&engine_dir).unwrap();
+        let cache = engine_dir.join("recovery-cache.json");
+        // No blobs/ directory exists yet
+        let cas = SharedCas::detect_from_cache_path(&cache);
+        assert!(cas.is_some());
+        // Publish should lazily create blobs/
+        let cas = cas.unwrap();
+        let bytes = b"lazy create test";
+        let hash = cas.publish(bytes).unwrap();
+        assert!(cas.contains(&hash));
     }
 }

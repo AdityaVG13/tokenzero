@@ -564,7 +564,14 @@ pub(crate) enum CacheCommand {
     #[command(alias = "statuz")]
     Status(CommonArgs),
     Prune(CachePruneArgs),
+    /// Migrate legacy short refs to full-hash canonical refs (dry-run by default).
     MigrateRefs(CacheMigrateRefsArgs),
+    /// Verify migration integrity without mutating.
+    MigrateVerify(CacheMigrateVerifyArgs),
+    /// Rollback migration aliases and manifest (never CAS/source bytes).
+    MigrateRollback(CacheMigrateRollbackArgs),
+    /// Clean up legacy source payloads after successful verification.
+    MigrateCleanup(CacheMigrateCleanupArgs),
 }
 
 #[derive(Debug, Args)]
@@ -585,9 +592,48 @@ pub(crate) struct CacheMigrateRefsArgs {
     pub(crate) root: Option<PathBuf>,
     #[arg(long)]
     pub(crate) cache_path: Option<PathBuf>,
-    /// Report only; do not write to CAS, store, or manifest.
+    /// Actually write to CAS, store, and manifest. Without this flag, migration is dry-run only.
     #[arg(long)]
-    pub(crate) dry_run: bool,
+    pub(crate) apply: bool,
+    #[arg(long)]
+    pub(crate) json: bool,
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct CacheMigrateVerifyArgs {
+    #[arg(long)]
+    pub(crate) root: Option<PathBuf>,
+    #[arg(long)]
+    pub(crate) cache_path: Option<PathBuf>,
+    #[arg(long)]
+    pub(crate) json: bool,
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct CacheMigrateRollbackArgs {
+    #[arg(long)]
+    pub(crate) root: Option<PathBuf>,
+    #[arg(long)]
+    pub(crate) cache_path: Option<PathBuf>,
+    /// Actually remove aliases and manifest. Without this flag, rollback is dry-run only.
+    #[arg(long)]
+    pub(crate) apply: bool,
+    #[arg(long)]
+    pub(crate) json: bool,
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct CacheMigrateCleanupArgs {
+    #[arg(long)]
+    pub(crate) root: Option<PathBuf>,
+    #[arg(long)]
+    pub(crate) cache_path: Option<PathBuf>,
+    /// Actually remove legacy source payloads. Requires --confirm-cleanup.
+    #[arg(long, requires = "confirm_cleanup")]
+    pub(crate) apply: bool,
+    /// Required confirmation flag. Cleanup is irreversible without migration re-run.
+    #[arg(long, requires = "apply")]
+    pub(crate) confirm_cleanup: bool,
     #[arg(long)]
     pub(crate) json: bool,
 }
