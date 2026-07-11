@@ -1,13 +1,13 @@
 //! Hard containment for expensive CodeMode execution.
 
 use serde::Serialize;
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::cell::Cell;
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex, OnceLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -21,26 +21,35 @@ const DEFAULT_MACHINE_PERMIT: &str = "/tmp/zerostack-codemode-heavy.permit";
 const PERMIT_POLL: Duration = Duration::from_millis(20);
 
 thread_local! {
-    static HEAVY_EXECUTION_ACTIVE: Cell<bool> = Cell::new(false);
+    static HEAVY_EXECUTION_ID: Cell<Option<u64>> = const { Cell::new(None) };
 }
 
-struct HeavyExecutionGuard;
+static NEXT_EXECUTION_ID: AtomicU64 = AtomicU64::new(1);
+
+struct HeavyExecutionGuard {
+    id: u64,
+}
 
 impl HeavyExecutionGuard {
     fn enter() -> Self {
-        HEAVY_EXECUTION_ACTIVE.with(|cell| cell.set(true));
-        HeavyExecutionGuard
+        let id = NEXT_EXECUTION_ID.fetch_add(1, Ordering::Relaxed);
+        HEAVY_EXECUTION_ID.with(|cell| cell.set(Some(id)));
+        HeavyExecutionGuard { id }
     }
 }
 
 impl Drop for HeavyExecutionGuard {
     fn drop(&mut self) {
-        HEAVY_EXECUTION_ACTIVE.with(|cell| cell.set(false));
+        HEAVY_EXECUTION_ID.with(|cell| cell.set(None));
     }
 }
 
+fn heavy_execution_id() -> Option<u64> {
+    HEAVY_EXECUTION_ID.with(Cell::get)
+}
+
 fn heavy_execution_active() -> bool {
-    HEAVY_EXECUTION_ACTIVE.with(|cell| cell.get())
+    heavy_execution_id().is_some()
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -67,7 +76,16 @@ pub(crate) struct ContainmentSnapshot {
     pub operation_class: Option<ExecutionClass>,
     pub elapsed_ms: Option<u64>,
     pub cancellation_state: &'static str,
+    pub background_jobs: usize,
     pub rejected_count: u64,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct BackgroundChild {
+    execution_id: u64,
+    pid: Option<u32>,
+    pgid: Option<u32>,
+    cancelled: bool,
 }
 
 #[derive(Debug)]
@@ -80,6 +98,7 @@ struct State {
     child_pid: Option<u32>,
     child_pgid: Option<u32>,
     cancellation_state: &'static str,
+    background_jobs: HashMap<String, BackgroundChild>,
     flights: HashMap<String, Arc<Flight>>,
 }
 impl Default for State {
@@ -93,6 +112,7 @@ impl Default for State {
             child_pid: None,
             child_pgid: None,
             cancellation_state: "none",
+            background_jobs: HashMap::new(),
             flights: HashMap::new(),
         }
     }
@@ -169,6 +189,21 @@ pub(crate) fn note_child(pid: Option<u32>, pgid: Option<u32>, cancellation_state
     controller().note_child(pid, pgid, cancellation_state);
 }
 
+pub(crate) fn reserve_background_job(id: &str) {
+    let Some(execution_id) = heavy_execution_id() else {
+        return;
+    };
+    controller().reserve_background_job(id, execution_id);
+}
+
+pub(crate) fn note_background_child(id: &str, pid: Option<u32>, pgid: Option<u32>) {
+    controller().note_background_child(id, pid, pgid);
+}
+
+pub(crate) fn finish_background_job(id: &str) {
+    controller().finish_background_job(id);
+}
+
 impl Controller {
     fn new(config: Config) -> Self {
         Self {
@@ -186,6 +221,75 @@ impl Controller {
             state.child_pid = pid;
             state.child_pgid = pgid;
             state.cancellation_state = cancellation_state;
+        }
+    }
+
+    fn reserve_background_job(&self, id: &str, execution_id: u64) {
+        self.lock().background_jobs.insert(
+            id.to_string(),
+            BackgroundChild {
+                execution_id,
+                pid: None,
+                pgid: None,
+                cancelled: false,
+            },
+        );
+    }
+
+    fn note_background_child(&self, id: &str, pid: Option<u32>, pgid: Option<u32>) {
+        let cancelled_pgid = {
+            let mut state = self.lock();
+            match state.background_jobs.get_mut(id) {
+                Some(job) if job.cancelled => {
+                    let cancelled_pgid = pgid;
+                    state.background_jobs.remove(id);
+                    cancelled_pgid
+                }
+                Some(job) => {
+                    job.pid = pid;
+                    job.pgid = pgid;
+                    None
+                }
+                None => None,
+            }
+        };
+        if let Some(pgid) = cancelled_pgid {
+            terminate_owned_process_group(pgid);
+        }
+    }
+
+    fn finish_background_job(&self, id: &str) {
+        self.lock().background_jobs.remove(id);
+    }
+
+    fn cancel_background_jobs(&self, execution_id: u64) {
+        let pgids = {
+            let mut state = self.lock();
+            let mut pgids = Vec::new();
+            let ids = state
+                .background_jobs
+                .iter()
+                .filter_map(|(id, job)| (job.execution_id == execution_id).then(|| id.clone()))
+                .collect::<Vec<_>>();
+            for id in ids {
+                if let Some(job) = state.background_jobs.get_mut(&id) {
+                    job.cancelled = true;
+                    if let Some(pgid) = job.pgid {
+                        pgids.push(pgid);
+                    }
+                }
+                if state
+                    .background_jobs
+                    .get(&id)
+                    .is_some_and(|job| job.pgid.is_some())
+                {
+                    state.background_jobs.remove(&id);
+                }
+            }
+            pgids
+        };
+        for pgid in pgids {
+            terminate_owned_process_group(pgid);
         }
     }
 
@@ -269,8 +373,12 @@ impl Controller {
             }
         };
         let result = {
-            let _guard = HeavyExecutionGuard::enter();
-            catch_worker_panic(run)
+            let guard = HeavyExecutionGuard::enter();
+            let result = catch_worker_panic(run);
+            if result.error.is_some() {
+                self.cancel_background_jobs(guard.id);
+            }
+            result
         };
         drop(slot);
         drop(permit);
@@ -313,6 +421,7 @@ impl Controller {
                 .active_started
                 .map(|v| u64::try_from(v.elapsed().as_millis()).unwrap_or(u64::MAX)),
             cancellation_state: s.cancellation_state,
+            background_jobs: s.background_jobs.len(),
             rejected_count: s.rejected_count,
         }
     }
@@ -671,12 +780,11 @@ mod tests {
             }
             thread::sleep(Duration::from_millis(1));
         }
-        assert!(
-            c.lock()
-                .flights
-                .values()
-                .any(|flight| { flight.followers.load(Ordering::Acquire) == 1 })
-        );
+        assert!(c
+            .lock()
+            .flights
+            .values()
+            .any(|flight| { flight.followers.load(Ordering::Acquire) == 1 }));
         let rejected = c.execute(&heavy(19), &CodeModeOptions::default(), || {
             panic!("clone ran")
         });
@@ -684,13 +792,11 @@ mod tests {
             rejected.error.as_ref().map(|e| e.kind.as_str()),
             Some("busy")
         );
-        assert!(
-            rejected
-                .error
-                .unwrap()
-                .message
-                .contains("dedup_followers_full")
-        );
+        assert!(rejected
+            .error
+            .unwrap()
+            .message
+            .contains("dedup_followers_full"));
         *gate.0.lock().unwrap() = true;
         gate.1.notify_all();
         assert!(leader.join().unwrap().error.is_none());
@@ -735,13 +841,12 @@ mod tests {
     fn containment_error_and_panic_release_permit() {
         let p = temp("release");
         let c = ctl(p.clone(), 1);
-        assert!(
-            c.execute(&heavy(1), &CodeModeOptions::default(), || {
+        assert!(c
+            .execute(&heavy(1), &CodeModeOptions::default(), || {
                 CodeModeResult::error("injected", 0)
             })
             .error
-            .is_some()
-        );
+            .is_some());
         assert!(!p.exists());
         assert_eq!(
             c.execute(&heavy(2), &CodeModeOptions::default(), || panic!(
@@ -807,13 +912,12 @@ mod tests {
         }
         drop(e);
         let start = Instant::now();
-        assert!(
-            c.execute("status", &CodeModeOptions::default(), || {
+        assert!(c
+            .execute("status", &CodeModeOptions::default(), || {
                 CodeModeResult::completed(json!(true), vec![], 0, 1, 1)
             })
             .error
-            .is_none()
-        );
+            .is_none());
         assert!(start.elapsed() < Duration::from_millis(20));
         *gate.0.lock().unwrap() = true;
         gate.1.notify_all();
@@ -858,6 +962,38 @@ mod tests {
             !process_alive(id),
             "synthetic child {id} survived containment cleanup"
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn containment_error_kills_registered_background_child() {
+        use std::os::unix::process::CommandExt;
+
+        let p = temp("background-cancel");
+        let c = ctl(p.clone(), 1);
+        let worker = Arc::clone(&c);
+        let child_id = Arc::new(AtomicUsize::new(0));
+        let seen = Arc::clone(&child_id);
+        let child = Arc::new(Mutex::new(None));
+        let child_slot = Arc::clone(&child);
+        let result = c.execute(&heavy(30), &CodeModeOptions::default(), move || {
+            let execution_id = heavy_execution_id().expect("heavy execution id");
+            worker.reserve_background_job("synthetic-background", execution_id);
+            let mut command = std::process::Command::new("sh");
+            command.args(["-c", "sleep 30"]).process_group(0);
+            let owned = command.spawn().unwrap();
+            let id = owned.id();
+            seen.store(id as usize, Ordering::SeqCst);
+            worker.note_background_child("synthetic-background", Some(id), Some(id));
+            *child_slot.lock().unwrap() = Some(owned);
+            CodeModeResult::error_with_kind("cancelled", "synthetic cancellation", 0, true)
+        });
+        assert_eq!(result.error.unwrap().kind, "cancelled");
+        let id = child_id.load(Ordering::SeqCst) as u32;
+        child.lock().unwrap().take().unwrap().wait().unwrap();
+        assert_process_group_dead(id);
+        assert_eq!(c.snapshot().background_jobs, 0);
+        assert!(!p.exists());
     }
 
     #[cfg(unix)]

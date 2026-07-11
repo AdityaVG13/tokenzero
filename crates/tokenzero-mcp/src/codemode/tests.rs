@@ -2,7 +2,7 @@ use super::exec::{
     exec_edit, execute_codemode, execute_codemode_with_options, limits_from_options,
     make_engine_for_root, resolve_paths_against_work_root,
 };
-use super::parser::{Statement, parse_expr, parse_plan, resolve_expr};
+use super::parser::{parse_expr, parse_plan, resolve_expr, Statement};
 use super::result::{CodeModeOptions, CodeModeResult, CodeModeStatus};
 use std::collections::HashMap;
 use std::fs;
@@ -204,18 +204,14 @@ fn shell_inline_threshold_keeps_refs_and_ref_wraps_large_text() {
         small_text.contains(small.trim_end()),
         "small shell output missing: {small_text}"
     );
-    assert!(
-        small_value["combined_ref"]
-            .as_str()
-            .unwrap()
-            .starts_with("tz://")
-    );
-    assert!(
-        small_value["capture_ref"]
-            .as_str()
-            .unwrap()
-            .starts_with("tz://")
-    );
+    assert!(small_value["combined_ref"]
+        .as_str()
+        .unwrap()
+        .starts_with("tz://"));
+    assert!(small_value["capture_ref"]
+        .as_str()
+        .unwrap()
+        .starts_with("tz://"));
     assert!(
         small_value.get("refs").is_none(),
         "shell refs must be role-labeled fields: {small_value}"
@@ -236,19 +232,15 @@ fn shell_inline_threshold_keeps_refs_and_ref_wraps_large_text() {
         large_result.error
     );
     let large_value = large_result.value.as_ref().unwrap();
-    assert!(
-        large_value["text"]["ref"]
-            .as_str()
-            .unwrap()
-            .starts_with("tz://")
-    );
+    assert!(large_value["text"]["ref"]
+        .as_str()
+        .unwrap()
+        .starts_with("tz://"));
     assert!(large_value["text"]["preview"].as_str().is_some());
-    assert!(
-        large_value["combined_ref"]
-            .as_str()
-            .unwrap()
-            .starts_with("tz://")
-    );
+    assert!(large_value["combined_ref"]
+        .as_str()
+        .unwrap()
+        .starts_with("tz://"));
     assert!(
         large_value.get("refs").is_none(),
         "shell refs must be role-labeled fields: {large_value}"
@@ -336,13 +328,11 @@ fn quiet_combinators_handle_edge_cases_compactly() {
 fn undefined_variable_in_return_is_plan_error() {
     let result = execute_codemode("return missing_binding");
     assert_eq!(result.status, CodeModeStatus::Error);
-    assert!(
-        result
-            .error
-            .as_deref()
-            .unwrap()
-            .contains("undefined variable: missing_binding")
-    );
+    assert!(result
+        .error
+        .as_deref()
+        .unwrap()
+        .contains("undefined variable: missing_binding"));
 }
 
 #[test]
@@ -604,12 +594,10 @@ fn describe_token_namespace_returns_signature() {
     assert_eq!(r.status, CodeModeStatus::Completed);
     let val = r.value.unwrap();
     assert_eq!(val["path"], "zero.token.compact");
-    assert!(
-        val["signature"]
-            .as_str()
-            .unwrap()
-            .contains("zero.token.compact")
-    );
+    assert!(val["signature"]
+        .as_str()
+        .unwrap()
+        .contains("zero.token.compact"));
 }
 
 #[test]
@@ -716,6 +704,85 @@ fn shell_plan_captures_exit_code() {
     );
 }
 
+#[cfg(unix)]
+#[test]
+fn background_shell_returns_before_wall_cap_and_can_be_stopped() {
+    let dir = tempfile::tempdir().unwrap();
+    let cache = dir.path().join("background-prompt-cache.json");
+    let options = CodeModeOptions {
+        root: Some(dir.path().to_path_buf()),
+        cache_path: Some(cache),
+        max_wall_ms: 500,
+        hard_max_wall_ms: 500,
+        ..CodeModeOptions::default()
+    };
+    let started = std::time::Instant::now();
+    let result = execute_codemode_with_options(
+        r#"return zero.token.shell("sleep 30", { background: true })"#,
+        options,
+    );
+    assert_eq!(
+        result.status,
+        CodeModeStatus::Completed,
+        "{:?}",
+        result.error
+    );
+    assert!(started.elapsed() < std::time::Duration::from_secs(1));
+    let value = result.value.unwrap();
+    assert!(value["job"].as_str().unwrap().starts_with("tzjob-"));
+    assert!(value["log"].as_str().unwrap().ends_with(".log"));
+    make_engine_for_root(dir.path().to_path_buf()).shutdown_background_jobs_for_test();
+}
+
+#[cfg(unix)]
+#[test]
+fn background_job_polls_to_exit_with_log_tail() {
+    let dir = tempfile::tempdir().unwrap();
+    let cache = dir.path().join("background-poll-cache.json");
+    let options = || CodeModeOptions {
+        root: Some(dir.path().to_path_buf()),
+        cache_path: Some(cache.clone()),
+        max_wall_ms: 1_000,
+        hard_max_wall_ms: 1_000,
+        ..CodeModeOptions::default()
+    };
+    let launched = execute_codemode_with_options(
+        r#"return zero.token.shell("printf alpha; sleep 0.2; printf omega", { background: true })"#,
+        options(),
+    );
+    assert_eq!(
+        launched.status,
+        CodeModeStatus::Completed,
+        "{:?}",
+        launched.error
+    );
+    let job = launched.value.unwrap()["job"].as_str().unwrap().to_string();
+    let running =
+        execute_codemode_with_options(&format!(r#"return zero.token.job("{job}")"#), options());
+    assert_eq!(
+        running.status,
+        CodeModeStatus::Completed,
+        "{:?}",
+        running.error
+    );
+    assert_eq!(running.value.unwrap()["status"], "running");
+    std::thread::sleep(std::time::Duration::from_millis(500));
+    let exited =
+        execute_codemode_with_options(&format!(r#"return zero.token.job("{job}")"#), options());
+    assert_eq!(
+        exited.status,
+        CodeModeStatus::Completed,
+        "{:?}",
+        exited.error
+    );
+    let value = exited.value.unwrap();
+    assert_eq!(value["status"], "exited");
+    assert_eq!(value["exitCode"], 0);
+    assert!(value["tail"].as_str().unwrap().contains("alpha"));
+    assert!(value["tail"].as_str().unwrap().contains("omega"));
+    assert!(std::path::Path::new(value["log"].as_str().unwrap()).exists());
+}
+
 #[test]
 fn multi_statement_composition() {
     let plan = r#"
@@ -809,33 +876,27 @@ fn windowed_expand_same_session_codemode_blob() {
 fn recall_method_is_discoverable_and_dispatchable() {
     let r = execute_codemode("describe:zero.recall");
     assert_eq!(r.status, CodeModeStatus::Completed);
-    assert!(
-        r.value.as_ref().unwrap()["signature"]
-            .as_str()
-            .unwrap()
-            .contains("zero.recall")
-    );
+    assert!(r.value.as_ref().unwrap()["signature"]
+        .as_str()
+        .unwrap()
+        .contains("zero.recall"));
     let search = execute_codemode("search:recall");
-    assert!(
-        search.value.as_ref().unwrap()["results"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|hit| hit["path"] == "zero.recall")
-    );
+    assert!(search.value.as_ref().unwrap()["results"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|hit| hit["path"] == "zero.recall"));
 }
 
 #[test]
 fn codemode_method_catalog_resource_shape() {
     let catalog = crate::codemode::catalog::codemode_method_catalog();
     assert_eq!(catalog["schema_version"], "tokenzero.codemode.catalog.v1");
-    assert!(
-        catalog["methods"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|m| m["path"] == "zero.recall")
-    );
+    assert!(catalog["methods"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|m| m["path"] == "zero.recall"));
 }
 
 #[test]

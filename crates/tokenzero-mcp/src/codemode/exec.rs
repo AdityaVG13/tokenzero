@@ -1,33 +1,33 @@
 //! CodeMode plan executor and TokenZero operation dispatch.
 
-use rquickjs::{Context, Runtime, function::Func};
-use serde_json::{Value, json};
+use rquickjs::{function::Func, Context, Runtime};
+use serde_json::{json, Value};
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
-use tokenzero_core::{Mode, ToolResponse, count_tokens, detect_content_type};
+use tokenzero_core::{count_tokens, detect_content_type, Mode, ToolResponse};
 use tokenzero_filters::{discover, rewrite_command};
 
 use crate::workspace::{
     allowed_roots_for_workspace, resolve_recovery_cache_path, tokenzero_work_root,
 };
-use crate::{EditHunk, EngineConfig, TokenZeroEngine, shell_timeout_from_secs};
+use crate::{shell_timeout_from_secs, EditHunk, EngineConfig, TokenZeroEngine};
 
 use super::catalog::{describe_method, search_catalog};
 use super::journal::{
+    atomic_write as journal_atomic_write, begin_plan, classify_method, current_digest,
+    doctor_json as journal_doctor_json, inspect as inspect_journal, open_unresolved, sha256_bytes,
     BeginOutcome, JournalOperation, JournalState, JournalTransaction, OperationClass,
-    OperationSpec, atomic_write as journal_atomic_write, begin_plan, classify_method,
-    current_digest, doctor_json as journal_doctor_json, inspect as inspect_journal,
-    open_unresolved, sha256_bytes,
+    OperationSpec,
 };
-use super::parser::{Expr, MethodCall, Statement, parse_plan, resolve_expr, resolve_return};
+use super::parser::{parse_plan, resolve_expr, resolve_return, Expr, MethodCall, Statement};
 use super::result::{CodeModeOptions, CodeModeResult, CodeModeStatus};
 use super::sandbox::lower_code_plan;
 use super::store::{
-    CodeModeLimits, ExecutionStep, ExecutionStore, execution_id, finalize_result, now_ms,
+    execution_id, finalize_result, now_ms, CodeModeLimits, ExecutionStep, ExecutionStore,
 };
 use crate::expand_params::ExpandParams;
 
@@ -734,6 +734,7 @@ fn js_prelude() -> &'static str {
             // zero.token.* (the router's namespaced surface): same engine
             // ops as the top-level zero.* bindings, same policy machinery.
             shell: (...args) => __tz_call('zero.shell', args),
+            job: (...args) => __tz_call('zero.token.job', args),
             read: (...args) => __tz_call('zero.read', args),
             find: (...args) => __tz_call('zero.find', args),
             grep: (...args) => __tz_call('zero.grep', args),
@@ -2239,6 +2240,7 @@ fn dispatch_values(
         "zero.glob" | "glob" | "zero.token.glob" => exec_glob(engine, work_root, args),
         "zero.tree" | "tree" | "zero.token.tree" => exec_tree(engine, work_root, args),
         "zero.shell" | "shell" | "zero.token.shell" => exec_shell(engine, work_root, args),
+        "zero.job" | "job" | "zero.token.job" => exec_job(engine, args),
         "zero.edit" | "edit" | "zero.token.edit" => exec_edit(engine, work_root, args),
         "zero.token.expand" | "zero.expand" | "expand" => exec_expand(engine, args),
         "zero.token.expandMany" | "zero.expandMany" | "expandMany" | "expand_many" => {
@@ -2757,12 +2759,11 @@ fn exec_tree(
     args: &[Value],
 ) -> Result<OpOutcome, Box<CodeModeResult>> {
     let roots = resolve_paths_against_work_root(
-        vec![
-            args.first()
-                .and_then(|v| v.as_str())
-                .map(PathBuf::from)
-                .unwrap_or_else(|| work_root.to_path_buf()),
-        ],
+        vec![args
+            .first()
+            .and_then(|v| v.as_str())
+            .map(PathBuf::from)
+            .unwrap_or_else(|| work_root.to_path_buf())],
         work_root,
     );
     let opts = Opts::from_arg(args, 1);
@@ -2792,9 +2793,6 @@ fn exec_shell(
         "zero.shell requires a command string as first argument",
     )?;
     let opts = Opts::from_arg(args, 1);
-    // Relative cwd is always anchored to this plan's execute root. Explicit
-    // allowed roots may precede the execute root in engine configuration, so
-    // using allowed_roots.first() can silently run in the wrong project.
     let cwd = opts.str("cwd").map(|raw| {
         let path = PathBuf::from(raw);
         if path.is_absolute() {
@@ -2807,6 +2805,13 @@ fn exec_shell(
     let timeout = opts
         .usize("timeout_seconds")
         .map(|secs| Duration::from_secs(secs as u64));
+
+    if opts.bool("background").unwrap_or(false) {
+        return engine
+            .shell_background(command, cwd.as_deref(), timeout)
+            .map(OpOutcome::from_catalog)
+            .map_err(|message| Box::new(CodeModeResult::error(message, 0)));
+    }
 
     let resp = engine.shell(
         command,
@@ -2832,6 +2837,13 @@ fn exec_shell(
     }))
 }
 
+fn exec_job(engine: &TokenZeroEngine, args: &[Value]) -> Result<OpOutcome, Box<CodeModeResult>> {
+    let id = require_str_arg(args, 0, "zero.token.job requires a job id string")?;
+    engine
+        .shell_job(id)
+        .map(OpOutcome::from_catalog)
+        .map_err(|message| Box::new(CodeModeResult::error(message, 0)))
+}
 pub(crate) fn exec_edit(
     engine: &TokenZeroEngine,
     work_root: &Path,

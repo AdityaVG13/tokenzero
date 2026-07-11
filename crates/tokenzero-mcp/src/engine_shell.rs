@@ -6,10 +6,10 @@ use super::cache_pack::{
 };
 use super::collect::*;
 use super::config::{
-    EngineConfig, FETCH_ALLOW_ENV, FETCH_DENY_ENV, FETCH_ENABLED_ENV, ServeFlight, new_session_id,
+    new_session_id, EngineConfig, ServeFlight, FETCH_ALLOW_ENV, FETCH_DENY_ENV, FETCH_ENABLED_ENV,
 };
 use super::fetch_cache::{epoch_secs, fetch_index_path, load_fetch_index, record_fetch};
-use super::fetch_guard::{FETCH_META_MARKER, split_fetch_meta, validate_fetch_target};
+use super::fetch_guard::{split_fetch_meta, validate_fetch_target, FETCH_META_MARKER};
 use super::metrics;
 use super::paths::*;
 use super::render::*;
@@ -17,32 +17,267 @@ use super::session::{
     DiffTelemetry, SeenState, ServeKey, ServedRecord, SessionMemory, SessionSummary,
 };
 use super::{
-    Accounting, ContentType, DEFAULT_MCP_IDLE_TIMEOUT_SECS, DEFAULT_SHELL_INLINE_BUDGET,
-    DEFAULT_SHELL_TIMEOUT_SECS, DIFF_MAX_BYTES, DIFF_MAX_LINES, DIFF_READS_ENV, EditHunk,
-    MAX_MCP_IDLE_TIMEOUT_SECS, MAX_SEARCH_VISITED_FILES, MAX_SHELL_TIMEOUT_SECS,
-    MIN_SEARCH_VISITED_FILES, Mode, RG_PATH_ENV, SEARCH_BACKEND_ENV, SEARCH_VISIT_MULTIPLIER,
-    SESSION_DEDUP_ENV, SearchBackend, ServeOptions, ShellRenderInput, TokenZeroEngine,
-    ToolResponse, cache_maintenance, count_tokens, detect_content_type, make_capsule,
+    cache_maintenance, count_tokens, detect_content_type, make_capsule,
     make_capsule_with_raw_tokens, ref_record, render_shell, sha256_hex, shell_combined_output,
-    shell_spill_dir, shell_timeout_from_secs, split_command_string,
+    shell_spill_dir, shell_timeout_from_secs, split_command_string, Accounting, ContentType,
+    EditHunk, Mode, SearchBackend, ServeOptions, ShellRenderInput, TokenZeroEngine, ToolResponse,
+    DEFAULT_MCP_IDLE_TIMEOUT_SECS, DEFAULT_SHELL_INLINE_BUDGET, DEFAULT_SHELL_TIMEOUT_SECS,
+    DIFF_MAX_BYTES, DIFF_MAX_LINES, DIFF_READS_ENV, MAX_MCP_IDLE_TIMEOUT_SECS,
+    MAX_SEARCH_VISITED_FILES, MAX_SHELL_TIMEOUT_SECS, MIN_SEARCH_VISITED_FILES, RG_PATH_ENV,
+    SEARCH_BACKEND_ENV, SEARCH_VISIT_MULTIPLIER, SESSION_DEDUP_ENV,
 };
 use crate::recall;
 use globset::{GlobBuilder, GlobMatcher};
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 use std::collections::{BTreeMap, HashSet};
 use std::ffi::OsString;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::{Condvar, Mutex, OnceLock};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Condvar, Mutex, OnceLock};
+use std::thread;
 use std::time::{Duration, SystemTime};
 use tokenzero_filters::rewrite_command;
 use tokenzero_recovery::{ExpansionResult, RecoveryStore, StoredPayload};
 use tokenzero_runtime::{
-    RunOutputPolicy, StreamCapture, contains_platform_shell_syntax,
-    run_command_with_policy_observer,
+    contains_platform_shell_syntax, run_command_with_policy_observer, RunOutputPolicy,
+    StreamCapture,
 };
 
+#[derive(Debug)]
+struct BackgroundJobState {
+    status: &'static str,
+    pid: Option<u32>,
+    pgid: Option<u32>,
+    exit_code: Option<i32>,
+}
+
+#[derive(Debug)]
+struct BackgroundJob {
+    id: String,
+    log: PathBuf,
+    state: Mutex<BackgroundJobState>,
+}
+
+#[derive(Debug, Default)]
+pub(crate) struct BackgroundJobRegistry {
+    next_id: AtomicU64,
+    jobs: Mutex<BTreeMap<String, Arc<BackgroundJob>>>,
+}
+
+static BACKGROUND_JOBS: OnceLock<BackgroundJobRegistry> = OnceLock::new();
+
+fn background_jobs() -> &'static BackgroundJobRegistry {
+    BACKGROUND_JOBS.get_or_init(BackgroundJobRegistry::default)
+}
+
+impl BackgroundJobRegistry {
+    fn start(
+        &self,
+        argv: Vec<String>,
+        cwd: Option<PathBuf>,
+        env: BTreeMap<String, String>,
+        timeout: Duration,
+        log_dir: PathBuf,
+    ) -> Result<Value, String> {
+        fs::create_dir_all(&log_dir).map_err(|err| format!("create background log dir: {err}"))?;
+        let sequence = self.next_id.fetch_add(1, Ordering::Relaxed);
+        let id = format!("tzjob-{}-{sequence}", std::process::id());
+        let log = log_dir.join(format!("{id}.log"));
+        fs::write(&log, []).map_err(|err| format!("create background log: {err}"))?;
+        let job = Arc::new(BackgroundJob {
+            id: id.clone(),
+            log: log.clone(),
+            state: Mutex::new(BackgroundJobState {
+                status: "running",
+                pid: None,
+                pgid: None,
+                exit_code: None,
+            }),
+        });
+        self.jobs
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .insert(id.clone(), Arc::clone(&job));
+        crate::codemode::containment::reserve_background_job(&id);
+        let worker_id = id.clone();
+        let spawn = thread::Builder::new()
+            .name(format!("tokenzero-{id}"))
+            .spawn(move || {
+                let observed = Arc::clone(&job);
+                let result = run_command_with_policy_observer(
+                    &argv,
+                    cwd.as_deref(),
+                    Some(&env),
+                    None,
+                    timeout,
+                    false,
+                    RunOutputPolicy {
+                        spill_dir: Some(log_dir),
+                        ..RunOutputPolicy::default()
+                    },
+                    move |pid, pgid, state| {
+                        if state == "running" {
+                            let mut current = observed
+                                .state
+                                .lock()
+                                .unwrap_or_else(|poison| poison.into_inner());
+                            current.pid = pid;
+                            current.pgid = pgid;
+                            drop(current);
+                            crate::codemode::containment::note_background_child(
+                                &observed.id,
+                                pid,
+                                pgid,
+                            );
+                        }
+                    },
+                );
+                let (text, exit_code, status) = match result {
+                    Ok(result) => (
+                        shell_combined_output(
+                            &result.command,
+                            result.exit_code,
+                            &result.stdout,
+                            &result.stderr,
+                        ),
+                        result.exit_code,
+                        "exited",
+                    ),
+                    Err(err) => (format!("background shell failed: {err}\n"), None, "failed"),
+                };
+                let _ = fs::write(&job.log, text);
+                let mut current = job
+                    .state
+                    .lock()
+                    .unwrap_or_else(|poison| poison.into_inner());
+                current.status = status;
+                current.exit_code = exit_code;
+                drop(current);
+                crate::codemode::containment::finish_background_job(&worker_id);
+            });
+        if let Err(err) = spawn {
+            self.jobs
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner())
+                .remove(&id);
+            crate::codemode::containment::finish_background_job(&id);
+            return Err(format!("spawn background worker: {err}"));
+        }
+        Ok(json!({"job": id, "log": log.display().to_string()}))
+    }
+
+    fn poll(&self, id: &str) -> Result<Value, String> {
+        let job = self
+            .jobs
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .get(id)
+            .cloned()
+            .ok_or_else(|| format!("unknown background job: {id}"))?;
+        let state = job
+            .state
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let log_text = fs::read_to_string(&job.log).unwrap_or_default();
+        let tail = log_text
+            .chars()
+            .rev()
+            .take(8192)
+            .collect::<String>()
+            .chars()
+            .rev()
+            .collect::<String>();
+        Ok(json!({
+            "status": state.status,
+            "pid": state.pid,
+            "exitCode": state.exit_code,
+            "tail": tail,
+            "log": job.log.display().to_string(),
+        }))
+    }
+
+    fn terminate_all(&self) {
+        let jobs = self
+            .jobs
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        for job in jobs.values() {
+            let state = job
+                .state
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner());
+            if state.status == "running" {
+                if let Some(pgid) = state.pgid {
+                    terminate_background_group(pgid);
+                }
+            }
+        }
+    }
+}
+
+impl Drop for BackgroundJobRegistry {
+    fn drop(&mut self) {
+        self.terminate_all();
+    }
+}
+
+#[cfg(unix)]
+fn terminate_background_group(pgid: u32) {
+    if pgid == 0 {
+        return;
+    }
+    let target = format!("-{pgid}");
+    let _ = std::process::Command::new("kill")
+        .args(["-TERM", "--", &target])
+        .status();
+    thread::sleep(Duration::from_millis(50));
+    let _ = std::process::Command::new("kill")
+        .args(["-KILL", "--", &target])
+        .status();
+}
+
+#[cfg(not(unix))]
+fn terminate_background_group(_: u32) {}
+
 impl TokenZeroEngine {
+    pub(crate) fn shell_background(
+        &self,
+        command: &str,
+        cwd: Option<&Path>,
+        timeout_override: Option<Duration>,
+    ) -> Result<Value, String> {
+        if let Some(cwd) = cwd {
+            if !self.path_allowed(cwd) {
+                return Err(format!("cwd is outside allowed roots: {}", cwd.display()));
+            }
+        }
+        let run_argv =
+            if contains_platform_shell_syntax(command, tokenzero_runtime::current_platform()) {
+                vec![command.to_string()]
+            } else {
+                split_command_string(command)
+            };
+        let mut child_env = BTreeMap::new();
+        child_env.insert("TOKENZERO_INNER".to_string(), "1".to_string());
+        background_jobs().start(
+            run_argv,
+            cwd.map(Path::to_path_buf),
+            child_env,
+            timeout_override.unwrap_or(self.config.shell_timeout),
+            shell_spill_dir(&self.config.cache_path),
+        )
+    }
+
+    pub(crate) fn shell_job(&self, id: &str) -> Result<Value, String> {
+        background_jobs().poll(id)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn shutdown_background_jobs_for_test(&self) {
+        background_jobs().terminate_all();
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub fn shell(
         &self,
@@ -351,5 +586,42 @@ impl TokenZeroEngine {
             "refs_cover_full_output": !streams_truncated
         }));
         response
+    }
+}
+
+#[cfg(all(test, unix))]
+mod background_tests {
+    use super::*;
+
+    #[test]
+    fn registry_drop_kills_running_process_group() {
+        let dir = tempfile::tempdir().unwrap();
+        let registry = BackgroundJobRegistry::default();
+        let launched = registry
+            .start(
+                vec!["sleep".to_string(), "30".to_string()],
+                None,
+                BTreeMap::new(),
+                Duration::from_secs(60),
+                dir.path().to_path_buf(),
+            )
+            .unwrap();
+        let id = launched["job"].as_str().unwrap();
+        let pid = (0..50)
+            .find_map(|_| {
+                let pid = registry.poll(id).unwrap()["pid"].as_u64();
+                if pid.is_none() {
+                    thread::sleep(Duration::from_millis(10));
+                }
+                pid
+            })
+            .expect("background child did not publish its pid") as u32;
+        drop(registry);
+        thread::sleep(Duration::from_millis(200));
+        let alive = std::process::Command::new("kill")
+            .args(["-0", &pid.to_string()])
+            .status()
+            .is_ok_and(|status| status.success());
+        assert!(!alive, "background child {pid} survived registry drop");
     }
 }
