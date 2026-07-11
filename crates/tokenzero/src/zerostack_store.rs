@@ -4,10 +4,13 @@
 //! MCP and CodeMode share one implementation (wqw.2 / wqw.8).
 
 pub use tokenzero_mcp::{
-    allowed_roots_for_workspace, default_allowed_roots, default_recovery_cache_path,
-    resolve_recovery_cache_path, resolve_recovery_cache_path_with_env, resolve_store_root_with_env,
-    store_resolution_json, store_resolution_report, store_resolution_report_with_env,
-    tokenzero_work_root,
+    allowed_roots_for_workspace, default_allowed_roots, resolve_recovery_cache_path,
+    store_resolution_json, store_resolution_report, tokenzero_work_root,
+};
+#[cfg(test)]
+use tokenzero_mcp::{
+    default_recovery_cache_path, resolve_recovery_cache_path_with_env,
+    resolve_store_root_with_env, store_resolution_report_with_env,
 };
 
 #[cfg(test)]
