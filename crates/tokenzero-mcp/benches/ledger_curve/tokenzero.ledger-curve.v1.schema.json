@@ -1,0 +1,69 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://tokenzero.dev/schemas/tokenzero.ledger-curve.v1.schema.json",
+  "title": "TokenZero Self-hosting Ledger Curve v1",
+  "description": "Reproducible per-release session-cost curve aggregated from tokenzero.ledger.v1. A session is uniquely identified by version.crate, repo, and session_id; every valid record is retained.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "generated_from_latest_record_at", "methodology", "sample", "sources", "curve", "sessions", "losses_disclosed"],
+  "properties": {
+    "schema": {"const": "tokenzero.ledger-curve.v1"},
+    "generated_from_latest_record_at": {"type": ["string", "null"], "format": "date-time"},
+    "methodology": {"type": "object"},
+    "sample": {
+      "type": "object",
+      "required": ["source_files_n", "records_n", "sessions_n", "versions_n", "malformed_records_n", "ignored_schema_records_n"],
+      "properties": {
+        "source_files_n": {"type": "integer", "minimum": 0},
+        "records_n": {"type": "integer", "minimum": 0},
+        "sessions_n": {"type": "integer", "minimum": 0},
+        "versions_n": {"type": "integer", "minimum": 0},
+        "malformed_records_n": {"type": "integer", "minimum": 0},
+        "ignored_schema_records_n": {"type": "integer", "minimum": 0}
+      }
+    },
+    "sources": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["path", "sha256", "bytes", "valid_records"],
+        "properties": {
+          "path": {"type": "string"},
+          "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+          "bytes": {"type": "integer", "minimum": 0},
+          "valid_records": {"type": "integer", "minimum": 0}
+        }
+      }
+    },
+    "curve": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["version", "sessions_n", "turns_n", "visible_cost_tokens", "raw_tokens_total", "prevented_tokens_total", "saved_bytes_total", "first_timestamp_ms", "last_timestamp_ms"],
+        "properties": {
+          "version": {"type": "string"},
+          "sessions_n": {"type": "integer", "minimum": 1},
+          "turns_n": {"type": "integer", "minimum": 1},
+          "visible_cost_tokens": {
+            "type": "object",
+            "required": ["total", "median_per_session", "mean_per_session", "min_per_session", "max_per_session"],
+            "properties": {
+              "total": {"type": "integer", "minimum": 0},
+              "median_per_session": {"type": "number", "minimum": 0},
+              "mean_per_session": {"type": "number", "minimum": 0},
+              "min_per_session": {"type": "integer", "minimum": 0},
+              "max_per_session": {"type": "integer", "minimum": 0}
+            }
+          },
+          "raw_tokens_total": {"type": "integer", "minimum": 0},
+          "prevented_tokens_total": {"type": "integer", "minimum": 0},
+          "saved_bytes_total": {"type": "integer", "minimum": 0},
+          "first_timestamp_ms": {"type": "integer", "minimum": 0},
+          "last_timestamp_ms": {"type": "integer", "minimum": 0}
+        }
+      }
+    },
+    "sessions": {"type": "array", "items": {"type": "object"}},
+    "losses_disclosed": {"type": "array", "minItems": 1, "items": {"type": "string"}}
+  }
+}
