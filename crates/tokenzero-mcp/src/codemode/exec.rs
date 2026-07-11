@@ -18,9 +18,16 @@ use crate::{EditHunk, EngineConfig, TokenZeroEngine, shell_timeout_from_secs};
 
 use super::catalog::{describe_method, search_catalog};
 use super::parser::{Expr, MethodCall, Statement, parse_plan, resolve_expr, resolve_return};
+use super::journal::{
+    BeginOutcome, JournalOperation, JournalState, JournalTransaction, OperationClass, OperationSpec,
+    atomic_write as journal_atomic_write, begin_plan, classify_method, current_digest,
+    doctor_json as journal_doctor_json, inspect as inspect_journal, open_unresolved, sha256_bytes,
+};
 use super::result::{CodeModeOptions, CodeModeResult, CodeModeStatus};
 use super::sandbox::lower_code_plan;
-use super::store::{CodeModeLimits, ExecutionStep, ExecutionStore, finalize_result, now_ms};
+use super::store::{
+    CodeModeLimits, ExecutionStep, ExecutionStore, execution_id, finalize_result, now_ms,
+};
 use crate::expand_params::ExpandParams;
 
 const EXACT_EXPAND_MARKER: &str = "__tz_exact_expand";
@@ -781,6 +788,50 @@ pub(super) fn limits_from_options(options: &CodeModeOptions) -> CodeModeLimits {
     }
 }
 
+fn lower_mutating_plan_to_json(
+    statements: &[Statement],
+    original_plan: &str,
+    started_ms: u128,
+) -> Result<Option<String>, String> {
+    let mut calls = Vec::new();
+    let mut needs_policy_envelope = false;
+    for (index, statement) in statements.iter().enumerate() {
+        let (id, call) = match statement {
+            Statement::Binding { name, call } => (name.clone(), call),
+            Statement::Call(call) => (format!("step{index}"), call),
+            Statement::Return(_) => continue,
+        };
+        needs_policy_envelope |= classify_method(&call.method) != OperationClass::ReadOnly;
+        calls.push((id, call));
+    }
+    if !needs_policy_envelope {
+        return Ok(None);
+    }
+    let empty_scope = HashMap::new();
+    let mut steps = Vec::with_capacity(calls.len());
+    for (id, call) in calls {
+        let args = call
+            .args
+            .iter()
+            .map(|arg| resolve_expr(arg, &empty_scope))
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|message| {
+                format!(
+                    "transactional lowered plans require literal mutation inputs so all preconditions can be journaled before apply: {message}"
+                )
+            })?;
+        steps.push(json!({"id": id, "method": call.method, "args": args}));
+    }
+    serde_json::to_string(&json!({
+        "atomic": false,
+        "plan_id": sha256_bytes(original_plan.as_bytes()),
+        "execution_id": execution_id(original_plan, started_ms),
+        "steps": steps,
+    }))
+    .map(Some)
+    .map_err(|err| format!("serialize transactional lowered plan: {err}"))
+}
+
 fn execute_lowered_plan(
     plan: &str,
     options: CodeModeOptions,
@@ -802,6 +853,24 @@ fn execute_lowered_plan(
             );
         }
     };
+
+    match lower_mutating_plan_to_json(&statements, plan, started_ms) {
+        Ok(Some(json_plan)) => {
+            return execute_json_plan(&json_plan, options, limits, started_ms);
+        }
+        Ok(None) => {}
+        Err(message) => {
+            return finalize_codemode_result(
+                CodeModeResult::error_with_kind("transaction", message, 0, false),
+                kind,
+                plan,
+                started_ms,
+                &options,
+                limits,
+                Vec::new(),
+            );
+        }
+    }
 
     if statements.len() > limits.max_logical_ops {
         return finalize_codemode_result(
@@ -1057,6 +1126,10 @@ fn finalize_codemode_result(
 ) -> CodeModeResult {
     let work_root = tokenzero_work_root(options.root.clone());
     let engine = make_engine_for_root_with_options(work_root, options);
+    let journal_health = journal_doctor_json(&engine.config.cache_path);
+    if let Some(extra) = result.telemetry.extra.as_mut().and_then(Value::as_object_mut) {
+        extra.insert("plan_journals".to_string(), journal_health);
+    }
     if matches!(result.status, CodeModeStatus::Completed) {
         if let Some(value) = result.value.take() {
             let (value, refs) = ref_first_final_value(&engine, value, options);
@@ -1216,6 +1289,221 @@ fn lower_recipe_plan(plan: &str) -> Option<String> {
     None
 }
 
+fn predict_edit_postimage(text: &str, edits: &[Value], create: bool) -> Result<String, String> {
+    if create {
+        if edits.len() != 1 {
+            return Err("create=true requires exactly one edit hunk".to_string());
+        }
+        let hunk = edits[0].as_object().ok_or_else(|| "edit hunk must be an object".to_string())?;
+        if hunk.get("find").and_then(Value::as_str).unwrap_or("") != "" {
+            return Err("create=true requires an empty find".to_string());
+        }
+        return hunk.get("replace").and_then(Value::as_str).map(str::to_string)
+            .ok_or_else(|| "edit hunk requires replace text".to_string());
+    }
+    let mut next = text.to_string();
+    for (index, value) in edits.iter().enumerate() {
+        let hunk = value.as_object().ok_or_else(|| format!("edit hunk {index} must be an object"))?;
+        let find = hunk.get("find").and_then(Value::as_str)
+            .ok_or_else(|| format!("edit hunk {index} requires find text"))?;
+        let replace = hunk.get("replace").and_then(Value::as_str)
+            .ok_or_else(|| format!("edit hunk {index} requires replace text"))?;
+        let replace_all = hunk.get("replace_all").and_then(Value::as_bool).unwrap_or(false);
+        let matches = next.match_indices(find).count();
+        if matches == 0 { return Err(format!("edit hunk {index} find text not found")); }
+        if !replace_all && matches != 1 {
+            return Err(format!("edit hunk {index} is ambiguous ({matches} matches)"));
+        }
+        next = if replace_all { next.replace(find, replace) } else { next.replacen(find, replace, 1) };
+    }
+    Ok(next)
+}
+
+fn prepare_json_transaction(
+    engine: &TokenZeroEngine,
+    work_root: &Path,
+    parsed: &Value,
+    steps: &[Value],
+    plan: &str,
+    started_ms: u128,
+) -> Result<(Option<JournalTransaction>, Option<String>, bool), String> {
+    let execution_id = parsed
+        .get("execution_id")
+        .and_then(Value::as_str)
+        .map(str::to_string)
+        .unwrap_or_else(|| execution_id(plan, started_ms));
+    let plan_id = parsed
+        .get("plan_id")
+        .and_then(Value::as_str)
+        .map(str::to_string)
+        .unwrap_or_else(|| sha256_bytes(plan.as_bytes()));
+    let atomic_requested = parsed
+        .get("atomic")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    match inspect_journal(&engine.config.cache_path, &execution_id) {
+        Ok(existing) if existing.atomic => {
+            if existing.plan_id != plan_id {
+                return Err("journal identity collision".to_string());
+            }
+            if !atomic_requested {
+                return Err("journal replay changed atomic policy".to_string());
+            }
+            return match existing.state {
+                JournalState::Committed => Ok((None, None, true)),
+                JournalState::RolledBack => {
+                    Err("execution was already rolled back; use a new execution_id".to_string())
+                }
+                _ => open_unresolved(&engine.config.cache_path, &execution_id)
+                    .map(|transaction| (Some(transaction), None, false)),
+            };
+        }
+        Ok(_) => {}
+        Err(message) if message.contains("No such file or directory") => {}
+        Err(message) => return Err(message),
+    }
+    let mut seen_targets = std::collections::HashSet::new();
+    let mut specs = Vec::with_capacity(steps.len());
+    for (index, step) in steps.iter().enumerate() {
+        let id = step
+            .get("id")
+            .and_then(Value::as_str)
+            .map(str::to_string)
+            .unwrap_or_else(|| format!("step{index}"));
+        let method = step
+            .get("method")
+            .or_else(|| step.get("tool"))
+            .and_then(Value::as_str)
+            .ok_or_else(|| format!("json plan step {index} missing method"))?
+            .to_string();
+        let mut spec = OperationSpec {
+            id,
+            method: method.clone(),
+            target: None,
+            precondition_digest: None,
+            precondition_exists: None,
+            postcondition_digest: None,
+            undo_refs: Vec::new(),
+            size: None,
+        };
+        if classify_method(&method) == OperationClass::ReversibleStoreMutation
+            && matches!(
+                method.as_str(),
+                "zero.edit" | "edit" | "zero.token.edit" | "tz_edit"
+            )
+        {
+            let path = step
+                .get("args")
+                .and_then(Value::as_array)
+                .and_then(|args| args.first())
+                .and_then(Value::as_str)
+                .ok_or_else(|| {
+                    format!(
+                        "journaled edit step {index} requires a literal path; dynamic targets are not CAS-safe"
+                    )
+                })?;
+            let path = resolve_paths_against_work_root(vec![PathBuf::from(path)], work_root)
+                .into_iter()
+                .next()
+                .ok_or_else(|| format!("journaled edit step {index} has no target"))?;
+            if !seen_targets.insert(path.clone()) {
+                return Err(format!(
+                    "atomic plan has repeated edit target {}; combine its hunks into one step",
+                    path.display()
+                ));
+            }
+            let (exists, bytes) = match std::fs::read(&path) {
+                Ok(bytes) => (true, bytes),
+                Err(err) if err.kind() == std::io::ErrorKind::NotFound => (false, Vec::new()),
+                Err(err) => return Err(format!("read edit precondition {}: {err}", path.display())),
+            };
+            let text = String::from_utf8(bytes.clone()).map_err(|_| {
+                format!("journaled edit target {} is not UTF-8", path.display())
+            })?;
+            let mut store = tokenzero_recovery::RecoveryStore::new(Some(
+                engine.config.cache_path.clone(),
+            ));
+            let stored = store
+                .store_payload(
+                    &text,
+                    detect_content_type(&text, Some(&path)),
+                    Some(&path),
+                    None,
+                    None,
+                )
+                .map_err(|err| format!("persist edit undo pre-image: {err}"))?;
+            let args = step.get("args").and_then(Value::as_array).expect("path came from args");
+            let edits = args.get(1).and_then(Value::as_array)
+                .ok_or_else(|| format!("journaled edit step {index} requires an edit array"))?;
+            let create = args.get(2).and_then(Value::as_object)
+                .and_then(|opts| opts.get("create")).and_then(Value::as_bool).unwrap_or(false);
+            let postimage = predict_edit_postimage(&text, edits, create)?;
+            spec.target = Some(path);
+            spec.precondition_digest = exists.then(|| sha256_bytes(&bytes));
+            spec.precondition_exists = Some(exists);
+            spec.postcondition_digest = Some(sha256_bytes(postimage.as_bytes()));
+            spec.undo_refs.push(stored.blob_ref);
+            spec.size = Some(bytes.len() as u64);
+        }
+        specs.push(spec);
+    }
+    match begin_plan(
+        &engine.config.cache_path,
+        work_root,
+        &plan_id,
+        &execution_id,
+        specs,
+        atomic_requested,
+    )? {
+        BeginOutcome::Disabled => Ok((None, None, false)),
+        BeginOutcome::Downgraded { reason } => Ok((None, Some(reason), false)),
+        BeginOutcome::AlreadyCommitted => Ok((None, None, true)),
+        BeginOutcome::Transaction(tx) => Ok((Some(tx), None, false)),
+    }
+}
+
+fn rollback_journal_operation(
+    cache_path: &Path,
+    operation: &JournalOperation,
+) -> Result<(), String> {
+    if operation.classification != OperationClass::ReversibleStoreMutation {
+        return Ok(());
+    }
+    let Some(target) = operation.target.as_deref() else {
+        // CAS puts are immutable and duplicate-safe; no visible state needs restoring.
+        return Ok(());
+    };
+    let path = Path::new(target);
+    let actual = current_digest(path).map_err(|err| format!("read rollback target: {err}"))?;
+    if actual == operation.precondition_digest {
+        return Ok(());
+    }
+    if actual != operation.postcondition_digest {
+        return Err(format!(
+            "rollback CAS refused for {target}: expected post-image {:?}, actual {:?}",
+            operation.postcondition_digest, actual
+        ));
+    }
+    if operation.precondition_exists == Some(false) {
+        match std::fs::remove_file(path) {
+            Ok(()) => return Ok(()),
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(err) => return Err(format!("remove created file {target}: {err}")),
+        }
+    }
+    let undo_ref = operation
+        .undo_refs
+        .first()
+        .ok_or_else(|| format!("rollback step {} is missing an undo ref", operation.index))?;
+    let mut store = tokenzero_recovery::RecoveryStore::new(Some(cache_path.to_path_buf()));
+    let expanded = store.expand(undo_ref, None, None, None, None, None);
+    if !expanded.found {
+        return Err(format!("undo ref {undo_ref} unavailable: {}", expanded.reason));
+    }
+    journal_atomic_write(path, expanded.content.as_bytes())
+        .map_err(|err| format!("restore {target}: {err}"))
+}
+
 fn execute_json_plan(
     plan: &str,
     options: CodeModeOptions,
@@ -1275,6 +1563,38 @@ fn execute_json_plan(
 
     let work_root = tokenzero_work_root(options.root.clone());
     let engine = make_engine_for_root_with_options(work_root.clone(), &options);
+    let (mut transaction, transaction_downgrade, already_committed) =
+        match prepare_json_transaction(&engine, &work_root, &parsed, steps_arr, plan, started_ms) {
+            Ok(value) => value,
+            Err(message) => {
+                return finalize_codemode_result(
+                    CodeModeResult::error_with_kind("transaction", message, 0, false),
+                    "json",
+                    plan,
+                    started_ms,
+                    &options,
+                    limits,
+                    Vec::new(),
+                );
+            }
+        };
+    if already_committed {
+        return finalize_codemode_result(
+            CodeModeResult::completed(
+                json!({"transaction": "already_committed", "idempotent_replay": true}),
+                Vec::new(),
+                0,
+                0,
+                0,
+            ),
+            "json",
+            plan,
+            started_ms,
+            &options,
+            limits,
+            Vec::new(),
+        );
+    }
     let mut scope: HashMap<String, Value> = HashMap::new();
     let mut all_refs = Vec::new();
     let mut total_visible = 0usize;
@@ -1325,19 +1645,104 @@ fn execute_json_plan(
             method: method.clone(),
             args,
         };
-        let outcome = match dispatch(&engine, &work_root, &call, &scope) {
-            Ok(outcome) => outcome,
-            Err(mut err) => {
-                if let Some(extra) = err.telemetry.extra.as_mut().and_then(Value::as_object_mut) {
-                    extra.insert("operations".to_string(), json!(idx + 1));
+        let reversible = classify_method(&method) == OperationClass::ReversibleStoreMutation;
+        let replayed = reversible
+            && transaction
+                .as_ref()
+                .is_some_and(|tx| !tx.step_needs_apply(idx));
+        if reversible && !replayed {
+            if let Some(tx) = transaction.as_mut() {
+                if let Err(message) = tx.mark_applying(idx) {
+                    let cache_path = engine.config.cache_path.clone();
+                    let combined = tx
+                        .rollback(message.clone(), |op| rollback_journal_operation(&cache_path, op))
+                        .err()
+                        .map(|err| err.to_string())
+                        .unwrap_or(message);
+                    return finalize_codemode_result(
+                        CodeModeResult::error_with_kind("transaction", combined, idx, false),
+                        "json", plan, started_ms, &options, limits, executed,
+                    );
                 }
-                err.telemetry.operations = idx + 1;
-                err.telemetry.logical_ops = idx + 1;
-                return finalize_codemode_result(
-                    *err, "json", plan, started_ms, &options, limits, executed,
-                );
+            }
+        }
+        let outcome = if replayed {
+            OpOutcome::from_catalog(json!({
+                "idempotent_replay": true,
+                "idempotency_key": transaction
+                    .as_ref()
+                    .and_then(|tx| tx.journal().operations.get(idx))
+                    .map(|op| op.idempotency_key.clone()),
+            }))
+        } else {
+            match dispatch(&engine, &work_root, &call, &scope) {
+                Ok(outcome) => outcome,
+                Err(mut err) => {
+                    if let Some(extra) = err.telemetry.extra.as_mut().and_then(Value::as_object_mut) {
+                        extra.insert("operations".to_string(), json!(idx + 1));
+                    }
+                    err.telemetry.operations = idx + 1;
+                    err.telemetry.logical_ops = idx + 1;
+                    if let Some(tx) = transaction.as_mut() {
+                        let original = err.error.as_ref()
+                            .map(|detail| detail.message.clone())
+                            .unwrap_or_else(|| "operation failed".to_string());
+                        let cache_path = engine.config.cache_path.clone();
+                        if let Err(combined) = tx.rollback(original, |op| {
+                            rollback_journal_operation(&cache_path, op)
+                        }) {
+                            if let Some(detail) = err.error.as_mut() {
+                                detail.message = combined.to_string();
+                            }
+                        }
+                    }
+                    return finalize_codemode_result(
+                        *err, "json", plan, started_ms, &options, limits, executed,
+                    );
+                }
             }
         };
+        if reversible && !replayed {
+            if let Some(tx) = transaction.as_mut() {
+                let postcondition = tx
+                    .journal()
+                    .operations
+                    .get(idx)
+                    .and_then(|op| op.target.as_deref())
+                    .map(Path::new)
+                    .map(current_digest)
+                    .transpose()
+                    .map_err(|err| format!("read postcondition: {err}"));
+                let postcondition = match postcondition {
+                    Ok(value) => value.flatten(),
+                    Err(message) => {
+                        let cache_path = engine.config.cache_path.clone();
+                        let combined = tx
+                            .rollback(message.clone(), |op| rollback_journal_operation(&cache_path, op))
+                            .err()
+                            .map(|err| err.to_string())
+                            .unwrap_or(message);
+                        return finalize_codemode_result(
+                            CodeModeResult::error_with_kind("transaction", combined, idx + 1, false),
+                            "json", plan, started_ms, &options, limits, executed,
+                        );
+                    }
+                };
+                let compensation_refs = refs_from_value(outcome.as_value());
+                if let Err(message) = tx.mark_applied(idx, postcondition, compensation_refs) {
+                    let cache_path = engine.config.cache_path.clone();
+                    let combined = tx
+                        .rollback(message.clone(), |op| rollback_journal_operation(&cache_path, op))
+                        .err()
+                        .map(|err| err.to_string())
+                        .unwrap_or(message);
+                    return finalize_codemode_result(
+                        CodeModeResult::error_with_kind("transaction", combined, idx + 1, false),
+                        "json", plan, started_ms, &options, limits, executed,
+                    );
+                }
+            }
+        }
         let refs = refs_from_value(outcome.as_value());
         executed.push(ExecutionStep {
             id: id.clone(),
@@ -1383,6 +1788,29 @@ fn execute_json_plan(
     }
     result.telemetry.parallel_groups = Some(count_parallel_groups(steps_arr));
     result.telemetry.physical_ops = estimate_physical_ops(steps_arr);
+    if let Some(reason) = transaction_downgrade {
+        if let Some(extra) = result.telemetry.extra.as_mut().and_then(Value::as_object_mut) {
+            extra.insert("transaction_atomic".to_string(), json!(false));
+            extra.insert("transaction_downgrade".to_string(), json!(reason));
+        }
+    }
+    if let Some(tx) = transaction {
+        match tx.commit() {
+            Ok(journal) => {
+                if let Some(extra) = result.telemetry.extra.as_mut().and_then(Value::as_object_mut) {
+                    extra.insert("transaction_atomic".to_string(), json!(true));
+                    extra.insert("plan_journal_version".to_string(), json!(journal.version));
+                    extra.insert("journal_state".to_string(), json!(journal.state));
+                }
+            }
+            Err(message) => {
+                return finalize_codemode_result(
+                    CodeModeResult::error_with_kind("transaction", message, steps_arr.len(), false),
+                    "json", plan, started_ms, &options, limits, executed,
+                );
+            }
+        }
+    }
     finalize_codemode_result(result, "json", plan, started_ms, &options, limits, executed)
 }
 
@@ -1562,6 +1990,18 @@ fn dispatch_values(
         "codemode.limits" | "limits" => {
             Ok(OpOutcome::from_catalog(CodeModeLimits::default().as_json()))
         }
+        "codemode.journalDoctor" | "journalDoctor" | "journal_doctor" => {
+            Ok(OpOutcome::from_catalog(journal_doctor_json(&engine.config.cache_path)))
+        }
+        "codemode.journalInspect" | "journalInspect" | "journal_inspect" => {
+            exec_journal_inspect(engine, args)
+        }
+        "codemode.journalResume" | "journalResume" | "journal_resume" => {
+            exec_journal_resume(engine, args)
+        }
+        "codemode.journalRollback" | "journalRollback" | "journal_rollback" => {
+            exec_journal_rollback(engine, args)
+        }
         _ => Err(Box::new(CodeModeResult::error(
             format!(
                 "unknown method: {method}. Use codemode.search() to discover available methods"
@@ -1572,6 +2012,75 @@ fn dispatch_values(
 }
 
 // ─── Operation implementations ──────────────────────────────────────────────
+
+fn journal_execution_arg(args: &[Value]) -> Result<&str, Box<CodeModeResult>> {
+    require_str_arg(args, 0, "journal command requires an execution_id string")
+}
+
+fn exec_journal_inspect(
+    engine: &TokenZeroEngine,
+    args: &[Value],
+) -> Result<OpOutcome, Box<CodeModeResult>> {
+    let execution_id = journal_execution_arg(args)?;
+    inspect_journal(&engine.config.cache_path, execution_id)
+        .and_then(|journal| serde_json::to_value(journal).map_err(|err| err.to_string()))
+        .map(OpOutcome::from_catalog)
+        .map_err(|message| Box::new(CodeModeResult::error_with_kind(
+            "journal_inspect", message, 0, false,
+        )))
+}
+
+fn exec_journal_resume(
+    engine: &TokenZeroEngine,
+    args: &[Value],
+) -> Result<OpOutcome, Box<CodeModeResult>> {
+    let execution_id = journal_execution_arg(args)?;
+    let journal = inspect_journal(&engine.config.cache_path, execution_id)
+        .map_err(|message| Box::new(CodeModeResult::error_with_kind(
+            "journal_resume", message, 0, false,
+        )))?;
+    if journal.state.is_resolved() {
+        return Err(Box::new(CodeModeResult::error_with_kind(
+            "journal_resume",
+            format!("journal is already resolved as {:?}", journal.state),
+            0,
+            false,
+        )));
+    }
+    Ok(OpOutcome::from_catalog(json!({
+        "execution_id": execution_id,
+        "state": journal.state,
+        "resume": "rerun the original redacted plan with the same execution_id; idempotency keys and CAS checks skip completed mutations",
+    })))
+}
+
+fn exec_journal_rollback(
+    engine: &TokenZeroEngine,
+    args: &[Value],
+) -> Result<OpOutcome, Box<CodeModeResult>> {
+    let execution_id = journal_execution_arg(args)?;
+    let mut transaction = open_unresolved(&engine.config.cache_path, execution_id)
+        .map_err(|message| Box::new(CodeModeResult::error_with_kind(
+            "journal_rollback", message, 0, false,
+        )))?;
+    let cache_path = engine.config.cache_path.clone();
+    transaction
+        .rollback("manual rollback requested", |operation| {
+            rollback_journal_operation(&cache_path, operation)
+        })
+        .map_err(|error| Box::new(CodeModeResult::error_with_kind(
+            "journal_rollback", error.to_string(), 0, false,
+        )))?;
+    let journal = inspect_journal(&engine.config.cache_path, execution_id)
+        .map_err(|message| Box::new(CodeModeResult::error_with_kind(
+            "journal_rollback", message, 0, false,
+        )))?;
+    Ok(OpOutcome::from_catalog(json!({
+        "execution_id": execution_id,
+        "state": journal.state,
+        "rolled_back": true,
+    })))
+}
 
 fn tool_response_to_value(resp: &ToolResponse) -> Value {
     let text = resp

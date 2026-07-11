@@ -5,6 +5,7 @@
 
 pub(crate) mod catalog;
 mod exec;
+pub(crate) mod journal;
 mod parser;
 mod result;
 mod sandbox;

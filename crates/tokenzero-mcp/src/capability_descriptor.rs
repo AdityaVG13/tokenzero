@@ -6,6 +6,7 @@ use serde_json::{json, Value};
 use std::collections::BTreeMap;
 use tokenzero_core::{McpToolSurface, MCP_SCHEMA_VERSION};
 
+use crate::codemode::journal::{classify_descriptor_tool, OperationClass};
 use crate::catalog::{
     canonical_tool_names_for_surface, canonical_tool_specs, resource_specs, tool_clusters,
     ResourceSpec,
@@ -49,6 +50,7 @@ pub struct ToolCapability {
     pub cluster: String,
     pub summary: String,
     pub capabilities: Vec<String>,
+    pub operation_class: OperationClass,
 }
 
 /// ZeroRef v1 capability contract.
@@ -158,6 +160,7 @@ fn build_all_tool_capabilities() -> Vec<ToolCapability> {
             cluster: seed.cluster.to_string(),
             summary: seed.summary.to_string(),
             capabilities: capabilities_for_tool(seed.name, seed.cluster),
+            operation_class: classify_descriptor_tool(seed.name),
         })
         .collect()
 }

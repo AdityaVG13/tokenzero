@@ -3,6 +3,7 @@
 use serde::Serialize;
 use serde_json::{Value, json};
 
+use super::journal::{OperationClass, classify_method};
 use super::store::CodeModeLimits;
 
 #[derive(Debug, Clone, Serialize)]
@@ -219,6 +220,30 @@ const METHOD_CATALOG: &[MethodDef] = &[
         signature: "codemode.describe(path: string): Promise<{ path, description, types: string }>",
     },
     MethodDef {
+        path: "codemode.journalDoctor",
+        connector: "codemode",
+        description: "List unresolved plan journals and safe recovery advice without deleting evidence",
+        signature: "codemode.journalDoctor(): Promise<{ schema_version, unresolved, resolved_count, corrupt }>",
+    },
+    MethodDef {
+        path: "codemode.journalInspect",
+        connector: "codemode",
+        description: "Inspect a redacted durable plan journal by execution id",
+        signature: "codemode.journalInspect(execution_id: string): Promise<PlanJournal>",
+    },
+    MethodDef {
+        path: "codemode.journalResume",
+        connector: "codemode",
+        description: "Validate that an unresolved journal can be safely resumed with the original plan",
+        signature: "codemode.journalResume(execution_id: string): Promise<{ state, resume }>",
+    },
+    MethodDef {
+        path: "codemode.journalRollback",
+        connector: "codemode",
+        description: "CAS-verified reverse-order rollback of an unresolved plan journal",
+        signature: "codemode.journalRollback(execution_id: string): Promise<{ state, rolled_back }>",
+    },
+    MethodDef {
         path: "codemode.limits",
         connector: "codemode",
         description: "Return active CodeMode sandbox, output, ref, and operation limits",
@@ -334,7 +359,8 @@ pub fn describe_method(path: &str) -> Value {
             "example": make_example(m.path),
             "related": related_methods(m.path),
             "kind": "method",
-            "mutability": if m.path == "zero.edit" { "mutating" } else { "read_only" },
+            "operation_class": classify_method(m.path),
+            "mutability": if classify_method(m.path) == OperationClass::ReadOnly { "read_only" } else { "mutating" },
             "limits": CodeModeLimits::default().as_json(),
             "safety": {
                 "sandbox": "fresh isolated context per execution; no network/env/process/raw-fs/module/timer capabilities"
