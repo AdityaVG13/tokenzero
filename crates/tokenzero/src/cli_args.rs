@@ -518,6 +518,42 @@ pub(crate) enum SessionLedgerCommand {
     Export,
     #[command(about = "Print the stable schema for the session ledger")]
     Schema,
+    #[command(about = "Query the response ledger")]
+    Query {
+        #[command(subcommand)]
+        query: LedgerQueryCommand,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+pub(crate) enum LedgerQueryCommand {
+    #[command(about = "Aggregate visible token cost for one repo over a time window")]
+    Repo {
+        #[arg(long)]
+        repo: PathBuf,
+        #[arg(long, default_value_t = 30)]
+        days: u64,
+    },
+    #[command(
+        name = "version-delta",
+        about = "Compare visible token cost between crate versions"
+    )]
+    VersionDelta {
+        #[arg(long)]
+        baseline: String,
+        #[arg(long)]
+        candidate: String,
+        #[arg(long, default_value_t = 30)]
+        days: u64,
+    },
+    #[command(
+        name = "agent-spend",
+        about = "Aggregate visible token cost by agent identity"
+    )]
+    AgentSpend {
+        #[arg(long, default_value_t = 30)]
+        days: u64,
+    },
 }
 
 #[derive(Debug, Args)]

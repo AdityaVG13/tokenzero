@@ -79,6 +79,7 @@ fn dispatch_gated_tool(
     };
     // Expand health is recorded inside expand_with_params (CLI + CodeMode + MCP).
     record_mcp_pulse(engine, canonical, args, &response, call_id);
+    engine.ledger.record_response(canonical, &response);
     engine.record_tool_attribution(canonical, engine_elapsed, persist_started.elapsed());
     Ok(mcp_tool_response(response))
 }

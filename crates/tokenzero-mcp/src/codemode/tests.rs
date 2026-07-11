@@ -2,7 +2,7 @@ use super::exec::{
     exec_edit, execute_codemode, execute_codemode_with_options, limits_from_options,
     make_engine_for_root, resolve_paths_against_work_root,
 };
-use super::parser::{parse_expr, parse_plan, resolve_expr, Statement};
+use super::parser::{Statement, parse_expr, parse_plan, resolve_expr};
 use super::result::{CodeModeOptions, CodeModeResult, CodeModeStatus};
 use std::collections::HashMap;
 use std::fs;
@@ -204,14 +204,18 @@ fn shell_inline_threshold_keeps_refs_and_ref_wraps_large_text() {
         small_text.contains(small.trim_end()),
         "small shell output missing: {small_text}"
     );
-    assert!(small_value["combined_ref"]
-        .as_str()
-        .unwrap()
-        .starts_with("tz://"));
-    assert!(small_value["capture_ref"]
-        .as_str()
-        .unwrap()
-        .starts_with("tz://"));
+    assert!(
+        small_value["combined_ref"]
+            .as_str()
+            .unwrap()
+            .starts_with("tz://")
+    );
+    assert!(
+        small_value["capture_ref"]
+            .as_str()
+            .unwrap()
+            .starts_with("tz://")
+    );
     assert!(
         small_value.get("refs").is_none(),
         "shell refs must be role-labeled fields: {small_value}"
@@ -232,15 +236,19 @@ fn shell_inline_threshold_keeps_refs_and_ref_wraps_large_text() {
         large_result.error
     );
     let large_value = large_result.value.as_ref().unwrap();
-    assert!(large_value["text"]["ref"]
-        .as_str()
-        .unwrap()
-        .starts_with("tz://"));
+    assert!(
+        large_value["text"]["ref"]
+            .as_str()
+            .unwrap()
+            .starts_with("tz://")
+    );
     assert!(large_value["text"]["preview"].as_str().is_some());
-    assert!(large_value["combined_ref"]
-        .as_str()
-        .unwrap()
-        .starts_with("tz://"));
+    assert!(
+        large_value["combined_ref"]
+            .as_str()
+            .unwrap()
+            .starts_with("tz://")
+    );
     assert!(
         large_value.get("refs").is_none(),
         "shell refs must be role-labeled fields: {large_value}"
@@ -328,11 +336,13 @@ fn quiet_combinators_handle_edge_cases_compactly() {
 fn undefined_variable_in_return_is_plan_error() {
     let result = execute_codemode("return missing_binding");
     assert_eq!(result.status, CodeModeStatus::Error);
-    assert!(result
-        .error
-        .as_deref()
-        .unwrap()
-        .contains("undefined variable: missing_binding"));
+    assert!(
+        result
+            .error
+            .as_deref()
+            .unwrap()
+            .contains("undefined variable: missing_binding")
+    );
 }
 
 #[test]
@@ -594,10 +604,12 @@ fn describe_token_namespace_returns_signature() {
     assert_eq!(r.status, CodeModeStatus::Completed);
     let val = r.value.unwrap();
     assert_eq!(val["path"], "zero.token.compact");
-    assert!(val["signature"]
-        .as_str()
-        .unwrap()
-        .contains("zero.token.compact"));
+    assert!(
+        val["signature"]
+            .as_str()
+            .unwrap()
+            .contains("zero.token.compact")
+    );
 }
 
 #[test]
@@ -876,27 +888,33 @@ fn windowed_expand_same_session_codemode_blob() {
 fn recall_method_is_discoverable_and_dispatchable() {
     let r = execute_codemode("describe:zero.recall");
     assert_eq!(r.status, CodeModeStatus::Completed);
-    assert!(r.value.as_ref().unwrap()["signature"]
-        .as_str()
-        .unwrap()
-        .contains("zero.recall"));
+    assert!(
+        r.value.as_ref().unwrap()["signature"]
+            .as_str()
+            .unwrap()
+            .contains("zero.recall")
+    );
     let search = execute_codemode("search:recall");
-    assert!(search.value.as_ref().unwrap()["results"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .any(|hit| hit["path"] == "zero.recall"));
+    assert!(
+        search.value.as_ref().unwrap()["results"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|hit| hit["path"] == "zero.recall")
+    );
 }
 
 #[test]
 fn codemode_method_catalog_resource_shape() {
     let catalog = crate::codemode::catalog::codemode_method_catalog();
     assert_eq!(catalog["schema_version"], "tokenzero.codemode.catalog.v1");
-    assert!(catalog["methods"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .any(|m| m["path"] == "zero.recall"));
+    assert!(
+        catalog["methods"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|m| m["path"] == "zero.recall")
+    );
 }
 
 #[test]

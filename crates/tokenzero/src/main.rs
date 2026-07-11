@@ -1035,23 +1035,65 @@ fn handle_pulse(args: PulseArgs) -> Result<()> {
 
 fn handle_session_ledger(args: SessionLedgerArgs) -> Result<()> {
     let root = tokenzero_work_root(args.root);
-    let ledger_path = default_ledger_path(&root);
+    let pulse_ledger_path = default_ledger_path(&root);
+    let cache_path = resolve_recovery_cache_path(&root, None);
+    let response_ledger_path = tokenzero_mcp::ledger::ledger_path_for_cache(&cache_path);
     match args.command {
         Some(SessionLedgerCommand::Schema) => {
-            let schema = SessionLedgerReport::schema_json();
-            println!("{}", serde_json::to_string_pretty(&schema)?);
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&tokenzero_mcp::ledger::schema_example())?
+            );
         }
         Some(SessionLedgerCommand::Export) => {
-            let report = SessionLedgerReport::from_ledger(&ledger_path)?;
+            let report = SessionLedgerReport::from_ledger(&pulse_ledger_path)?;
             println!("{}", serde_json::to_string_pretty(&report)?);
         }
         Some(SessionLedgerCommand::Stats) | None => {
-            let report = SessionLedgerReport::from_ledger(&ledger_path)?;
+            let report = SessionLedgerReport::from_ledger(&pulse_ledger_path)?;
             if args.json {
                 println!("{}", serde_json::to_string_pretty(&report)?);
             } else {
                 print!("{}", report.render_text());
             }
+        }
+        Some(SessionLedgerCommand::Query { query }) => {
+            let since_ms = |days: u64| {
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|duration| {
+                        u64::try_from(duration.as_millis())
+                            .unwrap_or(u64::MAX)
+                            .saturating_sub(days.saturating_mul(86_400_000))
+                    })
+                    .unwrap_or(0)
+            };
+            let query = match query {
+                LedgerQueryCommand::Repo { repo, days } => {
+                    tokenzero_mcp::ledger::LedgerQuery::RepoCost {
+                        repo: repo.to_string_lossy().into_owned(),
+                        since_ms: since_ms(days),
+                    }
+                }
+                LedgerQueryCommand::VersionDelta {
+                    baseline,
+                    candidate,
+                    days,
+                } => tokenzero_mcp::ledger::LedgerQuery::VersionDelta {
+                    baseline,
+                    candidate,
+                    since_ms: since_ms(days),
+                },
+                LedgerQueryCommand::AgentSpend { days } => {
+                    tokenzero_mcp::ledger::LedgerQuery::AgentSpend {
+                        since_ms: since_ms(days),
+                    }
+                }
+            };
+            emit_value(
+                tokenzero_mcp::ledger::query_ledger(&response_ledger_path, &query)?,
+                args.json,
+            )?;
         }
     }
     Ok(())

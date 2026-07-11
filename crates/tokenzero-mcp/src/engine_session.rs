@@ -49,6 +49,32 @@ impl TokenZeroEngine {
         // never have to run cache maintenance by hand.
         let _ = cache_maintenance(&config.cache_path, false);
         let metrics = metrics::ToolMetrics::new(&config.cache_path);
+        let session_id = new_session_id();
+        let repo = config
+            .allowed_roots
+            .first()
+            .map(PathBuf::as_path)
+            .or_else(|| config.cache_path.parent())
+            .unwrap_or_else(|| Path::new("."))
+            .to_string_lossy()
+            .into_owned();
+        let optimization_tags = vec![
+            format!(
+                "session_dedup:{}",
+                if config.session_dedup { "on" } else { "off" }
+            ),
+            format!(
+                "diff_reads:{}",
+                if config.diff_reads { "on" } else { "off" }
+            ),
+            format!("tool_surface:{}", config.tool_surface),
+        ];
+        let ledger = crate::ledger::LedgerWriter::new(
+            &config.cache_path,
+            session_id.clone(),
+            repo,
+            optimization_tags,
+        );
         let session_persist =
             SessionPersistence::for_cache(&config.cache_path, config.session_dedup);
         // Persisted session records are a demand-paged working set. Loading them here
@@ -74,7 +100,8 @@ impl TokenZeroEngine {
                 tokenzero_recovery::working_set::DEFAULT_WORKING_SET_TOKENS,
             )),
             in_flight: (Mutex::new(HashSet::new()), Condvar::new()),
-            session_id: new_session_id(),
+            session_id,
+            ledger,
             metrics,
             session_persist,
             session_boot,

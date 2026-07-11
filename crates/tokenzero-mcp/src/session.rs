@@ -266,12 +266,7 @@ impl SessionSummary {
             });
         }
         if let Some(diff) = &self.diff {
-            value["diff"] = json!({
-                "hunks": diff.hunks,
-                "plus": diff.plus,
-                "minus": diff.minus,
-                "base_ref": diff.base_ref
-            });
+            value["diff"] = json!({ "hunks": diff.hunks, "plus": diff.plus, "minus": diff.minus, "base_ref": diff.base_ref, "visible_tokens_saved": self.diff_saved });
         }
         Some(value)
     }

@@ -1,0 +1,490 @@
+//! Queryable, append-only accounting for served TokenZero responses.
+//!
+//! Every JSONL line is a tokenzero.ledger.v1 LedgerRecord. prevented_tokens is
+//! derived only from existing per-response dedup.visible_tokens_saved and
+//! diff.visible_tokens_saved telemetry. It is not a prevented-read estimate.
+//! saved_bytes separately preserves session_delta.saved_bytes.
+//!
+//! Writes use O_APPEND without per-turn fsync and fail open. Before a write
+//! would exceed DEFAULT_MAX_LEDGER_BYTES, the active file rotates to .jsonl.1.
+//! Queries scan both generations and ignore malformed lines, including a torn
+//! final line.
+
+use serde::{Deserialize, Serialize};
+use serde_json::{Value, json};
+use std::collections::BTreeMap;
+use std::fs::{self, OpenOptions};
+use std::io::{self, BufRead, BufReader, Write};
+use std::path::{Path, PathBuf};
+use std::sync::Mutex;
+use std::time::{SystemTime, UNIX_EPOCH};
+use tokenzero_core::ToolResponse;
+
+pub const LEDGER_SCHEMA: &str = "tokenzero.ledger.v1";
+pub const TOKENZERO_AGENT_ENV: &str = "TOKENZERO_AGENT";
+pub const DEFAULT_MAX_LEDGER_BYTES: u64 = 8 * 1024 * 1024;
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VersionIdentity {
+    #[serde(rename = "crate")]
+    pub crate_version: String,
+    pub git_describe: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TokenMass {
+    pub visible_tokens: u64,
+    pub raw_tokens: u64,
+    /// Existing dedup/diff token savings only; never a prevented-read estimate.
+    pub prevented_tokens: u64,
+    pub saved_bytes: u64,
+}
+
+/// One served response in the versioned tokenzero.ledger.v1 JSONL schema.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LedgerRecord {
+    pub schema: String,
+    pub timestamp_ms: u64,
+    pub session_id: String,
+    pub repo: String,
+    pub agent: Option<String>,
+    pub version: VersionIdentity,
+    pub tool: String,
+    pub token_mass: TokenMass,
+    pub cumulative_session_cost_tokens: u64,
+    pub optimization_tags: Vec<String>,
+}
+
+#[derive(Debug)]
+pub(crate) struct LedgerWriter {
+    path: PathBuf,
+    session_id: String,
+    repo: String,
+    agent: Option<String>,
+    version: VersionIdentity,
+    optimization_tags: Vec<String>,
+    max_bytes: u64,
+    cumulative_visible_tokens: Mutex<u64>,
+}
+
+impl LedgerWriter {
+    pub(crate) fn new(
+        cache_path: &Path,
+        session_id: String,
+        repo: String,
+        optimization_tags: Vec<String>,
+    ) -> Self {
+        Self::with_max_bytes(
+            cache_path,
+            session_id,
+            repo,
+            optimization_tags,
+            DEFAULT_MAX_LEDGER_BYTES,
+        )
+    }
+
+    fn with_max_bytes(
+        cache_path: &Path,
+        session_id: String,
+        repo: String,
+        optimization_tags: Vec<String>,
+        max_bytes: u64,
+    ) -> Self {
+        Self {
+            path: ledger_path_for_cache(cache_path),
+            session_id,
+            repo,
+            agent: std::env::var(TOKENZERO_AGENT_ENV)
+                .ok()
+                .map(|value| value.trim().to_owned())
+                .filter(|value| !value.is_empty()),
+            version: VersionIdentity {
+                crate_version: env!("CARGO_PKG_VERSION").to_string(),
+                git_describe: None,
+            },
+            optimization_tags,
+            max_bytes,
+            cumulative_visible_tokens: Mutex::new(0),
+        }
+    }
+
+    /// Snapshot existing response accounting and append one record. Fail-open.
+    pub(crate) fn record_response(&self, tool: &str, response: &ToolResponse) {
+        let Some(accounting) = response.accounting.as_ref() else {
+            return;
+        };
+        let telemetry = response.telemetry.as_ref();
+        let get = |pointer: &str| {
+            telemetry
+                .and_then(|value| value.pointer(pointer))
+                .and_then(Value::as_u64)
+                .unwrap_or(0)
+        };
+        let visible_tokens = u64::try_from(accounting.visible_tokens).unwrap_or(u64::MAX);
+        let Ok(mut cumulative) = self.cumulative_visible_tokens.lock() else {
+            return;
+        };
+        *cumulative = cumulative.saturating_add(visible_tokens);
+        let record = LedgerRecord {
+            schema: LEDGER_SCHEMA.to_string(),
+            timestamp_ms: now_ms(),
+            session_id: self.session_id.clone(),
+            repo: self.repo.clone(),
+            agent: self.agent.clone(),
+            version: self.version.clone(),
+            tool: tool.to_string(),
+            token_mass: TokenMass {
+                visible_tokens,
+                raw_tokens: u64::try_from(accounting.raw_tokens).unwrap_or(u64::MAX),
+                prevented_tokens: get("/dedup/visible_tokens_saved")
+                    .saturating_add(get("/diff/visible_tokens_saved")),
+                saved_bytes: get("/session_delta/saved_bytes"),
+            },
+            cumulative_session_cost_tokens: *cumulative,
+            optimization_tags: self.optimization_tags.clone(),
+        };
+        let _ = append_record(&self.path, &record, self.max_bytes);
+    }
+}
+
+pub fn ledger_path_for_cache(cache_path: &Path) -> PathBuf {
+    cache_path.with_file_name("ledger.jsonl")
+}
+
+fn rotated_path(path: &Path) -> PathBuf {
+    path.with_extension("jsonl.1")
+}
+
+fn append_record(path: &Path, record: &LedgerRecord, max_bytes: u64) -> io::Result<()> {
+    let mut line = serde_json::to_vec(record).map_err(io::Error::other)?;
+    line.push(b'\n');
+    let line_bytes = u64::try_from(line.len()).unwrap_or(u64::MAX);
+    if line_bytes > max_bytes {
+        return Ok(());
+    }
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let current = fs::metadata(path).map(|meta| meta.len()).unwrap_or(0);
+    if current > 0 && current.saturating_add(line_bytes) > max_bytes {
+        let rotated = rotated_path(path);
+        match fs::remove_file(&rotated) {
+            Ok(()) => {}
+            Err(err) if err.kind() == io::ErrorKind::NotFound => {}
+            Err(err) => return Err(err),
+        }
+        fs::rename(path, rotated)?;
+    }
+    OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)?
+        .write_all(&line)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LedgerQuery {
+    RepoCost {
+        repo: String,
+        since_ms: u64,
+    },
+    VersionDelta {
+        baseline: String,
+        candidate: String,
+        since_ms: u64,
+    },
+    AgentSpend {
+        since_ms: u64,
+    },
+}
+
+/// Scan and aggregate the bounded JSONL ledger. Malformed/torn lines are ignored.
+pub fn query_ledger(path: &Path, query: &LedgerQuery) -> io::Result<Value> {
+    let records = read_records(path)?;
+    match query {
+        LedgerQuery::RepoCost { repo, since_ms } => {
+            let (turns, visible, raw, prevented) = records
+                .iter()
+                .filter(|record| record.timestamp_ms >= *since_ms && record.repo == *repo)
+                .fold(
+                    (0_u64, 0_u64, 0_u64, 0_u64),
+                    |(turns, visible, raw, prevented), record| {
+                        (
+                            turns + 1,
+                            visible.saturating_add(record.token_mass.visible_tokens),
+                            raw.saturating_add(record.token_mass.raw_tokens),
+                            prevented.saturating_add(record.token_mass.prevented_tokens),
+                        )
+                    },
+                );
+            Ok(json!({
+                "schema": LEDGER_SCHEMA,
+                "query": "cost_per_repo",
+                "repo": repo,
+                "since_ms": since_ms,
+                "turns": turns,
+                "visible_cost_tokens": visible,
+                "raw_tokens": raw,
+                "prevented_tokens": prevented
+            }))
+        }
+        LedgerQuery::VersionDelta {
+            baseline,
+            candidate,
+            since_ms,
+        } => {
+            let mut totals = BTreeMap::<String, u64>::new();
+            for record in records
+                .iter()
+                .filter(|record| record.timestamp_ms >= *since_ms)
+            {
+                let total = totals
+                    .entry(record.version.crate_version.clone())
+                    .or_default();
+                *total = total.saturating_add(record.token_mass.visible_tokens);
+            }
+            let baseline_cost = totals.get(baseline).copied().unwrap_or(0);
+            let candidate_cost = totals.get(candidate).copied().unwrap_or(0);
+            Ok(json!({
+                "schema": LEDGER_SCHEMA,
+                "query": "version_delta",
+                "since_ms": since_ms,
+                "baseline": {"version": baseline, "visible_cost_tokens": baseline_cost},
+                "candidate": {"version": candidate, "visible_cost_tokens": candidate_cost},
+                "delta_visible_cost_tokens": i128::from(candidate_cost) - i128::from(baseline_cost)
+            }))
+        }
+        LedgerQuery::AgentSpend { since_ms } => {
+            let mut totals = BTreeMap::<String, (u64, u64)>::new();
+            for record in records
+                .iter()
+                .filter(|record| record.timestamp_ms >= *since_ms)
+            {
+                let agent = record.agent.as_deref().unwrap_or("<unknown>").to_string();
+                let total = totals.entry(agent).or_default();
+                total.0 = total.0.saturating_add(1);
+                total.1 = total.1.saturating_add(record.token_mass.visible_tokens);
+            }
+            let agents = totals
+                .into_iter()
+                .map(|(agent, (turns, visible_cost_tokens))| {
+                    json!({
+                        "agent": agent,
+                        "turns": turns,
+                        "visible_cost_tokens": visible_cost_tokens
+                    })
+                })
+                .collect::<Vec<_>>();
+            Ok(json!({
+                "schema": LEDGER_SCHEMA,
+                "query": "per_agent_spend",
+                "since_ms": since_ms,
+                "agents": agents
+            }))
+        }
+    }
+}
+
+fn read_records(path: &Path) -> io::Result<Vec<LedgerRecord>> {
+    let mut records = Vec::new();
+    for candidate in [rotated_path(path), path.to_path_buf()] {
+        let file = match fs::File::open(candidate) {
+            Ok(file) => file,
+            Err(err) if err.kind() == io::ErrorKind::NotFound => continue,
+            Err(err) => return Err(err),
+        };
+        for line in BufReader::new(file).lines() {
+            let Ok(line) = line else { continue };
+            let Ok(record) = serde_json::from_str::<LedgerRecord>(&line) else {
+                continue;
+            };
+            if record.schema == LEDGER_SCHEMA {
+                records.push(record);
+            }
+        }
+    }
+    Ok(records)
+}
+
+pub fn schema_example() -> Value {
+    json!({
+        "schema": LEDGER_SCHEMA,
+        "timestamp_ms": 1_700_000_000_000_u64,
+        "session_id": "session-123",
+        "repo": "/workspace/repo",
+        "agent": null,
+        "version": {"crate": env!("CARGO_PKG_VERSION"), "git_describe": null},
+        "tool": "read",
+        "token_mass": {
+            "visible_tokens": 120,
+            "raw_tokens": 400,
+            "prevented_tokens": 80,
+            "saved_bytes": 1024
+        },
+        "cumulative_session_cost_tokens": 120,
+        "optimization_tags": ["session_dedup:on", "diff_reads:on", "tool_surface:mcp"]
+    })
+}
+
+fn now_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| u64::try_from(duration.as_millis()).unwrap_or(u64::MAX))
+        .unwrap_or(0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn fixture(
+        timestamp_ms: u64,
+        repo: &str,
+        agent: Option<&str>,
+        version: &str,
+        visible: u64,
+    ) -> LedgerRecord {
+        LedgerRecord {
+            schema: LEDGER_SCHEMA.to_string(),
+            timestamp_ms,
+            session_id: "session-test".to_string(),
+            repo: repo.to_string(),
+            agent: agent.map(str::to_string),
+            version: VersionIdentity {
+                crate_version: version.to_string(),
+                git_describe: None,
+            },
+            tool: "read".to_string(),
+            token_mass: TokenMass {
+                visible_tokens: visible,
+                raw_tokens: visible * 2,
+                prevented_tokens: visible / 2,
+                saved_bytes: visible * 4,
+            },
+            cumulative_session_cost_tokens: visible,
+            optimization_tags: vec!["session_dedup:on".to_string()],
+        }
+    }
+
+    fn write_fixture(path: &Path, records: &[LedgerRecord]) {
+        for record in records {
+            append_record(path, record, DEFAULT_MAX_LEDGER_BYTES).unwrap();
+        }
+    }
+
+    #[test]
+    fn ledger_record_shape_and_version_are_stable() {
+        let value = serde_json::to_value(fixture(10, "/repo", None, "1.2.3", 7)).unwrap();
+        assert_eq!(value["schema"], LEDGER_SCHEMA);
+        assert_eq!(value.as_object().unwrap().len(), 10);
+        assert_eq!(value["agent"], Value::Null);
+        assert_eq!(value["version"]["crate"], "1.2.3");
+        assert_eq!(value["version"]["git_describe"], Value::Null);
+        assert_eq!(value["token_mass"].as_object().unwrap().len(), 4);
+        assert_eq!(value["token_mass"]["prevented_tokens"], 3);
+        let example = schema_example();
+        assert_eq!(example["schema"], LEDGER_SCHEMA);
+        assert!(example["version"].get("crate").is_some());
+        assert_eq!(example["version"]["git_describe"], Value::Null);
+    }
+
+    #[test]
+    fn ledger_rotation_keeps_active_file_bounded() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("session-ledger.jsonl");
+        let record = fixture(10, "/repo", None, "1", 7);
+        let line_len = serde_json::to_vec(&record).unwrap().len() as u64 + 1;
+        append_record(&path, &record, line_len * 2).unwrap();
+        append_record(&path, &record, line_len * 2).unwrap();
+        append_record(&path, &record, line_len * 2).unwrap();
+        assert!(fs::metadata(&path).unwrap().len() <= line_len * 2);
+        assert!(rotated_path(&path).is_file());
+    }
+
+    #[test]
+    fn ledger_scan_tolerates_torn_tail() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("session-ledger.jsonl");
+        write_fixture(&path, &[fixture(10, "/repo", None, "1", 7)]);
+        OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap()
+            .write_all(b"{\"schema\":\"tokenzero.ledger.v1\"")
+            .unwrap();
+        let result = query_ledger(
+            &path,
+            &LedgerQuery::RepoCost {
+                repo: "/repo".to_string(),
+                since_ms: 0,
+            },
+        )
+        .unwrap();
+        assert_eq!(result["turns"], 1);
+    }
+
+    #[test]
+    fn ledger_query_cost_per_repo_window() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("session-ledger.jsonl");
+        write_fixture(
+            &path,
+            &[
+                fixture(5, "/repo", Some("a"), "1", 100),
+                fixture(15, "/repo", Some("a"), "1", 40),
+                fixture(20, "/other", Some("a"), "1", 90),
+            ],
+        );
+        let result = query_ledger(
+            &path,
+            &LedgerQuery::RepoCost {
+                repo: "/repo".to_string(),
+                since_ms: 10,
+            },
+        )
+        .unwrap();
+        assert_eq!(result["turns"], 1);
+        assert_eq!(result["visible_cost_tokens"], 40);
+    }
+
+    #[test]
+    fn ledger_query_version_delta() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("session-ledger.jsonl");
+        write_fixture(
+            &path,
+            &[
+                fixture(10, "/repo", Some("a"), "1.0", 100),
+                fixture(11, "/repo", Some("a"), "2.0", 70),
+            ],
+        );
+        let result = query_ledger(
+            &path,
+            &LedgerQuery::VersionDelta {
+                baseline: "1.0".to_string(),
+                candidate: "2.0".to_string(),
+                since_ms: 0,
+            },
+        )
+        .unwrap();
+        assert_eq!(result["delta_visible_cost_tokens"], -30);
+    }
+
+    #[test]
+    fn ledger_query_per_agent_spend() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("session-ledger.jsonl");
+        write_fixture(
+            &path,
+            &[
+                fixture(10, "/repo", Some("alice"), "1", 30),
+                fixture(11, "/repo", Some("alice"), "1", 20),
+                fixture(12, "/repo", None, "1", 7),
+            ],
+        );
+        let result = query_ledger(&path, &LedgerQuery::AgentSpend { since_ms: 0 }).unwrap();
+        assert_eq!(result["agents"][0]["agent"], "<unknown>");
+        assert_eq!(result["agents"][1]["agent"], "alice");
+        assert_eq!(result["agents"][1]["visible_cost_tokens"], 50);
+    }
+}

@@ -27,6 +27,7 @@ mod fastmcp_mode;
 mod fetch_cache;
 mod fetch_guard;
 mod jsonrpc;
+pub mod ledger;
 mod metrics;
 mod paths;
 mod recall;
@@ -180,6 +181,8 @@ pub struct TokenZeroEngine {
     /// Shared with CodeMode plan engines so expand outcomes update the same gate.
     session_boot: Option<tokenzero_recovery::boot::SessionBoot>,
     surface_health: std::sync::Arc<surface_health::SurfaceHealth>,
+    /// Fail-open append-only response accounting beside the recovery cache.
+    ledger: ledger::LedgerWriter,
 }
 
 #[cfg(test)]
