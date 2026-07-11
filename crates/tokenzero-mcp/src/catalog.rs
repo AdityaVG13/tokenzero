@@ -208,6 +208,12 @@ pub fn resource_specs() -> Vec<ResourceSpec> {
             "application/json",
         ),
         (
+            "resource://tokenzero/session-boot",
+            "TokenZero session boot",
+            "Read the bounded manifest+delta boot capsule and component token attribution.",
+            "application/json",
+        ),
+        (
             "resource://tokenzero/metrics",
             "TokenZero tool metrics",
             "Read per-tool call counts, error counts, slow-call counts, and latency (this session plus cross-session cumulative).",

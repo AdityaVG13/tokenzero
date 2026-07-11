@@ -156,7 +156,9 @@ pub struct TokenZeroEngine {
     rg_binary: OnceLock<Option<PathBuf>>,
     /// Session-lifetime seen-set for the redundancy layer (docs/routing.md
     /// §5). Loaded from `session-memory.json` when dedup is enabled.
-    session: Mutex<SessionMemory>,
+    // None until a tool actually needs the persisted working set. Session boot must not
+    // deserialize session-memory.json on the compatible manifest+delta path.
+    session: Mutex<Option<SessionMemory>>,
     /// Single-flight gate: ServeKeys currently being served, with a condvar
     /// to wake waiters. Two pipelined identical reads on the 4-worker pool
     /// would otherwise both miss the seen-set (the first has not recorded its
@@ -174,6 +176,7 @@ pub struct TokenZeroEngine {
     session_persist: Option<session_persist::SessionPersistence>,
     /// Expand/read surface health + crash-only recovery unlock (wqw.9).
     /// Shared with CodeMode plan engines so expand outcomes update the same gate.
+    session_boot: Option<tokenzero_recovery::boot::SessionBoot>,
     surface_health: std::sync::Arc<surface_health::SurfaceHealth>,
 }
 

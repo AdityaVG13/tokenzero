@@ -86,6 +86,10 @@ fn main() -> Result<()> {
         Commands::Run(args) => emit(handle_run(args)?)?,
         Commands::Ingest(args) => emit(handle_ingest(args)?)?,
         Commands::Expand(args) => emit(handle_expand(args)?)?,
+        Commands::SessionOpen(args) => {
+            let as_json = args.json;
+            emit_value(engine_from_common(&args).session_boot_snapshot(), as_json)?;
+        }
         Commands::Mem(args) => emit_with_json(engine_from_common(&args).mem(), args.json)?,
         Commands::Rewrite(args) => emit_rewrite(args)?,
         // Fail-open hook contract: handle_hook never errors and never sets a

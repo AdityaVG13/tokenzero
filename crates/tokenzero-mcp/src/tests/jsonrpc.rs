@@ -622,6 +622,21 @@ fn mcp_tool_calls_are_pulse_accounted_with_attribution() {
 }
 
 #[test]
+fn session_boot_resource_is_served() {
+    let (_dir, engine) = test_engine();
+    let response = handle_jsonrpc(
+        &engine,
+        r#"{"jsonrpc":"2.0","id":1,"method":"resources/read","params":{"uri":"resource://tokenzero/session-boot"}}"#,
+    )
+    .unwrap();
+    let parsed = response_json(&response);
+    let text = parsed["result"]["contents"][0]["text"].as_str().unwrap();
+    let boot: Value = serde_json::from_str(text).unwrap();
+    assert_eq!(boot["schema"], "tokenzero.session-boot.v1");
+    assert!(boot["telemetry"]["total"].as_u64().unwrap() < 100);
+}
+
+#[test]
 fn tool_metrics_resource_is_served() {
     let (_dir, engine) = test_engine();
     let response = handle_jsonrpc(

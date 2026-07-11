@@ -395,6 +395,30 @@ fn concurrent_reads_keep_session_consistent() {
 }
 
 #[test]
+fn session_boot_is_bounded_and_itemized() {
+    let dir = tempdir().unwrap();
+    let engine = TokenZeroEngine::new(EngineConfig::for_root(dir.path()));
+    let boot = engine.session_boot_snapshot();
+    assert_eq!(boot["schema"], "tokenzero.session-boot.v1");
+    assert_eq!(boot["mode"], "manifest_delta");
+    assert_eq!(boot["demand_paging"]["working_set_loaded"], false);
+    assert!(boot["wire"].as_str().unwrap().starts_with("TZ/1 root="));
+    let telemetry = &boot["telemetry"];
+    let sum = telemetry["manifest"].as_u64().unwrap()
+        + telemetry["delta"].as_u64().unwrap()
+        + telemetry["toc_working_set"].as_u64().unwrap()
+        + telemetry["other"].as_u64().unwrap();
+    assert_eq!(sum, telemetry["total"].as_u64().unwrap());
+    assert!(sum < 100, "{boot:#}");
+
+    let _ = engine.session_rollup();
+    assert_eq!(
+        engine.session_boot_snapshot()["demand_paging"]["working_set_loaded"],
+        true
+    );
+}
+
+#[test]
 fn tool_metrics_records_session_calls() {
     let dir = tempdir().unwrap();
     let file = dir.path().join("hello.txt");

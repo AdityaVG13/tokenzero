@@ -78,6 +78,7 @@ pub(crate) fn build_resource_payload(
             "shared_store_opt_in_envs": ["TOKENZERO_SHARED_STORE", "ZEROSTACK_SHARED_STORE"],
             "engine_binaries": crate::engine_binaries_json(),
         }),
+        "resource://tokenzero/session-boot" => engine.session_boot_snapshot(),
         "resource://tokenzero/metrics" => engine.tool_metrics_snapshot(),
         "resource://tokenzero/shell-contract" => {
             return Ok([

@@ -51,18 +51,30 @@ impl TokenZeroEngine {
         let metrics = metrics::ToolMetrics::new(&config.cache_path);
         let session_persist =
             SessionPersistence::for_cache(&config.cache_path, config.session_dedup);
-        let mut session_memory = SessionMemory::default();
-        if let Some(ref persist) = session_persist {
-            persist.load_into(&mut session_memory);
-        }
+        // Persisted session records are a demand-paged working set. Loading them here
+        // would make cold boot proportional to prior session size.
+        let boot_root = config.allowed_roots.first().cloned().unwrap_or_else(|| {
+            config
+                .cache_path
+                .parent()
+                .unwrap_or_else(|| Path::new("."))
+                .to_path_buf()
+        });
+        let session_boot = tokenzero_recovery::boot::open_session_boot(
+            &config.cache_path,
+            &boot_root,
+            &config.allowed_roots,
+        )
+        .ok();
         Self {
             config,
             rg_binary: OnceLock::new(),
-            session: Mutex::new(session_memory),
+            session: Mutex::new(None),
             in_flight: (Mutex::new(HashSet::new()), Condvar::new()),
             session_id: new_session_id(),
             metrics,
             session_persist,
+            session_boot,
             surface_health: std::sync::Arc::new(crate::surface_health::SurfaceHealth::new()),
         }
     }
@@ -75,6 +87,41 @@ impl TokenZeroEngine {
         let mut engine = Self::new(config);
         engine.surface_health = surface_health;
         engine
+    }
+
+    /// Stable, bounded boot capsule and exact attribution buckets.
+    pub fn session_boot_snapshot(&self) -> Value {
+        let working_set_loaded = self
+            .session
+            .lock()
+            .map(|slot| slot.is_some())
+            .unwrap_or(false);
+        let mut snapshot = match &self.session_boot {
+            Some(boot) => serde_json::to_value(boot).unwrap_or_else(|_| json!({})),
+            None => {
+                let total = count_tokens("TZ/1 fallback=metadata_unavailable");
+                json!({
+                    "schema": "tokenzero.session-boot.v1",
+                    "mode": "legacy_fallback",
+                    "status": "metadata_unavailable",
+                    "wire": "TZ/1 fallback=metadata_unavailable",
+                    "telemetry": {
+                        "manifest": 0,
+                        "delta": 0,
+                        "toc_working_set": 0,
+                        "other": total,
+                        "total": total
+                    }
+                })
+            }
+        };
+        if let Some(object) = snapshot.as_object_mut() {
+            object.insert(
+                "demand_paging".to_string(),
+                json!({"working_set_loaded": working_set_loaded}),
+            );
+        }
+        snapshot
     }
 
     pub fn session_id(&self) -> &str {
@@ -106,6 +153,7 @@ impl TokenZeroEngine {
     pub(crate) fn tool_metrics_snapshot(&self) -> Value {
         let mut snap = self.metrics.snapshot();
         if let Some(obj) = snap.as_object_mut() {
+            obj.insert("session_boot".to_string(), self.session_boot_snapshot());
             obj.insert(
                 "surface_health".to_string(),
                 self.surface_health.telemetry(),
@@ -118,7 +166,8 @@ impl TokenZeroEngine {
     /// serve, nothing recorded) instead of failing the call.
     pub(crate) fn session_lookup(&self, key: &ServeKey, content_sha256: &str) -> SeenState {
         match self.session.lock() {
-            Ok(memory) => memory.lookup(key, content_sha256),
+            Ok(mut slot) => Self::load_session_memory(&mut slot, self.session_persist.as_ref())
+                .lookup(key, content_sha256),
             Err(_) => SeenState::Miss,
         }
     }
@@ -129,15 +178,16 @@ impl TokenZeroEngine {
         pending: Vec<(ServeKey, ServedRecord)>,
         summary: &SessionSummary,
     ) {
-        let Ok(mut memory) = self.session.lock() else {
+        let Ok(mut slot) = self.session.lock() else {
             return;
         };
+        let memory = Self::load_session_memory(&mut slot, self.session_persist.as_ref());
         for (key, record) in pending {
             memory.record(key, record);
         }
         memory.absorb(summary);
         if let Some(ref persist) = self.session_persist {
-            persist.persist(&memory);
+            persist.persist(memory);
         }
     }
 
@@ -162,9 +212,24 @@ impl TokenZeroEngine {
         ServeFlight { engine: self, keys }
     }
 
+    fn load_session_memory<'a>(
+        slot: &'a mut Option<SessionMemory>,
+        persistence: Option<&SessionPersistence>,
+    ) -> &'a mut SessionMemory {
+        slot.get_or_insert_with(|| {
+            let mut memory = SessionMemory::default();
+            if let Some(persist) = persistence {
+                persist.load_into(&mut memory);
+            }
+            memory
+        })
+    }
+
     pub(crate) fn session_rollup(&self) -> Value {
         match self.session.lock() {
-            Ok(memory) => memory.rollup(),
+            Ok(mut slot) => {
+                Self::load_session_memory(&mut slot, self.session_persist.as_ref()).rollup()
+            }
             Err(_) => json!({
                 "records": 0,
                 "dedup_hits": 0,

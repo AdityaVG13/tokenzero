@@ -44,6 +44,8 @@ pub(crate) enum Commands {
     Ingest(IngestArgs),
     #[command(about = "Recover exact bytes from a prior TokenZero ref")]
     Expand(ExpandArgs),
+    #[command(name = "session-open", about = "Open a bounded manifest+delta session")]
+    SessionOpen(CommonArgs),
     #[command(about = "Inspect recovery-cache state")]
     Mem(CommonArgs),
     #[command(about = "Rewrite a shell command with TokenZero-safe routing")]
