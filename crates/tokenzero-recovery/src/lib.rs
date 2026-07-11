@@ -1427,7 +1427,7 @@ impl RecoveryStore {
             let value = self
                 .persistence_path
                 .as_deref()
-                .and_then(|cache| externalize_blob_value(cache, text))
+                .and_then(|cache| externalize_blob_value(cache, text, &full_hash))
                 .unwrap_or_else(|| text.to_string());
             self.state.blobs.insert(canonical_ref.clone(), value);
         }
@@ -2462,11 +2462,10 @@ fn blob_sidecar_dir(cache_path: &Path) -> PathBuf {
     PathBuf::from(os)
 }
 
-fn externalize_blob_value(cache_path: &Path, text: &str) -> Option<String> {
+fn externalize_blob_value(cache_path: &Path, text: &str, hash: &str) -> Option<String> {
     if text.len() < BLOB_EXTERNALIZE_MIN_BYTES {
         return None;
     }
-    let hash = sha256_hex(text);
     let dir = blob_sidecar_dir(cache_path);
     fs::create_dir_all(&dir).ok()?;
     let path = dir.join(format!("{hash}.txt"));

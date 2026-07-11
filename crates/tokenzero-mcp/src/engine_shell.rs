@@ -176,7 +176,7 @@ impl TokenZeroEngine {
                 "truncated": result.stdout_capture.truncated,
                 "spill_path": result.stdout_capture.spill_path,
                 "spill_bytes": result.stdout_capture.spill_bytes,
-                "sha256": sha256_hex(&stdout_display),
+                "sha256": stdout_stored.blob_ref.strip_prefix("tz://blob/").unwrap_or(&stdout_stored.blob_ref),
                 "sha256_scope": "captured_display",
                 "ref": stdout_stored.blob_ref
             },
@@ -187,14 +187,14 @@ impl TokenZeroEngine {
                 "truncated": result.stderr_capture.truncated,
                 "spill_path": result.stderr_capture.spill_path,
                 "spill_bytes": result.stderr_capture.spill_bytes,
-                "sha256": sha256_hex(&stderr_display),
+                "sha256": stderr_stored.blob_ref.strip_prefix("tz://blob/").unwrap_or(&stderr_stored.blob_ref),
                 "sha256_scope": "captured_display",
                 "ref": stderr_stored.blob_ref
             },
             "combined": {
                 "bytes": output.len(),
                 "truncated": streams_truncated,
-                "sha256": sha256_hex(&output),
+                "sha256": combined_stored.blob_ref.strip_prefix("tz://blob/").unwrap_or(&combined_stored.blob_ref),
                 "ref": combined_stored.blob_ref
             },
             "allocator_pressure_relief": result.allocator_pressure_relief,

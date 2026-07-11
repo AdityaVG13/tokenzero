@@ -1,0 +1,148 @@
+{
+  "baseline": "baseline.json",
+  "candidate": "candidate.json",
+  "identical_conditions": {
+    "commands": {
+      "cold_warm_read": "tokenzero read <2MiB file>; 1 cold + 20 warm processes",
+      "ingest_expand": "tokenzero ingest <3MiB file>; tokenzero expand <blob-ref> --raw",
+      "large_shell_capture": "tokenzero run -- python3 -c <5MiB deterministic stdout>",
+      "repeated_recovery_persist": "50 tokenzero ingest calls with distinct 512-byte files and one cache"
+    },
+    "commit": "f2c98d66d7413e8e17d4265228bb722c1bd248f6",
+    "counts": {
+      "recovery_persists": 50,
+      "warm_reads": 20
+    },
+    "cpu": "Apple M5 Max",
+    "os": "macOS-26.5-arm64-arm-64bit-Mach-O",
+    "sizes": {
+      "large_read_bytes": 2097152,
+      "payload_bytes": 3145728,
+      "shell_bytes": 5242880
+    }
+  },
+  "lower_is_better": true,
+  "rows": {
+    "cold_read": {
+      "cpu_seconds": {
+        "absolute_delta": 2.7755575615628914e-17,
+        "baseline": 0.15,
+        "candidate": 0.15000000000000002,
+        "percent_delta": 0.0
+      },
+      "max_rss_bytes": {
+        "absolute_delta": 32768,
+        "baseline": 24133632,
+        "candidate": 24166400,
+        "percent_delta": 0.14
+      },
+      "wall_seconds": {
+        "absolute_delta": 0.009999999999999981,
+        "baseline": 0.17,
+        "candidate": 0.18,
+        "percent_delta": 5.88
+      }
+    },
+    "large_payload_expand": {
+      "cpu_seconds": {
+        "absolute_delta": -0.020000000000000018,
+        "baseline": 0.33,
+        "candidate": 0.31,
+        "percent_delta": -6.06
+      },
+      "max_rss_bytes": {
+        "absolute_delta": -98304,
+        "baseline": 33980416,
+        "candidate": 33882112,
+        "percent_delta": -0.29
+      },
+      "wall_seconds": {
+        "absolute_delta": -0.010000000000000009,
+        "baseline": 0.34,
+        "candidate": 0.33,
+        "percent_delta": -2.94
+      }
+    },
+    "large_payload_ingest": {
+      "cpu_seconds": {
+        "absolute_delta": -0.020000000000000018,
+        "baseline": 0.2,
+        "candidate": 0.18,
+        "percent_delta": -10.0
+      },
+      "max_rss_bytes": {
+        "absolute_delta": -32768,
+        "baseline": 23347200,
+        "candidate": 23314432,
+        "percent_delta": -0.14
+      },
+      "wall_seconds": {
+        "absolute_delta": -0.01999999999999999,
+        "baseline": 0.21,
+        "candidate": 0.19,
+        "percent_delta": -9.52
+      }
+    },
+    "large_shell_capture": {
+      "cpu_seconds": {
+        "absolute_delta": -0.12,
+        "baseline": 0.96,
+        "candidate": 0.84,
+        "percent_delta": -12.5
+      },
+      "max_rss_bytes": {
+        "absolute_delta": -32768,
+        "baseline": 52461568,
+        "candidate": 52428800,
+        "percent_delta": -0.06
+      },
+      "wall_seconds": {
+        "absolute_delta": -0.10999999999999999,
+        "baseline": 0.98,
+        "candidate": 0.87,
+        "percent_delta": -11.22
+      }
+    },
+    "repeated_recovery_persist": {
+      "cpu_seconds": {
+        "absolute_delta": -0.009999999999999981,
+        "baseline": 0.24,
+        "candidate": 0.23,
+        "percent_delta": -4.17
+      },
+      "max_rss_bytes": {
+        "absolute_delta": -65536,
+        "baseline": 29802496,
+        "candidate": 29736960,
+        "percent_delta": -0.22
+      },
+      "wall_seconds": {
+        "absolute_delta": -0.08999999999999997,
+        "baseline": 0.75,
+        "candidate": 0.66,
+        "percent_delta": -12.0
+      }
+    },
+    "warm_reads": {
+      "cpu_seconds": {
+        "absolute_delta": -0.20999999999999996,
+        "baseline": 4.01,
+        "candidate": 3.8,
+        "percent_delta": -5.24
+      },
+      "max_rss_bytes": {
+        "absolute_delta": -5357568,
+        "baseline": 35373056,
+        "candidate": 30015488,
+        "percent_delta": -15.15
+      },
+      "wall_seconds": {
+        "absolute_delta": -0.29000000000000004,
+        "baseline": 4.3,
+        "candidate": 4.01,
+        "percent_delta": -6.74
+      }
+    }
+  },
+  "schema": "tokenzero.perf-comparison.v1"
+}
