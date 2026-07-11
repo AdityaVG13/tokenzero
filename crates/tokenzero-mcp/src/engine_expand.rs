@@ -208,6 +208,7 @@ impl TokenZeroEngine {
                 Ok(t) => t,
                 Err(resp) => return *resp,
             };
+            self.rehydrate_working_set_expand(&mut store, &params);
             if since_result.content == target.content {
                 let text = unchanged_since_expand_ack(since_ref);
                 let tokens = count_tokens(&text);
@@ -297,6 +298,7 @@ impl TokenZeroEngine {
             Ok(t) => t,
             Err(resp) => return *resp,
         };
+        self.rehydrate_working_set_expand(&mut store, &params);
 
         // Explicit expand is the recovery contract: it ALWAYS returns exact
         // bytes. Replacing content with an "identical to … (unchanged)" ack
@@ -316,6 +318,14 @@ impl TokenZeroEngine {
         }
         self.session_apply(pending, &summary);
         response
+    }
+
+    fn rehydrate_working_set_expand(&self, store: &mut RecoveryStore, params: &ExpandParams) {
+        let Ok(mut working_set) = self.working_set.lock() else {
+            return;
+        };
+        let _ =
+            working_set.rehydrate_ref(store, &params.ref_id, params.start_line, params.end_line);
     }
 
     fn pending_expand_record(
