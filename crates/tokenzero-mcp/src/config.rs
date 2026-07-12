@@ -32,6 +32,8 @@ impl SearchBackend {
 #[derive(Debug, Clone)]
 pub struct EngineConfig {
     pub allowed_roots: Vec<PathBuf>,
+    /// Root against which relative paths are resolved before the allowlist check.
+    pub call_root: PathBuf,
     pub cache_path: PathBuf,
     pub max_visible_tokens: usize,
     pub mode: Mode,
@@ -72,6 +74,7 @@ impl EngineConfig {
         let output_policy = RunOutputPolicy::default();
         Self {
             allowed_roots: vec![root.to_path_buf()],
+            call_root: root.to_path_buf(),
             cache_path: root.join(".tokenzero/recovery-cache.json"),
             max_visible_tokens: 4000,
             mode: Mode::Auto,

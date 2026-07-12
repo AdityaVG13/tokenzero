@@ -231,7 +231,11 @@ impl TokenZeroEngine {
     }
 
     pub(crate) fn path_allowed(&self, path: &Path) -> bool {
-        let abs = comparable_path(path);
+        let abs = if path.is_absolute() {
+            comparable_path(path)
+        } else {
+            comparable_path(&self.config.call_root.join(path))
+        };
         // canonicalize_existing_prefix can only resolve `..` while the prefix
         // exists on disk; a `..` left behind a nonexistent component would
         // defeat the component-wise root check below, so fail closed. The
