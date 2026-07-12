@@ -645,7 +645,7 @@ fn unsafe_reason_for_words(parts: &[String]) -> Option<String> {
     if is_git_mutation(first, second) {
         return Some("git mutation left unmodified".to_string());
     }
-    if is_docker_mutation(first, second, &parts) {
+    if is_docker_mutation(first, second, parts) {
         return Some("docker mutation left unmodified".to_string());
     }
     if is_kubectl_mutation(first, second) {
