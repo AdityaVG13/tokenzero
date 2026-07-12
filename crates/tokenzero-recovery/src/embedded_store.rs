@@ -195,9 +195,8 @@ impl TokenZeroStore {
         // Use the handle's explicit shared CAS for portable blob refs first.
         if let Some(cas) = &self.shared_cas {
             if let Some(hash) = portable_blob_hash(r) {
-                match cas.resolve(hash) {
-                    Ok(bytes) => return Some(bytes),
-                    Err(_) => {}
+                if let Ok(bytes) = cas.resolve(hash) {
+                    return Some(bytes);
                 }
             }
         }
