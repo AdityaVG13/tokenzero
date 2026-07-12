@@ -345,6 +345,9 @@ fn scrub_value(value: &mut Value, temp_root: &Path, refs: &mut RefScrubber) {
             for (key, value) in object {
                 if key == "latency_ms" && value.is_number() {
                     *value = json!("[DYNAMIC_LATENCY_MS]");
+                } else if (key == "from_hwm" || key == "to_hwm") && value.is_number() {
+                    // Session watermarks are machine-global monotonic counters.
+                    *value = json!("[DYNAMIC_HWM]");
                 } else {
                     scrub_value(value, temp_root, refs);
                 }

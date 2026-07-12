@@ -399,6 +399,9 @@ fn expand_across_engine_respawn_stays_byte_exact() {
 #[test]
 fn expand_stale_persisted_sha_serves_full_after_payload_mutation() {
     use tokenzero_core::ContentType;
+    // This contract targets the LOCAL snapshot: with the pay-once user CAS
+    // attached, blobs publish there and the snapshot never holds the bytes.
+    tokenzero_recovery::set_ref_index_disabled_override(true);
     let dir = tempdir().unwrap();
     let config = EngineConfig::for_root(dir.path());
     let cache_path = config.cache_path.clone();
@@ -447,6 +450,7 @@ fn expand_stale_persisted_sha_serves_full_after_payload_mutation() {
         ..Default::default()
     });
     assert_eq!(resp.visible.as_ref().unwrap().text, "version_two\n");
+    tokenzero_recovery::set_ref_index_disabled_override(false);
 }
 
 #[test]

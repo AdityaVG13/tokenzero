@@ -254,8 +254,11 @@ fn cli_expand_decode_failure_keeps_expand_failed_taxonomy() {
     let root = tempdir().unwrap();
     let cache = root.path().join("cache.json");
     let expected = "D".repeat(70 * 1024);
+    // Pay-once user CAS (fpc) would absorb the blob; disable the ref index so
+    // this test exercises the cache-adjacent sidecar decode-failure taxonomy.
     let output = Command::cargo_bin("tokenzero")
         .unwrap()
+        .env("TOKENZERO_REF_INDEX", "0")
         .current_dir(root.path())
         .args([
             "run",
@@ -285,6 +288,7 @@ fn cli_expand_decode_failure_keeps_expand_failed_taxonomy() {
 
     let expanded = Command::cargo_bin("tokenzero")
         .unwrap()
+        .env("TOKENZERO_REF_INDEX", "0")
         .current_dir(root.path())
         .args([
             "expand",
