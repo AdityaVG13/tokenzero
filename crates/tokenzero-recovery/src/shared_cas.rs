@@ -71,6 +71,21 @@ impl SharedCas {
             .unwrap_or_else(|| cache_path.to_path_buf())
     }
 
+    /// Resolve a sibling engine's recovery cache path under the same unified
+    /// ZeroStack root. The current path must follow the layout
+    /// `<root>/<engine>/recovery-cache.json`. Returns `None` for flat or
+    /// non-unified layouts so that isolated stores stay isolated.
+    pub fn sibling_engine_cache_path(cache_path: &Path, engine: &str) -> Option<PathBuf> {
+        const ENGINES: &[&str] = &["tokenzero", "fszero", "graphzero"];
+        let engine_dir = cache_path.parent()?;
+        let name = engine_dir.file_name()?.to_str()?;
+        if !ENGINES.contains(&name) {
+            return None;
+        }
+        let store_root = engine_dir.parent()?;
+        Some(store_root.join(engine).join("recovery-cache.json"))
+    }
+
     /// Detect the canonical shared CAS for a recovery cache path. Unified
     /// stores attach before `blobs/` exists; flat caches attach once migration
     /// has materialized the CAS directory beside the cache.

@@ -1025,6 +1025,52 @@ impl RecoveryStore {
         self.remember_ref(ref_id);
     }
 
+    /// Cross-engine fallback: expand a foreign-engine blob ref (`fz://` or
+    /// `gz://`) in the sibling engine's recovery store under the same unified
+    /// ZeroStack root. This fixes the fszero-fz-ref-expand-broken-izj class of
+    /// failures where the minting engine stores the payload locally rather than
+    /// publishing it to the shared CAS, and the expanding tokenzero engine only
+    /// searched its own store.
+    fn expand_in_sibling_engine_store(
+        &self,
+        requested_ref: &str,
+        selector: Option<&str>,
+        start_line: Option<usize>,
+        end_line: Option<usize>,
+        anchor_kind: Option<&str>,
+        symbol: Option<&str>,
+    ) -> Option<ExpansionResult> {
+        let engine = match requested_ref.split_once("://")?.0 {
+            "fz" => "fszero",
+            "gz" => "graphzero",
+            _ => return None,
+        };
+        let self_cache = self.persistence_path.as_deref()?;
+        let sibling_cache = SharedCas::sibling_engine_cache_path(self_cache, engine)?;
+        if sibling_cache == self_cache || !sibling_cache.is_file() {
+            return None;
+        }
+        let canonical = canonicalize_expand_ref(requested_ref)?;
+        let mut sibling_store = RecoveryStore::new(Some(sibling_cache));
+        let result = sibling_store.expand(
+            &canonical,
+            selector,
+            start_line,
+            end_line,
+            anchor_kind,
+            symbol,
+        );
+        if result.found {
+            Some(ExpansionResult::ok(
+                requested_ref.to_string(),
+                result.selector,
+                result.content,
+            ))
+        } else {
+            None
+        }
+    }
+
     /// Return migration/compatibility state for doctor JSON output.
     /// Contains no payload content or filesystem paths.
     pub fn migration_state(&self) -> serde_json::Value {
@@ -1201,6 +1247,19 @@ impl RecoveryStore {
                 },
                 Err(SharedCasError::NotFound) if requested_ref.starts_with("tz://") => None,
                 Err(SharedCasError::NotFound) => {
+                    // Cross-engine fallback: foreign-engine blob refs may live
+                    // in the sibling engine's JSON store under the same unified
+                    // root (fszero-fz-ref-expand-broken-izj field regression).
+                    if let Some(result) = self.expand_in_sibling_engine_store(
+                        &requested_ref,
+                        selector,
+                        start_line,
+                        end_line,
+                        anchor_kind,
+                        symbol,
+                    ) {
+                        return result;
+                    }
                     return ExpansionResult::missing(
                         requested_ref,
                         selector.map(str::to_string),

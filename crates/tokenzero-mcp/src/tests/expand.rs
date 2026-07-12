@@ -3,6 +3,9 @@ use std::sync::Arc;
 use tempfile::tempdir;
 use tokenzero_core::{MCP_SCHEMA_VERSION, Mode};
 
+use tokenzero_core::ContentType;
+use tokenzero_recovery::RecoveryStore;
+
 use super::support::*;
 
 #[test]
@@ -846,4 +849,39 @@ fn crash_only_healthy_claim_false_after_ref_not_found_surface_error() {
             .decide(McpToolSurface::CodeMode, "expand"),
         crate::surface_health::CrashOnlyDecision::Unlocked
     );
+}
+
+#[test]
+fn expand_fz_blob_ref_from_sibling_fszero_store() {
+    // Engine-level regression for fszero-fz-ref-expand-broken-izj: a blob ref
+    // minted by the fszero engine and stored only in its JSON store must expand
+    // through the TokenZeroEngine when both engines share a unified root.
+    let dir = tempdir().unwrap();
+    let root = dir.path().join(".zerostack");
+    let fszero_cache = root.join("fszero").join("recovery-cache.json");
+    let tokenzero_cache = root.join("tokenzero").join("recovery-cache.json");
+
+    let payload = "fszero engine payload
+line two
+";
+    let fz_ref = format!("fz://blob/{}", tokenzero_core::sha256_hex(payload));
+
+    // Store via a flat path so the payload stays in the JSON store, then move
+    // the snapshot into the unified fszero layout.
+    let fszero_temp = dir.path().join("fszero-cache.json");
+    let mut fszero_store = RecoveryStore::new(Some(fszero_temp.clone()));
+    fszero_store
+        .store_payload(payload, ContentType::Unknown, None, None, None)
+        .unwrap();
+    fs::create_dir_all(fszero_cache.parent().unwrap()).unwrap();
+    fs::rename(&fszero_temp, &fszero_cache).unwrap();
+
+    let mut config = EngineConfig::for_root(dir.path());
+    config.cache_path = tokenzero_cache;
+    config.allowed_roots = vec![dir.path().to_path_buf()];
+    let engine = TokenZeroEngine::new(config);
+
+    let response = engine.expand(&fz_ref, Some("raw"), None, None, None, None);
+    assert_eq!(response.status, "ok", "{:?}", response.error);
+    assert_eq!(response.visible.as_ref().unwrap().text, payload);
 }

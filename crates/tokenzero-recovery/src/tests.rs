@@ -1727,6 +1727,80 @@ gamma
 }
 
 #[test]
+fn fz_blob_ref_falls_back_to_fszero_sibling_store() {
+    // fszero-fz-ref-expand-broken-izj regression: an fz:// blob ref minted by
+    // the fszero engine and stored only in the fszero JSON store must be
+    // expandable by the tokenzero engine under the same unified ZeroStack root.
+    let dir = tempdir().unwrap();
+    let root = dir.path().join(".zerostack");
+    let fszero_cache = root.join("fszero").join("recovery-cache.json");
+    let tokenzero_cache = root.join("tokenzero").join("recovery-cache.json");
+    fs::create_dir_all(fszero_cache.parent().unwrap()).unwrap();
+    fs::create_dir_all(tokenzero_cache.parent().unwrap()).unwrap();
+
+    let payload = "cross-engine blob from fszero
+second line
+";
+    let fz_ref = format!("fz://blob/{}", tokenzero_core::sha256_hex(payload));
+
+    // Store the payload using a flat cache path so it is written to the JSON
+    // store rather than published to the shared CAS, then move the snapshot into
+    // the unified fszero layout.
+    let fszero_temp = dir.path().join("fszero-cache.json");
+    let mut fszero_store = RecoveryStore::new(Some(fszero_temp.clone()));
+    fszero_store
+        .store_payload(payload, ContentType::Unknown, None, None, None)
+        .unwrap();
+    fs::create_dir_all(fszero_cache.parent().unwrap()).unwrap();
+    fs::rename(&fszero_temp, &fszero_cache).unwrap();
+
+    let mut tokenzero_store = RecoveryStore::new(Some(tokenzero_cache));
+    let expanded = tokenzero_store.expand(&fz_ref, Some("raw"), None, None, None, None);
+    assert!(
+        expanded.found,
+        "fz blob ref must expand via sibling fszero store: reason={}",
+        expanded.reason
+    );
+    assert_eq!(expanded.content, payload);
+    assert_eq!(expanded.ref_id, fz_ref);
+}
+
+#[test]
+fn gz_blob_ref_falls_back_to_graphzero_sibling_store() {
+    let dir = tempdir().unwrap();
+    let root = dir.path().join(".zerostack");
+    let gz_cache = root.join("graphzero").join("recovery-cache.json");
+    let tokenzero_cache = root.join("tokenzero").join("recovery-cache.json");
+    fs::create_dir_all(gz_cache.parent().unwrap()).unwrap();
+    fs::create_dir_all(tokenzero_cache.parent().unwrap()).unwrap();
+
+    let payload = "cross-engine blob from graphzero
+";
+    let gz_ref = format!("gz://blob/{}", tokenzero_core::sha256_hex(payload));
+
+    // Store the payload using a flat cache path so it is written to the JSON
+    // store rather than published to the shared CAS, then move the snapshot into
+    // the unified graphzero layout.
+    let gz_temp = dir.path().join("graphzero-cache.json");
+    let mut gz_store = RecoveryStore::new(Some(gz_temp.clone()));
+    gz_store
+        .store_payload(payload, ContentType::Unknown, None, None, None)
+        .unwrap();
+    fs::create_dir_all(gz_cache.parent().unwrap()).unwrap();
+    fs::rename(&gz_temp, &gz_cache).unwrap();
+
+    let mut tokenzero_store = RecoveryStore::new(Some(tokenzero_cache));
+    let expanded = tokenzero_store.expand(&gz_ref, Some("raw"), None, None, None, None);
+    assert!(
+        expanded.found,
+        "gz blob ref must expand via sibling graphzero store: reason={}",
+        expanded.reason
+    );
+    assert_eq!(expanded.content, payload);
+    assert_eq!(expanded.ref_id, gz_ref);
+}
+
+#[test]
 fn shared_cas_corruption_is_detected_via_fragment() {
     let (mut store, _cache, _dir, cas) = canonical_shared_store();
     let payload = b"alpha
