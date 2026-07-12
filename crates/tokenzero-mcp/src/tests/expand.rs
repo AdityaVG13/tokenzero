@@ -851,7 +851,6 @@ fn crash_only_healthy_claim_false_after_ref_not_found_surface_error() {
     );
 }
 
-
 #[test]
 fn expand_fz_blob_ref_from_sibling_fszero_store() {
     // Engine-level regression for fszero-fz-ref-expand-broken-izj: a blob ref
@@ -882,8 +881,7 @@ line two
     config.allowed_roots = vec![dir.path().to_path_buf()];
     let engine = TokenZeroEngine::new(config);
 
-    let response = engine.expand(&fz_ref, Some("raw"), None, None, None, None
-    );
+    let response = engine.expand(&fz_ref, Some("raw"), None, None, None, None);
     assert_eq!(response.status, "ok", "{:?}", response.error);
     assert_eq!(response.visible.as_ref().unwrap().text, payload);
 }

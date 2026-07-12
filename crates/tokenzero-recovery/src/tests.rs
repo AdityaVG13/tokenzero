@@ -1755,8 +1755,7 @@ second line
     fs::rename(&fszero_temp, &fszero_cache).unwrap();
 
     let mut tokenzero_store = RecoveryStore::new(Some(tokenzero_cache));
-    let expanded = tokenzero_store.expand(&fz_ref, Some("raw"), None, None, None, None
-    );
+    let expanded = tokenzero_store.expand(&fz_ref, Some("raw"), None, None, None, None);
     assert!(
         expanded.found,
         "fz blob ref must expand via sibling fszero store: reason={}",
@@ -1791,9 +1790,7 @@ fn gz_blob_ref_falls_back_to_graphzero_sibling_store() {
     fs::rename(&gz_temp, &gz_cache).unwrap();
 
     let mut tokenzero_store = RecoveryStore::new(Some(tokenzero_cache));
-    let expanded = tokenzero_store.expand(
-        &gz_ref, Some("raw"), None, None, None, None
-    );
+    let expanded = tokenzero_store.expand(&gz_ref, Some("raw"), None, None, None, None);
     assert!(
         expanded.found,
         "gz blob ref must expand via sibling graphzero store: reason={}",
