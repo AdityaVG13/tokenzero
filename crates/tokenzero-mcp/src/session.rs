@@ -10,7 +10,7 @@
 //! the same way (full serve, no persist on that path).
 
 use serde_json::{Value, json};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::time::SystemTime;
 
@@ -70,6 +70,7 @@ pub(crate) enum SeenState {
     /// Identical content already served; `serve_count` counts prior serves.
     Unchanged {
         serve_count: usize,
+        cross_session: bool,
     },
     /// Same key, different content: the previously served record, used as
     /// the diff base.
@@ -81,22 +82,38 @@ pub(crate) enum SeenState {
 #[derive(Debug, Default)]
 pub(crate) struct SessionMemory {
     records: HashMap<ServeKey, ServedRecord>,
+    restored_content_hashes: HashSet<String>,
     dedup_hits: usize,
     diff_hits: usize,
     visible_tokens_saved: usize,
     diff_tokens_saved: usize,
+    session_hwm: u64,
+    full_bytes: usize,
+    delta_bytes: usize,
 }
 
 impl SessionMemory {
     pub fn lookup(&self, key: &ServeKey, content_sha256: &str) -> SeenState {
+        let cross_session = self.restored_content_hashes.contains(content_sha256);
         match self.records.get(key) {
-            None => SeenState::Miss,
             Some(record) if record.content_sha256 == content_sha256 => SeenState::Unchanged {
                 serve_count: record.serve_count,
+                cross_session,
             },
             Some(record) => SeenState::Changed {
                 previous: record.clone(),
             },
+            None => self
+                .records
+                .values()
+                .filter(|record| record.content_sha256 == content_sha256)
+                .map(|record| record.serve_count)
+                .max()
+                .map(|serve_count| SeenState::Unchanged {
+                    serve_count,
+                    cross_session,
+                })
+                .unwrap_or(SeenState::Miss),
         }
     }
 
@@ -124,16 +141,45 @@ impl SessionMemory {
         diff_hits: usize,
         visible_tokens_saved: usize,
         diff_tokens_saved: usize,
+        session_hwm: u64,
+        full_bytes: usize,
+        delta_bytes: usize,
     ) {
+        self.restored_content_hashes = records
+            .values()
+            .map(|record| record.content_sha256.clone())
+            .collect();
         self.records = records;
         self.dedup_hits = dedup_hits;
         self.diff_hits = diff_hits;
         self.visible_tokens_saved = visible_tokens_saved;
         self.diff_tokens_saved = diff_tokens_saved;
+        self.session_hwm = session_hwm;
+        self.full_bytes = full_bytes;
+        self.delta_bytes = delta_bytes;
     }
 
     pub(crate) fn records_snapshot(&self) -> &HashMap<ServeKey, ServedRecord> {
         &self.records
+    }
+
+    pub(crate) fn session_hwm(&self) -> u64 {
+        self.session_hwm
+    }
+
+    pub(crate) fn advance_hwm(&mut self) -> (u64, u64) {
+        let from = self.session_hwm;
+        self.session_hwm = self.session_hwm.saturating_add(1);
+        (from, self.session_hwm)
+    }
+
+    pub(crate) fn note_bytes(&mut self, full: usize, delta: usize) {
+        self.full_bytes = self.full_bytes.saturating_add(full);
+        self.delta_bytes = self.delta_bytes.saturating_add(delta);
+    }
+
+    pub(crate) fn byte_rollup(&self) -> (usize, usize) {
+        (self.full_bytes, self.delta_bytes)
     }
 
     pub(crate) fn rollup_counters(&self) -> (usize, usize, usize, usize) {
@@ -151,7 +197,10 @@ impl SessionMemory {
             "dedup_hits": self.dedup_hits,
             "diff_hits": self.diff_hits,
             "visible_tokens_saved": self.visible_tokens_saved,
-            "diff_tokens_saved": self.diff_tokens_saved
+            "diff_tokens_saved": self.diff_tokens_saved,
+            "session_hwm": self.session_hwm,
+            "full_bytes": self.full_bytes,
+            "delta_bytes": self.delta_bytes
         })
     }
 }
@@ -166,7 +215,12 @@ pub(crate) struct SessionSummary {
     pub visible_saved: usize,
     pub diff_saved: usize,
     pub serve_count: usize,
+    pub cross_session_hits: usize,
     pub diff: Option<DiffTelemetry>,
+    pub full_bytes: Option<usize>,
+    pub delta_bytes: Option<usize>,
+    pub from_hwm: u64,
+    pub to_hwm: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -178,16 +232,27 @@ pub(crate) struct DiffTelemetry {
 }
 
 impl SessionSummary {
-    pub fn note_dedup(&mut self, serve_count: usize, saved: usize) {
+    pub fn note_dedup(&mut self, serve_count: usize, saved: usize, cross_session: bool) {
         self.dedup_notes += 1;
         self.serve_count = serve_count;
         self.visible_saved += saved;
+        self.cross_session_hits += usize::from(cross_session);
     }
 
     pub fn note_diff(&mut self, info: DiffTelemetry, saved: usize) {
         self.diff_serves += 1;
         self.diff_saved += saved;
         self.diff = Some(info);
+    }
+
+    pub fn note_wire_bytes(&mut self, full_bytes: usize, delta_bytes: usize) {
+        self.full_bytes = Some(full_bytes);
+        self.delta_bytes = Some(delta_bytes);
+    }
+
+    pub fn set_watermark(&mut self, from_hwm: u64, to_hwm: u64) {
+        self.from_hwm = from_hwm;
+        self.to_hwm = to_hwm;
     }
 
     /// Telemetry fragment to merge into the tool response, or `None` when
@@ -197,27 +262,66 @@ impl SessionSummary {
             (true, true) => "seen_set_dedup+diff_since_served",
             (true, false) => "seen_set_dedup",
             (false, true) => "diff_since_served",
+            (false, false) if self.full_bytes.is_some() => "full",
             (false, false) => return None,
         };
         let mut value = json!({
             "output_strategy": strategy,
-            "cache_hit": true
+            "cache_hit": self.dedup_notes > 0 || self.diff_serves > 0
         });
+        if let (Some(full_bytes), Some(delta_bytes)) = (self.full_bytes, self.delta_bytes) {
+            value["session_delta"] = json!({
+                "from_hwm": self.from_hwm,
+                "to_hwm": self.to_hwm,
+                "full_bytes": full_bytes,
+                "delta_bytes": delta_bytes,
+                "saved_bytes": full_bytes.saturating_sub(delta_bytes)
+            });
+        }
         if self.dedup_notes > 0 {
+            let cross_session_bytes_saved = if self.cross_session_hits > 0 {
+                self.full_bytes
+                    .zip(self.delta_bytes)
+                    .map(|(full, delta)| full.saturating_sub(delta))
+                    .unwrap_or(0)
+            } else {
+                0
+            };
             value["dedup"] = json!({
                 "hits": self.dedup_notes,
                 "serve_count": self.serve_count,
-                "visible_tokens_saved": self.visible_saved
+                "visible_tokens_saved": self.visible_saved,
+                "cross_session_hits": self.cross_session_hits,
+                "cross_session_bytes_saved": cross_session_bytes_saved
             });
         }
         if let Some(diff) = &self.diff {
-            value["diff"] = json!({
-                "hunks": diff.hunks,
-                "plus": diff.plus,
-                "minus": diff.minus,
-                "base_ref": diff.base_ref
-            });
+            value["diff"] = json!({ "hunks": diff.hunks, "plus": diff.plus, "minus": diff.minus, "base_ref": diff.base_ref, "visible_tokens_saved": self.diff_saved });
         }
         Some(value)
+    }
+}
+
+#[cfg(test)]
+mod delta_tests {
+    use super::*;
+    #[test]
+    fn telemetry_reports_watermark_and_wire_bytes() {
+        let mut summary = SessionSummary::default();
+        summary.note_wire_bytes(240, 32);
+        summary.set_watermark(7, 8);
+        let telemetry = summary.telemetry().expect("delta telemetry");
+        assert_eq!(telemetry["session_delta"]["from_hwm"], 7);
+        assert_eq!(telemetry["session_delta"]["to_hwm"], 8);
+        assert_eq!(telemetry["session_delta"]["full_bytes"], 240);
+        assert_eq!(telemetry["session_delta"]["delta_bytes"], 32);
+        assert_eq!(telemetry["session_delta"]["saved_bytes"], 208);
+    }
+    #[test]
+    fn watermark_is_monotonic() {
+        let mut memory = SessionMemory::default();
+        assert_eq!(memory.advance_hwm(), (0, 1));
+        assert_eq!(memory.advance_hwm(), (1, 2));
+        assert_eq!(memory.session_hwm(), 2);
     }
 }

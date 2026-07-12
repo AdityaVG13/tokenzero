@@ -44,6 +44,8 @@ pub(crate) enum Commands {
     Ingest(IngestArgs),
     #[command(about = "Recover exact bytes from a prior TokenZero ref")]
     Expand(ExpandArgs),
+    #[command(name = "session-open", about = "Open a bounded manifest+delta session")]
+    SessionOpen(CommonArgs),
     #[command(about = "Inspect recovery-cache state")]
     Mem(CommonArgs),
     #[command(about = "Rewrite a shell command with TokenZero-safe routing")]
@@ -59,6 +61,11 @@ pub(crate) enum Commands {
     Stats(CommonArgs),
     #[command(about = "Inspect or sync local Pulse telemetry")]
     Pulse(PulseArgs),
+    #[command(
+        about = "Session cost ledger: per-session, per-repo, per-agent mass × turns accounting",
+        alias = "ledger"
+    )]
+    SessionLedger(SessionLedgerArgs),
     #[command(about = "Inspect or prune TokenZero recovery-cache state")]
     Cache(CacheArgs),
     #[command(about = "Plan or apply local integration writes with rollback data")]
@@ -494,6 +501,62 @@ pub(crate) struct PulseImportArgs {
 }
 
 #[derive(Debug, Args)]
+pub(crate) struct SessionLedgerArgs {
+    #[arg(long, global = true)]
+    pub(crate) root: Option<PathBuf>,
+    #[arg(long, global = true)]
+    pub(crate) json: bool,
+    #[command(subcommand)]
+    pub(crate) command: Option<SessionLedgerCommand>,
+}
+
+#[derive(Debug, Subcommand)]
+pub(crate) enum SessionLedgerCommand {
+    #[command(about = "Print per-session cost breakdown (mass × turns)")]
+    Stats,
+    #[command(about = "Export ledger as JSON array")]
+    Export,
+    #[command(about = "Print the stable schema for the session ledger")]
+    Schema,
+    #[command(about = "Query the response ledger")]
+    Query {
+        #[command(subcommand)]
+        query: LedgerQueryCommand,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+pub(crate) enum LedgerQueryCommand {
+    #[command(about = "Aggregate visible token cost for one repo over a time window")]
+    Repo {
+        #[arg(long)]
+        repo: PathBuf,
+        #[arg(long, default_value_t = 30)]
+        days: u64,
+    },
+    #[command(
+        name = "version-delta",
+        about = "Compare visible token cost between crate versions"
+    )]
+    VersionDelta {
+        #[arg(long)]
+        baseline: String,
+        #[arg(long)]
+        candidate: String,
+        #[arg(long, default_value_t = 30)]
+        days: u64,
+    },
+    #[command(
+        name = "agent-spend",
+        about = "Aggregate visible token cost by agent identity"
+    )]
+    AgentSpend {
+        #[arg(long, default_value_t = 30)]
+        days: u64,
+    },
+}
+
+#[derive(Debug, Args)]
 pub(crate) struct CacheArgs {
     #[command(subcommand)]
     pub(crate) command: CacheCommand,
@@ -539,6 +602,14 @@ pub(crate) enum CacheCommand {
     #[command(alias = "statuz")]
     Status(CommonArgs),
     Prune(CachePruneArgs),
+    /// Migrate legacy short refs to full-hash canonical refs (dry-run by default).
+    MigrateRefs(CacheMigrateRefsArgs),
+    /// Verify migration integrity without mutating.
+    MigrateVerify(CacheMigrateVerifyArgs),
+    /// Rollback migration aliases and manifest (never CAS/source bytes).
+    MigrateRollback(CacheMigrateRollbackArgs),
+    /// Clean up legacy source payloads after successful verification.
+    MigrateCleanup(CacheMigrateCleanupArgs),
 }
 
 #[derive(Debug, Args)]
@@ -549,6 +620,58 @@ pub(crate) struct CachePruneArgs {
     pub(crate) cache_path: Option<PathBuf>,
     #[arg(long)]
     pub(crate) apply: bool,
+    #[arg(long)]
+    pub(crate) json: bool,
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct CacheMigrateRefsArgs {
+    #[arg(long)]
+    pub(crate) root: Option<PathBuf>,
+    #[arg(long)]
+    pub(crate) cache_path: Option<PathBuf>,
+    /// Actually write to CAS, store, and manifest. Without this flag, migration is dry-run only.
+    #[arg(long)]
+    pub(crate) apply: bool,
+    #[arg(long)]
+    pub(crate) json: bool,
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct CacheMigrateVerifyArgs {
+    #[arg(long)]
+    pub(crate) root: Option<PathBuf>,
+    #[arg(long)]
+    pub(crate) cache_path: Option<PathBuf>,
+    #[arg(long)]
+    pub(crate) json: bool,
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct CacheMigrateRollbackArgs {
+    #[arg(long)]
+    pub(crate) root: Option<PathBuf>,
+    #[arg(long)]
+    pub(crate) cache_path: Option<PathBuf>,
+    /// Actually remove aliases and manifest. Without this flag, rollback is dry-run only.
+    #[arg(long)]
+    pub(crate) apply: bool,
+    #[arg(long)]
+    pub(crate) json: bool,
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct CacheMigrateCleanupArgs {
+    #[arg(long)]
+    pub(crate) root: Option<PathBuf>,
+    #[arg(long)]
+    pub(crate) cache_path: Option<PathBuf>,
+    /// Actually remove legacy source payloads. Requires --confirm-cleanup.
+    #[arg(long, requires = "confirm_cleanup")]
+    pub(crate) apply: bool,
+    /// Required confirmation flag. Cleanup is irreversible without migration re-run.
+    #[arg(long, requires = "apply")]
+    pub(crate) confirm_cleanup: bool,
     #[arg(long)]
     pub(crate) json: bool,
 }

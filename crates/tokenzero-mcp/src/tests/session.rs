@@ -86,7 +86,8 @@ fn tiny_file_roi_guard_serves_full() {
     let second = read_ok(&engine, &file);
     assert_eq!(visible_text(&second), "hi");
     // The rejected note leaves no dedup telemetry behind.
-    assert!(second.telemetry.is_none(), "{:?}", second.telemetry);
+    let delta = &second.telemetry.as_ref().unwrap()["session_delta"];
+    assert_eq!(delta["full_bytes"], delta["delta_bytes"]);
 }
 
 #[test]
@@ -190,13 +191,16 @@ fn fully_rewritten_file_serves_full() {
 #[test]
 fn missing_diff_base_falls_back_to_full() {
     let dir = tempdir().unwrap();
+    let ref_index = dir.path().join("ref-index");
+    tokenzero_recovery::set_ref_index_root_override(Some(ref_index.clone()));
     let file = dir.path().join("sample.rs");
     fs::write(&file, dedup_fixture_content()).unwrap();
     let engine = TokenZeroEngine::new(EngineConfig::for_root(dir.path()));
 
     read_ok(&engine, &file);
-    // Prune the recovery cache: the diff base is gone.
+    // Prune the recovery cache AND shared CAS: the diff base is gone.
     fs::remove_file(&engine.config.cache_path).unwrap();
+    let _ = fs::remove_dir_all(&ref_index);
     let changed = dedup_fixture_content().replace("line 20:", "line 20 (changed):");
     fs::write(&file, &changed).unwrap();
     let second = read_ok(&engine, &file);
@@ -395,6 +399,117 @@ fn concurrent_reads_keep_session_consistent() {
 }
 
 #[test]
+fn session_boot_is_bounded_and_itemized() {
+    let dir = tempdir().unwrap();
+    let engine = TokenZeroEngine::new(EngineConfig::for_root(dir.path()));
+    let boot = engine.session_boot_snapshot();
+    assert_eq!(boot["schema"], "tokenzero.session-boot.v1");
+    assert_eq!(boot["mode"], "manifest_delta");
+    assert_eq!(boot["demand_paging"]["working_set_loaded"], false);
+    assert!(boot["wire"].as_str().unwrap().starts_with("TZ/1 root="));
+    let telemetry = &boot["telemetry"];
+    let sum = telemetry["manifest"].as_u64().unwrap()
+        + telemetry["delta"].as_u64().unwrap()
+        + telemetry["toc_working_set"].as_u64().unwrap()
+        + telemetry["other"].as_u64().unwrap();
+    assert_eq!(sum, telemetry["total"].as_u64().unwrap());
+    assert!(sum < 100, "{boot:#}");
+
+    let _ = engine.session_rollup();
+    assert_eq!(
+        engine.session_boot_snapshot()["demand_paging"]["working_set_loaded"],
+        true
+    );
+}
+
+#[test]
+fn turn_two_reports_smaller_delta_and_monotonic_watermark() {
+    let dir = tempdir().unwrap();
+    let file = dir.path().join("delta.rs");
+    fs::write(&file, dedup_fixture_content()).unwrap();
+    let engine = TokenZeroEngine::new(EngineConfig::for_root(dir.path()));
+    let first = read_ok(&engine, &file);
+    let second = read_ok(&engine, &file);
+    let first_delta = &first.telemetry.as_ref().unwrap()["session_delta"];
+    let second_delta = &second.telemetry.as_ref().unwrap()["session_delta"];
+    assert_eq!(first_delta["from_hwm"], 0);
+    assert_eq!(first_delta["to_hwm"], 1);
+    assert_eq!(second_delta["from_hwm"], 1);
+    assert_eq!(second_delta["to_hwm"], 2);
+    assert!(
+        second_delta["delta_bytes"].as_u64().unwrap()
+            < second_delta["full_bytes"].as_u64().unwrap()
+    );
+    let rollup = engine.session_rollup();
+    assert_eq!(rollup["session_hwm"], 2);
+    assert!(rollup["delta_bytes"].as_u64().unwrap() < rollup["full_bytes"].as_u64().unwrap());
+}
+
+#[test]
+fn v1_session_state_resumes_with_zero_watermark() {
+    let dir = tempdir().unwrap();
+    let file = dir.path().join("resume.rs");
+    fs::write(&file, dedup_fixture_content()).unwrap();
+    let config = EngineConfig::for_root(dir.path());
+    {
+        let engine = TokenZeroEngine::new(config.clone());
+        read_ok(&engine, &file);
+    }
+    let memory_path = crate::session_persist::session_memory_path(&config.cache_path);
+    let mut state: Value =
+        serde_json::from_str(&fs::read_to_string(&memory_path).unwrap()).unwrap();
+    state["version"] = json!(1);
+    for scope in state["scopes"].as_object_mut().unwrap().values_mut() {
+        scope.as_object_mut().unwrap().remove("session_hwm");
+        if let Some(rollup) = scope["rollup"].as_object_mut() {
+            rollup.remove("full_bytes");
+            rollup.remove("delta_bytes");
+        }
+    }
+    fs::write(&memory_path, serde_json::to_vec_pretty(&state).unwrap()).unwrap();
+    let resumed = TokenZeroEngine::new(config);
+    let response = read_ok(&resumed, &file);
+    assert!(
+        !visible_text(&response).contains("unchanged:"),
+        "v1 state without a watermark must resend full"
+    );
+    assert!(visible_text(&response).contains("line 01"));
+    let delta = &response.telemetry.as_ref().unwrap()["session_delta"];
+    assert_eq!(delta["from_hwm"], 0);
+    assert_eq!(delta["to_hwm"], 1);
+}
+
+#[test]
+fn resume_revalidates_gced_refs_and_resends_full() {
+    let dir = tempdir().unwrap();
+    let ref_index = dir.path().join("ref-index");
+    tokenzero_recovery::set_ref_index_root_override(Some(ref_index.clone()));
+    let file = dir.path().join("gc.rs");
+    fs::write(&file, dedup_fixture_content()).unwrap();
+    let config = EngineConfig::for_root(dir.path());
+    {
+        let engine = TokenZeroEngine::new(config.clone());
+        read_ok(&engine, &file);
+    }
+    // Remove all persistent state: cache, session memory, and shared CAS.
+    fs::remove_file(&config.cache_path).unwrap();
+    let mut journal = config.cache_path.clone().into_os_string();
+    journal.push(".journal");
+    let _ = fs::remove_file(std::path::PathBuf::from(journal));
+    let mem_path = crate::session_persist::session_memory_path(&config.cache_path);
+    let _ = fs::remove_file(&mem_path);
+    let _ = fs::remove_dir_all(&ref_index);
+    let _ = fs::remove_dir_all(dir.path().join("blobs"));
+    // Keep override at the now-empty dir so we don't fall through to HOME.
+    let resumed = TokenZeroEngine::new(config);
+    let response = read_ok(&resumed, &file);
+    assert!(!visible_text(&response).contains("unchanged:"));
+    assert!(visible_text(&response).contains("line 01"));
+    let delta = &response.telemetry.as_ref().unwrap()["session_delta"];
+    assert_eq!(delta["full_bytes"], delta["delta_bytes"]);
+}
+
+#[test]
 fn tool_metrics_records_session_calls() {
     let dir = tempdir().unwrap();
     let file = dir.path().join("hello.txt");
@@ -419,4 +534,42 @@ fn tool_metrics_records_session_calls() {
         3,
         "session counters track each read call"
     );
+}
+
+#[test]
+fn persisted_memory_is_user_scoped_and_reports_cross_session_savings() {
+    let project = tempdir().unwrap();
+    let user_a = tempdir().unwrap();
+    let user_b = tempdir().unwrap();
+    let file = project.path().join("conversation.rs");
+    fs::write(&file, dedup_fixture_content()).unwrap();
+    let config = EngineConfig::for_root(project.path());
+
+    crate::session_persist::with_session_root(user_a.path(), || {
+        let first_session = TokenZeroEngine::new(config.clone());
+        let first = read_ok(&first_session, &file);
+        assert!(!visible_text(&first).starts_with("unchanged:"));
+    });
+
+    crate::session_persist::with_session_root(user_b.path(), || {
+        let other_user = TokenZeroEngine::new(config.clone());
+        let response = read_ok(&other_user, &file);
+        assert!(!visible_text(&response).starts_with("unchanged:"));
+        assert_eq!(
+            response.telemetry.as_ref().unwrap()["dedup"]["cross_session_hits"],
+            Value::Null
+        );
+    });
+
+    crate::session_persist::with_session_root(user_a.path(), || {
+        let resumed = TokenZeroEngine::new(config.clone());
+        let response = read_ok(&resumed, &file);
+        assert!(visible_text(&response).starts_with("unchanged:"));
+        let dedup = &response.telemetry.as_ref().unwrap()["dedup"];
+        assert_eq!(dedup["cross_session_hits"], 1);
+        assert!(dedup["cross_session_bytes_saved"].as_u64().unwrap() > 0);
+    });
+
+    assert!(user_a.path().join("session-memory.json").is_file());
+    assert!(user_b.path().join("session-memory.json").is_file());
 }

@@ -3,11 +3,14 @@
 use rquickjs::{Context, Runtime, function::Func};
 use serde_json::{Value, json};
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
+use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
-use tokenzero_core::{Mode, ToolResponse, count_tokens, detect_content_type};
+use tokenzero_core::{
+    Mode, ToolResponse, count_tokens, detect_content_type, pack_to_token_boundary_with_char_limit,
+};
 use tokenzero_filters::{discover, rewrite_command};
 
 use crate::workspace::{
@@ -16,13 +19,134 @@ use crate::workspace::{
 use crate::{EditHunk, EngineConfig, TokenZeroEngine, shell_timeout_from_secs};
 
 use super::catalog::{describe_method, search_catalog};
+use super::journal::{
+    BeginOutcome, JournalOperation, JournalState, JournalTransaction, OperationClass,
+    OperationSpec, atomic_write as journal_atomic_write, begin_plan, classify_method,
+    current_digest, doctor_json as journal_doctor_json, inspect as inspect_journal,
+    open_unresolved, sha256_bytes,
+};
 use super::parser::{Expr, MethodCall, Statement, parse_plan, resolve_expr, resolve_return};
 use super::result::{CodeModeOptions, CodeModeResult, CodeModeStatus};
 use super::sandbox::lower_code_plan;
-use super::store::{CodeModeLimits, ExecutionStep, ExecutionStore, finalize_result, now_ms};
+use super::store::{
+    CodeModeLimits, ExecutionStep, ExecutionStore, execution_id, finalize_result, now_ms,
+};
 use crate::expand_params::ExpandParams;
 
 const EXACT_EXPAND_MARKER: &str = "__tz_exact_expand";
+
+/// Maximum number of recovery-cache sessions retained for fallback prefix telemetry.
+const PREVIOUS_OUTPUT_MAX_SESSIONS: usize = 32;
+/// Only the leading bytes can contribute to a future common-prefix hit.
+const PREVIOUS_OUTPUT_MAX_PREFIX_BYTES: usize = 64 * 1024;
+
+#[derive(Debug, Default)]
+struct PreviousOutputLru {
+    entries: HashMap<PathBuf, String>,
+    oldest_first: std::collections::VecDeque<PathBuf>,
+    stored_bytes: usize,
+    recipes: HashMap<PathBuf, HashMap<String, String>>,
+    recipe_oldest_first: VecDeque<PathBuf>,
+}
+
+impl PreviousOutputLru {
+    fn observe(&mut self, cache_path: PathBuf, current: &str) -> usize {
+        let matched = self
+            .entries
+            .get(&cache_path)
+            .map(|previous| common_prefix_len(current, previous))
+            .unwrap_or(0);
+        if let Some(position) = self.oldest_first.iter().position(|key| key == &cache_path) {
+            self.oldest_first.remove(position);
+        }
+        if let Some(previous) = self.entries.remove(&cache_path) {
+            self.stored_bytes = self.stored_bytes.saturating_sub(previous.len());
+        }
+        let mut end = current.len().min(PREVIOUS_OUTPUT_MAX_PREFIX_BYTES);
+        while !current.is_char_boundary(end) {
+            end -= 1;
+        }
+        let prefix = current[..end].to_owned();
+        self.stored_bytes = self.stored_bytes.saturating_add(prefix.len());
+        self.entries.insert(cache_path.clone(), prefix);
+        self.oldest_first.push_back(cache_path);
+        while self.entries.len() > PREVIOUS_OUTPUT_MAX_SESSIONS {
+            let Some(oldest) = self.oldest_first.pop_front() else {
+                break;
+            };
+            if let Some(previous) = self.entries.remove(&oldest) {
+                self.stored_bytes = self.stored_bytes.saturating_sub(previous.len());
+            }
+        }
+        matched
+    }
+    const RECIPE_MAX_SESSIONS: usize = 32;
+    const RECIPE_MAX_PER_SESSION: usize = 64;
+    const RECIPE_MAX_SOURCE_BYTES: usize = 64 * 1024;
+
+    fn touch_recipe_session(&mut self, cache_path: &Path) {
+        if let Some(position) = self
+            .recipe_oldest_first
+            .iter()
+            .position(|key| key == cache_path)
+        {
+            self.recipe_oldest_first.remove(position);
+        }
+        self.recipe_oldest_first.push_back(cache_path.to_path_buf());
+    }
+
+    fn recipe_session_mut(&mut self, cache_path: &Path) -> &mut HashMap<String, String> {
+        if !self.recipes.contains_key(cache_path) {
+            while self.recipes.len() >= Self::RECIPE_MAX_SESSIONS {
+                let Some(oldest) = self.recipe_oldest_first.pop_front() else {
+                    break;
+                };
+                self.recipes.remove(&oldest);
+            }
+            self.recipes
+                .insert(cache_path.to_path_buf(), HashMap::new());
+        }
+        self.touch_recipe_session(cache_path);
+        self.recipes
+            .get_mut(cache_path)
+            .expect("recipe session inserted above")
+    }
+
+    fn recipe_source(&mut self, cache_path: &Path, name: &str) -> Option<String> {
+        let source = self
+            .recipes
+            .get(cache_path)
+            .and_then(|recipes| recipes.get(name))
+            .cloned();
+        if source.is_some() {
+            self.touch_recipe_session(cache_path);
+        }
+        source
+    }
+
+    fn recipe_names(&mut self, cache_path: &Path) -> Vec<String> {
+        let mut names: Vec<String> = self
+            .recipes
+            .get(cache_path)
+            .map(|recipes| recipes.keys().cloned().collect())
+            .unwrap_or_default();
+        if self.recipes.contains_key(cache_path) {
+            self.touch_recipe_session(cache_path);
+        }
+        names.sort();
+        names
+    }
+}
+
+static PREVIOUS_OUTPUT_BY_SESSION: OnceLock<Mutex<PreviousOutputLru>> = OnceLock::new();
+
+fn previous_output_by_session() -> &'static Mutex<PreviousOutputLru> {
+    PREVIOUS_OUTPUT_BY_SESSION.get_or_init(|| Mutex::new(PreviousOutputLru::default()))
+}
+
+/// Approximate bytes per token for prevented-read counterfactuals. Used
+/// only when the visible text gives no better per-token byte ratio.
+const PREVENTED_READ_BYTES_PER_TOKEN: usize = 4;
 
 thread_local! {
     /// Payload identity registry for the current execution: hashes of exact
@@ -114,6 +238,13 @@ pub fn execute_codemode(plan: &str) -> CodeModeResult {
 }
 
 pub fn execute_codemode_with_options(plan: &str, options: CodeModeOptions) -> CodeModeResult {
+    let containment_options = options.clone();
+    super::containment::execute(plan, &containment_options, move || {
+        execute_codemode_uncontained(plan, options)
+    })
+}
+
+fn execute_codemode_uncontained(plan: &str, options: CodeModeOptions) -> CodeModeResult {
     EXACT_EXPAND_REGISTRY.with(|registry| registry.borrow_mut().clear());
     let plan = plan.trim();
     let started_ms = now_ms();
@@ -239,6 +370,10 @@ pub fn execute_codemode_with_options(plan: &str, options: CodeModeOptions) -> Co
 }
 
 fn should_run_quickjs(plan: &str) -> bool {
+    if plan.contains("zero.register(") || plan.contains("zero.run(") || plan.contains("zero.list(")
+    {
+        return true;
+    }
     let trimmed = plan.trim_start();
     trimmed.starts_with("export default")
         || trimmed.starts_with("async function")
@@ -261,6 +396,7 @@ struct JsExecutionState {
     physical_ops: usize,
     visible_tokens: usize,
     raw_tokens: usize,
+    prevented_read_bytes: usize,
     refs: Vec<String>,
     steps: Vec<ExecutionStep>,
     started_ms: u128,
@@ -456,17 +592,31 @@ fn execute_quickjs_plan(
         drained += 1;
     }
 
-    let (result_json, error): (Option<String>, Option<String>) = context
-        .with(|ctx| {
-            let globals = ctx.globals();
-            Ok::<_, rquickjs::Error>((globals.get("__tz_result")?, globals.get("__tz_error")?))
-        })
-        .unwrap_or((None, Some("sandbox: result extraction failed".to_string())));
+    let (result_json, error, error_kind): (Option<String>, Option<String>, Option<String>) =
+        context
+            .with(|ctx| {
+                let globals = ctx.globals();
+                Ok::<_, rquickjs::Error>((
+                    globals.get("__tz_result")?,
+                    globals.get("__tz_error")?,
+                    globals.get("__tz_error_kind")?,
+                ))
+            })
+            .unwrap_or((
+                None,
+                Some("sandbox: result extraction failed".to_string()),
+                Some("sandbox".to_string()),
+            ));
 
     let state = state.borrow();
     if let Some(error) = error {
         return finalize_codemode_result(
-            CodeModeResult::error(error, state.ops),
+            CodeModeResult::error_with_kind(
+                error_kind.as_deref().unwrap_or("sandbox"),
+                error,
+                state.ops,
+                false,
+            ),
             "code",
             plan,
             started_ms,
@@ -488,6 +638,18 @@ fn execute_quickjs_plan(
         state.raw_tokens,
     );
     result.telemetry.physical_ops = state.physical_ops;
+    result.telemetry.prevented_read_bytes = state.prevented_read_bytes;
+    if let Some(extra) = result
+        .telemetry
+        .extra
+        .as_mut()
+        .and_then(Value::as_object_mut)
+    {
+        extra.insert(
+            "prevented_read_bytes".to_string(),
+            json!(state.prevented_read_bytes),
+        );
+    }
     finalize_codemode_result(
         result,
         "code",
@@ -557,9 +719,12 @@ fn invoke_js_binding(
     engine: &TokenZeroEngine,
     work_root: &Path,
     method: &str,
-    args: Vec<Value>,
+    mut args: Vec<Value>,
     state: &Rc<RefCell<JsExecutionState>>,
 ) -> String {
+    if matches!(method, "codemode.recipeRun" | "recipeRun" | "recipe_run") {
+        args.push(json!(state.borrow().limits.max_code_bytes));
+    }
     {
         let state_ref = state.borrow();
         if now_ms().saturating_sub(state_ref.started_ms) as u64 > state_ref.limits.hard_max_wall_ms
@@ -592,11 +757,13 @@ fn invoke_js_binding(
         Ok(outcome) => outcome,
         Err(error) => {
             return serde_json::to_string(&json!({
-                "__tz_error": error.error.as_ref().map(|error| error.message.as_str()).unwrap_or("unknown error")
-            }))
-            .unwrap_or_else(|_| "{\"__tz_error\":\"unknown error\"}".to_string());
+                            "__tz_error": error.error.as_ref().map(|error| error.message.as_str()).unwrap_or("unknown error"),
+                            "__tz_error_kind": error.error.as_ref().map(|error| error.kind.as_str()).unwrap_or("runtime"),
+                        }))
+                        .unwrap_or_else(|_| "{\"__tz_error\":\"unknown error\",\"__tz_error_kind\":\"runtime\"}".to_string());
         }
     };
+    let prevented_read_bytes = outcome.prevented_read_bytes();
     let value = outcome.into_value();
     let refs = refs_from_value(&value);
     let mut state = state.borrow_mut();
@@ -617,6 +784,9 @@ fn invoke_js_binding(
         .visible_tokens
         .saturating_add(result_visible_tokens(&value));
     state.raw_tokens = state.raw_tokens.saturating_add(result_raw_tokens(&value));
+    state.prevented_read_bytes = state
+        .prevented_read_bytes
+        .saturating_add(prevented_read_bytes);
     state.refs.extend(refs.iter().cloned());
     let op = state.ops;
     state.steps.push(ExecutionStep {
@@ -632,7 +802,7 @@ fn js_prelude() -> &'static str {
     r#"
         const __tz_parse = (text) => {
           const value = JSON.parse(text); if (value && value.__tz_exact_expand) { try { return JSON.parse(value.text); } catch (_) { return value.text; } }
-          if (value && value.__tz_error) throw new Error(value.__tz_error);
+          if (value && value.__tz_error) { const error = new Error(value.__tz_error); error.__tz_error_kind = value.__tz_error_kind || 'runtime'; throw error; }
           return value;
         };
         const __tz_call = (method, args) => __tz_parse(__tz_call_json(method, JSON.stringify(args)));
@@ -646,6 +816,20 @@ fn js_prelude() -> &'static str {
           const text = typeof value === 'string' ? value : (value && typeof value.text === 'string' ? value.text : '');
           return text.length === 0 ? [] : text.split(/\r?\n/);
         };
+        const __tz_deep_freeze = (value) => {
+          if (value && typeof value === 'object' && !Object.isFrozen(value)) {
+            for (const child of Object.values(value)) __tz_deep_freeze(child);
+            Object.freeze(value);
+          }
+          return value;
+        };
+        const __tz_run_recipe = async (name, args = {}) => {
+          const recipe = __tz_call('codemode.recipeRun', [String(name)]);
+          const frozenArgs = __tz_deep_freeze(args === undefined ? {} : args);
+          const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor;
+          const invoke = new AsyncFunction('args', 'zero', 'ctx', 'token', recipe.source);
+          return await invoke(frozenArgs, zero, ctx, token);
+        };
         const zero = Object.freeze({
           raw: (value) => ({ __tz_raw: true, value }),
           count: (value) => Array.isArray(value) ? value.length : __tz_lines(value).length,
@@ -656,6 +840,9 @@ fn js_prelude() -> &'static str {
             return take === 1 ? (lines[0] || '') : lines.join('\n');
           },
           verdict: (ok, detail = '') => ({ ok: __tz_truthy(ok), detail: String(detail).split(/\r?\n/)[0] }),
+          register: (name, source) => __tz_call('codemode.recipeRegister', [name, source]),
+          run: (name, args = {}) => __tz_run_recipe(name, args),
+          list: () => __tz_call('codemode.recipeList', []),
           read: (...args) => __tz_call('zero.read', args),
           find: (...args) => __tz_call('zero.find', args),
           grep: (...args) => __tz_call('zero.grep', args),
@@ -685,10 +872,8 @@ fn js_prelude() -> &'static str {
             compactMany: (items) => __tz_parse(__tz_compact_many_json(JSON.stringify(items))),
             expandMany: (refs) => __tz_parse(__tz_expand_many_json(JSON.stringify(refs))),
             dedupe: (items) => __tz_parse(__tz_dedupe_json(JSON.stringify(items))),
-            // Op parity for routed callers that address this substrate as
-            // zero.token.* (the router's namespaced surface): same engine
-            // ops as the top-level zero.* bindings, same policy machinery.
             shell: (...args) => __tz_call('zero.shell', args),
+            job: (...args) => __tz_call('zero.token.job', args),
             read: (...args) => __tz_call('zero.read', args),
             find: (...args) => __tz_call('zero.find', args),
             grep: (...args) => __tz_call('zero.grep', args),
@@ -724,6 +909,7 @@ fn wrap_js_plan(plan: &str) -> String {
             globalThis.__tz_result = JSON.stringify(value === undefined ? null : value);
           }} catch (err) {{
             globalThis.__tz_error = String((err && (err.message || err.stack)) || err);
+            globalThis.__tz_error_kind = String((err && err.__tz_error_kind) || 'sandbox');
           }}
         }})();
         "#
@@ -749,6 +935,182 @@ pub(super) fn limits_from_options(options: &CodeModeOptions) -> CodeModeLimits {
         hard_max_wall_ms,
         ..Default::default()
     }
+}
+
+fn is_journaled_edit(method: &str) -> bool {
+    matches!(method, "zero.edit" | "edit" | "zero.token.edit" | "tz_edit")
+}
+
+fn prepare_lowered_transaction(
+    engine: &TokenZeroEngine,
+    work_root: &Path,
+    statements: &[Statement],
+    plan: &str,
+    started_ms: u128,
+) -> Result<(Option<JournalTransaction>, Option<String>, bool), String> {
+    let empty_scope = HashMap::new();
+    let mut steps = Vec::new();
+    for (index, statement) in statements.iter().enumerate() {
+        let (id, call) = match statement {
+            Statement::Binding { name, call } => (name.clone(), call),
+            Statement::Call(call) => (format!("step{index}"), call),
+            Statement::Return(_) => continue,
+        };
+        let args = if is_journaled_edit(&call.method) {
+            call.args
+                .iter()
+                .map(|arg| resolve_expr(arg, &empty_scope))
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|message| {
+                    format!(
+                        "journaled edits require literal path and hunk inputs before apply: {message}"
+                    )
+                })?
+        } else {
+            Vec::new()
+        };
+        steps.push(json!({"id": id, "method": call.method, "args": args}));
+    }
+    let parsed = json!({
+        "atomic": false,
+        "plan_id": sha256_bytes(plan.as_bytes()),
+        "execution_id": execution_id(plan, started_ms),
+    });
+    prepare_json_transaction(engine, work_root, &parsed, &steps, plan, started_ms)
+}
+
+fn dispatch_lowered_journaled(
+    engine: &TokenZeroEngine,
+    work_root: &Path,
+    call: &MethodCall,
+    scope: &HashMap<String, Value>,
+    transaction: &mut Option<JournalTransaction>,
+    journal_index: usize,
+) -> Result<OpOutcome, Box<CodeModeResult>> {
+    let reversible = classify_method(&call.method) == OperationClass::ReversibleStoreMutation;
+    let replayed_target_edit = reversible
+        && transaction.as_ref().is_some_and(|tx| {
+            tx.journal()
+                .operations
+                .get(journal_index)
+                .is_some_and(|operation| {
+                    operation.target.is_some() && !tx.step_needs_apply(journal_index)
+                })
+        });
+    if reversible && !replayed_target_edit {
+        if let Some(tx) = transaction.as_mut() {
+            if let Err(original) = tx.mark_applying(journal_index) {
+                let cache_path = engine.config.cache_path.clone();
+                let combined = tx
+                    .rollback(original.clone(), |operation| {
+                        rollback_journal_operation(&cache_path, operation)
+                    })
+                    .err()
+                    .map(|error| error.to_string())
+                    .unwrap_or(original);
+                return Err(Box::new(CodeModeResult::error_with_kind(
+                    "transaction",
+                    combined,
+                    journal_index,
+                    false,
+                )));
+            }
+        }
+    }
+    let outcome = if replayed_target_edit {
+        OpOutcome::from_catalog(json!({
+            "idempotent_replay": true,
+            "idempotency_key": transaction.as_ref()
+                .and_then(|tx| tx.journal().operations.get(journal_index))
+                .map(|operation| operation.idempotency_key.clone()),
+        }))
+    } else {
+        match dispatch(engine, work_root, call, scope) {
+            Ok(outcome) => outcome,
+            Err(mut error) => {
+                if let Some(tx) = transaction.as_mut() {
+                    let original = error
+                        .error
+                        .as_ref()
+                        .map(|detail| detail.message.clone())
+                        .unwrap_or_else(|| "operation failed".to_string());
+                    let cache_path = engine.config.cache_path.clone();
+                    if let Err(combined) = tx.rollback(original, |operation| {
+                        rollback_journal_operation(&cache_path, operation)
+                    }) {
+                        if let Some(detail) = error.error.as_mut() {
+                            detail.message = combined.to_string();
+                        }
+                    }
+                }
+                return Err(error);
+            }
+        }
+    };
+    if reversible && !replayed_target_edit {
+        if let Some(tx) = transaction.as_mut() {
+            let postcondition = tx
+                .journal()
+                .operations
+                .get(journal_index)
+                .and_then(|operation| operation.target.as_deref())
+                .map(Path::new)
+                .map(current_digest)
+                .transpose()
+                .map_err(|error| {
+                    Box::new(CodeModeResult::error_with_kind(
+                        "transaction",
+                        format!("read postcondition: {error}"),
+                        journal_index + 1,
+                        false,
+                    ))
+                })?
+                .flatten();
+            let compensation_refs = refs_from_value(outcome.as_value());
+            tx.mark_applied(journal_index, postcondition, compensation_refs)
+                .map_err(|message| {
+                    Box::new(CodeModeResult::error_with_kind(
+                        "transaction",
+                        message,
+                        journal_index + 1,
+                        false,
+                    ))
+                })?;
+        }
+    }
+    Ok(outcome)
+}
+
+fn finish_lowered_transaction(
+    result: &mut CodeModeResult,
+    transaction: Option<JournalTransaction>,
+    downgrade: Option<&str>,
+) -> Result<(), String> {
+    if let Some(reason) = downgrade {
+        if let Some(extra) = result
+            .telemetry
+            .extra
+            .as_mut()
+            .and_then(Value::as_object_mut)
+        {
+            extra.insert("transaction_atomic".to_string(), json!(false));
+            extra.insert("transaction_downgrade".to_string(), json!(reason));
+        }
+    }
+    if let Some(tx) = transaction {
+        let journal = tx.commit()?;
+        if let Some(extra) = result
+            .telemetry
+            .extra
+            .as_mut()
+            .and_then(Value::as_object_mut)
+        {
+            extra.insert("transaction_atomic".to_string(), json!(true));
+            extra.insert("plan_journal_version".to_string(), json!(journal.version));
+            extra.insert("journal_state".to_string(), json!(journal.state));
+        }
+    }
+    Ok(())
 }
 
 fn execute_lowered_plan(
@@ -790,19 +1152,60 @@ fn execute_lowered_plan(
 
     let work_root = tokenzero_work_root(options.root.clone());
     let engine = make_engine_for_root_with_options(work_root.clone(), &options);
+    let (mut transaction, transaction_downgrade, already_committed) =
+        match prepare_lowered_transaction(&engine, &work_root, &statements, plan, started_ms) {
+            Ok(value) => value,
+            Err(message) => {
+                return finalize_codemode_result(
+                    CodeModeResult::error_with_kind("transaction", message, 0, false),
+                    kind,
+                    plan,
+                    started_ms,
+                    &options,
+                    limits,
+                    Vec::new(),
+                );
+            }
+        };
+    if already_committed {
+        return finalize_codemode_result(
+            CodeModeResult::completed(
+                json!({"transaction": "already_committed", "idempotent_replay": true}),
+                Vec::new(),
+                0,
+                0,
+                0,
+            ),
+            kind,
+            plan,
+            started_ms,
+            &options,
+            limits,
+            Vec::new(),
+        );
+    }
     let mut scope: HashMap<String, Value> = HashMap::new();
     let mut all_refs: Vec<String> = Vec::new();
     let mut ops: usize = 0;
     let mut total_visible: usize = 0;
     let mut total_raw: usize = 0;
+    let mut total_prevented: usize = 0;
     let mut last_value: Value = Value::Null;
     let mut steps: Vec<ExecutionStep> = Vec::new();
+    let mut journal_index = 0usize;
 
     for stmt in &statements {
         match stmt {
             Statement::Binding { name, call } => {
                 ops += 1;
-                let outcome = match dispatch(&engine, &work_root, call, &scope) {
+                let outcome = match dispatch_lowered_journaled(
+                    &engine,
+                    &work_root,
+                    call,
+                    &scope,
+                    &mut transaction,
+                    journal_index,
+                ) {
                     Ok(outcome) => outcome,
                     Err(mut e) => {
                         if let Some(extra) =
@@ -817,19 +1220,33 @@ fn execute_lowered_plan(
                         );
                     }
                 };
+                journal_index += 1;
                 steps.push(ExecutionStep {
                     id: name.clone(),
                     method: call.method.clone(),
                     status: "completed".to_string(),
                     refs: refs_from_value(outcome.as_value()),
                 });
-                record_outcome(&outcome, &mut all_refs, &mut total_visible, &mut total_raw);
+                record_outcome(
+                    &outcome,
+                    &mut all_refs,
+                    &mut total_visible,
+                    &mut total_raw,
+                    &mut total_prevented,
+                );
                 last_value = outcome.as_value().clone();
                 scope.insert(name.clone(), outcome.into_value());
             }
             Statement::Call(call) => {
                 ops += 1;
-                let outcome = match dispatch(&engine, &work_root, call, &scope) {
+                let outcome = match dispatch_lowered_journaled(
+                    &engine,
+                    &work_root,
+                    call,
+                    &scope,
+                    &mut transaction,
+                    journal_index,
+                ) {
                     Ok(outcome) => outcome,
                     Err(mut e) => {
                         if let Some(extra) =
@@ -844,13 +1261,20 @@ fn execute_lowered_plan(
                         );
                     }
                 };
+                journal_index += 1;
                 steps.push(ExecutionStep {
                     id: format!("step{ops}"),
                     method: call.method.clone(),
                     status: "completed".to_string(),
                     refs: refs_from_value(outcome.as_value()),
                 });
-                record_outcome(&outcome, &mut all_refs, &mut total_visible, &mut total_raw);
+                record_outcome(
+                    &outcome,
+                    &mut all_refs,
+                    &mut total_visible,
+                    &mut total_raw,
+                    &mut total_prevented,
+                );
                 last_value = outcome.into_value();
             }
             Statement::Return(expr) => {
@@ -869,29 +1293,65 @@ fn execute_lowered_plan(
                     }
                 };
                 let vis = count_tokens(&serde_json::to_string(&value).unwrap_or_default());
+                let mut result =
+                    CodeModeResult::completed(value, all_refs, ops, total_visible + vis, total_raw);
+                result.telemetry.prevented_read_bytes = total_prevented;
+                if let Some(extra) = result
+                    .telemetry
+                    .extra
+                    .as_mut()
+                    .and_then(Value::as_object_mut)
+                {
+                    extra.insert("prevented_read_bytes".to_string(), json!(total_prevented));
+                }
+                if let Err(message) = finish_lowered_transaction(
+                    &mut result,
+                    transaction,
+                    transaction_downgrade.as_deref(),
+                ) {
+                    return finalize_codemode_result(
+                        CodeModeResult::error_with_kind("transaction", message, ops, false),
+                        kind,
+                        plan,
+                        started_ms,
+                        &options,
+                        limits,
+                        steps,
+                    );
+                }
                 return finalize_codemode_result(
-                    CodeModeResult::completed(value, all_refs, ops, total_visible + vis, total_raw),
-                    kind,
-                    plan,
-                    started_ms,
-                    &options,
-                    limits,
-                    steps,
+                    result, kind, plan, started_ms, &options, limits, steps,
                 );
             }
         }
     }
 
     let vis = count_tokens(&serde_json::to_string(&last_value).unwrap_or_default());
-    finalize_codemode_result(
-        CodeModeResult::completed(last_value, all_refs, ops, total_visible + vis, total_raw),
-        kind,
-        plan,
-        started_ms,
-        &options,
-        limits,
-        steps,
-    )
+    let mut result =
+        CodeModeResult::completed(last_value, all_refs, ops, total_visible + vis, total_raw);
+    result.telemetry.prevented_read_bytes = total_prevented;
+    if let Some(extra) = result
+        .telemetry
+        .extra
+        .as_mut()
+        .and_then(Value::as_object_mut)
+    {
+        extra.insert("prevented_read_bytes".to_string(), json!(total_prevented));
+    }
+    if let Err(message) =
+        finish_lowered_transaction(&mut result, transaction, transaction_downgrade.as_deref())
+    {
+        return finalize_codemode_result(
+            CodeModeResult::error_with_kind("transaction", message, ops, false),
+            kind,
+            plan,
+            started_ms,
+            &options,
+            limits,
+            steps,
+        );
+    }
+    finalize_codemode_result(result, kind, plan, started_ms, &options, limits, steps)
 }
 
 fn ref_first_final_value(
@@ -929,9 +1389,10 @@ fn ref_first_value(
                     if !refs.contains(&ref_id) {
                         refs.push(ref_id.clone());
                     }
+                    let preview_budget = budget_tokens.saturating_sub(count_tokens(&ref_id));
                     return json!({
                         "ref": ref_id,
-                        "preview": first_line_preview(&text),
+                        "preview": first_line_preview(&text, preview_budget),
                     });
                 }
             }
@@ -987,12 +1448,9 @@ fn unwrap_raw_value(value: Value) -> Value {
     }
 }
 
-fn first_line_preview(text: &str) -> String {
-    let mut preview = text.lines().next().unwrap_or("").trim().to_string();
-    if preview.chars().count() > 32 {
-        preview = preview.chars().take(32).collect();
-    }
-    preview
+fn first_line_preview(text: &str, max_tokens: usize) -> String {
+    let line = text.lines().next().unwrap_or("").trim();
+    pack_to_token_boundary_with_char_limit(line, max_tokens, 32).to_string()
 }
 
 fn finalize_codemode_result(
@@ -1006,6 +1464,15 @@ fn finalize_codemode_result(
 ) -> CodeModeResult {
     let work_root = tokenzero_work_root(options.root.clone());
     let engine = make_engine_for_root_with_options(work_root, options);
+    let journal_health = journal_doctor_json(&engine.config.cache_path);
+    if let Some(extra) = result
+        .telemetry
+        .extra
+        .as_mut()
+        .and_then(Value::as_object_mut)
+    {
+        extra.insert("plan_journals".to_string(), journal_health);
+    }
     if matches!(result.status, CodeModeStatus::Completed) {
         if let Some(value) = result.value.take() {
             let (value, refs) = ref_first_final_value(&engine, value, options);
@@ -1037,6 +1504,41 @@ fn finalize_codemode_result(
     result.telemetry.internal_actions = operations.saturating_add(result.refs.len());
     result.telemetry.payload_tokens = payload_tokens;
     result.telemetry.envelope_tokens = count_tokens(&result.visible_ack);
+    // Granular token attribution buckets (6ot).
+    result.telemetry.ack_tokens = count_tokens(&result.visible_ack);
+    let ref_strings = result.refs.join(" ");
+    result.telemetry.ref_string_tokens = count_tokens(&ref_strings);
+    // Framing = envelope minus ack and ref strings (JSON keys, punctuation, structure).
+    result.telemetry.framing_tokens = result
+        .telemetry
+        .envelope_tokens
+        .saturating_sub(result.telemetry.ack_tokens)
+        .saturating_sub(result.telemetry.ref_string_tokens);
+    // Preview = payload minus ref strings (inline text the model sees directly).
+    result.telemetry.preview_tokens =
+        payload_tokens.saturating_sub(result.telemetry.ref_string_tokens);
+
+    // Provider-exposed cached_tokens take priority when available; byte-prefix
+    // comparison is the fallback estimate.
+    let current_output =
+        serde_json::to_string(result.value.as_ref().unwrap_or(&Value::Null)).unwrap_or_default();
+    let (cached_tokens, total_output_tokens) = {
+        let cache_path = engine.config.cache_path.clone();
+        let mut outputs = previous_output_by_session().lock().unwrap();
+        let matched_bytes = outputs.observe(cache_path, &current_output);
+        let cached = count_tokens(&current_output[..matched_bytes]);
+        let total = count_tokens(&current_output);
+        (cached, total)
+    };
+    result.telemetry.prefix_cache_hits = result
+        .telemetry
+        .prefix_cache_hits
+        .saturating_add(cached_tokens);
+    result.telemetry.prefix_cache_total = result
+        .telemetry
+        .prefix_cache_total
+        .saturating_add(total_output_tokens);
+
     if let Some(extra) = result
         .telemetry
         .extra
@@ -1051,6 +1553,40 @@ fn finalize_codemode_result(
         extra.insert(
             "envelope_tokens".to_string(),
             json!(result.telemetry.envelope_tokens),
+        );
+        extra.insert("ack_tokens".to_string(), json!(result.telemetry.ack_tokens));
+        extra.insert(
+            "ref_string_tokens".to_string(),
+            json!(result.telemetry.ref_string_tokens),
+        );
+        extra.insert(
+            "framing_tokens".to_string(),
+            json!(result.telemetry.framing_tokens),
+        );
+        extra.insert(
+            "preview_tokens".to_string(),
+            json!(result.telemetry.preview_tokens),
+        );
+        extra.insert(
+            "prevented_read_bytes".to_string(),
+            json!(result.telemetry.prevented_read_bytes),
+        );
+        extra.insert(
+            "prefix_cache_hits".to_string(),
+            json!(result.telemetry.prefix_cache_hits),
+        );
+        extra.insert(
+            "prefix_cache_total".to_string(),
+            json!(result.telemetry.prefix_cache_total),
+        );
+        extra.insert(
+            "prefix_cache_hit_rate".to_string(),
+            json!(if result.telemetry.prefix_cache_total == 0 {
+                0.0
+            } else {
+                result.telemetry.prefix_cache_hits as f64
+                    / result.telemetry.prefix_cache_total as f64
+            }),
         );
     }
     result.telemetry.refs_count = Some(result.refs.len());
@@ -1095,6 +1631,257 @@ fn lower_recipe_plan(plan: &str) -> Option<String> {
         return Some("await zero.cache_pack()".to_string());
     }
     None
+}
+
+fn predict_edit_postimage(text: &str, edits: &[Value], create: bool) -> Result<String, String> {
+    if create {
+        if edits.len() != 1 {
+            return Err("create=true requires exactly one edit hunk".to_string());
+        }
+        let hunk = edits[0]
+            .as_object()
+            .ok_or_else(|| "edit hunk must be an object".to_string())?;
+        if !hunk
+            .get("find")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .is_empty()
+        {
+            return Err("create=true requires an empty find".to_string());
+        }
+        return hunk
+            .get("replace")
+            .and_then(Value::as_str)
+            .map(str::to_string)
+            .ok_or_else(|| "edit hunk requires replace text".to_string());
+    }
+    let mut next = text.to_string();
+    for (index, value) in edits.iter().enumerate() {
+        let hunk = value
+            .as_object()
+            .ok_or_else(|| format!("edit hunk {index} must be an object"))?;
+        let find = hunk
+            .get("find")
+            .and_then(Value::as_str)
+            .ok_or_else(|| format!("edit hunk {index} requires find text"))?;
+        let replace = hunk
+            .get("replace")
+            .and_then(Value::as_str)
+            .ok_or_else(|| format!("edit hunk {index} requires replace text"))?;
+        let replace_all = hunk
+            .get("replace_all")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        let matches = next.match_indices(find).count();
+        if matches == 0 {
+            return Err(format!("edit hunk {index} find text not found"));
+        }
+        if !replace_all && matches != 1 {
+            return Err(format!(
+                "edit hunk {index} is ambiguous ({matches} matches)"
+            ));
+        }
+        next = if replace_all {
+            next.replace(find, replace)
+        } else {
+            next.replacen(find, replace, 1)
+        };
+    }
+    Ok(next)
+}
+
+fn prepare_json_transaction(
+    engine: &TokenZeroEngine,
+    work_root: &Path,
+    parsed: &Value,
+    steps: &[Value],
+    plan: &str,
+    started_ms: u128,
+) -> Result<(Option<JournalTransaction>, Option<String>, bool), String> {
+    let execution_id = parsed
+        .get("execution_id")
+        .and_then(Value::as_str)
+        .map(str::to_string)
+        .unwrap_or_else(|| execution_id(plan, started_ms));
+    let plan_id = parsed
+        .get("plan_id")
+        .and_then(Value::as_str)
+        .map(str::to_string)
+        .unwrap_or_else(|| sha256_bytes(plan.as_bytes()));
+    let atomic_requested = parsed
+        .get("atomic")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    match inspect_journal(&engine.config.cache_path, &execution_id) {
+        Ok(existing) if existing.atomic => {
+            if existing.plan_id != plan_id {
+                return Err("journal identity collision".to_string());
+            }
+            if !atomic_requested {
+                return Err("journal replay changed atomic policy".to_string());
+            }
+            return match existing.state {
+                JournalState::Committed => Ok((None, None, true)),
+                JournalState::RolledBack => {
+                    Err("execution was already rolled back; use a new execution_id".to_string())
+                }
+                _ => open_unresolved(&engine.config.cache_path, &execution_id)
+                    .map(|transaction| (Some(transaction), None, false)),
+            };
+        }
+        Ok(_) => {}
+        Err(message) if message.contains("No such file or directory") => {}
+        Err(message) => return Err(message),
+    }
+    let mut seen_targets = std::collections::HashSet::new();
+    let mut specs = Vec::with_capacity(steps.len());
+    for (index, step) in steps.iter().enumerate() {
+        let id = step
+            .get("id")
+            .and_then(Value::as_str)
+            .map(str::to_string)
+            .unwrap_or_else(|| format!("step{index}"));
+        let method = step
+            .get("method")
+            .or_else(|| step.get("tool"))
+            .and_then(Value::as_str)
+            .ok_or_else(|| format!("json plan step {index} missing method"))?
+            .to_string();
+        let mut spec = OperationSpec {
+            id,
+            method: method.clone(),
+            target: None,
+            precondition_digest: None,
+            precondition_exists: None,
+            postcondition_digest: None,
+            undo_refs: Vec::new(),
+            size: None,
+        };
+        if classify_method(&method) == OperationClass::ReversibleStoreMutation
+            && is_journaled_edit(&method)
+        {
+            let path = step
+                .get("args")
+                .and_then(Value::as_array)
+                .and_then(|args| args.first())
+                .and_then(Value::as_str)
+                .ok_or_else(|| {
+                    format!(
+                        "journaled edit step {index} requires a literal path; dynamic targets are not CAS-safe"
+                    )
+                })?;
+            let path = resolve_paths_against_work_root(vec![PathBuf::from(path)], work_root)
+                .into_iter()
+                .next()
+                .ok_or_else(|| format!("journaled edit step {index} has no target"))?;
+            if !seen_targets.insert(path.clone()) {
+                return Err(format!(
+                    "atomic plan has repeated edit target {}; combine its hunks into one step",
+                    path.display()
+                ));
+            }
+            let (exists, bytes) = match std::fs::read(&path) {
+                Ok(bytes) => (true, bytes),
+                Err(err) if err.kind() == std::io::ErrorKind::NotFound => (false, Vec::new()),
+                Err(err) => {
+                    return Err(format!("read edit precondition {}: {err}", path.display()));
+                }
+            };
+            let text = String::from_utf8(bytes.clone())
+                .map_err(|_| format!("journaled edit target {} is not UTF-8", path.display()))?;
+            let mut store =
+                tokenzero_recovery::RecoveryStore::new(Some(engine.config.cache_path.clone()));
+            let stored = store
+                .store_payload(
+                    &text,
+                    detect_content_type(&text, Some(&path)),
+                    Some(&path),
+                    None,
+                    None,
+                )
+                .map_err(|err| format!("persist edit undo pre-image: {err}"))?;
+            let args = step
+                .get("args")
+                .and_then(Value::as_array)
+                .expect("path came from args");
+            let edits = args
+                .get(1)
+                .and_then(Value::as_array)
+                .ok_or_else(|| format!("journaled edit step {index} requires an edit array"))?;
+            let create = args
+                .get(2)
+                .and_then(Value::as_object)
+                .and_then(|opts| opts.get("create"))
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            let postimage = predict_edit_postimage(&text, edits, create)?;
+            spec.target = Some(path);
+            spec.precondition_digest = exists.then(|| sha256_bytes(&bytes));
+            spec.precondition_exists = Some(exists);
+            spec.postcondition_digest = Some(sha256_bytes(postimage.as_bytes()));
+            spec.undo_refs.push(stored.blob_ref);
+            spec.size = Some(bytes.len() as u64);
+        }
+        specs.push(spec);
+    }
+    match begin_plan(
+        &engine.config.cache_path,
+        work_root,
+        &plan_id,
+        &execution_id,
+        specs,
+        atomic_requested,
+    )? {
+        BeginOutcome::Disabled => Ok((None, None, false)),
+        BeginOutcome::Downgraded { reason } => Ok((None, Some(reason), false)),
+        BeginOutcome::AlreadyCommitted => Ok((None, None, true)),
+        BeginOutcome::Transaction(tx) => Ok((Some(*tx), None, false)),
+    }
+}
+
+fn rollback_journal_operation(
+    cache_path: &Path,
+    operation: &JournalOperation,
+) -> Result<(), String> {
+    if operation.classification != OperationClass::ReversibleStoreMutation {
+        return Ok(());
+    }
+    let Some(target) = operation.target.as_deref() else {
+        // CAS puts are immutable and duplicate-safe; no visible state needs restoring.
+        return Ok(());
+    };
+    let path = Path::new(target);
+    let actual = current_digest(path).map_err(|err| format!("read rollback target: {err}"))?;
+    if actual == operation.precondition_digest {
+        return Ok(());
+    }
+    if actual != operation.postcondition_digest {
+        return Err(format!(
+            "rollback CAS refused for {target}: expected post-image {:?}, actual {:?}",
+            operation.postcondition_digest, actual
+        ));
+    }
+    if operation.precondition_exists == Some(false) {
+        match std::fs::remove_file(path) {
+            Ok(()) => return Ok(()),
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(err) => return Err(format!("remove created file {target}: {err}")),
+        }
+    }
+    let undo_ref = operation
+        .undo_refs
+        .first()
+        .ok_or_else(|| format!("rollback step {} is missing an undo ref", operation.index))?;
+    let mut store = tokenzero_recovery::RecoveryStore::new(Some(cache_path.to_path_buf()));
+    let expanded = store.expand(undo_ref, None, None, None, None, None);
+    if !expanded.found {
+        return Err(format!(
+            "undo ref {undo_ref} unavailable: {}",
+            expanded.reason
+        ));
+    }
+    journal_atomic_write(path, expanded.content.as_bytes())
+        .map_err(|err| format!("restore {target}: {err}"))
 }
 
 fn execute_json_plan(
@@ -1156,10 +1943,43 @@ fn execute_json_plan(
 
     let work_root = tokenzero_work_root(options.root.clone());
     let engine = make_engine_for_root_with_options(work_root.clone(), &options);
+    let (mut transaction, transaction_downgrade, already_committed) =
+        match prepare_json_transaction(&engine, &work_root, &parsed, steps_arr, plan, started_ms) {
+            Ok(value) => value,
+            Err(message) => {
+                return finalize_codemode_result(
+                    CodeModeResult::error_with_kind("transaction", message, 0, false),
+                    "json",
+                    plan,
+                    started_ms,
+                    &options,
+                    limits,
+                    Vec::new(),
+                );
+            }
+        };
+    if already_committed {
+        return finalize_codemode_result(
+            CodeModeResult::completed(
+                json!({"transaction": "already_committed", "idempotent_replay": true}),
+                Vec::new(),
+                0,
+                0,
+                0,
+            ),
+            "json",
+            plan,
+            started_ms,
+            &options,
+            limits,
+            Vec::new(),
+        );
+    }
     let mut scope: HashMap<String, Value> = HashMap::new();
     let mut all_refs = Vec::new();
     let mut total_visible = 0usize;
     let mut total_raw = 0usize;
+    let mut total_prevented = 0usize;
     let mut executed = Vec::new();
     let mut last = Value::Null;
 
@@ -1205,19 +2025,133 @@ fn execute_json_plan(
             method: method.clone(),
             args,
         };
-        let outcome = match dispatch(&engine, &work_root, &call, &scope) {
-            Ok(outcome) => outcome,
-            Err(mut err) => {
-                if let Some(extra) = err.telemetry.extra.as_mut().and_then(Value::as_object_mut) {
-                    extra.insert("operations".to_string(), json!(idx + 1));
+        let reversible = classify_method(&method) == OperationClass::ReversibleStoreMutation;
+        let replayed = reversible
+            && transaction
+                .as_ref()
+                .is_some_and(|tx| !tx.step_needs_apply(idx));
+        if reversible && !replayed {
+            if let Some(tx) = transaction.as_mut() {
+                if let Err(message) = tx.mark_applying(idx) {
+                    let cache_path = engine.config.cache_path.clone();
+                    let combined = tx
+                        .rollback(message.clone(), |op| {
+                            rollback_journal_operation(&cache_path, op)
+                        })
+                        .err()
+                        .map(|err| err.to_string())
+                        .unwrap_or(message);
+                    return finalize_codemode_result(
+                        CodeModeResult::error_with_kind("transaction", combined, idx, false),
+                        "json",
+                        plan,
+                        started_ms,
+                        &options,
+                        limits,
+                        executed,
+                    );
                 }
-                err.telemetry.operations = idx + 1;
-                err.telemetry.logical_ops = idx + 1;
-                return finalize_codemode_result(
-                    *err, "json", plan, started_ms, &options, limits, executed,
-                );
+            }
+        }
+        let outcome = if replayed {
+            OpOutcome::from_catalog(json!({
+                "idempotent_replay": true,
+                "idempotency_key": transaction
+                    .as_ref()
+                    .and_then(|tx| tx.journal().operations.get(idx))
+                    .map(|op| op.idempotency_key.clone()),
+            }))
+        } else {
+            match dispatch(&engine, &work_root, &call, &scope) {
+                Ok(outcome) => outcome,
+                Err(mut err) => {
+                    if let Some(extra) = err.telemetry.extra.as_mut().and_then(Value::as_object_mut)
+                    {
+                        extra.insert("operations".to_string(), json!(idx + 1));
+                    }
+                    err.telemetry.operations = idx + 1;
+                    err.telemetry.logical_ops = idx + 1;
+                    if let Some(tx) = transaction.as_mut() {
+                        let original = err
+                            .error
+                            .as_ref()
+                            .map(|detail| detail.message.clone())
+                            .unwrap_or_else(|| "operation failed".to_string());
+                        let cache_path = engine.config.cache_path.clone();
+                        if let Err(combined) =
+                            tx.rollback(original, |op| rollback_journal_operation(&cache_path, op))
+                        {
+                            if let Some(detail) = err.error.as_mut() {
+                                detail.message = combined.to_string();
+                            }
+                        }
+                    }
+                    return finalize_codemode_result(
+                        *err, "json", plan, started_ms, &options, limits, executed,
+                    );
+                }
             }
         };
+        if reversible && !replayed {
+            if let Some(tx) = transaction.as_mut() {
+                let postcondition = tx
+                    .journal()
+                    .operations
+                    .get(idx)
+                    .and_then(|op| op.target.as_deref())
+                    .map(Path::new)
+                    .map(current_digest)
+                    .transpose()
+                    .map_err(|err| format!("read postcondition: {err}"));
+                let postcondition = match postcondition {
+                    Ok(value) => value.flatten(),
+                    Err(message) => {
+                        let cache_path = engine.config.cache_path.clone();
+                        let combined = tx
+                            .rollback(message.clone(), |op| {
+                                rollback_journal_operation(&cache_path, op)
+                            })
+                            .err()
+                            .map(|err| err.to_string())
+                            .unwrap_or(message);
+                        return finalize_codemode_result(
+                            CodeModeResult::error_with_kind(
+                                "transaction",
+                                combined,
+                                idx + 1,
+                                false,
+                            ),
+                            "json",
+                            plan,
+                            started_ms,
+                            &options,
+                            limits,
+                            executed,
+                        );
+                    }
+                };
+                let compensation_refs = refs_from_value(outcome.as_value());
+                if let Err(message) = tx.mark_applied(idx, postcondition, compensation_refs) {
+                    let cache_path = engine.config.cache_path.clone();
+                    let combined = tx
+                        .rollback(message.clone(), |op| {
+                            rollback_journal_operation(&cache_path, op)
+                        })
+                        .err()
+                        .map(|err| err.to_string())
+                        .unwrap_or(message);
+                    return finalize_codemode_result(
+                        CodeModeResult::error_with_kind("transaction", combined, idx + 1, false),
+                        "json",
+                        plan,
+                        started_ms,
+                        &options,
+                        limits,
+                        executed,
+                    );
+                }
+            }
+        }
         let refs = refs_from_value(outcome.as_value());
         executed.push(ExecutionStep {
             id: id.clone(),
@@ -1225,7 +2159,13 @@ fn execute_json_plan(
             status: "completed".to_string(),
             refs,
         });
-        record_outcome(&outcome, &mut all_refs, &mut total_visible, &mut total_raw);
+        record_outcome(
+            &outcome,
+            &mut all_refs,
+            &mut total_visible,
+            &mut total_raw,
+            &mut total_prevented,
+        );
         last = outcome.into_value();
         scope.insert(id, last.clone());
     }
@@ -1242,6 +2182,7 @@ fn execute_json_plan(
         total_visible + vis,
         total_raw,
     );
+    result.telemetry.prevented_read_bytes = total_prevented;
     if let Some(extra) = result
         .telemetry
         .extra
@@ -1252,9 +2193,48 @@ fn execute_json_plan(
             "parallel_groups".to_string(),
             json!(count_parallel_groups(steps_arr)),
         );
+        extra.insert("prevented_read_bytes".to_string(), json!(total_prevented));
     }
     result.telemetry.parallel_groups = Some(count_parallel_groups(steps_arr));
     result.telemetry.physical_ops = estimate_physical_ops(steps_arr);
+    if let Some(reason) = transaction_downgrade {
+        if let Some(extra) = result
+            .telemetry
+            .extra
+            .as_mut()
+            .and_then(Value::as_object_mut)
+        {
+            extra.insert("transaction_atomic".to_string(), json!(false));
+            extra.insert("transaction_downgrade".to_string(), json!(reason));
+        }
+    }
+    if let Some(tx) = transaction {
+        match tx.commit() {
+            Ok(journal) => {
+                if let Some(extra) = result
+                    .telemetry
+                    .extra
+                    .as_mut()
+                    .and_then(Value::as_object_mut)
+                {
+                    extra.insert("transaction_atomic".to_string(), json!(true));
+                    extra.insert("plan_journal_version".to_string(), json!(journal.version));
+                    extra.insert("journal_state".to_string(), json!(journal.state));
+                }
+            }
+            Err(message) => {
+                return finalize_codemode_result(
+                    CodeModeResult::error_with_kind("transaction", message, steps_arr.len(), false),
+                    "json",
+                    plan,
+                    started_ms,
+                    &options,
+                    limits,
+                    executed,
+                );
+            }
+        }
+    }
     finalize_codemode_result(result, "json", plan, started_ms, &options, limits, executed)
 }
 
@@ -1384,6 +2364,105 @@ fn dispatch_values(
     method: &str,
     args: &[Value],
 ) -> Result<OpOutcome, Box<CodeModeResult>> {
+    if matches!(
+        method,
+        "codemode.recipeRegister" | "recipeRegister" | "recipe_register"
+    ) {
+        let name = require_str_arg(args, 0, "recipe register requires a name string")?;
+        let source = require_str_arg(args, 1, "recipe register requires a source string")?;
+        if source.trim().is_empty() {
+            return Err(Box::new(CodeModeResult::error_with_kind(
+                "validation",
+                "recipe source must not be empty",
+                0,
+                false,
+            )));
+        }
+        if source.len() > PreviousOutputLru::RECIPE_MAX_SOURCE_BYTES {
+            return Err(Box::new(CodeModeResult::error_with_kind(
+                "recipe_source_too_large",
+                format!(
+                    "recipe source exceeds {} bytes",
+                    PreviousOutputLru::RECIPE_MAX_SOURCE_BYTES
+                ),
+                0,
+                false,
+            )));
+        }
+        let mut registry = previous_output_by_session()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let recipes = registry.recipe_session_mut(&engine.config.cache_path);
+        if !recipes.contains_key(name) && recipes.len() >= PreviousOutputLru::RECIPE_MAX_PER_SESSION
+        {
+            return Err(Box::new(CodeModeResult::error_with_kind(
+                "recipe_registry_full",
+                format!(
+                    "recipe registry is limited to {} recipes per session",
+                    PreviousOutputLru::RECIPE_MAX_PER_SESSION
+                ),
+                0,
+                false,
+            )));
+        }
+        recipes.insert(name.to_string(), source.to_string());
+        return Ok(OpOutcome::from_catalog(
+            json!({"name": name, "registered": true}),
+        ));
+    }
+    if matches!(method, "codemode.recipeList" | "recipeList" | "recipe_list") {
+        let mut registry = previous_output_by_session()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        return Ok(OpOutcome::from_catalog(json!(
+            registry.recipe_names(&engine.config.cache_path)
+        )));
+    }
+    if matches!(method, "codemode.recipeRun" | "recipeRun" | "recipe_run") {
+        let name = require_str_arg(args, 0, "recipe run requires a name string")?;
+        let max_code_bytes = args
+            .get(1)
+            .and_then(Value::as_u64)
+            .and_then(|value| usize::try_from(value).ok())
+            .unwrap_or_else(|| CodeModeLimits::default().max_code_bytes);
+        let source = previous_output_by_session()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .recipe_source(&engine.config.cache_path, name)
+            .ok_or_else(|| {
+                Box::new(CodeModeResult::error_with_kind(
+                    "recipe_not_found",
+                    format!("recipe not found: {name}"),
+                    0,
+                    false,
+                ))
+            })?;
+        if source.trim().is_empty() {
+            return Err(Box::new(CodeModeResult::error_with_kind(
+                "validation",
+                "recipe source must not be empty",
+                0,
+                false,
+            )));
+        }
+        if source.len() > max_code_bytes {
+            return Err(Box::new(CodeModeResult::error_with_kind(
+                "validation",
+                format!("recipe exceeds max_code_bytes {max_code_bytes}"),
+                0,
+                false,
+            )));
+        }
+        if quickjs_plan_requests_mutation(&source) {
+            return Err(Box::new(CodeModeResult::error_with_kind(
+                "sandbox",
+                "sandbox: mutating binding denied without transaction support",
+                0,
+                false,
+            )));
+        }
+        return Ok(OpOutcome::from_catalog(json!({"source": source})));
+    }
     // zero.token.* aliases: the router's namespaced surface addresses this
     // substrate as zero.token.<op>; both spellings hit the same engine ops.
     match method {
@@ -1393,6 +2472,7 @@ fn dispatch_values(
         "zero.glob" | "glob" | "zero.token.glob" => exec_glob(engine, work_root, args),
         "zero.tree" | "tree" | "zero.token.tree" => exec_tree(engine, work_root, args),
         "zero.shell" | "shell" | "zero.token.shell" => exec_shell(engine, work_root, args),
+        "zero.job" | "job" | "zero.token.job" => exec_job(engine, args),
         "zero.edit" | "edit" | "zero.token.edit" => exec_edit(engine, work_root, args),
         "zero.token.expand" | "zero.expand" | "expand" => exec_expand(engine, args),
         "zero.token.expandMany" | "zero.expandMany" | "expandMany" | "expand_many" => {
@@ -1434,6 +2514,18 @@ fn dispatch_values(
         "codemode.limits" | "limits" => {
             Ok(OpOutcome::from_catalog(CodeModeLimits::default().as_json()))
         }
+        "codemode.journalDoctor" | "journalDoctor" | "journal_doctor" => Ok(
+            OpOutcome::from_catalog(journal_doctor_json(&engine.config.cache_path)),
+        ),
+        "codemode.journalInspect" | "journalInspect" | "journal_inspect" => {
+            exec_journal_inspect(engine, args)
+        }
+        "codemode.journalResume" | "journalResume" | "journal_resume" => {
+            exec_journal_resume(engine, args)
+        }
+        "codemode.journalRollback" | "journalRollback" | "journal_rollback" => {
+            exec_journal_rollback(engine, args)
+        }
         _ => Err(Box::new(CodeModeResult::error(
             format!(
                 "unknown method: {method}. Use codemode.search() to discover available methods"
@@ -1444,6 +2536,98 @@ fn dispatch_values(
 }
 
 // ─── Operation implementations ──────────────────────────────────────────────
+
+fn journal_execution_arg(args: &[Value]) -> Result<&str, Box<CodeModeResult>> {
+    require_str_arg(args, 0, "journal command requires an execution_id string")
+}
+
+fn exec_journal_inspect(
+    engine: &TokenZeroEngine,
+    args: &[Value],
+) -> Result<OpOutcome, Box<CodeModeResult>> {
+    let execution_id = journal_execution_arg(args)?;
+    inspect_journal(&engine.config.cache_path, execution_id)
+        .and_then(|journal| serde_json::to_value(journal).map_err(|err| err.to_string()))
+        .map(OpOutcome::from_catalog)
+        .map_err(|message| {
+            Box::new(CodeModeResult::error_with_kind(
+                "journal_inspect",
+                message,
+                0,
+                false,
+            ))
+        })
+}
+
+fn exec_journal_resume(
+    engine: &TokenZeroEngine,
+    args: &[Value],
+) -> Result<OpOutcome, Box<CodeModeResult>> {
+    let execution_id = journal_execution_arg(args)?;
+    let journal = inspect_journal(&engine.config.cache_path, execution_id).map_err(|message| {
+        Box::new(CodeModeResult::error_with_kind(
+            "journal_resume",
+            message,
+            0,
+            false,
+        ))
+    })?;
+    if journal.state.is_resolved() {
+        return Err(Box::new(CodeModeResult::error_with_kind(
+            "journal_resume",
+            format!("journal is already resolved as {:?}", journal.state),
+            0,
+            false,
+        )));
+    }
+    Ok(OpOutcome::from_catalog(json!({
+        "execution_id": execution_id,
+        "state": journal.state,
+        "resume": "rerun the original redacted plan with the same execution_id; idempotency keys and CAS checks skip completed mutations",
+    })))
+}
+
+fn exec_journal_rollback(
+    engine: &TokenZeroEngine,
+    args: &[Value],
+) -> Result<OpOutcome, Box<CodeModeResult>> {
+    let execution_id = journal_execution_arg(args)?;
+    let mut transaction =
+        open_unresolved(&engine.config.cache_path, execution_id).map_err(|message| {
+            Box::new(CodeModeResult::error_with_kind(
+                "journal_rollback",
+                message,
+                0,
+                false,
+            ))
+        })?;
+    let cache_path = engine.config.cache_path.clone();
+    transaction
+        .rollback("manual rollback requested", |operation| {
+            rollback_journal_operation(&cache_path, operation)
+        })
+        .map_err(|error| {
+            Box::new(CodeModeResult::error_with_kind(
+                "journal_rollback",
+                error.to_string(),
+                0,
+                false,
+            ))
+        })?;
+    let journal = inspect_journal(&engine.config.cache_path, execution_id).map_err(|message| {
+        Box::new(CodeModeResult::error_with_kind(
+            "journal_rollback",
+            message,
+            0,
+            false,
+        ))
+    })?;
+    Ok(OpOutcome::from_catalog(json!({
+        "execution_id": execution_id,
+        "state": journal.state,
+        "rolled_back": true,
+    })))
+}
 
 fn tool_response_to_value(resp: &ToolResponse) -> Value {
     let text = resp
@@ -1477,20 +2661,70 @@ fn tool_response_to_value(resp: &ToolResponse) -> Value {
     obj
 }
 
+/// Counterfactual estimate of bytes that a full read would have cost but
+/// that were avoided because graph queries, search hits, or ref expansion
+/// satisfied the request without reading the whole source.
+///
+/// Methodology (honest, lower-bound):
+/// - For search/glob/tree (graph-guided sufficiency and search precision),
+///   the engine exposes `raw_tokens` (the full underlying output) and
+///   `visible_tokens` (the compact summary actually shown). The difference is
+///   the tokens we did not have to materialize in the response. We convert
+///   those tokens to bytes using the visible text's actual bytes-per-token
+///   ratio when available, otherwise a conservative 4 bytes/token fallback.
+/// - For expand (demand paging), the exact payload bytes are counted as
+///   prevented because the content was recovered from the cache/ref store
+///   instead of re-reading the source file.
+///
+/// This is a counterfactual estimate: it assumes the agent would otherwise
+/// have requested the full underlying content, and it does not include
+/// unread files that produced no matches.
+fn estimate_prevented_read_bytes(resp: &ToolResponse) -> usize {
+    let accounting = match &resp.accounting {
+        Some(acc) => acc,
+        None => return 0,
+    };
+    let visible_text = resp.visible.as_ref().map(|v| v.text.as_str()).unwrap_or("");
+    let mut prevented = 0usize;
+    match resp.tool.as_str() {
+        "find" | "grep" | "glob" | "tree" => {
+            let bytes_per_token = visible_text
+                .len()
+                .checked_div(accounting.visible_tokens)
+                .unwrap_or(PREVENTED_READ_BYTES_PER_TOKEN)
+                .max(1);
+            prevented = accounting
+                .raw_tokens
+                .saturating_sub(accounting.visible_tokens)
+                .saturating_mul(bytes_per_token);
+        }
+        "expand" | "expand_many" => {
+            prevented = visible_text.len();
+        }
+        _ => {}
+    }
+    prevented
+}
+
 #[derive(Debug)]
 pub(crate) struct OpOutcome {
     value: Value,
+    prevented_read_bytes: usize,
 }
 
 impl OpOutcome {
     fn from_tool_response(resp: &ToolResponse) -> Self {
         Self {
             value: tool_response_to_value(resp),
+            prevented_read_bytes: estimate_prevented_read_bytes(resp),
         }
     }
 
     fn from_catalog(value: Value) -> Self {
-        Self { value }
+        Self {
+            value,
+            prevented_read_bytes: 0,
+        }
     }
 
     pub(crate) fn into_value(self) -> Value {
@@ -1523,6 +2757,15 @@ impl OpOutcome {
     fn raw_tokens(&self) -> usize {
         result_raw_tokens(&self.value)
     }
+
+    fn prevented_read_bytes(&self) -> usize {
+        self.prevented_read_bytes
+    }
+
+    fn with_prevented_read_bytes(mut self, bytes: usize) -> Self {
+        self.prevented_read_bytes = bytes;
+        self
+    }
 }
 
 fn record_outcome(
@@ -1530,10 +2773,12 @@ fn record_outcome(
     all_refs: &mut Vec<String>,
     total_visible: &mut usize,
     total_raw: &mut usize,
+    total_prevented_read_bytes: &mut usize,
 ) {
     collect_refs(&outcome.value, all_refs);
     *total_visible += outcome.visible_tokens();
     *total_raw += outcome.raw_tokens();
+    *total_prevented_read_bytes += outcome.prevented_read_bytes();
 }
 
 struct Opts<'a>(Option<&'a serde_json::Map<String, Value>>);
@@ -1781,9 +3026,6 @@ fn exec_shell(
         "zero.shell requires a command string as first argument",
     )?;
     let opts = Opts::from_arg(args, 1);
-    // Relative cwd is always anchored to this plan's execute root. Explicit
-    // allowed roots may precede the execute root in engine configuration, so
-    // using allowed_roots.first() can silently run in the wrong project.
     let cwd = opts.str("cwd").map(|raw| {
         let path = PathBuf::from(raw);
         if path.is_absolute() {
@@ -1796,6 +3038,13 @@ fn exec_shell(
     let timeout = opts
         .usize("timeout_seconds")
         .map(|secs| Duration::from_secs(secs as u64));
+
+    if opts.bool("background").unwrap_or(false) {
+        return engine
+            .shell_background(command, cwd.as_deref(), timeout)
+            .map(OpOutcome::from_catalog)
+            .map_err(|message| Box::new(CodeModeResult::error(message, 0)));
+    }
 
     let resp = engine.shell(
         command,
@@ -1821,6 +3070,13 @@ fn exec_shell(
     }))
 }
 
+fn exec_job(engine: &TokenZeroEngine, args: &[Value]) -> Result<OpOutcome, Box<CodeModeResult>> {
+    let id = require_str_arg(args, 0, "zero.token.job requires a job id string")?;
+    engine
+        .shell_job(id)
+        .map(OpOutcome::from_catalog)
+        .map_err(|message| Box::new(CodeModeResult::error(message, 0)))
+}
 pub(crate) fn exec_edit(
     engine: &TokenZeroEngine,
     work_root: &Path,
@@ -1920,7 +3176,21 @@ fn exec_expand(engine: &TokenZeroEngine, args: &[Value]) -> Result<OpOutcome, Bo
     // Soft capsule on expand miss/error: plan continues with status in value.
     // Shared SurfaceHealth is updated inside expand_with_params (wqw.9).
     let resp = engine.expand_with_params(params);
-    Ok(OpOutcome::from_tool_response(&resp).mark_exact_expand())
+    // Strict ZeroRef parsing can classify a missing legacy-shaped blob as malformed.
+    // In CodeMode that is still an expand-surface miss for crash-only recovery (wqw.9).
+    if resp
+        .error
+        .as_ref()
+        .is_some_and(|error| error.code == "zeroref_malformed")
+    {
+        engine.surface_health().record_codemode_expand_x0();
+    }
+    let outcome = OpOutcome::from_tool_response(&resp);
+    if resp.error.is_none() {
+        Ok(outcome.mark_exact_expand())
+    } else {
+        Ok(outcome)
+    }
 }
 
 fn exec_expand_many(
@@ -1937,6 +3207,7 @@ fn exec_expand_many(
         }
     };
     let mut results = Vec::with_capacity(items.len());
+    let mut prevented = 0usize;
     for item in items {
         let params = ExpandParams::from_expand_many_item(item)
             .map_err(|message| Box::new(CodeModeResult::error(message, 0)))?;
@@ -1950,6 +3221,7 @@ fn exec_expand_many(
             )));
         }
         let resp = engine.expand_with_params(params);
+        prevented = prevented.saturating_add(estimate_prevented_read_bytes(&resp));
         results.push(
             OpOutcome::from_tool_response(&resp)
                 .mark_exact_expand()
@@ -1959,7 +3231,8 @@ fn exec_expand_many(
     Ok(OpOutcome::from_catalog(json!({
         "items": results,
         "count": results.len(),
-    })))
+    }))
+    .with_prevented_read_bytes(prevented))
 }
 
 fn exec_compact(
@@ -2093,7 +3366,10 @@ fn exec_compact_inner(
     if refs_out.len() > 1 {
         value["refs"] = json!(refs_out.iter().map(|r| &r.ref_id).collect::<Vec<_>>());
     }
-    Ok(OpOutcome { value })
+    Ok(OpOutcome {
+        value,
+        prevented_read_bytes: 0,
+    })
 }
 
 fn exec_ingest(engine: &TokenZeroEngine, args: &[Value]) -> Result<OpOutcome, Box<CodeModeResult>> {
@@ -2240,6 +3516,7 @@ fn exec_pipe(
     }
     let mut results: Vec<Value> = Vec::with_capacity(steps.len());
     let mut pipe_scope: HashMap<String, Value> = HashMap::new();
+    let mut prevented = 0usize;
     for (idx, step) in steps.iter().enumerate() {
         let method = step.get("method").and_then(|v| v.as_str()).ok_or_else(|| {
             Box::new(CodeModeResult::error(
@@ -2263,6 +3540,7 @@ fn exec_pipe(
             args: step_args,
         };
         let outcome = dispatch(engine, work_root, &call, &pipe_scope)?;
+        prevented = prevented.saturating_add(outcome.prevented_read_bytes());
         let val = outcome.into_value();
         pipe_scope.insert("_prev".to_string(), val.clone());
         pipe_scope.insert(format!("_step{idx}"), val.clone());
@@ -2280,7 +3558,7 @@ fn exec_pipe(
         .and_then(Value::as_bool)
         .unwrap_or(false)
     {
-        return Ok(OpOutcome::from_catalog(full));
+        return Ok(OpOutcome::from_catalog(full).with_prevented_read_bytes(prevented));
     }
     let text = serde_json::to_string(&full).unwrap_or_default();
     let content_type = detect_content_type(&text, None);
@@ -2293,12 +3571,13 @@ fn exec_pipe(
         .map(|s| s.blob_ref.as_str().to_string())
         .unwrap_or_default();
     if ref_id.is_empty() {
-        return Ok(OpOutcome::from_catalog(full));
+        return Ok(OpOutcome::from_catalog(full).with_prevented_read_bytes(prevented));
     }
     Ok(OpOutcome::from_catalog(json!({
         "ref": ref_id,
-        "preview": first_line_preview(&text),
-    })))
+        "preview": first_line_preview(&text, 256usize.saturating_sub(count_tokens(&ref_id))),
+    }))
+    .with_prevented_read_bytes(prevented))
 }
 
 /// Extract specific keys from an object value.
@@ -2523,4 +3802,60 @@ fn result_raw_tokens(value: &Value) -> usize {
         .get("raw_tokens")
         .and_then(|v| v.as_u64())
         .unwrap_or(0) as usize
+}
+
+/// Byte-stable prefix length aligned to char boundaries, used for the
+/// per-session prefix-cache hit-rate fallback estimate.
+fn common_prefix_len(a: &str, b: &str) -> usize {
+    let mut len = 0usize;
+    for ((idx, ca), (_, cb)) in a.char_indices().zip(b.char_indices()) {
+        if ca != cb {
+            break;
+        }
+        len = idx + ca.len_utf8();
+    }
+    len
+}
+
+#[cfg(test)]
+mod accumulator_bounds {
+    use super::*;
+
+    #[test]
+    fn previous_output_lru_bounds_entries_and_bytes() {
+        let mut outputs = PreviousOutputLru::default();
+        let payload = "x".repeat(PREVIOUS_OUTPUT_MAX_PREFIX_BYTES + 1024);
+        let first = PathBuf::from("session-0");
+        assert_eq!(outputs.observe(first.clone(), &payload), 0);
+        for index in 1..PREVIOUS_OUTPUT_MAX_SESSIONS {
+            assert_eq!(
+                outputs.observe(PathBuf::from(format!("session-{index}")), &payload),
+                0
+            );
+        }
+        assert_eq!(
+            outputs.observe(first.clone(), &payload),
+            PREVIOUS_OUTPUT_MAX_PREFIX_BYTES
+        );
+        outputs.observe(
+            PathBuf::from(format!("session-{}", PREVIOUS_OUTPUT_MAX_SESSIONS)),
+            &payload,
+        );
+        assert_eq!(outputs.entries.len(), PREVIOUS_OUTPUT_MAX_SESSIONS);
+        assert!(
+            outputs.stored_bytes <= PREVIOUS_OUTPUT_MAX_SESSIONS * PREVIOUS_OUTPUT_MAX_PREFIX_BYTES
+        );
+        assert!(outputs.entries.contains_key(&first));
+        assert!(!outputs.entries.contains_key(&PathBuf::from("session-1")));
+    }
+
+    #[test]
+    fn exact_expand_registry_is_execution_scoped() {
+        let stale = Value::String("stale exact payload".to_string());
+        record_exact_expand_payload(stale.as_str().unwrap());
+        assert!(is_exact_expand_value(&stale));
+        let result = execute_codemode("return 'fresh'");
+        assert_eq!(result.status, CodeModeStatus::Completed);
+        assert!(!is_exact_expand_value(&stale));
+    }
 }

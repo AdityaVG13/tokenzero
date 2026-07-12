@@ -6,6 +6,7 @@
 mod binary_resolve;
 mod cache_maintenance;
 mod cache_pack;
+mod capability_descriptor;
 mod catalog;
 mod codemode;
 mod collect;
@@ -26,6 +27,7 @@ mod fastmcp_mode;
 mod fetch_cache;
 mod fetch_guard;
 mod jsonrpc;
+pub mod ledger;
 mod metrics;
 mod paths;
 mod recall;
@@ -155,7 +157,11 @@ pub struct TokenZeroEngine {
     rg_binary: OnceLock<Option<PathBuf>>,
     /// Session-lifetime seen-set for the redundancy layer (docs/routing.md
     /// §5). Loaded from `session-memory.json` when dedup is enabled.
-    session: Mutex<SessionMemory>,
+    // None until a tool actually needs the persisted working set. Session boot must not
+    // deserialize session-memory.json on the compatible manifest+delta path.
+    session: Mutex<Option<SessionMemory>>,
+    /// Prompt-resident spans; bodies page to durable refs under budget pressure.
+    working_set: Mutex<tokenzero_recovery::working_set::WorkingSet>,
     /// Single-flight gate: ServeKeys currently being served, with a condvar
     /// to wake waiters. Two pipelined identical reads on the 4-worker pool
     /// would otherwise both miss the seen-set (the first has not recorded its
@@ -173,7 +179,10 @@ pub struct TokenZeroEngine {
     session_persist: Option<session_persist::SessionPersistence>,
     /// Expand/read surface health + crash-only recovery unlock (wqw.9).
     /// Shared with CodeMode plan engines so expand outcomes update the same gate.
+    session_boot: Option<tokenzero_recovery::boot::SessionBoot>,
     surface_health: std::sync::Arc<surface_health::SurfaceHealth>,
+    /// Fail-open append-only response accounting beside the recovery cache.
+    ledger: ledger::LedgerWriter,
 }
 
 #[cfg(test)]

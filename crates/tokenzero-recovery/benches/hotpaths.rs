@@ -58,6 +58,7 @@ fn roomy_config() -> RecoveryConfig {
         max_search_hits: 100_000,
         max_bytes: 64_000_000,
         max_load_bytes: 128_000_000,
+        ..RecoveryConfig::default()
     }
 }
 
@@ -168,5 +169,155 @@ fn bench_persist_path(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, bench_persist, bench_persist_path);
+fn cache_footprint(path: &std::path::Path) -> u64 {
+    let mut bytes = std::fs::metadata(path).map_or(0, |meta| meta.len());
+    let mut sidecar_os = path.as_os_str().to_owned();
+    sidecar_os.push(".blobs");
+    let sidecar = std::path::PathBuf::from(sidecar_os);
+    if let Ok(entries) = std::fs::read_dir(sidecar) {
+        bytes += entries
+            .filter_map(Result::ok)
+            .filter_map(|entry| entry.metadata().ok())
+            .filter(|meta| meta.is_file())
+            .map(|meta| meta.len())
+            .sum::<u64>();
+    }
+    bytes
+}
+
+/// Measures the durable cache footprint of repeatedly storing one deterministic
+/// 220 KiB source as an explicit FileRef versus the ordinary Inline path.
+fn measure_repeat_read_220kb_cache_bytes(c: &mut Criterion) {
+    const PAYLOAD_BYTES: usize = 220 * 1024;
+    const REPEATS: usize = 8;
+    let dir = TempDir::new().expect("temp dir");
+    let source = dir.path().join("repeat-read-220kb.txt");
+    let file_cache = dir.path().join("file-ref-cache.json");
+    let inline_cache = dir.path().join("inline-cache.json");
+    std::fs::write(&source, vec![b'x'; PAYLOAD_BYTES]).expect("write deterministic source");
+
+    let mut file_store = RecoveryStore::new(Some(file_cache.clone()));
+    for _ in 0..REPEATS {
+        file_store
+            .store_file_backed_blob(&source, 1, 1, ContentType::Unknown)
+            .expect("store FileRef");
+    }
+    let mut inline_store = RecoveryStore::new(Some(inline_cache.clone()));
+    let payload = std::fs::read_to_string(&source).expect("read deterministic source");
+    for _ in 0..REPEATS {
+        inline_store
+            .store_blob(&payload, ContentType::Unknown)
+            .expect("store Inline");
+    }
+
+    let file_ref_cache_bytes = cache_footprint(&file_cache);
+    let inline_cache_bytes = cache_footprint(&inline_cache);
+    assert!(
+        file_ref_cache_bytes < inline_cache_bytes,
+        "FileRef footprint {file_ref_cache_bytes} must be below Inline {inline_cache_bytes}"
+    );
+    let evidence = serde_json::json!({
+        "schema": "tokenzero.repeat-read-cache-bytes.v1",
+        "payload_bytes": PAYLOAD_BYTES,
+        "repeats": REPEATS,
+        "file_ref_cache_bytes": file_ref_cache_bytes,
+        "inline_cache_bytes": inline_cache_bytes,
+        "measurement": "snapshot plus content-addressed sidecar files"
+    });
+    let evidence_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("benches/perf_hotspots/repeat_read_220kb_cache_bytes.json");
+    std::fs::write(
+        evidence_path,
+        serde_json::to_vec_pretty(&evidence).expect("serialize evidence"),
+    )
+    .expect("write evidence");
+
+    c.bench_function("measure_repeat_read_220kb_cache_bytes", |b| {
+        b.iter(|| black_box((file_ref_cache_bytes, inline_cache_bytes)))
+    });
+}
+
+/// Measures the put_blob deduplication lever by storing the same deterministic
+/// ~220 KiB payload repeatedly before one durable persist. The evidence compares
+/// one stored payload with REPEATS stored payloads; Criterion measures the full
+/// repeated deferred-store plus persist path on a fresh store per iteration.
+fn persist_same_payload_repeated(c: &mut Criterion) {
+    const TARGET_PAYLOAD_BYTES: usize = 220 * 1024;
+    const REPEATS: usize = 8;
+
+    let payload = synthetic_payload(0, TARGET_PAYLOAD_BYTES);
+    let dir = TempDir::new().expect("temp dir");
+    let single_cache = dir.path().join("persist-same-payload-single.json");
+    let repeated_cache = dir.path().join("persist-same-payload-repeated.json");
+
+    let mut single_store = RecoveryStore::with_config(Some(single_cache.clone()), roomy_config());
+    single_store.store_payload_deferred(&payload, ContentType::Code, None, None, None);
+    single_store
+        .persist_pending()
+        .expect("persist single payload");
+
+    let mut repeated_store =
+        RecoveryStore::with_config(Some(repeated_cache.clone()), roomy_config());
+    for _ in 0..REPEATS {
+        repeated_store.store_payload_deferred(&payload, ContentType::Code, None, None, None);
+    }
+    repeated_store
+        .persist_pending()
+        .expect("persist repeated payload");
+
+    let payload_bytes = payload.len();
+    let single_cache_bytes = cache_footprint(&single_cache);
+    let repeated_cache_bytes = cache_footprint(&repeated_cache);
+    let naive_repeated_payload_bytes = payload_bytes * REPEATS;
+    assert!(
+        repeated_cache_bytes < naive_repeated_payload_bytes as u64,
+        "deduplicated footprint {repeated_cache_bytes} must be below naive repeated payload bytes {naive_repeated_payload_bytes}"
+    );
+
+    let evidence = serde_json::json!({
+        "schema": "tokenzero.persist-same-payload-repeated.v1",
+        "payload_bytes": payload_bytes,
+        "repeats": REPEATS,
+        "single_cache_bytes": single_cache_bytes,
+        "repeated_cache_bytes": repeated_cache_bytes,
+        "naive_repeated_payload_bytes": naive_repeated_payload_bytes,
+        "measurement": "snapshot plus content-addressed sidecar files"
+    });
+    let evidence_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("benches/perf_hotspots/persist_same_payload_repeated.json");
+    std::fs::write(
+        evidence_path,
+        serde_json::to_vec_pretty(&evidence).expect("serialize evidence"),
+    )
+    .expect("write evidence");
+
+    let mut iteration = 0usize;
+    c.bench_function("persist_same_payload_repeated", |b| {
+        b.iter(|| {
+            let cache = dir
+                .path()
+                .join(format!("persist-same-payload-bench-{iteration}.json"));
+            iteration += 1;
+            let mut store = RecoveryStore::with_config(Some(cache), roomy_config());
+            for _ in 0..REPEATS {
+                store.store_payload_deferred(
+                    black_box(&payload),
+                    ContentType::Code,
+                    None,
+                    None,
+                    None,
+                );
+            }
+            black_box(store.persist_pending()).expect("persist repeated payload")
+        })
+    });
+}
+
+criterion_group!(
+    benches,
+    bench_persist,
+    bench_persist_path,
+    measure_repeat_read_220kb_cache_bytes,
+    persist_same_payload_repeated
+);
 criterion_main!(benches);

@@ -134,6 +134,7 @@ impl TokenZeroEngine {
         let mut content_types = Vec::new();
         let mut bytes_read = 0usize;
         let mut summary = SessionSummary::default();
+        let mut working_set_anchor = None;
         // Serve records are applied only after every path succeeded: an
         // error response serves nothing, so nothing may be marked as seen.
         let mut pending: Vec<(ServeKey, ServedRecord)> = Vec::new();
@@ -157,7 +158,7 @@ impl TokenZeroEngine {
             } else {
                 fs::read_to_string(path)
             };
-            let text = match text_result {
+            let mut text = match text_result {
                 Ok(text) => text,
                 Err(err) => {
                     // "could not read X (read_failed)" with no cause stranded
@@ -179,15 +180,35 @@ impl TokenZeroEngine {
                 }
             };
             bytes_read += text.len();
+            if paths.len() == 1 {
+                let anchor_start = source_start.unwrap_or(1);
+                let anchor_end = source_end.unwrap_or_else(|| {
+                    anchor_start.saturating_add(text.lines().count().saturating_sub(1))
+                });
+                working_set_anchor = Some(tokenzero_recovery::working_set::SpanAnchor {
+                    path: path.clone(),
+                    symbol: None,
+                    start_line: anchor_start,
+                    end_line: anchor_end,
+                });
+            }
             let ctype = detect_content_type(&text, Some(path));
             content_types.push(ctype);
-            let stored = store.store_payload_deferred_batch(
-                &text,
-                ctype,
-                Some(path),
-                source_start,
-                source_end,
-            );
+            let stored = if paths.len() == 1
+                && source_start.is_none()
+                && source_end.is_none()
+                && text.len() >= 64 * 1024
+            {
+                store.store_source_backed_payload_deferred_batch(&text, ctype, path)
+            } else {
+                store.store_payload_deferred_batch(
+                    &text,
+                    ctype,
+                    Some(path),
+                    source_start,
+                    source_end,
+                )
+            };
             refs.push(ref_record("blob", stored.blob_ref.clone(), text.len()));
             refs.push(ref_record("file", stored.file_ref.clone(), text.len()));
             let capsule = if raw {
@@ -226,7 +247,10 @@ impl TokenZeroEngine {
                 // record the serve below so later calls can dedup.
                 let bypass = raw || matches!(mode, Mode::Passthrough) || options.fresh;
                 match self.session_lookup(&key, &content_sha256) {
-                    SeenState::Unchanged { serve_count } if !bypass => {
+                    SeenState::Unchanged {
+                        serve_count,
+                        cross_session,
+                    } if !bypass => {
                         let note = unchanged_read_note(path, &text, &stored);
                         let note_tokens = count_tokens(&note);
                         // ROI guard: a note that costs as much as the full
@@ -238,6 +262,7 @@ impl TokenZeroEngine {
                                 note_tokens,
                                 full_tokens: part_tokens,
                                 serve_count: serve_count + 1,
+                                cross_session,
                             });
                         }
                     }
@@ -277,7 +302,11 @@ impl TokenZeroEngine {
             }
             raw_tokens += capsule.raw_tokens;
             visible_tokens += part_tokens;
-            raw_visible_parts.push(text.trim_end().to_string());
+            if !raw {
+                let trimmed_len = text.trim_end().len();
+                text.truncate(trimmed_len);
+                raw_visible_parts.push(text);
+            }
             visible_parts.push(part_text);
         }
         if !refs.is_empty() {
@@ -287,10 +316,12 @@ impl TokenZeroEngine {
             }
         }
         let refs_complete = prune_dead_refs(&store, &mut refs);
-        if !refs_complete {
+        if !refs_complete && !raw {
             visible_parts = raw_visible_parts;
             visible_tokens = raw_tokens;
         }
+        let full_bytes = visible_parts.iter().map(String::len).sum::<usize>()
+            + visible_parts.len().saturating_sub(1) * 2;
         // Dedup/diff notes advertise refs in place of content: apply them
         // only when persistence succeeded AND every ref survived eviction.
         // Degraded storage always serves full — the bytes are in the text,
@@ -304,8 +335,9 @@ impl TokenZeroEngine {
                         note_tokens,
                         full_tokens,
                         serve_count,
+                        cross_session,
                     } => {
-                        summary.note_dedup(serve_count, full_tokens - note_tokens);
+                        summary.note_dedup(serve_count, full_tokens - note_tokens, cross_session);
                         visible_tokens -= full_tokens - note_tokens;
                         visible_parts[idx] = note;
                     }
@@ -322,6 +354,11 @@ impl TokenZeroEngine {
                     }
                 }
             }
+        }
+        if self.config.session_dedup {
+            let delta_bytes = visible_parts.iter().map(String::len).sum::<usize>()
+                + visible_parts.len().saturating_sub(1) * 2;
+            summary.note_wire_bytes(full_bytes, delta_bytes);
         }
         let exact_refs_available = !refs.is_empty();
         let exact_ref_tokens = exact_ref_token_count(&refs);
@@ -351,15 +388,21 @@ impl TokenZeroEngine {
                 "exact_refs_available": exact_refs_available
             }));
         }
+        // A serve whose refs failed to persist (or were evicted before the
+        // response returned) must not become a dedup base.
+        if storage_errors.is_empty() && refs_complete {
+            let (from_hwm, to_hwm) = self.session_apply(pending, &summary);
+            summary.set_watermark(from_hwm, to_hwm);
+        }
         // Merge — never overwrite — so degraded-storage markers survive a
         // dedup/diff serve in the same response.
         if let Some(extra) = summary.telemetry() {
             merge_telemetry(&mut response, extra);
         }
-        // A serve whose refs failed to persist (or were evicted before the
-        // response returned) must not become a dedup base.
-        if storage_errors.is_empty() && refs_complete {
-            self.session_apply(pending, &summary);
+        if !raw && !matches!(mode, Mode::Passthrough) {
+            if let Some(anchor) = working_set_anchor {
+                self.admit_working_set_response(&mut response, anchor);
+            }
         }
         // Raw reads keep the verbatim slice contract even when it is empty;
         // raw=true does not imply Mode::Passthrough, so guard it explicitly.

@@ -176,6 +176,79 @@ fn classic_surface_rejects_tz_execute_code() {
 }
 
 #[test]
+fn mcp_execute_root_honors_foreign_workspace_and_denies_outside() {
+    use tokenzero_core::McpToolSurface;
+    let server = tempdir().unwrap();
+    let foreign = tempdir().unwrap();
+    let outside = tempdir().unwrap();
+    std::fs::write(
+        foreign.path().join("CHANGELOG.md"),
+        "FOREIGN-WORKSPACE-MARKER\n",
+    )
+    .unwrap();
+    std::fs::write(outside.path().join("secret.txt"), "SECRET\n").unwrap();
+    let mut config = EngineConfig::for_root(server.path());
+    config.tool_surface = McpToolSurface::CodeMode;
+    let engine = TokenZeroEngine::new(config);
+    let foreign_root = foreign.path().display().to_string();
+
+    let rel = call_tool(
+        &engine,
+        "tz_execute_code",
+        &json!({
+            "plan": "return zero.token.read(\"CHANGELOG.md\")",
+            "root": foreign_root.clone(),
+        }),
+        None,
+    )
+    .expect("relative read should succeed");
+    assert!(
+        rel.to_string().contains("FOREIGN-WORKSPACE-MARKER"),
+        "relative read result: {rel}"
+    );
+
+    let changelog_path = foreign.path().join("CHANGELOG.md");
+    let abs_plan = format!(
+        "return zero.token.read({});",
+        serde_json::to_string(&changelog_path.display().to_string()).unwrap()
+    );
+    let abs = call_tool(
+        &engine,
+        "tz_execute_code",
+        &json!({
+            "plan": abs_plan,
+            "root": foreign_root.clone(),
+        }),
+        None,
+    )
+    .expect("absolute read should succeed");
+    assert!(
+        abs.to_string().contains("FOREIGN-WORKSPACE-MARKER"),
+        "absolute read result: {abs}"
+    );
+
+    let secret_plan = format!(
+        "return zero.token.read({});",
+        serde_json::to_string(&outside.path().join("secret.txt").display().to_string()).unwrap()
+    );
+    let denied = call_tool(
+        &engine,
+        "tz_execute_code",
+        &json!({
+            "plan": secret_plan,
+            "root": foreign_root,
+        }),
+        None,
+    )
+    .expect("outside-root failure must use the structured CodeMode result");
+    let denied_text = denied.to_string();
+    assert!(
+        denied_text.contains("path_not_allowed") || denied_text.contains("outside allowed roots"),
+        "{denied_text}"
+    );
+}
+
+#[test]
 fn codemode_report_tool_issue_is_not_permanently_locked() {
     use tokenzero_core::McpToolSurface;
     let dir = tempdir().unwrap();

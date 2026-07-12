@@ -221,9 +221,11 @@ impl SurfaceHealth {
     /// Test / config hook for threshold and unlock window.
     #[allow(dead_code)]
     pub fn with_policy(fail_threshold: u32, window: Duration) -> Self {
-        let mut inner = HealthInner::default();
-        inner.fail_threshold = fail_threshold.max(1);
-        inner.window = window;
+        let inner = HealthInner {
+            fail_threshold: fail_threshold.max(1),
+            window,
+            ..HealthInner::default()
+        };
         Self {
             inner: Mutex::new(inner),
         }
@@ -364,6 +366,7 @@ impl SurfaceHealth {
             "recovery_ladder": RECOVERY_LADDER,
             "unlocks": ["expand", "read"],
             "never_unlocks": ["shell", "edit", "write"],
+            "codemode_containment": crate::codemode::containment_snapshot(),
         })
     }
 }

@@ -1,0 +1,17 @@
+{
+  "schema_version": "zerostack.cas-gc.v1",
+  "record_type": "dry-run-report",
+  "run_id": "bad-verdict",
+  "store_root": "/shared/cas",
+  "evaluated_at": "2026-07-11T12:00:00Z",
+  "objects": [
+    {
+      "blob_hash": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+      "verdict": "delete",
+      "reason_codes": [
+        "uncertain-metadata"
+      ],
+      "evidence": []
+    }
+  ]
+}

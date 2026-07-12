@@ -79,23 +79,16 @@ fn discovers_launch_critical_families() {
 
 #[test]
 fn compound_commands_are_left_unmodified() {
-    // Pipes, sequences, logical operators, redirects, newlines, and
-    // command substitution forms $(…), `…`, $((…)) all count as compound.
+    // Benign pipes, sequences, logical operators, substitutions, and
+    // arithmetic expansions remain conservatively unvouched compounds.
     for command in [
-        // Pipes, sequences, logical operators
         "cat foo.txt | grep bar",
         "cargo test --workspace 2>&1 | tail -40",
         "ls -la; git status",
         "make build && make test",
         "grep -r needle . || true",
-        // Newline / carriage-return separators
-        "git status\nrm -rf /tmp/x",
-        "git status\rrm -rf /tmp/x",
-        // Command substitution $(…) and backticks
-        "cat foo $(rm -rf /tmp/x)",
         "echo \"today is $(date)\"",
         "echo \"`uname -a`\"",
-        // Arithmetic expansion $((…))
         "cat $((1+1)).txt",
     ] {
         let r = rewrite_command(command, "safe", true);
@@ -103,8 +96,27 @@ fn compound_commands_are_left_unmodified() {
         assert_eq!(r.reason, "compound command left unmodified");
         assert!(!r.safe, "compounds are never vouched: {command}");
     }
-}
 
+    // A mutation in any later command position must surface the mutation
+    // classification rather than being hidden behind the generic compound reason.
+    for command in [
+        "git status\nrm -rf /tmp/x",
+        "git status\rrm -rf /tmp/x",
+        "cat foo $(rm -rf /tmp/x)",
+    ] {
+        let r = rewrite_command(command, "safe", true);
+        assert_not_rewritten(&r);
+        assert!(
+            r.reason.contains("destructive mutation"),
+            "{command}: {}",
+            r.reason
+        );
+        assert!(
+            !r.safe,
+            "mutation-bearing compound must be unsafe: {command}"
+        );
+    }
+}
 #[test]
 fn quoted_operators_do_not_count_as_compound() {
     let r = rewrite_command("cat 'a|b.txt'", "safe", true);
@@ -240,6 +252,74 @@ fn read_only_finds_and_passthroughs_stay_vouched() {
     assert!(r.safe, "cat must be vouched");
     assert_eq!(r.family, "read");
     assert_rewritten_to(&r, "tokenzero read README.md");
+}
+
+#[test]
+fn argument_payloads_are_never_classified_as_intent() {
+    for command in [
+        r#"br create --description "will write and remove things""#,
+        r#"echo "rm -rf""#,
+        r#"printf '%s' "drop table""#,
+    ] {
+        assert_eq!(
+            unsafe_reason(command),
+            None,
+            "payload changed policy: {command}"
+        );
+    }
+
+    // A listed mutation remains a mutation regardless of harmless-looking or
+    // dangerous-looking message payload text.
+    for command in [
+        r#"git commit -m "documentation only""#,
+        r#"git commit -m "delete old write path""#,
+        r#"git push -o ci.variable="message=read only""#,
+    ] {
+        assert!(
+            unsafe_reason(command).is_some_and(|reason| reason.contains("git mutation")),
+            "listed mutation escaped policy: {command}"
+        );
+    }
+}
+
+#[test]
+fn mutation_is_detected_at_every_shell_command_position() {
+    for command in [
+        "echo ok && rm x",
+        "echo ok || rm x",
+        "echo ok; rm x",
+        "echo ok | rm x",
+        "echo ok
+rm x",
+        "$(rm x)",
+        "echo $(rm x)",
+        "echo \u{60}rm x\u{60}",
+        r#"sh -c 'rm x'"#,
+        r#"bash -c "echo ok && rm x""#,
+        r#"/bin/sh -c 'git push origin main'"#,
+    ] {
+        assert!(
+            unsafe_reason(command).is_some(),
+            "mutation escaped policy: {command}"
+        );
+    }
+}
+
+#[test]
+fn quoted_command_text_is_data_but_substitutions_still_execute() {
+    for command in [r#"echo "rm -rf""#, r#"printf '%s' 'git push'"#] {
+        assert_eq!(
+            unsafe_reason(command),
+            None,
+            "quoted data changed policy: {command}"
+        );
+    }
+    for command in [r#"echo "$(rm x)""#, "printf '%s' \u{60}git push\u{60}"] {
+        assert!(
+            unsafe_reason(command).is_some(),
+            "substitution escaped policy: {command}"
+        );
+    }
 }
 
 // ── split_words / has_shell_operators ─────────────────────────────────────────

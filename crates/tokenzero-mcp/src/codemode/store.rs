@@ -425,13 +425,19 @@ fn cap_exact_expand_value(value: &mut Value, max_output_bytes: usize) -> bool {
                     kept.truncate(new_len);
                 }
             }
-            map.values_mut().fold(false, |changed, item| {
-                cap_exact_expand_value(item, max_output_bytes) || changed
-            })
+            let mut changed = false;
+            for item in map.values_mut() {
+                changed |= cap_exact_expand_value(item, max_output_bytes);
+            }
+            changed
         }
-        Value::Array(items) => items.iter_mut().fold(false, |changed, item| {
-            cap_exact_expand_value(item, max_output_bytes) || changed
-        }),
+        Value::Array(items) => {
+            let mut changed = false;
+            for item in items {
+                changed |= cap_exact_expand_value(item, max_output_bytes);
+            }
+            changed
+        }
         _ => false,
     }
 }

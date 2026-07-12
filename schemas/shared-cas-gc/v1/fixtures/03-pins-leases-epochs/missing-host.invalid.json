@@ -1,0 +1,17 @@
+{
+  "schema_version": "zerostack.cas-gc.v1",
+  "record_type": "lease",
+  "engine": "tokenzero",
+  "project_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "operation_id": "build-42",
+  "epoch": 7,
+  "owner": {
+    "pid": 4242
+  },
+  "started_at": "2026-07-11T11:55:00Z",
+  "expires_at": "2026-07-11T12:05:00Z",
+  "grace_seconds": 300,
+  "blob_hashes": [
+    "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+  ]
+}

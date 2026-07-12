@@ -67,11 +67,35 @@ fn dispatch_gated_tool(
         }
     }
     let result = dispatch_tool(engine, canonical, name, args);
-    engine.record_tool_call(canonical, started.elapsed(), result.is_err());
-    let response = result?;
+    let engine_elapsed = started.elapsed();
+    let persist_started = std::time::Instant::now();
+    engine.record_tool_call(canonical, engine_elapsed, result.is_err());
+    let response = match result {
+        Ok(response) => response,
+        Err(error) => {
+            engine.record_tool_attribution(canonical, engine_elapsed, persist_started.elapsed());
+            return Err(error);
+        }
+    };
     // Expand health is recorded inside expand_with_params (CLI + CodeMode + MCP).
     record_mcp_pulse(engine, canonical, args, &response, call_id);
+    engine.ledger.record_response(canonical, &response);
+    engine.record_tool_attribution(canonical, engine_elapsed, persist_started.elapsed());
     Ok(mcp_tool_response(response))
+}
+
+/// A routed execution root may rebase onto an independently recognizable workspace (wqw.5).
+fn has_workspace_evidence(path: &Path) -> bool {
+    const MARKERS: &[&str] = &[
+        ".git",
+        ".zerostack",
+        "Cargo.toml",
+        "package.json",
+        "pyproject.toml",
+        "go.mod",
+        "CHANGELOG.md",
+    ];
+    path.is_dir() && MARKERS.iter().any(|marker| path.join(marker).exists())
 }
 
 /// Reject MCP-supplied roots that escape the server's configured allowlist.
@@ -166,11 +190,14 @@ fn exec_codemode_tool(
         surface_health: Some(engine.surface_health_handle()),
         ..Default::default()
     };
-    // wqw.5: plan-level root follows execute root, but MCP args must not expand
-    // the allowlist past the server's configured roots (agent-controlled).
+    // wqw.5: the per-call root defines the execution workspace boundary, which
+    // CodeMode unions with the configured roots. Per-operation policy still
+    // denies paths outside every effective root.
     if let Ok(root) = arg_string_any(args, &["root", "cwd", "workspace"]) {
         let root_path = std::path::PathBuf::from(root);
-        ensure_path_under_server_allowlist(engine, &root_path)?;
+        if !engine.path_allowed(&root_path) && !has_workspace_evidence(&root_path) {
+            ensure_path_under_server_allowlist(engine, &root_path)?;
+        }
         options.root = Some(root_path);
     } else if let Some(root) = engine.config.allowed_roots.first() {
         options.root = Some(root.clone());

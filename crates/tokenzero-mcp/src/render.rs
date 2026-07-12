@@ -1,63 +1,83 @@
 use crate::*;
 
 pub(crate) fn expansion_response(result: ExpansionResult, recovery_tokens: usize) -> ToolResponse {
-    if !result.found {
-        // Always include the full requested ref in the error message — never
-        // truncate mid-hash (field: truncated refs made agents invent new ids).
-        let full_ref = &result.ref_id;
-        let is_window_oob = result.reason.starts_with("window-out-of-range");
-        return ToolResponse::error(
+    if result.found {
+        return ToolResponse::ok(
             "expand",
-            if result.reason.starts_with("ref-not-found") || result.reason == "dangling-ref" {
-                "ref_not_found"
-            } else if is_window_oob {
-                "window_out_of_range"
-            } else {
-                match result.reason.as_str() {
-                    "stale-ref" => "ref_stale",
-                    "invalid-ref" => "invalid_ref",
-                    _ => "expand_failed",
-                }
+            Mode::Exact,
+            result.content,
+            Vec::new(),
+            Accounting {
+                raw_tokens: result.tokens,
+                visible_tokens: result.tokens,
+                recovery_tokens,
+                exact_ref_tokens: Some(count_tokens(&result.ref_id)),
             },
-            if result.reason.starts_with("ref-not-found") {
-                format!("{} (ref: {full_ref})", result.reason)
-            } else if is_window_oob {
-                format!("{} (ref: {full_ref})", result.reason)
-            } else {
-                match result.reason.as_str() {
-                    "stale-ref" => format!("ref is no longer recoverable: {full_ref}"),
-                    "dangling-ref" => {
-                        format!("ref is not present in the recovery cache: {full_ref}")
-                    }
-                    "invalid-ref" => format!(
-                        "ref is not a valid tz://, fz://, or gz:// recovery handle: {full_ref}"
-                    ),
-                    "decode-failed" => {
-                        format!("ref was found but could not be decoded: {full_ref}")
-                    }
-                    _ => format!("ref expansion failed: {full_ref}"),
-                }
-            },
-            Some(if is_window_oob {
-                "choose start_line/end_line within the stored payload line count (1-based inclusive)"
-                    .to_string()
-            } else {
-                "rerun the original read/find/tree/shell command".to_string()
-            }),
         );
     }
-    ToolResponse::ok(
-        "expand",
-        Mode::Exact,
-        result.content,
-        Vec::new(),
-        Accounting {
-            raw_tokens: result.tokens,
-            visible_tokens: result.tokens,
-            recovery_tokens,
-            exact_ref_tokens: Some(count_tokens(&result.ref_id)),
-        },
-    )
+
+    // Always include the full requested ref. Portable identities must never be
+    // truncated in an error, because the caller needs the exact digest to
+    // diagnose the producer/root mismatch.
+    let full_ref = &result.ref_id;
+    let reason = result.reason.as_str();
+    let is_window_oob = reason.starts_with("window-out-of-range");
+    let (code, message) = if reason.starts_with("ref-not-found") || reason == "dangling-ref" {
+        ("ref_not_found", format!("{reason} (ref: {full_ref})"))
+    } else if is_window_oob {
+        ("window_out_of_range", format!("{reason} (ref: {full_ref})"))
+    } else {
+        match reason {
+            "shared-cas-missing" => (
+                "shared_cas_missing",
+                format!("shared CAS object missing: {full_ref}"),
+            ),
+            "shared-cas-corruption" => (
+                "shared_cas_corruption",
+                format!("shared CAS object corrupted: {full_ref}"),
+            ),
+            "shared-cas-policy" => (
+                "shared_cas_policy",
+                format!("shared CAS policy denied expansion: {full_ref}"),
+            ),
+            "shared-cas-io" => (
+                "shared_cas_io",
+                format!("shared CAS I/O failure: {full_ref}"),
+            ),
+            "shared-cas-non-utf8" => (
+                "shared_cas_non_utf8",
+                format!("shared CAS object is not UTF-8 text: {full_ref}"),
+            ),
+            "unsupported-ref-kind" => (
+                "unsupported_ref_kind",
+                format!("foreign non-blob ref requires its owning engine: {full_ref}"),
+            ),
+            reason if reason.starts_with("zeroref-") => {
+                ("zeroref_malformed", format!("{reason}: {full_ref}"))
+            }
+            "stale-ref" => (
+                "ref_stale",
+                format!("ref is no longer recoverable: {full_ref}"),
+            ),
+            "invalid-ref" => (
+                "invalid_ref",
+                format!("ref is not a valid tz://, fz://, or gz:// recovery handle: {full_ref}"),
+            ),
+            "decode-failed" => (
+                "expand_failed",
+                format!("ref was found but could not be decoded: {full_ref}"),
+            ),
+            _ => ("expand_failed", format!("ref expansion failed: {full_ref}")),
+        }
+    };
+    let repair = if is_window_oob {
+        "choose start_line/end_line within the stored payload line count (1-based inclusive)"
+    } else if reason == "unsupported-ref-kind" {
+        "route the ref to the engine named by its scheme"
+    } else {
+        "align the producer and consumer shared store root, then retry with the exact ref"
+    };
+    ToolResponse::error("expand", code, message, Some(repair.to_string()))
 }
 
 pub(crate) fn unchanged_since_expand_ack(since_ref: &str) -> String {
@@ -366,6 +386,7 @@ pub(crate) enum PendingSubstitution {
         note_tokens: usize,
         full_tokens: usize,
         serve_count: usize,
+        cross_session: bool,
     },
     Diff {
         idx: usize,

@@ -45,8 +45,8 @@ use mcp_artifact::run_mcp_artifact;
 use reach::{installed_tokenzero_command_audit, run_reach};
 use release_claims::{ClaimEvidenceInputs, run_claim_audit};
 use tokenzero_pulse::{
-    PulseEvent, default_ledger_path, doctor_jsonl_sqlite, export_jsonl, import_jsonl, record_event,
-    report_for_path, sync_jsonl_to_sqlite,
+    PulseEvent, SessionLedgerReport, default_ledger_path, doctor_jsonl_sqlite, export_jsonl,
+    import_jsonl, record_event, report_for_path, sync_jsonl_to_sqlite,
 };
 use tokenzero_runtime::{
     ExecutionMode, contains_platform_shell_syntax, env_map, plan_command_for_platform, quote_for,
@@ -56,6 +56,16 @@ use zerostack_store::{
     allowed_roots_for_workspace, default_allowed_roots, resolve_recovery_cache_path,
     tokenzero_work_root,
 };
+
+/// Derive the migration manifest path from a recovery cache path.
+/// For unified stores: <store-root>/tokenzero/migration-manifest.json
+/// For legacy flat caches: <cache-parent>/migration-manifest.json
+fn migration_manifest_path(cache_path: &std::path::Path) -> std::path::PathBuf {
+    cache_path
+        .parent()
+        .unwrap_or(cache_path)
+        .join("migration-manifest.json")
+}
 
 fn main() -> Result<()> {
     let cli = Cli::parse_from(normalize_agent_invocation_args(std::env::args_os()));
@@ -76,6 +86,10 @@ fn main() -> Result<()> {
         Commands::Run(args) => emit(handle_run(args)?)?,
         Commands::Ingest(args) => emit(handle_ingest(args)?)?,
         Commands::Expand(args) => emit(handle_expand(args)?)?,
+        Commands::SessionOpen(args) => {
+            let as_json = args.json;
+            emit_value(engine_from_common(&args).session_boot_snapshot(), as_json)?;
+        }
         Commands::Mem(args) => emit_with_json(engine_from_common(&args).mem(), args.json)?,
         Commands::Rewrite(args) => emit_rewrite(args)?,
         // Fail-open hook contract: handle_hook never errors and never sets a
@@ -88,6 +102,7 @@ fn main() -> Result<()> {
             emit_value(handle_stats(args)?, as_json)?;
         }
         Commands::Pulse(args) => handle_pulse(args)?,
+        Commands::SessionLedger(args) => handle_session_ledger(args)?,
         Commands::Cache(args) => handle_cache(args)?,
         Commands::Install(args) => handle_install(args)?,
         Commands::Init(args) => handle_init(args)?,
@@ -810,6 +825,9 @@ fn doctor_report(args: &DoctorArgs) -> serde_json::Value {
             .map(|p| p.display().to_string())
     );
     report["effective_cache_path"] = json!(store.effective_cache_path.display().to_string());
+    // migration/compatibility state (no content or paths)
+    let recovery = tokenzero_recovery::RecoveryStore::new(Some(store.effective_cache_path.clone()));
+    report["migration"] = recovery.migration_state();
     // wqw.3: portable engine binary discovery (env → PATH → well-known).
     report["engine_binaries"] = tokenzero_mcp::engine_binaries_json();
     if let Some(summary) = &store.mismatch_summary {
@@ -1015,6 +1033,72 @@ fn handle_pulse(args: PulseArgs) -> Result<()> {
     Ok(())
 }
 
+fn handle_session_ledger(args: SessionLedgerArgs) -> Result<()> {
+    let root = tokenzero_work_root(args.root);
+    let pulse_ledger_path = default_ledger_path(&root);
+    let cache_path = resolve_recovery_cache_path(&root, None);
+    let response_ledger_path = tokenzero_mcp::ledger::ledger_path_for_cache(&cache_path);
+    match args.command {
+        Some(SessionLedgerCommand::Schema) => {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&tokenzero_mcp::ledger::schema_example())?
+            );
+        }
+        Some(SessionLedgerCommand::Export) => {
+            let report = SessionLedgerReport::from_ledger(&pulse_ledger_path)?;
+            println!("{}", serde_json::to_string_pretty(&report)?);
+        }
+        Some(SessionLedgerCommand::Stats) | None => {
+            let report = SessionLedgerReport::from_ledger(&pulse_ledger_path)?;
+            if args.json {
+                println!("{}", serde_json::to_string_pretty(&report)?);
+            } else {
+                print!("{}", report.render_text());
+            }
+        }
+        Some(SessionLedgerCommand::Query { query }) => {
+            let since_ms = |days: u64| {
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|duration| {
+                        u64::try_from(duration.as_millis())
+                            .unwrap_or(u64::MAX)
+                            .saturating_sub(days.saturating_mul(86_400_000))
+                    })
+                    .unwrap_or(0)
+            };
+            let query = match query {
+                LedgerQueryCommand::Repo { repo, days } => {
+                    tokenzero_mcp::ledger::LedgerQuery::RepoCost {
+                        repo: repo.to_string_lossy().into_owned(),
+                        since_ms: since_ms(days),
+                    }
+                }
+                LedgerQueryCommand::VersionDelta {
+                    baseline,
+                    candidate,
+                    days,
+                } => tokenzero_mcp::ledger::LedgerQuery::VersionDelta {
+                    baseline,
+                    candidate,
+                    since_ms: since_ms(days),
+                },
+                LedgerQueryCommand::AgentSpend { days } => {
+                    tokenzero_mcp::ledger::LedgerQuery::AgentSpend {
+                        since_ms: since_ms(days),
+                    }
+                }
+            };
+            emit_value(
+                tokenzero_mcp::ledger::query_ledger(&response_ledger_path, &query)?,
+                args.json,
+            )?;
+        }
+    }
+    Ok(())
+}
+
 fn emit_pulse_result<T: serde::Serialize>(
     operation: &str,
     result: std::io::Result<T>,
@@ -1083,6 +1167,105 @@ fn handle_cache(args: CacheArgs) -> Result<()> {
             let mut report = store.prune_stale(dry_run)?;
             report["maintenance"] = tokenzero_mcp::cache_maintenance(&cache, dry_run);
             emit_value(report, args.json)?;
+        }
+        CacheCommand::MigrateRefs(args) => {
+            let root = tokenzero_work_root(args.root);
+            let cache = resolve_recovery_cache_path(&root, args.cache_path);
+            let manifest = migration_manifest_path(&cache);
+            let mut store = tokenzero_recovery::RecoveryStore::new(Some(cache.clone()));
+            // Use the canonical SharedCas detection so migration writes to the
+            // same store root that RecoveryStore reads from at startup.
+            let cas = tokenzero_recovery::shared_cas::SharedCas::new(
+                tokenzero_recovery::shared_cas::SharedCas::attach_root_for_cache_path(&cache),
+            );
+            let mut adapter = tokenzero_recovery::migration::RecoveryStoreAdapter::new(&mut store);
+            let mut migration = tokenzero_recovery::migration::LegacyMigration::new(
+                &mut adapter,
+                &cas,
+                Some(manifest),
+            );
+            let dry_run = !args.apply;
+            let report = migration.run(dry_run);
+            if args.json {
+                println!("{}", report.to_json());
+            } else {
+                println!("{}", report.to_text());
+            }
+            if report.is_failure() {
+                std::process::exit(1);
+            }
+        }
+        CacheCommand::MigrateVerify(args) => {
+            let root = tokenzero_work_root(args.root);
+            let cache = resolve_recovery_cache_path(&root, args.cache_path);
+            let manifest = migration_manifest_path(&cache);
+            let mut store = tokenzero_recovery::RecoveryStore::new(Some(cache.clone()));
+            let cas = tokenzero_recovery::shared_cas::SharedCas::new(
+                tokenzero_recovery::shared_cas::SharedCas::attach_root_for_cache_path(&cache),
+            );
+            let mut adapter = tokenzero_recovery::migration::RecoveryStoreAdapter::new(&mut store);
+            let migration = tokenzero_recovery::migration::LegacyMigration::new(
+                &mut adapter,
+                &cas,
+                Some(manifest),
+            );
+            let report = migration.verify();
+            if args.json {
+                println!("{}", report.to_json());
+            } else {
+                println!("{}", report.to_text());
+            }
+            if report.is_failure() {
+                std::process::exit(1);
+            }
+        }
+        CacheCommand::MigrateRollback(args) => {
+            let root = tokenzero_work_root(args.root);
+            let cache = resolve_recovery_cache_path(&root, args.cache_path);
+            let manifest = migration_manifest_path(&cache);
+            let mut store = tokenzero_recovery::RecoveryStore::new(Some(cache.clone()));
+            let cas = tokenzero_recovery::shared_cas::SharedCas::new(
+                tokenzero_recovery::shared_cas::SharedCas::attach_root_for_cache_path(&cache),
+            );
+            let mut adapter = tokenzero_recovery::migration::RecoveryStoreAdapter::new(&mut store);
+            let mut migration = tokenzero_recovery::migration::LegacyMigration::new(
+                &mut adapter,
+                &cas,
+                Some(manifest),
+            );
+            let report = migration.rollback(args.apply);
+            if args.json {
+                println!("{}", report.to_json());
+            } else {
+                println!("{}", report.to_text());
+            }
+            if report.is_failure() {
+                std::process::exit(1);
+            }
+        }
+        CacheCommand::MigrateCleanup(args) => {
+            let root = tokenzero_work_root(args.root);
+            let cache = resolve_recovery_cache_path(&root, args.cache_path);
+            let manifest = migration_manifest_path(&cache);
+            let mut store = tokenzero_recovery::RecoveryStore::new(Some(cache.clone()));
+            let cas = tokenzero_recovery::shared_cas::SharedCas::new(
+                tokenzero_recovery::shared_cas::SharedCas::attach_root_for_cache_path(&cache),
+            );
+            let mut adapter = tokenzero_recovery::migration::RecoveryStoreAdapter::new(&mut store);
+            let mut migration = tokenzero_recovery::migration::LegacyMigration::new(
+                &mut adapter,
+                &cas,
+                Some(manifest),
+            );
+            let report = migration.cleanup(args.apply, args.confirm_cleanup);
+            if args.json {
+                println!("{}", report.to_json());
+            } else {
+                println!("{}", report.to_text());
+            }
+            if report.is_failure() {
+                std::process::exit(1);
+            }
         }
     }
     Ok(())

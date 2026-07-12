@@ -70,7 +70,7 @@ pub fn shared_store_opt_in_from_env() -> bool {
 }
 
 fn first_env(names: &[&str]) -> Option<OsString> {
-    names.iter().find_map(|name| env::var_os(name))
+    names.iter().find_map(env::var_os)
 }
 
 /// Pure store-root selection (wqw.2). See crate docs / `docs/core.md`.

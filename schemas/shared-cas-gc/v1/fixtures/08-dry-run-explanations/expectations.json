@@ -1,0 +1,30 @@
+{
+  "contract_point": "dry-run-explanation-records",
+  "cases": [
+    {
+      "file": "all-verdicts.json",
+      "schema": "dry-run-report.schema.json",
+      "schema_valid": true,
+      "verdict": "retain",
+      "contains_verdicts": [
+        "retain",
+        "collect",
+        "retain-uncertain"
+      ],
+      "reason_codes": [
+        "reachability-root",
+        "no-live-reference",
+        "corrupt-metadata"
+      ]
+    },
+    {
+      "file": "empty-reasons.invalid.json",
+      "schema": "dry-run-report.schema.json",
+      "schema_valid": false,
+      "verdict": "retain-uncertain",
+      "reason_codes": [
+        "uncertain-metadata"
+      ]
+    }
+  ]
+}

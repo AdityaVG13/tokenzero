@@ -2,9 +2,9 @@ use serde_json::{Value, json};
 use tokenzero_core::MCP_SCHEMA_VERSION;
 
 use crate::TokenZeroEngine;
-use crate::catalog::{canonical_tool_names_for_surface, resource_specs, tool_clusters, tool_docs};
+use crate::catalog::{resource_specs, tool_clusters, tool_docs};
 use crate::codemode::catalog::codemode_method_catalog;
-use crate::jsonrpc::{JsonRpcErrorData, SUPPORTED_PROTOCOL_VERSIONS, tool_filter_discovery};
+use crate::jsonrpc::{JsonRpcErrorData, tool_filter_discovery};
 
 /// Build the JSON payload string for a resource URI. Used by both the
 /// hand-rolled resources/read dispatch and the FastMCP ResourceHandler impls.
@@ -18,47 +18,9 @@ pub(crate) fn build_resource_payload(
         .ok_or_else(|| JsonRpcErrorData::unknown_resource(uri))?;
 
     let payload = match uri {
-        "resource://tokenzero/capabilities" => json!({
-            "schema_version": MCP_SCHEMA_VERSION,
-            "status": "ok",
-            "server": "tokenzero",
-            "version": env!("CARGO_PKG_VERSION"),
-            "protocolVersions": SUPPORTED_PROTOCOL_VERSIONS,
-            "tool_clusters": tool_clusters(),
-            "toolFiltering": tool_filter_discovery(engine.config.tool_surface),
-            "tool_surface": engine.config.tool_surface.as_str(),
-            "canonical_tools": canonical_tool_names_for_surface(engine.config.tool_surface),
-            "aliases": {
-                "read": "tz_read",
-                "find": "tz_find",
-                "grep": "tz_grep",
-                "glob": "tz_glob",
-                "tree": "tz_tree",
-                "edit": "tz_edit",
-                "recall": "tz_recall",
-                "batch": "tz_batch",
-                "fetch": "tz_fetch",
-                "shell": "tz_shell",
-                "ingest": "tz_ingest",
-                "expand": "tz_expand",
-                "mem": "tz_mem",
-                "cache_pack": "tz_cache_pack",
-                "cache-pack": "tz_cache_pack",
-                "rewrite": "tz_rewrite",
-                "discover": "tz_discover",
-            },
-            "codemode": {
-                "schema": "tokenzero.codemode.v1",
-                "cli": "tokenzero codemode --json --plan '<plan>'",
-                "note": "CodeMode is a separate plan-based execution layer on the same base tools/engine (Cloudflare-style, fewer round-trips). Use `tokenzero codemode` or resource://tokenzero/codemode for discovery."
-            },
-            "resources": resource_specs(),
-            "next_actions": [
-                "Call tools/list for JSON Schema 2020-12 input contracts.",
-                "Read resource://tokenzero/roots before passing paths or cwd.",
-                "Inspect tool text output: shell reports command_success inline and other tools carry a refs: footer; set TOKENZERO_MCP_ENVELOPE=compact|full for structuredContent envelopes."
-            ]
-        }),
+        "resource://tokenzero/capabilities" => {
+            crate::capability_descriptor::build_capability_payload(engine)
+        }
         "resource://tokenzero/codemode" => codemode_method_catalog(),
         "resource://tokenzero/tools" => json!({
             "schema_version": MCP_SCHEMA_VERSION,
@@ -116,6 +78,7 @@ pub(crate) fn build_resource_payload(
             "shared_store_opt_in_envs": ["TOKENZERO_SHARED_STORE", "ZEROSTACK_SHARED_STORE"],
             "engine_binaries": crate::engine_binaries_json(),
         }),
+        "resource://tokenzero/session-boot" => engine.session_boot_snapshot(),
         "resource://tokenzero/metrics" => engine.tool_metrics_snapshot(),
         "resource://tokenzero/shell-contract" => {
             return Ok([

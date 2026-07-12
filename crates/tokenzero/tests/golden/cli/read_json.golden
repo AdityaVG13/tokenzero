@@ -23,6 +23,17 @@
   ],
   "schema_version": "tokenzero.cli.v1",
   "status": "ok",
+  "telemetry": {
+    "cache_hit": false,
+    "output_strategy": "full",
+    "session_delta": {
+      "delta_bytes": 10,
+      "from_hwm": "[DYNAMIC_HWM]",
+      "full_bytes": 10,
+      "saved_bytes": 0,
+      "to_hwm": "[DYNAMIC_HWM]"
+    }
+  },
   "tool": "read",
   "visible": {
     "kind": "capsule",

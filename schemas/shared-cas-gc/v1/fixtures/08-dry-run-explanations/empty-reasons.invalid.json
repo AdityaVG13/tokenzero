@@ -1,0 +1,15 @@
+{
+  "schema_version": "zerostack.cas-gc.v1",
+  "record_type": "dry-run-report",
+  "run_id": "empty-reasons",
+  "store_root": "/shared/cas",
+  "evaluated_at": "2026-07-11T12:00:00Z",
+  "objects": [
+    {
+      "blob_hash": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+      "verdict": "retain",
+      "reason_codes": [],
+      "evidence": []
+    }
+  ]
+}

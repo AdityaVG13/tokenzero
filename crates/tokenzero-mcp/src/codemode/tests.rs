@@ -716,6 +716,85 @@ fn shell_plan_captures_exit_code() {
     );
 }
 
+#[cfg(unix)]
+#[test]
+fn background_shell_returns_before_wall_cap_and_can_be_stopped() {
+    let dir = tempfile::tempdir().unwrap();
+    let cache = dir.path().join("background-prompt-cache.json");
+    let options = CodeModeOptions {
+        root: Some(dir.path().to_path_buf()),
+        cache_path: Some(cache),
+        max_wall_ms: 500,
+        hard_max_wall_ms: 500,
+        ..CodeModeOptions::default()
+    };
+    let started = std::time::Instant::now();
+    let result = execute_codemode_with_options(
+        r#"return zero.token.shell("sleep 30", { background: true })"#,
+        options,
+    );
+    assert_eq!(
+        result.status,
+        CodeModeStatus::Completed,
+        "{:?}",
+        result.error
+    );
+    assert!(started.elapsed() < std::time::Duration::from_secs(1));
+    let value = result.value.unwrap();
+    assert!(value["job"].as_str().unwrap().starts_with("tzjob-"));
+    assert!(value["log"].as_str().unwrap().ends_with(".log"));
+    make_engine_for_root(dir.path().to_path_buf()).shutdown_background_jobs_for_test();
+}
+
+#[cfg(unix)]
+#[test]
+fn background_job_polls_to_exit_with_log_tail() {
+    let dir = tempfile::tempdir().unwrap();
+    let cache = dir.path().join("background-poll-cache.json");
+    let options = || CodeModeOptions {
+        root: Some(dir.path().to_path_buf()),
+        cache_path: Some(cache.clone()),
+        max_wall_ms: 1_000,
+        hard_max_wall_ms: 1_000,
+        ..CodeModeOptions::default()
+    };
+    let launched = execute_codemode_with_options(
+        r#"return zero.token.shell("printf alpha; sleep 0.2; printf omega", { background: true })"#,
+        options(),
+    );
+    assert_eq!(
+        launched.status,
+        CodeModeStatus::Completed,
+        "{:?}",
+        launched.error
+    );
+    let job = launched.value.unwrap()["job"].as_str().unwrap().to_string();
+    let running =
+        execute_codemode_with_options(&format!(r#"return zero.token.job("{job}")"#), options());
+    assert_eq!(
+        running.status,
+        CodeModeStatus::Completed,
+        "{:?}",
+        running.error
+    );
+    assert_eq!(running.value.unwrap()["status"], "running");
+    std::thread::sleep(std::time::Duration::from_millis(500));
+    let exited =
+        execute_codemode_with_options(&format!(r#"return zero.token.job("{job}")"#), options());
+    assert_eq!(
+        exited.status,
+        CodeModeStatus::Completed,
+        "{:?}",
+        exited.error
+    );
+    let value = exited.value.unwrap();
+    assert_eq!(value["status"], "exited");
+    assert_eq!(value["exitCode"], 0);
+    assert!(value["tail"].as_str().unwrap().contains("alpha"));
+    assert!(value["tail"].as_str().unwrap().contains("omega"));
+    assert!(std::path::Path::new(value["log"].as_str().unwrap()).exists());
+}
+
 #[test]
 fn multi_statement_composition() {
     let plan = r#"
@@ -749,8 +828,8 @@ fn expand_without_tz_prefix_is_rejected() {
 }
 
 #[test]
-fn expand_cross_scheme_fz_blob_in_one_plan() {
-    // wqw.1 Verify: mint via compact, expand via fz:// rewrite of same id in ONE plan.
+fn expand_same_store_scheme_alias_fz_gz_in_one_plan() {
+    // cqr.1 Verify: mint via compact, expand via fz:// rewrite of same id in ONE plan.
     // Exact expand unwraps to the raw payload string (not {text: ...}).
     let plan = r#"
         const data = await zero.compact("codemode cross-scheme body");
@@ -1490,7 +1569,7 @@ fn default_root_token_read_still_works() {
 }
 
 #[test]
-fn resolve_paths_against_work_root_joins_relative() {
+fn recipe_registry_contracts_and_resolve_paths_against_work_root() {
     let root = std::path::PathBuf::from("/tmp/foreign-proj");
     let resolved = resolve_paths_against_work_root(
         vec![
@@ -1501,4 +1580,141 @@ fn resolve_paths_against_work_root_joins_relative() {
     );
     assert_eq!(resolved[0], root.join("CHANGELOG.md"));
     assert_eq!(resolved[1], std::path::PathBuf::from("/abs/file.txt"));
+
+    let work = tempfile::tempdir().unwrap();
+    let recipe_options = |cache_path: PathBuf| CodeModeOptions {
+        root: Some(work.path().to_path_buf()),
+        cache_path: Some(cache_path),
+        ..Default::default()
+    };
+    let recipe_assert_completed = |result: &CodeModeResult| {
+        assert_eq!(
+            result.status,
+            CodeModeStatus::Completed,
+            "{:?}",
+            result.error
+        );
+    };
+
+    let cache = work.path().join("recipe-happy.json");
+    recipe_assert_completed(&execute_codemode_with_options(
+        r#"return zero.register("zeta", "return args.value;")"#,
+        recipe_options(cache.clone()),
+    ));
+    recipe_assert_completed(&execute_codemode_with_options(
+        r#"return zero.register("alpha", "return { value: args.message, nested: args.nested.value };")"#,
+        recipe_options(cache.clone()),
+    ));
+    let run = execute_codemode_with_options(
+        r#"return await zero.run("alpha", { message: "hello", nested: { value: 7 } })"#,
+        recipe_options(cache.clone()),
+    );
+    recipe_assert_completed(&run);
+    assert_eq!(
+        run.value,
+        Some(serde_json::json!({"value": "hello", "nested": 7}))
+    );
+    let list = execute_codemode_with_options("return zero.list()", recipe_options(cache));
+    recipe_assert_completed(&list);
+    assert_eq!(list.value, Some(serde_json::json!(["alpha", "zeta"])));
+
+    let missing = execute_codemode_with_options(
+        r#"return await zero.run("missing")"#,
+        recipe_options(work.path().join("recipe-missing.json")),
+    );
+    assert_eq!(
+        missing.error.as_ref().map(|error| error.kind.as_str()),
+        Some("recipe_not_found")
+    );
+
+    let policy_cache = work.path().join("recipe-policy.json");
+    recipe_assert_completed(&execute_codemode_with_options(
+        r#"return zero.register("denied", ["return await zero.", "edi", "t(\"blocked.txt\", []);"].join(""))"#,
+        recipe_options(policy_cache.clone()),
+    ));
+    let denied = execute_codemode_with_options(
+        r#"return await zero.run("denied")"#,
+        recipe_options(policy_cache),
+    );
+    assert_eq!(
+        denied.error.as_ref().map(|error| error.kind.as_str()),
+        Some("sandbox")
+    );
+
+    let args_cache = work.path().join("recipe-args.json");
+    recipe_assert_completed(&execute_codemode_with_options(
+        r#"return zero.register("echo", "args.nested.value = 'mutated'; return args;")"#,
+        recipe_options(args_cache.clone()),
+    ));
+    let injected = "return zero.shell(\"touch should-not-run\")";
+    let injection_plan = format!(
+        "return await zero.run(\"echo\", {{ injected: {}, nested: {{ value: \"original\" }} }})",
+        serde_json::to_string(injected).unwrap()
+    );
+    let injected_run = execute_codemode_with_options(&injection_plan, recipe_options(args_cache));
+    recipe_assert_completed(&injected_run);
+    assert_eq!(injected_run.value.as_ref().unwrap()["injected"], injected);
+    assert_eq!(
+        injected_run.value.as_ref().unwrap()["nested"]["value"],
+        "original"
+    );
+    assert!(!work.path().join("should-not-run").exists());
+
+    let capacity_cache = work.path().join("recipe-capacity.json");
+    for index in 0..64 {
+        let plan = format!(r#"return zero.register("r{index:02}", "return {index};")"#);
+        recipe_assert_completed(&execute_codemode_with_options(
+            &plan,
+            recipe_options(capacity_cache.clone()),
+        ));
+    }
+    let full = execute_codemode_with_options(
+        r#"return zero.register("overflow", "return 65;")"#,
+        recipe_options(capacity_cache),
+    );
+    assert_eq!(
+        full.error.as_ref().map(|error| error.kind.as_str()),
+        Some("recipe_registry_full")
+    );
+
+    let oversized_source = "x".repeat(64 * 1024 + 1);
+    let oversized_plan = format!(
+        "return zero.register(\"too-large\", {})",
+        serde_json::to_string(&oversized_source).unwrap()
+    );
+    let oversized = execute_codemode_with_options(
+        &oversized_plan,
+        CodeModeOptions {
+            max_code_bytes: 128 * 1024,
+            ..recipe_options(work.path().join("recipe-size.json"))
+        },
+    );
+    assert_eq!(
+        oversized.error.as_ref().map(|error| error.kind.as_str()),
+        Some("recipe_source_too_large")
+    );
+
+    let first_cache = work.path().join("recipe-session-00.json");
+    for index in 0..33 {
+        let cache_path = work.path().join(format!("recipe-session-{index:02}.json"));
+        recipe_assert_completed(&execute_codemode_with_options(
+            r#"return zero.register("only", "return 1;")"#,
+            recipe_options(cache_path),
+        ));
+    }
+    let evicted = execute_codemode_with_options(
+        r#"return await zero.run("only")"#,
+        recipe_options(first_cache),
+    );
+    assert_eq!(
+        evicted.error.as_ref().map(|error| error.kind.as_str()),
+        Some("recipe_not_found")
+    );
+
+    let representative = r#"const inventory = await zero.tree("crates", { depth: 4 }); const matches = await zero.find("dispatch_values", "crates/tokenzero-mcp/src"); return { inventory, matches };"#;
+    let invocation = r#"return await zero.run("inventory", { depth: 4 })"#;
+    let source_tokens = tokenzero_core::count_tokens(representative);
+    let invocation_tokens = tokenzero_core::count_tokens(invocation);
+    println!("recipe token comparison: source={source_tokens} invocation={invocation_tokens}");
+    assert!(invocation_tokens < source_tokens);
 }

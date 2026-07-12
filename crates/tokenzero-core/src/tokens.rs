@@ -1,3 +1,5 @@
+use std::sync::LazyLock;
+
 use crate::*;
 
 /// Lookup table for hex nibble encoding.
@@ -125,6 +127,223 @@ fn next_newline_or_end(text: &str, start: usize) -> usize {
     text.len()
 }
 
+/// Tokenizer families whose local token-cost characteristics TokenZero knows.
+///
+/// No tokenizer vocabulary is linked today. The registered families therefore
+/// use disclosed average character costs; unknown models retain the legacy
+/// lexical counter exactly.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TokenizerFamily {
+    Cl100k,
+    O200k,
+    SentencePiece,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TokenizerMetadata {
+    pub family: TokenizerFamily,
+    /// Average Unicode scalar values per token, scaled by 1,000.
+    pub chars_per_token_milli: usize,
+    /// Whether counts and boundaries are estimates rather than vocabulary
+    /// lookups. This remains true until a real tokenizer is linked.
+    pub approximate: bool,
+}
+
+const CL100K: TokenizerMetadata = TokenizerMetadata {
+    family: TokenizerFamily::Cl100k,
+    chars_per_token_milli: 4_000,
+    approximate: true,
+};
+const O200K: TokenizerMetadata = TokenizerMetadata {
+    family: TokenizerFamily::O200k,
+    chars_per_token_milli: 4_000,
+    approximate: true,
+};
+const SENTENCEPIECE: TokenizerMetadata = TokenizerMetadata {
+    family: TokenizerFamily::SentencePiece,
+    chars_per_token_milli: 3_500,
+    approximate: true,
+};
+
+/// Resolve a provider model id without allocating or making network calls.
+pub fn tokenizer_metadata(model_id: &str) -> Option<&'static TokenizerMetadata> {
+    // Provider-qualified ids ("openai/gpt-4o-...", "deepseek/...") carry the
+    // model name in the last path segment.
+    let model_id = model_id.rsplit('/').next().unwrap_or(model_id);
+    if starts_with_ignore_ascii_case(model_id, "gpt-4o")
+        || starts_with_ignore_ascii_case(model_id, "gpt-4.1")
+        || starts_with_ignore_ascii_case(model_id, "gpt-5")
+        || starts_with_ignore_ascii_case(model_id, "o1")
+        || starts_with_ignore_ascii_case(model_id, "o3")
+        || starts_with_ignore_ascii_case(model_id, "o4")
+        || contains_ignore_ascii_case(model_id, "codex")
+    {
+        Some(&O200K)
+    } else if starts_with_ignore_ascii_case(model_id, "gpt-4")
+        || starts_with_ignore_ascii_case(model_id, "gpt-3.5")
+    {
+        Some(&CL100K)
+    } else if starts_with_ignore_ascii_case(model_id, "llama")
+        || starts_with_ignore_ascii_case(model_id, "mistral")
+        || starts_with_ignore_ascii_case(model_id, "mixtral")
+        || starts_with_ignore_ascii_case(model_id, "gemma")
+    {
+        Some(&SENTENCEPIECE)
+    } else {
+        None
+    }
+}
+
+fn starts_with_ignore_ascii_case(value: &str, prefix: &str) -> bool {
+    value
+        .get(..prefix.len())
+        .is_some_and(|head| head.eq_ignore_ascii_case(prefix))
+}
+
+fn contains_ignore_ascii_case(value: &str, needle: &str) -> bool {
+    value
+        .as_bytes()
+        .windows(needle.len())
+        .any(|window| window.eq_ignore_ascii_case(needle.as_bytes()))
+}
+
+#[derive(Debug)]
+struct ActiveTokenizer {
+    model_id: Option<String>,
+    metadata: Option<&'static TokenizerMetadata>,
+}
+
+static ACTIVE_TOKENIZER: LazyLock<ActiveTokenizer> = LazyLock::new(|| {
+    let model_id = ["TOKENZERO_MODEL", "OMP_MODEL", "OPENAI_MODEL"]
+        .into_iter()
+        .find_map(|name| std::env::var(name).ok().filter(|value| !value.is_empty()));
+    let metadata = model_id.as_deref().and_then(tokenizer_metadata);
+    ActiveTokenizer { model_id, metadata }
+});
+
+/// Model selected once from `TOKENZERO_MODEL`, `OMP_MODEL`, then
+/// `OPENAI_MODEL`, in precedence order.
+pub fn active_model_id() -> Option<&'static str> {
+    ACTIVE_TOKENIZER.model_id.as_deref()
+}
+
+pub fn active_tokenizer_metadata() -> Option<&'static TokenizerMetadata> {
+    ACTIVE_TOKENIZER.metadata
+}
+
+/// Count for an explicit model. Unknown or absent ids deliberately preserve
+/// the pre-registry lexical heuristic.
+pub fn count_tokens_for_model(text: &str, model_id: Option<&str>) -> usize {
+    match model_id.and_then(tokenizer_metadata) {
+        Some(metadata) => approximate_token_count(text, metadata),
+        None => count_tokens_lexical(text),
+    }
+}
+
+fn approximate_token_count(text: &str, metadata: &TokenizerMetadata) -> usize {
+    if text.is_empty() {
+        return 0;
+    }
+    text.chars()
+        .count()
+        .saturating_mul(1_000)
+        .div_ceil(metadata.chars_per_token_milli)
+}
+
+/// Return the largest prefix that fits `max_tokens` and ends at a token
+/// boundary for the selected model. Registered tokenizers use their disclosed
+/// average-width boundary; the fallback never cuts a lexical word.
+pub fn pack_to_token_boundary(text: &str, max_tokens: usize) -> &str {
+    pack_to_token_boundary_with_char_limit(text, max_tokens, usize::MAX)
+}
+
+/// Pack a preview while treating refs separately: callers can retain a full,
+/// atomic ref and apply both the remaining token budget and a display-width
+/// cap to only the preview.
+pub fn pack_to_token_boundary_with_char_limit(
+    text: &str,
+    max_tokens: usize,
+    max_chars: usize,
+) -> &str {
+    pack_to_token_boundary_for_model_with_char_limit(text, max_tokens, max_chars, active_model_id())
+}
+
+pub fn pack_to_token_boundary_for_model<'a>(
+    text: &'a str,
+    max_tokens: usize,
+    model_id: Option<&str>,
+) -> &'a str {
+    pack_to_token_boundary_for_model_with_char_limit(text, max_tokens, usize::MAX, model_id)
+}
+
+fn pack_to_token_boundary_for_model_with_char_limit<'a>(
+    text: &'a str,
+    max_tokens: usize,
+    max_chars: usize,
+    model_id: Option<&str>,
+) -> &'a str {
+    if text.is_empty() || max_tokens == 0 || max_chars == 0 {
+        return "";
+    }
+    let Some(metadata) = model_id.and_then(tokenizer_metadata) else {
+        return lexical_boundary_prefix(text, max_tokens, max_chars);
+    };
+    let text_chars = text.chars().count();
+    let budget_chars = max_tokens.saturating_mul(metadata.chars_per_token_milli) / 1_000;
+    if text_chars <= budget_chars && text_chars <= max_chars {
+        return text;
+    }
+    let capped_tokens = max_chars.saturating_mul(1_000) / metadata.chars_per_token_milli;
+    let boundary_tokens = max_tokens.min(capped_tokens);
+    let boundary_chars = boundary_tokens.saturating_mul(metadata.chars_per_token_milli) / 1_000;
+    char_prefix(text, boundary_chars)
+}
+
+fn char_prefix(text: &str, chars: usize) -> &str {
+    match text.char_indices().nth(chars) {
+        Some((end, _)) => &text[..end],
+        None => text,
+    }
+}
+
+fn lexical_boundary_prefix(text: &str, max_tokens: usize, max_chars: usize) -> &str {
+    let mut tokens = 0usize;
+    let mut in_word = false;
+    let mut boundary = 0usize;
+    let mut completed = true;
+    for (seen, (start, ch)) in text.char_indices().enumerate() {
+        if seen == max_chars {
+            completed = false;
+            break;
+        }
+        let end = start + ch.len_utf8();
+        let word = ch.is_ascii_alphanumeric() || ch == '_';
+        if word {
+            if !in_word {
+                if tokens == max_tokens {
+                    completed = false;
+                    break;
+                }
+                tokens += 1;
+                in_word = true;
+            }
+        } else if ch.is_whitespace() {
+            in_word = false;
+        } else {
+            if tokens == max_tokens {
+                completed = false;
+                break;
+            }
+            tokens += 1;
+            in_word = false;
+        }
+        if !in_word {
+            boundary = end;
+        }
+    }
+    if completed { text } else { &text[..boundary] }
+}
+
 /// Per-byte classification for the ASCII fast path of `count_tokens`.
 /// 0 = non-whitespace separator (counts as a token if not currently in a token)
 /// 1 = in-token (alphanumeric or `_`)
@@ -145,6 +364,13 @@ pub(crate) const ASCII_TOKEN_CLASS: [u8; 256] = {
 };
 
 pub fn count_tokens(text: &str) -> usize {
+    match active_tokenizer_metadata() {
+        Some(metadata) => approximate_token_count(text, metadata),
+        None => count_tokens_lexical(text),
+    }
+}
+
+fn count_tokens_lexical(text: &str) -> usize {
     if text.is_empty() {
         return 0;
     }
@@ -235,4 +461,40 @@ pub fn savings_ratio(raw_tokens: usize, used_tokens: usize) -> f64 {
         return 0.0;
     }
     1.0 - (used_tokens as f64 / raw_tokens as f64)
+}
+
+#[cfg(test)]
+mod tokenizer_tests {
+    use super::*;
+
+    #[test]
+    fn tokenizer_registry_lookup_and_fallback_are_explicit() {
+        let o200k = tokenizer_metadata("openai/gpt-4o-2024-11-20").unwrap();
+        assert_eq!(o200k.family, TokenizerFamily::O200k);
+        assert!(o200k.approximate);
+
+        let sentencepiece = tokenizer_metadata("Llama-3.3-70B").unwrap();
+        assert_eq!(sentencepiece.family, TokenizerFamily::SentencePiece);
+        assert!(tokenizer_metadata("claude-sonnet-4").is_none());
+        assert_eq!(
+            count_tokens_for_model("alpha beta", Some("claude-sonnet-4")),
+            2,
+            "unknown models must retain the lexical fallback"
+        );
+    }
+
+    #[test]
+    fn token_boundary_packing_keeps_refs_atomic_and_drops_partial_preview_token() {
+        let reference = "tz://blob/0123456789abcdef";
+        let preview = "alpha betaGamma";
+        let packed = pack_to_token_boundary_for_model(preview, 1, None);
+
+        assert_eq!(packed, "alpha ");
+        assert_eq!(reference, "tz://blob/0123456789abcdef");
+        assert!(count_tokens_for_model(packed, None) <= 1);
+
+        let unicode = pack_to_token_boundary_for_model("ééééé", 1, Some("gpt-4o"));
+        assert_eq!(unicode, "éééé");
+        assert!(unicode.is_char_boundary(unicode.len()));
+    }
 }

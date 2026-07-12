@@ -324,6 +324,32 @@ pub fn run_command_with_policy(
     explicit_shell: bool,
     output_policy: RunOutputPolicy,
 ) -> Result<RunResult, RuntimeError> {
+    run_command_with_policy_observer(
+        argv,
+        cwd,
+        env_overrides,
+        stdin,
+        timeout,
+        explicit_shell,
+        output_policy,
+        |_, _, _| {},
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn run_command_with_policy_observer<F>(
+    argv: &[String],
+    cwd: Option<&Path>,
+    env_overrides: Option<&BTreeMap<String, String>>,
+    stdin: Option<&str>,
+    timeout: Duration,
+    explicit_shell: bool,
+    output_policy: RunOutputPolicy,
+    mut observer: F,
+) -> Result<RunResult, RuntimeError>
+where
+    F: FnMut(Option<u32>, Option<u32>, &'static str),
+{
     let output_policy = output_policy.normalized();
     let plan = plan_command(argv, cwd, explicit_shell)?;
     let command_display = command_display_for_plan(argv, &plan);
@@ -348,6 +374,11 @@ pub fn run_command_with_policy(
     if let Some(cwd) = cwd {
         command.current_dir(cwd);
     }
+    // This seam launches caller-selected commands only. Engine-internal helpers
+    // (supervisors, containment signals, and I/O workers) do not pass through it
+    // and retain their orchestration environment. Explicit overrides are applied
+    // afterward as the existing opt-in (including the INNER shim guard).
+    scrub_inherited_orchestration_env(&mut command);
     if let Some(env) = env_overrides {
         command.envs(env);
     }
@@ -360,6 +391,7 @@ pub fn run_command_with_policy(
     configure_process_group(&mut command);
     let mut child = command.spawn()?;
     let process_group = ProcessGroup::for_child(&child);
+    observer(Some(child.id()), process_group.pgid(), "running");
     let stdout = child.stdout.take().expect("stdout is piped");
     let stderr = child.stderr.take().expect("stderr is piped");
     let stdout_policy = output_policy.clone();
@@ -390,6 +422,7 @@ pub fn run_command_with_policy(
                 process_group,
                 false,
             )?;
+            observer(None, None, "timed_out_killed");
             return Ok(result_builder.finish(false, status.code(), process_io, true, start));
         }
     };
@@ -403,6 +436,15 @@ pub fn run_command_with_policy(
         process_group,
         true,
     )?;
+    observer(
+        None,
+        None,
+        if process_io.timed_out {
+            "timed_out_killed"
+        } else {
+            "completed"
+        },
+    );
     Ok(result_builder.finish(
         !process_io.timed_out && status.success(),
         status.code(),
@@ -673,6 +715,17 @@ struct ProcessGroup {
 }
 
 impl ProcessGroup {
+    fn pgid(self) -> Option<u32> {
+        #[cfg(unix)]
+        {
+            Some(self.pgid)
+        }
+        #[cfg(not(unix))]
+        {
+            None
+        }
+    }
+
     fn for_child(child: &std::process::Child) -> Self {
         #[cfg(not(unix))]
         let _ = child;
@@ -919,6 +972,21 @@ fn remove_spill_file(path: &Path, len: u64, dry_run: bool, report: &mut SpillPru
         report.removed_bytes += len;
     } else {
         report.failed_removals += 1;
+    }
+}
+
+const ORCHESTRATION_ENV_PREFIXES: [&str; 4] = ["TOKENZERO_", "ZEROSTACK_", "FSZERO_", "GRAPHZERO_"];
+
+fn scrub_inherited_orchestration_env(command: &mut Command) {
+    for (key, _) in std::env::vars_os() {
+        let orchestration_only = key.to_str().is_some_and(|name| {
+            ORCHESTRATION_ENV_PREFIXES
+                .iter()
+                .any(|prefix| name.starts_with(prefix))
+        });
+        if orchestration_only {
+            command.env_remove(key);
+        }
     }
 }
 

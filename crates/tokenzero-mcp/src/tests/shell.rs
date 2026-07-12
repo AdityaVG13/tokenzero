@@ -368,3 +368,102 @@ fn shell_caller_env_overrides_inner_guard() {
         .to_string();
     assert!(preview.contains("INNER=custom"), "{preview}");
 }
+
+#[cfg(unix)]
+#[test]
+fn shell_scrubs_inherited_orchestration_env() {
+    const PROBE_FLAG: &str = "TOKENZERO_ENV_SCRUB_PROBE_PARENT";
+    if std::env::var_os(PROBE_FLAG).is_none() {
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "tests::shell::shell_scrubs_inherited_orchestration_env",
+                "--nocapture",
+            ])
+            .env(PROBE_FLAG, "1")
+            .env("ZEROSTACK_STORE_ROOT", "inherited-store")
+            .env("FSZERO_ROOT", "inherited-fszero")
+            .env("GRAPHZERO_ROOT", "inherited-graphzero")
+            .env("TOKENZERO_CACHE_PATH", "inherited-cache")
+            .env("TOKENZERO_ALLOWED_ROOTS", "inherited-roots")
+            .env("TOKENZERO_EXPLICIT_CHILD", "inherited-value")
+            .env("SHELL_ENV_CONTROL", "preserved")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "probe subprocess failed: stdout={} stderr={}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        return;
+    }
+
+    let dir = tempdir().unwrap();
+    let engine = TokenZeroEngine::new(EngineConfig::for_root(dir.path()));
+    let script = r#"printf 'ZEROSTACK=%s\nFSZERO=%s\nGRAPHZERO=%s\nTOKENZERO_CACHE=%s\nTOKENZERO_ALLOWED=%s\nTOKENZERO_EXPLICIT=%s\nCONTROL=%s\nPATH_PRESENT=%s\n' "${ZEROSTACK_STORE_ROOT-absent}" "${FSZERO_ROOT-absent}" "${GRAPHZERO_ROOT-absent}" "${TOKENZERO_CACHE_PATH-absent}" "${TOKENZERO_ALLOWED_ROOTS-absent}" "${TOKENZERO_EXPLICIT_CHILD-absent}" "${SHELL_ENV_CONTROL-absent}" "${PATH:+yes}""#;
+    let argv = Some(vec!["sh".to_string(), "-c".to_string(), script.to_string()]);
+    let response = engine.shell(
+        "env scrub probe",
+        argv,
+        Some(dir.path()),
+        Mode::Auto,
+        None,
+        true,
+        None,
+        None,
+        None,
+    );
+    assert_eq!(response.status, "ok");
+    let stdout_ref = response
+        .refs
+        .iter()
+        .find(|row| row.kind == "stdout")
+        .unwrap()
+        .ref_id
+        .clone();
+    let stdout = engine
+        .expand(&stdout_ref, Some("raw"), None, None, None, None)
+        .visible
+        .unwrap()
+        .text;
+    assert_eq!(
+        stdout.trim_end(),
+        "ZEROSTACK=absent\nFSZERO=absent\nGRAPHZERO=absent\nTOKENZERO_CACHE=absent\nTOKENZERO_ALLOWED=absent\nTOKENZERO_EXPLICIT=absent\nCONTROL=preserved\nPATH_PRESENT=yes"
+    );
+
+    let mut explicit_env = BTreeMap::new();
+    explicit_env.insert(
+        "TOKENZERO_EXPLICIT_CHILD".to_string(),
+        "opted-in".to_string(),
+    );
+    let response = engine.shell(
+        "explicit env probe",
+        Some(vec![
+            "sh".to_string(),
+            "-c".to_string(),
+            r#"printf '%s' "${TOKENZERO_EXPLICIT_CHILD-absent}""#.to_string(),
+        ]),
+        Some(dir.path()),
+        Mode::Auto,
+        None,
+        true,
+        Some(explicit_env),
+        None,
+        None,
+    );
+    assert_eq!(response.status, "ok");
+    let stdout_ref = response
+        .refs
+        .iter()
+        .find(|row| row.kind == "stdout")
+        .unwrap()
+        .ref_id
+        .clone();
+    let stdout = engine
+        .expand(&stdout_ref, Some("raw"), None, None, None, None)
+        .visible
+        .unwrap()
+        .text;
+    assert_eq!(stdout, "opted-in");
+}

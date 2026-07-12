@@ -13,3 +13,4 @@ mod search;
 mod session;
 mod shell;
 mod support;
+mod working_set;

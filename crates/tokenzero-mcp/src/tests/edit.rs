@@ -295,6 +295,25 @@ fn path_allowed_rejects_unresolved_parent_components() {
 }
 
 #[test]
+fn path_allowed_resolves_relative_paths_against_call_root() {
+    // A bare relative path must be resolved against the engine's call root,
+    // not the process cwd, before the allowlist check. This matters when the
+    // workspace root is routed or otherwise differs from the current directory.
+    let base = tempdir().unwrap();
+    let root = base.path().join("ws");
+    fs::create_dir(&root).unwrap();
+    fs::write(root.join("inside.txt"), "alpha
+").unwrap();
+    let engine = TokenZeroEngine::new(EngineConfig::for_root(&root));
+
+    // Relative path under the call root is allowed even when the process cwd
+    // is somewhere else (here, the workspace root itself, not a parent).
+    assert!(engine.path_allowed(Path::new("inside.txt")));
+    // Relative paths that escape the call root via `..` must still be rejected.
+    assert!(!engine.path_allowed(Path::new("..").join("outside.txt").as_path()));
+}
+
+#[test]
 fn edit_rejects_non_utf8_files() {
     let dir = tempdir().unwrap();
     let file = dir.path().join("blob.bin");

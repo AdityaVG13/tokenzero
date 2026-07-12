@@ -731,7 +731,11 @@ mod bench_harness {
         let engine = engine_for_leg(&root, hermetic_cache_path(0, "direct-read", "perop"));
         let measured = measure_perop_leg(&engine, &workload);
         assert!(measured.visible_tokens > 0);
-        assert!(measured.wire_text.contains("Cargo.toml"));
+        assert!(
+            measured
+                .wire_text
+                .starts_with("[package]\nname = \"tokenzero-mcp\"")
+        );
         assert!(measured.wire_text.contains("tokenzero"));
     }
 

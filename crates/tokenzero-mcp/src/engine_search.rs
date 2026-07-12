@@ -71,7 +71,7 @@ impl TokenZeroEngine {
                 roots.iter().map(|root| comparable_path(root)).collect();
             canonical_roots.sort();
             self.begin_serve_flight(vec![ServeKey::Output {
-                tool: tool.to_string(),
+                tool: format!("{tool}:{:?}", self.config.search_backend),
                 query: query.to_string(),
                 roots: canonical_roots,
             }])
@@ -201,6 +201,7 @@ impl TokenZeroEngine {
                 mode,
             }
         };
+        let full_bytes = capsule.text.len();
         let mut visible_text = capsule.text;
         let mut final_visible_tokens = capsule.visible_tokens;
         let mut summary = SessionSummary::default();
@@ -221,13 +222,16 @@ impl TokenZeroEngine {
                 roots.iter().map(|root| comparable_path(root)).collect();
             canonical_roots.sort();
             let key = ServeKey::Output {
-                tool: tool.to_string(),
+                tool: format!("{tool}:{:?}", self.config.search_backend),
                 query: query.to_string(),
                 roots: canonical_roots,
             };
             let content_sha256 = sha256_hex(&output);
             let bypass = matches!(mode, Mode::Passthrough) || options.fresh;
-            if let SeenState::Unchanged { serve_count } = self.session_lookup(&key, &content_sha256)
+            if let SeenState::Unchanged {
+                serve_count,
+                cross_session,
+            } = self.session_lookup(&key, &content_sha256)
             {
                 if !bypass {
                     let note = unchanged_search_note(tool, query, &output, &stored);
@@ -235,7 +239,11 @@ impl TokenZeroEngine {
                     // ROI guard: emit only when strictly cheaper than the
                     // full render.
                     if note_tokens < final_visible_tokens {
-                        summary.note_dedup(serve_count + 1, final_visible_tokens - note_tokens);
+                        summary.note_dedup(
+                            serve_count + 1,
+                            final_visible_tokens - note_tokens,
+                            cross_session,
+                        );
                         visible_text = note;
                         final_visible_tokens = note_tokens;
                     }
@@ -299,12 +307,20 @@ impl TokenZeroEngine {
             telemetry["rg_unparsed_rows"] = json!(stats.unparsed_rows);
         }
         response.telemetry = Some(telemetry);
+        if self.config.session_dedup {
+            let delta_bytes = response
+                .visible
+                .as_ref()
+                .map_or(0, |visible| visible.text.len());
+            summary.note_wire_bytes(full_bytes, delta_bytes);
+        }
+        let (from_hwm, to_hwm) = self.session_apply(pending, &summary);
+        summary.set_watermark(from_hwm, to_hwm);
         // Merge — never overwrite — so backend/storage telemetry survives a
         // dedup serve in the same response.
         if let Some(extra) = summary.telemetry() {
             merge_telemetry(&mut response, extra);
         }
-        self.session_apply(pending, &summary);
         if matches.is_empty() {
             let suffix = if stats.truncated_by_results || stats.truncated_by_visit {
                 " (scan truncated)"

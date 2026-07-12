@@ -282,8 +282,12 @@ fn rg_and_internal_backends_return_identical_search_output() {
     search_backend_fixture(dir.path());
     let roots = vec![dir.path().to_path_buf()];
 
-    let internal_engine = engine_with_backend(dir.path(), SearchBackend::Internal);
-    let rg_engine = engine_with_backend(dir.path(), SearchBackend::Rg);
+    // Backend parity compares raw serve output; the second engine shares the
+    // cache scope and would otherwise serve a persisted-session dedup note.
+    let mut internal_engine = engine_with_backend(dir.path(), SearchBackend::Internal);
+    internal_engine.config.session_dedup = false;
+    let mut rg_engine = engine_with_backend(dir.path(), SearchBackend::Rg);
+    rg_engine.config.session_dedup = false;
     let internal = internal_engine.find("needle", &roots, Mode::Auto, 20, 4000);
     let rg = rg_engine.find("needle", &roots, Mode::Auto, 20, 4000);
 

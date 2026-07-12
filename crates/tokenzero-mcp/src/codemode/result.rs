@@ -86,11 +86,32 @@ pub struct CodeModeTelemetry {
     pub internal_actions: usize,
     pub cache_hits: usize,
     pub cache_misses: usize,
+    /// Per-session prefix cache hit count (provider cached_tokens when available;
+    /// otherwise byte-prefix estimate). Serde default keeps old telemetry readable.
+    #[serde(default)]
+    pub prefix_cache_hits: usize,
+    /// Per-session prefix cache denominator for the hit-rate metric.
+    #[serde(default)]
+    pub prefix_cache_total: usize,
     pub store_writes: usize,
     pub wall_ms: u64,
     pub bytes_materialized: usize,
     pub envelope_tokens: usize,
     pub payload_tokens: usize,
+    /// Token attribution buckets for envelope overhead audit (6ot).
+    pub ack_tokens: usize,
+    pub ref_string_tokens: usize,
+    pub framing_tokens: usize,
+    pub preview_tokens: usize,
+    /// Counterfactual prevented-read bytes: bytes that would have been read
+    /// if graph queries, search hits, or ref expansion had not satisfied the
+    /// request without a full file read. Measured as a lower-bound estimate
+    /// from available accounting (raw vs. visible tokens, plus exact expand
+    /// payload bytes); see exec.rs for the counterfactual methodology.
+    pub prevented_read_bytes: usize,
+    /// Count of expand calls that returned a capsule instead of the full body (wqw.13).
+    #[serde(default)]
+    pub prevented_full_body_count: usize,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub extra: Option<Value>,
 }
@@ -193,11 +214,19 @@ impl CodeModeResult {
                 internal_actions: ops,
                 cache_hits: 0,
                 cache_misses: ops,
+                prefix_cache_hits: 0,
+                prefix_cache_total: 0,
                 store_writes: refs_len,
                 wall_ms: 0,
                 bytes_materialized: raw,
                 envelope_tokens: 0,
                 payload_tokens: visible,
+                ack_tokens: 0,
+                ref_string_tokens: 0,
+                framing_tokens: 0,
+                preview_tokens: 0,
+                prevented_read_bytes: 0,
+                prevented_full_body_count: 0,
                 extra: Some(serde_json::json!({
                     "operations": ops,
                     "visible_tokens": visible,
@@ -206,7 +235,8 @@ impl CodeModeResult {
                     "refs_count": refs_len,
                     "parallel_groups": 0,
                     "envelope_tokens": 0,
-                    "payload_tokens": visible
+                    "payload_tokens": visible,
+                    "prevented_read_bytes": 0
                 })),
             },
             error: None,
@@ -249,11 +279,19 @@ impl CodeModeResult {
                 internal_actions: ops,
                 cache_hits: 0,
                 cache_misses: ops,
+                prefix_cache_hits: 0,
+                prefix_cache_total: 0,
                 store_writes: 0,
                 wall_ms: 0,
                 bytes_materialized: 0,
                 envelope_tokens: 0,
                 payload_tokens: 0,
+                ack_tokens: 0,
+                ref_string_tokens: 0,
+                framing_tokens: 0,
+                preview_tokens: 0,
+                prevented_read_bytes: 0,
+                prevented_full_body_count: 0,
                 extra: Some(serde_json::json!({
                     "operations": ops,
                     "visible_tokens": 0,
@@ -261,7 +299,8 @@ impl CodeModeResult {
                     "refs_count": 0,
                     "parallel_groups": 0,
                     "envelope_tokens": 0,
-                    "payload_tokens": 0
+                    "payload_tokens": 0,
+                    "prevented_read_bytes": 0
                 })),
             },
             error: Some(CodeModeError::new(kind, msg, retryable)),

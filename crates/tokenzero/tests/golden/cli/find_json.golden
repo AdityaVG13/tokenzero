@@ -36,17 +36,25 @@
   "schema_version": "tokenzero.cli.v1",
   "status": "ok",
   "telemetry": {
+    "cache_hit": false,
     "degraded": false,
     "exact_refs_available": true,
     "matched_files": 1,
     "matches": 2,
-    "output_strategy": "exact_first_search",
+    "output_strategy": "full",
     "query": "alpha",
     "result_limit": 20,
     "roots": [
       "sample.txt"
     ],
     "search_backend": "internal",
+    "session_delta": {
+      "delta_bytes": 40,
+      "from_hwm": "[DYNAMIC_HWM]",
+      "full_bytes": 40,
+      "saved_bytes": 0,
+      "to_hwm": "[DYNAMIC_HWM]"
+    },
     "storage_error": null,
     "transport_status": "ok",
     "truncated_by_results": false,

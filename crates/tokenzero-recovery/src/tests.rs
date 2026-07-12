@@ -1,5 +1,7 @@
 use super::*;
+use crate::shared_cas::SharedCas;
 use proptest::prelude::*;
+use std::collections::BTreeMap;
 use std::panic::{AssertUnwindSafe, catch_unwind, resume_unwind};
 use std::sync::{LazyLock, Mutex};
 use tempfile::tempdir;
@@ -138,6 +140,158 @@ fn restart_expand_is_byte_exact() {
 }
 
 #[test]
+fn old_string_blob_cache_round_trips_without_shape_rewrite() {
+    let dir = tempdir().unwrap();
+    let cache = dir.path().join("cache.json");
+    let text = "legacy
+bytes
+";
+    let ref_id = format!("tz://blob/{}", sha256_hex(text));
+    let mut json = serde_json::to_value(RecoveryState::empty(&RecoveryConfig::default())).unwrap();
+    json["blobs"][&ref_id] = serde_json::Value::String(text.to_string());
+    json["order"] = serde_json::json!([ref_id]);
+    fs::write(&cache, serde_json::to_vec(&json).unwrap()).unwrap();
+
+    let mut store = RecoveryStore::new(Some(cache.clone()));
+    let expanded = store.expand(&ref_id, Some("raw"), None, None, None, None);
+    assert!(expanded.found);
+    assert_eq!(expanded.content, text);
+    store.persist_pending().unwrap();
+
+    let persisted: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(cache).unwrap()).unwrap();
+    assert_eq!(persisted["blobs"][&ref_id].as_str(), Some(text));
+}
+
+#[test]
+fn file_backed_blob_resolves_exact_source_slice_after_restart() {
+    let dir = tempdir().unwrap();
+    let source = dir.path().join("source.txt");
+    let cache = dir.path().join("cache.json");
+    fs::write(
+        &source,
+        "one
+two
+three
+",
+    )
+    .unwrap();
+    let ref_id = {
+        let mut store = RecoveryStore::new(Some(cache.clone()));
+        store
+            .store_file_backed_blob(&source, 2, 3, ContentType::Code)
+            .unwrap()
+    };
+    let snapshot: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&cache).unwrap()).unwrap();
+    assert!(snapshot["blobs"][&ref_id].is_object());
+
+    let mut restarted = RecoveryStore::new(Some(cache));
+    let expanded = restarted.expand(&ref_id, Some("raw"), None, None, None, None);
+    assert!(expanded.found);
+    assert_eq!(
+        expanded.content,
+        "two
+three
+"
+    );
+}
+
+#[test]
+fn file_backed_blob_reports_stale_when_source_changes_or_disappears() {
+    let dir = tempdir().unwrap();
+    let source = dir.path().join("source.txt");
+    let cache = dir.path().join("cache.json");
+    fs::write(
+        &source, "stable
+",
+    )
+    .unwrap();
+    let ref_id = {
+        let mut store = RecoveryStore::new(Some(cache.clone()));
+        store
+            .store_file_backed_blob(&source, 1, 1, ContentType::Unknown)
+            .unwrap()
+    };
+
+    fs::write(
+        &source, "changed
+",
+    )
+    .unwrap();
+    let mut changed = RecoveryStore::new(Some(cache.clone()));
+    let expanded = changed.expand(&ref_id, Some("raw"), None, None, None, None);
+    assert!(!expanded.found);
+    assert_eq!(expanded.reason, "stale-ref");
+
+    fs::remove_file(&source).unwrap();
+    let mut missing = RecoveryStore::new(Some(cache));
+    let expanded = missing.expand(&ref_id, Some("raw"), None, None, None, None);
+    assert!(!expanded.found);
+    assert_eq!(expanded.reason, "stale-ref");
+}
+
+#[test]
+fn source_backed_payload_avoids_inline_file_copy_and_detects_staleness() {
+    let dir = tempdir().unwrap();
+    let source = dir.path().join("large.txt");
+    let cache = dir.path().join("cache.json");
+    let text = format!("{}\n", "stable payload ".repeat(8_000));
+    fs::write(&source, &text).unwrap();
+
+    let stored = {
+        let mut store = RecoveryStore::new(Some(cache.clone()));
+        let stored =
+            store.store_source_backed_payload_deferred_batch(&text, ContentType::Unknown, &source);
+        store.persist_pending().unwrap();
+        stored
+    };
+    let snapshot: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&cache).unwrap()).unwrap();
+    assert!(snapshot["blobs"][&stored.blob_ref].is_object());
+    assert_eq!(snapshot["files"][&stored.file_ref]["source_backed"], true);
+    assert_eq!(snapshot["files"][&stored.file_ref]["text"], "");
+
+    let mut restarted = RecoveryStore::new(Some(cache.clone()));
+    for ref_id in [&stored.blob_ref, &stored.file_ref] {
+        let expanded = restarted.expand(ref_id, Some("raw"), None, None, None, None);
+        assert!(expanded.found);
+        assert_eq!(expanded.content, text);
+    }
+
+    fs::write(&source, "changed\n").unwrap();
+    let mut changed = RecoveryStore::new(Some(cache));
+    for ref_id in [&stored.blob_ref, &stored.file_ref] {
+        let expanded = changed.expand(ref_id, Some("raw"), None, None, None, None);
+        assert!(!expanded.found);
+        assert_eq!(expanded.reason, "stale-ref");
+    }
+}
+
+#[test]
+fn inline_blob_survives_source_deletion() {
+    let dir = tempdir().unwrap();
+    let source = dir.path().join("ephemeral.txt");
+    let cache = dir.path().join("cache.json");
+    let text = "ephemeral bytes
+";
+    fs::write(&source, text).unwrap();
+    let blob_ref = {
+        let mut store = RecoveryStore::new(Some(cache.clone()));
+        store
+            .store_payload(text, ContentType::Unknown, Some(&source), None, None)
+            .unwrap()
+            .blob_ref
+    };
+    fs::remove_file(source).unwrap();
+
+    let mut restarted = RecoveryStore::new(Some(cache));
+    let expanded = restarted.expand(&blob_ref, Some("raw"), None, None, None, None);
+    assert!(expanded.found);
+    assert_eq!(expanded.content, text);
+}
+
+#[test]
 fn ref_index_expands_blob_across_cache_roots() {
     let index_dir = tempdir().unwrap();
     with_ref_index_env(index_dir.path(), true, || {
@@ -157,6 +311,59 @@ fn ref_index_expands_blob_across_cache_roots() {
         let expanded = other_root.expand(&stored.blob_ref, Some("raw"), None, None, None, None);
         assert!(expanded.found);
         assert_eq!(expanded.content, text);
+    });
+}
+
+#[test]
+fn ref_index_pay_once_reuses_one_user_cas_object_across_sessions() {
+    let index_dir = tempdir().unwrap();
+    with_ref_index_env(index_dir.path(), true, || {
+        let dir_a = tempdir().unwrap();
+        let dir_b = tempdir().unwrap();
+        let cache_a = dir_a.path().join("cache.json");
+        let cache_b = dir_b.path().join("cache.json");
+        let payload = "pay once across sessions
+with exact bytes
+";
+
+        let first = {
+            let mut store = RecoveryStore::new(Some(cache_a.clone()));
+            store
+                .store_payload(payload, ContentType::Unknown, None, None, None)
+                .unwrap()
+        };
+        let second = {
+            let mut store = RecoveryStore::new(Some(cache_b.clone()));
+            store
+                .store_payload(payload, ContentType::Unknown, None, None, None)
+                .unwrap()
+        };
+
+        assert_eq!(first.blob_ref, second.blob_ref);
+        let hash = ref_index_id_part(&first.blob_ref).unwrap();
+        let cas = SharedCas::new(index_dir.path().to_path_buf());
+        assert!(cas.contains(hash));
+        let object_dir = index_dir
+            .path()
+            .join("blobs")
+            .join("sha256")
+            .join(&hash[..2]);
+        assert_eq!(fs::read_dir(object_dir).unwrap().count(), 1);
+
+        for cache in [&cache_a, &cache_b] {
+            let snapshot: serde_json::Value =
+                serde_json::from_str(&fs::read_to_string(cache).unwrap()).unwrap();
+            assert_eq!(snapshot["blobs"].as_object().unwrap().len(), 0);
+        }
+
+        let shard = ref_index_shard_path(index_dir.path(), &first.blob_ref);
+        let entries =
+            ref_index_entries_for_ref(&fs::read_to_string(shard).unwrap(), &first.blob_ref);
+        assert_eq!(entries.len(), 2);
+        assert!(matches!(
+            resolve_blob_from_ref_index(&first.blob_ref, &RecoveryConfig::default()),
+            RefResolve::Found(content) if content == payload
+        ));
     });
 }
 
@@ -194,6 +401,8 @@ fn stale_ref_index_entry_is_pruned_and_reports_tiers() {
                 .unwrap()
         };
         fs::remove_file(&cache_a).unwrap();
+        // Remove the SharedCas blob so expansion can only reach the ref index.
+        let _ = fs::remove_dir_all(index_dir.path().join("blobs"));
 
         let mut other = RecoveryStore::new(Some(dir_b.path().join("cache.json")));
         let expanded = other.expand(&stored.blob_ref, Some("raw"), None, None, None, None);
@@ -213,15 +422,33 @@ fn ref_index_compaction_keeps_newest_entry_per_ref() {
     let dir = tempdir().unwrap();
     let shard = dir.path().join("ba.ndjson");
     let ref_id = "tz://blob/ba_ref";
-    append_ref_index_line(&shard, ref_id, Path::new("/old-store.json"), 1).unwrap();
+    append_ref_index_line(
+        &shard,
+        ref_id,
+        Path::new("/old-store.json"),
+        1,
+        ContentClass::Unknown,
+        false,
+    )
+    .unwrap();
     append_ref_index_line(
         &shard,
         "tz://blob/ba_other",
         Path::new("/other-store.json"),
         1,
+        ContentClass::Unknown,
+        false,
     )
     .unwrap();
-    append_ref_index_line(&shard, ref_id, Path::new("/new-store.json"), 2).unwrap();
+    append_ref_index_line(
+        &shard,
+        ref_id,
+        Path::new("/new-store.json"),
+        2,
+        ContentClass::Unknown,
+        false,
+    )
+    .unwrap();
 
     compact_ref_index_shard(&shard).unwrap();
 
@@ -273,7 +500,7 @@ fn ref_index_concurrent_append_smoke() {
                 thread::spawn(move || {
                     let _old = set_ref_index_test_override(Some((true, index_path)));
                     let ref_id = format!("tz://blob/ba{idx:030}");
-                    append_blob_refs_to_ref_index(&store_path, &[ref_id]);
+                    append_blob_refs_to_ref_index(&store_path, &[ref_id], None);
                 })
             })
             .collect();
@@ -836,6 +1063,7 @@ fn stale_check_uses_native_path_identity_before_display_path() {
                     .to_string(),
             ),
             path_identity: Some(path_identity_text(&source)),
+            source_backed: false,
             text: "same\n".to_string(),
             content_type: ContentType::Unknown.to_string(),
             source_fingerprint: Some(source_fingerprint),
@@ -966,6 +1194,94 @@ fn tmp_sweep_missing_dir_is_empty_report() {
 // ---------------------------------------------------------------------------
 // Journal / compaction
 // ---------------------------------------------------------------------------
+
+fn rotated_journal_fixture() -> (tempfile::TempDir, PathBuf, StoredPayload, StoredPayload) {
+    let dir = tempdir().unwrap();
+    let cache = dir.path().join("cache.json");
+    {
+        let mut store = RecoveryStore::new(Some(cache.clone()));
+        store
+            .store_payload("base\n", ContentType::Unknown, None, None, None)
+            .unwrap();
+    }
+
+    let make_entry = |text: &str| {
+        let mut store = RecoveryStore::new(Some(cache.clone()));
+        let stored = store.store_payload_deferred(text, ContentType::Unknown, None, None, None);
+        let entry = JournalEntry {
+            refs: store.session_refs.clone(),
+            state: session_delta(&store.state, &store.session_refs, &store.config),
+            deleted_blob_refs: Vec::new(),
+            deleted_aliases: Vec::new(),
+        };
+        (stored, entry)
+    };
+    let (first, first_entry) = make_entry("sealed\n");
+    let (second, second_entry) = make_entry("active\n");
+    let first_len = serde_json::to_vec(&first_entry).unwrap().len() as u64 + 1;
+    let second_len = serde_json::to_vec(&second_entry).unwrap().len() as u64 + 1;
+    let segment_limit = first_len.max(second_len);
+
+    assert_eq!(
+        append_journal(&cache, &first_entry, segment_limit).unwrap(),
+        JournalAppend::Appended
+    );
+    assert_eq!(
+        append_journal(&cache, &second_entry, segment_limit).unwrap(),
+        JournalAppend::Appended
+    );
+    (dir, cache, first, second)
+}
+
+#[test]
+fn journal_rotates_when_active_segment_reaches_limit() {
+    let (_dir, cache, _first, _second) = rotated_journal_fixture();
+    assert!(
+        journal_segment_path(&cache, 1).exists(),
+        "full active segment must be sealed"
+    );
+    assert!(
+        journal_path(&cache).exists(),
+        "rotation must leave a writable active segment"
+    );
+    assert!(
+        !journal_segment_path(&cache, 2).exists(),
+        "one rotation must create exactly one sealed segment"
+    );
+}
+
+#[test]
+fn journal_replays_sealed_segments_before_active_segment() {
+    let (_dir, cache, sealed, active) = rotated_journal_fixture();
+    let mut restarted = RecoveryStore::new(Some(cache));
+    for (stored, text) in [(&sealed, "sealed\n"), (&active, "active\n")] {
+        let expanded = restarted.expand(&stored.blob_ref, Some("raw"), None, None, None, None);
+        assert!(expanded.found, "journal segment lost {}", stored.blob_ref);
+        assert_eq!(expanded.content, text);
+    }
+}
+
+#[test]
+fn journal_torn_tail_in_newest_segment_preserves_all_complete_segments() {
+    let (_dir, cache, sealed, active) = rotated_journal_fixture();
+    let mut file = OpenOptions::new()
+        .append(true)
+        .open(journal_path(&cache))
+        .unwrap();
+    file.write_all(b"{\"refs\":[\"tz://blob/torn").unwrap();
+    drop(file);
+
+    let mut restarted = RecoveryStore::new(Some(cache));
+    for (stored, text) in [(&sealed, "sealed\n"), (&active, "active\n")] {
+        let expanded = restarted.expand(&stored.blob_ref, Some("raw"), None, None, None, None);
+        assert!(
+            expanded.found,
+            "torn newest tail poisoned {}",
+            stored.blob_ref
+        );
+        assert_eq!(expanded.content, text);
+    }
+}
 
 #[test]
 fn second_process_persist_appends_journal_without_snapshot_rewrite() {
@@ -1148,6 +1464,86 @@ fn corrupt_blob_sidecar_is_a_miss_not_bad_bytes() {
     );
 }
 
+#[test]
+fn streaming_chunk_boundary_preserves_exact_utf8_and_file_ref_bytes() {
+    let dir = tempdir().unwrap();
+    let payload_path = dir.path().join("boundary.txt");
+    let mut payload = "a".repeat(STREAM_READ_BUFFER_BYTES - 1);
+    payload.push('é');
+    payload.push_str(&"z".repeat(STREAM_READ_BUFFER_BYTES + 3));
+    fs::write(&payload_path, &payload).unwrap();
+
+    let (streamed, hash) = read_utf8_hashed(&payload_path, Some(payload.len())).unwrap();
+    assert_eq!(streamed, payload);
+    assert_eq!(hash, sha256_hex(&payload));
+
+    let line_path = dir.path().join("lines.txt");
+    let first = "x".repeat(STREAM_READ_BUFFER_BYTES - 2);
+    let selected = format!("{}\nthird\n", "y".repeat(STREAM_READ_BUFFER_BYTES + 7));
+    fs::write(&line_path, format!("{first}\n{selected}tail")).unwrap();
+    let (streamed_lines, line_hash) = read_utf8_line_range_hashed(&line_path, 2, 3).unwrap();
+    assert_eq!(streamed_lines, selected);
+    assert_eq!(line_hash, sha256_hex(&selected));
+}
+
+#[test]
+fn streaming_corrupt_sidecar_is_rejected_as_decode_failure() {
+    let dir = tempdir().unwrap();
+    let cache = dir.path().join("cache.json");
+    let payload = "verified".repeat(BLOB_EXTERNALIZE_MIN_BYTES / 4);
+    let stored = {
+        let mut store = RecoveryStore::new(Some(cache.clone()));
+        store
+            .store_payload(&payload, ContentType::Unknown, None, None, None)
+            .unwrap()
+    };
+    let sidecar = fs::read_dir(blob_sidecar_dir(&cache))
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path();
+    fs::write(sidecar, "tampered").unwrap();
+
+    let expanded = RecoveryStore::new(Some(cache)).expand(
+        &stored.blob_ref,
+        Some("raw"),
+        None,
+        None,
+        None,
+        None,
+    );
+    assert!(!expanded.found);
+    assert_eq!(expanded.reason, "decode-failed");
+    assert!(expanded.content.is_empty());
+}
+
+#[test]
+fn streaming_externalization_threshold_keeps_small_payload_inline() {
+    let dir = tempdir().unwrap();
+    let cache = dir.path().join("cache.json");
+    let small = "s".repeat(BLOB_EXTERNALIZE_MIN_BYTES - 1);
+    let at_threshold = "b".repeat(BLOB_EXTERNALIZE_MIN_BYTES);
+    let mut store = RecoveryStore::new(Some(cache));
+    let small_ref = store
+        .store_payload(&small, ContentType::Unknown, None, None, None)
+        .unwrap()
+        .blob_ref;
+    let big_ref = store
+        .store_payload(&at_threshold, ContentType::Unknown, None, None, None)
+        .unwrap()
+        .blob_ref;
+
+    assert_eq!(
+        store.state.blobs.get(&small_ref),
+        Some(&BlobEntry::Inline(small))
+    );
+    let Some(BlobEntry::Inline(marker)) = store.state.blobs.get(&big_ref) else {
+        panic!("threshold payload must use an inline sidecar marker");
+    };
+    assert!(marker.starts_with(BLOB_MARKER_PREFIX));
+}
+
 // ---------------------------------------------------------------------------
 // Proptest
 // ---------------------------------------------------------------------------
@@ -1174,7 +1570,7 @@ proptest! {
     fn generated_around_selectors_do_not_panic(line in any::<usize>(), radius in any::<usize>()) {
         let text = "a\nb\nc\n";
         let selector = format!("around:L{line}:{radius}");
-        let selected = select_content(text, Some(&selector), None, None, None, None);
+        let selected = select_content(text.to_string(), Some(&selector), None, None, None, None);
 
         let segments: Vec<&str> = text.split_inclusive('\n').collect();
         let num_lines = segments.len();
@@ -1192,11 +1588,11 @@ proptest! {
 }
 
 // ---------------------------------------------------------------------------
-// Cross-scheme expand (fz:// / gz:// shared blob identity) — wqw.1
+// Same-store scheme alias expand (fz:// / gz:// rewritten to tz://) — cqr.1
 // ---------------------------------------------------------------------------
 
 #[test]
-fn cross_scheme_fz_and_gz_blob_expand_byte_exact() {
+fn same_store_scheme_alias_fz_gz_blob_expand_byte_exact() {
     let (mut store, _cache, _dir) = temp_store();
     let payload = "cross-scheme payload\nline two\n";
     let stored = store
@@ -1220,26 +1616,14 @@ fn cross_scheme_fz_and_gz_blob_expand_byte_exact() {
 }
 
 #[test]
-fn cross_scheme_codemode_error_alias_expands_via_fz() {
+fn foreign_non_blob_ref_is_not_reinterpreted_as_tokenzero_key() {
     let (mut store, _cache, _dir) = temp_store();
-    let err_body = r#"{"kind":"runtime","message":"boom from plan"}"#;
-    let stored = store
-        .store_payload(err_body, ContentType::JsonConfig, None, None, None)
-        .unwrap();
-    let logical = "tz://codemode/execution/test-exec-1/error";
-    store.store_alias(logical, &stored.blob_ref).unwrap();
-
     let via_fz = "fz://codemode/execution/test-exec-1/error";
     let expanded = store.expand(via_fz, Some("raw"), None, None, None, None);
-    assert!(
-        expanded.found,
-        "fz codemode error ref must expand: {}",
-        expanded.reason
-    );
-    assert_eq!(expanded.content, err_body);
+    assert!(!expanded.found);
+    assert_eq!(expanded.reason, "unsupported-ref-kind");
     assert_eq!(expanded.ref_id, via_fz);
 }
-
 #[test]
 fn garbage_scheme_is_invalid_ref_with_full_id_preserved() {
     let (mut store, _cache, _dir) = temp_store();
@@ -1264,11 +1648,419 @@ fn canonicalize_and_is_expandable_helpers() {
         canonicalize_expand_ref("fz://blob/babc").as_deref(),
         Some("tz://blob/babc")
     );
-    assert_eq!(
-        canonicalize_expand_ref("gz://codemode/execution/x/error").as_deref(),
-        Some("tz://codemode/execution/x/error")
-    );
+    assert!(canonicalize_expand_ref("gz://codemode/execution/x/error").is_none());
     assert!(canonicalize_expand_ref("http://nope").is_none());
+}
+
+fn canonical_shared_store() -> (RecoveryStore, PathBuf, tempfile::TempDir, SharedCas) {
+    let dir = tempdir().unwrap();
+    let root = dir.path().join(".zerostack");
+    fs::create_dir_all(root.join("blobs").join("sha256")).unwrap();
+    let cache_dir = root.join("tokenzero");
+    fs::create_dir_all(&cache_dir).unwrap();
+    let cache = cache_dir.join("recovery-cache.json");
+    let cas = SharedCas::new(root.clone());
+    let store = RecoveryStore::new(Some(cache.clone()));
+    (store, cache, dir, cas)
+}
+
+// ---------------------------------------------------------------------------
+// #B/#L fragment algebra (cqr.5)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn canonical_shared_store_serves_full_refs_and_fragments() {
+    let (mut store, _cache, _dir, cas) = canonical_shared_store();
+    let payload = b"alpha
+beta
+gamma
+";
+    let full_hash = cas.publish(payload).unwrap();
+    let tz = format!("tz://blob/{full_hash}");
+    let fz = format!("fz://blob/{full_hash}");
+    let gz = format!("gz://blob/{full_hash}");
+
+    for scheme in [&tz, &fz, &gz] {
+        let expanded = store.expand(scheme, Some("raw"), None, None, None, None);
+        assert!(expanded.found);
+        assert_eq!(expanded.content.as_bytes(), payload);
+        assert_eq!(expanded.ref_id, *scheme);
+    }
+
+    let b_ref = format!("{tz}#B0-5");
+    let expanded_b = store.expand(&b_ref, Some("raw"), None, None, None, None);
+    assert!(expanded_b.found);
+    assert_eq!(expanded_b.content, "alpha");
+    assert_eq!(expanded_b.ref_id, b_ref);
+
+    let l_ref = format!("{tz}#L2-2");
+    let expanded_l = store.expand(&l_ref, Some("raw"), None, None, None, None);
+    assert!(expanded_l.found);
+    assert_eq!(
+        expanded_l.content,
+        "beta
+"
+    );
+    assert_eq!(expanded_l.ref_id, l_ref);
+}
+
+#[test]
+fn shared_cas_missing_on_disjoint_roots() {
+    let text = "alpha
+beta
+gamma
+";
+    let (mut producer, _cache, _dir, cas) = canonical_shared_store();
+    let full_hash = cas.publish(text.as_bytes()).unwrap();
+    let full_ref = format!("fz://blob/{full_hash}");
+    let (mut consumer, _consumer_cache, _consumer_dir, _consumer_cas) = canonical_shared_store();
+
+    let missing = consumer.expand(&full_ref, Some("raw"), None, None, None, None);
+    assert!(!missing.found);
+    assert_eq!(missing.reason, "shared-cas-missing");
+    assert_eq!(missing.ref_id, full_ref);
+
+    let present = producer.expand(&full_ref, Some("raw"), None, None, None, None);
+    assert!(present.found);
+    assert_eq!(present.content, text);
+    assert_eq!(present.ref_id, full_ref);
+}
+
+#[test]
+fn shared_cas_corruption_is_detected_via_fragment() {
+    let (mut store, _cache, _dir, cas) = canonical_shared_store();
+    let payload = b"alpha
+beta
+gamma
+";
+    let full_hash = cas.publish(payload).unwrap();
+    let prefix = &full_hash[..2];
+    let object_path = cas
+        .root()
+        .join("blobs")
+        .join("sha256")
+        .join(prefix)
+        .join(&full_hash);
+    fs::write(&object_path, b"corrupted").unwrap();
+
+    let fragment = format!("tz://blob/{full_hash}#B0-5");
+    let expanded = store.expand(&fragment, Some("raw"), None, None, None, None);
+    assert!(!expanded.found);
+    assert_eq!(expanded.reason, "shared-cas-corruption");
+    assert_eq!(expanded.ref_id, fragment);
+    assert!(expanded.content.is_empty());
+}
+
+#[test]
+fn shared_cas_rejects_malformed_hashes() {
+    let (mut store, _cache, _dir, _cas) = canonical_shared_store();
+    let uppercase_ref = format!("tz://blob/{}", "A".repeat(64));
+    let invalid_refs = vec!["tz://blob/abc".to_string(), uppercase_ref];
+
+    for (invalid_ref, reason) in invalid_refs
+        .into_iter()
+        .zip(["zeroref-legacy_ambiguity", "zeroref-malformed"])
+    {
+        let expanded = store.expand(&invalid_ref, Some("raw"), None, None, None, None);
+        assert!(!expanded.found);
+        assert_eq!(expanded.reason, reason);
+        assert_eq!(expanded.ref_id, invalid_ref);
+    }
+}
+
+#[test]
+fn b_fragment_returns_empty_for_zero_range() {
+    let (mut store, _cache, _dir) = temp_store();
+    let payload = "hello world\n";
+    let stored = store
+        .store_payload(payload, ContentType::Unknown, None, None, None)
+        .unwrap();
+    let b_ref = format!("{}#B0-0", stored.blob_ref);
+    let expanded = store.expand(&b_ref, Some("raw"), None, None, None, None);
+    assert!(expanded.found, "#B0-0 must succeed: {}", expanded.reason);
+    assert_eq!(expanded.content, "");
+    assert_eq!(expanded.ref_id, b_ref);
+}
+
+#[test]
+fn b_fragment_returns_first_n_bytes() {
+    let (mut store, _cache, _dir) = temp_store();
+    let payload = "hello world\n";
+    let stored = store
+        .store_payload(payload, ContentType::Unknown, None, None, None)
+        .unwrap();
+    let b_ref = format!("{}#B0-5", stored.blob_ref);
+    let expanded = store.expand(&b_ref, Some("raw"), None, None, None, None);
+    assert!(expanded.found, "#B0-5 must succeed: {}", expanded.reason);
+    assert_eq!(expanded.content, "hello");
+}
+
+#[test]
+fn b_fragment_returns_middle_slice() {
+    let (mut store, _cache, _dir) = temp_store();
+    let payload = "hello world\n";
+    let stored = store
+        .store_payload(payload, ContentType::Unknown, None, None, None)
+        .unwrap();
+    let b_ref = format!("{}#B6-11", stored.blob_ref);
+    let expanded = store.expand(&b_ref, Some("raw"), None, None, None, None);
+    assert!(expanded.found, "#B6-11 must succeed: {}", expanded.reason);
+    assert_eq!(expanded.content, "world");
+}
+
+#[test]
+fn b_fragment_reversed_returns_error() {
+    let (mut store, _cache, _dir) = temp_store();
+    let payload = "hello\n";
+    let stored = store
+        .store_payload(payload, ContentType::Unknown, None, None, None)
+        .unwrap();
+    let b_ref = format!("{}#B5-1", stored.blob_ref);
+    let expanded = store.expand(&b_ref, Some("raw"), None, None, None, None);
+    assert!(!expanded.found, "#B reversed must not succeed");
+    assert_eq!(expanded.reason, "fragment-reversed");
+    assert_eq!(expanded.ref_id, b_ref);
+    assert!(expanded.content.is_empty());
+}
+
+#[test]
+fn b_fragment_oob_returns_error() {
+    let (mut store, _cache, _dir) = temp_store();
+    let payload = "hello\n";
+    let stored = store
+        .store_payload(payload, ContentType::Unknown, None, None, None)
+        .unwrap();
+    let b_ref = format!("{}#B0-100", stored.blob_ref);
+    let expanded = store.expand(&b_ref, Some("raw"), None, None, None, None);
+    assert!(!expanded.found, "#B oob must not succeed");
+    assert!(
+        expanded.reason.starts_with("fragment-out-of-range"),
+        "got: {}",
+        expanded.reason
+    );
+    assert_eq!(expanded.ref_id, b_ref);
+    assert!(expanded.content.is_empty());
+}
+
+#[test]
+fn b_fragment_malformed_returns_error() {
+    let (mut store, _cache, _dir) = temp_store();
+    let payload = "hello\n";
+    let stored = store
+        .store_payload(payload, ContentType::Unknown, None, None, None)
+        .unwrap();
+    let b_ref = format!("{}#Babc", stored.blob_ref);
+    let expanded = store.expand(&b_ref, Some("raw"), None, None, None, None);
+    assert!(!expanded.found);
+    assert_eq!(expanded.reason, "fragment-malformed");
+}
+
+#[test]
+fn b_fragment_preserves_ref_id_in_error() {
+    let (mut store, _cache, _dir) = temp_store();
+    let payload = "hello\n";
+    let stored = store
+        .store_payload(payload, ContentType::Unknown, None, None, None)
+        .unwrap();
+    let b_ref = format!("{}#B5-1", stored.blob_ref);
+    let expanded = store.expand(&b_ref, Some("raw"), None, None, None, None);
+    assert_eq!(expanded.ref_id, b_ref);
+}
+
+#[test]
+fn b_fragment_full_range_returns_all_bytes() {
+    let (mut store, _cache, _dir) = temp_store();
+    let payload = "hello world\n";
+    let stored = store
+        .store_payload(payload, ContentType::Unknown, None, None, None)
+        .unwrap();
+    let b_ref = format!("{}#B0-{}", stored.blob_ref, payload.len());
+    let expanded = store.expand(&b_ref, Some("raw"), None, None, None, None);
+    assert!(expanded.found);
+    assert_eq!(expanded.content, payload);
+}
+
+#[test]
+fn l_fragment_returns_first_three_lines() {
+    let (mut store, _cache, _dir) = temp_store();
+    let payload = "a\nb\nc\nd\ne\n";
+    let stored = store
+        .store_payload(payload, ContentType::Unknown, None, None, None)
+        .unwrap();
+    let l_ref = format!("{}#L1-L3", stored.blob_ref);
+    let expanded = store.expand(&l_ref, Some("raw"), None, None, None, None);
+    assert!(expanded.found, "#L1-L3 must succeed: {}", expanded.reason);
+    assert_eq!(expanded.content, "a\nb\nc\n");
+}
+
+#[test]
+fn l_fragment_zero_line_returns_error() {
+    let (mut store, _cache, _dir) = temp_store();
+    let payload = "a\nb\nc\n";
+    let stored = store
+        .store_payload(payload, ContentType::Unknown, None, None, None)
+        .unwrap();
+    let l_ref = format!("{}#L0", stored.blob_ref);
+    let expanded = store.expand(&l_ref, Some("raw"), None, None, None, None);
+    assert!(!expanded.found, "#L0 must not succeed");
+    assert_eq!(expanded.reason, "fragment-malformed");
+    assert_eq!(expanded.ref_id, l_ref);
+}
+
+#[test]
+fn l_fragment_reversed_returns_error() {
+    let (mut store, _cache, _dir) = temp_store();
+    let payload = "a\nb\nc\n";
+    let stored = store
+        .store_payload(payload, ContentType::Unknown, None, None, None)
+        .unwrap();
+    let l_ref = format!("{}#L5-L2", stored.blob_ref);
+    let expanded = store.expand(&l_ref, Some("raw"), None, None, None, None);
+    assert!(!expanded.found, "#L reversed must not succeed");
+    assert_eq!(expanded.reason, "fragment-reversed");
+    assert_eq!(expanded.ref_id, l_ref);
+}
+
+#[test]
+fn l_fragment_oob_returns_error() {
+    let (mut store, _cache, _dir) = temp_store();
+    let payload = "a\nb\nc\n";
+    let stored = store
+        .store_payload(payload, ContentType::Unknown, None, None, None)
+        .unwrap();
+    let l_ref = format!("{}#L1-L100", stored.blob_ref);
+    let expanded = store.expand(&l_ref, Some("raw"), None, None, None, None);
+    assert!(!expanded.found, "#L oob must not succeed");
+    assert!(
+        expanded.reason.starts_with("window-out-of-range"),
+        "got: {}",
+        expanded.reason
+    );
+}
+
+#[test]
+fn l_fragment_empty_file_returns_error() {
+    let (mut store, _cache, _dir) = temp_store();
+    let payload = "";
+    let stored = store
+        .store_payload(payload, ContentType::Unknown, None, None, None)
+        .unwrap();
+    let l_ref = format!("{}#L1", stored.blob_ref);
+    let expanded = store.expand(&l_ref, Some("raw"), None, None, None, None);
+    assert!(!expanded.found, "#L1 on empty file must not succeed");
+    assert!(
+        expanded.reason.starts_with("window-out-of-range"),
+        "got: {}",
+        expanded.reason
+    );
+}
+
+#[test]
+fn l_fragment_preserves_crlf() {
+    let (mut store, _cache, _dir) = temp_store();
+    let payload = "a\r\nb\r\nc\r\n";
+    let stored = store
+        .store_payload(payload, ContentType::Unknown, None, None, None)
+        .unwrap();
+    let l_ref = format!("{}#L1-L2", stored.blob_ref);
+    let expanded = store.expand(&l_ref, Some("raw"), None, None, None, None);
+    assert!(
+        expanded.found,
+        "#L1-L2 CRLF must succeed: {}",
+        expanded.reason
+    );
+    assert_eq!(expanded.content, "a\r\nb\r\n");
+}
+
+#[test]
+fn l_fragment_preserves_trailing_newline() {
+    let (mut store, _cache, _dir) = temp_store();
+    let payload = "a\nb\n";
+    let stored = store
+        .store_payload(payload, ContentType::Unknown, None, None, None)
+        .unwrap();
+    let l_ref = format!("{}#L1-L2", stored.blob_ref);
+    let expanded = store.expand(&l_ref, Some("raw"), None, None, None, None);
+    assert!(expanded.found);
+    assert_eq!(expanded.content, "a\nb\n");
+    assert!(
+        expanded.content.ends_with('\n'),
+        "trailing newline must be preserved"
+    );
+}
+
+#[test]
+fn l_fragment_single_line_returns_one_line() {
+    let (mut store, _cache, _dir) = temp_store();
+    let payload = "a\nb\nc\n";
+    let stored = store
+        .store_payload(payload, ContentType::Unknown, None, None, None)
+        .unwrap();
+    let l_ref = format!("{}#L2", stored.blob_ref);
+    let expanded = store.expand(&l_ref, Some("raw"), None, None, None, None);
+    assert!(expanded.found);
+    assert_eq!(expanded.content, "b\n");
+}
+
+#[test]
+fn unknown_fragment_kind_returns_error() {
+    let (mut store, _cache, _dir) = temp_store();
+    let payload = "hello\n";
+    let stored = store
+        .store_payload(payload, ContentType::Unknown, None, None, None)
+        .unwrap();
+    let x_ref = format!("{}#X1-3", stored.blob_ref);
+    let expanded = store.expand(&x_ref, Some("raw"), None, None, None, None);
+    assert!(!expanded.found);
+    assert_eq!(expanded.reason, "fragment-unknown-kind");
+}
+
+#[test]
+fn duplicate_fragment_returns_error() {
+    let (mut store, _cache, _dir) = temp_store();
+    let payload = "hello\n";
+    let stored = store
+        .store_payload(payload, ContentType::Unknown, None, None, None)
+        .unwrap();
+    let dup_ref = format!("{}#B0-3#L1-2", stored.blob_ref);
+    let expanded = store.expand(&dup_ref, Some("raw"), None, None, None, None);
+    assert!(!expanded.found);
+    assert_eq!(expanded.reason, "fragment-duplicate");
+}
+
+#[test]
+fn b_fragment_no_fallback_to_full_payload() {
+    let (mut store, _cache, _dir) = temp_store();
+    let payload = "byte-range payload\nline two\n";
+    let stored = store
+        .store_payload(payload, ContentType::Unknown, None, None, None)
+        .unwrap();
+    // #B0-1 should return only 1 byte, not the full payload
+    let b_ref = format!("{}#B0-1", stored.blob_ref);
+    let expanded = store.expand(&b_ref, Some("raw"), None, None, None, None);
+    assert!(expanded.found);
+    assert_eq!(expanded.content, "b");
+    assert_ne!(expanded.content, payload);
+}
+
+// ---------------------------------------------------------------------------
+// Negative fixture: valid foreign full SHA-256 hash absent from TokenZero
+// ---------------------------------------------------------------------------
+
+#[test]
+fn same_store_scheme_alias_foreign_full_hash_absent_returns_missing() {
+    let (mut store, _cache, _dir) = temp_store();
+    // A valid 64-hex-char SHA-256 that was never stored in TokenZero.
+    // Simulates a ref produced by a foreign engine (FSZero/GraphZero) through
+    // its own store — TokenZero cannot resolve it (same-store alias only).
+    let foreign_ref = "fz://blob/abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789";
+    let expanded = store.expand(foreign_ref, Some("raw"), None, None, None, None);
+    assert!(!expanded.found);
+    assert_eq!(expanded.reason, "ref-not-found");
+    assert_eq!(
+        expanded.ref_id, foreign_ref,
+        "foreign ref must be preserved in full (no truncation)"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -1452,5 +2244,220 @@ fn windowed_expand_visible_tokens_much_less_than_full() {
     assert!(
         window_tokens * 3 < full_tokens,
         "window {window_tokens} vs full {full_tokens}"
+    );
+}
+
+#[test]
+fn classify_ref_maps_kind_and_content_type() {
+    assert_eq!(
+        classify_ref("tz://file/abc", Some(ContentType::Unknown)),
+        ContentClass::SourceFile
+    );
+    assert_eq!(
+        classify_ref("tz://search/abc", Some(ContentType::Unknown)),
+        ContentClass::SearchHits
+    );
+    assert_eq!(
+        classify_ref("tz://unit/abc", Some(ContentType::Diff)),
+        ContentClass::Diff
+    );
+    assert_eq!(
+        classify_ref("tz://unit/abc", Some(ContentType::ShellOutput)),
+        ContentClass::ShellOutput
+    );
+    assert_eq!(
+        classify_ref("tz://blob/abc", Some(ContentType::Code)),
+        ContentClass::SourceFile
+    );
+    assert_eq!(
+        classify_ref("tz://blob/abc", Some(ContentType::Diff)),
+        ContentClass::Diff
+    );
+    assert_eq!(
+        classify_ref("tz://blob/abc", Some(ContentType::ShellOutput)),
+        ContentClass::ShellOutput
+    );
+    assert_eq!(
+        classify_ref("tz://blob/abc", Some(ContentType::Markdown)),
+        ContentClass::Doc
+    );
+    assert_eq!(
+        classify_ref("tz://blob/abc", Some(ContentType::Unknown)),
+        ContentClass::BinaryPreview
+    );
+    assert_eq!(
+        classify_ref("tz://codemode/execution/x/code", None),
+        ContentClass::Unknown
+    );
+}
+
+#[test]
+fn export_class_stats_reports_per_class_rates() {
+    let dir = tempdir().unwrap();
+    with_ref_index_env(dir.path(), true, || {
+        let store_path = dir.path().join("store.json");
+        let refs = vec![
+            "tz://blob/codeblob".to_string(),
+            "tz://blob/diffblob".to_string(),
+            "tz://blob/diffblob".to_string(), // duplicate store entry
+            "tz://blob/unknownblob".to_string(),
+        ];
+        let mut classes = BTreeMap::new();
+        classes.insert("tz://blob/codeblob".to_string(), ContentClass::SourceFile);
+        classes.insert("tz://blob/diffblob".to_string(), ContentClass::Diff);
+        append_blob_refs_to_ref_index(&store_path, &refs, Some(&classes));
+
+        record_ref_index_expanded(&store_path, "tz://blob/codeblob", ContentClass::SourceFile);
+
+        let stats = export_class_stats();
+        let classes = stats["classes"].as_array().unwrap();
+        let source = classes
+            .iter()
+            .find(|c| c["content_class"] == "SourceFile")
+            .unwrap();
+        assert_eq!(source["total"], 1);
+        assert_eq!(source["expanded"], 1);
+        assert_eq!(source["rate"], 1.0);
+        let diff = classes
+            .iter()
+            .find(|c| c["content_class"] == "Diff")
+            .unwrap();
+        assert_eq!(diff["total"], 1);
+        assert_eq!(diff["expanded"], 0);
+        let binary = classes
+            .iter()
+            .find(|c| c["content_class"] == "BinaryPreview")
+            .unwrap();
+        assert_eq!(binary["total"], 1);
+        assert_eq!(binary["expanded"], 0);
+        assert_eq!(stats["total_refs"], 3);
+        assert_eq!(stats["total_expanded"], 1);
+    });
+}
+
+#[test]
+fn ref_index_records_content_class_on_persist() {
+    let index_dir = tempdir().unwrap();
+    with_ref_index_env(index_dir.path(), true, || {
+        let dir = tempdir().unwrap();
+        let cache = dir.path().join("cache.json");
+        let mut store = RecoveryStore::new(Some(cache));
+        let stored = store
+            .store_payload("fn main() {}", ContentType::Code, None, None, None)
+            .unwrap();
+
+        let shard = ref_index_shard_path(index_dir.path(), &stored.blob_ref);
+        let text = fs::read_to_string(shard).unwrap();
+        let line = text.lines().find(|l| l.contains(&stored.blob_ref)).unwrap();
+        assert!(line.contains("SourceFile"));
+        assert!(line.contains("\"expanded\":false"));
+    });
+}
+
+// ---------------------------------------------------------------------------
+// ZeroRef v1 contract
+// ---------------------------------------------------------------------------
+
+const FULL_HASH: &str = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
+
+#[test]
+fn zeroref_v1_round_trips_canonical_blob_refs() {
+    for (scheme, expected) in [("tz", "tz"), ("fz", "fz"), ("gz", "gz")] {
+        let input = format!("{scheme}://blob/{FULL_HASH}");
+        let parsed = parse_zeroref_v1_blob(&input, None).unwrap();
+        assert_eq!(parsed.scheme, expected);
+        assert_eq!(parsed.hash, FULL_HASH);
+        assert!(parsed.fragment.is_none());
+    }
+}
+
+#[test]
+fn zeroref_v1_round_trips_fragment_selectors() {
+    let line_ref = format!("tz://blob/{FULL_HASH}#L2-L5");
+    let parsed = parse_zeroref_v1_blob(&line_ref, None).unwrap();
+    assert_eq!(
+        parsed.fragment,
+        Some(ZeroRefFragment::Line { start: 2, end: 5 })
+    );
+
+    let byte_ref = format!("fz://blob/{FULL_HASH}#B0-64");
+    let parsed = parse_zeroref_v1_blob(&byte_ref, Some(64)).unwrap();
+    assert_eq!(
+        parsed.fragment,
+        Some(ZeroRefFragment::Byte { start: 0, end: 64 })
+    );
+
+    let empty_byte_ref = format!("gz://blob/{FULL_HASH}#B7-7");
+    let parsed = parse_zeroref_v1_blob(&empty_byte_ref, Some(128)).unwrap();
+    assert_eq!(
+        parsed.fragment,
+        Some(ZeroRefFragment::Byte { start: 7, end: 7 })
+    );
+}
+
+#[test]
+fn zeroref_v1_rejects_golden_negative_vectors() {
+    let cases = vec![
+        (
+            "tz://blob/ba_e3b0c44298fc1c149",
+            ZeroRefError::LegacyAmbiguity,
+        ),
+        (
+            "tz://blob/E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855",
+            ZeroRefError::Malformed,
+        ),
+        (
+            "tz://blob/e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b85g",
+            ZeroRefError::Malformed,
+        ),
+        (
+            "tz://blob/e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855/extra",
+            ZeroRefError::Malformed,
+        ),
+        ("tz://blob/", ZeroRefError::Malformed),
+        (
+            "tz://blob/e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855#B10-5",
+            ZeroRefError::Malformed,
+        ),
+        (
+            "tz://blob/e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855#L0-L3",
+            ZeroRefError::Malformed,
+        ),
+        (
+            "tz://file/e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            ZeroRefError::Unsupported,
+        ),
+    ];
+    for (input, expected) in cases {
+        let err = parse_zeroref_v1_blob(input, None).unwrap_err();
+        assert_eq!(err, expected, "{input} should yield {expected:?}");
+    }
+}
+
+#[test]
+fn zeroref_v1_byte_oob_respects_byte_length() {
+    let input = format!("tz://blob/{FULL_HASH}#B0-100");
+    assert_eq!(
+        parse_zeroref_v1_blob(&input, Some(64)).unwrap_err(),
+        ZeroRefError::Malformed
+    );
+    assert_eq!(
+        parse_zeroref_v1_blob(&input, Some(100)).unwrap().fragment,
+        Some(ZeroRefFragment::Byte { start: 0, end: 100 })
+    );
+    assert!(parse_zeroref_v1_blob(&input, None).is_ok());
+}
+
+#[test]
+fn zeroref_v1_legacy_short_ids_parsed_by_existing_parse_ref() {
+    let short = "tz://blob/ba_e3b0c44298fc1c149";
+    assert_eq!(
+        parse_zeroref_v1_blob(short, None).unwrap_err(),
+        ZeroRefError::LegacyAmbiguity
+    );
+    let canonicalized = canonicalize_expand_ref(short).unwrap();
+    assert!(
+        parse_ref(&canonicalized).is_some(),
+        "legacy short IDs remain parseable via existing parse_ref"
     );
 }

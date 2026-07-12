@@ -208,6 +208,12 @@ pub fn resource_specs() -> Vec<ResourceSpec> {
             "application/json",
         ),
         (
+            "resource://tokenzero/session-boot",
+            "TokenZero session boot",
+            "Read the bounded manifest+delta boot capsule and component token attribution.",
+            "application/json",
+        ),
+        (
             "resource://tokenzero/metrics",
             "TokenZero tool metrics",
             "Read per-tool call counts, error counts, slow-call counts, and latency (this session plus cross-session cumulative).",
@@ -498,7 +504,7 @@ pub(crate) fn canonical_tool_specs() -> Vec<ToolSpecSeed> {
             cluster: "material",
             summary: "Recover exact bytes from a tz://, fz://, or gz:// ref, optionally narrowed by line range, selector, or symbol.",
             doc: tool_description(
-                "Recover exact content from `tz://`, `fz://`, or `gz://` refs (shared blob identity) with optional ranges or anchors.",
+                "Recover exact content from `tz://`, `fz://`, or `gz://` refs (same-store scheme alias; cross-engine expansion pending ZeroRef v1) with optional ranges or anchors.",
                 "ref: copy a ref returned by read/find/tree/shell/ingest or sibling ZeroStack engines. selector/start_line/end_line: use only when narrowing recovery.",
                 "Use whenever compact output omitted needed detail. NOT for arbitrary file paths; use `read`.",
                 "Do expand refs instead of re-running expensive commands. Do use line ranges for large file refs. Don't invent refs.",
@@ -570,7 +576,9 @@ pub(crate) fn canonical_tool_specs() -> Vec<ToolSpecSeed> {
         },
         ToolSpecSeed {
             name: "tz_report_tool_issue",
-            cluster: "execution",
+            // Reports field issues for CodeMode/zero_execute surfaces; keeping
+            // it out of "execution" holds that agent menu at seven entries.
+            cluster: "codemode",
             summary: "Record a field issue against a CodeMode/TokenZero tool name (accepts zero_execute).",
             doc: tool_description(
                 "Record a field issue for expand/root/shell/CodeMode failures without leaving the harness.",
@@ -714,48 +722,6 @@ fn fresh_property() -> Value {
         "default": false,
         "description": "Bypass session dedup/diff for this call and always return the full render."
     })
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn codemode_recovery_tools_are_stably_advertised() {
-        let healthy =
-            tool_specs_for_filter_with_health(None, true, McpToolSurface::CodeMode, false);
-        let unhealthy =
-            tool_specs_for_filter_with_health(None, true, McpToolSurface::CodeMode, true);
-        let healthy_names = healthy.iter().map(|spec| &spec.name).collect::<Vec<_>>();
-        let unhealthy_names = unhealthy.iter().map(|spec| &spec.name).collect::<Vec<_>>();
-        assert_eq!(healthy_names, unhealthy_names);
-        assert!(
-            healthy_names
-                .iter()
-                .any(|name| name.as_str() == "tz_expand")
-        );
-        assert!(healthy_names.iter().any(|name| name.as_str() == "tz_read"));
-        assert!(crate::surface_health::surface_includes(
-            McpToolSurface::CodeMode,
-            "tz_expand"
-        ));
-    }
-
-    #[test]
-    fn execute_schema_exposes_bounded_root_and_wall_controls() {
-        let specs = canonical_tool_specs();
-        let execute = specs
-            .iter()
-            .find(|spec| spec.name == "tz_execute_code")
-            .unwrap();
-        let properties = &execute.input_schema["properties"];
-        assert!(properties.get("root").is_some());
-        assert!(properties.get("allowed_roots").is_some());
-        assert_eq!(
-            properties["limits"]["properties"]["hard_max_wall_ms"]["maximum"].as_u64(),
-            Some(crate::CodeModeLimits::default().hard_max_wall_ms)
-        );
-    }
 }
 
 fn read_schema() -> Value {
@@ -926,7 +892,7 @@ fn text_schema(description: &str) -> Value {
 fn expand_schema() -> Value {
     object_schema(
         json!({
-            "ref": {"type": "string", "pattern": "^(tz|fz|gz)://", "description": "Exact recovery ref (tz://, fz://, or gz:// — shared blob identity)."},
+            "ref": {"type": "string", "pattern": "^(tz|fz|gz)://", "description": "Exact recovery ref (tz://, fz://, or gz:// — same-store scheme alias; cross-engine expansion pending ZeroRef v1)."},
             "selector": {"type": "string", "description": "Recovery-store-specific selector."},
             "start_line": line_property(),
             "end_line": line_property(),
@@ -975,4 +941,46 @@ pub(crate) fn tool_clusters() -> Value {
             .map(|(cluster, tools)| json!({"cluster": cluster, "tools": tools}))
             .collect::<Vec<_>>()
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn codemode_recovery_tools_are_stably_advertised() {
+        let healthy =
+            tool_specs_for_filter_with_health(None, true, McpToolSurface::CodeMode, false);
+        let unhealthy =
+            tool_specs_for_filter_with_health(None, true, McpToolSurface::CodeMode, true);
+        let healthy_names = healthy.iter().map(|spec| &spec.name).collect::<Vec<_>>();
+        let unhealthy_names = unhealthy.iter().map(|spec| &spec.name).collect::<Vec<_>>();
+        assert_eq!(healthy_names, unhealthy_names);
+        assert!(
+            healthy_names
+                .iter()
+                .any(|name| name.as_str() == "tz_expand")
+        );
+        assert!(healthy_names.iter().any(|name| name.as_str() == "tz_read"));
+        assert!(crate::surface_health::surface_includes(
+            McpToolSurface::CodeMode,
+            "tz_expand"
+        ));
+    }
+
+    #[test]
+    fn execute_schema_exposes_bounded_root_and_wall_controls() {
+        let specs = canonical_tool_specs();
+        let execute = specs
+            .iter()
+            .find(|spec| spec.name == "tz_execute_code")
+            .unwrap();
+        let properties = &execute.input_schema["properties"];
+        assert!(properties.get("root").is_some());
+        assert!(properties.get("allowed_roots").is_some());
+        assert_eq!(
+            properties["limits"]["properties"]["hard_max_wall_ms"]["maximum"].as_u64(),
+            Some(crate::CodeModeLimits::default().hard_max_wall_ms)
+        );
+    }
 }

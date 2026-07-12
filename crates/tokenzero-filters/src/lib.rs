@@ -390,8 +390,219 @@ fn has_shell_operators(command: &str) -> bool {
 }
 
 fn unsafe_reason(command: &str) -> Option<String> {
-    let parts = split_words(command);
-    let first = parts.first().map(String::as_str).unwrap_or_default();
+    for node in parse_shell_commands(command) {
+        if let Some(reason) = unsafe_reason_for_words(&node.words) {
+            return Some(reason);
+        }
+        for nested in node.nested_commands {
+            if let Some(reason) = unsafe_reason(&nested) {
+                return Some(reason);
+            }
+        }
+        if is_shell_interpreter(&node.words) {
+            if let Some(payload) = shell_command_payload(&node.words) {
+                if let Some(reason) = unsafe_reason(payload) {
+                    return Some(reason);
+                }
+            }
+        }
+    }
+    None
+}
+
+#[derive(Debug, Default, PartialEq, Eq)]
+struct ShellCommand {
+    words: Vec<String>,
+    nested_commands: Vec<String>,
+}
+
+/// Parse enough POSIX shell structure to identify every executable position.
+/// Words remain opaque data; only operators create new command positions, while
+/// command substitutions are returned for recursive classification.
+fn parse_shell_commands(command: &str) -> Vec<ShellCommand> {
+    let mut commands = vec![ShellCommand::default()];
+    let mut word = String::new();
+    let mut quote = None;
+    let mut escaped = false;
+    let chars: Vec<char> = command.chars().collect();
+    let mut index = 0;
+
+    while index < chars.len() {
+        let ch = chars[index];
+        if escaped {
+            word.push(ch);
+            escaped = false;
+            index += 1;
+            continue;
+        }
+        if ch == '\\' && quote != Some('\'') && !cfg!(windows) {
+            escaped = true;
+            index += 1;
+            continue;
+        }
+        if quote == Some('\'') {
+            if ch == '\'' {
+                quote = None;
+            } else {
+                word.push(ch);
+            }
+            index += 1;
+            continue;
+        }
+        if ch == '\'' {
+            quote = Some('\'');
+            index += 1;
+            continue;
+        }
+        if ch == '"' {
+            quote = if quote == Some('"') { None } else { Some('"') };
+            index += 1;
+            continue;
+        }
+        if ch == '$' && chars.get(index + 1) == Some(&'(') {
+            flush_shell_word(&mut commands, &mut word);
+            let (nested, next) = take_parenthesized_command(&chars, index + 2);
+            commands
+                .last_mut()
+                .expect("parser always has a command")
+                .nested_commands
+                .push(nested);
+            index = next;
+            continue;
+        }
+        if ch == '`' {
+            flush_shell_word(&mut commands, &mut word);
+            let (nested, next) = take_backtick_command(&chars, index + 1);
+            commands
+                .last_mut()
+                .expect("parser always has a command")
+                .nested_commands
+                .push(nested);
+            index = next;
+            continue;
+        }
+        if quote.is_none() && ch.is_whitespace() {
+            flush_shell_word(&mut commands, &mut word);
+            if matches!(ch, '\n' | '\r') {
+                start_shell_command(&mut commands);
+            }
+            index += 1;
+            continue;
+        }
+        if quote.is_none() && matches!(ch, ';' | '|' | '&' | '!' | '(' | ')') {
+            flush_shell_word(&mut commands, &mut word);
+            start_shell_command(&mut commands);
+            index += 1;
+            if chars.get(index) == Some(&ch) {
+                index += 1;
+            }
+            continue;
+        }
+        word.push(ch);
+        index += 1;
+    }
+    if escaped {
+        word.push('\\');
+    }
+    flush_shell_word(&mut commands, &mut word);
+    commands.retain(|node| !node.words.is_empty() || !node.nested_commands.is_empty());
+    commands
+}
+
+fn flush_shell_word(commands: &mut [ShellCommand], word: &mut String) {
+    if !word.is_empty() {
+        commands
+            .last_mut()
+            .expect("parser always has a command")
+            .words
+            .push(std::mem::take(word));
+    }
+}
+
+fn start_shell_command(commands: &mut Vec<ShellCommand>) {
+    if commands
+        .last()
+        .is_some_and(|node| !node.words.is_empty() || !node.nested_commands.is_empty())
+    {
+        commands.push(ShellCommand::default());
+    }
+}
+
+fn take_parenthesized_command(chars: &[char], mut index: usize) -> (String, usize) {
+    let start = index;
+    let mut depth = 1;
+    let mut quote = None;
+    let mut escaped = false;
+    while index < chars.len() {
+        let ch = chars[index];
+        if escaped {
+            escaped = false;
+        } else if ch == '\\' && quote != Some('\'') {
+            escaped = true;
+        } else if quote == Some('\'') {
+            if ch == '\'' {
+                quote = None;
+            }
+        } else if ch == '\'' {
+            quote = Some('\'');
+        } else if ch == '"' {
+            quote = if quote == Some('"') { None } else { Some('"') };
+        } else if quote.is_none() && ch == '(' {
+            depth += 1;
+        } else if quote.is_none() && ch == ')' {
+            depth -= 1;
+            if depth == 0 {
+                return (chars[start..index].iter().collect(), index + 1);
+            }
+        }
+        index += 1;
+    }
+    (chars[start..].iter().collect(), chars.len())
+}
+
+fn take_backtick_command(chars: &[char], mut index: usize) -> (String, usize) {
+    let start = index;
+    let mut escaped = false;
+    while index < chars.len() {
+        let ch = chars[index];
+        if escaped {
+            escaped = false;
+        } else if ch == '\\' {
+            escaped = true;
+        } else if ch == '`' {
+            return (chars[start..index].iter().collect(), index + 1);
+        }
+        index += 1;
+    }
+    (chars[start..].iter().collect(), chars.len())
+}
+
+fn is_shell_interpreter(words: &[String]) -> bool {
+    words.first().is_some_and(|word| {
+        let executable = word.rsplit('/').next().unwrap_or(word);
+        matches!(executable, "sh" | "bash" | "dash" | "zsh" | "ksh")
+    })
+}
+
+fn shell_command_payload(words: &[String]) -> Option<&str> {
+    words.windows(2).find_map(|pair| {
+        let flag = pair[0].as_str();
+        (flag == "-c"
+            || (flag.starts_with('-')
+                && !flag.starts_with("--")
+                && flag[1..].chars().any(|ch| ch == 'c')))
+        .then_some(pair[1].as_str())
+    })
+}
+
+fn unsafe_reason_for_words(parts: &[String]) -> Option<String> {
+    let first = parts
+        .first()
+        .map(String::as_str)
+        .unwrap_or_default()
+        .rsplit('/')
+        .next()
+        .unwrap_or_default();
     let second = parts.get(1).map(String::as_str).unwrap_or_default();
     if is_destructive_first(first) {
         return Some("unsafe destructive mutation left unmodified".to_string());
@@ -434,7 +645,7 @@ fn unsafe_reason(command: &str) -> Option<String> {
     if is_git_mutation(first, second) {
         return Some("git mutation left unmodified".to_string());
     }
-    if is_docker_mutation(first, second, &parts) {
+    if is_docker_mutation(first, second, parts) {
         return Some("docker mutation left unmodified".to_string());
     }
     if is_kubectl_mutation(first, second) {
