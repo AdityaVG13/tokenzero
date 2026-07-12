@@ -5,6 +5,102 @@ All notable changes to TokenZero will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.3.0] -- 2026-07-12
+
+### Added
+- **ZeroRef v1 contract**: portable blob refs of the form
+  `(tz|fz|gz)://blob/<sha256>[#fragment]` with full-hash identity, digest
+  verification before fragment selection, and a stable error taxonomy
+  (`malformed`, `missing`, `corruption`, `unsupported`, …). Spec and golden
+  vectors live under `docs/zeroref-v1-contract.md`.
+- **Shared-CAS adapter**: canonical content-addressed storage for ZeroRef v1
+  blobs, with reachability/pin schema v1 frozen so GC and multi-engine
+  expand share one truth.
+- **Cross-engine expand**: `fz://` and `gz://` blob refs minted by fszero or
+  graphzero expand via sibling engine stores under the same unified
+  `.zerostack` root when the local shared CAS misses.
+- **Strict fragment algebra**: typed `#Bstart-end` (byte, half-open) and
+  `#Lstart-end` (line, inclusive) selectors with structured OOB errors.
+- **Capsule-default expand**: expand returns preview + ref by default instead
+  of shipping the full body into the model context.
+- **Session-delta protocol**: watermark, tombstones, and byte telemetry so
+  multi-turn sessions only ship what changed (`tokenzero.ledger.v1` curves
+  and observatory evidence included).
+- **Queryable session ledger** (`tokenzero.ledger.v1`): fail-open JSONL cost
+  stream with visible/raw/prevented token mass, rotation, and CLI queries for
+  repo/window cost, version delta, and per-agent spend. Pulse CLI aggregates
+  per-session cost.
+- **Sub-100-token manifest+delta session boot**: TZ/1 sidecars, demand-paged
+  session memory, session-boot MCP resource and `tokenzero session-open` CLI
+  (measured ~21 tokens on large corpora).
+- **Loss-free working-set span eviction**: LRU-bounded resident set with
+  TZ-EVICT markers, demand-paged rehydration, and byte-exact expand
+  round-trips.
+- **BlobEntry Inline/FileRef storage**: large reads store path+fingerprint
+  pointers instead of duplicating payloads; FileRef verifies content on
+  rehydrate.
+- **Pay-once user ref index + cross-session memory**: same content across
+  cache roots resolves to one user CAS object; privacy/scoping audit
+  documents isolation boundaries.
+- **Crash-safe plan-scoped mutation journaling** with bounded journal segment
+  rotation (sealed generations + snapshot compaction).
+- **CodeMode heavy-execution containment**: machine-wide permit, bounded
+  queue, identical-plan dedup, and tracked lifecycle for background shell
+  jobs.
+- **Bounded session recipe registry**: `zero.register` / `zero.run` /
+  `zero.list` for named parameterized plans with size and mutation gates.
+- **Per-model tokenizer registry** and boundary-aware packing (provider-
+  qualified model ids; residual budget packed to token boundaries).
+- **Telemetry**: granular envelope token attribution, prevented-read bytes,
+  prefix-cache hit rate, expand accounting contracts.
+- **Legacy ref migration**: command + complete lifecycle for pre-v1 refs.
+- **Portable engine binary discovery** and PR18 capability descriptor as sole
+  tool/ZeroRef policy owner.
+- **Bench harnesses**: ZeroRef 3x3 binary/store conformance matrix, ledger
+  regression gate, byte-stable prefix suite, delta-encoding evidence,
+  expand latency by size class, competitor bake-off / 1M-line navigation
+  frameworks, elision predictor evaluation.
+
+### Changed
+- **MCP policy ownership**: single owner for CodeMode list/call; tools/call
+  unified behind `gate_tools_call`; Classic surface gate restored.
+- **Store resolution**: single workspace store resolver for CLI and MCP;
+  recovery cache isolated per call root; store-root precedence tests frozen.
+- **Expand surface**: `parse_ref` accepts only `tz://` after canonicalize for
+  the portable path; sibling-engine fallback handles `fz://`/`gz://`.
+- **Read path**: source-backed admission for large files cuts peak RSS;
+  chunked bounded-memory expand reads; pulse lock metadata unfsynced
+  (~halved per-request p50 latency on read/find/expand).
+- **Binary resolution**: typed `BinaryResolution` Result; require executable
+  bit for env/PATH and well-known binaries.
+- **Write recovery ladder** on CodeMode edit failure with QuickJS deny ladder
+  parity.
+
+### Fixed
+- Cross-engine `fz://`/`gz://` expand no longer fails with ref-not-found when
+  the blob lives only in a sibling engine store under the unified root.
+- Evict livelock: victim selection no longer pins CAS-reachable refs forever
+  after `drop_ref`.
+- Relative CLI search paths resolve against the call root, not cwd.
+- Allowlist escape for MCP-supplied roots; expand health signal on
+  zeroref-malformed; search backend-parity keys.
+- Shell mutation classification by command position (data is not intent);
+  orchestration env scrubbed from user command children.
+- SurfaceHealth shared across plan engines; crash-only expand unlocked when
+  surface unhealthy; default recovery cache shared with expand.
+- Journal lowering scope, exact explicit expand, routed execution roots.
+- Observatory ref regex so ledger replay emits full expand accounting.
+- Tokenizer metadata matches provider-qualified model ids
+  (`openai/gpt-4o…`).
+- `tz_report_tool_issue` menu cluster restored to the seven-entry jsonrpc
+  contract; accepts `zero_execute`.
+
+### Security / privacy
+- User-scoped session memory and ref index with 0700/0600 permissions;
+  cross-user isolation via home directory; documented threat model and
+  known gaps in `docs/privacy-and-scoping.md`.
+- h2c-style orchestration env scrub on user-command spawns.
+
 ## [1.2.0] -- 2026-07-05
 
 ### Added

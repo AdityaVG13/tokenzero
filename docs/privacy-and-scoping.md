@@ -2,7 +2,7 @@
 
 **Date**: 2026-07-11
 **Scope**: Cross-session content-addressed conversation memory (`tokenzero-3jx`, `tokenzero-fpc`, `tokenzero-rdl`)
-**Version**: TokenZero 1.2.0
+**Version**: TokenZero 1.3.0
 
 ---
 
