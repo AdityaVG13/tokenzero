@@ -279,7 +279,7 @@ class McpClient:
 
 def find_ref(value: object) -> str | None:
     if isinstance(value, str):
-        match = re.search(r"(?:tz|fz)://[^\\s]+", value)
+        match = re.search(r"(?:tz|fz)://\S+", value)
         if match:
             return match.group(0).rstrip(".,;)")
     if isinstance(value, dict):
