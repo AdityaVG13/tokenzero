@@ -20,6 +20,9 @@ use thiserror::Error;
 use tokenzero_core::{ContentType, count_tokens, error_block, id_for, sha256_hex, symbol_block};
 
 use crate::shared_cas::{SharedCas, SharedCasError};
+use crate::telemetry::CrossEngineTelemetry;
+
+pub mod telemetry;
 
 pub mod boot;
 pub mod embedded_store;
@@ -693,6 +696,7 @@ pub struct RecoveryStore {
     pub recovery_tokens: usize,
     /// Count of legacy short-ref lookups resolved via alias this session.
     pub legacy_read_count: usize,
+    pub telemetry: CrossEngineTelemetry,
     /// Transient set of blob refs pending deletion. Applied by persist() and
     /// cleared only after successful authoritative snapshot write.
     pending_blob_deletions: BTreeSet<String>,
@@ -773,6 +777,7 @@ impl RecoveryStore {
             recovery_count: 0,
             recovery_tokens: 0,
             legacy_read_count: 0,
+            telemetry: CrossEngineTelemetry::default(),
             pending_blob_deletions: BTreeSet::new(),
             pending_alias_deletions: BTreeSet::new(),
             payload_memo: None,
