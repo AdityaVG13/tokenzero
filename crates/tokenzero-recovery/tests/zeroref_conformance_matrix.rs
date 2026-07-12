@@ -8,8 +8,9 @@
 //!
 //! Run from the tokenzero repo root:
 //!     env -u TOKENZERO_CACHE_PATH -u ZEROSTACK_STORE_ROOT \
-//!       CARGO_BUILD_JOBS=2 \
-//!       cargo test -p tokenzero-recovery --test zeroref_conformance_matrix -- --test-threads=1
+//!       CARGO_BUILD_JOBS=1 FSZERO_BIN=/path/to/fszero \
+//!       GRAPHZERO_BIN=/path/to/graphzero TOKENZERO_BIN=/path/to/tokenzero \
+//!       cargo test -p tokenzero-recovery --test zeroref_conformance_matrix -- --ignored --test-threads=1
 
 use std::collections::BTreeMap;
 use std::env;
@@ -18,12 +19,12 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::SystemTime;
 
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use tempfile::TempDir;
 
-use tokenzero_recovery::RecoveryStore;
 use tokenzero_recovery::shared_cas::SharedCas;
+use tokenzero_recovery::RecoveryStore;
 
 const SCHEMA: &str = "zeroref-conformance-evidence/v1";
 const ZEROREF_VERSION: &str = "v1";
@@ -106,14 +107,6 @@ fn discover_binary(engine: &'static str, env_var: &str, default: &str) -> Binary
         version,
         commit,
     }
-}
-
-fn repo_root() -> PathBuf {
-    PathBuf::from(env::var_os("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR"))
-        .join("..")
-        .join("..")
-        .canonicalize()
-        .expect("repo root")
 }
 
 fn clean_env(cmd: &mut Command) {
@@ -581,7 +574,7 @@ fn run_concurrent_writes(harness: &Harness) -> Value {
                     let mut cmd = Command::new(
                         env::var_os("FSZERO_BIN")
                             .map(PathBuf::from)
-                            .unwrap_or_else(|| PathBuf::from("/Users/aditya/.omp/agent/zerostack-origin-main/fszero/target/release/fszero")),
+                            .unwrap_or_else(|| PathBuf::from("fszero")),
                     );
                     clean_env(&mut cmd);
                     let put = cmd
@@ -609,9 +602,7 @@ fn run_concurrent_writes(harness: &Harness) -> Value {
                     let mut cmd = Command::new(
                         env::var_os("GRAPHZERO_BIN")
                             .map(PathBuf::from)
-                            .unwrap_or_else(|| {
-                                PathBuf::from("/tmp/graphzero-clean/target/release/graphzero")
-                            }),
+                            .unwrap_or_else(|| PathBuf::from("graphzero")),
                     );
                     clean_env(&mut cmd);
                     let put = cmd
@@ -654,6 +645,7 @@ fn run_concurrent_writes(harness: &Harness) -> Value {
 }
 
 #[test]
+#[ignore = "requires external fszero, graphzero, and tokenzero release binaries"]
 fn zeroref_conformance_matrix() {
     // Scrub leaked parent env per the project constraints.
     unsafe {
@@ -662,10 +654,9 @@ fn zeroref_conformance_matrix() {
         env::set_var("TOKENZERO_REF_INDEX", "0");
     }
 
-    let fszero_default =
-        "/Users/aditya/.omp/agent/zerostack-origin-main/fszero/target/release/fszero";
-    let graphzero_default = "/tmp/graphzero-clean/target/release/graphzero";
-    let tokenzero_default = "/Users/aditya/AI/tokenzero/target/release/tokenzero";
+    let fszero_default = "fszero";
+    let graphzero_default = "graphzero";
+    let tokenzero_default = "tokenzero";
 
     let fszero = discover_binary("fszero", "FSZERO_BIN", fszero_default);
     let graphzero = discover_binary("graphzero", "GRAPHZERO_BIN", graphzero_default);
@@ -692,15 +683,16 @@ fn zeroref_conformance_matrix() {
     let shared_cas = base.path().join("shared-cas");
     fs::create_dir_all(&shared_cas).unwrap();
 
+    let evidence = env::var_os("ZEROREF_EVIDENCE_PATH")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| base.path().join("zeroref-conformance-evidence.json"));
     let harness = Harness {
         base,
         shared_cas,
         fszero,
         graphzero,
         tokenzero,
-        evidence: repo_root()
-            .join("fixtures")
-            .join("zeroref-conformance-evidence.json"),
+        evidence,
     };
 
     let mut rows = Vec::new();
@@ -789,7 +781,11 @@ fn zeroref_conformance_matrix() {
         if wrong_store["status"] != "pass" || concurrent["status"] != "pass" {
             ok = false;
         }
-        if ok { "green" } else { "red" }
+        if ok {
+            "green"
+        } else {
+            "red"
+        }
     };
 
     let evidence = json!({
