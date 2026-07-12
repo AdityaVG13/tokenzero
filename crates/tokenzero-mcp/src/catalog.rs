@@ -576,7 +576,9 @@ pub(crate) fn canonical_tool_specs() -> Vec<ToolSpecSeed> {
         },
         ToolSpecSeed {
             name: "tz_report_tool_issue",
-            cluster: "execution",
+            // Reports field issues for CodeMode/zero_execute surfaces; keeping
+            // it out of "execution" holds that agent menu at seven entries.
+            cluster: "codemode",
             summary: "Record a field issue against a CodeMode/TokenZero tool name (accepts zero_execute).",
             doc: tool_description(
                 "Record a field issue for expand/root/shell/CodeMode failures without leaving the harness.",

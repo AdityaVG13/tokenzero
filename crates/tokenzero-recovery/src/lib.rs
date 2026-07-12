@@ -780,7 +780,17 @@ impl RecoveryStore {
         let shared_cas = persistence_path
             .as_deref()
             .and_then(SharedCas::detect_from_cache_path)
-            .or_else(|| ref_index_root().map(SharedCas::new));
+            // Pay-once user CAS attaches only to durable stores: memory-only
+            // stores publishing to (and stat-scanning) the user CAS would leak
+            // ephemeral payloads into it and drag real-store latency into
+            // hermetic contexts.
+            .or_else(|| {
+                persistence_path
+                    .is_some()
+                    .then(ref_index_root)
+                    .flatten()
+                    .map(SharedCas::new)
+            });
         Self {
             config,
             persistence_path,
@@ -1818,12 +1828,28 @@ impl RecoveryStore {
             self.config.max_search_hits,
         );
         while self.approx_bytes() > self.config.max_bytes {
-            let Some(victim) = self.state.order.iter().find(|r| self.has_ref(r)).cloned() else {
+            // Victim selection must use LOCAL presence: has_ref also reports
+            // shared-CAS reachability, and a CAS-served ref stays reachable
+            // after drop_ref, which would pin the same victim forever.
+            let Some(victim) = self
+                .state
+                .order
+                .iter()
+                .find(|r| self.local_entry_present(r))
+                .cloned()
+            else {
                 break;
             };
             self.drop_ref(&victim);
         }
         self.compact_order();
+    }
+
+    fn local_entry_present(&self, ref_id: &str) -> bool {
+        self.state.blobs.contains_key(ref_id)
+            || self.state.files.contains_key(ref_id)
+            || self.state.units.contains_key(ref_id)
+            || self.state.search_hits.contains_key(ref_id)
     }
 
     fn drop_ref(&mut self, ref_id: &str) {
@@ -2172,8 +2198,23 @@ pub fn set_ref_index_root_override(path: Option<PathBuf>) {
 }
 
 static REF_INDEX_ROOT_OVERRIDE: OnceLock<std::sync::Mutex<Option<PathBuf>>> = OnceLock::new();
+static REF_INDEX_DISABLED_OVERRIDE: OnceLock<std::sync::atomic::AtomicBool> = OnceLock::new();
+
+/// Test-only hook: disable the per-user ref-index/shared-CAS fallback entirely
+/// so stores exercise the local snapshot path regardless of ambient state.
+#[doc(hidden)]
+pub fn set_ref_index_disabled_override(disabled: bool) {
+    REF_INDEX_DISABLED_OVERRIDE
+        .get_or_init(|| std::sync::atomic::AtomicBool::new(false))
+        .store(disabled, std::sync::atomic::Ordering::SeqCst);
+}
 
 fn ref_index_root() -> Option<PathBuf> {
+    if let Some(flag) = REF_INDEX_DISABLED_OVERRIDE.get() {
+        if flag.load(std::sync::atomic::Ordering::SeqCst) {
+            return None;
+        }
+    }
     if let Some(lock) = REF_INDEX_ROOT_OVERRIDE.get() {
         if let Some(ref path) = *lock.lock().unwrap_or_else(|p| p.into_inner()) {
             return Some(path.clone());

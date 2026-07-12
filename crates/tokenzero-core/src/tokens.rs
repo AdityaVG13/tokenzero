@@ -167,6 +167,9 @@ const SENTENCEPIECE: TokenizerMetadata = TokenizerMetadata {
 
 /// Resolve a provider model id without allocating or making network calls.
 pub fn tokenizer_metadata(model_id: &str) -> Option<&'static TokenizerMetadata> {
+    // Provider-qualified ids ("openai/gpt-4o-...", "deepseek/...") carry the
+    // model name in the last path segment.
+    let model_id = model_id.rsplit('/').next().unwrap_or(model_id);
     if starts_with_ignore_ascii_case(model_id, "gpt-4o")
         || starts_with_ignore_ascii_case(model_id, "gpt-4.1")
         || starts_with_ignore_ascii_case(model_id, "gpt-5")
