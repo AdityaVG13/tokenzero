@@ -1,7 +1,6 @@
 {
   "losses_disclosed": [
-    "Only 3 tool turn(s) were observed; this is a schema example, not a workload distribution.",
-    "The ledger emitted no expand record; expand materialization cost is measured from the captured MCP result with the same tokenizer."
+    "Only 3 tool turn(s) were observed; this is a schema example, not a workload distribution."
   ],
   "methodology": {
     "boot_envelope": "canonical JSON of the MCP initialize result; charged once on turn 1",
@@ -19,8 +18,8 @@
   "schema": "tokenzero.observatory.v1",
   "session": {
     "agent": "session-observatory-replay",
-    "repo": "/var/folders/tw/wpjfrh5s60j_yldw1nv2k4300000gn/T/tokenzero-observatory-ujmxw8tj",
-    "session_id": "tz-62295-18c15e9637ea62c0",
+    "repo": "/var/folders/tw/wpjfrh5s60j_yldw1nv2k4300000gn/T/tokenzero-observatory-orikwrqt",
+    "session_id": "tz-39598-18c1624c22cf65e8",
     "version": {
       "crate": "1.2.0",
       "git_describe": null
@@ -29,7 +28,7 @@
   "source": {
     "capture": {
       "binary": "target/debug/tokenzero",
-      "binary_mtime_ns": 1783809761333692587,
+      "binary_mtime_ns": 1783814865164282859,
       "binary_version": "tokenzero 1.2.0",
       "boot_envelope_tokens": 155,
       "environment": {
@@ -49,19 +48,19 @@
       "unledgered_tool_results": [
         {
           "tool": "tz_expand",
-          "visible_tokens": 53
+          "visible_tokens": 375
         }
       ]
     },
     "ledger": "/Users/aditya/AI/TokenZero/crates/tokenzero-mcp/benches/session_observatory/replayed.ledger.jsonl",
-    "ledger_sha256": "fedbbf8054269505530b598c3c579b22b37ed73c865d482358c79b3d1cde6c94"
+    "ledger_sha256": "100fe6bf2c4999e3250e42b3a4df3a69eb4c6fd1a905ee15d230f396ffb1226a"
   },
   "totals": {
     "boot_envelope_tokens": 155,
-    "expand_materialization_tokens": 53,
-    "model_facing_total_tokens": 5718,
+    "expand_materialization_tokens": 256,
+    "model_facing_total_tokens": 5921,
     "tool_result_tokens": 423,
-    "tool_result_visible_tokens": 476,
+    "tool_result_visible_tokens": 679,
     "tool_schema_tokens": 5087
   },
   "turns": [
@@ -86,7 +85,7 @@
         "diff_reads:on",
         "tool_surface:mcp"
       ],
-      "timestamp_ms": 1783810926799,
+      "timestamp_ms": 1783815006651,
       "tool": "read",
       "tool_result_visible_tokens": 256,
       "turn_index": 1
@@ -112,26 +111,35 @@
         "diff_reads:on",
         "tool_surface:mcp"
       ],
-      "timestamp_ms": 1783810926810,
+      "timestamp_ms": 1783815006675,
       "tool": "find",
       "tool_result_visible_tokens": 167,
       "turn_index": 2
     },
     {
-      "accounting_source": "mcp_capture",
+      "accounting_source": "tokenzero.ledger.v1",
       "cost_buckets": {
         "boot_envelope_tokens": 0,
-        "expand_materialization_tokens": 53,
+        "expand_materialization_tokens": 256,
         "tool_result_tokens": 0,
         "tool_schema_tokens": 0
       },
-      "cumulative_session_cost_tokens": 423,
-      "ledger_token_mass": null,
-      "model_facing_total_tokens": 53,
-      "optimization_tags": [],
-      "timestamp_ms": 1783810926812,
+      "cumulative_session_cost_tokens": 679,
+      "ledger_token_mass": {
+        "prevented_tokens": 0,
+        "raw_tokens": 256,
+        "saved_bytes": 0,
+        "visible_tokens": 256
+      },
+      "model_facing_total_tokens": 256,
+      "optimization_tags": [
+        "session_dedup:on",
+        "diff_reads:on",
+        "tool_surface:mcp"
+      ],
+      "timestamp_ms": 1783815006685,
       "tool": "expand",
-      "tool_result_visible_tokens": 53,
+      "tool_result_visible_tokens": 256,
       "turn_index": 3
     }
   ]

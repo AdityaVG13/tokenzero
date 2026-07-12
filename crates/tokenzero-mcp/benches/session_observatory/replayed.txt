@@ -1,7 +1,7 @@
 TokenZero session observatory
 =============================
 schema: tokenzero.observatory.v1
-session: tz-62295-18c15e9637ea62c0
+session: tz-39598-18c1624c22cf65e8
 version: 1.2.0
 turns n: 3
 
@@ -9,14 +9,13 @@ Model-facing token cost
   boot envelope:          155
   tool schemas:           5087
   ordinary tool results:  423
-  expand materialization: 53
-  total:                  5718
+  expand materialization: 256
+  total:                  5921
 
 Per turn
    1 read         total=5498 boot=155 schemas=5087 result=256 expand=0
    2 find         total=167 boot=0 schemas=0 result=167 expand=0
-   3 expand       total=53 boot=0 schemas=0 result=0 expand=53
+   3 expand       total=256 boot=0 schemas=0 result=0 expand=256
 
 Losses / limitations
   - Only 3 tool turn(s) were observed; this is a schema example, not a workload distribution.
-  - The ledger emitted no expand record; expand materialization cost is measured from the captured MCP result with the same tokenizer.
