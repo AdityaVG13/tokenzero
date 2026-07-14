@@ -26,6 +26,7 @@ use crate::{parse_zeroref_v1_blob, RecoveryStore, ZeroRefError, ZeroRefFragment,
 
 const DESCRIPTOR_SCHEMA_VERSION: &str = "tokenzero.recovery.capability.v1";
 const DESCRIPTOR_VERSION: &str = "1.0.0";
+static CAS_PUBLICATION_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 /// Structured errors for the embeddable `TokenZeroStore` handle.
 ///
@@ -278,6 +279,9 @@ impl TokenZeroStore {
             .shared_cas
             .as_ref()
             .ok_or(TokenZeroStoreError::NoSharedCas)?;
+        let _publication_guard = CAS_PUBLICATION_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         validate_publication_target(cas, bytes)?;
         let hash = cas.publish(bytes).map_err(classify_publish_error)?;
         Ok(format!("tz://blob/{hash}"))
@@ -536,9 +540,16 @@ fn unique_probe_name(kind: &str) -> String {
     format!(".{kind}-{}-{timestamp}-{n}", std::process::id())
 }
 
-fn reject_symlink_ancestors(path: &Path) -> Result<(), TokenZeroStoreError> {
-    for ancestor in path.ancestors() {
-        match std::fs::symlink_metadata(ancestor) {
+fn reject_symlinks_below(root: &Path, path: &Path) -> Result<(), TokenZeroStoreError> {
+    let relative = path
+        .strip_prefix(root)
+        .map_err(|_| TokenZeroStoreError::PublishContainment)?;
+    let mut candidate = root.to_path_buf();
+    for component in std::iter::once(None).chain(relative.components().map(Some)) {
+        if let Some(component) = component {
+            candidate.push(component.as_os_str());
+        }
+        match std::fs::symlink_metadata(&candidate) {
             Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_dir() => {
                 return Err(TokenZeroStoreError::PublishContainment);
             }
@@ -562,7 +573,7 @@ fn probe_durable_cache_target(
     let parent = cache_path.parent().ok_or_else(|| {
         TokenZeroStoreError::CacheDir("invalid cache path: no parent directory".to_string())
     })?;
-    reject_symlink_ancestors(parent).map_err(|error| {
+    reject_symlinks_below(workspace_root, parent).map_err(|error| {
         TokenZeroStoreError::CacheDir(format!("cache parent is noncanonical: {error}"))
     })?;
     let canonical_root = std::fs::canonicalize(workspace_root).map_err(|error| {
@@ -580,14 +591,14 @@ fn probe_durable_cache_target(
         Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_file() => {
             return Err(TokenZeroStoreError::CacheDir(
                 "cache target is not a canonical regular file".to_string(),
-            ))
+            ));
         }
         Ok(_) => {}
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
         Err(error) => {
             return Err(TokenZeroStoreError::CacheDir(format!(
                 "cache target is unavailable: {error}"
-            )))
+            )));
         }
     }
     let probe = parent.join(unique_probe_name("recovery-cache-write-probe"));
@@ -626,9 +637,20 @@ fn prepare_canonical_prefix(
     cas: &SharedCas,
     prefix: &str,
 ) -> Result<(PathBuf, [bool; 3]), TokenZeroStoreError> {
-    reject_symlink_ancestors(cas.root())?;
-    std::fs::create_dir_all(cas.root()).map_err(classify_io_publish_error)?;
-    reject_symlink_ancestors(cas.root())?;
+    match std::fs::symlink_metadata(cas.root()) {
+        Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_dir() => {
+            return Err(TokenZeroStoreError::PublishContainment);
+        }
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            std::fs::create_dir_all(cas.root()).map_err(classify_io_publish_error)?;
+        }
+        Err(error) => return Err(classify_io_publish_error(error)),
+    }
+    let metadata = std::fs::symlink_metadata(cas.root()).map_err(classify_io_publish_error)?;
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        return Err(TokenZeroStoreError::PublishContainment);
+    }
     let mut canonical_parent = std::fs::canonicalize(cas.root())
         .map_err(|error| TokenZeroStoreError::Io(error.to_string()))?;
     let blobs = cas.root().join("blobs");
@@ -638,11 +660,15 @@ fn prepare_canonical_prefix(
     for child in [&blobs, &sha256, &prefix_dir] {
         match std::fs::symlink_metadata(child) {
             Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_dir() => {
-                return Err(TokenZeroStoreError::PublishContainment)
+                return Err(TokenZeroStoreError::PublishContainment);
             }
             Ok(_) => {}
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                std::fs::create_dir(child).map_err(classify_io_publish_error)?
+                match std::fs::create_dir(child) {
+                    Ok(()) => {}
+                    Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+                    Err(error) => return Err(classify_io_publish_error(error)),
+                }
             }
             Err(error) => return Err(classify_io_publish_error(error)),
         }
@@ -752,6 +778,9 @@ fn redact_path_identity(path: &Path) -> String {
 /// Establish actual CAS writability by attempting a tiny create/write/delete
 /// probe under the CAS root. Attachment is not sufficient.
 fn probe_cas_writable(cas: &SharedCas) -> bool {
+    let _publication_guard = CAS_PUBLICATION_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let prefix_seed = unique_probe_name("cas-prefix");
     let hash = Sha256::digest(prefix_seed.as_bytes())
         .iter()
@@ -1350,6 +1379,34 @@ mod tests {
                 assert_no_probe_artifacts(&entry.path());
             }
         }
+    }
+
+    #[test]
+    fn concurrent_fresh_root_put_and_probe_accept_shared_ancestor_creation() {
+        let dir = tempdir().unwrap();
+        let cas = SharedCas::new(dir.path().join("fresh-cas"));
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(9));
+        let handles = (0..8)
+            .map(|index| {
+                let cas = cas.clone();
+                let barrier = barrier.clone();
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    if index % 2 == 0 {
+                        let mut store = TokenZeroStore::with_shared_cas(None, cas);
+                        let payload = format!("concurrent-payload-{index}");
+                        store.put(payload.as_bytes(), None).unwrap();
+                    } else {
+                        assert!(probe_cas_writable(&cas));
+                    }
+                })
+            })
+            .collect::<Vec<_>>();
+        barrier.wait();
+        for handle in handles {
+            handle.join().unwrap();
+        }
+        assert_no_probe_artifacts(cas.root());
     }
 
     #[test]
