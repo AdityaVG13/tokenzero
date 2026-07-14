@@ -6,10 +6,9 @@ pub(crate) fn failed_segment(
     stderr: &str,
     exit_code: Option<i32>,
 ) -> Option<String> {
-    if is_search_no_match(command, stdout, stderr, exit_code) {
-        return None;
-    }
-    if is_expected_false_exit(command, stdout, stderr, exit_code) {
+    if is_search_no_match(command, stdout, stderr, exit_code)
+        || is_expected_false_exit(command, stdout, stderr, exit_code)
+    {
         return None;
     }
     if looks_env_invocation_failure(command, stdout, stderr, exit_code) {
@@ -56,12 +55,12 @@ pub(crate) fn failed_segment(
     }
 }
 
+const CD_FAILURE_NEEDLES: &[&str] = &["can't cd", "no such file", "not a directory"];
+
 fn is_cd_failure_segment(segment: &str, exit_code: Option<i32>, failure_output: &str) -> bool {
     segment.to_ascii_lowercase().starts_with("cd ")
         && (exit_code.is_some_and(|code| code != 0)
-            || failure_output.contains("can't cd")
-            || failure_output.contains("no such file")
-            || failure_output.contains("not a directory"))
+            || CD_FAILURE_NEEDLES.iter().any(|n| failure_output.contains(n)))
 }
 
 fn is_command_not_found_segment(segment: &str, failure_output: &str) -> bool {
@@ -69,11 +68,11 @@ fn is_command_not_found_segment(segment: &str, failure_output: &str) -> bool {
         && (failure_output.contains("command not found") || failure_output.contains("not found"))
 }
 
+const DIAGNOSTIC_SHELL_FAMILIES: &[&str] = &["test", "build", "lint", "python-test", "go-test"];
+
 pub(crate) fn is_diagnostic_failure_segment(segment: &str, stdout: &str, stderr: &str) -> bool {
-    matches!(
-        shell_family(segment, stdout, stderr).as_str(),
-        "test" | "build" | "lint" | "python-test" | "go-test"
-    ) || segment.contains("--check")
+    DIAGNOSTIC_SHELL_FAMILIES.contains(&shell_family(segment, stdout, stderr).as_str())
+        || segment.contains("--check")
 }
 
 pub(crate) fn masked_or_failure_segment(
@@ -127,16 +126,11 @@ pub(crate) fn masking_warning(
     stderr: &str,
     exit_code: Option<i32>,
 ) -> Option<String> {
-    if is_repo_inventory_command(command) && exit_code == Some(0) && stderr.trim().is_empty() {
-        return None;
-    }
-    if looks_env_invocation_failure(command, stdout, stderr, exit_code) {
-        return None;
-    }
-    if is_masked_expected_false_or(command, stdout, stderr, exit_code) {
-        return None;
-    }
-    if is_masked_expected_false_pipeline(command, stdout, stderr, exit_code) {
+    if is_repo_inventory_command(command) && exit_code == Some(0) && stderr.trim().is_empty()
+        || looks_env_invocation_failure(command, stdout, stderr, exit_code)
+        || is_masked_expected_false_or(command, stdout, stderr, exit_code)
+        || is_masked_expected_false_pipeline(command, stdout, stderr, exit_code)
+    {
         return None;
     }
     let has_masking_syntax = shell_operator_features(command)
@@ -155,17 +149,20 @@ pub(crate) fn masking_warning(
                 first_nonempty_shell_segment(command).as_deref(),
             )
     } else {
+        const NEEDLES: &[&str] = &[
+            "not found",
+            "no such file",
+            "permission denied",
+            "unrecognized option",
+            "invalid option",
+            "usage:",
+            "error",
+        ];
         let combined = format!("{stdout}\n{stderr}").to_ascii_lowercase();
         split_shell_segments(command)
             .iter()
             .any(|segment| is_explicit_false_segment(segment))
-            || combined.contains("not found")
-            || combined.contains("no such file")
-            || combined.contains("permission denied")
-            || combined.contains("unrecognized option")
-            || combined.contains("invalid option")
-            || combined.contains("usage:")
-            || combined.contains("error")
+            || NEEDLES.iter().any(|n| combined.contains(n))
     };
     if should_warn {
         Some("compound or pipeline syntax can mask upstream failure; inspect refs or rerun with pipefail".to_string())
@@ -188,7 +185,7 @@ pub(crate) fn pipeline_rerun_command(command: &str, warning: Option<&String>) ->
     }
     Some(format!(
         "bash -o pipefail -c {}",
-        shell_display_arg(analysis_command.trim(), ShellDisplayQuoteStyle::Posix)
+        shell_display_arg(analysis_command.trim(), "posix")
     ))
 }
 
@@ -199,13 +196,9 @@ pub(crate) fn first_or_list_lhs(command: &str) -> Option<String> {
     while let Some((idx, ch)) = chars.next() {
         if Some(ch) == quote {
             quote = None;
-            continue;
-        }
-        if quote.is_none() && (ch == '\'' || ch == '"') {
+        } else if quote.is_none() && (ch == '\'' || ch == '"') {
             quote = Some(ch);
-            continue;
-        }
-        if quote.is_none() && ch == '|' && chars.peek().is_some_and(|(_, next)| *next == '|') {
+        } else if quote.is_none() && ch == '|' && chars.peek().is_some_and(|(_, n)| *n == '|') {
             return Some(command[..idx].trim().to_string());
         }
     }
@@ -257,22 +250,28 @@ fn search_stdout_has_masked_failure_evidence(stdout: &str) -> bool {
     !stdout.trim().is_empty() && stdout.lines().any(search_stdout_line_is_diagnostic)
 }
 
+const SEARCH_DIAG_PREFIXES: &[&str] = &[
+    "error:",
+    "warning:",
+    "fatal:",
+    "panic",
+    "traceback",
+    "rg:",
+    "grep:",
+    "ripgrep:",
+];
+const SEARCH_DIAG_NEEDLES: &[&str] = &[
+    "regex parse error",
+    "unrecognized option",
+    "invalid option",
+    "permission denied",
+    "no such file or directory",
+];
+
 fn search_stdout_line_is_diagnostic(line: &str) -> bool {
-    let trimmed = line.trim_start();
-    let lower = trimmed.to_ascii_lowercase();
-    lower.starts_with("error:")
-        || lower.starts_with("warning:")
-        || lower.starts_with("fatal:")
-        || lower.starts_with("panic")
-        || lower.starts_with("traceback")
-        || lower.starts_with("rg:")
-        || lower.starts_with("grep:")
-        || lower.starts_with("ripgrep:")
-        || lower.contains("regex parse error")
-        || lower.contains("unrecognized option")
-        || lower.contains("invalid option")
-        || lower.contains("permission denied")
-        || lower.contains("no such file or directory")
+    let lower = line.trim_start().to_ascii_lowercase();
+    SEARCH_DIAG_PREFIXES.iter().any(|p| lower.starts_with(p))
+        || SEARCH_DIAG_NEEDLES.iter().any(|n| lower.contains(n))
 }
 
 /// Strict masked-failure evidence for exit-code-0 compound/pipeline paths.
@@ -329,48 +328,70 @@ pub(crate) fn shell_operator_features(command: &str) -> Vec<&'static str> {
     raw_shell_operator_features(&command)
 }
 
+struct QuoteCursor<'a> {
+    chars: std::iter::Peekable<std::str::CharIndices<'a>>,
+    quote: Option<char>,
+    escaped: bool,
+}
+
+impl<'a> QuoteCursor<'a> {
+    fn new(command: &'a str) -> Self {
+        Self {
+            chars: command.char_indices().peekable(),
+            quote: None,
+            escaped: false,
+        }
+    }
+
+    fn next_unquoted(&mut self) -> Option<(usize, char, Option<char>)> {
+        while let Some((idx, ch)) = self.chars.next() {
+            if self.escaped {
+                self.escaped = false;
+                continue;
+            }
+            if self.quote != Some('\'') && ch == '\\' {
+                self.escaped = true;
+                continue;
+            }
+            if Some(ch) == self.quote {
+                self.quote = None;
+                continue;
+            }
+            if self.quote.is_some() {
+                continue;
+            }
+            if ch == '\'' || ch == '"' {
+                self.quote = Some(ch);
+                continue;
+            }
+            let next = self.chars.peek().map(|(_, n)| *n);
+            return Some((idx, ch, next));
+        }
+        None
+    }
+}
+
 pub(crate) fn raw_shell_operator_features(command: &str) -> Vec<&'static str> {
     let mut features = Vec::new();
-    let mut quote: Option<char> = None;
-    let mut escaped = false;
-    let mut chars = command.chars().peekable();
-    while let Some(ch) = chars.next() {
-        if escaped {
-            escaped = false;
-            continue;
-        }
-        if quote != Some('\'') && ch == '\\' {
-            escaped = true;
-            continue;
-        }
-        if Some(ch) == quote {
-            quote = None;
-            continue;
-        }
-        if quote.is_some() {
-            continue;
-        }
-        if ch == '\'' || ch == '"' {
-            quote = Some(ch);
-            continue;
-        }
-        match ch {
-            '&' if chars.peek() == Some(&'&') => {
+    let mut cursor = QuoteCursor::new(command);
+    while let Some((_, ch, next)) = cursor.next_unquoted() {
+        match (ch, next) {
+            ('&', Some('&')) => {
                 push_unique_feature(&mut features, "and-list");
-                chars.next();
+                cursor.chars.next();
             }
-            '|' if chars.peek() == Some(&'|') => {
+            ('|', Some('|')) => {
                 push_unique_feature(&mut features, "or-list");
-                chars.next();
+                cursor.chars.next();
             }
-            '|' => push_unique_feature(&mut features, "pipeline"),
-            ';' => push_unique_feature(&mut features, "sequence"),
-            '>' | '<' => push_unique_feature(&mut features, "redirect"),
-            '$' if chars.peek() == Some(&'(') => {
+            ('|', _) => push_unique_feature(&mut features, "pipeline"),
+            (';', _) => push_unique_feature(&mut features, "sequence"),
+            ('>' | '<', _) => push_unique_feature(&mut features, "redirect"),
+            ('$', Some('(')) => {
                 push_unique_feature(&mut features, "subshell");
-                chars.next();
+                cursor.chars.next();
             }
-            '`' => push_unique_feature(&mut features, "subshell"),
+            ('`', _) => push_unique_feature(&mut features, "subshell"),
             _ => {}
         }
     }
@@ -386,40 +407,18 @@ pub(crate) fn push_unique_feature(features: &mut Vec<&'static str>, feature: &'s
 pub(crate) fn split_shell_segments(command: &str) -> Vec<String> {
     let command = shell_analysis_command(command);
     let mut segments = Vec::new();
-    let mut quote: Option<char> = None;
-    let mut escaped = false;
     let mut start = 0usize;
-    let mut chars = command.char_indices().peekable();
-    while let Some((idx, ch)) = chars.next() {
-        if escaped {
-            escaped = false;
-            continue;
-        }
-        if quote != Some('\'') && ch == '\\' {
-            escaped = true;
-            continue;
-        }
-        if Some(ch) == quote {
-            quote = None;
-            continue;
-        }
-        if quote.is_some() {
-            continue;
-        }
-        if ch == '\'' || ch == '"' {
-            quote = Some(ch);
-            continue;
-        }
-        let split_len = match ch {
-            '&' if chars.peek().is_some_and(|(_, next)| *next == '&') => Some(2),
-            '|' if chars.peek().is_some_and(|(_, next)| *next == '|') => Some(2),
-            '|' | ';' => Some(1),
+    let mut cursor = QuoteCursor::new(&command);
+    while let Some((idx, ch, next)) = cursor.next_unquoted() {
+        let split_len = match (ch, next) {
+            ('&', Some('&')) | ('|', Some('|')) => Some(2),
+            ('|' | ';', _) => Some(1),
             _ => None,
         };
         if let Some(split_len) = split_len {
             push_shell_segment(&mut segments, &command[start..idx]);
             if split_len == 2 {
-                chars.next();
+                cursor.chars.next();
             }
             start = idx + split_len;
         }
@@ -444,33 +443,17 @@ pub(crate) fn shell_analysis_command(command: &str) -> String {
 }
 
 pub(crate) fn shell_analysis_command_from_words(words: &[String]) -> Option<String> {
-    let first = words
-        .first()
-        .map(|word| shell_command_basename(word))
-        .unwrap_or_default();
-    if matches!(first.as_str(), "sh" | "bash" | "zsh") {
-        if let Some(command) = shell_c_command_argument(words) {
-            return Some(command);
-        }
+    let first = words.first().map(|word| shell_command_basename(word)).unwrap_or_default();
+    match first.as_str() {
+        "sh" | "bash" | "zsh" => shell_c_command_argument(words),
+        "cmd" => cmd_command_argument(words),
+        "powershell" | "pwsh" => powershell_command_argument(words),
+        "env" => env_split_string_analysis_command(words).or_else(|| {
+            let command_index = env_wrapped_command_index(words)?;
+            shell_analysis_command_from_words(&words[command_index..])
+        }),
+        _ => None,
     }
-    if first == "cmd" {
-        if let Some(command) = cmd_command_argument(words) {
-            return Some(command);
-        }
-    }
-    if matches!(first.as_str(), "powershell" | "pwsh") {
-        if let Some(command) = powershell_command_argument(words) {
-            return Some(command);
-        }
-    }
-    if first == "env" {
-        if let Some(command) = env_split_string_analysis_command(words) {
-            return Some(command);
-        }
-        let command_index = env_wrapped_command_index(words)?;
-        return shell_analysis_command_from_words(&words[command_index..]);
-    }
-    None
 }
 
 pub(crate) fn cmd_command_argument(words: &[String]) -> Option<String> {
@@ -479,7 +462,7 @@ pub(crate) fn cmd_command_argument(words: &[String]) -> Option<String> {
         let word = words[index].as_str();
         let lower = word.to_ascii_lowercase();
         if matches!(lower.as_str(), "/c" | "/k") {
-            return shell_command_tail(words, index + 1, ShellDisplayQuoteStyle::Cmd);
+            return shell_command_tail(words, index + 1, "cmd");
         }
         if lower.len() > 2 && (lower.starts_with("/c") || lower.starts_with("/k")) {
             return Some(word[2..].trim().to_string()).filter(|command| !command.is_empty());
@@ -499,7 +482,7 @@ pub(crate) fn powershell_command_argument(words: &[String]) -> Option<String> {
         let word = words[index].as_str();
         let lower = word.to_ascii_lowercase();
         if matches!(lower.as_str(), "-command" | "-c") {
-            return shell_command_tail(words, index + 1, ShellDisplayQuoteStyle::PowerShell);
+            return shell_command_tail(words, index + 1, "powershell");
         }
         if lower.starts_with("-command:") {
             return Some(word["-command:".len()..].trim().to_string())
@@ -531,7 +514,7 @@ pub(crate) fn powershell_command_argument(words: &[String]) -> Option<String> {
 pub(crate) fn shell_command_tail(
     words: &[String],
     start: usize,
-    style: ShellDisplayQuoteStyle,
+    style: &str,
 ) -> Option<String> {
     let tail = words.get(start..)?;
     if tail.is_empty() {
@@ -551,29 +534,25 @@ pub(crate) fn shell_command_tail(
     )
 }
 
+const POWERSHELL_VALUE_OPTIONS: &[&str] = &[
+    "-configurationname",
+    "-executionpolicy",
+    "-inputformat",
+    "-outputformat",
+    "-settingsfile",
+    "-version",
+    "-windowstyle",
+    "-workingdirectory",
+];
+
 pub(crate) fn is_powershell_option_with_value(lower: &str) -> bool {
-    matches!(
-        lower,
-        "-configurationname"
-            | "-executionpolicy"
-            | "-inputformat"
-            | "-outputformat"
-            | "-settingsfile"
-            | "-version"
-            | "-windowstyle"
-            | "-workingdirectory"
-    )
+    POWERSHELL_VALUE_OPTIONS.contains(&lower)
 }
 
 pub(crate) fn is_powershell_inline_option_with_value(lower: &str) -> bool {
-    lower.starts_with("-configurationname:")
-        || lower.starts_with("-executionpolicy:")
-        || lower.starts_with("-inputformat:")
-        || lower.starts_with("-outputformat:")
-        || lower.starts_with("-settingsfile:")
-        || lower.starts_with("-version:")
-        || lower.starts_with("-windowstyle:")
-        || lower.starts_with("-workingdirectory:")
+    POWERSHELL_VALUE_OPTIONS.iter().any(|opt| {
+        lower.starts_with(opt) && lower.as_bytes().get(opt.len()) == Some(&b':')
+    })
 }
 
 pub(crate) fn env_split_string_analysis_command(words: &[String]) -> Option<String> {
@@ -586,6 +565,19 @@ pub(crate) fn env_split_string_analysis_command(words: &[String]) -> Option<Stri
     env_words.extend(split_words);
     let command_index = env_wrapped_command_index(&env_words)?;
     shell_analysis_command_from_words(&env_words[command_index..])
+}
+
+fn advance_env_option(words: &[String], index: &mut usize) -> bool {
+    let word = words[*index].as_str();
+    if is_env_assignment(word) || is_env_no_arg_option(word) || is_env_inline_arg_option(word) {
+        *index += 1;
+        true
+    } else if is_env_arg_option(word) {
+        *index += 2;
+        true
+    } else {
+        false
+    }
 }
 
 pub(crate) fn env_split_string_words(words: &[String]) -> Option<Vec<String>> {
@@ -601,20 +593,8 @@ pub(crate) fn env_split_string_words(words: &[String]) -> Option<Vec<String>> {
         if let Some(value) = word.strip_prefix("--split-string=") {
             return Some(split_shell_words(value));
         }
-        if is_env_assignment(word) || is_env_no_arg_option(word) {
-            index += 1;
+        if advance_env_option(words, &mut index) {
             continue;
-        }
-        if is_env_arg_option(word) {
-            index += 2;
-            continue;
-        }
-        if is_env_inline_arg_option(word) {
-            index += 1;
-            continue;
-        }
-        if word.starts_with('-') {
-            return None;
         }
         return None;
     }
@@ -628,16 +608,7 @@ pub(crate) fn env_wrapped_command_index(words: &[String]) -> Option<usize> {
         if word == "--" {
             return (index + 1 < words.len()).then_some(index + 1);
         }
-        if is_env_assignment(word) || is_env_no_arg_option(word) {
-            index += 1;
-            continue;
-        }
-        if is_env_arg_option(word) {
-            index += 2;
-            continue;
-        }
-        if is_env_inline_arg_option(word) {
-            index += 1;
+        if advance_env_option(words, &mut index) {
             continue;
         }
         if word.starts_with('-') {
@@ -681,25 +652,20 @@ pub(crate) fn is_env_assignment(word: &str) -> bool {
     !word.starts_with('-') && word.find('=').is_some_and(|index| index > 0)
 }
 
+const ENV_NO_ARG_OPTIONS: &[&str] = &["-i", "--ignore-environment", "-0", "--null", "--debug"];
+const ENV_ARG_OPTIONS: &[&str] = &["-u", "--unset", "-C", "--chdir", "--argv0", "-S", "--split-string"];
+const ENV_INLINE_ARG_PREFIXES: &[&str] = &["--unset=", "--chdir=", "--argv0=", "--split-string="];
+
 pub(crate) fn is_env_no_arg_option(word: &str) -> bool {
-    matches!(
-        word,
-        "-i" | "--ignore-environment" | "-0" | "--null" | "--debug"
-    )
+    ENV_NO_ARG_OPTIONS.contains(&word)
 }
 
 pub(crate) fn is_env_arg_option(word: &str) -> bool {
-    matches!(
-        word,
-        "-u" | "--unset" | "-C" | "--chdir" | "--argv0" | "-S" | "--split-string"
-    )
+    ENV_ARG_OPTIONS.contains(&word)
 }
 
 pub(crate) fn is_env_inline_arg_option(word: &str) -> bool {
-    word.starts_with("--unset=")
-        || word.starts_with("--chdir=")
-        || word.starts_with("--argv0=")
-        || word.starts_with("--split-string=")
+    ENV_INLINE_ARG_PREFIXES.iter().any(|p| word.starts_with(p))
 }
 
 pub(crate) fn shell_c_command_argument(words: &[String]) -> Option<String> {

@@ -60,11 +60,59 @@ use zerostack_store::{
 /// Derive the migration manifest path from a recovery cache path.
 /// For unified stores: <store-root>/tokenzero/migration-manifest.json
 /// For legacy flat caches: <cache-parent>/migration-manifest.json
+fn emit_json_md<T, F, J, M>(output_json: J, output_md: M, as_json: bool, run: F) -> Result<()>
+where
+    T: serde::Serialize,
+    F: FnOnce(J, M) -> Result<T>,
+{
+    emit_value(run(output_json, output_md)?, as_json)
+}
+
 fn migration_manifest_path(cache_path: &std::path::Path) -> std::path::PathBuf {
     cache_path
         .parent()
         .unwrap_or(cache_path)
         .join("migration-manifest.json")
+}
+
+fn with_legacy_migration<R>(
+    root: Option<PathBuf>,
+    cache_path: Option<PathBuf>,
+    f: impl FnOnce(&mut tokenzero_recovery::migration::LegacyMigration<'_>) -> R,
+) -> R {
+    let root = tokenzero_work_root(root);
+    let cache = resolve_recovery_cache_path(&root, cache_path);
+    let manifest = migration_manifest_path(&cache);
+    let mut store = tokenzero_recovery::RecoveryStore::new(Some(cache.clone()));
+    let cas = tokenzero_recovery::shared_cas::SharedCas::new(
+        tokenzero_recovery::shared_cas::SharedCas::attach_root_for_cache_path(&cache),
+    );
+    let mut adapter = tokenzero_recovery::migration::RecoveryStoreAdapter::new(&mut store);
+    let mut migration = tokenzero_recovery::migration::LegacyMigration::new(
+        &mut adapter,
+        &cas,
+        Some(manifest),
+    );
+    f(&mut migration)
+}
+
+fn emit_migration_report(json: String, text: String, failed: bool, as_json: bool) -> Result<()> {
+    if as_json {
+        println!("{json}");
+    } else {
+        println!("{text}");
+    }
+    if failed {
+        std::process::exit(1);
+    }
+    Ok(())
+}
+
+macro_rules! cache_migrate {
+    ($root:expr, $cache:expr, $json:expr, $body:expr) => {{
+        let report = with_legacy_migration($root, $cache, $body);
+        emit_migration_report(report.to_json(), report.to_text(), report.is_failure(), $json)
+    }};
 }
 
 fn main() -> Result<()> {
@@ -88,7 +136,7 @@ fn main() -> Result<()> {
         Commands::Expand(args) => emit(handle_expand(args)?)?,
         Commands::SessionOpen(args) => {
             let as_json = args.json;
-            emit_value(engine_from_common(&args).session_boot_snapshot(), as_json)?;
+            emit_value(engine_from_common(&args).session_boot_snapshot(), as_json)?
         }
         Commands::Mem(args) => emit_with_json(engine_from_common(&args).mem(), args.json)?,
         Commands::Rewrite(args) => emit_rewrite(args)?,
@@ -99,7 +147,7 @@ fn main() -> Result<()> {
         Commands::Doctor(args) => handle_doctor(args)?,
         Commands::Stats(args) => {
             let as_json = args.json;
-            emit_value(handle_stats(args)?, as_json)?;
+            emit_value(handle_stats(args)?, as_json)?
         }
         Commands::Pulse(args) => handle_pulse(args)?,
         Commands::SessionLedger(args) => handle_session_ledger(args)?,
@@ -124,52 +172,24 @@ fn main() -> Result<()> {
             }
             tokenzero_mcp::run_fastmcp_stdio(engine_config_for_mcp(&args)?)
         }
-        Commands::McpSmoke(args) => emit_value(
-            run_mcp_artifact(args.output_json, args.output_md, 1)?,
-            args.json,
-        )?,
-        Commands::McpSoak(args) => emit_value(
-            run_mcp_artifact(args.output_json, args.output_md, 25)?,
-            args.json,
-        )?,
-        Commands::ExactRecoveryShell(args) => emit_value(
-            run_exact_recovery_shell(args.output_json, args.output_md)?,
-            args.json,
-        )?,
-        Commands::ExactRecoveryAudit(args) => emit_value(
-            run_exact_recovery_audit(args.output_json, args.output_md)?,
-            args.json,
-        )?,
-        Commands::HarmEval(args) => {
-            emit_value(run_harm_eval(args.output_json, args.output_md)?, args.json)?
-        }
-        Commands::ProtectedAnchorAudit(args) => emit_value(
-            run_protected_anchor_audit(args.output_json, args.output_md)?,
-            args.json,
-        )?,
-        Commands::FalseSuccessShell(args) => emit_value(
-            run_false_success_shell(args.output_json, args.output_md)?,
-            args.json,
-        )?,
-        Commands::RepoInventory(args) => emit_value(
-            run_repo_inventory(args.output_json, args.output_md)?,
-            args.json,
-        )?,
-        Commands::PromptCachePack(args) => emit_value(
-            run_prompt_cache_pack(args.output_json, args.output_md)?,
-            args.json,
-        )?,
+        Commands::McpSmoke(args) => emit_json_md(args.output_json, args.output_md, args.json, |j, m| run_mcp_artifact(j, m, 1))?,
+        Commands::McpSoak(args) => emit_json_md(args.output_json, args.output_md, args.json, |j, m| run_mcp_artifact(j, m, 25))?,
+        Commands::ExactRecoveryShell(args) => emit_json_md(args.output_json, args.output_md, args.json, run_exact_recovery_shell)?,
+        Commands::ExactRecoveryAudit(args) => emit_json_md(args.output_json, args.output_md, args.json, run_exact_recovery_audit)?,
+        Commands::HarmEval(args) => emit_json_md(args.output_json, args.output_md, args.json, run_harm_eval)?,
+        Commands::ProtectedAnchorAudit(args) => emit_json_md(args.output_json, args.output_md, args.json, run_protected_anchor_audit)?,
+        Commands::FalseSuccessShell(args) => emit_json_md(args.output_json, args.output_md, args.json, run_false_success_shell)?,
+        Commands::RepoInventory(args) => emit_json_md(args.output_json, args.output_md, args.json, run_repo_inventory)?,
+        Commands::PromptCachePack(args) => emit_json_md(args.output_json, args.output_md, args.json, run_prompt_cache_pack)?,
         Commands::InstallSmoke(args) => {
-            emit_value(run_install_smoke(args.output_json)?, args.json)?
+            let as_json = args.json;
+            emit_value(run_install_smoke(args.output_json)?, as_json)?
         }
         Commands::PackageAudit(args) => {
             let as_json = args.json;
-            emit_value(handle_package_audit(args), as_json)?;
+            emit_value(handle_package_audit(args), as_json)?
         }
-        Commands::ShellMatrix(args) => emit_value(
-            run_shell_matrix(args.output_json, args.output_md)?,
-            args.json,
-        )?,
+        Commands::ShellMatrix(args) => emit_json_md(args.output_json, args.output_md, args.json, run_shell_matrix)?,
         Commands::OsReachAudit(args) => emit_value(
             run_os_reach_audit(
                 args.output_json,
@@ -184,10 +204,7 @@ fn main() -> Result<()> {
             run_os_release_artifact(args.output_json, args.output_md, args.root)?,
             args.json,
         )?,
-        Commands::OneShotEval(args) => emit_value(
-            run_one_shot_eval(args.output_json, args.output_md)?,
-            args.json,
-        )?,
+        Commands::OneShotEval(args) => emit_json_md(args.output_json, args.output_md, args.json, run_one_shot_eval)?,
         Commands::SourceCurrencyAudit(args) => emit_value(
             run_source_currency_audit(
                 args.output_json,
@@ -206,10 +223,7 @@ fn main() -> Result<()> {
             )?,
             args.json,
         )?,
-        Commands::AdapterApprovalTemplate(args) => emit_value(
-            run_adapter_approval_template(args.output_json, args.output_md)?,
-            args.json,
-        )?,
+        Commands::AdapterApprovalTemplate(args) => emit_json_md(args.output_json, args.output_md, args.json, run_adapter_approval_template)?,
         Commands::ClaimAudit(args) => emit_value(
             run_claim_audit(
                 args.output_json,
@@ -226,23 +240,11 @@ fn main() -> Result<()> {
             )?,
             args.json,
         )?,
-        Commands::CompletionAudit(args) => emit_value(
-            run_completion_audit(args.output_json, args.output_md)?,
-            args.json,
-        )?,
-        Commands::SecurityPrivacyAudit(args) => emit_value(
-            run_security_privacy_audit(args.output_json, args.output_md)?,
-            args.json,
-        )?,
-        Commands::ArtifactHandoff(args) => emit_value(
-            run_artifact_handoff(args.output_json, args.output_md)?,
-            args.json,
-        )?,
+        Commands::CompletionAudit(args) => emit_json_md(args.output_json, args.output_md, args.json, run_completion_audit)?,
+        Commands::SecurityPrivacyAudit(args) => emit_json_md(args.output_json, args.output_md, args.json, run_security_privacy_audit)?,
+        Commands::ArtifactHandoff(args) => emit_json_md(args.output_json, args.output_md, args.json, run_artifact_handoff)?,
         Commands::Reach(args) => emit_value(run_reach(args.root, args.output_json)?, args.json)?,
-        Commands::WsSkeleton(args) => emit_value(
-            run_ws_skeleton(args.output_json, args.output_md)?,
-            args.json,
-        )?,
+        Commands::WsSkeleton(args) => emit_json_md(args.output_json, args.output_md, args.json, run_ws_skeleton)?,
         Commands::CodeMode(args) => {
             let plan = args.plan_text()?;
             let result = execute_codemode_with_options(
@@ -321,31 +323,21 @@ fn normalize_install_invocation_args(argv: Vec<OsString>) -> Vec<OsString> {
     if argv.len() < 3 {
         return argv;
     }
-
     match argv[2].to_str() {
         Some("plan") => {
-            let mut normalized = Vec::with_capacity(argv.len() + 1);
-            normalized.push(argv[0].clone());
-            normalized.push(OsString::from("install"));
-            normalized.push(OsString::from("--plan"));
-            normalized.extend(argv[3..].iter().cloned());
-            normalized
+            let mut out = vec![argv[0].clone(), "install".into(), "--plan".into()];
+            out.extend(argv[3..].iter().cloned());
+            out
         }
         Some("status") => {
-            let mut normalized = Vec::with_capacity(argv.len() + 1);
-            normalized.push(argv[0].clone());
-            normalized.push(OsString::from("clients"));
-            normalized.push(OsString::from("detect"));
-            for arg in &argv[3..] {
-                if matches!(
+            let mut out = vec![argv[0].clone(), "clients".into(), "detect".into()];
+            out.extend(argv[3..].iter().filter(|arg| {
+                !matches!(
                     arg.to_str(),
                     Some("--global" | "--mcp" | "--shell" | "--instructions" | "--cli" | "--plan")
-                ) {
-                    continue;
-                }
-                normalized.push(arg.clone());
-            }
-            normalized
+                )
+            }).cloned());
+            out
         }
         _ => argv,
     }
@@ -419,39 +411,26 @@ fn is_run_bool_option(value: &str) -> bool {
     )
 }
 
+const RUN_VALUE_OPTIONS: &[&str] = &[
+    "--cwd",
+    "--rewrite",
+    "--env",
+    "--runtime-platform",
+    "--mode",
+    "--budget",
+    "--allowed-root",
+    "--cache-path",
+    "--timeout",
+    "--timeout-seconds",
+    "--timout",
+];
+
 fn is_run_value_option(value: &str) -> bool {
-    matches!(
-        value,
-        "--cwd"
-            | "--rewrite"
-            | "--env"
-            | "--runtime-platform"
-            | "--mode"
-            | "--budget"
-            | "--allowed-root"
-            | "--cache-path"
-            | "--timeout"
-            | "--timeout-seconds"
-            | "--timout"
-    )
+    RUN_VALUE_OPTIONS.contains(&value)
 }
 
 fn is_run_value_option_with_equals(value: &str) -> bool {
-    [
-        "--cwd",
-        "--rewrite",
-        "--env",
-        "--runtime-platform",
-        "--mode",
-        "--budget",
-        "--allowed-root",
-        "--cache-path",
-        "--timeout",
-        "--timeout-seconds",
-        "--timout",
-    ]
-    .iter()
-    .any(|option| {
+    RUN_VALUE_OPTIONS.iter().any(|option| {
         value
             .strip_prefix(option)
             .is_some_and(|suffix| suffix.starts_with('='))
@@ -491,8 +470,7 @@ fn handle_read(args: ReadArgs) -> Result<EmitResponse> {
     if paths.is_empty() {
         anyhow::bail!("read requires a path");
     }
-    let engine = engine_from_tool(&args.tool)?;
-    let mode = parse_mode(&args.tool.mode)?;
+    let (engine, mode) = tool_engine_mode(&args.tool)?;
     let response = engine.read(
         &paths,
         mode,
@@ -502,21 +480,34 @@ fn handle_read(args: ReadArgs) -> Result<EmitResponse> {
         args.max_files,
         args.max_visible_tokens,
     );
-    record_tool_pulse(&response, tokenzero_work_root(None), "read")?;
-    Ok(EmitResponse {
-        response,
-        json: args.tool.json,
-    })
+    tool_emit(response, args.tool.json, "read")
+}
+
+fn default_paths(path: Vec<PathBuf>) -> Vec<PathBuf> {
+    if path.is_empty() {
+        vec![PathBuf::from(".")]
+    } else {
+        path
+    }
+}
+
+fn tool_engine_mode(tool: &ToolArgs) -> Result<(TokenZeroEngine, Mode)> {
+    Ok((engine_from_tool(tool)?, parse_mode(&tool.mode)?))
+}
+
+struct EmitResponse {
+    response: ToolResponse,
+    json: bool,
+}
+
+fn tool_emit(response: ToolResponse, json: bool, tool: &str) -> Result<EmitResponse> {
+    record_tool_pulse(&response, tokenzero_work_root(None), tool)?;
+    Ok(EmitResponse { response, json })
 }
 
 fn handle_find(args: FindArgs) -> Result<EmitResponse> {
-    let paths = if args.path.is_empty() {
-        vec![PathBuf::from(".")]
-    } else {
-        args.path
-    };
-    let engine = engine_from_tool(&args.tool)?;
-    let mode = parse_mode(&args.tool.mode)?;
+    let paths = default_paths(args.path);
+    let (engine, mode) = tool_engine_mode(&args.tool)?;
     let response = engine.find(
         &args.query,
         &paths,
@@ -524,27 +515,17 @@ fn handle_find(args: FindArgs) -> Result<EmitResponse> {
         args.max_files,
         args.max_visible_tokens,
     );
-    record_tool_pulse(&response, tokenzero_work_root(None), "find")?;
-    Ok(EmitResponse {
-        response,
-        json: args.tool.json,
-    })
+    tool_emit(response, args.tool.json, "find")
 }
 
 fn handle_recall(args: RecallArgs) -> Result<EmitResponse> {
-    let engine = engine_from_tool(&args.tool)?;
-    let mode = parse_mode(&args.tool.mode)?;
+    let (engine, mode) = tool_engine_mode(&args.tool)?;
     let response = engine.recall(&args.query, args.max_hits, mode, args.max_visible_tokens);
-    record_tool_pulse(&response, tokenzero_work_root(None), "recall")?;
-    Ok(EmitResponse {
-        response,
-        json: args.tool.json,
-    })
+    tool_emit(response, args.tool.json, "recall")
 }
 
 fn handle_fetch(args: FetchArgs) -> Result<EmitResponse> {
-    let engine = engine_from_tool(&args.tool)?;
-    let mode = parse_mode(&args.tool.mode)?;
+    let (engine, mode) = tool_engine_mode(&args.tool)?;
     let response = engine.fetch(
         &args.url,
         args.ttl_seconds,
@@ -552,21 +533,12 @@ fn handle_fetch(args: FetchArgs) -> Result<EmitResponse> {
         mode,
         args.max_visible_tokens,
     );
-    record_tool_pulse(&response, tokenzero_work_root(None), "fetch")?;
-    Ok(EmitResponse {
-        response,
-        json: args.tool.json,
-    })
+    tool_emit(response, args.tool.json, "fetch")
 }
 
 fn handle_grep(args: FindArgs) -> Result<EmitResponse> {
-    let paths = if args.path.is_empty() {
-        vec![PathBuf::from(".")]
-    } else {
-        args.path
-    };
-    let engine = engine_from_tool(&args.tool)?;
-    let mode = parse_mode(&args.tool.mode)?;
+    let paths = default_paths(args.path);
+    let (engine, mode) = tool_engine_mode(&args.tool)?;
     let response = engine.grep(
         &args.query,
         &paths,
@@ -574,21 +546,12 @@ fn handle_grep(args: FindArgs) -> Result<EmitResponse> {
         args.max_files,
         args.max_visible_tokens,
     );
-    record_tool_pulse(&response, tokenzero_work_root(None), "grep")?;
-    Ok(EmitResponse {
-        response,
-        json: args.tool.json,
-    })
+    tool_emit(response, args.tool.json, "grep")
 }
 
 fn handle_glob(args: GlobArgs) -> Result<EmitResponse> {
-    let paths = if args.path.is_empty() {
-        vec![PathBuf::from(".")]
-    } else {
-        args.path
-    };
-    let engine = engine_from_tool(&args.tool)?;
-    let mode = parse_mode(&args.tool.mode)?;
+    let paths = default_paths(args.path);
+    let (engine, mode) = tool_engine_mode(&args.tool)?;
     let response = engine.glob(
         &args.pattern,
         &paths,
@@ -597,21 +560,12 @@ fn handle_glob(args: GlobArgs) -> Result<EmitResponse> {
         args.max_files,
         args.max_visible_tokens,
     );
-    record_tool_pulse(&response, tokenzero_work_root(None), "glob")?;
-    Ok(EmitResponse {
-        response,
-        json: args.tool.json,
-    })
+    tool_emit(response, args.tool.json, "glob")
 }
 
 fn handle_tree(args: TreeArgs) -> Result<EmitResponse> {
-    let paths = if args.path.is_empty() {
-        vec![PathBuf::from(".")]
-    } else {
-        args.path
-    };
-    let engine = engine_from_tool(&args.tool)?;
-    let mode = parse_mode(&args.tool.mode)?;
+    let paths = default_paths(args.path);
+    let (engine, mode) = tool_engine_mode(&args.tool)?;
     let response = engine.tree(
         &paths,
         args.depth,
@@ -620,11 +574,7 @@ fn handle_tree(args: TreeArgs) -> Result<EmitResponse> {
         args.max_files,
         args.max_visible_tokens,
     );
-    record_tool_pulse(&response, tokenzero_work_root(None), "tree")?;
-    Ok(EmitResponse {
-        response,
-        json: args.tool.json,
-    })
+    tool_emit(response, args.tool.json, "tree")
 }
 
 fn handle_edit(args: EditArgs) -> Result<EmitResponse> {
@@ -642,8 +592,7 @@ fn handle_edit(args: EditArgs) -> Result<EmitResponse> {
             "invalid edits JSON ({err}); expected [{{\"find\": \"...\", \"replace\": \"...\", \"replace_all\": false}}]"
         )
     })?;
-    let engine = engine_from_tool(&args.tool)?;
-    let mode = parse_mode(&args.tool.mode)?;
+    let (engine, mode) = tool_engine_mode(&args.tool)?;
     let response = engine.edit(
         &args.path,
         &hunks,
@@ -652,11 +601,7 @@ fn handle_edit(args: EditArgs) -> Result<EmitResponse> {
         mode,
         args.max_visible_tokens,
     );
-    record_tool_pulse(&response, tokenzero_work_root(None), "edit")?;
-    Ok(EmitResponse {
-        response,
-        json: args.tool.json,
-    })
+    tool_emit(response, args.tool.json, "edit")
 }
 
 fn handle_run(args: RunArgs) -> Result<EmitResponse> {
@@ -673,8 +618,7 @@ fn handle_run(args: RunArgs) -> Result<EmitResponse> {
         println!("{}", serde_json::to_string_pretty(&plan)?);
         std::process::exit(0);
     }
-    let engine = engine_from_tool(&args.tool)?;
-    let mode = parse_mode(&args.tool.mode)?;
+    let (engine, mode) = tool_engine_mode(&args.tool)?;
     let mut stdin_payload = None;
     if args.stdin {
         let mut buffer = String::new();
@@ -699,11 +643,7 @@ fn handle_run(args: RunArgs) -> Result<EmitResponse> {
         stdin_payload.as_deref(),
         None,
     );
-    record_tool_pulse(&response, tokenzero_work_root(None), "shell")?;
-    Ok(EmitResponse {
-        response,
-        json: args.tool.json,
-    })
+    tool_emit(response, args.tool.json, "shell")
 }
 
 fn display_command_for_platform(argv: &[String], cwd: Option<&Path>, platform: &str) -> String {
@@ -720,8 +660,7 @@ fn handle_ingest(args: IngestArgs) -> Result<EmitResponse> {
     } else if let Some(input) = &args.input {
         text = fs::read_to_string(input)?;
     }
-    let engine = engine_from_tool(&args.tool)?;
-    let mode = parse_mode(&args.tool.mode)?;
+    let (engine, mode) = tool_engine_mode(&args.tool)?;
     let kind = content_type_from_kind(&args.kind, &text, args.input.as_deref());
     let source = args
         .input
@@ -729,11 +668,7 @@ fn handle_ingest(args: IngestArgs) -> Result<EmitResponse> {
         .map(|p| p.display().to_string())
         .unwrap_or_else(|| "stdin".to_string());
     let response = engine.ingest(&text, kind, mode, &source);
-    record_tool_pulse(&response, tokenzero_work_root(None), "ingest")?;
-    Ok(EmitResponse {
-        response,
-        json: args.tool.json,
-    })
+    tool_emit(response, args.tool.json, "ingest")
 }
 
 fn handle_expand(args: ExpandArgs) -> Result<EmitResponse> {
@@ -751,16 +686,15 @@ fn handle_expand(args: ExpandArgs) -> Result<EmitResponse> {
         anyhow::bail!("expand requires a ref");
     };
     let root = tokenzero_work_root(None);
-    let config = EngineConfig {
-        allowed_roots: default_allowed_roots(&root),
-        cache_path: resolve_recovery_cache_path(&root, args.cache_path.clone()),
-        max_visible_tokens: 4000,
-        mode: Mode::Exact,
-        shell_timeout: default_shell_timeout(),
-        mcp_idle_timeout: None,
-        ..EngineConfig::for_root(&root)
-    };
-    let engine = TokenZeroEngine::new(config);
+    let engine = TokenZeroEngine::new(engine_config(
+        root.clone(),
+        default_allowed_roots(&root),
+        resolve_recovery_cache_path(&root, args.cache_path.clone()),
+        4000,
+        Mode::Exact,
+        default_shell_timeout(),
+        None,
+    ));
     let (selector, start, end) = expand_selector(&args);
     let response = engine.expand(
         ref_id,
@@ -770,11 +704,7 @@ fn handle_expand(args: ExpandArgs) -> Result<EmitResponse> {
         args.anchor_kind.as_deref(),
         args.symbol.as_deref(),
     );
-    record_tool_pulse(&response, root, "expand")?;
-    Ok(EmitResponse {
-        response,
-        json: args.json,
-    })
+    tool_emit(response, args.json, "expand")
 }
 
 fn emit_rewrite(args: RewriteArgs) -> Result<()> {
@@ -788,16 +718,12 @@ fn emit_rewrite(args: RewriteArgs) -> Result<()> {
     };
     let result = rewrite_command(&command, &args.mode, args.mode != "off");
     if args.json {
-        println!("{}", serde_json::to_string_pretty(&result)?);
+        print_pretty(&result)
     } else {
-        let status = if result.applied {
-            "rewrite"
-        } else {
-            "no-rewrite"
-        };
+        let status = if result.applied { "rewrite" } else { "no-rewrite" };
         println!("{status}: {} ({})", result.rewritten_command, result.reason);
+        Ok(())
     }
-    Ok(())
 }
 
 fn doctor_report(args: &DoctorArgs) -> serde_json::Value {
@@ -805,12 +731,9 @@ fn doctor_report(args: &DoctorArgs) -> serde_json::Value {
     let mut report = install::doctor(&root, args.cache_path.as_deref());
     // wqw.5: doctor exposes effective allowed roots for the workspace root.
     let effective = allowed_roots_for_workspace(&root, &[]);
-    report["effective_allowed_roots"] = json!(
-        effective
-            .iter()
-            .map(|p| p.display().to_string())
-            .collect::<Vec<_>>()
-    );
+    let path_str = |p: &Path| p.display().to_string();
+    report["effective_allowed_roots"] =
+        json!(effective.iter().map(|p| path_str(p)).collect::<Vec<_>>());
     report["allowlist_algorithm"] = json!(
         "effective roots = doctor/call root union configured --allowed-root entries, deduped by canonical path. Relative CodeMode paths join to execute root."
     );
@@ -818,13 +741,9 @@ fn doctor_report(args: &DoctorArgs) -> serde_json::Value {
     let store = zerostack_store::store_resolution_report(&root, args.cache_path.clone());
     report["store_resolution"] =
         zerostack_store::store_resolution_json(&root, args.cache_path.clone());
-    report["effective_store_root"] = json!(
-        store
-            .effective_store_root
-            .as_ref()
-            .map(|p| p.display().to_string())
-    );
-    report["effective_cache_path"] = json!(store.effective_cache_path.display().to_string());
+    report["effective_store_root"] =
+        json!(store.effective_store_root.as_ref().map(|p| path_str(p)));
+    report["effective_cache_path"] = json!(path_str(&store.effective_cache_path));
     // migration/compatibility state (no content or paths)
     let recovery = tokenzero_recovery::RecoveryStore::new(Some(store.effective_cache_path.clone()));
     report["migration"] = recovery.migration_state();
@@ -875,56 +794,44 @@ fn doctor_report(args: &DoctorArgs) -> serde_json::Value {
 }
 
 fn handle_doctor(args: DoctorArgs) -> Result<()> {
+    let root = || tokenzero_work_root(args.root.clone());
     match args.command.clone() {
         Some(DoctorCommand::Capabilities) => emit_doctor_json(install::doctor_capabilities()),
         Some(DoctorCommand::Health) => emit_doctor_health(&args),
         Some(DoctorCommand::Fix) => {
-            let root = tokenzero_work_root(args.root.clone());
-            emit_doctor_json(install::doctor_fix(
-                &root,
-                args.cache_path.as_deref(),
-                args.dry_run,
-            ))
+            emit_doctor_json(install::doctor_fix(&root(), args.cache_path.as_deref(), args.dry_run))
         }
         Some(DoctorCommand::Undo { run_id }) => {
-            let root = tokenzero_work_root(args.root.clone());
-            emit_doctor_json(install::doctor_undo(&root, &run_id))
+            emit_doctor_json(install::doctor_undo(&root(), &run_id))
         }
-        Some(DoctorCommand::Ls) => {
-            let root = tokenzero_work_root(args.root.clone());
-            emit_doctor_json(install::doctor_ls(&root))
-        }
+        Some(DoctorCommand::Ls) => emit_doctor_json(install::doctor_ls(&root())),
         Some(DoctorCommand::RobotDocs) => {
             print!("{}", install::doctor_robot_docs());
             Ok(())
         }
-        Some(DoctorCommand::Explain { finding_id }) => {
-            let root = tokenzero_work_root(args.root.clone());
-            emit_doctor_json(install::doctor_explain(
-                &root,
-                args.cache_path.as_deref(),
-                &finding_id,
-            ))
-        }
+        Some(DoctorCommand::Explain { finding_id }) => emit_doctor_json(install::doctor_explain(
+            &root(),
+            args.cache_path.as_deref(),
+            &finding_id,
+        )),
         Some(DoctorCommand::Diagnose) | None => {
-            let root = tokenzero_work_root(args.root.clone());
             if args.fix {
                 return emit_doctor_json(install::doctor_fix(
-                    &root,
+                    &root(),
                     args.cache_path.as_deref(),
                     args.dry_run,
                 ));
             }
             if let Some(finding_id) = args.explain.as_deref() {
                 return emit_doctor_json(install::doctor_explain(
-                    &root,
+                    &root(),
                     args.cache_path.as_deref(),
                     finding_id,
                 ));
             }
             if args.robot_triage {
                 return emit_doctor_json(install::doctor_robot_triage(
-                    &root,
+                    &root(),
                     args.cache_path.as_deref(),
                 ));
             }
@@ -935,20 +842,19 @@ fn handle_doctor(args: DoctorArgs) -> Result<()> {
 
 fn emit_doctor_health(args: &DoctorArgs) -> Result<()> {
     let report = doctor_report(args);
+    let u64f = |v: &serde_json::Value| v.as_u64().unwrap_or(0);
     let ok = report["ok"].as_bool().unwrap_or(false);
     let status = report["status"].as_str().unwrap_or("blocked");
-    let finding_count = report["finding_count"].as_u64().unwrap_or(0);
-    let blocking = report["summary"]["blocking_findings"].as_u64().unwrap_or(0);
-    let info = report["summary"]["informational_findings"]
-        .as_u64()
-        .unwrap_or(0);
+    let finding_count = u64f(&report["finding_count"]);
+    let blocking = u64f(&report["summary"]["blocking_findings"]);
+    let info = u64f(&report["summary"]["informational_findings"]);
     let exit_code = doctor_exit_code(&report);
+    let doctor_ver = report["doctor_version"]
+        .as_str()
+        .unwrap_or(env!("CARGO_PKG_VERSION"));
     let line = format!(
-        "{status} tokenzero={} doctor={} findings={finding_count} blocking={blocking} info={info}",
+        "{status} tokenzero={} doctor={doctor_ver} findings={finding_count} blocking={blocking} info={info}",
         env!("CARGO_PKG_VERSION"),
-        report["doctor_version"]
-            .as_str()
-            .unwrap_or(env!("CARGO_PKG_VERSION"))
     );
     if args.json {
         emit_doctor_json(json!({
@@ -970,8 +876,13 @@ fn emit_doctor_health(args: &DoctorArgs) -> Result<()> {
     }
 }
 
+fn print_pretty<T: serde::Serialize>(value: &T) -> Result<()> {
+    println!("{}", serde_json::to_string_pretty(value)?);
+    Ok(())
+}
+
 fn emit_doctor_json(value: serde_json::Value) -> Result<()> {
-    println!("{}", serde_json::to_string_pretty(&value)?);
+    print_pretty(&value)?;
     let exit_code = doctor_exit_code(&value);
     if exit_code != 0 {
         std::process::exit(exit_code);
@@ -997,40 +908,35 @@ fn handle_stats(args: CommonArgs) -> Result<serde_json::Value> {
 }
 
 fn handle_pulse(args: PulseArgs) -> Result<()> {
-    let root = tokenzero_work_root(args.root);
-    let ledger_path = default_ledger_path(&root);
+    let ledger_path = default_ledger_path(&tokenzero_work_root(args.root));
     match args.command {
         Some(PulseCommand::Sync) => {
-            emit_pulse_result("pulse sync", sync_jsonl_to_sqlite(&ledger_path), args.json)?;
+            emit_pulse_result("pulse sync", sync_jsonl_to_sqlite(&ledger_path), args.json)
         }
         Some(PulseCommand::Doctor) => {
-            emit_pulse_result("pulse doctor", doctor_jsonl_sqlite(&ledger_path), args.json)?;
+            emit_pulse_result("pulse doctor", doctor_jsonl_sqlite(&ledger_path), args.json)
         }
-        Some(PulseCommand::ExportJsonl(export_args)) => {
-            emit_pulse_result(
-                "pulse export-jsonl",
-                export_jsonl(&ledger_path, &export_args.output),
-                args.json,
-            )?;
-        }
-        Some(PulseCommand::ImportJsonl(import_args)) => {
-            emit_pulse_result(
-                "pulse import-jsonl",
-                import_jsonl(&import_args.input, &ledger_path),
-                args.json,
-            )?;
-        }
+        Some(PulseCommand::ExportJsonl(export_args)) => emit_pulse_result(
+            "pulse export-jsonl",
+            export_jsonl(&ledger_path, &export_args.output),
+            args.json,
+        ),
+        Some(PulseCommand::ImportJsonl(import_args)) => emit_pulse_result(
+            "pulse import-jsonl",
+            import_jsonl(&import_args.input, &ledger_path),
+            args.json,
+        ),
         Some(PulseCommand::Stats) | None => {
             let _ = sync_jsonl_to_sqlite(&ledger_path);
             let report = report_for_path(&ledger_path)?;
             if args.json {
-                println!("{}", serde_json::to_string_pretty(&report)?);
+                print_pretty(&report)
             } else {
                 print!("{}", tokenzero_pulse::render_text(&report));
+                Ok(())
             }
         }
     }
-    Ok(())
 }
 
 fn handle_session_ledger(args: SessionLedgerArgs) -> Result<()> {
@@ -1039,20 +945,14 @@ fn handle_session_ledger(args: SessionLedgerArgs) -> Result<()> {
     let cache_path = resolve_recovery_cache_path(&root, None);
     let response_ledger_path = tokenzero_mcp::ledger::ledger_path_for_cache(&cache_path);
     match args.command {
-        Some(SessionLedgerCommand::Schema) => {
-            println!(
-                "{}",
-                serde_json::to_string_pretty(&tokenzero_mcp::ledger::schema_example())?
-            );
-        }
+        Some(SessionLedgerCommand::Schema) => print_pretty(&tokenzero_mcp::ledger::schema_example())?,
         Some(SessionLedgerCommand::Export) => {
-            let report = SessionLedgerReport::from_ledger(&pulse_ledger_path)?;
-            println!("{}", serde_json::to_string_pretty(&report)?);
+            print_pretty(&SessionLedgerReport::from_ledger(&pulse_ledger_path)?)?
         }
         Some(SessionLedgerCommand::Stats) | None => {
             let report = SessionLedgerReport::from_ledger(&pulse_ledger_path)?;
             if args.json {
-                println!("{}", serde_json::to_string_pretty(&report)?);
+                print_pretty(&report)?;
             } else {
                 print!("{}", report.render_text());
             }
@@ -1129,28 +1029,29 @@ fn emit_pulse_result<T: serde::Serialize>(
 }
 
 fn io_error_kind_name(kind: std::io::ErrorKind) -> &'static str {
-    match kind {
-        std::io::ErrorKind::NotFound => "not_found",
-        std::io::ErrorKind::PermissionDenied => "permission_denied",
-        std::io::ErrorKind::ConnectionRefused => "connection_refused",
-        std::io::ErrorKind::ConnectionReset => "connection_reset",
-        std::io::ErrorKind::ConnectionAborted => "connection_aborted",
-        std::io::ErrorKind::NotConnected => "not_connected",
-        std::io::ErrorKind::AddrInUse => "addr_in_use",
-        std::io::ErrorKind::AddrNotAvailable => "addr_not_available",
-        std::io::ErrorKind::BrokenPipe => "broken_pipe",
-        std::io::ErrorKind::AlreadyExists => "already_exists",
-        std::io::ErrorKind::WouldBlock => "would_block",
-        std::io::ErrorKind::InvalidInput => "invalid_input",
-        std::io::ErrorKind::InvalidData => "invalid_data",
-        std::io::ErrorKind::TimedOut => "timed_out",
-        std::io::ErrorKind::WriteZero => "write_zero",
-        std::io::ErrorKind::Interrupted => "interrupted",
-        std::io::ErrorKind::Unsupported => "unsupported",
-        std::io::ErrorKind::UnexpectedEof => "unexpected_eof",
-        std::io::ErrorKind::OutOfMemory => "out_of_memory",
-        _ => "other",
-    }
+    use std::io::ErrorKind as K;
+    const MAP: &[(K, &str)] = &[
+        (K::NotFound, "not_found"),
+        (K::PermissionDenied, "permission_denied"),
+        (K::ConnectionRefused, "connection_refused"),
+        (K::ConnectionReset, "connection_reset"),
+        (K::ConnectionAborted, "connection_aborted"),
+        (K::NotConnected, "not_connected"),
+        (K::AddrInUse, "addr_in_use"),
+        (K::AddrNotAvailable, "addr_not_available"),
+        (K::BrokenPipe, "broken_pipe"),
+        (K::AlreadyExists, "already_exists"),
+        (K::WouldBlock, "would_block"),
+        (K::InvalidInput, "invalid_input"),
+        (K::InvalidData, "invalid_data"),
+        (K::TimedOut, "timed_out"),
+        (K::WriteZero, "write_zero"),
+        (K::Interrupted, "interrupted"),
+        (K::Unsupported, "unsupported"),
+        (K::UnexpectedEof, "unexpected_eof"),
+        (K::OutOfMemory, "out_of_memory"),
+    ];
+    MAP.iter().find(|(k, _)| *k == kind).map(|(_, n)| *n).unwrap_or("other")
 }
 
 fn handle_cache(args: CacheArgs) -> Result<()> {
@@ -1169,103 +1070,20 @@ fn handle_cache(args: CacheArgs) -> Result<()> {
             emit_value(report, args.json)?;
         }
         CacheCommand::MigrateRefs(args) => {
-            let root = tokenzero_work_root(args.root);
-            let cache = resolve_recovery_cache_path(&root, args.cache_path);
-            let manifest = migration_manifest_path(&cache);
-            let mut store = tokenzero_recovery::RecoveryStore::new(Some(cache.clone()));
             // Use the canonical SharedCas detection so migration writes to the
             // same store root that RecoveryStore reads from at startup.
-            let cas = tokenzero_recovery::shared_cas::SharedCas::new(
-                tokenzero_recovery::shared_cas::SharedCas::attach_root_for_cache_path(&cache),
-            );
-            let mut adapter = tokenzero_recovery::migration::RecoveryStoreAdapter::new(&mut store);
-            let mut migration = tokenzero_recovery::migration::LegacyMigration::new(
-                &mut adapter,
-                &cas,
-                Some(manifest),
-            );
-            let dry_run = !args.apply;
-            let report = migration.run(dry_run);
-            if args.json {
-                println!("{}", report.to_json());
-            } else {
-                println!("{}", report.to_text());
-            }
-            if report.is_failure() {
-                std::process::exit(1);
-            }
+            cache_migrate!(args.root, args.cache_path, args.json, |m| m.run(!args.apply))?;
         }
         CacheCommand::MigrateVerify(args) => {
-            let root = tokenzero_work_root(args.root);
-            let cache = resolve_recovery_cache_path(&root, args.cache_path);
-            let manifest = migration_manifest_path(&cache);
-            let mut store = tokenzero_recovery::RecoveryStore::new(Some(cache.clone()));
-            let cas = tokenzero_recovery::shared_cas::SharedCas::new(
-                tokenzero_recovery::shared_cas::SharedCas::attach_root_for_cache_path(&cache),
-            );
-            let mut adapter = tokenzero_recovery::migration::RecoveryStoreAdapter::new(&mut store);
-            let migration = tokenzero_recovery::migration::LegacyMigration::new(
-                &mut adapter,
-                &cas,
-                Some(manifest),
-            );
-            let report = migration.verify();
-            if args.json {
-                println!("{}", report.to_json());
-            } else {
-                println!("{}", report.to_text());
-            }
-            if report.is_failure() {
-                std::process::exit(1);
-            }
+            cache_migrate!(args.root, args.cache_path, args.json, |m| m.verify())?;
         }
         CacheCommand::MigrateRollback(args) => {
-            let root = tokenzero_work_root(args.root);
-            let cache = resolve_recovery_cache_path(&root, args.cache_path);
-            let manifest = migration_manifest_path(&cache);
-            let mut store = tokenzero_recovery::RecoveryStore::new(Some(cache.clone()));
-            let cas = tokenzero_recovery::shared_cas::SharedCas::new(
-                tokenzero_recovery::shared_cas::SharedCas::attach_root_for_cache_path(&cache),
-            );
-            let mut adapter = tokenzero_recovery::migration::RecoveryStoreAdapter::new(&mut store);
-            let mut migration = tokenzero_recovery::migration::LegacyMigration::new(
-                &mut adapter,
-                &cas,
-                Some(manifest),
-            );
-            let report = migration.rollback(args.apply);
-            if args.json {
-                println!("{}", report.to_json());
-            } else {
-                println!("{}", report.to_text());
-            }
-            if report.is_failure() {
-                std::process::exit(1);
-            }
+            cache_migrate!(args.root, args.cache_path, args.json, |m| m.rollback(args.apply))?;
         }
         CacheCommand::MigrateCleanup(args) => {
-            let root = tokenzero_work_root(args.root);
-            let cache = resolve_recovery_cache_path(&root, args.cache_path);
-            let manifest = migration_manifest_path(&cache);
-            let mut store = tokenzero_recovery::RecoveryStore::new(Some(cache.clone()));
-            let cas = tokenzero_recovery::shared_cas::SharedCas::new(
-                tokenzero_recovery::shared_cas::SharedCas::attach_root_for_cache_path(&cache),
-            );
-            let mut adapter = tokenzero_recovery::migration::RecoveryStoreAdapter::new(&mut store);
-            let mut migration = tokenzero_recovery::migration::LegacyMigration::new(
-                &mut adapter,
-                &cas,
-                Some(manifest),
-            );
-            let report = migration.cleanup(args.apply, args.confirm_cleanup);
-            if args.json {
-                println!("{}", report.to_json());
-            } else {
-                println!("{}", report.to_text());
-            }
-            if report.is_failure() {
-                std::process::exit(1);
-            }
+            cache_migrate!(args.root, args.cache_path, args.json, |m| {
+                m.cleanup(args.apply, args.confirm_cleanup)
+            })?;
         }
     }
     Ok(())
@@ -1273,15 +1091,15 @@ fn handle_cache(args: CacheArgs) -> Result<()> {
 
 fn handle_cache_pack(args: CachePackArgs) -> Result<()> {
     let root = tokenzero_work_root(args.root.clone());
-    let engine = TokenZeroEngine::new(EngineConfig {
-        allowed_roots: default_allowed_roots(&root),
-        cache_path: resolve_recovery_cache_path(&root, args.cache_path.clone()),
-        max_visible_tokens: 4000,
-        mode: Mode::Structured,
-        shell_timeout: default_shell_timeout(),
-        mcp_idle_timeout: None,
-        ..EngineConfig::for_root(&root)
-    });
+    let engine = TokenZeroEngine::new(engine_config(
+        root.clone(),
+        default_allowed_roots(&root),
+        resolve_recovery_cache_path(&root, args.cache_path.clone()),
+        4000,
+        Mode::Structured,
+        default_shell_timeout(),
+        None,
+    ));
     emit_with_json(engine.cache_pack(&args.scope), args.json)
 }
 
@@ -1295,25 +1113,46 @@ fn handle_bench(args: BenchArgs) -> Result<()> {
     Ok(())
 }
 
+fn install_apply_or_plan(
+    root: &Path,
+    global: bool,
+    capabilities: &[String],
+    agents: &[String],
+    surface: McpToolSurface,
+    apply: bool,
+    as_json: bool,
+) -> Result<()> {
+    if apply {
+        emit_value(
+            install::apply_for_agents(root, global, capabilities, agents, surface)?,
+            as_json,
+        )
+    } else {
+        emit_value(
+            install::plan_for_agents(root, global, capabilities, agents, surface),
+            as_json,
+        )
+    }
+}
+
 fn handle_install(args: InstallArgs) -> Result<()> {
     let agents = install_agents(&args.agents, args.grok)?;
     let capabilities = install_capabilities(&args);
     let surface = parse_mcp_surface(&args.surface)?;
     let root = install_root(args.root.clone(), args.global);
     if let Some(id) = args.rollback {
-        emit_value(install::rollback(&root, &id)?, args.json)?;
-    } else if args.apply {
-        emit_value(
-            install::apply_for_agents(&root, args.global, &capabilities, &agents, surface)?,
-            args.json,
-        )?;
+        emit_value(install::rollback(&root, &id)?, args.json)
     } else {
-        emit_value(
-            install::plan_for_agents(&root, args.global, &capabilities, &agents, surface),
+        install_apply_or_plan(
+            &root,
+            args.global,
+            &capabilities,
+            &agents,
+            surface,
+            args.apply,
             args.json,
-        )?;
+        )
     }
-    Ok(())
 }
 
 fn handle_init(args: InitArgs) -> Result<()> {
@@ -1322,18 +1161,15 @@ fn handle_init(args: InitArgs) -> Result<()> {
     let capabilities = init_capabilities(&args);
     let surface = parse_mcp_surface(&args.surface)?;
     let root = install_root(args.root.clone(), args.global);
-    if args.apply {
-        emit_value(
-            install::apply_for_agents(&root, args.global, &capabilities, &agents, surface)?,
-            args.json,
-        )?;
-    } else {
-        emit_value(
-            install::plan_for_agents(&root, args.global, &capabilities, &agents, surface),
-            args.json,
-        )?;
-    }
-    Ok(())
+    install_apply_or_plan(
+        &root,
+        args.global,
+        &capabilities,
+        &agents,
+        surface,
+        args.apply,
+        args.json,
+    )
 }
 
 fn handle_clients(args: ClientsArgs) -> Result<()> {
@@ -1415,6 +1251,30 @@ fn handle_clients_plan(args: ClientsPlanArgs) -> Result<()> {
     emit_value(value, args.json)
 }
 
+fn clients_doctor_findings(status: &str) -> Vec<serde_json::Value> {
+    let (id, severity, summary, next_step) = match status {
+        "installed" => (
+            "tz-clients-installed",
+            "info",
+            "TokenZero client integration surfaces are present",
+            "Run tokenzero doctor --json for runtime health.",
+        ),
+        "mixed" => (
+            "tz-clients-mixed",
+            "warning",
+            "Some TokenZero client integration surfaces are present and some are missing",
+            "Run tokenzero clients plan --profile standard --json, review the plan, then use tokenzero install --global --apply --mcp --json if approved.",
+        ),
+        _ => (
+            "tz-clients-missing",
+            "info",
+            "No TokenZero client integration surfaces were detected at the planned target paths",
+            "Run tokenzero clients plan --profile standard --json to inspect the read-only integration plan.",
+        ),
+    };
+    vec![json!({"id": id, "severity": severity, "summary": summary, "next_step": next_step})]
+}
+
 fn handle_clients_doctor(args: ClientStatusArgs) -> Result<()> {
     let agents = install_agents(&args.agents, args.grok)?;
     let root = install_root(args.root.clone(), true);
@@ -1423,26 +1283,7 @@ fn handle_clients_doctor(args: ClientStatusArgs) -> Result<()> {
         .get("status")
         .and_then(|value| value.as_str())
         .unwrap_or("unknown");
-    let findings = match status {
-        "installed" => vec![json!({
-            "id": "tz-clients-installed",
-            "severity": "info",
-            "summary": "TokenZero client integration surfaces are present",
-            "next_step": "Run tokenzero doctor --json for runtime health."
-        })],
-        "mixed" => vec![json!({
-            "id": "tz-clients-mixed",
-            "severity": "warning",
-            "summary": "Some TokenZero client integration surfaces are present and some are missing",
-            "next_step": "Run tokenzero clients plan --profile standard --json, review the plan, then use tokenzero install --global --apply --mcp --json if approved."
-        })],
-        _ => vec![json!({
-            "id": "tz-clients-missing",
-            "severity": "info",
-            "summary": "No TokenZero client integration surfaces were detected at the planned target paths",
-            "next_step": "Run tokenzero clients plan --profile standard --json to inspect the read-only integration plan."
-        })],
-    };
+    let findings = clients_doctor_findings(status);
     if let Some(object) = report.as_object_mut() {
         object.insert("findings".to_string(), json!(findings));
     }
@@ -1459,17 +1300,12 @@ fn handle_capabilities(args: CapabilitiesArgs) -> Result<()> {
 }
 
 fn handle_robot_docs(args: RobotDocsArgs) {
-    match args.command {
-        RobotDocsCommand::Guide => {
-            print!("{}", robot_docs_guide());
-        }
-        RobotDocsCommand::Commands => {
-            print!("{}", agent_surfaces::robot_docs_commands());
-        }
-        RobotDocsCommand::Examples => {
-            print!("{}", agent_surfaces::robot_docs_examples());
-        }
-    }
+    let text = match args.command {
+        RobotDocsCommand::Guide => robot_docs_guide(),
+        RobotDocsCommand::Commands => agent_surfaces::robot_docs_commands(),
+        RobotDocsCommand::Examples => agent_surfaces::robot_docs_examples(),
+    };
+    print!("{text}");
 }
 
 fn handle_package_audit(args: PackageAuditArgs) -> serde_json::Value {
@@ -1492,42 +1328,57 @@ fn handle_quote(args: QuoteArgs) -> Result<()> {
     let argv = normalize_command(&args.args);
     let quoted = quote_for(&args.platform, &argv);
     if args.json {
-        println!(
-            "{}",
-            serde_json::to_string_pretty(
-                &json!({"platform": args.platform, "argv": argv, "command": quoted})
-            )?
-        );
+        print_pretty(&json!({"platform": args.platform, "argv": argv, "command": quoted}))
     } else {
         println!("{quoted}");
+        Ok(())
     }
-    Ok(())
+}
+
+fn engine_config(
+    root: PathBuf,
+    allowed_roots: Vec<PathBuf>,
+    cache_path: PathBuf,
+    max_visible_tokens: usize,
+    mode: Mode,
+    shell_timeout: std::time::Duration,
+    mcp_idle_timeout: Option<std::time::Duration>,
+) -> EngineConfig {
+    EngineConfig {
+        allowed_roots,
+        cache_path,
+        max_visible_tokens,
+        mode,
+        shell_timeout,
+        mcp_idle_timeout,
+        ..EngineConfig::for_root(&root)
+    }
 }
 
 fn engine_from_tool(args: &ToolArgs) -> Result<TokenZeroEngine> {
     let root = tokenzero_work_root(None);
-    Ok(TokenZeroEngine::new(EngineConfig {
-        allowed_roots: allowed_roots_for_workspace(&root, &args.allowed_root),
-        cache_path: resolve_recovery_cache_path(&root, args.cache_path.clone()),
-        max_visible_tokens: args.budget.unwrap_or(4000),
-        mode: parse_mode(&args.mode)?,
-        shell_timeout: shell_timeout_from_secs(args.timeout_seconds),
-        mcp_idle_timeout: None,
-        ..EngineConfig::for_root(&root)
-    }))
+    Ok(TokenZeroEngine::new(engine_config(
+        root.clone(),
+        allowed_roots_for_workspace(&root, &args.allowed_root),
+        resolve_recovery_cache_path(&root, args.cache_path.clone()),
+        args.budget.unwrap_or(4000),
+        parse_mode(&args.mode)?,
+        shell_timeout_from_secs(args.timeout_seconds),
+        None,
+    )))
 }
 
 fn engine_from_common(args: &CommonArgs) -> TokenZeroEngine {
     let root = tokenzero_work_root(args.root.clone());
-    TokenZeroEngine::new(EngineConfig {
-        allowed_roots: default_allowed_roots(&root),
-        cache_path: resolve_recovery_cache_path(&root, args.cache_path.clone()),
-        max_visible_tokens: 4000,
-        mode: Mode::Auto,
-        shell_timeout: default_shell_timeout(),
-        mcp_idle_timeout: None,
-        ..EngineConfig::for_root(&root)
-    })
+    TokenZeroEngine::new(engine_config(
+        root.clone(),
+        default_allowed_roots(&root),
+        resolve_recovery_cache_path(&root, args.cache_path.clone()),
+        4000,
+        Mode::Auto,
+        default_shell_timeout(),
+        None,
+    ))
 }
 
 fn engine_config_for_mcp(args: &McpServerArgs) -> Result<EngineConfig> {
@@ -1538,16 +1389,17 @@ fn engine_config_for_mcp(args: &McpServerArgs) -> Result<EngineConfig> {
         .unwrap_or(&args.mode)
         .parse::<McpToolSurface>()
         .map_err(anyhow::Error::msg)?;
-    Ok(EngineConfig {
-        allowed_roots: allowed_roots_for_workspace(&root, &args.allowed_root),
-        cache_path: resolve_recovery_cache_path(&root, args.cache_path.clone()),
-        max_visible_tokens: 4000,
-        mode: parse_mode(&args.default_mode)?,
-        shell_timeout: shell_timeout_from_secs(args.shell_timeout_seconds),
-        mcp_idle_timeout: mcp_idle_timeout_from_secs(args.idle_timeout_seconds),
-        tool_surface,
-        ..EngineConfig::for_root(&root)
-    })
+    let mut config = engine_config(
+        root.clone(),
+        allowed_roots_for_workspace(&root, &args.allowed_root),
+        resolve_recovery_cache_path(&root, args.cache_path.clone()),
+        4000,
+        parse_mode(&args.default_mode)?,
+        shell_timeout_from_secs(args.shell_timeout_seconds),
+        mcp_idle_timeout_from_secs(args.idle_timeout_seconds),
+    );
+    config.tool_surface = tool_surface;
+    Ok(config)
 }
 
 fn mcp_work_root(allowed_roots: &[PathBuf]) -> PathBuf {
@@ -1562,27 +1414,27 @@ fn supervised_child_args(args: &McpServerArgs) -> Vec<std::ffi::OsString> {
         "mcp-server".into(),
         "--mode".into(),
         args.mode.clone().into(),
+        "--default-mode".into(),
+        args.default_mode.clone().into(),
+        "--idle-timeout-seconds".into(),
+        "0".into(),
     ];
+    let mut push_opt = |flag: &str, value: OsString| {
+        child_args.push(flag.into());
+        child_args.push(value);
+    };
     for root in &args.allowed_root {
-        child_args.push("--allowed-root".into());
-        child_args.push(root.clone().into_os_string());
+        push_opt("--allowed-root", root.clone().into_os_string());
     }
     if let Some(cache_path) = &args.cache_path {
-        child_args.push("--cache-path".into());
-        child_args.push(cache_path.clone().into_os_string());
+        push_opt("--cache-path", cache_path.clone().into_os_string());
     }
-    child_args.push("--default-mode".into());
-    child_args.push(args.default_mode.clone().into());
     if let Some(seconds) = args.shell_timeout_seconds {
-        child_args.push("--shell-timeout-seconds".into());
-        child_args.push(seconds.to_string().into());
+        push_opt("--shell-timeout-seconds", seconds.to_string().into());
     }
     if let Some(surface) = &args.tool_surface {
-        child_args.push("--tool-surface".into());
-        child_args.push(surface.clone().into());
+        push_opt("--tool-surface", surface.clone().into());
     }
-    child_args.push("--idle-timeout-seconds".into());
-    child_args.push("0".into());
     child_args
 }
 
@@ -1662,13 +1514,19 @@ fn content_type_from_kind(kind: &str, text: &str, path: Option<&Path>) -> Conten
     }
 }
 
+// Note: kind mapping kept as match for exhaustiveness readability of domain labels.
+
+fn parse_line_token(value: &str) -> Option<usize> {
+    value.trim().trim_start_matches('L').parse().ok()
+}
+
 fn expand_selector(args: &ExpandArgs) -> (Option<String>, Option<usize>, Option<usize>) {
     let mut selector = args.selector.clone();
     if args.raw || selector.is_none() {
-        selector = Some("raw".to_string());
+        selector = Some("raw".into());
     }
     if args.summary {
-        selector = Some("summary".to_string());
+        selector = Some("summary".into());
     }
     let mut start = args.start_line;
     let mut end = args.end_line;
@@ -1688,11 +1546,7 @@ fn expand_selector(args: &ExpandArgs) -> (Option<String>, Option<usize>, Option<
     }
     if let Some(around) = args.around.as_deref() {
         let (line, radius) = around.split_once(':').unwrap_or((around, "3"));
-        let line = line
-            .trim()
-            .trim_start_matches('L')
-            .parse::<usize>()
-            .unwrap_or(1);
+        let line = parse_line_token(line).unwrap_or(1);
         let radius = radius.parse::<usize>().unwrap_or(3);
         start = Some(line.saturating_sub(radius).max(1));
         end = Some(line + radius);
@@ -1700,53 +1554,56 @@ fn expand_selector(args: &ExpandArgs) -> (Option<String>, Option<usize>, Option<
     (selector, start, end)
 }
 
-fn install_capabilities(args: &InstallArgs) -> Vec<String> {
-    let mut caps = Vec::new();
-    if args.mcp || args.grok || !args.agents.is_empty() {
+fn capability_list(
+    want_mcp: bool,
+    shell: bool,
+    instructions: bool,
+    cli: bool,
+    hooks: bool,
+    shims: bool,
+    default_mcp_if_empty: bool,
+) -> Vec<String> {
+    let flags = [
+        (want_mcp, "mcp"),
+        (shell, "shell"),
+        (instructions, "instructions"),
+        (cli, "cli"),
+        (hooks, "hooks"),
+        (shims, "shim"),
+    ];
+    let mut caps: Vec<String> = flags
+        .into_iter()
+        .filter(|(on, _)| *on)
+        .map(|(_, name)| name.to_string())
+        .collect();
+    if default_mcp_if_empty && caps.is_empty() {
         caps.push("mcp".to_string());
-    }
-    if args.shell {
-        caps.push("shell".to_string());
-    }
-    if args.instructions {
-        caps.push("instructions".to_string());
-    }
-    if args.cli {
-        caps.push("cli".to_string());
-    }
-    if args.hooks {
-        caps.push("hooks".to_string());
-    }
-    if args.shims {
-        caps.push("shim".to_string());
     }
     caps
 }
 
+fn install_capabilities(args: &InstallArgs) -> Vec<String> {
+    capability_list(
+        args.mcp || args.grok || !args.agents.is_empty(),
+        args.shell,
+        args.instructions,
+        args.cli,
+        args.hooks,
+        args.shims,
+        false,
+    )
+}
+
 fn init_capabilities(args: &InitArgs) -> Vec<String> {
-    let mut caps = Vec::new();
-    if args.mcp || !args.agents.is_empty() {
-        caps.push("mcp".to_string());
-    }
-    if args.shell {
-        caps.push("shell".to_string());
-    }
-    if args.instructions {
-        caps.push("instructions".to_string());
-    }
-    if args.cli {
-        caps.push("cli".to_string());
-    }
-    if args.hooks {
-        caps.push("hooks".to_string());
-    }
-    if args.shims {
-        caps.push("shim".to_string());
-    }
-    if caps.is_empty() {
-        caps.push("mcp".to_string());
-    }
-    caps
+    capability_list(
+        args.mcp || !args.agents.is_empty(),
+        args.shell,
+        args.instructions,
+        args.cli,
+        args.hooks,
+        args.shims,
+        true,
+    )
 }
 
 fn clients_profile(raw: &str) -> Result<String> {
@@ -1798,18 +1655,15 @@ fn client_status_report(
         .iter()
         .map(|write| client_surface_status(write, root))
         .collect::<Result<Vec<_>>>()?;
-    let installed = surfaces
-        .iter()
-        .filter(|surface| surface["state"] == "installed")
-        .count();
-    let mixed = surfaces
-        .iter()
-        .filter(|surface| surface["state"] == "mixed")
-        .count();
-    let missing = surfaces
-        .iter()
-        .filter(|surface| surface["state"] == "missing")
-        .count();
+    let count = |state: &str| {
+        surfaces
+            .iter()
+            .filter(|surface| surface["state"] == state)
+            .count()
+    };
+    let installed = count("installed");
+    let mixed = count("mixed");
+    let missing = count("missing");
     let status = if installed > 0 && missing == 0 && mixed == 0 {
         "installed"
     } else if installed > 0 || mixed > 0 {
@@ -1859,32 +1713,38 @@ fn install_agents(raw_agents: &[String], grok: bool) -> Result<Vec<String>> {
     Ok(agents)
 }
 
+const AGENT_ALIASES: &[(&str, &str)] = &[
+    ("claude", "claude"),
+    ("claude-code", "claude"),
+    ("claude-desktop", "claude"),
+    ("codex", "codex"),
+    ("cursor", "cursor"),
+    ("droid", "droid"),
+    ("factory-droid", "droid"),
+    ("factory", "factory"),
+    ("gemini", "gemini"),
+    ("grok", "grok"),
+    ("opencode", "opencode"),
+    ("open-code", "opencode"),
+];
+
 fn push_agent(agents: &mut Vec<String>, raw: &str) -> Result<()> {
     let normalized = raw.trim().to_ascii_lowercase().replace(['_', ' '], "-");
-    let agent = match normalized.as_str() {
-        "all" => return Ok(()),
-        "claude" | "claude-code" | "claude-desktop" => "claude",
-        "codex" => "codex",
-        "cursor" => "cursor",
-        "droid" | "factory-droid" => "droid",
-        "factory" => "factory",
-        "gemini" => "gemini",
-        "grok" => "grok",
-        "opencode" | "open-code" => "opencode",
-        "" => anyhow::bail!("--agent requires a non-empty agent name"),
-        other => anyhow::bail!(
-            "unsupported agent '{other}'; expected one of claude, codex, cursor, droid, factory, gemini, grok, opencode, or all"
-        ),
+    if normalized == "all" {
+        return Ok(());
+    }
+    if normalized.is_empty() {
+        anyhow::bail!("--agent requires a non-empty agent name");
+    }
+    let Some((_, agent)) = AGENT_ALIASES.iter().find(|(alias, _)| *alias == normalized) else {
+        anyhow::bail!(
+            "unsupported agent '{normalized}'; expected one of claude, codex, cursor, droid, factory, gemini, grok, opencode, or all"
+        );
     };
-    if !agents.iter().any(|existing| existing == agent) {
-        agents.push(agent.to_string());
+    if !agents.iter().any(|existing| existing == *agent) {
+        agents.push((*agent).to_string());
     }
     Ok(())
-}
-
-struct EmitResponse {
-    response: ToolResponse,
-    json: bool,
 }
 
 fn emit(value: EmitResponse) -> Result<()> {
@@ -1944,7 +1804,7 @@ fn child_failure_exit_code(response: &ToolResponse) -> Option<i32> {
 
 fn emit_value<T: serde::Serialize>(value: T, _as_json: bool) -> Result<()> {
     let json_value = serde_json::to_value(value)?;
-    println!("{}", serde_json::to_string_pretty(&json_value)?);
+    print_pretty(&json_value)?;
     if json_value.get("ok") == Some(&json!(false))
         || json_value.get("status") == Some(&json!("blocked"))
     {

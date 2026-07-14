@@ -1,8 +1,4 @@
-//! Disk-backed session seen-set (survives MCP process respawn).
-//!
-//! Gated on `EngineConfig::session_dedup`; `TOKENZERO_MCP_DEDUP=off` skips load
-//! and persist entirely. Scoped by `TOKENZERO_SESSION_SCOPE` when set, else a
-//! per-cache-store bucket so unrelated engine configurations do not cross-suppress.
+//! Disk-backed, per-scope session seen-set.
 
 use crate::session::{ServeKey, ServedRecord, SessionMemory};
 use fs4::FileExt;
@@ -11,14 +7,12 @@ use std::collections::{BTreeMap, HashMap};
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
 pub const SESSION_SCOPE_ENV: &str = "TOKENZERO_SESSION_SCOPE";
 #[cfg(not(test))]
 const REF_INDEX_PATH_ENV: &str = "TOKENZERO_REF_INDEX_PATH";
-/// Max served-payload records per scope (aligned with recovery `max_units`).
 pub const MAX_SESSION_MEMORY_RECORDS: usize = 2048;
-
 const LOCK_RETRIES: usize = 240;
 const LOCK_RETRY_DELAY: Duration = Duration::from_millis(25);
 const STATE_VERSION: u32 = 2;
@@ -32,42 +26,28 @@ pub(crate) struct SessionPersistence {
 
 impl SessionPersistence {
     pub(crate) fn for_cache(cache_path: &Path, session_dedup: bool) -> Option<Self> {
-        if !session_dedup {
-            return None;
-        }
-        let path = session_memory_path(cache_path);
-        let scope_id = session_scope_id(cache_path);
-        Some(Self {
-            path,
+        session_dedup.then(|| Self {
+            path: session_memory_path(cache_path),
             cache_path: cache_path.to_path_buf(),
-            scope_id,
+            scope_id: session_scope_id(cache_path),
         })
     }
 
     pub(crate) fn load_into(&self, memory: &mut SessionMemory) {
-        let Ok(Some(state)) = load_state(&self.path) else {
-            return;
-        };
-        let Some(scope) = state.scopes.get(&self.scope_id) else {
-            return;
-        };
+        let Some(state) = load_state(&self.path) else { return };
+        let Some(scope) = state.scopes.get(&self.scope_id) else { return };
         let store = tokenzero_recovery::RecoveryStore::new(Some(self.cache_path.clone()));
-        let mut records = HashMap::new();
-        // v1 has no watermark, so its first resumed turn must serve full. A
-        // legacy state remains readable, but its unwatermarked seen-set is not
-        // promoted into the v2 delta stream.
-        if state.version >= STATE_VERSION {
-            for entry in &scope.records {
-                // Resume validation is fail-safe: if the content blob was
-                // GC'd, forget the entry and force a full resend. The file ref
-                // is diagnostic only and may be project-local.
-                if !store.has_ref(&entry.record.blob_ref) {
-                    continue;
-                }
-                let key = serve_key_from_persisted(&entry.key);
-                records.insert(key, served_record_from_persisted(&entry.record));
-            }
-        }
+        // v1 has no watermark, so its first resumed turn must serve full.
+        let records = if state.version >= STATE_VERSION {
+            scope
+                .records
+                .iter()
+                .filter(|entry| store.has_ref(&entry.record.blob_ref))
+                .map(|entry| (entry.key.clone(), entry.record.clone()))
+                .collect()
+        } else {
+            HashMap::new()
+        };
         memory.restore_from_persist(
             records,
             scope.rollup.dedup_hits,
@@ -89,50 +69,55 @@ impl SessionPersistence {
             fs::create_dir_all(parent)?;
         }
         let _lock = SessionPersistLock::acquire(session_lock_path(&self.path))?;
-        let mut state = load_state(&self.path)?.unwrap_or_default();
+        let mut state = load_state(&self.path).unwrap_or_default();
+        let (dedup_hits, diff_hits, visible_tokens_saved, diff_tokens_saved) =
+            memory.rollup_counters();
+        let (full_bytes, delta_bytes) = memory.byte_rollup();
         let rollup = PersistedRollup {
-            dedup_hits: memory.rollup_counters().0,
-            diff_hits: memory.rollup_counters().1,
-            visible_tokens_saved: memory.rollup_counters().2,
-            diff_tokens_saved: memory.rollup_counters().3,
-            full_bytes: memory.byte_rollup().0,
-            delta_bytes: memory.byte_rollup().1,
+            dedup_hits,
+            diff_hits,
+            visible_tokens_saved,
+            diff_tokens_saved,
+            full_bytes,
+            delta_bytes,
         };
-        let mut records: Vec<PersistedRecordEntry> = memory
+        let mut records: Vec<_> = memory
             .records_snapshot()
             .iter()
             .enumerate()
             .map(|(idx, (key, record))| PersistedRecordEntry {
-                key: persisted_key(key),
-                record: persisted_record(record),
+                key: key.clone(),
+                record: record.clone(),
                 seq: idx as u64 + 1,
             })
             .collect();
-        records.sort_by_key(|entry| serde_json::to_string(&entry.key).unwrap_or_default());
+        sort_records(&mut records);
         for (idx, entry) in records.iter_mut().enumerate() {
             entry.seq = idx as u64 + 1;
         }
-        let mut merged: HashMap<PersistedServeKey, PersistedRecordEntry> = HashMap::new();
+
+        let mut merged = HashMap::new();
         if state.version >= STATE_VERSION {
             if let Some(existing) = state.scopes.get(&self.scope_id) {
-                for entry in &existing.records {
-                    merged.insert(entry.key.clone(), entry.clone());
-                }
+                merged.extend(
+                    existing
+                        .records
+                        .iter()
+                        .cloned()
+                        .map(|entry| (entry.key.clone(), entry)),
+                );
             }
         }
-        for entry in records {
-            merged.insert(entry.key.clone(), entry);
-        }
-        let mut scoped = PersistedScope {
+        merged.extend(records.into_iter().map(|entry| (entry.key.clone(), entry)));
+        let mut scope = PersistedScope {
             records: merged.into_values().collect(),
             rollup,
             session_hwm: memory.session_hwm(),
         };
-        scoped
-            .records
-            .sort_by_key(|entry| serde_json::to_string(&entry.key).unwrap_or_default());
-        evict_scope_records(&mut scoped, MAX_SESSION_MEMORY_RECORDS);
-        state.scopes.insert(self.scope_id.clone(), scoped);
+        sort_records(&mut scope.records);
+        evict_scope_records(&mut scope, MAX_SESSION_MEMORY_RECORDS);
+        state.version = STATE_VERSION;
+        state.scopes.insert(self.scope_id.clone(), scope);
         atomic_write_json(&self.path, &state)
     }
 }
@@ -147,10 +132,10 @@ fn user_memory_root(cache_path: &Path) -> PathBuf {
         if let Some(path) = SESSION_ROOT_TEST_OVERRIDE.with(|slot| slot.borrow().clone()) {
             return path;
         }
-        return cache_path
+        cache_path
             .parent()
             .unwrap_or_else(|| Path::new("."))
-            .to_path_buf();
+            .to_path_buf()
     }
     #[cfg(not(test))]
     {
@@ -173,7 +158,7 @@ fn user_memory_root_from(
         .map(PathBuf::from)
         .or_else(|| {
             home.filter(|value| !value.is_empty())
-                .map(|home| PathBuf::from(home).join(".tokenzero").join("ref-index"))
+                .map(|home| PathBuf::from(home).join(".tokenzero/ref-index"))
         })
         .unwrap_or_else(|| {
             cache_path
@@ -184,13 +169,11 @@ fn user_memory_root_from(
 }
 
 pub(crate) fn session_scope_id(_cache_path: &Path) -> String {
-    if let Ok(value) = std::env::var(SESSION_SCOPE_ENV) {
-        let trimmed = value.trim();
-        if !trimmed.is_empty() {
-            return trimmed.to_string();
-        }
-    }
-    "__user_global__".to_string()
+    std::env::var(SESSION_SCOPE_ENV)
+        .ok()
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| "__user_global__".to_owned())
 }
 
 #[cfg(test)]
@@ -205,10 +188,7 @@ pub(crate) fn with_session_root<R>(root: &Path, f: impl FnOnce() -> R) -> R {
         let previous = slot.replace(Some(root.to_path_buf()));
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f));
         slot.replace(previous);
-        match result {
-            Ok(value) => value,
-            Err(payload) => std::panic::resume_unwind(payload),
-        }
+        result.unwrap_or_else(|payload| std::panic::resume_unwind(payload))
     })
 }
 
@@ -234,53 +214,16 @@ struct PersistedScope {
     records: Vec<PersistedRecordEntry>,
     #[serde(default)]
     rollup: PersistedRollup,
-    /// Monotonic per-scope turn watermark. Missing in v1 means 0/full resend.
     #[serde(default)]
     session_hwm: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct PersistedRecordEntry {
-    key: PersistedServeKey,
-    record: PersistedServedRecord,
+    key: ServeKey,
+    record: ServedRecord,
     #[serde(default)]
     seq: u64,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
-enum PersistedServeKey {
-    File {
-        path: String,
-        start: Option<usize>,
-        end: Option<usize>,
-    },
-    Output {
-        tool: String,
-        query: String,
-        roots: Vec<String>,
-    },
-    Expand {
-        ref_id: String,
-        start_line: Option<usize>,
-        end_line: Option<usize>,
-        selector_norm: String,
-        symbol_norm: String,
-        anchor_kind_norm: String,
-    },
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct PersistedServedRecord {
-    content_sha256: String,
-    blob_ref: String,
-    file_ref: String,
-    raw_tokens: usize,
-    line_count: usize,
-    byte_len: usize,
-    serve_count: usize,
-    #[serde(default)]
-    served_at_unix_secs: Option<u64>,
 }
 
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
@@ -295,17 +238,16 @@ struct PersistedRollup {
     delta_bytes: usize,
 }
 
-fn load_state(path: &Path) -> std::io::Result<Option<SessionMemoryState>> {
-    let Ok(text) = fs::read_to_string(path) else {
-        return Ok(None);
-    };
-    let Ok(mut state) = serde_json::from_str::<SessionMemoryState>(&text) else {
-        return Ok(None);
-    };
+fn load_state(path: &Path) -> Option<SessionMemoryState> {
+    let mut state = serde_json::from_str::<SessionMemoryState>(&fs::read_to_string(path).ok()?).ok()?;
     if state.version == 0 {
         state.version = STATE_VERSION;
     }
-    Ok(Some(state))
+    Some(state)
+}
+
+fn sort_records(records: &mut [PersistedRecordEntry]) {
+    records.sort_by_key(|entry| serde_json::to_string(&entry.key).unwrap_or_default());
 }
 
 fn evict_scope_records(scope: &mut PersistedScope, limit: usize) {
@@ -314,7 +256,7 @@ fn evict_scope_records(scope: &mut PersistedScope, limit: usize) {
     }
     let excess = scope.records.len() - limit;
     scope.records.sort_by_key(|entry| entry.seq);
-    scope.records.drain(0..excess);
+    scope.records.drain(..excess);
     for (idx, entry) in scope.records.iter_mut().enumerate() {
         entry.seq = idx as u64 + 1;
     }
@@ -329,10 +271,7 @@ fn atomic_write_json(path: &Path, state: &SessionMemoryState) -> std::io::Result
         fs::set_permissions(parent, fs::Permissions::from_mode(0o700))?;
     }
     let tmp = path.with_extension(format!("tmp-{}", std::process::id()));
-    let body = serde_json::to_string_pretty(&SessionMemoryState {
-        version: STATE_VERSION,
-        scopes: state.scopes.clone(),
-    })?;
+    let body = serde_json::to_string_pretty(state)?;
     let mut options = OpenOptions::new();
     options.write(true).create(true).truncate(true);
     #[cfg(unix)]
@@ -344,26 +283,23 @@ fn atomic_write_json(path: &Path, state: &SessionMemoryState) -> std::io::Result
     tmp_file.write_all(body.as_bytes())?;
     tmp_file.flush()?;
     drop(tmp_file);
-    match fs::rename(&tmp, path) {
-        Ok(()) => Ok(()),
-        Err(err) => {
-            let _ = fs::remove_file(&tmp);
-            Err(err)
-        }
+    if let Err(err) = fs::rename(&tmp, path) {
+        let _ = fs::remove_file(&tmp);
+        return Err(err);
     }
+    Ok(())
 }
+
 fn session_lock_path(path: &Path) -> PathBuf {
     let mut name = path
         .file_name()
-        .map(|s| s.to_os_string())
-        .unwrap_or_else(|| std::ffi::OsString::from("session-memory.json"));
+        .map(|name| name.to_os_string())
+        .unwrap_or_else(|| "session-memory.json".into());
     name.push(".lock");
     path.with_file_name(name)
 }
 
-struct SessionPersistLock {
-    file: fs::File,
-}
+struct SessionPersistLock(fs::File);
 
 impl SessionPersistLock {
     fn acquire(path: PathBuf) -> std::io::Result<Self> {
@@ -380,11 +316,9 @@ impl SessionPersistLock {
             match FileExt::try_lock(&file) {
                 Ok(()) => {
                     let _ = writeln!(file, "{}", std::process::id());
-                    return Ok(Self { file });
+                    return Ok(Self(file));
                 }
-                Err(_) if attempt + 1 < LOCK_RETRIES => {
-                    std::thread::sleep(LOCK_RETRY_DELAY);
-                }
+                Err(_) if attempt + 1 < LOCK_RETRIES => std::thread::sleep(LOCK_RETRY_DELAY),
                 Err(err) => return Err(err.into()),
             }
         }
@@ -397,104 +331,6 @@ impl SessionPersistLock {
 
 impl Drop for SessionPersistLock {
     fn drop(&mut self) {
-        let _ = FileExt::unlock(&self.file);
-    }
-}
-
-fn persisted_key(key: &ServeKey) -> PersistedServeKey {
-    match key {
-        ServeKey::File { path, start, end } => PersistedServeKey::File {
-            path: path.to_string_lossy().into_owned(),
-            start: *start,
-            end: *end,
-        },
-        ServeKey::Output { tool, query, roots } => PersistedServeKey::Output {
-            tool: tool.clone(),
-            query: query.clone(),
-            roots: roots
-                .iter()
-                .map(|p| p.to_string_lossy().into_owned())
-                .collect(),
-        },
-        ServeKey::Expand {
-            ref_id,
-            start_line,
-            end_line,
-            selector_norm,
-            symbol_norm,
-            anchor_kind_norm,
-        } => PersistedServeKey::Expand {
-            ref_id: ref_id.clone(),
-            start_line: *start_line,
-            end_line: *end_line,
-            selector_norm: selector_norm.clone(),
-            symbol_norm: symbol_norm.clone(),
-            anchor_kind_norm: anchor_kind_norm.clone(),
-        },
-    }
-}
-
-fn serve_key_from_persisted(key: &PersistedServeKey) -> ServeKey {
-    match key {
-        PersistedServeKey::File { path, start, end } => ServeKey::File {
-            path: PathBuf::from(path),
-            start: *start,
-            end: *end,
-        },
-        PersistedServeKey::Output { tool, query, roots } => ServeKey::Output {
-            tool: tool.clone(),
-            query: query.clone(),
-            roots: roots.iter().map(PathBuf::from).collect(),
-        },
-        PersistedServeKey::Expand {
-            ref_id,
-            start_line,
-            end_line,
-            selector_norm,
-            symbol_norm,
-            anchor_kind_norm,
-        } => ServeKey::Expand {
-            ref_id: ref_id.clone(),
-            start_line: *start_line,
-            end_line: *end_line,
-            selector_norm: selector_norm.clone(),
-            symbol_norm: symbol_norm.clone(),
-            anchor_kind_norm: anchor_kind_norm.clone(),
-        },
-    }
-}
-
-fn persisted_record(record: &ServedRecord) -> PersistedServedRecord {
-    let served_at_unix_secs = record
-        .served_at
-        .duration_since(UNIX_EPOCH)
-        .ok()
-        .map(|d| d.as_secs());
-    PersistedServedRecord {
-        content_sha256: record.content_sha256.clone(),
-        blob_ref: record.blob_ref.clone(),
-        file_ref: record.file_ref.clone(),
-        raw_tokens: record.raw_tokens,
-        line_count: record.line_count,
-        byte_len: record.byte_len,
-        serve_count: record.serve_count,
-        served_at_unix_secs,
-    }
-}
-
-fn served_record_from_persisted(record: &PersistedServedRecord) -> ServedRecord {
-    let served_at = record
-        .served_at_unix_secs
-        .and_then(|secs| UNIX_EPOCH.checked_add(Duration::from_secs(secs)))
-        .unwrap_or_else(SystemTime::now);
-    ServedRecord {
-        content_sha256: record.content_sha256.clone(),
-        blob_ref: record.blob_ref.clone(),
-        file_ref: record.file_ref.clone(),
-        raw_tokens: record.raw_tokens,
-        line_count: record.line_count,
-        byte_len: record.byte_len,
-        served_at,
-        serve_count: record.serve_count,
+        let _ = FileExt::unlock(&self.0);
     }
 }

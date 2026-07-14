@@ -1,6 +1,38 @@
 use crate::shell_parse::split_shell_segments;
 use crate::*;
 
+pub(crate) struct InventoryStats<'a> {
+    pub files: usize,
+    pub dirs: usize,
+    pub line_counts: Vec<&'a str>,
+    pub paths: Vec<&'a str>,
+}
+
+pub(crate) fn inventory_stats<'a>(
+    output: &'a str,
+    sample_limit: usize,
+    is_file: impl Fn(&str) -> bool,
+) -> InventoryStats<'a> {
+    let mut stats = InventoryStats { files: 0, dirs: 0, line_counts: Vec::new(), paths: Vec::new() };
+    for line in output.lines().map(str::trim) {
+        if line.is_empty() || line.starts_with("===") || line.starts_with("---") {
+            continue;
+        }
+        if line.ends_with('/') {
+            stats.dirs += 1;
+        } else if is_file(line) {
+            stats.files += 1;
+            if stats.paths.len() < sample_limit {
+                stats.paths.push(line);
+            }
+        }
+        if line.split_whitespace().next().is_some_and(|value| value.parse::<usize>().is_ok()) {
+            stats.line_counts.push(line);
+        }
+    }
+    stats
+}
+
 pub fn is_repo_inventory_command(command: &str) -> bool {
     let lower = command.to_ascii_lowercase();
     let inventory_shape =
@@ -23,77 +55,35 @@ fn segment_is_bare_ls(lower: &str) -> bool {
         .any(|segment| segment == "ls" || segment.starts_with("ls -") || segment.starts_with("ls "))
 }
 
+const INVENTORY_COMMANDS: &[&str] = &[
+    "ls", "find", "tree", "dir", "gci", "get-childitem", "sort", "wc", "head", "tail",
+    "uniq", "cut", "echo", "cat", "sort-object", "select-object", "where-object", "measure-object",
+];
+
 fn all_segments_inventory_safe(command: &str) -> bool {
     split_shell_segments(command).iter().all(|segment| {
-        split_shell_words(segment)
-            .first()
-            .map(|word| shell_command_basename(word))
-            .is_some_and(|first| {
-                matches!(
-                    first.as_str(),
-                    "ls" | "find"
-                        | "tree"
-                        | "dir"
-                        | "gci"
-                        | "get-childitem"
-                        | "sort"
-                        | "wc"
-                        | "head"
-                        | "tail"
-                        | "uniq"
-                        | "cut"
-                        | "echo"
-                        | "cat"
-                        | "sort-object"
-                        | "select-object"
-                        | "where-object"
-                        | "measure-object"
-                )
-            })
+        split_shell_words(segment).first().map(|word| shell_command_basename(word))
+            .is_some_and(|first| INVENTORY_COMMANDS.contains(&first.as_str()))
     })
 }
 
 pub fn repo_inventory_view(command: &str, output: &str) -> String {
-    let mut file_count = 0usize;
-    let mut dir_count = 0usize;
-    let mut line_count_rows = Vec::new();
-    let mut sample_files = Vec::new();
-    for line in output.lines() {
-        let trimmed = line.trim();
-        if trimmed.is_empty() || trimmed.starts_with("===") || trimmed.starts_with("---") {
-            continue;
-        }
-        if trimmed.ends_with('/') {
-            dir_count += 1;
-        } else if trimmed.contains('/') || trimmed.contains('.') {
-            file_count += 1;
-            if sample_files.len() < 20 {
-                sample_files.push(trimmed.to_string());
-            }
-        }
-        if trimmed
-            .split_whitespace()
-            .next()
-            .is_some_and(|v| v.parse::<usize>().is_ok())
-        {
-            line_count_rows.push(trimmed.to_string());
-        }
-    }
+    let stats = inventory_stats(output, 20, |line| line.contains('/') || line.contains('.'));
     let mut out = String::new();
     out.push_str("repo_inventory:\n");
     out.push_str(&format!("command: {command}\n"));
-    out.push_str(&format!("files_seen: {file_count}\n"));
-    out.push_str(&format!("dirs_seen: {dir_count}\n"));
-    if !line_count_rows.is_empty() {
-        out.push_str("linecount_summary:\n");
-        for row in line_count_rows.iter().take(12) {
-            out.push_str(&format!("- {row}\n"));
+    out.push_str(&format!("files_seen: {}\ndirs_seen: {}\n", stats.files, stats.dirs));
+    for (label, values, limit) in [
+        ("linecount_summary", &stats.line_counts, 12),
+        ("sample_paths", &stats.paths, 20),
+    ] {
+        if values.is_empty() {
+            continue;
         }
-    }
-    if !sample_files.is_empty() {
-        out.push_str("sample_paths:\n");
-        for file in sample_files {
-            out.push_str(&format!("- {file}\n"));
+        out.push_str(label);
+        out.push_str(":\n");
+        for value in values.iter().take(limit) {
+            out.push_str(&format!("- {value}\n"));
         }
     }
     out
@@ -174,11 +164,10 @@ pub(crate) fn is_search_shell_command(command: &str) -> bool {
     any_search
 }
 
+const SEARCH_FILTERS: &[&str] = &["head", "tail", "sort", "uniq", "wc", "cut", "tr", "cat", "tee"];
+
 fn is_search_pipeline_filter(basename: &str) -> bool {
-    matches!(
-        basename,
-        "head" | "tail" | "sort" | "uniq" | "wc" | "cut" | "tr" | "cat" | "tee"
-    )
+    SEARCH_FILTERS.contains(&basename)
 }
 
 pub(crate) fn is_search_command(command: &str) -> bool {
@@ -334,23 +323,9 @@ pub(crate) fn git_subcommand_index(words: &[String]) -> Option<usize> {
 }
 
 pub(crate) fn search_shell_view(stdout: &str, stderr: &str) -> String {
-    let mut matches = Vec::new();
-    let mut diagnostics = Vec::new();
-    for line in stdout.lines() {
-        let trimmed = line.trim_end();
-        if !trimmed.is_empty() {
-            matches.push(trimmed);
-        }
-    }
-    for line in stderr.lines() {
-        let trimmed = line.trim_end();
-        if trimmed.is_empty() {
-            continue;
-        }
-        if looks_critical_line(trimmed) {
-            diagnostics.push(trimmed);
-        }
-    }
+    let matches: Vec<_> = stdout.lines().map(str::trim_end).filter(|line| !line.is_empty()).collect();
+    let diagnostics: Vec<_> = stderr.lines().map(str::trim_end)
+        .filter(|line| !line.is_empty() && looks_critical_line(line)).collect();
 
     let mut out = String::from("search_summary:\n");
     out.push_str(&format!("matches_seen: {}\n", matches.len()));

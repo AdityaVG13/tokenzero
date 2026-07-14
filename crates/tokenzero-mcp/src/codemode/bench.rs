@@ -565,6 +565,12 @@ fn measure_raw_leg(root: &Path, workload: &Workload) -> RawMeasurement {
 mod bench_harness {
     use super::*;
 
+    fn measure(plan: &str, tag: &str) -> PlanMeasurement {
+        let root = std::env::current_dir().unwrap();
+        let engine = engine_for_leg(&root, hermetic_cache_path(0, tag, "plan"));
+        measure_plan_leg(&engine, plan)
+    }
+
     #[test]
     fn scalar_return_plan_folds_into_primary_content() {
         let root = std::env::current_dir().unwrap();
@@ -586,33 +592,26 @@ mod bench_harness {
     #[test]
     fn pipe_composition_payload_is_ref_preview() {
         let root = std::env::current_dir().unwrap();
-        let workload = workloads_for_root(&root)
+        let plan = workloads_for_root(&root)
             .into_iter()
-            .find(|workload| workload.name == "pipe-composition")
-            .unwrap();
-        let engine = engine_for_leg(&root, hermetic_cache_path(0, "pipe-payload", "plan"));
-        let measured = measure_plan_leg(&engine, &workload.plan);
+            .find(|w| w.name == "pipe-composition")
+            .unwrap()
+            .plan;
+        let measured = measure(&plan, "pipe-payload");
         assert!(measured.payload_tokens < 40, "{measured:?}");
         assert_eq!(measured.wire_texts.len(), 2, "{:?}", measured.wire_texts);
-        let structured: Value = serde_json::from_str(&measured.wire_texts[1]).unwrap();
-        let value = structured.get("value").unwrap();
+        let value = serde_json::from_str::<Value>(&measured.wire_texts[1])
+            .unwrap()
+            .get("value")
+            .unwrap()
+            .clone();
         assert!(value.get("ref").and_then(Value::as_str).is_some());
-        assert!(
-            value
-                .get("preview")
-                .and_then(Value::as_str)
-                .unwrap_or("")
-                .chars()
-                .count()
-                <= 32
-        );
+        assert!(value.get("preview").and_then(Value::as_str).unwrap_or("").chars().count() <= 32);
     }
 
     #[test]
     fn codemode_v2_structured_json_is_compact() {
-        let root = std::env::current_dir().unwrap();
-        let engine = engine_for_leg(&root, hermetic_cache_path(0, "compact-json", "plan"));
-        let measured = measure_plan_leg(&engine, "return { answer: 42 }");
+        let measured = measure("return { answer: 42 }", "compact-json");
         assert_eq!(measured.wire_texts.len(), 2);
         let structured = &measured.wire_texts[1];
         assert!(!structured.contains(": "), "{structured}");
@@ -622,72 +621,40 @@ mod bench_harness {
         assert!(!structured.contains("null"), "{structured}");
     }
 
-    #[test]
-    fn matrix_integrity_sums_exact_and_legs_nonzero() {
-        let report = run_benchmark(&std::env::current_dir().unwrap());
-        assert_eq!(report.version, BENCHMARK_REPORT_VERSION);
-        for workload in &report.workloads {
-            assert!(workload.raw_visible_tokens > 0, "{} raw", workload.workload);
-            assert!(
-                workload.perop_visible_tokens > 0,
-                "{} per-op",
-                workload.workload
-            );
-            assert!(
-                workload.plan_visible_tokens > 0,
-                "{} plan",
-                workload.workload
-            );
-            assert!(workload.payload_tokens > 0, "{} payload", workload.workload);
-            assert!(
-                workload.envelope_tokens > 0,
-                "{} envelope",
-                workload.workload
-            );
-            assert_eq!(
-                workload.payload_tokens + workload.envelope_tokens,
-                workload.plan_visible_tokens,
-                "{} visible split",
-                workload.workload
-            );
+#[test]
+fn matrix_integrity_sums_exact_and_legs_nonzero() {
+    let report = run_benchmark(&std::env::current_dir().unwrap());
+    assert_eq!(report.version, BENCHMARK_REPORT_VERSION);
+    for workload in &report.workloads {
+        for (leg, tokens) in [
+            ("raw", workload.raw_visible_tokens),
+            ("per-op", workload.perop_visible_tokens),
+            ("plan", workload.plan_visible_tokens),
+            ("payload", workload.payload_tokens),
+            ("envelope", workload.envelope_tokens),
+        ] {
+            assert!(tokens > 0, "{} {leg}", workload.workload);
         }
         assert_eq!(
-            report.totals.total_raw_visible,
-            report
-                .workloads
-                .iter()
-                .map(|r| r.raw_visible_tokens)
-                .sum::<usize>()
-        );
-        assert_eq!(
-            report.totals.total_perop_visible,
-            report
-                .workloads
-                .iter()
-                .map(|r| r.perop_visible_tokens)
-                .sum::<usize>()
-        );
-        assert_eq!(
-            report.totals.total_perop_args,
-            report
-                .workloads
-                .iter()
-                .map(|r| r.perop_args_tokens)
-                .sum::<usize>()
-        );
-        assert_eq!(
-            report.totals.total_plan_visible,
-            report
-                .workloads
-                .iter()
-                .map(|r| r.plan_visible_tokens)
-                .sum::<usize>()
-        );
-        assert_eq!(
-            report.totals.total_plan_visible,
-            report.totals.total_payload + report.totals.total_envelope
+            workload.payload_tokens + workload.envelope_tokens,
+            workload.plan_visible_tokens,
+            "{} visible split",
+            workload.workload,
         );
     }
+    for (actual, expected, label) in [
+        (report.totals.total_raw_visible, report.workloads.iter().map(|r| r.raw_visible_tokens).sum::<usize>(), "raw"),
+        (report.totals.total_perop_visible, report.workloads.iter().map(|r| r.perop_visible_tokens).sum::<usize>(), "per-op"),
+        (report.totals.total_perop_args, report.workloads.iter().map(|r| r.perop_args_tokens).sum::<usize>(), "per-op args"),
+        (report.totals.total_plan_visible, report.workloads.iter().map(|r| r.plan_visible_tokens).sum::<usize>(), "plan"),
+    ] {
+        assert_eq!(actual, expected, "{label} total");
+    }
+    assert_eq!(
+        report.totals.total_plan_visible,
+        report.totals.total_payload + report.totals.total_envelope,
+    );
+}
 
     #[test]
     fn plan_leg_matches_fastmcp_v2_rendering_byte_for_byte() {

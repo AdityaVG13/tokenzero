@@ -37,7 +37,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Condvar, Mutex, OnceLock};
 use std::time::{Duration, SystemTime};
 use tokenzero_filters::rewrite_command;
-use tokenzero_recovery::{ExpansionResult, RecoveryStore, StoredPayload};
+use tokenzero_recovery::RecoveryStore;
 use tokenzero_runtime::{
     RunOutputPolicy, StreamCapture, contains_platform_shell_syntax, run_command_with_policy,
 };
@@ -92,6 +92,7 @@ impl TokenZeroEngine {
             &config.allowed_roots,
         )
         .ok();
+        let cache_path = config.cache_path.clone();
         Self {
             config,
             rg_binary: OnceLock::new(),
@@ -99,6 +100,7 @@ impl TokenZeroEngine {
             working_set: Mutex::new(tokenzero_recovery::working_set::WorkingSet::new(
                 tokenzero_recovery::working_set::DEFAULT_WORKING_SET_TOKENS,
             )),
+            recovery_store: Mutex::new(RecoveryStore::new(Some(cache_path))),
             in_flight: (Mutex::new(HashSet::new()), Condvar::new()),
             session_id,
             ledger,
@@ -297,7 +299,9 @@ impl TokenZeroEngine {
         if text.is_empty() {
             return;
         }
-        let mut store = RecoveryStore::new(Some(self.config.cache_path.clone()));
+        let Ok(mut store) = self.recovery_store.lock() else {
+            return;
+        };
         let Ok(mut working_set) = self.working_set.lock() else {
             return;
         };

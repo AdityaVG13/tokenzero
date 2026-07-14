@@ -1,66 +1,15 @@
-//! `TokenZeroEngine` methods extracted from `lib.rs`.
-#![allow(unused_imports)]
-
-use super::cache_pack::{
-    cache_pack_manifest_path, cache_pack_sources, previous_cache_digest, read_line_range_from_file,
-};
-use super::collect::*;
-use super::config::{
-    EngineConfig, FETCH_ALLOW_ENV, FETCH_DENY_ENV, FETCH_ENABLED_ENV, ServeFlight, new_session_id,
-};
-use super::fetch_cache::{epoch_secs, fetch_index_path, load_fetch_index, record_fetch};
-use super::fetch_guard::{FETCH_META_MARKER, split_fetch_meta, validate_fetch_target};
-use super::metrics;
-use super::paths::*;
-use super::render::*;
-use super::session::{
-    DiffTelemetry, SeenState, ServeKey, ServedRecord, SessionMemory, SessionSummary,
-};
-use super::{
-    Accounting, ContentType, DEFAULT_MCP_IDLE_TIMEOUT_SECS, DEFAULT_SHELL_TIMEOUT_SECS,
-    DIFF_MAX_BYTES, DIFF_MAX_LINES, DIFF_READS_ENV, EditHunk, MAX_MCP_IDLE_TIMEOUT_SECS,
-    MAX_SEARCH_VISITED_FILES, MAX_SHELL_TIMEOUT_SECS, MIN_SEARCH_VISITED_FILES, Mode, RG_PATH_ENV,
-    SEARCH_BACKEND_ENV, SEARCH_VISIT_MULTIPLIER, SESSION_DEDUP_ENV, SearchBackend, ServeOptions,
-    ShellRenderInput, TokenZeroEngine, ToolResponse, cache_maintenance, count_tokens,
-    detect_content_type, make_capsule, make_capsule_with_raw_tokens, ref_record, render_shell,
-    sha256_hex, shell_combined_output, shell_spill_dir, shell_timeout_from_secs,
-    split_command_string, tool_specs,
-};
-use crate::recall;
-use globset::{GlobBuilder, GlobMatcher};
-use serde_json::{Value, json};
-use std::collections::{BTreeMap, HashSet};
-use std::ffi::OsString;
-use std::fs;
-use std::path::{Path, PathBuf};
-use std::sync::{Condvar, Mutex, OnceLock};
-use std::time::{Duration, SystemTime};
-use tokenzero_filters::rewrite_command;
-use tokenzero_recovery::{ExpansionResult, RecoveryStore, StoredPayload};
-use tokenzero_runtime::{
-    RunOutputPolicy, StreamCapture, contains_platform_shell_syntax, run_command_with_policy,
-};
+use super::*;
 
 impl TokenZeroEngine {
     pub fn mem(&self) -> ToolResponse {
-        let store = RecoveryStore::new(Some(self.config.cache_path.clone()));
+        let store = self.recovery_store();
         let mut status = store.export_status();
         if let Some(object) = status.as_object_mut() {
             object.insert("session_dedup".to_string(), self.session_rollup());
         }
         let text = serde_json::to_string_pretty(&status).unwrap_or_else(|_| "{}".to_string());
-        ToolResponse::ok(
-            "mem",
-            Mode::Hybrid,
-            text.clone(),
-            Vec::new(),
-            Accounting {
-                raw_tokens: count_tokens(&text),
-                visible_tokens: count_tokens(&text),
-                recovery_tokens: 0,
-                exact_ref_tokens: Some(0),
-            },
-        )
+        let tokens = count_tokens(&text);
+        success_response("mem", Mode::Hybrid, text, Vec::new(), (tokens, tokens, 0, Some(0)))
     }
 
     pub fn cache_pack(&self, scope: &str) -> ToolResponse {
@@ -115,15 +64,12 @@ impl TokenZeroEngine {
         );
         let manifest_path = cache_pack_manifest_path(&self.config.cache_path, scope);
         let invalidation_reason = previous_cache_digest(&manifest_path)
-            .map(|previous| {
-                if previous == content_digest {
-                    "unchanged".to_string()
-                } else {
-                    "sources_changed".to_string()
-                }
-            })
-            .unwrap_or_else(|| "new_pack".to_string());
-        let mut store = RecoveryStore::new(Some(self.config.cache_path.clone()));
+            .map_or("new_pack", |previous| if previous == content_digest {
+                "unchanged"
+            } else {
+                "sources_changed"
+            }).to_string();
+        let mut store = self.recovery_store();
         let stable_stored = store.store_payload_deferred(
             &stable_text,
             ContentType::Markdown,
@@ -139,21 +85,18 @@ impl TokenZeroEngine {
             None,
         );
         if let Err(err) = store.persist_pending() {
-            return ToolResponse::error(
-                "cache-pack",
-                "cache_write_failed",
-                err.to_string(),
-                Some("fix recovery cache permissions".to_string()),
+            return failure_response(
+                "cache-pack", "cache_write_failed", err.to_string(),
+                Some("fix recovery cache permissions"),
             );
         }
         // The manifest embeds these refs; if eviction dropped either during
         // the persist, fail loud instead of publishing dead handles.
         if !store.has_ref(&stable_stored.blob_ref) || !store.has_ref(&volatile_stored.blob_ref) {
-            return ToolResponse::error(
-                "cache-pack",
-                "cache_evicted",
+            return failure_response(
+                "cache-pack", "cache_evicted",
                 "cache pack payload was evicted from the recovery cache before it could be advertised",
-                Some("increase recovery cache max_bytes or reduce the pack scope".to_string()),
+                Some("increase recovery cache max_bytes or reduce the pack scope"),
             );
         }
         let cacheable_tokens = count_tokens(&stable_text);
@@ -199,24 +142,13 @@ impl TokenZeroEngine {
         let visible = serde_json::to_string_pretty(&manifest).unwrap_or_default();
         let refs = vec![
             ref_record("stable_prefix", stable_stored.blob_ref, stable_text.len()),
-            ref_record(
-                "volatile_tail",
-                volatile_stored.blob_ref,
-                volatile_text.len(),
-            ),
+            ref_record("volatile_tail", volatile_stored.blob_ref, volatile_text.len()),
         ];
         let exact_ref_tokens = exact_ref_token_count(&refs);
-        let mut response = ToolResponse::ok(
-            "cache-pack",
-            Mode::Structured,
-            visible.clone(),
-            refs,
-            Accounting {
-                raw_tokens: cacheable_tokens + volatile_tokens,
-                visible_tokens: count_tokens(&visible),
-                recovery_tokens: store.recovery_tokens,
-                exact_ref_tokens: Some(exact_ref_tokens),
-            },
+        let mut response = success_response(
+            "cache-pack", Mode::Structured, visible.clone(), refs,
+            (cacheable_tokens + volatile_tokens, count_tokens(&visible),
+             store.recovery_tokens, Some(exact_ref_tokens)),
         );
         response.content_type = Some(ContentType::JsonConfig.to_string());
         response.telemetry = Some(json!({

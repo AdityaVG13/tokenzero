@@ -33,58 +33,28 @@ pub fn classify_method(method: &str) -> OperationClass {
         .or_else(|| method.strip_prefix("tz_"))
         .unwrap_or(method)
         .replace('-', "_");
-    match bare.as_str() {
-        "read"
-        | "find"
-        | "grep"
-        | "glob"
-        | "tree"
-        | "expand"
-        | "expandMany"
-        | "expand_many"
-        | "dedupe"
-        | "mem"
-        | "recall"
-        | "rewrite"
-        | "discover"
-        | "pick"
-        | "filter_lines"
-        | "count"
-        | "first"
-        | "verdict"
-        | "raw"
-        | "count_tokens"
-        | "assert"
-        | "codemode.search"
-        | "codemode.describe"
-        | "codemode.limits"
-        | "codemode.journalDoctor"
-        | "journalDoctor"
-        | "journal_doctor"
-        | "codemode.journalInspect"
-        | "journalInspect"
-        | "journal_inspect"
-        | "codemode.journalResume"
-        | "journalResume"
-        | "journal_resume"
-        | "search"
-        | "describe"
-        | "limits" => OperationClass::ReadOnly,
-        "edit"
-        | "codemode.journalRollback"
-        | "journalRollback"
-        | "journal_rollback"
-        | "compact"
-        | "compactMany"
-        | "compact_many"
-        | "compact_max"
-        | "ingest"
-        | "cache_pack"
-        | "store_put"
-        | "store_alias"
-        | "migration_apply" => OperationClass::ReversibleStoreMutation,
-        "shell" | "fetch" | "network" | "external" => OperationClass::IrreversibleExternal,
-        _ => OperationClass::Unknown,
+    const RO: &[&str] = &[
+        "read", "find", "grep", "glob", "tree", "expand", "expandMany", "expand_many", "dedupe",
+        "mem", "recall", "rewrite", "discover", "pick", "filter_lines", "count", "first", "verdict",
+        "raw", "count_tokens", "assert", "codemode.search", "codemode.describe", "codemode.limits",
+        "codemode.journalDoctor", "journalDoctor", "journal_doctor", "codemode.journalInspect",
+        "journalInspect", "journal_inspect", "codemode.journalResume", "journalResume",
+        "journal_resume", "search", "describe", "limits",
+    ];
+    const RV: &[&str] = &[
+        "edit", "codemode.journalRollback", "journalRollback", "journal_rollback", "compact",
+        "compactMany", "compact_many", "compact_max", "ingest", "cache_pack", "store_put",
+        "store_alias", "migration_apply",
+    ];
+    const IR: &[&str] = &["shell", "fetch", "network", "external"];
+    if RO.contains(&bare.as_str()) {
+        OperationClass::ReadOnly
+    } else if RV.contains(&bare.as_str()) {
+        OperationClass::ReversibleStoreMutation
+    } else if IR.contains(&bare.as_str()) {
+        OperationClass::IrreversibleExternal
+    } else {
+        OperationClass::Unknown
     }
 }
 
@@ -292,6 +262,31 @@ fn begin_plan_with_fault(
     )
 }
 
+
+fn open_journal_lock(
+    cache_path: &Path,
+    execution_id: &str,
+) -> Result<(PathBuf, PathBuf, std::fs::File), String> {
+    let root = journal_root(cache_path);
+    fs::create_dir_all(&root).map_err(|err| format!("create journal directory: {err}"))?;
+    let lock_path = root.join("mutation.lock");
+    let lock = OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(&lock_path)
+        .map_err(|err| format!("open journal lock: {err}"))?;
+    FileExt::try_lock(&lock).map_err(|err| {
+        format!(
+            "plan conflict: another mutation plan holds {}: {err}",
+            lock_path.display()
+        )
+    })?;
+    let path = root.join(format!("{}.json", safe_execution_id(execution_id)));
+    Ok((root, path, lock))
+}
+
 fn begin_plan_inner(
     cache_path: &Path,
     project_root: &Path,
@@ -339,23 +334,8 @@ fn begin_plan_inner(
         return Ok(BeginOutcome::Disabled);
     }
 
-    let root = journal_root(cache_path);
-    fs::create_dir_all(&root).map_err(|err| format!("create journal directory: {err}"))?;
-    let lock_path = root.join("mutation.lock");
-    let lock = OpenOptions::new()
-        .create(true)
-        .truncate(false)
-        .read(true)
-        .write(true)
-        .open(&lock_path)
-        .map_err(|err| format!("open journal lock: {err}"))?;
-    FileExt::try_lock(&lock).map_err(|err| {
-        format!(
-            "plan conflict: another mutation plan holds {}: {err}",
-            lock_path.display()
-        )
-    })?;
-    let path = root.join(format!("{}.json", safe_execution_id(execution_id)));
+    let (root, path, lock) = open_journal_lock(cache_path, execution_id)?;
+
     if path.exists() {
         let journal = read_journal(&path)?;
         if journal.execution_id != execution_id || journal.plan_id != plan_id {
@@ -443,23 +423,8 @@ fn record_downgrade(
     classes: &[OperationClass],
     reason: &str,
 ) -> Result<(), String> {
-    let root = journal_root(cache_path);
-    fs::create_dir_all(&root).map_err(|err| format!("create journal directory: {err}"))?;
-    let lock_path = root.join("mutation.lock");
-    let lock = OpenOptions::new()
-        .create(true)
-        .truncate(false)
-        .read(true)
-        .write(true)
-        .open(&lock_path)
-        .map_err(|err| format!("open journal lock: {err}"))?;
-    FileExt::try_lock(&lock).map_err(|err| {
-        format!(
-            "plan conflict: another mutation plan holds {}: {err}",
-            lock_path.display()
-        )
-    })?;
-    let path = root.join(format!("{}.json", safe_execution_id(execution_id)));
+    let (root, path, lock) = open_journal_lock(cache_path, execution_id)?;
+
     if path.exists() {
         let existing = read_journal(&path)?;
         if existing.execution_id != execution_id || existing.plan_id != plan_id {
@@ -749,23 +714,8 @@ pub fn open_unresolved(
     cache_path: &Path,
     execution_id: &str,
 ) -> Result<JournalTransaction, String> {
-    let root = journal_root(cache_path);
-    fs::create_dir_all(&root).map_err(|err| format!("create journal directory: {err}"))?;
-    let lock_path = root.join("mutation.lock");
-    let lock = OpenOptions::new()
-        .create(true)
-        .truncate(false)
-        .read(true)
-        .write(true)
-        .open(&lock_path)
-        .map_err(|err| format!("open journal lock: {err}"))?;
-    FileExt::try_lock(&lock).map_err(|err| {
-        format!(
-            "plan conflict: another mutation plan holds {}: {err}",
-            lock_path.display()
-        )
-    })?;
-    let path = root.join(format!("{}.json", safe_execution_id(execution_id)));
+    let (root, path, lock) = open_journal_lock(cache_path, execution_id)?;
+
     let journal = read_journal(&path)?;
     if journal.state.is_resolved() {
         return Err(format!(
@@ -882,38 +832,36 @@ fn pin_path(root: &Path, execution_id: &str, index: usize, hash: &str) -> PathBu
         &hash[..12]
     ))
 }
-fn write_pins(root: &Path, journal: &PlanJournal) -> Result<(), String> {
+fn for_each_pin(
+    root: &Path,
+    journal: &PlanJournal,
+    mut visit: impl FnMut(PathBuf, usize, &str) -> Result<(), String>,
+) -> Result<(), String> {
     for op in &journal.operations {
         for reference in &op.undo_refs {
             let Some(hash) = pin_hash(reference) else {
                 continue;
             };
-            let record = json!({"schema_version": PIN_SCHEMA_VERSION, "record_type": "pin", "engine": "tokenzero", "project_id": journal.project_id, "pin_id": format!("plan-{}-{}", &sha256_bytes(journal.execution_id.as_bytes())[..24], op.index), "created_at": rfc3339_now(), "blob_hash": hash});
-            let bytes = serde_json::to_vec_pretty(&record).map_err(|err| err.to_string())?;
-            atomic_write(
-                &pin_path(root, &journal.execution_id, op.index, &hash),
-                &bytes,
-            )
-            .map_err(|err| format!("persist undo pin: {err}"))?;
+            visit(pin_path(root, &journal.execution_id, op.index, &hash), op.index, &hash)?;
         }
     }
     Ok(())
 }
+
+fn write_pins(root: &Path, journal: &PlanJournal) -> Result<(), String> {
+    for_each_pin(root, journal, |path, index, hash| {
+        let record = json!({"schema_version": PIN_SCHEMA_VERSION, "record_type": "pin", "engine": "tokenzero", "project_id": journal.project_id, "pin_id": format!("plan-{}-{}", &sha256_bytes(journal.execution_id.as_bytes())[..24], index), "created_at": rfc3339_now(), "blob_hash": hash});
+        let bytes = serde_json::to_vec_pretty(&record).map_err(|err| err.to_string())?;
+        atomic_write(&path, &bytes).map_err(|err| format!("persist undo pin: {err}"))
+    })
+}
+
 fn remove_pins(root: &Path, journal: &PlanJournal) -> Result<(), String> {
-    for op in &journal.operations {
-        for reference in &op.undo_refs {
-            let Some(hash) = pin_hash(reference) else {
-                continue;
-            };
-            let path = pin_path(root, &journal.execution_id, op.index, &hash);
-            match fs::remove_file(&path) {
-                Ok(()) => {}
-                Err(err) if err.kind() == io::ErrorKind::NotFound => {}
-                Err(err) => return Err(format!("remove resolved pin {}: {err}", path.display())),
-            }
-        }
-    }
-    Ok(())
+    for_each_pin(root, journal, |path, _, _| match fs::remove_file(&path) {
+        Ok(()) => Ok(()),
+        Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(err) => Err(format!("remove resolved pin {}: {err}", path.display())),
+    })
 }
 fn enforce_retention(root: &Path) -> Result<(), String> {
     let mut resolved = Vec::new();
@@ -1013,6 +961,36 @@ mod tests {
         dir.join("tokenzero").join("recovery-cache.json")
     }
 
+    fn begin_tx(
+        cache: &Path,
+        root: &Path,
+        plan: &str,
+        execution: &str,
+        n: usize,
+    ) -> Box<JournalTransaction> {
+        match begin_plan(cache, root, plan, execution, (0..n).map(spec).collect(), true).unwrap() {
+            BeginOutcome::Transaction(tx) => tx,
+            other => panic!("unexpected outcome: {other:?}"),
+        }
+    }
+
+    fn apply_all(tx: &mut JournalTransaction, n: usize) {
+        for index in 0..n {
+            tx.mark_applying(index).unwrap();
+            tx.mark_applied(
+                index,
+                Some(sha256_bytes(format!("post-{index}").as_bytes())),
+                Vec::new(),
+            )
+            .unwrap();
+        }
+    }
+
+    fn assert_completed(result: &crate::codemode::CodeModeResult) {
+        assert_eq!(result.status, CodeModeStatus::Completed, "{:?}", result.error);
+    }
+
+
     #[test]
     fn journal_state_machine_fault_boundaries_restart_classification() {
         let temp = tempdir().unwrap();
@@ -1029,25 +1007,16 @@ mod tests {
         )
         .unwrap_err();
         assert!(error.contains("fault injected at prepare"));
-        assert_eq!(
-            inspect(&cache, execution).unwrap().state,
-            JournalState::Prepared
-        );
+        assert_eq!(inspect(&cache, execution).unwrap().state, JournalState::Prepared);
 
         let mut tx = open_unresolved(&cache, execution).unwrap();
         tx.mark_applying(0).unwrap();
         drop(tx);
-        assert_eq!(
-            inspect(&cache, execution).unwrap().state,
-            JournalState::Applying
-        );
+        assert_eq!(inspect(&cache, execution).unwrap().state, JournalState::Applying);
 
         let mut tx = open_unresolved(&cache, execution).unwrap();
         tx.set_fault("apply-step-0");
-        assert!(
-            tx.mark_applied(0, Some(sha256_bytes(b"post")), Vec::new())
-                .is_err()
-        );
+        assert!(tx.mark_applied(0, Some(sha256_bytes(b"post")), Vec::new()).is_err());
         drop(tx);
         let partial = inspect(&cache, execution).unwrap();
         assert_eq!(partial.state, JournalState::Applying);
@@ -1056,47 +1025,25 @@ mod tests {
         let mut tx = open_unresolved(&cache, execution).unwrap();
         tx.set_fault("commit");
         assert!(tx.commit().is_err());
-        assert_eq!(
-            inspect(&cache, execution).unwrap().state,
-            JournalState::Committed
-        );
+        assert_eq!(inspect(&cache, execution).unwrap().state, JournalState::Committed);
         doctor(&cache);
-        assert_eq!(
-            fs::read_dir(journal_root(&cache).join("pins"))
-                .unwrap()
-                .count(),
-            0
-        );
+        assert_eq!(fs::read_dir(journal_root(&cache).join("pins")).unwrap().count(), 0);
 
         let rollback_execution = "cm://exec/fault-rollback";
-        let mut tx = match begin_plan(
-            &cache,
-            temp.path(),
-            "plan-b",
-            rollback_execution,
-            vec![spec(0)],
-            true,
-        )
-        .unwrap()
-        {
-            BeginOutcome::Transaction(tx) => tx,
-            other => panic!("unexpected outcome: {other:?}"),
-        };
+        let mut tx = begin_tx(&cache, temp.path(), "plan-b", rollback_execution, 1);
         tx.mark_applying(0).unwrap();
-        tx.mark_applied(0, Some(sha256_bytes(b"post")), Vec::new())
-            .unwrap();
+        tx.mark_applied(0, Some(sha256_bytes(b"post")), Vec::new()).unwrap();
         tx.set_fault("rollback-step-0");
         assert!(tx.rollback("later failure", |_| Ok(())).is_err());
         drop(tx);
         let crashed = inspect(&cache, rollback_execution).unwrap();
         assert_eq!(crashed.state, JournalState::RollingBack);
         assert_eq!(crashed.operations[0].state, StepState::RolledBack);
-        let mut tx = open_unresolved(&cache, rollback_execution).unwrap();
-        tx.rollback("resume rollback", |_| Ok(())).unwrap();
-        assert_eq!(
-            inspect(&cache, rollback_execution).unwrap().state,
-            JournalState::RolledBack
-        );
+        open_unresolved(&cache, rollback_execution)
+            .unwrap()
+            .rollback("resume rollback", |_| Ok(()))
+            .unwrap();
+        assert_eq!(inspect(&cache, rollback_execution).unwrap().state, JournalState::RolledBack);
     }
 
     #[test]
@@ -1104,12 +1051,7 @@ mod tests {
         let temp = tempdir().unwrap();
         let cache = cache(temp.path());
         let execution = "cm://exec/idempotent";
-        let mut tx = match begin_plan(&cache, temp.path(), "plan", execution, vec![spec(0)], true)
-            .unwrap()
-        {
-            BeginOutcome::Transaction(tx) => tx,
-            other => panic!("unexpected outcome: {other:?}"),
-        };
+        let mut tx = begin_tx(&cache, temp.path(), "plan", execution, 1);
         tx.mark_applying(0).unwrap();
         tx.mark_applied(0, Some(sha256_bytes(b"once")), Vec::new())
             .unwrap();
@@ -1123,29 +1065,12 @@ mod tests {
     #[test]
     fn journal_rollback_is_reverse_order_and_preserves_both_errors() {
         let temp = tempdir().unwrap();
-        let cache = cache(temp.path());
+        let cache_path = cache(temp.path());
         let execution = "cm://exec/reverse-rollback";
-        let mut tx = match begin_plan(
-            &cache,
-            temp.path(),
-            "plan",
-            execution,
-            vec![spec(0), spec(1)],
-            true,
-        )
-        .unwrap()
-        {
-            BeginOutcome::Transaction(tx) => tx,
-            other => panic!("unexpected outcome: {other:?}"),
-        };
+        let mut tx = begin_tx(&cache_path, temp.path(), "plan", execution, 2);
         for index in 0..2 {
             tx.mark_applying(index).unwrap();
-            tx.mark_applied(
-                index,
-                Some(sha256_bytes(format!("post{index}").as_bytes())),
-                Vec::new(),
-            )
-            .unwrap();
+            tx.mark_applied(index, Some(sha256_bytes(format!("post{index}").as_bytes())), Vec::new()).unwrap();
         }
         let mut order = Vec::new();
         let error = tx
@@ -1162,7 +1087,7 @@ mod tests {
         assert_eq!(error.original, "apply failed");
         assert_eq!(error.rollback.len(), 1);
         drop(tx);
-        let journal = inspect(&cache, execution).unwrap();
+        let journal = inspect(&cache_path, execution).unwrap();
         assert_eq!(journal.state, JournalState::ManualIntervention);
         assert_eq!(journal.original_error.as_deref(), Some("apply failed"));
         assert!(journal.rollback_errors[0].contains("undo failed"));
@@ -1172,58 +1097,23 @@ mod tests {
     fn journal_mixed_shell_plan_rejects_atomic_or_records_downgrade() {
         let temp = tempdir().unwrap();
         let cache = cache(temp.path());
-        let specs = vec![
-            spec(0),
-            OperationSpec {
-                id: "shell".to_string(),
-                method: "zero.shell".to_string(),
-                target: None,
-                precondition_digest: None,
-                precondition_exists: None,
-                postcondition_digest: None,
-                undo_refs: Vec::new(),
-                size: None,
-            },
-        ];
-        let error = begin_plan(
-            &cache,
-            temp.path(),
-            "plan",
-            "cm://exec/mixed-atomic",
-            specs.clone(),
-            true,
-        )
-        .unwrap_err();
+        let mut shell = spec(1);
+        shell.id = "shell".to_string();
+        shell.method = "zero.shell".to_string();
+        shell.undo_refs.clear();
+        shell.size = None;
+        let specs = vec![spec(0), shell];
+        let error = begin_plan(&cache, temp.path(), "plan", "cm://exec/mixed-atomic", specs.clone(), true).unwrap_err();
         assert!(error.contains("atomic plan rejected"));
-        match begin_plan(
-            &cache,
-            temp.path(),
-            "plan",
-            "cm://exec/mixed-downgrade",
-            specs,
-            false,
-        )
-        .unwrap()
-        {
+        match begin_plan(&cache, temp.path(), "plan", "cm://exec/mixed-downgrade", specs, false).unwrap() {
             BeginOutcome::Downgraded { reason } => assert!(reason.contains("zero.shell")),
             other => panic!("unexpected outcome: {other:?}"),
         }
         let downgrade = inspect(&cache, "cm://exec/mixed-downgrade").unwrap();
         assert!(!downgrade.atomic);
         assert_eq!(downgrade.state, JournalState::Committed);
-        assert!(
-            downgrade
-                .downgrade_reason
-                .as_deref()
-                .unwrap()
-                .contains("zero.shell")
-        );
-        assert!(
-            downgrade
-                .operations
-                .iter()
-                .all(|op| op.state == StepState::Skipped)
-        );
+        assert!(downgrade.downgrade_reason.as_deref().unwrap().contains("zero.shell"));
+        assert!(downgrade.operations.iter().all(|op| op.state == StepState::Skipped));
     }
 
     #[test]
@@ -1247,19 +1137,13 @@ mod tests {
     #[test]
     fn journal_multi_process_conflict_fails_before_overwrite() {
         let temp = tempdir().unwrap();
-        let _held = match begin_plan(
+        let _held = begin_tx(
             &cache(temp.path()),
             temp.path(),
             "plan",
             "cm://exec/parent",
-            vec![spec(0)],
-            true,
-        )
-        .unwrap()
-        {
-            BeginOutcome::Transaction(tx) => tx,
-            other => panic!("unexpected outcome: {other:?}"),
-        };
+            1,
+        );
         let status = Command::new(std::env::current_exe().unwrap())
             .arg("--exact")
             .arg("codemode::journal::tests::journal_conflict_child")
@@ -1275,12 +1159,7 @@ mod tests {
         let temp = tempdir().unwrap();
         let cache = cache(temp.path());
         let execution = "cm://exec/doctor";
-        let tx = match begin_plan(&cache, temp.path(), "plan", execution, vec![spec(0)], true)
-            .unwrap()
-        {
-            BeginOutcome::Transaction(tx) => tx,
-            other => panic!("unexpected outcome: {other:?}"),
-        };
+        let tx = begin_tx(&cache, temp.path(), "plan", execution, 1);
         let report = doctor(&cache);
         assert_eq!(report.unresolved.len(), 1);
         assert_eq!(report.unresolved[0].state, JournalState::Prepared);
@@ -1334,22 +1213,13 @@ mod tests {
         })
         .to_string();
         let first = execute_codemode_with_options(&plan, options(temp.path(), &cache));
-        assert_eq!(first.status, CodeModeStatus::Completed, "{:?}", first.error);
+        assert_completed(&first);
         assert_eq!(fs::read_to_string(&path).unwrap(), "after-secret-body");
         let journal = inspect(&cache, "cm://exec/json-commit").unwrap();
         assert_eq!(journal.state, JournalState::Committed);
-        assert!(
-            !serde_json::to_string(&journal)
-                .unwrap()
-                .contains("after-secret-body")
-        );
+        assert!(!serde_json::to_string(&journal).unwrap().contains("after-secret-body"));
         let second = execute_codemode_with_options(&plan, options(temp.path(), &cache));
-        assert_eq!(
-            second.status,
-            CodeModeStatus::Completed,
-            "{:?}",
-            second.error
-        );
+        assert_completed(&second);
         assert_eq!(fs::read_to_string(&path).unwrap(), "after-secret-body");
         assert_eq!(second.value.unwrap()["idempotent_replay"], true);
     }
@@ -1371,14 +1241,8 @@ mod tests {
         }).to_string();
         let result = execute_codemode_with_options(&plan, options(temp.path(), &cache));
         assert_eq!(result.status, CodeModeStatus::Error);
-        assert_eq!(
-            fs::read_to_string(temp.path().join("a.txt")).unwrap(),
-            "a-before"
-        );
-        assert_eq!(
-            fs::read_to_string(temp.path().join("b.txt")).unwrap(),
-            "b-before"
-        );
+        assert_eq!(fs::read_to_string(temp.path().join("a.txt")).unwrap(), "a-before");
+        assert_eq!(fs::read_to_string(temp.path().join("b.txt")).unwrap(), "b-before");
         assert!(inspect(&cache, "cm://exec/json-rollback").is_err());
     }
 
@@ -1398,39 +1262,18 @@ mod tests {
         }).to_string();
         let result = execute_codemode_with_options(&plan, options(temp.path(), &cache));
         assert_eq!(result.status, CodeModeStatus::Error);
-        assert!(
-            result
-                .error
-                .unwrap()
-                .message
-                .contains("atomic plan rejected")
-        );
-        assert_eq!(
-            fs::read_to_string(temp.path().join("a.txt")).unwrap(),
-            "before"
-        );
+        assert!(result.error.unwrap().message.contains("atomic plan rejected"));
+        assert_eq!(fs::read_to_string(temp.path().join("a.txt")).unwrap(), "before");
         assert!(!temp.path().join("shell-ran").exists());
     }
 
     #[test]
     fn journal_fault_injection_covers_each_apply_and_rollback_step() {
         let temp = tempdir().unwrap();
-        let cache = cache(temp.path());
+        let cache_path = cache(temp.path());
         for fault_index in 0..3 {
             let execution = format!("cm://exec/apply-fault-{fault_index}");
-            let mut tx = match begin_plan(
-                &cache,
-                temp.path(),
-                "apply-plan",
-                &execution,
-                vec![spec(0), spec(1), spec(2)],
-                true,
-            )
-            .unwrap()
-            {
-                BeginOutcome::Transaction(tx) => tx,
-                other => panic!("unexpected outcome: {other:?}"),
-            };
+            let mut tx = begin_tx(&cache_path, temp.path(), "apply-plan", &execution, 3);
             for index in 0..=fault_index {
                 tx.mark_applying(index).unwrap();
                 if index == fault_index {
@@ -1441,45 +1284,21 @@ mod tests {
                     Some(sha256_bytes(format!("post-{index}").as_bytes())),
                     Vec::new(),
                 );
-                if index == fault_index {
-                    assert!(result.is_err());
-                } else {
-                    result.unwrap();
-                }
+                assert_eq!(result.is_ok(), index != fault_index, "{result:?}");
             }
             drop(tx);
-            let journal = inspect(&cache, &execution).unwrap();
+            let journal = inspect(&cache_path, &execution).unwrap();
             assert_eq!(journal.state, JournalState::Applying);
             assert_eq!(journal.operations[fault_index].state, StepState::Applied);
         }
         for fault_index in 0..3 {
             let execution = format!("cm://exec/rollback-fault-{fault_index}");
-            let mut tx = match begin_plan(
-                &cache,
-                temp.path(),
-                "rollback-plan",
-                &execution,
-                vec![spec(0), spec(1), spec(2)],
-                true,
-            )
-            .unwrap()
-            {
-                BeginOutcome::Transaction(tx) => tx,
-                other => panic!("unexpected outcome: {other:?}"),
-            };
-            for index in 0..3 {
-                tx.mark_applying(index).unwrap();
-                tx.mark_applied(
-                    index,
-                    Some(sha256_bytes(format!("post-{index}").as_bytes())),
-                    Vec::new(),
-                )
-                .unwrap();
-            }
+            let mut tx = begin_tx(&cache_path, temp.path(), "rollback-plan", &execution, 3);
+            apply_all(&mut tx, 3);
             tx.set_fault(format!("rollback-step-{fault_index}"));
             assert!(tx.rollback("later failure", |_| Ok(())).is_err());
             drop(tx);
-            let journal = inspect(&cache, &execution).unwrap();
+            let journal = inspect(&cache_path, &execution).unwrap();
             assert_eq!(journal.state, JournalState::RollingBack);
             assert_eq!(journal.operations[fault_index].state, StepState::RolledBack);
         }
@@ -1488,7 +1307,7 @@ mod tests {
     #[test]
     fn journal_cas_conflict_never_clobbers_newer_data() {
         let temp = tempdir().unwrap();
-        let cache = cache(temp.path());
+        let cache_path = cache(temp.path());
         let target = temp.path().join("cas.txt");
         fs::write(&target, "old").unwrap();
         let mut cas_spec = spec(0);
@@ -1496,80 +1315,49 @@ mod tests {
         cas_spec.precondition_digest = Some(sha256_bytes(b"old"));
         cas_spec.precondition_exists = Some(true);
         cas_spec.postcondition_digest = Some(sha256_bytes(b"post"));
-        let mut tx = match begin_plan(
-            &cache,
-            temp.path(),
-            "cas-before",
-            "cm://exec/cas-before",
-            vec![cas_spec.clone()],
-            true,
+        let begin = |plan: &str, exec: &str, specs: Vec<OperationSpec>| match begin_plan(
+            &cache_path, temp.path(), plan, exec, specs, true,
         )
         .unwrap()
         {
             BeginOutcome::Transaction(tx) => tx,
             other => panic!("unexpected outcome: {other:?}"),
         };
+        let mut tx = begin("cas-before", "cm://exec/cas-before", vec![cas_spec.clone()]);
         fs::write(&target, "newer").unwrap();
-        assert!(
-            tx.mark_applying(0)
-                .unwrap_err()
-                .contains("CAS precondition failed")
-        );
+        assert!(tx.mark_applying(0).unwrap_err().contains("CAS precondition failed"));
         assert_eq!(fs::read_to_string(&target).unwrap(), "newer");
         drop(tx);
 
         fs::write(&target, "old").unwrap();
-        let mut tx = match begin_plan(
-            &cache,
-            temp.path(),
-            "cas-rollback",
-            "cm://exec/cas-rollback",
-            vec![cas_spec],
-            true,
-        )
-        .unwrap()
-        {
-            BeginOutcome::Transaction(tx) => tx,
-            other => panic!("unexpected outcome: {other:?}"),
-        };
+        let mut tx = begin("cas-rollback", "cm://exec/cas-rollback", vec![cas_spec]);
         tx.mark_applying(0).unwrap();
         fs::write(&target, "post").unwrap();
-        tx.mark_applied(0, Some(sha256_bytes(b"post")), Vec::new())
-            .unwrap();
+        tx.mark_applied(0, Some(sha256_bytes(b"post")), Vec::new()).unwrap();
         fs::write(&target, "newest").unwrap();
         let error = tx
             .rollback("later failure", |operation| {
-                let actual =
-                    current_digest(Path::new(operation.target.as_deref().unwrap())).unwrap();
+                let actual = current_digest(Path::new(operation.target.as_deref().unwrap())).unwrap();
                 if actual != operation.postcondition_digest {
                     return Err("rollback CAS refused newer data".to_string());
                 }
                 Ok(())
             })
             .unwrap_err();
-        assert!(
-            error
-                .to_string()
-                .contains("rollback CAS refused newer data")
-        );
+        assert!(error.to_string().contains("rollback CAS refused newer data"));
         assert_eq!(fs::read_to_string(&target).unwrap(), "newest");
     }
 
     #[test]
     fn journal_classification_table_covers_policy_boundaries() {
-        assert_eq!(classify_method("zero.read"), OperationClass::ReadOnly);
-        assert_eq!(
-            classify_method("zero.edit"),
-            OperationClass::ReversibleStoreMutation
-        );
-        assert_eq!(
-            classify_method("zero.shell"),
-            OperationClass::IrreversibleExternal
-        );
-        assert_eq!(
-            classify_method("not.in.descriptor"),
-            OperationClass::Unknown
-        );
+        for (method, class) in [
+            ("zero.read", OperationClass::ReadOnly),
+            ("zero.edit", OperationClass::ReversibleStoreMutation),
+            ("zero.shell", OperationClass::IrreversibleExternal),
+            ("not.in.descriptor", OperationClass::Unknown),
+        ] {
+            assert_eq!(classify_method(method), class, "{method}");
+        }
         assert_eq!(
             classify_descriptor_tool("tz_ingest"),
             OperationClass::ReversibleStoreMutation

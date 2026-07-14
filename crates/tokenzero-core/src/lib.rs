@@ -48,7 +48,13 @@ impl std::str::FromStr for Mode {
 
 impl fmt::Display for Mode {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(match self {
+        f.write_str(self.as_str())
+    }
+}
+
+impl Mode {
+    fn as_str(self) -> &'static str {
+        match self {
             Self::Auto => "auto",
             Self::Passthrough => "passthrough",
             Self::Diagnostic => "diagnostic",
@@ -59,11 +65,9 @@ impl fmt::Display for Mode {
             Self::Hybrid => "hybrid",
             Self::Critical => "critical",
             Self::Fidelity => "fidelity",
-        })
+        }
     }
-}
 
-impl Mode {
     pub fn effective_policy(self) -> Self {
         match self {
             Self::Hybrid => Self::Auto,
@@ -226,6 +230,23 @@ pub struct ToolResponse {
 }
 
 impl ToolResponse {
+    fn base(status: &str, tool: impl Into<String>) -> Self {
+        Self {
+            schema_version: CLI_SCHEMA_VERSION.to_string(),
+            status: status.to_string(),
+            tool: tool.into(),
+            mode: None,
+            visible: None,
+            refs: Vec::new(),
+            accounting: None,
+            diagnostic: None,
+            error: None,
+            content_type: None,
+            telemetry: None,
+            safety: None,
+        }
+    }
+
     pub fn ok(
         tool: impl Into<String>,
         mode: Mode,
@@ -234,9 +255,6 @@ impl ToolResponse {
         accounting: Accounting,
     ) -> Self {
         Self {
-            schema_version: CLI_SCHEMA_VERSION.to_string(),
-            status: "ok".to_string(),
-            tool: tool.into(),
             mode: Some(mode.to_string()),
             visible: Some(Visible {
                 kind: "capsule".to_string(),
@@ -244,11 +262,7 @@ impl ToolResponse {
             }),
             refs,
             accounting: Some(accounting),
-            diagnostic: None,
-            error: None,
-            content_type: None,
-            telemetry: None,
-            safety: None,
+            ..Self::base("ok", tool)
         }
     }
 
@@ -259,22 +273,12 @@ impl ToolResponse {
         repair: Option<String>,
     ) -> Self {
         Self {
-            schema_version: CLI_SCHEMA_VERSION.to_string(),
-            status: "error".to_string(),
-            tool: tool.into(),
-            mode: None,
-            visible: None,
-            refs: Vec::new(),
-            accounting: None,
-            diagnostic: None,
             error: Some(CliError {
                 code: code.into(),
                 message: message.into(),
                 repair,
             }),
-            content_type: None,
-            telemetry: None,
-            safety: None,
+            ..Self::base("error", tool)
         }
     }
 }
@@ -389,18 +393,7 @@ pub fn make_capsule_content_aware(
     recovery_ref: Option<&str>,
     aggressive: bool,
 ) -> Capsule {
-    if !aggressive && max_visible_tokens == 0 {
-        return make_capsule_with_recovery_ref(
-            text,
-            raw_tokens,
-            Mode::Auto,
-            max_visible_tokens,
-            label,
-            recovery_ref,
-        );
-    }
-    // For non-aggressive, check if raw fits budget
-    if !aggressive && raw_tokens <= max_visible_tokens {
+    if !aggressive && (max_visible_tokens == 0 || raw_tokens <= max_visible_tokens) {
         return make_capsule_with_recovery_ref(
             text,
             raw_tokens,
@@ -436,6 +429,20 @@ pub fn make_capsule_content_aware(
 }
 
 /// Summarize code: show first N lines (imports/signatures) + last M lines.
+const CODE_SIG_PREFIXES: &[&str] = &[
+    "pub ", "fn ", "struct ", "enum ", "impl ", "trait ", "class ", "def ", "function ",
+    "export ", "import ", "use ", "#[",
+];
+
+fn push_labeled_lines(out: &mut String, label: &str, lines: &[&str], limit: usize) {
+    if lines.is_empty() { return; }
+    out.push_str(label);
+    for line in lines.iter().take(limit) {
+        out.push_str(line);
+        out.push('\n');
+    }
+}
+
 fn summarize_code(text: &str, budget_tokens: usize, prefix: &str) -> String {
     let lines: Vec<&str> = text.lines().collect();
     let total = lines.len();
@@ -448,19 +455,7 @@ fn summarize_code(text: &str, budget_tokens: usize, prefix: &str) -> String {
         .take(total.min(80))
         .filter(|l| {
             let t = l.trim();
-            t.starts_with("pub ")
-                || t.starts_with("fn ")
-                || t.starts_with("struct ")
-                || t.starts_with("enum ")
-                || t.starts_with("impl ")
-                || t.starts_with("trait ")
-                || t.starts_with("class ")
-                || t.starts_with("def ")
-                || t.starts_with("function ")
-                || t.starts_with("export ")
-                || t.starts_with("import ")
-                || t.starts_with("use ")
-                || t.starts_with("#[")
+            CODE_SIG_PREFIXES.iter().any(|p| t.starts_with(p))
         })
         .copied()
         .collect();
@@ -469,13 +464,9 @@ fn summarize_code(text: &str, budget_tokens: usize, prefix: &str) -> String {
     let mut out = String::new();
     out.push_str(prefix);
     out.push_str(&lines[..head].join("\n"));
-    if !sig_lines.is_empty() {
-        out.push_str("\n\n# declarations/signatures:\n");
-        for line in sig_lines.iter().take(budget_tokens / 8) {
-            out.push_str(line);
-            out.push('\n');
-        }
-    }
+    push_labeled_lines(
+        &mut out, "\n\n# declarations/signatures:\n", &sig_lines, budget_tokens / 8,
+    );
     out.push_str(&format!(
         "\n... omitted {} lines; exact ref available ...\n\n",
         total.saturating_sub(head + tail)
@@ -485,46 +476,32 @@ fn summarize_code(text: &str, budget_tokens: usize, prefix: &str) -> String {
 }
 
 /// Summarize logs: prioritize errors/warnings, then head+tail.
+const LOG_ERROR_NEEDLES: &[&str] = &["error", "fatal", "panic", "failed", "traceback"];
+
 fn summarize_logs(text: &str, budget_tokens: usize, prefix: &str) -> String {
     let lines: Vec<&str> = text.lines().collect();
     let total = lines.len();
-    let error_lines: Vec<&str> = lines
-        .iter()
-        .filter(|l| {
-            let lower = l.to_ascii_lowercase();
-            lower.contains("error")
-                || lower.contains("fatal")
-                || lower.contains("panic")
-                || lower.contains("failed")
-                || lower.contains("traceback")
-        })
-        .copied()
-        .collect();
-    let warning_lines: Vec<&str> = lines
-        .iter()
-        .filter(|l| {
-            let lower = l.to_ascii_lowercase();
-            lower.contains("warn") && !lower.contains("error")
-        })
-        .copied()
-        .collect();
+    let (mut error_lines, mut warning_lines) = (Vec::new(), Vec::new());
+    for line in &lines {
+        let lower = line.to_ascii_lowercase();
+        if LOG_ERROR_NEEDLES.iter().any(|needle| lower.contains(needle)) {
+            error_lines.push(*line);
+        }
+        if lower.contains("warn") && !lower.contains("error") {
+            warning_lines.push(*line);
+        }
+    }
     let max_entries = budget_tokens / 6;
     let mut out = String::new();
     out.push_str(prefix);
-    if !error_lines.is_empty() {
-        out.push_str(&format!("# {} error(s):\n", error_lines.len()));
-        for line in error_lines.iter().take(max_entries) {
-            out.push_str(line);
-            out.push('\n');
-        }
-    }
-    if !warning_lines.is_empty() {
-        out.push_str(&format!("# {} warning(s):\n", warning_lines.len()));
-        for line in warning_lines.iter().take(max_entries / 2) {
-            out.push_str(line);
-            out.push('\n');
-        }
-    }
+    push_labeled_lines(
+        &mut out, &format!("# {} error(s):\n", error_lines.len()),
+        &error_lines, max_entries,
+    );
+    push_labeled_lines(
+        &mut out, &format!("# {} warning(s):\n", warning_lines.len()),
+        &warning_lines, max_entries / 2,
+    );
     if error_lines.is_empty() && warning_lines.is_empty() {
         let head = 6.min(total);
         let tail = 4.min(total.saturating_sub(head));
@@ -553,30 +530,10 @@ fn summarize_json(text: &str, _budget_tokens: usize, prefix: &str) -> String {
             out.push_str(&format!("json_object: {} keys\n", map.len()));
             for (key, val) in map.iter().take(25) {
                 let kind = match val {
-                    serde_json::Value::Null => "null",
-                    serde_json::Value::Bool(_) => "bool",
-                    serde_json::Value::Number(_) => "number",
-                    serde_json::Value::String(s) => {
-                        if s.len() > 100 {
-                            "string(long)"
-                        } else {
-                            "string"
-                        }
-                    }
-                    serde_json::Value::Array(a) => {
-                        if a.is_empty() {
-                            "array(0)"
-                        } else {
-                            "array"
-                        }
-                    }
-                    serde_json::Value::Object(o) => {
-                        if o.is_empty() {
-                            "object(0)"
-                        } else {
-                            "object"
-                        }
-                    }
+                    serde_json::Value::String(s) if s.len() > 100 => "string(long)",
+                    serde_json::Value::Array(a) if a.is_empty() => "array(0)",
+                    serde_json::Value::Object(o) if o.is_empty() => "object(0)",
+                    other => json_kind(other),
                 };
                 out.push_str(&format!("  {key}: {kind}\n"));
             }
@@ -603,18 +560,15 @@ fn summarize_json(text: &str, _budget_tokens: usize, prefix: &str) -> String {
 }
 
 pub fn summarize_lines(text: &str, head: usize, tail: usize, prefix: &str) -> String {
-    let lines: Vec<&str> = text.lines().collect();
+    let lines: Vec<_> = text.lines().collect();
     if lines.len() <= head + tail + 3 {
         return format!("{prefix}{}", text.trim_end());
     }
-    let mut out = String::new();
-    out.push_str(prefix);
-    out.push_str(&lines[..head].join("\n"));
-    out.push_str("\n\n... omitted ");
-    out.push_str(&lines.len().saturating_sub(head + tail).to_string());
-    out.push_str(" lines; exact ref available ...\n\n");
-    out.push_str(&lines[lines.len() - tail..].join("\n"));
-    out
+    format!(
+        "{prefix}{}\n\n... omitted {} lines; exact ref available ...\n\n{}",
+        lines[..head].join("\n"), lines.len().saturating_sub(head + tail),
+        lines[lines.len() - tail..].join("\n"),
+    )
 }
 
 fn capsule_prefix(label: Option<&str>, max_visible_tokens: usize, raw_tokens: usize) -> String {
@@ -806,56 +760,7 @@ pub fn render_shell(input: ShellRenderInput<'_>) -> ShellRender {
         let visible = compact_repo_inventory_shell_capsule(&input, &body);
         enforce_token_budget(&visible, input.max_visible_tokens)
     } else {
-        use std::fmt::Write as _;
-        let display_command = if policy.policy == "exact" || policy.policy == "passthrough" {
-            input.command.to_string()
-        } else {
-            mask_visible_secrets(input.command)
-        };
-        // Pre-size the header buffer so we don't re-alloc per push_str.
-        let mut visible = String::with_capacity(256 + body.len());
-        let _ = writeln!(visible, "# shell");
-        let _ = writeln!(visible, "command: {display_command}");
-        let _ = writeln!(visible, "policy: {} ({})", policy.policy, policy.reason);
-        let _ = writeln!(visible, "status: {}", status.status_label);
-        let _ = writeln!(visible, "command_success: {}", status.command_success);
-        let _ = writeln!(
-            visible,
-            "exit_code: {}",
-            status
-                .exit_code
-                .map(|v| v.to_string())
-                .unwrap_or_else(|| "null".to_string())
-        );
-        if let Some(segment) = status.failed_segment.as_deref() {
-            let _ = writeln!(visible, "failed_segment: {segment}");
-        }
-        if let Some(warning) = status.pipeline_masking_warning.as_deref() {
-            let _ = writeln!(visible, "pipeline_masking_warning: {warning}");
-        }
-        if let Some(command) = status.pipeline_rerun_command.as_deref() {
-            let _ = writeln!(
-                visible,
-                "pipeline_rerun_command: {}",
-                mask_visible_secrets(command)
-            );
-        }
-        if let Some(stdout_ref) = input.stdout_ref {
-            let _ = writeln!(visible, "stdout_ref: {stdout_ref}");
-        }
-        if let Some(stderr_ref) = input.stderr_ref {
-            let _ = writeln!(visible, "stderr_ref: {stderr_ref}");
-        }
-        if let Some(combined_ref) = input.combined_ref {
-            let _ = writeln!(visible, "combined_ref: {combined_ref}");
-        }
-        visible.push('\n');
-        visible.push_str(body.trim_end());
-        // Adaptive floor: when a small successful command's telemetry header
-        // costs more than the raw output it frames, shrink to a header of
-        // "# shell ok" plus the combined ref (protected recovery anchor).
-        // Failures, timeouts, masked pipelines, and explicit render modes
-        // keep the full diagnostics.
+        let mut visible = format_shell_status_header(&input, &policy, &status, &body);
         let header_dominates = count_tokens(&visible) > combined_tokens;
         let minimal_eligible = input.mode.effective_policy() == Mode::Auto
             && status.command_success
@@ -863,16 +768,7 @@ pub fn render_shell(input: ShellRenderInput<'_>) -> ShellRender {
             && status.failed_segment.is_none()
             && status.pipeline_masking_warning.is_none();
         if (header_dominates || success_compacted) && minimal_eligible {
-            let mut minimal = String::with_capacity(64 + body.len());
-            minimal.push_str("# shell ok");
-            if let Some(combined_ref) = input.combined_ref {
-                let _ = write!(minimal, "\ncombined_ref: {combined_ref}");
-            }
-            let trimmed_body = body.trim_end();
-            if !trimmed_body.is_empty() {
-                minimal.push('\n');
-                minimal.push_str(trimmed_body);
-            }
+            let minimal = format_minimal_shell_ok(input.combined_ref, &body);
             if count_tokens(&minimal) < count_tokens(&visible) {
                 minimal_envelope = true;
                 visible = minimal;
@@ -887,20 +783,110 @@ pub fn render_shell(input: ShellRenderInput<'_>) -> ShellRender {
         policy,
         command_status: status,
         diagnostics: Vec::new(),
-        output_strategy: if compact_passthrough {
-            "compact_adaptive_shell".to_string()
-        } else if compact_diagnostic {
-            "compact_diagnostic_shell".to_string()
-        } else if compact_inventory {
-            "compact_inventory_shell".to_string()
-        } else if success_compacted {
-            "compact_success_shell".to_string()
-        } else if minimal_envelope {
-            "minimal_envelope_shell".to_string()
-        } else {
-            "exact_first_adaptive_shell".to_string()
-        },
+        output_strategy: shell_output_strategy(
+            compact_passthrough,
+            compact_diagnostic,
+            compact_inventory,
+            success_compacted,
+            minimal_envelope,
+        )
+        .to_string(),
     }
+}
+
+
+fn shell_output_strategy(
+    compact_passthrough: bool,
+    compact_diagnostic: bool,
+    compact_inventory: bool,
+    success_compacted: bool,
+    minimal_envelope: bool,
+) -> &'static str {
+    [
+        (compact_passthrough, "compact_adaptive_shell"),
+        (compact_diagnostic, "compact_diagnostic_shell"),
+        (compact_inventory, "compact_inventory_shell"),
+        (success_compacted, "compact_success_shell"),
+        (minimal_envelope, "minimal_envelope_shell"),
+    ].into_iter().find_map(|(active, name)| active.then_some(name))
+        .unwrap_or("exact_first_adaptive_shell")
+}
+
+fn push_shell_kv(out: &mut String, key: &str, value: &str) {
+    use std::fmt::Write as _;
+    let _ = writeln!(out, "{key}: {value}");
+}
+
+fn push_shell_status(out: &mut String, status: &CommandStatus, compact: bool) {
+    let code = status.exit_code.map_or_else(|| "null".to_string(), |value| value.to_string());
+    push_shell_kv(out, "exit_code", &code);
+    if let Some(segment) = status.failed_segment.as_deref() {
+        if compact {
+            push_shell_kv(out, "failed_segment", &mask_visible_secrets(segment));
+        } else {
+            push_shell_kv(out, "failed_segment", segment);
+        }
+    }
+    if let Some(warning) = status.pipeline_masking_warning.as_deref() {
+        if compact && warning.contains("mask") {
+            push_shell_kv(out, "pipeline_masking_warning", "inspect combined_ref");
+        } else if compact {
+            push_shell_kv(out, "pipeline_masking_warning", &mask_visible_secrets(warning));
+        } else {
+            push_shell_kv(out, "pipeline_masking_warning", warning);
+        }
+    }
+    if let Some(command) = status.pipeline_rerun_command.as_deref() {
+        push_shell_kv(out, "pipeline_rerun_command", &mask_visible_secrets(command));
+    }
+}
+
+fn format_shell_status_header(
+    input: &ShellRenderInput<'_>,
+    policy: &PolicyDecision,
+    status: &CommandStatus,
+    body: &str,
+) -> String {
+    use std::fmt::Write as _;
+    let display_command = if policy.policy == "exact" || policy.policy == "passthrough" {
+        input.command.to_string()
+    } else {
+        mask_visible_secrets(input.command)
+    };
+    let mut visible = String::with_capacity(256 + body.len());
+    let _ = writeln!(visible, "# shell");
+    push_shell_kv(&mut visible, "command", &display_command);
+    let _ = writeln!(visible, "policy: {} ({})", policy.policy, policy.reason);
+    push_shell_kv(&mut visible, "status", &status.status_label);
+    let _ = writeln!(visible, "command_success: {}", status.command_success);
+    push_shell_status(&mut visible, status, false);
+    if let Some(stdout_ref) = input.stdout_ref {
+        push_shell_kv(&mut visible, "stdout_ref", stdout_ref);
+    }
+    if let Some(stderr_ref) = input.stderr_ref {
+        push_shell_kv(&mut visible, "stderr_ref", stderr_ref);
+    }
+    if let Some(combined_ref) = input.combined_ref {
+        push_shell_kv(&mut visible, "combined_ref", combined_ref);
+    }
+    visible.push('\n');
+    visible.push_str(body.trim_end());
+    visible
+}
+
+fn format_minimal_shell_ok(combined_ref: Option<&str>, body: &str) -> String {
+    use std::fmt::Write as _;
+    let mut minimal = String::with_capacity(64 + body.len());
+    minimal.push_str("# shell ok");
+    if let Some(combined_ref) = combined_ref {
+        let _ = write!(minimal, "\ncombined_ref: {combined_ref}");
+    }
+    let trimmed_body = body.trim_end();
+    if !trimmed_body.is_empty() {
+        minimal.push('\n');
+        minimal.push_str(trimmed_body);
+    }
+    minimal
 }
 
 /// Render a shell result that recovery verified as a byte-identical repeat
@@ -956,18 +942,16 @@ pub fn render_shell_repeat(input: ShellRenderInput<'_>, repeat_seen: u32) -> She
 
 /// Continuation lines of a compiler/test diagnostic block: indented context,
 /// gutter pipes, caret underlines, and note/help follow-ups.
+fn line_starts_with_any(line: &str, prefixes: &[&str]) -> bool {
+    prefixes.iter().any(|p| line.starts_with(p))
+}
+
 fn is_critical_continuation_line(line: &str) -> bool {
     if line.starts_with(' ') || line.starts_with('\t') {
         return true;
     }
     let trimmed = line.trim_start();
-    if trimmed.starts_with("-->")
-        || trimmed.starts_with('|')
-        || trimmed.starts_with('^')
-        || trimmed.starts_with('=')
-        || trimmed.starts_with("note:")
-        || trimmed.starts_with("help:")
-    {
+    if line_starts_with_any(trimmed, &["-->", "|", "^", "=", "note:", "help:"]) {
         return true;
     }
     // Source gutter lines: "5 |     let x = 1;"
@@ -1001,14 +985,18 @@ fn is_pytest_summary_line(trimmed: &str) -> bool {
         && !trimmed.contains(" error")
 }
 
+const PYTEST_NOISE_PREFIXES: &[&str] = &[
+    "platform ",
+    "rootdir:",
+    "configfile:",
+    "cachedir:",
+    "plugins:",
+    "collected ",
+    "collecting ",
+];
+
 fn is_pytest_noise_line(trimmed: &str) -> bool {
-    if trimmed.starts_with("platform ")
-        || trimmed.starts_with("rootdir:")
-        || trimmed.starts_with("configfile:")
-        || trimmed.starts_with("cachedir:")
-        || trimmed.starts_with("plugins:")
-        || trimmed.starts_with("collected ")
-        || trimmed.starts_with("collecting ")
+    if line_starts_with_any(trimmed, PYTEST_NOISE_PREFIXES)
         || (trimmed.starts_with("==")
             && trimmed.ends_with("==")
             && trimmed.contains("session starts"))
@@ -1032,41 +1020,52 @@ fn is_pytest_noise_line(trimmed: &str) -> bool {
             .all(|c| matches!(c, '.' | 's' | 'x' | 'X'))
 }
 
+const NPM_SUMMARY_PREFIXES: &[&str] = &[
+    "added ",
+    "removed ",
+    "changed ",
+    "audited ",
+    "found 0 vulnerabilities",
+    "up to date",
+];
+
 fn is_npm_summary_line(trimmed: &str) -> bool {
-    trimmed.starts_with("added ")
-        || trimmed.starts_with("removed ")
-        || trimmed.starts_with("changed ")
-        || trimmed.starts_with("audited ")
-        || trimmed.starts_with("found 0 vulnerabilities")
-        || trimmed.starts_with("up to date")
+    line_starts_with_any(trimmed, NPM_SUMMARY_PREFIXES)
 }
+
+const NPM_NOISE_PREFIXES: &[&str] = &[
+    "npm http",
+    "npm timing",
+    "npm verb",
+    "npm sill",
+    "npm info",
+    "run `npm fund`",
+    "run \"npm fund\"",
+];
 
 fn is_npm_noise_line(trimmed: &str) -> bool {
-    trimmed.starts_with("npm http")
-        || trimmed.starts_with("npm timing")
-        || trimmed.starts_with("npm verb")
-        || trimmed.starts_with("npm sill")
-        || trimmed.starts_with("npm info")
+    line_starts_with_any(trimmed, NPM_NOISE_PREFIXES)
         || trimmed.contains("packages are looking for funding")
-        || trimmed.starts_with("run `npm fund`")
-        || trimmed.starts_with("run \"npm fund\"")
 }
 
+const GIT_PROGRESS_PREFIXES: &[&str] = &[
+    "remote: Enumerating objects",
+    "remote: Counting objects",
+    "remote: Compressing objects",
+    "remote: Total",
+    "Receiving objects",
+    "Resolving deltas",
+    "Counting objects",
+    "Compressing objects",
+    "Writing objects",
+    "Unpacking objects",
+];
+
 fn git_progress_prefix(trimmed: &str) -> Option<&'static str> {
-    [
-        "remote: Enumerating objects",
-        "remote: Counting objects",
-        "remote: Compressing objects",
-        "remote: Total",
-        "Receiving objects",
-        "Resolving deltas",
-        "Counting objects",
-        "Compressing objects",
-        "Writing objects",
-        "Unpacking objects",
-    ]
-    .into_iter()
-    .find(|prefix| trimmed.starts_with(prefix))
+    GIT_PROGRESS_PREFIXES
+        .iter()
+        .copied()
+        .find(|prefix| trimmed.starts_with(prefix))
 }
 
 /// Token-aware summarizer: spends `max_tokens` on the most information-dense
@@ -1195,6 +1194,18 @@ fn line_information_density(line: &str) -> bool {
 /// that are identical after digit-normalization (timestamps, counters,
 /// progress percentages) collapse into one representative plus a count.
 /// Critical lines never collapse. Read-path `dedupe_lines` is unchanged.
+
+fn compact_head_tail(out: Vec<String>, context: usize) -> String {
+    if out.len() <= context * 2 + 20 {
+        return out.join("\n");
+    }
+    let omitted = out.len().saturating_sub(context * 2);
+    let mut compact = out[..context].to_vec();
+    compact.push(format!("... omitted {omitted} lines; exact ref available ..."));
+    compact.extend_from_slice(&out[out.len() - context..]);
+    compact.join("\n")
+}
+
 fn dedupe_lines_structural(text: &str, context: usize) -> String {
     let lines: Vec<&str> = text.lines().collect();
     if lines.is_empty() {
@@ -1242,17 +1253,7 @@ fn dedupe_lines_structural(text: &str, context: usize) -> String {
         out.push(line.to_string());
         idx += 1;
     }
-    if out.len() > context * 2 + 20 {
-        let omitted = out.len().saturating_sub(context * 2);
-        let mut compact = out[..context].to_vec();
-        compact.push(format!(
-            "... omitted {omitted} lines; exact ref available ..."
-        ));
-        compact.extend_from_slice(&out[out.len() - context..]);
-        compact.join("\n")
-    } else {
-        out.join("\n")
-    }
+    compact_head_tail(out, context)
 }
 
 fn normalize_digit_runs(line: &str) -> String {
@@ -1331,91 +1332,51 @@ fn compact_diagnostic_shell_capsule(
     status: &CommandStatus,
     body: &str,
 ) -> String {
-    let mut visible = String::new();
+    let mut visible = String::with_capacity(128 + body.len());
     visible.push_str("# shell\n");
-    visible.push_str(&format!("status: {}\n", status.status_label));
-    visible.push_str(&format!(
-        "exit_code: {}\n",
-        status
-            .exit_code
-            .map(|v| v.to_string())
-            .unwrap_or_else(|| "null".to_string())
-    ));
-    if let Some(segment) = status.failed_segment.as_deref() {
-        visible.push_str(&format!(
-            "failed_segment: {}\n",
-            mask_visible_secrets(segment)
-        ));
-    }
-    if let Some(warning) = status.pipeline_masking_warning.as_deref() {
-        let warning = if warning.contains("mask") {
-            "inspect combined_ref".to_string()
-        } else {
-            mask_visible_secrets(warning)
-        };
-        visible.push_str(&format!("pipeline_masking_warning: {warning}\n"));
-    }
-    if let Some(command) = status.pipeline_rerun_command.as_deref() {
-        visible.push_str(&format!(
-            "pipeline_rerun_command: {}\n",
-            mask_visible_secrets(command)
-        ));
-    }
-    if input.stderr.trim().is_empty() && !input.stdout.trim().is_empty() {
-        if let Some(stdout_ref) = input.stdout_ref {
-            visible.push_str(&format!("stdout_ref: {stdout_ref}\n"));
+    push_shell_kv(&mut visible, "status", &status.status_label);
+    push_shell_status(&mut visible, status, true);
+    if input.stderr.trim().is_empty() {
+        if let Some(stdout_ref) = input.stdout_ref.filter(|_| !input.stdout.trim().is_empty()) {
+            push_shell_kv(&mut visible, "stdout_ref", stdout_ref);
         }
-    }
-    if !input.stderr.trim().is_empty() {
-        if let Some(stderr_ref) = input.stderr_ref {
-            visible.push_str(&format!("stderr_ref: {stderr_ref}\n"));
-        }
+    } else if let Some(stderr_ref) = input.stderr_ref {
+        push_shell_kv(&mut visible, "stderr_ref", stderr_ref);
     }
     if let Some(combined_ref) = input.combined_ref {
-        visible.push_str(&format!("combined_ref: {combined_ref}\n"));
+        push_shell_kv(&mut visible, "combined_ref", combined_ref);
     }
     visible.push('\n');
     visible.push_str(body.trim_end());
     visible
 }
 
+const SHELL_DIAG_BOILERPLATE_PREFIXES: &[&str] = &[
+    "+ CategoryInfo",
+    "+ FullyQualifiedErrorId",
+    "At line:",
+    "+ ~",
+    "~~~~",
+];
+const FAILURE_ANCHOR_NEEDLES: &[&str] = &[
+    "error", "failed", "failure", "panic", "traceback", "exception", "assertion", "not ok",
+];
+const SECRET_MARKERS: &[&str] = &[
+    "token=", "password=", "secret=", "api_key=", "authorization:", "bearer ",
+];
+
 fn is_shell_diagnostic_boilerplate(line: &str) -> bool {
-    let trimmed = line.trim_start();
-    trimmed.starts_with("+ CategoryInfo")
-        || trimmed.starts_with("+ FullyQualifiedErrorId")
-        || trimmed.starts_with("At line:")
-        || trimmed.starts_with("+ ~")
-        || trimmed.starts_with("~~~~")
+    line_starts_with_any(line.trim_start(), SHELL_DIAG_BOILERPLATE_PREFIXES)
 }
 
 fn looks_failure_anchor_line(line: &str) -> bool {
     let lower = line.to_ascii_lowercase();
-    [
-        "error",
-        "failed",
-        "failure",
-        "panic",
-        "traceback",
-        "exception",
-        "assertion",
-        "not ok",
-    ]
-    .iter()
-    .any(|needle| lower.contains(needle))
+    FAILURE_ANCHOR_NEEDLES.iter().any(|needle| lower.contains(needle))
 }
 
 fn has_visible_secret_marker(text: &str) -> bool {
     let lower = text.to_ascii_lowercase();
-    [
-        "token=",
-        "password=",
-        "secret=",
-        "api_key=",
-        "authorization:",
-        "bearer ",
-    ]
-    .iter()
-    .any(|needle| lower.contains(needle))
+    SECRET_MARKERS.iter().any(|needle| lower.contains(needle))
 }
 
 fn has_protected_failure_context(text: &str) -> bool {
@@ -1426,20 +1387,14 @@ fn has_protected_failure_context(text: &str) -> bool {
         || lower.contains("traceback")
 }
 
+const DIFF_LINE_PREFIXES: &[&str] = &[
+    "diff --git", "index ", "--- ", "+++ ", "@@", "rename ", "deleted file", "new file", "+", "-",
+];
+
 pub fn diff_summary(text: &str, max_lines: usize) -> String {
     let mut out = Vec::new();
     for line in text.lines() {
-        if line.starts_with("diff --git")
-            || line.starts_with("index ")
-            || line.starts_with("--- ")
-            || line.starts_with("+++ ")
-            || line.starts_with("@@")
-            || line.starts_with("rename ")
-            || line.starts_with("deleted file")
-            || line.starts_with("new file")
-            || line.starts_with('+')
-            || line.starts_with('-')
-        {
+        if line_starts_with_any(line, DIFF_LINE_PREFIXES) {
             out.push(line);
         }
         if out.len() >= max_lines {
@@ -1476,17 +1431,7 @@ pub fn dedupe_lines(text: &str, context: usize) -> String {
         }
         idx += count;
     }
-    if out.len() > context * 2 + 20 {
-        let omitted = out.len().saturating_sub(context * 2);
-        let mut compact = out[..context].to_vec();
-        compact.push(format!(
-            "... omitted {omitted} lines; exact ref available ..."
-        ));
-        compact.extend_from_slice(&out[out.len() - context..]);
-        compact.join("\n")
-    } else {
-        out.join("\n")
-    }
+    compact_head_tail(out, context)
 }
 
 pub fn mask_visible_secrets(text: &str) -> String {
@@ -1640,15 +1585,16 @@ pub fn id_for(prefix: char, text: &str) -> String {
     out
 }
 
+const CODE_EXTENSIONS: &[&str] = &[
+    "rs", "py", "js", "jsx", "ts", "tsx", "go", "java", "c", "cc", "cpp", "h", "hpp",
+];
+
 pub fn detect_content_type(text: &str, path: Option<&Path>) -> ContentType {
-    if let Some(path) = path {
-        match path
-            .extension()
-            .and_then(|v| v.to_str())
-            .unwrap_or_default()
-        {
-            "rs" | "py" | "js" | "jsx" | "ts" | "tsx" | "go" | "java" | "c" | "cc" | "cpp"
-            | "h" | "hpp" => return ContentType::Code,
+    if let Some(ext) = path.and_then(|p| p.extension()).and_then(|v| v.to_str()) {
+        if CODE_EXTENSIONS.contains(&ext) {
+            return ContentType::Code;
+        }
+        match ext {
             "json" => return ContentType::JsonConfig,
             "md" | "markdown" => return ContentType::Markdown,
             "diff" | "patch" => return ContentType::Diff,
@@ -1700,6 +1646,7 @@ mod shell_display;
 mod shell_family;
 mod shell_parse;
 mod shell_policy;
+mod shell_quote;
 mod tokens;
 
 use render::domain::*;
@@ -1713,6 +1660,12 @@ pub use render::domain::{
 };
 pub use shell_display::{
     shell_display_command_from_argv, shell_display_command_from_argv_for_platform,
+};
+pub use shell_quote::{
+    argv_has_shell_operator_tokens, contains_platform_shell_syntax, contains_shell_syntax,
+    host_shell_platform, is_shell_operator_token, is_windows_shell_builtin, is_windows_shell_host,
+    looks_like_powershell_syntax, quote_for, quote_posix, quote_powershell, quote_windows_cmd,
+    split_command_string, split_command_string_for_platform,
 };
 pub use shell_family::shell_family;
 pub use shell_policy::{classify_command_status, decide_shell_policy, shell_combined_output};

@@ -1,6 +1,6 @@
 use super::*;
 use std::sync::Arc;
-use std::sync::Mutex as StdMutex;
+use crate::stdio::TestOutput;
 use std::sync::atomic::{AtomicU32, Ordering};
 
 struct ChannelWriter {
@@ -55,20 +55,6 @@ fn channel_pipe() -> (ChannelWriter, ChannelReader) {
             position: 0,
         },
     )
-}
-
-#[derive(Clone)]
-struct SharedOutput(Arc<StdMutex<Vec<u8>>>);
-
-impl Write for SharedOutput {
-    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-        self.0.lock().unwrap().extend_from_slice(buf);
-        Ok(buf.len())
-    }
-
-    fn flush(&mut self) -> std::io::Result<()> {
-        Ok(())
-    }
 }
 
 /// Scripted echo server: answers every request with an empty result and
@@ -141,7 +127,7 @@ fn supervisor_respawns_child_and_replays_initialize_after_crash() {
     };
 
     let (event_tx, event_rx) = mpsc::channel();
-    let output = SharedOutput(Arc::new(StdMutex::new(Vec::new())));
+    let output = TestOutput::default();
     let output_capture = output.clone();
 
     let initialize = r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"t","version":"0"}}}"#;
@@ -167,8 +153,7 @@ fn supervisor_respawns_child_and_replays_initialize_after_crash() {
     assert_eq!(exit_code, 0);
     assert!(spawn_count.load(Ordering::SeqCst) >= 2, "child respawned");
 
-    let written = output.0.lock().unwrap().clone();
-    let written = String::from_utf8(written).unwrap();
+    let written = String::from_utf8(output.bytes()).unwrap();
     assert_eq!(
         written.matches("\"id\":1").count(),
         1,
@@ -184,14 +169,11 @@ fn supervisor_respawns_child_and_replays_initialize_after_crash() {
     );
 }
 
-fn wait_for_output(output: &SharedOutput, needle: &str) {
+fn wait_for_output(output: &TestOutput, needle: &str) {
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
-        {
-            let written = output.0.lock().unwrap();
-            if String::from_utf8_lossy(&written).contains(needle) {
-                return;
-            }
+        if output.contains(needle) {
+            return;
         }
         assert!(
             Instant::now() < deadline,
@@ -250,7 +232,7 @@ fn take_resend_framing_is_a_noop_without_a_pending_resend() {
 fn supervisor_gives_up_after_repeated_spawn_failures() {
     let spawner = || Err(std::io::Error::other("spawn always fails in this test"));
     let (event_tx, event_rx) = mpsc::channel();
-    let output = SharedOutput(Arc::new(StdMutex::new(Vec::new())));
+    let output = TestOutput::default();
 
     let exit_code = run_supervisor_loop(spawner, event_tx, event_rx, output);
 

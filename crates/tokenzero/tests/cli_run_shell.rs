@@ -1,14 +1,13 @@
-use assert_cmd::prelude::*;
+mod common;
+use common::*;
+
 use serde_json::Value;
-use std::process::Command;
 use tempfile::tempdir;
 
 #[test]
 fn cli_run_has_no_alias_dependency() {
-    let dir = tempdir().unwrap();
-    let cache = dir.path().join("cache.json");
-    let output = Command::cargo_bin("tokenzero")
-        .unwrap()
+    let (_dir, cache) = setup_temp_with_cache();
+    let output = tokenzero_cmd()
         .args([
             "run",
             "--json",
@@ -20,12 +19,8 @@ fn cli_run_has_no_alias_dependency() {
         ])
         .output()
         .unwrap();
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let json: Value = serde_json::from_slice(&output.stdout).unwrap();
+    let output = assert_success(output, "run echo");
+    let json = parse_json_stdout(&output);
     assert_eq!(json["status"], "ok");
     assert_eq!(json["telemetry"]["alias_dependency"], false);
     let argv = json["telemetry"]["argv"].as_array().unwrap();
@@ -42,12 +37,9 @@ fn cli_run_has_no_alias_dependency() {
 #[cfg(not(windows))]
 #[test]
 fn shell_inline_budget_zero_disables_small_output_inlining() {
-    let dir = tempdir().unwrap();
-    let cache = dir.path().join("cache.json");
-    let output_file = dir.path().join("small.txt");
-    std::fs::write(&output_file, "tok ".repeat(200)).unwrap();
-    let output = Command::cargo_bin("tokenzero")
-        .unwrap()
+    let (dir, cache) = setup_temp_with_cache();
+    std::fs::write(dir.path().join("small.txt"), "tok ".repeat(200)).unwrap();
+    let output = tokenzero_cmd()
         .env("TOKENZERO_SHELL_INLINE_BUDGET", "0")
         .args([
             "run",
@@ -64,17 +56,9 @@ fn shell_inline_budget_zero_disables_small_output_inlining() {
         ])
         .output()
         .unwrap();
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let json: Value = serde_json::from_slice(&output.stdout).unwrap();
+    let json = parse_json_stdout(&assert_success(output, "inline budget"));
     let visible = json["visible"]["text"].as_str().unwrap();
-    assert!(
-        visible.contains("combined_ref:"),
-        "visible should point at refs: {visible}"
-    );
+    assert!(visible.contains("combined_ref:"), "visible should point at refs: {visible}");
     assert!(
         !visible.contains("tok tok tok tok tok tok tok tok tok tok"),
         "env override disabled inline shell payloads: {visible}"
@@ -83,9 +67,8 @@ fn shell_inline_budget_zero_disables_small_output_inlining() {
 
 #[test]
 fn cli_run_has_status_truth_stream_refs_and_expand() {
-    let dir = tempdir().unwrap();
-    let cache = dir.path().join("cache.json");
-    let command = if cfg!(windows) {
+    let (dir, cache) = setup_temp_with_cache();
+    let command: Vec<&str> = if cfg!(windows) {
         vec![
             "powershell",
             "-NoProfile",
@@ -95,7 +78,6 @@ fn cli_run_has_status_truth_stream_refs_and_expand() {
     } else {
         vec!["sh", "-c", "printf alpha; printf beta >&2; exit 7"]
     };
-
     let mut args = vec![
         "run",
         "--json",
@@ -112,61 +94,25 @@ fn cli_run_has_status_truth_stream_refs_and_expand() {
         "--",
     ];
     args.extend(command);
-
-    let output = Command::cargo_bin("tokenzero")
-        .unwrap()
-        .args(args)
-        .output()
-        .unwrap();
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let json: Value = serde_json::from_slice(&output.stdout).unwrap();
+    let output = assert_success(tokenzero_cmd().args(&args).output().unwrap(), "status truth");
+    let json = parse_json_stdout(&output);
     assert_eq!(json["status"], "ok");
     assert_eq!(json["telemetry"]["transport_status"], "ok");
     assert_eq!(json["telemetry"]["command_success"], false);
     assert_eq!(json["telemetry"]["exit_code"], 7);
-    assert!(
-        json["refs"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|r| r["kind"] == "stdout")
-    );
-    assert!(
-        json["refs"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|r| r["kind"] == "stderr")
-    );
-
+    assert!(json["refs"].as_array().unwrap().iter().any(|r| r["kind"] == "stdout"));
+    assert!(json["refs"].as_array().unwrap().iter().any(|r| r["kind"] == "stderr"));
     let stdout_ref = json["telemetry"]["stdout_ref"].as_str().unwrap();
-    let expanded = Command::cargo_bin("tokenzero")
-        .unwrap()
-        .args([
-            "expand",
-            stdout_ref,
-            "--cache-path",
-            cache.to_str().unwrap(),
-            "--raw",
-        ])
-        .output()
-        .unwrap();
-    assert!(expanded.status.success());
-    assert_eq!(String::from_utf8_lossy(&expanded.stdout), "alpha");
+    let text = expand_raw_text(stdout_ref, Some(&cache), None, &[]);
+    assert_eq!(text, "alpha");
 }
 
 #[cfg(not(windows))]
 #[test]
 fn cli_run_text_mode_propagates_child_exit_code() {
-    let dir = tempdir().unwrap();
-    let cache = dir.path().join("cache.json");
+    let (dir, cache) = setup_temp_with_cache();
     let run = |command: &[&str]| {
-        Command::cargo_bin("tokenzero")
-            .unwrap()
+        tokenzero_cmd()
             .args([
                 "run",
                 "--cache-path",
@@ -184,100 +130,60 @@ fn cli_run_text_mode_propagates_child_exit_code() {
     assert_eq!(run(&["sh", "-c", "exit 3"]).status.code(), Some(3));
     assert_eq!(run(&["false"]).status.code(), Some(1));
     assert_eq!(run(&["true"]).status.code(), Some(0));
-    // Masked pipeline: the shell itself exits 0, so text mode mirrors sh
-    // semantics; the visible warning carries the failure evidence.
+    // Masked pipeline: shell exits 0; warning carries failure evidence.
     assert_eq!(run(&["false | true"]).status.code(), Some(0));
 }
 
 #[test]
 fn cli_rewrite_accepts_trailing_command_args() {
-    let output = Command::cargo_bin("tokenzero")
-        .unwrap()
-        .args(["rewrite", "--json", "--", "git", "status"])
-        .output()
-        .unwrap();
-    assert!(output.status.success());
-    let json: Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert_eq!(json["family"], "git");
-    assert_eq!(json["rewritten_command"], "git status");
-
-    let ls = Command::cargo_bin("tokenzero")
-        .unwrap()
-        .args(["rewrite", "--json", "--", "ls", "-la"])
-        .output()
-        .unwrap();
-    assert!(ls.status.success());
-    let json: Value = serde_json::from_slice(&ls.stdout).unwrap();
-    assert_eq!(json["family"], "tree");
-    assert_eq!(json["rewritten_command"], "ls -la");
-
-    let legacy = Command::cargo_bin("tokenzero")
-        .unwrap()
-        .args(["rewrite", "--json", "cat README.md"])
-        .output()
-        .unwrap();
-    assert!(legacy.status.success());
-    let json: Value = serde_json::from_slice(&legacy.stdout).unwrap();
-    assert_eq!(json["rewritten_command"], "tokenzero read README.md");
-
-    let missing = Command::cargo_bin("tokenzero")
-        .unwrap()
-        .args(["rewrite", "--json"])
-        .output()
-        .unwrap();
+    for (args, family, rewritten) in [
+        (
+            &["rewrite", "--json", "--", "git", "status"][..],
+            "git",
+            "git status",
+        ),
+        (
+            &["rewrite", "--json", "--", "ls", "-la"][..],
+            "tree",
+            "ls -la",
+        ),
+        (
+            &["rewrite", "--json", "cat README.md"][..],
+            "read",
+            "tokenzero read README.md",
+        ),
+    ] {
+        let output = assert_success(tokenzero_cmd().args(args).output().unwrap(), "rewrite");
+        let json = parse_json_stdout(&output);
+        if family != "read" {
+            assert_eq!(json["family"], family);
+        }
+        assert_eq!(json["rewritten_command"], rewritten);
+    }
+    let missing = tokenzero_cmd().args(["rewrite", "--json"]).output().unwrap();
     assert!(!missing.status.success());
 }
 
 #[test]
 fn cli_run_pipeline_masking_is_not_reported_as_success() {
-    let dir = tempdir().unwrap();
-    let cache = dir.path().join("cache.json");
-    let output = Command::cargo_bin("tokenzero")
-        .unwrap()
-        .args([
-            "run",
-            "--json",
-            "--cache-path",
-            cache.to_str().unwrap(),
-            "--allowed-root",
-            dir.path().to_str().unwrap(),
-            "--cwd",
-            dir.path().to_str().unwrap(),
-            "--",
-            "false | true",
-        ])
-        .output()
-        .unwrap();
-    assert!(output.status.success());
-    let json: Value = serde_json::from_slice(&output.stdout).unwrap();
+    let (dir, cache) = setup_temp_with_cache();
+    let json = run_cli_run_json(dir.path(), &cache, &["false | true"]);
     assert_eq!(json["telemetry"]["command_success"], false);
     if !cfg!(windows) {
         assert_eq!(json["telemetry"]["exit_code"], 0);
         assert_eq!(json["telemetry"]["failed_segment"], "false");
-    }
-    if cfg!(windows) {
-        assert_eq!(json["telemetry"]["status_label"], "command_failed");
+        assert!(json["visible"]["text"]
+            .as_str()
+            .unwrap()
+            .contains("pipeline_masking_warning"));
+        assert!(json["telemetry"]["pipeline_masking_warning"]
+            .as_str()
+            .is_some_and(|w| !w.is_empty()));
+        assert!(json["telemetry"]["pipeline_rerun_command"]
+            .as_str()
+            .is_some_and(|c| !c.is_empty()));
     } else {
-        assert!(
-            json["visible"]["text"]
-                .as_str()
-                .unwrap()
-                .contains("pipeline_masking_warning")
-        );
-        assert!(
-            json["telemetry"]["pipeline_masking_warning"]
-                .as_str()
-                .is_some_and(|w| !w.is_empty()),
-            "pipeline_masking_warning should be non-empty: {:?}",
-            json["telemetry"]["pipeline_masking_warning"]
-        );
-        assert!(
-            json["telemetry"]["pipeline_rerun_command"]
-                .as_str()
-                .is_some_and(|c| !c.is_empty()),
-            "pipeline_rerun_command should be present on non-Windows: {:?}",
-            json["telemetry"]["pipeline_rerun_command"]
-        );
+        assert_eq!(json["telemetry"]["status_label"], "command_failed");
     }
 }
 
@@ -291,35 +197,10 @@ fn cli_run_pipeline_masking_includes_pipefail_rerun_command() {
             "bash -o pipefail -c 'printf ok | false | true'",
         ),
     ] {
-        let dir = tempdir().unwrap();
-        let cache = dir.path().join("cache.json");
-        let output = Command::cargo_bin("tokenzero")
-            .unwrap()
-            .args([
-                "run",
-                "--json",
-                "--cache-path",
-                cache.to_str().unwrap(),
-                "--allowed-root",
-                dir.path().to_str().unwrap(),
-                "--cwd",
-                dir.path().to_str().unwrap(),
-                "--",
-                script,
-            ])
-            .output()
-            .unwrap();
-        assert!(
-            output.status.success(),
-            "{}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-        let json: Value = serde_json::from_slice(&output.stdout).unwrap();
+        let (dir, cache) = setup_temp_with_cache();
+        let json = run_cli_run_json(dir.path(), &cache, &[script]);
         assert_eq!(json["telemetry"]["command_success"], false, "{script}");
-        assert_eq!(
-            json["telemetry"]["pipeline_rerun_command"], rerun,
-            "{script}"
-        );
+        assert_eq!(json["telemetry"]["pipeline_rerun_command"], rerun, "{script}");
         assert!(
             json["visible"]["text"]
                 .as_str()
@@ -335,69 +216,40 @@ fn cli_run_pipeline_masking_includes_pipefail_rerun_command() {
 #[test]
 fn cli_run_shell_wrapped_rg_keeps_search_summary() {
     use std::os::unix::fs::PermissionsExt;
-
-    let dir = tempdir().unwrap();
+    let (dir, cache) = setup_temp_with_cache();
     let bin_dir = dir.path().join("bin");
     std::fs::create_dir(&bin_dir).unwrap();
     let rg_path = bin_dir.join("rg");
-    std::fs::write(
-        &rg_path,
-        "#!/bin/sh\nprintf 'sample.txt:1:error: tokenzero\\n'\n",
-    )
-    .unwrap();
+    std::fs::write(&rg_path, "#!/bin/sh\nprintf 'sample.txt:1:error: tokenzero\\n'\n").unwrap();
     let mut perms = std::fs::metadata(&rg_path).unwrap().permissions();
     perms.set_mode(0o755);
     std::fs::set_permissions(&rg_path, perms).unwrap();
-
-    let cache = dir.path().join("cache.json");
-    let path = format!(
-        "{}:{}",
-        bin_dir.display(),
-        std::env::var("PATH").unwrap_or_default()
-    );
+    let path = format!("{}:{}", bin_dir.display(), std::env::var("PATH").unwrap_or_default());
     let path_assignment = format!("PATH={path}");
-    let output = Command::cargo_bin("tokenzero")
-        .unwrap()
-        .args([
-            "run",
-            "--json",
-            "--cache-path",
-            cache.to_str().unwrap(),
-            "--allowed-root",
-            dir.path().to_str().unwrap(),
-            "--cwd",
-            dir.path().to_str().unwrap(),
-            "--",
+    let json = run_cli_run_json(
+        dir.path(),
+        &cache,
+        &[
             "env",
             path_assignment.as_str(),
             "bash",
             "-c",
             "rg -P '(?=tokenzero)' sample.txt",
-        ])
-        .output()
-        .unwrap();
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
+        ],
     );
-    let json: Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(json["telemetry"]["family"], "search");
     assert_eq!(json["telemetry"]["policy"], "structured");
     assert_eq!(json["telemetry"]["command_success"], true);
     let visible = json["visible"]["text"].as_str().unwrap();
     assert!(visible.contains("search_summary"), "{visible}");
     assert!(visible.contains("matches_seen: 1"), "{visible}");
-    assert!(
-        visible.contains("sample.txt:1:error: tokenzero"),
-        "{visible}"
-    );
+    assert!(visible.contains("sample.txt:1:error: tokenzero"), "{visible}");
 }
 
 #[cfg(not(windows))]
 #[test]
 fn cli_run_inner_script_pipeline_masking_uses_pipefail_rerun() {
-    for (label, trailing_args, rerun) in [
+    let cases: [(&str, Vec<&str>, &str); 4] = [
         (
             "env-wrap | false | true",
             vec!["env", "TZ=UTC", "bash", "-lc", "false | true"],
@@ -417,45 +269,18 @@ fn cli_run_inner_script_pipeline_masking_uses_pipefail_rerun() {
             "split-string --split-string",
             vec![
                 "env",
-                "--split-string=bash -lc \"printf ok | false | true\"",
+                r#"--split-string=bash -lc "printf ok | false | true""#,
             ],
             "bash -o pipefail -c 'printf ok | false | true'",
         ),
-    ] {
-        let dir = tempdir().unwrap();
-        let cache = dir.path().join("cache.json");
-        let output = Command::cargo_bin("tokenzero")
-            .unwrap()
-            .args([
-                "run",
-                "--json",
-                "--cache-path",
-                cache.to_str().unwrap(),
-                "--allowed-root",
-                dir.path().to_str().unwrap(),
-                "--cwd",
-                dir.path().to_str().unwrap(),
-                "--",
-            ])
-            .args(&trailing_args)
-            .output()
-            .unwrap();
-        assert!(
-            output.status.success(),
-            "{label}: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-        let json: Value = serde_json::from_slice(&output.stdout).unwrap();
+    ];
+    for (label, trailing_args, rerun) in cases {
+        let (dir, cache) = setup_temp_with_cache();
+        let json = run_cli_run_json(dir.path(), &cache, &trailing_args);
         assert_eq!(json["telemetry"]["command_success"], false, "{label}");
         assert_eq!(json["telemetry"]["failed_segment"], "false", "{label}");
-        assert_eq!(
-            json["telemetry"]["shell_syntax_summary"], "pipeline",
-            "{label}"
-        );
-        assert_eq!(
-            json["telemetry"]["pipeline_rerun_command"], rerun,
-            "{label}"
-        );
+        assert_eq!(json["telemetry"]["shell_syntax_summary"], "pipeline", "{label}");
+        assert_eq!(json["telemetry"]["pipeline_rerun_command"], rerun, "{label}");
         assert!(
             json["visible"]["text"]
                 .as_str()
@@ -470,34 +295,18 @@ fn cli_run_inner_script_pipeline_masking_uses_pipefail_rerun() {
 #[cfg(not(windows))]
 #[test]
 fn cli_run_expected_false_or_true_has_no_masking_warning() {
-    let dir = tempdir().unwrap();
-    let cache = dir.path().join("cache.json");
-    let output = Command::cargo_bin("tokenzero")
-        .unwrap()
-        .args([
-            "run",
-            "--json",
-            "--cache-path",
-            cache.to_str().unwrap(),
-            "--allowed-root",
-            dir.path().to_str().unwrap(),
-            "--cwd",
-            dir.path().to_str().unwrap(),
-            "--",
+    let (dir, cache) = setup_temp_with_cache();
+    let json = run_cli_run_json(
+        dir.path(),
+        &cache,
+        &[
             "test",
             "-f",
             "definitely-missing-tokenzero-file",
             "||",
             "true",
-        ])
-        .output()
-        .unwrap();
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
+        ],
     );
-    let json: Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(json["telemetry"]["command_success"], true);
     assert_eq!(json["telemetry"]["status_label"], "command_success");
     assert!(json["telemetry"]["failed_segment"].is_null());
@@ -507,74 +316,33 @@ fn cli_run_expected_false_or_true_has_no_masking_warning() {
 #[cfg(not(windows))]
 #[test]
 fn cli_run_expected_false_pipelines_preserve_status_truth() {
-    let dir = tempdir().unwrap();
+    let (dir, cache) = setup_temp_with_cache();
     std::fs::write(dir.path().join("left.txt"), b"left\n").unwrap();
     std::fs::write(dir.path().join("right.txt"), b"right\n").unwrap();
-    let cache = dir.path().join("cache.json");
 
-    let run = |command: &[&str]| -> Value {
-        let output = Command::cargo_bin("tokenzero")
-            .unwrap()
-            .args([
-                "run",
-                "--json",
-                "--cache-path",
-                cache.to_str().unwrap(),
-                "--allowed-root",
-                dir.path().to_str().unwrap(),
-                "--cwd",
-                dir.path().to_str().unwrap(),
-                "--",
-            ])
-            .args(command)
-            .output()
-            .unwrap();
-        assert!(
-            output.status.success(),
-            "{}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-        serde_json::from_slice(&output.stdout).unwrap()
-    };
-
-    for command in [
+    let success_cmds: [&[&str]; 2] = [
         &[
             "test",
             "-f",
             "definitely-missing-tokenzero-file",
             "|",
             "cat",
-        ][..],
-        &["cmp", "left.txt", "right.txt", "|", "cat"][..],
-    ] {
-        let json = run(command);
-        let visible = json["visible"]["text"].as_str().unwrap();
+        ],
+        &["cmp", "left.txt", "right.txt", "|", "cat"],
+    ];
+    for command in success_cmds {
+        let json = run_cli_run_json(dir.path(), &cache, command);
         assert_eq!(json["telemetry"]["command_success"], true, "{command:?}");
-        assert_eq!(
-            json["telemetry"]["status_label"], "command_success",
-            "{command:?}"
-        );
-        assert_eq!(
-            json["telemetry"]["shell_syntax_summary"], "pipeline",
-            "{command:?}"
-        );
-        assert!(
-            json["telemetry"]["failed_segment"].is_null(),
-            "{command:?}: {visible}"
-        );
-        assert!(
-            json["telemetry"]["pipeline_masking_warning"].is_null(),
-            "{command:?}: {visible}"
-        );
-        assert!(
-            json["telemetry"]["pipeline_rerun_command"].is_null(),
-            "{command:?}: {visible}"
-        );
+        assert_eq!(json["telemetry"]["status_label"], "command_success", "{command:?}");
+        assert_eq!(json["telemetry"]["shell_syntax_summary"], "pipeline", "{command:?}");
+        assert!(json["telemetry"]["failed_segment"].is_null(), "{command:?}");
+        assert!(json["telemetry"]["pipeline_masking_warning"].is_null(), "{command:?}");
+        assert!(json["telemetry"]["pipeline_rerun_command"].is_null(), "{command:?}");
     }
 
-    for (command, failed_segment, rerun) in [
+    let fail_cmds: [(&[&str], &str, &str); 2] = [
         (
-            &["cmp", "missing-a", "missing-b", "|", "cat"][..],
+            &["cmp", "missing-a", "missing-b", "|", "cat"],
             "cmp missing-a missing-b",
             "bash -o pipefail -c 'cmp missing-a missing-b | cat'",
         ),
@@ -585,25 +353,17 @@ fn cli_run_expected_false_pipelines_preserve_status_truth() {
                 "definitely-missing-tokenzero-file",
                 "|",
                 "false",
-            ][..],
+            ],
             "false",
             "bash -o pipefail -c 'test -f definitely-missing-tokenzero-file | false'",
         ),
-    ] {
-        let json = run(command);
+    ];
+    for (command, failed_segment, rerun) in fail_cmds {
+        let json = run_cli_run_json(dir.path(), &cache, command);
         assert_eq!(json["telemetry"]["command_success"], false, "{command:?}");
-        assert_eq!(
-            json["telemetry"]["status_label"], "command_failed",
-            "{command:?}"
-        );
-        assert_eq!(
-            json["telemetry"]["shell_syntax_summary"], "pipeline",
-            "{command:?}"
-        );
-        assert_eq!(
-            json["telemetry"]["failed_segment"], failed_segment,
-            "{command:?}"
-        );
+        assert_eq!(json["telemetry"]["status_label"], "command_failed", "{command:?}");
+        assert_eq!(json["telemetry"]["shell_syntax_summary"], "pipeline", "{command:?}");
+        assert_eq!(json["telemetry"]["failed_segment"], failed_segment, "{command:?}");
         assert!(
             json["telemetry"]["pipeline_masking_warning"]
                 .as_str()
@@ -611,10 +371,7 @@ fn cli_run_expected_false_pipelines_preserve_status_truth() {
             "{command:?}: {}",
             json["visible"]["text"].as_str().unwrap()
         );
-        assert_eq!(
-            json["telemetry"]["pipeline_rerun_command"], rerun,
-            "{command:?}"
-        );
+        assert_eq!(json["telemetry"]["pipeline_rerun_command"], rerun, "{command:?}");
         assert!(
             json["visible"]["text"]
                 .as_str()
@@ -629,31 +386,8 @@ fn cli_run_expected_false_pipelines_preserve_status_truth() {
 #[cfg(not(windows))]
 #[test]
 fn cli_run_argv_metacharacters_are_display_quoted() {
-    let dir = tempdir().unwrap();
-    let cache = dir.path().join("cache.json");
-    let output = Command::cargo_bin("tokenzero")
-        .unwrap()
-        .args([
-            "run",
-            "--json",
-            "--cache-path",
-            cache.to_str().unwrap(),
-            "--allowed-root",
-            dir.path().to_str().unwrap(),
-            "--cwd",
-            dir.path().to_str().unwrap(),
-            "--",
-            "true",
-            "error|warning",
-        ])
-        .output()
-        .unwrap();
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let json: Value = serde_json::from_slice(&output.stdout).unwrap();
+    let (dir, cache) = setup_temp_with_cache();
+    let json = run_cli_run_json(dir.path(), &cache, &["true", "error|warning"]);
     assert_eq!(json["telemetry"]["command"], "true 'error|warning'");
     assert_eq!(json["telemetry"]["shell_syntax_summary"], "argv/simple");
     assert_eq!(json["telemetry"]["command_success"], true);
@@ -663,73 +397,50 @@ fn cli_run_argv_metacharacters_are_display_quoted() {
 #[cfg(not(windows))]
 #[test]
 fn cli_run_or_true_does_not_hide_stderr_failure() {
-    let dir = tempdir().unwrap();
-    let cache = dir.path().join("cache.json");
-    let output = Command::cargo_bin("tokenzero")
-        .unwrap()
-        .args([
-            "run",
-            "--json",
-            "--cache-path",
-            cache.to_str().unwrap(),
-            "--allowed-root",
-            dir.path().to_str().unwrap(),
-            "--cwd",
-            dir.path().to_str().unwrap(),
-            "--",
+    let (dir, cache) = setup_temp_with_cache();
+    let json = run_cli_run_json(
+        dir.path(),
+        &cache,
+        &[
             "diff",
             "--definitely-not-a-tokenzero-option",
             "||",
             "true",
-        ])
-        .output()
-        .unwrap();
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
+        ],
     );
-    let json: Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(json["telemetry"]["command_success"], false);
     assert_eq!(json["telemetry"]["status_label"], "command_failed");
     assert_eq!(
         json["telemetry"]["failed_segment"],
         "diff --definitely-not-a-tokenzero-option"
     );
-    assert!(
-        json["telemetry"]["pipeline_masking_warning"]
-            .as_str()
-            .unwrap()
-            .contains("mask")
-    );
+    assert!(json["telemetry"]["pipeline_masking_warning"]
+        .as_str()
+        .unwrap()
+        .contains("mask"));
 }
 
 #[test]
 fn cli_run_preserves_multi_arg_shell_operators() {
-    let dir = tempdir().unwrap();
-    let cache = dir.path().join("cache.json");
-    let output = Command::cargo_bin("tokenzero")
-        .unwrap()
-        .args([
-            "run",
-            "--json",
-            "--cache-path",
-            cache.to_str().unwrap(),
-            "--",
-            "echo",
-            "one",
-            "&&",
-            "echo",
-            "two",
-        ])
-        .output()
-        .unwrap();
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let json: Value = serde_json::from_slice(&output.stdout).unwrap();
+    let (_dir, cache) = setup_temp_with_cache();
+    let json = parse_json_stdout(&assert_success(
+        tokenzero_cmd()
+            .args([
+                "run",
+                "--json",
+                "--cache-path",
+                cache.to_str().unwrap(),
+                "--",
+                "echo",
+                "one",
+                "&&",
+                "echo",
+                "two",
+            ])
+            .output()
+            .unwrap(),
+        "multi-arg operators",
+    ));
     assert_eq!(json["telemetry"]["execution_mode"], "shell");
     assert_eq!(json["telemetry"]["command_success"], true);
     assert!(
@@ -748,43 +459,35 @@ fn cli_run_preserves_multi_arg_shell_operators() {
             .collect::<Vec<_>>(),
         vec!["one", "two"]
     );
-    assert!(
-        json["telemetry"]["argv"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|arg| arg == "echo one && echo two")
-    );
+    assert!(json["telemetry"]["argv"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|arg| arg == "echo one && echo two"));
 }
 
 #[cfg(not(windows))]
 #[test]
 fn cli_run_quotes_multi_arg_shell_operator_literals() {
-    let dir = tempdir().unwrap();
-    let cache = dir.path().join("cache.json");
-    let output = Command::cargo_bin("tokenzero")
-        .unwrap()
-        .args([
-            "run",
-            "--json",
-            "--cache-path",
-            cache.to_str().unwrap(),
-            "--",
-            "printf",
-            "%s\n",
-            "literal; echo TOKENZERO_INJECTED",
-            "|",
-            "cat",
-        ])
-        .output()
-        .unwrap();
-
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let json: Value = serde_json::from_slice(&output.stdout).unwrap();
+    let (_dir, cache) = setup_temp_with_cache();
+    let json = parse_json_stdout(&assert_success(
+        tokenzero_cmd()
+            .args([
+                "run",
+                "--json",
+                "--cache-path",
+                cache.to_str().unwrap(),
+                "--",
+                "printf",
+                "%s\n",
+                "literal; echo TOKENZERO_INJECTED",
+                "|",
+                "cat",
+            ])
+            .output()
+            .unwrap(),
+        "quoted literals",
+    ));
     assert_eq!(json["telemetry"]["execution_mode"], "shell");
     assert_eq!(json["telemetry"]["command_success"], true);
     assert_eq!(json["telemetry"]["shell_syntax_summary"], "pipeline");
@@ -813,27 +516,22 @@ fn cli_default_artifact_output_does_not_overwrite_mcp_smoke() {
         ),
     ] {
         let dir = tempdir().unwrap();
-        let results_dir = dir.path().join("results").join("current");
-        std::fs::create_dir_all(&results_dir).unwrap();
+        let results_dir = results_current_dir(dir.path());
         let mcp_smoke = results_dir.join("rust_mcp_smoke.json");
         std::fs::write(&mcp_smoke, br#"{"schema_version":"sentinel.mcp"}"#).unwrap();
-
-        let output = Command::cargo_bin("tokenzero")
-            .unwrap()
-            .current_dir(dir.path())
-            .args([subcommand, "--json"])
-            .output()
-            .unwrap();
-        assert!(
-            output.status.success(),
-            "{subcommand}: {}",
-            String::from_utf8_lossy(&output.stderr)
+        let output = assert_success(
+            tokenzero_cmd()
+                .current_dir(dir.path())
+                .args([subcommand, "--json"])
+                .output()
+                .unwrap(),
+            subcommand,
         );
-
+        let _ = output;
         let artifact_path = results_dir.join(artifact_name);
         assert!(artifact_path.exists(), "{subcommand} default artifact");
-        let artifact: Value = serde_json::from_slice(&std::fs::read(&artifact_path).unwrap())
-            .expect("{subcommand} JSON");
+        let artifact: Value =
+            serde_json::from_slice(&std::fs::read(&artifact_path).unwrap()).expect("JSON");
         assert_eq!(artifact["schema_version"], schema_version);
         assert_eq!(
             std::fs::read_to_string(&mcp_smoke).unwrap(),
@@ -847,23 +545,18 @@ fn cli_default_artifact_output_does_not_overwrite_mcp_smoke() {
 fn cli_false_success_shell_audit_covers_expected_false_and_masked_failure() {
     let dir = tempdir().unwrap();
     let artifact = dir.path().join("false-success-shell.json");
-    let output = Command::cargo_bin("tokenzero")
-        .unwrap()
-        .args([
-            "false-success-shell",
-            "--output-json",
-            artifact.to_str().unwrap(),
-            "--json",
-        ])
-        .output()
-        .unwrap();
-
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let json: Value = serde_json::from_slice(&output.stdout).unwrap();
+    let json = parse_json_stdout(&assert_success(
+        tokenzero_cmd()
+            .args([
+                "false-success-shell",
+                "--output-json",
+                artifact.to_str().unwrap(),
+                "--json",
+            ])
+            .output()
+            .unwrap(),
+        "false-success-shell",
+    ));
     assert_eq!(json["schema_version"], "tokenzero.false_success_shell.v1");
     assert_eq!(json["ok"], true);
     let rows = json["rows"].as_array().unwrap();
@@ -882,18 +575,10 @@ fn cli_false_success_shell_audit_covers_expected_false_and_masked_failure() {
             "missing passing false-success row for {id}: {rows:#?}"
         );
     }
-
-    let expected_false = rows
-        .iter()
-        .find(|row| row["id"] == "expected_false_guard")
-        .expect("expected_false_guard row");
+    let expected_false = find_row_by(rows, "id", "expected_false_guard");
     assert_eq!(expected_false["command_success"], true);
     assert_eq!(expected_false["hazard_visible"], false);
-
-    let masked_failure = rows
-        .iter()
-        .find(|row| row["id"] == "or_true_stderr_failure")
-        .expect("or_true_stderr_failure row");
+    let masked_failure = find_row_by(rows, "id", "or_true_stderr_failure");
     assert_eq!(masked_failure["command_success"], false);
     assert_eq!(masked_failure["hazard_visible"], true);
 }

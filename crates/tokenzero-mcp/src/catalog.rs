@@ -39,6 +39,7 @@ pub struct ToolSpec {
 pub(crate) struct ToolSpecSeed {
     pub(crate) name: &'static str,
     pub(crate) cluster: &'static str,
+    pub(crate) capabilities: &'static [&'static str],
     pub(crate) summary: &'static str,
     pub(crate) doc: String,
     pub(crate) input_schema: Value,
@@ -236,12 +237,28 @@ pub fn resource_specs() -> Vec<ResourceSpec> {
     .collect()
 }
 
-pub(crate) fn canonical_tool_specs() -> Vec<ToolSpecSeed> {
-    let hard_max_wall_ms = crate::CodeModeLimits::default().hard_max_wall_ms;
-    vec![
-        ToolSpecSeed {
+macro_rules! tool_table {
+    ($( $kind:ident => { name: $name:literal, $($body:tt)* } ),* $(,)?) => {
+        #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+        pub(crate) enum ToolKind { $( $kind ),* }
+
+        impl ToolKind {
+            pub(crate) fn from_canonical(name: &str) -> Option<Self> {
+                match name { $( $name => Some(Self::$kind), )* _ => None }
+            }
+        }
+
+        pub(crate) fn canonical_tool_specs() -> Vec<ToolSpecSeed> {
+            vec![$( ToolSpecSeed { name: $name, $($body)* } ),*]
+        }
+    };
+}
+
+tool_table! {
+        ExecuteCode => {
             name: "tz_execute_code",
             cluster: "codemode",
+            capabilities: &["codemode", "plan-execution", "sandboxed"],
             summary: "Execute a TokenZero CodeMode recipe, JSON plan, or JavaScript plan.",
             doc: tool_description(
                 "Execute a CodeMode plan through the native TokenZero executor.",
@@ -276,8 +293,8 @@ pub(crate) fn canonical_tool_specs() -> Vec<ToolSpecSeed> {
                     "limits": {
                         "type": "object",
                         "properties": {
-                            "max_wall_ms": {"type": "integer", "minimum": 0, "maximum": hard_max_wall_ms},
-                            "hard_max_wall_ms": {"type": "integer", "minimum": 0, "maximum": hard_max_wall_ms}
+                            "max_wall_ms": {"type": "integer", "minimum": 0, "maximum": crate::CodeModeLimits::default().hard_max_wall_ms},
+                            "hard_max_wall_ms": {"type": "integer", "minimum": 0, "maximum": crate::CodeModeLimits::default().hard_max_wall_ms}
                         },
                         "additionalProperties": {"type": "integer", "minimum": 0}
                     }
@@ -285,9 +302,10 @@ pub(crate) fn canonical_tool_specs() -> Vec<ToolSpecSeed> {
             }),
             arg_aliases: json!({}),
         },
-        ToolSpecSeed {
+        CodemodeSearch => {
             name: "tz_codemode_search",
             cluster: "codemode",
+            capabilities: &["codemode", "catalog-search", "read-only"],
             summary: "Search the TokenZero CodeMode method catalog.",
             doc: tool_description(
                 "Search CodeMode methods by keyword.",
@@ -308,9 +326,10 @@ pub(crate) fn canonical_tool_specs() -> Vec<ToolSpecSeed> {
             }),
             arg_aliases: json!({}),
         },
-        ToolSpecSeed {
+        CodemodeDescribe => {
             name: "tz_codemode_describe",
             cluster: "codemode",
+            capabilities: &["codemode", "catalog-describe", "read-only"],
             summary: "Describe a TokenZero CodeMode method or capabilities manifest.",
             doc: tool_description(
                 "Describe CodeMode capabilities or a specific method.",
@@ -328,9 +347,10 @@ pub(crate) fn canonical_tool_specs() -> Vec<ToolSpecSeed> {
             }),
             arg_aliases: json!({}),
         },
-        ToolSpecSeed {
+        Read => {
             name: "tz_read",
             cluster: "material",
+            capabilities: &["read", "exact-refs", "line-range", "shared-cas"],
             summary: "Read file(s) under allowed roots: compact visible output plus exact tz:// recovery refs. Bound big files with start_line/end_line.",
             doc: tool_description(
                 "Read local files into compact visible output while storing exact recovery refs.",
@@ -343,9 +363,10 @@ pub(crate) fn canonical_tool_specs() -> Vec<ToolSpecSeed> {
             input_schema: read_schema(),
             arg_aliases: json!({}),
         },
-        ToolSpecSeed {
+        Find => {
             name: "tz_find",
             cluster: "material",
+            capabilities: &["search", "literal", "exact-refs", "shared-cas"],
             summary: "Search file contents for a literal substring and return compact, recoverable matches. Narrow path before broad queries.",
             doc: tool_description(
                 "Search local text for a literal substring and return compact, recoverable matches.",
@@ -358,9 +379,10 @@ pub(crate) fn canonical_tool_specs() -> Vec<ToolSpecSeed> {
             input_schema: search_schema("Literal substring to search for."),
             arg_aliases: json!({}),
         },
-        ToolSpecSeed {
+        Grep => {
             name: "tz_grep",
             cluster: "material",
+            capabilities: &["search", "regex", "exact-refs", "shared-cas"],
             summary: "Grep-style exact-first content search: regex when the ripgrep backend is active, literal substring otherwise.",
             doc: tool_description(
                 "Run grep-compatible exact-first search with recoverable output.",
@@ -375,9 +397,10 @@ pub(crate) fn canonical_tool_specs() -> Vec<ToolSpecSeed> {
             ),
             arg_aliases: json!({}),
         },
-        ToolSpecSeed {
+        Recall => {
             name: "tz_recall",
             cluster: "material",
+            capabilities: &["search", "cache", "exact-refs", "shared-cas"],
             summary: "Search every payload already stored in the recovery cache; hits carry exact tz:// refs recoverable in one `expand` call.",
             doc: tool_description(
                 "Full-text search over previously stored tool outputs and file payloads.",
@@ -390,9 +413,10 @@ pub(crate) fn canonical_tool_specs() -> Vec<ToolSpecSeed> {
             input_schema: recall_schema(),
             arg_aliases: json!({}),
         },
-        ToolSpecSeed {
+        Batch => {
             name: "tz_batch",
             cluster: "execution",
+            capabilities: &["batch", "exact-refs"],
             summary: "Run several TokenZero ops in one call: one combined capsule, per-op sections, unioned refs.",
             doc: tool_description(
                 "Batch several TokenZero operations into one round trip.",
@@ -405,9 +429,10 @@ pub(crate) fn canonical_tool_specs() -> Vec<ToolSpecSeed> {
             input_schema: batch_schema(),
             arg_aliases: json!({}),
         },
-        ToolSpecSeed {
+        Fetch => {
             name: "tz_fetch",
             cluster: "web",
+            capabilities: &["fetch", "web", "cache", "exact-refs"],
             summary: "Fetch an http(s) URL via curl with a TTL cache: compact body capsule plus exact tz:// refs; repeat fetches inside the TTL never touch the network.",
             doc: tool_description(
                 "Fetch a URL with recoverable output and a TTL'd local cache.",
@@ -420,9 +445,10 @@ pub(crate) fn canonical_tool_specs() -> Vec<ToolSpecSeed> {
             input_schema: fetch_schema(),
             arg_aliases: json!({}),
         },
-        ToolSpecSeed {
+        Glob => {
             name: "tz_glob",
             cluster: "material",
+            capabilities: &["discover", "glob", "shared-cas"],
             summary: "List file paths matching a glob pattern (no contents). Use before read.",
             doc: tool_description(
                 "Discover paths with glob patterns while keeping results bounded and recoverable.",
@@ -435,9 +461,10 @@ pub(crate) fn canonical_tool_specs() -> Vec<ToolSpecSeed> {
             input_schema: glob_schema(),
             arg_aliases: json!({"pattern": ["glob", "query"]}),
         },
-        ToolSpecSeed {
+        Tree => {
             name: "tz_tree",
             cluster: "material",
+            capabilities: &["discover", "tree", "shared-cas"],
             summary: "Inspect a bounded directory tree for orientation. Keep depth small.",
             doc: tool_description(
                 "Inspect a bounded directory tree for repo orientation.",
@@ -450,9 +477,10 @@ pub(crate) fn canonical_tool_specs() -> Vec<ToolSpecSeed> {
             input_schema: tree_schema(),
             arg_aliases: json!({}),
         },
-        ToolSpecSeed {
+        Edit => {
             name: "tz_edit",
             cluster: "edit",
+            capabilities: &["write", "atomic", "exact-refs"],
             summary: "Apply multi-hunk find/replace edits to one file in a single call: all-or-nothing, atomic write, undo via tz:// ref, dry_run preview.",
             doc: tool_description(
                 "Read, verify, and edit one file in a single call with an exact undo ref.",
@@ -465,9 +493,10 @@ pub(crate) fn canonical_tool_specs() -> Vec<ToolSpecSeed> {
             input_schema: edit_schema(),
             arg_aliases: json!({}),
         },
-        ToolSpecSeed {
+        Shell => {
             name: "tz_shell",
             cluster: "execution",
+            capabilities: &["shell", "exact-refs", "command-success"],
             summary: "Run a local command: compact output, exact stream refs, command_success telemetry. Retry only read-only commands.",
             doc: tool_description(
                 "Run a local command with compact output, exact refs, and command-success telemetry.",
@@ -484,9 +513,10 @@ pub(crate) fn canonical_tool_specs() -> Vec<ToolSpecSeed> {
                 "timeout_seconds": ["timeout_secs", "timeout", "shell_timeout_seconds"]
             }),
         },
-        ToolSpecSeed {
+        Ingest => {
             name: "tz_ingest",
             cluster: "execution",
+            capabilities: &["ingest", "exact-refs"],
             summary: "Store external text behind exact tz:// refs and return a compact capsule.",
             doc: tool_description(
                 "Store external text behind exact refs and return compact visible output.",
@@ -499,9 +529,10 @@ pub(crate) fn canonical_tool_specs() -> Vec<ToolSpecSeed> {
             input_schema: text_schema("External text payload to store behind exact refs."),
             arg_aliases: json!({"text": ["input"]}),
         },
-        ToolSpecSeed {
+        Expand => {
             name: "tz_expand",
             cluster: "material",
+            capabilities: &["expand", "exact-refs", "fragment-selectors", "symbol-anchors", "diff-baseline", "shared-cas"],
             summary: "Recover exact bytes from a tz://, fz://, or gz:// ref, optionally narrowed by line range, selector, or symbol.",
             doc: tool_description(
                 "Recover exact content from `tz://`, `fz://`, or `gz://` refs (same-store scheme alias; cross-engine expansion pending ZeroRef v1) with optional ranges or anchors.",
@@ -514,9 +545,10 @@ pub(crate) fn canonical_tool_specs() -> Vec<ToolSpecSeed> {
             input_schema: expand_schema(),
             arg_aliases: json!({}),
         },
-        ToolSpecSeed {
+        Mem => {
             name: "tz_mem",
             cluster: "execution",
+            capabilities: &["diagnostic", "cache"],
             summary: "Inspect local recovery-cache and configuration state.",
             doc: tool_description(
                 "Inspect local TokenZero recovery, cache, and configuration state.",
@@ -529,9 +561,10 @@ pub(crate) fn canonical_tool_specs() -> Vec<ToolSpecSeed> {
             input_schema: no_args_schema(),
             arg_aliases: json!({}),
         },
-        ToolSpecSeed {
+        CachePack => {
             name: "tz_cache_pack",
             cluster: "execution",
+            capabilities: &["cache", "prompt-cache"],
             summary: "Build a daemonless prompt-cache pack with a stable prefix and volatile refs.",
             doc: tool_description(
                 "Build a daemonless prompt-cache pack with stable prefix and volatile refs.",
@@ -544,9 +577,10 @@ pub(crate) fn canonical_tool_specs() -> Vec<ToolSpecSeed> {
             input_schema: cache_pack_schema(),
             arg_aliases: json!({}),
         },
-        ToolSpecSeed {
+        Rewrite => {
             name: "tz_rewrite",
             cluster: "execution",
+            capabilities: &["diagnostic", "rewrite"],
             summary: "Plan a conservative, TokenZero-safe rewrite of a shell command without executing it.",
             doc: tool_description(
                 "Plan a conservative command rewrite without executing the command.",
@@ -559,9 +593,10 @@ pub(crate) fn canonical_tool_specs() -> Vec<ToolSpecSeed> {
             input_schema: rewrite_schema(),
             arg_aliases: json!({"command": ["cmd", "input", "script"], "argv": ["args"]}),
         },
-        ToolSpecSeed {
+        Discover => {
             name: "tz_discover",
             cluster: "execution",
+            capabilities: &["diagnostic", "discovery"],
             summary: "Report TokenZero filter and runtime readiness metadata.",
             doc: tool_description(
                 "Discover TokenZero filter and runtime readiness metadata.",
@@ -574,11 +609,12 @@ pub(crate) fn canonical_tool_specs() -> Vec<ToolSpecSeed> {
             input_schema: no_args_schema(),
             arg_aliases: json!({}),
         },
-        ToolSpecSeed {
+        ReportToolIssue => {
             name: "tz_report_tool_issue",
             // Reports field issues for CodeMode/zero_execute surfaces; keeping
             // it out of "execution" holds that agent menu at seven entries.
             cluster: "codemode",
+            capabilities: &["diagnostic", "report"],
             summary: "Record a field issue against a CodeMode/TokenZero tool name (accepts zero_execute).",
             doc: tool_description(
                 "Record a field issue for expand/root/shell/CodeMode failures without leaving the harness.",
@@ -604,7 +640,6 @@ pub(crate) fn canonical_tool_specs() -> Vec<ToolSpecSeed> {
                 "detail": ["body", "repro", "context"]
             }),
         },
-    ]
 }
 
 #[allow(dead_code)]
@@ -678,6 +713,12 @@ fn object_schema(properties: Value, required: &[&str]) -> Value {
     schema
 }
 
+macro_rules! schema {
+    ($required:expr; { $($properties:tt)* }) => {
+        object_schema(json!({ $($properties)* }), $required)
+    };
+}
+
 fn no_args_schema() -> Value {
     object_schema(json!({}), &[])
 }
@@ -725,8 +766,7 @@ fn fresh_property() -> Value {
 }
 
 fn read_schema() -> Value {
-    object_schema(
-        json!({
+    schema!(&["path"]; {
             "path": path_value("File path(s) under an allowed root."),
             "mode": mode_property(),
             "start_line": line_property(),
@@ -735,9 +775,7 @@ fn read_schema() -> Value {
             "fresh": fresh_property(),
             "max_files": positive_usize(20),
             "max_visible_tokens": positive_usize(4000)
-        }),
-        &["path"],
-    )
+    })
 }
 
 // Advertised schemas must stay plain objects: top-level combinators
@@ -745,8 +783,7 @@ fn read_schema() -> Value {
 // tool from the model's tool list entirely. Either-or argument requirements
 // are stated in property descriptions and enforced server-side.
 fn search_schema(query_description: &str) -> Value {
-    object_schema(
-        json!({
+    schema!(&[]; {
             "query": {"type": "string", "minLength": 1, "description": format!("{query_description} Provide this or `pattern`.")},
             "pattern": string_alias_property(),
             "path": path_value("Roots or files to search; defaults to the workspace root."),
@@ -754,14 +791,11 @@ fn search_schema(query_description: &str) -> Value {
             "fresh": fresh_property(),
             "max_files": positive_usize(20),
             "max_visible_tokens": positive_usize(4000)
-        }),
-        &[],
-    )
+    })
 }
 
 fn batch_schema() -> Value {
-    object_schema(
-        json!({
+    schema!(&["ops"]; {
             "ops": {
                 "type": "array",
                 "minItems": 1,
@@ -777,67 +811,52 @@ fn batch_schema() -> Value {
                 }
             },
             "mode": mode_property()
-        }),
-        &["ops"],
-    )
+    })
 }
 
 fn fetch_schema() -> Value {
-    object_schema(
-        json!({
+    schema!(&["url"]; {
             "url": {"type": "string", "minLength": 1, "description": "http(s) URL to fetch."},
             "ttl_seconds": {"type": "integer", "minimum": 0, "default": 86400, "description": "Serve a cached body younger than this without touching the network."},
             "fresh": {"type": "boolean", "default": false, "description": "Bypass the TTL cache and re-fetch."},
             "mode": mode_property(),
             "max_visible_tokens": positive_usize(4000)
-        }),
-        &["url"],
-    )
+    })
 }
 
 fn recall_schema() -> Value {
-    object_schema(
-        json!({
+    schema!(&["query"]; {
             "query": {"type": "string", "minLength": 1, "description": "Literal case-insensitive substring to search for across stored payloads."},
             "max_hits": positive_usize(50),
             "mode": mode_property(),
             "max_visible_tokens": positive_usize(4000)
-        }),
-        &["query"],
-    )
+    })
 }
 
 fn glob_schema() -> Value {
-    object_schema(
-        json!({
+    schema!(&["pattern"]; {
             "pattern": {"type": "string", "minLength": 1, "description": "Glob pattern to match file paths."},
             "path": path_value("Roots to inspect; defaults to the workspace root."),
             "include_hidden": {"type": "boolean", "default": false},
             "mode": mode_property(),
             "max_files": positive_usize(200),
             "max_visible_tokens": positive_usize(4000)
-        }),
-        &["pattern"],
-    )
+    })
 }
 
 fn tree_schema() -> Value {
-    object_schema(
-        json!({
+    schema!(&[]; {
             "path": path_value("Roots to inspect; defaults to the workspace root."),
             "depth": positive_usize(2),
             "include_hidden": {"type": "boolean", "default": false},
             "mode": mode_property(),
             "max_files": positive_usize(200),
             "max_visible_tokens": positive_usize(4000)
-        }),
-        &[],
-    )
+    })
 }
 
 fn edit_schema() -> Value {
-    object_schema(
-        json!({
+    schema!(&["path", "edits"]; {
             "path": {"type": "string", "minLength": 1, "description": "File path under an allowed root."},
             "edits": {
                 "type": "array",
@@ -858,14 +877,11 @@ fn edit_schema() -> Value {
             "dry_run": {"type": "boolean", "default": false, "description": "Validate and render the hunk diff without writing."},
             "mode": mode_property(),
             "max_visible_tokens": positive_usize(4000)
-        }),
-        &["path", "edits"],
-    )
+    })
 }
 
 fn shell_schema() -> Value {
-    object_schema(
-        json!({
+    schema!(&[]; {
             "command": {"type": "string", "minLength": 1, "description": "Command string to execute. Provide this or `argv`."},
             "argv": {"type": "array", "items": {"type": "string"}, "minItems": 1, "description": "Argument vector executed without reparsing."},
             "cwd": {"type": "string", "description": "Working directory under an allowed root."},
@@ -874,24 +890,18 @@ fn shell_schema() -> Value {
             "no_rewrite": {"type": "boolean", "default": false},
             "stdin": {"type": "string"},
             "timeout_seconds": positive_usize(DEFAULT_SHELL_TIMEOUT_SECS as usize)
-        }),
-        &[],
-    )
+    })
 }
 
 fn text_schema(description: &str) -> Value {
-    object_schema(
-        json!({
+    schema!(&["text"]; {
             "text": {"type": "string", "minLength": 1, "description": description},
             "mode": mode_property()
-        }),
-        &["text"],
-    )
+    })
 }
 
 fn expand_schema() -> Value {
-    object_schema(
-        json!({
+    schema!(&["ref"]; {
             "ref": {"type": "string", "pattern": "^(tz|fz|gz)://", "description": "Exact recovery ref (tz://, fz://, or gz:// — same-store scheme alias; cross-engine expansion pending ZeroRef v1)."},
             "selector": {"type": "string", "description": "Recovery-store-specific selector."},
             "start_line": line_property(),
@@ -900,33 +910,25 @@ fn expand_schema() -> Value {
             "symbol": {"type": "string", "description": "Symbol name for symbol-aware recovery."},
             "since": {"type": "string", "pattern": "^(tz|fz|gz)://", "description": "tz/fz/gz ref baseline for unified diff; errors if not recoverable."},
             "fresh": fresh_property()
-        }),
-        &["ref"],
-    )
+    })
 }
 
 fn cache_pack_schema() -> Value {
-    object_schema(
-        json!({
+    schema!(&[]; {
             "scope": {
                 "type": "string",
                 "default": "agent",
                 "description": "Cache-pack scope; use `agent`."
             }
-        }),
-        &[],
-    )
+    })
 }
 
 fn rewrite_schema() -> Value {
-    object_schema(
-        json!({
+    schema!(&[]; {
             "command": {"type": "string", "minLength": 1, "description": "Command string to rewrite. Provide this or `argv`."},
             "argv": {"type": "array", "items": {"type": "string"}, "minItems": 1, "description": "Argument vector to rewrite."},
             "mode": {"type": "string", "default": "safe", "description": "Rewrite policy mode."}
-        }),
-        &[],
-    )
+    })
 }
 
 pub(crate) fn tool_clusters() -> Value {

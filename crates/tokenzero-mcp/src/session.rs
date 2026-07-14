@@ -9,6 +9,7 @@
 //! against the current payload before suppressing. Lock poisoning fails open
 //! the same way (full serve, no persist on that path).
 
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
@@ -17,7 +18,8 @@ use std::time::SystemTime;
 /// Identity of one served payload. File reads are keyed per canonicalized
 /// path and requested line range; find/grep outputs are keyed per tool,
 /// query, and canonicalized root set.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
 pub(crate) enum ServeKey {
     File {
         path: PathBuf,
@@ -45,7 +47,7 @@ pub(crate) enum ServeKey {
 /// canonical payload text (the bytes behind `blob_ref`) — the invalidation
 /// check. Refs are refreshed on every serve, so the stored ones always point
 /// at recoverable content for the latest serve.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct ServedRecord {
     pub content_sha256: String,
     pub blob_ref: String,
@@ -59,8 +61,19 @@ pub(crate) struct ServedRecord {
     pub byte_len: usize,
     /// Telemetry only — never an invalidation input (the content hash is).
     #[allow(dead_code)]
+    #[serde(rename = "served_at_unix_secs", default = "SystemTime::now", serialize_with = "serialize_served_at", deserialize_with = "deserialize_served_at")]
     pub served_at: SystemTime,
     pub serve_count: usize,
+}
+
+fn serialize_served_at<S: serde::Serializer>(time: &SystemTime, serializer: S) -> Result<S::Ok, S::Error> {
+    time.duration_since(SystemTime::UNIX_EPOCH).ok().map(|d| d.as_secs()).serialize(serializer)
+}
+
+fn deserialize_served_at<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<SystemTime, D::Error> {
+    Ok(Option::<u64>::deserialize(deserializer)?
+        .and_then(|secs| SystemTime::UNIX_EPOCH.checked_add(std::time::Duration::from_secs(secs)))
+        .unwrap_or_else(SystemTime::now))
 }
 
 /// Lookup outcome for a key against the current payload hash.

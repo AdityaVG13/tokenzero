@@ -311,25 +311,27 @@ pub(crate) fn os_matrix_residual_message(missing: &[String]) -> String {
     format!("{missing_display} shell and install artifacts missing")
 }
 
-pub(crate) fn os_reach_artifact_purpose(missing: &[String]) -> String {
+fn os_purpose(missing: &[String], complete: &str, incomplete_prefix: &str) -> String {
     if missing.is_empty() {
-        return "Windows, Linux, and macOS OS reach proof with no missing release OS rows"
-            .to_string();
+        complete.to_string()
+    } else {
+        format!("{incomplete_prefix} {}", release_os_list_display(missing))
     }
-    format!(
+}
+
+pub(crate) fn os_reach_artifact_purpose(missing: &[String]) -> String {
+    os_purpose(
+        missing,
+        "Windows, Linux, and macOS OS reach proof with no missing release OS rows",
         "OS reach evidence with {} release claim still blocked",
-        release_os_list_display(missing)
     )
 }
 
 pub(crate) fn os_release_artifact_purpose(missing: &[String]) -> String {
-    if missing.is_empty() {
-        return "Release artifact schema for completed Windows, Linux, and macOS OS matrix runs"
-            .to_string();
-    }
-    format!(
-        "Current release artifact schema; next OS release artifact needed for {}",
-        release_os_list_display(missing)
+    os_purpose(
+        missing,
+        "Release artifact schema for completed Windows, Linux, and macOS OS matrix runs",
+        "Current release artifact schema; next OS release artifact needed for",
     )
 }
 

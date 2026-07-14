@@ -7,8 +7,8 @@ use std::collections::BTreeMap;
 use tokenzero_core::{MCP_SCHEMA_VERSION, McpToolSurface};
 
 use crate::catalog::{
-    ResourceSpec, canonical_tool_names_for_surface, canonical_tool_specs, resource_specs,
-    tool_clusters,
+    ResourceSpec, canonical_tool_names_for_surface, canonical_tool_specs,
+    resource_specs, tool_clusters,
 };
 use crate::codemode::journal::{OperationClass, classify_descriptor_tool};
 use crate::jsonrpc::{SUPPORTED_PROTOCOL_VERSIONS, tool_filter_discovery};
@@ -159,47 +159,13 @@ fn build_all_tool_capabilities() -> Vec<ToolCapability> {
             name: seed.name.to_string(),
             cluster: seed.cluster.to_string(),
             summary: seed.summary.to_string(),
-            capabilities: capabilities_for_tool(seed.name, seed.cluster),
+            capabilities: std::iter::once(seed.cluster)
+                .chain(seed.capabilities.iter().copied())
+                .map(str::to_string)
+                .collect(),
             operation_class: classify_descriptor_tool(seed.name),
         })
         .collect()
-}
-
-fn capabilities_for_tool(name: &str, cluster: &str) -> Vec<String> {
-    let mut caps = Vec::new();
-    caps.push(cluster.to_string());
-    let extra: &[&str] = match name {
-        "tz_read" => &["read", "exact-refs", "line-range", "shared-cas"],
-        "tz_find" => &["search", "literal", "exact-refs", "shared-cas"],
-        "tz_grep" => &["search", "regex", "exact-refs", "shared-cas"],
-        "tz_recall" => &["search", "cache", "exact-refs", "shared-cas"],
-        "tz_glob" => &["discover", "glob", "shared-cas"],
-        "tz_tree" => &["discover", "tree", "shared-cas"],
-        "tz_expand" => &[
-            "expand",
-            "exact-refs",
-            "fragment-selectors",
-            "symbol-anchors",
-            "diff-baseline",
-            "shared-cas",
-        ],
-        "tz_edit" => &["write", "atomic", "exact-refs"],
-        "tz_shell" => &["shell", "exact-refs", "command-success"],
-        "tz_fetch" => &["fetch", "web", "cache", "exact-refs"],
-        "tz_ingest" => &["ingest", "exact-refs"],
-        "tz_batch" => &["batch", "exact-refs"],
-        "tz_mem" => &["diagnostic", "cache"],
-        "tz_cache_pack" => &["cache", "prompt-cache"],
-        "tz_rewrite" => &["diagnostic", "rewrite"],
-        "tz_discover" => &["diagnostic", "discovery"],
-        "tz_report_tool_issue" => &["diagnostic", "report"],
-        "tz_execute_code" => &["codemode", "plan-execution", "sandboxed"],
-        "tz_codemode_search" => &["codemode", "catalog-search", "read-only"],
-        "tz_codemode_describe" => &["codemode", "catalog-describe", "read-only"],
-        _ => &[],
-    };
-    caps.extend(extra.iter().map(|s| s.to_string()));
-    caps
 }
 
 /// JSON payload for `resource://tokenzero/capabilities`.

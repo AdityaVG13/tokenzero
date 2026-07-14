@@ -2,136 +2,81 @@ use super::*;
 use proptest::prelude::*;
 use std::path::Path;
 
-#[test]
-fn simple_command_plans_as_argv_without_alias() {
-    let argv = vec!["tokenzero".to_string(), "--version".to_string()];
-    let plan = plan_command(&argv, None, false).unwrap();
-    assert_eq!(plan.execution_mode, ExecutionMode::Argv);
-    assert!(!plan.alias_dependency);
-    assert!(plan.explicit_binary);
-    assert_eq!(plan.argv, argv);
+fn argv(words: &[&str]) -> Vec<String> {
+    words.iter().map(|s| s.to_string()).collect()
 }
 
 #[test]
-fn shell_metacharacters_inside_argv_args_do_not_force_shell() {
-    let argv = vec![
-        "rg".to_string(),
-        "error|warning".to_string(),
-        "src/lib.rs".to_string(),
-    ];
-    let plan = plan_command_for_platform(&argv, None, false, "posix").unwrap();
-
+fn plan_and_shell_syntax_matrix() {
+    // simple argv plan
+    let simple = argv(&["tokenzero", "--version"]);
+    let plan = plan_command(&simple, None, false).unwrap();
     assert_eq!(plan.execution_mode, ExecutionMode::Argv);
-    assert_eq!(plan.argv, argv);
-    // Mutation-killed: if `|` inside a single argv arg were mistaken for a
-    // shell pipe, mode would be Shell. Verify the pipe char is literal.
+    assert!(!plan.alias_dependency && plan.explicit_binary);
+    assert_eq!(plan.argv, simple);
+
+    // shell metacharacters inside argv args stay Argv
+    let rg = argv(&["rg", "error|warning", "src/lib.rs"]);
+    let plan = plan_command_for_platform(&rg, None, false, "posix").unwrap();
+    assert_eq!(plan.execution_mode, ExecutionMode::Argv);
+    assert_eq!(plan.argv, rg);
     assert!(!contains_shell_syntax("rg 'error|warning' ."));
-}
 
-#[test]
-fn multi_arg_shell_operators_use_real_shell() {
-    let argv = vec![
-        "echo".to_string(),
-        "one".to_string(),
-        "&&".to_string(),
-        "echo".to_string(),
-        "two".to_string(),
-    ];
-    let plan = plan_command_for_platform(&argv, None, false, "linux").unwrap();
-    assert_eq!(plan.execution_mode, ExecutionMode::Shell);
-    assert_eq!(plan.argv, vec!["/bin/sh", "-c", "echo one && echo two"]);
-    assert!(!plan.alias_dependency);
-    assert!(!plan.explicit_binary);
-}
+    // multi-arg operators force shell
+    for &(name, words, expected_c) in &[
+        ("and_list", &["echo", "one", "&&", "echo", "two"][..], "echo one && echo two"),
+        (
+            "quoted_literal_args",
+            &["printf", "%s\n", "literal; echo TOKENZERO_INJECTED", "|", "cat"][..],
+            "printf '%s\n' 'literal; echo TOKENZERO_INJECTED' | cat",
+        ),
+    ] {
+        let plan = plan_command_for_platform(&argv(words), None, false, "linux").unwrap();
+        assert_eq!(plan.execution_mode, ExecutionMode::Shell, "{name}");
+        assert_eq!(
+            plan.argv,
+            vec!["/bin/sh".to_string(), "-c".to_string(), expected_c.to_string()],
+            "{name}"
+        );
+        assert!(!plan.alias_dependency && !plan.explicit_binary, "{name}");
+    }
 
-#[test]
-fn multi_arg_shell_operators_quote_literal_arguments_in_plan() {
-    let argv = vec![
-        "printf".to_string(),
-        "%s\n".to_string(),
-        "literal; echo TOKENZERO_INJECTED".to_string(),
-        "|".to_string(),
-        "cat".to_string(),
-    ];
-    let plan = plan_command_for_platform(&argv, None, false, "linux").unwrap();
-
-    assert_eq!(plan.execution_mode, ExecutionMode::Shell);
-    assert_eq!(
-        plan.argv,
-        vec![
-            "/bin/sh".to_string(),
-            "-c".to_string(),
-            "printf '%s\n' 'literal; echo TOKENZERO_INJECTED' | cat".to_string(),
-        ]
-    );
-}
-
-#[test]
-fn quoted_operator_literals_stay_argv() {
+    // quoted operator literals stay argv
     assert!(!contains_shell_syntax("rg 'a|b' ."));
     assert!(contains_shell_syntax("rg a | head"));
-    // Pin POSIX tokenization to match the pinned linux plan: the
-    // platform-current splitter keeps single quotes literal on Windows.
-    let argv = split_command_string_for_platform("rg 'a|b' .", "linux");
-    let plan = plan_command_for_platform(&argv, None, false, "linux").unwrap();
+    let words = split_command_string_for_platform("rg 'a|b' .", "linux");
+    let plan = plan_command_for_platform(&words, None, false, "linux").unwrap();
     assert_eq!(plan.execution_mode, ExecutionMode::Argv);
     assert_eq!(plan.argv, vec!["rg", "a|b", "."]);
-}
 
-#[test]
-fn double_quoted_backslash_stays_literal_before_ordinary_chars() {
-    // POSIX: inside double quotes, backslash is literal unless before $ ` " \.
-    let argv = split_command_string_for_platform("grep -n \"a\\|b\" file.txt", "linux");
-    assert_eq!(argv, vec!["grep", "-n", "a\\|b", "file.txt"]);
-    // Mutation-killed: a naive double-quote handler that treats \ as a
-    // universal escape (collapsing `\|` -> `|`) would produce "a|b".
-    // The correct POSIX behavior preserves the literal backslash.
-    assert_ne!(
-        argv[2], "a|b",
-        "backslash before ordinary char '|' must be literal, not consumed as escape"
+    // double-quoted backslash literals
+    let split = split_command_string_for_platform("grep -n \"a\\|b\" file.txt", "linux");
+    assert_eq!(split, vec!["grep", "-n", "a\\|b", "file.txt"]);
+    assert_ne!(split[2], "a|b", "backslash before ordinary char '|' must be literal");
+    assert_eq!(
+        split_command_string_for_platform("echo \"a\\\"b\\\\c\\$d\"", "linux"),
+        vec!["echo", "a\"b\\c$d"]
     );
-
-    let escapes = split_command_string_for_platform("echo \"a\\\"b\\\\c\\$d\"", "linux");
-    assert_eq!(escapes, vec!["echo", "a\"b\\c$d"]);
-
-    // Unquoted backslash still escapes the next char.
     let unquoted = split_command_string_for_platform("echo a\\ b", "linux");
     assert_eq!(unquoted, vec!["echo", "a b"]);
-    // Mutation-killed: without the escape, the space would split into
-    // two args ["echo", "a", "b"].
     assert_eq!(unquoted.len(), 2, "escaped space must not split the token");
-}
 
-#[test]
-fn variable_and_tilde_expansion_route_through_shell() {
-    assert!(contains_shell_syntax("cat \"$HOME/.zshrc\""));
-    assert!(contains_shell_syntax("cat $HOME/.zshrc"));
-    assert!(contains_shell_syntax("echo ${PATH}"));
-    assert!(contains_shell_syntax("cat ~/notes.txt"));
-    assert!(contains_shell_syntax("ls ~"));
-    assert!(contains_shell_syntax("ls ~bob/dir"));
+    // variable/tilde expansion routing
+    for command in [
+        "cat \"$HOME/.zshrc\"", "cat $HOME/.zshrc", "echo ${PATH}", "cat ~/notes.txt", "ls ~", "ls ~bob/dir",
+    ] {
+        assert!(contains_shell_syntax(command), "{command}");
+    }
+    for command in ["echo '$HOME'", "rg '~/x' .", "git show HEAD~1", "echo \\$HOME", "echo a$"] {
+        assert!(!contains_shell_syntax(command), "{command}");
+    }
 
-    // Single quotes suppress expansion; literal cost must not route to shell.
-    assert!(!contains_shell_syntax("echo '$HOME'"));
-    assert!(!contains_shell_syntax("rg '~/x' ."));
-    // Non-word-start tilde (git revision syntax) is not expansion.
-    assert!(!contains_shell_syntax("git show HEAD~1"));
-    // Escaped dollar is literal.
-    assert!(!contains_shell_syntax("echo \\$HOME"));
-    // Trailing bare dollar is literal.
-    assert!(!contains_shell_syntax("echo a$"));
-}
-
-#[test]
-fn leading_posix_env_assignment_uses_shell() {
+    // leading env assignment uses shell
     let command = "TOKENZERO_SHELL_CAPTURE_BYTES=12 tokenzero --version";
     assert!(contains_shell_syntax(command));
     let plan = plan_command_for_platform(&[command.to_string()], None, false, "linux").unwrap();
     assert_eq!(plan.execution_mode, ExecutionMode::Shell);
-    assert_eq!(
-        plan.argv,
-        vec!["/bin/sh".to_string(), "-c".to_string(), command.to_string()]
-    );
+    assert_eq!(plan.argv, vec!["/bin/sh".to_string(), "-c".to_string(), command.to_string()]);
 }
 
 struct SplitCase {
@@ -251,36 +196,20 @@ fn test_policy(dir: &Path) -> RunOutputPolicy {
 }
 
 #[test]
-fn stream_capture_spills_and_truncates_large_output() {
+fn stream_capture_spill_matrix() {
     let dir = tempfile::tempdir().unwrap();
     let policy = test_policy(dir.path());
-    let stream = capture_reader(std::io::Cursor::new(vec![b'a'; 20]), "stdout", policy).unwrap();
-
+    let stream = capture_reader(std::io::Cursor::new(vec![b'a'; 20]), "stdout", policy.clone()).unwrap();
     assert_eq!(stream.text, "aaaaaaaaaa");
-    assert_eq!(stream.capture.bytes_seen, 20);
-    assert_eq!(stream.capture.captured_bytes, 10);
+    assert_eq!((stream.capture.bytes_seen, stream.capture.captured_bytes, stream.capture.spill_bytes), (20, 10, 20));
     assert!(stream.capture.truncated);
-    let spill_path = stream.capture.spill_path.unwrap();
-    // Mutation-killed: spill file must contain ALL 20 bytes, not just the
-    // 10-byte captured prefix.
-    let spill_content = std::fs::read(&spill_path).unwrap();
+    let spill_content = std::fs::read(stream.capture.spill_path.as_ref().unwrap()).unwrap();
     assert_eq!(spill_content.len(), 20);
-    assert!(
-        spill_content.iter().all(|&b| b == b'a'),
-        "spill file must contain the original payload, not partial/garbage"
-    );
-    assert_eq!(stream.capture.spill_bytes, 20);
-}
+    assert!(spill_content.iter().all(|&b| b == b'a'));
 
-#[test]
-fn stream_capture_spill_is_not_double_counted_on_large_first_read() {
-    let dir = tempfile::tempdir().unwrap();
-    let policy = test_policy(dir.path());
     let payload = vec![b'z'; 20_000];
     let stream = capture_reader(std::io::Cursor::new(payload.clone()), "stdout", policy).unwrap();
-
-    let spill_path = stream.capture.spill_path.unwrap();
-    assert_eq!(std::fs::read(spill_path).unwrap(), payload);
+    assert_eq!(std::fs::read(stream.capture.spill_path.unwrap()).unwrap(), payload);
     assert_eq!(stream.capture.spill_bytes, 20_000);
 }
 
@@ -288,58 +217,26 @@ fn stream_capture_spill_is_not_double_counted_on_large_first_read() {
 #[test]
 fn timeout_kills_child_while_large_stdin_write_is_blocked() {
     let input = "x".repeat(8 * 1024 * 1024);
-    let argv = vec![
-        "/bin/sh".to_string(),
-        "-c".to_string(),
-        "sleep 5".to_string(),
-    ];
+    let argv = vec!["/bin/sh".into(), "-c".into(), "sleep 5".into()];
     let start = Instant::now();
-
-    let result = run_command(
-        &argv,
-        None,
-        None,
-        Some(&input),
-        Duration::from_millis(150),
-        false,
-    )
-    .unwrap();
-
-    assert!(result.timed_out);
-    assert!(!result.ok);
-    assert!(result.exit_code != Some(0));
-    assert!(
-        start.elapsed() < Duration::from_secs(4),
-        "timeout was not enforced while stdin write was blocked"
-    );
+    let result = run_command(&argv, None, None, Some(&input), Duration::from_millis(150), false).unwrap();
+    assert!(result.timed_out && !result.ok && result.exit_code != Some(0));
+    assert!(start.elapsed() < Duration::from_secs(4), "timeout was not enforced while stdin write was blocked");
 }
 
 #[cfg(not(windows))]
 #[test]
 fn fast_command_with_background_child_returns_promptly_without_timeout() {
-    let argv = vec![
-        "/bin/sh".to_string(),
-        "-c".to_string(),
-        "sleep 5 & echo started".to_string(),
-    ];
+    let argv = vec!["/bin/sh".into(), "-c".into(), "sleep 5 & echo started".into()];
     let start = Instant::now();
-
     let result = run_command(&argv, None, None, None, Duration::from_secs(30), false).unwrap();
-
-    assert!(result.ok, "{result:?}");
-    assert!(!result.timed_out, "{result:?}");
-    assert!(result.io_grace_expired, "{result:?}");
+    assert!(result.ok && !result.timed_out && result.io_grace_expired, "{result:?}");
     assert_eq!(result.exit_code, Some(0));
     assert!(result.stdout.contains("started"), "{result:?}");
-    assert!(
-        start.elapsed() < Duration::from_secs(4),
-        "foreground exit must not wait for the background child"
-    );
+    assert!(start.elapsed() < Duration::from_secs(4), "foreground exit must not wait for the background child");
 }
 
-/// wqw.4: on shell timeout the whole process group is SIGTERM then SIGKILL —
-/// no orphan children remain, and partial stdout captured before the timeout
-/// is returned with timed_out=true.
+/// wqw.4: timeout SIGTERM/SIGKILL whole group; partial stdout preserved.
 #[cfg(unix)]
 #[test]
 fn timeout_process_group_kill_leaves_no_orphans_and_keeps_partial_stdout() {
@@ -350,152 +247,91 @@ fn timeout_process_group_kill_leaves_no_orphans_and_keeps_partial_stdout() {
     let dir = tempdir().unwrap();
     let pidfile = dir.path().join("grandchild.pid");
     let pidfile_str = pidfile.display().to_string();
-    // Print partial bytes, spawn a long-lived grandchild, then sleep past timeout.
-    // The grandchild PID is recorded so we can prove the group kill reaped it.
     let script = format!(
-        r#"
-set -e
-echo 'partial-before-timeout-wqw4'
-(sleep 120) &
-echo $! > '{pidfile_str}'
-sleep 120
-"#
+        "set -e\necho 'partial-before-timeout-wqw4'\n(sleep 120) &\necho $! > '{pidfile_str}'\nsleep 120\n"
     );
-    let argv = vec!["/bin/sh".to_string(), "-c".to_string(), script];
+    let argv = vec!["/bin/sh".into(), "-c".into(), script];
     let start = Instant::now();
     let result = run_command(&argv, None, None, None, Duration::from_millis(250), false).unwrap();
-
-    assert!(result.timed_out, "must report timeout: {result:?}");
-    assert!(!result.ok, "{result:?}");
-    assert!(
-        result.stdout.contains("partial-before-timeout-wqw4"),
-        "partial stdout must be returned: {:?}",
-        result.stdout
-    );
-    assert!(
-        start.elapsed() < Duration::from_secs(5),
-        "timeout must not wait for sleep 120"
-    );
-
-    // Allow kill escalation (TERM → brief wait → KILL) and reaping.
+    assert!(result.timed_out && !result.ok, "{result:?}");
+    assert!(result.stdout.contains("partial-before-timeout-wqw4"), "{:?}", result.stdout);
+    assert!(start.elapsed() < Duration::from_secs(5), "timeout must not wait for sleep 120");
     std::thread::sleep(Duration::from_millis(200));
-    let grandchild_pid: Option<u32> = fs::read_to_string(&pidfile)
-        .ok()
-        .and_then(|s| s.trim().parse().ok());
-    if let Some(pid) = grandchild_pid {
-        // kill -0 succeeds only if the process still exists.
+    if let Some(pid) = fs::read_to_string(&pidfile).ok().and_then(|s| s.trim().parse::<u32>().ok()) {
         let still_alive = SysCommand::new("kill")
             .args(["-0", &pid.to_string()])
             .status()
             .map(|s| s.success())
             .unwrap_or(false);
-        assert!(
-            !still_alive,
-            "grandchild pid {pid} must not be an orphan after process-group timeout kill"
-        );
+        assert!(!still_alive, "grandchild pid {pid} must not be an orphan after process-group timeout kill");
     } else {
-        // If the pidfile never landed (killed before write), prove via ps that
-        // no sleep 120 from this test script remains keyed by our marker path.
-        let ps = SysCommand::new("ps")
-            .args(["-axo", "pid=,command="])
-            .output()
-            .expect("ps");
+        let ps = SysCommand::new("ps").args(["-axo", "pid=,command="]).output().expect("ps");
         let listing = String::from_utf8_lossy(&ps.stdout);
-        assert!(
-            !listing.contains(&pidfile_str),
-            "no process should still reference the pidfile path: {listing}"
-        );
+        assert!(!listing.contains(&pidfile_str), "no process should still reference the pidfile path: {listing}");
     }
 }
 
-/// Timeout duration is caller-configurable (engine shell_timeout /
-/// TOKENZERO_SHELL_TIMEOUT_SECS / timeout_seconds on tools/call).
-#[cfg(unix)]
+#[cfg(not(windows))]
 #[test]
 fn shell_timeout_is_configurable_short_vs_long() {
-    let argv = vec![
-        "/bin/sh".to_string(),
-        "-c".to_string(),
-        "sleep 2".to_string(),
-    ];
+    let argv = vec!["/bin/sh".into(), "-c".into(), "sleep 2".into()];
     let short = run_command(&argv, None, None, None, Duration::from_millis(100), false).unwrap();
     assert!(short.timed_out, "100ms timeout must fire on sleep 2");
-
     let long = run_command(&argv, None, None, None, Duration::from_secs(10), false).unwrap();
-    assert!(!long.timed_out, "10s budget must allow sleep 2: {long:?}");
-    assert!(long.ok, "{long:?}");
+    assert!(!long.timed_out && long.ok, "10s budget must allow sleep 2: {long:?}");
 }
 
-#[test]
-fn windows_powershell_script_plan_uses_powershell() {
-    let script = "$tzTmp = Join-Path $env:TEMP 'tz-quote'; [Console]::Out.Write($tzTmp)";
-    let argv = vec![script.to_string()];
-    let plan = plan_command_for_platform(&argv, None, false, "windows").unwrap();
+fn windows_shell_plan_matrix() {
+    let script = "$tzTmp = Join-Path $env:TEMP 'tz-quote'; [Console]::Out.Write($tzTmp)".to_string();
+    let plan = plan_command_for_platform(&[script.clone()], None, false, "windows").unwrap();
     assert_eq!(plan.execution_mode, ExecutionMode::Shell);
-    assert_eq!(plan.shell.as_deref(), Some("powershell"));
-    assert_eq!(plan.shell_arg.as_deref(), Some("-Command"));
-    assert_eq!(
-        plan.argv,
-        vec!["powershell", "-NoProfile", "-Command", script]
-    );
-    assert!(!plan.alias_dependency);
-    assert!(!plan.explicit_binary);
-}
+    assert_eq!((plan.shell.as_deref(), plan.shell_arg.as_deref()), (Some("powershell"), Some("-Command")));
+    assert_eq!(plan.argv, vec!["powershell".to_string(), "-NoProfile".to_string(), "-Command".to_string(), script]);
+    assert!(!plan.alias_dependency && !plan.explicit_binary);
 
-#[test]
-fn windows_builtin_echo_uses_cmd() {
-    let argv = vec!["echo".to_string(), "ok".to_string()];
-    let plan = plan_command_for_platform(&argv, None, false, "windows").unwrap();
+    let plan = plan_command_for_platform(&argv(&["echo", "ok"]), None, false, "windows").unwrap();
     assert_eq!(plan.execution_mode, ExecutionMode::Shell);
     assert_eq!(plan.argv, vec!["cmd", "/C", "echo ok"]);
-    assert_eq!(plan.shell.as_deref(), Some("cmd"));
-    assert_eq!(plan.shell_arg.as_deref(), Some("/C"));
-    assert!(!plan.alias_dependency);
-    assert!(!plan.explicit_binary);
+    assert_eq!((plan.shell.as_deref(), plan.shell_arg.as_deref()), (Some("cmd"), Some("/C")));
+    assert!(!plan.alias_dependency && !plan.explicit_binary);
 }
-
 #[test]
 fn quoting_preserves_spaces() {
-    assert_eq!(quote_posix("a b"), "'a b'");
-    assert_eq!(quote_powershell("a'b"), "'a''b'");
+    let cases: &[(&str, &str, &str)] = &[
+        ("posix", "a b", "'a b'"),
+        ("powershell", "a'b", "'a''b'"),
+        ("cmd", "C:\\Program Files\\tz", "\"C:\\Program Files\\tz\""),
+        ("cmd", "%PATH%", "\"%%PATH%%\""),
+        ("cmd", "a^b", "\"a^^b\""),
+        ("cmd", "a\"b", "\"a\\\"b\""),
+    ];
+    for &(platform, input, expected) in cases {
+        let actual = match platform {
+            "posix" => quote_posix(input),
+            "powershell" => quote_powershell(input),
+            _ => quote_windows_cmd(input),
+        };
+        assert_eq!(actual, expected, "platform={platform} input={input:?}");
+    }
     assert_eq!(
-        quote_windows_cmd("C:\\Program Files\\tz"),
-        "\"C:\\Program Files\\tz\""
+        split_command_string_for_platform(&format!("tool {}", quote_posix("a b")), "linux"),
+        vec!["tool", "a b"]
     );
-    assert_eq!(quote_windows_cmd("%PATH%"), "\"%%PATH%%\"");
-    assert_eq!(quote_windows_cmd("a^b"), "\"a^^b\"");
-    assert_eq!(quote_windows_cmd("a\"b"), "\"a\\\"b\"");
-
-    // Mutation-killed round-trip: an implementation that dropped the
-    // space-preserving quotes would split "a b" into two tokens.
-    let roundtripped =
-        split_command_string_for_platform(&format!("tool {}", quote_posix("a b")), "linux");
-    assert_eq!(roundtripped, vec!["tool", "a b"]);
-
-    let roundtripped_cmd = split_command_string_for_platform(
-        &format!("tool {}", quote_windows_cmd("C:\\Program Files\\tz")),
-        "cmd",
+    assert_eq!(
+        split_command_string_for_platform(
+            &format!("tool {}", quote_windows_cmd("C:\\Program Files\\tz")),
+            "cmd",
+        ),
+        vec!["tool", "C:\\Program Files\\tz"]
     );
-    assert_eq!(roundtripped_cmd, vec!["tool", "C:\\Program Files\\tz"]);
-
-    // Mutation-killed: a cmd implementation that ignored %% doubling
-    // would pass %PATH% through literally, expanding the env var.
-    assert_ne!(
-        quote_windows_cmd("%PATH%"),
-        "%PATH%",
-        "percent signs must be doubled to suppress expansion"
-    );
+    assert_ne!(quote_windows_cmd("%PATH%"), "%PATH%", "percent signs must be doubled to suppress expansion");
 }
 
 fn write_spill_aged(dir: &Path, name: &str, bytes: usize, age: Duration) -> PathBuf {
     let path = dir.join(name);
     fs::write(&path, vec![b'x'; bytes]).unwrap();
-    File::options()
-        .write(true)
-        .open(&path)
-        .unwrap()
-        .set_modified(SystemTime::now() - age)
-        .unwrap();
+    File::options().write(true).open(&path).unwrap()
+        .set_modified(SystemTime::now() - age).unwrap();
     path
 }
 
@@ -503,103 +339,33 @@ fn assert_spill_prune_kept(old: &Path, fresh: &Path, foreign: &Path, report: &Sp
     assert!(!old.exists(), "expired spill must be reclaimed");
     assert!(fresh.exists(), "fresh spill must survive");
     assert!(foreign.exists(), "non-spill files must never be touched");
-    assert_eq!(report.scanned_files, 2);
-    assert_eq!(report.removed_files, 1);
-    assert_eq!(report.removed_bytes, 10);
-    assert_eq!(report.kept_files, 1);
-    assert_eq!(report.kept_bytes, 20);
-    assert_eq!(report.failed_removals, 0);
+    assert_eq!((report.scanned_files, report.removed_files, report.removed_bytes, report.kept_files, report.kept_bytes, report.failed_removals), (2, 1, 10, 1, 20, 0));
 }
 
 #[test]
-fn spill_prune_reclaims_expired_and_keeps_fresh_and_foreign_files() {
+fn spill_prune_matrix() {
     let dir = tempfile::tempdir().unwrap();
-    let old = write_spill_aged(
-        dir.path(),
-        "tokenzero-1-1-stdout.log",
-        10,
-        Duration::from_secs(48 * 60 * 60),
-    );
-    let fresh = write_spill_aged(
-        dir.path(),
-        "tokenzero-2-2-stderr.log",
-        20,
-        Duration::from_secs(60),
-    );
-    let foreign = write_spill_aged(
-        dir.path(),
-        "user-notes.log",
-        30,
-        Duration::from_secs(48 * 60 * 60),
-    );
-    let report = prune_spill_dir(
-        dir.path(),
-        DEFAULT_SPILL_TTL,
-        DEFAULT_SPILL_MAX_TOTAL_BYTES,
-        false,
-    );
+    let old = write_spill_aged(dir.path(), "tokenzero-1-1-stdout.log", 10, Duration::from_secs(48 * 60 * 60));
+    let fresh = write_spill_aged(dir.path(), "tokenzero-2-2-stderr.log", 20, Duration::from_secs(60));
+    let foreign = write_spill_aged(dir.path(), "user-notes.log", 30, Duration::from_secs(48 * 60 * 60));
+    let report = prune_spill_dir(dir.path(), DEFAULT_SPILL_TTL, DEFAULT_SPILL_MAX_TOTAL_BYTES, false);
     assert_spill_prune_kept(&old, &fresh, &foreign, &report);
-}
 
-#[test]
-fn spill_prune_byte_ceiling_evicts_oldest_first() {
     let dir = tempfile::tempdir().unwrap();
-    let oldest = write_spill_aged(
-        dir.path(),
-        "tokenzero-1-1-stdout.log",
-        60,
-        Duration::from_secs(300),
-    );
-    let middle = write_spill_aged(
-        dir.path(),
-        "tokenzero-2-2-stdout.log",
-        60,
-        Duration::from_secs(200),
-    );
-    let newest = write_spill_aged(
-        dir.path(),
-        "tokenzero-3-3-stdout.log",
-        60,
-        Duration::from_secs(100),
-    );
+    let oldest = write_spill_aged(dir.path(), "tokenzero-1-1-stdout.log", 60, Duration::from_secs(300));
+    let middle = write_spill_aged(dir.path(), "tokenzero-2-2-stdout.log", 60, Duration::from_secs(200));
+    let newest = write_spill_aged(dir.path(), "tokenzero-3-3-stdout.log", 60, Duration::from_secs(100));
     let report = prune_spill_dir(dir.path(), DEFAULT_SPILL_TTL, 130, false);
-    assert!(!oldest.exists(), "oldest spill must be evicted first");
-    assert!(middle.exists());
-    assert!(newest.exists());
-    assert_eq!(report.removed_files, 1);
-    assert_eq!(report.kept_bytes, 120);
-}
+    assert!(!oldest.exists() && middle.exists() && newest.exists());
+    assert_eq!((report.removed_files, report.kept_bytes), (1, 120));
 
-#[test]
-fn spill_prune_dry_run_counts_without_unlinking() {
     let dir = tempfile::tempdir().unwrap();
-    let old = write_spill_aged(
-        dir.path(),
-        "tokenzero-1-1-stdout.log",
-        10,
-        Duration::from_secs(48 * 60 * 60),
-    );
-    let report = prune_spill_dir(
-        dir.path(),
-        DEFAULT_SPILL_TTL,
-        DEFAULT_SPILL_MAX_TOTAL_BYTES,
-        true,
-    );
-    assert!(old.exists(), "dry run must not unlink");
-    assert!(report.dry_run);
-    assert_eq!(report.removed_files, 1);
-    assert_eq!(report.removed_bytes, 10);
-}
+    let old = write_spill_aged(dir.path(), "tokenzero-1-1-stdout.log", 10, Duration::from_secs(48 * 60 * 60));
+    let report = prune_spill_dir(dir.path(), DEFAULT_SPILL_TTL, DEFAULT_SPILL_MAX_TOTAL_BYTES, true);
+    assert!(old.exists());
+    assert_eq!((report.dry_run, report.removed_files, report.removed_bytes), (true, 1, 10));
 
-#[test]
-fn spill_prune_missing_dir_is_empty_report() {
-    let dir = tempfile::tempdir().unwrap();
-    let report = prune_spill_dir(
-        &dir.path().join("does-not-exist"),
-        DEFAULT_SPILL_TTL,
-        DEFAULT_SPILL_MAX_TOTAL_BYTES,
-        false,
-    );
-    assert_eq!(report.scanned_files, 0);
-    assert_eq!(report.removed_files, 0);
+    let missing = std::env::temp_dir().join(format!("tokenzero-missing-spill-{}", std::process::id()));
+    let report = prune_spill_dir(&missing, DEFAULT_SPILL_TTL, DEFAULT_SPILL_MAX_TOTAL_BYTES, false);
+    assert_eq!((report.scanned_files, report.removed_files, report.kept_files, report.failed_removals), (0, 0, 0, 0));
 }

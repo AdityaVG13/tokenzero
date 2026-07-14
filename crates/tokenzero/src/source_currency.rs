@@ -23,219 +23,42 @@ pub(crate) struct CompetitorAdapterSource {
 
 const COMPETITOR_SOURCE_DATE: &str = "2026-06-04";
 
-const COMPETITOR_SOURCES: &[CompetitorSource] = &[
-    CompetitorSource {
-        tool: "rtk",
-        url: "https://github.com/rtk-ai/rtk",
-        source_commit: "snapshot-20260604",
-        claimed_scope: "Rust command proxy and shell-hook command filters",
-        issue_pr_themes: &["parser coverage", "install/platform", "deps/CI", "reach"],
-        strengths: &["command-filter mindshare", "large adoption signal"],
-        gaps: &[
-            "exact recovery beyond command filters",
-            "Safe Savings evidence",
-        ],
-    },
-    CompetitorSource {
-        tool: "ztk",
-        url: "https://github.com/codejunkie99/ztk",
-        source_commit: "snapshot-20260604",
-        claimed_scope: "Tiny Zig binary with hooks and manual raw mode",
-        issue_pr_themes: &["stderr preservation", "failure fidelity"],
-        strengths: &["small binary", "manual raw mode"],
-        gaps: &["diagnostic invariants", "host reach evidence"],
-    },
-    CompetitorSource {
-        tool: "lean-ctx",
-        url: "https://github.com/yvgude/lean-ctx",
-        source_commit: "snapshot-20260604",
-        claimed_scope: "Context OS with MCP tools, read modes, memory, routing, and dashboard",
-        issue_pr_themes: &["Windows Codex compression gap", "signature map"],
-        strengths: &["MCP breadth", "context routing"],
-        gaps: &["daemonless core proof", "exact runtime contract"],
-    },
-    CompetitorSource {
-        tool: "tokenpak",
-        url: "https://github.com/tokenpak/tokenpak",
-        source_commit: "snapshot-20260604",
-        claimed_scope: "Local HTTP proxy with compression recipes, cost tracking, and routing",
-        issue_pr_themes: &[
-            "coverage gate mismatch",
-            "pricing bootstrap",
-            "model leak",
-            "stream aborts",
-        ],
-        strengths: &["cost tracking", "provider routing"],
-        gaps: &["proxy default", "provider path fragility"],
-    },
-    CompetitorSource {
-        tool: "tokenjuice",
-        url: "https://github.com/vincentkoc/tokenjuice",
-        source_commit: "snapshot-20260604",
-        claimed_scope: "Deterministic terminal output compaction and broad integrations",
-        issue_pr_themes: &["dependency maintenance", "adapter breadth"],
-        strengths: &["deterministic output compaction", "host adapter breadth"],
-        gaps: &[
-            "exact recovery proof",
-            "recovery-adjusted benchmark metrics",
-        ],
-    },
-    CompetitorSource {
-        tool: "context-mode",
-        url: "https://github.com/mksglu/context-mode",
-        source_commit: "snapshot-20260604",
-        claimed_scope: "MCP sandbox, search/index, FTS knowledge base, and high reduction summaries",
-        issue_pr_themes: &[
-            "concurrency flood guard",
-            "cwd bug",
-            "install manifests",
-            "platform beta coverage",
-        ],
-        strengths: &["MCP search/index breadth", "sandbox model"],
-        gaps: &["no pre-index default", "shell truth", "one-shot adequacy"],
-    },
-    CompetitorSource {
-        tool: "caveman",
-        url: "https://github.com/JuliusBrussee/caveman",
-        source_commit: "snapshot-20260604",
-        claimed_scope: "Claude skill and terse agent communication style",
-        issue_pr_themes: &[
-            "install/platform failures",
-            "Node removal",
-            "OpenCode",
-            "PowerShell",
-        ],
-        strengths: &["social spread", "prompt-style compression"],
-        gaps: &[
-            "runtime proof system",
-            "exact recovery",
-            "protected-anchor recall",
-        ],
-    },
-    CompetitorSource {
-        tool: "cavekit",
-        url: "https://github.com/JuliusBrussee/cavekit",
-        source_commit: "snapshot-20260604",
-        claimed_scope: "Natural-language blueprint and planning validation",
-        issue_pr_themes: &["manual install", "Codex port", "security", "CLI support"],
-        strengths: &["planning flow", "blueprint validation"],
-        gaps: &["runtime compression", "exact refs"],
-    },
-    CompetitorSource {
-        tool: "cavemem",
-        url: "https://github.com/JuliusBrussee/cavemem",
-        source_commit: "snapshot-20260604",
-        claimed_scope: "Cross-agent compressed local memory",
-        issue_pr_themes: &[
-            "Windows paths",
-            "Codex installer",
-            "session leakage",
-            "sqlite backend",
-        ],
-        strengths: &["cross-agent memory", "local compression"],
-        gaps: &["daemon default avoidance", "source/context boundaries"],
-    },
-    CompetitorSource {
-        tool: "caveman-code",
-        url: "https://github.com/JuliusBrussee/caveman-code",
-        source_commit: "snapshot-20260604",
-        claimed_scope: "Agent/code integration layer",
-        issue_pr_themes: &["install", "login", "provider failures"],
-        strengths: &["code-agent integration"],
-        gaps: &["host-integration failure evidence", "recovery proof"],
-    },
-    CompetitorSource {
-        tool: "headroom",
-        url: "https://github.com/chopratejas/headroom",
-        source_commit: "snapshot-20260604",
-        claimed_scope: "Library/proxy/MCP compression with retrieval store",
-        issue_pr_themes: &[
-            "provider-agnostic proxy",
-            "timeout",
-            "telemetry",
-            "Homebrew",
-            "RTK hook",
-        ],
-        strengths: &["library/proxy/MCP surface", "retrieval store"],
-        gaps: &["no-proxy default", "exact local runtime"],
-    },
-    CompetitorSource {
-        tool: "engram",
-        url: "https://github.com/pythondatascrape/engram",
-        source_commit: "snapshot-20260604",
-        claimed_scope: "Local daemon for conversation history compression",
-        issue_pr_themes: &["identity compression compatibility"],
-        strengths: &["conversation history compression"],
-        gaps: &["daemon default", "on-demand cache packs"],
-    },
-    CompetitorSource {
-        tool: "claw",
-        url: "https://github.com/open-compress/claw-compactor",
-        source_commit: "snapshot-20260604",
-        claimed_scope: "Reversible multi-stage compression and RewindStore",
-        issue_pr_themes: &["credential exposure reports", "RewindStore persistence"],
-        strengths: &["reversible pipeline", "multi-stage compression"],
-        gaps: &["CLI/MCP exact refs", "security gates"],
-    },
-    CompetitorSource {
-        tool: "contextpilot",
-        url: "https://github.com/msousa202/ContextPilot",
-        source_commit: "snapshot-20260604",
-        claimed_scope: "SDK wrapper, proxy, MCP, and quality fallback",
-        issue_pr_themes: &[
-            "report capsule",
-            "session memory",
-            "hybrid scoring",
-            "skeletonization",
-        ],
-        strengths: &["quality gate concept", "SDK integration"],
-        gaps: &["service dependency", "local exact recovery"],
-    },
-    CompetitorSource {
-        tool: "wilpel-caveman-compression",
-        url: "https://github.com/wilpel/caveman-compression",
-        source_commit: "snapshot-20260604",
-        claimed_scope: "Semantic grammar stripping for prompt compression",
-        issue_pr_themes: &[
-            "negation preservation",
-            "missing Skill.md",
-            "endpoint support",
-        ],
-        strengths: &["semantic grammar stripping"],
-        gaps: &["lossy protected-anchor risk", "exact recovery"],
-    },
-    CompetitorSource {
-        tool: "compresh",
-        url: "https://github.com/compresh/compresh",
-        source_commit: "snapshot-20260604",
-        claimed_scope: "Depth-aware proxy context compression and fetch markers",
-        issue_pr_themes: &["no active backlog snapshot"],
-        strengths: &["depth-aware compression", "fetch markers"],
-        gaps: &["local runtime", "recovery-adjusted accounting"],
-    },
-    CompetitorSource {
-        tool: "compresh-mcp",
-        url: "https://github.com/compresh/compresh-mcp",
-        source_commit: "snapshot-20260604",
-        claimed_scope: "MCP wrapper around Compresh and remote/local fallback",
-        issue_pr_themes: &["no active backlog snapshot"],
-        strengths: &["MCP wrapper", "remote/local fallback"],
-        gaps: &["paid/remote default risk", "exact local refs"],
-    },
-    CompetitorSource {
-        tool: "context-gateway",
-        url: "https://github.com/Compresr-ai/Context-Gateway",
-        source_commit: "snapshot-20260604",
-        claimed_scope: "Agentic API gateway with background history compaction",
-        issue_pr_themes: &[
-            "thinking-block 400 errors",
-            "Copilot integration",
-            "SSE/header PRs",
-        ],
-        strengths: &["agentic API gateway", "session history compaction"],
-        gaps: &["background compaction default", "Core local recovery"],
-    },
-];
+macro_rules! competitor_sources {
+    ($(($tool:literal, $url:literal, $scope:literal,
+        [$($theme:literal),*], [$($strength:literal),*], [$($gap:literal),*]
+    )),* $(,)?) => {
+        const COMPETITOR_SOURCES: &[CompetitorSource] = &[$(CompetitorSource {
+            tool: $tool,
+            url: $url,
+            source_commit: "snapshot-20260604",
+            claimed_scope: $scope,
+            issue_pr_themes: &[$($theme),*],
+            strengths: &[$($strength),*],
+            gaps: &[$($gap),*],
+        }),*];
+    };
+}
+
+competitor_sources! {
+    ("rtk", "https://github.com/rtk-ai/rtk", "Rust command proxy and shell-hook command filters", ["parser coverage", "install/platform", "deps/CI", "reach"], ["command-filter mindshare", "large adoption signal"], ["exact recovery beyond command filters", "Safe Savings evidence"]),
+    ("ztk", "https://github.com/codejunkie99/ztk", "Tiny Zig binary with hooks and manual raw mode", ["stderr preservation", "failure fidelity"], ["small binary", "manual raw mode"], ["diagnostic invariants", "host reach evidence"]),
+    ("lean-ctx", "https://github.com/yvgude/lean-ctx", "Context OS with MCP tools, read modes, memory, routing, and dashboard", ["Windows Codex compression gap", "signature map"], ["MCP breadth", "context routing"], ["daemonless core proof", "exact runtime contract"]),
+    ("tokenpak", "https://github.com/tokenpak/tokenpak", "Local HTTP proxy with compression recipes, cost tracking, and routing", ["coverage gate mismatch", "pricing bootstrap", "model leak", "stream aborts"], ["cost tracking", "provider routing"], ["proxy default", "provider path fragility"]),
+    ("tokenjuice", "https://github.com/vincentkoc/tokenjuice", "Deterministic terminal output compaction and broad integrations", ["dependency maintenance", "adapter breadth"], ["deterministic output compaction", "host adapter breadth"], ["exact recovery proof", "recovery-adjusted benchmark metrics"]),
+    ("context-mode", "https://github.com/mksglu/context-mode", "MCP sandbox, search/index, FTS knowledge base, and high reduction summaries", ["concurrency flood guard", "cwd bug", "install manifests", "platform beta coverage"], ["MCP search/index breadth", "sandbox model"], ["no pre-index default", "shell truth", "one-shot adequacy"]),
+    ("caveman", "https://github.com/JuliusBrussee/caveman", "Claude skill and terse agent communication style", ["install/platform failures", "Node removal", "OpenCode", "PowerShell"], ["social spread", "prompt-style compression"], ["runtime proof system", "exact recovery", "protected-anchor recall"]),
+    ("cavekit", "https://github.com/JuliusBrussee/cavekit", "Natural-language blueprint and planning validation", ["manual install", "Codex port", "security", "CLI support"], ["planning flow", "blueprint validation"], ["runtime compression", "exact refs"]),
+    ("cavemem", "https://github.com/JuliusBrussee/cavemem", "Cross-agent compressed local memory", ["Windows paths", "Codex installer", "session leakage", "sqlite backend"], ["cross-agent memory", "local compression"], ["daemon default avoidance", "source/context boundaries"]),
+    ("caveman-code", "https://github.com/JuliusBrussee/caveman-code", "Agent/code integration layer", ["install", "login", "provider failures"], ["code-agent integration"], ["host-integration failure evidence", "recovery proof"]),
+    ("headroom", "https://github.com/chopratejas/headroom", "Library/proxy/MCP compression with retrieval store", ["provider-agnostic proxy", "timeout", "telemetry", "Homebrew", "RTK hook"], ["library/proxy/MCP surface", "retrieval store"], ["no-proxy default", "exact local runtime"]),
+    ("engram", "https://github.com/pythondatascrape/engram", "Local daemon for conversation history compression", ["identity compression compatibility"], ["conversation history compression"], ["daemon default", "on-demand cache packs"]),
+    ("claw", "https://github.com/open-compress/claw-compactor", "Reversible multi-stage compression and RewindStore", ["credential exposure reports", "RewindStore persistence"], ["reversible pipeline", "multi-stage compression"], ["CLI/MCP exact refs", "security gates"]),
+    ("contextpilot", "https://github.com/msousa202/ContextPilot", "SDK wrapper, proxy, MCP, and quality fallback", ["report capsule", "session memory", "hybrid scoring", "skeletonization"], ["quality gate concept", "SDK integration"], ["service dependency", "local exact recovery"]),
+    ("wilpel-caveman-compression", "https://github.com/wilpel/caveman-compression", "Semantic grammar stripping for prompt compression", ["negation preservation", "missing Skill.md", "endpoint support"], ["semantic grammar stripping"], ["lossy protected-anchor risk", "exact recovery"]),
+    ("compresh", "https://github.com/compresh/compresh", "Depth-aware proxy context compression and fetch markers", ["no active backlog snapshot"], ["depth-aware compression", "fetch markers"], ["local runtime", "recovery-adjusted accounting"]),
+    ("compresh-mcp", "https://github.com/compresh/compresh-mcp", "MCP wrapper around Compresh and remote/local fallback", ["no active backlog snapshot"], ["MCP wrapper", "remote/local fallback"], ["paid/remote default risk", "exact local refs"]),
+    ("context-gateway", "https://github.com/Compresr-ai/Context-Gateway", "Agentic API gateway with background history compaction", ["thinking-block 400 errors", "Copilot integration", "SSE/header PRs"], ["agentic API gateway", "session history compaction"], ["background compaction default", "Core local recovery"]),
+}
 
 pub(crate) fn competitor_adapter_sources() -> impl Iterator<Item = CompetitorAdapterSource> {
     COMPETITOR_SOURCES
@@ -248,10 +71,7 @@ pub(crate) fn competitor_adapter_sources() -> impl Iterator<Item = CompetitorAda
 }
 
 pub(crate) fn competitor_source_url(tool: &str) -> Option<&'static str> {
-    COMPETITOR_SOURCES
-        .iter()
-        .find(|source| source.tool == tool)
-        .map(|source| source.url)
+    COMPETITOR_SOURCES.iter().find_map(|source| (source.tool == tool).then_some(source.url))
 }
 
 pub(crate) fn source_currency_report(release_candidate_id: &str) -> serde_json::Value {
@@ -317,16 +137,11 @@ pub(crate) fn refreshed_source_currency_report(
     let mut refresh_errors = Vec::<serde_json::Value>::new();
     for source in COMPETITOR_SOURCES {
         let refresh = refresh_by_tool.get(source.tool);
-        let source_commit = refresh
-            .and_then(|row| row["source_commit"].as_str())
-            .unwrap_or_default()
-            .trim()
-            .to_string();
-        let source_date = refresh
-            .and_then(|row| row["source_date"].as_str())
-            .unwrap_or(COMPETITOR_SOURCE_DATE)
-            .trim()
-            .to_string();
+        let refreshed = |key, default| {
+            refresh.and_then(|row| row[key].as_str()).unwrap_or(default).trim().to_string()
+        };
+        let source_commit = refreshed("source_commit", "");
+        let source_date = refreshed("source_date", COMPETITOR_SOURCE_DATE);
         let refresh_error = refresh
             .and_then(|row| row["refresh_error"].as_str())
             .map(str::trim)
@@ -417,13 +232,11 @@ pub(crate) fn read_source_refresh_rows(path: &Path) -> Result<Vec<serde_json::Va
         .with_context(|| format!("reading source refresh ledger {}", path.display()))?;
     let value: serde_json::Value = serde_json::from_slice(&bytes)
         .with_context(|| format!("parsing source refresh ledger {}", path.display()))?;
-    if let Some(rows) = value["rows"].as_array() {
-        return Ok(rows.clone());
-    }
-    if let Some(rows) = value.as_array() {
-        return Ok(rows.clone());
-    }
-    anyhow::bail!("source refresh ledger must be a JSON array or an object with a rows array");
+    value["rows"]
+        .as_array()
+        .or_else(|| value.as_array())
+        .cloned()
+        .context("source refresh ledger must be a JSON array or an object with a rows array")
 }
 
 pub(crate) fn git_head_source_refresh_rows() -> Vec<serde_json::Value> {
@@ -450,10 +263,7 @@ pub(crate) fn git_head_source_refresh_rows() -> Vec<serde_json::Value> {
 const LS_REMOTE_TIMEOUT: Duration = Duration::from_secs(30);
 
 fn git_ls_remote_head(url: &str) -> Result<String> {
-    let argv: Vec<String> = ["git", "ls-remote", url, "HEAD"]
-        .iter()
-        .map(|s| s.to_string())
-        .collect();
+    let argv = ["git", "ls-remote", url, "HEAD"].map(str::to_string).to_vec();
     let output = tokenzero_runtime::run_command(&argv, None, None, None, LS_REMOTE_TIMEOUT, false)
         .with_context(|| format!("running git ls-remote HEAD for {url}"))?;
     if output.timed_out {

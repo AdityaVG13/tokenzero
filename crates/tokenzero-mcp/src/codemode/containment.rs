@@ -688,6 +688,35 @@ mod tests {
     fn heavy(id: usize) -> String {
         format!("zero.read({id}); zero.read({id})")
     }
+    struct BlockedExecution {
+        gate: Arc<(Mutex<bool>, Condvar)>,
+        join: thread::JoinHandle<CodeModeResult>,
+    }
+    impl BlockedExecution {
+        fn start(controller: Arc<Controller>, id: usize) -> Self {
+            let gate = Arc::new((Mutex::new(false), Condvar::new()));
+            let entered = Arc::new((Mutex::new(false), Condvar::new()));
+            let (worker_gate, worker_entered) = (Arc::clone(&gate), Arc::clone(&entered));
+            let join = thread::spawn(move || controller.execute(
+                &heavy(id), &CodeModeOptions::default(), || {
+                    *worker_entered.0.lock().unwrap() = true;
+                    worker_entered.1.notify_all();
+                    let mut open = worker_gate.0.lock().unwrap();
+                    while !*open { open = worker_gate.1.wait(open).unwrap(); }
+                    CodeModeResult::completed(json!(id), vec![], 1, 1, 1)
+                },
+            ));
+            let mut ready = entered.0.lock().unwrap();
+            while !*ready { ready = entered.1.wait(ready).unwrap(); }
+            drop(ready);
+            Self { gate, join }
+        }
+        fn finish(self) -> CodeModeResult {
+            *self.gate.0.lock().unwrap() = true;
+            self.gate.1.notify_all();
+            self.join.join().unwrap()
+        }
+    }
     #[test]
     fn containment_eight_submissions_never_exceed_max_concurrency() {
         let c = ctl(temp("parallel"), 8);
@@ -738,108 +767,36 @@ mod tests {
     #[test]
     fn containment_dedup_followers_are_bounded() {
         let c = ctl(temp("dedup-bounded"), 1);
-        let gate = Arc::new((Mutex::new(false), Condvar::new()));
-        let entered = Arc::new((Mutex::new(false), Condvar::new()));
-        let leader = {
-            let c = Arc::clone(&c);
-            let gate = Arc::clone(&gate);
-            let entered = Arc::clone(&entered);
-            thread::spawn(move || {
-                c.execute(&heavy(19), &CodeModeOptions::default(), || {
-                    *entered.0.lock().unwrap() = true;
-                    entered.1.notify_all();
-                    let mut open = gate.0.lock().unwrap();
-                    while !*open {
-                        open = gate.1.wait(open).unwrap();
-                    }
-                    CodeModeResult::completed(json!(19), vec![], 1, 1, 1)
-                })
-            })
-        };
-        let mut ready = entered.0.lock().unwrap();
-        while !*ready {
-            ready = entered.1.wait(ready).unwrap();
-        }
-        drop(ready);
+        let blocked = BlockedExecution::start(Arc::clone(&c), 19);
         let follower = {
             let c = Arc::clone(&c);
-            thread::spawn(move || {
-                c.execute(&heavy(19), &CodeModeOptions::default(), || {
-                    panic!("follower ran")
-                })
-            })
+            thread::spawn(move || c.execute(&heavy(19), &CodeModeOptions::default(), || panic!("follower ran")))
         };
         let deadline = Instant::now() + Duration::from_secs(1);
-        while Instant::now() < deadline {
-            if c.lock()
-                .flights
-                .values()
-                .any(|flight| flight.followers.load(Ordering::Acquire) == 1)
-            {
-                break;
-            }
+        while Instant::now() < deadline
+            && !c.lock().flights.values().any(|f| f.followers.load(Ordering::Acquire) == 1)
+        {
             thread::sleep(Duration::from_millis(1));
         }
-        assert!(
-            c.lock()
-                .flights
-                .values()
-                .any(|flight| { flight.followers.load(Ordering::Acquire) == 1 })
-        );
-        let rejected = c.execute(&heavy(19), &CodeModeOptions::default(), || {
-            panic!("clone ran")
-        });
-        assert_eq!(
-            rejected.error.as_ref().map(|e| e.kind.as_str()),
-            Some("busy")
-        );
-        assert!(
-            rejected
-                .error
-                .unwrap()
-                .message
-                .contains("dedup_followers_full")
-        );
-        *gate.0.lock().unwrap() = true;
-        gate.1.notify_all();
-        assert!(leader.join().unwrap().error.is_none());
+        assert!(c.lock().flights.values().any(|f| f.followers.load(Ordering::Acquire) == 1));
+        let rejected = c.execute(&heavy(19), &CodeModeOptions::default(), || panic!("clone ran"));
+        assert_eq!(rejected.error.as_ref().map(|e| e.kind.as_str()), Some("busy"));
+        assert!(rejected.error.unwrap().message.contains("dedup_followers_full"));
+        assert!(blocked.finish().error.is_none());
         assert!(follower.join().unwrap().error.is_none());
     }
 
     #[test]
     fn containment_queue_full_is_structured_busy() {
         let c = ctl(temp("busy"), 0);
-        let gate = Arc::new((Mutex::new(false), Condvar::new()));
-        let entered = Arc::new((Mutex::new(false), Condvar::new()));
-        let j = {
-            let c = Arc::clone(&c);
-            let gate = Arc::clone(&gate);
-            let entered = Arc::clone(&entered);
-            thread::spawn(move || {
-                c.execute(&heavy(1), &CodeModeOptions::default(), || {
-                    *entered.0.lock().unwrap() = true;
-                    entered.1.notify_all();
-                    let mut g = gate.0.lock().unwrap();
-                    while !*g {
-                        g = gate.1.wait(g).unwrap();
-                    }
-                    CodeModeResult::completed(json!(1), vec![], 1, 1, 1)
-                })
-            })
-        };
-        let mut e = entered.0.lock().unwrap();
-        while !*e {
-            e = entered.1.wait(e).unwrap();
-        }
-        drop(e);
-        let r = c.execute(&heavy(2), &CodeModeOptions::default(), || panic!("spawned"));
-        assert_eq!(r.error.as_ref().map(|e| e.kind.as_str()), Some("busy"));
-        assert!(r.error.unwrap().retryable);
-        *gate.0.lock().unwrap() = true;
-        gate.1.notify_all();
-        j.join().unwrap();
+        let blocked = BlockedExecution::start(Arc::clone(&c), 1);
+        let result = c.execute(&heavy(2), &CodeModeOptions::default(), || panic!("spawned"));
+        assert_eq!(result.error.as_ref().map(|e| e.kind.as_str()), Some("busy"));
+        assert!(result.error.unwrap().retryable);
+        blocked.finish();
         assert_eq!(c.snapshot().rejected_count, 1)
     }
+
     #[test]
     fn containment_error_and_panic_release_permit() {
         let p = temp("release");
@@ -892,42 +849,15 @@ mod tests {
     #[test]
     fn containment_status_never_queues() {
         let c = ctl(temp("status"), 0);
-        let gate = Arc::new((Mutex::new(false), Condvar::new()));
-        let entered = Arc::new((Mutex::new(false), Condvar::new()));
-        let j = {
-            let c = Arc::clone(&c);
-            let gate = Arc::clone(&gate);
-            let entered = Arc::clone(&entered);
-            thread::spawn(move || {
-                c.execute(&heavy(1), &CodeModeOptions::default(), || {
-                    *entered.0.lock().unwrap() = true;
-                    entered.1.notify_all();
-                    let mut g = gate.0.lock().unwrap();
-                    while !*g {
-                        g = gate.1.wait(g).unwrap();
-                    }
-                    CodeModeResult::completed(json!(1), vec![], 1, 1, 1)
-                })
-            })
-        };
-        let mut e = entered.0.lock().unwrap();
-        while !*e {
-            e = entered.1.wait(e).unwrap();
-        }
-        drop(e);
+        let blocked = BlockedExecution::start(Arc::clone(&c), 1);
         let start = Instant::now();
-        assert!(
-            c.execute("status", &CodeModeOptions::default(), || {
-                CodeModeResult::completed(json!(true), vec![], 0, 1, 1)
-            })
-            .error
-            .is_none()
-        );
+        assert!(c.execute("status", &CodeModeOptions::default(), || {
+            CodeModeResult::completed(json!(true), vec![], 0, 1, 1)
+        }).error.is_none());
         assert!(start.elapsed() < Duration::from_millis(20));
-        *gate.0.lock().unwrap() = true;
-        gate.1.notify_all();
-        j.join().unwrap();
+        blocked.finish();
     }
+
     #[test]
     fn containment_dead_pid_lock_is_reclaimed() {
         let p = temp("dead");

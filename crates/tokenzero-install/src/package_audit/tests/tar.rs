@@ -1,363 +1,136 @@
 use super::fixtures::*;
+use super::harness::*;
 use super::*;
-
-/// Run `package_audit` on a single tar archive built from `entries`, returning
-/// the full report and the issues array.
-fn run_tar_audit(entries: &[TarTestEntry<'_>]) -> (serde_json::Value, Vec<serde_json::Value>) {
-    let dir = tempdir().unwrap();
-    let artifact = dir.path().join("release.tar");
-    write_test_tar_entries(&artifact, entries);
-    let report = package_audit(dir.path(), &[artifact]);
-    let issues: Vec<serde_json::Value> = report["issues"].as_array().unwrap().clone();
-    (report, issues)
-}
-
-/// Helper: run audit on a tar archive built from plain names (all type '0').
-fn run_tar_audit_from_names(names: &[&str]) -> (serde_json::Value, Vec<serde_json::Value>) {
-    let dir = tempdir().unwrap();
-    let artifact = dir.path().join("release.tar");
-    write_test_tar(&artifact, names);
-    let report = package_audit(dir.path(), &[artifact]);
-    let issues: Vec<serde_json::Value> = report["issues"].as_array().unwrap().clone();
-    (report, issues)
-}
-
-/// Assert the audit report indicates rejection.
-fn assert_audit_rejected(report: &serde_json::Value) {
-    assert_eq!(report["ok"], false);
-}
-
-/// Assert at least one issue matches all key/value pairs in `fields`.
-fn assert_issue(issues: &[serde_json::Value], fields: &[(&str, &str)]) {
-    assert!(
-        issues
-            .iter()
-            .any(|issue| fields.iter().all(|(k, v)| issue[*k] == *v)),
-        "expected issue matching {fields:?}\n  in: {issues:#?}"
-    );
-}
-
-/// Assert no issue has the given `code`.
-fn assert_no_issue(issues: &[serde_json::Value], code: &str) {
-    assert!(
-        !issues.iter().any(|issue| issue["code"] == code),
-        "unexpected issue with code={code} in {issues:#?}"
-    );
-}
-
-/// Assert at least one issue matches `code`+`member` and its `detail` contains `s`.
-fn assert_issue_detail(issues: &[serde_json::Value], code: &str, member: &str, s: &str) {
-    assert!(
-        issues.iter().any(|issue| {
-            issue["code"] == code
-                && issue["member"] == member
-                && issue["detail"].as_str().is_some_and(|d| d.contains(s))
-        }),
-        "expected {code} for {member} with detail containing '{s}'\n  in: {issues:#?}"
-    );
-}
-
-/// Assert the `fields` array inside the matching issue contains every expected field name.
-fn assert_issue_fields(
-    issues: &[serde_json::Value],
-    code: &str,
-    member: &str,
-    expected: &[&str],
-    report: &serde_json::Value,
-) {
-    let issue = issues
-        .iter()
-        .find(|i| i["code"] == code && i["member"] == member)
-        .unwrap_or_else(|| panic!("missing {code} issue for {member}: {report:#}"));
-    let fields = issue["fields"].as_array().unwrap();
-    for field in expected {
-        assert!(
-            fields.iter().any(|v| v == field),
-            "missing {field} field in {issue:#}"
-        );
-    }
-}
-
-/// Assert the issue's JSON serialization does NOT contain `secret`.
-fn assert_issue_no_secret(
-    issues: &[serde_json::Value],
-    code: &str,
-    member: &str,
-    secret: &str,
-    report: &serde_json::Value,
-) {
-    let issue = issues
-        .iter()
-        .find(|i| i["code"] == code && i["member"] == member)
-        .unwrap_or_else(|| panic!("missing {code} issue for {member}: {report:#}"));
-    let serialized = serde_json::to_string(issue).unwrap();
-    assert!(
-        !serialized.contains(secret),
-        "issue must not expose '{secret}': {issue:#}"
-    );
-}
-
-/// Assert no issue matches `code`+`member`.
-fn assert_no_issue_code_member(issues: &[serde_json::Value], code: &str, member: &str) {
-    assert!(
-        !issues
-            .iter()
-            .any(|issue| issue["code"] == code && issue["member"] == member),
-        "unexpected {code} issue for {member} in {issues:#?}"
-    );
-}
-
-// ── Tests ────────────────────────────────────────────────────────────────────
-
 #[test]
 fn package_audit_rejects_tar_archive_dev_target_launcher_payload() {
     let member = "tokenzero-v0.1.1/bin/tokenzero";
-    let payload = b"#!/bin/sh\nexec target/release/tokenzero \"$@\"\n";
-    let (report, issues) = run_tar_audit(&[TarTestEntry::new(member, b'0', payload)]);
-    assert_audit_rejected(&report);
-    assert_issue(
-        &issues,
-        &[("code", "dev_runtime_launcher"), ("member", member)],
+    run_tar_contract(
+        &[TarTestEntry::new(member, b'0', b"#!/bin/sh\nexec target/release/tokenzero \"$@\"\n")],
+        &ContractCase { label: "dev launcher", expect_codes: &["dev_runtime_launcher"], expect_fields: &[("code", "dev_runtime_launcher"), ("member", member)], },
     );
 }
-
 #[test]
 fn package_audit_fails_closed_on_archive_link_target_control_characters() {
     let member = "tokenzero-v0.1.1/bin/tokenzero";
     let link_target = "bin/tokenzero\rshim";
-    let (report, issues) =
-        run_tar_audit(&[TarTestEntry::new(member, b'2', b"").with_link_target(link_target)]);
-    assert_audit_rejected(&report);
-    assert_issue(
-        &issues,
-        &[
-            ("code", "archive_link_target_uninspectable"),
-            ("member", member),
-            ("link_target", link_target),
-            ("reason", "control_character"),
-        ],
+    run_tar_contract(
+        &[TarTestEntry::new(member, b'2', b"").with_link_target(link_target)],
+        &ContractCase { label: "link control", expect_codes: &["archive_link_target_uninspectable"], expect_fields: &[ ("code", "archive_link_target_uninspectable"), ("member", member), ("link_target", link_target), ("reason", "control_character"), ], },
     );
 }
-
 #[test]
 fn package_audit_rejects_private_gzip_tar_members_in_process() {
     let dir = tempdir().unwrap();
     let tar_path = dir.path().join("release.tar");
     let artifact = dir.path().join("release.tar.gz");
-    write_test_tar(
-        &tar_path,
-        &[
-            "tokenzero-v0.1.1/._LICENSE",
-            "tokenzero-v0.1.1/.tokenzero/config.json",
-        ],
-    );
+    write_test_tar(&tar_path, &["tokenzero-v0.1.1/._LICENSE", "tokenzero-v0.1.1/.tokenzero/config.json"]);
     fs::write(&artifact, gzip_bytes(&fs::read(&tar_path).unwrap())).unwrap();
-
     let report = package_audit(dir.path(), &[artifact]);
-    let issues: Vec<serde_json::Value> = report["issues"].as_array().unwrap().clone();
+    let issues = report["issues"].as_array().unwrap().clone();
     assert_audit_rejected(&report);
     assert_issue(&issues, &[("code", "appledouble_metadata")]);
     assert_issue(&issues, &[("code", "private_tool_state_member")]);
 }
-
 #[test]
 fn package_audit_rejects_concatenated_gzip_tar_members() {
     let dir = tempdir().unwrap();
     let artifact = dir.path().join("release.tar.gz");
-    let visible_fragment = test_tar_entry_bytes("tokenzero-v0.1.1/LICENSE", b"MIT");
-    let mut hidden_fragment =
-        test_tar_entry_bytes("tokenzero-v0.1.1/.tokenzero/config.json", b"{}");
-    hidden_fragment.extend_from_slice(&[0u8; 1024]);
-    let mut bytes = gzip_bytes(&visible_fragment);
-    bytes.extend_from_slice(&gzip_bytes(&hidden_fragment));
+    let visible = test_tar_entry_bytes("tokenzero-v0.1.1/LICENSE", b"MIT");
+    let mut hidden = test_tar_entry_bytes("tokenzero-v0.1.1/.tokenzero/config.json", b"{}");
+    hidden.extend_from_slice(&[0u8; 1024]);
+    let mut bytes = gzip_bytes(&visible);
+    bytes.extend_from_slice(&gzip_bytes(&hidden));
     fs::write(&artifact, bytes).unwrap();
-
     let report = package_audit(dir.path(), &[artifact]);
-    let issues: Vec<serde_json::Value> = report["issues"].as_array().unwrap().clone();
+    let issues = report["issues"].as_array().unwrap().clone();
     assert_audit_rejected(&report);
-    assert_issue(
-        &issues,
-        &[
-            ("code", "private_tool_state_member"),
-            ("member", "tokenzero-v0.1.1/.tokenzero/config.json"),
-        ],
-    );
+    assert_issue(&issues, &[("code", "private_tool_state_member"), ("member", "tokenzero-v0.1.1/.tokenzero/config.json")]);
 }
-
 #[test]
-fn package_audit_fails_closed_on_tar_missing_end_marker() {
-    let dir = tempdir().unwrap();
-    let artifact = dir.path().join("release.tar");
-    fs::write(
-        &artifact,
-        test_tar_entry_bytes("tokenzero-v0.1.1/LICENSE", b"MIT"),
-    )
-    .unwrap();
-
-    let report = package_audit(dir.path(), &[artifact]);
-    let issues: Vec<serde_json::Value> = report["issues"].as_array().unwrap().clone();
+fn package_audit_fails_closed_on_tar_end_marker_contracts() {
+    let (report, issues) = write_tar_and_audit(|a| {
+        fs::write(a, test_tar_entry_bytes("tokenzero-v0.1.1/LICENSE", b"MIT")).unwrap();
+    });
     assert_audit_rejected(&report);
-    assert!(issues.iter().any(|issue| {
-        issue["code"] == "archive_member_metadata_malformed"
-            && issue["detail"]
-                .as_str()
-                .is_some_and(|d| d.contains("end-of-archive marker"))
-    }));
-}
-
-#[test]
-fn package_audit_fails_closed_on_tar_trailing_data_after_end_marker() {
-    let dir = tempdir().unwrap();
-    let artifact = dir.path().join("release.tar");
-    write_test_tar(&artifact, &["tokenzero-v0.1.1/LICENSE"]);
-    let mut bytes = fs::read(&artifact).unwrap();
-    bytes.extend_from_slice(&test_tar_entry_bytes(
-        "tokenzero-v0.1.1/.tokenzero/config.json",
-        b"{}",
-    ));
-    fs::write(&artifact, bytes).unwrap();
-
-    let report = package_audit(dir.path(), &[artifact]);
-    let issues: Vec<serde_json::Value> = report["issues"].as_array().unwrap().clone();
+    assert!(issues.iter().any(|i| i["code"] == "archive_member_metadata_malformed"
+        && i["detail"].as_str().is_some_and(|d| d.contains("end-of-archive marker"))));
+    let (report, issues) = write_tar_and_audit(|a| {
+        write_test_tar(a, &["tokenzero-v0.1.1/LICENSE"]);
+        let mut b = fs::read(a).unwrap();
+        b.extend_from_slice(&test_tar_entry_bytes("tokenzero-v0.1.1/.tokenzero/config.json", b"{}"));
+        fs::write(a, b).unwrap();
+    });
     assert_audit_rejected(&report);
-    assert!(issues.iter().any(|issue| {
-        issue["code"] == "archive_trailing_data"
-            && issue["detail"]
-                .as_str()
-                .is_some_and(|d| d.contains("end-of-archive marker"))
-    }));
+    assert!(issues.iter().any(|i| i["code"] == "archive_trailing_data"
+        && i["detail"].as_str().is_some_and(|d| d.contains("end-of-archive marker"))));
 }
-
 #[test]
 fn package_audit_fails_closed_on_tar_private_owner_metadata() {
-    let dir = tempdir().unwrap();
-    let artifact = dir.path().join("release.tar");
     let member = "tokenzero-v0.1.1/LICENSE";
-    let mut header = test_tar_header(member, b'0', 0, None);
-    write_tar_octal(&mut header[108..116], 501);
-    write_tar_octal(&mut header[116..124], 20);
-    header[265..271].copy_from_slice(b"aditya");
-    header[297..302].copy_from_slice(b"staff");
-    write_test_tar_checksum(&mut header);
-    let mut bytes = header.to_vec();
-    bytes.extend_from_slice(&[0u8; 1024]);
-    fs::write(&artifact, bytes).unwrap();
-
-    let report = package_audit(dir.path(), &[artifact]);
-    let issues: Vec<serde_json::Value> = report["issues"].as_array().unwrap().clone();
+    let (report, issues) = write_tar_and_audit(|a| {
+        let mut header = test_tar_header(member, b'0', 0, None);
+        write_tar_octal(&mut header[108..116], 501);
+        write_tar_octal(&mut header[116..124], 20);
+        header[265..271].copy_from_slice(b"aditya");
+        header[297..302].copy_from_slice(b"staff");
+        write_test_tar_checksum(&mut header);
+        let mut bytes = header.to_vec();
+        bytes.extend_from_slice(&[0u8; 1024]);
+        fs::write(a, bytes).unwrap();
+    });
     assert_audit_rejected(&report);
-    assert_issue_fields(
-        &issues,
-        "archive_private_owner_metadata",
-        member,
-        &["uid", "gid", "uname", "gname"],
-        &report,
-    );
+    assert_issue_fields(&issues, "archive_private_owner_metadata", member, &["uid", "gid", "uname", "gname"], &report);
 }
-
 #[test]
 fn package_audit_fails_closed_on_tar_special_member_types() {
-    let char_device = "tokenzero-v0.1.1/dev/null";
-    let fifo = "tokenzero-v0.1.1/run/install.fifo";
-    let sparse_launcher = "tokenzero-v0.1.1/bin/tokenzero";
-    let (report, issues) = run_tar_audit(&[
-        TarTestEntry::new(char_device, b'3', b""),
-        TarTestEntry::new(fifo, b'6', b""),
-        TarTestEntry::new(sparse_launcher, b'S', b"target/release/tokenzero"),
-    ]);
+    let cases = [
+        ("tokenzero-v0.1.1/dev/null", b'3', "character_device", b"".as_slice()),
+        ("tokenzero-v0.1.1/run/install.fifo", b'6', "fifo", b""),
+        ("tokenzero-v0.1.1/bin/tokenzero", b'S', "sparse_file", b"target/release/tokenzero"),
+    ];
+    let entries: Vec<_> = cases.iter().map(|(m, f, _, d)| TarTestEntry::new(m, *f, d)).collect();
+    let (report, issues) = run_tar_audit(&entries);
     assert_audit_rejected(&report);
-    for (member, reason) in [
-        (char_device, "character_device"),
-        (fifo, "fifo"),
-        (sparse_launcher, "sparse_file"),
-    ] {
-        assert_issue(
-            &issues,
-            &[
-                ("code", "archive_unsupported_member_type"),
-                ("member", member),
-                ("reason", reason),
-            ],
-        );
+    for (member, _, reason, _) in cases {
+        assert_issue(&issues, &[("code", "archive_unsupported_member_type"), ("member", member), ("reason", reason)]);
     }
 }
-
 #[test]
-fn package_audit_rejects_gnu_longlink_sensitive_member() {
-    let long_member = format!(
-        "tokenzero-v0.1.1/{}/{}/{}/.env",
-        "a".repeat(90),
-        "b".repeat(90),
-        "c".repeat(90)
-    );
+fn package_audit_rejects_long_and_pax_name_overrides() {
+    let long_member = format!("tokenzero-v0.1.1/{}/{}/{}/.env", "a".repeat(90), "b".repeat(90), "c".repeat(90));
+    let long_payload = format!("{long_member}\0");
     let (report, issues) = run_tar_audit(&[
-        TarTestEntry::new("././@LongLink", b'L', format!("{long_member}\0").as_bytes()),
+        TarTestEntry::new("././@LongLink", b'L', long_payload.as_bytes()),
         TarTestEntry::new("payload.txt", b'0', b""),
     ]);
     assert_audit_rejected(&report);
-    assert_issue(
-        &issues,
-        &[("code", "sensitive_member_name"), ("member", &long_member)],
-    );
-}
-
-#[test]
-fn package_audit_rejects_pax_path_private_member() {
+    assert_issue(&issues, &[("code", "sensitive_member_name"), ("member", long_member.as_str())]);
     let pax_member = "tokenzero-v0.1.1/.tokenzero/config.json";
-    let pax_payload = pax_record("path", pax_member);
-    let (report, issues) = run_tar_audit(&[
-        TarTestEntry::new("./PaxHeaders.0/config.json", b'x', &pax_payload),
-        TarTestEntry::new("config.json", b'0', b""),
-    ]);
-    assert_audit_rejected(&report);
-    assert_issue(
-        &issues,
-        &[
-            ("code", "private_tool_state_member"),
-            ("member", pax_member),
-        ],
+    let pax = pax_record("path", pax_member);
+    run_tar_contract(
+        &[TarTestEntry::new("./PaxHeaders.0/config.json", b'x', &pax), TarTestEntry::new("config.json", b'0', b"")],
+        &ContractCase { label: "pax path private", expect_codes: &["private_tool_state_member"], expect_fields: &[("code", "private_tool_state_member"), ("member", pax_member)], },
     );
 }
-
 #[test]
-fn package_audit_accepts_empty_pax_path_delete_with_header_name() {
-    let dir = tempfile::Builder::new()
-        .prefix("tokenzero-test-")
-        .tempdir()
-        .unwrap();
-    let artifact = dir.path().join("release.tar");
-    let pax_payload = pax_record("path", "");
-    write_test_tar_entries(
-        &artifact,
-        &[
-            TarTestEntry::new("./PaxHeaders.0/LICENSE", b'x', &pax_payload),
-            TarTestEntry::new("tokenzero-v0.1.1/LICENSE", b'0', b"MIT"),
-        ],
-    );
-    assert_eq!(package_audit(dir.path(), &[artifact])["ok"], true);
+fn package_audit_accepts_empty_pax_delete_overrides() {
+    for (key, header, body) in [
+        ("path", "./PaxHeaders.0/LICENSE", ("tokenzero-v0.1.1/LICENSE", b'0', b"MIT".as_slice(), None)),
+        ("linkpath", "./PaxHeaders.0/tokenzero-link", ("tokenzero-v0.1.1/bin/tokenzero-link", b'2', b"".as_slice(), Some("bin/tokenzero"))),
+    ] {
+        let dir = tempfile::Builder::new().prefix("tokenzero-test-").tempdir().unwrap();
+        let artifact = dir.path().join("release.tar");
+        let pax_payload = pax_record(key, "");
+        let mut entry = TarTestEntry::new(body.0, body.1, body.2);
+        if let Some(link) = body.3 {
+            entry = entry.with_link_target(link);
+        }
+        write_test_tar_entries(&artifact, &[TarTestEntry::new(header, b'x', &pax_payload), entry]);
+        assert_eq!(package_audit(dir.path(), &[artifact])["ok"], true);
+    }
 }
-
 #[test]
-fn package_audit_accepts_empty_pax_linkpath_delete_with_header_target() {
-    let dir = tempfile::Builder::new()
-        .prefix("tokenzero-test-")
-        .tempdir()
-        .unwrap();
-    let artifact = dir.path().join("release.tar");
-    let member = "tokenzero-v0.1.1/bin/tokenzero-link";
-    let pax_payload = pax_record("linkpath", "");
-    write_test_tar_entries(
-        &artifact,
-        &[
-            TarTestEntry::new("./PaxHeaders.0/tokenzero-link", b'x', &pax_payload),
-            TarTestEntry::new(member, b'2', b"").with_link_target("bin/tokenzero"),
-        ],
-    );
-    assert_eq!(package_audit(dir.path(), &[artifact])["ok"], true);
-}
-
-#[test]
-fn package_audit_empty_pax_path_suppresses_global_pax_path_for_member() {
+fn package_audit_empty_pax_suppresses_global_pax_overrides() {
     let dir = tempdir().unwrap();
     let inner = dir.path().join("inner.tar");
     let artifact = dir.path().join("release.tar");
@@ -365,360 +138,156 @@ fn package_audit_empty_pax_path_suppresses_global_pax_path_for_member() {
     let nested_member = "tokenzero-v0.1.1/.tokenzero/config.json";
     write_test_tar(&inner, &[nested_member]);
     let inner_bytes = fs::read(&inner).unwrap();
-    write_test_tar_entries(
-        &artifact,
-        &[
-            TarTestEntry::new("./GlobalHead.0", b'g', &pax_record("path", global_path)),
-            TarTestEntry::new("./PaxHeaders.0/payload.bin", b'x', &pax_record("path", "")),
-            TarTestEntry::new("payload.bin", b'0', &inner_bytes),
-        ],
-    );
+    let global_pax = pax_record("path", global_path);
+    let delete_pax = pax_record("path", "");
+    write_test_tar_entries(&artifact, &[
+        TarTestEntry::new("./GlobalHead.0", b'g', &global_pax),
+        TarTestEntry::new("./PaxHeaders.0/payload.bin", b'x', &delete_pax),
+        TarTestEntry::new("payload.bin", b'0', &inner_bytes),
+    ]);
     let report = package_audit(dir.path(), &[artifact]);
-    let issues: Vec<serde_json::Value> = report["issues"].as_array().unwrap().clone();
+    let issues = report["issues"].as_array().unwrap().clone();
     assert_audit_rejected(&report);
-    assert_issue(
-        &issues,
-        &[
-            ("code", "archive_global_pax_override_present"),
-            ("field", "path"),
-        ],
-    );
+    assert_issue(&issues, &[("code", "archive_global_pax_override_present"), ("field", "path")]);
     assert_no_issue_code_member(&issues, "private_tool_state_member", nested_member);
-}
-
-#[test]
-fn package_audit_empty_pax_linkpath_suppresses_global_pax_linkpath_for_member() {
-    let dir = tempdir().unwrap();
-    let artifact = dir.path().join("release.tar");
     let member = "tokenzero-v0.1.1/bin/tokenzero-link";
     let global_link_target = "../.env";
-    write_test_tar_entries(
-        &artifact,
-        &[
-            TarTestEntry::new(
-                "./GlobalHead.0",
-                b'g',
-                &pax_record("linkpath", global_link_target),
-            ),
-            TarTestEntry::new(
-                "./PaxHeaders.0/tokenzero-link",
-                b'x',
-                &pax_record("linkpath", ""),
-            ),
-            TarTestEntry::new(member, b'2', b"").with_link_target("bin/tokenzero"),
-        ],
-    );
-    let report = package_audit(dir.path(), &[artifact]);
-    let issues: Vec<serde_json::Value> = report["issues"].as_array().unwrap().clone();
+    let global_pax = pax_record("linkpath", global_link_target);
+    let delete_pax = pax_record("linkpath", "");
+    let (report, issues) = run_tar_audit(&[
+        TarTestEntry::new("./GlobalHead.0", b'g', &global_pax),
+        TarTestEntry::new("./PaxHeaders.0/tokenzero-link", b'x', &delete_pax),
+        TarTestEntry::new(member, b'2', b"").with_link_target("bin/tokenzero"),
+    ]);
     assert_audit_rejected(&report);
-    assert_issue(
-        &issues,
-        &[
-            ("code", "archive_global_pax_override_present"),
-            ("field", "linkpath"),
-        ],
-    );
-    assert!(
-        !issues.iter().any(|issue| {
-            issue["code"] == "archive_link_target_escape"
-                && issue["member"] == member
-                && issue["link_target"] == global_link_target
-        }),
+    assert_issue(&issues, &[("code", "archive_global_pax_override_present"), ("field", "linkpath")]);
+    assert_eq!(
+        issues.iter().any(|i| i["code"] == "archive_link_target_escape" && i["member"] == member && i["link_target"] == global_link_target),
+        false,
         "global PAX linkpath should be deleted for the symlink member: {report:#}"
     );
 }
-
 #[test]
-fn package_audit_fails_closed_on_invalid_tar_size() {
-    let dir = tempdir().unwrap();
-    let artifact = dir.path().join("release.tar");
-    let mut header = test_tar_header("tokenzero-v0.1.1/LICENSE", b'0', 0, None);
-    header[124..136].copy_from_slice(b"not-octal\0\0\0");
-    write_test_tar_checksum(&mut header);
-    fs::write(&artifact, header).unwrap();
-
-    let report = package_audit(dir.path(), &[artifact]);
-    let issues: Vec<serde_json::Value> = report["issues"].as_array().unwrap().clone();
+fn package_audit_fails_closed_on_tar_size_and_checksum_matrix() {
+    let member = "tokenzero-v0.1.1/LICENSE";
+    let (report, issues) = write_tar_and_audit(|a| {
+        let mut header = test_tar_header(member, b'0', 0, None);
+        header[124..136].copy_from_slice(b"not-octal\0\0\0");
+        write_test_tar_checksum(&mut header);
+        fs::write(a, header).unwrap();
+    });
     assert_audit_rejected(&report);
-    assert_issue(
-        &issues,
-        &[
-            ("code", "archive_member_size_malformed"),
-            ("member", "tokenzero-v0.1.1/LICENSE"),
-        ],
-    );
-}
-
-#[test]
-fn package_audit_reads_bounded_tar_base256_size() {
-    let dir = tempdir().unwrap();
-    let artifact = dir.path().join("release.tar");
-    let member = "tokenzero-v0.1.1/.env";
+    assert_issue(&issues, &[("code", "archive_member_size_malformed"), ("member", member)]);
+    let sensitive = "tokenzero-v0.1.1/.env";
     let payload = b"license";
-    let mut bytes = test_tar_entry_bytes(member, payload);
-    write_tar_base256(&mut bytes[124..136], payload.len() as u128);
-    write_test_tar_checksum_bytes(&mut bytes[0..512]);
-    bytes.extend_from_slice(&[0u8; 1024]);
-    fs::write(&artifact, bytes).unwrap();
-
-    let report = package_audit(dir.path(), &[artifact]);
-    let issues: Vec<serde_json::Value> = report["issues"].as_array().unwrap().clone();
+    let (report, issues) = write_tar_and_audit(|a| {
+        let mut bytes = test_tar_entry_bytes(sensitive, payload);
+        write_tar_base256(&mut bytes[124..136], payload.len() as u128);
+        write_test_tar_checksum_bytes(&mut bytes[0..512]);
+        bytes.extend_from_slice(&[0u8; 1024]);
+        fs::write(a, bytes).unwrap();
+    });
     assert_audit_rejected(&report);
-    assert_issue(
-        &issues,
-        &[("code", "sensitive_member_name"), ("member", member)],
-    );
+    assert_issue(&issues, &[("code", "sensitive_member_name"), ("member", sensitive)]);
     assert_no_issue(&issues, "archive_member_size_malformed");
-}
-
-#[test]
-fn package_audit_fails_closed_on_negative_tar_base256_size() {
-    let dir = tempdir().unwrap();
-    let artifact = dir.path().join("release.tar");
-    let mut header = test_tar_header("tokenzero-v0.1.1/LICENSE", b'0', 0, None);
-    header[124..136].fill(0xff);
-    write_test_tar_checksum(&mut header);
-    fs::write(&artifact, header).unwrap();
-
-    let report = package_audit(dir.path(), &[artifact]);
-    let issues: Vec<serde_json::Value> = report["issues"].as_array().unwrap().clone();
+    let (report, issues) = write_tar_and_audit(|a| {
+        let mut header = test_tar_header(member, b'0', 0, None);
+        header[124..136].fill(0xff);
+        write_test_tar_checksum(&mut header);
+        fs::write(a, header).unwrap();
+    });
     assert_audit_rejected(&report);
-    assert_issue_detail(
-        &issues,
-        "archive_member_size_malformed",
-        "tokenzero-v0.1.1/LICENSE",
-        "negative base-256",
-    );
-}
-
-#[test]
-fn package_audit_fails_closed_on_oversized_tar_base256_size() {
-    let dir = tempdir().unwrap();
-    let artifact = dir.path().join("release.tar");
-    let mut header = test_tar_header("tokenzero-v0.1.1/LICENSE", b'0', 0, None);
-    header[124..136].fill(0);
-    header[124] = 0x81;
-    write_test_tar_checksum(&mut header);
-    fs::write(&artifact, header).unwrap();
-
-    let report = package_audit(dir.path(), &[artifact]);
-    let issues: Vec<serde_json::Value> = report["issues"].as_array().unwrap().clone();
+    assert_issue_detail(&issues, "archive_member_size_malformed", member, "negative base-256");
+    let (report, issues) = write_tar_and_audit(|a| {
+        let mut header = test_tar_header(member, b'0', 0, None);
+        header[124..136].fill(0);
+        header[124] = 0x81;
+        write_test_tar_checksum(&mut header);
+        fs::write(a, header).unwrap();
+    });
     assert_audit_rejected(&report);
-    assert_issue_detail(
-        &issues,
-        "archive_member_size_malformed",
-        "tokenzero-v0.1.1/LICENSE",
-        "too large",
-    );
-}
-
-#[test]
-fn package_audit_fails_closed_on_invalid_tar_checksum() {
-    let dir = tempdir().unwrap();
-    let artifact = dir.path().join("release.tar");
-    let mut header = test_tar_header("tokenzero-v0.1.1/LICENSE", b'0', 0, None);
-    header[148..156].copy_from_slice(b"000000\0 ");
-    fs::write(&artifact, header).unwrap();
-
-    let report = package_audit(dir.path(), &[artifact]);
-    let issues: Vec<serde_json::Value> = report["issues"].as_array().unwrap().clone();
+    assert_issue_detail(&issues, "archive_member_size_malformed", member, "too large");
+    let (report, issues) = write_tar_and_audit(|a| {
+        let mut header = test_tar_header(member, b'0', 0, None);
+        header[148..156].copy_from_slice(b"000000\0 ");
+        fs::write(a, header).unwrap();
+    });
     assert_audit_rejected(&report);
-    assert_issue_detail(
-        &issues,
-        "archive_member_metadata_malformed",
-        "tokenzero-v0.1.1/LICENSE",
-        "checksum",
-    );
-}
-
-#[test]
-fn package_audit_fails_closed_on_truncated_tar_payload() {
-    let dir = tempdir().unwrap();
-    let artifact = dir.path().join("release.tar");
-    let mut bytes = test_tar_header("tokenzero-v0.1.1/LICENSE", b'0', 16, None).to_vec();
-    bytes.extend_from_slice(b"partial");
-    fs::write(&artifact, bytes).unwrap();
-
-    let report = package_audit(dir.path(), &[artifact]);
-    let issues: Vec<serde_json::Value> = report["issues"].as_array().unwrap().clone();
+    assert_issue_detail(&issues, "archive_member_metadata_malformed", member, "checksum");
+    let (report, issues) = write_tar_and_audit(|a| {
+        let mut bytes = test_tar_header(member, b'0', 16, None).to_vec();
+        bytes.extend_from_slice(b"partial");
+        fs::write(a, bytes).unwrap();
+    });
     assert_audit_rejected(&report);
-    assert_issue(
-        &issues,
-        &[
-            ("code", "archive_member_payload_truncated"),
-            ("member", "tokenzero-v0.1.1/LICENSE"),
-        ],
-    );
+    assert_issue(&issues, &[("code", "archive_member_payload_truncated"), ("member", member)]);
 }
-
 #[test]
-fn package_audit_fails_closed_on_malformed_pax_path() {
-    let hidden_member = "tokenzero-v0.1.1/.tokenzero/config.json";
-    let malformed_pax = format!("999 path={hidden_member}\n");
-    let (report, issues) = run_tar_audit(&[
-        TarTestEntry::new("./PaxHeaders.0/config.json", b'x', malformed_pax.as_bytes()),
-        TarTestEntry::new("config.json", b'0', b""),
+fn package_audit_fails_closed_on_pax_malformed_and_metadata_matrix() {
+    let hidden = "tokenzero-v0.1.1/.tokenzero/config.json";
+    let malformed = format!("999 path={hidden}\n");
+    run_tar_contract(
+        &[TarTestEntry::new("./PaxHeaders.0/config.json", b'x', malformed.as_bytes()), TarTestEntry::new("config.json", b'0', b"")],
+        &ContractCase { label: "malformed pax", expect_codes: &["archive_member_metadata_malformed"], expect_fields: &[("code", "archive_member_metadata_malformed"), ("member", "./PaxHeaders.0/config.json")], },
+    );
+    let dir = tempdir().unwrap();
+    let path_a = dir.path().join("duplicate-path.tar");
+    let link_a = dir.path().join("duplicate-linkpath.tar");
+    let mut dup_path = pax_record("path", hidden);
+    dup_path.extend_from_slice(&pax_record("path", "tokenzero-v0.1.1/config.json"));
+    write_test_tar_entries(&path_a, &[
+        TarTestEntry::new("./PaxHeaders.0/config.json", b'x', &dup_path),
+        TarTestEntry::new("config.json", b'0', b"{}"),
     ]);
+    let mut dup_link = pax_record("linkpath", "../.env");
+    dup_link.extend_from_slice(&pax_record("linkpath", "config.json"));
+    write_test_tar_entries(&link_a, &[
+        TarTestEntry::new("./PaxHeaders.0/config-link", b'x', &dup_link),
+        TarTestEntry::new("config-link", b'2', b"").with_link_target("config.json"),
+    ]);
+    let report = package_audit(dir.path(), &[path_a, link_a]);
+    let issues = report["issues"].as_array().unwrap().clone();
     assert_audit_rejected(&report);
-    assert_issue(
-        &issues,
-        &[
-            ("code", "archive_member_metadata_malformed"),
-            ("member", "./PaxHeaders.0/config.json"),
-        ],
-    );
-}
-
-#[test]
-fn package_audit_fails_closed_on_duplicate_pax_overrides() {
-    let dir = tempdir().unwrap();
-    let path_artifact = dir.path().join("duplicate-path.tar");
-    let linkpath_artifact = dir.path().join("duplicate-linkpath.tar");
-    let hidden_member = "tokenzero-v0.1.1/.tokenzero/config.json";
-    let safe_member = "tokenzero-v0.1.1/config.json";
-    let hidden_link_target = "../.env";
-    let safe_link_target = "config.json";
-
-    let mut duplicate_path = pax_record("path", hidden_member);
-    duplicate_path.extend_from_slice(&pax_record("path", safe_member));
-    write_test_tar_entries(
-        &path_artifact,
-        &[
-            TarTestEntry::new("./PaxHeaders.0/config.json", b'x', &duplicate_path),
-            TarTestEntry::new("config.json", b'0', b"{}"),
-        ],
-    );
-
-    let mut duplicate_linkpath = pax_record("linkpath", hidden_link_target);
-    duplicate_linkpath.extend_from_slice(&pax_record("linkpath", safe_link_target));
-    write_test_tar_entries(
-        &linkpath_artifact,
-        &[
-            TarTestEntry::new("./PaxHeaders.0/config-link", b'x', &duplicate_linkpath),
-            TarTestEntry::new("config-link", b'2', b"").with_link_target(safe_link_target),
-        ],
-    );
-
-    let report = package_audit(dir.path(), &[path_artifact, linkpath_artifact]);
-    let issues: Vec<serde_json::Value> = report["issues"].as_array().unwrap().clone();
-    assert_audit_rejected(&report);
-    for (member, field) in [
-        ("./PaxHeaders.0/config.json", "path"),
-        ("./PaxHeaders.0/config-link", "linkpath"),
-    ] {
+    for (member, field) in [("./PaxHeaders.0/config.json", "path"), ("./PaxHeaders.0/config-link", "linkpath")] {
         assert_issue_detail(&issues, "archive_member_metadata_malformed", member, field);
     }
-}
-
-#[test]
-fn package_audit_fails_closed_on_pax_private_metadata_fields() {
-    let dir = tempdir().unwrap();
-    let artifact = dir.path().join("release.tar");
-    let mut pax_payload = pax_record("uname", "builder");
-    pax_payload.extend_from_slice(&pax_record("comment", "/tmp/example/release"));
-    write_test_tar_entries(
-        &artifact,
-        &[
-            TarTestEntry::new("./PaxHeaders.0/LICENSE", b'x', &pax_payload),
+    let (report, issues) = write_tar_and_audit(|a| {
+        let mut pax = pax_record("uname", "builder");
+        pax.extend_from_slice(&pax_record("comment", "/tmp/example/release"));
+        write_test_tar_entries(a, &[
+            TarTestEntry::new("./PaxHeaders.0/LICENSE", b'x', &pax),
             TarTestEntry::new("tokenzero-v0.1.1/LICENSE", b'0', b"MIT"),
-        ],
-    );
-
-    let report = package_audit(dir.path(), &[artifact]);
-    let issues: Vec<serde_json::Value> = report["issues"].as_array().unwrap().clone();
+        ]);
+    });
     assert_audit_rejected(&report);
-    assert_issue_fields(
-        &issues,
-        "archive_pax_metadata_present",
-        "./PaxHeaders.0/LICENSE",
-        &["uname", "comment"],
-        &report,
-    );
-    assert_issue_no_secret(
-        &issues,
-        "archive_pax_metadata_present",
-        "./PaxHeaders.0/LICENSE",
-        "builder",
-        &report,
-    );
-    assert_issue_no_secret(
-        &issues,
-        "archive_pax_metadata_present",
-        "./PaxHeaders.0/LICENSE",
-        "/tmp/example",
-        &report,
-    );
-}
-
-#[test]
-fn package_audit_fails_closed_on_global_pax_metadata_fields() {
-    let pax_payload = pax_record("SCHILY.xattr.com.apple.quarantine", "local-machine");
+    assert_issue_fields(&issues, "archive_pax_metadata_present", "./PaxHeaders.0/LICENSE", &["uname", "comment"], &report);
+    assert_issue_no_secret(&issues, "archive_pax_metadata_present", "./PaxHeaders.0/LICENSE", "builder", &report);
+    assert_issue_no_secret(&issues, "archive_pax_metadata_present", "./PaxHeaders.0/LICENSE", "/tmp/example", &report);
+    let pax = pax_record("SCHILY.xattr.com.apple.quarantine", "local-machine");
     let (report, issues) = run_tar_audit(&[
-        TarTestEntry::new("./GlobalHead.0", b'g', &pax_payload),
+        TarTestEntry::new("./GlobalHead.0", b'g', &pax),
         TarTestEntry::new("tokenzero-v0.1.1/LICENSE", b'0', b"MIT"),
     ]);
     assert_audit_rejected(&report);
-    assert_issue(
-        &issues,
-        &[
-            ("code", "archive_pax_metadata_present"),
-            ("member", "./GlobalHead.0"),
-        ],
-    );
-    assert!(
-        issues.iter().any(|issue| {
-            issue["code"] == "archive_pax_metadata_present"
-                && issue["fields"]
-                    .as_array()
-                    .unwrap()
-                    .iter()
-                    .any(|f| f == "SCHILY.xattr.*")
-        }),
-        "expected SCHILY.xattr.* field in {issues:#?}"
-    );
+    assert_issue(&issues, &[("code", "archive_pax_metadata_present"), ("member", "./GlobalHead.0")]);
+    assert!(issues.iter().any(|i| i["code"] == "archive_pax_metadata_present"
+        && i["fields"].as_array().unwrap().iter().any(|f| f == "SCHILY.xattr.*")), "{issues:#?}");
 }
-
 #[test]
-fn package_audit_fails_closed_on_benign_global_pax_path_override() {
-    let global_path = "tokenzero-v0.1.1/LICENSE";
-    let (report, issues) = run_tar_audit(&[
-        TarTestEntry::new("./GlobalHead.0", b'g', &pax_record("path", global_path)),
-        TarTestEntry::new("LICENSE", b'0', b"MIT"),
-    ]);
-    assert_audit_rejected(&report);
-    assert_issue_no_secret(
-        &issues,
-        "archive_global_pax_override_present",
-        "./GlobalHead.0",
-        global_path,
-        &report,
-    );
-}
-
-#[test]
-fn package_audit_fails_closed_on_benign_global_pax_linkpath_override() {
-    let member = "tokenzero-v0.1.1/bin/tokenzero-link";
-    let global_link_target = "bin/tokenzero";
-    let (report, issues) = run_tar_audit(&[
-        TarTestEntry::new(
-            "./GlobalHead.0",
-            b'g',
-            &pax_record("linkpath", global_link_target),
-        ),
-        TarTestEntry::new(member, b'2', b"").with_link_target(global_link_target),
-    ]);
-    assert_audit_rejected(&report);
-    assert_issue_no_secret(
-        &issues,
-        "archive_global_pax_override_present",
-        "./GlobalHead.0",
-        global_link_target,
-        &report,
-    );
-}
-
-#[test]
-fn package_audit_applies_global_pax_path_to_nested_archive_payload() {
+fn package_audit_global_pax_override_contracts() {
+    for (key, secret, body) in [
+        ("path", "tokenzero-v0.1.1/LICENSE", ("LICENSE", b'0', b"MIT".as_slice(), None)),
+        ("linkpath", "bin/tokenzero", ("tokenzero-v0.1.1/bin/tokenzero-link", b'2', b"".as_slice(), Some("bin/tokenzero"))),
+    ] {
+        let pax = pax_record(key, secret);
+        let mut entry = TarTestEntry::new(body.0, body.1, body.2);
+        if let Some(link) = body.3 {
+            entry = entry.with_link_target(link);
+        }
+        let (report, issues) = run_tar_audit(&[TarTestEntry::new("./GlobalHead.0", b'g', &pax), entry]);
+        assert_audit_rejected(&report);
+        assert_issue_no_secret(&issues, "archive_global_pax_override_present", "./GlobalHead.0", secret, &report);
+    }
     let dir = tempdir().unwrap();
     let inner = dir.path().join("inner.tar");
     let artifact = dir.path().join("release.tar");
@@ -726,236 +295,102 @@ fn package_audit_applies_global_pax_path_to_nested_archive_payload() {
     let nested_member = "tokenzero-v0.1.1/.tokenzero/config.json";
     write_test_tar(&inner, &[nested_member]);
     let inner_bytes = fs::read(&inner).unwrap();
-    write_test_tar_entries(
-        &artifact,
-        &[
-            TarTestEntry::new("./GlobalHead.0", b'g', &pax_record("path", global_path)),
-            TarTestEntry::new("payload.bin", b'0', &inner_bytes),
-        ],
-    );
-
-    let report = package_audit(dir.path(), &[artifact]);
-    let issues: Vec<serde_json::Value> = report["issues"].as_array().unwrap().clone();
-    assert_audit_rejected(&report);
-    assert!(issues.iter().any(|issue| {
-        issue["code"] == "private_tool_state_member"
-            && issue["path"]
-                .as_str()
-                .is_some_and(|p| p.contains("release.tar!") && p.contains(global_path))
-            && issue["member"] == nested_member
-    }));
-}
-
-#[test]
-fn package_audit_applies_global_pax_path_to_duplicate_detection() {
-    let global_path = "tokenzero-v0.1.1/LICENSE";
-    let (report, issues) = run_tar_audit(&[
-        TarTestEntry::new("./GlobalHead.0", b'g', &pax_record("path", global_path)),
-        TarTestEntry::new("first.txt", b'0', b"first"),
-        TarTestEntry::new("second.txt", b'0', b"second"),
+    let pax = pax_record("path", global_path);
+    write_test_tar_entries(&artifact, &[
+        TarTestEntry::new("./GlobalHead.0", b'g', &pax),
+        TarTestEntry::new("payload.bin", b'0', &inner_bytes),
     ]);
+    let report = package_audit(dir.path(), &[artifact]);
+    let issues = report["issues"].as_array().unwrap().clone();
     assert_audit_rejected(&report);
-    assert_issue(
-        &issues,
+    assert!(issues.iter().any(|i| i["code"] == "private_tool_state_member"
+        && i["path"].as_str().is_some_and(|p| p.contains("release.tar!") && p.contains(global_path))
+        && i["member"] == nested_member));
+    let global_path = "tokenzero-v0.1.1/LICENSE";
+    let pax = pax_record("path", global_path);
+    run_tar_contract(
         &[
-            ("code", "tar_duplicate_member_name"),
-            ("member", global_path),
+            TarTestEntry::new("./GlobalHead.0", b'g', &pax),
+            TarTestEntry::new("first.txt", b'0', b"first"),
+            TarTestEntry::new("second.txt", b'0', b"second"),
         ],
+        &ContractCase { label: "global path duplicate", expect_codes: &["tar_duplicate_member_name"], expect_fields: &[("code", "tar_duplicate_member_name"), ("member", global_path)], },
     );
-}
-
-#[test]
-fn package_audit_applies_global_pax_linkpath_to_following_links() {
     let member = "tokenzero-v0.1.1/bin/tokenzero-link";
     let global_link_target = "../.env";
-    let header_link_target = "bin/tokenzero";
-    let (report, issues) = run_tar_audit(&[
-        TarTestEntry::new(
-            "./GlobalHead.0",
-            b'g',
-            &pax_record("linkpath", global_link_target),
-        ),
-        TarTestEntry::new(member, b'2', b"").with_link_target(header_link_target),
-    ]);
-    assert_audit_rejected(&report);
-    assert_issue(
-        &issues,
+    let pax = pax_record("linkpath", global_link_target);
+    run_tar_contract(
         &[
-            ("code", "archive_link_target_escape"),
-            ("member", member),
-            ("link_target", global_link_target),
+            TarTestEntry::new("./GlobalHead.0", b'g', &pax),
+            TarTestEntry::new(member, b'2', b"").with_link_target("bin/tokenzero"),
         ],
+        &ContractCase { label: "global linkpath escape", expect_codes: &["archive_link_target_escape"], expect_fields: &[("code", "archive_link_target_escape"), ("member", member), ("link_target", global_link_target)], },
     );
 }
-
 #[test]
 fn package_audit_fails_closed_on_duplicate_tar_member_names() {
     let dir = tempdir().unwrap();
-    let tar_artifact = dir.path().join("release.tar");
-    let gzip_artifact = dir.path().join("release.tar.gz");
+    let tar_a = dir.path().join("release.tar");
+    let gzip_a = dir.path().join("release.tar.gz");
     let member = "tokenzero-v0.1.1/LICENSE";
-    write_test_tar_entries(
-        &tar_artifact,
-        &[
-            TarTestEntry::new(member, b'0', b"first"),
-            TarTestEntry::new(member, b'0', b"second"),
-        ],
-    );
-    fs::write(
-        &gzip_artifact,
-        gzip_bytes(&fs::read(&tar_artifact).unwrap()),
-    )
-    .unwrap();
-
-    let report = package_audit(dir.path(), &[tar_artifact.clone(), gzip_artifact.clone()]);
-    let issues: Vec<serde_json::Value> = report["issues"].as_array().unwrap().clone();
+    write_test_tar_entries(&tar_a, &[TarTestEntry::new(member, b'0', b"first"), TarTestEntry::new(member, b'0', b"second")]);
+    fs::write(&gzip_a, gzip_bytes(&fs::read(&tar_a).unwrap())).unwrap();
+    let report = package_audit(dir.path(), &[tar_a.clone(), gzip_a.clone()]);
+    let issues = report["issues"].as_array().unwrap().clone();
     assert_audit_rejected(&report);
-    for artifact in [tar_artifact, gzip_artifact] {
-        assert_issue(
-            &issues,
-            &[
-                ("code", "tar_duplicate_member_name"),
-                ("path", &artifact.display().to_string()),
-                ("member", member),
-            ],
-        );
+    for a in [tar_a, gzip_a] {
+        assert_issue(&issues, &[("code", "tar_duplicate_member_name"), ("path", &a.display().to_string()), ("member", member)]);
     }
 }
-
 #[test]
-fn package_audit_rejects_archive_member_path_escape() {
-    let parent_member = "tokenzero-v0.1.1/../.env";
-    let absolute_member = "/tmp/tokenzero/LICENSE";
-    let windows_member = "C:/Users/example/.ssh/id_ed25519";
-    let (report, issues) =
-        run_tar_audit_from_names(&[parent_member, absolute_member, windows_member]);
+fn package_audit_rejects_path_and_link_escape_matrix() {
+    let parent = "tokenzero-v0.1.1/../.env";
+    let absolute = "/tmp/tokenzero/LICENSE";
+    let windows = "C:/Users/example/.ssh/id_ed25519";
+    let (report, issues) = run_tar_audit_from_names(&[parent, absolute, windows]);
     assert_audit_rejected(&report);
-    assert_issue(
-        &issues,
-        &[
-            ("code", "archive_member_path_escape"),
-            ("member", parent_member),
-            ("reason", "parent_directory"),
-        ],
-    );
-    assert_issue(
-        &issues,
-        &[
-            ("code", "archive_member_path_escape"),
-            ("member", absolute_member),
-            ("reason", "absolute_path"),
-        ],
-    );
-    assert_issue(
-        &issues,
-        &[
-            ("code", "archive_member_path_escape"),
-            ("member", windows_member),
-            ("reason", "windows_drive_path"),
-        ],
-    );
-}
-
-#[test]
-fn package_audit_rejects_tar_link_target_escape() {
-    let symlink_member = "tokenzero-v0.1.1/bin/tokenzero";
-    let hardlink_member = "tokenzero-v0.1.1/cache/recovery-cache.json";
+    for (member, reason) in [(parent, "parent_directory"), (absolute, "absolute_path"), (windows, "windows_drive_path")] {
+        assert_issue(&issues, &[("code", "archive_member_path_escape"), ("member", member), ("reason", reason)]);
+    }
+    let symlink = "tokenzero-v0.1.1/bin/tokenzero";
+    let hardlink = "tokenzero-v0.1.1/cache/recovery-cache.json";
     let (report, issues) = run_tar_audit(&[
-        TarTestEntry::new(symlink_member, b'2', b"").with_link_target("../.env"),
-        TarTestEntry::new(hardlink_member, b'1', b"")
-            .with_link_target("/home/example/.tokenzero/recovery-cache.json"),
+        TarTestEntry::new(symlink, b'2', b"").with_link_target("../.env"),
+        TarTestEntry::new(hardlink, b'1', b"").with_link_target("/home/example/.tokenzero/recovery-cache.json"),
     ]);
     assert_audit_rejected(&report);
-    assert_issue(
-        &issues,
-        &[
-            ("code", "archive_link_target_escape"),
-            ("member", symlink_member),
-            ("link_kind", "symlink"),
-            ("reason", "parent_directory"),
-        ],
-    );
-    assert_issue(
-        &issues,
-        &[
-            ("code", "sensitive_link_target"),
-            ("member", symlink_member),
-            ("link_target", "../.env"),
-        ],
-    );
-    assert_issue(
-        &issues,
-        &[
-            ("code", "archive_link_target_escape"),
-            ("member", hardlink_member),
-            ("link_kind", "hardlink"),
-            ("reason", "absolute_path"),
-        ],
-    );
-    assert_issue(
-        &issues,
-        &[
-            ("code", "private_tool_state_link_target"),
-            ("member", hardlink_member),
-            (
-                "link_target",
-                "/home/example/.tokenzero/recovery-cache.json",
-            ),
-        ],
-    );
+    for fields in [
+        &[("code", "archive_link_target_escape"), ("member", symlink), ("link_kind", "symlink"), ("reason", "parent_directory")][..],
+        &[("code", "sensitive_link_target"), ("member", symlink), ("link_target", "../.env")][..],
+        &[("code", "archive_link_target_escape"), ("member", hardlink), ("link_kind", "hardlink"), ("reason", "absolute_path")][..],
+        &[("code", "private_tool_state_link_target"), ("member", hardlink), ("link_target", "/home/example/.tokenzero/recovery-cache.json")][..],
+    ] {
+        assert_issue(&issues, fields);
+    }
 }
-
 #[test]
-fn package_audit_rejects_private_dotdir_directory_leaf_members() {
+fn package_audit_rejects_private_dotdir_members_and_targets() {
     let dir = tempdir().unwrap();
-    let tar_artifact = dir.path().join("release.tar");
-    let zip_artifact = dir.path().join("release.zip");
-    let tar_private_dir = "tokenzero-v0.1.1/.tokenzero";
-    let zip_private_dir = "tokenzero-v0.1.1/.cursor/";
-    write_test_tar_entries(
-        &tar_artifact,
-        &[TarTestEntry::new(tar_private_dir, b'5', b"")],
-    );
-    write_test_zip(&zip_artifact, &[ZipTestEntry::file(zip_private_dir, b"")]);
-
-    let report = package_audit(dir.path(), &[tar_artifact, zip_artifact]);
-    let issues: Vec<serde_json::Value> = report["issues"].as_array().unwrap().clone();
+    let tar_a = dir.path().join("release.tar");
+    let zip_a = dir.path().join("release.zip");
+    let tar_dir = "tokenzero-v0.1.1/.tokenzero";
+    let zip_dir = "tokenzero-v0.1.1/.cursor/";
+    write_test_tar_entries(&tar_a, &[TarTestEntry::new(tar_dir, b'5', b"")]);
+    write_test_zip(&zip_a, &[ZipTestEntry::file(zip_dir, b"")]);
+    let report = package_audit(dir.path(), &[tar_a, zip_a]);
+    let issues = report["issues"].as_array().unwrap().clone();
     assert_audit_rejected(&report);
-    assert_issue(
-        &issues,
-        &[
-            ("code", "private_tool_state_member"),
-            ("member", tar_private_dir),
-        ],
-    );
-    assert_issue(
-        &issues,
-        &[
-            ("code", "private_tool_state_member"),
-            ("member", zip_private_dir),
-        ],
+    for member in [tar_dir, zip_dir] {
+        assert_issue(&issues, &[("code", "private_tool_state_member"), ("member", member)]);
+    }
+    let symlink = "tokenzero-v0.1.1/config-link";
+    run_tar_contract(
+        &[TarTestEntry::new(symlink, b'2', b"").with_link_target(".tokenzero")],
+        &ContractCase { label: "dotdir link", expect_codes: &["private_tool_state_link_target"], expect_fields: &[("code", "private_tool_state_link_target"), ("member", symlink), ("link_target", ".tokenzero")], },
     );
 }
-
 #[test]
-fn package_audit_rejects_private_dotdir_link_target_leaf() {
-    let symlink_member = "tokenzero-v0.1.1/config-link";
-    let (report, issues) = run_tar_audit(&[
-        TarTestEntry::new(symlink_member, b'2', b"").with_link_target(".tokenzero")
-    ]);
-    assert_audit_rejected(&report);
-    assert_issue(
-        &issues,
-        &[
-            ("code", "private_tool_state_link_target"),
-            ("member", symlink_member),
-            ("link_target", ".tokenzero"),
-        ],
-    );
-}
-
-#[test]
-fn package_audit_rejects_pax_global_private_metadata() {
+fn package_audit_rejects_pax_and_gnu_link_and_name_conflicts() {
     let global_path = "tokenzero-v0.1.1/.tokenzero/config.json";
     let global_linkpath = "../.env";
     let mut pax_payload = pax_record("path", global_path);
@@ -965,119 +400,51 @@ fn package_audit_rejects_pax_global_private_metadata() {
         TarTestEntry::new("tokenzero-v0.1.1/config.json", b'0', b"{}"),
     ]);
     assert_audit_rejected(&report);
-    assert_issue(
-        &issues,
-        &[
-            ("code", "private_tool_state_member"),
-            ("member", global_path),
-        ],
-    );
-    assert_issue(
-        &issues,
-        &[
-            ("code", "archive_link_target_escape"),
-            ("member", "./GlobalHead.0"),
-            ("link_target", global_linkpath),
-            ("reason", "parent_directory"),
-        ],
-    );
-}
-
-#[test]
-fn package_audit_rejects_pax_and_gnu_link_targets() {
+    assert_issue(&issues, &[("code", "private_tool_state_member"), ("member", global_path)]);
+    assert_issue(&issues, &[("code", "archive_link_target_escape"), ("member", "./GlobalHead.0"), ("link_target", global_linkpath), ("reason", "parent_directory")]);
     let pax_member = "tokenzero-v0.1.1/config";
     let pax_target = "tokenzero-v0.1.1/.tokenzero/config.json";
-    let pax_payload = pax_record("linkpath", pax_target);
     let gnu_member = "tokenzero-v0.1.1/ssh-key";
     let gnu_target = format!("../{}/id_ed25519", "private".repeat(20));
-    let gnu_target_payload = format!("{gnu_target}\0");
+    let gnu_payload = format!("{gnu_target}\0");
+    let pax = pax_record("linkpath", pax_target);
     let (report, issues) = run_tar_audit(&[
-        TarTestEntry::new("./PaxHeaders.0/config", b'x', &pax_payload),
+        TarTestEntry::new("./PaxHeaders.0/config", b'x', &pax),
         TarTestEntry::new(pax_member, b'2', b""),
-        TarTestEntry::new("././@LongLink", b'K', gnu_target_payload.as_bytes()),
+        TarTestEntry::new("././@LongLink", b'K', gnu_payload.as_bytes()),
         TarTestEntry::new(gnu_member, b'2', b""),
     ]);
     assert_audit_rejected(&report);
-    assert_issue(
-        &issues,
+    assert_issue(&issues, &[("code", "private_tool_state_link_target"), ("member", pax_member), ("link_target", pax_target)]);
+    assert_issue(&issues, &[("code", "archive_link_target_escape"), ("member", gnu_member), ("link_target", gnu_target.as_str()), ("reason", "parent_directory")]);
+    assert_issue(&issues, &[("code", "sensitive_link_target"), ("member", gnu_member), ("link_target", gnu_target.as_str())]);
+    let private = "tokenzero-v0.1.1/.tokenzero/config.json";
+    let pax = pax_record("path", private);
+    run_tar_contract(
         &[
-            ("code", "private_tool_state_link_target"),
-            ("member", pax_member),
-            ("link_target", pax_target),
+            TarTestEntry::new("./PaxHeaders.0/config.json", b'x', &pax),
+            TarTestEntry::new("././@LongLink", b'L', b"tokenzero-v0.1.1/config.json\0"),
+            TarTestEntry::new("config.json", b'0', b""),
         ],
+        &ContractCase { label: "name conflict", expect_codes: &["private_tool_state_member"], expect_fields: &[("code", "private_tool_state_member"), ("member", private)], },
     );
-    assert_issue(
-        &issues,
+    let symlink = "tokenzero-v0.1.1/config-link";
+    let private_target = "tokenzero-v0.1.1/.tokenzero/config.json";
+    let pax = pax_record("linkpath", private_target);
+    run_tar_contract(
         &[
-            ("code", "archive_link_target_escape"),
-            ("member", gnu_member),
-            ("link_target", &gnu_target),
-            ("reason", "parent_directory"),
+            TarTestEntry::new("./PaxHeaders.0/config-link", b'x', &pax),
+            TarTestEntry::new("././@LongLink", b'K', b"tokenzero-v0.1.1/config.json\0"),
+            TarTestEntry::new(symlink, b'2', b"").with_link_target("config.json"),
         ],
-    );
-    assert_issue(
-        &issues,
-        &[
-            ("code", "sensitive_link_target"),
-            ("member", gnu_member),
-            ("link_target", &gnu_target),
-        ],
-    );
-}
-
-#[test]
-fn package_audit_fails_closed_on_conflicting_tar_name_overrides() {
-    let safe_long_member = "tokenzero-v0.1.1/config.json";
-    let private_pax_member = "tokenzero-v0.1.1/.tokenzero/config.json";
-    let pax_payload = pax_record("path", private_pax_member);
-    let long_payload = format!("{safe_long_member}\0");
-    let (report, issues) = run_tar_audit(&[
-        TarTestEntry::new("./PaxHeaders.0/config.json", b'x', &pax_payload),
-        TarTestEntry::new("././@LongLink", b'L', long_payload.as_bytes()),
-        TarTestEntry::new("config.json", b'0', b""),
-    ]);
-    assert_audit_rejected(&report);
-    assert_issue(
-        &issues,
-        &[
-            ("code", "private_tool_state_member"),
-            ("member", private_pax_member),
-        ],
+        &ContractCase { label: "link conflict", expect_codes: &["private_tool_state_link_target"], expect_fields: &[("code", "private_tool_state_link_target"), ("member", symlink), ("link_target", private_target)], },
     );
 }
-
-#[test]
-fn package_audit_fails_closed_on_conflicting_tar_link_overrides() {
-    let symlink_member = "tokenzero-v0.1.1/config-link";
-    let private_pax_target = "tokenzero-v0.1.1/.tokenzero/config.json";
-    let pax_payload = pax_record("linkpath", private_pax_target);
-    let long_payload = "tokenzero-v0.1.1/config.json\0".to_string();
-    let (report, issues) = run_tar_audit(&[
-        TarTestEntry::new("./PaxHeaders.0/config-link", b'x', &pax_payload),
-        TarTestEntry::new("././@LongLink", b'K', long_payload.as_bytes()),
-        TarTestEntry::new(symlink_member, b'2', b"").with_link_target("config.json"),
-    ]);
-    assert_audit_rejected(&report);
-    assert_issue(
-        &issues,
-        &[
-            ("code", "private_tool_state_link_target"),
-            ("member", symlink_member),
-            ("link_target", private_pax_target),
-        ],
-    );
-}
-
 #[test]
 fn package_audit_fails_closed_on_tar_directory_payload() {
     let member = "tokenzero-v0.1.1/docs/";
-    let (report, issues) = run_tar_audit(&[TarTestEntry::new(member, b'5', b"hidden")]);
-    assert_audit_rejected(&report);
-    assert_issue(
-        &issues,
-        &[
-            ("code", "tar_directory_payload_present"),
-            ("member", member),
-        ],
+    run_tar_contract(
+        &[TarTestEntry::new(member, b'5', b"hidden")],
+        &ContractCase { label: "dir payload", expect_codes: &["tar_directory_payload_present"], expect_fields: &[("code", "tar_directory_payload_present"), ("member", member)], },
     );
 }

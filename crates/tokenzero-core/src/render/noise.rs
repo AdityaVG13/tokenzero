@@ -45,33 +45,17 @@ pub(crate) fn should_compact_repo_inventory_shell(
 }
 
 pub(crate) fn compact_repo_inventory_view(command: &str, output: &str) -> String {
-    let mut file_count = 0usize;
-    let mut dir_count = 0usize;
-    let mut sample_files = Vec::new();
-    for line in output.lines() {
-        let trimmed = line.trim();
-        if trimmed.is_empty() || trimmed.starts_with("===") || trimmed.starts_with("---") {
-            continue;
-        }
-        if trimmed.ends_with('/') {
-            dir_count += 1;
-        } else if looks_like_inventory_file_path(trimmed) {
-            file_count += 1;
-            if sample_files.len() < 3 {
-                sample_files.push(trimmed.to_string());
-            }
-        }
-    }
+    let stats = inventory_stats(output, 3, looks_like_inventory_file_path);
     let mut out = String::new();
     out.push_str("repo_inventory\n");
-    out.push_str(&format!("files_seen: {file_count}\n"));
-    if dir_count > 0 {
-        out.push_str(&format!("dirs_seen: {dir_count}\n"));
+    out.push_str(&format!("files_seen: {}\n", stats.files));
+    if stats.dirs > 0 {
+        out.push_str(&format!("dirs_seen: {}\n", stats.dirs));
     }
-    if !sample_files.is_empty() {
+    if !stats.paths.is_empty() {
         out.push_str("sample_paths:\n");
-        for file in sample_files {
-            out.push_str(&format!("- {}\n", compact_inventory_path(&file)));
+        for file in stats.paths {
+            out.push_str(&format!("- {}\n", compact_inventory_path(file)));
         }
     } else if !command.trim().is_empty() {
         out.push_str("sample_paths: none\n");
@@ -361,28 +345,12 @@ pub(crate) fn success_noise_view(command: &str, stdout: &str, stderr: &str) -> O
         return None;
     }
 
-    let mut header_parts: Vec<String> = Vec::new();
-    if compiled > 0 {
-        header_parts.push(format!("{compiled} compiled"));
-    }
-    if fresh > 0 {
-        header_parts.push(format!("{fresh} fresh"));
-    }
-    if downloaded > 0 {
-        header_parts.push(format!("{downloaded} downloaded"));
-    }
-    if tests_ok > 0 {
-        header_parts.push(format!("{tests_ok} tests ok"));
-    }
-    if pytest_passed > 0 {
-        header_parts.push(format!("{pytest_passed} passed"));
-    }
-    if git_progress > 0 {
-        header_parts.push(format!("{git_progress} progress lines"));
-    }
-    if bookkeeping > 0 {
-        header_parts.push(format!("{bookkeeping} bookkeeping"));
-    }
+    let header_parts: Vec<_> = [
+        (compiled, "compiled"), (fresh, "fresh"), (downloaded, "downloaded"),
+        (tests_ok, "tests ok"), (pytest_passed, "passed"),
+        (git_progress, "progress lines"), (bookkeeping, "bookkeeping"),
+    ].into_iter().filter(|(count, _)| *count > 0)
+        .map(|(count, label)| format!("{count} {label}")).collect();
     let tool = match families.first() {
         Some(SuccessFamily::Cargo) => "cargo",
         Some(SuccessFamily::Pytest) => "pytest",

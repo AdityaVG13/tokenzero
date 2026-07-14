@@ -43,7 +43,7 @@ use tokenzero_runtime::{
 
 impl TokenZeroEngine {
     pub fn ingest(&self, text: &str, kind: ContentType, mode: Mode, source: &str) -> ToolResponse {
-        let mut store = RecoveryStore::new(Some(self.config.cache_path.clone()));
+        let mut store = self.recovery_store();
         let mut refs = Vec::new();
         let mut storage_error = None;
         match store.store_payload(text, kind, None, None, None) {

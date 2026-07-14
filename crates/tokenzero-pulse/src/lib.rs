@@ -12,6 +12,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tempfile::NamedTempFile;
 use tokenzero_core::{PULSE_SCHEMA_VERSION, savings_ratio};
 
+const EVENT_SQL_COLUMNS: &str = "schema_version, event, timestamp_unix, tool, mode, raw_tokens, visible_tokens, recovery_tokens, task_lossless, cache_hit, retry_count, failure, exact_ref_count, latency_ms, source_hash, session_id, call_id, ref_ids";
 const PULSE_SOURCE_OF_TRUTH: &str = "jsonl";
 const PULSE_SYNC_SCHEMA_VERSION: &str = "pulse-sync-v1";
 const PULSE_EVENT_LOCK_TIMEOUT: Duration = Duration::from_secs(30);
@@ -33,15 +34,13 @@ pub struct PulseEvent {
     pub exact_ref_count: usize,
     pub latency_ms: u128,
     pub source_hash: Option<String>,
-    /// Stable id of the serving session (e.g. one MCP server session), so
-    /// expand-time recovery can be attributed back to the original serve.
+    /// Serving session id for expand-time attribution.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session_id: Option<String>,
-    /// Id of the individual call within the session (e.g. JSON-RPC id).
+    /// Call id within the session (e.g. JSON-RPC id).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub call_id: Option<String>,
-    /// tz:// refs advertised by a serve, or the ref expanded by an expand
-    /// call — the join key between the two sides of RACC accounting.
+    /// Serve/expand tz:// refs — RACC join key.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub ref_ids: Vec<String>,
 }
@@ -60,7 +59,7 @@ pub struct PulseReport {
     pub exact_ref_count: usize,
     pub visible_savings: f64,
     pub recovery_adjusted_savings: f64,
-    /// Non-empty ledger lines that failed to parse (corruption indicator).
+    /// Corrupt/non-empty unparsable ledger lines.
     #[serde(default)]
     pub skipped_lines: usize,
 }
@@ -136,7 +135,6 @@ impl PulseEvent {
         }
     }
 
-    /// Attach attribution ids to an event (builder style).
     pub fn with_attribution(
         mut self,
         session_id: Option<String>,
@@ -161,16 +159,10 @@ pub fn record_event(path: &Path, event: &PulseEvent) -> std::io::Result<()> {
     }
     let file_existed = path.exists();
     let mut file = OpenOptions::new().append(true).create(true).open(path)?;
-    // Build JSON + newline before writing so every append is one logical record.
-    // The lock serializes writers; sync_data narrows the accepted loss window to
-    // a write/fsync failure instead of leaving completed appends only in cache.
+    // One logical JSONL record per append; no fsync (telemetry, crash-loss ok).
     let mut line = serde_json::to_string(event).map_err(io_other)?;
     line.push('\n');
     file.write_all(line.as_bytes())?;
-    // No fsync: this is telemetry, not state. The lock already serializes
-    // writers and scan_jsonl skips torn lines, so the only loss window is an
-    // OS crash losing the last unflushed events — acceptable for a usage
-    // ledger, and fsync here taxed EVERY tool call ~5-10ms (bead tokenzero-7m4).
     if !file_existed {
         sync_parent(path)?;
     }
@@ -187,14 +179,7 @@ pub fn export_jsonl(path: &Path, output: &Path) -> std::io::Result<PulseSyncStat
     let status = sync_jsonl_to_sqlite_locked(path)?;
     atomic_export_sqlite_jsonl(&status.sqlite_path, output)?;
     let output_scan = scan_jsonl(output, |_| Ok(()))?;
-    let meta = PulseSyncMeta {
-        schema_version: PULSE_SYNC_SCHEMA_VERSION.to_string(),
-        source_of_truth: PULSE_SOURCE_OF_TRUTH.to_string(),
-        ledger_sha256: output_scan.ledger_sha256,
-        event_count: output_scan.event_count,
-        skipped_lines: output_scan.skipped_lines,
-        updated_unix: now_unix(),
-    };
+    let meta = meta_from_scan(&output_scan);
     write_sidecar_meta(&export_meta_path(output), &meta)?;
     Ok(status)
 }
@@ -219,16 +204,10 @@ pub fn doctor_jsonl_sqlite(path: &Path) -> std::io::Result<PulseDoctorReport> {
     let hot_index_used = hot_index_is_used(&conn)?;
     Ok(PulseDoctorReport {
         ok: status.ok && sqlite_integrity == "ok" && marker_match && hot_index_used,
-        source_of_truth: status.source_of_truth,
-        ledger_path: status.ledger_path,
-        sqlite_path: status.sqlite_path,
-        meta_path: status.meta_path,
-        event_count: status.event_count,
-        skipped_lines: status.skipped_lines,
-        ledger_sha256: status.ledger_sha256,
-        sqlite_integrity,
-        marker_match,
-        hot_index_used,
+        source_of_truth: status.source_of_truth, ledger_path: status.ledger_path,
+        sqlite_path: status.sqlite_path, meta_path: status.meta_path,
+        event_count: status.event_count, skipped_lines: status.skipped_lines,
+        ledger_sha256: status.ledger_sha256, sqlite_integrity, marker_match, hot_index_used,
     })
 }
 
@@ -260,29 +239,13 @@ fn now_unix() -> u64 {
         .as_secs()
 }
 
-fn sync_jsonl_to_sqlite_locked(path: &Path) -> std::io::Result<PulseSyncStatus> {
-    let sqlite_path = sqlite_path_for_ledger(path);
-    let meta_path = meta_path_for_ledger(path);
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)?;
-    }
-    if let Some(parent) = sqlite_path.parent() {
-        fs::create_dir_all(parent)?;
-    }
-
-    let scan = sync_jsonl_into_sqlite_cache(path, &sqlite_path)?;
-
-    let meta = PulseSyncMeta {
-        schema_version: PULSE_SYNC_SCHEMA_VERSION.to_string(),
-        source_of_truth: PULSE_SOURCE_OF_TRUTH.to_string(),
-        ledger_sha256: scan.ledger_sha256.clone(),
-        event_count: scan.event_count,
-        skipped_lines: scan.skipped_lines,
-        updated_unix: now_unix(),
-    };
-    write_sidecar_meta(&meta_path, &meta)?;
-
-    Ok(PulseSyncStatus {
+fn sync_status_from_scan(
+    path: &Path,
+    sqlite_path: PathBuf,
+    meta_path: PathBuf,
+    scan: JsonlScan,
+) -> PulseSyncStatus {
+    PulseSyncStatus {
         ok: scan.skipped_lines == 0,
         source_of_truth: PULSE_SOURCE_OF_TRUTH.to_string(),
         ledger_path: path.to_path_buf(),
@@ -291,23 +254,36 @@ fn sync_jsonl_to_sqlite_locked(path: &Path) -> std::io::Result<PulseSyncStatus> 
         event_count: scan.event_count,
         skipped_lines: scan.skipped_lines,
         ledger_sha256: scan.ledger_sha256,
-    })
+    }
+}
+
+fn sync_jsonl_to_sqlite_locked(path: &Path) -> std::io::Result<PulseSyncStatus> {
+    let sqlite_path = sqlite_path_for_ledger(path);
+    let meta_path = meta_path_for_ledger(path);
+    for p in [path.parent(), sqlite_path.parent()].into_iter().flatten() {
+        fs::create_dir_all(p)?;
+    }
+
+    let scan = sync_jsonl_into_sqlite_cache(path, &sqlite_path)?;
+
+    let meta = meta_from_scan(&scan);
+    write_sidecar_meta(&meta_path, &meta)?;
+
+    Ok(sync_status_from_scan(path, sqlite_path, meta_path, scan))
 }
 
 fn open_sqlite(path: &Path) -> std::io::Result<Connection> {
     let conn = Connection::open(path).map_err(sqlite_error)?;
-    conn.busy_timeout(Duration::from_secs(5))
-        .map_err(sqlite_error)?;
-    conn.pragma_update(None, "journal_mode", "WAL")
-        .map_err(sqlite_error)?;
-    conn.pragma_update(None, "synchronous", "NORMAL")
-        .map_err(sqlite_error)?;
-    conn.pragma_update(None, "fullfsync", "ON")
-        .map_err(sqlite_error)?;
-    conn.pragma_update(None, "wal_autocheckpoint", 1000)
-        .map_err(sqlite_error)?;
-    conn.pragma_update(None, "foreign_keys", "ON")
-        .map_err(sqlite_error)?;
+    conn.busy_timeout(Duration::from_secs(5)).map_err(sqlite_error)?;
+    for (key, val) in [
+        ("journal_mode", "WAL"),
+        ("synchronous", "NORMAL"),
+        ("fullfsync", "ON"),
+        ("wal_autocheckpoint", "1000"),
+        ("foreign_keys", "ON"),
+    ] {
+        conn.pragma_update(None, key, val).map_err(sqlite_error)?;
+    }
     Ok(conn)
 }
 
@@ -315,7 +291,19 @@ fn sync_jsonl_into_sqlite_cache(
     ledger_path: &Path,
     sqlite_path: &Path,
 ) -> std::io::Result<JsonlScan> {
+    let scan = scan_jsonl(ledger_path, |_| Ok(()))?;
     let mut conn = open_or_rebuild_sqlite(sqlite_path)?;
+    // Marker-equality fast path: skip DELETE+rebuild when meta matches scan.
+    if let Ok(sqlite_meta) = read_sqlite_meta(&conn) {
+        let meta_path = meta_path_for_ledger(ledger_path);
+        if meta_matches_scan(&sqlite_meta, &scan)
+            && read_sidecar_meta(&meta_path)
+                .map(|meta| meta_matches_scan(&meta, &scan))
+                .unwrap_or(false)
+        {
+            return Ok(scan);
+        }
+    }
     match write_sqlite_events_from_jsonl(&mut conn, ledger_path) {
         Ok(scan) => Ok(scan),
         Err(err) if sqlite_cache_can_rebuild(&err) => {
@@ -350,21 +338,24 @@ fn sqlite_cache_can_rebuild(err: &std::io::Error) -> bool {
         return false;
     }
     let message = err.to_string();
-    message.contains("file is not a database")
-        || message.contains("database disk image is malformed")
-        || message.contains("not a database")
-        || message.contains("has no column named")
-        || message.contains("no such column")
-        || message.contains("no such table")
+    [
+        "file is not a database",
+        "database disk image is malformed",
+        "not a database",
+        "has no column named",
+        "no such column",
+        "no such table",
+    ]
+    .iter()
+    .any(|needle| message.contains(needle))
 }
 
 fn remove_sqlite_cache_files(path: &Path) -> std::io::Result<()> {
     for suffix in ["", "-wal", "-shm"] {
-        let target = sqlite_sidecar_path(path, suffix);
-        match fs::remove_file(&target) {
-            Ok(()) => {}
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
-            Err(err) => return Err(err),
+        if let Err(err) = fs::remove_file(sqlite_sidecar_path(path, suffix)) {
+            if err.kind() != std::io::ErrorKind::NotFound {
+                return Err(err);
+            }
         }
     }
     Ok(())
@@ -394,43 +385,20 @@ fn sqlite_sidecar_path(path: &Path, suffix: &str) -> PathBuf {
 
 fn init_sqlite(conn: &Connection) -> std::io::Result<()> {
     conn.execute_batch(
-        "
-        CREATE TABLE IF NOT EXISTS events (
+        "CREATE TABLE IF NOT EXISTS events (
             line_no INTEGER PRIMARY KEY,
-            schema_version TEXT NOT NULL,
-            event TEXT NOT NULL,
-            timestamp_unix INTEGER NOT NULL,
-            tool TEXT NOT NULL,
-            mode TEXT NOT NULL,
-            raw_tokens INTEGER NOT NULL,
-            visible_tokens INTEGER NOT NULL,
-            recovery_tokens INTEGER NOT NULL,
-            task_lossless INTEGER NOT NULL,
-            cache_hit INTEGER NOT NULL,
-            retry_count INTEGER NOT NULL,
-            failure INTEGER NOT NULL,
-            exact_ref_count INTEGER NOT NULL,
-            latency_ms INTEGER NOT NULL,
-            source_hash TEXT,
-            session_id TEXT,
-            call_id TEXT,
-            ref_ids TEXT,
-            record_hash TEXT NOT NULL
+            schema_version TEXT NOT NULL, event TEXT NOT NULL, timestamp_unix INTEGER NOT NULL,
+            tool TEXT NOT NULL, mode TEXT NOT NULL,
+            raw_tokens INTEGER NOT NULL, visible_tokens INTEGER NOT NULL, recovery_tokens INTEGER NOT NULL,
+            task_lossless INTEGER NOT NULL, cache_hit INTEGER NOT NULL, retry_count INTEGER NOT NULL,
+            failure INTEGER NOT NULL, exact_ref_count INTEGER NOT NULL, latency_ms INTEGER NOT NULL,
+            source_hash TEXT, session_id TEXT, call_id TEXT, ref_ids TEXT, record_hash TEXT NOT NULL
         );
-        CREATE TABLE IF NOT EXISTS meta (
-            key TEXT PRIMARY KEY,
-            value TEXT NOT NULL
-        );
-        CREATE INDEX IF NOT EXISTS idx_events_tool_time
-            ON events(tool, timestamp_unix DESC);
-        CREATE INDEX IF NOT EXISTS idx_events_event_time
-            ON events(event, timestamp_unix DESC);
-        ",
+        CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+        CREATE INDEX IF NOT EXISTS idx_events_tool_time ON events(tool, timestamp_unix DESC);
+        CREATE INDEX IF NOT EXISTS idx_events_event_time ON events(event, timestamp_unix DESC);",
     )
     .map_err(sqlite_error)?;
-    // Self-migration for sidecars created before the attribution columns
-    // existed. The events table is rebuilt from JSONL on every sync, so
-    // adding the columns is sufficient; an error means they already exist.
     for ddl in [
         "ALTER TABLE events ADD COLUMN session_id TEXT",
         "ALTER TABLE events ADD COLUMN call_id TEXT",
@@ -455,53 +423,34 @@ fn write_sqlite_events_from_jsonl(
     let tx = conn.transaction().map_err(sqlite_error)?;
     tx.execute("DELETE FROM events", []).map_err(sqlite_error)?;
     let scan = {
-        let mut stmt = tx
-            .prepare(
-                "
-                INSERT INTO events (
-                    line_no, schema_version, event, timestamp_unix, tool, mode,
-                    raw_tokens, visible_tokens, recovery_tokens, task_lossless,
-                    cache_hit, retry_count, failure, exact_ref_count, latency_ms,
-                    source_hash, session_id, call_id, ref_ids, record_hash
-                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20)
-                ",
-            )
-            .map_err(sqlite_error)?;
+        let mut stmt = tx.prepare(
+            "INSERT INTO events (line_no, schema_version, event, timestamp_unix, tool, mode, raw_tokens, visible_tokens, recovery_tokens, task_lossless, cache_hit, retry_count, failure, exact_ref_count, latency_ms, source_hash, session_id, call_id, ref_ids, record_hash) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20)",
+        ).map_err(sqlite_error)?;
         let mut line_no = 0i64;
         scan_jsonl(path, |event| {
             line_no += 1;
             stmt.execute(params![
-                line_no,
-                &event.schema_version,
-                &event.event,
-                event.timestamp_unix as i64,
-                &event.tool,
-                &event.mode,
-                clamp_i64(event.raw_tokens),
-                clamp_i64(event.visible_tokens),
-                clamp_i64(event.recovery_tokens),
-                bool_i64(event.task_lossless),
-                bool_i64(event.cache_hit),
-                clamp_i64(event.retry_count),
-                bool_i64(event.failure),
-                clamp_i64(event.exact_ref_count),
-                clamp_u128_i64(event.latency_ms),
-                event.source_hash.as_deref(),
-                event.session_id.as_deref(),
-                event.call_id.as_deref(),
-                ref_ids_to_column(&event.ref_ids)?,
-                hash_event(event)?,
+                line_no, &event.schema_version, &event.event, event.timestamp_unix as i64,
+                &event.tool, &event.mode, clamp_i64(event.raw_tokens), clamp_i64(event.visible_tokens),
+                clamp_i64(event.recovery_tokens), bool_i64(event.task_lossless), bool_i64(event.cache_hit),
+                clamp_i64(event.retry_count), bool_i64(event.failure), clamp_i64(event.exact_ref_count),
+                clamp_u128_i64(event.latency_ms), event.source_hash.as_deref(), event.session_id.as_deref(),
+                event.call_id.as_deref(), ref_ids_to_column(&event.ref_ids)?, hash_event(event)?,
             ])
             .map_err(sqlite_error)?;
             Ok(())
         })?
     };
-    set_meta(&tx, "schema_version", PULSE_SYNC_SCHEMA_VERSION)?;
-    set_meta(&tx, "source_of_truth", PULSE_SOURCE_OF_TRUTH)?;
-    set_meta(&tx, "ledger_sha256", &scan.ledger_sha256)?;
-    set_meta(&tx, "event_count", &scan.event_count.to_string())?;
-    set_meta(&tx, "skipped_lines", &scan.skipped_lines.to_string())?;
-    set_meta(&tx, "updated_unix", &now_unix().to_string())?;
+    for (k, v) in [
+        ("schema_version", PULSE_SYNC_SCHEMA_VERSION.to_string()),
+        ("source_of_truth", PULSE_SOURCE_OF_TRUTH.to_string()),
+        ("ledger_sha256", scan.ledger_sha256.clone()),
+        ("event_count", scan.event_count.to_string()),
+        ("skipped_lines", scan.skipped_lines.to_string()),
+        ("updated_unix", now_unix().to_string()),
+    ] {
+        set_meta(&tx, k, &v)?;
+    }
     tx.commit().map_err(sqlite_error)?;
     Ok(scan)
 }
@@ -522,12 +471,8 @@ fn read_sqlite_meta(conn: &Connection) -> std::io::Result<PulseSyncMeta> {
         source_of_truth: sqlite_meta_value(conn, "source_of_truth")?,
         ledger_sha256: sqlite_meta_value(conn, "ledger_sha256")?,
         event_count: sqlite_meta_value(conn, "event_count")?.parse().unwrap_or(0),
-        skipped_lines: sqlite_meta_value(conn, "skipped_lines")?
-            .parse()
-            .unwrap_or(0),
-        updated_unix: sqlite_meta_value(conn, "updated_unix")?
-            .parse()
-            .unwrap_or(0),
+        skipped_lines: sqlite_meta_value(conn, "skipped_lines")?.parse().unwrap_or(0),
+        updated_unix: sqlite_meta_value(conn, "updated_unix")?.parse().unwrap_or(0),
     })
 }
 
@@ -545,22 +490,10 @@ fn sqlite_integrity_check(conn: &Connection) -> std::io::Result<String> {
 
 fn hot_index_is_used(conn: &Connection) -> std::io::Result<bool> {
     let mut stmt = conn
-        .prepare(
-            "EXPLAIN QUERY PLAN
-             SELECT line_no FROM events
-             WHERE tool = ?1
-             ORDER BY timestamp_unix DESC
-             LIMIT 10",
-        )
+        .prepare("EXPLAIN QUERY PLAN SELECT line_no FROM events WHERE tool = ?1 ORDER BY timestamp_unix DESC LIMIT 10")
         .map_err(sqlite_error)?;
-    let rows = stmt
-        .query_map(["read"], |row| row.get::<_, String>(3))
-        .map_err(sqlite_error)?;
-    for detail in rows {
-        if detail
-            .map_err(sqlite_error)?
-            .contains("idx_events_tool_time")
-        {
+    for detail in stmt.query_map(["read"], |row| row.get::<_, String>(3)).map_err(sqlite_error)? {
+        if detail.map_err(sqlite_error)?.contains("idx_events_tool_time") {
             return Ok(true);
         }
     }
@@ -582,15 +515,16 @@ struct VerifiedImportSource {
     meta: Option<PulseSyncMeta>,
 }
 
+fn import_err(msg: &str) -> std::io::Error {
+    std::io::Error::new(std::io::ErrorKind::InvalidInput, msg)
+}
+
 fn ensure_import_not_older(
     input: &Path,
     current_ledger: &Path,
 ) -> std::io::Result<VerifiedImportSource> {
     if !fs::metadata(input)?.is_file() {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::InvalidInput,
-            "import source is not a regular file",
-        ));
+        return Err(import_err("import source is not a regular file"));
     }
     let input_source = verify_import_source(input)?;
     let current_scan = scan_jsonl(current_ledger, |_| Ok(()))?;
@@ -598,19 +532,14 @@ fn ensure_import_not_older(
         return Ok(input_source);
     }
 
-    let Some(current_meta) = read_trusted_sidecar_meta(&meta_path_for_ledger(current_ledger))?
-    else {
+    let Some(current_meta) = read_trusted_sidecar_meta(&meta_path_for_ledger(current_ledger))? else {
         if current_scan.event_count == 0 && current_scan.skipped_lines == 0 {
             return Ok(input_source);
         }
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::InvalidInput,
-            "current Pulse ledger has no version marker; refusing to overwrite it",
-        ));
+        return Err(import_err("current Pulse ledger has no version marker; refusing to overwrite it"));
     };
     let Some(input_meta) = &input_source.meta else {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::InvalidInput,
+        return Err(import_err(
             "import snapshot has no version marker; refusing to overwrite the current Pulse ledger",
         ));
     };
@@ -618,16 +547,12 @@ fn ensure_import_not_older(
         if current_scan.skipped_lines > 0 && input_meta.updated_unix > current_meta.updated_unix {
             return Ok(input_source);
         }
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::InvalidInput,
+        return Err(import_err(
             "current Pulse ledger has unsynced changes; run `tokenzero pulse sync` before importing a different snapshot",
         ));
     }
     if input_meta.updated_unix <= current_meta.updated_unix {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::InvalidInput,
-            "import snapshot is not newer than the current Pulse ledger marker",
-        ));
+        return Err(import_err("import snapshot is not newer than the current Pulse ledger marker"));
     }
     Ok(input_source)
 }
@@ -643,10 +568,7 @@ fn verify_import_source(input: &Path) -> std::io::Result<VerifiedImportSource> {
     let meta = read_trusted_sidecar_meta(&export_meta_path(input))?;
     if let Some(meta) = &meta {
         if !meta_matches_scan(meta, &scan) {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                "import snapshot marker does not match source JSONL",
-            ));
+            return Err(import_err("import snapshot marker does not match source JSONL"));
         }
     }
     Ok(VerifiedImportSource { scan, meta })
@@ -662,13 +584,21 @@ fn read_trusted_sidecar_meta(path: &Path) -> std::io::Result<Option<PulseSyncMet
         }
         Ok(_) => Err(std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
-            format!(
-                "Pulse marker has an unexpected schema or source at {}",
-                path.display()
-            ),
+            format!("Pulse marker has an unexpected schema or source at {}", path.display()),
         )),
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(err) => Err(err),
+    }
+}
+
+fn meta_from_scan(scan: &JsonlScan) -> PulseSyncMeta {
+    PulseSyncMeta {
+        schema_version: PULSE_SYNC_SCHEMA_VERSION.to_string(),
+        source_of_truth: PULSE_SOURCE_OF_TRUTH.to_string(),
+        ledger_sha256: scan.ledger_sha256.clone(),
+        event_count: scan.event_count,
+        skipped_lines: scan.skipped_lines,
+        updated_unix: now_unix(),
     }
 }
 
@@ -692,9 +622,7 @@ fn atomic_write(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
 }
 
 fn persist_temp(file: NamedTempFile, path: &Path) -> std::io::Result<()> {
-    file.persist(path)
-        .map(|_| ())
-        .map_err(|err| std::io::Error::new(err.error.kind(), err.error))
+    file.persist(path).map(|_| ()).map_err(|err| std::io::Error::new(err.error.kind(), err.error))
 }
 
 fn create_temp_writer(path: &Path) -> std::io::Result<(NamedTempFile, BufWriter<std::fs::File>)> {
@@ -717,6 +645,20 @@ fn finish_temp_writer(
     Ok(())
 }
 
+fn pulse_event_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<PulseEvent> {
+    Ok(PulseEvent {
+        schema_version: row.get(0)?, event: row.get(1)?,
+        timestamp_unix: i64_u64(row.get(2)?), tool: row.get(3)?, mode: row.get(4)?,
+        raw_tokens: i64_usize(row.get(5)?), visible_tokens: i64_usize(row.get(6)?),
+        recovery_tokens: i64_usize(row.get(7)?), task_lossless: i64_bool(row.get(8)?),
+        cache_hit: i64_bool(row.get(9)?), retry_count: i64_usize(row.get(10)?),
+        failure: i64_bool(row.get(11)?), exact_ref_count: i64_usize(row.get(12)?),
+        latency_ms: i64_u128(row.get(13)?), source_hash: row.get(14)?,
+        session_id: row.get(15)?, call_id: row.get(16)?,
+        ref_ids: ref_ids_from_column(row.get(17)?),
+    })
+}
+
 fn atomic_export_sqlite_jsonl(sqlite_path: &Path, output: &Path) -> std::io::Result<()> {
     if let Some(parent) = output.parent() {
         fs::create_dir_all(parent)?;
@@ -724,42 +666,12 @@ fn atomic_export_sqlite_jsonl(sqlite_path: &Path, output: &Path) -> std::io::Res
     let conn = open_sqlite(sqlite_path)?;
     let mut stmt = conn
         .prepare(
-            "
-            SELECT schema_version, event, timestamp_unix, tool, mode,
-                   raw_tokens, visible_tokens, recovery_tokens, task_lossless,
-                   cache_hit, retry_count, failure, exact_ref_count, latency_ms,
-                   source_hash, session_id, call_id, ref_ids
-            FROM events
-            ORDER BY line_no ASC
-            ",
+            &format!("SELECT {EVENT_SQL_COLUMNS} FROM events ORDER BY line_no ASC"),
         )
         .map_err(sqlite_error)?;
     (|| -> std::io::Result<()> {
         let (file, mut writer) = create_temp_writer(output)?;
-        let rows = stmt
-            .query_map([], |row| {
-                Ok(PulseEvent {
-                    schema_version: row.get(0)?,
-                    event: row.get(1)?,
-                    timestamp_unix: i64_u64(row.get(2)?),
-                    tool: row.get(3)?,
-                    mode: row.get(4)?,
-                    raw_tokens: i64_usize(row.get(5)?),
-                    visible_tokens: i64_usize(row.get(6)?),
-                    recovery_tokens: i64_usize(row.get(7)?),
-                    task_lossless: i64_bool(row.get(8)?),
-                    cache_hit: i64_bool(row.get(9)?),
-                    retry_count: i64_usize(row.get(10)?),
-                    failure: i64_bool(row.get(11)?),
-                    exact_ref_count: i64_usize(row.get(12)?),
-                    latency_ms: i64_u128(row.get(13)?),
-                    source_hash: row.get(14)?,
-                    session_id: row.get(15)?,
-                    call_id: row.get(16)?,
-                    ref_ids: ref_ids_from_column(row.get(17)?),
-                })
-            })
-            .map_err(sqlite_error)?;
+        let rows = stmt.query_map([], pulse_event_from_row).map_err(sqlite_error)?;
         for row in rows {
             let event = row.map_err(sqlite_error)?;
             serde_json::to_writer(&mut writer, &event).map_err(io_other)?;
@@ -847,12 +759,7 @@ fn acquire_pulse_lock(path: &Path) -> std::io::Result<PulseLock> {
     if let Some(parent) = lock_path.parent() {
         fs::create_dir_all(parent)?;
     }
-    let mut file = OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create(true)
-        .truncate(false)
-        .open(&lock_path)?;
+    let mut file = OpenOptions::new().read(true).write(true).create(true).truncate(false).open(&lock_path)?;
     match FileExt::try_lock(&file) {
         Ok(()) => {}
         Err(TryLockError::WouldBlock) => return Err(pulse_lock_held_error(&lock_path)),
@@ -862,18 +769,12 @@ fn acquire_pulse_lock(path: &Path) -> std::io::Result<PulseLock> {
         Err(TryLockError::Error(err)) => return Err(err),
     }
 
-    // SAFETY: The lock file is a stable OS-lock anchor. Do not unlink it on
-    // drop: replacing the anchor would let another process lock the new file
-    // while this process still holds the old one.
+    // Keep the lock-file anchor stable across processes (do not unlink on drop).
     file.set_len(0)?;
     let token = lock_token();
     writeln!(file, "token={token}")?;
     writeln!(file, "pid={}", std::process::id())?;
     writeln!(file, "created_unix={}", now_unix())?;
-    // The advisory file lock, not its diagnostic metadata, is the concurrency
-    // boundary. Flushing this metadata on every acquisition put two durability
-    // barriers on every MCP tool call even though Pulse events are explicitly
-    // crash-loss-tolerant. Leave metadata buffered like the event append.
     Ok(PulseLock { file })
 }
 
@@ -948,10 +849,7 @@ where
         }
         hasher.update(&line);
         match parse_event_line(&line) {
-            Ok(Some(event)) => {
-                on_event(&event)?;
-                event_count += 1;
-            }
+            Ok(Some(event)) => { on_event(&event)?; event_count += 1; }
             Ok(None) => {}
             Err(()) => skipped_lines += 1,
         }
@@ -976,12 +874,8 @@ fn parse_event_line(line: &[u8]) -> Result<Option<PulseEvent>, ()> {
 }
 
 fn trim_ascii(mut value: &[u8]) -> &[u8] {
-    while value.first().is_some_and(u8::is_ascii_whitespace) {
-        value = &value[1..];
-    }
-    while value.last().is_some_and(u8::is_ascii_whitespace) {
-        value = &value[..value.len() - 1];
-    }
+    while value.first().is_some_and(u8::is_ascii_whitespace) { value = &value[1..]; }
+    while value.last().is_some_and(u8::is_ascii_whitespace) { value = &value[..value.len() - 1]; }
     value
 }
 
@@ -1001,12 +895,8 @@ fn aggregate_for_path(path: &Path) -> std::io::Result<PulseReport> {
             task_lossless_tokens = task_lossless_tokens
                 .saturating_add(event.visible_tokens.saturating_add(event.recovery_tokens));
         }
-        if event.failure {
-            failures += 1;
-        }
-        if event.cache_hit {
-            cache_hits += 1;
-        }
+        failures += usize::from(event.failure);
+        cache_hits += usize::from(event.cache_hit);
         exact_ref_count = exact_ref_count.saturating_add(event.exact_ref_count);
         Ok(())
     })?;
@@ -1014,18 +904,10 @@ fn aggregate_for_path(path: &Path) -> std::io::Result<PulseReport> {
         schema_version: PULSE_SCHEMA_VERSION.to_string(),
         status: "ok".to_string(),
         event_count: scan.event_count,
-        raw_tokens,
-        visible_tokens,
-        recovery_tokens,
-        task_lossless_tokens,
-        failures,
-        cache_hits,
-        exact_ref_count,
+        raw_tokens, visible_tokens, recovery_tokens, task_lossless_tokens,
+        failures, cache_hits, exact_ref_count,
         visible_savings: savings_ratio(raw_tokens, visible_tokens),
-        recovery_adjusted_savings: savings_ratio(
-            raw_tokens,
-            visible_tokens.saturating_add(recovery_tokens),
-        ),
+        recovery_adjusted_savings: savings_ratio(raw_tokens, visible_tokens.saturating_add(recovery_tokens)),
         skipped_lines: scan.skipped_lines,
     })
 }
@@ -1042,72 +924,37 @@ fn hex_sha256(bytes: &[u8]) -> String {
 }
 
 fn hex_digest(hasher: Sha256) -> String {
-    hasher
-        .finalize()
+    hex_encode(&hasher.finalize())
+}
+
+fn hex_encode(bytes: impl AsRef<[u8]>) -> String {
+    bytes
+        .as_ref()
         .iter()
         .map(|b| format!("{b:02x}"))
         .collect()
 }
 
-fn sqlite_path_for_ledger(path: &Path) -> PathBuf {
-    path.parent()
-        .unwrap_or_else(|| Path::new("."))
-        .join("events.sqlite")
+fn ledger_sibling(path: &Path, name: &str) -> PathBuf {
+    path.parent().unwrap_or_else(|| Path::new(".")).join(name)
 }
+fn sqlite_path_for_ledger(path: &Path) -> PathBuf { ledger_sibling(path, "events.sqlite") }
+fn meta_path_for_ledger(path: &Path) -> PathBuf { ledger_sibling(path, "events.meta.json") }
+fn export_meta_path(path: &Path) -> PathBuf { path.with_extension("meta.json") }
+fn lock_path_for_ledger(path: &Path) -> PathBuf { ledger_sibling(path, "sync.lock") }
 
-fn meta_path_for_ledger(path: &Path) -> PathBuf {
-    path.parent()
-        .unwrap_or_else(|| Path::new("."))
-        .join("events.meta.json")
-}
-
-fn export_meta_path(path: &Path) -> PathBuf {
-    path.with_extension("meta.json")
-}
-
-fn lock_path_for_ledger(path: &Path) -> PathBuf {
-    path.parent()
-        .unwrap_or_else(|| Path::new("."))
-        .join("sync.lock")
-}
-
-fn clamp_i64(value: usize) -> i64 {
-    value.min(i64::MAX as usize) as i64
-}
-
-fn clamp_u128_i64(value: u128) -> i64 {
-    value.min(i64::MAX as u128) as i64
-}
-
-fn bool_i64(value: bool) -> i64 {
-    if value { 1 } else { 0 }
-}
-
-fn i64_bool(value: i64) -> bool {
-    value != 0
-}
-
-fn i64_usize(value: i64) -> usize {
-    value.max(0) as usize
-}
-
-fn i64_u64(value: i64) -> u64 {
-    value.max(0) as u64
-}
-
-fn i64_u128(value: i64) -> u128 {
-    value.max(0) as u128
-}
+fn clamp_i64(value: usize) -> i64 { value.min(i64::MAX as usize) as i64 }
+fn clamp_u128_i64(value: u128) -> i64 { value.min(i64::MAX as u128) as i64 }
+fn bool_i64(value: bool) -> i64 { i64::from(value) }
+fn i64_bool(value: i64) -> bool { value != 0 }
+fn i64_usize(value: i64) -> usize { value.max(0) as usize }
+fn i64_u64(value: i64) -> u64 { value.max(0) as u64 }
+fn i64_u128(value: i64) -> u128 { value.max(0) as u128 }
 
 fn hash_hint(value: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(value.as_bytes());
-    hasher
-        .finalize()
-        .iter()
-        .take(8)
-        .map(|b| format!("{b:02x}"))
-        .collect()
+    hex_encode(&hasher.finalize()[..8])
 }
 
 fn io_other(err: serde_json::Error) -> std::io::Error {
@@ -1118,14 +965,10 @@ fn sqlite_error(err: rusqlite::Error) -> std::io::Error {
     std::io::Error::new(std::io::ErrorKind::InvalidData, err)
 }
 
-// ---------------------------------------------------------------------------
-// Session Ledger (bfu): per-session, per-repo, per-agent mass × turns accounting
-// ---------------------------------------------------------------------------
-
-/// Stable schema version for the session ledger.
+// Session Ledger (bfu): per-session mass × turns accounting.
 pub const SESSION_LEDGER_SCHEMA_VERSION: &str = "session-ledger-v1";
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct SessionLedgerEntry {
     pub session_id: String,
     pub turns: usize,
@@ -1161,50 +1004,33 @@ impl SessionLedgerReport {
                 .session_id
                 .clone()
                 .unwrap_or_else(|| "unknown".to_string());
-            let entry = sessions.entry(sid.clone()).or_insert(SessionLedgerEntry {
+            let entry = sessions.entry(sid.clone()).or_insert_with(|| SessionLedgerEntry {
                 session_id: sid,
-                turns: 0,
-                raw_tokens: 0,
-                visible_tokens: 0,
-                recovery_tokens: 0,
-                exact_ref_count: 0,
-                failures: 0,
-                cache_hits: 0,
-                tools: BTreeMap::new(),
                 source_hash: event.source_hash.clone(),
+                ..SessionLedgerEntry::default()
             });
             entry.turns += 1;
             entry.raw_tokens += event.raw_tokens;
             entry.visible_tokens += event.visible_tokens;
             entry.recovery_tokens += event.recovery_tokens;
             entry.exact_ref_count += event.exact_ref_count;
-            if event.failure {
-                entry.failures += 1;
-            }
-            if event.cache_hit {
-                entry.cache_hits += 1;
-            }
+            entry.failures += usize::from(event.failure);
+            entry.cache_hits += usize::from(event.cache_hit);
             *entry.tools.entry(event.tool.clone()).or_insert(0) += 1;
             Ok(())
         })?;
         let sessions_vec: Vec<SessionLedgerEntry> = sessions.into_values().collect();
-        let total_turns: usize = sessions_vec.iter().map(|s| s.turns).sum();
-        let total_raw: usize = sessions_vec.iter().map(|s| s.raw_tokens).sum();
-        let total_visible: usize = sessions_vec.iter().map(|s| s.visible_tokens).sum();
-        let total_recovery: usize = sessions_vec.iter().map(|s| s.recovery_tokens).sum();
-        let total_refs: usize = sessions_vec.iter().map(|s| s.exact_ref_count).sum();
-        let total_failures: usize = sessions_vec.iter().map(|s| s.failures).sum();
-        let total_cache_hits: usize = sessions_vec.iter().map(|s| s.cache_hits).sum();
+        let sum = |f: fn(&SessionLedgerEntry) -> usize| sessions_vec.iter().map(f).sum::<usize>();
         Ok(Self {
             schema_version: SESSION_LEDGER_SCHEMA_VERSION.to_string(),
             total_sessions: sessions_vec.len(),
-            total_turns,
-            total_raw_tokens: total_raw,
-            total_visible_tokens: total_visible,
-            total_recovery_tokens: total_recovery,
-            total_exact_refs: total_refs,
-            total_failures,
-            total_cache_hits,
+            total_turns: sum(|s| s.turns),
+            total_raw_tokens: sum(|s| s.raw_tokens),
+            total_visible_tokens: sum(|s| s.visible_tokens),
+            total_recovery_tokens: sum(|s| s.recovery_tokens),
+            total_exact_refs: sum(|s| s.exact_ref_count),
+            total_failures: sum(|s| s.failures),
+            total_cache_hits: sum(|s| s.cache_hits),
             sessions: sessions_vec,
         })
     }
@@ -1229,12 +1055,9 @@ impl SessionLedgerReport {
                 "schema_version": "string — session-ledger-v1",
                 "total_sessions": "usize — number of distinct sessions",
                 "total_turns": "usize — total tool calls across all sessions",
-                "total_raw_tokens": "usize",
-                "total_visible_tokens": "usize",
-                "total_recovery_tokens": "usize",
-                "total_exact_refs": "usize",
-                "total_failures": "usize",
-                "total_cache_hits": "usize",
+                "total_raw_tokens": "usize", "total_visible_tokens": "usize",
+                "total_recovery_tokens": "usize", "total_exact_refs": "usize",
+                "total_failures": "usize", "total_cache_hits": "usize",
                 "sessions": "Vec<SessionLedgerEntry>"
             },
             "cli": {
@@ -1281,6 +1104,7 @@ impl SessionLedgerReport {
         }
         out
     }
+
 }
 
 #[cfg(test)]

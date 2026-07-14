@@ -1,10 +1,8 @@
 //! Canonical shared content-addressed storage (CAS) for ZeroRef v1 blobs.
 //!
-//! Immutable objects are stored under `<root>/blobs/sha256/<first-two-hex>/<full-hash>`.
-//! This adapter implements the shared-CAS tier for full-hash portable refs
-//! (`tz://blob/<sha256>` and its `fz`/`gz` aliases). The legacy private JSON
-//! recovery store in `RecoveryStore` remains available as a separate read tier
-//! for migration.
+//! Immutable objects live at `<root>/blobs/sha256/<first-two-hex>/<full-hash>`.
+//! Shared-CAS tier for full-hash portable refs (`tz://blob/<sha256>` and
+//! `fz`/`gz` aliases). Legacy private JSON recovery remains a separate tier.
 
 use sha2::{Digest, Sha256};
 use std::fs::{self, File, OpenOptions};
@@ -17,19 +15,14 @@ use thiserror::Error;
 /// Error taxonomy for the canonical shared CAS.
 #[derive(Debug, Error)]
 pub enum SharedCasError {
-    /// Requested object is not present in the shared CAS.
     #[error("object not found")]
     NotFound,
-    /// Underlying storage operation failed.
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
-    /// Stored object does not match its full-hash identity.
     #[error("corruption: object does not match expected hash")]
     Corruption,
-    /// Policy denied access (e.g. not a regular file or size limit exceeded).
     #[error("policy violation")]
     Policy,
-    /// Hash string is not a valid 64-character lowercase hex SHA-256.
     #[error("invalid hash: {0}")]
     InvalidHash(String),
 }
@@ -41,40 +34,31 @@ pub struct SharedCas {
 }
 
 impl SharedCas {
-    /// Create a shared CAS anchored at `root`. The effective ZeroStack root
-    /// determines whether the store is project-local (default) or explicitly
-    /// shared.
+    /// Create a shared CAS anchored at `root`.
     pub fn new(root: PathBuf) -> Self {
         Self { root }
     }
 
-    /// Resolve the shared CAS store root from a TokenZero cache path, without
-    /// requiring the `blobs/` directory to already exist. Unified stores place
-    /// the recovery cache at `<store-root>/tokenzero/recovery-cache.json` and
-    /// immutable objects at `<store-root>/blobs/...`. Legacy project-private
-    /// `.tokenzero` caches do not imply shared-CAS access. Returns `None` for
-    /// flat/legacy private caches.
+    /// Resolve store root from a TokenZero cache path without requiring `blobs/`.
+    /// Unified: `<store-root>/tokenzero/recovery-cache.json` → `<store-root>`.
+    /// Legacy flat `.tokenzero` caches return `None`.
     pub fn resolve_cache_root(cache_path: &Path) -> Option<PathBuf> {
         let engine_dir = cache_path.parent()?;
         if engine_dir.file_name()? != "tokenzero" {
             return None;
         }
-        let store_root = engine_dir.parent()?;
-        Some(store_root.to_path_buf())
+        Some(engine_dir.parent()?.to_path_buf())
     }
 
-    /// Derive the CAS attachment root for any explicit recovery cache path.
-    /// Unified caches use `<store-root>`; flat caches use the cache parent.
+    /// Attachment root for any recovery cache path (unified store root or parent).
     pub fn attach_root_for_cache_path(cache_path: &Path) -> PathBuf {
         Self::resolve_cache_root(cache_path)
             .or_else(|| cache_path.parent().map(Path::to_path_buf))
             .unwrap_or_else(|| cache_path.to_path_buf())
     }
 
-    /// Resolve a sibling engine's recovery cache path under the same unified
-    /// ZeroStack root. The current path must follow the layout
-    /// `<root>/<engine>/recovery-cache.json`. Returns `None` for flat or
-    /// non-unified layouts so that isolated stores stay isolated.
+    /// Sibling engine recovery cache under the same unified root.
+    /// Layout `<root>/<engine>/recovery-cache.json`; `None` keeps flat stores isolated.
     pub fn sibling_engine_cache_path(cache_path: &Path, engine: &str) -> Option<PathBuf> {
         const ENGINES: &[&str] = &["tokenzero", "fszero", "graphzero"];
         let engine_dir = cache_path.parent()?;
@@ -82,167 +66,120 @@ impl SharedCas {
         if !ENGINES.contains(&name) {
             return None;
         }
-        let store_root = engine_dir.parent()?;
-        Some(store_root.join(engine).join("recovery-cache.json"))
+        Some(engine_dir.parent()?.join(engine).join("recovery-cache.json"))
     }
 
-    /// Detect the canonical shared CAS for a recovery cache path. Unified
-    /// stores attach before `blobs/` exists; flat caches attach once migration
-    /// has materialized the CAS directory beside the cache.
+    /// Detect shared CAS. Unified attaches before `blobs/`; flat needs `blobs/`.
     pub fn detect_from_cache_path(cache_path: &Path) -> Option<Self> {
-        let unified_root = Self::resolve_cache_root(cache_path);
-        let root = unified_root
-            .clone()
-            .unwrap_or_else(|| Self::attach_root_for_cache_path(cache_path));
-        (unified_root.is_some() || root.join("blobs").is_dir()).then(|| Self::new(root))
-    }
+            let unified_root = Self::resolve_cache_root(cache_path);
+            let is_unified = unified_root.is_some();
+            let root = unified_root.unwrap_or_else(|| Self::attach_root_for_cache_path(cache_path));
+            (is_unified || root.join("blobs").is_dir()).then(|| Self::new(root))
+        }
 
-    /// Return the effective root path.
+    /// Effective root path.
     pub fn root(&self) -> &Path {
         &self.root
     }
 
-    /// Publish immutable bytes to the shared CAS and return the full SHA-256 hash.
-    ///
-    /// The write is performed by creating a unique sibling temp file, flushing
-    /// and syncing it, then renaming it atomically into the canonical path. If
-    /// the destination already exists, its content is verified against the
-    /// expected digest and length; idempotent success is returned, otherwise
-    /// `Corruption`.
-    ///
-    /// Parent directories are created lazily on first publish so that a
-    /// `SharedCas` can be attached to a store root before any `blobs/` exist.
+    /// Publish immutable bytes; return full SHA-256. Atomic temp + rename.
+    /// Existing destinations are byte/hash verified (`Corruption` on mismatch).
+    /// Parents are created lazily so attachment can precede `blobs/`.
     pub fn publish(&self, bytes: &[u8]) -> Result<String, SharedCasError> {
         let full_hash = sha256_hex(bytes);
         let path = self.object_path(&full_hash);
-
         if path.exists() {
-            return self.verify_existing(&path, bytes, &full_hash);
+            return Self::verify_existing(&path, bytes, &full_hash);
         }
-
-        let parent = path
-            .parent()
-            .expect("object path always has a parent directory");
+        let parent = path.parent().expect("object path always has a parent directory");
         fs::create_dir_all(parent)?;
-
         let tmp_path = parent.join(format!(".tmp-{}-{}.blob", full_hash, unique_suffix()));
-        let mut tmp = OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&tmp_path)?;
-        tmp.write_all(bytes)?;
-        tmp.flush()?;
-        tmp.sync_all()?;
-        drop(tmp);
-
+        {
+            let mut tmp = OpenOptions::new().write(true).create_new(true).open(&tmp_path)?;
+            tmp.write_all(bytes)?;
+            tmp.flush()?;
+            tmp.sync_all()?;
+        }
         if let Err(err) = fs::rename(&tmp_path, &path) {
             let _ = fs::remove_file(&tmp_path);
-            if path.exists() {
-                return self.verify_existing(&path, bytes, &full_hash);
-            }
-            return Err(err.into());
+            return if path.exists() {
+                Self::verify_existing(&path, bytes, &full_hash)
+            } else {
+                Err(err.into())
+            };
         }
-
         #[cfg(unix)]
         if let Ok(parent_dir) = File::open(parent) {
             let _ = parent_dir.sync_all();
         }
-
         Ok(full_hash)
     }
 
-    /// Resolve a full-hash blob from the shared CAS.
-    ///
-    /// The path must be a regular file, and the returned bytes are verified
-    /// against the requested hash. Any mismatch is `Corruption`; there is no
-    /// fallback to another store tier.
+    /// Resolve full-hash blob. Regular file only; hash mismatch → `Corruption`.
     pub fn resolve(&self, full_hash: &str) -> Result<Vec<u8>, SharedCasError> {
         self.validate_hash(full_hash)?;
         let path = self.object_path(full_hash);
-
-        let meta = match fs::metadata(&path) {
-            Ok(meta) => meta,
-            Err(err) if err.kind() == io::ErrorKind::NotFound => {
+        let (meta, bytes) = match read_regular_file(&path) {
+            Ok(v) => v,
+            Err(SharedCasError::Io(err)) if err.kind() == io::ErrorKind::NotFound => {
                 return Err(SharedCasError::NotFound);
             }
-            Err(err) => return Err(err.into()),
+            Err(err) => return Err(err),
         };
-
-        if !meta.is_file() {
-            return Err(SharedCasError::Policy);
-        }
-
-        let mut file = File::open(&path)?;
-        let mut bytes = Vec::with_capacity(meta.len() as usize);
-        file.read_to_end(&mut bytes)?;
-
-        if bytes.len() as u64 != meta.len() {
+        if bytes.len() as u64 != meta.len() || sha256_hex(&bytes) != full_hash {
             return Err(SharedCasError::Corruption);
         }
-
-        let actual_hash = sha256_hex(&bytes);
-        if actual_hash != full_hash {
-            return Err(SharedCasError::Corruption);
-        }
-
         Ok(bytes)
     }
 
-    /// Check whether a valid full-hash object exists in the shared CAS without
-    /// reading its contents.
+    /// True when a valid full-hash object exists (no content read).
     pub fn contains(&self, full_hash: &str) -> bool {
         self.validate_hash(full_hash).is_ok() && self.object_path(full_hash).is_file()
     }
 
     fn object_path(&self, full_hash: &str) -> PathBuf {
-        let prefix = &full_hash[..2];
         self.root
             .join("blobs")
             .join("sha256")
-            .join(prefix)
+            .join(&full_hash[..2])
             .join(full_hash)
     }
 
     fn validate_hash(&self, full_hash: &str) -> Result<(), SharedCasError> {
-        if full_hash.len() != 64
-            || full_hash
-                .bytes()
-                .any(|b| !b.is_ascii_digit() && !(b'a'..=b'f').contains(&b))
-        {
-            return Err(SharedCasError::InvalidHash(full_hash.to_string()));
+            (full_hash.len() == 64
+                && full_hash.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)))
+            .then_some(())
+            .ok_or_else(|| SharedCasError::InvalidHash(full_hash.into()))
         }
-        Ok(())
-    }
 
     fn verify_existing(
-        &self,
-        path: &Path,
-        expected_bytes: &[u8],
-        expected_hash: &str,
-    ) -> Result<String, SharedCasError> {
-        let meta = fs::metadata(path)?;
-        if !meta.is_file() {
-            return Err(SharedCasError::Policy);
+            path: &Path,
+            expected_bytes: &[u8],
+            expected_hash: &str,
+        ) -> Result<String, SharedCasError> {
+            let (meta, actual) = read_regular_file(path)?;
+            if meta.len() != expected_bytes.len() as u64
+                || actual != expected_bytes
+                || sha256_hex(&actual) != expected_hash
+            {
+                return Err(SharedCasError::Corruption);
+            }
+            Ok(expected_hash.into())
         }
-        if meta.len() != expected_bytes.len() as u64 {
-            return Err(SharedCasError::Corruption);
-        }
+}
 
-        let mut file = File::open(path)?;
-        let mut actual = Vec::with_capacity(meta.len() as usize);
-        file.read_to_end(&mut actual)?;
-
-        if actual != expected_bytes || sha256_hex(&actual) != expected_hash {
-            return Err(SharedCasError::Corruption);
-        }
-
-        Ok(expected_hash.to_string())
+fn read_regular_file(path: &Path) -> Result<(std::fs::Metadata, Vec<u8>), SharedCasError> {
+    let meta = fs::metadata(path)?;
+    if !meta.is_file() {
+        return Err(SharedCasError::Policy);
     }
+    let mut bytes = Vec::with_capacity(meta.len() as usize);
+    File::open(path)?.read_to_end(&mut bytes)?;
+    Ok((meta, bytes))
 }
 
 fn sha256_hex(bytes: &[u8]) -> String {
-    let digest = Sha256::digest(bytes);
-    digest.iter().map(|b| format!("{b:02x}")).collect()
+    Sha256::digest(bytes).iter().map(|b| format!("{b:02x}")).collect()
 }
 
 fn unique_suffix() -> String {
@@ -252,149 +189,100 @@ fn unique_suffix() -> String {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_nanos();
-    format!("{}-{}", ts, n)
+    format!("{ts}-{n}")
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    #[test]
-    fn round_trip() {
+    fn temp_cas() -> (tempfile::TempDir, SharedCas) {
         let dir = tempfile::tempdir().unwrap();
         let cas = SharedCas::new(dir.path().to_path_buf());
-        let bytes = b"hello canonical shared CAS";
+        (dir, cas)
+    }
 
-        let hash = cas.publish(bytes).unwrap();
-        assert_eq!(hash.len(), 64);
-        assert!(cas.contains(&hash));
+    fn blob_path(root: &Path, hash: &str) -> PathBuf {
+        root.join("blobs").join("sha256").join(&hash[..2]).join(hash)
+    }
 
-        let resolved = cas.resolve(&hash).unwrap();
-        assert_eq!(resolved, bytes);
+    fn unified_cache(dir: &Path) -> PathBuf {
+        let engine = dir.join("tokenzero");
+        fs::create_dir_all(&engine).unwrap();
+        engine.join("recovery-cache.json")
     }
 
     #[test]
-    fn idempotent_publish() {
-        let dir = tempfile::tempdir().unwrap();
-        let cas = SharedCas::new(dir.path().to_path_buf());
-        let bytes = b"idempotent content";
-
-        let hash1 = cas.publish(bytes).unwrap();
-        let hash2 = cas.publish(bytes).unwrap();
-        assert_eq!(hash1, hash2);
-
-        let resolved = cas.resolve(&hash1).unwrap();
-        assert_eq!(resolved, bytes);
+    fn publish_resolve_matrix() {
+        for (label, bytes, again) in [
+            ("round_trip", b"hello canonical shared CAS".as_slice(), false),
+            ("idempotent_publish", b"idempotent content".as_slice(), true),
+        ] {
+            let (_d, cas) = temp_cas();
+            let hash = cas.publish(bytes).unwrap();
+            assert_eq!(hash.len(), 64, "{label}");
+            assert!(cas.contains(&hash), "{label}");
+            if again {
+                assert_eq!(cas.publish(bytes).unwrap(), hash, "{label}");
+            }
+            assert_eq!(cas.resolve(&hash).unwrap(), bytes, "{label}");
+        }
     }
 
     #[test]
-    fn corruption_detected_on_resolve() {
-        let dir = tempfile::tempdir().unwrap();
-        let cas = SharedCas::new(dir.path().to_path_buf());
-        let bytes = b"corrupt me";
-
-        let hash = cas.publish(bytes).unwrap();
-        let path = dir
-            .path()
-            .join("blobs")
-            .join("sha256")
-            .join(&hash[..2])
-            .join(&hash);
-        fs::write(&path, b"tampered bytes").unwrap();
-
-        assert!(matches!(
-            cas.resolve(&hash),
-            Err(SharedCasError::Corruption)
-        ));
+    fn corruption_matrix() {
+        for (label, via_resolve, original, tampered) in [
+            ("resolve", true, b"corrupt me".as_slice(), b"tampered bytes".as_slice()),
+            (
+                "existing_publish",
+                false,
+                b"do not overwrite".as_slice(),
+                b"different bytes".as_slice(),
+            ),
+        ] {
+            let (dir, cas) = temp_cas();
+            let hash = cas.publish(original).unwrap();
+            fs::write(blob_path(dir.path(), &hash), tampered).unwrap();
+            let err = if via_resolve {
+                cas.resolve(&hash).map(|_| ())
+            } else {
+                cas.publish(original).map(|_| ())
+            };
+            assert!(matches!(err, Err(SharedCasError::Corruption)), "{label}: {err:?}");
+        }
     }
 
     #[test]
-    fn corruption_detected_on_existing_publish() {
-        let dir = tempfile::tempdir().unwrap();
-        let cas = SharedCas::new(dir.path().to_path_buf());
-        let bytes = b"do not overwrite";
-
-        let hash = cas.publish(bytes).unwrap();
-        let path = dir
-            .path()
-            .join("blobs")
-            .join("sha256")
-            .join(&hash[..2])
-            .join(&hash);
-        fs::write(&path, b"different bytes").unwrap();
-
-        assert!(matches!(
-            cas.publish(bytes),
-            Err(SharedCasError::Corruption)
-        ));
-    }
-
-    #[test]
-    fn invalid_hash_rejected() {
-        let dir = tempfile::tempdir().unwrap();
-        let cas = SharedCas::new(dir.path().to_path_buf());
-
-        assert!(matches!(
-            cas.resolve("not-a-hash"),
-            Err(SharedCasError::InvalidHash(_))
-        ));
-        assert!(matches!(
-            cas.resolve("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcde"),
-            Err(SharedCasError::InvalidHash(_))
-        ));
-        assert!(matches!(
-            cas.resolve("0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF"),
-            Err(SharedCasError::InvalidHash(_))
-        ));
-    }
-
-    #[test]
-    fn not_found_for_missing_hash() {
-        let dir = tempfile::tempdir().unwrap();
-        let cas = SharedCas::new(dir.path().to_path_buf());
+    fn invalid_hash_and_missing() {
+        let (_d, cas) = temp_cas();
+        for h in [
+            "not-a-hash",
+            "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcde",
+            "0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF",
+        ] {
+            assert!(
+                matches!(cas.resolve(h), Err(SharedCasError::InvalidHash(_))),
+                "{h}"
+            );
+        }
         let missing = "0000000000000000000000000000000000000000000000000000000000000000";
-
-        assert!(matches!(
-            cas.resolve(missing),
-            Err(SharedCasError::NotFound)
-        ));
+        assert!(matches!(cas.resolve(missing), Err(SharedCasError::NotFound)));
     }
 
     #[test]
-    fn resolve_cache_root_unified_path() {
+    fn cache_root_detection_matrix() {
         let dir = tempfile::tempdir().unwrap();
-        let engine_dir = dir.path().join("tokenzero");
-        fs::create_dir_all(&engine_dir).unwrap();
-        let cache = engine_dir.join("recovery-cache.json");
-        // blobs/ does not exist yet — resolver should still work
-        let root = SharedCas::resolve_cache_root(&cache);
-        assert!(root.is_some());
-        assert_eq!(root.unwrap(), dir.path().to_path_buf());
-    }
-
-    #[test]
-    fn resolve_cache_root_legacy_flat_returns_none() {
+        assert_eq!(
+            SharedCas::resolve_cache_root(&unified_cache(dir.path())).as_deref(),
+            Some(dir.path())
+        );
         let dir = tempfile::tempdir().unwrap();
         let legacy = dir.path().join(".tokenzero");
         fs::create_dir_all(&legacy).unwrap();
-        let cache = legacy.join("recovery-cache.json");
-        let root = SharedCas::resolve_cache_root(&cache);
-        assert!(root.is_none());
-    }
-
-    #[test]
-    fn detect_without_blobs_dir_works() {
+        assert!(SharedCas::resolve_cache_root(&legacy.join("recovery-cache.json")).is_none());
         let dir = tempfile::tempdir().unwrap();
-        let engine_dir = dir.path().join("tokenzero");
-        fs::create_dir_all(&engine_dir).unwrap();
-        let cache = engine_dir.join("recovery-cache.json");
-        // No blobs/ directory exists yet
-        let cas = SharedCas::detect_from_cache_path(&cache);
-        assert!(cas.is_some());
-        // Publish should lazily create blobs/
-        let cas = cas.unwrap();
-        let bytes = b"lazy create test";
-        let hash = cas.publish(bytes).unwrap();
+        let cas = SharedCas::detect_from_cache_path(&unified_cache(dir.path())).unwrap();
+        let hash = cas.publish(b"lazy create test").unwrap();
         assert!(cas.contains(&hash));
     }
 }

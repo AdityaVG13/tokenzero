@@ -1,47 +1,9 @@
-use assert_cmd::prelude::*;
 use serde_json::Value;
 use std::path::Path;
-use std::process::Command;
 use tempfile::tempdir;
 
 use super::common::*;
 
-/// Generate the standard source_currency rows for the 11 required adapter tools.
-fn source_currency_rows() -> Vec<Value> {
-    required_adapter_tools()
-        .iter()
-        .enumerate()
-        .map(|(idx, tool)| {
-            serde_json::json!({
-                "tool": tool,
-                "url": format!("https://github.com/example/{tool}"),
-                "source_date": "2026-06-04",
-                "source_commit": format!("{:040x}", idx + 1),
-                "claimed_scope": "claim gate fixture",
-                "issue_pr_themes": ["fixture issue"],
-                "strengths": ["fixture strength"],
-                "gaps": ["fixture gap"],
-                "fresh_for_private_planning": true,
-                "fresh_for_public_claim": true
-            })
-        })
-        .collect()
-}
-
-/// Standard paths for the 6 evidence artifacts.
-fn evidence_artifact_paths(dir: &Path) -> [std::path::PathBuf; 6] {
-    [
-        dir.join("source-currency.json"),
-        dir.join("benchmark.json"),
-        dir.join("adapter-approval.json"),
-        dir.join("recovery.json"),
-        dir.join("task-success.json"),
-        dir.join("os.json"),
-    ]
-}
-
-/// Write the 6 evidence artifact files with mismatched adapter RC ("rc-beta")
-/// while the rest use the given `rc_id`.
 fn write_mismatched_rc_fixtures(dir: &Path, rc_id: &str) {
     let source_rows: Vec<Value> = required_adapter_tools()
         .iter()
@@ -84,19 +46,7 @@ fn write_mismatched_rc_fixtures(dir: &Path, rc_id: &str) {
             }]
         }),
     );
-    // Mismatched RC: adapter uses "rc-beta" while others use `rc_id`
-    write_json_fixture(
-        &paths[2],
-        &serde_json::json!({
-            "schema_version": "tokenzero.adapter_approval_audit.v1",
-            "ok": true, "release_candidate_id": "rc-beta",
-            "execution_allowed": true, "public_claims_approved": true,
-            "blind_install_attempted": false,
-            "required_adapter_count": 11, "reviewed_command_count": 11,
-            "missing_reviewed_command_count": 0, "duplicate_command_count": 0,
-            "unsafe_command_count": 0, "adapters": reviewed_adapter_rows()
-        }),
-    );
+    write_json_fixture(&paths[2], &adapter_approval_audit_fixture("rc-beta", true));
     write_json_fixture(
         &paths[3],
         &serde_json::json!({
@@ -123,96 +73,30 @@ fn write_mismatched_rc_fixtures(dir: &Path, rc_id: &str) {
     );
 }
 
-/// Fix the adapter artifact to use a consistent RC ID.
 fn fix_adapter_rc(dir: &Path, rc_id: &str) {
-    let paths = evidence_artifact_paths(dir);
     write_json_fixture(
-        &paths[2],
-        &serde_json::json!({
-            "schema_version": "tokenzero.adapter_approval_audit.v1",
-            "ok": true, "release_candidate_id": rc_id,
-            "execution_allowed": true, "public_claims_approved": true,
-            "blind_install_attempted": false,
-            "required_adapter_count": 11, "reviewed_command_count": 11,
-            "missing_reviewed_command_count": 0, "duplicate_command_count": 0,
-            "unsafe_command_count": 0, "adapters": reviewed_adapter_rows()
-        }),
+        &evidence_artifact_paths(dir)[2],
+        &adapter_approval_audit_fixture(rc_id, true),
     );
 }
 
-/// Run `claim-audit` with all 6 evidence artifacts + `--release-approval --json`.
-fn run_claim_audit_with_all_artifacts(dir: &Path) -> Value {
-    let paths = evidence_artifact_paths(dir);
-    let output = Command::cargo_bin("tokenzero")
-        .unwrap()
-        .args([
-            "claim-audit",
-            "--release-approval",
-            "--source-artifact",
-            paths[0].to_str().unwrap(),
-            "--benchmark-artifact",
-            paths[1].to_str().unwrap(),
-            "--adapter-approval-artifact",
-            paths[2].to_str().unwrap(),
-            "--recovery-artifact",
-            paths[3].to_str().unwrap(),
-            "--task-success-artifact",
-            paths[4].to_str().unwrap(),
-            "--os-artifact",
-            paths[5].to_str().unwrap(),
-            "--json",
-        ])
-        .output()
-        .unwrap();
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    serde_json::from_slice(&output.stdout).unwrap()
-}
-
-/// Assert the release_candidate gate passes and all claims are approved.
 fn assert_rc_gate_passes(json: &Value) {
     assert_eq!(json["public_claims_approved"], true);
     assert_eq!(json["release_publication_allowed"], true);
-    let rc_gate = find_gate(json, "release_candidate");
-    assert_eq!(rc_gate["pass"], true);
-    assert!(
-        json["claims"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .all(|claim| { claim["approved"] == true && claim["public_safe_to_publish"] == true })
-    );
+    assert_eq!(find_gate(json, "release_candidate")["pass"], true);
+    assert!(json["claims"].as_array().unwrap().iter().all(|claim| {
+        claim["approved"] == true && claim["public_safe_to_publish"] == true
+    }));
 }
 
-/// Assert the release_candidate gate fails with the given reason.
 fn assert_rc_gate_fails(json: &Value, expected_reason: &str) {
     assert_eq!(json["public_claims_approved"], false);
     let rc_gate = find_gate(json, "release_candidate");
     assert_eq!(rc_gate["pass"], false);
     assert_reason(rc_gate, expected_reason);
-    assert!(
-        json["blocked_reasons"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|r| r == expected_reason)
-    );
+    assert_blocked_reason(json, expected_reason);
 }
 
-/// Find an evidence gate by id.
-fn find_gate<'a>(json: &'a Value, gate_id: &str) -> &'a Value {
-    json["evidence_gates"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|gate| gate["id"] == gate_id)
-        .unwrap_or_else(|| panic!("evidence gate not found: {gate_id}"))
-}
-
-/// Write the 6 `results/current/` fixture files.
 fn write_all_results_current_fixtures(dir: &Path, release_candidate_id: &str) {
     let results_dir = dir.join("results").join("current");
     std::fs::create_dir_all(&results_dir).unwrap();
@@ -291,7 +175,6 @@ fn write_all_results_current_fixtures(dir: &Path, release_candidate_id: &str) {
     );
 }
 
-/// Find a row in the evidence_integrity_matrix by requirement_id and evidence path.
 fn find_integrity_row<'a>(integrity: &'a [Value], req_id: &str, evidence: &str) -> &'a Value {
     integrity
         .iter()
@@ -299,7 +182,6 @@ fn find_integrity_row<'a>(integrity: &'a [Value], req_id: &str, evidence: &str) 
         .unwrap_or_else(|| panic!("integrity row not found: {req_id} / {evidence}"))
 }
 
-/// Assert standard fields on an integrity matrix row.
 fn assert_integrity_row_fields(
     row: &Value,
     expected_kind: &str,
@@ -318,8 +200,6 @@ type RcEmissionCommands = (
     [std::path::PathBuf; 7],
 );
 
-/// Build the 9 (name, args, output_json) command definitions for RC emission tests.
-/// Returns (commands, [source, bench, adapter, recovery, task, os, claim] artifact paths).
 fn rc_emission_test_commands(dir: &Path) -> RcEmissionCommands {
     let paths = [
         dir.join("source.json"),
@@ -330,101 +210,41 @@ fn rc_emission_test_commands(dir: &Path) -> RcEmissionCommands {
         dir.join("os.json"),
         dir.join("claim.json"),
     ];
-    let commands = vec![
-        (
-            "source",
-            vec![
-                "source-currency-audit".into(),
-                "--output-json".into(),
-                paths[0].display().to_string(),
-                "--json".into(),
-            ],
-            paths[0].clone(),
-        ),
-        (
-            "benchmark",
-            vec![
-                "bench".into(),
-                "competitors".into(),
-                "--suite".into(),
-                "shell-heavy".into(),
-                "--output-json".into(),
-                paths[1].display().to_string(),
-                "--json".into(),
-            ],
-            paths[1].clone(),
-        ),
-        (
-            "adapter",
-            vec![
-                "adapter-approval-audit".into(),
-                "--output-json".into(),
-                paths[2].display().to_string(),
-                "--json".into(),
-            ],
-            paths[2].clone(),
-        ),
-        (
-            "recovery",
-            vec![
-                "exact-recovery-audit".into(),
-                "--output-json".into(),
-                paths[3].display().to_string(),
-                "--json".into(),
-            ],
-            paths[3].clone(),
-        ),
-        (
-            "task",
-            vec![
-                "one-shot-eval".into(),
-                "--output-json".into(),
-                paths[4].display().to_string(),
-                "--json".into(),
-            ],
-            paths[4].clone(),
-        ),
-        (
-            "os",
-            vec![
-                "os-reach-audit".into(),
-                "--output-json".into(),
-                paths[5].display().to_string(),
-                "--json".into(),
-            ],
-            paths[5].clone(),
-        ),
-        (
-            "os_release",
-            vec![
-                "os-release-artifact".into(),
-                "--output-json".into(),
-                dir.join("os-release.json").display().to_string(),
-                "--json".into(),
-            ],
-            dir.join("os-release.json"),
-        ),
-        (
-            "completion",
-            vec![
-                "completion-audit".into(),
-                "--output-json".into(),
-                dir.join("completion.json").display().to_string(),
-                "--json".into(),
-            ],
-            dir.join("completion.json"),
-        ),
-        (
-            "handoff",
-            vec![
-                "artifact-handoff".into(),
-                "--output-json".into(),
-                dir.join("handoff.json").display().to_string(),
-                "--json".into(),
-            ],
-            dir.join("handoff.json"),
-        ),
+    let command_specs: [(&str, &[&str], usize); 6] = [
+        ("source", &["source-currency-audit"], 0),
+        ("benchmark", &["bench", "competitors", "--suite", "shell-heavy"], 1),
+        ("adapter", &["adapter-approval-audit"], 2),
+        ("recovery", &["exact-recovery-audit"], 3),
+        ("task", &["one-shot-eval"], 4),
+        ("os", &["os-reach-audit"], 5),
     ];
+    let mut commands = Vec::new();
+    for (name, base, idx) in command_specs {
+        let mut args: Vec<String> = base.iter().map(|s| (*s).to_string()).collect();
+        args.extend([
+            "--output-json".to_string(),
+            paths[idx].display().to_string(),
+            "--json".to_string(),
+        ]);
+        commands.push((name, args, paths[idx].clone()));
+    }
+    for (name, sub, file) in [
+        ("os_release", "os-release-artifact", "os-release.json"),
+        ("completion", "completion-audit", "completion.json"),
+        ("handoff", "artifact-handoff", "handoff.json"),
+    ] {
+        let out = dir.join(file);
+        commands.push((
+            name,
+            vec![
+                sub.to_string(),
+                "--output-json".to_string(),
+                out.display().to_string(),
+                "--json".to_string(),
+            ],
+            out,
+        ));
+    }
     (commands, paths)
 }
 
@@ -432,23 +252,19 @@ fn rc_emission_test_commands(dir: &Path) -> RcEmissionCommands {
 fn cli_claim_audit_blocks_public_claims_without_release_approval() {
     let dir = tempdir().unwrap();
     let output_json = dir.path().join("claims.json");
-    let output = Command::cargo_bin("tokenzero")
-        .unwrap()
-        .current_dir(dir.path())
-        .args([
-            "claim-audit",
-            "--output-json",
-            output_json.to_str().unwrap(),
-            "--json",
-        ])
-        .output()
-        .unwrap();
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let json: Value = serde_json::from_slice(&output.stdout).unwrap();
+    let json = parse_json_stdout(&assert_success(
+        tokenzero_cmd()
+            .current_dir(dir.path())
+            .args([
+                "claim-audit",
+                "--output-json",
+                output_json.to_str().unwrap(),
+                "--json",
+            ])
+            .output()
+            .unwrap(),
+        "claim-audit blocked",
+    ));
     assert_eq!(json["schema_version"], "tokenzero.claim_audit.v1");
     assert_eq!(json["public_claims_approved"], false);
     assert_eq!(json["transport_status"], "ok");
@@ -456,12 +272,9 @@ fn cli_claim_audit_blocks_public_claims_without_release_approval() {
     assert_eq!(json["release_publication_allowed"], false);
     assert_eq!(json["gate_passes"]["release_approval"], false);
     assert_eq!(json["gate_passes"]["benchmark_artifact"], false);
-    assert!(
-        json["gate_reasons"]["release_approval"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|reason| reason == "release approval not granted")
+    assert_reason_contains(
+        json["gate_reasons"]["release_approval"].as_array().unwrap(),
+        "release approval not granted",
     );
     assert_eq!(json["release_candidate_ids"], serde_json::json!([]));
     let release_candidate_artifacts = json["release_candidate_artifacts"].as_array().unwrap();
@@ -470,18 +283,10 @@ fn cli_claim_audit_blocks_public_claims_without_release_approval() {
         artifact["release_candidate_id"] == serde_json::Value::Null
             && artifact["artifact_path"] == serde_json::Value::Null
     }));
-    assert!(
-        json["blocked_reasons"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|reason| reason == "release approval not granted")
-    );
-    assert!(
-        json["claims"].as_array().unwrap().iter().all(|claim| {
-            claim["approved"] == false && claim["public_safe_to_publish"] == false
-        })
-    );
+    assert_blocked_reason(&json, "release approval not granted");
+    assert!(json["claims"].as_array().unwrap().iter().all(|claim| {
+        claim["approved"] == false && claim["public_safe_to_publish"] == false
+    }));
     assert!(output_json.exists());
 }
 
@@ -490,24 +295,13 @@ fn cli_claim_audit_uses_results_current_artifacts_without_explicit_paths() {
     let dir = tempdir().unwrap();
     let release_candidate_id = "rc-current-defaults";
     write_all_results_current_fixtures(dir.path(), release_candidate_id);
-
-    let output = Command::cargo_bin("tokenzero")
-        .unwrap()
-        .current_dir(dir.path())
-        .env("TOKENZERO_RELEASE_CANDIDATE_ID", release_candidate_id)
-        .args(["claim-audit", "--json"])
-        .output()
-        .unwrap();
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
+    let json = run_tokenzero_json_in_with_env(
+        &["claim-audit", "--json"],
+        dir.path(),
+        &[("TOKENZERO_RELEASE_CANDIDATE_ID", release_candidate_id)],
     );
-    let json: Value = serde_json::from_slice(&output.stdout).unwrap();
     let source_gate = find_gate(&json, "source_currency");
     let rc_gate = find_gate(&json, "release_candidate");
-
-    // Oracle: source gate passes and artifact path is forward-slash relative
     assert_eq!(source_gate["pass"], true);
     let source_artifact_path = json["gate_artifact_paths"]["source_currency"]
         .as_str()
@@ -517,23 +311,17 @@ fn cli_claim_audit_uses_results_current_artifacts_without_explicit_paths() {
         source_artifact_path,
         "results/current/tokenzero_source_currency.json"
     );
-
-    // Oracle: all 6 artifacts attached under the current RC
     assert_eq!(rc_gate["details"]["attached_artifact_count"], 6);
     assert_eq!(
         rc_gate["details"]["release_candidate_ids"],
         serde_json::json!([release_candidate_id])
     );
-    assert!(
-        rc_gate["details"]["artifacts"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .filter_map(|artifact| artifact["artifact_path"].as_str())
-            .all(|path| !path.contains('\\'))
-    );
-
-    // Oracle: no stale reasons emitted — current artifacts are consumed directly
+    assert!(rc_gate["details"]["artifacts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|artifact| artifact["artifact_path"].as_str())
+        .all(|path| !path.contains('\\')));
     let blocked_reasons = json["blocked_reasons"].as_array().unwrap();
     for stale_reason in [
         "source ledger requires same-release-candidate refresh",
@@ -554,9 +342,9 @@ fn cli_claim_audit_uses_results_current_artifacts_without_explicit_paths() {
 fn cli_claim_audit_evaluates_supplied_evidence_artifacts_fail_closed() {
     let dir = tempdir().unwrap();
     let bad_benchmark = dir.path().join("bad-benchmark.json");
-    std::fs::write(
+    write_json_fixture(
         &bad_benchmark,
-        serde_json::to_vec(&serde_json::json!({
+        &serde_json::json!({
             "schema_version": "tokenzero.bench.v1",
             "ok": true,
             "public_claims_approved": true,
@@ -566,72 +354,45 @@ fn cli_claim_audit_evaluates_supplied_evidence_artifacts_fail_closed() {
                 "runnable_adapter_count": 0
             },
             "rows": []
-        }))
-        .unwrap(),
-    )
-    .unwrap();
-    let output = Command::cargo_bin("tokenzero")
-        .unwrap()
-        .args([
-            "claim-audit",
-            "--release-approval",
-            "--benchmark-artifact",
-            bad_benchmark.to_str().unwrap(),
-            "--json",
-        ])
-        .output()
-        .unwrap();
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
+        }),
     );
-    let json: Value = serde_json::from_slice(&output.stdout).unwrap();
+    let json = parse_json_stdout(&assert_success(
+        tokenzero_cmd()
+            .args([
+                "claim-audit",
+                "--release-approval",
+                "--benchmark-artifact",
+                bad_benchmark.to_str().unwrap(),
+                "--json",
+            ])
+            .output()
+            .unwrap(),
+        "claim fail-closed",
+    ));
     assert_eq!(json["public_claims_approved"], false);
-    let benchmark_gate = json["evidence_gates"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|gate| gate["id"] == "benchmark_artifact")
-        .expect("benchmark gate");
+    let benchmark_gate = find_gate(&json, "benchmark_artifact");
     assert_eq!(benchmark_gate["pass"], false);
-    assert!(
-        benchmark_gate["reasons"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|reason| reason
-                == "benchmark adapter matrix does not account for all required competitors")
-    );
-    assert!(
-        benchmark_gate["reasons"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|reason| reason == "benchmark attempted blind install")
-    );
-    assert!(
-        json["blocked_reasons"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|reason| reason
-                == "benchmark adapter matrix does not account for all required competitors")
+    for reason in [
+        "benchmark adapter matrix does not account for all required competitors",
+        "benchmark attempted blind install",
+    ] {
+        assert_reason(benchmark_gate, reason);
+    }
+    assert_blocked_reason(
+        &json,
+        "benchmark adapter matrix does not account for all required competitors",
     );
 }
 
 #[test]
 fn cli_claim_audit_requires_same_release_candidate_across_supplied_artifacts() {
     let dir = tempdir().unwrap();
-    // Phase 1: mismatched adapter RC ("rc-beta" vs "rc-alpha") → gate fails
     write_mismatched_rc_fixtures(dir.path(), "rc-alpha");
     let json = run_claim_audit_with_all_artifacts(dir.path());
     assert_rc_gate_fails(
         &json,
         "evidence artifacts are not from the same release candidate",
     );
-
-    // Phase 2: fix adapter to "rc-alpha" → gate passes
     fix_adapter_rc(dir.path(), "rc-alpha");
     let json = run_claim_audit_with_all_artifacts(dir.path());
     assert_rc_gate_passes(&json);
@@ -641,117 +402,105 @@ fn cli_claim_audit_requires_same_release_candidate_across_supplied_artifacts() {
 fn cli_claim_evidence_artifacts_emit_release_candidate_id() {
     let dir = tempdir().unwrap();
     let (commands, paths) = rc_emission_test_commands(dir.path());
-
     for (name, args, output_json) in commands {
-        let output = Command::cargo_bin("tokenzero")
-            .unwrap()
-            .env("TOKENZERO_RELEASE_CANDIDATE_ID", "rc-fixture")
-            .args(args)
-            .output()
-            .unwrap();
-        assert!(
-            output.status.success(),
-            "{name}: {}",
-            String::from_utf8_lossy(&output.stderr)
+        let output = assert_success(
+            tokenzero_cmd()
+                .env("TOKENZERO_RELEASE_CANDIDATE_ID", "rc-fixture")
+                .args(&args)
+                .output()
+                .unwrap(),
+            name,
         );
+        let _ = output;
         let artifact: Value = serde_json::from_slice(&std::fs::read(&output_json).unwrap())
             .unwrap_or_else(|err| panic!("{name}: {err}"));
         assert_eq!(artifact["release_candidate_id"], "rc-fixture", "{name}");
     }
-
-    // Oracle: claim-audit itself emits the RC ID
-    let claim_output = Command::cargo_bin("tokenzero")
-        .unwrap()
-        .env("TOKENZERO_RELEASE_CANDIDATE_ID", "rc-fixture")
-        .args([
-            "claim-audit",
-            "--source-artifact",
-            paths[0].to_str().unwrap(),
-            "--benchmark-artifact",
-            paths[1].to_str().unwrap(),
-            "--adapter-approval-artifact",
-            paths[2].to_str().unwrap(),
-            "--recovery-artifact",
-            paths[3].to_str().unwrap(),
-            "--task-success-artifact",
-            paths[4].to_str().unwrap(),
-            "--os-artifact",
-            paths[5].to_str().unwrap(),
-            "--output-json",
-            paths[6].to_str().unwrap(),
-            "--json",
-        ])
-        .output()
-        .unwrap();
-    assert!(
-        claim_output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&claim_output.stderr)
+    let claim_output = assert_success(
+        tokenzero_cmd()
+            .env("TOKENZERO_RELEASE_CANDIDATE_ID", "rc-fixture")
+            .args([
+                "claim-audit",
+                "--source-artifact",
+                paths[0].to_str().unwrap(),
+                "--benchmark-artifact",
+                paths[1].to_str().unwrap(),
+                "--adapter-approval-artifact",
+                paths[2].to_str().unwrap(),
+                "--recovery-artifact",
+                paths[3].to_str().unwrap(),
+                "--task-success-artifact",
+                paths[4].to_str().unwrap(),
+                "--os-artifact",
+                paths[5].to_str().unwrap(),
+                "--output-json",
+                paths[6].to_str().unwrap(),
+                "--json",
+            ])
+            .output()
+            .unwrap(),
+        "claim emit rc",
     );
+    let _ = claim_output;
     let claim_artifact: Value = serde_json::from_slice(&std::fs::read(&paths[6]).unwrap())
         .unwrap_or_else(|err| panic!("claim: {err}"));
-    assert_eq!(
-        claim_artifact["release_candidate_id"], "rc-fixture",
-        "claim"
-    );
+    assert_eq!(claim_artifact["release_candidate_id"], "rc-fixture", "claim");
 }
 
 #[test]
 fn cli_completion_audit_maps_requirements_and_blocks_false_closure() {
     let dir = tempdir().unwrap();
     let output_json = dir.path().join("completion.json");
-    let output = Command::cargo_bin("tokenzero")
-        .unwrap()
-        .current_dir(dir.path())
-        .args([
-            "completion-audit",
-            "--output-json",
-            output_json.to_str().unwrap(),
-            "--json",
-        ])
-        .output()
-        .unwrap();
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let json: Value = serde_json::from_slice(&output.stdout).unwrap();
+    let json = parse_json_stdout(&assert_success(
+        tokenzero_cmd()
+            .current_dir(dir.path())
+            .args([
+                "completion-audit",
+                "--output-json",
+                output_json.to_str().unwrap(),
+                "--json",
+            ])
+            .output()
+            .unwrap(),
+        "completion audit",
+    ));
     assert_eq!(json["schema_version"], "tokenzero.completion_audit.v1");
-    assert_eq!(json["status"], "ok");
-    assert_eq!(json["completion_status"], "blocked");
-    assert_eq!(json["ok"], true);
-    assert_eq!(json["completion_achieved"], false);
-    assert_eq!(json["final_summary_is_evidence"], false);
-    assert_eq!(json["public_claims_approved"], false);
-    assert_eq!(json["release_publication_allowed"], false);
-    assert_eq!(json["all_requirement_rows_passed"], false);
+    for (k, v) in [
+        ("status", serde_json::json!("ok")),
+        ("completion_status", serde_json::json!("blocked")),
+        ("ok", serde_json::json!(true)),
+        ("completion_achieved", serde_json::json!(false)),
+        ("final_summary_is_evidence", serde_json::json!(false)),
+        ("public_claims_approved", serde_json::json!(false)),
+        ("release_publication_allowed", serde_json::json!(false)),
+        ("all_requirement_rows_passed", serde_json::json!(false)),
+    ] {
+        assert_eq!(json[k], v, "{k}");
+    }
     assert_eq!(
         json["blocked_requirement_ids"],
         serde_json::json!(["G-005", "G-008", "FR-007", "FR-010", "NFR-002"])
     );
-    assert_eq!(json["requirement_status_counts"]["passed"], 9);
-    assert_eq!(json["requirement_status_counts"]["passed_private"], 8);
-    assert_eq!(json["requirement_status_counts"]["passed_blocked"], 2);
-    assert_eq!(json["requirement_status_counts"]["blocked_public"], 3);
-
+    for (k, n) in [
+        ("passed", 9),
+        ("passed_private", 8),
+        ("passed_blocked", 2),
+        ("blocked_public", 3),
+    ] {
+        assert_eq!(json["requirement_status_counts"][k], n, "{k}");
+    }
     let goal_rows = json["g_goals"].as_array().unwrap();
     for goal_id in [
         "G-001", "G-002", "G-003", "G-004", "G-005", "G-006", "G-007", "G-008", "G-009", "G-010",
     ] {
-        assert!(
-            goal_rows.iter().any(|row| row["id"] == goal_id),
-            "{goal_id}"
-        );
+        assert!(goal_rows.iter().any(|row| row["id"] == goal_id), "{goal_id}");
     }
-
     let must_fr_rows = json["must_fr"].as_array().unwrap();
     for fr_id in [
         "FR-001", "FR-002", "FR-003", "FR-004", "FR-005", "FR-006", "FR-007", "FR-010",
     ] {
         assert!(must_fr_rows.iter().any(|row| row["id"] == fr_id), "{fr_id}");
     }
-
     let critical_nfr_rows = json["critical_nfr"].as_array().unwrap();
     for nfr_id in ["NFR-001", "NFR-002", "NFR-003", "NFR-004"] {
         assert!(
@@ -759,39 +508,32 @@ fn cli_completion_audit_maps_requirements_and_blocks_false_closure() {
             "{nfr_id}"
         );
     }
-
     assert!(json["g_goals"].as_array().unwrap().iter().all(|row| {
-        row["direct_evidence"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .all(|evidence| {
-                evidence.as_str().unwrap().starts_with("results/current/")
-                    || evidence.as_str().unwrap().starts_with("cargo ")
-                    || evidence.as_str().unwrap().contains("validate_prd_goal.py")
-                    || evidence.as_str().unwrap().starts_with("docs/")
-            })
+        row["direct_evidence"].as_array().unwrap().iter().all(|evidence| {
+            let s = evidence.as_str().unwrap();
+            s.starts_with("results/current/")
+                || s.starts_with("cargo ")
+                || s.contains("validate_prd_goal.py")
+                || s.starts_with("docs/")
+        })
     }));
     assert!(json["residual_gaps"].as_array().unwrap().iter().any(|gap| {
         gap.as_str()
             .unwrap()
             .contains("shell and install artifacts missing")
     }));
-    assert!(
-        json["residual_gaps"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|gap| gap.as_str().unwrap().contains("public claim"))
-    );
+    assert!(json["residual_gaps"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|gap| gap.as_str().unwrap().contains("public claim")));
     assert!(output_json.exists());
 }
 
 #[test]
 fn cli_completion_audit_reports_direct_evidence_integrity() {
     let dir = tempdir().unwrap();
-    let results_dir = dir.path().join("results").join("current");
-    std::fs::create_dir_all(&results_dir).unwrap();
+    let results_dir = results_current_dir(dir.path());
     std::fs::write(
         results_dir.join("tokenzero_claim_audit.json"),
         r#"{"schema_version":"tokenzero.source_currency.v1"}"#,
@@ -819,51 +561,31 @@ fn cli_completion_audit_reports_direct_evidence_integrity() {
         "reconciliation fixture without gate evidence\n",
     )
     .unwrap();
-
-    let output = Command::cargo_bin("tokenzero")
-        .unwrap()
-        .current_dir(dir.path())
-        .env("TOKENZERO_RELEASE_CANDIDATE_ID", "rc-current")
-        .args(["completion-audit", "--json"])
-        .output()
-        .unwrap();
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
+    let json = run_tokenzero_json_in_with_env(
+        &["completion-audit", "--json"],
+        dir.path(),
+        &[("TOKENZERO_RELEASE_CANDIDATE_ID", "rc-current")],
     );
-    let json: Value = serde_json::from_slice(&output.stdout).unwrap();
     let integrity = json["evidence_integrity_matrix"]
         .as_array()
         .expect("completion audit exposes evidence integrity matrix");
-
-    // Oracle: claim audit artifact has wrong schema_version
     let claim_row = find_integrity_row(
         integrity,
         "G-008",
         "results/current/tokenzero_claim_audit.json",
     );
-    assert_integrity_row_fields(
-        claim_row,
-        "artifact",
-        serde_json::json!(true),
-        "invalid",
-        serde_json::json!(false),
-    );
-    assert_eq!(claim_row["schema_version"], "tokenzero.source_currency.v1");
-    assert_eq!(
-        claim_row["expected_schema_version"],
-        "tokenzero.claim_audit.v1"
-    );
-    assert_eq!(claim_row["schema_matches"], false);
-    assert_reason(claim_row, "schema_version mismatch");
+    {
+        assert_integrity_row_fields(claim_row, "artifact", serde_json::json!(true), "invalid", serde_json::json!(false));
+        assert_eq!(claim_row["schema_version"], "tokenzero.source_currency.v1");
+        assert_eq!(claim_row["expected_schema_version"], "tokenzero.claim_audit.v1");
+        assert_eq!(claim_row["schema_matches"], false);
+        assert_reason(claim_row, "schema_version mismatch");
+    };
     assert_eq!(claim_row["requirement_status"], "passed_blocked");
     assert_eq!(
         claim_row["requirement_residual"],
         "public claim approval intentionally false until claim audit evidence gates pass"
     );
-
-    // Oracle: source currency has wrong release_candidate_id
     let source_row = find_integrity_row(
         integrity,
         "G-001",
@@ -886,29 +608,18 @@ fn cli_completion_audit_reports_direct_evidence_integrity() {
     assert_eq!(source_row["expected_release_candidate_id"], "rc-current");
     assert_eq!(source_row["release_candidate_matches"], false);
     assert_reason(source_row, "release_candidate_id mismatch");
-
-    // Oracle: artifact handoff has wrong schema_version
     let handoff_row = find_integrity_row(
         integrity,
         "G-010",
         "results/current/tokenzero_artifact_handoff.json",
     );
-    assert_integrity_row_fields(
-        handoff_row,
-        "artifact",
-        serde_json::json!(true),
-        "invalid",
-        serde_json::json!(false),
-    );
-    assert_eq!(handoff_row["schema_version"], "tokenzero.claim_audit.v1");
-    assert_eq!(
-        handoff_row["expected_schema_version"],
-        "tokenzero.artifact_handoff.v1"
-    );
-    assert_eq!(handoff_row["schema_matches"], false);
-    assert_reason(handoff_row, "schema_version mismatch");
-
-    // Oracle: ADR doc is missing expected content markers
+    {
+        assert_integrity_row_fields(handoff_row, "artifact", serde_json::json!(true), "invalid", serde_json::json!(false));
+        assert_eq!(handoff_row["schema_version"], "tokenzero.claim_audit.v1");
+        assert_eq!(handoff_row["expected_schema_version"], "tokenzero.artifact_handoff.v1");
+        assert_eq!(handoff_row["schema_matches"], false);
+        assert_reason(handoff_row, "schema_version mismatch");
+    };
     let adr_row = find_integrity_row(integrity, "G-010", "docs/advanced-adr-execution-record.md");
     assert_integrity_row_fields(
         adr_row,
@@ -929,8 +640,6 @@ fn cli_completion_audit_reports_direct_evidence_integrity() {
     );
     assert_eq!(adr_row["content_markers_present"], false);
     assert_reason(adr_row, "content marker missing: validate_prd_goal.py");
-
-    // Oracle: reconciliation doc is missing Snapshot marker
     let recon_row = find_integrity_row(
         integrity,
         "G-010",
@@ -949,8 +658,6 @@ fn cli_completion_audit_reports_direct_evidence_integrity() {
     );
     assert_eq!(recon_row["content_markers_present"], false);
     assert_reason(recon_row, "content marker missing: Snapshot");
-
-    // Oracle: command evidence is unverifiable (null fields) but requirement passes
     let cmd_row = find_integrity_row(integrity, "G-006", "cargo test --workspace");
     assert_integrity_row_fields(
         cmd_row,
@@ -964,8 +671,6 @@ fn cli_completion_audit_reports_direct_evidence_integrity() {
     assert_eq!(cmd_row["schema_matches"], serde_json::Value::Null);
     assert_eq!(cmd_row["requirement_status"], "passed");
     assert_eq!(cmd_row["requirement_residual"], serde_json::Value::Null);
-
-    // Oracle: missing artifacts are visible, not silently treated as proof
     assert!(
         integrity
             .iter()
@@ -980,34 +685,31 @@ fn cli_completion_audit_reports_direct_evidence_integrity() {
 fn cli_security_privacy_audit_proves_local_raw_payload_and_root_guards() {
     let dir = tempdir().unwrap();
     let output_json = dir.path().join("security.json");
-    let output = Command::cargo_bin("tokenzero")
-        .unwrap()
-        .args([
-            "security-privacy-audit",
-            "--output-json",
-            output_json.to_str().unwrap(),
-            "--json",
-        ])
-        .output()
-        .unwrap();
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let json: Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert_eq!(
-        json["schema_version"],
-        "tokenzero.security_privacy_audit.v1"
-    );
-    assert_eq!(json["ok"], true);
-    assert_eq!(json["raw_payloads_local_by_default"], true);
-    assert_eq!(json["pulse_records_raw_payload"], false);
-    assert_eq!(json["secret_masking_active"], true);
-    assert_eq!(json["allowed_root_controls_active"], true);
-    assert_eq!(json["unapproved_external_writes"], false);
-    assert_eq!(json["release_publication_allowed"], false);
-
+    let json = parse_json_stdout(&assert_success(
+        tokenzero_cmd()
+            .args([
+                "security-privacy-audit",
+                "--output-json",
+                output_json.to_str().unwrap(),
+                "--json",
+            ])
+            .output()
+            .unwrap(),
+        "security privacy",
+    ));
+    assert_eq!(json["schema_version"], "tokenzero.security_privacy_audit.v1");
+    for (k, v) in [
+        ("ok", serde_json::json!(true)),
+        ("raw_payloads_local_by_default", serde_json::json!(true)),
+        ("pulse_records_raw_payload", serde_json::json!(false)),
+        ("secret_masking_active", serde_json::json!(true)),
+        ("allowed_root_controls_active", serde_json::json!(true)),
+        ("unapproved_external_writes", serde_json::json!(false)),
+        ("release_publication_allowed", serde_json::json!(false)),
+    ] {
+        assert_eq!(json[k], v, "{k}");
+    }
+    let rows = json["rows"].as_array().unwrap();
     for row_id in [
         "cli_visible_secret_masking",
         "exact_ref_local_recovery",
@@ -1016,10 +718,7 @@ fn cli_security_privacy_audit_proves_local_raw_payload_and_root_guards() {
         "no_unapproved_external_writes",
     ] {
         assert!(
-            json["rows"]
-                .as_array()
-                .unwrap()
-                .iter()
+            rows.iter()
                 .any(|row| row["id"] == row_id && row["pass"] == true),
             "{row_id}"
         );

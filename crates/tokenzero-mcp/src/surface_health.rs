@@ -406,97 +406,51 @@ pub fn decide_static(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tokenzero_core::McpToolSurface;
+    use CrashOnlyDecision::*;
 
     #[test]
     fn healthy_blocks_expand_on_codemode() {
         let h = SurfaceHealth::new();
         assert!(h.is_healthy());
         assert!(h.primary_surface_healthy_claim());
-        assert_eq!(
-            h.decide(McpToolSurface::CodeMode, "expand"),
-            CrashOnlyDecision::Blocked
-        );
-        let err = h
-            .allow_tool_call(McpToolSurface::CodeMode, "tz_expand")
-            .unwrap_err();
-        assert!(
-            err.contains("primary surface is healthy"),
-            "blocked message must claim healthy only when healthy: {err}"
-        );
+        assert_eq!(h.decide(McpToolSurface::CodeMode, "expand"), Blocked);
+        let err = h.allow_tool_call(McpToolSurface::CodeMode, "tz_expand").unwrap_err();
+        assert!(err.contains("primary surface is healthy"), "{err}");
         assert_eq!(h.telemetry()["telemetry"]["blocked_count"], 1);
     }
 
     #[test]
-    fn expand_x0_unlocks_recovery_and_false_healthy_claim() {
-        let h = SurfaceHealth::new();
-        h.record_codemode_expand_x0();
-        assert!(!h.is_healthy());
-        assert!(!h.primary_surface_healthy_claim());
-        assert_eq!(
-            h.decide(McpToolSurface::CodeMode, "expand"),
-            CrashOnlyDecision::Unlocked
-        );
-        assert!(
-            h.allow_tool_call(McpToolSurface::CodeMode, "tz_expand")
-                .is_ok()
-        );
-        assert_eq!(h.telemetry()["telemetry"]["unlocked_count"], 1);
-        assert_eq!(h.telemetry()["primary_surface_healthy"], false);
+    fn failures_unlock_only_recovery_and_success_relocks() {
+        for record in [
+            SurfaceHealth::record_codemode_expand_x0,
+            SurfaceHealth::record_substrate_down,
+        ] {
+            let h = SurfaceHealth::new();
+            record(&h);
+            assert!(!h.is_healthy());
+            assert!(!h.primary_surface_healthy_claim());
+            assert_eq!(h.decide(McpToolSurface::CodeMode, "expand"), Unlocked);
+            assert_eq!(h.decide(McpToolSurface::CodeMode, "read"), Unlocked);
+            for tool in ["shell", "edit"] {
+                assert_eq!(h.decide(McpToolSurface::CodeMode, tool), PermanentlyLocked);
+            }
+            assert!(h.allow_tool_call(McpToolSurface::CodeMode, "tz_expand").is_ok());
+            assert_eq!(h.telemetry()["telemetry"]["unlocked_count"], 1);
+            assert_eq!(h.telemetry()["primary_surface_healthy"], false);
+            assert!(h.allow_tool_call(McpToolSurface::CodeMode, "tz_shell").unwrap_err().contains("never unlocked"));
+            h.record_expand_outcome(true, None);
+            assert!(h.is_healthy());
+            assert_eq!(h.decide(McpToolSurface::CodeMode, "expand"), Blocked);
+        }
     }
 
     #[test]
-    fn substrate_down_unlocks_read_not_shell() {
-        let h = SurfaceHealth::new();
-        h.record_substrate_down();
-        assert_eq!(
-            h.decide(McpToolSurface::CodeMode, "read"),
-            CrashOnlyDecision::Unlocked
-        );
-        assert_eq!(
-            h.decide(McpToolSurface::CodeMode, "shell"),
-            CrashOnlyDecision::PermanentlyLocked
-        );
-        assert_eq!(
-            h.decide(McpToolSurface::CodeMode, "edit"),
-            CrashOnlyDecision::PermanentlyLocked
-        );
-        assert!(
-            h.allow_tool_call(McpToolSurface::CodeMode, "tz_shell")
-                .unwrap_err()
-                .contains("never unlocked")
-        );
-    }
-
-    #[test]
-    fn success_re_locks_recovery() {
-        let h = SurfaceHealth::new();
-        h.record_expand_outcome(false, Some("expand_failed"));
-        assert!(h.recovery_unlocked());
-        h.record_expand_outcome(true, None);
-        assert!(h.is_healthy());
-        assert_eq!(
-            h.decide(McpToolSurface::CodeMode, "expand"),
-            CrashOnlyDecision::Blocked
-        );
-    }
-
-    #[test]
-    fn invalid_ref_does_not_unlock() {
-        let h = SurfaceHealth::new();
-        h.record_expand_outcome(false, Some("invalid_ref"));
-        assert!(h.is_healthy());
-    }
-
-    #[test]
-    fn out_of_range_window_does_not_unlock() {
-        let h = SurfaceHealth::new();
-        h.record_expand_outcome(false, Some("window_out_of_range"));
-        assert!(h.is_healthy());
-    }
-
-    #[test]
-    fn read_health_distinguishes_client_errors_from_substrate_failures() {
+    fn client_errors_do_not_unlock() {
+        for code in ["invalid_ref", "window_out_of_range"] {
+            let h = SurfaceHealth::new();
+            h.record_expand_outcome(false, Some(code));
+            assert!(h.is_healthy(), "{code}");
+        }
         let h = SurfaceHealth::new();
         h.record_read_outcome(false, Some("read_failed"));
         assert!(h.is_healthy());
@@ -507,130 +461,56 @@ mod tests {
     }
 
     #[test]
-    fn classic_surface_not_gated() {
+    fn policy_tables_preserve_surface_and_alias_rules() {
+        for (surface, tool, unlocked, expected) in [
+            (McpToolSurface::CodeMode, "tz_execute_code", false, NotGated),
+            (McpToolSurface::CodeMode, "expand", false, Blocked),
+            (McpToolSurface::CodeMode, "expand", true, Unlocked),
+            (McpToolSurface::CodeMode, "shell", true, PermanentlyLocked),
+            (McpToolSurface::Classic, "shell", false, NotGated),
+            (McpToolSurface::Classic, "expand", false, NotGated),
+        ] {
+            assert_eq!(decide_static(surface, tool, unlocked), expected, "{tool}");
+        }
+        for (tool, expected) in [
+            ("tz_expand", ToolClass::Recovery),
+            ("expand", ToolClass::Recovery),
+            ("tz_shell", ToolClass::Locked),
+            ("report-tool-issue", ToolClass::Primary),
+            ("tz_execute_code", ToolClass::Primary),
+        ] {
+            assert_eq!(tool_class(tool), expected, "{tool}");
+        }
         let h = SurfaceHealth::new();
-        assert_eq!(
-            h.decide(McpToolSurface::Classic, "expand"),
-            CrashOnlyDecision::NotGated
-        );
         assert!(h.allow_tool_call(McpToolSurface::Classic, "expand").is_ok());
-    }
-
-    #[test]
-    fn static_policy_matrix() {
-        use CrashOnlyDecision::*;
-        assert_eq!(
-            decide_static(McpToolSurface::CodeMode, "tz_execute_code", false),
-            NotGated
-        );
-        assert_eq!(
-            decide_static(McpToolSurface::CodeMode, "expand", false),
-            Blocked
-        );
-        assert_eq!(
-            decide_static(McpToolSurface::CodeMode, "expand", true),
-            Unlocked
-        );
-        assert_eq!(
-            decide_static(McpToolSurface::CodeMode, "shell", true),
-            PermanentlyLocked
-        );
-        assert_eq!(
-            decide_static(McpToolSurface::Classic, "shell", false),
-            NotGated
-        );
+        assert_eq!(h.decide(McpToolSurface::CodeMode, "tz_report_tool_issue"), NotGated);
+        assert!(h.allow_tool_call(McpToolSurface::CodeMode, "report_tool_issue").is_ok());
     }
 
     #[test]
     fn recovery_ladder_documented() {
-        assert!(RECOVERY_LADDER.contains("zero.token.expand"));
-        assert!(RECOVERY_LADDER.contains("tz_expand"));
-        assert!(RECOVERY_LADDER.contains("not native Read"));
-        assert!(RECOVERY_LADDER.contains("Write/shell"));
+        for phrase in ["zero.token.expand", "tz_expand", "not native Read", "Write/shell"] {
+            assert!(RECOVERY_LADDER.contains(phrase), "{phrase}");
+        }
     }
 
     #[test]
-    fn report_tool_issue_not_gated_on_codemode() {
+    fn list_call_and_gate_modes_share_policy() {
+        assert!(!tool_listed_on_surface(McpToolSurface::Classic, "tz_execute_code", false));
+        assert_eq!(admit_tools_call(McpToolSurface::Classic, "tz_execute_code"), CallAdmission::UnknownTool);
+        for unlocked in [false, true] {
+            assert!(tool_listed_on_surface(McpToolSurface::CodeMode, "tz_report_tool_issue", unlocked));
+            assert!(tool_listed_on_surface(McpToolSurface::CodeMode, "tz_expand", unlocked));
+        }
+        assert!(!tool_listed_on_surface(McpToolSurface::CodeMode, "tz_shell", true));
+        assert_eq!(admit_tools_call(McpToolSurface::CodeMode, "tz_shell"), CallAdmission::Proceed);
+
         let h = SurfaceHealth::new();
-        assert_eq!(
-            h.decide(McpToolSurface::CodeMode, "tz_report_tool_issue"),
-            CrashOnlyDecision::NotGated
-        );
-        assert!(
-            h.allow_tool_call(McpToolSurface::CodeMode, "report_tool_issue")
-                .is_ok()
-        );
-    }
-
-    #[test]
-    fn tool_class_uses_canonical_names() {
-        assert_eq!(tool_class("tz_expand"), ToolClass::Recovery);
-        assert_eq!(tool_class("expand"), ToolClass::Recovery);
-        assert_eq!(tool_class("tz_shell"), ToolClass::Locked);
-        assert_eq!(tool_class("report-tool-issue"), ToolClass::Primary);
-        assert_eq!(tool_class("tz_execute_code"), ToolClass::Primary);
-    }
-
-    #[test]
-    fn list_and_call_share_one_policy() {
-        // Classic never lists CodeMode execute.
-        assert!(!tool_listed_on_surface(
-            McpToolSurface::Classic,
-            "tz_execute_code",
-            false
+        assert_eq!(h.gate_tools_call(McpToolSurface::Classic, "tz_execute_code", GateMode::Strict), Err(GateRefusal::UnknownTool));
+        assert!(h.gate_tools_call(McpToolSurface::Classic, "tz_execute_code", GateMode::HealthOnly).is_ok());
+        assert!(matches!(
+            h.gate_tools_call(McpToolSurface::CodeMode, "tz_expand", GateMode::Strict),
+            Err(GateRefusal::Policy(_))
         ));
-        assert_eq!(
-            admit_tools_call(McpToolSurface::Classic, "tz_execute_code"),
-            CallAdmission::UnknownTool
-        );
-        // CodeMode lists report and recovery stably; health gates calls.
-        assert!(tool_listed_on_surface(
-            McpToolSurface::CodeMode,
-            "tz_report_tool_issue",
-            false
-        ));
-        assert!(tool_listed_on_surface(
-            McpToolSurface::CodeMode,
-            "tz_expand",
-            false
-        ));
-        assert!(tool_listed_on_surface(
-            McpToolSurface::CodeMode,
-            "tz_expand",
-            true
-        ));
-        // Locked tools are never listed but still admit to the health gate.
-        assert!(!tool_listed_on_surface(
-            McpToolSurface::CodeMode,
-            "tz_shell",
-            true
-        ));
-        assert_eq!(
-            admit_tools_call(McpToolSurface::CodeMode, "tz_shell"),
-            CallAdmission::Proceed
-        );
-    }
-
-    #[test]
-    fn gate_tools_call_strict_vs_health_only() {
-        let h = SurfaceHealth::new();
-        assert_eq!(
-            h.gate_tools_call(McpToolSurface::Classic, "tz_execute_code", GateMode::Strict),
-            Err(GateRefusal::UnknownTool)
-        );
-        // HealthOnly skips membership so FastMCP / tests can still dispatch.
-        assert!(
-            h.gate_tools_call(
-                McpToolSurface::Classic,
-                "tz_execute_code",
-                GateMode::HealthOnly
-            )
-            .is_ok()
-        );
-        // CodeMode expand is blocked while healthy under both modes.
-        let blocked = h
-            .gate_tools_call(McpToolSurface::CodeMode, "tz_expand", GateMode::Strict)
-            .unwrap_err();
-        assert!(matches!(blocked, GateRefusal::Policy(_)));
     }
 }

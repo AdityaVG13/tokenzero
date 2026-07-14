@@ -70,19 +70,13 @@ pub struct RunOutputPolicy {
 
 impl Default for RunOutputPolicy {
     fn default() -> Self {
-        let per_stream_capture_bytes = std::env::var("TOKENZERO_SHELL_CAPTURE_BYTES")
-            .ok()
-            .and_then(|value| value.parse::<usize>().ok())
-            .unwrap_or(DEFAULT_SHELL_CAPTURE_BYTES);
-        let spill_threshold_bytes = std::env::var("TOKENZERO_SHELL_SPILL_BYTES")
-            .ok()
-            .and_then(|value| value.parse::<usize>().ok())
-            .unwrap_or(DEFAULT_SHELL_SPILL_BYTES);
-        let spill_dir = std::env::var_os("TOKENZERO_SHELL_SPILL_DIR").map(PathBuf::from);
+        let env_usize = |key, default| {
+            std::env::var(key).ok().and_then(|v| v.parse().ok()).unwrap_or(default)
+        };
         Self {
-            per_stream_capture_bytes,
-            spill_threshold_bytes,
-            spill_dir,
+            per_stream_capture_bytes: env_usize("TOKENZERO_SHELL_CAPTURE_BYTES", DEFAULT_SHELL_CAPTURE_BYTES),
+            spill_threshold_bytes: env_usize("TOKENZERO_SHELL_SPILL_BYTES", DEFAULT_SHELL_SPILL_BYTES),
+            spill_dir: std::env::var_os("TOKENZERO_SHELL_SPILL_DIR").map(PathBuf::from),
         }
         .normalized()
     }
@@ -96,9 +90,7 @@ impl RunOutputPolicy {
         if self.spill_threshold_bytes == 0 {
             self.spill_threshold_bytes = DEFAULT_SHELL_SPILL_BYTES;
         }
-        self.spill_threshold_bytes = self
-            .spill_threshold_bytes
-            .min(self.per_stream_capture_bytes);
+        self.spill_threshold_bytes = self.spill_threshold_bytes.min(self.per_stream_capture_bytes);
         self
     }
 }
@@ -120,9 +112,7 @@ pub struct RunResult {
     pub spill_threshold_bytes: usize,
     pub allocator_pressure_relief: AllocatorPressureRelief,
     pub timed_out: bool,
-    /// The main child exited, but background descendants kept the stdio
-    /// pipes open past the IO grace window and the group was terminated.
-    /// Honest success rather than a timeout; captured output may stop early.
+    /// Main child exited; group terminated after IO grace (not a timeout).
     #[serde(default)]
     pub io_grace_expired: bool,
     pub duration_ms: u128,
@@ -170,17 +160,10 @@ impl RunResultBuilder {
             &process_io.stderr.capture,
         );
         RunResult {
-            ok,
-            command: self.command,
-            argv: self.argv,
-            execution_mode: self.execution_mode,
-            alias_dependency: self.alias_dependency,
-            cwd: self.cwd,
-            exit_code,
-            stdout: process_io.stdout.text,
-            stderr: process_io.stderr.text,
-            stdout_capture: process_io.stdout.capture,
-            stderr_capture: process_io.stderr.capture,
+            ok, command: self.command, argv: self.argv, execution_mode: self.execution_mode,
+            alias_dependency: self.alias_dependency, cwd: self.cwd, exit_code,
+            stdout: process_io.stdout.text, stderr: process_io.stderr.text,
+            stdout_capture: process_io.stdout.capture, stderr_capture: process_io.stderr.capture,
             capture_limit_bytes: self.capture_limit_bytes,
             spill_threshold_bytes: self.spill_threshold_bytes,
             allocator_pressure_relief,
@@ -193,6 +176,27 @@ impl RunResultBuilder {
 
 pub fn current_platform() -> &'static str {
     if cfg!(windows) { "windows" } else { "posix" }
+}
+
+fn runtime_plan(
+    execution_mode: ExecutionMode,
+    argv: Vec<String>,
+    shell: Option<String>,
+    shell_arg: Option<String>,
+    cwd: Option<&Path>,
+    platform: &str,
+    explicit_binary: bool,
+) -> RuntimePlan {
+    RuntimePlan {
+        execution_mode,
+        argv,
+        shell,
+        shell_arg,
+        cwd: cwd.map(|p| p.display().to_string()),
+        platform: platform.to_string(),
+        explicit_binary,
+        alias_dependency: false,
+    }
 }
 
 pub fn plan_command(
@@ -214,82 +218,58 @@ pub fn plan_command_for_platform(
     }
     let joined_command = argv.join(" ");
     let windows = matches!(platform, "windows" | "cmd" | "powershell" | "pwsh");
+    let first = argv.first();
     let powershell_script = windows
-        && !argv
-            .first()
-            .is_some_and(|value| is_windows_shell_host(value))
+        && !first.is_some_and(|value| is_windows_shell_host(value))
         && looks_like_powershell_syntax(&joined_command);
     let needs_shell = explicit_shell
-        || argv.len() == 1 && contains_platform_shell_syntax(&argv[0], platform)
+        || (argv.len() == 1 && contains_platform_shell_syntax(&argv[0], platform))
         || argv_has_shell_operator_tokens(argv)
         || powershell_script
-        || windows
-            && argv
-                .first()
-                .is_some_and(|value| is_windows_shell_builtin(value));
-    if needs_shell {
-        let (shell, shell_arg, shell_platform) = if windows && powershell_script {
-            (
-                "powershell".to_string(),
-                "-Command".to_string(),
-                "powershell",
-            )
-        } else if windows {
-            ("cmd".to_string(), "/C".to_string(), "cmd")
-        } else {
-            ("/bin/sh".to_string(), "-c".to_string(), "posix")
-        };
-        let command_string = shell_command_string_from_argv(argv, shell_platform);
-        let shell_argv = if windows && powershell_script {
-            vec![
-                "powershell".to_string(),
-                "-NoProfile".to_string(),
-                "-Command".to_string(),
-                command_string,
-            ]
-        } else if windows {
-            vec!["cmd".to_string(), "/C".to_string(), command_string]
-        } else {
-            vec!["/bin/sh".to_string(), "-c".to_string(), command_string]
-        };
-        Ok(RuntimePlan {
-            execution_mode: ExecutionMode::Shell,
-            argv: shell_argv,
-            shell: Some(shell),
-            shell_arg: Some(shell_arg),
-            cwd: cwd.map(|p| p.display().to_string()),
-            platform: platform.to_string(),
-            explicit_binary: false,
-            alias_dependency: false,
-        })
-    } else {
-        Ok(RuntimePlan {
-            execution_mode: ExecutionMode::Argv,
-            argv: argv.to_vec(),
-            shell: None,
-            shell_arg: None,
-            cwd: cwd.map(|p| p.display().to_string()),
-            platform: platform.to_string(),
-            explicit_binary: true,
-            alias_dependency: false,
-        })
+        || (windows && first.is_some_and(|value| is_windows_shell_builtin(value)));
+    if !needs_shell {
+        return Ok(runtime_plan(
+            ExecutionMode::Argv,
+            argv.to_vec(),
+            None,
+            None,
+            cwd,
+            platform,
+            true,
+        ));
     }
+    let (shell, shell_arg, shell_platform, prefix): (&str, &str, &str, &[&str]) =
+        if windows && powershell_script {
+            ("powershell", "-Command", "powershell", &["powershell", "-NoProfile", "-Command"])
+        } else if windows {
+            ("cmd", "/C", "cmd", &["cmd", "/C"])
+        } else {
+            ("/bin/sh", "-c", "posix", &["/bin/sh", "-c"])
+        };
+    let command_string = shell_command_string_from_argv(argv, shell_platform);
+    let mut shell_argv = prefix.iter().map(|s| (*s).to_string()).collect::<Vec<_>>();
+    shell_argv.push(command_string);
+    Ok(runtime_plan(
+        ExecutionMode::Shell,
+        shell_argv,
+        Some(shell.to_string()),
+        Some(shell_arg.to_string()),
+        cwd,
+        platform,
+        false,
+    ))
 }
 
 fn shell_command_string_from_argv(argv: &[String], shell_platform: &str) -> String {
     if argv.len() == 1 {
         return argv[0].clone();
     }
-
     argv.iter()
         .map(|arg| {
             if is_shell_operator_token(arg) {
                 arg.clone()
             } else {
-                shell_display_command_from_argv_for_platform(
-                    std::slice::from_ref(arg),
-                    shell_platform,
-                )
+                shell_display_command_from_argv_for_platform(std::slice::from_ref(arg), shell_platform)
             }
         })
         .collect::<Vec<_>>()
@@ -304,15 +284,7 @@ pub fn run_command(
     timeout: Duration,
     explicit_shell: bool,
 ) -> Result<RunResult, RuntimeError> {
-    run_command_with_policy(
-        argv,
-        cwd,
-        env_overrides,
-        stdin,
-        timeout,
-        explicit_shell,
-        RunOutputPolicy::default(),
-    )
+    run_command_with_policy(argv, cwd, env_overrides, stdin, timeout, explicit_shell, RunOutputPolicy::default())
 }
 
 pub fn run_command_with_policy(
@@ -324,16 +296,7 @@ pub fn run_command_with_policy(
     explicit_shell: bool,
     output_policy: RunOutputPolicy,
 ) -> Result<RunResult, RuntimeError> {
-    run_command_with_policy_observer(
-        argv,
-        cwd,
-        env_overrides,
-        stdin,
-        timeout,
-        explicit_shell,
-        output_policy,
-        |_, _, _| {},
-    )
+    run_command_with_policy_observer(argv, cwd, env_overrides, stdin, timeout, explicit_shell, output_policy, |_, _, _| {})
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -356,16 +319,10 @@ where
     let result_builder =
         RunResultBuilder::from_plan(command_display.clone(), &plan, cwd, &output_policy);
     let start = Instant::now();
+    let (program, rest) = plan.argv.split_first().ok_or(RuntimeError::EmptyCommand)?;
     let mut command = match plan.execution_mode {
-        ExecutionMode::Argv => {
-            // argv is non-empty for a successful plan (plan_command rejects empty
-            // commands), but split_first makes that explicit and panic-proof at
-            // the process-spawn boundary rather than relying on the invariant.
-            let (program, rest) = plan.argv.split_first().ok_or(RuntimeError::EmptyCommand)?;
-            command_for_argv(program, rest, cwd, env_overrides)
-        }
+        ExecutionMode::Argv => command_for_argv(program, rest, cwd, env_overrides),
         ExecutionMode::Shell => {
-            let (program, rest) = plan.argv.split_first().ok_or(RuntimeError::EmptyCommand)?;
             let mut cmd = Command::new(program);
             cmd.args(rest);
             cmd
@@ -374,19 +331,12 @@ where
     if let Some(cwd) = cwd {
         command.current_dir(cwd);
     }
-    // This seam launches caller-selected commands only. Engine-internal helpers
-    // (supervisors, containment signals, and I/O workers) do not pass through it
-    // and retain their orchestration environment. Explicit overrides are applied
-    // afterward as the existing opt-in (including the INNER shim guard).
+    // Caller-selected commands only; explicit env overrides applied after scrub.
     scrub_inherited_orchestration_env(&mut command);
     if let Some(env) = env_overrides {
         command.envs(env);
     }
-    if stdin.is_some() {
-        command.stdin(Stdio::piped());
-    } else {
-        command.stdin(Stdio::null());
-    }
+    command.stdin(if stdin.is_some() { Stdio::piped() } else { Stdio::null() });
     command.stdout(Stdio::piped()).stderr(Stdio::piped());
     configure_process_group(&mut command);
     let mut child = command.spawn()?;
@@ -402,9 +352,7 @@ where
     let stderr_reader = spawn_io_worker("stderr reader", move || {
         capture_reader(stderr, "stderr", stderr_policy)
     });
-    // SAFETY: stdin writes can block indefinitely when the child keeps the pipe
-    // open but never reads it. Keep the writer on a separate thread so
-    // wait_timeout always remains the authority for child-process liveness.
+    // Stdin writes can block; keep them off the wait_timeout path.
     let stdin_writer = spawn_stdin_writer(stdin, child.stdin.take());
     let status = match child.wait_timeout(timeout)? {
         Some(status) => status,
@@ -413,28 +361,14 @@ where
             let _ = child.kill();
             let status = child.wait()?;
             let process_io = collect_process_io(
-                stdin_writer,
-                stdout_reader,
-                stderr_reader,
-                true,
-                start,
-                timeout,
-                process_group,
-                false,
+                stdin_writer, stdout_reader, stderr_reader, true, start, timeout, process_group, false,
             )?;
             observer(None, None, "timed_out_killed");
             return Ok(result_builder.finish(false, status.code(), process_io, true, start));
         }
     };
     let process_io = collect_process_io(
-        stdin_writer,
-        stdout_reader,
-        stderr_reader,
-        false,
-        start,
-        timeout,
-        process_group,
-        true,
+        stdin_writer, stdout_reader, stderr_reader, false, start, timeout, process_group, true,
     )?;
     observer(
         None,
@@ -456,11 +390,7 @@ where
 
 fn command_display_for_plan(input_argv: &[String], plan: &RuntimePlan) -> String {
     match plan.execution_mode {
-        ExecutionMode::Shell => plan
-            .argv
-            .last()
-            .cloned()
-            .unwrap_or_else(|| input_argv.join(" ")),
+        ExecutionMode::Shell => plan.argv.last().cloned().unwrap_or_else(|| input_argv.join(" ")),
         ExecutionMode::Argv => {
             command_display_for_execution_mode(&plan.argv, plan.execution_mode, &plan.platform)
         }
@@ -487,10 +417,7 @@ fn allocator_pressure_relief_after_large_capture(
         || stdout.spill_path.is_some()
         || stderr.spill_path.is_some();
     if !large_capture {
-        return AllocatorPressureRelief {
-            attempted: false,
-            reclaimed_bytes: None,
-        };
+        return AllocatorPressureRelief { attempted: false, reclaimed_bytes: None };
     }
     platform_allocator_pressure_relief()
 }
@@ -507,26 +434,15 @@ fn platform_allocator_pressure_relief() -> AllocatorPressureRelief {
         fn malloc_zone_pressure_relief(zone: *mut c_void, goal: usize) -> usize;
     }
 
-    // SAFETY: this declaration matches the macOS malloc ABI:
-    // `size_t malloc_zone_pressure_relief(malloc_zone_t *zone, size_t goal)`.
-    // `malloc_zone_t` is opaque, so `*mut c_void` is only used as the ABI
-    // carrier. Passing a null zone is the documented request to examine all
-    // zones, and `goal = 0` asks malloc to reclaim as much cached memory as it
-    // can. No Rust allocation or borrowed pointer is passed to C, no ownership
-    // crosses the boundary, and the return value is only telemetry.
+    // SAFETY: matches macOS malloc ABI; null zone = all zones, goal 0 = reclaim max.
+    // No Rust allocations cross the FFI boundary; return is telemetry only.
     let reclaimed = unsafe { malloc_zone_pressure_relief(std::ptr::null_mut(), 0) };
-    AllocatorPressureRelief {
-        attempted: true,
-        reclaimed_bytes: Some(reclaimed),
-    }
+    AllocatorPressureRelief { attempted: true, reclaimed_bytes: Some(reclaimed) }
 }
 
 #[cfg(not(target_os = "macos"))]
 fn platform_allocator_pressure_relief() -> AllocatorPressureRelief {
-    AllocatorPressureRelief {
-        attempted: false,
-        reclaimed_bytes: None,
-    }
+    AllocatorPressureRelief { attempted: false, reclaimed_bytes: None }
 }
 
 #[derive(Debug)]
@@ -565,24 +481,18 @@ fn collect_process_io(
     process_group: ProcessGroup,
     child_exited: bool,
 ) -> Result<ProcessIo, RuntimeError> {
-    // A dead main child cannot produce more output; any still-open pipe is
-    // held by a background descendant. Collect for a short grace instead of
-    // the full command deadline, then terminate the group: prompt return, no
-    // orphans, and no false timeout for a command that already exited.
+    // Exited main child: short grace then group terminate (no false timeout).
     let deadline = if child_exited {
-        let grace = Instant::now()
+        Instant::now()
             .checked_add(child_exited_io_grace())
-            .unwrap_or_else(Instant::now);
-        deadline_from(start, timeout).min(grace)
+            .unwrap_or_else(Instant::now)
+            .min(deadline_from(start, timeout))
     } else {
         deadline_from(start, timeout)
     };
     let mut timed_out = false;
     let mut io_grace_expired = false;
-    let mut stdin_result = match stdin_writer.as_mut() {
-        Some(writer) => poll_worker_until(writer, deadline)?,
-        None => Some(Ok(())),
-    };
+    let mut stdin_result = poll_stdin_until(stdin_writer.as_mut(), deadline)?;
     let mut stdout_result = poll_worker_until(&mut stdout_reader, deadline)?;
     let mut stderr_result = poll_worker_until(&mut stderr_reader, deadline)?;
 
@@ -597,9 +507,7 @@ fn collect_process_io(
             .checked_add(process_io_shutdown_grace())
             .unwrap_or_else(Instant::now);
         if stdin_result.is_none() {
-            if let Some(writer) = stdin_writer.as_mut() {
-                stdin_result = poll_worker_until(writer, cleanup_deadline)?;
-            }
+            stdin_result = poll_stdin_until(stdin_writer.as_mut(), cleanup_deadline)?;
         }
         if stdout_result.is_none() {
             stdout_result = poll_worker_until(&mut stdout_reader, cleanup_deadline)?;
@@ -613,18 +521,31 @@ fn collect_process_io(
     if !tolerate_write_error && !timed_out && !io_grace_expired {
         stdin_result.map_err(RuntimeError::Io)?;
     }
-    let stdout = stdout_result
-        .ok_or_else(|| timed_out_worker_error("shell stdout reader"))?
-        .map_err(RuntimeError::Io)?;
-    let stderr = stderr_result
-        .ok_or_else(|| timed_out_worker_error("shell stderr reader"))?
-        .map_err(RuntimeError::Io)?;
+    let stdout = take_stream_result(stdout_result, "shell stdout reader")?;
+    let stderr = take_stream_result(stderr_result, "shell stderr reader")?;
     Ok(ProcessIo {
         stdout,
         stderr,
         timed_out,
         io_grace_expired,
     })
+}
+
+fn poll_stdin_until(
+    writer: Option<&mut IoWorker<()>>,
+    deadline: Instant,
+) -> Result<Option<std::io::Result<()>>, RuntimeError> {
+    match writer {
+        Some(writer) => poll_worker_until(writer, deadline),
+        None => Ok(Some(Ok(()))),
+    }
+}
+
+fn take_stream_result(
+    result: Option<std::io::Result<CapturedStream>>,
+    name: &'static str,
+) -> Result<CapturedStream, RuntimeError> {
+    result.ok_or_else(|| timed_out_worker_error(name))?.map_err(RuntimeError::Io)
 }
 
 struct IoWorker<T> {
@@ -639,14 +560,8 @@ where
     F: FnOnce() -> std::io::Result<T> + Send + 'static,
 {
     let (sender, receiver) = mpsc::channel();
-    let handle = thread::spawn(move || {
-        let _ = sender.send(work());
-    });
-    IoWorker {
-        name,
-        receiver,
-        handle: Some(handle),
-    }
+    let handle = thread::spawn(move || { let _ = sender.send(work()); });
+    IoWorker { name, receiver, handle: Some(handle) }
 }
 
 fn poll_worker_until<T>(
@@ -685,21 +600,11 @@ fn deadline_from(start: Instant, timeout: Duration) -> Instant {
     start.checked_add(timeout).unwrap_or_else(Instant::now)
 }
 
-fn process_io_shutdown_grace() -> Duration {
-    // After terminating the group, give the IO workers room to observe the pipe
-    // close and drain. Kept well under the 5s descendant sleeps in the runtime
-    // tests so a regression in the group kill fails loudly instead of being
-    // absorbed by the grace window.
-    Duration::from_secs(2)
-}
+// After group terminate: room for workers to observe pipe close (under 5s test sleeps).
+fn process_io_shutdown_grace() -> Duration { Duration::from_secs(2) }
 
-/// IO wait after the main child has already EXITED: an exited process
-/// flushes within milliseconds, so any pipe still open belongs to a
-/// background descendant that may never close it. Much tighter than the
-/// kill-path shutdown grace.
-fn child_exited_io_grace() -> Duration {
-    Duration::from_millis(250)
-}
+// Main child already exited: open pipes belong to background descendants.
+fn child_exited_io_grace() -> Duration { Duration::from_millis(250) }
 
 fn timed_out_worker_error(name: &str) -> RuntimeError {
     RuntimeError::Io(std::io::Error::new(
@@ -717,13 +622,9 @@ struct ProcessGroup {
 impl ProcessGroup {
     fn pgid(self) -> Option<u32> {
         #[cfg(unix)]
-        {
-            Some(self.pgid)
-        }
+        { Some(self.pgid) }
         #[cfg(not(unix))]
-        {
-            None
-        }
+        { None }
     }
 
     fn for_child(child: &std::process::Child) -> Self {
@@ -758,21 +659,16 @@ fn terminate_unix_process_group(pgid: u32) {
     // `kill -TERM -<pgid>` with exit 0 yet signals nothing, so the group
     // kill silently no-ops without it (Debian and macOS tolerate both).
     let target = format!("-{pgid}");
-    let _ = Command::new("kill")
-        .arg("-TERM")
-        .arg("--")
-        .arg(&target)
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status();
+    let kill = |sig: &str| {
+        let _ = Command::new("kill")
+            .args([sig, "--", &target])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+    };
+    kill("-TERM");
     thread::sleep(Duration::from_millis(50));
-    let _ = Command::new("kill")
-        .arg("-KILL")
-        .arg("--")
-        .arg(target)
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status();
+    kill("-KILL");
 }
 
 fn capture_reader<R: Read>(
@@ -801,14 +697,12 @@ fn capture_reader<R: Read>(
             spill.write(chunk, captured_before, &captured)?;
         }
     }
-    let truncated = bytes_seen > captured.len();
-    let text = String::from_utf8_lossy(&captured).into_owned();
     Ok(CapturedStream {
-        text,
+        text: String::from_utf8_lossy(&captured).into_owned(),
         capture: StreamCapture {
             bytes_seen,
             captured_bytes: captured.len(),
-            truncated,
+            truncated: bytes_seen > captured.len(),
             spill_path: spill.path_string(),
             spill_bytes: spill.bytes_written(),
         },
@@ -860,37 +754,24 @@ impl SpillWriter {
     }
 
     fn create_path(&self) -> std::io::Result<PathBuf> {
-        let root = self
-            .dir
-            .clone()
-            .unwrap_or_else(|| std::env::temp_dir().join("tokenzero-spills"));
-        let stamp = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_nanos();
-        let pid = std::process::id();
-        Ok(root.join(format!("tokenzero-{pid}-{stamp}-{}.log", self.stream_name)))
+        let root = self.dir.clone().unwrap_or_else(|| std::env::temp_dir().join("tokenzero-spills"));
+        let stamp = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_nanos();
+        Ok(root.join(format!("tokenzero-{}-{stamp}-{}.log", std::process::id(), self.stream_name)))
     }
 
     fn path_string(&self) -> Option<String> {
         self.path.as_ref().map(|path| path.display().to_string())
     }
 
-    fn bytes_written(&self) -> usize {
-        self.bytes_written
-    }
+    fn bytes_written(&self) -> usize { self.bytes_written }
 }
 
-/// Age after which a spill file is reclaimable: spills back `spill_path`
-/// pointers inside a session; a day later the session that knew the path is
-/// gone.
+/// Age after which a spill file is reclaimable (session path pointers expire).
 pub const DEFAULT_SPILL_TTL: Duration = Duration::from_secs(24 * 60 * 60);
-/// Ceiling for the total bytes a spill directory may hold after an age pass;
-/// oldest spills are reclaimed first until the directory fits.
+/// Post-age-pass byte ceiling; oldest spills reclaimed first.
 pub const DEFAULT_SPILL_MAX_TOTAL_BYTES: u64 = 256 * 1024 * 1024;
 
-/// Outcome of a spill-directory prune. With `dry_run`, `removed_*` counts
-/// what would be reclaimed without unlinking anything.
+/// Spill-directory prune outcome (`removed_*` is prospective under `dry_run`).
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct SpillPruneReport {
     pub dir: String,
@@ -903,11 +784,8 @@ pub struct SpillPruneReport {
     pub failed_removals: usize,
 }
 
-/// Reclaim spill files written by `SpillWriter`: everything older than
-/// `max_age`, then oldest-first until the directory holds at most
-/// `max_total_bytes`. Only `tokenzero-*.log` files are considered, per-file
-/// failures are counted rather than fatal, and a missing directory is an
-/// empty report — callers may invoke this fail-open on every startup.
+/// Reclaim `tokenzero-*.log` spills older than `max_age`, then oldest-first
+/// until `max_total_bytes`. Failures are counted; missing dir → empty report.
 pub fn prune_spill_dir(
     dir: &Path,
     max_age: Duration,
@@ -926,24 +804,13 @@ pub fn prune_spill_dir(
     let mut fresh: Vec<(SystemTime, u64, PathBuf)> = Vec::new();
     for entry in entries.flatten() {
         let path = entry.path();
-        let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
-            continue;
-        };
-        if !name.starts_with("tokenzero-") || !name.ends_with(".log") {
-            continue;
-        }
-        let Ok(meta) = entry.metadata() else {
-            continue;
-        };
-        if !meta.is_file() {
-            continue;
-        }
+        let Some(name) = path.file_name().and_then(|name| name.to_str()) else { continue };
+        if !name.starts_with("tokenzero-") || !name.ends_with(".log") { continue; }
+        let Ok(meta) = entry.metadata() else { continue };
+        if !meta.is_file() { continue; }
         report.scanned_files += 1;
         let modified = meta.modified().unwrap_or(now);
-        let expired = now
-            .duration_since(modified)
-            .map(|age| age > max_age)
-            .unwrap_or(false);
+        let expired = now.duration_since(modified).map(|age| age > max_age).unwrap_or(false);
         if expired {
             remove_spill_file(&path, meta.len(), dry_run, &mut report);
         } else {
@@ -979,12 +846,9 @@ const ORCHESTRATION_ENV_PREFIXES: [&str; 4] = ["TOKENZERO_", "ZEROSTACK_", "FSZE
 
 fn scrub_inherited_orchestration_env(command: &mut Command) {
     for (key, _) in std::env::vars_os() {
-        let orchestration_only = key.to_str().is_some_and(|name| {
-            ORCHESTRATION_ENV_PREFIXES
-                .iter()
-                .any(|prefix| name.starts_with(prefix))
-        });
-        if orchestration_only {
+        if key.to_str().is_some_and(|name| {
+            ORCHESTRATION_ENV_PREFIXES.iter().any(|prefix| name.starts_with(prefix))
+        }) {
             command.env_remove(key);
         }
     }
@@ -1013,8 +877,7 @@ fn command_for_argv(
     }
     #[cfg(not(windows))]
     {
-        let _ = cwd;
-        let _ = env_overrides;
+        let _ = (cwd, env_overrides);
         let mut cmd = Command::new(program);
         cmd.args(args);
         cmd
@@ -1039,23 +902,19 @@ fn resolve_windows_program(
     env_overrides: Option<&BTreeMap<String, String>>,
 ) -> PathBuf {
     let raw = Path::new(program);
+    let first_existing = |base: &Path| {
+        windows_program_candidates(base, env_overrides)
+            .into_iter()
+            .find(|candidate| candidate.exists())
+    };
     if has_windows_path_separator(program) || raw.is_absolute() {
-        return windows_program_candidates(raw, env_overrides)
-            .into_iter()
-            .find(|candidate| candidate.exists())
-            .unwrap_or_else(|| raw.to_path_buf());
+        return first_existing(raw).unwrap_or_else(|| raw.to_path_buf());
     }
-
     for dir in windows_search_dirs(cwd, env_overrides) {
-        let base = dir.join(program);
-        if let Some(found) = windows_program_candidates(&base, env_overrides)
-            .into_iter()
-            .find(|candidate| candidate.exists())
-        {
+        if let Some(found) = first_existing(&dir.join(program)) {
             return found;
         }
     }
-
     raw.to_path_buf()
 }
 
@@ -1082,14 +941,14 @@ fn windows_program_candidates(
     env_overrides: Option<&BTreeMap<String, String>>,
 ) -> Vec<PathBuf> {
     if path.extension().is_none() {
-        let mut candidates = windows_pathexts(env_overrides)
+        let mut candidates: Vec<PathBuf> = windows_pathexts(env_overrides)
             .into_iter()
             .map(|ext| {
                 let mut with_ext = path.as_os_str().to_os_string();
                 with_ext.push(ext);
                 PathBuf::from(with_ext)
             })
-            .collect::<Vec<_>>();
+            .collect();
         candidates.push(path.to_path_buf());
         return candidates;
     }
@@ -1111,9 +970,7 @@ fn windows_pathexts(env_overrides: Option<&BTreeMap<String, String>>) -> Vec<Str
 #[cfg(windows)]
 fn env_value(env_overrides: Option<&BTreeMap<String, String>>, key: &str) -> Option<String> {
     env_overrides.and_then(|env| {
-        env.iter()
-            .find(|(candidate, _)| candidate.eq_ignore_ascii_case(key))
-            .map(|(_, value)| value.clone())
+        env.iter().find(|(c, _)| c.eq_ignore_ascii_case(key)).map(|(_, v)| v.clone())
     })
 }
 
@@ -1124,497 +981,18 @@ fn has_windows_path_separator(program: &str) -> bool {
 
 #[cfg(windows)]
 fn is_windows_batch_file(path: &Path) -> bool {
-    path.extension()
-        .and_then(|ext| ext.to_str())
-        .is_some_and(|ext| ext.eq_ignore_ascii_case("cmd") || ext.eq_ignore_ascii_case("bat"))
+    path.extension().and_then(|ext| ext.to_str()).is_some_and(|ext| {
+        ext.eq_ignore_ascii_case("cmd") || ext.eq_ignore_ascii_case("bat")
+    })
 }
 
-pub fn split_command_string(command: &str) -> Vec<String> {
-    split_command_string_for_platform(command, current_platform())
-}
-
-pub fn split_command_string_for_platform(command: &str, platform: &str) -> Vec<String> {
-    let preserve_backslashes = matches!(platform, "windows" | "cmd" | "powershell" | "pwsh");
-    let single_quote_groups = single_quote_groups_for_platform(command, platform);
-    let doubled_quote_escape = doubled_quote_escape_for_platform(command, platform);
-    let mut out = Vec::new();
-    let mut current = String::new();
-    let mut quote: Option<char> = None;
-    let mut escaped = false;
-    let mut token_started = false;
-    let mut chars = command.chars().peekable();
-    while let Some(ch) = chars.next() {
-        if escaped {
-            current.push(ch);
-            escaped = false;
-            token_started = true;
-            continue;
-        }
-        if ch == '\\' && quote != Some('\'') && !preserve_backslashes {
-            // POSIX: inside double quotes a backslash is literal unless it
-            // precedes $, `, ", or \ — so "a\|b" must stay a\|b (BRE
-            // alternation), not collapse to a|b.
-            if quote == Some('"') && !matches!(chars.peek().copied(), Some('$' | '`' | '"' | '\\'))
-            {
-                current.push('\\');
-                token_started = true;
-                continue;
-            }
-            escaped = true;
-            token_started = true;
-            continue;
-        }
-        if Some(ch) == quote
-            && doubled_quote_escape == Some(ch)
-            && chars.peek().copied() == Some(ch)
-        {
-            current.push(ch);
-            let _ = chars.next();
-            token_started = true;
-            continue;
-        }
-        if Some(ch) == quote {
-            quote = None;
-            token_started = true;
-            continue;
-        }
-        if quote.is_none() && (ch == '"' || ch == '\'' && single_quote_groups) {
-            quote = Some(ch);
-            token_started = true;
-            continue;
-        }
-        if quote.is_none() && ch.is_whitespace() {
-            if token_started {
-                out.push(std::mem::take(&mut current));
-                token_started = false;
-            }
-            continue;
-        }
-        current.push(ch);
-        token_started = true;
-    }
-    if escaped {
-        current.push('\\');
-    }
-    if token_started {
-        out.push(current);
-    }
-    out
-}
-
-fn doubled_quote_escape_for_platform(command: &str, platform: &str) -> Option<char> {
-    match platform {
-        "cmd" => Some('"'),
-        "powershell" | "pwsh" => Some('\''),
-        "windows" => {
-            if first_windows_cmd_word(command)
-                .as_deref()
-                .is_some_and(is_powershell_shell_host)
-            {
-                Some('\'')
-            } else {
-                Some('"')
-            }
-        }
-        _ => None,
-    }
-}
-
-pub fn contains_shell_syntax(value: &str) -> bool {
-    contains_shell_syntax_with_single_quotes(value, true)
-}
-
-fn contains_shell_syntax_with_single_quotes(value: &str, single_quote_groups: bool) -> bool {
-    if starts_with_posix_env_assignment(value) {
-        return true;
-    }
-    let mut quote: Option<char> = None;
-    let mut escaped = false;
-    let mut at_word_start = true;
-    let chars: Vec<char> = value.chars().collect();
-    let mut index = 0;
-    while index < chars.len() {
-        let ch = chars[index];
-        if escaped {
-            escaped = false;
-            at_word_start = false;
-            index += 1;
-            continue;
-        }
-        if ch == '\\' && quote != Some('\'') {
-            escaped = true;
-            at_word_start = false;
-            index += 1;
-            continue;
-        }
-        if Some(ch) == quote {
-            quote = None;
-            at_word_start = false;
-            index += 1;
-            continue;
-        }
-        if quote.is_none() && (ch == '"' || ch == '\'' && single_quote_groups) {
-            quote = Some(ch);
-            at_word_start = false;
-            index += 1;
-            continue;
-        }
-        let next = chars.get(index + 1).copied();
-        // Parameter expansion happens in unquoted and double-quoted contexts:
-        // routing $VAR/${...}/$( through a real shell preserves expansion
-        // instead of direct-exec'ing the literal bytes.
-        if quote != Some('\'')
-            && ch == '$'
-            && next.is_some_and(|next| {
-                next == '(' || next == '{' || next == '_' || next.is_ascii_alphabetic()
-            })
-        {
-            return true;
-        }
-        if quote.is_none() {
-            if matches!(ch, '|' | ';' | '>' | '<' | '`' | '\n') || ch == '&' && next == Some('&') {
-                return true;
-            }
-            // Tilde expansion only applies to an unquoted word-leading ~.
-            if ch == '~'
-                && at_word_start
-                && next.is_none_or(|next| {
-                    next == '/' || next.is_whitespace() || next.is_ascii_alphanumeric()
-                })
-            {
-                return true;
-            }
-            at_word_start = ch.is_whitespace();
-        } else {
-            at_word_start = false;
-        }
-        index += 1;
-    }
-    false
-}
-
-fn single_quote_groups_for_platform(value: &str, platform: &str) -> bool {
-    match platform {
-        "cmd" => false,
-        "windows" => first_windows_cmd_word(value)
-            .as_deref()
-            .is_some_and(is_powershell_shell_host),
-        "powershell" | "pwsh" => true,
-        _ => true,
-    }
-}
-
-fn first_windows_cmd_word(value: &str) -> Option<String> {
-    let mut quote = false;
-    let mut word = String::new();
-    for ch in value.chars() {
-        if ch == '"' {
-            quote = !quote;
-            continue;
-        }
-        if !quote && ch.is_whitespace() {
-            break;
-        }
-        word.push(ch);
-    }
-    if word.is_empty() { None } else { Some(word) }
-}
-
-fn starts_with_posix_env_assignment(value: &str) -> bool {
-    let words = split_command_string(value);
-    words.len() > 1
-        && words
-            .first()
-            .is_some_and(|word| is_posix_env_assignment(word))
-}
-
-fn is_posix_env_assignment(word: &str) -> bool {
-    let Some((name, _)) = word.split_once('=') else {
-        return false;
-    };
-    let mut chars = name.chars();
-    let Some(first) = chars.next() else {
-        return false;
-    };
-    (first == '_' || first.is_ascii_alphabetic())
-        && chars.all(|ch| ch == '_' || ch.is_ascii_alphanumeric())
-}
-
-pub fn contains_platform_shell_syntax(value: &str, platform: &str) -> bool {
-    contains_shell_syntax_with_single_quotes(
-        value,
-        single_quote_groups_for_platform(value, platform),
-    ) || matches!(platform, "windows" | "powershell" | "pwsh")
-        && looks_like_powershell_syntax(value)
-}
-
-pub fn looks_like_powershell_syntax(value: &str) -> bool {
-    if first_unquoted_word(value).is_some_and(|word| is_powershell_command_word(&word)) {
-        return true;
-    }
-
-    let mut quote: Option<char> = None;
-    let mut escaped = false;
-    let chars: Vec<char> = value.chars().collect();
-    let mut index = 0;
-    while index < chars.len() {
-        let ch = chars[index];
-        if escaped {
-            escaped = false;
-            index += 1;
-            continue;
-        }
-        if ch == '`' && quote != Some('\'') {
-            escaped = true;
-            index += 1;
-            continue;
-        }
-        if Some(ch) == quote {
-            quote = None;
-            index += 1;
-            continue;
-        }
-        if quote.is_none() && (ch == '\'' || ch == '"') {
-            quote = Some(ch);
-            index += 1;
-            continue;
-        }
-        if quote != Some('\'') {
-            let next = chars.get(index + 1).copied();
-            if ch == '$' && next.is_some_and(is_powershell_variable_start) {
-                return true;
-            }
-            if ch == '[' && chars[index + 1..].windows(3).any(|w| w == [']', ':', ':']) {
-                return true;
-            }
-        }
-        index += 1;
-    }
-    false
-}
-
-fn first_unquoted_word(value: &str) -> Option<String> {
-    let mut quote: Option<char> = None;
-    let mut escaped = false;
-    let mut word = String::new();
-    for ch in value.chars() {
-        if escaped {
-            if quote.is_none() || quote == Some('"') {
-                word.push(ch);
-            }
-            escaped = false;
-            continue;
-        }
-        if ch == '`' && quote != Some('\'') {
-            escaped = true;
-            continue;
-        }
-        if Some(ch) == quote {
-            quote = None;
-            continue;
-        }
-        if quote.is_none() && (ch == '\'' || ch == '"') {
-            quote = Some(ch);
-            continue;
-        }
-        if quote.is_none() && ch.is_whitespace() {
-            break;
-        }
-        word.push(ch);
-    }
-    if word.is_empty() { None } else { Some(word) }
-}
-
-fn is_powershell_variable_start(ch: char) -> bool {
-    ch == '{' || ch == '_' || ch == '?' || ch.is_ascii_alphabetic()
-}
-
-fn is_windows_shell_host(value: &str) -> bool {
-    is_powershell_shell_host(value) || windows_shell_host_stem(value) == "cmd"
-}
-
-fn is_powershell_shell_host(value: &str) -> bool {
-    matches!(
-        windows_shell_host_stem(value).as_str(),
-        "powershell" | "pwsh"
-    )
-}
-
-fn windows_shell_host_stem(value: &str) -> String {
-    let leaf = value.rsplit(['\\', '/']).next().unwrap_or(value);
-    Path::new(leaf)
-        .file_stem()
-        .and_then(|stem| stem.to_str())
-        .unwrap_or(leaf)
-        .to_ascii_lowercase()
-}
-
-fn is_powershell_command_word(word: &str) -> bool {
-    let Some((verb, noun)) = word.split_once('-') else {
-        return matches!(
-            word.to_ascii_lowercase().as_str(),
-            "foreach"
-                | "where"
-                | "if"
-                | "else"
-                | "elseif"
-                | "for"
-                | "while"
-                | "try"
-                | "catch"
-                | "finally"
-                | "param"
-                | "function"
-        );
-    };
-    !noun.is_empty()
-        && matches!(
-            verb.to_ascii_lowercase().as_str(),
-            "add"
-                | "clear"
-                | "convertfrom"
-                | "convertto"
-                | "copy"
-                | "export"
-                | "foreach"
-                | "format"
-                | "get"
-                | "import"
-                | "invoke"
-                | "join"
-                | "move"
-                | "new"
-                | "out"
-                | "pop"
-                | "push"
-                | "remove"
-                | "resolve"
-                | "select"
-                | "set"
-                | "sort"
-                | "split"
-                | "start"
-                | "stop"
-                | "tee"
-                | "test"
-                | "where"
-                | "write"
-        )
-}
-
-fn argv_has_shell_operator_tokens(argv: &[String]) -> bool {
-    argv.iter().any(|arg| is_shell_operator_token(arg))
-}
-
-fn is_shell_operator_token(arg: &str) -> bool {
-    matches!(
-        arg,
-        "|" | "||" | "&&" | ";" | ">" | ">>" | "<" | "<<" | "2>" | "2>>" | "&>"
-    )
-}
-
-pub fn is_windows_shell_builtin(value: &str) -> bool {
-    matches!(
-        value.to_ascii_lowercase().as_str(),
-        "assoc"
-            | "break"
-            | "call"
-            | "cd"
-            | "chdir"
-            | "cls"
-            | "color"
-            | "copy"
-            | "date"
-            | "del"
-            | "dir"
-            | "echo"
-            | "erase"
-            | "exit"
-            | "for"
-            | "ftype"
-            | "if"
-            | "md"
-            | "mkdir"
-            | "mklink"
-            | "move"
-            | "path"
-            | "pause"
-            | "popd"
-            | "prompt"
-            | "pushd"
-            | "rd"
-            | "rem"
-            | "ren"
-            | "rename"
-            | "rmdir"
-            | "set"
-            | "shift"
-            | "start"
-            | "time"
-            | "title"
-            | "type"
-            | "ver"
-            | "verify"
-            | "vol"
-    )
-}
-
-pub fn quote_posix(value: &str) -> String {
-    if value.is_empty() {
-        return "''".to_string();
-    }
-    if value
-        .chars()
-        .all(|c| c.is_ascii_alphanumeric() || "-_./:@%+=".contains(c))
-    {
-        value.to_string()
-    } else {
-        format!("'{}'", value.replace('\'', "'\"'\"'"))
-    }
-}
-
-pub fn quote_windows_cmd(value: &str) -> String {
-    if value.is_empty() {
-        return "\"\"".to_string();
-    }
-    if value
-        .chars()
-        .all(|c| c.is_ascii_alphanumeric() || "-_./:\\@+=".contains(c))
-    {
-        value.to_string()
-    } else {
-        let mut quoted = String::with_capacity(value.len() + 2);
-        quoted.push('"');
-        for ch in value.chars() {
-            match ch {
-                '"' => quoted.push_str("\\\""),
-                '%' => quoted.push_str("%%"),
-                '^' => quoted.push_str("^^"),
-                _ => quoted.push(ch),
-            }
-        }
-        quoted.push('"');
-        quoted
-    }
-}
-
-pub fn quote_powershell(value: &str) -> String {
-    if value.is_empty() {
-        return "''".to_string();
-    }
-    format!("'{}'", value.replace('\'', "''"))
-}
-
-pub fn quote_for(platform: &str, args: &[String]) -> String {
-    args.iter()
-        .map(|arg| match platform {
-            "windows" | "cmd" => quote_windows_cmd(arg),
-            "powershell" | "pwsh" => quote_powershell(arg),
-            _ => quote_posix(arg),
-        })
-        .collect::<Vec<_>>()
-        .join(" ")
-}
+// Shell split/quote/platform helpers live in tokenzero_core (single source of truth).
+pub use tokenzero_core::{
+    argv_has_shell_operator_tokens, contains_platform_shell_syntax, contains_shell_syntax,
+    is_shell_operator_token, is_windows_shell_builtin, is_windows_shell_host,
+    looks_like_powershell_syntax, quote_for, quote_posix, quote_powershell, quote_windows_cmd,
+    split_command_string, split_command_string_for_platform,
+};
 
 pub fn env_map(pairs: &[String]) -> Result<BTreeMap<String, String>, RuntimeError> {
     let mut out = BTreeMap::new();

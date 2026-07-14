@@ -135,28 +135,22 @@ pub struct ExecutionStore {
 
 impl ExecutionStore {
     pub fn new(cache_path: std::path::PathBuf) -> Self {
-        Self {
-            store: RecoveryStore::new(Some(cache_path)),
-        }
+        Self { store: RecoveryStore::new(Some(cache_path)) }
     }
-
     pub fn store_json(&mut self, value: &Value) -> Result<String, String> {
-        let text = serde_json::to_string_pretty(value).map_err(|err| err.to_string())?;
-        self.store_text(&text, ContentType::JsonConfig)
+        self.store_text(&serde_json::to_string_pretty(value).map_err(|error| error.to_string())?, ContentType::JsonConfig)
     }
-
     pub fn store_text(&mut self, text: &str, content_type: ContentType) -> Result<String, String> {
-        self.store
-            .store_payload(text, content_type, None, None, None)
-            .map(|stored| stored.blob_ref.as_str().to_string())
-            .map_err(|err| err.to_string())
+        self.store.store_payload(text, content_type, None, None, None)
+            .map(|stored| stored.blob_ref.as_str().to_string()).map_err(|error| error.to_string())
     }
-
     pub fn alias(&mut self, logical_ref: &str, target_ref: &str) -> Result<(), String> {
-        self.store
-            .store_alias(logical_ref, target_ref)
-            .map_err(|err| err.to_string())
+        self.store.store_alias(logical_ref, target_ref).map_err(|error| error.to_string())
     }
+}
+
+fn stored(result: Result<String, String>) -> String {
+    result.unwrap_or_else(|error| format!("store-error:{error}"))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -171,21 +165,12 @@ pub fn finalize_result(
     steps: Vec<ExecutionStep>,
 ) -> CodeModeResult {
     let id = execution_id(plan, started_ms);
-    let status_str = match result.status {
-        CodeModeStatus::Completed => "completed",
-        CodeModeStatus::Error => "error",
-    };
+    let completed = matches!(result.status, CodeModeStatus::Completed);
+    let (status_str, ack, telemetry_status) = if completed { ("completed", "C", "ok") } else { ("error", "X0", "error") };
     result.execution_id = Some(id.clone());
-    result.visible_ack = match result.status {
-        CodeModeStatus::Completed => "C".to_string(),
-        CodeModeStatus::Error => "X0".to_string(),
-    };
-    result.telemetry.kind = "codemode.execute".to_string();
-    result.telemetry.status = if matches!(result.status, CodeModeStatus::Completed) {
-        "ok".to_string()
-    } else {
-        "error".to_string()
-    };
+    result.visible_ack = ack.into();
+    result.telemetry.kind = "codemode.execute".into();
+    result.telemetry.status = telemetry_status.into();
     result.telemetry.wall_ms = finished_ms.saturating_sub(started_ms) as u64;
     result.telemetry.steps_run = Some(steps.len());
     let mut extra = result
@@ -201,15 +186,9 @@ pub fn finalize_result(
     extra.insert("finished_at_ms".to_string(), json!(finished_ms));
     result.telemetry.extra = Some(Value::Object(extra));
 
-    let code_ref = store
-        .store_text(plan, ContentType::Code)
-        .unwrap_or_else(|err| format!("store-error:{err}"));
-    let steps_ref = store
-        .store_json(&json!(steps))
-        .unwrap_or_else(|err| format!("store-error:{err}"));
-    let telemetry_ref = store
-        .store_json(&json!(result.telemetry))
-        .unwrap_or_else(|err| format!("store-error:{err}"));
+    let code_ref = stored(store.store_text(plan, ContentType::Code));
+    let steps_ref = stored(store.store_json(&json!(steps)));
+    let telemetry_ref = stored(store.store_json(&json!(result.telemetry)));
 
     let result_ref = result.value.as_ref().and_then(|value| {
         serde_json::to_vec(value)
@@ -374,70 +353,30 @@ fn guard_visible_output(result: &mut CodeModeResult, limits: &CodeModeLimits) {
     }
 }
 
+fn record_exact_text(value: &Value) {
+    if let Some(text) = value.get("text").and_then(Value::as_str) {
+        super::exec::record_exact_expand_payload(text);
+    }
+}
+
 fn cap_exact_expand_value(value: &mut Value, max_output_bytes: usize) -> bool {
     match value {
-        Value::Object(map) => {
-            if map
-                .get("__tz_exact_expand")
-                .and_then(Value::as_bool)
-                .unwrap_or(false)
-            {
-                let Some(original) = map.get("text").and_then(Value::as_str).map(str::to_string)
-                else {
-                    return false;
-                };
-                if serde_json::to_vec(value)
-                    .map(|bytes| bytes.len() <= max_output_bytes)
-                    .unwrap_or(true)
-                {
-                    return false;
+        Value::Object(map) if map.get("__tz_exact_expand").and_then(Value::as_bool).unwrap_or(false) => {
+            let Some(mut kept) = map.get("text").and_then(Value::as_str).map(str::to_string) else { return false };
+            if serde_json::to_vec(value).map(|bytes| bytes.len() <= max_output_bytes).unwrap_or(true) { return false; }
+            let note = "\n[tokenzero expand truncated: output exceeded CodeMode max_output_bytes; rerun expand with start_line/end_line windowing opts]\n";
+            loop {
+                if let Value::Object(map) = value { map.insert("text".into(), Value::String(format!("{kept}{note}"))); }
+                if kept.is_empty() || serde_json::to_vec(&*value).map(|bytes| bytes.len() <= max_output_bytes).unwrap_or(false) {
+                    record_exact_text(value);
+                    return true;
                 }
-                let note = "\n[tokenzero expand truncated: output exceeded CodeMode max_output_bytes; rerun expand with start_line/end_line windowing opts]\n";
-                let mut kept = original.clone();
-                loop {
-                    if let Value::Object(map) = value {
-                        map.insert("text".to_string(), Value::String(format!("{kept}{note}")));
-                    }
-                    if serde_json::to_vec(value)
-                        .map(|bytes| bytes.len() <= max_output_bytes)
-                        .unwrap_or(false)
-                    {
-                        if let Value::Object(map) = value {
-                            if let Some(text) = map.get("text").and_then(Value::as_str) {
-                                super::exec::record_exact_expand_payload(text);
-                            }
-                        }
-                        return true;
-                    }
-                    if kept.is_empty() {
-                        if let Value::Object(map) = value {
-                            if let Some(text) = map.get("text").and_then(Value::as_str) {
-                                super::exec::record_exact_expand_payload(text);
-                            }
-                        }
-                        return true;
-                    }
-                    let new_len = kept
-                        .char_indices()
-                        .nth(kept.chars().count().saturating_mul(3) / 4)
-                        .map(|(idx, _)| idx)
-                        .unwrap_or(0);
-                    kept.truncate(new_len);
-                }
+                let new_len = kept.char_indices().nth(kept.chars().count().saturating_mul(3) / 4).map(|(index, _)| index).unwrap_or(0);
+                kept.truncate(new_len);
             }
-            let mut changed = false;
-            for item in map.values_mut() {
-                changed |= cap_exact_expand_value(item, max_output_bytes);
-            }
-            changed
         }
-        Value::Array(items) => {
-            let mut changed = false;
-            for item in items {
-                changed |= cap_exact_expand_value(item, max_output_bytes);
-            }
-            changed
-        }
+        Value::Object(map) => map.values_mut().fold(false, |changed, item| cap_exact_expand_value(item, max_output_bytes) | changed),
+        Value::Array(items) => items.iter_mut().fold(false, |changed, item| cap_exact_expand_value(item, max_output_bytes) | changed),
         _ => false,
     }
 }
@@ -446,15 +385,9 @@ fn strip_exact_expand_markers(value: &mut Value) {
     match value {
         Value::Object(map) => {
             map.remove("__tz_exact_expand");
-            for value in map.values_mut() {
-                strip_exact_expand_markers(value);
-            }
+            map.values_mut().for_each(strip_exact_expand_markers);
         }
-        Value::Array(items) => {
-            for value in items {
-                strip_exact_expand_markers(value);
-            }
-        }
+        Value::Array(items) => items.iter_mut().for_each(strip_exact_expand_markers),
         _ => {}
     }
 }

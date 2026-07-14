@@ -18,24 +18,18 @@ pub(crate) struct ClaimEvidenceInputs {
 
 impl ClaimEvidenceInputs {
     fn with_current_defaults(mut self) -> Self {
-        self.source_artifact = self
-            .source_artifact
-            .or_else(|| current_claim_artifact_path("tokenzero_source_currency.json"));
-        self.benchmark_artifact = self.benchmark_artifact.or_else(|| {
-            current_claim_artifact_path("tokenzero_bench_competitors_shell_heavy.json")
-        });
-        self.adapter_approval_artifact = self
-            .adapter_approval_artifact
-            .or_else(|| current_claim_artifact_path("tokenzero_adapter_approval_audit.json"));
-        self.recovery_artifact = self
-            .recovery_artifact
-            .or_else(|| current_claim_artifact_path("tokenzero_exact_recovery_audit.json"));
-        self.task_success_artifact = self
-            .task_success_artifact
-            .or_else(|| current_claim_artifact_path("tokenzero_one_shot_eval.json"));
-        self.os_artifact = self
-            .os_artifact
-            .or_else(|| current_claim_artifact_path("tokenzero_os_reach_audit.json"));
+        for (slot, name) in [
+            (&mut self.source_artifact, "tokenzero_source_currency.json"),
+            (&mut self.benchmark_artifact, "tokenzero_bench_competitors_shell_heavy.json"),
+            (&mut self.adapter_approval_artifact, "tokenzero_adapter_approval_audit.json"),
+            (&mut self.recovery_artifact, "tokenzero_exact_recovery_audit.json"),
+            (&mut self.task_success_artifact, "tokenzero_one_shot_eval.json"),
+            (&mut self.os_artifact, "tokenzero_os_reach_audit.json"),
+        ] {
+            if slot.is_none() {
+                *slot = current_claim_artifact_path(name);
+            }
+        }
         self
     }
 }
@@ -409,11 +403,9 @@ fn push_unique_reason(reasons: &mut Vec<String>, reason: &str) {
 
 fn evaluate_benchmark_claim_gate(artifact_path: Option<&PathBuf>) -> Result<serde_json::Value> {
     let Some(path) = artifact_path else {
-        return Ok(claim_gate(
+        return Ok(missing_claim_gate(
             "benchmark_artifact",
-            None,
-            vec!["benchmark artifact not approved for publication".to_string()],
-            json!({"supplied": false}),
+            "benchmark artifact not approved for publication",
         ));
     };
     let artifact = load_json_artifact(path)?;
@@ -598,11 +590,9 @@ fn evaluate_adapter_approval_claim_gate(
     artifact_path: Option<&PathBuf>,
 ) -> Result<serde_json::Value> {
     let Some(path) = artifact_path else {
-        return Ok(claim_gate(
+        return Ok(missing_claim_gate(
             "adapter_approval",
-            None,
-            vec!["adapter approval artifact not attached to public claim".to_string()],
-            json!({"supplied": false}),
+            "adapter approval artifact not attached to public claim",
         ));
     };
     let artifact = load_json_artifact(path)?;
@@ -682,13 +672,15 @@ fn validate_adapter_approval_rows(artifact: &serde_json::Value, reasons: &mut Ve
     }
 }
 
+fn missing_claim_gate(id: &str, reason: &str) -> serde_json::Value {
+    claim_gate(id, None, vec![reason.to_string()], json!({"supplied": false}))
+}
+
 fn evaluate_recovery_claim_gate(artifact_path: Option<&PathBuf>) -> Result<serde_json::Value> {
     let Some(path) = artifact_path else {
-        return Ok(claim_gate(
+        return Ok(missing_claim_gate(
             "recovery_artifact",
-            None,
-            vec!["byte-perfect recovery proof not attached to public claim".to_string()],
-            json!({"supplied": false}),
+            "byte-perfect recovery proof not attached to public claim",
         ));
     };
     let artifact = load_json_artifact(path)?;
@@ -715,11 +707,9 @@ fn evaluate_recovery_claim_gate(artifact_path: Option<&PathBuf>) -> Result<serde
 
 fn evaluate_task_success_claim_gate(artifact_path: Option<&PathBuf>) -> Result<serde_json::Value> {
     let Some(path) = artifact_path else {
-        return Ok(claim_gate(
+        return Ok(missing_claim_gate(
             "task_success_artifact",
-            None,
-            vec!["task-success proof not attached to public claim".to_string()],
-            json!({"supplied": false}),
+            "task-success proof not attached to public claim",
         ));
     };
     let artifact = load_json_artifact(path)?;
@@ -746,11 +736,9 @@ fn evaluate_task_success_claim_gate(artifact_path: Option<&PathBuf>) -> Result<s
 
 fn evaluate_os_claim_gate(artifact_path: Option<&PathBuf>) -> Result<serde_json::Value> {
     let Some(path) = artifact_path else {
-        return Ok(claim_gate(
+        return Ok(missing_claim_gate(
             "os_artifact",
-            None,
-            vec!["OS artifact set not attached to public claim".to_string()],
-            json!({"supplied": false}),
+            "OS artifact set not attached to public claim",
         ));
     };
     let artifact = load_json_artifact(path)?;

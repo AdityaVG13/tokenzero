@@ -44,6 +44,18 @@ pub(crate) fn json_artifact_path(path: &Path) -> String {
     path.to_string_lossy().replace('\\', "/")
 }
 
+fn blocked_reason_strings(value: &serde_json::Value) -> Vec<String> {
+    value
+        .as_array()
+        .cloned()
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|reason| reason.as_str().map(str::to_string))
+        .filter(|reason| !reason.is_empty())
+        .collect()
+}
+
+
 fn increment_status_count(counts: &mut serde_json::Map<String, serde_json::Value>, status: &str) {
     let count = counts
         .get(status)
@@ -58,14 +70,7 @@ pub(crate) fn completion_claim_public_residual(claim_gate_snapshot: &serde_json:
         return "public claim approval is true; final publication still follows release handoff gates"
             .to_string();
     }
-    let reasons = claim_gate_snapshot["blocked_reasons"]
-        .as_array()
-        .cloned()
-        .unwrap_or_default()
-        .into_iter()
-        .filter_map(|reason| reason.as_str().map(str::to_string))
-        .filter(|reason| !reason.is_empty())
-        .collect::<Vec<_>>();
+    let reasons = blocked_reason_strings(&claim_gate_snapshot["blocked_reasons"]);
     if reasons.is_empty() {
         return "public claim approval intentionally false until claim audit evidence gates pass"
             .to_string();
@@ -101,14 +106,7 @@ pub(crate) fn completion_source_public_residual(path: &Path) -> String {
             .to_string();
     }
 
-    let reasons = artifact["blocked_reasons"]
-        .as_array()
-        .cloned()
-        .unwrap_or_default()
-        .into_iter()
-        .filter_map(|reason| reason.as_str().map(str::to_string))
-        .filter(|reason| !reason.is_empty())
-        .collect::<Vec<_>>();
+    let reasons = blocked_reason_strings(&artifact["blocked_reasons"]);
     if reasons.is_empty() {
         "source refresh required for public claims".to_string()
     } else {
@@ -234,6 +232,34 @@ pub(crate) fn completion_evidence_integrity_matrix(
     }
     rows
 }
+
+struct ArtifactContract {
+    evidence_path: Option<&'static str>,
+    handoff_ids: &'static [&'static str],
+    schema: &'static str,
+    release_candidate: bool,
+}
+
+const ARTIFACT_CONTRACTS: &[ArtifactContract] = &[
+    ArtifactContract { evidence_path: Some("results/current/rust_mcp_smoke.json"), handoff_ids: &["mcp_smoke"], schema: "tokenzero.rust_mcp_churn.v1", release_candidate: false },
+    ArtifactContract { evidence_path: Some("results/current/tokenzero_adapter_approval_audit.json"), handoff_ids: &["adapter_approval_audit"], schema: "tokenzero.adapter_approval_audit.v1", release_candidate: true },
+    ArtifactContract { evidence_path: Some("results/current/tokenzero_artifact_handoff.json"), handoff_ids: &[], schema: "tokenzero.artifact_handoff.v1", release_candidate: true },
+    ArtifactContract { evidence_path: Some("results/current/tokenzero_bench_competitors_shell_heavy.json"), handoff_ids: &["bench_competitors"], schema: "tokenzero.bench.v1", release_candidate: true },
+    ArtifactContract { evidence_path: Some("results/current/tokenzero_claim_audit.json"), handoff_ids: &["claim_audit"], schema: "tokenzero.claim_audit.v1", release_candidate: true },
+    ArtifactContract { evidence_path: Some("results/current/tokenzero_exact_recovery_audit.json"), handoff_ids: &["exact_recovery"], schema: "tokenzero.exact_recovery_audit.v1", release_candidate: true },
+    ArtifactContract { evidence_path: Some("results/current/tokenzero_exact_recovery_shell.json"), handoff_ids: &["exact_recovery_shell"], schema: "tokenzero.exact_recovery_shell.v1", release_candidate: false },
+    ArtifactContract { evidence_path: Some("results/current/tokenzero_false_success_shell.json"), handoff_ids: &["false_success_shell"], schema: "tokenzero.false_success_shell.v1", release_candidate: false },
+    ArtifactContract { evidence_path: Some("results/current/tokenzero_one_shot_eval.json"), handoff_ids: &["one_shot", "task_success"], schema: "tokenzero.one_shot_eval.v1", release_candidate: true },
+    ArtifactContract { evidence_path: Some("results/current/tokenzero_os_reach_audit.json"), handoff_ids: &["os_reach"], schema: "tokenzero.os_reach_audit.v1", release_candidate: true },
+    ArtifactContract { evidence_path: Some("results/current/tokenzero_os_release_artifact.json"), handoff_ids: &["os_release_artifact"], schema: "tokenzero.os_release_artifact.v1", release_candidate: true },
+    ArtifactContract { evidence_path: Some("results/current/tokenzero_protected_anchor_audit.json"), handoff_ids: &[], schema: "tokenzero.protected_anchor_audit.v1", release_candidate: false },
+    ArtifactContract { evidence_path: Some("results/current/tokenzero_reach.json"), handoff_ids: &["reach"], schema: "tokenzero.reach.v1", release_candidate: false },
+    ArtifactContract { evidence_path: Some("results/current/tokenzero_security_privacy_audit.json"), handoff_ids: &["security_privacy_audit"], schema: "tokenzero.security_privacy_audit.v1", release_candidate: false },
+    ArtifactContract { evidence_path: Some("results/current/tokenzero_shell_matrix.json"), handoff_ids: &["shell_matrix"], schema: "tokenzero.shell_matrix.v1", release_candidate: false },
+    ArtifactContract { evidence_path: Some("results/current/tokenzero_source_currency.json"), handoff_ids: &["source_currency"], schema: "tokenzero.source_currency.v1", release_candidate: true },
+    ArtifactContract { evidence_path: None, handoff_ids: &["completion_audit"], schema: "tokenzero.completion_audit.v1", release_candidate: true },
+    ArtifactContract { evidence_path: None, handoff_ids: &["adapter_approval_file"], schema: "tokenzero.adapter_approval_file.v1", release_candidate: false },
+];
 
 struct CompletionEvidenceIntegrity {
     present: serde_json::Value,
@@ -445,57 +471,20 @@ fn completion_content_marker_value(markers: &[&'static str]) -> serde_json::Valu
     }
 }
 
+fn evidence_contract(evidence: &str) -> Option<&'static ArtifactContract> {
+    ARTIFACT_CONTRACTS
+        .iter()
+        .find(|contract| contract.evidence_path == Some(evidence))
+}
+
 fn completion_expected_evidence_schema_version(evidence: &str) -> Option<&'static str> {
-    match evidence {
-        "results/current/rust_mcp_smoke.json" => Some("tokenzero.rust_mcp_churn.v1"),
-        "results/current/tokenzero_adapter_approval_audit.json" => {
-            Some("tokenzero.adapter_approval_audit.v1")
-        }
-        "results/current/tokenzero_artifact_handoff.json" => Some("tokenzero.artifact_handoff.v1"),
-        "results/current/tokenzero_bench_competitors_shell_heavy.json" => {
-            Some("tokenzero.bench.v1")
-        }
-        "results/current/tokenzero_claim_audit.json" => Some("tokenzero.claim_audit.v1"),
-        "results/current/tokenzero_exact_recovery_audit.json" => {
-            Some("tokenzero.exact_recovery_audit.v1")
-        }
-        "results/current/tokenzero_exact_recovery_shell.json" => {
-            Some("tokenzero.exact_recovery_shell.v1")
-        }
-        "results/current/tokenzero_false_success_shell.json" => {
-            Some("tokenzero.false_success_shell.v1")
-        }
-        "results/current/tokenzero_one_shot_eval.json" => Some("tokenzero.one_shot_eval.v1"),
-        "results/current/tokenzero_os_reach_audit.json" => Some("tokenzero.os_reach_audit.v1"),
-        "results/current/tokenzero_os_release_artifact.json" => {
-            Some("tokenzero.os_release_artifact.v1")
-        }
-        "results/current/tokenzero_protected_anchor_audit.json" => {
-            Some("tokenzero.protected_anchor_audit.v1")
-        }
-        "results/current/tokenzero_reach.json" => Some("tokenzero.reach.v1"),
-        "results/current/tokenzero_security_privacy_audit.json" => {
-            Some("tokenzero.security_privacy_audit.v1")
-        }
-        "results/current/tokenzero_shell_matrix.json" => Some("tokenzero.shell_matrix.v1"),
-        "results/current/tokenzero_source_currency.json" => Some("tokenzero.source_currency.v1"),
-        _ => None,
-    }
+    evidence_contract(evidence).map(|contract| contract.schema)
 }
 
 fn completion_expected_release_candidate_id(evidence: &str) -> Option<String> {
-    match evidence {
-        "results/current/tokenzero_adapter_approval_audit.json"
-        | "results/current/tokenzero_artifact_handoff.json"
-        | "results/current/tokenzero_bench_competitors_shell_heavy.json"
-        | "results/current/tokenzero_claim_audit.json"
-        | "results/current/tokenzero_exact_recovery_audit.json"
-        | "results/current/tokenzero_one_shot_eval.json"
-        | "results/current/tokenzero_os_reach_audit.json"
-        | "results/current/tokenzero_os_release_artifact.json"
-        | "results/current/tokenzero_source_currency.json" => Some(release_candidate_id()),
-        _ => None,
-    }
+    evidence_contract(evidence)
+        .filter(|contract| contract.release_candidate)
+        .map(|_| release_candidate_id())
 }
 
 fn completion_expected_evidence_content_markers(evidence: &str) -> Vec<&'static str> {
@@ -757,42 +746,20 @@ pub(crate) fn handoff_artifact_integrity_matrix(
     (json!(rows), all_required_present, all_required_valid)
 }
 
+fn handoff_contract(id: &str) -> Option<&'static ArtifactContract> {
+    ARTIFACT_CONTRACTS
+        .iter()
+        .find(|contract| contract.handoff_ids.contains(&id))
+}
+
 fn handoff_expected_schema_version(id: &str) -> Option<&'static str> {
-    match id {
-        "adapter_approval_audit" => Some("tokenzero.adapter_approval_audit.v1"),
-        "adapter_approval_file" => Some("tokenzero.adapter_approval_file.v1"),
-        "bench_competitors" => Some("tokenzero.bench.v1"),
-        "claim_audit" => Some("tokenzero.claim_audit.v1"),
-        "completion_audit" => Some("tokenzero.completion_audit.v1"),
-        "exact_recovery" => Some("tokenzero.exact_recovery_audit.v1"),
-        "exact_recovery_shell" => Some("tokenzero.exact_recovery_shell.v1"),
-        "false_success_shell" => Some("tokenzero.false_success_shell.v1"),
-        "mcp_smoke" => Some("tokenzero.rust_mcp_churn.v1"),
-        "one_shot" | "task_success" => Some("tokenzero.one_shot_eval.v1"),
-        "os_reach" => Some("tokenzero.os_reach_audit.v1"),
-        "os_release_artifact" => Some("tokenzero.os_release_artifact.v1"),
-        "reach" => Some("tokenzero.reach.v1"),
-        "security_privacy_audit" => Some("tokenzero.security_privacy_audit.v1"),
-        "shell_matrix" => Some("tokenzero.shell_matrix.v1"),
-        "source_currency" => Some("tokenzero.source_currency.v1"),
-        _ => None,
-    }
+    handoff_contract(id).map(|contract| contract.schema)
 }
 
 fn handoff_expected_release_candidate_id(id: &str) -> Option<String> {
-    match id {
-        "adapter_approval_audit"
-        | "bench_competitors"
-        | "claim_audit"
-        | "completion_audit"
-        | "exact_recovery"
-        | "one_shot"
-        | "os_reach"
-        | "os_release_artifact"
-        | "source_currency"
-        | "task_success" => Some(release_candidate_id()),
-        _ => None,
-    }
+    handoff_contract(id)
+        .filter(|contract| contract.release_candidate)
+        .map(|_| release_candidate_id())
 }
 
 pub(crate) fn handoff_completion_audit_snapshot(path: &Path) -> serde_json::Value {

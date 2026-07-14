@@ -19,6 +19,29 @@ fn temp_store() -> (RecoveryStore, PathBuf, tempfile::TempDir) {
     (store, cache, dir)
 }
 
+
+
+fn put_payload(store: &mut RecoveryStore, text: &str) -> StoredPayload {
+    store
+        .store_payload(text, ContentType::Unknown, None, None, None)
+        .unwrap()
+}
+
+fn expand_raw(store: &mut RecoveryStore, ref_id: &str) -> ExpansionResult {
+    store.expand(ref_id, Some("raw"), None, None, None, None)
+}
+
+
+
+fn assert_expand_ok(expanded: &ExpansionResult, content: &str, ref_id: &str) {
+    assert!(expanded.found, "expected found for {ref_id}: {}", expanded.reason);
+    assert_eq!(expanded.content, content);
+    assert_eq!(expanded.ref_id, ref_id);
+}
+
+
+
+
 static REF_INDEX_ENV_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
 
 struct RefIndexEnvGuard {
@@ -302,9 +325,7 @@ fn ref_index_expands_blob_across_cache_roots() {
         let text = "alpha\nbeta\nbytes exact\n";
         let stored = {
             let mut store = RecoveryStore::new(Some(cache_a));
-            store
-                .store_payload(text, ContentType::Unknown, None, None, None)
-                .unwrap()
+            put_payload(&mut store, text)
         };
 
         let mut other_root = RecoveryStore::new(Some(cache_b));
@@ -328,15 +349,11 @@ with exact bytes
 
         let first = {
             let mut store = RecoveryStore::new(Some(cache_a.clone()));
-            store
-                .store_payload(payload, ContentType::Unknown, None, None, None)
-                .unwrap()
+            put_payload(&mut store, payload)
         };
         let second = {
             let mut store = RecoveryStore::new(Some(cache_b.clone()));
-            store
-                .store_payload(payload, ContentType::Unknown, None, None, None)
-                .unwrap()
+            put_payload(&mut store, payload)
         };
 
         assert_eq!(first.blob_ref, second.blob_ref);
@@ -375,9 +392,7 @@ fn ref_index_disabled_preserves_local_only_miss() {
         let dir_b = tempdir().unwrap();
         let stored = {
             let mut store = RecoveryStore::new(Some(dir_a.path().join("cache.json")));
-            store
-                .store_payload("hidden\n", ContentType::Unknown, None, None, None)
-                .unwrap()
+            put_payload(&mut store, "hidden\n")
         };
 
         let mut other = RecoveryStore::new(Some(dir_b.path().join("cache.json")));
@@ -396,9 +411,7 @@ fn stale_ref_index_entry_is_pruned_and_reports_tiers() {
         let cache_a = dir_a.path().join("cache.json");
         let stored = {
             let mut store = RecoveryStore::new(Some(cache_a.clone()));
-            store
-                .store_payload("gone\n", ContentType::Unknown, None, None, None)
-                .unwrap()
+            put_payload(&mut store, "gone\n")
         };
         fs::remove_file(&cache_a).unwrap();
         // Remove the SharedCas blob so expansion can only reach the ref index.
@@ -467,12 +480,8 @@ fn repeated_persist_of_same_blob_ref_does_not_duplicate_newest_store_entry() {
         let cache = dir.path().join("cache.json");
         let text = "same ref repeated\n";
         let mut store = RecoveryStore::new(Some(cache));
-        let stored = store
-            .store_payload(text, ContentType::Unknown, None, None, None)
-            .unwrap();
-        let repeated = store
-            .store_payload(text, ContentType::Unknown, None, None, None)
-            .unwrap();
+        let stored = put_payload(&mut store, text);
+        let repeated = put_payload(&mut store, text);
         assert_eq!(stored.blob_ref, repeated.blob_ref);
 
         let shard = ref_index_shard_path(index_dir.path(), &stored.blob_ref);
@@ -548,9 +557,7 @@ fn expand_preserves_non_newline_terminated_content() {
     // F-004 regression: exact recovery must not add a trailing newline.
     let (mut store, _, _dir) = temp_store();
     let text = "no trailing newline";
-    let stored = store
-        .store_payload(text, ContentType::Unknown, None, None, None)
-        .unwrap();
+    let stored = put_payload(&mut store, text);
     let expanded = store.expand(&stored.blob_ref, Some("raw"), None, None, None, None);
     assert_eq!(expanded.content, text);
     let file = store.expand(&stored.file_ref, Some("raw"), None, None, None, None);
@@ -560,9 +567,7 @@ fn expand_preserves_non_newline_terminated_content() {
 #[test]
 fn range_fragment_selects_lines() {
     let (mut store, _, _dir) = temp_store();
-    let stored = store
-        .store_payload("a\nb\nc\n", ContentType::Unknown, None, None, None)
-        .unwrap();
+    let stored = put_payload(&mut store, "a\nb\nc\n");
     let expanded = store.expand(
         &format!("{}#L2-L3", stored.file_ref),
         None,
@@ -578,9 +583,7 @@ fn range_fragment_selects_lines() {
 fn slice_preserves_trailing_blank_line() {
     // F-001 regression: a slice ending on a blank line keeps that line's newline.
     let (mut store, _, _dir) = temp_store();
-    let stored = store
-        .store_payload("a\nb\n\nc\n", ContentType::Unknown, None, None, None)
-        .unwrap();
+    let stored = put_payload(&mut store, "a\nb\n\nc\n");
     let expanded = store.expand(
         &format!("{}#L1-L3", stored.file_ref),
         None,
@@ -687,9 +690,7 @@ fn concurrent_persistence_preserves_all_thread_payloads() {
                 let mut store = RecoveryStore::new(Some(cache));
                 barrier.wait();
                 let text = format!("payload-{worker}\n");
-                let stored = store
-                    .store_payload(&text, ContentType::Unknown, None, None, None)
-                    .unwrap();
+                let stored = put_payload(&mut store, &text);
                 (stored.blob_ref, text)
             })
         })
@@ -717,14 +718,10 @@ fn alternating_writers_on_one_cache_path_still_merge() {
     let mut expected = Vec::new();
     for round in 0..4 {
         let text = format!("left-{round}\n");
-        let stored = left
-            .store_payload(&text, ContentType::Unknown, None, None, None)
-            .unwrap();
+        let stored = put_payload(&mut left, &text);
         expected.push((stored.blob_ref, text));
         let text = format!("right-{round}\n");
-        let stored = right
-            .store_payload(&text, ContentType::Unknown, None, None, None)
-            .unwrap();
+        let stored = put_payload(&mut right, &text);
         expected.push((stored.blob_ref, text));
     }
 
@@ -750,9 +747,7 @@ fn single_writer_repeat_persists_skip_reload_and_stay_byte_exact() {
     let mut expected = Vec::new();
     for round in 0..4 {
         let text = format!("solo-{round}\n");
-        let stored = store
-            .store_payload(&text, ContentType::Unknown, None, None, None)
-            .unwrap();
+        let stored = put_payload(&mut store, &text);
         expected.push((stored.blob_ref, text));
         let identity = store.disk_identity.expect("identity captured after write");
         assert_eq!(DiskIdentity::capture(&cache), Some(identity));
@@ -924,9 +919,7 @@ macro_rules! test_eviction_on_overflow {
 }
 
 fn do_store(store: &mut RecoveryStore, text: &str) -> StoredPayload {
-    store
-        .store_payload(text, ContentType::Unknown, None, None, None)
-        .unwrap()
+    put_payload(store, text)
 }
 
 fn do_deferred(store: &mut RecoveryStore, text: &str) -> StoredPayload {
@@ -1200,9 +1193,7 @@ fn rotated_journal_fixture() -> (tempfile::TempDir, PathBuf, StoredPayload, Stor
     let cache = dir.path().join("cache.json");
     {
         let mut store = RecoveryStore::new(Some(cache.clone()));
-        store
-            .store_payload("base\n", ContentType::Unknown, None, None, None)
-            .unwrap();
+        put_payload(&mut store, "base\n");
     }
 
     let make_entry = |text: &str| {
@@ -1289,17 +1280,13 @@ fn second_process_persist_appends_journal_without_snapshot_rewrite() {
     let cache = dir.path().join("cache.json");
     let first = {
         let mut store = RecoveryStore::new(Some(cache.clone()));
-        store
-            .store_payload("alpha\n", ContentType::Unknown, None, None, None)
-            .unwrap()
+        put_payload(&mut store, "alpha\n")
     };
     let snapshot_before = fs::read(&cache).unwrap();
 
     let second = {
         let mut store = RecoveryStore::new(Some(cache.clone()));
-        store
-            .store_payload("beta\n", ContentType::Unknown, None, None, None)
-            .unwrap()
+        put_payload(&mut store, "beta\n")
     };
     assert_eq!(
         fs::read(&cache).unwrap(),
@@ -1322,18 +1309,12 @@ fn foreign_journal_append_forces_merge_and_nothing_is_lost() {
     let cache = dir.path().join("cache.json");
     {
         let mut store = RecoveryStore::new(Some(cache.clone()));
-        store
-            .store_payload("base\n", ContentType::Unknown, None, None, None)
-            .unwrap();
+        put_payload(&mut store, "base\n");
     }
     let mut a = RecoveryStore::new(Some(cache.clone()));
     let mut b = RecoveryStore::new(Some(cache.clone()));
-    let from_b = b
-        .store_payload("from-b\n", ContentType::Unknown, None, None, None)
-        .unwrap();
-    let from_a = a
-        .store_payload("from-a\n", ContentType::Unknown, None, None, None)
-        .unwrap();
+    let from_b = put_payload(&mut b, "from-b\n");
+    let from_a = put_payload(&mut a, "from-a\n");
 
     let mut restarted = RecoveryStore::new(Some(cache));
     for (stored, text) in [(&from_b, "from-b\n"), (&from_a, "from-a\n")] {
@@ -1353,15 +1334,11 @@ fn corrupt_journal_tail_keeps_complete_entries() {
     let cache = dir.path().join("cache.json");
     {
         let mut store = RecoveryStore::new(Some(cache.clone()));
-        store
-            .store_payload("alpha\n", ContentType::Unknown, None, None, None)
-            .unwrap();
+        put_payload(&mut store, "alpha\n");
     }
     let good = {
         let mut store = RecoveryStore::new(Some(cache.clone()));
-        store
-            .store_payload("good\n", ContentType::Unknown, None, None, None)
-            .unwrap()
+        put_payload(&mut store, "good\n")
     };
     let journal = journal_path(&cache);
     let mut bytes = fs::read(&journal).unwrap();
@@ -1383,16 +1360,12 @@ fn oversized_journal_compacts_into_fresh_snapshot() {
     let cache = dir.path().join("cache.json");
     let small = {
         let mut store = RecoveryStore::new(Some(cache.clone()));
-        store
-            .store_payload("tiny\n", ContentType::Unknown, None, None, None)
-            .unwrap()
+        put_payload(&mut store, "tiny\n")
     };
     let big_text = "x".repeat(80 * 1024);
     let big = {
         let mut store = RecoveryStore::new(Some(cache.clone()));
-        store
-            .store_payload(&big_text, ContentType::Unknown, None, None, None)
-            .unwrap()
+        put_payload(&mut store, &big_text)
     };
     assert!(
         !journal_path(&cache).exists(),
@@ -1414,9 +1387,7 @@ fn oversized_journal_compacts_into_fresh_snapshot() {
 fn big_blob_externalizes_to_sidecar_and_roundtrips() {
     let (mut store, cache, _dir) = temp_store();
     let big = "x".repeat(200 * 1024);
-    let stored = store
-        .store_payload(&big, ContentType::Unknown, None, None, None)
-        .unwrap();
+    let stored = put_payload(&mut store, &big);
     let sidecar = blob_sidecar_dir(&cache);
     assert!(sidecar.is_dir(), "sidecar dir must exist");
     assert!(
@@ -1445,9 +1416,7 @@ fn corrupt_blob_sidecar_is_a_miss_not_bad_bytes() {
     let big = "y".repeat(200 * 1024);
     let stored = {
         let mut store = RecoveryStore::new(Some(cache.clone()));
-        store
-            .store_payload(&big, ContentType::Unknown, None, None, None)
-            .unwrap()
+        put_payload(&mut store, &big)
     };
     for entry in fs::read_dir(blob_sidecar_dir(&cache)).unwrap() {
         fs::write(entry.unwrap().path(), "tampered").unwrap();
@@ -1493,9 +1462,7 @@ fn streaming_corrupt_sidecar_is_rejected_as_decode_failure() {
     let payload = "verified".repeat(BLOB_EXTERNALIZE_MIN_BYTES / 4);
     let stored = {
         let mut store = RecoveryStore::new(Some(cache.clone()));
-        store
-            .store_payload(&payload, ContentType::Unknown, None, None, None)
-            .unwrap()
+        put_payload(&mut store, &payload)
     };
     let sidecar = fs::read_dir(blob_sidecar_dir(&cache))
         .unwrap()
@@ -1525,13 +1492,9 @@ fn streaming_externalization_threshold_keeps_small_payload_inline() {
     let small = "s".repeat(BLOB_EXTERNALIZE_MIN_BYTES - 1);
     let at_threshold = "b".repeat(BLOB_EXTERNALIZE_MIN_BYTES);
     let mut store = RecoveryStore::new(Some(cache));
-    let small_ref = store
-        .store_payload(&small, ContentType::Unknown, None, None, None)
-        .unwrap()
+    let small_ref = put_payload(&mut store, &small)
         .blob_ref;
-    let big_ref = store
-        .store_payload(&at_threshold, ContentType::Unknown, None, None, None)
-        .unwrap()
+    let big_ref = put_payload(&mut store, &at_threshold)
         .blob_ref;
 
     assert_eq!(
@@ -1555,7 +1518,7 @@ proptest! {
         let cache = dir.path().join("cache.json");
         let stored = {
             let mut store = RecoveryStore::new(Some(cache.clone()));
-            store.store_payload(&text, ContentType::Unknown, None, None, None).unwrap()
+            put_payload(&mut store, &text)
         };
         let mut restarted = RecoveryStore::new(Some(cache));
         let expanded = restarted.expand(&stored.blob_ref, Some("raw"), None, None, None, None);
@@ -1595,9 +1558,7 @@ proptest! {
 fn same_store_scheme_alias_fz_gz_blob_expand_byte_exact() {
     let (mut store, _cache, _dir) = temp_store();
     let payload = "cross-scheme payload\nline two\n";
-    let stored = store
-        .store_payload(payload, ContentType::Unknown, None, None, None)
-        .unwrap();
+    let stored = put_payload(&mut store, payload);
     assert!(stored.blob_ref.starts_with("tz://blob/"));
     let id = stored.blob_ref.strip_prefix("tz://blob/").unwrap();
     let fz = format!("fz://blob/{id}");
@@ -1652,469 +1613,99 @@ fn canonicalize_and_is_expandable_helpers() {
     assert!(canonicalize_expand_ref("http://nope").is_none());
 }
 
-fn canonical_shared_store() -> (RecoveryStore, PathBuf, tempfile::TempDir, SharedCas) {
-    let dir = tempdir().unwrap();
-    let root = dir.path().join(".zerostack");
-    fs::create_dir_all(root.join("blobs").join("sha256")).unwrap();
-    let cache_dir = root.join("tokenzero");
-    fs::create_dir_all(&cache_dir).unwrap();
-    let cache = cache_dir.join("recovery-cache.json");
-    let cas = SharedCas::new(root.clone());
-    let store = RecoveryStore::new(Some(cache.clone()));
-    (store, cache, dir, cas)
-}
+
 
 // ---------------------------------------------------------------------------
-// #B/#L fragment algebra (cqr.5)
+// #B/#L fragment algebra (cqr.5) — table-driven scenarios
 // ---------------------------------------------------------------------------
 
-#[test]
-fn canonical_shared_store_serves_full_refs_and_fragments() {
-    let (mut store, _cache, _dir, cas) = canonical_shared_store();
-    let payload = b"alpha
-beta
-gamma
-";
-    let full_hash = cas.publish(payload).unwrap();
-    let tz = format!("tz://blob/{full_hash}");
-    let fz = format!("fz://blob/{full_hash}");
-    let gz = format!("gz://blob/{full_hash}");
-
-    for scheme in [&tz, &fz, &gz] {
-        let expanded = store.expand(scheme, Some("raw"), None, None, None, None);
-        assert!(expanded.found);
-        assert_eq!(expanded.content.as_bytes(), payload);
-        assert_eq!(expanded.ref_id, *scheme);
-    }
-
-    let b_ref = format!("{tz}#B0-5");
-    let expanded_b = store.expand(&b_ref, Some("raw"), None, None, None, None);
-    assert!(expanded_b.found);
-    assert_eq!(expanded_b.content, "alpha");
-    assert_eq!(expanded_b.ref_id, b_ref);
-
-    let l_ref = format!("{tz}#L2-2");
-    let expanded_l = store.expand(&l_ref, Some("raw"), None, None, None, None);
-    assert!(expanded_l.found);
-    assert_eq!(
-        expanded_l.content,
-        "beta
-"
-    );
-    assert_eq!(expanded_l.ref_id, l_ref);
+#[derive(Clone, Copy)]
+enum FragExpect<'a> {
+    Ok(&'a str),
+    Err(&'a str),
+    ErrPrefix(&'a str),
 }
 
-#[test]
-fn shared_cas_missing_on_disjoint_roots() {
-    let text = "alpha
-beta
-gamma
-";
-    let (mut producer, _cache, _dir, cas) = canonical_shared_store();
-    let full_hash = cas.publish(text.as_bytes()).unwrap();
-    let full_ref = format!("fz://blob/{full_hash}");
-    let (mut consumer, _consumer_cache, _consumer_dir, _consumer_cas) = canonical_shared_store();
-
-    let missing = consumer.expand(&full_ref, Some("raw"), None, None, None, None);
-    assert!(!missing.found);
-    assert_eq!(missing.reason, "shared-cas-missing");
-    assert_eq!(missing.ref_id, full_ref);
-
-    let present = producer.expand(&full_ref, Some("raw"), None, None, None, None);
-    assert!(present.found);
-    assert_eq!(present.content, text);
-    assert_eq!(present.ref_id, full_ref);
+fn store_blob(store: &mut RecoveryStore, payload: &str) -> String {
+    put_payload(store, payload).blob_ref
 }
 
-#[test]
-fn fz_blob_ref_falls_back_to_fszero_sibling_store() {
-    // fszero-fz-ref-expand-broken-izj regression: an fz:// blob ref minted by
-    // the fszero engine and stored only in the fszero JSON store must be
-    // expandable by the tokenzero engine under the same unified ZeroStack root.
-    let dir = tempdir().unwrap();
-    let root = dir.path().join(".zerostack");
-    let fszero_cache = root.join("fszero").join("recovery-cache.json");
-    let tokenzero_cache = root.join("tokenzero").join("recovery-cache.json");
-    fs::create_dir_all(fszero_cache.parent().unwrap()).unwrap();
-    fs::create_dir_all(tokenzero_cache.parent().unwrap()).unwrap();
-
-    let payload = "cross-engine blob from fszero
-second line
-";
-    let fz_ref = format!("fz://blob/{}", tokenzero_core::sha256_hex(payload));
-
-    // Store the payload using a flat cache path so it is written to the JSON
-    // store rather than published to the shared CAS, then move the snapshot into
-    // the unified fszero layout.
-    let fszero_temp = dir.path().join("fszero-cache.json");
-    let mut fszero_store = RecoveryStore::new(Some(fszero_temp.clone()));
-    fszero_store
-        .store_payload(payload, ContentType::Unknown, None, None, None)
-        .unwrap();
-    fs::create_dir_all(fszero_cache.parent().unwrap()).unwrap();
-    fs::rename(&fszero_temp, &fszero_cache).unwrap();
-
-    let mut tokenzero_store = RecoveryStore::new(Some(tokenzero_cache));
-    let expanded = tokenzero_store.expand(&fz_ref, Some("raw"), None, None, None, None);
-    assert!(
-        expanded.found,
-        "fz blob ref must expand via sibling fszero store: reason={}",
-        expanded.reason
-    );
-    assert_eq!(expanded.content, payload);
-    assert_eq!(expanded.ref_id, fz_ref);
+fn expand_fragment(payload: &str, fragment: &str) -> (ExpansionResult, String) {
+    let (mut store, _cache, _dir) = temp_store();
+    let blob = store_blob(&mut store, payload);
+    let frag_ref = format!("{blob}#{fragment}");
+    (expand_raw(&mut store, &frag_ref), frag_ref)
 }
 
-#[test]
-fn gz_blob_ref_falls_back_to_graphzero_sibling_store() {
-    let dir = tempdir().unwrap();
-    let root = dir.path().join(".zerostack");
-    let gz_cache = root.join("graphzero").join("recovery-cache.json");
-    let tokenzero_cache = root.join("tokenzero").join("recovery-cache.json");
-    fs::create_dir_all(gz_cache.parent().unwrap()).unwrap();
-    fs::create_dir_all(tokenzero_cache.parent().unwrap()).unwrap();
-
-    let payload = "cross-engine blob from graphzero
-";
-    let gz_ref = format!("gz://blob/{}", tokenzero_core::sha256_hex(payload));
-
-    // Store the payload using a flat cache path so it is written to the JSON
-    // store rather than published to the shared CAS, then move the snapshot into
-    // the unified graphzero layout.
-    let gz_temp = dir.path().join("graphzero-cache.json");
-    let mut gz_store = RecoveryStore::new(Some(gz_temp.clone()));
-    gz_store
-        .store_payload(payload, ContentType::Unknown, None, None, None)
-        .unwrap();
-    fs::create_dir_all(gz_cache.parent().unwrap()).unwrap();
-    fs::rename(&gz_temp, &gz_cache).unwrap();
-
-    let mut tokenzero_store = RecoveryStore::new(Some(tokenzero_cache));
-    let expanded = tokenzero_store.expand(&gz_ref, Some("raw"), None, None, None, None);
-    assert!(
-        expanded.found,
-        "gz blob ref must expand via sibling graphzero store: reason={}",
-        expanded.reason
-    );
-    assert_eq!(expanded.content, payload);
-    assert_eq!(expanded.ref_id, gz_ref);
-}
-
-#[test]
-fn shared_cas_corruption_is_detected_via_fragment() {
-    let (mut store, _cache, _dir, cas) = canonical_shared_store();
-    let payload = b"alpha
-beta
-gamma
-";
-    let full_hash = cas.publish(payload).unwrap();
-    let prefix = &full_hash[..2];
-    let object_path = cas
-        .root()
-        .join("blobs")
-        .join("sha256")
-        .join(prefix)
-        .join(&full_hash);
-    fs::write(&object_path, b"corrupted").unwrap();
-
-    let fragment = format!("tz://blob/{full_hash}#B0-5");
-    let expanded = store.expand(&fragment, Some("raw"), None, None, None, None);
-    assert!(!expanded.found);
-    assert_eq!(expanded.reason, "shared-cas-corruption");
-    assert_eq!(expanded.ref_id, fragment);
-    assert!(expanded.content.is_empty());
-}
-
-#[test]
-fn shared_cas_rejects_malformed_hashes() {
-    let (mut store, _cache, _dir, _cas) = canonical_shared_store();
-    let uppercase_ref = format!("tz://blob/{}", "A".repeat(64));
-    let invalid_refs = vec!["tz://blob/abc".to_string(), uppercase_ref];
-
-    for (invalid_ref, reason) in invalid_refs
-        .into_iter()
-        .zip(["zeroref-legacy_ambiguity", "zeroref-malformed"])
-    {
-        let expanded = store.expand(&invalid_ref, Some("raw"), None, None, None, None);
-        assert!(!expanded.found);
-        assert_eq!(expanded.reason, reason);
-        assert_eq!(expanded.ref_id, invalid_ref);
+fn assert_fragment_case(payload: &str, fragment: &str, expect: FragExpect<'_>) {
+    let (expanded, frag_ref) = expand_fragment(payload, fragment);
+    match expect {
+        FragExpect::Ok(content) => {
+            assert!(expanded.found, "#{fragment} must succeed: {}", expanded.reason);
+            assert_eq!(expanded.content, content);
+            assert_eq!(expanded.ref_id, frag_ref);
+        }
+        FragExpect::Err(reason) => {
+            assert!(!expanded.found, "#{fragment} must not succeed");
+            assert_eq!(expanded.reason, reason);
+            assert_eq!(expanded.ref_id, frag_ref);
+            assert!(expanded.content.is_empty());
+        }
+        FragExpect::ErrPrefix(prefix) => {
+            assert!(!expanded.found, "#{fragment} must not succeed");
+            assert!(expanded.reason.starts_with(prefix), "got: {}", expanded.reason);
+            assert_eq!(expanded.ref_id, frag_ref);
+            assert!(expanded.content.is_empty());
+        }
     }
 }
 
+/// Scenarios: empty zero-range, first n, middle, reversed, oob, malformed,
+/// preserves_ref_id, no_fallback. Full-range handled separately (dynamic end).
 #[test]
-fn b_fragment_returns_empty_for_zero_range() {
-    let (mut store, _cache, _dir) = temp_store();
-    let payload = "hello world\n";
-    let stored = store
-        .store_payload(payload, ContentType::Unknown, None, None, None)
-        .unwrap();
-    let b_ref = format!("{}#B0-0", stored.blob_ref);
-    let expanded = store.expand(&b_ref, Some("raw"), None, None, None, None);
-    assert!(expanded.found, "#B0-0 must succeed: {}", expanded.reason);
-    assert_eq!(expanded.content, "");
-    assert_eq!(expanded.ref_id, b_ref);
+fn b_fragment_matrix() {
+    let hello = "hello world\n";
+    let short = "hello\n";
+    let cases: &[(&str, &str, FragExpect<'_>)] = &[
+        (hello, "B0-0", FragExpect::Ok("")),
+        (hello, "B0-5", FragExpect::Ok("hello")),
+        (hello, "B6-11", FragExpect::Ok("world")),
+        (short, "B5-1", FragExpect::Err("fragment-reversed")),
+        (short, "B0-100", FragExpect::ErrPrefix("fragment-out-of-range")),
+        (short, "Babc", FragExpect::Err("fragment-malformed")),
+        ("byte-range payload\nline two\n", "B0-1", FragExpect::Ok("b")),
+    ];
+    for &(payload, fragment, expect) in cases {
+        assert_fragment_case(payload, fragment, expect);
+    }
+    let (mut store, _c, _d) = temp_store();
+    let blob = store_blob(&mut store, hello);
+    let b_ref = format!("{}#B0-{}", blob, hello.len());
+    assert_expand_ok(&expand_raw(&mut store, &b_ref), hello, &b_ref);
 }
 
+/// Scenarios: first three, L0, reversed, oob, empty, CRLF, trailing newline,
+/// single line, unknown kind, duplicate fragment.
 #[test]
-fn b_fragment_returns_first_n_bytes() {
-    let (mut store, _cache, _dir) = temp_store();
-    let payload = "hello world\n";
-    let stored = store
-        .store_payload(payload, ContentType::Unknown, None, None, None)
-        .unwrap();
-    let b_ref = format!("{}#B0-5", stored.blob_ref);
-    let expanded = store.expand(&b_ref, Some("raw"), None, None, None, None);
-    assert!(expanded.found, "#B0-5 must succeed: {}", expanded.reason);
-    assert_eq!(expanded.content, "hello");
-}
-
-#[test]
-fn b_fragment_returns_middle_slice() {
-    let (mut store, _cache, _dir) = temp_store();
-    let payload = "hello world\n";
-    let stored = store
-        .store_payload(payload, ContentType::Unknown, None, None, None)
-        .unwrap();
-    let b_ref = format!("{}#B6-11", stored.blob_ref);
-    let expanded = store.expand(&b_ref, Some("raw"), None, None, None, None);
-    assert!(expanded.found, "#B6-11 must succeed: {}", expanded.reason);
-    assert_eq!(expanded.content, "world");
-}
-
-#[test]
-fn b_fragment_reversed_returns_error() {
-    let (mut store, _cache, _dir) = temp_store();
-    let payload = "hello\n";
-    let stored = store
-        .store_payload(payload, ContentType::Unknown, None, None, None)
-        .unwrap();
-    let b_ref = format!("{}#B5-1", stored.blob_ref);
-    let expanded = store.expand(&b_ref, Some("raw"), None, None, None, None);
-    assert!(!expanded.found, "#B reversed must not succeed");
-    assert_eq!(expanded.reason, "fragment-reversed");
-    assert_eq!(expanded.ref_id, b_ref);
-    assert!(expanded.content.is_empty());
-}
-
-#[test]
-fn b_fragment_oob_returns_error() {
-    let (mut store, _cache, _dir) = temp_store();
-    let payload = "hello\n";
-    let stored = store
-        .store_payload(payload, ContentType::Unknown, None, None, None)
-        .unwrap();
-    let b_ref = format!("{}#B0-100", stored.blob_ref);
-    let expanded = store.expand(&b_ref, Some("raw"), None, None, None, None);
-    assert!(!expanded.found, "#B oob must not succeed");
-    assert!(
-        expanded.reason.starts_with("fragment-out-of-range"),
-        "got: {}",
-        expanded.reason
-    );
-    assert_eq!(expanded.ref_id, b_ref);
-    assert!(expanded.content.is_empty());
-}
-
-#[test]
-fn b_fragment_malformed_returns_error() {
-    let (mut store, _cache, _dir) = temp_store();
-    let payload = "hello\n";
-    let stored = store
-        .store_payload(payload, ContentType::Unknown, None, None, None)
-        .unwrap();
-    let b_ref = format!("{}#Babc", stored.blob_ref);
-    let expanded = store.expand(&b_ref, Some("raw"), None, None, None, None);
-    assert!(!expanded.found);
-    assert_eq!(expanded.reason, "fragment-malformed");
-}
-
-#[test]
-fn b_fragment_preserves_ref_id_in_error() {
-    let (mut store, _cache, _dir) = temp_store();
-    let payload = "hello\n";
-    let stored = store
-        .store_payload(payload, ContentType::Unknown, None, None, None)
-        .unwrap();
-    let b_ref = format!("{}#B5-1", stored.blob_ref);
-    let expanded = store.expand(&b_ref, Some("raw"), None, None, None, None);
-    assert_eq!(expanded.ref_id, b_ref);
-}
-
-#[test]
-fn b_fragment_full_range_returns_all_bytes() {
-    let (mut store, _cache, _dir) = temp_store();
-    let payload = "hello world\n";
-    let stored = store
-        .store_payload(payload, ContentType::Unknown, None, None, None)
-        .unwrap();
-    let b_ref = format!("{}#B0-{}", stored.blob_ref, payload.len());
-    let expanded = store.expand(&b_ref, Some("raw"), None, None, None, None);
-    assert!(expanded.found);
-    assert_eq!(expanded.content, payload);
-}
-
-#[test]
-fn l_fragment_returns_first_three_lines() {
-    let (mut store, _cache, _dir) = temp_store();
-    let payload = "a\nb\nc\nd\ne\n";
-    let stored = store
-        .store_payload(payload, ContentType::Unknown, None, None, None)
-        .unwrap();
-    let l_ref = format!("{}#L1-L3", stored.blob_ref);
-    let expanded = store.expand(&l_ref, Some("raw"), None, None, None, None);
-    assert!(expanded.found, "#L1-L3 must succeed: {}", expanded.reason);
-    assert_eq!(expanded.content, "a\nb\nc\n");
-}
-
-#[test]
-fn l_fragment_zero_line_returns_error() {
-    let (mut store, _cache, _dir) = temp_store();
-    let payload = "a\nb\nc\n";
-    let stored = store
-        .store_payload(payload, ContentType::Unknown, None, None, None)
-        .unwrap();
-    let l_ref = format!("{}#L0", stored.blob_ref);
-    let expanded = store.expand(&l_ref, Some("raw"), None, None, None, None);
-    assert!(!expanded.found, "#L0 must not succeed");
-    assert_eq!(expanded.reason, "fragment-malformed");
-    assert_eq!(expanded.ref_id, l_ref);
-}
-
-#[test]
-fn l_fragment_reversed_returns_error() {
-    let (mut store, _cache, _dir) = temp_store();
-    let payload = "a\nb\nc\n";
-    let stored = store
-        .store_payload(payload, ContentType::Unknown, None, None, None)
-        .unwrap();
-    let l_ref = format!("{}#L5-L2", stored.blob_ref);
-    let expanded = store.expand(&l_ref, Some("raw"), None, None, None, None);
-    assert!(!expanded.found, "#L reversed must not succeed");
-    assert_eq!(expanded.reason, "fragment-reversed");
-    assert_eq!(expanded.ref_id, l_ref);
-}
-
-#[test]
-fn l_fragment_oob_returns_error() {
-    let (mut store, _cache, _dir) = temp_store();
-    let payload = "a\nb\nc\n";
-    let stored = store
-        .store_payload(payload, ContentType::Unknown, None, None, None)
-        .unwrap();
-    let l_ref = format!("{}#L1-L100", stored.blob_ref);
-    let expanded = store.expand(&l_ref, Some("raw"), None, None, None, None);
-    assert!(!expanded.found, "#L oob must not succeed");
-    assert!(
-        expanded.reason.starts_with("window-out-of-range"),
-        "got: {}",
-        expanded.reason
-    );
-}
-
-#[test]
-fn l_fragment_empty_file_returns_error() {
-    let (mut store, _cache, _dir) = temp_store();
-    let payload = "";
-    let stored = store
-        .store_payload(payload, ContentType::Unknown, None, None, None)
-        .unwrap();
-    let l_ref = format!("{}#L1", stored.blob_ref);
-    let expanded = store.expand(&l_ref, Some("raw"), None, None, None, None);
-    assert!(!expanded.found, "#L1 on empty file must not succeed");
-    assert!(
-        expanded.reason.starts_with("window-out-of-range"),
-        "got: {}",
-        expanded.reason
-    );
-}
-
-#[test]
-fn l_fragment_preserves_crlf() {
-    let (mut store, _cache, _dir) = temp_store();
-    let payload = "a\r\nb\r\nc\r\n";
-    let stored = store
-        .store_payload(payload, ContentType::Unknown, None, None, None)
-        .unwrap();
-    let l_ref = format!("{}#L1-L2", stored.blob_ref);
-    let expanded = store.expand(&l_ref, Some("raw"), None, None, None, None);
-    assert!(
-        expanded.found,
-        "#L1-L2 CRLF must succeed: {}",
-        expanded.reason
-    );
-    assert_eq!(expanded.content, "a\r\nb\r\n");
-}
-
-#[test]
-fn l_fragment_preserves_trailing_newline() {
-    let (mut store, _cache, _dir) = temp_store();
-    let payload = "a\nb\n";
-    let stored = store
-        .store_payload(payload, ContentType::Unknown, None, None, None)
-        .unwrap();
-    let l_ref = format!("{}#L1-L2", stored.blob_ref);
-    let expanded = store.expand(&l_ref, Some("raw"), None, None, None, None);
-    assert!(expanded.found);
-    assert_eq!(expanded.content, "a\nb\n");
-    assert!(
-        expanded.content.ends_with('\n'),
-        "trailing newline must be preserved"
-    );
-}
-
-#[test]
-fn l_fragment_single_line_returns_one_line() {
-    let (mut store, _cache, _dir) = temp_store();
-    let payload = "a\nb\nc\n";
-    let stored = store
-        .store_payload(payload, ContentType::Unknown, None, None, None)
-        .unwrap();
-    let l_ref = format!("{}#L2", stored.blob_ref);
-    let expanded = store.expand(&l_ref, Some("raw"), None, None, None, None);
-    assert!(expanded.found);
-    assert_eq!(expanded.content, "b\n");
-}
-
-#[test]
-fn unknown_fragment_kind_returns_error() {
-    let (mut store, _cache, _dir) = temp_store();
-    let payload = "hello\n";
-    let stored = store
-        .store_payload(payload, ContentType::Unknown, None, None, None)
-        .unwrap();
-    let x_ref = format!("{}#X1-3", stored.blob_ref);
-    let expanded = store.expand(&x_ref, Some("raw"), None, None, None, None);
-    assert!(!expanded.found);
-    assert_eq!(expanded.reason, "fragment-unknown-kind");
-}
-
-#[test]
-fn duplicate_fragment_returns_error() {
-    let (mut store, _cache, _dir) = temp_store();
-    let payload = "hello\n";
-    let stored = store
-        .store_payload(payload, ContentType::Unknown, None, None, None)
-        .unwrap();
-    let dup_ref = format!("{}#B0-3#L1-2", stored.blob_ref);
-    let expanded = store.expand(&dup_ref, Some("raw"), None, None, None, None);
-    assert!(!expanded.found);
-    assert_eq!(expanded.reason, "fragment-duplicate");
-}
-
-#[test]
-fn b_fragment_no_fallback_to_full_payload() {
-    let (mut store, _cache, _dir) = temp_store();
-    let payload = "byte-range payload\nline two\n";
-    let stored = store
-        .store_payload(payload, ContentType::Unknown, None, None, None)
-        .unwrap();
-    // #B0-1 should return only 1 byte, not the full payload
-    let b_ref = format!("{}#B0-1", stored.blob_ref);
-    let expanded = store.expand(&b_ref, Some("raw"), None, None, None, None);
-    assert!(expanded.found);
-    assert_eq!(expanded.content, "b");
-    assert_ne!(expanded.content, payload);
+fn l_fragment_matrix() {
+    let three = "a\nb\nc\n";
+    let cases: &[(&str, &str, FragExpect<'_>)] = &[
+        ("a\nb\nc\nd\ne\n", "L1-L3", FragExpect::Ok("a\nb\nc\n")),
+        (three, "L0", FragExpect::Err("fragment-malformed")),
+        (three, "L5-L2", FragExpect::Err("fragment-reversed")),
+        (three, "L1-L100", FragExpect::ErrPrefix("window-out-of-range")),
+        ("", "L1", FragExpect::ErrPrefix("window-out-of-range")),
+        ("a\r\nb\r\nc\r\n", "L1-L2", FragExpect::Ok("a\r\nb\r\n")),
+        ("a\nb\n", "L1-L2", FragExpect::Ok("a\nb\n")),
+        (three, "L2", FragExpect::Ok("b\n")),
+        ("hello\n", "X1-3", FragExpect::Err("fragment-unknown-kind")),
+        ("hello\n", "B0-3#L1-2", FragExpect::Err("fragment-duplicate")),
+    ];
+    for &(payload, fragment, expect) in cases {
+        assert_fragment_case(payload, fragment, expect);
+    }
+    let (expanded, _) = expand_fragment("a\nb\n", "L1-L2");
+    assert!(expanded.content.ends_with('\n'), "trailing newline must be preserved");
 }
 
 // ---------------------------------------------------------------------------
@@ -2153,9 +1744,7 @@ fn multi_line_fixture(n: usize) -> String {
 fn windowed_expand_middle_edges_and_full() {
     let (mut store, _cache, _dir) = temp_store();
     let payload = multi_line_fixture(200);
-    let stored = store
-        .store_payload(&payload, ContentType::Unknown, None, None, None)
-        .unwrap();
+    let stored = put_payload(&mut store, &payload);
 
     let full = store.expand(&stored.blob_ref, Some("raw"), None, None, None, None);
     assert!(full.found);
@@ -2192,101 +1781,30 @@ fn windowed_expand_middle_edges_and_full() {
     assert_eq!(last.content, "line-200\n");
 }
 
+fn assert_window_oob(store: &mut RecoveryStore, blob: &str, format: Option<&str>, start: Option<usize>, end: Option<usize>) {
+    let oob = store.expand(blob, format, start, end, None, None);
+    assert!(!oob.found, "OOB must not succeed empty");
+    assert!(oob.reason.starts_with("window-out-of-range"), "got {}", oob.reason);
+    assert!(!oob.reason.contains("ref-not-found"), "OOB must not look like missing ref: {}", oob.reason);
+    assert_eq!(oob.ref_id, blob);
+}
+
 #[test]
 fn windowed_expand_oob_is_structured_not_ref_not_found() {
     let (mut store, _cache, _dir) = temp_store();
-    let payload = multi_line_fixture(50);
-    let stored = store
-        .store_payload(&payload, ContentType::Unknown, None, None, None)
-        .unwrap();
-    let oob = store.expand(
-        &stored.blob_ref,
-        Some("raw"),
-        Some(500),
-        Some(510),
-        None,
-        None,
-    );
-    assert!(!oob.found);
-    assert!(
-        oob.reason.starts_with("window-out-of-range"),
-        "got {}",
-        oob.reason
-    );
-    assert!(
-        !oob.reason.contains("ref-not-found"),
-        "OOB must not look like missing ref: {}",
-        oob.reason
-    );
-    assert_eq!(oob.ref_id, stored.blob_ref);
-
-    let inverted = store.expand(&stored.blob_ref, Some("raw"), Some(10), Some(5), None, None);
-    assert!(!inverted.found);
-    assert!(inverted.reason.starts_with("window-out-of-range"));
-
-    let end_past_last_line = store.expand(
-        &stored.blob_ref,
-        Some("raw"),
-        Some(40),
-        Some(60),
-        None,
-        None,
-    );
-    assert!(!end_past_last_line.found);
-    assert!(
-        end_past_last_line.reason.starts_with("window-out-of-range"),
-        "got {}",
-        end_past_last_line.reason
-    );
+    let blob = put_payload(&mut store, &multi_line_fixture(50)).blob_ref;
+    assert_window_oob(&mut store, &blob, Some("raw"), Some(500), Some(510));
+    assert_window_oob(&mut store, &blob, Some("raw"), Some(10), Some(5));
+    assert_window_oob(&mut store, &blob, Some("raw"), Some(40), Some(60));
 }
 
 #[test]
 fn selector_lines_oob_is_structured_not_empty_success() {
     let (mut store, _cache, _dir) = temp_store();
-    let payload = multi_line_fixture(50);
-    let stored = store
-        .store_payload(&payload, ContentType::Unknown, None, None, None)
-        .unwrap();
-    let oob = store.expand(
-        &stored.blob_ref,
-        Some("lines:500-510"),
-        None,
-        None,
-        None,
-        None,
-    );
-    assert!(!oob.found, "selector OOB must not succeed empty");
-    assert!(
-        oob.reason.starts_with("window-out-of-range"),
-        "got {}",
-        oob.reason
-    );
-
-    let around = store.expand(
-        &stored.blob_ref,
-        Some("around:L500:2"),
-        None,
-        None,
-        None,
-        None,
-    );
-    assert!(!around.found);
-    assert!(around.reason.starts_with("window-out-of-range"));
-
-    let end_past_last_line = store.expand(
-        &stored.blob_ref,
-        Some("lines:40-60"),
-        None,
-        None,
-        None,
-        None,
-    );
-    assert!(!end_past_last_line.found);
-    assert!(
-        end_past_last_line.reason.starts_with("window-out-of-range"),
-        "got {}",
-        end_past_last_line.reason
-    );
+    let blob = put_payload(&mut store, &multi_line_fixture(50)).blob_ref;
+    assert_window_oob(&mut store, &blob, Some("lines:500-510"), None, None);
+    assert_window_oob(&mut store, &blob, Some("around:L500:2"), None, None);
+    assert_window_oob(&mut store, &blob, Some("lines:40-60"), None, None);
 }
 
 #[test]
@@ -2294,9 +1812,7 @@ fn windowed_expand_visible_tokens_much_less_than_full() {
     let (mut store, _cache, _dir) = temp_store();
     // ~200 lines × ~8 tokens-ish → full multi-k; 50-line window << full
     let payload = multi_line_fixture(200);
-    let stored = store
-        .store_payload(&payload, ContentType::Unknown, None, None, None)
-        .unwrap();
+    let stored = put_payload(&mut store, &payload);
     store.recovery_tokens = 0;
     let full = store.expand(&stored.blob_ref, Some("raw"), None, None, None, None);
     let full_tokens = full.tokens;
@@ -2323,47 +1839,23 @@ fn windowed_expand_visible_tokens_much_less_than_full() {
 
 #[test]
 fn classify_ref_maps_kind_and_content_type() {
-    assert_eq!(
-        classify_ref("tz://file/abc", Some(ContentType::Unknown)),
-        ContentClass::SourceFile
-    );
-    assert_eq!(
-        classify_ref("tz://search/abc", Some(ContentType::Unknown)),
-        ContentClass::SearchHits
-    );
-    assert_eq!(
-        classify_ref("tz://unit/abc", Some(ContentType::Diff)),
-        ContentClass::Diff
-    );
-    assert_eq!(
-        classify_ref("tz://unit/abc", Some(ContentType::ShellOutput)),
-        ContentClass::ShellOutput
-    );
-    assert_eq!(
-        classify_ref("tz://blob/abc", Some(ContentType::Code)),
-        ContentClass::SourceFile
-    );
-    assert_eq!(
-        classify_ref("tz://blob/abc", Some(ContentType::Diff)),
-        ContentClass::Diff
-    );
-    assert_eq!(
-        classify_ref("tz://blob/abc", Some(ContentType::ShellOutput)),
-        ContentClass::ShellOutput
-    );
-    assert_eq!(
-        classify_ref("tz://blob/abc", Some(ContentType::Markdown)),
-        ContentClass::Doc
-    );
-    assert_eq!(
-        classify_ref("tz://blob/abc", Some(ContentType::Unknown)),
-        ContentClass::BinaryPreview
-    );
-    assert_eq!(
-        classify_ref("tz://codemode/execution/x/code", None),
-        ContentClass::Unknown
-    );
+    let cases = [
+        ("tz://file/abc", Some(ContentType::Unknown), ContentClass::SourceFile),
+        ("tz://search/abc", Some(ContentType::Unknown), ContentClass::SearchHits),
+        ("tz://unit/abc", Some(ContentType::Diff), ContentClass::Diff),
+        ("tz://unit/abc", Some(ContentType::ShellOutput), ContentClass::ShellOutput),
+        ("tz://blob/abc", Some(ContentType::Code), ContentClass::SourceFile),
+        ("tz://blob/abc", Some(ContentType::Diff), ContentClass::Diff),
+        ("tz://blob/abc", Some(ContentType::ShellOutput), ContentClass::ShellOutput),
+        ("tz://blob/abc", Some(ContentType::Markdown), ContentClass::Doc),
+        ("tz://blob/abc", Some(ContentType::Unknown), ContentClass::BinaryPreview),
+        ("tz://codemode/execution/x/code", None, ContentClass::Unknown),
+    ];
+    for (ref_id, ct, class) in cases {
+        assert_eq!(classify_ref(ref_id, ct), class);
+    }
 }
+
 
 #[test]
 fn export_class_stats_reports_per_class_rates() {

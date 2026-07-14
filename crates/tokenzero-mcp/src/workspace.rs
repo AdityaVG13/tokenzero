@@ -281,81 +281,38 @@ mod tests {
     use tempfile::tempdir;
 
     #[test]
-    fn cwd_dot_zerostack_does_not_contaminate_tempdir_resolution() {
-        let dir = tempdir().unwrap();
-        let root = dir.path();
-        let unrelated = tempdir().unwrap();
-        let _ = fs::create_dir_all(unrelated.path().join(".zerostack/tokenzero"));
-        assert_eq!(
-            default_recovery_cache_path(root),
-            root.join(".tokenzero/recovery-cache.json")
-        );
-    }
-
-    #[test]
-    fn pure_resolve_store_root_ignores_pin_without_opt_in() {
-        let proj = tempdir().unwrap();
-        let shared = tempdir().unwrap();
-        assert!(
-            resolve_store_root_with_env(proj.path(), Some(shared.path().as_os_str()), false)
-                .is_none()
-        );
-        assert_eq!(
-            resolve_store_root_with_env(proj.path(), Some(shared.path().as_os_str()), true)
-                .unwrap(),
-            shared.path()
-        );
-    }
-
-    #[test]
-    fn pure_two_roots_isolate_when_pin_present_without_opt_in() {
+    fn roots_isolate_without_shared_opt_in() {
         let a = tempdir().unwrap();
         let b = tempdir().unwrap();
         let shared = tempdir().unwrap();
-        let pin = Some(shared.path().as_os_str());
-        assert!(resolve_store_root_with_env(a.path(), pin, false).is_none());
-        assert!(resolve_store_root_with_env(b.path(), pin, false).is_none());
-        assert_ne!(
-            default_recovery_cache_path(a.path()),
-            default_recovery_cache_path(b.path())
-        );
-        assert!(default_recovery_cache_path(a.path()).starts_with(a.path()));
-        assert!(default_recovery_cache_path(b.path()).starts_with(b.path()));
+        for root in [a.path(), b.path()] {
+            assert!(resolve_store_root_with_env(root, Some(shared.path().as_os_str()), false).is_none());
+            assert!(default_recovery_cache_path(root).starts_with(root));
+        }
+        assert_eq!(resolve_store_root_with_env(a.path(), Some(shared.path().as_os_str()), true).unwrap(), shared.path());
+        assert_ne!(default_recovery_cache_path(a.path()), default_recovery_cache_path(b.path()));
     }
 
     #[test]
-    fn unified_recovery_default_when_dot_zerostack_exists() {
+    fn unrelated_and_local_zerostack_resolution() {
         let dir = tempdir().unwrap();
         let root = dir.path();
+        let unrelated = tempdir().unwrap();
+        fs::create_dir_all(unrelated.path().join(".zerostack/tokenzero")).unwrap();
+        assert_eq!(default_recovery_cache_path(root), root.join(".tokenzero/recovery-cache.json"));
         fs::create_dir_all(root.join(".zerostack/tokenzero")).unwrap();
-        assert_eq!(
-            default_recovery_cache_path(root),
-            root.join(".zerostack/tokenzero/recovery-cache.json")
-        );
+        assert_eq!(default_recovery_cache_path(root), root.join(".zerostack/tokenzero/recovery-cache.json"));
     }
 
     #[test]
-    fn recovery_cache_path_honors_env_between_explicit_and_default() {
+    fn recovery_cache_precedence() {
         let dir = tempdir().unwrap();
         let root = dir.path();
         let explicit = root.join("explicit.json");
         let env_path = root.join("env.json");
-        assert_eq!(
-            resolve_recovery_cache_path_with_env(
-                root,
-                Some(explicit.clone()),
-                Some(env_path.clone().into_os_string()),
-            ),
-            explicit
-        );
-        assert_eq!(
-            resolve_recovery_cache_path_with_env(
-                root,
-                None,
-                Some(env_path.clone().into_os_string())
-            ),
-            env_path
-        );
+        for (given, expected) in [(Some(explicit.clone()), explicit), (None, env_path.clone())] {
+            assert_eq!(resolve_recovery_cache_path_with_env(root, given, Some(env_path.clone().into_os_string())), expected);
+        }
     }
 
     #[test]
@@ -363,21 +320,10 @@ mod tests {
         let dir = tempdir().unwrap();
         let root = dir.path();
         let pin = root.join("shared-store");
-        let report = store_resolution_report_with_env(
-            root,
-            None,
-            None,
-            Some(pin.clone().into_os_string()),
-            false,
-        );
+        let report = store_resolution_report_with_env(root, None, None, Some(pin.into_os_string()), false);
         assert!(!report.shared_store_opt_in);
         assert!(report.global_pin_set);
         assert_eq!(report.isolation_mode, "per_root");
-        assert!(
-            report
-                .mismatch_summary
-                .as_ref()
-                .is_some_and(|s| s.contains("ignored for isolation"))
-        );
+        assert!(report.mismatch_summary.as_ref().is_some_and(|s| s.contains("ignored for isolation")));
     }
 }

@@ -197,6 +197,41 @@ enum FragmentSpec {
 /// fragment), unknown kind, and non-numeric values are rejected with typed
 /// [`FragmentError`]s. Out-of-range checks that need content length are
 /// deferred to the caller.
+/// Shared numeric range parser for `#B`/`#L` fragments.
+///
+/// Accepts `-` or `,` separators. `allow_single` treats a lone number as start==end.
+/// `require_nonzero_start` rejects start==0 (line ranges). On reverse (`start > end`)
+/// returns `Err(true)`; other parse failures return `Err(false)` so expand-path and
+/// ZeroRef taxonomies can map independently.
+fn parse_fragment_bounds_core(
+    value: &str,
+    repeated_kind: char,
+    allow_single: bool,
+    require_nonzero_start: bool,
+) -> Result<(usize, usize), bool> {
+    let separated = value.split_once(',').or_else(|| value.split_once('-'));
+    let (start, end) = match separated {
+        Some((start, end)) => (start, end),
+        None if allow_single => (value, value),
+        None => return Err(false),
+    };
+    let start = start
+        .trim_start_matches(repeated_kind)
+        .parse::<usize>()
+        .map_err(|_| false)?;
+    let end = end
+        .trim_start_matches(repeated_kind)
+        .parse::<usize>()
+        .map_err(|_| false)?;
+    if require_nonzero_start && start == 0 {
+        return Err(false);
+    }
+    if start > end {
+        return Err(true);
+    }
+    Ok((start, end))
+}
+
 fn parse_fragment_spec(fragment: &str) -> Result<FragmentSpec, FragmentError> {
     if fragment.is_empty() {
         return Err(FragmentError::Malformed);
@@ -204,43 +239,24 @@ fn parse_fragment_spec(fragment: &str) -> Result<FragmentSpec, FragmentError> {
     if fragment.contains('#') {
         return Err(FragmentError::DuplicateFragment);
     }
-    let kind = &fragment[..1];
+    let kind = fragment.as_bytes().first().copied().unwrap_or(0) as char;
     let rest = &fragment[1..];
+    let map_err = |reversed: bool| {
+        if reversed {
+            FragmentError::Reversed
+        } else {
+            FragmentError::Malformed
+        }
+    };
     match kind {
-        "B" => {
-            let (start_str, end_str) = rest
-                .split_once('-')
-                .or_else(|| rest.split_once(','))
-                .unwrap_or((rest, rest));
-            let start = start_str
-                .trim_start_matches('B')
-                .parse::<usize>()
-                .map_err(|_| FragmentError::Malformed)?;
-            let end = end_str
-                .trim_start_matches('B')
-                .parse::<usize>()
-                .map_err(|_| FragmentError::Malformed)?;
-            if start > end {
-                return Err(FragmentError::Reversed);
-            }
+        'B' => {
+            let (start, end) =
+                parse_fragment_bounds_core(rest, 'B', true, false).map_err(map_err)?;
             Ok(FragmentSpec::Byte { start, end })
         }
-        "L" => {
-            let (start_str, end_str) = rest.split_once('-').unwrap_or((rest, rest));
-            let start = start_str
-                .trim_start_matches('L')
-                .parse::<usize>()
-                .map_err(|_| FragmentError::Malformed)?;
-            let end = end_str
-                .trim_start_matches('L')
-                .parse::<usize>()
-                .map_err(|_| FragmentError::Malformed)?;
-            if start == 0 {
-                return Err(FragmentError::Malformed);
-            }
-            if start > end {
-                return Err(FragmentError::Reversed);
-            }
+        'L' => {
+            let (start, end) =
+                parse_fragment_bounds_core(rest, 'L', true, true).map_err(map_err)?;
             Ok(FragmentSpec::Line { start, end })
         }
         _ => Err(FragmentError::UnknownKind),
@@ -248,14 +264,14 @@ fn parse_fragment_spec(fragment: &str) -> Result<FragmentSpec, FragmentError> {
 }
 
 /// Stable reason string for a [`FragmentError`] used in `ExpansionResult::reason`.
-fn fragment_error_reason(err: FragmentError) -> String {
+fn fragment_error_reason(err: FragmentError) -> &'static str {
     match err {
-        FragmentError::Malformed => "fragment-malformed".to_string(),
-        FragmentError::Reversed => "fragment-reversed".to_string(),
-        FragmentError::OutOfRange => "fragment-out-of-range".to_string(),
-        FragmentError::NonUtf8Line => "non_utf8_line_fragment".to_string(),
-        FragmentError::UnknownKind => "fragment-unknown-kind".to_string(),
-        FragmentError::DuplicateFragment => "fragment-duplicate".to_string(),
+        FragmentError::Malformed => "fragment-malformed",
+        FragmentError::Reversed => "fragment-reversed",
+        FragmentError::OutOfRange => "fragment-out-of-range",
+        FragmentError::NonUtf8Line => "non_utf8_line_fragment",
+        FragmentError::UnknownKind => "fragment-unknown-kind",
+        FragmentError::DuplicateFragment => "fragment-duplicate",
     }
 }
 
@@ -381,24 +397,9 @@ fn parse_zeroref_v1_fragment_bounds(
     repeated_kind: char,
     allow_single: bool,
 ) -> Result<(usize, usize), ZeroRefError> {
-    let separated = value.split_once(',').or_else(|| value.split_once('-'));
-    let (start, end) = match separated {
-        Some((start, end)) => (start, end),
-        None if allow_single => (value, value),
-        None => return Err(ZeroRefError::Malformed),
-    };
-    let start = start
-        .parse::<usize>()
-        .map_err(|_| ZeroRefError::Malformed)?;
-    let end = end
-        .strip_prefix(repeated_kind)
-        .unwrap_or(end)
-        .parse::<usize>()
-        .map_err(|_| ZeroRefError::Malformed)?;
-    if (repeated_kind == 'L' && start == 0) || start > end {
-        return Err(ZeroRefError::Malformed);
-    }
-    Ok((start, end))
+    // ZeroRef taxonomy collapses reverse/malformed into Malformed (unlike expand path).
+    parse_fragment_bounds_core(value, repeated_kind, allow_single, repeated_kind == 'L')
+        .map_err(|_| ZeroRefError::Malformed)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1155,15 +1156,21 @@ impl RecoveryStore {
     ) -> ExpansionResult {
         self.recovery_count += 1;
         let requested_ref = ref_id.to_string();
+        let selector_owned = selector.map(str::to_string);
+        macro_rules! miss {
+            ($reason:expr) => {
+                ExpansionResult::missing(
+                    requested_ref.clone(),
+                    selector_owned.clone(),
+                    $reason,
+                )
+            };
+        }
         // Validate fragments before the ZeroRef structural parser so fragment
         // failures retain their dedicated error taxonomy.
         if let Some((_, fragment)) = ref_id.split_once('#') {
             if let Err(err) = parse_fragment_spec(fragment) {
-                return ExpansionResult::missing(
-                    requested_ref,
-                    selector.map(str::to_string),
-                    fragment_error_reason(err),
-                );
+                return miss!(fragment_error_reason(err));
             }
         }
         // Full-hash portable blobs use the canonical shared CAS before the
@@ -1173,31 +1180,17 @@ impl RecoveryStore {
             Ok(parsed) => Some(parsed),
             Err(ZeroRefError::Unsupported) => None,
             Err(ZeroRefError::LegacyAmbiguity) if is_legacy_same_store_blob_ref(ref_id) => None,
-            Err(err) => {
-                return ExpansionResult::missing(
-                    requested_ref,
-                    selector.map(str::to_string),
-                    format!("zeroref-{err}"),
-                );
-            }
+            Err(err) => return miss!(format!("zeroref-{err}")),
         };
         if portable.is_none()
             && (ref_id.starts_with("fz://") || ref_id.starts_with("gz://"))
             && !ref_id.starts_with("fz://blob/")
             && !ref_id.starts_with("gz://blob/")
         {
-            return ExpansionResult::missing(
-                requested_ref,
-                selector.map(str::to_string),
-                "unsupported-ref-kind",
-            );
+            return miss!("unsupported-ref-kind");
         }
         let Some(lookup_ref) = canonicalize_expand_ref(ref_id) else {
-            return ExpansionResult::missing(
-                requested_ref,
-                selector.map(str::to_string),
-                "invalid-ref",
-            );
+            return miss!("invalid-ref");
         };
 
         // Check legacy_compat and ambiguous-aliases gates on the
@@ -1206,18 +1199,10 @@ impl RecoveryStore {
         // regardless of whether an alias exists.
         if is_legacy_same_store_blob_ref(&lookup_ref) {
             if !self.config.legacy_compat {
-                return ExpansionResult::missing(
-                    requested_ref,
-                    selector.map(str::to_string),
-                    "legacy-ref-disabled",
-                );
+                return miss!("legacy-ref-disabled");
             }
             if self.state.ambiguous_aliases.contains(&lookup_ref) {
-                return ExpansionResult::missing(
-                    requested_ref,
-                    selector.map(str::to_string),
-                    "legacy-ambiguous",
-                );
+                return miss!("legacy-ambiguous");
             }
             self.legacy_read_count += 1;
         }
@@ -1229,21 +1214,14 @@ impl RecoveryStore {
         // Re-parse the resolved (aliased) ref for shared CAS dispatch.
         let portable_resolved = match parse_zeroref_v1_blob(&resolved_ref, None) {
             Ok(parsed) => Some(parsed),
-            Err(ZeroRefError::LegacyAmbiguity) | Err(ZeroRefError::Unsupported) => None,
-            Err(_) => None,
+            Err(ZeroRefError::LegacyAmbiguity) | Err(ZeroRefError::Unsupported) | Err(_) => None,
         };
 
         let shared_content = match (&portable_resolved, &self.shared_cas) {
             (Some(portable), Some(cas)) => match cas.resolve(&portable.hash) {
                 Ok(bytes) => match String::from_utf8(bytes) {
                     Ok(content) => Some(content),
-                    Err(_) => {
-                        return ExpansionResult::missing(
-                            requested_ref,
-                            selector.map(str::to_string),
-                            "shared-cas-non-utf8",
-                        );
-                    }
+                    Err(_) => return miss!("shared-cas-non-utf8"),
                 },
                 Err(SharedCasError::NotFound) if requested_ref.starts_with("tz://") => None,
                 Err(SharedCasError::NotFound) => {
@@ -1260,50 +1238,18 @@ impl RecoveryStore {
                     ) {
                         return result;
                     }
-                    return ExpansionResult::missing(
-                        requested_ref,
-                        selector.map(str::to_string),
-                        "shared-cas-missing",
-                    );
+                    return miss!("shared-cas-missing");
                 }
-                Err(SharedCasError::Corruption) => {
-                    return ExpansionResult::missing(
-                        requested_ref,
-                        selector.map(str::to_string),
-                        "shared-cas-corruption",
-                    );
-                }
-                Err(SharedCasError::Policy) => {
-                    return ExpansionResult::missing(
-                        requested_ref,
-                        selector.map(str::to_string),
-                        "shared-cas-policy",
-                    );
-                }
-                Err(SharedCasError::Io(_)) => {
-                    return ExpansionResult::missing(
-                        requested_ref,
-                        selector.map(str::to_string),
-                        "shared-cas-io",
-                    );
-                }
-                Err(SharedCasError::InvalidHash(_)) => {
-                    return ExpansionResult::missing(
-                        requested_ref,
-                        selector.map(str::to_string),
-                        "zeroref-malformed",
-                    );
-                }
+                Err(SharedCasError::Corruption) => return miss!("shared-cas-corruption"),
+                Err(SharedCasError::Policy) => return miss!("shared-cas-policy"),
+                Err(SharedCasError::Io(_)) => return miss!("shared-cas-io"),
+                Err(SharedCasError::InvalidHash(_)) => return miss!("zeroref-malformed"),
             },
             _ => None,
         };
         let ref_id = resolved_ref;
         let Some(parsed) = parse_ref(&ref_id) else {
-            return ExpansionResult::missing(
-                requested_ref,
-                selector.map(str::to_string),
-                "invalid-ref",
-            );
+            return miss!("invalid-ref");
         };
         let mut selected_start = start_line;
         let mut selected_end = end_line;
@@ -1312,11 +1258,7 @@ impl RecoveryStore {
         // fallback to the full payload for a fragment request.
         let fragment_spec = parsed.fragment.as_deref().map(parse_fragment_spec);
         if let Some(Err(err)) = &fragment_spec {
-            return ExpansionResult::missing(
-                requested_ref,
-                selector.map(str::to_string),
-                fragment_error_reason(*err),
-            );
+            return miss!(fragment_error_reason(*err));
         }
         if let Some(Ok(FragmentSpec::Line { start, end })) = &fragment_spec {
             selected_start = Some(*start);
@@ -1330,13 +1272,7 @@ impl RecoveryStore {
         } else {
             match self.resolve_ref_with_index(&parsed.kind, &parsed.bare) {
                 RefResolve::Found(content) => content,
-                RefResolve::Stale => {
-                    return ExpansionResult::missing(
-                        requested_ref,
-                        selector.map(str::to_string),
-                        "stale-ref",
-                    );
-                }
+                RefResolve::Stale => return miss!("stale-ref"),
                 RefResolve::NotFound => {
                     let reason = if requested_ref.starts_with("fz://blob/")
                         || requested_ref.starts_with("gz://blob/")
@@ -1345,27 +1281,13 @@ impl RecoveryStore {
                     } else {
                         ref_not_found_reason(&parsed.kind)
                     };
-                    return ExpansionResult::missing(
-                        requested_ref,
-                        selector.map(str::to_string),
-                        reason,
-                    );
+                    return miss!(reason);
                 }
-                RefResolve::DecodeFailed => {
-                    return ExpansionResult::missing(
-                        requested_ref,
-                        selector.map(str::to_string),
-                        "decode-failed",
-                    );
-                }
+                RefResolve::DecodeFailed => return miss!("decode-failed"),
             }
         };
         if parsed.kind == "file" && self.file_ref_is_stale(&parsed.bare) {
-            return ExpansionResult::missing(
-                requested_ref,
-                selector.map(str::to_string),
-                "stale-ref",
-            );
+            return miss!("stale-ref");
         }
         // Apply #B byte-range fragment after content resolution (cqr.5).
         // Zero-based half-open: content[start..end]. start == end → empty.
@@ -1373,26 +1295,14 @@ impl RecoveryStore {
         if let Some(Ok(FragmentSpec::Byte { start, end })) = &fragment_spec {
             let bytes = content.as_bytes();
             if *end > bytes.len() {
-                return ExpansionResult::missing(
-                    requested_ref,
-                    selector.map(str::to_string),
-                    format!(
-                        "fragment-out-of-range; start={start} end={end} len={}",
-                        bytes.len()
-                    ),
-                );
+                return miss!(format!(
+                    "fragment-out-of-range; start={start} end={end} len={}",
+                    bytes.len()
+                ));
             }
             let sliced = String::from_utf8_lossy(&bytes[*start..*end]).into_owned();
-            self.recovery_tokens += count_tokens(&sliced);
-            if let Some(store_path) = self.persistence_path.as_ref() {
-                let content_class = self
-                    .ref_classes
-                    .get(&ref_id)
-                    .copied()
-                    .unwrap_or_else(|| classify_ref(&ref_id, None));
-                record_ref_index_expanded(store_path, &ref_id, content_class);
-            }
-            return ExpansionResult::ok(requested_ref, selector.map(str::to_string), sliced);
+            self.note_expand(&ref_id, &sliced);
+            return ExpansionResult::ok(requested_ref, selector_owned, sliced);
         }
         // Explicit / selector line windows: OOB is a structured error, never
         // ref_not_found (zq9). 1-based inclusive; start past last line or end <
@@ -1400,24 +1310,18 @@ impl RecoveryStore {
         if let Some(start) = selected_start {
             let line_count = content_line_count(&content);
             if start == 0 || start > line_count {
-                return ExpansionResult::missing(
-                    requested_ref,
-                    selector.map(str::to_string),
-                    format!(
-                        "window-out-of-range; start={start} end={} lines={line_count}",
-                        selected_end
-                            .map(|e| e.to_string())
-                            .unwrap_or_else(|| start.to_string())
-                    ),
-                );
+                return miss!(format!(
+                    "window-out-of-range; start={start} end={} lines={line_count}",
+                    selected_end
+                        .map(|e| e.to_string())
+                        .unwrap_or_else(|| start.to_string())
+                ));
             }
             if let Some(end) = selected_end {
                 if end < start || end > line_count {
-                    return ExpansionResult::missing(
-                        requested_ref,
-                        selector.map(str::to_string),
-                        format!("window-out-of-range; start={start} end={end} lines={line_count}"),
-                    );
+                    return miss!(format!(
+                        "window-out-of-range; start={start} end={end} lines={line_count}"
+                    ));
                 }
             }
         }
@@ -1429,16 +1333,20 @@ impl RecoveryStore {
             anchor_kind,
             symbol,
         );
-        self.recovery_tokens += count_tokens(&selected);
+        self.note_expand(&ref_id, &selected);
+        ExpansionResult::ok(requested_ref, selector_owned, selected)
+    }
+
+    fn note_expand(&mut self, ref_id: &str, content: &str) {
+        self.recovery_tokens += count_tokens(content);
         if let Some(store_path) = self.persistence_path.as_ref() {
             let content_class = self
                 .ref_classes
-                .get(&ref_id)
+                .get(ref_id)
                 .copied()
-                .unwrap_or_else(|| classify_ref(&ref_id, None));
-            record_ref_index_expanded(store_path, &ref_id, content_class);
+                .unwrap_or_else(|| classify_ref(ref_id, None));
+            record_ref_index_expanded(store_path, ref_id, content_class);
         }
-        ExpansionResult::ok(requested_ref, selector.map(str::to_string), selected)
     }
 
     fn resolve_alias_chain(&self, ref_id: &str) -> Option<String> {
@@ -3215,6 +3123,18 @@ fn read_limited_utf8<R: Read>(
     Ok(String::from_utf8(bytes).ok())
 }
 
+fn merge_map_entries<T>(
+    session: &HashSet<&str>,
+    dst: &mut BTreeMap<String, T>,
+    src: BTreeMap<String, T>,
+) {
+    for (ref_id, value) in src {
+        if session.contains(ref_id.as_str()) || dst.contains_key(&ref_id) {
+            dst.insert(ref_id, value);
+        }
+    }
+}
+
 fn merge_states(
     existing: RecoveryState,
     current: RecoveryState,
@@ -3223,26 +3143,10 @@ fn merge_states(
 ) -> RecoveryState {
     let session: HashSet<&str> = session_refs.iter().map(String::as_str).collect();
     let mut merged = existing;
-    for (ref_id, value) in current.blobs {
-        if session.contains(ref_id.as_str()) || merged.blobs.contains_key(&ref_id) {
-            merged.blobs.insert(ref_id, value);
-        }
-    }
-    for (ref_id, value) in current.files {
-        if session.contains(ref_id.as_str()) || merged.files.contains_key(&ref_id) {
-            merged.files.insert(ref_id, value);
-        }
-    }
-    for (ref_id, value) in current.units {
-        if session.contains(ref_id.as_str()) || merged.units.contains_key(&ref_id) {
-            merged.units.insert(ref_id, value);
-        }
-    }
-    for (ref_id, value) in current.search_hits {
-        if session.contains(ref_id.as_str()) || merged.search_hits.contains_key(&ref_id) {
-            merged.search_hits.insert(ref_id, value);
-        }
-    }
+    merge_map_entries(&session, &mut merged.blobs, current.blobs);
+    merge_map_entries(&session, &mut merged.files, current.files);
+    merge_map_entries(&session, &mut merged.units, current.units);
+    merge_map_entries(&session, &mut merged.search_hits, current.search_hits);
     for (alias, target) in current.aliases {
         merged.aliases.insert(alias, target);
     }

@@ -39,58 +39,62 @@ pub struct DiscoverReport {
     pub os_warnings: Vec<String>,
 }
 
-pub fn supported_filters() -> Vec<FilterInfo> {
-    vec![
-        info("read", ["cat", "head", "tail", "wc"]),
-        info("search", ["rg", "grep", "findstr"]),
-        info("tree", ["find", "ls", "tree"]),
-        info("git", ["git status", "git diff", "git log"]),
-        info(
-            "test",
-            [
-                "pytest",
-                "cargo test",
-                "go test",
-                "npm test",
-                "pnpm test",
-                "yarn test",
-                "jest",
-                "vitest",
-            ],
-        ),
-        info(
-            "build",
-            [
-                "cargo build",
-                "npm run build",
-                "pnpm build",
-                "yarn build",
-                "tsc",
-                "eslint",
-                "ruff",
-                "mypy",
-                "clippy",
-            ],
-        ),
-        info("docker", ["docker ps", "docker logs", "docker compose"]),
-        info(
-            "kubectl",
-            ["kubectl get", "kubectl logs", "kubectl describe"],
-        ),
-        info("package", ["cargo", "npm", "pnpm", "yarn", "uv"]),
-        info("config", ["json", "yaml", "toml", "logs"]),
-    ]
-}
+#[derive(Clone, Copy)]
+enum RewriteKind { Read, Search, Tree, Git, Quiet, Passthrough }
 
-fn info<const N: usize>(family: &str, commands: [&str; N]) -> FilterInfo {
-    FilterInfo {
+struct RewriteRule { families: Words, kind: RewriteKind }
+
+// Ordered family dispatch keeps rewrite precedence explicit and data-driven.
+const REWRITE_RULES: &[RewriteRule] = &[
+    RewriteRule { families: &["read"], kind: RewriteKind::Read },
+    RewriteRule { families: &["search"], kind: RewriteKind::Search },
+    RewriteRule { families: &["tree"], kind: RewriteKind::Tree },
+    RewriteRule { families: &["git"], kind: RewriteKind::Git },
+    RewriteRule { families: &["test", "build", "package"], kind: RewriteKind::Quiet },
+    RewriteRule { families: &["docker", "kubectl"], kind: RewriteKind::Passthrough },
+];
+
+type Words = &'static [&'static str];
+
+const FILTER_SPECS: &[(&str, Words)] = &[
+    ("read", &["cat", "head", "tail", "wc"]),
+    ("search", &["rg", "grep", "findstr"]),
+    ("tree", &["find", "ls", "tree"]),
+    ("git", &["git status", "git diff", "git log"]),
+    ("test", &["pytest", "cargo test", "go test", "npm test", "pnpm test", "yarn test", "jest", "vitest"]),
+    ("build", &["cargo build", "npm run build", "pnpm build", "yarn build", "tsc", "eslint", "ruff", "mypy", "clippy"]),
+    ("docker", &["docker ps", "docker logs", "docker compose"]),
+    ("kubectl", &["kubectl get", "kubectl logs", "kubectl describe"]),
+    ("package", &["cargo", "npm", "pnpm", "yarn", "uv"]),
+    ("config", &["json", "yaml", "toml", "logs"]),
+];
+
+struct ClassRule { family: &'static str, commands: Words, subcommands: Words }
+
+// Ordered: specific command/subcommand pairs precede broad package families.
+const CLASS_RULES: &[ClassRule] = &[
+    ClassRule { family: "read", commands: &["cat", "head", "tail", "wc"], subcommands: &[] },
+    ClassRule { family: "search", commands: &["rg", "grep", "findstr"], subcommands: &[] },
+    ClassRule { family: "tree", commands: &["find", "ls", "tree"], subcommands: &[] },
+    ClassRule { family: "git", commands: &["git"], subcommands: &[] },
+    ClassRule { family: "test", commands: &["pytest", "unittest", "jest", "vitest"], subcommands: &[] },
+    ClassRule { family: "test", commands: &["cargo", "go", "npm", "pnpm", "yarn"], subcommands: &["test"] },
+    ClassRule { family: "build", commands: &["cargo"], subcommands: &["build"] },
+    ClassRule { family: "build", commands: &["npm", "pnpm", "yarn"], subcommands: &["run", "build"] },
+    ClassRule { family: "build", commands: &["tsc", "eslint", "ruff", "mypy", "clippy"], subcommands: &[] },
+    ClassRule { family: "docker", commands: &["docker"], subcommands: &[] },
+    ClassRule { family: "kubectl", commands: &["kubectl"], subcommands: &[] },
+    ClassRule { family: "package", commands: &["cargo", "npm", "pnpm", "yarn", "uv"], subcommands: &[] },
+];
+
+pub fn supported_filters() -> Vec<FilterInfo> {
+    FILTER_SPECS.iter().map(|&(family, commands)| FilterInfo {
         family: family.to_string(),
-        commands: commands.iter().map(|v| v.to_string()).collect(),
+        commands: commands.iter().map(|&command| command.to_string()).collect(),
         supported: true,
         exact_refs: true,
-    }
+    }).collect()
 }
-
 pub fn discover() -> DiscoverReport {
     DiscoverReport {
         schema_version: "tokenzero.discover.v1".to_string(),
@@ -105,38 +109,19 @@ pub fn discover() -> DiscoverReport {
 }
 
 pub fn os_warnings() -> Vec<String> {
-    let mut warnings = Vec::new();
-    if cfg!(windows) {
-        warnings
-            .push("verify PowerShell and cmd quoting with the OS matrix before launch".to_string());
-    }
-    warnings
+    cfg!(windows).then(|| "verify PowerShell and cmd quoting with the OS matrix before launch".to_string())
+        .into_iter().collect()
 }
 
 pub fn classify_command(command: &str) -> String {
     let parts = split_words(command);
     let first = parts.first().map(String::as_str).unwrap_or_default();
     let second = parts.get(1).map(String::as_str).unwrap_or_default();
-    match first {
-        "cat" | "head" | "tail" | "wc" => "read",
-        "rg" | "grep" | "findstr" => "search",
-        "find" | "ls" | "tree" => "tree",
-        "git" => "git",
-        "pytest" | "unittest" | "jest" | "vitest" => "test",
-        "cargo" if second == "test" => "test",
-        "go" if second == "test" => "test",
-        "npm" | "pnpm" | "yarn" if second == "test" => "test",
-        "cargo" if second == "build" => "build",
-        "npm" | "pnpm" | "yarn" if second == "run" || second == "build" => "build",
-        "tsc" | "eslint" | "ruff" | "mypy" | "clippy" => "build",
-        "docker" => "docker",
-        "kubectl" => "kubectl",
-        "cargo" | "npm" | "pnpm" | "yarn" | "uv" => "package",
-        _ => "unknown",
-    }
-    .to_string()
+    CLASS_RULES.iter().find(|rule| {
+        rule.commands.contains(&first)
+            && (rule.subcommands.is_empty() || rule.subcommands.contains(&second))
+    }).map_or("unknown", |rule| rule.family).to_string()
 }
-
 pub fn rewrite_command(command: &str, mode: &str, enabled: bool) -> RewriteResult {
     let family = classify_command(command);
     if !enabled || mode == "off" {
@@ -162,47 +147,25 @@ pub fn rewrite_command(command: &str, mode: &str, enabled: bool) -> RewriteResul
             false,
         );
     }
-    let rewritten = match family.as_str() {
-        "read" => rewrite_read(command),
-        "search" => rewrite_search(command),
-        "tree" => rewrite_tree(command),
-        "git" => rewrite_git(command),
-        "test" | "build" | "package" => {
-            Some(inject_quiet_flag(command).unwrap_or_else(|| command.to_string()))
-        }
-        "docker" | "kubectl" => Some(command.to_string()),
-        _ => None,
-    };
+    let rewritten = REWRITE_RULES.iter()
+        .find(|rule| rule.families.contains(&family.as_str()))
+        .and_then(|rule| apply_rewrite(rule.kind, command));
     finish_rewrite(command, &family, rewritten)
 }
 
 fn finish_rewrite(command: &str, family: &str, rewritten: Option<String>) -> RewriteResult {
-    match rewritten {
-        Some(value) if value != command => result(
+    if let Some(value) = rewritten {
+        let applied = value != command;
+        return result(
             command,
-            &value,
-            true,
-            "bounded tokenzero-safe rewrite",
+            if applied { &value } else { command },
+            applied,
+            if applied { "bounded tokenzero-safe rewrite" } else { "already bounded or passthrough" },
             family,
             true,
-        ),
-        Some(_) => result(
-            command,
-            command,
-            false,
-            "already bounded or passthrough",
-            family,
-            true,
-        ),
-        None => result(
-            command,
-            command,
-            false,
-            "unsupported command family",
-            family,
-            false,
-        ),
+        );
     }
+    result(command, command, false, "unsupported command family", family, false)
 }
 
 fn result(
@@ -225,64 +188,33 @@ fn result(
     }
 }
 
-fn rewrite_read(command: &str) -> Option<String> {
+fn apply_rewrite(kind: RewriteKind, command: &str) -> Option<String> {
     let parts = split_words(command);
-    match parts.first().map(String::as_str) {
-        Some("cat") if parts.len() >= 2 => {
-            Some(format!("tokenzero read {}", shell_join(&parts[1..])))
-        }
-        Some("head") | Some("tail") => Some(command.to_string()),
-        _ => None,
+    let first = parts.first().map(String::as_str);
+    match kind {
+        RewriteKind::Read => match first {
+            Some("cat") if parts.len() >= 2 => Some(format!("tokenzero read {}", shell_join(&parts[1..]))),
+            Some("head" | "tail") => Some(command.to_string()),
+            _ => None,
+        },
+        RewriteKind::Search => matches!(first, Some("rg" | "grep")).then(|| command.to_string()),
+        RewriteKind::Tree => match first {
+            Some("tree") if !parts.iter().any(|p| is_tree_depth_flag(p)) => Some(format!("{command} -L 2")),
+            Some("tree" | "find") => Some(command.to_string()),
+            Some("ls") if !parts.iter().any(|p| p.contains('R')) => Some(command.to_string()),
+            _ => None,
+        },
+        RewriteKind::Git => match parts.get(1).map(String::as_str) {
+            Some("log") if !parts.iter().any(|p| is_git_log_count_flag(p)) => Some(format!("{command} -n 80")),
+            Some("log" | "status" | "diff" | "show") => Some(command.to_string()),
+            Some("clone" | "fetch" | "pull") => Some(inject_quiet_flag(command).unwrap_or_else(|| command.to_string())),
+            _ => None,
+        },
+        RewriteKind::Quiet => Some(inject_quiet_flag(command).unwrap_or_else(|| command.to_string())),
+        RewriteKind::Passthrough => Some(command.to_string()),
     }
 }
 
-fn rewrite_search(command: &str) -> Option<String> {
-    let parts = split_words(command);
-    match parts.first().map(String::as_str) {
-        Some("rg") | Some("grep") if parts.len() >= 2 => Some(command.to_string()),
-        _ => None,
-    }
-}
-
-fn rewrite_tree(command: &str) -> Option<String> {
-    let parts = split_words(command);
-    match parts.first().map(String::as_str) {
-        Some("tree") => {
-            if parts.iter().any(|p| is_tree_depth_flag(p)) {
-                Some(command.to_string())
-            } else {
-                Some(format!("{command} -L 2"))
-            }
-        }
-        Some("ls") if !parts.iter().any(|p| p.contains('R')) => Some(command.to_string()),
-        Some("find") => Some(command.to_string()),
-        _ => None,
-    }
-}
-
-fn rewrite_git(command: &str) -> Option<String> {
-    let parts = split_words(command);
-    if parts.first().map(String::as_str) != Some("git") {
-        return None;
-    }
-    match parts.get(1).map(String::as_str) {
-        Some("log") => {
-            if parts.iter().any(|p| is_git_log_count_flag(p)) {
-                Some(command.to_string())
-            } else {
-                Some(format!("{command} -n 80"))
-            }
-        }
-        Some("clone" | "fetch" | "pull") => {
-            Some(inject_quiet_flag(command).unwrap_or_else(|| command.to_string()))
-        }
-        Some("status" | "diff" | "show") => Some(command.to_string()),
-        _ => None,
-    }
-}
-
-/// Verbosity tokens that mean the caller already chose an output level; the
-/// quiet injector never overrides an explicit choice.
 fn is_tree_depth_flag(part: &str) -> bool {
     part == "-L"
         || part.starts_with("--depth")
@@ -299,51 +231,26 @@ fn is_git_log_count_flag(part: &str) -> bool {
             .is_some_and(|value| value.is_empty() || value.chars().all(|ch| ch.is_ascii_digit()))
 }
 
+const VERBOSITY_FLAGS: Words = &["-q", "--quiet", "-v", "-vv", "-vvv", "--verbose", "-s", "--silent", "--progress", "--no-progress"];
+struct QuietRule { commands: Words, subcommands: Words, flag: &'static str }
+const QUIET_RULES: &[QuietRule] = &[
+    QuietRule { commands: &["cargo"], subcommands: &["build", "check", "clippy", "test", "bench", "doc", "fetch", "run"], flag: "-q" },
+    QuietRule { commands: &["git"], subcommands: &["clone", "fetch", "pull"], flag: "--quiet" },
+    QuietRule { commands: &["npm"], subcommands: &["test", "run", "build", "rebuild"], flag: "--silent" },
+];
+
 fn has_explicit_verbosity(parts: &[String]) -> bool {
-    parts.iter().any(|p| {
-        matches!(
-            p.as_str(),
-            "-q" | "--quiet"
-                | "-v"
-                | "-vv"
-                | "-vvv"
-                | "--verbose"
-                | "-s"
-                | "--silent"
-                | "--progress"
-                | "--no-progress"
-        ) || p.starts_with("--loglevel")
-            || p.starts_with("--verbosity")
-    })
+    parts.iter().any(|part| VERBOSITY_FLAGS.contains(&part.as_str())
+        || part.starts_with("--loglevel") || part.starts_with("--verbosity"))
 }
 
-/// Append a success-safe quiet flag for known-noisy toolchains. Quiet flags
-/// only suppress bookkeeping chrome (Compiling/progress/lifecycle banners);
-/// errors and warnings still print, and exact refs capture whatever remains.
-/// Commands carrying a `--` passthrough separator are left alone because a
-/// trailing flag would bind to the inner tool instead.
 fn inject_quiet_flag(command: &str) -> Option<String> {
     let parts = split_words(command);
-    if has_explicit_verbosity(&parts) || parts.iter().any(|p| p == "--") {
-        return None;
-    }
+    if has_explicit_verbosity(&parts) || parts.iter().any(|part| part == "--") { return None; }
     let first = parts.first().map(String::as_str).unwrap_or_default();
     let second = parts.get(1).map(String::as_str).unwrap_or_default();
-    match first {
-        "cargo"
-            if matches!(
-                second,
-                "build" | "check" | "clippy" | "test" | "bench" | "doc" | "fetch" | "run"
-            ) =>
-        {
-            Some(format!("{command} -q"))
-        }
-        "git" if matches!(second, "clone" | "fetch" | "pull") => Some(format!("{command} --quiet")),
-        "npm" if matches!(second, "test" | "run" | "build" | "rebuild") => {
-            Some(format!("{command} --silent"))
-        }
-        _ => None,
-    }
+    QUIET_RULES.iter().find(|rule| rule.commands.contains(&first) && rule.subcommands.contains(&second))
+        .map(|rule| format!("{command} {}", rule.flag))
 }
 
 fn has_shell_operators(command: &str) -> bool {
@@ -595,243 +502,65 @@ fn shell_command_payload(words: &[String]) -> Option<&str> {
     })
 }
 
+#[derive(Clone, Copy)]
+enum SafetyKind { Destructive, Dispatcher, Remote, InPlace, Find, Git, Docker, Kubectl, Package, Network }
+
+struct SafetyRule { kind: SafetyKind, reason: &'static str }
+
+// Ordered from broad process/filesystem hazards through family-specific network hazards.
+const SAFETY_RULES: &[SafetyRule] = &[
+    SafetyRule { kind: SafetyKind::Destructive, reason: "unsafe destructive mutation left unmodified" },
+    SafetyRule { kind: SafetyKind::Dispatcher, reason: "command dispatcher left unmodified; safety depends on the dispatched command" },
+    SafetyRule { kind: SafetyKind::Remote, reason: "remote execution left unmodified" },
+    SafetyRule { kind: SafetyKind::InPlace, reason: "in-place file edit left unmodified" },
+    SafetyRule { kind: SafetyKind::Find, reason: "find with side effects left unmodified" },
+    SafetyRule { kind: SafetyKind::Git, reason: "git mutation left unmodified" },
+    SafetyRule { kind: SafetyKind::Docker, reason: "docker mutation left unmodified" },
+    SafetyRule { kind: SafetyKind::Kubectl, reason: "kubectl mutation left unmodified" },
+    SafetyRule { kind: SafetyKind::Package, reason: "package/network mutation left unmodified" },
+    SafetyRule { kind: SafetyKind::Network, reason: "network command left unmodified" },
+];
+
+const DESTRUCTIVE: Words = &["rm", "rmdir", "unlink", "mv", "cp", "chmod", "chown", "dd", "shutdown", "reboot", "shred", "truncate", "wipefs", "parted", "fdisk", "mount", "umount", "ln", "rsync", "systemctl", "service", "launchctl", "iptables", "nft", "ufw", "crontab"];
+const DISPATCHERS: Words = &["xargs", "eval", "exec", "source", "env", "sudo", "doas", "nohup", "timeout", "watch", "npx"];
+const GIT_MUTATIONS: Words = &["push", "reset", "clean", "checkout", "switch", "rebase", "merge", "commit", "restore", "rm", "mv", "apply", "am", "cherry-pick", "revert", "stash", "tag", "branch", "remote"];
+const DOCKER_MUTATIONS: Words = &["rm", "rmi", "cp", "import", "stop", "kill", "push", "login", "run", "exec", "build", "prune", "system", "restart", "update"];
+const COMPOSE_MUTATIONS: Words = &["up", "down", "rm", "run", "exec", "build", "pull", "push", "restart", "start", "stop", "kill", "create"];
+const KUBECTL_MUTATIONS: Words = &["delete", "apply", "replace", "scale", "patch", "create", "exec", "edit", "drain", "cordon", "uncordon", "rollout", "annotate", "label", "taint", "cp"];
+const JS_PACKAGE_MUTATIONS: Words = &["install", "add", "publish", "login", "uninstall", "remove", "update", "upgrade", "link", "unlink", "exec", "dlx", "create", "ci"];
+const CARGO_MUTATIONS: Words = &["publish", "install", "login", "add", "remove", "update", "yank", "owner"];
+const UV_MUTATIONS: Words = &["pip", "add", "remove", "sync", "tool", "publish", "venv"];
+
 fn unsafe_reason_for_words(parts: &[String]) -> Option<String> {
-    let first = parts
-        .first()
-        .map(String::as_str)
-        .unwrap_or_default()
-        .rsplit('/')
-        .next()
-        .unwrap_or_default();
+    let first = parts.first().map(String::as_str).unwrap_or_default().rsplit('/').next().unwrap_or_default();
     let second = parts.get(1).map(String::as_str).unwrap_or_default();
-    if is_destructive_first(first) {
-        return Some("unsafe destructive mutation left unmodified".to_string());
-    }
-    if is_command_dispatcher(first) {
-        return Some(
-            "command dispatcher left unmodified; safety depends on the dispatched command"
-                .to_string(),
-        );
-    }
-    if ["ssh", "scp", "sftp"].contains(&first) {
-        return Some("remote execution left unmodified".to_string());
-    }
-    if matches!(first, "sed" | "awk" | "gawk")
-        && parts
-            .iter()
-            .skip(1)
-            .any(|p| p.starts_with("-i") || p == "--in-place" || p == "inplace")
-    {
-        return Some("in-place file edit left unmodified".to_string());
-    }
-    if first == "perl"
-        && parts
-            .iter()
-            .skip(1)
-            .any(|p| p.starts_with('-') && !p.starts_with("--") && p.contains('i'))
-    {
-        return Some("in-place file edit left unmodified".to_string());
-    }
-    if first == "find"
-        && parts.iter().any(|p| {
-            matches!(
-                p.as_str(),
-                "-delete" | "-exec" | "-execdir" | "-ok" | "-okdir"
-            )
-        })
-    {
-        return Some("find with side effects left unmodified".to_string());
-    }
-    if is_git_mutation(first, second) {
-        return Some("git mutation left unmodified".to_string());
-    }
-    if is_docker_mutation(first, second, parts) {
-        return Some("docker mutation left unmodified".to_string());
-    }
-    if is_kubectl_mutation(first, second) {
-        return Some("kubectl mutation left unmodified".to_string());
-    }
-    if is_package_mutation(first, second) {
-        return Some("package/network mutation left unmodified".to_string());
-    }
-    if ["curl", "wget"].contains(&first) {
-        return Some("network command left unmodified".to_string());
-    }
-    None
+    SAFETY_RULES.iter().find(|rule| safety_rule_matches(rule.kind, first, second, parts))
+        .map(|rule| rule.reason.to_string())
 }
 
-fn is_destructive_first(first: &str) -> bool {
-    matches!(
-        first,
-        "rm" | "rmdir"
-            | "unlink"
-            | "mv"
-            | "cp"
-            | "chmod"
-            | "chown"
-            | "dd"
-            | "shutdown"
-            | "reboot"
-            | "shred"
-            | "truncate"
-            | "wipefs"
-            | "parted"
-            | "fdisk"
-            | "mount"
-            | "umount"
-            | "ln"
-            | "rsync"
-            | "systemctl"
-            | "service"
-            | "launchctl"
-            | "iptables"
-            | "nft"
-            | "ufw"
-            | "crontab"
-    ) || first.starts_with("mkfs")
-}
-
-fn is_command_dispatcher(first: &str) -> bool {
-    matches!(
-        first,
-        "xargs"
-            | "eval"
-            | "exec"
-            | "source"
-            | "env"
-            | "sudo"
-            | "doas"
-            | "nohup"
-            | "timeout"
-            | "watch"
-            | "npx"
-    )
-}
-
-fn is_git_mutation(first: &str, second: &str) -> bool {
-    first == "git"
-        && matches!(
-            second,
-            "push"
-                | "reset"
-                | "clean"
-                | "checkout"
-                | "switch"
-                | "rebase"
-                | "merge"
-                | "commit"
-                | "restore"
-                | "rm"
-                | "mv"
-                | "apply"
-                | "am"
-                | "cherry-pick"
-                | "revert"
-                | "stash"
-                | "tag"
-                | "branch"
-                | "remote"
-        )
-}
-
-fn is_docker_mutation(first: &str, second: &str, parts: &[String]) -> bool {
-    if first != "docker" {
-        return false;
+fn safety_rule_matches(kind: SafetyKind, first: &str, second: &str, parts: &[String]) -> bool {
+    match kind {
+        SafetyKind::Destructive => DESTRUCTIVE.contains(&first) || first.starts_with("mkfs"),
+        SafetyKind::Dispatcher => DISPATCHERS.contains(&first),
+        SafetyKind::Remote => ["ssh", "scp", "sftp"].contains(&first),
+        SafetyKind::InPlace => {
+            let flags = parts.get(1..).unwrap_or_default();
+            matches!(first, "sed" | "awk" | "gawk") && flags.iter().any(|p| p.starts_with("-i") || p == "--in-place" || p == "inplace")
+                || first == "perl" && flags.iter().any(|p| p.starts_with('-') && !p.starts_with("--") && p.contains('i'))
+        }
+        SafetyKind::Find => first == "find" && parts.iter().any(|p| ["-delete", "-exec", "-execdir", "-ok", "-okdir"].contains(&p.as_str())),
+        SafetyKind::Git => first == "git" && GIT_MUTATIONS.contains(&second),
+        SafetyKind::Docker => first == "docker" && (DOCKER_MUTATIONS.contains(&second)
+            || second == "compose" && parts.iter().skip(2).any(|p| COMPOSE_MUTATIONS.contains(&p.as_str()))),
+        SafetyKind::Kubectl => first == "kubectl" && KUBECTL_MUTATIONS.contains(&second),
+        SafetyKind::Package => match first {
+            "npm" | "pnpm" | "yarn" => JS_PACKAGE_MUTATIONS.contains(&second),
+            "cargo" => CARGO_MUTATIONS.contains(&second),
+            "uv" => UV_MUTATIONS.contains(&second),
+            _ => false,
+        },
+        SafetyKind::Network => ["curl", "wget"].contains(&first),
     }
-    if matches!(
-        second,
-        "rm" | "rmi"
-            | "cp"
-            | "import"
-            | "stop"
-            | "kill"
-            | "push"
-            | "login"
-            | "run"
-            | "exec"
-            | "build"
-            | "prune"
-            | "system"
-            | "restart"
-            | "update"
-    ) {
-        return true;
-    }
-    second == "compose"
-        && parts
-            .iter()
-            .skip(2)
-            .any(|part| is_docker_compose_mutation(part))
-}
-
-fn is_docker_compose_mutation(part: &str) -> bool {
-    matches!(
-        part,
-        "up" | "down"
-            | "rm"
-            | "run"
-            | "exec"
-            | "build"
-            | "pull"
-            | "push"
-            | "restart"
-            | "start"
-            | "stop"
-            | "kill"
-            | "create"
-    )
-}
-
-fn is_kubectl_mutation(first: &str, second: &str) -> bool {
-    first == "kubectl"
-        && matches!(
-            second,
-            "delete"
-                | "apply"
-                | "replace"
-                | "scale"
-                | "patch"
-                | "create"
-                | "exec"
-                | "edit"
-                | "drain"
-                | "cordon"
-                | "uncordon"
-                | "rollout"
-                | "annotate"
-                | "label"
-                | "taint"
-                | "cp"
-        )
-}
-
-fn is_package_mutation(first: &str, second: &str) -> bool {
-    matches!(
-        (first, second),
-        (
-            "npm" | "pnpm" | "yarn",
-            "install"
-                | "add"
-                | "publish"
-                | "login"
-                | "uninstall"
-                | "remove"
-                | "update"
-                | "upgrade"
-                | "link"
-                | "unlink"
-                | "exec"
-                | "dlx"
-                | "create"
-                | "ci"
-        ) | (
-            "cargo",
-            "publish" | "install" | "login" | "add" | "remove" | "update" | "yank" | "owner"
-        ) | (
-            "uv",
-            "pip" | "add" | "remove" | "sync" | "tool" | "publish" | "venv"
-        )
-    )
 }
 
 fn split_words(command: &str) -> Vec<String> {

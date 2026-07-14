@@ -66,18 +66,11 @@ fn run_stdio_core<W: Write + Send + 'static>(
     }
 
     loop {
-        let event = if let Some(timeout) = idle_timeout {
-            match events.recv_timeout(timeout) {
-                Ok(event) => event,
-                Err(mpsc::RecvTimeoutError::Timeout) => break,
-                Err(mpsc::RecvTimeoutError::Disconnected) => break,
-            }
-        } else {
-            match events.recv() {
-                Ok(event) => event,
-                Err(_) => break,
-            }
+        let event = match idle_timeout {
+            Some(timeout) => events.recv_timeout(timeout).ok(),
+            None => events.recv().ok(),
         };
+        let Some(event) = event else { break };
 
         match event {
             StdioEvent::Message { framed, text } => {
@@ -266,60 +259,42 @@ pub(crate) fn read_stdio_events_from_reader<R: BufRead>(
                 break;
             }
         };
-
-        if framed {
-            match read_framed_jsonrpc(reader) {
-                Ok(Some(text)) => {
-                    if tx.send(StdioEvent::Message { framed, text }).is_err() {
-                        break;
-                    }
-                }
-                Ok(None) => {
-                    let _ = tx.send(StdioEvent::Eof);
-                    break;
-                }
-                Err(err) => {
-                    // A desynced framed stream has no recoverable message
-                    // boundary, so framed errors stay fatal.
-                    let _ = tx.send(StdioEvent::ParseError {
-                        framed,
-                        error: err.to_string(),
-                        recoverable: false,
-                    });
-                    break;
-                }
-            }
+        let message = if framed {
+            read_framed_jsonrpc(reader)
         } else {
-            let line = match read_unframed_jsonrpc_line(reader) {
-                Ok(Some(line)) => line,
-                Ok(None) => {
-                    let _ = tx.send(StdioEvent::Eof);
+            read_unframed_jsonrpc_line(reader)
+        };
+        match message {
+            Ok(Some(text)) if !framed && text.trim().is_empty() => {}
+            Ok(Some(text)) => {
+                if tx.send(StdioEvent::Message { framed, text }).is_err() {
                     break;
                 }
-                Err(err) => {
-                    // Unframed parsing leaves the stream at the next line
-                    // boundary, so one bad line must not end the session.
-                    if tx
-                        .send(StdioEvent::ParseError {
-                            framed,
-                            error: err.to_string(),
-                            recoverable: true,
-                        })
-                        .is_err()
-                    {
-                        break;
-                    }
-                    continue;
-                }
-            };
-            if line.trim().is_empty() {
-                continue;
             }
-            if tx.send(StdioEvent::Message { framed, text: line }).is_err() {
+            Ok(None) => {
+                let _ = tx.send(StdioEvent::Eof);
                 break;
+            }
+            Err(err) => {
+                let recoverable = !framed;
+                if tx.send(StdioEvent::ParseError {
+                    framed,
+                    error: err.to_string(),
+                    recoverable,
+                }).is_err() || !recoverable {
+                    break;
+                }
             }
         }
     }
+}
+
+fn invalid_data(message: impl Into<String>) -> Error {
+    Error::new(ErrorKind::InvalidData, message.into())
+}
+
+fn unexpected_eof(message: &'static str) -> Error {
+    Error::new(ErrorKind::UnexpectedEof, message)
 }
 
 fn starts_with_framed_header(buffer: &[u8]) -> bool {
@@ -341,77 +316,52 @@ pub(crate) fn read_framed_jsonrpc<R: BufRead>(reader: &mut R) -> std::io::Result
             if header_bytes == 0 {
                 return Ok(None);
             }
-            return Err(Error::new(
-                ErrorKind::UnexpectedEof,
-                "MCP stdio frame ended before header terminator",
-            ));
+            return Err(unexpected_eof("MCP stdio frame ended before header terminator"));
         }
         if !header_line.ends_with(b"\n") {
-            return Err(Error::new(
-                ErrorKind::UnexpectedEof,
-                "MCP stdio header line ended before newline",
-            ));
+            return Err(unexpected_eof("MCP stdio header line ended before newline"));
         }
-        header_bytes = header_bytes.checked_add(bytes).ok_or_else(|| {
-            Error::new(
-                ErrorKind::InvalidData,
-                "MCP stdio header section length overflow",
-            )
-        })?;
+        header_bytes = header_bytes
+            .checked_add(bytes)
+            .ok_or_else(|| invalid_data("MCP stdio header section length overflow"))?;
         if header_bytes > MAX_MCP_STDIO_HEADER_SECTION_BYTES {
-            return Err(Error::new(
-                ErrorKind::InvalidData,
-                format!(
-                    "MCP stdio header section exceeds maximum {MAX_MCP_STDIO_HEADER_SECTION_BYTES}"
-                ),
-            ));
+            return Err(invalid_data(format!(
+                "MCP stdio header section exceeds maximum {MAX_MCP_STDIO_HEADER_SECTION_BYTES}"
+            )));
         }
         let header = std::str::from_utf8(&header_line)
-            .map_err(|err| Error::new(ErrorKind::InvalidData, err.to_string()))?
+            .map_err(|err| invalid_data(err.to_string()))?
             .trim_end_matches(['\r', '\n']);
         if header.is_empty() {
             break;
         }
         let Some((name, value)) = header.split_once(':') else {
-            return Err(Error::new(
-                ErrorKind::InvalidData,
-                format!("invalid MCP stdio header: {header}"),
-            ));
+            return Err(invalid_data(format!("invalid MCP stdio header: {header}")));
         };
         if name.eq_ignore_ascii_case("Content-Length") {
             if content_length.is_some() {
-                return Err(Error::new(
-                    ErrorKind::InvalidData,
-                    "duplicate Content-Length header",
-                ));
+                return Err(invalid_data("duplicate Content-Length header"));
             }
             let parsed = value.trim().parse::<usize>().map_err(|err| {
-                Error::new(
-                    ErrorKind::InvalidData,
-                    format!("invalid Content-Length header: {err}"),
-                )
+                invalid_data(format!("invalid Content-Length header: {err}"))
             })?;
             if parsed > MAX_MCP_STDIO_FRAME_BYTES {
-                return Err(Error::new(
-                    ErrorKind::InvalidData,
-                    format!("Content-Length {parsed} exceeds maximum {MAX_MCP_STDIO_FRAME_BYTES}"),
-                ));
+                return Err(invalid_data(format!(
+                    "Content-Length {parsed} exceeds maximum {MAX_MCP_STDIO_FRAME_BYTES}"
+                )));
             }
             content_length = Some(parsed);
         }
     }
 
     let Some(content_length) = content_length else {
-        return Err(Error::new(
-            ErrorKind::InvalidData,
-            "missing Content-Length header",
-        ));
+        return Err(invalid_data("missing Content-Length header"));
     };
     let mut body = vec![0; content_length];
     reader.read_exact(&mut body)?;
     String::from_utf8(body)
         .map(Some)
-        .map_err(|err| Error::new(ErrorKind::InvalidData, format!("invalid UTF-8 body: {err}")))
+        .map_err(|err| invalid_data(format!("invalid UTF-8 body: {err}")))
 }
 
 pub(crate) fn read_unframed_jsonrpc_line<R: BufRead>(
@@ -429,7 +379,7 @@ pub(crate) fn read_unframed_jsonrpc_line<R: BufRead>(
     }
     String::from_utf8(line)
         .map(Some)
-        .map_err(|err| Error::new(ErrorKind::InvalidData, format!("invalid UTF-8 line: {err}")))
+        .map_err(|err| invalid_data(format!("invalid UTF-8 line: {err}")))
 }
 
 fn read_mcp_header_line<R: BufRead>(reader: &mut R, line: &mut Vec<u8>) -> std::io::Result<usize> {
@@ -457,15 +407,12 @@ fn read_bounded_stdio_line<R: BufRead>(
             .iter()
             .position(|byte| *byte == b'\n')
             .map_or(buffer.len(), |position| position + 1);
-        let next_len = line.len().checked_add(bytes_to_consume).ok_or_else(|| {
-            Error::new(ErrorKind::InvalidData, format!("{label} length overflow"))
-        })?;
+        let next_len = line.len()
+            .checked_add(bytes_to_consume)
+            .ok_or_else(|| invalid_data(format!("{label} length overflow")))?;
         if next_len > max_bytes {
             drain_to_line_boundary(reader)?;
-            return Err(Error::new(
-                ErrorKind::InvalidData,
-                format!("{label} exceeds maximum {max_bytes}"),
-            ));
+            return Err(invalid_data(format!("{label} exceeds maximum {max_bytes}")));
         }
         line.extend_from_slice(&buffer[..bytes_to_consume]);
         reader.consume(bytes_to_consume);
@@ -519,6 +466,40 @@ pub(crate) fn write_framed_jsonrpc<W: Write>(
         response
     )?;
     writer.flush()
+}
+
+#[cfg(test)]
+#[derive(Clone, Default)]
+pub(crate) struct TestOutput(Arc<Mutex<Vec<u8>>>);
+
+#[cfg(test)]
+impl TestOutput {
+    fn guard(&self) -> std::sync::MutexGuard<'_, Vec<u8>> {
+        match self.0.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        }
+    }
+
+    pub(crate) fn bytes(&self) -> Vec<u8> {
+        self.guard().clone()
+    }
+
+    pub(crate) fn contains(&self, needle: &str) -> bool {
+        String::from_utf8_lossy(&self.guard()).contains(needle)
+    }
+}
+
+#[cfg(test)]
+impl Write for TestOutput {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.guard().extend_from_slice(buf);
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
 }
 
 #[cfg(test)]

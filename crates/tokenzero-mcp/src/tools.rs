@@ -8,6 +8,7 @@ use tokenzero_core::{
 use tokenzero_filters::{discover, rewrite_command};
 use tokenzero_runtime::{ExecutionMode, plan_command_for_platform};
 
+use crate::catalog::ToolKind;
 use crate::expand_params::ExpandParams;
 use crate::jsonrpc::JsonRpcErrorData;
 use crate::{EditHunk, ServeOptions, TokenZeroEngine, shell_timeout_from_secs};
@@ -429,21 +430,9 @@ fn value_has_role_labeled_shell_refs(value: &Value) -> bool {
 fn codemode_v2_structured(result: &crate::CodeModeResult, ack: &str, telemetry_ref: &str) -> Value {
     let mut object = serde_json::Map::new();
     object.insert("ack".to_string(), json!(ack));
-    match result.status {
-        crate::CodeModeStatus::Completed => {
-            if let Some(value) = &result.value {
-                object.insert("value".to_string(), value.clone());
-            }
-        }
-        crate::CodeModeStatus::Error => {
-            if let Some(error_ref) = result
-                .execution_refs
-                .as_ref()
-                .and_then(|refs| refs.pointer("/stored/error"))
-                .and_then(Value::as_str)
-            {
-                object.insert("ref".to_string(), json!(error_ref));
-            }
+    if matches!(result.status, crate::CodeModeStatus::Completed) {
+        if let Some(value) = &result.value {
+            object.insert("value".to_string(), value.clone());
         }
     }
     object.insert("ref".to_string(), json!(telemetry_ref));
@@ -495,20 +484,15 @@ fn codemode_v2_tool_response(
             exact_ref_tokens: None,
         },
     );
-    response.telemetry = if folded_scalar {
-        Some(json!({
-            "envelope_tokens": envelope_tokens,
-            "payload_tokens": result.telemetry.payload_tokens,
-            "telemetry_ref": telemetry_ref,
-        }))
-    } else {
-        Some(json!({
-            "structuredContent": structured,
-            "envelope_tokens": envelope_tokens,
-            "payload_tokens": result.telemetry.payload_tokens,
-            "telemetry_ref": telemetry_ref,
-        }))
-    };
+    let mut telemetry = json!({
+        "envelope_tokens": envelope_tokens,
+        "payload_tokens": result.telemetry.payload_tokens,
+        "telemetry_ref": telemetry_ref,
+    });
+    if !folded_scalar {
+        telemetry["structuredContent"] = structured;
+    }
+    response.telemetry = Some(telemetry);
     if matches!(result.status, crate::CodeModeStatus::Error) {
         response.status = "error".to_string();
         response.error = result.error.as_ref().map(|error| tokenzero_core::CliError {
@@ -563,6 +547,22 @@ fn codemode_contract_payload_v1(result: &crate::CodeModeResult) -> Value {
     payload
 }
 
+fn inline_response(tool: &str, mode: Mode, text: String, raw_tokens: usize) -> ToolResponse {
+    let visible_tokens = count_tokens(&text);
+    ToolResponse::ok(
+        tool,
+        mode,
+        text,
+        Vec::new(),
+        Accounting {
+            raw_tokens,
+            visible_tokens,
+            recovery_tokens: 0,
+            exact_ref_tokens: Some(0),
+        },
+    )
+}
+
 /// Tool dispatch shared by direct calls and `tz_batch` sub-ops.
 pub(crate) fn dispatch_tool(
     engine: &TokenZeroEngine,
@@ -570,11 +570,17 @@ pub(crate) fn dispatch_tool(
     name: &str,
     args: &Value,
 ) -> Result<ToolResponse, JsonRpcErrorData> {
-    let response = match canonical {
-        "execute_code" => exec_codemode_tool(engine, name, args)?,
-        "codemode_search" => exec_codemode_search_tool(name, args)?,
-        "codemode_describe" => exec_codemode_describe_tool(name, args)?,
-        "read" => {
+    let kind = if canonical == "compact" {
+        Some(ToolKind::Ingest)
+    } else {
+        ToolKind::from_canonical(canonical)
+    }
+    .ok_or_else(|| JsonRpcErrorData::unknown_tool(name))?;
+    let response = match kind {
+        ToolKind::ExecuteCode => exec_codemode_tool(engine, name, args)?,
+        ToolKind::CodemodeSearch => exec_codemode_search_tool(name, args)?,
+        ToolKind::CodemodeDescribe => exec_codemode_describe_tool(name, args)?,
+        ToolKind::Read => {
             let path = arg_path_list(args, "path")?;
             engine.read_with_options(
                 &path,
@@ -587,7 +593,7 @@ pub(crate) fn dispatch_tool(
                 arg_serve_options(args),
             )
         }
-        "find" => {
+        ToolKind::Find => {
             let query = arg_string_any(args, &["query", "pattern"])?;
             let path = arg_path_list(args, "path").unwrap_or_else(|_| vec![PathBuf::from(".")]);
             engine.find_with_options(
@@ -599,7 +605,7 @@ pub(crate) fn dispatch_tool(
                 arg_serve_options(args),
             )
         }
-        "grep" => {
+        ToolKind::Grep => {
             let query = arg_string_any(args, &["query", "pattern"])?;
             let path = arg_path_list(args, "path").unwrap_or_else(|_| vec![PathBuf::from(".")]);
             engine.grep_with_options(
@@ -611,7 +617,7 @@ pub(crate) fn dispatch_tool(
                 arg_serve_options(args),
             )
         }
-        "recall" => {
+        ToolKind::Recall => {
             let query = arg_string_any(args, &["query", "pattern"])?;
             engine.recall(
                 query,
@@ -620,7 +626,7 @@ pub(crate) fn dispatch_tool(
                 arg_u64(args, "max_visible_tokens").unwrap_or(4000),
             )
         }
-        "glob" => {
+        ToolKind::Glob => {
             let pattern = arg_string_any(args, &["pattern", "glob", "query"])?;
             let path = arg_path_list(args, "path").unwrap_or_else(|_| vec![PathBuf::from(".")]);
             engine.glob(
@@ -632,7 +638,7 @@ pub(crate) fn dispatch_tool(
                 arg_u64(args, "max_visible_tokens").unwrap_or(4000),
             )
         }
-        "tree" => {
+        ToolKind::Tree => {
             let path = arg_path_list(args, "path").unwrap_or_else(|_| vec![PathBuf::from(".")]);
             engine.tree(
                 &path,
@@ -643,7 +649,7 @@ pub(crate) fn dispatch_tool(
                 arg_u64(args, "max_visible_tokens").unwrap_or(4000),
             )
         }
-        "edit" => {
+        ToolKind::Edit => {
             let path = args
                 .get("path")
                 .and_then(Value::as_str)
@@ -667,7 +673,7 @@ pub(crate) fn dispatch_tool(
             }
             resp
         }
-        "shell" => {
+        ToolKind::Shell => {
             let (command, argv) = arg_command(args)?;
             engine.shell(
                 &command,
@@ -689,7 +695,7 @@ pub(crate) fn dispatch_tool(
                 ),
             )
         }
-        "ingest" | "compact" => {
+        ToolKind::Ingest => {
             let text = args
                 .get("text")
                 .and_then(Value::as_str)
@@ -702,15 +708,15 @@ pub(crate) fn dispatch_tool(
             };
             engine.ingest(text, ContentType::Unknown, arg_mode(args), tool)
         }
-        "expand" => {
+        ToolKind::Expand => {
             let params = ExpandParams::from_tool_args(args)?;
             engine.expand_with_params(params)
         }
-        "mem" => engine.mem(),
-        "cache_pack" => {
+        ToolKind::Mem => engine.mem(),
+        ToolKind::CachePack => {
             engine.cache_pack(args.get("scope").and_then(Value::as_str).unwrap_or("agent"))
         }
-        "rewrite" => {
+        ToolKind::Rewrite => {
             let (command, _) = arg_command(args)?;
             let value = serde_json::to_string_pretty(&rewrite_command(
                 &command,
@@ -718,35 +724,14 @@ pub(crate) fn dispatch_tool(
                 true,
             ))
             .unwrap_or_default();
-            ToolResponse::ok(
-                "rewrite",
-                Mode::Hybrid,
-                value.clone(),
-                Vec::new(),
-                Accounting {
-                    raw_tokens: count_tokens(&command),
-                    visible_tokens: count_tokens(&value),
-                    recovery_tokens: 0,
-                    exact_ref_tokens: Some(0),
-                },
-            )
+            inline_response("rewrite", Mode::Hybrid, value, count_tokens(&command))
         }
-        "discover" => {
+        ToolKind::Discover => {
             let value = serde_json::to_string_pretty(&discover()).unwrap_or_default();
-            ToolResponse::ok(
-                "discover",
-                Mode::Hybrid,
-                value.clone(),
-                Vec::new(),
-                Accounting {
-                    raw_tokens: count_tokens(&value),
-                    visible_tokens: count_tokens(&value),
-                    recovery_tokens: 0,
-                    exact_ref_tokens: Some(0),
-                },
-            )
+            let tokens = count_tokens(&value);
+            inline_response("discover", Mode::Hybrid, value, tokens)
         }
-        "report_tool_issue" => {
+        ToolKind::ReportToolIssue => {
             let tool = arg_string_any(args, &["tool", "name", "tool_name", "surface"])
                 .map_err(JsonRpcErrorData::from)?;
             let summary = arg_string_any(args, &["summary", "message", "title"])
@@ -766,18 +751,8 @@ pub(crate) fn dispatch_tool(
             ) {
                 Ok(report) => {
                     let text = serde_json::to_string_pretty(&report).unwrap_or_default();
-                    ToolResponse::ok(
-                        "report_tool_issue",
-                        Mode::Structured,
-                        text.clone(),
-                        Vec::new(),
-                        Accounting {
-                            raw_tokens: count_tokens(&text),
-                            visible_tokens: count_tokens(&text),
-                            recovery_tokens: 0,
-                            exact_ref_tokens: Some(0),
-                        },
-                    )
+                    let tokens = count_tokens(&text);
+                    inline_response("report_tool_issue", Mode::Structured, text, tokens)
                 }
                 Err(message) => ToolResponse::error(
                     "report_tool_issue",
@@ -787,8 +762,8 @@ pub(crate) fn dispatch_tool(
                 ),
             }
         }
-        "batch" => batch_response(engine, args)?,
-        "fetch" => {
+        ToolKind::Batch => batch_response(engine, args)?,
+        ToolKind::Fetch => {
             let url = arg_string_any(args, &["url", "uri"])?;
             engine.fetch(
                 url,
@@ -798,7 +773,6 @@ pub(crate) fn dispatch_tool(
                 arg_u64(args, "max_visible_tokens").unwrap_or(4000),
             )
         }
-        _ => return Err(JsonRpcErrorData::unknown_tool(name)),
     };
     Ok(response)
 }

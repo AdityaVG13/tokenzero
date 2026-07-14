@@ -1,50 +1,9 @@
-//! `TokenZeroEngine` expand + recall (extracted from `lib.rs`).
-#![allow(unused_imports)]
-
-use super::cache_pack::{
-    cache_pack_manifest_path, cache_pack_sources, previous_cache_digest, read_line_range_from_file,
-};
-use super::collect::*;
-use super::config::{
-    EngineConfig, FETCH_ALLOW_ENV, FETCH_DENY_ENV, FETCH_ENABLED_ENV, ServeFlight, new_session_id,
-};
+use super::*;
 use super::expand_params::ExpandParams;
-use super::fetch_cache::{epoch_secs, fetch_index_path, load_fetch_index, record_fetch};
-use super::fetch_guard::{FETCH_META_MARKER, split_fetch_meta, validate_fetch_target};
-use super::metrics;
-use super::paths::*;
-use super::render::*;
-use super::session::{
-    DiffTelemetry, SeenState, ServeKey, ServedRecord, SessionMemory, SessionSummary,
-};
-use super::{
-    Accounting, ContentType, DEFAULT_MCP_IDLE_TIMEOUT_SECS, DEFAULT_SHELL_TIMEOUT_SECS,
-    DIFF_MAX_BYTES, DIFF_MAX_LINES, DIFF_READS_ENV, EditHunk, MAX_MCP_IDLE_TIMEOUT_SECS,
-    MAX_SEARCH_VISITED_FILES, MAX_SHELL_TIMEOUT_SECS, MIN_SEARCH_VISITED_FILES, Mode, RG_PATH_ENV,
-    SEARCH_BACKEND_ENV, SEARCH_VISIT_MULTIPLIER, SESSION_DEDUP_ENV, SearchBackend, ServeOptions,
-    ShellRenderInput, TokenZeroEngine, ToolResponse, cache_maintenance, count_tokens,
-    detect_content_type, make_capsule, make_capsule_with_raw_tokens, ref_record, render_shell,
-    sha256_hex, shell_combined_output, shell_spill_dir, shell_timeout_from_secs,
-    split_command_string,
-};
-use crate::diff;
-use crate::recall;
-use globset::{GlobBuilder, GlobMatcher};
-use serde_json::{Value, json};
-use std::collections::{BTreeMap, HashSet};
-use std::ffi::OsString;
-use std::fs;
-use std::path::{Path, PathBuf};
-use std::sync::{Condvar, Mutex, OnceLock};
-use std::time::{Duration, SystemTime};
-use tokenzero_filters::rewrite_command;
-use tokenzero_recovery::{ExpansionResult, RecoveryStore, StoredPayload, is_expandable_ref};
-use tokenzero_runtime::{
-    RunOutputPolicy, StreamCapture, contains_platform_shell_syntax, run_command_with_policy,
-};
+use tokenzero_recovery::is_expandable_ref;
 
 fn norm_opt(value: &Option<String>) -> String {
-    value.as_deref().unwrap_or("").to_string()
+    value.clone().unwrap_or_default()
 }
 
 fn expand_serve_key(params: &ExpandParams) -> ServeKey {
@@ -133,11 +92,7 @@ fn legacy_sibling_holding_ref(ref_id: &str, active_cache: &Path) -> Option<PathB
         return None;
     }
     let other = RecoveryStore::new(Some(sibling.clone()));
-    if other.has_ref(ref_id) {
-        Some(sibling)
-    } else {
-        None
-    }
+    other.has_ref(ref_id).then_some(sibling)
 }
 
 impl TokenZeroEngine {
@@ -153,13 +108,9 @@ impl TokenZeroEngine {
 
     fn expand_with_params_inner(&self, params: ExpandParams) -> ToolResponse {
         if !is_expandable_ref(&params.ref_id) {
-            return ToolResponse::error(
-                "expand",
-                "invalid_ref",
-                format!(
-                    "ref must start with tz://, fz://, or gz://, got: {}",
-                    params.ref_id
-                ),
+            return failure_response(
+                "expand", "invalid_ref",
+                format!("ref must start with tz://, fz://, or gz://, got: {}", params.ref_id),
                 None,
             );
         }
@@ -171,15 +122,14 @@ impl TokenZeroEngine {
             self.begin_serve_flight(Vec::new())
         };
 
-        let mut store = RecoveryStore::new(Some(self.config.cache_path.clone()));
+        let mut store = self.recovery_store();
         let mut summary = SessionSummary::default();
         let mut pending: Vec<(ServeKey, ServedRecord)> = Vec::new();
 
         if let Some(since_ref) = params.since.as_deref().filter(|_| !params.fresh) {
-            if !is_expandable_ref(since_ref) {
-                return ToolResponse::error(
-                    "expand",
-                    "invalid_ref",
+            if is_expandable_ref(since_ref) == false {
+                return failure_response(
+                    "expand", "invalid_ref",
                     format!("since must start with tz://, fz://, or gz://, got: {since_ref}"),
                     None,
                 );
@@ -192,105 +142,57 @@ impl TokenZeroEngine {
                 params.anchor_kind.as_deref(),
                 params.symbol.as_deref(),
             );
-            if !since_result.found {
-                return ToolResponse::error(
-                    "expand",
-                    match since_result.reason.as_str() {
-                        "stale-ref" => "ref_stale",
-                        "dangling-ref" => "ref_not_found",
-                        "invalid-ref" => "invalid_ref",
-                        _ => "expand_failed",
-                    },
-                    format!("since ref is not recoverable: {since_ref}"),
-                    None,
+            if since_result.found == false {
+                let code = match since_result.reason.as_str() {
+                    "stale-ref" => "ref_stale",
+                    "dangling-ref" => "ref_not_found",
+                    "invalid-ref" => "invalid_ref",
+                    _ => "expand_failed",
+                };
+                return failure_response(
+                    "expand", code, format!("since ref is not recoverable: {since_ref}"), None,
                 );
             }
             let target = match resolve_slice(&mut store, &params, &self.config.cache_path) {
-                Ok(t) => t,
-                Err(resp) => return *resp,
+                Ok(target) => target,
+                Err(response) => return *response,
             };
             self.rehydrate_working_set_expand(&mut store, &params);
-            if since_result.content == target.content {
-                let text = unchanged_since_expand_ack(since_ref);
-                let tokens = count_tokens(&text);
-                let mut response = ToolResponse::ok(
-                    "expand",
-                    Mode::Exact,
-                    text,
-                    Vec::new(),
-                    Accounting {
-                        raw_tokens: tokens,
-                        visible_tokens: tokens,
-                        recovery_tokens: store.recovery_tokens,
-                        exact_ref_tokens: Some(count_tokens(&params.ref_id)),
-                    },
-                );
-                if self.config.session_dedup {
-                    pending.push(self.pending_expand_record(&params, &target.content, &mut store));
-                }
-                if let Some(telemetry) = summary.telemetry() {
-                    response.telemetry = Some(telemetry);
-                }
-                self.session_apply(pending, &summary);
-                return response;
-            }
-            let render = match diff::unified_diff(&since_result.content, &target.content) {
-                Some(r) => r,
-                None => {
-                    let text = unchanged_since_expand_ack(since_ref);
-                    let tokens = count_tokens(&text);
-                    if self.config.session_dedup {
-                        pending.push(self.pending_expand_record(
-                            &params,
-                            &target.content,
-                            &mut store,
-                        ));
-                    }
-                    let response = ToolResponse::ok(
-                        "expand",
-                        Mode::Exact,
-                        text,
-                        Vec::new(),
-                        Accounting {
-                            raw_tokens: tokens,
-                            visible_tokens: tokens,
-                            recovery_tokens: store.recovery_tokens,
-                            exact_ref_tokens: Some(count_tokens(&params.ref_id)),
-                        },
-                    );
-                    self.session_apply(pending, &summary);
-                    return response;
-                }
+            let (text, diff) = if since_result.content == target.content {
+                (unchanged_since_expand_ack(since_ref), None)
+            } else if let Some(render) = diff::unified_diff(&since_result.content, &target.content) {
+                (
+                    expand_since_diff_text(since_ref, &params.ref_id, &render.text),
+                    Some(DiffTelemetry {
+                        hunks: render.hunks,
+                        plus: render.plus,
+                        minus: render.minus,
+                        base_ref: since_ref.to_string(),
+                    }),
+                )
+            } else {
+                (unchanged_since_expand_ack(since_ref), None)
             };
-            let assembled = expand_since_diff_text(since_ref, &params.ref_id, &render.text);
-            let tokens = count_tokens(&assembled);
-            summary.note_diff(
-                DiffTelemetry {
-                    hunks: render.hunks,
-                    plus: render.plus,
-                    minus: render.minus,
-                    base_ref: since_ref.to_string(),
-                },
-                0,
-            );
-            let mut response = ToolResponse::ok(
+            let tokens = count_tokens(&text);
+            if let Some(telemetry) = diff {
+                summary.note_diff(telemetry, 0);
+            }
+            if self.config.session_dedup {
+                pending.push(self.pending_expand_record(key, &params, &target.content, &mut store));
+            }
+            let mut response = success_response(
                 "expand",
                 Mode::Exact,
-                assembled,
+                text,
                 Vec::new(),
-                Accounting {
-                    raw_tokens: tokens,
-                    visible_tokens: tokens,
-                    recovery_tokens: store.recovery_tokens,
-                    exact_ref_tokens: Some(count_tokens(&params.ref_id)),
-                },
+                (
+                    tokens,
+                    tokens,
+                    store.recovery_tokens,
+                    Some(count_tokens(&params.ref_id)),
+                ),
             );
-            if self.config.session_dedup {
-                pending.push(self.pending_expand_record(&params, &target.content, &mut store));
-            }
-            if let Some(telemetry) = summary.telemetry() {
-                response.telemetry = Some(telemetry);
-            }
+            response.telemetry = summary.telemetry();
             self.session_apply(pending, &summary);
             return response;
         }
@@ -311,12 +213,9 @@ impl TokenZeroEngine {
         // below so those paths keep learning from expands.
 
         if self.config.session_dedup {
-            pending.push(self.pending_expand_record(&params, &target.content, &mut store));
+            pending.push(self.pending_expand_record(key, &params, &target.content, &mut store));
         }
-        let mut response = expansion_response(target, store.recovery_tokens);
-        if let Some(telemetry) = summary.telemetry() {
-            response.telemetry = Some(telemetry);
-        }
+        let response = expansion_response(target, store.recovery_tokens);
         self.session_apply(pending, &summary);
         response
     }
@@ -331,12 +230,11 @@ impl TokenZeroEngine {
 
     fn pending_expand_record(
         &self,
+        key: ServeKey,
         params: &ExpandParams,
         content: &str,
         store: &mut RecoveryStore,
     ) -> (ServeKey, ServedRecord) {
-        let key = expand_serve_key(params);
-        let content_sha256 = sha256_hex(content);
         let stored = store.store_payload_deferred_batch(
             content,
             ContentType::Unknown,
@@ -345,17 +243,7 @@ impl TokenZeroEngine {
             params.end_line,
         );
         let _ = store.persist_pending();
-        let record = ServedRecord {
-            content_sha256,
-            blob_ref: stored.blob_ref.clone(),
-            file_ref: stored.file_ref.clone(),
-            raw_tokens: stored.raw_tokens,
-            line_count: content.lines().count(),
-            byte_len: content.len(),
-            served_at: SystemTime::now(),
-            serve_count: 1,
-        };
-        (key, record)
+        (key, served_record(content, &stored))
     }
 
     pub fn expand(
@@ -389,11 +277,8 @@ impl TokenZeroEngine {
         max_visible_tokens: usize,
     ) -> ToolResponse {
         if query.trim().is_empty() {
-            return ToolResponse::error(
-                "recall",
-                "invalid_query",
-                "recall requires a non-empty query".to_string(),
-                None,
+            return failure_response(
+                "recall", "invalid_query", "recall requires a non-empty query", None,
             );
         }
         let outcome = recall::recall_search(&self.config.cache_path, query, max_hits.max(1));
@@ -432,17 +317,9 @@ impl TokenZeroEngine {
             Some(&format!("recall {}", zero_hit_label(query))),
         );
         let exact_ref_tokens = exact_ref_token_count(&refs);
-        let mut response = ToolResponse::ok(
-            "recall",
-            mode,
-            capsule.text,
-            refs,
-            Accounting {
-                raw_tokens: capsule.raw_tokens,
-                visible_tokens: capsule.visible_tokens,
-                recovery_tokens: 0,
-                exact_ref_tokens: Some(exact_ref_tokens),
-            },
+        let mut response = success_response(
+            "recall", mode, capsule.text, refs,
+            (capsule.raw_tokens, capsule.visible_tokens, 0, Some(exact_ref_tokens)),
         );
         response.content_type = Some(ContentType::SearchResult.to_string());
         response.telemetry = Some(json!({

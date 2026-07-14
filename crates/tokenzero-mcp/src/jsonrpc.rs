@@ -23,6 +23,37 @@ const LOGGING_LEVELS: &[&str] = &[
     "emergency",
 ];
 
+macro_rules! rpc_methods {
+    ($( $variant:ident => $name:literal ),* $(,)?) => {
+        #[derive(Clone, Copy)]
+        enum RpcMethod { $( $variant ),* }
+
+        impl RpcMethod {
+            const NAMES: &'static [&'static str] = &[$( $name ),*];
+
+            fn parse(name: &str) -> Option<Self> {
+                match name { $( $name => Some(Self::$variant), )* _ => None }
+            }
+        }
+    };
+}
+
+rpc_methods! {
+    Initialize => "initialize",
+    Initialized => "notifications/initialized",
+    Ping => "ping",
+    Discover => "server/discover",
+    ListResources => "resources/list",
+    ListResourceTemplates => "resources/templates/list",
+    ReadResource => "resources/read",
+    ListPrompts => "prompts/list",
+    SetLoggingLevel => "logging/setLevel",
+    ListTools => "tools/list",
+    CallTool => "tools/call",
+}
+
+const JSONRPC_METHODS: &[&str] = RpcMethod::NAMES;
+
 pub fn handle_jsonrpc(engine: &TokenZeroEngine, line: &str) -> Option<String> {
     let parsed: Value = match serde_json::from_str(line) {
         Ok(value) => value,
@@ -71,81 +102,91 @@ fn handle_jsonrpc_batch(engine: &TokenZeroEngine, batch: Vec<Value>) -> Option<V
     Some(Value::Array(responses))
 }
 
-fn handle_jsonrpc_request(engine: &TokenZeroEngine, parsed: Value) -> Option<Value> {
-    let Some(object) = parsed.as_object() else {
-        return Some(jsonrpc_error(
+macro_rules! rpc_try {
+    ($result:expr) => {
+        match $result {
+            Ok(value) => value,
+            Err(error) => return Some(error),
+        }
+    };
+}
+
+fn request_error(id: Value, reason: &str, fix_hint: &str) -> Value {
+    jsonrpc_error(
+        id,
+        -32600,
+        "Invalid Request",
+        JsonRpcErrorData::invalid_request(reason, fix_hint),
+    )
+}
+
+fn validate_request(
+    parsed: &Value,
+) -> Result<(&serde_json::Map<String, Value>, &str, Option<Value>), Value> {
+    let object = parsed.as_object().ok_or_else(|| {
+        request_error(
             Value::Null,
-            -32600,
-            "Invalid Request",
-            JsonRpcErrorData::invalid_request(
-                "request must be a JSON object",
-                "Send an object with jsonrpc, method, params, and id fields.",
-            ),
-        ));
-    };
-    let id_for_error = object
-        .get("id")
-        .filter(|id| is_valid_jsonrpc_id(id))
-        .cloned()
-        .unwrap_or(Value::Null);
+            "request must be a JSON object",
+            "Send an object with jsonrpc, method, params, and id fields.",
+        )
+    })?;
+    let valid_id = object.get("id").filter(|id| is_valid_jsonrpc_id(id));
+    let id_for_error = valid_id.cloned().unwrap_or(Value::Null);
     if object.get("jsonrpc").and_then(Value::as_str) != Some("2.0") {
-        return Some(jsonrpc_error(
+        return Err(request_error(
             id_for_error,
-            -32600,
-            "Invalid Request",
-            JsonRpcErrorData::invalid_request(
-                "jsonrpc must be \"2.0\"",
-                "Set the top-level jsonrpc field to \"2.0\" and retry.",
-            ),
+            "jsonrpc must be \"2.0\"",
+            "Set the top-level jsonrpc field to \"2.0\" and retry.",
         ));
     }
-    let Some(method) = object.get("method").and_then(Value::as_str) else {
-        return Some(jsonrpc_error(
-            id_for_error,
-            -32600,
-            "Invalid Request",
-            JsonRpcErrorData::invalid_request(
-                "method must be a string",
-                "Set method to initialize, tools/list, tools/call, resources/list, or resources/read.",
-            ),
+    let method = object.get("method").and_then(Value::as_str).ok_or_else(|| {
+        request_error(
+            id_for_error.clone(),
+            "method must be a string",
+            "Set method to initialize, tools/list, tools/call, resources/list, or resources/read.",
+        )
+    })?;
+    if object.contains_key("id") && valid_id.is_none() {
+        return Err(request_error(
+            Value::Null,
+            "id must be string, number, or null",
+            "Use a string, number, or null id so the response can be correlated.",
         ));
+    }
+    if object
+        .get("params")
+        .is_some_and(|params| !(params.is_object() || params.is_array()))
+    {
+        return Err(request_error(
+            id_for_error,
+            "params must be object or array",
+            "Use object params for MCP methods; omit params when no parameters are needed.",
+        ));
+    }
+    Ok((object, method, object.get("id").cloned()))
+}
+
+fn handle_jsonrpc_request(engine: &TokenZeroEngine, parsed: Value) -> Option<Value> {
+    let (object, method, id) = rpc_try!(validate_request(&parsed));
+    let id = id?;
+    #[cfg(test)]
+    if method == "tokenzero/internal/test-panic" {
+        panic!("test-induced tool panic");
+    }
+    let method = match RpcMethod::parse(method) {
+        Some(method) => method,
+        None => {
+            return Some(jsonrpc_error(
+                id,
+                -32601,
+                "Method not found",
+                JsonRpcErrorData::unknown_method(method),
+            ));
+        }
     };
-    if let Some(id) = object.get("id") {
-        if !is_valid_jsonrpc_id(id) {
-            return Some(jsonrpc_error(
-                Value::Null,
-                -32600,
-                "Invalid Request",
-                JsonRpcErrorData::invalid_request(
-                    "id must be string, number, or null",
-                    "Use a string, number, or null id so the response can be correlated.",
-                ),
-            ));
-        }
-    }
-    if let Some(params) = object.get("params") {
-        if !(params.is_object() || params.is_array()) {
-            return Some(jsonrpc_error(
-                id_for_error,
-                -32600,
-                "Invalid Request",
-                JsonRpcErrorData::invalid_request(
-                    "params must be object or array",
-                    "Use object params for MCP methods; omit params when no parameters are needed.",
-                ),
-            ));
-        }
-    }
-    if !object.contains_key("id") {
-        return None;
-    }
-    let id = object.get("id").cloned().unwrap_or(Value::Null);
     let result = match method {
-        "initialize" => {
-            let requested = match initialize_protocol_version(object, &id) {
-                Ok(requested) => requested,
-                Err(error) => return Some(error),
-            };
+        RpcMethod::Initialize => {
+            let requested = rpc_try!(initialize_protocol_version(object, &id));
             let requested_is_supported = supported_protocol_version(requested);
             let protocol_version = if requested_is_supported {
                 requested
@@ -172,14 +213,9 @@ fn handle_jsonrpc_request(engine: &TokenZeroEngine, parsed: Value) -> Option<Val
                 }
             })
         }
-        "ping" | "notifications/initialized" => json!({}),
-        #[cfg(test)]
-        "tokenzero/internal/test-panic" => panic!("test-induced tool panic"),
-        "server/discover" => {
-            let params = match meta_only_params(object, &id, "server/discover") {
-                Ok(params) => params,
-                Err(error) => return Some(error),
-            };
+        RpcMethod::Ping | RpcMethod::Initialized => json!({}),
+        RpcMethod::Discover => {
+            let params = rpc_try!(meta_only_params(object, &id, "server/discover"));
             json!({
                 "resultType": "complete",
                 "supportedVersions": SUPPORTED_PROTOCOL_VERSIONS,
@@ -204,14 +240,9 @@ fn handle_jsonrpc_request(engine: &TokenZeroEngine, parsed: Value) -> Option<Val
                 "toolFiltering": tool_filter_discovery(engine.config.tool_surface)
             })
         }
-        "resources/list" => {
-            let params = match object_params(object, &id, "resources/list") {
-                Ok(params) => params,
-                Err(error) => return Some(error),
-            };
-            if let Err(error) = ensure_optional_cursor_param(params, &id, "resources/list") {
-                return Some(error);
-            }
+        RpcMethod::ListResources => {
+            let params = rpc_try!(object_params(object, &id, "resources/list"));
+            rpc_try!(ensure_optional_cursor_param(params, &id, "resources/list"));
             json!({
                 "resources": resource_specs(),
                 "resultType": "complete",
@@ -219,16 +250,13 @@ fn handle_jsonrpc_request(engine: &TokenZeroEngine, parsed: Value) -> Option<Val
                 "cacheScope": "workspace"
             })
         }
-        "resources/templates/list" => {
-            let params = match object_params(object, &id, "resources/templates/list") {
-                Ok(params) => params,
-                Err(error) => return Some(error),
-            };
-            if let Err(error) =
-                ensure_optional_cursor_param(params, &id, "resources/templates/list")
-            {
-                return Some(error);
-            }
+        RpcMethod::ListResourceTemplates => {
+            let params = rpc_try!(object_params(object, &id, "resources/templates/list"));
+            rpc_try!(ensure_optional_cursor_param(
+                params,
+                &id,
+                "resources/templates/list",
+            ));
             json!({
                 "resourceTemplates": [],
                 "resultType": "complete",
@@ -236,56 +264,25 @@ fn handle_jsonrpc_request(engine: &TokenZeroEngine, parsed: Value) -> Option<Val
                 "cacheScope": "workspace"
             })
         }
-        "resources/read" => {
-            let params = match object_params(object, &id, "resources/read") {
-                Ok(Some(params)) => params,
-                Ok(None) => {
-                    return Some(jsonrpc_invalid_params_error(
-                        id,
-                        JsonRpcErrorData::missing_param("resources/read", "uri"),
-                    ));
-                }
-                Err(error) => return Some(error),
-            };
-            let uri = match required_string_param(params, &id, "resources/read", "uri") {
-                Ok(uri) => uri,
-                Err(error) => return Some(error),
-            };
-            match read_resource(engine, uri) {
-                Ok(value) => value,
-                Err(error) => {
-                    return Some(jsonrpc_invalid_params_error(id, error));
-                }
-            }
+        RpcMethod::ReadResource => {
+            let params = rpc_try!(required_params(object, &id, "resources/read", "uri"));
+            let uri = rpc_try!(required_string_param(params, &id, "resources/read", "uri"));
+            rpc_try!(read_resource(engine, uri)
+                .map_err(|error| jsonrpc_invalid_params_error(id.clone(), error)))
         }
-        "prompts/list" => {
-            let params = match object_params(object, &id, "prompts/list") {
-                Ok(params) => params,
-                Err(error) => return Some(error),
-            };
-            if let Err(error) = ensure_optional_cursor_param(params, &id, "prompts/list") {
-                return Some(error);
-            }
+        RpcMethod::ListPrompts => {
+            let params = rpc_try!(object_params(object, &id, "prompts/list"));
+            rpc_try!(ensure_optional_cursor_param(params, &id, "prompts/list"));
             json!({"prompts": []})
         }
-        "logging/setLevel" => {
-            let params = match required_object_params(object, &id, "logging/setLevel") {
-                Ok(params) => params,
-                Err(error) => return Some(error),
-            };
-            if let Err(error) = logging_level(params, &id) {
-                return Some(error);
-            }
+        RpcMethod::SetLoggingLevel => {
+            let params = rpc_try!(required_object_params(object, &id, "logging/setLevel"));
+            rpc_try!(logging_level(params, &id));
             json!({})
         }
-        "tools/list" => {
-            let params = match object_params(object, &id, "tools/list") {
-                Ok(params) => params,
-                Err(error) => return Some(error),
-            };
-            if let Err(error) = ensure_optional_cursor_param(params, &id, "tools/list") {
-                return Some(error);
-            }
+        RpcMethod::ListTools => {
+            let params = rpc_try!(object_params(object, &id, "tools/list"));
+            rpc_try!(ensure_optional_cursor_param(params, &id, "tools/list"));
             let filter = match tool_list_filter(params) {
                 Ok(filter) => filter,
                 Err(error) => return Some(jsonrpc_invalid_params_error(id, error)),
@@ -308,43 +305,16 @@ fn handle_jsonrpc_request(engine: &TokenZeroEngine, parsed: Value) -> Option<Val
                 }
             })
         }
-        "tools/call" => {
-            let params = match object_params(object, &id, "tools/call") {
-                Ok(Some(params)) => params,
-                Ok(None) => {
-                    return Some(jsonrpc_invalid_params_error(
-                        id,
-                        JsonRpcErrorData::missing_param("tools/call", "name"),
-                    ));
-                }
-                Err(error) => return Some(error),
-            };
-            let name = match required_string_param(params, &id, "tools/call", "name") {
-                Ok(name) => name,
-                Err(error) => return Some(error),
-            };
-            let args = match tool_arguments(params, &id) {
-                Ok(args) => args,
-                Err(error) => return Some(error),
-            };
+        RpcMethod::CallTool => {
+            let params = rpc_try!(required_params(object, &id, "tools/call", "name"));
+            let name = rpc_try!(required_string_param(params, &id, "tools/call", "name"));
+            let args = rpc_try!(tool_arguments(params, &id));
             let call_id = match &id {
                 Value::Null => None,
                 other => Some(other.to_string()),
             };
-            match call_tool(engine, name, &args, call_id) {
-                Ok(value) => value,
-                Err(error) => {
-                    return Some(jsonrpc_invalid_params_error(id, error));
-                }
-            }
-        }
-        _ => {
-            return Some(jsonrpc_error(
-                id,
-                -32601,
-                "Method not found",
-                JsonRpcErrorData::unknown_method(method),
-            ));
+            rpc_try!(call_tool(engine, name, &args, call_id)
+                .map_err(|error| jsonrpc_invalid_params_error(id.clone(), error)))
         }
     };
     Some(json!({"jsonrpc": "2.0", "id": id, "result": result}))
@@ -409,18 +379,26 @@ fn ensure_optional_cursor_param(
     }
 }
 
+fn required_params<'a>(
+    object: &'a serde_json::Map<String, Value>,
+    id: &Value,
+    method: &str,
+    missing: &str,
+) -> Result<&'a serde_json::Map<String, Value>, Value> {
+    object_params(object, id, method)?.ok_or_else(|| {
+        jsonrpc_invalid_params_error(
+            id.clone(),
+            JsonRpcErrorData::missing_param(method, missing),
+        )
+    })
+}
+
 fn required_object_params<'a>(
     object: &'a serde_json::Map<String, Value>,
     id: &Value,
     method: &str,
 ) -> Result<&'a serde_json::Map<String, Value>, Value> {
-    match object_params(object, id, method)? {
-        Some(params) => Ok(params),
-        None => Err(jsonrpc_invalid_params_error(
-            id.clone(),
-            JsonRpcErrorData::missing_param(method, "params"),
-        )),
-    }
+    required_params(object, id, method, "params")
 }
 
 fn initialize_protocol_version<'a>(
@@ -739,26 +717,40 @@ fn is_valid_logging_level(value: &str) -> bool {
     LOGGING_LEVELS.contains(&value)
 }
 
-const JSONRPC_METHODS: &[&str] = &[
-    "initialize",
-    "notifications/initialized",
-    "ping",
-    "server/discover",
-    "resources/list",
-    "resources/templates/list",
-    "resources/read",
-    "prompts/list",
-    "logging/setLevel",
-    "tools/list",
-    "tools/call",
-];
-
 #[derive(Debug, Clone)]
 pub(crate) struct JsonRpcErrorData {
     value: Value,
 }
 
 impl JsonRpcErrorData {
+    fn recoverable(
+        kind: &'static str,
+        error_type: &'static str,
+        message: String,
+        fix_hint: String,
+        available_options: Value,
+        suggestions: Value,
+        suggested_tool_calls: Value,
+        extra: Value,
+    ) -> Self {
+        let mut value = json!({
+            "kind": kind,
+            "error_type": error_type,
+            "message": message,
+            "recoverable": true,
+            "reason": message,
+            "fix_hint": fix_hint,
+            "available_options": available_options,
+            "suggestions": suggestions,
+            "suggested_tool_calls": suggested_tool_calls,
+        });
+        value
+            .as_object_mut()
+            .expect("error data object")
+            .extend(extra.as_object().expect("error extras").clone());
+        Self { value }
+    }
+
     /// Human-readable message for inline rendering (batch sub-op errors).
     pub(crate) fn message_text(&self) -> String {
         self.value
@@ -770,40 +762,33 @@ impl JsonRpcErrorData {
     }
 
     pub(crate) fn internal_error(reason: impl Into<String>) -> Self {
-        let reason = reason.into();
-        Self {
-            value: json!({
-                "kind": "internal_error",
-                "error_type": "INTERNAL",
-                "message": reason,
-                "recoverable": true,
-                "reason": reason,
-                "fix_hint": "Retry the request; the server isolated an internal fault and remains available.",
-                "available_options": [],
-                "suggestions": [],
-                "suggested_tool_calls": []
-            }),
-        }
+        Self::recoverable(
+            "internal_error",
+            "INTERNAL",
+            reason.into(),
+            "Retry the request; the server isolated an internal fault and remains available."
+                .into(),
+            json!([]),
+            json!([]),
+            json!([]),
+            json!({}),
+        )
     }
 
     fn invalid_params(reason: impl Into<String>) -> Self {
-        let reason = reason.into();
-        Self {
-            value: json!({
-                "kind": "invalid_params",
-                "error_type": "INVALID_ARGUMENT",
-                "message": reason,
-                "recoverable": true,
-                "reason": reason,
-                "fix_hint": "Check the method input schema from tools/list or resources/list, then retry with object params.",
-                "available_options": ["tools/list", "resources/list"],
-                "suggestions": [],
-                "suggested_tool_calls": [
-                    {"method": "tools/list", "params": {}},
-                    {"method": "resources/list", "params": {}}
-                ]
-            }),
-        }
+        Self::recoverable(
+            "invalid_params",
+            "INVALID_ARGUMENT",
+            reason.into(),
+            "Check the method input schema from tools/list or resources/list, then retry with object params.".into(),
+            json!(["tools/list", "resources/list"]),
+            json!([]),
+            json!([
+                {"method": "tools/list", "params": {}},
+                {"method": "resources/list", "params": {}}
+            ]),
+            json!({}),
+        )
     }
 
     fn missing_param(method: &str, param: &str) -> Self {
@@ -829,47 +814,36 @@ impl JsonRpcErrorData {
                 json!([]),
             ),
         };
-        let message = format!("missing {param}");
-        Self {
-            value: json!({
-                "kind": "missing_param",
-                "error_type": "INVALID_ARGUMENT",
-                "message": message,
-                "recoverable": true,
-                "method": method,
-                "param": param,
-                "parameter": param,
-                "reason": message,
-                "fix_hint": fix_hint,
-                "available_options": available_options,
-                "suggestions": [],
-                "suggested_tool_calls": suggested_tool_calls
-            }),
-        }
+        Self::recoverable(
+            "missing_param",
+            "INVALID_ARGUMENT",
+            format!("missing {param}"),
+            fix_hint.into(),
+            json!(available_options),
+            json!([]),
+            suggested_tool_calls,
+            json!({"method": method, "param": param, "parameter": param}),
+        )
     }
 
     pub(crate) fn unknown_tool(name: &str) -> Self {
         let available_options = tool_names();
-        let suggestions = similar_options(name, &available_options);
-        Self {
-            value: json!({
-                "kind": "unknown_tool",
-                "error_type": "NOT_FOUND",
-                "message": format!("unknown tool: {name}"),
-                "recoverable": true,
+        Self::recoverable(
+            "unknown_tool",
+            "NOT_FOUND",
+            format!("unknown tool: {name}"),
+            "Call tools/list, then retry tools/call with one of available_options as params.name."
+                .into(),
+            json!(available_options),
+            json!(similar_options(name, &tool_names())),
+            json!([{"method": "tools/list", "params": {}}]),
+            json!({
                 "entity_type": "tool",
                 "provided": name,
                 "tool": name,
-                "reason": format!("unknown tool: {name}"),
-                "fix_hint": "Call tools/list, then retry tools/call with one of available_options as params.name.",
-                "available_options": available_options,
                 "available_tools": tool_names(),
-                "suggestions": suggestions,
-                "suggested_tool_calls": [
-                    {"method": "tools/list", "params": {}}
-                ]
             }),
-        }
+        )
     }
 
     /// Crash-only / surface-health policy refusal (wqw.9). Distinct from
@@ -897,51 +871,41 @@ impl JsonRpcErrorData {
 
     fn invalid_logging_level(level: &str) -> Self {
         let available_options = logging_levels();
-        let suggestions = similar_options(level, &available_options);
-        Self {
-            value: json!({
-                "kind": "invalid_param_value",
-                "error_type": "INVALID_ARGUMENT",
-                "message": format!("unsupported logging/setLevel level: {level}"),
-                "recoverable": true,
+        Self::recoverable(
+            "invalid_param_value",
+            "INVALID_ARGUMENT",
+            format!("unsupported logging/setLevel level: {level}"),
+            "Set params.level to one of available_options.".into(),
+            json!(available_options),
+            json!(similar_options(level, &logging_levels())),
+            json!([{"method": "logging/setLevel", "params": {"level": "info"}}]),
+            json!({
                 "method": "logging/setLevel",
                 "param": "level",
                 "parameter": "level",
                 "provided": level,
-                "reason": format!("unsupported logging/setLevel level: {level}"),
-                "fix_hint": "Set params.level to one of available_options.",
-                "available_options": available_options,
                 "available_levels": logging_levels(),
-                "suggestions": suggestions,
-                "suggested_tool_calls": [
-                    {"method": "logging/setLevel", "params": {"level": "info"}}
-                ]
             }),
-        }
+        )
     }
 
     pub(crate) fn unknown_resource(uri: &str) -> Self {
         let available_options = resource_uris();
-        let suggestions = similar_options(uri, &available_options);
-        Self {
-            value: json!({
-                "kind": "unknown_resource",
-                "error_type": "NOT_FOUND",
-                "message": format!("unknown resource: {uri}"),
-                "recoverable": true,
+        Self::recoverable(
+            "unknown_resource",
+            "NOT_FOUND",
+            format!("unknown resource: {uri}"),
+            "Call resources/list, then retry resources/read with one of available_options as params.uri.".into(),
+            json!(available_options),
+            json!(similar_options(uri, &resource_uris())),
+            json!([{"method": "resources/list", "params": {}}]),
+            json!({
                 "entity_type": "resource",
                 "provided": uri,
                 "uri": uri,
-                "reason": format!("unknown resource: {uri}"),
-                "fix_hint": "Call resources/list, then retry resources/read with one of available_options as params.uri.",
-                "available_options": available_options,
                 "available_resources": resource_uris(),
-                "suggestions": suggestions,
-                "suggested_tool_calls": [
-                    {"method": "resources/list", "params": {}}
-                ]
             }),
-        }
+        )
     }
 
     fn unknown_tool_cluster(cluster: &str) -> Self {
@@ -952,88 +916,71 @@ impl JsonRpcErrorData {
                 .map(|cluster| cluster.to_string()),
         );
         let suggestions = similar_options(cluster, &available_options);
-        Self {
-            value: json!({
-                "kind": "unknown_tool_cluster",
-                "error_type": "INVALID_ARGUMENT",
-                "message": format!("unknown tools/list cluster: {cluster}"),
-                "recoverable": true,
+        Self::recoverable(
+            "unknown_tool_cluster",
+            "INVALID_ARGUMENT",
+            format!("unknown tools/list cluster: {cluster}"),
+            "Use tools/list params._meta.tokenzero/toolCluster with one of available_options, or omit it for the full catalog.".into(),
+            json!(available_options),
+            json!(suggestions),
+            json!([
+                {"method": "tools/list", "params": {"_meta": {"tokenzero/toolCluster": "material"}}},
+                {"method": "tools/list", "params": {"_meta": {"tokenzero/toolCluster": "execution"}}}
+            ]),
+            json!({
                 "entity_type": "tool_cluster",
                 "provided": cluster,
                 "parameter": "cluster",
-                "reason": format!("unknown tools/list cluster: {cluster}"),
-                "fix_hint": "Use tools/list params._meta.tokenzero/toolCluster with one of available_options, or omit it for the full catalog.",
-                "available_options": available_options,
                 "available_clusters": tool_cluster_names(),
-                "suggestions": suggestions,
-                "suggested_tool_calls": [
-                    {"method": "tools/list", "params": {"_meta": {"tokenzero/toolCluster": "material"}}},
-                    {"method": "tools/list", "params": {"_meta": {"tokenzero/toolCluster": "execution"}}}
-                ]
             }),
-        }
+        )
     }
 
     fn unknown_method(method: &str) -> Self {
-        let available_options = JSONRPC_METHODS
-            .iter()
-            .map(|method| (*method).to_string())
-            .collect::<Vec<_>>();
+        let available_options = JSONRPC_METHODS.iter().map(ToString::to_string).collect::<Vec<_>>();
         let suggestions = similar_options(method, &available_options);
-        Self {
-            value: json!({
-                "kind": "unknown_method",
-                "error_type": "NOT_FOUND",
-                "message": format!("unknown JSON-RPC method: {method}"),
-                "recoverable": true,
+        Self::recoverable(
+            "unknown_method",
+            "NOT_FOUND",
+            format!("unknown JSON-RPC method: {method}"),
+            "Call server/discover for protocol capabilities or use one of available_options."
+                .into(),
+            json!(available_options),
+            json!(suggestions),
+            json!([{"method": "server/discover", "params": {}}]),
+            json!({
                 "entity_type": "method",
                 "provided": method,
                 "method": method,
-                "reason": format!("unknown JSON-RPC method: {method}"),
-                "fix_hint": "Call server/discover for protocol capabilities or use one of available_options.",
-                "available_options": available_options,
                 "available_methods": JSONRPC_METHODS,
-                "suggestions": suggestions,
-                "suggested_tool_calls": [
-                    {"method": "server/discover", "params": {}}
-                ]
             }),
-        }
+        )
     }
 
     pub(crate) fn parse_error(reason: String) -> Self {
-        Self {
-            value: json!({
-                "kind": "parse_error",
-                "error_type": "INVALID_REQUEST",
-                "message": reason,
-                "recoverable": true,
-                "reason": reason,
-                "fix_hint": "Send one valid JSON-RPC 2.0 request object per line, or use Content-Length framed JSON.",
-                "available_options": JSONRPC_METHODS,
-                "suggestions": [],
-                "suggested_tool_calls": []
-            }),
-        }
+        Self::recoverable(
+            "parse_error",
+            "INVALID_REQUEST",
+            reason,
+            "Send one valid JSON-RPC 2.0 request object per line, or use Content-Length framed JSON.".into(),
+            json!(JSONRPC_METHODS),
+            json!([]),
+            json!([]),
+            json!({}),
+        )
     }
 
     fn invalid_request(reason: impl Into<String>, fix_hint: impl Into<String>) -> Self {
-        let reason = reason.into();
-        Self {
-            value: json!({
-                "kind": "invalid_request",
-                "error_type": "INVALID_REQUEST",
-                "message": reason,
-                "recoverable": true,
-                "reason": reason,
-                "fix_hint": fix_hint.into(),
-                "available_options": JSONRPC_METHODS,
-                "suggestions": [],
-                "suggested_tool_calls": [
-                    {"method": "server/discover", "params": {}}
-                ]
-            }),
-        }
+        Self::recoverable(
+            "invalid_request",
+            "INVALID_REQUEST",
+            reason.into(),
+            fix_hint.into(),
+            json!(JSONRPC_METHODS),
+            json!([]),
+            json!([{"method": "server/discover", "params": {}}]),
+            json!({}),
+        )
     }
 }
 

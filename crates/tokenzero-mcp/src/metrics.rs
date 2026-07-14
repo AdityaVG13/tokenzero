@@ -14,7 +14,7 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use serde_json::{Value, json};
 use tokenzero_core::MCP_SCHEMA_VERSION;
@@ -116,7 +116,7 @@ impl ToolMetrics {
 
         // Merge this single call into the persistent sidecar. Reload from
         // disk first so concurrent server processes can accumulate.
-        let persist_started = Instant::now();
+        // Attribution is owned by tools.rs via record_attribution.
         let mut persisted = self.load_persisted();
         persisted
             .entry(tool.to_string())
@@ -126,13 +126,6 @@ impl ToolMetrics {
             *mirror = persisted.clone();
         }
         let _ = self.write_persisted(&persisted);
-        let engine_us = u64::try_from(elapsed.as_micros()).unwrap_or(u64::MAX);
-        let persist_us = u64::try_from(persist_started.elapsed().as_micros()).unwrap_or(u64::MAX);
-        self.record_attribution(
-            tool,
-            Duration::from_micros(engine_us),
-            Duration::from_micros(persist_us),
-        );
     }
 
     pub(crate) fn record_attribution(&self, tool: &str, engine: Duration, persist: Duration) {

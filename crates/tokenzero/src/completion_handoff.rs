@@ -13,6 +13,45 @@ use crate::claim_actions::{
 use serde_json::json;
 use std::path::Path;
 
+fn goal_row(
+    id: &str,
+    status: &str,
+    claim: &str,
+    direct_evidence: &[&str],
+    residual: serde_json::Value,
+) -> serde_json::Value {
+    json!({
+        "id": id,
+        "status": status,
+        "claim": claim,
+        "direct_evidence": direct_evidence,
+        "residual": residual
+    })
+}
+
+
+const HANDOFF_ARTIFACTS: &[(&str, &str, &str)] = &[
+    ("completion_audit", "results/current/tokenzero_completion_audit.json", "false-closure audit and requirement map"),
+    ("security_privacy_audit", "results/current/tokenzero_security_privacy_audit.json", "G-009/NFR-003/NFR-004 local security and privacy proof"),
+    ("bench_competitors", "results/current/tokenzero_bench_competitors_shell_heavy.json", "Safe Savings benchmark and unavailable-row adapter matrix"),
+    ("adapter_approval_audit", "results/current/tokenzero_adapter_approval_audit.json", "Non-executing reviewed-command gate for runnable competitor adapters"),
+    ("adapter_approval_file", "results/current/tokenzero_adapter_approval_file.json", "reviewed command-shape approval file; execution and public claims remain gated"),
+    ("source_currency", "results/current/tokenzero_source_currency.json", "private source ledger and public freshness gate"),
+    ("claim_audit", "results/current/tokenzero_claim_audit.json", "public claim gate, same-release-candidate check, and gated action list"),
+    ("os_reach", "results/current/tokenzero_os_reach_audit.json", ""),
+    ("os_release_artifact", "results/current/tokenzero_os_release_artifact.json", ""),
+    ("one_shot", "results/current/tokenzero_one_shot_eval.json", "golden critical trace one-shot adequacy evidence"),
+    ("task_success", "results/current/tokenzero_one_shot_eval.json", "claim-gate task-success proof from one-shot adequacy rows"),
+    ("exact_recovery", "results/current/tokenzero_exact_recovery_audit.json", "normal and degraded exact recovery audit"),
+    ("exact_recovery_shell", "results/current/tokenzero_exact_recovery_shell.json", "VP-006 byte-perfect shell expand checks for emitted local refs"),
+    ("false_success_shell", "results/current/tokenzero_false_success_shell.json", "FR-006 shell status truth audit for nonzero, failed cd, masked pipeline, timeout, and success"),
+    ("reach", "results/current/tokenzero_reach.json", "FR-008/G-007 host reach and installed wrapper trust evidence"),
+    ("mcp_smoke", "results/current/rust_mcp_smoke.json", "VP-003 MCP smoke proof with ok true and no unexpected exits"),
+    ("shell_matrix", "results/current/tokenzero_shell_matrix.json", "VP-004 shell matrix proof for current-host runtime behavior"),
+    ("advanced_adr", "docs/advanced-adr-execution-record.md", "phase decisions and evidence record"),
+    ("competitive_reconciliation", "results/current/tokenzero_competitive_superiority_reconciliation.md", "residual gate reconciliation snapshot and no-gated-action proof"),
+];
+
 pub(crate) fn completion_audit_report() -> serde_json::Value {
     let claim_gate_snapshot =
         completion_claim_gate_snapshot(Path::new("results/current/tokenzero_claim_audit.json"));
@@ -27,164 +66,32 @@ pub(crate) fn completion_audit_report() -> serde_json::Value {
         "results/current/tokenzero_source_currency.json",
     ));
     let g_goals = vec![
-        json!({
-            "id": "G-001",
-            "status": "passed_private",
-            "claim": "Competitive evidence ledger covers named and adjacent repositories",
-            "direct_evidence": ["results/current/tokenzero_source_currency.json"],
-            "residual": &source_public_residual
-        }),
-        json!({
-            "id": "G-002",
-            "status": "passed_private",
-            "claim": "Benchmark harness measures TokenZero and accounts for competitor adapters",
-            "direct_evidence": ["results/current/tokenzero_bench_competitors_shell_heavy.json", "results/current/tokenzero_adapter_approval_audit.json"],
-            "residual": "runnable competitor execution remains approval-gated"
-        }),
-        json!({
-            "id": "G-003",
-            "status": "passed",
-            "claim": "Exact Recovery Always has refs or degraded diagnostics",
-            "direct_evidence": ["results/current/tokenzero_exact_recovery_audit.json", "results/current/tokenzero_exact_recovery_shell.json"],
-            "residual": serde_json::Value::Null
-        }),
-        json!({
-            "id": "G-004",
-            "status": "passed_private",
-            "claim": "Adaptive One-Shot Planner avoids hidden second-call dependence on golden critical traces",
-            "direct_evidence": ["results/current/tokenzero_one_shot_eval.json"],
-            "residual": "public one-shot claim remains gated"
-        }),
-        json!({
-            "id": "G-005",
-            "status": "blocked_public",
-            "claim": "No-Daemon OS Runtime preserves Windows, macOS, and Linux behavior",
-            "direct_evidence": ["results/current/tokenzero_os_reach_audit.json", "results/current/tokenzero_os_release_artifact.json"],
-            "residual": os_matrix_residual
-        }),
-        json!({
-            "id": "G-006",
-            "status": "passed",
-            "claim": "Stable CLI/MCP diagnostics separate transport from child command success",
-            "direct_evidence": ["cargo test --workspace", "results/current/tokenzero_false_success_shell.json", "results/current/tokenzero_bench_competitors_shell_heavy.json"],
-            "residual": serde_json::Value::Null
-        }),
-        json!({
-            "id": "G-007",
-            "status": "passed_private",
-            "claim": "Reach and install coverage identifies intercepted and bypassed host surfaces",
-            "direct_evidence": ["results/current/tokenzero_reach.json", "results/current/tokenzero_os_reach_audit.json", "results/current/tokenzero_os_release_artifact.json"],
-            "residual": "non-current OS release artifacts remain gated"
-        }),
-        json!({
-            "id": "G-008",
-            "status": "passed_blocked",
-            "claim": "Public Claim Gate blocks release-facing savings claims",
-            "direct_evidence": ["results/current/tokenzero_claim_audit.json"],
-            "residual": &claim_public_residual
-        }),
-        json!({
-            "id": "G-009",
-            "status": "passed",
-            "claim": "Security and privacy keep raw payloads local and avoid unapproved external writes",
-            "direct_evidence": ["results/current/tokenzero_security_privacy_audit.json"],
-            "residual": serde_json::Value::Null
-        }),
-        json!({
-            "id": "G-010",
-            "status": "passed_private",
-            "claim": "Agent Execution Pack supports future implementation without this chat",
-            "direct_evidence": ["results/current/tokenzero_artifact_handoff.json", "docs/advanced-adr-execution-record.md", "results/current/tokenzero_competitive_superiority_reconciliation.md", "validate_prd_goal.py --min-score 930"],
-            "residual": "completion remains blocked by explicit residual gates"
-        }),
+        goal_row("G-001", "passed_private", "Competitive evidence ledger covers named and adjacent repositories", &["results/current/tokenzero_source_currency.json"], json!(&source_public_residual)),
+        goal_row("G-002", "passed_private", "Benchmark harness measures TokenZero and accounts for competitor adapters", &["results/current/tokenzero_bench_competitors_shell_heavy.json", "results/current/tokenzero_adapter_approval_audit.json"], json!("runnable competitor execution remains approval-gated")),
+        goal_row("G-003", "passed", "Exact Recovery Always has refs or degraded diagnostics", &["results/current/tokenzero_exact_recovery_audit.json", "results/current/tokenzero_exact_recovery_shell.json"], serde_json::Value::Null),
+        goal_row("G-004", "passed_private", "Adaptive One-Shot Planner avoids hidden second-call dependence on golden critical traces", &["results/current/tokenzero_one_shot_eval.json"], json!("public one-shot claim remains gated")),
+        goal_row("G-005", "blocked_public", "No-Daemon OS Runtime preserves Windows, macOS, and Linux behavior", &["results/current/tokenzero_os_reach_audit.json", "results/current/tokenzero_os_release_artifact.json"], json!(&os_matrix_residual)),
+        goal_row("G-006", "passed", "Stable CLI/MCP diagnostics separate transport from child command success", &["cargo test --workspace", "results/current/tokenzero_false_success_shell.json", "results/current/tokenzero_bench_competitors_shell_heavy.json"], serde_json::Value::Null),
+        goal_row("G-007", "passed_private", "Reach and install coverage identifies intercepted and bypassed host surfaces", &["results/current/tokenzero_reach.json", "results/current/tokenzero_os_reach_audit.json", "results/current/tokenzero_os_release_artifact.json"], json!("non-current OS release artifacts remain gated")),
+        goal_row("G-008", "passed_blocked", "Public Claim Gate blocks release-facing savings claims", &["results/current/tokenzero_claim_audit.json"], json!(&claim_public_residual)),
+        goal_row("G-009", "passed", "Security and privacy keep raw payloads local and avoid unapproved external writes", &["results/current/tokenzero_security_privacy_audit.json"], serde_json::Value::Null),
+        goal_row("G-010", "passed_private", "Agent Execution Pack supports future implementation without this chat", &["results/current/tokenzero_artifact_handoff.json", "docs/advanced-adr-execution-record.md", "results/current/tokenzero_competitive_superiority_reconciliation.md", "validate_prd_goal.py --min-score 930"], json!("completion remains blocked by explicit residual gates")),
     ];
     let must_fr = vec![
-        completion_req_row(
-            "FR-001",
-            "passed_private",
-            &["results/current/tokenzero_source_currency.json"],
-            &source_public_residual,
-        ),
-        completion_req_row(
-            "FR-002",
-            "passed_private",
-            &[
-                "results/current/tokenzero_bench_competitors_shell_heavy.json",
-                "results/current/tokenzero_adapter_approval_audit.json",
-            ],
-            "runnable competitor adapters require approval",
-        ),
-        completion_req_row(
-            "FR-003",
-            "passed",
-            &["results/current/tokenzero_exact_recovery_audit.json"],
-            "",
-        ),
-        completion_req_row(
-            "FR-004",
-            "passed",
-            &["results/current/tokenzero_protected_anchor_audit.json"],
-            "",
-        ),
-        completion_req_row(
-            "FR-005",
-            "passed_private",
-            &["results/current/tokenzero_one_shot_eval.json"],
-            "public one-shot claim still gated",
-        ),
-        completion_req_row(
-            "FR-006",
-            "passed",
-            &[
-                "cargo test --workspace",
-                "results/current/tokenzero_false_success_shell.json",
-            ],
-            "",
-        ),
-        completion_req_row(
-            "FR-007",
-            "blocked_public",
-            &[
-                "results/current/tokenzero_os_reach_audit.json",
-                "results/current/tokenzero_os_release_artifact.json",
-            ],
-            &os_matrix_residual,
-        ),
-        completion_req_row(
-            "FR-010",
-            "passed_blocked",
-            &["results/current/tokenzero_claim_audit.json"],
-            &claim_public_residual,
-        ),
+        completion_req_row("FR-001", "passed_private", &["results/current/tokenzero_source_currency.json"], &source_public_residual),
+        completion_req_row("FR-002", "passed_private", &[ "results/current/tokenzero_bench_competitors_shell_heavy.json", "results/current/tokenzero_adapter_approval_audit.json", ], "runnable competitor adapters require approval"),
+        completion_req_row("FR-003", "passed", &["results/current/tokenzero_exact_recovery_audit.json"], ""),
+        completion_req_row("FR-004", "passed", &["results/current/tokenzero_protected_anchor_audit.json"], ""),
+        completion_req_row("FR-005", "passed_private", &["results/current/tokenzero_one_shot_eval.json"], "public one-shot claim still gated"),
+        completion_req_row("FR-006", "passed", &[ "cargo test --workspace", "results/current/tokenzero_false_success_shell.json", ], ""),
+        completion_req_row("FR-007", "blocked_public", &[ "results/current/tokenzero_os_reach_audit.json", "results/current/tokenzero_os_release_artifact.json", ], &os_matrix_residual),
+        completion_req_row("FR-010", "passed_blocked", &["results/current/tokenzero_claim_audit.json"], &claim_public_residual)
     ];
     let critical_nfr = vec![
-        completion_req_row(
-            "NFR-001",
-            "passed",
-            &["results/current/tokenzero_exact_recovery_audit.json"],
-            "",
-        ),
-        completion_req_row(
-            "NFR-002",
-            "blocked_public",
-            &[
-                "results/current/tokenzero_os_reach_audit.json",
-                "results/current/tokenzero_os_release_artifact.json",
-            ],
-            &os_matrix_residual,
-        ),
-        completion_req_row(
-            "NFR-003",
-            "passed",
-            &["results/current/tokenzero_security_privacy_audit.json"],
-            "",
-        ),
-        completion_req_row(
-            "NFR-004",
-            "passed",
-            &["results/current/tokenzero_security_privacy_audit.json"],
-            "",
-        ),
+        completion_req_row("NFR-001", "passed", &["results/current/tokenzero_exact_recovery_audit.json"], ""),
+        completion_req_row("NFR-002", "blocked_public", &[ "results/current/tokenzero_os_reach_audit.json", "results/current/tokenzero_os_release_artifact.json", ], &os_matrix_residual),
+        completion_req_row("NFR-003", "passed", &["results/current/tokenzero_security_privacy_audit.json"], ""),
+        completion_req_row("NFR-004", "passed", &["results/current/tokenzero_security_privacy_audit.json"], "")
     ];
     let (requirement_status_counts, blocked_requirement_ids, all_requirement_rows_passed) =
         completion_requirement_status_summary(&[&g_goals, &must_fr, &critical_nfr]);
@@ -249,103 +156,17 @@ pub(crate) fn artifact_handoff_report(
         missing_release_os_rows(Path::new("results/current/tokenzero_os_reach_audit.json"));
     let os_reach_purpose = os_reach_artifact_purpose(&missing_release_oses);
     let os_release_artifact_purpose = os_release_artifact_purpose(&missing_release_oses);
-    let artifacts = vec![
-        handoff_artifact(
-            "completion_audit",
-            "results/current/tokenzero_completion_audit.json",
-            "false-closure audit and requirement map",
-        ),
-        handoff_artifact(
-            "security_privacy_audit",
-            "results/current/tokenzero_security_privacy_audit.json",
-            "G-009/NFR-003/NFR-004 local security and privacy proof",
-        ),
-        handoff_artifact(
-            "bench_competitors",
-            "results/current/tokenzero_bench_competitors_shell_heavy.json",
-            "Safe Savings benchmark and unavailable-row adapter matrix",
-        ),
-        handoff_artifact(
-            "adapter_approval_audit",
-            "results/current/tokenzero_adapter_approval_audit.json",
-            "Non-executing reviewed-command gate for runnable competitor adapters",
-        ),
-        handoff_artifact(
-            "adapter_approval_file",
-            "results/current/tokenzero_adapter_approval_file.json",
-            "reviewed command-shape approval file; execution and public claims remain gated",
-        ),
-        handoff_artifact(
-            "source_currency",
-            "results/current/tokenzero_source_currency.json",
-            "private source ledger and public freshness gate",
-        ),
-        handoff_artifact(
-            "claim_audit",
-            "results/current/tokenzero_claim_audit.json",
-            "public claim gate, same-release-candidate check, and gated action list",
-        ),
-        handoff_artifact(
-            "os_reach",
-            "results/current/tokenzero_os_reach_audit.json",
-            &os_reach_purpose,
-        ),
-        handoff_artifact(
-            "os_release_artifact",
-            "results/current/tokenzero_os_release_artifact.json",
-            &os_release_artifact_purpose,
-        ),
-        handoff_artifact(
-            "one_shot",
-            "results/current/tokenzero_one_shot_eval.json",
-            "golden critical trace one-shot adequacy evidence",
-        ),
-        handoff_artifact(
-            "task_success",
-            "results/current/tokenzero_one_shot_eval.json",
-            "claim-gate task-success proof from one-shot adequacy rows",
-        ),
-        handoff_artifact(
-            "exact_recovery",
-            "results/current/tokenzero_exact_recovery_audit.json",
-            "normal and degraded exact recovery audit",
-        ),
-        handoff_artifact(
-            "exact_recovery_shell",
-            "results/current/tokenzero_exact_recovery_shell.json",
-            "VP-006 byte-perfect shell expand checks for emitted local refs",
-        ),
-        handoff_artifact(
-            "false_success_shell",
-            "results/current/tokenzero_false_success_shell.json",
-            "FR-006 shell status truth audit for nonzero, failed cd, masked pipeline, timeout, and success",
-        ),
-        handoff_artifact(
-            "reach",
-            "results/current/tokenzero_reach.json",
-            "FR-008/G-007 host reach and installed wrapper trust evidence",
-        ),
-        handoff_artifact(
-            "mcp_smoke",
-            "results/current/rust_mcp_smoke.json",
-            "VP-003 MCP smoke proof with ok true and no unexpected exits",
-        ),
-        handoff_artifact(
-            "shell_matrix",
-            "results/current/tokenzero_shell_matrix.json",
-            "VP-004 shell matrix proof for current-host runtime behavior",
-        ),
-        handoff_artifact(
-            "advanced_adr",
-            "docs/advanced-adr-execution-record.md",
-            "phase decisions and evidence record",
-        ),
-        handoff_artifact(
-            "competitive_reconciliation",
-            "results/current/tokenzero_competitive_superiority_reconciliation.md",
-            "residual gate reconciliation snapshot and no-gated-action proof",
-        ),
-    ];
+    let artifacts = HANDOFF_ARTIFACTS
+        .iter()
+        .map(|&(id, path, purpose)| {
+            let purpose = match id {
+                "os_reach" => &os_reach_purpose,
+                "os_release_artifact" => &os_release_artifact_purpose,
+                _ => purpose,
+            };
+            handoff_artifact(id, path, purpose)
+        })
+        .collect::<Vec<_>>();
     let (artifact_integrity_matrix, all_required_artifacts_present, all_required_artifacts_valid) =
         handoff_artifact_integrity_matrix(&artifacts);
     let verification_plan_matrix = handoff_verification_plan_matrix(&missing_release_oses);

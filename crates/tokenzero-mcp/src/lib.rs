@@ -162,6 +162,8 @@ pub struct TokenZeroEngine {
     session: Mutex<Option<SessionMemory>>,
     /// Prompt-resident spans; bodies page to durable refs under budget pressure.
     working_set: Mutex<tokenzero_recovery::working_set::WorkingSet>,
+    /// Reused RecoveryStore for working-set admission (one per engine lifetime).
+    recovery_store: Mutex<tokenzero_recovery::RecoveryStore>,
     /// Single-flight gate: ServeKeys currently being served, with a condvar
     /// to wake waiters. Two pipelined identical reads on the 4-worker pool
     /// would otherwise both miss the seen-set (the first has not recorded its

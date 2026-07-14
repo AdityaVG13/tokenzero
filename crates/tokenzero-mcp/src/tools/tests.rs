@@ -5,10 +5,7 @@ fn codemode_not_exposed_as_mcp_tool() {
     let list =
         crate::catalog::tool_specs_for_filter(None, true, tokenzero_core::McpToolSurface::Classic);
     let names: Vec<_> = list.iter().map(|tool| tool.name.as_str()).collect();
-    assert!(
-        !names.contains(&"tz_codemode"),
-        "tz_codemode must not appear in MCP tool list"
-    );
+    assert!(!names.contains(&"tz_codemode"), "tz_codemode must not appear in MCP tool list");
     assert!(names.contains(&"tz_read"));
     assert!(names.contains(&"tz_expand"));
 }

@@ -181,92 +181,106 @@ pub struct MigrationManifest {
     pub completed: bool,
 }
 
-impl MigrationManifest {
-    /// Load a manifest from `path`, or return an empty one if missing.
-    /// Returns an error if the file exists but is corrupt or has a newer version.
-    pub fn load(path: &Path) -> Result<Self, MigrationErrorCode> {
-        match fs::read_to_string(path) {
-            Ok(text) => {
-                let mf: Self =
-                    serde_json::from_str(&text).map_err(|_| MigrationErrorCode::ManifestCorrupt)?;
-                if mf.version.as_str() != MIGRATION_MANIFEST_VERSION {
-                    return Err(MigrationErrorCode::ManifestNewerVersion);
-                }
-                Ok(mf)
+impl MigrationManifest { fn entry(
+        short_ref: String,
+        full_hash: String,
+        size: u64,
+        migrated_at: u64,
+        resumed: bool,
+        owner_alias: bool,
+    ) -> ManifestEntry {
+        ManifestEntry {
+            short_ref,
+            full_hash,
+            size,
+            state: EntryState::Migrated,
+            migrated_at,
+            verified_at: None,
+            resumed,
+            owner_alias,
+        }
+    } /// Load a manifest from `path`, or return an empty one if missing.
+/// Returns an error if the file exists but is corrupt or has a newer version.
+pub fn load(path: &Path) -> Result<Self, MigrationErrorCode> {
+    match fs::read_to_string(path) {
+        Ok(text) => {
+            let mf: Self =
+                serde_json::from_str(&text).map_err(|_| MigrationErrorCode::ManifestCorrupt)?;
+            if mf.version.as_str() != MIGRATION_MANIFEST_VERSION {
+                return Err(MigrationErrorCode::ManifestNewerVersion);
             }
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
-                Err(MigrationErrorCode::ManifestMissing)
-            }
-            Err(_) => Err(MigrationErrorCode::ManifestCorrupt),
+            Ok(mf)
         }
-    }
-
-    fn empty() -> Self {
-        Self {
-            version: MIGRATION_MANIFEST_VERSION.to_string(),
-            entries: BTreeMap::new(),
-            completed: false,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            Err(MigrationErrorCode::ManifestMissing)
         }
-    }
-
-    /// Save the manifest to `path` atomically:
-    /// write to a unique temp file, sync data, then rename.
-    pub fn save(&self, path: &Path) -> Result<(), MigrationErrorCode> {
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent).map_err(|_| MigrationErrorCode::ManifestSave)?;
-        }
-        let text =
-            serde_json::to_string_pretty(self).map_err(|_| MigrationErrorCode::ManifestSave)?;
-        let mut last_err = None;
-        for attempt in 0..TMP_RETRIES {
-            let tmp = tmp_manifest_path(path, attempt);
-            match Self::write_tmp_sync(&tmp, &text) {
-                Ok(()) => match fs::rename(&tmp, path) {
-                    Ok(()) => return Ok(()),
-                    Err(err) => {
-                        let _ = fs::remove_file(&tmp);
-                        last_err = Some(err);
-                    }
-                },
-                Err(err) => {
-                    let _ = fs::remove_file(&tmp);
-                    last_err = Some(err);
-                }
-            }
-        }
-        Err(last_err.map_or(MigrationErrorCode::ManifestSave, |_| {
-            MigrationErrorCode::ManifestSave
-        }))
-    }
-
-    fn write_tmp_sync(tmp: &Path, text: &str) -> Result<(), std::io::Error> {
-        let mut file = fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(tmp)?;
-        file.write_all(text.as_bytes())?;
-        file.flush()?;
-        #[cfg(unix)]
-        {
-            let _ = file.sync_data();
-        }
-        #[cfg(not(unix))]
-        {
-            let _ = file.sync_all();
-        }
-        Ok(())
-    }
-
-    pub fn contains_hash(&self, short_ref: &str, full_hash: &str) -> bool {
-        self.entries
-            .get(short_ref)
-            .is_some_and(|e| e.full_hash == full_hash)
-    }
-
-    pub fn contains_short(&self, short_ref: &str) -> bool {
-        self.entries.contains_key(short_ref)
+        Err(_) => Err(MigrationErrorCode::ManifestCorrupt),
     }
 }
+
+fn empty() -> Self {
+    Self {
+        version: MIGRATION_MANIFEST_VERSION.to_string(),
+        entries: BTreeMap::new(),
+        completed: false,
+    }
+}
+
+/// Save the manifest to `path` atomically:
+/// write to a unique temp file, sync data, then rename.
+pub fn save(&self, path: &Path) -> Result<(), MigrationErrorCode> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|_| MigrationErrorCode::ManifestSave)?;
+    }
+    let text =
+        serde_json::to_string_pretty(self).map_err(|_| MigrationErrorCode::ManifestSave)?;
+
+    for attempt in 0..TMP_RETRIES {
+        let tmp = tmp_manifest_path(path, attempt);
+        match Self::write_tmp_sync(&tmp, &text) {
+            Ok(()) => match fs::rename(&tmp, path) {
+                Ok(()) => return Ok(()),
+                Err(err) => {
+                    let _ = fs::remove_file(&tmp);
+                    let _ = err;
+                }
+            },
+            Err(err) => {
+                let _ = fs::remove_file(&tmp);
+                let _ = err;
+            }
+        }
+    }
+    Err(MigrationErrorCode::ManifestSave)
+}
+
+fn write_tmp_sync(tmp: &Path, text: &str) -> Result<(), std::io::Error> {
+    let mut file = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(tmp)?;
+    file.write_all(text.as_bytes())?;
+    file.flush()?;
+    #[cfg(unix)]
+    {
+        let _ = file.sync_data();
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = file.sync_all();
+    }
+    Ok(())
+}
+
+pub fn contains_hash(&self, short_ref: &str, full_hash: &str) -> bool {
+    self.entries
+        .get(short_ref)
+        .is_some_and(|e| e.full_hash == full_hash)
+}
+
+pub fn contains_short(&self, short_ref: &str) -> bool {
+    self.entries.contains_key(short_ref)
+} }
 
 fn tmp_manifest_path(manifest: &Path, attempt: usize) -> PathBuf {
     let parent = manifest.parent().unwrap_or_else(|| Path::new("."));
@@ -329,98 +343,167 @@ pub struct MigrationError {
     pub short_ref: Option<String>,
 }
 
-impl MigrationReport {
-    fn new(operation: &str, dry_run: bool) -> Self {
-        Self {
-            manifest_version: MIGRATION_MANIFEST_VERSION.to_string(),
-            operation: operation.to_string(),
-            dry_run,
-            total: 0,
-            migrated: 0,
-            skipped: 0,
-            failed: 0,
-            repaired: 0,
-            verified: 0,
-            aliases: Vec::new(),
-            errors: Vec::new(),
-            timestamp: now_unix(),
-        }
-    }
-
-    pub fn is_failure(&self) -> bool {
-        self.failed > 0 || !self.errors.is_empty()
-    }
-
-    pub fn to_json(&self) -> String {
-        serde_json::to_string_pretty(self).unwrap_or_else(|_| "{}".to_string())
-    }
-
-    pub fn to_text(&self) -> String {
-        let mut out = String::new();
-        out.push_str(&format!(
-            "Migration {} (dry_run={})
-             ─────────────────────────────────
-             total:    {}
-             migrated: {}
-             skipped:  {}
-             failed:   {}
-             repaired: {}
-             verified: {}
-",
-            self.operation,
-            self.dry_run,
-            self.total,
-            self.migrated,
-            self.skipped,
-            self.failed,
-            self.repaired,
-            self.verified,
-        ));
-        if !self.aliases.is_empty() {
-            out.push_str(
-                "
-aliases:
-",
-            );
-            for entry in &self.aliases {
-                out.push_str(&format!(
-                    "  {} → {}  [{}]
-",
-                    entry.short_ref,
-                    entry.full_ref,
-                    match entry.status {
-                        AliasStatus::Migrated => "migrated",
-                        AliasStatus::Skipped => "skipped",
-                        AliasStatus::Failed => "failed",
-                        AliasStatus::Repaired => "repaired",
-                        AliasStatus::Verified => "verified",
-                    }
-                ));
-                if let Some(err) = &entry.error {
-                    out.push_str(&format!(
-                        "    error: {err}
-"
-                    ));
-                }
-            }
-        }
-        if !self.errors.is_empty() {
-            out.push_str(
-                "
-errors:
-",
-            );
-            for err in &self.errors {
-                out.push_str(&format!(
-                    "  [{}] {}
-",
-                    err.code, err.message
-                ));
-            }
-        }
-        out
+impl MigrationReport { fn push_alias(
+        &mut self,
+        short_ref: String,
+        full_ref: String,
+        size: u64,
+        status: AliasStatus,
+        error: Option<String>,
+        error_code: Option<String>,
+    ) {
+        self.aliases.push(AliasEntry {
+            short_ref,
+            full_ref,
+            size,
+            status,
+            error,
+            error_code,
+        });
+    } fn new(operation: &str, dry_run: bool) -> Self {
+    Self {
+        manifest_version: MIGRATION_MANIFEST_VERSION.to_string(),
+        operation: operation.to_string(),
+        dry_run,
+        total: 0,
+        migrated: 0,
+        skipped: 0,
+        failed: 0,
+        repaired: 0,
+        verified: 0,
+        aliases: Vec::new(),
+        errors: Vec::new(),
+        timestamp: now_unix(),
     }
 }
+
+pub fn is_failure(&self) -> bool {
+    self.failed > 0 || !self.errors.is_empty()
+}
+
+/// Record a top-level error without counting a failed entry (manifest load, flags).
+fn record_error(
+        &mut self,
+        code: impl Into<String>,
+        message: impl Into<String>,
+        short_ref: Option<String>,
+    ) {
+        self.errors.push(MigrationError {
+            code: code.into(),
+            message: message.into(),
+            short_ref,
+        });
+    }
+
+/// Count a failed entry and append a structured error.
+fn fail(&mut self, code: &str, message: impl Into<String>, short_ref: Option<String>) {
+        self.failed += 1;
+        self.record_error(code, message, short_ref);
+    }
+
+/// Fail an entry with both an alias row and a top-level error.
+fn fail_alias(
+        &mut self,
+        short_ref: &str,
+        full_ref: String,
+        size: u64,
+        code: &str,
+        message: impl Into<String>,
+    ) {
+        let message = message.into();
+        self.failed += 1;
+        self.push_alias(
+            short_ref.to_string(), full_ref, size, AliasStatus::Failed,
+            Some(message.clone()), Some(code.to_string()),
+        );
+        self.record_error(code, message, Some(short_ref.to_string()));
+    }
+
+/// Mutate the last alias row to Failed and record a top-level error.
+fn fail_last_alias(
+    &mut self,
+    short_ref: &str,
+    alias_error: impl Into<String>,
+    code: &str,
+    message: impl Into<String>,
+) {
+    self.failed += 1;
+    let idx = self.aliases.len() - 1;
+    self.aliases[idx].status = AliasStatus::Failed;
+    self.aliases[idx].error = Some(alias_error.into());
+    self.aliases[idx].error_code = Some(code.to_string());
+    self.record_error(code.to_string(), message.into(), Some(short_ref.to_string()));
+}
+
+pub fn to_json(&self) -> String {
+    serde_json::to_string_pretty(self).unwrap_or_else(|_| "{}".to_string())
+}
+
+pub fn to_text(&self) -> String {
+    let mut out = String::new();
+    out.push_str(&format!(
+        "Migration {} (dry_run={})
+         ─────────────────────────────────
+         total:    {}
+         migrated: {}
+         skipped:  {}
+         failed:   {}
+         repaired: {}
+         verified: {}
+",
+        self.operation,
+        self.dry_run,
+        self.total,
+        self.migrated,
+        self.skipped,
+        self.failed,
+        self.repaired,
+        self.verified,
+    ));
+    if !self.aliases.is_empty() {
+        out.push_str(
+            "
+aliases:
+",
+        );
+        for entry in &self.aliases {
+            out.push_str(&format!(
+                "  {} → {}  [{}]
+",
+                entry.short_ref,
+                entry.full_ref,
+                match entry.status {
+                    AliasStatus::Migrated => "migrated",
+                    AliasStatus::Skipped => "skipped",
+                    AliasStatus::Failed => "failed",
+                    AliasStatus::Repaired => "repaired",
+                    AliasStatus::Verified => "verified",
+                }
+            ));
+            if let Some(err) = &entry.error {
+                out.push_str(&format!(
+                    "    error: {err}
+"
+                ));
+            }
+        }
+    }
+    if !self.errors.is_empty() {
+        out.push_str(
+            "
+errors:
+",
+        );
+        for err in &self.errors {
+            out.push_str(&format!(
+                "  [{}] {}
+",
+                err.code, err.message
+            ));
+        }
+    }
+    out
+} }
 
 // ── Migration engine ──────────────────────────────────────────────────────
 
@@ -470,22 +553,14 @@ impl<'a> LegacyMigration<'a> {
                 Ok(mf) => mf,
                 Err(MigrationErrorCode::ManifestMissing) => MigrationManifest::empty(),
                 Err(MigrationErrorCode::ManifestNewerVersion) => {
-                    report.errors.push(MigrationError {
-                        code: "manifest-newer-version".to_string(),
-                        message: format!(
-                            "manifest version is newer than supported ({})",
-                            MIGRATION_MANIFEST_VERSION
-                        ),
-                        short_ref: None,
-                    });
+                    report.record_error("manifest-newer-version", format!(
+                        "manifest version is newer than supported ({})",
+                        MIGRATION_MANIFEST_VERSION
+                    ), None);
                     return report;
                 }
                 Err(_) => {
-                    report.errors.push(MigrationError {
-                        code: "manifest-corrupt".to_string(),
-                        message: "manifest file is corrupt, cannot continue".to_string(),
-                        short_ref: None,
-                    });
+                    report.record_error("manifest-corrupt", "manifest file is corrupt, cannot continue", None);
                     return report;
                 }
             },
@@ -525,14 +600,10 @@ impl<'a> LegacyMigration<'a> {
             if unique_hashes.len() > 1 {
                 // Ambiguous: this short ref maps to multiple distinct full hashes.
                 self.store.mark_ambiguous(short_ref);
-                report.errors.push(MigrationError {
-                    code: "ambiguous-short-id".to_string(),
-                    message: format!(
-                        "{short_ref}: short prefix maps to {} distinct full hashes",
-                        unique_hashes.len()
-                    ),
-                    short_ref: Some(short_ref.clone()),
-                });
+                report.record_error("ambiguous-short-id".to_string(), format!(
+                    "{short_ref}: short prefix maps to {} distinct full hashes",
+                    unique_hashes.len()
+                ), Some(short_ref.clone()));
             }
         }
 
@@ -564,21 +635,13 @@ impl<'a> LegacyMigration<'a> {
                 report.failed += report.migrated + report.repaired;
                 report.migrated = 0;
                 report.repaired = 0;
-                report.errors.push(MigrationError {
-                    code: "store-persist".to_string(),
-                    message: format!("store persist failed: {err}"),
-                    short_ref: None,
-                });
+                report.record_error("store-persist".to_string(), format!("store persist failed: {err}"), None);
             }
 
             if let Some(path) = &self.manifest_path {
                 updated_manifest.completed = report.failed == 0 && !write_failed;
                 if let Err(err) = updated_manifest.save(path) {
-                    report.errors.push(MigrationError {
-                        code: "manifest-save".to_string(),
-                        message: format!("manifest save failed: {err}"),
-                        short_ref: None,
-                    });
+                    report.record_error("manifest-save".to_string(), format!("manifest save failed: {err}"), None);
                 }
             }
         }
@@ -596,54 +659,35 @@ impl<'a> LegacyMigration<'a> {
     ) {
         // Skip ambiguous refs.
         if self.store.is_ambiguous(short_ref) {
+            // Alias-row failure only (no top-level errors entry — historical contract).
             report.failed += 1;
-            report.aliases.push(AliasEntry {
-                short_ref: short_ref.to_string(),
-                full_ref: String::new(),
-                size: 0,
-                status: AliasStatus::Failed,
-                error: Some("short ref is ambiguous (maps to multiple full hashes)".to_string()),
-                error_code: Some("ambiguous-short-id".to_string()),
-            });
+            report.push_alias(
+                short_ref.to_string(), String::new(), 0, AliasStatus::Failed,
+                Some("short ref is ambiguous (maps to multiple full hashes)".to_string()), Some("ambiguous-short-id".to_string()),
+            );
             return;
         }
 
         let content = match self.store.resolve_blob_bytes(short_ref) {
             BlobContentResult::Ok(bytes) => bytes,
             BlobContentResult::Missing => {
-                report.failed += 1;
-                let msg = format!("{short_ref}: could not resolve blob content");
-                report.aliases.push(AliasEntry {
-                    short_ref: short_ref.to_string(),
-                    full_ref: String::new(),
-                    size: 0,
-                    status: AliasStatus::Failed,
-                    error: Some(msg.clone()),
-                    error_code: Some("source-missing".to_string()),
-                });
-                report.errors.push(MigrationError {
-                    code: "source-missing".to_string(),
-                    message: msg,
-                    short_ref: Some(short_ref.to_string()),
-                });
+                report.fail_alias(
+                    short_ref,
+                    String::new(),
+                    0,
+                    "source-missing",
+                    format!("{short_ref}: could not resolve blob content"),
+                );
                 return;
             }
             BlobContentResult::Corrupt => {
-                report.failed += 1;
-                let msg = format!("{short_ref}: blob content is empty or corrupt");
-                report.aliases.push(AliasEntry {
-                    short_ref: short_ref.to_string(),
-                    full_ref: String::new(),
-                    size: 0,
-                    status: AliasStatus::Failed,
-                    error: Some(msg.clone()),
-                    error_code: Some("source-corrupt".to_string()),
-                });
-                report.errors.push(MigrationError {
-                    code: "source-corrupt".to_string(),
-                    message: msg,
-                    short_ref: Some(short_ref.to_string()),
-                });
+                report.fail_alias(
+                    short_ref,
+                    String::new(),
+                    0,
+                    "source-corrupt",
+                    format!("{short_ref}: blob content is empty or corrupt"),
+                );
                 return;
             }
         };
@@ -655,24 +699,16 @@ impl<'a> LegacyMigration<'a> {
         // Verify the short ID is a correct prefix of the full hash.
         if let Some(short_hex) = short_id_hex(short_ref) {
             if &full_hash[..16] != short_hex {
-                report.failed += 1;
-                let msg = format!(
-                    "{short_ref}: ambiguous short ID —                      short prefix {short_hex} does not match                      full hash prefix {}",
-                    &full_hash[..16],
-                );
-                report.aliases.push(AliasEntry {
-                    short_ref: short_ref.to_string(),
-                    full_ref: full_ref.clone(),
+                report.fail_alias(
+                    short_ref,
+                    full_ref.clone(),
                     size,
-                    status: AliasStatus::Failed,
-                    error: Some(msg.clone()),
-                    error_code: Some("ambiguous-short-id".to_string()),
-                });
-                report.errors.push(MigrationError {
-                    code: "ambiguous-short-id".to_string(),
-                    message: msg,
-                    short_ref: Some(short_ref.to_string()),
-                });
+                    "ambiguous-short-id",
+                    format!(
+                        "{short_ref}: ambiguous short ID —                      short prefix {short_hex} does not match                      full hash prefix {}",
+                        &full_hash[..16],
+                    ),
+                );
                 return;
             }
         }
@@ -699,14 +735,10 @@ impl<'a> LegacyMigration<'a> {
                     match self.cas.publish(&content) {
                         Ok(_) => {
                             report.repaired += 1;
-                            report.aliases.push(AliasEntry {
-                                short_ref: short_ref.to_string(),
-                                full_ref: full_ref.clone(),
-                                size,
-                                status: AliasStatus::Repaired,
-                                error: None,
-                                error_code: None,
-                            });
+                            report.push_alias(
+                                short_ref.to_string(), full_ref.clone(), size, AliasStatus::Repaired,
+                                None, None,
+                            );
                             let mut entry = existing.clone();
                             entry.resumed = true;
                             entry.owner_alias = true;
@@ -716,34 +748,25 @@ impl<'a> LegacyMigration<'a> {
                             return;
                         }
                         Err(_err) => {
-                            report.failed += 1;
-                            report.aliases.push(AliasEntry {
-                                short_ref: short_ref.to_string(),
-                                full_ref: full_ref.clone(),
+                            report.fail_alias(
+                                short_ref,
+                                full_ref.clone(),
                                 size,
-                                status: AliasStatus::Failed,
-                                error: Some("CAS republish failed".to_string()),
-                                error_code: Some("cas-io".to_string()),
-                            });
-                            report.errors.push(MigrationError {
-                                code: "cas-io".to_string(),
-                                message: format!("{short_ref}: CAS republish failed"),
-                                short_ref: Some(short_ref.to_string()),
-                            });
+                                "cas-io",
+                                format!("{short_ref}: CAS republish failed"),
+                            );
+                            report.aliases.last_mut().unwrap().error =
+                                Some("CAS republish failed".to_string());
                             return;
                         }
                     }
                 } else if !cas_ok && !needs_alias_repair && dry_run {
                     // Dry-run: report planned repair.
                     report.repaired += 1;
-                    report.aliases.push(AliasEntry {
-                        short_ref: short_ref.to_string(),
-                        full_ref: full_ref.clone(),
-                        size,
-                        status: AliasStatus::Repaired,
-                        error: Some("CAS missing — would republish".to_string()),
-                        error_code: Some("cas-missing".to_string()),
-                    });
+                    report.push_alias(
+                        short_ref.to_string(), full_ref.clone(), size, AliasStatus::Repaired,
+                        Some("CAS missing — would republish".to_string()), Some("cas-missing".to_string()),
+                    );
                     return;
                 } else if !cas_ok && needs_alias_repair && !dry_run {
                     // Both CAS and alias missing: republish and re-alias.
@@ -751,14 +774,10 @@ impl<'a> LegacyMigration<'a> {
                         Ok(_) => {
                             self.store.store_alias_deferred(short_ref, &full_ref);
                             report.repaired += 1;
-                            report.aliases.push(AliasEntry {
-                                short_ref: short_ref.to_string(),
-                                full_ref: full_ref.clone(),
-                                size,
-                                status: AliasStatus::Repaired,
-                                error: None,
-                                error_code: None,
-                            });
+                            report.push_alias(
+                                short_ref.to_string(), full_ref.clone(), size, AliasStatus::Repaired,
+                                None, None,
+                            );
                             let mut entry = existing.clone();
                             entry.resumed = true;
                             entry.owner_alias = true;
@@ -768,34 +787,25 @@ impl<'a> LegacyMigration<'a> {
                             return;
                         }
                         Err(_err) => {
-                            report.failed += 1;
-                            report.aliases.push(AliasEntry {
-                                short_ref: short_ref.to_string(),
-                                full_ref: full_ref.clone(),
+                            report.fail_alias(
+                                short_ref,
+                                full_ref.clone(),
                                 size,
-                                status: AliasStatus::Failed,
-                                error: Some("CAS republish failed".to_string()),
-                                error_code: Some("cas-io".to_string()),
-                            });
-                            report.errors.push(MigrationError {
-                                code: "cas-io".to_string(),
-                                message: format!("{short_ref}: CAS republish failed"),
-                                short_ref: Some(short_ref.to_string()),
-                            });
+                                "cas-io",
+                                format!("{short_ref}: CAS republish failed"),
+                            );
+                            report.aliases.last_mut().unwrap().error =
+                                Some("CAS republish failed".to_string());
                             return;
                         }
                     }
                 } else if needs_alias_repair && !dry_run {
                     self.store.store_alias_deferred(short_ref, &full_ref);
                     report.repaired += 1;
-                    report.aliases.push(AliasEntry {
-                        short_ref: short_ref.to_string(),
-                        full_ref: full_ref.clone(),
-                        size,
-                        status: AliasStatus::Repaired,
-                        error: None,
-                        error_code: None,
-                    });
+                    report.push_alias(
+                        short_ref.to_string(), full_ref.clone(), size, AliasStatus::Repaired,
+                        None, None,
+                    );
                     let mut entry = existing.clone();
                     entry.resumed = true;
                     entry.owner_alias = true;
@@ -805,14 +815,10 @@ impl<'a> LegacyMigration<'a> {
                     return;
                 } else if !needs_alias_repair && cas_ok {
                     report.skipped += 1;
-                    report.aliases.push(AliasEntry {
-                        short_ref: short_ref.to_string(),
-                        full_ref: full_ref.clone(),
-                        size,
-                        status: AliasStatus::Skipped,
-                        error: None,
-                        error_code: None,
-                    });
+                    report.push_alias(
+                        short_ref.to_string(), full_ref.clone(), size, AliasStatus::Skipped,
+                        None, None,
+                    );
                     if !dry_run && !updated_manifest.entries.contains_key(short_ref) {
                         updated_manifest
                             .entries
@@ -822,34 +828,22 @@ impl<'a> LegacyMigration<'a> {
                 } else if needs_alias_repair && dry_run {
                     // Dry-run: would repair alias but cannot mutate.
                     report.repaired += 1;
-                    report.aliases.push(AliasEntry {
-                        short_ref: short_ref.to_string(),
-                        full_ref: full_ref.clone(),
-                        size,
-                        status: AliasStatus::Repaired,
-                        error: Some("alias missing — would repair".to_string()),
-                        error_code: Some("alias-missing".to_string()),
-                    });
+                    report.push_alias(
+                        short_ref.to_string(), full_ref.clone(), size, AliasStatus::Repaired,
+                        Some("alias missing — would repair".to_string()), Some("alias-missing".to_string()),
+                    );
                     return;
                 }
             } else {
-                report.failed += 1;
-                let msg = format!(
-                    "{short_ref}: manifest hash conflict — manifest entry differs from computed hash/size"
-                );
-                report.aliases.push(AliasEntry {
-                    short_ref: short_ref.to_string(),
-                    full_ref: full_ref.clone(),
+                report.fail_alias(
+                    short_ref,
+                    full_ref.clone(),
                     size,
-                    status: AliasStatus::Failed,
-                    error: Some(msg.clone()),
-                    error_code: Some("manifest-hash-conflict".to_string()),
-                });
-                report.errors.push(MigrationError {
-                    code: "manifest-hash-conflict".to_string(),
-                    message: msg,
-                    short_ref: Some(short_ref.to_string()),
-                });
+                    "manifest-hash-conflict",
+                    format!(
+                        "{short_ref}: manifest hash conflict — manifest entry differs from computed hash/size"
+                    ),
+                );
                 return;
             }
         } // Check for existing alias conflict.
@@ -866,102 +860,67 @@ impl<'a> LegacyMigration<'a> {
 
                 if !cas_ok && dry_run {
                     report.repaired += 1;
-                    report.aliases.push(AliasEntry {
-                        short_ref: short_ref.to_string(),
-                        full_ref: full_ref.clone(),
-                        size,
-                        status: AliasStatus::Repaired,
-                        error: Some("CAS missing — would republish".to_string()),
-                        error_code: Some("cas-missing".to_string()),
-                    });
+                    report.push_alias(
+                        short_ref.to_string(), full_ref.clone(), size, AliasStatus::Repaired,
+                        Some("CAS missing — would republish".to_string()), Some("cas-missing".to_string()),
+                    );
                     return;
                 }
 
                 if !cas_ok && self.cas.publish(&content).is_err() {
-                    report.failed += 1;
-                    report.aliases.push(AliasEntry {
-                        short_ref: short_ref.to_string(),
-                        full_ref: full_ref.clone(),
+                    report.fail_alias(
+                        short_ref,
+                        full_ref.clone(),
                         size,
-                        status: AliasStatus::Failed,
-                        error: Some("CAS republish failed".to_string()),
-                        error_code: Some("cas-io".to_string()),
-                    });
-                    report.errors.push(MigrationError {
-                        code: "cas-io".to_string(),
-                        message: format!("{short_ref}: CAS republish failed"),
-                        short_ref: Some(short_ref.to_string()),
-                    });
+                        "cas-io",
+                        format!("{short_ref}: CAS republish failed"),
+                    );
+                    report.aliases.last_mut().unwrap().error =
+                        Some("CAS republish failed".to_string());
                     return;
                 }
 
                 if !manifest.contains_hash(short_ref, &full_hash) && !dry_run {
                     updated_manifest.entries.insert(
                         short_ref.to_string(),
-                        ManifestEntry {
-                            short_ref: short_ref.to_string(),
-                            full_hash: full_hash.clone(),
-                            size,
-                            state: EntryState::Migrated,
-                            migrated_at: now_unix(),
-                            verified_at: None,
-                            resumed: true,
-                            owner_alias: true,
-                        },
+                        MigrationManifest::entry(
+                            short_ref.to_string(), full_hash.clone(), size,
+                            now_unix(), true, true,
+                        ),
                     );
                     report.repaired += 1;
-                    report.aliases.push(AliasEntry {
-                        short_ref: short_ref.to_string(),
-                        full_ref: full_ref.clone(),
-                        size,
-                        status: AliasStatus::Repaired,
-                        error: None,
-                        error_code: None,
-                    });
+                    report.push_alias(
+                        short_ref.to_string(), full_ref.clone(), size, AliasStatus::Repaired,
+                        None, None,
+                    );
                 } else {
                     report.skipped += 1;
-                    report.aliases.push(AliasEntry {
-                        short_ref: short_ref.to_string(),
-                        full_ref: full_ref.clone(),
-                        size,
-                        status: AliasStatus::Skipped,
-                        error: None,
-                        error_code: None,
-                    });
+                    report.push_alias(
+                        short_ref.to_string(), full_ref.clone(), size, AliasStatus::Skipped,
+                        None, None,
+                    );
                 }
                 return;
             } else {
-                report.failed += 1;
-                let msg = format!(
-                    "{short_ref}: alias conflict —                      existing alias targets {existing_target},                      but content hashes to {full_ref}",
-                );
-                report.aliases.push(AliasEntry {
-                    short_ref: short_ref.to_string(),
-                    full_ref: full_ref.clone(),
+                report.fail_alias(
+                    short_ref,
+                    full_ref.clone(),
                     size,
-                    status: AliasStatus::Failed,
-                    error: Some(msg.clone()),
-                    error_code: Some("alias-conflict".to_string()),
-                });
-                report.errors.push(MigrationError {
-                    code: "alias-conflict".to_string(),
-                    message: msg,
-                    short_ref: Some(short_ref.to_string()),
-                });
+                    "alias-conflict",
+                    format!(
+                        "{short_ref}: alias conflict —                      existing alias targets {existing_target},                      but content hashes to {full_ref}",
+                    ),
+                );
                 return;
             }
         }
 
         if dry_run {
             report.migrated += 1;
-            report.aliases.push(AliasEntry {
-                short_ref: short_ref.to_string(),
-                full_ref: full_ref.clone(),
-                size,
-                status: AliasStatus::Migrated,
-                error: None,
-                error_code: None,
-            });
+            report.push_alias(
+                short_ref.to_string(), full_ref.clone(), size, AliasStatus::Migrated,
+                None, None,
+            );
             return;
         }
 
@@ -971,59 +930,35 @@ impl<'a> LegacyMigration<'a> {
                 debug_assert_eq!(published_hash, full_hash);
             }
             Err(SharedCasError::Corruption) => {
-                report.failed += 1;
-                let msg = format!(
-                    "{short_ref}: CAS corruption —                      object {full_hash} exists with different bytes",
-                );
-                report.aliases.push(AliasEntry {
-                    short_ref: short_ref.to_string(),
-                    full_ref: full_ref.clone(),
+                report.fail_alias(
+                    short_ref,
+                    full_ref.clone(),
                     size,
-                    status: AliasStatus::Failed,
-                    error: Some(msg.clone()),
-                    error_code: Some("cas-corruption".to_string()),
-                });
-                report.errors.push(MigrationError {
-                    code: "cas-corruption".to_string(),
-                    message: msg,
-                    short_ref: Some(short_ref.to_string()),
-                });
+                    "cas-corruption",
+                    format!(
+                        "{short_ref}: CAS corruption —                      object {full_hash} exists with different bytes",
+                    ),
+                );
                 return;
             }
             Err(SharedCasError::Policy) => {
-                report.failed += 1;
-                let msg = format!("{short_ref}: CAS policy violation");
-                report.aliases.push(AliasEntry {
-                    short_ref: short_ref.to_string(),
-                    full_ref: full_ref.clone(),
+                report.fail_alias(
+                    short_ref,
+                    full_ref.clone(),
                     size,
-                    status: AliasStatus::Failed,
-                    error: Some(msg.clone()),
-                    error_code: Some("cas-policy".to_string()),
-                });
-                report.errors.push(MigrationError {
-                    code: "cas-policy".to_string(),
-                    message: msg,
-                    short_ref: Some(short_ref.to_string()),
-                });
+                    "cas-policy",
+                    format!("{short_ref}: CAS policy violation"),
+                );
                 return;
             }
             Err(_err) => {
-                report.failed += 1;
-                let msg = format!("{short_ref}: CAS publish failed");
-                report.aliases.push(AliasEntry {
-                    short_ref: short_ref.to_string(),
-                    full_ref: full_ref.clone(),
+                report.fail_alias(
+                    short_ref,
+                    full_ref.clone(),
                     size,
-                    status: AliasStatus::Failed,
-                    error: Some(msg.clone()),
-                    error_code: Some("cas-io".to_string()),
-                });
-                report.errors.push(MigrationError {
-                    code: "cas-io".to_string(),
-                    message: msg,
-                    short_ref: Some(short_ref.to_string()),
-                });
+                    "cas-io",
+                    format!("{short_ref}: CAS publish failed"),
+                );
                 return;
             }
         }
@@ -1033,86 +968,62 @@ impl<'a> LegacyMigration<'a> {
 
         updated_manifest.entries.insert(
             short_ref.to_string(),
-            ManifestEntry {
-                short_ref: short_ref.to_string(),
-                full_hash: full_hash.clone(),
-                size,
-                state: EntryState::Migrated,
-                migrated_at: now_unix(),
-                verified_at: None,
-                resumed: false,
-                owner_alias: true,
-            },
+            MigrationManifest::entry(
+                short_ref.to_string(), full_hash.clone(), size,
+                now_unix(), false, true,
+            ),
         );
 
         report.migrated += 1;
-        report.aliases.push(AliasEntry {
-            short_ref: short_ref.to_string(),
-            full_ref: full_ref.clone(),
-            size,
-            status: AliasStatus::Migrated,
-            error: None,
-            error_code: None,
-        });
+        report.push_alias(
+            short_ref.to_string(), full_ref.clone(), size, AliasStatus::Migrated,
+            None, None,
+        );
     }
 
     /// Verify migration integrity: checks every manifest entry's CAS object
     /// hash+size against the manifest and the exact alias target in the store.
     /// Also hash/size-checks the legacy source blob when present, ensuring the
+    fn load_manifest(&self, report: &mut MigrationReport) -> Option<MigrationManifest> {
+        match self.manifest_path.as_ref() {
+            Some(p) => match MigrationManifest::load(p) {
+                Ok(mf) => Some(mf),
+                Err(MigrationErrorCode::ManifestMissing) => {
+                    report.record_error("manifest-missing", "migration manifest does not exist", None);
+                    None
+                }
+                Err(MigrationErrorCode::ManifestNewerVersion) => {
+                    report.record_error("manifest-newer-version", "manifest version is newer than supported", None);
+                    None
+                }
+                Err(_) => {
+                    report.record_error("manifest-corrupt", "manifest is corrupt", None);
+                    None
+                }
+            },
+            None => {
+                report.record_error("manifest-missing", "no manifest path configured", None);
+                None
+            }
+        }
+    }
+
     /// source, CAS, and alias are all consistent. Redacts underlying storage
     /// errors from report messages.
     pub fn verify(&self) -> MigrationReport {
         let mut report = MigrationReport::new("verify", false);
-        let manifest = match self.manifest_path.as_ref() {
-            Some(p) => match MigrationManifest::load(p) {
-                Ok(mf) => mf,
-                Err(MigrationErrorCode::ManifestMissing) => {
-                    report.errors.push(MigrationError {
-                        code: "manifest-missing".to_string(),
-                        message: "migration manifest does not exist".to_string(),
-                        short_ref: None,
-                    });
-                    return report;
-                }
-                Err(MigrationErrorCode::ManifestNewerVersion) => {
-                    report.errors.push(MigrationError {
-                        code: "manifest-newer-version".to_string(),
-                        message: "manifest version is newer than supported".to_string(),
-                        short_ref: None,
-                    });
-                    return report;
-                }
-                Err(_) => {
-                    report.errors.push(MigrationError {
-                        code: "manifest-corrupt".to_string(),
-                        message: "manifest is corrupt".to_string(),
-                        short_ref: None,
-                    });
-                    return report;
-                }
-            },
-            None => {
-                report.errors.push(MigrationError {
-                    code: "manifest-missing".to_string(),
-                    message: "no manifest path configured".to_string(),
-                    short_ref: None,
-                });
-                return report;
-            }
+        let Some(manifest) = self.load_manifest(&mut report) else {
+            return report;
         };
 
         report.total = manifest.entries.len();
 
         for (short_ref, entry) in &manifest.entries {
             let full_ref = format!("{BLOB_REF_PREFIX}{}", entry.full_hash);
-            report.aliases.push(AliasEntry {
-                short_ref: short_ref.clone(),
-                full_ref: full_ref.clone(),
-                size: entry.size,
-                status: AliasStatus::Verified,
-                error: None,
-                error_code: None,
-            });
+            report.push_alias(
+                short_ref.clone(), full_ref.clone(), entry.size, AliasStatus::Verified,
+                None, None,
+            );
 
             // Verify the legacy source blob when present: hash+size must
             // match the manifest entry (which stores the shared proof).
@@ -1120,17 +1031,12 @@ impl<'a> LegacyMigration<'a> {
                 BlobContentResult::Ok(bytes) => {
                     let source_hash = full_sha256_hex(&bytes);
                     if source_hash != entry.full_hash || bytes.len() as u64 != entry.size {
-                        report.failed += 1;
-                        let idx = report.aliases.len() - 1;
-                        report.aliases[idx].status = AliasStatus::Failed;
-                        report.aliases[idx].error =
-                            Some("legacy source hash/size mismatch with manifest".to_string());
-                        report.aliases[idx].error_code = Some("source-corrupt".to_string());
-                        report.errors.push(MigrationError {
-                            code: "source-corrupt".to_string(),
-                            message: format!("{short_ref}: legacy source hash/size mismatch"),
-                            short_ref: Some(short_ref.clone()),
-                        });
+                        report.fail_last_alias(
+                            short_ref,
+                            "legacy source hash/size mismatch with manifest",
+                            "source-corrupt",
+                            format!("{short_ref}: legacy source hash/size mismatch"),
+                        );
                         false
                     } else {
                         true
@@ -1141,16 +1047,12 @@ impl<'a> LegacyMigration<'a> {
                     true
                 }
                 BlobContentResult::Corrupt => {
-                    report.failed += 1;
-                    let idx = report.aliases.len() - 1;
-                    report.aliases[idx].status = AliasStatus::Failed;
-                    report.aliases[idx].error = Some("legacy source corrupt".to_string());
-                    report.aliases[idx].error_code = Some("source-corrupt".to_string());
-                    report.errors.push(MigrationError {
-                        code: "source-corrupt".to_string(),
-                        message: format!("{short_ref}: legacy source corrupt"),
-                        short_ref: Some(short_ref.clone()),
-                    });
+                    report.fail_last_alias(
+                        short_ref,
+                        "legacy source corrupt",
+                        "source-corrupt",
+                        format!("{short_ref}: legacy source corrupt"),
+                    );
                     false
                 }
             };
@@ -1160,16 +1062,12 @@ impl<'a> LegacyMigration<'a> {
 
             // Verify CAS object: hash+size must match manifest exactly.
             if !self.cas.contains(&entry.full_hash) {
-                report.failed += 1;
-                let idx = report.aliases.len() - 1;
-                report.aliases[idx].status = AliasStatus::Failed;
-                report.aliases[idx].error = Some("CAS object missing".to_string());
-                report.aliases[idx].error_code = Some("cas-missing".to_string());
-                report.errors.push(MigrationError {
-                    code: "cas-missing".to_string(),
-                    message: format!("{short_ref}: CAS object missing"),
-                    short_ref: Some(short_ref.clone()),
-                });
+                report.fail_last_alias(
+                    short_ref,
+                    "CAS object missing",
+                    "cas-missing",
+                    format!("{short_ref}: CAS object missing"),
+                );
                 continue;
             }
 
@@ -1177,30 +1075,22 @@ impl<'a> LegacyMigration<'a> {
                 Ok(bytes) => {
                     let cas_hash = full_sha256_hex(&bytes);
                     if cas_hash != entry.full_hash || bytes.len() as u64 != entry.size {
-                        report.failed += 1;
-                        let idx = report.aliases.len() - 1;
-                        report.aliases[idx].status = AliasStatus::Failed;
-                        report.aliases[idx].error = Some("CAS hash/size mismatch".to_string());
-                        report.aliases[idx].error_code = Some("cas-corruption".to_string());
-                        report.errors.push(MigrationError {
-                            code: "cas-corruption".to_string(),
-                            message: format!("{short_ref}: CAS hash/size mismatch"),
-                            short_ref: Some(short_ref.clone()),
-                        });
+                        report.fail_last_alias(
+                            short_ref,
+                            "CAS hash/size mismatch",
+                            "cas-corruption",
+                            format!("{short_ref}: CAS hash/size mismatch"),
+                        );
                         continue;
                     }
                 }
                 Err(_) => {
-                    report.failed += 1;
-                    let idx = report.aliases.len() - 1;
-                    report.aliases[idx].status = AliasStatus::Failed;
-                    report.aliases[idx].error = Some("CAS read failure".to_string());
-                    report.aliases[idx].error_code = Some("cas-corruption".to_string());
-                    report.errors.push(MigrationError {
-                        code: "cas-corruption".to_string(),
-                        message: format!("{short_ref}: CAS read failure"),
-                        short_ref: Some(short_ref.clone()),
-                    });
+                    report.fail_last_alias(
+                        short_ref,
+                        "CAS read failure",
+                        "cas-corruption",
+                        format!("{short_ref}: CAS read failure"),
+                    );
                     continue;
                 }
             }
@@ -1209,29 +1099,21 @@ impl<'a> LegacyMigration<'a> {
             match self.store.alias_target(short_ref) {
                 Some(target) if target == full_ref => {}
                 Some(_target) => {
-                    report.failed += 1;
-                    let idx = report.aliases.len() - 1;
-                    report.aliases[idx].status = AliasStatus::Failed;
-                    report.aliases[idx].error = Some("alias targets wrong ref".to_string());
-                    report.aliases[idx].error_code = Some("alias-conflict".to_string());
-                    report.errors.push(MigrationError {
-                        code: "alias-conflict".to_string(),
-                        message: format!("{short_ref}: alias mismatch"),
-                        short_ref: Some(short_ref.clone()),
-                    });
+                    report.fail_last_alias(
+                        short_ref,
+                        "alias targets wrong ref",
+                        "alias-conflict",
+                        format!("{short_ref}: alias mismatch"),
+                    );
                     continue;
                 }
                 None => {
-                    report.failed += 1;
-                    let idx = report.aliases.len() - 1;
-                    report.aliases[idx].status = AliasStatus::Failed;
-                    report.aliases[idx].error = Some("alias missing from store".to_string());
-                    report.aliases[idx].error_code = Some("alias-missing".to_string());
-                    report.errors.push(MigrationError {
-                        code: "alias-missing".to_string(),
-                        message: format!("{short_ref}: alias missing"),
-                        short_ref: Some(short_ref.clone()),
-                    });
+                    report.fail_last_alias(
+                        short_ref,
+                        "alias missing from store",
+                        "alias-missing",
+                        format!("{short_ref}: alias missing"),
+                    );
                     continue;
                 }
             }
@@ -1247,34 +1129,8 @@ impl<'a> LegacyMigration<'a> {
     pub fn rollback(&mut self, apply: bool) -> MigrationReport {
         let dry_run = !apply;
         let mut report = MigrationReport::new("rollback", dry_run);
-        let manifest = match self.manifest_path.as_ref() {
-            Some(p) => match MigrationManifest::load(p) {
-                Ok(mf) => mf,
-                Err(MigrationErrorCode::ManifestMissing) => {
-                    report.errors.push(MigrationError {
-                        code: "manifest-missing".to_string(),
-                        message: "migration manifest does not exist".to_string(),
-                        short_ref: None,
-                    });
-                    return report;
-                }
-                Err(_) => {
-                    report.errors.push(MigrationError {
-                        code: "manifest-corrupt".to_string(),
-                        message: "manifest is corrupt".to_string(),
-                        short_ref: None,
-                    });
-                    return report;
-                }
-            },
-            None => {
-                report.errors.push(MigrationError {
-                    code: "manifest-missing".to_string(),
-                    message: "no manifest path configured".to_string(),
-                    short_ref: None,
-                });
-                return report;
-            }
+        let Some(manifest) = self.load_manifest(&mut report) else {
+            return report;
         };
 
         report.total = manifest.entries.len();
@@ -1291,37 +1147,25 @@ impl<'a> LegacyMigration<'a> {
             };
 
             if !source_verified {
-                report.failed += 1;
-                let msg = format!(
-                    "{short_ref}: legacy source hash/size mismatch, cannot verify rollback safety"
+                report.fail_alias(
+                    short_ref,
+                    format!("{BLOB_REF_PREFIX}{}", entry.full_hash),
+                    entry.size,
+                    "rollback-source-gone",
+                    format!(
+                        "{short_ref}: legacy source hash/size mismatch, cannot verify rollback safety"
+                    ),
                 );
-                report.aliases.push(AliasEntry {
-                    short_ref: short_ref.clone(),
-                    full_ref: format!("{BLOB_REF_PREFIX}{}", entry.full_hash),
-                    size: entry.size,
-                    status: AliasStatus::Failed,
-                    error: Some(msg.clone()),
-                    error_code: Some("rollback-source-gone".to_string()),
-                });
-                report.errors.push(MigrationError {
-                    code: "rollback-source-gone".to_string(),
-                    message: msg,
-                    short_ref: Some(short_ref.clone()),
-                });
                 continue;
             }
 
             // Only remove aliases known to have been created by migration.
             if !entry.owner_alias {
                 report.skipped += 1;
-                report.aliases.push(AliasEntry {
-                    short_ref: short_ref.clone(),
-                    full_ref: format!("{BLOB_REF_PREFIX}{}", entry.full_hash),
-                    size: entry.size,
-                    status: AliasStatus::Skipped,
-                    error: Some("alias was not created by migration, skipping".to_string()),
-                    error_code: None,
-                });
+                report.push_alias(
+                    short_ref.clone(), format!("{BLOB_REF_PREFIX}{}", entry.full_hash), entry.size, AliasStatus::Skipped,
+                    Some("alias was not created by migration, skipping".to_string()), None,
+                );
                 continue;
             }
 
@@ -1329,24 +1173,16 @@ impl<'a> LegacyMigration<'a> {
                 self.store.remove_alias(short_ref);
             }
             report.migrated += 1;
-            report.aliases.push(AliasEntry {
-                short_ref: short_ref.clone(),
-                full_ref: format!("{BLOB_REF_PREFIX}{}", entry.full_hash),
-                size: entry.size,
-                status: AliasStatus::Migrated,
-                error: None,
-                error_code: None,
-            });
+            report.push_alias(
+                short_ref.clone(), format!("{BLOB_REF_PREFIX}{}", entry.full_hash), entry.size, AliasStatus::Migrated,
+                None, None,
+            );
         }
 
         // Persist alias removals successfully before deleting manifest.
         if apply && report.failed == 0 {
             if let Err(_err) = self.store.persist_pending() {
-                report.errors.push(MigrationError {
-                    code: "store-persist".to_string(),
-                    message: "persist failed: rollback incomplete".to_string(),
-                    short_ref: None,
-                });
+                report.record_error("store-persist", "persist failed: rollback incomplete", None);
                 // Don't delete manifest if persist failed
                 return report;
             }
@@ -1371,21 +1207,13 @@ impl<'a> LegacyMigration<'a> {
         if dry_run && !confirmed {
             // Dry-run + no confirm: plan only, no checks beyond manifest load.
         } else if apply && !confirmed {
-            report.errors.push(MigrationError {
-                code: "cleanup-confirmation-required".to_string(),
-                message: "cleanup requires --confirm-cleanup flag".to_string(),
-                short_ref: None,
-            });
+            report.record_error("cleanup-confirmation-required", "cleanup requires --confirm-cleanup flag", None);
             return report;
         }
 
         let verify_report = self.verify();
         if verify_report.is_failure() {
-            report.errors.push(MigrationError {
-                code: "cleanup-needs-verification".to_string(),
-                message: "cleanup requires successful verification first".to_string(),
-                short_ref: None,
-            });
+            report.record_error("cleanup-needs-verification", "cleanup requires successful verification first", None);
             if apply {
                 report.errors.extend(verify_report.errors);
             }
@@ -1396,20 +1224,12 @@ impl<'a> LegacyMigration<'a> {
             Some(p) => match MigrationManifest::load(p) {
                 Ok(mf) => mf,
                 Err(_) => {
-                    report.errors.push(MigrationError {
-                        code: "manifest-corrupt".to_string(),
-                        message: "manifest is corrupt".to_string(),
-                        short_ref: None,
-                    });
+                    report.record_error("manifest-corrupt", "manifest is corrupt", None);
                     return report;
                 }
             },
             None => {
-                report.errors.push(MigrationError {
-                    code: "manifest-missing".to_string(),
-                    message: "no manifest path configured".to_string(),
-                    short_ref: None,
-                });
+                report.record_error("manifest-missing", "no manifest path configured", None);
                 return report;
             }
         };
@@ -1420,14 +1240,10 @@ impl<'a> LegacyMigration<'a> {
             if !apply {
                 // Dry-run: report planned removals without mutation.
                 report.migrated += 1;
-                report.aliases.push(AliasEntry {
-                    short_ref: short_ref.clone(),
-                    full_ref: format!("{BLOB_REF_PREFIX}{}", entry.full_hash),
-                    size: entry.size,
-                    status: AliasStatus::Migrated,
-                    error: None,
-                    error_code: None,
-                });
+                report.push_alias(
+                    short_ref.clone(), format!("{BLOB_REF_PREFIX}{}", entry.full_hash), entry.size, AliasStatus::Migrated,
+                    None, None,
+                );
                 continue;
             }
 
@@ -1440,23 +1256,21 @@ impl<'a> LegacyMigration<'a> {
                 _ => false,
             };
             if !source_match {
-                report.failed += 1;
-                report.errors.push(MigrationError {
-                    code: "source-corrupt".to_string(),
-                    message: format!("{short_ref}: source hash/size mismatch"),
-                    short_ref: Some(short_ref.clone()),
-                });
+                report.fail(
+                    "source-corrupt",
+                    format!("{short_ref}: source hash/size mismatch"),
+                    Some(short_ref.clone()),
+                );
                 continue;
             }
 
             // Verify CAS object matches manifest.
             if !self.cas.contains(&entry.full_hash) {
-                report.failed += 1;
-                report.errors.push(MigrationError {
-                    code: "cas-missing".to_string(),
-                    message: format!("{short_ref}: CAS object missing"),
-                    short_ref: Some(short_ref.clone()),
-                });
+                report.fail(
+                    "cas-missing",
+                    format!("{short_ref}: CAS object missing"),
+                    Some(short_ref.clone()),
+                );
                 continue;
             }
             let cas_match = match self.cas.resolve(&entry.full_hash) {
@@ -1466,12 +1280,11 @@ impl<'a> LegacyMigration<'a> {
                 Err(_) => false,
             };
             if !cas_match {
-                report.failed += 1;
-                report.errors.push(MigrationError {
-                    code: "cas-corruption".to_string(),
-                    message: format!("{short_ref}: CAS hash/size mismatch"),
-                    short_ref: Some(short_ref.clone()),
-                });
+                report.fail(
+                    "cas-corruption",
+                    format!("{short_ref}: CAS hash/size mismatch"),
+                    Some(short_ref.clone()),
+                );
                 continue;
             }
 
@@ -1480,26 +1293,21 @@ impl<'a> LegacyMigration<'a> {
             match self.store.alias_target(short_ref) {
                 Some(target) if target == full_ref => {}
                 _ => {
-                    report.failed += 1;
-                    report.errors.push(MigrationError {
-                        code: "alias-missing".to_string(),
-                        message: format!("{short_ref}: alias missing or mismatch"),
-                        short_ref: Some(short_ref.clone()),
-                    });
+                    report.fail(
+                        "alias-missing",
+                        format!("{short_ref}: alias missing or mismatch"),
+                        Some(short_ref.clone()),
+                    );
                     continue;
                 }
             }
 
             self.store.remove_blob(short_ref);
             report.migrated += 1;
-            report.aliases.push(AliasEntry {
-                short_ref: short_ref.clone(),
-                full_ref,
-                size: entry.size,
-                status: AliasStatus::Migrated,
-                error: None,
-                error_code: None,
-            });
+            report.push_alias(
+                short_ref.clone(), full_ref, entry.size, AliasStatus::Migrated,
+                None, None,
+            );
         }
 
         // Treat persist failure as failure. Never delete CAS.
@@ -1507,11 +1315,7 @@ impl<'a> LegacyMigration<'a> {
             if let Err(_err) = self.store.persist_pending() {
                 report.failed += report.migrated;
                 report.migrated = 0;
-                report.errors.push(MigrationError {
-                    code: "store-persist".to_string(),
-                    message: "persist failed: cleanup incomplete".to_string(),
-                    short_ref: None,
-                });
+                report.record_error("store-persist", "persist failed: cleanup incomplete", None);
             }
         }
 
@@ -1600,18 +1404,13 @@ mod tests {
                 ambiguous: BTreeMap::new(),
             }
         }
-
         fn insert(&mut self, ref_id: &str, content: &str) {
-            self.blobs
-                .insert(ref_id.to_string(), content.as_bytes().to_vec());
+            self.blobs.insert(ref_id.to_string(), content.as_bytes().to_vec());
         }
     }
 
     impl MigrationStore for FakeStore {
-        fn blob_ref_ids(&self) -> Vec<String> {
-            self.blobs.keys().cloned().collect()
-        }
-
+        fn blob_ref_ids(&self) -> Vec<String> { self.blobs.keys().cloned().collect() }
         fn resolve_blob_bytes(&self, ref_id: &str) -> BlobContentResult {
             match self.blobs.get(ref_id) {
                 Some(bytes) if !bytes.is_empty() => BlobContentResult::Ok(bytes.clone()),
@@ -1619,137 +1418,104 @@ mod tests {
                 None => BlobContentResult::Missing,
             }
         }
-
-        fn alias_target(&self, alias: &str) -> Option<String> {
-            self.aliases.get(alias).cloned()
-        }
-
+        fn alias_target(&self, alias: &str) -> Option<String> { self.aliases.get(alias).cloned() }
         fn store_alias_deferred(&mut self, alias: &str, target: &str) {
             self.aliases.insert(alias.to_string(), target.to_string());
         }
-
-        fn remove_alias(&mut self, alias: &str) {
-            self.aliases.remove(alias);
-        }
-
-        fn remove_blob(&mut self, ref_id: &str) {
-            self.blobs.remove(ref_id);
-        }
-
+        fn remove_alias(&mut self, alias: &str) { self.aliases.remove(alias); }
+        fn remove_blob(&mut self, ref_id: &str) { self.blobs.remove(ref_id); }
         fn mark_ambiguous(&mut self, short_ref: &str) {
             self.ambiguous.insert(short_ref.to_string(), true);
         }
-
-        fn is_ambiguous(&self, short_ref: &str) -> bool {
-            self.ambiguous.contains_key(short_ref)
-        }
-
-        fn persist_pending(&mut self) -> Result<(), String> {
-            Ok(())
-        }
-    }
-
-    fn cas_root_from_cache(cache_path: &Path) -> PathBuf {
-        cache_path.parent().unwrap_or(cache_path).to_path_buf()
+        fn is_ambiguous(&self, short_ref: &str) -> bool { self.ambiguous.contains_key(short_ref) }
+        fn persist_pending(&mut self) -> Result<(), String> { Ok(()) }
     }
 
     fn test_setup(dir: &Path) -> (FakeStore, SharedCas, PathBuf) {
         let cache = dir.join("recovery-cache.json");
-        let cas_root = cas_root_from_cache(&cache);
-        let cas = SharedCas::new(cas_root.clone());
-        let manifest = dir.join("migration-manifest.json");
-        (FakeStore::new(), cas, manifest)
+        let cas = SharedCas::new(cache.parent().unwrap_or(&cache).to_path_buf());
+        (FakeStore::new(), cas, dir.join("migration-manifest.json"))
     }
 
-    // ── migration_migrate_single_legacy_blob ──────────────────────────
+    fn short_ref_for(text: &str) -> (String, String) {
+        let full_hash = full_sha256_hex(text.as_bytes());
+        (format!("tz://blob/b{}", &full_hash[..16]), full_hash)
+    }
+
+    fn insert_legacy(store: &mut FakeStore, text: &str) -> (String, String) {
+        let (short_ref, full_hash) = short_ref_for(text);
+        store.insert(&short_ref, text);
+        (short_ref, full_hash)
+    }
+
+    fn assert_error_code(report: &MigrationReport, code: &str) {
+        assert!(
+            report.errors.iter().any(|e| e.code == code),
+            "expected {code}, got {:?}",
+            report.errors
+        );
+    }
+
+    fn migrate(
+        store: &mut FakeStore,
+        cas: &SharedCas,
+        manifest: Option<PathBuf>,
+        dry_run: bool,
+    ) -> MigrationReport {
+        LegacyMigration::new(store, cas, manifest).run(dry_run)
+    }
+
+
+
+    fn cas_obj(dir: &Path, full_hash: &str) -> PathBuf {
+        dir.join("blobs").join("sha256").join(&full_hash[..2]).join(full_hash)
+    }
+
+    fn with_fake(text: &str, dry_run: bool) -> (tempfile::TempDir, FakeStore, SharedCas, PathBuf, String, String, MigrationReport) {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut store, cas, manifest) = test_setup(dir.path());
+        let (short_ref, full_hash) = insert_legacy(&mut store, text);
+        let report = migrate(&mut store, &cas, Some(manifest.clone()), dry_run);
+        (dir, store, cas, manifest, short_ref, full_hash, report)
+    }
+
+    // ── success / resume / dry-run matrix (named scenarios preserved) ──
 
     #[test]
     fn migration_migrate_single_legacy_blob() {
         let dir = tempfile::tempdir().unwrap();
         let (mut store, cas, manifest) = test_setup(dir.path());
-
         let text = "hello migration target";
-        let full_hash = full_sha256_hex(text.as_bytes());
-        let short_hex = &full_hash[..16];
-        let short_ref = format!("tz://blob/b{short_hex}");
-        store.insert(&short_ref, text);
-
-        let mut migration = LegacyMigration::new(&mut store, &cas, Some(manifest.clone()));
-        let report = migration.run(false);
-
-        assert_eq!(report.total, 1);
-        assert_eq!(report.migrated, 1);
-        assert_eq!(report.skipped, 0);
-        assert_eq!(report.failed, 0);
-        assert_eq!(report.repaired, 0);
-
-        let alias = store.alias_target(&short_ref);
-        assert!(alias.is_some());
-        let full_ref = alias.unwrap();
+        let (short_ref, full_hash) = insert_legacy(&mut store, text);
+        let report = migrate(&mut store, &cas, Some(manifest.clone()), false);
+        assert_eq!((report.total, report.migrated, report.skipped, report.failed, report.repaired), (1, 1, 0, 0, 0));
+        let full_ref = store.alias_target(&short_ref).unwrap();
         assert!(full_ref.starts_with("tz://blob/"));
-        let hash = &full_ref["tz://blob/".len()..];
-        assert_eq!(hash.len(), FULL_HASH_LEN);
-        assert_eq!(hash, full_hash);
-
+        assert_eq!(&full_ref["tz://blob/".len()..], full_hash);
         assert!(cas.contains(&full_hash));
-
-        let loaded = MigrationManifest::load(&manifest).unwrap();
-        assert_eq!(loaded.version, MIGRATION_MANIFEST_VERSION);
-        assert!(loaded.entries.contains_key(&short_ref));
-        let entry = loaded.entries.get(&short_ref).unwrap();
-        assert_eq!(entry.full_hash, full_hash);
-        assert_eq!(entry.size, text.len() as u64);
-        assert_eq!(entry.state, EntryState::Migrated);
+        let entry = MigrationManifest::load(&manifest).unwrap().entries.get(&short_ref).unwrap().clone();
+        assert_eq!((entry.full_hash, entry.size, entry.state), (full_hash, text.len() as u64, EntryState::Migrated));
     }
 
     #[test]
     fn migration_canonical_full_ref_and_exact_bytes() {
         let dir = tempfile::tempdir().unwrap();
         let (mut store, cas, manifest) = test_setup(dir.path());
-
-        let text1 = "payload alpha";
-        let text2 = "payload beta different";
-        let h1 = full_sha256_hex(text1.as_bytes());
-        let h2 = full_sha256_hex(text2.as_bytes());
-        assert_ne!(h1, h2);
-        assert_eq!(h1.len(), FULL_HASH_LEN);
-        assert_eq!(h2.len(), FULL_HASH_LEN);
-
-        let r1 = format!("tz://blob/b{}", &h1[..16]);
-        let r2 = format!("tz://blob/b{}", &h2[..16]);
-        store.insert(&r1, text1);
-        store.insert(&r2, text2);
-
-        let mut migration = LegacyMigration::new(&mut store, &cas, Some(manifest));
-        let report = migration.run(false);
-        assert_eq!(report.migrated, 2);
-
-        let resolved1 = cas.resolve(&h1).unwrap();
-        let resolved2 = cas.resolve(&h2).unwrap();
-        assert_eq!(resolved1, text1.as_bytes());
-        assert_eq!(resolved2, text2.as_bytes());
+        let hashes: Vec<_> = ["payload alpha", "payload beta different"].iter().map(|t| {
+            let (_, h) = insert_legacy(&mut store, t);
+            (h, *t)
+        }).collect();
+        assert_ne!(hashes[0].0, hashes[1].0);
+        assert_eq!(migrate(&mut store, &cas, Some(manifest), false).migrated, 2);
+        for (h, t) in hashes { assert_eq!(cas.resolve(&h).unwrap(), t.as_bytes()); }
     }
 
     #[test]
     fn migration_no_duplicate_payload_when_cas_attached() {
-        let dir = tempfile::tempdir().unwrap();
-        let (mut store, cas, manifest) = test_setup(dir.path());
-
-        let text = "shared content no dup";
-        let full_hash = full_sha256_hex(text.as_bytes());
-        let short_ref = format!("tz://blob/b{}", &full_hash[..16]);
-        store.insert(&short_ref, text);
-
-        let mut m1 = LegacyMigration::new(&mut store, &cas, Some(manifest.clone()));
-        let r1 = m1.run(false);
+        let (_d, mut store, cas, manifest, _, full_hash, r1) = with_fake("shared content no dup", false);
         assert_eq!(r1.migrated, 1);
-
-        // Same content, different fake short ref (tests CAS idempotency).
-        store.insert("tz://blob/baaaaaaaaaaaaaaa1", text);
-
-        let mut m2 = LegacyMigration::new(&mut store, &cas, Some(manifest.clone()));
-        let _r2 = m2.run(false);
-
+        store.insert("tz://blob/baaaaaaaaaaaaaaa1", "shared content no dup");
+        let _ = migrate(&mut store, &cas, Some(manifest), false);
         assert!(cas.contains(&full_hash));
     }
 
@@ -1757,515 +1523,212 @@ mod tests {
     fn migration_idempotent_rerun() {
         let dir = tempfile::tempdir().unwrap();
         let (mut store, cas, manifest) = test_setup(dir.path());
-
-        let text = "idempotent content";
-        let full_hash = full_sha256_hex(text.as_bytes());
-        let short_ref = format!("tz://blob/b{}", &full_hash[..16]);
-        store.insert(&short_ref, text);
-
-        let mut m1 = LegacyMigration::new(&mut store, &cas, Some(manifest.clone()));
-        let r1 = m1.run(false);
-        assert_eq!(r1.migrated, 1);
-
-        let mut m2 = LegacyMigration::new(&mut store, &cas, Some(manifest.clone()));
-        let r2 = m2.run(false);
-        assert_eq!(r2.total, 1);
-        assert_eq!(r2.migrated, 0);
-        assert_eq!(r2.skipped, 1);
-        assert_eq!(r2.failed, 0);
+        insert_legacy(&mut store, "idempotent content");
+        assert_eq!(migrate(&mut store, &cas, Some(manifest.clone()), false).migrated, 1);
+        let r2 = migrate(&mut store, &cas, Some(manifest), false);
+        assert_eq!((r2.total, r2.migrated, r2.skipped, r2.failed), (1, 0, 1, 0));
     }
 
     #[test]
     fn migration_apply_restart_byte_exact_legacy_read() {
         let dir = tempfile::tempdir().unwrap();
         let (mut store, cas, manifest) = test_setup(dir.path());
-
         let text = "restart byte exact";
-        let full_hash = full_sha256_hex(text.as_bytes());
-        let short_ref = format!("tz://blob/b{}", &full_hash[..16]);
-        store.insert(&short_ref, text);
-
-        let mut m = LegacyMigration::new(&mut store, &cas, Some(manifest.clone()));
-        let report = m.run(false);
-        assert_eq!(report.migrated, 1);
-
-        // Simulate restart: new store, same manifest.
+        let (short_ref, full_hash) = insert_legacy(&mut store, text);
+        assert_eq!(migrate(&mut store, &cas, Some(manifest.clone()), false).migrated, 1);
         let (mut store2, cas2, _) = test_setup(dir.path());
         store2.insert(&short_ref, text);
-
-        let mut m2 = LegacyMigration::new(&mut store2, &cas2, Some(manifest.clone()));
-        let r2 = m2.run(false);
-        assert_eq!(r2.repaired, 1);
-        assert_eq!(r2.skipped, 0);
-
-        let target = store2.alias_target(&short_ref);
-        assert!(target.is_some());
-
-        let bytes = cas2.resolve(&full_hash).unwrap();
-        assert_eq!(bytes, text.as_bytes());
+        let r2 = migrate(&mut store2, &cas2, Some(manifest), false);
+        assert_eq!((r2.repaired, r2.skipped), (1, 0));
+        assert!(store2.alias_target(&short_ref).is_some());
+        assert_eq!(cas2.resolve(&full_hash).unwrap(), text.as_bytes());
     }
 
     #[test]
     fn migration_missing_alias_repair_on_resume() {
-        let dir = tempfile::tempdir().unwrap();
-        let (mut store, cas, manifest) = test_setup(dir.path());
-
-        let text = "repair alias";
-        let full_hash = full_sha256_hex(text.as_bytes());
-        let short_ref = format!("tz://blob/b{}", &full_hash[..16]);
-        store.insert(&short_ref, text);
-
-        let mut m = LegacyMigration::new(&mut store, &cas, Some(manifest.clone()));
-        let r = m.run(false);
-        assert_eq!(r.migrated, 1);
-
+        let (_d, mut store, cas, manifest, short_ref, _, _) = with_fake("repair alias", false);
         store.remove_alias(&short_ref);
-
-        let mut m2 = LegacyMigration::new(&mut store, &cas, Some(manifest.clone()));
-        let r2 = m2.run(false);
-        assert_eq!(r2.repaired, 1);
+        assert_eq!(migrate(&mut store, &cas, Some(manifest), false).repaired, 1);
         assert!(store.alias_target(&short_ref).is_some());
     }
 
     #[test]
     fn migration_missing_cas_repair_on_resume() {
-        let dir = tempfile::tempdir().unwrap();
-        let (mut store, cas, manifest) = test_setup(dir.path());
-
-        let text = "repair cas";
-        let full_hash = full_sha256_hex(text.as_bytes());
-        let short_ref = format!("tz://blob/b{}", &full_hash[..16]);
-        store.insert(&short_ref, text);
-
-        let mut m = LegacyMigration::new(&mut store, &cas, Some(manifest.clone()));
-        let r = m.run(false);
-        assert_eq!(r.migrated, 1);
-
-        let obj_path = dir
-            .path()
-            .join("blobs")
-            .join("sha256")
-            .join(&full_hash[..2])
-            .join(&full_hash);
-        fs::remove_file(&obj_path).unwrap();
+        let (dir, mut store, cas, manifest, short_ref, full_hash, _) = with_fake("repair cas", false);
+        fs::remove_file(cas_obj(dir.path(), &full_hash)).unwrap();
         store.remove_alias(&short_ref);
-
-        let mut m2 = LegacyMigration::new(&mut store, &cas, Some(manifest.clone()));
-        let r2 = m2.run(false);
-        assert_eq!(r2.repaired, 1);
-        assert!(cas.contains(&full_hash));
-        assert!(store.alias_target(&short_ref).is_some());
+        assert_eq!(migrate(&mut store, &cas, Some(manifest), false).repaired, 1);
+        assert!(cas.contains(&full_hash) && store.alias_target(&short_ref).is_some());
     }
+
+    // ── failure matrix ──
 
     #[test]
     fn migration_ambiguous_short_id_fails_safely() {
         let dir = tempfile::tempdir().unwrap();
         let (mut store, cas, manifest) = test_setup(dir.path());
-
-        let fake_ref = "tz://blob/bdeadbeefdeadbeef";
-        let content = "this content does not match the claimed short ID";
-        store.insert(fake_ref, content);
-
-        let mut migration = LegacyMigration::new(&mut store, &cas, Some(manifest));
-        let report = migration.run(false);
-
-        assert_eq!(report.total, 1);
-        assert_eq!(report.migrated, 0);
-        assert_eq!(report.failed, 1);
-        assert!(report.errors.iter().any(|e| e.code == "ambiguous-short-id"));
+        store.insert("tz://blob/bdeadbeefdeadbeef", "this content does not match the claimed short ID");
+        let report = migrate(&mut store, &cas, Some(manifest), false);
+        assert_eq!((report.total, report.migrated, report.failed), (1, 0, 1));
+        assert_error_code(&report, "ambiguous-short-id");
     }
 
     #[test]
     fn migration_alias_conflict_fails_safely() {
         let dir = tempfile::tempdir().unwrap();
         let (mut store, cas, manifest) = test_setup(dir.path());
-
-        let text = "original content for conflict test";
-        let full_hash = full_sha256_hex(text.as_bytes());
-        let short_ref = format!("tz://blob/b{}", &full_hash[..16]);
-        store.insert(&short_ref, text);
-
-        let wrong_full_ref = format!("{BLOB_REF_PREFIX}{}", "f".repeat(FULL_HASH_LEN));
-        store.store_alias_deferred(&short_ref, &wrong_full_ref);
-
-        let mut migration = LegacyMigration::new(&mut store, &cas, Some(manifest));
-        let report = migration.run(false);
-
-        assert_eq!(report.total, 1);
-        assert_eq!(report.migrated, 0);
-        assert_eq!(report.failed, 1);
-        assert!(report.errors.iter().any(|e| e.code == "alias-conflict"));
+        let (short_ref, _) = insert_legacy(&mut store, "original content for conflict test");
+        store.store_alias_deferred(&short_ref, &format!("{BLOB_REF_PREFIX}{}", "f".repeat(FULL_HASH_LEN)));
+        let report = migrate(&mut store, &cas, Some(manifest), false);
+        assert_eq!((report.total, report.migrated, report.failed), (1, 0, 1));
+        assert_error_code(&report, "alias-conflict");
     }
 
     #[test]
     fn migration_conflicting_manifest_hash_is_deterministic_ambiguity() {
         let dir = tempfile::tempdir().unwrap();
         let (mut store, cas, manifest) = test_setup(dir.path());
-
-        let text = "manifest conflict text";
-        let full_hash = full_sha256_hex(text.as_bytes());
-        let short_ref = format!("tz://blob/b{}", &full_hash[..16]);
-        store.insert(&short_ref, text);
-
-        let mut fake_manifest = MigrationManifest::empty();
-        fake_manifest.entries.insert(
+        let (short_ref, _) = insert_legacy(&mut store, "manifest conflict text");
+        let mut fake = MigrationManifest::empty();
+        fake.entries.insert(
             short_ref.clone(),
-            ManifestEntry {
-                short_ref: short_ref.clone(),
-                full_hash: "f".repeat(FULL_HASH_LEN),
-                size: 999,
-                state: EntryState::Migrated,
-                migrated_at: now_unix(),
-                verified_at: None,
-                resumed: false,
-                owner_alias: false,
-            },
+            MigrationManifest::entry(short_ref.clone(), "f".repeat(FULL_HASH_LEN), 999, now_unix(), false, false),
         );
-        fake_manifest.save(&manifest).unwrap();
-
-        let mut migration = LegacyMigration::new(&mut store, &cas, Some(manifest.clone()));
-        let report = migration.run(false);
-
+        fake.save(&manifest).unwrap();
+        let report = migrate(&mut store, &cas, Some(manifest), false);
         assert_eq!(report.failed, 1);
-        assert!(
-            report
-                .errors
-                .iter()
-                .any(|e| e.code == "manifest-hash-conflict")
-        );
+        assert_error_code(&report, "manifest-hash-conflict");
     }
 
     #[test]
     fn migration_dry_run_produces_no_writes() {
-        let dir = tempfile::tempdir().unwrap();
-        let (mut store, cas, manifest) = test_setup(dir.path());
-
-        let text = "dry run content";
-        let full_hash = full_sha256_hex(text.as_bytes());
-        let short_ref = format!("tz://blob/b{}", &full_hash[..16]);
-        store.insert(&short_ref, text);
-
-        let mut migration = LegacyMigration::new(&mut store, &cas, Some(manifest.clone()));
-        let report = migration.run(true);
-
+        let (dir_unused, store, cas, manifest, short_ref, full_hash, report) =
+            with_fake("dry run content", true);
+        let _ = dir_unused;
         assert!(report.dry_run);
-        assert_eq!(report.total, 1);
-        assert_eq!(report.migrated, 1);
-        assert_eq!(report.failed, 0);
-
+        assert_eq!((report.total, report.migrated, report.failed), (1, 1, 0));
         assert!(store.alias_target(&short_ref).is_none());
-        assert!(!manifest.exists());
-        assert!(!cas.contains(&full_hash));
+        assert!(!manifest.exists() && !cas.contains(&full_hash));
     }
 
     #[test]
     fn migration_dry_run_no_writes_idempotent() {
         let dir = tempfile::tempdir().unwrap();
         let (mut store, cas, manifest) = test_setup(dir.path());
-
-        let text = "dry run idempotent";
-        let full_hash = full_sha256_hex(text.as_bytes());
-        let short_ref = format!("tz://blob/b{}", &full_hash[..16]);
-        store.insert(&short_ref, text);
-
-        let mut m1 = LegacyMigration::new(&mut store, &cas, Some(manifest.clone()));
-        let r1 = m1.run(true);
-        assert_eq!(r1.migrated, 1);
-
-        let mut m2 = LegacyMigration::new(&mut store, &cas, Some(manifest.clone()));
-        let r2 = m2.run(true);
-        assert_eq!(r2.migrated, 1);
+        insert_legacy(&mut store, "dry run idempotent");
+        assert_eq!(migrate(&mut store, &cas, Some(manifest.clone()), true).migrated, 1);
+        assert_eq!(migrate(&mut store, &cas, Some(manifest), true).migrated, 1);
     }
 
     #[test]
     fn migration_corrupt_source_fails() {
         let dir = tempfile::tempdir().unwrap();
         let (mut store, cas, manifest) = test_setup(dir.path());
-
-        let short_ref = "tz://blob/b0000000000000000";
-        store.blobs.insert(short_ref.to_string(), vec![]);
-
-        let mut migration = LegacyMigration::new(&mut store, &cas, Some(manifest));
-        let report = migration.run(false);
-
+        store.blobs.insert("tz://blob/b0000000000000000".into(), vec![]);
+        let report = migrate(&mut store, &cas, Some(manifest), false);
         assert_eq!(report.failed, 1);
-        assert!(report.errors.iter().any(|e| e.code == "source-corrupt"));
+        assert_error_code(&report, "source-corrupt");
     }
 
     #[test]
     fn migration_corrupt_cas_detected() {
         let dir = tempfile::tempdir().unwrap();
         let (mut store, cas, manifest) = test_setup(dir.path());
-
-        let text = "corrupt CAS test";
-        let full_hash = full_sha256_hex(text.as_bytes());
-        let short_ref = format!("tz://blob/b{}", &full_hash[..16]);
-        store.insert(&short_ref, text);
-
-        let obj_dir = dir
-            .path()
-            .join("blobs")
-            .join("sha256")
-            .join(&full_hash[..2]);
+        let (_, full_hash) = insert_legacy(&mut store, "corrupt CAS test");
+        let obj_dir = dir.path().join("blobs").join("sha256").join(&full_hash[..2]);
         fs::create_dir_all(&obj_dir).unwrap();
         fs::write(obj_dir.join(&full_hash), b"tampered bytes").unwrap();
-
-        let mut migration = LegacyMigration::new(&mut store, &cas, Some(manifest));
-        let report = migration.run(false);
-
+        let report = migrate(&mut store, &cas, Some(manifest), false);
         assert_eq!(report.failed, 1);
-        assert!(report.errors.iter().any(|e| e.code == "cas-corruption"));
+        assert_error_code(&report, "cas-corruption");
     }
 
     #[test]
     fn migration_verify_all_ok() {
-        let dir = tempfile::tempdir().unwrap();
-        let (mut store, cas, manifest) = test_setup(dir.path());
-
-        let text = "verify ok";
-        let full_hash = full_sha256_hex(text.as_bytes());
-        let short_ref = format!("tz://blob/b{}", &full_hash[..16]);
-        store.insert(&short_ref, text);
-
-        let mut m = LegacyMigration::new(&mut store, &cas, Some(manifest.clone()));
-        let r = m.run(false);
-        assert_eq!(r.migrated, 1);
-
-        let m2 = LegacyMigration::new(&mut store, &cas, Some(manifest.clone()));
-        let vr = m2.verify();
-        assert_eq!(vr.total, 1);
-        assert_eq!(vr.verified, 1);
-        assert_eq!(vr.failed, 0);
+        let (_d, mut store, cas, manifest, _, _, _) = with_fake("verify ok", false);
+        let vr = LegacyMigration::new(&mut store, &cas, Some(manifest)).verify();
+        assert_eq!((vr.total, vr.verified, vr.failed), (1, 1, 0));
     }
 
     #[test]
     fn migration_verify_cas_missing() {
-        let dir = tempfile::tempdir().unwrap();
-        let (mut store, cas, manifest) = test_setup(dir.path());
-
-        let text = "verify missing cas";
-        let full_hash = full_sha256_hex(text.as_bytes());
-        let short_ref = format!("tz://blob/b{}", &full_hash[..16]);
-        store.insert(&short_ref, text);
-
-        let mut m = LegacyMigration::new(&mut store, &cas, Some(manifest.clone()));
-        m.run(false);
-
-        let obj_path = dir
-            .path()
-            .join("blobs")
-            .join("sha256")
-            .join(&full_hash[..2])
-            .join(&full_hash);
-        fs::remove_file(&obj_path).unwrap();
-
-        let m2 = LegacyMigration::new(&mut store, &cas, Some(manifest.clone()));
-        let vr = m2.verify();
+        let (dir, mut store, cas, manifest, _, full_hash, _) = with_fake("verify missing cas", false);
+        fs::remove_file(cas_obj(dir.path(), &full_hash)).unwrap();
+        let vr = LegacyMigration::new(&mut store, &cas, Some(manifest)).verify();
         assert_eq!(vr.failed, 1);
-        assert!(vr.errors.iter().any(|e| e.code == "cas-missing"));
+        assert_error_code(&vr, "cas-missing");
     }
 
     #[test]
     fn migration_verify_alias_missing() {
-        let dir = tempfile::tempdir().unwrap();
-        let (mut store, cas, manifest) = test_setup(dir.path());
-
-        let text = "verify missing alias";
-        let full_hash = full_sha256_hex(text.as_bytes());
-        let short_ref = format!("tz://blob/b{}", &full_hash[..16]);
-        store.insert(&short_ref, text);
-
-        let mut m = LegacyMigration::new(&mut store, &cas, Some(manifest.clone()));
-        m.run(false);
-
+        let (_d, mut store, cas, manifest, short_ref, _, _) = with_fake("verify missing alias", false);
         store.remove_alias(&short_ref);
-
-        let m2 = LegacyMigration::new(&mut store, &cas, Some(manifest.clone()));
-        let vr = m2.verify();
+        let vr = LegacyMigration::new(&mut store, &cas, Some(manifest)).verify();
         assert_eq!(vr.failed, 1);
-        assert!(vr.errors.iter().any(|e| e.code == "alias-missing"));
+        assert_error_code(&vr, "alias-missing");
     }
 
     #[test]
     fn migration_rollback_removes_aliases_and_manifest() {
-        let dir = tempfile::tempdir().unwrap();
-        let (mut store, cas, manifest) = test_setup(dir.path());
-
-        let text = "rollback test";
-        let full_hash = full_sha256_hex(text.as_bytes());
-        let short_ref = format!("tz://blob/b{}", &full_hash[..16]);
-        store.insert(&short_ref, text);
-
-        let mut m = LegacyMigration::new(&mut store, &cas, Some(manifest.clone()));
-        let r = m.run(false);
-        assert_eq!(r.migrated, 1);
-        assert!(store.alias_target(&short_ref).is_some());
-        assert!(manifest.exists());
-
-        let mut m2 = LegacyMigration::new(&mut store, &cas, Some(manifest.clone()));
-        let rr = m2.rollback(true);
-
-        assert_eq!(rr.migrated, 1);
-        assert_eq!(rr.failed, 0);
-
-        assert!(store.alias_target(&short_ref).is_none());
-        assert!(!manifest.exists());
-        assert!(cas.contains(&full_hash));
-        assert!(matches!(
-            store.resolve_blob_bytes(&short_ref),
-            BlobContentResult::Ok(_)
-        ));
+        let (_d, mut store, cas, manifest, short_ref, full_hash, _) = with_fake("rollback test", false);
+        let rr = LegacyMigration::new(&mut store, &cas, Some(manifest.clone())).rollback(true);
+        assert_eq!((rr.migrated, rr.failed), (1, 0));
+        assert!(store.alias_target(&short_ref).is_none() && !manifest.exists() && cas.contains(&full_hash));
+        assert!(matches!(store.resolve_blob_bytes(&short_ref), BlobContentResult::Ok(_)));
     }
 
     #[test]
     fn migration_rollback_fails_when_source_gone() {
-        let dir = tempfile::tempdir().unwrap();
-        let (mut store, cas, manifest) = test_setup(dir.path());
-
-        let text = "rollback source gone";
-        let full_hash = full_sha256_hex(text.as_bytes());
-        let short_ref = format!("tz://blob/b{}", &full_hash[..16]);
-        store.insert(&short_ref, text);
-
-        let mut m = LegacyMigration::new(&mut store, &cas, Some(manifest.clone()));
-        m.run(false);
-
+        let (_d, mut store, cas, manifest, short_ref, _, _) = with_fake("rollback source gone", false);
         store.remove_blob(&short_ref);
-
-        let mut m2 = LegacyMigration::new(&mut store, &cas, Some(manifest.clone()));
-        let rr = m2.rollback(true);
+        let rr = LegacyMigration::new(&mut store, &cas, Some(manifest)).rollback(true);
         assert_eq!(rr.failed, 1);
-        assert!(rr.errors.iter().any(|e| e.code == "rollback-source-gone"));
+        assert_error_code(&rr, "rollback-source-gone");
         assert!(store.alias_target(&short_ref).is_some());
     }
 
     #[test]
     fn migration_cleanup_dry_run_no_writes() {
-        let dir = tempfile::tempdir().unwrap();
-        let (mut store, cas, manifest) = test_setup(dir.path());
-
-        let text = "cleanup dry run";
-        let full_hash = full_sha256_hex(text.as_bytes());
-        let short_ref = format!("tz://blob/b{}", &full_hash[..16]);
-        store.insert(&short_ref, text);
-
-        let mut m = LegacyMigration::new(&mut store, &cas, Some(manifest.clone()));
-        m.run(false);
-
-        let mut m2 = LegacyMigration::new(&mut store, &cas, Some(manifest.clone()));
-        let cr = m2.cleanup(false, true);
+        let (_d, mut store, cas, manifest, short_ref, _, _) = with_fake("cleanup dry run", false);
+        let cr = LegacyMigration::new(&mut store, &cas, Some(manifest)).cleanup(false, true);
         assert!(cr.dry_run);
-        assert_eq!(cr.migrated, 1);
-        assert_eq!(cr.failed, 0);
-        assert!(matches!(
-            store.resolve_blob_bytes(&short_ref),
-            BlobContentResult::Ok(_)
-        ));
+        assert_eq!((cr.migrated, cr.failed), (1, 0));
+        assert!(matches!(store.resolve_blob_bytes(&short_ref), BlobContentResult::Ok(_)));
     }
 
     #[test]
     fn migration_cleanup_apply_removes_legacy_sources() {
-        let dir = tempfile::tempdir().unwrap();
-        let (mut store, cas, manifest) = test_setup(dir.path());
-
-        let text = "cleanup apply";
-        let full_hash = full_sha256_hex(text.as_bytes());
-        let short_ref = format!("tz://blob/b{}", &full_hash[..16]);
-        store.insert(&short_ref, text);
-
-        let mut m = LegacyMigration::new(&mut store, &cas, Some(manifest.clone()));
-        m.run(false);
-
-        let mut m2 = LegacyMigration::new(&mut store, &cas, Some(manifest.clone()));
-        let cr = m2.cleanup(true, true);
-        assert!(!cr.dry_run);
-        assert_eq!(cr.migrated, 1);
-        assert_eq!(cr.failed, 0);
-
-        assert!(matches!(
-            store.resolve_blob_bytes(&short_ref),
-            BlobContentResult::Missing
-        ));
-        assert!(store.alias_target(&short_ref).is_some());
-        assert!(cas.contains(&full_hash));
+        let (_d, mut store, cas, manifest, short_ref, full_hash, _) = with_fake("cleanup apply", false);
+        let cr = LegacyMigration::new(&mut store, &cas, Some(manifest)).cleanup(true, true);
+        assert!(!cr.dry_run && cr.migrated == 1 && cr.failed == 0);
+        assert!(matches!(store.resolve_blob_bytes(&short_ref), BlobContentResult::Missing));
+        assert!(store.alias_target(&short_ref).is_some() && cas.contains(&full_hash));
     }
 
     #[test]
     fn migration_cleanup_requires_confirmation() {
-        let dir = tempfile::tempdir().unwrap();
-        let (mut store, cas, manifest) = test_setup(dir.path());
-
-        let text = "cleanup no confirm";
-        let full_hash = full_sha256_hex(text.as_bytes());
-        let short_ref = format!("tz://blob/b{}", &full_hash[..16]);
-        store.insert(&short_ref, text);
-
-        let mut m = LegacyMigration::new(&mut store, &cas, Some(manifest.clone()));
-        m.run(false);
-
-        let mut m2 = LegacyMigration::new(&mut store, &cas, Some(manifest.clone()));
-        let cr = m2.cleanup(true, false);
-        assert!(
-            cr.errors
-                .iter()
-                .any(|e| e.code == "cleanup-confirmation-required")
-        );
-        assert!(matches!(
-            store.resolve_blob_bytes(&short_ref),
-            BlobContentResult::Ok(_)
-        ));
+        let (_d, mut store, cas, manifest, short_ref, _, _) = with_fake("cleanup no confirm", false);
+        let cr = LegacyMigration::new(&mut store, &cas, Some(manifest)).cleanup(true, false);
+        assert_error_code(&cr, "cleanup-confirmation-required");
+        assert!(matches!(store.resolve_blob_bytes(&short_ref), BlobContentResult::Ok(_)));
     }
 
     #[test]
     fn migration_cleanup_requires_verification() {
-        let dir = tempfile::tempdir().unwrap();
-        let (mut store, cas, manifest) = test_setup(dir.path());
-
-        let text = "cleanup needs verify";
-        let full_hash = full_sha256_hex(text.as_bytes());
-        let short_ref = format!("tz://blob/b{}", &full_hash[..16]);
-        store.insert(&short_ref, text);
-
-        let mut m = LegacyMigration::new(&mut store, &cas, Some(manifest.clone()));
-        m.run(false);
-
-        let obj_path = dir
-            .path()
-            .join("blobs")
-            .join("sha256")
-            .join(&full_hash[..2])
-            .join(&full_hash);
-        fs::remove_file(&obj_path).unwrap();
-
-        let mut m2 = LegacyMigration::new(&mut store, &cas, Some(manifest.clone()));
-        let cr = m2.cleanup(true, true);
-        assert!(
-            cr.errors
-                .iter()
-                .any(|e| e.code == "cleanup-needs-verification")
-        );
-        assert!(matches!(
-            store.resolve_blob_bytes(&short_ref),
-            BlobContentResult::Ok(_)
-        ));
+        let (dir, mut store, cas, manifest, short_ref, full_hash, _) = with_fake("cleanup needs verify", false);
+        fs::remove_file(cas_obj(dir.path(), &full_hash)).unwrap();
+        let cr = LegacyMigration::new(&mut store, &cas, Some(manifest)).cleanup(true, true);
+        assert_error_code(&cr, "cleanup-needs-verification");
+        assert!(matches!(store.resolve_blob_bytes(&short_ref), BlobContentResult::Ok(_)));
     }
 
     #[test]
     fn migration_strict_manifest_version_newer_rejected() {
         let dir = tempfile::tempdir().unwrap();
         let (mut store, cas, manifest) = test_setup(dir.path());
-
-        let bad = r#"{"version": "tokenzero.migration.v99", "entries": {}, "completed": false}"#;
-        fs::write(&manifest, bad).unwrap();
-
-        let mut migration = LegacyMigration::new(&mut store, &cas, Some(manifest.clone()));
-        let report = migration.run(false);
-        assert!(
-            report
-                .errors
-                .iter()
-                .any(|e| e.code == "manifest-newer-version")
-        );
+        fs::write(&manifest, r#"{"version":"tokenzero.migration.v99","entries":{},"completed":false}"#).unwrap();
+        let report = migrate(&mut store, &cas, Some(manifest), false);
+        assert_error_code(&report, "manifest-newer-version");
         assert_eq!(report.total, 0);
     }
 
@@ -2273,64 +1736,43 @@ mod tests {
     fn migration_corrupt_manifest_rejected() {
         let dir = tempfile::tempdir().unwrap();
         let (mut store, cas, manifest) = test_setup(dir.path());
-
         fs::write(&manifest, b"not json at all").unwrap();
-
-        let mut migration = LegacyMigration::new(&mut store, &cas, Some(manifest));
-        let report = migration.run(false);
-        assert!(report.errors.iter().any(|e| e.code == "manifest-corrupt"));
+        assert_error_code(&migrate(&mut store, &cas, Some(manifest), false), "manifest-corrupt");
     }
 
     #[test]
     fn migration_is_legacy_blob_ref_detection() {
         assert!(is_legacy_blob_ref("tz://blob/babc123def4567890"));
         assert!(is_legacy_blob_ref("tz://blob/b0000000000000000"));
-
-        assert!(!is_legacy_blob_ref(&format!(
-            "tz://blob/{}",
-            "a".repeat(FULL_HASH_LEN)
-        )));
-        assert!(!is_legacy_blob_ref("tz://file/babc123def456789"));
-        assert!(!is_legacy_blob_ref("tz://unit/uabc123def456789"));
-        assert!(!is_legacy_blob_ref("tz://blob/xabc123def456789"));
-        assert!(!is_legacy_blob_ref("tz://blob/babc"));
-        assert!(!is_legacy_blob_ref("tz://blob/babc123def45678901"));
+        for bad in [
+            format!("tz://blob/{}", "a".repeat(FULL_HASH_LEN)),
+            "tz://file/babc123def456789".into(),
+            "tz://unit/uabc123def456789".into(),
+            "tz://blob/xabc123def456789".into(),
+            "tz://blob/babc".into(),
+            "tz://blob/babc123def45678901".into(),
+        ] {
+            assert!(!is_legacy_blob_ref(&bad));
+        }
     }
 
     #[test]
     fn migration_full_hash_ref_not_migrated() {
         let dir = tempfile::tempdir().unwrap();
         let (mut store, cas, manifest) = test_setup(dir.path());
-
-        let full_hash = "a".repeat(FULL_HASH_LEN);
-        let full_ref = format!("{BLOB_REF_PREFIX}{full_hash}");
-        store.insert(&full_ref, "already canonical");
-
-        let mut migration = LegacyMigration::new(&mut store, &cas, Some(manifest));
-        let report = migration.run(false);
-
-        assert_eq!(report.total, 0);
-        assert_eq!(report.migrated, 0);
+        store.insert(&format!("{BLOB_REF_PREFIX}{}", "a".repeat(FULL_HASH_LEN)), "already canonical");
+        let report = migrate(&mut store, &cas, Some(manifest), false);
+        assert_eq!((report.total, report.migrated), (0, 0));
     }
 
     #[test]
     fn migration_canonical_vs_legacy_key_collision_separation() {
         let dir = tempfile::tempdir().unwrap();
-        let (mut store, cas, _manifest) = test_setup(dir.path());
-
-        let text = "legacy blob";
-        let legacy_hash = full_sha256_hex(text.as_bytes());
-        let legacy_ref = format!("tz://blob/b{}", &legacy_hash[..16]);
-        store.insert(&legacy_ref, text);
-
-        let canonical_text = "canonical blob different";
-        let canonical_hash = full_sha256_hex(canonical_text.as_bytes());
-        let canonical_ref = format!("tz://blob/{canonical_hash}");
-        store.insert(&canonical_ref, canonical_text);
-
-        let mut migration = LegacyMigration::new(&mut store, &cas, None);
-        let report = migration.run(true);
-
+        let (mut store, cas, _) = test_setup(dir.path());
+        let (legacy_ref, _) = insert_legacy(&mut store, "legacy blob");
+        let ctext = "canonical blob different";
+        store.insert(&format!("tz://blob/{}", full_sha256_hex(ctext.as_bytes())), ctext);
+        let report = migrate(&mut store, &cas, None, true);
         assert_eq!(report.total, 1);
         assert!(report.aliases.iter().any(|a| a.short_ref == legacy_ref));
     }
@@ -2339,33 +1781,18 @@ mod tests {
     fn migration_deterministic_ambiguous_prefix_two_distinct_hashes() {
         let dir = tempfile::tempdir().unwrap();
         let (mut store, cas, manifest) = test_setup(dir.path());
-
-        // Inject two blobs with the SAME fabricated short ref but DIFFERENT bytes.
-        // This simulates a genuine prefix collision without needing a natural SHA collision.
         let fake_short = "tz://blob/babcdabcdabcdabcd";
         store.insert(fake_short, "content alpha");
-        // Overwrite with different content under the same ref.
         store.insert(fake_short, "content beta different enough");
-
-        // Actually, we need two distinct blobs under the same short ref.
-        // FakeStore only stores one value per key. Let's use a different approach:
-        // mark the ref as ambiguous directly and verify migration fails on it.
-
         store.mark_ambiguous(fake_short);
-
-        let mut migration = LegacyMigration::new(&mut store, &cas, Some(manifest));
-        let report = migration.run(false);
-
-        // All entries for this short ref should fail.
-        let failures: Vec<_> = report
-            .aliases
-            .iter()
-            .filter(|a| a.short_ref == fake_short && a.status == AliasStatus::Failed)
-            .collect();
-        assert_eq!(failures.len(), 1);
+        let report = migrate(&mut store, &cas, Some(manifest), false);
+        assert_eq!(
+            report.aliases.iter().filter(|a| a.short_ref == fake_short && a.status == AliasStatus::Failed).count(),
+            1
+        );
     }
 
-    // ── Real RecoveryStore-backed tests ──────────────────────────────────
+    // ── Real RecoveryStore-backed tests ──
 
     fn cas_from_cache(cache_path: &Path) -> SharedCas {
         SharedCas::detect_from_cache_path(cache_path).unwrap_or_else(|| {
@@ -2373,353 +1800,202 @@ mod tests {
         })
     }
 
+    fn engine_cache(dir: &Path) -> (PathBuf, PathBuf) {
+        let engine_dir = dir.join("tokenzero");
+        fs::create_dir_all(&engine_dir).unwrap();
+        (engine_dir.clone(), engine_dir.join("recovery-cache.json"))
+    }
+
+    fn recovery_store(cache: &Path) -> crate::RecoveryStore {
+        crate::RecoveryStore::new(Some(cache.to_path_buf()))
+    }
+
+    fn migrate_adapter(
+        store: &mut crate::RecoveryStore,
+        cas: &SharedCas,
+        manifest: PathBuf,
+        dry_run: bool,
+    ) -> MigrationReport {
+        let mut adapter = crate::migration::RecoveryStoreAdapter::new(store);
+        LegacyMigration::new(&mut adapter, cas, Some(manifest)).run(dry_run)
+    }
+
+    fn insert_short(store: &mut crate::RecoveryStore, text: &str) -> (String, String) {
+        let full_hash = full_sha256_hex(text.as_bytes());
+        let short_ref = format!("tz://blob/b{}", &full_hash[..16]);
+        store.insert_test_blob(&short_ref, text);
+        (short_ref, full_hash)
+    }
+
     #[test]
     fn migration_cas_publish_exact_bytes_not_in_recovery_json() {
         let dir = tempfile::tempdir().unwrap();
-        // Create a unified store layout: <dir>/tokenzero/recovery-cache.json
-        let engine_dir = dir.path().join("tokenzero");
-        std::fs::create_dir_all(&engine_dir).unwrap();
-        let cache = engine_dir.join("recovery-cache.json");
-
-        let mut store = crate::RecoveryStore::new(Some(cache.clone()));
+        let (_, cache) = engine_cache(dir.path());
         let text = "canonical CAS payload no dup";
-        let full_hash = crate::migration::full_sha256_hex(text.as_bytes());
-
-        // Publish through the production RecoveryStore write path.
+        let full_hash = full_sha256_hex(text.as_bytes());
+        let mut store = recovery_store(&cache);
         let blob_ref = store.put_blob(text, tokenzero_core::ContentType::Unknown);
         assert_eq!(blob_ref, format!("tz://blob/{full_hash}"));
         store.persist().unwrap();
         drop(store);
-
-        let published_hash = full_hash.clone();
-
-        assert_eq!(published_hash.len(), 64);
-        assert!(
-            published_hash
-                .chars()
-                .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase())
-        );
-        assert_eq!(published_hash, full_hash);
-
-        // Resolve after restart (new CAS instance)
-        let cas2 = SharedCas::detect_from_cache_path(&cache).unwrap();
-        let resolved = cas2.resolve(&full_hash).unwrap();
-        assert_eq!(resolved, text.as_bytes());
-
-        // Raw payload must NOT be in recovery JSON
-        let cas3 = SharedCas::detect_from_cache_path(&cache).unwrap();
-        assert!(cas3.contains(&full_hash));
-        let recovery_json = std::fs::read_to_string(&cache).unwrap();
-        assert!(!recovery_json.contains(text));
-
-        let mut restarted = crate::RecoveryStore::new(Some(cache.clone()));
-        let expanded = restarted.expand(&blob_ref, None, None, None, None, None);
-        assert_eq!(expanded.content, text);
+        assert_eq!(full_hash.len(), 64);
+        assert!(full_hash.chars().all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()));
+        let cas = SharedCas::detect_from_cache_path(&cache).unwrap();
+        assert_eq!(cas.resolve(&full_hash).unwrap(), text.as_bytes());
+        assert!(cas.contains(&full_hash));
+        assert!(!fs::read_to_string(&cache).unwrap().contains(text));
+        assert_eq!(recovery_store(&cache).expand(&blob_ref, None, None, None, None, None).content, text);
     }
 
     #[test]
     fn migration_cas_publish_store_no_duplicate_payload() {
         let dir = tempfile::tempdir().unwrap();
-        let engine_dir = dir.path().join("tokenzero");
-        std::fs::create_dir_all(&engine_dir).unwrap();
-        let cache = engine_dir.join("recovery-cache.json");
-
-        let mut store = crate::RecoveryStore::new(Some(cache.clone()));
+        let (engine_dir, cache) = engine_cache(dir.path());
+        let mut store = recovery_store(&cache);
         let text = "no duplicate in recovery state";
-        let full_hash = crate::migration::full_sha256_hex(text.as_bytes());
-        let short_ref = format!("tz://blob/b{}", &full_hash[..16]);
-
-        // Insert test blob
-        store.insert_test_blob(&short_ref, text);
-
+        let (_, full_hash) = insert_short(&mut store, text);
         let cas = SharedCas::detect_from_cache_path(&cache).unwrap();
-        let mut adapter = crate::migration::RecoveryStoreAdapter::new(&mut store);
-        let manifest = engine_dir.join("migration-manifest.json");
-        let mut migration = LegacyMigration::new(&mut adapter, &cas, Some(manifest));
-        let report = migration.run(false);
-        assert_eq!(report.migrated, 1);
-
-        // CAS has the bytes
+        assert_eq!(migrate_adapter(&mut store, &cas, engine_dir.join("migration-manifest.json"), false).migrated, 1);
         assert!(cas.contains(&full_hash));
-        let resolved = cas.resolve(&full_hash).unwrap();
-        assert_eq!(resolved, text.as_bytes());
+        assert_eq!(cas.resolve(&full_hash).unwrap(), text.as_bytes());
     }
 
     #[test]
     fn migration_alias_present_cas_missing_republishes() {
         let dir = tempfile::tempdir().unwrap();
-        let engine_dir = dir.path().join("tokenzero");
-        std::fs::create_dir_all(&engine_dir).unwrap();
-        let cache = engine_dir.join("recovery-cache.json");
-
-        let mut store = crate::RecoveryStore::new(Some(cache.clone()));
+        let (engine_dir, cache) = engine_cache(dir.path());
+        let mut store = recovery_store(&cache);
         let text = "matching alias with missing canonical CAS object";
-        let full_hash = full_sha256_hex(text.as_bytes());
-        let short_ref = format!("tz://blob/b{}", &full_hash[..16]);
-        let full_ref = format!("{BLOB_REF_PREFIX}{full_hash}");
-        store.insert_test_blob(&short_ref, text);
-        store.store_alias_deferred(&short_ref, &full_ref);
-
+        let (short_ref, full_hash) = insert_short(&mut store, text);
+        store.store_alias_deferred(&short_ref, &format!("{BLOB_REF_PREFIX}{full_hash}"));
         let cas = cas_from_cache(&cache);
         assert!(!cas.contains(&full_hash));
-        let manifest = engine_dir.join("migration-manifest.json");
         let mut adapter = RecoveryStoreAdapter::new(&mut store);
-        let mut migration = LegacyMigration::new(&mut adapter, &cas, Some(manifest));
-
+        let mut migration = LegacyMigration::new(&mut adapter, &cas, Some(engine_dir.join("migration-manifest.json")));
         let report = migration.run(false);
-        assert!(report.errors.is_empty());
-        assert!(report.repaired >= 1);
-        assert!(cas.contains(&full_hash));
-
+        assert!(report.errors.is_empty() && report.repaired >= 1 && cas.contains(&full_hash));
         let verify = migration.verify();
-        assert!(verify.errors.is_empty());
-        assert_eq!(verify.verified, verify.total);
+        assert!(verify.errors.is_empty() && verify.verified == verify.total);
     }
 
     #[test]
     fn migration_legacy_disabled_fails() {
         let dir = tempfile::tempdir().unwrap();
-        let engine_dir = dir.path().join("tokenzero");
-        std::fs::create_dir_all(&engine_dir).unwrap();
-        let cache = engine_dir.join("recovery-cache.json");
-
-        let config = crate::RecoveryConfig {
-            legacy_compat: false,
-            ..crate::RecoveryConfig::default()
-        };
-        let mut store = crate::RecoveryStore::with_config(Some(cache.clone()), config);
-
+        let (_, cache) = engine_cache(dir.path());
+        let config = crate::RecoveryConfig { legacy_compat: false, ..crate::RecoveryConfig::default() };
+        let mut store = crate::RecoveryStore::with_config(Some(cache), config);
         let text = "disabled legacy";
-        let full_hash = crate::migration::full_sha256_hex(text.as_bytes());
-        let short_ref = format!("tz://blob/b{}", &full_hash[..16]);
-        store.insert_test_blob(&short_ref, text);
+        let (short_ref, full_hash) = insert_short(&mut store, text);
         store.store_alias_deferred(&short_ref, &format!("tz://blob/{full_hash}"));
-
-        // Expand should fail with legacy-ref-disabled
         let result = store.expand(&short_ref, None, None, None, None, None);
-        assert!(!result.found);
-        assert_eq!(result.reason, "legacy-ref-disabled");
-
-        // Full ref should still work (not a legacy ref)
+        assert!(!result.found && result.reason == "legacy-ref-disabled");
         let full_ref = format!("tz://blob/{full_hash}");
         store.insert_test_blob(&full_ref, text);
-        let result2 = store.expand(&full_ref, None, None, None, None, None);
-        assert!(result2.found);
+        assert!(store.expand(&full_ref, None, None, None, None, None).found);
     }
 
     #[test]
     fn migration_ambiguous_alias_fails() {
         let dir = tempfile::tempdir().unwrap();
-        let engine_dir = dir.path().join("tokenzero");
-        std::fs::create_dir_all(&engine_dir).unwrap();
-        let cache = engine_dir.join("recovery-cache.json");
-
-        let mut store = crate::RecoveryStore::new(Some(cache.clone()));
+        let (_, cache) = engine_cache(dir.path());
+        let mut store = recovery_store(&cache);
         let short_ref = "tz://blob/babcdabcdabcdabcd";
         store.insert_test_blob(short_ref, "content");
         store.mark_ambiguous(short_ref);
-
         let result = store.expand(short_ref, None, None, None, None, None);
-        assert!(!result.found);
-        assert_eq!(result.reason, "legacy-ambiguous");
+        assert!(!result.found && result.reason == "legacy-ambiguous");
     }
 
     #[test]
     fn migration_fz_gz_refs_no_local_fallback_when_cas_missing() {
         let dir = tempfile::tempdir().unwrap();
-        let engine_dir = dir.path().join("tokenzero");
-        std::fs::create_dir_all(&engine_dir).unwrap();
-        let cache = engine_dir.join("recovery-cache.json");
-
-        let mut store = crate::RecoveryStore::new(Some(cache.clone()));
+        let (_, cache) = engine_cache(dir.path());
+        let mut store = recovery_store(&cache);
         let text = "fz gz no fallback test";
-        let full_hash = crate::migration::full_sha256_hex(text.as_bytes());
-
-        // Store the blob locally under tz:// scheme
+        let full_hash = full_sha256_hex(text.as_bytes());
         let tz_ref = format!("tz://blob/{full_hash}");
         store.insert_test_blob(&tz_ref, text);
-
-        // fz:// and gz:// refs should fail when CAS is missing (even though local tz blob exists)
-        let fz_ref = format!("fz://blob/{full_hash}");
-        let result = store.expand(&fz_ref, None, None, None, None, None);
-        assert!(!result.found);
-        assert_eq!(result.reason, "shared-cas-missing");
-
-        let gz_ref = format!("gz://blob/{full_hash}");
-        let result2 = store.expand(&gz_ref, None, None, None, None, None);
-        assert!(!result2.found);
-        assert_eq!(result2.reason, "shared-cas-missing");
-
-        // tz:// should fall back to local store
-        let result3 = store.expand(&tz_ref, None, None, None, None, None);
-        assert!(result3.found);
-        assert_eq!(result3.content, text);
+        for scheme in ["fz", "gz"] {
+            let r = store.expand(&format!("{scheme}://blob/{full_hash}"), None, None, None, None, None);
+            assert!(!r.found && r.reason == "shared-cas-missing");
+        }
+        let ok = store.expand(&tz_ref, None, None, None, None, None);
+        assert!(ok.found && ok.content == text);
     }
 
     #[test]
     fn migration_rollback_dry_run_no_mutation() {
         let dir = tempfile::tempdir().unwrap();
-        let engine_dir = dir.path().join("tokenzero");
-        std::fs::create_dir_all(&engine_dir).unwrap();
-        let cache = engine_dir.join("recovery-cache.json");
-
-        let mut store = crate::RecoveryStore::new(Some(cache.clone()));
-        let text = "rollback dry run";
-        let full_hash = crate::migration::full_sha256_hex(text.as_bytes());
-        let short_ref = format!("tz://blob/b{}", &full_hash[..16]);
-        store.insert_test_blob(&short_ref, text);
-
+        let (engine_dir, cache) = engine_cache(dir.path());
+        let mut store = recovery_store(&cache);
+        let (short_ref, _) = insert_short(&mut store, "rollback dry run");
         let cas = cas_from_cache(&cache);
-        let mut adapter = crate::migration::RecoveryStoreAdapter::new(&mut store);
         let manifest = engine_dir.join("migration-manifest.json");
-        let mut m = LegacyMigration::new(&mut adapter, &cas, Some(manifest.clone()));
-        let r = m.run(false);
-        assert_eq!(r.migrated, 1);
-        assert!(manifest.exists());
-        assert!(store.alias_target(&short_ref).is_some());
-
-        // Rollback dry-run: nothing should be removed
-        let mut adapter2 = crate::migration::RecoveryStoreAdapter::new(&mut store);
-        let mut m2 = LegacyMigration::new(&mut adapter2, &cas, Some(manifest.clone()));
-        let rr = m2.rollback(false); // dry_run = true (apply = false)
-        assert!(rr.dry_run);
-        assert_eq!(rr.migrated, 1);
-        assert!(manifest.exists());
-        assert!(store.alias_target(&short_ref).is_some());
+        assert_eq!(migrate_adapter(&mut store, &cas, manifest.clone(), false).migrated, 1);
+        let mut adapter = crate::migration::RecoveryStoreAdapter::new(&mut store);
+        let rr = LegacyMigration::new(&mut adapter, &cas, Some(manifest.clone())).rollback(false);
+        assert!(rr.dry_run && rr.migrated == 1 && manifest.exists() && store.alias_target(&short_ref).is_some());
     }
 
     #[test]
     fn migration_rollback_apply_removes_aliases() {
         let dir = tempfile::tempdir().unwrap();
-        let engine_dir = dir.path().join("tokenzero");
-        std::fs::create_dir_all(&engine_dir).unwrap();
-        let cache = engine_dir.join("recovery-cache.json");
-
-        let mut store = crate::RecoveryStore::new(Some(cache.clone()));
-        let text = "rollback apply";
-        let full_hash = crate::migration::full_sha256_hex(text.as_bytes());
-        let short_ref = format!("tz://blob/b{}", &full_hash[..16]);
-        store.insert_test_blob(&short_ref, text);
-
+        let (engine_dir, cache) = engine_cache(dir.path());
+        let mut store = recovery_store(&cache);
+        let (short_ref, full_hash) = insert_short(&mut store, "rollback apply");
         let cas = cas_from_cache(&cache);
-        let mut adapter = crate::migration::RecoveryStoreAdapter::new(&mut store);
         let manifest = engine_dir.join("migration-manifest.json");
-        let mut m = LegacyMigration::new(&mut adapter, &cas, Some(manifest.clone()));
-        m.run(false);
-        assert!(store.alias_target(&short_ref).is_some());
-
-        // Rollback apply
-        let mut adapter2 = crate::migration::RecoveryStoreAdapter::new(&mut store);
-        let mut m2 = LegacyMigration::new(&mut adapter2, &cas, Some(manifest.clone()));
-        let rr = m2.rollback(true);
-        assert!(!rr.dry_run);
-        assert_eq!(rr.migrated, 1);
-        assert_eq!(rr.failed, 0);
-        assert!(store.alias_target(&short_ref).is_none());
-        assert!(!manifest.exists());
-        // CAS must not be deleted
-        assert!(cas.contains(&full_hash));
+        migrate_adapter(&mut store, &cas, manifest.clone(), false);
+        let mut adapter = crate::migration::RecoveryStoreAdapter::new(&mut store);
+        let rr = LegacyMigration::new(&mut adapter, &cas, Some(manifest.clone())).rollback(true);
+        assert!(!rr.dry_run && rr.migrated == 1 && rr.failed == 0);
+        assert!(store.alias_target(&short_ref).is_none() && !manifest.exists() && cas.contains(&full_hash));
     }
 
     #[test]
     fn migration_cleanup_restart_preserves_tombstones() {
         let dir = tempfile::tempdir().unwrap();
         let cache = dir.path().join("recovery-cache.json");
-
-        // First store
-        let mut store = crate::RecoveryStore::new(Some(cache.clone()));
+        let mut store = recovery_store(&cache);
         let text = "cleanup restart";
-        let full_hash = crate::migration::full_sha256_hex(text.as_bytes());
-        let short_ref = format!("tz://blob/b{}", &full_hash[..16]);
-        store.insert_test_blob(&short_ref, text);
-
+        let (short_ref, full_hash) = insert_short(&mut store, text);
         let cas = cas_from_cache(&cache);
-        let mut adapter = crate::migration::RecoveryStoreAdapter::new(&mut store);
         let manifest = dir.path().join("migration-manifest.json");
-        let mut m = LegacyMigration::new(&mut adapter, &cas, Some(manifest.clone()));
-        m.run(false);
-
-        // Apply cleanup
-        let mut adapter2 = crate::migration::RecoveryStoreAdapter::new(&mut store);
-        let mut m2 = LegacyMigration::new(&mut adapter2, &cas, Some(manifest.clone()));
-        let cr = m2.cleanup(true, true);
-        assert!(!cr.dry_run);
-        assert_eq!(cr.migrated, 1);
-        assert_eq!(cr.failed, 0);
-
-        // "Restart" — new store loading same cache
-        let mut store2 = crate::RecoveryStore::new(Some(cache.clone()));
-        // Legacy source should be gone; alias-aware reads still resolve through CAS.
+        migrate_adapter(&mut store, &cas, manifest.clone(), false);
+        let mut adapter = crate::migration::RecoveryStoreAdapter::new(&mut store);
+        let cr = LegacyMigration::new(&mut adapter, &cas, Some(manifest)).cleanup(true, true);
+        assert!(!cr.dry_run && cr.migrated == 1 && cr.failed == 0);
+        let mut store2 = recovery_store(&cache);
         assert!(!store2.blob_ref_ids().contains(&short_ref));
-        // Alias should still exist
-        assert!(store2.alias_target(&short_ref).is_some());
-        // CAS must still have the bytes, and the alias must resolve through
-        // the flat cache attached CAS after the legacy source is gone.
-        assert!(cas.contains(&full_hash));
+        assert!(store2.alias_target(&short_ref).is_some() && cas.contains(&full_hash));
         let expanded = store2.expand(&short_ref, None, None, None, None, None);
-        assert!(expanded.found);
-        assert_eq!(expanded.content, text);
+        assert!(expanded.found && expanded.content == text);
     }
 
     #[test]
     fn migration_bare_plan_no_filesystem_changes() {
         let dir = tempfile::tempdir().unwrap();
-        let engine_dir = dir.path().join("tokenzero");
-        std::fs::create_dir_all(&engine_dir).unwrap();
-        let cache = engine_dir.join("recovery-cache.json");
-
-        // Create store but no blob data - bare migration plan
-        let mut store = crate::RecoveryStore::new(Some(cache.clone()));
+        let (engine_dir, cache) = engine_cache(dir.path());
+        let mut store = recovery_store(&cache);
         let cas = cas_from_cache(&cache);
         let mut adapter = crate::migration::RecoveryStoreAdapter::new(&mut store);
-        let manifest = engine_dir.join("migration-manifest.json");
-        let mut migration = LegacyMigration::new(&mut adapter, &cas, Some(manifest.clone()));
-
-        // Dry-run migration with no blobs
+        let mut migration = LegacyMigration::new(&mut adapter, &cas, Some(engine_dir.join("migration-manifest.json")));
         let report = migration.run(true);
-        assert_eq!(report.total, 0);
-        assert_eq!(report.migrated, 0);
-
-        // Verify with no manifest
-        let v = migration.verify();
-        assert!(
-            v.errors
-                .iter()
-                .any(|error| error.code == "manifest-missing")
-        );
-
-        // Rollback dry-run with no manifest
-        let rb = migration.rollback(false);
-        assert!(
-            rb.errors
-                .iter()
-                .any(|error| error.code == "manifest-missing")
-        );
-
-        // Cleanup dry-run with no manifest
+        assert_eq!((report.total, report.migrated), (0, 0));
+        assert_error_code(&migration.verify(), "manifest-missing");
+        assert_error_code(&migration.rollback(false), "manifest-missing");
         let cl = migration.cleanup(false, false);
         assert_eq!(cl.total, 0);
-        assert!(
-            cl.errors
-                .iter()
-                .any(|error| error.code == "cleanup-needs-verification")
-        );
+        assert_error_code(&cl, "cleanup-needs-verification");
     }
 
     #[test]
     fn migration_doctor_no_payload_or_paths() {
         let dir = tempfile::tempdir().unwrap();
-        let engine_dir = dir.path().join("tokenzero");
-        std::fs::create_dir_all(&engine_dir).unwrap();
-        let cache = engine_dir.join("recovery-cache.json");
-
-        let store = crate::RecoveryStore::new(Some(cache.clone()));
-        let state = store.migration_state();
-
-        // Doctor data must have no payload or filesystem paths
+        let (_, cache) = engine_cache(dir.path());
+        let state = recovery_store(&cache).migration_state();
         let json_str = serde_json::to_string(&state).unwrap();
-        assert!(!json_str.contains("payload"));
-        assert!(!json_str.contains("/blobs/"));
+        assert!(!json_str.contains("payload") && !json_str.contains("/blobs/"));
         assert!(state.get("legacy_compat_supported_until").is_some());
     }
 }

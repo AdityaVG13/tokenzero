@@ -249,126 +249,66 @@ fn execute_codemode_uncontained(plan: &str, options: CodeModeOptions) -> CodeMod
     let plan = plan.trim();
     let started_ms = now_ms();
     let limits = limits_from_options(&options);
-
+    let finish = |result, kind, steps| finalize_codemode_result(
+        result, kind, plan, started_ms, &options, &limits, steps,
+    );
     if plan.len() > limits.max_code_bytes {
-        return finalize_codemode_result(
+        return finish(
             CodeModeResult::error_with_kind(
-                "validation",
-                format!("plan exceeds max_code_bytes {}", limits.max_code_bytes),
-                0,
-                false,
+                "validation", format!("plan exceeds max_code_bytes {}", limits.max_code_bytes),
+                0, false,
             ),
-            "code",
-            plan,
-            started_ms,
-            &options,
-            &limits,
-            Vec::new(),
+            "code", Vec::new(),
         );
     }
-
     if plan.is_empty() {
-        return finalize_codemode_result(
-            CodeModeResult::error("empty plan", 0),
-            "code",
-            plan,
-            started_ms,
-            &options,
-            &limits,
-            Vec::new(),
-        );
+        return finish(CodeModeResult::error("empty plan", 0), "code", Vec::new());
     }
-    if let Some(query) = plan.strip_prefix("search:") {
-        let result = search_catalog(query.trim());
-        let text = serde_json::to_string_pretty(&result).unwrap_or_default();
-        let tokens = count_tokens(&text);
-        return finalize_codemode_result(
+    let catalog = plan.strip_prefix("search:")
+        .map(|query| (search_catalog(query.trim()), "search", "codemode.search"))
+        .or_else(|| plan.strip_prefix("describe:")
+            .map(|target| (describe_method(target.trim()), "describe", "codemode.describe")));
+    if let Some((result, id, method)) = catalog {
+        let tokens = count_tokens(&serde_json::to_string_pretty(&result).unwrap_or_default());
+        return finish(
             CodeModeResult::completed(result, Vec::new(), 1, tokens, tokens),
             "recipe",
-            plan,
-            started_ms,
-            &options,
-            &limits,
             vec![ExecutionStep {
-                id: "search".to_string(),
-                method: "codemode.search".to_string(),
-                status: "completed".to_string(),
-                refs: Vec::new(),
+                id: id.to_string(), method: method.to_string(),
+                status: "completed".to_string(), refs: Vec::new(),
             }],
         );
     }
-    if let Some(target) = plan.strip_prefix("describe:") {
-        let result = describe_method(target.trim());
-        let text = serde_json::to_string_pretty(&result).unwrap_or_default();
-        let tokens = count_tokens(&text);
-        return finalize_codemode_result(
-            CodeModeResult::completed(result, Vec::new(), 1, tokens, tokens),
-            "recipe",
-            plan,
-            started_ms,
-            &options,
-            &limits,
-            vec![ExecutionStep {
-                id: "describe".to_string(),
-                method: "codemode.describe".to_string(),
-                status: "completed".to_string(),
-                refs: Vec::new(),
-            }],
-        );
-    }
-
     if let Some(recipe) = lower_recipe_plan(plan) {
         return execute_lowered_plan(&recipe, options, &limits, "recipe", started_ms);
     }
     if plan.starts_with('{') || plan.starts_with('[') {
         return execute_json_plan(plan, options, &limits, started_ms);
     }
-
     let lowered = match lower_code_plan(plan, &limits) {
         Ok(lowered) => lowered,
-        Err(message) => {
-            return finalize_codemode_result(
-                CodeModeResult::error(message, 0),
-                "code",
-                plan,
-                started_ms,
-                &options,
-                &limits,
-                Vec::new(),
-            );
-        }
+        Err(message) => return finish(CodeModeResult::error(message, 0), "code", Vec::new()),
     };
-    // The lowered mini-interpreter only understands a small statement grammar;
-    // anything it cannot FULLY parse (optional chaining, ??, computed calls)
-    // must run in the real QuickJS sandbox instead of degrading — the old
-    // lenient parser turned unknown expressions into source-text strings.
     let use_quickjs = should_run_quickjs(plan) || parse_plan(&lowered).is_err();
+    if use_quickjs && quickjs_plan_requests_mutation(plan) {
+        let message = crate::annotate_write_failure(
+            concat!(
+                "sandbox: mutating binding denied without transaction support ",
+                "(use the lowered zero.edit / tz_edit path, not free-form JS mutation)",
+            ),
+            false,
+        );
+        return finish(
+            CodeModeResult::error_with_kind("sandbox", message, 0, false),
+            "code", Vec::new(),
+        );
+    }
     if use_quickjs {
-        if quickjs_plan_requests_mutation(plan) {
-            // QuickJS sandbox still blocks free-form mutation (transaction
-            // safety). Surface the write recovery ladder so agents are not
-            // stuck on "use CodeMode" alone (wqw.12).
-            let msg = crate::annotate_write_failure(
-                "sandbox: mutating binding denied without transaction support \
-                 (use the lowered zero.edit / tz_edit path, not free-form JS mutation)",
-                false,
-            );
-            return finalize_codemode_result(
-                CodeModeResult::error_with_kind("sandbox", msg, 0, false),
-                "code",
-                plan,
-                started_ms,
-                &options,
-                &limits,
-                Vec::new(),
-            );
-        }
         execute_quickjs_plan(plan, options, &limits, started_ms)
     } else {
         execute_lowered_plan(&lowered, options, &limits, "code", started_ms)
     }
 }
-
 fn should_run_quickjs(plan: &str) -> bool {
     if plan.contains("zero.register(") || plan.contains("zero.run(") || plan.contains("zero.list(")
     {
@@ -409,258 +349,112 @@ fn execute_quickjs_plan(
     limits: &CodeModeLimits,
     started_ms: u128,
 ) -> CodeModeResult {
+    let finish = |result, steps| finalize_codemode_result(
+        result, "code", plan, started_ms, &options, limits, steps,
+    );
     let work_root = tokenzero_work_root(options.root.clone());
-    let engine = Rc::new(make_engine_for_root_with_options(
-        work_root.clone(),
-        &options,
-    ));
+    let engine = Rc::new(make_engine_for_root_with_options(work_root.clone(), &options));
     let state = Rc::new(RefCell::new(JsExecutionState {
         started_ms,
         limits: limits.clone(),
-        ..JsExecutionState::default()
+        ..Default::default()
     }));
-
     let runtime = match Runtime::new() {
         Ok(runtime) => runtime,
-        Err(err) => {
-            return finalize_codemode_result(
-                CodeModeResult::error(format!("sandbox: QuickJS runtime init failed: {err}"), 0),
-                "code",
-                plan,
-                started_ms,
-                &options,
-                limits,
-                Vec::new(),
-            );
-        }
+        Err(error) => return finish(
+            CodeModeResult::error(format!("sandbox: QuickJS runtime init failed: {error}"), 0),
+            Vec::new(),
+        ),
     };
     runtime.set_memory_limit(limits.max_memory_bytes);
     runtime.set_max_stack_size(512 * 1024);
     let context = match Context::full(&runtime) {
         Ok(context) => context,
-        Err(err) => {
-            return finalize_codemode_result(
-                CodeModeResult::error(format!("sandbox: QuickJS context init failed: {err}"), 0),
-                "code",
-                plan,
-                started_ms,
-                &options,
-                limits,
-                Vec::new(),
-            );
-        }
+        Err(error) => return finish(
+            CodeModeResult::error(format!("sandbox: QuickJS context init failed: {error}"), 0),
+            Vec::new(),
+        ),
     };
-
     let setup = context.with(|ctx| {
-        let globals = ctx.globals();
         install_js_generic_binding(
-            &globals,
-            Rc::clone(&engine),
-            work_root.clone(),
-            Rc::clone(&state),
-        )?;
-        install_js_binding(
-            &globals,
-            "__tz_compact_json",
-            "zero.token.compact",
-            Rc::clone(&engine),
-            work_root.clone(),
-            Rc::clone(&state),
-        )?;
-        install_js_binding(
-            &globals,
-            "__tz_expand_json",
-            "zero.token.expand",
-            Rc::clone(&engine),
-            work_root.clone(),
-            Rc::clone(&state),
-        )?;
-        install_js_binding_json_arg(
-            &globals,
-            "__tz_compact_many_json",
-            "zero.token.compactMany",
-            Rc::clone(&engine),
-            work_root.clone(),
-            Rc::clone(&state),
-        )?;
-        install_js_binding_json_arg(
-            &globals,
-            "__tz_expand_many_json",
-            "zero.token.expandMany",
-            Rc::clone(&engine),
-            work_root.clone(),
-            Rc::clone(&state),
-        )?;
-        install_js_binding_json_arg(
-            &globals,
-            "__tz_dedupe_json",
-            "zero.token.dedupe",
-            Rc::clone(&engine),
-            work_root.clone(),
-            Rc::clone(&state),
+            &ctx.globals(), Rc::clone(&engine), work_root.clone(), Rc::clone(&state),
         )?;
         ctx.eval::<(), _>(js_prelude())
     });
-    if let Err(err) = setup {
-        return finalize_codemode_result(
-            CodeModeResult::error(format!("sandbox: QuickJS binding setup failed: {err}"), 0),
-            "code",
-            plan,
-            started_ms,
-            &options,
-            limits,
+    if let Err(error) = setup {
+        return finish(
+            CodeModeResult::error(format!("sandbox: QuickJS binding setup failed: {error}"), 0),
             Vec::new(),
         );
     }
-
-    let script = wrap_js_plan(plan);
-    if let Err(err) = context.with(|ctx| ctx.eval::<(), _>(script.as_str())) {
-        let ops = state.borrow().ops;
-        return finalize_codemode_result(
-            CodeModeResult::error(format!("sandbox: QuickJS eval failed: {err}"), ops),
-            "code",
-            plan,
-            started_ms,
-            &options,
-            limits,
-            state.borrow().steps.clone(),
+    if let Err(error) = context.with(|ctx| ctx.eval::<(), _>(wrap_js_plan(plan).as_str())) {
+        let state = state.borrow();
+        return finish(
+            CodeModeResult::error(format!("sandbox: QuickJS eval failed: {error}"), state.ops),
+            state.steps.clone(),
         );
     }
 
     let mut drained = 0;
     while runtime.is_job_pending() {
-        if now_ms().saturating_sub(started_ms) as u64 > limits.hard_max_wall_ms {
+        let elapsed = now_ms().saturating_sub(started_ms) as u64;
+        let limit_error = if elapsed > limits.hard_max_wall_ms {
+            Some(format!("runtime: hard_max_wall_ms exceeded {}", limits.hard_max_wall_ms))
+        } else if elapsed > limits.max_wall_ms {
+            Some(format!("runtime: max_wall_ms exceeded {}", limits.max_wall_ms))
+        } else if drained >= limits.max_microtasks {
+            Some(format!("sandbox: microtask cap exceeded {}", limits.max_microtasks))
+        } else { None };
+        if let Some(message) = limit_error {
             let state = state.borrow();
-            return finalize_codemode_result(
-                CodeModeResult::error(
-                    format!(
-                        "runtime: hard_max_wall_ms exceeded {}",
-                        limits.hard_max_wall_ms
-                    ),
-                    state.ops,
-                ),
-                "code",
-                plan,
-                started_ms,
-                &options,
-                limits,
-                state.steps.clone(),
-            );
+            return finish(CodeModeResult::error(message, state.ops), state.steps.clone());
         }
-        if now_ms().saturating_sub(started_ms) as u64 > limits.max_wall_ms {
+        if let Err(error) = runtime.execute_pending_job() {
             let state = state.borrow();
-            return finalize_codemode_result(
-                CodeModeResult::error(
-                    format!("runtime: max_wall_ms exceeded {}", limits.max_wall_ms),
-                    state.ops,
-                ),
-                "code",
-                plan,
-                started_ms,
-                &options,
-                limits,
-                state.steps.clone(),
-            );
-        }
-        if drained >= limits.max_microtasks {
-            let state = state.borrow();
-            return finalize_codemode_result(
-                CodeModeResult::error(
-                    format!("sandbox: microtask cap exceeded {}", limits.max_microtasks),
-                    state.ops,
-                ),
-                "code",
-                plan,
-                started_ms,
-                &options,
-                limits,
-                state.steps.clone(),
-            );
-        }
-        if let Err(err) = runtime.execute_pending_job() {
-            let state = state.borrow();
-            return finalize_codemode_result(
-                CodeModeResult::error(format!("sandbox: QuickJS job failed: {err}"), state.ops),
-                "code",
-                plan,
-                started_ms,
-                &options,
-                limits,
+            return finish(
+                CodeModeResult::error(format!("sandbox: QuickJS job failed: {error}"), state.ops),
                 state.steps.clone(),
             );
         }
         drained += 1;
     }
 
-    let (result_json, error, error_kind): (Option<String>, Option<String>, Option<String>) =
-        context
-            .with(|ctx| {
-                let globals = ctx.globals();
-                Ok::<_, rquickjs::Error>((
-                    globals.get("__tz_result")?,
-                    globals.get("__tz_error")?,
-                    globals.get("__tz_error_kind")?,
-                ))
-            })
-            .unwrap_or((
-                None,
-                Some("sandbox: result extraction failed".to_string()),
-                Some("sandbox".to_string()),
-            ));
-
+    let (result_json, error, error_kind): (Option<String>, Option<String>, Option<String>) = context
+        .with(|ctx| {
+            let globals = ctx.globals();
+            Ok::<_, rquickjs::Error>((
+                globals.get("__tz_result")?,
+                globals.get("__tz_error")?,
+                globals.get("__tz_error_kind")?,
+            ))
+        })
+        .unwrap_or((
+            None,
+            Some("sandbox: result extraction failed".to_string()),
+            Some("sandbox".to_string()),
+        ));
     let state = state.borrow();
     if let Some(error) = error {
-        return finalize_codemode_result(
+        return finish(
             CodeModeResult::error_with_kind(
-                error_kind.as_deref().unwrap_or("sandbox"),
-                error,
-                state.ops,
-                false,
+                error_kind.as_deref().unwrap_or("sandbox"), error, state.ops, false,
             ),
-            "code",
-            plan,
-            started_ms,
-            &options,
-            limits,
             state.steps.clone(),
         );
     }
     let value = result_json
         .and_then(|text| serde_json::from_str::<Value>(&text).ok())
         .unwrap_or(Value::Null);
-    let visible =
-        state.visible_tokens + count_tokens(&serde_json::to_string(&value).unwrap_or_default());
+    let visible = state.visible_tokens
+        + count_tokens(&serde_json::to_string(&value).unwrap_or_default());
     let mut result = CodeModeResult::completed(
-        value,
-        state.refs.clone(),
-        state.ops,
-        visible,
-        state.raw_tokens,
+        value, state.refs.clone(), state.ops, visible, state.raw_tokens,
     );
     result.telemetry.physical_ops = state.physical_ops;
     result.telemetry.prevented_read_bytes = state.prevented_read_bytes;
-    if let Some(extra) = result
-        .telemetry
-        .extra
-        .as_mut()
-        .and_then(Value::as_object_mut)
-    {
-        extra.insert(
-            "prevented_read_bytes".to_string(),
-            json!(state.prevented_read_bytes),
-        );
-    }
-    finalize_codemode_result(
-        result,
-        "code",
-        plan,
-        started_ms,
-        &options,
-        limits,
-        state.steps.clone(),
-    )
+    telemetry_insert(&mut result, "prevented_read_bytes", json!(state.prevented_read_bytes));
+    finish(result, state.steps.clone())
 }
-
 fn install_js_generic_binding<'js>(
     globals: &rquickjs::Object<'js>,
     engine: Rc<TokenZeroEngine>,
@@ -672,45 +466,6 @@ fn install_js_generic_binding<'js>(
         Func::from(move |method: String, args_json: String| {
             let args = serde_json::from_str::<Vec<Value>>(&args_json).unwrap_or_default();
             invoke_js_binding(&engine, &work_root, &method, args, &state)
-        }),
-    )
-}
-
-fn install_js_binding<'js>(
-    globals: &rquickjs::Object<'js>,
-    name: &str,
-    method: &'static str,
-    engine: Rc<TokenZeroEngine>,
-    work_root: PathBuf,
-    state: Rc<RefCell<JsExecutionState>>,
-) -> rquickjs::Result<()> {
-    globals.set(
-        name,
-        Func::from(move |arg: String| {
-            invoke_js_binding(
-                &engine,
-                &work_root,
-                method,
-                vec![Value::String(arg)],
-                &state,
-            )
-        }),
-    )
-}
-
-fn install_js_binding_json_arg<'js>(
-    globals: &rquickjs::Object<'js>,
-    name: &str,
-    method: &'static str,
-    engine: Rc<TokenZeroEngine>,
-    work_root: PathBuf,
-    state: Rc<RefCell<JsExecutionState>>,
-) -> rquickjs::Result<()> {
-    globals.set(
-        name,
-        Func::from(move |arg_json: String| {
-            let arg = serde_json::from_str::<Value>(&arg_json).unwrap_or(Value::Null);
-            invoke_js_binding(&engine, &work_root, method, vec![arg], &state)
         }),
     )
 }
@@ -727,30 +482,42 @@ fn invoke_js_binding(
     }
     {
         let state_ref = state.borrow();
-        if now_ms().saturating_sub(state_ref.started_ms) as u64 > state_ref.limits.hard_max_wall_ms
-        {
-            return serde_json::to_string(&json!({
-                "__tz_error": format!("runtime: hard_max_wall_ms exceeded {}", state_ref.limits.hard_max_wall_ms)
-            }))
-            .unwrap_or_else(|_| "{\"__tz_error\":\"hard wall clock exceeded\"}".to_string());
-        }
-        if now_ms().saturating_sub(state_ref.started_ms) as u64 > state_ref.limits.max_wall_ms {
-            return serde_json::to_string(&json!({
-                "__tz_error": format!("runtime: max_wall_ms exceeded {}", state_ref.limits.max_wall_ms)
-            }))
-            .unwrap_or_else(|_| "{\"__tz_error\":\"wall clock exceeded\"}".to_string());
-        }
-        if state_ref.ops >= state_ref.limits.max_logical_ops {
-            return serde_json::to_string(&json!({
-                "__tz_error": format!("runtime: max_logical_ops exceeded {}", state_ref.limits.max_logical_ops)
-            }))
-            .unwrap_or_else(|_| "{\"__tz_error\":\"logical op cap exceeded\"}".to_string());
-        }
-        if state_ref.physical_ops >= state_ref.limits.max_physical_ops {
-            return serde_json::to_string(&json!({
-                "__tz_error": format!("runtime: max_physical_ops exceeded {}", state_ref.limits.max_physical_ops)
-            }))
-            .unwrap_or_else(|_| "{\"__tz_error\":\"physical op cap exceeded\"}".to_string());
+        let elapsed = now_ms().saturating_sub(state_ref.started_ms) as u64;
+        let limit_err = if elapsed > state_ref.limits.hard_max_wall_ms {
+            Some((
+                format!(
+                    "runtime: hard_max_wall_ms exceeded {}",
+                    state_ref.limits.hard_max_wall_ms
+                ),
+                "hard wall clock exceeded",
+            ))
+        } else if elapsed > state_ref.limits.max_wall_ms {
+            Some((
+                format!("runtime: max_wall_ms exceeded {}", state_ref.limits.max_wall_ms),
+                "wall clock exceeded",
+            ))
+        } else if state_ref.ops >= state_ref.limits.max_logical_ops {
+            Some((
+                format!(
+                    "runtime: max_logical_ops exceeded {}",
+                    state_ref.limits.max_logical_ops
+                ),
+                "logical op cap exceeded",
+            ))
+        } else if state_ref.physical_ops >= state_ref.limits.max_physical_ops {
+            Some((
+                format!(
+                    "runtime: max_physical_ops exceeded {}",
+                    state_ref.limits.max_physical_ops
+                ),
+                "physical op cap exceeded",
+            ))
+        } else {
+            None
+        };
+        if let Some((message, fallback)) = limit_err {
+            return serde_json::to_string(&json!({ "__tz_error": message }))
+                .unwrap_or_else(|_| format!(r#"{{"__tz_error":"{fallback}"}}"#));
         }
     }
     let outcome = match dispatch_values(engine, work_root, method, &args) {
@@ -763,7 +530,7 @@ fn invoke_js_binding(
                         .unwrap_or_else(|_| "{\"__tz_error\":\"unknown error\",\"__tz_error_kind\":\"runtime\"}".to_string());
         }
     };
-    let prevented_read_bytes = outcome.prevented_read_bytes();
+    let prevented_read_bytes = outcome.prevented_read_bytes;
     let value = outcome.into_value();
     let refs = refs_from_value(&value);
     let mut state = state.borrow_mut();
@@ -830,6 +597,9 @@ fn js_prelude() -> &'static str {
           const invoke = new AsyncFunction('args', 'zero', 'ctx', 'token', recipe.source);
           return await invoke(frozenArgs, zero, ctx, token);
         };
+        const __tz_bind = (method) => (...args) => __tz_call(method, args);
+        const __tz_json_bind = (method) => (...args) => __tz_call(method, args.map(a => typeof a === 'string' ? a : JSON.stringify(a)));
+        const __tz_methods = (prefix, names) => Object.fromEntries(names.map((name) => [name, __tz_bind(prefix + name)]));
         const zero = Object.freeze({
           raw: (value) => ({ __tz_raw: true, value }),
           count: (value) => Array.isArray(value) ? value.length : __tz_lines(value).length,
@@ -843,47 +613,21 @@ fn js_prelude() -> &'static str {
           register: (name, source) => __tz_call('codemode.recipeRegister', [name, source]),
           run: (name, args = {}) => __tz_run_recipe(name, args),
           list: () => __tz_call('codemode.recipeList', []),
-          read: (...args) => __tz_call('zero.read', args),
-          find: (...args) => __tz_call('zero.find', args),
-          grep: (...args) => __tz_call('zero.grep', args),
-          glob: (...args) => __tz_call('zero.glob', args),
-          tree: (...args) => __tz_call('zero.tree', args),
-          shell: (...args) => __tz_call('zero.shell', args),
-          expand: (...args) => __tz_call('zero.token.expand', args),
-          compact: (...args) => __tz_call('zero.token.compact', args.map(a => typeof a === 'string' ? a : JSON.stringify(a))),
-          compact_max: (...args) => __tz_call('zero.compact_max', args.map(a => typeof a === 'string' ? a : JSON.stringify(a))),
-          ingest: (...args) => __tz_call('zero.ingest', args),
-          mem: (...args) => __tz_call('zero.mem', args),
-          recall: (...args) => __tz_call('zero.recall', args),
-          fetch: (...args) => __tz_call('zero.fetch', args),
-          cache_pack: (...args) => __tz_call('zero.cache_pack', args),
-          rewrite: (...args) => __tz_call('zero.rewrite', args),
-          discover: (...args) => __tz_call('zero.discover', args),
-          batch: (...args) => __tz_call('zero.batch', args),
-          pipe: (...args) => __tz_call('zero.pipe', args),
-          pick: (...args) => __tz_call('zero.pick', args),
-          filter_lines: (...args) => __tz_call('zero.filter_lines', args),
-          count_tokens: (...args) => __tz_call('zero.count_tokens', args),
-          assert: (...args) => __tz_call('zero.assert', args),
-          queryMany: (items) => __tz_parse(__tz_compact_many_json(JSON.stringify(items))),
+          ...__tz_methods('zero.', ['read','find','grep','glob','tree','shell','expand','ingest','mem','recall','fetch','cache_pack','rewrite','discover','batch','pipe','pick','filter_lines','count_tokens','assert']),
+          compact: __tz_json_bind('zero.token.compact'),
+          compact_max: __tz_json_bind('zero.compact_max'),
+          queryMany: __tz_bind('zero.token.compactMany'),
           token: Object.freeze({
-            compact: (text) => __tz_parse(__tz_compact_json(typeof text === 'string' ? text : JSON.stringify(text))),
-            expand: (ref) => __tz_parse(__tz_expand_json(String(ref))),
-            compactMany: (items) => __tz_parse(__tz_compact_many_json(JSON.stringify(items))),
-            expandMany: (refs) => __tz_parse(__tz_expand_many_json(JSON.stringify(refs))),
-            dedupe: (items) => __tz_parse(__tz_dedupe_json(JSON.stringify(items))),
-            shell: (...args) => __tz_call('zero.shell', args),
-            job: (...args) => __tz_call('zero.token.job', args),
-            read: (...args) => __tz_call('zero.read', args),
-            find: (...args) => __tz_call('zero.find', args),
-            grep: (...args) => __tz_call('zero.grep', args),
-            glob: (...args) => __tz_call('zero.glob', args),
-            tree: (...args) => __tz_call('zero.tree', args),
-            rewrite: (...args) => __tz_call('zero.rewrite', args),
-            mem: (...args) => __tz_call('zero.mem', args),
-            recall: (...args) => __tz_call('zero.recall', args),
+            compact: __tz_json_bind('zero.token.compact'),
+            expand: __tz_bind('zero.token.expand'),
+            compactMany: __tz_bind('zero.token.compactMany'),
+            expandMany: __tz_bind('zero.token.expandMany'),
+            dedupe: __tz_bind('zero.token.dedupe'),
+            shell: __tz_bind('zero.shell'),
+            job: __tz_bind('zero.token.job'),
+            ...__tz_methods('zero.', ['read','find','grep','glob','tree','rewrite','mem','recall']),
           }),
-          ref: (value) => __tz_parse(__tz_compact_json(typeof value === 'string' ? value : JSON.stringify(value))),
+          ref: __tz_json_bind('zero.token.compact'),
         });
         const token = zero.token;
         const ctx = Object.freeze({ ref: zero.ref, step: async (_name, fn) => await fn() });
@@ -1001,13 +745,7 @@ fn dispatch_lowered_journaled(
         if let Some(tx) = transaction.as_mut() {
             if let Err(original) = tx.mark_applying(journal_index) {
                 let cache_path = engine.config.cache_path.clone();
-                let combined = tx
-                    .rollback(original.clone(), |operation| {
-                        rollback_journal_operation(&cache_path, operation)
-                    })
-                    .err()
-                    .map(|error| error.to_string())
-                    .unwrap_or(original);
+                let combined = rollback_tx_on_error(tx, original, &cache_path);
                 return Err(Box::new(CodeModeResult::error_with_kind(
                     "transaction",
                     combined,
@@ -1087,30 +825,68 @@ fn finish_lowered_transaction(
     downgrade: Option<&str>,
 ) -> Result<(), String> {
     if let Some(reason) = downgrade {
-        if let Some(extra) = result
-            .telemetry
-            .extra
-            .as_mut()
-            .and_then(Value::as_object_mut)
-        {
-            extra.insert("transaction_atomic".to_string(), json!(false));
-            extra.insert("transaction_downgrade".to_string(), json!(reason));
-        }
+        telemetry_insert(result, "transaction_atomic", json!(false));
+        telemetry_insert(result, "transaction_downgrade", json!(reason));
     }
     if let Some(tx) = transaction {
         let journal = tx.commit()?;
-        if let Some(extra) = result
-            .telemetry
-            .extra
-            .as_mut()
-            .and_then(Value::as_object_mut)
-        {
-            extra.insert("transaction_atomic".to_string(), json!(true));
-            extra.insert("plan_journal_version".to_string(), json!(journal.version));
-            extra.insert("journal_state".to_string(), json!(journal.state));
-        }
+        telemetry_insert(result, "transaction_atomic", json!(true));
+        telemetry_insert(result, "plan_journal_version", json!(journal.version));
+        telemetry_insert(result, "journal_state", json!(journal.state));
     }
     Ok(())
+}
+
+#[derive(Default)]
+struct PlanProgress {
+    scope: HashMap<String, Value>,
+    refs: Vec<String>,
+    ops: usize,
+    visible: usize,
+    raw: usize,
+    prevented: usize,
+    last: Value,
+    steps: Vec<ExecutionStep>,
+}
+
+impl PlanProgress {
+    fn record(&mut self, id: String, call: &MethodCall, outcome: &OpOutcome) {
+        self.steps.push(ExecutionStep {
+            id,
+            method: call.method.clone(),
+            status: "completed".to_string(),
+            refs: refs_from_value(outcome.as_value()),
+        });
+        record_outcome(
+            outcome,
+            &mut self.refs,
+            &mut self.visible,
+            &mut self.raw,
+            &mut self.prevented,
+        );
+        self.last = outcome.as_value().clone();
+    }
+}
+
+fn finish_lowered_result(
+    value: Value,
+    mut progress: PlanProgress,
+    transaction: Option<JournalTransaction>,
+    downgrade: Option<&str>,
+    kind: &str,
+    plan: &str,
+    started_ms: u128,
+    options: &CodeModeOptions,
+    limits: &CodeModeLimits,
+) -> CodeModeResult {
+    let visible = progress.visible + count_tokens(&serde_json::to_string(&value).unwrap_or_default());
+    let mut result = CodeModeResult::completed(value, progress.refs, progress.ops, visible, progress.raw);
+    result.telemetry.prevented_read_bytes = progress.prevented;
+    telemetry_insert(&mut result, "prevented_read_bytes", json!(progress.prevented));
+    if let Err(message) = finish_lowered_transaction(&mut result, transaction, downgrade) {
+        result = CodeModeResult::error_with_kind("transaction", message, progress.ops, false);
+    }
+    finalize_codemode_result(result, kind, plan, started_ms, options, limits, std::mem::take(&mut progress.steps))
 }
 
 fn execute_lowered_plan(
@@ -1121,239 +897,83 @@ fn execute_lowered_plan(
     started_ms: u128,
 ) -> CodeModeResult {
     let statements = match parse_plan(plan) {
-        Ok(s) => s,
-        Err(e) => {
-            return finalize_codemode_result(
-                CodeModeResult::error(e, 0),
-                kind,
-                plan,
-                started_ms,
-                &options,
-                limits,
-                Vec::new(),
-            );
-        }
+        Ok(statements) => statements,
+        Err(message) => return finalize_codemode_result(
+            CodeModeResult::error(message, 0), kind, plan, started_ms, &options, limits, Vec::new(),
+        ),
     };
-
     if statements.len() > limits.max_logical_ops {
         return finalize_codemode_result(
-            CodeModeResult::error(
-                format!("plan exceeds max_logical_ops {}", limits.max_logical_ops),
-                0,
-            ),
-            kind,
-            plan,
-            started_ms,
-            &options,
-            limits,
-            Vec::new(),
+            CodeModeResult::error(format!("plan exceeds max_logical_ops {}", limits.max_logical_ops), 0),
+            kind, plan, started_ms, &options, limits, Vec::new(),
         );
     }
 
     let work_root = tokenzero_work_root(options.root.clone());
     let engine = make_engine_for_root_with_options(work_root.clone(), &options);
-    let (mut transaction, transaction_downgrade, already_committed) =
+    let (mut transaction, downgrade, already_committed) =
         match prepare_lowered_transaction(&engine, &work_root, &statements, plan, started_ms) {
             Ok(value) => value,
-            Err(message) => {
-                return finalize_codemode_result(
-                    CodeModeResult::error_with_kind("transaction", message, 0, false),
-                    kind,
-                    plan,
-                    started_ms,
-                    &options,
-                    limits,
-                    Vec::new(),
-                );
-            }
+            Err(message) => return finalize_codemode_result(
+                CodeModeResult::error_with_kind("transaction", message, 0, false),
+                kind, plan, started_ms, &options, limits, Vec::new(),
+            ),
         };
     if already_committed {
         return finalize_codemode_result(
             CodeModeResult::completed(
                 json!({"transaction": "already_committed", "idempotent_replay": true}),
-                Vec::new(),
-                0,
-                0,
-                0,
+                Vec::new(), 0, 0, 0,
             ),
-            kind,
-            plan,
-            started_ms,
-            &options,
-            limits,
-            Vec::new(),
+            kind, plan, started_ms, &options, limits, Vec::new(),
         );
     }
-    let mut scope: HashMap<String, Value> = HashMap::new();
-    let mut all_refs: Vec<String> = Vec::new();
-    let mut ops: usize = 0;
-    let mut total_visible: usize = 0;
-    let mut total_raw: usize = 0;
-    let mut total_prevented: usize = 0;
-    let mut last_value: Value = Value::Null;
-    let mut steps: Vec<ExecutionStep> = Vec::new();
-    let mut journal_index = 0usize;
 
-    for stmt in &statements {
-        match stmt {
-            Statement::Binding { name, call } => {
-                ops += 1;
-                let outcome = match dispatch_lowered_journaled(
-                    &engine,
-                    &work_root,
-                    call,
-                    &scope,
-                    &mut transaction,
-                    journal_index,
-                ) {
-                    Ok(outcome) => outcome,
-                    Err(mut e) => {
-                        if let Some(extra) =
-                            e.telemetry.extra.as_mut().and_then(Value::as_object_mut)
-                        {
-                            extra.insert("operations".to_string(), json!(ops));
-                        }
-                        e.telemetry.operations = ops;
-                        e.telemetry.logical_ops = ops;
-                        return finalize_codemode_result(
-                            *e, kind, plan, started_ms, &options, limits, steps,
-                        );
-                    }
-                };
-                journal_index += 1;
-                steps.push(ExecutionStep {
-                    id: name.clone(),
-                    method: call.method.clone(),
-                    status: "completed".to_string(),
-                    refs: refs_from_value(outcome.as_value()),
-                });
-                record_outcome(
-                    &outcome,
-                    &mut all_refs,
-                    &mut total_visible,
-                    &mut total_raw,
-                    &mut total_prevented,
-                );
-                last_value = outcome.as_value().clone();
-                scope.insert(name.clone(), outcome.into_value());
-            }
-            Statement::Call(call) => {
-                ops += 1;
-                let outcome = match dispatch_lowered_journaled(
-                    &engine,
-                    &work_root,
-                    call,
-                    &scope,
-                    &mut transaction,
-                    journal_index,
-                ) {
-                    Ok(outcome) => outcome,
-                    Err(mut e) => {
-                        if let Some(extra) =
-                            e.telemetry.extra.as_mut().and_then(Value::as_object_mut)
-                        {
-                            extra.insert("operations".to_string(), json!(ops));
-                        }
-                        e.telemetry.operations = ops;
-                        e.telemetry.logical_ops = ops;
-                        return finalize_codemode_result(
-                            *e, kind, plan, started_ms, &options, limits, steps,
-                        );
-                    }
-                };
-                journal_index += 1;
-                steps.push(ExecutionStep {
-                    id: format!("step{ops}"),
-                    method: call.method.clone(),
-                    status: "completed".to_string(),
-                    refs: refs_from_value(outcome.as_value()),
-                });
-                record_outcome(
-                    &outcome,
-                    &mut all_refs,
-                    &mut total_visible,
-                    &mut total_raw,
-                    &mut total_prevented,
-                );
-                last_value = outcome.into_value();
-            }
+    let mut progress = PlanProgress::default();
+    let mut journal_index = 0;
+    for statement in &statements {
+        let (id, call, binding) = match statement {
+            Statement::Binding { name, call } => (name.clone(), call, Some(name)),
+            Statement::Call(call) => (format!("step{}", progress.ops + 1), call, None),
             Statement::Return(expr) => {
-                let value = match resolve_return(expr, &scope) {
+                let value = match resolve_return(expr, &progress.scope) {
                     Ok(value) => value,
-                    Err(message) => {
-                        return finalize_codemode_result(
-                            CodeModeResult::error(message, ops),
-                            kind,
-                            plan,
-                            started_ms,
-                            &options,
-                            limits,
-                            steps,
-                        );
-                    }
+                    Err(message) => return finalize_codemode_result(
+                        CodeModeResult::error(message, progress.ops), kind, plan, started_ms,
+                        &options, limits, progress.steps,
+                    ),
                 };
-                let vis = count_tokens(&serde_json::to_string(&value).unwrap_or_default());
-                let mut result =
-                    CodeModeResult::completed(value, all_refs, ops, total_visible + vis, total_raw);
-                result.telemetry.prevented_read_bytes = total_prevented;
-                if let Some(extra) = result
-                    .telemetry
-                    .extra
-                    .as_mut()
-                    .and_then(Value::as_object_mut)
-                {
-                    extra.insert("prevented_read_bytes".to_string(), json!(total_prevented));
-                }
-                if let Err(message) = finish_lowered_transaction(
-                    &mut result,
-                    transaction,
-                    transaction_downgrade.as_deref(),
-                ) {
-                    return finalize_codemode_result(
-                        CodeModeResult::error_with_kind("transaction", message, ops, false),
-                        kind,
-                        plan,
-                        started_ms,
-                        &options,
-                        limits,
-                        steps,
-                    );
-                }
-                return finalize_codemode_result(
-                    result, kind, plan, started_ms, &options, limits, steps,
+                return finish_lowered_result(
+                    value, progress, transaction, downgrade.as_deref(), kind, plan,
+                    started_ms, &options, limits,
                 );
             }
+        };
+        progress.ops += 1;
+        let outcome = match dispatch_lowered_journaled(
+            &engine, &work_root, call, &progress.scope, &mut transaction, journal_index,
+        ) {
+            Ok(outcome) => outcome,
+            Err(mut error) => {
+                telemetry_insert(&mut error, "operations", json!(progress.ops));
+                error.telemetry.operations = progress.ops;
+                error.telemetry.logical_ops = progress.ops;
+                return finalize_codemode_result(
+                    *error, kind, plan, started_ms, &options, limits, progress.steps,
+                );
+            }
+        };
+        journal_index += 1;
+        progress.record(id, call, &outcome);
+        if let Some(name) = binding {
+            progress.scope.insert(name.clone(), outcome.into_value());
         }
     }
-
-    let vis = count_tokens(&serde_json::to_string(&last_value).unwrap_or_default());
-    let mut result =
-        CodeModeResult::completed(last_value, all_refs, ops, total_visible + vis, total_raw);
-    result.telemetry.prevented_read_bytes = total_prevented;
-    if let Some(extra) = result
-        .telemetry
-        .extra
-        .as_mut()
-        .and_then(Value::as_object_mut)
-    {
-        extra.insert("prevented_read_bytes".to_string(), json!(total_prevented));
-    }
-    if let Err(message) =
-        finish_lowered_transaction(&mut result, transaction, transaction_downgrade.as_deref())
-    {
-        return finalize_codemode_result(
-            CodeModeResult::error_with_kind("transaction", message, ops, false),
-            kind,
-            plan,
-            started_ms,
-            &options,
-            limits,
-            steps,
-        );
-    }
-    finalize_codemode_result(result, kind, plan, started_ms, &options, limits, steps)
+    let value = std::mem::take(&mut progress.last);
+    finish_lowered_result(
+        value, progress, transaction, downgrade.as_deref(), kind, plan, started_ms, &options, limits,
+    )
 }
-
 fn ref_first_final_value(
     engine: &TokenZeroEngine,
     value: Value,
@@ -1453,6 +1073,34 @@ fn first_line_preview(text: &str, max_tokens: usize) -> String {
     pack_to_token_boundary_with_char_limit(line, max_tokens, 32).to_string()
 }
 
+
+fn telemetry_insert(result: &mut CodeModeResult, key: &str, value: Value) {
+    if let Some(extra) = result.telemetry.extra.as_mut().and_then(Value::as_object_mut) {
+        extra.insert(key.to_string(), value);
+    }
+}
+
+fn rollback_tx_on_error(
+    tx: &mut JournalTransaction,
+    original: String,
+    cache_path: &Path,
+) -> String {
+    tx.rollback(original.clone(), |operation| {
+        rollback_journal_operation(cache_path, operation)
+    })
+    .err()
+    .map(|error| error.to_string())
+    .unwrap_or(original)
+}
+
+fn boxed_error(kind: &str, message: impl Into<String>) -> Box<CodeModeResult> {
+    Box::new(CodeModeResult::error_with_kind(kind, message, 0, false))
+}
+
+fn operation_error(message: impl Into<String>) -> Box<CodeModeResult> {
+    Box::new(CodeModeResult::error(message.into(), 0))
+}
+
 fn finalize_codemode_result(
     mut result: CodeModeResult,
     kind: &str,
@@ -1465,14 +1113,7 @@ fn finalize_codemode_result(
     let work_root = tokenzero_work_root(options.root.clone());
     let engine = make_engine_for_root_with_options(work_root, options);
     let journal_health = journal_doctor_json(&engine.config.cache_path);
-    if let Some(extra) = result
-        .telemetry
-        .extra
-        .as_mut()
-        .and_then(Value::as_object_mut)
-    {
-        extra.insert("plan_journals".to_string(), journal_health);
-    }
+    telemetry_insert(&mut result, "plan_journals", journal_health);
     if matches!(result.status, CodeModeStatus::Completed) {
         if let Some(value) = result.value.take() {
             let (value, refs) = ref_first_final_value(&engine, value, options);
@@ -1504,17 +1145,14 @@ fn finalize_codemode_result(
     result.telemetry.internal_actions = operations.saturating_add(result.refs.len());
     result.telemetry.payload_tokens = payload_tokens;
     result.telemetry.envelope_tokens = count_tokens(&result.visible_ack);
-    // Granular token attribution buckets (6ot).
     result.telemetry.ack_tokens = count_tokens(&result.visible_ack);
     let ref_strings = result.refs.join(" ");
     result.telemetry.ref_string_tokens = count_tokens(&ref_strings);
-    // Framing = envelope minus ack and ref strings (JSON keys, punctuation, structure).
     result.telemetry.framing_tokens = result
         .telemetry
         .envelope_tokens
         .saturating_sub(result.telemetry.ack_tokens)
         .saturating_sub(result.telemetry.ref_string_tokens);
-    // Preview = payload minus ref strings (inline text the model sees directly).
     result.telemetry.preview_tokens =
         payload_tokens.saturating_sub(result.telemetry.ref_string_tokens);
 
@@ -1539,55 +1177,23 @@ fn finalize_codemode_result(
         .prefix_cache_total
         .saturating_add(total_output_tokens);
 
-    if let Some(extra) = result
-        .telemetry
-        .extra
-        .as_mut()
-        .and_then(Value::as_object_mut)
-    {
-        extra.insert("refs_count".to_string(), json!(result.refs.len()));
-        extra.insert(
-            "payload_tokens".to_string(),
-            json!(result.telemetry.payload_tokens),
-        );
-        extra.insert(
-            "envelope_tokens".to_string(),
-            json!(result.telemetry.envelope_tokens),
-        );
-        extra.insert("ack_tokens".to_string(), json!(result.telemetry.ack_tokens));
-        extra.insert(
-            "ref_string_tokens".to_string(),
-            json!(result.telemetry.ref_string_tokens),
-        );
-        extra.insert(
-            "framing_tokens".to_string(),
-            json!(result.telemetry.framing_tokens),
-        );
-        extra.insert(
-            "preview_tokens".to_string(),
-            json!(result.telemetry.preview_tokens),
-        );
-        extra.insert(
-            "prevented_read_bytes".to_string(),
-            json!(result.telemetry.prevented_read_bytes),
-        );
-        extra.insert(
-            "prefix_cache_hits".to_string(),
-            json!(result.telemetry.prefix_cache_hits),
-        );
-        extra.insert(
-            "prefix_cache_total".to_string(),
-            json!(result.telemetry.prefix_cache_total),
-        );
-        extra.insert(
-            "prefix_cache_hit_rate".to_string(),
-            json!(if result.telemetry.prefix_cache_total == 0 {
-                0.0
-            } else {
-                result.telemetry.prefix_cache_hits as f64
-                    / result.telemetry.prefix_cache_total as f64
-            }),
-        );
+    if let Some(extra) = result.telemetry.extra.as_mut().and_then(Value::as_object_mut) {
+        let cache_rate = if result.telemetry.prefix_cache_total == 0 { 0.0 } else {
+            result.telemetry.prefix_cache_hits as f64 / result.telemetry.prefix_cache_total as f64
+        };
+        for (key, value) in [
+            ("refs_count", json!(result.refs.len())),
+            ("payload_tokens", json!(result.telemetry.payload_tokens)),
+            ("envelope_tokens", json!(result.telemetry.envelope_tokens)),
+            ("ack_tokens", json!(result.telemetry.ack_tokens)),
+            ("ref_string_tokens", json!(result.telemetry.ref_string_tokens)),
+            ("framing_tokens", json!(result.telemetry.framing_tokens)),
+            ("preview_tokens", json!(result.telemetry.preview_tokens)),
+            ("prevented_read_bytes", json!(result.telemetry.prevented_read_bytes)),
+            ("prefix_cache_hits", json!(result.telemetry.prefix_cache_hits)),
+            ("prefix_cache_total", json!(result.telemetry.prefix_cache_total)),
+            ("prefix_cache_hit_rate", json!(cache_rate)),
+        ] { extra.insert(key.to_string(), value); }
     }
     result.telemetry.refs_count = Some(result.refs.len());
     finalize_result(
@@ -1890,354 +1496,166 @@ fn execute_json_plan(
     limits: &CodeModeLimits,
     started_ms: u128,
 ) -> CodeModeResult {
+    let finish = |result, steps| finalize_codemode_result(
+        result, "json", plan, started_ms, &options, limits, steps,
+    );
     let parsed: Value = match serde_json::from_str(plan) {
         Ok(value) => value,
-        Err(err) => {
-            return finalize_codemode_result(
-                CodeModeResult::error(format!("json plan parse error: {err}"), 0),
-                "json",
-                plan,
-                started_ms,
-                &options,
-                limits,
-                Vec::new(),
-            );
-        }
+        Err(error) => return finish(
+            CodeModeResult::error(format!("json plan parse error: {error}"), 0), Vec::new(),
+        ),
     };
-    let steps_value = if let Some(steps) = parsed.get("steps") {
-        steps.clone()
-    } else {
-        parsed.clone()
-    };
-    let steps_arr = match steps_value.as_array() {
+    let steps = match parsed.get("steps").unwrap_or(&parsed).as_array() {
         Some(steps) => steps,
-        None => {
-            return finalize_codemode_result(
-                CodeModeResult::error("json plan requires a steps array".to_string(), 0),
-                "json",
-                plan,
-                started_ms,
-                &options,
-                limits,
-                Vec::new(),
-            );
-        }
+        None => return finish(
+            CodeModeResult::error("json plan requires a steps array".to_string(), 0), Vec::new(),
+        ),
     };
-    if steps_arr.len() > limits.max_logical_ops {
-        return finalize_codemode_result(
+    if steps.len() > limits.max_logical_ops {
+        return finish(
             CodeModeResult::error(
-                format!(
-                    "json plan exceeds max_logical_ops {}",
-                    limits.max_logical_ops
-                ),
-                0,
+                format!("json plan exceeds max_logical_ops {}", limits.max_logical_ops), 0,
             ),
-            "json",
-            plan,
-            started_ms,
-            &options,
-            limits,
             Vec::new(),
         );
     }
 
     let work_root = tokenzero_work_root(options.root.clone());
     let engine = make_engine_for_root_with_options(work_root.clone(), &options);
-    let (mut transaction, transaction_downgrade, already_committed) =
-        match prepare_json_transaction(&engine, &work_root, &parsed, steps_arr, plan, started_ms) {
+    let (mut transaction, downgrade, already_committed) =
+        match prepare_json_transaction(&engine, &work_root, &parsed, steps, plan, started_ms) {
             Ok(value) => value,
-            Err(message) => {
-                return finalize_codemode_result(
-                    CodeModeResult::error_with_kind("transaction", message, 0, false),
-                    "json",
-                    plan,
-                    started_ms,
-                    &options,
-                    limits,
-                    Vec::new(),
-                );
-            }
+            Err(message) => return finish(
+                CodeModeResult::error_with_kind("transaction", message, 0, false), Vec::new(),
+            ),
         };
     if already_committed {
-        return finalize_codemode_result(
+        return finish(
             CodeModeResult::completed(
                 json!({"transaction": "already_committed", "idempotent_replay": true}),
-                Vec::new(),
-                0,
-                0,
-                0,
+                Vec::new(), 0, 0, 0,
             ),
-            "json",
-            plan,
-            started_ms,
-            &options,
-            limits,
             Vec::new(),
         );
     }
-    let mut scope: HashMap<String, Value> = HashMap::new();
-    let mut all_refs = Vec::new();
-    let mut total_visible = 0usize;
-    let mut total_raw = 0usize;
-    let mut total_prevented = 0usize;
-    let mut executed = Vec::new();
-    let mut last = Value::Null;
 
-    for (idx, step) in steps_arr.iter().enumerate() {
-        let id = step
-            .get("id")
-            .and_then(|v| v.as_str())
-            .map(str::to_string)
-            .unwrap_or_else(|| format!("step{idx}"));
-        let method = match step
-            .get("method")
-            .or_else(|| step.get("tool"))
-            .and_then(|v| v.as_str())
-        {
+    let mut progress = PlanProgress::default();
+    for (index, step) in steps.iter().enumerate() {
+        let id = step.get("id").and_then(Value::as_str).map(str::to_string)
+            .unwrap_or_else(|| format!("step{index}"));
+        let method = match step.get("method").or_else(|| step.get("tool")).and_then(Value::as_str) {
             Some(method) => method.to_string(),
-            None => {
-                return finalize_codemode_result(
-                    CodeModeResult::error(format!("json plan step {idx} missing method"), idx),
-                    "json",
-                    plan,
-                    started_ms,
-                    &options,
-                    limits,
-                    executed,
-                );
-            }
+            None => return finish(
+                CodeModeResult::error(format!("json plan step {index} missing method"), index),
+                progress.steps,
+            ),
         };
-        let args = match json_args_to_exprs(step.get("args"), &scope) {
+        let args = match json_args_to_exprs(step.get("args"), &progress.scope) {
             Ok(args) => args,
-            Err(message) => {
-                return finalize_codemode_result(
-                    CodeModeResult::error(message, idx),
-                    "json",
-                    plan,
-                    started_ms,
-                    &options,
-                    limits,
-                    executed,
-                );
-            }
+            Err(message) => return finish(
+                CodeModeResult::error(message, index), progress.steps,
+            ),
         };
-        let call = MethodCall {
-            method: method.clone(),
-            args,
-        };
+        let call = MethodCall { method: method.clone(), args };
         let reversible = classify_method(&method) == OperationClass::ReversibleStoreMutation;
-        let replayed = reversible
-            && transaction
-                .as_ref()
-                .is_some_and(|tx| !tx.step_needs_apply(idx));
+        let replayed = reversible && transaction.as_ref().is_some_and(|tx| !tx.step_needs_apply(index));
         if reversible && !replayed {
             if let Some(tx) = transaction.as_mut() {
-                if let Err(message) = tx.mark_applying(idx) {
-                    let cache_path = engine.config.cache_path.clone();
-                    let combined = tx
-                        .rollback(message.clone(), |op| {
-                            rollback_journal_operation(&cache_path, op)
-                        })
-                        .err()
-                        .map(|err| err.to_string())
-                        .unwrap_or(message);
-                    return finalize_codemode_result(
-                        CodeModeResult::error_with_kind("transaction", combined, idx, false),
-                        "json",
-                        plan,
-                        started_ms,
-                        &options,
-                        limits,
-                        executed,
+                if let Err(message) = tx.mark_applying(index) {
+                    let message = rollback_tx_on_error(tx, message, &engine.config.cache_path);
+                    return finish(
+                        CodeModeResult::error_with_kind("transaction", message, index, false),
+                        progress.steps,
                     );
                 }
             }
         }
+        progress.ops = index + 1;
         let outcome = if replayed {
             OpOutcome::from_catalog(json!({
                 "idempotent_replay": true,
-                "idempotency_key": transaction
-                    .as_ref()
-                    .and_then(|tx| tx.journal().operations.get(idx))
-                    .map(|op| op.idempotency_key.clone()),
+                "idempotency_key": transaction.as_ref()
+                    .and_then(|tx| tx.journal().operations.get(index))
+                    .map(|operation| operation.idempotency_key.clone()),
             }))
         } else {
-            match dispatch(&engine, &work_root, &call, &scope) {
+            match dispatch(&engine, &work_root, &call, &progress.scope) {
                 Ok(outcome) => outcome,
-                Err(mut err) => {
-                    if let Some(extra) = err.telemetry.extra.as_mut().and_then(Value::as_object_mut)
-                    {
-                        extra.insert("operations".to_string(), json!(idx + 1));
-                    }
-                    err.telemetry.operations = idx + 1;
-                    err.telemetry.logical_ops = idx + 1;
+                Err(mut error) => {
+                    telemetry_insert(&mut error, "operations", json!(progress.ops));
+                    error.telemetry.operations = progress.ops;
+                    error.telemetry.logical_ops = progress.ops;
                     if let Some(tx) = transaction.as_mut() {
-                        let original = err
-                            .error
-                            .as_ref()
+                        let original = error.error.as_ref()
                             .map(|detail| detail.message.clone())
                             .unwrap_or_else(|| "operation failed".to_string());
-                        let cache_path = engine.config.cache_path.clone();
-                        if let Err(combined) =
-                            tx.rollback(original, |op| rollback_journal_operation(&cache_path, op))
-                        {
-                            if let Some(detail) = err.error.as_mut() {
+                        if let Err(combined) = tx.rollback(original, |operation| {
+                            rollback_journal_operation(&engine.config.cache_path, operation)
+                        }) {
+                            if let Some(detail) = error.error.as_mut() {
                                 detail.message = combined.to_string();
                             }
                         }
                     }
-                    return finalize_codemode_result(
-                        *err, "json", plan, started_ms, &options, limits, executed,
-                    );
+                    return finish(*error, progress.steps);
                 }
             }
         };
         if reversible && !replayed {
             if let Some(tx) = transaction.as_mut() {
-                let postcondition = tx
-                    .journal()
-                    .operations
-                    .get(idx)
-                    .and_then(|op| op.target.as_deref())
-                    .map(Path::new)
-                    .map(current_digest)
-                    .transpose()
-                    .map_err(|err| format!("read postcondition: {err}"));
+                let postcondition = tx.journal().operations.get(index)
+                    .and_then(|operation| operation.target.as_deref())
+                    .map(Path::new).map(current_digest).transpose();
                 let postcondition = match postcondition {
                     Ok(value) => value.flatten(),
-                    Err(message) => {
-                        let cache_path = engine.config.cache_path.clone();
-                        let combined = tx
-                            .rollback(message.clone(), |op| {
-                                rollback_journal_operation(&cache_path, op)
-                            })
-                            .err()
-                            .map(|err| err.to_string())
-                            .unwrap_or(message);
-                        return finalize_codemode_result(
+                    Err(error) => {
+                        let message = rollback_tx_on_error(
+                            tx, format!("read postcondition: {error}"), &engine.config.cache_path,
+                        );
+                        return finish(
                             CodeModeResult::error_with_kind(
-                                "transaction",
-                                combined,
-                                idx + 1,
-                                false,
+                                "transaction", message, index + 1, false,
                             ),
-                            "json",
-                            plan,
-                            started_ms,
-                            &options,
-                            limits,
-                            executed,
+                            progress.steps,
                         );
                     }
                 };
-                let compensation_refs = refs_from_value(outcome.as_value());
-                if let Err(message) = tx.mark_applied(idx, postcondition, compensation_refs) {
-                    let cache_path = engine.config.cache_path.clone();
-                    let combined = tx
-                        .rollback(message.clone(), |op| {
-                            rollback_journal_operation(&cache_path, op)
-                        })
-                        .err()
-                        .map(|err| err.to_string())
-                        .unwrap_or(message);
-                    return finalize_codemode_result(
-                        CodeModeResult::error_with_kind("transaction", combined, idx + 1, false),
-                        "json",
-                        plan,
-                        started_ms,
-                        &options,
-                        limits,
-                        executed,
+                if let Err(message) = tx.mark_applied(
+                    index, postcondition, refs_from_value(outcome.as_value()),
+                ) {
+                    let message = rollback_tx_on_error(tx, message, &engine.config.cache_path);
+                    return finish(
+                        CodeModeResult::error_with_kind(
+                            "transaction", message, index + 1, false,
+                        ),
+                        progress.steps,
                     );
                 }
             }
         }
-        let refs = refs_from_value(outcome.as_value());
-        executed.push(ExecutionStep {
-            id: id.clone(),
-            method,
-            status: "completed".to_string(),
-            refs,
-        });
-        record_outcome(
-            &outcome,
-            &mut all_refs,
-            &mut total_visible,
-            &mut total_raw,
-            &mut total_prevented,
-        );
-        last = outcome.into_value();
-        scope.insert(id, last.clone());
+        progress.record(id.clone(), &call, &outcome);
+        progress.scope.insert(id, outcome.into_value());
     }
 
-    let value = parsed
-        .get("return")
-        .and_then(|return_value| resolve_json_return(return_value, &scope).ok())
+    let last = std::mem::take(&mut progress.last);
+    let value = parsed.get("return")
+        .and_then(|value| resolve_json_return(value, &progress.scope).ok())
         .unwrap_or(last);
-    let vis = count_tokens(&serde_json::to_string(&value).unwrap_or_default());
+    let visible = progress.visible + count_tokens(&serde_json::to_string(&value).unwrap_or_default());
     let mut result = CodeModeResult::completed(
-        value,
-        all_refs,
-        steps_arr.len(),
-        total_visible + vis,
-        total_raw,
+        value, progress.refs, steps.len(), visible, progress.raw,
     );
-    result.telemetry.prevented_read_bytes = total_prevented;
-    if let Some(extra) = result
-        .telemetry
-        .extra
-        .as_mut()
-        .and_then(Value::as_object_mut)
-    {
-        extra.insert(
-            "parallel_groups".to_string(),
-            json!(count_parallel_groups(steps_arr)),
-        );
-        extra.insert("prevented_read_bytes".to_string(), json!(total_prevented));
+    result.telemetry.prevented_read_bytes = progress.prevented;
+    let parallel_groups = count_parallel_groups(steps);
+    telemetry_insert(&mut result, "parallel_groups", json!(parallel_groups));
+    telemetry_insert(&mut result, "prevented_read_bytes", json!(progress.prevented));
+    result.telemetry.parallel_groups = Some(parallel_groups);
+    result.telemetry.physical_ops = estimate_physical_ops(steps);
+    if let Err(message) = finish_lowered_transaction(&mut result, transaction, downgrade.as_deref()) {
+        result = CodeModeResult::error_with_kind("transaction", message, steps.len(), false);
     }
-    result.telemetry.parallel_groups = Some(count_parallel_groups(steps_arr));
-    result.telemetry.physical_ops = estimate_physical_ops(steps_arr);
-    if let Some(reason) = transaction_downgrade {
-        if let Some(extra) = result
-            .telemetry
-            .extra
-            .as_mut()
-            .and_then(Value::as_object_mut)
-        {
-            extra.insert("transaction_atomic".to_string(), json!(false));
-            extra.insert("transaction_downgrade".to_string(), json!(reason));
-        }
-    }
-    if let Some(tx) = transaction {
-        match tx.commit() {
-            Ok(journal) => {
-                if let Some(extra) = result
-                    .telemetry
-                    .extra
-                    .as_mut()
-                    .and_then(Value::as_object_mut)
-                {
-                    extra.insert("transaction_atomic".to_string(), json!(true));
-                    extra.insert("plan_journal_version".to_string(), json!(journal.version));
-                    extra.insert("journal_state".to_string(), json!(journal.state));
-                }
-            }
-            Err(message) => {
-                return finalize_codemode_result(
-                    CodeModeResult::error_with_kind("transaction", message, steps_arr.len(), false),
-                    "json",
-                    plan,
-                    started_ms,
-                    &options,
-                    limits,
-                    executed,
-                );
-            }
-        }
-    }
-    finalize_codemode_result(result, "json", plan, started_ms, &options, limits, executed)
+    finish(result, progress.steps)
 }
-
 fn json_args_to_exprs(
     value: Option<&Value>,
     scope: &HashMap<String, Value>,
@@ -2332,7 +1750,6 @@ fn count_parallel_groups(steps: &[Value]) -> usize {
 }
 
 fn estimate_physical_ops(steps: &[Value]) -> usize {
-    // V1 exposes explicit batch methods, so every JSON step is one native dispatch.
     steps.len()
 }
 
@@ -2352,7 +1769,7 @@ fn dispatch(
         .args
         .iter()
         .map(|arg| {
-            resolve_expr(arg, scope).map_err(|message| Box::new(CodeModeResult::error(message, 0)))
+            resolve_expr(arg, scope).map_err(|message| operation_error(message))
         })
         .collect::<Result<Vec<_>, _>>()?;
     dispatch_values(engine, work_root, &call.method, &args)
@@ -2371,23 +1788,13 @@ fn dispatch_values(
         let name = require_str_arg(args, 0, "recipe register requires a name string")?;
         let source = require_str_arg(args, 1, "recipe register requires a source string")?;
         if source.trim().is_empty() {
-            return Err(Box::new(CodeModeResult::error_with_kind(
-                "validation",
-                "recipe source must not be empty",
-                0,
-                false,
-            )));
+            return Err(boxed_error("validation", "recipe source must not be empty"));
         }
         if source.len() > PreviousOutputLru::RECIPE_MAX_SOURCE_BYTES {
-            return Err(Box::new(CodeModeResult::error_with_kind(
-                "recipe_source_too_large",
-                format!(
+            return Err(boxed_error("recipe_source_too_large", format!(
                     "recipe source exceeds {} bytes",
                     PreviousOutputLru::RECIPE_MAX_SOURCE_BYTES
-                ),
-                0,
-                false,
-            )));
+                )));
         }
         let mut registry = previous_output_by_session()
             .lock()
@@ -2395,15 +1802,10 @@ fn dispatch_values(
         let recipes = registry.recipe_session_mut(&engine.config.cache_path);
         if !recipes.contains_key(name) && recipes.len() >= PreviousOutputLru::RECIPE_MAX_PER_SESSION
         {
-            return Err(Box::new(CodeModeResult::error_with_kind(
-                "recipe_registry_full",
-                format!(
+            return Err(boxed_error("recipe_registry_full", format!(
                     "recipe registry is limited to {} recipes per session",
                     PreviousOutputLru::RECIPE_MAX_PER_SESSION
-                ),
-                0,
-                false,
-            )));
+                )));
         }
         recipes.insert(name.to_string(), source.to_string());
         return Ok(OpOutcome::from_catalog(
@@ -2429,42 +1831,18 @@ fn dispatch_values(
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .recipe_source(&engine.config.cache_path, name)
-            .ok_or_else(|| {
-                Box::new(CodeModeResult::error_with_kind(
-                    "recipe_not_found",
-                    format!("recipe not found: {name}"),
-                    0,
-                    false,
-                ))
-            })?;
+            .ok_or_else(|| boxed_error("recipe_not_found", format!("recipe not found: {name}")))?;
         if source.trim().is_empty() {
-            return Err(Box::new(CodeModeResult::error_with_kind(
-                "validation",
-                "recipe source must not be empty",
-                0,
-                false,
-            )));
+            return Err(boxed_error("validation", "recipe source must not be empty"));
         }
         if source.len() > max_code_bytes {
-            return Err(Box::new(CodeModeResult::error_with_kind(
-                "validation",
-                format!("recipe exceeds max_code_bytes {max_code_bytes}"),
-                0,
-                false,
-            )));
+            return Err(boxed_error("validation", format!("recipe exceeds max_code_bytes {max_code_bytes}")));
         }
         if quickjs_plan_requests_mutation(&source) {
-            return Err(Box::new(CodeModeResult::error_with_kind(
-                "sandbox",
-                "sandbox: mutating binding denied without transaction support",
-                0,
-                false,
-            )));
+            return Err(boxed_error("sandbox", "sandbox: mutating binding denied without transaction support"));
         }
         return Ok(OpOutcome::from_catalog(json!({"source": source})));
     }
-    // zero.token.* aliases: the router's namespaced surface addresses this
-    // substrate as zero.token.<op>; both spellings hit the same engine ops.
     match method {
         "zero.read" | "read" | "zero.token.read" => exec_read(engine, work_root, args),
         "zero.find" | "find" | "zero.token.find" => exec_find(engine, work_root, args, false),
@@ -2475,15 +1853,9 @@ fn dispatch_values(
         "zero.job" | "job" | "zero.token.job" => exec_job(engine, args),
         "zero.edit" | "edit" | "zero.token.edit" => exec_edit(engine, work_root, args),
         "zero.token.expand" | "zero.expand" | "expand" => exec_expand(engine, args),
-        "zero.token.expandMany" | "zero.expandMany" | "expandMany" | "expand_many" => {
-            exec_expand_many(engine, args)
-        }
-        "zero.token.compact" | "zero.compact" | "compact" | "zero.ref" | "ref" => {
-            exec_compact(engine, args)
-        }
-        "zero.token.compactMany" | "zero.compactMany" | "compactMany" | "compact_many" => {
-            exec_compact_many(engine, args)
-        }
+        "zero.token.expandMany" | "zero.expandMany" | "expandMany" | "expand_many" => exec_expand_many(engine, args),
+        "zero.token.compact" | "zero.compact" | "compact" | "zero.ref" | "ref" => exec_compact(engine, args),
+        "zero.token.compactMany" | "zero.compactMany" | "compactMany" | "compact_many" => exec_compact_many(engine, args),
         "zero.token.dedupe" | "zero.dedupe" | "dedupe" => exec_dedupe(args),
         "zero.compact_max" | "compact_max" => exec_compact_max(engine, args),
         "zero.ingest" | "ingest" => exec_ingest(engine, args),
@@ -2526,16 +1898,12 @@ fn dispatch_values(
         "codemode.journalRollback" | "journalRollback" | "journal_rollback" => {
             exec_journal_rollback(engine, args)
         }
-        _ => Err(Box::new(CodeModeResult::error(
-            format!(
-                "unknown method: {method}. Use codemode.search() to discover available methods"
-            ),
-            0,
+        _ => Err(operation_error(format!(
+            "unknown method: {method}. Use codemode.search() to discover available methods"
         ))),
     }
 }
 
-// ─── Operation implementations ──────────────────────────────────────────────
 
 fn journal_execution_arg(args: &[Value]) -> Result<&str, Box<CodeModeResult>> {
     require_str_arg(args, 0, "journal command requires an execution_id string")
@@ -2573,12 +1941,7 @@ fn exec_journal_resume(
         ))
     })?;
     if journal.state.is_resolved() {
-        return Err(Box::new(CodeModeResult::error_with_kind(
-            "journal_resume",
-            format!("journal is already resolved as {:?}", journal.state),
-            0,
-            false,
-        )));
+        return Err(boxed_error("journal_resume", format!("journal is already resolved as {:?}", journal.state)));
     }
     Ok(OpOutcome::from_catalog(json!({
         "execution_id": execution_id,
@@ -2661,24 +2024,6 @@ fn tool_response_to_value(resp: &ToolResponse) -> Value {
     obj
 }
 
-/// Counterfactual estimate of bytes that a full read would have cost but
-/// that were avoided because graph queries, search hits, or ref expansion
-/// satisfied the request without reading the whole source.
-///
-/// Methodology (honest, lower-bound):
-/// - For search/glob/tree (graph-guided sufficiency and search precision),
-///   the engine exposes `raw_tokens` (the full underlying output) and
-///   `visible_tokens` (the compact summary actually shown). The difference is
-///   the tokens we did not have to materialize in the response. We convert
-///   those tokens to bytes using the visible text's actual bytes-per-token
-///   ratio when available, otherwise a conservative 4 bytes/token fallback.
-/// - For expand (demand paging), the exact payload bytes are counted as
-///   prevented because the content was recovered from the cache/ref store
-///   instead of re-reading the source file.
-///
-/// This is a counterfactual estimate: it assumes the agent would otherwise
-/// have requested the full underlying content, and it does not include
-/// unread files that produced no matches.
 fn estimate_prevented_read_bytes(resp: &ToolResponse) -> usize {
     let accounting = match &resp.accounting {
         Some(acc) => acc,
@@ -2750,18 +2095,6 @@ impl OpOutcome {
         self
     }
 
-    fn visible_tokens(&self) -> usize {
-        result_visible_tokens(&self.value)
-    }
-
-    fn raw_tokens(&self) -> usize {
-        result_raw_tokens(&self.value)
-    }
-
-    fn prevented_read_bytes(&self) -> usize {
-        self.prevented_read_bytes
-    }
-
     fn with_prevented_read_bytes(mut self, bytes: usize) -> Self {
         self.prevented_read_bytes = bytes;
         self
@@ -2776,9 +2109,9 @@ fn record_outcome(
     total_prevented_read_bytes: &mut usize,
 ) {
     collect_refs(&outcome.value, all_refs);
-    *total_visible += outcome.visible_tokens();
-    *total_raw += outcome.raw_tokens();
-    *total_prevented_read_bytes += outcome.prevented_read_bytes();
+    *total_visible += result_visible_tokens(&outcome.value);
+    *total_raw += result_raw_tokens(&outcome.value);
+    *total_prevented_read_bytes += outcome.prevented_read_bytes;
 }
 
 struct Opts<'a>(Option<&'a serde_json::Map<String, Value>>);
@@ -2814,7 +2147,14 @@ fn require_str_arg<'a>(
 ) -> Result<&'a str, Box<CodeModeResult>> {
     args.get(index)
         .and_then(|value| value.as_str())
-        .ok_or_else(|| Box::new(CodeModeResult::error(message.to_string(), 0)))
+        .ok_or_else(|| operation_error(message.to_string()))
+}
+
+fn require_array_arg<'a>(
+    args: &'a [Value], index: usize, message: &str,
+) -> Result<&'a [Value], Box<CodeModeResult>> {
+    args.get(index).and_then(Value::as_array).map(Vec::as_slice)
+        .ok_or_else(|| operation_error(message.to_string()))
 }
 
 /// Collect path args, joining relative entries to `work_root` (wqw.5).
@@ -2844,12 +2184,12 @@ fn require_paths_from_arg(
                 .filter_map(|value| value.as_str().map(PathBuf::from))
                 .collect();
             if paths.is_empty() {
-                Err(Box::new(CodeModeResult::error(message.to_string(), 0)))
+                Err(operation_error(message.to_string()))
             } else {
                 Ok(paths)
             }
         }
-        _ => Err(Box::new(CodeModeResult::error(message.to_string(), 0))),
+        _ => Err(operation_error(message.to_string())),
     }
 }
 
@@ -2911,24 +2251,14 @@ fn exec_read(
             .unwrap_or("");
         // wqw.5: outside allowlist is a hard plan error (clear deny), not a soft capsule.
         if code == "path_not_allowed" || code == "path_outside_allowed_roots" {
-            return Err(Box::new(CodeModeResult::error_with_kind(
-                "path_not_allowed",
-                message,
-                0,
-                false,
-            )));
+            return Err(boxed_error("path_not_allowed", message));
         }
         let lower = message.to_ascii_lowercase();
         if lower.contains("__zerostack_missing_target__")
             || lower.contains("not found")
             || lower.contains("no such")
         {
-            return Err(Box::new(CodeModeResult::error_with_kind(
-                "substrate",
-                message,
-                0,
-                false,
-            )));
+            return Err(boxed_error("substrate", message));
         }
     }
     Ok(OpOutcome::from_tool_response(&resp))
@@ -3043,7 +2373,7 @@ fn exec_shell(
         return engine
             .shell_background(command, cwd.as_deref(), timeout)
             .map(OpOutcome::from_catalog)
-            .map_err(|message| Box::new(CodeModeResult::error(message, 0)));
+            .map_err(|message| operation_error(message));
     }
 
     let resp = engine.shell(
@@ -3075,7 +2405,7 @@ fn exec_job(engine: &TokenZeroEngine, args: &[Value]) -> Result<OpOutcome, Box<C
     engine
         .shell_job(id)
         .map(OpOutcome::from_catalog)
-        .map_err(|message| Box::new(CodeModeResult::error(message, 0)))
+        .map_err(|message| operation_error(message))
 }
 pub(crate) fn exec_edit(
     engine: &TokenZeroEngine,
@@ -3087,36 +2417,23 @@ pub(crate) fn exec_edit(
         0,
         "zero.edit requires a path string as first argument",
     )?);
-    let edits_val = match args.get(1) {
-        Some(Value::Array(arr)) => arr,
-        _ => {
-            return Err(Box::new(CodeModeResult::error(
-                "zero.edit requires an array of {find, replace} hunks as second argument",
-                0,
-            )));
-        }
-    };
+    let edits_val = require_array_arg(
+        args, 1, "zero.edit requires an array of {find, replace} hunks as second argument",
+    )?;
     let mut edits = Vec::with_capacity(edits_val.len());
     for (idx, value) in edits_val.iter().enumerate() {
         let hunk: EditHunk = serde_json::from_value(value.clone()).map_err(|err| {
-            Box::new(CodeModeResult::error(
-                format!("zero.edit: invalid hunk at index {idx}: {err}"),
-                0,
-            ))
+            operation_error(format!("zero.edit: invalid hunk at index {idx}: {err}"))
         })?;
         edits.push(hunk);
     }
     if edits.is_empty() {
-        return Err(Box::new(CodeModeResult::error(
-            "zero.edit: no edit hunks provided",
-            0,
-        )));
+        return Err(operation_error("zero.edit: no edit hunks provided"));
     }
     let opts = Opts::from_arg(args, 2);
     let dry_run = opts.bool("dry_run").unwrap_or(false);
     let create = opts.bool("create").unwrap_or(false);
 
-    // Resolve relative edit paths against the execute root (same as read).
     let path = resolve_paths_against_work_root(vec![path], work_root)
         .into_iter()
         .next()
@@ -3163,14 +2480,11 @@ pub(crate) fn exec_edit(
 
 fn exec_expand(engine: &TokenZeroEngine, args: &[Value]) -> Result<OpOutcome, Box<CodeModeResult>> {
     let params = ExpandParams::from_codemode_args(args)
-        .map_err(|message| Box::new(CodeModeResult::error(message, 0)))?;
+        .map_err(|message| operation_error(message))?;
     if !tokenzero_recovery::is_expandable_ref(&params.ref_id) {
-        return Err(Box::new(CodeModeResult::error(
-            format!(
-                "expand takes a tz:// fz:// gz:// ref; to read a file use zero.fs.compound('read',{{path}}) -- got: {}",
-                params.ref_id
-            ),
-            0,
+        return Err(operation_error(format!(
+            "expand takes a tz:// fz:// gz:// ref; to read a file use zero.fs.compound('read',{{path}}) -- got: {}",
+            params.ref_id
         )));
     }
     // Soft capsule on expand miss/error: plan continues with status in value.
@@ -3197,27 +2511,19 @@ fn exec_expand_many(
     engine: &TokenZeroEngine,
     args: &[Value],
 ) -> Result<OpOutcome, Box<CodeModeResult>> {
-    let items = match args.first() {
-        Some(Value::Array(items)) => items,
-        _ => {
-            return Err(Box::new(CodeModeResult::error(
-                "zero.token.expandMany requires an array of tz://, fz://, or gz:// refs or item objects",
-                0,
-            )));
-        }
-    };
+    let items = require_array_arg(
+        args, 0,
+        "zero.token.expandMany requires an array of tz://, fz://, or gz:// refs or item objects",
+    )?;
     let mut results = Vec::with_capacity(items.len());
     let mut prevented = 0usize;
     for item in items {
         let params = ExpandParams::from_expand_many_item(item)
-            .map_err(|message| Box::new(CodeModeResult::error(message, 0)))?;
+            .map_err(|message| operation_error(message))?;
         if !tokenzero_recovery::is_expandable_ref(&params.ref_id) {
-            return Err(Box::new(CodeModeResult::error(
-                format!(
-                    "expandMany takes a tz:// fz:// gz:// ref; to read a file use zero.fs.compound('read',{{path}}) -- got: {}",
-                    params.ref_id
-                ),
-                0,
+            return Err(operation_error(format!(
+                "expandMany takes a tz:// fz:// gz:// ref; to read a file use zero.fs.compound('read',{{path}}) -- got: {}",
+                params.ref_id
             )));
         }
         let resp = engine.expand_with_params(params);
@@ -3246,18 +2552,12 @@ fn exec_compact_many(
     engine: &TokenZeroEngine,
     args: &[Value],
 ) -> Result<OpOutcome, Box<CodeModeResult>> {
-    let items = match args.first() {
-        Some(Value::Array(items)) => items.clone(),
-        _ => {
-            return Err(Box::new(CodeModeResult::error(
-                "zero.token.compactMany requires an array of payloads",
-                0,
-            )));
-        }
-    };
+    let items = require_array_arg(
+        args, 0, "zero.token.compactMany requires an array of payloads",
+    )?;
     let mut results = Vec::with_capacity(items.len());
     let mut refs = Vec::new();
-    for item in items {
+    for item in items.iter().cloned() {
         let outcome = exec_compact_inner(engine, &[item], false)?;
         collect_refs(outcome.as_value(), &mut refs);
         results.push(outcome.into_value());
@@ -3270,15 +2570,7 @@ fn exec_compact_many(
 }
 
 fn exec_dedupe(args: &[Value]) -> Result<OpOutcome, Box<CodeModeResult>> {
-    let items = match args.first() {
-        Some(Value::Array(items)) => items,
-        _ => {
-            return Err(Box::new(CodeModeResult::error(
-                "zero.token.dedupe requires an array",
-                0,
-            )));
-        }
-    };
+    let items = require_array_arg(args, 0, "zero.token.dedupe requires an array")?;
     let mut seen = std::collections::BTreeSet::new();
     let mut unique = Vec::new();
     for item in items {
@@ -3309,21 +2601,16 @@ fn exec_compact_inner(
         Some(Value::String(s)) => s.clone(),
         Some(other) => serde_json::to_string(other).unwrap_or_default(),
         None => {
-            return Err(Box::new(CodeModeResult::error(
-                "zero.token.compact/zero.compact requires data as first argument",
-                0,
-            )));
+            return Err(operation_error("zero.token.compact/zero.compact requires data as first argument"));
         }
     };
     let content_type = detect_content_type(&data, None);
     let raw_tokens = count_tokens(&data);
-    // Store for recovery first
     let mut store = tokenzero_recovery::RecoveryStore::new(Some(engine.config.cache_path.clone()));
     let stored = store
         .store_payload(&data, content_type, None, None, None)
         .ok();
     let recovery_ref = stored.as_ref().map(|s| s.blob_ref.as_str());
-    // Use content-aware compression
     let capsule = tokenzero_core::make_capsule_content_aware(
         &data,
         raw_tokens,
@@ -3440,10 +2727,7 @@ fn exec_rewrite(args: &[Value]) -> Result<OpOutcome, Box<CodeModeResult>> {
     let opts = Opts::from_arg(args, 1);
     let mode = opts.str("mode").unwrap_or("safe");
     let value = serde_json::to_value(rewrite_command(command, mode, true)).map_err(|err| {
-        Box::new(CodeModeResult::error(
-            format!("zero.rewrite failed: {err}"),
-            0,
-        ))
+        operation_error(format!("zero.rewrite failed: {err}"))
     })?;
     Ok(OpOutcome::from_catalog(value))
 }
@@ -3458,36 +2742,23 @@ fn exec_batch(engine: &TokenZeroEngine, args: &[Value]) -> Result<OpOutcome, Box
     let ops = match args.first() {
         Some(Value::Array(items)) => items.clone(),
         Some(Value::String(text)) => serde_json::from_str(text).map_err(|err| {
-            Box::new(CodeModeResult::error(
-                format!("zero.batch ops is not valid JSON: {err}"),
-                0,
-            ))
+            operation_error(format!("zero.batch ops is not valid JSON: {err}"))
         })?,
         _ => {
-            return Err(Box::new(CodeModeResult::error(
-                "zero.batch requires an array of {tool, args} objects as first argument",
-                0,
-            )));
+            return Err(operation_error("zero.batch requires an array of {tool, args} objects as first argument"));
         }
     };
     if ops.is_empty() {
-        return Err(Box::new(CodeModeResult::error(
-            "zero.batch requires at least one op",
-            0,
-        )));
+        return Err(operation_error("zero.batch requires at least one op"));
     }
     let wrapped = json!({"ops": ops, "mode": "auto"});
     match crate::tools::batch_response(engine, &wrapped) {
         Ok(resp) => Ok(OpOutcome::from_tool_response(&resp)),
-        Err(error) => Err(Box::new(CodeModeResult::error(error.message_text(), 0))),
+        Err(error) => Err(operation_error(error.message_text())),
     }
 }
 
-// ─── Composition built-ins ──────────────────────────────────────────────────
 
-/// Execute a sequence of operations, threading each result into `_prev`.
-/// Input: array of {method: string, args?: array} objects.
-/// Returns: array of operation results in order.
 fn exec_pipe(
     engine: &TokenZeroEngine,
     work_root: &Path,
@@ -3496,33 +2767,21 @@ fn exec_pipe(
     let steps = match args.first() {
         Some(Value::Array(items)) => items.clone(),
         Some(Value::String(text)) => serde_json::from_str(text).map_err(|err| {
-            Box::new(CodeModeResult::error(
-                format!("zero.pipe: steps is not valid JSON array: {err}"),
-                0,
-            ))
+            operation_error(format!("zero.pipe: steps is not valid JSON array: {err}"))
         })?,
         _ => {
-            return Err(Box::new(CodeModeResult::error(
-                "zero.pipe requires an array of {method, args} steps",
-                0,
-            )));
+            return Err(operation_error("zero.pipe requires an array of {method, args} steps"));
         }
     };
     if steps.is_empty() {
-        return Err(Box::new(CodeModeResult::error(
-            "zero.pipe requires at least one step",
-            0,
-        )));
+        return Err(operation_error("zero.pipe requires at least one step"));
     }
     let mut results: Vec<Value> = Vec::with_capacity(steps.len());
     let mut pipe_scope: HashMap<String, Value> = HashMap::new();
     let mut prevented = 0usize;
     for (idx, step) in steps.iter().enumerate() {
         let method = step.get("method").and_then(|v| v.as_str()).ok_or_else(|| {
-            Box::new(CodeModeResult::error(
-                format!("zero.pipe: step {idx} missing 'method' string"),
-                0,
-            ))
+            operation_error(format!("zero.pipe: step {idx} missing 'method' string"))
         })?;
         let step_args: Vec<Expr> = match step.get("args") {
             Some(Value::Array(arr)) => arr
@@ -3540,7 +2799,7 @@ fn exec_pipe(
             args: step_args,
         };
         let outcome = dispatch(engine, work_root, &call, &pipe_scope)?;
-        prevented = prevented.saturating_add(outcome.prevented_read_bytes());
+        prevented = prevented.saturating_add(outcome.prevented_read_bytes);
         let val = outcome.into_value();
         pipe_scope.insert("_prev".to_string(), val.clone());
         pipe_scope.insert(format!("_step{idx}"), val.clone());
@@ -3580,20 +2839,12 @@ fn exec_pipe(
     .with_prevented_read_bytes(prevented))
 }
 
-/// Extract specific keys from an object value.
-/// Args: (value_or_var, keys_array) or (value_or_var, "key1", "key2", ...)
 fn exec_pick(args: &[Value]) -> Result<OpOutcome, Box<CodeModeResult>> {
     let source = args.first().ok_or_else(|| {
-        Box::new(CodeModeResult::error(
-            "zero.pick requires a source object as first argument",
-            0,
-        ))
+        operation_error("zero.pick requires a source object as first argument")
     })?;
     let obj = source.as_object().ok_or_else(|| {
-        Box::new(CodeModeResult::error(
-            "zero.pick: first argument must be an object",
-            0,
-        ))
+        operation_error("zero.pick: first argument must be an object")
     })?;
     let keys: Vec<&str> = match args.get(1) {
         Some(Value::Array(arr)) => arr.iter().filter_map(|v| v.as_str()).collect(),
@@ -3607,10 +2858,7 @@ fn exec_pick(args: &[Value]) -> Result<OpOutcome, Box<CodeModeResult>> {
             ks
         }
         _ => {
-            return Err(Box::new(CodeModeResult::error(
-                "zero.pick: second argument must be an array of keys or key strings",
-                0,
-            )));
+            return Err(operation_error("zero.pick: second argument must be an array of keys or key strings"));
         }
     };
     let picked: serde_json::Map<String, Value> = keys
@@ -3620,24 +2868,16 @@ fn exec_pick(args: &[Value]) -> Result<OpOutcome, Box<CodeModeResult>> {
     Ok(OpOutcome::from_catalog(Value::Object(picked)))
 }
 
-/// Filter lines in a text value by a substring pattern.
-/// Args: (value_with_text_field, pattern) or (string_value, pattern)
 fn exec_filter_lines(args: &[Value]) -> Result<OpOutcome, Box<CodeModeResult>> {
     let source = args.first().ok_or_else(|| {
-        Box::new(CodeModeResult::error(
-            "zero.filter_lines requires a source as first argument",
-            0,
-        ))
+        operation_error("zero.filter_lines requires a source as first argument")
     })?;
     let text = source
         .as_str()
         .or_else(|| source.get("text").and_then(|v| v.as_str()))
         .unwrap_or("");
     let pattern = args.get(1).and_then(|v| v.as_str()).ok_or_else(|| {
-        Box::new(CodeModeResult::error(
-            "zero.filter_lines requires a pattern string as second argument",
-            0,
-        ))
+        operation_error("zero.filter_lines requires a pattern string as second argument")
     })?;
     let filtered: Vec<&str> = text.lines().filter(|line| line.contains(pattern)).collect();
     Ok(OpOutcome::from_catalog(json!({
@@ -3649,10 +2889,7 @@ fn exec_filter_lines(args: &[Value]) -> Result<OpOutcome, Box<CodeModeResult>> {
 
 fn exec_count(args: &[Value]) -> Result<OpOutcome, Box<CodeModeResult>> {
     let value = args.first().ok_or_else(|| {
-        Box::new(CodeModeResult::error(
-            "zero.count requires a value as first argument",
-            0,
-        ))
+        operation_error("zero.count requires a value as first argument")
     })?;
     let count = if let Some(items) = value.as_array() {
         items.len()
@@ -3666,10 +2903,7 @@ fn exec_count(args: &[Value]) -> Result<OpOutcome, Box<CodeModeResult>> {
 
 fn exec_first(args: &[Value]) -> Result<OpOutcome, Box<CodeModeResult>> {
     let value = args.first().ok_or_else(|| {
-        Box::new(CodeModeResult::error(
-            "zero.first requires a value as first argument",
-            0,
-        ))
+        operation_error("zero.first requires a value as first argument")
     })?;
     let n = args.get(1).and_then(Value::as_u64).unwrap_or(1).max(1) as usize;
     if let Some(items) = value.as_array() {
@@ -3736,10 +2970,7 @@ fn exec_count_tokens(args: &[Value]) -> Result<OpOutcome, Box<CodeModeResult>> {
         Some(Value::String(s)) => s.clone(),
         Some(other) => serde_json::to_string(other).unwrap_or_default(),
         None => {
-            return Err(Box::new(CodeModeResult::error(
-                "zero.count_tokens requires data as first argument",
-                0,
-            )));
+            return Err(operation_error("zero.count_tokens requires data as first argument"));
         }
     };
     let tokens = count_tokens(&text);
@@ -3751,17 +2982,7 @@ fn exec_count_tokens(args: &[Value]) -> Result<OpOutcome, Box<CodeModeResult>> {
 }
 
 fn exec_assert(args: &[Value]) -> Result<OpOutcome, Box<CodeModeResult>> {
-    let condition = args.first().and_then(|v| v.as_bool()).unwrap_or_else(|| {
-        // Truthy: non-null, non-false, non-empty-string, non-zero
-        match args.first() {
-            Some(Value::Null) | None => false,
-            Some(Value::Bool(b)) => *b,
-            Some(Value::String(s)) => !s.is_empty(),
-            Some(Value::Number(n)) => n.as_f64().unwrap_or(0.0) != 0.0,
-            Some(Value::Array(a)) => !a.is_empty(),
-            Some(Value::Object(o)) => !o.is_empty(),
-        }
-    });
+    let condition = args.first().is_some_and(value_truthy);
     let message = args
         .get(1)
         .and_then(|v| v.as_str())
@@ -3769,11 +2990,10 @@ fn exec_assert(args: &[Value]) -> Result<OpOutcome, Box<CodeModeResult>> {
     if condition {
         Ok(OpOutcome::from_catalog(json!({ "ok": true })))
     } else {
-        Err(Box::new(CodeModeResult::error(message.to_string(), 0)))
+        Err(operation_error(message.to_string()))
     }
 }
 
-// ─── Utilities ──────────────────────────────────────────────────────────────
 
 fn collect_refs(value: &Value, refs: &mut Vec<String>) {
     if let Some(r) = value.get("ref").and_then(|v| v.as_str()) {

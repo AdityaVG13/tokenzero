@@ -1,144 +1,120 @@
-use assert_cmd::prelude::*;
+mod common;
+use common::*;
+
 use serde_json::{Value, json};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use tempfile::tempdir;
 
 const GOLDEN_RELEASE_CANDIDATE_ID: &str = "golden-test";
 
+
+fn golden_tokenzero_with_rc(args: &[&str], dir: &Path) -> std::process::Output {
+    assert_success(
+        tokenzero_cmd()
+            .current_dir(dir)
+            .env("TOKENZERO_RELEASE_CANDIDATE_ID", GOLDEN_RELEASE_CANDIDATE_ID)
+            .args(args)
+            .output()
+            .unwrap(),
+        &format!("{args:?}"),
+    )
+}
+
+fn assert_stdout_and_file_golden(stdout: &[u8], file: &Path, dir: &Path, golden: &str) {
+    let actual = canonical_json(stdout, dir);
+    let written = canonical_json(&std::fs::read(file).unwrap(), dir);
+    assert_eq!(actual, written);
+    assert_golden(golden, &actual);
+}
+
 #[test]
 fn cli_read_json_envelope_matches_golden() {
-    let dir = tempdir().unwrap();
+    let (dir, cache) = setup_temp_with_cache();
     let file = dir.path().join("sample.txt");
     std::fs::write(&file, "alpha\nbeta\n").unwrap();
-    let cache = dir.path().join("cache.json");
-
-    let output = Command::cargo_bin("tokenzero")
-        .unwrap()
-        .args([
-            "read",
-            file.to_str().unwrap(),
-            "--cache-path",
-            cache.to_str().unwrap(),
-            "--allowed-root",
-            dir.path().to_str().unwrap(),
-            "--json",
-        ])
-        .output()
-        .unwrap();
-
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
+    let output = assert_success(
+        tokenzero_cmd()
+            .args([
+                "read",
+                file.to_str().unwrap(),
+                "--cache-path",
+                cache.to_str().unwrap(),
+                "--allowed-root",
+                dir.path().to_str().unwrap(),
+                "--json",
+            ])
+            .output()
+            .unwrap(),
+        "read golden",
     );
-    let actual = canonical_json(&output.stdout, dir.path());
-    assert_golden("cli/read_json.golden", &actual);
+    assert_golden("cli/read_json.golden", &canonical_json(&output.stdout, dir.path()));
 }
 
 #[test]
 fn cli_find_json_envelope_matches_golden() {
-    let dir = tempdir().unwrap();
-    let file = dir.path().join("sample.txt");
-    std::fs::write(&file, "alpha\nbeta\nalphabet\n").unwrap();
-    let cache = dir.path().join("cache.json");
-
-    let output = Command::cargo_bin("tokenzero")
-        .unwrap()
-        // Pin the search backend so the golden telemetry does not depend on
-        // whether rg is installed on the machine running the suite.
-        .env("TOKENZERO_SEARCH_BACKEND", "internal")
-        // Run from inside the fixture dir and search a RELATIVE target so the
-        // emitted hit paths (and therefore raw_tokens) are byte-identical on
-        // every platform -- absolute temp paths differ in length across OSes
-        // (e.g. macOS /var/folders/... vs Linux /tmp/...), which would skew the
-        // pre-scrub token count the golden pins.
-        .current_dir(dir.path())
-        .args([
-            "find",
-            "alpha",
-            "sample.txt",
-            "--cache-path",
-            cache.to_str().unwrap(),
-            "--allowed-root",
-            dir.path().to_str().unwrap(),
-            "--json",
-        ])
-        .output()
-        .unwrap();
-
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
+    let (dir, cache) = setup_temp_with_cache();
+    std::fs::write(dir.path().join("sample.txt"), "alpha\nbeta\nalphabet\n").unwrap();
+    let output = assert_success(
+        tokenzero_cmd()
+            .env("TOKENZERO_SEARCH_BACKEND", "internal")
+            .current_dir(dir.path())
+            .args([
+                "find",
+                "alpha",
+                "sample.txt",
+                "--cache-path",
+                cache.to_str().unwrap(),
+                "--allowed-root",
+                dir.path().to_str().unwrap(),
+                "--json",
+            ])
+            .output()
+            .unwrap(),
+        "find golden",
     );
-    let actual = canonical_json(&output.stdout, dir.path());
-    assert_golden("cli/find_json.golden", &actual);
+    assert_golden("cli/find_json.golden", &canonical_json(&output.stdout, dir.path()));
 }
 
 #[test]
 fn cli_adapter_approval_template_json_matches_golden() {
     let dir = tempdir().unwrap();
     let output_json = dir.path().join("adapter-approval-template.json");
-
-    let output = Command::cargo_bin("tokenzero")
-        .unwrap()
-        .env(
-            "TOKENZERO_RELEASE_CANDIDATE_ID",
-            GOLDEN_RELEASE_CANDIDATE_ID,
-        )
-        .args([
+    let output = golden_tokenzero_with_rc(
+        &[
             "adapter-approval-template",
             "--output-json",
             output_json.to_str().unwrap(),
             "--json",
-        ])
-        .output()
-        .unwrap();
-
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
+        ],
+        dir.path(),
     );
-    let actual = canonical_json(&output.stdout, dir.path());
-    let written = canonical_json(&std::fs::read(output_json).unwrap(), dir.path());
-    assert_eq!(actual, written);
-    assert_golden("cli/adapter_approval_template_json.golden", &actual);
+    assert_stdout_and_file_golden(
+        &output.stdout,
+        &output_json,
+        dir.path(),
+        "cli/adapter_approval_template_json.golden",
+    );
 }
 
 #[test]
 fn cli_adapter_approval_audit_missing_review_json_matches_golden() {
     let dir = tempdir().unwrap();
     let output_json = dir.path().join("adapter-approval-audit.json");
-
-    let output = Command::cargo_bin("tokenzero")
-        .unwrap()
-        .env(
-            "TOKENZERO_RELEASE_CANDIDATE_ID",
-            GOLDEN_RELEASE_CANDIDATE_ID,
-        )
-        .args([
+    let output = golden_tokenzero_with_rc(
+        &[
             "adapter-approval-audit",
             "--output-json",
             output_json.to_str().unwrap(),
             "--json",
-        ])
-        .output()
-        .unwrap();
-
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
+        ],
+        dir.path(),
     );
-    let actual = canonical_json(&output.stdout, dir.path());
-    let written = canonical_json(&std::fs::read(output_json).unwrap(), dir.path());
-    assert_eq!(actual, written);
-    assert_golden(
+    assert_stdout_and_file_golden(
+        &output.stdout,
+        &output_json,
+        dir.path(),
         "cli/adapter_approval_audit_missing_review_json.golden",
-        &actual,
     );
 }
 
@@ -147,55 +123,39 @@ fn cli_adapter_approval_audit_reviewed_without_execution_json_matches_golden() {
     let dir = tempdir().unwrap();
     let template_json = dir.path().join("adapter-approval-template.json");
     let audit_json = dir.path().join("adapter-approval-audit.json");
-
-    let template_output = Command::cargo_bin("tokenzero")
-        .unwrap()
-        .env(
-            "TOKENZERO_RELEASE_CANDIDATE_ID",
-            GOLDEN_RELEASE_CANDIDATE_ID,
-        )
-        .args([
-            "adapter-approval-template",
-            "--output-json",
-            template_json.to_str().unwrap(),
-            "--json",
-        ])
-        .output()
-        .unwrap();
-    assert!(
-        template_output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&template_output.stderr)
+    assert_success(
+        tokenzero_cmd()
+            .env("TOKENZERO_RELEASE_CANDIDATE_ID", GOLDEN_RELEASE_CANDIDATE_ID)
+            .args([
+                "adapter-approval-template",
+                "--output-json",
+                template_json.to_str().unwrap(),
+                "--json",
+            ])
+            .output()
+            .unwrap(),
+        "template",
     );
-
-    let output = Command::cargo_bin("tokenzero")
-        .unwrap()
-        .env(
-            "TOKENZERO_RELEASE_CANDIDATE_ID",
-            GOLDEN_RELEASE_CANDIDATE_ID,
-        )
-        .args([
-            "adapter-approval-audit",
-            "--approval-file",
-            template_json.to_str().unwrap(),
-            "--output-json",
-            audit_json.to_str().unwrap(),
-            "--json",
-        ])
-        .output()
-        .unwrap();
-
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
+    let output = assert_success(
+        tokenzero_cmd()
+            .env("TOKENZERO_RELEASE_CANDIDATE_ID", GOLDEN_RELEASE_CANDIDATE_ID)
+            .args([
+                "adapter-approval-audit",
+                "--approval-file",
+                template_json.to_str().unwrap(),
+                "--output-json",
+                audit_json.to_str().unwrap(),
+                "--json",
+            ])
+            .output()
+            .unwrap(),
+        "adapter reviewed",
     );
-    let actual = canonical_json(&output.stdout, dir.path());
-    let written = canonical_json(&std::fs::read(audit_json).unwrap(), dir.path());
-    assert_eq!(actual, written);
-    assert_golden(
+    assert_stdout_and_file_golden(
+        &output.stdout,
+        &audit_json,
+        dir.path(),
         "cli/adapter_approval_audit_reviewed_no_execution_json.golden",
-        &actual,
     );
 }
 
@@ -204,32 +164,26 @@ fn cli_completion_audit_json_matches_golden() {
     let dir = tempdir().unwrap();
     write_completion_handoff_fixture(dir.path());
     let output_json = dir.path().join("completion-audit.json");
-
-    let output = Command::cargo_bin("tokenzero")
-        .unwrap()
-        .current_dir(dir.path())
-        .env(
-            "TOKENZERO_RELEASE_CANDIDATE_ID",
-            GOLDEN_RELEASE_CANDIDATE_ID,
-        )
-        .args([
-            "completion-audit",
-            "--output-json",
-            output_json.to_str().unwrap(),
-            "--json",
-        ])
-        .output()
-        .unwrap();
-
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
+    let output = assert_success(
+        tokenzero_cmd()
+            .current_dir(dir.path())
+            .env("TOKENZERO_RELEASE_CANDIDATE_ID", GOLDEN_RELEASE_CANDIDATE_ID)
+            .args([
+                "completion-audit",
+                "--output-json",
+                output_json.to_str().unwrap(),
+                "--json",
+            ])
+            .output()
+            .unwrap(),
+        "completion golden",
     );
-    let actual = canonical_json(&output.stdout, dir.path());
-    let written = canonical_json(&std::fs::read(output_json).unwrap(), dir.path());
-    assert_eq!(actual, written);
-    assert_golden("cli/completion_audit_json.golden", &actual);
+    assert_stdout_and_file_golden(
+        &output.stdout,
+        &output_json,
+        dir.path(),
+        "cli/completion_audit_json.golden",
+    );
 }
 
 #[test]
@@ -239,88 +193,68 @@ fn cli_artifact_handoff_json_matches_golden() {
     let results_dir = dir.path().join("results").join("current");
     let completion_json = results_dir.join("tokenzero_completion_audit.json");
     let handoff_json = dir.path().join("artifact-handoff.json");
-
-    let completion_output = Command::cargo_bin("tokenzero")
-        .unwrap()
-        .current_dir(dir.path())
-        .env(
-            "TOKENZERO_RELEASE_CANDIDATE_ID",
-            GOLDEN_RELEASE_CANDIDATE_ID,
-        )
-        .args([
-            "completion-audit",
-            "--output-json",
-            completion_json.to_str().unwrap(),
-            "--json",
-        ])
-        .output()
-        .unwrap();
-    assert!(
-        completion_output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&completion_output.stderr)
+    assert_success(
+        tokenzero_cmd()
+            .current_dir(dir.path())
+            .env("TOKENZERO_RELEASE_CANDIDATE_ID", GOLDEN_RELEASE_CANDIDATE_ID)
+            .args([
+                "completion-audit",
+                "--output-json",
+                completion_json.to_str().unwrap(),
+                "--json",
+            ])
+            .output()
+            .unwrap(),
+        "completion for handoff",
     );
-
-    let output = Command::cargo_bin("tokenzero")
-        .unwrap()
-        .current_dir(dir.path())
-        .env(
-            "TOKENZERO_RELEASE_CANDIDATE_ID",
-            GOLDEN_RELEASE_CANDIDATE_ID,
-        )
-        .env("PATH", "")
-        .args([
-            "artifact-handoff",
-            "--output-json",
-            handoff_json.to_str().unwrap(),
-            "--json",
-        ])
-        .output()
-        .unwrap();
-
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
+    let output = assert_success(
+        tokenzero_cmd()
+            .current_dir(dir.path())
+            .env("TOKENZERO_RELEASE_CANDIDATE_ID", GOLDEN_RELEASE_CANDIDATE_ID)
+            .env("PATH", "")
+            .args([
+                "artifact-handoff",
+                "--output-json",
+                handoff_json.to_str().unwrap(),
+                "--json",
+            ])
+            .output()
+            .unwrap(),
+        "handoff golden",
     );
-    let actual = canonical_json(&output.stdout, dir.path());
-    let written = canonical_json(&std::fs::read(handoff_json).unwrap(), dir.path());
-    assert_eq!(actual, written);
-    assert_golden("cli/artifact_handoff_json.golden", &actual);
+    assert_stdout_and_file_golden(
+        &output.stdout,
+        &handoff_json,
+        dir.path(),
+        "cli/artifact_handoff_json.golden",
+    );
 }
 
 #[cfg(unix)]
 #[test]
 fn cli_run_failure_json_envelope_matches_golden() {
-    let dir = tempdir().unwrap();
-    let cache = dir.path().join("cache.json");
-
-    let output = Command::cargo_bin("tokenzero")
-        .unwrap()
-        .args([
-            "run",
-            "--json",
-            "--cache-path",
-            cache.to_str().unwrap(),
-            "--allowed-root",
-            dir.path().to_str().unwrap(),
-            "--cwd",
-            dir.path().to_str().unwrap(),
-            "--",
-            "sh",
-            "-c",
-            "printf alpha; printf beta >&2; exit 7",
-        ])
-        .output()
-        .unwrap();
-
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
+    let (dir, cache) = setup_temp_with_cache();
+    let output = assert_success(
+        tokenzero_cmd()
+            .args([
+                "run",
+                "--json",
+                "--cache-path",
+                cache.to_str().unwrap(),
+                "--allowed-root",
+                dir.path().to_str().unwrap(),
+                "--cwd",
+                dir.path().to_str().unwrap(),
+                "--",
+                "sh",
+                "-c",
+                "printf alpha; printf beta >&2; exit 7",
+            ])
+            .output()
+            .unwrap(),
+        "run failure golden",
     );
-    let actual = canonical_json(&output.stdout, dir.path());
-    assert_golden("cli/run_failure_json.golden", &actual);
+    assert_golden("cli/run_failure_json.golden", &canonical_json(&output.stdout, dir.path()));
 }
 
 fn canonical_json(bytes: &[u8], temp_root: &Path) -> String {
@@ -346,7 +280,6 @@ fn scrub_value(value: &mut Value, temp_root: &Path, refs: &mut RefScrubber) {
                 if key == "latency_ms" && value.is_number() {
                     *value = json!("[DYNAMIC_LATENCY_MS]");
                 } else if (key == "from_hwm" || key == "to_hwm") && value.is_number() {
-                    // Session watermarks are machine-global monotonic counters.
                     *value = json!("[DYNAMIC_HWM]");
                 } else {
                     scrub_value(value, temp_root, refs);
@@ -369,19 +302,11 @@ fn scrub_value(value: &mut Value, temp_root: &Path, refs: &mut RefScrubber) {
 fn scrub_temp_path(text: &str, temp_root: &Path) -> String {
     let temp = normalize_path(&temp_root.to_string_lossy());
     let workspace = normalize_path(&workspace_root().to_string_lossy());
-    // The CLI under test reports its own binary path (current_exe), which
-    // moves with CARGO_TARGET_DIR (e.g. target/windows-verify on the Windows
-    // verifier); pin the exact binary path to the default layout first so the
-    // golden stays stable under custom target dirs.
     let current_exe = normalize_path(env!("CARGO_BIN_EXE_tokenzero"));
     normalize_path(text)
         .replace(&current_exe, "[WORKSPACE]/target/debug/tokenzero")
         .replace(&temp, "[TMP]")
         .replace(&workspace, "[WORKSPACE]")
-        // The runtime's own binary (current_exe) carries a `.exe` suffix on
-        // Windows; normalize that workspace target path so the golden (generated
-        // on Unix) is platform-stable. Scoped to the build target path so the
-        // intentional `tokenzero.exe` command literals in the output stay intact.
         .replace("/target/debug/tokenzero.exe", "/target/debug/tokenzero")
         .replace("/target/release/tokenzero.exe", "/target/release/tokenzero")
 }
@@ -399,80 +324,28 @@ fn workspace_root() -> PathBuf {
 }
 
 fn write_completion_handoff_fixture(root: &Path) {
-    let results_dir = root.join("results").join("current");
-    std::fs::create_dir_all(&results_dir).unwrap();
-
+    let results_dir = results_current_dir(root);
     write_source_currency_fixture(&results_dir);
     write_claim_audit_fixture(&results_dir);
     write_os_reach_fixture(&results_dir);
-
     for (file_name, schema_version, release_bound) in [
-        (
-            "tokenzero_adapter_approval_audit.json",
-            "tokenzero.adapter_approval_audit.v1",
-            true,
-        ),
-        (
-            "tokenzero_adapter_approval_file.json",
-            "tokenzero.adapter_approval_file.v1",
-            false,
-        ),
-        (
-            "tokenzero_artifact_handoff.json",
-            "tokenzero.artifact_handoff.v1",
-            true,
-        ),
-        (
-            "tokenzero_bench_competitors_shell_heavy.json",
-            "tokenzero.bench.v1",
-            true,
-        ),
-        (
-            "tokenzero_exact_recovery_audit.json",
-            "tokenzero.exact_recovery_audit.v1",
-            true,
-        ),
-        (
-            "tokenzero_exact_recovery_shell.json",
-            "tokenzero.exact_recovery_shell.v1",
-            false,
-        ),
-        (
-            "tokenzero_false_success_shell.json",
-            "tokenzero.false_success_shell.v1",
-            false,
-        ),
-        (
-            "tokenzero_one_shot_eval.json",
-            "tokenzero.one_shot_eval.v1",
-            true,
-        ),
-        (
-            "tokenzero_os_release_artifact.json",
-            "tokenzero.os_release_artifact.v1",
-            true,
-        ),
-        (
-            "tokenzero_protected_anchor_audit.json",
-            "tokenzero.protected_anchor_audit.v1",
-            false,
-        ),
+        ("tokenzero_adapter_approval_audit.json", "tokenzero.adapter_approval_audit.v1", true),
+        ("tokenzero_adapter_approval_file.json", "tokenzero.adapter_approval_file.v1", false),
+        ("tokenzero_artifact_handoff.json", "tokenzero.artifact_handoff.v1", true),
+        ("tokenzero_bench_competitors_shell_heavy.json", "tokenzero.bench.v1", true),
+        ("tokenzero_exact_recovery_audit.json", "tokenzero.exact_recovery_audit.v1", true),
+        ("tokenzero_exact_recovery_shell.json", "tokenzero.exact_recovery_shell.v1", false),
+        ("tokenzero_false_success_shell.json", "tokenzero.false_success_shell.v1", false),
+        ("tokenzero_one_shot_eval.json", "tokenzero.one_shot_eval.v1", true),
+        ("tokenzero_os_release_artifact.json", "tokenzero.os_release_artifact.v1", true),
+        ("tokenzero_protected_anchor_audit.json", "tokenzero.protected_anchor_audit.v1", false),
         ("tokenzero_reach.json", "tokenzero.reach.v1", false),
         ("rust_mcp_smoke.json", "tokenzero.rust_mcp_churn.v1", false),
-        (
-            "tokenzero_security_privacy_audit.json",
-            "tokenzero.security_privacy_audit.v1",
-            false,
-        ),
-        (
-            "tokenzero_shell_matrix.json",
-            "tokenzero.shell_matrix.v1",
-            false,
-        ),
+        ("tokenzero_security_privacy_audit.json", "tokenzero.security_privacy_audit.v1", false),
+        ("tokenzero_shell_matrix.json", "tokenzero.shell_matrix.v1", false),
     ] {
-        write_schema_fixture(&results_dir, file_name, schema_version, release_bound);
+        write_schema_pretty(&results_dir, file_name, schema_version, release_bound);
     }
-
     let docs_dir = root.join("docs");
     std::fs::create_dir_all(&docs_dir).unwrap();
     std::fs::write(
@@ -488,9 +361,9 @@ fn write_completion_handoff_fixture(root: &Path) {
 }
 
 fn write_source_currency_fixture(results_dir: &Path) {
-    write_json_fixture(
+    write_json_fixture_pretty(
         &results_dir.join("tokenzero_source_currency.json"),
-        json!({
+        &json!({
             "schema_version": "tokenzero.source_currency.v1",
             "release_candidate_id": GOLDEN_RELEASE_CANDIDATE_ID,
             "fresh_for_public_claim": true,
@@ -500,72 +373,69 @@ fn write_source_currency_fixture(results_dir: &Path) {
 }
 
 fn write_claim_audit_fixture(results_dir: &Path) {
-    write_json_fixture(
-        &results_dir.join("tokenzero_claim_audit.json"),
-        json!({
-            "schema_version": "tokenzero.claim_audit.v1",
-            "release_candidate_id": GOLDEN_RELEASE_CANDIDATE_ID,
-            "public_claims_approved": false,
-            "blocked_reasons": ["release approval not granted"],
-            "evidence_gates": [
-                {"id": "source_currency", "pass": true, "reasons": []},
-                {
-                    "id": "benchmark_artifact",
-                    "pass": false,
-                    "reasons": [
-                        "benchmark artifact not approved for publication",
-                        "benchmark competitor rows must be runnable for public claims"
+    write_json_fixture(&results_dir.join("tokenzero_claim_audit.json"), &json!({
+        "schema_version": "tokenzero.claim_audit.v1",
+        "release_candidate_id": GOLDEN_RELEASE_CANDIDATE_ID,
+        "public_claims_approved": false,
+        "blocked_reasons": ["release approval not granted"],
+        "evidence_gates": [
+            {"id": "source_currency", "pass": true, "reasons": []},
+            {
+                "id": "benchmark_artifact",
+                "pass": false,
+                "reasons": [
+                    "benchmark artifact not approved for publication",
+                    "benchmark competitor rows must be runnable for public claims"
+                ]
+            },
+            {
+                "id": "adapter_approval",
+                "pass": false,
+                "reasons": [
+                    "adapter approval artifact does not allow execution",
+                    "adapter approval artifact not approved for public claims"
+                ]
+            },
+            {
+                "id": "os_artifact",
+                "pass": false,
+                "reasons": ["OS artifact set not approved for public claim"]
+            },
+            {
+                "id": "release_candidate",
+                "pass": true,
+                "reasons": [],
+                "details": {
+                    "release_candidate_ids": [GOLDEN_RELEASE_CANDIDATE_ID],
+                    "artifacts": [
+                        {
+                            "artifact_id": "source_artifact",
+                            "artifact_path": "results/current/tokenzero_source_currency.json",
+                            "release_candidate_id": GOLDEN_RELEASE_CANDIDATE_ID,
+                            "schema_version": "tokenzero.source_currency.v1"
+                        },
+                        {
+                            "artifact_id": "adapter_approval_artifact",
+                            "artifact_path": "results/current/tokenzero_adapter_approval_audit.json",
+                            "release_candidate_id": GOLDEN_RELEASE_CANDIDATE_ID,
+                            "schema_version": "tokenzero.adapter_approval_audit.v1"
+                        }
                     ]
-                },
-                {
-                    "id": "adapter_approval",
-                    "pass": false,
-                    "reasons": [
-                        "adapter approval artifact does not allow execution",
-                        "adapter approval artifact not approved for public claims"
-                    ]
-                },
-                {
-                    "id": "os_artifact",
-                    "pass": false,
-                    "reasons": ["OS artifact set not approved for public claim"]
-                },
-                {
-                    "id": "release_candidate",
-                    "pass": true,
-                    "reasons": [],
-                    "details": {
-                        "release_candidate_ids": [GOLDEN_RELEASE_CANDIDATE_ID],
-                        "artifacts": [
-                            {
-                                "artifact_id": "source_artifact",
-                                "artifact_path": "results/current/tokenzero_source_currency.json",
-                                "release_candidate_id": GOLDEN_RELEASE_CANDIDATE_ID,
-                                "schema_version": "tokenzero.source_currency.v1"
-                            },
-                            {
-                                "artifact_id": "adapter_approval_artifact",
-                                "artifact_path": "results/current/tokenzero_adapter_approval_audit.json",
-                                "release_candidate_id": GOLDEN_RELEASE_CANDIDATE_ID,
-                                "schema_version": "tokenzero.adapter_approval_audit.v1"
-                            }
-                        ]
-                    }
-                },
-                {
-                    "id": "release_approval",
-                    "pass": false,
-                    "reasons": ["release approval not granted"]
                 }
-            ]
-        }),
-    );
+            },
+            {
+                "id": "release_approval",
+                "pass": false,
+                "reasons": ["release approval not granted"]
+            }
+        ]
+    }));
 }
 
 fn write_os_reach_fixture(results_dir: &Path) {
-    write_json_fixture(
+    write_json_fixture_pretty(
         &results_dir.join("tokenzero_os_reach_audit.json"),
-        json!({
+        &serde_json::json!({
             "schema_version": "tokenzero.os_reach_audit.v1",
             "release_candidate_id": GOLDEN_RELEASE_CANDIDATE_ID,
             "all_release_oses_run": false,
@@ -580,7 +450,7 @@ fn write_os_reach_fixture(results_dir: &Path) {
     );
 }
 
-fn write_schema_fixture(
+fn write_schema_pretty(
     results_dir: &Path,
     file_name: &str,
     schema_version: &str,
@@ -593,11 +463,7 @@ fn write_schema_fixture(
     if release_bound {
         artifact["release_candidate_id"] = json!(GOLDEN_RELEASE_CANDIDATE_ID);
     }
-    write_json_fixture(&results_dir.join(file_name), artifact);
-}
-
-fn write_json_fixture(path: &Path, value: Value) {
-    std::fs::write(path, serde_json::to_vec_pretty(&value).unwrap()).unwrap();
+    write_json_fixture_pretty(&results_dir.join(file_name), &artifact);
 }
 
 #[derive(Default)]
@@ -612,11 +478,9 @@ impl RefScrubber {
     fn scrub(&mut self, text: &str) -> String {
         let mut output = String::with_capacity(text.len());
         let mut cursor = 0;
-
         while let Some(relative_start) = text[cursor..].find("tz://") {
             let start = cursor + relative_start;
             output.push_str(&text[cursor..start]);
-
             if let Some((end, kind)) = ref_end_and_kind(&text[start..]) {
                 let end = start + end;
                 let original = &text[start..end];
@@ -628,7 +492,6 @@ impl RefScrubber {
                 cursor = start + "tz://".len();
             }
         }
-
         output.push_str(&text[cursor..]);
         output
     }
@@ -637,7 +500,6 @@ impl RefScrubber {
         if let Some(replacement) = self.replacements.get(original) {
             return replacement.clone();
         }
-
         let replacement = match kind {
             RefKind::Blob => {
                 self.blob_count += 1;
@@ -678,26 +540,22 @@ fn ref_end_and_kind(text: &str) -> Option<(usize, RefKind)> {
             }
         }
     }
-
     None
 }
 
 fn assert_golden(relative_path: &str, actual: &str) {
     let golden_path = golden_root().join(relative_path);
-
     if std::env::var_os("UPDATE_GOLDENS").is_some() {
         std::fs::create_dir_all(golden_path.parent().unwrap()).unwrap();
         std::fs::write(&golden_path, actual).unwrap();
         return;
     }
-
     let expected = std::fs::read_to_string(&golden_path).unwrap_or_else(|err| {
         panic!(
             "Golden file missing: {}\n{err}\nRun with UPDATE_GOLDENS=1 cargo test -p tokenzero --test golden_outputs",
             golden_path.display()
         )
     });
-
     if actual != expected {
         let actual_path = golden_path.with_extension("actual");
         std::fs::write(&actual_path, actual).unwrap();
@@ -721,7 +579,6 @@ fn unified_diff(expected: &str, actual: &str) -> String {
     let actual_lines: Vec<_> = actual.lines().collect();
     let mut diff = String::from("--- expected\n+++ actual\n");
     let max_len = expected_lines.len().max(actual_lines.len());
-
     for index in 0..max_len {
         match (expected_lines.get(index), actual_lines.get(index)) {
             (Some(expected), Some(actual)) if expected == actual => {}
@@ -741,6 +598,5 @@ fn unified_diff(expected: &str, actual: &str) -> String {
             (None, None) => {}
         }
     }
-
     diff
 }
