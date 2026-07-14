@@ -19,12 +19,12 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::SystemTime;
 
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use tempfile::TempDir;
 
-use tokenzero_recovery::shared_cas::SharedCas;
 use tokenzero_recovery::RecoveryStore;
+use tokenzero_recovery::shared_cas::SharedCas;
 
 const SCHEMA: &str = "zeroref-conformance-evidence/v1";
 const ZEROREF_VERSION: &str = "v1";
@@ -42,17 +42,17 @@ struct BinaryMeta {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Engine {
-    FsZero,
-    GraphZero,
-    TokenZero,
+    Fs,
+    Graph,
+    Token,
 }
 
 impl Engine {
     fn as_str(&self) -> &'static str {
         match self {
-            Engine::FsZero => "fszero",
-            Engine::GraphZero => "graphzero",
-            Engine::TokenZero => "tokenzero",
+            Engine::Fs => "fszero",
+            Engine::Graph => "graphzero",
+            Engine::Token => "tokenzero",
         }
     }
 }
@@ -262,7 +262,7 @@ fn run_cell(
     let input_path = write_payload(harness.base.path(), payload_name, payload);
 
     let reference = match writer {
-        Engine::FsZero => {
+        Engine::Fs => {
             let put = fixture_put(
                 &harness.fszero,
                 &writer_root,
@@ -271,7 +271,7 @@ fn run_cell(
             );
             put["ref"].as_str().unwrap().to_string()
         }
-        Engine::GraphZero => {
+        Engine::Graph => {
             let put = fixture_put(
                 &harness.graphzero,
                 &writer_root,
@@ -280,7 +280,7 @@ fn run_cell(
             );
             put["ref"].as_str().unwrap().to_string()
         }
-        Engine::TokenZero => {
+        Engine::Token => {
             let (reference, _hash) = tokenzero_put(&harness.shared_cas, payload);
             reference
         }
@@ -292,9 +292,9 @@ fn run_cell(
     let mut notes = String::new();
 
     let consumer_meta = match reader {
-        Engine::FsZero => &harness.fszero,
-        Engine::GraphZero => &harness.graphzero,
-        Engine::TokenZero => &harness.tokenzero,
+        Engine::Fs => &harness.fszero,
+        Engine::Graph => &harness.graphzero,
+        Engine::Token => &harness.tokenzero,
     };
 
     let result = std::panic::catch_unwind(|| {
@@ -305,7 +305,7 @@ fn run_cell(
             payload_name
         ));
         let bytes = match reader {
-            Engine::FsZero => {
+            Engine::Fs => {
                 fixture_expand(
                     &harness.fszero,
                     &reader_root,
@@ -315,7 +315,7 @@ fn run_cell(
                 )
                 .0
             }
-            Engine::GraphZero => {
+            Engine::Graph => {
                 fixture_expand(
                     &harness.graphzero,
                     &reader_root,
@@ -325,7 +325,7 @@ fn run_cell(
                 )
                 .0
             }
-            Engine::TokenZero => tokenzero_expand(&harness.shared_cas, &reference, payload).0,
+            Engine::Token => tokenzero_expand(&harness.shared_cas, &reference, payload).0,
         };
         let hash = sha256_bytes(&bytes);
         assert_eq!(
@@ -398,7 +398,7 @@ fn run_fragment_cell(harness: &Harness, writer: Engine, reader: Engine) -> Vec<V
 
     let input_path = write_payload(harness.base.path(), "fragment_text", bytes);
     let reference = match writer {
-        Engine::FsZero => {
+        Engine::Fs => {
             let put = fixture_put(
                 &harness.fszero,
                 &writer_root,
@@ -407,7 +407,7 @@ fn run_fragment_cell(harness: &Harness, writer: Engine, reader: Engine) -> Vec<V
             );
             put["ref"].as_str().unwrap().to_string()
         }
-        Engine::GraphZero => {
+        Engine::Graph => {
             let put = fixture_put(
                 &harness.graphzero,
                 &writer_root,
@@ -416,7 +416,7 @@ fn run_fragment_cell(harness: &Harness, writer: Engine, reader: Engine) -> Vec<V
             );
             put["ref"].as_str().unwrap().to_string()
         }
-        Engine::TokenZero => {
+        Engine::Token => {
             let (reference, _hash) = tokenzero_put(&harness.shared_cas, bytes);
             reference
         }
@@ -441,7 +441,7 @@ fn run_fragment_cell(harness: &Harness, writer: Engine, reader: Engine) -> Vec<V
         ));
         let result = std::panic::catch_unwind(|| {
             let got = match reader {
-                Engine::FsZero => {
+                Engine::Fs => {
                     fixture_expand(
                         &harness.fszero,
                         &reader_root,
@@ -451,7 +451,7 @@ fn run_fragment_cell(harness: &Harness, writer: Engine, reader: Engine) -> Vec<V
                     )
                     .0
                 }
-                Engine::GraphZero => {
+                Engine::Graph => {
                     fixture_expand(
                         &harness.graphzero,
                         &reader_root,
@@ -461,7 +461,7 @@ fn run_fragment_cell(harness: &Harness, writer: Engine, reader: Engine) -> Vec<V
                     )
                     .0
                 }
-                Engine::TokenZero => {
+                Engine::Token => {
                     let cache_path = harness
                         .shared_cas
                         .join("tokenzero")
@@ -541,7 +541,7 @@ fn run_wrong_store(harness: &Harness) -> Value {
     let out = cmd.output().expect("spawn corrupt expand");
 
     let diag: Value = serde_json::from_slice(&out.stderr).unwrap_or(json!({}));
-    let failed = out.status.success() == false;
+    let failed = !out.status.success();
     json!({
         "test": "corruption-catches-false-positive",
         "reference": reference,
@@ -560,12 +560,12 @@ fn run_concurrent_writes(harness: &Harness) -> Value {
     let bytes = payload.as_bytes();
     let expected_hash = sha256_bytes(bytes);
     let mut handles = Vec::new();
-    for engine in [Engine::FsZero, Engine::GraphZero, Engine::TokenZero] {
+    for engine in [Engine::Fs, Engine::Graph, Engine::Token] {
         let shared_cas = harness.shared_cas.clone();
         let b = bytes.to_vec();
         let h = std::thread::spawn(move || {
             let hash: String = match engine {
-                Engine::FsZero => {
+                Engine::Fs => {
                     let dir = tempfile::tempdir().unwrap();
                     let store = dir.path().join("store");
                     fs::create_dir_all(&store).unwrap();
@@ -593,7 +593,7 @@ fn run_concurrent_writes(harness: &Harness) -> Value {
                     let json: Value = serde_json::from_slice(&put.stdout).unwrap();
                     json["hash"].as_str().unwrap().to_string()
                 }
-                Engine::GraphZero => {
+                Engine::Graph => {
                     let dir = tempfile::tempdir().unwrap();
                     let store = dir.path().join("store");
                     fs::create_dir_all(&store).unwrap();
@@ -621,7 +621,7 @@ fn run_concurrent_writes(harness: &Harness) -> Value {
                     let json: Value = serde_json::from_slice(&put.stdout).unwrap();
                     json["hash"].as_str().unwrap().to_string()
                 }
-                Engine::TokenZero => {
+                Engine::Token => {
                     let cas = SharedCas::new(shared_cas);
                     cas.publish(&b).unwrap()
                 }
@@ -700,8 +700,8 @@ fn zeroref_conformance_matrix() {
     for os in ["macos", "linux", "windows"] {
         let mut cells = Vec::new();
         if OS == os {
-            for writer in [Engine::FsZero, Engine::GraphZero, Engine::TokenZero] {
-                for reader in [Engine::FsZero, Engine::GraphZero, Engine::TokenZero] {
+            for writer in [Engine::Fs, Engine::Graph, Engine::Token] {
+                for reader in [Engine::Fs, Engine::Graph, Engine::Token] {
                     for (payload_name, payload) in payloads() {
                         let cell = run_cell(&harness, writer, reader, payload_name, &payload);
                         cells.push(cell);
@@ -709,8 +709,8 @@ fn zeroref_conformance_matrix() {
                 }
             }
         } else {
-            for writer in [Engine::FsZero, Engine::GraphZero, Engine::TokenZero] {
-                for reader in [Engine::FsZero, Engine::GraphZero, Engine::TokenZero] {
+            for writer in [Engine::Fs, Engine::Graph, Engine::Token] {
+                for reader in [Engine::Fs, Engine::Graph, Engine::Token] {
                     cells.push(json!({
                         "writer": writer.as_str(),
                         "reader": reader.as_str(),
@@ -728,8 +728,8 @@ fn zeroref_conformance_matrix() {
     }
 
     let mut fragment_rows = Vec::new();
-    for writer in [Engine::FsZero, Engine::GraphZero, Engine::TokenZero] {
-        for reader in [Engine::FsZero, Engine::GraphZero, Engine::TokenZero] {
+    for writer in [Engine::Fs, Engine::Graph, Engine::Token] {
+        for reader in [Engine::Fs, Engine::Graph, Engine::Token] {
             fragment_rows.extend(run_fragment_cell(&harness, writer, reader));
         }
     }
@@ -781,11 +781,7 @@ fn zeroref_conformance_matrix() {
         if wrong_store["status"] != "pass" || concurrent["status"] != "pass" {
             ok = false;
         }
-        if ok {
-            "green"
-        } else {
-            "red"
-        }
+        if ok { "green" } else { "red" }
     };
 
     let evidence = json!({
