@@ -742,9 +742,6 @@ pub fn doctor(cache_path: &Path) -> JournalDoctorReport {
 }
 pub fn inspect(cache_path: &Path, execution_id: &str) -> Result<PlanJournal, String> {
     let path = journal_root(cache_path).join(format!("{}.json", safe_execution_id(execution_id)));
-    if !path.exists() {
-        return Err(format!("journal not found: {}", path.display()));
-    }
     read_journal(&path)
 }
 pub fn open_unresolved(
@@ -828,7 +825,13 @@ fn safe_execution_id(value: &str) -> String {
     }
 }
 fn read_journal(path: &Path) -> Result<PlanJournal, String> {
-    let bytes = fs::read(path).map_err(|err| format!("read journal {}: {err}", path.display()))?;
+    let bytes = match fs::read(path) {
+        Ok(bytes) => bytes,
+        Err(err) if err.kind() == io::ErrorKind::NotFound => {
+            return Err(format!("journal not found: {}", path.display()));
+        }
+        Err(err) => return Err(format!("read journal {}: {err}", path.display())),
+    };
     let journal: PlanJournal =
         serde_json::from_slice(&bytes).map_err(|err| format!("parse journal: {err}"))?;
     if journal.version != PLAN_JOURNAL_VERSION {
@@ -1001,6 +1004,20 @@ mod tests {
 
     fn cache(dir: &Path) -> PathBuf {
         dir.join("tokenzero").join("recovery-cache.json")
+    }
+
+    #[test]
+    fn inspect_preserves_non_not_found_io_errors() {
+        let temp = tempdir().unwrap();
+        let cache = cache(temp.path());
+        let execution = "cm://exec/not-a-file";
+        let path = journal_root(&cache)
+            .join(format!("{}.json", safe_execution_id(execution)));
+        fs::create_dir_all(&path).unwrap();
+
+        let error = inspect(&cache, execution).unwrap_err();
+        assert!(error.starts_with("read journal "), "{error}");
+        assert!(!error.starts_with("journal not found:"), "{error}");
     }
 
     #[test]
