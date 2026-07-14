@@ -6,6 +6,7 @@
 //! recovery store in `RecoveryStore` remains available as a separate read tier
 //! for migration.
 
+use fs4::FileExt;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
@@ -197,23 +198,28 @@ impl SharedCas {
     }
 
     /// Enumerate all full-hash objects currently present in the shared CAS.
-    /// Temp files and non-regular files are ignored.
+    /// Temp files, non-regular files, and prefix-directory symlinks are ignored.
+    /// Listing never follows directory symlinks under the CAS root.
     pub fn list_objects(&self) -> Result<Vec<String>, SharedCasError> {
         let mut objects = Vec::new();
         let base = self.root.join("blobs").join("sha256");
-        if !base.is_dir() {
+        if !dir_is_real(&base) {
             return Ok(objects);
         }
         for prefix_entry in fs::read_dir(&base)? {
             let prefix_entry = prefix_entry?;
             let prefix_dir = prefix_entry.path();
-            if !prefix_dir.is_dir() {
+            // Refuse to follow prefix symlinks that could escape the CAS root.
+            if !entry_is_real_dir(&prefix_entry) {
                 continue;
             }
             for entry in fs::read_dir(&prefix_dir)? {
                 let entry = entry?;
                 let path = entry.path();
-                if !path.is_file() {
+                let Ok(ft) = entry.file_type() else {
+                    continue;
+                };
+                if ft.is_symlink() || !ft.is_file() {
                     continue;
                 }
                 let name = entry.file_name();
@@ -224,6 +230,11 @@ impl SharedCas {
                     continue;
                 }
                 if self.validate_hash(name_str).is_ok() {
+                    // Containment: reconstructed object path must stay under CAS root
+                    // and must not be a symlink.
+                    if !self.path_is_contained_object(&path, name_str) {
+                        continue;
+                    }
                     objects.push(name_str.to_string());
                 }
             }
@@ -232,10 +243,25 @@ impl SharedCas {
     }
 
     /// Remove a full-hash object from the shared CAS. Idempotent: a missing
-    /// object is not an error.
+    /// object is not an error. Refuses to follow prefix symlinks or delete
+    /// paths that resolve outside the CAS root.
     pub fn remove_object(&self, full_hash: &str) -> Result<(), SharedCasError> {
         self.validate_hash(full_hash)?;
         let path = self.object_path(full_hash);
+        // Structural containment of the reconstructed path (no symlink parents).
+        if !self.object_path_chain_is_safe(full_hash) {
+            return Err(SharedCasError::Policy);
+        }
+        // Use symlink_metadata so we never follow a final-component symlink.
+        match fs::symlink_metadata(&path) {
+            Ok(meta) => {
+                if meta.file_type().is_symlink() || !meta.file_type().is_file() {
+                    return Err(SharedCasError::Policy);
+                }
+            }
+            Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(()),
+            Err(err) => return Err(err.into()),
+        }
         match fs::remove_file(&path) {
             Ok(()) => Ok(()),
             Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(()),
@@ -276,6 +302,58 @@ impl SharedCas {
             .join("sha256")
             .join(prefix)
             .join(full_hash)
+    }
+
+    /// True when `path` is the canonical object location for `full_hash` under
+    /// this CAS root, no path component is a symlink, and the path does not
+    /// escape the store root. Requires the final object to exist as a regular
+    /// non-symlink file (used by listing).
+    fn path_is_contained_object(&self, path: &Path, full_hash: &str) -> bool {
+        if path != self.object_path(full_hash) {
+            return false;
+        }
+        if !self.object_path_chain_is_safe(full_hash) {
+            return false;
+        }
+        match fs::symlink_metadata(path) {
+            Ok(meta) => !meta.file_type().is_symlink() && meta.file_type().is_file(),
+            Err(_) => false,
+        }
+    }
+
+    /// Verify the reconstructed object path stays under the CAS root and that
+    /// no existing path component on the way is a symlink. Missing components
+    /// are allowed (object may not exist yet).
+    fn object_path_chain_is_safe(&self, full_hash: &str) -> bool {
+        if self.validate_hash(full_hash).is_err() {
+            return false;
+        }
+        let expected = self.object_path(full_hash);
+        let relative = match expected.strip_prefix(&self.root) {
+            Ok(rel) => rel,
+            Err(_) => return false,
+        };
+        let mut cur = self.root.clone();
+        // Root itself must not be a symlink.
+        match fs::symlink_metadata(&cur) {
+            Ok(meta) if meta.file_type().is_symlink() => return false,
+            Ok(_) => {}
+            Err(_) => return false,
+        }
+        for component in relative.components() {
+            cur = cur.join(component);
+            match fs::symlink_metadata(&cur) {
+                Ok(meta) if meta.file_type().is_symlink() => return false,
+                Ok(_) => {}
+                Err(err) if err.kind() == io::ErrorKind::NotFound => {
+                    // Remaining path is absent; structural reconstruction is still
+                    // under root and no symlink was observed.
+                    return true;
+                }
+                Err(_) => return false,
+            }
+        }
+        true
     }
 
     fn validate_hash(&self, full_hash: &str) -> Result<(), SharedCasError> {
@@ -585,9 +663,25 @@ fn validate_run_id(run_id: &str) -> Result<(), GcError> {
     Ok(())
 }
 
-/// Parse a relaxed RFC 3339 date-time string into a `SystemTime`.
+fn dir_is_real(path: &Path) -> bool {
+    match fs::symlink_metadata(path) {
+        Ok(meta) => meta.is_dir() && !meta.file_type().is_symlink(),
+        Err(_) => false,
+    }
+}
+
+fn entry_is_real_dir(entry: &fs::DirEntry) -> bool {
+    match entry.file_type() {
+        Ok(ft) => ft.is_dir() && !ft.is_symlink(),
+        Err(_) => false,
+    }
+}
+
+/// Parse an RFC 3339 date-time string into a `SystemTime`.
+/// Validates calendar field ranges, applies signed numeric offsets, and
+/// rejects malformed timestamps. Offset and `Z` are required.
 fn parse_rfc3339(s: &str) -> Option<SystemTime> {
-    if s.len() < 19 {
+    if s.len() < 20 {
         return None;
     }
     let bytes = s.as_bytes();
@@ -605,32 +699,71 @@ fn parse_rfc3339(s: &str) -> Option<SystemTime> {
     let hour: u32 = s[11..13].parse().ok()?;
     let minute: u32 = s[14..16].parse().ok()?;
     let second: u32 = s[17..19].parse().ok()?;
+    if !(1..=12).contains(&month) {
+        return None;
+    }
+    if hour > 23 || minute > 59 || second > 60 {
+        return None;
+    }
+    let max_day = days_in_month(year, month)?;
+    if day == 0 || day > max_day {
+        return None;
+    }
     let tail = &s[19..];
     let (nanos, tail) = if tail.starts_with('.') {
-        let rest = &tail[1..];
+        let rest = tail.strip_prefix('.').unwrap();
         let digits = rest.chars().take_while(|c| c.is_ascii_digit()).count();
         if digits == 0 {
             return None;
         }
-        let frac = &rest[..digits];
+        // Cap fractional precision at nanoseconds; extra digits are truncated.
+        let take = digits.min(9);
+        let frac = &rest[..take];
         let mut nano = frac.parse::<u64>().ok()?;
-        let scale = 10u64.pow(9 - digits.min(9) as u32);
+        let scale = 10u64.pow(9 - take as u32);
         nano *= scale;
         (nano, &rest[digits..])
     } else {
         (0u64, tail)
     };
-    if tail != "Z" {
+    let offset_secs: i64 = if tail == "Z" || tail == "z" {
+        0
+    } else {
         if tail.len() != 6
             || !(tail.starts_with('+') || tail.starts_with('-'))
             || tail.as_bytes().get(3) != Some(&b':')
         {
             return None;
         }
-    }
+        let sign: i64 = if tail.starts_with('+') { 1 } else { -1 };
+        let off_h: i64 = tail[1..3].parse().ok()?;
+        let off_m: i64 = tail[4..6].parse().ok()?;
+        if off_h > 23 || off_m > 59 {
+            return None;
+        }
+        sign * (off_h * 3600 + off_m * 60)
+    };
     let days = civil_to_days(year, month, day);
-    let secs = days * 86400 + hour as i64 * 3600 + minute as i64 * 60 + second as i64;
-    Some(UNIX_EPOCH + std::time::Duration::new(secs as u64, nanos as u32))
+    let local_secs = days * 86400 + hour as i64 * 3600 + minute as i64 * 60 + second as i64;
+    // Convert local civil time to UTC by subtracting the offset.
+    let utc_secs = local_secs.checked_sub(offset_secs)?;
+    if utc_secs < 0 {
+        return None;
+    }
+    Some(UNIX_EPOCH + std::time::Duration::new(utc_secs as u64, nanos as u32))
+}
+
+fn is_leap_year(year: i64) -> bool {
+    (year % 4 == 0 && year % 100 != 0) || (year % 400 == 0)
+}
+
+fn days_in_month(year: i64, month: u32) -> Option<u32> {
+    match month {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => Some(31),
+        4 | 6 | 9 | 11 => Some(30),
+        2 => Some(if is_leap_year(year) { 29 } else { 28 }),
+        _ => None,
+    }
 }
 
 fn civil_to_days(year: i64, month: u32, day: u32) -> i64 {
@@ -922,8 +1055,15 @@ fn mark_hash(state: &mut MarkState, hash: &str, reason: &str, evidence: &str) {
 fn load_all_roots(store_root: &Path, state: &mut MarkState) -> Result<(), GcError> {
     let roots_dir = store_root.join("gc").join("roots");
     if !roots_dir.is_dir() {
+        // No roots namespace at all: treat as missing reachability metadata.
+        // Conservative retention — never interpret absence as authoritative empty.
+        state.uncertain = true;
+        state
+            .global_evidence
+            .push("missing gc/roots directory; reachability metadata absent".into());
         return Ok(());
     }
+    let mut saw_any_project = false;
     for engine_entry in fs::read_dir(&roots_dir)? {
         let engine_entry = engine_entry?;
         let engine_dir = engine_entry.path();
@@ -936,12 +1076,22 @@ fn load_all_roots(store_root: &Path, state: &mut MarkState) -> Result<(), GcErro
             if !project_dir.is_dir() {
                 continue;
             }
+            saw_any_project = true;
             let current = project_dir.join("current.json");
             if !current.is_file() {
+                // Project namespace exists but current snapshot is missing:
+                // uncertain, not authoritative empty.
+                state.uncertain = true;
+                state.global_evidence.push(format!(
+                    "missing reachability snapshot {}",
+                    current.display()
+                ));
                 continue;
             }
             match read_reachability_snapshot(&current) {
                 Ok(snap) => {
+                    // Present valid snapshot is authoritative for this project,
+                    // including blob_hashes=[] (true empty live set).
                     let evidence = format!("root {} epoch {}", current.display(), snap.epoch);
                     for h in &snap.blob_hashes {
                         mark_hash(state, h, "reachability-root", &evidence);
@@ -955,6 +1105,12 @@ fn load_all_roots(store_root: &Path, state: &mut MarkState) -> Result<(), GcErro
                 }
             }
         }
+    }
+    if !saw_any_project {
+        state.uncertain = true;
+        state
+            .global_evidence
+            .push("gc/roots has no project namespaces; reachability metadata absent".into());
     }
     Ok(())
 }
@@ -1181,7 +1337,78 @@ struct SweepProgress {
 fn read_sweep_progress(path: &Path) -> Result<SweepProgress, GcError> {
     let text = fs::read_to_string(path).map_err(GcError::Io)?;
     let progress: SweepProgress = serde_json::from_str(&text).map_err(GcError::Json)?;
+    validate_sweep_progress(&progress, path)?;
     Ok(progress)
+}
+
+const GC_RECORD_TYPE_SWEEP_PROGRESS: &str = "sweep-progress";
+
+fn validate_sweep_progress(progress: &SweepProgress, path: &Path) -> Result<(), GcError> {
+    if progress.schema_version != GC_SCHEMA_VERSION {
+        return Err(GcError::CorruptMetadata {
+            path: path.to_path_buf(),
+            reason: format!("unsupported schema_version {}", progress.schema_version),
+        });
+    }
+    if progress.record_type != GC_RECORD_TYPE_SWEEP_PROGRESS {
+        return Err(GcError::CorruptMetadata {
+            path: path.to_path_buf(),
+            reason: format!("record_type {}", progress.record_type),
+        });
+    }
+    if progress.run_id.is_empty() {
+        return Err(GcError::SchemaViolation("run_id empty".into()));
+    }
+    if progress.store_root.is_empty() {
+        return Err(GcError::SchemaViolation("store_root empty".into()));
+    }
+    for h in progress.objects.iter().chain(progress.deleted.iter()) {
+        if !is_valid_hash(h) {
+            return Err(GcError::CorruptMetadata {
+                path: path.to_path_buf(),
+                reason: format!("invalid blob hash {h}"),
+            });
+        }
+    }
+    Ok(())
+}
+
+/// Shared exclusive lock serializing GC check/delete with root/pin/lease publication.
+/// Lock ordering is single-level: only this file is locked by metadata publishers
+/// and GC, so there is no multi-lock deadlock.
+fn gc_coord_lock_path(store_root: &Path) -> PathBuf {
+    store_root.join("gc").join("coordinator.lock")
+}
+
+struct GcCoordLock {
+    file: File,
+}
+
+impl GcCoordLock {
+    fn acquire(store_root: &Path) -> Result<Self, GcError> {
+        // Truncating the lock file is safe: the advisory lock is held on the
+        // file descriptor, and the file contents are never read.
+        let path = gc_coord_lock_path(store_root);
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        let file = OpenOptions::new()
+            .create(true)
+            .truncate(true)
+            .read(true)
+            .write(true)
+            .open(&path)
+            .map_err(GcError::Io)?;
+        // Blocking exclusive lock; single lock file for all GC metadata writers.
+        FileExt::lock(&file).map_err(GcError::Io)?;
+        Ok(Self { file })
+    }
+}
+
+impl Drop for GcCoordLock {
+    fn drop(&mut self) {
+        let _ = FileExt::unlock(&self.file);
+    }
 }
 
 fn build_final_report(report: &DryRunReport, deleted: &[String]) -> DryRunReport {
@@ -1208,11 +1435,29 @@ fn build_final_report(report: &DryRunReport, deleted: &[String]) -> DryRunReport
 /// by calling `run_gc` again with the same `run_id`.
 pub fn run_gc(store_root: &Path, config: &GcConfig) -> Result<DryRunReport, GcError> {
     validate_run_id(&config.run_id)?;
+    // Hold the shared coordinator lock for the entire mark/recheck/delete path
+    // so root/pin/lease publishers cannot interleave between recheck and remove.
+    let _coord = GcCoordLock::acquire(store_root)?;
     let cas = SharedCas::new(store_root.to_path_buf());
+    let store_root_key = store_root.to_string_lossy().into_owned();
 
     let progress_path = gc_progress_path(store_root, &config.run_id);
     let prior_progress = if progress_path.is_file() {
-        Some(read_sweep_progress(&progress_path)?)
+        let progress = read_sweep_progress(&progress_path)?;
+        // Resume only journals that match this run and store identity.
+        if progress.run_id != config.run_id {
+            return Err(GcError::SchemaViolation(format!(
+                "progress run_id {} does not match config {}",
+                progress.run_id, config.run_id
+            )));
+        }
+        if progress.store_root != store_root_key {
+            return Err(GcError::SchemaViolation(format!(
+                "progress store_root {} does not match {}",
+                progress.store_root, store_root_key
+            )));
+        }
+        Some(progress)
     } else {
         None
     };
@@ -1239,10 +1484,19 @@ pub fn run_gc(store_root: &Path, config: &GcConfig) -> Result<DryRunReport, GcEr
         return Ok(report);
     }
 
-    let mut deleted = prior_progress
-        .as_ref()
-        .map(|p| p.deleted.clone())
-        .unwrap_or_default();
+    // Candidate set is from this evaluation. Prior deleted entries are only
+    // trusted when the object is still absent; republished objects are
+    // re-evaluated so resume reports stay truthful.
+    let mut deleted: Vec<String> = Vec::new();
+    if let Some(prior) = prior_progress.as_ref() {
+        for h in &prior.deleted {
+            if !cas.contains(h) {
+                deleted.push(h.clone());
+            }
+            // If the hash was republished after a crash-delete, do not carry
+            // it as deleted; it must be rechecked against live metadata.
+        }
+    }
     let to_delete: Vec<String> = report
         .objects
         .iter()
@@ -1252,9 +1506,9 @@ pub fn run_gc(store_root: &Path, config: &GcConfig) -> Result<DryRunReport, GcEr
 
     let progress = SweepProgress {
         schema_version: GC_SCHEMA_VERSION.to_string(),
-        record_type: "sweep-progress".to_string(),
+        record_type: GC_RECORD_TYPE_SWEEP_PROGRESS.to_string(),
         run_id: config.run_id.clone(),
-        store_root: store_root.to_string_lossy().into_owned(),
+        store_root: store_root_key.clone(),
         evaluated_at: report.evaluated_at.clone(),
         objects: to_delete.clone(),
         deleted: deleted.clone(),
@@ -1265,9 +1519,10 @@ pub fn run_gc(store_root: &Path, config: &GcConfig) -> Result<DryRunReport, GcEr
     for hash in &to_delete {
         let hash = hash.clone();
         if deleted.contains(&hash) {
+            // Only skip when still absent after reconciliation above.
             continue;
         }
-        // Immediate re-check before deleting.
+        // Immediate re-check under the same coordinator lock before deleting.
         let mut re_state = MarkState::default();
         load_all_roots(store_root, &mut re_state)?;
         load_all_pins(store_root, &mut re_state, config.now)?;
@@ -1279,9 +1534,9 @@ pub fn run_gc(store_root: &Path, config: &GcConfig) -> Result<DryRunReport, GcEr
         deleted.push(hash.clone());
         let progress = SweepProgress {
             schema_version: GC_SCHEMA_VERSION.to_string(),
-            record_type: "sweep-progress".to_string(),
+            record_type: GC_RECORD_TYPE_SWEEP_PROGRESS.to_string(),
             run_id: config.run_id.clone(),
-            store_root: store_root.to_string_lossy().into_owned(),
+            store_root: store_root_key.clone(),
             evaluated_at: report.evaluated_at.clone(),
             objects: to_delete.clone(),
             deleted: deleted.clone(),
@@ -1452,6 +1707,8 @@ fn validate_candidate(value: &serde_json::Value) -> Result<(), GcError> {
 }
 
 /// Publish a reachability snapshot in the shared-CAS GC namespace.
+/// Epoch must be >= 1 and strictly greater than any currently published epoch
+/// for the same engine/project. Serialized against GC via the coordinator lock.
 pub fn publish_reachability_snapshot(
     store_root: &Path,
     engine: &str,
@@ -1465,9 +1722,30 @@ pub fn publish_reachability_snapshot(
     if !is_valid_hash(project_id) {
         return Err(GcError::SchemaViolation("project_id".into()));
     }
+    if epoch == 0 {
+        return Err(GcError::SchemaViolation("epoch must be >= 1".into()));
+    }
     for h in blob_hashes {
         if !is_valid_hash(h) {
             return Err(GcError::Policy(format!("invalid hash {h}")));
+        }
+    }
+    let _coord = GcCoordLock::acquire(store_root)?;
+    let path = reachability_snapshot_path(store_root, engine, project_id);
+    if path.is_file() {
+        match read_reachability_snapshot(&path) {
+            Ok(existing) => {
+                if epoch <= existing.epoch {
+                    return Err(GcError::SchemaViolation(format!(
+                        "epoch {epoch} must be strictly greater than current {}",
+                        existing.epoch
+                    )));
+                }
+            }
+            Err(_err) => {
+                // Unreadable current snapshot: allow replacement with a fresh
+                // valid positive epoch (already checked).
+            }
         }
     }
     let mut hashes = blob_hashes.to_vec();
@@ -1482,7 +1760,6 @@ pub fn publish_reachability_snapshot(
         published_at: rfc3339_now(),
         blob_hashes: hashes,
     };
-    let path = reachability_snapshot_path(store_root, engine, project_id);
     let bytes = serde_json::to_vec_pretty(&snap)?;
     gc_atomic_write(&path, &bytes)?;
     Ok(path)
@@ -1508,6 +1785,7 @@ pub fn publish_pin_record(store_root: &Path, pin: &PinRecord) -> Result<PathBuf,
     if !is_valid_hash(&pin.blob_hash) {
         return Err(GcError::SchemaViolation("blob_hash".into()));
     }
+    let _coord = GcCoordLock::acquire(store_root)?;
     let path = pin_record_path(store_root, &pin.engine, &pin.project_id, &pin.pin_id);
     let bytes = serde_json::to_vec_pretty(pin)?;
     gc_atomic_write(&path, &bytes)?;
@@ -1548,6 +1826,7 @@ pub fn publish_lease_record(store_root: &Path, lease: &LeaseRecord) -> Result<Pa
             return Err(GcError::SchemaViolation("blob_hash".into()));
         }
     }
+    let _coord = GcCoordLock::acquire(store_root)?;
     let path = lease_record_path(
         store_root,
         &lease.engine,
@@ -1792,7 +2071,13 @@ mod tests {
         let h1 = cas.publish(b"reachable").unwrap();
         cas.publish(b"orphan").unwrap();
 
-        make_snapshot(&root, GC_ENGINE_TOKENZERO, &pid(&root), 1, &[h1.clone()]);
+        make_snapshot(
+            &root,
+            GC_ENGINE_TOKENZERO,
+            &pid(&root),
+            1,
+            std::slice::from_ref(&h1),
+        );
 
         let config = GcConfig::default();
         let report = run_gc(&root, &config).unwrap();
@@ -1811,7 +2096,13 @@ mod tests {
         let (_dir, root, cas) = make_store();
         let h1 = cas.publish(b"reachable").unwrap();
         let h2 = cas.publish(b"orphan").unwrap();
-        make_snapshot(&root, GC_ENGINE_TOKENZERO, &pid(&root), 1, &[h1.clone()]);
+        make_snapshot(
+            &root,
+            GC_ENGINE_TOKENZERO,
+            &pid(&root),
+            1,
+            std::slice::from_ref(&h1),
+        );
 
         let report = run_gc(&root, &GcConfig::default()).unwrap();
         let r1 = report.objects.iter().find(|o| o.blob_hash == h1).unwrap();
@@ -1827,6 +2118,7 @@ mod tests {
         let h1 = cas.publish(b"pinned").unwrap();
         let h2 = cas.publish(b"orphan").unwrap();
         make_pin(&root, GC_ENGINE_TOKENZERO, &pid(&root), "pin-1", &h1);
+        make_snapshot(&root, GC_ENGINE_TOKENZERO, &pid(&root), 1, &[]);
 
         let report = run_gc(&root, &GcConfig::default()).unwrap();
         let r1 = report.objects.iter().find(|o| o.blob_hash == h1).unwrap();
@@ -1847,9 +2139,10 @@ mod tests {
             GC_ENGINE_TOKENZERO,
             &pid(&root),
             "lease-1",
-            &[h1.clone()],
+            std::slice::from_ref(&h1),
             future,
         );
+        make_snapshot(&root, GC_ENGINE_TOKENZERO, &pid(&root), 1, &[]);
 
         let report = run_gc(&root, &GcConfig::default()).unwrap();
         let r1 = report.objects.iter().find(|o| o.blob_hash == h1).unwrap();
@@ -1870,9 +2163,10 @@ mod tests {
             GC_ENGINE_TOKENZERO,
             &pid(&root),
             "lease-1",
-            &[h1.clone()],
+            std::slice::from_ref(&h1),
             past,
         );
+        make_snapshot(&root, GC_ENGINE_TOKENZERO, &pid(&root), 1, &[]);
 
         let report = run_gc(&root, &GcConfig::default()).unwrap();
         let r1 = report.objects.iter().find(|o| o.blob_hash == h1).unwrap();
@@ -1886,6 +2180,9 @@ mod tests {
     fn gc_collect_unreachable_aged() {
         let (_dir, root, cas) = make_store();
         let h1 = cas.publish(b"orphan").unwrap();
+        // Authoritative empty reachability snapshot (valid current.json with
+        // blob_hashes=[]) is required before GC may treat orphans as Collect.
+        make_snapshot(&root, GC_ENGINE_TOKENZERO, &pid(&root), 1, &[]);
         let config = GcConfig {
             apply: true,
             ..GcConfig::default()
@@ -1966,7 +2263,7 @@ mod tests {
             GC_ENGINE_TOKENZERO,
             &pid(&root),
             1,
-            &[reachable.clone()],
+            std::slice::from_ref(&reachable),
         );
 
         let mut config = GcConfig {
@@ -2032,5 +2329,254 @@ mod tests {
         let hash = cas.publish(bytes).unwrap();
         let repaired = cas.repair_object(&hash, bytes).unwrap();
         assert!(!repaired);
+    }
+
+    #[test]
+    fn gc_missing_roots_current_is_uncertain_not_empty() {
+        let (_dir, root, cas) = make_store();
+        let legacy = cas.publish(b"legacy-live").unwrap();
+        // Project roots dir without current.json must not authorize deletion.
+        let project_dir = root
+            .join("gc")
+            .join("roots")
+            .join(GC_ENGINE_TOKENZERO)
+            .join(pid(&root));
+        fs::create_dir_all(&project_dir).unwrap();
+        let config = GcConfig {
+            apply: true,
+            ..GcConfig::default()
+        };
+        let report = run_gc(&root, &config).unwrap();
+        let r = report
+            .objects
+            .iter()
+            .find(|o| o.blob_hash == legacy)
+            .unwrap();
+        assert_eq!(r.verdict, GcVerdict::RetainUncertain);
+        assert!(cas.contains(&legacy));
+    }
+
+    #[test]
+    fn gc_authoritative_empty_snapshot_collects_orphans() {
+        let (_dir, root, cas) = make_store();
+        let orphan = cas.publish(b"true-orphan").unwrap();
+        make_snapshot(&root, GC_ENGINE_TOKENZERO, &pid(&root), 1, &[]);
+        let config = GcConfig {
+            apply: true,
+            ..GcConfig::default()
+        };
+        let report = run_gc(&root, &config).unwrap();
+        let r = report
+            .objects
+            .iter()
+            .find(|o| o.blob_hash == orphan)
+            .unwrap();
+        assert_eq!(r.verdict, GcVerdict::Collect);
+        assert!(!cas.contains(&orphan));
+    }
+
+    #[test]
+    fn publish_reachability_rejects_epoch_zero_and_regression() {
+        let (_dir, root, _cas) = make_store();
+        let project = pid(&root);
+        let err = publish_reachability_snapshot(&root, GC_ENGINE_TOKENZERO, &project, 0, &[])
+            .unwrap_err();
+        assert!(matches!(err, GcError::SchemaViolation(_)));
+        publish_reachability_snapshot(&root, GC_ENGINE_TOKENZERO, &project, 2, &[]).unwrap();
+        let err = publish_reachability_snapshot(&root, GC_ENGINE_TOKENZERO, &project, 2, &[])
+            .unwrap_err();
+        assert!(matches!(err, GcError::SchemaViolation(_)));
+        let err = publish_reachability_snapshot(&root, GC_ENGINE_TOKENZERO, &project, 1, &[])
+            .unwrap_err();
+        assert!(matches!(err, GcError::SchemaViolation(_)));
+        publish_reachability_snapshot(&root, GC_ENGINE_TOKENZERO, &project, 3, &[]).unwrap();
+    }
+
+    #[test]
+    fn list_and_remove_refuse_prefix_symlink_escape() {
+        let (_dir, root, cas) = make_store();
+        let hash = cas.publish(b"inside-cas").unwrap();
+        let outside = root.parent().unwrap().join("outside-escape");
+        fs::create_dir_all(&outside).unwrap();
+        let outside_blob = outside.join(&hash);
+        fs::write(&outside_blob, b"escaped").unwrap();
+
+        let prefix = root.join("blobs").join("sha256").join(&hash[..2]);
+        // Replace prefix directory with a symlink to outside.
+        fs::remove_dir_all(&prefix).unwrap();
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(&outside, &prefix).unwrap();
+        }
+        #[cfg(not(unix))]
+        {
+            // On non-unix platforms this containment scenario is not exercised.
+            return;
+        }
+
+        let listed = cas.list_objects().unwrap();
+        assert!(
+            !listed.contains(&hash),
+            "prefix symlink objects must not be listed"
+        );
+        assert!(matches!(
+            cas.remove_object(&hash),
+            Err(SharedCasError::Policy)
+        ));
+        // External object must remain untouched.
+        assert!(outside_blob.is_file());
+        assert_eq!(fs::read(&outside_blob).unwrap(), b"escaped");
+    }
+
+    #[test]
+    fn resume_journal_reconciles_republished_object() {
+        let (_dir, root, cas) = make_store();
+        let orphan = cas.publish(b"republish-me").unwrap();
+        make_snapshot(&root, GC_ENGINE_TOKENZERO, &pid(&root), 1, &[]);
+
+        // Simulate a crash journal that claims the hash was deleted.
+        let progress_path = root
+            .join("gc")
+            .join("reports")
+            .join("resume-run.progress.json");
+        fs::create_dir_all(progress_path.parent().unwrap()).unwrap();
+        let stale = SweepProgress {
+            schema_version: GC_SCHEMA_VERSION.to_string(),
+            record_type: "sweep-progress".to_string(),
+            run_id: "resume-run".into(),
+            store_root: root.to_string_lossy().into_owned(),
+            evaluated_at: rfc3339_now(),
+            objects: vec![orphan.clone()],
+            deleted: vec![orphan.clone()],
+            state: "sweeping".into(),
+        };
+        fs::write(&progress_path, serde_json::to_vec_pretty(&stale).unwrap()).unwrap();
+
+        // Object is still present (republished / never actually deleted).
+        assert!(cas.contains(&orphan));
+
+        let config = GcConfig {
+            run_id: "resume-run".into(),
+            apply: true,
+            ..GcConfig::default()
+        };
+        let report = run_gc(&root, &config).unwrap();
+        // Journal claimed delete but object was live: re-evaluate and truthfully
+        // delete under authoritative empty roots. Must not skip recheck.
+        assert!(!cas.contains(&orphan));
+        let r = report
+            .objects
+            .iter()
+            .find(|o| o.blob_hash == orphan)
+            .unwrap();
+        assert_eq!(r.verdict, GcVerdict::Collect);
+        assert!(r
+            .evidence
+            .iter()
+            .any(|e| e.contains("deleted by this sweep")));
+    }
+
+    #[test]
+    fn resume_journal_rejects_store_identity_mismatch() {
+        let (_dir, root, cas) = make_store();
+        let orphan = cas.publish(b"identity").unwrap();
+        make_snapshot(&root, GC_ENGINE_TOKENZERO, &pid(&root), 1, &[]);
+        let progress_path = root
+            .join("gc")
+            .join("reports")
+            .join("bad-store.progress.json");
+        fs::create_dir_all(progress_path.parent().unwrap()).unwrap();
+        let stale = SweepProgress {
+            schema_version: GC_SCHEMA_VERSION.to_string(),
+            record_type: "sweep-progress".to_string(),
+            run_id: "bad-store".into(),
+            store_root: "/not/this/store".into(),
+            evaluated_at: rfc3339_now(),
+            objects: vec![orphan.clone()],
+            deleted: vec![],
+            state: "sweeping".into(),
+        };
+        fs::write(&progress_path, serde_json::to_vec_pretty(&stale).unwrap()).unwrap();
+        let config = GcConfig {
+            run_id: "bad-store".into(),
+            apply: true,
+            ..GcConfig::default()
+        };
+        let err = run_gc(&root, &config).unwrap_err();
+        assert!(matches!(err, GcError::SchemaViolation(_)));
+        assert!(cas.contains(&orphan));
+    }
+
+    #[test]
+    fn parse_rfc3339_applies_offsets_and_rejects_ranges() {
+        let z = parse_rfc3339("1970-01-01T00:00:00Z").unwrap();
+        assert_eq!(z, UNIX_EPOCH);
+
+        let plus = parse_rfc3339("1970-01-01T01:00:00+01:00").unwrap();
+        assert_eq!(plus, UNIX_EPOCH);
+
+        let minus = parse_rfc3339("1969-12-31T23:00:00-01:00").unwrap();
+        assert_eq!(minus, UNIX_EPOCH);
+
+        assert!(parse_rfc3339("2024-13-01T00:00:00Z").is_none());
+        assert!(parse_rfc3339("2024-02-30T00:00:00Z").is_none());
+        assert!(parse_rfc3339("2024-04-31T00:00:00Z").is_none());
+        assert!(parse_rfc3339("2024-01-01T24:00:00Z").is_none());
+        assert!(parse_rfc3339("2024-01-01T00:60:00Z").is_none());
+        assert!(parse_rfc3339("2024-01-01T00:00:00+24:00").is_none());
+        assert!(parse_rfc3339("2024-01-01T00:00:00").is_none());
+        // Leap day accepted.
+        assert!(parse_rfc3339("2024-02-29T12:00:00Z").is_some());
+        assert!(parse_rfc3339("2023-02-29T12:00:00Z").is_none());
+    }
+
+    #[test]
+    fn gc_recheck_under_lock_sees_concurrent_pin() {
+        // Single-threaded stand-in for the race: recheck+delete are under the
+        // coordinator lock shared with publish_pin_record. Publishing a pin
+        // before apply recheck must retain the object.
+        let (_dir, root, cas) = make_store();
+        let h = cas.publish(b"race-pin").unwrap();
+        make_snapshot(&root, GC_ENGINE_TOKENZERO, &pid(&root), 1, &[]);
+        make_pin(&root, GC_ENGINE_TOKENZERO, &pid(&root), "late-pin", &h);
+        let config = GcConfig {
+            apply: true,
+            ..GcConfig::default()
+        };
+        let report = run_gc(&root, &config).unwrap();
+        let r = report.objects.iter().find(|o| o.blob_hash == h).unwrap();
+        assert_eq!(r.verdict, GcVerdict::Retain);
+        assert!(cas.contains(&h));
+    }
+
+    #[test]
+    fn resume_journal_rejects_bad_schema() {
+        let (_dir, root, cas) = make_store();
+        let orphan = cas.publish(b"schema-journal").unwrap();
+        make_snapshot(&root, GC_ENGINE_TOKENZERO, &pid(&root), 1, &[]);
+        let progress_path = root
+            .join("gc")
+            .join("reports")
+            .join("bad-schema.progress.json");
+        fs::create_dir_all(progress_path.parent().unwrap()).unwrap();
+        let stale = serde_json::json!({
+            "schema_version": "zerostack.cas-gc.v0",
+            "record_type": "sweep-progress",
+            "run_id": "bad-schema",
+            "store_root": root.to_string_lossy(),
+            "evaluated_at": rfc3339_now(),
+            "objects": [orphan],
+            "deleted": [],
+            "state": "sweeping"
+        });
+        fs::write(&progress_path, serde_json::to_vec_pretty(&stale).unwrap()).unwrap();
+        let config = GcConfig {
+            run_id: "bad-schema".into(),
+            apply: true,
+            ..GcConfig::default()
+        };
+        let err = run_gc(&root, &config).unwrap_err();
+        assert!(matches!(err, GcError::CorruptMetadata { .. }));
+        assert!(cas.contains(&orphan));
     }
 }
