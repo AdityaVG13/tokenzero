@@ -22,6 +22,7 @@ use tokenzero_core::{ContentType, count_tokens, error_block, id_for, sha256_hex,
 use crate::shared_cas::{SharedCas, SharedCasError};
 
 pub mod boot;
+pub mod embedded_store;
 pub mod migration;
 pub mod shared_cas;
 pub mod working_set;
