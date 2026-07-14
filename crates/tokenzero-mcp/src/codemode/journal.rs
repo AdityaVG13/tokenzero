@@ -741,9 +741,8 @@ pub fn doctor(cache_path: &Path) -> JournalDoctorReport {
     report
 }
 pub fn inspect(cache_path: &Path, execution_id: &str) -> Result<PlanJournal, String> {
-    read_journal(
-        &journal_root(cache_path).join(format!("{}.json", safe_execution_id(execution_id))),
-    )
+    let path = journal_root(cache_path).join(format!("{}.json", safe_execution_id(execution_id)));
+    read_journal(&path)
 }
 pub fn open_unresolved(
     cache_path: &Path,
@@ -826,7 +825,13 @@ fn safe_execution_id(value: &str) -> String {
     }
 }
 fn read_journal(path: &Path) -> Result<PlanJournal, String> {
-    let bytes = fs::read(path).map_err(|err| format!("read journal: {err}"))?;
+    let bytes = match fs::read(path) {
+        Ok(bytes) => bytes,
+        Err(err) if err.kind() == io::ErrorKind::NotFound => {
+            return Err(format!("journal not found: {}", path.display()));
+        }
+        Err(err) => return Err(format!("read journal {}: {err}", path.display())),
+    };
     let journal: PlanJournal =
         serde_json::from_slice(&bytes).map_err(|err| format!("parse journal: {err}"))?;
     if journal.version != PLAN_JOURNAL_VERSION {
@@ -842,25 +847,13 @@ fn persist_journal(path: &Path, journal: &PlanJournal) -> Result<(), String> {
 pub(crate) fn atomic_write(path: &Path, bytes: &[u8]) -> io::Result<()> {
     let parent = path.parent().unwrap_or_else(|| Path::new("."));
     fs::create_dir_all(parent)?;
-    let tmp = parent.join(format!(
-        ".{}.{}.tmp",
-        path.file_name()
-            .and_then(|v| v.to_str())
-            .unwrap_or("journal"),
-        std::process::id()
-    ));
-    let result = (|| {
-        let mut file = OpenOptions::new().create_new(true).write(true).open(&tmp)?;
-        file.write_all(bytes)?;
-        file.sync_all()?;
-        fs::rename(&tmp, path)?;
-        File::open(parent)?.sync_all()?;
-        Ok(())
-    })();
-    if result.is_err() {
-        let _ = fs::remove_file(&tmp);
-    }
-    result
+    let mut tmp = tempfile::NamedTempFile::new_in(parent)?;
+    tmp.write_all(bytes)?;
+    tmp.as_file().sync_all()?;
+    tmp.persist(path).map_err(|err| err.error)?;
+    #[cfg(unix)]
+    File::open(parent)?.sync_all()?;
+    Ok(())
 }
 fn pin_hash(reference: &str) -> Option<String> {
     let value = reference.split('#').next()?.rsplit('/').next()?;
@@ -1011,6 +1004,20 @@ mod tests {
 
     fn cache(dir: &Path) -> PathBuf {
         dir.join("tokenzero").join("recovery-cache.json")
+    }
+
+    #[test]
+    fn inspect_preserves_non_not_found_io_errors() {
+        let temp = tempdir().unwrap();
+        let cache = cache(temp.path());
+        let execution = "cm://exec/not-a-file";
+        let path = journal_root(&cache)
+            .join(format!("{}.json", safe_execution_id(execution)));
+        fs::create_dir_all(&path).unwrap();
+
+        let error = inspect(&cache, execution).unwrap_err();
+        assert!(error.starts_with("read journal "), "{error}");
+        assert!(!error.starts_with("journal not found:"), "{error}");
     }
 
     #[test]
