@@ -20,6 +20,7 @@ serde_json.workspace = true
 sha2.workspace = true
 similar.workspace = true
 thiserror.workspace = true
+tempfile.workspace = true
 tokenzero-core = { path = "../tokenzero-core", version = "1.0.2" }
 tokenzero-filters = { path = "../tokenzero-filters", version = "1.0.2" }
 tokenzero-pulse = { path = "../tokenzero-pulse", version = "1.0.2" }
@@ -30,4 +31,3 @@ fastmcp-rust.workspace = true
 [dev-dependencies]
 assert_cmd.workspace = true
 proptest.workspace = true
-tempfile.workspace = true
