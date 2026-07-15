@@ -67,21 +67,20 @@ framing, and shell rendering at microsecond scale on the workspace's criterion s
 
 #### End-to-end benchmark
 
-Six real workloads on this repository, run raw and through TokenZero. Both
-sides are counted with the same tokenizer (TokenZero's own accounting), and
-every TokenZero row keeps exact `tz://` refs, so nothing hidden is more than
-one `expand` away. The current reproducible demo artifact is
-`demo/demo_results.json`:
+Six reproducible workloads on this repository, measured with one pinned
+release binary. Both sides use TokenZero's own accounting, and every hidden
+byte remains recoverable through an exact `tz://` ref. The current snapshot,
+binary SHA-256, methodology, and history live under `benchmarks/northstar/`:
 
 | Workload | Raw tokens | TokenZero | Savings |
 | :-- | --: | --: | --: |
-| Small read (`Cargo.toml`) | 324 | 324 | **0%** |
-| Large read (`crates/tokenzero-mcp/src/lib.rs`) | 16,977 | 150 | **99.1%** |
-| Re-read the same file (MCP dedup) | 16,977 | 185 | **98.9%** |
-| Repo-wide grep (`fn ` across `crates/`) | 79,424 | 508 | **99.4%** |
-| Re-find stored content (`recall` vs re-running the grep) | 79,424 | 46 | **99.9%** |
-| `run -- git --version` | 11 | 11 | **0%** |
-| **Total** | **193,137** | **1,224** | **99.4%** |
+| Large source read | 1,598 | 45 | **97.0%** |
+| Re-read the same file (seen-set dedup) | 1,598 | 45 | **97.0%** |
+| Repo-wide grep (`fn ` across `crates/`) | 85,453 | 36 | **99.0%** |
+| `cargo test` (`tokenzero-filters`) | 233 | 257 | **-11.0%** |
+| Directory listing (find vs tree, depth 3) | 32,757 | 512 | **98.0%** |
+| Re-find stored content (`recall` vs re-running grep) | 85,453 | 46 | **99.0%** |
+| **Total** | **207,092** | **941** | **99.0%** |
 
 Path-only outputs like `glob` pass through nearly unchanged: there is nothing
 to hide, and a capsule never costs more than raw.

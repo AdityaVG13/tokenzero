@@ -5,6 +5,24 @@ All notable changes to TokenZero will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.4.0] -- 2026-07-15
+
+### Added
+- **Embeddable recovery API**: `TokenZeroStore` exposes the shared recovery store as a reusable Rust handle with byte-exact put, get, expand, pin, and lifecycle contracts.
+- **Conservative shared-CAS maintenance**: mark-and-sweep GC, orphan repair, durable pin metadata, and cross-engine reachability preserve live ZeroRef payloads.
+- **Reproducible performance evidence**: automated northstar rebaselining, release-binary provenance, source-state fingerprints, find backend crossover measurements, and retained history make benchmark claims auditable.
+
+### Changed
+- **Lower MCP latency**: retained before/after evidence measures p50 reductions of 53.7% for read, 58.1% for find, and 57.1% for expand while preserving advisory locking and JSONL append semantics.
+- **Smaller implementation**: behavior-preserving consolidation and generated corpus materialization reduce code across `crates`, `benches`, `benchmarks`, and `scripts` from 110,723 to 59,072 lines (46.6%).
+- **Search routing**: deterministic crossover evidence retains the internal scanner for small trees and `rg` for larger directory searches.
+- **Benchmark integrity**: northstar runs now use one release binary for every component, fail closed on stale reuse, and record binary SHA-256 and source provenance.
+
+### Fixed
+- Recovery publication, garbage collection, concurrent writer synchronization, stale portable-reference hashes, malformed repeated fragments, and orphan segment cleanup now fail safely without exposing corrupted bytes or deleting live data.
+- Windows CodeMode journal persistence preserves I/O errors and durable replacement semantics.
+- MCP working-set admission, capability descriptor revisioning, async plan parsing, release telemetry audits, package-audit fixtures, and deleted regression coverage were restored and hardened.
+
 ## [1.3.0] -- 2026-07-12
 
 ### Added
