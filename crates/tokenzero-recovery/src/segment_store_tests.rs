@@ -161,3 +161,89 @@ fn binary_payload_round_trips_without_utf8_assumptions() {
     let mut reopened = SegmentStore::open(p, None).unwrap();
     assert_eq!(reopened.expand("binary").unwrap().unwrap(), payload);
 }
+
+#[test]
+fn hot_recovery_serializes_with_writer_and_rereads_manifest() {
+    let d = tempdir().unwrap();
+    let p = d.path().join("recovery-cache.json");
+    let mut initial = SegmentStore::create_shadow(p.clone(), None).unwrap();
+    initial.put("before", b"before", u64::MAX).unwrap();
+    let index = d.path().join(&initial.manifest().hot.index_file);
+    std::fs::write(index, b"force recovery").unwrap();
+
+    let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+    let open_path = p.clone();
+    let open_barrier = barrier.clone();
+    let opener = std::thread::spawn(move || {
+        open_barrier.wait();
+        let mut store = SegmentStore::open(open_path, None).unwrap();
+        assert_eq!(store.expand("before").unwrap().unwrap(), b"before");
+    });
+    let write_path = p.clone();
+    let writer = std::thread::spawn(move || {
+        barrier.wait();
+        let mut store = SegmentStore::open(write_path, None).unwrap();
+        store.put("during", b"during", u64::MAX).unwrap();
+    });
+    opener.join().unwrap();
+    writer.join().unwrap();
+
+    let mut reopened = SegmentStore::open(p, None).unwrap();
+    assert_eq!(reopened.expand("before").unwrap().unwrap(), b"before");
+    assert_eq!(reopened.expand("during").unwrap().unwrap(), b"during");
+}
+
+#[test]
+fn gc_publishes_both_manifests_before_deleting_segments() {
+    let d = tempdir().unwrap();
+    let p = d.path().join("recovery-cache.json");
+    let mut store = SegmentStore::create_shadow(p.clone(), None).unwrap();
+    store.put("expired", b"expired", 1).unwrap();
+    store.seal().unwrap();
+    assert_eq!(store.evict_expired(2).unwrap(), 1);
+
+    // Force restart through the backup manifest. It must describe the same
+    // post-GC file set rather than referencing files already unlinked.
+    std::fs::write(SegmentStore::manifest_path(&p), b"corrupt primary").unwrap();
+    let mut reopened = SegmentStore::open(p, None).unwrap();
+    assert_eq!(reopened.expand("expired").unwrap(), None);
+}
+
+#[test]
+fn restart_cleans_gc_orphans_not_named_by_manifest() {
+    let d = tempdir().unwrap();
+    let p = d.path().join("recovery-cache.json");
+    let mut store = SegmentStore::create_shadow(p.clone(), None).unwrap();
+    store.put("expired", b"expired", 1).unwrap();
+    store.seal().unwrap();
+    let evicted = store.manifest().cold[0].clone();
+    assert_eq!(store.evict_expired(2).unwrap(), 1);
+    let data = d.path().join(&evicted.data_file);
+    let index = d.path().join(&evicted.index_file);
+    std::fs::write(&data, b"orphan data").unwrap();
+    std::fs::write(&index, b"orphan index").unwrap();
+
+    SegmentStore::open(p, None).unwrap();
+
+    assert!(!data.exists());
+    assert!(!index.exists());
+}
+
+#[test]
+fn restart_removes_orphan_next_generation_and_can_seal_again() {
+    let d = tempdir().unwrap();
+    let p = d.path().join("recovery-cache.json");
+    let mut store = SegmentStore::create_shadow(p.clone(), None).unwrap();
+    store.put("kept", b"kept", u64::MAX).unwrap();
+    let next = store.manifest().hot.generation + 1;
+    let next_data = d.path().join(format!("recovery.{next}.segment"));
+    let next_index = d.path().join(format!("recovery.{next}.segment.index"));
+    std::fs::write(&next_data, b"TZSEG001").unwrap();
+    std::fs::write(&next_index, b"{}").unwrap();
+
+    let mut reopened = SegmentStore::open(p, None).unwrap();
+    assert!(!next_data.exists());
+    assert!(!next_index.exists());
+    reopened.seal().unwrap();
+    assert_eq!(reopened.expand("kept").unwrap().unwrap(), b"kept");
+}

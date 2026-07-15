@@ -324,8 +324,7 @@ impl TokenZeroEngine {
                 "exact_refs_available": exact_refs_available
             }));
         }
-        let working_set_replaced = !pending.is_empty()
-            && !raw
+        let working_set_replaced = !raw
             && !matches!(mode, Mode::Passthrough)
             && working_set_anchor
                 .is_some_and(|anchor| self.admit_working_set_response(&mut response, anchor));

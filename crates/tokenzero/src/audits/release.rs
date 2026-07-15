@@ -52,6 +52,11 @@ fn one_shot_shell_cmd<'a>(unix: &'a str, windows: &'a str) -> &'a str {
     if cfg!(windows) { windows } else { unix }
 }
 
+fn one_shot_anchors_ok(id: &str, row: &Json, visible: &str, anchors: &[&str]) -> bool {
+    anchors_present(visible, anchors)
+        && (id != "failure_diagnosis_anchor" || row["telemetry"]["command_success"] == false)
+}
+
 pub(crate) fn run_one_shot_eval(output_json: PathBuf, output_md: Option<PathBuf>) -> Result<Json> {
     let exe = std::env::current_exe()?;
     let temp = tempdir()?;
@@ -95,7 +100,7 @@ pub(crate) fn run_one_shot_eval(output_json: PathBuf, output_md: Option<PathBuf>
             let row = run_json_command(&exe, args)?;
             let vis = row["visible"]["text"].as_str().unwrap_or_default();
             let refs_ok = refs_available(&row);
-            let anchors_ok = anchors_present(vis, anchors);
+            let anchors_ok = one_shot_anchors_ok(id, &row, vis, anchors);
             Ok(one_shot_row(
                 id,
                 "inspect or fix",
@@ -411,4 +416,36 @@ pub(crate) fn write_artifacts(
         )?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn failure_diagnosis_requires_failed_command_telemetry() {
+        let anchors = ["exit_code: 101", "tests::alpha"];
+        let visible = "exit_code: 101 tests::alpha";
+        let success = object!({"telemetry": {"command_success": true}});
+        let failure = object!({"telemetry": {"command_success": false}});
+
+        assert!(!one_shot_anchors_ok(
+            "failure_diagnosis_anchor",
+            &success,
+            visible,
+            &anchors
+        ));
+        assert!(one_shot_anchors_ok(
+            "failure_diagnosis_anchor",
+            &failure,
+            visible,
+            &anchors
+        ));
+        assert!(one_shot_anchors_ok(
+            "warning_changed_file_anchor",
+            &success,
+            visible,
+            &anchors
+        ));
+    }
 }

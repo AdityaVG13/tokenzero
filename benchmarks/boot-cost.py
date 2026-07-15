@@ -2,7 +2,8 @@
 """Measure manifest+delta boot cost on this repo and a 100k-file corpus."""
 from __future__ import annotations
 import argparse; import json; import tempfile; from pathlib import Path
-import harness as H; REPO = H.REPO; BIN = REPO / 'target/debug/tokenzero'; EVIDENCE = Path(__file__).with_suffix('')
+import os
+import harness as H; REPO = H.REPO; BIN = Path(os.environ.get('TOKENZERO_BOOT_BENCH_BIN', REPO / 'target/debug/tokenzero')); EVIDENCE = Path(__file__).with_suffix('')
 SYNTHETIC_FILES = 100000; COUNT_EXCLUDES = {'.git', 'target', '.zerostack'}
 
 def masked_argv(arguments: list[str], root: Path, cache: Path) -> list[str]:
@@ -26,7 +27,7 @@ def measure(label: str, root: Path, cache_dir: Path) -> dict[str, object]:
 
 def run(label: str) -> Path:
     if not BIN.is_file():
-        raise SystemExit('target/debug/tokenzero missing; build the focused tokenzero package first')
+        raise SystemExit(f'benchmark binary missing: {BIN}; build or select it with TOKENZERO_BOOT_BENCH_BIN')
     with H.heavy_guard(f'python3 benchmarks/boot-cost.py --label {label}'):
         with tempfile.TemporaryDirectory(prefix='tokenzero-boot-cost-') as raw:
             tmp = Path(raw); synthetic = tmp / 'synthetic-100k'; synthetic.mkdir(); H.synthetic_tree(synthetic, SYNTHETIC_FILES)

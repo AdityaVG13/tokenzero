@@ -153,7 +153,11 @@ impl SegmentStore {
     ) -> Result<Self, SegmentStoreError> {
         let cache = cache.into();
         let root = cache.parent().unwrap_or(Path::new(".")).to_path_buf();
+        // Recovery can truncate the hot segment and rewrite its index, so it must
+        // serialize with writers and use a manifest re-read under that lock.
+        let _lock = Lock::get(lock_path(&cache))?;
         let manifest = load_manifest_fallback(&Self::manifest_path(&cache))?;
+        cleanup_orphan_segments(&root, &manifest)?;
         let hot_index = load_or_recover_hot(&root, &manifest.hot)?;
         Ok(Self {
             cache_path: cache,
@@ -270,6 +274,7 @@ impl SegmentStore {
         self.reload()?;
         let mut n = 0;
         let mut keep = vec![];
+        let mut remove_after_publish = vec![];
         for d in self.manifest.cold.drain(..) {
             let idx = load_index(&self.root, &d)?;
             let expired = idx
@@ -282,8 +287,7 @@ impl SegmentStore {
                     .is_some_and(|c| portable_hash(&e.ref_id).is_some_and(|h| c.is_pinned(h)))
             });
             if expired && !pinned {
-                remove(&self.root.join(&d.data_file))?;
-                remove(&self.root.join(&d.index_file))?;
+                remove_after_publish.push(d.clone());
                 self.cold_indexes.remove(&d.generation);
                 n += 1
             } else {
@@ -293,7 +297,15 @@ impl SegmentStore {
         self.manifest.cold = keep;
         if n > 0 {
             self.manifest.generation += 1;
-            self.publish()?
+            // Both durable manifests must stop naming a segment before either
+            // file is unlinked. A crash before unlink leaves harmless orphans.
+            self.publish()?;
+            self.refresh_manifest_backup()?;
+            for d in remove_after_publish {
+                remove(&self.root.join(&d.data_file))?;
+                remove(&self.root.join(&d.index_file))?;
+            }
+            sync_dir(&self.root);
         }
         Ok(n)
     }
@@ -333,6 +345,14 @@ impl SegmentStore {
         self.manifest.generation += 1;
         Ok(())
     }
+    fn refresh_manifest_backup(&self) -> Result<(), SegmentStoreError> {
+        let p = Self::manifest_path(&self.cache_path);
+        fs::copy(&p, bak(&p))?;
+        File::open(bak(&p))?.sync_all()?;
+        sync_dir(&self.root);
+        Ok(())
+    }
+
     fn publish(&mut self) -> Result<(), SegmentStoreError> {
         let p = Self::manifest_path(&self.cache_path);
         self.manifest.checksum = checksum(&self.manifest)?;
@@ -392,6 +412,35 @@ fn load_manifest(p: &Path) -> Result<SegmentManifest, SegmentStoreError> {
 }
 fn load_manifest_fallback(p: &Path) -> Result<SegmentManifest, SegmentStoreError> {
     load_manifest(p).or_else(|_| load_manifest(&bak(p)))
+}
+
+fn cleanup_orphan_segments(
+    root: &Path,
+    manifest: &SegmentManifest,
+) -> Result<(), SegmentStoreError> {
+    let mut live = std::collections::BTreeSet::new();
+    for descriptor in std::iter::once(&manifest.hot).chain(manifest.cold.iter()) {
+        live.insert(descriptor.data_file.as_str());
+        live.insert(descriptor.index_file.as_str());
+    }
+    for entry in fs::read_dir(root)? {
+        let entry = entry?;
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else { continue };
+        let is_data = name
+            .strip_prefix("recovery.")
+            .and_then(|rest| rest.strip_suffix(".segment"))
+            .is_some_and(|generation| generation.parse::<u64>().is_ok());
+        let is_index = name
+            .strip_prefix("recovery.")
+            .and_then(|rest| rest.strip_suffix(".segment.index"))
+            .is_some_and(|generation| generation.parse::<u64>().is_ok());
+        if (is_data || is_index) && !live.contains(name) {
+            remove(&entry.path())?;
+        }
+    }
+    sync_dir(root);
+    Ok(())
 }
 fn bak(p: &Path) -> PathBuf {
     PathBuf::from(format!("{}.bak", p.display()))

@@ -2549,3 +2549,96 @@ fn zeroref_v1_legacy_short_ids_parsed_by_existing_parse_ref() {
         "legacy short IDs remain parseable via existing parse_ref"
     );
 }
+
+#[test]
+fn zeroref_v1_rejects_repeated_fragment_prefixes() {
+    for fragment in ["BB0-1", "LL1-L2"] {
+        let input = format!("tz://blob/{FULL_HASH}#{fragment}");
+        assert_eq!(
+            parse_zeroref_v1_blob(&input, None).unwrap_err(),
+            ZeroRefError::Malformed,
+            "{input}"
+        );
+    }
+}
+
+#[test]
+fn expand_rejects_full_portable_ref_payload_hash_mismatch() {
+    let (mut store, _cache, _dir) = temp_store();
+    let claimed = format!("tz://blob/{FULL_HASH}");
+    store.state.blobs.insert(
+        claimed.clone(),
+        BlobEntry::Inline("not the claimed bytes".into()),
+    );
+
+    let expanded = store.expand(&claimed, Some("raw"), None, None, None, None);
+
+    assert!(!expanded.found);
+    assert_eq!(expanded.reason, "zeroref-corruption");
+}
+
+#[test]
+fn expand_allows_legacy_migration_key_without_portable_hash_check() {
+    let (mut store, _cache, _dir) = temp_store();
+    let legacy = "tz://blob/b0123456789abcdef";
+    store
+        .state
+        .blobs
+        .insert(legacy.into(), BlobEntry::Inline("legacy payload".into()));
+
+    let expanded = store.expand(legacy, Some("raw"), None, None, None, None);
+
+    assert!(expanded.found, "{}", expanded.reason);
+    assert_eq!(expanded.content, "legacy payload");
+}
+
+#[test]
+fn repeated_payload_reuses_refs_without_persistent_mutation() {
+    let temp = tempfile::tempdir().unwrap();
+    let cache = temp.path().join("recovery.json");
+    let index = temp.path().join("ref-index.jsonl");
+    let previous_override = set_ref_index_test_override(Some((true, index.clone())));
+    let mut store = RecoveryStore::new(Some(cache.clone()));
+    let text = (0..64)
+        .map(|idx| format!("repeated payload unit {}", idx % 4))
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    let first = store
+        .store_payload(
+            &text,
+            ContentType::Code,
+            Some(Path::new("memo-source.rs")),
+            None,
+            None,
+        )
+        .unwrap();
+    assert_eq!(first.unit_refs.len(), 64);
+    assert_eq!(first.unit_refs[0], first.unit_refs[4]);
+    let snapshot_identity = DiskIdentity::capture(&cache);
+    let journal_identity = DiskIdentity::capture(&journal_path(&cache));
+    let index_identity = DiskIdentity::capture(&index);
+
+    let second = store
+        .store_payload(
+            &text,
+            ContentType::Code,
+            Some(Path::new("memo-source.rs")),
+            None,
+            None,
+        )
+        .unwrap();
+
+    assert_eq!(
+        serde_json::to_vec(&first).unwrap(),
+        serde_json::to_vec(&second).unwrap()
+    );
+    assert_eq!(DiskIdentity::capture(&cache), snapshot_identity);
+    assert_eq!(
+        DiskIdentity::capture(&journal_path(&cache)),
+        journal_identity
+    );
+    assert_eq!(DiskIdentity::capture(&index), index_identity);
+    assert!(store.session_refs.is_empty());
+    set_ref_index_test_override(previous_override);
+}

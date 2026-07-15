@@ -228,6 +228,9 @@ fn parse_fragment_bounds_core(
     allow_single: bool,
     require_nonzero_start: bool,
 ) -> Result<(usize, usize), bool> {
+    if value.starts_with(repeated_kind) {
+        return Err(false);
+    }
     let separated = value.split_once(',').or_else(|| value.split_once('-'));
     let (start, end) = match separated {
         Some((start, end)) => (start, end),
@@ -1153,6 +1156,12 @@ impl RecoveryStore {
                 Err(reason) => return miss!(reason),
             }
         };
+        if portable
+            .as_ref()
+            .is_some_and(|portable| sha256_hex(&content) != portable.hash)
+        {
+            return miss!("zeroref-corruption");
+        }
         if parsed.kind == "file" && self.file_ref_is_stale(parsed.bare) {
             return miss!("stale-ref");
         }
@@ -2935,65 +2944,6 @@ fn mtime_ns(meta: &fs::Metadata) -> u128 {
 }
 
 
-}
-
-#[cfg(test)]
-mod payload_memo_tests {
-    use super::*;
-
-    #[test]
-    fn repeated_payload_reuses_refs_without_persistent_mutation() {
-        let temp = tempfile::tempdir().unwrap();
-        let cache = temp.path().join("recovery.json");
-        let index = temp.path().join("ref-index.jsonl");
-        let previous_override = set_ref_index_test_override(Some((true, index.clone())));
-        let mut store = RecoveryStore::new(Some(cache.clone()));
-        let text = (0..64)
-            .map(|idx| format!("repeated payload unit {}", idx % 4))
-            .collect::<Vec<_>>()
-            .join(
-                "
-",
-            );
-
-        let first = store
-            .store_payload(
-                &text,
-                ContentType::Code,
-                Some(Path::new("memo-source.rs")),
-                None,
-                None,
-            )
-            .unwrap();
-        assert_eq!(first.unit_refs.len(), 64);
-        assert_eq!(first.unit_refs[0], first.unit_refs[4]);
-        let snapshot_identity = DiskIdentity::capture(&cache);
-        let journal_identity = DiskIdentity::capture(&journal_path(&cache));
-        let index_identity = DiskIdentity::capture(&index);
-
-        let second = store
-            .store_payload(
-                &text,
-                ContentType::Code,
-                Some(Path::new("memo-source.rs")),
-                None,
-                None,
-            )
-            .unwrap();
-
-        assert_eq!(
-            serde_json::to_vec(&first).unwrap(),
-            serde_json::to_vec(&second).unwrap()
-        );
-        assert_eq!(DiskIdentity::capture(&cache), snapshot_identity);
-        assert_eq!(
-            DiskIdentity::capture(&journal_path(&cache)),
-            journal_identity
-        );
-        assert_eq!(DiskIdentity::capture(&index), index_identity);
-        assert!(store.session_refs.is_empty());
-        set_ref_index_test_override(previous_override);
-    }
 }
 
 #[cfg(test)]

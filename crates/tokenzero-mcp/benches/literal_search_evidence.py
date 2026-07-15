@@ -13,6 +13,7 @@ import hashlib
 import json
 import math
 import os
+import platform
 from pathlib import Path
 import random
 import re
@@ -26,7 +27,7 @@ SCENARIOS = {
     "absent_ascii": "TZ_ABSENT_7f4c2d",
     "rare_ascii": "TZ_RARE_91b7",
     "common_ascii": "TZ_COMMON",
-    "unicode": "東京カフェ",
+    "unicode": "æ±äº¬ã«ãã§",
 }
 
 
@@ -67,7 +68,7 @@ def make_corpus(root: Path, files: int) -> None:
         if index % 997 == 0:
             lines[5] += " TZ_RARE_91b7"
         if index % 17 == 0:
-            lines[6] += " 東京カフェ"
+            lines[6] += " æ±äº¬ã«ãã§"
         (directory / f"f{index:06d}.txt").write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
@@ -120,7 +121,11 @@ def summarize(samples: list[tuple[float, int | None, str]]) -> dict[str, object]
     }
 
 
-def main() -> None:
+def gate_exit_code(acceptance: dict[str, bool]) -> int:
+    return 0 if acceptance.get("all_gates_pass") is True else 1
+
+
+def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--files", type=int, default=10_000)
     parser.add_argument("--runs", type=int, default=12)
@@ -208,6 +213,11 @@ def main() -> None:
                     "candidate_head": run(["git", "rev-parse", "HEAD"], cwd=repo).stdout.strip(),
                     "candidate_source": candidate_source,
                     "candidate_dirty": bool(run(["git", "status", "--porcelain"], cwd=repo).stdout),
+                    "machine": platform.machine(),
+                    "os": platform.platform(),
+                    "python": platform.python_version(),
+                    "baseline_binary_sha256": hashlib.sha256(binaries["baseline"].read_bytes()).hexdigest(),
+                    "candidate_binary_sha256": hashlib.sha256(binaries["candidate"].read_bytes()).hexdigest(),
                     "run_order": "alternating AB/BA per scenario iteration",
                 },
                 "scenarios": scenarios,
@@ -221,9 +231,10 @@ def main() -> None:
             args.output.parent.mkdir(parents=True, exist_ok=True)
             args.output.write_text(json.dumps(result, indent=2, sort_keys=True) + "\n")
             print(json.dumps(result["acceptance"], sort_keys=True))
+            return gate_exit_code(result["acceptance"])
         finally:
             run(["git", "worktree", "remove", "--force", str(baseline_tree)], cwd=repo)
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

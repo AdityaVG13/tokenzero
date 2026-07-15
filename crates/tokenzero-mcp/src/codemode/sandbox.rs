@@ -38,7 +38,7 @@ const DENIED_TOKENS: &[(&str, &str)] = &[
 
 pub(crate) fn lower_code_plan(plan: &str, limits: &CodeModeLimits) -> Result<String, String> {
     let trimmed = plan.trim_start();
-    let is_function_plan = ["export default", "function", "function"]
+    let is_function_plan = ["export default", "async function", "function"]
         .iter()
         .any(|prefix| trimmed.starts_with(prefix));
     if is_function_plan && plan.len() > limits.max_code_bytes {

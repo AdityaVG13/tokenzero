@@ -325,3 +325,6 @@ mod zip;
 use paths::*;
 use tar::*;
 use zip::*;
+
+#[cfg(test)]
+mod tests;

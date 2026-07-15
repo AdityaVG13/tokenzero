@@ -18,7 +18,6 @@ REPO = Path(__file__).resolve().parents[3]
 BIN = Path(os.environ.get("TOKENZERO_FIND_BENCH_BIN", REPO / "target/release/tokenzero"))
 EVIDENCE = Path(__file__).with_suffix("") / "evidence.json"
 QUERY = "fn "
-PRIOR_P95_MS = 33.0
 
 
 def percentile(values: list[float], fraction: float) -> float:
@@ -27,14 +26,27 @@ def percentile(values: list[float], fraction: float) -> float:
     return ordered[index]
 
 
-def source_diff_sha256() -> str:
-    diff = subprocess.run(
-        ["git", "diff", "--binary"],
-        cwd=REPO,
-        capture_output=True,
-        check=True,
+def source_state_sha256() -> str:
+    status = subprocess.run(
+        ["git", "status", "--short", "--untracked-files=all"], cwd=REPO,
+        capture_output=True, check=True,
     ).stdout
-    return hashlib.sha256(diff).hexdigest()
+    diff = subprocess.run(
+        ["git", "diff", "--binary", "HEAD"], cwd=REPO,
+        capture_output=True, check=True,
+    ).stdout
+    untracked = subprocess.run(
+        ["git", "ls-files", "--others", "--exclude-standard", "-z"], cwd=REPO,
+        capture_output=True, check=True,
+    ).stdout.split(b"\0")
+    digest = hashlib.sha256(status + diff)
+    for encoded in sorted(path for path in untracked if path):
+        content = (REPO / os.fsdecode(encoded)).read_bytes()
+        digest.update(len(encoded).to_bytes(8, "big"))
+        digest.update(encoded)
+        digest.update(len(content).to_bytes(8, "big"))
+        digest.update(content)
+    return digest.hexdigest()
 
 
 def run_sample(temp: Path, index: int) -> dict[str, Any]:
@@ -125,7 +137,7 @@ def run(runs: int, warmups: int, output: Path) -> dict[str, Any]:
             "machine": platform.machine(),
             "os": platform.platform(),
             "python": platform.python_version(),
-            "source_diff_sha256": source_diff_sha256(),
+            "source_state_sha256": source_state_sha256(),
         },
         "methodology": {
             "command": "tokenzero find 'fn ' crates --max-files 200 --mode passthrough --json",
@@ -136,7 +148,14 @@ def run(runs: int, warmups: int, output: Path) -> dict[str, Any]:
             "percentile": "nearest rank",
             "output_parity": "visible output SHA-256 and match count must be identical across samples",
         },
-        "prior_evidence": {"p95_ms": PRIOR_P95_MS, "source": "hyperfine-S3_find.json"},
+        "prior_evidence": {
+            "reported_p95_ms": 33.0,
+            "source": "hyperfine-S3_find.json",
+            "retained_artifact": False,
+            "verified": False,
+            "comparable": False,
+            "note": "The source artifact was not retained, so this number is excluded from gates and improvement claims.",
+        },
         "result": {
             "p50_ms": round(p50_ms, 6),
             "p95_ms": round(p95_ms, 6),
@@ -148,8 +167,9 @@ def run(runs: int, warmups: int, output: Path) -> dict[str, Any]:
             "samples_ms": elapsed,
         },
         "acceptance": {
-            "p95_below_prior_33ms": p95_ms < PRIOR_P95_MS,
-            "improvement_pct": round(100 * (PRIOR_P95_MS - p95_ms) / PRIOR_P95_MS, 3),
+            "output_stable_across_samples": True,
+            "performance_gate": None,
+            "reason": "no retained comparable baseline",
         },
     }
     output.parent.mkdir(parents=True, exist_ok=True)
@@ -164,8 +184,8 @@ def main() -> int:
     parser.add_argument("--warmups", type=int, default=3)
     parser.add_argument("--output", type=Path, default=EVIDENCE)
     args = parser.parse_args()
-    evidence = run(args.runs, args.warmups, args.output)
-    return 0 if evidence["acceptance"]["p95_below_prior_33ms"] else 1
+    run(args.runs, args.warmups, args.output)
+    return 0
 
 
 if __name__ == "__main__":

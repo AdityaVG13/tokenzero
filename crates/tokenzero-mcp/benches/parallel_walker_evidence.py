@@ -12,6 +12,7 @@ import hashlib
 import json
 import math
 import os
+import platform
 from pathlib import Path
 import random
 import re
@@ -38,6 +39,27 @@ def run(command: list[str], *, cwd: Path) -> subprocess.CompletedProcess[str]:
     return completed
 
 
+def source_tree_fingerprint(repo: Path) -> dict[str, object]:
+    """Hash every tracked or unignored source byte used by the candidate."""
+    paths = sorted(filter(None, run(
+        ["git", "ls-files", "--cached", "--others", "--exclude-standard"], cwd=repo
+    ).stdout.splitlines()))
+    digest = hashlib.sha256()
+    count = 0
+    for relative in paths:
+        path = repo / relative
+        if not path.is_file():
+            continue
+        encoded = relative.encode()
+        digest.update(len(encoded).to_bytes(8, "big"))
+        digest.update(encoded)
+        content = path.read_bytes()
+        digest.update(len(content).to_bytes(8, "big"))
+        digest.update(content)
+        count += 1
+    return {"sha256": digest.hexdigest(), "files": count}
+
+
 def make_corpus(root: Path, files: int, deep: bool) -> None:
     rng = random.Random(0xA11CE_2026 + int(deep))
     alphabet = "abcdefghijklmnopqrstuvwxyz0123456789_-"
@@ -50,7 +72,7 @@ def make_corpus(root: Path, files: int, deep: bool) -> None:
         directory.mkdir(parents=True, exist_ok=True)
         payload = "".join(rng.choices(alphabet, k=192))
         if index % 997 == 0:
-            payload += " café 東京"
+            payload += " cafÃ© æ±äº¬"
         (directory / f"f{index:06d}.txt").write_text(payload + "\n", encoding="utf-8")
     (root / ".hidden.txt").write_text("TZ_ABSENT_8f31c9\n")
     (root / "target").mkdir()
@@ -109,7 +131,11 @@ def summarize(samples: list[tuple[float, int | None, str]]) -> dict[str, object]
             "output_sha256": samples[0][2]}
 
 
-def main() -> None:
+def gate_exit_code(acceptance: dict[str, bool | None]) -> int:
+    return 0 if acceptance.get("all_gates_pass") is True else 1
+
+
+def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--files", type=int, default=100_000)
     parser.add_argument("--runs", type=int, default=12)
@@ -136,6 +162,7 @@ def main() -> None:
             corpora = {"shallow": temp / "shallow", "deep": temp / "deep"}
             make_corpus(corpora["shallow"], args.files, False)
             make_corpus(corpora["deep"], args.files, True)
+            candidate_source = source_tree_fingerprint(repo)
             targets = {"candidate": temp / "candidate-target", "baseline": temp / "baseline-target"}
             run(["cargo", "build", "--locked", "--profile", "release-perf", "-p", "tokenzero",
                  "--target-dir", str(targets["candidate"])], cwd=repo)
@@ -200,7 +227,13 @@ def main() -> None:
                                       "cold_command": args.cold_command,
                                       "output_parity_required": True, "baseline_ref": args.baseline,
                                       "baseline_commit": run(["git", "rev-parse", "HEAD"], cwd=baseline_tree).stdout.strip(),
-                                      "candidate_commit": run(["git", "rev-parse", "HEAD"], cwd=repo).stdout.strip()},
+                                      "candidate_commit": run(["git", "rev-parse", "HEAD"], cwd=repo).stdout.strip(),
+                                      "candidate_source": candidate_source,
+                                      "candidate_dirty": bool(run(["git", "status", "--porcelain"], cwd=repo).stdout),
+                                      "machine": platform.machine(), "os": platform.platform(),
+                                      "python": platform.python_version(),
+                                      "baseline_binary_sha256": hashlib.sha256(binaries["baseline"].read_bytes()).hexdigest(),
+                                      "candidate_binary_sha256": hashlib.sha256(binaries["candidate"].read_bytes()).hexdigest()},
                       "scenarios": scenarios, "losses": losses,
                       "acceptance": {"p50_at_least_20pct_faster": all(v["change_pct"]["p50_ms"] <= -20.0 for v in scenarios.values()),
                                      "p95_not_worse": all(v["change_pct"]["p95_ms"] <= 0.0 for v in scenarios.values()),
@@ -209,9 +242,10 @@ def main() -> None:
             args.output.parent.mkdir(parents=True, exist_ok=True)
             args.output.write_text(json.dumps(result, indent=2, sort_keys=True) + "\n")
             print(json.dumps(result["acceptance"], sort_keys=True))
+            return gate_exit_code(result["acceptance"])
         finally:
             run(["git", "worktree", "remove", "--force", str(baseline_tree)], cwd=repo)
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

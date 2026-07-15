@@ -42,6 +42,30 @@ fn session_working_set_eviction_is_visible_in_metrics() {
 }
 
 #[test]
+fn working_set_admission_does_not_depend_on_session_dedup() {
+    let dir = tempdir().unwrap();
+    let file = dir.path().join("dedup-off.rs");
+    let body = (0..300)
+        .map(|index| format!("line {index}: dedup-off working-set fixture\n"))
+        .collect::<String>();
+    fs::write(&file, body).unwrap();
+    let mut config = EngineConfig::for_root(dir.path());
+    config.session_dedup = false;
+    let engine = TokenZeroEngine::new(config);
+    *engine.working_set.lock().unwrap() = tokenzero_recovery::working_set::WorkingSet::new(1);
+
+    let response = engine.read(&[file], Mode::Auto, None, None, false, 20, 4000);
+    let visible = response.visible.unwrap().text;
+    assert!(
+        visible.starts_with("TZ-EVICT/1 ref=tz://blob/"),
+        "dedup-off reads must still enter the working set: {visible}"
+    );
+    let metrics = engine.tool_metrics_snapshot();
+    assert_eq!(metrics["working_set"]["evictions"], 1);
+    assert_eq!(metrics["working_set"]["refs_created"], 1);
+}
+
+#[test]
 fn session_expand_fault_is_byte_exact_and_updates_working_set_metrics() {
     let dir = tempdir().unwrap();
     let file = dir.path().join("fault.rs");

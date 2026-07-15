@@ -15,7 +15,7 @@ use crate::jsonrpc::{SUPPORTED_PROTOCOL_VERSIONS, tool_filter_discovery};
 
 /// PR18 policy descriptor revision. Bump whenever the tool or capability
 /// contract changes.
-pub const PR18_DESCRIPTOR_VERSION: &str = "PR18.1";
+pub const PR18_DESCRIPTOR_VERSION: &str = "PR18.2";
 
 /// Machine-readable policy descriptor enumerating every TokenZero tool,
 /// capability tag, and ZeroRef v1 feature.
@@ -193,4 +193,20 @@ fn build_all_tool_capabilities() -> Vec<ToolCapability> {
 /// This is the only place that owns the capabilities wire shape.
 pub(crate) fn build_capability_payload(engine: &crate::TokenZeroEngine) -> Value {
     CapabilityDescriptor::for_engine(engine).to_json()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn portable_ref_schema_addition_advances_descriptor_revision() {
+        let descriptor = CapabilityDescriptor::for_surface(McpToolSurface::Classic);
+        let payload = descriptor.to_json();
+
+        assert_eq!(payload["descriptorVersion"], "PR18.2");
+        assert_eq!(payload["zeroref_v1"]["portable_ref_kinds"], json!(["blob"]));
+        assert!(payload["zeroref_v1"]["unsupported_portable_ref_kinds"].is_array());
+        assert!(payload["zeroref_v1"]["limitations"].is_array());
+    }
 }

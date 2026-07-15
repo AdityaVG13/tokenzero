@@ -1088,3 +1088,6 @@ impl SessionLedgerReport {
         out
     }
 }
+
+#[cfg(test)]
+mod tests;

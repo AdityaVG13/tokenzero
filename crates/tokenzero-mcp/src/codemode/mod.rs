@@ -24,3 +24,6 @@ pub(crate) use containment::snapshot as containment_snapshot;
 pub use exec::execute_codemode_with_options;
 pub use result::{CODEMODE_SCHEMA, CodeModeOptions, CodeModeResult, CodeModeStatus};
 pub use store::{CODEMODE_LIMITS_SCHEMA, CodeModeLimits};
+
+#[cfg(test)]
+mod e2e_tests;

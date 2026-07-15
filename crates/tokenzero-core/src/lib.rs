@@ -923,7 +923,7 @@ fn is_critical_continuation_line(line: &str) -> bool {
     }
     let t = line.trim_start();
     let is_num = |n: &str| !n.is_empty() && n.chars().all(|c| c.is_ascii_digit());
-    starts_with_any(t, "-->|^|note:|help:")
+    starts_with_any(t, "-->|^|=|note:|help:")
         || t.split_once(' ')
             .is_some_and(|(n, r)| is_num(n) && r.trim_start().starts_with('|'))
 }
@@ -954,6 +954,7 @@ const PYTEST_NOISE_PREFIXES: &str =
 
 fn is_pytest_noise_line(t: &str) -> bool {
     starts_with_any(t, PYTEST_NOISE_PREFIXES)
+        || (!t.is_empty() && t.chars().all(|c| matches!(c, '.' | 's' | 'x' | 'X')))
         || (t.starts_with("==") && t.ends_with("==") && t.contains("session starts"))
         || (t.contains("::") && (ends_with_any(t, "PASSED|SKIPPED") || t.contains(" PASSED ")))
         || ends_with_any(t, "XPASS|SKIPPED")
@@ -1484,5 +1485,19 @@ mod tests {
         assert!(looks_failure_anchor_line("panic: parser failed"));
         assert!(!looks_failure_anchor_line("ok 12 - parser"));
         assert!(!looks_failure_anchor_line("not ready yet"));
+    }
+}
+
+#[cfg(test)]
+#[path = "tests/mod.rs"]
+mod semantic_tests;
+
+#[cfg(test)]
+mod core_safety_regressions {
+    use super::*;
+
+    #[test]
+    fn equals_prefixed_diagnostic_is_a_continuation() {
+        assert!(is_critical_continuation_line("= short test summary info ="));
     }
 }
