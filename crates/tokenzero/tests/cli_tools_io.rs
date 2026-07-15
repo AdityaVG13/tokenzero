@@ -138,10 +138,11 @@ fn cli_expand_not_found_names_all_lookup_tiers() {
 fn cli_expand_decode_failure_keeps_expand_failed_taxonomy() {
     let root = tempdir().unwrap();
     let cache = root.path().join("cache.json");
-    let expected = "D".repeat(70 * 1024);
+    let payload = root.path().join("payload.txt");
+    fs::write(&payload, "D".repeat(70 * 1024)).unwrap();
     let output = assert_success(
         tokenzero_cmd().env("TOKENZERO_REF_INDEX", "0").current_dir(root.path())
-            .args(argv!["run";"--cache-path";cache.to_str().unwrap();"--json";"--";"python3";"-c";&format!("import sys; sys.stdout.write({expected:?})")])
+            .args(argv!["run";"--cache-path";cache.to_str().unwrap();"--json";"--";"python3";"-c";"from pathlib import Path; import sys; sys.stdout.buffer.write(Path(sys.argv[1]).read_bytes())";payload.to_str().unwrap()])
             .output().unwrap(),
         "large run for decode",
     );
