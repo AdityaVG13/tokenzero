@@ -146,7 +146,7 @@ fn structural_dedupe_collapses_digit_varying_runs_but_not_criticals() {
         ])
         .collect::<Vec<_>>()
         .join("\n");
-    let deduped = dedupe_lines_structural(&text, 6);
+    let deduped = dedupe_lines_impl(&text, 6, true);
 
     assert!(deduped.contains("similar lines collapsed"), "{deduped}");
     assert_eq!(

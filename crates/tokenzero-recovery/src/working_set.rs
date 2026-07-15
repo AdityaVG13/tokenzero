@@ -108,11 +108,11 @@ impl PrefetchHook for SameFileNeighborPrefetch {
             .iter()
             .filter(|candidate| candidate.anchor.path == fault.path)
             .min_by_key(|candidate| {
-                let distance = if candidate.anchor.start_line > fault.end_line {
-                    candidate.anchor.start_line - fault.end_line
-                } else {
-                    fault.start_line.saturating_sub(candidate.anchor.end_line)
-                };
+                let distance = candidate
+                    .anchor
+                    .start_line
+                    .saturating_sub(fault.end_line)
+                    .max(fault.start_line.saturating_sub(candidate.anchor.end_line));
                 (distance, candidate.id)
             })
             .map(|candidate| PrefetchHint {
@@ -372,10 +372,10 @@ impl WorkingSet {
     }
 
     fn refresh_rates(&mut self) {
-        self.telemetry.fault_rate = if self.telemetry.lookups == 0 {
-            0.0
-        } else {
+        self.telemetry.fault_rate = if self.telemetry.lookups != 0 {
             self.telemetry.faults as f64 / self.telemetry.lookups as f64
+        } else {
+            0.0
         };
     }
 
@@ -403,13 +403,10 @@ impl WorkingSet {
     }
 
     fn remove_evicted_ref(&mut self, ref_id: &str, id: u64) {
-        let remove_key = if let Some(ids) = self.evicted_refs.get_mut(ref_id) {
+        if self.evicted_refs.get_mut(ref_id).is_some_and(|ids| {
             ids.retain(|candidate| *candidate != id);
             ids.is_empty()
-        } else {
-            false
-        };
-        if remove_key {
+        }) {
             self.evicted_refs.remove(ref_id);
         }
     }
@@ -452,10 +449,10 @@ impl WorkingSet {
                 let SpanBody::Resident(text) = &span.body else {
                     unreachable!()
                 };
-                (text.clone(), span.anchor.clone(), span.id)
+                (text, &span.anchor, span.id)
             };
-            let ref_id = store.store_blob(&bytes, ContentType::Unknown)?;
-            let replacement = format_ref_line(ref_id.clone(), &anchor);
+            let ref_id = store.store_blob(bytes, ContentType::Unknown)?;
+            let replacement = format_ref_line(ref_id.clone(), anchor);
             let bytes_evicted = bytes.len();
             self.spans[victim].body = SpanBody::Evicted {
                 ref_id: ref_id.clone(),

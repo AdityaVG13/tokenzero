@@ -1,45 +1,4 @@
-//! `TokenZeroEngine` methods extracted from `lib.rs`.
-#![allow(unused_imports)]
-
-use super::cache_pack::{
-    cache_pack_manifest_path, cache_pack_sources, previous_cache_digest, read_line_range_from_file,
-};
-use super::collect::*;
-use super::config::{
-    EngineConfig, FETCH_ALLOW_ENV, FETCH_DENY_ENV, FETCH_ENABLED_ENV, ServeFlight, new_session_id,
-};
-use super::fetch_cache::{epoch_secs, fetch_index_path, load_fetch_index, record_fetch};
-use super::fetch_guard::{FETCH_META_MARKER, split_fetch_meta, validate_fetch_target};
-use super::metrics;
-use super::paths::*;
-use super::render::*;
-use super::session::{
-    DiffTelemetry, SeenState, ServeKey, ServedRecord, SessionMemory, SessionSummary,
-};
-use super::{
-    Accounting, ContentType, DEFAULT_MCP_IDLE_TIMEOUT_SECS, DEFAULT_SHELL_TIMEOUT_SECS,
-    DIFF_MAX_BYTES, DIFF_MAX_LINES, DIFF_READS_ENV, EditHunk, MAX_MCP_IDLE_TIMEOUT_SECS,
-    MAX_SEARCH_VISITED_FILES, MAX_SHELL_TIMEOUT_SECS, MIN_SEARCH_VISITED_FILES, Mode, RG_PATH_ENV,
-    SEARCH_BACKEND_ENV, SEARCH_VISIT_MULTIPLIER, SESSION_DEDUP_ENV, SearchBackend, ServeOptions,
-    ShellRenderInput, TokenZeroEngine, ToolResponse, cache_maintenance, count_tokens,
-    detect_content_type, make_capsule, make_capsule_with_raw_tokens, ref_record, render_shell,
-    sha256_hex, shell_combined_output, shell_spill_dir, shell_timeout_from_secs,
-    split_command_string,
-};
-use crate::recall;
-use globset::{GlobBuilder, GlobMatcher};
-use serde_json::{Value, json};
-use std::collections::{BTreeMap, HashSet};
-use std::ffi::OsString;
-use std::fs;
-use std::path::{Path, PathBuf};
-use std::sync::{Condvar, Mutex, OnceLock};
-use std::time::{Duration, SystemTime};
-use tokenzero_filters::rewrite_command;
-use tokenzero_recovery::{ExpansionResult, RecoveryStore, StoredPayload};
-use tokenzero_runtime::{
-    RunOutputPolicy, StreamCapture, contains_platform_shell_syntax, run_command_with_policy,
-};
+use super::*;
 
 impl TokenZeroEngine {
     #[allow(clippy::too_many_arguments)]
@@ -55,12 +14,7 @@ impl TokenZeroEngine {
     ) -> ToolResponse {
         for root in roots {
             if !self.path_allowed(root) {
-                return ToolResponse::error(
-                    tool,
-                    "path_not_allowed",
-                    format!("path is outside allowed roots: {}", root.display()),
-                    None,
-                );
+                return path_not_allowed(tool, root);
             }
         }
         // Single-flight identical searches so a second pipelined call dedups
@@ -107,19 +61,22 @@ impl TokenZeroEngine {
         // fall back). Auto mode always falls back.
         let explicit_rg = matches!(self.config.search_backend, SearchBackend::Rg);
         let backend_unavailable = |reason: &str| {
-            ToolResponse::error(
+            failure_response(
                 tool,
                 "backend_unavailable",
                 format!("TOKENZERO_SEARCH_BACKEND=rg but ripgrep is unusable: {reason}"),
                 Some(
                     "install ripgrep, set TOKENZERO_RG_PATH, or use auto/internal \
-                     (internal matches literal substrings, not regex)"
-                        .to_string(),
+                  (internal matches literal substrings, not regex)",
                 ),
             )
         };
         let rg = match self.config.search_backend {
             SearchBackend::Internal => None,
+            SearchBackend::Auto if tool == "find" && roots.iter().all(|root| root.is_file()) => {
+                fallback_reason = Some("in_process_file_fast_path".to_owned());
+                None
+            }
             SearchBackend::Rg | SearchBackend::Auto => {
                 let resolved = self.rg_binary();
                 if resolved.is_none() {
@@ -142,14 +99,11 @@ impl TokenZeroEngine {
                 // its parse error instead of silently degrading to substring
                 // semantics that would return different results.
                 Err(RgFailure::InvalidPattern(message)) => {
-                    return ToolResponse::error(
+                    return failure_response(
                         tool,
                         "invalid_pattern",
                         message,
-                        Some(
-                            "fix the regex, or use tz_find for literal substring search"
-                                .to_string(),
-                        ),
+                        Some("fix the regex, or use tz_find for literal substring search"),
                     );
                 }
                 Err(RgFailure::Unavailable(reason)) => {
@@ -167,40 +121,31 @@ impl TokenZeroEngine {
         let output = flat_search_output(&matches);
         let compact = grouped_search_output(&matches);
         let (visible_source, grouped) = pick_cheaper(&output, &compact);
-        let mut store = RecoveryStore::new(Some(self.config.cache_path.clone()));
+        let mut store = self.recovery_store();
         let search_refs = store.store_search_output_deferred(&output, Some(query));
         let stored =
             store.store_payload_deferred(&output, ContentType::SearchResult, None, None, None);
-        let mut refs = Vec::new();
-        let mut storage_error = None;
-        match store.persist_pending() {
-            Ok(()) => {
-                refs.push(ref_record("blob", stored.blob_ref.clone(), output.len()));
-                refs.push(ref_record("file", stored.file_ref.clone(), output.len()));
-                refs.extend(search_refs.into_iter().map(|r| ref_record("search", r, 0)));
-            }
-            Err(err) => storage_error = Some(err.to_string()),
-        }
-        let refs_complete = prune_dead_refs(&store, &mut refs);
+        let mut refs = Vec::with_capacity(2 + search_refs.len());
+        push_payload_refs(&mut refs, &stored, output.len());
+        refs.extend(
+            search_refs
+                .into_iter()
+                .map(|id| ref_record("search", id, 0)),
+        );
+        let persisted = persist_refs(&mut store, &mut refs);
+        let refs_complete = persisted.refs_complete;
+        let storage_error = persisted.error;
         let exact_ref_tokens = exact_ref_token_count(&refs);
         let exact_refs_available = !refs.is_empty();
-        let capsule = if refs_complete {
-            make_capsule_with_raw_tokens(
-                visible_source,
-                stored.raw_tokens,
-                mode,
-                max_visible_tokens,
-                Some(&format!("{tool} {query}")),
-            )
-        } else {
-            tokenzero_core::Capsule {
-                text: output.trim_end().to_string(),
-                raw_tokens: stored.raw_tokens,
-                visible_tokens: stored.raw_tokens,
-                omitted_lines: 0,
-                mode,
-            }
-        };
+        let capsule = recoverable_capsule(
+            visible_source,
+            &output,
+            stored.raw_tokens,
+            mode,
+            max_visible_tokens,
+            &format!("{tool} {query}"),
+            refs_complete,
+        );
         let full_bytes = capsule.text.len();
         let mut visible_text = capsule.text;
         let mut final_visible_tokens = capsule.visible_tokens;
@@ -249,39 +194,25 @@ impl TokenZeroEngine {
                     }
                 }
             }
-            pending.push((
-                key,
-                ServedRecord {
-                    content_sha256,
-                    blob_ref: stored.blob_ref.clone(),
-                    file_ref: stored.file_ref.clone(),
-                    raw_tokens: stored.raw_tokens,
-                    line_count: output.lines().count(),
-                    byte_len: output.len(),
-                    served_at: SystemTime::now(),
-                    serve_count: 1,
-                },
-            ));
+            pending.push((key, served_record(&output, &stored)));
         }
-        let mut response = ToolResponse::ok(
+        let mut response = success_response(
             tool,
             mode,
             visible_text,
             refs,
-            Accounting {
-                raw_tokens: capsule.raw_tokens,
-                visible_tokens: final_visible_tokens,
-                recovery_tokens: 0,
-                exact_ref_tokens: Some(exact_ref_tokens),
-            },
+            (
+                capsule.raw_tokens,
+                final_visible_tokens,
+                0,
+                Some(exact_ref_tokens),
+            ),
         );
         response.content_type = Some(ContentType::SearchResult.to_string());
         if storage_error.is_some() {
-            response.diagnostic = Some(tokenzero_core::Diagnostic {
-                code: "cache_write_failed".to_string(),
-                message: format!("could not persist recovery cache for {tool} output"),
-                repair: Some("fix recovery cache permissions or pass --cache-path".to_string()),
-            });
+            response.diagnostic = Some(cache_write_diagnostic(format!(
+                "could not persist recovery cache for {tool} output"
+            )));
         }
         let mut telemetry = json!({
             "query": query,
@@ -348,23 +279,18 @@ impl TokenZeroEngine {
         let matcher = match GlobBuilder::new(pattern).literal_separator(false).build() {
             Ok(glob) => glob.compile_matcher(),
             Err(err) => {
-                return ToolResponse::error(
+                return failure_response(
                     "glob",
                     "invalid_glob",
                     err.to_string(),
-                    Some("check glob syntax".to_string()),
+                    Some("check glob syntax"),
                 );
             }
         };
         let mut paths: Vec<PathBuf> = Vec::new();
         for root in roots {
             if !self.path_allowed(root) {
-                return ToolResponse::error(
-                    "glob",
-                    "path_not_allowed",
-                    format!("path is outside allowed roots: {}", root.display()),
-                    None,
-                );
+                return path_not_allowed("glob", root);
             }
             collect_glob(
                 root,
@@ -393,11 +319,8 @@ impl TokenZeroEngine {
         );
         // search_result_response records degraded cache-persist markers in
         // telemetry; fold them into glob's object instead of clobbering them.
-        let prior = response.telemetry.take();
-        let prior_field = |key: &str| prior.as_ref().and_then(|t| t.get(key)).cloned();
-        let degraded = prior_field("degraded")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false);
+        let prior = response.telemetry.take().unwrap_or_default();
+        let degraded = prior["degraded"].as_bool().unwrap_or(false);
         response.telemetry = Some(json!({
             "pattern": pattern,
             "roots": roots.iter().map(|p| p.display().to_string()).collect::<Vec<_>>(),
@@ -406,9 +329,8 @@ impl TokenZeroEngine {
             "output_strategy": if grouped { "grouped_by_root" } else { "exact_first_glob" },
             "transport_status": if degraded { "degraded" } else { "ok" },
             "degraded": degraded,
-            "storage_error": prior_field("storage_error").unwrap_or(Value::Null),
-            "exact_refs_available": prior_field("exact_refs_available")
-                .and_then(|v| v.as_bool())
+            "storage_error": prior.get("storage_error").cloned().unwrap_or(Value::Null),
+            "exact_refs_available": prior["exact_refs_available"].as_bool()
                 .unwrap_or(!response.refs.is_empty())
         }));
         if rows.is_empty() {
@@ -441,12 +363,7 @@ impl TokenZeroEngine {
         let mut spans: Vec<(String, usize)> = Vec::new();
         for root in roots {
             if !self.path_allowed(root) {
-                return ToolResponse::error(
-                    "tree",
-                    "path_not_allowed",
-                    format!("path is outside allowed roots: {}", root.display()),
-                    None,
-                );
+                return path_not_allowed("tree", root);
             }
             spans.push((root.display().to_string(), entries.len()));
             collect_tree(
@@ -498,66 +415,45 @@ impl TokenZeroEngine {
         mode: Mode,
         max_visible_tokens: usize,
     ) -> ToolResponse {
-        let mut store = RecoveryStore::new(Some(self.config.cache_path.clone()));
+        let mut store = self.recovery_store();
         let search_refs = store.store_search_output_deferred(output, Some(key));
         let stored =
             store.store_payload_deferred(output, ContentType::SearchResult, None, None, None);
-        let mut refs = Vec::new();
-        let mut storage_error = None;
-        match store.persist_pending() {
-            Ok(()) => {
-                refs.push(ref_record("blob", stored.blob_ref, output.len()));
-                refs.push(ref_record("file", stored.file_ref, output.len()));
-                refs.extend(search_refs.into_iter().map(|r| ref_record("search", r, 0)));
-            }
-            Err(err) => storage_error = Some(err.to_string()),
-        }
-        let refs_complete = prune_dead_refs(&store, &mut refs);
+        let mut refs = Vec::with_capacity(2 + search_refs.len());
+        push_payload_refs(&mut refs, &stored, output.len());
+        refs.extend(
+            search_refs
+                .into_iter()
+                .map(|id| ref_record("search", id, 0)),
+        );
+        let persisted = persist_refs(&mut store, &mut refs);
         let exact_ref_tokens = exact_ref_token_count(&refs);
-        let capsule = if refs_complete {
-            match rendered {
-                Some(text) => make_capsule_with_raw_tokens(
-                    text,
-                    stored.raw_tokens,
-                    mode,
-                    max_visible_tokens,
-                    Some(&format!("{tool} {key}")),
-                ),
-                None => make_capsule(
-                    output,
-                    mode,
-                    max_visible_tokens,
-                    Some(&format!("{tool} {key}")),
-                ),
-            }
-        } else {
-            tokenzero_core::Capsule {
-                text: output.trim_end().to_string(),
-                raw_tokens: stored.raw_tokens,
-                visible_tokens: stored.raw_tokens,
-                omitted_lines: 0,
-                mode,
-            }
-        };
-        let mut response = ToolResponse::ok(
+        let capsule = recoverable_capsule(
+            rendered.unwrap_or(output),
+            output,
+            stored.raw_tokens,
+            mode,
+            max_visible_tokens,
+            &format!("{tool} {key}"),
+            persisted.refs_complete,
+        );
+        let mut response = success_response(
             tool,
             mode,
             capsule.text,
             refs,
-            Accounting {
-                raw_tokens: capsule.raw_tokens,
-                visible_tokens: capsule.visible_tokens,
-                recovery_tokens: store.recovery_tokens,
-                exact_ref_tokens: Some(exact_ref_tokens),
-            },
+            (
+                capsule.raw_tokens,
+                capsule.visible_tokens,
+                store.recovery_tokens,
+                Some(exact_ref_tokens),
+            ),
         );
         response.content_type = Some(ContentType::SearchResult.to_string());
-        if let Some(error) = storage_error {
-            response.diagnostic = Some(tokenzero_core::Diagnostic {
-                code: "cache_write_failed".to_string(),
-                message: format!("could not persist recovery cache for {tool} output"),
-                repair: Some("fix recovery cache permissions or pass --cache-path".to_string()),
-            });
+        if let Some(error) = persisted.error {
+            response.diagnostic = Some(cache_write_diagnostic(format!(
+                "could not persist recovery cache for {tool} output"
+            )));
             response.telemetry = Some(json!({
                 "transport_status": "degraded",
                 "degraded": true,

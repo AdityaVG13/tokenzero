@@ -6,16 +6,38 @@ on:
 permissions:
   contents: read
 
+env:
+  FSZERO_COMMIT: fd48260ccb5ba98487579206799d56eb06a1c10a
+  GRAPHZERO_COMMIT: d99032a9828c3401e5f4ce43f4260f7f1c4c63b4
+
 jobs:
   rust-core:
     strategy:
       fail-fast: false
       matrix:
-        os: [macos-latest, ubuntu-latest, windows-latest]
+        include:
+          - { os: macos-latest, rust_os: macos, exe: "" }
+          - { os: ubuntu-latest, rust_os: linux, exe: "" }
+          - { os: windows-latest, rust_os: windows, exe: .exe }
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - name: Checkout TokenZero
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - name: Checkout pinned FSZero
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          repository: AdityaVG13/fszero
+          ref: ${{ env.FSZERO_COMMIT }}
+          path: _siblings/fszero
+      - name: Checkout pinned GraphZero
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          repository: AdityaVG13/graphzero
+          ref: ${{ env.GRAPHZERO_COMMIT }}
+          path: _siblings/graphzero
+      - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable 2026-06-30
       - name: Rust format
         run: cargo fmt --all -- --check
       - name: Rust tests
@@ -27,17 +49,90 @@ jobs:
       - name: Windows verifier
         if: matrix.os == 'windows-latest'
         shell: pwsh
-        run: .\scripts\rust_windows_verify.ps1
+        run: ./scripts/rust_windows_verify.ps1
+      - name: Build real ZeroRef binaries
+        shell: bash
+        run: |
+          cargo build --release --locked --manifest-path _siblings/fszero/Cargo.toml --bin fszero
+          cargo build --release --locked --manifest-path _siblings/graphzero/Cargo.toml --bin graphzero
+          cargo build --release --locked -p tokenzero
+      - name: Run native ZeroRef conformance row
+        shell: bash
+        env:
+          FSZERO_BIN: ${{ github.workspace }}/_siblings/fszero/target/release/fszero${{ matrix.exe }}
+          GRAPHZERO_BIN: ${{ github.workspace }}/_siblings/graphzero/target/release/graphzero${{ matrix.exe }}
+          TOKENZERO_BIN: ${{ github.workspace }}/target/release/tokenzero${{ matrix.exe }}
+          FSZERO_COMMIT: ${{ env.FSZERO_COMMIT }}
+          GRAPHZERO_COMMIT: ${{ env.GRAPHZERO_COMMIT }}
+          TOKENZERO_COMMIT: ${{ github.event.pull_request.head.sha || github.sha }}
+          ZEROREF_OS_FILTER: ${{ matrix.rust_os }}
+          ZEROREF_EVIDENCE_PATH: ${{ github.workspace }}/results/current/zeroref-${{ matrix.rust_os }}.json
+        run: |
+          mkdir -p results/current
+          cargo test --locked -p tokenzero-recovery --test zeroref_conformance_matrix zeroref_conformance_matrix -- --ignored --exact --test-threads=1
+      - name: Run native migration and rollback lifecycle smokes
+        shell: bash
+        env:
+          ZEROREF_LIFECYCLE_EVIDENCE_PATH: ${{ github.workspace }}/results/current/zeroref-lifecycle-${{ matrix.rust_os }}.json
+        run: >-
+          cargo test --locked -p tokenzero-recovery
+          --test zeroref_lifecycle_smokes
+          zeroref_lifecycle_smokes_tokenzero_local
+          -- --exact --test-threads=1
+      - name: Retain native ZeroRef evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: zeroref-native-${{ matrix.rust_os }}
+          path: |
+            results/current/zeroref-${{ matrix.rust_os }}.json
+            results/current/zeroref-lifecycle-${{ matrix.rust_os }}.json
+          if-no-files-found: error
+          retention-days: 30
 
-  rust-release-gates:
+  zeroref-conformance-gate:
+    if: always()
+    needs: rust-core
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: actions/setup-node@v4
+      - name: Checkout TokenZero gate
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - name: Download every native evidence artifact
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          pattern: zeroref-native-*
+          path: results/zeroref-native
+          merge-multiple: true
+      - name: Exercise fail-closed aggregation cases
+        run: python3 .github/scripts/aggregate_zeroref_evidence.py --self-test
+      - name: Merge and gate retained ZeroRef evidence
+        run: >-
+          python3 .github/scripts/aggregate_zeroref_evidence.py
+          --input-dir results/zeroref-native
+          --output results/current/zeroref-conformance-merged.json
+          --fszero-commit "${{ env.FSZERO_COMMIT }}"
+          --graphzero-commit "${{ env.GRAPHZERO_COMMIT }}"
+          --tokenzero-commit "${{ github.event.pull_request.head.sha || github.sha }}"
+      - name: Retain merged green evidence
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: zeroref-conformance-merged
+          path: results/current/zeroref-conformance-merged.json
+          if-no-files-found: error
+          retention-days: 30
+
+  rust-release-gates:
+    needs: zeroref-conformance-gate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable 2026-06-30
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: "22"
-      - uses: ruby/setup-ruby@v1
+      - uses: ruby/setup-ruby@6e5d382445ae5590b7449d8b3bc8cb1c2c27f617 # v1
         with:
           ruby-version: "3.3"
       - name: Embedded test mod boundary
@@ -45,7 +140,7 @@ jobs:
       - name: Module boundaries
         run: python3 scripts/check_module_boundaries.py
       - name: Cargo deny (licenses, advisories, sources)
-        uses: EmbarkStudios/cargo-deny-action@v2
+        uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2
         with:
           command: check
       - name: Build release binary

@@ -211,7 +211,7 @@ failures can be recorded without leaving the harness. Reports land under
 | `tz_fetch` | TTL-cached http(s) fetch via curl with exact refs |
 | `tz_shell` | compressed shell/test/log output |
 | `tz_ingest` | external payload ingest with exact refs |
-| `tz_expand` | exact recovery from `tz://`, `fz://`, or `gz://` refs (same-store scheme alias; cross-engine expansion pending ZeroRef v1) |
+| `tz_expand` | exact recovery from `tz://`, `fz://`, or `gz://` blob refs (same-store scheme alias; cross-engine blob expand under shared CAS is release-gated on retained multi-OS evidence; non-blob portable refs unsupported) |
 | `tz_mem` | recovery/cache/config state |
 | `tz_cache_pack` | daemonless prompt-cache pack generation |
 | `tz_rewrite` | conservative command rewrite planning |

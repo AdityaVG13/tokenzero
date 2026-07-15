@@ -326,6 +326,48 @@ fn rg_and_internal_backends_return_identical_search_output() {
 }
 
 #[test]
+fn auto_find_single_file_uses_literal_fast_path_without_changing_output() {
+    if !rg_or_skip("auto_find_single_file_uses_literal_fast_path_without_changing_output") {
+        return;
+    }
+    let dir = tempdir().unwrap();
+    search_backend_fixture(dir.path());
+    let file = dir.path().join("alpha.rs");
+    let roots = vec![file];
+
+    let mut auto_engine = TokenZeroEngine::new(EngineConfig::for_root(dir.path()));
+    auto_engine.config.session_dedup = false;
+    let mut rg_engine = engine_with_backend(dir.path(), SearchBackend::Rg);
+    rg_engine.config.session_dedup = false;
+    let fast = auto_engine.find("needle", &roots, Mode::Auto, 20, 4000);
+    let rg = rg_engine.find("needle", &roots, Mode::Auto, 20, 4000);
+
+    let telemetry = fast.telemetry.as_ref().unwrap();
+    assert_eq!(telemetry["search_backend"], "internal");
+    assert_eq!(telemetry["fallback_reason"], "in_process_file_fast_path");
+    assert_eq!(
+        expanded_flat_output(&auto_engine, &fast),
+        expanded_flat_output(&rg_engine, &rg)
+    );
+    let invalid_utf8 = dir.path().join("invalid.bin");
+    fs::write(
+        &invalid_utf8,
+        [
+            b'c', b'a', b'f', 0xe9, b' ', b'n', b'e', b'e', b'd', b'l', b'e', b'\n',
+        ],
+    )
+    .unwrap();
+    let invalid_roots = vec![invalid_utf8];
+    let fast = auto_engine.find("needle", &invalid_roots, Mode::Auto, 20, 4000);
+    let rg = rg_engine.find("needle", &invalid_roots, Mode::Auto, 20, 4000);
+    assert_eq!(
+        expanded_flat_output(&auto_engine, &fast),
+        expanded_flat_output(&rg_engine, &rg),
+        "the in-process path must retain rg byte-search behavior"
+    );
+}
+
+#[test]
 fn grep_treats_pattern_as_regex_under_rg_backend() {
     if !rg_or_skip("grep_treats_pattern_as_regex_under_rg_backend") {
         return;

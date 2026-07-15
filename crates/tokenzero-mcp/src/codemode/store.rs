@@ -6,7 +6,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use tokenzero_core::{ContentType, count_tokens};
 use tokenzero_recovery::RecoveryStore;
 
-use super::result::{CodeModeResult, CodeModeStatus};
+use super::result::{CodeModeResult, CodeModeStatus, CodeModeTelemetry};
 
 pub const CODEMODE_LIMITS_SCHEMA: &str = "tokenzero.codemode.limits.v1";
 pub const DEFAULT_MAX_LOGICAL_OPS: usize = 1000;
@@ -104,8 +104,7 @@ pub struct ExecutionRecord {
 pub fn now_ms() -> u128 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .map(|duration| duration.as_millis())
-        .unwrap_or(0)
+        .map_or(0, |duration| duration.as_millis())
 }
 
 pub fn execution_id(code: &str, started_ms: u128) -> String {
@@ -139,24 +138,27 @@ impl ExecutionStore {
             store: RecoveryStore::new(Some(cache_path)),
         }
     }
-
     pub fn store_json(&mut self, value: &Value) -> Result<String, String> {
-        let text = serde_json::to_string_pretty(value).map_err(|err| err.to_string())?;
-        self.store_text(&text, ContentType::JsonConfig)
+        self.store_text(
+            &serde_json::to_string_pretty(value).map_err(|error| error.to_string())?,
+            ContentType::JsonConfig,
+        )
     }
-
     pub fn store_text(&mut self, text: &str, content_type: ContentType) -> Result<String, String> {
         self.store
             .store_payload(text, content_type, None, None, None)
             .map(|stored| stored.blob_ref.as_str().to_string())
-            .map_err(|err| err.to_string())
+            .map_err(|error| error.to_string())
     }
-
     pub fn alias(&mut self, logical_ref: &str, target_ref: &str) -> Result<(), String> {
         self.store
             .store_alias(logical_ref, target_ref)
-            .map_err(|err| err.to_string())
+            .map_err(|error| error.to_string())
     }
+}
+
+fn stored(result: Result<String, String>) -> String {
+    result.unwrap_or_else(|error| format!("store-error:{error}"))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -171,21 +173,16 @@ pub fn finalize_result(
     steps: Vec<ExecutionStep>,
 ) -> CodeModeResult {
     let id = execution_id(plan, started_ms);
-    let status_str = match result.status {
-        CodeModeStatus::Completed => "completed",
-        CodeModeStatus::Error => "error",
+    let completed = matches!(result.status, CodeModeStatus::Completed);
+    let (status_str, ack, telemetry_status) = if completed {
+        ("completed", "C", "ok")
+    } else {
+        ("error", "X0", "error")
     };
     result.execution_id = Some(id.clone());
-    result.visible_ack = match result.status {
-        CodeModeStatus::Completed => "C".to_string(),
-        CodeModeStatus::Error => "X0".to_string(),
-    };
-    result.telemetry.kind = "codemode.execute".to_string();
-    result.telemetry.status = if matches!(result.status, CodeModeStatus::Completed) {
-        "ok".to_string()
-    } else {
-        "error".to_string()
-    };
+    result.visible_ack = ack.into();
+    result.telemetry.kind = "codemode.execute".into();
+    result.telemetry.status = telemetry_status.into();
     result.telemetry.wall_ms = finished_ms.saturating_sub(started_ms) as u64;
     result.telemetry.steps_run = Some(steps.len());
     let mut extra = result
@@ -201,15 +198,9 @@ pub fn finalize_result(
     extra.insert("finished_at_ms".to_string(), json!(finished_ms));
     result.telemetry.extra = Some(Value::Object(extra));
 
-    let code_ref = store
-        .store_text(plan, ContentType::Code)
-        .unwrap_or_else(|err| format!("store-error:{err}"));
-    let steps_ref = store
-        .store_json(&json!(steps))
-        .unwrap_or_else(|err| format!("store-error:{err}"));
-    let telemetry_ref = store
-        .store_json(&json!(result.telemetry))
-        .unwrap_or_else(|err| format!("store-error:{err}"));
+    let code_ref = stored(store.store_text(plan, ContentType::Code));
+    let steps_ref = stored(store.store_json(&json!(steps)));
+    let telemetry_ref = stored(store.store_json(&json!(result.telemetry)));
 
     let result_ref = result.value.as_ref().and_then(|value| {
         serde_json::to_vec(value)
@@ -222,12 +213,13 @@ pub fn finalize_result(
         .as_ref()
         .and_then(|error| store.store_json(&json!(error)).ok());
 
-    let execution_logical_ref = execution_ref(&id, "");
-    let code_logical_ref = execution_ref(&id, "code");
-    let steps_logical_ref = execution_ref(&id, "steps");
-    let telemetry_logical_ref = execution_ref(&id, "telemetry");
-    let result_logical_ref = execution_ref(&id, "result");
-    let error_logical_ref = execution_ref(&id, "error");
+    let logical_ref = |suffix| execution_ref(&id, suffix);
+    let execution_logical_ref = logical_ref("");
+    let code_logical_ref = logical_ref("code");
+    let steps_logical_ref = logical_ref("steps");
+    let telemetry_logical_ref = logical_ref("telemetry");
+    let result_logical_ref = logical_ref("result");
+    let error_logical_ref = logical_ref("error");
 
     let mut logical_refs = json!({
         "execution": execution_logical_ref,
@@ -257,11 +249,9 @@ pub fn finalize_result(
         refs: result.refs.clone(),
     };
     let record_value = serde_json::to_value(&record).unwrap_or(Value::Null);
-    let execution_record_ref = store
-        .store_json(&record_value)
-        .unwrap_or_else(|err| format!("store-error:{err}"));
+    let execution_record_ref = stored(store.store_json(&record_value));
 
-    let envelope_logical_ref = execution_ref(&id, "envelope");
+    let envelope_logical_ref = logical_ref("envelope");
     let envelope_bundle = json!({
         "schema": "tokenzero.codemode.envelope.v2",
         "execution_id": id.clone(),
@@ -279,9 +269,7 @@ pub fn finalize_result(
             "execution_record_ref": execution_record_ref.clone(),
         }
     });
-    let envelope_ref = store
-        .store_json(&envelope_bundle)
-        .unwrap_or_else(|err| format!("store-error:{err}"));
+    let envelope_ref = stored(store.store_json(&envelope_bundle));
     if let Some(obj) = logical_refs.as_object_mut() {
         obj.insert("envelope".to_string(), json!(envelope_logical_ref.clone()));
         if let Some(stored) = obj.get_mut("stored").and_then(Value::as_object_mut) {
@@ -289,17 +277,19 @@ pub fn finalize_result(
         }
     }
 
-    let _ = store.alias(&execution_logical_ref, &execution_record_ref);
-    let _ = store.alias(&code_logical_ref, &code_ref);
-    let _ = store.alias(&steps_logical_ref, &steps_ref);
-    let _ = store.alias(&telemetry_logical_ref, &telemetry_ref);
-    if let Some(stored) = result_ref.as_deref() {
-        let _ = store.alias(&result_logical_ref, stored);
+    for (logical, stored) in [
+        (&execution_logical_ref, Some(execution_record_ref.as_str())),
+        (&code_logical_ref, Some(code_ref.as_str())),
+        (&steps_logical_ref, Some(steps_ref.as_str())),
+        (&telemetry_logical_ref, Some(telemetry_ref.as_str())),
+        (&result_logical_ref, result_ref.as_deref()),
+        (&error_logical_ref, error_ref.as_deref()),
+        (&envelope_logical_ref, Some(envelope_ref.as_str())),
+    ] {
+        if let Some(stored) = stored {
+            let _ = store.alias(logical, stored);
+        }
     }
-    if let Some(stored) = error_ref.as_deref() {
-        let _ = store.alias(&error_logical_ref, stored);
-    }
-    let _ = store.alias(&envelope_logical_ref, &envelope_ref);
 
     if result.refs.len() < limits.max_refs_emitted {
         result.refs.push(execution_record_ref);
@@ -309,6 +299,13 @@ pub fn finalize_result(
     result
 }
 
+fn record_visible_tokens(telemetry: &mut CodeModeTelemetry, visible: usize) {
+    telemetry.visible_tokens = visible;
+    if let Some(extra) = telemetry.extra.as_mut().and_then(Value::as_object_mut) {
+        extra.insert("visible_tokens".to_string(), json!(visible));
+    }
+}
+
 fn guard_visible_output(result: &mut CodeModeResult, limits: &CodeModeLimits) {
     if result.refs.len() > limits.max_refs_emitted {
         result.refs.truncate(limits.max_refs_emitted);
@@ -316,36 +313,19 @@ fn guard_visible_output(result: &mut CodeModeResult, limits: &CodeModeLimits) {
     if let Some(value) = &mut result.value {
         if cap_exact_expand_value(value, limits.max_output_bytes) {
             let visible = count_tokens(&serde_json::to_string(value).unwrap_or_default());
-            result.telemetry.visible_tokens = visible;
-            if let Some(extra) = result
-                .telemetry
-                .extra
-                .as_mut()
-                .and_then(Value::as_object_mut)
-            {
-                extra.insert("visible_tokens".to_string(), json!(visible));
-            }
+            record_visible_tokens(&mut result.telemetry, visible);
         }
         strip_exact_expand_markers(value);
     }
     if let Some(value) = &mut result.value {
         if let Value::String(text) = value.clone() {
             if text.len() > limits.max_output_bytes && super::exec::is_exact_expand_value(value) {
-                let note = "\n[tokenzero expand truncated: output exceeded CodeMode max_output_bytes; rerun expand with start_line/end_line windowing opts]\n";
-                let mut kept: String = text;
-                loop {
-                    let candidate = format!("{kept}{note}");
-                    let serialized_len = serde_json::to_string(&candidate)
-                        .map(|s| s.len())
-                        .unwrap_or(usize::MAX);
-                    if serialized_len <= limits.max_output_bytes || kept.is_empty() {
-                        super::exec::record_exact_expand_payload(&candidate);
-                        *value = Value::String(candidate);
-                        break;
-                    }
-                    let keep_chars = kept.chars().count().saturating_mul(3) / 4;
-                    kept = kept.chars().take(keep_chars).collect();
-                }
+                let fitted = truncate_string_to_fit(text, |candidate| {
+                    serde_json::to_string(candidate)
+                        .is_ok_and(|serialized| serialized.len() <= limits.max_output_bytes)
+                });
+                super::exec::record_exact_expand_payload(&fitted);
+                *value = Value::String(fitted);
                 let visible = count_tokens(&serde_json::to_string(value).unwrap_or_default());
                 result.telemetry.visible_tokens = visible;
             }
@@ -361,83 +341,61 @@ fn guard_visible_output(result: &mut CodeModeResult, limits: &CodeModeLimits) {
                 "message": "visible result exceeded CodeMode max_output_bytes; expand result ref from execution_refs.stored.result",
                 "bytes": bytes,
             }));
-            result.telemetry.visible_tokens = count_tokens("C");
-            if let Some(extra) = result
-                .telemetry
-                .extra
-                .as_mut()
-                .and_then(Value::as_object_mut)
-            {
-                extra.insert("visible_tokens".to_string(), json!(count_tokens("C")));
-            }
+            record_visible_tokens(&mut result.telemetry, count_tokens("C"));
         }
+    }
+}
+
+const TRUNCATION_NOTE: &str = "\n[tokenzero expand truncated: output exceeded CodeMode max_output_bytes; rerun expand with start_line/end_line windowing opts]\n";
+
+fn truncate_string_to_fit(mut text: String, mut fits: impl FnMut(&str) -> bool) -> String {
+    loop {
+        let candidate = format!("{text}{TRUNCATION_NOTE}");
+        if text.is_empty() || fits(&candidate) {
+            return candidate;
+        }
+        let keep_chars = text.chars().count().saturating_mul(3) / 4;
+        text = text.chars().take(keep_chars).collect();
+    }
+}
+
+fn record_exact_text(value: &Value) {
+    if let Some(text) = value.get("text").and_then(Value::as_str) {
+        super::exec::record_exact_expand_payload(text);
     }
 }
 
 fn cap_exact_expand_value(value: &mut Value, max_output_bytes: usize) -> bool {
     match value {
-        Value::Object(map) => {
+        Value::Object(map)
             if map
                 .get("__tz_exact_expand")
                 .and_then(Value::as_bool)
-                .unwrap_or(false)
+                .unwrap_or(false) =>
+        {
+            let Some(kept) = map.get("text").and_then(Value::as_str).map(str::to_string) else {
+                return false;
+            };
+            if serde_json::to_vec(&*map)
+                .map(|bytes| bytes.len() <= max_output_bytes)
+                .unwrap_or(true)
             {
-                let Some(original) = map.get("text").and_then(Value::as_str).map(str::to_string)
-                else {
-                    return false;
-                };
-                if serde_json::to_vec(value)
-                    .map(|bytes| bytes.len() <= max_output_bytes)
-                    .unwrap_or(true)
-                {
-                    return false;
-                }
-                let note = "\n[tokenzero expand truncated: output exceeded CodeMode max_output_bytes; rerun expand with start_line/end_line windowing opts]\n";
-                let mut kept = original.clone();
-                loop {
-                    if let Value::Object(map) = value {
-                        map.insert("text".to_string(), Value::String(format!("{kept}{note}")));
-                    }
-                    if serde_json::to_vec(value)
-                        .map(|bytes| bytes.len() <= max_output_bytes)
-                        .unwrap_or(false)
-                    {
-                        if let Value::Object(map) = value {
-                            if let Some(text) = map.get("text").and_then(Value::as_str) {
-                                super::exec::record_exact_expand_payload(text);
-                            }
-                        }
-                        return true;
-                    }
-                    if kept.is_empty() {
-                        if let Value::Object(map) = value {
-                            if let Some(text) = map.get("text").and_then(Value::as_str) {
-                                super::exec::record_exact_expand_payload(text);
-                            }
-                        }
-                        return true;
-                    }
-                    let new_len = kept
-                        .char_indices()
-                        .nth(kept.chars().count().saturating_mul(3) / 4)
-                        .map(|(idx, _)| idx)
-                        .unwrap_or(0);
-                    kept.truncate(new_len);
-                }
+                return false;
             }
-            let mut changed = false;
-            for item in map.values_mut() {
-                changed |= cap_exact_expand_value(item, max_output_bytes);
-            }
-            changed
+            let fitted = truncate_string_to_fit(kept, |candidate| {
+                map.insert("text".into(), Value::String(candidate.to_string()));
+                serde_json::to_vec(&*map).is_ok_and(|bytes| bytes.len() <= max_output_bytes)
+            });
+            map.insert("text".into(), Value::String(fitted));
+            record_exact_text(value);
+            true
         }
-        Value::Array(items) => {
-            let mut changed = false;
-            for item in items {
-                changed |= cap_exact_expand_value(item, max_output_bytes);
-            }
-            changed
-        }
+        Value::Object(map) => map.values_mut().fold(false, |changed, item| {
+            cap_exact_expand_value(item, max_output_bytes) | changed
+        }),
+        Value::Array(items) => items.iter_mut().fold(false, |changed, item| {
+            cap_exact_expand_value(item, max_output_bytes) | changed
+        }),
         _ => false,
     }
 }
@@ -446,15 +404,9 @@ fn strip_exact_expand_markers(value: &mut Value) {
     match value {
         Value::Object(map) => {
             map.remove("__tz_exact_expand");
-            for value in map.values_mut() {
-                strip_exact_expand_markers(value);
-            }
+            map.values_mut().for_each(strip_exact_expand_markers);
         }
-        Value::Array(items) => {
-            for value in items {
-                strip_exact_expand_markers(value);
-            }
-        }
+        Value::Array(items) => items.iter_mut().for_each(strip_exact_expand_markers),
         _ => {}
     }
 }

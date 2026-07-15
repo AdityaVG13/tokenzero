@@ -240,3 +240,21 @@ Resolving deltas: 100% (500/500), done.\n";
         rendered.visible
     );
 }
+
+#[test]
+fn pytest_success_collapses_bare_progress_lines() {
+    let stdout = "collected 12 items\n............\n============ 12 passed in 0.34s ============\n";
+    let rendered = render_shell(success_input("pytest tests -q", stdout, ""));
+
+    assert_eq!(rendered.output_strategy, "compact_success_shell");
+    assert!(
+        rendered.visible.contains("12 passed in 0.34s"),
+        "{}",
+        rendered.visible
+    );
+    assert!(
+        !rendered.visible.contains("............"),
+        "{}",
+        rendered.visible
+    );
+}

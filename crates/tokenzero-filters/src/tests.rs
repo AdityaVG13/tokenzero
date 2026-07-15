@@ -262,7 +262,7 @@ fn argument_payloads_are_never_classified_as_intent() {
         r#"printf '%s' "drop table""#,
     ] {
         assert_eq!(
-            unsafe_reason(command),
+            analyze_shell(command).0,
             None,
             "payload changed policy: {command}"
         );
@@ -276,7 +276,9 @@ fn argument_payloads_are_never_classified_as_intent() {
         r#"git push -o ci.variable="message=read only""#,
     ] {
         assert!(
-            unsafe_reason(command).is_some_and(|reason| reason.contains("git mutation")),
+            analyze_shell(command)
+                .0
+                .is_some_and(|reason| reason.contains("git mutation")),
             "listed mutation escaped policy: {command}"
         );
     }
@@ -299,7 +301,7 @@ rm x",
         r#"/bin/sh -c 'git push origin main'"#,
     ] {
         assert!(
-            unsafe_reason(command).is_some(),
+            analyze_shell(command).0.is_some(),
             "mutation escaped policy: {command}"
         );
     }
@@ -309,14 +311,14 @@ rm x",
 fn quoted_command_text_is_data_but_substitutions_still_execute() {
     for command in [r#"echo "rm -rf""#, r#"printf '%s' 'git push'"#] {
         assert_eq!(
-            unsafe_reason(command),
+            analyze_shell(command).0,
             None,
             "quoted data changed policy: {command}"
         );
     }
     for command in [r#"echo "$(rm x)""#, "printf '%s' \u{60}git push\u{60}"] {
         assert!(
-            unsafe_reason(command).is_some(),
+            analyze_shell(command).0.is_some(),
             "substitution escaped policy: {command}"
         );
     }
@@ -332,9 +334,9 @@ fn backslash_escaped_quotes_split_correctly() {
         vec!["cat".to_string(), "a\"b.txt".to_string()]
     );
     // An escaped quote must not flip quote state and hide a real pipe.
-    assert!(has_shell_operators(r#"echo \" | rm -rf /tmp/x"#));
+    assert!(analyze_shell(r#"echo \" | rm -rf /tmp/x"#).1);
     // An escaped operator is not an operator.
-    assert!(!has_shell_operators(r"cat foo\;bar.txt"));
+    assert!(!analyze_shell(r"cat foo\;bar.txt").1);
 }
 
 // ── Quiet flag injection ─────────────────────────────────────────────────────

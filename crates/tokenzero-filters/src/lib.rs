@@ -39,58 +39,54 @@ pub struct DiscoverReport {
     pub os_warnings: Vec<String>,
 }
 
+type Words = &'static [&'static str];
+
+const FILTER_SPECS: &[(&str, &str)] = &[
+    ("read", "cat|head|tail|wc"),
+    ("search", "rg|grep|findstr"),
+    ("tree", "find|ls|tree"),
+    ("git", "git status|git diff|git log"),
+    (
+        "test",
+        "pytest|cargo test|go test|npm test|pnpm test|yarn test|jest|vitest",
+    ),
+    (
+        "build",
+        "cargo build|npm run build|pnpm build|yarn build|tsc|eslint|ruff|mypy|clippy",
+    ),
+    ("docker", "docker ps|docker logs|docker compose"),
+    ("kubectl", "kubectl get|kubectl logs|kubectl describe"),
+    ("package", "cargo|npm|pnpm|yarn|uv"),
+    ("config", "json|yaml|toml|logs"),
+];
+
+// Ordered: specific command/subcommand pairs precede broad package families.
+const CLASS_RULES: &[(&str, Words, Words)] = &[
+    ("read", &["cat", "head", "tail", "wc"], &[]),
+    ("search", &["rg", "grep", "findstr"], &[]),
+    ("tree", &["find", "ls", "tree"], &[]),
+    ("git", &["git"], &[]),
+    ("test", &["pytest", "unittest", "jest", "vitest"], &[]),
+    ("test", &["cargo", "go", "npm", "pnpm", "yarn"], &["test"]),
+    ("build", &["cargo"], &["build"]),
+    ("build", &["npm", "pnpm", "yarn"], &["run", "build"]),
+    ("build", &["tsc", "eslint", "ruff", "mypy", "clippy"], &[]),
+    ("docker", &["docker"], &[]),
+    ("kubectl", &["kubectl"], &[]),
+    ("package", &["cargo", "npm", "pnpm", "yarn", "uv"], &[]),
+];
+
 pub fn supported_filters() -> Vec<FilterInfo> {
-    vec![
-        info("read", ["cat", "head", "tail", "wc"]),
-        info("search", ["rg", "grep", "findstr"]),
-        info("tree", ["find", "ls", "tree"]),
-        info("git", ["git status", "git diff", "git log"]),
-        info(
-            "test",
-            [
-                "pytest",
-                "cargo test",
-                "go test",
-                "npm test",
-                "pnpm test",
-                "yarn test",
-                "jest",
-                "vitest",
-            ],
-        ),
-        info(
-            "build",
-            [
-                "cargo build",
-                "npm run build",
-                "pnpm build",
-                "yarn build",
-                "tsc",
-                "eslint",
-                "ruff",
-                "mypy",
-                "clippy",
-            ],
-        ),
-        info("docker", ["docker ps", "docker logs", "docker compose"]),
-        info(
-            "kubectl",
-            ["kubectl get", "kubectl logs", "kubectl describe"],
-        ),
-        info("package", ["cargo", "npm", "pnpm", "yarn", "uv"]),
-        info("config", ["json", "yaml", "toml", "logs"]),
-    ]
+    FILTER_SPECS
+        .iter()
+        .map(|&(family, commands)| FilterInfo {
+            family: family.to_string(),
+            commands: commands.split('|').map(str::to_string).collect(),
+            supported: true,
+            exact_refs: true,
+        })
+        .collect()
 }
-
-fn info<const N: usize>(family: &str, commands: [&str; N]) -> FilterInfo {
-    FilterInfo {
-        family: family.to_string(),
-        commands: commands.iter().map(|v| v.to_string()).collect(),
-        supported: true,
-        exact_refs: true,
-    }
-}
-
 pub fn discover() -> DiscoverReport {
     DiscoverReport {
         schema_version: "tokenzero.discover.v1".to_string(),
@@ -105,98 +101,71 @@ pub fn discover() -> DiscoverReport {
 }
 
 pub fn os_warnings() -> Vec<String> {
-    let mut warnings = Vec::new();
-    if cfg!(windows) {
-        warnings
-            .push("verify PowerShell and cmd quoting with the OS matrix before launch".to_string());
-    }
-    warnings
+    cfg!(windows)
+        .then(|| "verify PowerShell and cmd quoting with the OS matrix before launch".to_string())
+        .into_iter()
+        .collect()
+}
+
+fn classify_words(parts: &[String]) -> &'static str {
+    let first = parts.first().map(String::as_str).unwrap_or_default();
+    let second = parts.get(1).map(String::as_str).unwrap_or_default();
+    CLASS_RULES
+        .iter()
+        .find(|(_, commands, subcommands)| {
+            commands.contains(&first) && (subcommands.is_empty() || subcommands.contains(&second))
+        })
+        .map_or("unknown", |rule| rule.0)
 }
 
 pub fn classify_command(command: &str) -> String {
-    let parts = split_words(command);
-    let first = parts.first().map(String::as_str).unwrap_or_default();
-    let second = parts.get(1).map(String::as_str).unwrap_or_default();
-    match first {
-        "cat" | "head" | "tail" | "wc" => "read",
-        "rg" | "grep" | "findstr" => "search",
-        "find" | "ls" | "tree" => "tree",
-        "git" => "git",
-        "pytest" | "unittest" | "jest" | "vitest" => "test",
-        "cargo" if second == "test" => "test",
-        "go" if second == "test" => "test",
-        "npm" | "pnpm" | "yarn" if second == "test" => "test",
-        "cargo" if second == "build" => "build",
-        "npm" | "pnpm" | "yarn" if second == "run" || second == "build" => "build",
-        "tsc" | "eslint" | "ruff" | "mypy" | "clippy" => "build",
-        "docker" => "docker",
-        "kubectl" => "kubectl",
-        "cargo" | "npm" | "pnpm" | "yarn" | "uv" => "package",
-        _ => "unknown",
-    }
-    .to_string()
+    classify_words(&split_words(command)).to_string()
 }
 
 pub fn rewrite_command(command: &str, mode: &str, enabled: bool) -> RewriteResult {
-    let family = classify_command(command);
+    let parts = split_words(command);
+    let family = classify_words(&parts);
     if !enabled || mode == "off" {
-        // Disabled still reports an honest safety verdict: run the normal
-        // analysis and discard the rewrite.
-        let probe = rewrite_command(command, "safe", true);
-        return result(command, command, false, "disabled", &family, probe.safe);
+        let safe = rewrite_enabled(command, family, &parts).safe;
+        return result(command, command.into(), false, "disabled", family, safe);
     }
-    if let Some(reason) = unsafe_reason(command) {
-        return result(command, command, false, &reason, &family, false);
+    rewrite_enabled(command, family, &parts)
+}
+
+fn rewrite_enabled(command: &str, family: &str, parts: &[String]) -> RewriteResult {
+    let (unsafe_reason, compound) = analyze_shell(command);
+    if let Some(reason) = unsafe_reason {
+        return result(command, command.into(), false, &reason, family, false);
     }
-    // Family rewrites only understand a single simple command; rewriting one
-    // segment of a pipeline/sequence produces a broken command (e.g.
-    // `cat a | grep b` must not become `tokenzero read a '|' grep b`).
-    // Compounds are never vouched: any segment could mutate.
-    if has_shell_operators(command) {
+    if compound {
         return result(
             command,
-            command,
+            command.into(),
             false,
             "compound command left unmodified",
-            &family,
+            family,
             false,
         );
     }
-    let rewritten = match family.as_str() {
-        "read" => rewrite_read(command),
-        "search" => rewrite_search(command),
-        "tree" => rewrite_tree(command),
-        "git" => rewrite_git(command),
-        "test" | "build" | "package" => {
-            Some(inject_quiet_flag(command).unwrap_or_else(|| command.to_string()))
+    match apply_rewrite(family, command, parts) {
+        Some(rewritten) => {
+            let applied = rewritten != command;
+            result(
+                command,
+                rewritten,
+                applied,
+                if applied {
+                    "bounded tokenzero-safe rewrite"
+                } else {
+                    "already bounded or passthrough"
+                },
+                family,
+                true,
+            )
         }
-        "docker" | "kubectl" => Some(command.to_string()),
-        _ => None,
-    };
-    finish_rewrite(command, &family, rewritten)
-}
-
-fn finish_rewrite(command: &str, family: &str, rewritten: Option<String>) -> RewriteResult {
-    match rewritten {
-        Some(value) if value != command => result(
-            command,
-            &value,
-            true,
-            "bounded tokenzero-safe rewrite",
-            family,
-            true,
-        ),
-        Some(_) => result(
-            command,
-            command,
-            false,
-            "already bounded or passthrough",
-            family,
-            true,
-        ),
         None => result(
             command,
-            command,
+            command.into(),
             false,
             "unsupported command family",
             family,
@@ -207,7 +176,7 @@ fn finish_rewrite(command: &str, family: &str, rewritten: Option<String>) -> Rew
 
 fn result(
     command: &str,
-    rewritten: &str,
+    rewritten: std::borrow::Cow<'_, str>,
     applied: bool,
     reason: &str,
     family: &str,
@@ -217,7 +186,7 @@ fn result(
         schema_version: "tokenzero.rewrite.v1".to_string(),
         status: "ok".to_string(),
         command: command.to_string(),
-        rewritten_command: rewritten.to_string(),
+        rewritten_command: rewritten.into_owned(),
         applied,
         reason: reason.to_string(),
         family: family.to_string(),
@@ -225,64 +194,48 @@ fn result(
     }
 }
 
-fn rewrite_read(command: &str) -> Option<String> {
-    let parts = split_words(command);
-    match parts.first().map(String::as_str) {
-        Some("cat") if parts.len() >= 2 => {
-            Some(format!("tokenzero read {}", shell_join(&parts[1..])))
-        }
-        Some("head") | Some("tail") => Some(command.to_string()),
-        _ => None,
-    }
-}
-
-fn rewrite_search(command: &str) -> Option<String> {
-    let parts = split_words(command);
-    match parts.first().map(String::as_str) {
-        Some("rg") | Some("grep") if parts.len() >= 2 => Some(command.to_string()),
-        _ => None,
-    }
-}
-
-fn rewrite_tree(command: &str) -> Option<String> {
-    let parts = split_words(command);
-    match parts.first().map(String::as_str) {
-        Some("tree") => {
-            if parts.iter().any(|p| is_tree_depth_flag(p)) {
-                Some(command.to_string())
-            } else {
-                Some(format!("{command} -L 2"))
+fn apply_rewrite<'a>(
+    family: &str,
+    command: &'a str,
+    parts: &[String],
+) -> Option<std::borrow::Cow<'a, str>> {
+    use std::borrow::Cow::{Borrowed, Owned};
+    let first = parts.first().map(String::as_str);
+    match family {
+        "read" => match first {
+            Some("cat") if parts.len() >= 2 => {
+                Some(Owned(format!("tokenzero read {}", shell_join(&parts[1..]))))
             }
-        }
-        Some("ls") if !parts.iter().any(|p| p.contains('R')) => Some(command.to_string()),
-        Some("find") => Some(command.to_string()),
-        _ => None,
-    }
-}
-
-fn rewrite_git(command: &str) -> Option<String> {
-    let parts = split_words(command);
-    if parts.first().map(String::as_str) != Some("git") {
-        return None;
-    }
-    match parts.get(1).map(String::as_str) {
-        Some("log") => {
-            if parts.iter().any(|p| is_git_log_count_flag(p)) {
-                Some(command.to_string())
-            } else {
-                Some(format!("{command} -n 80"))
+            Some("head" | "tail") => Some(Borrowed(command)),
+            _ => None,
+        },
+        "search" => matches!(first, Some("rg" | "grep")).then_some(Borrowed(command)),
+        "tree" => match first {
+            Some("tree") if !parts.iter().any(|p| is_tree_depth_flag(p)) => {
+                Some(Owned(format!("{command} -L 2")))
             }
+            Some("tree" | "find") => Some(Borrowed(command)),
+            Some("ls") if !parts.iter().any(|p| p.contains('R')) => Some(Borrowed(command)),
+            _ => None,
+        },
+        "git" => match parts.get(1).map(String::as_str) {
+            Some("log") if !parts.iter().any(|p| is_git_log_count_flag(p)) => {
+                Some(Owned(format!("{command} -n 80")))
+            }
+            Some("log" | "status" | "diff" | "show") => Some(Borrowed(command)),
+            Some("clone" | "fetch" | "pull") => {
+                Some(inject_quiet_flag(command, parts).map_or(Borrowed(command), Owned))
+            }
+            _ => None,
+        },
+        "test" | "build" | "package" => {
+            Some(inject_quiet_flag(command, parts).map_or(Borrowed(command), Owned))
         }
-        Some("clone" | "fetch" | "pull") => {
-            Some(inject_quiet_flag(command).unwrap_or_else(|| command.to_string()))
-        }
-        Some("status" | "diff" | "show") => Some(command.to_string()),
+        "docker" | "kubectl" => Some(Borrowed(command)),
         _ => None,
     }
 }
 
-/// Verbosity tokens that mean the caller already chose an output level; the
-/// quiet injector never overrides an explicit choice.
 fn is_tree_depth_flag(part: &str) -> bool {
     part == "-L"
         || part.starts_with("--depth")
@@ -299,109 +252,52 @@ fn is_git_log_count_flag(part: &str) -> bool {
             .is_some_and(|value| value.is_empty() || value.chars().all(|ch| ch.is_ascii_digit()))
 }
 
+const VERBOSITY_FLAGS: &str =
+    "-q --quiet -v -vv -vvv --verbose -s --silent --progress --no-progress";
+const QUIET_RULES: &[(&str, &str, &str)] = &[
+    ("cargo", "build check clippy test bench doc fetch run", "-q"),
+    ("git", "clone fetch pull", "--quiet"),
+    ("npm", "test run build rebuild", "--silent"),
+];
+
 fn has_explicit_verbosity(parts: &[String]) -> bool {
-    parts.iter().any(|p| {
-        matches!(
-            p.as_str(),
-            "-q" | "--quiet"
-                | "-v"
-                | "-vv"
-                | "-vvv"
-                | "--verbose"
-                | "-s"
-                | "--silent"
-                | "--progress"
-                | "--no-progress"
-        ) || p.starts_with("--loglevel")
-            || p.starts_with("--verbosity")
+    parts.iter().any(|part| {
+        listed(VERBOSITY_FLAGS, part)
+            || part.starts_with("--loglevel")
+            || part.starts_with("--verbosity")
     })
 }
 
-/// Append a success-safe quiet flag for known-noisy toolchains. Quiet flags
-/// only suppress bookkeeping chrome (Compiling/progress/lifecycle banners);
-/// errors and warnings still print, and exact refs capture whatever remains.
-/// Commands carrying a `--` passthrough separator are left alone because a
-/// trailing flag would bind to the inner tool instead.
-fn inject_quiet_flag(command: &str) -> Option<String> {
-    let parts = split_words(command);
-    if has_explicit_verbosity(&parts) || parts.iter().any(|p| p == "--") {
+fn inject_quiet_flag(command: &str, parts: &[String]) -> Option<String> {
+    if has_explicit_verbosity(parts) || parts.iter().any(|part| part == "--") {
         return None;
     }
     let first = parts.first().map(String::as_str).unwrap_or_default();
     let second = parts.get(1).map(String::as_str).unwrap_or_default();
-    match first {
-        "cargo"
-            if matches!(
-                second,
-                "build" | "check" | "clippy" | "test" | "bench" | "doc" | "fetch" | "run"
-            ) =>
-        {
-            Some(format!("{command} -q"))
-        }
-        "git" if matches!(second, "clone" | "fetch" | "pull") => Some(format!("{command} --quiet")),
-        "npm" if matches!(second, "test" | "run" | "build" | "rebuild") => {
-            Some(format!("{command} --silent"))
-        }
-        _ => None,
-    }
+    QUIET_RULES
+        .iter()
+        .find(|(commands, subcommands, _)| listed(commands, first) && listed(subcommands, second))
+        .map(|(_, _, flag)| format!("{command} {flag}"))
 }
 
-fn has_shell_operators(command: &str) -> bool {
-    let mut quote: Option<char> = None;
-    let mut escaped = false;
-    let mut chars = command.chars().peekable();
-    while let Some(ch) = chars.next() {
-        if escaped {
-            escaped = false;
-            continue;
-        }
-        // POSIX shells escape the next character with a backslash outside
-        // single quotes; Windows shells treat backslash as a path separator,
-        // so the escape rule must match the shell that will execute.
-        if ch == '\\' && quote != Some('\'') && !cfg!(windows) {
-            escaped = true;
-            continue;
-        }
-        if Some(ch) == quote {
-            quote = None;
-            continue;
-        }
-        match quote {
-            None => {
-                if ch == '\'' || ch == '"' {
-                    quote = Some(ch);
-                    continue;
-                }
-                if matches!(ch, '\n' | '\r' | '|' | ';' | '&' | '>' | '<' | '`') {
-                    return true;
-                }
-                if ch == '$' && chars.peek() == Some(&'(') {
-                    return true;
-                }
-            }
-            // Command substitution still runs inside double quotes.
-            Some('"') if ch == '`' || (ch == '$' && chars.peek() == Some(&'(')) => {
-                return true;
-            }
-            _ => {}
-        }
-    }
-    false
+fn analyze_shell(command: &str) -> (Option<String>, bool) {
+    let (commands, compound) = parse_shell_commands(command);
+    (unsafe_reason_for_commands(&commands), compound)
 }
 
-fn unsafe_reason(command: &str) -> Option<String> {
-    for node in parse_shell_commands(command) {
+fn unsafe_reason_for_commands(commands: &[ShellCommand]) -> Option<String> {
+    for node in commands {
         if let Some(reason) = unsafe_reason_for_words(&node.words) {
             return Some(reason);
         }
-        for nested in node.nested_commands {
-            if let Some(reason) = unsafe_reason(&nested) {
+        for nested in &node.nested_commands {
+            if let (Some(reason), _) = analyze_shell(nested) {
                 return Some(reason);
             }
         }
         if is_shell_interpreter(&node.words) {
             if let Some(payload) = shell_command_payload(&node.words) {
-                if let Some(reason) = unsafe_reason(payload) {
+                if let (Some(reason), _) = analyze_shell(payload) {
                     return Some(reason);
                 }
             }
@@ -416,89 +312,59 @@ struct ShellCommand {
     nested_commands: Vec<String>,
 }
 
-/// Parse enough POSIX shell structure to identify every executable position.
-/// Words remain opaque data; only operators create new command positions, while
-/// command substitutions are returned for recursive classification.
-fn parse_shell_commands(command: &str) -> Vec<ShellCommand> {
+/// Parse executable positions and report operators that make a command compound.
+fn parse_shell_commands(command: &str) -> (Vec<ShellCommand>, bool) {
     let mut commands = vec![ShellCommand::default()];
     let mut word = String::new();
     let mut quote = None;
     let mut escaped = false;
     let chars: Vec<char> = command.chars().collect();
     let mut index = 0;
-
+    let mut compound = false;
     while index < chars.len() {
         let ch = chars[index];
         if escaped {
             word.push(ch);
             escaped = false;
-            index += 1;
-            continue;
-        }
-        if ch == '\\' && quote != Some('\'') && !cfg!(windows) {
+        } else if ch == '\\' && quote != Some('\'') && !cfg!(windows) {
             escaped = true;
-            index += 1;
-            continue;
-        }
-        if quote == Some('\'') {
+        } else if quote == Some('\'') {
             if ch == '\'' {
                 quote = None;
             } else {
                 word.push(ch);
             }
-            index += 1;
-            continue;
-        }
-        if ch == '\'' {
+        } else if ch == '\'' {
             quote = Some('\'');
-            index += 1;
-            continue;
-        }
-        if ch == '"' {
+        } else if ch == '"' {
             quote = if quote == Some('"') { None } else { Some('"') };
-            index += 1;
-            continue;
-        }
-        if ch == '$' && chars.get(index + 1) == Some(&'(') {
+        } else if ch == '$' && chars.get(index + 1) == Some(&'(') {
             flush_shell_word(&mut commands, &mut word);
-            let (nested, next) = take_parenthesized_command(&chars, index + 2);
-            commands
-                .last_mut()
-                .expect("parser always has a command")
-                .nested_commands
-                .push(nested);
-            index = next;
+            index = push_nested(&mut commands, &chars, index + 2, ')');
+            compound = true;
             continue;
-        }
-        if ch == '`' {
+        } else if ch == '`' {
             flush_shell_word(&mut commands, &mut word);
-            let (nested, next) = take_backtick_command(&chars, index + 1);
-            commands
-                .last_mut()
-                .expect("parser always has a command")
-                .nested_commands
-                .push(nested);
-            index = next;
+            index = push_nested(&mut commands, &chars, index + 1, '`');
+            compound = true;
             continue;
-        }
-        if quote.is_none() && ch.is_whitespace() {
+        } else if quote.is_none() && ch.is_whitespace() {
             flush_shell_word(&mut commands, &mut word);
             if matches!(ch, '\n' | '\r') {
                 start_shell_command(&mut commands);
+                compound = true;
             }
-            index += 1;
-            continue;
-        }
-        if quote.is_none() && matches!(ch, ';' | '|' | '&' | '!' | '(' | ')') {
+        } else if quote.is_none() && matches!(ch, ';' | '|' | '&' | '!' | '(' | ')') {
             flush_shell_word(&mut commands, &mut word);
             start_shell_command(&mut commands);
-            index += 1;
-            if chars.get(index) == Some(&ch) {
+            compound |= matches!(ch, ';' | '|' | '&');
+            if chars.get(index + 1) == Some(&ch) {
                 index += 1;
             }
-            continue;
+        } else {
+            compound |= quote.is_none() && matches!(ch, '>' | '<');
+            word.push(ch);
         }
-        word.push(ch);
         index += 1;
     }
     if escaped {
@@ -506,7 +372,22 @@ fn parse_shell_commands(command: &str) -> Vec<ShellCommand> {
     }
     flush_shell_word(&mut commands, &mut word);
     commands.retain(|node| !node.words.is_empty() || !node.nested_commands.is_empty());
+    (commands, compound)
+}
+
+fn push_nested(
+    commands: &mut [ShellCommand],
+    chars: &[char],
+    start: usize,
+    delimiter: char,
+) -> usize {
+    let (nested, next) = take_nested_command(chars, start, delimiter);
     commands
+        .last_mut()
+        .expect("parser always has a command")
+        .nested_commands
+        .push(nested);
+    next
 }
 
 fn flush_shell_word(commands: &mut [ShellCommand], word: &mut String) {
@@ -528,8 +409,8 @@ fn start_shell_command(commands: &mut Vec<ShellCommand>) {
     }
 }
 
-fn take_parenthesized_command(chars: &[char], mut index: usize) -> (String, usize) {
-    let start = index;
+fn take_nested_command(chars: &[char], start: usize, delimiter: char) -> (String, usize) {
+    let mut index = start;
     let mut depth = 1;
     let mut quote = None;
     let mut escaped = false;
@@ -537,8 +418,12 @@ fn take_parenthesized_command(chars: &[char], mut index: usize) -> (String, usiz
         let ch = chars[index];
         if escaped {
             escaped = false;
-        } else if ch == '\\' && quote != Some('\'') {
+        } else if ch == '\\' && (delimiter == '`' || quote != Some('\'')) {
             escaped = true;
+        } else if delimiter == '`' {
+            if ch == '`' {
+                return (chars[start..index].iter().collect(), index + 1);
+            }
         } else if quote == Some('\'') {
             if ch == '\'' {
                 quote = None;
@@ -554,23 +439,6 @@ fn take_parenthesized_command(chars: &[char], mut index: usize) -> (String, usiz
             if depth == 0 {
                 return (chars[start..index].iter().collect(), index + 1);
             }
-        }
-        index += 1;
-    }
-    (chars[start..].iter().collect(), chars.len())
-}
-
-fn take_backtick_command(chars: &[char], mut index: usize) -> (String, usize) {
-    let start = index;
-    let mut escaped = false;
-    while index < chars.len() {
-        let ch = chars[index];
-        if escaped {
-            escaped = false;
-        } else if ch == '\\' {
-            escaped = true;
-        } else if ch == '`' {
-            return (chars[start..index].iter().collect(), index + 1);
         }
         index += 1;
     }
@@ -595,6 +463,24 @@ fn shell_command_payload(words: &[String]) -> Option<&str> {
     })
 }
 
+const DESTRUCTIVE: &str = "rm rmdir unlink mv cp chmod chown dd shutdown reboot shred truncate wipefs parted fdisk mount umount ln rsync systemctl service launchctl iptables nft ufw crontab";
+const DISPATCHERS: &str = "xargs eval exec source env sudo doas nohup timeout watch npx";
+const GIT_MUTATIONS: &str = "push reset clean checkout switch rebase merge commit restore rm mv apply am cherry-pick revert stash tag branch remote";
+const DOCKER_MUTATIONS: &str =
+    "rm rmi cp import stop kill push login run exec build prune system restart update";
+const COMPOSE_MUTATIONS: &str =
+    "up down rm run exec build pull push restart start stop kill create";
+const KUBECTL_MUTATIONS: &str = "delete apply replace scale patch create exec edit drain cordon uncordon rollout annotate label taint cp";
+const JS_PACKAGE_MUTATIONS: &str =
+    "install add publish login uninstall remove update upgrade link unlink exec dlx create ci";
+const CARGO_MUTATIONS: &str = "publish install login add remove update yank owner";
+const UV_MUTATIONS: &str = "pip add remove sync tool publish venv";
+
+fn listed(list: &str, word: &str) -> bool {
+    list.split_ascii_whitespace()
+        .any(|candidate| candidate == word)
+}
+
 fn unsafe_reason_for_words(parts: &[String]) -> Option<String> {
     let first = parts
         .first()
@@ -604,35 +490,24 @@ fn unsafe_reason_for_words(parts: &[String]) -> Option<String> {
         .next()
         .unwrap_or_default();
     let second = parts.get(1).map(String::as_str).unwrap_or_default();
-    if is_destructive_first(first) {
-        return Some("unsafe destructive mutation left unmodified".to_string());
-    }
-    if is_command_dispatcher(first) {
-        return Some(
-            "command dispatcher left unmodified; safety depends on the dispatched command"
-                .to_string(),
-        );
-    }
-    if ["ssh", "scp", "sftp"].contains(&first) {
-        return Some("remote execution left unmodified".to_string());
-    }
-    if matches!(first, "sed" | "awk" | "gawk")
-        && parts
+    let flags = parts.get(1..).unwrap_or_default();
+    let in_place_edit = matches!(first, "sed" | "awk" | "gawk")
+        && flags
             .iter()
-            .skip(1)
             .any(|p| p.starts_with("-i") || p == "--in-place" || p == "inplace")
-    {
-        return Some("in-place file edit left unmodified".to_string());
-    }
-    if first == "perl"
-        && parts
-            .iter()
-            .skip(1)
-            .any(|p| p.starts_with('-') && !p.starts_with("--") && p.contains('i'))
-    {
-        return Some("in-place file edit left unmodified".to_string());
-    }
-    if first == "find"
+        || first == "perl"
+            && flags
+                .iter()
+                .any(|p| p.starts_with('-') && !p.starts_with("--") && p.contains('i'));
+    let reason = if listed(DESTRUCTIVE, first) || first.starts_with("mkfs") {
+        "unsafe destructive mutation left unmodified"
+    } else if listed(DISPATCHERS, first) {
+        "command dispatcher left unmodified; safety depends on the dispatched command"
+    } else if matches!(first, "ssh" | "scp" | "sftp") {
+        "remote execution left unmodified"
+    } else if in_place_edit {
+        "in-place file edit left unmodified"
+    } else if first == "find"
         && parts.iter().any(|p| {
             matches!(
                 p.as_str(),
@@ -640,198 +515,29 @@ fn unsafe_reason_for_words(parts: &[String]) -> Option<String> {
             )
         })
     {
-        return Some("find with side effects left unmodified".to_string());
-    }
-    if is_git_mutation(first, second) {
-        return Some("git mutation left unmodified".to_string());
-    }
-    if is_docker_mutation(first, second, parts) {
-        return Some("docker mutation left unmodified".to_string());
-    }
-    if is_kubectl_mutation(first, second) {
-        return Some("kubectl mutation left unmodified".to_string());
-    }
-    if is_package_mutation(first, second) {
-        return Some("package/network mutation left unmodified".to_string());
-    }
-    if ["curl", "wget"].contains(&first) {
-        return Some("network command left unmodified".to_string());
-    }
-    None
-}
-
-fn is_destructive_first(first: &str) -> bool {
-    matches!(
-        first,
-        "rm" | "rmdir"
-            | "unlink"
-            | "mv"
-            | "cp"
-            | "chmod"
-            | "chown"
-            | "dd"
-            | "shutdown"
-            | "reboot"
-            | "shred"
-            | "truncate"
-            | "wipefs"
-            | "parted"
-            | "fdisk"
-            | "mount"
-            | "umount"
-            | "ln"
-            | "rsync"
-            | "systemctl"
-            | "service"
-            | "launchctl"
-            | "iptables"
-            | "nft"
-            | "ufw"
-            | "crontab"
-    ) || first.starts_with("mkfs")
-}
-
-fn is_command_dispatcher(first: &str) -> bool {
-    matches!(
-        first,
-        "xargs"
-            | "eval"
-            | "exec"
-            | "source"
-            | "env"
-            | "sudo"
-            | "doas"
-            | "nohup"
-            | "timeout"
-            | "watch"
-            | "npx"
-    )
-}
-
-fn is_git_mutation(first: &str, second: &str) -> bool {
-    first == "git"
-        && matches!(
-            second,
-            "push"
-                | "reset"
-                | "clean"
-                | "checkout"
-                | "switch"
-                | "rebase"
-                | "merge"
-                | "commit"
-                | "restore"
-                | "rm"
-                | "mv"
-                | "apply"
-                | "am"
-                | "cherry-pick"
-                | "revert"
-                | "stash"
-                | "tag"
-                | "branch"
-                | "remote"
-        )
-}
-
-fn is_docker_mutation(first: &str, second: &str, parts: &[String]) -> bool {
-    if first != "docker" {
-        return false;
-    }
-    if matches!(
-        second,
-        "rm" | "rmi"
-            | "cp"
-            | "import"
-            | "stop"
-            | "kill"
-            | "push"
-            | "login"
-            | "run"
-            | "exec"
-            | "build"
-            | "prune"
-            | "system"
-            | "restart"
-            | "update"
-    ) {
-        return true;
-    }
-    second == "compose"
-        && parts
-            .iter()
-            .skip(2)
-            .any(|part| is_docker_compose_mutation(part))
-}
-
-fn is_docker_compose_mutation(part: &str) -> bool {
-    matches!(
-        part,
-        "up" | "down"
-            | "rm"
-            | "run"
-            | "exec"
-            | "build"
-            | "pull"
-            | "push"
-            | "restart"
-            | "start"
-            | "stop"
-            | "kill"
-            | "create"
-    )
-}
-
-fn is_kubectl_mutation(first: &str, second: &str) -> bool {
-    first == "kubectl"
-        && matches!(
-            second,
-            "delete"
-                | "apply"
-                | "replace"
-                | "scale"
-                | "patch"
-                | "create"
-                | "exec"
-                | "edit"
-                | "drain"
-                | "cordon"
-                | "uncordon"
-                | "rollout"
-                | "annotate"
-                | "label"
-                | "taint"
-                | "cp"
-        )
-}
-
-fn is_package_mutation(first: &str, second: &str) -> bool {
-    matches!(
-        (first, second),
-        (
-            "npm" | "pnpm" | "yarn",
-            "install"
-                | "add"
-                | "publish"
-                | "login"
-                | "uninstall"
-                | "remove"
-                | "update"
-                | "upgrade"
-                | "link"
-                | "unlink"
-                | "exec"
-                | "dlx"
-                | "create"
-                | "ci"
-        ) | (
-            "cargo",
-            "publish" | "install" | "login" | "add" | "remove" | "update" | "yank" | "owner"
-        ) | (
-            "uv",
-            "pip" | "add" | "remove" | "sync" | "tool" | "publish" | "venv"
-        )
-    )
+        "find with side effects left unmodified"
+    } else if first == "git" && listed(GIT_MUTATIONS, second) {
+        "git mutation left unmodified"
+    } else if first == "docker"
+        && (listed(DOCKER_MUTATIONS, second)
+            || second == "compose" && parts.iter().skip(2).any(|p| listed(COMPOSE_MUTATIONS, p)))
+    {
+        "docker mutation left unmodified"
+    } else if first == "kubectl" && listed(KUBECTL_MUTATIONS, second) {
+        "kubectl mutation left unmodified"
+    } else if match first {
+        "npm" | "pnpm" | "yarn" => listed(JS_PACKAGE_MUTATIONS, second),
+        "cargo" => listed(CARGO_MUTATIONS, second),
+        "uv" => listed(UV_MUTATIONS, second),
+        _ => false,
+    } {
+        "package/network mutation left unmodified"
+    } else if matches!(first, "curl" | "wget") {
+        "network command left unmodified"
+    } else {
+        return None;
+    };
+    Some(reason.to_string())
 }
 
 fn split_words(command: &str) -> Vec<String> {

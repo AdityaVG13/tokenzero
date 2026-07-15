@@ -1,23 +1,20 @@
 {
   "candidate_mcp_vs_cli_p50_ratio": {
     "expand": {
-      "mcp_over_cli_raw": 0.618947,
-      "mcp_over_cli_start_subtracted": 1.047822
+      "mcp_over_cli_raw": 0.263101,
+      "mcp_over_cli_start_subtracted": 0.343884
     },
     "find": {
-      "mcp_over_cli_raw": 0.387449,
-      "mcp_over_cli_start_subtracted": 0.514606
+      "mcp_over_cli_raw": 0.184974,
+      "mcp_over_cli_start_subtracted": 0.22608
     },
     "read": {
-      "mcp_over_cli_raw": 0.515058,
-      "mcp_over_cli_start_subtracted": 0.948448
+      "mcp_over_cli_raw": 0.258367,
+      "mcp_over_cli_start_subtracted": 0.341479
     }
   },
-  "change": "remove per-acquisition durability barriers for Pulse advisory-lock diagnostic metadata; advisory locking and JSONL append remain",
+  "change": "remove per-acquisition durability barriers for Pulse advisory-lock diagnostics and run auto-backend literal find on direct file roots in-process; advisory locking, JSONL append, and explicit-rg behavior remain",
   "losses": [
-    "read.engine_ms p50 increased 0.059500 ms (3.351 -> 3.4105 ms)",
-    "find.engine_ms p50 increased 0.802000 ms (4.581 -> 5.383 ms)",
-    "expand.engine_ms p50 increased 0.100000 ms (4.586 -> 4.686 ms)",
     "No MCP wall p50 or p95 regression was observed; component movements are retained rather than cherry-picked."
   ],
   "operations": {
@@ -25,78 +22,78 @@
       "attribution_p50_ms": {
         "engine_ms": {
           "baseline": 4.586,
-          "candidate": 4.686
+          "candidate": 3.0295
         },
         "framing_residual_ms": {
           "baseline": 0.716083,
-          "candidate": 0.680479
+          "candidate": 0.604229
         },
         "persist_ms": {
           "baseline": 4.2035,
-          "candidate": 0.254
+          "candidate": 0.4475
         }
       },
       "wall_p50_ms": {
         "baseline": 9.516542,
-        "candidate": 5.621458,
-        "change_pct": -40.93
+        "candidate": 4.079479,
+        "change_pct": -57.133
       },
       "wall_p95_ms": {
         "baseline": 10.176071,
-        "candidate": 6.704907,
-        "change_pct": -34.111
+        "candidate": 5.581716,
+        "change_pct": -45.149
       }
     },
     "find": {
       "attribution_p50_ms": {
         "engine_ms": {
           "baseline": 4.581,
-          "candidate": 5.383
+          "candidate": 3.0095
         },
         "framing_residual_ms": {
           "baseline": 0.192333,
-          "candidate": 0.181105
+          "candidate": 0.146437
         },
         "persist_ms": {
           "baseline": 4.0875,
-          "candidate": 0.2605
+          "candidate": 0.554
         }
       },
       "wall_p50_ms": {
         "baseline": 8.840812,
-        "candidate": 5.828917,
-        "change_pct": -34.068
+        "candidate": 3.705626,
+        "change_pct": -58.085
       },
       "wall_p95_ms": {
         "baseline": 9.678248,
-        "candidate": 6.229373,
-        "change_pct": -35.635
+        "candidate": 5.524952,
+        "change_pct": -42.914
       }
     },
     "read": {
       "attribution_p50_ms": {
         "engine_ms": {
           "baseline": 3.351,
-          "candidate": 3.4105
+          "candidate": 2.9975
         },
         "framing_residual_ms": {
           "baseline": 0.502479,
-          "candidate": 0.47625
+          "candidate": 0.410937
         },
         "persist_ms": {
           "baseline": 4.414,
-          "candidate": 0.2455
+          "candidate": 0.4235
         }
       },
       "wall_p50_ms": {
         "baseline": 8.34948,
-        "candidate": 4.190145,
-        "change_pct": -49.815
+        "candidate": 3.866583,
+        "change_pct": -53.691
       },
       "wall_p95_ms": {
         "baseline": 13.837113,
-        "candidate": 6.732917,
-        "change_pct": -51.342
+        "candidate": 4.874696,
+        "change_pct": -64.771
       }
     }
   },

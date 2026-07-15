@@ -9,7 +9,6 @@ import json
 import math
 import os
 import platform
-import statistics
 import subprocess
 import tempfile
 import threading
@@ -19,6 +18,9 @@ from pathlib import Path
 from typing import Any
 
 REPO = Path(__file__).resolve().parents[3]
+import sys
+sys.path.insert(0, str(REPO / "benchmarks"))
+from bench_common import acquire_guard, release_guard, write_json
 BIN = REPO / "target/debug/tokenzero"
 EVIDENCE = Path(__file__).with_suffix("").with_name("codemode_rss")
 GUARD = Path("/tmp/zerostack-heavy-process.guard")
@@ -37,79 +39,14 @@ GUARD_WAIT_SECONDS = 60
 GUARD_WAIT_STEP = 2
 
 
-def percentile(values: list[float], q: float) -> float:
-    if not values:
-        return 0.0
-    ordered = sorted(values)
-    index = (len(ordered) - 1) * q
-    lo = int(index)
-    hi = min(lo + 1, len(ordered) - 1)
-    return ordered[lo] + (ordered[hi] - ordered[lo]) * (index - lo)
 
 
-def summary(values: list[float]) -> dict[str, float | int]:
-    if not values:
-        return {"n": 0, "p50_ms": 0.0, "p95_ms": 0.0, "mean_ms": 0.0}
-    return {
-        "n": len(values),
-        "p50_ms": round(percentile(values, 0.50), 6),
-        "p95_ms": round(percentile(values, 0.95), 6),
-        "mean_ms": round(statistics.fmean(values), 6),
-    }
 
 
-def process_is_alive(pid: int) -> bool:
-    try:
-        os.kill(pid, 0)
-    except PermissionError:
-        return True
-    except ProcessLookupError:
-        return False
-    return True
 
 
-def acquire_guard(command: str) -> None:
-    start = time.monotonic()
-    while True:
-        try:
-            GUARD.mkdir()
-        except FileExistsError:
-            pid_file = GUARD / "pid"
-            try:
-                pid = int(pid_file.read_text().strip())
-            except (FileNotFoundError, ValueError):
-                for child in GUARD.iterdir():
-                    if child.is_file():
-                        child.unlink()
-                GUARD.rmdir()
-                continue
-            if process_is_alive(pid):
-                elapsed = time.monotonic() - start
-                if elapsed >= GUARD_WAIT_SECONDS:
-                    raise SystemExit(f"heavy-process guard held by live pid {pid}")
-                time.sleep(GUARD_WAIT_STEP)
-                continue
-            for child in GUARD.iterdir():
-                if child.is_file():
-                    child.unlink()
-            GUARD.rmdir()
-            continue
-        break
-    getattr(GUARD / "pid", "wri" + "te_text")(f"{os.getpid()}\n")
-    getattr(GUARD / "repository", "wri" + "te_text")(f"{REPO}\n")
-    getattr(GUARD / "command", "wri" + "te_text")(f"{command}\n")
-    getattr(GUARD / "started_at", "wri" + "te_text")(time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()))
 
 
-def release_guard() -> None:
-    if not GUARD.exists() or not (GUARD / "pid").exists():
-        return
-    if (GUARD / "pid").read_text().strip() != str(os.getpid()):
-        return
-    for child in GUARD.iterdir():
-        if child.is_file():
-            child.unlink()
-    GUARD.rmdir()
 
 
 def sample_rss(pid: int) -> int:
@@ -330,7 +267,7 @@ def write_comparison() -> Path:
         "honest_losses": honest_losses
     }
     destination = EVIDENCE / "comparison.json"
-    getattr(destination, "wri" + "te_text")(json.dumps(result, indent=2, sort_keys=True) + "\n")
+    write_json(destination, result)
     return destination
 
 
@@ -338,7 +275,9 @@ def run(label: str, iterations: int) -> Path:
     if not BIN.is_file():
         raise SystemExit("target/debug/tokenzero missing; build it once before running this harness")
 
-    acquire_guard(f"codemode_rss.py --label {label} --iterations {iterations}")
+    acquire_guard(GUARD, REPO, f"codemode_rss.py --label {label} --iterations {iterations}", wait_seconds=GUARD_WAIT_SECONDS, wait_step=GUARD_WAIT_STEP)
+    started_at = GUARD / "started_at"
+    started_at.write_text(started_at.read_text().removesuffix("\n"))
     client = None
 
     try:
@@ -449,7 +388,7 @@ def run(label: str, iterations: int) -> Path:
 
             EVIDENCE.mkdir(parents=True, exist_ok=True)
             destination = EVIDENCE / f"{label}.json"
-            getattr(destination, "wri" + "te_text")(json.dumps(result, indent=2, sort_keys=True) + "\n")
+            write_json(destination, result)
 
             if label == "candidate" and (EVIDENCE / "baseline.json").is_file():
                 write_comparison()
@@ -462,7 +401,7 @@ def run(label: str, iterations: int) -> Path:
                 client.close()
             except Exception:
                 pass
-        release_guard()
+        release_guard(GUARD)
 
 
 

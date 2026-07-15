@@ -2,16 +2,10 @@
 """Validate shared-CAS GC v1 schemas and golden fixtures using only stdlib."""
 from __future__ import annotations
 
-import json
-import re
-import sys
-from datetime import datetime, timedelta
-from pathlib import Path
-from typing import Any
+import json; import re; import sys; from datetime import datetime, timedelta
+from pathlib import Path; from typing import Any
 
-HERE = Path(__file__).resolve().parent
-SCHEMAS = HERE.parent
-VERDICTS = {"retain", "collect", "retain-uncertain"}
+HERE = Path(__file__).resolve().parent; SCHEMAS = HERE.parent; VERDICTS = {"retain", "collect", "retain-uncertain"}
 UNCERTAIN_REASONS = {
     "unknown-version", "corrupt-metadata", "uncertain-metadata", "unpublished-temp"
 }
@@ -45,8 +39,7 @@ def type_matches(value: Any, expected: str) -> bool:
 
 
 def validate(instance: Any, schema: dict[str, Any], where: str = "$") -> list[str]:
-    errors: list[str] = []
-    expected_type = schema.get("type")
+    errors: list[str] = []; expected_type = schema.get("type")
     if expected_type and not type_matches(instance, expected_type):
         return [f"{where}: expected {expected_type}, got {type(instance).__name__}"]
     if "const" in schema and instance != schema["const"]:
@@ -54,9 +47,7 @@ def validate(instance: Any, schema: dict[str, Any], where: str = "$") -> list[st
     if "enum" in schema and instance not in schema["enum"]:
         errors.append(f"{where}: value {instance!r} is not in enum")
     if isinstance(instance, dict):
-        required = schema.get("required", [])
-        errors.extend(f"{where}: missing required key {key!r}" for key in required if key not in instance)
-        properties = schema.get("properties", {})
+        required = schema.get("required", []); errors.extend(f"{where}: missing required key {key!r}" for key in required if key not in instance); properties = schema.get("properties", {})
         if schema.get("additionalProperties") is False:
             errors.extend(f"{where}: unexpected key {key!r}" for key in instance if key not in properties)
         for key, value in instance.items():
@@ -95,8 +86,7 @@ def validate(instance: Any, schema: dict[str, Any], where: str = "$") -> list[st
 
 
 def check_path(record: dict[str, Any], store_path: str, path_valid: bool) -> None:
-    parts = Path(store_path).parts
-    actual = False
+    parts = Path(store_path).parts; actual = False
     if record.get("record_type") == "reachability-snapshot" and len(parts) == 5:
         actual = parts[:2] == ("gc", "roots") and parts[2:4] == (record.get("engine"), record.get("project_id")) and (parts[4] == "current.json" or (parts[4].startswith(".current.") and parts[4].endswith(".tmp")))
     elif record.get("record_type") == "pin" and len(parts) == 5:
@@ -109,8 +99,7 @@ def check_path(record: dict[str, Any], store_path: str, path_valid: bool) -> Non
 
 def check_report_semantics(report: dict[str, Any], path: Path) -> None:
     for item in report.get("objects", []):
-        verdict = item.get("verdict")
-        reasons = set(item.get("reason_codes", []))
+        verdict = item.get("verdict"); reasons = set(item.get("reason_codes", []))
         if verdict == "collect" and reasons != {"no-live-reference"}:
             fail(f"{path}: collect requires only no-live-reference")
         if reasons & UNCERTAIN_REASONS and verdict != "retain-uncertain":
@@ -132,15 +121,9 @@ def main() -> int:
     if len(contract_dirs) != 8:
         fail(f"expected 8 contract directories, found {len(contract_dirs)}")
 
-    fixture_count = 0
-    case_count = 0
-    all_contracts: list[str] = []
-    loaded_by_dir: dict[Path, dict[str, Any]] = {}
+    fixture_count = 0; case_count = 0; all_contracts: list[str] = []; loaded_by_dir: dict[Path, dict[str, Any]] = {}
     for directory in contract_dirs:
-        expectations_path = directory / "expectations.json"
-        expectations = load_json(expectations_path)
-        all_contracts.append(expectations["contract_point"])
-        cases = expectations.get("cases")
+        expectations_path = directory / "expectations.json"; expectations = load_json(expectations_path); all_contracts.append(expectations["contract_point"]); cases = expectations.get("cases")
         if not isinstance(cases, list) or not cases:
             fail(f"{expectations_path}: cases must be non-empty")
         case_by_file = {case["file"]: case for case in cases}
@@ -151,8 +134,7 @@ def main() -> int:
             fail(f"{directory}: fixture/expectation mismatch: {fixture_names ^ set(case_by_file)}")
         loaded: dict[str, Any] = {}
         for name, case in case_by_file.items():
-            case_count += 1
-            fixture_count += 1
+            case_count += 1; fixture_count += 1
             if case.get("verdict") not in VERDICTS:
                 fail(f"{expectations_path}: invalid or missing verdict for {name}")
             reasons = case.get("reason_codes")
@@ -169,13 +151,10 @@ def main() -> int:
                 if case.get("parse_valid") is not False or case.get("verdict") != "retain-uncertain":
                     fail(f"{fixture}: corrupt fixture must explicitly retain-uncertain")
                 continue
-            record = load_json(fixture)
-            loaded[name] = record
-            schema_name = case.get("schema")
+            record = load_json(fixture); loaded[name] = record; schema_name = case.get("schema")
             if schema_name not in schemas:
                 fail(f"{expectations_path}: unknown schema {schema_name!r}")
-            errors = validate(record, schemas[schema_name])
-            expected_valid = case.get("schema_valid")
+            errors = validate(record, schemas[schema_name]); expected_valid = case.get("schema_valid")
             if not isinstance(expected_valid, bool):
                 fail(f"{expectations_path}: schema_valid missing for {name}")
             if (not errors) != expected_valid:
@@ -186,25 +165,18 @@ def main() -> int:
                 check_path(record, case["store_path"], case.get("path_valid", True))
         loaded_by_dir[directory] = loaded
 
-    namespace = loaded_by_dir[HERE / "01-namespace-isolation"]
-    namespace_pairs = {(r["engine"], r["project_id"]) for n, r in namespace.items() if not n.endswith(".invalid.json")}
+    namespace = loaded_by_dir[HERE / "01-namespace-isolation"]; namespace_pairs = {(r["engine"], r["project_id"]) for n, r in namespace.items() if not n.endswith(".invalid.json")}
     if len(namespace_pairs) < 2:
         fail("namespace fixture does not contain independent projects")
 
-    collision_dir = HERE / "07-collision-resistance"
-    collision = loaded_by_dir[collision_dir]
-    collision_records = [r for n, r in collision.items() if "project-" in n]
-    namespaces = {(r["engine"], r["project_id"]) for r in collision_records}
+    collision_dir = HERE / "07-collision-resistance"; collision = loaded_by_dir[collision_dir]; collision_records = [r for n, r in collision.items() if "project-" in n]; namespaces = {(r["engine"], r["project_id"]) for r in collision_records}
     hashes = {h for r in collision_records for h in r["blob_hashes"]}
     if len({r["engine"] for r in collision_records}) != 2 or len({r["project_id"] for r in collision_records}) != 2 or len(namespaces) != 4 or len(hashes) != 1:
         fail("collision fixture must be a 2-engine x 2-project matrix sharing one hash")
 
-    grace_expectations = load_json(HERE / "04-stale-lease-grace" / "expectations.json")
-    evaluated = datetime.fromisoformat(grace_expectations["evaluated_at"].replace("Z", "+00:00"))
+    grace_expectations = load_json(HERE / "04-stale-lease-grace" / "expectations.json"); evaluated = datetime.fromisoformat(grace_expectations["evaluated_at"].replace("Z", "+00:00"))
     for case in grace_expectations["cases"]:
-        record = loaded_by_dir[HERE / "04-stale-lease-grace"][case["file"]]
-        expires = datetime.fromisoformat(record["expires_at"].replace("Z", "+00:00"))
-        inside = evaluated < expires + timedelta(seconds=record["grace_seconds"])
+        record = loaded_by_dir[HERE / "04-stale-lease-grace"][case["file"]]; expires = datetime.fromisoformat(record["expires_at"].replace("Z", "+00:00")); inside = evaluated < expires + timedelta(seconds=record["grace_seconds"])
         if inside and case["verdict"] != "retain":
             fail(f"{case['file']}: inside grace must retain")
         if not inside and case["owner_status"] == "unknown" and case["verdict"] != "retain-uncertain":
@@ -215,12 +187,8 @@ def main() -> int:
         if case["file"] != "known-v1.json" and (case.get("scope") != "whole-store" or case["verdict"] != "retain-uncertain"):
             fail("unknown/newer/corrupt metadata must retain whole store uncertain")
 
-    print(f"validated {len(schemas)} schemas")
-    print(f"validated {len(contract_dirs)} contract fixture directories")
-    print(f"validated {fixture_count} fixtures and {case_count} verdict expectations")
-    print("validated namespace path grammar and 2-engine x 2-project shared-hash isolation")
-    print("validated stale-lease grace and whole-store retain-on-uncertainty semantics")
-    print("shared-CAS GC v1 fixtures: OK")
+    print(f"validated {len(schemas)} schemas"); print(f"validated {len(contract_dirs)} contract fixture directories"); print(f"validated {fixture_count} fixtures and {case_count} verdict expectations"); print("validated namespace path grammar and 2-engine x 2-project shared-hash isolation")
+    print("validated stale-lease grace and whole-store retain-on-uncertainty semantics"); print("shared-CAS GC v1 fixtures: OK")
     return 0
 
 

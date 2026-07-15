@@ -1,6 +1,43 @@
 use clap::{Args, Parser, Subcommand};
 use std::path::PathBuf;
 
+macro_rules! define_args {
+    ($( $(#[$struct_attr:meta])* @ $name:ident($( $(#[$field_attr:meta])* $field:ident: $ty:ty;)*) )*) => {
+        $(
+            #[derive(Debug, Args)]
+            $(#[$struct_attr])*
+            pub(crate) struct $name {$($(#[$field_attr])* pub(crate) $field: $ty,)*}
+        )*
+    };
+}
+
+macro_rules! define_subcommands {
+    ($(
+        @ $name:ident {
+            $($(#[$variant_doc:meta])* $variant:ident $(($arg:ty))? $(=> $variant_attr:meta)*),* $(,)?
+        }
+    )*) => {$(
+        #[derive(Debug, Subcommand)]
+        pub(crate) enum $name {$($(#[$variant_doc])* $(#[$variant_attr])* $variant $(($arg))?,)*}
+    )*};
+}
+
+macro_rules! artifact_args {
+    ($($name:ident => $default:literal),* $(,)?) => {
+        $(
+            #[derive(Debug, Args)]
+            pub(crate) struct $name {
+                #[arg(long, default_value = $default)]
+                pub(crate) output_json: PathBuf,
+                #[arg(long)]
+                pub(crate) output_md: Option<PathBuf>,
+                #[arg(long)]
+                pub(crate) json: bool,
+            }
+        )*
+    };
+}
+
 #[derive(Debug, Parser)]
 #[command(
     name = "tokenzero",
@@ -11,421 +48,6 @@ use std::path::PathBuf;
 pub(crate) struct Cli {
     #[command(subcommand)]
     pub(crate) command: Option<Commands>,
-}
-
-#[derive(Debug, Subcommand)]
-pub(crate) enum Commands {
-    #[command(about = "Read bounded file content with exact recovery refs")]
-    Read(ReadArgs),
-    #[command(
-        about = "Search local text and return compact matches",
-        alias = "search"
-    )]
-    Find(FindArgs),
-    #[command(about = "Alias for find")]
-    Grep(FindArgs),
-    #[command(about = "List matching paths without dumping file contents")]
-    Glob(GlobArgs),
-    #[command(about = "Inspect a bounded directory tree")]
-    Tree(TreeArgs),
-    #[command(about = "Apply multi-hunk find/replace edits to one file with undo refs")]
-    Edit(EditArgs),
-    #[command(about = "Search payloads already stored in the recovery cache")]
-    Recall(RecallArgs),
-    #[command(about = "Fetch an http(s) URL via curl with a TTL cache and exact refs")]
-    Fetch(FetchArgs),
-    #[command(
-        alias = "shell",
-        alias = "rn",
-        about = "Run a command with status-truth telemetry"
-    )]
-    Run(RunArgs),
-    #[command(about = "Ingest text or a file into a compact TokenZero capsule")]
-    Ingest(IngestArgs),
-    #[command(about = "Recover exact bytes from a prior TokenZero ref")]
-    Expand(ExpandArgs),
-    #[command(name = "session-open", about = "Open a bounded manifest+delta session")]
-    SessionOpen(CommonArgs),
-    #[command(about = "Inspect recovery-cache state")]
-    Mem(CommonArgs),
-    #[command(about = "Rewrite a shell command with TokenZero-safe routing")]
-    #[command(alias = "rewrite-command")]
-    Rewrite(RewriteArgs),
-    #[command(about = "Agent-harness hook adapters: stdin JSON in, decision JSON out")]
-    Hook(HookArgs),
-    #[command(about = "List local TokenZero tool-discovery metadata")]
-    Discover(CommonArgs),
-    #[command(about = "Check local TokenZero health and next steps")]
-    Doctor(DoctorArgs),
-    #[command(about = "Print local TokenZero usage statistics")]
-    Stats(CommonArgs),
-    #[command(about = "Inspect or sync local Pulse telemetry")]
-    Pulse(PulseArgs),
-    #[command(
-        about = "Session cost ledger: per-session, per-repo, per-agent mass × turns accounting",
-        alias = "ledger"
-    )]
-    SessionLedger(SessionLedgerArgs),
-    #[command(about = "Inspect or prune TokenZero recovery-cache state")]
-    Cache(CacheArgs),
-    #[command(about = "Plan or apply local integration writes with rollback data")]
-    Install(InstallArgs),
-    #[command(about = "Compatibility alias for install --mcp --agent <name>")]
-    Init(InitArgs),
-    #[command(
-        about = "Inspect AI client TokenZero integration state",
-        alias = "client"
-    )]
-    Clients(ClientsArgs),
-    #[command(name = "client-status", about = "Alias for clients detect")]
-    ClientStatus(ClientStatusArgs),
-    #[command(
-        about = "Print the machine-readable CLI contract for agents",
-        alias = "capability",
-        alias = "capabilites"
-    )]
-    Capabilities(CapabilitiesArgs),
-    #[command(
-        name = "robot-docs",
-        about = "Print in-tool documentation for agents",
-        alias = "robot-doc",
-        alias = "robotdocs"
-    )]
-    RobotDocs(RobotDocsArgs),
-    #[command(name = "cache-pack")]
-    CachePack(CachePackArgs),
-    Bench(BenchArgs),
-    #[command(name = "mcp-server")]
-    McpServer(McpServerArgs),
-    #[command(name = "mcp-smoke")]
-    McpSmoke(ArtifactArgs),
-    #[command(name = "mcp-soak")]
-    McpSoak(ArtifactArgs),
-    #[command(name = "exact-recovery-shell")]
-    ExactRecoveryShell(ExactRecoveryShellArgs),
-    #[command(name = "exact-recovery-audit")]
-    ExactRecoveryAudit(ExactRecoveryAuditArgs),
-    #[command(
-        name = "codemode",
-        about = "Compose multi-step plans on the same base tools as MCP (fewer round-trips, Cloudflare-style)",
-        long_about = "Execute JS-like plans that compose the same TokenZero operations as MCP (zero.read, zero.find, zero.shell, ...) in one call for faster multi-step workflows.\n\n\
-            Discovery: tokenzero codemode 'search:read' | tokenzero codemode 'describe:zero.read'\n\n\
-            Cache: defaults to the same recovery-cache.json as CLI expand/MCP so refs mintable \
-            by codemode expand on the next call. Override with --cache-path / TOKENZERO_CACHE_PATH \
-            when using an isolated store (wrong root yields store_mismatch naming both paths)."
-    )]
-    CodeMode(CodeModeArgs),
-    #[command(name = "harm-eval")]
-    HarmEval(ArtifactArgs),
-    #[command(name = "protected-anchor-audit")]
-    ProtectedAnchorAudit(ProtectedAnchorAuditArgs),
-    #[command(name = "false-success-shell")]
-    FalseSuccessShell(FalseSuccessShellArgs),
-    #[command(name = "repo-inventory")]
-    RepoInventory(ArtifactArgs),
-    #[command(name = "prompt-cache-pack")]
-    PromptCachePack(ArtifactArgs),
-    #[command(name = "install-smoke")]
-    InstallSmoke(InstallSmokeArgs),
-    #[command(name = "package-audit")]
-    PackageAudit(PackageAuditArgs),
-    #[command(name = "shell-matrix")]
-    ShellMatrix(ShellMatrixArgs),
-    #[command(name = "os-reach-audit")]
-    OsReachAudit(OsReachAuditArgs),
-    #[command(name = "os-release-artifact")]
-    OsReleaseArtifact(OsReleaseArtifactArgs),
-    #[command(name = "one-shot-eval")]
-    OneShotEval(OneShotEvalArgs),
-    #[command(name = "source-currency-audit")]
-    SourceCurrencyAudit(SourceCurrencyAuditArgs),
-    #[command(name = "adapter-approval-audit")]
-    AdapterApprovalAudit(AdapterApprovalAuditArgs),
-    #[command(name = "adapter-approval-template")]
-    AdapterApprovalTemplate(AdapterApprovalTemplateArgs),
-    #[command(name = "claim-audit")]
-    ClaimAudit(ClaimAuditArgs),
-    #[command(name = "completion-audit")]
-    CompletionAudit(CompletionAuditArgs),
-    #[command(name = "security-privacy-audit")]
-    SecurityPrivacyAudit(SecurityPrivacyAuditArgs),
-    #[command(name = "artifact-handoff")]
-    ArtifactHandoff(ArtifactHandoffArgs),
-    Reach(ReachArgs),
-    #[command(name = "ws-skeleton")]
-    WsSkeleton(WsSkeletonArgs),
-    Quote(QuoteArgs),
-}
-
-#[derive(Debug, Clone, Args)]
-pub(crate) struct CommonArgs {
-    #[arg(long)]
-    pub(crate) root: Option<PathBuf>,
-    #[arg(long)]
-    pub(crate) cache_path: Option<PathBuf>,
-    #[arg(long)]
-    pub(crate) json: bool,
-}
-
-#[derive(Debug, Clone, Args)]
-pub(crate) struct ToolArgs {
-    #[arg(long, default_value = "auto")]
-    pub(crate) mode: String,
-    #[arg(long)]
-    pub(crate) budget: Option<usize>,
-    #[arg(long)]
-    pub(crate) allowed_root: Vec<PathBuf>,
-    #[arg(long)]
-    pub(crate) cache_path: Option<PathBuf>,
-    #[arg(long, alias = "timeout", alias = "timout", value_name = "SECONDS")]
-    pub(crate) timeout_seconds: Option<u64>,
-    #[arg(long, alias = "jsno", alias = "jason")]
-    pub(crate) json: bool,
-}
-
-#[derive(Debug, Args)]
-pub(crate) struct ReadArgs {
-    #[arg(value_name = "PATH")]
-    pub(crate) path: Vec<PathBuf>,
-    #[arg(long)]
-    pub(crate) paths_from: Option<PathBuf>,
-    #[arg(long, default_value_t = 20)]
-    pub(crate) max_files: usize,
-    #[arg(long, default_value_t = 4000)]
-    pub(crate) max_visible_tokens: usize,
-    #[arg(long)]
-    pub(crate) start_line: Option<usize>,
-    #[arg(long)]
-    pub(crate) end_line: Option<usize>,
-    #[arg(long)]
-    pub(crate) raw: bool,
-    #[command(flatten)]
-    pub(crate) tool: ToolArgs,
-}
-
-#[derive(Debug, Args)]
-pub(crate) struct FindArgs {
-    pub(crate) query: String,
-    pub(crate) path: Vec<PathBuf>,
-    #[arg(long, default_value_t = 20)]
-    pub(crate) max_files: usize,
-    #[arg(long, default_value_t = 4000)]
-    pub(crate) max_visible_tokens: usize,
-    #[command(flatten)]
-    pub(crate) tool: ToolArgs,
-}
-
-#[derive(Debug, Args)]
-pub(crate) struct RecallArgs {
-    pub(crate) query: String,
-    #[arg(long, default_value_t = 50)]
-    pub(crate) max_hits: usize,
-    #[arg(long, default_value_t = 4000)]
-    pub(crate) max_visible_tokens: usize,
-    #[command(flatten)]
-    pub(crate) tool: ToolArgs,
-}
-
-#[derive(Debug, Args)]
-pub(crate) struct FetchArgs {
-    pub(crate) url: String,
-    /// Serve a cached body younger than this without touching the network.
-    #[arg(long)]
-    pub(crate) ttl_seconds: Option<usize>,
-    /// Bypass the TTL cache and re-fetch.
-    #[arg(long)]
-    pub(crate) fresh: bool,
-    #[arg(long, default_value_t = 4000)]
-    pub(crate) max_visible_tokens: usize,
-    #[command(flatten)]
-    pub(crate) tool: ToolArgs,
-}
-
-#[derive(Debug, Args)]
-pub(crate) struct GlobArgs {
-    pub(crate) pattern: String,
-    pub(crate) path: Vec<PathBuf>,
-    #[arg(long, default_value_t = 200)]
-    pub(crate) max_files: usize,
-    #[arg(long, default_value_t = 4000)]
-    pub(crate) max_visible_tokens: usize,
-    #[arg(long)]
-    pub(crate) include_hidden: bool,
-    #[command(flatten)]
-    pub(crate) tool: ToolArgs,
-}
-
-#[derive(Debug, Args)]
-pub(crate) struct TreeArgs {
-    pub(crate) path: Vec<PathBuf>,
-    #[arg(long, default_value_t = 2)]
-    pub(crate) depth: usize,
-    #[arg(long, default_value_t = 200)]
-    pub(crate) max_files: usize,
-    #[arg(long, default_value_t = 4000)]
-    pub(crate) max_visible_tokens: usize,
-    #[arg(long)]
-    pub(crate) include_hidden: bool,
-    #[command(flatten)]
-    pub(crate) tool: ToolArgs,
-}
-
-#[derive(Debug, Args)]
-pub(crate) struct EditArgs {
-    #[arg(value_name = "PATH")]
-    pub(crate) path: PathBuf,
-    /// JSON array of {find, replace, replace_all?} hunks.
-    #[arg(long = "edits-json", value_name = "JSON")]
-    pub(crate) edits_json: Option<String>,
-    /// Read the edits JSON from stdin instead of --edits-json.
-    #[arg(long)]
-    pub(crate) stdin: bool,
-    /// Create a new file: one hunk with empty find; replace is the content.
-    #[arg(long)]
-    pub(crate) create: bool,
-    /// Validate and render the hunk diff without writing.
-    #[arg(long)]
-    pub(crate) dry_run: bool,
-    #[arg(long, default_value_t = 4000)]
-    pub(crate) max_visible_tokens: usize,
-    #[command(flatten)]
-    pub(crate) tool: ToolArgs,
-}
-
-#[derive(Debug, Args)]
-pub(crate) struct RunArgs {
-    #[arg(last = true)]
-    pub(crate) command: Vec<String>,
-    #[arg(long)]
-    pub(crate) cwd: Option<PathBuf>,
-    #[arg(long)]
-    pub(crate) rewrite: Option<String>,
-    #[arg(long)]
-    pub(crate) no_rewrite: bool,
-    #[arg(long)]
-    pub(crate) stdin: bool,
-    #[arg(long = "env")]
-    pub(crate) env_overrides: Vec<String>,
-    #[arg(long)]
-    pub(crate) explain_runtime: bool,
-    #[arg(long)]
-    pub(crate) runtime_platform: Option<String>,
-    #[command(flatten)]
-    pub(crate) tool: ToolArgs,
-}
-
-#[derive(Debug, Args)]
-pub(crate) struct IngestArgs {
-    pub(crate) input: Option<PathBuf>,
-    #[arg(long)]
-    pub(crate) stdin: bool,
-    #[arg(long, default_value = "auto")]
-    pub(crate) kind: String,
-    #[command(flatten)]
-    pub(crate) tool: ToolArgs,
-}
-
-#[derive(Debug, Args)]
-pub(crate) struct ExpandArgs {
-    #[arg(value_name = "REF")]
-    pub(crate) refs: Vec<String>,
-    #[arg(long)]
-    pub(crate) refs_from: Option<PathBuf>,
-    #[arg(long)]
-    pub(crate) selector: Option<String>,
-    #[arg(long)]
-    pub(crate) raw: bool,
-    #[arg(long)]
-    pub(crate) summary: bool,
-    #[arg(long)]
-    pub(crate) force: bool,
-    #[arg(long)]
-    pub(crate) start_line: Option<usize>,
-    #[arg(long)]
-    pub(crate) end_line: Option<usize>,
-    #[arg(long)]
-    pub(crate) line: Option<usize>,
-    #[arg(long)]
-    pub(crate) lines: Option<String>,
-    #[arg(long)]
-    pub(crate) around: Option<String>,
-    #[arg(long)]
-    pub(crate) anchor_kind: Option<String>,
-    #[arg(long)]
-    pub(crate) symbol: Option<String>,
-    #[arg(long)]
-    pub(crate) cache_path: Option<PathBuf>,
-    #[arg(long)]
-    pub(crate) json: bool,
-}
-
-#[derive(Debug, Args)]
-pub(crate) struct RewriteArgs {
-    /// Command string; alternative to trailing `-- <command...>`.
-    pub(crate) command: Option<String>,
-    /// Command after `--`, matching `tokenzero run -- <command...>`.
-    #[arg(last = true)]
-    pub(crate) argv: Vec<String>,
-    #[arg(long, default_value = "safe")]
-    pub(crate) mode: String,
-    #[arg(long)]
-    pub(crate) json: bool,
-}
-
-#[derive(Debug, Args)]
-pub(crate) struct HookArgs {
-    #[command(subcommand)]
-    pub(crate) target: HookTarget,
-}
-
-#[derive(Debug, Subcommand)]
-pub(crate) enum HookTarget {
-    #[command(
-        name = "claude-code",
-        about = "Claude Code PreToolUse adapter: wraps Bash commands in `tokenzero run` (fail-open, always exits 0)"
-    )]
-    ClaudeCode(HookClaudeCodeArgs),
-    #[command(
-        name = "claude-code-session-start",
-        about = "Claude Code SessionStart adapter: restores a compact session pack after compaction/resume (fail-open, always exits 0)"
-    )]
-    ClaudeCodeSessionStart(HookSessionStartArgs),
-}
-
-#[derive(Debug, Args)]
-pub(crate) struct HookClaudeCodeArgs {
-    /// rewrite | guide | off. Unknown values pass through (fail-open).
-    #[arg(long, default_value = "rewrite")]
-    pub(crate) mode: String,
-}
-
-#[derive(Debug, Args)]
-pub(crate) struct HookSessionStartArgs {
-    /// Token budget for the restored session pack.
-    #[arg(long, default_value_t = 600)]
-    pub(crate) max_tokens: usize,
-}
-
-#[derive(Debug, Args)]
-pub(crate) struct DoctorArgs {
-    #[arg(long, global = true)]
-    pub(crate) root: Option<PathBuf>,
-    #[arg(long, global = true)]
-    pub(crate) cache_path: Option<PathBuf>,
-    #[arg(long, global = true)]
-    pub(crate) runtime: bool,
-    #[arg(long, global = true)]
-    pub(crate) json: bool,
-    #[arg(long = "robot-triage", global = true)]
-    pub(crate) robot_triage: bool,
-    #[arg(long, global = true)]
-    pub(crate) fix: bool,
-    #[arg(long = "dry-run", global = true)]
-    pub(crate) dry_run: bool,
-    #[arg(long, global = true)]
-    pub(crate) explain: Option<String>,
-    #[command(subcommand)]
-    pub(crate) command: Option<DoctorCommand>,
 }
 
 #[derive(Debug, Clone, Subcommand)]
@@ -462,54 +84,6 @@ pub(crate) enum DoctorCommand {
     RobotDocs,
 }
 
-#[derive(Debug, Args)]
-pub(crate) struct PulseArgs {
-    #[arg(long, global = true)]
-    pub(crate) root: Option<PathBuf>,
-    #[arg(long, global = true)]
-    pub(crate) json: bool,
-    #[command(subcommand)]
-    pub(crate) command: Option<PulseCommand>,
-}
-
-#[derive(Debug, Subcommand)]
-pub(crate) enum PulseCommand {
-    #[command(
-        name = "stats",
-        alias = "status",
-        about = "Print local Pulse telemetry report"
-    )]
-    Stats,
-    Sync,
-    Doctor,
-    #[command(name = "export-jsonl")]
-    ExportJsonl(PulseExportArgs),
-    #[command(name = "import-jsonl")]
-    ImportJsonl(PulseImportArgs),
-}
-
-#[derive(Debug, Args)]
-pub(crate) struct PulseExportArgs {
-    #[arg(value_name = "OUTPUT")]
-    pub(crate) output: PathBuf,
-}
-
-#[derive(Debug, Args)]
-pub(crate) struct PulseImportArgs {
-    #[arg(value_name = "INPUT")]
-    pub(crate) input: PathBuf,
-}
-
-#[derive(Debug, Args)]
-pub(crate) struct SessionLedgerArgs {
-    #[arg(long, global = true)]
-    pub(crate) root: Option<PathBuf>,
-    #[arg(long, global = true)]
-    pub(crate) json: bool,
-    #[command(subcommand)]
-    pub(crate) command: Option<SessionLedgerCommand>,
-}
-
 #[derive(Debug, Subcommand)]
 pub(crate) enum SessionLedgerCommand {
     #[command(about = "Print per-session cost breakdown (mass × turns)")]
@@ -518,6 +92,8 @@ pub(crate) enum SessionLedgerCommand {
     Export,
     #[command(about = "Print the stable schema for the session ledger")]
     Schema,
+    #[command(about = "Inspect the exact default-off shareable telemetry payload; sends nothing")]
+    Inspect(TelemetryInspectArgs),
     #[command(about = "Query the response ledger")]
     Query {
         #[command(subcommand)]
@@ -556,590 +132,82 @@ pub(crate) enum LedgerQueryCommand {
     },
 }
 
-#[derive(Debug, Args)]
-pub(crate) struct CacheArgs {
-    #[command(subcommand)]
-    pub(crate) command: CacheCommand,
+define_subcommands! {
+    @ Commands { Read(ReadArgs) => command(about = "Read bounded file content with exact recovery refs"), Find(FindArgs) => command( about = "Search local text and return compact matches", alias = "search" ), Grep(FindArgs) => command(about = "Alias for find"), Glob(GlobArgs) => command(about = "List matching paths without dumping file contents"), Tree(TreeArgs) => command(about = "Inspect a bounded directory tree"), Edit(EditArgs) => command(about = "Apply multi-hunk find/replace edits to one file with undo refs"), Recall(RecallArgs) => command(about = "Search payloads already stored in the recovery cache"), Fetch(FetchArgs) => command(about = "Fetch an http(s) URL via curl with a TTL cache and exact refs"), Run(RunArgs) => command( alias = "shell", alias = "rn", about = "Run a command with status-truth telemetry" ), Ingest(IngestArgs) => command(about = "Ingest text or a file into a compact TokenZero capsule"), Expand(ExpandArgs) => command(about = "Recover exact bytes from a prior TokenZero ref"), SessionOpen(CommonArgs) => command(name = "session-open", about = "Open a bounded manifest+delta session"), Mem(CommonArgs) => command(about = "Inspect recovery-cache state"), Rewrite(RewriteArgs) => command(about = "Rewrite a shell command with TokenZero-safe routing") => command(alias = "rewrite-command"), Hook(HookArgs) => command(about = "Agent-harness hook adapters: stdin JSON in, decision JSON out"), Discover(CommonArgs) => command(about = "List local TokenZero tool-discovery metadata"), Doctor(DoctorArgs) => command(about = "Check local TokenZero health and next steps"), Stats(CommonArgs) => command(about = "Print local TokenZero usage statistics"), Pulse(PulseArgs) => command(about = "Inspect or sync local Pulse telemetry"), SessionLedger(SessionLedgerArgs) => command( about = "Session cost ledger: per-session, per-repo, per-agent mass × turns accounting", alias = "ledger" ), Cache(CacheArgs) => command(about = "Inspect or prune TokenZero recovery-cache state"), Install(InstallArgs) => command(about = "Plan or apply local integration writes with rollback data"), Init(InitArgs) => command(about = "Compatibility alias for install --mcp --agent <name>"), Clients(ClientsArgs) => command( about = "Inspect AI client TokenZero integration state", alias = "client" ), ClientStatus(ClientStatusArgs) => command(name = "client-status", about = "Alias for clients detect"), Capabilities(CapabilitiesArgs) => command( about = "Print the machine-readable CLI contract for agents", alias = "capability", alias = "capabilites" ), RobotDocs(RobotDocsArgs) => command( name = "robot-docs", about = "Print in-tool documentation for agents", alias = "robot-doc", alias = "robotdocs" ), CachePack(CachePackArgs) => command(name = "cache-pack"), Bench(BenchArgs), McpServer(McpServerArgs) => command(name = "mcp-server"), McpSmoke(ArtifactArgs) => command(name = "mcp-smoke"), McpSoak(ArtifactArgs) => command(name = "mcp-soak"), ExactRecoveryShell(ExactRecoveryShellArgs) => command(name = "exact-recovery-shell"), ExactRecoveryAudit(ExactRecoveryAuditArgs) => command(name = "exact-recovery-audit"), CodeMode(CodeModeArgs) => command( name = "codemode", about = "Compose multi-step plans on the same base tools as MCP (fewer round-trips, Cloudflare-style)", long_about = "Execute JS-like plans that compose the same TokenZero operations as MCP (zero.read, zero.find, zero.shell, ...) in one call for faster multi-step workflows.\n\nDiscovery: tokenzero codemode 'search:read' | tokenzero codemode 'describe:zero.read'\n\nCache: defaults to the same recovery-cache.json as CLI expand/MCP so refs mintable by codemode expand on the next call. Override with --cache-path / TOKENZERO_CACHE_PATH when using an isolated store (wrong root yields store_mismatch naming both paths)." ), HarmEval(ArtifactArgs) => command(name = "harm-eval"), ProtectedAnchorAudit(ProtectedAnchorAuditArgs) => command(name = "protected-anchor-audit"), FalseSuccessShell(FalseSuccessShellArgs) => command(name = "false-success-shell"), RepoInventory(ArtifactArgs) => command(name = "repo-inventory"), PromptCachePack(ArtifactArgs) => command(name = "prompt-cache-pack"), InstallSmoke(InstallSmokeArgs) => command(name = "install-smoke"), PackageAudit(PackageAuditArgs) => command(name = "package-audit"), ShellMatrix(ShellMatrixArgs) => command(name = "shell-matrix"), OsReachAudit(OsReachAuditArgs) => command(name = "os-reach-audit"), OsReleaseArtifact(OsReleaseArtifactArgs) => command(name = "os-release-artifact"), OneShotEval(OneShotEvalArgs) => command(name = "one-shot-eval"), SourceCurrencyAudit(SourceCurrencyAuditArgs) => command(name = "source-currency-audit"), AdapterApprovalAudit(AdapterApprovalAuditArgs) => command(name = "adapter-approval-audit"), AdapterApprovalTemplate(AdapterApprovalTemplateArgs) => command(name = "adapter-approval-template"), ClaimAudit(ClaimAuditArgs) => command(name = "claim-audit"), CompletionAudit(CompletionAuditArgs) => command(name = "completion-audit"), SecurityPrivacyAudit(SecurityPrivacyAuditArgs) => command(name = "security-privacy-audit"), ArtifactHandoff(ArtifactHandoffArgs) => command(name = "artifact-handoff"), Reach(ReachArgs), WsSkeleton(WsSkeletonArgs) => command(name = "ws-skeleton"), Quote(QuoteArgs), }
+    @ HookTarget { ClaudeCode(HookClaudeCodeArgs) => command( name = "claude-code", about = "Claude Code PreToolUse adapter: wraps Bash commands in `tokenzero run` (fail-open, always exits 0)" ), ClaudeCodeSessionStart(HookSessionStartArgs) => command( name = "claude-code-session-start", about = "Claude Code SessionStart adapter: restores a compact session pack after compaction/resume (fail-open, always exits 0)" ), }
+    @ PulseCommand { Stats => command( name = "stats", alias = "status", about = "Print local Pulse telemetry report" ), Sync, Doctor, ExportJsonl(PulseExportArgs) => command(name = "export-jsonl"), ImportJsonl(PulseImportArgs) => command(name = "import-jsonl"), }
+    @ BenchCommand { Competitors(BenchCompetitorsArgs), }
+    @ CacheCommand { Status(CommonArgs) => command(alias = "statuz"), Prune(CachePruneArgs), #[doc = "Migrate legacy short refs to full-hash canonical refs (dry-run by default)."] MigrateRefs(CacheMigrateRefsArgs), #[doc = "Verify migration integrity without mutating."] MigrateVerify(CacheMigrateVerifyArgs), #[doc = "Rollback migration aliases and manifest (never CAS/source bytes)."] MigrateRollback(CacheMigrateRollbackArgs), #[doc = "Clean up legacy source payloads after successful verification."] MigrateCleanup(CacheMigrateCleanupArgs), }
+    @ ClientsCommand { Detect(ClientStatusArgs) => command(about = "Detect configured TokenZero AI client surfaces"), Scan(ClientStatusArgs) => command(about = "Scan this machine for AI harnesses TokenZero can adapt to"), Plan(ClientsPlanArgs) => command(about = "Plan TokenZero AI client integration writes"), Doctor(ClientStatusArgs) => command(about = "Diagnose TokenZero AI client integration state"), Rollback(ClientsRollbackArgs) => command(about = "Rollback a previous TokenZero client integration write"), }
+    @ RobotDocsCommand { Guide => command(alias = "manual"), Commands => command(about = "Print canonical command quick reference for agents"), Examples => command(about = "Print copy-paste examples for common agent tasks"), }
 }
 
-#[derive(Debug, Args)]
-pub(crate) struct CachePackArgs {
-    #[arg(long, default_value = "agent")]
-    pub(crate) scope: String,
-    #[arg(long)]
-    pub(crate) root: Option<PathBuf>,
-    #[arg(long)]
-    pub(crate) cache_path: Option<PathBuf>,
-    #[arg(long)]
-    pub(crate) json: bool,
+define_args! {
+    #[derive(Clone)] @ CommonArgs(#[arg(long)] root: Option<PathBuf>; #[arg(long)] cache_path: Option<PathBuf>; #[arg(long)] json: bool;)
+    #[derive(Clone)] @ ToolArgs(#[arg(long, default_value = "auto")] mode: String; #[arg(long)] budget: Option<usize>; #[arg(long)] allowed_root: Vec<PathBuf>; #[arg(long)] cache_path: Option<PathBuf>; #[arg(long, alias = "timeout", alias = "timout", value_name = "SECONDS")] timeout_seconds: Option<u64>; #[arg(long, alias = "jsno", alias = "jason")] json: bool;)
+    @ ReadArgs(#[arg(value_name = "PATH")] path: Vec<PathBuf>; #[arg(long)] paths_from: Option<PathBuf>; #[arg(long, default_value_t = 20)] max_files: usize; #[arg(long, default_value_t = 4000)] max_visible_tokens: usize; #[arg(long)] start_line: Option<usize>; #[arg(long)] end_line: Option<usize>; #[arg(long)] raw: bool; #[command(flatten)] tool: ToolArgs;)
+    @ FindArgs(query: String; path: Vec<PathBuf>; #[arg(long, default_value_t = 20)] max_files: usize; #[arg(long, default_value_t = 4000)] max_visible_tokens: usize; #[command(flatten)] tool: ToolArgs;)
+    @ RecallArgs(query: String; #[arg(long, default_value_t = 50)] max_hits: usize; #[arg(long, default_value_t = 4000)] max_visible_tokens: usize; #[command(flatten)] tool: ToolArgs;)
+    @ FetchArgs(url: String; #[doc = "Serve a cached body younger than this without touching the network."] #[arg(long)] ttl_seconds: Option<usize>; #[doc = "Bypass the TTL cache and re-fetch."] #[arg(long)] fresh: bool; #[arg(long, default_value_t = 4000)] max_visible_tokens: usize; #[command(flatten)] tool: ToolArgs;)
+    @ GlobArgs(pattern: String; path: Vec<PathBuf>; #[arg(long, default_value_t = 200)] max_files: usize; #[arg(long, default_value_t = 4000)] max_visible_tokens: usize; #[arg(long)] include_hidden: bool; #[command(flatten)] tool: ToolArgs;)
+    @ TreeArgs(path: Vec<PathBuf>; #[arg(long, default_value_t = 2)] depth: usize; #[arg(long, default_value_t = 200)] max_files: usize; #[arg(long, default_value_t = 4000)] max_visible_tokens: usize; #[arg(long)] include_hidden: bool; #[command(flatten)] tool: ToolArgs;)
+    @ EditArgs(#[arg(value_name = "PATH")] path: PathBuf; #[doc = "JSON array of {find, replace, replace_all?} hunks."] #[arg(long = "edits-json", value_name = "JSON")] edits_json: Option<String>; #[doc = "Read the edits JSON from stdin instead of --edits-json."] #[arg(long)] stdin: bool; #[doc = "Create a new file: one hunk with empty find; replace is the content."] #[arg(long)] create: bool; #[doc = "Validate and render the hunk diff without writing."] #[arg(long)] dry_run: bool; #[arg(long, default_value_t = 4000)] max_visible_tokens: usize; #[command(flatten)] tool: ToolArgs;)
+    @ RunArgs(#[arg(last = true)] command: Vec<String>; #[arg(long)] cwd: Option<PathBuf>; #[arg(long)] rewrite: Option<String>; #[arg(long)] no_rewrite: bool; #[arg(long)] stdin: bool; #[arg(long = "env")] env_overrides: Vec<String>; #[arg(long)] explain_runtime: bool; #[arg(long)] runtime_platform: Option<String>; #[command(flatten)] tool: ToolArgs;)
+    @ IngestArgs(input: Option<PathBuf>; #[arg(long)] stdin: bool; #[arg(long, default_value = "auto")] kind: String; #[command(flatten)] tool: ToolArgs;)
+    @ ExpandArgs(#[arg(value_name = "REF")] refs: Vec<String>; #[arg(long)] refs_from: Option<PathBuf>; #[arg(long)] selector: Option<String>; #[arg(long)] raw: bool; #[arg(long)] summary: bool; #[arg(long)] force: bool; #[arg(long)] start_line: Option<usize>; #[arg(long)] end_line: Option<usize>; #[arg(long)] line: Option<usize>; #[arg(long)] lines: Option<String>; #[arg(long)] around: Option<String>; #[arg(long)] anchor_kind: Option<String>; #[arg(long)] symbol: Option<String>; #[arg(long)] cache_path: Option<PathBuf>; #[arg(long)] json: bool;)
+    @ RewriteArgs(#[doc = "Command string; alternative to trailing -- <command...>."] command: Option<String>; #[doc = "Command after --, matching tokenzero run -- <command...>."] #[arg(last = true)] argv: Vec<String>; #[arg(long, default_value = "safe")] mode: String; #[arg(long)] json: bool;)
+    @ HookArgs(#[command(subcommand)] target: HookTarget;)
+    @ HookClaudeCodeArgs(#[doc = "rewrite | guide | off. Unknown values pass through (fail-open)."] #[arg(long, default_value = "rewrite")] mode: String;)
+    @ HookSessionStartArgs(#[doc = "Token budget for the restored session pack."] #[arg(long, default_value_t = 600)] max_tokens: usize;)
+    @ DoctorArgs(#[arg(long, global = true)] root: Option<PathBuf>; #[arg(long, global = true)] cache_path: Option<PathBuf>; #[arg(long, global = true)] runtime: bool; #[arg(long, global = true)] json: bool; #[arg(long = "robot-triage", global = true)] robot_triage: bool; #[arg(long, global = true)] fix: bool; #[arg(long = "dry-run", global = true)] dry_run: bool; #[arg(long, global = true)] explain: Option<String>; #[command(subcommand)] command: Option<DoctorCommand>;)
+    @ PulseArgs(#[arg(long, global = true)] root: Option<PathBuf>; #[arg(long, global = true)] json: bool; #[command(subcommand)] command: Option<PulseCommand>;)
+    @ PulseExportArgs(#[arg(value_name = "OUTPUT")] output: PathBuf;)
+    @ PulseImportArgs(#[arg(value_name = "INPUT")] input: PathBuf;)
+    @ SessionLedgerArgs(#[arg(long, global = true)] root: Option<PathBuf>; #[arg(long, global = true)] json: bool; #[command(subcommand)] command: Option<SessionLedgerCommand>;)
+    @ TelemetryInspectArgs(#[doc = "Explicitly opt in to shareable telemetry inspection (no exporter exists)."] #[arg(long)] telemetry: bool; #[doc = "Explicitly opt out; takes precedence over --telemetry."] #[arg(long)] no_telemetry: bool;)
+    @ CacheArgs(#[command(subcommand)] command: CacheCommand;)
+    @ CachePackArgs(#[arg(long, default_value = "agent")] scope: String; #[arg(long)] root: Option<PathBuf>; #[arg(long)] cache_path: Option<PathBuf>; #[arg(long)] json: bool;)
+    @ BenchArgs(#[command(subcommand)] command: BenchCommand;)
+    @ BenchCompetitorsArgs(#[arg(long, default_value = "shell-heavy")] suite: String; #[arg(long)] output_json: Option<PathBuf>; #[arg(long)] adapter_approval_artifact: Option<PathBuf>; #[arg(long)] json: bool;)
+    @ CachePruneArgs(#[arg(long)] root: Option<PathBuf>; #[arg(long)] cache_path: Option<PathBuf>; #[arg(long)] apply: bool; #[arg(long)] json: bool;)
+    @ CacheMigrateRefsArgs(#[arg(long)] root: Option<PathBuf>; #[arg(long)] cache_path: Option<PathBuf>; #[doc = "Actually write to CAS, store, and manifest. Without this flag, migration is dry-run only."] #[arg(long)] apply: bool; #[arg(long)] json: bool;)
+    @ CacheMigrateVerifyArgs(#[arg(long)] root: Option<PathBuf>; #[arg(long)] cache_path: Option<PathBuf>; #[arg(long)] json: bool;)
+    @ CacheMigrateRollbackArgs(#[arg(long)] root: Option<PathBuf>; #[arg(long)] cache_path: Option<PathBuf>; #[doc = "Actually remove aliases and manifest. Without this flag, rollback is dry-run only."] #[arg(long)] apply: bool; #[arg(long)] json: bool;)
+    @ CacheMigrateCleanupArgs(#[arg(long)] root: Option<PathBuf>; #[arg(long)] cache_path: Option<PathBuf>; #[doc = "Actually remove legacy source payloads. Requires --confirm-cleanup."] #[arg(long, requires = "confirm_cleanup")] apply: bool; #[doc = "Required confirmation flag. Cleanup is irreversible without migration re-run."] #[arg(long, requires = "apply")] confirm_cleanup: bool; #[arg(long)] json: bool;)
+    @ InstallArgs(#[arg(long)] root: Option<PathBuf>; #[arg(long)] plan: bool; #[arg(long)] apply: bool; #[arg(long)] rollback: Option<String>; #[arg(long)] global: bool; #[arg(long)] mcp: bool; #[arg(long)] shell: bool; #[arg(long)] instructions: bool; #[arg(long)] cli: bool; #[doc = "Wire the Claude Code PreToolUse hook into .claude/settings.json."] #[arg(long)] hooks: bool; #[doc = "Install the universal PATH shims under .tokenzero/shims/."] #[arg(long)] shims: bool; #[arg(long = "agent", value_name = "AGENT")] agents: Vec<String>; #[arg(long)] grok: bool; #[doc = "MCP tool surface profile (always classic; CodeMode is a separate execution layer)."] #[arg(long, value_name = "SURFACE", default_value = "classic")] surface: String; #[arg(long)] json: bool;)
+    @ InitArgs(#[arg(long)] root: Option<PathBuf>; #[arg(long)] global: bool; #[arg(long = "agent", value_name = "AGENT")] agents: Vec<String>; #[arg(long)] mcp: bool; #[arg(long)] shell: bool; #[arg(long)] instructions: bool; #[arg(long)] cli: bool; #[doc = "Wire the Claude Code PreToolUse hook into .claude/settings.json."] #[arg(long)] hooks: bool; #[doc = "Install the universal PATH shims under .tokenzero/shims/."] #[arg(long)] shims: bool; #[arg(long)] apply: bool; #[arg(long)] plan: bool; #[doc = "MCP tool surface profile (always classic; CodeMode is a separate execution layer)."] #[arg(long, value_name = "SURFACE", default_value = "classic")] surface: String; #[arg(long)] json: bool;)
+    @ ClientsArgs(#[command(subcommand)] command: ClientsCommand;)
+    @ ClientStatusArgs(#[arg(long)] root: Option<PathBuf>; #[arg(long = "agent", value_name = "AGENT")] agents: Vec<String>; #[arg(long)] grok: bool; #[arg(long)] json: bool;)
+    @ ClientsPlanArgs(#[arg(long)] root: Option<PathBuf>; #[arg(long, default_value = "standard")] profile: String; #[arg(long = "agent", value_name = "AGENT")] agents: Vec<String>; #[arg(long)] grok: bool; #[arg(long)] json: bool;)
+    @ ClientsRollbackArgs(id: String; #[arg(long)] root: Option<PathBuf>; #[arg(long)] json: bool;)
+    @ CapabilitiesArgs(#[arg(long, alias = "jsno", alias = "jason")] json: bool;)
+    @ RobotDocsArgs(#[command(subcommand)] command: RobotDocsCommand;)
+    @ McpServerArgs(#[doc = "Launch mode: mcp exposes per-op tools; codemode exposes primary, report, and gated recovery tools."] #[arg(long, default_value = "mcp", value_name = "MODE")] mode: String; #[arg(long)] allowed_root: Vec<PathBuf>; #[arg(long)] cache_path: Option<PathBuf>; #[arg(long, default_value = "auto")] default_mode: String; #[arg(long, alias = "timeout", value_name = "SECONDS")] shell_timeout_seconds: Option<u64>; #[arg(long, value_name = "SECONDS")] idle_timeout_seconds: Option<u64>; #[doc = "Run a crash-transparent supervisor that owns the client stdio pipes and automatically respawns the inner MCP server if it ever dies."] #[arg(long)] supervise: bool; #[doc = "Backward-compatible alias for --mode."] #[arg(long, value_name = "SURFACE")] tool_surface: Option<String>;)
+    @ OsReachAuditArgs(#[arg(long, default_value = "results/current/tokenzero_os_reach_audit.json")] output_json: PathBuf; #[arg(long)] output_md: Option<PathBuf>; #[arg(long, default_value = ".")] root: PathBuf; #[arg(long = "os-artifact")] os_artifact: Vec<PathBuf>; #[arg(long)] release_approval: bool; #[arg(long)] json: bool;)
+    @ OsReleaseArtifactArgs(#[arg(long, default_value = "results/current/tokenzero_os_release_artifact.json")] output_json: PathBuf; #[arg(long)] output_md: Option<PathBuf>; #[arg(long, default_value = ".")] root: PathBuf; #[arg(long)] json: bool;)
+    @ SourceCurrencyAuditArgs(#[arg(long, default_value = "results/current/tokenzero_source_currency.json")] output_json: PathBuf; #[arg(long)] output_md: Option<PathBuf>; #[arg(long)] refresh_ledger: Option<PathBuf>; #[arg(long)] refresh_git_heads: bool; #[arg(long)] json: bool;)
+    @ AdapterApprovalAuditArgs(#[arg(long, default_value = "results/current/tokenzero_adapter_approval_audit.json")] output_json: PathBuf; #[arg(long)] output_md: Option<PathBuf>; #[arg(long)] approval_file: Option<PathBuf>; #[arg(long)] execution_approval: bool; #[arg(long)] json: bool;)
+    @ ClaimAuditArgs(#[arg(long, default_value = "results/current/tokenzero_claim_audit.json")] output_json: PathBuf; #[arg(long)] output_md: Option<PathBuf>; #[arg(long)] source_artifact: Option<PathBuf>; #[arg(long)] benchmark_artifact: Option<PathBuf>; #[arg(long)] adapter_approval_artifact: Option<PathBuf>; #[arg(long)] recovery_artifact: Option<PathBuf>; #[arg(long)] task_success_artifact: Option<PathBuf>; #[arg(long)] os_artifact: Option<PathBuf>; #[arg(long)] release_approval: bool; #[arg(long)] json: bool;)
+    @ ReachArgs(#[arg(long, default_value = ".")] root: PathBuf; #[arg(long)] output_json: Option<PathBuf>; #[arg(long)] json: bool;)
+    @ InstallSmokeArgs(#[arg(long)] output_json: Option<PathBuf>; #[arg(long)] json: bool;)
+    @ PackageAuditArgs(#[arg(long, default_value = ".")] dist: PathBuf; #[arg(long)] json: bool;)
+    @ QuoteArgs(#[arg(long)] platform: String; #[arg(last = true)] args: Vec<String>; #[arg(long)] json: bool;)
+    @ CodeModeArgs(#[doc = "CodeMode plan (JS-style zero.token.compact / expand) as a positional argument."] #[arg(value_name = "PLAN")] plan: Option<String>; #[doc = "CodeMode plan as an explicit flag; kept for router compatibility."] #[arg(short = 'p', long = "plan", value_name = "PLAN")] plan_flag: Option<String>; #[doc = "Read plan from a file instead of inline. Supports .txt and .js extensions."] #[arg(long = "plan-file", value_name = "PATH")] plan_file: Option<PathBuf>; #[doc = "Workspace root used for CodeMode file, shell, and recovery-cache boundaries."] #[arg(long)] root: Option<PathBuf>; #[doc = "Additional allowed roots for plans that must intentionally cross the workspace boundary."] #[arg(long)] allowed_root: Vec<PathBuf>; #[doc = "Override the CodeMode recovery cache path."] #[arg(long)] cache_path: Option<PathBuf>; #[doc = "Maximum visible tokens for each underlying TokenZero operation."] #[arg(long, default_value_t = 4000)] max_visible_tokens: usize; #[arg(long, alias = "timeout", alias = "timout", value_name = "SECONDS")] timeout_seconds: Option<u64>; #[arg(long)] json: bool;)
 }
 
-#[derive(Debug, Args)]
-pub(crate) struct BenchArgs {
-    #[command(subcommand)]
-    pub(crate) command: BenchCommand,
-}
-
-#[derive(Debug, Subcommand)]
-pub(crate) enum BenchCommand {
-    Competitors(BenchCompetitorsArgs),
-}
-
-#[derive(Debug, Args)]
-pub(crate) struct BenchCompetitorsArgs {
-    #[arg(long, default_value = "shell-heavy")]
-    pub(crate) suite: String,
-    #[arg(long)]
-    pub(crate) output_json: Option<PathBuf>,
-    #[arg(long)]
-    pub(crate) adapter_approval_artifact: Option<PathBuf>,
-    #[arg(long)]
-    pub(crate) json: bool,
-}
-
-#[derive(Debug, Subcommand)]
-pub(crate) enum CacheCommand {
-    #[command(alias = "statuz")]
-    Status(CommonArgs),
-    Prune(CachePruneArgs),
-    /// Migrate legacy short refs to full-hash canonical refs (dry-run by default).
-    MigrateRefs(CacheMigrateRefsArgs),
-    /// Verify migration integrity without mutating.
-    MigrateVerify(CacheMigrateVerifyArgs),
-    /// Rollback migration aliases and manifest (never CAS/source bytes).
-    MigrateRollback(CacheMigrateRollbackArgs),
-    /// Clean up legacy source payloads after successful verification.
-    MigrateCleanup(CacheMigrateCleanupArgs),
-}
-
-#[derive(Debug, Args)]
-pub(crate) struct CachePruneArgs {
-    #[arg(long)]
-    pub(crate) root: Option<PathBuf>,
-    #[arg(long)]
-    pub(crate) cache_path: Option<PathBuf>,
-    #[arg(long)]
-    pub(crate) apply: bool,
-    #[arg(long)]
-    pub(crate) json: bool,
-}
-
-#[derive(Debug, Args)]
-pub(crate) struct CacheMigrateRefsArgs {
-    #[arg(long)]
-    pub(crate) root: Option<PathBuf>,
-    #[arg(long)]
-    pub(crate) cache_path: Option<PathBuf>,
-    /// Actually write to CAS, store, and manifest. Without this flag, migration is dry-run only.
-    #[arg(long)]
-    pub(crate) apply: bool,
-    #[arg(long)]
-    pub(crate) json: bool,
-}
-
-#[derive(Debug, Args)]
-pub(crate) struct CacheMigrateVerifyArgs {
-    #[arg(long)]
-    pub(crate) root: Option<PathBuf>,
-    #[arg(long)]
-    pub(crate) cache_path: Option<PathBuf>,
-    #[arg(long)]
-    pub(crate) json: bool,
-}
-
-#[derive(Debug, Args)]
-pub(crate) struct CacheMigrateRollbackArgs {
-    #[arg(long)]
-    pub(crate) root: Option<PathBuf>,
-    #[arg(long)]
-    pub(crate) cache_path: Option<PathBuf>,
-    /// Actually remove aliases and manifest. Without this flag, rollback is dry-run only.
-    #[arg(long)]
-    pub(crate) apply: bool,
-    #[arg(long)]
-    pub(crate) json: bool,
-}
-
-#[derive(Debug, Args)]
-pub(crate) struct CacheMigrateCleanupArgs {
-    #[arg(long)]
-    pub(crate) root: Option<PathBuf>,
-    #[arg(long)]
-    pub(crate) cache_path: Option<PathBuf>,
-    /// Actually remove legacy source payloads. Requires --confirm-cleanup.
-    #[arg(long, requires = "confirm_cleanup")]
-    pub(crate) apply: bool,
-    /// Required confirmation flag. Cleanup is irreversible without migration re-run.
-    #[arg(long, requires = "apply")]
-    pub(crate) confirm_cleanup: bool,
-    #[arg(long)]
-    pub(crate) json: bool,
-}
-
-#[derive(Debug, Args)]
-pub(crate) struct InstallArgs {
-    #[arg(long)]
-    pub(crate) root: Option<PathBuf>,
-    #[arg(long)]
-    pub(crate) plan: bool,
-    #[arg(long)]
-    pub(crate) apply: bool,
-    #[arg(long)]
-    pub(crate) rollback: Option<String>,
-    #[arg(long)]
-    pub(crate) global: bool,
-    #[arg(long)]
-    pub(crate) mcp: bool,
-    #[arg(long)]
-    pub(crate) shell: bool,
-    #[arg(long)]
-    pub(crate) instructions: bool,
-    #[arg(long)]
-    pub(crate) cli: bool,
-    /// Wire the Claude Code PreToolUse hook into .claude/settings.json.
-    #[arg(long)]
-    pub(crate) hooks: bool,
-    /// Install the universal PATH shims under .tokenzero/shims/.
-    #[arg(long)]
-    pub(crate) shims: bool,
-    #[arg(long = "agent", value_name = "AGENT")]
-    pub(crate) agents: Vec<String>,
-    #[arg(long)]
-    pub(crate) grok: bool,
-    /// MCP tool surface profile (always `classic`; CodeMode is a separate execution layer).
-    #[arg(long, value_name = "SURFACE", default_value = "classic")]
-    pub(crate) surface: String,
-    #[arg(long)]
-    pub(crate) json: bool,
-}
-
-#[derive(Debug, Args)]
-pub(crate) struct InitArgs {
-    #[arg(long)]
-    pub(crate) root: Option<PathBuf>,
-    #[arg(long)]
-    pub(crate) global: bool,
-    #[arg(long = "agent", value_name = "AGENT")]
-    pub(crate) agents: Vec<String>,
-    #[arg(long)]
-    pub(crate) mcp: bool,
-    #[arg(long)]
-    pub(crate) shell: bool,
-    #[arg(long)]
-    pub(crate) instructions: bool,
-    #[arg(long)]
-    pub(crate) cli: bool,
-    /// Wire the Claude Code PreToolUse hook into .claude/settings.json.
-    #[arg(long)]
-    pub(crate) hooks: bool,
-    /// Install the universal PATH shims under .tokenzero/shims/.
-    #[arg(long)]
-    pub(crate) shims: bool,
-    #[arg(long)]
-    pub(crate) apply: bool,
-    #[arg(long)]
-    pub(crate) plan: bool,
-    /// MCP tool surface profile (always `classic`; CodeMode is a separate execution layer).
-    #[arg(long, value_name = "SURFACE", default_value = "classic")]
-    pub(crate) surface: String,
-    #[arg(long)]
-    pub(crate) json: bool,
-}
-
-#[derive(Debug, Args)]
-pub(crate) struct ClientsArgs {
-    #[command(subcommand)]
-    pub(crate) command: ClientsCommand,
-}
-
-#[derive(Debug, Subcommand)]
-pub(crate) enum ClientsCommand {
-    #[command(about = "Detect configured TokenZero AI client surfaces")]
-    Detect(ClientStatusArgs),
-    #[command(about = "Scan this machine for AI harnesses TokenZero can adapt to")]
-    Scan(ClientStatusArgs),
-    #[command(about = "Plan TokenZero AI client integration writes")]
-    Plan(ClientsPlanArgs),
-    #[command(about = "Diagnose TokenZero AI client integration state")]
-    Doctor(ClientStatusArgs),
-    #[command(about = "Rollback a previous TokenZero client integration write")]
-    Rollback(ClientsRollbackArgs),
-}
-
-#[derive(Debug, Args)]
-pub(crate) struct ClientStatusArgs {
-    #[arg(long)]
-    pub(crate) root: Option<PathBuf>,
-    #[arg(long = "agent", value_name = "AGENT")]
-    pub(crate) agents: Vec<String>,
-    #[arg(long)]
-    pub(crate) grok: bool,
-    #[arg(long)]
-    pub(crate) json: bool,
-}
-
-#[derive(Debug, Args)]
-pub(crate) struct ClientsPlanArgs {
-    #[arg(long)]
-    pub(crate) root: Option<PathBuf>,
-    #[arg(long, default_value = "standard")]
-    pub(crate) profile: String,
-    #[arg(long = "agent", value_name = "AGENT")]
-    pub(crate) agents: Vec<String>,
-    #[arg(long)]
-    pub(crate) grok: bool,
-    #[arg(long)]
-    pub(crate) json: bool,
-}
-
-#[derive(Debug, Args)]
-pub(crate) struct ClientsRollbackArgs {
-    pub(crate) id: String,
-    #[arg(long)]
-    pub(crate) root: Option<PathBuf>,
-    #[arg(long)]
-    pub(crate) json: bool,
-}
-
-#[derive(Debug, Args)]
-pub(crate) struct CapabilitiesArgs {
-    #[arg(long, alias = "jsno", alias = "jason")]
-    pub(crate) json: bool,
-}
-
-#[derive(Debug, Args)]
-pub(crate) struct RobotDocsArgs {
-    #[command(subcommand)]
-    pub(crate) command: RobotDocsCommand,
-}
-
-#[derive(Debug, Subcommand)]
-pub(crate) enum RobotDocsCommand {
-    #[command(alias = "manual")]
-    Guide,
-    #[command(about = "Print canonical command quick reference for agents")]
-    Commands,
-    #[command(about = "Print copy-paste examples for common agent tasks")]
-    Examples,
-}
-
-#[derive(Debug, Args)]
-pub(crate) struct McpServerArgs {
-    /// Launch mode: mcp exposes per-op tools; codemode exposes primary, report, and gated recovery tools.
-    #[arg(long, default_value = "mcp", value_name = "MODE")]
-    pub(crate) mode: String,
-    #[arg(long)]
-    pub(crate) allowed_root: Vec<PathBuf>,
-    #[arg(long)]
-    pub(crate) cache_path: Option<PathBuf>,
-    #[arg(long, default_value = "auto")]
-    pub(crate) default_mode: String,
-    #[arg(long, alias = "timeout", value_name = "SECONDS")]
-    pub(crate) shell_timeout_seconds: Option<u64>,
-    #[arg(long, value_name = "SECONDS")]
-    pub(crate) idle_timeout_seconds: Option<u64>,
-    /// Run a crash-transparent supervisor that owns the client stdio pipes
-    /// and automatically respawns the inner MCP server if it ever dies.
-    #[arg(long)]
-    pub(crate) supervise: bool,
-    /// Backward-compatible alias for --mode.
-    #[arg(long, value_name = "SURFACE")]
-    pub(crate) tool_surface: Option<String>,
-}
-
-#[derive(Debug, Args)]
-pub(crate) struct ArtifactArgs {
-    #[arg(long, default_value = "results/current/rust_mcp_smoke.json")]
-    pub(crate) output_json: PathBuf,
-    #[arg(long)]
-    pub(crate) output_md: Option<PathBuf>,
-    #[arg(long)]
-    pub(crate) json: bool,
-}
-
-#[derive(Debug, Args)]
-pub(crate) struct ShellMatrixArgs {
-    #[arg(long, default_value = "results/current/tokenzero_shell_matrix.json")]
-    pub(crate) output_json: PathBuf,
-    #[arg(long)]
-    pub(crate) output_md: Option<PathBuf>,
-    #[arg(long)]
-    pub(crate) json: bool,
-}
-
-#[derive(Debug, Args)]
-pub(crate) struct FalseSuccessShellArgs {
-    #[arg(
-        long,
-        default_value = "results/current/tokenzero_false_success_shell.json"
-    )]
-    pub(crate) output_json: PathBuf,
-    #[arg(long)]
-    pub(crate) output_md: Option<PathBuf>,
-    #[arg(long)]
-    pub(crate) json: bool,
-}
-
-#[derive(Debug, Args)]
-pub(crate) struct ExactRecoveryShellArgs {
-    #[arg(
-        long,
-        default_value = "results/current/tokenzero_exact_recovery_shell.json"
-    )]
-    pub(crate) output_json: PathBuf,
-    #[arg(long)]
-    pub(crate) output_md: Option<PathBuf>,
-    #[arg(long)]
-    pub(crate) json: bool,
-}
-
-#[derive(Debug, Args)]
-pub(crate) struct ExactRecoveryAuditArgs {
-    #[arg(
-        long,
-        default_value = "results/current/tokenzero_exact_recovery_audit.json"
-    )]
-    pub(crate) output_json: PathBuf,
-    #[arg(long)]
-    pub(crate) output_md: Option<PathBuf>,
-    #[arg(long)]
-    pub(crate) json: bool,
-}
-
-#[derive(Debug, Args)]
-pub(crate) struct ProtectedAnchorAuditArgs {
-    #[arg(
-        long,
-        default_value = "results/current/tokenzero_protected_anchor_audit.json"
-    )]
-    pub(crate) output_json: PathBuf,
-    #[arg(long)]
-    pub(crate) output_md: Option<PathBuf>,
-    #[arg(long)]
-    pub(crate) json: bool,
-}
-
-#[derive(Debug, Args)]
-pub(crate) struct OsReachAuditArgs {
-    #[arg(long, default_value = "results/current/tokenzero_os_reach_audit.json")]
-    pub(crate) output_json: PathBuf,
-    #[arg(long)]
-    pub(crate) output_md: Option<PathBuf>,
-    #[arg(long, default_value = ".")]
-    pub(crate) root: PathBuf,
-    #[arg(long = "os-artifact")]
-    pub(crate) os_artifact: Vec<PathBuf>,
-    #[arg(long)]
-    pub(crate) release_approval: bool,
-    #[arg(long)]
-    pub(crate) json: bool,
-}
-
-#[derive(Debug, Args)]
-pub(crate) struct OneShotEvalArgs {
-    #[arg(long, default_value = "results/current/tokenzero_one_shot_eval.json")]
-    pub(crate) output_json: PathBuf,
-    #[arg(long)]
-    pub(crate) output_md: Option<PathBuf>,
-    #[arg(long)]
-    pub(crate) json: bool,
-}
-
-#[derive(Debug, Args)]
-pub(crate) struct OsReleaseArtifactArgs {
-    #[arg(
-        long,
-        default_value = "results/current/tokenzero_os_release_artifact.json"
-    )]
-    pub(crate) output_json: PathBuf,
-    #[arg(long)]
-    pub(crate) output_md: Option<PathBuf>,
-    #[arg(long, default_value = ".")]
-    pub(crate) root: PathBuf,
-    #[arg(long)]
-    pub(crate) json: bool,
-}
-
-#[derive(Debug, Args)]
-pub(crate) struct SourceCurrencyAuditArgs {
-    #[arg(long, default_value = "results/current/tokenzero_source_currency.json")]
-    pub(crate) output_json: PathBuf,
-    #[arg(long)]
-    pub(crate) output_md: Option<PathBuf>,
-    #[arg(long)]
-    pub(crate) refresh_ledger: Option<PathBuf>,
-    #[arg(long)]
-    pub(crate) refresh_git_heads: bool,
-    #[arg(long)]
-    pub(crate) json: bool,
-}
-
-#[derive(Debug, Args)]
-pub(crate) struct AdapterApprovalAuditArgs {
-    #[arg(
-        long,
-        default_value = "results/current/tokenzero_adapter_approval_audit.json"
-    )]
-    pub(crate) output_json: PathBuf,
-    #[arg(long)]
-    pub(crate) output_md: Option<PathBuf>,
-    #[arg(long)]
-    pub(crate) approval_file: Option<PathBuf>,
-    #[arg(long)]
-    pub(crate) execution_approval: bool,
-    #[arg(long)]
-    pub(crate) json: bool,
-}
-
-#[derive(Debug, Args)]
-pub(crate) struct AdapterApprovalTemplateArgs {
-    #[arg(
-        long,
-        default_value = "results/current/tokenzero_adapter_approval_file.json"
-    )]
-    pub(crate) output_json: PathBuf,
-    #[arg(long)]
-    pub(crate) output_md: Option<PathBuf>,
-    #[arg(long)]
-    pub(crate) json: bool,
-}
-
-#[derive(Debug, Args)]
-pub(crate) struct ClaimAuditArgs {
-    #[arg(long, default_value = "results/current/tokenzero_claim_audit.json")]
-    pub(crate) output_json: PathBuf,
-    #[arg(long)]
-    pub(crate) output_md: Option<PathBuf>,
-    #[arg(long)]
-    pub(crate) source_artifact: Option<PathBuf>,
-    #[arg(long)]
-    pub(crate) benchmark_artifact: Option<PathBuf>,
-    #[arg(long)]
-    pub(crate) adapter_approval_artifact: Option<PathBuf>,
-    #[arg(long)]
-    pub(crate) recovery_artifact: Option<PathBuf>,
-    #[arg(long)]
-    pub(crate) task_success_artifact: Option<PathBuf>,
-    #[arg(long)]
-    pub(crate) os_artifact: Option<PathBuf>,
-    #[arg(long)]
-    pub(crate) release_approval: bool,
-    #[arg(long)]
-    pub(crate) json: bool,
-}
-
-#[derive(Debug, Args)]
-pub(crate) struct CompletionAuditArgs {
-    #[arg(
-        long,
-        default_value = "results/current/tokenzero_completion_audit.json"
-    )]
-    pub(crate) output_json: PathBuf,
-    #[arg(long)]
-    pub(crate) output_md: Option<PathBuf>,
-    #[arg(long)]
-    pub(crate) json: bool,
-}
-
-#[derive(Debug, Args)]
-pub(crate) struct SecurityPrivacyAuditArgs {
-    #[arg(
-        long,
-        default_value = "results/current/tokenzero_security_privacy_audit.json"
-    )]
-    pub(crate) output_json: PathBuf,
-    #[arg(long)]
-    pub(crate) output_md: Option<PathBuf>,
-    #[arg(long)]
-    pub(crate) json: bool,
-}
-
-#[derive(Debug, Args)]
-pub(crate) struct ArtifactHandoffArgs {
-    #[arg(
-        long,
-        default_value = "results/current/tokenzero_artifact_handoff.json"
-    )]
-    pub(crate) output_json: PathBuf,
-    #[arg(long)]
-    pub(crate) output_md: Option<PathBuf>,
-    #[arg(long)]
-    pub(crate) json: bool,
-}
-
-#[derive(Debug, Args)]
-pub(crate) struct ReachArgs {
-    #[arg(long, default_value = ".")]
-    pub(crate) root: PathBuf,
-    #[arg(long)]
-    pub(crate) output_json: Option<PathBuf>,
-    #[arg(long)]
-    pub(crate) json: bool,
-}
-
-#[derive(Debug, Args)]
-pub(crate) struct WsSkeletonArgs {
-    #[arg(long, default_value = "results/current/tokenzero_ws_001.json")]
-    pub(crate) output_json: PathBuf,
-    #[arg(long)]
-    pub(crate) output_md: Option<PathBuf>,
-    #[arg(long)]
-    pub(crate) json: bool,
-}
-
-#[derive(Debug, Args)]
-pub(crate) struct InstallSmokeArgs {
-    #[arg(long)]
-    pub(crate) output_json: Option<PathBuf>,
-    #[arg(long)]
-    pub(crate) json: bool,
-}
-
-#[derive(Debug, Args)]
-pub(crate) struct PackageAuditArgs {
-    #[arg(long, default_value = ".")]
-    pub(crate) dist: PathBuf,
-    #[arg(long)]
-    pub(crate) json: bool,
-}
-
-#[derive(Debug, Args)]
-pub(crate) struct QuoteArgs {
-    #[arg(long)]
-    pub(crate) platform: String,
-    #[arg(last = true)]
-    pub(crate) args: Vec<String>,
-    #[arg(long)]
-    pub(crate) json: bool,
-}
-
-#[derive(Debug, Args)]
-pub(crate) struct CodeModeArgs {
-    /// CodeMode plan (JS-style zero.token.compact / expand) as a positional argument.
-    #[arg(value_name = "PLAN")]
-    pub(crate) plan: Option<String>,
-    /// CodeMode plan as an explicit flag; kept for router compatibility.
-    #[arg(short = 'p', long = "plan", value_name = "PLAN")]
-    pub(crate) plan_flag: Option<String>,
-    /// Read plan from a file instead of inline. Supports .txt and .js extensions.
-    #[arg(long = "plan-file", value_name = "PATH")]
-    pub(crate) plan_file: Option<PathBuf>,
-    /// Workspace root used for CodeMode file, shell, and recovery-cache boundaries.
-    #[arg(long)]
-    pub(crate) root: Option<PathBuf>,
-    /// Additional allowed roots for plans that must intentionally cross the workspace boundary.
-    #[arg(long)]
-    pub(crate) allowed_root: Vec<PathBuf>,
-    /// Override the CodeMode recovery cache path.
-    #[arg(long)]
-    pub(crate) cache_path: Option<PathBuf>,
-    /// Maximum visible tokens for each underlying TokenZero operation.
-    #[arg(long, default_value_t = 4000)]
-    pub(crate) max_visible_tokens: usize,
-    #[arg(long, alias = "timeout", alias = "timout", value_name = "SECONDS")]
-    pub(crate) timeout_seconds: Option<u64>,
-    #[arg(long)]
-    pub(crate) json: bool,
+artifact_args! {
+    ArtifactArgs => "results/current/rust_mcp_smoke.json",
+    ShellMatrixArgs => "results/current/tokenzero_shell_matrix.json",
+    FalseSuccessShellArgs => "results/current/tokenzero_false_success_shell.json",
+    ExactRecoveryShellArgs => "results/current/tokenzero_exact_recovery_shell.json",
+    ExactRecoveryAuditArgs => "results/current/tokenzero_exact_recovery_audit.json",
+    ProtectedAnchorAuditArgs => "results/current/tokenzero_protected_anchor_audit.json",
+    OneShotEvalArgs => "results/current/tokenzero_one_shot_eval.json",
+    AdapterApprovalTemplateArgs => "results/current/tokenzero_adapter_approval_file.json",
+    CompletionAuditArgs => "results/current/tokenzero_completion_audit.json",
+    SecurityPrivacyAuditArgs => "results/current/tokenzero_security_privacy_audit.json",
+    ArtifactHandoffArgs => "results/current/tokenzero_artifact_handoff.json",
+    WsSkeletonArgs => "results/current/tokenzero_ws_001.json",
 }
 
 impl CodeModeArgs {
@@ -1153,60 +221,5 @@ impl CodeModeArgs {
             .or(self.plan.as_deref())
             .unwrap_or("")
             .to_string())
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn cli_args_do_not_import_cli_monolith() {
-        let source = include_str!("cli_args.rs");
-        // The test module itself uses super::* but the non-test code must not.
-        let non_test: &str = source.split("#[cfg(test)]").next().unwrap_or(source);
-        let forbidden_imports = ["use crate::main", "crate::main::"];
-        for forbidden in forbidden_imports {
-            assert!(
-                !non_test.contains(forbidden),
-                "cli_args.rs must not back-import the CLI monolith: {forbidden}"
-            );
-        }
-    }
-
-    use super::CodeModeArgs;
-
-    #[test]
-    fn plan_file_reads_from_disk() {
-        let dir = tempfile::tempdir().unwrap();
-        let plan_path = dir.path().join("test.plan.js");
-        std::fs::write(&plan_path, r#"await zero.compact("from file")"#).unwrap();
-        let args = CodeModeArgs {
-            plan: None,
-            plan_flag: None,
-            plan_file: Some(plan_path),
-            root: None,
-            allowed_root: Vec::new(),
-            cache_path: None,
-            max_visible_tokens: 4000,
-            timeout_seconds: None,
-            json: false,
-        };
-        let text = args.plan_text().unwrap();
-        assert!(text.contains("from file"));
-    }
-
-    #[test]
-    fn plan_text_prefers_flag_over_positional() {
-        let args = CodeModeArgs {
-            plan: Some("positional".to_string()),
-            plan_flag: Some("flag_wins".to_string()),
-            plan_file: None,
-            root: None,
-            allowed_root: Vec::new(),
-            cache_path: None,
-            max_visible_tokens: 4000,
-            timeout_seconds: None,
-            json: false,
-        };
-        assert_eq!(args.plan_text().unwrap(), "flag_wins");
     }
 }

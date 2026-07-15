@@ -1,45 +1,4 @@
-//! `TokenZeroEngine` methods extracted from `lib.rs`.
-#![allow(unused_imports)]
-
-use super::cache_pack::{
-    cache_pack_manifest_path, cache_pack_sources, previous_cache_digest, read_line_range_from_file,
-};
-use super::collect::*;
-use super::config::{
-    EngineConfig, FETCH_ALLOW_ENV, FETCH_DENY_ENV, FETCH_ENABLED_ENV, ServeFlight, new_session_id,
-};
-use super::fetch_cache::{epoch_secs, fetch_index_path, load_fetch_index, record_fetch};
-use super::fetch_guard::{FETCH_META_MARKER, split_fetch_meta, validate_fetch_target};
-use super::metrics;
-use super::paths::*;
-use super::render::*;
-use super::session::{
-    DiffTelemetry, SeenState, ServeKey, ServedRecord, SessionMemory, SessionSummary,
-};
-use super::{
-    Accounting, ContentType, DEFAULT_MCP_IDLE_TIMEOUT_SECS, DEFAULT_SHELL_TIMEOUT_SECS,
-    DIFF_MAX_BYTES, DIFF_MAX_LINES, DIFF_READS_ENV, EditHunk, MAX_MCP_IDLE_TIMEOUT_SECS,
-    MAX_SEARCH_VISITED_FILES, MAX_SHELL_TIMEOUT_SECS, MIN_SEARCH_VISITED_FILES, Mode, RG_PATH_ENV,
-    SEARCH_BACKEND_ENV, SEARCH_VISIT_MULTIPLIER, SESSION_DEDUP_ENV, SearchBackend, ServeOptions,
-    ShellRenderInput, TokenZeroEngine, ToolResponse, cache_maintenance, count_tokens,
-    detect_content_type, make_capsule, make_capsule_with_raw_tokens, ref_record, render_shell,
-    sha256_hex, shell_combined_output, shell_spill_dir, shell_timeout_from_secs,
-    split_command_string,
-};
-use crate::recall;
-use globset::{GlobBuilder, GlobMatcher};
-use serde_json::{Value, json};
-use std::collections::{BTreeMap, HashSet};
-use std::ffi::OsString;
-use std::fs;
-use std::path::{Path, PathBuf};
-use std::sync::{Condvar, Mutex, OnceLock};
-use std::time::{Duration, SystemTime};
-use tokenzero_filters::rewrite_command;
-use tokenzero_recovery::{ExpansionResult, RecoveryStore, StoredPayload};
-use tokenzero_runtime::{
-    RunOutputPolicy, StreamCapture, contains_platform_shell_syntax, run_command_with_policy,
-};
+use super::*;
 
 impl TokenZeroEngine {
     #[allow(clippy::too_many_arguments)]
@@ -124,7 +83,7 @@ impl TokenZeroEngine {
         } else {
             self.begin_serve_flight(Vec::new())
         };
-        let mut store = RecoveryStore::new(Some(self.config.cache_path.clone()));
+        let mut store = self.recovery_store();
         let mut visible_parts = Vec::new();
         let mut raw_visible_parts = Vec::new();
         let mut refs = Vec::new();
@@ -144,12 +103,7 @@ impl TokenZeroEngine {
         let mut substitutions: Vec<PendingSubstitution> = Vec::new();
         for path in paths.iter().take(max_files) {
             if !self.path_allowed(path) {
-                return ToolResponse::error(
-                    "read",
-                    "path_not_allowed",
-                    format!("path is outside allowed roots: {}", path.display()),
-                    None,
-                );
+                return path_not_allowed("read", path);
             }
             let source_start = start_line;
             let source_end = end_line;
@@ -286,19 +240,7 @@ impl TokenZeroEngine {
                     }
                     _ => {}
                 }
-                pending.push((
-                    key,
-                    ServedRecord {
-                        content_sha256,
-                        blob_ref: stored.blob_ref.clone(),
-                        file_ref: stored.file_ref.clone(),
-                        raw_tokens: stored.raw_tokens,
-                        line_count: text.lines().count(),
-                        byte_len: text.len(),
-                        served_at: SystemTime::now(),
-                        serve_count: 1,
-                    },
-                ));
+                pending.push((key, served_record(&text, &stored)));
             }
             raw_tokens += capsule.raw_tokens;
             visible_tokens += part_tokens;
@@ -309,19 +251,16 @@ impl TokenZeroEngine {
             }
             visible_parts.push(part_text);
         }
-        if !refs.is_empty() {
-            if let Err(err) = store.persist_pending() {
-                storage_errors.push(err.to_string());
-                refs.clear();
-            }
+        let persisted = persist_refs(&mut store, &mut refs);
+        if let Some(error) = persisted.error {
+            storage_errors.push(error);
         }
-        let refs_complete = prune_dead_refs(&store, &mut refs);
+        let refs_complete = persisted.refs_complete;
         if !refs_complete && !raw {
             visible_parts = raw_visible_parts;
             visible_tokens = raw_tokens;
         }
-        let full_bytes = visible_parts.iter().map(String::len).sum::<usize>()
-            + visible_parts.len().saturating_sub(1) * 2;
+        let full_bytes = joined_bytes(&visible_parts);
         // Dedup/diff notes advertise refs in place of content: apply them
         // only when persistence succeeded AND every ref survived eviction.
         // Degraded storage always serves full — the bytes are in the text,
@@ -356,31 +295,28 @@ impl TokenZeroEngine {
             }
         }
         if self.config.session_dedup {
-            let delta_bytes = visible_parts.iter().map(String::len).sum::<usize>()
-                + visible_parts.len().saturating_sub(1) * 2;
+            let delta_bytes = joined_bytes(&visible_parts);
             summary.note_wire_bytes(full_bytes, delta_bytes);
         }
         let exact_refs_available = !refs.is_empty();
         let exact_ref_tokens = exact_ref_token_count(&refs);
-        let mut response = ToolResponse::ok(
+        let mut response = success_response(
             "read",
             mode,
             visible_parts.join("\n\n"),
             refs,
-            Accounting {
+            (
                 raw_tokens,
                 visible_tokens,
-                recovery_tokens: store.recovery_tokens,
-                exact_ref_tokens: Some(exact_ref_tokens),
-            },
+                store.recovery_tokens,
+                Some(exact_ref_tokens),
+            ),
         );
         response.content_type = Some(common_content_type(&content_types).to_string());
         if !storage_errors.is_empty() {
-            response.diagnostic = Some(tokenzero_core::Diagnostic {
-                code: "cache_write_failed".to_string(),
-                message: "could not persist recovery cache for one or more read paths".to_string(),
-                repair: Some("fix recovery cache permissions or pass --cache-path".to_string()),
-            });
+            response.diagnostic = Some(cache_write_diagnostic(
+                "could not persist recovery cache for one or more read paths",
+            ));
             response.telemetry = Some(json!({
                 "transport_status": "degraded",
                 "degraded": true,
@@ -388,9 +324,13 @@ impl TokenZeroEngine {
                 "exact_refs_available": exact_refs_available
             }));
         }
-        // A serve whose refs failed to persist (or were evicted before the
-        // response returned) must not become a dedup base.
-        if storage_errors.is_empty() && refs_complete {
+        let working_set_replaced = !raw
+            && !matches!(mode, Mode::Passthrough)
+            && working_set_anchor
+                .is_some_and(|anchor| self.admit_working_set_response(&mut response, anchor));
+        // A serve whose refs failed to persist, or whose visible bytes were
+        // replaced by working-set eviction, must not become a dedup base.
+        if storage_errors.is_empty() && refs_complete && !working_set_replaced {
             let (from_hwm, to_hwm) = self.session_apply(pending, &summary);
             summary.set_watermark(from_hwm, to_hwm);
         }
@@ -398,11 +338,6 @@ impl TokenZeroEngine {
         // dedup/diff serve in the same response.
         if let Some(extra) = summary.telemetry() {
             merge_telemetry(&mut response, extra);
-        }
-        if !raw && !matches!(mode, Mode::Passthrough) {
-            if let Some(anchor) = working_set_anchor {
-                self.admit_working_set_response(&mut response, anchor);
-            }
         }
         // Raw reads keep the verbatim slice contract even when it is empty;
         // raw=true does not imply Mode::Passthrough, so guard it explicitly.

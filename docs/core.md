@@ -63,7 +63,7 @@ diff hunks, prompts, and status hazards remain visible or have exact refs.
 
 ## Expand
 
-`tokenzero expand <ref>` recovers exact payloads, ranges, search hits, anchors, summaries, and symbols from `tz://`, `fz://`, or `gz://` refs. Note: `fz://` and `gz://` are currently **same-store scheme aliases** — they are rewritten to `tz://` and looked up in the TokenZero store, not a cross-engine adapter. True cross-engine expansion is tracked by the ZeroRef v1 epic. Exact refs are not counted as model-readable context until expanded.
+`tokenzero expand <ref>` recovers exact payloads, ranges, search hits, anchors, summaries, and symbols from `tz://`, `fz://`, or `gz://` refs. `fz://`/`gz://` remain **same-store scheme aliases** when rewritten into the TokenZero store; blob refs also expand across engines under a verified shared ZeroStack CAS / sibling store when the release's retained multi-OS evidence gate is green (see `docs/zeroref-v1-contract.md`). The checked-in fixture alone is not release evidence. Non-blob portable refs stay engine-specific. Exact refs are not counted as model-readable context until expanded.
 
 Selectors support raw, `error_block`, `summary`, `lines:N-M`, `around:N:R`, `anchor:<kind>`, and `symbol:<name>`. Batch recovery uses multiple refs or `--refs-from`:
 

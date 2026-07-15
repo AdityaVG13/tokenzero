@@ -8,7 +8,9 @@
 //! usable, answers the requests that were in flight with a retryable error,
 //! and keeps proxying. The client never observes a disconnect.
 
-use crate::stdio::{StdioEvent, read_stdio_events_from_reader, write_framed_jsonrpc};
+use crate::stdio::{
+    StdioEvent, read_stdio_events_from_reader, write_jsonrpc_response as write_stdio_response,
+};
 use crate::{JsonRpcErrorData, jsonrpc_error};
 use serde_json::Value;
 use std::collections::HashMap;
@@ -98,12 +100,22 @@ fn reap_child(child: &mut Child) {
 }
 
 struct ActiveChild {
-    /// `None` once the client has hung up and the child's stdin was closed
-    /// to let it finish in-flight work and exit.
+    /// `None` after client EOF, while in-flight responses drain.
     stdin: Option<Box<dyn Write + Send>>,
     terminate: Box<dyn FnMut() + Send>,
     spawned_at: Instant,
     generation: u64,
+}
+
+#[derive(Default)]
+struct SupervisorState {
+    generation: u64,
+    consecutive_failures: u32,
+    cached_initialize: Option<String>,
+    cached_initialized_notification: Option<String>,
+    outstanding: HashMap<String, bool>,
+    swallow_response_id: Option<String>,
+    pending_resend: Option<String>,
 }
 
 fn write_child_line(child: &mut ActiveChild, line: &str) -> std::io::Result<()> {
@@ -120,28 +132,8 @@ pub(crate) fn run_supervisor_loop<W: Write>(
     event_rx: mpsc::Receiver<SupervisorEvent>,
     mut client_out: W,
 ) -> i32 {
-    let mut generation = 0u64;
-    let mut consecutive_failures = 0u32;
-    let mut cached_initialize: Option<String> = None;
-    let mut cached_initialized_notification: Option<String> = None;
-    // id-key -> client framing for every request awaiting a child response.
-    let mut outstanding: HashMap<String, bool> = HashMap::new();
-    // id-key of a replayed initialize whose duplicate response must not
-    // reach the client.
-    let mut swallow_response_id: Option<String> = None;
-    // A message that failed to write because the child died mid-send; it
-    // never reached a child, so re-sending after respawn cannot double-run it.
-    let mut pending_resend: Option<String> = None;
-
-    let mut child = match start_child(
-        &mut spawn,
-        &event_tx,
-        &mut generation,
-        &mut consecutive_failures,
-        cached_initialize.as_deref(),
-        cached_initialized_notification.as_deref(),
-        &mut swallow_response_id,
-    ) {
+    let mut state = SupervisorState::default();
+    let mut child = match start_child(&mut spawn, &event_tx, &mut state) {
         Some(child) => child,
         None => return 1,
     };
@@ -154,28 +146,16 @@ pub(crate) fn run_supervisor_loop<W: Write>(
                 if line.is_empty() {
                     continue;
                 }
-                track_client_message(
-                    &line,
-                    framed,
-                    &mut cached_initialize,
-                    &mut cached_initialized_notification,
-                    &mut outstanding,
-                );
+                track_client_message(&line, framed, &mut state);
                 if write_child_line(&mut child, &line).is_err() {
                     // The child is gone and this message never reached it.
-                    pending_resend = Some(line);
+                    state.pending_resend = Some(line);
                     let respawned = recover_child(
                         &mut spawn,
                         &event_tx,
-                        &mut generation,
-                        &mut consecutive_failures,
                         &mut child,
-                        cached_initialize.as_deref(),
-                        cached_initialized_notification.as_deref(),
-                        &mut swallow_response_id,
-                        &mut outstanding,
+                        &mut state,
                         &mut client_out,
-                        &mut pending_resend,
                     );
                     if !respawned {
                         break 1;
@@ -194,7 +174,7 @@ pub(crate) fn run_supervisor_loop<W: Write>(
                     JsonRpcErrorData::parse_error(error),
                 )
                 .to_string();
-                if write_client_response(&mut client_out, framed, &response).is_err() {
+                if write_stdio_response(&mut client_out, framed, &response).is_err() {
                     break 0;
                 }
                 if !recoverable {
@@ -205,29 +185,20 @@ pub(crate) fn run_supervisor_loop<W: Write>(
                 break drain_child_after_client_eof(
                     &mut child,
                     &event_rx,
-                    &mut swallow_response_id,
-                    &mut outstanding,
+                    &mut state,
                     &mut client_out,
                 );
             }
             SupervisorEvent::FromChild { generation, text } => {
-                if generation != child.generation {
-                    // A response raced the teardown of a replaced child; its
-                    // requests were already answered with retryable errors.
-                    continue;
-                }
-                let line = text.trim_end_matches(['\r', '\n']);
-                if line.is_empty() {
-                    continue;
-                }
-                if let Some(swallow_id) = swallow_response_id.as_deref() {
-                    if response_id_key(line).as_deref() == Some(swallow_id) {
-                        swallow_response_id = None;
-                        continue;
-                    }
-                }
-                let framed = response_framing(line, &mut outstanding);
-                if write_client_response(&mut client_out, framed, line).is_err() {
+                if forward_child_response(
+                    generation,
+                    &text,
+                    child.generation,
+                    &mut state,
+                    &mut client_out,
+                )
+                .is_err()
+                {
                     break 0;
                 }
             }
@@ -240,15 +211,9 @@ pub(crate) fn run_supervisor_loop<W: Write>(
                 let respawned = recover_child(
                     &mut spawn,
                     &event_tx,
-                    &mut generation,
-                    &mut consecutive_failures,
                     &mut child,
-                    cached_initialize.as_deref(),
-                    cached_initialized_notification.as_deref(),
-                    &mut swallow_response_id,
-                    &mut outstanding,
+                    &mut state,
                     &mut client_out,
-                    &mut pending_resend,
                 );
                 if !respawned {
                     break 1;
@@ -264,11 +229,36 @@ pub(crate) fn run_supervisor_loop<W: Write>(
 /// After the client hangs up, closes the child's stdin and keeps forwarding
 /// its remaining responses until it exits, so one-shot piped sessions and
 /// session teardown never lose in-flight replies.
+fn forward_child_response<W: Write>(
+    generation: u64,
+    text: &str,
+    active_generation: u64,
+    state: &mut SupervisorState,
+    client_out: &mut W,
+) -> std::io::Result<()> {
+    if generation != active_generation {
+        return Ok(());
+    }
+    let line = text.trim_end_matches(['\r', '\n']);
+    if line.is_empty() {
+        return Ok(());
+    }
+    let swallow = state
+        .swallow_response_id
+        .as_deref()
+        .is_some_and(|id| response_id_key(line).as_deref() == Some(id));
+    if swallow {
+        state.swallow_response_id = None;
+        return Ok(());
+    }
+    let framed = response_framing(line, &mut state.outstanding);
+    write_stdio_response(client_out, framed, line)
+}
+
 fn drain_child_after_client_eof<W: Write>(
     child: &mut ActiveChild,
     event_rx: &mpsc::Receiver<SupervisorEvent>,
-    swallow_response_id: &mut Option<String>,
-    outstanding: &mut HashMap<String, bool>,
+    state: &mut SupervisorState,
     client_out: &mut W,
 ) -> i32 {
     child.stdin = None;
@@ -279,28 +269,17 @@ fn drain_child_after_client_eof<W: Write>(
             return 0;
         }
         match event_rx.recv_timeout(remaining) {
-            Ok(SupervisorEvent::FromChild { generation, text })
-                if generation == child.generation =>
-            {
-                let line = text.trim_end_matches(['\r', '\n']);
-                if line.is_empty() {
-                    continue;
-                }
-                if let Some(swallow_id) = swallow_response_id.as_deref() {
-                    if response_id_key(line).as_deref() == Some(swallow_id) {
-                        *swallow_response_id = None;
-                        continue;
-                    }
-                }
-                let framed = response_framing(line, outstanding);
-                if write_client_response(client_out, framed, line).is_err() {
+            Ok(SupervisorEvent::FromChild { generation, text }) => {
+                if forward_child_response(generation, &text, child.generation, state, client_out)
+                    .is_err()
+                {
                     return 0;
                 }
             }
             Ok(SupervisorEvent::ChildExited { generation }) if generation == child.generation => {
                 return 0;
             }
-            Ok(_) => continue,
+            Ok(_) => {}
             Err(_) => return 0,
         }
     }
@@ -308,38 +287,19 @@ fn drain_child_after_client_eof<W: Write>(
 
 /// Caches the handshake messages and registers request ids so responses can
 /// be correlated, framed correctly, and failed over on a child crash.
-fn track_client_message(
-    line: &str,
-    framed: bool,
-    cached_initialize: &mut Option<String>,
-    cached_initialized_notification: &mut Option<String>,
-    outstanding: &mut HashMap<String, bool>,
-) {
+fn track_client_message(line: &str, framed: bool, state: &mut SupervisorState) {
     let Ok(parsed) = serde_json::from_str::<Value>(line) else {
-        // Forwarded verbatim; the child answers with its own parse error.
         return;
     };
-    let method = parsed.get("method").and_then(Value::as_str);
-    match method {
-        Some("initialize") => *cached_initialize = Some(line.to_string()),
+    match parsed.get("method").and_then(Value::as_str) {
+        Some("initialize") => state.cached_initialize = Some(line.to_string()),
         Some("notifications/initialized") => {
-            *cached_initialized_notification = Some(line.to_string());
+            state.cached_initialized_notification = Some(line.to_string());
         }
         _ => {}
     }
-    match &parsed {
-        Value::Array(batch) => {
-            for item in batch {
-                if let Some(key) = id_key(item.get("id")) {
-                    outstanding.insert(key, framed);
-                }
-            }
-        }
-        value => {
-            if let Some(key) = id_key(value.get("id")) {
-                outstanding.insert(key, framed);
-            }
-        }
+    for key in value_id_keys(&parsed) {
+        state.outstanding.insert(key, framed);
     }
 }
 
@@ -361,74 +321,34 @@ fn response_framing(line: &str, outstanding: &mut HashMap<String, bool>) -> bool
     let Ok(parsed) = serde_json::from_str::<Value>(line) else {
         return false;
     };
-    match &parsed {
-        Value::Array(batch) => {
-            let mut framed = false;
-            let mut framing_known = false;
-            for item in batch {
-                if let Some(key) = id_key(item.get("id")) {
-                    if let Some(item_framed) = outstanding.remove(&key) {
-                        if !framing_known {
-                            framed = item_framed;
-                            framing_known = true;
-                        }
-                    }
-                }
-            }
-            framed
+    let mut framing = None;
+    for key in value_id_keys(&parsed) {
+        if let Some(item_framing) = outstanding.remove(&key) {
+            framing.get_or_insert(item_framing);
         }
-        value => id_key(value.get("id"))
-            .and_then(|key| outstanding.remove(&key))
-            .unwrap_or(false),
     }
-}
-
-fn write_client_response<W: Write>(
-    client_out: &mut W,
-    framed: bool,
-    response: &str,
-) -> std::io::Result<()> {
-    if framed {
-        write_framed_jsonrpc(client_out, response)
-    } else {
-        writeln!(client_out, "{response}")?;
-        client_out.flush()
-    }
+    framing.unwrap_or(false)
 }
 
 /// Fails over after a child death: answers every in-flight request with a
 /// retryable error, respawns the child, and replays the handshake plus any
 /// message the dead child never received.
-#[allow(clippy::too_many_arguments)]
 fn recover_child(
     spawn: &mut impl FnMut() -> std::io::Result<ChildHandles>,
     event_tx: &mpsc::Sender<SupervisorEvent>,
-    generation: &mut u64,
-    consecutive_failures: &mut u32,
     child: &mut ActiveChild,
-    cached_initialize: Option<&str>,
-    cached_initialized_notification: Option<&str>,
-    swallow_response_id: &mut Option<String>,
-    outstanding: &mut HashMap<String, bool>,
+    state: &mut SupervisorState,
     client_out: &mut impl Write,
-    pending_resend: &mut Option<String>,
 ) -> bool {
     (child.terminate)();
     if child.spawned_at.elapsed() >= STABLE_CHILD_LIFETIME {
-        *consecutive_failures = 0;
+        state.consecutive_failures = 0;
     } else {
-        // Crash-looping children must hit the backoff/give-up path even when
-        // every individual spawn succeeds.
-        *consecutive_failures += 1;
+        state.consecutive_failures += 1;
     }
-    // The message that never reached the dead child will be re-sent and
-    // answered for real, so it must NOT also get a retryable error here:
-    // emitting both would hand the client two replies for one id (a protocol
-    // violation strict clients tear the session down over). Pull its ids out
-    // of the outstanding set first, preserving their original framing for the
-    // resend below.
-    let resend_framing = take_resend_framing(pending_resend.as_deref(), outstanding);
-    for (key, framed) in outstanding.drain() {
+    let resend_framing =
+        take_resend_framing(state.pending_resend.as_deref(), &mut state.outstanding);
+    for (key, framed) in state.outstanding.drain() {
         let id = serde_json::from_str::<Value>(&key).unwrap_or(Value::Null);
         let response = jsonrpc_error(
             id,
@@ -439,39 +359,19 @@ fn recover_child(
             ),
         )
         .to_string();
-        if write_client_response(client_out, framed, &response).is_err() {
+        if write_stdio_response(client_out, framed, &response).is_err() {
             return false;
         }
     }
-    let Some(new_child) = start_child(
-        spawn,
-        event_tx,
-        generation,
-        consecutive_failures,
-        cached_initialize,
-        cached_initialized_notification,
-        swallow_response_id,
-    ) else {
+    let Some(new_child) = start_child(spawn, event_tx, state) else {
         return false;
     };
     *child = new_child;
-    if let Some(line) = pending_resend.take() {
-        reinstate_resend_framing(&line, &resend_framing, outstanding);
+    if let Some(line) = state.pending_resend.take() {
+        reinstate_resend_framing(&line, &resend_framing, &mut state.outstanding);
         if write_child_line(child, &line).is_err() {
-            *pending_resend = Some(line);
-            return recover_child(
-                spawn,
-                event_tx,
-                generation,
-                consecutive_failures,
-                child,
-                cached_initialize,
-                cached_initialized_notification,
-                swallow_response_id,
-                outstanding,
-                client_out,
-                pending_resend,
-            );
+            state.pending_resend = Some(line);
+            return recover_child(spawn, event_tx, child, state, client_out);
         }
     }
     true
@@ -484,21 +384,22 @@ fn take_resend_framing(
     pending_resend: Option<&str>,
     outstanding: &mut HashMap<String, bool>,
 ) -> HashMap<String, bool> {
-    match pending_resend {
-        Some(line) => message_id_keys(line)
-            .into_iter()
-            .filter_map(|key| outstanding.remove(&key).map(|framed| (key, framed)))
-            .collect(),
-        None => HashMap::new(),
-    }
+    pending_resend
+        .into_iter()
+        .flat_map(message_id_keys)
+        .filter_map(|key| outstanding.remove(&key).map(|framed| (key, framed)))
+        .collect()
 }
 
 /// Every request id carried by a (possibly batched) client message.
 fn message_id_keys(line: &str) -> Vec<String> {
-    let Ok(parsed) = serde_json::from_str::<Value>(line) else {
-        return Vec::new();
-    };
-    match &parsed {
+    serde_json::from_str::<Value>(line)
+        .map(|value| value_id_keys(&value))
+        .unwrap_or_default()
+}
+
+fn value_id_keys(value: &Value) -> Vec<String> {
+    match value {
         Value::Array(batch) => batch
             .iter()
             .filter_map(|item| id_key(item.get("id")))
@@ -524,18 +425,14 @@ fn reinstate_resend_framing(
 fn start_child(
     spawn: &mut impl FnMut() -> std::io::Result<ChildHandles>,
     event_tx: &mpsc::Sender<SupervisorEvent>,
-    generation: &mut u64,
-    consecutive_failures: &mut u32,
-    cached_initialize: Option<&str>,
-    cached_initialized_notification: Option<&str>,
-    swallow_response_id: &mut Option<String>,
+    state: &mut SupervisorState,
 ) -> Option<ActiveChild> {
     loop {
-        if *consecutive_failures >= MAX_CONSECUTIVE_SPAWN_FAILURES {
+        if state.consecutive_failures >= MAX_CONSECUTIVE_SPAWN_FAILURES {
             return None;
         }
-        if *consecutive_failures > 0 {
-            let exponent = (*consecutive_failures - 1).min(16);
+        if state.consecutive_failures > 0 {
+            let exponent = (state.consecutive_failures - 1).min(16);
             let backoff = BASE_RESPAWN_BACKOFF
                 .saturating_mul(1u32 << exponent)
                 .min(MAX_RESPAWN_BACKOFF);
@@ -544,32 +441,32 @@ fn start_child(
         let handles = match spawn() {
             Ok(handles) => handles,
             Err(_) => {
-                *consecutive_failures += 1;
+                state.consecutive_failures += 1;
                 continue;
             }
         };
-        *generation += 1;
-        let child_generation = *generation;
+        state.generation += 1;
+        let generation = state.generation;
         let mut active = ActiveChild {
             stdin: Some(handles.stdin),
             terminate: handles.terminate,
             spawned_at: Instant::now(),
-            generation: child_generation,
+            generation,
         };
-        pump_child_stdout(handles.stdout, event_tx.clone(), child_generation);
-        if let Some(initialize) = cached_initialize {
-            *swallow_response_id = serde_json::from_str::<Value>(initialize)
+        pump_child_stdout(handles.stdout, event_tx.clone(), generation);
+        if let Some(initialize) = state.cached_initialize.as_deref() {
+            state.swallow_response_id = serde_json::from_str::<Value>(initialize)
                 .ok()
                 .and_then(|parsed| id_key(parsed.get("id")));
             if write_child_line(&mut active, initialize).is_err() {
                 (active.terminate)();
-                *consecutive_failures += 1;
+                state.consecutive_failures += 1;
                 continue;
             }
-            if let Some(initialized) = cached_initialized_notification {
+            if let Some(initialized) = state.cached_initialized_notification.as_deref() {
                 if write_child_line(&mut active, initialized).is_err() {
                     (active.terminate)();
-                    *consecutive_failures += 1;
+                    state.consecutive_failures += 1;
                     continue;
                 }
             }
@@ -607,6 +504,3 @@ fn pump_child_stdout(
         let _ = event_tx.send(SupervisorEvent::ChildExited { generation });
     });
 }
-
-#[cfg(test)]
-mod tests;

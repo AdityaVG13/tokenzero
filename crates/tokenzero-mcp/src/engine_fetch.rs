@@ -1,45 +1,4 @@
-//! `TokenZeroEngine` methods extracted from `lib.rs`.
-#![allow(unused_imports)]
-
-use super::cache_pack::{
-    cache_pack_manifest_path, cache_pack_sources, previous_cache_digest, read_line_range_from_file,
-};
-use super::collect::*;
-use super::config::{
-    EngineConfig, FETCH_ALLOW_ENV, FETCH_DENY_ENV, FETCH_ENABLED_ENV, ServeFlight, new_session_id,
-};
-use super::fetch_cache::{epoch_secs, fetch_index_path, load_fetch_index, record_fetch};
-use super::fetch_guard::{FETCH_META_MARKER, split_fetch_meta, validate_fetch_target};
-use super::metrics;
-use super::paths::*;
-use super::render::*;
-use super::session::{
-    DiffTelemetry, SeenState, ServeKey, ServedRecord, SessionMemory, SessionSummary,
-};
-use super::{
-    Accounting, ContentType, DEFAULT_MCP_IDLE_TIMEOUT_SECS, DEFAULT_SHELL_TIMEOUT_SECS,
-    DIFF_MAX_BYTES, DIFF_MAX_LINES, DIFF_READS_ENV, EditHunk, MAX_MCP_IDLE_TIMEOUT_SECS,
-    MAX_SEARCH_VISITED_FILES, MAX_SHELL_TIMEOUT_SECS, MIN_SEARCH_VISITED_FILES, Mode, RG_PATH_ENV,
-    SEARCH_BACKEND_ENV, SEARCH_VISIT_MULTIPLIER, SESSION_DEDUP_ENV, SearchBackend, ServeOptions,
-    ShellRenderInput, TokenZeroEngine, ToolResponse, cache_maintenance, count_tokens,
-    detect_content_type, make_capsule, make_capsule_with_raw_tokens, ref_record, render_shell,
-    resolve_curl_binary, sha256_hex, shell_combined_output, shell_spill_dir,
-    shell_timeout_from_secs, split_command_string,
-};
-use crate::recall;
-use globset::{GlobBuilder, GlobMatcher};
-use serde_json::{Value, json};
-use std::collections::{BTreeMap, HashSet};
-use std::ffi::OsString;
-use std::fs;
-use std::path::Path;
-use std::sync::{Condvar, Mutex, OnceLock};
-use std::time::{Duration, SystemTime};
-use tokenzero_filters::rewrite_command;
-use tokenzero_recovery::{ExpansionResult, RecoveryStore, StoredPayload};
-use tokenzero_runtime::{
-    RunOutputPolicy, StreamCapture, contains_platform_shell_syntax, run_command_with_policy,
-};
+use super::*;
 
 impl TokenZeroEngine {
     /// Fetch a URL through the system curl with a TTL'd cache over the
@@ -55,7 +14,7 @@ impl TokenZeroEngine {
         max_visible_tokens: usize,
     ) -> ToolResponse {
         if !(url.starts_with("http://") || url.starts_with("https://")) {
-            return ToolResponse::error(
+            return failure_response(
                 "fetch",
                 "invalid_url",
                 format!("fetch requires an http(s) URL, got {url}"),
@@ -85,7 +44,7 @@ impl TokenZeroEngine {
             if let Some(entry) = load_fetch_index(&index_path).entries.get(url) {
                 let age = epoch_secs().saturating_sub(entry.fetched_at_secs);
                 if age <= ttl_secs {
-                    let mut store = RecoveryStore::new(Some(self.config.cache_path.clone()));
+                    let mut store = self.recovery_store();
                     let cached = store.expand(&entry.blob_ref, Some("raw"), None, None, None, None);
                     if cached.found {
                         let recovery_tokens = store.recovery_tokens;
@@ -108,11 +67,11 @@ impl TokenZeroEngine {
             None => match resolve_curl_binary() {
                 Ok(resolved) => resolved.path,
                 Err(err) => {
-                    return ToolResponse::error(
+                    return failure_response(
                         "fetch",
                         "fetch_failed",
                         err.message,
-                        Some("install curl or set TOKENZERO_CURL_PATH".to_string()),
+                        Some("install curl or set TOKENZERO_CURL_PATH"),
                     );
                 }
             },
@@ -154,14 +113,8 @@ impl TokenZeroEngine {
                 argv.push(format!("{}:{}:{}", target.host, target.port, ip));
             }
             argv.push(current_url.clone());
-            let mut child_env = BTreeMap::new();
-            child_env.insert("TOKENZERO_INNER".to_string(), "1".to_string());
-            let output_policy = RunOutputPolicy {
-                per_stream_capture_bytes: self.config.shell_capture_bytes,
-                spill_threshold_bytes: self.config.shell_spill_bytes,
-                spill_dir: Some(shell_spill_dir(&self.config.cache_path)),
-            }
-            .normalized();
+            let child_env = inner_env();
+            let output_policy = self.shell_output_policy();
             let result = match run_command_with_policy(
                 &argv,
                 None,
@@ -173,21 +126,21 @@ impl TokenZeroEngine {
             ) {
                 Ok(result) => result,
                 Err(err) => {
-                    return ToolResponse::error(
+                    return failure_response(
                         "fetch",
                         "fetch_failed",
                         format!("could not run curl: {err}"),
-                        Some("install curl or set TOKENZERO_CURL_PATH".to_string()),
+                        Some("install curl or set TOKENZERO_CURL_PATH"),
                     );
                 }
             };
             if !result.ok || result.exit_code != Some(0) {
                 let stderr: String = result.stderr.trim().chars().take(300).collect();
-                return ToolResponse::error(
+                return failure_response(
                     "fetch",
                     "fetch_failed",
                     format!("curl exited with {:?}: {stderr}", result.exit_code),
-                    Some("check the URL and network access".to_string()),
+                    Some("check the URL and network access"),
                 );
             }
             let (body, http_code, redirect_url) = split_fetch_meta(&result.stdout);
@@ -195,7 +148,7 @@ impl TokenZeroEngine {
                 (Some(code), Some(next)) if (300..400).contains(&code) => {
                     redirect_hops += 1;
                     if redirect_hops > MAX_FETCH_REDIRECTS {
-                        return ToolResponse::error(
+                        return failure_response(
                             "fetch",
                             "too_many_redirects",
                             format!("more than {MAX_FETCH_REDIRECTS} redirects from {url}"),
@@ -234,53 +187,34 @@ impl TokenZeroEngine {
         recovery_tokens: usize,
         index_path: &Path,
     ) -> ToolResponse {
-        let mut store = RecoveryStore::new(Some(self.config.cache_path.clone()));
+        let mut store = self.recovery_store();
         let ctype = detect_content_type(body, None);
         let stored = store.store_payload_deferred(body, ctype, None, None, None);
-        let mut refs = Vec::new();
-        let mut storage_error = None;
-        match store.persist_pending() {
-            Ok(()) => {
-                refs.push(ref_record("blob", stored.blob_ref.clone(), body.len()));
-                refs.push(ref_record("file", stored.file_ref.clone(), body.len()));
-            }
-            Err(err) => storage_error = Some(err.to_string()),
-        }
-        let refs_complete = prune_dead_refs(&store, &mut refs);
+        let mut refs = Vec::with_capacity(2);
+        push_payload_refs(&mut refs, &stored, body.len());
+        let persisted = persist_refs(&mut store, &mut refs);
+        let refs_complete = persisted.refs_complete;
+        let storage_error = persisted.error;
         // An evicted blob must not enter the fetch index: a later cache hit
         // would advertise a ref that cannot be expanded.
         if !cache_hit && storage_error.is_none() && refs_complete {
             record_fetch(index_path, url, &stored.blob_ref, body.len());
         }
-        let capsule = if refs_complete {
-            make_capsule_with_raw_tokens(
-                body,
-                stored.raw_tokens,
-                mode,
-                max_visible_tokens,
-                Some(&format!("fetch {}", zero_hit_label(url))),
-            )
-        } else {
-            tokenzero_core::Capsule {
-                text: body.trim_end().to_string(),
-                raw_tokens: stored.raw_tokens,
-                visible_tokens: stored.raw_tokens,
-                omitted_lines: 0,
-                mode,
-            }
-        };
-        let exact_ref_tokens = exact_ref_token_count(&refs);
-        let mut response = ToolResponse::ok(
+        let capsule = recoverable_capsule(
+            body,
+            body,
+            stored.raw_tokens,
+            mode,
+            max_visible_tokens,
+            &format!("fetch {}", zero_hit_label(url)),
+            refs_complete,
+        );
+        let mut response = capsule_response!(
             "fetch",
             mode,
-            capsule.text,
+            capsule,
             refs,
-            Accounting {
-                raw_tokens: capsule.raw_tokens,
-                visible_tokens: capsule.visible_tokens,
-                recovery_tokens: recovery_tokens + store.recovery_tokens,
-                exact_ref_tokens: Some(exact_ref_tokens),
-            },
+            recovery_tokens + store.recovery_tokens
         );
         response.content_type = Some(ctype.to_string());
         response.telemetry = Some(json!({
@@ -293,11 +227,9 @@ impl TokenZeroEngine {
             "storage_error": storage_error.clone(),
         }));
         if storage_error.is_some() {
-            response.diagnostic = Some(tokenzero_core::Diagnostic {
-                code: "cache_write_failed".to_string(),
-                message: "could not persist recovery cache for fetch output".to_string(),
-                repair: Some("fix recovery cache permissions or pass --cache-path".to_string()),
-            });
+            response.diagnostic = Some(cache_write_diagnostic(
+                "could not persist recovery cache for fetch output",
+            ));
         }
         if body.is_empty() {
             apply_zero_hit_note(

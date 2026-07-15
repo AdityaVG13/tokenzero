@@ -1,74 +1,205 @@
 use crate::*;
 
+pub(crate) struct PersistResult {
+    pub(crate) refs_complete: bool,
+    pub(crate) error: Option<String>,
+}
+
+impl TokenZeroEngine {
+    pub(crate) fn recovery_store(&self) -> RecoveryStore {
+        RecoveryStore::new(Some(self.config.cache_path.clone()))
+    }
+
+    pub(crate) fn shell_output_policy(&self) -> RunOutputPolicy {
+        RunOutputPolicy {
+            per_stream_capture_bytes: self.config.shell_capture_bytes,
+            spill_threshold_bytes: self.config.shell_spill_bytes,
+            spill_dir: Some(shell_spill_dir(&self.config.cache_path)),
+        }
+        .normalized()
+    }
+}
+
+pub(crate) fn inner_env() -> BTreeMap<String, String> {
+    BTreeMap::from([("TOKENZERO_INNER".to_string(), "1".to_string())])
+}
+
+pub(crate) fn persist_refs(
+    store: &mut RecoveryStore,
+    refs: &mut Vec<tokenzero_core::RefRecord>,
+) -> PersistResult {
+    let error = (!refs.is_empty())
+        .then(|| store.persist_pending())
+        .transpose()
+        .err()
+        .map(|err| err.to_string());
+    if error.is_some() {
+        refs.clear();
+    }
+    PersistResult {
+        refs_complete: error.is_none() && prune_dead_refs(store, refs),
+        error,
+    }
+}
+
+pub(crate) fn push_payload_refs(
+    refs: &mut Vec<tokenzero_core::RefRecord>,
+    stored: &StoredPayload,
+    bytes: usize,
+) {
+    refs.push(ref_record("blob", stored.blob_ref.clone(), bytes));
+    refs.push(ref_record("file", stored.file_ref.clone(), bytes));
+}
+
+pub(crate) fn served_record(content: &str, stored: &StoredPayload) -> ServedRecord {
+    ServedRecord {
+        content_sha256: sha256_hex(content),
+        blob_ref: stored.blob_ref.clone(),
+        file_ref: stored.file_ref.clone(),
+        raw_tokens: stored.raw_tokens,
+        line_count: content.lines().count(),
+        byte_len: content.len(),
+        served_at: SystemTime::now(),
+        serve_count: 1,
+    }
+}
+
+pub(crate) fn success_response(
+    tool: &str,
+    mode: Mode,
+    text: String,
+    refs: Vec<tokenzero_core::RefRecord>,
+    accounting: (usize, usize, usize, Option<usize>),
+) -> ToolResponse {
+    ToolResponse::ok(
+        tool,
+        mode,
+        text,
+        refs,
+        Accounting {
+            raw_tokens: accounting.0,
+            visible_tokens: accounting.1,
+            recovery_tokens: accounting.2,
+            exact_ref_tokens: accounting.3,
+        },
+    )
+}
+
+pub(crate) fn recoverable_capsule(
+    rendered: &str,
+    fallback: &str,
+    raw_tokens: usize,
+    mode: Mode,
+    max_visible_tokens: usize,
+    label: &str,
+    refs_complete: bool,
+) -> tokenzero_core::Capsule {
+    if refs_complete {
+        make_capsule_with_raw_tokens(rendered, raw_tokens, mode, max_visible_tokens, Some(label))
+    } else {
+        tokenzero_core::Capsule {
+            text: fallback.trim_end().to_string(),
+            raw_tokens,
+            visible_tokens: raw_tokens,
+            omitted_lines: 0,
+            mode,
+        }
+    }
+}
+
+pub(crate) fn cache_write_diagnostic(message: impl Into<String>) -> tokenzero_core::Diagnostic {
+    tokenzero_core::Diagnostic {
+        code: "cache_write_failed".to_string(),
+        message: message.into(),
+        repair: Some("fix recovery cache permissions or pass --cache-path".to_string()),
+    }
+}
+
+pub(crate) fn failure_response(
+    tool: &str,
+    code: &str,
+    message: impl Into<String>,
+    repair: Option<&str>,
+) -> ToolResponse {
+    ToolResponse::error(tool, code, message.into(), repair.map(str::to_string))
+}
+
+pub(crate) fn path_not_allowed(tool: &str, path: &Path) -> ToolResponse {
+    failure_response(
+        tool,
+        "path_not_allowed",
+        format!("path is outside allowed roots: {}", path.display()),
+        None,
+    )
+}
+
 pub(crate) fn expansion_response(result: ExpansionResult, recovery_tokens: usize) -> ToolResponse {
     if result.found {
-        return ToolResponse::ok(
+        return success_response(
             "expand",
             Mode::Exact,
             result.content,
             Vec::new(),
-            Accounting {
-                raw_tokens: result.tokens,
-                visible_tokens: result.tokens,
+            (
+                result.tokens,
+                result.tokens,
                 recovery_tokens,
-                exact_ref_tokens: Some(count_tokens(&result.ref_id)),
-            },
+                Some(count_tokens(&result.ref_id)),
+            ),
         );
     }
-
-    // Always include the full requested ref. Portable identities must never be
-    // truncated in an error, because the caller needs the exact digest to
-    // diagnose the producer/root mismatch.
     let full_ref = &result.ref_id;
     let reason = result.reason.as_str();
     let is_window_oob = reason.starts_with("window-out-of-range");
+    let exact = [
+        (
+            "shared-cas-missing",
+            "shared_cas_missing",
+            "shared CAS object missing",
+        ),
+        (
+            "shared-cas-corruption",
+            "shared_cas_corruption",
+            "shared CAS object corrupted",
+        ),
+        (
+            "shared-cas-policy",
+            "shared_cas_policy",
+            "shared CAS policy denied expansion",
+        ),
+        ("shared-cas-io", "shared_cas_io", "shared CAS I/O failure"),
+        (
+            "shared-cas-non-utf8",
+            "shared_cas_non_utf8",
+            "shared CAS object is not UTF-8 text",
+        ),
+        (
+            "unsupported-ref-kind",
+            "unsupported_ref_kind",
+            "foreign non-blob ref requires its owning engine",
+        ),
+        ("stale-ref", "ref_stale", "ref is no longer recoverable"),
+        (
+            "invalid-ref",
+            "invalid_ref",
+            "ref is not a valid tz://, fz://, or gz:// recovery handle",
+        ),
+        (
+            "decode-failed",
+            "expand_failed",
+            "ref was found but could not be decoded",
+        ),
+    ];
     let (code, message) = if reason.starts_with("ref-not-found") || reason == "dangling-ref" {
         ("ref_not_found", format!("{reason} (ref: {full_ref})"))
     } else if is_window_oob {
         ("window_out_of_range", format!("{reason} (ref: {full_ref})"))
+    } else if reason.starts_with("zeroref-") {
+        ("zeroref_malformed", format!("{reason}: {full_ref}"))
+    } else if let Some((_, code, message)) = exact.iter().find(|entry| entry.0 == reason) {
+        (*code, format!("{message}: {full_ref}"))
     } else {
-        match reason {
-            "shared-cas-missing" => (
-                "shared_cas_missing",
-                format!("shared CAS object missing: {full_ref}"),
-            ),
-            "shared-cas-corruption" => (
-                "shared_cas_corruption",
-                format!("shared CAS object corrupted: {full_ref}"),
-            ),
-            "shared-cas-policy" => (
-                "shared_cas_policy",
-                format!("shared CAS policy denied expansion: {full_ref}"),
-            ),
-            "shared-cas-io" => (
-                "shared_cas_io",
-                format!("shared CAS I/O failure: {full_ref}"),
-            ),
-            "shared-cas-non-utf8" => (
-                "shared_cas_non_utf8",
-                format!("shared CAS object is not UTF-8 text: {full_ref}"),
-            ),
-            "unsupported-ref-kind" => (
-                "unsupported_ref_kind",
-                format!("foreign non-blob ref requires its owning engine: {full_ref}"),
-            ),
-            reason if reason.starts_with("zeroref-") => {
-                ("zeroref_malformed", format!("{reason}: {full_ref}"))
-            }
-            "stale-ref" => (
-                "ref_stale",
-                format!("ref is no longer recoverable: {full_ref}"),
-            ),
-            "invalid-ref" => (
-                "invalid_ref",
-                format!("ref is not a valid tz://, fz://, or gz:// recovery handle: {full_ref}"),
-            ),
-            "decode-failed" => (
-                "expand_failed",
-                format!("ref was found but could not be decoded: {full_ref}"),
-            ),
-            _ => ("expand_failed", format!("ref expansion failed: {full_ref}")),
-        }
+        ("expand_failed", format!("ref expansion failed: {full_ref}"))
     };
     let repair = if is_window_oob {
         "choose start_line/end_line within the stored payload line count (1-based inclusive)"
@@ -135,14 +266,26 @@ pub(crate) struct EditFailure {
     pub(crate) repair: Option<String>,
 }
 
+fn edit_failure(
+    code: &'static str,
+    message: impl Into<String>,
+    repair: &'static str,
+) -> Result<AppliedEdits, EditFailure> {
+    Err(EditFailure {
+        code,
+        message: message.into(),
+        repair: Some(repair.to_string()),
+    })
+}
+
 /// Whole-file hunk for `create=true`: `replace` becomes the file content.
 pub(crate) fn create_file_hunk(hunk: &EditHunk) -> Result<AppliedEdits, EditFailure> {
     if hunk.replace.is_empty() {
-        return Err(EditFailure {
-            code: "no_op_hunk",
-            message: "create hunk has an empty replace; nothing to write".to_string(),
-            repair: Some("pass the full new-file content in replace".to_string()),
-        });
+        return edit_failure(
+            "no_op_hunk",
+            "create hunk has an empty replace; nothing to write",
+            "pass the full new-file content in replace",
+        );
     }
     let mut diff = String::from("@@ hunk 1 @@ line 1");
     for line in hunk.replace.lines() {
@@ -167,43 +310,39 @@ pub(crate) fn apply_edit_hunks(
     let mut lines_removed = 0usize;
     for (index, hunk) in edits.iter().enumerate() {
         if hunk.find.is_empty() {
-            return Err(EditFailure {
-                code: "edit_failed",
-                message: format!(
-                    "edits[{index}] has an empty find; that is only valid with create=true"
-                ),
-                repair: Some("pass the exact text to replace in find".to_string()),
-            });
+            return edit_failure(
+                "edit_failed",
+                format!("edits[{index}] has an empty find; that is only valid with create=true"),
+                "pass the exact text to replace in find",
+            );
         }
         if hunk.find == hunk.replace {
-            return Err(EditFailure {
-                code: "no_op_hunk",
-                message: format!("edits[{index}] replaces text with identical text"),
-                repair: Some("drop the hunk or change replace".to_string()),
-            });
+            return edit_failure(
+                "no_op_hunk",
+                format!("edits[{index}] replaces text with identical text"),
+                "drop the hunk or change replace",
+            );
         }
         let offsets: Vec<usize> = text.match_indices(&hunk.find).map(|(at, _)| at).collect();
         if offsets.is_empty() {
             let hint = closest_line_hint(&text, &hunk.find)
                 .map(|hint| format!("; {hint}"))
                 .unwrap_or_default();
-            return Err(EditFailure {
-                code: "hunk_not_found",
-                message: format!("edits[{index}] matched nothing{hint}"),
-                repair: Some(
-                    "re-read the file and pass the exact current text in find".to_string(),
-                ),
-            });
+            return edit_failure(
+                "hunk_not_found",
+                format!("edits[{index}] matched nothing{hint}"),
+                "re-read the file and pass the exact current text in find",
+            );
         }
         if offsets.len() > 1 && !hunk.replace_all {
-            return Err(EditFailure {
-                code: "ambiguous_hunk",
-                message: format!(
+            return edit_failure(
+                "ambiguous_hunk",
+                format!(
                     "edits[{index}] matches {} times; expected exactly one match",
                     offsets.len()
                 ),
-                repair: Some("add surrounding context to find or set replace_all=true".to_string()),
-            });
+                "add surrounding context to find or set replace_all=true",
+            );
         }
         for (occurrence, &offset) in offsets.iter().enumerate() {
             let label = if offsets.len() > 1 {

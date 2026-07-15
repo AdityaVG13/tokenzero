@@ -12,6 +12,9 @@ from pathlib import Path
 from typing import Iterable
 
 REPO = Path(__file__).resolve().parents[3]
+import sys
+sys.path.insert(0, str(REPO / "benchmarks"))
+from bench_common import percentile, write_json
 DEFAULT_OUTPUT = Path(__file__).with_suffix("").with_name("ledger_curve") / "starter.json"
 LEDGER_SCHEMA = "tokenzero.ledger.v1"
 CURVE_SCHEMA = "tokenzero.ledger-curve.v1"
@@ -49,14 +52,6 @@ def version_key(version: str) -> tuple:
     for piece in version.replace("-", ".").split("."):
         pieces.append((0, int(piece)) if piece.isdigit() else (1, piece))
     return tuple(pieces)
-
-
-def percentile(values: list[int], q: float) -> float:
-    ordered = sorted(values)
-    index = (len(ordered) - 1) * q
-    low = int(index)
-    high = min(low + 1, len(ordered) - 1)
-    return ordered[low] + (ordered[high] - ordered[low]) * (index - low)
 
 
 def iso_timestamp(timestamp_ms: int) -> str:
@@ -192,8 +187,7 @@ def main() -> int:
     args = parser.parse_args()
     paths = candidate_paths(args.ledgers)
     result = aggregate(paths)
-    args.output.parent.mkdir(parents=True, exist_ok=True)
-    args.output.write_text(json.dumps(result, indent=2, sort_keys=True) + "\n")
+    write_json(args.output, result)
     print(json.dumps({"output": str(args.output), **result["sample"], "losses_disclosed": result["losses_disclosed"]}, sort_keys=True))
     return 0
 

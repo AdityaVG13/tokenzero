@@ -94,14 +94,12 @@ pub fn run_codemode_audit(root: &std::path::Path) -> CodeModeAuditReport {
 }
 
 fn audit_recovery(root: &std::path::Path) -> RecoveryEvidence {
-    // Hermetic cache: package-suite concurrency must not share workspace
-    // recovery-cache.json (parallel expand/compact races → false recover fails).
     let cache_path = std::env::temp_dir().join(format!(
         "tokenzero-codemode-audit-recovery-{}-{}.json",
         std::process::id(),
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_nanos())
+            .map(|duration| duration.as_nanos())
             .unwrap_or(0)
     ));
     let opts = CodeModeOptions {
@@ -109,49 +107,25 @@ fn audit_recovery(root: &std::path::Path) -> RecoveryEvidence {
         cache_path: Some(cache_path),
         ..Default::default()
     };
-
     let large = "abcdefghij\n".repeat(200);
-    let payloads: Vec<(&str, &str)> = vec![
+    let payloads = [
         ("small_text", "hello world recovery test"),
         ("special_chars", "line1\nline2\ttab\r\nwindows"),
         ("code_block", "fn main() {\n    println!(\"exact\");\n}\n"),
-        ("large_repetitive", &large),
+        ("large_repetitive", large.as_str()),
     ];
-
-    let mut cases = Vec::new();
-    for (label, payload) in &payloads {
-        let plan = format!(
-            r#"const c = await zero.compact({}); const e = await zero.expand(c.ref); return {{ ref: c.ref, recovered: zero.raw(e), original_len: {}}}"#,
-            serde_json::to_string(payload).unwrap(),
-            payload.len()
-        );
-        let r = execute_codemode_with_options(&plan, opts.clone());
-        let (ref_produced, expand_recovered, byte_exact) = if r.status == CodeModeStatus::Completed
-        {
-            let val = r.value.as_ref().unwrap();
-            let ref_id = val["ref"].as_str().unwrap_or("").to_string();
-            let recovered = val["recovered"].as_str().unwrap_or("");
-            (ref_id, true, recovered == *payload)
-        } else {
-            ("".to_string(), false, false)
-        };
-
-        cases.push(RecoveryCase {
-            label: label.to_string(),
-            input_bytes: payload.len(),
-            ref_produced,
-            expand_recovered,
-            byte_exact,
-        });
-    }
-
-    let all_byte_exact = cases.iter().all(|c| c.byte_exact);
-    let total_refs_checked = cases.len();
-
+    let cases: Vec<_> = payloads.into_iter().map(|(label, payload)| {
+        let plan = format!(r#"const c = zero.compact({}); const e = zero.expand(c.ref); return {{ ref: c.ref, recovered: zero.raw(e), original_len: {}}}"#, serde_json::to_string(payload).unwrap(), payload.len());
+        let result = execute_codemode_with_options(&plan, opts.clone());
+        let evidence = result.value.as_ref().filter(|_| result.status == CodeModeStatus::Completed)
+            .map(|value| (value["ref"].as_str().unwrap_or("").to_string(), true, value["recovered"].as_str().unwrap_or("") == payload))
+            .unwrap_or_else(|| (String::new(), false, false));
+        RecoveryCase { label: label.into(), input_bytes: payload.len(), ref_produced: evidence.0, expand_recovered: evidence.1, byte_exact: evidence.2 }
+    }).collect();
     RecoveryEvidence {
+        all_byte_exact: cases.iter().all(|case| case.byte_exact),
+        total_refs_checked: cases.len(),
         cases,
-        all_byte_exact,
-        total_refs_checked,
     }
 }
 
@@ -180,13 +154,13 @@ fn audit_cross_surface(_root: &std::path::Path) -> CrossSurfaceEvidence {
     let operations: Vec<(&str, String, String)> = vec![
         (
             "read",
-            format!(r#"await zero.read({quoted})"#),
-            format!(r#"const r = await zero.read({quoted}); return r"#),
+            format!(r#"zero.read({quoted})"#),
+            format!(r#"const r = zero.read({quoted}); return r"#),
         ),
         (
             "shell",
-            r#"await zero.shell("echo parity")"#.to_string(),
-            r#"const s = await zero.shell("echo parity"); return s"#.to_string(),
+            r#"zero.shell("echo parity")"#.to_string(),
+            r#"const s = zero.shell("echo parity"); return s"#.to_string(),
         ),
     ];
 

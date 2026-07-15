@@ -302,8 +302,12 @@ fn path_allowed_resolves_relative_paths_against_call_root() {
     let base = tempdir().unwrap();
     let root = base.path().join("ws");
     fs::create_dir(&root).unwrap();
-    fs::write(root.join("inside.txt"), "alpha
-").unwrap();
+    fs::write(
+        root.join("inside.txt"),
+        "alpha
+",
+    )
+    .unwrap();
     let engine = TokenZeroEngine::new(EngineConfig::for_root(&root));
 
     // Relative path under the call root is allowed even when the process cwd

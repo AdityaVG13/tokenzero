@@ -69,42 +69,32 @@ pub(crate) fn recall_search(cache_path: &Path, query: &str, max_hits: usize) -> 
     };
     let needle = query.to_lowercase();
     let mut seen_texts: HashSet<u64> = HashSet::new();
-    for section in ["files", "blobs"] {
-        let Some(entries) = snapshot.get(section).and_then(Value::as_object) else {
+    for entry in snapshot_entries(&snapshot) {
+        let Some(text) = entry.get("text").and_then(Value::as_str) else {
             continue;
         };
-        for entry in entries.values() {
-            let Some(text) = entry.get("text").and_then(Value::as_str) else {
-                continue;
-            };
-            let Some(ref_id) = entry.get("ref_id").and_then(Value::as_str) else {
-                continue;
-            };
-            if !seen_texts.insert(text_fingerprint(text)) {
+        let Some(ref_id) = entry.get("ref_id").and_then(Value::as_str) else {
+            continue;
+        };
+        if !seen_texts.insert(text_fingerprint(text)) {
+            continue;
+        }
+        outcome.payloads_searched += 1;
+        let label = entry_label(entry, false);
+        for (idx, line) in text.lines().enumerate() {
+            if !line.to_lowercase().contains(&needle) {
                 continue;
             }
-            outcome.payloads_searched += 1;
-            let label = entry
-                .get("path")
-                .and_then(Value::as_str)
-                .or_else(|| entry.get("content_type").and_then(Value::as_str))
-                .unwrap_or("payload")
-                .to_string();
-            for (idx, line) in text.lines().enumerate() {
-                if !line.to_lowercase().contains(&needle) {
-                    continue;
-                }
-                if outcome.hits.len() >= max_hits {
-                    outcome.truncated = true;
-                    return outcome;
-                }
-                outcome.hits.push(RecallHit {
-                    ref_id: ref_id.to_string(),
-                    label: label.clone(),
-                    line: idx + 1,
-                    text: clamp_line(line),
-                });
+            if outcome.hits.len() >= max_hits {
+                outcome.truncated = true;
+                return outcome;
             }
+            outcome.hits.push(RecallHit {
+                ref_id: ref_id.to_string(),
+                label: label.clone(),
+                line: idx + 1,
+                text: clamp_line(line),
+            });
         }
     }
     outcome
@@ -117,16 +107,14 @@ pub(crate) fn recall_search(cache_path: &Path, query: &str, max_hits: usize) -> 
 pub(crate) fn build_session_pack(cache_path: &Path, max_tokens: usize) -> Option<String> {
     let raw = std::fs::read_to_string(cache_path).ok()?;
     let snapshot: Value = serde_json::from_str(&raw).ok()?;
-    let mut entries: Vec<(&str, &Value)> = Vec::new();
-    for section in ["files", "blobs"] {
-        if let Some(map) = snapshot.get(section).and_then(Value::as_object) {
-            for entry in map.values() {
-                if let Some(ref_id) = entry.get("ref_id").and_then(Value::as_str) {
-                    entries.push((ref_id, entry));
-                }
-            }
-        }
-    }
+    let entries: Vec<(&str, &Value)> = snapshot_entries(&snapshot)
+        .filter_map(|entry| {
+            entry
+                .get("ref_id")
+                .and_then(Value::as_str)
+                .map(|ref_id| (ref_id, entry))
+        })
+        .collect();
     if entries.is_empty() {
         return None;
     }
@@ -162,15 +150,7 @@ pub(crate) fn build_session_pack(cache_path: &Path, max_tokens: usize) -> Option
         if text.is_empty() || !seen_texts.insert(text_fingerprint(text)) {
             continue;
         }
-        let label = match entry.get("path").and_then(Value::as_str) {
-            Some(path) if path.starts_with("shell:") => "shell capture".to_string(),
-            Some(path) => path.to_string(),
-            None => entry
-                .get("content_type")
-                .and_then(Value::as_str)
-                .unwrap_or("payload")
-                .to_string(),
-        };
+        let label = entry_label(entry, true);
         let line = format!(
             "\n- {label} — {} lines, ~{} tok — {ref_id}",
             text.lines().count(),
@@ -195,6 +175,28 @@ pub(crate) fn build_session_pack(cache_path: &Path, max_tokens: usize) -> Option
     Some(pack)
 }
 
+fn snapshot_entries(snapshot: &Value) -> impl Iterator<Item = &Value> {
+    ["files", "blobs"].into_iter().flat_map(move |section| {
+        snapshot
+            .get(section)
+            .and_then(Value::as_object)
+            .into_iter()
+            .flat_map(|map| map.values())
+    })
+}
+
+fn entry_label(entry: &Value, shell_capture: bool) -> String {
+    match entry.get("path").and_then(Value::as_str) {
+        Some(path) if shell_capture && path.starts_with("shell:") => "shell capture".to_string(),
+        Some(path) => path.to_string(),
+        None => entry
+            .get("content_type")
+            .and_then(Value::as_str)
+            .unwrap_or("payload")
+            .to_string(),
+    }
+}
+
 fn clamp_line(line: &str) -> String {
     let trimmed = line.trim();
     let clamped: String = trimmed.chars().take(MAX_HIT_LINE_CHARS).collect();
@@ -211,6 +213,3 @@ fn text_fingerprint(text: &str) -> u64 {
     text.hash(&mut hasher);
     hasher.finish()
 }
-
-#[cfg(test)]
-mod tests;

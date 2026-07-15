@@ -8,24 +8,22 @@ an upstream model provider's cache-hit telemetry.
 """
 from __future__ import annotations
 
-import hashlib
 import json
 import os
-import platform
 import subprocess
 import tempfile
 from pathlib import Path
 from typing import Any
 
 REPO = Path(__file__).resolve().parents[3]
+import sys
+sys.path.insert(0, str(REPO / "benchmarks"))
+from bench_common import environment as _environment, sha256_bytes as sha256, write_json
+environment = lambda: _environment(REPO, BIN)
 BIN = REPO / "target/debug/tokenzero"
 EASY_START = REPO / "docs/easy-start.tokenzero.md"
 SESSION_DELTA = Path(__file__).with_name("session_delta") / "evidence.json"
 OUT = Path(__file__).with_suffix("") / "evidence.json"
-
-
-def sha256(data: bytes) -> str:
-    return hashlib.sha256(data).hexdigest()
 
 
 def run_bytes(args: list[str], *, env_overrides: dict[str, str] | None = None) -> bytes:
@@ -136,28 +134,6 @@ def surface_result(samples: list[bytes]) -> dict[str, Any]:
         "byte_identical": identical,
         "longest_common_prefix_bytes": lcp,
         "prefix_reuse_pct": round(100 * lcp / denominator, 3) if denominator else 100.0,
-    }
-
-
-def environment() -> dict[str, Any]:
-    diff = subprocess.run(
-        ["git", "diff", "--binary"], cwd=REPO, capture_output=True, check=True
-    ).stdout
-    commit = subprocess.run(
-        ["git", "rev-parse", "HEAD"],
-        cwd=REPO,
-        capture_output=True,
-        text=True,
-        check=True,
-    ).stdout.strip()
-    return {
-        "commit": commit,
-        "machine": platform.machine(),
-        "os": platform.platform(),
-        "python": platform.python_version(),
-        "binary": str(BIN.relative_to(REPO)),
-        "binary_sha256": sha256(BIN.read_bytes()),
-        "source_diff_sha256": sha256(diff),
     }
 
 
@@ -297,9 +273,7 @@ def main() -> None:
         ],
         "status": "ok",
     }
-    OUT.parent.mkdir(parents=True, exist_ok=True)
-    OUT.write_text(json.dumps(evidence, indent=2, sort_keys=True) + "\n")
-    print(json.dumps(evidence, indent=2, sort_keys=True))
+    write_json(OUT, evidence, emit=True)
 
 
 if __name__ == "__main__":

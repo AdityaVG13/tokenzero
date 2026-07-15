@@ -1,18 +1,22 @@
 use crate::*;
 
+pub(crate) fn safe_auto_success(input: &ShellRenderInput<'_>, status: &CommandStatus) -> bool {
+    input.mode.effective_policy() == Mode::Auto
+        && status.command_success
+        && !input.timed_out
+        && status.failed_segment.is_none()
+        && status.pipeline_masking_warning.is_none()
+}
+
 pub(crate) fn should_compact_tiny_shell(
     input: &ShellRenderInput<'_>,
     policy: &PolicyDecision,
     status: &CommandStatus,
 ) -> bool {
-    input.mode.effective_policy() == Mode::Auto
-        && policy.policy == "passthrough"
-        && status.command_success
+    safe_auto_success(input, status)
         && input.exit_code == Some(0)
-        && !input.timed_out
+        && policy.policy == "passthrough"
         && input.stderr.trim().is_empty()
-        && status.failed_segment.is_none()
-        && status.pipeline_masking_warning.is_none()
         && input.stdout.len() <= 512
         && input.stdout.lines().count() <= 8
         && count_tokens(input.stdout) <= 48
@@ -32,12 +36,10 @@ pub(crate) fn should_compact_repo_inventory_shell(
     policy: &PolicyDecision,
     status: &CommandStatus,
 ) -> bool {
-    input.mode.effective_policy() == Mode::Auto
+    safe_auto_success(input, status)
+        && input.exit_code == Some(0)
         && policy.policy == "structured"
         && is_repo_inventory_command(input.command)
-        && status.command_success
-        && input.exit_code == Some(0)
-        && !input.timed_out
         && input.stderr.trim().is_empty()
         && input.combined_ref.is_some()
         && count_tokens(input.stdout) <= 160
@@ -45,33 +47,17 @@ pub(crate) fn should_compact_repo_inventory_shell(
 }
 
 pub(crate) fn compact_repo_inventory_view(command: &str, output: &str) -> String {
-    let mut file_count = 0usize;
-    let mut dir_count = 0usize;
-    let mut sample_files = Vec::new();
-    for line in output.lines() {
-        let trimmed = line.trim();
-        if trimmed.is_empty() || trimmed.starts_with("===") || trimmed.starts_with("---") {
-            continue;
-        }
-        if trimmed.ends_with('/') {
-            dir_count += 1;
-        } else if looks_like_inventory_file_path(trimmed) {
-            file_count += 1;
-            if sample_files.len() < 3 {
-                sample_files.push(trimmed.to_string());
-            }
-        }
-    }
+    let stats = inventory_stats(output, 3, looks_like_inventory_file_path);
     let mut out = String::new();
     out.push_str("repo_inventory\n");
-    out.push_str(&format!("files_seen: {file_count}\n"));
-    if dir_count > 0 {
-        out.push_str(&format!("dirs_seen: {dir_count}\n"));
+    out.push_str(&format!("files_seen: {}\n", stats.files));
+    if stats.dirs > 0 {
+        out.push_str(&format!("dirs_seen: {}\n", stats.dirs));
     }
-    if !sample_files.is_empty() {
+    if !stats.paths.is_empty() {
         out.push_str("sample_paths:\n");
-        for file in sample_files {
-            out.push_str(&format!("- {}\n", compact_inventory_path(&file)));
+        for file in stats.paths {
+            out.push_str(&format!("- {}\n", compact_inventory_path(file)));
         }
     } else if !command.trim().is_empty() {
         out.push_str("sample_paths: none\n");
@@ -136,12 +122,7 @@ pub(crate) fn should_compact_success_noise(
     input: &ShellRenderInput<'_>,
     status: &CommandStatus,
 ) -> bool {
-    input.mode.effective_policy() == Mode::Auto
-        && status.command_success
-        && !input.timed_out
-        && status.failed_segment.is_none()
-        && status.pipeline_masking_warning.is_none()
-        && input.combined_ref.is_some()
+    safe_auto_success(input, status) && input.combined_ref.is_some()
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -222,18 +203,12 @@ pub(crate) fn success_noise_view(command: &str, stdout: &str, stderr: &str) -> O
         std::collections::BTreeMap::new();
 
     for raw_line in stdout.lines().chain(stderr.lines()) {
-        // Carriage-return progress overwrites itself on a TTY; only the
-        // final state carries information.
         let line = raw_line.rsplit('\r').next().unwrap_or(raw_line);
         let trimmed = line.trim();
         if trimmed.is_empty() {
             in_critical_block = false;
             continue;
         }
-        // Passing-test markers outrank the critical-keyword scan: test NAMES
-        // routinely contain words like "warning" or "failure" while the line
-        // itself only certifies a pass. The strict shapes ("test <name> ...
-        // ok" / "<id> PASSED") cannot carry failure evidence.
         let pass_marker = families.iter().find_map(|family| match family {
             SuccessFamily::Cargo if is_cargo_test_ok_line(trimmed) => Some(SuccessFamily::Cargo),
             SuccessFamily::Pytest if is_pytest_pass_marker(trimmed) => Some(SuccessFamily::Pytest),
@@ -252,9 +227,6 @@ pub(crate) fn success_noise_view(command: &str, stdout: &str, stderr: &str) -> O
             kept_lines.push(line.to_string());
             continue;
         }
-        // Noise classification outranks diagnostic continuation: toolchains
-        // indent bookkeeping lines (cargo's "   Compiling ..."), which must
-        // end a critical block rather than be swallowed into it.
         let mut classified = false;
         for family in &families {
             match family {
@@ -262,30 +234,19 @@ pub(crate) fn success_noise_view(command: &str, stdout: &str, stderr: &str) -> O
                     if let Some(rest) = trimmed.strip_prefix("Finished ") {
                         finished_in = rest.rsplit_once(" in ").map(|(_, t)| t.to_string());
                         classified = true;
-                    } else if trimmed.starts_with("Compiling ")
-                        || trimmed.starts_with("Checking ")
-                        || trimmed.starts_with("Documenting ")
-                    {
+                    } else if starts_with_any(trimmed, "Compiling |Checking |Documenting ") {
                         compiled += 1;
                         classified = true;
                     } else if trimmed.starts_with("Fresh ") {
                         fresh += 1;
                         classified = true;
-                    } else if trimmed.starts_with("Downloaded ")
-                        || trimmed.starts_with("Downloading ")
-                    {
+                    } else if starts_with_any(trimmed, "Downloaded |Downloading ") {
                         downloaded += 1;
                         classified = true;
-                    } else if trimmed.starts_with("Updating ")
-                        || trimmed.starts_with("Locking ")
-                        || trimmed.starts_with("Adding ")
-                        || trimmed.starts_with("Removing ")
-                        || trimmed.starts_with("Installing ")
-                        || trimmed.starts_with("Blocking ")
-                        || trimmed.starts_with("Building ")
-                        || trimmed.starts_with("Running ")
-                        || trimmed.starts_with("Doc-tests ")
-                        || (trimmed.starts_with("running ") && trimmed.ends_with("tests"))
+                    } else if starts_with_any(
+                        trimmed,
+                        "Updating |Locking |Adding |Removing |Installing |Blocking |Building |Running |Doc-tests ",
+                    ) || trimmed.starts_with("running ") && trimmed.ends_with("tests")
                         || trimmed == "running 1 test"
                     {
                         bookkeeping += 1;
@@ -361,28 +322,19 @@ pub(crate) fn success_noise_view(command: &str, stdout: &str, stderr: &str) -> O
         return None;
     }
 
-    let mut header_parts: Vec<String> = Vec::new();
-    if compiled > 0 {
-        header_parts.push(format!("{compiled} compiled"));
-    }
-    if fresh > 0 {
-        header_parts.push(format!("{fresh} fresh"));
-    }
-    if downloaded > 0 {
-        header_parts.push(format!("{downloaded} downloaded"));
-    }
-    if tests_ok > 0 {
-        header_parts.push(format!("{tests_ok} tests ok"));
-    }
-    if pytest_passed > 0 {
-        header_parts.push(format!("{pytest_passed} passed"));
-    }
-    if git_progress > 0 {
-        header_parts.push(format!("{git_progress} progress lines"));
-    }
-    if bookkeeping > 0 {
-        header_parts.push(format!("{bookkeeping} bookkeeping"));
-    }
+    let header_parts: Vec<_> = [
+        (compiled, "compiled"),
+        (fresh, "fresh"),
+        (downloaded, "downloaded"),
+        (tests_ok, "tests ok"),
+        (pytest_passed, "passed"),
+        (git_progress, "progress lines"),
+        (bookkeeping, "bookkeeping"),
+    ]
+    .into_iter()
+    .filter(|(count, _)| *count > 0)
+    .map(|(count, label)| format!("{count} {label}"))
+    .collect();
     let tool = match families.first() {
         Some(SuccessFamily::Cargo) => "cargo",
         Some(SuccessFamily::Pytest) => "pytest",
@@ -402,15 +354,11 @@ pub(crate) fn success_noise_view(command: &str, stdout: &str, stderr: &str) -> O
         out.push_str(&header_parts.join(", "));
     }
     out.push_str(" [collapsed]");
-    for line in &summary_lines {
-        out.push('\n');
-        out.push_str(line);
-    }
-    for line in last_progress.values() {
-        out.push('\n');
-        out.push_str(line);
-    }
-    for line in &kept_lines {
+    for line in summary_lines
+        .iter()
+        .chain(last_progress.values())
+        .chain(&kept_lines)
+    {
         out.push('\n');
         out.push_str(line);
     }

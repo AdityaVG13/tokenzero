@@ -25,6 +25,16 @@ pub(crate) fn is_symlink(path: &Path) -> bool {
     fs::symlink_metadata(path).is_ok_and(|meta| meta.file_type().is_symlink())
 }
 
+fn sorted_entries(path: &Path) -> Option<Vec<PathBuf>> {
+    let mut entries: Vec<PathBuf> = fs::read_dir(path)
+        .ok()?
+        .flatten()
+        .map(|entry| entry.path())
+        .collect();
+    entries.sort();
+    Some(entries)
+}
+
 pub(crate) fn max_search_visited_files(max_results: usize) -> usize {
     if max_results == 0 {
         return 0;
@@ -211,7 +221,8 @@ pub(crate) fn collect_search(
     }
     if current.is_file() {
         stats.visited_files += 1;
-        if let Ok(text) = fs::read_to_string(current) {
+        if let Ok(bytes) = fs::read(current) {
+            let text = String::from_utf8_lossy(&bytes);
             let before = matches.len();
             let path_display = current.display().to_string();
             let rel_display = current
@@ -242,14 +253,9 @@ pub(crate) fn collect_search(
         }
         return;
     }
-    let Ok(entries) = fs::read_dir(current) else {
+    let Some(entries) = sorted_entries(current) else {
         return;
     };
-    let mut entries = entries
-        .flatten()
-        .map(|entry| entry.path())
-        .collect::<Vec<_>>();
-    entries.sort();
     for path in entries {
         if should_skip(&path, false) || is_symlink(&path) {
             continue;
@@ -270,6 +276,7 @@ pub(crate) fn collect_search(
     }
 }
 
+#[derive(Debug)]
 pub(crate) enum RgFailure {
     /// rg rejected the pattern (regex parse error); a tool error, not a
     /// fallback, because the internal scanner's substring semantics would
@@ -305,20 +312,20 @@ pub(crate) fn rg_search(
             break;
         }
         let mut command = std::process::Command::new(rg);
-        command
-            .arg("--line-number")
-            .arg("--no-heading")
-            .arg("--color=never")
-            .arg("--no-messages")
-            .arg("--hidden")
-            .arg("--no-ignore")
-            // A single-file root would otherwise omit the path column.
-            .arg("--with-filename");
+        command.args([
+            "--line-number",
+            "--no-heading",
+            "--color=never",
+            "--no-messages",
+            "--hidden",
+            "--no-ignore",
+            "--with-filename",
+        ]);
         // Mirror the internal scanner's skip list (`should_skip` with hidden
         // entries excluded): `!.*` also keeps the `.tokenzero` recovery cache
         // out of results.
         for skip in ["!.*", "!target", "!__pycache__"] {
-            command.arg("--glob").arg(skip);
+            command.args(["--glob", skip]);
         }
         if tool == "find" {
             command.arg("--fixed-strings");
@@ -426,14 +433,17 @@ pub(crate) fn parse_rg_line(line: &str, base: &str) -> Option<SearchMatch> {
 }
 
 fn find_rg_field_boundary(tail: &str, root: &Path) -> Option<(usize, usize, usize)> {
-    let mut search_from = 0usize;
-    let mut chosen: Option<(usize, usize, usize)> = None;
+    let mut search_from = 0;
+    let mut chosen = None;
     while let Some(offset) = tail[search_from..].find(':') {
         let rel_end = search_from + offset;
-        if let Some(candidate) = parse_rg_boundary(tail, rel_end) {
-            if chosen.is_none() {
-                chosen = Some(candidate);
-            }
+        let after = &tail[rel_end + 1..];
+        if let Some((second, line)) = after
+            .find(':')
+            .and_then(|second| after[..second].parse().ok().map(|line| (second, line)))
+        {
+            let candidate = (rel_end, line, rel_end + second + 2);
+            chosen.get_or_insert(candidate);
             if root.join(&tail[..rel_end]).is_file() {
                 return Some(candidate);
             }
@@ -441,14 +451,6 @@ fn find_rg_field_boundary(tail: &str, root: &Path) -> Option<(usize, usize, usiz
         search_from = rel_end + 1;
     }
     chosen
-}
-
-fn parse_rg_boundary(tail: &str, rel_end: usize) -> Option<(usize, usize, usize)> {
-    let after = &tail[rel_end + 1..];
-    let second = after.find(':')?;
-    let line_number = after[..second].parse::<usize>().ok()?;
-    let text_start = rel_end + 1 + second + 1;
-    Some((rel_end, line_number, text_start))
 }
 
 pub(crate) struct TreeEntry {
@@ -470,11 +472,9 @@ pub(crate) fn collect_tree(
     if rows.len() >= max_files || depth == 0 {
         return;
     }
-    let Ok(entries) = fs::read_dir(current) else {
+    let Some(entries) = sorted_entries(current) else {
         return;
     };
-    let mut entries = entries.flatten().map(|e| e.path()).collect::<Vec<_>>();
-    entries.sort();
     for path in entries {
         if rows.len() >= max_files || should_skip(&path, include_hidden) {
             continue;
@@ -526,11 +526,9 @@ pub(crate) fn collect_glob(
         }
         return;
     }
-    let Ok(entries) = fs::read_dir(current) else {
+    let Some(entries) = sorted_entries(current) else {
         return;
     };
-    let mut entries = entries.flatten().map(|e| e.path()).collect::<Vec<_>>();
-    entries.sort();
     for path in entries {
         if rows.len() >= max_files || should_skip(&path, include_hidden) || is_symlink(&path) {
             continue;

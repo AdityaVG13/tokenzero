@@ -1,40 +1,30 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-target_dir="${CARGO_TARGET_DIR:-target/linux-docker}"
-bin="${target_dir}/release/tokenzero"
+target_dir="${CARGO_TARGET_DIR:-target/linux-docker}"; bin="${target_dir}/release/tokenzero"
 mkdir -p results/current
 
 cargo build --release -p tokenzero
 
 measure() {
-  local label="$1"
-  local threshold="$2"
-  shift 2
-  local tmp
+  local label="$1"; local threshold="$2"
+  shift 2; local tmp
   tmp="$(mktemp)"
   for _ in $(seq 1 30); do
-    local start end
-    start="$(date +%s%N)"
-    "$@" >/dev/null
-    end="$(date +%s%N)"
+    local start end; start="$(date +%s%N)"
+    "$@" >/dev/null; end="$(date +%s%N)"
     awk -v start="${start}" -v end="${end}" 'BEGIN { printf "%.6f\n", (end - start) / 1000000 }' >>"${tmp}"
   done
-  sort -n "${tmp}" -o "${tmp}"
-  local count idx p95 min max ok
-  count="$(wc -l <"${tmp}" | tr -d ' ')"
-  idx="$(awk -v count="${count}" 'BEGIN { idx = int(count * 0.95); if (idx < count * 0.95) idx += 1; if (idx < 1) idx = 1; print idx }')"
-  p95="$(sed -n "${idx}p" "${tmp}")"
-  min="$(sed -n '1p' "${tmp}")"
-  max="$(sed -n "${count}p" "${tmp}")"
-  ok="$(awk -v p95="${p95}" -v threshold="${threshold}" 'BEGIN { print (p95 <= threshold) ? "true" : "false" }')"
+  sort -n "${tmp}" -o "${tmp}"; local count idx p95 min max ok
+  count="$(wc -l <"${tmp}" | tr -d ' ')"; idx="$(awk -v count="${count}" 'BEGIN { idx = int(count * 0.95); if (idx < count * 0.95) idx += 1; if (idx < 1) idx = 1; print idx }')"
+  p95="$(sed -n "${idx}p" "${tmp}")"; min="$(sed -n '1p' "${tmp}")"
+  max="$(sed -n "${count}p" "${tmp}")"; ok="$(awk -v p95="${p95}" -v threshold="${threshold}" 'BEGIN { print (p95 <= threshold) ? "true" : "false" }')"
   rm -f "${tmp}"
   printf '"%s":{"p95_ms":%s,"min_ms":%s,"max_ms":%s,"count":%s,"threshold_ms":%s,"ok":%s}' \
     "${label}" "${p95}" "${min}" "${max}" "${count}" "${threshold}" "${ok}"
 }
 
-version_json="$(measure version 25 "${bin}" --version)"
-run_json="$(measure run_echo 25 "${bin}" run -- echo ok)"
+version_json="$(measure version 25 "${bin}" --version)"; run_json="$(measure run_echo 25 "${bin}" run -- echo ok)"
 ok="true"
 if [[ "${version_json}" != *'"ok":true'* || "${run_json}" != *'"ok":true'* ]]; then
   ok="false"

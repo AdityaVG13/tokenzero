@@ -30,10 +30,7 @@ function Add-Step {
     [string]$Log
   )
   $script:Steps += [ordered]@{
-    name = $Name
-    ok = $Ok
-    exit_code = $ExitCode
-    log = $Log
+    name = $Name; ok = $Ok; exit_code = $ExitCode; log = $Log
   }
 }
 
@@ -43,15 +40,7 @@ function Write-Report {
     [bool]$Ok
   )
   $report = [ordered]@{
-    schema_version = "tokenzero.windows_verify.v1"
-    status = $Status
-    ok = $Ok
-    host = $env:COMPUTERNAME
-    os = [System.Environment]::OSVersion.VersionString
-    cargo = (& cargo --version)
-    rustc = (& rustc --version)
-    target_dir = $env:CARGO_TARGET_DIR
-    steps = $script:Steps
+    schema_version = "tokenzero.windows_verify.v1"; status = $Status; ok = $Ok; host = $env:COMPUTERNAME; os = [System.Environment]::OSVersion.VersionString; cargo = (& cargo --version); rustc = (& rustc --version); target_dir = $env:CARGO_TARGET_DIR; steps = $script:Steps
     artifacts = $script:Artifacts
   }
   $report | ConvertTo-Json -Depth 8 | Out-File -Encoding utf8 results/current/rust_windows_verify.json
@@ -66,9 +55,7 @@ function Write-DiagnosticArtifact {
     return
   }
 
-  Write-Host "::group::$Label ($Path)"
-  Get-Content -LiteralPath $Path -Raw -ErrorAction SilentlyContinue | Write-Host
-  Write-Host "::endgroup::"
+  Write-Host "::group::$Label ($Path)"; Get-Content -LiteralPath $Path -Raw -ErrorAction SilentlyContinue | Write-Host; Write-Host "::endgroup::"
 }
 
 function Run-Step {
@@ -76,16 +63,11 @@ function Run-Step {
     [string]$Name,
     [string]$Log,
     [scriptblock]$Block
-  )
-  $global:LASTEXITCODE = 0
-  $output = & $Block 2>&1
+  ); $global:LASTEXITCODE = 0; $output = & $Block 2>&1
   $code = if ($null -eq $LASTEXITCODE) { 0 } else { $LASTEXITCODE }
-  $output | Out-File -Encoding utf8 $Log
-  Add-Step -Name $Name -Ok ($code -eq 0) -ExitCode $code -Log $Log
+  $output | Out-File -Encoding utf8 $Log; Add-Step -Name $Name -Ok ($code -eq 0) -ExitCode $code -Log $Log
   if ($code -ne 0) {
-    Write-Report -Status "blocked" -Ok $false
-    Write-DiagnosticArtifact -Label "$Name log" -Path $Log
-    Write-DiagnosticArtifact -Label "windows verifier report" -Path "results/current/rust_windows_verify.json"
+    Write-Report -Status "blocked" -Ok $false; Write-DiagnosticArtifact -Label "$Name log" -Path $Log; Write-DiagnosticArtifact -Label "windows verifier report" -Path "results/current/rust_windows_verify.json"
     throw "$Name failed with exit code $code"
   }
 }
@@ -96,18 +78,11 @@ function Run-Json-Step {
     [string]$JsonPath,
     [string]$Log,
     [scriptblock]$Block
-  )
-  $global:LASTEXITCODE = 0
-  $stdout = & $Block
+  ); $global:LASTEXITCODE = 0; $stdout = & $Block
   $code = if ($null -eq $LASTEXITCODE) { 0 } else { $LASTEXITCODE }
-  $stdout | Out-File -Encoding utf8 $JsonPath
-  $stdout | Out-File -Encoding utf8 $Log
-  Add-Step -Name $Name -Ok ($code -eq 0) -ExitCode $code -Log $Log
+  $stdout | Out-File -Encoding utf8 $JsonPath; $stdout | Out-File -Encoding utf8 $Log; Add-Step -Name $Name -Ok ($code -eq 0) -ExitCode $code -Log $Log
   if ($code -ne 0) {
-    Write-Report -Status "blocked" -Ok $false
-    Write-DiagnosticArtifact -Label "$Name output" -Path $JsonPath
-    Write-DiagnosticArtifact -Label "$Name log" -Path $Log
-    Write-DiagnosticArtifact -Label "windows verifier report" -Path "results/current/rust_windows_verify.json"
+    Write-Report -Status "blocked" -Ok $false; Write-DiagnosticArtifact -Label "$Name output" -Path $JsonPath; Write-DiagnosticArtifact -Label "$Name log" -Path $Log; Write-DiagnosticArtifact -Label "windows verifier report" -Path "results/current/rust_windows_verify.json"
     throw "$Name failed with exit code $code"
   }
 }
@@ -122,8 +97,7 @@ Run-Step "cargo build tokenzero release" "results/current/rust_windows_cargo_bui
 
 $tokenzero = Join-Path (Get-Location) "$env:CARGO_TARGET_DIR\release\tokenzero.exe"
 if (!(Test-Path $tokenzero)) {
-  Add-Step -Name "resolve tokenzero binary" -Ok $false -ExitCode 1 -Log ""
-  Write-Report -Status "blocked" -Ok $false
+  Add-Step -Name "resolve tokenzero binary" -Ok $false -ExitCode 1 -Log ""; Write-Report -Status "blocked" -Ok $false
   throw "tokenzero.exe not found at $tokenzero"
 }
 

@@ -438,11 +438,13 @@ one `zero.*` surface for users who want all three.
 | [**GraphZero**](https://github.com/AdityaVG13/graphzero) | Code graph + causality + decision memory | coming soon, hardening |
 
 The engines share content-addressed blob identity: the same bytes hash to the
-same ref whether it was minted as `tz://`, `fz://`, or `gz://`. Currently
-`fz://` and `gz://` are **same-store scheme aliases** — they are rewritten to
-`tz://` and looked up in the TokenZero store. True cross-engine expansion
-(refs produced by FSZero/GraphZero through their own stores) requires a
-verified shared-CAS adapter and is tracked by the ZeroRef v1 epic.
+same ref whether it was minted as `tz://`, `fz://`, or `gz://`. `fz://` and
+`gz://` still act as **same-store scheme aliases** when rewritten into the
+TokenZero store. Release publication of cross-engine **blob** expand under a verified shared
+ZeroStack CAS (and sibling-engine store fallback) is blocked until CI retains a
+green macOS/Linux/Windows ZeroRef v1 3×3 matrix. The checked-in fixture may be
+a host-only diagnostic snapshot and does not authorize release. Non-blob
+portable refs remain unsupported; see `docs/zeroref-v1-contract.md`.
 
 The [ZeroStack hub](https://github.com/AdityaVG13/ZeroStack) ships the unified
 CodeMode server (one `zero_execute` tool spanning all three engines), an

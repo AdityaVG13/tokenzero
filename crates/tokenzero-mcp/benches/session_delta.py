@@ -9,12 +9,13 @@ from __future__ import annotations
 
 import hashlib
 import json
-import platform
-import subprocess
 from collections import defaultdict
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[3]
+import sys
+sys.path.insert(0, str(REPO / "benchmarks"))
+from bench_common import environment as bench_environment, pct_saved, write_json
 OUT = Path(__file__).with_suffix("") / "evidence.json"
 TURNS = 12
 OP_SPECS = {
@@ -74,22 +75,6 @@ def envelope(request_id: int, op: str, visible: str, ref: str, telemetry: dict |
 
 def wire_bytes(value: dict) -> int:
     return len((json.dumps(value, sort_keys=True, separators=(",", ":")) + "\n").encode())
-
-
-def pct_saved(raw: int, visible: int) -> float:
-    return round(100 * (raw - visible) / raw, 3)
-
-
-def environment() -> dict:
-    diff = subprocess.run(["git", "diff", "--binary"], cwd=REPO, capture_output=True, check=True).stdout
-    commit = subprocess.run(["git", "rev-parse", "HEAD"], cwd=REPO, capture_output=True, text=True, check=True).stdout.strip()
-    return {
-        "commit": commit,
-        "machine": platform.machine(),
-        "os": platform.platform(),
-        "python": platform.python_version(),
-        "source_diff_sha256": hashlib.sha256(diff).hexdigest(),
-    }
 
 
 def main() -> None:
@@ -158,7 +143,7 @@ def main() -> None:
     regressions = [row for row in rows if row["delta_bytes"] > row["baseline_bytes"]]
     evidence = {
         "schema": "tokenzero.session-delta-headline.v1",
-        "environment": environment(),
+        "environment": bench_environment(REPO),
         "methodology": {
             "corpus": "12 turns x read/search/tree/git; read and tree stable, search changes every 6 turns, git every 8 turns",
             "baseline": "compact capsule emitted on every turn",
@@ -181,9 +166,7 @@ def main() -> None:
         },
         "samples": rows,
     }
-    OUT.parent.mkdir(parents=True, exist_ok=True)
-    OUT.write_text(json.dumps(evidence, indent=2, sort_keys=True) + "\n")
-    print(json.dumps(evidence, indent=2, sort_keys=True))
+    write_json(OUT, evidence, emit=True)
 
 
 if __name__ == "__main__":

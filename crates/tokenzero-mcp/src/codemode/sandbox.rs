@@ -37,9 +37,10 @@ const DENIED_TOKENS: &[(&str, &str)] = &[
 ];
 
 pub(crate) fn lower_code_plan(plan: &str, limits: &CodeModeLimits) -> Result<String, String> {
-    let is_function_plan = plan.trim_start().starts_with("export default")
-        || plan.trim_start().starts_with("async function")
-        || plan.trim_start().starts_with("function");
+    let trimmed = plan.trim_start();
+    let is_function_plan = ["export default", "async function", "function"]
+        .iter()
+        .any(|prefix| trimmed.starts_with(prefix));
     if is_function_plan && plan.len() > limits.max_code_bytes {
         return Err(format!(
             "sandbox: code exceeds max_code_bytes {}",
@@ -100,23 +101,15 @@ fn rewrite_outside_strings(code: &str, token: &str, replacement: &str) -> String
 /// `process`/`spawn`.
 fn contains_token_at_identifier_boundary(haystack: &str, token: &str) -> bool {
     let bytes = haystack.as_bytes();
-    let token_ends_with_ident = token
+    let check_end = token
         .as_bytes()
         .last()
-        .is_some_and(|b| is_identifier_byte(*b));
-    let mut search_from = 0;
-    while let Some(rel) = haystack[search_from..].find(token) {
-        let start = search_from + rel;
+        .is_some_and(|byte| is_identifier_byte(*byte));
+    haystack.match_indices(token).any(|(start, _)| {
         let end = start + token.len();
-        let boundary_before = start == 0 || !is_identifier_byte(bytes[start - 1]);
-        let boundary_after =
-            !token_ends_with_ident || end >= bytes.len() || !is_identifier_byte(bytes[end]);
-        if boundary_before && boundary_after {
-            return true;
-        }
-        search_from = start + 1;
-    }
-    false
+        (start == 0 || !is_identifier_byte(bytes[start - 1]))
+            && (!check_end || end == bytes.len() || !is_identifier_byte(bytes[end]))
+    })
 }
 
 fn is_identifier_byte(b: u8) -> bool {
@@ -160,14 +153,12 @@ fn mask_string_literals(code: &str) -> String {
 }
 
 fn extract_function_body(code: &str) -> Result<String, String> {
-    let start = code
-        .find(") {")
-        .map(|pos| pos + 2)
-        .or_else(|| code.find("){ ").map(|pos| pos + 1))
-        .or_else(|| code.find("){ ").map(|pos| pos + 1))
-        .or_else(|| code.find("){ ").map(|pos| pos + 1))
-        .or_else(|| code.find("){\n").map(|pos| pos + 1))
-        .or_else(|| code.find("){").map(|pos| pos + 1))
+    let start = [") {", "){ ", "){\n", "){"]
+        .iter()
+        .find_map(|pattern| {
+            code.find(pattern)
+                .map(|position| position + pattern.find('{').unwrap())
+        })
         .ok_or_else(|| "sandbox: function body missing '{'".to_string())?;
     let end = code
         .rfind('}')

@@ -16,9 +16,8 @@ pub fn sha256_hex(text: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(text.as_bytes());
     let digest = hasher.finalize();
-    let bytes = &*digest;
-    let mut out = String::with_capacity(bytes.len() * 2);
-    for &b in bytes {
+    let mut out = String::with_capacity(digest.len() * 2);
+    for &b in digest.iter() {
         push_hex_byte(&mut out, b);
     }
     out
@@ -28,11 +27,7 @@ pub fn enforce_token_budget(text: &str, max_visible_tokens: usize) -> String {
     enforce_token_budget_with_ref(text, max_visible_tokens, None)
 }
 
-/// Budget enforcement with a recovery cue: when `recovery_ref` is provided,
-/// the truncation marker names the exact ref to expand instead of the
-/// generic "exact refs available", so an agent reading only the visible
-/// capsule knows precisely how to recover the omitted content. The marker's
-/// token cost is part of the budget either way.
+/// Enforce the visible budget while naming an exact recovery ref when available.
 pub fn enforce_token_budget_with_ref(
     text: &str,
     max_visible_tokens: usize,
@@ -41,33 +36,18 @@ pub fn enforce_token_budget_with_ref(
     if max_visible_tokens == 0 || count_tokens(text) <= max_visible_tokens {
         return text.to_string();
     }
-    let marker = match recovery_ref {
-        Some(ref_id) => {
-            format!("... omitted by visible budget; expand {ref_id} for the full output ...")
-        }
-        None => "... omitted by visible budget; exact refs available ...".to_string(),
-    };
+    let marker = recovery_ref.map_or_else(
+        || "... omitted by visible budget; exact refs available ...".to_string(),
+        |ref_id| format!("... omitted by visible budget; expand {ref_id} for the full output ..."),
+    );
     let marker = marker.as_str();
     let marker_tokens = count_tokens(marker);
     if marker_tokens > max_visible_tokens {
         return "omitted".to_string();
     }
-    // O(n) shape: iterate lines, tokenize each lazily, and stop the first
-    // time adding the next line (plus the trailing "\n{marker}" overhead)
-    // would exceed the budget. Replaces the prior O(n^2) (re-join the whole
-    // prefix + re-tokenize on every iteration).
-    //
-    // Isomorphism note: `count_tokens` treats `\n` as whitespace, not a token
-    // boundary, so `count_tokens(lines[..=k].join("\n"))` equals
-    // `sum(count_tokens(line) for line in lines[..=k])` exactly — a running
-    // sum of per-line token counts is equivalent to retokenizing the joined
-    // prefix. The candidate being compared in the prior loop was
-    // `out.join("\n") + "\n" + marker`, with token cost
-    // `running + line_tokens + 1 (the trailing \n) + marker_tokens`.
     const SEPARATOR_TOKENS: usize = 1;
     let mut running: usize = 0;
     let mut keep: usize = 0;
-    let mut first_start: Option<usize> = None;
     for line in text.lines() {
         let lt = count_tokens(line);
         let next_total = running
@@ -76,23 +56,13 @@ pub fn enforce_token_budget_with_ref(
         if next_total > max_visible_tokens {
             break;
         }
-        if keep == 0 {
-            first_start = Some(line.as_ptr() as usize - text.as_ptr() as usize);
-        }
         running = running.saturating_add(lt);
         keep += 1;
     }
     if keep == 0 {
         return marker.to_string();
     }
-    // Reassemble the exact same byte sequence the old code produced:
-    // `lines[0..keep].join("\n") + "\n" + marker`. The first kept line's
-    // start in `text` is captured above; we then walk forward through
-    // `text` counting newlines to find the byte offset just past the
-    // (keep-1)th newline after the first kept line, which is the end of
-    // the joined prefix. This avoids allocating a `Vec<&str>`.
-    let start = first_start.expect("keep > 0 implies first_start set");
-    let end = prefix_end_for_kept_lines(text, start, keep);
+    let end = prefix_end_for_kept_lines(text, keep);
     let prefix = &text[..end];
     let mut out = String::with_capacity(prefix.len() + 1 + marker.len());
     out.push_str(prefix);
@@ -101,30 +71,10 @@ pub fn enforce_token_budget_with_ref(
     out
 }
 
-fn prefix_end_for_kept_lines(text: &str, start: usize, keep: usize) -> usize {
-    if keep == 1 {
-        return next_newline_or_end(text, start);
-    }
-    let target = keep - 1;
-    let mut newlines_seen = 0usize;
-    for (i, b) in text[start..].bytes().enumerate() {
-        if b == b'\n' {
-            newlines_seen += 1;
-            if newlines_seen == target {
-                return start + i;
-            }
-        }
-    }
-    text.len()
-}
-
-fn next_newline_or_end(text: &str, start: usize) -> usize {
-    for (i, b) in text[start..].bytes().enumerate() {
-        if b == b'\n' {
-            return start + i;
-        }
-    }
-    text.len()
+fn prefix_end_for_kept_lines(text: &str, keep: usize) -> usize {
+    text.match_indices('\n')
+        .nth(keep.saturating_sub(2))
+        .map_or(text.len(), |(index, _)| index)
 }
 
 /// Tokenizer families whose local token-cost characteristics TokenZero knows.
@@ -149,49 +99,35 @@ pub struct TokenizerMetadata {
     pub approximate: bool,
 }
 
-const CL100K: TokenizerMetadata = TokenizerMetadata {
-    family: TokenizerFamily::Cl100k,
-    chars_per_token_milli: 4_000,
-    approximate: true,
-};
-const O200K: TokenizerMetadata = TokenizerMetadata {
-    family: TokenizerFamily::O200k,
-    chars_per_token_milli: 4_000,
-    approximate: true,
-};
-const SENTENCEPIECE: TokenizerMetadata = TokenizerMetadata {
-    family: TokenizerFamily::SentencePiece,
-    chars_per_token_milli: 3_500,
-    approximate: true,
-};
+const fn tokenizer(family: TokenizerFamily, chars_per_token_milli: usize) -> TokenizerMetadata {
+    TokenizerMetadata {
+        family,
+        chars_per_token_milli,
+        approximate: true,
+    }
+}
+
+const CL100K: TokenizerMetadata = tokenizer(TokenizerFamily::Cl100k, 4_000);
+const O200K: TokenizerMetadata = tokenizer(TokenizerFamily::O200k, 4_000);
+const SENTENCEPIECE: TokenizerMetadata = tokenizer(TokenizerFamily::SentencePiece, 3_500);
 
 /// Resolve a provider model id without allocating or making network calls.
 pub fn tokenizer_metadata(model_id: &str) -> Option<&'static TokenizerMetadata> {
-    // Provider-qualified ids ("openai/gpt-4o-...", "deepseek/...") carry the
-    // model name in the last path segment.
-    let model_id = model_id.rsplit('/').next().unwrap_or(model_id);
-    if starts_with_ignore_ascii_case(model_id, "gpt-4o")
-        || starts_with_ignore_ascii_case(model_id, "gpt-4.1")
-        || starts_with_ignore_ascii_case(model_id, "gpt-5")
-        || starts_with_ignore_ascii_case(model_id, "o1")
-        || starts_with_ignore_ascii_case(model_id, "o3")
-        || starts_with_ignore_ascii_case(model_id, "o4")
-        || contains_ignore_ascii_case(model_id, "codex")
-    {
-        Some(&O200K)
-    } else if starts_with_ignore_ascii_case(model_id, "gpt-4")
-        || starts_with_ignore_ascii_case(model_id, "gpt-3.5")
-    {
-        Some(&CL100K)
-    } else if starts_with_ignore_ascii_case(model_id, "llama")
-        || starts_with_ignore_ascii_case(model_id, "mistral")
-        || starts_with_ignore_ascii_case(model_id, "mixtral")
-        || starts_with_ignore_ascii_case(model_id, "gemma")
-    {
-        Some(&SENTENCEPIECE)
-    } else {
-        None
+    let model = model_id.rsplit('/').next().unwrap_or(model_id);
+    const RULES: &[(&TokenizerMetadata, &[&str])] = &[
+        (&O200K, &["gpt-4o", "gpt-4.1", "gpt-5", "o1", "o3", "o4"]),
+        (&CL100K, &["gpt-4", "gpt-3.5"]),
+        (&SENTENCEPIECE, &["llama", "mistral", "mixtral", "gemma"]),
+    ];
+    if contains_ignore_ascii_case(model, "codex") {
+        return Some(&O200K);
     }
+    RULES.iter().find_map(|(metadata, prefixes)| {
+        prefixes
+            .iter()
+            .any(|prefix| starts_with_ignore_ascii_case(model, prefix))
+            .then_some(*metadata)
+    })
 }
 
 fn starts_with_ignore_ascii_case(value: &str, prefix: &str) -> bool {
@@ -241,9 +177,6 @@ pub fn count_tokens_for_model(text: &str, model_id: Option<&str>) -> usize {
 }
 
 fn approximate_token_count(text: &str, metadata: &TokenizerMetadata) -> usize {
-    if text.is_empty() {
-        return 0;
-    }
     text.chars()
         .count()
         .saturating_mul(1_000)
@@ -300,10 +233,9 @@ fn pack_to_token_boundary_for_model_with_char_limit<'a>(
 }
 
 fn char_prefix(text: &str, chars: usize) -> &str {
-    match text.char_indices().nth(chars) {
-        Some((end, _)) => &text[..end],
-        None => text,
-    }
+    text.char_indices()
+        .nth(chars)
+        .map_or(text, |(end, _)| &text[..end])
 }
 
 fn lexical_boundary_prefix(text: &str, max_tokens: usize, max_chars: usize) -> &str {
@@ -329,11 +261,10 @@ fn lexical_boundary_prefix(text: &str, max_tokens: usize, max_chars: usize) -> &
             }
         } else if ch.is_whitespace() {
             in_word = false;
+        } else if tokens == max_tokens {
+            completed = false;
+            break;
         } else {
-            if tokens == max_tokens {
-                completed = false;
-                break;
-            }
             tokens += 1;
             in_word = false;
         }
@@ -364,94 +295,42 @@ pub(crate) const ASCII_TOKEN_CLASS: [u8; 256] = {
 };
 
 pub fn count_tokens(text: &str) -> usize {
-    match active_tokenizer_metadata() {
-        Some(metadata) => approximate_token_count(text, metadata),
-        None => count_tokens_lexical(text),
+    active_tokenizer_metadata().map_or_else(
+        || count_tokens_lexical(text),
+        |metadata| approximate_token_count(text, metadata),
+    )
+}
+
+fn count_ascii(bytes: &[u8], stop_at_non_ascii: bool) -> (usize, usize) {
+    let (mut tokens, mut in_token) = (0, false);
+    for (index, &byte) in bytes.iter().enumerate() {
+        if stop_at_non_ascii && !byte.is_ascii() {
+            return (tokens, index);
+        }
+        let class = ASCII_TOKEN_CLASS[byte as usize];
+        tokens += usize::from(class == 0 || class == 1 && !in_token);
+        in_token = class == 1;
     }
+    (tokens, bytes.len())
 }
 
 fn count_tokens_lexical(text: &str) -> usize {
-    if text.is_empty() {
-        return 0;
+    let (tokens, ascii_end) = count_ascii(text.as_bytes(), true);
+    if ascii_end == text.len() {
+        tokens
+    } else {
+        count_tokens_tail(text, ascii_end)
     }
-    // ASCII fast path: classify each byte via a const 256-entry table.
-    // Non-ASCII bytes (>= 0x80) fall back to the per-char path which
-    // mirrors the original semantics (char.is_ascii_alphanumeric(),
-    // char.is_whitespace()).
-    let bytes = text.as_bytes();
-    let mut tokens = 0usize;
-    let mut in_token = false;
-    let mut i = 0;
-    while i < bytes.len() {
-        let b = bytes[i];
-        if b < 0x80 {
-            match ASCII_TOKEN_CLASS[b as usize] {
-                1 => {
-                    if !in_token {
-                        tokens += 1;
-                        in_token = true;
-                    }
-                }
-                2 => in_token = false,
-                _ => {
-                    in_token = false;
-                    tokens += 1;
-                }
-            }
-            i += 1;
-        } else {
-            // Non-ASCII: defer to the original char-based counting on the
-            // remaining slice. This keeps the per-byte loop SIMD-friendly
-            // and exact for ASCII, while preserving the Unicode semantics
-            // (whitespace per char::is_whitespace, alphanumeric+'_' as in-token).
-            return count_tokens_tail(text, i);
-        }
-    }
-    tokens
 }
 
-/// Slow path used when `count_tokens` encounters a non-ASCII byte: tokenize
-/// the suffix from `start_byte_offset` exactly as the original char-based
-/// implementation would, then add the tokens already counted by the fast path.
+/// Finish lexical counting after the ASCII fast path reaches Unicode.
 pub(crate) fn count_tokens_tail(text: &str, start_byte_offset: usize) -> usize {
-    let prefix_tokens = {
-        // Re-tokenize the ASCII prefix we already walked so the function
-        // is self-contained and idempotent; the caller's fast-path prefix
-        // tokens are re-derived here. For correctness we just need the
-        // suffix tokens added to the prefix count.
-        let mut t = 0usize;
-        let mut in_token = false;
-        for &b in &text.as_bytes()[..start_byte_offset] {
-            match ASCII_TOKEN_CLASS[b as usize] {
-                1 => {
-                    if !in_token {
-                        t += 1;
-                        in_token = true;
-                    }
-                }
-                2 => in_token = false,
-                _ => {
-                    in_token = false;
-                    t += 1;
-                }
-            }
-        }
-        t
-    };
-    let mut tokens = prefix_tokens;
+    let (mut tokens, _) = count_ascii(&text.as_bytes()[..start_byte_offset], false);
     let mut in_token = false;
     for ch in text[start_byte_offset..].chars() {
-        if ch.is_ascii_alphanumeric() || ch == '_' {
-            if !in_token {
-                tokens += 1;
-                in_token = true;
-            }
-        } else {
-            in_token = false;
-            if !ch.is_whitespace() {
-                tokens += 1;
-            }
-        }
+        let word = ch.is_ascii_alphanumeric() || ch == '_';
+        tokens += usize::from(!ch.is_whitespace() && (!word || !in_token));
+        in_token = word;
     }
     tokens
 }

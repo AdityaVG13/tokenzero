@@ -1,46 +1,6 @@
-//! `TokenZeroEngine` methods extracted from `lib.rs`.
-#![allow(unused_imports)]
-
-use super::cache_pack::{
-    cache_pack_manifest_path, cache_pack_sources, previous_cache_digest, read_line_range_from_file,
-};
-use super::collect::*;
-use super::config::{
-    EngineConfig, FETCH_ALLOW_ENV, FETCH_DENY_ENV, FETCH_ENABLED_ENV, ServeFlight, new_session_id,
-};
-use super::fetch_cache::{epoch_secs, fetch_index_path, load_fetch_index, record_fetch};
-use super::fetch_guard::{FETCH_META_MARKER, split_fetch_meta, validate_fetch_target};
-use super::metrics;
-use super::paths::*;
-use super::render::*;
-use super::session::{
-    DiffTelemetry, SeenState, ServeKey, ServedRecord, SessionMemory, SessionSummary,
-};
+use super::config::{ServeFlight, new_session_id};
 use super::session_persist::SessionPersistence;
-use super::{
-    Accounting, ContentType, DEFAULT_MCP_IDLE_TIMEOUT_SECS, DEFAULT_SHELL_TIMEOUT_SECS,
-    DIFF_MAX_BYTES, DIFF_MAX_LINES, DIFF_READS_ENV, EditHunk, MAX_MCP_IDLE_TIMEOUT_SECS,
-    MAX_SEARCH_VISITED_FILES, MAX_SHELL_TIMEOUT_SECS, MIN_SEARCH_VISITED_FILES, Mode, RG_PATH_ENV,
-    SEARCH_BACKEND_ENV, SEARCH_VISIT_MULTIPLIER, SESSION_DEDUP_ENV, SearchBackend, ServeOptions,
-    ShellRenderInput, TokenZeroEngine, ToolResponse, cache_maintenance, count_tokens,
-    detect_content_type, make_capsule, make_capsule_with_raw_tokens, ref_record, render_shell,
-    sha256_hex, shell_combined_output, shell_spill_dir, shell_timeout_from_secs,
-    split_command_string,
-};
-use crate::recall;
-use globset::{GlobBuilder, GlobMatcher};
-use serde_json::{Value, json};
-use std::collections::{BTreeMap, HashSet};
-use std::ffi::OsString;
-use std::fs;
-use std::path::{Path, PathBuf};
-use std::sync::{Condvar, Mutex, OnceLock};
-use std::time::{Duration, SystemTime};
-use tokenzero_filters::rewrite_command;
-use tokenzero_recovery::{ExpansionResult, RecoveryStore, StoredPayload};
-use tokenzero_runtime::{
-    RunOutputPolicy, StreamCapture, contains_platform_shell_syntax, run_command_with_policy,
-};
+use super::*;
 
 impl TokenZeroEngine {
     pub fn new(config: EngineConfig) -> Self {
@@ -92,6 +52,7 @@ impl TokenZeroEngine {
             &config.allowed_roots,
         )
         .ok();
+        let cache_path = config.cache_path.clone();
         Self {
             config,
             rg_binary: OnceLock::new(),
@@ -99,6 +60,7 @@ impl TokenZeroEngine {
             working_set: Mutex::new(tokenzero_recovery::working_set::WorkingSet::new(
                 tokenzero_recovery::working_set::DEFAULT_WORKING_SET_TOKENS,
             )),
+            recovery_store: Mutex::new(RecoveryStore::new(Some(cache_path))),
             in_flight: (Mutex::new(HashSet::new()), Condvar::new()),
             session_id,
             ledger,
@@ -234,16 +196,20 @@ impl TokenZeroEngine {
             return (0, 0);
         };
         let memory = Self::load_session_memory(&mut slot, self.session_persist.as_ref());
-        for (key, record) in pending {
-            memory.record(key, record);
-        }
+        let changed_keys: Vec<_> = pending
+            .into_iter()
+            .map(|(key, record)| {
+                memory.record(key.clone(), record);
+                key
+            })
+            .collect();
         memory.absorb(summary);
         if let (Some(full), Some(delta)) = (summary.full_bytes, summary.delta_bytes) {
             memory.note_bytes(full, delta);
         }
         let watermark = memory.advance_hwm();
         if let Some(ref persist) = self.session_persist {
-            persist.persist(memory);
+            persist.persist(memory, &changed_keys);
         }
         watermark
     }
@@ -286,24 +252,27 @@ impl TokenZeroEngine {
         &self,
         response: &mut ToolResponse,
         anchor: tokenzero_recovery::working_set::SpanAnchor,
-    ) {
+    ) -> bool {
         let Some(text) = response
             .visible
             .as_ref()
             .map(|visible| visible.text.clone())
         else {
-            return;
+            return false;
         };
         if text.is_empty() {
-            return;
+            return false;
         }
-        let mut store = RecoveryStore::new(Some(self.config.cache_path.clone()));
+        let Ok(mut store) = self.recovery_store.lock() else {
+            return false;
+        };
         let Ok(mut working_set) = self.working_set.lock() else {
-            return;
+            return false;
         };
         let Ok(admission) = working_set.admit(&mut store, text, anchor) else {
-            return;
+            return false;
         };
+        let replaced = admission.replacement.is_some();
         if let Some(replacement) = admission.replacement {
             if let Some(visible) = response.visible.as_mut() {
                 visible.text = replacement;
@@ -339,6 +308,7 @@ impl TokenZeroEngine {
                 }),
             );
         }
+        replaced
     }
 
     pub(crate) fn session_rollup(&self) -> Value {

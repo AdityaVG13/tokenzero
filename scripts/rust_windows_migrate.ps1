@@ -13,8 +13,7 @@ param(
 
 $ErrorActionPreference = "Stop"
 
-$RepoRoot = Resolve-Path (Join-Path $PSScriptRoot "..")
-$completed = @()
+$RepoRoot = Resolve-Path (Join-Path $PSScriptRoot ".."); $completed = @()
 
 function Resolve-FullPath {
   param([string]$Path)
@@ -31,11 +30,9 @@ function Test-PathUnder {
     [string]$Base
   )
 
-  $fullPath = [System.IO.Path]::GetFullPath($Path).TrimEnd("\", "/")
-  $fullBase = [System.IO.Path]::GetFullPath($Base).TrimEnd("\", "/")
+  $fullPath = [System.IO.Path]::GetFullPath($Path).TrimEnd("\", "/"); $fullBase = [System.IO.Path]::GetFullPath($Base).TrimEnd("\", "/")
   return $fullPath.Equals($fullBase, [System.StringComparison]::OrdinalIgnoreCase) -or
-    $fullPath.StartsWith($fullBase + [System.IO.Path]::DirectorySeparatorChar, [System.StringComparison]::OrdinalIgnoreCase) -or
-    $fullPath.StartsWith($fullBase + [System.IO.Path]::AltDirectorySeparatorChar, [System.StringComparison]::OrdinalIgnoreCase)
+    $fullPath.StartsWith($fullBase + [System.IO.Path]::DirectorySeparatorChar, [System.StringComparison]::OrdinalIgnoreCase) -or; $fullPath.StartsWith($fullBase + [System.IO.Path]::AltDirectorySeparatorChar, [System.StringComparison]::OrdinalIgnoreCase)
 }
 
 function Write-Report {
@@ -62,27 +59,16 @@ function Invoke-Checked {
     [string[]]$Arguments
   )
 
-  $psi = [System.Diagnostics.ProcessStartInfo]::new()
-  $psi.FileName = $FileName
-  $psi.WorkingDirectory = $WorkingDirectory
-  $psi.Arguments = ($Arguments | ForEach-Object { Quote-ProcessArg $_ }) -join " "
-  $psi.RedirectStandardOutput = $true
-  $psi.RedirectStandardError = $true
+  $psi = [System.Diagnostics.ProcessStartInfo]::new(); $psi.FileName = $FileName; $psi.WorkingDirectory = $WorkingDirectory; $psi.Arguments = ($Arguments | ForEach-Object { Quote-ProcessArg $_ }) -join " "; $psi.RedirectStandardOutput = $true; $psi.RedirectStandardError = $true
   $psi.UseShellExecute = $false
 
-  $process = [System.Diagnostics.Process]::Start($psi)
-  $stdout = $process.StandardOutput.ReadToEnd()
-  $stderr = $process.StandardError.ReadToEnd()
-  $process.WaitForExit()
+  $process = [System.Diagnostics.Process]::Start($psi); $stdout = $process.StandardOutput.ReadToEnd(); $stderr = $process.StandardError.ReadToEnd(); $process.WaitForExit()
   if ($process.ExitCode -ne 0) {
     throw "$Name failed with exit code $($process.ExitCode)`n$stdout`n$stderr"
   }
 
   return [ordered]@{
-    name = $Name
-    exit_code = $process.ExitCode
-    stdout_preview = $stdout.Substring(0, [Math]::Min(500, $stdout.Length))
-    stderr_preview = $stderr.Substring(0, [Math]::Min(500, $stderr.Length))
+    name = $Name; exit_code = $process.ExitCode; stdout_preview = $stdout.Substring(0, [Math]::Min(500, $stdout.Length)); stderr_preview = $stderr.Substring(0, [Math]::Min(500, $stderr.Length))
   }
 }
 
@@ -96,15 +82,11 @@ function Test-RemoteBranch {
     $output = & git ls-remote --heads $Url $BranchName 2>&1
     $code = if ($null -eq $LASTEXITCODE) { 0 } else { $LASTEXITCODE }
     return [ordered]@{
-      ok = ($code -eq 0) -and ![string]::IsNullOrWhiteSpace(($output | Out-String))
-      exit_code = $code
-      output_preview = ($output | Out-String).Substring(0, [Math]::Min(500, ($output | Out-String).Length))
+      ok = ($code -eq 0) -and ![string]::IsNullOrWhiteSpace(($output | Out-String)); exit_code = $code; output_preview = ($output | Out-String).Substring(0, [Math]::Min(500, ($output | Out-String).Length))
     }
   } catch {
     return [ordered]@{
-      ok = $false
-      exit_code = -1
-      output_preview = $_.Exception.Message
+      ok = $false; exit_code = -1; output_preview = $_.Exception.Message
     }
   }
 }
@@ -128,11 +110,8 @@ function Invoke-McpInitialize {
   try {
     $psi = [System.Diagnostics.ProcessStartInfo]::new()
     $psi.FileName = if ($env:ComSpec) { $env:ComSpec } else { "cmd.exe" }
-    $commandLine = "$(Quote-ProcessArg $RuntimeExe) mcp-server --allowed-root $(Quote-ProcessArg $AllowedRoot) --cache-path $(Quote-ProcessArg $CachePath) < $(Quote-ProcessArg $requestPath)"
-    $psi.Arguments = '/D /C "' + $commandLine + '"'
-    $psi.RedirectStandardOutput = $true
-    $psi.RedirectStandardError = $true
-    $psi.UseShellExecute = $false
+    $commandLine = "$(Quote-ProcessArg $RuntimeExe) mcp-server --allowed-root $(Quote-ProcessArg $AllowedRoot) --cache-path $(Quote-ProcessArg $CachePath) < $(Quote-ProcessArg $requestPath)"; $psi.Arguments = '/D /C "' + $commandLine + '"'; $psi.RedirectStandardOutput = $true
+    $psi.RedirectStandardError = $true; $psi.UseShellExecute = $false
 
     $proc = [System.Diagnostics.Process]::Start($psi)
     if (!$proc.WaitForExit(10000)) {
@@ -140,18 +119,13 @@ function Invoke-McpInitialize {
       throw "MCP initialize timed out"
     }
 
-    $stdout = $proc.StandardOutput.ReadToEnd()
-    $stderr = $proc.StandardError.ReadToEnd()
-    $ok = ($proc.ExitCode -eq 0) -and $stdout.Replace(" ", "").Contains('"name":"tokenzero"')
+    $stdout = $proc.StandardOutput.ReadToEnd(); $stderr = $proc.StandardError.ReadToEnd(); $ok = ($proc.ExitCode -eq 0) -and $stdout.Replace(" ", "").Contains('"name":"tokenzero"')
     if (!$ok) {
       throw "MCP initialize failed with exit code $($proc.ExitCode)`n$stdout`n$stderr"
     }
 
     return [ordered]@{
-      name = "mcp initialize"
-      exit_code = $proc.ExitCode
-      stdout_preview = $stdout.Substring(0, [Math]::Min(500, $stdout.Length))
-      stderr_preview = $stderr.Substring(0, [Math]::Min(500, $stderr.Length))
+      name = "mcp initialize"; exit_code = $proc.ExitCode; stdout_preview = $stdout.Substring(0, [Math]::Min(500, $stdout.Length)); stderr_preview = $stderr.Substring(0, [Math]::Min(500, $stderr.Length))
     }
   } finally {
     Remove-Item -LiteralPath $requestPath -Force -ErrorAction SilentlyContinue
@@ -167,15 +141,12 @@ function Invoke-ArchiveCheckout {
   try {
     Move-Item -LiteralPath $CurrentCheckoutPath -Destination $ArchiveCheckoutPath -ErrorAction Stop
     return [ordered]@{
-      name = "archive python checkout"
-      path = $ArchiveCheckoutPath
-      mode = "rename"
+      name = "archive python checkout"; path = $ArchiveCheckoutPath; mode = "rename"
     }
   } catch {
     $moveError = $_.Exception.Message
 
-    New-Item -ItemType Directory -Force -Path $ArchiveCheckoutPath | Out-Null
-    $children = @(Get-ChildItem -LiteralPath $CurrentCheckoutPath -Force)
+    New-Item -ItemType Directory -Force -Path $ArchiveCheckoutPath | Out-Null; $children = @(Get-ChildItem -LiteralPath $CurrentCheckoutPath -Force)
     foreach ($item in $children) {
       Copy-Item -LiteralPath $item.FullName -Destination (Join-Path $ArchiveCheckoutPath $item.Name) -Recurse -Force
     }
@@ -190,11 +161,7 @@ function Invoke-ArchiveCheckout {
     }
 
     return [ordered]@{
-      name = "archive python checkout"
-      path = $ArchiveCheckoutPath
-      mode = "content-copy"
-      copied_items = $children.Count
-      move_error = $moveError
+      name = "archive python checkout"; path = $ArchiveCheckoutPath; mode = "content-copy"; copied_items = $children.Count; move_error = $moveError
     }
   }
 }
@@ -211,8 +178,7 @@ try {
   $CurrentCheckout = Resolve-FullPath $CurrentCheckout
 
   if ([string]::IsNullOrWhiteSpace($ArchivePath)) {
-    $stamp = Get-Date -Format "yyyy-MM-dd-HHmmss"
-    $ArchivePath = Join-Path $HomeRoot "tokenzero-python-old-$stamp"
+    $stamp = Get-Date -Format "yyyy-MM-dd-HHmmss"; $ArchivePath = Join-Path $HomeRoot "tokenzero-python-old-$stamp"
   }
   $ArchivePath = Resolve-FullPath $ArchivePath
 
@@ -235,98 +201,50 @@ try {
 
   $remoteBranch = Test-RemoteBranch -Url $SourceUrl -BranchName $Branch
 
-  $releaseExe = Join-Path $CurrentCheckout "target/release/tokenzero.exe"
-  $globalLauncher = Join-Path $HomeRoot ".tokenzero/bin/tokenzero.cmd"
+  $releaseExe = Join-Path $CurrentCheckout "target/release/tokenzero.exe"; $globalLauncher = Join-Path $HomeRoot ".tokenzero/bin/tokenzero.cmd"
   $actions = @(
     [ordered]@{
-      id = "verify_source_checkout"
-      command = "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/rust_windows_verify.ps1"
-      cwd = $RepoRoot.ToString()
-      skipped = [bool]$SkipVerifier
+      id = "verify_source_checkout"; command = "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/rust_windows_verify.ps1"; cwd = $RepoRoot.ToString(); skipped = [bool]$SkipVerifier
     },
     [ordered]@{
-      id = "rehearse_real_global_config"
-      command = "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/rust_windows_global_rehearsal.ps1"
-      cwd = $RepoRoot.ToString()
-      skipped = [bool]$SkipRehearsal
+      id = "rehearse_real_global_config"; command = "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/rust_windows_global_rehearsal.ps1"; cwd = $RepoRoot.ToString(); skipped = [bool]$SkipRehearsal
     },
     [ordered]@{
-      id = "archive_python_checkout"
-      command = "Move-Item -LiteralPath '$CurrentCheckout' -Destination '$ArchivePath' (falls back to content archive if the checkout root is locked)"
-      cwd = $HomeRoot
-      skipped = $false
+      id = "archive_python_checkout"; command = "Move-Item -LiteralPath '$CurrentCheckout' -Destination '$ArchivePath' (falls back to content archive if the checkout root is locked)"; cwd = $HomeRoot; skipped = $false
     },
     [ordered]@{
-      id = "clone_rust_checkout"
-      command = "git clone --branch $Branch --single-branch $SourceUrl '$CurrentCheckout'"
-      cwd = $HomeRoot
-      skipped = $false
+      id = "clone_rust_checkout"; command = "git clone --branch $Branch --single-branch $SourceUrl '$CurrentCheckout'"; cwd = $HomeRoot; skipped = $false
     },
     [ordered]@{
-      id = "build_final_release_binary"
-      command = "cargo build --release -p tokenzero --locked"
-      cwd = $CurrentCheckout
-      skipped = $false
+      id = "build_final_release_binary"; command = "cargo build --release -p tokenzero --locked"; cwd = $CurrentCheckout; skipped = $false
     },
     [ordered]@{
-      id = "preview_global_install"
-      command = "target\release\tokenzero.exe install --global --plan --mcp --shell --cli --root '$HomeRoot' --json"
-      cwd = $CurrentCheckout
-      skipped = $false
+      id = "preview_global_install"; command = "target\release\tokenzero.exe install --global --plan --mcp --shell --cli --root '$HomeRoot' --json"; cwd = $CurrentCheckout; skipped = $false
     },
     [ordered]@{
-      id = "apply_global_install"
-      command = "target\release\tokenzero.exe install --global --apply --mcp --shell --cli --root '$HomeRoot' --json"
-      cwd = $CurrentCheckout
-      skipped = $false
+      id = "apply_global_install"; command = "target\release\tokenzero.exe install --global --apply --mcp --shell --cli --root '$HomeRoot' --json"; cwd = $CurrentCheckout; skipped = $false
     },
     [ordered]@{
-      id = "verify_global_launcher_runtime_copy"
-      command = "Verify '$globalLauncher' calls a tokenzero-runtime-* copy under '$HomeRoot\.tokenzero\bin' and not target\release\tokenzero.exe"
-      cwd = $CurrentCheckout
-      skipped = $false
+      id = "verify_global_launcher_runtime_copy"; command = "Verify '$globalLauncher' calls a tokenzero-runtime-* copy under '$HomeRoot\.tokenzero\bin' and not target\release\tokenzero.exe"; cwd = $CurrentCheckout; skipped = $false
     },
     [ordered]@{
-      id = "verify_global_launcher"
-      command = "'$globalLauncher' --version"
-      cwd = $CurrentCheckout
-      skipped = $false
+      id = "verify_global_launcher"; command = "'$globalLauncher' --version"; cwd = $CurrentCheckout; skipped = $false
     },
     [ordered]@{
-      id = "verify_global_mcp_initialize"
-      command = "Launch installed tokenzero-runtime-* MCP server with --allowed-root '$CurrentCheckout' --cache-path '$HomeRoot\.tokenzero\recovery-cache.json'"
-      cwd = $CurrentCheckout
-      skipped = $false
+      id = "verify_global_mcp_initialize"; command = "Launch installed tokenzero-runtime-* MCP server with --allowed-root '$CurrentCheckout' --cache-path '$HomeRoot\.tokenzero\recovery-cache.json'"; cwd = $CurrentCheckout; skipped = $false
     }
   )
 
   $preflight = [ordered]@{
-    current_checkout_exists = Test-Path -LiteralPath $CurrentCheckout
-    archive_path_exists = Test-Path -LiteralPath $ArchivePath
-    home_root_exists = Test-Path -LiteralPath $HomeRoot
-    source_url = $SourceUrl
-    branch = $Branch
-    remote_branch = $remoteBranch
+    current_checkout_exists = Test-Path -LiteralPath $CurrentCheckout; archive_path_exists = Test-Path -LiteralPath $ArchivePath; home_root_exists = Test-Path -LiteralPath $HomeRoot; source_url = $SourceUrl; branch = $Branch; remote_branch = $remoteBranch
   }
 
   if (!$Apply) {
     $report = [ordered]@{
-      schema_version = "tokenzero.windows_migration.v1"
-      status = "planned"
-      ok = $true
-      dry_run = $true
-      apply_requires = "-Apply -ConfirmMigration"
-      home_root = $HomeRoot
-      current_checkout = $CurrentCheckout
-      archive_path = $ArchivePath
-      source_url = $SourceUrl
-      branch = $Branch
-      preflight = $preflight
-      actions = $actions
+      schema_version = "tokenzero.windows_migration.v1"; status = "planned"; ok = $true; dry_run = $true; apply_requires = "-Apply -ConfirmMigration"; home_root = $HomeRoot; current_checkout = $CurrentCheckout; archive_path = $ArchivePath; source_url = $SourceUrl; branch = $Branch
+      preflight = $preflight; actions = $actions
     }
-    Write-Report $report
-    $report | ConvertTo-Json -Depth 12
-    exit 0
+    Write-Report $report; $report | ConvertTo-Json -Depth 12; exit 0
   }
 
   if (!$ConfirmMigration) {
@@ -385,18 +303,14 @@ try {
     -FileName $releaseExe `
     -Arguments @("install", "--global", "--apply", "--mcp", "--shell", "--cli", "--root", $HomeRoot, "--json")
 
-  $launcherText = Get-Content -LiteralPath $globalLauncher -Raw
-  $runtimeFiles = @(Get-ChildItem -LiteralPath (Join-Path $HomeRoot ".tokenzero/bin") -Filter "tokenzero-runtime-*.exe" -ErrorAction SilentlyContinue)
+  $launcherText = Get-Content -LiteralPath $globalLauncher -Raw; $runtimeFiles = @(Get-ChildItem -LiteralPath (Join-Path $HomeRoot ".tokenzero/bin") -Filter "tokenzero-runtime-*.exe" -ErrorAction SilentlyContinue)
   $launcherUsesInstalledRuntime = $launcherText.Contains("tokenzero-runtime-") -and !$launcherText.ToLowerInvariant().Replace("\", "/").Contains("target/release/tokenzero")
   if (!$launcherUsesInstalledRuntime -or $runtimeFiles.Count -eq 0) {
     throw "Global launcher must call an installed tokenzero-runtime-* copy, not target\release\tokenzero.exe"
   }
   $runtimeExe = ($runtimeFiles | Sort-Object LastWriteTimeUtc -Descending | Select-Object -First 1).FullName
   $completed += [ordered]@{
-    name = "global launcher runtime copy"
-    exit_code = 0
-    stdout_preview = "runtime_count=$($runtimeFiles.Count) runtime=$runtimeExe"
-    stderr_preview = ""
+    name = "global launcher runtime copy"; exit_code = 0; stdout_preview = "runtime_count=$($runtimeFiles.Count) runtime=$runtimeExe"; stderr_preview = ""
   }
 
   $completed += Invoke-Checked `
@@ -417,39 +331,17 @@ try {
     -CachePath (Join-Path $HomeRoot ".tokenzero/recovery-cache.json")
 
   $report = [ordered]@{
-    schema_version = "tokenzero.windows_migration.v1"
-    status = "ok"
-    ok = $true
-    dry_run = $false
-    home_root = $HomeRoot
-    current_checkout = $CurrentCheckout
-    archive_path = $ArchivePath
-    source_url = $SourceUrl
-    branch = $Branch
-    completed = $completed
+    schema_version = "tokenzero.windows_migration.v1"; status = "ok"; ok = $true; dry_run = $false; home_root = $HomeRoot; current_checkout = $CurrentCheckout; archive_path = $ArchivePath; source_url = $SourceUrl; branch = $Branch; completed = $completed
   }
-  Write-Report $report
-  $report | ConvertTo-Json -Depth 12
+  Write-Report $report; $report | ConvertTo-Json -Depth 12
 } catch {
   $report = [ordered]@{
-    schema_version = "tokenzero.windows_migration.v1"
-    status = "blocked"
-    ok = $false
-    dry_run = !$Apply
-    home_root = $HomeRoot
-    current_checkout = $CurrentCheckout
-    archive_path = $ArchivePath
-    source_url = $SourceUrl
-    branch = $Branch
-    completed = $completed
+    schema_version = "tokenzero.windows_migration.v1"; status = "blocked"; ok = $false; dry_run = !$Apply; home_root = $HomeRoot; current_checkout = $CurrentCheckout; archive_path = $ArchivePath; source_url = $SourceUrl; branch = $Branch; completed = $completed
     rollback_hint = [ordered]@{
       restore_checkout = "If '$ArchivePath' exists and '$CurrentCheckout' is absent or disposable, rename '$ArchivePath' back to '$CurrentCheckout'."
       rollback_global_install = "If global install applied, run '$globalLauncher install --rollback latest --root $HomeRoot --json' before restoring the Python checkout."
     }
-    error = $_.Exception.Message
-    script_stack = $_.ScriptStackTrace
+    error = $_.Exception.Message; script_stack = $_.ScriptStackTrace
   }
-  Write-Report $report
-  $report | ConvertTo-Json -Depth 12
-  exit 1
+  Write-Report $report; $report | ConvertTo-Json -Depth 12; exit 1
 }

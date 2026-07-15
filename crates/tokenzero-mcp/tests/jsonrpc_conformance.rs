@@ -1,1474 +1,741 @@
-use serde_json::{Value, json};
-use std::fs;
-use tempfile::tempdir;
-use tokenzero_mcp::{EngineConfig, TokenZeroEngine, handle_jsonrpc};
-
-#[derive(Clone, Copy)]
-enum RequirementLevel {
-    Must,
-    Should,
-}
-
-struct ConformanceCase {
-    id: &'static str,
-    section: &'static str,
-    level: RequirementLevel,
-    description: &'static str,
-    input: CaseInput,
-    expected: Expected,
-}
-
-enum CaseInput {
-    Json(Value),
-    Raw(&'static str),
-}
-
-enum Expected {
-    NoResponse,
-    Result { id: Value },
-    Error { id: Value, code: i64 },
-    Batch(Vec<BatchExpected>),
-}
-
-enum BatchExpected {
-    Result { id: Value },
-    Error { id: Value, code: i64 },
-}
-
-/// Shorthand constructor for `ConformanceCase`.
-fn cc(
-    id: &'static str,
-    section: &'static str,
-    level: RequirementLevel,
-    description: &'static str,
-    input: CaseInput,
-    expected: Expected,
-) -> ConformanceCase {
-    ConformanceCase {
-        id,
-        section,
-        level,
-        description,
-        input,
-        expected,
+//! JSON-RPC 2.0 and MCP conformance matrices.
+mod conformance {
+    use serde_json::{Value, json};
+    use std::fs;
+    use tempfile::TempDir;
+    use tokenzero_mcp::{EngineConfig, TokenZeroEngine, handle_jsonrpc};
+    type ConformanceSection = (&'static str, fn(&Server));
+    struct Server {
+        dir: TempDir,
+        engine: TokenZeroEngine,
     }
-}
-
-/// Build a JSON-RPC request `Value` from method and params.
-fn mcp_req(id: &str, method: &str, params: Value) -> Value {
-    json!({"jsonrpc": "2.0", "id": id, "method": method, "params": params})
-}
-
-fn jsonrpc_cases() -> Vec<ConformanceCase> {
-    vec![
-        cc(
-            "JSONRPC-2.0-PARSE-001",
-            "JSON-RPC 2.0 Parse",
-            RequirementLevel::Must,
-            "Malformed JSON returns a parse error with null id",
-            CaseInput::Raw("{bad"),
-            Expected::Error {
-                id: Value::Null,
-                code: -32700,
-            },
-        ),
-        cc(
-            "JSONRPC-2.0-REQ-001",
-            "JSON-RPC 2.0 Request Object",
-            RequirementLevel::Must,
-            "A valid request object returns a response with the same id",
-            CaseInput::Json(json!({"jsonrpc":"2.0","id":1,"method":"ping"})),
-            Expected::Result { id: json!(1) },
-        ),
-        cc(
-            "JSONRPC-2.0-REQ-002",
-            "JSON-RPC 2.0 Request Object",
-            RequirementLevel::Must,
-            "The jsonrpc member must be exactly 2.0",
-            CaseInput::Json(json!({"jsonrpc":"1.0","id":"bad-version","method":"ping"})),
-            Expected::Error {
-                id: json!("bad-version"),
-                code: -32600,
-            },
-        ),
-        cc(
-            "JSONRPC-2.0-REQ-003",
-            "JSON-RPC 2.0 Request Object",
-            RequirementLevel::Must,
-            "A missing jsonrpc member is an invalid request",
-            CaseInput::Json(json!({"id":"missing-version","method":"ping"})),
-            Expected::Error {
-                id: json!("missing-version"),
-                code: -32600,
-            },
-        ),
-        cc(
-            "JSONRPC-2.0-REQ-004",
-            "JSON-RPC 2.0 Request Object",
-            RequirementLevel::Must,
-            "A request must be a JSON object",
-            CaseInput::Json(json!(1)),
-            Expected::Error {
-                id: Value::Null,
-                code: -32600,
-            },
-        ),
-        cc(
-            "JSONRPC-2.0-REQ-005",
-            "JSON-RPC 2.0 Request Object",
-            RequirementLevel::Must,
-            "The method member must be a string",
-            CaseInput::Json(json!({"jsonrpc":"2.0","id":"bad-method","method":7})),
-            Expected::Error {
-                id: json!("bad-method"),
-                code: -32600,
-            },
-        ),
-        cc(
-            "JSONRPC-2.0-REQ-006",
-            "JSON-RPC 2.0 Request Object",
-            RequirementLevel::Must,
-            "The id member must be a string, number, or null",
-            CaseInput::Json(json!({"jsonrpc":"2.0","id":{"not":"valid"},"method":"ping"})),
-            Expected::Error {
-                id: Value::Null,
-                code: -32600,
-            },
-        ),
-        cc(
-            "JSONRPC-2.0-REQ-007",
-            "JSON-RPC 2.0 Request Object",
-            RequirementLevel::Should,
-            "The params member should be an object or array when present",
-            CaseInput::Json(
-                json!({"jsonrpc":"2.0","id":"bad-params","method":"ping","params":true}),
-            ),
-            Expected::Error {
-                id: json!("bad-params"),
-                code: -32600,
-            },
-        ),
-        cc(
-            "JSONRPC-2.0-NOTIF-001",
-            "JSON-RPC 2.0 Notifications",
-            RequirementLevel::Must,
-            "A request object without id is a notification and gets no response",
-            CaseInput::Json(json!({"jsonrpc":"2.0","method":"ping"})),
-            Expected::NoResponse,
-        ),
-        cc(
-            "JSONRPC-2.0-NOTIF-002",
-            "JSON-RPC 2.0 Notifications",
-            RequirementLevel::Must,
-            "Unknown notification methods still get no response",
-            CaseInput::Json(json!({"jsonrpc":"2.0","method":"unknown/notification"})),
-            Expected::NoResponse,
-        ),
-        cc(
-            "MCP-2025-06-18-INITIALIZED-NOTIF-001",
-            "MCP 2025-06-18 Initialized Notification",
-            RequirementLevel::Must,
-            "notifications/initialized is a notification and gets no response",
-            CaseInput::Json(json!({"jsonrpc":"2.0","method":"notifications/initialized"})),
-            Expected::NoResponse,
-        ),
-        cc(
-            "JSONRPC-2.0-METHOD-001",
-            "JSON-RPC 2.0 Method Dispatch",
-            RequirementLevel::Must,
-            "Unknown request methods return Method not found",
-            CaseInput::Json(json!({"jsonrpc":"2.0","id":"unknown","method":"unknown/request"})),
-            Expected::Error {
-                id: json!("unknown"),
-                code: -32601,
-            },
-        ),
-        cc(
-            "JSONRPC-2.0-BATCH-001",
-            "JSON-RPC 2.0 Batch",
-            RequirementLevel::Must,
-            "A batch returns responses only for requests, not notifications",
-            CaseInput::Json(json!([
-                {"jsonrpc":"2.0","id":"batch-ping","method":"ping"},
-                {"jsonrpc":"2.0","method":"ping"}
-            ])),
-            Expected::Batch(vec![BatchExpected::Result {
-                id: json!("batch-ping"),
-            }]),
-        ),
-        cc(
-            "JSONRPC-2.0-BATCH-002",
-            "JSON-RPC 2.0 Batch",
-            RequirementLevel::Must,
-            "An empty batch is an invalid request",
-            CaseInput::Json(json!([])),
-            Expected::Error {
-                id: Value::Null,
-                code: -32600,
-            },
-        ),
-        cc(
-            "JSONRPC-2.0-BATCH-003",
-            "JSON-RPC 2.0 Batch",
-            RequirementLevel::Must,
-            "A batch containing only notifications gets no response",
-            CaseInput::Json(json!([
-                {"jsonrpc":"2.0","method":"ping"},
-                {"jsonrpc":"2.0","method":"unknown/notification"}
-            ])),
-            Expected::NoResponse,
-        ),
-        cc(
-            "JSONRPC-2.0-BATCH-004",
-            "JSON-RPC 2.0 Batch",
-            RequirementLevel::Must,
-            "Invalid batch elements return invalid request errors alongside valid responses",
-            CaseInput::Json(json!([
-                1,
-                {"jsonrpc":"2.0","id":"batch-valid","method":"ping"}
-            ])),
-            Expected::Batch(vec![
-                BatchExpected::Error {
-                    id: Value::Null,
-                    code: -32600,
-                },
-                BatchExpected::Result {
-                    id: json!("batch-valid"),
-                },
-            ]),
-        ),
-    ]
-}
-
-#[test]
-fn jsonrpc_request_envelope_conformance_matrix() {
-    let dir = tempdir().unwrap();
-    let engine = TokenZeroEngine::new(EngineConfig::for_root(dir.path()));
-    let cases = jsonrpc_cases();
-    let mut failures = Vec::new();
-
-    for case in &cases {
-        if let Err(reason) = run_case(&engine, case) {
-            failures.push(format!("{}: {}: {reason}", case.id, case.description));
+    impl Server {
+        fn new() -> Self {
+            let dir = tempfile::tempdir().unwrap();
+            let engine = TokenZeroEngine::new(EngineConfig::for_root(dir.path()));
+            Self { dir, engine }
+        }
+        fn path(&self, name: &str) -> std::path::PathBuf {
+            self.dir.path().join(name)
+        }
+        fn raw(&self, input: &str) -> Option<Value> {
+            handle_jsonrpc(&self.engine, input).map(|text| serde_json::from_str(&text).unwrap())
+        }
+        fn response(&self, input: Value) -> Value {
+            self.raw(&input.to_string())
+                .unwrap_or_else(|| panic!("expected response to {input}"))
+        }
+        fn call(&self, id: &str, method: &str, params: Value) -> Value {
+            self.response(json!({"jsonrpc":"2.0","id":id,"method":method,"params":params}))
         }
     }
-
-    assert!(failures.is_empty(), "{}", render_report(&cases, &failures));
+    enum Input {
+        Json(Value),
+        Raw(&'static str),
+    }
+    enum Reply {
+        None,
+        Result(Value),
+        Error(Value, i64),
+        Batch(Vec<Reply>),
+    }
+    struct RpcCase {
+        id: &'static str,
+        input: Input,
+        reply: Reply,
+    }
+    type InvalidCase = (String, &'static str, Value, &'static str);
+    macro_rules! rpc_cases {
+($($id:literal: $input:expr => $reply:expr;)+) => { [$(RpcCase { id: $id, input: $input, reply: $reply }),+] };
 }
-
-#[test]
-fn jsonrpc_invalid_params_errors_include_structured_data() {
-    let dir = tempdir().unwrap();
-    let engine = TokenZeroEngine::new(EngineConfig::for_root(dir.path()));
-
-    let cases = [
-        (
-            "missing tool name",
-            json!({"jsonrpc":"2.0","id":"missing-tool","method":"tools/call","params":{}}),
-            "missing_param",
-            "param",
-            json!("name"),
-        ),
-        (
-            "unknown tool",
-            json!({"jsonrpc":"2.0","id":"unknown-tool","method":"tools/call","params":{"name":"does_not_exist","arguments":{}}}),
-            "unknown_tool",
-            "tool",
-            json!("does_not_exist"),
-        ),
-        (
-            "unknown resource",
-            json!({"jsonrpc":"2.0","id":"unknown-resource","method":"resources/read","params":{"uri":"resource://tokenzero/missing"}}),
-            "unknown_resource",
-            "uri",
-            json!("resource://tokenzero/missing"),
-        ),
-    ];
-
-    for (label, input, kind, field, expected_value) in cases {
-        let response = handle_jsonrpc(&engine, &input.to_string())
-            .unwrap_or_else(|| panic!("{label}: expected error response"));
-        let actual: Value = serde_json::from_str(&response).unwrap();
-        let data = &actual["error"]["data"];
-
-        assert_eq!(actual["error"]["code"], -32602, "{label}: {actual}");
-        assert!(
-            data.is_object(),
-            "{label}: expected object data, got {data}"
-        );
-        assert_eq!(data["kind"], kind, "{label}: {actual}");
-        assert_eq!(data[field], expected_value, "{label}: {actual}");
-        assert!(
-            data["reason"]
-                .as_str()
-                .is_some_and(|reason| !reason.is_empty()),
-            "{label}: missing reason in {actual}"
-        );
-
-        match kind {
-            "unknown_tool" => assert!(
-                data["available_tools"]
-                    .as_array()
-                    .unwrap()
-                    .iter()
-                    .any(|tool| tool == "tz_read"),
-                "{label}: missing available tool list in {actual}"
-            ),
-            "unknown_resource" => assert!(
-                data["available_resources"]
-                    .as_array()
-                    .unwrap()
-                    .iter()
-                    .any(|uri| uri == "resource://tokenzero/capabilities"),
-                "{label}: missing available resource list in {actual}"
-            ),
-            _ => {}
+    macro_rules! invalid_cases {
+($server:expr; $($prefix:expr, $id:literal, $description:literal, $request_id:literal, $method:literal, $params:expr, $kind:literal;)+) => {{
+let cases = [$(invalid($prefix, $id, $description, $request_id, $method, $params, $kind)),+]; run_invalid($server, &cases);
+}};
+}
+    macro_rules! error_cases {
+($server:expr; $($id:literal: $input:expr => $code:literal, $response_id:expr, $kind:literal, [$($array:literal => $needle:literal),*] $(, $field:literal => $expected:expr)?;)+) => {$({
+let payload = match $input { Input::Json(value) => value.to_string(), Input::Raw(text) => text.into() }; let actual = $server.raw(&payload).unwrap_or_else(|| panic!("{}: expected response", $id)); assert_error(&actual, &$response_id, $code).unwrap_or_else(|reason| panic!("{}: {}", $id, reason)); let data = &actual["error"]["data"]; assert_eq!(data["kind"], $kind, "{}: {}", $id, actual);
+$(assert_eq!(data[$field], $expected, "{}: {}", $id, actual);)? $(assert!(array_has(data, $array, $needle), "{}: missing {} in {}", $id, $array, actual);)* })+};
+}
+    const P2025: &str = "MCP-2025-06-18-";
+    const PDRAFT: &str = "MCP-DRAFT-";
+    fn request(id: &str, method: &str, params: Value) -> Value {
+        match params {
+            Value::Null => json!({"jsonrpc":"2.0","id":id,"method":method}),
+            params => json!({"jsonrpc":"2.0","id":id,"method":method,"params":params}),
         }
     }
-}
-
-#[test]
-fn jsonrpc_protocol_errors_include_structured_data() {
-    let dir = tempdir().unwrap();
-    let engine = TokenZeroEngine::new(EngineConfig::for_root(dir.path()));
-
-    let cases = [
+    fn invalid(
+        prefix: &str,
+        id: &str,
+        description: &'static str,
+        request_id: &str,
+        method: &str,
+        params: Value,
+        kind: &'static str,
+    ) -> InvalidCase {
         (
-            "parse error",
-            CaseInput::Raw("{bad"),
-            -32700,
-            Value::Null,
-            "parse_error",
-            None,
-        ),
-        (
-            "invalid non-object request",
-            CaseInput::Json(json!(1)),
-            -32600,
-            Value::Null,
-            "invalid_request",
-            None,
-        ),
-        (
-            "invalid params envelope",
-            CaseInput::Json(json!({
-                "jsonrpc":"2.0",
-                "id":"bad-params-envelope",
-                "method":"ping",
-                "params":true
-            })),
-            -32600,
-            json!("bad-params-envelope"),
-            "invalid_request",
-            None,
-        ),
-        (
-            "unknown method",
-            CaseInput::Json(json!({
-                "jsonrpc":"2.0",
-                "id":"unknown-method",
-                "method":"unknown/request"
-            })),
-            -32601,
-            json!("unknown-method"),
-            "unknown_method",
-            Some(("method", json!("unknown/request"))),
-        ),
-    ];
-
-    for (label, input, code, id, kind, field) in cases {
-        let payload = match input {
-            CaseInput::Json(value) => value.to_string(),
-            CaseInput::Raw(text) => text.to_string(),
+            format!("{prefix}{id}"),
+            description,
+            request(request_id, method, params),
+            kind,
+        )
+    }
+    #[test]
+    fn jsonrpc_and_mcp_conformance() {
+        let sections: &[ConformanceSection] = &[
+            ("JSON-RPC envelopes", run_jsonrpc),
+            ("protocol errors", run_protocol_errors),
+            ("initialize", run_initialize),
+            ("logging", run_logging),
+            ("server discovery", run_discover),
+            ("method params", run_invalid_method_params),
+            ("result shapes", run_result_shapes),
+            ("tool errors", run_tool_error),
+            ("recall", run_recall),
+            ("zero-hit search", run_zero_hit),
+            ("edit", run_edit),
+            ("tool filters", run_tool_filters),
+        ];
+        for (_, run) in sections {
+            run(&Server::new());
+        }
+    }
+    fn run_jsonrpc(server: &Server) {
+        use Input::{Json, Raw};
+        use Reply::{Batch, Error, None, Result};
+        let cases = rpc_cases! {
+        "JSONRPC-2.0-PARSE-001": Raw("{bad") => Error(Value::Null, -32700); "JSONRPC-2.0-REQ-001": Json(json!({"jsonrpc":"2.0","id":1,"method":"ping"})) => Result(json!(1)); "JSONRPC-2.0-REQ-002": Json(json!({"jsonrpc":"1.0","id":"bad-version","method":"ping"})) => Error(json!("bad-version"), -32600);
+        "JSONRPC-2.0-REQ-003": Json(json!({"id":"missing-version","method":"ping"})) => Error(json!("missing-version"), -32600); "JSONRPC-2.0-REQ-004": Json(json!(1)) => Error(Value::Null, -32600); "JSONRPC-2.0-REQ-005": Json(json!({"jsonrpc":"2.0","id":"bad-method","method":7})) => Error(json!("bad-method"), -32600);
+        "JSONRPC-2.0-REQ-006": Json(json!({"jsonrpc":"2.0","id":{"not":"valid"},"method":"ping"})) => Error(Value::Null, -32600); "JSONRPC-2.0-REQ-007": Json(json!({"jsonrpc":"2.0","id":"bad-params","method":"ping","params":true})) => Error(json!("bad-params"), -32600); "JSONRPC-2.0-NOTIF-001": Json(json!({"jsonrpc":"2.0","method":"ping"})) => None;
+        "JSONRPC-2.0-NOTIF-002": Json(json!({"jsonrpc":"2.0","method":"unknown/notification"})) => None; "MCP-2025-06-18-INITIALIZED-NOTIF-001": Json(json!({"jsonrpc":"2.0","method":"notifications/initialized"})) => None; "JSONRPC-2.0-METHOD-001": Json(json!({"jsonrpc":"2.0","id":"unknown","method":"unknown/request"})) => Error(json!("unknown"), -32601);
+        "JSONRPC-2.0-BATCH-001": Json(json!([{"jsonrpc":"2.0","id":"batch-ping","method":"ping"},{"jsonrpc":"2.0","method":"ping"}])) => Batch(vec![Result(json!("batch-ping"))]); "JSONRPC-2.0-BATCH-002": Json(json!([])) => Error(Value::Null, -32600); "JSONRPC-2.0-BATCH-003": Json(json!([{"jsonrpc":"2.0","method":"ping"},{"jsonrpc":"2.0","method":"unknown/notification"}])) => None;
+        "JSONRPC-2.0-BATCH-004": Json(json!([1,{"jsonrpc":"2.0","id":"batch-valid","method":"ping"}])) => Batch(vec![Error(Value::Null, -32600), Result(json!("batch-valid"))]);
         };
-        let response = handle_jsonrpc(&engine, &payload)
-            .unwrap_or_else(|| panic!("{label}: expected protocol error response"));
-        let actual: Value = serde_json::from_str(&response).unwrap();
-        let data = &actual["error"]["data"];
-
-        assert_eq!(actual["id"], id, "{label}: {actual}");
-        assert_eq!(actual["error"]["code"], code, "{label}: {actual}");
-        assert_eq!(data["kind"], kind, "{label}: {actual}");
-        assert_protocol_error_data(data).unwrap_or_else(|reason| panic!("{label}: {reason}"));
-
-        if let Some((field_name, expected_value)) = field {
-            assert_eq!(data[field_name], expected_value, "{label}: {actual}");
-        }
-        if kind == "unknown_method" {
-            assert!(
-                data["available_methods"]
-                    .as_array()
-                    .unwrap()
-                    .iter()
-                    .any(|method| method == "tools/list"),
-                "{label}: missing available method list in {actual}"
-            );
-            assert!(
-                data["available_methods"]
-                    .as_array()
-                    .unwrap()
-                    .iter()
-                    .any(|method| method == "notifications/initialized"),
-                "{label}: missing initialized notification compatibility method in {actual}"
-            );
+        for case in &cases {
+            run_rpc_case(server, case).unwrap_or_else(|reason| panic!("{}: {reason}", case.id));
         }
     }
-}
-
-/// Assert that an initialize result has the expected shape and capabilities.
-fn assert_init_result(result: &Value, protocol_version: &str) {
-    assert_eq!(result["protocolVersion"], protocol_version);
-    assert!(result["capabilities"]["logging"].is_object());
-    assert!(result["capabilities"]["tools"].is_object());
-    assert!(result["capabilities"]["resources"].is_object());
-    assert!(result["capabilities"]["prompts"].is_object());
-    assert_eq!(result["serverInfo"]["name"], "tokenzero");
-    assert!(
-        result["serverInfo"]["version"]
-            .as_str()
-            .is_some_and(|version| !version.is_empty()),
-        "{result}"
-    );
-}
-
-/// Assert protocol negotiation metadata.
-fn assert_init_negotiation(negotiation: &Value, requested: &str, negotiated: &str, fallback: bool) {
-    assert_eq!(negotiation["requestedProtocolVersion"], requested);
-    assert_eq!(negotiation["negotiatedProtocolVersion"], negotiated);
-    assert_eq!(negotiation["fallback"], fallback);
-}
-
-#[test]
-fn mcp_initialize_conformance_matrix() {
-    let dir = tempdir().unwrap();
-    let engine = TokenZeroEngine::new(EngineConfig::for_root(dir.path()));
-
-    let stable = response_json(
-        &engine,
-        json!({
-            "jsonrpc": "2.0",
-            "id": "init-stable",
-            "method": "initialize",
-            "params": initialize_params("2025-06-18")
-        }),
-    );
-    assert_init_result(&stable["result"], "2025-06-18");
-    assert_init_negotiation(
-        &stable["result"]["_meta"]["tokenzero/protocolNegotiation"],
-        "2025-06-18",
-        "2025-06-18",
-        false,
-    );
-
-    let initialized_with_id = response_json(
-        &engine,
-        json!({
-            "jsonrpc": "2.0",
-            "id": "initialized-legacy-request",
-            "method": "notifications/initialized",
-            "params": {}
-        }),
-    );
-    assert_eq!(initialized_with_id["result"], json!({}));
-
-    let unsupported = response_json(
-        &engine,
-        json!({
-            "jsonrpc": "2.0",
-            "id": "init-unsupported",
-            "method": "initialize",
-            "params": initialize_params("1900-01-01")
-        }),
-    );
-    assert_init_result(&unsupported["result"], "2025-06-18");
-    let unsupported_negotiation = &unsupported["result"]["_meta"]["tokenzero/protocolNegotiation"];
-    assert_init_negotiation(unsupported_negotiation, "1900-01-01", "2025-06-18", true);
-    assert!(
-        unsupported_negotiation["supportedProtocolVersions"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|version| version == "2025-06-18"),
-        "{unsupported}"
-    );
-
-    let invalid_cases = [
-        (
-            "MCP-2025-06-18-INIT-PARAMS-001",
-            "initialize params are required",
-            json!({"jsonrpc":"2.0","id":"init-no-params","method":"initialize"}),
-            "missing_param",
-        ),
-        (
-            "MCP-2025-06-18-INIT-PARAMS-002",
-            "initialize params must be object",
-            json!({"jsonrpc":"2.0","id":"init-array","method":"initialize","params":[]}),
-            "invalid_params",
-        ),
-        (
-            "MCP-2025-06-18-INIT-PROTOCOL-001",
-            "initialize protocolVersion is required",
-            json!({"jsonrpc":"2.0","id":"init-no-version","method":"initialize","params":{"capabilities":{},"clientInfo":{"name":"client","version":"1.0.0"}}}),
-            "missing_param",
-        ),
-        (
-            "MCP-2025-06-18-INIT-PROTOCOL-002",
-            "initialize protocolVersion must be string",
-            json!({"jsonrpc":"2.0","id":"init-number-version","method":"initialize","params":{"protocolVersion":1,"capabilities":{},"clientInfo":{"name":"client","version":"1.0.0"}}}),
-            "invalid_params",
-        ),
-        (
-            "MCP-2025-06-18-INIT-CAPS-001",
-            "initialize capabilities are required",
-            json!({"jsonrpc":"2.0","id":"init-no-caps","method":"initialize","params":{"protocolVersion":"2025-06-18","clientInfo":{"name":"client","version":"1.0.0"}}}),
-            "missing_param",
-        ),
-        (
-            "MCP-2025-06-18-INIT-CAPS-002",
-            "initialize capabilities must be object",
-            json!({"jsonrpc":"2.0","id":"init-array-caps","method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":[],"clientInfo":{"name":"client","version":"1.0.0"}}}),
-            "invalid_params",
-        ),
-        (
-            "MCP-2025-06-18-INIT-CLIENT-001",
-            "initialize clientInfo is required",
-            json!({"jsonrpc":"2.0","id":"init-no-client","method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{}}}),
-            "missing_param",
-        ),
-        (
-            "MCP-2025-06-18-INIT-CLIENT-002",
-            "initialize clientInfo must be object",
-            json!({"jsonrpc":"2.0","id":"init-array-client","method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":[]}}),
-            "invalid_params",
-        ),
-        (
-            "MCP-2025-06-18-INIT-CLIENT-003",
-            "initialize clientInfo.name is required",
-            json!({"jsonrpc":"2.0","id":"init-client-no-name","method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"version":"1.0.0"}}}),
-            "missing_param",
-        ),
-        (
-            "MCP-2025-06-18-INIT-CLIENT-004",
-            "initialize clientInfo.version is required",
-            json!({"jsonrpc":"2.0","id":"init-client-no-version","method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"client"}}}),
-            "missing_param",
-        ),
-        (
-            "MCP-2025-06-18-INIT-CLIENT-005",
-            "initialize clientInfo.title must be string when present",
-            json!({"jsonrpc":"2.0","id":"init-client-title-number","method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"client","version":"1.0.0","title":7}}}),
-            "invalid_params",
-        ),
-    ];
-
-    for (case_id, description, input, expected_kind) in invalid_cases {
-        let actual = response_json(&engine, input);
-        assert_invalid_params_kind(&actual, expected_kind, case_id, description);
-    }
-}
-
-#[test]
-fn mcp_logging_set_level_conformance_matrix() {
-    let dir = tempdir().unwrap();
-    let engine = TokenZeroEngine::new(EngineConfig::for_root(dir.path()));
-
-    for level in [
-        "debug",
-        "info",
-        "notice",
-        "warning",
-        "error",
-        "critical",
-        "alert",
-        "emergency",
-    ] {
-        let response = response_json(
-            &engine,
-            json!({"jsonrpc":"2.0","id":format!("log-{level}"),"method":"logging/setLevel","params":{"level":level}}),
+    fn run_protocol_errors(server: &Server) {
+        use Input::{Json, Raw};
+        error_cases!(server;
+        "PARAM-MISSING-TOOL": Json(json!({"jsonrpc":"2.0","id":"missing-tool","method":"tools/call","params":{}})) => -32602, json!("missing-tool"), "missing_param", [], "param" => json!("name");
+        "PARAM-UNKNOWN-TOOL": Json(json!({"jsonrpc":"2.0","id":"unknown-tool","method":"tools/call","params":{"name":"does_not_exist","arguments":{}}})) => -32602, json!("unknown-tool"), "unknown_tool", ["available_tools" => "tz_read"], "tool" => json!("does_not_exist");
+        "PARAM-UNKNOWN-RESOURCE": Json(json!({"jsonrpc":"2.0","id":"unknown-resource","method":"resources/read","params":{"uri":"resource://tokenzero/missing"}})) => -32602, json!("unknown-resource"), "unknown_resource", ["available_resources" => "resource://tokenzero/capabilities"], "uri" => json!("resource://tokenzero/missing");
+        "PROTOCOL-PARSE": Raw("{bad") => -32700, Value::Null, "parse_error", []; "PROTOCOL-NON-OBJECT": Json(json!(1)) => -32600, Value::Null, "invalid_request", []; "PROTOCOL-PARAMS-ENVELOPE": Json(json!({"jsonrpc":"2.0","id":"bad-params-envelope","method":"ping","params":true})) => -32600, json!("bad-params-envelope"), "invalid_request", [];
+        "PROTOCOL-UNKNOWN-METHOD": Json(json!({"jsonrpc":"2.0","id":"unknown-method","method":"unknown/request"})) => -32601, json!("unknown-method"), "unknown_method", ["available_methods" => "tools/list", "available_methods" => "notifications/initialized"], "method" => json!("unknown/request");
         );
-        assert!(response["result"].is_object(), "{level}: {response}");
-        assert!(response.get("error").is_none(), "{level}: {response}");
     }
-
-    let invalid_cases = [
-        (
-            "MCP-2025-06-18-LOGGING-LEVEL-001",
-            "logging/setLevel params are required",
-            json!({"jsonrpc":"2.0","id":"log-no-params","method":"logging/setLevel"}),
-            "missing_param",
-        ),
-        (
-            "MCP-2025-06-18-LOGGING-LEVEL-002",
-            "logging/setLevel params must be object",
-            json!({"jsonrpc":"2.0","id":"log-array-params","method":"logging/setLevel","params":[]}),
-            "invalid_params",
-        ),
-        (
-            "MCP-2025-06-18-LOGGING-LEVEL-003",
-            "logging/setLevel level is required",
-            json!({"jsonrpc":"2.0","id":"log-missing-level","method":"logging/setLevel","params":{}}),
-            "missing_param",
-        ),
-        (
-            "MCP-2025-06-18-LOGGING-LEVEL-004",
-            "logging/setLevel level must be string",
-            json!({"jsonrpc":"2.0","id":"log-number-level","method":"logging/setLevel","params":{"level":1}}),
-            "invalid_params",
-        ),
-        (
-            "MCP-2025-06-18-LOGGING-LEVEL-005",
-            "logging/setLevel level must be a valid syslog severity",
-            json!({"jsonrpc":"2.0","id":"log-trace-level","method":"logging/setLevel","params":{"level":"trace"}}),
-            "invalid_param_value",
-        ),
-    ];
-
-    for (case_id, description, input, expected_kind) in invalid_cases {
-        let actual = response_json(&engine, input);
-        assert_invalid_params_kind(&actual, expected_kind, case_id, description);
+    fn initialize_params(version: &str) -> Value {
+        json!({"protocolVersion":version,"capabilities":{},"clientInfo":{"name":"tokenzero-conformance-client","version":"1.0.0"}})
     }
-
-    let missing_level = response_json(
-        &engine,
-        json!({"jsonrpc":"2.0","id":"log-missing-level-options","method":"logging/setLevel","params":{}}),
-    );
-    assert!(
-        missing_level["error"]["data"]["available_options"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|level| level == "info"),
-        "{missing_level}"
-    );
-
-    let invalid_level = response_json(
-        &engine,
-        json!({"jsonrpc":"2.0","id":"log-invalid-level-options","method":"logging/setLevel","params":{"level":"trace"}}),
-    );
-    let data = &invalid_level["error"]["data"];
-    assert_eq!(data["parameter"], "level");
-    assert_eq!(data["provided"], "trace");
-    assert!(
-        data["available_levels"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|level| level == "warning"),
-        "{invalid_level}"
-    );
-    assert_eq!(
-        data["suggested_tool_calls"][0]["method"], "logging/setLevel",
-        "{invalid_level}"
-    );
-}
-
-#[test]
-fn mcp_server_discover_conformance_matrix() {
-    let dir = tempdir().unwrap();
-    let engine = TokenZeroEngine::new(EngineConfig::for_root(dir.path()));
-
-    let discovered = response_json(
-        &engine,
-        json!({
-            "jsonrpc": "2.0",
-            "id": "discover-draft",
-            "method": "server/discover",
-            "params": {
-                "_meta": {
-                    "io.modelcontextprotocol/protocolVersion": "2026-07-28",
-                    "io.modelcontextprotocol/clientInfo": {
-                        "name": "tokenzero-conformance-client",
-                        "version": "1.0.0"
-                    },
-                    "io.modelcontextprotocol/clientCapabilities": {}
-                }
-            }
-        }),
-    );
-    let result = &discovered["result"];
-    assert_eq!(result["resultType"], "complete", "{discovered}");
-    assert!(
-        result["supportedVersions"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|version| version == "2026-07-28"),
-        "{discovered}"
-    );
-    assert!(
-        result["capabilities"]["tools"].is_object(),
-        "server/discover must report tool capabilities: {discovered}"
-    );
-    assert!(
-        result["capabilities"]["resources"].is_object(),
-        "server/discover must report resource capabilities: {discovered}"
-    );
-    assert!(
-        result["serverInfo"]["name"]
-            .as_str()
-            .is_some_and(|name| !name.is_empty()),
-        "server/discover must report serverInfo.name: {discovered}"
-    );
-    assert!(
-        result["serverInfo"]["version"]
-            .as_str()
-            .is_some_and(|version| !version.is_empty()),
-        "server/discover must report serverInfo.version: {discovered}"
-    );
-    assert_non_empty_string(
-        &result["instructions"],
-        "server/discover optional instructions, when present",
-    );
-    assert_eq!(
-        result["_meta"]["clientMetaAccepted"], true,
-        "server/discover should preserve that standard _meta was accepted: {discovered}"
-    );
-    assert_eq!(
-        result["protocolVersions"], result["supportedVersions"],
-        "legacy protocolVersions alias must stay in lockstep with draft supportedVersions: {discovered}"
-    );
-
-    let no_params = response_json(
-        &engine,
-        json!({"jsonrpc":"2.0","id":"discover-no-params","method":"server/discover"}),
-    );
-    assert_eq!(no_params["result"]["resultType"], "complete", "{no_params}");
-    assert_eq!(
-        no_params["result"]["_meta"]["clientMetaAccepted"], false,
-        "{no_params}"
-    );
-
-    let invalid_cases = [
-        (
-            "MCP-DRAFT-DISCOVER-PARAMS-001",
-            "server/discover params must be object when present",
-            json!({"jsonrpc":"2.0","id":"discover-array","method":"server/discover","params":[]}),
-        ),
-        (
-            "MCP-DRAFT-DISCOVER-PARAMS-002",
-            "server/discover params._meta must be object when present",
-            json!({"jsonrpc":"2.0","id":"discover-bad-meta","method":"server/discover","params":{"_meta":[]}}),
-        ),
-        (
-            "MCP-DRAFT-DISCOVER-PARAMS-003",
-            "server/discover carries no body params beyond standard _meta",
-            json!({"jsonrpc":"2.0","id":"discover-extra","method":"server/discover","params":{"protocolVersion":"2026-07-28"}}),
-        ),
-    ];
-
-    for (case_id, description, input) in invalid_cases {
-        let actual = response_json(&engine, input);
-        assert_invalid_params_kind(&actual, "invalid_params", case_id, description);
-    }
-}
-
-#[test]
-fn mcp_method_params_conformance_matrix() {
-    let dir = tempdir().unwrap();
-    let engine = TokenZeroEngine::new(EngineConfig::for_root(dir.path()));
-
-    let cases = [
-        (
-            "MCP-2025-06-18-TOOLS-LIST-PARAMS-001",
-            "tools/list params must be an object when present",
-            json!({"jsonrpc":"2.0","id":"tools-list-array","method":"tools/list","params":[]}),
-            "invalid_params",
-        ),
-        (
-            "MCP-2025-06-18-RESOURCES-LIST-PARAMS-001",
-            "resources/list params must be an object when present",
-            json!({"jsonrpc":"2.0","id":"resources-list-array","method":"resources/list","params":[]}),
-            "invalid_params",
-        ),
-        (
-            "MCP-2025-06-18-RESOURCES-TEMPLATES-LIST-PARAMS-001",
-            "resources/templates/list params must be an object when present",
-            json!({"jsonrpc":"2.0","id":"resources-templates-list-array","method":"resources/templates/list","params":[]}),
-            "invalid_params",
-        ),
-        (
-            "MCP-2025-06-18-PROMPTS-LIST-PARAMS-001",
-            "prompts/list params must be an object when present",
-            json!({"jsonrpc":"2.0","id":"prompts-list-array","method":"prompts/list","params":[]}),
-            "invalid_params",
-        ),
-        (
-            "MCP-2025-06-18-RESOURCES-READ-PARAMS-001",
-            "resources/read params must be an object with uri",
-            json!({"jsonrpc":"2.0","id":"resources-read-array","method":"resources/read","params":[]}),
-            "invalid_params",
-        ),
-        (
-            "MCP-2025-06-18-RESOURCES-READ-PARAMS-002",
-            "resources/read params.uri must be a string",
-            json!({"jsonrpc":"2.0","id":"resources-read-uri-number","method":"resources/read","params":{"uri":7}}),
-            "invalid_params",
-        ),
-        (
-            "MCP-2025-06-18-TOOLS-CALL-PARAMS-001",
-            "tools/call params must be an object with name",
-            json!({"jsonrpc":"2.0","id":"tools-call-array","method":"tools/call","params":[]}),
-            "invalid_params",
-        ),
-        (
-            "MCP-2025-06-18-TOOLS-CALL-PARAMS-002",
-            "tools/call params.name must be a string",
-            json!({"jsonrpc":"2.0","id":"tools-call-name-number","method":"tools/call","params":{"name":7}}),
-            "invalid_params",
-        ),
-        (
-            "MCP-2025-06-18-TOOLS-CALL-ARGS-001",
-            "tools/call arguments must be an object when present",
-            json!({"jsonrpc":"2.0","id":"tools-call-args-array","method":"tools/call","params":{"name":"shell","arguments":["echo","should-not-run"]}}),
-            "invalid_params",
-        ),
-        (
-            "MCP-2025-06-18-TOOLS-LIST-CURSOR-001",
-            "tools/list params.cursor must be a string when present",
-            json!({"jsonrpc":"2.0","id":"tools-list-cursor-number","method":"tools/list","params":{"cursor":7}}),
-            "invalid_params",
-        ),
-        (
-            "MCP-2025-06-18-RESOURCES-LIST-CURSOR-001",
-            "resources/list params.cursor must be a string when present",
-            json!({"jsonrpc":"2.0","id":"resources-list-cursor-number","method":"resources/list","params":{"cursor":7}}),
-            "invalid_params",
-        ),
-        (
-            "MCP-2025-06-18-RESOURCES-TEMPLATES-LIST-CURSOR-001",
-            "resources/templates/list params.cursor must be a string when present",
-            json!({"jsonrpc":"2.0","id":"resources-templates-list-cursor-number","method":"resources/templates/list","params":{"cursor":7}}),
-            "invalid_params",
-        ),
-        (
-            "MCP-2025-06-18-PROMPTS-LIST-CURSOR-001",
-            "prompts/list params.cursor must be a string when present",
-            json!({"jsonrpc":"2.0","id":"prompts-list-cursor-number","method":"prompts/list","params":{"cursor":7}}),
-            "invalid_params",
-        ),
-    ];
-
-    for (case_id, description, input, expected_kind) in cases {
-        let actual = response_json(&engine, input);
-        assert_invalid_params_kind(&actual, expected_kind, case_id, description);
-    }
-}
-
-/// Assert every item in a resources/list response has the required fields.
-fn assert_resource_entries(resources: &[Value], label: &str) {
-    for resource in resources {
-        assert_non_empty_string(&resource["uri"], &format!("{label} resource.uri"));
-        assert_non_empty_string(&resource["name"], &format!("{label} resource.name"));
-        assert_non_empty_string(&resource["mimeType"], &format!("{label} resource.mimeType"));
-        if let Some(description) = resource.get("description") {
-            assert_non_empty_string(description, &format!("{label} resource.description"));
-        }
-    }
-}
-
-/// Assert every item in a tools/list response has the required fields.
-fn assert_tool_entries(tools: &[Value], label: &str) {
-    for tool in tools {
-        assert_non_empty_string(&tool["name"], "{label} tool.name");
-        assert_non_empty_string(&tool["description"], "{label} tool.description");
+    fn run_initialize(server: &Server) {
+        let stable = server.response(request(
+            "init-stable",
+            "initialize",
+            initialize_params("2025-06-18"),
+        ));
+        assert_init(&stable["result"], "2025-06-18");
+        assert_negotiation(
+            &stable["result"]["_meta"]["tokenzero/protocolNegotiation"],
+            "2025-06-18",
+            "2025-06-18",
+            false,
+        );
+        let initialized = server.response(request(
+            "initialized-legacy-request",
+            "notifications/initialized",
+            json!({}),
+        ));
         assert_eq!(
-            tool["inputSchema"]["type"], "object",
-            "{label} tool.inputSchema must be an object schema: {tool}"
+            initialized["result"],
+            json!({}),
+            "INITIALIZED-LEGACY: {initialized}"
+        );
+        let unsupported = server.response(request(
+            "init-unsupported",
+            "initialize",
+            initialize_params("1900-01-01"),
+        ));
+        assert_init(&unsupported["result"], "2025-06-18");
+        let negotiation = &unsupported["result"]["_meta"]["tokenzero/protocolNegotiation"];
+        assert_negotiation(negotiation, "1900-01-01", "2025-06-18", true);
+        assert!(
+            array_has(negotiation, "supportedProtocolVersions", "2025-06-18"),
+            "INIT-UNSUPPORTED: {unsupported}"
+        );
+        invalid_cases!(server;
+        P2025, "INIT-PARAMS-001", "initialize params are required", "init-no-params", "initialize", Value::Null, "missing_param"; P2025, "INIT-PARAMS-002", "initialize params must be object", "init-array", "initialize", json!([]), "invalid_params";
+        P2025, "INIT-PROTOCOL-001", "initialize protocolVersion is required", "init-no-version", "initialize", json!({"capabilities":{},"clientInfo":{"name":"client","version":"1.0.0"}}), "missing_param";
+        P2025, "INIT-PROTOCOL-002", "initialize protocolVersion must be string", "init-number-version", "initialize", json!({"protocolVersion":1,"capabilities":{},"clientInfo":{"name":"client","version":"1.0.0"}}), "invalid_params";
+        P2025, "INIT-CAPS-001", "initialize capabilities are required", "init-no-caps", "initialize", json!({"protocolVersion":"2025-06-18","clientInfo":{"name":"client","version":"1.0.0"}}), "missing_param";
+        P2025, "INIT-CAPS-002", "initialize capabilities must be object", "init-array-caps", "initialize", json!({"protocolVersion":"2025-06-18","capabilities":[],"clientInfo":{"name":"client","version":"1.0.0"}}), "invalid_params";
+        P2025, "INIT-CLIENT-001", "initialize clientInfo is required", "init-no-client", "initialize", json!({"protocolVersion":"2025-06-18","capabilities":{}}), "missing_param"; P2025, "INIT-CLIENT-002", "initialize clientInfo must be object", "init-array-client", "initialize", json!({"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":[]}), "invalid_params";
+        P2025, "INIT-CLIENT-003", "initialize clientInfo.name is required", "init-client-no-name", "initialize", json!({"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"version":"1.0.0"}}), "missing_param";
+        P2025, "INIT-CLIENT-004", "initialize clientInfo.version is required", "init-client-no-version", "initialize", json!({"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"client"}}), "missing_param";
+        P2025, "INIT-CLIENT-005", "initialize clientInfo.title must be string when present", "init-client-title-number", "initialize", json!({"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"client","version":"1.0.0","title":7}}), "invalid_params";
         );
     }
-}
-
-#[test]
-fn mcp_result_shape_conformance_matrix() {
-    let dir = tempdir().unwrap();
-    let fixture_path = dir.path().join("fixture.txt");
-    fs::write(&fixture_path, "tokenzero conformance fixture\n").unwrap();
-    let engine = TokenZeroEngine::new(EngineConfig::for_root(dir.path()));
-
-    let resources = response_json(
-        &engine,
-        mcp_req("resources-shape", "resources/list", json!({})),
-    );
-    assert_list_result_shape(&resources, "resources", "resources/list");
-    let resources_array = resources["result"]["resources"].as_array().unwrap();
-    assert!(!resources_array.is_empty(), "{resources}");
-    assert_resource_entries(resources_array, "resources/list");
-
-    let resource_templates = response_json(
-        &engine,
-        mcp_req(
+    fn run_logging(server: &Server) {
+        for level in [
+            "debug",
+            "info",
+            "notice",
+            "warning",
+            "error",
+            "critical",
+            "alert",
+            "emergency",
+        ] {
+            let actual = server.response(request(
+                &format!("log-{level}"),
+                "logging/setLevel",
+                json!({"level":level}),
+            ));
+            assert!(
+                actual["result"].is_object() && actual.get("error").is_none(),
+                "LOGGING-{level}: {actual}"
+            );
+        }
+        invalid_cases!(server;
+        P2025, "LOGGING-LEVEL-001", "logging/setLevel params are required", "log-no-params", "logging/setLevel", Value::Null, "missing_param"; P2025, "LOGGING-LEVEL-002", "logging/setLevel params must be object", "log-array-params", "logging/setLevel", json!([]), "invalid_params";
+        P2025, "LOGGING-LEVEL-003", "logging/setLevel level is required", "log-missing-level", "logging/setLevel", json!({}), "missing_param"; P2025, "LOGGING-LEVEL-004", "logging/setLevel level must be string", "log-number-level", "logging/setLevel", json!({"level":1}), "invalid_params";
+        P2025, "LOGGING-LEVEL-005", "logging/setLevel level must be a valid syslog severity", "log-trace-level", "logging/setLevel", json!({"level":"trace"}), "invalid_param_value";
+        );
+        let missing = server.response(request(
+            "log-missing-level-options",
+            "logging/setLevel",
+            json!({}),
+        ));
+        assert!(
+            array_has(&missing["error"]["data"], "available_options", "info"),
+            "LOGGING-MISSING-OPTIONS: {missing}"
+        );
+        let invalid = server.response(request(
+            "log-invalid-level-options",
+            "logging/setLevel",
+            json!({"level":"trace"}),
+        ));
+        let data = &invalid["error"]["data"];
+        assert_eq!(
+            data["parameter"], "level",
+            "LOGGING-INVALID-OPTIONS: {invalid}"
+        );
+        assert_eq!(
+            data["provided"], "trace",
+            "LOGGING-INVALID-OPTIONS: {invalid}"
+        );
+        assert!(
+            array_has(data, "available_levels", "warning"),
+            "LOGGING-INVALID-OPTIONS: {invalid}"
+        );
+        assert_eq!(
+            data["suggested_tool_calls"][0]["method"], "logging/setLevel",
+            "LOGGING-INVALID-OPTIONS: {invalid}"
+        );
+    }
+    fn run_discover(server: &Server) {
+        let discovered = server.response(request( "discover-draft", "server/discover", json!({"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientInfo":{"name":"tokenzero-conformance-client","version":"1.0.0"},"io.modelcontextprotocol/clientCapabilities":{}}}), ));
+        let result = &discovered["result"];
+        assert_eq!(
+            result["resultType"], "complete",
+            "DISCOVER-DRAFT: {discovered}"
+        );
+        assert!(
+            array_has(result, "supportedVersions", "2026-07-28"),
+            "DISCOVER-DRAFT: {discovered}"
+        );
+        for capability in ["tools", "resources"] {
+            assert!(
+                result["capabilities"][capability].is_object(),
+                "DISCOVER-DRAFT {capability}: {discovered}"
+            );
+        }
+        for field in ["name", "version"] {
+            assert_non_empty(
+                &result["serverInfo"][field],
+                &format!("DISCOVER-DRAFT serverInfo.{field}"),
+            );
+        }
+        assert_non_empty(&result["instructions"], "DISCOVER-DRAFT instructions");
+        assert_eq!(
+            result["_meta"]["clientMetaAccepted"], true,
+            "DISCOVER-DRAFT: {discovered}"
+        );
+        assert_eq!(
+            result["protocolVersions"], result["supportedVersions"],
+            "DISCOVER-DRAFT: {discovered}"
+        );
+        let no_params = server.response(
+            json!({"jsonrpc":"2.0","id":"discover-no-params","method":"server/discover"}),
+        );
+        assert_eq!(
+            no_params["result"]["resultType"], "complete",
+            "DISCOVER-NO-PARAMS: {no_params}"
+        );
+        assert_eq!(
+            no_params["result"]["_meta"]["clientMetaAccepted"], false,
+            "DISCOVER-NO-PARAMS: {no_params}"
+        );
+        invalid_cases!(server;
+        PDRAFT, "DISCOVER-PARAMS-001", "server/discover params must be object when present", "discover-array", "server/discover", json!([]), "invalid_params"; PDRAFT, "DISCOVER-PARAMS-002", "server/discover params._meta must be object when present", "discover-bad-meta", "server/discover", json!({"_meta":[]}), "invalid_params";
+        PDRAFT, "DISCOVER-PARAMS-003", "server/discover carries no body params beyond standard _meta", "discover-extra", "server/discover", json!({"protocolVersion":"2026-07-28"}), "invalid_params";
+        );
+    }
+    fn run_invalid_method_params(server: &Server) {
+        invalid_cases!(server;
+        P2025, "TOOLS-LIST-PARAMS-001", "tools/list params must be an object when present", "tools-list-array", "tools/list", json!([]), "invalid_params"; P2025, "RESOURCES-LIST-PARAMS-001", "resources/list params must be an object when present", "resources-list-array", "resources/list", json!([]), "invalid_params";
+        P2025, "RESOURCES-TEMPLATES-LIST-PARAMS-001", "resources/templates/list params must be an object when present", "resources-templates-list-array", "resources/templates/list", json!([]), "invalid_params"; P2025, "PROMPTS-LIST-PARAMS-001", "prompts/list params must be an object when present", "prompts-list-array", "prompts/list", json!([]), "invalid_params";
+        P2025, "RESOURCES-READ-PARAMS-001", "resources/read params must be an object with uri", "resources-read-array", "resources/read", json!([]), "invalid_params"; P2025, "RESOURCES-READ-PARAMS-002", "resources/read params.uri must be a string", "resources-read-uri-number", "resources/read", json!({"uri":7}), "invalid_params";
+        P2025, "TOOLS-CALL-PARAMS-001", "tools/call params must be an object with name", "tools-call-array", "tools/call", json!([]), "invalid_params"; P2025, "TOOLS-CALL-PARAMS-002", "tools/call params.name must be a string", "tools-call-name-number", "tools/call", json!({"name":7}), "invalid_params";
+        P2025, "TOOLS-CALL-ARGS-001", "tools/call arguments must be an object when present", "tools-call-args-array", "tools/call", json!({"name":"shell","arguments":["echo","should-not-run"]}), "invalid_params"; P2025, "TOOLS-LIST-CURSOR-001", "tools/list params.cursor must be a string when present", "tools-list-cursor-number", "tools/list", json!({"cursor":7}), "invalid_params";
+        P2025, "RESOURCES-LIST-CURSOR-001", "resources/list params.cursor must be a string when present", "resources-list-cursor-number", "resources/list", json!({"cursor":7}), "invalid_params";
+        P2025, "RESOURCES-TEMPLATES-LIST-CURSOR-001", "resources/templates/list params.cursor must be a string when present", "resources-templates-list-cursor-number", "resources/templates/list", json!({"cursor":7}), "invalid_params";
+        P2025, "PROMPTS-LIST-CURSOR-001", "prompts/list params.cursor must be a string when present", "prompts-list-cursor-number", "prompts/list", json!({"cursor":7}), "invalid_params";
+        );
+    }
+    fn run_result_shapes(server: &Server) {
+        let fixture = server.path("fixture.txt");
+        fs::write(
+            &fixture,
+            "tokenzero conformance fixture
+",
+        )
+        .unwrap();
+        let resources = server.call("resources-shape", "resources/list", json!({}));
+        assert_list(&resources, "resources", "RESULT-RESOURCES");
+        let items = resources["result"]["resources"].as_array().unwrap();
+        assert!(!items.is_empty(), "RESULT-RESOURCES: {resources}");
+        for item in items {
+            assert_fields(item, "RESULT-RESOURCES", &["uri", "name", "mimeType"]);
+            if let Some(description) = item.get("description") {
+                assert_non_empty(description, "RESULT-RESOURCES description");
+            }
+        }
+        let templates = server.call(
             "resource-templates-shape",
             "resources/templates/list",
             json!({}),
-        ),
-    );
-    assert_list_result_shape(
-        &resource_templates,
-        "resourceTemplates",
-        "resources/templates/list",
-    );
-    assert!(
-        resource_templates["result"]["resourceTemplates"]
-            .as_array()
-            .unwrap()
-            .is_empty(),
-        "TokenZero exposes concrete resources, not URI templates: {resource_templates}"
-    );
-
-    let prompts = response_json(&engine, mcp_req("prompts-shape", "prompts/list", json!({})));
-    assert_list_result_shape(&prompts, "prompts", "prompts/list");
-
-    let tools = response_json(&engine, mcp_req("tools-shape", "tools/list", json!({})));
-    assert_list_result_shape(&tools, "tools", "tools/list");
-    let tools_array = tools["result"]["tools"].as_array().unwrap();
-    assert!(!tools_array.is_empty(), "{tools}");
-    assert_tool_entries(tools_array, "tools/list");
-
-    let resource_read = response_json(
-        &engine,
-        mcp_req(
+        );
+        assert_list(&templates, "resourceTemplates", "RESULT-TEMPLATES");
+        assert!(
+            templates["result"]["resourceTemplates"]
+                .as_array()
+                .unwrap()
+                .is_empty(),
+            "RESULT-TEMPLATES: {templates}"
+        );
+        let prompts = server.call("prompts-shape", "prompts/list", json!({}));
+        assert_list(&prompts, "prompts", "RESULT-PROMPTS");
+        let tools = server.call("tools-shape", "tools/list", json!({}));
+        assert_list(&tools, "tools", "RESULT-TOOLS");
+        let tools_array = tools["result"]["tools"].as_array().unwrap();
+        assert!(!tools_array.is_empty(), "RESULT-TOOLS: {tools}");
+        for tool in tools_array {
+            assert_fields(tool, "RESULT-TOOLS", &["name", "description"]);
+            assert_eq!(
+                tool["inputSchema"]["type"], "object",
+                "RESULT-TOOLS: {tool}"
+            );
+        }
+        let read = server.call(
             "read-resource-shape",
             "resources/read",
             json!({"uri":"resource://tokenzero/capabilities"}),
-        ),
-    );
-    assert!(
-        resource_read["result"].get("contents").is_some(),
-        "{resource_read}"
-    );
-    let contents = resource_read["result"]["contents"].as_array().unwrap();
-    assert!(!contents.is_empty(), "{resource_read}");
-    for content in contents {
-        assert_non_empty_string(&content["uri"], "resources/read contents[].uri");
-        assert_non_empty_string(&content["mimeType"], "resources/read contents[].mimeType");
-        assert_non_empty_string(&content["text"], "resources/read contents[].text");
-    }
-
-    let tool_call = response_json(
-        &engine,
-        mcp_req(
+        );
+        let contents = read["result"]["contents"].as_array().unwrap();
+        assert!(!contents.is_empty(), "RESULT-READ: {read}");
+        for content in contents {
+            assert_fields(content, "RESULT-READ", &["uri", "mimeType", "text"]);
+        }
+        let call = server.call(
             "tool-call-shape",
             "tools/call",
-            json!({"name":"read","arguments":{"path":fixture_path.display().to_string(),"raw":true}}),
-        ),
-    );
-    assert!(tool_call.get("error").is_none(), "{tool_call}");
-    let result = &tool_call["result"];
-    let content = result["content"].as_array().unwrap();
-    assert!(!content.is_empty(), "{tool_call}");
-    assert_eq!(content[0]["type"], "text", "{tool_call}");
-    assert_non_empty_string(&content[0]["text"], "tools/call content[].text");
-    assert!(
-        result.get("structuredContent").is_none(),
-        "tools/call results are text-only unless TOKENZERO_MCP_ENVELOPE is set: {tool_call}"
-    );
-    assert!(
-        result.get("isError").is_none() || result["isError"] == false,
-        "successful tools/call must not report isError true: {tool_call}"
-    );
-}
-
-#[test]
-fn mcp_tool_result_conformance_marks_tool_originated_errors() {
-    let dir = tempdir().unwrap();
-    let engine = TokenZeroEngine::new(EngineConfig::for_root(dir.path()));
-    let input = json!({
-        "jsonrpc": "2.0",
-        "id": "tool-origin-error",
-        "method": "tools/call",
-        "params": {
-            "name": "read",
-            "arguments": {"path": "/__tokenzero_conformance_outside_root__"}
-        }
-    });
-
-    let response = handle_jsonrpc(&engine, &input.to_string())
-        .unwrap_or_else(|| panic!("expected tool result response"));
-    let actual: Value = serde_json::from_str(&response).unwrap();
-
-    assert!(
-        actual.get("error").is_none(),
-        "tool-originated errors must not be protocol errors: {actual}"
-    );
-    assert_eq!(actual["result"]["isError"], true, "{actual}");
-    assert!(
-        actual["result"]["content"][0]["text"]
-            .as_str()
-            .is_some_and(|text| text.contains("outside allowed roots")),
-        "{actual}"
-    );
-}
-
-#[test]
-fn recall_tool_searches_stored_payloads_end_to_end() {
-    let dir = tempdir().unwrap();
-    let file = dir.path().join("data.txt");
-    fs::write(&file, "unique_recall_marker line\n").unwrap();
-    let engine = TokenZeroEngine::new(EngineConfig::for_root(dir.path()));
-
-    response_json(
-        &engine,
-        json!({
-            "jsonrpc": "2.0",
-            "id": "recall-seed",
-            "method": "tools/call",
-            "params": {"name": "read", "arguments": {"path": file.display().to_string()}}
-        }),
-    );
-    // Alias name + stringly max_hits exercises stub-client coercion.
-    let recalled = response_json(
-        &engine,
-        json!({
-            "jsonrpc": "2.0",
-            "id": "recall-query",
-            "method": "tools/call",
-            "params": {"name": "recall", "arguments": {"query": "UNIQUE_RECALL_MARKER", "max_hits": "5"}}
-        }),
-    );
-    let text = recalled["result"]["content"][0]["text"].as_str().unwrap();
-    assert!(text.contains("unique_recall_marker"), "{text}");
-    assert!(text.contains("tz://"), "{text}");
-}
-
-#[test]
-fn zero_hit_search_renders_note_above_refs_footer() {
-    let dir = tempdir().unwrap();
-    fs::write(dir.path().join("lib.rs"), "fn alpha() {}\n").unwrap();
-    let engine = TokenZeroEngine::new(EngineConfig::for_root(dir.path()));
-
-    let response = response_json(
-        &engine,
-        json!({
-            "jsonrpc": "2.0",
-            "id": "zero-hit-grep",
-            "method": "tools/call",
-            "params": {
-                "name": "grep",
-                "arguments": {
-                    "query": "no_such_token",
-                    "path": dir.path().display().to_string()
-                }
-            }
-        }),
-    );
-
-    let text = response["result"]["content"][0]["text"].as_str().unwrap();
-    let mut lines = text.lines();
-    assert_eq!(
-        lines.next(),
-        Some("# grep no_such_token — 0 matches"),
-        "{text}"
-    );
-    assert!(
-        lines
-            .next()
-            .is_some_and(|line| line.starts_with("refs: tz://blob/")),
-        "refs must stay recoverable from the text content: {text}"
-    );
-}
-
-#[test]
-fn tools_call_edit_applies_stub_string_edits_end_to_end() {
-    let dir = tempdir().unwrap();
-    let file = dir.path().join("lib.rs");
-    fs::write(&file, "fn alpha() {}\nfn beta() {}\n").unwrap();
-    let engine = TokenZeroEngine::new(EngineConfig::for_root(dir.path()));
-
-    let listed = response_json(
-        &engine,
-        json!({"jsonrpc":"2.0","id":"edit-list","method":"tools/list","params":{}}),
-    );
-    let names = tool_names(&listed);
-    assert!(names.iter().any(|name| name == "tz_edit"), "{names:?}");
-    assert!(names.iter().any(|name| name == "edit"), "{names:?}");
-
-    let docs = response_json(
-        &engine,
-        json!({"jsonrpc":"2.0","id":"edit-docs","method":"resources/read","params":{"uri":"resource://tokenzero/tools"}}),
-    );
-    let docs_payload: Value =
-        serde_json::from_str(docs["result"]["contents"][0]["text"].as_str().unwrap()).unwrap();
-    assert!(
-        docs_payload["tools"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|tool| tool["name"] == "tz_edit"),
-        "tz_edit must appear in the resource catalog"
-    );
-
-    // Stub-schema clients send the edits array as a JSON-encoded string and
-    // booleans as strings; the server coerces both.
-    let edits = serde_json::to_string(&json!([
-        {"find": "fn alpha() {}", "replace": "fn alpha() -> u8 { 1 }", "replace_all": "false"}
-    ]))
-    .unwrap();
-    let response = response_json(
-        &engine,
-        json!({
-            "jsonrpc": "2.0",
-            "id": "edit-call",
-            "method": "tools/call",
-            "params": {
-                "name": "edit",
-                "arguments": {
-                    "path": file.display().to_string(),
-                    "edits": edits,
-                    "dry_run": "false"
-                }
-            }
-        }),
-    );
-    assert!(response.get("error").is_none(), "{response}");
-    let result = &response["result"];
-    assert!(
-        result.get("isError").is_none() || result["isError"] == false,
-        "{response}"
-    );
-    let text = result["content"][0]["text"].as_str().unwrap();
-    assert!(
-        text.lines().next().is_some_and(
-            |line| line.starts_with(&format!("# edit {} — 1 hunks applied", file.display()))
-        ),
-        "{text}"
-    );
-    // Post-image blob/file refs are listed verbatim; the undo ref must also
-    // be on the wire verbatim (labeled) — the default envelope is text-only,
-    // so the footer is the ONLY way a client can learn the undo ref id.
-    let footer = text
-        .lines()
-        .find(|line| line.starts_with("refs: "))
-        .unwrap_or_else(|| panic!("missing refs footer: {text}"));
-    assert!(footer.contains("tz://blob/"), "{footer}");
-    let undo_ref = footer
-        .split_whitespace()
-        .find_map(|part| part.strip_prefix("undo:"))
-        .unwrap_or_else(|| panic!("missing labeled undo ref: {footer}"));
-    assert!(undo_ref.starts_with("tz://blob/"), "{footer}");
-    assert_eq!(
-        fs::read_to_string(&file).unwrap(),
-        "fn alpha() -> u8 { 1 }\nfn beta() {}\n"
-    );
-    // The labeled undo ref recovers the exact pre-image through the wire.
-    let expanded = response_json(
-        &engine,
-        json!({
-            "jsonrpc": "2.0",
-            "id": "edit-undo-expand",
-            "method": "tools/call",
-            "params": {"name": "expand", "arguments": {"ref": undo_ref}}
-        }),
-    );
-    let expanded_text = expanded["result"]["content"][0]["text"].as_str().unwrap();
-    assert!(expanded_text.contains("fn alpha() {}"), "{expanded_text}");
-}
-
-#[test]
-fn tools_list_supports_agent_friendly_cluster_filtering() {
-    let dir = tempdir().unwrap();
-    let engine = TokenZeroEngine::new(EngineConfig::for_root(dir.path()));
-
-    let default = response_json(
-        &engine,
-        json!({"jsonrpc":"2.0","id":"tools-default","method":"tools/list","params":{}}),
-    );
-    let default_names = tool_names(&default);
-    assert!(
-        default_names.len() > 7,
-        "default remains full compatibility catalog: {default}"
-    );
-    assert!(default_names.iter().any(|name| name == "tz_read"));
-    assert!(default_names.iter().any(|name| name == "read"));
-
-    let material = response_json(
-        &engine,
-        json!({
-            "jsonrpc": "2.0",
-            "id": "tools-material",
-            "method": "tools/list",
-            "params": {"_meta": {"tokenzero/toolCluster": "material"}}
-        }),
-    );
-    let material_names = tool_names(&material);
-    assert!(
-        material_names.len() <= 7,
-        "material cluster must stay small enough for agent menus: {material}"
-    );
-    assert!(material_names.iter().any(|name| name == "tz_read"));
-    assert!(material_names.iter().any(|name| name == "tz_expand"));
-    assert!(!material_names.iter().any(|name| name == "tz_shell"));
-    assert!(!material_names.iter().any(|name| name == "read"));
-    assert_eq!(
-        material["result"]["_meta"]["tokenzero/toolFilter"]["cluster"],
-        "material"
-    );
-    assert_eq!(
-        material["result"]["_meta"]["tokenzero/toolFilter"]["includeAliases"],
-        false
-    );
-
-    let execution = response_json(
-        &engine,
-        json!({
-            "jsonrpc": "2.0",
-            "id": "tools-execution",
-            "method": "tools/list",
-            "params": {"profile": "execution"}
-        }),
-    );
-    let execution_names = tool_names(&execution);
-    assert!(
-        execution_names.len() <= 7,
-        "execution cluster must stay small enough for agent menus: {execution}"
-    );
-    assert!(execution_names.iter().any(|name| name == "tz_shell"));
-    assert!(!execution_names.iter().any(|name| name == "tz_read"));
-
-    let aliased = response_json(
-        &engine,
-        json!({
-            "jsonrpc": "2.0",
-            "id": "tools-material-aliases",
-            "method": "tools/list",
-            "params": {
-                "_meta": {
-                    "tokenzero/toolCluster": "material",
-                    "tokenzero/includeAliases": true
-                }
-            }
-        }),
-    );
-    let aliased_names = tool_names(&aliased);
-    assert!(aliased_names.iter().any(|name| name == "tz_read"));
-    assert!(aliased_names.iter().any(|name| name == "read"));
-    assert_eq!(
-        aliased["result"]["_meta"]["tokenzero/toolFilter"]["includeAliases"],
-        true
-    );
-
-    let invalid = response_json(
-        &engine,
-        json!({
-            "jsonrpc": "2.0",
-            "id": "tools-bad-cluster",
-            "method": "tools/list",
-            "params": {"_meta": {"tokenzero/toolCluster": "matrial"}}
-        }),
-    );
-    assert_eq!(invalid["error"]["code"], -32602, "{invalid}");
-    assert_eq!(
-        invalid["error"]["data"]["kind"], "unknown_tool_cluster",
-        "{invalid}"
-    );
-    assert_eq!(
-        invalid["error"]["data"]["error_type"], "INVALID_ARGUMENT",
-        "{invalid}"
-    );
-    assert!(
-        invalid["error"]["data"]["available_options"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|value| value == "material"),
-        "{invalid}"
-    );
-    assert_eq!(
-        invalid["error"]["data"]["suggestions"][0]["value"], "material",
-        "{invalid}"
-    );
-}
-
-fn initialize_params(protocol_version: &str) -> Value {
-    json!({
-        "protocolVersion": protocol_version,
-        "capabilities": {},
-        "clientInfo": {
-            "name": "tokenzero-conformance-client",
-            "version": "1.0.0"
-        }
-    })
-}
-
-fn response_json(engine: &TokenZeroEngine, input: Value) -> Value {
-    let response =
-        handle_jsonrpc(engine, &input.to_string()).unwrap_or_else(|| panic!("expected response"));
-    serde_json::from_str(&response).unwrap()
-}
-
-fn tool_names(response: &Value) -> Vec<String> {
-    response["result"]["tools"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .filter_map(|tool| tool["name"].as_str().map(str::to_string))
-        .collect()
-}
-
-fn assert_list_result_shape(response: &Value, key: &str, label: &str) {
-    assert!(response.get("error").is_none(), "{label}: {response}");
-    assert!(
-        response["result"][key].is_array(),
-        "{label}: result.{key} must be array: {response}"
-    );
-    if let Some(cursor) = response["result"].get("nextCursor") {
+            json!({"name":"read","arguments":{"path":fixture.display().to_string(),"raw":true}}),
+        );
+        let result = &call["result"];
+        let content = result["content"].as_array().unwrap();
         assert!(
-            cursor.is_string(),
-            "{label}: result.nextCursor must be string when present: {response}"
+            call.get("error").is_none() && !content.is_empty(),
+            "RESULT-CALL: {call}"
+        );
+        assert_eq!(content[0]["type"], "text", "RESULT-CALL: {call}");
+        assert_non_empty(&content[0]["text"], "RESULT-CALL content text");
+        assert!(
+            result.get("structuredContent").is_none(),
+            "RESULT-CALL: {call}"
+        );
+        assert!(
+            result.get("isError").is_none() || result["isError"] == false,
+            "RESULT-CALL: {call}"
         );
     }
-}
-
-fn assert_non_empty_string(value: &Value, label: &str) {
-    assert!(
-        value.as_str().is_some_and(|text| !text.is_empty()),
-        "{label} must be a non-empty string, got {value}"
-    );
-}
-
-fn assert_invalid_params_kind(
-    actual: &Value,
-    expected_kind: &str,
-    case_id: &str,
-    description: &str,
-) {
-    assert_eq!(
-        actual["error"]["code"], -32602,
-        "{case_id}: {description}: {actual}"
-    );
-    assert_eq!(
-        actual["error"]["data"]["kind"], expected_kind,
-        "{case_id}: {description}: {actual}"
-    );
-    assert_protocol_error_data(&actual["error"]["data"])
-        .unwrap_or_else(|reason| panic!("{case_id}: {description}: {reason}"));
-}
-
-fn assert_batch_responses(expected: &[BatchExpected], actual: &[Value]) -> Result<(), String> {
-    if actual.len() != expected.len() {
-        return Err(format!(
-            "expected {} batch responses, got {}: {actual:?}",
-            expected.len(),
-            actual.len()
+    fn run_tool_error(server: &Server) {
+        let actual = server.call(
+            "tool-origin-error",
+            "tools/call",
+            json!({"name":"read","arguments":{"path":"/__tokenzero_conformance_outside_root__"}}),
+        );
+        assert!(actual.get("error").is_none(), "TOOL-ORIGIN-ERROR: {actual}");
+        assert_eq!(
+            actual["result"]["isError"], true,
+            "TOOL-ORIGIN-ERROR: {actual}"
+        );
+        assert!(
+            actual["result"]["content"][0]["text"]
+                .as_str()
+                .is_some_and(|text| text.contains("outside allowed roots")),
+            "TOOL-ORIGIN-ERROR: {actual}"
+        );
+    }
+    fn run_recall(server: &Server) {
+        let file = server.path("data.txt");
+        fs::write(
+            &file,
+            "unique_recall_marker line
+",
+        )
+        .unwrap();
+        server.call(
+            "recall-seed",
+            "tools/call",
+            json!({"name":"read","arguments":{"path":file.display().to_string()}}),
+        );
+        let recalled = server.call(
+            "recall-query",
+            "tools/call",
+            json!({"name":"recall","arguments":{"query":"UNIQUE_RECALL_MARKER","max_hits":"5"}}),
+        );
+        let text = recalled["result"]["content"][0]["text"].as_str().unwrap();
+        for needle in ["unique_recall_marker", "tz://"] {
+            assert!(
+                text.contains(needle),
+                "RECALL-QUERY missing {needle}: {text}"
+            );
+        }
+    }
+    fn run_zero_hit(server: &Server) {
+        fs::write(
+            server.path("lib.rs"),
+            "fn alpha() {}
+",
+        )
+        .unwrap();
+        let response = server.call("zero-hit-grep", "tools/call", json!({"name":"grep","arguments":{"query":"no_such_token","path":server.dir.path().display().to_string()}}));
+        let text = response["result"]["content"][0]["text"].as_str().unwrap();
+        let lines: Vec<_> = text.lines().collect();
+        assert_eq!(
+            lines.first().copied(),
+            Some("# grep no_such_token — 0 matches"),
+            "ZERO-HIT: {text}"
+        );
+        assert!(
+            lines
+                .get(1)
+                .is_some_and(|line| line.starts_with("refs: tz://blob/")),
+            "ZERO-HIT: {text}"
+        );
+    }
+    fn run_edit(server: &Server) {
+        let file = server.path("lib.rs");
+        fs::write(
+            &file,
+            "fn alpha() {}
+fn beta() {}
+",
+        )
+        .unwrap();
+        let listed = server.response(request("edit-list", "tools/list", json!({})));
+        assert_members(&tool_names(&listed), &["tz_edit", "edit"], &[], "EDIT-LIST");
+        let docs = server.response(request(
+            "edit-docs",
+            "resources/read",
+            json!({"uri":"resource://tokenzero/tools"}),
         ));
+        let catalog: Value =
+            serde_json::from_str(docs["result"]["contents"][0]["text"].as_str().unwrap()).unwrap();
+        assert!(
+            catalog["tools"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|tool| tool["name"] == "tz_edit"),
+            "EDIT-DOCS"
+        );
+        let edits = serde_json::to_string(&json!([{"find":"fn alpha() {}","replace":"fn alpha() -> u8 { 1 }","replace_all":"false"}])).unwrap();
+        let response = server.call("edit-call", "tools/call", json!({"name":"edit","arguments":{"path":file.display().to_string(),"edits":edits,"dry_run":"false"}}));
+        assert!(response.get("error").is_none(), "EDIT-CALL: {response}");
+        let result = &response["result"];
+        assert!(
+            result.get("isError").is_none() || result["isError"] == false,
+            "EDIT-CALL: {response}"
+        );
+        let text = result["content"][0]["text"].as_str().unwrap();
+        assert!(
+            text.lines()
+                .next()
+                .is_some_and(|line| line
+                    .starts_with(&format!("# edit {} — 1 hunks applied", file.display()))),
+            "EDIT-CALL: {text}"
+        );
+        let footer = text
+            .lines()
+            .find(|line| line.starts_with("refs: "))
+            .unwrap_or_else(|| panic!("EDIT-CALL missing refs: {text}"));
+        assert!(footer.contains("tz://blob/"), "EDIT-CALL: {footer}");
+        let undo_ref = footer
+            .split_whitespace()
+            .find_map(|part| part.strip_prefix("undo:"))
+            .unwrap_or_else(|| panic!("EDIT-CALL missing undo: {footer}"));
+        assert!(undo_ref.starts_with("tz://blob/"), "EDIT-CALL: {footer}");
+        assert_eq!(
+            fs::read_to_string(&file).unwrap(),
+            "fn alpha() -> u8 { 1 }
+fn beta() {}
+",
+            "EDIT-CALL file"
+        );
+        let expanded = server.call(
+            "edit-undo-expand",
+            "tools/call",
+            json!({"name":"expand","arguments":{"ref":undo_ref}}),
+        );
+        let expanded_text = expanded["result"]["content"][0]["text"].as_str().unwrap();
+        assert!(
+            expanded_text.contains("fn alpha() {}"),
+            "EDIT-UNDO: {expanded_text}"
+        );
     }
-    for (index, (expected, actual)) in expected.iter().zip(actual.iter()).enumerate() {
-        match expected {
-            BatchExpected::Result { id } => assert_result_response(actual, id)
-                .map_err(|reason| format!("batch[{index}]: {reason}"))?,
-            BatchExpected::Error { id, code } => assert_error_response(actual, id, *code)
-                .map_err(|reason| format!("batch[{index}]: {reason}"))?,
+    fn run_tool_filters(server: &Server) {
+        let default = server.call("tools-default", "tools/list", json!({}));
+        let names = tool_names(&default);
+        assert!(names.len() > 7, "TOOLS-DEFAULT: {default}");
+        assert_members(&names, &["tz_read", "read"], &[], "TOOLS-DEFAULT");
+        let material = server.call(
+            "tools-material",
+            "tools/list",
+            json!({"_meta":{"tokenzero/toolCluster":"material"}}),
+        );
+        let names = tool_names(&material);
+        assert!(names.len() <= 7, "TOOLS-MATERIAL: {material}");
+        assert_members(
+            &names,
+            &["tz_read", "tz_expand"],
+            &["tz_shell", "read"],
+            "TOOLS-MATERIAL",
+        );
+        let filter = &material["result"]["_meta"]["tokenzero/toolFilter"];
+        assert_eq!(filter["cluster"], "material", "TOOLS-MATERIAL: {material}");
+        assert_eq!(
+            filter["includeAliases"], false,
+            "TOOLS-MATERIAL: {material}"
+        );
+        let execution = server.call(
+            "tools-execution",
+            "tools/list",
+            json!({"profile":"execution"}),
+        );
+        let names = tool_names(&execution);
+        assert!(names.len() <= 7, "TOOLS-EXECUTION: {execution}");
+        assert_members(&names, &["tz_shell"], &["tz_read"], "TOOLS-EXECUTION");
+        let aliased = server.call(
+            "tools-material-aliases",
+            "tools/list",
+            json!({"_meta":{"tokenzero/toolCluster":"material","tokenzero/includeAliases":true}}),
+        );
+        assert_members(
+            &tool_names(&aliased),
+            &["tz_read", "read"],
+            &[],
+            "TOOLS-ALIASED",
+        );
+        assert_eq!(
+            aliased["result"]["_meta"]["tokenzero/toolFilter"]["includeAliases"], true,
+            "TOOLS-ALIASED: {aliased}"
+        );
+        let invalid = server.call(
+            "tools-bad-cluster",
+            "tools/list",
+            json!({"_meta":{"tokenzero/toolCluster":"matrial"}}),
+        );
+        let data = &invalid["error"]["data"];
+        assert_eq!(
+            invalid["error"]["code"], -32602,
+            "TOOLS-BAD-CLUSTER: {invalid}"
+        );
+        assert_eq!(
+            data["kind"], "unknown_tool_cluster",
+            "TOOLS-BAD-CLUSTER: {invalid}"
+        );
+        assert_eq!(
+            data["error_type"], "INVALID_ARGUMENT",
+            "TOOLS-BAD-CLUSTER: {invalid}"
+        );
+        assert!(
+            array_has(data, "available_options", "material"),
+            "TOOLS-BAD-CLUSTER: {invalid}"
+        );
+        assert_eq!(
+            data["suggestions"][0]["value"], "material",
+            "TOOLS-BAD-CLUSTER: {invalid}"
+        );
+    }
+    fn run_invalid(server: &Server, cases: &[InvalidCase]) {
+        for (id, description, input, kind) in cases {
+            let actual = server.response(input.clone());
+            assert_eq!(
+                actual["error"]["code"], -32602,
+                "{id}: {description}: {actual}"
+            );
+            assert_eq!(
+                actual["error"]["data"]["kind"], *kind,
+                "{id}: {description}: {actual}"
+            );
+            assert_protocol_data(&actual["error"]["data"])
+                .unwrap_or_else(|reason| panic!("{id}: {description}: {reason}"));
         }
     }
-    Ok(())
-}
-
-fn run_case(engine: &TokenZeroEngine, case: &ConformanceCase) -> Result<(), String> {
-    let payload = match &case.input {
-        CaseInput::Json(value) => value.to_string(),
-        CaseInput::Raw(text) => text.to_string(),
-    };
-    let response = handle_jsonrpc(engine, &payload)
-        .map(|text| serde_json::from_str::<Value>(&text).map_err(|err| err.to_string()))
-        .transpose()?;
-
-    match (&case.expected, response) {
-        (Expected::NoResponse, None) => Ok(()),
-        (Expected::NoResponse, Some(actual)) => Err(format!("expected no response, got {actual}")),
-        (Expected::Result { id }, Some(actual)) => assert_result_response(&actual, id),
-        (Expected::Result { .. }, None) => Err("expected result response, got no response".into()),
-        (Expected::Error { id, code }, Some(actual)) => assert_error_response(&actual, id, *code),
-        (Expected::Error { .. }, None) => Err("expected error response, got no response".into()),
-        (Expected::Batch(expected), Some(Value::Array(actual))) => {
-            assert_batch_responses(expected, &actual)
-        }
-        (Expected::Batch(_), Some(actual)) => Err(format!("expected batch array, got {actual}")),
-        (Expected::Batch(_), None) => Err("expected batch response, got no response".into()),
-    }
-}
-
-fn assert_result_response(actual: &Value, expected_id: &Value) -> Result<(), String> {
-    if actual["jsonrpc"] != "2.0" {
-        return Err(format!("missing jsonrpc 2.0 in {actual}"));
-    }
-    if &actual["id"] != expected_id {
-        return Err(format!("expected id {expected_id}, got {}", actual["id"]));
-    }
-    if !actual.get("result").is_some_and(Value::is_object) {
-        return Err(format!("expected object result, got {actual}"));
-    }
-    if actual.get("error").is_some() {
-        return Err(format!("result response included error: {actual}"));
-    }
-    Ok(())
-}
-
-fn assert_error_response(
-    actual: &Value,
-    expected_id: &Value,
-    expected_code: i64,
-) -> Result<(), String> {
-    if actual["jsonrpc"] != "2.0" {
-        return Err(format!("missing jsonrpc 2.0 in {actual}"));
-    }
-    if &actual["id"] != expected_id {
-        return Err(format!("expected id {expected_id}, got {}", actual["id"]));
-    }
-    if actual["error"]["code"] != expected_code {
-        return Err(format!(
-            "expected error code {expected_code}, got {} in {actual}",
-            actual["error"]["code"]
-        ));
-    }
-    if actual.get("result").is_some() {
-        return Err(format!("error response included result: {actual}"));
-    }
-    assert_protocol_error_data(&actual["error"]["data"])?;
-    Ok(())
-}
-
-fn assert_protocol_error_data(data: &Value) -> Result<(), String> {
-    if !data.is_object() {
-        return Err(format!("expected object error.data, got {data}"));
-    }
-    if data["kind"].as_str().is_none_or(str::is_empty) {
-        return Err(format!("missing data.kind in {data}"));
-    }
-    if data["reason"].as_str().is_none_or(str::is_empty) {
-        return Err(format!("missing data.reason in {data}"));
-    }
-    if data["fix_hint"].as_str().is_none_or(str::is_empty) {
-        return Err(format!("missing data.fix_hint in {data}"));
-    }
-    if !data["recoverable"].is_boolean() {
-        return Err(format!("missing data.recoverable in {data}"));
-    }
-    Ok(())
-}
-
-fn render_report(cases: &[ConformanceCase], failures: &[String]) -> String {
-    let mut sections = std::collections::BTreeMap::<&str, (usize, usize, usize)>::new();
-    for case in cases {
-        let entry = sections.entry(case.section).or_default();
-        match case.level {
-            RequirementLevel::Must => entry.0 += 1,
-            RequirementLevel::Should => entry.1 += 1,
-        }
-        entry.2 += 1;
-    }
-
-    let mut report = String::from("# MCP JSON-RPC Conformance Report\n\n");
-    report.push_str("| Section | MUST | SHOULD | Tested |\n");
-    report.push_str("|---------|------|--------|--------|\n");
-    for (section, (must, should, tested)) in sections {
-        report.push_str(&format!("| {section} | {must} | {should} | {tested} |\n"));
-    }
-    report.push_str("\nFailures:\n");
-    if failures.is_empty() {
-        report.push_str("- none\n");
-    } else {
-        for failure in failures {
-            report.push_str(&format!("- {failure}\n"));
+    fn run_rpc_case(server: &Server, case: &RpcCase) -> Result<(), String> {
+        let payload = match &case.input {
+            Input::Json(value) => value.to_string(),
+            Input::Raw(text) => (*text).into(),
+        };
+        let actual = server.raw(&payload);
+        match (&case.reply, actual) {
+            (Reply::None, None) => Ok(()),
+            (Reply::None, Some(value)) => Err(format!("expected no response, got {value}")),
+            (Reply::Result(id), Some(value)) => assert_result(&value, id),
+            (Reply::Result(_), None) => Err("expected result response, got no response".into()),
+            (Reply::Error(id, code), Some(value)) => assert_error(&value, id, *code),
+            (Reply::Error(_, _), None) => Err("expected error response, got no response".into()),
+            (Reply::Batch(expected), Some(Value::Array(actual)))
+                if actual.len() == expected.len() =>
+            {
+                for (index, (expected, actual)) in expected.iter().zip(&actual).enumerate() {
+                    match expected {
+                        Reply::Result(id) => assert_result(actual, id),
+                        Reply::Error(id, code) => assert_error(actual, id, *code),
+                        _ => unreachable!(),
+                    }
+                    .map_err(|reason| format!("batch[{index}]: {reason}"))?;
+                }
+                Ok(())
+            }
+            (Reply::Batch(expected), Some(Value::Array(actual))) => Err(format!(
+                "expected {} batch responses, got {}: {actual:?}",
+                expected.len(),
+                actual.len()
+            )),
+            (Reply::Batch(_), Some(value)) => Err(format!("expected batch array, got {value}")),
+            (Reply::Batch(_), None) => Err("expected batch response, got no response".into()),
         }
     }
-    report
+    fn assert_result(actual: &Value, id: &Value) -> Result<(), String> {
+        check(actual["jsonrpc"] == "2.0", || {
+            format!("missing jsonrpc 2.0 in {actual}")
+        })?;
+        check(&actual["id"] == id, || {
+            format!("expected id {id}, got {}", actual["id"])
+        })?;
+        check(actual.get("result").is_some_and(Value::is_object), || {
+            format!("expected object result, got {actual}")
+        })?;
+        check(actual.get("error").is_none(), || {
+            format!("result response included error: {actual}")
+        })
+    }
+    fn assert_error(actual: &Value, id: &Value, code: i64) -> Result<(), String> {
+        check(actual["jsonrpc"] == "2.0", || {
+            format!("missing jsonrpc 2.0 in {actual}")
+        })?;
+        check(&actual["id"] == id, || {
+            format!("expected id {id}, got {}", actual["id"])
+        })?;
+        check(actual["error"]["code"] == code, || {
+            format!(
+                "expected error code {code}, got {} in {actual}",
+                actual["error"]["code"]
+            )
+        })?;
+        check(actual.get("result").is_none(), || {
+            format!("error response included result: {actual}")
+        })?;
+        assert_protocol_data(&actual["error"]["data"])
+    }
+    fn assert_protocol_data(data: &Value) -> Result<(), String> {
+        check(data.is_object(), || {
+            format!("expected object error.data, got {data}")
+        })?;
+        for field in ["kind", "reason", "fix_hint"] {
+            check(
+                data[field].as_str().is_some_and(|text| !text.is_empty()),
+                || format!("missing data.{field} in {data}"),
+            )?;
+        }
+        check(data["recoverable"].is_boolean(), || {
+            format!("missing data.recoverable in {data}")
+        })
+    }
+    fn check(condition: bool, message: impl FnOnce() -> String) -> Result<(), String> {
+        condition.then_some(()).ok_or_else(message)
+    }
+    fn assert_init(result: &Value, version: &str) {
+        assert_eq!(result["protocolVersion"], version);
+        for capability in ["logging", "tools", "resources", "prompts"] {
+            assert!(
+                result["capabilities"][capability].is_object(),
+                "INIT {capability}: {result}"
+            );
+        }
+        assert_eq!(result["serverInfo"]["name"], "tokenzero");
+        assert_non_empty(&result["serverInfo"]["version"], "INIT server version");
+    }
+    fn assert_negotiation(value: &Value, requested: &str, negotiated: &str, fallback: bool) {
+        assert_eq!(value["requestedProtocolVersion"], requested);
+        assert_eq!(value["negotiatedProtocolVersion"], negotiated);
+        assert_eq!(value["fallback"], fallback);
+    }
+    fn assert_fields(value: &Value, label: &str, fields: &[&str]) {
+        for field in fields {
+            assert_non_empty(&value[field], &format!("{label}.{field}"));
+        }
+    }
+    fn assert_list(response: &Value, key: &str, label: &str) {
+        assert!(response.get("error").is_none(), "{label}: {response}");
+        assert!(response["result"][key].is_array(), "{label}: {response}");
+        if let Some(cursor) = response["result"].get("nextCursor") {
+            assert!(cursor.is_string(), "{label}: {response}");
+        }
+    }
+    fn assert_non_empty(value: &Value, label: &str) {
+        assert!(
+            value.as_str().is_some_and(|text| !text.is_empty()),
+            "{label}: {value}"
+        );
+    }
+    fn assert_members(names: &[&str], included: &[&str], excluded: &[&str], label: &str) {
+        for name in included {
+            assert!(names.contains(name), "{label}: missing {name}");
+        }
+        for name in excluded {
+            assert!(
+                !names.contains(name),
+                "{label}: unexpectedly included {name}"
+            );
+        }
+    }
+    fn array_has(value: &Value, field: &str, needle: &str) -> bool {
+        value[field]
+            .as_array()
+            .is_some_and(|items| items.iter().any(|item| item == needle))
+    }
+    fn tool_names(response: &Value) -> Vec<&str> {
+        response["result"]["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|tool| tool["name"].as_str())
+            .collect()
+    }
 }

@@ -18,6 +18,10 @@ if ! command -v jq &>/dev/null; then
 fi
 
 jq -r '
+def lpad($width):
+  tostring as $value
+  | (" " * ([$width - ($value | length), 0] | max)) + $value;
+
   .telemetry as $t |
   [
     "ack",         ($t.ack_tokens // 0),
@@ -31,7 +35,7 @@ jq -r '
   ] as $rows |
   "bucket           tokens  pct-of-visible",
   "──────────────────────────────────────",
-  ($rows | _nwise(2) | .[0] as $k | .[1] as $v |
+  ($rows | range(0; length; 2) as $i | .[$i] as $k | .[$i + 1] as $v |
     "\(($k | lpad(16))) \(($v | tostring | lpad(8)))  \(if ($t.visible_tokens // 0) > 0 then ((($v / ($t.visible_tokens // 1)) * 100) | round | tostring | lpad(6)) else "    -" end)%"
   ),
   "",

@@ -5,51 +5,38 @@ pub(crate) fn content_for(
     row: &InstallWrite,
     root: &Path,
     previous: Option<&str>,
-    mcp_surface: McpToolSurface,
-) -> std::io::Result<PendingContent> {
-    match row.capability.as_str() {
-        "mcp" => {
-            let path = Path::new(&row.path);
-            if path.extension().and_then(|ext| ext.to_str()) == Some("toml") {
-                merge_toml_mcp(
-                    previous.unwrap_or_default(),
-                    root,
-                    path,
-                    row.global,
-                    mcp_surface,
-                )
-                .map(PendingContent::Text)
-            } else {
-                merge_json_mcp(previous.unwrap_or_default(), root, row.global, mcp_surface)
-                    .map(PendingContent::Text)
-            }
+    surface: McpToolSurface,
+) -> std::io::Result<Vec<u8>> {
+    let previous = previous.unwrap_or_default();
+    let text = match row.capability.as_str() {
+        "mcp"
+            if Path::new(&row.path)
+                .extension()
+                .and_then(|ext| ext.to_str())
+                == Some("toml") =>
+        {
+            merge_toml_mcp(previous, root, Path::new(&row.path), row.global, surface)
         }
-        "instructions" => Ok(PendingContent::Text(instructions_content(mcp_surface))),
-        "shell" => Ok(PendingContent::Text(shell_launcher_content(
-            root, row.global,
-        ))),
-        "cli" => Ok(PendingContent::Text(cli_launcher_content(root, row.global))),
-        "cli-runtime" => current_exe_bytes().map(PendingContent::Bytes),
-        "cli-shim" => Ok(PendingContent::Text(windows_posix_cli_shim_content())),
-        "hooks" => merge_json_hooks(
-            previous.unwrap_or_default(),
-            &hook_command(root, row.global),
-        )
-        .map(PendingContent::Text),
-        "shim" => shim_content(Path::new(&row.path), root, row.global).map(PendingContent::Text),
-        _ => Ok(PendingContent::Text(
-            serde_json::json!({
-                "schema_version": "tokenzero.runtime_manifest.v1",
-                "runtime": "rust",
-                "external_runtime_required": false,
-                "binary": runtime_manifest_binary(root, row.global),
-                "source_binary": current_exe_string(),
-                "global_launcher": tokenzero_command(root, row.global)
-            })
-            .to_string()
-                + "\n",
-        )),
-    }
+        "mcp" => merge_json_mcp(previous, root, row.global, surface),
+        "instructions" => Ok(instructions_content(surface)),
+        "shell" => Ok(shell_launcher_content(root, row.global)),
+        "cli" => Ok(cli_launcher_content(root, row.global)),
+        "cli-shim" => Ok(windows_posix_cli_shim_content()),
+        "hooks" => merge_json_hooks(previous, &hook_command(root, row.global)),
+        "shim" => shim_content(Path::new(&row.path), root, row.global),
+        "cli-runtime" => return current_exe_bytes(),
+        _ => Ok(serde_json::json!({
+            "schema_version": "tokenzero.runtime_manifest.v1",
+            "runtime": "rust",
+            "external_runtime_required": false,
+            "binary": runtime_manifest_binary(root, row.global),
+            "source_binary": current_exe_string(),
+            "global_launcher": tokenzero_command(root, row.global)
+        })
+        .to_string()
+            + "\n"),
+    }?;
+    Ok(text.into_bytes())
 }
 
 /// Parse `previous` as a JSON object document (empty input -> empty object),
@@ -135,24 +122,10 @@ pub(crate) fn merge_json_hooks(previous: &str, hook_command: &str) -> std::io::R
         hooks_object,
         "PreToolUse",
         vec![
-            serde_json::json!({
-                "matcher": "Bash",
-                "hooks": [{
-                    "type": "command",
-                    "command": hook_command,
-                    "timeout": 10,
-                }]
-            }),
+            hook_matcher_entry("Bash", hook_command),
             // Same adapter command: the hook dispatches on tool_name, so the
             // Read matcher reuses it for the unbounded-large-Read guard.
-            serde_json::json!({
-                "matcher": "Read",
-                "hooks": [{
-                    "type": "command",
-                    "command": hook_command,
-                    "timeout": 10,
-                }]
-            }),
+            hook_matcher_entry("Read", hook_command),
         ],
     )?;
     upsert_tokenzero_hooks(
@@ -169,6 +142,17 @@ pub(crate) fn merge_json_hooks(previous: &str, hook_command: &str) -> std::io::R
         })],
     )?;
     Ok(serde_json::to_string_pretty(&Value::Object(object))? + "\n")
+}
+
+fn hook_matcher_entry(matcher: &str, hook_command: &str) -> Value {
+    serde_json::json!({
+        "matcher": matcher,
+        "hooks": [{
+            "type": "command",
+            "command": hook_command,
+            "timeout": 10,
+        }]
+    })
 }
 
 /// One AI harness detected on this machine.
@@ -205,35 +189,30 @@ pub fn detect_present_agents(home: &Path, path_env: Option<&str>) -> Vec<Detecte
         ("zed", &[".config/zed"], &["zed"], false),
         ("crush", &[".config/crush"], &["crush"], false),
     ];
-    let mut detected = Vec::new();
-    for (agent, home_paths, binaries, supported) in PROBES {
-        let mut evidence = home_paths.iter().find_map(|rel| {
-            let candidate = home.join(rel);
-            candidate
-                .exists()
-                .then(|| format!("{} exists", candidate.display()))
-        });
-        if evidence.is_none() {
-            if let Some(path_env) = path_env {
-                'dirs: for dir in std::env::split_paths(path_env) {
-                    for binary in *binaries {
-                        if is_executable_file(&dir.join(binary)) {
-                            evidence = Some(format!("{binary} on PATH"));
-                            break 'dirs;
-                        }
-                    }
-                }
-            }
-        }
-        if let Some(evidence) = evidence {
-            detected.push(DetectedAgent {
-                agent: (*agent).to_string(),
-                evidence,
-                supported: *supported,
+    PROBES
+        .iter()
+        .filter_map(|&(agent, homes, binaries, supported)| {
+            let home_evidence = homes.iter().find_map(|rel| {
+                let path = home.join(rel);
+                path.exists().then(|| format!("{} exists", path.display()))
             });
-        }
-    }
-    detected
+            let evidence = home_evidence.or_else(|| {
+                path_env.and_then(|path| {
+                    std::env::split_paths(path).find_map(|dir| {
+                        binaries
+                            .iter()
+                            .find(|binary| is_executable_file(&dir.join(binary)))
+                            .map(|binary| format!("{binary} on PATH"))
+                    })
+                })
+            });
+            evidence.map(|evidence| DetectedAgent {
+                agent: agent.to_string(),
+                evidence,
+                supported,
+            })
+        })
+        .collect()
 }
 
 /// The TokenZero-owned PreToolUse entry is the one whose hook command invokes
@@ -245,13 +224,12 @@ pub(crate) fn is_tokenzero_hook_entry(entry: &Value) -> bool {
         .get("hooks")
         .and_then(Value::as_array)
         .is_some_and(|hooks| {
-            hooks.iter().any(|hook| {
-                hook.get("command")
-                    .and_then(Value::as_str)
-                    .is_some_and(|command| {
-                        command.contains("tokenzero") && command.contains("hook claude-code")
-                    })
-            })
+            hooks
+                .iter()
+                .filter_map(|hook| hook.get("command")?.as_str())
+                .any(|command| {
+                    command.contains("tokenzero") && command.contains("hook claude-code")
+                })
         })
 }
 
@@ -311,46 +289,24 @@ pub(crate) fn mcp_args(root: &Path) -> Vec<String> {
 }
 
 pub(crate) fn mcp_env(root: &Path, mcp_surface: McpToolSurface) -> Map<String, Value> {
-    let mut env = Map::new();
-    env.insert(
-        "TOKENZERO_ALLOWED_ROOTS".to_string(),
-        Value::String(root.display().to_string()),
-    );
-    env.insert(
-        "TOKENZERO_CACHE_PATH".to_string(),
-        Value::String(cache_path(root).display().to_string()),
-    );
-    env.insert(
-        "TOKENZERO_DEFAULT_MODE".to_string(),
-        Value::String("auto".to_string()),
-    );
-    env.insert(
-        McpToolSurface::ENV.to_string(),
-        Value::String(mcp_surface.as_str().to_string()),
-    );
-    env.insert(
-        "TOKENZERO_MAX_OUTPUT_BYTES".to_string(),
-        Value::String("2000000".to_string()),
-    );
-    env.insert(
-        "TOKENZERO_SHELL_TIMEOUT".to_string(),
-        Value::String("30".to_string()),
-    );
-    env.insert(
-        "TOKENZERO_CACHE_BLOBS".to_string(),
-        Value::String("512".to_string()),
-    );
-    env.insert(
-        "TOKENZERO_CACHE_UNITS".to_string(),
-        Value::String("8192".to_string()),
-    );
-    // Long agent sessions can idle for hours between tool calls; an
-    // idle-exited server reads as a permanent disconnect to MCP clients.
-    env.insert(
-        "TOKENZERO_MCP_IDLE_TIMEOUT_SECS".to_string(),
-        Value::String("0".to_string()),
-    );
-    env
+    // Insertion order is part of the generated-file contract (JSON/TOML byte identity).
+    [
+        ("TOKENZERO_ALLOWED_ROOTS", root.display().to_string()),
+        (
+            "TOKENZERO_CACHE_PATH",
+            cache_path(root).display().to_string(),
+        ),
+        ("TOKENZERO_DEFAULT_MODE", "auto".to_string()),
+        (McpToolSurface::ENV, mcp_surface.as_str().to_string()),
+        ("TOKENZERO_MAX_OUTPUT_BYTES", "2000000".to_string()),
+        ("TOKENZERO_SHELL_TIMEOUT", "30".to_string()),
+        ("TOKENZERO_CACHE_BLOBS", "512".to_string()),
+        ("TOKENZERO_CACHE_UNITS", "8192".to_string()),
+        ("TOKENZERO_MCP_IDLE_TIMEOUT_SECS", "0".to_string()),
+    ]
+    .into_iter()
+    .map(|(key, value)| (key.to_string(), Value::String(value)))
+    .collect()
 }
 
 pub(crate) fn toml_mcp_block(
@@ -376,8 +332,7 @@ pub(crate) fn toml_mcp_block(
         toml_env_lines(root, mcp_surface)
     );
     if include_codex_tool_approvals {
-        let tools: &[&str] = &["shell", "read", "find", "tree"];
-        for tool in tools {
+        for tool in ["shell", "read", "find", "tree"] {
             block.push_str(&format!(
                 "\n[mcp_servers.tokenzero.tools.{tool}]\napproval_mode = \"approve\"\n"
             ));
@@ -405,21 +360,16 @@ pub(crate) fn strip_tokenzero_managed_toml(input: &str) -> String {
         let trimmed = line.trim();
         if trimmed == "# tokenzero:mcp:start" {
             skipping = true;
-            continue;
-        }
-        if trimmed == "# tokenzero:mcp:end" {
+        } else if trimmed == "# tokenzero:mcp:end" {
             skipping = false;
-            continue;
-        }
-        if let Some(table) = toml_table_name(line) {
-            skipping =
-                table == "mcp_servers.tokenzero" || table.starts_with("mcp_servers.tokenzero.");
-            if skipping {
-                continue;
+        } else {
+            if let Some(table) = toml_table_name(line) {
+                skipping =
+                    table == "mcp_servers.tokenzero" || table.starts_with("mcp_servers.tokenzero.");
             }
-        }
-        if !skipping {
-            output.push(line);
+            if !skipping {
+                output.push(line);
+            }
         }
     }
     let mut text = output.join("\n");
@@ -431,16 +381,8 @@ pub(crate) fn strip_tokenzero_managed_toml(input: &str) -> String {
 
 pub(crate) fn toml_table_name(line: &str) -> Option<String> {
     let trimmed = line.trim();
-    if !trimmed.starts_with('[') || trimmed.starts_with("[[") || !trimmed.ends_with(']') {
-        return None;
-    }
-    Some(
-        trimmed
-            .trim_start_matches('[')
-            .trim_end_matches(']')
-            .trim()
-            .to_string(),
-    )
+    (!trimmed.starts_with("[[") && trimmed.starts_with('[') && trimmed.ends_with(']'))
+        .then(|| trimmed[1..trimmed.len() - 1].trim().to_string())
 }
 
 pub(crate) fn toml_string_array(values: &[String]) -> String {

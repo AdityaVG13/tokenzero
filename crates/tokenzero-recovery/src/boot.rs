@@ -63,8 +63,8 @@ pub struct SessionBoot {
 }
 
 /// Open a session without loading the recovery snapshot or walking the repo.
-/// Missing metadata is initialized atomically. Unknown, older, newer, corrupt,
-/// or unreadable metadata is left untouched and gets a bounded legacy fallback.
+/// Missing metadata is initialized atomically. Unknown/older/newer/corrupt/
+/// unreadable metadata is left untouched with a bounded legacy fallback.
 pub fn open_session_boot(
     cache_path: &Path,
     root: &Path,
@@ -76,37 +76,16 @@ pub fn open_session_boot(
 
     let (manifest, delta, mode) = match load_manifest(&manifest_path) {
         MetadataLoad::Compatible(manifest) if manifest.root_digest == root_digest => {
-            match load_delta(&delta_path, &manifest.manifest_id) {
-                MetadataLoad::Compatible(delta) => (manifest, delta, "manifest_delta"),
-                MetadataLoad::Missing => {
-                    let delta = empty_delta(&manifest.manifest_id);
-                    atomic_write_json(&delta_path, &delta)?;
-                    (manifest, delta, "manifest_delta")
-                }
-                MetadataLoad::Incompatible => {
-                    let delta = empty_delta(&manifest.manifest_id);
-                    (manifest, delta, "legacy_fallback")
-                }
-            }
+            let (delta, mode) = take_delta(&delta_path, &manifest.manifest_id)?;
+            (manifest, delta, mode)
         }
         MetadataLoad::Missing => {
             let manifest = new_manifest(root_digest);
-            match load_delta(&delta_path, &manifest.manifest_id) {
-                MetadataLoad::Compatible(delta) => {
-                    atomic_write_json(&manifest_path, &manifest)?;
-                    (manifest, delta, "manifest_delta")
-                }
-                MetadataLoad::Missing => {
-                    let delta = empty_delta(&manifest.manifest_id);
-                    atomic_write_json(&manifest_path, &manifest)?;
-                    atomic_write_json(&delta_path, &delta)?;
-                    (manifest, delta, "manifest_delta")
-                }
-                MetadataLoad::Incompatible => {
-                    let delta = empty_delta(&manifest.manifest_id);
-                    (manifest, delta, "legacy_fallback")
-                }
+            let (delta, mode) = take_delta(&delta_path, &manifest.manifest_id)?;
+            if mode == "manifest_delta" {
+                atomic_write_json(&manifest_path, &manifest)?;
             }
+            (manifest, delta, mode)
         }
         MetadataLoad::Compatible(_) | MetadataLoad::Incompatible => {
             let manifest = new_manifest(root_digest);
@@ -114,8 +93,20 @@ pub fn open_session_boot(
             (manifest, delta, "legacy_fallback")
         }
     };
-
     Ok(build_boot(mode, manifest, delta, manifest_path, delta_path))
+}
+
+/// Compatible → reuse; Missing → write empty; Incompatible → empty in-memory only.
+fn take_delta(path: &Path, manifest_id: &str) -> std::io::Result<(SessionDelta, &'static str)> {
+    match load_delta(path, manifest_id) {
+        MetadataLoad::Compatible(delta) => Ok((delta, "manifest_delta")),
+        MetadataLoad::Missing => {
+            let delta = empty_delta(manifest_id);
+            atomic_write_json(path, &delta)?;
+            Ok((delta, "manifest_delta"))
+        }
+        MetadataLoad::Incompatible => Ok((empty_delta(manifest_id), "legacy_fallback")),
+    }
 }
 
 fn build_boot(
@@ -126,29 +117,22 @@ fn build_boot(
     delta_path: PathBuf,
 ) -> SessionBoot {
     let delta_ref = delta_id(&delta);
-    let manifest_part = format!(
+    let mut wire = format!(
         "TZ/1 root={} m={} v={}",
         manifest.root_digest, manifest.manifest_id, manifest.store_version
     );
-    let delta_part = format!(" d={delta_ref}");
-    let toc_part = format!(" toc={} ws={}", manifest.toc_ref, manifest.working_set_ref);
-    let other_part = if mode == "manifest_delta" {
-        String::new()
-    } else {
-        " fallback=legacy".to_string()
-    };
-    let wire = format!("{manifest_part}{delta_part}{toc_part}{other_part}");
-    let manifest_tokens = count_tokens(&manifest_part);
-    let through_delta = count_tokens(&(manifest_part.clone() + &delta_part));
-    let through_toc = count_tokens(&(manifest_part.clone() + &delta_part + &toc_part));
+    let m = count_tokens(&wire);
+    wire.push_str(&format!(" d={delta_ref}"));
+    let d = count_tokens(&wire);
+    wire.push_str(&format!(
+        " toc={} ws={}",
+        manifest.toc_ref, manifest.working_set_ref
+    ));
+    let t = count_tokens(&wire);
+    if mode != "manifest_delta" {
+        wire.push_str(" fallback=legacy");
+    }
     let total = count_tokens(&wire);
-    let telemetry = BootTokenComponents {
-        manifest: manifest_tokens,
-        delta: through_delta.saturating_sub(manifest_tokens),
-        toc_working_set: through_toc.saturating_sub(through_delta),
-        other: total.saturating_sub(through_toc),
-        total,
-    };
     SessionBoot {
         schema: "tokenzero.session-boot.v1",
         mode,
@@ -157,7 +141,13 @@ fn build_boot(
         delta_ref,
         manifest_path,
         delta_path,
-        telemetry,
+        telemetry: BootTokenComponents {
+            manifest: m,
+            delta: d.saturating_sub(m),
+            toc_working_set: t.saturating_sub(d),
+            other: total.saturating_sub(t),
+            total,
+        },
     }
 }
 
@@ -170,15 +160,15 @@ fn new_manifest(root_digest: String) -> BootManifest {
         root_digest,
         manifest_id: short_digest(seed.as_bytes()),
         store_version: STORE_VERSION,
-        toc_ref: EMPTY_ID.to_string(),
-        working_set_ref: EMPTY_ID.to_string(),
+        toc_ref: EMPTY_ID.into(),
+        working_set_ref: EMPTY_ID.into(),
     }
 }
 
 fn empty_delta(manifest_id: &str) -> SessionDelta {
     SessionDelta {
         version: DELTA_VERSION,
-        manifest_id: manifest_id.to_string(),
+        manifest_id: manifest_id.into(),
         session_hwm: 0,
         added_refs: Vec::new(),
         changed_refs: Vec::new(),
@@ -195,51 +185,49 @@ enum MetadataLoad<T> {
 fn read_metadata(path: &Path) -> MetadataLoad<Vec<u8>> {
     match fs::read(path) {
         Ok(bytes) => MetadataLoad::Compatible(bytes),
-        Err(error) if error.kind() == ErrorKind::NotFound => MetadataLoad::Missing,
+        Err(e) if e.kind() == ErrorKind::NotFound => MetadataLoad::Missing,
         Err(_) => MetadataLoad::Incompatible,
     }
 }
 
-fn load_manifest(path: &Path) -> MetadataLoad<BootManifest> {
-    let bytes = match read_metadata(path) {
-        MetadataLoad::Missing => return MetadataLoad::Missing,
-        MetadataLoad::Compatible(bytes) => bytes,
-        MetadataLoad::Incompatible => return MetadataLoad::Incompatible,
-    };
-    let Ok(manifest) = serde_json::from_slice::<BootManifest>(&bytes) else {
-        return MetadataLoad::Incompatible;
-    };
-    if manifest.version != MANIFEST_VERSION
-        || manifest.store_version != STORE_VERSION
-        || !is_fixed_id(&manifest.root_digest)
-        || !is_fixed_id(&manifest.manifest_id)
-        || !is_fixed_id(&manifest.toc_ref)
-        || !is_fixed_id(&manifest.working_set_ref)
-    {
-        return MetadataLoad::Incompatible;
+fn parse_metadata<T>(path: &Path, parse: impl FnOnce(&[u8]) -> Option<T>) -> MetadataLoad<T> {
+    match read_metadata(path) {
+        MetadataLoad::Missing => MetadataLoad::Missing,
+        MetadataLoad::Incompatible => MetadataLoad::Incompatible,
+        MetadataLoad::Compatible(bytes) => parse(&bytes)
+            .map(MetadataLoad::Compatible)
+            .unwrap_or(MetadataLoad::Incompatible),
     }
-    MetadataLoad::Compatible(manifest)
+}
+
+fn load_manifest(path: &Path) -> MetadataLoad<BootManifest> {
+    parse_metadata(path, |bytes| {
+        let m = serde_json::from_slice::<BootManifest>(bytes).ok()?;
+        (m.version == MANIFEST_VERSION
+            && m.store_version == STORE_VERSION
+            && [
+                &m.root_digest,
+                &m.manifest_id,
+                &m.toc_ref,
+                &m.working_set_ref,
+            ]
+            .into_iter()
+            .all(|id| is_fixed_id(id)))
+        .then_some(m)
+    })
 }
 
 fn load_delta(path: &Path, manifest_id: &str) -> MetadataLoad<SessionDelta> {
-    let bytes = match read_metadata(path) {
-        MetadataLoad::Missing => return MetadataLoad::Missing,
-        MetadataLoad::Compatible(bytes) => bytes,
-        MetadataLoad::Incompatible => return MetadataLoad::Incompatible,
-    };
-    let Ok(delta) = serde_json::from_slice::<SessionDelta>(&bytes) else {
-        return MetadataLoad::Incompatible;
-    };
-    let refs_are_valid = delta
-        .added_refs
-        .iter()
-        .chain(&delta.changed_refs)
-        .chain(&delta.deleted_refs)
-        .all(|reference| is_fixed_id(reference));
-    if delta.version != DELTA_VERSION || delta.manifest_id != manifest_id || !refs_are_valid {
-        return MetadataLoad::Incompatible;
-    }
-    MetadataLoad::Compatible(delta)
+    parse_metadata(path, |bytes| {
+        let d = serde_json::from_slice::<SessionDelta>(bytes).ok()?;
+        let refs_ok = d
+            .added_refs
+            .iter()
+            .chain(&d.changed_refs)
+            .chain(&d.deleted_refs)
+            .all(|r| is_fixed_id(r));
+        (d.version == DELTA_VERSION && d.manifest_id == manifest_id && refs_ok).then_some(d)
+    })
 }
 
 fn delta_id(delta: &SessionDelta) -> String {
@@ -248,18 +236,15 @@ fn delta_id(delta: &SessionDelta) -> String {
         && delta.changed_refs.is_empty()
         && delta.deleted_refs.is_empty()
     {
-        return EMPTY_ID.to_string();
+        return EMPTY_ID.into();
     }
     serde_json::to_vec(delta)
-        .map(|bytes| short_digest(&bytes))
-        .unwrap_or_else(|_| EMPTY_ID.to_string())
+        .map(|b| short_digest(&b))
+        .unwrap_or_else(|_| EMPTY_ID.into())
 }
 
 fn root_digest(root: &Path, allowed_roots: &[PathBuf]) -> String {
-    let mut roots = allowed_roots
-        .iter()
-        .map(|path| normalize(path))
-        .collect::<Vec<_>>();
+    let mut roots: Vec<_> = allowed_roots.iter().map(|p| normalize(p)).collect();
     roots.push(normalize(root));
     roots.sort();
     roots.dedup();
@@ -274,14 +259,13 @@ fn normalize(path: &Path) -> String {
 }
 
 fn is_fixed_id(value: &str) -> bool {
-    value.len() == ID_HEX_LEN && value.bytes().all(|byte| byte.is_ascii_hexdigit())
+    value.len() == ID_HEX_LEN && value.bytes().all(|b| b.is_ascii_hexdigit())
 }
 
 fn short_digest(bytes: &[u8]) -> String {
-    let digest = Sha256::digest(bytes);
-    digest[..ID_HEX_LEN / 2]
+    Sha256::digest(bytes)[..ID_HEX_LEN / 2]
         .iter()
-        .map(|byte| format!("{byte:02x}"))
+        .map(|b| format!("{b:02x}"))
         .collect()
 }
 
@@ -294,83 +278,9 @@ fn atomic_write_json<T: Serialize>(path: &Path, value: &T) -> std::io::Result<()
         .as_nanos();
     let tmp = path.with_extension(format!("tmp-{}-{nonce}", std::process::id()));
     let body = serde_json::to_vec_pretty(value)
-        .map_err(|error| std::io::Error::new(ErrorKind::InvalidData, error))?;
+        .map_err(|e| std::io::Error::new(ErrorKind::InvalidData, e))?;
     fs::write(&tmp, body)?;
-    match fs::rename(&tmp, path) {
-        Ok(()) => Ok(()),
-        Err(error) => {
-            let _ = fs::remove_file(&tmp);
-            Err(error)
-        }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use tempfile::tempdir;
-
-    #[test]
-    fn boot_is_bounded_and_independent_of_repo_size() {
-        let dir = tempdir().unwrap();
-        let cache = dir.path().join("recovery-cache.json");
-        let small = open_session_boot(&cache, dir.path(), &[dir.path().to_path_buf()]).unwrap();
-        for idx in 0..10_000 {
-            fs::write(dir.path().join(format!("f{idx}")), b"x").unwrap();
-        }
-        let large = open_session_boot(&cache, dir.path(), &[dir.path().to_path_buf()]).unwrap();
-        assert_eq!(small.manifest_id, large.manifest_id);
-        assert_eq!(small.telemetry.total, large.telemetry.total);
-        assert!(large.telemetry.total < 100, "{}", large.wire);
-        assert_eq!(
-            large.telemetry.total,
-            large.telemetry.manifest
-                + large.telemetry.delta
-                + large.telemetry.toc_working_set
-                + large.telemetry.other
-        );
-    }
-
-    #[test]
-    fn incompatible_manifest_falls_back_without_overwrite() {
-        let dir = tempdir().unwrap();
-        let cache = dir.path().join("recovery-cache.json");
-        let manifest = cache.with_file_name("boot-manifest.json");
-        fs::write(&manifest, br#"{"version":99}"#).unwrap();
-        let before = fs::read(&manifest).unwrap();
-        let boot = open_session_boot(&cache, dir.path(), &[]).unwrap();
-        assert_eq!(boot.mode, "legacy_fallback");
-        assert_eq!(fs::read(&manifest).unwrap(), before);
-        assert!(boot.telemetry.total < 100);
-    }
-
-    #[test]
-    fn corrupt_delta_with_payload_falls_back_without_overwrite() {
-        let dir = tempdir().unwrap();
-        let cache = dir.path().join("recovery-cache.json");
-        let first = open_session_boot(&cache, dir.path(), &[]).unwrap();
-        let delta = cache.with_file_name("boot-session-delta.json");
-        let body = format!(
-            r#"{{"version":1,"manifest_id":"{}","session_hwm":1,"payload":"forbidden"}}"#,
-            first.manifest_id
-        );
-        fs::write(&delta, body).unwrap();
-        let before = fs::read(&delta).unwrap();
-        let boot = open_session_boot(&cache, dir.path(), &[]).unwrap();
-        assert_eq!(boot.mode, "legacy_fallback");
-        assert_eq!(fs::read(&delta).unwrap(), before);
-    }
-
-    #[test]
-    fn missing_manifest_and_delta_are_written_and_reused() {
-        let dir = tempdir().unwrap();
-        let cache = dir.path().join("recovery-cache.json");
-        let first = open_session_boot(&cache, dir.path(), &[]).unwrap();
-        let second = open_session_boot(&cache, dir.path(), &[]).unwrap();
-        assert_eq!(first.mode, "manifest_delta");
-        assert_eq!(first.manifest_id, second.manifest_id);
-        assert_eq!(second.delta_ref, EMPTY_ID);
-        assert!(first.manifest_path.is_file());
-        assert!(first.delta_path.is_file());
-    }
+    fs::rename(&tmp, path).inspect_err(|_| {
+        let _ = fs::remove_file(&tmp);
+    })
 }

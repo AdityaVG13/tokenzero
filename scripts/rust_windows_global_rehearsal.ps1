@@ -8,8 +8,7 @@ param(
 
 $ErrorActionPreference = "Stop"
 
-$RepoRoot = Resolve-Path (Join-Path $PSScriptRoot "..")
-Push-Location $RepoRoot
+$RepoRoot = Resolve-Path (Join-Path $PSScriptRoot ".."); Push-Location $RepoRoot
 
 function Write-Report {
   param([hashtable]$Report)
@@ -40,8 +39,7 @@ function Get-RelativePathUnder {
     [string]$Base
   )
 
-  $fullPath = [System.IO.Path]::GetFullPath($Path)
-  $fullBase = [System.IO.Path]::GetFullPath($Base).TrimEnd("\", "/")
+  $fullPath = [System.IO.Path]::GetFullPath($Path); $fullBase = [System.IO.Path]::GetFullPath($Base).TrimEnd("\", "/")
   if (!$fullPath.StartsWith($fullBase, [System.StringComparison]::OrdinalIgnoreCase)) {
     throw "path is outside root: $fullPath"
   }
@@ -83,36 +81,21 @@ function Invoke-McpInitialize {
   try {
     $psi = [System.Diagnostics.ProcessStartInfo]::new()
     $psi.FileName = if ($env:ComSpec) { $env:ComSpec } else { "cmd.exe" }
-    $commandLine = "$(Quote-CmdArg $Command) mcp-server --allowed-root $(Quote-CmdArg $AllowedRoot) --cache-path $(Quote-CmdArg $CachePath) < $(Quote-CmdArg $requestPath)"
-    $psi.Arguments = '/D /C "' + $commandLine + '"'
-    $psi.RedirectStandardOutput = $true
-    $psi.RedirectStandardError = $true
+    $commandLine = "$(Quote-CmdArg $Command) mcp-server --allowed-root $(Quote-CmdArg $AllowedRoot) --cache-path $(Quote-CmdArg $CachePath) < $(Quote-CmdArg $requestPath)"; $psi.Arguments = '/D /C "' + $commandLine + '"'; $psi.RedirectStandardOutput = $true; $psi.RedirectStandardError = $true
     $psi.UseShellExecute = $false
 
     $proc = [System.Diagnostics.Process]::Start($psi)
     if (!$proc.WaitForExit(30000)) {
       $proc.Kill()
       return [ordered]@{
-        ok = $false
-        command = $Command
-        exit_code = $null
-        timed_out = $true
-        stdout_preview = ""
-        stderr_preview = ""
+        ok = $false; command = $Command; exit_code = $null; timed_out = $true; stdout_preview = ""; stderr_preview = ""
       }
     }
 
-    $stdout = $proc.StandardOutput.ReadToEnd()
-    $stderr = $proc.StandardError.ReadToEnd()
-    $ok = ($proc.ExitCode -eq 0) -and $stdout.Replace(" ", "").Contains('"name":"tokenzero"')
+    $stdout = $proc.StandardOutput.ReadToEnd(); $stderr = $proc.StandardError.ReadToEnd(); $ok = ($proc.ExitCode -eq 0) -and $stdout.Replace(" ", "").Contains('"name":"tokenzero"')
 
     return [ordered]@{
-      ok = $ok
-      command = $Command
-      exit_code = $proc.ExitCode
-      timed_out = $false
-      stdout_preview = $stdout.Substring(0, [Math]::Min(300, $stdout.Length))
-      stderr_preview = $stderr.Substring(0, [Math]::Min(300, $stderr.Length))
+      ok = $ok; command = $Command; exit_code = $proc.ExitCode; timed_out = $false; stdout_preview = $stdout.Substring(0, [Math]::Min(300, $stdout.Length)); stderr_preview = $stderr.Substring(0, [Math]::Min(300, $stderr.Length))
     }
   } finally {
     Remove-Item -LiteralPath $requestPath -Force -ErrorAction SilentlyContinue
@@ -152,11 +135,9 @@ try {
     "--json"
   )
 
-  $tempRoot = Join-Path ([System.IO.Path]::GetTempPath()) ("tokenzero global rehearsal " + [Guid]::NewGuid().ToString("N"))
-  New-Item -ItemType Directory -Force $tempRoot | Out-Null
+  $tempRoot = Join-Path ([System.IO.Path]::GetTempPath()) ("tokenzero global rehearsal " + [Guid]::NewGuid().ToString("N")); New-Item -ItemType Directory -Force $tempRoot | Out-Null
 
-  $copied = @()
-  $jsonParseFailures = @()
+  $copied = @(); $jsonParseFailures = @()
   foreach ($write in $plan.writes) {
     if ($write.action -ne "merge") {
       continue
@@ -170,17 +151,12 @@ try {
         Test-JsonFile $write.path
       } catch {
         $jsonParseFailures += [ordered]@{
-          path = $write.path
-          error = $_.Exception.Message
+          path = $write.path; error = $_.Exception.Message
         }
       }
     }
 
-    $relative = Get-RelativePathUnder -Path $write.path -Base $Root
-    $destination = Join-Path $tempRoot $relative
-    New-Item -ItemType Directory -Force (Split-Path -Parent $destination) | Out-Null
-    Copy-Item -LiteralPath $write.path -Destination $destination -Force
-    $copied += $relative
+    $relative = Get-RelativePathUnder -Path $write.path -Base $Root; $destination = Join-Path $tempRoot $relative; New-Item -ItemType Directory -Force (Split-Path -Parent $destination) | Out-Null; Copy-Item -LiteralPath $write.path -Destination $destination -Force; $copied += $relative
   }
 
   if ($jsonParseFailures.Count -gt 0) {
@@ -211,8 +187,7 @@ try {
     "--json"
   )
 
-  $postMergeFailures = @()
-  $tokenzeroEntries = 0
+  $postMergeFailures = @(); $tokenzeroEntries = 0
   foreach ($write in $rehearsalPlan.writes) {
     if (($write.action -ne "merge") -or !(Test-Path -LiteralPath $write.path)) {
       continue
@@ -232,15 +207,12 @@ try {
       }
     } catch {
       $postMergeFailures += [ordered]@{
-        path = $write.path
-        error = $_.Exception.Message
+        path = $write.path; error = $_.Exception.Message
       }
     }
   }
 
-  $launcher = Join-Path $tempRoot ".tokenzero/bin/tokenzero.cmd"
-  $cachePath = Join-Path $tempRoot ".tokenzero/recovery-cache.json"
-  $launcherText = Get-Content -LiteralPath $launcher -Raw
+  $launcher = Join-Path $tempRoot ".tokenzero/bin/tokenzero.cmd"; $cachePath = Join-Path $tempRoot ".tokenzero/recovery-cache.json"; $launcherText = Get-Content -LiteralPath $launcher -Raw
   $runtimeFiles = @(Get-ChildItem -LiteralPath (Join-Path $tempRoot ".tokenzero/bin") -Filter "tokenzero-runtime-*.exe" -ErrorAction SilentlyContinue)
   $launcherUsesInstalledRuntime = $launcherText.Contains("tokenzero-runtime-") -and !$launcherText.ToLowerInvariant().Replace("\", "/").Contains("target/release/tokenzero")
   $mcpCommand = if ($runtimeFiles.Count -gt 0) { $runtimeFiles[0].FullName } else { $launcher }
@@ -250,24 +222,11 @@ try {
   $report = [ordered]@{
     schema_version = "tokenzero.windows_global_rehearsal.v1"
     status = if ($ok) { "ok" } else { "blocked" }
-    ok = $ok
-    root = $Root
-    tokenzero_exe = $script:TokenZeroExe
-    fake_root_contains_space = $tempRoot.Contains(" ")
-    plan_write_count = $plan.writes.Count
-    copied_existing_merge_configs = $copied.Count
-    apply_status = $applied.status
-    applied_written_count = $applied.written.Count
-    launcher_uses_installed_runtime = $launcherUsesInstalledRuntime
-    installed_runtime_count = $runtimeFiles.Count
-    json_parse_failures = $jsonParseFailures
-    post_merge_failures = $postMergeFailures
-    tokenzero_entries_after_merge = $tokenzeroEntries
-    mcp_launcher = $mcp
+    ok = $ok; root = $Root; tokenzero_exe = $script:TokenZeroExe; fake_root_contains_space = $tempRoot.Contains(" "); plan_write_count = $plan.writes.Count; copied_existing_merge_configs = $copied.Count; apply_status = $applied.status; applied_written_count = $applied.written.Count
+    launcher_uses_installed_runtime = $launcherUsesInstalledRuntime; installed_runtime_count = $runtimeFiles.Count; json_parse_failures = $jsonParseFailures; post_merge_failures = $postMergeFailures; tokenzero_entries_after_merge = $tokenzeroEntries; mcp_launcher = $mcp
     temp_root = if ($KeepTemp) { $tempRoot } else { $null }
   }
-  Write-Report $report
-  $report | ConvertTo-Json -Depth 10
+  Write-Report $report; $report | ConvertTo-Json -Depth 10
 
   if (!$KeepTemp) {
     Remove-Item -LiteralPath $tempRoot -Recurse -Force
@@ -278,17 +237,9 @@ try {
   }
 } catch {
   $report = [ordered]@{
-    schema_version = "tokenzero.windows_global_rehearsal.v1"
-    status = "blocked"
-    ok = $false
-    root = $Root
-    tokenzero_exe = $script:TokenZeroExe
-    error = $_.Exception.Message
-    script_stack = $_.ScriptStackTrace
+    schema_version = "tokenzero.windows_global_rehearsal.v1"; status = "blocked"; ok = $false; root = $Root; tokenzero_exe = $script:TokenZeroExe; error = $_.Exception.Message; script_stack = $_.ScriptStackTrace
   }
-  Write-Report $report
-  $report | ConvertTo-Json -Depth 10
-  exit 1
+  Write-Report $report; $report | ConvertTo-Json -Depth 10; exit 1
 } finally {
   Pop-Location
 }

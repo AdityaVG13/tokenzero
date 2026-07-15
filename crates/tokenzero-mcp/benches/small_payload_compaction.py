@@ -10,13 +10,14 @@ from __future__ import annotations
 import hashlib
 import importlib.metadata
 import json
-import platform
-import subprocess
 from collections import defaultdict
 from pathlib import Path
 from typing import Callable
 
 REPO = Path(__file__).resolve().parents[3]
+import sys
+sys.path.insert(0, str(REPO / "benchmarks"))
+from bench_common import environment as bench_environment, pct_saved, write_json
 OUT = Path(__file__).with_suffix("") / "evidence.json"
 SIZES = (32, 48, 64, 96, 128, 192, 256, 384, 512, 768, 960)
 KINDS = ("ack", "preview", "ref_list")
@@ -79,22 +80,6 @@ def inline_wire(kind: str, payload: str) -> str:
 def ref_wire(kind: str, payload: str) -> str:
     digest = hashlib.sha256(payload.encode()).hexdigest()
     return compact_json({"result": {"kind": kind, "raw_bytes": len(payload.encode()), "ref": f"tz://blob/{digest}", "status": "ok"}})
-
-
-def environment() -> dict:
-    diff = subprocess.run(["git", "diff", "--binary"], cwd=REPO, capture_output=True, check=True).stdout
-    commit = subprocess.run(["git", "rev-parse", "HEAD"], cwd=REPO, capture_output=True, text=True, check=True).stdout.strip()
-    return {
-        "commit": commit,
-        "machine": platform.machine(),
-        "os": platform.platform(),
-        "python": platform.python_version(),
-        "source_diff_sha256": hashlib.sha256(diff).hexdigest(),
-    }
-
-
-def pct_saved(baseline: int, candidate: int) -> float:
-    return round(100 * (baseline - candidate) / baseline, 3)
 
 
 def summarize(rows: list[dict]) -> dict:
@@ -183,7 +168,7 @@ def main() -> None:
         }
     evidence = {
         "schema": "tokenzero.small-payload-packing.v1",
-        "environment": environment(),
+        "environment": bench_environment(REPO),
         "tokenizers": tokenizer_metadata,
         "methodology": {
             "corpus": "264 deterministic ASCII payloads: 3 classes x 11 byte sizes x 8 variants; every payload is below 1 KiB",
@@ -197,9 +182,7 @@ def main() -> None:
         "fixture": {"classes": list(KINDS), "payload_sizes_bytes": list(SIZES), "variants_per_class_size": VARIANTS, "samples": len(corpus), "max_payload_bytes": max(SIZES)},
         "results": results,
     }
-    OUT.parent.mkdir(parents=True, exist_ok=True)
-    OUT.write_text(json.dumps(evidence, indent=2, sort_keys=True) + "\n")
-    print(json.dumps(evidence, indent=2, sort_keys=True))
+    write_json(OUT, evidence, emit=True)
 
 
 if __name__ == "__main__":

@@ -1,8 +1,1 @@
-{
-  "file_ref_cache_bytes": 638,
-  "inline_cache_bytes": 225871,
-  "measurement": "snapshot plus content-addressed sidecar files",
-  "payload_bytes": 225280,
-  "repeats": 8,
-  "schema": "tokenzero.repeat-read-cache-bytes.v1"
-}
+{"file_ref_cache_bytes":638,"inline_cache_bytes":225871,"measurement":"snapshot plus content-addressed sidecar files","payload_bytes":225280,"repeats":8,"schema":"tokenzero.repeat-read-cache-bytes.v1"}

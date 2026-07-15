@@ -1,14 +1,1 @@
-{
-  "mcpServers": {
-    "tokenzero": {
-      "type": "local",
-      "command": "__TOKENZERO_BIN__",
-      "args": [
-        "mcp-server",
-        "--allowed-root", "__REPO__",
-        "--cache-path", "__CACHE__"
-      ],
-      "tools": ["*"]
-    }
-  }
-}
+{"mcpServers":{"tokenzero":{"type":"local","command":"__TOKENZERO_BIN__","args":["mcp-server","--allowed-root","__REPO__","--cache-path","__CACHE__"],"tools":["*"]}}}

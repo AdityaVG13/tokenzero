@@ -400,7 +400,7 @@ fn expand_across_engine_respawn_stays_byte_exact() {
 }
 
 #[test]
-fn expand_stale_persisted_sha_serves_full_after_payload_mutation() {
+fn expand_stale_persisted_sha_rejects_payload_mutation() {
     use tokenzero_core::ContentType;
     // This contract targets the LOCAL snapshot: with the pay-once user CAS
     // attached, blobs publish there and the snapshot never holds the bytes.
@@ -452,8 +452,12 @@ fn expand_stale_persisted_sha_serves_full_after_payload_mutation() {
         ref_id: blob_ref,
         ..Default::default()
     });
-    assert_eq!(resp.visible.as_ref().unwrap().text, "version_two\n");
     tokenzero_recovery::set_ref_index_disabled_override(false);
+    assert_eq!(resp.status, "error", "{:?}", resp.error);
+    assert!(
+        resp.visible.is_none(),
+        "hash-mismatched portable refs must not expose mutated bytes"
+    );
 }
 
 #[test]

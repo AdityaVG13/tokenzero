@@ -24,8 +24,14 @@ use crate::shared_cas::{SharedCas, SharedCasError};
 pub mod boot;
 pub mod embedded_store;
 pub mod migration;
+pub mod segment_store;
+#[cfg(test)]
+mod segment_store_tests;
 pub mod shared_cas;
 pub mod working_set;
+
+#[cfg(test)]
+mod tests;
 
 const LOCK_RETRIES: usize = 240;
 const MAX_SHELL_OUTCOMES: usize = 256;
@@ -41,6 +47,25 @@ const JOURNAL_MAX_SEALED_SEGMENTS: usize = 4;
 /// configured canonical shared CAS. Legacy short blob refs retain a clearly separated
 /// same-store alias tier when no shared object is available.
 pub const EXPAND_REF_SCHEMES: &[&str] = &["tz://", "fz://", "gz://"];
+const BLOB_REF_PREFIXES: &[(&str, &str)] = &[
+    ("tz", "tz://blob/"),
+    ("fz", "fz://blob/"),
+    ("gz", "gz://blob/"),
+];
+fn blob_ref_scheme_hash(bare: &str) -> Option<(&str, &str)> {
+    BLOB_REF_PREFIXES
+        .iter()
+        .find_map(|(scheme, prefix)| bare.strip_prefix(prefix).map(|hash| (*scheme, hash)))
+}
+fn blob_ref_hash(bare: &str) -> Option<&str> {
+    blob_ref_scheme_hash(bare).map(|(_, hash)| hash)
+}
+fn is_foreign_blob_ref(ref_id: &str) -> bool {
+    ref_id.starts_with("fz://blob/") || ref_id.starts_with("gz://blob/")
+}
+fn is_foreign_non_blob_ref(ref_id: &str) -> bool {
+    (ref_id.starts_with("fz://") || ref_id.starts_with("gz://")) && blob_ref_hash(ref_id).is_none()
+}
 
 /// True when `ref_id` starts with a scheme expand can recover (`tz://`, `fz://`, `gz://`).
 pub fn is_expandable_ref(ref_id: &str) -> bool {
@@ -56,21 +81,12 @@ pub fn canonicalize_expand_ref(ref_id: &str) -> Option<String> {
     if ref_id.starts_with("tz://") {
         return Some(ref_id.to_string());
     }
-    if let Some(rest) = ref_id.strip_prefix("fz://blob/") {
-        return Some(format!("tz://blob/{rest}"));
-    }
-    if let Some(rest) = ref_id.strip_prefix("gz://blob/") {
-        return Some(format!("tz://blob/{rest}"));
-    }
-    None
+    blob_ref_hash(ref_id).map(|hash| format!("tz://blob/{hash}"))
 }
 
 fn is_legacy_same_store_blob_ref(ref_id: &str) -> bool {
     let bare = ref_id.split_once('#').map_or(ref_id, |(bare, _)| bare);
-    let hash = ["tz://blob/", "fz://blob/", "gz://blob/"]
-        .iter()
-        .find_map(|prefix| bare.strip_prefix(prefix));
-    hash.is_some_and(|hash| {
+    blob_ref_hash(bare).is_some_and(|hash| {
         hash.len() == 17
             && hash.starts_with('b')
             && hash[1..]
@@ -79,15 +95,89 @@ fn is_legacy_same_store_blob_ref(ref_id: &str) -> bool {
     })
 }
 
-/// `file:line[:col]` matcher for search-output ingestion. Compiled once on first
-/// use — the pattern is a compile-time literal, so `expect` can only fire on a
-/// programmer typo (caught by the unit tests below), never on user input. The
-/// previous code rebuilt this regex on every `store_search_output` call.
+/// Lazily compiled `file:line[:col]` matcher for search ingestion.
 static SEARCH_PATH_LINE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"(?P<path>(?:[\w.@+-]+/)+[\w.@+-]+):(?P<line>\d+):?(?P<col>\d+)?")
         .expect("SEARCH_PATH_LINE is a valid compile-time regex literal")
 });
 static TMP_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+macro_rules! recovery_maps {
+    (contains $s:expr, $id:expr) => {
+        $s.blobs.contains_key($id)
+            || $s.files.contains_key($id)
+            || $s.units.contains_key($id)
+            || $s.search_hits.contains_key($id)
+    };
+    (remove $s:expr, $id:expr) => {{
+        $s.blobs.remove($id);
+        $s.files.remove($id);
+        $s.units.remove($id);
+        $s.search_hits.remove($id);
+    }};
+    (keys $s:expr) => {
+        $s.blobs
+            .keys()
+            .chain($s.files.keys())
+            .chain($s.units.keys())
+            .chain($s.search_hits.keys())
+    };
+    (copy $d:expr, $s:expr, $id:expr) => {{
+        copy_map_entry(&mut $d.blobs, &$s.blobs, $id);
+        copy_map_entry(&mut $d.files, &$s.files, $id);
+        copy_map_entry(&mut $d.units, &$s.units, $id);
+        copy_map_entry(&mut $d.search_hits, &$s.search_hits, $id);
+    }};
+    (merge $session:expr, $m:expr, $c:expr) => {{
+        merge_map_entries($session, &mut $m.blobs, $c.blobs);
+        merge_map_entries($session, &mut $m.files, $c.files);
+        merge_map_entries($session, &mut $m.units, $c.units);
+        merge_map_entries($session, &mut $m.search_hits, $c.search_hits);
+    }};
+    (evict $slf:expr) => {{
+        evict_prefix(
+            &mut $slf.state.blobs,
+            &mut $slf.state.order,
+            "tz://blob/",
+            $slf.config.max_blobs,
+        );
+        evict_prefix(
+            &mut $slf.state.files,
+            &mut $slf.state.order,
+            "tz://file/",
+            $slf.config.max_files,
+        );
+        evict_prefix(
+            &mut $slf.state.units,
+            &mut $slf.state.order,
+            "tz://unit/",
+            $slf.config.max_units,
+        );
+        evict_prefix(
+            &mut $slf.state.search_hits,
+            &mut $slf.state.order,
+            "tz://search/",
+            $slf.config.max_search_hits,
+        );
+    }};
+}
+
+macro_rules! persist_after_deferred {
+    ($name:ident, $deferred:ident ( $($arg:ident : $ty:ty),* $(,)? ) -> $ret:ty) => {
+        pub fn $name(&mut self, $($arg : $ty),*) -> Result<$ret, RecoveryError> {
+            let value = self.$deferred($($arg),*);
+            self.persist_value(value)
+        }
+    };
+}
+
+macro_rules! recovery_lib {
+    ($($tt:tt)*) => {
+        $($tt)*
+    };
+}
+
+recovery_lib! {
 
 #[derive(Debug, Error)]
 pub enum RecoveryError {
@@ -97,88 +187,33 @@ pub enum RecoveryError {
     Json(#[from] serde_json::Error),
 }
 
-/// ZeroRef v1 contract error taxonomy for portable blob refs.
-/// Stable error labels used by `parse_zeroref_v1_blob` and the v1 test suite.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ZeroRefError {
-    /// Ref string is not structurally a ZeroRef v1 blob ref.
-    Malformed,
-    /// Scope is not a portable blob ref (e.g. file, unit, session, execution, index).
-    Unsupported,
-    /// Object missing from the store (not found after a valid parse).
-    Missing,
-    /// Underlying storage or network read failed.
-    Io,
-    /// Complete-object digest verification failed.
-    Corruption,
-    /// Policy denied access/expansion.
-    Policy,
-    /// Ref version is incompatible with this consumer.
-    IncompatibleVersion,
-    /// Legacy short/prefix ID cannot be disambiguated under v1 rules.
-    LegacyAmbiguity,
+macro_rules! labeled_errors {
+    ($name:ident { $($var:ident => $label:literal),+ $(,)? }) => {
+        #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, thiserror::Error)]
+        #[serde(rename_all = "snake_case")]
+        pub enum $name {
+            $(
+                #[error($label)]
+                $var,
+            )+
+        }
+    };
 }
 
-impl std::fmt::Display for ZeroRefError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let label = match self {
-            Self::Malformed => "malformed",
-            Self::Unsupported => "unsupported",
-            Self::Missing => "missing",
-            Self::Io => "io",
-            Self::Corruption => "corruption",
-            Self::Policy => "policy",
-            Self::IncompatibleVersion => "incompatible_version",
-            Self::LegacyAmbiguity => "legacy_ambiguity",
-        };
-        write!(f, "{label}")
-    }
-}
+labeled_errors! { ZeroRefError {
+    Malformed => "malformed", Unsupported => "unsupported", Missing => "missing", Io => "io",
+    Corruption => "corruption", Policy => "policy", IncompatibleVersion => "incompatible_version",
+    LegacyAmbiguity => "legacy_ambiguity",
+}}
 
-impl std::error::Error for ZeroRefError {}
+labeled_errors! { FragmentError {
+    Malformed => "malformed", Reversed => "reversed", OutOfRange => "out_of_range",
+    NonUtf8Line => "non_utf8_line_fragment", UnknownKind => "unknown_kind",
+    DuplicateFragment => "duplicate_fragment",
+}}
 
-/// Typed error for `#B`/`#L` fragment parsing and evaluation (cqr.5).
-///
-/// Used by `parse_fragment_spec` and the `expand` fragment path to surface
-/// structured rejection instead of falling back to the full payload.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum FragmentError {
-    /// Fragment string is not structurally valid (non-numeric, missing `-`, empty).
-    Malformed,
-    /// `start > end` for a `#B` or `#L` range.
-    Reversed,
-    /// `end > content.len()` (`#B`) or `start/end > line_count` (`#L`).
-    OutOfRange,
-    /// `#L` requested on content whose line bytes are not valid UTF-8.
-    /// The current String-based store cannot produce this, but the contract
-    /// requires the variant so future raw-byte stores can signal it without
-    /// changing the error type.
-    NonUtf8Line,
-    /// Fragment kind is not `B` or `L`.
-    UnknownKind,
-    /// Fragment string contains a second `#` (e.g. `#B0-5#L1-3`).
-    DuplicateFragment,
-}
 
-impl std::fmt::Display for FragmentError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let label = match self {
-            Self::Malformed => "malformed",
-            Self::Reversed => "reversed",
-            Self::OutOfRange => "out_of_range",
-            Self::NonUtf8Line => "non_utf8_line_fragment",
-            Self::UnknownKind => "unknown_kind",
-            Self::DuplicateFragment => "duplicate_fragment",
-        };
-        write!(f, "{label}")
-    }
-}
-
-impl std::error::Error for FragmentError {}
-
-/// Internal parsed fragment spec produced by `parse_fragment_spec`.
+// Parsed byte or line fragment.
 enum FragmentSpec {
     /// Zero-based half-open byte range `start..end`.
     Byte { start: usize, end: usize },
@@ -186,18 +221,33 @@ enum FragmentSpec {
     Line { start: usize, end: usize },
 }
 
-/// Parse a `#B`/`#L` fragment string into a [`FragmentSpec`].
-///
-/// Fragment syntax (after the leading `#` stripped by `parse_ref`):
-/// - `Bstart-end` — zero-based half-open byte range; `start == end` allowed.
-/// - `Bn`         — single byte position `n..n` (empty).
-/// - `Lstart-end` — one-based inclusive line range.
-/// - `Ln`         — single line `n`.
-///
-/// Reversed (`start > end`), zero-line (`#L0`), duplicate (`#` inside
-/// fragment), unknown kind, and non-numeric values are rejected with typed
-/// [`FragmentError`]s. Out-of-range checks that need content length are
-/// deferred to the caller.
+// Parse validated byte and line fragment bounds.
+fn parse_fragment_bounds_core(
+    value: &str,
+    repeated_kind: char,
+    allow_single: bool,
+    require_nonzero_start: bool,
+) -> Result<(usize, usize), bool> {
+    if value.starts_with(repeated_kind) {
+        return Err(false);
+    }
+    let separated = value.split_once(',').or_else(|| value.split_once('-'));
+    let (start, end) = match separated {
+        Some((start, end)) => (start, end),
+        None if allow_single => (value, value),
+        None => return Err(false),
+    };
+    let start = start.trim_start_matches(repeated_kind).parse::<usize>().map_err(|_| false)?;
+    let end = end.trim_start_matches(repeated_kind).parse::<usize>().map_err(|_| false)?;
+    if require_nonzero_start && start == 0 {
+        return Err(false);
+    }
+    if start > end {
+        return Err(true);
+    }
+    Ok((start, end))
+}
+
 fn parse_fragment_spec(fragment: &str) -> Result<FragmentSpec, FragmentError> {
     if fragment.is_empty() {
         return Err(FragmentError::Malformed);
@@ -205,58 +255,49 @@ fn parse_fragment_spec(fragment: &str) -> Result<FragmentSpec, FragmentError> {
     if fragment.contains('#') {
         return Err(FragmentError::DuplicateFragment);
     }
-    let kind = &fragment[..1];
-    let rest = &fragment[1..];
+    let kind = fragment.as_bytes()[0] as char;
+    let map_err = |reversed| {
+        if reversed {
+            FragmentError::Reversed
+        } else {
+            FragmentError::Malformed
+        }
+    };
+    let (start, end) = parse_fragment_bounds_core(&fragment[1..], kind, true, kind == 'L').map_err(map_err)?;
     match kind {
-        "B" => {
-            let (start_str, end_str) = rest
-                .split_once('-')
-                .or_else(|| rest.split_once(','))
-                .unwrap_or((rest, rest));
-            let start = start_str
-                .trim_start_matches('B')
-                .parse::<usize>()
-                .map_err(|_| FragmentError::Malformed)?;
-            let end = end_str
-                .trim_start_matches('B')
-                .parse::<usize>()
-                .map_err(|_| FragmentError::Malformed)?;
-            if start > end {
-                return Err(FragmentError::Reversed);
-            }
-            Ok(FragmentSpec::Byte { start, end })
-        }
-        "L" => {
-            let (start_str, end_str) = rest.split_once('-').unwrap_or((rest, rest));
-            let start = start_str
-                .trim_start_matches('L')
-                .parse::<usize>()
-                .map_err(|_| FragmentError::Malformed)?;
-            let end = end_str
-                .trim_start_matches('L')
-                .parse::<usize>()
-                .map_err(|_| FragmentError::Malformed)?;
-            if start == 0 {
-                return Err(FragmentError::Malformed);
-            }
-            if start > end {
-                return Err(FragmentError::Reversed);
-            }
-            Ok(FragmentSpec::Line { start, end })
-        }
+        'B' => Ok(FragmentSpec::Byte { start, end }),
+        'L' => Ok(FragmentSpec::Line { start, end }),
         _ => Err(FragmentError::UnknownKind),
     }
 }
 
 /// Stable reason string for a [`FragmentError`] used in `ExpansionResult::reason`.
-fn fragment_error_reason(err: FragmentError) -> String {
+fn shared_cas_error_reason(err: SharedCasError) -> &'static str {
     match err {
-        FragmentError::Malformed => "fragment-malformed".to_string(),
-        FragmentError::Reversed => "fragment-reversed".to_string(),
-        FragmentError::OutOfRange => "fragment-out-of-range".to_string(),
-        FragmentError::NonUtf8Line => "non_utf8_line_fragment".to_string(),
-        FragmentError::UnknownKind => "fragment-unknown-kind".to_string(),
-        FragmentError::DuplicateFragment => "fragment-duplicate".to_string(),
+        SharedCasError::Corruption => "shared-cas-corruption",
+        SharedCasError::Policy => "shared-cas-policy",
+        SharedCasError::Io(_) => "shared-cas-io",
+        SharedCasError::InvalidHash(_) => "zeroref-malformed",
+        SharedCasError::NotFound => "shared-cas-missing",
+    }
+}
+
+/// `Err(None)` = non-UTF8 object bytes; `Err(Some(_))` = CAS error.
+fn shared_cas_utf8(cas: &SharedCas, hash: &str) -> Result<String, Option<SharedCasError>> {
+    match cas.resolve(hash) {
+        Ok(bytes) => String::from_utf8(bytes).map_err(|_| None),
+        Err(err) => Err(Some(err)),
+    }
+}
+
+fn fragment_error_reason(err: FragmentError) -> &'static str {
+    match err {
+        FragmentError::Malformed => "fragment-malformed",
+        FragmentError::Reversed => "fragment-reversed",
+        FragmentError::OutOfRange => "fragment-out-of-range",
+        FragmentError::NonUtf8Line => "non_utf8_line_fragment",
+        FragmentError::UnknownKind => "fragment-unknown-kind",
+        FragmentError::DuplicateFragment => "fragment-duplicate",
     }
 }
 
@@ -278,128 +319,38 @@ pub enum ZeroRefFragment {
     Line { start: usize, end: usize },
 }
 
-/// Parse and validate a ZeroRef v1 portable blob ref.
-///
-/// Portable scope is `(tz|fz|gz)://blob/<full-hash>` only. Execution/error/session/file/graph/index
-/// refs remain engine-specific and are rejected with `ZeroRefError::Unsupported`.
-///
-/// Identity is the full lowercase 64-hex SHA-256 of the complete unfragmented bytes. The parser
-/// emits the full hash and rejects short, prefix, uppercase, non-hex, or extra-segment IDs.
-///
-/// Fragments:
-/// - `#Bstart-end`: zero-based half-open byte range, checked arithmetic; `start == end` allowed;
-///   reversed (`start > end`) or `end > byte_length` rejected with `Malformed`.
-/// - `#Lstart-end`: one-based inclusive line range, exact newline retention; `start == 0`,
-///   reversed, or out-of-bounds rejected with `Malformed`.
-///
-/// Legacy 17-character short IDs (prefix + 8 hex bytes) are rejected by this v1 parser; callers
-/// that need backward compatibility should detect `LegacyAmbiguity` and fall back to the existing
-/// `parse_ref`/`canonicalize_expand_ref` path.
-pub fn parse_zeroref_v1_blob(
-    ref_id: &str,
-    byte_length: Option<usize>,
-) -> Result<ZeroRefV1Blob, ZeroRefError> {
-    let (bare, fragment_str) = ref_id
-        .split_once('#')
-        .map_or((ref_id, None), |(b, f)| (b, Some(f)));
-
-    // Scheme must be one of the three portable blob schemes and the path must be exactly `blob/<hash>`.
-    let scheme = if bare.starts_with("tz://blob/") {
-        "tz"
-    } else if bare.starts_with("fz://blob/") {
-        "fz"
-    } else if bare.starts_with("gz://blob/") {
-        "gz"
-    } else {
-        return Err(ZeroRefError::Unsupported);
-    };
-    let hash = bare
-        .strip_prefix(&format!("{scheme}://blob/"))
-        .expect("prefix checked above");
-
-    if hash.is_empty() {
-        return Err(ZeroRefError::Malformed);
-    }
-    if hash.contains('/') {
+/// Parse a portable `(tz|fz|gz)://blob/<sha256>` ZeroRef v1 reference.
+/// Only full lowercase SHA-256 identities are accepted. `#Bstart-end` is a
+/// zero-based half-open byte range; `#Lstart-end` is a one-based inclusive
+/// line range. Legacy short IDs return [`ZeroRefError::LegacyAmbiguity`].
+pub fn parse_zeroref_v1_blob(ref_id: &str, byte_length: Option<usize>) -> Result<ZeroRefV1Blob, ZeroRefError> {
+    let (bare, fragment) = ref_id.split_once('#').map_or((ref_id, None), |(bare, fragment)| (bare, Some(fragment)));
+    let (scheme, hash) = blob_ref_scheme_hash(bare).ok_or(ZeroRefError::Unsupported)?;
+    if hash.is_empty() || hash.contains('/') {
         return Err(ZeroRefError::Malformed);
     }
     if hash.len() != 64 {
-        // 17-char short IDs (prefix + 8 hex bytes) are a legacy format, not v1.
         return Err(ZeroRefError::LegacyAmbiguity);
     }
-    if hash
-        .chars()
-        .any(|c| !c.is_ascii_hexdigit() || c.is_ascii_uppercase())
-    {
+    if hash.bytes().any(|byte| !byte.is_ascii_hexdigit() || byte.is_ascii_uppercase()) {
         return Err(ZeroRefError::Malformed);
     }
-
-    let fragment = fragment_str
-        .map(|f| parse_zeroref_v1_fragment(f, byte_length))
+    let fragment = fragment
+        .map(|fragment| {
+            let (kind, value) = match fragment.as_bytes().first() {
+                Some(&b'B') => ('B', &fragment[1..]),
+                Some(&b'L') => ('L', &fragment[1..]),
+                _ => return Err(ZeroRefError::Malformed),
+            };
+            let (start, end) = parse_fragment_bounds_core(value, kind, kind == 'L', kind == 'L').map_err(|_| ZeroRefError::Malformed)?;
+            match kind {
+                'B' if byte_length.is_none_or(|len| end <= len) => Ok(ZeroRefFragment::Byte { start, end }),
+                'L' => Ok(ZeroRefFragment::Line { start, end }),
+                _ => Err(ZeroRefError::Malformed),
+            }
+        })
         .transpose()?;
-
-    Ok(ZeroRefV1Blob {
-        scheme: scheme.to_string(),
-        hash: hash.to_string(),
-        fragment,
-    })
-}
-
-fn parse_zeroref_v1_fragment(
-    fragment: &str,
-    byte_length: Option<usize>,
-) -> Result<ZeroRefFragment, ZeroRefError> {
-    if fragment.is_empty() {
-        return Err(ZeroRefError::Malformed);
-    }
-    match fragment.chars().next() {
-        Some('B') => parse_zeroref_v1_byte_fragment(&fragment[1..], byte_length),
-        Some('L') => parse_zeroref_v1_line_fragment(&fragment[1..]),
-        _ => Err(ZeroRefError::Malformed),
-    }
-}
-
-fn parse_zeroref_v1_byte_fragment(
-    value: &str,
-    byte_length: Option<usize>,
-) -> Result<ZeroRefFragment, ZeroRefError> {
-    let (start, end) = parse_zeroref_v1_fragment_bounds(value, 'B', false)?;
-    if let Some(len) = byte_length {
-        if end > len {
-            return Err(ZeroRefError::Malformed);
-        }
-    }
-    Ok(ZeroRefFragment::Byte { start, end })
-}
-
-fn parse_zeroref_v1_line_fragment(value: &str) -> Result<ZeroRefFragment, ZeroRefError> {
-    let (start, end) = parse_zeroref_v1_fragment_bounds(value, 'L', true)?;
-    Ok(ZeroRefFragment::Line { start, end })
-}
-
-fn parse_zeroref_v1_fragment_bounds(
-    value: &str,
-    repeated_kind: char,
-    allow_single: bool,
-) -> Result<(usize, usize), ZeroRefError> {
-    let separated = value.split_once(',').or_else(|| value.split_once('-'));
-    let (start, end) = match separated {
-        Some((start, end)) => (start, end),
-        None if allow_single => (value, value),
-        None => return Err(ZeroRefError::Malformed),
-    };
-    let start = start
-        .parse::<usize>()
-        .map_err(|_| ZeroRefError::Malformed)?;
-    let end = end
-        .strip_prefix(repeated_kind)
-        .unwrap_or(end)
-        .parse::<usize>()
-        .map_err(|_| ZeroRefError::Malformed)?;
-    if (repeated_kind == 'L' && start == 0) || start > end {
-        return Err(ZeroRefError::Malformed);
-    }
-    Ok((start, end))
+    Ok(ZeroRefV1Blob { scheme: scheme.to_string(), hash: hash.to_string(), fragment })
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -480,6 +431,36 @@ pub struct StoredPayload {
     pub source_end_line: Option<usize>,
 }
 
+#[derive(Debug, Clone)]
+struct PayloadMemo {
+    text: String,
+    content_type: ContentType,
+    path: Option<PathBuf>,
+    source_start_line: Option<usize>,
+    source_end_line: Option<usize>,
+    source_backed: bool,
+    stored: StoredPayload,
+}
+
+impl PayloadMemo {
+    fn matches(
+        &self,
+        text: &str,
+        content_type: ContentType,
+        path: Option<&Path>,
+        source_start_line: Option<usize>,
+        source_end_line: Option<usize>,
+        source_backed: bool,
+    ) -> bool {
+        self.text == text
+            && self.content_type == content_type
+            && self.path.as_deref() == path
+            && self.source_start_line == source_start_line
+            && self.source_end_line == source_end_line
+            && self.source_backed == source_backed
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExpansionResult {
     #[serde(rename = "ref")]
@@ -494,14 +475,7 @@ pub struct ExpansionResult {
 impl ExpansionResult {
     pub fn ok(ref_id: String, selector: Option<String>, content: String) -> Self {
         let tokens = count_tokens(&content);
-        Self {
-            ref_id,
-            selector,
-            content,
-            tokens,
-            found: true,
-            reason: "ok".to_string(),
-        }
+        Self { ref_id, selector, content, tokens, found: true, reason: "ok".to_string() }
     }
 
     pub fn missing(ref_id: String, selector: Option<String>, reason: impl Into<String>) -> Self {
@@ -523,11 +497,7 @@ pub enum BlobEntry {
     /// deserialize into this variant and serialize back to the same JSON shape.
     Inline(String),
     /// Pointer to an exact, one-based inclusive source line range.
-    FileRef {
-        path: PathBuf,
-        source_start_line: usize,
-        source_end_line: usize,
-    },
+    FileRef { path: PathBuf, source_start_line: usize, source_end_line: usize },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -554,10 +524,7 @@ pub(crate) struct RecoveryState {
     pub ambiguous_aliases: BTreeSet<String>,
 }
 
-/// Last observed result of a shell command, keyed by scope+command hash, so
-/// repeat runs with byte-identical output can render as a delta instead of
-/// re-paying for the full capsule. The combined blob itself lives in `blobs`
-/// (content-addressed), so this index never duplicates payload bytes.
+// Capped shell-result index; blob payloads remain content-addressed.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct ShellOutcome {
     pub combined_sha: String,
@@ -573,9 +540,7 @@ pub struct ShellRepeat {
     pub seen: u32,
 }
 
-#[derive(
-    Debug, Default, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize,
-)]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "PascalCase")]
 pub enum ContentClass {
     SourceFile,
@@ -588,13 +553,12 @@ pub enum ContentClass {
     Unknown,
 }
 
-/// Infer a coarse content class from the ref kind and the original content type.
-/// Used to tag ref-index entries so a predictor can learn per-class expansion rates.
+// Infer the ref-index content class.
 fn classify_ref(ref_id: &str, content_type: Option<ContentType>) -> ContentClass {
     let Some(parsed) = parse_ref(ref_id) else {
         return ContentClass::Unknown;
     };
-    match parsed.kind.as_str() {
+    match parsed.kind {
         "file" => ContentClass::SourceFile,
         "search" => ContentClass::SearchHits,
         "unit" => match content_type {
@@ -606,10 +570,9 @@ fn classify_ref(ref_id: &str, content_type: Option<ContentType>) -> ContentClass
             Some(ContentType::Code) => ContentClass::SourceFile,
             Some(ContentType::Diff) => ContentClass::Diff,
             Some(ContentType::ShellOutput) => ContentClass::ShellOutput,
-            Some(ContentType::Markdown)
-            | Some(ContentType::Logs)
-            | Some(ContentType::Tree)
-            | Some(ContentType::JsonConfig) => ContentClass::Doc,
+            Some(ContentType::Markdown) | Some(ContentType::Logs) | Some(ContentType::Tree) | Some(ContentType::JsonConfig) => {
+                ContentClass::Doc
+            }
             Some(ContentType::SearchResult) => ContentClass::SearchHits,
             _ => ContentClass::BinaryPreview,
         },
@@ -664,6 +627,14 @@ impl RecoveryState {
             ambiguous_aliases: BTreeSet::new(),
         }
     }
+
+    fn configure(&mut self, config: &RecoveryConfig) {
+        self.max_blobs = config.max_blobs;
+        self.max_files = config.max_files;
+        self.max_units = config.max_units;
+        self.max_search_hits = config.max_search_hits;
+        self.max_bytes = config.max_bytes;
+    }
 }
 
 #[derive(Debug)]
@@ -700,14 +671,15 @@ pub struct RecoveryStore {
     /// Transient set of alias short refs pending deletion. Applied by
     /// persist() and cleared only after successful authoritative snapshot write.
     pending_alias_deletions: BTreeSet<String>,
+    /// Last exact payload admitted by this engine. One entry bounds retained
+    /// memory while covering the repeated MCP read/find hot path.
+    payload_memo: Option<PayloadMemo>,
+    /// A memo hit can make the immediately following persist provably empty.
+    /// Any real ref mutation clears this flag through `remember_ref`.
+    skip_empty_persist: bool,
 }
 
-/// Cache-file identity used to detect foreign writes between persists.
-/// `atomic_write_json` always replaces the file via rename, so any cooperating
-/// writer changes the inode — mtime alone is never trusted (its granularity
-/// can be a full second on some filesystems). Captured only under the persist
-/// lock; any uncertainty (missing file, unreadable metadata) must yield `None`
-/// and force the full reload+merge path.
+// Snapshot identity used to detect foreign atomic replacements.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct DiskIdentity {
     len: u64,
@@ -728,19 +700,15 @@ impl DiskIdentity {
         #[cfg(unix)]
         {
             use std::os::unix::fs::MetadataExt;
-            Some(Self {
-                len: meta.len(),
-                modified,
-                dev: meta.dev(),
-                ino: meta.ino(),
-            })
+            Some(Self { len: meta.len(), modified, dev: meta.dev(), ino: meta.ino() })
         }
         #[cfg(not(unix))]
-        Some(Self {
-            len: meta.len(),
-            modified,
-        })
+        Some(Self { len: meta.len(), modified })
     }
+}
+
+fn cache_identities(path: &Path) -> (Option<DiskIdentity>, Option<DiskIdentity>) {
+    (DiskIdentity::capture(path), DiskIdentity::capture(&journal_path(path)))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -757,41 +725,14 @@ impl RecoveryStore {
     }
 
     pub fn with_config(persistence_path: Option<PathBuf>, config: RecoveryConfig) -> Self {
-        let loaded = persistence_path
-            .as_ref()
-            .and_then(|path| load_state(path, &config).ok().flatten());
-        // Capture disk identity right after a successful load (read first,
-        // stat second). This lets the FIRST persist of a fresh process take
-        // the journal fast path — critical for CLI invocations, which are one
-        // process per call and would otherwise rewrite the whole snapshot
-        // every time. The capture runs without the persist lock, but that is
-        // safe: persist re-captures under the lock and any mismatch falls
-        // back to the full reload+merge. If a foreign write lands between our
-        // read and stat, the identity matches the NEWER disk state and the
-        // fast path appends only this session's refs — byte-for-byte the same
-        // disk outcome merge_states would have produced.
-        let (disk_identity, journal_identity) = match (&loaded, &persistence_path) {
-            (Some(_), Some(path)) => (
-                DiskIdentity::capture(path),
-                DiskIdentity::capture(&journal_path(path)),
-            ),
-            _ => (None, None),
-        };
+        let loaded = persistence_path.as_ref().and_then(|path| load_state(path, &config).ok().flatten());
+        let (disk_identity, journal_identity) =
+            loaded.as_ref().and(persistence_path.as_deref()).map(cache_identities).unwrap_or_default();
         let state = loaded.unwrap_or_else(|| RecoveryState::empty(&config));
         let shared_cas = persistence_path
             .as_deref()
             .and_then(SharedCas::detect_from_cache_path)
-            // Pay-once user CAS attaches only to durable stores: memory-only
-            // stores publishing to (and stat-scanning) the user CAS would leak
-            // ephemeral payloads into it and drag real-store latency into
-            // hermetic contexts.
-            .or_else(|| {
-                persistence_path
-                    .is_some()
-                    .then(ref_index_root)
-                    .flatten()
-                    .map(SharedCas::new)
-            });
+            .or_else(|| persistence_path.is_some().then(ref_index_root).flatten().map(SharedCas::new));
         Self {
             config,
             persistence_path,
@@ -806,20 +747,16 @@ impl RecoveryStore {
             legacy_read_count: 0,
             pending_blob_deletions: BTreeSet::new(),
             pending_alias_deletions: BTreeSet::new(),
+            payload_memo: None,
+            skip_empty_persist: false,
         }
     }
 
     /// Persist exact bytes as a durable content-addressed blob without
     /// creating file/unit index entries. Used when prompt spans are paged out.
-    pub fn store_blob(
-        &mut self,
-        text: &str,
-        content_type: ContentType,
-    ) -> Result<String, RecoveryError> {
+    pub fn store_blob(&mut self, text: &str, content_type: ContentType) -> Result<String, RecoveryError> {
         let ref_id = self.put_blob(text, content_type);
-        self.evict();
-        self.persist()?;
-        Ok(ref_id)
+        self.persist_evicted(ref_id)
     }
 
     /// Persist a blob as a pointer to an exact source-file line range.
@@ -835,49 +772,28 @@ impl RecoveryStore {
     ) -> Result<String, RecoveryError> {
         let source = fs::read_to_string(path)?;
         let line_count = content_line_count(&source);
-        if source_start_line == 0
-            || source_start_line > source_end_line
-            || source_end_line > line_count
-        {
+        if line_range_out_of_bounds(source_start_line, source_end_line, line_count) {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidInput,
-                format!(
-                    "invalid source line range {source_start_line}..={source_end_line}; file has {line_count} lines"
-                ),
+                format!("invalid source line range {source_start_line}..={source_end_line}; file has {line_count} lines"),
             )
             .into());
         }
         let text = line_slice_exact(&source, source_start_line, source_end_line);
-        let ref_id = self.put_file_backed_blob(
-            &text,
-            path,
-            source_start_line,
-            source_end_line,
-            content_type,
-        );
-        self.evict();
-        self.persist()?;
-        Ok(ref_id)
+        let ref_id = self.put_file_backed_blob(&text, path, source_start_line, source_end_line, content_type);
+        self.persist_evicted(ref_id)
     }
 
-    pub fn store_payload(
-        &mut self,
-        text: &str,
-        content_type: ContentType,
-        path: Option<&Path>,
-        source_start_line: Option<usize>,
-        source_end_line: Option<usize>,
-    ) -> Result<StoredPayload, RecoveryError> {
-        let stored = self.store_payload_deferred(
-            text,
-            content_type,
-            path,
-            source_start_line,
-            source_end_line,
-        );
-        self.persist()?;
-        Ok(stored)
-    }
+    persist_after_deferred!(
+        store_payload,
+        store_payload_deferred(
+            text: &str,
+            content_type: ContentType,
+            path: Option<&Path>,
+            source_start_line: Option<usize>,
+            source_end_line: Option<usize>,
+        ) -> StoredPayload
+    );
 
     pub fn store_payload_deferred(
         &mut self,
@@ -887,14 +803,10 @@ impl RecoveryStore {
         source_start_line: Option<usize>,
         source_end_line: Option<usize>,
     ) -> StoredPayload {
-        let stored = self.store_payload_deferred_batch(
-            text,
-            content_type,
-            path,
-            source_start_line,
-            source_end_line,
-        );
-        self.evict();
+        let stored = self.store_payload_deferred_batch(text, content_type, path, source_start_line, source_end_line);
+        if !self.skip_empty_persist {
+            self.evict();
+        }
         stored
     }
 
@@ -906,8 +818,100 @@ impl RecoveryStore {
         source_start_line: Option<usize>,
         source_end_line: Option<usize>,
     ) -> StoredPayload {
+        if let Some(stored) = self.admit_memoized_payload(text, content_type, path, source_start_line, source_end_line, false) {
+            return stored;
+        }
         let blob_ref = self.put_blob(text, content_type);
         let file_ref = self.put_file(text, content_type, path, source_start_line, source_end_line);
+        let stored = self.finish_payload(blob_ref, file_ref, text, content_type, source_start_line, source_end_line);
+        self.memoize_payload(text, content_type, path, (source_start_line, source_end_line), false, &stored);
+        stored
+    }
+
+    /// Admit an already-read complete source file without duplicating its payload.
+    pub fn store_source_backed_payload_deferred_batch(&mut self, text: &str, content_type: ContentType, path: &Path) -> StoredPayload {
+        if let Some(stored) = self.admit_memoized_payload(text, content_type, Some(path), None, None, true) {
+            return stored;
+        }
+        let source_sha256 = sha256_hex(text);
+        let blob_ref = self.put_file_backed_blob_hashed(path, 1, content_line_count(text), content_type, &source_sha256);
+        let file_ref = self.put_source_backed_file(text, content_type, path, &source_sha256);
+        let stored = self.finish_payload(blob_ref, file_ref, text, content_type, None, None);
+        self.memoize_payload(text, content_type, Some(path), (None, None), true, &stored);
+        stored
+    }
+
+    fn memoized_payload(
+        &self,
+        text: &str,
+        content_type: ContentType,
+        path: Option<&Path>,
+        source_start_line: Option<usize>,
+        source_end_line: Option<usize>,
+        source_backed: bool,
+    ) -> Option<StoredPayload> {
+        let memo = self
+            .payload_memo
+            .as_ref()?
+            .matches(
+                text,
+                content_type,
+                path,
+                source_start_line,
+                source_end_line,
+                source_backed,
+            )
+            .then_some(self.payload_memo.as_ref()?)?;
+        let refs_live = self.state.files.contains_key(&memo.stored.file_ref)
+            && memo.stored.unit_refs.iter().all(|ref_id| self.state.units.contains_key(ref_id))
+            && self.has_ref(&memo.stored.blob_ref);
+        refs_live.then(|| memo.stored.clone())
+    }
+
+    fn admit_memoized_payload(
+        &mut self,
+        text: &str,
+        content_type: ContentType,
+        path: Option<&Path>,
+        source_start_line: Option<usize>,
+        source_end_line: Option<usize>,
+        source_backed: bool,
+    ) -> Option<StoredPayload> {
+        let stored = self.memoized_payload(text, content_type, path, source_start_line, source_end_line, source_backed)?;
+        self.skip_empty_persist = true;
+        Some(stored)
+    }
+
+    fn memoize_payload(
+        &mut self,
+        text: &str,
+        content_type: ContentType,
+        path: Option<&Path>,
+        source_lines: (Option<usize>, Option<usize>),
+        source_backed: bool,
+        stored: &StoredPayload,
+    ) {
+        let (source_start_line, source_end_line) = source_lines;
+        self.payload_memo = Some(PayloadMemo {
+            text: text.to_owned(),
+            content_type,
+            path: path.map(Path::to_path_buf),
+            source_start_line,
+            source_end_line,
+            source_backed,
+            stored: stored.clone(),
+        });
+    }
+
+    fn finish_payload(
+        &mut self,
+        blob_ref: String,
+        file_ref: String,
+        text: &str,
+        content_type: ContentType,
+        source_start_line: Option<usize>,
+        source_end_line: Option<usize>,
+    ) -> StoredPayload {
         let unit_refs = self.index_units(text, content_type, &file_ref);
         StoredPayload {
             blob_ref,
@@ -919,36 +923,14 @@ impl RecoveryStore {
         }
     }
 
-    /// Admit an already-read complete source file without duplicating its payload.
-    ///
-    /// Recovery stores path/range pointers plus a content fingerprint and
-    /// revalidates the source on expansion. Ordinary payload admission remains
-    /// self-contained for ephemeral and ranged content.
-    pub fn store_source_backed_payload_deferred_batch(
-        &mut self,
-        text: &str,
-        content_type: ContentType,
-        path: &Path,
-    ) -> StoredPayload {
-        let source_end_line = content_line_count(text);
-        let source_sha256 = sha256_hex(text);
-        let blob_ref = self.put_file_backed_blob_hashed(
-            path,
-            1,
-            source_end_line,
-            content_type,
-            &source_sha256,
-        );
-        let file_ref = self.put_source_backed_file(text, content_type, path, &source_sha256);
-        let unit_refs = self.index_units(text, content_type, &file_ref);
-        StoredPayload {
-            blob_ref,
-            file_ref,
-            unit_refs,
-            raw_tokens: count_tokens(text),
-            source_start_line: None,
-            source_end_line: None,
-        }
+    fn persist_value<T>(&mut self, value: T) -> Result<T, RecoveryError> {
+        self.persist()?;
+        Ok(value)
+    }
+
+    fn persist_evicted<T>(&mut self, value: T) -> Result<T, RecoveryError> {
+        self.evict();
+        self.persist_value(value)
     }
 
     pub fn persist_pending(&mut self) -> Result<(), RecoveryError> {
@@ -956,38 +938,34 @@ impl RecoveryStore {
     }
 
     pub fn store_alias(&mut self, alias: &str, target_ref: &str) -> Result<(), RecoveryError> {
-        self.state
-            .aliases
-            .insert(alias.to_string(), target_ref.to_string());
+        self.store_alias_deferred(alias, target_ref);
         self.persist()
     }
 
     /// Store an alias without persisting. Caller must call `persist_pending()`.
     pub fn store_alias_deferred(&mut self, alias: &str, target_ref: &str) {
-        self.state
-            .aliases
-            .insert(alias.to_string(), target_ref.to_string());
+        self.skip_empty_persist = false;
+        self.state.aliases.insert(alias.to_string(), target_ref.to_string());
     }
 
-    /// Remove an alias. Caller must call `persist_pending()`.
-    /// Marks a tombstone; persist() applies the actual removal after merging
-    /// concurrent disk state so external additions are preserved.
+    /// Remove an alias after the next authoritative persist.
     pub(crate) fn remove_alias(&mut self, alias: &str) {
+        self.skip_empty_persist = false;
         self.state.aliases.remove(alias);
         self.state.ambiguous_aliases.remove(alias);
         self.pending_alias_deletions.insert(alias.to_string());
     }
 
-    /// Remove a blob from the store. Caller must call `persist_pending()`.
-    /// Marks a tombstone; persist() applies the actual removal after merging
-    /// concurrent disk state so external additions are preserved.
+    /// Remove a blob after the next authoritative persist.
     pub(crate) fn remove_blob(&mut self, ref_id: &str) {
+        self.skip_empty_persist = false;
         self.state.blobs.remove(ref_id);
         self.pending_blob_deletions.insert(ref_id.to_string());
     }
 
     /// Mark a short ref as ambiguous (maps to multiple full hashes).
     pub fn mark_ambiguous(&mut self, short_ref: &str) {
+        self.skip_empty_persist = false;
         self.state.ambiguous_aliases.insert(short_ref.to_string());
     }
 
@@ -1009,29 +987,13 @@ impl RecoveryStore {
     /// Resolve a blob's content by its full ref ID.
     /// Returns None if not found or if the stored value cannot be resolved.
     pub(crate) fn resolve_blob_content(&self, ref_id: &str) -> Option<String> {
-        self.state.blobs.get(ref_id).and_then(|value| {
-            match resolve_blob_value(self.persistence_path.as_deref(), ref_id, value) {
-                RefResolve::Found(content) => Some(content),
-                RefResolve::NotFound | RefResolve::Stale | RefResolve::DecodeFailed => None,
-            }
+        self.state.blobs.get(ref_id).and_then(|value| match resolve_blob_value(self.persistence_path.as_deref(), ref_id, value) {
+            RefResolve::Found(content) => Some(content),
+            RefResolve::NotFound | RefResolve::Stale | RefResolve::DecodeFailed => None,
         })
     }
 
-    /// Insert a raw blob entry with a caller-specified ref ID (test only).
-    #[cfg(test)]
-    pub(crate) fn insert_test_blob(&mut self, ref_id: &str, content: &str) {
-        self.state
-            .blobs
-            .insert(ref_id.to_string(), BlobEntry::Inline(content.to_string()));
-        self.remember_ref(ref_id);
-    }
-
-    /// Cross-engine fallback: expand a foreign-engine blob ref (`fz://` or
-    /// `gz://`) in the sibling engine's recovery store under the same unified
-    /// ZeroStack root. This fixes the fszero-fz-ref-expand-broken-izj class of
-    /// failures where the minting engine stores the payload locally rather than
-    /// publishing it to the shared CAS, and the expanding tokenzero engine only
-    /// searched its own store.
+    // Resolve foreign blobs from a sibling engine store under the same root.
     fn expand_in_sibling_engine_store(
         &self,
         requested_ref: &str,
@@ -1053,23 +1015,8 @@ impl RecoveryStore {
         }
         let canonical = canonicalize_expand_ref(requested_ref)?;
         let mut sibling_store = RecoveryStore::new(Some(sibling_cache));
-        let result = sibling_store.expand(
-            &canonical,
-            selector,
-            start_line,
-            end_line,
-            anchor_kind,
-            symbol,
-        );
-        if result.found {
-            Some(ExpansionResult::ok(
-                requested_ref.to_string(),
-                result.selector,
-                result.content,
-            ))
-        } else {
-            None
-        }
+        let result = sibling_store.expand(&canonical, selector, start_line, end_line, anchor_kind, symbol);
+        result.found.then(|| ExpansionResult::ok(requested_ref.to_string(), result.selector, result.content))
     }
 
     /// Return migration/compatibility state for doctor JSON output.
@@ -1097,21 +1044,12 @@ impl RecoveryStore {
         (blob_ref, file_ref)
     }
 
-    pub fn store_search_output(
-        &mut self,
-        output: &str,
-        query: Option<&str>,
-    ) -> Result<Vec<String>, RecoveryError> {
-        let refs = self.store_search_output_deferred(output, query);
-        self.persist()?;
-        Ok(refs)
-    }
+    persist_after_deferred!(
+        store_search_output,
+        store_search_output_deferred(output: &str, query: Option<&str>) -> Vec<String>
+    );
 
-    pub fn store_search_output_deferred(
-        &mut self,
-        output: &str,
-        query: Option<&str>,
-    ) -> Vec<String> {
+    pub fn store_search_output_deferred(&mut self, output: &str, query: Option<&str>) -> Vec<String> {
         let path_line = &*SEARCH_PATH_LINE;
         let mut refs = Vec::new();
         for (idx, line) in output.lines().enumerate() {
@@ -1123,134 +1061,53 @@ impl RecoveryStore {
             }
             let hit_id = id_for('h', &format!("search:{idx}:{line}"));
             let ref_id = format!("tz://search/{hit_id}");
-            self.ref_classes.insert(
-                ref_id.clone(),
-                classify_ref(&ref_id, Some(ContentType::SearchResult)),
-            );
-            self.state.search_hits.insert(
-                ref_id.clone(),
-                StoredUnit {
-                    ref_id: ref_id.clone(),
-                    text: line.to_string(),
-                    content_type: "search_result".to_string(),
-                    source_ref: None,
-                    start_line: Some(idx + 1),
-                    end_line: Some(idx + 1),
-                },
-            );
-            self.remember_ref(&ref_id);
-            refs.push(ref_id);
+            refs.push(self.insert_stored_unit(
+                true, ref_id, line, ContentType::SearchResult, None, (Some(idx + 1), Some(idx + 1)),
+            ));
         }
         self.evict();
         refs
     }
 
     pub fn expand(
-        &mut self,
-        ref_id: &str,
-        selector: Option<&str>,
-        start_line: Option<usize>,
-        end_line: Option<usize>,
-        anchor_kind: Option<&str>,
-        symbol: Option<&str>,
+        // Validate routing and fragments before resolving CAS/local content and selectors.
+        &mut self, ref_id: &str, selector: Option<&str>, start_line: Option<usize>, end_line: Option<usize>,
+        anchor_kind: Option<&str>, symbol: Option<&str>,
     ) -> ExpansionResult {
         self.recovery_count += 1;
         let requested_ref = ref_id.to_string();
-        // Validate fragments before the ZeroRef structural parser so fragment
-        // failures retain their dedicated error taxonomy.
-        if let Some((_, fragment)) = ref_id.split_once('#') {
-            if let Err(err) = parse_fragment_spec(fragment) {
-                return ExpansionResult::missing(
-                    requested_ref,
-                    selector.map(str::to_string),
-                    fragment_error_reason(err),
-                );
-            }
+        let selector_owned = selector.map(str::to_string);
+        macro_rules! miss {
+            ($reason:expr) => {
+                ExpansionResult::missing(requested_ref.clone(), selector_owned.clone(), $reason)
+            };
         }
-        // Full-hash portable blobs use the canonical shared CAS before the
-        // legacy TokenZero JSON tier. The original scheme and complete digest
-        // stay intact for routing, verification, and errors.
-        let portable = match parse_zeroref_v1_blob(ref_id, None) {
-            Ok(parsed) => Some(parsed),
-            Err(ZeroRefError::Unsupported) => None,
-            Err(ZeroRefError::LegacyAmbiguity) if is_legacy_same_store_blob_ref(ref_id) => None,
-            Err(err) => {
-                return ExpansionResult::missing(
-                    requested_ref,
-                    selector.map(str::to_string),
-                    format!("zeroref-{err}"),
-                );
-            }
+        let early_fragment = ref_id.split_once('#').map(|(_, fragment)| fragment);
+        let early_fragment_spec = match early_fragment.map(parse_fragment_spec).transpose() {
+            Err(err) => return miss!(fragment_error_reason(err)),
+            Ok(spec) => spec,
         };
-        if portable.is_none()
-            && (ref_id.starts_with("fz://") || ref_id.starts_with("gz://"))
-            && !ref_id.starts_with("fz://blob/")
-            && !ref_id.starts_with("gz://blob/")
-        {
-            return ExpansionResult::missing(
-                requested_ref,
-                selector.map(str::to_string),
-                "unsupported-ref-kind",
-            );
+        let portable = match parse_expand_portable(ref_id) {
+            Ok(parsed) => parsed,
+            Err(reason) => return miss!(reason),
+        };
+        if portable.is_none() && is_foreign_non_blob_ref(ref_id) {
+            return miss!("unsupported-ref-kind");
         }
         let Some(lookup_ref) = canonicalize_expand_ref(ref_id) else {
-            return ExpansionResult::missing(
-                requested_ref,
-                selector.map(str::to_string),
-                "invalid-ref",
-            );
+            return miss!("invalid-ref");
         };
-
-        // Check legacy_compat and ambiguous-aliases gates on the
-        // canonicalized requested ref BEFORE alias traversal. This ensures
-        // disabled legacy refs and ambiguous short IDs fail immediately
-        // regardless of whether an alias exists.
-        if is_legacy_same_store_blob_ref(&lookup_ref) {
-            if !self.config.legacy_compat {
-                return ExpansionResult::missing(
-                    requested_ref,
-                    selector.map(str::to_string),
-                    "legacy-ref-disabled",
-                );
-            }
-            if self.state.ambiguous_aliases.contains(&lookup_ref) {
-                return ExpansionResult::missing(
-                    requested_ref,
-                    selector.map(str::to_string),
-                    "legacy-ambiguous",
-                );
-            }
-            self.legacy_read_count += 1;
+        if let Some(reason) = self.note_legacy_expand(&lookup_ref) {
+            return miss!(reason);
         }
-
-        // Resolve alias chain AFTER the legacy gates so migrated short refs
-        // route to their canonical full-hash target before CAS dispatch.
         let resolved_ref = self.resolve_alias_chain(&lookup_ref).unwrap_or(lookup_ref);
-
-        // Re-parse the resolved (aliased) ref for shared CAS dispatch.
-        let portable_resolved = match parse_zeroref_v1_blob(&resolved_ref, None) {
-            Ok(parsed) => Some(parsed),
-            Err(ZeroRefError::LegacyAmbiguity) | Err(ZeroRefError::Unsupported) => None,
-            Err(_) => None,
-        };
-
+        let portable_resolved = parse_zeroref_v1_blob(&resolved_ref, None).ok();
         let shared_content = match (&portable_resolved, &self.shared_cas) {
-            (Some(portable), Some(cas)) => match cas.resolve(&portable.hash) {
-                Ok(bytes) => match String::from_utf8(bytes) {
-                    Ok(content) => Some(content),
-                    Err(_) => {
-                        return ExpansionResult::missing(
-                            requested_ref,
-                            selector.map(str::to_string),
-                            "shared-cas-non-utf8",
-                        );
-                    }
-                },
-                Err(SharedCasError::NotFound) if requested_ref.starts_with("tz://") => None,
-                Err(SharedCasError::NotFound) => {
-                    // Cross-engine fallback: foreign-engine blob refs may live
-                    // in the sibling engine's JSON store under the same unified
-                    // root (fszero-fz-ref-expand-broken-izj field regression).
+            (Some(portable), Some(cas)) => match shared_cas_utf8(cas, &portable.hash) {
+                Ok(content) => Some(content),
+                Err(None) => return miss!("shared-cas-non-utf8"),
+                Err(Some(SharedCasError::NotFound)) if requested_ref.starts_with("tz://") => None,
+                Err(Some(SharedCasError::NotFound)) => {
                     if let Some(result) = self.expand_in_sibling_engine_store(
                         &requested_ref,
                         selector,
@@ -1261,185 +1118,84 @@ impl RecoveryStore {
                     ) {
                         return result;
                     }
-                    return ExpansionResult::missing(
-                        requested_ref,
-                        selector.map(str::to_string),
-                        "shared-cas-missing",
-                    );
+                    return miss!("shared-cas-missing");
                 }
-                Err(SharedCasError::Corruption) => {
-                    return ExpansionResult::missing(
-                        requested_ref,
-                        selector.map(str::to_string),
-                        "shared-cas-corruption",
-                    );
-                }
-                Err(SharedCasError::Policy) => {
-                    return ExpansionResult::missing(
-                        requested_ref,
-                        selector.map(str::to_string),
-                        "shared-cas-policy",
-                    );
-                }
-                Err(SharedCasError::Io(_)) => {
-                    return ExpansionResult::missing(
-                        requested_ref,
-                        selector.map(str::to_string),
-                        "shared-cas-io",
-                    );
-                }
-                Err(SharedCasError::InvalidHash(_)) => {
-                    return ExpansionResult::missing(
-                        requested_ref,
-                        selector.map(str::to_string),
-                        "zeroref-malformed",
-                    );
-                }
+                Err(Some(err)) => return miss!(shared_cas_error_reason(err)),
             },
             _ => None,
         };
         let ref_id = resolved_ref;
         let Some(parsed) = parse_ref(&ref_id) else {
-            return ExpansionResult::missing(
-                requested_ref,
-                selector.map(str::to_string),
-                "invalid-ref",
-            );
+            return miss!("invalid-ref");
         };
         let mut selected_start = start_line;
         let mut selected_end = end_line;
-        // Parse fragment spec early to catch malformed/duplicate/unknown
-        // before store lookup (cqr.5). #B and #L are both supported; no
-        // fallback to the full payload for a fragment request.
-        let fragment_spec = parsed.fragment.as_deref().map(parse_fragment_spec);
+        // Reuse the early parse when the resolved ref kept the same fragment text.
+        let fragment_spec = match (early_fragment, early_fragment_spec, parsed.fragment) {
+            (Some(early), Some(spec), Some(pf)) if early == pf => Some(Ok(spec)),
+            (_, _, Some(pf)) => Some(parse_fragment_spec(pf)),
+            _ => None,
+        };
         if let Some(Err(err)) = &fragment_spec {
-            return ExpansionResult::missing(
-                requested_ref,
-                selector.map(str::to_string),
-                fragment_error_reason(*err),
-            );
+            return miss!(fragment_error_reason(*err));
         }
         if let Some(Ok(FragmentSpec::Line { start, end })) = &fragment_spec {
             selected_start = Some(*start);
             selected_end = Some(*end);
         }
-        // Resolve lines:/range:/around: before OOB so selector windows get the
-        // same structured error as explicit start_line/end_line (zq9).
         resolve_selector_line_window(selector, &mut selected_start, &mut selected_end);
         let content = if let Some(content) = shared_content {
             content
         } else {
-            match self.resolve_ref_with_index(&parsed.kind, &parsed.bare) {
-                RefResolve::Found(content) => content,
-                RefResolve::Stale => {
-                    return ExpansionResult::missing(
-                        requested_ref,
-                        selector.map(str::to_string),
-                        "stale-ref",
-                    );
-                }
-                RefResolve::NotFound => {
-                    let reason = if requested_ref.starts_with("fz://blob/")
-                        || requested_ref.starts_with("gz://blob/")
-                    {
-                        "ref-not-found".to_string()
-                    } else {
-                        ref_not_found_reason(&parsed.kind)
-                    };
-                    return ExpansionResult::missing(
-                        requested_ref,
-                        selector.map(str::to_string),
-                        reason,
-                    );
-                }
-                RefResolve::DecodeFailed => {
-                    return ExpansionResult::missing(
-                        requested_ref,
-                        selector.map(str::to_string),
-                        "decode-failed",
-                    );
-                }
+            match resolve_to_expand_content(
+                self.resolve_ref_with_index(parsed.kind, parsed.bare),
+                &requested_ref,
+                parsed.kind,
+            ) {
+                Ok(content) => content,
+                Err(reason) => return miss!(reason),
             }
         };
-        if parsed.kind == "file" && self.file_ref_is_stale(&parsed.bare) {
-            return ExpansionResult::missing(
-                requested_ref,
-                selector.map(str::to_string),
-                "stale-ref",
-            );
+        if portable
+            .as_ref()
+            .is_some_and(|portable| sha256_hex(&content) != portable.hash)
+        {
+            return miss!("zeroref-corruption");
         }
-        // Apply #B byte-range fragment after content resolution (cqr.5).
-        // Zero-based half-open: content[start..end]. start == end → empty.
-        // Reversed was already caught by parse_fragment_spec; only OOB remains.
-        if let Some(Ok(FragmentSpec::Byte { start, end })) = &fragment_spec {
-            let bytes = content.as_bytes();
-            if *end > bytes.len() {
-                return ExpansionResult::missing(
-                    requested_ref,
-                    selector.map(str::to_string),
-                    format!(
-                        "fragment-out-of-range; start={start} end={end} len={}",
-                        bytes.len()
-                    ),
-                );
-            }
-            let sliced = String::from_utf8_lossy(&bytes[*start..*end]).into_owned();
-            self.recovery_tokens += count_tokens(&sliced);
-            if let Some(store_path) = self.persistence_path.as_ref() {
-                let content_class = self
-                    .ref_classes
-                    .get(&ref_id)
-                    .copied()
-                    .unwrap_or_else(|| classify_ref(&ref_id, None));
-                record_ref_index_expanded(store_path, &ref_id, content_class);
-            }
-            return ExpansionResult::ok(requested_ref, selector.map(str::to_string), sliced);
+        if parsed.kind == "file" && self.file_ref_is_stale(parsed.bare) {
+            return miss!("stale-ref");
         }
-        // Explicit / selector line windows: OOB is a structured error, never
-        // ref_not_found (zq9). 1-based inclusive; start past last line or end <
-        // start fails.
-        if let Some(start) = selected_start {
-            let line_count = content_line_count(&content);
-            if start == 0 || start > line_count {
-                return ExpansionResult::missing(
-                    requested_ref,
-                    selector.map(str::to_string),
-                    format!(
-                        "window-out-of-range; start={start} end={} lines={line_count}",
-                        selected_end
-                            .map(|e| e.to_string())
-                            .unwrap_or_else(|| start.to_string())
-                    ),
-                );
-            }
-            if let Some(end) = selected_end {
-                if end < start || end > line_count {
-                    return ExpansionResult::missing(
-                        requested_ref,
-                        selector.map(str::to_string),
-                        format!("window-out-of-range; start={start} end={end} lines={line_count}"),
-                    );
-                }
-            }
+        match expand_selected_content(content, &fragment_spec, selector, selected_start, selected_end, anchor_kind, symbol) {
+            Ok(selected) => self.expand_ok(requested_ref, selector_owned, &ref_id, selected),
+            Err(reason) => miss!(reason),
         }
-        let selected = select_content(
-            content,
-            selector,
-            selected_start,
-            selected_end,
-            anchor_kind,
-            symbol,
-        );
-        self.recovery_tokens += count_tokens(&selected);
+    }
+
+    fn note_legacy_expand(&mut self, lookup_ref: &str) -> Option<&'static str> {
+        if !is_legacy_same_store_blob_ref(lookup_ref) {
+            return None;
+        }
+        if !self.config.legacy_compat {
+            return Some("legacy-ref-disabled");
+        }
+        if self.state.ambiguous_aliases.contains(lookup_ref) {
+            return Some("legacy-ambiguous");
+        }
+        self.legacy_read_count += 1;
+        None
+    }
+
+    fn expand_ok(&mut self, requested_ref: String, selector: Option<String>, ref_id: &str, content: String) -> ExpansionResult {
+        self.note_expand(ref_id, &content);
+        ExpansionResult::ok(requested_ref, selector, content)
+    }
+
+    fn note_expand(&mut self, ref_id: &str, content: &str) {
+        self.recovery_tokens += count_tokens(content);
         if let Some(store_path) = self.persistence_path.as_ref() {
-            let content_class = self
-                .ref_classes
-                .get(&ref_id)
-                .copied()
-                .unwrap_or_else(|| classify_ref(&ref_id, None));
-            record_ref_index_expanded(store_path, &ref_id, content_class);
+            let content_class = self.ref_classes.get(ref_id).copied().unwrap_or_else(|| classify_ref(ref_id, None));
+            record_ref_index_expanded(store_path, ref_id, content_class);
         }
-        ExpansionResult::ok(requested_ref, selector.map(str::to_string), selected)
     }
 
     fn resolve_alias_chain(&self, ref_id: &str) -> Option<String> {
@@ -1461,26 +1217,22 @@ impl RecoveryStore {
         let Some(parsed) = parse_ref(&lookup) else {
             return false;
         };
-        match parsed.kind.as_str() {
-            "blob" => {
-                self.state.blobs.contains_key(&parsed.bare)
-                    || self
-                        .shared_cas
-                        .as_ref()
-                        .and_then(|cas| {
-                            ref_index_id_part(&parsed.bare).map(|hash| cas.contains(hash))
-                        })
-                        .unwrap_or(false)
-                    || matches!(
-                        resolve_blob_from_ref_index(&parsed.bare, &self.config),
-                        RefResolve::Found(_)
-                    )
-            }
-            "file" => self.state.files.contains_key(&parsed.bare),
-            "unit" => self.state.units.contains_key(&parsed.bare),
-            "search" => self.state.search_hits.contains_key(&parsed.bare),
+        match parsed.kind {
+            "blob" => self.blob_reachable(parsed.bare),
+            "file" => self.state.files.contains_key(parsed.bare),
+            "unit" | "search" => recovery_unit_map(&self.state, parsed.kind).is_some_and(|m| m.contains_key(parsed.bare)),
             _ => false,
         }
+    }
+
+    fn blob_reachable(&self, bare: &str) -> bool {
+        self.state.blobs.contains_key(bare)
+            || self
+                .shared_cas
+                .as_ref()
+                .and_then(|cas| ref_index_id_part(bare).map(|hash| cas.contains(hash)))
+                .unwrap_or(false)
+            || blob_reachable_in_ref_index(bare, &self.config)
     }
 
     pub fn export_status(&self) -> serde_json::Value {
@@ -1504,13 +1256,7 @@ impl RecoveryStore {
     }
 
     pub fn prune_stale(&mut self, dry_run: bool) -> Result<serde_json::Value, RecoveryError> {
-        let stale: Vec<String> = self
-            .state
-            .files
-            .keys()
-            .filter(|ref_id| self.file_ref_is_stale(ref_id))
-            .cloned()
-            .collect();
+        let stale: Vec<String> = self.state.files.keys().filter(|ref_id| self.file_ref_is_stale(ref_id)).cloned().collect();
         if !dry_run {
             for ref_id in &stale {
                 self.drop_ref(ref_id);
@@ -1521,26 +1267,26 @@ impl RecoveryStore {
             "schema_version": "tokenzero.cache.v1",
             "status": "ok",
             "dry_run": dry_run,
-            "candidates": stale.iter().map(|ref_id| serde_json::json!({"category": "exact", "ref": ref_id, "reason": "stale-source"})).collect::<Vec<_>>(),
+            "candidates": stale.iter().map(|ref_id| {
+                serde_json::json!({"category": "exact", "ref": ref_id, "reason": "stale-source"})
+            }).collect::<Vec<_>>(),
             "reclaimed_bytes": if dry_run { 0 } else { stale.len() },
         }))
     }
 
-    /// Record the outcome of a shell command and report whether it repeated
-    /// the previous run byte-for-byte (same combined output, same exit code).
-    /// Callers may render verified-unchanged successes as a tiny delta
-    /// envelope; the content-addressed blob ref still recovers exact bytes.
-    pub fn record_shell_outcome(
-        &mut self,
-        scope: Option<&str>,
-        command: &str,
-        combined: &str,
-        exit_code: Option<i32>,
-    ) -> Result<ShellRepeat, RecoveryError> {
-        let repeat = self.record_shell_outcome_deferred(scope, command, combined, exit_code);
-        self.persist()?;
-        Ok(repeat)
-    }
+    // Record the outcome of a shell command and report whether it repeated
+    // the previous run byte-for-byte (same combined output, same exit code).
+    // Callers may render verified-unchanged successes as a tiny delta
+    // envelope; the content-addressed blob ref still recovers exact bytes.
+    persist_after_deferred!(
+        record_shell_outcome,
+        record_shell_outcome_deferred(
+            scope: Option<&str>,
+            command: &str,
+            combined: &str,
+            exit_code: Option<i32>,
+        ) -> ShellRepeat
+    );
 
     pub fn record_shell_outcome_deferred(
         &mut self,
@@ -1549,39 +1295,17 @@ impl RecoveryStore {
         combined: &str,
         exit_code: Option<i32>,
     ) -> ShellRepeat {
+        self.skip_empty_persist = false;
         let key = id_for('s', &format!("{}\u{0}{command}", scope.unwrap_or("")));
         let combined_sha = sha256_hex(combined);
         let seq = self.state.shell_outcome_seq.wrapping_add(1);
         self.state.shell_outcome_seq = seq;
         let (unchanged, seen) = match self.state.shell_outcomes.get(&key) {
-            Some(prev) if prev.combined_sha == combined_sha && prev.exit_code == exit_code => {
-                (true, prev.seen.saturating_add(1))
-            }
+            Some(prev) if prev.combined_sha == combined_sha && prev.exit_code == exit_code => (true, prev.seen.saturating_add(1)),
             _ => (false, 1),
         };
-        self.state.shell_outcomes.insert(
-            key,
-            ShellOutcome {
-                combined_sha,
-                exit_code,
-                seen,
-                seq,
-            },
-        );
-        while self.state.shell_outcomes.len() > MAX_SHELL_OUTCOMES {
-            let victim = self
-                .state
-                .shell_outcomes
-                .iter()
-                .min_by_key(|(_, outcome)| outcome.seq)
-                .map(|(key, _)| key.clone());
-            match victim {
-                Some(victim) => {
-                    self.state.shell_outcomes.remove(&victim);
-                }
-                None => break,
-            }
-        }
+        self.state.shell_outcomes.insert(key, ShellOutcome { combined_sha, exit_code, seen, seq });
+        trim_shell_outcomes(&mut self.state.shell_outcomes);
         ShellRepeat { unchanged, seen }
     }
 
@@ -1593,14 +1317,7 @@ impl RecoveryStore {
         source_end_line: usize,
         content_type: ContentType,
     ) -> String {
-        let full_hash = sha256_hex(text);
-        self.put_file_backed_blob_hashed(
-            path,
-            source_start_line,
-            source_end_line,
-            content_type,
-            &full_hash,
-        )
+        self.put_file_backed_blob_hashed(path, source_start_line, source_end_line, content_type, &sha256_hex(text))
     }
 
     fn put_file_backed_blob_hashed(
@@ -1611,73 +1328,45 @@ impl RecoveryStore {
         content_type: ContentType,
         full_hash: &str,
     ) -> String {
-        let canonical_ref = format!("tz://blob/{full_hash}");
-        self.ref_classes.insert(
-            canonical_ref.clone(),
-            classify_ref(&canonical_ref, Some(content_type)),
-        );
-        let legacy_ref = format!("tz://blob/b{}", &full_hash[..16]);
-        if legacy_ref != canonical_ref {
-            self.state.aliases.insert(legacy_ref, canonical_ref.clone());
+        self.register_blob(
+            full_hash,
+            format!("tz://blob/b{}", &full_hash[..16]),
+            content_type,
+            Some(BlobEntry::FileRef { path: path.to_path_buf(), source_start_line, source_end_line }),
+        )
+    }
+
+    fn track_ref_class(&mut self, ref_id: &str, content_type: ContentType) {
+        self.ref_classes.insert(ref_id.to_string(), classify_ref(ref_id, Some(content_type)));
+    }
+
+    fn register_blob(&mut self, full_hash: &str, legacy_ref: String, content_type: ContentType, value: Option<BlobEntry>) -> String {
+        let ref_id = format!("tz://blob/{full_hash}");
+        self.track_ref_class(&ref_id, content_type);
+        if legacy_ref != ref_id {
+            self.state.aliases.insert(legacy_ref, ref_id.clone());
         }
-        self.state.blobs.insert(
-            canonical_ref.clone(),
-            BlobEntry::FileRef {
-                path: path.to_path_buf(),
-                source_start_line,
-                source_end_line,
-            },
-        );
-        self.remember_ref(&canonical_ref);
-        canonical_ref
+        if let Some(value) = value {
+            self.state.blobs.insert(ref_id.clone(), value);
+        }
+        self.remember_ref(&ref_id);
+        ref_id
     }
 
     fn put_blob(&mut self, text: &str, content_type: ContentType) -> String {
         let full_hash = sha256_hex(text);
-        let canonical_ref = format!("tz://blob/{full_hash}");
-        self.ref_classes.insert(
-            canonical_ref.clone(),
-            classify_ref(&canonical_ref, Some(content_type)),
-        );
-
-        // Publish to the canonical shared CAS when attached. On success the
-        // canonical ref is served from the immutable CAS and the payload is
-        // not duplicated in local recovery state. On publish failure, store
-        // the full-hash payload locally so the emitted ref remains readable.
-        let cas_published = if let Some(cas) = &self.shared_cas {
-            cas.publish(text.as_bytes()).is_ok()
+        let published = self.shared_cas.as_ref().is_some_and(|cas| cas.publish(text.as_bytes()).is_ok());
+        let value = if published {
+            None
         } else {
-            false
-        };
-
-        // Always compute and store the legacy short ref as an alias so existing
-        // callers using legacy refs can resolve through the alias chain.
-        let legacy_ref = format!("tz://blob/{}", id_for('b', text));
-        if legacy_ref != canonical_ref {
-            self.state.aliases.insert(legacy_ref, canonical_ref.clone());
-        }
-
-        if !cas_published {
-            // Multi-MB payloads (shell captures are the usual offender) stored
-            // inline multiply every snapshot serialize, journal append, and load
-            // parse, and sit in RAM for the process lifetime (bead tz8). Above
-            // the threshold, durable stores divert the bytes to a content-
-            // addressed sidecar file and keep a tiny marker as the value; the
-            // marker travels through journal/merge/delta untouched and is only
-            // resolved on expand. Fail-open: if the sidecar write fails, the
-            // text stays inline.
-            let value = self
+            let text = self
                 .persistence_path
                 .as_deref()
                 .and_then(|cache| externalize_blob_value(cache, text, &full_hash))
                 .unwrap_or_else(|| text.to_string());
-            // Sidecar markers are inline metadata, never source-file pointers.
-            self.state
-                .blobs
-                .insert(canonical_ref.clone(), BlobEntry::Inline(value));
-        }
-        self.remember_ref(&canonical_ref);
-        canonical_ref
+            Some(BlobEntry::Inline(text))
+        };
+        self.register_blob(&full_hash, format!("tz://blob/{}", id_for('b', text)), content_type, value)
     }
 
     fn put_file(
@@ -1688,23 +1377,44 @@ impl RecoveryStore {
         source_start_line: Option<usize>,
         source_end_line: Option<usize>,
     ) -> String {
+        self.put_file_entry(
+            text,
+            content_type,
+            path,
+            false,
+            || fingerprint_for_stored_payload(path, source_start_line, source_end_line),
+            source_start_line,
+            source_end_line,
+        )
+    }
+
+    fn put_source_backed_file(&mut self, text: &str, content_type: ContentType, path: &Path, source_sha256: &str) -> String {
+        self.put_file_entry(text, content_type, Some(path), true, || source_fingerprint_from_sha256(path, source_sha256), None, None)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn put_file_entry<F: FnOnce() -> Option<SourceFingerprint>>(
+        &mut self,
+        text: &str,
+        content_type: ContentType,
+        path: Option<&Path>,
+        source_backed: bool,
+        source_fingerprint: F,
+        source_start_line: Option<usize>,
+        source_end_line: Option<usize>,
+    ) -> String {
         let ref_id = recovery_file_ref(text, path);
-        self.ref_classes
-            .insert(ref_id.clone(), classify_ref(&ref_id, Some(content_type)));
+        self.track_ref_class(&ref_id, content_type);
         self.state.files.insert(
             ref_id.clone(),
             StoredFile {
                 ref_id: ref_id.clone(),
-                path: path.map(|p| p.to_string_lossy().to_string()),
+                path: path.map(|path| path.to_string_lossy().into_owned()),
                 path_identity: path.map(path_identity_text),
-                source_backed: false,
-                text: text.to_string(),
+                source_backed,
+                text: if source_backed { String::new() } else { text.to_string() },
                 content_type: content_type.to_string(),
-                source_fingerprint: fingerprint_for_stored_payload(
-                    path,
-                    source_start_line,
-                    source_end_line,
-                ),
+                source_fingerprint: source_fingerprint(),
                 source_start_line,
                 source_end_line,
             },
@@ -1713,51 +1423,12 @@ impl RecoveryStore {
         ref_id
     }
 
-    fn put_source_backed_file(
-        &mut self,
-        text: &str,
-        content_type: ContentType,
-        path: &Path,
-        source_sha256: &str,
-    ) -> String {
-        let ref_id = recovery_file_ref(text, Some(path));
-        self.ref_classes
-            .insert(ref_id.clone(), classify_ref(&ref_id, Some(content_type)));
-        self.state.files.insert(
-            ref_id.clone(),
-            StoredFile {
-                ref_id: ref_id.clone(),
-                path: Some(path.to_string_lossy().to_string()),
-                path_identity: Some(path_identity_text(path)),
-                source_backed: true,
-                text: String::new(),
-                content_type: content_type.to_string(),
-                source_fingerprint: source_fingerprint_from_sha256(path, source_sha256),
-                source_start_line: None,
-                source_end_line: None,
-            },
-        );
-        self.remember_ref(&ref_id);
-        ref_id
-    }
-
-    fn index_units(
-        &mut self,
-        text: &str,
-        content_type: ContentType,
-        source_ref: &str,
-    ) -> Vec<String> {
+    fn index_units(&mut self, text: &str, content_type: ContentType, source_ref: &str) -> Vec<String> {
         let mut refs = Vec::new();
         for (idx, line) in text.lines().enumerate() {
             let stripped = line.trim();
             if stripped.len() >= 12 {
-                refs.push(self.put_unit(
-                    stripped,
-                    content_type,
-                    Some(source_ref),
-                    Some(idx + 1),
-                    Some(idx + 1),
-                ));
+                refs.push(self.put_unit(stripped, content_type, Some(source_ref), Some(idx + 1), Some(idx + 1)));
             }
             if refs.len() >= 64 {
                 break;
@@ -1767,137 +1438,81 @@ impl RecoveryStore {
     }
 
     fn put_unit(
+        &mut self, text: &str, content_type: ContentType, source_ref: Option<&str>,
+        start_line: Option<usize>, end_line: Option<usize>,
+    ) -> String {
+        self.insert_stored_unit(false, format!("tz://unit/{}", id_for('u', text)), text, content_type, source_ref, (start_line, end_line))
+    }
+
+    fn insert_stored_unit(
         &mut self,
+        search_hit: bool,
+        ref_id: String,
         text: &str,
         content_type: ContentType,
         source_ref: Option<&str>,
-        start_line: Option<usize>,
-        end_line: Option<usize>,
+        source_lines: (Option<usize>, Option<usize>),
     ) -> String {
-        let ref_id = format!("tz://unit/{}", id_for('u', text));
-        self.ref_classes
-            .insert(ref_id.clone(), classify_ref(&ref_id, Some(content_type)));
-        self.state
-            .units
-            .entry(ref_id.clone())
-            .or_insert_with(|| StoredUnit {
-                ref_id: ref_id.clone(),
-                text: text.to_string(),
-                content_type: content_type.to_string(),
-                source_ref: source_ref.map(str::to_string),
-                start_line,
-                end_line,
-            });
+        let (start_line, end_line) = source_lines;
+        self.track_ref_class(&ref_id, content_type);
+        let unit = StoredUnit {
+            ref_id: ref_id.clone(),
+            text: text.to_string(),
+            content_type: content_type.to_string(),
+            source_ref: source_ref.map(str::to_string),
+            start_line,
+            end_line,
+        };
+        if search_hit {
+            self.state.search_hits.insert(ref_id.clone(), unit);
+        } else {
+            self.state.units.entry(ref_id.clone()).or_insert(unit);
+        }
         self.remember_ref(&ref_id);
         ref_id
     }
 
     fn resolve_ref(&self, kind: &str, bare: &str) -> RefResolve {
         match kind {
-            "blob" => self
-                .state
-                .blobs
-                .get(bare)
-                .map_or(RefResolve::NotFound, |value| {
-                    resolve_blob_value(self.persistence_path.as_deref(), bare, value)
-                }),
-            "file" => self
-                .state
-                .files
-                .get(bare)
-                .map(resolve_file_value)
-                .unwrap_or(RefResolve::NotFound),
-            "unit" => self
-                .state
-                .units
-                .get(bare)
-                .map(|u| RefResolve::Found(u.text.clone()))
-                .unwrap_or(RefResolve::NotFound),
-            "search" => self
-                .state
-                .search_hits
-                .get(bare)
-                .map(|u| RefResolve::Found(u.text.clone()))
-                .unwrap_or(RefResolve::NotFound),
+            "blob" => self.state.blobs.get(bare).map_or(RefResolve::NotFound, |value| {
+                resolve_blob_value(self.persistence_path.as_deref(), bare, value)
+            }),
+            "file" => self.state.files.get(bare).map(resolve_file_value).unwrap_or(RefResolve::NotFound),
+            "unit" | "search" => recovery_unit_map(&self.state, kind)
+                .and_then(|units| units.get(bare))
+                .map_or(RefResolve::NotFound, |u| RefResolve::Found(u.text.clone())),
             _ => RefResolve::NotFound,
         }
     }
 
     fn resolve_ref_with_index(&self, kind: &str, bare: &str) -> RefResolve {
         match self.resolve_ref(kind, bare) {
-            RefResolve::Found(content) => return RefResolve::Found(content),
-            RefResolve::Stale => return RefResolve::Stale,
-            RefResolve::DecodeFailed => return RefResolve::DecodeFailed,
-            RefResolve::NotFound => {}
+            RefResolve::NotFound if kind == "blob" => resolve_blob_from_ref_index(bare, &self.config),
+            other => other,
         }
-        if kind != "blob" {
-            return RefResolve::NotFound;
-        }
-        resolve_blob_from_ref_index(bare, &self.config)
     }
 
     fn file_ref_is_stale(&self, bare: &str) -> bool {
-        let Some(stored) = self.state.files.get(bare) else {
-            return false;
-        };
-        let Some(path_text) = stored.path.as_deref() else {
-            return false;
-        };
-        if path_text.starts_with("shell:") || path_text.starts_with("search:") {
+        let Some(stored) = self.state.files.get(bare) else { return false };
+        if is_ephemeral_source_path(stored.path.as_deref().unwrap_or_default()) {
             return false;
         }
-        let Some(expected) = stored.source_fingerprint.as_ref() else {
-            return false;
-        };
-        let source_path = stored
-            .path_identity
-            .as_deref()
-            .and_then(path_from_identity_text)
-            .unwrap_or_else(|| PathBuf::from(path_text));
+        let Some(expected) = stored.source_fingerprint.as_ref() else { return false };
+        let Some(source_path) = stored_source_path(stored) else { return false };
         source_fingerprint(&source_path).is_none_or(|actual| actual != *expected)
     }
 
     fn remember_ref(&mut self, ref_id: &str) {
+        self.skip_empty_persist = false;
         self.state.order.push(ref_id.to_string());
         self.session_refs.push(ref_id.to_string());
     }
 
     fn evict(&mut self) {
-        evict_prefix(
-            &mut self.state.blobs,
-            &mut self.state.order,
-            "tz://blob/",
-            self.config.max_blobs,
-        );
-        evict_prefix(
-            &mut self.state.files,
-            &mut self.state.order,
-            "tz://file/",
-            self.config.max_files,
-        );
-        evict_prefix(
-            &mut self.state.units,
-            &mut self.state.order,
-            "tz://unit/",
-            self.config.max_units,
-        );
-        evict_prefix(
-            &mut self.state.search_hits,
-            &mut self.state.order,
-            "tz://search/",
-            self.config.max_search_hits,
-        );
+        recovery_maps!(evict self);
         while self.approx_bytes() > self.config.max_bytes {
-            // Victim selection must use LOCAL presence: has_ref also reports
-            // shared-CAS reachability, and a CAS-served ref stays reachable
-            // after drop_ref, which would pin the same victim forever.
-            let Some(victim) = self
-                .state
-                .order
-                .iter()
-                .find(|r| self.local_entry_present(r))
-                .cloned()
-            else {
+            // CAS reachability must not pin a local eviction victim.
+            let Some(victim) = self.state.order.iter().find(|ref_id| self.local_entry_present(ref_id)).cloned() else {
                 break;
             };
             self.drop_ref(&victim);
@@ -1906,51 +1521,39 @@ impl RecoveryStore {
     }
 
     fn local_entry_present(&self, ref_id: &str) -> bool {
-        self.state.blobs.contains_key(ref_id)
-            || self.state.files.contains_key(ref_id)
-            || self.state.units.contains_key(ref_id)
-            || self.state.search_hits.contains_key(ref_id)
+        state_entry_present(&self.state, ref_id)
     }
 
     fn drop_ref(&mut self, ref_id: &str) {
-        self.state.blobs.remove(ref_id);
-        self.state.files.remove(ref_id);
-        self.state.units.remove(ref_id);
-        self.state.search_hits.remove(ref_id);
+        self.skip_empty_persist = false;
+        recovery_maps!(remove self.state, ref_id);
     }
 
     fn compact_order(&mut self) {
-        let live: HashSet<String> = self
-            .state
-            .blobs
-            .keys()
-            .chain(self.state.files.keys())
-            .chain(self.state.units.keys())
-            .chain(self.state.search_hits.keys())
-            .cloned()
-            .collect();
+        let live: HashSet<String> = recovery_maps!(keys self.state).cloned().collect();
         let mut seen = HashSet::new();
-        self.state
-            .order
-            .retain(|ref_id| live.contains(ref_id) && seen.insert(ref_id.clone()));
+        self.state.order.retain(|ref_id| live.contains(ref_id) && seen.insert(ref_id.clone()));
     }
 
     fn approx_bytes(&self) -> usize {
         // Externalized blob markers account at their original payload size so
         // eviction pressure reflects real content, not marker bytes.
-        let blob_bytes: usize = self.state.blobs.values().map(blob_value_len).sum();
-        let file_bytes: usize = self
-            .state
-            .files
-            .values()
-            .map(|v| v.text.len() + v.path.as_deref().unwrap_or_default().len())
-            .sum();
-        let unit_bytes: usize = self.state.units.values().map(|v| v.text.len()).sum();
-        let search_bytes: usize = self.state.search_hits.values().map(|v| v.text.len()).sum();
-        blob_bytes + file_bytes + unit_bytes + search_bytes
+        self.state.blobs.values().map(blob_value_len).sum::<usize>()
+            + self.state.files.values().map(|v| v.text.len() + v.path.as_deref().unwrap_or_default().len()).sum::<usize>()
+            + self.state.units.values().chain(self.state.search_hits.values()).map(|v| v.text.len()).sum::<usize>()
     }
 
     fn persist(&mut self) -> Result<(), RecoveryError> {
+        let storage_unchanged = self.persistence_path.as_deref().is_none_or(|path| {
+            let (disk_identity, journal_identity) = cache_identities(path);
+            disk_identity == self.disk_identity && journal_identity == self.journal_identity
+        });
+        if self.persist_skip_empty(storage_unchanged) {
+            self.skip_empty_persist = false;
+            return Ok(());
+        }
+        self.skip_empty_persist = false;
+        // The persist lock covers identity checks, merge, journal append, and snapshot publication.
         let Some(path) = self.persistence_path.clone() else {
             self.evict();
             return Ok(());
@@ -1959,158 +1562,126 @@ impl RecoveryStore {
             fs::create_dir_all(parent)?;
         }
         let _lock = PersistLock::acquire(recovery_lock_path(&path))?;
-        // Skip the reload+merge only when the file is byte-identical to our
-        // last write under this lock: in-memory state is then a superset of
-        // disk and authoritative. Any mismatch — another process persisted,
-        // the file vanished, metadata is unreadable — falls back to the full
-        // merge so multi-process semantics are preserved exactly.
-        let snap_unchanged = self
-            .disk_identity
-            .is_some_and(|identity| DiskIdentity::capture(&path) == Some(identity));
-        let journal_unchanged =
-            self.journal_identity == DiskIdentity::capture(&journal_path(&path));
+        let snap_unchanged = self.disk_identity.is_some_and(|identity| DiskIdentity::capture(&path) == Some(identity));
+        let journal_unchanged = self.journal_identity == DiskIdentity::capture(&journal_path(&path));
         let unchanged_since_last_write = snap_unchanged && journal_unchanged;
         if !unchanged_since_last_write {
-            let existing = load_state(&path, &self.config)?
-                .unwrap_or_else(|| RecoveryState::empty(&self.config));
+            let existing = load_state(&path, &self.config)?.unwrap_or_else(|| RecoveryState::empty(&self.config));
             let current = std::mem::replace(&mut self.state, RecoveryState::empty(&self.config));
             self.state = merge_states(existing, current, &self.session_refs, &self.config);
         }
         self.evict();
-        // Apply pending deletions to in-memory state. Tombstones are kept
-        // until the authoritative write succeeds so a crash-and-restart
-        // retries the deletion. Drain to owned vecs to avoid borrow issues
-        // with concurrent mutation of self.state and self.pending_*.
-        let pending_aliases: Vec<String> = self.pending_alias_deletions.iter().cloned().collect();
-        let pending_blobs: Vec<String> = self.pending_blob_deletions.iter().cloned().collect();
-        for alias in &pending_aliases {
-            self.state.aliases.remove(alias);
-            self.state.ambiguous_aliases.remove(alias);
+        let has_pending_deletions = !self.pending_alias_deletions.is_empty() || !self.pending_blob_deletions.is_empty();
+        apply_deletions(
+            &mut self.state,
+            self.pending_blob_deletions.iter().map(String::as_str),
+            self.pending_alias_deletions.iter().map(String::as_str),
+        );
+        if self.try_append_session_journal(&path, unchanged_since_last_write, has_pending_deletions) {
+            return Ok(());
         }
-        for ref_id in &pending_blobs {
-            self.state.blobs.remove(ref_id);
+        self.publish_snapshot(&path)
+    }
+
+    fn persist_skip_empty(&self, storage_unchanged: bool) -> bool {
+        self.skip_empty_persist
+            && self.session_refs.is_empty()
+            && self.pending_blob_deletions.is_empty()
+            && self.pending_alias_deletions.is_empty()
+            && storage_unchanged
+    }
+
+    // True when journal append published the delta. Restores session_refs on compaction/append failure.
+    fn try_append_session_journal(
+        &mut self,
+        path: &Path,
+        unchanged_since_last_write: bool,
+        has_pending_deletions: bool,
+    ) -> bool {
+        if !(unchanged_since_last_write && !has_pending_deletions) {
+            return false;
         }
-        let has_pending_deletions = !pending_aliases.is_empty() || !pending_blobs.is_empty();
-        // Fast path: disk is byte-identical to our last write, so everything
-        // new since then is exactly `session_refs`. Append that delta to the
-        // journal sibling instead of rewriting the whole snapshot — persist
-        // cost becomes O(new data this session), not O(entire store). The
-        // delta line replays through `merge_states` at load, so merge
-        // semantics are inherited, never re-implemented. Any append error or
-        // an oversized journal falls through to the full snapshot rewrite.
-        // Journal tombstones make deletions durable and replayable without
-        // rewriting the snapshot; old journal entries cannot resurrect them.
-        if unchanged_since_last_write && !has_pending_deletions {
-            let delta = session_delta(&self.state, &self.session_refs, &self.config);
-            let entry = JournalEntry {
-                refs: std::mem::take(&mut self.session_refs),
-                state: delta,
-                deleted_blob_refs: self.pending_blob_deletions.iter().cloned().collect(),
-                deleted_aliases: self.pending_alias_deletions.iter().cloned().collect(),
-            };
-            let snap_len = self.disk_identity.map_or(0, |identity| identity.len);
-            let segment_limit = journal_compact_threshold(snap_len);
-            match append_journal(&path, &entry, segment_limit) {
-                Ok(JournalAppend::Appended) => {
-                    self.journal_identity = DiskIdentity::capture(&journal_path(&path));
-                    append_blob_refs_to_ref_index(&path, &entry.refs, Some(&self.ref_classes));
-                    self.pending_blob_deletions.clear();
-                    self.pending_alias_deletions.clear();
-                    return Ok(());
-                }
-                Ok(JournalAppend::NeedsCompaction) | Err(_) => {
-                    self.session_refs = entry.refs;
-                }
+        let delta = session_delta(&self.state, &self.session_refs, &self.config);
+        let entry = JournalEntry {
+            refs: std::mem::take(&mut self.session_refs),
+            state: delta,
+            deleted_blob_refs: self.pending_blob_deletions.iter().cloned().collect(),
+            deleted_aliases: self.pending_alias_deletions.iter().cloned().collect(),
+        };
+        let segment_limit = journal_compact_threshold(self.disk_identity.map_or(0, |identity| identity.len));
+        match append_journal(path, &entry, segment_limit) {
+            Ok(JournalAppend::Appended) => {
+                self.journal_identity = DiskIdentity::capture(&journal_path(path));
+                append_blob_refs_to_ref_index(path, &entry.refs, Some(&self.ref_classes));
+                self.clear_pending_deletions();
+                true
             }
-            // fall through: compact journal into a fresh snapshot
+            Ok(JournalAppend::NeedsCompaction) | Err(_) => {
+                self.session_refs = entry.refs;
+                false
+            }
         }
+    }
+
+    fn publish_snapshot(&mut self, path: &Path) -> Result<(), RecoveryError> {
         self.disk_identity = None;
-        atomic_write_json(&path, &self.state)?;
-        remove_journal_segments(&path);
+        atomic_write_json(path, &self.state)?;
+        remove_journal_segments(path);
         self.journal_identity = None;
-        self.disk_identity = DiskIdentity::capture(&path);
-        append_blob_refs_to_ref_index(&path, &self.session_refs, Some(&self.ref_classes));
+        self.disk_identity = DiskIdentity::capture(path);
+        append_blob_refs_to_ref_index(path, &self.session_refs, Some(&self.ref_classes));
         self.session_refs.clear();
+        self.clear_pending_deletions();
+        Ok(())
+    }
+
+    fn clear_pending_deletions(&mut self) {
         self.pending_blob_deletions.clear();
         self.pending_alias_deletions.clear();
-        Ok(())
     }
 }
 
 #[derive(Debug)]
-struct ParsedRef {
-    kind: String,
-    bare: String,
-    fragment: Option<String>,
+struct ParsedRef<'a> {
+    kind: &'a str,
+    bare: &'a str,
+    fragment: Option<&'a str>,
 }
 
-fn parse_ref(ref_id: &str) -> Option<ParsedRef> {
-    // Callers canonicalize fz:// / gz:// → tz:// before parse_ref (same-store alias).
-    // Accept only the store scheme here so scheme rewriting lives in one place.
-    let (bare, fragment) = ref_id
-        .split_once('#')
-        .map_or((ref_id, None), |(b, f)| (b, Some(f.to_string())));
+fn parse_ref(ref_id: &str) -> Option<ParsedRef<'_>> {
+    let (bare, fragment) = ref_id.split_once('#').map_or((ref_id, None), |(bare, fragment)| (bare, Some(fragment)));
     let rest = bare.strip_prefix("tz://")?;
     let (kind, id) = rest.split_once('/')?;
-    if id.is_empty() {
-        return None;
-    }
-    if !matches!(kind, "blob" | "file" | "unit" | "search" | "codemode") {
+    if id.is_empty() || !matches!(kind, "blob" | "file" | "unit" | "search" | "codemode") {
         return None;
     }
     if kind == "codemode" {
         let mut parts = id.split('/');
-        if parts.next() != Some("execution") {
-            return None;
-        }
-        let _safe_id = parts.next()?;
-        if !matches!(
-            parts.next(),
-            Some("code" | "steps" | "telemetry" | "result" | "error")
-        ) || parts.next().is_some()
+        if parts.next() != Some("execution")
+            || parts.next().is_none()
+            || !matches!(parts.next(), Some("code" | "steps" | "telemetry" | "result" | "error"))
+            || parts.next().is_some()
         {
             return None;
         }
     }
-    Some(ParsedRef {
-        kind: kind.to_string(),
-        bare: format!("tz://{rest}"),
-        fragment,
-    })
+    Some(ParsedRef { kind, bare, fragment })
 }
 
 fn parse_line_fragment(fragment: &str) -> (Option<usize>, Option<usize>) {
     let value = fragment.trim().trim_start_matches('L');
-    if let Some((start, end)) = value.split_once('-') {
-        (
-            start.trim_start_matches('L').parse().ok(),
-            end.trim_start_matches('L').parse().ok(),
-        )
-    } else {
-        let line = value.parse().ok();
-        (line, line)
-    }
+    let (start, end) = value.split_once('-').unwrap_or((value, value));
+    (start.trim_start_matches('L').parse().ok(), end.trim_start_matches('L').parse().ok())
 }
 
 fn parse_around_selector(value: &str) -> (Option<usize>, Option<usize>) {
-    let (line_text, radius_text) = value
-        .split_once(':')
-        .or_else(|| value.split_once(','))
-        .unwrap_or((value, "3"));
-    let line = line_text
-        .trim()
-        .trim_start_matches('L')
-        .parse::<usize>()
-        .unwrap_or(1);
+    let (line_text, radius_text) = value.split_once(':').or_else(|| value.split_once(',')).unwrap_or((value, "3"));
+    let line = line_text.trim().trim_start_matches('L').parse::<usize>().unwrap_or(1);
     let radius = radius_text.trim().parse::<usize>().unwrap_or(3);
-    (
-        Some(line.saturating_sub(radius).max(1)),
-        Some(line.saturating_add(radius)),
-    )
+    (Some(line.saturating_sub(radius).max(1)), Some(line.saturating_add(radius)))
 }
 
-/// Line count for window validation (split_inclusive so a trailing newline
-/// still counts as a line segment, matching `line_slice_exact`).
+// Line count matching exact split-inclusive slicing.
 fn content_line_count(text: &str) -> usize {
     if text.is_empty() {
         0
@@ -2119,114 +1690,60 @@ fn content_line_count(text: &str) -> usize {
     }
 }
 
-/// Exact line slice for recovery: returns the verbatim bytes of lines
-/// `start..=end` (1-based, inclusive), preserving each line's trailing
-/// newline — including a trailing blank line — so `expand` is byte-exact.
-/// Unlike `tokenzero_core::line_range` (display: drops trailing newlines),
-/// this is the recovery path and must reproduce the original bytes.
-/// Caller must validate OOB via `content_line_count` before calling when a
-/// structured `window-out-of-range` error is required.
+// Return an exact one-based inclusive line slice.
 fn line_slice_exact(text: &str, start: usize, end: usize) -> String {
     let start = start.max(1);
-    let end = end.max(start);
-    let segments: Vec<&str> = text.split_inclusive('\n').collect();
-    if start > segments.len() {
-        return String::new();
-    }
-    let lo = start - 1;
-    let hi = end.min(segments.len());
-    segments[lo..hi].concat()
+    text.split_inclusive('\n').skip(start - 1).take(end.max(start) - start + 1).collect()
 }
 
-/// Parse line-window selectors into start/end. Non-window selectors leave the
-/// existing start/end untouched.
-fn resolve_selector_line_window(
-    selector: Option<&str>,
-    selected_start: &mut Option<usize>,
-    selected_end: &mut Option<usize>,
-) {
-    match selector {
-        Some(value)
-            if value.starts_with("range:")
-                || value.starts_with("lines:")
-                || value.starts_with("line:") =>
-        {
-            let prefix_len = value.find(':').map_or(0, |n| n + 1);
-            let (start, end) = parse_line_fragment(&value[prefix_len..]);
-            *selected_start = start;
-            *selected_end = end;
-        }
-        Some(value) if value.starts_with("around:") => {
-            let (start, end) = parse_around_selector(&value["around:".len()..]);
-            *selected_start = start;
-            *selected_end = end;
-        }
-        _ => {}
+// Resolve a selector line window in place.
+fn resolve_selector_line_window(selector: Option<&str>, selected_start: &mut Option<usize>, selected_end: &mut Option<usize>) {
+    let Some(selector) = selector else { return };
+    let window = ["range:", "lines:", "line:"]
+        .into_iter()
+        .find_map(|prefix| selector.strip_prefix(prefix).map(parse_line_fragment))
+        .or_else(|| selector.strip_prefix("around:").map(parse_around_selector));
+    if let Some((start, end)) = window {
+        (*selected_start, *selected_end) = (start, end);
     }
 }
 
-fn select_content(
+fn select_content<'a>(
     content: String,
-    selector: Option<&str>,
+    selector: Option<&'a str>,
     start_line: Option<usize>,
     end_line: Option<usize>,
     anchor_kind: Option<&str>,
-    symbol: Option<&str>,
+    symbol: Option<&'a str>,
 ) -> String {
-    let mut selected_start = start_line;
-    let mut selected_end = end_line;
-    let mut selected_symbol = symbol.map(str::to_string);
-    let mut selected_anchor = anchor_kind.map(str::to_string);
     match selector {
-        Some("raw") | None => {}
         Some("error_block") => return error_block(&content, 3),
         Some("summary") => return tokenzero_core::summarize_lines(&content, 12, 8, ""),
-        Some(value) if value.starts_with("anchor:") => {
-            selected_anchor = Some(value["anchor:".len()..].to_string())
-        }
-        Some(value) if value.starts_with("symbol:") => {
-            selected_symbol = Some(value["symbol:".len()..].to_string())
-        }
-        Some(value)
-            if value.starts_with("range:")
-                || value.starts_with("lines:")
-                || value.starts_with("line:")
-                || value.starts_with("around:") =>
-        {
-            // Already resolved by resolve_selector_line_window before OOB.
-            resolve_selector_line_window(selector, &mut selected_start, &mut selected_end);
-        }
-        Some(_) => {}
+        _ => {}
     }
+    let (mut selected_start, mut selected_end) = (start_line, end_line);
+    resolve_selector_line_window(selector, &mut selected_start, &mut selected_end);
     if let Some(start) = selected_start {
         return line_slice_exact(&content, start, selected_end.unwrap_or(start));
     }
-    if let Some(symbol) = selected_symbol {
-        return symbol_block(&content, &symbol);
+    if let Some(symbol) = selector.and_then(|value| value.strip_prefix("symbol:")).or(symbol) {
+        return symbol_block(&content, symbol);
     }
-    if selected_anchor.is_some() {
+    if anchor_kind.is_some() || selector.is_some_and(|value| value.starts_with("anchor:")) {
         return content
             .lines()
             .filter(|line| {
-                let trimmed = line.trim_start();
-                trimmed.starts_with("fn ")
-                    || trimmed.starts_with("def ")
-                    || trimmed.starts_with("class ")
-                    || trimmed.starts_with("struct ")
-                    || trimmed.starts_with("impl ")
-                    || trimmed.starts_with("use ")
-                    || trimmed.starts_with("import ")
+                let line = line.trim_start();
+                ["fn ", "def ", "class ", "struct ", "impl ", "use ", "import "].iter().any(|prefix| line.starts_with(prefix))
             })
             .collect::<Vec<_>>()
             .join("\n");
     }
     content
 }
-
 fn ref_not_found_reason(kind: &str) -> String {
     if kind == "blob" && ref_index_enabled() {
-        "ref-not-found; tiers tried: explicit/env cache, current-root store, per-user ref-index"
-            .to_string()
+        "ref-not-found; tiers tried: explicit/env cache, current-root store, per-user ref-index".to_string()
     } else if kind == "blob" {
         "ref-not-found; tiers tried: explicit/env cache, current-root store (per-user ref-index disabled)".to_string()
     } else {
@@ -2234,14 +1751,58 @@ fn ref_not_found_reason(kind: &str) -> String {
     }
 }
 
+fn resolve_to_expand_content(resolve: RefResolve, requested_ref: &str, kind: &str) -> Result<String, String> {
+    match resolve {
+        RefResolve::Found(content) => Ok(content),
+        RefResolve::Stale => Err("stale-ref".into()),
+        RefResolve::DecodeFailed => Err("decode-failed".into()),
+        RefResolve::NotFound if is_foreign_blob_ref(requested_ref) => Err("ref-not-found".into()),
+        RefResolve::NotFound => Err(ref_not_found_reason(kind)),
+    }
+}
+fn parse_expand_portable(ref_id: &str) -> Result<Option<ZeroRefV1Blob>, String> {
+    match parse_zeroref_v1_blob(ref_id, None) {
+        Ok(parsed) => Ok(Some(parsed)),
+        Err(ZeroRefError::Unsupported) => Ok(None),
+        Err(ZeroRefError::LegacyAmbiguity) if is_legacy_same_store_blob_ref(ref_id) => Ok(None),
+        Err(err) => Err(format!("zeroref-{err}")),
+    }
+}
+fn expand_selected_content(
+    content: String,
+    fragment_spec: &Option<Result<FragmentSpec, FragmentError>>,
+    selector: Option<&str>,
+    selected_start: Option<usize>,
+    selected_end: Option<usize>,
+    anchor_kind: Option<&str>,
+    symbol: Option<&str>,
+) -> Result<String, String> {
+    if let Some(Ok(FragmentSpec::Byte { start, end })) = fragment_spec {
+        let bytes = content.as_bytes();
+        if *end > bytes.len() {
+            return Err(format!(
+                "fragment-out-of-range; start={start} end={end} len={}",
+                bytes.len()
+            ));
+        }
+        return Ok(String::from_utf8_lossy(&bytes[*start..*end]).into_owned());
+    }
+    if let Some(start) = selected_start {
+        let end = selected_end.unwrap_or(start);
+        let line_count = content_line_count(&content);
+        if line_range_out_of_bounds(start, end, line_count) {
+            return Err(format!("window-out-of-range; start={start} end={end} lines={line_count}"));
+        }
+    }
+    Ok(select_content(content, selector, selected_start, selected_end, anchor_kind, symbol))
+}
+
 fn ref_index_enabled() -> bool {
     #[cfg(test)]
     if let Some((enabled, _)) = ref_index_test_override() {
         return enabled;
     }
-    env::var(REF_INDEX_DISABLE_ENV)
-        .map(|value| value.trim() != "0")
-        .unwrap_or(true)
+    env::var(REF_INDEX_DISABLE_ENV).map(|value| value.trim() != "0").unwrap_or(true)
 }
 
 use std::sync::OnceLock;
@@ -2294,9 +1855,7 @@ fn ref_index_root() -> Option<PathBuf> {
         if let Some(path) = env::var_os(REF_INDEX_PATH_ENV).filter(|value| !value.is_empty()) {
             return Some(PathBuf::from(path));
         }
-        env::var_os("HOME")
-            .filter(|value| !value.is_empty())
-            .map(|home| PathBuf::from(home).join(".tokenzero").join("ref-index"))
+        env::var_os("HOME").filter(|value| !value.is_empty()).map(|home| PathBuf::from(home).join(".tokenzero").join("ref-index"))
     }
 }
 
@@ -2311,75 +1870,65 @@ fn create_ref_index_dir(path: &Path) -> std::io::Result<()> {
 }
 
 fn ref_index_id_part(ref_id: &str) -> Option<&str> {
-    ref_id
-        .rsplit_once('/')
-        .map(|(_, id)| id)
-        .filter(|id| !id.is_empty())
-}
-
-fn ref_index_shard_name(ref_id: &str) -> String {
-    let id = ref_index_id_part(ref_id).unwrap_or(ref_id);
-    let mut chars = id.chars();
-    let first = chars.next().unwrap_or('x');
-    let second = chars.next().unwrap_or('x');
-    format!("{first}{second}.ndjson")
+    ref_id.rsplit_once('/').map(|(_, id)| id).filter(|id| !id.is_empty())
 }
 
 fn ref_index_shard_path(root: &Path, ref_id: &str) -> PathBuf {
-    root.join(ref_index_shard_name(ref_id))
+    let id = ref_index_id_part(ref_id).unwrap_or(ref_id);
+    let mut chars = id.chars();
+    root.join(format!("{}{}.ndjson", chars.next().unwrap_or('x'), chars.next().unwrap_or('x')))
 }
 
 fn ref_index_lock_path(shard: &Path) -> PathBuf {
     append_file_name_suffix(shard, ".lock")
 }
 
-fn append_blob_refs_to_ref_index(
-    store_path: &Path,
-    refs: &[String],
-    classes: Option<&BTreeMap<String, ContentClass>>,
-) {
-    let Some(root) = ref_index_root() else {
-        return;
-    };
-    let Ok(store_path) = store_path
-        .canonicalize()
-        .or_else(|_| Ok::<_, std::io::Error>(store_path.to_path_buf()))
-    else {
-        return;
-    };
-    let blob_refs: Vec<&String> = refs
-        .iter()
-        .filter(|ref_id| ref_id.starts_with("tz://blob/"))
-        .collect();
-    if blob_refs.is_empty() || create_ref_index_dir(&root).is_err() {
+fn ref_index_timestamp() -> u128 {
+    SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).map(|duration| duration.as_nanos()).unwrap_or_default()
+}
+
+fn ref_index_text(path: &Path) -> Option<String> {
+    read_limited_utf8(fs::File::open(path).ok()?, (REF_INDEX_MAX_BYTES as usize).saturating_mul(4)).ok().flatten()
+}
+
+fn parsed_ref_index_entries(text: &str) -> impl Iterator<Item = RefIndexEntry> + '_ {
+    text.lines().map(str::trim).filter(|line| !line.is_empty()).map_while(|line| serde_json::from_str(line).ok())
+}
+
+fn ref_index_store_path(store_path: &Path) -> Option<PathBuf> {
+    store_path.canonicalize().or_else(|_| Ok::<_, std::io::Error>(store_path.to_path_buf())).ok()
+}
+
+fn ref_index_root_store(store_path: &Path) -> Option<(PathBuf, PathBuf)> {
+    Some((ref_index_root()?, ref_index_store_path(store_path)?))
+}
+
+fn locked_ref_index_shard(root: &Path, ref_id: &str) -> Option<(PathBuf, PersistLock)> {
+    let shard = ref_index_shard_path(root, ref_id);
+    PersistLock::acquire_with_retries(ref_index_lock_path(&shard), LOCK_RETRIES).ok().map(|lock| (shard, lock))
+}
+
+fn compact_ref_index_if_needed(shard: &Path) {
+    if fs::metadata(shard).is_ok_and(|meta| meta.len() > REF_INDEX_MAX_BYTES) {
+        let _ = compact_ref_index_shard(shard);
+    }
+}
+
+fn append_blob_refs_to_ref_index(store_path: &Path, refs: &[String], classes: Option<&BTreeMap<String, ContentClass>>) {
+    let Some((root, store_path)) = ref_index_root_store(store_path) else { return };
+    let mut refs = refs.iter().filter(|ref_id| ref_id.starts_with("tz://blob/")).peekable();
+    if refs.peek().is_none() || create_ref_index_dir(&root).is_err() {
         return;
     }
-    let ts = SystemTime::now()
-        .duration_since(SystemTime::UNIX_EPOCH)
-        .map(|duration| duration.as_nanos())
-        .unwrap_or_default();
-    for ref_id in blob_refs {
-        let shard = ref_index_shard_path(&root, ref_id);
-        let Ok(_lock) =
-            PersistLock::acquire_with_retries(ref_index_lock_path(&shard), LOCK_RETRIES)
-        else {
-            continue;
-        };
-        if newest_ref_index_store_path(&shard, ref_id).as_deref()
-            == Some(store_path.to_string_lossy().as_ref())
-        {
+    let ts = ref_index_timestamp();
+    for ref_id in refs {
+        let Some((shard, _lock)) = locked_ref_index_shard(&root, ref_id) else { continue };
+        if newest_ref_index_store_path(&shard, ref_id).as_deref() == Some(store_path.to_string_lossy().as_ref()) {
             continue;
         }
-        let content_class = classes
-            .and_then(|m| m.get(ref_id.as_str()))
-            .copied()
-            .unwrap_or_else(|| classify_ref(ref_id, None));
-        if append_ref_index_line(&shard, ref_id, &store_path, ts, content_class, false).is_ok()
-            && fs::metadata(&shard)
-                .map(|meta| meta.len() > REF_INDEX_MAX_BYTES)
-                .unwrap_or(false)
-        {
-            let _ = compact_ref_index_shard(&shard);
+        let class = classes.and_then(|classes| classes.get(ref_id)).copied().unwrap_or_else(|| classify_ref(ref_id, None));
+        if append_ref_index_line(&shard, ref_id, &store_path, ts, class, false).is_ok() {
+            compact_ref_index_if_needed(&shard);
         }
     }
 }
@@ -2392,9 +1941,7 @@ fn append_ref_index_line(
     content_class: ContentClass,
     expanded: bool,
 ) -> Result<(), RecoveryError> {
-    let Some(parent) = shard.parent() else {
-        return Ok(());
-    };
+    let Some(parent) = shard.parent() else { return Ok(()) };
     create_ref_index_dir(parent)?;
     let entry = RefIndexEntry {
         ref_id: ref_id.to_string(),
@@ -2405,183 +1952,135 @@ fn append_ref_index_line(
     };
     let mut line = serde_json::to_string(&entry)?;
     line.push('\n');
-    let mut options = OpenOptions::new();
-    options.create(true).append(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.mode(0o600);
-    }
-    let mut file = options.open(shard)?;
-    file.write_all(line.as_bytes())?;
+    private_open_options().create(true).append(true).open(shard)?.write_all(line.as_bytes())?;
     Ok(())
 }
 
-fn compact_ref_index_shard(shard: &Path) -> Result<(), RecoveryError> {
-    let file = match fs::File::open(shard) {
-        Ok(file) => file,
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-        Err(err) => return Err(err.into()),
-    };
-    let Some(text) = read_limited_utf8(file, (REF_INDEX_MAX_BYTES as usize).saturating_mul(4))?
-    else {
-        return Ok(());
-    };
-    let entries = newest_ref_index_entries(&text, None);
-    write_ref_index_entries(shard, entries.values())
+fn open_optional_file(path: &Path) -> Result<Option<fs::File>, RecoveryError> {
+    match fs::File::open(path) {
+        Ok(file) => Ok(Some(file)),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(err) => Err(err.into()),
+    }
 }
 
-fn prune_ref_index_stale_entries(ref_id: &str, stale_store_paths: &HashSet<String>) {
-    if stale_store_paths.is_empty() {
+fn compact_ref_index_shard(shard: &Path) -> Result<(), RecoveryError> {
+    let Some(file) = open_optional_file(shard)? else { return Ok(()) };
+    let Some(text) = read_limited_utf8(file, (REF_INDEX_MAX_BYTES as usize).saturating_mul(4))? else {
+        return Ok(());
+    };
+    write_ref_index_entries(shard, newest_ref_index_entries(&text, None).values())
+}
+
+fn prune_ref_index_stale_entries(ref_id: &str, stale: &HashSet<String>) {
+    if stale.is_empty() {
         return;
     }
-    let Some(root) = ref_index_root() else {
-        return;
-    };
-    let shard = ref_index_shard_path(&root, ref_id);
-    let Ok(_lock) = PersistLock::acquire_with_retries(ref_index_lock_path(&shard), LOCK_RETRIES)
-    else {
-        return;
-    };
-    let Ok(file) = fs::File::open(&shard) else {
-        return;
-    };
-    let Ok(Some(text)) = read_limited_utf8(file, (REF_INDEX_MAX_BYTES as usize).saturating_mul(4))
-    else {
-        return;
-    };
-    let mut entries = Vec::new();
-    for line in text.lines() {
-        let line = line.trim();
-        if line.is_empty() {
-            continue;
-        }
-        let Ok(entry) = serde_json::from_str::<RefIndexEntry>(line) else {
-            break;
-        };
-        if entry.ref_id == ref_id && stale_store_paths.contains(&entry.store_path) {
-            continue;
-        }
-        entries.push(entry);
-    }
-    let _ = write_ref_index_entries(&shard, entries.iter());
+    let Some(root) = ref_index_root() else { return };
+    let Some((shard, _lock)) = locked_ref_index_shard(&root, ref_id) else { return };
+    let Some(text) = ref_index_text(&shard) else { return };
+    let entries: Vec<_> =
+        parsed_ref_index_entries(&text).filter(|entry| entry.ref_id != ref_id || !stale.contains(&entry.store_path)).collect();
+    let _ = write_ref_index_entries(&shard, &entries);
 }
 
 fn newest_ref_index_store_path(shard: &Path, ref_id: &str) -> Option<String> {
-    let file = fs::File::open(shard).ok()?;
-    let text = read_limited_utf8(file, (REF_INDEX_MAX_BYTES as usize).saturating_mul(4))
-        .ok()
-        .flatten()?;
-    ref_index_entries_for_ref(&text, ref_id)
-        .into_iter()
-        .next()
-        .map(|entry| entry.store_path)
+    parsed_ref_index_entries(&ref_index_text(shard)?).filter(|entry| entry.ref_id == ref_id).fold(None, |newest, entry| {
+        if newest.as_ref().is_none_or(|current: &RefIndexEntry| entry.ts > current.ts) {
+            Some(entry)
+        } else {
+            newest
+        }
+    }).map(|entry| entry.store_path)
 }
 
 fn ref_index_entries_for_ref(text: &str, ref_id: &str) -> Vec<RefIndexEntry> {
-    let mut entries = Vec::new();
-    for line in text.lines() {
-        let line = line.trim();
-        if line.is_empty() {
-            continue;
-        }
-        let Ok(entry) = serde_json::from_str::<RefIndexEntry>(line) else {
-            break;
-        };
-        if entry.ref_id == ref_id {
-            entries.push(entry);
-        }
-    }
-    entries.sort_by_key(|b| std::cmp::Reverse(b.ts));
+    let mut entries: Vec<_> = parsed_ref_index_entries(text).filter(|entry| entry.ref_id == ref_id).collect();
+    entries.sort_by_key(|entry| std::cmp::Reverse(entry.ts));
     entries
 }
 
 fn newest_ref_index_entries(text: &str, skip_ref: Option<&str>) -> BTreeMap<String, RefIndexEntry> {
     let mut entries = BTreeMap::new();
-    for line in text.lines() {
-        let line = line.trim();
-        if line.is_empty() {
-            continue;
-        }
-        let Ok(entry) = serde_json::from_str::<RefIndexEntry>(line) else {
-            break;
-        };
-        if skip_ref == Some(entry.ref_id.as_str()) {
-            continue;
-        }
-        let replace = entries
-            .get(&entry.ref_id)
-            .map(|existing: &RefIndexEntry| entry.ts >= existing.ts)
-            .unwrap_or(true);
-        if replace {
-            let mut entry = entry;
-            if let Some(existing) = entries.get(&entry.ref_id) {
-                entry.expanded |= existing.expanded;
+    for mut entry in parsed_ref_index_entries(text).filter(|entry| skip_ref != Some(entry.ref_id.as_str())) {
+        match entries.entry(entry.ref_id.clone()) {
+            std::collections::btree_map::Entry::Vacant(slot) => {
+                slot.insert(entry);
             }
-            entries.insert(entry.ref_id.clone(), entry);
-        } else if let Some(existing) = entries.get_mut(&entry.ref_id) {
-            existing.expanded |= entry.expanded;
+            std::collections::btree_map::Entry::Occupied(mut slot) => {
+                let existing = slot.get_mut();
+                if entry.ts >= existing.ts {
+                    entry.expanded |= existing.expanded;
+                    slot.insert(entry);
+                } else {
+                    existing.expanded |= entry.expanded;
+                }
+            }
         }
     }
     entries
 }
 
-fn write_ref_index_entries<'a>(
-    shard: &Path,
-    entries: impl IntoIterator<Item = &'a RefIndexEntry>,
-) -> Result<(), RecoveryError> {
-    let parent = shard.parent().unwrap_or_else(|| Path::new("."));
-    create_ref_index_dir(parent)?;
+fn write_ref_index_entries<'a>(shard: &Path, entries: impl IntoIterator<Item = &'a RefIndexEntry>) -> Result<(), RecoveryError> {
+    create_ref_index_dir(shard.parent().unwrap_or_else(|| Path::new(".")))?;
     let tmp = recovery_tmp_path(shard);
     {
-        let mut options = OpenOptions::new();
-        options.write(true).create_new(true);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt;
-            options.mode(0o600);
-        }
-        let mut file = options.open(&tmp)?;
+        let mut file = create_private_new(&tmp)?;
         for entry in entries {
-            let mut line = serde_json::to_string(entry)?;
-            line.push('\n');
-            file.write_all(line.as_bytes())?;
+            serde_json::to_writer(&mut file, entry)?;
+            file.write_all(b"\n")?;
         }
     }
     fs::rename(&tmp, shard).map_err(RecoveryError::from)
 }
 
-fn resolve_blob_from_ref_index(ref_id: &str, config: &RecoveryConfig) -> RefResolve {
-    let Some(root) = ref_index_root() else {
-        return RefResolve::NotFound;
-    };
-    let shard = ref_index_shard_path(&root, ref_id);
-    let Ok(file) = fs::File::open(&shard) else {
-        return RefResolve::NotFound;
-    };
-    let Ok(Some(text)) = read_limited_utf8(file, (REF_INDEX_MAX_BYTES as usize).saturating_mul(4))
-    else {
-        return RefResolve::NotFound;
-    };
+fn ref_index_blob_entries(ref_id: &str) -> Option<(PathBuf, Vec<RefIndexEntry>)> {
+    let root = ref_index_root()?;
+    let text = ref_index_text(&ref_index_shard_path(&root, ref_id))?;
     let entries = ref_index_entries_for_ref(&text, ref_id);
+    Some((root, entries))
+}
+
+fn blob_reachable_in_ref_index(ref_id: &str, config: &RecoveryConfig) -> bool {
+    let Some((root, entries)) = ref_index_blob_entries(ref_id) else {
+        return false;
+    };
+    if entries.is_empty() {
+        return false;
+    }
+    if let Some(hash) = ref_index_id_part(ref_id) {
+        if SharedCas::new(root).contains(hash) {
+            return true;
+        }
+    }
+    entries.iter().any(|entry| {
+        let store_path = PathBuf::from(&entry.store_path);
+        store_path.is_file()
+            && load_state(&store_path, config)
+                .ok()
+                .flatten()
+                .is_some_and(|state| state.blobs.contains_key(ref_id))
+    })
+}
+
+fn resolve_blob_from_ref_index(ref_id: &str, config: &RecoveryConfig) -> RefResolve {
+    let Some((root, entries)) = ref_index_blob_entries(ref_id) else {
+        return RefResolve::NotFound;
+    };
     if !entries.is_empty() {
         if let Some(hash) = ref_index_id_part(ref_id) {
-            match SharedCas::new(root.clone()).resolve(hash) {
-                Ok(bytes) => {
-                    return String::from_utf8(bytes)
-                        .map(RefResolve::Found)
-                        .unwrap_or(RefResolve::DecodeFailed);
-                }
-                Err(SharedCasError::Corruption) => return RefResolve::DecodeFailed,
+            match shared_cas_utf8(&SharedCas::new(root), hash) {
+                Ok(content) => return RefResolve::Found(content),
+                Err(None) | Err(Some(SharedCasError::Corruption)) => return RefResolve::DecodeFailed,
                 Err(_) => {}
             }
         }
     }
-    let mut stale_store_paths = HashSet::new();
+    let mut stale = HashSet::new();
     for entry in entries {
         let store_path = PathBuf::from(&entry.store_path);
         if !store_path.is_file() {
-            stale_store_paths.insert(entry.store_path);
+            stale.insert(entry.store_path);
             continue;
         }
         let resolved = load_state(&store_path, config)
@@ -2590,146 +2089,78 @@ fn resolve_blob_from_ref_index(ref_id: &str, config: &RecoveryConfig) -> RefReso
             .and_then(|state| state.blobs.get(ref_id).cloned())
             .map(|value| resolve_blob_value(Some(&store_path), ref_id, &value));
         match resolved {
-            Some(RefResolve::Found(content)) => {
-                if !stale_store_paths.is_empty() {
-                    prune_ref_index_stale_entries(ref_id, &stale_store_paths);
-                }
-                return RefResolve::Found(content);
+            Some(result @ (RefResolve::Found(_) | RefResolve::DecodeFailed)) => {
+                prune_ref_index_stale_entries(ref_id, &stale);
+                return result;
             }
             Some(RefResolve::Stale) => return RefResolve::Stale,
-            Some(RefResolve::DecodeFailed) => {
-                if !stale_store_paths.is_empty() {
-                    prune_ref_index_stale_entries(ref_id, &stale_store_paths);
-                }
-                return RefResolve::DecodeFailed;
+            Some(RefResolve::NotFound) | None => {
+                stale.insert(entry.store_path);
             }
-            Some(RefResolve::NotFound) | None => stale_store_paths.insert(entry.store_path),
-        };
+        }
     }
-    prune_ref_index_stale_entries(ref_id, &stale_store_paths);
+    prune_ref_index_stale_entries(ref_id, &stale);
     RefResolve::NotFound
 }
 
-/// Append an expansion outcome to the per-user ref index. Preserves the
-/// content class from an existing entry for the same ref when available,
-/// so a ref expanded in a later session keeps the class it was stored with.
-fn record_ref_index_expanded(store_path: &Path, ref_id: &str, fallback_class: ContentClass) {
-    let Some(root) = ref_index_root() else {
-        return;
-    };
-    let Ok(store_path) = store_path
-        .canonicalize()
-        .or_else(|_| Ok::<_, std::io::Error>(store_path.to_path_buf()))
-    else {
-        return;
-    };
-    let shard = ref_index_shard_path(&root, ref_id);
-    let Ok(_lock) = PersistLock::acquire_with_retries(ref_index_lock_path(&shard), LOCK_RETRIES)
-    else {
-        return;
-    };
-    let existing = if let Ok(file) = fs::File::open(&shard) {
-        read_limited_utf8(file, (REF_INDEX_MAX_BYTES as usize).saturating_mul(4))
-            .ok()
-            .flatten()
-            .and_then(|text| ref_index_entries_for_ref(&text, ref_id).into_iter().next())
-    } else {
-        None
-    };
-    let content_class = existing
-        .as_ref()
-        .map(|entry| entry.content_class)
-        .unwrap_or(fallback_class);
-    // Avoid rewriting the shard when the ref is already marked expanded.
-    // The expanded flag is sticky across sessions.
-    if existing
-        .as_ref()
-        .map(|entry| entry.expanded)
-        .unwrap_or(false)
-    {
+fn record_ref_index_expanded(store_path: &Path, ref_id: &str, fallback: ContentClass) {
+    let Some((root, store_path)) = ref_index_root_store(store_path) else { return };
+    let Some((shard, _lock)) = locked_ref_index_shard(&root, ref_id) else { return };
+    let existing = ref_index_text(&shard).and_then(|text| ref_index_entries_for_ref(&text, ref_id).into_iter().next());
+    if existing.as_ref().is_some_and(|entry| entry.expanded) {
         return;
     }
-    let ts = SystemTime::now()
-        .duration_since(SystemTime::UNIX_EPOCH)
-        .map(|duration| duration.as_nanos())
-        .unwrap_or_default();
-    let _ = append_ref_index_line(&shard, ref_id, &store_path, ts, content_class, true);
-    if fs::metadata(&shard)
-        .map(|meta| meta.len() > REF_INDEX_MAX_BYTES)
-        .unwrap_or(false)
-    {
-        let _ = compact_ref_index_shard(&shard);
-    }
+    let class = existing.map_or(fallback, |entry| entry.content_class);
+    let _ = append_ref_index_line(&shard, ref_id, &store_path, ref_index_timestamp(), class, true);
+    compact_ref_index_if_needed(&shard);
 }
 
 /// Export per-content-class expansion rates from the per-user ref index.
 /// Returns a JSON summary with total refs, expanded refs, and the expansion
 /// rate for each content class. The `expanded` flag is sticky across sessions.
 pub fn export_class_stats() -> serde_json::Value {
-    let empty = serde_json::json!({
-        "schema_version": "tokenzero.recovery.class-stats.v1",
-        "classes": Vec::<serde_json::Value>::new(),
-        "total_refs": 0,
-        "total_expanded": 0,
-    });
+    const SCHEMA: &str = "tokenzero.recovery.class-stats.v1";
+    let empty = || {
+        serde_json::json!({
+            "schema_version": SCHEMA,
+            "classes": Vec::<serde_json::Value>::new(),
+            "total_refs": 0,
+            "total_expanded": 0,
+        })
+    };
     let Some(root) = ref_index_root() else {
-        return empty.clone();
+        return empty();
     };
-    let mut all_entries = Vec::new();
-    let Ok(entries) = fs::read_dir(&root) else {
-        return empty;
+    let Ok(shards) = fs::read_dir(root) else {
+        return empty();
     };
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if path.extension().and_then(|e| e.to_str()) != Some("ndjson") {
-            continue;
-        }
-        let Ok(file) = fs::File::open(&path) else {
-            continue;
-        };
-        let Ok(Some(text)) =
-            read_limited_utf8(file, (REF_INDEX_MAX_BYTES as usize).saturating_mul(4))
-        else {
-            continue;
-        };
-        for line in text.lines() {
-            let line = line.trim();
-            if line.is_empty() {
-                continue;
-            }
-            if let Ok(entry) = serde_json::from_str::<RefIndexEntry>(line) {
-                all_entries.push(entry);
-            }
-        }
-    }
     let mut per_ref: BTreeMap<String, (u128, ContentClass, bool)> = BTreeMap::new();
-    for entry in all_entries {
-        match per_ref.entry(entry.ref_id.clone()) {
-            std::collections::btree_map::Entry::Vacant(slot) => {
-                slot.insert((entry.ts, entry.content_class, entry.expanded));
-            }
-            std::collections::btree_map::Entry::Occupied(mut slot) => {
-                let (ts, class, expanded) = slot.get_mut();
-                *expanded |= entry.expanded;
-                if entry.ts > *ts {
-                    *ts = entry.ts;
-                    *class = entry.content_class;
-                }
+    for shard in shards
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| path.extension().and_then(|ext| ext.to_str()) == Some("ndjson"))
+    {
+        let Some(text) = ref_index_text(&shard) else {
+            continue;
+        };
+        for entry in parsed_ref_index_entries(&text) {
+            let current = per_ref.entry(entry.ref_id).or_insert((0, entry.content_class, false));
+            current.2 |= entry.expanded;
+            if entry.ts > current.0 {
+                current.0 = entry.ts;
+                current.1 = entry.content_class;
             }
         }
     }
     let mut totals: BTreeMap<ContentClass, (usize, usize)> = BTreeMap::new();
     for (_, class, expanded) in per_ref.values() {
-        let (total, expanded_count) = totals.entry(*class).or_insert((0, 0));
-        *total += 1;
-        if *expanded {
-            *expanded_count += 1;
-        }
+        let counts = totals.entry(*class).or_default();
+        counts.0 += 1;
+        counts.1 += usize::from(*expanded);
     }
-    let mut classes = Vec::new();
     let mut total_refs = 0usize;
     let mut total_expanded = 0usize;
-    for class in [
+    let classes = [
         ContentClass::SourceFile,
         ContentClass::Diff,
         ContentClass::ShellOutput,
@@ -2737,76 +2168,54 @@ pub fn export_class_stats() -> serde_json::Value {
         ContentClass::Doc,
         ContentClass::BinaryPreview,
         ContentClass::Unknown,
-    ] {
-        let (total, expanded) = totals.remove(&class).unwrap_or((0, 0));
-        let rate = if total > 0 {
-            expanded as f64 / total as f64
-        } else {
+    ]
+    .into_iter()
+    .map(|class| {
+        let (total, expanded) = totals.remove(&class).unwrap_or_default();
+        total_refs += total;
+        total_expanded += expanded;
+        let rate = if total == 0 {
             0.0
+        } else {
+            expanded as f64 / total as f64
         };
-        classes.push(serde_json::json!({
+        serde_json::json!({
             "content_class": class,
             "total": total,
             "expanded": expanded,
             "rate": rate,
-        }));
-        total_refs += total;
-        total_expanded += expanded;
-    }
+        })
+    })
+    .collect::<Vec<_>>();
     serde_json::json!({
-        "schema_version": "tokenzero.recovery.class-stats.v1",
+        "schema_version": SCHEMA,
         "classes": classes,
         "total_refs": total_refs,
         "total_expanded": total_expanded,
     })
 }
 
-fn load_state(
-    path: &Path,
-    config: &RecoveryConfig,
-) -> Result<Option<RecoveryState>, RecoveryError> {
-    let file = match fs::File::open(path) {
-        Ok(file) => file,
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(err) => return Err(err.into()),
-    };
+fn load_state(path: &Path, config: &RecoveryConfig) -> Result<Option<RecoveryState>, RecoveryError> {
+    let Some(file) = open_optional_file(path)? else { return Ok(None) };
     let meta = file.metadata()?;
-    if !meta.is_file() {
-        return Ok(None);
-    }
     // Compare as u64 so a file larger than usize can't truncate and slip past
     // the load-size guard on 32-bit targets (which would risk an OOM on read).
-    if meta.len() > config.max_load_bytes as u64 {
+    if !meta.is_file() || meta.len() > config.max_load_bytes as u64 {
         return Ok(None);
     }
-    let Some(text) = read_limited_utf8(file, config.max_load_bytes)? else {
-        return Ok(None);
-    };
-    let Ok(mut state) = serde_json::from_str::<RecoveryState>(&text) else {
-        return Ok(None);
-    };
-    state.max_blobs = config.max_blobs;
-    state.max_files = config.max_files;
-    state.max_units = config.max_units;
-    state.max_search_hits = config.max_search_hits;
-    state.max_bytes = config.max_bytes;
+    let Some(text) = read_limited_utf8(file, config.max_load_bytes)? else { return Ok(None) };
+    let Ok(mut state) = serde_json::from_str::<RecoveryState>(&text) else { return Ok(None) };
+    state.configure(config);
     Ok(Some(apply_journal(state, path, config)))
 }
 
-/// Externalized-blob sidecar (bead tz8). Values >= this many bytes are
-/// written to `<cache>.blobs/<sha256>.txt` and replaced by a marker string:
-/// `\u{0}tzx:v1:<sha256hex>:<len>:`. Content-addressed: reads verify the
-/// hash, so a torn or tampered sidecar is a cache miss, never bad bytes.
-/// A leading NUL keeps collisions with real tool output implausible, and a
-/// malformed marker is treated as literal text (fail-open both ways).
+// Large blobs use verified content-addressed sidecars.
 const BLOB_EXTERNALIZE_MIN_BYTES: usize = 64 * 1024;
 const STREAM_READ_BUFFER_BYTES: usize = 64 * 1024;
 const BLOB_MARKER_PREFIX: &str = "\u{0}tzx:v1:";
 
 fn blob_sidecar_dir(cache_path: &Path) -> PathBuf {
-    let mut os: OsString = cache_path.as_os_str().to_owned();
-    os.push(".blobs");
-    PathBuf::from(os)
+    append_file_name_suffix(cache_path, ".blobs")
 }
 
 fn externalize_blob_value(cache_path: &Path, text: &str, hash: &str) -> Option<String> {
@@ -2836,78 +2245,81 @@ fn parse_blob_marker(value: &str) -> Option<(&str, usize)> {
 fn blob_value_len(value: &BlobEntry) -> usize {
     match value {
         BlobEntry::Inline(text) => parse_blob_marker(text).map_or(text.len(), |(_, len)| len),
-        BlobEntry::FileRef { path, .. } => {
-            std::mem::size_of::<BlobEntry>() + path.as_os_str().len()
-        }
+        BlobEntry::FileRef { path, .. } => std::mem::size_of::<BlobEntry>() + path.as_os_str().len(),
     }
+}
+
+fn encode_hex(bytes: &[u8]) -> String {
+    use std::fmt::Write as _;
+    let mut encoded = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        write!(&mut encoded, "{byte:02x}").expect("writing hex into String cannot fail");
+    }
+    encoded
 }
 
 fn digest_hex(hasher: Sha256) -> String {
-    hasher
-        .finalize()
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect()
+    encode_hex(hasher.finalize().as_ref())
 }
 
-/// Read UTF-8 through a fixed buffer while hashing exact bytes. The Vec becomes
-/// the returned String without copying, so a contiguous response has one payload allocation.
-fn read_utf8_hashed(path: &Path, expected_len: Option<usize>) -> std::io::Result<(String, String)> {
-    let mut file = fs::File::open(path)?;
-    let capacity = expected_len
-        .or_else(|| file.metadata().ok()?.len().try_into().ok())
-        .unwrap_or(STREAM_READ_BUFFER_BYTES);
-    let mut bytes = Vec::with_capacity(capacity);
-    let mut hasher = Sha256::new();
+fn invalid_data(msg: impl Into<String>) -> std::io::Error {
+    std::io::Error::new(std::io::ErrorKind::InvalidData, msg.into())
+}
+
+fn finalize_utf8_digest(bytes: Vec<u8>, hasher: Sha256) -> std::io::Result<(String, String)> {
+    Ok((
+        String::from_utf8(bytes).map_err(|err| invalid_data(err.to_string()))?,
+        digest_hex(hasher),
+    ))
+}
+
+fn line_range_out_of_bounds(start: usize, end: usize, line_count: usize) -> bool {
+    start == 0 || start > end || end > line_count
+}
+
+fn read_file_chunks<R: Read>(reader: &mut R, mut on_chunk: impl FnMut(&[u8]) -> std::io::Result<()>) -> std::io::Result<()> {
     let mut buffer = [0_u8; STREAM_READ_BUFFER_BYTES];
     loop {
-        let read = file.read(&mut buffer)?;
+        let read = reader.read(&mut buffer)?;
         if read == 0 {
             break;
         }
-        if expected_len.is_some_and(|len| bytes.len().saturating_add(read) > len) {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                "streamed payload exceeds its recorded length",
-            ));
-        }
-        hasher.update(&buffer[..read]);
-        bytes.extend_from_slice(&buffer[..read]);
+        on_chunk(&buffer[..read])?;
     }
-    if expected_len.is_some_and(|len| bytes.len() != len) {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::InvalidData,
-            "streamed payload does not match its recorded length",
-        ));
-    }
-    let text = String::from_utf8(bytes)
-        .map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidData, err))?;
-    Ok((text, digest_hex(hasher)))
+    Ok(())
 }
 
-/// Stream one-based inclusive lines without materializing the rest of the file.
-/// Hashing covers the exact selected bytes used to derive the blob ref.
-fn read_utf8_line_range_hashed(
-    path: &Path,
-    start_line: usize,
-    end_line: usize,
-) -> std::io::Result<(String, String)> {
+fn read_utf8_hashed(path: &Path, expected_len: Option<usize>) -> std::io::Result<(String, String)> {
+    let mut file = fs::File::open(path)?;
+    let capacity = expected_len.or_else(|| file.metadata().ok()?.len().try_into().ok()).unwrap_or(STREAM_READ_BUFFER_BYTES);
+    let mut bytes = Vec::with_capacity(capacity);
+    let mut hasher = Sha256::new();
+    read_file_chunks(&mut file, |chunk| {
+        if expected_len.is_some_and(|len| bytes.len().saturating_add(chunk.len()) > len) {
+            return Err(invalid_data("streamed payload exceeds its recorded length"));
+        }
+        hasher.update(chunk);
+        bytes.extend_from_slice(chunk);
+        Ok(())
+    })?;
+    if expected_len.is_some_and(|len| bytes.len() != len) {
+        return Err(invalid_data("streamed payload does not match its recorded length"));
+    }
+    finalize_utf8_digest(bytes, hasher)
+}
+
+fn read_utf8_line_range_hashed(path: &Path, start_line: usize, end_line: usize) -> std::io::Result<(String, String)> {
     let mut file = fs::File::open(path)?;
     let mut selected = Vec::new();
     let mut hasher = Sha256::new();
-    let mut buffer = [0_u8; STREAM_READ_BUFFER_BYTES];
     let mut line = 1_usize;
     let mut bytes_seen = 0_usize;
     let mut newline_count = 0_usize;
     let mut last_byte = None;
-    loop {
-        let read = file.read(&mut buffer)?;
-        if read == 0 {
-            break;
-        }
-        bytes_seen += read;
+    read_file_chunks(&mut file, |chunk| {
+        bytes_seen += chunk.len();
         let mut selected_from = None;
-        for (index, byte) in buffer[..read].iter().copied().enumerate() {
+        for (index, byte) in chunk.iter().copied().enumerate() {
             if line >= start_line && line <= end_line && selected_from.is_none() {
                 selected_from = Some(index);
             }
@@ -2915,8 +2327,8 @@ fn read_utf8_line_range_hashed(
                 newline_count += 1;
                 if line == end_line {
                     if let Some(from) = selected_from.take() {
-                        hasher.update(&buffer[from..=index]);
-                        selected.extend_from_slice(&buffer[from..=index]);
+                        hasher.update(&chunk[from..=index]);
+                        selected.extend_from_slice(&chunk[from..=index]);
                     }
                 }
                 line += 1;
@@ -2924,51 +2336,50 @@ fn read_utf8_line_range_hashed(
             last_byte = Some(byte);
         }
         if let Some(from) = selected_from {
-            hasher.update(&buffer[from..read]);
-            selected.extend_from_slice(&buffer[from..read]);
+            hasher.update(&chunk[from..]);
+            selected.extend_from_slice(&chunk[from..]);
         }
+        Ok(())
+    })?;
+    let line_count = if bytes_seen == 0 { 0 } else { newline_count + usize::from(last_byte != Some(b'\n')) };
+    if line_range_out_of_bounds(start_line, end_line, line_count) {
+        return Err(invalid_data("streamed line range is outside the source"));
     }
-    let line_count = if bytes_seen == 0 {
-        0
+    finalize_utf8_digest(selected, hasher)
+}
+
+fn stored_source_path(stored: &StoredFile) -> Option<PathBuf> {
+    let path_text = stored.path.as_deref()?;
+    Some(stored.path_identity.as_deref().and_then(path_from_identity_text).unwrap_or_else(|| PathBuf::from(path_text)))
+}
+
+fn resolve_found_if(ok: bool, text: String, fail: RefResolve) -> RefResolve {
+    if ok {
+        RefResolve::Found(text)
     } else {
-        newline_count + usize::from(last_byte != Some(b'\n'))
-    };
-    if start_line == 0 || start_line > end_line || end_line > line_count {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::InvalidData,
-            "streamed line range is outside the source",
-        ));
+        fail
     }
-    let text = String::from_utf8(selected)
-        .map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidData, err))?;
-    Ok((text, digest_hex(hasher)))
+}
+
+fn blob_ref_digest_matches(ref_id: &str, text: &str, sha256: &str) -> bool {
+    ref_id.strip_prefix("tz://blob/").is_some_and(|hash| {
+        if hash.len() == 64 {
+            sha256 == hash
+        } else {
+            id_for('b', text) == hash
+        }
+    })
 }
 
 fn resolve_file_value(stored: &StoredFile) -> RefResolve {
     if !stored.source_backed {
         return RefResolve::Found(stored.text.clone());
     }
-    let Some(path_text) = stored.path.as_deref() else {
-        return RefResolve::DecodeFailed;
-    };
-    let path = stored
-        .path_identity
-        .as_deref()
-        .and_then(path_from_identity_text)
-        .unwrap_or_else(|| PathBuf::from(path_text));
-    let Some(expected) = stored.source_fingerprint.as_ref() else {
-        return RefResolve::DecodeFailed;
-    };
-    let Ok(expected_len) = usize::try_from(expected.size) else {
-        return RefResolve::Stale;
-    };
-    let Ok((text, sha256)) = read_utf8_hashed(&path, Some(expected_len)) else {
-        return RefResolve::Stale;
-    };
-    if source_fingerprint_from_sha256(&path, &sha256).as_ref() != Some(expected) {
-        return RefResolve::Stale;
-    }
-    RefResolve::Found(text)
+    let Some(path) = stored_source_path(stored) else { return RefResolve::DecodeFailed };
+    let Some(expected) = stored.source_fingerprint.as_ref() else { return RefResolve::DecodeFailed };
+    let Ok(expected_len) = usize::try_from(expected.size) else { return RefResolve::Stale };
+    let Ok((text, sha256)) = read_utf8_hashed(&path, Some(expected_len)) else { return RefResolve::Stale };
+    resolve_found_if(source_fingerprint_from_sha256(&path, &sha256).as_ref() == Some(expected), text, RefResolve::Stale)
 }
 
 fn resolve_blob_value(cache_path: Option<&Path>, ref_id: &str, value: &BlobEntry) -> RefResolve {
@@ -2977,58 +2388,28 @@ fn resolve_blob_value(cache_path: Option<&Path>, ref_id: &str, value: &BlobEntry
             let Some((hash, expected_len)) = parse_blob_marker(value) else {
                 return RefResolve::Found(value.clone());
             };
-            let Some(cache_path) = cache_path else {
-                return RefResolve::DecodeFailed;
-            };
+            let Some(cache_path) = cache_path else { return RefResolve::DecodeFailed };
             let path = blob_sidecar_dir(cache_path).join(format!("{hash}.txt"));
             let Ok((text, actual_hash)) = read_utf8_hashed(&path, Some(expected_len)) else {
                 return RefResolve::DecodeFailed;
             };
-            if actual_hash == hash {
-                RefResolve::Found(text)
-            } else {
-                RefResolve::DecodeFailed
-            }
+            resolve_found_if(actual_hash == hash, text, RefResolve::DecodeFailed)
         }
-        BlobEntry::FileRef {
-            path,
-            source_start_line,
-            source_end_line,
-        } => {
-            let Ok((text, sha256)) =
-                read_utf8_line_range_hashed(path, *source_start_line, *source_end_line)
-            else {
+        BlobEntry::FileRef { path, source_start_line, source_end_line } => {
+            let Ok((text, sha256)) = read_utf8_line_range_hashed(path, *source_start_line, *source_end_line) else {
                 return RefResolve::Stale;
             };
-            let hash_matches = ref_id.strip_prefix("tz://blob/").is_some_and(|hash| {
-                if hash.len() == 64 {
-                    sha256 == hash
-                } else {
-                    id_for('b', &text) == hash
-                }
-            });
-            if hash_matches {
-                RefResolve::Found(text)
-            } else {
-                RefResolve::Stale
-            }
+            resolve_found_if(blob_ref_digest_matches(ref_id, &text, &sha256), text, RefResolve::Stale)
         }
     }
 }
 
-/// Journal sibling of the snapshot: `recovery-cache.json.journal`. Each line
-/// is one persisted session delta (a `JournalEntry`); load replays them onto
-/// the snapshot through `merge_states`, so on-disk state is always
-/// `snapshot ⊕ journal` and merge semantics have a single implementation.
+// Active journal sibling path.
 fn journal_path(path: &Path) -> PathBuf {
-    let mut os: OsString = path.as_os_str().to_owned();
-    os.push(".journal");
-    PathBuf::from(os)
+    append_file_name_suffix(path, ".journal")
 }
 
-/// One persist's worth of new data: the refs stored this session plus a
-/// minimal `RecoveryState` carrying only their entries (and the session's
-/// aliases/shell outcomes, which merge unconditionally).
+// Persisted session delta.
 #[derive(Debug, Serialize, Deserialize)]
 struct JournalEntry {
     refs: Vec<String>,
@@ -3039,54 +2420,58 @@ struct JournalEntry {
     deleted_aliases: Vec<String>,
 }
 
-fn session_delta(
-    state: &RecoveryState,
-    session_refs: &[String],
-    config: &RecoveryConfig,
-) -> RecoveryState {
+fn apply_deletions<'a>(
+    state: &mut RecoveryState,
+    blob_refs: impl IntoIterator<Item = &'a str>,
+    aliases: impl IntoIterator<Item = &'a str>,
+) {
+    for alias in aliases {
+        state.aliases.remove(alias);
+        state.ambiguous_aliases.remove(alias);
+    }
+    for ref_id in blob_refs {
+        state.blobs.remove(ref_id);
+    }
+}
+
+fn recovery_unit_map<'a>(
+    state: &'a RecoveryState,
+    kind: &str,
+) -> Option<&'a BTreeMap<String, StoredUnit>> {
+    match kind {
+        "unit" => Some(&state.units),
+        "search" => Some(&state.search_hits),
+        _ => None,
+    }
+}
+
+fn state_entry_present(state: &RecoveryState, ref_id: &str) -> bool {
+    recovery_maps!(contains state, ref_id)
+}
+
+
+fn session_delta(state: &RecoveryState, session_refs: &[String], config: &RecoveryConfig) -> RecoveryState {
     let mut delta = RecoveryState::empty(config);
     for ref_id in session_refs {
-        if let Some(value) = state.blobs.get(ref_id) {
-            delta.blobs.insert(ref_id.clone(), value.clone());
-        }
-        if let Some(value) = state.files.get(ref_id) {
-            delta.files.insert(ref_id.clone(), value.clone());
-        }
-        if let Some(value) = state.units.get(ref_id) {
-            delta.units.insert(ref_id.clone(), value.clone());
-        }
-        if let Some(value) = state.search_hits.get(ref_id) {
-            delta.search_hits.insert(ref_id.clone(), value.clone());
-        }
+        recovery_maps!(copy delta, state, ref_id);
     }
-    // Aliases must travel wholesale: an alias is often stored AFTER the
-    // persist that carried its target (persist clears session_refs), so any
-    // session-ref filter silently drops it from the journal — codemode's
-    // logical execution refs died exactly this way. The map is small and
-    // merge_states upserts aliases unconditionally, so replay stays exact.
+    // These capped indexes are merged wholesale because they can change after
+    // the persist that carried their target and have no session-ref identity.
     delta.aliases = state.aliases.clone();
-    // Shell outcomes are a small capped map merged "current wins per key";
-    // carrying the whole map keeps replay exact without change tracking.
     delta.shell_outcomes = state.shell_outcomes.clone();
     delta.shell_outcome_seq = state.shell_outcome_seq;
-    // Ambiguous aliases must travel wholesale — same rationale as aliases.
     delta.ambiguous_aliases = state.ambiguous_aliases.clone();
-    delta.order = session_refs
-        .iter()
-        .filter(|ref_id| {
-            delta.blobs.contains_key(*ref_id)
-                || delta.files.contains_key(*ref_id)
-                || delta.units.contains_key(*ref_id)
-                || delta.search_hits.contains_key(*ref_id)
-        })
-        .cloned()
-        .collect();
+    delta.order = session_refs.iter().filter(|ref_id| state_entry_present(&delta, ref_id)).cloned().collect();
     delta
 }
 
-/// Rotate an active journal once it reaches this size. The snapshot is
-/// compacted instead of discarding a fifth sealed segment, so bounded journal
-/// storage never sacrifices live recovery data.
+fn copy_map_entry<T: Clone>(destination: &mut BTreeMap<String, T>, source: &BTreeMap<String, T>, ref_id: &str) {
+    if let Some(value) = source.get(ref_id) {
+        destination.insert(ref_id.to_string(), value.clone());
+    }
+}
+
+// Bound journal segments relative to the snapshot.
 fn journal_compact_threshold(snapshot_len: u64) -> u64 {
     snapshot_len.max(64 * 1024)
 }
@@ -3110,11 +2495,7 @@ fn remove_journal_segments(path: &Path) {
     }
 }
 
-fn append_journal(
-    snapshot_path: &Path,
-    entry: &JournalEntry,
-    segment_limit: u64,
-) -> Result<JournalAppend, RecoveryError> {
+fn append_journal(snapshot_path: &Path, entry: &JournalEntry, segment_limit: u64) -> Result<JournalAppend, RecoveryError> {
     let mut line = serde_json::to_string(entry)?;
     line.push('\n');
     let line_len = line.len() as u64;
@@ -3142,71 +2523,50 @@ fn append_journal(
     Ok(JournalAppend::Appended)
 }
 
-/// Replay journal lines onto a loaded snapshot. Fail-open at every step: a
-/// missing/oversized/corrupt journal simply yields the snapshot (the cache is
-/// reconstructible by design). A parse failure stops replay at that line so a
-/// torn tail write can never poison earlier, complete entries.
-fn apply_journal(mut state: RecoveryState, path: &Path, config: &RecoveryConfig) -> RecoveryState {
-    let mut journal_paths = Vec::with_capacity(JOURNAL_MAX_SEALED_SEGMENTS + 1);
-    for generation in (1..=JOURNAL_MAX_SEALED_SEGMENTS).rev() {
-        journal_paths.push((journal_segment_path(path, generation), false));
+/// Fail-open capped journal segment read: `None` stops replay; empty means missing segment.
+/// Fail-open capped journal segment read: `None` stops replay; `Some(None)` skips a missing segment.
+fn read_capped_journal_text(path: &Path, remaining: &mut u64) -> Option<Option<String>> {
+    let file = match fs::File::open(path) {
+        Ok(file) => file,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Some(None),
+        Err(_) => return None,
+    };
+    let Ok(meta) = file.metadata() else {
+        return None;
+    };
+    if !meta.is_file() || meta.len() > *remaining {
+        return None;
     }
-    journal_paths.push((journal_path(path), true));
+    *remaining -= meta.len();
+    match read_limited_utf8(file, meta.len() as usize) {
+        Ok(Some(text)) => Some(Some(text)),
+        _ => None,
+    }
+}
 
+
+// Replay complete journal entries; any bad tail fails open to recovered state.
+fn apply_journal(mut state: RecoveryState, path: &Path, config: &RecoveryConfig) -> RecoveryState {
+    let journals = (1..=JOURNAL_MAX_SEALED_SEGMENTS)
+        .rev()
+        .map(|generation| journal_segment_path(path, generation))
+        .chain(std::iter::once(journal_path(path)));
     let mut remaining = config.max_load_bytes as u64;
-    for (journal, newest) in journal_paths {
-        let file = match fs::File::open(&journal) {
-            Ok(file) => file,
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => continue,
-            Err(_) => return state,
-        };
-        let Ok(meta) = file.metadata() else {
-            return state;
-        };
-        if !meta.is_file() || meta.len() > remaining {
-            return state;
-        }
-        remaining -= meta.len();
-        let Ok(Some(text)) = read_limited_utf8(file, meta.len() as usize) else {
-            return state;
-        };
-        for line in text.lines() {
-            let line = line.trim();
-            if line.is_empty() {
-                continue;
-            }
-            let Ok(entry) = serde_json::from_str::<JournalEntry>(line) else {
-                // Only the active (newest) segment can be torn by an
-                // interrupted append. Earlier complete entries remain valid.
-                if newest {
-                    return state;
-                }
-                return state;
-            };
-            let JournalEntry {
-                refs,
-                state: delta,
-                deleted_blob_refs,
-                deleted_aliases,
-            } = entry;
+    for journal in journals {
+        let Some(maybe_text) = read_capped_journal_text(&journal, &mut remaining) else { return state };
+        let Some(text) = maybe_text else { continue };
+        for line in text.lines().map(str::trim).filter(|line| !line.is_empty()) {
+            let Ok(entry) = serde_json::from_str::<JournalEntry>(line) else { return state };
+            let JournalEntry { refs, state: delta, deleted_blob_refs, deleted_aliases } = entry;
             let accumulated = std::mem::replace(&mut state, RecoveryState::empty(config));
             state = merge_states(accumulated, delta, &refs, config);
-            for alias in deleted_aliases {
-                state.aliases.remove(&alias);
-                state.ambiguous_aliases.remove(&alias);
-            }
-            for ref_id in deleted_blob_refs {
-                state.blobs.remove(&ref_id);
-            }
+            apply_deletions(&mut state, deleted_blob_refs.iter().map(String::as_str), deleted_aliases.iter().map(String::as_str));
         }
     }
     state
 }
 
-fn read_limited_utf8<R: Read>(
-    reader: R,
-    max_load_bytes: usize,
-) -> Result<Option<String>, RecoveryError> {
+fn read_limited_utf8<R: Read>(reader: R, max_load_bytes: usize) -> Result<Option<String>, RecoveryError> {
     let mut limited = reader.take((max_load_bytes as u64).saturating_add(1));
     let mut bytes = Vec::new();
     limited.read_to_end(&mut bytes)?;
@@ -3216,115 +2576,78 @@ fn read_limited_utf8<R: Read>(
     Ok(String::from_utf8(bytes).ok())
 }
 
-fn merge_states(
-    existing: RecoveryState,
-    current: RecoveryState,
-    session_refs: &[String],
-    config: &RecoveryConfig,
-) -> RecoveryState {
+fn merge_map_entries<T>(session: &HashSet<&str>, dst: &mut BTreeMap<String, T>, src: BTreeMap<String, T>) {
+    for (ref_id, value) in src {
+        if session.contains(ref_id.as_str()) || dst.contains_key(&ref_id) {
+            dst.insert(ref_id, value);
+        }
+    }
+}
+
+fn trim_shell_outcomes(outcomes: &mut BTreeMap<String, ShellOutcome>) {
+    while outcomes.len() > MAX_SHELL_OUTCOMES {
+        let Some(victim) = outcomes.iter().min_by_key(|(_, outcome)| outcome.seq).map(|(key, _)| key.clone()) else {
+            break;
+        };
+        outcomes.remove(&victim);
+    }
+}
+
+fn merge_states(existing: RecoveryState, current: RecoveryState, session_refs: &[String], config: &RecoveryConfig) -> RecoveryState {
     let session: HashSet<&str> = session_refs.iter().map(String::as_str).collect();
     let mut merged = existing;
-    for (ref_id, value) in current.blobs {
-        if session.contains(ref_id.as_str()) || merged.blobs.contains_key(&ref_id) {
-            merged.blobs.insert(ref_id, value);
-        }
-    }
-    for (ref_id, value) in current.files {
-        if session.contains(ref_id.as_str()) || merged.files.contains_key(&ref_id) {
-            merged.files.insert(ref_id, value);
-        }
-    }
-    for (ref_id, value) in current.units {
-        if session.contains(ref_id.as_str()) || merged.units.contains_key(&ref_id) {
-            merged.units.insert(ref_id, value);
-        }
-    }
-    for (ref_id, value) in current.search_hits {
-        if session.contains(ref_id.as_str()) || merged.search_hits.contains_key(&ref_id) {
-            merged.search_hits.insert(ref_id, value);
-        }
-    }
-    for (alias, target) in current.aliases {
-        merged.aliases.insert(alias, target);
-    }
+    recovery_maps!(merge &session, merged, current);
+    merged.aliases.extend(current.aliases);
     merged.order.extend(session_refs.iter().cloned());
     let mut seen = HashSet::new();
     merged.order.retain(|ref_id| seen.insert(ref_id.clone()));
-    // Shell outcomes: this session's observations win per key; the verdict
-    // itself is always recomputed from a content hash at record time, so a
-    // merge can never fabricate an "unchanged" result.
     merged.shell_outcome_seq = merged.shell_outcome_seq.max(current.shell_outcome_seq);
-    for (key, outcome) in current.shell_outcomes {
-        merged.shell_outcomes.insert(key, outcome);
-    }
-    while merged.shell_outcomes.len() > MAX_SHELL_OUTCOMES {
-        let victim = merged
-            .shell_outcomes
-            .iter()
-            .min_by_key(|(_, outcome)| outcome.seq)
-            .map(|(key, _)| key.clone());
-        match victim {
-            Some(victim) => {
-                merged.shell_outcomes.remove(&victim);
-            }
-            None => break,
-        }
-    }
-    for alias in current.ambiguous_aliases {
-        merged.ambiguous_aliases.insert(alias);
-    }
-    merged.max_blobs = config.max_blobs;
-    merged.max_files = config.max_files;
-    merged.max_units = config.max_units;
-    merged.max_search_hits = config.max_search_hits;
-    merged.max_bytes = config.max_bytes;
+    merged.shell_outcomes.extend(current.shell_outcomes);
+    trim_shell_outcomes(&mut merged.shell_outcomes);
+    merged.ambiguous_aliases.extend(current.ambiguous_aliases);
+    merged.configure(config);
     merged
 }
 
-fn evict_prefix<T>(
-    items: &mut BTreeMap<String, T>,
-    order: &mut Vec<String>,
-    prefix: &str,
-    limit: usize,
-) {
-    if items.len() <= limit {
+fn evict_prefix<T>(items: &mut BTreeMap<String, T>, order: &mut Vec<String>, prefix: &str, limit: usize) {
+    let excess = items.len().saturating_sub(limit);
+    if excess == 0 {
         return;
     }
-
-    let excess = items.len() - limit;
-    let mut victims = Vec::with_capacity(excess);
-    let mut victim_set = HashSet::with_capacity(excess);
-
-    for ref_id in order.iter() {
+    let mut victims = HashSet::with_capacity(excess);
+    for ref_id in order.iter().filter(|ref_id| ref_id.starts_with(prefix) && items.contains_key(*ref_id)) {
+        victims.insert(ref_id.clone());
         if victims.len() == excess {
             break;
         }
-        if ref_id.starts_with(prefix)
-            && items.contains_key(ref_id)
-            && victim_set.insert(ref_id.clone())
-        {
-            victims.push(ref_id.clone());
-        }
     }
-
     if victims.len() < excess {
         for ref_id in items.keys() {
+            victims.insert(ref_id.clone());
             if victims.len() == excess {
                 break;
             }
-            if victim_set.insert(ref_id.clone()) {
-                victims.push(ref_id.clone());
-            }
         }
     }
-
-    for victim in &victims {
-        items.remove(victim);
+    items.retain(|ref_id, _| !victims.contains(ref_id));
+    order.retain(|ref_id| !victims.contains(ref_id));
+}
+fn private_open_options() -> OpenOptions {
+    let mut options = OpenOptions::new();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
     }
-    order.retain(|item| !victim_set.contains(item));
+    options
+}
+
+fn create_private_new(path: &Path) -> std::io::Result<fs::File> {
+    private_open_options().write(true).create_new(true).open(path)
 }
 
 fn atomic_write_json(path: &Path, state: &RecoveryState) -> Result<(), RecoveryError> {
+    // A same-directory rename publishes either the old or complete new cache.
     let parent = path.parent().unwrap_or_else(|| Path::new("."));
     fs::create_dir_all(parent)?;
     let mut last_collision = None;
@@ -3333,22 +2656,15 @@ fn atomic_write_json(path: &Path, state: &RecoveryState) -> Result<(), RecoveryE
         match write_json_to_tmp(&tmp, state) {
             Ok(()) => {
                 if let Err(err) = fs::rename(&tmp, path) {
-                    // Best-effort cleanup: the rename error is the one worth
-                    // surfacing; a failed unlink only strands a temp file.
                     let _ = fs::remove_file(&tmp);
                     return Err(err.into());
                 }
-                // No parent-dir fsync after rename: see write_json_to_tmp.
-                // Atomicity (no torn read) is provided by rename itself;
-                // power-loss durability of the rename is out of scope for a
-                // reconstructible cache.
                 return Ok(());
             }
             Err(RecoveryError::Io(err)) if err.kind() == std::io::ErrorKind::AlreadyExists => {
                 last_collision = Some(err);
             }
             Err(err) => {
-                // Best-effort cleanup; propagate the write error unmasked.
                 let _ = fs::remove_file(&tmp);
                 return Err(err);
             }
@@ -3358,129 +2674,77 @@ fn atomic_write_json(path: &Path, state: &RecoveryState) -> Result<(), RecoveryE
         .unwrap_or_else(|| {
             std::io::Error::new(
                 std::io::ErrorKind::AlreadyExists,
-                format!(
-                    "could not allocate recovery temp file for {} after {TMP_RETRIES} attempts",
-                    path.display()
-                ),
+                format!("could not allocate recovery temp file for {} after {TMP_RETRIES} attempts", path.display()),
             )
         })
         .into())
 }
 
 fn write_json_to_tmp(tmp: &Path, state: &RecoveryState) -> Result<(), RecoveryError> {
-    let mut options = OpenOptions::new();
-    options.write(true).create_new(true);
-    // The cache holds the exact bytes of everything served for this
-    // workspace; keep it owner-only. The atomic rename preserves the mode.
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.mode(0o600);
-    }
-    let file = options.open(tmp)?;
-    // Buffer the serializer: serde_json::to_writer on a raw File issues one
-    // write(2) per JSON fragment, which profiled as 95% of warm-op wall time
-    // (tests/artifacts/perf/2026-06-11-pushmax). Identical bytes, ~3 syscalls.
+    // Buffered serialization avoids per-fragment writes; the cache is reconstructible.
+    let file = create_private_new(tmp)?;
     let mut writer = std::io::BufWriter::with_capacity(1 << 20, file);
     serde_json::to_writer(&mut writer, state)?;
     writer.write_all(b"\n")?;
-    let _file = writer
-        .into_inner()
-        .map_err(std::io::IntoInnerError::into_error)?;
-    // sync_data, not sync_all: the cache is reconstructible working state
-    // (a lost entry reports dangling-ref on expand, never wrong bytes; see
-    // docs/racc.md), so file metadata durability is not required — only that
-    // the tmp file's *bytes* are on disk before the rename publishes it, so a
-    // reader can never observe a torn/partial cache. On macOS sync_all maps to
-    // F_FULLFSYNC (full device flush, ~8ms pair); sync_data is fdatasync and
-    // skips it (~16x faster) while still ordering the data write ahead of the
-    // rename.
+    let _file = writer.into_inner().map_err(std::io::IntoInnerError::into_error)?;
     Ok(())
 }
 
-// No sync_parent_dir: the directory entry created by rename is not flushed.
-// Crash *consistency* does not need it — rename is atomic within a single
-// directory, so a concurrent or post-crash reader sees either the old inode or
-// the new one, never a torn file. Only power-loss *durability* of the rename
-// would need a parent-dir fsync, and that is explicitly out of scope here: the
-// cache is reconstructible working state. On macOS this fsync was a second
-// F_FULLFSYNC, doubling persist cost for a guarantee the cache does not claim.
-// Accepted power-loss window: a crash in the unflushed interval can revert the
-// cache to the previous consistent state, degrading affected refs to
-// dangling-ref — the designed-safe outcome (docs/racc.md), never wrong bytes.
-
 fn recovery_file_ref(text: &str, path: Option<&Path>) -> String {
-    let path_identity = path.map(path_identity_text).unwrap_or_default();
     let mut hasher = Sha256::new();
-    hasher.update(path_identity.as_bytes());
+    hasher.update(path.map(path_identity_text).unwrap_or_default());
     hasher.update(b":");
     hasher.update(text.as_bytes());
-    let digest = hasher.finalize();
-    let short_hash = digest
-        .iter()
-        .take(8)
-        .map(|byte| format!("{byte:02x}"))
-        .collect::<String>();
-    format!("tz://file/f{short_hash}")
+    format!("tz://file/f{}", &digest_hex(hasher)[..16])
 }
 
+
+macro_rules! path_identity_platform {
+    (unix) => {
+        fn path_identity_text(path: &Path) -> String {
+            use std::os::unix::ffi::OsStrExt;
+            format!("unix:{}", encode_hex(path.as_os_str().as_bytes()))
+        }
+        fn path_from_identity_text(identity: &str) -> Option<PathBuf> {
+            use std::os::unix::ffi::OsStringExt;
+            Some(PathBuf::from(OsString::from_vec(decode_hex_bytes(identity.strip_prefix("unix:")?)?)))
+        }
+    };
+    (windows) => {
+        fn path_identity_text(path: &Path) -> String {
+            use std::os::windows::ffi::OsStrExt;
+            let mut bytes = Vec::new();
+            for unit in path.as_os_str().encode_wide() {
+                bytes.extend_from_slice(&unit.to_be_bytes());
+            }
+            format!("windows:{}", encode_hex(&bytes))
+        }
+        fn path_from_identity_text(identity: &str) -> Option<PathBuf> {
+            use std::os::windows::ffi::OsStringExt;
+            let bytes = decode_hex_bytes(identity.strip_prefix("windows:")?)?;
+            let mut chunks = bytes.chunks_exact(2);
+            let units: Vec<u16> = chunks.by_ref().map(|p| u16::from_be_bytes([p[0], p[1]])).collect();
+            if !chunks.remainder().is_empty() {
+                return None;
+            }
+            Some(PathBuf::from(OsString::from_wide(&units)))
+        }
+    };
+    (other) => {
+        fn path_identity_text(path: &Path) -> String {
+            format!("display:{}", path.to_string_lossy())
+        }
+        fn path_from_identity_text(identity: &str) -> Option<PathBuf> {
+            Some(PathBuf::from(identity.strip_prefix("display:")?))
+        }
+    };
+}
 #[cfg(unix)]
-fn path_identity_text(path: &Path) -> String {
-    use std::fmt::Write as _;
-    use std::os::unix::ffi::OsStrExt;
-
-    let mut encoded = String::from("unix:");
-    for byte in path.as_os_str().as_bytes() {
-        write!(&mut encoded, "{byte:02x}").expect("writing hex bytes into String cannot fail");
-    }
-    encoded
-}
-
-#[cfg(unix)]
-fn path_from_identity_text(identity: &str) -> Option<PathBuf> {
-    use std::os::unix::ffi::OsStringExt;
-
-    let bytes = decode_hex_bytes(identity.strip_prefix("unix:")?)?;
-    Some(PathBuf::from(OsString::from_vec(bytes)))
-}
-
+path_identity_platform!(unix);
 #[cfg(windows)]
-fn path_identity_text(path: &Path) -> String {
-    use std::fmt::Write as _;
-    use std::os::windows::ffi::OsStrExt;
-
-    let mut encoded = String::from("windows:");
-    for unit in path.as_os_str().encode_wide() {
-        write!(&mut encoded, "{unit:04x}").expect("writing hex units into String cannot fail");
-    }
-    encoded
-}
-
-#[cfg(windows)]
-fn path_from_identity_text(identity: &str) -> Option<PathBuf> {
-    use std::os::windows::ffi::OsStringExt;
-
-    let bytes = decode_hex_bytes(identity.strip_prefix("windows:")?)?;
-    let mut chunks = bytes.chunks_exact(2);
-    let units = chunks
-        .by_ref()
-        .map(|pair| u16::from_be_bytes([pair[0], pair[1]]))
-        .collect::<Vec<_>>();
-    if !chunks.remainder().is_empty() {
-        return None;
-    }
-    Some(PathBuf::from(OsString::from_wide(&units)))
-}
-
+path_identity_platform!(windows);
 #[cfg(not(any(unix, windows)))]
-fn path_identity_text(path: &Path) -> String {
-    format!("display:{}", path.to_string_lossy())
-}
-
-#[cfg(not(any(unix, windows)))]
-fn path_from_identity_text(identity: &str) -> Option<PathBuf> {
-    Some(PathBuf::from(identity.strip_prefix("display:")?))
-}
+path_identity_platform!(other);
 
 fn decode_hex_bytes(hex: &str) -> Option<Vec<u8>> {
     let mut bytes = Vec::with_capacity(hex.len() / 2);
@@ -3512,11 +2776,7 @@ fn recovery_lock_path(path: &Path) -> PathBuf {
 fn recovery_tmp_path(path: &Path) -> PathBuf {
     let parent = path.parent().unwrap_or_else(|| Path::new("."));
     let mut tmp_name = OsString::from(".");
-    tmp_name.push(
-        path.file_name()
-            .map(OsString::from)
-            .unwrap_or_else(|| OsString::from("recovery")),
-    );
+    tmp_name.push(path.file_name().map(OsString::from).unwrap_or_else(|| OsString::from("recovery")));
     let nonce = TMP_COUNTER.fetch_add(1, Ordering::Relaxed);
     tmp_name.push(format!(".{}.{nonce}.tmp", std::process::id()));
     parent.join(tmp_name)
@@ -3538,25 +2798,11 @@ pub struct TmpSweepReport {
     pub failed: usize,
 }
 
-/// Remove abandoned atomic-write temp files left beside the recovery cache by
-/// processes that died mid-persist. Both the current hidden
-/// `.{name}.{pid}.{n}.tmp` shape and the pre-1.0 visible `{name}.*.tmp` shape
-/// are matched; the `.lock` anchor never is. Only files older than `max_age`
-/// are touched, so an in-flight writer is never raced. Fail-open: per-file
-/// failures are counted, a missing directory is an empty report.
-pub fn sweep_stale_tmp_files(
-    cache_path: &Path,
-    max_age: Duration,
-    dry_run: bool,
-) -> TmpSweepReport {
-    let mut report = TmpSweepReport {
-        dry_run,
-        ..TmpSweepReport::default()
-    };
-    let Some(parent) = cache_path.parent() else {
-        return report;
-    };
-    let Some(cache_name) = cache_path.file_name().and_then(|name| name.to_str()) else {
+/// Remove matching recovery temp files older than `max_age`.
+/// Dry runs report candidates; per-file failures are counted and fail open.
+pub fn sweep_stale_tmp_files(cache_path: &Path, max_age: Duration, dry_run: bool) -> TmpSweepReport {
+    let mut report = TmpSweepReport { dry_run, ..TmpSweepReport::default() };
+    let Some((parent, cache_name)) = cache_path.parent().zip(cache_path.file_name().and_then(|name| name.to_str())) else {
         return report;
     };
     let Ok(entries) = fs::read_dir(parent) else {
@@ -3571,23 +2817,16 @@ pub fn sweep_stale_tmp_files(
         if !name.ends_with(".tmp") || !name.contains(cache_name) {
             continue;
         }
-        let Ok(meta) = entry.metadata() else {
-            continue;
-        };
+        let Ok(meta) = entry.metadata() else { continue };
         if !meta.is_file() {
             continue;
         }
         report.scanned += 1;
-        let expired = meta
-            .modified()
-            .ok()
-            .and_then(|modified| now.duration_since(modified).ok())
-            .map(|age| age > max_age)
-            .unwrap_or(false);
+        let expired = meta.modified().ok().and_then(|modified| now.duration_since(modified).ok()).is_some_and(|age| age > max_age);
         if !expired {
             continue;
         }
-        if dry_run || fs::remove_file(&path).is_ok() {
+        if dry_run || fs::remove_file(path).is_ok() {
             report.removed += 1;
             report.removed_bytes += meta.len();
         } else {
@@ -3599,10 +2838,7 @@ pub fn sweep_stale_tmp_files(
 
 fn append_file_name_suffix(path: &Path, suffix: &str) -> PathBuf {
     let parent = path.parent().unwrap_or_else(|| Path::new("."));
-    let mut file_name = path
-        .file_name()
-        .map(OsString::from)
-        .unwrap_or_else(|| OsString::from("recovery"));
+    let mut file_name = path.file_name().map(OsString::from).unwrap_or_else(|| OsString::from("recovery"));
     file_name.push(suffix);
     parent.join(file_name)
 }
@@ -3629,39 +2865,18 @@ impl PersistLock {
         for attempt in 0..retries {
             match FileExt::try_lock(&file) {
                 Ok(()) => {
-                    // SAFETY: This file is a stable OS-lock anchor. Do not
-                    // unlink it while holding or releasing the lock: replacing
-                    // the inode lets a second process lock the replacement
-                    // while this process still owns the original.
-                    //
-                    // No sync_all here: flock is a VFS-level kernel lock that
-                    // releases on process death regardless of on-disk
-                    // durability. The PID written below is diagnostic, not
-                    // required for correctness. Skipping the fsync saves
-                    // ~5-15ms per persist on macOS where sync_all =
-                    // F_FULLFSYNC.
                     file.set_len(0)?;
                     writeln!(file, "{}", std::process::id())?;
                     return Ok(Self { file });
                 }
-                Err(TryLockError::WouldBlock) => {
-                    if attempt + 1 < retries {
-                        thread::sleep(LOCK_RETRY_DELAY);
-                    }
+                Err(TryLockError::Error(err)) if err.kind() != std::io::ErrorKind::WouldBlock => {
+                    return Err(err.into());
                 }
-                Err(TryLockError::Error(err)) if err.kind() == std::io::ErrorKind::WouldBlock => {
-                    if attempt + 1 < retries {
-                        thread::sleep(LOCK_RETRY_DELAY);
-                    }
-                }
-                Err(TryLockError::Error(err)) => return Err(err.into()),
+                Err(_) if attempt + 1 < retries => thread::sleep(LOCK_RETRY_DELAY),
+                Err(_) => {}
             }
         }
-        Err(std::io::Error::new(
-            std::io::ErrorKind::TimedOut,
-            format!("timed out waiting for lock {}", path.display()),
-        )
-        .into())
+        Err(std::io::Error::new(std::io::ErrorKind::TimedOut, format!("timed out waiting for lock {}", path.display())).into())
     }
 }
 
@@ -3669,6 +2884,10 @@ impl Drop for PersistLock {
     fn drop(&mut self) {
         let _ = FileExt::unlock(&self.file);
     }
+}
+
+fn is_ephemeral_source_path(path_text: &str) -> bool {
+    path_text.starts_with("shell:") || path_text.starts_with("search:")
 }
 
 fn fingerprint_for_stored_payload(
@@ -3680,70 +2899,97 @@ fn fingerprint_for_stored_payload(
         return None;
     }
     let path = path?;
-    let path_text = path.to_string_lossy();
-    if path_text.starts_with("shell:") || path_text.starts_with("search:") {
+    if is_ephemeral_source_path(&path.to_string_lossy()) {
         return None;
     }
     source_fingerprint(path)
 }
 
-fn source_fingerprint_from_sha256(path: &Path, sha256: &str) -> Option<SourceFingerprint> {
-    let meta = fs::metadata(path).ok()?;
-    if !meta.is_file() {
-        return None;
-    }
-    let mtime_ns = meta
-        .modified()
-        .ok()
-        .and_then(|m| m.duration_since(SystemTime::UNIX_EPOCH).ok())
-        .map(|d| d.as_nanos())
-        .unwrap_or_default();
-    Some(SourceFingerprint {
+fn fingerprint_from_meta(meta: &fs::Metadata, sha256: String) -> SourceFingerprint {
+    SourceFingerprint {
         size: meta.len(),
-        mtime_ns,
-        sha256: sha256.to_string(),
+        mtime_ns: mtime_ns(meta),
+        sha256,
+    }
+}
+
+fn source_fingerprint_from_sha256(path: &Path, sha256: &str) -> Option<SourceFingerprint> {
+    Some(fingerprint_from_meta(&file_meta(path)?, sha256.to_string()))
+}
+
+fn hash_file_sha256(path: &Path) -> Option<(fs::Metadata, String)> {
+    let meta = file_meta(path)?;
+    let mut file = fs::File::open(path).ok()?;
+    let mut hasher = Sha256::new();
+    read_file_chunks(&mut file, |chunk| {
+        hasher.update(chunk);
+        Ok(())
     })
+    .ok()?;
+    Some((meta, digest_hex(hasher)))
 }
 
 fn source_fingerprint(path: &Path) -> Option<SourceFingerprint> {
-    let meta = fs::metadata(path).ok()?;
-    if !meta.is_file() {
-        return None;
-    }
-    let mut file = fs::File::open(path).ok()?;
-    let mut hasher = Sha256::new();
-    let mut buffer = [0_u8; 64 * 1024];
-    loop {
-        let read = file.read(&mut buffer).ok()?;
-        if read == 0 {
-            break;
-        }
-        hasher.update(&buffer[..read]);
-    }
-    source_fingerprint_from_parts(meta, hasher.finalize())
+    let (meta, sha256) = hash_file_sha256(path)?;
+    Some(fingerprint_from_meta(&meta, sha256))
 }
 
-fn source_fingerprint_from_parts(
-    meta: fs::Metadata,
-    digest: impl AsRef<[u8]>,
-) -> Option<SourceFingerprint> {
-    let sha256 = digest
-        .as_ref()
-        .iter()
-        .map(|b| format!("{b:02x}"))
-        .collect::<String>();
-    let mtime_ns = meta
-        .modified()
-        .ok()
-        .and_then(|m| m.duration_since(SystemTime::UNIX_EPOCH).ok())
-        .map(|d| d.as_nanos())
-        .unwrap_or_default();
-    Some(SourceFingerprint {
-        size: meta.len(),
-        mtime_ns,
-        sha256,
-    })
+fn file_meta(path: &Path) -> Option<fs::Metadata> {
+    let meta = fs::metadata(path).ok()?;
+    meta.is_file().then_some(meta)
+}
+
+fn mtime_ns(meta: &fs::Metadata) -> u128 {
+    meta.modified().ok().and_then(|m| m.duration_since(SystemTime::UNIX_EPOCH).ok()).map(|d| d.as_nanos()).unwrap_or_default()
+}
+
+
 }
 
 #[cfg(test)]
-mod tests;
+mod select_content_tests {
+    use super::*;
+
+    #[test]
+    fn selector_line_windows_override_existing_line_args() {
+        let content = "one\ntwo\nthree\nfour\nfive\n".to_string();
+
+        assert_eq!(
+            select_content(
+                content.clone(),
+                Some("range:2-3"),
+                Some(5),
+                Some(5),
+                None,
+                None
+            ),
+            "two\nthree\n"
+        );
+        assert_eq!(
+            select_content(
+                content.clone(),
+                Some("lines:L3-L4"),
+                Some(5),
+                Some(5),
+                None,
+                None
+            ),
+            "three\nfour\n"
+        );
+        assert_eq!(
+            select_content(
+                content.clone(),
+                Some("line:4"),
+                Some(5),
+                Some(5),
+                None,
+                None
+            ),
+            "four\n"
+        );
+        assert_eq!(
+            select_content(content, Some("around:3:1"), Some(5), Some(5), None, None),
+            "two\nthree\nfour\n"
+        );
+    }
+}

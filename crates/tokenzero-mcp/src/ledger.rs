@@ -10,6 +10,7 @@
 //! Queries scan both generations and ignore malformed lines, including a torn
 //! final line.
 
+pub use crate::config::{TELEMETRY_ENV, resolve_telemetry};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
@@ -168,10 +169,10 @@ fn append_record(path: &Path, record: &LedgerRecord, max_bytes: u64) -> io::Resu
     let current = fs::metadata(path).map(|meta| meta.len()).unwrap_or(0);
     if current > 0 && current.saturating_add(line_bytes) > max_bytes {
         let rotated = rotated_path(path);
-        match fs::remove_file(&rotated) {
-            Ok(()) => {}
-            Err(err) if err.kind() == io::ErrorKind::NotFound => {}
-            Err(err) => return Err(err),
+        if let Err(err) = fs::remove_file(&rotated) {
+            if err.kind() != io::ErrorKind::NotFound {
+                return Err(err);
+            }
         }
         fs::rename(path, rotated)?;
     }
@@ -201,22 +202,19 @@ pub enum LedgerQuery {
 /// Scan and aggregate the bounded JSONL ledger. Malformed/torn lines are ignored.
 pub fn query_ledger(path: &Path, query: &LedgerQuery) -> io::Result<Value> {
     let records = read_records(path)?;
+    let since = |ms: u64| records.iter().filter(move |r| r.timestamp_ms >= ms);
     match query {
         LedgerQuery::RepoCost { repo, since_ms } => {
-            let (turns, visible, raw, prevented) = records
-                .iter()
-                .filter(|record| record.timestamp_ms >= *since_ms && record.repo == *repo)
-                .fold(
-                    (0_u64, 0_u64, 0_u64, 0_u64),
-                    |(turns, visible, raw, prevented), record| {
-                        (
-                            turns + 1,
-                            visible.saturating_add(record.token_mass.visible_tokens),
-                            raw.saturating_add(record.token_mass.raw_tokens),
-                            prevented.saturating_add(record.token_mass.prevented_tokens),
-                        )
-                    },
-                );
+            let (turns, visible, raw, prevented) = since(*since_ms)
+                .filter(|r| r.repo == *repo)
+                .fold((0_u64, 0_u64, 0_u64, 0_u64), |(t, v, raw, p), r| {
+                    (
+                        t + 1,
+                        v.saturating_add(r.token_mass.visible_tokens),
+                        raw.saturating_add(r.token_mass.raw_tokens),
+                        p.saturating_add(r.token_mass.prevented_tokens),
+                    )
+                });
             Ok(json!({
                 "schema": LEDGER_SCHEMA,
                 "query": "cost_per_repo",
@@ -233,18 +231,13 @@ pub fn query_ledger(path: &Path, query: &LedgerQuery) -> io::Result<Value> {
             candidate,
             since_ms,
         } => {
-            let mut totals = BTreeMap::<String, u64>::new();
-            for record in records
-                .iter()
-                .filter(|record| record.timestamp_ms >= *since_ms)
-            {
-                let total = totals
-                    .entry(record.version.crate_version.clone())
-                    .or_default();
-                *total = total.saturating_add(record.token_mass.visible_tokens);
+            let mut totals = BTreeMap::<&str, u64>::new();
+            for r in since(*since_ms) {
+                let total = totals.entry(r.version.crate_version.as_str()).or_default();
+                *total = total.saturating_add(r.token_mass.visible_tokens);
             }
-            let baseline_cost = totals.get(baseline).copied().unwrap_or(0);
-            let candidate_cost = totals.get(candidate).copied().unwrap_or(0);
+            let baseline_cost = totals.get(baseline.as_str()).copied().unwrap_or(0);
+            let candidate_cost = totals.get(candidate.as_str()).copied().unwrap_or(0);
             Ok(json!({
                 "schema": LEDGER_SCHEMA,
                 "query": "version_delta",
@@ -255,15 +248,13 @@ pub fn query_ledger(path: &Path, query: &LedgerQuery) -> io::Result<Value> {
             }))
         }
         LedgerQuery::AgentSpend { since_ms } => {
-            let mut totals = BTreeMap::<String, (u64, u64)>::new();
-            for record in records
-                .iter()
-                .filter(|record| record.timestamp_ms >= *since_ms)
-            {
-                let agent = record.agent.as_deref().unwrap_or("<unknown>").to_string();
-                let total = totals.entry(agent).or_default();
+            let mut totals = BTreeMap::<&str, (u64, u64)>::new();
+            for r in since(*since_ms) {
+                let total = totals
+                    .entry(r.agent.as_deref().unwrap_or("<unknown>"))
+                    .or_default();
                 total.0 = total.0.saturating_add(1);
-                total.1 = total.1.saturating_add(record.token_mass.visible_tokens);
+                total.1 = total.1.saturating_add(r.token_mass.visible_tokens);
             }
             let agents = totals
                 .into_iter()
@@ -306,6 +297,51 @@ fn read_records(path: &Path) -> io::Result<Vec<LedgerRecord>> {
     Ok(records)
 }
 
+pub const TELEMETRY_SCHEMA: &str = "tokenzero.telemetry.v1";
+
+/// The complete shareable telemetry payload. No identifiers or content are included.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct TelemetryPayload {
+    pub schema: &'static str,
+    pub version: &'static str,
+    pub raw_tokens: u64,
+    pub saved_tokens: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct TelemetryInspection {
+    pub enabled: bool,
+    pub exporter: &'static str,
+    pub payload: TelemetryPayload,
+}
+
+/// Summarize both ledger generations and build the exact dry-run payload.
+pub fn inspect_telemetry(path: &Path, enabled: bool) -> io::Result<TelemetryInspection> {
+    let (raw_tokens, saved_tokens) = aggregate_token_mass(path)?;
+    Ok(TelemetryInspection {
+        enabled,
+        exporter: "none",
+        payload: TelemetryPayload {
+            schema: TELEMETRY_SCHEMA,
+            version: env!("CARGO_PKG_VERSION"),
+            raw_tokens,
+            saved_tokens,
+        },
+    })
+}
+
+/// Summarize every ledger entry's raw and prevented token mass.
+pub fn aggregate_token_mass(path: &Path) -> io::Result<(u64, u64)> {
+    let records = read_records(path)?;
+    let (raw, saved) = records.iter().fold((0_u64, 0_u64), |(raw, saved), record| {
+        (
+            raw.saturating_add(record.token_mass.raw_tokens),
+            saved.saturating_add(record.token_mass.prevented_tokens),
+        )
+    });
+    Ok((raw, saved))
+}
+
 pub fn schema_example() -> Value {
     json!({
         "schema": LEDGER_SCHEMA,
@@ -331,160 +367,4 @@ fn now_ms() -> u64 {
         .duration_since(UNIX_EPOCH)
         .map(|duration| u64::try_from(duration.as_millis()).unwrap_or(u64::MAX))
         .unwrap_or(0)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn fixture(
-        timestamp_ms: u64,
-        repo: &str,
-        agent: Option<&str>,
-        version: &str,
-        visible: u64,
-    ) -> LedgerRecord {
-        LedgerRecord {
-            schema: LEDGER_SCHEMA.to_string(),
-            timestamp_ms,
-            session_id: "session-test".to_string(),
-            repo: repo.to_string(),
-            agent: agent.map(str::to_string),
-            version: VersionIdentity {
-                crate_version: version.to_string(),
-                git_describe: None,
-            },
-            tool: "read".to_string(),
-            token_mass: TokenMass {
-                visible_tokens: visible,
-                raw_tokens: visible * 2,
-                prevented_tokens: visible / 2,
-                saved_bytes: visible * 4,
-            },
-            cumulative_session_cost_tokens: visible,
-            optimization_tags: vec!["session_dedup:on".to_string()],
-        }
-    }
-
-    fn write_fixture(path: &Path, records: &[LedgerRecord]) {
-        for record in records {
-            append_record(path, record, DEFAULT_MAX_LEDGER_BYTES).unwrap();
-        }
-    }
-
-    #[test]
-    fn ledger_record_shape_and_version_are_stable() {
-        let value = serde_json::to_value(fixture(10, "/repo", None, "1.2.3", 7)).unwrap();
-        assert_eq!(value["schema"], LEDGER_SCHEMA);
-        assert_eq!(value.as_object().unwrap().len(), 10);
-        assert_eq!(value["agent"], Value::Null);
-        assert_eq!(value["version"]["crate"], "1.2.3");
-        assert_eq!(value["version"]["git_describe"], Value::Null);
-        assert_eq!(value["token_mass"].as_object().unwrap().len(), 4);
-        assert_eq!(value["token_mass"]["prevented_tokens"], 3);
-        let example = schema_example();
-        assert_eq!(example["schema"], LEDGER_SCHEMA);
-        assert!(example["version"].get("crate").is_some());
-        assert_eq!(example["version"]["git_describe"], Value::Null);
-    }
-
-    #[test]
-    fn ledger_rotation_keeps_active_file_bounded() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("session-ledger.jsonl");
-        let record = fixture(10, "/repo", None, "1", 7);
-        let line_len = serde_json::to_vec(&record).unwrap().len() as u64 + 1;
-        append_record(&path, &record, line_len * 2).unwrap();
-        append_record(&path, &record, line_len * 2).unwrap();
-        append_record(&path, &record, line_len * 2).unwrap();
-        assert!(fs::metadata(&path).unwrap().len() <= line_len * 2);
-        assert!(rotated_path(&path).is_file());
-    }
-
-    #[test]
-    fn ledger_scan_tolerates_torn_tail() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("session-ledger.jsonl");
-        write_fixture(&path, &[fixture(10, "/repo", None, "1", 7)]);
-        OpenOptions::new()
-            .append(true)
-            .open(&path)
-            .unwrap()
-            .write_all(b"{\"schema\":\"tokenzero.ledger.v1\"")
-            .unwrap();
-        let result = query_ledger(
-            &path,
-            &LedgerQuery::RepoCost {
-                repo: "/repo".to_string(),
-                since_ms: 0,
-            },
-        )
-        .unwrap();
-        assert_eq!(result["turns"], 1);
-    }
-
-    #[test]
-    fn ledger_query_cost_per_repo_window() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("session-ledger.jsonl");
-        write_fixture(
-            &path,
-            &[
-                fixture(5, "/repo", Some("a"), "1", 100),
-                fixture(15, "/repo", Some("a"), "1", 40),
-                fixture(20, "/other", Some("a"), "1", 90),
-            ],
-        );
-        let result = query_ledger(
-            &path,
-            &LedgerQuery::RepoCost {
-                repo: "/repo".to_string(),
-                since_ms: 10,
-            },
-        )
-        .unwrap();
-        assert_eq!(result["turns"], 1);
-        assert_eq!(result["visible_cost_tokens"], 40);
-    }
-
-    #[test]
-    fn ledger_query_version_delta() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("session-ledger.jsonl");
-        write_fixture(
-            &path,
-            &[
-                fixture(10, "/repo", Some("a"), "1.0", 100),
-                fixture(11, "/repo", Some("a"), "2.0", 70),
-            ],
-        );
-        let result = query_ledger(
-            &path,
-            &LedgerQuery::VersionDelta {
-                baseline: "1.0".to_string(),
-                candidate: "2.0".to_string(),
-                since_ms: 0,
-            },
-        )
-        .unwrap();
-        assert_eq!(result["delta_visible_cost_tokens"], -30);
-    }
-
-    #[test]
-    fn ledger_query_per_agent_spend() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("session-ledger.jsonl");
-        write_fixture(
-            &path,
-            &[
-                fixture(10, "/repo", Some("alice"), "1", 30),
-                fixture(11, "/repo", Some("alice"), "1", 20),
-                fixture(12, "/repo", None, "1", 7),
-            ],
-        );
-        let result = query_ledger(&path, &LedgerQuery::AgentSpend { since_ms: 0 }).unwrap();
-        assert_eq!(result["agents"][0]["agent"], "<unknown>");
-        assert_eq!(result["agents"][1]["agent"], "alice");
-        assert_eq!(result["agents"][1]["visible_cost_tokens"], 50);
-    }
 }

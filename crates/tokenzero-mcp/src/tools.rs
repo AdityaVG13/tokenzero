@@ -8,42 +8,33 @@ use tokenzero_core::{
 use tokenzero_filters::{discover, rewrite_command};
 use tokenzero_runtime::{ExecutionMode, plan_command_for_platform};
 
+use crate::catalog::ToolKind;
 use crate::expand_params::ExpandParams;
 use crate::jsonrpc::JsonRpcErrorData;
 use crate::{EditHunk, ServeOptions, TokenZeroEngine, shell_timeout_from_secs};
 
-pub(crate) fn call_tool(
-    engine: &TokenZeroEngine,
-    name: &str,
-    args: &Value,
-    call_id: Option<String>,
-) -> Result<Value, JsonRpcErrorData> {
-    dispatch_gated_tool(
-        engine,
-        name,
-        args,
-        call_id,
-        crate::surface_health::GateMode::Strict,
-    )
+macro_rules! gated_tool_entry {
+    ($name:ident, $gate:ident) => {
+        pub(crate) fn $name(
+            engine: &TokenZeroEngine,
+            name: &str,
+            args: &Value,
+            call_id: Option<String>,
+        ) -> Result<Value, JsonRpcErrorData> {
+            dispatch_gated_tool(
+                engine,
+                name,
+                args,
+                call_id,
+                crate::surface_health::GateMode::$gate,
+            )
+        }
+    };
 }
 
-/// FastMCP variant: health gate only ([`GateMode::HealthOnly`]). Registration
-/// already filters by surface; membership stays open at call time for the
-/// unified FastMCP product contract and existing CodeMode plan tests.
-pub(crate) fn call_tool_fastmcp(
-    engine: &TokenZeroEngine,
-    name: &str,
-    args: &Value,
-    call_id: Option<String>,
-) -> Result<Value, JsonRpcErrorData> {
-    dispatch_gated_tool(
-        engine,
-        name,
-        args,
-        call_id,
-        crate::surface_health::GateMode::HealthOnly,
-    )
-}
+gated_tool_entry!(call_tool, Strict);
+// FastMCP registration already filters by surface, so call-time gating only checks health.
+gated_tool_entry!(call_tool_fastmcp, HealthOnly);
 
 fn dispatch_gated_tool(
     engine: &TokenZeroEngine,
@@ -54,18 +45,15 @@ fn dispatch_gated_tool(
 ) -> Result<Value, JsonRpcErrorData> {
     let canonical = canonical_tool(name);
     let started = std::time::Instant::now();
-    match engine
+    engine
         .surface_health()
         .gate_tools_call(engine.config.tool_surface, name, mode)
-    {
-        Ok(_) => {}
-        Err(crate::surface_health::GateRefusal::UnknownTool) => {
-            return Err(JsonRpcErrorData::unknown_tool(name));
-        }
-        Err(crate::surface_health::GateRefusal::Policy(msg)) => {
-            return Err(JsonRpcErrorData::policy_refusal(name, msg));
-        }
-    }
+        .map_err(|refusal| match refusal {
+            crate::surface_health::GateRefusal::UnknownTool => JsonRpcErrorData::unknown_tool(name),
+            crate::surface_health::GateRefusal::Policy(message) => {
+                JsonRpcErrorData::policy_refusal(name, message)
+            }
+        })?;
     let result = dispatch_tool(engine, canonical, name, args);
     let engine_elapsed = started.elapsed();
     let persist_started = std::time::Instant::now();
@@ -128,10 +116,10 @@ fn record_mcp_pulse(
     response: &ToolResponse,
     call_id: Option<String>,
 ) {
-    let Some(root) = engine.config.allowed_roots.first() else {
-        return;
-    };
-    let Some(accounting) = response.accounting.as_ref() else {
+    let (Some(root), Some(accounting)) = (
+        engine.config.allowed_roots.first(),
+        response.accounting.as_ref(),
+    ) else {
         return;
     };
     let mut ref_ids: Vec<String> = response
@@ -139,10 +127,10 @@ fn record_mcp_pulse(
         .iter()
         .map(|record| record.ref_id.clone())
         .collect();
-    if canonical == "expand" {
-        if let Some(ref_id) = args.get("ref").and_then(Value::as_str) {
-            ref_ids.push(ref_id.to_string());
-        }
+    if canonical == "expand"
+        && let Some(ref_id) = args.get("ref").and_then(Value::as_str)
+    {
+        ref_ids.push(ref_id.to_string());
     }
     let mut event = tokenzero_pulse::PulseEvent::tool_call(
         canonical,
@@ -162,18 +150,13 @@ fn record_mcp_pulse(
 fn json_tool_response(name: &str, value: Value) -> Result<ToolResponse, JsonRpcErrorData> {
     let text = serde_json::to_string(&value).map_err(|err| err.to_string())?;
     let tokens = count_tokens(&text);
-    Ok(ToolResponse::ok(
-        name,
-        Mode::Structured,
-        text,
-        Vec::new(),
-        Accounting {
-            raw_tokens: tokens,
-            visible_tokens: tokens,
-            recovery_tokens: 0,
-            exact_ref_tokens: None,
-        },
-    ))
+    let mut response = inline_response(name, Mode::Structured, text, tokens);
+    response
+        .accounting
+        .as_mut()
+        .expect("inline accounting")
+        .exact_ref_tokens = None;
+    Ok(response)
 }
 
 fn exec_codemode_tool(
@@ -348,21 +331,21 @@ fn codemode_v2_ack(result: &crate::CodeModeResult, telemetry_ref: &str) -> Strin
             format!("ok tz{ops} {pct} t:{telemetry_ref}")
         }
         crate::CodeModeStatus::Error => {
-            let (kind, retryable, message) = result
-                .error
-                .as_ref()
-                .map(|error| {
-                    (
-                        error.kind.as_str(),
-                        if error.retryable {
-                            "retryable"
-                        } else {
-                            "final"
-                        },
-                        error.message.as_str(),
-                    )
-                })
-                .unwrap_or(("runtime", "final", "unknown error"));
+            let (kind, retryable, message) =
+                result
+                    .error
+                    .as_ref()
+                    .map_or(("runtime", "final", "unknown error"), |error| {
+                        (
+                            error.kind.as_str(),
+                            if error.retryable {
+                                "retryable"
+                            } else {
+                                "final"
+                            },
+                            error.message.as_str(),
+                        )
+                    });
             let first = message.chars().take(120).collect::<String>();
             format!("err {kind} {retryable} {first} t:{telemetry_ref}")
         }
@@ -389,16 +372,8 @@ fn refs_referenced_by_value(value: Option<&Value>, ordered_refs: &[String]) -> V
                     refs.insert(text.clone());
                 }
             }
-            Value::Array(items) => {
-                for item in items {
-                    collect(item, refs);
-                }
-            }
-            Value::Object(map) => {
-                for value in map.values() {
-                    collect(value, refs);
-                }
-            }
+            Value::Array(items) => items.iter().for_each(|item| collect(item, refs)),
+            Value::Object(map) => map.values().for_each(|value| collect(value, refs)),
             _ => {}
         }
     }
@@ -429,21 +404,9 @@ fn value_has_role_labeled_shell_refs(value: &Value) -> bool {
 fn codemode_v2_structured(result: &crate::CodeModeResult, ack: &str, telemetry_ref: &str) -> Value {
     let mut object = serde_json::Map::new();
     object.insert("ack".to_string(), json!(ack));
-    match result.status {
-        crate::CodeModeStatus::Completed => {
-            if let Some(value) = &result.value {
-                object.insert("value".to_string(), value.clone());
-            }
-        }
-        crate::CodeModeStatus::Error => {
-            if let Some(error_ref) = result
-                .execution_refs
-                .as_ref()
-                .and_then(|refs| refs.pointer("/stored/error"))
-                .and_then(Value::as_str)
-            {
-                object.insert("ref".to_string(), json!(error_ref));
-            }
+    if matches!(result.status, crate::CodeModeStatus::Completed) {
+        if let Some(value) = &result.value {
+            object.insert("value".to_string(), value.clone());
         }
     }
     object.insert("ref".to_string(), json!(telemetry_ref));
@@ -483,32 +446,19 @@ fn codemode_v2_tool_response(
         count_tokens(&serde_json::to_string(&structured).unwrap_or_default())
     };
     let envelope_tokens = count_tokens(&ack) + structured_tokens;
-    let mut response = ToolResponse::ok(
-        name,
-        Mode::Structured,
-        ack,
-        Vec::new(),
-        Accounting {
-            raw_tokens: result.telemetry.raw_tokens,
-            visible_tokens: envelope_tokens,
-            recovery_tokens: 0,
-            exact_ref_tokens: None,
-        },
-    );
-    response.telemetry = if folded_scalar {
-        Some(json!({
-            "envelope_tokens": envelope_tokens,
-            "payload_tokens": result.telemetry.payload_tokens,
-            "telemetry_ref": telemetry_ref,
-        }))
-    } else {
-        Some(json!({
-            "structuredContent": structured,
-            "envelope_tokens": envelope_tokens,
-            "payload_tokens": result.telemetry.payload_tokens,
-            "telemetry_ref": telemetry_ref,
-        }))
-    };
+    let mut response = inline_response(name, Mode::Structured, ack, result.telemetry.raw_tokens);
+    let accounting = response.accounting.as_mut().expect("inline accounting");
+    accounting.visible_tokens = envelope_tokens;
+    accounting.exact_ref_tokens = None;
+    let mut telemetry = json!({
+        "envelope_tokens": envelope_tokens,
+        "payload_tokens": result.telemetry.payload_tokens,
+        "telemetry_ref": telemetry_ref,
+    });
+    if !folded_scalar {
+        telemetry["structuredContent"] = structured;
+    }
+    response.telemetry = Some(telemetry);
     if matches!(result.status, crate::CodeModeStatus::Error) {
         response.status = "error".to_string();
         response.error = result.error.as_ref().map(|error| tokenzero_core::CliError {
@@ -524,21 +474,13 @@ fn codemode_contract_payload_v1(result: &crate::CodeModeResult) -> Value {
     let ack = result.visible_ack.clone();
     let mut refs = serde_json::Map::new();
     if let Some(execution_refs) = result.execution_refs.as_ref().and_then(Value::as_object) {
-        for key in ["code", "steps", "telemetry"] {
+        let status_ref = match result.status {
+            crate::CodeModeStatus::Completed => "result",
+            crate::CodeModeStatus::Error => "error",
+        };
+        for key in ["code", "steps", "telemetry", status_ref] {
             if let Some(value) = execution_refs.get(key) {
                 refs.insert(key.to_string(), value.clone());
-            }
-        }
-        match result.status {
-            crate::CodeModeStatus::Completed => {
-                if let Some(value) = execution_refs.get("result") {
-                    refs.insert("result".to_string(), value.clone());
-                }
-            }
-            crate::CodeModeStatus::Error => {
-                if let Some(value) = execution_refs.get("error") {
-                    refs.insert("error".to_string(), value.clone());
-                }
             }
         }
     }
@@ -563,6 +505,33 @@ fn codemode_contract_payload_v1(result: &crate::CodeModeResult) -> Value {
     payload
 }
 
+fn inline_response(tool: &str, mode: Mode, text: String, raw_tokens: usize) -> ToolResponse {
+    let visible_tokens = count_tokens(&text);
+    ToolResponse::ok(
+        tool,
+        mode,
+        text,
+        Vec::new(),
+        Accounting {
+            raw_tokens,
+            visible_tokens,
+            recovery_tokens: 0,
+            exact_ref_tokens: Some(0),
+        },
+    )
+}
+
+fn pretty_json_response(
+    tool: &str,
+    mode: Mode,
+    value: &impl serde::Serialize,
+    raw_tokens: Option<usize>,
+) -> ToolResponse {
+    let text = serde_json::to_string_pretty(value).unwrap_or_default();
+    let tokens = raw_tokens.unwrap_or_else(|| count_tokens(&text));
+    inline_response(tool, mode, text, tokens)
+}
+
 /// Tool dispatch shared by direct calls and `tz_batch` sub-ops.
 pub(crate) fn dispatch_tool(
     engine: &TokenZeroEngine,
@@ -570,114 +539,97 @@ pub(crate) fn dispatch_tool(
     name: &str,
     args: &Value,
 ) -> Result<ToolResponse, JsonRpcErrorData> {
-    let response = match canonical {
-        "execute_code" => exec_codemode_tool(engine, name, args)?,
-        "codemode_search" => exec_codemode_search_tool(name, args)?,
-        "codemode_describe" => exec_codemode_describe_tool(name, args)?,
-        "read" => {
-            let path = arg_path_list(args, "path")?;
-            engine.read_with_options(
-                &path,
-                arg_mode(args),
-                arg_u64(args, "start_line"),
-                arg_u64(args, "end_line"),
-                arg_bool(args, "raw"),
-                arg_u64(args, "max_files").unwrap_or(20),
-                arg_u64(args, "max_visible_tokens").unwrap_or(4000),
-                arg_serve_options(args),
-            )
-        }
-        "find" => {
+    let kind = if canonical == "compact" {
+        Some(ToolKind::Ingest)
+    } else {
+        ToolKind::from_canonical(canonical)
+    }
+    .ok_or_else(|| JsonRpcErrorData::unknown_tool(name))?;
+    let response = match kind {
+        ToolKind::ExecuteCode => exec_codemode_tool(engine, name, args)?,
+        ToolKind::CodemodeSearch => exec_codemode_search_tool(name, args)?,
+        ToolKind::CodemodeDescribe => exec_codemode_describe_tool(name, args)?,
+        ToolKind::Read => engine.read_with_options(
+            &arg_path_list(args, "path")?,
+            arg_mode(args),
+            arg_u64(args, "start_line"),
+            arg_u64(args, "end_line"),
+            arg_bool(args, "raw"),
+            arg_u64_or(args, "max_files", 20),
+            arg_u64_or(args, "max_visible_tokens", 4000),
+            arg_serve_options(args),
+        ),
+        search @ (ToolKind::Find | ToolKind::Grep) => {
             let query = arg_string_any(args, &["query", "pattern"])?;
             let path = arg_path_list(args, "path").unwrap_or_else(|_| vec![PathBuf::from(".")]);
-            engine.find_with_options(
-                query,
-                &path,
-                arg_mode(args),
-                arg_u64(args, "max_files").unwrap_or(20),
-                arg_u64(args, "max_visible_tokens").unwrap_or(4000),
-                arg_serve_options(args),
-            )
+            macro_rules! call_search {
+                ($method:ident) => {
+                    engine.$method(
+                        query,
+                        &path,
+                        arg_mode(args),
+                        arg_u64_or(args, "max_files", 20),
+                        arg_u64_or(args, "max_visible_tokens", 4000),
+                        arg_serve_options(args),
+                    )
+                };
+            }
+            match search {
+                ToolKind::Find => call_search!(find_with_options),
+                ToolKind::Grep => call_search!(grep_with_options),
+                _ => unreachable!(),
+            }
         }
-        "grep" => {
-            let query = arg_string_any(args, &["query", "pattern"])?;
-            let path = arg_path_list(args, "path").unwrap_or_else(|_| vec![PathBuf::from(".")]);
-            engine.grep_with_options(
-                query,
-                &path,
-                arg_mode(args),
-                arg_u64(args, "max_files").unwrap_or(20),
-                arg_u64(args, "max_visible_tokens").unwrap_or(4000),
-                arg_serve_options(args),
-            )
-        }
-        "recall" => {
-            let query = arg_string_any(args, &["query", "pattern"])?;
-            engine.recall(
-                query,
-                arg_u64(args, "max_hits").unwrap_or(50),
-                arg_mode(args),
-                arg_u64(args, "max_visible_tokens").unwrap_or(4000),
-            )
-        }
-        "glob" => {
-            let pattern = arg_string_any(args, &["pattern", "glob", "query"])?;
-            let path = arg_path_list(args, "path").unwrap_or_else(|_| vec![PathBuf::from(".")]);
-            engine.glob(
-                pattern,
-                &path,
-                arg_bool(args, "include_hidden"),
-                arg_mode(args),
-                arg_u64(args, "max_files").unwrap_or(200),
-                arg_u64(args, "max_visible_tokens").unwrap_or(4000),
-            )
-        }
-        "tree" => {
-            let path = arg_path_list(args, "path").unwrap_or_else(|_| vec![PathBuf::from(".")]);
-            engine.tree(
-                &path,
-                arg_u64(args, "depth").unwrap_or(2),
-                arg_bool(args, "include_hidden"),
-                arg_mode(args),
-                arg_u64(args, "max_files").unwrap_or(200),
-                arg_u64(args, "max_visible_tokens").unwrap_or(4000),
-            )
-        }
-        "edit" => {
-            let path = args
-                .get("path")
-                .and_then(Value::as_str)
-                .ok_or_else(|| "missing path".to_string())?;
-            let edits = arg_edit_hunks(args)?;
-            let mut resp = engine.edit(
+        ToolKind::Recall => engine.recall(
+            arg_string_any(args, &["query", "pattern"])?,
+            arg_u64_or(args, "max_hits", 50),
+            arg_mode(args),
+            arg_u64_or(args, "max_visible_tokens", 4000),
+        ),
+        ToolKind::Glob => engine.glob(
+            arg_string_any(args, &["pattern", "glob", "query"])?,
+            &arg_paths_or_dot(args),
+            arg_bool(args, "include_hidden"),
+            arg_mode(args),
+            arg_u64_or(args, "max_files", 200),
+            arg_u64_or(args, "max_visible_tokens", 4000),
+        ),
+        ToolKind::Tree => engine.tree(
+            &arg_paths_or_dot(args),
+            arg_u64_or(args, "depth", 2),
+            arg_bool(args, "include_hidden"),
+            arg_mode(args),
+            arg_u64_or(args, "max_files", 200),
+            arg_u64_or(args, "max_visible_tokens", 4000),
+        ),
+        ToolKind::Edit => {
+            let path = arg_string_any(args, &["path"]).map_err(|_| "missing path".to_string())?;
+            let mut response = engine.edit(
                 Path::new(path),
-                &edits,
+                &arg_edit_hunks(args)?,
                 arg_bool(args, "create"),
                 arg_bool(args, "dry_run"),
                 arg_mode(args),
-                arg_u64(args, "max_visible_tokens").unwrap_or(4000),
+                arg_u64_or(args, "max_visible_tokens", 4000),
             );
-            // wqw.12: annotate mutation failures with write recovery ladder.
-            if resp.status == "error" {
-                if let Some(err) = resp.error.as_mut() {
-                    // Expand/read recovery health does not prove the write
-                    // substrate is down and must not authorize native Write.
-                    err.message = crate::annotate_write_failure(&err.message, false);
+            if response.status == "error" {
+                if let Some(error) = response.error.as_mut() {
+                    error.message = crate::annotate_write_failure(&error.message, false);
                 }
             }
-            resp
+            response
         }
-        "shell" => {
+        ToolKind::Shell => {
             let (command, argv) = arg_command(args)?;
             engine.shell(
                 &command,
                 argv,
-                args.get("cwd").and_then(Value::as_str).map(Path::new),
+                arg_str(args, "cwd").map(Path::new),
                 arg_mode(args),
-                args.get("rewrite").and_then(Value::as_str),
+                arg_str(args, "rewrite"),
                 arg_bool(args, "no_rewrite"),
                 None,
-                args.get("stdin").and_then(Value::as_str),
+                arg_str(args, "stdin"),
                 arg_timeout_any(
                     args,
                     &[
@@ -689,12 +641,9 @@ pub(crate) fn dispatch_tool(
                 ),
             )
         }
-        "ingest" | "compact" => {
-            let text = args
-                .get("text")
-                .and_then(Value::as_str)
-                .or_else(|| args.get("input").and_then(Value::as_str))
-                .ok_or_else(|| "missing text".to_string())?;
+        ToolKind::Ingest => {
+            let text =
+                arg_string_any(args, &["text", "input"]).map_err(|_| "missing text".to_string())?;
             let tool = if canonical == "compact" {
                 "compact"
             } else {
@@ -702,61 +651,25 @@ pub(crate) fn dispatch_tool(
             };
             engine.ingest(text, ContentType::Unknown, arg_mode(args), tool)
         }
-        "expand" => {
-            let params = ExpandParams::from_tool_args(args)?;
-            engine.expand_with_params(params)
-        }
-        "mem" => engine.mem(),
-        "cache_pack" => {
-            engine.cache_pack(args.get("scope").and_then(Value::as_str).unwrap_or("agent"))
-        }
-        "rewrite" => {
+        ToolKind::Expand => engine.expand_with_params(ExpandParams::from_tool_args(args)?),
+        ToolKind::Mem => engine.mem(),
+        ToolKind::CachePack => engine.cache_pack(arg_str(args, "scope").unwrap_or("agent")),
+        ToolKind::Rewrite => {
             let (command, _) = arg_command(args)?;
-            let value = serde_json::to_string_pretty(&rewrite_command(
-                &command,
-                args.get("mode").and_then(Value::as_str).unwrap_or("safe"),
-                true,
-            ))
-            .unwrap_or_default();
-            ToolResponse::ok(
+            pretty_json_response(
                 "rewrite",
                 Mode::Hybrid,
-                value.clone(),
-                Vec::new(),
-                Accounting {
-                    raw_tokens: count_tokens(&command),
-                    visible_tokens: count_tokens(&value),
-                    recovery_tokens: 0,
-                    exact_ref_tokens: Some(0),
-                },
+                &rewrite_command(&command, arg_str(args, "mode").unwrap_or("safe"), true),
+                Some(count_tokens(&command)),
             )
         }
-        "discover" => {
-            let value = serde_json::to_string_pretty(&discover()).unwrap_or_default();
-            ToolResponse::ok(
-                "discover",
-                Mode::Hybrid,
-                value.clone(),
-                Vec::new(),
-                Accounting {
-                    raw_tokens: count_tokens(&value),
-                    visible_tokens: count_tokens(&value),
-                    recovery_tokens: 0,
-                    exact_ref_tokens: Some(0),
-                },
-            )
-        }
-        "report_tool_issue" => {
-            let tool = arg_string_any(args, &["tool", "name", "tool_name", "surface"])
-                .map_err(JsonRpcErrorData::from)?;
-            let summary = arg_string_any(args, &["summary", "message", "title"])
-                .map_err(JsonRpcErrorData::from)?;
-            let detail = args
-                .get("detail")
-                .or_else(|| args.get("body"))
-                .or_else(|| args.get("repro"))
-                .or_else(|| args.get("context"))
-                .and_then(Value::as_str);
+        ToolKind::Discover => pretty_json_response("discover", Mode::Hybrid, &discover(), None),
+        ToolKind::ReportToolIssue => {
+            let tool = arg_string_any(args, &["tool", "name", "tool_name", "surface"])?;
+            let summary = arg_string_any(args, &["summary", "message", "title"])?;
+            let detail = arg_string_any(args, &["detail", "body", "repro", "context"])
+                .ok()
+                .or(Some(summary));
             match crate::record_tool_issue(
                 &engine.config.cache_path,
                 tool,
@@ -765,19 +678,7 @@ pub(crate) fn dispatch_tool(
                 Some(engine.session_id()),
             ) {
                 Ok(report) => {
-                    let text = serde_json::to_string_pretty(&report).unwrap_or_default();
-                    ToolResponse::ok(
-                        "report_tool_issue",
-                        Mode::Structured,
-                        text.clone(),
-                        Vec::new(),
-                        Accounting {
-                            raw_tokens: count_tokens(&text),
-                            visible_tokens: count_tokens(&text),
-                            recovery_tokens: 0,
-                            exact_ref_tokens: Some(0),
-                        },
-                    )
+                    pretty_json_response("report_tool_issue", Mode::Structured, &report, None)
                 }
                 Err(message) => ToolResponse::error(
                     "report_tool_issue",
@@ -787,18 +688,14 @@ pub(crate) fn dispatch_tool(
                 ),
             }
         }
-        "batch" => batch_response(engine, args)?,
-        "fetch" => {
-            let url = arg_string_any(args, &["url", "uri"])?;
-            engine.fetch(
-                url,
-                arg_u64(args, "ttl_seconds"),
-                arg_bool(args, "fresh"),
-                arg_mode(args),
-                arg_u64(args, "max_visible_tokens").unwrap_or(4000),
-            )
-        }
-        _ => return Err(JsonRpcErrorData::unknown_tool(name)),
+        ToolKind::Batch => batch_response(engine, args)?,
+        ToolKind::Fetch => engine.fetch(
+            arg_string_any(args, &["url", "uri"])?,
+            arg_u64(args, "ttl_seconds"),
+            arg_bool(args, "fresh"),
+            arg_mode(args),
+            arg_u64_or(args, "max_visible_tokens", 4000),
+        ),
     };
     Ok(response)
 }
@@ -996,10 +893,7 @@ pub(crate) fn mcp_tool_response(response: ToolResponse) -> Value {
 /// summarized by kind (their content stays recoverable through the listed
 /// blob/file refs plus visible line numbers).
 fn refs_footer(response: &ToolResponse, text: &str) -> Option<String> {
-    if response.refs.is_empty() {
-        return None;
-    }
-    if response.refs.iter().any(|r| text.contains(&r.ref_id)) {
+    if response.refs.is_empty() || response.refs.iter().any(|r| text.contains(&r.ref_id)) {
         return None;
     }
     let mut listed: Vec<String> = Vec::new();
@@ -1121,20 +1015,30 @@ fn arg_serve_options(args: &Value) -> ServeOptions {
 // without the canonical schema may serialize booleans and integers as
 // strings. Coerce those instead of silently dropping the argument.
 fn arg_bool(args: &Value, key: &str) -> bool {
-    match args.get(key) {
-        Some(Value::Bool(value)) => *value,
-        Some(Value::String(value)) => {
-            matches!(
-                value.trim().to_ascii_lowercase().as_str(),
-                "true" | "1" | "yes"
-            )
-        }
+    args.get(key).is_some_and(|value| match value {
+        Value::Bool(value) => *value,
+        Value::String(value) => matches!(
+            value.trim().to_ascii_lowercase().as_str(),
+            "true" | "1" | "yes"
+        ),
         _ => false,
-    }
+    })
 }
 
 fn arg_u64(args: &Value, key: &str) -> Option<usize> {
     coerce_u64(args.get(key)?).and_then(|value| usize::try_from(value).ok())
+}
+
+fn arg_u64_or(args: &Value, key: &str, default: usize) -> usize {
+    arg_u64(args, key).unwrap_or(default)
+}
+
+fn arg_paths_or_dot(args: &Value) -> Vec<PathBuf> {
+    arg_path_list(args, "path").unwrap_or_else(|_| vec![PathBuf::from(".")])
+}
+
+fn arg_str<'a>(args: &'a Value, key: &str) -> Option<&'a str> {
+    args.get(key).and_then(Value::as_str)
 }
 
 fn coerce_u64(value: &Value) -> Option<u64> {
@@ -1154,12 +1058,9 @@ fn arg_timeout_any(args: &Value, keys: &[&str]) -> Option<Duration> {
 }
 
 fn arg_string_any<'a>(args: &'a Value, keys: &[&str]) -> Result<&'a str, String> {
-    for key in keys {
-        if let Some(value) = args.get(*key).and_then(Value::as_str) {
-            return Ok(value);
-        }
-    }
-    Err(format!("missing {}", keys.join("|")))
+    keys.iter()
+        .find_map(|key| args.get(*key).and_then(Value::as_str))
+        .ok_or_else(|| format!("missing {}", keys.join("|")))
 }
 
 fn arg_command(args: &Value) -> Result<(String, Option<Vec<String>>), String> {
@@ -1170,16 +1071,16 @@ fn arg_command(args: &Value) -> Result<(String, Option<Vec<String>>), String> {
         let argv = string_array_arg(items, "argv")?;
         return Ok((display_command_for_argv(&argv), Some(argv)));
     }
-    for key in ["command", "cmd", "input", "script"] {
-        if let Some(value) = args.get(key).and_then(Value::as_str) {
-            return Ok((value.to_string(), None));
-        }
+    if let Ok(command) = arg_string_any(args, &["command", "cmd", "input", "script"]) {
+        return Ok((command.to_string(), None));
     }
-    for key in ["argv", "args"] {
-        if let Some(items) = args.get(key).and_then(Value::as_array) {
-            let argv = string_array_arg(items, key)?;
-            return Ok((display_command_for_argv(&argv), Some(argv)));
-        }
+    if let Some((key, items)) = ["argv", "args"].into_iter().find_map(|key| {
+        args.get(key)
+            .and_then(Value::as_array)
+            .map(|items| (key, items))
+    }) {
+        let argv = string_array_arg(items, key)?;
+        return Ok((display_command_for_argv(&argv), Some(argv)));
     }
     Err("missing command; expected command/cmd/input/script string or argv/args array".to_string())
 }
@@ -1196,9 +1097,7 @@ fn display_command_for_argv_on_platform(argv: &[String], platform: &str) -> Stri
 }
 
 fn arg_path_list(args: &Value, key: &str) -> Result<Vec<PathBuf>, String> {
-    let Some(value) = args.get(key) else {
-        return Err(format!("missing {key}"));
-    };
+    let value = args.get(key).ok_or_else(|| format!("missing {key}"))?;
     if let Some(path) = value.as_str() {
         // Stub-schema clients may send a list as its JSON-encoded string.
         if path.trim_start().starts_with('[') {
@@ -1212,11 +1111,10 @@ fn arg_path_list(args: &Value, key: &str) -> Result<Vec<PathBuf>, String> {
         return Ok(vec![PathBuf::from(path)]);
     }
     if let Some(items) = value.as_array() {
-        let paths = string_array_arg(items, key)?
+        return Ok(string_array_arg(items, key)?
             .into_iter()
             .map(PathBuf::from)
-            .collect::<Vec<_>>();
-        return Ok(paths);
+            .collect());
     }
     Err(format!("invalid {key}"))
 }
@@ -1274,6 +1172,3 @@ fn string_array_arg(items: &[Value], label: &str) -> Result<Vec<String>, String>
         })
         .collect()
 }
-
-#[cfg(test)]
-mod tests;

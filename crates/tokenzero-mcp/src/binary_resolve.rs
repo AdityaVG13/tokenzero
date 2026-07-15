@@ -110,61 +110,50 @@ fn binary_candidate_names(name: &str, windows: bool, pathext: Option<&OsStr>) ->
     if !windows || Path::new(name).extension().is_some() {
         return names;
     }
-
-    let mut extensions = Vec::new();
-    if let Some(pathext) = pathext {
-        for extension in pathext.to_string_lossy().split(';') {
-            let extension = extension.trim();
-            if extension.is_empty() {
-                continue;
-            }
-            if extension.starts_with('.') {
-                extensions.push(extension.to_string());
-            } else {
-                extensions.push(format!(".{extension}"));
-            }
+    let mut append = |extension: &str| {
+        let extension = extension.trim();
+        if extension.is_empty() {
+            return;
         }
-    }
-    extensions.extend(WINDOWS_EXECUTABLE_EXTENSIONS.map(str::to_string));
-
-    for extension in extensions {
-        let candidate = format!("{name}{extension}");
+        let candidate = if extension.starts_with('.') {
+            format!("{name}{extension}")
+        } else {
+            format!("{name}.{extension}")
+        };
         if !names
             .iter()
-            .any(|existing| existing.eq_ignore_ascii_case(&candidate))
+            .any(|known| known.eq_ignore_ascii_case(&candidate))
         {
             names.push(candidate);
         }
+    };
+    if let Some(value) = pathext {
+        for extension in value.to_string_lossy().split(';') {
+            append(extension);
+        }
     }
+    WINDOWS_EXECUTABLE_EXTENSIONS.into_iter().for_each(append);
     names
 }
 
 fn find_on_paths(
     name: &str,
-    dirs: &[PathBuf],
+    dirs: impl IntoIterator<Item = impl AsRef<Path>>,
     windows: bool,
     pathext: Option<&OsStr>,
 ) -> Option<PathBuf> {
     let names = binary_candidate_names(name, windows, pathext);
-    for dir in dirs {
-        for n in &names {
-            let candidate = dir.join(n);
-            if is_executable_file(&candidate) {
-                return Some(candidate);
-            }
-        }
-    }
-    None
+    dirs.into_iter()
+        .flat_map(|dir| names.iter().map(move |name| dir.as_ref().join(name)))
+        .find(|path| is_executable_file(path))
 }
 
 /// PATH lookup for `name` (honors `PATHEXT` and standard script extensions on Windows).
 pub fn find_on_path(name: &str) -> Option<PathBuf> {
     let path_var = env::var_os("PATH")?;
-    let dirs: Vec<PathBuf> = env::split_paths(&path_var)
-        .filter(|dir| !dir.as_os_str().is_empty())
-        .collect();
+    let dirs = env::split_paths(&path_var).filter(|dir| !dir.as_os_str().is_empty());
     let pathext = env::var_os("PATHEXT");
-    find_on_paths(name, &dirs, cfg!(windows), pathext.as_deref())
+    find_on_paths(name, dirs, cfg!(windows), pathext.as_deref())
 }
 
 fn home_dir() -> Option<PathBuf> {
@@ -301,185 +290,4 @@ pub fn engine_binaries_json() -> serde_json::Value {
         "binaries": bins.iter().map(resolution_to_json).collect::<Vec<_>>(),
         "note": "No host-absolute personal AI checkout paths are used. Multi-machine: install tokenzero on PATH or under $HOME/.tokenzero/bin; use TOKENZERO_BIN / TOKENZERO_RG_PATH when needed.",
     })
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::fs;
-    use tempfile::tempdir;
-
-    #[test]
-    fn env_override_wins_when_file_exists() {
-        let dir = tempdir().unwrap();
-        let fake = dir.path().join("rg");
-        fs::write(&fake, b"#!/bin/sh\n").unwrap();
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let mut perms = fs::metadata(&fake).unwrap().permissions();
-            perms.set_mode(0o755);
-            fs::set_permissions(&fake, perms).unwrap();
-        }
-        let res = resolve_binary_with_env("rg", Some(&fake));
-        let ok = res.expect("env override should resolve");
-        assert_eq!(ok.source, "env");
-        assert_eq!(ok.path, fake);
-    }
-
-    #[test]
-    fn missing_env_override_is_clear_error() {
-        let missing = PathBuf::from("/no/such/tokenzero-wqw3-rg-binary-xyz");
-        let res = resolve_binary_with_env("rg", Some(&missing));
-        let err = res.expect_err("missing env override");
-        assert!(err.message.contains("missing file"), "{}", err.message);
-        assert!(err.message.contains("TOKENZERO"), "{}", err.message);
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn path_lookup_skips_non_executable_files() {
-        use std::os::unix::fs::PermissionsExt;
-
-        let dir = tempdir().unwrap();
-        let fake = dir.path().join("rg");
-        fs::write(&fake, b"not executable").unwrap();
-        fs::set_permissions(&fake, fs::Permissions::from_mode(0o644)).unwrap();
-
-        assert!(
-            find_on_paths("rg", &[dir.path().to_path_buf()], false, None).is_none(),
-            "PATH lookup must not select a non-executable file"
-        );
-    }
-
-    #[test]
-    fn windows_candidates_honor_pathext_and_include_script_launchers() {
-        let names = binary_candidate_names("tokenzero", true, Some(OsStr::new(".PY;.EXE")));
-        for expected in [
-            "tokenzero.PY",
-            "tokenzero.EXE",
-            "tokenzero.COM",
-            "tokenzero.BAT",
-            "tokenzero.CMD",
-        ] {
-            assert!(
-                names.iter().any(|name| name == expected),
-                "missing {expected}"
-            );
-        }
-        assert_eq!(
-            names
-                .iter()
-                .filter(|name| name.eq_ignore_ascii_case("tokenzero.exe"))
-                .count(),
-            1,
-            "PATHEXT and standard fallbacks must be deduplicated"
-        );
-    }
-
-    #[test]
-    fn windows_well_known_candidates_include_installer_cmd() {
-        let home = Path::new("test-home");
-        let candidates = well_known_candidates_for("tokenzero", Some(home), true, None);
-        assert!(candidates.contains(&home.join(".tokenzero").join("bin").join("tokenzero.CMD")));
-    }
-
-    #[test]
-    fn unix_candidates_do_not_add_windows_extensions() {
-        assert_eq!(
-            binary_candidate_names("tokenzero", false, Some(OsStr::new(".CMD"))),
-            vec!["tokenzero"]
-        );
-    }
-
-    #[test]
-    fn non_executable_env_override_is_clear_error() {
-        #[cfg(unix)]
-        {
-            let dir = tempdir().unwrap();
-            let fake = dir.path().join("rg");
-            fs::write(&fake, b"x").unwrap();
-            use std::os::unix::fs::PermissionsExt;
-            let mut perms = fs::metadata(&fake).unwrap().permissions();
-            perms.set_mode(0o644);
-            fs::set_permissions(&fake, perms).unwrap();
-            let res = resolve_binary_with_env("rg", Some(&fake));
-            let err = res.expect_err("non-executable env override");
-            assert!(err.message.contains("not executable"), "{}", err.message);
-        }
-    }
-
-    #[test]
-    fn well_known_finds_file_outside_path() {
-        let dir = tempdir().unwrap();
-        let bin_dir = dir.path().join("bin");
-        fs::create_dir_all(&bin_dir).unwrap();
-        let fake = bin_dir.join("rg");
-        fs::write(&fake, b"x").unwrap();
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let mut perms = fs::metadata(&fake).unwrap().permissions();
-            perms.set_mode(0o755);
-            fs::set_permissions(&fake, perms).unwrap();
-        }
-        // Simulate well-known by calling first_existing directly.
-        let found = first_existing([fake.clone()]);
-        assert_eq!(found, Some(fake));
-    }
-
-    #[test]
-    fn well_known_skips_non_executable_on_unix() {
-        #[cfg(unix)]
-        {
-            let dir = tempdir().unwrap();
-            let fake = dir.path().join("rg");
-            fs::write(&fake, b"x").unwrap();
-            use std::os::unix::fs::PermissionsExt;
-            let mut perms = fs::metadata(&fake).unwrap().permissions();
-            perms.set_mode(0o644);
-            fs::set_permissions(&fake, perms).unwrap();
-            assert!(first_existing([fake]).is_none());
-        }
-    }
-
-    #[test]
-    fn resolution_order_is_documented_in_json() {
-        let json = engine_binaries_json();
-        let order = json["resolution_order"].as_array().unwrap();
-        assert_eq!(order[0], "env");
-        assert_eq!(order[1], "path");
-        assert_eq!(order[2], "well_known");
-        assert!(
-            json["note"]
-                .as_str()
-                .unwrap()
-                .contains("No host-absolute personal")
-        );
-    }
-
-    #[test]
-    fn well_known_candidates_never_include_personal_ai_checkouts() {
-        let cands = well_known_candidates("tokenzero");
-        for c in &cands {
-            let s = c.to_string_lossy();
-            assert!(
-                !s.contains("/AI/tokenzero/target")
-                    && !s.contains("/AI/FSZero/target")
-                    && !s.contains("/AI/graphzero/target"),
-                "must not hardcode personal AI target/release paths: {s}"
-            );
-        }
-    }
-
-    #[test]
-    fn tokenzero_resolution_has_fallback_or_path() {
-        // Running under cargo test: current_exe is available as last resort.
-        let res = resolve_tokenzero_binary();
-        let ok = res.expect("expected tokenzero resolve via path/well_known/current_exe");
-        assert!(
-            matches!(ok.source, "env" | "path" | "well_known" | "current_exe"),
-            "{ok:?}"
-        );
-    }
 }

@@ -1,48 +1,8 @@
-//! `TokenZeroEngine` methods extracted from `lib.rs`.
-#![allow(unused_imports)]
-
-use super::cache_pack::{
-    cache_pack_manifest_path, cache_pack_sources, previous_cache_digest, read_line_range_from_file,
-};
-use super::collect::*;
-use super::config::{
-    EngineConfig, FETCH_ALLOW_ENV, FETCH_DENY_ENV, FETCH_ENABLED_ENV, ServeFlight, new_session_id,
-};
-use super::fetch_cache::{epoch_secs, fetch_index_path, load_fetch_index, record_fetch};
-use super::fetch_guard::{FETCH_META_MARKER, split_fetch_meta, validate_fetch_target};
-use super::metrics;
-use super::paths::*;
-use super::render::*;
-use super::session::{
-    DiffTelemetry, SeenState, ServeKey, ServedRecord, SessionMemory, SessionSummary,
-};
-use super::{
-    Accounting, ContentType, DEFAULT_MCP_IDLE_TIMEOUT_SECS, DEFAULT_SHELL_INLINE_BUDGET,
-    DEFAULT_SHELL_TIMEOUT_SECS, DIFF_MAX_BYTES, DIFF_MAX_LINES, DIFF_READS_ENV, EditHunk,
-    MAX_MCP_IDLE_TIMEOUT_SECS, MAX_SEARCH_VISITED_FILES, MAX_SHELL_TIMEOUT_SECS,
-    MIN_SEARCH_VISITED_FILES, Mode, RG_PATH_ENV, SEARCH_BACKEND_ENV, SEARCH_VISIT_MULTIPLIER,
-    SESSION_DEDUP_ENV, SearchBackend, ServeOptions, ShellRenderInput, TokenZeroEngine,
-    ToolResponse, cache_maintenance, count_tokens, detect_content_type, make_capsule,
-    make_capsule_with_raw_tokens, ref_record, render_shell, sha256_hex, shell_combined_output,
-    shell_spill_dir, shell_timeout_from_secs, split_command_string,
-};
-use crate::recall;
-use globset::{GlobBuilder, GlobMatcher};
-use serde_json::{Value, json};
-use std::collections::{BTreeMap, HashSet};
-use std::ffi::OsString;
-use std::fs;
-use std::path::{Path, PathBuf};
+use super::*;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Condvar, Mutex, OnceLock};
 use std::thread;
-use std::time::{Duration, SystemTime};
-use tokenzero_filters::rewrite_command;
-use tokenzero_recovery::{ExpansionResult, RecoveryStore, StoredPayload};
-use tokenzero_runtime::{
-    RunOutputPolicy, StreamCapture, contains_platform_shell_syntax,
-    run_command_with_policy_observer,
-};
+use tokenzero_runtime::run_command_with_policy_observer;
 
 #[derive(Debug)]
 struct BackgroundJobState {
@@ -54,6 +14,14 @@ struct BackgroundJobState {
 
 const MAX_BACKGROUND_JOBS: usize = 256;
 
+fn shell_argv(command: &str) -> Vec<String> {
+    if contains_platform_shell_syntax(command, tokenzero_runtime::current_platform()) {
+        vec![command.to_string()]
+    } else {
+        split_command_string(command)
+    }
+}
+
 #[derive(Debug)]
 struct BackgroundJob {
     id: String,
@@ -63,13 +31,7 @@ struct BackgroundJob {
 }
 
 fn background_job_is_complete(job: &BackgroundJob) -> bool {
-    matches!(
-        job.state
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner())
-            .status,
-        "exited" | "failed"
-    )
+    matches!(lock(&job.state).status, "exited" | "failed")
 }
 
 #[derive(Debug, Default)]
@@ -84,12 +46,67 @@ fn background_jobs() -> &'static BackgroundJobRegistry {
     BACKGROUND_JOBS.get_or_init(BackgroundJobRegistry::default)
 }
 
+fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    mutex.lock().unwrap_or_else(|poison| poison.into_inner())
+}
+
+fn store_shell_payload(
+    store: &mut RecoveryStore,
+    text: &str,
+    digest: &str,
+    kind: &str,
+    content_type: ContentType,
+) -> StoredPayload {
+    let source = PathBuf::from(format!("shell:{kind}:{digest}"));
+    store.store_payload_deferred(text, content_type, Some(&source), None, None)
+}
+
+fn store_shell_outputs(
+    store: &mut RecoveryStore,
+    stdout: &str,
+    stderr: &str,
+    combined: &str,
+    digest: &str,
+) -> (StoredPayload, StoredPayload, StoredPayload) {
+    (
+        store_shell_payload(store, stdout, digest, "stdout", ContentType::ShellOutput),
+        store_shell_payload(store, stderr, digest, "stderr", ContentType::ShellOutput),
+        store_shell_payload(
+            store,
+            combined,
+            digest,
+            "combined",
+            ContentType::ShellOutput,
+        ),
+    )
+}
+
+fn shell_ref(kind: &str, stored: &StoredPayload, bytes: usize) -> tokenzero_core::RefRecord {
+    ref_record(kind, stored.blob_ref.clone(), bytes)
+}
+
+macro_rules! shell_stream_capture {
+    ($display:expr, $capture:expr, $stored:expr) => {
+        json!({
+            "bytes": $display.len(),
+            "bytes_seen": $capture.bytes_seen,
+            "captured_bytes": $capture.captured_bytes,
+            "truncated": $capture.truncated,
+            "spill_path": $capture.spill_path,
+            "spill_bytes": $capture.spill_bytes,
+            "sha256": $stored
+                .blob_ref
+                .strip_prefix("tz://blob/")
+                .unwrap_or(&$stored.blob_ref),
+            "sha256_scope": "captured_display",
+            "ref": $stored.blob_ref
+        })
+    };
+}
+
 impl BackgroundJobRegistry {
     fn insert_bounded(&self, job: Arc<BackgroundJob>) -> Result<(), String> {
-        let mut jobs = self
-            .jobs
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner());
+        let mut jobs = lock(&self.jobs);
         while jobs.len() >= MAX_BACKGROUND_JOBS {
             let oldest_completed = jobs
                 .iter()
@@ -154,10 +171,7 @@ impl BackgroundJobRegistry {
                     },
                     move |pid, pgid, state| {
                         if state == "running" {
-                            let mut current = observed
-                                .state
-                                .lock()
-                                .unwrap_or_else(|poison| poison.into_inner());
+                            let mut current = lock(&observed.state);
                             current.pid = pid;
                             current.pgid = pgid;
                             drop(current);
@@ -183,20 +197,14 @@ impl BackgroundJobRegistry {
                     Err(err) => (format!("background shell failed: {err}\n"), None, "failed"),
                 };
                 let _ = fs::write(&job.log, text);
-                let mut current = job
-                    .state
-                    .lock()
-                    .unwrap_or_else(|poison| poison.into_inner());
+                let mut current = lock(&job.state);
                 current.status = status;
                 current.exit_code = exit_code;
                 drop(current);
                 crate::codemode::containment::finish_background_job(&worker_id);
             });
         if let Err(err) = spawn {
-            self.jobs
-                .lock()
-                .unwrap_or_else(|poison| poison.into_inner())
-                .remove(&id);
+            lock(&self.jobs).remove(&id);
             crate::codemode::containment::finish_background_job(&id);
             return Err(format!("spawn background worker: {err}"));
         }
@@ -204,17 +212,11 @@ impl BackgroundJobRegistry {
     }
 
     fn poll(&self, id: &str) -> Result<Value, String> {
-        let job = self
-            .jobs
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner())
+        let job = lock(&self.jobs)
             .get(id)
             .cloned()
             .ok_or_else(|| format!("unknown background job: {id}"))?;
-        let state = job
-            .state
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner());
+        let state = lock(&job.state);
         let log_text = fs::read_to_string(&job.log).unwrap_or_default();
         let tail = log_text
             .chars()
@@ -234,15 +236,9 @@ impl BackgroundJobRegistry {
     }
 
     fn terminate_all(&self) {
-        let jobs = self
-            .jobs
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner());
+        let jobs = lock(&self.jobs);
         for job in jobs.values() {
-            let state = job
-                .state
-                .lock()
-                .unwrap_or_else(|poison| poison.into_inner());
+            let state = lock(&job.state);
             if state.status == "running" {
                 if let Some(pgid) = state.pgid {
                     terminate_background_group(pgid);
@@ -288,14 +284,8 @@ impl TokenZeroEngine {
                 return Err(format!("cwd is outside allowed roots: {}", cwd.display()));
             }
         }
-        let run_argv =
-            if contains_platform_shell_syntax(command, tokenzero_runtime::current_platform()) {
-                vec![command.to_string()]
-            } else {
-                split_command_string(command)
-            };
-        let mut child_env = BTreeMap::new();
-        child_env.insert("TOKENZERO_INNER".to_string(), "1".to_string());
+        let run_argv = shell_argv(command);
+        let child_env = inner_env();
         background_jobs().start(
             run_argv,
             cwd.map(Path::to_path_buf),
@@ -307,11 +297,6 @@ impl TokenZeroEngine {
 
     pub(crate) fn shell_job(&self, id: &str) -> Result<Value, String> {
         background_jobs().poll(id)
-    }
-
-    #[cfg(test)]
-    pub(crate) fn shutdown_background_jobs_for_test(&self) {
-        background_jobs().terminate_all();
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -360,12 +345,7 @@ impl TokenZeroEngine {
         child_env
             .entry("TOKENZERO_INNER".to_string())
             .or_insert_with(|| "1".to_string());
-        let output_policy = RunOutputPolicy {
-            per_stream_capture_bytes: self.config.shell_capture_bytes,
-            spill_threshold_bytes: self.config.shell_spill_bytes,
-            spill_dir: Some(shell_spill_dir(&self.config.cache_path)),
-        }
-        .normalized();
+        let output_policy = self.shell_output_policy();
         let result = match run_command_with_policy_observer(
             &run_argv,
             cwd,
@@ -397,31 +377,14 @@ impl TokenZeroEngine {
             &stdout_display,
             &stderr_display,
         );
-        let mut store = RecoveryStore::new(Some(self.config.cache_path.clone()));
+        let mut store = self.recovery_store();
         let command_digest = sha256_hex(display_command);
-        let stdout_source = PathBuf::from(format!("shell:stdout:{command_digest}"));
-        let stderr_source = PathBuf::from(format!("shell:stderr:{command_digest}"));
-        let combined_source = PathBuf::from(format!("shell:combined:{command_digest}"));
-        let stdout_stored = store.store_payload_deferred(
+        let (stdout_stored, stderr_stored, combined_stored) = store_shell_outputs(
+            &mut store,
             &stdout_display,
-            ContentType::ShellOutput,
-            Some(&stdout_source),
-            None,
-            None,
-        );
-        let stderr_stored = store.store_payload_deferred(
             &stderr_display,
-            ContentType::ShellOutput,
-            Some(&stderr_source),
-            None,
-            None,
-        );
-        let combined_stored = store.store_payload_deferred(
             &output,
-            ContentType::ShellOutput,
-            Some(&combined_source),
-            None,
-            None,
+            &command_digest,
         );
         let render = render_shell(ShellRenderInput {
             command: display_command,
@@ -443,28 +406,8 @@ impl TokenZeroEngine {
             "env_summary": env_summary,
             "timing": {"duration_ms": result.duration_ms, "timed_out": result.timed_out},
             "exit_code": result.exit_code,
-            "stdout": {
-                "bytes": stdout_display.len(),
-                "bytes_seen": result.stdout_capture.bytes_seen,
-                "captured_bytes": result.stdout_capture.captured_bytes,
-                "truncated": result.stdout_capture.truncated,
-                "spill_path": result.stdout_capture.spill_path,
-                "spill_bytes": result.stdout_capture.spill_bytes,
-                "sha256": stdout_stored.blob_ref.strip_prefix("tz://blob/").unwrap_or(&stdout_stored.blob_ref),
-                "sha256_scope": "captured_display",
-                "ref": stdout_stored.blob_ref
-            },
-            "stderr": {
-                "bytes": stderr_display.len(),
-                "bytes_seen": result.stderr_capture.bytes_seen,
-                "captured_bytes": result.stderr_capture.captured_bytes,
-                "truncated": result.stderr_capture.truncated,
-                "spill_path": result.stderr_capture.spill_path,
-                "spill_bytes": result.stderr_capture.spill_bytes,
-                "sha256": stderr_stored.blob_ref.strip_prefix("tz://blob/").unwrap_or(&stderr_stored.blob_ref),
-                "sha256_scope": "captured_display",
-                "ref": stderr_stored.blob_ref
-            },
+            "stdout": shell_stream_capture!(&stdout_display, result.stdout_capture, stdout_stored),
+            "stderr": shell_stream_capture!(&stderr_display, result.stderr_capture, stderr_stored),
             "combined": {
                 "bytes": output.len(),
                 "truncated": streams_truncated,
@@ -481,36 +424,24 @@ impl TokenZeroEngine {
             "command_status": render.command_status.clone()
         });
         let capture_text = serde_json::to_string(&capture).unwrap_or_else(|_| "{}".to_string());
-        let capture_source = PathBuf::from(format!("shell:capture:{command_digest}"));
-        let capture_stored = store.store_payload_deferred(
+        let capture_stored = store_shell_payload(
+            &mut store,
             &capture_text,
+            &command_digest,
+            "capture",
             ContentType::JsonConfig,
-            Some(&capture_source),
-            None,
-            None,
         );
-        if let Err(err) = store.persist_pending() {
-            return degraded_shell_response(command, mode, &output, err.to_string());
-        }
         let mut refs = vec![
-            ref_record(
-                "stdout",
-                stdout_stored.blob_ref.clone(),
-                stdout_display.len(),
-            ),
-            ref_record(
-                "stderr",
-                stderr_stored.blob_ref.clone(),
-                stderr_display.len(),
-            ),
-            ref_record("combined", combined_stored.blob_ref.clone(), output.len()),
-            ref_record(
-                "capture",
-                capture_stored.blob_ref.clone(),
-                capture_text.len(),
-            ),
+            shell_ref("stdout", &stdout_stored, stdout_display.len()),
+            shell_ref("stderr", &stderr_stored, stderr_display.len()),
+            shell_ref("combined", &combined_stored, output.len()),
+            shell_ref("capture", &capture_stored, capture_text.len()),
         ];
-        let refs_complete = prune_dead_refs(&store, &mut refs);
+        let persisted = persist_refs(&mut store, &mut refs);
+        if let Some(error) = persisted.error {
+            return degraded_shell_response(command, mode, &output, error);
+        }
+        let refs_complete = persisted.refs_complete;
         let raw_tokens = count_tokens(&output);
         let inline_shell_output = refs_complete
             && !streams_truncated
