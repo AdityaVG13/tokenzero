@@ -196,7 +196,6 @@ mod flows {
     use sha2::{Digest, Sha256};
     use std::fs::{self, OpenOptions};
     use std::io::{self, Write};
-    use std::sync::atomic::{AtomicU64, Ordering};
     use std::time::{SystemTime, UNIX_EPOCH};
 
     pub fn sha256_bytes(bytes: &[u8]) -> String {
@@ -771,13 +770,13 @@ mod flows {
     }
 
     fn read_journal(path: &Path) -> Result<PlanJournal, String> {
-        let bytes = fs::read(path).map_err(|e| {
-            if e.kind() == io::ErrorKind::NotFound {
-                format!("journal not found: {e}")
-            } else {
-                format!("read journal: {e}")
+        let bytes = match fs::read(path) {
+            Ok(bytes) => bytes,
+            Err(err) if err.kind() == io::ErrorKind::NotFound => {
+                return Err(format!("journal not found: {}", path.display()));
             }
-        })?;
+            Err(err) => return Err(format!("read journal {}: {err}", path.display())),
+        };
         let journal: PlanJournal =
             serde_json::from_slice(&bytes).map_err(|e| format!("parse journal: {e}"))?;
         if journal.version != PLAN_JOURNAL_VERSION {
@@ -795,36 +794,13 @@ mod flows {
     pub fn atomic_write(path: &Path, bytes: &[u8]) -> io::Result<()> {
         let parent = path.parent().unwrap_or_else(|| Path::new("."));
         fs::create_dir_all(parent)?;
-        static NEXT_TMP_ID: AtomicU64 = AtomicU64::new(0);
-        let nonce = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_nanos();
-        let tmp = parent.join(format!(
-            ".{}.{}.{nonce}.{}.tmp",
-            path.file_name()
-                .and_then(|v| v.to_str())
-                .unwrap_or("journal"),
-            std::process::id(),
-            NEXT_TMP_ID.fetch_add(1, Ordering::Relaxed)
-        ));
-        let result = (|| {
-            let mut file = OpenOptions::new().create_new(true).write(true).open(&tmp)?;
-            file.write_all(bytes)?;
-            file.sync_all()?;
-            fs::rename(&tmp, path)?;
-            // Directory fsync is Unix-only: on Windows a directory handle
-            // cannot be opened via `File::open` (no FILE_FLAG_BACKUP_SEMANTICS),
-            // which would spuriously fail every journal write after the rename
-            // already succeeded.
-            #[cfg(unix)]
-            File::open(parent)?.sync_all()?;
-            Ok(())
-        })();
-        if result.is_err() {
-            let _ = fs::remove_file(&tmp);
-        }
-        result
+        let mut tmp = tempfile::NamedTempFile::new_in(parent)?;
+        tmp.write_all(bytes)?;
+        tmp.as_file().sync_all()?;
+        tmp.persist(path).map_err(|err| err.error)?;
+        #[cfg(unix)]
+        File::open(parent)?.sync_all()?;
+        Ok(())
     }
 
     fn pin_hash(reference: &str) -> Option<String> {

@@ -1525,7 +1525,7 @@ fn prepare_json_transaction(
                 };
             }
             Ok(_) => {}
-            Err(message) if message.contains("journal not found") => {}
+            Err(message) if message.starts_with("journal not found:") => {}
             Err(message) => return Err(message),
         }
         let mut seen_targets = std::collections::HashSet::new();
