@@ -1,5 +1,11 @@
 use crate::*;
 
+macro_rules! doctor_status_report {
+    ($schema:literal, $status:expr, $ok:expr, $exit_code:expr; $($key:literal => $value:expr),* $(,)?) => {
+        serde_json::json!({ "schema_version": $schema, "status": $status, "ok": $ok, "exit_code": $exit_code, $($key: $value),* })
+    };
+}
+
 pub fn doctor(root: &Path, cache_path: Option<&Path>) -> serde_json::Value {
     let cache = doctor_cache_path(root, cache_path);
     let root_exists = root.exists();
@@ -10,15 +16,19 @@ pub fn doctor(root: &Path, cache_path: Option<&Path>) -> serde_json::Value {
     let mut findings = Vec::new();
     if !root_exists {
         findings.push(doctor_finding(
-            "tz-root-missing", "error", "root_exists", "doctor root does not exist",
+            "tz-root-missing",
             serde_json::json!({ "path": root.display().to_string(), "exists": false }),
-            false, false, None, "Pass --root pointing at an existing project directory.",
+            false,
+            false,
+            None,
         ));
     } else if !root_is_dir {
         findings.push(doctor_finding(
-            "tz-root-not-directory", "error", "root_is_directory", "doctor root is not a directory",
+            "tz-root-not-directory",
             serde_json::json!({ "path": root.display().to_string(), "is_directory": false }),
-            false, false, None, "Pass --root pointing at a directory.",
+            false,
+            false,
+            None,
         ));
     }
     if !cache_parent_exists {
@@ -36,14 +46,10 @@ pub fn doctor(root: &Path, cache_path: Option<&Path>) -> serde_json::Value {
         };
         findings.push(doctor_finding(
             "tz-cache-parent-missing",
-            "info",
-            "cache_parent_exists",
-            "recovery cache parent does not exist yet",
             serde_json::json!({ "path": path, "exists": false }),
             cache_parent_fixable,
             cache_parent_fixable,
             Some(recommended),
-            "Create the cache parent first if this preflight must be clean before the first cache-writing command.",
         ));
     }
     let has_blocking_finding = findings.iter().any(finding_is_error);
@@ -51,32 +57,55 @@ pub fn doctor(root: &Path, cache_path: Option<&Path>) -> serde_json::Value {
         .as_ref()
         .map(|p| p.display().to_string())
         .unwrap_or_else(|| String::from(""));
-    let checks = vec![
-        doctor_check("root_exists", root_exists, if root_exists { "ok" } else { "error" }, root.display().to_string()),
-        doctor_check("root_is_directory", root_is_dir, if root_is_dir { "ok" } else { "error" }, root.display().to_string()),
-        doctor_check("cache_parent_exists", cache_parent_exists, if cache_parent_exists { "ok" } else { "info" }, cache_parent_path),
-        doctor_check("core_runtime_rust", true, "ok", "compiled Rust binary"),
-        doctor_check("mcp_server_entrypoint_declared", true, "ok", "tokenzero mcp-server"),
-    ];
-    let next_steps = if has_blocking_finding {
-        vec![doctor_next_step(
+    let root_path = root.display().to_string();
+    let checks = [
+        (
+            "root_exists",
+            root_exists,
+            if root_exists { "ok" } else { "error" },
+            root_path.as_str(),
+        ),
+        (
+            "root_is_directory",
+            root_is_dir,
+            if root_is_dir { "ok" } else { "error" },
+            root_path.as_str(),
+        ),
+        (
+            "cache_parent_exists",
+            cache_parent_exists,
+            if cache_parent_exists { "ok" } else { "info" },
+            cache_parent_path.as_str(),
+        ),
+        ("core_runtime_rust", true, "ok", "compiled Rust binary"),
+        (
+            "mcp_server_entrypoint_declared",
+            true,
+            "ok",
+            "tokenzero mcp-server",
+        ),
+    ]
+    .map(|(id, ok, severity, evidence)| doctor_check(id, ok, severity, evidence));
+    let next_step = if has_blocking_finding {
+        (
             "fix_blocking_findings",
             "tokenzero doctor --json --root <existing-directory>",
             "doctor refuses to claim health while the root is invalid",
-        )]
+        )
     } else if findings.is_empty() {
-        vec![doctor_next_step(
+        (
             "no_action_required",
             "tokenzero doctor --runtime --json",
             "run this only when a runtime plan probe is needed",
-        )]
+        )
     } else {
-        vec![doctor_next_step(
+        (
             "review_informational_findings",
             "tokenzero doctor --json",
             "only non-blocking preflight findings were detected",
-        )]
+        )
     };
+    let next_steps = vec![doctor_next_step(next_step.0, next_step.1, next_step.2)];
     let exit_code = if has_blocking_finding { 1 } else { 0 };
     let blocking_findings = findings.iter().filter(|f| finding_is_error(f)).count();
     let informational_findings = findings.len().saturating_sub(blocking_findings);
@@ -187,7 +216,7 @@ pub fn doctor_fix(root: &Path, cache_path: Option<&Path>, dry_run: bool) -> serd
         return report;
     }
 
-    let lock = match DoctorLock::acquire(root) {
+    let _lock = match DoctorLock::acquire(root) {
         Ok(lock) => lock,
         Err(err) if err.kind() == ErrorKind::WouldBlock => {
             let mut report = doctor_fix_base("concurrency_lost", false, 5, false, false, 0);
@@ -204,14 +233,12 @@ pub fn doctor_fix(root: &Path, cache_path: Option<&Path>, dry_run: bool) -> serd
     let run_id = doctor_run_id(root, &cache);
     let run_dir = root.join(".doctor/runs").join(&run_id);
     if let Err(err) = fs::create_dir_all(run_dir.join("backups")) {
-        drop(lock);
         return doctor_fix_io_error(false, "create run artifact directory", err);
     }
 
     let action = match doctor_mutate_create_dir(root, &run_dir, &run_id, &cache_parent) {
         Ok(action) => action,
         Err(err) => {
-            drop(lock);
             return doctor_fix_io_error(false, "create cache parent", err);
         }
     };
@@ -255,7 +282,6 @@ pub fn doctor_fix(root: &Path, cache_path: Option<&Path>, dry_run: bool) -> serd
             let _ = atomic_write(&run_dir.join("stdout.json"), &bytes);
         }
     }
-    drop(lock);
     report
 }
 
@@ -264,26 +290,29 @@ pub fn doctor_undo(root: &Path, run_id: &str) -> serde_json::Value {
         match fs::read_to_string(root.join(".doctor/latest")) {
             Ok(id) => id.trim().to_string(),
             Err(err) => {
-                return doctor_undo_status("failed", false, 3, run_id, Some(format!("could not resolve latest run: {err}")));
+                return doctor_undo_error(
+                    "failed",
+                    3,
+                    run_id,
+                    format!("could not resolve latest run: {err}"),
+                );
             }
         }
     } else {
         run_id.to_string()
     };
-    let lock = match DoctorLock::acquire(root) {
+    let _lock = match DoctorLock::acquire(root) {
         Ok(lock) => lock,
         Err(err) if err.kind() == ErrorKind::WouldBlock => {
-            return serde_json::json!({
-                "schema_version": "tokenzero.doctor.undo.v1",
-                "status": "concurrency_lost",
-                "ok": false,
-                "exit_code": 5,
-                "run_id": resolved_run_id,
-                "error": err.to_string()
-            });
+            return doctor_undo_error("concurrency_lost", 5, &resolved_run_id, err.to_string());
         }
         Err(err) => {
-            return doctor_undo_status("failed", false, 3, &resolved_run_id, Some(format!("could not acquire doctor lock: {err}")));
+            return doctor_undo_error(
+                "failed",
+                3,
+                &resolved_run_id,
+                format!("could not acquire doctor lock: {err}"),
+            );
         }
     };
     let run_dir = root.join(".doctor/runs").join(&resolved_run_id);
@@ -291,38 +320,36 @@ pub fn doctor_undo(root: &Path, run_id: &str) -> serde_json::Value {
     let content = match fs::read_to_string(&actions_path) {
         Ok(content) => content,
         Err(err) => {
-            drop(lock);
-            return serde_json::json!({
-                "schema_version": "tokenzero.doctor.undo.v1",
-                "status": "failed",
-                "ok": false,
-                "exit_code": 3,
-                "run_id": resolved_run_id,
-                "actions_path": actions_path.display().to_string(),
-                "error": format!("could not read actions.jsonl: {err}")
-            });
+            return doctor_status_report!("tokenzero.doctor.undo.v1", "failed", false, 3;
+                "run_id" => resolved_run_id,
+                "actions_path" => actions_path.display().to_string(),
+                "error" => format!("could not read actions.jsonl: {err}"));
         }
     };
-    let mut actions = Vec::new();
-    for line in content.lines().filter(|line| !line.trim().is_empty()) {
-        match serde_json::from_str::<DoctorActionRecord>(line) {
-            Ok(action) => actions.push(action),
-            Err(err) => {
-                drop(lock);
-                return doctor_undo_status("failed", false, 3, &resolved_run_id, Some(format!("could not parse actions.jsonl: {err}")));
-            }
+    let actions = content
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .map(serde_json::from_str::<DoctorActionRecord>)
+        .collect::<Result<Vec<_>, _>>();
+    let actions = match actions {
+        Ok(actions) => actions,
+        Err(err) => {
+            return doctor_undo_error(
+                "failed",
+                3,
+                &resolved_run_id,
+                format!("could not parse actions.jsonl: {err}"),
+            );
         }
-    }
+    };
     let mut restored = Vec::new();
     for action in actions.iter().rev() {
         if action.fixer_id != DOCTOR_FIXER_CACHE_PARENT || action.op != "create_dir" {
-            drop(lock);
-            return doctor_undo_status(
+            return doctor_undo_error(
                 "failed",
-                false,
                 3,
                 &resolved_run_id,
-                Some(format!("unsupported undo action {} for {}", action.op, action.path)),
+                format!("unsupported undo action {} for {}", action.op, action.path),
             );
         }
         let target = root.join(&action.path);
@@ -331,13 +358,15 @@ pub fn doctor_undo(root: &Path, run_id: &str) -> serde_json::Value {
             continue;
         }
         if !target.is_dir() {
-            drop(lock);
-            return doctor_undo_failed(&resolved_run_id, &action.path, "created path is not a directory");
+            return doctor_undo_failed(
+                &resolved_run_id,
+                &action.path,
+                "created path is not a directory",
+            );
         }
         match fs::read_dir(&target) {
             Ok(mut entries) => {
                 if entries.next().is_some() {
-                    drop(lock);
                     return doctor_undo_failed(
                         &resolved_run_id,
                         &action.path,
@@ -346,20 +375,29 @@ pub fn doctor_undo(root: &Path, run_id: &str) -> serde_json::Value {
                 }
             }
             Err(err) => {
-                drop(lock);
-                return doctor_undo_failed(&resolved_run_id, &action.path, &format!("could not inspect directory: {err}"));
+                return doctor_undo_failed(
+                    &resolved_run_id,
+                    &action.path,
+                    &format!("could not inspect directory: {err}"),
+                );
             }
         }
         let quarantine = run_dir.join("quarantine").join(&action.path);
         if let Some(parent) = quarantine.parent() {
             if let Err(err) = fs::create_dir_all(parent) {
-                drop(lock);
-                return doctor_undo_failed(&resolved_run_id, &action.path, &format!("could not create quarantine parent: {err}"));
+                return doctor_undo_failed(
+                    &resolved_run_id,
+                    &action.path,
+                    &format!("could not create quarantine parent: {err}"),
+                );
             }
         }
         if let Err(err) = fs::rename(&target, &quarantine) {
-            drop(lock);
-            return doctor_undo_failed(&resolved_run_id, &action.path, &format!("could not quarantine created directory: {err}"));
+            return doctor_undo_failed(
+                &resolved_run_id,
+                &action.path,
+                &format!("could not quarantine created directory: {err}"),
+            );
         }
         restored.push(serde_json::json!({
             "path": action.path,
@@ -367,19 +405,11 @@ pub fn doctor_undo(root: &Path, run_id: &str) -> serde_json::Value {
             "quarantine_path": quarantine.display().to_string()
         }));
     }
-    let report = serde_json::json!({
-        "schema_version": "tokenzero.doctor.undo.v1",
-        "status": "ok",
-        "ok": true,
-        "exit_code": 0,
-        "run_id": resolved_run_id,
-        "mutates": true,
-        "restored": restored
-    });
+    let report = doctor_status_report!("tokenzero.doctor.undo.v1", "ok", true, 0;
+        "run_id" => resolved_run_id, "mutates" => true, "restored" => restored);
     if let Ok(bytes) = serde_json::to_vec_pretty(&report) {
         let _ = atomic_write(&run_dir.join("undo.json"), &bytes);
     }
-    drop(lock);
     report
 }
 
@@ -392,7 +422,7 @@ pub fn doctor_ls(root: &Path) -> serde_json::Value {
     let entries = match fs::read_dir(&runs_dir) {
         Ok(entries) => entries,
         Err(err) if err.kind() == ErrorKind::NotFound => {
-            return doctor_ls_report(root, &runs_dir, "ok", true, 0, 0, vec![], None);
+            return doctor_ls_report(root, &runs_dir, "ok", true, 0, vec![], None);
         }
         Err(err) => {
             return doctor_ls_report(
@@ -401,7 +431,6 @@ pub fn doctor_ls(root: &Path) -> serde_json::Value {
                 "failed",
                 false,
                 74,
-                0,
                 vec![],
                 Some(format!("could not list doctor runs: {err}")),
             );
@@ -409,7 +438,9 @@ pub fn doctor_ls(root: &Path) -> serde_json::Value {
     };
     let mut runs = Vec::new();
     for entry in entries.filter_map(Result::ok) {
-        let Ok(file_type) = entry.file_type() else { continue; };
+        let Ok(file_type) = entry.file_type() else {
+            continue;
+        };
         if !file_type.is_dir() {
             continue;
         }
@@ -422,7 +453,9 @@ pub fn doctor_ls(root: &Path) -> serde_json::Value {
             .ok()
             .map(|text| text.lines().filter(|line| !line.trim().is_empty()).count())
             .unwrap_or(0);
-        let started_at_unix = run_id.split_once("__").and_then(|(prefix, _)| prefix.parse::<u64>().ok());
+        let started_at_unix = run_id
+            .split_once("__")
+            .and_then(|(prefix, _)| prefix.parse::<u64>().ok());
         runs.push(serde_json::json!({
             "run_id": run_id,
             "started_at_unix": started_at_unix,
@@ -437,34 +470,43 @@ pub fn doctor_ls(root: &Path) -> serde_json::Value {
         }));
     }
     runs.sort_by(|left, right| {
-        right["run_id"].as_str().unwrap_or("").cmp(left["run_id"].as_str().unwrap_or(""))
+        right["run_id"]
+            .as_str()
+            .unwrap_or("")
+            .cmp(left["run_id"].as_str().unwrap_or(""))
     });
-    doctor_ls_report(root, &runs_dir, "ok", true, 0, runs.len(), runs, None)
+    doctor_ls_report(root, &runs_dir, "ok", true, 0, runs, None)
 }
 
 fn doctor_ls_report(
-    root: &Path, runs_dir: &Path, status: &str, ok: bool, exit_code: i64,
-    run_count: usize, runs: Vec<Value>, error: Option<String>,
+    root: &Path,
+    runs_dir: &Path,
+    status: &str,
+    ok: bool,
+    exit_code: i64,
+    runs: Vec<Value>,
+    error: Option<String>,
 ) -> Value {
-    let mut value = serde_json::json!({
-        "schema_version": "tokenzero.doctor.ls.v1",
-        "status": status, "ok": ok, "exit_code": exit_code,
-        "root": root.display().to_string(),
-        "runs_dir": runs_dir.display().to_string(),
-        "run_count": run_count, "runs": runs
-    });
+    let run_count = runs.len();
+    let mut value = doctor_status_report!("tokenzero.doctor.ls.v1", status, ok, exit_code;
+        "root" => root.display().to_string(), "runs_dir" => runs_dir.display().to_string(),
+        "run_count" => run_count, "runs" => runs);
     if let Some(error) = error {
         value["error"] = serde_json::json!(error);
     }
     value
 }
 
-fn doctor_fix_base(status: &str, ok: bool, exit_code: i64, dry_run: bool, mutates: bool, actions_taken: i64) -> serde_json::Value {
-    serde_json::json!({
-        "schema_version": "tokenzero.doctor.fix.v1",
-        "status": status, "ok": ok, "exit_code": exit_code, "mode": "fix",
-        "dry_run": dry_run, "mutates": mutates, "actions_taken": actions_taken
-    })
+fn doctor_fix_base(
+    status: &str,
+    ok: bool,
+    exit_code: i64,
+    dry_run: bool,
+    mutates: bool,
+    actions_taken: i64,
+) -> serde_json::Value {
+    doctor_status_report!("tokenzero.doctor.fix.v1", status, ok, exit_code;
+        "mode" => "fix", "dry_run" => dry_run, "mutates" => mutates, "actions_taken" => actions_taken)
 }
 
 pub(crate) fn doctor_fix_refused(
@@ -495,26 +537,13 @@ pub(crate) fn doctor_fix_io_error(
 }
 
 pub(crate) fn doctor_undo_failed(run_id: &str, path: &str, reason: &str) -> serde_json::Value {
-    serde_json::json!({
-        "schema_version": "tokenzero.doctor.undo.v1",
-        "status": "failed",
-        "ok": false,
-        "exit_code": 3,
-        "run_id": run_id,
-        "path": path,
-        "reason": reason
-    })
+    doctor_status_report!("tokenzero.doctor.undo.v1", "failed", false, 3;
+        "run_id" => run_id, "path" => path, "reason" => reason)
 }
 
-fn doctor_undo_status(status: &str, ok: bool, exit_code: i64, run_id: &str, error: Option<String>) -> serde_json::Value {
-    let mut value = serde_json::json!({
-        "schema_version": "tokenzero.doctor.undo.v1",
-        "status": status, "ok": ok, "exit_code": exit_code, "run_id": run_id
-    });
-    if let Some(error) = error {
-        value["error"] = serde_json::json!(error);
-    }
-    value
+fn doctor_undo_error(status: &str, exit_code: i64, run_id: &str, error: String) -> Value {
+    doctor_status_report!("tokenzero.doctor.undo.v1", status, false, exit_code;
+        "run_id" => run_id, "error" => error)
 }
 
 pub(crate) fn doctor_mutate_create_dir(
@@ -524,7 +553,10 @@ pub(crate) fn doctor_mutate_create_dir(
     path: &Path,
 ) -> std::io::Result<DoctorActionRecord> {
     if path.exists() {
-        return Err(Error::new(ErrorKind::AlreadyExists, format!("{} already exists", path.display())));
+        return Err(Error::new(
+            ErrorKind::AlreadyExists,
+            format!("{} already exists", path.display()),
+        ));
     }
     if !doctor_cache_parent_fixable(root, Some(path)) {
         return Err(Error::new(
@@ -534,7 +566,9 @@ pub(crate) fn doctor_mutate_create_dir(
     }
     let rel = doctor_rel_path(root, path);
     let before_hash = sha256("missing");
-    let backup_marker = run_dir.join("backups").join(format!("{}.missing.json", rel.replace('/', "__")));
+    let backup_marker = run_dir
+        .join("backups")
+        .join(format!("{}.missing.json", rel.replace('/', "__")));
     let backup = serde_json::json!({
         "schema_version": "tokenzero.doctor.backup_marker.v1",
         "path": rel,
@@ -546,7 +580,11 @@ pub(crate) fn doctor_mutate_create_dir(
         .map_err(|err| Error::other(format!("serialize backup marker: {err}")))?;
     atomic_write(&backup_marker, &backup_bytes)?;
     fs::create_dir(path)?;
-    let after_hash = if path.exists() && path.is_dir() { sha256("dir:empty") } else { sha256("missing") };
+    let after_hash = if path.exists() && path.is_dir() {
+        sha256("dir:empty")
+    } else {
+        sha256("missing")
+    };
     let quarantine = run_dir.join("quarantine").join(&rel);
     let action = DoctorActionRecord {
         schema_version: "tokenzero.doctor.action.v1".to_string(),
@@ -563,8 +601,12 @@ pub(crate) fn doctor_mutate_create_dir(
         quarantine_path: Some(quarantine.display().to_string()),
     };
     let write_action = (|| -> std::io::Result<()> {
-        let mut file = fs::OpenOptions::new().create(true).append(true).open(run_dir.join("actions.jsonl"))?;
-        serde_json::to_writer(&mut file, &action).map_err(|err| Error::other(format!("serialize action: {err}")))?;
+        let mut file = fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(run_dir.join("actions.jsonl"))?;
+        serde_json::to_writer(&mut file, &action)
+            .map_err(|err| Error::other(format!("serialize action: {err}")))?;
         file.write_all(b"\n")?;
         file.sync_all()
     })();
@@ -578,76 +620,83 @@ pub(crate) fn doctor_mutate_create_dir(
     Ok(action)
 }
 
-pub(crate) fn fixable_cache_parent_finding(report: &serde_json::Value) -> Option<&serde_json::Value> {
+pub(crate) fn fixable_cache_parent_finding(
+    report: &serde_json::Value,
+) -> Option<&serde_json::Value> {
     report["findings"].as_array()?.iter().find(|finding| {
-        finding["id"] == DOCTOR_FIXER_CACHE_PARENT && finding["fix_supported"].as_bool().unwrap_or(false)
+        finding["id"] == DOCTOR_FIXER_CACHE_PARENT
+            && finding["fix_supported"].as_bool().unwrap_or(false)
     })
 }
 
-const DOCTOR_COMMANDS: &[(&str, &str, bool, bool)] = &[
-    ("doctor --json", "read-only install and cache health report", false, true),
-    ("doctor diagnose --json", "explicit spelling for the default read-only diagnose mode", false, true),
-    ("doctor health", "cheap liveness summary for schedulers and agents", false, true),
-    ("doctor capabilities --json", "machine-readable doctor contract", false, true),
-    ("doctor robot-docs", "paste-ready agent handbook", false, false),
-    ("doctor explain <finding-id>", "expand a current or known doctor finding", false, true),
-    ("doctor --robot-triage --json", "single-call triage summary for agents", false, true),
-    ("doctor --dry-run --fix --json", "plan the cache-parent repair without writing", false, true),
-    ("doctor --fix --json", "repair the missing cache parent through the doctor mutate chokepoint", true, true),
-    ("doctor fix --json", "explicit spelling for doctor --fix --json", true, true),
-    ("doctor undo <run-id> --json", "restore the cache-parent create-dir fixer by quarantining the created empty directory", true, true),
-    ("doctor ls --json", "list local doctor run artifacts with run ids, exit codes, and action counts", false, true),
-    ("doctor --runtime --json", "read-only report plus local runtime command plan probe", false, true),
-];
+macro_rules! doctor_commands {
+    ($($name:literal, $description:literal, $mutates:literal, $json:literal;)*) => {
+        vec![$(serde_json::json!({ "name": $name, "description": $description, "mutates": $mutates, "json": $json })),*]
+    };
+}
 
-const DOCTOR_DETECTORS: &[(&str, &str, &str, &str, &str, u64, bool, bool)] = &[
-    ("tz-root-missing", "root_exists", "workspace_root", "error", "doctor root path does not exist", 1, true, false),
-    ("tz-root-not-directory", "root_is_directory", "workspace_root", "error", "doctor root path exists but is not a directory", 1, true, false),
-    ("tz-cache-parent-missing", "cache_parent_exists", "cache", "info", "recovery cache parent directory does not exist yet", 1, true, true),
-    ("tz-core-runtime-rust", "core_runtime_rust", "runtime", "ok", "core runtime is the compiled Rust binary", 0, true, false),
-    ("tz-mcp-server-entrypoint-declared", "mcp_server_entrypoint_declared", "mcp", "ok", "MCP server entrypoint is declared as tokenzero mcp-server", 0, true, false),
-];
+macro_rules! doctor_detectors {
+    ($($id:literal, $check:literal, $subsystem:literal, $severity:literal, $description:literal, $cost:literal, $auto_detected:literal, $auto_fixed:literal;)*) => {
+        vec![$(serde_json::json!({ "id": $id, "check": $check, "subsystem": $subsystem, "severity": $severity, "description": $description, "estimated_cost_ms": $cost, "online_required": false, "auto_detected": $auto_detected, "auto_fixed": $auto_fixed })),*]
+    };
+}
 
-const DOCTOR_MANUAL_REMEDIATIONS: &[(&str, &str, &str)] = &[
-    ("tz-root-missing", "Run tokenzero doctor --json --root <existing-directory>.", "The doctor cannot invent or create the project root safely."),
-    ("tz-root-not-directory", "Run tokenzero doctor --json --root <directory>.", "The doctor root must be a directory so all checks have a bounded scope."),
-    ("tz-cache-parent-missing", "Run tokenzero doctor --dry-run --fix --json, then tokenzero doctor --fix --json if the write set is acceptable.", "The doctor can repair this only when the cache parent is inside the root and the immediate parent already exists."),
-];
+macro_rules! doctor_remediations {
+    ($($id:literal, $instruction:literal, $reason:literal;)*) => {
+        vec![$(serde_json::json!({ "id": $id, "instruction": $instruction, "reason": $reason })),*]
+    };
+}
 
-const DOCTOR_EXIT_CODE_ROWS: &[(i64, &str, &str, &str)] = &[
-    (0, "ok", "success_or_healthy", "healthy or informational findings only"),
-    (1, "blocked", "findings_present_no_fix", "blocking doctor finding; parse findings[] and next_steps[]"),
-    (2, "partial", "fix_partial", "fix attempted but only some actions completed"),
-    (3, "rolled_back_or_restore_failed", "fix_failed_or_undo_failed", "fix failed and rolled back, or undo could not restore safely"),
-    (4, "refused_unsafe", "refused_unsafe", "doctor refused an unsafe or unsupported operation"),
-    (5, "concurrency_lost", "concurrency_lost", "another doctor process holds the mutation lock"),
-    (6, "online_required", "online_required", "a detector or fixer requires explicit --online consent"),
-    (64, "usage_error", "usage_error", "unknown flag or malformed invocation"),
-    (66, "no_input", "no_input", "target path does not exist or is not usable"),
-    (73, "cannot_create_output", "cannot_create_output", "doctor could not create a requested report or run artifact"),
-    (74, "io_error", "io_error", "filesystem I/O error during read-only diagnosis"),
-];
+macro_rules! doctor_exit_code_rows {
+    ($($code:literal, $label:literal, $canonical:literal, $meaning:literal;)*) => {
+        serde_json::json!([$({ "code": $code, "label": $label, "canonical_label": $canonical, "meaning": $meaning }),*])
+    };
+}
 
-const KNOWN_DOCTOR_FINDINGS: &[(&str, &str, &str, &str, &str, bool, &str)] = &[
-    ("tz-root-missing", "error", "root_exists", "doctor root does not exist", "tokenzero doctor --json --root <existing-directory>", false, "the doctor cannot infer the intended project root"),
-    ("tz-root-not-directory", "error", "root_is_directory", "doctor root is not a directory", "tokenzero doctor --json --root <directory>", false, "doctor checks require a bounded directory root"),
-    ("tz-cache-parent-missing", "info", "cache_parent_exists", "recovery cache parent does not exist yet", "tokenzero doctor --dry-run --fix --json", true, "fix mode can create the cache parent when it is inside the root and the immediate parent exists"),
-];
+macro_rules! doctor_findings {
+    ($($id:literal, $severity:literal, $check:literal, $summary:literal,
+       $next:literal, $command:literal, $fixable:literal, $reason:literal;)*) => {
+        &[$([$id, $severity, $check, $summary, $next, $command, $fixable, $reason]),*]
+    };
+}
+
+const KNOWN_DOCTOR_FINDINGS: &[[&str; 8]] = doctor_findings! {
+    "tz-root-missing", "error", "root_exists", "doctor root does not exist",
+        "Pass --root pointing at an existing project directory.", "tokenzero doctor --json --root <existing-directory>", "false", "the doctor cannot infer the intended project root";
+    "tz-root-not-directory", "error", "root_is_directory", "doctor root is not a directory",
+        "Pass --root pointing at a directory.", "tokenzero doctor --json --root <directory>", "false", "doctor checks require a bounded directory root";
+    "tz-cache-parent-missing", "info", "cache_parent_exists", "recovery cache parent does not exist yet",
+        "Create the cache parent first if this preflight must be clean before the first cache-writing command.", "tokenzero doctor --dry-run --fix --json", "true", "fix mode can create the cache parent when it is inside the root and the immediate parent exists";
+};
 
 pub fn doctor_capabilities() -> serde_json::Value {
-    let commands: Vec<Value> = DOCTOR_COMMANDS.iter().map(|(name, description, mutates, json)| {
-        serde_json::json!({ "name": name, "description": description, "mutates": mutates, "json": json })
-    }).collect();
-    let detectors: Vec<Value> = DOCTOR_DETECTORS.iter().map(|(id, check, subsystem, severity, description, cost, auto_detected, auto_fixed)| {
-        serde_json::json!({
-            "id": id, "check": check, "subsystem": subsystem, "severity": severity,
-            "description": description, "estimated_cost_ms": cost, "online_required": false,
-            "auto_detected": auto_detected, "auto_fixed": auto_fixed
-        })
-    }).collect();
-    let manual_remediations: Vec<Value> = DOCTOR_MANUAL_REMEDIATIONS.iter().map(|(id, instruction, reason)| {
-        serde_json::json!({ "id": id, "instruction": instruction, "reason": reason })
-    }).collect();
+    let commands = doctor_commands! {
+        "doctor --json", "read-only install and cache health report", false, true;
+        "doctor diagnose --json", "explicit spelling for the default read-only diagnose mode", false, true;
+        "doctor health", "cheap liveness summary for schedulers and agents", false, true;
+        "doctor capabilities --json", "machine-readable doctor contract", false, true;
+        "doctor robot-docs", "paste-ready agent handbook", false, false;
+        "doctor explain <finding-id>", "expand a current or known doctor finding", false, true;
+        "doctor --robot-triage --json", "single-call triage summary for agents", false, true;
+        "doctor --dry-run --fix --json", "plan the cache-parent repair without writing", false, true;
+        "doctor --fix --json", "repair the missing cache parent through the doctor mutate chokepoint", true, true;
+        "doctor fix --json", "explicit spelling for doctor --fix --json", true, true;
+        "doctor undo <run-id> --json", "restore the cache-parent create-dir fixer by quarantining the created empty directory", true, true;
+        "doctor ls --json", "list local doctor run artifacts with run ids, exit codes, and action counts", false, true;
+        "doctor --runtime --json", "read-only report plus local runtime command plan probe", false, true;
+    };
+    let detectors = doctor_detectors! {
+        "tz-root-missing", "root_exists", "workspace_root", "error", "doctor root path does not exist", 1, true, false;
+        "tz-root-not-directory", "root_is_directory", "workspace_root", "error", "doctor root path exists but is not a directory", 1, true, false;
+        "tz-cache-parent-missing", "cache_parent_exists", "cache", "info", "recovery cache parent directory does not exist yet", 1, true, true;
+        "tz-core-runtime-rust", "core_runtime_rust", "runtime", "ok", "core runtime is the compiled Rust binary", 0, true, false;
+        "tz-mcp-server-entrypoint-declared", "mcp_server_entrypoint_declared", "mcp", "ok", "MCP server entrypoint is declared as tokenzero mcp-server", 0, true, false;
+    };
+    let manual_remediations = doctor_remediations! {
+        "tz-root-missing", "Run tokenzero doctor --json --root <existing-directory>.", "The doctor cannot invent or create the project root safely.";
+        "tz-root-not-directory", "Run tokenzero doctor --json --root <directory>.", "The doctor root must be a directory so all checks have a bounded scope.";
+        "tz-cache-parent-missing", "Run tokenzero doctor --dry-run --fix --json, then tokenzero doctor --fix --json if the write set is acceptable.", "The doctor can repair this only when the cache parent is inside the root and the immediate parent already exists.";
+    };
     serde_json::json!({
         "schema_version": "tokenzero.doctor.capabilities.v1",
         "tool": "tokenzero",
@@ -696,11 +745,19 @@ pub fn doctor_capabilities() -> serde_json::Value {
 }
 
 pub fn doctor_exit_codes() -> serde_json::Value {
-    serde_json::Value::Array(
-        DOCTOR_EXIT_CODE_ROWS.iter().map(|(code, label, canonical_label, meaning)| {
-            serde_json::json!({ "code": code, "label": label, "canonical_label": canonical_label, "meaning": meaning })
-        }).collect(),
-    )
+    doctor_exit_code_rows! {
+        0, "ok", "success_or_healthy", "healthy or informational findings only";
+        1, "blocked", "findings_present_no_fix", "blocking doctor finding; parse findings[] and next_steps[]";
+        2, "partial", "fix_partial", "fix attempted but only some actions completed";
+        3, "rolled_back_or_restore_failed", "fix_failed_or_undo_failed", "fix failed and rolled back, or undo could not restore safely";
+        4, "refused_unsafe", "refused_unsafe", "doctor refused an unsafe or unsupported operation";
+        5, "concurrency_lost", "concurrency_lost", "another doctor process holds the mutation lock";
+        6, "online_required", "online_required", "a detector or fixer requires explicit --online consent";
+        64, "usage_error", "usage_error", "unknown flag or malformed invocation";
+        66, "no_input", "no_input", "target path does not exist or is not usable";
+        73, "cannot_create_output", "cannot_create_output", "doctor could not create a requested report or run artifact";
+        74, "io_error", "io_error", "filesystem I/O error during read-only diagnosis";
+    }
 }
 
 pub fn doctor_explain(
@@ -715,7 +772,12 @@ pub fn doctor_explain(
             .find(|finding| finding["id"].as_str() == Some(finding_id))
     });
     if let Some(finding) = current_finding {
-        return doctor_explain_ok(finding_id, true, finding.clone(), report["next_steps"].clone());
+        return doctor_explain_ok(
+            finding_id,
+            true,
+            finding.clone(),
+            report["next_steps"].clone(),
+        );
     }
     if let Some(known) = known_doctor_finding(finding_id) {
         return doctor_explain_ok(
@@ -758,13 +820,15 @@ fn doctor_explain_ok(finding_id: &str, current: bool, finding: Value, next_steps
 pub fn doctor_robot_triage(root: &Path, cache_path: Option<&Path>) -> serde_json::Value {
     let report = doctor(root, cache_path);
     let actions_planned = fixable_cache_parent_finding(&report)
-        .map(|finding| serde_json::json!([{
-            "fixer_id": DOCTOR_FIXER_CACHE_PARENT,
-            "finding_id": DOCTOR_FIXER_CACHE_PARENT,
-            "description": "create missing cache parent directory",
-            "path": finding["evidence"]["path"],
-            "recommended_command": "tokenzero doctor --dry-run --fix --json"
-        }]))
+        .map(|finding| {
+            serde_json::json!([{
+                "fixer_id": DOCTOR_FIXER_CACHE_PARENT,
+                "finding_id": DOCTOR_FIXER_CACHE_PARENT,
+                "description": "create missing cache parent directory",
+                "path": finding["evidence"]["path"],
+                "recommended_command": "tokenzero doctor --dry-run --fix --json"
+            }])
+        })
         .unwrap_or_else(|| serde_json::json!([]));
     let recommended_command = if actions_planned.as_array().is_some_and(|v| !v.is_empty()) {
         "tokenzero doctor --dry-run --fix --json"
@@ -790,71 +854,48 @@ pub fn doctor_robot_triage(root: &Path, cache_path: Option<&Path>) -> serde_json
     })
 }
 
+const DOCTOR_ROBOT_DOCS: &[&str] = &[
+    "# TokenZero Doctor Robot Guide\n\nCanonical read-only commands:\n- `tokenzero doctor --json` diagnoses local root/cache/runtime health.\n",
+    "- `tokenzero doctor health` prints a one-line liveness summary.\n- `tokenzero doctor capabilities --json` prints the machine-readable doctor contract.\n- `tokenzero doctor explain <finding-id>` expands a current or known finding.\n- `tokenzero doctor --robot-triage --json` returns summary, findings, planned actions, and next command in one JSON object.\n",
+    "- `tokenzero doctor --dry-run --fix --json` plans the cache-parent repair without writing.\n- `tokenzero doctor --fix --json` creates the missing cache parent through the doctor mutate chokepoint.\n- `tokenzero doctor undo <run-id> --json` restores the cache-parent create-dir fixer when the directory is still empty.\n- `tokenzero doctor ls --json` lists local doctor run artifacts and undo commands.\n",
+    "\nEXIT CODES:\n- `0`: healthy or informational findings only.\n- `1`: blocking finding; parse `findings[]` and `next_steps[]`.\n",
+    "- `2`: fix partially completed.\n- `3`: fix rollback or undo failed.\n- `4`: unsafe or unsupported operation refused.\n- `5`: another doctor process holds the mutation lock.\n",
+    "- `6`: explicit `--online` consent is required.\n- `64`: usage error.\n- `66`: no usable input path.\n- `73`: cannot create an output artifact.\n",
+    "- `74`: read-only diagnosis hit an I/O error.\n\nJSON contract:\n- Stdout is data only for `--json` commands.\n",
+    "- Stderr is empty unless process-level errors occur.\n- Every JSON object includes `schema_version`.\n- `capabilities.detectors[]` is the source of known finding ids.\n\n",
+    "This doctor will NEVER do:\n- mutate project state during diagnose, health, capabilities, robot-docs, explain, or robot-triage.\n- run network probes by default.\n- edit cache contents; the only current fixer creates a missing cache parent directory.\n",
+    "- write outside declared `write_scopes`.\n\nNext move for agents:\n1. Run `tokenzero doctor --json`.\n",
+    "2. If `tz-cache-parent-missing` is present with `fix_supported=true`, run `tokenzero doctor --dry-run --fix --json`.\n3. Use `tokenzero doctor explain <finding-id>` for evidence and remediation detail.\n4. After `--fix`, save the returned `run_id`; use `tokenzero doctor undo <run-id> --json` to restore.\n",
+];
+
 pub fn doctor_robot_docs() -> String {
-    String::from(r###"# TokenZero Doctor Robot Guide
-
-Canonical read-only commands:
-- `tokenzero doctor --json` diagnoses local root/cache/runtime health.
-- `tokenzero doctor health` prints a one-line liveness summary.
-- `tokenzero doctor capabilities --json` prints the machine-readable doctor contract.
-- `tokenzero doctor explain <finding-id>` expands a current or known finding.
-- `tokenzero doctor --robot-triage --json` returns summary, findings, planned actions, and next command in one JSON object.
-- `tokenzero doctor --dry-run --fix --json` plans the cache-parent repair without writing.
-- `tokenzero doctor --fix --json` creates the missing cache parent through the doctor mutate chokepoint.
-- `tokenzero doctor undo <run-id> --json` restores the cache-parent create-dir fixer when the directory is still empty.
-- `tokenzero doctor ls --json` lists local doctor run artifacts and undo commands.
-
-EXIT CODES:
-- `0`: healthy or informational findings only.
-- `1`: blocking finding; parse `findings[]` and `next_steps[]`.
-- `2`: fix partially completed.
-- `3`: fix rollback or undo failed.
-- `4`: unsafe or unsupported operation refused.
-- `5`: another doctor process holds the mutation lock.
-- `6`: explicit `--online` consent is required.
-- `64`: usage error.
-- `66`: no usable input path.
-- `73`: cannot create an output artifact.
-- `74`: read-only diagnosis hit an I/O error.
-
-JSON contract:
-- Stdout is data only for `--json` commands.
-- Stderr is empty unless process-level errors occur.
-- Every JSON object includes `schema_version`.
-- `capabilities.detectors[]` is the source of known finding ids.
-
-This doctor will NEVER do:
-- mutate project state during diagnose, health, capabilities, robot-docs, explain, or robot-triage.
-- run network probes by default.
-- edit cache contents; the only current fixer creates a missing cache parent directory.
-- write outside declared `write_scopes`.
-
-Next move for agents:
-1. Run `tokenzero doctor --json`.
-2. If `tz-cache-parent-missing` is present with `fix_supported=true`, run `tokenzero doctor --dry-run --fix --json`.
-3. Use `tokenzero doctor explain <finding-id>` for evidence and remediation detail.
-4. After `--fix`, save the returned `run_id`; use `tokenzero doctor undo <run-id> --json` to restore.
-"###)
+    DOCTOR_ROBOT_DOCS.concat()
 }
 
-pub(crate) fn known_doctor_finding(finding_id: &str) -> Option<serde_json::Value> {
-    KNOWN_DOCTOR_FINDINGS.iter().find(|(id, ..)| *id == finding_id).map(
-        |(id, severity, check, summary, command, auto_fixable, reason)| {
-            serde_json::json!({
-                "id": id, "severity": severity, "check": check, "summary": summary,
-                "remediation": { "command": command, "auto_fixable": auto_fixable, "reason": reason }
-            })
-        },
-    )
+fn doctor_finding_spec(finding_id: &str) -> Option<&'static [&'static str; 8]> {
+    KNOWN_DOCTOR_FINDINGS
+        .iter()
+        .find(|spec| spec[0] == finding_id)
+}
+
+pub(crate) fn known_doctor_finding(finding_id: &str) -> Option<Value> {
+    doctor_finding_spec(finding_id).map(|spec| serde_json::json!({
+        "id": spec[0], "severity": spec[1], "check": spec[2], "summary": spec[3],
+        "remediation": { "command": spec[5], "auto_fixable": spec[6] == "true", "reason": spec[7] }
+    }))
 }
 
 fn doctor_finding(
-    id: &str, severity: &str, check: &str, summary: &str, evidence: Value,
-    auto_fix: bool, fix_supported: bool, recommended_argv: Option<Value>, next_step: &str,
+    id: &str,
+    evidence: Value,
+    auto_fix: bool,
+    fix_supported: bool,
+    recommended_argv: Option<Value>,
 ) -> Value {
+    let spec = doctor_finding_spec(id).expect("doctor finding must be declared");
     let mut value = serde_json::json!({
-        "id": id, "severity": severity, "status": "detected", "check": check, "summary": summary,
-        "evidence": evidence, "auto_fix": auto_fix, "fix_supported": fix_supported, "next_step": next_step
+        "id": id, "severity": spec[1], "status": "detected", "check": spec[2], "summary": spec[3],
+        "evidence": evidence, "auto_fix": auto_fix, "fix_supported": fix_supported, "next_step": spec[4]
     });
     if let Some(argv) = recommended_argv {
         value["recommended_argv"] = argv;
@@ -871,19 +912,17 @@ fn doctor_next_step(action: &str, command: &str, reason: &str) -> Value {
 }
 
 fn finding_is_error(finding: &Value) -> bool {
-    finding.get("severity").and_then(Value::as_str).is_some_and(|severity| severity == "error")
+    finding
+        .get("severity")
+        .and_then(Value::as_str)
+        .is_some_and(|severity| severity == "error")
 }
 
 pub(crate) const DOCTOR_CONTRACT_VERSION: &str = "1.2";
 pub(crate) const DOCTOR_FIXER_CACHE_PARENT: &str = "tz-cache-parent-missing";
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub(crate) struct DoctorActionRecord {
-    pub(crate) schema_version: String, pub(crate) path: String, pub(crate) op: String,
-    pub(crate) before_hash: String, pub(crate) after_hash: String,
-    pub(crate) before_exists: bool, pub(crate) after_exists: bool,
-    pub(crate) run_id: String, pub(crate) fixer_id: String, pub(crate) ok: bool,
-    pub(crate) backup_path: Option<String>, pub(crate) quarantine_path: Option<String>,
+install_records! {
+    pub(crate) struct DoctorActionRecord { pub(crate) schema_version: String, pub(crate) path: String, pub(crate) op: String, pub(crate) before_hash: String, pub(crate) after_hash: String, pub(crate) before_exists: bool, pub(crate) after_exists: bool, pub(crate) run_id: String, pub(crate) fixer_id: String, pub(crate) ok: bool, pub(crate) backup_path: Option<String>, pub(crate) quarantine_path: Option<String> }
 }
 
 pub(crate) struct DoctorLock {
@@ -895,7 +934,12 @@ impl DoctorLock {
         let lock_dir = root.join(".doctor");
         fs::create_dir_all(&lock_dir)?;
         let lock_path = lock_dir.join("doctor.lock");
-        let mut file = fs::OpenOptions::new().read(true).write(true).create(true).truncate(false).open(&lock_path)?;
+        let mut file = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(&lock_path)?;
         match FileExt::try_lock(&file) {
             Ok(()) => {
                 file.set_len(0)?;
@@ -919,15 +963,21 @@ impl Drop for DoctorLock {
 }
 
 pub(crate) fn doctor_cache_path(root: &Path, cache_path: Option<&Path>) -> PathBuf {
-    cache_path.map(PathBuf::from).unwrap_or_else(|| root.join(".tokenzero/recovery-cache.json"))
+    cache_path
+        .map(PathBuf::from)
+        .unwrap_or_else(|| root.join(".tokenzero/recovery-cache.json"))
 }
 
 pub(crate) fn doctor_cache_parent(root: &Path, cache_path: Option<&Path>) -> Option<PathBuf> {
-    doctor_cache_path(root, cache_path).parent().map(Path::to_path_buf)
+    doctor_cache_path(root, cache_path)
+        .parent()
+        .map(Path::to_path_buf)
 }
 
 pub(crate) fn doctor_cache_parent_fixable(root: &Path, cache_parent: Option<&Path>) -> bool {
-    let Some(cache_parent) = cache_parent else { return false; };
+    let Some(cache_parent) = cache_parent else {
+        return false;
+    };
     root.exists()
         && root.is_dir()
         && !cache_parent.exists()
@@ -936,7 +986,10 @@ pub(crate) fn doctor_cache_parent_fixable(root: &Path, cache_parent: Option<&Pat
 }
 
 pub(crate) fn doctor_rel_path(root: &Path, path: &Path) -> String {
-    path.strip_prefix(root).unwrap_or(path).to_string_lossy().replace('\\', "/")
+    path.strip_prefix(root)
+        .unwrap_or(path)
+        .to_string_lossy()
+        .replace('\\', "/")
 }
 
 pub(crate) fn doctor_run_id(root: &Path, cache: &Path) -> String {

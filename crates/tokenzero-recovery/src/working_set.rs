@@ -108,8 +108,11 @@ impl PrefetchHook for SameFileNeighborPrefetch {
             .iter()
             .filter(|candidate| candidate.anchor.path == fault.path)
             .min_by_key(|candidate| {
-                let distance = candidate.anchor.start_line.saturating_sub(fault.end_line)
-                                    .max(fault.start_line.saturating_sub(candidate.anchor.end_line));
+                let distance = candidate
+                    .anchor
+                    .start_line
+                    .saturating_sub(fault.end_line)
+                    .max(fault.start_line.saturating_sub(candidate.anchor.end_line));
                 (distance, candidate.id)
             })
             .map(|candidate| PrefetchHint {
@@ -369,10 +372,12 @@ impl WorkingSet {
     }
 
     fn refresh_rates(&mut self) {
-            self.telemetry.fault_rate = (self.telemetry.lookups != 0)
-                .then(|| self.telemetry.faults as f64 / self.telemetry.lookups as f64)
-                .unwrap_or_default();
-        }
+        self.telemetry.fault_rate = if self.telemetry.lookups != 0 {
+            self.telemetry.faults as f64 / self.telemetry.lookups as f64
+        } else {
+            0.0
+        };
+    }
 
     fn queue_prefetch_hints(&mut self, fault: &SpanAnchor, fault_id: u64, fault_ref: &str) {
         let candidates = self
@@ -398,13 +403,13 @@ impl WorkingSet {
     }
 
     fn remove_evicted_ref(&mut self, ref_id: &str, id: u64) {
-            if self.evicted_refs.get_mut(ref_id).is_some_and(|ids| {
-                ids.retain(|candidate| *candidate != id);
-                ids.is_empty()
-            }) {
-                self.evicted_refs.remove(ref_id);
-            }
+        if self.evicted_refs.get_mut(ref_id).is_some_and(|ids| {
+            ids.retain(|candidate| *candidate != id);
+            ids.is_empty()
+        }) {
+            self.evicted_refs.remove(ref_id);
         }
+    }
 
     fn enforce_budget(
         &mut self,
@@ -446,8 +451,8 @@ impl WorkingSet {
                 };
                 (text, &span.anchor, span.id)
             };
-            let ref_id = store.store_blob(&bytes, ContentType::Unknown)?;
-            let replacement = format_ref_line(ref_id.clone(), &anchor);
+            let ref_id = store.store_blob(bytes, ContentType::Unknown)?;
+            let replacement = format_ref_line(ref_id.clone(), anchor);
             let bytes_evicted = bytes.len();
             self.spans[victim].body = SpanBody::Evicted {
                 ref_id: ref_id.clone(),

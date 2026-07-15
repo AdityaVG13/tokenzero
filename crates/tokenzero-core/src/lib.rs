@@ -10,64 +10,64 @@ pub const MCP_SCHEMA_VERSION: &str = "tokenzero.mcp.v1";
 pub const INSTALL_SCHEMA_VERSION: &str = "tokenzero.install_plan.v1";
 pub const PULSE_SCHEMA_VERSION: &str = "tokenzero.pulse.v1";
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum Mode {
-    #[default]
-    Auto,
-    Passthrough,
-    Diagnostic,
-    Structured,
-    Dedupe,
-    DiffAware,
-    Exact,
-    Hybrid,
-    Critical,
-    Fidelity,
+macro_rules! string_enum {
+    ($(#[$meta:meta])* $vis:vis enum $name:ident, $as_vis:vis as_str {
+        $($(#[$variant_meta:meta])* $variant:ident => $text:literal),+ $(,)?
+    }) => {
+        $(#[$meta])*
+        $vis enum $name { $($(#[$variant_meta])* $variant),+ }
+
+        impl $name {
+            $as_vis fn as_str(self) -> &'static str {
+                match self { $(Self::$variant => $text),+ }
+            }
+        }
+
+        impl fmt::Display for $name {
+            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                f.write_str(self.as_str())
+            }
+        }
+    };
+}
+
+string_enum! {
+    #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+    #[serde(rename_all = "lowercase")]
+    pub enum Mode, as_str {
+        #[default] Auto => "auto",
+        Passthrough => "passthrough",
+        Diagnostic => "diagnostic",
+        Structured => "structured",
+        Dedupe => "dedupe",
+        DiffAware => "diff-aware",
+        Exact => "exact",
+        Hybrid => "hybrid",
+        Critical => "critical",
+        Fidelity => "fidelity",
+    }
 }
 
 impl std::str::FromStr for Mode {
     type Err = String;
-
-    fn from_str(value: &str) -> Result<Self, Self::Err> {
-        match value {
-            "auto" => Ok(Self::Auto),
-            "passthrough" => Ok(Self::Passthrough),
-            "diagnostic" => Ok(Self::Diagnostic),
-            "structured" => Ok(Self::Structured),
-            "dedupe" => Ok(Self::Dedupe),
-            "diff-aware" | "diff_aware" | "diffaware" => Ok(Self::DiffAware),
-            "hybrid" => Ok(Self::Auto),
-            "critical" => Ok(Self::Diagnostic),
-            "fidelity" => Ok(Self::Structured),
-            "exact" => Ok(Self::Exact),
-            other => Err(format!("unsupported mode: {other}")),
-        }
-    }
-}
-
-impl fmt::Display for Mode {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(self.as_str())
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        const MAP: &[(&[&str], Mode)] = &[
+            (&["auto", "hybrid"], Mode::Auto),
+            (&["passthrough"], Mode::Passthrough),
+            (&["diagnostic", "critical"], Mode::Diagnostic),
+            (&["structured", "fidelity"], Mode::Structured),
+            (&["dedupe"], Mode::Dedupe),
+            (&["diff-aware", "diff_aware", "diffaware"], Mode::DiffAware),
+            (&["exact"], Mode::Exact),
+        ];
+        MAP.iter()
+            .find(|(aliases, _)| aliases.contains(&s))
+            .map(|(_, m)| *m)
+            .ok_or_else(|| format!("unsupported mode: {s}"))
     }
 }
 
 impl Mode {
-    fn as_str(self) -> &'static str {
-        match self {
-            Self::Auto => "auto",
-            Self::Passthrough => "passthrough",
-            Self::Diagnostic => "diagnostic",
-            Self::Structured => "structured",
-            Self::Dedupe => "dedupe",
-            Self::DiffAware => "diff-aware",
-            Self::Exact => "exact",
-            Self::Hybrid => "hybrid",
-            Self::Critical => "critical",
-            Self::Fidelity => "fidelity",
-        }
-    }
-
     pub fn effective_policy(self) -> Self {
         match self {
             Self::Hybrid => Self::Auto,
@@ -78,32 +78,23 @@ impl Mode {
     }
 }
 
-/// MCP launch-mode selected tool surface. Classic is the default per-op MCP catalog;
-/// CodeMode exposes only the three contract tools.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum McpToolSurface {
-    #[default]
-    Classic,
-    CodeMode,
+string_enum! {
+    #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+    #[serde(rename_all = "lowercase")]
+    pub enum McpToolSurface, pub as_str {
+        #[default] Classic => "mcp",
+        CodeMode => "codemode",
+    }
 }
 
 impl McpToolSurface {
     pub const ENV: &'static str = "TOKENZERO_MCP_TOOL_SURFACE";
-
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Classic => "mcp",
-            Self::CodeMode => "codemode",
-        }
-    }
 }
 
 impl std::str::FromStr for McpToolSurface {
     type Err = String;
-
-    fn from_str(value: &str) -> Result<Self, Self::Err> {
-        match value
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s
             .trim()
             .to_ascii_lowercase()
             .replace(['_', ' '], "-")
@@ -118,40 +109,44 @@ impl std::str::FromStr for McpToolSurface {
     }
 }
 
-impl fmt::Display for McpToolSurface {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(self.as_str())
+string_enum! {
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+    #[serde(rename_all = "snake_case")]
+    pub enum ContentType, as_str {
+        Code => "code",
+        ShellOutput => "shell_output",
+        SearchResult => "search_result",
+        Tree => "tree",
+        Diff => "diff",
+        JsonConfig => "json_config",
+        Markdown => "markdown",
+        Logs => "logs",
+        Unknown => "unknown",
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ContentType {
-    Code,
-    ShellOutput,
-    SearchResult,
-    Tree,
-    Diff,
-    JsonConfig,
-    Markdown,
-    Logs,
-    Unknown,
+/// Returns true if `haystack` starts with any pipe-delimited prefix.
+pub(crate) fn starts_with_any(h: &str, p: &str) -> bool {
+    p.split('|').any(|n| h.starts_with(n))
 }
 
-impl fmt::Display for ContentType {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(match self {
-            Self::Code => "code",
-            Self::ShellOutput => "shell_output",
-            Self::SearchResult => "search_result",
-            Self::Tree => "tree",
-            Self::Diff => "diff",
-            Self::JsonConfig => "json_config",
-            Self::Markdown => "markdown",
-            Self::Logs => "logs",
-            Self::Unknown => "unknown",
-        })
-    }
+/// Returns true if `haystack` ends with any pipe-delimited suffix.
+pub(crate) fn ends_with_any(h: &str, p: &str) -> bool {
+    p.split('|').any(|n| h.ends_with(n))
+}
+
+/// Returns true if `haystack` contains any pipe-delimited needle.
+pub(crate) fn contains_any(h: &str, p: &str) -> bool {
+    p.split('|').any(|n| h.contains(n))
+}
+
+/// Returns true if `haystack` contains any whitespace-delimited needle.
+pub(crate) fn contains_any_ws(h: &str, n: &str) -> bool {
+    n.split_whitespace().any(|w| h.contains(w))
+}
+
+pub(crate) fn is_one_of(value: &str, choices: &str) -> bool {
+    choices.split_whitespace().any(|choice| value == choice)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -182,7 +177,6 @@ impl Accounting {
     pub fn visible_savings_ratio(&self) -> f64 {
         savings_ratio(self.raw_tokens, self.visible_tokens)
     }
-
     pub fn recovery_adjusted_savings_ratio(&self) -> f64 {
         savings_ratio(self.raw_tokens, self.visible_tokens + self.recovery_tokens)
     }
@@ -204,7 +198,7 @@ pub struct CliError {
     pub repair: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct ToolResponse {
     pub schema_version: String,
     pub status: String,
@@ -235,15 +229,7 @@ impl ToolResponse {
             schema_version: CLI_SCHEMA_VERSION.to_string(),
             status: status.to_string(),
             tool: tool.into(),
-            mode: None,
-            visible: None,
-            refs: Vec::new(),
-            accounting: None,
-            diagnostic: None,
-            error: None,
-            content_type: None,
-            telemetry: None,
-            safety: None,
+            ..Self::default()
         }
     }
 
@@ -312,78 +298,58 @@ pub fn make_capsule_with_raw_tokens(
     make_capsule_with_recovery_ref(text, raw_tokens, mode, max_visible_tokens, label, None)
 }
 
-/// `make_capsule_with_raw_tokens` plus a recovery cue: when the payload's
-/// exact ref is already known, budget truncation names it inline so the
-/// agent can recover without consulting the response's refs footer.
+/// Adds an inline exact-ref recovery cue to a token-budgeted capsule.
 pub fn make_capsule_with_recovery_ref(
     text: &str,
     raw_tokens: usize,
     mode: Mode,
-    max_visible_tokens: usize,
+    max_tokens: usize,
     label: Option<&str>,
     recovery_ref: Option<&str>,
 ) -> Capsule {
-    let line_count = text.lines().count();
-    let prefix = capsule_prefix(label, max_visible_tokens, raw_tokens);
+    let prefix = capsule_prefix(label, max_tokens, raw_tokens);
     let policy = mode.effective_policy();
-    let visible = match policy {
+    let mut visible = match policy {
         Mode::Exact => format!("{prefix}[exact payload stored; use expand for raw bytes]"),
         Mode::Passthrough => format!("{prefix}{}", text.trim_end()),
-        Mode::Diagnostic => {
-            let block = error_block(text, 3);
-            if block.trim().is_empty() {
-                summarize_lines(text, 8, 6, &prefix)
-            } else {
-                format!("{prefix}{}", block.trim_end())
-            }
-        }
+        Mode::Diagnostic => match error_block(text, 3) {
+            b if b.trim().is_empty() => summarize_lines(text, 8, 6, &prefix),
+            b => format!("{prefix}{}", b.trim_end()),
+        },
         Mode::Structured => summarize_lines(text, 24, 16, &prefix),
         Mode::Dedupe => format!("{prefix}{}", dedupe_lines(text, 8).trim_end()),
         Mode::DiffAware => format!("{prefix}{}", diff_summary(text, 120).trim_end()),
-        Mode::Auto => {
-            if max_visible_tokens == 0 || raw_tokens <= max_visible_tokens {
-                format!("{prefix}{}", text.trim_end())
-            } else {
-                summarize_lines(text, 18, 12, &prefix)
-            }
+        Mode::Auto if max_tokens == 0 || raw_tokens <= max_tokens => {
+            format!("{prefix}{}", text.trim_end())
         }
-        Mode::Hybrid | Mode::Critical | Mode::Fidelity => unreachable!("legacy modes are mapped"),
+        Mode::Auto => summarize_lines(text, 18, 12, &prefix),
+        _ => unreachable!(),
     };
-    let visible = if policy == Mode::Passthrough {
-        visible
-    } else {
-        enforce_token_budget_with_ref(&visible, max_visible_tokens, recovery_ref)
-    };
+    if policy != Mode::Passthrough {
+        visible = enforce_token_budget_with_ref(&visible, max_tokens, recovery_ref);
+    }
     let mut visible_tokens = count_tokens(&visible);
-    // Adaptive floor: a capsule must never cost more than the raw text it
-    // wraps. When framing overhead exceeds the savings (small payloads), fall
-    // back to the raw text; exact refs still provide recovery either way.
-    // Exact mode is excluded because hiding the payload is its contract.
-    let raw_fits_budget = max_visible_tokens == 0 || raw_tokens <= max_visible_tokens;
-    let visible = if policy != Mode::Exact && raw_fits_budget && visible_tokens > raw_tokens {
+    if policy != Mode::Exact
+        && (max_tokens == 0 || raw_tokens <= max_tokens)
+        && visible_tokens > raw_tokens
+    {
         let fallback = text.trim_end().to_string();
         let fallback_tokens = count_tokens(&fallback);
         if fallback_tokens < visible_tokens {
             visible_tokens = fallback_tokens;
-            fallback
-        } else {
-            visible
+            visible = fallback;
         }
-    } else {
-        visible
-    };
+    }
     Capsule {
         visible_tokens,
         raw_tokens,
-        omitted_lines: line_count.saturating_sub(visible.lines().count()),
+        omitted_lines: text.lines().count().saturating_sub(visible.lines().count()),
         text: visible,
         mode,
     }
 }
 
-/// Content-type-aware capsule creation. Uses domain knowledge to produce
-/// a more useful visible summary while guaranteeing byte-exact recovery
-/// through the provided `recovery_ref`.
+/// Creates a domain-aware summary with byte-exact recovery via `recovery_ref`.
 pub fn make_capsule_content_aware(
     text: &str,
     raw_tokens: usize,
@@ -429,13 +395,13 @@ pub fn make_capsule_content_aware(
 }
 
 /// Summarize code: show first N lines (imports/signatures) + last M lines.
-const CODE_SIG_PREFIXES: &[&str] = &[
-    "pub ", "fn ", "struct ", "enum ", "impl ", "trait ", "class ", "def ", "function ",
-    "export ", "import ", "use ", "#[",
-];
+const CODE_SIG_PREFIXES: &str =
+    "pub |fn |struct |enum |impl |trait |class |def |function |export |import |use |#[";
 
 fn push_labeled_lines(out: &mut String, label: &str, lines: &[&str], limit: usize) {
-    if lines.is_empty() { return; }
+    if lines.is_empty() {
+        return;
+    }
     out.push_str(label);
     for line in lines.iter().take(limit) {
         out.push_str(line);
@@ -449,82 +415,78 @@ fn summarize_code(text: &str, budget_tokens: usize, prefix: &str) -> String {
     if total <= 30 {
         return format!("{prefix}{}", text.trim_end());
     }
-    // Show signatures/declarations and tail
-    let sig_lines: Vec<&str> = lines
+    let sigs: Vec<&str> = lines
         .iter()
         .take(total.min(80))
-        .filter(|l| {
-            let t = l.trim();
-            CODE_SIG_PREFIXES.iter().any(|p| t.starts_with(p))
-        })
+        .filter(|l| starts_with_any(l.trim(), CODE_SIG_PREFIXES))
         .copied()
         .collect();
     let head = 8.min(total);
     let tail = 6.min(total.saturating_sub(head));
-    let mut out = String::new();
-    out.push_str(prefix);
-    out.push_str(&lines[..head].join("\n"));
+    let mut out = format!("{prefix}{}", lines[..head].join("\n"));
     push_labeled_lines(
-        &mut out, "\n\n# declarations/signatures:\n", &sig_lines, budget_tokens / 8,
+        &mut out,
+        "\n\n# declarations/signatures:\n",
+        &sigs,
+        budget_tokens / 8,
     );
-    out.push_str(&format!(
-        "\n... omitted {} lines; exact ref available ...\n\n",
-        total.saturating_sub(head + tail)
-    ));
-    out.push_str(&lines[total - tail..].join("\n"));
-    out
+    out.push_str(&omitted_lines_marker(total.saturating_sub(head + tail)));
+    out + &lines[total - tail..].join("\n")
 }
 
 /// Summarize logs: prioritize errors/warnings, then head+tail.
-const LOG_ERROR_NEEDLES: &[&str] = &["error", "fatal", "panic", "failed", "traceback"];
+const LOG_ERROR_NEEDLES: &str = "error fatal panic failed traceback";
 
 fn summarize_logs(text: &str, budget_tokens: usize, prefix: &str) -> String {
     let lines: Vec<&str> = text.lines().collect();
-    let total = lines.len();
-    let (mut error_lines, mut warning_lines) = (Vec::new(), Vec::new());
-    for line in &lines {
-        let lower = line.to_ascii_lowercase();
-        if LOG_ERROR_NEEDLES.iter().any(|needle| lower.contains(needle)) {
-            error_lines.push(*line);
-        }
-        if lower.contains("warn") && !lower.contains("error") {
-            warning_lines.push(*line);
+    let (mut errs, mut warns) = (Vec::new(), Vec::new());
+    for l in &lines {
+        let low = l.to_ascii_lowercase();
+        if contains_any_ws(&low, LOG_ERROR_NEEDLES) {
+            errs.push(*l);
+        } else if low.contains("warn") {
+            warns.push(*l);
         }
     }
-    let max_entries = budget_tokens / 6;
-    let mut out = String::new();
-    out.push_str(prefix);
+    let mut out = prefix.to_string();
+    let limit = budget_tokens / 6;
     push_labeled_lines(
-        &mut out, &format!("# {} error(s):\n", error_lines.len()),
-        &error_lines, max_entries,
+        &mut out,
+        &format!("# {} error(s):\n", errs.len()),
+        &errs,
+        limit,
     );
     push_labeled_lines(
-        &mut out, &format!("# {} warning(s):\n", warning_lines.len()),
-        &warning_lines, max_entries / 2,
+        &mut out,
+        &format!("# {} warning(s):\n", warns.len()),
+        &warns,
+        limit / 2,
     );
-    if error_lines.is_empty() && warning_lines.is_empty() {
-        let head = 6.min(total);
-        let tail = 4.min(total.saturating_sub(head));
+    if errs.is_empty() && warns.is_empty() {
+        let head = 6.min(lines.len());
+        let tail = 4.min(lines.len().saturating_sub(head));
         out.push_str(&lines[..head].join("\n"));
-        if total > head + tail {
+        if lines.len() > head + tail {
             out.push_str(&format!(
                 "\n... omitted {} lines ...\n",
-                total.saturating_sub(head + tail)
+                lines.len().saturating_sub(head + tail)
             ));
         }
         if tail > 0 {
-            out.push_str(&lines[total - tail..].join("\n"));
+            out.push_str(&lines[lines.len() - tail..].join("\n"));
         }
     } else {
-        out.push_str(&format!("# {total} total lines; exact ref available"));
+        out.push_str(&format!(
+            "# {} total lines; exact ref available",
+            lines.len()
+        ));
     }
     out
 }
 
 /// Summarize JSON: show schema shape (keys, types, array lengths).
 fn summarize_json(text: &str, _budget_tokens: usize, prefix: &str) -> String {
-    let mut out = String::new();
-    out.push_str(prefix);
+    let mut out = prefix.to_string();
     match serde_json::from_str::<serde_json::Value>(text.trim()) {
         Ok(serde_json::Value::Object(map)) => {
             out.push_str(&format!("json_object: {} keys\n", map.len()));
@@ -541,22 +503,17 @@ fn summarize_json(text: &str, _budget_tokens: usize, prefix: &str) -> String {
         Ok(serde_json::Value::Array(items)) => {
             out.push_str(&format!("json_array: {} items\n", items.len()));
             if let Some(first) = items.first() {
-                out.push_str(&format!(
-                    "  sample: {}\n",
-                    serde_json::to_string(first)
-                        .unwrap_or_default()
-                        .chars()
-                        .take(200)
-                        .collect::<String>()
-                ));
+                let sample: String = serde_json::to_string(first)
+                    .unwrap_or_default()
+                    .chars()
+                    .take(200)
+                    .collect();
+                out.push_str(&format!("  sample: {sample}\n"));
             }
         }
-        _ => {
-            return summarize_lines(text, 12, 8, prefix);
-        }
+        _ => return summarize_lines(text, 12, 8, prefix),
     }
-    out.push_str("# exact ref available for full content");
-    out
+    out + "# exact ref available for full content"
 }
 
 pub fn summarize_lines(text: &str, head: usize, tail: usize, prefix: &str) -> String {
@@ -566,7 +523,8 @@ pub fn summarize_lines(text: &str, head: usize, tail: usize, prefix: &str) -> St
     }
     format!(
         "{prefix}{}\n\n... omitted {} lines; exact ref available ...\n\n{}",
-        lines[..head].join("\n"), lines.len().saturating_sub(head + tail),
+        lines[..head].join("\n"),
+        lines.len().saturating_sub(head + tail),
         lines[lines.len() - tail..].join("\n"),
     )
 }
@@ -579,34 +537,29 @@ fn capsule_prefix(label: Option<&str>, max_visible_tokens: usize, raw_tokens: us
     if max_visible_tokens == 0 {
         return full;
     }
-    let label_budget = max_visible_tokens.saturating_sub(raw_tokens).max(4);
-    if count_tokens(&full) <= label_budget {
+    let budget = max_visible_tokens.saturating_sub(raw_tokens).max(4);
+    if count_tokens(&full) <= budget {
         return full;
     }
-    let compact = compact_label(label);
-    let compact_prefix = format!("# {compact}\n");
-    if count_tokens(&compact_prefix) <= label_budget
-        || count_tokens(&compact_prefix) < count_tokens(&full)
-    {
-        return compact_prefix;
+    let compact = format!("# {}\n", compact_label(label));
+    if count_tokens(&compact) <= budget || count_tokens(&compact) < count_tokens(&full) {
+        compact
+    } else {
+        "# source\n".to_string()
     }
-    "# source\n".to_string()
 }
 
 fn compact_label(label: &str) -> String {
-    let path = Path::new(label);
-    if label.contains('\\') || label.contains('/') {
-        if let Some(name) = path.file_name().and_then(|name| name.to_str()) {
+    if label.contains(['\\', '/']) {
+        if let Some(name) = Path::new(label).file_name().and_then(|name| name.to_str()) {
             return format!(".../{name}");
         }
     }
     let mut chars = label.chars();
-    let head = chars.by_ref().take(48).collect::<String>();
-    if chars.next().is_some() {
-        format!("{head}...")
-    } else {
-        label.to_string()
-    }
+    let head: String = chars.by_ref().take(48).collect();
+    chars
+        .next()
+        .map_or_else(|| label.to_string(), |_| format!("{head}..."))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -652,14 +605,34 @@ pub struct ShellRenderInput<'a> {
     pub combined_ref: Option<&'a str>,
 }
 
-pub fn render_shell(input: ShellRenderInput<'_>) -> ShellRender {
-    let status = classify_command_status(
+fn shell_input_status(input: &ShellRenderInput<'_>) -> CommandStatus {
+    classify_command_status(
         input.command,
         input.stdout,
         input.stderr,
         input.exit_code,
         input.timed_out,
-    );
+    )
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ShellViewCase {
+    CompactTiny,
+    CompactDiagnostic,
+    CompactInventory,
+    PolicyBased,
+}
+
+struct ShellRenderContext<'a> {
+    policy: &'a PolicyDecision,
+    status: &'a CommandStatus,
+    combined: &'a str,
+    combined_tokens: usize,
+    max_tokens: usize,
+}
+
+pub fn render_shell(input: ShellRenderInput<'_>) -> ShellRender {
+    let status = shell_input_status(&input);
     let policy = decide_shell_policy(
         input.command,
         input.stdout,
@@ -669,175 +642,210 @@ pub fn render_shell(input: ShellRenderInput<'_>) -> ShellRender {
     );
     let combined =
         shell_combined_output(input.command, input.exit_code, input.stdout, input.stderr);
-    // Pre-compute line counts so we don't re-scan combined/visible later.
-    let combined_line_count = combined.lines().count();
-    let combined_tokens = count_tokens(&combined);
-    let mut minimal_envelope = false;
-    let mut success_compacted = false;
-    let compact_passthrough = should_compact_tiny_shell(&input, &policy, &status);
-    let compact_diagnostic =
-        should_compact_short_failure_shell(&input, &policy, &status, &combined);
-    let compact_inventory = should_compact_repo_inventory_shell(&input, &policy, &status);
-    let body = if compact_passthrough {
-        compact_shell_view(input.stdout)
-    } else if compact_diagnostic {
-        compact_diagnostic_shell_view(input.stdout, input.stderr)
-    } else if compact_inventory {
-        compact_repo_inventory_view(input.command, input.stdout)
-    } else if policy.policy == "exact" || policy.policy == "passthrough" {
-        // Move combined directly into body — no clone needed.
-        combined
+    let (combined_line_count, combined_tokens) =
+        (combined.lines().count(), count_tokens(&combined));
+    let (mut minimal_envelope, mut success_compacted) = (false, false);
+    let max_t = input.max_visible_tokens;
+    let cp = should_compact_tiny_shell(&input, &policy, &status);
+    let cd = should_compact_short_failure_shell(&input, &policy, &status, &combined);
+    let ci = should_compact_repo_inventory_shell(&input, &policy, &status);
+    let case = if cp {
+        ShellViewCase::CompactTiny
+    } else if cd {
+        ShellViewCase::CompactDiagnostic
+    } else if ci {
+        ShellViewCase::CompactInventory
     } else {
-        match policy.policy.as_str() {
-            "diagnostic" => {
-                diagnostic_shell_view(input.stdout, input.stderr, input.max_visible_tokens)
-            }
-            "structured" => structured_shell_view(input.command, input.stdout, input.stderr),
-            "dedupe" => dedupe_lines_structural(&combined, 6),
-            "diff-aware" => diff_summary(&combined, 160),
-            _ => summarize_lines(&combined, 18, 12, ""),
-        }
+        ShellViewCase::PolicyBased
     };
-    // Success-noise compaction: when a command verifiably succeeded and its
-    // exact bytes are recoverable, replace boilerplate-heavy bodies with a
-    // denser candidate. Candidates only win when strictly cheaper, and every
-    // critical line (error/warning/assertion evidence) is kept verbatim, so
-    // protected anchors survive. Failures, timeouts, masked pipelines, and
-    // explicit non-auto modes never enter this branch.
-    let body = if should_compact_success_noise(&input, &status)
-        && !compact_passthrough
-        && !compact_inventory
-        && policy.policy != "exact"
-    {
-        let mut best = body;
-        let mut best_tokens = count_tokens(&best);
-        if let Some(view) = success_noise_view(input.command, input.stdout, input.stderr) {
-            let view_tokens = count_tokens(&view);
-            // Adopt when strictly cheaper, or — for diagnostic-policy success
-            // bodies — when the family view sits far under raw cost: it keeps
-            // whole critical blocks verbatim where radius-based context both
-            // truncates anchors and retains adjacent noise.
-            let diagnostic_headroom =
-                policy.policy == "diagnostic" && view_tokens * 2 <= combined_tokens;
-            if view_tokens < best_tokens || diagnostic_headroom {
-                best = view;
-                best_tokens = view_tokens;
-                success_compacted = true;
-            }
-        }
-        // Search/json/diff bodies are requested content, not success noise:
-        // only boilerplate-prone policies get the token-aware squeeze.
-        let squeezable = matches!(
-            policy.policy.as_str(),
-            "dedupe" | "passthrough" | "diagnostic"
-        );
-        if squeezable && best_tokens > shell_success_summary_budget(input.max_visible_tokens) {
-            let squeezed = summarize_tokens(
-                &best,
-                shell_success_summary_budget(input.max_visible_tokens),
-                "",
-            );
-            if count_tokens(&squeezed) < best_tokens {
-                best = squeezed;
-                success_compacted = true;
-            }
-        }
-        best
-    } else {
-        body
+    let context = ShellRenderContext {
+        policy: &policy,
+        status: &status,
+        combined: &combined,
+        combined_tokens,
+        max_tokens: max_t,
     };
-    let body = if policy.policy == "exact" || policy.policy == "passthrough" {
-        body
-    } else {
-        mask_visible_secrets(&body)
-    };
-    let visible = if compact_passthrough {
-        body
-    } else if compact_diagnostic {
-        let visible = compact_diagnostic_shell_capsule(&input, &status, &body);
-        enforce_token_budget(&visible, input.max_visible_tokens)
-    } else if compact_inventory {
-        let visible = compact_repo_inventory_shell_capsule(&input, &body);
-        enforce_token_budget(&visible, input.max_visible_tokens)
-    } else {
-        let mut visible = format_shell_status_header(&input, &policy, &status, &body);
-        let header_dominates = count_tokens(&visible) > combined_tokens;
-        let minimal_eligible = input.mode.effective_policy() == Mode::Auto
-            && status.command_success
-            && !input.timed_out
-            && status.failed_segment.is_none()
-            && status.pipeline_masking_warning.is_none();
-        if (header_dominates || success_compacted) && minimal_eligible {
-            let minimal = format_minimal_shell_ok(input.combined_ref, &body);
-            if count_tokens(&minimal) < count_tokens(&visible) {
-                minimal_envelope = true;
-                visible = minimal;
-            }
-        }
-        enforce_token_budget(&visible, input.max_visible_tokens)
-    };
-    let visible_line_count = visible.lines().count();
+    let body = build_shell_body(case, &input, &context, &mut success_compacted);
+    let visible = finalize_shell_visible(
+        case,
+        &input,
+        &context,
+        &body,
+        success_compacted,
+        &mut minimal_envelope,
+    );
     ShellRender {
-        omitted_lines: combined_line_count.saturating_sub(visible_line_count),
+        omitted_lines: combined_line_count.saturating_sub(visible.lines().count()),
         visible,
         policy,
         command_status: status,
         diagnostics: Vec::new(),
-        output_strategy: shell_output_strategy(
-            compact_passthrough,
-            compact_diagnostic,
-            compact_inventory,
-            success_compacted,
-            minimal_envelope,
-        )
-        .to_string(),
+        output_strategy: shell_output_strategy(cp, cd, ci, success_compacted, minimal_envelope)
+            .to_string(),
     }
 }
 
-
-fn shell_output_strategy(
-    compact_passthrough: bool,
-    compact_diagnostic: bool,
-    compact_inventory: bool,
-    success_compacted: bool,
-    minimal_envelope: bool,
-) -> &'static str {
-    [
-        (compact_passthrough, "compact_adaptive_shell"),
-        (compact_diagnostic, "compact_diagnostic_shell"),
-        (compact_inventory, "compact_inventory_shell"),
-        (success_compacted, "compact_success_shell"),
-        (minimal_envelope, "minimal_envelope_shell"),
-    ].into_iter().find_map(|(active, name)| active.then_some(name))
-        .unwrap_or("exact_first_adaptive_shell")
+fn build_shell_body(
+    case: ShellViewCase,
+    input: &ShellRenderInput<'_>,
+    context: &ShellRenderContext<'_>,
+    success_compacted: &mut bool,
+) -> String {
+    let ShellRenderContext {
+        policy,
+        status,
+        combined,
+        combined_tokens,
+        max_tokens,
+    } = context;
+    let (combined_tokens, max_tokens) = (*combined_tokens, *max_tokens);
+    match case {
+        ShellViewCase::CompactTiny => compact_shell_view(input.stdout),
+        ShellViewCase::CompactDiagnostic => {
+            compact_diagnostic_shell_view(input.stdout, input.stderr)
+        }
+        ShellViewCase::CompactInventory => compact_repo_inventory_view(input.command, input.stdout),
+        ShellViewCase::PolicyBased => {
+            let mut body = if matches!(policy.policy.as_str(), "exact" | "passthrough") {
+                combined.to_string()
+            } else {
+                match policy.policy.as_str() {
+                    "diagnostic" => diagnostic_shell_view(input.stdout, input.stderr, max_tokens),
+                    "structured" => {
+                        structured_shell_view(input.command, input.stdout, input.stderr)
+                    }
+                    "dedupe" => dedupe_lines_impl(combined, 6, true),
+                    "diff-aware" => diff_summary(combined, 160),
+                    _ => summarize_lines(combined, 18, 12, ""),
+                }
+            };
+            if should_compact_success_noise(input, status) && policy.policy != "exact" {
+                let mut best_tokens = count_tokens(&body);
+                if let Some(view) = success_noise_view(input.command, input.stdout, input.stderr) {
+                    let view_tokens = count_tokens(&view);
+                    if view_tokens < best_tokens
+                        || (policy.policy == "diagnostic" && view_tokens * 2 <= combined_tokens)
+                    {
+                        body = view;
+                        best_tokens = view_tokens;
+                        *success_compacted = true;
+                    }
+                }
+                if matches!(
+                    policy.policy.as_str(),
+                    "dedupe" | "passthrough" | "diagnostic"
+                ) && best_tokens > shell_success_summary_budget(max_tokens)
+                {
+                    let squeezed =
+                        summarize_tokens(&body, shell_success_summary_budget(max_tokens), "");
+                    if count_tokens(&squeezed) < best_tokens {
+                        body = squeezed;
+                        *success_compacted = true;
+                    }
+                }
+            }
+            if policy.policy != "exact" && policy.policy != "passthrough" {
+                body = mask_visible_secrets(&body);
+            }
+            body
+        }
+    }
 }
 
-fn push_shell_kv(out: &mut String, key: &str, value: &str) {
-    use std::fmt::Write as _;
-    let _ = writeln!(out, "{key}: {value}");
+fn finalize_shell_visible(
+    case: ShellViewCase,
+    input: &ShellRenderInput<'_>,
+    context: &ShellRenderContext<'_>,
+    body: &str,
+    success_compacted: bool,
+    minimal_envelope: &mut bool,
+) -> String {
+    let ShellRenderContext {
+        policy,
+        status,
+        combined_tokens,
+        max_tokens,
+        ..
+    } = context;
+    let (combined_tokens, max_tokens) = (*combined_tokens, *max_tokens);
+    match case {
+        ShellViewCase::CompactTiny => body.to_string(),
+        ShellViewCase::CompactDiagnostic => enforce_token_budget(
+            &compact_diagnostic_shell_capsule(input, status, body),
+            max_tokens,
+        ),
+        ShellViewCase::CompactInventory => enforce_token_budget(
+            &compact_repo_inventory_shell_capsule(input, body),
+            max_tokens,
+        ),
+        ShellViewCase::PolicyBased => {
+            let mut vis = format_shell_status_header(input, policy, status, body);
+            if (count_tokens(&vis) > combined_tokens || success_compacted)
+                && safe_auto_success(input, status)
+            {
+                let minimal = format_minimal_shell_ok(input.combined_ref, body);
+                if count_tokens(&minimal) < count_tokens(&vis) {
+                    *minimal_envelope = true;
+                    vis = minimal;
+                }
+            }
+            enforce_token_budget(&vis, max_tokens)
+        }
+    }
+}
+fn shell_output_strategy(cp: bool, cd: bool, ci: bool, sc: bool, me: bool) -> &'static str {
+    [
+        (cp, "compact_adaptive_shell"),
+        (cd, "compact_diagnostic_shell"),
+        (ci, "compact_inventory_shell"),
+        (sc, "compact_success_shell"),
+        (me, "minimal_envelope_shell"),
+    ]
+    .into_iter()
+    .find_map(|(active, strategy)| active.then_some(strategy))
+    .unwrap_or("exact_first_adaptive_shell")
+}
+
+fn push_shell_kv(out: &mut String, k: &str, v: &str) {
+    out.push_str(&format!("{k}: {v}\n"));
+}
+
+fn push_optional_shell_kv(out: &mut String, k: &str, v: Option<&str>) {
+    if let Some(val) = v {
+        push_shell_kv(out, k, val);
+    }
 }
 
 fn push_shell_status(out: &mut String, status: &CommandStatus, compact: bool) {
-    let code = status.exit_code.map_or_else(|| "null".to_string(), |value| value.to_string());
-    push_shell_kv(out, "exit_code", &code);
-    if let Some(segment) = status.failed_segment.as_deref() {
-        if compact {
-            push_shell_kv(out, "failed_segment", &mask_visible_secrets(segment));
+    push_shell_kv(
+        out,
+        "exit_code",
+        &status
+            .exit_code
+            .map_or("null".to_string(), |v| v.to_string()),
+    );
+    for (key, value, always_mask) in [
+        ("failed_segment", status.failed_segment.as_deref(), false),
+        (
+            "pipeline_masking_warning",
+            status.pipeline_masking_warning.as_deref(),
+            false,
+        ),
+        (
+            "pipeline_rerun_command",
+            status.pipeline_rerun_command.as_deref(),
+            true,
+        ),
+    ] {
+        let Some(value) = value else { continue };
+        let value = if compact && key == "pipeline_masking_warning" && value.contains("mask") {
+            "inspect combined_ref".to_string()
+        } else if compact || always_mask {
+            mask_visible_secrets(value)
         } else {
-            push_shell_kv(out, "failed_segment", segment);
-        }
-    }
-    if let Some(warning) = status.pipeline_masking_warning.as_deref() {
-        if compact && warning.contains("mask") {
-            push_shell_kv(out, "pipeline_masking_warning", "inspect combined_ref");
-        } else if compact {
-            push_shell_kv(out, "pipeline_masking_warning", &mask_visible_secrets(warning));
-        } else {
-            push_shell_kv(out, "pipeline_masking_warning", warning);
-        }
-    }
-    if let Some(command) = status.pipeline_rerun_command.as_deref() {
-        push_shell_kv(out, "pipeline_rerun_command", &mask_visible_secrets(command));
+            value.to_string()
+        };
+        push_shell_kv(out, key, &value);
     }
 }
 
@@ -847,233 +855,136 @@ fn format_shell_status_header(
     status: &CommandStatus,
     body: &str,
 ) -> String {
-    use std::fmt::Write as _;
-    let display_command = if policy.policy == "exact" || policy.policy == "passthrough" {
+    let cmd = if matches!(policy.policy.as_str(), "exact" | "passthrough") {
         input.command.to_string()
     } else {
         mask_visible_secrets(input.command)
     };
-    let mut visible = String::with_capacity(256 + body.len());
-    let _ = writeln!(visible, "# shell");
-    push_shell_kv(&mut visible, "command", &display_command);
-    let _ = writeln!(visible, "policy: {} ({})", policy.policy, policy.reason);
-    push_shell_kv(&mut visible, "status", &status.status_label);
-    let _ = writeln!(visible, "command_success: {}", status.command_success);
-    push_shell_status(&mut visible, status, false);
-    if let Some(stdout_ref) = input.stdout_ref {
-        push_shell_kv(&mut visible, "stdout_ref", stdout_ref);
-    }
-    if let Some(stderr_ref) = input.stderr_ref {
-        push_shell_kv(&mut visible, "stderr_ref", stderr_ref);
-    }
-    if let Some(combined_ref) = input.combined_ref {
-        push_shell_kv(&mut visible, "combined_ref", combined_ref);
-    }
-    visible.push('\n');
-    visible.push_str(body.trim_end());
-    visible
+    let mut vis = "# shell\n".to_string();
+    push_shell_kv(&mut vis, "command", &cmd);
+    vis.push_str(&format!("policy: {} ({})\n", policy.policy, policy.reason));
+    push_shell_kv(&mut vis, "status", &status.status_label);
+    vis.push_str(&format!("command_success: {}\n", status.command_success));
+    push_shell_status(&mut vis, status, false);
+    push_optional_shell_kv(&mut vis, "stdout_ref", input.stdout_ref);
+    push_optional_shell_kv(&mut vis, "stderr_ref", input.stderr_ref);
+    push_optional_shell_kv(&mut vis, "combined_ref", input.combined_ref);
+    vis + "\n" + body.trim_end()
 }
 
 fn format_minimal_shell_ok(combined_ref: Option<&str>, body: &str) -> String {
-    use std::fmt::Write as _;
-    let mut minimal = String::with_capacity(64 + body.len());
-    minimal.push_str("# shell ok");
-    if let Some(combined_ref) = combined_ref {
-        let _ = write!(minimal, "\ncombined_ref: {combined_ref}");
+    let mut min = "# shell ok".to_string();
+    if let Some(r) = combined_ref {
+        min += &format!("\ncombined_ref: {r}");
     }
-    let trimmed_body = body.trim_end();
-    if !trimmed_body.is_empty() {
-        minimal.push('\n');
-        minimal.push_str(trimmed_body);
+    let trimmed = body.trim_end();
+    if !trimmed.is_empty() {
+        min = min + "\n" + trimmed;
     }
-    minimal
+    min
 }
 
-/// Render a shell result that recovery verified as a byte-identical repeat
-/// of the previous run (same combined output, same exit code). Verified
-/// successes compact to a delta envelope pointing at the content-addressed
-/// ref; everything else — failures, timeouts, masked pipelines, explicit
-/// modes, first runs, or envelopes that would not beat raw — delegates to
-/// `render_shell` untouched. A repeated failure keeps repeating its full
-/// evidence.
+/// Compacts verified byte-identical successful repeats; all other runs render normally.
 pub fn render_shell_repeat(input: ShellRenderInput<'_>, repeat_seen: u32) -> ShellRender {
-    let status = classify_command_status(
-        input.command,
-        input.stdout,
-        input.stderr,
-        input.exit_code,
-        input.timed_out,
-    );
-    let eligible = repeat_seen >= 2
-        && input.mode.effective_policy() == Mode::Auto
-        && status.command_success
-        && !input.timed_out
-        && status.failed_segment.is_none()
-        && status.pipeline_masking_warning.is_none()
-        && input.combined_ref.is_some();
-    if !eligible {
-        return render_shell(input);
+    let status = shell_input_status(&input);
+    if repeat_seen >= 2 && safe_auto_success(&input, &status) && input.combined_ref.is_some() {
+        let combined =
+            shell_combined_output(input.command, input.exit_code, input.stdout, input.stderr);
+        let mut visible = format!("# shell ok (unchanged; run {repeat_seen})");
+        if let Some(r) = input.combined_ref {
+            visible += &format!("\ncombined_ref: {r}");
+        }
+        if count_tokens(&visible) < count_tokens(&combined) {
+            let visible = enforce_token_budget(&visible, input.max_visible_tokens);
+            return ShellRender {
+                omitted_lines: combined
+                    .lines()
+                    .count()
+                    .saturating_sub(visible.lines().count()),
+                visible,
+                policy: PolicyDecision {
+                    policy: "passthrough".to_string(),
+                    reason: "verified unchanged repeat".to_string(),
+                    family: shell_family(input.command, input.stdout, input.stderr),
+                },
+                command_status: status,
+                diagnostics: Vec::new(),
+                output_strategy: "repeat_unchanged_shell".to_string(),
+            };
+        }
     }
-    let combined =
-        shell_combined_output(input.command, input.exit_code, input.stdout, input.stderr);
-    let combined_tokens = count_tokens(&combined);
-    let mut visible = format!("# shell ok (unchanged; run {repeat_seen})");
-    if let Some(combined_ref) = input.combined_ref {
-        visible.push_str(&format!("\ncombined_ref: {combined_ref}"));
-    }
-    if count_tokens(&visible) >= combined_tokens {
-        return render_shell(input);
-    }
-    let visible = enforce_token_budget(&visible, input.max_visible_tokens);
-    let visible_line_count = visible.lines().count();
-    ShellRender {
-        omitted_lines: combined.lines().count().saturating_sub(visible_line_count),
-        visible,
-        policy: PolicyDecision {
-            policy: "passthrough".to_string(),
-            reason: "verified unchanged repeat".to_string(),
-            family: shell_family(input.command, input.stdout, input.stderr),
-        },
-        command_status: status,
-        diagnostics: Vec::new(),
-        output_strategy: "repeat_unchanged_shell".to_string(),
-    }
+    render_shell(input)
 }
 
-/// Continuation lines of a compiler/test diagnostic block: indented context,
-/// gutter pipes, caret underlines, and note/help follow-ups.
-fn line_starts_with_any(line: &str, prefixes: &[&str]) -> bool {
-    prefixes.iter().any(|p| line.starts_with(p))
-}
-
+/// Recognizes compiler/test diagnostic continuation lines.
 fn is_critical_continuation_line(line: &str) -> bool {
-    if line.starts_with(' ') || line.starts_with('\t') {
+    if line.starts_with([' ', '\t']) {
         return true;
     }
-    let trimmed = line.trim_start();
-    if line_starts_with_any(trimmed, &["-->", "|", "^", "=", "note:", "help:"]) {
-        return true;
-    }
-    // Source gutter lines: "5 |     let x = 1;"
-    trimmed.split_once(' ').is_some_and(|(num, rest)| {
-        !num.is_empty()
-            && num.chars().all(|c| c.is_ascii_digit())
-            && rest.trim_start().starts_with('|')
-    })
+    let t = line.trim_start();
+    let is_num = |n: &str| !n.is_empty() && n.chars().all(|c| c.is_ascii_digit());
+    starts_with_any(t, "-->|^|note:|help:")
+        || t.split_once(' ')
+            .is_some_and(|(n, r)| is_num(n) && r.trim_start().starts_with('|'))
 }
+
+const CARGO_TEST_OK_SUFFIXES: &str = "... ok|... ignored";
 
 fn is_cargo_test_ok_line(trimmed: &str) -> bool {
     trimmed.starts_with("test ")
-        && (trimmed.ends_with("... ok") || trimmed.ends_with("... ignored"))
+        && ends_with_any(trimmed, CARGO_TEST_OK_SUFFIXES)
         && !trimmed.contains("FAILED")
 }
 
 fn is_pytest_pass_marker(trimmed: &str) -> bool {
     trimmed.contains("::")
-        && (trimmed.ends_with("PASSED")
-            || trimmed.ends_with("XPASS")
-            || trimmed.ends_with("SKIPPED"))
-        && !trimmed.contains("FAILED")
-        && !trimmed.contains("ERROR")
+        && ends_with_any(trimmed, "PASSED|XPASS|SKIPPED")
+        && !contains_any(trimmed, "FAILED|ERROR")
 }
 
 fn is_pytest_summary_line(trimmed: &str) -> bool {
     trimmed.starts_with("==")
         && trimmed.ends_with("==")
-        && (trimmed.contains(" passed") || trimmed.contains(" skipped"))
-        && !trimmed.contains(" failed")
-        && !trimmed.contains(" error")
+        && contains_any(trimmed, " passed| skipped")
+        && !contains_any(trimmed, " failed| error")
 }
 
-const PYTEST_NOISE_PREFIXES: &[&str] = &[
-    "platform ",
-    "rootdir:",
-    "configfile:",
-    "cachedir:",
-    "plugins:",
-    "collected ",
-    "collecting ",
-];
+const PYTEST_NOISE_PREFIXES: &str =
+    "platform |rootdir:|configfile:|cachedir:|plugins:|collected |collecting ";
 
-fn is_pytest_noise_line(trimmed: &str) -> bool {
-    if line_starts_with_any(trimmed, PYTEST_NOISE_PREFIXES)
-        || (trimmed.starts_with("==")
-            && trimmed.ends_with("==")
-            && trimmed.contains("session starts"))
-    {
-        return true;
-    }
-    if (trimmed.contains("::") && (trimmed.ends_with("PASSED") || trimmed.contains(" PASSED ")))
-        || trimmed.ends_with("XPASS")
-        || trimmed.ends_with("SKIPPED")
-    {
-        return true;
-    }
-    let body = trimmed
-        .strip_suffix(|c: char| c == ']')
-        .map(|rest| rest.trim_end_matches(|c: char| c.is_ascii_digit() || c == '%' || c == '['))
-        .unwrap_or(trimmed);
-    !body.is_empty()
-        && body
-            .trim()
-            .chars()
-            .all(|c| matches!(c, '.' | 's' | 'x' | 'X'))
+fn is_pytest_noise_line(t: &str) -> bool {
+    starts_with_any(t, PYTEST_NOISE_PREFIXES)
+        || (t.starts_with("==") && t.ends_with("==") && t.contains("session starts"))
+        || (t.contains("::") && (ends_with_any(t, "PASSED|SKIPPED") || t.contains(" PASSED ")))
+        || ends_with_any(t, "XPASS|SKIPPED")
+        || t.strip_suffix(']')
+            .map(|s| s.trim_end_matches(|c: char| c.is_ascii_digit() || matches!(c, '%' | '[')))
+            .is_some_and(|b| {
+                !b.is_empty() && b.trim().chars().all(|c| matches!(c, '.' | 's' | 'x' | 'X'))
+            })
 }
 
-const NPM_SUMMARY_PREFIXES: &[&str] = &[
-    "added ",
-    "removed ",
-    "changed ",
-    "audited ",
-    "found 0 vulnerabilities",
-    "up to date",
-];
+const NPM_SUMMARY_PREFIXES: &str =
+    "added |removed |changed |audited |found 0 vulnerabilities|up to date";
 
-fn is_npm_summary_line(trimmed: &str) -> bool {
-    line_starts_with_any(trimmed, NPM_SUMMARY_PREFIXES)
+fn is_npm_summary_line(t: &str) -> bool {
+    starts_with_any(t, NPM_SUMMARY_PREFIXES)
 }
 
-const NPM_NOISE_PREFIXES: &[&str] = &[
-    "npm http",
-    "npm timing",
-    "npm verb",
-    "npm sill",
-    "npm info",
-    "run `npm fund`",
-    "run \"npm fund\"",
-];
+const NPM_NOISE_PREFIXES: &str =
+    "npm http|npm timing|npm verb|npm sill|npm info|run `npm fund`|run \"npm fund\"";
 
-fn is_npm_noise_line(trimmed: &str) -> bool {
-    line_starts_with_any(trimmed, NPM_NOISE_PREFIXES)
-        || trimmed.contains("packages are looking for funding")
+fn is_npm_noise_line(t: &str) -> bool {
+    starts_with_any(t, NPM_NOISE_PREFIXES) || t.contains("packages are looking for funding")
 }
 
-const GIT_PROGRESS_PREFIXES: &[&str] = &[
-    "remote: Enumerating objects",
-    "remote: Counting objects",
-    "remote: Compressing objects",
-    "remote: Total",
-    "Receiving objects",
-    "Resolving deltas",
-    "Counting objects",
-    "Compressing objects",
-    "Writing objects",
-    "Unpacking objects",
-];
+const GIT_PROGRESS_PREFIXES: &str = "remote: Enumerating objects|remote: Counting objects|remote: Compressing objects|remote: Total|Receiving objects|Resolving deltas|Counting objects|Compressing objects|Writing objects|Unpacking objects";
 
-fn git_progress_prefix(trimmed: &str) -> Option<&'static str> {
-    GIT_PROGRESS_PREFIXES
-        .iter()
-        .copied()
-        .find(|prefix| trimmed.starts_with(prefix))
+fn git_progress_prefix(t: &str) -> Option<&'static str> {
+    GIT_PROGRESS_PREFIXES.split('|').find(|p| t.starts_with(p))
 }
 
-/// Token-aware summarizer: spends `max_tokens` on the most information-dense
-/// lines (critical evidence first, then numeric/path-rich lines, then head and
-/// tail context) instead of a blind head/tail split. Critical lines are kept
-/// even when they alone exceed the budget — anchor protection outranks the
-/// soft budget. Gaps are marked with line counts so omissions stay explicit
-/// and recoverable via the exact refs.
+/// Selects information-dense lines within a soft budget while always retaining criticals.
 pub fn summarize_tokens(text: &str, max_tokens: usize, prefix: &str) -> String {
     if max_tokens == 0 {
         return format!("{prefix}{}", text.trim_end());
@@ -1083,191 +994,163 @@ pub fn summarize_tokens(text: &str, max_tokens: usize, prefix: &str) -> String {
         return format!("{prefix}{}", text.trim_end());
     }
     let n = lines.len();
-    let line_tokens: Vec<usize> = lines.iter().map(|line| count_tokens(line)).collect();
+    let line_tokens: Vec<usize> = lines.iter().map(|l| count_tokens(l)).collect();
     let mut order: Vec<usize> = (0..n).collect();
-    let score = |idx: usize| -> u32 {
-        let line = lines[idx];
-        if looks_critical_line(line) {
-            return 100;
-        }
-        let mut score = 0u32;
-        if idx < 3 || idx + 3 >= n {
-            score += 60;
-        }
-        if line_information_density(line) {
-            score += 30;
-        }
-        if line.trim().is_empty() {
-            return 0;
-        }
-        score.max(1)
-    };
-    let scores: Vec<u32> = (0..n).map(score).collect();
+    let scores: Vec<u32> = (0..n)
+        .map(|idx| {
+            let line = lines[idx];
+            if looks_critical_line(line) {
+                100
+            } else if line.trim().is_empty() {
+                0
+            } else {
+                let mut s = if idx < 3 || idx + 3 >= n { 60 } else { 0 };
+                if line_information_density(line) {
+                    s += 30;
+                }
+                s.max(1)
+            }
+        })
+        .collect();
     order.sort_by(|a, b| scores[*b].cmp(&scores[*a]).then(a.cmp(b)));
-    // "... +N lines; exact ref available ..." tokenizes to ~13 units.
-    let gap_marker_tokens = 13usize;
     let mut selected = vec![false; n];
     let mut spent = 0usize;
     for &idx in &order {
         let cost = line_tokens[idx];
-        if scores[idx] >= 100 {
-            // Criticals are always kept; protection outranks the budget.
+        if scores[idx] >= 100 || (scores[idx] != 0 && spent + cost + 13 <= max_tokens) {
             selected[idx] = true;
-            spent = spent.saturating_add(cost);
-            continue;
+            spent = if scores[idx] >= 100 {
+                spent.saturating_add(cost)
+            } else {
+                spent + cost
+            };
         }
-        if scores[idx] == 0 {
-            continue;
-        }
-        if spent + cost + gap_marker_tokens > max_tokens {
-            continue;
-        }
-        selected[idx] = true;
-        spent += cost;
     }
-    // Fill single-line gaps that cost no more than their marker would.
     for idx in 1..n.saturating_sub(1) {
-        if !selected[idx]
-            && selected[idx - 1]
-            && selected[idx + 1]
-            && line_tokens[idx] <= gap_marker_tokens
-        {
+        if !selected[idx] && selected[idx - 1] && selected[idx + 1] && line_tokens[idx] <= 13 {
             selected[idx] = true;
         }
     }
     if !selected.iter().any(|v| *v) {
         return summarize_lines(text, 8, 6, prefix);
     }
-    let mut out = String::new();
-    out.push_str(prefix);
-    let mut omitted_run = 0usize;
-    let mut first = true;
+    let mut out = prefix.to_string();
+    let mut omitted = 0;
     for idx in 0..n {
-        if selected[idx] {
-            if omitted_run > 0 {
-                if !first {
-                    out.push('\n');
-                }
-                out.push_str(&format!(
-                    "... +{omitted_run} lines; exact ref available ..."
-                ));
-                first = false;
-                omitted_run = 0;
-            }
-            if !first {
-                out.push('\n');
-            }
-            out.push_str(lines[idx]);
-            first = false;
-        } else {
-            omitted_run += 1;
+        if !selected[idx] {
+            omitted += 1;
+            continue;
         }
+        if omitted > 0 {
+            push_summary_line(
+                &mut out,
+                &format!("... +{omitted} lines; exact ref available ..."),
+            );
+            omitted = 0;
+        }
+        push_summary_line(&mut out, lines[idx]);
     }
-    if omitted_run > 0 {
-        if !first {
-            out.push('\n');
-        }
-        out.push_str(&format!(
-            "... +{omitted_run} lines; exact ref available ..."
-        ));
+    if omitted > 0 {
+        push_summary_line(
+            &mut out,
+            &format!("... +{omitted} lines; exact ref available ..."),
+        );
     }
     out
 }
 
-/// Heuristic: a line is information-dense when it carries identifiers tied to
-/// concrete artifacts — paths, line references, numbers, or hashes.
+fn push_summary_line(out: &mut String, line: &str) {
+    if !out.is_empty() && !out.ends_with('\n') {
+        out.push('\n');
+    }
+    out.push_str(line);
+}
+
+/// Detects artifact identifiers, paths, line references, numbers, or hashes.
 fn line_information_density(line: &str) -> bool {
-    let mut digits = 0usize;
-    let mut path_chars = 0usize;
-    for ch in line.chars() {
-        if ch.is_ascii_digit() {
-            digits += 1;
-        }
-        if ch == '/' || ch == '\\' {
-            path_chars += 1;
-        }
-    }
-    digits >= 3 || path_chars >= 2 || line.contains(".rs:") || line.contains(".py:")
+    let (digits, paths) = line.chars().fold((0, 0), |(d, p), c| {
+        (
+            d + usize::from(c.is_ascii_digit()),
+            p + usize::from(c == '/' || c == '\\'),
+        )
+    });
+    digits >= 3 || paths >= 2 || line.contains(".rs:") || line.contains(".py:")
 }
 
-/// Shell-path dedupe: in addition to exact-run collapse, consecutive lines
-/// that are identical after digit-normalization (timestamps, counters,
-/// progress percentages) collapse into one representative plus a count.
-/// Critical lines never collapse. Read-path `dedupe_lines` is unchanged.
-
-fn compact_head_tail(out: Vec<String>, context: usize) -> String {
-    if out.len() <= context * 2 + 20 {
-        return out.join("\n");
-    }
-    let omitted = out.len().saturating_sub(context * 2);
-    let mut compact = out[..context].to_vec();
-    compact.push(format!("... omitted {omitted} lines; exact ref available ..."));
-    compact.extend_from_slice(&out[out.len() - context..]);
-    compact.join("\n")
-}
-
-fn dedupe_lines_structural(text: &str, context: usize) -> String {
+/// Shell-only dedupe also collapses digit-varying runs while preserving critical lines.
+fn dedupe_lines_impl(text: &str, context: usize, structural: bool) -> String {
     let lines: Vec<&str> = text.lines().collect();
     if lines.is_empty() {
         return String::new();
     }
-    let normalized: Vec<String> = lines
-        .iter()
-        .map(|line| normalize_digit_runs(line))
-        .collect();
+    let norm = structural.then(|| {
+        lines
+            .iter()
+            .map(|l| normalize_digit_runs(l))
+            .collect::<Vec<_>>()
+    });
     let mut out = Vec::new();
-    let mut idx = 0usize;
+    let mut idx = 0;
     while idx < lines.len() {
         let line = lines[idx];
-        if looks_critical_line(line) {
+        if structural && looks_critical_line(line) {
             out.push(line.to_string());
             idx += 1;
             continue;
         }
-        let mut exact = 1usize;
-        while idx + exact < lines.len() && lines[idx + exact] == line {
-            exact += 1;
-        }
+        let exact = lines[idx..]
+            .iter()
+            .take_while(|candidate| **candidate == line)
+            .count();
         if exact >= 3 {
             out.push(line.to_string());
             out.push(format!("... repeated {} more times ...", exact - 1));
             idx += exact;
             continue;
         }
-        let mut similar = 1usize;
-        while idx + similar < lines.len()
-            && !looks_critical_line(lines[idx + similar])
-            && normalized[idx + similar] == normalized[idx]
-        {
-            similar += 1;
+        if let Some(n) = norm.as_ref() {
+            let similar = (idx..lines.len())
+                .take_while(|&i| !looks_critical_line(lines[i]) && n[i] == n[idx])
+                .count();
+            if similar >= 4 {
+                out.push(line.to_string());
+                out.push(format!(
+                    "... {} similar lines collapsed (digits vary); exact ref available ...",
+                    similar - 1
+                ));
+                idx += similar;
+                continue;
+            }
         }
-        if similar >= 4 {
-            out.push(line.to_string());
-            out.push(format!(
-                "... {} similar lines collapsed (digits vary); exact ref available ...",
-                similar - 1
-            ));
-            idx += similar;
-            continue;
-        }
-        out.push(line.to_string());
-        idx += 1;
+        out.extend(lines[idx..idx + exact].iter().map(|l| l.to_string()));
+        idx += exact;
     }
     compact_head_tail(out, context)
 }
 
+fn compact_head_tail(out: Vec<String>, context: usize) -> String {
+    if out.len() <= context * 2 + 20 {
+        return out.join("\n");
+    }
+    format!(
+        "{}\n... omitted {} lines; exact ref available ...\n{}",
+        out[..context].join("\n"),
+        out.len().saturating_sub(context * 2),
+        out[out.len() - context..].join("\n")
+    )
+}
+
 fn normalize_digit_runs(line: &str) -> String {
-    let mut out = String::with_capacity(line.len());
-    let mut in_digits = false;
-    for ch in line.chars() {
-        if ch.is_ascii_digit() {
-            if !in_digits {
+    let (mut out, mut in_d) = (String::with_capacity(line.len()), false);
+    for c in line.chars() {
+        if c.is_ascii_digit() {
+            if !in_d {
                 out.push('#');
-                in_digits = true;
+                in_d = true;
             }
         } else {
-            in_digits = false;
-            out.push(ch);
+            in_d = false;
+            out.push(c);
         }
     }
     out
@@ -1279,15 +1162,13 @@ fn should_compact_short_failure_shell(
     status: &CommandStatus,
     combined: &str,
 ) -> bool {
-    let has_visible_diagnostic_output =
-        !input.stdout.trim().is_empty() || !input.stderr.trim().is_empty();
     input.mode.effective_policy() == Mode::Auto
         && policy.policy == "diagnostic"
         && !status.command_success
         && input.exit_code.is_some()
         && !input.timed_out
         && input.combined_ref.is_some()
-        && has_visible_diagnostic_output
+        && (!input.stdout.trim().is_empty() || !input.stderr.trim().is_empty())
         && !has_visible_secret_marker(combined)
         && !has_protected_failure_context(combined)
         && count_tokens(combined) <= 160
@@ -1296,34 +1177,24 @@ fn should_compact_short_failure_shell(
 }
 
 fn compact_diagnostic_shell_view(stdout: &str, stderr: &str) -> String {
-    let mut failure_anchors = Vec::new();
-    let mut critical = Vec::new();
-    let mut fallback = Vec::new();
+    let (mut critical, mut fallback) = (None, None);
     for line in stdout.lines().chain(stderr.lines()) {
-        let trimmed = line.trim();
-        if trimmed.is_empty() || is_shell_diagnostic_boilerplate(trimmed) {
+        let line = line.trim();
+        if line.is_empty() || is_shell_diagnostic_boilerplate(line) {
             continue;
         }
-        if looks_failure_anchor_line(trimmed) {
-            failure_anchors.push(trimmed.to_string());
-        } else if looks_critical_line(trimmed) {
-            critical.push(trimmed.to_string());
-        } else if fallback.is_empty() {
-            fallback.push(trimmed.to_string());
+        if looks_failure_anchor_line(line) {
+            return line.to_string();
         }
-        if failure_anchors.len() >= 3 {
-            break;
-        }
+        let slot = if looks_critical_line(line) {
+            &mut critical
+        } else {
+            &mut fallback
+        };
+        slot.get_or_insert_with(|| line.to_string());
     }
-    let kept = if !failure_anchors.is_empty() {
-        failure_anchors
-    } else if !critical.is_empty() {
-        critical
-    } else {
-        fallback
-    };
-    kept.first()
-        .cloned()
+    critical
+        .or(fallback)
         .unwrap_or_else(|| "diagnostic output omitted; see combined_ref".to_string())
 }
 
@@ -1332,8 +1203,7 @@ fn compact_diagnostic_shell_capsule(
     status: &CommandStatus,
     body: &str,
 ) -> String {
-    let mut visible = String::with_capacity(128 + body.len());
-    visible.push_str("# shell\n");
+    let mut visible = "# shell\n".to_string();
     push_shell_kv(&mut visible, "status", &status.status_label);
     push_shell_status(&mut visible, status, true);
     if input.stderr.trim().is_empty() {
@@ -1343,64 +1213,46 @@ fn compact_diagnostic_shell_capsule(
     } else if let Some(stderr_ref) = input.stderr_ref {
         push_shell_kv(&mut visible, "stderr_ref", stderr_ref);
     }
-    if let Some(combined_ref) = input.combined_ref {
-        push_shell_kv(&mut visible, "combined_ref", combined_ref);
-    }
-    visible.push('\n');
-    visible.push_str(body.trim_end());
-    visible
+    push_optional_shell_kv(&mut visible, "combined_ref", input.combined_ref);
+    visible + "\n" + body.trim_end()
 }
 
-const SHELL_DIAG_BOILERPLATE_PREFIXES: &[&str] = &[
-    "+ CategoryInfo",
-    "+ FullyQualifiedErrorId",
-    "At line:",
-    "+ ~",
-    "~~~~",
-];
-const FAILURE_ANCHOR_NEEDLES: &[&str] = &[
-    "error", "failed", "failure", "panic", "traceback", "exception", "assertion", "not ok",
-];
-const SECRET_MARKERS: &[&str] = &[
-    "token=", "password=", "secret=", "api_key=", "authorization:", "bearer ",
-];
+const SHELL_DIAG_BOILERPLATE_PREFIXES: &str =
+    "+ CategoryInfo|+ FullyQualifiedErrorId|At line:|+ ~|~~~~";
+const FAILURE_ANCHOR_NEEDLES: &str =
+    "error|failure|failed|panic|traceback|exception|assertion|not ok";
+const SECRET_MARKERS: &str = "token=|password=|secret=|api_key=|authorization:|bearer ";
 
 fn is_shell_diagnostic_boilerplate(line: &str) -> bool {
-    line_starts_with_any(line.trim_start(), SHELL_DIAG_BOILERPLATE_PREFIXES)
+    starts_with_any(line.trim_start(), SHELL_DIAG_BOILERPLATE_PREFIXES)
 }
 
 fn looks_failure_anchor_line(line: &str) -> bool {
     let lower = line.to_ascii_lowercase();
-    FAILURE_ANCHOR_NEEDLES.iter().any(|needle| lower.contains(needle))
+    FAILURE_ANCHOR_NEEDLES
+        .split('|')
+        .any(|needle| lower.contains(needle))
 }
 
 fn has_visible_secret_marker(text: &str) -> bool {
-    let lower = text.to_ascii_lowercase();
-    SECRET_MARKERS.iter().any(|needle| lower.contains(needle))
+    contains_any(&text.to_ascii_lowercase(), SECRET_MARKERS)
 }
 
 fn has_protected_failure_context(text: &str) -> bool {
     let lower = text.to_ascii_lowercase();
-    lower.contains("assertion failed")
+    contains_any(&lower, "assertion failed|traceback")
         || (lower.contains("left:") && lower.contains("right:"))
         || (lower.contains("test ") && lower.contains("failed") && lower.contains(".rs:"))
-        || lower.contains("traceback")
 }
 
-const DIFF_LINE_PREFIXES: &[&str] = &[
-    "diff --git", "index ", "--- ", "+++ ", "@@", "rename ", "deleted file", "new file", "+", "-",
-];
+const DIFF_LINE_PREFIXES: &str = "diff --git|index |--- |+++ |@@|rename |deleted file|new file|+|-";
 
 pub fn diff_summary(text: &str, max_lines: usize) -> String {
-    let mut out = Vec::new();
-    for line in text.lines() {
-        if line_starts_with_any(line, DIFF_LINE_PREFIXES) {
-            out.push(line);
-        }
-        if out.len() >= max_lines {
-            break;
-        }
-    }
+    let out: Vec<_> = text
+        .lines()
+        .filter(|l| starts_with_any(l, DIFF_LINE_PREFIXES))
+        .take(max_lines.max(1))
+        .collect();
     if out.is_empty() {
         summarize_lines(text, 18, 12, "")
     } else {
@@ -1409,29 +1261,7 @@ pub fn diff_summary(text: &str, max_lines: usize) -> String {
 }
 
 pub fn dedupe_lines(text: &str, context: usize) -> String {
-    let lines: Vec<&str> = text.lines().collect();
-    if lines.is_empty() {
-        return String::new();
-    }
-    let mut out = Vec::new();
-    let mut idx = 0usize;
-    while idx < lines.len() {
-        let line = lines[idx];
-        let mut count = 1usize;
-        while idx + count < lines.len() && lines[idx + count] == line {
-            count += 1;
-        }
-        if count >= 3 {
-            out.push(line.to_string());
-            out.push(format!("... repeated {} more times ...", count - 1));
-        } else {
-            for _ in 0..count {
-                out.push(line.to_string());
-            }
-        }
-        idx += count;
-    }
-    compact_head_tail(out, context)
+    dedupe_lines_impl(text, context, false)
 }
 
 pub fn mask_visible_secrets(text: &str) -> String {
@@ -1442,23 +1272,19 @@ pub fn mask_visible_secrets(text: &str) -> String {
 }
 
 fn mask_secret_line(line: &str) -> String {
-    let lower = line.to_ascii_lowercase();
-    for key in ["token=", "password=", "secret=", "api_key=", "apikey="] {
-        if let Some(pos) = lower.find(key) {
-            let keep = &line[..pos + key.len()];
-            return format!("{keep}[masked]");
-        }
+    let low = line.to_ascii_lowercase();
+    if let Some((key, pos)) = "token= password= secret= api_key= apikey="
+        .split_whitespace()
+        .find_map(|key| low.find(key).map(|pos| (key, pos)))
+    {
+        return format!("{}[masked]", &line[..pos + key.len()]);
     }
     line.split_whitespace()
         .map(|word| {
-            if word.starts_with("sk-")
-                || word.starts_with("sk-proj-")
-                || word.starts_with("ghp_")
-                || word.starts_with("AKIA")
-            {
-                "[masked]".to_string()
+            if starts_with_any(word, "sk-|sk-proj-|ghp_|AKIA") {
+                "[masked]"
             } else {
-                word.to_string()
+                word
             }
         })
         .collect::<Vec<_>>()
@@ -1473,29 +1299,26 @@ pub fn error_block(text: &str, radius: usize) -> String {
     keyword_window_view(text, radius, |line| regex_like_error(&line))
 }
 
-/// Keep radius windows around lines flagged by `is_hit`, and mark every gap
-/// (leading, interior, trailing) with an explicit elision line so the visible
-/// view never silently drops content. If nothing is elided the output is the
-/// byte-exact join of all lines, marker-free.
+/// Keeps radius windows around hits and marks every omitted gap explicitly.
+fn omitted_lines_marker(n: usize) -> String {
+    format!("... omitted {n} lines; exact ref available ...")
+}
 fn keyword_window_view(text: &str, radius: usize, is_hit: impl Fn(&str) -> bool) -> String {
     let lines: Vec<&str> = text.lines().collect();
     let mut keep = vec![false; lines.len()];
-    let mut any_hit = false;
     for (idx, line) in lines.iter().enumerate() {
         if is_hit(line) {
-            any_hit = true;
-            let start = idx.saturating_sub(radius);
-            let end = (idx + radius + 1).min(lines.len());
-            for slot in keep.iter_mut().take(end).skip(start) {
-                *slot = true;
-            }
+            let (start, end) = (
+                idx.saturating_sub(radius),
+                (idx + radius + 1).min(lines.len()),
+            );
+            keep[start..end].fill(true);
         }
     }
-    if !any_hit {
+    if !keep.iter().any(|&k| k) {
         return String::new();
     }
-    let mut out: Vec<String> = Vec::new();
-    let mut idx = 0usize;
+    let (mut out, mut idx) = (Vec::new(), 0);
     while idx < lines.len() {
         if keep[idx] {
             out.push(lines[idx].to_string());
@@ -1505,29 +1328,16 @@ fn keyword_window_view(text: &str, radius: usize, is_hit: impl Fn(&str) -> bool)
             while idx < lines.len() && !keep[idx] {
                 idx += 1;
             }
-            out.push(format!(
-                "... omitted {} lines; exact ref available ...",
-                idx - start
-            ));
+            out.push(omitted_lines_marker(idx - start));
         }
     }
     out.join("\n")
 }
 
+const ERROR_NEEDLES: &str = "error exception traceback failed assertion panic expected actual";
+
 fn regex_like_error(line: &&str) -> bool {
-    let lower = line.to_ascii_lowercase();
-    [
-        "error",
-        "exception",
-        "traceback",
-        "failed",
-        "assertion",
-        "panic",
-        "expected",
-        "actual",
-    ]
-    .iter()
-    .any(|needle| lower.contains(needle))
+    contains_any_ws(&line.to_ascii_lowercase(), ERROR_NEEDLES)
 }
 
 pub fn line_range(text: &str, start: usize, end: usize) -> String {
@@ -1549,11 +1359,11 @@ pub fn symbol_block(text: &str, symbol: &str) -> String {
     while start > 0 && lines[start - 1].starts_with([' ', '\t']) {
         start -= 1;
     }
-    let base_indent = leading_ws(lines[hit]);
+    let indent = leading_ws(lines[hit]);
     let mut end = hit + 1;
     while end < lines.len() {
         let line = lines[end];
-        if !line.trim().is_empty() && leading_ws(line) <= base_indent && end > hit + 1 {
+        if !line.trim().is_empty() && leading_ws(line) <= indent && end > hit + 1 {
             break;
         }
         end += 1;
@@ -1570,17 +1380,13 @@ fn leading_ws(line: &str) -> usize {
     line.chars().take_while(|c| *c == ' ' || *c == '\t').count()
 }
 
-/// Generate a short TokenZero ref ID: `<prefix>` + 16 hex chars (first 8 SHA-256 bytes).
-/// These are TokenZero legacy refs, NOT portable full SHA-256 ZeroRef v1 IDs.
-/// Full-hash migration is tracked by the ZeroRef v1 epic.
+/// Generates a legacy short ref: `<prefix>` plus the first eight SHA-256 bytes.
 pub fn id_for(prefix: char, text: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(text.as_bytes());
-    let digest = hasher.finalize();
-    let mut out = String::with_capacity(17);
-    out.push(prefix);
-    for &byte in digest.iter().take(8) {
-        push_hex_byte(&mut out, byte);
+    let mut out = format!("{prefix}");
+    for byte in &hasher.finalize()[..8] {
+        push_hex_byte(&mut out, *byte);
     }
     out
 }
@@ -1589,12 +1395,20 @@ const CODE_EXTENSIONS: &[&str] = &[
     "rs", "py", "js", "jsx", "ts", "tsx", "go", "java", "c", "cc", "cpp", "h", "hpp",
 ];
 
+fn looks_like_logs(text: &str) -> bool {
+    let s: Vec<&str> = text.lines().take(20).collect();
+    s.len() >= 5
+        && s.iter()
+            .filter(|l| {
+                contains_any_ws(&l.to_ascii_uppercase(), "DEBUG INFO WARN ERROR FATAL TRACE")
+            })
+            .count()
+            > s.len() / 3
+}
 pub fn detect_content_type(text: &str, path: Option<&Path>) -> ContentType {
     if let Some(ext) = path.and_then(|p| p.extension()).and_then(|v| v.to_str()) {
-        if CODE_EXTENSIONS.contains(&ext) {
-            return ContentType::Code;
-        }
         match ext {
+            ext if CODE_EXTENSIONS.contains(&ext) => return ContentType::Code,
             "json" => return ContentType::JsonConfig,
             "md" | "markdown" => return ContentType::Markdown,
             "diff" | "patch" => return ContentType::Diff,
@@ -1614,22 +1428,6 @@ pub fn detect_content_type(text: &str, path: Option<&Path>) -> ContentType {
     } else {
         ContentType::Unknown
     }
-}
-
-fn looks_like_logs(text: &str) -> bool {
-    let sample: Vec<&str> = text.lines().take(20).collect();
-    if sample.len() < 5 {
-        return false;
-    }
-    let log_prefixes = ["DEBUG", "INFO", "WARN", "ERROR", "FATAL", "TRACE"];
-    let matching = sample
-        .iter()
-        .filter(|line| {
-            let upper = line.to_ascii_uppercase();
-            log_prefixes.iter().any(|p| upper.contains(p))
-        })
-        .count();
-    matching > sample.len() / 3
 }
 
 pub fn ref_record(kind: &str, ref_id: String, bytes: usize) -> RefRecord {
@@ -1661,14 +1459,14 @@ pub use render::domain::{
 pub use shell_display::{
     shell_display_command_from_argv, shell_display_command_from_argv_for_platform,
 };
+pub use shell_family::shell_family;
+pub use shell_policy::{classify_command_status, decide_shell_policy, shell_combined_output};
 pub use shell_quote::{
     argv_has_shell_operator_tokens, contains_platform_shell_syntax, contains_shell_syntax,
     host_shell_platform, is_shell_operator_token, is_windows_shell_builtin, is_windows_shell_host,
     looks_like_powershell_syntax, quote_for, quote_posix, quote_powershell, quote_windows_cmd,
     split_command_string, split_command_string_for_platform,
 };
-pub use shell_family::shell_family;
-pub use shell_policy::{classify_command_status, decide_shell_policy, shell_combined_output};
 pub use tokens::{
     TokenizerFamily, TokenizerMetadata, active_model_id, active_tokenizer_metadata, count_tokens,
     count_tokens_for_model, enforce_token_budget, enforce_token_budget_with_ref,
@@ -1677,4 +1475,14 @@ pub use tokens::{
 };
 
 #[cfg(test)]
-mod tests;
+mod tests {
+    use super::*;
+
+    #[test]
+    fn failure_anchor_needles_preserve_multiword_not_ok() {
+        assert!(looks_failure_anchor_line("not ok 12 - parser"));
+        assert!(looks_failure_anchor_line("panic: parser failed"));
+        assert!(!looks_failure_anchor_line("ok 12 - parser"));
+        assert!(!looks_failure_anchor_line("not ready yet"));
+    }
+}

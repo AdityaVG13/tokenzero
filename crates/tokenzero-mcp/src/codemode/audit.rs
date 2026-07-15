@@ -95,11 +95,18 @@ pub fn run_codemode_audit(root: &std::path::Path) -> CodeModeAuditReport {
 
 fn audit_recovery(root: &std::path::Path) -> RecoveryEvidence {
     let cache_path = std::env::temp_dir().join(format!(
-        "tokenzero-codemode-audit-recovery-{}-{}.json", std::process::id(),
-        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)
-            .map(|duration| duration.as_nanos()).unwrap_or(0)
+        "tokenzero-codemode-audit-recovery-{}-{}.json",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|duration| duration.as_nanos())
+            .unwrap_or(0)
     ));
-    let opts = CodeModeOptions { root: Some(root.to_path_buf()), cache_path: Some(cache_path), ..Default::default() };
+    let opts = CodeModeOptions {
+        root: Some(root.to_path_buf()),
+        cache_path: Some(cache_path),
+        ..Default::default()
+    };
     let large = "abcdefghij\n".repeat(200);
     let payloads = [
         ("small_text", "hello world recovery test"),
@@ -115,7 +122,11 @@ fn audit_recovery(root: &std::path::Path) -> RecoveryEvidence {
             .unwrap_or_else(|| (String::new(), false, false));
         RecoveryCase { label: label.into(), input_bytes: payload.len(), ref_produced: evidence.0, expand_recovered: evidence.1, byte_exact: evidence.2 }
     }).collect();
-    RecoveryEvidence { all_byte_exact: cases.iter().all(|case| case.byte_exact), total_refs_checked: cases.len(), cases }
+    RecoveryEvidence {
+        all_byte_exact: cases.iter().all(|case| case.byte_exact),
+        total_refs_checked: cases.len(),
+        cases,
+    }
 }
 
 fn audit_cost(root: &std::path::Path) -> CostEvidence {

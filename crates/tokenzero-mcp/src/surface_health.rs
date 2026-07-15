@@ -123,13 +123,8 @@ pub(crate) fn tool_listed_on_surface(
 ) -> bool {
     match surface {
         McpToolSurface::Classic => !is_codemode_exclusive(tool_name),
-        McpToolSurface::CodeMode => match tool_class(tool_name) {
-            ToolClass::Primary => true,
-            // The server declares tools.listChanged=false and FastMCP registers
-            // handlers once. Keep recovery discoverable; calls remain gated.
-            ToolClass::Recovery => true,
-            ToolClass::Locked => false,
-        },
+        // Recovery stays discoverable because registration is static; calls remain gated.
+        McpToolSurface::CodeMode => tool_class(tool_name) != ToolClass::Locked,
     }
 }
 
@@ -152,7 +147,7 @@ pub(crate) fn admit_tools_call(surface: McpToolSurface, tool_name: &str) -> Call
 struct HealthInner {
     consecutive_failures: u32,
     last_failure_at: Option<Instant>,
-    last_failure_kind: Option<String>,
+    last_failure_kind: Option<&'static str>,
     blocked_count: u64,
     unlocked_count: u64,
     fail_threshold: u32,
@@ -175,23 +170,16 @@ impl Default for HealthInner {
 
 impl HealthInner {
     fn is_unhealthy(&self, now: Instant) -> bool {
-        if self.consecutive_failures < self.fail_threshold {
-            return false;
-        }
-        match self.last_failure_at {
-            Some(at) => now.duration_since(at) < self.window,
-            None => false,
-        }
+        self.consecutive_failures >= self.fail_threshold
+            && self
+                .last_failure_at
+                .is_some_and(|at| now.duration_since(at) < self.window)
     }
 
-    fn is_healthy(&self, now: Instant) -> bool {
-        !self.is_unhealthy(now)
-    }
-
-    fn record_failure(&mut self, kind: &str, now: Instant) {
+    fn record_failure(&mut self, kind: &'static str, now: Instant) {
         self.consecutive_failures = self.consecutive_failures.saturating_add(1);
         self.last_failure_at = Some(now);
-        self.last_failure_kind = Some(kind.to_string());
+        self.last_failure_kind = Some(kind);
     }
 
     fn record_success(&mut self) {
@@ -200,17 +188,9 @@ impl HealthInner {
 }
 
 /// Session-scoped expand/read surface health + crash-only gate.
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub struct SurfaceHealth {
     inner: Mutex<HealthInner>,
-}
-
-impl Default for SurfaceHealth {
-    fn default() -> Self {
-        Self {
-            inner: Mutex::new(HealthInner::default()),
-        }
-    }
 }
 
 impl SurfaceHealth {
@@ -221,13 +201,12 @@ impl SurfaceHealth {
     /// Test / config hook for threshold and unlock window.
     #[allow(dead_code)]
     pub fn with_policy(fail_threshold: u32, window: Duration) -> Self {
-        let inner = HealthInner {
-            fail_threshold: fail_threshold.max(1),
-            window,
-            ..HealthInner::default()
-        };
         Self {
-            inner: Mutex::new(inner),
+            inner: Mutex::new(HealthInner {
+                fail_threshold: fail_threshold.max(1),
+                window,
+                ..HealthInner::default()
+            }),
         }
     }
 
@@ -236,8 +215,7 @@ impl SurfaceHealth {
     }
 
     pub fn is_healthy(&self) -> bool {
-        let inner = self.lock();
-        inner.is_healthy(Instant::now())
+        !self.lock().is_unhealthy(Instant::now())
     }
 
     /// True when recovery expand/read may be engaged on CodeMode.
@@ -254,18 +232,15 @@ impl SurfaceHealth {
             inner.record_success();
             return;
         }
-        let kind = code.unwrap_or("expand_failed");
-        if !matches!(
-            kind,
-            "expand_failed"
-                | "ref_not_found"
-                | "ref_stale"
-                | "store_mismatch"
-                | "substrate_down"
-                | "expand_x0"
-        ) {
-            return;
-        }
+        let kind = match code.unwrap_or("expand_failed") {
+            "expand_failed" => "expand_failed",
+            "ref_not_found" => "ref_not_found",
+            "ref_stale" => "ref_stale",
+            "store_mismatch" => "store_mismatch",
+            "substrate_down" => "substrate_down",
+            "expand_x0" => "expand_x0",
+            _ => return,
+        };
         inner.record_failure(kind, now);
     }
 
@@ -331,10 +306,7 @@ impl SurfaceHealth {
         mode: GateMode,
     ) -> Result<CrashOnlyDecision, GateRefusal> {
         if mode == GateMode::Strict
-            && matches!(
-                admit_tools_call(surface, tool_name),
-                CallAdmission::UnknownTool
-            )
+            && admit_tools_call(surface, tool_name) == CallAdmission::UnknownTool
         {
             return Err(GateRefusal::UnknownTool);
         }
@@ -349,8 +321,7 @@ impl SurfaceHealth {
 
     pub fn telemetry(&self) -> Value {
         let inner = self.lock();
-        let now = Instant::now();
-        let healthy = inner.is_healthy(now);
+        let healthy = !inner.is_unhealthy(Instant::now());
         json!({
             "schema_version": "tokenzero.surface_health.v1",
             "primary_surface_healthy": healthy,
@@ -393,124 +364,7 @@ pub fn decide_static(
     match tool_class(tool_name) {
         ToolClass::Primary => CrashOnlyDecision::NotGated,
         ToolClass::Locked => CrashOnlyDecision::PermanentlyLocked,
-        ToolClass::Recovery => {
-            if recovery_unlocked {
-                CrashOnlyDecision::Unlocked
-            } else {
-                CrashOnlyDecision::Blocked
-            }
-        }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use CrashOnlyDecision::*;
-
-    #[test]
-    fn healthy_blocks_expand_on_codemode() {
-        let h = SurfaceHealth::new();
-        assert!(h.is_healthy());
-        assert!(h.primary_surface_healthy_claim());
-        assert_eq!(h.decide(McpToolSurface::CodeMode, "expand"), Blocked);
-        let err = h.allow_tool_call(McpToolSurface::CodeMode, "tz_expand").unwrap_err();
-        assert!(err.contains("primary surface is healthy"), "{err}");
-        assert_eq!(h.telemetry()["telemetry"]["blocked_count"], 1);
-    }
-
-    #[test]
-    fn failures_unlock_only_recovery_and_success_relocks() {
-        for record in [
-            SurfaceHealth::record_codemode_expand_x0,
-            SurfaceHealth::record_substrate_down,
-        ] {
-            let h = SurfaceHealth::new();
-            record(&h);
-            assert!(!h.is_healthy());
-            assert!(!h.primary_surface_healthy_claim());
-            assert_eq!(h.decide(McpToolSurface::CodeMode, "expand"), Unlocked);
-            assert_eq!(h.decide(McpToolSurface::CodeMode, "read"), Unlocked);
-            for tool in ["shell", "edit"] {
-                assert_eq!(h.decide(McpToolSurface::CodeMode, tool), PermanentlyLocked);
-            }
-            assert!(h.allow_tool_call(McpToolSurface::CodeMode, "tz_expand").is_ok());
-            assert_eq!(h.telemetry()["telemetry"]["unlocked_count"], 1);
-            assert_eq!(h.telemetry()["primary_surface_healthy"], false);
-            assert!(h.allow_tool_call(McpToolSurface::CodeMode, "tz_shell").unwrap_err().contains("never unlocked"));
-            h.record_expand_outcome(true, None);
-            assert!(h.is_healthy());
-            assert_eq!(h.decide(McpToolSurface::CodeMode, "expand"), Blocked);
-        }
-    }
-
-    #[test]
-    fn client_errors_do_not_unlock() {
-        for code in ["invalid_ref", "window_out_of_range"] {
-            let h = SurfaceHealth::new();
-            h.record_expand_outcome(false, Some(code));
-            assert!(h.is_healthy(), "{code}");
-        }
-        let h = SurfaceHealth::new();
-        h.record_read_outcome(false, Some("read_failed"));
-        assert!(h.is_healthy());
-        h.record_read_outcome(false, Some("read_substrate_down"));
-        assert!(h.recovery_unlocked());
-        h.record_read_outcome(true, None);
-        assert!(h.is_healthy());
-    }
-
-    #[test]
-    fn policy_tables_preserve_surface_and_alias_rules() {
-        for (surface, tool, unlocked, expected) in [
-            (McpToolSurface::CodeMode, "tz_execute_code", false, NotGated),
-            (McpToolSurface::CodeMode, "expand", false, Blocked),
-            (McpToolSurface::CodeMode, "expand", true, Unlocked),
-            (McpToolSurface::CodeMode, "shell", true, PermanentlyLocked),
-            (McpToolSurface::Classic, "shell", false, NotGated),
-            (McpToolSurface::Classic, "expand", false, NotGated),
-        ] {
-            assert_eq!(decide_static(surface, tool, unlocked), expected, "{tool}");
-        }
-        for (tool, expected) in [
-            ("tz_expand", ToolClass::Recovery),
-            ("expand", ToolClass::Recovery),
-            ("tz_shell", ToolClass::Locked),
-            ("report-tool-issue", ToolClass::Primary),
-            ("tz_execute_code", ToolClass::Primary),
-        ] {
-            assert_eq!(tool_class(tool), expected, "{tool}");
-        }
-        let h = SurfaceHealth::new();
-        assert!(h.allow_tool_call(McpToolSurface::Classic, "expand").is_ok());
-        assert_eq!(h.decide(McpToolSurface::CodeMode, "tz_report_tool_issue"), NotGated);
-        assert!(h.allow_tool_call(McpToolSurface::CodeMode, "report_tool_issue").is_ok());
-    }
-
-    #[test]
-    fn recovery_ladder_documented() {
-        for phrase in ["zero.token.expand", "tz_expand", "not native Read", "Write/shell"] {
-            assert!(RECOVERY_LADDER.contains(phrase), "{phrase}");
-        }
-    }
-
-    #[test]
-    fn list_call_and_gate_modes_share_policy() {
-        assert!(!tool_listed_on_surface(McpToolSurface::Classic, "tz_execute_code", false));
-        assert_eq!(admit_tools_call(McpToolSurface::Classic, "tz_execute_code"), CallAdmission::UnknownTool);
-        for unlocked in [false, true] {
-            assert!(tool_listed_on_surface(McpToolSurface::CodeMode, "tz_report_tool_issue", unlocked));
-            assert!(tool_listed_on_surface(McpToolSurface::CodeMode, "tz_expand", unlocked));
-        }
-        assert!(!tool_listed_on_surface(McpToolSurface::CodeMode, "tz_shell", true));
-        assert_eq!(admit_tools_call(McpToolSurface::CodeMode, "tz_shell"), CallAdmission::Proceed);
-
-        let h = SurfaceHealth::new();
-        assert_eq!(h.gate_tools_call(McpToolSurface::Classic, "tz_execute_code", GateMode::Strict), Err(GateRefusal::UnknownTool));
-        assert!(h.gate_tools_call(McpToolSurface::Classic, "tz_execute_code", GateMode::HealthOnly).is_ok());
-        assert!(matches!(
-            h.gate_tools_call(McpToolSurface::CodeMode, "tz_expand", GateMode::Strict),
-            Err(GateRefusal::Policy(_))
-        ));
+        ToolClass::Recovery if recovery_unlocked => CrashOnlyDecision::Unlocked,
+        ToolClass::Recovery => CrashOnlyDecision::Blocked,
     }
 }

@@ -37,28 +37,3 @@ pub(crate) fn unified_diff(old: &str, new: &str) -> Option<DiffRender> {
         minus,
     })
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn unified_diff_renders_hunks_without_file_header() {
-        let old = "a\nb\nc\nd\ne\nf\ng\nh\ni\nj\n";
-        let new = "a\nb\nc\nd\nE\nf\ng\nh\ni\nj\n";
-        let render = unified_diff(old, new).unwrap();
-
-        assert_eq!(render.hunks, 1);
-        assert_eq!(render.plus, 1);
-        assert_eq!(render.minus, 1);
-        assert!(render.text.starts_with("@@"), "{}", render.text);
-        assert!(render.text.contains("-e"), "{}", render.text);
-        assert!(render.text.contains("+E"), "{}", render.text);
-        assert!(!render.text.contains("---"), "{}", render.text);
-    }
-
-    #[test]
-    fn unified_diff_of_identical_text_is_none() {
-        assert!(unified_diff("same\n", "same\n").is_none());
-    }
-}

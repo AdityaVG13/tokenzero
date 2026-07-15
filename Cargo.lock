@@ -2861,6 +2861,7 @@ dependencies = [
  "fastmcp-rust",
  "fs4",
  "globset",
+ "memchr",
  "proptest",
  "rquickjs",
  "serde",

@@ -26,7 +26,11 @@ pub(crate) fn is_symlink(path: &Path) -> bool {
 }
 
 fn sorted_entries(path: &Path) -> Option<Vec<PathBuf>> {
-    let mut entries: Vec<PathBuf> = fs::read_dir(path).ok()?.flatten().map(|entry| entry.path()).collect();
+    let mut entries: Vec<PathBuf> = fs::read_dir(path)
+        .ok()?
+        .flatten()
+        .map(|entry| entry.path())
+        .collect();
     entries.sort();
     Some(entries)
 }
@@ -217,7 +221,8 @@ pub(crate) fn collect_search(
     }
     if current.is_file() {
         stats.visited_files += 1;
-        if let Ok(text) = fs::read_to_string(current) {
+        if let Ok(bytes) = fs::read(current) {
+            let text = String::from_utf8_lossy(&bytes);
             let before = matches.len();
             let path_display = current.display().to_string();
             let rel_display = current
@@ -271,6 +276,7 @@ pub(crate) fn collect_search(
     }
 }
 
+#[derive(Debug)]
 pub(crate) enum RgFailure {
     /// rg rejected the pattern (regex parse error); a tool error, not a
     /// fallback, because the internal scanner's substring semantics would
@@ -306,20 +312,20 @@ pub(crate) fn rg_search(
             break;
         }
         let mut command = std::process::Command::new(rg);
-        command
-            .arg("--line-number")
-            .arg("--no-heading")
-            .arg("--color=never")
-            .arg("--no-messages")
-            .arg("--hidden")
-            .arg("--no-ignore")
-            // A single-file root would otherwise omit the path column.
-            .arg("--with-filename");
+        command.args([
+            "--line-number",
+            "--no-heading",
+            "--color=never",
+            "--no-messages",
+            "--hidden",
+            "--no-ignore",
+            "--with-filename",
+        ]);
         // Mirror the internal scanner's skip list (`should_skip` with hidden
         // entries excluded): `!.*` also keeps the `.tokenzero` recovery cache
         // out of results.
         for skip in ["!.*", "!target", "!__pycache__"] {
-            command.arg("--glob").arg(skip);
+            command.args(["--glob", skip]);
         }
         if tool == "find" {
             command.arg("--fixed-strings");

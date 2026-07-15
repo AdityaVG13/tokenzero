@@ -63,6 +63,12 @@ Project-local mirror events can be enabled at:
 
 The default event schema records token counts, refs, latency, cache hits, recovery cost, and health flags. It does not record raw code, raw shell output, secrets, or daemon artifacts.
 
+### Local Pulse versus shareable telemetry
+
+Pulse is local observability; it is not the default-off shareable telemetry permission. Existing Pulse JSONL/SQLite, ToolMetrics, and response-ledger accounting continue locally regardless of `TOKENZERO_TELEMETRY`. The shareable dry-run payload contains only `schema=tokenzero.telemetry.v1`, current crate `version`, `raw_tokens`, and `saved_tokens`. Inspect it with `tokenzero session-ledger inspect --json`; `--telemetry` opts in, `--no-telemetry` opts out with precedence, and `TOKENZERO_TELEMETRY` accepts only `1/on/true/yes` case-insensitively. It is off otherwise. Inspection always reports `exporter=none`: no exporter or upload path exists, and enabling it sends nothing.
+
+`TOKENZERO_PULSE_DISABLED` is not read by the current Pulse implementation and therefore does **not** disable local Pulse recording. Do not rely on that variable; control whether a caller records Pulse events at that caller's integration surface. This documents the previously implicit name/behavior mismatch rather than implying an unsupported global kill switch.
+
 Pulse uses JSONL as the source of truth. SQLite is a locked, rebuildable query cache at `.tokenzero/pulse/events.sqlite` or `~/.tokenzero/pulse/events.sqlite`. Reconciliation is one-way from JSONL into SQLite and guarded by `.tokenzero/pulse/sync.lock`. Sync, import, and export commands wait briefly for transient lock contention before returning a clear lock-held error. Event appends wait longer, call `sync_data` before returning, and still fail open for normal TokenZero tool responses. Full snapshot exports use temp files, fsync, and atomic persist.
 
 When Pulse sync/import/export/doctor commands are run with `--json`, failures return a machine-readable error body before exiting non-zero. Lock contention uses `schema_version=tokenzero.pulse.error.v1`, `ok=false`, `error_kind=would_block`, `retryable=true`, and an `error` string containing the held lock path.

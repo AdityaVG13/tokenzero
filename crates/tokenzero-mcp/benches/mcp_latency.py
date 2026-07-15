@@ -19,6 +19,11 @@ import time
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[3]
+import sys
+sys.path.insert(0, str(REPO / "benchmarks"))
+from bench_common import acquire_guard as _acquire_guard, find_ref, percentile, release_guard as _release_guard, summary
+acquire_guard = lambda command: _acquire_guard(GUARD, REPO, command)
+release_guard = lambda: _release_guard(GUARD)
 BIN = REPO / "target/debug/tokenzero"
 EVIDENCE = Path(__file__).with_suffix("").with_name("mcp_latency")
 GUARD = Path("/tmp/zerostack-heavy-process.guard")
@@ -26,50 +31,12 @@ WARMUPS = 10
 SAMPLES = 50
 
 
-def acquire_guard(command: str) -> None:
-    try:
-        GUARD.mkdir()
-    except FileExistsError:
-        try:
-            pid = int((GUARD / "pid").read_text().strip())
-            os.kill(pid, 0)
-        except (FileNotFoundError, ValueError, ProcessLookupError):
-            for child in GUARD.iterdir():
-                if child.is_file():
-                    child.unlink()
-            GUARD.rmdir()
-            GUARD.mkdir()
-        except PermissionError as exc:
-            raise SystemExit(f"heavy-process guard owner cannot be inspected: {exc}")
-        else:
-            raise SystemExit(f"heavy-process guard held by live pid {pid}")
-    (GUARD / "pid").write_text(f"{os.getpid()}\n")
-    (GUARD / "repository").write_text(f"{REPO}\n")
-    (GUARD / "command").write_text(f"{command}\n")
-    (GUARD / "started_at").write_text(time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()) + "\n")
 
 
-def release_guard() -> None:
-    if not GUARD.exists() or not (GUARD / "pid").exists():
-        return
-    if (GUARD / "pid").read_text().strip() != str(os.getpid()):
-        return
-    for child in GUARD.iterdir():
-        if child.is_file():
-            child.unlink()
-    GUARD.rmdir()
 
 
-def percentile(values: list[float], q: float) -> float:
-    ordered = sorted(values)
-    index = (len(ordered) - 1) * q
-    lo = int(index)
-    hi = min(lo + 1, len(ordered) - 1)
-    return ordered[lo] + (ordered[hi] - ordered[lo]) * (index - lo)
 
 
-def summary(values: list[float]) -> dict[str, float | int]:
-    return {"n": len(values), "p50_ms": round(percentile(values, .50), 6), "p95_ms": round(percentile(values, .95), 6), "mean_ms": round(statistics.fmean(values), 6)}
 
 
 def write_comparison() -> Path:
@@ -101,7 +68,7 @@ def write_comparison() -> Path:
         losses.append("No MCP wall p50 or p95 regression was observed; component movements are retained rather than cherry-picked.")
     result = {
         "schema": "tokenzero.mcp-latency-comparison.v1",
-        "change": "remove per-acquisition durability barriers for Pulse advisory-lock diagnostic metadata; advisory locking and JSONL append remain",
+        "change": "remove per-acquisition durability barriers for Pulse advisory-lock diagnostics and run auto-backend literal find on direct file roots in-process; advisory locking, JSONL append, and explicit-rg behavior remain",
         "proven_hotspot": "Pulse persistence exceeded 20% of baseline MCP p50 for read/find/expand",
         "operations": operations,
         "losses": losses,
@@ -169,22 +136,6 @@ class McpClient:
             raise RuntimeError(f"MCP server exited with {rc}")
 
 
-def find_ref(value: object) -> str | None:
-    if isinstance(value, str):
-        match = re.search(r"(?:tz|fz)://[^\s]+", value)
-        if match:
-            return match.group(0)
-    if isinstance(value, dict):
-        for item in value.values():
-            found = find_ref(item)
-            if found:
-                return found
-    if isinstance(value, list):
-        for item in value:
-            found = find_ref(item)
-            if found:
-                return found
-    return None
 
 
 def cli_sample(command: list[str]) -> float:
@@ -204,6 +155,7 @@ def run(label: str) -> Path:
     try:
         with tempfile.TemporaryDirectory(prefix="tokenzero-mcp-latency-") as raw_tmp:
             root = Path(raw_tmp)
+            os.environ["TOKENZERO_REF_INDEX_PATH"] = str(root / "ref-index")
             corpus = root / "corpus.txt"
             corpus.write_text("needle TokenZero latency corpus\n" * 256)
             cache = root / "cache.json"

@@ -21,6 +21,11 @@ from pathlib import Path
 from typing import Any
 
 REPO = Path(__file__).resolve().parents[3]
+import sys
+sys.path.insert(0, str(REPO / "benchmarks"))
+from bench_common import find_ref as _find_ref, percentile, summary as _summary
+summary = lambda values: _summary(values, include_p99=True)
+find_ref = lambda value: _find_ref(value, pattern=REF_RE.pattern)
 BIN = Path(os.environ.get("TOKENZERO_EXPAND_BENCH_BIN", REPO / "target/debug/tokenzero"))
 EVIDENCE = Path(__file__).with_suffix("") / "evidence.json"
 SIZE_CLASSES = (
@@ -33,39 +38,10 @@ SIZE_CLASSES = (
 REF_RE = re.compile(r"(?:tz|fz)://[A-Za-z0-9._/-]+")
 
 
-def percentile(values: list[float], q: float) -> float:
-    ordered = sorted(values)
-    index = (len(ordered) - 1) * q
-    lo = int(index)
-    hi = min(lo + 1, len(ordered) - 1)
-    return ordered[lo] + (ordered[hi] - ordered[lo]) * (index - lo)
 
 
-def summary(values: list[float]) -> dict[str, float | int]:
-    return {
-        "n": len(values),
-        "p50_ms": round(percentile(values, 0.50), 6),
-        "p95_ms": round(percentile(values, 0.95), 6),
-        "p99_ms": round(percentile(values, 0.99), 6),
-        "mean_ms": round(statistics.fmean(values), 6),
-    }
 
 
-def find_ref(value: object) -> str | None:
-    if isinstance(value, str):
-        match = REF_RE.search(value)
-        return match.group(0) if match else None
-    if isinstance(value, dict):
-        for item in value.values():
-            found = find_ref(item)
-            if found:
-                return found
-    if isinstance(value, list):
-        for item in value:
-            found = find_ref(item)
-            if found:
-                return found
-    return None
 
 
 def write_payload(path: Path, size: int, label: str) -> str:

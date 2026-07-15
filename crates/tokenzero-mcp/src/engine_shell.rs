@@ -1,6 +1,6 @@
 use super::*;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread;
 use tokenzero_runtime::run_command_with_policy_observer;
 
@@ -14,6 +14,14 @@ struct BackgroundJobState {
 
 const MAX_BACKGROUND_JOBS: usize = 256;
 
+fn shell_argv(command: &str) -> Vec<String> {
+    if contains_platform_shell_syntax(command, tokenzero_runtime::current_platform()) {
+        vec![command.to_string()]
+    } else {
+        split_command_string(command)
+    }
+}
+
 #[derive(Debug)]
 struct BackgroundJob {
     id: String,
@@ -23,10 +31,7 @@ struct BackgroundJob {
 }
 
 fn background_job_is_complete(job: &BackgroundJob) -> bool {
-    matches!(
-        lock(&job.state).status,
-        "exited" | "failed"
-    )
+    matches!(lock(&job.state).status, "exited" | "failed")
 }
 
 #[derive(Debug, Default)]
@@ -54,6 +59,49 @@ fn store_shell_payload(
 ) -> StoredPayload {
     let source = PathBuf::from(format!("shell:{kind}:{digest}"));
     store.store_payload_deferred(text, content_type, Some(&source), None, None)
+}
+
+fn store_shell_outputs(
+    store: &mut RecoveryStore,
+    stdout: &str,
+    stderr: &str,
+    combined: &str,
+    digest: &str,
+) -> (StoredPayload, StoredPayload, StoredPayload) {
+    (
+        store_shell_payload(store, stdout, digest, "stdout", ContentType::ShellOutput),
+        store_shell_payload(store, stderr, digest, "stderr", ContentType::ShellOutput),
+        store_shell_payload(
+            store,
+            combined,
+            digest,
+            "combined",
+            ContentType::ShellOutput,
+        ),
+    )
+}
+
+fn shell_ref(kind: &str, stored: &StoredPayload, bytes: usize) -> tokenzero_core::RefRecord {
+    ref_record(kind, stored.blob_ref.clone(), bytes)
+}
+
+macro_rules! shell_stream_capture {
+    ($display:expr, $capture:expr, $stored:expr) => {
+        json!({
+            "bytes": $display.len(),
+            "bytes_seen": $capture.bytes_seen,
+            "captured_bytes": $capture.captured_bytes,
+            "truncated": $capture.truncated,
+            "spill_path": $capture.spill_path,
+            "spill_bytes": $capture.spill_bytes,
+            "sha256": $stored
+                .blob_ref
+                .strip_prefix("tz://blob/")
+                .unwrap_or(&$stored.blob_ref),
+            "sha256_scope": "captured_display",
+            "ref": $stored.blob_ref
+        })
+    };
 }
 
 impl BackgroundJobRegistry {
@@ -236,12 +284,7 @@ impl TokenZeroEngine {
                 return Err(format!("cwd is outside allowed roots: {}", cwd.display()));
             }
         }
-        let run_argv =
-            if contains_platform_shell_syntax(command, tokenzero_runtime::current_platform()) {
-                vec![command.to_string()]
-            } else {
-                split_command_string(command)
-            };
+        let run_argv = shell_argv(command);
         let child_env = inner_env();
         background_jobs().start(
             run_argv,
@@ -254,11 +297,6 @@ impl TokenZeroEngine {
 
     pub(crate) fn shell_job(&self, id: &str) -> Result<Value, String> {
         background_jobs().poll(id)
-    }
-
-    #[cfg(test)]
-    pub(crate) fn shutdown_background_jobs_for_test(&self) {
-        background_jobs().terminate_all();
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -341,14 +379,12 @@ impl TokenZeroEngine {
         );
         let mut store = self.recovery_store();
         let command_digest = sha256_hex(display_command);
-        let stdout_stored = store_shell_payload(
-            &mut store, &stdout_display, &command_digest, "stdout", ContentType::ShellOutput,
-        );
-        let stderr_stored = store_shell_payload(
-            &mut store, &stderr_display, &command_digest, "stderr", ContentType::ShellOutput,
-        );
-        let combined_stored = store_shell_payload(
-            &mut store, &output, &command_digest, "combined", ContentType::ShellOutput,
+        let (stdout_stored, stderr_stored, combined_stored) = store_shell_outputs(
+            &mut store,
+            &stdout_display,
+            &stderr_display,
+            &output,
+            &command_digest,
         );
         let render = render_shell(ShellRenderInput {
             command: display_command,
@@ -370,28 +406,8 @@ impl TokenZeroEngine {
             "env_summary": env_summary,
             "timing": {"duration_ms": result.duration_ms, "timed_out": result.timed_out},
             "exit_code": result.exit_code,
-            "stdout": {
-                "bytes": stdout_display.len(),
-                "bytes_seen": result.stdout_capture.bytes_seen,
-                "captured_bytes": result.stdout_capture.captured_bytes,
-                "truncated": result.stdout_capture.truncated,
-                "spill_path": result.stdout_capture.spill_path,
-                "spill_bytes": result.stdout_capture.spill_bytes,
-                "sha256": stdout_stored.blob_ref.strip_prefix("tz://blob/").unwrap_or(&stdout_stored.blob_ref),
-                "sha256_scope": "captured_display",
-                "ref": stdout_stored.blob_ref
-            },
-            "stderr": {
-                "bytes": stderr_display.len(),
-                "bytes_seen": result.stderr_capture.bytes_seen,
-                "captured_bytes": result.stderr_capture.captured_bytes,
-                "truncated": result.stderr_capture.truncated,
-                "spill_path": result.stderr_capture.spill_path,
-                "spill_bytes": result.stderr_capture.spill_bytes,
-                "sha256": stderr_stored.blob_ref.strip_prefix("tz://blob/").unwrap_or(&stderr_stored.blob_ref),
-                "sha256_scope": "captured_display",
-                "ref": stderr_stored.blob_ref
-            },
+            "stdout": shell_stream_capture!(&stdout_display, result.stdout_capture, stdout_stored),
+            "stderr": shell_stream_capture!(&stderr_display, result.stderr_capture, stderr_stored),
             "combined": {
                 "bytes": output.len(),
                 "truncated": streams_truncated,
@@ -409,13 +425,17 @@ impl TokenZeroEngine {
         });
         let capture_text = serde_json::to_string(&capture).unwrap_or_else(|_| "{}".to_string());
         let capture_stored = store_shell_payload(
-            &mut store, &capture_text, &command_digest, "capture", ContentType::JsonConfig,
+            &mut store,
+            &capture_text,
+            &command_digest,
+            "capture",
+            ContentType::JsonConfig,
         );
         let mut refs = vec![
-            ref_record("stdout", stdout_stored.blob_ref.clone(), stdout_display.len()),
-            ref_record("stderr", stderr_stored.blob_ref.clone(), stderr_display.len()),
-            ref_record("combined", combined_stored.blob_ref.clone(), output.len()),
-            ref_record("capture", capture_stored.blob_ref.clone(), capture_text.len()),
+            shell_ref("stdout", &stdout_stored, stdout_display.len()),
+            shell_ref("stderr", &stderr_stored, stderr_display.len()),
+            shell_ref("combined", &combined_stored, output.len()),
+            shell_ref("capture", &capture_stored, capture_text.len()),
         ];
         let persisted = persist_refs(&mut store, &mut refs);
         if let Some(error) = persisted.error {

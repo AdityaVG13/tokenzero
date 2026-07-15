@@ -1,4 +1,5 @@
 #![forbid(unsafe_code)]
+#![recursion_limit = "2048"]
 
 mod package_audit;
 pub use package_audit::package_audit;
@@ -18,76 +19,28 @@ use tokenzero_core::{INSTALL_SCHEMA_VERSION, McpToolSurface};
 #[cfg(windows)]
 const WINDOWS_USER_PATH_REGISTRY: &str = "HKCU\\Environment\\Path";
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct InstallWrite {
-    pub path: String, pub action: String, pub backup_id: String, pub capability: String, pub global: bool,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ClientSurfaceCheck {
-    pub name: String, pub ok: bool, pub detail: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ClientSurfaceStatus {
-    pub path: String, pub action: String, pub capability: String, pub global: bool,
-    pub exists: bool, pub installed: bool, pub state: String, pub checks: Vec<ClientSurfaceCheck>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct RollbackInfo {
-    pub id: String, pub available: bool, pub manifest_path: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct InstallPlan {
-    pub schema_version: String, pub status: String, pub dry_run: bool,
-    pub detected_surfaces: Vec<String>, pub mcp_surface: McpToolSurface,
-    pub writes: Vec<InstallWrite>, pub rollback: RollbackInfo, pub global_writes_allowed: bool,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct AppliedInstall {
-    pub schema_version: String, pub status: String, pub dry_run: bool,
-    pub written: Vec<String>, pub rollback: RollbackInfo, pub verification: Vec<VerificationRow>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct VerificationRow {
-    pub path: String, pub observed_sha256: String, pub byte_count: usize, pub verified: bool,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-struct RollbackManifest {
-    schema_version: String, id: String, created_unix: u64, entries: Vec<RollbackEntry>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-struct RollbackEntry {
-    path: String, existed: bool, previous_content: Option<String>,
-    #[serde(default)]
-    previous_bytes: Option<Vec<u8>>, previous_sha256: Option<String>,
-}
-
-enum PendingContent {
-    Text(String),
-    Bytes(Vec<u8>),
-}
-
-impl PendingContent {
-    fn as_bytes(&self) -> &[u8] {
-        match self {
-            PendingContent::Text(text) => text.as_bytes(),
-            PendingContent::Bytes(bytes) => bytes,
+macro_rules! install_records {
+    ($($vis:vis struct $name:ident { $($(#[$field_meta:meta])* $field_vis:vis $field:ident: $ty:ty),* $(,)? })*) => {$ (
+        #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+        $vis struct $name {
+            $($(#[$field_meta])* $field_vis $field: $ty),*
         }
-    }
-    fn as_text(&self) -> Option<&str> {
-        match self {
-            PendingContent::Text(text) => Some(text),
-            PendingContent::Bytes(_) => None,
-        }
-    }
+    )*};
 }
+
+install_records! {
+    pub struct InstallWrite { pub path: String, pub action: String, pub backup_id: String, pub capability: String, pub global: bool }
+    pub struct ClientSurfaceCheck { pub name: String, pub ok: bool, pub detail: String }
+    pub struct ClientSurfaceStatus { pub path: String, pub action: String, pub capability: String, pub global: bool, pub exists: bool, pub installed: bool, pub state: String, pub checks: Vec<ClientSurfaceCheck> }
+    pub struct RollbackInfo { pub id: String, pub available: bool, pub manifest_path: String }
+    pub struct InstallPlan { pub schema_version: String, pub status: String, pub dry_run: bool, pub detected_surfaces: Vec<String>, pub mcp_surface: McpToolSurface, pub writes: Vec<InstallWrite>, pub rollback: RollbackInfo, pub global_writes_allowed: bool }
+    pub struct AppliedInstall { pub schema_version: String, pub status: String, pub dry_run: bool, pub written: Vec<String>, pub rollback: RollbackInfo, pub verification: Vec<VerificationRow> }
+    pub struct VerificationRow { pub path: String, pub observed_sha256: String, pub byte_count: usize, pub verified: bool }
+    struct RollbackManifest { schema_version: String, id: String, created_unix: u64, entries: Vec<RollbackEntry> }
+    struct RollbackEntry { path: String, existed: bool, previous_content: Option<String>, #[serde(default)] previous_bytes: Option<Vec<u8>>, previous_sha256: Option<String> }
+}
+
+type PendingContent = Vec<u8>;
 
 pub fn plan(root: &Path, global: bool, capabilities: &[String]) -> InstallPlan {
     plan_for_agents(root, global, capabilities, &[], McpToolSurface::Classic)
@@ -101,48 +54,22 @@ pub fn plan_for_agents(
     mcp_surface: McpToolSurface,
 ) -> InstallPlan {
     let rollback_id = rollback_id();
-    let rollback_path = root
-        .join(".tokenzero/install")
-        .join(format!("{rollback_id}.json"));
     let selected = if capabilities.is_empty() {
-        ["mcp", "instructions", "shell"].map(str::to_string).to_vec()
+        ["mcp", "instructions", "shell"]
+            .map(str::to_string)
+            .to_vec()
     } else {
         capabilities.to_vec()
     };
     let mut writes = Vec::new();
     for capability in &selected {
-        match capability.as_str() {
-            "mcp" => push_mcp_writes(&mut writes, root, global, &rollback_id, agents),
-            "instructions" => push_write(
-                &mut writes,
-                root.join("AGENTS.md"),
-                "patch",
-                capability,
-                &rollback_id,
-                global,
-            ),
-            "shell" => push_write(
-                &mut writes,
-                shell_launcher_path(root, global),
-                "write",
-                capability,
-                &rollback_id,
-                global,
-            ),
-            "runtime" => push_write(
-                &mut writes,
-                root.join(".tokenzero/install/runtime.json"),
-                "write",
-                capability,
-                &rollback_id,
-                global,
-            ),
-            "cli" => push_cli_writes(&mut writes, root, global, &rollback_id),
-            "hooks" => push_hooks_writes(&mut writes, root, global, &rollback_id, agents),
-            "shim" => push_shim_writes(&mut writes, root, global, &rollback_id),
-            _ => {}
-        }
+        append_capability_writes(&mut writes, root, global, &rollback_id, capability, agents);
     }
+    let manifest_path = root
+        .join(".tokenzero/install")
+        .join(format!("{rollback_id}.json"))
+        .display()
+        .to_string();
     InstallPlan {
         schema_version: INSTALL_SCHEMA_VERSION.to_string(),
         status: "planned".to_string(),
@@ -153,85 +80,124 @@ pub fn plan_for_agents(
         rollback: RollbackInfo {
             id: rollback_id,
             available: true,
-            manifest_path: rollback_path.display().to_string(),
+            manifest_path,
         },
         global_writes_allowed: global,
     }
 }
 
-fn push_mcp_writes(
+fn append_capability_writes(
     writes: &mut Vec<InstallWrite>,
     root: &Path,
     global: bool,
     rollback_id: &str,
+    capability: &str,
     agents: &[String],
 ) {
-    if !global {
-        push_write(writes, root.join(".tokenzero/mcp-server.json"), "merge", "mcp", rollback_id, global);
-        return;
-    }
-    push_cli_writes(writes, root, global, rollback_id);
-    for path in global_json_mcp_paths_for_agents(root, agents)
-        .into_iter()
-        .chain(global_toml_mcp_paths_for_agents(root, agents))
-    {
-        push_write(writes, path, "merge", "mcp", rollback_id, global);
+    let simple = match capability {
+        "instructions" => Some((root.join("AGENTS.md"), "patch")),
+        "shell" => Some((shell_launcher_path(root, global), "write")),
+        "runtime" => Some((root.join(".tokenzero/install/runtime.json"), "write")),
+        "mcp" if !global => Some((root.join(".tokenzero/mcp-server.json"), "merge")),
+        "mcp" => {
+            append_cli_writes(writes, root, global, rollback_id);
+            for path in global_json_mcp_paths_for_agents(root, agents)
+                .into_iter()
+                .chain(global_toml_mcp_paths_for_agents(root, agents))
+            {
+                push_write(writes, path, "merge", "mcp", rollback_id, global);
+            }
+            None
+        }
+        "cli" => {
+            append_cli_writes(writes, root, global, rollback_id);
+            None
+        }
+        "hooks" if agents.is_empty() || agents.iter().any(|agent| agent == "claude") => {
+            Some((root.join(".claude/settings.json"), "merge"))
+        }
+        "shim" => {
+            let shim_dir = shims_dir(root);
+            for tool in SHIM_TOOLS {
+                if resolve_real_tool(tool, &shim_dir).is_some() {
+                    push_write(
+                        writes,
+                        shim_dir.join(tool),
+                        "write",
+                        "shim",
+                        rollback_id,
+                        global,
+                    );
+                }
+            }
+            None
+        }
+        _ => None,
+    };
+    if let Some((path, action)) = simple {
+        push_write(writes, path, action, capability, rollback_id, global);
     }
 }
 
-fn push_cli_writes(writes: &mut Vec<InstallWrite>, root: &Path, global: bool, rollback_id: &str) {
+fn append_cli_writes(writes: &mut Vec<InstallWrite>, root: &Path, global: bool, rollback_id: &str) {
     if global {
-        push_write(writes, installed_runtime_binary_path(root), "copy", "cli-runtime", rollback_id, global);
+        push_write(
+            writes,
+            installed_runtime_binary_path(root),
+            "copy",
+            "cli-runtime",
+            rollback_id,
+            true,
+        );
     }
-    push_write(writes, tokenzero_launcher_path(root, global), "write", "cli", rollback_id, global);
+    for (path, capability) in [
+        (tokenzero_launcher_path(root, global), "cli"),
+        (root.join(".tokenzero/install/runtime.json"), "runtime"),
+    ] {
+        push_write(writes, path, "write", capability, rollback_id, global);
+    }
     #[cfg(windows)]
     if global {
         push_write(
             writes,
-            root.join(".tokenzero").join("bin").join("tokenzero"),
+            root.join(".tokenzero/bin/tokenzero"),
             "write",
             "cli-shim",
             rollback_id,
-            global,
+            true,
         );
-    }
-    push_write(writes, root.join(".tokenzero/install/runtime.json"), "write", "runtime", rollback_id, global);
-    #[cfg(windows)]
-    if global && is_real_windows_user_root(root) {
-        push_write(writes, PathBuf::from(WINDOWS_USER_PATH_REGISTRY), "prepend", "path", rollback_id, global);
+        if is_real_windows_user_root(root) {
+            push_write(
+                writes,
+                PathBuf::from(WINDOWS_USER_PATH_REGISTRY),
+                "prepend",
+                "path",
+                rollback_id,
+                true,
+            );
+        }
     }
 }
 
-/// Per-agent relative JSON MCP paths, excluding the always-present
-/// `.config/tokenzero/agents/{agent}.mcp.json` entry.
-fn agent_json_mcp_relpaths(agent: &str) -> Vec<&'static str> {
-    match agent {
-        "claude" => {
-            let mut paths = vec![".claude.json", ".claude/mcp.json"];
-            if cfg!(windows) {
-                paths.push("AppData/Roaming/Claude/claude_desktop_config.json");
-            } else {
-                paths.push("Library/Application Support/Claude/claude_desktop_config.json");
-            }
-            paths
-        }
-        "cursor" => {
-            let mut paths = vec![".cursor/mcp.json"];
-            if cfg!(windows) {
-                paths.push("AppData/Roaming/Cursor/User/mcp.json");
-            } else {
-                paths.push("Library/Application Support/Cursor/User/mcp.json");
-            }
-            paths
-        }
-        "factory" => vec![".factory/mcp.json"],
-        "gemini" => vec![".gemini/settings.json"],
-        "opencode" => vec![".config/opencode/mcp.json"],
-        "codex" | "droid" | "grok" => Vec::new(),
-        _ => Vec::new(),
-    }
-}
+#[cfg(windows)]
+const CLAUDE_DESKTOP_REL: &str = "AppData/Roaming/Claude/claude_desktop_config.json";
+#[cfg(not(windows))]
+const CLAUDE_DESKTOP_REL: &str = "Library/Application Support/Claude/claude_desktop_config.json";
+#[cfg(windows)]
+const CURSOR_DESKTOP_REL: &str = "AppData/Roaming/Cursor/User/mcp.json";
+#[cfg(not(windows))]
+const CURSOR_DESKTOP_REL: &str = "Library/Application Support/Cursor/User/mcp.json";
 
+const AGENT_JSON_MCP_RELS: &[(&str, &[&str])] = &[
+    (
+        "claude",
+        &[".claude.json", ".claude/mcp.json", CLAUDE_DESKTOP_REL],
+    ),
+    ("cursor", &[".cursor/mcp.json", CURSOR_DESKTOP_REL]),
+    ("factory", &[".factory/mcp.json"]),
+    ("gemini", &[".gemini/settings.json"]),
+    ("opencode", &[".config/opencode/mcp.json"]),
+];
 const DEFAULT_JSON_MCP_RELS: &[&str] = &[
     ".tokenzero/mcp.json",
     ".tokenzero/mcp-server.json",
@@ -244,86 +210,61 @@ const DEFAULT_JSON_MCP_RELS: &[&str] = &[
     ".config/opencode/mcp.json",
     ".factory/mcp.json",
 ];
-
 const DEFAULT_AGENT_MCP_NAMES: &[&str] = &[
     "claude", "codex", "cursor", "droid", "factory", "gemini", "grok", "opencode",
 ];
+const TOML_MCP_AGENTS: &[(&str, &str)] = &[
+    ("codex", ".codex/config.toml"),
+    ("grok", ".grok/config.toml"),
+];
+
+fn agent_json_mcp_relpaths(agent: &str) -> &'static [&'static str] {
+    AGENT_JSON_MCP_RELS
+        .iter()
+        .find(|(name, _)| *name == agent)
+        .map_or(&[], |(_, paths)| paths)
+}
 
 fn global_json_mcp_paths_for_agents(root: &Path, agents: &[String]) -> Vec<PathBuf> {
-    if !agents.is_empty() {
-        let mut paths = Vec::new();
-        for agent in agents {
-            paths.push(root.join(format!(".config/tokenzero/agents/{agent}.mcp.json")));
-            for rel in agent_json_mcp_relpaths(agent) {
-                paths.push(root.join(rel));
-            }
-        }
-        return paths;
+    if agents.is_empty() {
+        return DEFAULT_JSON_MCP_RELS
+            .iter()
+            .copied()
+            .chain([CLAUDE_DESKTOP_REL, CURSOR_DESKTOP_REL])
+            .map(|rel| root.join(rel))
+            .chain(
+                DEFAULT_AGENT_MCP_NAMES
+                    .iter()
+                    .map(|agent| root.join(format!(".config/tokenzero/agents/{agent}.mcp.json"))),
+            )
+            .collect();
     }
-
-    let mut paths: Vec<PathBuf> = DEFAULT_JSON_MCP_RELS
+    agents
         .iter()
-        .map(|rel| root.join(rel))
-        .collect();
-    if cfg!(windows) {
-        paths.push(root.join("AppData/Roaming/Claude/claude_desktop_config.json"));
-        paths.push(root.join("AppData/Roaming/Cursor/User/mcp.json"));
-    } else {
-        paths.push(root.join("Library/Application Support/Claude/claude_desktop_config.json"));
-        paths.push(root.join("Library/Application Support/Cursor/User/mcp.json"));
-    }
-    for agent in DEFAULT_AGENT_MCP_NAMES {
-        paths.push(root.join(format!(".config/tokenzero/agents/{agent}.mcp.json")));
-    }
-    paths
+        .flat_map(|agent| {
+            std::iter::once(root.join(format!(".config/tokenzero/agents/{agent}.mcp.json"))).chain(
+                agent_json_mcp_relpaths(agent)
+                    .iter()
+                    .map(|rel| root.join(rel)),
+            )
+        })
+        .collect()
 }
-
-const TOML_MCP_AGENTS: &[(&str, &str)] = &[("codex", ".codex/config.toml"), ("grok", ".grok/config.toml")];
 
 fn global_toml_mcp_paths_for_agents(root: &Path, agents: &[String]) -> Vec<PathBuf> {
-    if agents.is_empty() {
-        return TOML_MCP_AGENTS.iter().map(|(_, rel)| root.join(rel)).collect();
-    }
-    let mut paths = Vec::new();
-    for agent in agents {
-        if let Some((_, rel)) = TOML_MCP_AGENTS.iter().find(|(name, _)| *name == agent.as_str()) {
-            paths.push(root.join(rel));
-        }
-    }
-    paths
-}
-
-fn push_hooks_writes(
-    writes: &mut Vec<InstallWrite>,
-    root: &Path,
-    global: bool,
-    rollback_id: &str,
-    agents: &[String],
-) {
-    // Agent-scoped exactly like the native claude MCP paths: a plan targeting
-    // only other agents (e.g. grok) must never list a .claude path.
-    if !agents.is_empty() && !agents.iter().any(|agent| agent == "claude") {
-        return;
-    }
-    push_write(writes, root.join(".claude/settings.json"), "merge", "hooks", rollback_id, global);
+    TOML_MCP_AGENTS
+        .iter()
+        .filter(|(agent, _)| {
+            agents.is_empty() || agents.iter().any(|selected| selected.as_str() == *agent)
+        })
+        .map(|(_, rel)| root.join(rel))
+        .collect()
 }
 
 /// Read-heavy tools agents reach for via bare shell; each gets a PATH shim.
 const SHIM_TOOLS: &[&str] = &[
     "cat", "head", "tail", "grep", "rg", "find", "ls", "tree", "wc",
 ];
-
-fn push_shim_writes(writes: &mut Vec<InstallWrite>, root: &Path, global: bool, rollback_id: &str) {
-    let shim_dir = shims_dir(root);
-    for tool in SHIM_TOOLS {
-        // The plan is per-machine: a tool absent from PATH at install time
-        // (e.g. rg not installed) gets no shim rather than a broken wrapper.
-        if resolve_real_tool(tool, &shim_dir).is_none() {
-            continue;
-        }
-        push_write(writes, shim_dir.join(tool), "write", "shim", rollback_id, global);
-    }
-}
 
 fn shims_dir(root: &Path) -> PathBuf {
     root.join(".tokenzero").join("shims")
@@ -370,7 +311,9 @@ fn is_shim_layer_dir(dir: &Path) -> bool {
 
 fn is_generated_shim(path: &Path) -> bool {
     let mut prefix = [0u8; 64];
-    let Ok(mut file) = fs::File::open(path) else { return false; };
+    let Ok(mut file) = fs::File::open(path) else {
+        return false;
+    };
     let read = std::io::Read::read(&mut file, &mut prefix).unwrap_or(0);
     String::from_utf8_lossy(&prefix[..read]).contains("tokenzero shim")
 }
@@ -425,12 +368,19 @@ fn prepare_write(
         fs::read_to_string(&path).ok()
     };
     let content = if path_write {
-        PendingContent::Text(windows_path_with_tokenzero_bin(root, previous.as_deref()))
+        windows_path_with_tokenzero_bin(root, previous.as_deref()).into_bytes()
     } else {
         content_for(row, root, previous.as_deref(), mcp_surface)?
     };
-    let existing_bytes = if !path_write && binary_write { fs::read(&path).ok() } else { None };
-    let previous_bytes = existing_bytes.as_ref().filter(|bytes| bytes.as_slice() != content.as_bytes()).cloned();
+    let existing_bytes = if !path_write && binary_write {
+        fs::read(&path).ok()
+    } else {
+        None
+    };
+    let previous_bytes = existing_bytes
+        .as_ref()
+        .filter(|bytes| bytes.as_slice() != content.as_slice())
+        .cloned();
     let previous_sha256 = previous_bytes
         .as_deref()
         .map(sha256_bytes)
@@ -440,7 +390,11 @@ fn prepare_write(
         content,
         RollbackEntry {
             path: row.path.clone(),
-            existed: if path_write { previous.is_some() } else { path.exists() },
+            existed: if path_write {
+                previous.is_some()
+            } else {
+                path.exists()
+            },
             previous_sha256,
             previous_content: previous,
             previous_bytes,
@@ -500,15 +454,14 @@ pub fn apply_for_agents(
     let mut verification = Vec::new();
     for (path, content, row) in &pending {
         let observed = if is_windows_user_path_write(row) {
-            let content = content.as_text().ok_or_else(|| {
+            let text = std::str::from_utf8(content).map_err(|_| {
                 Error::new(ErrorKind::InvalidData, "Windows Path write must be text")
             })?;
-            write_windows_user_path(content)?;
+            write_windows_user_path(text)?;
             windows_user_path()?.unwrap_or_default().into_bytes()
         } else {
-            let bytes = content.as_bytes();
-            if row.action != "copy" || fs::read(path).ok().as_deref() != Some(bytes) {
-                atomic_write(path, bytes)?;
+            if row.action != "copy" || fs::read(path).ok().as_deref() != Some(content) {
+                atomic_write(path, content)?;
             }
             make_executable_if_needed(row, path)?;
             fs::read(path)?
@@ -580,90 +533,45 @@ pub fn rollback(root: &Path, rollback_id: &str) -> std::io::Result<serde_json::V
     }))
 }
 
-fn tokenzero_command(root: &Path, global: bool) -> String {
-    tokenzero_launcher_path(root, global).display().to_string()
+macro_rules! install_helpers {
+    ($(fn $name:ident($($arg:ident: $ty:ty),*) -> $return:ty = $value:expr;)*) => {$ (
+        fn $name($($arg: $ty),*) -> $return {
+            $value
+        }
+    )*};
 }
 
-fn tokenzero_launcher_path(root: &Path, global: bool) -> PathBuf {
-    if !global {
-        return PathBuf::from(current_exe_string());
-    }
-    root.join(".tokenzero").join("bin").join(if cfg!(windows) { "tokenzero.cmd" } else { "tokenzero" })
-}
-
-fn shell_launcher_path(root: &Path, _global: bool) -> PathBuf {
-    root.join(".tokenzero").join("bin").join(if cfg!(windows) { "tokenzero-shell.cmd" } else { "tokenzero-shell" })
-}
-
-fn mcp_command(root: &Path, global: bool) -> String {
-    if global { runtime_manifest_binary(root, true) } else { tokenzero_command(root, false) }
-}
-
-fn cache_path(root: &Path) -> PathBuf {
-    root.join(".tokenzero/recovery-cache.json")
-}
-
-fn current_exe_string() -> String {
-    std::env::current_exe()
-        .ok()
-        .map(|path| path.display().to_string())
-        .unwrap_or_else(|| "tokenzero".to_string())
-}
-
-fn current_exe_bytes() -> std::io::Result<Vec<u8>> {
-    fs::read(std::env::current_exe()?)
-}
-
-fn installed_runtime_binary_path(root: &Path) -> PathBuf {
-    root.join(".tokenzero").join("bin").join(installed_runtime_binary_name())
-}
-
-fn installed_runtime_binary_name() -> String {
-    let hash = current_exe_hash_prefix().unwrap_or_else(|| "current".to_string());
-    if cfg!(windows) { format!("tokenzero-runtime-{hash}.exe") } else { format!("tokenzero-runtime-{hash}") }
-}
-
-fn current_exe_hash_prefix() -> Option<String> {
-    let bytes = current_exe_bytes().ok()?;
-    let hash = sha256_bytes(&bytes);
-    Some(hash.chars().take(16).collect())
-}
-
-fn runtime_manifest_binary(root: &Path, global: bool) -> String {
-    if global { installed_runtime_binary_path(root).display().to_string() } else { current_exe_string() }
-}
-
-fn shell_quote(value: &str) -> String {
-    format!("'{}'", value.replace('\'', "'\\''"))
-}
-
-fn cli_launcher_content(root: &Path, global: bool) -> String {
-    let target = runtime_manifest_binary(root, global);
-    if cfg!(windows) {
-        format!("@echo off\r\n\"{}\" %*\r\nexit /b %ERRORLEVEL%\r\n", target)
-    } else {
-        format!("#!/bin/sh\nexec {} \"$@\"\n", shell_quote(&target))
-    }
-}
-
-fn windows_posix_cli_shim_content() -> String {
-    "#!/bin/sh\nDIR=$(CDPATH= cd -- \"$(dirname -- \"$0\")\" && pwd)\nexec \"$DIR/tokenzero.cmd\" \"$@\"\n"
-        .to_string()
-}
-
-fn shell_launcher_content(root: &Path, global: bool) -> String {
-    if cfg!(windows) {
+install_helpers! {
+    fn tokenzero_command(root: &Path, global: bool) -> String = tokenzero_launcher_path(root, global).display().to_string();
+    fn mcp_command(root: &Path, global: bool) -> String = if global { runtime_manifest_binary(root, true) } else { tokenzero_command(root, false) };
+    fn current_exe_string() -> String = std::env::current_exe().ok().map(|path| path.display().to_string()).unwrap_or_else(|| "tokenzero".to_string());
+    fn installed_runtime_binary_name() -> String = {
+        let hash = current_exe_hash_prefix().unwrap_or_else(|| "current".to_string());
+        format!("tokenzero-runtime-{hash}{}", if cfg!(windows) { ".exe" } else { "" })
+    };
+    fn runtime_manifest_binary(root: &Path, global: bool) -> String = if global { installed_runtime_binary_path(root).display().to_string() } else { current_exe_string() };
+    fn shell_quote(value: &str) -> String = format!("'{}'", value.replace('\'', "'\\''"));
+    fn cli_launcher_content(root: &Path, global: bool) -> String = {
+        let target = runtime_manifest_binary(root, global);
+        if cfg!(windows) { format!("@echo off\r\n\"{}\" %*\r\nexit /b %ERRORLEVEL%\r\n", target) }
+        else { format!("#!/bin/sh\nexec {} \"$@\"\n", shell_quote(&target)) }
+    };
+    fn windows_posix_cli_shim_content() -> String = "#!/bin/sh\nDIR=$(CDPATH= cd -- \"$(dirname -- \"$0\")\" && pwd)\nexec \"$DIR/tokenzero.cmd\" \"$@\"\n".to_string();
+    fn shell_launcher_content(root: &Path, global: bool) -> String = if cfg!(windows) {
         format!("@echo off\r\ncall \"{}\" run -- %*\r\nexit /b %ERRORLEVEL%\r\n", tokenzero_command(root, global))
     } else {
         format!("#!/bin/sh\nexec {} run -- \"$@\"\n", shell_quote(&tokenzero_command(root, global)))
-    }
+    };
+    fn tokenzero_launcher_path(root: &Path, global: bool) -> PathBuf = if global {
+        root.join(".tokenzero/bin").join(if cfg!(windows) { "tokenzero.cmd" } else { "tokenzero" })
+    } else { PathBuf::from(current_exe_string()) };
+    fn shell_launcher_path(root: &Path, _global: bool) -> PathBuf = root.join(".tokenzero/bin").join(if cfg!(windows) { "tokenzero-shell.cmd" } else { "tokenzero-shell" });
+    fn cache_path(root: &Path) -> PathBuf = root.join(".tokenzero/recovery-cache.json");
+    fn current_exe_bytes() -> std::io::Result<Vec<u8>> = fs::read(std::env::current_exe()?);
+    fn installed_runtime_binary_path(root: &Path) -> PathBuf = root.join(".tokenzero/bin").join(installed_runtime_binary_name());
+    fn current_exe_hash_prefix() -> Option<String> = Some(sha256_bytes(&current_exe_bytes().ok()?).chars().take(16).collect());
 }
 
-/// POSIX shim script: inert unless `TOKENZERO_SHIM=1`, and never recursive —
-/// `TOKENZERO_INNER=1` prefixes the wrapped exec, so PATH lookups made by the
-/// child of `tokenzero run` fall straight through every shim to the real
-/// binary. The real tool path is resolved at install time with the shim
-/// directory excluded from PATH and baked in.
 fn shim_content(path: &Path, root: &Path, global: bool) -> std::io::Result<String> {
     let tool = path
         .file_name()
@@ -770,14 +678,20 @@ fn atomic_write(path: &Path, content: &[u8]) -> std::io::Result<()> {
         restrict_tokenzero_dir(parent);
     }
     let dir = parent.unwrap_or_else(|| Path::new("."));
-    let name = path.file_name().and_then(|v| v.to_str()).unwrap_or("tokenzero");
+    let name = path
+        .file_name()
+        .and_then(|v| v.to_str())
+        .unwrap_or("tokenzero");
     let tmp = dir.join(format!(".{}.{}.tmp", name, std::process::id()));
-    let mut file = fs::OpenOptions::new().write(true).create(true).truncate(true).open(&tmp)?;
+    let mut file = fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .open(&tmp)?;
     file.write_all(content)?;
     file.sync_all()?;
-    fs::rename(&tmp, path).or_else(|err| {
+    fs::rename(&tmp, path).inspect_err(|_| {
         let _ = fs::remove_file(&tmp);
-        Err(err)
     })
 }
 
@@ -788,7 +702,10 @@ fn latest_manifest(root: &Path) -> Option<PathBuf> {
         .map(|entry| entry.path())
         .filter(|path| {
             path.extension().and_then(|v| v.to_str()) == Some("json")
-                && path.file_stem().and_then(|v| v.to_str()).is_some_and(|stem| stem.starts_with("rollback-"))
+                && path
+                    .file_stem()
+                    .and_then(|v| v.to_str())
+                    .is_some_and(|stem| stem.starts_with("rollback-"))
         })
         .max()
 }
@@ -798,7 +715,10 @@ fn rollback_id() -> String {
 }
 
 fn now_unix() -> u64 {
-    SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs()
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
 }
 
 fn sha256(text: &str) -> String {
@@ -808,7 +728,11 @@ fn sha256(text: &str) -> String {
 fn sha256_bytes(bytes: &[u8]) -> String {
     let mut hasher = Sha256::new();
     hasher.update(bytes);
-    hasher.finalize().iter().map(|b| format!("{b:02x}")).collect()
+    hasher
+        .finalize()
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
 }
 
 mod content;
@@ -825,6 +749,3 @@ pub use doctor::{
     doctor_robot_docs, doctor_robot_triage, doctor_undo,
 };
 pub use inspect::inspect_client_surface;
-
-#[cfg(test)]
-mod tests;

@@ -16,7 +16,9 @@ pub(crate) fn shell_display_arg(arg: &str, platform: &str) -> String {
         _ => ('\'', '\'', "'\\''", "-_./:,=@%"),
     };
     if !arg.is_empty()
-        && arg.chars().all(|ch| ch.is_ascii_alphanumeric() || safe.contains(ch))
+        && arg
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || safe.contains(ch))
     {
         arg.to_string()
     } else {

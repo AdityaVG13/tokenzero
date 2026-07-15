@@ -21,7 +21,6 @@ pub struct ExitCode {
     pub retryable: bool,
 }
 
-
 const fn cmd(
     name: &'static str,
     aliases: &'static [&'static str],
@@ -31,23 +30,93 @@ const fn cmd(
     primary_invocation: &'static str,
     description: &'static str,
 ) -> CommandSurface {
-    CommandSurface { name, aliases, category, mutates, json, primary_invocation, description }
+    CommandSurface {
+        name,
+        aliases,
+        category,
+        mutates,
+        json,
+        primary_invocation,
+        description,
+    }
 }
 
 const fn exit(code: i32, label: &'static str, meaning: &'static str, retryable: bool) -> ExitCode {
-    ExitCode { code, label, meaning, retryable }
+    ExitCode {
+        code,
+        label,
+        meaning,
+        retryable,
+    }
 }
 
-
 const COMMANDS: &[CommandSurface] = &[
-    cmd("read", &[], "context", false, true, "tokenzero read <path> --json", "Read bounded file content with exact recovery refs."),
-    cmd("find", &["grep", "search"], "context", false, true, "tokenzero find <query> <path> --json", "Search local text and return compact matches."),
-    cmd("recall", &[], "context", false, true, "tokenzero recall <query> --json", "Search payloads already stored in the recovery cache."),
-    cmd("fetch", &[], "context", false, true, "tokenzero fetch <url> --json", "Fetch an http(s) URL via curl with a TTL cache and exact refs."),
-    cmd("glob", &[], "context", false, true, "tokenzero glob '<pattern>' <path> --json", "List matching paths without dumping file contents."),
-    cmd("tree", &[], "context", false, true, "tokenzero tree <path> --json", "Inspect a bounded directory tree."),
-    cmd("edit", &[], "execution", true, true, "tokenzero edit <path> --edits-json '<json>' --json", "Apply multi-hunk find/replace edits to one file: all-or-nothing, atomic write, undo ref."),
-    cmd("run", &[
+    cmd(
+        "read",
+        &[],
+        "context",
+        false,
+        true,
+        "tokenzero read <path> --json",
+        "Read bounded file content with exact recovery refs.",
+    ),
+    cmd(
+        "find",
+        &["grep", "search"],
+        "context",
+        false,
+        true,
+        "tokenzero find <query> <path> --json",
+        "Search local text and return compact matches.",
+    ),
+    cmd(
+        "recall",
+        &[],
+        "context",
+        false,
+        true,
+        "tokenzero recall <query> --json",
+        "Search payloads already stored in the recovery cache.",
+    ),
+    cmd(
+        "fetch",
+        &[],
+        "context",
+        false,
+        true,
+        "tokenzero fetch <url> --json",
+        "Fetch an http(s) URL via curl with a TTL cache and exact refs.",
+    ),
+    cmd(
+        "glob",
+        &[],
+        "context",
+        false,
+        true,
+        "tokenzero glob '<pattern>' <path> --json",
+        "List matching paths without dumping file contents.",
+    ),
+    cmd(
+        "tree",
+        &[],
+        "context",
+        false,
+        true,
+        "tokenzero tree <path> --json",
+        "Inspect a bounded directory tree.",
+    ),
+    cmd(
+        "edit",
+        &[],
+        "execution",
+        true,
+        true,
+        "tokenzero edit <path> --edits-json '<json>' --json",
+        "Apply multi-hunk find/replace edits to one file: all-or-nothing, atomic write, undo ref.",
+    ),
+    cmd(
+        "run",
+        &[
             "shell",
             "rn",
             "run <command>",
@@ -56,16 +125,88 @@ const COMMANDS: &[CommandSurface] = &[
             "--jsno",
             "--jason",
             "--timout",
-        ], "execution", false, true, "tokenzero run --json -- <command>", "Run a command with status-truth telemetry and refs; common JSON/timeout typos and missing -- delimiters are recovered."),
-    cmd("expand", &[], "recovery", false, true, "tokenzero expand <tz-ref> --raw", "Recover exact bytes from a prior TokenZero ref."),
-    cmd("mem", &["cache status", "cache statuz"], "state", false, true, "tokenzero mem --json", "Inspect recovery-cache state."),
-    cmd("pulse", &["pulse stats", "pulse status"], "state", false, true, "tokenzero pulse --json", "Inspect local Pulse telemetry; stats/status recover to the read-only report."),
-    cmd("doctor", &["doctor health", "doctor status", "doctor statuz"], "health", false, true, "tokenzero doctor --json", "Check local TokenZero health and next steps."),
-    cmd("install", &["install plan", "install status"], "setup", true, true, "tokenzero install --plan --json", "Plan or apply local integration writes with rollback data; --hooks wires the Claude Code PreToolUse hook, --shims installs the universal PATH shims, and install status recovers to clients detect."),
-    cmd("hook claude-code", &[], "setup", false, true, "tokenzero hook claude-code", "Claude Code PreToolUse adapter: reads hook JSON on stdin, rewrites Bash commands to run under `tokenzero run`, and always exits 0 (fail-open)."),
-    cmd("capabilities", &["capability", "capabilites", "--jsno", "--jason"], "agent-contract", false, true, "tokenzero capabilities --json", "Emit the machine-readable CLI contract for agents."),
-    cmd("codemode", &[], "agent-contract", false, true, "tokenzero codemode --json --plan '<plan>'", "Compose multi-step plans on the same base tools as MCP, fewer round-trips. Cloudflare-style plan execution with progressive discovery."),
-    cmd("robot-docs guide", &[
+        ],
+        "execution",
+        false,
+        true,
+        "tokenzero run --json -- <command>",
+        "Run a command with status-truth telemetry and refs; common JSON/timeout typos and missing -- delimiters are recovered.",
+    ),
+    cmd(
+        "expand",
+        &[],
+        "recovery",
+        false,
+        true,
+        "tokenzero expand <tz-ref> --raw",
+        "Recover exact bytes from a prior TokenZero ref.",
+    ),
+    cmd(
+        "mem",
+        &["cache status", "cache statuz"],
+        "state",
+        false,
+        true,
+        "tokenzero mem --json",
+        "Inspect recovery-cache state.",
+    ),
+    cmd(
+        "pulse",
+        &["pulse stats", "pulse status"],
+        "state",
+        false,
+        true,
+        "tokenzero pulse --json",
+        "Inspect local Pulse telemetry; stats/status recover to the read-only report.",
+    ),
+    cmd(
+        "doctor",
+        &["doctor health", "doctor status", "doctor statuz"],
+        "health",
+        false,
+        true,
+        "tokenzero doctor --json",
+        "Check local TokenZero health and next steps.",
+    ),
+    cmd(
+        "install",
+        &["install plan", "install status"],
+        "setup",
+        true,
+        true,
+        "tokenzero install --plan --json",
+        "Plan or apply local integration writes with rollback data; --hooks wires the Claude Code PreToolUse hook, --shims installs the universal PATH shims, and install status recovers to clients detect.",
+    ),
+    cmd(
+        "hook claude-code",
+        &[],
+        "setup",
+        false,
+        true,
+        "tokenzero hook claude-code",
+        "Claude Code PreToolUse adapter: reads hook JSON on stdin, rewrites Bash commands to run under `tokenzero run`, and always exits 0 (fail-open).",
+    ),
+    cmd(
+        "capabilities",
+        &["capability", "capabilites", "--jsno", "--jason"],
+        "agent-contract",
+        false,
+        true,
+        "tokenzero capabilities --json",
+        "Emit the machine-readable CLI contract for agents.",
+    ),
+    cmd(
+        "codemode",
+        &[],
+        "agent-contract",
+        false,
+        true,
+        "tokenzero codemode --json --plan '<plan>'",
+        "Compose multi-step plans on the same base tools as MCP, fewer round-trips. Cloudflare-style plan execution with progressive discovery.",
+    ),
+    cmd(
+        "robot-docs guide",
+        &[
             "robot-doc guide",
             "robotdocs guide",
             "--robot-help",
@@ -73,13 +214,29 @@ const COMMANDS: &[CommandSurface] = &[
             "robot-docs manual",
             "robot-docs commands",
             "robot-docs examples",
-        ], "agent-contract", false, false, "tokenzero robot-docs guide", "Print a paste-ready agent guide with canonical commands."),
+        ],
+        "agent-contract",
+        false,
+        false,
+        "tokenzero robot-docs guide",
+        "Print a paste-ready agent guide with canonical commands.",
+    ),
 ];
 
 const EXIT_CODES: &[ExitCode] = &[
     exit(0, "success", "The requested command completed.", false),
-    exit(1, "blocked", "TokenZero refused or could not complete a requested operation; JSON includes a stable error or finding.", false),
-    exit(2, "usage", "The CLI invocation was malformed; rerun with the exact command shown in the error or help output.", false),
+    exit(
+        1,
+        "blocked",
+        "TokenZero refused or could not complete a requested operation; JSON includes a stable error or finding.",
+        false,
+    ),
+    exit(
+        2,
+        "usage",
+        "The CLI invocation was malformed; rerun with the exact command shown in the error or help output.",
+        false,
+    ),
 ];
 
 const FEATURES: &[&str] = &[

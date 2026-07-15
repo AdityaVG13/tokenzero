@@ -7,7 +7,11 @@ fn tar_size_malformed(artifact: &str, member: &str, detail: String) -> serde_jso
         "detail": detail
     })
 }
-pub(crate) fn parse_tar_members(bytes: &[u8], artifact: &str, issues: &mut Vec<serde_json::Value>,) -> Vec<ArchiveMember> {
+pub(crate) fn parse_tar_members(
+    bytes: &[u8],
+    artifact: &str,
+    issues: &mut Vec<serde_json::Value>,
+) -> Vec<ArchiveMember> {
     let mut members = Vec::new();
     let mut seen_names = HashSet::new();
     let mut offset = 0usize;
@@ -68,18 +72,24 @@ pub(crate) fn parse_tar_members(bytes: &[u8], artifact: &str, issues: &mut Vec<s
         match typeflag {
             b'L' => match parse_tar_payload_path(data) {
                 Ok(path) => pending_long_name = path,
-                Err(reason) => push_archive_member_name_uninspectable(artifact, &header_name, reason, issues),
+                Err(reason) => {
+                    push_archive_member_name_uninspectable(artifact, &header_name, reason, issues)
+                }
             },
             b'K' => match parse_tar_payload_path(data) {
                 Ok(path) => pending_long_link = path,
                 Err(reason) => push_archive_link_target_uninspectable(
-                    artifact, &header_name,
+                    artifact,
+                    &header_name,
                     &lossy_tar_payload_path(data).unwrap_or_else(|| "<invalid-utf8>".to_string()),
-                    ArchiveMemberKind::Symlink, reason, issues,
+                    ArchiveMemberKind::Symlink,
+                    reason,
+                    issues,
                 ),
             },
             b'x' => match parse_pax_overrides(data) {
-                Ok(pax) => { let metadata_member =
+                Ok(pax) => {
+                    let metadata_member =
                         parse_tar_header_name(header).unwrap_or_else(|| "<pax>".to_string());
                     audit_pax_metadata_fields(
                         artifact,
@@ -88,7 +98,8 @@ pub(crate) fn parse_tar_members(bytes: &[u8], artifact: &str, issues: &mut Vec<s
                         issues,
                     );
                     pending_pax_path = pax.path;
-                    pending_pax_linkpath = pax.linkpath; }
+                    pending_pax_linkpath = pax.linkpath;
+                }
                 Err(error) => {
                     pending_pax_path = None;
                     pending_pax_linkpath = None;
@@ -99,7 +110,8 @@ pub(crate) fn parse_tar_members(bytes: &[u8], artifact: &str, issues: &mut Vec<s
                 let metadata_member =
                     parse_tar_header_name(header).unwrap_or_else(|| "<global-pax>".to_string());
                 match parse_pax_overrides(data) {
-                    Ok(pax) => { audit_pax_metadata_fields(
+                    Ok(pax) => {
+                        audit_pax_metadata_fields(
                             artifact,
                             &metadata_member,
                             &pax.metadata_fields,
@@ -117,10 +129,11 @@ pub(crate) fn parse_tar_members(bytes: &[u8], artifact: &str, issues: &mut Vec<s
                                     artifact,
                                     &path,
                                     true,
-                                    path.replace('\\', "/").ends_with('/'),
+                                    path.ends_with(['/', '\\']),
                                     issues,
                                 );
-                                global_pax_path = Some(path); }
+                                global_pax_path = Some(path);
+                            }
                             Some(PaxOverride::Delete) => {
                                 global_pax_path = None;
                             }
@@ -240,13 +253,21 @@ fn tar_override_candidates(
     if let Some(PaxOverride::Set(value)) = pending_pax {
         push_unique_string(&mut candidates, Some(value));
     }
-    if !suppress_global {
-        push_unique_string(&mut candidates, global.cloned());
+    if !suppress_global
+        && let Some(global) = global
+        && !candidates.iter().any(|candidate| candidate == global)
+    {
+        candidates.push(global.clone());
     }
     push_unique_string(&mut candidates, header_value);
     candidates
 }
-pub(crate) fn tar_member_name_candidates(pending_long_name: &mut Option<String>, pending_pax_path: &mut Option<PaxOverride>, global_pax_path: Option<&String>, header: &[u8],) -> Vec<String> {
+pub(crate) fn tar_member_name_candidates(
+    pending_long_name: &mut Option<String>,
+    pending_pax_path: &mut Option<PaxOverride>,
+    global_pax_path: Option<&String>,
+    header: &[u8],
+) -> Vec<String> {
     tar_override_candidates(
         pending_long_name,
         pending_pax_path,
@@ -254,7 +275,12 @@ pub(crate) fn tar_member_name_candidates(pending_long_name: &mut Option<String>,
         parse_tar_header_name(header),
     )
 }
-pub(crate) fn tar_member_link_candidates(pending_long_link: &mut Option<String>, pending_pax_linkpath: &mut Option<PaxOverride>, global_pax_linkpath: Option<&String>, header: &[u8],) -> Vec<Option<String>> {
+pub(crate) fn tar_member_link_candidates(
+    pending_long_link: &mut Option<String>,
+    pending_pax_linkpath: &mut Option<PaxOverride>,
+    global_pax_linkpath: Option<&String>,
+    header: &[u8],
+) -> Vec<Option<String>> {
     let candidates = tar_override_candidates(
         pending_long_link,
         pending_pax_linkpath,
@@ -308,11 +334,15 @@ pub(crate) fn parse_tar_header_link_name(header: &[u8]) -> Option<String> {
     (!link.is_empty()).then_some(link)
 }
 pub(crate) fn nul_terminated(bytes: &[u8]) -> String {
-    String::from_utf8_lossy(nul_terminated_bytes(bytes)).trim().to_string()
+    String::from_utf8_lossy(nul_terminated_bytes(bytes))
+        .trim()
+        .to_string()
 }
 pub(crate) fn nul_terminated_bytes(bytes: &[u8]) -> &[u8] {
-    let end = bytes.iter().position(|byte| *byte == 0).unwrap_or(bytes.len());
-    &bytes[..end]
+    &bytes[..bytes
+        .iter()
+        .position(|byte| *byte == 0)
+        .unwrap_or(bytes.len())]
 }
 pub(crate) fn parse_tar_payload_path(payload: &[u8]) -> Result<Option<String>, &'static str> {
     let raw_path = tar_payload_path_bytes(payload);
@@ -413,14 +443,14 @@ pub(crate) fn parse_pax_key(key: &[u8]) -> Result<&str, String> {
 }
 pub(crate) fn pax_metadata_field_label(key: &str) -> String {
     let lower = key.to_ascii_lowercase();
-    if lower.starts_with("schily.xattr.") {
-        return "SCHILY.xattr.*".to_string();
-    }
-    if lower.starts_with("libarchive.xattr.") {
-        return "LIBARCHIVE.xattr.*".to_string();
-    }
-    if lower.starts_with("security.") {
-        return "security.*".to_string();
+    for (prefix, label) in [
+        ("schily.xattr.", "SCHILY.xattr.*"),
+        ("libarchive.xattr.", "LIBARCHIVE.xattr.*"),
+        ("security.", "security.*"),
+    ] {
+        if lower.starts_with(prefix) {
+            return label.to_string();
+        }
     }
     if key.len() <= 64
         && key
@@ -489,32 +519,26 @@ pub(crate) fn validate_tar_checksum(header: &[u8]) -> Result<(), String> {
         ))
     }
 }
-pub(crate) fn tar_checksum_unsigned(header: &[u8]) -> u32 {
+fn tar_checksum(header: &[u8], signed: bool) -> i64 {
     header
         .iter()
         .enumerate()
         .map(|(index, byte)| {
             if (148..156).contains(&index) {
-                b' ' as u32
+                b' ' as i64
+            } else if signed {
+                (*byte as i8) as i64
             } else {
-                *byte as u32
+                *byte as i64
             }
         })
         .sum()
 }
+pub(crate) fn tar_checksum_unsigned(header: &[u8]) -> u32 {
+    tar_checksum(header, false) as u32
+}
 pub(crate) fn tar_checksum_signed(header: &[u8]) -> Option<u32> {
-    let checksum: i64 = header
-        .iter()
-        .enumerate()
-        .map(|(index, byte)| {
-            if (148..156).contains(&index) {
-                b' ' as i64
-            } else {
-                (*byte as i8) as i64
-            }
-        })
-        .sum();
-    u32::try_from(checksum).ok()
+    u32::try_from(tar_checksum(header, true)).ok()
 }
 pub(crate) fn audit_tar_owner_metadata(
     artifact: &str,
@@ -537,13 +561,15 @@ pub(crate) fn audit_tar_owner_metadata(
     }
 }
 pub(crate) fn tar_numeric_owner_field_is_private(field: &[u8]) -> bool {
-    let value = nul_terminated(field);
-    if value.is_empty() {
-        return false;
-    }
-    usize::from_str_radix(value.trim(), 8) != Ok(0)
+    let value = String::from_utf8_lossy(nul_terminated_bytes(field));
+    let value = value.trim();
+    !value.is_empty() && usize::from_str_radix(value, 8) != Ok(0)
 }
 pub(crate) fn tar_named_owner_field_is_private(field: &[u8]) -> bool {
-    let value = nul_terminated(field).to_ascii_lowercase();
-    !matches!(value.as_str(), "" | "0" | "root" | "wheel")
+    let value = String::from_utf8_lossy(nul_terminated_bytes(field));
+    let value = value.trim();
+    !(value.is_empty()
+        || value == "0"
+        || value.eq_ignore_ascii_case("root")
+        || value.eq_ignore_ascii_case("wheel"))
 }

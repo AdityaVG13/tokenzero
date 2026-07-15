@@ -2,6 +2,8 @@
 //!
 //! Run with: cargo bench -p tokenzero-recovery
 
+mod segment_hotpaths;
+
 use std::time::Duration;
 
 use criterion::{Criterion, black_box, criterion_group, criterion_main};
@@ -318,6 +320,7 @@ criterion_group!(
     bench_persist,
     bench_persist_path,
     measure_repeat_read_220kb_cache_bytes,
-    persist_same_payload_repeated
+    persist_same_payload_repeated,
+    segment_hotpaths::segment_store_8mib
 );
 criterion_main!(benches);

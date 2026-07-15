@@ -187,33 +187,74 @@ fn telemetry(ops: usize, visible: usize, raw: usize, refs: usize, ok: bool) -> C
         "refs_count": refs, "parallel_groups": 0, "envelope_tokens": 0,
         "payload_tokens": visible, "prevented_read_bytes": 0
     });
-    if ok { extra["equivalent_calls"] = serde_json::json!(ops.saturating_add(1)); }
+    if ok {
+        extra["equivalent_calls"] = serde_json::json!(ops.saturating_add(1));
+    }
     CodeModeTelemetry {
-        operations: ops, visible_tokens: visible, raw_tokens: raw, steps_run: None,
-        parallel_groups: Some(0), refs_count: Some(refs),
-        equivalent_calls: ok.then(|| ops.saturating_add(1)), kind: "codemode.execute".into(),
-        status: if ok { "ok" } else { "error" }.into(), logical_ops: ops,
-        physical_ops: ops, batched_ops: 0, internal_actions: ops, cache_hits: 0,
-        cache_misses: ops, prefix_cache_hits: 0, prefix_cache_total: 0,
-        store_writes: if ok { refs } else { 0 }, wall_ms: 0, bytes_materialized: raw,
-        envelope_tokens: 0, payload_tokens: visible, ack_tokens: 0, ref_string_tokens: 0,
-        framing_tokens: 0, preview_tokens: 0, prevented_read_bytes: 0,
-        prevented_full_body_count: 0, extra: Some(extra),
+        operations: ops,
+        visible_tokens: visible,
+        raw_tokens: raw,
+        steps_run: None,
+        parallel_groups: Some(0),
+        refs_count: Some(refs),
+        equivalent_calls: ok.then(|| ops.saturating_add(1)),
+        kind: "codemode.execute".into(),
+        status: if ok { "ok" } else { "error" }.into(),
+        logical_ops: ops,
+        physical_ops: ops,
+        batched_ops: 0,
+        internal_actions: ops,
+        cache_hits: 0,
+        cache_misses: ops,
+        prefix_cache_hits: 0,
+        prefix_cache_total: 0,
+        store_writes: if ok { refs } else { 0 },
+        wall_ms: 0,
+        bytes_materialized: raw,
+        envelope_tokens: 0,
+        payload_tokens: visible,
+        ack_tokens: 0,
+        ref_string_tokens: 0,
+        framing_tokens: 0,
+        preview_tokens: 0,
+        prevented_read_bytes: 0,
+        prevented_full_body_count: 0,
+        extra: Some(extra),
     }
 }
 
 impl CodeModeResult {
-    fn new(value: Option<Value>, refs: Vec<String>, telemetry: CodeModeTelemetry, error: Option<CodeModeError>) -> Self {
+    fn new(
+        value: Option<Value>,
+        refs: Vec<String>,
+        telemetry: CodeModeTelemetry,
+        error: Option<CodeModeError>,
+    ) -> Self {
         let ok = error.is_none();
         Self {
             schema: CODEMODE_SCHEMA,
-            status: if ok { CodeModeStatus::Completed } else { CodeModeStatus::Error },
-            visible_ack: if ok { "C" } else { "X0" }.into(), execution_id: None,
-            value, refs, execution_refs: None, telemetry, error,
+            status: if ok {
+                CodeModeStatus::Completed
+            } else {
+                CodeModeStatus::Error
+            },
+            visible_ack: if ok { "C" } else { "X0" }.into(),
+            execution_id: None,
+            value,
+            refs,
+            execution_refs: None,
+            telemetry,
+            error,
         }
     }
 
-    pub fn completed(value: Value, refs: Vec<String>, ops: usize, visible: usize, raw: usize) -> Self {
+    pub fn completed(
+        value: Value,
+        refs: Vec<String>,
+        ops: usize,
+        visible: usize,
+        raw: usize,
+    ) -> Self {
         let info = telemetry(ops, visible, raw, refs.len(), true);
         Self::new(Some(value), refs, info, None)
     }
@@ -223,17 +264,44 @@ impl CodeModeResult {
         Self::error_with_kind(classify_error_kind(&message), message, ops, false)
     }
 
-    pub fn error_with_kind(kind: impl Into<String>, msg: impl Into<String>, ops: usize, retryable: bool) -> Self {
-        Self::new(None, Vec::new(), telemetry(ops, 0, 0, 0, false), Some(CodeModeError::new(kind, msg, retryable)))
+    pub fn error_with_kind(
+        kind: impl Into<String>,
+        msg: impl Into<String>,
+        ops: usize,
+        retryable: bool,
+    ) -> Self {
+        Self::new(
+            None,
+            Vec::new(),
+            telemetry(ops, 0, 0, 0, false),
+            Some(CodeModeError::new(kind, msg, retryable)),
+        )
     }
 
     pub fn to_line(&self) -> String {
         match self.status {
             CodeModeStatus::Completed => {
-                let refs = (!self.refs.is_empty()).then(|| format!(" refs={}", self.refs.join(","))).unwrap_or_default();
-                format!("codemode:ok C ops={} visible_tokens={} raw_tokens={}{}", self.telemetry.operations(), self.telemetry.visible_tokens(), self.telemetry.raw_tokens(), refs)
+                let refs = if !self.refs.is_empty() {
+                    format!(" refs={}", self.refs.join(","))
+                } else {
+                    Default::default()
+                };
+                format!(
+                    "codemode:ok C ops={} visible_tokens={} raw_tokens={}{}",
+                    self.telemetry.operations(),
+                    self.telemetry.visible_tokens(),
+                    self.telemetry.raw_tokens(),
+                    refs
+                )
             }
-            CodeModeStatus::Error => format!("codemode:error X0 ops={} {}", self.telemetry.operations(), self.error.as_ref().map(|error| error.message.as_str()).unwrap_or("unknown")),
+            CodeModeStatus::Error => format!(
+                "codemode:error X0 ops={} {}",
+                self.telemetry.operations(),
+                self.error
+                    .as_ref()
+                    .map(|error| error.message.as_str())
+                    .unwrap_or("unknown")
+            ),
         }
     }
 }

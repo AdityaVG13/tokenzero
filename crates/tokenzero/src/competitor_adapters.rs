@@ -5,38 +5,67 @@ use std::path::{Path, PathBuf};
 
 use crate::source_currency;
 
-pub(crate) const REQUIRED_COMPETITOR_ADAPTERS: &[&str] = &[
-    "rtk", "ztk", "lean-ctx", "tokenpak", "tokenjuice", "context-mode", "caveman", "headroom",
-    "claw", "compresh", "context-gateway",
-];
+macro_rules! str_table {
+    ($name:ident, $($value:literal),+ $(,)?) => {
+        pub(crate) const $name: &[&str] = &[$($value),+];
+    };
+}
+macro_rules! pair_table {
+    ($name:ident, $($needle:literal => $reason:literal),+ $(,)?) => {
+        pub(crate) const $name: &[(&str, &str)] = &[$(($needle, $reason)),+];
+    };
+}
 
-// --- Declarative safety tables ---
-
-const PACKAGE_INSTALL_PATTERNS: &[&str] = &[
-    "npm install", "npm i ", "pnpm add", "pnpm install", "pnpm dlx",
-    "yarn add", "yarn install", "cargo install", "go install", "gem install",
-    "pip install", "pip3 install", "pipx install", "uv tool install", "uv pip install",
-    "brew install", "choco install", "winget install", "scoop install",
-    "apt install", "apt-get install",
-];
-
-/// (substring to detect, reason message)
-const UNSAFE_PATTERNS: &[(&str, &str)] = &[
-    ("git clone", "external fetch or container execution command is not reviewed-safe"),
-    ("docker run", "external fetch or container execution command is not reviewed-safe"),
-    ("docker pull", "external fetch or container execution command is not reviewed-safe"),
-    ("rm -rf", "destructive filesystem command is not reviewed-safe"),
-    ("remove-item", "destructive filesystem command is not reviewed-safe"),
-];
-
-/// Piped-curl variants: (prefix, separator char)
-const PIPED_FETCH_PATTERNS: &[(&str, &str)] = &[
-    ("curl", "curl pipe execution is not reviewed-safe"),
-    ("irm ", "PowerShell web pipe execution is not reviewed-safe"),
-    ("iwr ", "PowerShell web pipe execution is not reviewed-safe"),
-];
-
-// --- Adapter row builder ---
+str_table!(
+    REQUIRED_COMPETITOR_ADAPTERS,
+    "rtk",
+    "ztk",
+    "lean-ctx",
+    "tokenpak",
+    "tokenjuice",
+    "context-mode",
+    "caveman",
+    "headroom",
+    "claw",
+    "compresh",
+    "context-gateway",
+);
+str_table!(
+    PACKAGE_INSTALL_PATTERNS,
+    "npm install",
+    "npm i ",
+    "pnpm add",
+    "pnpm install",
+    "pnpm dlx",
+    "yarn add",
+    "yarn install",
+    "cargo install",
+    "go install",
+    "gem install",
+    "pip install",
+    "pip3 install",
+    "pipx install",
+    "uv tool install",
+    "uv pip install",
+    "brew install",
+    "choco install",
+    "winget install",
+    "scoop install",
+    "apt install",
+    "apt-get install",
+);
+pair_table!(UNSAFE_PATTERNS,
+    "git clone" => "external fetch or container execution command is not reviewed-safe",
+    "docker run" => "external fetch or container execution command is not reviewed-safe",
+    "docker pull" => "external fetch or container execution command is not reviewed-safe",
+    "rm -rf" => "destructive filesystem command is not reviewed-safe",
+    "remove-item" => "destructive filesystem command is not reviewed-safe",
+);
+pair_table!(PIPED_FETCH_PATTERNS,
+    "curl" => "curl pipe execution is not reviewed-safe",
+    "irm " => "PowerShell web pipe execution is not reviewed-safe",
+    "iwr " => "PowerShell web pipe execution is not reviewed-safe",
+);
 
 fn adapter_row_json(
     suite: &str,
@@ -44,19 +73,37 @@ fn adapter_row_json(
     approved_not_executed: bool,
     approval_row: Option<&serde_json::Value>,
 ) -> serde_json::Value {
-    let (status, reason, depth) = if approved_not_executed {
-        ("approved_not_executed",
-         "adapter command reviewed and explicitly approved, but competitor execution is still not performed by this local proof command",
-         "approved_adapter_not_executed")
+    let adapter_command = if approved_not_executed {
+        approval_row
+            .and_then(|r| r["reviewed_command"].as_str())
+            .map(|c| json!(c))
+            .unwrap_or(serde_json::Value::Null)
     } else {
-        ("unavailable",
-         "adapter command is approval-gated; no blind install or unreviewed competitor binary execution in this local proof",
-         "adapter_not_run")
+        serde_json::Value::Null
+    };
+    let (status, reason, depth) = if approved_not_executed {
+        (
+            "approved_not_executed",
+            "adapter command reviewed and explicitly approved, but competitor execution is still not performed by this local proof command",
+            "approved_adapter_not_executed",
+        )
+    } else {
+        (
+            "unavailable",
+            "adapter command is approval-gated; no blind install or unreviewed competitor binary execution in this local proof",
+            "adapter_not_run",
+        )
     };
     let notes = if approved_not_executed {
-        format!("adapter row linked to reviewed approval artifact; {} command is not executed or blindly installed", source.tool)
+        format!(
+            "adapter row linked to reviewed approval artifact; {} command is not executed or blindly installed",
+            source.tool
+        )
     } else {
-        format!("adapter row accounted from source ledger; {} is unavailable rather than fabricated or blindly installed", source.tool)
+        format!(
+            "adapter row accounted from source ledger; {} is unavailable rather than fabricated or blindly installed",
+            source.tool
+        )
     };
     json!({
         "schema_version": "tokenzero.bench.v1", "suite": suite,
@@ -64,9 +111,7 @@ fn adapter_row_json(
         "tool": source.tool, "adapter_kind": "competitor",
         "adapter_allowlisted": true, "blind_install_attempted": false,
         "availability_status": status, "availability_reason": reason,
-        "adapter_command": approval_row
-            .and_then(|r| r["reviewed_command"].as_str())
-            .map(|c| json!(c)).unwrap_or(serde_json::Value::Null),
+        "adapter_command": adapter_command,
         "adapter_command_reviewed": approved_not_executed,
         "adapter_source_url": source.url,
         "adapter_source_commit": source.source_commit,
@@ -88,18 +133,24 @@ fn approved_not_executed<'a>(
         || artifact["execution_allowed"] != true
         || artifact["public_claims_approved"] != true
         || artifact["blind_install_attempted"] != false
-    { return None; }
-    let row = artifact["adapters"].as_array()?.iter()
+    {
+        return None;
+    }
+    let row = artifact["adapters"]
+        .as_array()?
+        .iter()
         .find(|r| r["tool"] == source.tool)?;
     if row["approval_status"] != "reviewed"
         || row["execution_allowed"] != true
         || row["blind_install_attempted"] != false
-        || row["reviewed_command"].as_str().map_or(true, |c| c.is_empty())
-    { return None; }
+        || row["reviewed_command"]
+            .as_str()
+            .is_none_or(|c| c.is_empty() || adapter_command_unsafe_reason(c).is_some())
+    {
+        return None;
+    }
     Some(row)
 }
-
-// --- Public API ---
 
 pub(crate) fn load_benchmark_adapter_approval(
     path: Option<&PathBuf>,
@@ -125,10 +176,22 @@ pub(crate) fn competitor_adapter_rows(
 }
 
 pub(crate) fn competitor_adapter_matrix(adapter_rows: &[serde_json::Value]) -> serde_json::Value {
-    let accounted: Vec<_> = adapter_rows.iter().filter_map(|r| r["tool"].as_str()).collect();
-    let all_accounted = REQUIRED_COMPETITOR_ADAPTERS.iter().all(|t| accounted.iter().any(|rt| rt == t));
-    let counts = |s: &str| adapter_rows.iter().filter(|r| r["availability_status"] == s).count();
-    let blind = adapter_rows.iter().any(|r| r["blind_install_attempted"] == true);
+    let accounted: Vec<_> = adapter_rows
+        .iter()
+        .filter_map(|r| r["tool"].as_str())
+        .collect();
+    let all_accounted = REQUIRED_COMPETITOR_ADAPTERS
+        .iter()
+        .all(|t| accounted.iter().any(|rt| rt == t));
+    let counts = |s: &str| {
+        adapter_rows
+            .iter()
+            .filter(|r| r["availability_status"] == s)
+            .count()
+    };
+    let blind = adapter_rows
+        .iter()
+        .any(|r| r["blind_install_attempted"] == true);
     let ok = all_accounted && !blind;
     json!({
         "schema_version": "tokenzero.adapter_matrix.v1",
@@ -154,10 +217,22 @@ pub(crate) fn adapter_approval_audit_report(
     execution_approval: bool,
     release_candidate_id: &str,
 ) -> Result<serde_json::Value> {
-    let approval = approval_file.map(|p| fs::read(p).map_err(anyhow::Error::from).and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).map_err(anyhow::Error::from))).transpose()?;
-    let schema_valid = approval.as_ref().is_some_and(|v| v["schema_version"] == "tokenzero.adapter_approval_file.v1");
-    let approved_cmds = approval.as_ref().filter(|_| schema_valid)
-        .and_then(|v| v["commands"].as_array()).cloned().unwrap_or_default();
+    let approval = approval_file
+        .map(|p| {
+            fs::read(p).map_err(anyhow::Error::from).and_then(|bytes| {
+                serde_json::from_slice::<serde_json::Value>(&bytes).map_err(anyhow::Error::from)
+            })
+        })
+        .transpose()?;
+    let schema_valid = approval
+        .as_ref()
+        .is_some_and(|v| v["schema_version"] == "tokenzero.adapter_approval_file.v1");
+    let approved_cmds = approval
+        .as_ref()
+        .filter(|_| schema_valid)
+        .and_then(|v| v["commands"].as_array())
+        .cloned()
+        .unwrap_or_default();
 
     let mut reviewed_cnt = 0usize;
     let mut unsafe_cnt = 0usize;
@@ -183,16 +258,35 @@ pub(crate) fn adapter_approval_audit_report(
         })
     }).collect();
 
-    let missing_cnt = adapters.iter().filter(|r| r["approval_status"] == "missing_reviewed_command").count();
-    let dup_cnt = adapters.iter().filter(|r| r["approval_status"] == "duplicate_command").count();
+    let missing_cnt = adapters
+        .iter()
+        .filter(|r| r["approval_status"] == "missing_reviewed_command")
+        .count();
+    let dup_cnt = adapters
+        .iter()
+        .filter(|r| r["approval_status"] == "duplicate_command")
+        .count();
     let mut blocked = Vec::new();
-    if approval.is_some() && !schema_valid { blocked.push("adapter approval file schema invalid".to_string()); }
-    if dup_cnt > 0 { blocked.push("duplicate adapter approval commands rejected".to_string()); }
-    if missing_cnt > 0 { blocked.push("reviewed competitor commands missing".to_string()); }
-    if unsafe_cnt > 0 { blocked.push("unsafe reviewed competitor commands rejected".to_string()); }
-    if !execution_approval { blocked.push("explicit runnable adapter execution approval not granted".to_string()); }
-    let all_reviewed = schema_valid && reviewed_cnt == REQUIRED_COMPETITOR_ADAPTERS.len()
-        && missing_cnt == 0 && unsafe_cnt == 0 && dup_cnt == 0;
+    if approval.is_some() && !schema_valid {
+        blocked.push("adapter approval file schema invalid".to_string());
+    }
+    if dup_cnt > 0 {
+        blocked.push("duplicate adapter approval commands rejected".to_string());
+    }
+    if missing_cnt > 0 {
+        blocked.push("reviewed competitor commands missing".to_string());
+    }
+    if unsafe_cnt > 0 {
+        blocked.push("unsafe reviewed competitor commands rejected".to_string());
+    }
+    if !execution_approval {
+        blocked.push("explicit runnable adapter execution approval not granted".to_string());
+    }
+    let all_reviewed = schema_valid
+        && reviewed_cnt == REQUIRED_COMPETITOR_ADAPTERS.len()
+        && missing_cnt == 0
+        && unsafe_cnt == 0
+        && dup_cnt == 0;
     let exec_ok = execution_approval && all_reviewed;
 
     Ok(json!({
@@ -213,12 +307,17 @@ pub(crate) fn adapter_approval_audit_report(
 }
 
 pub(crate) fn adapter_approval_template_report(release_candidate_id: &str) -> serde_json::Value {
-    let cmds: Vec<_> = REQUIRED_COMPETITOR_ADAPTERS.iter().map(|tool| json!({
-        "tool": tool, "url": source_currency::competitor_source_url(tool).unwrap_or(""),
-        "reviewed": true, "command": format!("{tool} --version"),
-        "review_scope": "command-shape safety review only; does not approve execution",
-        "execution_approval_required": true
-    })).collect();
+    let cmds: Vec<_> = REQUIRED_COMPETITOR_ADAPTERS
+        .iter()
+        .map(|tool| {
+            json!({
+                "tool": tool, "url": source_currency::competitor_source_url(tool).unwrap_or(""),
+                "reviewed": true, "command": format!("{tool} --version"),
+                "review_scope": "command-shape safety review only; does not approve execution",
+                "execution_approval_required": true
+            })
+        })
+        .collect();
     json!({
         "schema_version": "tokenzero.adapter_approval_file.v1",
         "status": "ok", "ok": true,
@@ -251,12 +350,14 @@ fn adapter_command_unsafe_reason(command: &str) -> Option<&'static str> {
         return Some("package manager install command is not reviewed-safe");
     }
     for (needle, reason) in UNSAFE_PATTERNS {
-        if lower.contains(needle) { return Some(reason); }
+        if lower.contains(needle) {
+            return Some(reason);
+        }
     }
     for (prefix, reason) in PIPED_FETCH_PATTERNS {
-            if lower.contains(prefix) && lower.contains('|') {
-                return Some(reason);
-            }
+        if lower.contains(prefix) && lower.contains('|') {
+            return Some(reason);
         }
+    }
     None
 }

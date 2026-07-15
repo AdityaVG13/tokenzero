@@ -1,12 +1,13 @@
 //! Disk-backed, per-scope session seen-set.
 
-use crate::session::{ServeKey, ServedRecord, SessionMemory};
+use crate::session::{ServeKey, ServedRecord, SessionMemory, SessionRollup};
 use fs4::FileExt;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
 use std::fs::{self, OpenOptions};
-use std::io::Write;
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 pub const SESSION_SCOPE_ENV: &str = "TOKENZERO_SESSION_SCOPE";
@@ -16,12 +17,14 @@ pub const MAX_SESSION_MEMORY_RECORDS: usize = 2048;
 const LOCK_RETRIES: usize = 240;
 const LOCK_RETRY_DELAY: Duration = Duration::from_millis(25);
 const STATE_VERSION: u32 = 2;
+const JOURNAL_COMPACT_BYTES: u64 = 8 * 1024 * 1024;
 
 #[derive(Debug, Clone)]
 pub(crate) struct SessionPersistence {
     path: PathBuf,
     cache_path: PathBuf,
     scope_id: String,
+    last_persisted: Arc<Mutex<Option<String>>>,
 }
 
 impl SessionPersistence {
@@ -30,95 +33,121 @@ impl SessionPersistence {
             path: session_memory_path(cache_path),
             cache_path: cache_path.to_path_buf(),
             scope_id: session_scope_id(cache_path),
+            last_persisted: Arc::new(Mutex::new(None)),
         })
     }
 
     pub(crate) fn load_into(&self, memory: &mut SessionMemory) {
-        let Some(state) = load_state(&self.path) else { return };
-        let Some(scope) = state.scopes.get(&self.scope_id) else { return };
+        let Ok(_lock) = SessionPersistLock::acquire(session_lock_path(&self.path)) else {
+            return;
+        };
+        let Some(state) = load_state(&self.path) else {
+            return;
+        };
+        let Some(scope) = state.scopes.get(&self.scope_id) else {
+            return;
+        };
         let store = tokenzero_recovery::RecoveryStore::new(Some(self.cache_path.clone()));
+        let mut ref_available = HashMap::new();
         // v1 has no watermark, so its first resumed turn must serve full.
         let records = if state.version >= STATE_VERSION {
             scope
                 .records
                 .iter()
-                .filter(|entry| store.has_ref(&entry.record.blob_ref))
+                .filter(|entry| {
+                    *ref_available
+                        .entry(entry.record.blob_ref.as_str())
+                        .or_insert_with(|| store.has_ref(&entry.record.blob_ref))
+                })
                 .map(|entry| (entry.key.clone(), entry.record.clone()))
                 .collect()
         } else {
             HashMap::new()
         };
-        memory.restore_from_persist(
-            records,
-            scope.rollup.dedup_hits,
-            scope.rollup.diff_hits,
-            scope.rollup.visible_tokens_saved,
-            scope.rollup.diff_tokens_saved,
-            scope.session_hwm,
-            scope.rollup.full_bytes,
-            scope.rollup.delta_bytes,
-        );
+        memory.restore_from_persist(records, scope.rollup.clone(), scope.session_hwm);
     }
 
-    pub(crate) fn persist(&self, memory: &SessionMemory) {
-        let _ = self.persist_inner(memory);
+    pub(crate) fn persist(&self, memory: &SessionMemory, changed_keys: &[ServeKey]) {
+        let _ = self.persist_inner(memory, changed_keys);
     }
 
-    fn persist_inner(&self, memory: &SessionMemory) -> std::io::Result<()> {
-        if let Some(parent) = self.path.parent() {
-            fs::create_dir_all(parent)?;
-        }
+    fn persist_inner(
+        &self,
+        memory: &SessionMemory,
+        changed_keys: &[ServeKey],
+    ) -> std::io::Result<bool> {
+        let parent = self.path.parent().unwrap_or_else(|| Path::new("."));
+        ensure_private_dir(parent)?;
         let _lock = SessionPersistLock::acquire(session_lock_path(&self.path))?;
-        let mut state = load_state(&self.path).unwrap_or_default();
-        let (dedup_hits, diff_hits, visible_tokens_saved, diff_tokens_saved) =
-            memory.rollup_counters();
-        let (full_bytes, delta_bytes) = memory.byte_rollup();
-        let rollup = PersistedRollup {
-            dedup_hits,
-            diff_hits,
-            visible_tokens_saved,
-            diff_tokens_saved,
-            full_bytes,
-            delta_bytes,
-        };
-        let mut records: Vec<_> = memory
-            .records_snapshot()
+        let snapshot = memory.records_snapshot();
+        let records = changed_keys
             .iter()
-            .enumerate()
-            .map(|(idx, (key, record))| PersistedRecordEntry {
-                key: key.clone(),
-                record: record.clone(),
-                seq: idx as u64 + 1,
+            .filter_map(|key| {
+                snapshot.get(key).map(|record| PersistedRecordEntry {
+                    key: key.clone(),
+                    record: record.clone(),
+                    seq: 0,
+                })
             })
             .collect();
-        sort_records(&mut records);
-        for (idx, entry) in records.iter_mut().enumerate() {
-            entry.seq = idx as u64 + 1;
-        }
-
-        let mut merged = HashMap::new();
-        if state.version >= STATE_VERSION {
-            if let Some(existing) = state.scopes.get(&self.scope_id) {
-                merged.extend(
-                    existing
-                        .records
-                        .iter()
-                        .cloned()
-                        .map(|entry| (entry.key.clone(), entry)),
-                );
-            }
-        }
-        merged.extend(records.into_iter().map(|entry| (entry.key.clone(), entry)));
-        let mut scope = PersistedScope {
-            records: merged.into_values().collect(),
-            rollup,
+        let delta = PersistedDelta {
+            version: STATE_VERSION,
+            scope_id: self.scope_id.clone(),
+            records,
+            rollup: memory.persisted_rollup(),
             session_hwm: memory.session_hwm(),
         };
-        sort_records(&mut scope.records);
-        evict_scope_records(&mut scope, MAX_SESSION_MEMORY_RECORDS);
-        state.version = STATE_VERSION;
-        state.scopes.insert(self.scope_id.clone(), scope);
-        atomic_write_json(&self.path, &state)
+        let delta_body = serde_json::to_string(&delta)?;
+        if self
+            .last_persisted
+            .lock()
+            .ok()
+            .as_deref()
+            .and_then(Option::as_deref)
+            == Some(delta_body.as_str())
+            && last_complete_journal_line(&self.path).as_deref() == Some(delta_body.as_str())
+        {
+            return Ok(false);
+        }
+
+        let base = fs::read_to_string(&self.path)
+            .ok()
+            .and_then(|body| serde_json::from_str::<SessionMemoryState>(&body).ok());
+        if base
+            .as_ref()
+            .is_none_or(|state| state.version < STATE_VERSION)
+        {
+            let mut state = base.unwrap_or_default();
+            let mut records: Vec<_> = snapshot
+                .iter()
+                .map(|(key, record)| PersistedRecordEntry {
+                    key: key.clone(),
+                    record: record.clone(),
+                    seq: 0,
+                })
+                .collect();
+            normalize_records(&mut records);
+            state.version = STATE_VERSION;
+            state.scopes.insert(
+                self.scope_id.clone(),
+                PersistedScope {
+                    records,
+                    rollup: memory.persisted_rollup(),
+                    session_hwm: memory.session_hwm(),
+                },
+            );
+            let body = serde_json::to_string_pretty(&state)?;
+            atomic_write_json(&self.path, &body)?;
+            remove_journal(&self.path)?;
+            append_json_line(&session_journal_path(&self.path), &delta_body)?;
+        } else {
+            append_json_line(&session_journal_path(&self.path), &delta_body)?;
+            compact_if_needed(&self.path, JOURNAL_COMPACT_BYTES)?;
+        }
+        if let Ok(mut last) = self.last_persisted.lock() {
+            *last = Some(delta_body);
+        }
+        Ok(true)
     }
 }
 
@@ -188,24 +217,18 @@ pub(crate) fn with_session_root<R>(root: &Path, f: impl FnOnce() -> R) -> R {
         let previous = slot.replace(Some(root.to_path_buf()));
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f));
         slot.replace(previous);
-        result.unwrap_or_else(|payload| std::panic::resume_unwind(payload))
+        match result {
+            Ok(value) => value,
+            Err(payload) => std::panic::resume_unwind(payload),
+        }
     })
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Default, Serialize, Deserialize)]
 struct SessionMemoryState {
     version: u32,
     #[serde(default)]
     scopes: BTreeMap<String, PersistedScope>,
-}
-
-impl Default for SessionMemoryState {
-    fn default() -> Self {
-        Self {
-            version: STATE_VERSION,
-            scopes: BTreeMap::new(),
-        }
-    }
 }
 
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
@@ -213,7 +236,7 @@ struct PersistedScope {
     #[serde(default)]
     records: Vec<PersistedRecordEntry>,
     #[serde(default)]
-    rollup: PersistedRollup,
+    rollup: SessionRollup,
     #[serde(default)]
     session_hwm: u64,
 }
@@ -226,52 +249,162 @@ struct PersistedRecordEntry {
     seq: u64,
 }
 
-#[derive(Debug, Default, Clone, Serialize, Deserialize)]
-struct PersistedRollup {
-    dedup_hits: usize,
-    diff_hits: usize,
-    visible_tokens_saved: usize,
-    diff_tokens_saved: usize,
+#[derive(Debug, Serialize, Deserialize)]
+struct PersistedDelta {
+    version: u32,
+    scope_id: String,
     #[serde(default)]
-    full_bytes: usize,
-    #[serde(default)]
-    delta_bytes: usize,
+    records: Vec<PersistedRecordEntry>,
+    rollup: SessionRollup,
+    session_hwm: u64,
 }
 
 fn load_state(path: &Path) -> Option<SessionMemoryState> {
-    let mut state = serde_json::from_str::<SessionMemoryState>(&fs::read_to_string(path).ok()?).ok()?;
-    if state.version == 0 {
-        state.version = STATE_VERSION;
+    let mut state =
+        serde_json::from_str::<SessionMemoryState>(&fs::read_to_string(path).ok()?).ok()?;
+    if state.version < STATE_VERSION {
+        return Some(state);
+    }
+    let journal = fs::read_to_string(session_journal_path(path)).unwrap_or_default();
+    let complete = journal.rfind('\n').map_or("", |end| &journal[..=end]);
+    for line in complete.lines().filter(|line| !line.trim().is_empty()) {
+        let delta: PersistedDelta = serde_json::from_str(line).ok()?;
+        if delta.version != STATE_VERSION {
+            return None;
+        }
+        apply_delta(&mut state, delta);
+    }
+    for scope in state.scopes.values_mut() {
+        normalize_records(&mut scope.records);
     }
     Some(state)
 }
 
-fn sort_records(records: &mut [PersistedRecordEntry]) {
-    records.sort_by_key(|entry| serde_json::to_string(&entry.key).unwrap_or_default());
+fn apply_delta(state: &mut SessionMemoryState, delta: PersistedDelta) {
+    let scope = state.scopes.entry(delta.scope_id).or_default();
+    let mut records: HashMap<_, _> = scope
+        .records
+        .drain(..)
+        .map(|entry| (entry.key.clone(), entry))
+        .collect();
+    records.extend(
+        delta
+            .records
+            .into_iter()
+            .map(|entry| (entry.key.clone(), entry)),
+    );
+    scope.records = records.into_values().collect();
+    scope.rollup = delta.rollup;
+    scope.session_hwm = delta.session_hwm;
+    state.version = STATE_VERSION;
 }
 
-fn evict_scope_records(scope: &mut PersistedScope, limit: usize) {
-    if scope.records.len() <= limit {
-        return;
+fn normalize_records(records: &mut Vec<PersistedRecordEntry>) {
+    sort_records(records);
+    if records.len() > MAX_SESSION_MEMORY_RECORDS {
+        records.drain(..records.len() - MAX_SESSION_MEMORY_RECORDS);
     }
-    let excess = scope.records.len() - limit;
-    scope.records.sort_by_key(|entry| entry.seq);
-    scope.records.drain(..excess);
-    for (idx, entry) in scope.records.iter_mut().enumerate() {
+    for (idx, entry) in records.iter_mut().enumerate() {
         entry.seq = idx as u64 + 1;
     }
 }
 
-fn atomic_write_json(path: &Path, state: &SessionMemoryState) -> std::io::Result<()> {
-    let parent = path.parent().unwrap_or_else(|| Path::new("."));
-    fs::create_dir_all(parent)?;
+fn sort_records(records: &mut [PersistedRecordEntry]) {
+    records.sort_by_cached_key(|entry| serde_json::to_string(&entry.key).unwrap_or_default());
+}
+
+fn sidecar_path(path: &Path, suffix: &str) -> PathBuf {
+    let mut name = path
+        .file_name()
+        .map_or_else(|| "session-memory.json".into(), |name| name.to_os_string());
+    name.push(suffix);
+    path.with_file_name(name)
+}
+
+fn session_journal_path(path: &Path) -> PathBuf {
+    sidecar_path(path, ".journal")
+}
+
+fn last_complete_journal_line(path: &Path) -> Option<String> {
+    let body = fs::read_to_string(session_journal_path(path)).ok()?;
+    body.strip_suffix('\n')?
+        .lines()
+        .next_back()
+        .map(str::to_owned)
+}
+
+fn append_json_line(path: &Path, body: &str) -> std::io::Result<()> {
+    let mut options = OpenOptions::new();
+    options.read(true).append(true).create(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut file = options.open(path)?;
+    let len = file.metadata()?.len();
+    if len > 0 {
+        file.seek(SeekFrom::End(-1))?;
+        let mut tail = [0];
+        file.read_exact(&mut tail)?;
+        if tail[0] != b'\n' {
+            let bytes = fs::read(path)?;
+            file.set_len(
+                bytes
+                    .iter()
+                    .rposition(|byte| *byte == b'\n')
+                    .map_or(0, |idx| idx + 1) as u64,
+            )?;
+        }
+    }
+    file.seek(SeekFrom::End(0))?;
+    file.write_all(body.as_bytes())?;
+    file.write_all(b"\n")?;
+    file.flush()
+}
+
+fn compact_if_needed(path: &Path, max_bytes: u64) -> std::io::Result<()> {
+    let journal = session_journal_path(path);
+    if fs::metadata(&journal).is_ok_and(|metadata| metadata.len() > max_bytes) {
+        compact_journal(path)?;
+    }
+    Ok(())
+}
+
+fn compact_journal(path: &Path) -> std::io::Result<()> {
+    let state = load_state(path).ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "invalid session persistence journal",
+        )
+    })?;
+    let body = serde_json::to_string_pretty(&state)?;
+    atomic_write_json(path, &body)?;
+    remove_journal(path)
+}
+
+fn remove_journal(path: &Path) -> std::io::Result<()> {
+    match fs::remove_file(session_journal_path(path)) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error),
+    }
+}
+
+fn ensure_private_dir(path: &Path) -> std::io::Result<()> {
+    fs::create_dir_all(path)?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(parent, fs::Permissions::from_mode(0o700))?;
+        if fs::metadata(path)?.permissions().mode() & 0o7777 != 0o700 {
+            fs::set_permissions(path, fs::Permissions::from_mode(0o700))?;
+        }
     }
+    Ok(())
+}
+
+fn atomic_write_json(path: &Path, body: &str) -> std::io::Result<()> {
     let tmp = path.with_extension(format!("tmp-{}", std::process::id()));
-    let body = serde_json::to_string_pretty(state)?;
     let mut options = OpenOptions::new();
     options.write(true).create(true).truncate(true);
     #[cfg(unix)]
@@ -291,12 +424,7 @@ fn atomic_write_json(path: &Path, state: &SessionMemoryState) -> std::io::Result
 }
 
 fn session_lock_path(path: &Path) -> PathBuf {
-    let mut name = path
-        .file_name()
-        .map(|name| name.to_os_string())
-        .unwrap_or_else(|| "session-memory.json".into());
-    name.push(".lock");
-    path.with_file_name(name)
+    sidecar_path(path, ".lock")
 }
 
 struct SessionPersistLock(fs::File);
@@ -332,5 +460,86 @@ impl SessionPersistLock {
 impl Drop for SessionPersistLock {
     fn drop(&mut self) {
         let _ = FileExt::unlock(&self.0);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::session::{SeenState, ServeKey, ServedRecord, SessionMemory};
+    use std::time::SystemTime;
+
+    fn test_record(blob_ref: &str) -> ServedRecord {
+        ServedRecord {
+            content_sha256: "same-content".to_string(),
+            blob_ref: blob_ref.to_string(),
+            file_ref: blob_ref.to_string(),
+            raw_tokens: 1,
+            line_count: 1,
+            byte_len: 4,
+            served_at: SystemTime::UNIX_EPOCH,
+            serve_count: 1,
+        }
+    }
+
+    #[test]
+    fn v1_state_does_not_replay_v2_journal_into_seen_set() {
+        let temp = tempfile::tempdir().unwrap();
+        let state_path = temp.path().join("session-memory.json");
+        let key = ServeKey::File {
+            path: PathBuf::from("notes.txt"),
+            start: None,
+            end: None,
+        };
+        let record = test_record("tz://blob/missing");
+        let state = SessionMemoryState {
+            version: 1,
+            scopes: BTreeMap::from([(
+                "__user_global__".to_string(),
+                PersistedScope {
+                    records: vec![PersistedRecordEntry {
+                        key: key.clone(),
+                        record: record.clone(),
+                        seq: 1,
+                    }],
+                    rollup: SessionRollup::default(),
+                    session_hwm: 0,
+                },
+            )]),
+        };
+        fs::write(&state_path, serde_json::to_string(&state).unwrap()).unwrap();
+
+        let delta = PersistedDelta {
+            version: STATE_VERSION,
+            scope_id: "__user_global__".to_string(),
+            records: vec![PersistedRecordEntry {
+                key: key.clone(),
+                record,
+                seq: 1,
+            }],
+            rollup: SessionRollup::default(),
+            session_hwm: 1,
+        };
+        fs::write(
+            session_journal_path(&state_path),
+            format!("{}\n", serde_json::to_string(&delta).unwrap()),
+        )
+        .unwrap();
+
+        let persisted = load_state(&state_path).unwrap();
+        assert_eq!(persisted.version, 1);
+
+        let persistence = SessionPersistence {
+            path: state_path,
+            cache_path: temp.path().join("cache.json"),
+            scope_id: "__user_global__".to_string(),
+            last_persisted: Arc::new(Mutex::new(None)),
+        };
+        let mut memory = SessionMemory::default();
+        persistence.load_into(&mut memory);
+        assert!(matches!(
+            memory.lookup(&key, "same-content"),
+            SeenState::Miss
+        ));
     }
 }

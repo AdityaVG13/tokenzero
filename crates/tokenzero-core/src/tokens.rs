@@ -16,9 +16,8 @@ pub fn sha256_hex(text: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(text.as_bytes());
     let digest = hasher.finalize();
-    let bytes = &*digest;
-    let mut out = String::with_capacity(bytes.len() * 2);
-    for &b in bytes {
+    let mut out = String::with_capacity(digest.len() * 2);
+    for &b in digest.iter() {
         push_hex_byte(&mut out, b);
     }
     out
@@ -37,18 +36,15 @@ pub fn enforce_token_budget_with_ref(
     if max_visible_tokens == 0 || count_tokens(text) <= max_visible_tokens {
         return text.to_string();
     }
-    let marker = match recovery_ref {
-        Some(ref_id) => {
-            format!("... omitted by visible budget; expand {ref_id} for the full output ...")
-        }
-        None => "... omitted by visible budget; exact refs available ...".to_string(),
-    };
+    let marker = recovery_ref.map_or_else(
+        || "... omitted by visible budget; exact refs available ...".to_string(),
+        |ref_id| format!("... omitted by visible budget; expand {ref_id} for the full output ..."),
+    );
     let marker = marker.as_str();
     let marker_tokens = count_tokens(marker);
     if marker_tokens > max_visible_tokens {
         return "omitted".to_string();
     }
-    // Count each line once; newline and marker costs are part of the budget.
     const SEPARATOR_TOKENS: usize = 1;
     let mut running: usize = 0;
     let mut keep: usize = 0;
@@ -76,9 +72,8 @@ pub fn enforce_token_budget_with_ref(
 }
 
 fn prefix_end_for_kept_lines(text: &str, keep: usize) -> usize {
-    let newline = keep.saturating_sub(1).max(1) - 1;
     text.match_indices('\n')
-        .nth(newline)
+        .nth(keep.saturating_sub(2))
         .map_or(text.len(), |(index, _)| index)
 }
 
@@ -105,7 +100,11 @@ pub struct TokenizerMetadata {
 }
 
 const fn tokenizer(family: TokenizerFamily, chars_per_token_milli: usize) -> TokenizerMetadata {
-    TokenizerMetadata { family, chars_per_token_milli, approximate: true }
+    TokenizerMetadata {
+        family,
+        chars_per_token_milli,
+        approximate: true,
+    }
 }
 
 const CL100K: TokenizerMetadata = tokenizer(TokenizerFamily::Cl100k, 4_000);
@@ -124,7 +123,10 @@ pub fn tokenizer_metadata(model_id: &str) -> Option<&'static TokenizerMetadata> 
         return Some(&O200K);
     }
     RULES.iter().find_map(|(metadata, prefixes)| {
-        prefixes.iter().any(|prefix| starts_with_ignore_ascii_case(model, prefix)).then_some(*metadata)
+        prefixes
+            .iter()
+            .any(|prefix| starts_with_ignore_ascii_case(model, prefix))
+            .then_some(*metadata)
     })
 }
 
@@ -175,9 +177,6 @@ pub fn count_tokens_for_model(text: &str, model_id: Option<&str>) -> usize {
 }
 
 fn approximate_token_count(text: &str, metadata: &TokenizerMetadata) -> usize {
-    if text.is_empty() {
-        return 0;
-    }
     text.chars()
         .count()
         .saturating_mul(1_000)
@@ -234,10 +233,9 @@ fn pack_to_token_boundary_for_model_with_char_limit<'a>(
 }
 
 fn char_prefix(text: &str, chars: usize) -> &str {
-    match text.char_indices().nth(chars) {
-        Some((end, _)) => &text[..end],
-        None => text,
-    }
+    text.char_indices()
+        .nth(chars)
+        .map_or(text, |(end, _)| &text[..end])
 }
 
 fn lexical_boundary_prefix(text: &str, max_tokens: usize, max_chars: usize) -> &str {
@@ -297,10 +295,10 @@ pub(crate) const ASCII_TOKEN_CLASS: [u8; 256] = {
 };
 
 pub fn count_tokens(text: &str) -> usize {
-    match active_tokenizer_metadata() {
-        Some(metadata) => approximate_token_count(text, metadata),
-        None => count_tokens_lexical(text),
-    }
+    active_tokenizer_metadata().map_or_else(
+        || count_tokens_lexical(text),
+        |metadata| approximate_token_count(text, metadata),
+    )
 }
 
 fn count_ascii(bytes: &[u8], stop_at_non_ascii: bool) -> (usize, usize) {
@@ -309,18 +307,9 @@ fn count_ascii(bytes: &[u8], stop_at_non_ascii: bool) -> (usize, usize) {
         if stop_at_non_ascii && !byte.is_ascii() {
             return (tokens, index);
         }
-        match ASCII_TOKEN_CLASS[byte as usize] {
-            1 if !in_token => {
-                tokens += 1;
-                in_token = true;
-            }
-            1 => {}
-            2 => in_token = false,
-            _ => {
-                tokens += 1;
-                in_token = false;
-            }
-        }
+        let class = ASCII_TOKEN_CLASS[byte as usize];
+        tokens += usize::from(class == 0 || class == 1 && !in_token);
+        in_token = class == 1;
     }
     (tokens, bytes.len())
 }
@@ -339,17 +328,9 @@ pub(crate) fn count_tokens_tail(text: &str, start_byte_offset: usize) -> usize {
     let (mut tokens, _) = count_ascii(&text.as_bytes()[..start_byte_offset], false);
     let mut in_token = false;
     for ch in text[start_byte_offset..].chars() {
-        if ch.is_ascii_alphanumeric() || ch == '_' {
-            if !in_token {
-                tokens += 1;
-                in_token = true;
-            }
-        } else {
-            in_token = false;
-            if !ch.is_whitespace() {
-                tokens += 1;
-            }
-        }
+        let word = ch.is_ascii_alphanumeric() || ch == '_';
+        tokens += usize::from(!ch.is_whitespace() && (!word || !in_token));
+        in_token = word;
     }
     tokens
 }

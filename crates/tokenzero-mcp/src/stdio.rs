@@ -199,14 +199,21 @@ fn send_parse_error(
 /// itself fails (client side of the pipe is gone).
 fn write_stdio_responses<W: Write>(mut writer: W, responses: mpsc::Receiver<OutgoingResponse>) {
     while let Ok(response) = responses.recv() {
-        let written = if response.framed {
-            write_framed_jsonrpc(&mut writer, &response.text)
-        } else {
-            writeln!(writer, "{}", response.text).and_then(|_| flush_retry(&mut writer))
-        };
-        if written.is_err() {
+        if write_jsonrpc_response(&mut writer, response.framed, &response.text).is_err() {
             break;
         }
+    }
+}
+
+pub(crate) fn write_jsonrpc_response<W: Write>(
+    writer: &mut W,
+    framed: bool,
+    response: &str,
+) -> std::io::Result<()> {
+    if framed {
+        write_framed_jsonrpc(writer, response)
+    } else {
+        writeln!(writer, "{response}").and_then(|_| flush_retry(writer))
     }
 }
 
@@ -277,11 +284,15 @@ pub(crate) fn read_stdio_events_from_reader<R: BufRead>(
             }
             Err(err) => {
                 let recoverable = !framed;
-                if tx.send(StdioEvent::ParseError {
-                    framed,
-                    error: err.to_string(),
-                    recoverable,
-                }).is_err() || !recoverable {
+                if tx
+                    .send(StdioEvent::ParseError {
+                        framed,
+                        error: err.to_string(),
+                        recoverable,
+                    })
+                    .is_err()
+                    || !recoverable
+                {
                     break;
                 }
             }
@@ -316,7 +327,9 @@ pub(crate) fn read_framed_jsonrpc<R: BufRead>(reader: &mut R) -> std::io::Result
             if header_bytes == 0 {
                 return Ok(None);
             }
-            return Err(unexpected_eof("MCP stdio frame ended before header terminator"));
+            return Err(unexpected_eof(
+                "MCP stdio frame ended before header terminator",
+            ));
         }
         if !header_line.ends_with(b"\n") {
             return Err(unexpected_eof("MCP stdio header line ended before newline"));
@@ -342,9 +355,10 @@ pub(crate) fn read_framed_jsonrpc<R: BufRead>(reader: &mut R) -> std::io::Result
             if content_length.is_some() {
                 return Err(invalid_data("duplicate Content-Length header"));
             }
-            let parsed = value.trim().parse::<usize>().map_err(|err| {
-                invalid_data(format!("invalid Content-Length header: {err}"))
-            })?;
+            let parsed = value
+                .trim()
+                .parse::<usize>()
+                .map_err(|err| invalid_data(format!("invalid Content-Length header: {err}")))?;
             if parsed > MAX_MCP_STDIO_FRAME_BYTES {
                 return Err(invalid_data(format!(
                     "Content-Length {parsed} exceeds maximum {MAX_MCP_STDIO_FRAME_BYTES}"
@@ -407,7 +421,8 @@ fn read_bounded_stdio_line<R: BufRead>(
             .iter()
             .position(|byte| *byte == b'\n')
             .map_or(buffer.len(), |position| position + 1);
-        let next_len = line.len()
+        let next_len = line
+            .len()
             .checked_add(bytes_to_consume)
             .ok_or_else(|| invalid_data(format!("{label} length overflow")))?;
         if next_len > max_bytes {
@@ -467,40 +482,3 @@ pub(crate) fn write_framed_jsonrpc<W: Write>(
     )?;
     writer.flush()
 }
-
-#[cfg(test)]
-#[derive(Clone, Default)]
-pub(crate) struct TestOutput(Arc<Mutex<Vec<u8>>>);
-
-#[cfg(test)]
-impl TestOutput {
-    fn guard(&self) -> std::sync::MutexGuard<'_, Vec<u8>> {
-        match self.0.lock() {
-            Ok(guard) => guard,
-            Err(poisoned) => poisoned.into_inner(),
-        }
-    }
-
-    pub(crate) fn bytes(&self) -> Vec<u8> {
-        self.guard().clone()
-    }
-
-    pub(crate) fn contains(&self, needle: &str) -> bool {
-        String::from_utf8_lossy(&self.guard()).contains(needle)
-    }
-}
-
-#[cfg(test)]
-impl Write for TestOutput {
-    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-        self.guard().extend_from_slice(buf);
-        Ok(buf.len())
-    }
-
-    fn flush(&mut self) -> std::io::Result<()> {
-        Ok(())
-    }
-}
-
-#[cfg(test)]
-mod tests;

@@ -6,14 +6,13 @@ use crate::shell_parse::{
     looks_diagnostic, looks_status_table, shell_analysis_command, split_shell_words,
 };
 
-fn is_one_of(value: &str, choices: &[&str]) -> bool {
-    choices.contains(&value)
-}
-
 pub fn shell_family(command: &str, stdout: &str, stderr: &str) -> String {
     let analysis = shell_analysis_command(command);
     let words = split_shell_words(&analysis);
-    let first = words.first().map(|word| shell_command_basename(word)).unwrap_or_default();
+    let first = words
+        .first()
+        .map(|word| shell_command_basename(word))
+        .unwrap_or_default();
     let second = (first == "git")
         .then(|| git_subcommand_index(&words))
         .flatten()
@@ -25,38 +24,38 @@ pub fn shell_family(command: &str, stdout: &str, stderr: &str) -> String {
     let family = if is_repo_inventory_command(command) || is_repo_inventory_command(&analysis) {
         "repo-inventory"
     } else if first == "diff"
-        || first == "git" && is_one_of(second, &["diff", "show"])
+        || first == "git" && ["diff", "show"].contains(&second)
         || combined.starts_with("diff --git")
         || combined.contains("\n@@ ")
     {
         "diff"
-    } else if is_one_of(&first, &["test", "[", "[[", "cmp"]) {
+    } else if ["test", "[", "[[", "cmp"].contains(&first.as_str()) {
         "predicate"
-    } else if first == "cargo" && is_one_of(second, &["test", "build", "check", "clippy"]) {
-        if second == "test" {
-            "test"
-        } else {
-            "build"
-        }
+    } else if first == "cargo" && ["test", "build", "check", "clippy"].contains(&second) {
+        if second == "test" { "test" } else { "build" }
     } else if is_search_shell_command(command) {
         "search"
-    } else if is_one_of(&first, &["pytest", "unittest"])
-        || ["python -m pytest", "python -m unittest"].iter().any(|needle| command.contains(needle))
+    } else if ["pytest", "unittest"].contains(&first.as_str())
+        || ["python -m pytest", "python -m unittest"]
+            .iter()
+            .any(|needle| command.contains(needle))
     {
         "python-test"
     } else if first == "go" && second == "test" {
         "go-test"
-    } else if is_one_of(&first, &["jest", "vitest"])
-        || is_one_of(&first, &["npm", "pnpm", "yarn"]) && second == "test"
+    } else if ["jest", "vitest"].contains(&first.as_str())
+        || ["npm", "pnpm", "yarn"].contains(&first.as_str()) && second == "test"
     {
         "test"
-    } else if is_one_of(&first, &["eslint", "tsc", "ruff", "mypy", "clippy"]) {
+    } else if ["eslint", "tsc", "ruff", "mypy", "clippy"].contains(&first.as_str()) {
         "lint"
-    } else if is_one_of(&first, &["docker", "kubectl"]) || looks_status_table(&combined) {
+    } else if ["docker", "kubectl"].contains(&first.as_str()) || looks_status_table(&combined) {
         "status"
     } else if serde_json::from_str::<serde_json::Value>(stdout.trim()).is_ok()
         || combined.contains("<testsuite")
-        || combined.lines().any(|line| line.starts_with("ok ") || line.starts_with("not ok "))
+        || combined
+            .lines()
+            .any(|line| line.starts_with("ok ") || line.starts_with("not ok "))
     {
         "structured"
     } else if looks_diagnostic(&combined) {

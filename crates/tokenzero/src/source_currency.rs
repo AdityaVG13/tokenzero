@@ -71,7 +71,9 @@ pub(crate) fn competitor_adapter_sources() -> impl Iterator<Item = CompetitorAda
 }
 
 pub(crate) fn competitor_source_url(tool: &str) -> Option<&'static str> {
-    COMPETITOR_SOURCES.iter().find_map(|source| (source.tool == tool).then_some(source.url))
+    COMPETITOR_SOURCES
+        .iter()
+        .find_map(|source| (source.tool == tool).then_some(source.url))
 }
 
 pub(crate) fn source_currency_report(release_candidate_id: &str) -> serde_json::Value {
@@ -138,7 +140,11 @@ pub(crate) fn refreshed_source_currency_report(
     for source in COMPETITOR_SOURCES {
         let refresh = refresh_by_tool.get(source.tool);
         let refreshed = |key, default| {
-            refresh.and_then(|row| row[key].as_str()).unwrap_or(default).trim().to_string()
+            refresh
+                .and_then(|row| row[key].as_str())
+                .unwrap_or(default)
+                .trim()
+                .to_string()
         };
         let source_commit = refreshed("source_commit", "");
         let source_date = refreshed("source_date", COMPETITOR_SOURCE_DATE);
@@ -263,7 +269,9 @@ pub(crate) fn git_head_source_refresh_rows() -> Vec<serde_json::Value> {
 const LS_REMOTE_TIMEOUT: Duration = Duration::from_secs(30);
 
 fn git_ls_remote_head(url: &str) -> Result<String> {
-    let argv = ["git", "ls-remote", url, "HEAD"].map(str::to_string).to_vec();
+    let argv = ["git", "ls-remote", url, "HEAD"]
+        .map(str::to_string)
+        .to_vec();
     let output = tokenzero_runtime::run_command(&argv, None, None, None, LS_REMOTE_TIMEOUT, false)
         .with_context(|| format!("running git ls-remote HEAD for {url}"))?;
     if output.timed_out {

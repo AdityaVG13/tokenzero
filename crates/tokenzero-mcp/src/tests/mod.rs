@@ -14,3 +14,4 @@ mod session;
 mod shell;
 mod support;
 mod working_set;
+mod zeroref_claims;

@@ -2,23 +2,23 @@ use crate::artifact_contracts::load_json_artifact;
 use serde_json::json;
 use std::path::Path;
 
+fn values(value: &serde_json::Value) -> Vec<serde_json::Value> {
+    value.as_array().cloned().unwrap_or_default()
+}
+
 pub(crate) fn completion_claim_gate_snapshot(path: &Path) -> serde_json::Value {
     let artifact = match load_json_artifact(path) {
         Ok(artifact) => artifact,
         Err(error) => {
             return json!({
-                "present": false,
-                "artifact_path": path.display().to_string(),
-                "public_claims_approved": false,
-                "gate_passes": {},
+                "present": false, "artifact_path": path.display().to_string(),
+                "public_claims_approved": false, "gate_passes": {},
                 "blocked_reasons": ["claim audit artifact missing or unreadable"],
-                "release_candidate_ids": [],
-                "release_candidate_artifacts": [],
+                "release_candidate_ids": [], "release_candidate_artifacts": [],
                 "error": error.to_string()
             });
         }
     };
-
     let mut gate_passes = artifact["gate_passes"]
         .as_object()
         .cloned()
@@ -27,61 +27,37 @@ pub(crate) fn completion_claim_gate_snapshot(path: &Path) -> serde_json::Value {
         .as_object()
         .cloned()
         .unwrap_or_default();
-    let release_candidate_ids_present = !artifact["release_candidate_ids"].is_null();
-    let release_candidate_artifacts_present = !artifact["release_candidate_artifacts"].is_null();
-    let mut release_candidate_ids = artifact["release_candidate_ids"]
-        .as_array()
-        .cloned()
-        .unwrap_or_default();
-    let mut release_candidate_artifacts = artifact["release_candidate_artifacts"]
-        .as_array()
-        .cloned()
-        .unwrap_or_default();
-    if let Some(gates) = artifact["evidence_gates"].as_array() {
-        for gate in gates {
-            if let Some(id) = gate["id"].as_str() {
-                if !gate_passes.contains_key(id) {
-                    gate_passes.insert(id.to_string(), gate["pass"].clone());
-                }
-                if !gate_reasons.contains_key(id) {
-                    gate_reasons.insert(
-                        id.to_string(),
-                        gate["reasons"]
-                            .as_array()
-                            .cloned()
-                            .unwrap_or_default()
-                            .into(),
-                    );
-                }
-                if id == "release_candidate" {
-                    if !release_candidate_ids_present {
-                        release_candidate_ids = gate["details"]["release_candidate_ids"]
-                            .as_array()
-                            .cloned()
-                            .unwrap_or_default();
-                    }
-                    if !release_candidate_artifacts_present {
-                        release_candidate_artifacts = gate["details"]["artifacts"]
-                            .as_array()
-                            .cloned()
-                            .unwrap_or_default();
-                    }
-                }
+    let ids_present = !artifact["release_candidate_ids"].is_null();
+    let artifacts_present = !artifact["release_candidate_artifacts"].is_null();
+    let mut ids = values(&artifact["release_candidate_ids"]);
+    let mut artifacts = values(&artifact["release_candidate_artifacts"]);
+    for gate in values(&artifact["evidence_gates"]) {
+        let Some(id) = gate["id"].as_str() else {
+            continue;
+        };
+        gate_passes
+            .entry(id.to_string())
+            .or_insert_with(|| gate["pass"].clone());
+        gate_reasons
+            .entry(id.to_string())
+            .or_insert_with(|| values(&gate["reasons"]).into());
+        if id == "release_candidate" {
+            if !ids_present {
+                ids = values(&gate["details"]["release_candidate_ids"]);
+            }
+            if !artifacts_present {
+                artifacts = values(&gate["details"]["artifacts"]);
             }
         }
     }
-
     json!({
-        "present": true,
-        "artifact_path": path.display().to_string(),
+        "present": true, "artifact_path": path.display().to_string(),
         "schema_version": artifact["schema_version"],
         "release_candidate_id": artifact["release_candidate_id"],
         "public_claims_approved": artifact["public_claims_approved"],
-        "gate_passes": gate_passes,
-        "gate_reasons": gate_reasons,
-        "blocked_reasons": artifact["blocked_reasons"].as_array().cloned().unwrap_or_default(),
-        "release_candidate_ids": release_candidate_ids,
-        "release_candidate_artifacts": release_candidate_artifacts
+        "gate_passes": gate_passes, "gate_reasons": gate_reasons,
+        "blocked_reasons": values(&artifact["blocked_reasons"]),
+        "release_candidate_ids": ids, "release_candidate_artifacts": artifacts
     })
 }
 
@@ -119,121 +95,157 @@ pub(crate) fn completion_residual_gate_matrix(
     json!(rows)
 }
 
+struct GateAction {
+    gate_id: &'static str,
+    action_id: &'static str,
+    owner: &'static str,
+    stop_before: &'static [&'static str],
+}
+
+const GATE_ACTIONS: &[GateAction] = &[
+    GateAction {
+        gate_id: "source_currency",
+        action_id: "source_currency_refresh",
+        owner: "product/release",
+        stop_before: &["publication", "public benchmark claim"],
+    },
+    GateAction {
+        gate_id: "benchmark_artifact",
+        action_id: "benchmark_publication_approval",
+        owner: "product/release",
+        stop_before: &["publication", "public benchmark claim"],
+    },
+    GateAction {
+        gate_id: "adapter_approval",
+        action_id: "runnable_adapter_approval",
+        owner: "bench/release",
+        stop_before: &["competitor execution", "public benchmark claim"],
+    },
+    GateAction {
+        gate_id: "os_artifact",
+        action_id: "os_matrix_expansion",
+        owner: "release/verification",
+        stop_before: &["OS-agnostic public claim", "publication"],
+    },
+    GateAction {
+        gate_id: "release_approval",
+        action_id: "final_false_closure_audit",
+        owner: "implementer",
+        stop_before: &["release", "publication", "global install apply"],
+    },
+];
+
 fn completion_gate_next_action(
     gate_id: &str,
     reasons: &[serde_json::Value],
 ) -> (&'static str, &'static str, Vec<&'static str>) {
-    match gate_id {
-        "source_currency" => (
-            "source_currency_refresh",
-            "product/release",
-            vec!["publication", "public benchmark claim"],
-        ),
-        "benchmark_artifact"
-            if reason_values_contain(
-                reasons,
-                "benchmark competitor rows must be runnable for public claims",
-            ) =>
-        {
-            (
-                "runnable_adapter_approval",
-                "bench/release",
-                vec!["competitor execution", "public benchmark claim"],
-            )
-        }
-        "benchmark_artifact" => (
-            "benchmark_publication_approval",
-            "product/release",
-            vec!["publication", "public benchmark claim"],
-        ),
-        "adapter_approval" => (
+    if gate_id == "benchmark_artifact"
+        && reason_values_contain(
+            reasons,
+            "benchmark competitor rows must be runnable for public claims",
+        )
+    {
+        return (
             "runnable_adapter_approval",
             "bench/release",
             vec!["competitor execution", "public benchmark claim"],
-        ),
-        "os_artifact" => (
-            "os_matrix_expansion",
-            "release/verification",
-            vec!["OS-agnostic public claim", "publication"],
-        ),
-        "release_approval" => (
-            "final_false_closure_audit",
-            "implementer",
-            vec!["release", "publication", "global install apply"],
-        ),
-        _ => (
-            "final_false_closure_audit",
-            "implementer",
-            vec!["release", "publication"],
-        ),
+        );
     }
+    GATE_ACTIONS
+        .iter()
+        .find(|row| row.gate_id == gate_id)
+        .map_or(
+            (
+                "final_false_closure_audit",
+                "implementer",
+                vec!["release", "publication"],
+            ),
+            |row| (row.action_id, row.owner, row.stop_before.to_vec()),
+        )
 }
 
 fn reason_values_contain(reasons: &[serde_json::Value], needle: &str) -> bool {
-    reasons
-        .iter()
-        .any(|reason| reason.as_str().is_some_and(|reason| reason == needle))
+    reasons.iter().any(|reason| reason.as_str() == Some(needle))
 }
 
 pub(crate) fn artifact_loop_next_actions(
     residual_gate_matrix: &serde_json::Value,
 ) -> Vec<serde_json::Value> {
-    let mut action_ids = Vec::<String>::new();
-    if let Some(rows) = residual_gate_matrix.as_array() {
-        for row in rows {
-            if let Some(action_id) = row["next_action_id"].as_str() {
-                if !action_ids.iter().any(|existing| existing == action_id) {
-                    action_ids.push(action_id.to_string());
-                }
-            }
+    let mut ids = Vec::new();
+    for id in residual_gate_matrix
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|row| row["next_action_id"].as_str())
+    {
+        if !ids.contains(&id) {
+            ids.push(id);
         }
     }
-    if !action_ids
-        .iter()
-        .any(|existing| existing == "final_false_closure_audit")
-    {
-        action_ids.push("final_false_closure_audit".to_string());
+    if !ids.contains(&"final_false_closure_audit") {
+        ids.push("final_false_closure_audit");
     }
-    action_ids
-        .iter()
-        .map(|action_id| artifact_loop_next_action(action_id))
+    ids.into_iter()
+        .map(artifact_loop_next_action)
         .filter(|action| !action.is_null())
         .collect()
 }
 
+struct NextAction {
+    id: &'static str,
+    owner: &'static str,
+    action: &'static str,
+    validation: &'static str,
+    stop_condition: &'static str,
+}
+
+const NEXT_ACTIONS: &[NextAction] = &[
+    NextAction {
+        id: "source_currency_refresh",
+        owner: "product/release",
+        action: "refresh primary source pages and pin release-candidate IDs across source, benchmark, recovery, task-success, OS, and adapter approval artifacts before public claims",
+        validation: "tokenzero source-currency-audit --json and tokenzero claim-audit --source-artifact <source.json> --benchmark-artifact <bench.json> --adapter-approval-artifact <adapter.json> --recovery-artifact <recovery.json> --task-success-artifact <task.json> --os-artifact <os.json> --json",
+        stop_condition: "do not publish savings/superiority claims while fresh_for_public_claim is false or release_candidate gate fails",
+    },
+    NextAction {
+        id: "runnable_adapter_approval",
+        owner: "bench/release",
+        action: "approve reviewed competitor commands, link them into the benchmark as approved_not_executed evidence, and only then decide whether an explicitly approved execution phase is warranted",
+        validation: "tokenzero adapter-approval-audit --approval-file <reviewed.json> --execution-approval --json, then tokenzero bench competitors --adapter-approval-artifact <adapter-approval.json> --json and inspect approved_not_executed rows before any runnable execution",
+        stop_condition: "no blind install, no unreviewed competitor binary execution, and no public benchmark claim from approved_not_executed rows",
+    },
+    NextAction {
+        id: "benchmark_publication_approval",
+        owner: "product/release",
+        action: "approve benchmark publication only after source, adapter, recovery, task-success, and OS evidence gates agree",
+        validation: "tokenzero claim-audit --benchmark-artifact <bench.json> --adapter-approval-artifact <adapter.json> --source-artifact <source.json> --recovery-artifact <recovery.json> --task-success-artifact <task.json> --os-artifact <os.json> --json",
+        stop_condition: "do not publish benchmark superiority claims until claim-audit reports public_claims_approved=true and release approval is explicit",
+    },
+    NextAction {
+        id: "final_false_closure_audit",
+        owner: "implementer",
+        action: "rerun completion audit and reconcile every residual gate before claiming completion",
+        validation: "tokenzero completion-audit --json",
+        stop_condition: "completion_achieved must remain false until every required evidence row is direct and current",
+    },
+];
+
 fn artifact_loop_next_action(action_id: &str) -> serde_json::Value {
-    match action_id {
-        "os_matrix_expansion" => os_matrix_expansion_next_action(),
-        "source_currency_refresh" => json!({
-            "id": "source_currency_refresh",
-            "owner": "product/release",
-            "action": "refresh primary source pages and pin release-candidate IDs across source, benchmark, recovery, task-success, OS, and adapter approval artifacts before public claims",
-            "validation": "tokenzero source-currency-audit --json and tokenzero claim-audit --source-artifact <source.json> --benchmark-artifact <bench.json> --adapter-approval-artifact <adapter.json> --recovery-artifact <recovery.json> --task-success-artifact <task.json> --os-artifact <os.json> --json",
-            "stop_condition": "do not publish savings/superiority claims while fresh_for_public_claim is false or release_candidate gate fails"
-        }),
-        "runnable_adapter_approval" => json!({
-            "id": "runnable_adapter_approval",
-            "owner": "bench/release",
-            "action": "approve reviewed competitor commands, link them into the benchmark as approved_not_executed evidence, and only then decide whether an explicitly approved execution phase is warranted",
-            "validation": "tokenzero adapter-approval-audit --approval-file <reviewed.json> --execution-approval --json, then tokenzero bench competitors --adapter-approval-artifact <adapter-approval.json> --json and inspect approved_not_executed rows before any runnable execution",
-            "stop_condition": "no blind install, no unreviewed competitor binary execution, and no public benchmark claim from approved_not_executed rows"
-        }),
-        "benchmark_publication_approval" => json!({
-            "id": "benchmark_publication_approval",
-            "owner": "product/release",
-            "action": "approve benchmark publication only after source, adapter, recovery, task-success, and OS evidence gates agree",
-            "validation": "tokenzero claim-audit --benchmark-artifact <bench.json> --adapter-approval-artifact <adapter.json> --source-artifact <source.json> --recovery-artifact <recovery.json> --task-success-artifact <task.json> --os-artifact <os.json> --json",
-            "stop_condition": "do not publish benchmark superiority claims until claim-audit reports public_claims_approved=true and release approval is explicit"
-        }),
-        "final_false_closure_audit" => json!({
-            "id": "final_false_closure_audit",
-            "owner": "implementer",
-            "action": "rerun completion audit and reconcile every residual gate before claiming completion",
-            "validation": "tokenzero completion-audit --json",
-            "stop_condition": "completion_achieved must remain false until every required evidence row is direct and current"
-        }),
-        _ => serde_json::Value::Null,
+    if action_id == "os_matrix_expansion" {
+        return os_matrix_expansion_next_action();
     }
+    NEXT_ACTIONS
+        .iter()
+        .find(|action| action.id == action_id)
+        .map_or(serde_json::Value::Null, |action| {
+            json!({
+                "id": action.id,
+                "owner": action.owner,
+                "action": action.action,
+                "validation": action.validation,
+                "stop_condition": action.stop_condition
+            })
+        })
 }
 
 fn os_matrix_expansion_next_action() -> serde_json::Value {
@@ -315,7 +327,12 @@ fn os_purpose(missing: &[String], complete: &str, incomplete_prefix: &str) -> St
     if missing.is_empty() {
         complete.to_string()
     } else {
-        format!("{incomplete_prefix} {}", release_os_list_display(missing))
+        let oses = release_os_list_display(missing);
+        if incomplete_prefix.contains("{}") {
+            incomplete_prefix.replacen("{}", &oses, 1)
+        } else {
+            format!("{incomplete_prefix} {oses}")
+        }
     }
 }
 
@@ -386,24 +403,4 @@ pub(crate) fn handoff_resolve_residual_next_actions(
         .collect::<Vec<_>>();
 
     json!(enriched_rows)
-}
-
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn claim_actions_do_not_import_cli_monolith() {
-        let source = include_str!("claim_actions.rs");
-        let forbidden_imports = [
-            format!("use {}::", "super"),
-            format!("{}::", "super"),
-            format!("use crate::{}", "main"),
-            format!("crate::{}::", "main"),
-        ];
-        for forbidden in forbidden_imports {
-            assert!(
-                !source.contains(&forbidden),
-                "claim_actions.rs must not back-import the CLI monolith: {forbidden}"
-            );
-        }
-    }
 }

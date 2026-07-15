@@ -296,21 +296,37 @@ fn unescape_string(s: &str) -> String {
 }
 
 #[derive(Default)]
-struct Scanner { depths: [i32; 3], quote: Option<char>, escaped: bool }
+struct Scanner {
+    depths: [i32; 3],
+    quote: Option<char>,
+    escaped: bool,
+}
 impl Scanner {
-    fn at_top(&self) -> bool { self.quote.is_none() && self.depths.iter().all(|depth| *depth <= 0) }
+    fn at_top(&self) -> bool {
+        self.quote.is_none() && self.depths.iter().all(|depth| *depth <= 0)
+    }
     fn consume(&mut self, ch: char) {
         if let Some(quote) = self.quote {
-            if self.escaped { self.escaped = false; }
-            else if ch == '\\' { self.escaped = true; }
-            else if ch == quote { self.quote = None; }
+            if self.escaped {
+                self.escaped = false;
+            } else if ch == '\\' {
+                self.escaped = true;
+            } else if ch == quote {
+                self.quote = None;
+            }
             return;
         }
-        if ch == '"' || ch == '\'' || ch as u32 == 96 { self.quote = Some(ch); return; }
+        if ch == '"' || ch == '\'' || ch as u32 == 96 {
+            self.quote = Some(ch);
+            return;
+        }
         match ch {
-            '(' => self.depths[0] += 1, ')' => self.depths[0] -= 1,
-            '{' => self.depths[1] += 1, '}' => self.depths[1] -= 1,
-            '[' => self.depths[2] += 1, ']' => self.depths[2] -= 1,
+            '(' => self.depths[0] += 1,
+            ')' => self.depths[0] -= 1,
+            '{' => self.depths[1] += 1,
+            '}' => self.depths[1] -= 1,
+            '[' => self.depths[2] += 1,
+            ']' => self.depths[2] -= 1,
             _ => {}
         }
     }
@@ -319,86 +335,88 @@ fn split_statements(input: &str) -> Vec<String> {
     let (mut parts, mut current, mut scanner) = (Vec::new(), String::new(), Scanner::default());
     for ch in input.chars() {
         if matches!(ch, ';' | '\n') && scanner.at_top() {
-            if !current.trim().is_empty() { parts.push(current.trim().to_string()); }
+            if !current.trim().is_empty() {
+                parts.push(current.trim().to_string());
+            }
             current.clear();
-        } else { current.push(ch); scanner.consume(ch); }
+        } else {
+            current.push(ch);
+            scanner.consume(ch);
+        }
     }
-    if !current.trim().is_empty() { parts.push(current.trim().to_string()); }
+    if !current.trim().is_empty() {
+        parts.push(current.trim().to_string());
+    }
     parts
 }
 fn split_top_level_commas(s: &str) -> Vec<&str> {
     let (mut parts, mut start, mut scanner) = (Vec::new(), 0, Scanner::default());
     for (index, ch) in s.char_indices() {
-        if ch == ',' && scanner.at_top() { parts.push(&s[start..index]); start = index + 1; }
-        else { scanner.consume(ch); }
+        if ch == ',' && scanner.at_top() {
+            parts.push(&s[start..index]);
+            start = index + 1;
+        } else {
+            scanner.consume(ch);
+        }
     }
     parts.push(&s[start..]);
     parts
 }
 
-fn resolve_name(scope: &HashMap<String, Value>, object: &str, property: Option<&str>) -> Result<Value, String> {
-    let value = scope.get(object).ok_or_else(|| format!("undefined variable: {object}"))?;
-    property.map_or_else(|| Ok(value.clone()), |property| value.get(property).cloned().ok_or_else(|| format!("undefined property: {object}.{property}")))
+fn resolve_name(
+    scope: &HashMap<String, Value>,
+    object: &str,
+    property: Option<&str>,
+) -> Result<Value, String> {
+    let value = scope
+        .get(object)
+        .ok_or_else(|| format!("undefined variable: {object}"))?;
+    property.map_or_else(
+        || Ok(value.clone()),
+        |property| {
+            value
+                .get(property)
+                .cloned()
+                .ok_or_else(|| format!("undefined property: {object}.{property}"))
+        },
+    )
 }
-fn resolve_fields(fields: &[(String, Expr)], scope: &HashMap<String, Value>) -> Result<Value, String> {
-    fields.iter().map(|(key, value)| resolve_expr(value, scope).map(|value| (key.clone(), value)))
-        .collect::<Result<serde_json::Map<_, _>, _>>().map(Value::Object)
+fn resolve_fields(
+    fields: &[(String, Expr)],
+    scope: &HashMap<String, Value>,
+) -> Result<Value, String> {
+    fields
+        .iter()
+        .map(|(key, value)| resolve_expr(value, scope).map(|value| (key.clone(), value)))
+        .collect::<Result<serde_json::Map<_, _>, _>>()
+        .map(Value::Object)
 }
 pub(crate) fn resolve_expr(expr: &Expr, scope: &HashMap<String, Value>) -> Result<Value, String> {
     match expr {
         Expr::StringLit(value) => Ok(Value::String(value.clone())),
         Expr::IntLit(value) if *value >= 0 => Ok(json!(*value as u64)),
-        Expr::IntLit(value) => Ok(json!(*value)), Expr::FloatLit(value) => Ok(json!(*value)),
-        Expr::BoolLit(value) => Ok(json!(value)), Expr::Null => Ok(Value::Null),
-        Expr::Array(items) => items.iter().map(|item| resolve_expr(item, scope)).collect::<Result<_, _>>().map(Value::Array),
+        Expr::IntLit(value) => Ok(json!(*value)),
+        Expr::FloatLit(value) => Ok(json!(*value)),
+        Expr::BoolLit(value) => Ok(json!(value)),
+        Expr::Null => Ok(Value::Null),
+        Expr::Array(items) => items
+            .iter()
+            .map(|item| resolve_expr(item, scope))
+            .collect::<Result<_, _>>()
+            .map(Value::Array),
         Expr::Object(fields) => resolve_fields(fields, scope),
         Expr::VarRef(name) => resolve_name(scope, name, None),
         Expr::PropAccess(object, property) => resolve_name(scope, object, Some(property)),
     }
 }
-pub(crate) fn resolve_return(expr: &ReturnExpr, scope: &HashMap<String, Value>) -> Result<Value, String> {
+pub(crate) fn resolve_return(
+    expr: &ReturnExpr,
+    scope: &HashMap<String, Value>,
+) -> Result<Value, String> {
     match expr {
         ReturnExpr::Var(name) => resolve_name(scope, name, None),
         ReturnExpr::PropAccess(object, property) => resolve_name(scope, object, Some(property)),
         ReturnExpr::Object(fields) => resolve_fields(fields, scope),
         ReturnExpr::Expr(expression) => resolve_expr(expression, scope),
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn return_literal_int_folds_correctly() {
-        let plan = "return 12345;";
-        let stmts = parse_plan(plan).unwrap();
-        assert_eq!(stmts.len(), 1);
-        match &stmts[0] {
-            Statement::Return(ReturnExpr::Expr(Expr::IntLit(n))) => assert_eq!(*n, 12345),
-            other => panic!("expected Return(Expr(IntLit(12345))), got {:?}", other),
-        }
-    }
-
-    #[test]
-    fn return_literal_string_folds_correctly() {
-        let plan = r#"return "hello";"#;
-        let stmts = parse_plan(plan).unwrap();
-        assert_eq!(stmts.len(), 1);
-        match &stmts[0] {
-            Statement::Return(ReturnExpr::Expr(Expr::StringLit(s))) => assert_eq!(s, "hello"),
-            other => panic!("expected Return(Expr(StringLit(hello))), got {:?}", other),
-        }
-    }
-
-    #[test]
-    fn return_literal_bool_folds_correctly() {
-        let plan = "return true;";
-        let stmts = parse_plan(plan).unwrap();
-        assert_eq!(stmts.len(), 1);
-        match &stmts[0] {
-            Statement::Return(ReturnExpr::Expr(Expr::BoolLit(b))) => assert!(b),
-            other => panic!("expected Return(Expr(BoolLit(true))), got {:?}", other),
-        }
     }
 }

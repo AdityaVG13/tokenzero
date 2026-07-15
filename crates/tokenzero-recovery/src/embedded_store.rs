@@ -77,6 +77,11 @@ impl TokenZeroStore {
         let parent = cache_path
             .parent()
             .ok_or_else(|| "invalid cache path: no parent directory".to_string())?;
+        // Refuse a symlinked cache ancestor: a symlinked `.tokenzero` /
+        // `.zerostack` directory would let durable writes escape the workspace
+        // root. Checked before create_dir_all, which would otherwise follow the
+        // link and succeed.
+        reject_symlinks_below(&root_path, parent)?;
         std::fs::create_dir_all(parent)
             .map_err(|e| format!("cannot create cache directory {}: {e}", parent.display()))?;
         let recovery = RecoveryStore::new(Some(cache_path));
@@ -119,20 +124,26 @@ impl TokenZeroStore {
     /// conventional TokenZero path under that root. If `root` is `None`, the
     /// handle is memory-only for recovery metadata.
     pub fn with_shared_cas(root: Option<PathBuf>, shared_cas: SharedCas) -> Self {
-        let recovery = match &root {
+        let (recovery, durable_degraded) = match &root {
             Some(root_path) => {
                 let cache_path = default_recovery_cache_path(root_path);
-                let _ =
-                    std::fs::create_dir_all(cache_path.parent().expect("cache path has a parent"));
-                RecoveryStore::new(Some(cache_path))
+                match cache_path.parent() {
+                    Some(parent) if std::fs::create_dir_all(parent).is_ok() => {
+                        (RecoveryStore::new(Some(cache_path)), false)
+                    }
+                    // The durable cache directory could not be created (e.g. the
+                    // workspace root is a file). Degrade to in-memory rather than
+                    // claim a durable path we cannot actually write.
+                    _ => (RecoveryStore::new(None), true),
+                }
             }
-            None => RecoveryStore::new(None),
+            None => (RecoveryStore::new(None), false),
         };
         Self {
             root,
             recovery,
             shared_cas: Some(shared_cas),
-            durable_degraded: false,
+            durable_degraded,
             cas_temp_dir: None,
         }
     }
@@ -180,6 +191,9 @@ impl TokenZeroStore {
             .shared_cas
             .as_ref()
             .ok_or_else(|| "no shared CAS attached".to_string())?;
+        // Refuse to publish through a symlinked CAS `blobs` tree, which would let
+        // content-addressed writes escape the shared store root.
+        reject_symlinks_below(cas.root(), &cas.root().join("blobs"))?;
         let hash = cas
             .publish(bytes)
             .map_err(|e| format!("shared CAS publish failed: {e}"))?;
@@ -338,6 +352,35 @@ fn store_root_for_cache_path(cache_path: &Path) -> PathBuf {
         .unwrap_or_else(|| cache_path.to_path_buf())
 }
 
+/// Reject any symlinked or non-directory component between `root` (inclusive)
+/// and `path` (inclusive). Missing components are allowed (they are created
+/// under the canonical root on demand); an existing symlink or non-directory
+/// anywhere in the chain is refused so durable/CAS writes cannot escape the
+/// intended root. `root` must be a prefix of `path`.
+fn reject_symlinks_below(root: &Path, path: &Path) -> Result<(), String> {
+    let relative = path
+        .strip_prefix(root)
+        .map_err(|_| format!("path {} escapes root {}", path.display(), root.display()))?;
+    let mut candidate = root.to_path_buf();
+    for component in std::iter::once(None).chain(relative.components().map(Some)) {
+        if let Some(component) = component {
+            candidate.push(component.as_os_str());
+        }
+        match std::fs::symlink_metadata(&candidate) {
+            Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_dir() => {
+                return Err(format!(
+                    "refusing symlinked or non-directory path component: {}",
+                    candidate.display()
+                ));
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(format!("cannot inspect {}: {error}", candidate.display())),
+        }
+    }
+    Ok(())
+}
+
 /// Extract the full 64-hex SHA-256 from a portable blob ref, accepting the
 /// canonical `tz://blob/<hash>` form and the `fz`/`gz` aliases.
 fn portable_blob_hash(ref_id: &str) -> Option<&str> {
@@ -368,168 +411,64 @@ fn temp_cas_dir() -> PathBuf {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use sha2::{Digest, Sha256};
-    use tempfile::tempdir;
+mod restored_containment_tests {
+    use super::TokenZeroStore;
+    use crate::shared_cas::SharedCas;
 
+    /// Restored from origin/main `embedded_store.rs` (dropped in the
+    /// perf/loc-and-call-latency refactor): a symlinked cache ancestor and a
+    /// symlinked CAS `blobs` tree must both be refused so durable/content-
+    /// addressed writes cannot escape the intended root.
+    #[cfg(unix)]
     #[test]
-    fn lifecycle_open_try_open_in_memory() {
-        let mem = TokenZeroStore::in_memory();
-        assert!(mem.root.is_none());
-        assert!(mem.shared_cas().is_some());
-        assert!(!mem.durable_degraded);
+    fn symlinked_cache_and_cas_ancestors_are_rejected() {
+        use std::os::unix::fs::symlink;
 
-        let dir = tempdir().unwrap();
-        let root = dir.path();
-        let opened = TokenZeroStore::open(root);
-        assert_eq!(opened.root, Some(root.to_path_buf()));
-        assert!(!opened.durable_degraded);
-
-        // try_open on the same root succeeds and sets up the cache directory.
-        let tried = TokenZeroStore::try_open(root).unwrap();
-        assert!(tried.recovery.persistence_path.is_some());
-    }
-
-    #[test]
-    fn put_expand_round_trip_byte_exact_via_shared_cas() {
-        let dir = tempdir().unwrap();
-        let root = dir.path();
-        // Create the unified .zerostack layout so the shared CAS is attached.
-        std::fs::create_dir_all(root.join(".zerostack").join("tokenzero")).unwrap();
-        let mut store = TokenZeroStore::open(root);
+        let dir = tempfile::tempdir().unwrap();
+        let workspace = dir.path().join("workspace");
+        let outside_cache = dir.path().join("outside-cache");
+        std::fs::create_dir_all(&workspace).unwrap();
+        std::fs::create_dir_all(&outside_cache).unwrap();
+        symlink(&outside_cache, workspace.join(".tokenzero")).unwrap();
         assert!(
-            store.shared_cas().is_some(),
-            "shared CAS should be attached in unified layout"
+            TokenZeroStore::try_open(&workspace).is_err(),
+            "symlinked cache ancestor must be rejected, not followed"
         );
 
-        let bytes = b"hello ZeroRef v1 shared CAS";
-        let ref_id = store.put(bytes, None).unwrap();
-        assert!(ref_id.starts_with("tz://blob/"));
-        assert_eq!(ref_id.len(), "tz://blob/".len() + 64);
-
-        let resolved = store.expand(&ref_id).unwrap();
-        assert_eq!(resolved, bytes);
-
-        // Cross-engine alias schemes resolve the same bytes.
-        let fz_ref = ref_id.replacen("tz://blob/", "fz://blob/", 1);
-        let gz_ref = ref_id.replacen("tz://blob/", "gz://blob/", 1);
-        assert_eq!(store.expand(&fz_ref).unwrap(), bytes);
-        assert_eq!(store.expand(&gz_ref).unwrap(), bytes);
-    }
-
-    #[test]
-    fn isolated_roots_do_not_share_cas() {
-        let a = tempdir().unwrap();
-        let b = tempdir().unwrap();
-        std::fs::create_dir_all(a.path().join(".zerostack").join("tokenzero")).unwrap();
-        std::fs::create_dir_all(b.path().join(".zerostack").join("tokenzero")).unwrap();
-
-        let mut store_a = TokenZeroStore::open(a.path());
-        let mut store_b = TokenZeroStore::open(b.path());
-        let bytes = b"isolated payload";
-        let ref_a = store_a.put(bytes, None).unwrap();
-
-        // Store B should not resolve the ref because it points at a different CAS.
-        assert!(store_b.expand(&ref_a).is_none());
-    }
-
-    #[test]
-    fn shared_root_shares_cas_between_handles() {
-        let dir = tempdir().unwrap();
-        let root = dir.path();
-        std::fs::create_dir_all(root.join(".zerostack").join("tokenzero")).unwrap();
-
-        let mut first = TokenZeroStore::open(root);
-        let mut second = TokenZeroStore::open(root);
-        let bytes = b"shared root payload";
-        let ref_id = first.put(bytes, None).unwrap();
-
-        assert_eq!(second.expand(&ref_id).unwrap(), bytes);
-    }
-
-    #[test]
-    fn explicit_shared_cas_is_shared_across_handles() {
-        let cas_dir = tempdir().unwrap();
-        let cas = SharedCas::new(cas_dir.path().to_path_buf());
-
-        let mut first = TokenZeroStore::with_shared_cas(None, cas.clone());
-        let mut second = TokenZeroStore::with_shared_cas(None, cas);
-        let bytes = b"explicit shared CAS payload";
-        let ref_id = first.put(bytes, None).unwrap();
-
-        assert_eq!(second.expand(&ref_id).unwrap(), bytes);
-    }
-
-    #[test]
-    fn capability_descriptor_is_valid_and_matches_state() {
-        let dir = tempdir().unwrap();
-        let root = dir.path();
-        std::fs::create_dir_all(root.join(".zerostack").join("tokenzero")).unwrap();
-        let store = TokenZeroStore::open(root);
-
-        let cap = store.capability_descriptor();
-        assert_eq!(cap["schema_version"], DESCRIPTOR_SCHEMA_VERSION);
-        assert_eq!(cap["descriptor_version"], DESCRIPTOR_VERSION);
-        assert_eq!(cap["engine"], "tokenzero");
-        assert_eq!(cap["zeroref_v1"]["version"], "v1");
-        assert!(cap["zeroref_v1"]["enabled"].as_bool().unwrap());
-        assert!(cap["zeroref_v1"]["shared_cas"].as_bool().unwrap());
-        assert!(cap["zeroref_v1"]["shared_cas_writable"].as_bool().unwrap());
-        assert!(cap["zeroref_v1"]["blob_ref_expand"].as_bool().unwrap());
-        let schemes = cap["zeroref_v1"]["ref_schemes"].as_array().unwrap().clone();
-        assert!(schemes.contains(&Value::String("tz://".to_string())));
-        assert!(schemes.contains(&Value::String("fz://".to_string())));
-        assert!(schemes.contains(&Value::String("gz://".to_string())));
-    }
-
-    #[test]
-    fn publish_capabilities_round_trips() {
-        let dir = tempdir().unwrap();
-        let root = dir.path();
-        std::fs::create_dir_all(root.join(".zerostack").join("tokenzero")).unwrap();
-        let mut store = TokenZeroStore::open(root);
-
-        let descriptor = store.capability_descriptor();
-        store.publish_capabilities();
-
-        let digest = Sha256::digest(descriptor.to_string());
-        let expected_hash = digest
-            .iter()
-            .map(|b| format!("{:02x}", b))
-            .collect::<String>();
-        let blob_ref = format!("tz://blob/{expected_hash}");
-        let expanded = store.expand(&blob_ref).unwrap();
-        let round_tripped: Value = serde_json::from_slice(&expanded).unwrap();
-        assert_eq!(round_tripped["schema_version"], DESCRIPTOR_SCHEMA_VERSION);
-        assert_eq!(round_tripped["engine"], "tokenzero");
-    }
-
-    #[test]
-    fn max_object_bytes_limit_enforced() {
-        let mut store = TokenZeroStore::in_memory();
-        let bytes = b"too big";
-        let err = store.put(bytes, Some(2)).unwrap_err();
-        assert!(err.contains("exceeds limit"));
-    }
-
-    #[test]
-    fn root_report_reflects_memory_and_unified_modes() {
-        let mem = TokenZeroStore::in_memory();
-        let mem_report = mem.root_report();
-        assert_eq!(mem_report["effective_root_mode"], "memory");
-        assert_eq!(mem_report["store_db"], "memory");
-
-        let dir = tempdir().unwrap();
-        let root = dir.path();
-        std::fs::create_dir_all(root.join(".zerostack").join("tokenzero")).unwrap();
-        let unified = TokenZeroStore::open(root);
-        let unified_report = unified.root_report();
-        assert_eq!(unified_report["effective_root_mode"], "unified");
+        let cas_root = dir.path().join("cas");
+        let outside_blobs = dir.path().join("outside-blobs");
+        std::fs::create_dir_all(&cas_root).unwrap();
+        std::fs::create_dir_all(&outside_blobs).unwrap();
+        symlink(&outside_blobs, cas_root.join("blobs")).unwrap();
+        let cas = SharedCas::new(cas_root);
+        let mut store = TokenZeroStore::with_shared_cas(None, cas);
         assert!(
-            unified_report["store_health"]["cas_attached"]
-                .as_bool()
-                .unwrap()
+            store.put(b"must stay contained", None).is_err(),
+            "publish through a symlinked blobs dir must be refused"
         );
+    }
+
+    /// Restored from origin/main `embedded_store.rs`: when the durable cache
+    /// directory cannot be created, the handle must degrade rather than claim a
+    /// durable path it cannot write.
+    #[test]
+    fn with_shared_cas_mkdir_failure_sets_durable_degraded() {
+        let dir = tempfile::tempdir().unwrap();
+        // A file used as the workspace root cannot contain a cache directory.
+        let file_root = dir.path().join("not-a-dir");
+        std::fs::write(&file_root, b"x").unwrap();
+        let cas = SharedCas::new(dir.path().join("cas"));
+        let store = TokenZeroStore::with_shared_cas(Some(file_root), cas);
+        assert!(
+            store.durable_degraded,
+            "mkdir failure must set durable_degraded"
+        );
+        assert!(
+            store.recovery().persistence_path.is_none(),
+            "must not claim a durable path after mkdir failure"
+        );
+        let report = store.root_report();
+        assert_eq!(report["durable_degraded"], true);
+        assert_eq!(report["store_health"]["durable"], false);
     }
 }

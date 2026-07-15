@@ -15,7 +15,7 @@ pub(crate) fn command_succeeded(
     timed_out: bool,
     failed_segment: Option<&str>,
 ) -> bool {
-    timed_out == false
+    !timed_out
         && !(failed_segment.is_some() && exit_code == Some(0))
         && (exit_code == Some(0) || search_no_match || expected_false_exit)
 }
@@ -35,8 +35,10 @@ fn is_diagnostic_shell_policy(
     exit_code: Option<i32>,
     status_hazard: bool,
 ) -> bool {
-    matches!(family, "test" | "build" | "lint" | "python-test" | "go-test")
-        || status_hazard
+    matches!(
+        family,
+        "test" | "build" | "lint" | "python-test" | "go-test"
+    ) || status_hazard
         || exit_code.is_some_and(|code| code != 0)
         || looks_diagnostic(combined)
 }
@@ -87,11 +89,7 @@ pub fn decide_shell_policy(
     let family = shell_family(command, stdout, stderr);
     let requested = mode.effective_policy();
     if requested != Mode::Auto {
-        return PolicyDecision {
-            policy: requested.to_string(),
-            reason: "explicit user mode".to_string(),
-            family,
-        };
+        return policy_decision(family, (requested.as_str(), "explicit user mode"));
     }
     let combined = format!("{stdout}\n{stderr}");
     let search_no_match = is_search_no_match(command, stdout, stderr, exit_code);

@@ -260,8 +260,7 @@ impl TokenZeroEngine {
             visible_parts = raw_visible_parts;
             visible_tokens = raw_tokens;
         }
-        let full_bytes = visible_parts.iter().map(String::len).sum::<usize>()
-            + visible_parts.len().saturating_sub(1) * 2;
+        let full_bytes = joined_bytes(&visible_parts);
         // Dedup/diff notes advertise refs in place of content: apply them
         // only when persistence succeeded AND every ref survived eviction.
         // Degraded storage always serves full — the bytes are in the text,
@@ -296,8 +295,7 @@ impl TokenZeroEngine {
             }
         }
         if self.config.session_dedup {
-            let delta_bytes = visible_parts.iter().map(String::len).sum::<usize>()
-                + visible_parts.len().saturating_sub(1) * 2;
+            let delta_bytes = joined_bytes(&visible_parts);
             summary.note_wire_bytes(full_bytes, delta_bytes);
         }
         let exact_refs_available = !refs.is_empty();
@@ -307,7 +305,12 @@ impl TokenZeroEngine {
             mode,
             visible_parts.join("\n\n"),
             refs,
-            (raw_tokens, visible_tokens, store.recovery_tokens, Some(exact_ref_tokens)),
+            (
+                raw_tokens,
+                visible_tokens,
+                store.recovery_tokens,
+                Some(exact_ref_tokens),
+            ),
         );
         response.content_type = Some(common_content_type(&content_types).to_string());
         if !storage_errors.is_empty() {
@@ -321,9 +324,14 @@ impl TokenZeroEngine {
                 "exact_refs_available": exact_refs_available
             }));
         }
-        // A serve whose refs failed to persist (or were evicted before the
-        // response returned) must not become a dedup base.
-        if storage_errors.is_empty() && refs_complete {
+        let working_set_replaced = !pending.is_empty()
+            && !raw
+            && !matches!(mode, Mode::Passthrough)
+            && working_set_anchor
+                .is_some_and(|anchor| self.admit_working_set_response(&mut response, anchor));
+        // A serve whose refs failed to persist, or whose visible bytes were
+        // replaced by working-set eviction, must not become a dedup base.
+        if storage_errors.is_empty() && refs_complete && !working_set_replaced {
             let (from_hwm, to_hwm) = self.session_apply(pending, &summary);
             summary.set_watermark(from_hwm, to_hwm);
         }
@@ -331,11 +339,6 @@ impl TokenZeroEngine {
         // dedup/diff serve in the same response.
         if let Some(extra) = summary.telemetry() {
             merge_telemetry(&mut response, extra);
-        }
-        if !raw && !matches!(mode, Mode::Passthrough) {
-            if let Some(anchor) = working_set_anchor {
-                self.admit_working_set_response(&mut response, anchor);
-            }
         }
         // Raw reads keep the verbatim slice contract even when it is empty;
         // raw=true does not imply Mode::Passthrough, so guard it explicitly.

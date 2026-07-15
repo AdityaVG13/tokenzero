@@ -16,9 +16,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Shared-CAS adapter**: canonical content-addressed storage for ZeroRef v1
   blobs, with reachability/pin schema v1 frozen so GC and multi-engine
   expand share one truth.
-- **Cross-engine expand**: `fz://` and `gz://` blob refs minted by fszero or
-  graphzero expand via sibling engine stores under the same unified
-  `.zerostack` root when the local shared CAS misses.
+- **Cross-engine blob expand**: `fz://` and `gz://` **blob** refs minted by
+  fszero or graphzero expand via the shared CAS and, on miss, sibling engine
+  stores under the same unified `.zerostack` root. Non-blob portable refs are
+  still unsupported. Release evidence is the retained merged CI artifact; the
+  checked-in fixture is only a reproducible host snapshot.
 - **Strict fragment algebra**: typed `#Bstart-end` (byte, half-open) and
   `#Lstart-end` (line, inclusive) selectors with structured OOB errors.
 - **Capsule-default expand**: expand returns preview + ref by default instead
@@ -68,9 +70,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   recovery cache isolated per call root; store-root precedence tests frozen.
 - **Expand surface**: `parse_ref` accepts only `tz://` after canonicalize for
   the portable path; sibling-engine fallback handles `fz://`/`gz://`.
-- **Read path**: source-backed admission for large files cuts peak RSS;
-  chunked bounded-memory expand reads; pulse lock metadata unfsynced
-  (~halved per-request p50 latency on read/find/expand).
+- **Read/search path**: source-backed admission for large files cuts peak RSS;
+  chunked bounded-memory expand reads; Pulse lock metadata skips redundant
+  durability barriers; auto literal search on direct files runs in-process.
+  Retained before/after evidence measures MCP p50 reductions of 53.7% for read,
+  58.1% for find, and 57.1% for expand.
+- **Program footprint**: behavior-preserving consolidation and generated corpus
+  materialization reduce code across `crates`, `benches`, `benchmarks`, and
+  `scripts` from 110,723 to 59,072 lines (46.6%).
 - **Binary resolution**: typed `BinaryResolution` Result; require executable
   bit for env/PATH and well-known binaries.
 - **Write recovery ladder** on CodeMode edit failure with QuickJS deny ladder

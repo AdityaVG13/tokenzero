@@ -14,54 +14,92 @@ struct MethodDef {
     signature: &'static str,
 }
 
-macro_rules! method {
-    ($path:literal, $connector:literal, $description:literal, $signature:literal) => {
-        MethodDef { path: $path, connector: $connector, description: $description, signature: $signature }
+macro_rules! methods {
+    ($( $path:literal, $connector:literal, $description:literal => $signature:literal; )*) => {
+        &[ $(MethodDef { path: $path, connector: $connector, description: $description, signature: $signature }),* ]
     };
 }
 
-const METHOD_CATALOG: &[MethodDef] = &[
-    method!("zero.read", "zero", "Read file(s) with token-budget capsule compression and exact recovery refs", "zero.read(path: string | string[], opts?: { mode?, start_line?, end_line?, max_visible_tokens? }): Promise<{ text: string, ref: string, visible_tokens: number, raw_tokens: number }>"),
-    method!("zero.find", "zero", "Search file contents for a pattern (regex or literal) with compact results", "zero.find(pattern: string, path?: string | string[], opts?: { mode?, max_files?, max_visible_tokens? }): Promise<{ text: string, ref: string, status: string, visible_tokens?: number, raw_tokens?: number }>"),
-    method!("zero.grep", "zero", "Exact literal substring search (no regex interpretation)", "zero.grep(pattern: string, path?: string | string[], opts?: { mode?, max_files?, max_visible_tokens? }): Promise<{ text: string, ref: string, status: string, visible_tokens?: number, raw_tokens?: number }>"),
-    method!("zero.glob", "zero", "List file paths matching a glob pattern (no file contents)", "zero.glob(pattern: string, path?: string | string[], opts?: { max_files? }): Promise<{ text: string, ref: string, status: string, visible_tokens?: number, raw_tokens?: number }>"),
-    method!("zero.tree", "zero", "Inspect a bounded directory tree for orientation", "zero.tree(path?: string, opts?: { depth?, include_hidden?, max_files? }): Promise<{ text: string, ref: string }>"),
-    method!("zero.shell", "zero", "Run a shell command with status-truth telemetry and compact output", "zero.shell(command: string, opts?: { cwd?, mode?, timeout_seconds? }): Promise<{ text: string, ref: string, exit_code: number, success: boolean }>"),
-    method!("zero.edit", "zero", "Apply multi-hunk find/replace edits to one file atomically", "zero.edit(path: string, edits: Array<{ find: string, replace: string, replace_all?: boolean }>, opts?: { dry_run?, create? }): Promise<{ text: string, ref: string, hunks_applied: number }>"),
-    method!("zero.token.expand", "zero.token", "Recover exact bytes from a tz:// ref", "zero.token.expand(ref: string, opts?: { start_line?, end_line?, selector?, symbol?, anchor_kind?, since?, fresh? }): Promise<{ text: string, status: string, ref?: string, visible_tokens?: number, raw_tokens?: number }>"),
-    method!("zero.token.compact", "zero.token", "Store arbitrary text/data behind a tz:// recovery ref via ingest", "zero.token.compact(data: string): Promise<{ ref: string, raw_tokens: number }>"),
-    method!("zero.token.compactMany", "zero.token", "Batch compact many payloads in one CodeMode step with one visible ack", "zero.token.compactMany(items: Array<string | any>): Promise<{ items: Array<{ ref: string }>, refs: string[], count: number }>"),
-    method!("zero.token.expandMany", "zero.token", "Batch expand many tz:// refs in one CodeMode step", "zero.token.expandMany(items: Array<string | { ref, start_line?, end_line?, selector?, symbol?, since?, fresh? }>): Promise<{ items: Array<{ text: string }>, count: number }>"),
-    method!("zero.token.dedupe", "zero.token", "Deduplicate JSON/string values while preserving first occurrence order", "zero.token.dedupe(items: any[]): Promise<{ items: any[], count: number }>"),
-    method!("zero.expand", "zero", "Recover exact bytes from a tz:// ref (compatibility alias for zero.token.expand)", "zero.expand(ref: string, opts?: { start_line?, end_line?, selector? }): Promise<{ text: string, status: string, ref?: string, visible_tokens?: number, raw_tokens?: number }>"),
-    method!("zero.compact", "zero", "Store arbitrary text/data behind a tz:// recovery ref via ingest (compatibility alias for zero.token.compact)", "zero.compact(data: string): Promise<{ ref: string, raw_tokens: number }>"),
-    method!("zero.ingest", "zero", "Ingest text into a compact TokenZero capsule with recovery ref", "zero.ingest(text: string, opts?: { mode?, source? }): Promise<{ text: string, ref: string, visible_tokens: number, raw_tokens: number }>"),
-    method!("zero.mem", "zero", "Inspect recovery-cache state and statistics", "zero.mem(): Promise<{ text: string }>"),
-    method!("zero.recall", "zero", "Search payloads already stored in the recovery cache", "zero.recall(query: string, opts?: { max_hits?, mode?, max_visible_tokens? }): Promise<{ text: string, ref: string, status: string }>"),
-    method!("zero.fetch", "zero", "Fetch an http(s) URL via curl with TTL cache and exact refs", "zero.fetch(url: string, opts?: { ttl_seconds?, fresh?, mode?, max_visible_tokens? }): Promise<{ text: string, ref: string, status: string }>"),
-    method!("zero.cache_pack", "zero", "Build a daemonless prompt-cache pack with stable prefix and volatile refs", "zero.cache_pack(opts?: { scope? }): Promise<{ text: string, ref: string }>"),
-    method!("zero.rewrite", "zero", "Plan a conservative shell command rewrite without executing it", "zero.rewrite(command: string, opts?: { mode? }): Promise<{ text: string }>"),
-    method!("zero.discover", "zero", "Report TokenZero filter and runtime readiness metadata", "zero.discover(): Promise<{ filters: object, runtime: object }>"),
-    method!("zero.batch", "zero", "Run several independent TokenZero ops in one step (max 16)", "zero.batch(ops: Array<{ tool: string, args: object }>): Promise<{ text: string, refs: string[] }>"),
-    method!("zero.pipe", "zero", "Execute a sequence of operations with result threading (_prev auto-binding)", "zero.pipe(steps: Array<{ method: string, args?: any[] }>): Promise<{ steps: number, results: any[], last: any }>"),
-    method!("zero.pick", "zero", "Extract specific keys from an object value", "zero.pick(source: object, keys: string[] | ...string): Promise<object>"),
-    method!("zero.filter_lines", "zero", "Filter lines in a text value by substring match", "zero.filter_lines(source: { text: string } | string, pattern: string): Promise<{ text: string, lines: number, pattern: string }>"),
-    method!("zero.compact_max", "zero", "Max compression with guaranteed byte-exact recovery: content-type-aware aggressive compaction with tz:// ref", "zero.compact_max(data: string | any): Promise<{ text: string, ref: string, raw_tokens: number, visible_tokens: number, compression_strategy: string, savings_pct: string }>"),
-    method!("zero.count", "zero", "Count lines in a text value or items in an array without materializing extra payload", "zero.count(x: string | { text: string } | any[]): number"),
-    method!("zero.first", "zero", "Return the first line or array item, or the first n lines/items", "zero.first(x: string | { text: string } | any[], n?: number): any"),
-    method!("zero.verdict", "zero", "Return a compact one-line verdict object", "zero.verdict(ok: any | (() => any), detail?: string): { ok: boolean, detail: string }"),
-    method!("zero.raw", "zero", "Opt one final-return value out of automatic ref-first compaction", "zero.raw<T>(value: T): T"),
-    method!("zero.count_tokens", "zero", "Count tokens, bytes, and lines in a value without storing it (introspection helper)", "zero.count_tokens(data: string | any): Promise<{ tokens: number, bytes: number, lines: number }>"),
-    method!("zero.assert", "zero", "Fail the plan immediately if condition is falsy (plan-level guard)", "zero.assert(condition: any, message?: string): Promise<{ ok: true }>"),
-    method!("codemode.search", "codemode", "Search available methods by keyword", "codemode.search(query: string): Promise<{ results: Array<{ path, description, score }> }>"),
-    method!("codemode.describe", "codemode", "Get full TypeScript signature for a method", "codemode.describe(path: string): Promise<{ path, description, types: string }>"),
-    method!("codemode.journalDoctor", "codemode", "List unresolved plan journals and safe recovery advice without deleting evidence", "codemode.journalDoctor(): Promise<{ schema_version, unresolved, resolved_count, corrupt }>"),
-    method!("codemode.journalInspect", "codemode", "Inspect a redacted durable plan journal by execution id", "codemode.journalInspect(execution_id: string): Promise<PlanJournal>"),
-    method!("codemode.journalResume", "codemode", "Validate that an unresolved journal can be safely resumed with the original plan", "codemode.journalResume(execution_id: string): Promise<{ state, resume }>"),
-    method!("codemode.journalRollback", "codemode", "CAS-verified reverse-order rollback of an unresolved plan journal", "codemode.journalRollback(execution_id: string): Promise<{ state, rolled_back }>"),
-    method!("codemode.limits", "codemode", "Return active CodeMode sandbox, output, ref, and operation limits", "codemode.limits(): Promise<CodeModeLimits>"),
-];
-
+const METHOD_CATALOG: &[MethodDef] = methods! {
+    "zero.read", "zero", "Read file(s) with token-budget capsule compression and exact recovery refs" =>
+        "zero.read(path: string | string[], opts?: { mode?, start_line?, end_line?, max_visible_tokens? }): Promise<{ text: string, ref: string, visible_tokens: number, raw_tokens: number }>";
+    "zero.find", "zero", "Search file contents for a pattern (regex or literal) with compact results" =>
+        "zero.find(pattern: string, path?: string | string[], opts?: { mode?, max_files?, max_visible_tokens? }): Promise<{ text: string, ref: string, status: string, visible_tokens?: number, raw_tokens?: number }>";
+    "zero.grep", "zero", "Exact literal substring search (no regex interpretation)" =>
+        "zero.grep(pattern: string, path?: string | string[], opts?: { mode?, max_files?, max_visible_tokens? }): Promise<{ text: string, ref: string, status: string, visible_tokens?: number, raw_tokens?: number }>";
+    "zero.glob", "zero", "List file paths matching a glob pattern (no file contents)" =>
+        "zero.glob(pattern: string, path?: string | string[], opts?: { max_files? }): Promise<{ text: string, ref: string, status: string, visible_tokens?: number, raw_tokens?: number }>";
+    "zero.tree", "zero", "Inspect a bounded directory tree for orientation" =>
+        "zero.tree(path?: string, opts?: { depth?, include_hidden?, max_files? }): Promise<{ text: string, ref: string }>";
+    "zero.shell", "zero", "Run a shell command with status-truth telemetry and compact output" =>
+        "zero.shell(command: string, opts?: { cwd?, mode?, timeout_seconds? }): Promise<{ text: string, ref: string, exit_code: number, success: boolean }>";
+    "zero.edit", "zero", "Apply multi-hunk find/replace edits to one file atomically" =>
+        "zero.edit(path: string, edits: Array<{ find: string, replace: string, replace_all?: boolean }>, opts?: { dry_run?, create? }): Promise<{ text: string, ref: string, hunks_applied: number }>";
+    "zero.token.expand", "zero.token", "Recover exact bytes from a tz:// ref" =>
+        "zero.token.expand(ref: string, opts?: { start_line?, end_line?, selector?, symbol?, anchor_kind?, since?, fresh? }): Promise<{ text: string, status: string, ref?: string, visible_tokens?: number, raw_tokens?: number }>";
+    "zero.token.compact", "zero.token", "Store arbitrary text/data behind a tz:// recovery ref via ingest" =>
+        "zero.token.compact(data: string): Promise<{ ref: string, raw_tokens: number }>";
+    "zero.token.compactMany", "zero.token", "Batch compact many payloads in one CodeMode step with one visible ack" =>
+        "zero.token.compactMany(items: Array<string | any>): Promise<{ items: Array<{ ref: string }>, refs: string[], count: number }>";
+    "zero.token.expandMany", "zero.token", "Batch expand many tz:// refs in one CodeMode step" =>
+        "zero.token.expandMany(items: Array<string | { ref, start_line?, end_line?, selector?, symbol?, since?, fresh? }>): Promise<{ items: Array<{ text: string }>, count: number }>";
+    "zero.token.dedupe", "zero.token", "Deduplicate JSON/string values while preserving first occurrence order" =>
+        "zero.token.dedupe(items: any[]): Promise<{ items: any[], count: number }>";
+    "zero.expand", "zero", "Recover exact bytes from a tz:// ref (compatibility alias for zero.token.expand)" =>
+        "zero.expand(ref: string, opts?: { start_line?, end_line?, selector? }): Promise<{ text: string, status: string, ref?: string, visible_tokens?: number, raw_tokens?: number }>";
+    "zero.compact", "zero", "Store arbitrary text/data behind a tz:// recovery ref via ingest (compatibility alias for zero.token.compact)" =>
+        "zero.compact(data: string): Promise<{ ref: string, raw_tokens: number }>";
+    "zero.ingest", "zero", "Ingest text into a compact TokenZero capsule with recovery ref" =>
+        "zero.ingest(text: string, opts?: { mode?, source? }): Promise<{ text: string, ref: string, visible_tokens: number, raw_tokens: number }>";
+    "zero.mem", "zero", "Inspect recovery-cache state and statistics" =>
+        "zero.mem(): Promise<{ text: string }>";
+    "zero.recall", "zero", "Search payloads already stored in the recovery cache" =>
+        "zero.recall(query: string, opts?: { max_hits?, mode?, max_visible_tokens? }): Promise<{ text: string, ref: string, status: string }>";
+    "zero.fetch", "zero", "Fetch an http(s) URL via curl with TTL cache and exact refs" =>
+        "zero.fetch(url: string, opts?: { ttl_seconds?, fresh?, mode?, max_visible_tokens? }): Promise<{ text: string, ref: string, status: string }>";
+    "zero.cache_pack", "zero", "Build a daemonless prompt-cache pack with stable prefix and volatile refs" =>
+        "zero.cache_pack(opts?: { scope? }): Promise<{ text: string, ref: string }>";
+    "zero.rewrite", "zero", "Plan a conservative shell command rewrite without executing it" =>
+        "zero.rewrite(command: string, opts?: { mode? }): Promise<{ text: string }>";
+    "zero.discover", "zero", "Report TokenZero filter and runtime readiness metadata" =>
+        "zero.discover(): Promise<{ filters: object, runtime: object }>";
+    "zero.batch", "zero", "Run several independent TokenZero ops in one step (max 16)" =>
+        "zero.batch(ops: Array<{ tool: string, args: object }>): Promise<{ text: string, refs: string[] }>";
+    "zero.pipe", "zero", "Execute a sequence of operations with result threading (_prev auto-binding)" =>
+        "zero.pipe(steps: Array<{ method: string, args?: any[] }>): Promise<{ steps: number, results: any[], last: any }>";
+    "zero.pick", "zero", "Extract specific keys from an object value" =>
+        "zero.pick(source: object, keys: string[] | ...string): Promise<object>";
+    "zero.filter_lines", "zero", "Filter lines in a text value by substring match" =>
+        "zero.filter_lines(source: { text: string } | string, pattern: string): Promise<{ text: string, lines: number, pattern: string }>";
+    "zero.compact_max", "zero", "Max compression with guaranteed byte-exact recovery: content-type-aware aggressive compaction with tz:// ref" =>
+        "zero.compact_max(data: string | any): Promise<{ text: string, ref: string, raw_tokens: number, visible_tokens: number, compression_strategy: string, savings_pct: string }>";
+    "zero.count", "zero", "Count lines in a text value or items in an array without materializing extra payload" =>
+        "zero.count(x: string | { text: string } | any[]): number";
+    "zero.first", "zero", "Return the first line or array item, or the first n lines/items" =>
+        "zero.first(x: string | { text: string } | any[], n?: number): any";
+    "zero.verdict", "zero", "Return a compact one-line verdict object" =>
+        "zero.verdict(ok: any | (() => any), detail?: string): { ok: boolean, detail: string }";
+    "zero.raw", "zero", "Opt one final-return value out of automatic ref-first compaction" =>
+        "zero.raw<T>(value: T): T";
+    "zero.count_tokens", "zero", "Count tokens, bytes, and lines in a value without storing it (introspection helper)" =>
+        "zero.count_tokens(data: string | any): Promise<{ tokens: number, bytes: number, lines: number }>";
+    "zero.assert", "zero", "Fail the plan immediately if condition is falsy (plan-level guard)" =>
+        "zero.assert(condition: any, message?: string): Promise<{ ok: true }>";
+    "codemode.search", "codemode", "Search available methods by keyword" =>
+        "codemode.search(query: string): Promise<{ results: Array<{ path, description, score }> }>";
+    "codemode.describe", "codemode", "Get full TypeScript signature for a method" =>
+        "codemode.describe(path: string): Promise<{ path, description, types: string }>";
+    "codemode.journalDoctor", "codemode", "List unresolved plan journals and safe recovery advice without deleting evidence" =>
+        "codemode.journalDoctor(): Promise<{ schema_version, unresolved, resolved_count, corrupt }>";
+    "codemode.journalInspect", "codemode", "Inspect a redacted durable plan journal by execution id" =>
+        "codemode.journalInspect(execution_id: string): Promise<PlanJournal>";
+    "codemode.journalResume", "codemode", "Validate that an unresolved journal can be safely resumed with the original plan" =>
+        "codemode.journalResume(execution_id: string): Promise<{ state, resume }>";
+    "codemode.journalRollback", "codemode", "CAS-verified reverse-order rollback of an unresolved plan journal" =>
+        "codemode.journalRollback(execution_id: string): Promise<{ state, rolled_back }>";
+    "codemode.limits", "codemode", "Return active CodeMode sandbox, output, ref, and operation limits" =>
+        "codemode.limits(): Promise<CodeModeLimits>";
+};
 pub fn search_catalog(query: &str) -> Value {
     let query_lower = query.to_lowercase();
     let mut results: Vec<(f64, &MethodDef)> = METHOD_CATALOG

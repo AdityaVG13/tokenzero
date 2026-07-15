@@ -67,6 +67,9 @@ pub struct EngineConfig {
     pub fetch_deny_hosts: Vec<String>,
     /// Installed MCP tool surface (`TOKENZERO_MCP_TOOL_SURFACE`).
     pub tool_surface: McpToolSurface,
+    /// Programmatic shareable-telemetry choice; `None` defers to the environment.
+    /// Permission is inspect-only because TokenZero has no telemetry exporter.
+    pub telemetry_enabled: Option<bool>,
 }
 
 impl EngineConfig {
@@ -92,6 +95,7 @@ impl EngineConfig {
             fetch_allow_hosts: env_host_list(FETCH_ALLOW_ENV),
             fetch_deny_hosts: env_host_list(FETCH_DENY_ENV),
             tool_surface: mcp_tool_surface_from_env(),
+            telemetry_enabled: None,
         }
     }
 }
@@ -103,21 +107,43 @@ pub fn mcp_tool_surface_from_env() -> McpToolSurface {
         .unwrap_or_default()
 }
 
+pub const TELEMETRY_ENV: &str = "TOKENZERO_TELEMETRY";
 pub const FETCH_ENABLED_ENV: &str = "TOKENZERO_FETCH";
 pub const FETCH_ALLOW_ENV: &str = "TOKENZERO_FETCH_ALLOW";
 pub const FETCH_DENY_ENV: &str = "TOKENZERO_FETCH_DENY";
 pub const SHELL_INLINE_BUDGET_ENV: &str = "TOKENZERO_SHELL_INLINE_BUDGET";
 pub const DEFAULT_SHELL_INLINE_BUDGET: usize = 256;
 
+fn matches_env_value(value: &str, accepted: &[&str]) -> bool {
+    accepted
+        .iter()
+        .any(|word| value.trim().eq_ignore_ascii_case(word))
+}
+
+/// Parse a default-off opt-in value without touching process-global state.
+pub fn telemetry_env_enabled(value: Option<&str>) -> bool {
+    value.is_some_and(|value| matches_env_value(value, &["1", "on", "true", "yes"]))
+}
+
+/// Resolve shareable telemetry permission from highest to lowest precedence.
+pub fn resolve_telemetry(
+    cli_opt_in: bool,
+    cli_opt_out: bool,
+    programmatic: Option<bool>,
+    env_value: Option<&str>,
+) -> bool {
+    if cli_opt_out {
+        false
+    } else if cli_opt_in {
+        true
+    } else {
+        programmatic.unwrap_or_else(|| telemetry_env_enabled(env_value))
+    }
+}
+
 /// Opt-in toggle parse: only `1`/`on`/`true`/`yes` (case-insensitive) enable.
 pub(crate) fn env_opt_in(name: &str) -> bool {
-    match std::env::var(name) {
-        Ok(value) => matches!(
-            value.trim().to_ascii_lowercase().as_str(),
-            "1" | "on" | "true" | "yes"
-        ),
-        Err(_) => false,
-    }
+    std::env::var(name).is_ok_and(|value| matches_env_value(&value, &["1", "on", "true", "yes"]))
 }
 
 pub(crate) fn env_host_list(name: &str) -> Vec<String> {
@@ -179,13 +205,9 @@ pub fn shell_inline_budget_from_env() -> usize {
 /// Opt-out toggle parse: unset means enabled; `0`/`off`/`false`/`no`
 /// (case-insensitive) disable.
 pub(crate) fn env_toggle_enabled(name: &str) -> bool {
-    match std::env::var(name) {
-        Ok(value) => !matches!(
-            value.trim().to_ascii_lowercase().as_str(),
-            "0" | "off" | "false" | "no"
-        ),
-        Err(_) => true,
-    }
+    std::env::var(name).map_or(true, |value| {
+        !matches_env_value(&value, &["0", "off", "false", "no"])
+    })
 }
 
 pub fn default_shell_timeout() -> Duration {
@@ -217,4 +239,37 @@ pub fn mcp_idle_timeout_from_secs(seconds: Option<u64>) -> Option<Duration> {
     Some(Duration::from_secs(
         seconds.clamp(1, MAX_MCP_IDLE_TIMEOUT_SECS),
     ))
+}
+
+#[cfg(test)]
+mod telemetry_tests {
+    use super::*;
+
+    #[test]
+    fn telemetry_env_is_strict_and_default_off() {
+        for value in [
+            None,
+            Some(""),
+            Some("0"),
+            Some("false"),
+            Some("off"),
+            Some("no"),
+            Some("invalid"),
+        ] {
+            assert!(!telemetry_env_enabled(value));
+        }
+        for value in ["1", "ON", " true ", "Yes"] {
+            assert!(telemetry_env_enabled(Some(value)));
+        }
+    }
+
+    #[test]
+    fn telemetry_precedence_is_explicit_and_deterministic() {
+        assert!(resolve_telemetry(true, false, Some(false), Some("off")));
+        assert!(!resolve_telemetry(true, true, Some(true), Some("yes")));
+        assert!(resolve_telemetry(false, false, Some(true), Some("off")));
+        assert!(!resolve_telemetry(false, false, Some(false), Some("yes")));
+        assert!(resolve_telemetry(false, false, None, Some("yes")));
+        assert!(!resolve_telemetry(false, false, None, None));
+    }
 }

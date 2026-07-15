@@ -5,40 +5,38 @@ pub(crate) fn content_for(
     row: &InstallWrite,
     root: &Path,
     previous: Option<&str>,
-    mcp_surface: McpToolSurface,
-) -> std::io::Result<PendingContent> {
-    match row.capability.as_str() {
-        "mcp" => {
-            let path = Path::new(&row.path);
-            if path.extension().and_then(|ext| ext.to_str()) == Some("toml") {
-                merge_toml_mcp(previous.unwrap_or_default(), root, path, row.global, mcp_surface)
-                    .map(PendingContent::Text)
-            } else {
-                merge_json_mcp(previous.unwrap_or_default(), root, row.global, mcp_surface)
-                    .map(PendingContent::Text)
-            }
+    surface: McpToolSurface,
+) -> std::io::Result<Vec<u8>> {
+    let previous = previous.unwrap_or_default();
+    let text = match row.capability.as_str() {
+        "mcp"
+            if Path::new(&row.path)
+                .extension()
+                .and_then(|ext| ext.to_str())
+                == Some("toml") =>
+        {
+            merge_toml_mcp(previous, root, Path::new(&row.path), row.global, surface)
         }
-        "instructions" => Ok(PendingContent::Text(instructions_content(mcp_surface))),
-        "shell" => Ok(PendingContent::Text(shell_launcher_content(root, row.global))),
-        "cli" => Ok(PendingContent::Text(cli_launcher_content(root, row.global))),
-        "cli-runtime" => current_exe_bytes().map(PendingContent::Bytes),
-        "cli-shim" => Ok(PendingContent::Text(windows_posix_cli_shim_content())),
-        "hooks" => merge_json_hooks(previous.unwrap_or_default(), &hook_command(root, row.global))
-            .map(PendingContent::Text),
-        "shim" => shim_content(Path::new(&row.path), root, row.global).map(PendingContent::Text),
-        _ => Ok(PendingContent::Text(
-            serde_json::json!({
-                "schema_version": "tokenzero.runtime_manifest.v1",
-                "runtime": "rust",
-                "external_runtime_required": false,
-                "binary": runtime_manifest_binary(root, row.global),
-                "source_binary": current_exe_string(),
-                "global_launcher": tokenzero_command(root, row.global)
-            })
-            .to_string()
-                + "\n",
-        )),
-    }
+        "mcp" => merge_json_mcp(previous, root, row.global, surface),
+        "instructions" => Ok(instructions_content(surface)),
+        "shell" => Ok(shell_launcher_content(root, row.global)),
+        "cli" => Ok(cli_launcher_content(root, row.global)),
+        "cli-shim" => Ok(windows_posix_cli_shim_content()),
+        "hooks" => merge_json_hooks(previous, &hook_command(root, row.global)),
+        "shim" => shim_content(Path::new(&row.path), root, row.global),
+        "cli-runtime" => return current_exe_bytes(),
+        _ => Ok(serde_json::json!({
+            "schema_version": "tokenzero.runtime_manifest.v1",
+            "runtime": "rust",
+            "external_runtime_required": false,
+            "binary": runtime_manifest_binary(root, row.global),
+            "source_binary": current_exe_string(),
+            "global_launcher": tokenzero_command(root, row.global)
+        })
+        .to_string()
+            + "\n"),
+    }?;
+    Ok(text.into_bytes())
 }
 
 /// Parse `previous` as a JSON object document (empty input -> empty object),
@@ -51,7 +49,10 @@ fn parse_json_object(previous: &str, what: &str) -> std::io::Result<Map<String, 
         .map_err(|err| Error::new(ErrorKind::InvalidData, format!("invalid JSON: {err}")))?;
     match value {
         Value::Object(map) => Ok(map),
-        _ => Err(Error::new(ErrorKind::InvalidData, format!("{what} must be an object"))),
+        _ => Err(Error::new(
+            ErrorKind::InvalidData,
+            format!("{what} must be an object"),
+        )),
     }
 }
 
@@ -61,7 +62,10 @@ fn object_entry<'a>(
     key: &str,
     what: &str,
 ) -> std::io::Result<&'a mut Map<String, Value>> {
-    object.entry(key).or_insert_with(|| Value::Object(Map::new())).as_object_mut()
+    object
+        .entry(key)
+        .or_insert_with(|| Value::Object(Map::new()))
+        .as_object_mut()
         .ok_or_else(|| Error::new(ErrorKind::InvalidData, format!("{what} must be an object")))
 }
 
@@ -185,29 +189,30 @@ pub fn detect_present_agents(home: &Path, path_env: Option<&str>) -> Vec<Detecte
         ("zed", &[".config/zed"], &["zed"], false),
         ("crush", &[".config/crush"], &["crush"], false),
     ];
-    let mut detected = Vec::new();
-    for (agent, home_paths, binaries, supported) in PROBES {
-        let mut evidence = home_paths.iter().find_map(|rel| {
-            let candidate = home.join(rel);
-            candidate.exists().then(|| format!("{} exists", candidate.display()))
-        });
-        if evidence.is_none() {
-            if let Some(path_env) = path_env {
-                'dirs: for dir in std::env::split_paths(path_env) {
-                    for binary in *binaries {
-                        if is_executable_file(&dir.join(binary)) {
-                            evidence = Some(format!("{binary} on PATH"));
-                            break 'dirs;
-                        }
-                    }
-                }
-            }
-        }
-        if let Some(evidence) = evidence {
-            detected.push(DetectedAgent { agent: (*agent).to_string(), evidence, supported: *supported });
-        }
-    }
-    detected
+    PROBES
+        .iter()
+        .filter_map(|&(agent, homes, binaries, supported)| {
+            let home_evidence = homes.iter().find_map(|rel| {
+                let path = home.join(rel);
+                path.exists().then(|| format!("{} exists", path.display()))
+            });
+            let evidence = home_evidence.or_else(|| {
+                path_env.and_then(|path| {
+                    std::env::split_paths(path).find_map(|dir| {
+                        binaries
+                            .iter()
+                            .find(|binary| is_executable_file(&dir.join(binary)))
+                            .map(|binary| format!("{binary} on PATH"))
+                    })
+                })
+            });
+            evidence.map(|evidence| DetectedAgent {
+                agent: agent.to_string(),
+                evidence,
+                supported,
+            })
+        })
+        .collect()
 }
 
 /// The TokenZero-owned PreToolUse entry is the one whose hook command invokes
@@ -215,13 +220,17 @@ pub fn detect_present_agents(home: &Path, path_env: Option<&str>) -> Vec<Detecte
 /// separately because the launcher/runtime file name varies per install
 /// (`tokenzero`, `tokenzero.cmd`, `tokenzero-runtime-<hash>`).
 pub(crate) fn is_tokenzero_hook_entry(entry: &Value) -> bool {
-    entry.get("hooks").and_then(Value::as_array).is_some_and(|hooks| {
-        hooks.iter().any(|hook| {
-            hook.get("command").and_then(Value::as_str).is_some_and(|command| {
-                command.contains("tokenzero") && command.contains("hook claude-code")
-            })
+    entry
+        .get("hooks")
+        .and_then(Value::as_array)
+        .is_some_and(|hooks| {
+            hooks
+                .iter()
+                .filter_map(|hook| hook.get("command")?.as_str())
+                .any(|command| {
+                    command.contains("tokenzero") && command.contains("hook claude-code")
+                })
         })
-    })
 }
 
 /// Claude Code runs hook commands through a shell, so the launcher path is
@@ -281,24 +290,23 @@ pub(crate) fn mcp_args(root: &Path) -> Vec<String> {
 
 pub(crate) fn mcp_env(root: &Path, mcp_surface: McpToolSurface) -> Map<String, Value> {
     // Insertion order is part of the generated-file contract (JSON/TOML byte identity).
-    let pairs = [
+    [
         ("TOKENZERO_ALLOWED_ROOTS", root.display().to_string()),
-        ("TOKENZERO_CACHE_PATH", cache_path(root).display().to_string()),
+        (
+            "TOKENZERO_CACHE_PATH",
+            cache_path(root).display().to_string(),
+        ),
         ("TOKENZERO_DEFAULT_MODE", "auto".to_string()),
         (McpToolSurface::ENV, mcp_surface.as_str().to_string()),
         ("TOKENZERO_MAX_OUTPUT_BYTES", "2000000".to_string()),
         ("TOKENZERO_SHELL_TIMEOUT", "30".to_string()),
         ("TOKENZERO_CACHE_BLOBS", "512".to_string()),
         ("TOKENZERO_CACHE_UNITS", "8192".to_string()),
-        // Long agent sessions can idle for hours between tool calls; an
-        // idle-exited server reads as a permanent disconnect to MCP clients.
         ("TOKENZERO_MCP_IDLE_TIMEOUT_SECS", "0".to_string()),
-    ];
-    let mut env = Map::new();
-    for (key, value) in pairs {
-        env.insert(key.to_string(), Value::String(value));
-    }
-    env
+    ]
+    .into_iter()
+    .map(|(key, value)| (key.to_string(), Value::String(value)))
+    .collect()
 }
 
 pub(crate) fn toml_mcp_block(
@@ -352,20 +360,16 @@ pub(crate) fn strip_tokenzero_managed_toml(input: &str) -> String {
         let trimmed = line.trim();
         if trimmed == "# tokenzero:mcp:start" {
             skipping = true;
-            continue;
-        }
-        if trimmed == "# tokenzero:mcp:end" {
+        } else if trimmed == "# tokenzero:mcp:end" {
             skipping = false;
-            continue;
-        }
-        if let Some(table) = toml_table_name(line) {
-            skipping = table == "mcp_servers.tokenzero" || table.starts_with("mcp_servers.tokenzero.");
-            if skipping {
-                continue;
+        } else {
+            if let Some(table) = toml_table_name(line) {
+                skipping =
+                    table == "mcp_servers.tokenzero" || table.starts_with("mcp_servers.tokenzero.");
             }
-        }
-        if !skipping {
-            output.push(line);
+            if !skipping {
+                output.push(line);
+            }
         }
     }
     let mut text = output.join("\n");
@@ -377,20 +381,19 @@ pub(crate) fn strip_tokenzero_managed_toml(input: &str) -> String {
 
 pub(crate) fn toml_table_name(line: &str) -> Option<String> {
     let trimmed = line.trim();
-    if !trimmed.starts_with('[') || trimmed.starts_with("[[") || !trimmed.ends_with(']') {
-        return None;
-    }
-    Some(
-        trimmed
-            .trim_start_matches('[')
-            .trim_end_matches(']')
-            .trim()
-            .to_string(),
-    )
+    (!trimmed.starts_with("[[") && trimmed.starts_with('[') && trimmed.ends_with(']'))
+        .then(|| trimmed[1..trimmed.len() - 1].trim().to_string())
 }
 
 pub(crate) fn toml_string_array(values: &[String]) -> String {
-    format!("[{}]", values.iter().map(|value| toml_string(value)).collect::<Vec<_>>().join(", "))
+    format!(
+        "[{}]",
+        values
+            .iter()
+            .map(|value| toml_string(value))
+            .collect::<Vec<_>>()
+            .join(", ")
+    )
 }
 
 pub(crate) fn toml_string(value: &str) -> String {

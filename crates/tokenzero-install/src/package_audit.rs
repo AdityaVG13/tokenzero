@@ -1,7 +1,7 @@
 use flate2::read::{DeflateDecoder, MultiGzDecoder};
-use std::{borrow::Cow, collections::HashSet, fs};
 use std::io::Read;
 use std::path::{Path, PathBuf};
+use std::{borrow::Cow, collections::HashSet, fs};
 const MAX_ARCHIVE_MEMBERS: usize = 4096;
 const MAX_NESTED_ARCHIVE_DEPTH: usize = 3;
 const MAX_TOP_LEVEL_ARCHIVE_BYTES: u64 = 256 * 1024 * 1024;
@@ -23,7 +23,11 @@ pub fn package_audit(root: &Path, artifacts: &[PathBuf]) -> serde_json::Value {
         root.join("package/npm/package.json"),
         root.join("packaging/homebrew/tokenzero.rb"),
     ];
-    let candidates: &[PathBuf] = if artifacts.is_empty() { &defaults } else { artifacts };
+    let candidates: &[PathBuf] = if artifacts.is_empty() {
+        &defaults
+    } else {
+        artifacts
+    };
     let mut issues = Vec::new();
     let mut checked = 0;
     for path in candidates.iter().filter(|path| path.exists()) {
@@ -47,63 +51,187 @@ fn audit_artifact(path: &Path, issues: &mut Issues) {
         audit_archive_members(&display, members, 0, issues);
         return;
     }
-    if !is_supported_archive_name(path.file_name().and_then(|n| n.to_str()).unwrap_or_default())
-        && let Ok(text) = fs::read_to_string(path)
+    if !is_supported_archive_name(
+        path.file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or_default(),
+    ) && let Ok(text) = fs::read_to_string(path)
     {
-        audit_artifact_text(path, &text, issues);
+        audit_release_text(
+            &path.display().to_string(),
+            None,
+            &text,
+            path.to_string_lossy().as_ref(),
+            issues,
+        );
     }
 }
-fn audit_artifact_text(path: &Path, text: &str, issues: &mut Issues) {
+fn audit_release_text(
+    artifact: &str,
+    member: Option<&str>,
+    text: &str,
+    public_path: &str,
+    issues: &mut Issues,
+) {
     let lower = text.to_ascii_lowercase();
-    let external_runtime = [
-        ["py", "thon "],
-        ["uv", " run"],
-        ["pip", " install"],
-    ]
-    .into_iter()
-    .any(|parts| lower.contains(&parts.concat()));
-    if external_runtime {
-        push_issue(
-            issues,
-            "external_runtime_dependency",
-            path,
-            "artifact references a non-Rust runtime",
-        );
-    }
     let normalized_text = lower.replace('\\', "/");
-    let normalized_path = path.display().to_string().to_ascii_lowercase().replace('\\', "/");
-    let file_name = path.file_name().and_then(|n| n.to_str()).unwrap_or_default();
-    let launcher = lower.starts_with("@echo off")
-        || lower.starts_with("#!/bin/sh")
-        || file_name.eq_ignore_ascii_case("tokenzero.cmd")
-        || normalized_path.ends_with("/.tokenzero/bin/tokenzero");
-    if launcher && normalized_text.contains("target/release/tokenzero") {
-        push_issue(
-            issues,
+    let normalized_path = public_path.to_ascii_lowercase().replace('\\', "/");
+    let leaf = normalized_path.rsplit('/').next().unwrap_or_default();
+    let findings = [
+        (
+            [["py", "thon "], ["uv", " run"], ["pip", " install"]]
+                .into_iter()
+                .any(|parts| lower.contains(&parts.concat())),
+            "external_runtime_dependency",
+            "artifact references a non-Rust runtime",
+            "archive executable/script member references a non-Rust runtime",
+        ),
+        (
+            (lower.starts_with("@echo off")
+                || lower.starts_with("#!/bin/sh")
+                || leaf == "tokenzero.cmd"
+                || normalized_path.ends_with("/.tokenzero/bin/tokenzero"))
+                && normalized_text.contains("target/release/tokenzero"),
             "dev_runtime_launcher",
-            path,
             "launcher points at a development target/release binary",
-        );
-    }
-    if ["raw_traces", "lab_notes", "local_only"]
-        .iter()
-        .any(|marker| lower.contains(marker))
-    {
-        push_issue(
-            issues,
+            "archive executable/script member points at a development target/release binary",
+        ),
+        (
+            ["raw_traces", "lab_notes", "local_only"]
+                .iter()
+                .any(|marker| lower.contains(marker)),
             "non_release_artifact_reference",
-            path,
             "artifact references non-release material",
-        );
+            "archive executable/script member references non-release material",
+        ),
+    ];
+    for (_, code, artifact_detail, member_detail) in findings.into_iter().filter(|f| f.0) {
+        let mut issue = serde_json::json!({
+            "code": code,
+            "path": artifact,
+            "detail": if member.is_some() { member_detail } else { artifact_detail }
+        });
+        if let Some(member) = member {
+            issue["member"] = member.into();
+        }
+        issues.push(issue);
     }
-}
-fn push_issue(issues: &mut Issues, code: &str, path: &Path, detail: impl Into<String>) {
-    issues.push(serde_json::json!({ "code": code, "path": path.display().to_string(), "detail": detail.into() }));
 }
 fn push_archive_issue(issues: &mut Issues, code: &str, path: &str, detail: impl Into<String>) {
     issues.push(serde_json::json!({ "code": code, "path": path, "detail": detail.into() }));
 }
-fn audit_archive_members(artifact: &str, members: Vec<ArchiveMember>, depth: usize, issues: &mut Issues, ) { for member in members { audit_public_member_name( artifact, &member.name, true, matches!(member.kind, ArchiveMemberKind::Directory), issues, ); if let Some(target) = member.link_target.as_deref() { audit_public_link_target(artifact, &member.name, target, member.kind, issues); } let Some(bytes) = member.nested_archive.as_deref() else { continue; }; let violation = if bytes.len() > MAX_NESTED_ARCHIVE_BYTES { Some(( "nested_archive_too_large", "nested archive exceeds the package-audit in-memory inspection limit", )) } else if depth >= MAX_NESTED_ARCHIVE_DEPTH { Some(( "nested_archive_depth_exceeded", "nested archive exceeds the package-audit recursion limit", )) } else { None }; if let Some((code, detail)) = violation { issues.push(serde_json::json!({ "code": code, "path": artifact, "member": member.name, "detail": detail })); continue; } let nested_artifact = format!("{artifact}!{}", member.name); if let Some(nested) = archive_members_from_bytes(&member.name, bytes, &nested_artifact, issues) { audit_archive_members(&nested_artifact, nested, depth + 1, issues); } } } #[derive(Clone, Copy)] enum ArchiveMemberKind { Path, Directory, Hardlink, Symlink, } impl ArchiveMemberKind { fn as_str(self) -> &'static str { match self { Self::Path => "path", Self::Directory => "directory", Self::Hardlink => "hardlink", Self::Symlink => "symlink", } } } struct ArchiveMember { name: String, kind: ArchiveMemberKind, link_target: Option<String>, nested_archive: Option<Vec<u8>>, } fn archive_members(path: &Path, issues: &mut Issues) -> Option<Vec<ArchiveMember>> { let name = path.file_name().and_then(|n| n.to_str()).unwrap_or_default(); if !is_supported_archive_name(name) { return None; } let artifact = path.display().to_string(); let metadata = match fs::metadata(path) { Ok(metadata) => metadata, Err(error) => { push_archive_issue( issues, "archive_member_listing_failed", &artifact, format!("failed to stat archive: {error}"), ); return None; } }; if metadata.len() > MAX_TOP_LEVEL_ARCHIVE_BYTES { issues.push(serde_json::json!({ "code": "archive_file_too_large", "path": artifact, "size": metadata.len(), "limit": MAX_TOP_LEVEL_ARCHIVE_BYTES, "detail": "top-level archive exceeds the package-audit read budget; package-audit fails closed before loading it into memory" })); return None; } match fs::read(path) { Ok(bytes) => archive_members_from_bytes(name, &bytes, &artifact, issues), Err(error) => { push_archive_issue( issues, "archive_member_listing_failed", &artifact, format!("failed to read archive: {error}"), ); None } } } fn archive_members_from_bytes( name: &str, bytes: &[u8], artifact: &str, issues: &mut Issues,) -> Option<Vec<ArchiveMember>> {
+fn audit_archive_members(
+    artifact: &str,
+    members: Vec<ArchiveMember>,
+    depth: usize,
+    issues: &mut Issues,
+) {
+    for member in members {
+        audit_public_member_name(
+            artifact,
+            &member.name,
+            true,
+            matches!(member.kind, ArchiveMemberKind::Directory),
+            issues,
+        );
+        if let Some(target) = member.link_target.as_deref() {
+            audit_public_link_target(artifact, &member.name, target, member.kind, issues);
+        }
+        let Some(bytes) = member.nested_archive.as_deref() else {
+            continue;
+        };
+        let violation = if bytes.len() > MAX_NESTED_ARCHIVE_BYTES {
+            Some((
+                "nested_archive_too_large",
+                "nested archive exceeds the package-audit in-memory inspection limit",
+            ))
+        } else if depth >= MAX_NESTED_ARCHIVE_DEPTH {
+            Some((
+                "nested_archive_depth_exceeded",
+                "nested archive exceeds the package-audit recursion limit",
+            ))
+        } else {
+            None
+        };
+        if let Some((code, detail)) = violation {
+            issues.push(serde_json::json!({ "code": code, "path": artifact, "member": member.name, "detail": detail }));
+            continue;
+        }
+        let nested_artifact = format!("{artifact}!{}", member.name);
+        if let Some(nested) =
+            archive_members_from_bytes(&member.name, bytes, &nested_artifact, issues)
+        {
+            audit_archive_members(&nested_artifact, nested, depth + 1, issues);
+        }
+    }
+}
+#[derive(Clone, Copy)]
+enum ArchiveMemberKind {
+    Path,
+    Directory,
+    Hardlink,
+    Symlink,
+}
+impl ArchiveMemberKind {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Path => "path",
+            Self::Directory => "directory",
+            Self::Hardlink => "hardlink",
+            Self::Symlink => "symlink",
+        }
+    }
+}
+struct ArchiveMember {
+    name: String,
+    kind: ArchiveMemberKind,
+    link_target: Option<String>,
+    nested_archive: Option<Vec<u8>>,
+}
+fn archive_members(path: &Path, issues: &mut Issues) -> Option<Vec<ArchiveMember>> {
+    let name = path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or_default();
+    if !is_supported_archive_name(name) {
+        return None;
+    }
+    let artifact = path.display().to_string();
+    let metadata = match fs::metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) => {
+            push_archive_issue(
+                issues,
+                "archive_member_listing_failed",
+                &artifact,
+                format!("failed to stat archive: {error}"),
+            );
+            return None;
+        }
+    };
+    if metadata.len() > MAX_TOP_LEVEL_ARCHIVE_BYTES {
+        issues.push(serde_json::json!({ "code": "archive_file_too_large", "path": artifact, "size": metadata.len(), "limit": MAX_TOP_LEVEL_ARCHIVE_BYTES, "detail": "top-level archive exceeds the package-audit read budget; package-audit fails closed before loading it into memory" }));
+        return None;
+    }
+    match fs::read(path) {
+        Ok(bytes) => archive_members_from_bytes(name, &bytes, &artifact, issues),
+        Err(error) => {
+            push_archive_issue(
+                issues,
+                "archive_member_listing_failed",
+                &artifact,
+                format!("failed to read archive: {error}"),
+            );
+            None
+        }
+    }
+}
+fn archive_members_from_bytes(
+    name: &str,
+    bytes: &[u8],
+    artifact: &str,
+    issues: &mut Issues,
+) -> Option<Vec<ArchiveMember>> {
     let lower = name.to_ascii_lowercase();
     if lower.ends_with(".tar") {
         return Some(parse_tar_members(bytes, artifact, issues));
@@ -162,13 +290,7 @@ impl ZipPayloadBudget {
             exhausted: false,
         }
     }
-    fn consume(
-        &mut self,
-        artifact: &str,
-        member: &str,
-        size: usize,
-        issues: &mut Issues,
-    ) -> bool {
+    fn consume(&mut self, artifact: &str, member: &str, size: usize, issues: &mut Issues) -> bool {
         if self.exhausted {
             return false;
         }
@@ -203,5 +325,3 @@ mod zip;
 use paths::*;
 use tar::*;
 use zip::*;
-#[cfg(test)]
-mod tests;

@@ -14,6 +14,10 @@ import tempfile
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[3]
+import sys
+sys.path.insert(0, str(REPO / "benchmarks"))
+from bench_common import find_ref as _find_ref, write_json
+find_ref = lambda value: _find_ref(value, strip_punctuation=True)
 BIN = REPO / "target/debug/tokenzero"
 EVIDENCE = Path(__file__).with_suffix("").with_name("session_observatory")
 LEDGER_SCHEMA = "tokenzero.ledger.v1"
@@ -277,22 +281,6 @@ class McpClient:
             raise RuntimeError(f"MCP server exited with {code}: {stderr[-2000:]}")
 
 
-def find_ref(value: object) -> str | None:
-    if isinstance(value, str):
-        match = re.search(r"(?:tz|fz)://\S+", value)
-        if match:
-            return match.group(0).rstrip(".,;)")
-    if isinstance(value, dict):
-        for child in value.values():
-            found = find_ref(child)
-            if found:
-                return found
-    if isinstance(value, list):
-        for child in value:
-            found = find_ref(child)
-            if found:
-                return found
-    return None
 
 
 def run_replay(output: Path, human: Path, ledger_copy: Path) -> dict:
@@ -339,8 +327,7 @@ def run_replay(output: Path, human: Path, ledger_copy: Path) -> dict:
             "unledgered_tool_results": [{"tool": "tz_expand", "visible_tokens": canonical_tokens(expand_result)}],
         }
         result = observe(ledger_copy, None, capture["boot_envelope_tokens"], capture["tool_schema_tokens"], capture)
-        output.parent.mkdir(parents=True, exist_ok=True)
-        output.write_text(json.dumps(result, indent=2, sort_keys=True) + "\n")
+        write_json(output, result)
         human.parent.mkdir(parents=True, exist_ok=True)
         human.write_text(human_report(result))
         return result
@@ -367,8 +354,7 @@ def main() -> int:
         output = args.output
     else:
         result = observe(args.ledger, args.session_id, args.boot_envelope_tokens, args.tool_schema_tokens)
-        args.output.parent.mkdir(parents=True, exist_ok=True)
-        args.output.write_text(json.dumps(result, indent=2, sort_keys=True) + "\n")
+        write_json(args.output, result)
         if args.human:
             args.human.parent.mkdir(parents=True, exist_ok=True)
             args.human.write_text(human_report(result))

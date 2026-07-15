@@ -9,7 +9,13 @@ impl TokenZeroEngine {
         }
         let text = serde_json::to_string_pretty(&status).unwrap_or_else(|_| "{}".to_string());
         let tokens = count_tokens(&text);
-        success_response("mem", Mode::Hybrid, text, Vec::new(), (tokens, tokens, 0, Some(0)))
+        success_response(
+            "mem",
+            Mode::Hybrid,
+            text,
+            Vec::new(),
+            (tokens, tokens, 0, Some(0)),
+        )
     }
 
     pub fn cache_pack(&self, scope: &str) -> ToolResponse {
@@ -64,11 +70,14 @@ impl TokenZeroEngine {
         );
         let manifest_path = cache_pack_manifest_path(&self.config.cache_path, scope);
         let invalidation_reason = previous_cache_digest(&manifest_path)
-            .map_or("new_pack", |previous| if previous == content_digest {
-                "unchanged"
-            } else {
-                "sources_changed"
-            }).to_string();
+            .map_or("new_pack", |previous| {
+                if previous == content_digest {
+                    "unchanged"
+                } else {
+                    "sources_changed"
+                }
+            })
+            .to_string();
         let mut store = self.recovery_store();
         let stable_stored = store.store_payload_deferred(
             &stable_text,
@@ -86,7 +95,9 @@ impl TokenZeroEngine {
         );
         if let Err(err) = store.persist_pending() {
             return failure_response(
-                "cache-pack", "cache_write_failed", err.to_string(),
+                "cache-pack",
+                "cache_write_failed",
+                err.to_string(),
                 Some("fix recovery cache permissions"),
             );
         }
@@ -94,7 +105,8 @@ impl TokenZeroEngine {
         // the persist, fail loud instead of publishing dead handles.
         if !store.has_ref(&stable_stored.blob_ref) || !store.has_ref(&volatile_stored.blob_ref) {
             return failure_response(
-                "cache-pack", "cache_evicted",
+                "cache-pack",
+                "cache_evicted",
                 "cache pack payload was evicted from the recovery cache before it could be advertised",
                 Some("increase recovery cache max_bytes or reduce the pack scope"),
             );
@@ -142,13 +154,24 @@ impl TokenZeroEngine {
         let visible = serde_json::to_string_pretty(&manifest).unwrap_or_default();
         let refs = vec![
             ref_record("stable_prefix", stable_stored.blob_ref, stable_text.len()),
-            ref_record("volatile_tail", volatile_stored.blob_ref, volatile_text.len()),
+            ref_record(
+                "volatile_tail",
+                volatile_stored.blob_ref,
+                volatile_text.len(),
+            ),
         ];
         let exact_ref_tokens = exact_ref_token_count(&refs);
         let mut response = success_response(
-            "cache-pack", Mode::Structured, visible.clone(), refs,
-            (cacheable_tokens + volatile_tokens, count_tokens(&visible),
-             store.recovery_tokens, Some(exact_ref_tokens)),
+            "cache-pack",
+            Mode::Structured,
+            visible.clone(),
+            refs,
+            (
+                cacheable_tokens + volatile_tokens,
+                count_tokens(&visible),
+                store.recovery_tokens,
+                Some(exact_ref_tokens),
+            ),
         );
         response.content_type = Some(ContentType::JsonConfig.to_string());
         response.telemetry = Some(json!({

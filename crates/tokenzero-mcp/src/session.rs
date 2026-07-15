@@ -1,13 +1,4 @@
-//! Session redundancy layer state (docs/routing.md §5): an in-memory
-//! seen-set of payloads already served this session, keyed per file range or
-//! per search output. The content hash of the exact served payload is the
-//! only invalidation source; mtime is never consulted.
-//!
-//! When `session_dedup` is on, the map is also persisted under the store
-//! root (`session-memory.json`, scoped by `TOKENZERO_SESSION_SCOPE`) so MCP
-//! process respawn can still dedup. Dedup always re-checks `content_sha256`
-//! against the current payload before suppressing. Lock poisoning fails open
-//! the same way (full serve, no persist on that path).
+//! Exact-payload session deduplication, delta telemetry, and persisted rollup state.
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -15,9 +6,6 @@ use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::time::SystemTime;
 
-/// Identity of one served payload. File reads are keyed per canonicalized
-/// path and requested line range; find/grep outputs are keyed per tool,
-/// query, and canonicalized root set.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub(crate) enum ServeKey {
@@ -31,8 +19,6 @@ pub(crate) enum ServeKey {
         query: String,
         roots: Vec<PathBuf>,
     },
-    /// Ref-based delivery (expand / CodeMode expand): keyed by ref + window +
-    /// selector/symbol normalization.
     Expand {
         ref_id: String,
         start_line: Option<usize>,
@@ -43,66 +29,75 @@ pub(crate) enum ServeKey {
     },
 }
 
-/// What was served for a key. `content_sha256` is the hash of the exact
-/// canonical payload text (the bytes behind `blob_ref`) — the invalidation
-/// check. Refs are refreshed on every serve, so the stored ones always point
-/// at recoverable content for the latest serve.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct ServedRecord {
     pub content_sha256: String,
     pub blob_ref: String,
-    /// Kept for diagnostics: serving paths mint fresh refs per call, and
-    /// content-addressing makes them identical to these on an unchanged hit.
     #[allow(dead_code)]
     pub file_ref: String,
     #[allow(dead_code)]
     pub raw_tokens: usize,
     pub line_count: usize,
     pub byte_len: usize,
-    /// Telemetry only — never an invalidation input (the content hash is).
     #[allow(dead_code)]
-    #[serde(rename = "served_at_unix_secs", default = "SystemTime::now", serialize_with = "serialize_served_at", deserialize_with = "deserialize_served_at")]
+    #[serde(
+        rename = "served_at_unix_secs",
+        default = "SystemTime::now",
+        serialize_with = "serialize_served_at",
+        deserialize_with = "deserialize_served_at"
+    )]
     pub served_at: SystemTime,
     pub serve_count: usize,
 }
 
-fn serialize_served_at<S: serde::Serializer>(time: &SystemTime, serializer: S) -> Result<S::Ok, S::Error> {
-    time.duration_since(SystemTime::UNIX_EPOCH).ok().map(|d| d.as_secs()).serialize(serializer)
+fn serialize_served_at<S: serde::Serializer>(
+    time: &SystemTime,
+    serializer: S,
+) -> Result<S::Ok, S::Error> {
+    time.duration_since(SystemTime::UNIX_EPOCH)
+        .ok()
+        .map(|d| d.as_secs())
+        .serialize(serializer)
 }
 
-fn deserialize_served_at<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<SystemTime, D::Error> {
+fn deserialize_served_at<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<SystemTime, D::Error> {
     Ok(Option::<u64>::deserialize(deserializer)?
         .and_then(|secs| SystemTime::UNIX_EPOCH.checked_add(std::time::Duration::from_secs(secs)))
         .unwrap_or_else(SystemTime::now))
 }
 
-/// Lookup outcome for a key against the current payload hash.
 #[derive(Debug, Clone)]
 pub(crate) enum SeenState {
     Miss,
-    /// Identical content already served; `serve_count` counts prior serves.
     Unchanged {
         serve_count: usize,
         cross_session: bool,
     },
-    /// Same key, different content: the previously served record, used as
-    /// the diff base.
     Changed {
         previous: ServedRecord,
     },
+}
+
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
+pub(crate) struct SessionRollup {
+    pub(crate) dedup_hits: usize,
+    pub(crate) diff_hits: usize,
+    pub(crate) visible_tokens_saved: usize,
+    pub(crate) diff_tokens_saved: usize,
+    #[serde(default)]
+    pub(crate) full_bytes: usize,
+    #[serde(default)]
+    pub(crate) delta_bytes: usize,
 }
 
 #[derive(Debug, Default)]
 pub(crate) struct SessionMemory {
     records: HashMap<ServeKey, ServedRecord>,
     restored_content_hashes: HashSet<String>,
-    dedup_hits: usize,
-    diff_hits: usize,
-    visible_tokens_saved: usize,
-    diff_tokens_saved: usize,
+    rollup: SessionRollup,
     session_hwm: u64,
-    full_bytes: usize,
-    delta_bytes: usize,
 }
 
 impl SessionMemory {
@@ -130,8 +125,6 @@ impl SessionMemory {
         }
     }
 
-    /// Insert or replace the record for a key, carrying the serve counter
-    /// forward across content changes.
     pub fn record(&mut self, key: ServeKey, mut record: ServedRecord) {
         if let Some(existing) = self.records.get(&key) {
             record.serve_count = existing.serve_count + 1;
@@ -140,40 +133,33 @@ impl SessionMemory {
     }
 
     pub fn absorb(&mut self, summary: &SessionSummary) {
-        self.dedup_hits += summary.dedup_notes;
-        self.diff_hits += summary.diff_serves;
-        self.visible_tokens_saved += summary.visible_saved;
-        self.diff_tokens_saved += summary.diff_saved;
+        self.rollup.dedup_hits += summary.dedup_notes;
+        self.rollup.diff_hits += summary.diff_serves;
+        self.rollup.visible_tokens_saved += summary.visible_saved;
+        self.rollup.diff_tokens_saved += summary.diff_saved;
     }
 
-    /// Restore disk-backed seen-set for this scope (dedup on only).
     pub(crate) fn restore_from_persist(
         &mut self,
         records: HashMap<ServeKey, ServedRecord>,
-        dedup_hits: usize,
-        diff_hits: usize,
-        visible_tokens_saved: usize,
-        diff_tokens_saved: usize,
+        rollup: SessionRollup,
         session_hwm: u64,
-        full_bytes: usize,
-        delta_bytes: usize,
     ) {
         self.restored_content_hashes = records
             .values()
             .map(|record| record.content_sha256.clone())
             .collect();
         self.records = records;
-        self.dedup_hits = dedup_hits;
-        self.diff_hits = diff_hits;
-        self.visible_tokens_saved = visible_tokens_saved;
-        self.diff_tokens_saved = diff_tokens_saved;
+        self.rollup = rollup;
         self.session_hwm = session_hwm;
-        self.full_bytes = full_bytes;
-        self.delta_bytes = delta_bytes;
     }
 
     pub(crate) fn records_snapshot(&self) -> &HashMap<ServeKey, ServedRecord> {
         &self.records
+    }
+
+    pub(crate) fn persisted_rollup(&self) -> SessionRollup {
+        self.rollup.clone()
     }
 
     pub(crate) fn session_hwm(&self) -> u64 {
@@ -187,40 +173,24 @@ impl SessionMemory {
     }
 
     pub(crate) fn note_bytes(&mut self, full: usize, delta: usize) {
-        self.full_bytes = self.full_bytes.saturating_add(full);
-        self.delta_bytes = self.delta_bytes.saturating_add(delta);
-    }
-
-    pub(crate) fn byte_rollup(&self) -> (usize, usize) {
-        (self.full_bytes, self.delta_bytes)
-    }
-
-    pub(crate) fn rollup_counters(&self) -> (usize, usize, usize, usize) {
-        (
-            self.dedup_hits,
-            self.diff_hits,
-            self.visible_tokens_saved,
-            self.diff_tokens_saved,
-        )
+        self.rollup.full_bytes = self.rollup.full_bytes.saturating_add(full);
+        self.rollup.delta_bytes = self.rollup.delta_bytes.saturating_add(delta);
     }
 
     pub fn rollup(&self) -> Value {
         json!({
             "records": self.records.len(),
-            "dedup_hits": self.dedup_hits,
-            "diff_hits": self.diff_hits,
-            "visible_tokens_saved": self.visible_tokens_saved,
-            "diff_tokens_saved": self.diff_tokens_saved,
+            "dedup_hits": self.rollup.dedup_hits,
+            "diff_hits": self.rollup.diff_hits,
+            "visible_tokens_saved": self.rollup.visible_tokens_saved,
+            "diff_tokens_saved": self.rollup.diff_tokens_saved,
             "session_hwm": self.session_hwm,
-            "full_bytes": self.full_bytes,
-            "delta_bytes": self.delta_bytes
+            "full_bytes": self.rollup.full_bytes,
+            "delta_bytes": self.rollup.delta_bytes
         })
     }
 }
 
-/// Per-call accumulator for redundancy outcomes: feeds both the response
-/// telemetry (merged, never clobbering existing keys' siblings) and the
-/// session rollup counters.
 #[derive(Debug, Default)]
 pub(crate) struct SessionSummary {
     pub dedup_notes: usize,
@@ -268,8 +238,6 @@ impl SessionSummary {
         self.to_hwm = to_hwm;
     }
 
-    /// Telemetry fragment to merge into the tool response, or `None` when
-    /// the call served everything full.
     pub fn telemetry(&self) -> Option<Value> {
         let strategy = match (self.dedup_notes > 0, self.diff_serves > 0) {
             (true, true) => "seen_set_dedup+diff_since_served",

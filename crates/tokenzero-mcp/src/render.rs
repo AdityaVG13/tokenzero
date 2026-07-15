@@ -15,7 +15,8 @@ impl TokenZeroEngine {
             per_stream_capture_bytes: self.config.shell_capture_bytes,
             spill_threshold_bytes: self.config.shell_spill_bytes,
             spill_dir: Some(shell_spill_dir(&self.config.cache_path)),
-        }.normalized()
+        }
+        .normalized()
     }
 }
 
@@ -27,7 +28,11 @@ pub(crate) fn persist_refs(
     store: &mut RecoveryStore,
     refs: &mut Vec<tokenzero_core::RefRecord>,
 ) -> PersistResult {
-    let error = (!refs.is_empty()).then(|| store.persist_pending()).transpose().err().map(|err| err.to_string());
+    let error = (!refs.is_empty())
+        .then(|| store.persist_pending())
+        .transpose()
+        .err()
+        .map(|err| err.to_string());
     if error.is_some() {
         refs.clear();
     }
@@ -121,8 +126,10 @@ pub(crate) fn failure_response(
 
 pub(crate) fn path_not_allowed(tool: &str, path: &Path) -> ToolResponse {
     failure_response(
-        tool, "path_not_allowed",
-        format!("path is outside allowed roots: {}", path.display()), None,
+        tool,
+        "path_not_allowed",
+        format!("path is outside allowed roots: {}", path.display()),
+        None,
     )
 }
 
@@ -145,15 +152,43 @@ pub(crate) fn expansion_response(result: ExpansionResult, recovery_tokens: usize
     let reason = result.reason.as_str();
     let is_window_oob = reason.starts_with("window-out-of-range");
     let exact = [
-        ("shared-cas-missing", "shared_cas_missing", "shared CAS object missing"),
-        ("shared-cas-corruption", "shared_cas_corruption", "shared CAS object corrupted"),
-        ("shared-cas-policy", "shared_cas_policy", "shared CAS policy denied expansion"),
+        (
+            "shared-cas-missing",
+            "shared_cas_missing",
+            "shared CAS object missing",
+        ),
+        (
+            "shared-cas-corruption",
+            "shared_cas_corruption",
+            "shared CAS object corrupted",
+        ),
+        (
+            "shared-cas-policy",
+            "shared_cas_policy",
+            "shared CAS policy denied expansion",
+        ),
         ("shared-cas-io", "shared_cas_io", "shared CAS I/O failure"),
-        ("shared-cas-non-utf8", "shared_cas_non_utf8", "shared CAS object is not UTF-8 text"),
-        ("unsupported-ref-kind", "unsupported_ref_kind", "foreign non-blob ref requires its owning engine"),
+        (
+            "shared-cas-non-utf8",
+            "shared_cas_non_utf8",
+            "shared CAS object is not UTF-8 text",
+        ),
+        (
+            "unsupported-ref-kind",
+            "unsupported_ref_kind",
+            "foreign non-blob ref requires its owning engine",
+        ),
         ("stale-ref", "ref_stale", "ref is no longer recoverable"),
-        ("invalid-ref", "invalid_ref", "ref is not a valid tz://, fz://, or gz:// recovery handle"),
-        ("decode-failed", "expand_failed", "ref was found but could not be decoded"),
+        (
+            "invalid-ref",
+            "invalid_ref",
+            "ref is not a valid tz://, fz://, or gz:// recovery handle",
+        ),
+        (
+            "decode-failed",
+            "expand_failed",
+            "ref was found but could not be decoded",
+        ),
     ];
     let (code, message) = if reason.starts_with("ref-not-found") || reason == "dangling-ref" {
         ("ref_not_found", format!("{reason} (ref: {full_ref})"))
@@ -236,14 +271,19 @@ fn edit_failure(
     message: impl Into<String>,
     repair: &'static str,
 ) -> Result<AppliedEdits, EditFailure> {
-    Err(EditFailure { code, message: message.into(), repair: Some(repair.to_string()) })
+    Err(EditFailure {
+        code,
+        message: message.into(),
+        repair: Some(repair.to_string()),
+    })
 }
 
 /// Whole-file hunk for `create=true`: `replace` becomes the file content.
 pub(crate) fn create_file_hunk(hunk: &EditHunk) -> Result<AppliedEdits, EditFailure> {
     if hunk.replace.is_empty() {
         return edit_failure(
-            "no_op_hunk", "create hunk has an empty replace; nothing to write",
+            "no_op_hunk",
+            "create hunk has an empty replace; nothing to write",
             "pass the full new-file content in replace",
         );
     }
@@ -278,7 +318,8 @@ pub(crate) fn apply_edit_hunks(
         }
         if hunk.find == hunk.replace {
             return edit_failure(
-                "no_op_hunk", format!("edits[{index}] replaces text with identical text"),
+                "no_op_hunk",
+                format!("edits[{index}] replaces text with identical text"),
                 "drop the hunk or change replace",
             );
         }
@@ -288,14 +329,18 @@ pub(crate) fn apply_edit_hunks(
                 .map(|hint| format!("; {hint}"))
                 .unwrap_or_default();
             return edit_failure(
-                "hunk_not_found", format!("edits[{index}] matched nothing{hint}"),
+                "hunk_not_found",
+                format!("edits[{index}] matched nothing{hint}"),
                 "re-read the file and pass the exact current text in find",
             );
         }
         if offsets.len() > 1 && !hunk.replace_all {
             return edit_failure(
                 "ambiguous_hunk",
-                format!("edits[{index}] matches {} times; expected exactly one match", offsets.len()),
+                format!(
+                    "edits[{index}] matches {} times; expected exactly one match",
+                    offsets.len()
+                ),
                 "add surrounding context to find or set replace_all=true",
             );
         }

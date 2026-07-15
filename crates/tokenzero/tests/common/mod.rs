@@ -62,42 +62,18 @@ pub fn setup_temp_with_cache() -> (TempDir, std::path::PathBuf) {
     (dir, cache)
 }
 
-pub fn run_tokenzero_json(args: &[&str]) -> Value {
-    let output = Command::cargo_bin("tokenzero")
-        .unwrap()
-        .args(args)
-        .output()
-        .unwrap();
-    assert!(
-        output.status.success(),
-        "tokenzero {:?} failed: {}",
-        args,
-        String::from_utf8_lossy(&output.stderr)
-    );
-    serde_json::from_slice(&output.stdout).unwrap()
-}
-
-pub fn run_tokenzero_json_in(args: &[&str], cwd: &std::path::Path) -> Value {
-    let output = Command::cargo_bin("tokenzero")
-        .unwrap()
-        .current_dir(cwd)
-        .args(args)
-        .output()
-        .unwrap();
-    assert!(
-        output.status.success(),
-        "tokenzero {:?} failed: {}",
-        args,
-        String::from_utf8_lossy(&output.stderr)
-    );
-    serde_json::from_slice(&output.stdout).unwrap()
-}
-
-pub fn run_tokenzero_json_with_env(args: &[&str], envs: &[(&str, &str)]) -> Value {
-    let mut cmd = Command::cargo_bin("tokenzero").unwrap();
+fn run_tokenzero_json_configured(
+    args: &[&str],
+    cwd: Option<&std::path::Path>,
+    envs: &[(&str, &str)],
+) -> Value {
+    let mut cmd = tokenzero_cmd();
     cmd.args(args);
-    for (k, v) in envs {
-        cmd.env(k, v);
+    if let Some(cwd) = cwd {
+        cmd.current_dir(cwd);
+    }
+    for (key, value) in envs {
+        cmd.env(key, value);
     }
     let output = cmd.output().unwrap();
     assert!(
@@ -107,6 +83,18 @@ pub fn run_tokenzero_json_with_env(args: &[&str], envs: &[(&str, &str)]) -> Valu
         String::from_utf8_lossy(&output.stderr)
     );
     serde_json::from_slice(&output.stdout).unwrap()
+}
+
+pub fn run_tokenzero_json(args: &[&str]) -> Value {
+    run_tokenzero_json_configured(args, None, &[])
+}
+
+pub fn run_tokenzero_json_in(args: &[&str], cwd: &std::path::Path) -> Value {
+    run_tokenzero_json_configured(args, Some(cwd), &[])
+}
+
+pub fn run_tokenzero_json_with_env(args: &[&str], envs: &[(&str, &str)]) -> Value {
+    run_tokenzero_json_configured(args, None, envs)
 }
 
 pub fn write_json_fixture(path: &std::path::Path, value: &Value) {
@@ -198,6 +186,11 @@ pub fn find_artifact<'a>(json: &'a Value, artifact_id: &str) -> &'a Value {
     find_row_by(json["artifacts"].as_array().unwrap(), "id", artifact_id)
 }
 
+pub fn assert_json_fields(value: &Value, expected: &[(&str, Value)]) {
+    for (field, expected) in expected {
+        assert_eq!(&value[*field], expected, "{field}");
+    }
+}
 
 pub fn tokenzero_cmd() -> Command {
     Command::cargo_bin("tokenzero").unwrap()
@@ -212,6 +205,14 @@ pub fn assert_success(output: Output, label: &str) -> Output {
     output
 }
 
+pub fn assert_success_ref(output: &Output, label: &str) {
+    assert!(
+        output.status.success(),
+        "{label}: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
 pub fn parse_json_stdout(output: &Output) -> Value {
     serde_json::from_slice(&output.stdout).unwrap()
 }
@@ -220,20 +221,30 @@ pub fn run_tokenzero_output(args: &[&str]) -> Output {
     tokenzero_cmd().args(args).output().unwrap()
 }
 
-
+pub fn run_tool_json(
+    tool: &str,
+    extra_args: &[&str],
+    root: &std::path::Path,
+    cache: &std::path::Path,
+) -> Value {
+    let mut args = vec![tool];
+    args.extend_from_slice(extra_args);
+    args.extend([
+        "--cache-path",
+        cache.to_str().unwrap(),
+        "--allowed-root",
+        root.to_str().unwrap(),
+        "--json",
+    ]);
+    run_tokenzero_json(&args)
+}
 
 pub fn run_tokenzero_json_in_with_env(
     args: &[&str],
     cwd: &std::path::Path,
     envs: &[(&str, &str)],
 ) -> Value {
-    let mut cmd = tokenzero_cmd();
-    cmd.current_dir(cwd).args(args);
-    for (k, v) in envs {
-        cmd.env(k, v);
-    }
-    let output = assert_success(cmd.output().unwrap(), &format!("{args:?}"));
-    parse_json_stdout(&output)
+    run_tokenzero_json_configured(args, Some(cwd), envs)
 }
 
 pub fn results_current_dir(root: &std::path::Path) -> std::path::PathBuf {
@@ -296,7 +307,6 @@ pub fn run_cli_run_json(
     parse_json_stdout(&output)
 }
 
-
 pub fn expand_raw_text(
     r: &str,
     cache: Option<&std::path::Path>,
@@ -317,7 +327,6 @@ pub fn expand_raw_text(
     let output = assert_success(cmd.output().unwrap(), "expand");
     String::from_utf8_lossy(&output.stdout).into_owned()
 }
-
 
 pub fn adapter_approval_audit_fixture(rc_id: &str, execution_allowed: bool) -> Value {
     serde_json::json!({
@@ -368,9 +377,7 @@ pub fn run_claim_audit_with_all_artifacts(dir: &std::path::Path) -> Value {
     ])
 }
 
-
-
-
+#[allow(clippy::too_many_arguments)]
 pub fn assert_integrity_row(
     row: &Value,
     present: bool,
@@ -401,8 +408,3 @@ pub fn assert_integrity_row(
     assert_eq!(row["valid"], valid);
     assert_reason(row, reason);
 }
-
-
-
-
-

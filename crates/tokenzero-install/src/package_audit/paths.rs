@@ -10,82 +10,61 @@ pub(crate) enum PathClassification {
     LocalGenerated,
 }
 
-/// Codes/details for a path classification on a member name vs a link target.
-struct ClassificationCodes {
-    member_code: &'static str,
-    member_detail: &'static str,
-    link_code: &'static str,
-    link_detail: &'static str,
+macro_rules! classification_issues {
+    ($($member_code:literal, $member_detail:literal;
+       $link_code:literal, $link_detail:literal;)*) => {
+        [$( (($member_code, $member_detail), ($link_code, $link_detail)) ),*]
+    };
 }
-
-fn classification_codes(finding: PathClassification) -> ClassificationCodes {
-    match finding {
-        PathClassification::PrivateToolState => ClassificationCodes {
-            member_code: "private_tool_state_member",
-            member_detail: "archive includes private local AI/tool state",
-            link_code: "private_tool_state_link_target",
-            link_detail: "archive link target points at private local AI/tool state",
-        },
-        PathClassification::NonPublicDotdir => ClassificationCodes {
-            member_code: "non_public_dotdir_member",
-            member_detail: "archive includes a non-allowlisted dot directory",
-            link_code: "non_public_dotdir_link_target",
-            link_detail: "archive link target points at a non-allowlisted dot directory",
-        },
-        PathClassification::Sensitive => ClassificationCodes {
-            member_code: "sensitive_member_name",
-            member_detail: "archive or artifact member name looks credential-bearing",
-            link_code: "sensitive_link_target",
-            link_detail: "archive link target looks credential-bearing",
-        },
-        PathClassification::LocalGenerated => ClassificationCodes {
-            member_code: "local_generated_member",
-            member_detail: "archive includes local database, backup, dump, or generated metadata",
-            link_code: "local_generated_link_target",
-            link_detail: "archive link target points at local database, backup, dump, or generated metadata",
-        },
+type ClassificationIssue = ((&'static str, &'static str), (&'static str, &'static str));
+const CLASSIFICATION_ISSUES: [ClassificationIssue; 4] = classification_issues! {
+    "private_tool_state_member", "archive includes private local AI/tool state";
+        "private_tool_state_link_target", "archive link target points at private local AI/tool state";
+    "non_public_dotdir_member", "archive includes a non-allowlisted dot directory";
+        "non_public_dotdir_link_target", "archive link target points at a non-allowlisted dot directory";
+    "sensitive_member_name", "archive or artifact member name looks credential-bearing";
+        "sensitive_link_target", "archive link target looks credential-bearing";
+    "local_generated_member", "archive includes local database, backup, dump, or generated metadata";
+        "local_generated_link_target", "archive link target points at local database, backup, dump, or generated metadata";
+};
+impl PathClassification {
+    fn issue(self, link: bool) -> (&'static str, &'static str) {
+        let pair = CLASSIFICATION_ISSUES[self as usize];
+        if link { pair.1 } else { pair.0 }
     }
 }
 
 /// Normalize backslashes, split into non-empty parts, and lowercase the leaf.
-fn split_normalized(normalized: &str) -> (Vec<&str>, String) {
-    let parts: Vec<&str> = normalized
+fn split_normalized(normalized: &str) -> Vec<&str> {
+    normalized
         .split('/')
         .filter(|part| !part.is_empty())
-        .collect();
-    let leaf = parts
-        .last()
-        .copied()
-        .unwrap_or_default()
-        .to_ascii_lowercase();
-    (parts, leaf)
+        .collect()
 }
 
 fn classify_public_path(
     parts: &[&str],
     leaf_is_directory: bool,
     leaf: &str,
-) -> Vec<PathClassification> {
-    let mut found = Vec::new();
+    mut found: impl FnMut(PathClassification),
+) {
     for (index, part) in parts.iter().enumerate() {
         let is_leaf = index + 1 == parts.len();
-        let lower = part.to_ascii_lowercase();
-        if is_private_tool_dotdir(&lower) {
-            found.push(PathClassification::PrivateToolState);
+        if is_private_tool_dotdir(part) {
+            found(PathClassification::PrivateToolState);
             break;
         }
-        if (!is_leaf || leaf_is_directory) && lower.starts_with('.') && !is_public_dotdir(&lower) {
-            found.push(PathClassification::NonPublicDotdir);
+        if (!is_leaf || leaf_is_directory) && part.starts_with('.') && !is_public_dotdir(part) {
+            found(PathClassification::NonPublicDotdir);
             break;
         }
     }
     if is_sensitive_member_leaf(leaf) {
-        found.push(PathClassification::Sensitive);
+        found(PathClassification::Sensitive);
     }
     if is_local_generated_member_leaf(leaf) {
-        found.push(PathClassification::LocalGenerated);
+        found(PathClassification::LocalGenerated);
     }
-    found
 }
 pub(crate) fn audit_public_member_name(
     artifact: &str,
@@ -97,8 +76,10 @@ pub(crate) fn audit_public_member_name(
     if let Some(reason) = archive_path_control_reason(member) {
         push_archive_member_name_uninspectable(artifact, member, reason, issues);
     }
-    let normalized = member.replace('\\', "/");
-    let (parts, leaf) = split_normalized(&normalized);
+    let mut normalized = member.replace('\\', "/");
+    normalized.make_ascii_lowercase();
+    let parts = split_normalized(&normalized);
+    let leaf = parts.last().copied().unwrap_or_default();
     if check_path_escape {
         if let Some(reason) = archive_path_escape_reason(&normalized, &parts) {
             issues.push(serde_json::json!({
@@ -118,15 +99,15 @@ pub(crate) fn audit_public_member_name(
             "detail": "archive contains macOS AppleDouble metadata"
         }));
     }
-    for finding in classify_public_path(&parts, member_is_directory, &leaf) {
-        let codes = classification_codes(finding);
+    classify_public_path(&parts, member_is_directory, leaf, |finding| {
+        let (code, detail) = finding.issue(false);
         issues.push(serde_json::json!({
-            "code": codes.member_code,
+            "code": code,
             "path": artifact,
             "member": member,
-            "detail": codes.member_detail
+            "detail": detail
         }));
-    }
+    });
 }
 pub(crate) fn audit_public_link_target(
     artifact: &str,
@@ -138,9 +119,11 @@ pub(crate) fn audit_public_link_target(
     if let Some(reason) = archive_path_control_reason(target) {
         push_archive_link_target_uninspectable(artifact, member, target, kind, reason, issues);
     }
-    let normalized = target.replace('\\', "/");
+    let mut normalized = target.replace('\\', "/");
+    normalized.make_ascii_lowercase();
     let target_is_directory = normalized.ends_with('/');
-    let (parts, leaf) = split_normalized(&normalized);
+    let parts = split_normalized(&normalized);
+    let leaf = parts.last().copied().unwrap_or_default();
     let link_kind = kind.as_str();
     if let Some(reason) = archive_path_escape_reason(&normalized, &parts) {
         issues.push(serde_json::json!({
@@ -153,17 +136,17 @@ pub(crate) fn audit_public_link_target(
             "detail": "archive link target escapes the package root"
         }));
     }
-    for finding in classify_public_path(&parts, target_is_directory, &leaf) {
-        let codes = classification_codes(finding);
+    classify_public_path(&parts, target_is_directory, leaf, |finding| {
+        let (code, detail) = finding.issue(true);
         issues.push(serde_json::json!({
-            "code": codes.link_code,
+            "code": code,
             "path": artifact,
             "member": member,
             "link_target": target,
             "link_kind": link_kind,
-            "detail": codes.link_detail
+            "detail": detail
         }));
-    }
+    });
 }
 pub(crate) fn archive_path_escape_reason(normalized: &str, parts: &[&str]) -> Option<&'static str> {
     if normalized.starts_with('/') {
@@ -178,15 +161,13 @@ pub(crate) fn archive_path_escape_reason(normalized: &str, parts: &[&str]) -> Op
     None
 }
 pub(crate) fn archive_path_control_reason(path: &str) -> Option<&'static str> {
-    for ch in path.chars() {
+    path.chars().find(|ch| ch.is_control()).map(|ch| {
         if ch == '\0' {
-            return Some("nul_byte");
+            "nul_byte"
+        } else {
+            "control_character"
         }
-        if ch.is_control() {
-            return Some("control_character");
-        }
-    }
-    None
+    })
 }
 pub(crate) fn audit_tar_header_name_encoding(
     artifact: &str,
@@ -316,8 +297,9 @@ const SENSITIVE_LEAVES: &[&str] = &[
     "credentials.json",
 ];
 const SENSITIVE_SUFFIXES: &[&str] = &[".pem", ".key", ".p12", ".pfx", ".ppk", ".ovpn", ".kdbx"];
-const LOCAL_GENERATED_SUFFIXES: &[&str] =
-    &[".sqlite", ".sqlite3", ".db", ".bak", ".backup", ".dump", ".dmp"];
+const LOCAL_GENERATED_SUFFIXES: &[&str] = &[
+    ".sqlite", ".sqlite3", ".db", ".bak", ".backup", ".dump", ".dmp",
+];
 const LOCAL_GENERATED_NEEDLES: &[&str] = &[
     "transcript",
     "chat-export",
@@ -343,7 +325,9 @@ pub(crate) fn is_public_dotdir(part: &str) -> bool {
 pub(crate) fn is_sensitive_member_leaf(leaf: &str) -> bool {
     SENSITIVE_LEAVES.contains(&leaf)
         || leaf.starts_with(".env.")
-        || SENSITIVE_SUFFIXES.iter().any(|suffix| leaf.ends_with(suffix))
+        || SENSITIVE_SUFFIXES
+            .iter()
+            .any(|suffix| leaf.ends_with(suffix))
 }
 pub(crate) fn is_local_generated_member_leaf(leaf: &str) -> bool {
     LOCAL_GENERATED_SUFFIXES
@@ -354,8 +338,12 @@ pub(crate) fn is_local_generated_member_leaf(leaf: &str) -> bool {
             .any(|needle| leaf.contains(needle))
 }
 
-const EXECUTABLE_LEAVES: &[&str] =
-    &["tokenzero", "tokenzero.exe", "tokenzero.cmd", "tokenzero.js"];
+const EXECUTABLE_LEAVES: &[&str] = &[
+    "tokenzero",
+    "tokenzero.exe",
+    "tokenzero.cmd",
+    "tokenzero.js",
+];
 const EXECUTABLE_EXTENSIONS: &[&str] = &[
     "bat", "cmd", "com", "cjs", "dll", "dylib", "exe", "fish", "jar", "js", "mjs", "node", "php",
     "pl", "ps1", "psm1", "py", "rb", "sh", "so", "wasm", "zsh",
@@ -373,58 +361,19 @@ pub(crate) fn audit_archive_executable_payload(
     let Ok(text) = std::str::from_utf8(payload) else {
         return;
     };
-    let lower = text.to_ascii_lowercase();
-    let script_runtime = ["py", "thon"].concat();
-    let uv_run = ["uv", " run"].concat();
-    let package_install = ["pip", " install"].concat();
-    if lower.contains(&format!("{script_runtime} "))
-        || lower.contains(&uv_run)
-        || lower.contains(&package_install)
-    {
-        issues.push(serde_json::json!({
-            "code": "external_runtime_dependency",
-            "path": artifact,
-            "member": member,
-            "detail": "archive executable/script member references a non-Rust runtime"
-        }));
-    }
-    let normalized_text = lower.replace('\\', "/");
-    let normalized_member = member.to_ascii_lowercase().replace('\\', "/");
-    let leaf = normalized_member.rsplit('/').next().unwrap_or_default();
-    let looks_like_launcher = lower.starts_with("@echo off")
-        || lower.starts_with("#!/bin/sh")
-        || leaf == "tokenzero.cmd"
-        || normalized_member.ends_with("/.tokenzero/bin/tokenzero");
-    if looks_like_launcher && normalized_text.contains("target/release/tokenzero") {
-        issues.push(serde_json::json!({
-            "code": "dev_runtime_launcher",
-            "path": artifact,
-            "member": member,
-            "detail": "archive executable/script member points at a development target/release binary"
-        }));
-    }
-    if lower.contains("raw_traces") || lower.contains("lab_notes") || lower.contains("local_only") {
-        issues.push(serde_json::json!({
-            "code": "non_release_artifact_reference",
-            "path": artifact,
-            "member": member,
-            "detail": "archive executable/script member references non-release material"
-        }));
-    }
+    audit_release_text(artifact, Some(member), text, member, issues);
 }
 pub(crate) fn is_executable_or_script_member_name(name: &str) -> bool {
-    let normalized = name.replace('\\', "/").to_ascii_lowercase();
-    let parts: Vec<&str> = normalized
-        .split('/')
-        .filter(|part| !part.is_empty())
-        .collect();
-    let Some(leaf) = parts.last().copied() else {
+    let mut normalized = name.replace('\\', "/");
+    normalized.make_ascii_lowercase();
+    let mut parts = normalized.split('/').filter(|part| !part.is_empty());
+    let Some(leaf) = parts.clone().next_back() else {
         return false;
     };
     if EXECUTABLE_LEAVES.contains(&leaf) || leaf.starts_with("tokenzero-runtime-") {
         return true;
     }
-    if parts.contains(&"bin") && !leaf.contains('.') {
+    if parts.any(|part| part == "bin") && !leaf.contains('.') {
         return true;
     }
     let ext = leaf.rsplit_once('.').map(|(_, e)| e).unwrap_or_default();

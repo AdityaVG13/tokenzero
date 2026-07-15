@@ -3,17 +3,27 @@
 
 use std::path::Path;
 
+use crate::is_one_of;
+
 /// Host platform tag used by shell split/quote helpers (`windows` / `posix`).
 pub fn host_shell_platform() -> &'static str {
-    if cfg!(windows) {
-        "windows"
-    } else {
-        "posix"
-    }
+    ["posix", "windows"][cfg!(windows) as usize]
 }
 
 pub fn split_command_string(command: &str) -> Vec<String> {
     split_command_string_for_platform(command, host_shell_platform())
+}
+
+fn toggle_quote(quote: &mut Option<char>, ch: char, single_quote_groups: bool) -> bool {
+    if Some(ch) == *quote {
+        *quote = None;
+        true
+    } else if quote.is_none() && matches!(ch, '"' | '\'') && (ch != '\'' || single_quote_groups) {
+        *quote = Some(ch);
+        true
+    } else {
+        false
+    }
 }
 
 pub fn split_command_string_for_platform(command: &str, platform: &str) -> Vec<String> {
@@ -30,50 +40,26 @@ pub fn split_command_string_for_platform(command: &str, platform: &str) -> Vec<S
         if escaped {
             current.push(ch);
             escaped = false;
-            token_started = true;
-            continue;
-        }
-        if ch == '\\' && quote != Some('\'') && !preserve_backslashes {
-            // POSIX: inside double quotes a backslash is literal unless it
-            // precedes $, `, ", or \ — so "a\|b" must stay a\|b (BRE
-            // alternation), not collapse to a|b.
-            if quote == Some('"') && !matches!(chars.peek().copied(), Some('$' | '`' | '"' | '\\'))
-            {
+        } else if ch == '\\' && quote != Some('\'') && !preserve_backslashes {
+            if quote == Some('"') && !matches!(chars.peek(), Some('$' | '`' | '"' | '\\')) {
                 current.push('\\');
-                token_started = true;
-                continue;
+            } else {
+                escaped = true;
             }
-            escaped = true;
-            token_started = true;
-            continue;
-        }
-        if Some(ch) == quote
-            && doubled_quote_escape == Some(ch)
-            && chars.peek().copied() == Some(ch)
+        } else if Some(ch) == quote && doubled_quote_escape == Some(ch) && chars.peek() == Some(&ch)
         {
             current.push(ch);
-            let _ = chars.next();
-            token_started = true;
-            continue;
-        }
-        if Some(ch) == quote {
-            quote = None;
-            token_started = true;
-            continue;
-        }
-        if quote.is_none() && (ch == '"' || ch == '\'' && single_quote_groups) {
-            quote = Some(ch);
-            token_started = true;
-            continue;
-        }
-        if quote.is_none() && ch.is_whitespace() {
+            chars.next();
+        } else if toggle_quote(&mut quote, ch, single_quote_groups) {
+        } else if quote.is_none() && ch.is_whitespace() {
             if token_started {
                 out.push(std::mem::take(&mut current));
                 token_started = false;
             }
             continue;
+        } else {
+            current.push(ch);
         }
-        current.push(ch);
         token_started = true;
     }
     if escaped {
@@ -89,16 +75,14 @@ fn doubled_quote_escape_for_platform(command: &str, platform: &str) -> Option<ch
     match platform {
         "cmd" => Some('"'),
         "powershell" | "pwsh" => Some('\''),
-        "windows" => {
+        "windows"
             if first_windows_cmd_word(command)
                 .as_deref()
-                .is_some_and(is_powershell_shell_host)
-            {
-                Some('\'')
-            } else {
-                Some('"')
-            }
+                .is_some_and(is_powershell_shell_host) =>
+        {
+            Some('\'')
         }
+        "windows" => Some('"'),
         _ => None,
     }
 }
@@ -116,43 +100,35 @@ fn contains_shell_syntax_with_single_quotes(value: &str, single_quote_groups: bo
     while let Some(ch) = chars.next() {
         if escaped {
             escaped = false;
-            at_word_start = false;
-            continue;
-        }
-        if ch == '\\' && quote != Some('\'') {
+        } else if ch == '\\' && quote != Some('\'') {
             escaped = true;
-            at_word_start = false;
-            continue;
-        }
-        if Some(ch) == quote {
-            quote = None;
-            at_word_start = false;
-            continue;
-        }
-        if quote.is_none() && (ch == '"' || ch == '\'' && single_quote_groups) {
-            quote = Some(ch);
-            at_word_start = false;
-            continue;
-        }
-        let next = chars.peek().copied();
-        if quote != Some('\'') && ch == '$'
-            && next.is_some_and(|next| matches!(next, '(' | '{' | '_') || next.is_ascii_alphabetic())
-        {
-            return true;
-        }
-        if quote.is_none() {
-            if matches!(ch, '|' | ';' | '>' | '<' | '`' | '\n') || ch == '&' && next == Some('&') {
-                return true;
-            }
-            if ch == '~' && at_word_start
-                && next.is_none_or(|next| next == '/' || next.is_whitespace() || next.is_ascii_alphanumeric())
+        } else if toggle_quote(&mut quote, ch, single_quote_groups) {
+        } else {
+            let next = chars.peek().copied();
+            if quote != Some('\'')
+                && ch == '$'
+                && next.is_some_and(|n| matches!(n, '(' | '{' | '_') || n.is_ascii_alphabetic())
             {
                 return true;
             }
-            at_word_start = ch.is_whitespace();
-        } else {
-            at_word_start = false;
+            if quote.is_none() {
+                if matches!(ch, '|' | ';' | '>' | '<' | '`' | '\n')
+                    || ch == '&' && next == Some('&')
+                {
+                    return true;
+                }
+                if ch == '~'
+                    && at_word_start
+                    && next
+                        .is_none_or(|n| n == '/' || n.is_whitespace() || n.is_ascii_alphanumeric())
+                {
+                    return true;
+                }
+                at_word_start = ch.is_whitespace();
+                continue;
+            }
         }
+        at_word_start = false;
     }
     false
 }
@@ -163,7 +139,6 @@ fn single_quote_groups_for_platform(value: &str, platform: &str) -> bool {
         "windows" => first_windows_cmd_word(value)
             .as_deref()
             .is_some_and(is_powershell_shell_host),
-        "powershell" | "pwsh" => true,
         _ => true,
     }
 }
@@ -181,7 +156,7 @@ fn first_windows_cmd_word(value: &str) -> Option<String> {
         }
         word.push(ch);
     }
-    if word.is_empty() { None } else { Some(word) }
+    (!word.is_empty()).then_some(word)
 }
 
 fn starts_with_posix_env_assignment(value: &str) -> bool {
@@ -193,15 +168,13 @@ fn starts_with_posix_env_assignment(value: &str) -> bool {
 }
 
 fn is_posix_env_assignment(word: &str) -> bool {
-    let Some((name, _)) = word.split_once('=') else {
-        return false;
-    };
-    let mut chars = name.chars();
-    let Some(first) = chars.next() else {
-        return false;
-    };
-    (first == '_' || first.is_ascii_alphabetic())
-        && chars.all(|ch| ch == '_' || ch.is_ascii_alphanumeric())
+    word.split_once('=').is_some_and(|(name, _)| {
+        let mut chars = name.chars();
+        chars
+            .next()
+            .is_some_and(|first| first == '_' || first.is_ascii_alphabetic())
+            && chars.all(|ch| ch == '_' || ch.is_ascii_alphanumeric())
+    })
 }
 
 pub fn contains_platform_shell_syntax(value: &str, platform: &str) -> bool {
@@ -222,22 +195,15 @@ pub fn looks_like_powershell_syntax(value: &str) -> bool {
     while let Some((index, ch)) = chars.next() {
         if escaped {
             escaped = false;
-            continue;
-        }
-        if ch == '`' && quote != Some('\'') {
+        } else if ch == '`' && quote != Some('\'') {
             escaped = true;
-            continue;
-        }
-        if Some(ch) == quote {
-            quote = None;
-            continue;
-        }
-        if quote.is_none() && matches!(ch, '\'' | '"') {
-            quote = Some(ch);
-            continue;
-        }
-        if quote != Some('\'') {
-            if ch == '$' && chars.peek().is_some_and(|(_, next)| is_powershell_variable_start(*next)) {
+        } else if toggle_quote(&mut quote, ch, true) {
+        } else if quote != Some('\'') {
+            if ch == '$'
+                && chars
+                    .peek()
+                    .is_some_and(|(_, next)| is_powershell_variable_start(*next))
+            {
                 return true;
             }
             if ch == '[' && type_tail.is_some_and(|tail| index < tail) {
@@ -258,26 +224,16 @@ fn first_unquoted_word(value: &str) -> Option<String> {
                 word.push(ch);
             }
             escaped = false;
-            continue;
-        }
-        if ch == '`' && quote != Some('\'') {
+        } else if ch == '`' && quote != Some('\'') {
             escaped = true;
-            continue;
-        }
-        if Some(ch) == quote {
-            quote = None;
-            continue;
-        }
-        if quote.is_none() && (ch == '\'' || ch == '"') {
-            quote = Some(ch);
-            continue;
-        }
-        if quote.is_none() && ch.is_whitespace() {
+        } else if toggle_quote(&mut quote, ch, true) {
+        } else if quote.is_none() && ch.is_whitespace() {
             break;
+        } else {
+            word.push(ch);
         }
-        word.push(ch);
     }
-    if word.is_empty() { None } else { Some(word) }
+    (!word.is_empty()).then_some(word)
 }
 
 fn is_powershell_variable_start(ch: char) -> bool {
@@ -289,10 +245,7 @@ pub fn is_windows_shell_host(value: &str) -> bool {
 }
 
 pub fn is_powershell_shell_host(value: &str) -> bool {
-    matches!(
-        windows_shell_host_stem(value).as_str(),
-        "powershell" | "pwsh"
-    )
+    is_one_of(windows_shell_host_stem(value).as_str(), "powershell pwsh")
 }
 
 pub fn windows_shell_host_stem(value: &str) -> String {
@@ -304,26 +257,18 @@ pub fn windows_shell_host_stem(value: &str) -> String {
         .to_ascii_lowercase()
 }
 
-const POWERSHELL_KEYWORDS: &[&str] = &[
-    "foreach", "where", "if", "else", "elseif", "for", "while", "try", "catch", "finally",
-    "param", "function",
-];
-const POWERSHELL_VERBS: &[&str] = &[
-    "add", "clear", "convertfrom", "convertto", "copy", "export", "foreach", "format", "get",
-    "import", "invoke", "join", "move", "new", "out", "pop", "push", "remove", "resolve",
-    "select", "set", "sort", "split", "start", "stop", "tee", "test", "where", "write",
-];
+const POWERSHELL_KEYWORDS: &str =
+    "foreach where if else elseif for while try catch finally param function";
+const POWERSHELL_VERBS: &str = "add clear convertfrom convertto copy export foreach format get import invoke join move new out pop push remove resolve select set sort split start stop tee test where write";
+const WINDOWS_SHELL_BUILTINS: &str = "assoc break call cd chdir cls color copy date del dir echo erase exit for ftype if md mkdir mklink move path pause popd prompt pushd rd rem ren rename rmdir set shift start time title type ver verify vol";
 
 fn is_powershell_command_word(word: &str) -> bool {
-    let Some((verb, noun)) = word.split_once('-') else {
-        let lower = word.to_ascii_lowercase();
-        return POWERSHELL_KEYWORDS.contains(&lower.as_str());
-    };
-    if noun.is_empty() {
-        return false;
+    let lower = word.to_ascii_lowercase();
+    if let Some((verb, noun)) = lower.split_once('-') {
+        !noun.is_empty() && is_one_of(verb, POWERSHELL_VERBS)
+    } else {
+        is_one_of(&lower, POWERSHELL_KEYWORDS)
     }
-    let verb = verb.to_ascii_lowercase();
-    POWERSHELL_VERBS.contains(&verb.as_str())
 }
 
 pub fn argv_has_shell_operator_tokens(argv: &[String]) -> bool {
@@ -337,16 +282,8 @@ pub fn is_shell_operator_token(arg: &str) -> bool {
     )
 }
 
-const WINDOWS_SHELL_BUILTINS: &[&str] = &[
-    "assoc", "break", "call", "cd", "chdir", "cls", "color", "copy", "date", "del", "dir",
-    "echo", "erase", "exit", "for", "ftype", "if", "md", "mkdir", "mklink", "move", "path",
-    "pause", "popd", "prompt", "pushd", "rd", "rem", "ren", "rename", "rmdir", "set", "shift",
-    "start", "time", "title", "type", "ver", "verify", "vol",
-];
-
 pub fn is_windows_shell_builtin(value: &str) -> bool {
-    let lower = value.to_ascii_lowercase();
-    WINDOWS_SHELL_BUILTINS.contains(&lower.as_str())
+    is_one_of(&value.to_ascii_lowercase(), WINDOWS_SHELL_BUILTINS)
 }
 
 fn is_unquoted_safe(value: &str, extra: &str) -> bool {

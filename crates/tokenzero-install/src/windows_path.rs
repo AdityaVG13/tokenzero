@@ -72,9 +72,10 @@ pub(crate) fn windows_user_path() -> std::io::Result<Option<String>> {
     let stdout = String::from_utf8_lossy(&output.stdout);
     Ok(stdout.lines().map(str::trim_start).find_map(|line| {
         let rest = line.strip_prefix("Path")?.trim_start();
-        ["REG_EXPAND_SZ", "REG_SZ"]
-            .into_iter()
-            .find_map(|kind| rest.strip_prefix(kind).map(|value| value.trim_start().to_owned()))
+        ["REG_EXPAND_SZ", "REG_SZ"].into_iter().find_map(|kind| {
+            rest.strip_prefix(kind)
+                .map(|value| value.trim_start().to_owned())
+        })
     }))
 }
 
@@ -96,7 +97,17 @@ fn update_windows_user_path(args: &[&str], failure: &'static str) -> std::io::Re
 #[cfg(windows)]
 pub(crate) fn write_windows_user_path(value: &str) -> std::io::Result<()> {
     update_windows_user_path(
-        &["add", USER_ENVIRONMENT, "/v", "Path", "/t", "REG_EXPAND_SZ", "/d", value, "/f"],
+        &[
+            "add",
+            USER_ENVIRONMENT,
+            "/v",
+            "Path",
+            "/t",
+            "REG_EXPAND_SZ",
+            "/d",
+            value,
+            "/f",
+        ],
         "failed to update HKCU user Path",
     )
 }

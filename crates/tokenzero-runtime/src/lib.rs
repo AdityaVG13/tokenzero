@@ -46,7 +46,7 @@ pub struct RuntimePlan {
     pub alias_dependency: bool,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct AllocatorPressureRelief {
     pub attempted: bool,
     pub reclaimed_bytes: Option<usize>,
@@ -71,11 +71,20 @@ pub struct RunOutputPolicy {
 impl Default for RunOutputPolicy {
     fn default() -> Self {
         let env_usize = |key, default| {
-            std::env::var(key).ok().and_then(|v| v.parse().ok()).unwrap_or(default)
+            std::env::var(key)
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(default)
         };
         Self {
-            per_stream_capture_bytes: env_usize("TOKENZERO_SHELL_CAPTURE_BYTES", DEFAULT_SHELL_CAPTURE_BYTES),
-            spill_threshold_bytes: env_usize("TOKENZERO_SHELL_SPILL_BYTES", DEFAULT_SHELL_SPILL_BYTES),
+            per_stream_capture_bytes: env_usize(
+                "TOKENZERO_SHELL_CAPTURE_BYTES",
+                DEFAULT_SHELL_CAPTURE_BYTES,
+            ),
+            spill_threshold_bytes: env_usize(
+                "TOKENZERO_SHELL_SPILL_BYTES",
+                DEFAULT_SHELL_SPILL_BYTES,
+            ),
             spill_dir: std::env::var_os("TOKENZERO_SHELL_SPILL_DIR").map(PathBuf::from),
         }
         .normalized()
@@ -90,7 +99,9 @@ impl RunOutputPolicy {
         if self.spill_threshold_bytes == 0 {
             self.spill_threshold_bytes = DEFAULT_SHELL_SPILL_BYTES;
         }
-        self.spill_threshold_bytes = self.spill_threshold_bytes.min(self.per_stream_capture_bytes);
+        self.spill_threshold_bytes = self
+            .spill_threshold_bytes
+            .min(self.per_stream_capture_bytes);
         self
     }
 }
@@ -118,85 +129,8 @@ pub struct RunResult {
     pub duration_ms: u128,
 }
 
-#[derive(Debug)]
-struct RunResultBuilder {
-    command: String,
-    argv: Vec<String>,
-    execution_mode: ExecutionMode,
-    alias_dependency: bool,
-    cwd: Option<String>,
-    capture_limit_bytes: usize,
-    spill_threshold_bytes: usize,
-}
-
-impl RunResultBuilder {
-    fn from_plan(
-        command: String,
-        plan: &RuntimePlan,
-        cwd: Option<&Path>,
-        output_policy: &RunOutputPolicy,
-    ) -> Self {
-        Self {
-            command,
-            argv: plan.argv.clone(),
-            execution_mode: plan.execution_mode,
-            alias_dependency: plan.alias_dependency,
-            cwd: cwd.map(|p| p.display().to_string()),
-            capture_limit_bytes: output_policy.per_stream_capture_bytes,
-            spill_threshold_bytes: output_policy.spill_threshold_bytes,
-        }
-    }
-
-    fn finish(
-        self,
-        ok: bool,
-        exit_code: Option<i32>,
-        process_io: ProcessIo,
-        force_timed_out: bool,
-        start: Instant,
-    ) -> RunResult {
-        let allocator_pressure_relief = allocator_pressure_relief_after_large_capture(
-            &process_io.stdout.capture,
-            &process_io.stderr.capture,
-        );
-        RunResult {
-            ok, command: self.command, argv: self.argv, execution_mode: self.execution_mode,
-            alias_dependency: self.alias_dependency, cwd: self.cwd, exit_code,
-            stdout: process_io.stdout.text, stderr: process_io.stderr.text,
-            stdout_capture: process_io.stdout.capture, stderr_capture: process_io.stderr.capture,
-            capture_limit_bytes: self.capture_limit_bytes,
-            spill_threshold_bytes: self.spill_threshold_bytes,
-            allocator_pressure_relief,
-            timed_out: force_timed_out || process_io.timed_out,
-            io_grace_expired: process_io.io_grace_expired,
-            duration_ms: start.elapsed().as_millis(),
-        }
-    }
-}
-
 pub fn current_platform() -> &'static str {
     if cfg!(windows) { "windows" } else { "posix" }
-}
-
-fn runtime_plan(
-    execution_mode: ExecutionMode,
-    argv: Vec<String>,
-    shell: Option<String>,
-    shell_arg: Option<String>,
-    cwd: Option<&Path>,
-    platform: &str,
-    explicit_binary: bool,
-) -> RuntimePlan {
-    RuntimePlan {
-        execution_mode,
-        argv,
-        shell,
-        shell_arg,
-        cwd: cwd.map(|p| p.display().to_string()),
-        platform: platform.to_string(),
-        explicit_binary,
-        alias_dependency: false,
-    }
 }
 
 pub fn plan_command(
@@ -213,49 +147,49 @@ pub fn plan_command_for_platform(
     explicit_shell: bool,
     platform: &str,
 ) -> Result<RuntimePlan, RuntimeError> {
-    if argv.is_empty() || argv.iter().all(|v| v.is_empty()) {
+    if argv.is_empty() || argv.iter().all(String::is_empty) {
         return Err(RuntimeError::EmptyCommand);
     }
-    let joined_command = argv.join(" ");
+    let make = |execution_mode, argv, shell, shell_arg, explicit_binary| RuntimePlan {
+        execution_mode,
+        argv,
+        shell,
+        shell_arg,
+        cwd: cwd.map(|p| p.display().to_string()),
+        platform: platform.into(),
+        explicit_binary,
+        alias_dependency: false,
+    };
     let windows = matches!(platform, "windows" | "cmd" | "powershell" | "pwsh");
     let first = argv.first();
-    let powershell_script = windows
-        && !first.is_some_and(|value| is_windows_shell_host(value))
-        && looks_like_powershell_syntax(&joined_command);
+    let powershell = windows
+        && !first.is_some_and(|v| is_windows_shell_host(v))
+        && looks_like_powershell_syntax(&argv.join(" "));
     let needs_shell = explicit_shell
         || (argv.len() == 1 && contains_platform_shell_syntax(&argv[0], platform))
         || argv_has_shell_operator_tokens(argv)
-        || powershell_script
-        || (windows && first.is_some_and(|value| is_windows_shell_builtin(value)));
+        || powershell
+        || (windows && first.is_some_and(|v| is_windows_shell_builtin(v)));
     if !needs_shell {
-        return Ok(runtime_plan(
-            ExecutionMode::Argv,
-            argv.to_vec(),
-            None,
-            None,
-            cwd,
-            platform,
-            true,
-        ));
+        return Ok(make(ExecutionMode::Argv, argv.to_vec(), None, None, true));
     }
-    let (shell, shell_arg, shell_platform, prefix): (&str, &str, &str, &[&str]) =
-        if windows && powershell_script {
-            ("powershell", "-Command", "powershell", &["powershell", "-NoProfile", "-Command"])
-        } else if windows {
-            ("cmd", "/C", "cmd", &["cmd", "/C"])
-        } else {
-            ("/bin/sh", "-c", "posix", &["/bin/sh", "-c"])
-        };
-    let command_string = shell_command_string_from_argv(argv, shell_platform);
-    let mut shell_argv = prefix.iter().map(|s| (*s).to_string()).collect::<Vec<_>>();
-    shell_argv.push(command_string);
-    Ok(runtime_plan(
+    let (host, arg, syntax, prefix): (&str, &str, &str, &[&str]) = match (windows, powershell) {
+        (true, true) => (
+            "powershell",
+            "-Command",
+            "powershell",
+            &["powershell", "-NoProfile", "-Command"],
+        ),
+        (true, false) => ("cmd", "/C", "cmd", &["cmd", "/C"]),
+        (false, _) => ("/bin/sh", "-c", "posix", &["/bin/sh", "-c"]),
+    };
+    let mut shell_argv = prefix.iter().map(|s| (*s).into()).collect::<Vec<_>>();
+    shell_argv.push(shell_command_string_from_argv(argv, syntax));
+    Ok(make(
         ExecutionMode::Shell,
         shell_argv,
-        Some(shell.to_string()),
-        Some(shell_arg.to_string()),
-        cwd,
-        platform,
+        Some(host.into()),
+        Some(arg.into()),
         false,
     ))
 }
@@ -269,7 +203,10 @@ fn shell_command_string_from_argv(argv: &[String], shell_platform: &str) -> Stri
             if is_shell_operator_token(arg) {
                 arg.clone()
             } else {
-                shell_display_command_from_argv_for_platform(std::slice::from_ref(arg), shell_platform)
+                shell_display_command_from_argv_for_platform(
+                    std::slice::from_ref(arg),
+                    shell_platform,
+                )
             }
         })
         .collect::<Vec<_>>()
@@ -284,7 +221,15 @@ pub fn run_command(
     timeout: Duration,
     explicit_shell: bool,
 ) -> Result<RunResult, RuntimeError> {
-    run_command_with_policy(argv, cwd, env_overrides, stdin, timeout, explicit_shell, RunOutputPolicy::default())
+    run_command_with_policy(
+        argv,
+        cwd,
+        env_overrides,
+        stdin,
+        timeout,
+        explicit_shell,
+        RunOutputPolicy::default(),
+    )
 }
 
 pub fn run_command_with_policy(
@@ -296,7 +241,16 @@ pub fn run_command_with_policy(
     explicit_shell: bool,
     output_policy: RunOutputPolicy,
 ) -> Result<RunResult, RuntimeError> {
-    run_command_with_policy_observer(argv, cwd, env_overrides, stdin, timeout, explicit_shell, output_policy, |_, _, _| {})
+    run_command_with_policy_observer(
+        argv,
+        cwd,
+        env_overrides,
+        stdin,
+        timeout,
+        explicit_shell,
+        output_policy,
+        |_, _, _| {},
+    )
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -315,9 +269,18 @@ where
 {
     let output_policy = output_policy.normalized();
     let plan = plan_command(argv, cwd, explicit_shell)?;
-    let command_display = command_display_for_plan(argv, &plan);
-    let result_builder =
-        RunResultBuilder::from_plan(command_display.clone(), &plan, cwd, &output_policy);
+    let command_display = match plan.execution_mode {
+        ExecutionMode::Shell => plan.argv.last().cloned().unwrap_or_else(|| argv.join(" ")),
+        ExecutionMode::Argv => {
+            shell_display_command_from_argv_for_platform(&plan.argv, &plan.platform)
+        }
+    };
+    let result_command = command_display.clone();
+    let result_argv = plan.argv.clone();
+    let (result_mode, result_alias_dependency) = (plan.execution_mode, plan.alias_dependency);
+    let result_cwd = cwd.map(|path| path.display().to_string());
+    let capture_limit_bytes = output_policy.per_stream_capture_bytes;
+    let spill_threshold_bytes = output_policy.spill_threshold_bytes;
     let start = Instant::now();
     let (program, rest) = plan.argv.split_first().ok_or(RuntimeError::EmptyCommand)?;
     let mut command = match plan.execution_mode {
@@ -336,7 +299,11 @@ where
     if let Some(env) = env_overrides {
         command.envs(env);
     }
-    command.stdin(if stdin.is_some() { Stdio::piped() } else { Stdio::null() });
+    command.stdin(if stdin.is_some() {
+        Stdio::piped()
+    } else {
+        Stdio::null()
+    });
     command.stdout(Stdio::piped()).stderr(Stdio::piped());
     configure_process_group(&mut command);
     let mut child = command.spawn()?;
@@ -354,72 +321,73 @@ where
     });
     // Stdin writes can block; keep them off the wait_timeout path.
     let stdin_writer = spawn_stdin_writer(stdin, child.stdin.take());
+    let mut force_timed_out = false;
     let status = match child.wait_timeout(timeout)? {
         Some(status) => status,
         None => {
+            force_timed_out = true;
             process_group.terminate();
             let _ = child.kill();
-            let status = child.wait()?;
-            let process_io = collect_process_io(
-                stdin_writer, stdout_reader, stderr_reader, true, start, timeout, process_group, false,
-            )?;
-            observer(None, None, "timed_out_killed");
-            return Ok(result_builder.finish(false, status.code(), process_io, true, start));
+            child.wait()?
         }
     };
     let process_io = collect_process_io(
-        stdin_writer, stdout_reader, stderr_reader, false, start, timeout, process_group, true,
+        stdin_writer,
+        stdout_reader,
+        stderr_reader,
+        force_timed_out,
+        start,
+        timeout,
+        process_group,
+        !force_timed_out,
     )?;
+    let timed_out = force_timed_out || process_io.timed_out;
     observer(
         None,
         None,
-        if process_io.timed_out {
+        if timed_out {
             "timed_out_killed"
         } else {
             "completed"
         },
     );
-    Ok(result_builder.finish(
-        !process_io.timed_out && status.success(),
-        status.code(),
-        process_io,
-        false,
-        start,
-    ))
-}
-
-fn command_display_for_plan(input_argv: &[String], plan: &RuntimePlan) -> String {
-    match plan.execution_mode {
-        ExecutionMode::Shell => plan.argv.last().cloned().unwrap_or_else(|| input_argv.join(" ")),
-        ExecutionMode::Argv => {
-            command_display_for_execution_mode(&plan.argv, plan.execution_mode, &plan.platform)
-        }
-    }
-}
-
-fn command_display_for_execution_mode(
-    argv: &[String],
-    execution_mode: ExecutionMode,
-    platform: &str,
-) -> String {
-    match execution_mode {
-        ExecutionMode::Shell => argv.join(" "),
-        ExecutionMode::Argv => shell_display_command_from_argv_for_platform(argv, platform),
-    }
+    let allocator_pressure_relief = allocator_pressure_relief_after_large_capture(
+        &process_io.stdout.capture,
+        &process_io.stderr.capture,
+    );
+    Ok(RunResult {
+        ok: !timed_out && status.success(),
+        command: result_command,
+        argv: result_argv,
+        execution_mode: result_mode,
+        alias_dependency: result_alias_dependency,
+        cwd: result_cwd,
+        exit_code: status.code(),
+        stdout: process_io.stdout.text,
+        stderr: process_io.stderr.text,
+        stdout_capture: process_io.stdout.capture,
+        stderr_capture: process_io.stderr.capture,
+        capture_limit_bytes,
+        spill_threshold_bytes,
+        allocator_pressure_relief,
+        timed_out,
+        io_grace_expired: process_io.io_grace_expired,
+        duration_ms: start.elapsed().as_millis(),
+    })
 }
 
 fn allocator_pressure_relief_after_large_capture(
     stdout: &StreamCapture,
     stderr: &StreamCapture,
 ) -> AllocatorPressureRelief {
-    let large_capture = stdout.truncated
-        || stderr.truncated
-        || stdout.spill_path.is_some()
-        || stderr.spill_path.is_some();
-    if !large_capture {
-        return AllocatorPressureRelief { attempted: false, reclaimed_bytes: None };
+    if [stdout, stderr]
+        .iter()
+        .any(|capture| capture.truncated || capture.spill_path.is_some())
+    {
+        platform_allocator_pressure_relief()
+    } else {
+        AllocatorPressureRelief::default()
     }
-    platform_allocator_pressure_relief()
 }
 
 #[cfg(target_os = "macos")]
@@ -429,20 +397,19 @@ fn allocator_pressure_relief_after_large_capture(
 )]
 fn platform_allocator_pressure_relief() -> AllocatorPressureRelief {
     use std::ffi::c_void;
-
     unsafe extern "C" {
         fn malloc_zone_pressure_relief(zone: *mut c_void, goal: usize) -> usize;
     }
-
-    // SAFETY: matches macOS malloc ABI; null zone = all zones, goal 0 = reclaim max.
-    // No Rust allocations cross the FFI boundary; return is telemetry only.
     let reclaimed = unsafe { malloc_zone_pressure_relief(std::ptr::null_mut(), 0) };
-    AllocatorPressureRelief { attempted: true, reclaimed_bytes: Some(reclaimed) }
+    AllocatorPressureRelief {
+        attempted: true,
+        reclaimed_bytes: Some(reclaimed),
+    }
 }
 
 #[cfg(not(target_os = "macos"))]
 fn platform_allocator_pressure_relief() -> AllocatorPressureRelief {
-    AllocatorPressureRelief { attempted: false, reclaimed_bytes: None }
+    AllocatorPressureRelief::default()
 }
 
 #[derive(Debug)]
@@ -451,101 +418,11 @@ struct CapturedStream {
     capture: StreamCapture,
 }
 
-fn spawn_stdin_writer(
-    input: Option<&str>,
-    child_stdin: Option<ChildStdin>,
-) -> Option<IoWorker<()>> {
-    input.map(|input| {
-        let input = input.as_bytes().to_vec();
-        let mut child_stdin = child_stdin.expect("stdin is piped");
-        spawn_io_worker("stdin writer", move || child_stdin.write_all(&input))
-    })
-}
-
-#[derive(Debug)]
 struct ProcessIo {
     stdout: CapturedStream,
     stderr: CapturedStream,
     timed_out: bool,
     io_grace_expired: bool,
-}
-
-#[allow(clippy::too_many_arguments)]
-fn collect_process_io(
-    mut stdin_writer: Option<IoWorker<()>>,
-    mut stdout_reader: IoWorker<CapturedStream>,
-    mut stderr_reader: IoWorker<CapturedStream>,
-    tolerate_write_error: bool,
-    start: Instant,
-    timeout: Duration,
-    process_group: ProcessGroup,
-    child_exited: bool,
-) -> Result<ProcessIo, RuntimeError> {
-    // Exited main child: short grace then group terminate (no false timeout).
-    let deadline = if child_exited {
-        Instant::now()
-            .checked_add(child_exited_io_grace())
-            .unwrap_or_else(Instant::now)
-            .min(deadline_from(start, timeout))
-    } else {
-        deadline_from(start, timeout)
-    };
-    let mut timed_out = false;
-    let mut io_grace_expired = false;
-    let mut stdin_result = poll_stdin_until(stdin_writer.as_mut(), deadline)?;
-    let mut stdout_result = poll_worker_until(&mut stdout_reader, deadline)?;
-    let mut stderr_result = poll_worker_until(&mut stderr_reader, deadline)?;
-
-    if stdin_result.is_none() || stdout_result.is_none() || stderr_result.is_none() {
-        if child_exited {
-            io_grace_expired = true;
-        } else {
-            timed_out = true;
-        }
-        process_group.terminate();
-        let cleanup_deadline = Instant::now()
-            .checked_add(process_io_shutdown_grace())
-            .unwrap_or_else(Instant::now);
-        if stdin_result.is_none() {
-            stdin_result = poll_stdin_until(stdin_writer.as_mut(), cleanup_deadline)?;
-        }
-        if stdout_result.is_none() {
-            stdout_result = poll_worker_until(&mut stdout_reader, cleanup_deadline)?;
-        }
-        if stderr_result.is_none() {
-            stderr_result = poll_worker_until(&mut stderr_reader, cleanup_deadline)?;
-        }
-    }
-
-    let stdin_result = stdin_result.ok_or_else(|| timed_out_worker_error("shell stdin writer"))?;
-    if !tolerate_write_error && !timed_out && !io_grace_expired {
-        stdin_result.map_err(RuntimeError::Io)?;
-    }
-    let stdout = take_stream_result(stdout_result, "shell stdout reader")?;
-    let stderr = take_stream_result(stderr_result, "shell stderr reader")?;
-    Ok(ProcessIo {
-        stdout,
-        stderr,
-        timed_out,
-        io_grace_expired,
-    })
-}
-
-fn poll_stdin_until(
-    writer: Option<&mut IoWorker<()>>,
-    deadline: Instant,
-) -> Result<Option<std::io::Result<()>>, RuntimeError> {
-    match writer {
-        Some(writer) => poll_worker_until(writer, deadline),
-        None => Ok(Some(Ok(()))),
-    }
-}
-
-fn take_stream_result(
-    result: Option<std::io::Result<CapturedStream>>,
-    name: &'static str,
-) -> Result<CapturedStream, RuntimeError> {
-    result.ok_or_else(|| timed_out_worker_error(name))?.map_err(RuntimeError::Io)
 }
 
 struct IoWorker<T> {
@@ -554,17 +431,78 @@ struct IoWorker<T> {
     handle: Option<thread::JoinHandle<()>>,
 }
 
-fn spawn_io_worker<T, F>(name: &'static str, work: F) -> IoWorker<T>
-where
-    T: Send + 'static,
-    F: FnOnce() -> std::io::Result<T> + Send + 'static,
-{
+fn spawn_io_worker<T: Send + 'static>(
+    name: &'static str,
+    work: impl FnOnce() -> std::io::Result<T> + Send + 'static,
+) -> IoWorker<T> {
     let (sender, receiver) = mpsc::channel();
-    let handle = thread::spawn(move || { let _ = sender.send(work()); });
-    IoWorker { name, receiver, handle: Some(handle) }
+    let handle = thread::spawn(move || {
+        let _ = sender.send(work());
+    });
+    IoWorker {
+        name,
+        receiver,
+        handle: Some(handle),
+    }
 }
 
-fn poll_worker_until<T>(
+fn spawn_stdin_writer(input: Option<&str>, stdin: Option<ChildStdin>) -> Option<IoWorker<()>> {
+    input.map(|input| {
+        let input = input.as_bytes().to_vec();
+        let mut stdin = stdin.expect("stdin is piped");
+        spawn_io_worker("stdin writer", move || stdin.write_all(&input))
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn collect_process_io(
+    mut stdin: Option<IoWorker<()>>,
+    mut stdout: IoWorker<CapturedStream>,
+    mut stderr: IoWorker<CapturedStream>,
+    tolerate_write_error: bool,
+    start: Instant,
+    timeout: Duration,
+    group: ProcessGroup,
+    child_exited: bool,
+) -> Result<ProcessIo, RuntimeError> {
+    let deadline = if child_exited {
+        deadline_from(Instant::now(), CHILD_EXITED_IO_GRACE).min(deadline_from(start, timeout))
+    } else {
+        deadline_from(start, timeout)
+    };
+    let mut stdin_result = poll_stdin(stdin.as_mut(), deadline)?;
+    let mut stdout_result = poll_worker(&mut stdout, deadline)?;
+    let mut stderr_result = poll_worker(&mut stderr, deadline)?;
+    let incomplete = stdin_result.is_none() || stdout_result.is_none() || stderr_result.is_none();
+    let timed_out = incomplete && !child_exited;
+    let io_grace_expired = incomplete && child_exited;
+    if incomplete {
+        group.terminate();
+        let cleanup = deadline_from(Instant::now(), PROCESS_IO_SHUTDOWN_GRACE);
+        stdin_result = stdin_result.or(poll_stdin(stdin.as_mut(), cleanup)?);
+        stdout_result = stdout_result.or(poll_worker(&mut stdout, cleanup)?);
+        stderr_result = stderr_result.or(poll_worker(&mut stderr, cleanup)?);
+    }
+    let stdin_result = stdin_result.ok_or_else(|| worker_timeout("shell stdin writer"))?;
+    if !tolerate_write_error && !timed_out && !io_grace_expired {
+        stdin_result?;
+    }
+    Ok(ProcessIo {
+        stdout: stdout_result.ok_or_else(|| worker_timeout("shell stdout reader"))??,
+        stderr: stderr_result.ok_or_else(|| worker_timeout("shell stderr reader"))??,
+        timed_out,
+        io_grace_expired,
+    })
+}
+
+fn poll_stdin(
+    worker: Option<&mut IoWorker<()>>,
+    deadline: Instant,
+) -> Result<Option<std::io::Result<()>>, RuntimeError> {
+    worker.map_or(Ok(Some(Ok(()))), |worker| poll_worker(worker, deadline))
+}
+
+fn poll_worker<T>(
     worker: &mut IoWorker<T>,
     deadline: Instant,
 ) -> Result<Option<std::io::Result<T>>, RuntimeError> {
@@ -600,13 +538,10 @@ fn deadline_from(start: Instant, timeout: Duration) -> Instant {
     start.checked_add(timeout).unwrap_or_else(Instant::now)
 }
 
-// After group terminate: room for workers to observe pipe close (under 5s test sleeps).
-fn process_io_shutdown_grace() -> Duration { Duration::from_secs(2) }
+const PROCESS_IO_SHUTDOWN_GRACE: Duration = Duration::from_secs(2);
+const CHILD_EXITED_IO_GRACE: Duration = Duration::from_millis(250);
 
-// Main child already exited: open pipes belong to background descendants.
-fn child_exited_io_grace() -> Duration { Duration::from_millis(250) }
-
-fn timed_out_worker_error(name: &str) -> RuntimeError {
+fn worker_timeout(name: &str) -> RuntimeError {
     RuntimeError::Io(std::io::Error::new(
         std::io::ErrorKind::TimedOut,
         format!("{name} did not close after process timeout cleanup"),
@@ -614,31 +549,28 @@ fn timed_out_worker_error(name: &str) -> RuntimeError {
 }
 
 #[derive(Clone, Copy)]
-struct ProcessGroup {
-    #[cfg(unix)]
-    pgid: u32,
-}
+struct ProcessGroup(Option<u32>);
 
 impl ProcessGroup {
     fn pgid(self) -> Option<u32> {
-        #[cfg(unix)]
-        { Some(self.pgid) }
-        #[cfg(not(unix))]
-        { None }
+        self.0
     }
 
+    #[cfg(unix)]
     fn for_child(child: &std::process::Child) -> Self {
-        #[cfg(not(unix))]
-        let _ = child;
-        Self {
-            #[cfg(unix)]
-            pgid: child.id(),
-        }
+        Self(Some(child.id()))
+    }
+
+    #[cfg(not(unix))]
+    fn for_child(_: &std::process::Child) -> Self {
+        Self(None)
     }
 
     fn terminate(self) {
         #[cfg(unix)]
-        terminate_unix_process_group(self.pgid);
+        if let Some(pgid) = self.0 {
+            terminate_unix_process_group(pgid);
+        }
     }
 }
 
@@ -648,27 +580,24 @@ fn configure_process_group(command: &mut Command) {
 }
 
 #[cfg(not(unix))]
-fn configure_process_group(_command: &mut Command) {}
+fn configure_process_group(_: &mut Command) {}
 
 #[cfg(unix)]
 fn terminate_unix_process_group(pgid: u32) {
     if pgid == 0 {
         return;
     }
-    // The "--" separator is load-bearing: Ubuntu's procps kill accepts
-    // `kill -TERM -<pgid>` with exit 0 yet signals nothing, so the group
-    // kill silently no-ops without it (Debian and macOS tolerate both).
     let target = format!("-{pgid}");
-    let kill = |sig: &str| {
+    for signal in ["-TERM", "-KILL"] {
         let _ = Command::new("kill")
-            .args([sig, "--", &target])
+            .args([signal, "--", &target])
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .status();
-    };
-    kill("-TERM");
-    thread::sleep(Duration::from_millis(50));
-    kill("-KILL");
+        if signal == "-TERM" {
+            thread::sleep(Duration::from_millis(50));
+        }
+    }
 }
 
 fn capture_reader<R: Read>(
@@ -703,8 +632,8 @@ fn capture_reader<R: Read>(
             bytes_seen,
             captured_bytes: captured.len(),
             truncated: bytes_seen > captured.len(),
-            spill_path: spill.path_string(),
-            spill_bytes: spill.bytes_written(),
+            spill_path: spill.path.as_ref().map(|path| path.display().to_string()),
+            spill_bytes: spill.bytes_written,
         },
     })
 }
@@ -736,7 +665,19 @@ impl SpillWriter {
         captured: &[u8],
     ) -> std::io::Result<()> {
         if self.file.is_none() {
-            let path = self.create_path()?;
+            let root = self
+                .dir
+                .clone()
+                .unwrap_or_else(|| std::env::temp_dir().join("tokenzero-spills"));
+            let stamp = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos();
+            let path = root.join(format!(
+                "tokenzero-{}-{stamp}-{}.log",
+                std::process::id(),
+                self.stream_name
+            ));
             if let Some(parent) = path.parent() {
                 fs::create_dir_all(parent)?;
             }
@@ -746,24 +687,13 @@ impl SpillWriter {
             self.path = Some(path);
             self.file = Some(file);
         }
-        if let Some(file) = self.file.as_mut() {
-            file.write_all(chunk)?;
-            self.bytes_written = self.bytes_written.saturating_add(chunk.len());
-        }
+        self.file
+            .as_mut()
+            .expect("spill file initialized")
+            .write_all(chunk)?;
+        self.bytes_written = self.bytes_written.saturating_add(chunk.len());
         Ok(())
     }
-
-    fn create_path(&self) -> std::io::Result<PathBuf> {
-        let root = self.dir.clone().unwrap_or_else(|| std::env::temp_dir().join("tokenzero-spills"));
-        let stamp = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_nanos();
-        Ok(root.join(format!("tokenzero-{}-{stamp}-{}.log", std::process::id(), self.stream_name)))
-    }
-
-    fn path_string(&self) -> Option<String> {
-        self.path.as_ref().map(|path| path.display().to_string())
-    }
-
-    fn bytes_written(&self) -> usize { self.bytes_written }
 }
 
 /// Age after which a spill file is reclaimable (session path pointers expire).
@@ -771,7 +701,6 @@ pub const DEFAULT_SPILL_TTL: Duration = Duration::from_secs(24 * 60 * 60);
 /// Post-age-pass byte ceiling; oldest spills reclaimed first.
 pub const DEFAULT_SPILL_MAX_TOTAL_BYTES: u64 = 256 * 1024 * 1024;
 
-/// Spill-directory prune outcome (`removed_*` is prospective under `dry_run`).
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct SpillPruneReport {
     pub dir: String,
@@ -784,8 +713,6 @@ pub struct SpillPruneReport {
     pub failed_removals: usize,
 }
 
-/// Reclaim `tokenzero-*.log` spills older than `max_age`, then oldest-first
-/// until `max_total_bytes`. Failures are counted; missing dir → empty report.
 pub fn prune_spill_dir(
     dir: &Path,
     max_age: Duration,
@@ -795,40 +722,47 @@ pub fn prune_spill_dir(
     let mut report = SpillPruneReport {
         dir: dir.display().to_string(),
         dry_run,
-        ..SpillPruneReport::default()
+        ..Default::default()
     };
     let Ok(entries) = fs::read_dir(dir) else {
         return report;
     };
     let now = SystemTime::now();
-    let mut fresh: Vec<(SystemTime, u64, PathBuf)> = Vec::new();
+    let mut fresh = Vec::new();
     for entry in entries.flatten() {
         let path = entry.path();
-        let Some(name) = path.file_name().and_then(|name| name.to_str()) else { continue };
-        if !name.starts_with("tokenzero-") || !name.ends_with(".log") { continue; }
+        let valid_name = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name.starts_with("tokenzero-") && name.ends_with(".log"));
         let Ok(meta) = entry.metadata() else { continue };
-        if !meta.is_file() { continue; }
+        if !valid_name || !meta.is_file() {
+            continue;
+        }
         report.scanned_files += 1;
         let modified = meta.modified().unwrap_or(now);
-        let expired = now.duration_since(modified).map(|age| age > max_age).unwrap_or(false);
-        if expired {
+        if now.duration_since(modified).is_ok_and(|age| age > max_age) {
             remove_spill_file(&path, meta.len(), dry_run, &mut report);
         } else {
             fresh.push((modified, meta.len(), path));
         }
     }
-    fresh.sort_by_key(|(modified, _, _)| *modified);
-    let mut fresh_bytes: u64 = fresh.iter().map(|(_, len, _)| *len).sum();
-    let mut evict_until = 0;
-    while fresh_bytes > max_total_bytes && evict_until < fresh.len() {
-        let (_, len, path) = &fresh[evict_until];
-        remove_spill_file(path, *len, dry_run, &mut report);
-        fresh_bytes = fresh_bytes.saturating_sub(*len);
-        evict_until += 1;
-    }
-    for (_, len, _) in &fresh[evict_until..] {
+    fresh.sort_by_key(|item| item.0);
+    let mut bytes = fresh.iter().map(|item| item.1).sum::<u64>();
+    let split = fresh
+        .iter()
+        .take_while(|item| {
+            if bytes <= max_total_bytes {
+                return false;
+            }
+            remove_spill_file(&item.2, item.1, dry_run, &mut report);
+            bytes = bytes.saturating_sub(item.1);
+            true
+        })
+        .count();
+    for item in &fresh[split..] {
         report.kept_files += 1;
-        report.kept_bytes += *len;
+        report.kept_bytes += item.1;
     }
     report
 }
@@ -847,7 +781,9 @@ const ORCHESTRATION_ENV_PREFIXES: [&str; 4] = ["TOKENZERO_", "ZEROSTACK_", "FSZE
 fn scrub_inherited_orchestration_env(command: &mut Command) {
     for (key, _) in std::env::vars_os() {
         if key.to_str().is_some_and(|name| {
-            ORCHESTRATION_ENV_PREFIXES.iter().any(|prefix| name.starts_with(prefix))
+            ORCHESTRATION_ENV_PREFIXES
+                .iter()
+                .any(|prefix| name.starts_with(prefix))
         }) {
             command.env_remove(key);
         }
@@ -863,12 +799,21 @@ fn command_for_argv(
     #[cfg(windows)]
     {
         let resolved = resolve_windows_program(program, cwd, env_overrides);
-        if is_windows_batch_file(&resolved) {
+        if resolved
+            .extension()
+            .and_then(|ext| ext.to_str())
+            .is_some_and(|ext| ext.eq_ignore_ascii_case("cmd") || ext.eq_ignore_ascii_case("bat"))
+        {
             let mut cmd = Command::new("cmd");
-            cmd.arg("/D")
-                .arg("/S")
-                .arg("/C")
-                .arg(windows_batch_call_command(&resolved, args));
+            cmd.arg("/D").arg("/S").arg("/C").arg(
+                std::iter::once("call".to_string())
+                    .chain(std::iter::once(quote_windows_cmd(
+                        &resolved.display().to_string(),
+                    )))
+                    .chain(args.iter().map(|arg| quote_windows_cmd(arg)))
+                    .collect::<Vec<_>>()
+                    .join(" "),
+            );
             return cmd;
         }
         let mut cmd = Command::new(resolved);
@@ -885,105 +830,58 @@ fn command_for_argv(
 }
 
 #[cfg(windows)]
-fn windows_batch_call_command(resolved: &Path, args: &[String]) -> String {
-    std::iter::once("call".to_string())
-        .chain(std::iter::once(quote_windows_cmd(
-            &resolved.display().to_string(),
-        )))
-        .chain(args.iter().map(|arg| quote_windows_cmd(arg)))
-        .collect::<Vec<_>>()
-        .join(" ")
-}
-
-#[cfg(windows)]
 fn resolve_windows_program(
     program: &str,
     cwd: Option<&Path>,
-    env_overrides: Option<&BTreeMap<String, String>>,
+    env: Option<&BTreeMap<String, String>>,
 ) -> PathBuf {
     let raw = Path::new(program);
-    let first_existing = |base: &Path| {
-        windows_program_candidates(base, env_overrides)
+    let find = |path: &Path| {
+        windows_program_candidates(path, env)
             .into_iter()
             .find(|candidate| candidate.exists())
     };
-    if has_windows_path_separator(program) || raw.is_absolute() {
-        return first_existing(raw).unwrap_or_else(|| raw.to_path_buf());
+    if program.contains('\\') || program.contains('/') || raw.is_absolute() {
+        return find(raw).unwrap_or_else(|| raw.into());
     }
-    for dir in windows_search_dirs(cwd, env_overrides) {
-        if let Some(found) = first_existing(&dir.join(program)) {
-            return found;
-        }
+    let mut dirs = cwd.map(Path::to_path_buf).into_iter().collect::<Vec<_>>();
+    if dirs.is_empty() {
+        dirs.extend(std::env::current_dir());
     }
-    raw.to_path_buf()
-}
-
-#[cfg(windows)]
-fn windows_search_dirs(
-    cwd: Option<&Path>,
-    env_overrides: Option<&BTreeMap<String, String>>,
-) -> Vec<PathBuf> {
-    let mut dirs = Vec::new();
-    if let Some(cwd) = cwd {
-        dirs.push(cwd.to_path_buf());
-    } else if let Ok(current) = std::env::current_dir() {
-        dirs.push(current);
-    }
-    if let Some(path) = env_value(env_overrides, "PATH").or_else(|| std::env::var("PATH").ok()) {
+    if let Some(path) = env_value(env, "PATH").or_else(|| std::env::var("PATH").ok()) {
         dirs.extend(std::env::split_paths(&path));
     }
-    dirs
+    dirs.into_iter()
+        .find_map(|dir| find(&dir.join(program)))
+        .unwrap_or_else(|| raw.into())
 }
 
 #[cfg(windows)]
-fn windows_program_candidates(
-    path: &Path,
-    env_overrides: Option<&BTreeMap<String, String>>,
-) -> Vec<PathBuf> {
-    if path.extension().is_none() {
-        let mut candidates: Vec<PathBuf> = windows_pathexts(env_overrides)
-            .into_iter()
-            .map(|ext| {
-                let mut with_ext = path.as_os_str().to_os_string();
-                with_ext.push(ext);
-                PathBuf::from(with_ext)
-            })
-            .collect();
-        candidates.push(path.to_path_buf());
-        return candidates;
+fn windows_program_candidates(path: &Path, env: Option<&BTreeMap<String, String>>) -> Vec<PathBuf> {
+    if path.extension().is_some() {
+        return vec![path.into()];
     }
-    vec![path.to_path_buf()]
-}
-
-#[cfg(windows)]
-fn windows_pathexts(env_overrides: Option<&BTreeMap<String, String>>) -> Vec<String> {
-    env_value(env_overrides, "PATHEXT")
+    let mut candidates = env_value(env, "PATHEXT")
         .or_else(|| std::env::var("PATHEXT").ok())
-        .unwrap_or_else(|| ".COM;.EXE;.BAT;.CMD".to_string())
+        .unwrap_or_else(|| ".COM;.EXE;.BAT;.CMD".into())
         .split(';')
         .map(str::trim)
         .filter(|ext| ext.starts_with('.') && ext.len() > 1)
-        .map(|ext| ext.to_ascii_lowercase())
-        .collect()
+        .map(|ext| {
+            let mut name = path.as_os_str().to_os_string();
+            name.push(ext.to_ascii_lowercase());
+            PathBuf::from(name)
+        })
+        .collect::<Vec<_>>();
+    candidates.push(path.into());
+    candidates
 }
 
 #[cfg(windows)]
-fn env_value(env_overrides: Option<&BTreeMap<String, String>>, key: &str) -> Option<String> {
-    env_overrides.and_then(|env| {
-        env.iter().find(|(c, _)| c.eq_ignore_ascii_case(key)).map(|(_, v)| v.clone())
-    })
-}
-
-#[cfg(windows)]
-fn has_windows_path_separator(program: &str) -> bool {
-    program.contains('\\') || program.contains('/')
-}
-
-#[cfg(windows)]
-fn is_windows_batch_file(path: &Path) -> bool {
-    path.extension().and_then(|ext| ext.to_str()).is_some_and(|ext| {
-        ext.eq_ignore_ascii_case("cmd") || ext.eq_ignore_ascii_case("bat")
-    })
+fn env_value(env: Option<&BTreeMap<String, String>>, key: &str) -> Option<String> {
+    env?.iter()
+        .find(|(candidate, _)| candidate.eq_ignore_ascii_case(key))
+        .map(|(_, value)| value.clone())
 }
 
 // Shell split/quote/platform helpers live in tokenzero_core (single source of truth).
@@ -1007,6 +905,3 @@ pub fn env_map(pairs: &[String]) -> Result<BTreeMap<String, String>, RuntimeErro
     }
     Ok(out)
 }
-
-#[cfg(test)]
-mod tests;

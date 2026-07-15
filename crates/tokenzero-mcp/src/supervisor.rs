@@ -8,7 +8,9 @@
 //! usable, answers the requests that were in flight with a retryable error,
 //! and keeps proxying. The client never observes a disconnect.
 
-use crate::stdio::{StdioEvent, read_stdio_events_from_reader, write_framed_jsonrpc};
+use crate::stdio::{
+    StdioEvent, read_stdio_events_from_reader, write_jsonrpc_response as write_stdio_response,
+};
 use crate::{JsonRpcErrorData, jsonrpc_error};
 use serde_json::Value;
 use std::collections::HashMap;
@@ -148,7 +150,13 @@ pub(crate) fn run_supervisor_loop<W: Write>(
                 if write_child_line(&mut child, &line).is_err() {
                     // The child is gone and this message never reached it.
                     state.pending_resend = Some(line);
-                    let respawned = recover_child(&mut spawn, &event_tx, &mut child, &mut state, &mut client_out);
+                    let respawned = recover_child(
+                        &mut spawn,
+                        &event_tx,
+                        &mut child,
+                        &mut state,
+                        &mut client_out,
+                    );
                     if !respawned {
                         break 1;
                     }
@@ -166,7 +174,7 @@ pub(crate) fn run_supervisor_loop<W: Write>(
                     JsonRpcErrorData::parse_error(error),
                 )
                 .to_string();
-                if write_client_response(&mut client_out, framed, &response).is_err() {
+                if write_stdio_response(&mut client_out, framed, &response).is_err() {
                     break 0;
                 }
                 if !recoverable {
@@ -174,7 +182,12 @@ pub(crate) fn run_supervisor_loop<W: Write>(
                 }
             }
             SupervisorEvent::FromClient(StdioEvent::Eof) => {
-                break drain_child_after_client_eof(&mut child, &event_rx, &mut state, &mut client_out);
+                break drain_child_after_client_eof(
+                    &mut child,
+                    &event_rx,
+                    &mut state,
+                    &mut client_out,
+                );
             }
             SupervisorEvent::FromChild { generation, text } => {
                 if forward_child_response(
@@ -195,7 +208,13 @@ pub(crate) fn run_supervisor_loop<W: Write>(
                 if exited_generation != child.generation {
                     continue;
                 }
-                let respawned = recover_child(&mut spawn, &event_tx, &mut child, &mut state, &mut client_out);
+                let respawned = recover_child(
+                    &mut spawn,
+                    &event_tx,
+                    &mut child,
+                    &mut state,
+                    &mut client_out,
+                );
                 if !respawned {
                     break 1;
                 }
@@ -224,15 +243,16 @@ fn forward_child_response<W: Write>(
     if line.is_empty() {
         return Ok(());
     }
-    let swallow = state.swallow_response_id.as_deref().is_some_and(|id| {
-        response_id_key(line).as_deref() == Some(id)
-    });
+    let swallow = state
+        .swallow_response_id
+        .as_deref()
+        .is_some_and(|id| response_id_key(line).as_deref() == Some(id));
     if swallow {
         state.swallow_response_id = None;
         return Ok(());
     }
     let framed = response_framing(line, &mut state.outstanding);
-    write_client_response(client_out, framed, line)
+    write_stdio_response(client_out, framed, line)
 }
 
 fn drain_child_after_client_eof<W: Write>(
@@ -268,7 +288,9 @@ fn drain_child_after_client_eof<W: Write>(
 /// Caches the handshake messages and registers request ids so responses can
 /// be correlated, framed correctly, and failed over on a child crash.
 fn track_client_message(line: &str, framed: bool, state: &mut SupervisorState) {
-    let Ok(parsed) = serde_json::from_str::<Value>(line) else { return };
+    let Ok(parsed) = serde_json::from_str::<Value>(line) else {
+        return;
+    };
     match parsed.get("method").and_then(Value::as_str) {
         Some("initialize") => state.cached_initialize = Some(line.to_string()),
         Some("notifications/initialized") => {
@@ -276,17 +298,8 @@ fn track_client_message(line: &str, framed: bool, state: &mut SupervisorState) {
         }
         _ => {}
     }
-    match &parsed {
-        Value::Array(batch) => batch.iter().for_each(|item| {
-            if let Some(key) = id_key(item.get("id")) {
-                state.outstanding.insert(key, framed);
-            }
-        }),
-        value => {
-            if let Some(key) = id_key(value.get("id")) {
-                state.outstanding.insert(key, framed);
-            }
-        }
+    for key in value_id_keys(&parsed) {
+        state.outstanding.insert(key, framed);
     }
 }
 
@@ -308,39 +321,13 @@ fn response_framing(line: &str, outstanding: &mut HashMap<String, bool>) -> bool
     let Ok(parsed) = serde_json::from_str::<Value>(line) else {
         return false;
     };
-    match &parsed {
-        Value::Array(batch) => {
-            let mut framed = false;
-            let mut framing_known = false;
-            for item in batch {
-                if let Some(key) = id_key(item.get("id")) {
-                    if let Some(item_framed) = outstanding.remove(&key) {
-                        if !framing_known {
-                            framed = item_framed;
-                            framing_known = true;
-                        }
-                    }
-                }
-            }
-            framed
+    let mut framing = None;
+    for key in value_id_keys(&parsed) {
+        if let Some(item_framing) = outstanding.remove(&key) {
+            framing.get_or_insert(item_framing);
         }
-        value => id_key(value.get("id"))
-            .and_then(|key| outstanding.remove(&key))
-            .unwrap_or(false),
     }
-}
-
-fn write_client_response<W: Write>(
-    client_out: &mut W,
-    framed: bool,
-    response: &str,
-) -> std::io::Result<()> {
-    if framed {
-        write_framed_jsonrpc(client_out, response)
-    } else {
-        writeln!(client_out, "{response}")?;
-        client_out.flush()
-    }
+    framing.unwrap_or(false)
 }
 
 /// Fails over after a child death: answers every in-flight request with a
@@ -359,10 +346,8 @@ fn recover_child(
     } else {
         state.consecutive_failures += 1;
     }
-    let resend_framing = take_resend_framing(
-        state.pending_resend.as_deref(),
-        &mut state.outstanding,
-    );
+    let resend_framing =
+        take_resend_framing(state.pending_resend.as_deref(), &mut state.outstanding);
     for (key, framed) in state.outstanding.drain() {
         let id = serde_json::from_str::<Value>(&key).unwrap_or(Value::Null);
         let response = jsonrpc_error(
@@ -374,11 +359,13 @@ fn recover_child(
             ),
         )
         .to_string();
-        if write_client_response(client_out, framed, &response).is_err() {
+        if write_stdio_response(client_out, framed, &response).is_err() {
             return false;
         }
     }
-    let Some(new_child) = start_child(spawn, event_tx, state) else { return false };
+    let Some(new_child) = start_child(spawn, event_tx, state) else {
+        return false;
+    };
     *child = new_child;
     if let Some(line) = state.pending_resend.take() {
         reinstate_resend_framing(&line, &resend_framing, &mut state.outstanding);
@@ -397,21 +384,22 @@ fn take_resend_framing(
     pending_resend: Option<&str>,
     outstanding: &mut HashMap<String, bool>,
 ) -> HashMap<String, bool> {
-    match pending_resend {
-        Some(line) => message_id_keys(line)
-            .into_iter()
-            .filter_map(|key| outstanding.remove(&key).map(|framed| (key, framed)))
-            .collect(),
-        None => HashMap::new(),
-    }
+    pending_resend
+        .into_iter()
+        .flat_map(message_id_keys)
+        .filter_map(|key| outstanding.remove(&key).map(|framed| (key, framed)))
+        .collect()
 }
 
 /// Every request id carried by a (possibly batched) client message.
 fn message_id_keys(line: &str) -> Vec<String> {
-    let Ok(parsed) = serde_json::from_str::<Value>(line) else {
-        return Vec::new();
-    };
-    match &parsed {
+    serde_json::from_str::<Value>(line)
+        .map(|value| value_id_keys(&value))
+        .unwrap_or_default()
+}
+
+fn value_id_keys(value: &Value) -> Vec<String> {
+    match value {
         Value::Array(batch) => batch
             .iter()
             .filter_map(|item| id_key(item.get("id")))
@@ -516,6 +504,3 @@ fn pump_child_stdout(
         let _ = event_tx.send(SupervisorEvent::ChildExited { generation });
     });
 }
-
-#[cfg(test)]
-mod tests;

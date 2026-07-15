@@ -20,10 +20,25 @@ fn session_working_set_eviction_is_visible_in_metrics() {
     assert!(!visible.contains(" symbol="), "{visible}");
     assert!(visible.contains(" lines=1-"), "{visible}");
 
+    let repeated = engine.read(
+        &[dir.path().join("large.rs")],
+        Mode::Auto,
+        None,
+        None,
+        false,
+        20,
+        4000,
+    );
+    let repeated_visible = repeated.visible.unwrap().text;
+    assert!(
+        repeated_visible.starts_with("TZ-EVICT/1 ref=tz://blob/"),
+        "an eviction marker must not seed dedup with bytes that were never returned: {repeated_visible}"
+    );
+
     let metrics = engine.tool_metrics_snapshot();
-    assert_eq!(metrics["working_set"]["evictions"], 1);
+    assert_eq!(metrics["working_set"]["evictions"], 2);
     assert!(metrics["working_set"]["bytes_evicted"].as_u64().unwrap() > 0);
-    assert_eq!(metrics["working_set"]["refs_created"], 1);
+    assert_eq!(metrics["working_set"]["refs_created"], 2);
 }
 
 #[test]

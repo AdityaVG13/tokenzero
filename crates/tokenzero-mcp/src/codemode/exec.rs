@@ -51,46 +51,48 @@ struct PreviousOutputLru {
 
 impl PreviousOutputLru {
     fn observe(&mut self, cache_path: PathBuf, current: &str) -> usize {
-        let matched = self
-            .entries
-            .get(&cache_path)
-            .map(|previous| common_prefix_len(current, previous))
-            .unwrap_or(0);
-        if let Some(position) = self.oldest_first.iter().position(|key| key == &cache_path) {
-            self.oldest_first.remove(position);
-        }
-        if let Some(previous) = self.entries.remove(&cache_path) {
-            self.stored_bytes = self.stored_bytes.saturating_sub(previous.len());
-        }
-        let mut end = current.len().min(PREVIOUS_OUTPUT_MAX_PREFIX_BYTES);
-        while !current.is_char_boundary(end) {
-            end -= 1;
-        }
-        let prefix = current[..end].to_owned();
-        self.stored_bytes = self.stored_bytes.saturating_add(prefix.len());
-        self.entries.insert(cache_path.clone(), prefix);
-        self.oldest_first.push_back(cache_path);
-        while self.entries.len() > PREVIOUS_OUTPUT_MAX_SESSIONS {
-            let Some(oldest) = self.oldest_first.pop_front() else {
-                break;
-            };
-            if let Some(previous) = self.entries.remove(&oldest) {
-                self.stored_bytes = self.stored_bytes.saturating_sub(previous.len());
+        {
+            let matched = self
+                .entries
+                .get(&cache_path)
+                .map(|p| common_prefix_len(current, p))
+                .unwrap_or(0);
+            if let Some(pos) = self.oldest_first.iter().position(|k| k == &cache_path) {
+                self.oldest_first.remove(pos);
             }
+            if let Some(prev) = self.entries.remove(&cache_path) {
+                self.stored_bytes = self.stored_bytes.saturating_sub(prev.len());
+            }
+            let mut end = current.len().min(PREVIOUS_OUTPUT_MAX_PREFIX_BYTES);
+            while !current.is_char_boundary(end) {
+                end -= 1;
+            }
+            let prefix = current[..end].to_owned();
+            self.stored_bytes = self.stored_bytes.saturating_add(prefix.len());
+            self.entries.insert(cache_path.clone(), prefix);
+            self.oldest_first.push_back(cache_path);
+            while self.entries.len() > PREVIOUS_OUTPUT_MAX_SESSIONS {
+                let Some(oldest) = self.oldest_first.pop_front() else {
+                    break;
+                };
+                if let Some(prev) = self.entries.remove(&oldest) {
+                    self.stored_bytes = self.stored_bytes.saturating_sub(prev.len());
+                }
+            }
+            matched
         }
-        matched
     }
     const RECIPE_MAX_SESSIONS: usize = 32;
     const RECIPE_MAX_PER_SESSION: usize = 64;
     const RECIPE_MAX_SOURCE_BYTES: usize = 64 * 1024;
 
     fn touch_recipe_session(&mut self, cache_path: &Path) {
-        if let Some(position) = self
+        if let Some(pos) = self
             .recipe_oldest_first
             .iter()
-            .position(|key| key == cache_path)
+            .position(|k| k == cache_path)
         {
-            self.recipe_oldest_first.remove(position);
+            self.recipe_oldest_first.remove(pos);
         }
         self.recipe_oldest_first.push_back(cache_path.to_path_buf());
     }
@@ -116,7 +118,7 @@ impl PreviousOutputLru {
         let source = self
             .recipes
             .get(cache_path)
-            .and_then(|recipes| recipes.get(name))
+            .and_then(|r| r.get(name))
             .cloned();
         if source.is_some() {
             self.touch_recipe_session(cache_path);
@@ -128,7 +130,7 @@ impl PreviousOutputLru {
         let mut names: Vec<String> = self
             .recipes
             .get(cache_path)
-            .map(|recipes| recipes.keys().cloned().collect())
+            .map(|r| r.keys().cloned().collect())
             .unwrap_or_default();
         if self.recipes.contains_key(cache_path) {
             self.touch_recipe_session(cache_path);
@@ -142,6 +144,13 @@ static PREVIOUS_OUTPUT_BY_SESSION: OnceLock<Mutex<PreviousOutputLru>> = OnceLock
 
 fn previous_output_by_session() -> &'static Mutex<PreviousOutputLru> {
     PREVIOUS_OUTPUT_BY_SESSION.get_or_init(|| Mutex::new(PreviousOutputLru::default()))
+}
+
+fn with_previous_outputs<R>(f: impl FnOnce(&mut PreviousOutputLru) -> R) -> R {
+    let mut guard = previous_output_by_session()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    f(&mut guard)
 }
 
 /// Approximate bytes per token for prevented-read counterfactuals. Used
@@ -187,11 +196,6 @@ pub(crate) fn is_exact_expand_value(value: &Value) -> bool {
         _ => return false,
     };
     EXACT_EXPAND_REGISTRY.with(|registry| registry.borrow().contains(&key))
-}
-
-#[cfg(test)]
-pub(crate) fn make_engine_for_root(root: PathBuf) -> TokenZeroEngine {
-    make_engine_for_root_with_options(root, &CodeModeOptions::default())
 }
 
 fn make_engine_for_root_with_options(root: PathBuf, options: &CodeModeOptions) -> TokenZeroEngine {
@@ -249,33 +253,46 @@ fn execute_codemode_uncontained(plan: &str, options: CodeModeOptions) -> CodeMod
     let plan = plan.trim();
     let started_ms = now_ms();
     let limits = limits_from_options(&options);
-    let finish = |result, kind, steps| finalize_codemode_result(
-        result, kind, plan, started_ms, &options, &limits, steps,
-    );
+    let finish = |result, kind, steps| {
+        finalize_codemode_result(result, kind, plan, started_ms, &options, &limits, steps)
+    };
     if plan.len() > limits.max_code_bytes {
         return finish(
             CodeModeResult::error_with_kind(
-                "validation", format!("plan exceeds max_code_bytes {}", limits.max_code_bytes),
-                0, false,
+                "validation",
+                format!("plan exceeds max_code_bytes {}", limits.max_code_bytes),
+                0,
+                false,
             ),
-            "code", Vec::new(),
+            "code",
+            Vec::new(),
         );
     }
     if plan.is_empty() {
         return finish(CodeModeResult::error("empty plan", 0), "code", Vec::new());
     }
-    let catalog = plan.strip_prefix("search:")
+    let catalog = plan
+        .strip_prefix("search:")
         .map(|query| (search_catalog(query.trim()), "search", "codemode.search"))
-        .or_else(|| plan.strip_prefix("describe:")
-            .map(|target| (describe_method(target.trim()), "describe", "codemode.describe")));
+        .or_else(|| {
+            plan.strip_prefix("describe:").map(|target| {
+                (
+                    describe_method(target.trim()),
+                    "describe",
+                    "codemode.describe",
+                )
+            })
+        });
     if let Some((result, id, method)) = catalog {
         let tokens = count_tokens(&serde_json::to_string_pretty(&result).unwrap_or_default());
         return finish(
             CodeModeResult::completed(result, Vec::new(), 1, tokens, tokens),
             "recipe",
             vec![ExecutionStep {
-                id: id.to_string(), method: method.to_string(),
-                status: "completed".to_string(), refs: Vec::new(),
+                id: id.to_string(),
+                method: method.to_string(),
+                status: "completed".to_string(),
+                refs: Vec::new(),
             }],
         );
     }
@@ -300,7 +317,8 @@ fn execute_codemode_uncontained(plan: &str, options: CodeModeOptions) -> CodeMod
         );
         return finish(
             CodeModeResult::error_with_kind("sandbox", message, 0, false),
-            "code", Vec::new(),
+            "code",
+            Vec::new(),
         );
     }
     if use_quickjs {
@@ -343,117 +361,146 @@ struct JsExecutionState {
     limits: CodeModeLimits,
 }
 
+fn wall_clock_limit_error(elapsed: u64, limits: &CodeModeLimits) -> Option<(String, &'static str)> {
+    if elapsed > limits.hard_max_wall_ms {
+        Some((
+            format!(
+                "runtime: hard_max_wall_ms exceeded {}",
+                limits.hard_max_wall_ms
+            ),
+            "hard wall clock exceeded",
+        ))
+    } else if elapsed > limits.max_wall_ms {
+        Some((
+            format!("runtime: max_wall_ms exceeded {}", limits.max_wall_ms),
+            "wall clock exceeded",
+        ))
+    } else {
+        None
+    }
+}
+fn tz_error_json(message: &str, fallback: &str) -> String {
+    serde_json::to_string(&json!({ "__tz_error": message }))
+        .unwrap_or_else(|_| format!(r#"{{"__tz_error":"{fallback}"}}"#))
+}
+
 fn execute_quickjs_plan(
     plan: &str,
     options: CodeModeOptions,
     limits: &CodeModeLimits,
     started_ms: u128,
 ) -> CodeModeResult {
-    let finish = |result, steps| finalize_codemode_result(
-        result, "code", plan, started_ms, &options, limits, steps,
-    );
-    let work_root = tokenzero_work_root(options.root.clone());
-    let engine = Rc::new(make_engine_for_root_with_options(work_root.clone(), &options));
-    let state = Rc::new(RefCell::new(JsExecutionState {
-        started_ms,
-        limits: limits.clone(),
-        ..Default::default()
-    }));
-    let runtime = match Runtime::new() {
-        Ok(runtime) => runtime,
-        Err(error) => return finish(
-            CodeModeResult::error(format!("sandbox: QuickJS runtime init failed: {error}"), 0),
-            Vec::new(),
-        ),
+    let finish = |result, steps| {
+        finalize_codemode_result(result, "code", plan, started_ms, &options, limits, steps)
     };
-    runtime.set_memory_limit(limits.max_memory_bytes);
-    runtime.set_max_stack_size(512 * 1024);
-    let context = match Context::full(&runtime) {
-        Ok(context) => context,
-        Err(error) => return finish(
-            CodeModeResult::error(format!("sandbox: QuickJS context init failed: {error}"), 0),
-            Vec::new(),
-        ),
-    };
-    let setup = context.with(|ctx| {
-        install_js_generic_binding(
-            &ctx.globals(), Rc::clone(&engine), work_root.clone(), Rc::clone(&state),
-        )?;
-        ctx.eval::<(), _>(js_prelude())
-    });
-    if let Err(error) = setup {
-        return finish(
-            CodeModeResult::error(format!("sandbox: QuickJS binding setup failed: {error}"), 0),
-            Vec::new(),
-        );
-    }
-    if let Err(error) = context.with(|ctx| ctx.eval::<(), _>(wrap_js_plan(plan).as_str())) {
-        let state = state.borrow();
-        return finish(
-            CodeModeResult::error(format!("sandbox: QuickJS eval failed: {error}"), state.ops),
+    let fail0 = |message: String| finish(CodeModeResult::error(message, 0), Vec::new());
+    let fail_state = |state: &JsExecutionState, message: String| {
+        finish(
+            CodeModeResult::error(message, state.ops),
             state.steps.clone(),
-        );
-    }
-
-    let mut drained = 0;
-    while runtime.is_job_pending() {
-        let elapsed = now_ms().saturating_sub(started_ms) as u64;
-        let limit_error = if elapsed > limits.hard_max_wall_ms {
-            Some(format!("runtime: hard_max_wall_ms exceeded {}", limits.hard_max_wall_ms))
-        } else if elapsed > limits.max_wall_ms {
-            Some(format!("runtime: max_wall_ms exceeded {}", limits.max_wall_ms))
-        } else if drained >= limits.max_microtasks {
-            Some(format!("sandbox: microtask cap exceeded {}", limits.max_microtasks))
-        } else { None };
-        if let Some(message) = limit_error {
-            let state = state.borrow();
-            return finish(CodeModeResult::error(message, state.ops), state.steps.clone());
+        )
+    };
+    {
+        let work_root = tokenzero_work_root(options.root.clone());
+        let engine = Rc::new(make_engine_for_root_with_options(
+            work_root.clone(),
+            &options,
+        ));
+        let state = Rc::new(RefCell::new(JsExecutionState {
+            started_ms,
+            limits: limits.clone(),
+            ..Default::default()
+        }));
+        let runtime = match Runtime::new() {
+            Ok(runtime) => runtime,
+            Err(error) => return fail0(format!("sandbox: QuickJS runtime init failed: {error}")),
+        };
+        runtime.set_memory_limit(limits.max_memory_bytes);
+        runtime.set_max_stack_size(512 * 1024);
+        let context = match Context::full(&runtime) {
+            Ok(context) => context,
+            Err(error) => return fail0(format!("sandbox: QuickJS context init failed: {error}")),
+        };
+        if let Err(error) = context.with(|ctx| {
+            install_js_generic_binding(
+                &ctx.globals(),
+                Rc::clone(&engine),
+                work_root.clone(),
+                Rc::clone(&state),
+            )?;
+            ctx.eval::<(), _>(js_prelude())
+        }) {
+            return fail0(format!("sandbox: QuickJS binding setup failed: {error}"));
         }
-        if let Err(error) = runtime.execute_pending_job() {
-            let state = state.borrow();
+        if let Err(error) = context.with(|ctx| ctx.eval::<(), _>(wrap_js_plan(plan).as_str())) {
+            return fail_state(
+                &state.borrow(),
+                format!("sandbox: QuickJS eval failed: {error}"),
+            );
+        }
+        let mut drained = 0;
+        while runtime.is_job_pending() {
+            let elapsed = now_ms().saturating_sub(started_ms) as u64;
+            if let Some((message, _)) = wall_clock_limit_error(elapsed, limits) {
+                return fail_state(&state.borrow(), message);
+            }
+            if drained >= limits.max_microtasks {
+                return fail_state(
+                    &state.borrow(),
+                    format!("sandbox: microtask cap exceeded {}", limits.max_microtasks),
+                );
+            }
+            if let Err(error) = runtime.execute_pending_job() {
+                return fail_state(
+                    &state.borrow(),
+                    format!("sandbox: QuickJS job failed: {error}"),
+                );
+            }
+            drained += 1;
+        }
+        let (result_json, error, error_kind): (Option<String>, Option<String>, Option<String>) =
+            context
+                .with(|ctx| {
+                    let globals = ctx.globals();
+                    Ok::<_, rquickjs::Error>((
+                        globals.get("__tz_result")?,
+                        globals.get("__tz_error")?,
+                        globals.get("__tz_error_kind")?,
+                    ))
+                })
+                .unwrap_or((
+                    None,
+                    Some("sandbox: result extraction failed".to_string()),
+                    Some("sandbox".to_string()),
+                ));
+        let state = state.borrow();
+        if let Some(error) = error {
             return finish(
-                CodeModeResult::error(format!("sandbox: QuickJS job failed: {error}"), state.ops),
+                CodeModeResult::error_with_kind(
+                    error_kind.as_deref().unwrap_or("sandbox"),
+                    error,
+                    state.ops,
+                    false,
+                ),
                 state.steps.clone(),
             );
         }
-        drained += 1;
-    }
-
-    let (result_json, error, error_kind): (Option<String>, Option<String>, Option<String>) = context
-        .with(|ctx| {
-            let globals = ctx.globals();
-            Ok::<_, rquickjs::Error>((
-                globals.get("__tz_result")?,
-                globals.get("__tz_error")?,
-                globals.get("__tz_error_kind")?,
-            ))
-        })
-        .unwrap_or((
-            None,
-            Some("sandbox: result extraction failed".to_string()),
-            Some("sandbox".to_string()),
-        ));
-    let state = state.borrow();
-    if let Some(error) = error {
-        return finish(
-            CodeModeResult::error_with_kind(
-                error_kind.as_deref().unwrap_or("sandbox"), error, state.ops, false,
-            ),
-            state.steps.clone(),
+        let value = result_json
+            .and_then(|text| serde_json::from_str::<Value>(&text).ok())
+            .unwrap_or(Value::Null);
+        let visible =
+            state.visible_tokens + count_tokens(&serde_json::to_string(&value).unwrap_or_default());
+        let mut result = CodeModeResult::completed(
+            value,
+            state.refs.clone(),
+            state.ops,
+            visible,
+            state.raw_tokens,
         );
+        result.telemetry.physical_ops = state.physical_ops;
+        set_prevented_read_bytes(&mut result, state.prevented_read_bytes);
+        finish(result, state.steps.clone())
     }
-    let value = result_json
-        .and_then(|text| serde_json::from_str::<Value>(&text).ok())
-        .unwrap_or(Value::Null);
-    let visible = state.visible_tokens
-        + count_tokens(&serde_json::to_string(&value).unwrap_or_default());
-    let mut result = CodeModeResult::completed(
-        value, state.refs.clone(), state.ops, visible, state.raw_tokens,
-    );
-    result.telemetry.physical_ops = state.physical_ops;
-    result.telemetry.prevented_read_bytes = state.prevented_read_bytes;
-    telemetry_insert(&mut result, "prevented_read_bytes", json!(state.prevented_read_bytes));
-    finish(result, state.steps.clone())
 }
 fn install_js_generic_binding<'js>(
     globals: &rquickjs::Object<'js>,
@@ -477,92 +524,83 @@ fn invoke_js_binding(
     mut args: Vec<Value>,
     state: &Rc<RefCell<JsExecutionState>>,
 ) -> String {
-    if matches!(method, "codemode.recipeRun" | "recipeRun" | "recipe_run") {
-        args.push(json!(state.borrow().limits.max_code_bytes));
-    }
     {
-        let state_ref = state.borrow();
-        let elapsed = now_ms().saturating_sub(state_ref.started_ms) as u64;
-        let limit_err = if elapsed > state_ref.limits.hard_max_wall_ms {
-            Some((
-                format!(
-                    "runtime: hard_max_wall_ms exceeded {}",
-                    state_ref.limits.hard_max_wall_ms
-                ),
-                "hard wall clock exceeded",
-            ))
-        } else if elapsed > state_ref.limits.max_wall_ms {
-            Some((
-                format!("runtime: max_wall_ms exceeded {}", state_ref.limits.max_wall_ms),
-                "wall clock exceeded",
-            ))
-        } else if state_ref.ops >= state_ref.limits.max_logical_ops {
-            Some((
-                format!(
-                    "runtime: max_logical_ops exceeded {}",
-                    state_ref.limits.max_logical_ops
-                ),
-                "logical op cap exceeded",
-            ))
-        } else if state_ref.physical_ops >= state_ref.limits.max_physical_ops {
-            Some((
-                format!(
-                    "runtime: max_physical_ops exceeded {}",
-                    state_ref.limits.max_physical_ops
-                ),
-                "physical op cap exceeded",
-            ))
-        } else {
-            None
+        if matches!(method, "codemode.recipeRun" | "recipeRun" | "recipe_run") {
+            args.push(json!(state.borrow().limits.max_code_bytes));
+        }
+        {
+            let state_ref = state.borrow();
+            let elapsed = now_ms().saturating_sub(state_ref.started_ms) as u64;
+            let limit_err = wall_clock_limit_error(elapsed, &state_ref.limits).or_else(|| {
+                if state_ref.ops >= state_ref.limits.max_logical_ops {
+                    Some((
+                        format!(
+                            "runtime: max_logical_ops exceeded {}",
+                            state_ref.limits.max_logical_ops
+                        ),
+                        "logical op cap exceeded",
+                    ))
+                } else if state_ref.physical_ops >= state_ref.limits.max_physical_ops {
+                    Some((
+                        format!(
+                            "runtime: max_physical_ops exceeded {}",
+                            state_ref.limits.max_physical_ops
+                        ),
+                        "physical op cap exceeded",
+                    ))
+                } else {
+                    None
+                }
+            });
+            if let Some((message, fallback)) = limit_err {
+                return tz_error_json(&message, fallback);
+            }
+        }
+        let outcome = match dispatch_values(engine, work_root, method, &args) {
+            Ok(outcome) => outcome,
+            Err(error) => {
+                return serde_json::to_string(&json!({
+                    "__tz_error": error.error.as_ref().map(|error| error.message.as_str()).unwrap_or("unknown error"),
+                    "__tz_error_kind": error.error.as_ref().map(|error| error.kind.as_str()).unwrap_or("runtime"),
+                })).unwrap_or_else(|_| "{\"__tz_error\":\"unknown error\",\"__tz_error_kind\":\"runtime\"}".to_string());
+            }
         };
-        if let Some((message, fallback)) = limit_err {
-            return serde_json::to_string(&json!({ "__tz_error": message }))
-                .unwrap_or_else(|_| format!(r#"{{"__tz_error":"{fallback}"}}"#));
-        }
+        let prevented_read_bytes = outcome.prevented_read_bytes;
+        let value = outcome.into_value();
+        let refs = refs_from_value(&value);
+        let mut state = state.borrow_mut();
+        let logical_width = if matches!(
+            method,
+            "zero.token.compactMany" | "zero.token.expandMany" | "zero.token.dedupe"
+        ) {
+            args.first()
+                .and_then(Value::as_array)
+                .map(|items| items.len().max(1))
+                .unwrap_or(1)
+        } else {
+            1
+        };
+        state.ops = state.ops.saturating_add(logical_width);
+        state.physical_ops = state.physical_ops.saturating_add(1);
+        state.visible_tokens = state
+            .visible_tokens
+            .saturating_add(result_token_field(&value, "visible_tokens"));
+        state.raw_tokens = state
+            .raw_tokens
+            .saturating_add(result_token_field(&value, "raw_tokens"));
+        state.prevented_read_bytes = state
+            .prevented_read_bytes
+            .saturating_add(prevented_read_bytes);
+        state.refs.extend(refs.iter().cloned());
+        let op = state.ops;
+        state.steps.push(ExecutionStep {
+            id: format!("js_step{op}"),
+            method: method.to_string(),
+            status: "completed".to_string(),
+            refs,
+        });
+        serde_json::to_string(&value).unwrap_or_else(|_| "null".to_string())
     }
-    let outcome = match dispatch_values(engine, work_root, method, &args) {
-        Ok(outcome) => outcome,
-        Err(error) => {
-            return serde_json::to_string(&json!({
-                            "__tz_error": error.error.as_ref().map(|error| error.message.as_str()).unwrap_or("unknown error"),
-                            "__tz_error_kind": error.error.as_ref().map(|error| error.kind.as_str()).unwrap_or("runtime"),
-                        }))
-                        .unwrap_or_else(|_| "{\"__tz_error\":\"unknown error\",\"__tz_error_kind\":\"runtime\"}".to_string());
-        }
-    };
-    let prevented_read_bytes = outcome.prevented_read_bytes;
-    let value = outcome.into_value();
-    let refs = refs_from_value(&value);
-    let mut state = state.borrow_mut();
-    let logical_width = if matches!(
-        method,
-        "zero.token.compactMany" | "zero.token.expandMany" | "zero.token.dedupe"
-    ) {
-        args.first()
-            .and_then(Value::as_array)
-            .map(|items| items.len().max(1))
-            .unwrap_or(1)
-    } else {
-        1
-    };
-    state.ops = state.ops.saturating_add(logical_width);
-    state.physical_ops = state.physical_ops.saturating_add(1);
-    state.visible_tokens = state
-        .visible_tokens
-        .saturating_add(result_visible_tokens(&value));
-    state.raw_tokens = state.raw_tokens.saturating_add(result_raw_tokens(&value));
-    state.prevented_read_bytes = state
-        .prevented_read_bytes
-        .saturating_add(prevented_read_bytes);
-    state.refs.extend(refs.iter().cloned());
-    let op = state.ops;
-    state.steps.push(ExecutionStep {
-        id: format!("js_step{op}"),
-        method: method.to_string(),
-        status: "completed".to_string(),
-        refs,
-    });
-    serde_json::to_string(&value).unwrap_or_else(|_| "null".to_string())
 }
 
 fn js_prelude() -> &'static str {
@@ -685,6 +723,56 @@ fn is_journaled_edit(method: &str) -> bool {
     matches!(method, "zero.edit" | "edit" | "zero.token.edit" | "tz_edit")
 }
 
+struct PlanBootstrap {
+    work_root: PathBuf,
+    engine: TokenZeroEngine,
+    transaction: Option<JournalTransaction>,
+    downgrade: Option<String>,
+}
+
+#[allow(clippy::result_large_err)]
+fn bootstrap_plan_executor(
+    options: &CodeModeOptions,
+    step_count: usize,
+    limits: &CodeModeLimits,
+    kind_label: &str,
+    prepare: impl FnOnce(
+        &TokenZeroEngine,
+        &Path,
+    ) -> Result<(Option<JournalTransaction>, Option<String>, bool), String>,
+) -> Result<PlanBootstrap, CodeModeResult> {
+    {
+        if step_count > limits.max_logical_ops {
+            return Err(CodeModeResult::error(
+                format!(
+                    "{kind_label}exceeds max_logical_ops {}",
+                    limits.max_logical_ops
+                ),
+                0,
+            ));
+        }
+        let work_root = tokenzero_work_root(options.root.clone());
+        let engine = make_engine_for_root_with_options(work_root.clone(), options);
+        let (transaction, downgrade, already_committed) = prepare(&engine, &work_root)
+            .map_err(|message| CodeModeResult::error_with_kind("transaction", message, 0, false))?;
+        if already_committed {
+            return Err(CodeModeResult::completed(
+                json!({"transaction": "already_committed", "idempotent_replay": true}),
+                Vec::new(),
+                0,
+                0,
+                0,
+            ));
+        }
+        Ok(PlanBootstrap {
+            work_root,
+            engine,
+            transaction,
+            downgrade,
+        })
+    }
+}
+
 fn prepare_lowered_transaction(
     engine: &TokenZeroEngine,
     work_root: &Path,
@@ -723,100 +811,127 @@ fn prepare_lowered_transaction(
     prepare_json_transaction(engine, work_root, &parsed, &steps, plan, started_ms)
 }
 
-fn dispatch_lowered_journaled(
-    engine: &TokenZeroEngine,
-    work_root: &Path,
-    call: &MethodCall,
-    scope: &HashMap<String, Value>,
-    transaction: &mut Option<JournalTransaction>,
+#[derive(Clone, Copy)]
+enum JournalDispatchMode {
+    /// Lowered plans: replay only when the op has a target; do not rollback on
+    /// postcondition / mark_applied failures.
+    Lowered,
+    /// JSON plans: replay whenever the step does not need apply; rollback on
+    /// postcondition / mark_applied failures.
+    Json,
+}
+
+fn journal_op_replayed(
+    transaction: &Option<JournalTransaction>,
     journal_index: usize,
-) -> Result<OpOutcome, Box<CodeModeResult>> {
-    let reversible = classify_method(&call.method) == OperationClass::ReversibleStoreMutation;
-    let replayed_target_edit = reversible
-        && transaction.as_ref().is_some_and(|tx| {
-            tx.journal()
-                .operations
-                .get(journal_index)
-                .is_some_and(|operation| {
-                    operation.target.is_some() && !tx.step_needs_apply(journal_index)
-                })
-        });
-    if reversible && !replayed_target_edit {
-        if let Some(tx) = transaction.as_mut() {
-            if let Err(original) = tx.mark_applying(journal_index) {
-                let cache_path = engine.config.cache_path.clone();
-                let combined = rollback_tx_on_error(tx, original, &cache_path);
-                return Err(Box::new(CodeModeResult::error_with_kind(
-                    "transaction",
-                    combined,
-                    journal_index,
-                    false,
-                )));
-            }
-        }
-    }
-    let outcome = if replayed_target_edit {
-        OpOutcome::from_catalog(json!({
-            "idempotent_replay": true,
-            "idempotency_key": transaction.as_ref()
-                .and_then(|tx| tx.journal().operations.get(journal_index))
-                .map(|operation| operation.idempotency_key.clone()),
-        }))
-    } else {
-        match dispatch(engine, work_root, call, scope) {
-            Ok(outcome) => outcome,
-            Err(mut error) => {
-                if let Some(tx) = transaction.as_mut() {
-                    let original = error
-                        .error
-                        .as_ref()
-                        .map(|detail| detail.message.clone())
-                        .unwrap_or_else(|| "operation failed".to_string());
-                    let cache_path = engine.config.cache_path.clone();
-                    if let Err(combined) = tx.rollback(original, |operation| {
-                        rollback_journal_operation(&cache_path, operation)
-                    }) {
-                        if let Some(detail) = error.error.as_mut() {
-                            detail.message = combined.to_string();
-                        }
-                    }
-                }
-                return Err(error);
-            }
-        }
-    };
-    if reversible && !replayed_target_edit {
-        if let Some(tx) = transaction.as_mut() {
-            let postcondition = tx
+    mode: JournalDispatchMode,
+) -> bool {
+    transaction.as_ref().is_some_and(|tx| {
+        let needs = tx.step_needs_apply(journal_index);
+        match mode {
+            JournalDispatchMode::Lowered => tx
                 .journal()
                 .operations
                 .get(journal_index)
-                .and_then(|operation| operation.target.as_deref())
-                .map(Path::new)
-                .map(current_digest)
-                .transpose()
-                .map_err(|error| {
-                    Box::new(CodeModeResult::error_with_kind(
-                        "transaction",
-                        format!("read postcondition: {error}"),
-                        journal_index + 1,
-                        false,
-                    ))
-                })?
-                .flatten();
-            let compensation_refs = refs_from_value(outcome.as_value());
-            tx.mark_applied(journal_index, postcondition, compensation_refs)
-                .map_err(|message| {
-                    Box::new(CodeModeResult::error_with_kind(
-                        "transaction",
-                        message,
-                        journal_index + 1,
-                        false,
-                    ))
-                })?;
+                .is_some_and(|operation| operation.target.is_some() && !needs),
+            JournalDispatchMode::Json => !needs,
         }
+    })
+}
+
+fn tx_error(message: impl Into<String>, ops: usize) -> Box<CodeModeResult> {
+    Box::new(CodeModeResult::error_with_kind(
+        "transaction",
+        message,
+        ops,
+        false,
+    ))
+}
+
+fn dispatch_journaled(
+    engine: &TokenZeroEngine,
+    work_root: &Path,
+    call: &MethodCall,
+    scope: &Scope,
+    transaction: &mut Option<JournalTransaction>,
+    journal_index: usize,
+    mode: JournalDispatchMode,
+) -> OpResult {
+    {
+        let reversible = classify_method(&call.method) == OperationClass::ReversibleStoreMutation;
+        let replayed = reversible && journal_op_replayed(transaction, journal_index, mode);
+        if reversible && !replayed {
+            if let Some(tx) = transaction.as_mut() {
+                if let Err(original) = tx.mark_applying(journal_index) {
+                    let combined = rollback_tx_on_error(tx, original, &engine.config.cache_path);
+                    return Err(tx_error(combined, journal_index));
+                }
+            }
+        }
+        let outcome = if replayed {
+            OpOutcome::from_catalog(json!({
+                "idempotent_replay": true,
+                "idempotency_key": transaction.as_ref().and_then(|tx| tx.journal().operations.get(journal_index)).map(|operation| operation.idempotency_key.clone()),
+            }))
+        } else {
+            match dispatch(engine, work_root, call, scope) {
+                Ok(outcome) => outcome,
+                Err(mut error) => {
+                    if let Some(tx) = transaction.as_mut() {
+                        let original = error
+                            .error
+                            .as_ref()
+                            .map(|detail| detail.message.clone())
+                            .unwrap_or_else(|| "operation failed".to_string());
+                        if let Err(combined) = tx.rollback(original, |operation| {
+                            rollback_journal_operation(&engine.config.cache_path, operation)
+                        }) {
+                            if let Some(detail) = error.error.as_mut() {
+                                detail.message = combined.to_string();
+                            }
+                        }
+                    }
+                    return Err(error);
+                }
+            }
+        };
+        if reversible && !replayed {
+            if let Some(tx) = transaction.as_mut() {
+                let postcondition = match tx
+                    .journal()
+                    .operations
+                    .get(journal_index)
+                    .and_then(|operation| operation.target.as_deref())
+                    .map(Path::new)
+                    .map(current_digest)
+                    .transpose()
+                {
+                    Ok(value) => value.flatten(),
+                    Err(error) => {
+                        let message = format!("read postcondition: {error}");
+                        let message = if matches!(mode, JournalDispatchMode::Json) {
+                            rollback_tx_on_error(tx, message, &engine.config.cache_path)
+                        } else {
+                            message
+                        };
+                        return Err(tx_error(message, journal_index + 1));
+                    }
+                };
+                let compensation_refs = refs_from_value(outcome.as_value());
+                if let Err(message) =
+                    tx.mark_applied(journal_index, postcondition, compensation_refs)
+                {
+                    let message = if matches!(mode, JournalDispatchMode::Json) {
+                        rollback_tx_on_error(tx, message, &engine.config.cache_path)
+                    } else {
+                        message
+                    };
+                    return Err(tx_error(message, journal_index + 1));
+                }
+            }
+        }
+        Ok(outcome)
     }
-    Ok(outcome)
 }
 
 fn finish_lowered_transaction(
@@ -839,7 +954,7 @@ fn finish_lowered_transaction(
 
 #[derive(Default)]
 struct PlanProgress {
-    scope: HashMap<String, Value>,
+    scope: Scope,
     refs: Vec<String>,
     ops: usize,
     visible: usize,
@@ -868,6 +983,7 @@ impl PlanProgress {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn finish_lowered_result(
     value: Value,
     mut progress: PlanProgress,
@@ -878,15 +994,23 @@ fn finish_lowered_result(
     started_ms: u128,
     options: &CodeModeOptions,
     limits: &CodeModeLimits,
+    decorate: impl FnOnce(&mut CodeModeResult),
 ) -> CodeModeResult {
-    let visible = progress.visible + count_tokens(&serde_json::to_string(&value).unwrap_or_default());
-    let mut result = CodeModeResult::completed(value, progress.refs, progress.ops, visible, progress.raw);
-    result.telemetry.prevented_read_bytes = progress.prevented;
-    telemetry_insert(&mut result, "prevented_read_bytes", json!(progress.prevented));
+    let ops = progress.ops;
+    let mut result = completed_with_progress(value, &progress, ops);
+    decorate(&mut result);
     if let Err(message) = finish_lowered_transaction(&mut result, transaction, downgrade) {
-        result = CodeModeResult::error_with_kind("transaction", message, progress.ops, false);
+        result = CodeModeResult::error_with_kind("transaction", message, ops, false);
     }
-    finalize_codemode_result(result, kind, plan, started_ms, options, limits, std::mem::take(&mut progress.steps))
+    finalize_codemode_result(
+        result,
+        kind,
+        plan,
+        started_ms,
+        options,
+        limits,
+        std::mem::take(&mut progress.steps),
+    )
 }
 
 fn execute_lowered_plan(
@@ -896,74 +1020,71 @@ fn execute_lowered_plan(
     kind: &str,
     started_ms: u128,
 ) -> CodeModeResult {
+    let finish = |result: CodeModeResult, steps: Vec<ExecutionStep>| {
+        finalize_codemode_result(result, kind, plan, started_ms, &options, limits, steps)
+    };
     let statements = match parse_plan(plan) {
         Ok(statements) => statements,
-        Err(message) => return finalize_codemode_result(
-            CodeModeResult::error(message, 0), kind, plan, started_ms, &options, limits, Vec::new(),
-        ),
+        Err(message) => return finish(CodeModeResult::error(message, 0), Vec::new()),
     };
-    if statements.len() > limits.max_logical_ops {
-        return finalize_codemode_result(
-            CodeModeResult::error(format!("plan exceeds max_logical_ops {}", limits.max_logical_ops), 0),
-            kind, plan, started_ms, &options, limits, Vec::new(),
-        );
-    }
-
-    let work_root = tokenzero_work_root(options.root.clone());
-    let engine = make_engine_for_root_with_options(work_root.clone(), &options);
-    let (mut transaction, downgrade, already_committed) =
-        match prepare_lowered_transaction(&engine, &work_root, &statements, plan, started_ms) {
-            Ok(value) => value,
-            Err(message) => return finalize_codemode_result(
-                CodeModeResult::error_with_kind("transaction", message, 0, false),
-                kind, plan, started_ms, &options, limits, Vec::new(),
-            ),
-        };
-    if already_committed {
-        return finalize_codemode_result(
-            CodeModeResult::completed(
-                json!({"transaction": "already_committed", "idempotent_replay": true}),
-                Vec::new(), 0, 0, 0,
-            ),
-            kind, plan, started_ms, &options, limits, Vec::new(),
-        );
-    }
+    let mut boot = match bootstrap_plan_executor(
+        &options,
+        statements.len(),
+        limits,
+        "plan ",
+        |engine, work_root| {
+            prepare_lowered_transaction(engine, work_root, &statements, plan, started_ms)
+        },
+    ) {
+        Ok(boot) => boot,
+        Err(result) => return finish(result, Vec::new()),
+    };
 
     let mut progress = PlanProgress::default();
-    let mut journal_index = 0;
-    for statement in &statements {
+    for (journal_index, statement) in statements.iter().enumerate() {
         let (id, call, binding) = match statement {
             Statement::Binding { name, call } => (name.clone(), call, Some(name)),
             Statement::Call(call) => (format!("step{}", progress.ops + 1), call, None),
             Statement::Return(expr) => {
                 let value = match resolve_return(expr, &progress.scope) {
                     Ok(value) => value,
-                    Err(message) => return finalize_codemode_result(
-                        CodeModeResult::error(message, progress.ops), kind, plan, started_ms,
-                        &options, limits, progress.steps,
-                    ),
+                    Err(message) => {
+                        return finish(
+                            CodeModeResult::error(message, progress.ops),
+                            progress.steps,
+                        );
+                    }
                 };
                 return finish_lowered_result(
-                    value, progress, transaction, downgrade.as_deref(), kind, plan,
-                    started_ms, &options, limits,
+                    value,
+                    progress,
+                    boot.transaction,
+                    boot.downgrade.as_deref(),
+                    kind,
+                    plan,
+                    started_ms,
+                    &options,
+                    limits,
+                    |_| {},
                 );
             }
         };
         progress.ops += 1;
-        let outcome = match dispatch_lowered_journaled(
-            &engine, &work_root, call, &progress.scope, &mut transaction, journal_index,
+        let outcome = match dispatch_journaled(
+            &boot.engine,
+            &boot.work_root,
+            call,
+            &progress.scope,
+            &mut boot.transaction,
+            journal_index,
+            JournalDispatchMode::Lowered,
         ) {
             Ok(outcome) => outcome,
             Err(mut error) => {
-                telemetry_insert(&mut error, "operations", json!(progress.ops));
-                error.telemetry.operations = progress.ops;
-                error.telemetry.logical_ops = progress.ops;
-                return finalize_codemode_result(
-                    *error, kind, plan, started_ms, &options, limits, progress.steps,
-                );
+                stamp_ops_on_error(&mut error, progress.ops);
+                return finish(*error, progress.steps);
             }
         };
-        journal_index += 1;
         progress.record(id, call, &outcome);
         if let Some(name) = binding {
             progress.scope.insert(name.clone(), outcome.into_value());
@@ -971,9 +1092,19 @@ fn execute_lowered_plan(
     }
     let value = std::mem::take(&mut progress.last);
     finish_lowered_result(
-        value, progress, transaction, downgrade.as_deref(), kind, plan, started_ms, &options, limits,
+        value,
+        progress,
+        boot.transaction,
+        boot.downgrade.as_deref(),
+        kind,
+        plan,
+        started_ms,
+        &options,
+        limits,
+        |_| {},
     )
 }
+
 fn ref_first_final_value(
     engine: &TokenZeroEngine,
     value: Value,
@@ -997,56 +1128,57 @@ fn ref_first_value(
     store: &mut tokenzero_recovery::RecoveryStore,
     refs: &mut Vec<String>,
 ) -> Value {
-    if is_exact_expand_value(&value) {
-        return value;
-    }
-    match value {
-        Value::String(text) => {
-            if count_tokens(&text) > budget_tokens {
-                let content_type = detect_content_type(&text, None);
-                if let Ok(stored) = store.store_payload(&text, content_type, None, None, None) {
-                    let ref_id = stored.blob_ref.as_str().to_string();
-                    if !refs.contains(&ref_id) {
-                        refs.push(ref_id.clone());
+    {
+        if is_exact_expand_value(&value) {
+            return value;
+        }
+        match value {
+            Value::String(text) => {
+                if count_tokens(&text) > budget_tokens {
+                    let content_type = detect_content_type(&text, None);
+                    if let Ok(stored) = store.store_payload(&text, content_type, None, None, None) {
+                        let ref_id = stored.blob_ref.as_str().to_string();
+                        if !refs.contains(&ref_id) {
+                            refs.push(ref_id.clone());
+                        }
+                        let preview_budget = budget_tokens.saturating_sub(count_tokens(&ref_id));
+                        return json!({ "ref": ref_id, "preview": first_line_preview(&text, preview_budget) });
                     }
-                    let preview_budget = budget_tokens.saturating_sub(count_tokens(&ref_id));
-                    return json!({
-                        "ref": ref_id,
-                        "preview": first_line_preview(&text, preview_budget),
-                    });
                 }
+                Value::String(text)
             }
-            Value::String(text)
-        }
-        Value::Array(items) => Value::Array(
-            items
-                .into_iter()
-                .map(|item| ref_first_value(item, budget_tokens, store, refs))
-                .collect(),
-        ),
-        Value::Object(mut map) => {
-            if map
-                .get("__tz_raw")
-                .and_then(Value::as_bool)
-                .unwrap_or(false)
-            {
-                return map.remove("value").unwrap_or(Value::Null);
-            }
-            if map
-                .get(EXACT_EXPAND_MARKER)
-                .and_then(Value::as_bool)
-                .unwrap_or(false)
-            {
-                map.remove(EXACT_EXPAND_MARKER);
-                return Value::Object(map);
-            }
-            Value::Object(
-                map.into_iter()
-                    .map(|(key, value)| (key, ref_first_value(value, budget_tokens, store, refs)))
+            Value::Array(items) => Value::Array(
+                items
+                    .into_iter()
+                    .map(|item| ref_first_value(item, budget_tokens, store, refs))
                     .collect(),
-            )
+            ),
+            Value::Object(mut map) => {
+                if map
+                    .get("__tz_raw")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false)
+                {
+                    return map.remove("value").unwrap_or(Value::Null);
+                }
+                if map
+                    .get(EXACT_EXPAND_MARKER)
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false)
+                {
+                    map.remove(EXACT_EXPAND_MARKER);
+                    return Value::Object(map);
+                }
+                Value::Object(
+                    map.into_iter()
+                        .map(|(key, value)| {
+                            (key, ref_first_value(value, budget_tokens, store, refs))
+                        })
+                        .collect(),
+                )
+            }
+            other => other,
         }
-        other => other,
     }
 }
 
@@ -1073,9 +1205,13 @@ fn first_line_preview(text: &str, max_tokens: usize) -> String {
     pack_to_token_boundary_with_char_limit(line, max_tokens, 32).to_string()
 }
 
-
 fn telemetry_insert(result: &mut CodeModeResult, key: &str, value: Value) {
-    if let Some(extra) = result.telemetry.extra.as_mut().and_then(Value::as_object_mut) {
+    if let Some(extra) = result
+        .telemetry
+        .extra
+        .as_mut()
+        .and_then(Value::as_object_mut)
+    {
         extra.insert(key.to_string(), value);
     }
 }
@@ -1093,12 +1229,46 @@ fn rollback_tx_on_error(
     .unwrap_or(original)
 }
 
+type OpResult = Result<OpOutcome, Box<CodeModeResult>>;
+type Scope = HashMap<String, Value>;
+
+fn catalog(value: Value) -> OpResult {
+    Ok(OpOutcome::from_catalog(value))
+}
+fn tool(response: ToolResponse) -> OpResult {
+    Ok(OpOutcome::from_tool_response(&response))
+}
+
 fn boxed_error(kind: &str, message: impl Into<String>) -> Box<CodeModeResult> {
     Box::new(CodeModeResult::error_with_kind(kind, message, 0, false))
 }
 
 fn operation_error(message: impl Into<String>) -> Box<CodeModeResult> {
     Box::new(CodeModeResult::error(message.into(), 0))
+}
+
+fn map_journal_err(kind: &'static str) -> impl FnOnce(String) -> Box<CodeModeResult> {
+    move |message| boxed_error(kind, message)
+}
+
+fn stamp_ops_on_error(error: &mut CodeModeResult, ops: usize) {
+    telemetry_insert(error, "operations", json!(ops));
+    error.telemetry.operations = ops;
+    error.telemetry.logical_ops = ops;
+}
+
+fn set_prevented_read_bytes(result: &mut CodeModeResult, prevented: usize) {
+    result.telemetry.prevented_read_bytes = prevented;
+    telemetry_insert(result, "prevented_read_bytes", json!(prevented));
+}
+
+fn completed_with_progress(value: Value, progress: &PlanProgress, ops: usize) -> CodeModeResult {
+    let visible =
+        progress.visible + count_tokens(&serde_json::to_string(&value).unwrap_or_default());
+    let mut result =
+        CodeModeResult::completed(value, progress.refs.clone(), ops, visible, progress.raw);
+    set_prevented_read_bytes(&mut result, progress.prevented);
+    result
 }
 
 fn finalize_codemode_result(
@@ -1110,106 +1280,123 @@ fn finalize_codemode_result(
     limits: &CodeModeLimits,
     steps: Vec<ExecutionStep>,
 ) -> CodeModeResult {
-    let work_root = tokenzero_work_root(options.root.clone());
-    let engine = make_engine_for_root_with_options(work_root, options);
-    let journal_health = journal_doctor_json(&engine.config.cache_path);
-    telemetry_insert(&mut result, "plan_journals", journal_health);
-    if matches!(result.status, CodeModeStatus::Completed) {
-        if let Some(value) = result.value.take() {
-            let (value, refs) = ref_first_final_value(&engine, value, options);
-            for ref_id in refs {
-                if !result.refs.contains(&ref_id) {
-                    result.refs.push(ref_id);
+    {
+        let work_root = tokenzero_work_root(options.root.clone());
+        let engine = make_engine_for_root_with_options(work_root, options);
+        let journal_health = journal_doctor_json(&engine.config.cache_path);
+        telemetry_insert(&mut result, "plan_journals", journal_health);
+        if matches!(result.status, CodeModeStatus::Completed) {
+            if let Some(value) = result.value.take() {
+                let (value, refs) = ref_first_final_value(&engine, value, options);
+                for ref_id in refs {
+                    if !result.refs.contains(&ref_id) {
+                        result.refs.push(ref_id);
+                    }
                 }
+                result.value = Some(value);
             }
-            result.value = Some(value);
         }
-    }
-    let payload_tokens = result
-        .value
-        .as_ref()
-        .map(|value| count_tokens(&serde_json::to_string(value).unwrap_or_default()))
-        .unwrap_or_else(|| {
-            result
-                .error
-                .as_ref()
-                .map(|error| count_tokens(&error.message))
-                .unwrap_or(0)
-        });
-    let operations = result.telemetry.operations();
-    let physical_ops = physical_ops_for(&result);
-    result.telemetry.operations = operations;
-    result.telemetry.logical_ops = operations;
-    result.telemetry.physical_ops = physical_ops;
-    result.telemetry.batched_ops = if operations > physical_ops { 1 } else { 0 };
-    result.telemetry.internal_actions = operations.saturating_add(result.refs.len());
-    result.telemetry.payload_tokens = payload_tokens;
-    result.telemetry.envelope_tokens = count_tokens(&result.visible_ack);
-    result.telemetry.ack_tokens = count_tokens(&result.visible_ack);
-    let ref_strings = result.refs.join(" ");
-    result.telemetry.ref_string_tokens = count_tokens(&ref_strings);
-    result.telemetry.framing_tokens = result
-        .telemetry
-        .envelope_tokens
-        .saturating_sub(result.telemetry.ack_tokens)
-        .saturating_sub(result.telemetry.ref_string_tokens);
-    result.telemetry.preview_tokens =
-        payload_tokens.saturating_sub(result.telemetry.ref_string_tokens);
-
-    // Provider-exposed cached_tokens take priority when available; byte-prefix
-    // comparison is the fallback estimate.
-    let current_output =
-        serde_json::to_string(result.value.as_ref().unwrap_or(&Value::Null)).unwrap_or_default();
-    let (cached_tokens, total_output_tokens) = {
-        let cache_path = engine.config.cache_path.clone();
-        let mut outputs = previous_output_by_session().lock().unwrap();
-        let matched_bytes = outputs.observe(cache_path, &current_output);
-        let cached = count_tokens(&current_output[..matched_bytes]);
-        let total = count_tokens(&current_output);
-        (cached, total)
-    };
-    result.telemetry.prefix_cache_hits = result
-        .telemetry
-        .prefix_cache_hits
-        .saturating_add(cached_tokens);
-    result.telemetry.prefix_cache_total = result
-        .telemetry
-        .prefix_cache_total
-        .saturating_add(total_output_tokens);
-
-    if let Some(extra) = result.telemetry.extra.as_mut().and_then(Value::as_object_mut) {
-        let cache_rate = if result.telemetry.prefix_cache_total == 0 { 0.0 } else {
-            result.telemetry.prefix_cache_hits as f64 / result.telemetry.prefix_cache_total as f64
+        let payload_tokens = result
+            .value
+            .as_ref()
+            .map(|value| count_tokens(&serde_json::to_string(value).unwrap_or_default()))
+            .unwrap_or_else(|| {
+                result
+                    .error
+                    .as_ref()
+                    .map(|error| count_tokens(&error.message))
+                    .unwrap_or(0)
+            });
+        let operations = result.telemetry.operations();
+        let physical_ops = result.telemetry.physical_ops;
+        result.telemetry.operations = operations;
+        result.telemetry.logical_ops = operations;
+        result.telemetry.physical_ops = physical_ops;
+        result.telemetry.batched_ops = if operations > physical_ops { 1 } else { 0 };
+        result.telemetry.internal_actions = operations.saturating_add(result.refs.len());
+        result.telemetry.payload_tokens = payload_tokens;
+        result.telemetry.envelope_tokens = count_tokens(&result.visible_ack);
+        result.telemetry.ack_tokens = count_tokens(&result.visible_ack);
+        let ref_strings = result.refs.join(" ");
+        result.telemetry.ref_string_tokens = count_tokens(&ref_strings);
+        result.telemetry.framing_tokens = result
+            .telemetry
+            .envelope_tokens
+            .saturating_sub(result.telemetry.ack_tokens)
+            .saturating_sub(result.telemetry.ref_string_tokens);
+        result.telemetry.preview_tokens =
+            payload_tokens.saturating_sub(result.telemetry.ref_string_tokens);
+        let current_output = serde_json::to_string(result.value.as_ref().unwrap_or(&Value::Null))
+            .unwrap_or_default();
+        let (cached_tokens, total_output_tokens) = {
+            let cache_path = engine.config.cache_path.clone();
+            let matched_bytes =
+                with_previous_outputs(|outputs| outputs.observe(cache_path, &current_output));
+            (
+                count_tokens(&current_output[..matched_bytes]),
+                count_tokens(&current_output),
+            )
         };
-        for (key, value) in [
-            ("refs_count", json!(result.refs.len())),
-            ("payload_tokens", json!(result.telemetry.payload_tokens)),
-            ("envelope_tokens", json!(result.telemetry.envelope_tokens)),
-            ("ack_tokens", json!(result.telemetry.ack_tokens)),
-            ("ref_string_tokens", json!(result.telemetry.ref_string_tokens)),
-            ("framing_tokens", json!(result.telemetry.framing_tokens)),
-            ("preview_tokens", json!(result.telemetry.preview_tokens)),
-            ("prevented_read_bytes", json!(result.telemetry.prevented_read_bytes)),
-            ("prefix_cache_hits", json!(result.telemetry.prefix_cache_hits)),
-            ("prefix_cache_total", json!(result.telemetry.prefix_cache_total)),
-            ("prefix_cache_hit_rate", json!(cache_rate)),
-        ] { extra.insert(key.to_string(), value); }
+        result.telemetry.prefix_cache_hits = result
+            .telemetry
+            .prefix_cache_hits
+            .saturating_add(cached_tokens);
+        result.telemetry.prefix_cache_total = result
+            .telemetry
+            .prefix_cache_total
+            .saturating_add(total_output_tokens);
+        if let Some(extra) = result
+            .telemetry
+            .extra
+            .as_mut()
+            .and_then(Value::as_object_mut)
+        {
+            let cache_rate = if result.telemetry.prefix_cache_total == 0 {
+                0.0
+            } else {
+                result.telemetry.prefix_cache_hits as f64
+                    / result.telemetry.prefix_cache_total as f64
+            };
+            for (key, value) in [
+                ("refs_count", json!(result.refs.len())),
+                ("payload_tokens", json!(result.telemetry.payload_tokens)),
+                ("envelope_tokens", json!(result.telemetry.envelope_tokens)),
+                ("ack_tokens", json!(result.telemetry.ack_tokens)),
+                (
+                    "ref_string_tokens",
+                    json!(result.telemetry.ref_string_tokens),
+                ),
+                ("framing_tokens", json!(result.telemetry.framing_tokens)),
+                ("preview_tokens", json!(result.telemetry.preview_tokens)),
+                (
+                    "prevented_read_bytes",
+                    json!(result.telemetry.prevented_read_bytes),
+                ),
+                (
+                    "prefix_cache_hits",
+                    json!(result.telemetry.prefix_cache_hits),
+                ),
+                (
+                    "prefix_cache_total",
+                    json!(result.telemetry.prefix_cache_total),
+                ),
+                ("prefix_cache_hit_rate", json!(cache_rate)),
+            ] {
+                extra.insert(key.to_string(), value);
+            }
+        }
+        result.telemetry.refs_count = Some(result.refs.len());
+        finalize_result(
+            result,
+            kind,
+            plan,
+            started_ms,
+            now_ms(),
+            ExecutionStore::new(engine.config.cache_path.clone()),
+            limits,
+            steps,
+        )
     }
-    result.telemetry.refs_count = Some(result.refs.len());
-    finalize_result(
-        result,
-        kind,
-        plan,
-        started_ms,
-        now_ms(),
-        ExecutionStore::new(engine.config.cache_path.clone()),
-        limits,
-        steps,
-    )
-}
-
-fn physical_ops_for(result: &CodeModeResult) -> usize {
-    result.telemetry.physical_ops
 }
 
 fn lower_recipe_plan(plan: &str) -> Option<String> {
@@ -1240,62 +1427,73 @@ fn lower_recipe_plan(plan: &str) -> Option<String> {
 }
 
 fn predict_edit_postimage(text: &str, edits: &[Value], create: bool) -> Result<String, String> {
-    if create {
-        if edits.len() != 1 {
-            return Err("create=true requires exactly one edit hunk".to_string());
+    {
+        if create {
+            if edits.len() != 1 {
+                return Err("create=true requires exactly one edit hunk".to_string());
+            }
+            let hunk = edits[0]
+                .as_object()
+                .ok_or_else(|| "edit hunk must be an object".to_string())?;
+            if !hunk
+                .get("find")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .is_empty()
+            {
+                return Err("create=true requires an empty find".to_string());
+            }
+            return hunk
+                .get("replace")
+                .and_then(Value::as_str)
+                .map(str::to_string)
+                .ok_or_else(|| "edit hunk requires replace text".to_string());
         }
-        let hunk = edits[0]
-            .as_object()
-            .ok_or_else(|| "edit hunk must be an object".to_string())?;
-        if !hunk
-            .get("find")
-            .and_then(Value::as_str)
-            .unwrap_or("")
-            .is_empty()
-        {
-            return Err("create=true requires an empty find".to_string());
+        let mut next = text.to_string();
+        for (index, value) in edits.iter().enumerate() {
+            let hunk = value
+                .as_object()
+                .ok_or_else(|| format!("edit hunk {index} must be an object"))?;
+            let find = hunk
+                .get("find")
+                .and_then(Value::as_str)
+                .ok_or_else(|| format!("edit hunk {index} requires find text"))?;
+            let replace = hunk
+                .get("replace")
+                .and_then(Value::as_str)
+                .ok_or_else(|| format!("edit hunk {index} requires replace text"))?;
+            let replace_all = hunk
+                .get("replace_all")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            let matches = next.match_indices(find).count();
+            if matches == 0 {
+                return Err(format!("edit hunk {index} find text not found"));
+            }
+            if !replace_all && matches != 1 {
+                return Err(format!(
+                    "edit hunk {index} is ambiguous ({matches} matches)"
+                ));
+            }
+            next = if replace_all {
+                next.replace(find, replace)
+            } else {
+                next.replacen(find, replace, 1)
+            };
         }
-        return hunk
-            .get("replace")
-            .and_then(Value::as_str)
-            .map(str::to_string)
-            .ok_or_else(|| "edit hunk requires replace text".to_string());
+        Ok(next)
     }
-    let mut next = text.to_string();
-    for (index, value) in edits.iter().enumerate() {
-        let hunk = value
-            .as_object()
-            .ok_or_else(|| format!("edit hunk {index} must be an object"))?;
-        let find = hunk
-            .get("find")
-            .and_then(Value::as_str)
-            .ok_or_else(|| format!("edit hunk {index} requires find text"))?;
-        let replace = hunk
-            .get("replace")
-            .and_then(Value::as_str)
-            .ok_or_else(|| format!("edit hunk {index} requires replace text"))?;
-        let replace_all = hunk
-            .get("replace_all")
-            .and_then(Value::as_bool)
-            .unwrap_or(false);
-        let matches = next.match_indices(find).count();
-        if matches == 0 {
-            return Err(format!("edit hunk {index} find text not found"));
-        }
-        if !replace_all && matches != 1 {
-            return Err(format!(
-                "edit hunk {index} is ambiguous ({matches} matches)"
-            ));
-        }
-        next = if replace_all {
-            next.replace(find, replace)
-        } else {
-            next.replacen(find, replace, 1)
-        };
-    }
-    Ok(next)
 }
 
+fn jstr<'a>(value: &'a Value, key: &str) -> Option<&'a str> {
+    value.get(key).and_then(Value::as_str)
+}
+fn jstring(value: &Value, key: &str) -> Option<String> {
+    jstr(value, key).map(str::to_string)
+}
+fn jbool(value: &Value, key: &str, default: bool) -> bool {
+    value.get(key).and_then(Value::as_bool).unwrap_or(default)
+}
 fn prepare_json_transaction(
     engine: &TokenZeroEngine,
     work_root: &Path,
@@ -1304,144 +1502,124 @@ fn prepare_json_transaction(
     plan: &str,
     started_ms: u128,
 ) -> Result<(Option<JournalTransaction>, Option<String>, bool), String> {
-    let execution_id = parsed
-        .get("execution_id")
-        .and_then(Value::as_str)
-        .map(str::to_string)
-        .unwrap_or_else(|| execution_id(plan, started_ms));
-    let plan_id = parsed
-        .get("plan_id")
-        .and_then(Value::as_str)
-        .map(str::to_string)
-        .unwrap_or_else(|| sha256_bytes(plan.as_bytes()));
-    let atomic_requested = parsed
-        .get("atomic")
-        .and_then(Value::as_bool)
-        .unwrap_or(false);
-    match inspect_journal(&engine.config.cache_path, &execution_id) {
-        Ok(existing) if existing.atomic => {
-            if existing.plan_id != plan_id {
-                return Err("journal identity collision".to_string());
-            }
-            if !atomic_requested {
-                return Err("journal replay changed atomic policy".to_string());
-            }
-            return match existing.state {
-                JournalState::Committed => Ok((None, None, true)),
-                JournalState::RolledBack => {
-                    Err("execution was already rolled back; use a new execution_id".to_string())
+    {
+        let execution_id =
+            jstring(parsed, "execution_id").unwrap_or_else(|| execution_id(plan, started_ms));
+        let plan_id = jstring(parsed, "plan_id").unwrap_or_else(|| sha256_bytes(plan.as_bytes()));
+        let atomic_requested = jbool(parsed, "atomic", false);
+        match inspect_journal(&engine.config.cache_path, &execution_id) {
+            Ok(existing) if existing.atomic => {
+                if existing.plan_id != plan_id {
+                    return Err("journal identity collision".to_string());
                 }
-                _ => open_unresolved(&engine.config.cache_path, &execution_id)
-                    .map(|transaction| (Some(transaction), None, false)),
-            };
+                if !atomic_requested {
+                    return Err("journal replay changed atomic policy".to_string());
+                }
+                return match existing.state {
+                    JournalState::Committed => Ok((None, None, true)),
+                    JournalState::RolledBack => {
+                        Err("execution was already rolled back; use a new execution_id".to_string())
+                    }
+                    _ => open_unresolved(&engine.config.cache_path, &execution_id)
+                        .map(|transaction| (Some(transaction), None, false)),
+                };
+            }
+            Ok(_) => {}
+            Err(message) if message.contains("journal not found") => {}
+            Err(message) => return Err(message),
         }
-        Ok(_) => {}
-        Err(message) if message.contains("No such file or directory") => {}
-        Err(message) => return Err(message),
-    }
-    let mut seen_targets = std::collections::HashSet::new();
-    let mut specs = Vec::with_capacity(steps.len());
-    for (index, step) in steps.iter().enumerate() {
-        let id = step
-            .get("id")
-            .and_then(Value::as_str)
-            .map(str::to_string)
-            .unwrap_or_else(|| format!("step{index}"));
-        let method = step
-            .get("method")
-            .or_else(|| step.get("tool"))
-            .and_then(Value::as_str)
-            .ok_or_else(|| format!("json plan step {index} missing method"))?
-            .to_string();
-        let mut spec = OperationSpec {
-            id,
-            method: method.clone(),
-            target: None,
-            precondition_digest: None,
-            precondition_exists: None,
-            postcondition_digest: None,
-            undo_refs: Vec::new(),
-            size: None,
-        };
-        if classify_method(&method) == OperationClass::ReversibleStoreMutation
-            && is_journaled_edit(&method)
-        {
-            let path = step
-                .get("args")
-                .and_then(Value::as_array)
-                .and_then(|args| args.first())
+        let mut seen_targets = std::collections::HashSet::new();
+        let mut specs = Vec::with_capacity(steps.len());
+        for (index, step) in steps.iter().enumerate() {
+            let id = jstring(step, "id").unwrap_or_else(|| format!("step{index}"));
+            let method = step
+                .get("method")
+                .or_else(|| step.get("tool"))
                 .and_then(Value::as_str)
-                .ok_or_else(|| {
-                    format!(
-                        "journaled edit step {index} requires a literal path; dynamic targets are not CAS-safe"
-                    )
-                })?;
-            let path = resolve_paths_against_work_root(vec![PathBuf::from(path)], work_root)
-                .into_iter()
-                .next()
-                .ok_or_else(|| format!("journaled edit step {index} has no target"))?;
-            if !seen_targets.insert(path.clone()) {
-                return Err(format!(
-                    "atomic plan has repeated edit target {}; combine its hunks into one step",
-                    path.display()
-                ));
-            }
-            let (exists, bytes) = match std::fs::read(&path) {
-                Ok(bytes) => (true, bytes),
-                Err(err) if err.kind() == std::io::ErrorKind::NotFound => (false, Vec::new()),
-                Err(err) => {
-                    return Err(format!("read edit precondition {}: {err}", path.display()));
-                }
+                .ok_or_else(|| format!("json plan step {index} missing method"))?
+                .to_string();
+            let mut spec = OperationSpec {
+                id,
+                method: method.clone(),
+                target: None,
+                precondition_digest: None,
+                precondition_exists: None,
+                postcondition_digest: None,
+                undo_refs: Vec::new(),
+                size: None,
             };
-            let text = String::from_utf8(bytes.clone())
-                .map_err(|_| format!("journaled edit target {} is not UTF-8", path.display()))?;
-            let mut store =
-                tokenzero_recovery::RecoveryStore::new(Some(engine.config.cache_path.clone()));
-            let stored = store
-                .store_payload(
-                    &text,
-                    detect_content_type(&text, Some(&path)),
-                    Some(&path),
-                    None,
-                    None,
-                )
-                .map_err(|err| format!("persist edit undo pre-image: {err}"))?;
-            let args = step
-                .get("args")
-                .and_then(Value::as_array)
-                .expect("path came from args");
-            let edits = args
-                .get(1)
-                .and_then(Value::as_array)
-                .ok_or_else(|| format!("journaled edit step {index} requires an edit array"))?;
-            let create = args
-                .get(2)
-                .and_then(Value::as_object)
-                .and_then(|opts| opts.get("create"))
-                .and_then(Value::as_bool)
-                .unwrap_or(false);
-            let postimage = predict_edit_postimage(&text, edits, create)?;
-            spec.target = Some(path);
-            spec.precondition_digest = exists.then(|| sha256_bytes(&bytes));
-            spec.precondition_exists = Some(exists);
-            spec.postcondition_digest = Some(sha256_bytes(postimage.as_bytes()));
-            spec.undo_refs.push(stored.blob_ref);
-            spec.size = Some(bytes.len() as u64);
+            if classify_method(&method) == OperationClass::ReversibleStoreMutation
+                && is_journaled_edit(&method)
+            {
+                let path = step.get("args").and_then(Value::as_array).and_then(|args| args.first()).and_then(Value::as_str).ok_or_else(|| format!("journaled edit step {index} requires a literal path; dynamic targets are not CAS-safe"))?;
+                let path = resolve_paths_against_work_root(vec![PathBuf::from(path)], work_root)
+                    .into_iter()
+                    .next()
+                    .ok_or_else(|| format!("journaled edit step {index} has no target"))?;
+                if !seen_targets.insert(path.clone()) {
+                    return Err(format!(
+                        "atomic plan has repeated edit target {}; combine its hunks into one step",
+                        path.display()
+                    ));
+                }
+                let (exists, bytes) = match std::fs::read(&path) {
+                    Ok(bytes) => (true, bytes),
+                    Err(err) if err.kind() == std::io::ErrorKind::NotFound => (false, Vec::new()),
+                    Err(err) => {
+                        return Err(format!("read edit precondition {}: {err}", path.display()));
+                    }
+                };
+                let text = String::from_utf8(bytes.clone()).map_err(|_| {
+                    format!("journaled edit target {} is not UTF-8", path.display())
+                })?;
+                let mut store =
+                    tokenzero_recovery::RecoveryStore::new(Some(engine.config.cache_path.clone()));
+                let stored = store
+                    .store_payload(
+                        &text,
+                        detect_content_type(&text, Some(&path)),
+                        Some(&path),
+                        None,
+                        None,
+                    )
+                    .map_err(|err| format!("persist edit undo pre-image: {err}"))?;
+                let args = step
+                    .get("args")
+                    .and_then(Value::as_array)
+                    .expect("path came from args");
+                let edits = args
+                    .get(1)
+                    .and_then(Value::as_array)
+                    .ok_or_else(|| format!("journaled edit step {index} requires an edit array"))?;
+                let create = args
+                    .get(2)
+                    .and_then(Value::as_object)
+                    .and_then(|opts| opts.get("create"))
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false);
+                let postimage = predict_edit_postimage(&text, edits, create)?;
+                spec.target = Some(path);
+                spec.precondition_digest = exists.then(|| sha256_bytes(&bytes));
+                spec.precondition_exists = Some(exists);
+                spec.postcondition_digest = Some(sha256_bytes(postimage.as_bytes()));
+                spec.undo_refs.push(stored.blob_ref);
+                spec.size = Some(bytes.len() as u64);
+            }
+            specs.push(spec);
         }
-        specs.push(spec);
-    }
-    match begin_plan(
-        &engine.config.cache_path,
-        work_root,
-        &plan_id,
-        &execution_id,
-        specs,
-        atomic_requested,
-    )? {
-        BeginOutcome::Disabled => Ok((None, None, false)),
-        BeginOutcome::Downgraded { reason } => Ok((None, Some(reason), false)),
-        BeginOutcome::AlreadyCommitted => Ok((None, None, true)),
-        BeginOutcome::Transaction(tx) => Ok((Some(*tx), None, false)),
+        match begin_plan(
+            &engine.config.cache_path,
+            work_root,
+            &plan_id,
+            &execution_id,
+            specs,
+            atomic_requested,
+        )? {
+            BeginOutcome::Disabled => Ok((None, None, false)),
+            BeginOutcome::Downgraded { reason } => Ok((None, Some(reason), false)),
+            BeginOutcome::AlreadyCommitted => Ok((None, None, true)),
+            BeginOutcome::Transaction(tx) => Ok((Some(*tx), None, false)),
+        }
     }
 }
 
@@ -1496,170 +1674,114 @@ fn execute_json_plan(
     limits: &CodeModeLimits,
     started_ms: u128,
 ) -> CodeModeResult {
-    let finish = |result, steps| finalize_codemode_result(
-        result, "json", plan, started_ms, &options, limits, steps,
-    );
+    let finish = |result, steps| {
+        finalize_codemode_result(result, "json", plan, started_ms, &options, limits, steps)
+    };
     let parsed: Value = match serde_json::from_str(plan) {
         Ok(value) => value,
-        Err(error) => return finish(
-            CodeModeResult::error(format!("json plan parse error: {error}"), 0), Vec::new(),
-        ),
+        Err(error) => {
+            return finish(
+                CodeModeResult::error(format!("json plan parse error: {error}"), 0),
+                Vec::new(),
+            );
+        }
     };
     let steps = match parsed.get("steps").unwrap_or(&parsed).as_array() {
         Some(steps) => steps,
-        None => return finish(
-            CodeModeResult::error("json plan requires a steps array".to_string(), 0), Vec::new(),
-        ),
+        None => {
+            return finish(
+                CodeModeResult::error("json plan requires a steps array".to_string(), 0),
+                Vec::new(),
+            );
+        }
     };
-    if steps.len() > limits.max_logical_ops {
-        return finish(
-            CodeModeResult::error(
-                format!("json plan exceeds max_logical_ops {}", limits.max_logical_ops), 0,
-            ),
-            Vec::new(),
-        );
-    }
-
-    let work_root = tokenzero_work_root(options.root.clone());
-    let engine = make_engine_for_root_with_options(work_root.clone(), &options);
-    let (mut transaction, downgrade, already_committed) =
-        match prepare_json_transaction(&engine, &work_root, &parsed, steps, plan, started_ms) {
-            Ok(value) => value,
-            Err(message) => return finish(
-                CodeModeResult::error_with_kind("transaction", message, 0, false), Vec::new(),
-            ),
-        };
-    if already_committed {
-        return finish(
-            CodeModeResult::completed(
-                json!({"transaction": "already_committed", "idempotent_replay": true}),
-                Vec::new(), 0, 0, 0,
-            ),
-            Vec::new(),
-        );
-    }
+    let mut boot = match bootstrap_plan_executor(
+        &options,
+        steps.len(),
+        limits,
+        "json plan ",
+        |engine, work_root| {
+            prepare_json_transaction(engine, work_root, &parsed, steps, plan, started_ms)
+        },
+    ) {
+        Ok(boot) => boot,
+        Err(result) => return finish(result, Vec::new()),
+    };
 
     let mut progress = PlanProgress::default();
     for (index, step) in steps.iter().enumerate() {
-        let id = step.get("id").and_then(Value::as_str).map(str::to_string)
+        let id = step
+            .get("id")
+            .and_then(Value::as_str)
+            .map(str::to_string)
             .unwrap_or_else(|| format!("step{index}"));
-        let method = match step.get("method").or_else(|| step.get("tool")).and_then(Value::as_str) {
+        let method = match step
+            .get("method")
+            .or_else(|| step.get("tool"))
+            .and_then(Value::as_str)
+        {
             Some(method) => method.to_string(),
-            None => return finish(
-                CodeModeResult::error(format!("json plan step {index} missing method"), index),
-                progress.steps,
-            ),
+            None => {
+                return finish(
+                    CodeModeResult::error(format!("json plan step {index} missing method"), index),
+                    progress.steps,
+                );
+            }
         };
         let args = match json_args_to_exprs(step.get("args"), &progress.scope) {
             Ok(args) => args,
-            Err(message) => return finish(
-                CodeModeResult::error(message, index), progress.steps,
-            ),
+            Err(message) => return finish(CodeModeResult::error(message, index), progress.steps),
         };
-        let call = MethodCall { method: method.clone(), args };
-        let reversible = classify_method(&method) == OperationClass::ReversibleStoreMutation;
-        let replayed = reversible && transaction.as_ref().is_some_and(|tx| !tx.step_needs_apply(index));
-        if reversible && !replayed {
-            if let Some(tx) = transaction.as_mut() {
-                if let Err(message) = tx.mark_applying(index) {
-                    let message = rollback_tx_on_error(tx, message, &engine.config.cache_path);
-                    return finish(
-                        CodeModeResult::error_with_kind("transaction", message, index, false),
-                        progress.steps,
-                    );
-                }
-            }
-        }
+        let call = MethodCall {
+            method: method.clone(),
+            args,
+        };
         progress.ops = index + 1;
-        let outcome = if replayed {
-            OpOutcome::from_catalog(json!({
-                "idempotent_replay": true,
-                "idempotency_key": transaction.as_ref()
-                    .and_then(|tx| tx.journal().operations.get(index))
-                    .map(|operation| operation.idempotency_key.clone()),
-            }))
-        } else {
-            match dispatch(&engine, &work_root, &call, &progress.scope) {
-                Ok(outcome) => outcome,
-                Err(mut error) => {
-                    telemetry_insert(&mut error, "operations", json!(progress.ops));
-                    error.telemetry.operations = progress.ops;
-                    error.telemetry.logical_ops = progress.ops;
-                    if let Some(tx) = transaction.as_mut() {
-                        let original = error.error.as_ref()
-                            .map(|detail| detail.message.clone())
-                            .unwrap_or_else(|| "operation failed".to_string());
-                        if let Err(combined) = tx.rollback(original, |operation| {
-                            rollback_journal_operation(&engine.config.cache_path, operation)
-                        }) {
-                            if let Some(detail) = error.error.as_mut() {
-                                detail.message = combined.to_string();
-                            }
-                        }
-                    }
-                    return finish(*error, progress.steps);
-                }
+        let outcome = match dispatch_journaled(
+            &boot.engine,
+            &boot.work_root,
+            &call,
+            &progress.scope,
+            &mut boot.transaction,
+            index,
+            JournalDispatchMode::Json,
+        ) {
+            Ok(outcome) => outcome,
+            Err(mut error) => {
+                stamp_ops_on_error(&mut error, progress.ops);
+                return finish(*error, progress.steps);
             }
         };
-        if reversible && !replayed {
-            if let Some(tx) = transaction.as_mut() {
-                let postcondition = tx.journal().operations.get(index)
-                    .and_then(|operation| operation.target.as_deref())
-                    .map(Path::new).map(current_digest).transpose();
-                let postcondition = match postcondition {
-                    Ok(value) => value.flatten(),
-                    Err(error) => {
-                        let message = rollback_tx_on_error(
-                            tx, format!("read postcondition: {error}"), &engine.config.cache_path,
-                        );
-                        return finish(
-                            CodeModeResult::error_with_kind(
-                                "transaction", message, index + 1, false,
-                            ),
-                            progress.steps,
-                        );
-                    }
-                };
-                if let Err(message) = tx.mark_applied(
-                    index, postcondition, refs_from_value(outcome.as_value()),
-                ) {
-                    let message = rollback_tx_on_error(tx, message, &engine.config.cache_path);
-                    return finish(
-                        CodeModeResult::error_with_kind(
-                            "transaction", message, index + 1, false,
-                        ),
-                        progress.steps,
-                    );
-                }
-            }
-        }
         progress.record(id.clone(), &call, &outcome);
         progress.scope.insert(id, outcome.into_value());
     }
 
     let last = std::mem::take(&mut progress.last);
-    let value = parsed.get("return")
-        .and_then(|value| resolve_json_return(value, &progress.scope).ok())
+    let value = parsed
+        .get("return")
+        .and_then(|value| resolve_json_binding(value, &progress.scope).ok())
         .unwrap_or(last);
-    let visible = progress.visible + count_tokens(&serde_json::to_string(&value).unwrap_or_default());
-    let mut result = CodeModeResult::completed(
-        value, progress.refs, steps.len(), visible, progress.raw,
-    );
-    result.telemetry.prevented_read_bytes = progress.prevented;
-    let parallel_groups = count_parallel_groups(steps);
-    telemetry_insert(&mut result, "parallel_groups", json!(parallel_groups));
-    telemetry_insert(&mut result, "prevented_read_bytes", json!(progress.prevented));
-    result.telemetry.parallel_groups = Some(parallel_groups);
-    result.telemetry.physical_ops = estimate_physical_ops(steps);
-    if let Err(message) = finish_lowered_transaction(&mut result, transaction, downgrade.as_deref()) {
-        result = CodeModeResult::error_with_kind("transaction", message, steps.len(), false);
-    }
-    finish(result, progress.steps)
+    progress.ops = steps.len();
+    finish_lowered_result(
+        value,
+        progress,
+        boot.transaction,
+        boot.downgrade.as_deref(),
+        "json",
+        plan,
+        started_ms,
+        &options,
+        limits,
+        |result| {
+            let parallel_groups = count_parallel_groups(steps);
+            telemetry_insert(result, "parallel_groups", json!(parallel_groups));
+            result.telemetry.parallel_groups = Some(parallel_groups);
+            result.telemetry.physical_ops = steps.len();
+        },
+    )
 }
-fn json_args_to_exprs(
-    value: Option<&Value>,
-    scope: &HashMap<String, Value>,
-) -> Result<Vec<Expr>, String> {
+
+fn json_args_to_exprs(value: Option<&Value>, scope: &Scope) -> Result<Vec<Expr>, String> {
     let Some(value) = value else {
         return Ok(Vec::new());
     };
@@ -1671,11 +1793,7 @@ fn json_args_to_exprs(
         .collect()
 }
 
-fn resolve_json_return(value: &Value, scope: &HashMap<String, Value>) -> Result<Value, String> {
-    resolve_json_binding(value, scope)
-}
-
-fn resolve_json_binding(value: &Value, scope: &HashMap<String, Value>) -> Result<Value, String> {
+fn resolve_json_binding(value: &Value, scope: &Scope) -> Result<Value, String> {
     match value {
         Value::String(s) if s.starts_with('$') => resolve_binding_string(s, scope),
         Value::Array(items) => items
@@ -1692,7 +1810,7 @@ fn resolve_json_binding(value: &Value, scope: &HashMap<String, Value>) -> Result
     }
 }
 
-fn resolve_binding_string(s: &str, scope: &HashMap<String, Value>) -> Result<Value, String> {
+fn resolve_binding_string(s: &str, scope: &Scope) -> Result<Value, String> {
     let path = s.trim_start_matches('$');
     if path.is_empty() {
         return Err("empty json binding".to_string());
@@ -1749,10 +1867,6 @@ fn count_parallel_groups(steps: &[Value]) -> usize {
         .count()
 }
 
-fn estimate_physical_ops(steps: &[Value]) -> usize {
-    steps.len()
-}
-
 fn refs_from_value(value: &Value) -> Vec<String> {
     let mut refs = Vec::new();
     collect_refs(value, &mut refs);
@@ -1763,14 +1877,12 @@ fn dispatch(
     engine: &TokenZeroEngine,
     work_root: &Path,
     call: &MethodCall,
-    scope: &HashMap<String, Value>,
-) -> Result<OpOutcome, Box<CodeModeResult>> {
+    scope: &Scope,
+) -> OpResult {
     let args: Vec<Value> = call
         .args
         .iter()
-        .map(|arg| {
-            resolve_expr(arg, scope).map_err(|message| operation_error(message))
-        })
+        .map(|arg| resolve_expr(arg, scope).map_err(operation_error))
         .collect::<Result<Vec<_>, _>>()?;
     dispatch_values(engine, work_root, &call.method, &args)
 }
@@ -1780,7 +1892,7 @@ fn dispatch_values(
     work_root: &Path,
     method: &str,
     args: &[Value],
-) -> Result<OpOutcome, Box<CodeModeResult>> {
+) -> OpResult {
     if matches!(
         method,
         "codemode.recipeRegister" | "recipeRegister" | "recipe_register"
@@ -1791,34 +1903,35 @@ fn dispatch_values(
             return Err(boxed_error("validation", "recipe source must not be empty"));
         }
         if source.len() > PreviousOutputLru::RECIPE_MAX_SOURCE_BYTES {
-            return Err(boxed_error("recipe_source_too_large", format!(
+            return Err(boxed_error(
+                "recipe_source_too_large",
+                format!(
                     "recipe source exceeds {} bytes",
                     PreviousOutputLru::RECIPE_MAX_SOURCE_BYTES
-                )));
+                ),
+            ));
         }
-        let mut registry = previous_output_by_session()
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let recipes = registry.recipe_session_mut(&engine.config.cache_path);
-        if !recipes.contains_key(name) && recipes.len() >= PreviousOutputLru::RECIPE_MAX_PER_SESSION
-        {
-            return Err(boxed_error("recipe_registry_full", format!(
-                    "recipe registry is limited to {} recipes per session",
-                    PreviousOutputLru::RECIPE_MAX_PER_SESSION
-                )));
-        }
-        recipes.insert(name.to_string(), source.to_string());
-        return Ok(OpOutcome::from_catalog(
-            json!({"name": name, "registered": true}),
-        ));
+        return with_previous_outputs(|registry| {
+            let recipes = registry.recipe_session_mut(&engine.config.cache_path);
+            if !recipes.contains_key(name)
+                && recipes.len() >= PreviousOutputLru::RECIPE_MAX_PER_SESSION
+            {
+                return Err(boxed_error(
+                    "recipe_registry_full",
+                    format!(
+                        "recipe registry is limited to {} recipes per session",
+                        PreviousOutputLru::RECIPE_MAX_PER_SESSION
+                    ),
+                ));
+            }
+            recipes.insert(name.to_string(), source.to_string());
+            catalog(json!({"name": name, "registered": true}))
+        });
     }
     if matches!(method, "codemode.recipeList" | "recipeList" | "recipe_list") {
-        let mut registry = previous_output_by_session()
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        return Ok(OpOutcome::from_catalog(json!(
+        return catalog(json!(with_previous_outputs(|registry| {
             registry.recipe_names(&engine.config.cache_path)
-        )));
+        })));
     }
     if matches!(method, "codemode.recipeRun" | "recipeRun" | "recipe_run") {
         let name = require_str_arg(args, 0, "recipe run requires a name string")?;
@@ -1827,21 +1940,26 @@ fn dispatch_values(
             .and_then(Value::as_u64)
             .and_then(|value| usize::try_from(value).ok())
             .unwrap_or_else(|| CodeModeLimits::default().max_code_bytes);
-        let source = previous_output_by_session()
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .recipe_source(&engine.config.cache_path, name)
-            .ok_or_else(|| boxed_error("recipe_not_found", format!("recipe not found: {name}")))?;
+        let source = with_previous_outputs(|registry| {
+            registry.recipe_source(&engine.config.cache_path, name)
+        })
+        .ok_or_else(|| boxed_error("recipe_not_found", format!("recipe not found: {name}")))?;
         if source.trim().is_empty() {
             return Err(boxed_error("validation", "recipe source must not be empty"));
         }
         if source.len() > max_code_bytes {
-            return Err(boxed_error("validation", format!("recipe exceeds max_code_bytes {max_code_bytes}")));
+            return Err(boxed_error(
+                "validation",
+                format!("recipe exceeds max_code_bytes {max_code_bytes}"),
+            ));
         }
         if quickjs_plan_requests_mutation(&source) {
-            return Err(boxed_error("sandbox", "sandbox: mutating binding denied without transaction support"));
+            return Err(boxed_error(
+                "sandbox",
+                "sandbox: mutating binding denied without transaction support",
+            ));
         }
-        return Ok(OpOutcome::from_catalog(json!({"source": source})));
+        return catalog(json!({"source": source}));
     }
     match method {
         "zero.read" | "read" | "zero.token.read" => exec_read(engine, work_root, args),
@@ -1853,11 +1971,17 @@ fn dispatch_values(
         "zero.job" | "job" | "zero.token.job" => exec_job(engine, args),
         "zero.edit" | "edit" | "zero.token.edit" => exec_edit(engine, work_root, args),
         "zero.token.expand" | "zero.expand" | "expand" => exec_expand(engine, args),
-        "zero.token.expandMany" | "zero.expandMany" | "expandMany" | "expand_many" => exec_expand_many(engine, args),
-        "zero.token.compact" | "zero.compact" | "compact" | "zero.ref" | "ref" => exec_compact(engine, args),
-        "zero.token.compactMany" | "zero.compactMany" | "compactMany" | "compact_many" => exec_compact_many(engine, args),
+        "zero.token.expandMany" | "zero.expandMany" | "expandMany" | "expand_many" => {
+            exec_expand_many(engine, args)
+        }
+        "zero.token.compact" | "zero.compact" | "compact" | "zero.ref" | "ref" => {
+            exec_compact_inner(engine, args, false)
+        }
+        "zero.token.compactMany" | "zero.compactMany" | "compactMany" | "compact_many" => {
+            exec_compact_many(engine, args)
+        }
         "zero.token.dedupe" | "zero.dedupe" | "dedupe" => exec_dedupe(args),
-        "zero.compact_max" | "compact_max" => exec_compact_max(engine, args),
+        "zero.compact_max" | "compact_max" => exec_compact_inner(engine, args, true),
         "zero.ingest" | "ingest" => exec_ingest(engine, args),
         "zero.mem" | "mem" | "zero.token.mem" => exec_mem(engine),
         "zero.recall" | "recall" | "zero.token.recall" => exec_recall(engine, args),
@@ -1877,15 +2001,13 @@ fn dispatch_values(
         "zero.assert" | "assert" => exec_assert(args),
         "codemode.search" | "search" => {
             let query = args.first().and_then(|v| v.as_str()).unwrap_or("");
-            Ok(OpOutcome::from_catalog(search_catalog(query)))
+            catalog(search_catalog(query))
         }
         "codemode.describe" | "describe" => {
             let path = args.first().and_then(|v| v.as_str()).unwrap_or("");
-            Ok(OpOutcome::from_catalog(describe_method(path)))
+            catalog(describe_method(path))
         }
-        "codemode.limits" | "limits" => {
-            Ok(OpOutcome::from_catalog(CodeModeLimits::default().as_json()))
-        }
+        "codemode.limits" | "limits" => catalog(CodeModeLimits::default().as_json()),
         "codemode.journalDoctor" | "journalDoctor" | "journal_doctor" => Ok(
             OpOutcome::from_catalog(journal_doctor_json(&engine.config.cache_path)),
         ),
@@ -1904,15 +2026,203 @@ fn dispatch_values(
     }
 }
 
-
 fn journal_execution_arg(args: &[Value]) -> Result<&str, Box<CodeModeResult>> {
     require_str_arg(args, 0, "journal command requires an execution_id string")
 }
 
-fn exec_journal_inspect(
-    engine: &TokenZeroEngine,
-    args: &[Value],
-) -> Result<OpOutcome, Box<CodeModeResult>> {
+macro_rules! op_tool {
+    ($name:ident ($($arg:ident : $ty:ty),*) => $body:expr) => {
+        fn $name($($arg : $ty),*) -> OpResult { tool($body) }
+    };
+}
+macro_rules! op_catalog {
+    ($name:ident ($($arg:ident : $ty:ty),*) => $body:expr) => {
+        fn $name($($arg : $ty),*) -> OpResult { catalog($body) }
+    };
+}
+op_tool!(exec_mem(engine: &TokenZeroEngine) => engine.mem());
+op_catalog!(exec_discover() => serde_json::to_value(discover()).unwrap_or(Value::Null));
+op_catalog!(exec_raw(args: &[Value]) => json!({ "__tz_raw": true, "value": args.first().cloned().unwrap_or(Value::Null) }));
+
+fn exec_ingest(engine: &TokenZeroEngine, args: &[Value]) -> OpResult {
+    let text = require_str_arg(args, 0, "zero.ingest requires text as first argument")?;
+    let opts = Opts::from_arg(args, 1);
+    let mode = opts.mode_or("mode", Mode::Auto);
+    let source = opts.str("source").unwrap_or("codemode-ingest");
+    let content_type = detect_content_type(text, None);
+
+    let resp = engine.ingest(text, content_type, mode, source);
+    tool(resp)
+}
+
+fn exec_rewrite(args: &[Value]) -> OpResult {
+    let command = require_str_arg(
+        args,
+        0,
+        "zero.rewrite requires a command string as first argument",
+    )?;
+    let opts = Opts::from_arg(args, 1);
+    let mode = opts.str("mode").unwrap_or("safe");
+    let value = serde_json::to_value(rewrite_command(command, mode, true))
+        .map_err(|err| operation_error(format!("zero.rewrite failed: {err}")))?;
+    catalog(value)
+}
+
+fn exec_cache_pack(engine: &TokenZeroEngine, args: &[Value]) -> OpResult {
+    let opts = Opts::from_arg(args, 0);
+    let scope = opts.str("scope").unwrap_or("agent");
+    let resp = engine.cache_pack(scope);
+    tool(resp)
+}
+
+fn exec_recall(engine: &TokenZeroEngine, args: &[Value]) -> OpResult {
+    let query = require_str_arg(
+        args,
+        0,
+        "zero.recall requires a query string as first argument",
+    )?;
+    let opts = Opts::from_arg(args, 1);
+    let mode = opts.mode_or("mode", Mode::Auto);
+    let max_hits = opts.usize("max_hits").unwrap_or(50);
+    let max_visible = opts
+        .usize("max_visible_tokens")
+        .unwrap_or(engine.config.max_visible_tokens);
+    let resp = engine.recall(query, max_hits, mode, max_visible);
+    tool(resp)
+}
+
+fn exec_fetch(engine: &TokenZeroEngine, args: &[Value]) -> OpResult {
+    let url = require_str_arg(
+        args,
+        0,
+        "zero.fetch requires an http(s) URL as first argument",
+    )?;
+    let opts = Opts::from_arg(args, 1);
+    let mode = opts.mode_or("mode", Mode::Auto);
+    let ttl_seconds = opts.usize("ttl_seconds");
+    let fresh = opts.bool("fresh").unwrap_or(false);
+    let max_visible = opts
+        .usize("max_visible_tokens")
+        .unwrap_or(engine.config.max_visible_tokens);
+    let resp = engine.fetch(url, ttl_seconds, fresh, mode, max_visible);
+    tool(resp)
+}
+
+fn exec_batch(engine: &TokenZeroEngine, args: &[Value]) -> OpResult {
+    let ops = match args.first() {
+        Some(Value::Array(items)) => items.clone(),
+        Some(Value::String(text)) => serde_json::from_str(text)
+            .map_err(|err| operation_error(format!("zero.batch ops is not valid JSON: {err}")))?,
+        _ => {
+            return Err(operation_error(
+                "zero.batch requires an array of {tool, args} objects as first argument",
+            ));
+        }
+    };
+    if ops.is_empty() {
+        return Err(operation_error("zero.batch requires at least one op"));
+    }
+    let wrapped = json!({"ops": ops, "mode": "auto"});
+    match crate::tools::batch_response(engine, &wrapped) {
+        Ok(resp) => tool(resp),
+        Err(error) => Err(operation_error(error.message_text())),
+    }
+}
+
+fn exec_compact_many(engine: &TokenZeroEngine, args: &[Value]) -> OpResult {
+    let items = require_array_arg(
+        args,
+        0,
+        "zero.token.compactMany requires an array of payloads",
+    )?;
+    let mut results = Vec::with_capacity(items.len());
+    let mut refs = Vec::new();
+    for item in items.iter().cloned() {
+        let outcome = exec_compact_inner(engine, &[item], false)?;
+        collect_refs(outcome.as_value(), &mut refs);
+        results.push(outcome.into_value());
+    }
+    catalog(json!({
+        "items": results,
+        "count": results.len(),
+        "refs": refs,
+    }))
+}
+
+fn exec_job(engine: &TokenZeroEngine, args: &[Value]) -> OpResult {
+    engine
+        .shell_job(require_str_arg(
+            args,
+            0,
+            "zero.token.job requires a job id string",
+        )?)
+        .map(OpOutcome::from_catalog)
+        .map_err(operation_error)
+}
+op_catalog!(exec_count_tokens(args: &[Value]) => json!(count_tokens(text_from_value(args.first().unwrap_or(&Value::Null)).unwrap_or(""))));
+fn exec_verdict(args: &[Value]) -> OpResult {
+    let ok = args.first().map(value_truthy).unwrap_or(false);
+    let detail = args
+        .get(1)
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .lines()
+        .next()
+        .unwrap_or("")
+        .to_string();
+    catalog(json!({ "ok": ok, "detail": detail }))
+}
+fn exec_assert(args: &[Value]) -> OpResult {
+    if !value_truthy(args.first().unwrap_or(&Value::Null)) {
+        return Err(operation_error(
+            args.get(1)
+                .and_then(Value::as_str)
+                .unwrap_or("assertion failed"),
+        ));
+    }
+    catalog(json!(true))
+}
+fn exec_count(args: &[Value]) -> OpResult {
+    let value = args
+        .first()
+        .ok_or_else(|| operation_error("zero.count requires a value as first argument"))?;
+    let count = value.as_array().map(|i| i.len()).unwrap_or_else(|| {
+        text_from_value(value)
+            .map(|t| t.lines().count())
+            .unwrap_or(0)
+    });
+    catalog(json!(count))
+}
+fn exec_dedupe(args: &[Value]) -> OpResult {
+    let items = require_array_arg(args, 0, "zero.dedupe requires an array as first argument")?;
+    let mut out = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for item in items {
+        if seen.insert(serde_json::to_string(item).unwrap_or_default()) {
+            out.push(item.clone());
+        }
+    }
+    catalog(Value::Array(out))
+}
+fn exec_filter_lines(args: &[Value]) -> OpResult {
+    let text = text_from_value(
+        args.first()
+            .ok_or_else(|| operation_error("zero.filter_lines requires text"))?,
+    )
+    .unwrap_or("");
+    let pattern = require_str_arg(
+        args,
+        1,
+        "zero.filter_lines requires a pattern string as second argument",
+    )?;
+    catalog(json!(
+        text.lines()
+            .filter(|l| l.contains(pattern))
+            .collect::<Vec<_>>()
+            .join("\n")
+    ))
+}
+fn exec_journal_inspect(engine: &TokenZeroEngine, args: &[Value]) -> OpResult {
     let execution_id = journal_execution_arg(args)?;
     inspect_journal(&engine.config.cache_path, execution_id)
         .and_then(|journal| serde_json::to_value(journal).map_err(|err| err.to_string()))
@@ -1927,69 +2237,40 @@ fn exec_journal_inspect(
         })
 }
 
-fn exec_journal_resume(
-    engine: &TokenZeroEngine,
-    args: &[Value],
-) -> Result<OpOutcome, Box<CodeModeResult>> {
+fn exec_journal_resume(engine: &TokenZeroEngine, args: &[Value]) -> OpResult {
     let execution_id = journal_execution_arg(args)?;
-    let journal = inspect_journal(&engine.config.cache_path, execution_id).map_err(|message| {
-        Box::new(CodeModeResult::error_with_kind(
-            "journal_resume",
-            message,
-            0,
-            false,
-        ))
-    })?;
+    let journal = inspect_journal(&engine.config.cache_path, execution_id)
+        .map_err(map_journal_err("journal_resume"))?;
     if journal.state.is_resolved() {
-        return Err(boxed_error("journal_resume", format!("journal is already resolved as {:?}", journal.state)));
+        return Err(boxed_error(
+            "journal_resume",
+            format!("journal is already resolved as {:?}", journal.state),
+        ));
     }
-    Ok(OpOutcome::from_catalog(json!({
+    catalog(json!({
         "execution_id": execution_id,
         "state": journal.state,
         "resume": "rerun the original redacted plan with the same execution_id; idempotency keys and CAS checks skip completed mutations",
-    })))
+    }))
 }
 
-fn exec_journal_rollback(
-    engine: &TokenZeroEngine,
-    args: &[Value],
-) -> Result<OpOutcome, Box<CodeModeResult>> {
+fn exec_journal_rollback(engine: &TokenZeroEngine, args: &[Value]) -> OpResult {
     let execution_id = journal_execution_arg(args)?;
-    let mut transaction =
-        open_unresolved(&engine.config.cache_path, execution_id).map_err(|message| {
-            Box::new(CodeModeResult::error_with_kind(
-                "journal_rollback",
-                message,
-                0,
-                false,
-            ))
-        })?;
+    let mut transaction = open_unresolved(&engine.config.cache_path, execution_id)
+        .map_err(map_journal_err("journal_rollback"))?;
     let cache_path = engine.config.cache_path.clone();
     transaction
         .rollback("manual rollback requested", |operation| {
             rollback_journal_operation(&cache_path, operation)
         })
-        .map_err(|error| {
-            Box::new(CodeModeResult::error_with_kind(
-                "journal_rollback",
-                error.to_string(),
-                0,
-                false,
-            ))
-        })?;
-    let journal = inspect_journal(&engine.config.cache_path, execution_id).map_err(|message| {
-        Box::new(CodeModeResult::error_with_kind(
-            "journal_rollback",
-            message,
-            0,
-            false,
-        ))
-    })?;
-    Ok(OpOutcome::from_catalog(json!({
+        .map_err(|error| boxed_error("journal_rollback", error.to_string()))?;
+    let journal = inspect_journal(&engine.config.cache_path, execution_id)
+        .map_err(map_journal_err("journal_rollback"))?;
+    catalog(json!({
         "execution_id": execution_id,
         "state": journal.state,
         "rolled_back": true,
-    })))
+    }))
 }
 
 fn tool_response_to_value(resp: &ToolResponse) -> Value {
@@ -2064,27 +2345,22 @@ impl OpOutcome {
             prevented_read_bytes: estimate_prevented_read_bytes(resp),
         }
     }
-
     fn from_catalog(value: Value) -> Self {
         Self {
             value,
             prevented_read_bytes: 0,
         }
     }
-
     pub(crate) fn into_value(self) -> Value {
         self.value
     }
-
     pub(crate) fn as_value(&self) -> &Value {
         &self.value
     }
-
     fn with_value(mut self, update: impl FnOnce(&mut Value)) -> Self {
         update(&mut self.value);
         self
     }
-
     fn mark_exact_expand(mut self) -> Self {
         if let Value::Object(map) = &mut self.value {
             if let Some(text) = map.get("text").and_then(Value::as_str) {
@@ -2094,7 +2370,6 @@ impl OpOutcome {
         }
         self
     }
-
     fn with_prevented_read_bytes(mut self, bytes: usize) -> Self {
         self.prevented_read_bytes = bytes;
         self
@@ -2109,8 +2384,8 @@ fn record_outcome(
     total_prevented_read_bytes: &mut usize,
 ) {
     collect_refs(&outcome.value, all_refs);
-    *total_visible += result_visible_tokens(&outcome.value);
-    *total_raw += result_raw_tokens(&outcome.value);
+    *total_visible += result_token_field(&outcome.value, "visible_tokens");
+    *total_raw += result_token_field(&outcome.value, "raw_tokens");
     *total_prevented_read_bytes += outcome.prevented_read_bytes;
 }
 
@@ -2123,6 +2398,10 @@ impl<'a> Opts<'a> {
 
     fn usize(&self, key: &str) -> Option<usize> {
         self.0?.get(key)?.as_u64().map(|n| n as usize)
+    }
+
+    fn usize_or(&self, key: &str, default: usize) -> usize {
+        self.usize(key).unwrap_or(default)
     }
 
     fn bool(&self, key: &str) -> Option<bool> {
@@ -2138,6 +2417,32 @@ impl<'a> Opts<'a> {
             .and_then(|value| value.parse().ok())
             .unwrap_or(default)
     }
+
+    fn max_visible(&self, engine: &TokenZeroEngine) -> usize {
+        self.usize_or("max_visible_tokens", engine.config.max_visible_tokens)
+    }
+}
+
+fn array_or_json_arg(
+    args: &[Value],
+    required: &str,
+    bad_json: impl FnOnce(&serde_json::Error) -> String,
+) -> Result<Vec<Value>, Box<CodeModeResult>> {
+    match args.first() {
+        Some(Value::Array(items)) => Ok(items.clone()),
+        Some(Value::String(text)) => {
+            serde_json::from_str(text).map_err(|err| operation_error(bad_json(&err)))
+        }
+        _ => Err(operation_error(required.to_string())),
+    }
+}
+
+fn data_arg(args: &[Value], message: &str) -> Result<String, Box<CodeModeResult>> {
+    match args.first() {
+        Some(Value::String(s)) => Ok(s.clone()),
+        Some(other) => Ok(serde_json::to_string(other).unwrap_or_default()),
+        None => Err(operation_error(message.to_string())),
+    }
 }
 
 fn require_str_arg<'a>(
@@ -2151,9 +2456,13 @@ fn require_str_arg<'a>(
 }
 
 fn require_array_arg<'a>(
-    args: &'a [Value], index: usize, message: &str,
+    args: &'a [Value],
+    index: usize,
+    message: &str,
 ) -> Result<&'a [Value], Box<CodeModeResult>> {
-    args.get(index).and_then(Value::as_array).map(Vec::as_slice)
+    args.get(index)
+        .and_then(Value::as_array)
+        .map(Vec::as_slice)
         .ok_or_else(|| operation_error(message.to_string()))
 }
 
@@ -2218,58 +2527,47 @@ pub(crate) fn resolve_paths_against_work_root(
         .collect()
 }
 
-fn exec_read(
-    engine: &TokenZeroEngine,
-    work_root: &Path,
-    args: &[Value],
-) -> Result<OpOutcome, Box<CodeModeResult>> {
-    let paths = require_paths_from_arg(
-        args,
-        0,
-        "zero.read requires a path string or array as first argument",
-    )?;
-    let paths = resolve_paths_against_work_root(paths, work_root);
-    let opts = Opts::from_arg(args, 1);
-    let mode = opts.mode_or("mode", Mode::Auto);
-    let start_line = opts.usize("start_line");
-    let end_line = opts.usize("end_line");
-    let max_visible = opts
-        .usize("max_visible_tokens")
-        .unwrap_or(engine.config.max_visible_tokens);
-
-    let resp = engine.read(&paths, mode, start_line, end_line, false, 20, max_visible);
-    if resp.status == "error" {
-        let message = resp
-            .error
-            .as_ref()
-            .map(|error| error.message.clone())
-            .unwrap_or_else(|| "zero.read failed".to_string());
-        let code = resp
-            .error
-            .as_ref()
-            .map(|error| error.code.as_str())
-            .unwrap_or("");
-        // wqw.5: outside allowlist is a hard plan error (clear deny), not a soft capsule.
-        if code == "path_not_allowed" || code == "path_outside_allowed_roots" {
-            return Err(boxed_error("path_not_allowed", message));
+fn exec_read(engine: &TokenZeroEngine, work_root: &Path, args: &[Value]) -> OpResult {
+    {
+        let paths = require_paths_from_arg(
+            args,
+            0,
+            "zero.read requires a path string or array as first argument",
+        )?;
+        let paths = resolve_paths_against_work_root(paths, work_root);
+        let opts = Opts::from_arg(args, 1);
+        let mode = opts.mode_or("mode", Mode::Auto);
+        let start_line = opts.usize("start_line");
+        let end_line = opts.usize("end_line");
+        let max_visible = opts.max_visible(engine);
+        let resp = engine.read(&paths, mode, start_line, end_line, false, 20, max_visible);
+        if resp.status == "error" {
+            let message = resp
+                .error
+                .as_ref()
+                .map(|error| error.message.clone())
+                .unwrap_or_else(|| "zero.read failed".to_string());
+            let code = resp
+                .error
+                .as_ref()
+                .map(|error| error.code.as_str())
+                .unwrap_or("");
+            if code == "path_not_allowed" || code == "path_outside_allowed_roots" {
+                return Err(boxed_error("path_not_allowed", message));
+            }
+            let lower = message.to_ascii_lowercase();
+            if lower.contains("__zerostack_missing_target__")
+                || lower.contains("not found")
+                || lower.contains("no such")
+            {
+                return Err(boxed_error("substrate", message));
+            }
         }
-        let lower = message.to_ascii_lowercase();
-        if lower.contains("__zerostack_missing_target__")
-            || lower.contains("not found")
-            || lower.contains("no such")
-        {
-            return Err(boxed_error("substrate", message));
-        }
+        tool(resp)
     }
-    Ok(OpOutcome::from_tool_response(&resp))
 }
 
-fn exec_find(
-    engine: &TokenZeroEngine,
-    work_root: &Path,
-    args: &[Value],
-    exact: bool,
-) -> Result<OpOutcome, Box<CodeModeResult>> {
+fn exec_find(engine: &TokenZeroEngine, work_root: &Path, args: &[Value], exact: bool) -> OpResult {
     let pattern = require_str_arg(
         args,
         0,
@@ -2278,31 +2576,25 @@ fn exec_find(
     let paths = paths_from_arg(args, 1, work_root.to_path_buf());
     let opts = Opts::from_arg(args, 2);
     let mode = opts.mode_or("mode", Mode::Auto);
-    let max_files = opts.usize("max_files").unwrap_or(20);
-    let max_visible = opts
-        .usize("max_visible_tokens")
-        .unwrap_or(engine.config.max_visible_tokens);
+    let max_files = opts.usize_or("max_files", 20);
+    let max_visible = opts.max_visible(engine);
 
     let resp = if exact {
         engine.grep(pattern, &paths, mode, max_files, max_visible)
     } else {
         engine.find(pattern, &paths, mode, max_files, max_visible)
     };
-    Ok(OpOutcome::from_tool_response(&resp))
+    tool(resp)
 }
 
-fn exec_glob(
-    engine: &TokenZeroEngine,
-    work_root: &Path,
-    args: &[Value],
-) -> Result<OpOutcome, Box<CodeModeResult>> {
+fn exec_glob(engine: &TokenZeroEngine, work_root: &Path, args: &[Value]) -> OpResult {
     let pattern = require_str_arg(
         args,
         0,
         "zero.glob requires a pattern string as first argument",
     )?;
     let paths = paths_from_arg(args, 1, work_root.to_path_buf());
-    let max_files = Opts::from_arg(args, 2).usize("max_files").unwrap_or(200);
+    let max_files = Opts::from_arg(args, 2).usize_or("max_files", 200);
 
     let resp = engine.glob(
         pattern,
@@ -2312,14 +2604,10 @@ fn exec_glob(
         max_files,
         engine.config.max_visible_tokens,
     );
-    Ok(OpOutcome::from_tool_response(&resp))
+    tool(resp)
 }
 
-fn exec_tree(
-    engine: &TokenZeroEngine,
-    work_root: &Path,
-    args: &[Value],
-) -> Result<OpOutcome, Box<CodeModeResult>> {
+fn exec_tree(engine: &TokenZeroEngine, work_root: &Path, args: &[Value]) -> OpResult {
     let roots = resolve_paths_against_work_root(
         vec![
             args.first()
@@ -2330,9 +2618,9 @@ fn exec_tree(
         work_root,
     );
     let opts = Opts::from_arg(args, 1);
-    let depth = opts.usize("depth").unwrap_or(3);
+    let depth = opts.usize_or("depth", 3);
     let include_hidden = opts.bool("include_hidden").unwrap_or(false);
-    let max_files = opts.usize("max_files").unwrap_or(200);
+    let max_files = opts.usize_or("max_files", 200);
 
     let resp = engine.tree(
         &roots,
@@ -2342,145 +2630,127 @@ fn exec_tree(
         max_files,
         engine.config.max_visible_tokens,
     );
-    Ok(OpOutcome::from_tool_response(&resp))
+    tool(resp)
 }
 
-fn exec_shell(
-    engine: &TokenZeroEngine,
-    work_root: &Path,
-    args: &[Value],
-) -> Result<OpOutcome, Box<CodeModeResult>> {
-    let command = require_str_arg(
-        args,
-        0,
-        "zero.shell requires a command string as first argument",
-    )?;
-    let opts = Opts::from_arg(args, 1);
-    let cwd = opts.str("cwd").map(|raw| {
-        let path = PathBuf::from(raw);
-        if path.is_absolute() {
-            path
-        } else {
-            work_root.join(path)
-        }
-    });
-    let mode = opts.mode_or("mode", Mode::Auto);
-    let timeout = opts
-        .usize("timeout_seconds")
-        .map(|secs| Duration::from_secs(secs as u64));
-
-    if opts.bool("background").unwrap_or(false) {
-        return engine
-            .shell_background(command, cwd.as_deref(), timeout)
-            .map(OpOutcome::from_catalog)
-            .map_err(|message| operation_error(message));
-    }
-
-    let resp = engine.shell(
-        command,
-        None,
-        cwd.as_deref(),
-        mode,
-        Some("safe"),
-        false,
-        None,
-        None,
-        timeout,
-    );
-
-    Ok(OpOutcome::from_tool_response(&resp).with_value(|value| {
-        if let Some(telem) = &resp.telemetry {
-            if let Some(exit) = telem.get("exit_code") {
-                value["exit_code"] = exit.clone();
-            }
-            if let Some(success) = telem.get("command_success") {
-                value["success"] = success.clone();
-            }
-        }
-    }))
-}
-
-fn exec_job(engine: &TokenZeroEngine, args: &[Value]) -> Result<OpOutcome, Box<CodeModeResult>> {
-    let id = require_str_arg(args, 0, "zero.token.job requires a job id string")?;
-    engine
-        .shell_job(id)
-        .map(OpOutcome::from_catalog)
-        .map_err(|message| operation_error(message))
-}
-pub(crate) fn exec_edit(
-    engine: &TokenZeroEngine,
-    work_root: &Path,
-    args: &[Value],
-) -> Result<OpOutcome, Box<CodeModeResult>> {
-    let path = PathBuf::from(require_str_arg(
-        args,
-        0,
-        "zero.edit requires a path string as first argument",
-    )?);
-    let edits_val = require_array_arg(
-        args, 1, "zero.edit requires an array of {find, replace} hunks as second argument",
-    )?;
-    let mut edits = Vec::with_capacity(edits_val.len());
-    for (idx, value) in edits_val.iter().enumerate() {
-        let hunk: EditHunk = serde_json::from_value(value.clone()).map_err(|err| {
-            operation_error(format!("zero.edit: invalid hunk at index {idx}: {err}"))
-        })?;
-        edits.push(hunk);
-    }
-    if edits.is_empty() {
-        return Err(operation_error("zero.edit: no edit hunks provided"));
-    }
-    let opts = Opts::from_arg(args, 2);
-    let dry_run = opts.bool("dry_run").unwrap_or(false);
-    let create = opts.bool("create").unwrap_or(false);
-
-    let path = resolve_paths_against_work_root(vec![path], work_root)
-        .into_iter()
-        .next()
-        .unwrap_or_else(|| work_root.to_path_buf());
-
-    let resp = engine.edit(
-        &path,
-        &edits,
-        create,
-        dry_run,
-        Mode::Auto,
-        engine.config.max_visible_tokens,
-    );
-    if resp.status == "error" {
-        let message = resp
-            .error
-            .as_ref()
-            .map(|e| e.message.clone())
-            .unwrap_or_else(|| "zero.edit failed".to_string());
-        // Expand/read health is intentionally independent of write health.
-        // A missing ref must never authorize a native-write escape for an
-        // unrelated edit failure.
-        let annotated = crate::annotate_write_failure(&message, false);
-        return Err(Box::new(CodeModeResult::error_with_kind(
-            resp.error
-                .as_ref()
-                .map(|e| e.code.as_str())
-                .unwrap_or("edit_failed"),
-            annotated,
+fn exec_shell(engine: &TokenZeroEngine, work_root: &Path, args: &[Value]) -> OpResult {
+    {
+        let command = require_str_arg(
+            args,
             0,
+            "zero.shell requires a command string as first argument",
+        )?;
+        let opts = Opts::from_arg(args, 1);
+        let cwd = opts.str("cwd").map(|raw| {
+            let path = PathBuf::from(raw);
+            if path.is_absolute() {
+                path
+            } else {
+                work_root.join(path)
+            }
+        });
+        let mode = opts.mode_or("mode", Mode::Auto);
+        let timeout = opts
+            .usize("timeout_seconds")
+            .map(|secs| Duration::from_secs(secs as u64));
+        if opts.bool("background").unwrap_or(false) {
+            return engine
+                .shell_background(command, cwd.as_deref(), timeout)
+                .map(OpOutcome::from_catalog)
+                .map_err(operation_error);
+        }
+        let resp = engine.shell(
+            command,
+            None,
+            cwd.as_deref(),
+            mode,
+            Some("safe"),
             false,
-        )));
+            None,
+            None,
+            timeout,
+        );
+        Ok(OpOutcome::from_tool_response(&resp).with_value(|value| {
+            if let Some(telem) = &resp.telemetry {
+                if let Some(exit) = telem.get("exit_code") {
+                    value["exit_code"] = exit.clone();
+                }
+                if let Some(success) = telem.get("command_success") {
+                    value["success"] = success.clone();
+                }
+            }
+        }))
     }
-    let hunks_applied = resp
-        .telemetry
-        .as_ref()
-        .and_then(|t| t.get("hunks"))
-        .and_then(|v| v.as_u64())
-        .unwrap_or(edits.len() as u64);
-    Ok(OpOutcome::from_tool_response(&resp).with_value(|value| {
-        value["hunks_applied"] = json!(hunks_applied);
-    }))
 }
 
-fn exec_expand(engine: &TokenZeroEngine, args: &[Value]) -> Result<OpOutcome, Box<CodeModeResult>> {
-    let params = ExpandParams::from_codemode_args(args)
-        .map_err(|message| operation_error(message))?;
+pub(crate) fn exec_edit(engine: &TokenZeroEngine, work_root: &Path, args: &[Value]) -> OpResult {
+    {
+        let path = PathBuf::from(require_str_arg(
+            args,
+            0,
+            "zero.edit requires a path string as first argument",
+        )?);
+        let edits_val = require_array_arg(
+            args,
+            1,
+            "zero.edit requires an array of {find, replace} hunks as second argument",
+        )?;
+        let mut edits = Vec::with_capacity(edits_val.len());
+        for (idx, value) in edits_val.iter().enumerate() {
+            let hunk: EditHunk = serde_json::from_value(value.clone()).map_err(|err| {
+                operation_error(format!("zero.edit: invalid hunk at index {idx}: {err}"))
+            })?;
+            edits.push(hunk);
+        }
+        if edits.is_empty() {
+            return Err(operation_error("zero.edit: no edit hunks provided"));
+        }
+        let opts = Opts::from_arg(args, 2);
+        let dry_run = opts.bool("dry_run").unwrap_or(false);
+        let create = opts.bool("create").unwrap_or(false);
+        let path = resolve_paths_against_work_root(vec![path], work_root)
+            .into_iter()
+            .next()
+            .unwrap_or_else(|| work_root.to_path_buf());
+        let resp = engine.edit(
+            &path,
+            &edits,
+            create,
+            dry_run,
+            Mode::Auto,
+            engine.config.max_visible_tokens,
+        );
+        if resp.status == "error" {
+            let message = resp
+                .error
+                .as_ref()
+                .map(|e| e.message.clone())
+                .unwrap_or_else(|| "zero.edit failed".to_string());
+            let annotated = crate::annotate_write_failure(&message, false);
+            return Err(Box::new(CodeModeResult::error_with_kind(
+                resp.error
+                    .as_ref()
+                    .map(|e| e.code.as_str())
+                    .unwrap_or("edit_failed"),
+                annotated,
+                0,
+                false,
+            )));
+        }
+        let hunks_applied = resp
+            .telemetry
+            .as_ref()
+            .and_then(|t| t.get("hunks"))
+            .and_then(|v| v.as_u64())
+            .unwrap_or(edits.len() as u64);
+        Ok(OpOutcome::from_tool_response(&resp).with_value(|value| {
+            value["hunks_applied"] = json!(hunks_applied);
+        }))
+    }
+}
+
+fn exec_expand(engine: &TokenZeroEngine, args: &[Value]) -> OpResult {
+    let params = ExpandParams::from_codemode_args(args).map_err(operation_error)?;
     if !tokenzero_recovery::is_expandable_ref(&params.ref_id) {
         return Err(operation_error(format!(
             "expand takes a tz:// fz:// gz:// ref; to read a file use zero.fs.compound('read',{{path}}) -- got: {}",
@@ -2507,19 +2777,16 @@ fn exec_expand(engine: &TokenZeroEngine, args: &[Value]) -> Result<OpOutcome, Bo
     }
 }
 
-fn exec_expand_many(
-    engine: &TokenZeroEngine,
-    args: &[Value],
-) -> Result<OpOutcome, Box<CodeModeResult>> {
+fn exec_expand_many(engine: &TokenZeroEngine, args: &[Value]) -> OpResult {
     let items = require_array_arg(
-        args, 0,
+        args,
+        0,
         "zero.token.expandMany requires an array of tz://, fz://, or gz:// refs or item objects",
     )?;
     let mut results = Vec::with_capacity(items.len());
     let mut prevented = 0usize;
     for item in items {
-        let params = ExpandParams::from_expand_many_item(item)
-            .map_err(|message| operation_error(message))?;
+        let params = ExpandParams::from_expand_many_item(item).map_err(operation_error)?;
         if !tokenzero_recovery::is_expandable_ref(&params.ref_id) {
             return Err(operation_error(format!(
                 "expandMany takes a tz:// fz:// gz:// ref; to read a file use zero.fs.compound('read',{{path}}) -- got: {}",
@@ -2541,311 +2808,136 @@ fn exec_expand_many(
     .with_prevented_read_bytes(prevented))
 }
 
-fn exec_compact(
-    engine: &TokenZeroEngine,
-    args: &[Value],
-) -> Result<OpOutcome, Box<CodeModeResult>> {
-    exec_compact_inner(engine, args, false)
-}
-
-fn exec_compact_many(
-    engine: &TokenZeroEngine,
-    args: &[Value],
-) -> Result<OpOutcome, Box<CodeModeResult>> {
-    let items = require_array_arg(
-        args, 0, "zero.token.compactMany requires an array of payloads",
-    )?;
-    let mut results = Vec::with_capacity(items.len());
-    let mut refs = Vec::new();
-    for item in items.iter().cloned() {
-        let outcome = exec_compact_inner(engine, &[item], false)?;
-        collect_refs(outcome.as_value(), &mut refs);
-        results.push(outcome.into_value());
-    }
-    Ok(OpOutcome::from_catalog(json!({
-        "items": results,
-        "count": results.len(),
-        "refs": refs,
-    })))
-}
-
-fn exec_dedupe(args: &[Value]) -> Result<OpOutcome, Box<CodeModeResult>> {
-    let items = require_array_arg(args, 0, "zero.token.dedupe requires an array")?;
-    let mut seen = std::collections::BTreeSet::new();
-    let mut unique = Vec::new();
-    for item in items {
-        let key = serde_json::to_string(item).unwrap_or_default();
-        if seen.insert(key) {
-            unique.push(item.clone());
-        }
-    }
-    Ok(OpOutcome::from_catalog(json!({
-        "items": unique,
-        "count": unique.len(),
-    })))
-}
-
-fn exec_compact_max(
-    engine: &TokenZeroEngine,
-    args: &[Value],
-) -> Result<OpOutcome, Box<CodeModeResult>> {
-    exec_compact_inner(engine, args, true)
-}
-
-fn exec_compact_inner(
-    engine: &TokenZeroEngine,
-    args: &[Value],
-    aggressive: bool,
-) -> Result<OpOutcome, Box<CodeModeResult>> {
-    let data = match args.first() {
-        Some(Value::String(s)) => s.clone(),
-        Some(other) => serde_json::to_string(other).unwrap_or_default(),
-        None => {
-            return Err(operation_error("zero.token.compact/zero.compact requires data as first argument"));
-        }
-    };
-    let content_type = detect_content_type(&data, None);
-    let raw_tokens = count_tokens(&data);
-    let mut store = tokenzero_recovery::RecoveryStore::new(Some(engine.config.cache_path.clone()));
-    let stored = store
-        .store_payload(&data, content_type, None, None, None)
-        .ok();
-    let recovery_ref = stored.as_ref().map(|s| s.blob_ref.as_str());
-    let capsule = tokenzero_core::make_capsule_content_aware(
-        &data,
-        raw_tokens,
-        content_type,
-        engine.config.max_visible_tokens,
-        Some("compact"),
-        recovery_ref,
-        aggressive,
-    );
-    let mut refs_out = Vec::new();
-    if let Some(s) = &stored {
-        refs_out.push(tokenzero_core::ref_record(
-            "blob",
-            s.blob_ref.clone(),
-            data.len(),
-        ));
-        refs_out.push(tokenzero_core::ref_record(
-            "file",
-            s.file_ref.clone(),
-            data.len(),
-        ));
-    }
-    let strategy = if aggressive {
-        "content_aware_max"
-    } else {
-        "content_aware"
-    };
-    let ref_id = stored.as_ref().map(|s| s.blob_ref.as_str()).unwrap_or("");
-    let mut value = json!({
-        "text": capsule.text,
-        "status": "ok",
-        "raw_tokens": raw_tokens,
-        "visible_tokens": capsule.visible_tokens,
-        "compression_strategy": strategy,
-        "savings_pct": format!("{:.0}%", tokenzero_core::savings_ratio(raw_tokens, capsule.visible_tokens) * 100.0),
-    });
-    if !ref_id.is_empty() {
-        value["ref"] = json!(ref_id);
-    }
-    if refs_out.len() > 1 {
-        value["refs"] = json!(refs_out.iter().map(|r| &r.ref_id).collect::<Vec<_>>());
-    }
-    Ok(OpOutcome {
-        value,
-        prevented_read_bytes: 0,
-    })
-}
-
-fn exec_ingest(engine: &TokenZeroEngine, args: &[Value]) -> Result<OpOutcome, Box<CodeModeResult>> {
-    let text = require_str_arg(args, 0, "zero.ingest requires text as first argument")?;
-    let opts = Opts::from_arg(args, 1);
-    let mode = opts.mode_or("mode", Mode::Auto);
-    let source = opts.str("source").unwrap_or("codemode-ingest");
-    let content_type = detect_content_type(text, None);
-
-    let resp = engine.ingest(text, content_type, mode, source);
-    Ok(OpOutcome::from_tool_response(&resp))
-}
-
-fn exec_mem(engine: &TokenZeroEngine) -> Result<OpOutcome, Box<CodeModeResult>> {
-    let resp = engine.mem();
-    Ok(OpOutcome::from_tool_response(&resp))
-}
-
-fn exec_recall(engine: &TokenZeroEngine, args: &[Value]) -> Result<OpOutcome, Box<CodeModeResult>> {
-    let query = require_str_arg(
-        args,
-        0,
-        "zero.recall requires a query string as first argument",
-    )?;
-    let opts = Opts::from_arg(args, 1);
-    let mode = opts.mode_or("mode", Mode::Auto);
-    let max_hits = opts.usize("max_hits").unwrap_or(50);
-    let max_visible = opts
-        .usize("max_visible_tokens")
-        .unwrap_or(engine.config.max_visible_tokens);
-    let resp = engine.recall(query, max_hits, mode, max_visible);
-    Ok(OpOutcome::from_tool_response(&resp))
-}
-
-fn exec_fetch(engine: &TokenZeroEngine, args: &[Value]) -> Result<OpOutcome, Box<CodeModeResult>> {
-    let url = require_str_arg(
-        args,
-        0,
-        "zero.fetch requires an http(s) URL as first argument",
-    )?;
-    let opts = Opts::from_arg(args, 1);
-    let mode = opts.mode_or("mode", Mode::Auto);
-    let ttl_seconds = opts.usize("ttl_seconds");
-    let fresh = opts.bool("fresh").unwrap_or(false);
-    let max_visible = opts
-        .usize("max_visible_tokens")
-        .unwrap_or(engine.config.max_visible_tokens);
-    let resp = engine.fetch(url, ttl_seconds, fresh, mode, max_visible);
-    Ok(OpOutcome::from_tool_response(&resp))
-}
-
-fn exec_cache_pack(
-    engine: &TokenZeroEngine,
-    args: &[Value],
-) -> Result<OpOutcome, Box<CodeModeResult>> {
-    let opts = Opts::from_arg(args, 0);
-    let scope = opts.str("scope").unwrap_or("agent");
-    let resp = engine.cache_pack(scope);
-    Ok(OpOutcome::from_tool_response(&resp))
-}
-
-fn exec_rewrite(args: &[Value]) -> Result<OpOutcome, Box<CodeModeResult>> {
-    let command = require_str_arg(
-        args,
-        0,
-        "zero.rewrite requires a command string as first argument",
-    )?;
-    let opts = Opts::from_arg(args, 1);
-    let mode = opts.str("mode").unwrap_or("safe");
-    let value = serde_json::to_value(rewrite_command(command, mode, true)).map_err(|err| {
-        operation_error(format!("zero.rewrite failed: {err}"))
-    })?;
-    Ok(OpOutcome::from_catalog(value))
-}
-
-fn exec_discover() -> Result<OpOutcome, Box<CodeModeResult>> {
-    Ok(OpOutcome::from_catalog(
-        serde_json::to_value(discover()).unwrap_or(Value::Null),
-    ))
-}
-
-fn exec_batch(engine: &TokenZeroEngine, args: &[Value]) -> Result<OpOutcome, Box<CodeModeResult>> {
-    let ops = match args.first() {
-        Some(Value::Array(items)) => items.clone(),
-        Some(Value::String(text)) => serde_json::from_str(text).map_err(|err| {
-            operation_error(format!("zero.batch ops is not valid JSON: {err}"))
-        })?,
-        _ => {
-            return Err(operation_error("zero.batch requires an array of {tool, args} objects as first argument"));
-        }
-    };
-    if ops.is_empty() {
-        return Err(operation_error("zero.batch requires at least one op"));
-    }
-    let wrapped = json!({"ops": ops, "mode": "auto"});
-    match crate::tools::batch_response(engine, &wrapped) {
-        Ok(resp) => Ok(OpOutcome::from_tool_response(&resp)),
-        Err(error) => Err(operation_error(error.message_text())),
-    }
-}
-
-
-fn exec_pipe(
-    engine: &TokenZeroEngine,
-    work_root: &Path,
-    args: &[Value],
-) -> Result<OpOutcome, Box<CodeModeResult>> {
-    let steps = match args.first() {
-        Some(Value::Array(items)) => items.clone(),
-        Some(Value::String(text)) => serde_json::from_str(text).map_err(|err| {
-            operation_error(format!("zero.pipe: steps is not valid JSON array: {err}"))
-        })?,
-        _ => {
-            return Err(operation_error("zero.pipe requires an array of {method, args} steps"));
-        }
-    };
-    if steps.is_empty() {
-        return Err(operation_error("zero.pipe requires at least one step"));
-    }
-    let mut results: Vec<Value> = Vec::with_capacity(steps.len());
-    let mut pipe_scope: HashMap<String, Value> = HashMap::new();
-    let mut prevented = 0usize;
-    for (idx, step) in steps.iter().enumerate() {
-        let method = step.get("method").and_then(|v| v.as_str()).ok_or_else(|| {
-            operation_error(format!("zero.pipe: step {idx} missing 'method' string"))
-        })?;
-        let step_args: Vec<Expr> = match step.get("args") {
-            Some(Value::Array(arr)) => arr
-                .iter()
-                .map(|v| match v {
-                    Value::String(s) if s == "_prev" => Expr::VarRef("_prev".to_string()),
-                    Value::String(s) => Expr::StringLit(s.clone()),
-                    _ => Expr::StringLit(serde_json::to_string(v).unwrap_or_default()),
-                })
-                .collect(),
-            _ => Vec::new(),
-        };
-        let call = MethodCall {
-            method: method.to_string(),
-            args: step_args,
-        };
-        let outcome = dispatch(engine, work_root, &call, &pipe_scope)?;
-        prevented = prevented.saturating_add(outcome.prevented_read_bytes);
-        let val = outcome.into_value();
-        pipe_scope.insert("_prev".to_string(), val.clone());
-        pipe_scope.insert(format!("_step{idx}"), val.clone());
-        results.push(val);
-    }
-    let full = json!({
-        "steps": results.len(),
-        "results": results,
-        "last": results.last().cloned().unwrap_or(Value::Null),
-    });
-    if args
-        .get(1)
-        .and_then(Value::as_object)
-        .and_then(|opts| opts.get("raw"))
-        .and_then(Value::as_bool)
-        .unwrap_or(false)
+fn exec_compact_inner(engine: &TokenZeroEngine, args: &[Value], aggressive: bool) -> OpResult {
     {
-        return Ok(OpOutcome::from_catalog(full).with_prevented_read_bytes(prevented));
+        let data = data_arg(
+            args,
+            "zero.token.compact/zero.compact requires data as first argument",
+        )?;
+        let content_type = detect_content_type(&data, None);
+        let raw_tokens = count_tokens(&data);
+        let mut store =
+            tokenzero_recovery::RecoveryStore::new(Some(engine.config.cache_path.clone()));
+        let stored = store
+            .store_payload(&data, content_type, None, None, None)
+            .ok();
+        let recovery_ref = stored.as_ref().map(|s| s.blob_ref.as_str());
+        let capsule = tokenzero_core::make_capsule_content_aware(
+            &data,
+            raw_tokens,
+            content_type,
+            engine.config.max_visible_tokens,
+            Some("compact"),
+            recovery_ref,
+            aggressive,
+        );
+        let mut refs_out = Vec::new();
+        if let Some(s) = &stored {
+            refs_out.push(tokenzero_core::ref_record(
+                "blob",
+                s.blob_ref.clone(),
+                data.len(),
+            ));
+            refs_out.push(tokenzero_core::ref_record(
+                "file",
+                s.file_ref.clone(),
+                data.len(),
+            ));
+        }
+        let strategy = if aggressive {
+            "content_aware_max"
+        } else {
+            "content_aware"
+        };
+        let ref_id = stored.as_ref().map(|s| s.blob_ref.as_str()).unwrap_or("");
+        let mut value = json!({ "text": capsule.text, "status": "ok", "raw_tokens": raw_tokens, "visible_tokens": capsule.visible_tokens, "compression_strategy": strategy, "savings_pct": format!("{:.0}%", tokenzero_core::savings_ratio(raw_tokens, capsule.visible_tokens) * 100.0) });
+        if !ref_id.is_empty() {
+            value["ref"] = json!(ref_id);
+        }
+        if refs_out.len() > 1 {
+            value["refs"] = json!(refs_out.iter().map(|r| &r.ref_id).collect::<Vec<_>>());
+        }
+        Ok(OpOutcome {
+            value,
+            prevented_read_bytes: 0,
+        })
     }
-    let text = serde_json::to_string(&full).unwrap_or_default();
-    let content_type = detect_content_type(&text, None);
-    let mut store = tokenzero_recovery::RecoveryStore::new(Some(engine.config.cache_path.clone()));
-    let stored = store
-        .store_payload(&text, content_type, None, None, None)
-        .ok();
-    let ref_id = stored
-        .as_ref()
-        .map(|s| s.blob_ref.as_str().to_string())
-        .unwrap_or_default();
-    if ref_id.is_empty() {
-        return Ok(OpOutcome::from_catalog(full).with_prevented_read_bytes(prevented));
-    }
-    Ok(OpOutcome::from_catalog(json!({
-        "ref": ref_id,
-        "preview": first_line_preview(&text, 256usize.saturating_sub(count_tokens(&ref_id))),
-    }))
-    .with_prevented_read_bytes(prevented))
 }
 
-fn exec_pick(args: &[Value]) -> Result<OpOutcome, Box<CodeModeResult>> {
-    let source = args.first().ok_or_else(|| {
-        operation_error("zero.pick requires a source object as first argument")
-    })?;
-    let obj = source.as_object().ok_or_else(|| {
-        operation_error("zero.pick: first argument must be an object")
-    })?;
+fn exec_pipe(engine: &TokenZeroEngine, work_root: &Path, args: &[Value]) -> OpResult {
+    {
+        let steps = array_or_json_arg(
+            args,
+            "zero.pipe requires an array of {method, args} steps",
+            |err| format!("zero.pipe: steps is not valid JSON array: {err}"),
+        )?;
+        if steps.is_empty() {
+            return Err(operation_error("zero.pipe requires at least one step"));
+        }
+        let mut results: Vec<Value> = Vec::with_capacity(steps.len());
+        let mut pipe_scope: Scope = HashMap::new();
+        let mut prevented = 0usize;
+        for (idx, step) in steps.iter().enumerate() {
+            let method = step.get("method").and_then(|v| v.as_str()).ok_or_else(|| {
+                operation_error(format!("zero.pipe: step {idx} missing 'method' string"))
+            })?;
+            let step_args: Vec<Expr> = match step.get("args") {
+                Some(Value::Array(arr)) => arr
+                    .iter()
+                    .map(|v| match v {
+                        Value::String(s) if s == "_prev" => Expr::VarRef("_prev".to_string()),
+                        Value::String(s) => Expr::StringLit(s.clone()),
+                        _ => Expr::StringLit(serde_json::to_string(v).unwrap_or_default()),
+                    })
+                    .collect(),
+                _ => Vec::new(),
+            };
+            let call = MethodCall {
+                method: method.to_string(),
+                args: step_args,
+            };
+            let outcome = dispatch(engine, work_root, &call, &pipe_scope)?;
+            prevented = prevented.saturating_add(outcome.prevented_read_bytes);
+            let val = outcome.into_value();
+            pipe_scope.insert("_prev".to_string(), val.clone());
+            pipe_scope.insert(format!("_step{idx}"), val.clone());
+            results.push(val);
+        }
+        let full = json!({ "steps": results.len(), "results": results, "last": results.last().cloned().unwrap_or(Value::Null) });
+        if args
+            .get(1)
+            .and_then(Value::as_object)
+            .and_then(|opts| opts.get("raw"))
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+        {
+            return Ok(OpOutcome::from_catalog(full).with_prevented_read_bytes(prevented));
+        }
+        let text = serde_json::to_string(&full).unwrap_or_default();
+        let content_type = detect_content_type(&text, None);
+        let mut store =
+            tokenzero_recovery::RecoveryStore::new(Some(engine.config.cache_path.clone()));
+        let stored = store
+            .store_payload(&text, content_type, None, None, None)
+            .ok();
+        let ref_id = stored
+            .as_ref()
+            .map(|s| s.blob_ref.as_str().to_string())
+            .unwrap_or_default();
+        if ref_id.is_empty() {
+            return Ok(OpOutcome::from_catalog(full).with_prevented_read_bytes(prevented));
+        }
+        Ok(OpOutcome::from_catalog(json!({ "ref": ref_id, "preview": first_line_preview(&text, 256usize.saturating_sub(count_tokens(&ref_id))) })).with_prevented_read_bytes(prevented))
+    }
+}
+
+fn exec_pick(args: &[Value]) -> OpResult {
+    let source = args
+        .first()
+        .ok_or_else(|| operation_error("zero.pick requires a source object as first argument"))?;
+    let obj = source
+        .as_object()
+        .ok_or_else(|| operation_error("zero.pick: first argument must be an object"))?;
     let keys: Vec<&str> = match args.get(1) {
         Some(Value::Array(arr)) => arr.iter().filter_map(|v| v.as_str()).collect(),
         Some(Value::String(k)) => {
@@ -2858,94 +2950,39 @@ fn exec_pick(args: &[Value]) -> Result<OpOutcome, Box<CodeModeResult>> {
             ks
         }
         _ => {
-            return Err(operation_error("zero.pick: second argument must be an array of keys or key strings"));
+            return Err(operation_error(
+                "zero.pick: second argument must be an array of keys or key strings",
+            ));
         }
     };
     let picked: serde_json::Map<String, Value> = keys
         .into_iter()
         .filter_map(|key| obj.get(key).map(|v| (key.to_string(), v.clone())))
         .collect();
-    Ok(OpOutcome::from_catalog(Value::Object(picked)))
+    catalog(Value::Object(picked))
 }
 
-fn exec_filter_lines(args: &[Value]) -> Result<OpOutcome, Box<CodeModeResult>> {
-    let source = args.first().ok_or_else(|| {
-        operation_error("zero.filter_lines requires a source as first argument")
-    })?;
-    let text = source
-        .as_str()
-        .or_else(|| source.get("text").and_then(|v| v.as_str()))
-        .unwrap_or("");
-    let pattern = args.get(1).and_then(|v| v.as_str()).ok_or_else(|| {
-        operation_error("zero.filter_lines requires a pattern string as second argument")
-    })?;
-    let filtered: Vec<&str> = text.lines().filter(|line| line.contains(pattern)).collect();
-    Ok(OpOutcome::from_catalog(json!({
-        "text": filtered.join("\n"),
-        "lines": filtered.len(),
-        "pattern": pattern,
-    })))
-}
-
-fn exec_count(args: &[Value]) -> Result<OpOutcome, Box<CodeModeResult>> {
-    let value = args.first().ok_or_else(|| {
-        operation_error("zero.count requires a value as first argument")
-    })?;
-    let count = if let Some(items) = value.as_array() {
-        items.len()
-    } else {
-        text_from_value(value)
-            .map(|text| text.lines().count())
-            .unwrap_or(0)
-    };
-    Ok(OpOutcome::from_catalog(json!(count)))
-}
-
-fn exec_first(args: &[Value]) -> Result<OpOutcome, Box<CodeModeResult>> {
-    let value = args.first().ok_or_else(|| {
-        operation_error("zero.first requires a value as first argument")
-    })?;
-    let n = args.get(1).and_then(Value::as_u64).unwrap_or(1).max(1) as usize;
-    if let Some(items) = value.as_array() {
-        if n == 1 {
-            return Ok(OpOutcome::from_catalog(
-                items.first().cloned().unwrap_or(Value::Null),
-            ));
+fn exec_first(args: &[Value]) -> OpResult {
+    {
+        let value = args
+            .first()
+            .ok_or_else(|| operation_error("zero.first requires a value as first argument"))?;
+        let n = args.get(1).and_then(Value::as_u64).unwrap_or(1).max(1) as usize;
+        if let Some(items) = value.as_array() {
+            if n == 1 {
+                return catalog(items.first().cloned().unwrap_or(Value::Null));
+            }
+            return catalog(Value::Array(items.iter().take(n).cloned().collect()));
         }
-        return Ok(OpOutcome::from_catalog(Value::Array(
-            items.iter().take(n).cloned().collect(),
-        )));
+        let text = text_from_value(value).unwrap_or("");
+        let lines = text.lines().take(n).collect::<Vec<_>>();
+        let out = if n == 1 {
+            lines.first().copied().unwrap_or("").to_string()
+        } else {
+            lines.join("\n")
+        };
+        catalog(json!(out))
     }
-    let text = text_from_value(value).unwrap_or("");
-    let lines = text.lines().take(n).collect::<Vec<_>>();
-    let out = if n == 1 {
-        lines.first().copied().unwrap_or("").to_string()
-    } else {
-        lines.join("\n")
-    };
-    Ok(OpOutcome::from_catalog(json!(out)))
-}
-
-fn exec_verdict(args: &[Value]) -> Result<OpOutcome, Box<CodeModeResult>> {
-    let ok = args.first().map(value_truthy).unwrap_or(false);
-    let detail = args
-        .get(1)
-        .and_then(Value::as_str)
-        .unwrap_or("")
-        .lines()
-        .next()
-        .unwrap_or("")
-        .to_string();
-    Ok(OpOutcome::from_catalog(
-        json!({ "ok": ok, "detail": detail }),
-    ))
-}
-
-fn exec_raw(args: &[Value]) -> Result<OpOutcome, Box<CodeModeResult>> {
-    let value = args.first().cloned().unwrap_or(Value::Null);
-    Ok(OpOutcome::from_catalog(
-        json!({ "__tz_raw": true, "value": value }),
-    ))
 }
 
 fn text_from_value(value: &Value) -> Option<&str> {
@@ -2965,36 +3002,6 @@ fn value_truthy(value: &Value) -> bool {
     }
 }
 
-fn exec_count_tokens(args: &[Value]) -> Result<OpOutcome, Box<CodeModeResult>> {
-    let text = match args.first() {
-        Some(Value::String(s)) => s.clone(),
-        Some(other) => serde_json::to_string(other).unwrap_or_default(),
-        None => {
-            return Err(operation_error("zero.count_tokens requires data as first argument"));
-        }
-    };
-    let tokens = count_tokens(&text);
-    Ok(OpOutcome::from_catalog(json!({
-        "tokens": tokens,
-        "bytes": text.len(),
-        "lines": text.lines().count(),
-    })))
-}
-
-fn exec_assert(args: &[Value]) -> Result<OpOutcome, Box<CodeModeResult>> {
-    let condition = args.first().is_some_and(value_truthy);
-    let message = args
-        .get(1)
-        .and_then(|v| v.as_str())
-        .unwrap_or("assertion failed");
-    if condition {
-        Ok(OpOutcome::from_catalog(json!({ "ok": true })))
-    } else {
-        Err(operation_error(message.to_string()))
-    }
-}
-
-
 fn collect_refs(value: &Value, refs: &mut Vec<String>) {
     if let Some(r) = value.get("ref").and_then(|v| v.as_str()) {
         if r.starts_with("tz://") && !refs.contains(&r.to_string()) {
@@ -3010,18 +3017,8 @@ fn collect_refs(value: &Value, refs: &mut Vec<String>) {
     }
 }
 
-fn result_visible_tokens(value: &Value) -> usize {
-    value
-        .get("visible_tokens")
-        .and_then(|v| v.as_u64())
-        .unwrap_or(0) as usize
-}
-
-fn result_raw_tokens(value: &Value) -> usize {
-    value
-        .get("raw_tokens")
-        .and_then(|v| v.as_u64())
-        .unwrap_or(0) as usize
+fn result_token_field(value: &Value, field: &str) -> usize {
+    value.get(field).and_then(|v| v.as_u64()).unwrap_or(0) as usize
 }
 
 /// Byte-stable prefix length aligned to char boundaries, used for the
@@ -3074,8 +3071,10 @@ mod accumulator_bounds {
         let stale = Value::String("stale exact payload".to_string());
         record_exact_expand_payload(stale.as_str().unwrap());
         assert!(is_exact_expand_value(&stale));
-        let result = execute_codemode("return 'fresh'");
-        assert_eq!(result.status, CodeModeStatus::Completed);
+        assert_eq!(
+            execute_codemode("return 'fresh'").status,
+            CodeModeStatus::Completed
+        );
         assert!(!is_exact_expand_value(&stale));
     }
 }

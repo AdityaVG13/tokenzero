@@ -1,6 +1,7 @@
 use crate::shell_parse::split_shell_segments;
 use crate::*;
 
+#[derive(Default)]
 pub(crate) struct InventoryStats<'a> {
     pub files: usize,
     pub dirs: usize,
@@ -13,7 +14,7 @@ pub(crate) fn inventory_stats<'a>(
     sample_limit: usize,
     is_file: impl Fn(&str) -> bool,
 ) -> InventoryStats<'a> {
-    let mut stats = InventoryStats { files: 0, dirs: 0, line_counts: Vec::new(), paths: Vec::new() };
+    let mut stats = InventoryStats::default();
     for line in output.lines().map(str::trim) {
         if line.is_empty() || line.starts_with("===") || line.starts_with("---") {
             continue;
@@ -26,7 +27,11 @@ pub(crate) fn inventory_stats<'a>(
                 stats.paths.push(line);
             }
         }
-        if line.split_whitespace().next().is_some_and(|value| value.parse::<usize>().is_ok()) {
+        if line
+            .split_whitespace()
+            .next()
+            .is_some_and(|value| value.parse::<usize>().is_ok())
+        {
             stats.line_counts.push(line);
         }
     }
@@ -42,10 +47,6 @@ pub fn is_repo_inventory_command(command: &str) -> bool {
             || lower.contains("get-childitem")
             || lower.contains("gci ")
             || segment_is_bare_ls(&lower);
-    // The inventory view renders ALL output lines as file paths, so every
-    // segment must be a lister or a pure filter; `ls -d x; other-tool run`
-    // must not have other-tool's output swallowed as sample paths (and
-    // "tools -v" must not match the "ls -" substring at all).
     inventory_shape && all_segments_inventory_safe(command)
 }
 
@@ -56,13 +57,31 @@ fn segment_is_bare_ls(lower: &str) -> bool {
 }
 
 const INVENTORY_COMMANDS: &[&str] = &[
-    "ls", "find", "tree", "dir", "gci", "get-childitem", "sort", "wc", "head", "tail",
-    "uniq", "cut", "echo", "cat", "sort-object", "select-object", "where-object", "measure-object",
+    "ls",
+    "find",
+    "tree",
+    "dir",
+    "gci",
+    "get-childitem",
+    "sort",
+    "wc",
+    "head",
+    "tail",
+    "uniq",
+    "cut",
+    "echo",
+    "cat",
+    "sort-object",
+    "select-object",
+    "where-object",
+    "measure-object",
 ];
 
 fn all_segments_inventory_safe(command: &str) -> bool {
     split_shell_segments(command).iter().all(|segment| {
-        split_shell_words(segment).first().map(|word| shell_command_basename(word))
+        split_shell_words(segment)
+            .first()
+            .map(|word| shell_command_basename(word))
             .is_some_and(|first| INVENTORY_COMMANDS.contains(&first.as_str()))
     })
 }
@@ -72,7 +91,10 @@ pub fn repo_inventory_view(command: &str, output: &str) -> String {
     let mut out = String::new();
     out.push_str("repo_inventory:\n");
     out.push_str(&format!("command: {command}\n"));
-    out.push_str(&format!("files_seen: {}\ndirs_seen: {}\n", stats.files, stats.dirs));
+    out.push_str(&format!(
+        "files_seen: {}\ndirs_seen: {}\n",
+        stats.files, stats.dirs
+    ));
     for (label, values, limit) in [
         ("linecount_summary", &stats.line_counts, 12),
         ("sample_paths", &stats.paths, 20),
@@ -122,12 +144,16 @@ pub fn structured_shell_view(command: &str, stdout: &str, stderr: &str) -> Strin
         let mut out = String::from("status_summary:\n");
         for line in combined.lines().take(80) {
             let lower = line.to_ascii_lowercase();
-            if lower.contains("error")
-                || lower.contains("failed")
-                || lower.contains("crash")
-                || lower.contains("pending")
-                || lower.contains("terminating")
-                || lower.contains("unhealthy")
+            if [
+                "error",
+                "failed",
+                "crash",
+                "pending",
+                "terminating",
+                "unhealthy",
+            ]
+            .iter()
+            .any(|needle| lower.contains(needle))
                 || line.starts_with("NAME")
             {
                 out.push_str(line);
@@ -157,24 +183,20 @@ pub(crate) fn is_search_shell_command(command: &str) -> bool {
         };
         if is_search_command(&first) {
             any_search = true;
-        } else if !is_search_pipeline_filter(&first) {
+        } else if !SEARCH_FILTERS.contains(&first.as_str()) {
             return false;
         }
     }
     any_search
 }
 
-const SEARCH_FILTERS: &[&str] = &["head", "tail", "sort", "uniq", "wc", "cut", "tr", "cat", "tee"];
-
-fn is_search_pipeline_filter(basename: &str) -> bool {
-    SEARCH_FILTERS.contains(&basename)
-}
+const SEARCH_FILTERS: &[&str] = &[
+    "head", "tail", "sort", "uniq", "wc", "cut", "tr", "cat", "tee",
+];
 
 pub(crate) fn is_search_command(command: &str) -> bool {
-    matches!(
-        shell_command_basename(command).as_str(),
-        "rg" | "grep" | "egrep" | "fgrep" | "ag" | "ack" | "findstr"
-    )
+    const COMMANDS: &[&str] = &["rg", "grep", "egrep", "fgrep", "ag", "ack", "findstr"];
+    COMMANDS.contains(&shell_command_basename(command).as_str())
 }
 
 pub(crate) fn shell_command_basename(command: &str) -> String {
@@ -219,15 +241,23 @@ pub(crate) fn is_expected_false_exit(
     is_expected_false_segment(command, stdout, stderr)
 }
 
-pub(crate) fn is_expected_false_pipeline_exit(command: &str, stdout: &str, stderr: &str) -> bool {
+fn is_expected_false_pipeline_edge(command: &str, stdout: &str, stderr: &str, first: bool) -> bool {
     let segments = split_shell_segments(command);
-    let Some((last, upstream)) = segments.split_last() else {
-        return false;
+    let edge = if first {
+        segments.split_first()
+    } else {
+        segments.split_last()
     };
-    is_expected_false_segment(last, stdout, stderr)
-        && !upstream
-            .iter()
-            .any(|segment| is_explicit_false_segment(segment))
+    edge.is_some_and(|(candidate, others)| {
+        is_expected_false_segment(candidate, stdout, stderr)
+            && !others
+                .iter()
+                .any(|segment| is_explicit_false_segment(segment))
+    })
+}
+
+pub(crate) fn is_expected_false_pipeline_exit(command: &str, stdout: &str, stderr: &str) -> bool {
+    is_expected_false_pipeline_edge(command, stdout, stderr, false)
 }
 
 pub(crate) fn is_expected_false_segment(command: &str, stdout: &str, stderr: &str) -> bool {
@@ -268,12 +298,10 @@ pub(crate) fn is_masked_expected_false_or(
     stderr: &str,
     exit_code: Option<i32>,
 ) -> bool {
-    if exit_code != Some(0) {
-        return false;
-    }
-    first_or_list_lhs(command)
-        .filter(|segment| !segment.is_empty())
-        .is_some_and(|segment| is_expected_false_segment(&segment, stdout, stderr))
+    exit_code == Some(0)
+        && first_or_list_lhs(command)
+            .filter(|segment| !segment.is_empty())
+            .is_some_and(|segment| is_expected_false_segment(&segment, stdout, stderr))
 }
 
 pub(crate) fn is_masked_expected_false_pipeline(
@@ -282,21 +310,10 @@ pub(crate) fn is_masked_expected_false_pipeline(
     stderr: &str,
     exit_code: Option<i32>,
 ) -> bool {
-    if exit_code != Some(0) || !stderr.trim().is_empty() {
-        return false;
-    }
-    let features = shell_operator_features(command);
-    if !features.contains(&"pipeline") {
-        return false;
-    }
-    let segments = split_shell_segments(command);
-    let Some((first, rest)) = segments.split_first() else {
-        return false;
-    };
-    is_expected_false_segment(first, stdout, stderr)
-        && !rest
-            .iter()
-            .any(|segment| is_explicit_false_segment(segment))
+    exit_code == Some(0)
+        && stderr.trim().is_empty()
+        && shell_operator_features(command).contains(&"pipeline")
+        && is_expected_false_pipeline_edge(command, stdout, stderr, true)
 }
 
 pub(crate) fn is_explicit_false_segment(segment: &str) -> bool {
@@ -323,9 +340,16 @@ pub(crate) fn git_subcommand_index(words: &[String]) -> Option<usize> {
 }
 
 pub(crate) fn search_shell_view(stdout: &str, stderr: &str) -> String {
-    let matches: Vec<_> = stdout.lines().map(str::trim_end).filter(|line| !line.is_empty()).collect();
-    let diagnostics: Vec<_> = stderr.lines().map(str::trim_end)
-        .filter(|line| !line.is_empty() && looks_critical_line(line)).collect();
+    let matches: Vec<_> = stdout
+        .lines()
+        .map(str::trim_end)
+        .filter(|line| !line.is_empty())
+        .collect();
+    let diagnostics: Vec<_> = stderr
+        .lines()
+        .map(str::trim_end)
+        .filter(|line| !line.is_empty() && looks_critical_line(line))
+        .collect();
 
     let mut out = String::from("search_summary:\n");
     out.push_str(&format!("matches_seen: {}\n", matches.len()));

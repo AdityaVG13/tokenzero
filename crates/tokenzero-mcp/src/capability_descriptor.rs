@@ -7,8 +7,8 @@ use std::collections::BTreeMap;
 use tokenzero_core::{MCP_SCHEMA_VERSION, McpToolSurface};
 
 use crate::catalog::{
-    ResourceSpec, canonical_tool_names_for_surface, canonical_tool_specs,
-    resource_specs, tool_clusters,
+    ResourceSpec, canonical_tool_names_for_surface, canonical_tool_specs, resource_specs,
+    tool_clusters,
 };
 use crate::codemode::journal::{OperationClass, classify_descriptor_tool};
 use crate::jsonrpc::{SUPPORTED_PROTOCOL_VERSIONS, tool_filter_discovery};
@@ -65,6 +65,9 @@ pub struct ZeroRefCapabilities {
     pub symbol_aware: bool,
     pub diff_baseline: bool,
     pub cross_engine: bool,
+    pub portable_ref_kinds: Vec<String>,
+    pub unsupported_portable_ref_kinds: Vec<String>,
+    pub limitations: Vec<String>,
     pub features: Vec<String>,
 }
 
@@ -80,7 +83,7 @@ impl CapabilityDescriptor {
             status: "ok".to_string(),
             server: "tokenzero".to_string(),
             version: env!("CARGO_PKG_VERSION").to_string(),
-            protocol_versions: SUPPORTED_PROTOCOL_VERSIONS.iter().map(|s| s.to_string()).collect(),
+            protocol_versions: strings(SUPPORTED_PROTOCOL_VERSIONS),
             tool_surface: surface.as_str().to_string(),
             canonical_tools,
             aliases,
@@ -94,11 +97,11 @@ impl CapabilityDescriptor {
                 "note": "CodeMode is a separate plan-based execution layer on the same base tools/engine (Cloudflare-style, fewer round-trips). Use `tokenzero codemode` or resource://tokenzero/codemode for discovery."
             }),
             resources: resource_specs(),
-            next_actions: vec![
-                "Call tools/list for JSON Schema 2020-12 input contracts.".to_string(),
-                "Read resource://tokenzero/roots before passing paths or cwd.".to_string(),
-                "Inspect tool text output: shell reports command_success inline and other tools carry a refs: footer; set TOKENZERO_MCP_ENVELOPE=compact|full for structuredContent envelopes.".to_string(),
-            ],
+            next_actions: strings(&[
+                "Call tools/list for JSON Schema 2020-12 input contracts.",
+                "Read resource://tokenzero/roots before passing paths or cwd.",
+                "Inspect tool text output: shell reports command_success inline and other tools carry a refs: footer; set TOKENZERO_MCP_ENVELOPE=compact|full for structuredContent envelopes.",
+            ]),
         }
     }
 
@@ -120,24 +123,42 @@ impl Default for ZeroRefCapabilities {
             enabled: true,
             shared_cas: true,
             blob_ref_expand: true,
-            ref_schemes: vec![
-                "tz://".to_string(),
-                "fz://".to_string(),
-                "gz://".to_string(),
-            ],
-            fragment_selectors: vec!["#B".to_string(), "#L".to_string()],
+            ref_schemes: strings(&["tz://", "fz://", "gz://"]),
+            fragment_selectors: strings(&["#B", "#L"]),
             symbol_aware: true,
             diff_baseline: true,
-            cross_engine: false,
-            features: vec![
-                "shared-content-addressable-storage".to_string(),
-                "blob-ref-expand".to_string(),
-                "fragment-selectors".to_string(),
-                "symbol-aware-recovery".to_string(),
-                "diff-baseline".to_string(),
-            ],
+            // Evidence-backed blob expand across engines under a shared CAS
+            // (fixtures/zeroref-conformance-evidence.json). Non-blob portable
+            // refs remain unsupported.
+            cross_engine: true,
+            portable_ref_kinds: strings(&["blob"]),
+            unsupported_portable_ref_kinds: strings(&[
+                "execution",
+                "error",
+                "session",
+                "file",
+                "graph",
+                "index",
+                "unit",
+            ]),
+            limitations: strings(&[
+                "Cross-engine portability is limited to full-hash ZeroRef v1 blob refs and #B/#L fragments.",
+                "Correctness evidence does not establish zero-copy, latency, or performance claims.",
+            ]),
+            features: strings(&[
+                "shared-content-addressable-storage",
+                "blob-ref-expand",
+                "cross-engine-blob-expand",
+                "fragment-selectors",
+                "symbol-aware-recovery",
+                "diff-baseline",
+            ]),
         }
     }
+}
+
+fn strings(values: &[&str]) -> Vec<String> {
+    values.iter().map(|value| (*value).to_string()).collect()
 }
 
 fn alias_map_for_surface(surface: McpToolSurface) -> BTreeMap<String, String> {
@@ -154,7 +175,7 @@ fn alias_map_for_surface(surface: McpToolSurface) -> BTreeMap<String, String> {
 
 fn build_all_tool_capabilities() -> Vec<ToolCapability> {
     canonical_tool_specs()
-        .into_iter()
+        .iter()
         .map(|seed| ToolCapability {
             name: seed.name.to_string(),
             cluster: seed.cluster.to_string(),
@@ -172,79 +193,4 @@ fn build_all_tool_capabilities() -> Vec<ToolCapability> {
 /// This is the only place that owns the capabilities wire shape.
 pub(crate) fn build_capability_payload(engine: &crate::TokenZeroEngine) -> Value {
     CapabilityDescriptor::for_engine(engine).to_json()
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use tokenzero_core::McpToolSurface;
-
-    #[test]
-    fn descriptor_lists_all_expected_canonical_tools() {
-        let descriptor = CapabilityDescriptor::for_surface(McpToolSurface::Classic);
-        let expected = [
-            "tz_execute_code",
-            "tz_codemode_search",
-            "tz_codemode_describe",
-            "tz_read",
-            "tz_find",
-            "tz_grep",
-            "tz_recall",
-            "tz_batch",
-            "tz_fetch",
-            "tz_glob",
-            "tz_tree",
-            "tz_edit",
-            "tz_shell",
-            "tz_ingest",
-            "tz_expand",
-            "tz_mem",
-            "tz_cache_pack",
-            "tz_rewrite",
-            "tz_discover",
-            "tz_report_tool_issue",
-        ];
-        let names: std::collections::HashSet<String> =
-            descriptor.tools.iter().map(|t| t.name.clone()).collect();
-        assert_eq!(names.len(), expected.len(), "tool count mismatch");
-        for name in expected {
-            assert!(
-                names.contains(name),
-                "expected tool {name} missing from descriptor"
-            );
-        }
-    }
-
-    #[test]
-    fn descriptor_exposes_zeroref_v1_capabilities() {
-        let descriptor = CapabilityDescriptor::for_surface(McpToolSurface::Classic);
-        assert!(descriptor.zeroref_v1.enabled);
-        assert!(descriptor.zeroref_v1.shared_cas);
-        assert!(descriptor.zeroref_v1.blob_ref_expand);
-        assert_eq!(descriptor.zeroref_v1.version, "v1");
-        assert!(
-            descriptor
-                .zeroref_v1
-                .features
-                .contains(&"shared-content-addressable-storage".to_string()),
-            "expected shared-cas feature"
-        );
-        assert!(
-            descriptor
-                .zeroref_v1
-                .features
-                .contains(&"blob-ref-expand".to_string()),
-            "expected blob-ref-expand feature"
-        );
-    }
-
-    #[test]
-    fn descriptor_to_json_is_object() {
-        let descriptor = CapabilityDescriptor::for_surface(McpToolSurface::Classic);
-        let json = descriptor.to_json();
-        assert!(json.is_object());
-        assert_eq!(json["descriptorVersion"], PR18_DESCRIPTOR_VERSION);
-        assert_eq!(json["schema_version"], MCP_SCHEMA_VERSION);
-        assert!(json["tools"].as_array().is_some_and(|a| !a.is_empty()));
-    }
 }

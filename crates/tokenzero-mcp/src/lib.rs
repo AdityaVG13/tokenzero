@@ -12,6 +12,7 @@ mod codemode;
 mod collect;
 mod config;
 mod diff;
+mod engine_common;
 mod engine_edit;
 mod engine_expand;
 mod engine_fetch;
@@ -42,6 +43,9 @@ mod surface_health;
 mod tools;
 mod workspace;
 mod write_ladder;
+
+#[cfg(test)]
+mod tests;
 
 pub use binary_resolve::{
     BinaryResolution, ResolveError, ResolvedBinary, TOKENZERO_BIN_ENV, TOKENZERO_CURL_PATH_ENV,
@@ -75,6 +79,7 @@ use cache_pack::{
     cache_pack_manifest_path, cache_pack_sources, previous_cache_digest, read_line_range_from_file,
 };
 use collect::*;
+use engine_common::*;
 use fetch_cache::{epoch_secs, fetch_index_path, load_fetch_index, record_fetch};
 use fetch_guard::{FETCH_META_MARKER, split_fetch_meta, validate_fetch_target};
 use globset::{GlobBuilder, GlobMatcher};
@@ -186,6 +191,3 @@ pub struct TokenZeroEngine {
     /// Fail-open append-only response accounting beside the recovery cache.
     ledger: ledger::LedgerWriter,
 }
-
-#[cfg(test)]
-mod tests;

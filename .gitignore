@@ -73,7 +73,8 @@ __pycache__/
 
 # Public Rust fixtures allowlist
 /test-corpus/*
-!/test-corpus/*.rs
+!/test-corpus/*.rs.gz
+!/test-corpus/materialize.py
 
 # Local/generated outputs
 /codedb.snapshot

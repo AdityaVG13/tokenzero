@@ -1,100 +1,143 @@
 use crate::*;
 
-fn evidence_row(id: &str, pass: bool, evidence: impl serde::Serialize) -> serde_json::Value {
-    json!({"id":id,"pass":pass,"evidence":evidence})
-}
-fn presence(present: bool, evidence: impl serde::Serialize) -> serde_json::Value {
-    json!({"present":present,"evidence":evidence})
-}
+type Json = serde_json::Value;
 
-// --- One-shot const tables ---
-type OneShotDef = (&'static str, &'static str, &'static [&'static str], &'static str);
-type OneShotShellDef = (&'static str, &'static [&'static str], &'static str, &'static str);
+macro_rules! object { ($($tt:tt)*) => { serde_json::json!($($tt)*) }; }
+macro_rules! list { ($($tt:tt)*) => { vec![$($tt)*] }; }
+macro_rules! array { ($($tt:tt)*) => { [$($tt)*] }; }
 
-const ONE_SHOT_DEFS: &[OneShotDef] = &[
-    ("source_edit_anchor", "edit src.rs alpha return value", &["alpha_is_answer","assert_eq","file_ref"], "structured read keeps edit anchors and exact refs visible"),
-    ("failure_diagnosis_anchor", "inspect failing assertion without rerunning raw command", &["exit_code: 101","tests::alpha","src/lib.rs:42","assertion failed","stderr_ref:"], "diagnostic shell mode preserves status truth and failure anchors"),
-    ("warning_changed_file_anchor", "fix or inspect changed file without rerunning status output", &["warning: unused import","M src/main.rs","modified: src/lib.rs"], "diagnostic shell mode preserves warning and changed-file anchors"),
-    ("diff_review_anchor", "review changed hunk without expanding raw diff", &["diff --git","src/main.rs","@@ -1 +1 @@","+new"], "diff rendering preserves path, hunk, and added line anchors"),
-    ("recovery_degraded_anchor", "repair recovery cache before trusting exact recovery", &["alpha_is_answer","assert_eq"], "degraded mode is adequate only when repair action and visible edit anchors are present"),
-];
-
-const ONE_SHOT_SHELL_CMDS: &[OneShotShellDef] = &[
-    ("failure_diagnosis_anchor", &["exit_code: 101","tests::alpha","src/lib.rs:42","assertion failed","stderr_ref:"],
-     "echo 'running 1 test'; echo 'test tests::alpha ... FAILED'; echo 'src/lib.rs:42:9: assertion failed: left == right' >&2; echo 'left: 1' >&2; echo 'right: 2' >&2; echo 'error: test failed' >&2; exit 101",
-     "Write-Output 'running 1 test'; Write-Output 'test tests::alpha ... FAILED'; [Console]::Error.WriteLine('src/lib.rs:42:9: assertion failed: left == right'); [Console]::Error.WriteLine('left: 1'); [Console]::Error.WriteLine('right: 2'); [Console]::Error.WriteLine('error: test failed'); exit 101"),
-    ("warning_changed_file_anchor", &["warning: unused import","M src/main.rs","modified: src/lib.rs"],
-     "echo 'warning: unused import'; echo 'M src/main.rs'; echo 'modified: src/lib.rs'",
-     "Write-Output 'warning: unused import'; Write-Output 'M src/main.rs'; Write-Output 'modified: src/lib.rs'"),
-    ("diff_review_anchor", &["diff --git","src/main.rs","@@ -1 +1 @@","+new"],
-     "printf 'diff --git a/src/main.rs b/src/main.rs\n@@ -1 +1 @@\n-old\n+new\n'",
-     "Write-Output 'diff --git a/src/main.rs b/src/main.rs'; Write-Output '@@ -1 +1 @@'; Write-Output '-old'; Write-Output '+new'"),
-];
-
-fn one_shot_row(trace_id: &str, next: &str, anchors: &[&str], anchors_ok: bool, refs_ok: bool, degraded: bool, rationale: &str) -> serde_json::Value {
-    json!({"trace_id":trace_id,"expected_next_action":next,"required_anchors":anchors,"required_anchors_present":anchors_ok,"refs_available":refs_ok,"degraded_explicit":degraded,"planned_expands":[],"unplanned_second_call":false,"task_success":anchors_ok,"critical":true,"mode_rationale":rationale})
-}
-fn one_shot_missed(row: &serde_json::Value) -> bool {
-    row["required_anchors_present"]!=true||row["task_success"]!=true||row["unplanned_second_call"]==true||(row["refs_available"]!=true&&row["degraded_explicit"]!=true)
+macro_rules! finish {
+    ($output:expr, $markdown:expr, $report:expr, $title:literal) => {
+        finish_artifact(&$output, $markdown.as_deref(), $report, $title)
+    };
 }
 
-fn one_shot_shell_cmd<'a>(unix: &'a str, windows: &'a str) -> &'a str { if cfg!(windows) { windows } else { unix } }
+fn evidence_row(id: &str, pass: bool, evidence: impl serde::Serialize) -> Json {
+    object!({"id":id,"pass":pass,"evidence":evidence})
+}
+fn presence(present: bool, evidence: impl serde::Serialize) -> Json {
+    object!({"present":present,"evidence":evidence})
+}
 
-pub(crate) fn run_one_shot_eval(output_json: PathBuf, output_md: Option<PathBuf>) -> Result<serde_json::Value> {
+macro_rules! one_shot_cases {
+    ($($row:expr);+ $(;)?) => {
+        const ONE_SHOT_SHELL_CASES: &[(&str, &[&str])] = &[$($row),+];
+    };
+}
+one_shot_cases! {
+    ("failure_diagnosis_anchor", &["exit_code: 101", "tests::alpha", "src/lib.rs:42", "assertion failed", "stderr_ref:"]);
+    ("warning_changed_file_anchor", &["warning: unused import", "M src/main.rs", "modified: src/lib.rs"]);
+    ("diff_review_anchor", &["diff --git", "src/main.rs", "@@ -1 +1 @@", "+new"]);
+}
+
+fn one_shot_row(
+    trace_id: &str,
+    next: &str,
+    anchors: &[&str],
+    anchors_ok: bool,
+    refs_ok: bool,
+    degraded: bool,
+    rationale: &str,
+) -> Json {
+    object!({"trace_id":trace_id,"expected_next_action":next,"required_anchors":anchors,"required_anchors_present":anchors_ok,"refs_available":refs_ok,"degraded_explicit":degraded,"planned_expands":[],"unplanned_second_call":false,"task_success":anchors_ok,"critical":true,"mode_rationale":rationale})
+}
+fn one_shot_missed(row: &Json) -> bool {
+    row["required_anchors_present"] != true
+        || row["task_success"] != true
+        || row["unplanned_second_call"] == true
+        || (row["refs_available"] != true && row["degraded_explicit"] != true)
+}
+
+fn one_shot_shell_cmd<'a>(unix: &'a str, windows: &'a str) -> &'a str {
+    if cfg!(windows) { windows } else { unix }
+}
+
+pub(crate) fn run_one_shot_eval(output_json: PathBuf, output_md: Option<PathBuf>) -> Result<Json> {
     let exe = std::env::current_exe()?;
     let temp = tempdir()?;
     let cache = temp.path().join("one-shot-cache.json");
     let source = temp.path().join("src.rs");
     fs::create_dir_all(temp.path())?;
-    fs::write(&source, "pub fn alpha() -> usize {\n    41\n}\n\n#[test]\nfn alpha_is_answer() {\n    assert_eq!(alpha(), 42);\n}\n")?;
+    fs::write(
+        &source,
+        "pub fn alpha() -> usize {\n    41\n}\n\n#[test]\nfn alpha_is_answer() {\n    assert_eq!(alpha(), 42);\n}\n",
+    )?;
     let broken = temp.path().join("cache-as-directory");
     fs::create_dir_all(&broken)?;
 
     let read_row = run_read_json(&exe, &source, &cache, temp.path())?;
     let read_vis = read_row["visible"]["text"].as_str().unwrap_or_default();
     let read_refs = refs_available(&read_row);
-    let read_file_ref = read_row["refs"].as_array().is_some_and(|refs| refs.iter().any(|r| r["kind"]=="file"&&r["ref"].as_str().is_some()));
-    let read_ok = anchors_present(read_vis, &["alpha_is_answer","assert_eq"]) && read_file_ref;
+    let read_file_ref = read_row["refs"].as_array().is_some_and(|refs| {
+        refs.iter()
+            .any(|r| r["kind"] == "file" && r["ref"].as_str().is_some())
+    });
+    let read_ok = anchors_present(read_vis, &["alpha_is_answer", "assert_eq"]) && read_file_ref;
 
     // Build shell case rows
-    let shell_cases: Vec<(String, Vec<String>, Vec<&str>)> = ONE_SHOT_SHELL_CMDS.iter().map(|(id, anchors, unix_cmd, win_cmd)| {
-        let cmd_str = one_shot_shell_cmd(unix_cmd, win_cmd);
-        let mut args = run_json_args(temp.path().to_str().unwrap(), cache.to_str().unwrap());
-        args.push("--".to_string());
-        if cfg!(windows) { args.extend(["powershell".to_string(),"-NoProfile".to_string(),"-Command".to_string(),cmd_str.to_string()]); }
-        else { args.extend(["sh".to_string(),"-c".to_string(),cmd_str.to_string()]); }
-        (id.to_string(), args, anchors.to_vec())
-    }).collect();
+    let shell_cases: Vec<(String, Vec<String>, Vec<&str>)> =
+        super::recovery::PROTECTED_ANCHOR_CASES_DEF
+            .iter()
+            .take(3)
+            .zip(ONE_SHOT_SHELL_CASES)
+            .map(|((_, _, _, unix_cmd, win_cmd), (id, anchors))| {
+                (
+                    id.to_string(),
+                    one_shot_shell_args(temp.path(), &cache, one_shot_shell_cmd(unix_cmd, win_cmd)),
+                    anchors.to_vec(),
+                )
+            })
+            .collect();
 
-    let shell_rows: Vec<_> = shell_cases.iter().map(|(id, args, anchors)| {
-        let row = run_json_command_owned(&exe, args)?;
-        let vis = row["visible"]["text"].as_str().unwrap_or_default();
-        let refs_ok = refs_available(&row);
-        let anchors_ok = anchors_present(vis, anchors);
-        Ok(one_shot_row(id, "inspect or fix", anchors, anchors_ok, refs_ok, false, "shell diagnostic preserves anchors"))
-    }).collect::<Result<Vec<_>>>()?;
+    let shell_rows: Vec<_> = shell_cases
+        .iter()
+        .map(|(id, args, anchors)| {
+            let row = run_json_command(&exe, args)?;
+            let vis = row["visible"]["text"].as_str().unwrap_or_default();
+            let refs_ok = refs_available(&row);
+            let anchors_ok = anchors_present(vis, anchors);
+            Ok(one_shot_row(
+                id,
+                "inspect or fix",
+                anchors,
+                anchors_ok,
+                refs_ok,
+                false,
+                "shell diagnostic preserves anchors",
+            ))
+        })
+        .collect::<Result<Vec<_>>>()?;
 
     let degraded_row = run_read_json(&exe, &source, &broken, temp.path())?;
     let deg_vis = degraded_row["visible"]["text"].as_str().unwrap_or_default();
     let deg_refs = refs_available(&degraded_row);
-    let deg_explicit = degraded_row["diagnostic"]["code"]=="cache_write_failed"
-        && degraded_row["diagnostic"]["repair"].as_str().is_some_and(|r| r.contains("recovery cache"));
-    let deg_ok = anchors_present(deg_vis, &["alpha_is_answer","assert_eq"]) && deg_explicit;
+    let deg_explicit = degraded_row["diagnostic"]["code"] == "cache_write_failed"
+        && degraded_row["diagnostic"]["repair"]
+            .as_str()
+            .is_some_and(|r| r.contains("recovery cache"));
+    let deg_ok = anchors_present(deg_vis, &["alpha_is_answer", "assert_eq"]) && deg_explicit;
 
-    let rows: Vec<_> = [
-        vec![one_shot_row("source_edit_anchor","edit src.rs alpha return value",&["alpha_is_answer","assert_eq","file_ref"],read_ok,read_refs,false,"structured read keeps edit anchors and exact refs visible")],
-        shell_rows,
-        vec![one_shot_row("recovery_degraded_anchor","repair recovery cache before trusting exact recovery",&["alpha_is_answer","assert_eq"],deg_ok,deg_refs,deg_explicit,"degraded mode is adequate only when repair action and visible edit anchors are present")],
-    ].concat();
+    let rows: Vec<_> = array! {list! {one_shot_row("source_edit_anchor","edit src.rs alpha return value",&["alpha_is_answer","assert_eq","file_ref"],read_ok,read_refs,false,"structured read keeps edit anchors and exact refs visible")},shell_rows,list! {one_shot_row("recovery_degraded_anchor","repair recovery cache before trusting exact recovery",&["alpha_is_answer","assert_eq"],deg_ok,deg_refs,deg_explicit,"degraded mode is adequate only when repair action and visible edit anchors are present")},}.concat();
 
-    let crit_total = rows.iter().filter(|r| r["critical"]==true).count();
-    let crit_miss = rows.iter().filter(|r| r["critical"]==true&&one_shot_missed(r)).count();
+    let crit_total = rows.iter().filter(|r| r["critical"] == true).count();
+    let crit_miss = rows
+        .iter()
+        .filter(|r| r["critical"] == true && one_shot_missed(r))
+        .count();
     let overall_miss = rows.iter().filter(|r| one_shot_missed(r)).count();
-    let crit_rate = if crit_total==0{0.0}else{crit_miss as f64/crit_total as f64};
-    let overall_rate = if rows.is_empty(){0.0}else{overall_miss as f64/rows.len() as f64};
-    let ok = crit_miss==0 && overall_rate<0.02;
-    let report = json!({"schema_version":"tokenzero.one_shot_eval.v1","status":if ok{"ok"}else{"blocked"},"ok":ok,"release_candidate_id":release_candidate_id(),"critical_miss_rate":crit_rate,"overall_miss_rate":overall_rate,"thresholds":{"critical_miss_rate":0.0,"overall_miss_rate_lt":0.02},"rows":rows,"public_claims_approved":false,"release_publication_allowed":false});
-    finish_artifact(&output_json, output_md.as_deref(), report, "One-shot evaluation")
+    let crit_rate = if crit_total == 0 {
+        0.0
+    } else {
+        crit_miss as f64 / crit_total as f64
+    };
+    let overall_rate = if rows.is_empty() {
+        0.0
+    } else {
+        overall_miss as f64 / rows.len() as f64
+    };
+    let ok = crit_miss == 0 && overall_rate < 0.02;
+    let report = object!({"schema_version":"tokenzero.one_shot_eval.v1","status":if ok{"ok"}else{"blocked"},"ok":ok,"release_candidate_id":release_candidate_id(),"critical_miss_rate":crit_rate,"overall_miss_rate":overall_rate,"thresholds":{"critical_miss_rate":0.0,"overall_miss_rate_lt":0.02},"rows":rows,"public_claims_approved":false,"release_publication_allowed":false});
+    finish!(output_json, output_md, report, "One-shot evaluation")
 }
 
 pub(crate) fn anchors_present(visible: &str, anchors: &[&str]) -> bool {
@@ -105,80 +148,159 @@ pub(crate) fn anchors_present(visible: &str, anchors: &[&str]) -> bool {
 pub(crate) fn one_shot_shell_args(root: &Path, cache: &Path, command: &str) -> Vec<String> {
     let mut args = run_json_args(&root.to_string_lossy(), &cache.to_string_lossy());
     args.push("--".to_string());
-    if cfg!(windows) { args.extend(["powershell".to_string(),"-NoProfile".to_string(),"-Command".to_string(),command.to_string()]); }
-    else { args.extend(["sh".to_string(),"-c".to_string(),command.to_string()]); }
+    if cfg!(windows) {
+        args.extend([
+            "powershell".to_string(),
+            "-NoProfile".to_string(),
+            "-Command".to_string(),
+            command.to_string(),
+        ]);
+    } else {
+        args.extend(["sh".to_string(), "-c".to_string(), command.to_string()]);
+    }
     args
 }
 
-pub(crate) fn run_source_currency_audit(output_json: PathBuf, output_md: Option<PathBuf>, refresh_ledger: Option<PathBuf>, refresh_git_heads: bool) -> Result<serde_json::Value> {
-    if refresh_ledger.is_some() && refresh_git_heads { anyhow::bail!("choose --refresh-ledger or --refresh-git-heads, not both"); }
+pub(crate) fn run_source_currency_audit(
+    output_json: PathBuf,
+    output_md: Option<PathBuf>,
+    refresh_ledger: Option<PathBuf>,
+    refresh_git_heads: bool,
+) -> Result<Json> {
+    if refresh_ledger.is_some() && refresh_git_heads {
+        anyhow::bail!("choose --refresh-ledger or --refresh-git-heads, not both");
+    }
     let rcid = release_candidate_id();
     let report = if let Some(rl) = refresh_ledger.as_deref() {
-        source_currency::refreshed_source_currency_report(source_currency::read_source_refresh_rows(rl)?, "refresh-ledger", Some(rl), &rcid)
+        source_currency::refreshed_source_currency_report(
+            source_currency::read_source_refresh_rows(rl)?,
+            "refresh-ledger",
+            Some(rl),
+            &rcid,
+        )
     } else if refresh_git_heads {
-        source_currency::refreshed_source_currency_report(source_currency::git_head_source_refresh_rows(), "git-ls-remote-head", None, &rcid)
-    } else { source_currency::source_currency_report(&rcid) };
-    finish_artifact(&output_json, output_md.as_deref(), report, "Source currency audit")
+        source_currency::refreshed_source_currency_report(
+            source_currency::git_head_source_refresh_rows(),
+            "git-ls-remote-head",
+            None,
+            &rcid,
+        )
+    } else {
+        source_currency::source_currency_report(&rcid)
+    };
+    finish!(output_json, output_md, report, "Source currency audit")
 }
 
-pub(crate) fn run_completion_audit(output_json: PathBuf, output_md: Option<PathBuf>) -> Result<serde_json::Value> {
+pub(crate) fn run_completion_audit(
+    output_json: PathBuf,
+    output_md: Option<PathBuf>,
+) -> Result<Json> {
     let report = completion_handoff::completion_audit_report();
-    finish_artifact(&output_json, output_md.as_deref(), report, "Completion audit")
+    finish!(output_json, output_md, report, "Completion audit")
 }
 
-pub(crate) fn run_security_privacy_audit(output_json: PathBuf, output_md: Option<PathBuf>) -> Result<serde_json::Value> {
+pub(crate) fn run_security_privacy_audit(
+    output_json: PathBuf,
+    output_md: Option<PathBuf>,
+) -> Result<Json> {
     let exe = std::env::current_exe()?;
     let temp = tempdir()?;
     let cache = temp.path().join("security-cache.json");
-    let (sc_unix, sc_win) = ("echo token=abc123; echo password=hunter2 >&2; exit 2",
-        "Write-Output 'token=abc123'; [Console]::Error.WriteLine('password=hunter2'); exit 2");
-    let mut run_args = run_json_args(&temp.path().display().to_string(), &cache.display().to_string());
-    run_args.push("--".to_string());
-    if cfg!(windows) { run_args.extend(["powershell".to_string(),"-NoProfile".to_string(),"-Command".to_string(),sc_win.to_string()]); }
-    else { run_args.extend(["sh".to_string(),"-c".to_string(),sc_unix.to_string()]); }
-    let run_row = run_json_command_owned(&exe, &run_args)?;
+    let (sc_unix, sc_win) = (
+        "echo token=abc123; echo password=hunter2 >&2; exit 2",
+        "Write-Output 'token=abc123'; [Console]::Error.WriteLine('password=hunter2'); exit 2",
+    );
+    let run_args = one_shot_shell_args(temp.path(), &cache, one_shot_shell_cmd(sc_unix, sc_win));
+    let run_row = run_json_command(&exe, &run_args)?;
     let visible = run_row["visible"]["text"].as_str().unwrap_or_default();
-    let comb_ref = run_row["telemetry"]["combined_ref"].as_str().unwrap_or_default();
+    let comb_ref = run_row["telemetry"]["combined_ref"]
+        .as_str()
+        .unwrap_or_default();
     let expanded = expand_ref_with_exe(&exe, &cache, comb_ref)?;
-    let mask_ok = visible.contains("token=[masked]") && visible.contains("password=[masked]")
-        && !visible.contains("abc123") && !visible.contains("hunter2");
-    let recovery_ok = expanded.contains("token=abc123") && expanded.contains("password=hunter2")
+    let mask_ok = visible.contains("token=[masked]")
+        && visible.contains("password=[masked]")
+        && !visible.contains("abc123")
+        && !visible.contains("hunter2");
+    let recovery_ok = expanded.contains("token=abc123")
+        && expanded.contains("password=hunter2")
         && comb_ref.starts_with("tz://");
 
     // Pulse event
     let pulse_path = temp.path().join("pulse.jsonl");
-    record_event(&pulse_path, &PulseEvent { schema_version:"pulse-v1".into(), event:"tool_call".into(), timestamp_unix:1, tool:"shell".into(), mode:"hybrid".into(), raw_tokens:8, visible_tokens:2, recovery_tokens:1, task_lossless:true, cache_hit:false, retry_count:0, failure:false, exact_ref_count:1, latency_ms:1, source_hash:Some("sha256:redacted-local-source".into()), session_id:None, call_id:None, ref_ids:Vec::new() })?;
+    record_event(
+        &pulse_path,
+        &PulseEvent {
+            schema_version: "pulse-v1".into(),
+            event: "tool_call".into(),
+            timestamp_unix: 1,
+            tool: "shell".into(),
+            mode: "hybrid".into(),
+            raw_tokens: 8,
+            visible_tokens: 2,
+            recovery_tokens: 1,
+            task_lossless: true,
+            cache_hit: false,
+            retry_count: 0,
+            failure: false,
+            exact_ref_count: 1,
+            latency_ms: 1,
+            source_hash: Some("sha256:redacted-local-source".into()),
+            session_id: None,
+            call_id: None,
+            ref_ids: Vec::new(),
+        },
+    )?;
     let pulse_text = fs::read_to_string(&pulse_path)?;
-    let pulse_ok = !pulse_text.contains("abc123") && !pulse_text.contains("hunter2")
-        && !pulse_text.contains("secret raw payload") && pulse_text.contains("source_hash");
+    let pulse_ok = !pulse_text.contains("abc123")
+        && !pulse_text.contains("hunter2")
+        && !pulse_text.contains("secret raw payload")
+        && pulse_text.contains("source_hash");
 
     // MCP root enforcement
     let allowed = temp.path().join("allowed");
     let outside = temp.path().join("outside");
-    fs::create_dir_all(&allowed)?; fs::create_dir_all(&outside)?;
+    fs::create_dir_all(&allowed)?;
+    fs::create_dir_all(&outside)?;
     fs::write(outside.join("secret.txt"), "token=abc123\n")?;
-    let engine = TokenZeroEngine::new(EngineConfig { allowed_roots: vec![allowed.clone()], cache_path: temp.path().join("mcp-cache.json"), max_visible_tokens: 4000, mode: Mode::Hybrid, shell_timeout: default_shell_timeout(), mcp_idle_timeout: None, ..EngineConfig::for_root(&allowed) });
-    let mcp_read = engine.read(&[outside.join("secret.txt")], Mode::Hybrid, None, None, false, 1, 4000);
-    let mcp_ok = mcp_read.status == "error" && mcp_read.error.as_ref().is_some_and(|e| e.code == "path_not_allowed");
+    let engine = TokenZeroEngine::new(EngineConfig {
+        allowed_roots: list! {allowed.clone()},
+        cache_path: temp.path().join("mcp-cache.json"),
+        max_visible_tokens: 4000,
+        mode: Mode::Hybrid,
+        shell_timeout: default_shell_timeout(),
+        mcp_idle_timeout: None,
+        ..EngineConfig::for_root(&allowed)
+    });
+    let mcp_read = engine.read(
+        &[outside.join("secret.txt")],
+        Mode::Hybrid,
+        None,
+        None,
+        false,
+        1,
+        4000,
+    );
+    let mcp_ok = mcp_read.status == "error"
+        && mcp_read
+            .error
+            .as_ref()
+            .is_some_and(|e| e.code == "path_not_allowed");
 
-    let rows = vec![
-        evidence_row("cli_visible_secret_masking", mask_ok, "visible output masks token/password values"),
-        evidence_row("exact_ref_local_recovery", recovery_ok, comb_ref),
-        evidence_row("pulse_no_raw_payload", pulse_ok, pulse_path.display().to_string()),
-        evidence_row("mcp_allowed_root_enforced", mcp_ok, "MCP read outside allowed root returns path_not_allowed"),
-        evidence_row("no_unapproved_external_writes", true, "audit performs only local temp writes and requested artifact write; release/publication actions remain gated"),
-    ];
+    let rows = list! {evidence_row("cli_visible_secret_masking",mask_ok, "visible output masks token/password values",),evidence_row("exact_ref_local_recovery",recovery_ok,comb_ref),evidence_row("pulse_no_raw_payload",pulse_ok,pulse_path.display().to_string(),),evidence_row("mcp_allowed_root_enforced",mcp_ok, "MCP read outside allowed root returns path_not_allowed",),evidence_row("no_unapproved_external_writes",true, "audit performs only local temp writes and requested artifact write; release/publication actions remain gated",),};
     let ok = rows.iter().all(|r| r["pass"] == true);
-    let report = json!({"schema_version":"tokenzero.security_privacy_audit.v1","status":if ok{"ok"}else{"blocked"},"ok":ok,"raw_payloads_local_by_default":recovery_ok&&pulse_ok,"pulse_records_raw_payload":!pulse_ok,"secret_masking_active":mask_ok,"allowed_root_controls_active":mcp_ok,"unapproved_external_writes":false,"release_publication_allowed":false,"rows":rows,"gated_actions":["release","publication","remote mutation","paid services","global install apply"]});
-    finish_artifact(&output_json, output_md.as_deref(), report, "Security privacy audit")
+    let report = object!({"schema_version":"tokenzero.security_privacy_audit.v1","status":if ok{"ok"}else{"blocked"},"ok":ok,"raw_payloads_local_by_default":recovery_ok&&pulse_ok,"pulse_records_raw_payload":!pulse_ok,"secret_masking_active":mask_ok,"allowed_root_controls_active":mcp_ok,"unapproved_external_writes":false,"release_publication_allowed":false,"rows":rows,"gated_actions":["release","publication","remote mutation","paid services","global install apply"]});
+    finish!(output_json, output_md, report, "Security privacy audit")
 }
 
-pub(crate) fn run_artifact_handoff(output_json: PathBuf, output_md: Option<PathBuf>) -> Result<serde_json::Value> {
+pub(crate) fn run_artifact_handoff(
+    output_json: PathBuf,
+    output_md: Option<PathBuf>,
+) -> Result<Json> {
     let report = completion_handoff::artifact_handoff_report(installed_tokenzero_command_audit());
-    finish_artifact(&output_json, output_md.as_deref(), report, "Artifact handoff")
+    finish!(output_json, output_md, report, "Artifact handoff")
 }
 
-pub(crate) fn run_ws_skeleton(output_json: PathBuf, output_md: Option<PathBuf>) -> Result<serde_json::Value> {
+pub(crate) fn run_ws_skeleton(output_json: PathBuf, output_md: Option<PathBuf>) -> Result<Json> {
     let exe = std::env::current_exe()?;
     let temp = tempdir()?;
     let cache = temp.path().join("ws-cache.json");
@@ -186,62 +308,107 @@ pub(crate) fn run_ws_skeleton(output_json: PathBuf, output_md: Option<PathBuf>) 
     fs::write(&file, "alpha\nbeta\nwarning: keep this anchor\n")?;
 
     let read_row = run_read_json(&exe, &file, &cache, temp.path())?;
-    let file_ref = read_row["refs"].as_array().and_then(|refs| refs.iter().find(|r| r["kind"]=="file")).and_then(|r| r["ref"].as_str()).unwrap_or_default();
+    let file_ref = read_row["refs"]
+        .as_array()
+        .and_then(|refs| refs.iter().find(|r| r["kind"] == "file"))
+        .and_then(|r| r["ref"].as_str())
+        .unwrap_or_default();
     let expanded = expand_ref_with_exe(&exe, &cache, file_ref)?;
 
-    let (fu, fw) = ("echo warning: note; echo error: fail >&2; exit 3", "Write-Output 'warning: note'; [Console]::Error.WriteLine('error: fail'); exit 3");
-    let mut run_args = run_json_args(temp.path().to_str().unwrap(), cache.to_str().unwrap());
-    run_args.push("--".to_string());
-    if cfg!(windows) { run_args.extend(["powershell".to_string(),"-NoProfile".to_string(),"-Command".to_string(),fw.to_string()]); }
-    else { run_args.extend(["sh".to_string(),"-c".to_string(),fu.to_string()]); }
-    let failure_row = run_json_command_owned(&exe, &run_args)?;
+    let (fu, fw) = (
+        "echo warning: note; echo error: fail >&2; exit 3",
+        "Write-Output 'warning: note'; [Console]::Error.WriteLine('error: fail'); exit 3",
+    );
+    let run_args = one_shot_shell_args(temp.path(), &cache, one_shot_shell_cmd(fu, fw));
+    let failure_row = run_json_command(&exe, &run_args)?;
 
     let bench_out = ws_sibling_artifact_path(&output_json, "tokenzero_ws_001_bench.json");
-    let bench = run_bench_competitors(BenchCompetitorsArgs { suite: "shell-heavy".into(), output_json: Some(bench_out.clone()), adapter_approval_artifact: None, json: true })?;
+    let bench = run_bench_competitors(BenchCompetitorsArgs {
+        suite: "shell-heavy".into(),
+        output_json: Some(bench_out.clone()),
+        adapter_approval_artifact: None,
+        json: true,
+    })?;
     let one_shot_out = ws_sibling_artifact_path(&output_json, "tokenzero_ws_001_one_shot.json");
     let one_shot = run_one_shot_eval(one_shot_out.clone(), None)?;
     let claim_out = ws_sibling_artifact_path(&output_json, "tokenzero_ws_001_claim_audit.json");
-    let claim = run_claim_audit(claim_out.clone(), None, false, ClaimEvidenceInputs { source_artifact:None, benchmark_artifact:None, adapter_approval_artifact:None, recovery_artifact:None, task_success_artifact:None, os_artifact:None })?;
+    let claim = run_claim_audit(
+        claim_out.clone(),
+        None,
+        false,
+        ClaimEvidenceInputs {
+            source_artifact: None,
+            benchmark_artifact: None,
+            adapter_approval_artifact: None,
+            recovery_artifact: None,
+            task_success_artifact: None,
+            os_artifact: None,
+        },
+    )?;
     let reach = run_reach(PathBuf::from("."), None)?;
 
-    let competitor_unavailable = bench["rows"].as_array().is_some_and(|rows| rows.iter().any(|r| r["tool"]=="competitors"&&r["availability_status"]=="unavailable"));
-    let artifacts = json!({
-        "one_command_family": presence(failure_row["telemetry"]["family"]=="test"||failure_row["telemetry"]["family"]=="diagnostic"||!failure_row["telemetry"]["family"].is_null(), &failure_row["telemetry"]["family"]),
-        "one_file_read": presence(read_row["status"]=="ok"&&refs_available(&read_row), file_ref),
-        "one_failure_trace": presence(failure_row["telemetry"]["command_success"]==false&&failure_row["visible"]["text"].as_str().unwrap_or_default().contains("error"), &failure_row["telemetry"]["combined_ref"]),
-        "one_competitor_unavailable_row": presence(competitor_unavailable, "competitors unavailable row in benchmark JSON"),
-        "one_exact_expand_check": presence(expanded=="alpha\nbeta\nwarning: keep this anchor\n", file_ref),
-        "adaptive_mode_rationale": presence(one_shot["ok"]==true, "one-shot-eval rows include mode_rationale"),
-        "degraded_mode_handling": presence(claim["public_claims_approved"]==false, "claim gate remains blocked until recovery/source/task evidence is attached"),
+    let competitor_unavailable = bench["rows"].as_array().is_some_and(|rows| {
+        rows.iter()
+            .any(|r| r["tool"] == "competitors" && r["availability_status"] == "unavailable")
     });
-    let ok = artifacts.as_object().is_some_and(|m| m.values().all(|v| v["present"]==true)) && bench["ok"]==true && one_shot["ok"]==true && reach["ok"]==true;
-    let report = json!({"schema_version":"tokenzero.ws_skeleton.v1","status":if ok{"ok"}else{"blocked"},"ok":ok,"ws_id":"WS-001","milestone":"M-002 Skeleton","artifacts":artifacts,"release_candidate_id":release_candidate_id(),"bench_artifact":json_artifact_path(&bench_out),"one_shot_artifact":json_artifact_path(&one_shot_out),"claim_audit_artifact":json_artifact_path(&claim_out),"reach_daemon_required":reach["daemon_required"],"public_claims_approved":false,"release_publication_allowed":false,"release_gates":{"public_claims_approved":false,"publication_allowed":false,"release_publication_allowed":false,"global_install_apply_allowed":false},"next_phase_allowed":ok});
-    finish_artifact(&output_json, output_md.as_deref(), report, "WS-001 walking skeleton")
+    let failure_command_failed = failure_row["telemetry"]["command_success"] == false;
+    let failure_visible = failure_row["visible"]["text"].as_str().unwrap_or_default();
+    let artifacts = object!({"one_command_family": presence(failure_command_failed&&(failure_row["telemetry"]["family"]=="test"||failure_row["telemetry"]["family"]=="diagnostic"||!failure_row["telemetry"]["family"].is_null()),&failure_row["telemetry"]["family"]), "one_file_read": presence(read_row["status"]=="ok"&&refs_available(&read_row),file_ref), "one_failure_trace": presence(failure_command_failed&&failure_visible.contains("error"),&failure_row["telemetry"]["combined_ref"]), "one_competitor_unavailable_row": presence(competitor_unavailable, "competitors unavailable row in benchmark JSON"), "one_exact_expand_check": presence(expanded=="alpha\nbeta\nwarning: keep this anchor\n",file_ref), "adaptive_mode_rationale": presence(one_shot["ok"]==true, "one-shot-eval rows include mode_rationale"), "degraded_mode_handling": presence(claim["public_claims_approved"]==false, "claim gate remains blocked until recovery/source/task evidence is attached"),});
+    let ok = artifacts
+        .as_object()
+        .is_some_and(|m| m.values().all(|v| v["present"] == true))
+        && bench["ok"] == true
+        && one_shot["ok"] == true
+        && reach["ok"] == true;
+    let report = object!({"schema_version":"tokenzero.ws_skeleton.v1","status":if ok{"ok"}else{"blocked"},"ok":ok,"ws_id":"WS-001","milestone":"M-002 Skeleton","artifacts":artifacts,"release_candidate_id":release_candidate_id(),"bench_artifact":json_artifact_path(&bench_out),"one_shot_artifact":json_artifact_path(&one_shot_out),"claim_audit_artifact":json_artifact_path(&claim_out),"reach_daemon_required":reach["daemon_required"],"public_claims_approved":false,"release_publication_allowed":false,"release_gates":{"public_claims_approved":false,"publication_allowed":false,"release_publication_allowed":false,"global_install_apply_allowed":false},"next_phase_allowed":ok});
+    finish!(output_json, output_md, report, "WS-001 walking skeleton")
 }
 
-pub(crate) fn run_install_smoke(output_json: Option<PathBuf>) -> Result<serde_json::Value> {
+pub(crate) fn run_install_smoke(output_json: Option<PathBuf>) -> Result<Json> {
     let temp = tempdir()?;
     let root = temp.path();
     fs::write(root.join("AGENTS.md"), "original\n")?;
     let plan = install::plan(root, false, &[]);
     let applied = install::apply(root, false, &[])?;
     let rolled = install::rollback(root, "latest")?;
-    let report = json!({"schema_version":"tokenzero.install_smoke.v1","status":"ok","ok":true,"plan":plan,"applied":applied,"rollback":rolled,"global_writes":false});
-    if let Some(o) = output_json { write_artifacts(&o, None, &report, "Rust install smoke")?; }
+    let report = object!({"schema_version":"tokenzero.install_smoke.v1","status":"ok","ok":true,"plan":plan,"applied":applied,"rollback":rolled,"global_writes":false});
+    if let Some(o) = output_json {
+        write_artifacts(&o, None, &report, "Rust install smoke")?;
+    }
     Ok(report)
 }
 
-pub(crate) fn finish_artifact(output_json: &Path, output_md: Option<&Path>, report: serde_json::Value, title: &str) -> Result<serde_json::Value> {
+pub(crate) fn finish_artifact(
+    output_json: &Path,
+    output_md: Option<&Path>,
+    report: Json,
+    title: &str,
+) -> Result<Json> {
     write_artifacts(output_json, output_md, &report, title)?;
     Ok(report)
 }
 
-pub(crate) fn write_artifacts(output_json: &Path, output_md: Option<&Path>, report: &serde_json::Value, title: &str) -> Result<()> {
-    if let Some(p) = output_json.parent() { fs::create_dir_all(p)?; }
+pub(crate) fn write_artifacts(
+    output_json: &Path,
+    output_md: Option<&Path>,
+    report: &Json,
+    title: &str,
+) -> Result<()> {
+    if let Some(p) = output_json.parent() {
+        fs::create_dir_all(p)?;
+    }
     fs::write(output_json, serde_json::to_string_pretty(report)? + "\n")?;
     if let Some(md) = output_md {
-        if let Some(p) = md.parent() { fs::create_dir_all(p)?; }
-        fs::write(md, format!("# {title}\n\n```json\n{}\n```\n", serde_json::to_string_pretty(report)?))?;
+        if let Some(p) = md.parent() {
+            fs::create_dir_all(p)?;
+        }
+        fs::write(
+            md,
+            format!(
+                "# {title}\n\n```json\n{}\n```\n",
+                serde_json::to_string_pretty(report)?
+            ),
+        )?;
     }
     Ok(())
 }

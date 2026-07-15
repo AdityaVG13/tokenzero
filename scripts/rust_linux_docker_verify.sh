@@ -1,8 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-export PATH="/usr/local/cargo/bin:${PATH}"
-export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-target/linux-docker}"
+export PATH="/usr/local/cargo/bin:${PATH}"; export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-target/linux-docker}"
 
 cargo test --workspace
 cargo run -p tokenzero -- shell-matrix \

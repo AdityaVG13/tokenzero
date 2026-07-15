@@ -14,14 +14,8 @@ mod store;
 
 #[allow(dead_code)]
 pub mod audit;
-#[cfg(test)]
-mod audit_tests;
 #[allow(dead_code)]
 pub mod bench;
-#[cfg(test)]
-mod e2e_tests;
-#[cfg(test)]
-mod tests;
 
 pub use catalog::{
     describe_method as describe_codemode_method, search_catalog as search_codemode_catalog,

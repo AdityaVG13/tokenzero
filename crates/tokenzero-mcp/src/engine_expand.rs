@@ -1,5 +1,5 @@
-use super::*;
 use super::expand_params::ExpandParams;
+use super::*;
 use tokenzero_recovery::is_expandable_ref;
 
 fn norm_opt(value: &Option<String>) -> String {
@@ -109,8 +109,12 @@ impl TokenZeroEngine {
     fn expand_with_params_inner(&self, params: ExpandParams) -> ToolResponse {
         if !is_expandable_ref(&params.ref_id) {
             return failure_response(
-                "expand", "invalid_ref",
-                format!("ref must start with tz://, fz://, or gz://, got: {}", params.ref_id),
+                "expand",
+                "invalid_ref",
+                format!(
+                    "ref must start with tz://, fz://, or gz://, got: {}",
+                    params.ref_id
+                ),
                 None,
             );
         }
@@ -127,9 +131,10 @@ impl TokenZeroEngine {
         let mut pending: Vec<(ServeKey, ServedRecord)> = Vec::new();
 
         if let Some(since_ref) = params.since.as_deref().filter(|_| !params.fresh) {
-            if is_expandable_ref(since_ref) == false {
+            if !is_expandable_ref(since_ref) {
                 return failure_response(
-                    "expand", "invalid_ref",
+                    "expand",
+                    "invalid_ref",
                     format!("since must start with tz://, fz://, or gz://, got: {since_ref}"),
                     None,
                 );
@@ -142,7 +147,7 @@ impl TokenZeroEngine {
                 params.anchor_kind.as_deref(),
                 params.symbol.as_deref(),
             );
-            if since_result.found == false {
+            if !since_result.found {
                 let code = match since_result.reason.as_str() {
                     "stale-ref" => "ref_stale",
                     "dangling-ref" => "ref_not_found",
@@ -150,7 +155,10 @@ impl TokenZeroEngine {
                     _ => "expand_failed",
                 };
                 return failure_response(
-                    "expand", code, format!("since ref is not recoverable: {since_ref}"), None,
+                    "expand",
+                    code,
+                    format!("since ref is not recoverable: {since_ref}"),
+                    None,
                 );
             }
             let target = match resolve_slice(&mut store, &params, &self.config.cache_path) {
@@ -160,7 +168,8 @@ impl TokenZeroEngine {
             self.rehydrate_working_set_expand(&mut store, &params);
             let (text, diff) = if since_result.content == target.content {
                 (unchanged_since_expand_ack(since_ref), None)
-            } else if let Some(render) = diff::unified_diff(&since_result.content, &target.content) {
+            } else if let Some(render) = diff::unified_diff(&since_result.content, &target.content)
+            {
                 (
                     expand_since_diff_text(since_ref, &params.ref_id, &render.text),
                     Some(DiffTelemetry {
@@ -278,7 +287,10 @@ impl TokenZeroEngine {
     ) -> ToolResponse {
         if query.trim().is_empty() {
             return failure_response(
-                "recall", "invalid_query", "recall requires a non-empty query", None,
+                "recall",
+                "invalid_query",
+                "recall requires a non-empty query",
+                None,
             );
         }
         let outcome = recall::recall_search(&self.config.cache_path, query, max_hits.max(1));
@@ -316,11 +328,7 @@ impl TokenZeroEngine {
             max_visible_tokens,
             Some(&format!("recall {}", zero_hit_label(query))),
         );
-        let exact_ref_tokens = exact_ref_token_count(&refs);
-        let mut response = success_response(
-            "recall", mode, capsule.text, refs,
-            (capsule.raw_tokens, capsule.visible_tokens, 0, Some(exact_ref_tokens)),
-        );
+        let mut response = capsule_response!("recall", mode, capsule, refs, 0);
         response.content_type = Some(ContentType::SearchResult.to_string());
         response.telemetry = Some(json!({
             "query": query,

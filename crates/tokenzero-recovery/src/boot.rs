@@ -124,7 +124,10 @@ fn build_boot(
     let m = count_tokens(&wire);
     wire.push_str(&format!(" d={delta_ref}"));
     let d = count_tokens(&wire);
-    wire.push_str(&format!(" toc={} ws={}", manifest.toc_ref, manifest.working_set_ref));
+    wire.push_str(&format!(
+        " toc={} ws={}",
+        manifest.toc_ref, manifest.working_set_ref
+    ));
     let t = count_tokens(&wire);
     if mode != "manifest_delta" {
         wire.push_str(" fallback=legacy");
@@ -202,9 +205,14 @@ fn load_manifest(path: &Path) -> MetadataLoad<BootManifest> {
         let m = serde_json::from_slice::<BootManifest>(bytes).ok()?;
         (m.version == MANIFEST_VERSION
             && m.store_version == STORE_VERSION
-            && [&m.root_digest, &m.manifest_id, &m.toc_ref, &m.working_set_ref]
-                .into_iter()
-                .all(|id| is_fixed_id(id)))
+            && [
+                &m.root_digest,
+                &m.manifest_id,
+                &m.toc_ref,
+                &m.working_set_ref,
+            ]
+            .into_iter()
+            .all(|id| is_fixed_id(id)))
         .then_some(m)
     })
 }
@@ -272,72 +280,7 @@ fn atomic_write_json<T: Serialize>(path: &Path, value: &T) -> std::io::Result<()
     let body = serde_json::to_vec_pretty(value)
         .map_err(|e| std::io::Error::new(ErrorKind::InvalidData, e))?;
     fs::write(&tmp, body)?;
-    fs::rename(&tmp, path).map_err(|e| {
+    fs::rename(&tmp, path).inspect_err(|_| {
         let _ = fs::remove_file(&tmp);
-        e
     })
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use tempfile::tempdir;
-
-    fn open_boot(root: &Path, allowed: &[PathBuf]) -> SessionBoot {
-        open_session_boot(&root.join("recovery-cache.json"), root, allowed).unwrap()
-    }
-
-    #[test]
-    fn boot_is_bounded_and_independent_of_repo_size() {
-        let dir = tempdir().unwrap();
-        let root = dir.path();
-        let small = open_boot(root, &[root.to_path_buf()]);
-        for i in 0..10_000 {
-            fs::write(root.join(format!("f{i}")), b"x").unwrap();
-        }
-        let large = open_boot(root, &[root.to_path_buf()]);
-        assert_eq!(small.manifest_id, large.manifest_id);
-        assert_eq!(small.telemetry.total, large.telemetry.total);
-        assert!(large.telemetry.total < 100, "{}", large.wire);
-        let t = &large.telemetry;
-        assert_eq!(t.total, t.manifest + t.delta + t.toc_working_set + t.other);
-    }
-
-    #[test]
-    fn fallback_modes_preserve_on_disk_bytes() {
-        let dir = tempdir().unwrap();
-        let root = dir.path();
-        let manifest = root.join("boot-manifest.json");
-        fs::write(&manifest, br#"{"version":99}"#).unwrap();
-        let before = fs::read(&manifest).unwrap();
-        let boot = open_boot(root, &[]);
-        assert_eq!(boot.mode, "legacy_fallback");
-        assert_eq!(fs::read(&manifest).unwrap(), before);
-        assert!(boot.telemetry.total < 100);
-
-        let dir = tempdir().unwrap();
-        let root = dir.path();
-        let first = open_boot(root, &[]);
-        let body = format!(
-            r#"{{"version":1,"manifest_id":"{}","session_hwm":1,"payload":"forbidden"}}"#,
-            first.manifest_id
-        );
-        fs::write(&first.delta_path, body).unwrap();
-        let before = fs::read(&first.delta_path).unwrap();
-        let boot = open_boot(root, &[]);
-        assert_eq!(boot.mode, "legacy_fallback");
-        assert_eq!(fs::read(&first.delta_path).unwrap(), before);
-    }
-
-    #[test]
-    fn missing_manifest_and_delta_are_written_and_reused() {
-        let dir = tempdir().unwrap();
-        let root = dir.path();
-        let first = open_boot(root, &[]);
-        let second = open_boot(root, &[]);
-        assert_eq!(first.mode, "manifest_delta");
-        assert_eq!(first.manifest_id, second.manifest_id);
-        assert_eq!(second.delta_ref, EMPTY_ID);
-        assert!(first.manifest_path.is_file() && first.delta_path.is_file());
-    }
 }

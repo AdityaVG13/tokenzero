@@ -14,7 +14,7 @@ impl TokenZeroEngine {
         mode: Mode,
         max_visible_tokens: usize,
     ) -> ToolResponse {
-        if self.path_allowed(path) == false {
+        if !self.path_allowed(path) {
             return path_not_allowed("edit", path);
         }
         if edits.is_empty() {
@@ -25,7 +25,7 @@ impl TokenZeroEngine {
                 Some("pass at least one {find, replace} hunk"),
             );
         }
-        if create && (edits.len() != 1 || edits[0].find.is_empty() == false) {
+        if create && (edits.len() != 1 || !edits[0].find.is_empty()) {
             return failure_response(
                 "edit",
                 "edit_failed",
@@ -46,21 +46,28 @@ impl TokenZeroEngine {
         } else {
             let bytes = match fs::read(path) {
                 Ok(bytes) => bytes,
-                Err(err) => return failure_response(
-                    "edit",
-                    "edit_failed",
-                    format!("could not read {}: {err}", path.display()),
-                    Some("pass create=true to create a new file"),
-                ),
+                Err(err) => {
+                    return failure_response(
+                        "edit",
+                        "edit_failed",
+                        format!("could not read {}: {err}", path.display()),
+                        Some("pass create=true to create a new file"),
+                    );
+                }
             };
             match String::from_utf8(bytes) {
                 Ok(text) => text,
-                Err(_) => return failure_response(
-                    "edit",
-                    "not_utf8",
-                    format!("{} is not valid UTF-8; edit only handles text files", path.display()),
-                    None,
-                ),
+                Err(_) => {
+                    return failure_response(
+                        "edit",
+                        "not_utf8",
+                        format!(
+                            "{} is not valid UTF-8; edit only handles text files",
+                            path.display()
+                        ),
+                        None,
+                    );
+                }
             }
         };
         let applied = if create {
@@ -100,7 +107,8 @@ impl TokenZeroEngine {
         if !dry_run {
             if let Err(err) = write_atomic(path, applied.text.as_bytes()) {
                 return failure_response(
-                    "edit", "edit_failed",
+                    "edit",
+                    "edit_failed",
                     format!("could not write {}: {err}", path.display()),
                     Some("check directory permissions"),
                 );
@@ -128,10 +136,17 @@ impl TokenZeroEngine {
                 );
             }
         }
-        let (prefix, status) = if dry_run { ("dry-run: ", "would apply") } else { ("", "applied") };
+        let (prefix, status) = if dry_run {
+            ("dry-run: ", "would apply")
+        } else {
+            ("", "applied")
+        };
         let header = format!(
             "# edit {} — {prefix}{} hunks {status} (+{} -{} lines)",
-            path.display(), edits.len(), applied.lines_added, applied.lines_removed,
+            path.display(),
+            edits.len(),
+            applied.lines_added,
+            applied.lines_removed,
         );
         let assembled = if applied.diff.is_empty() {
             header
@@ -148,20 +163,8 @@ impl TokenZeroEngine {
             &format!("edit {}", path.display()),
             refs_complete,
         );
-        let exact_ref_tokens = exact_ref_token_count(&refs);
         let exact_refs_available = !refs.is_empty();
-        let mut response = success_response(
-            "edit",
-            mode,
-            capsule.text,
-            refs,
-            (
-                capsule.raw_tokens,
-                capsule.visible_tokens,
-                store.recovery_tokens,
-                Some(exact_ref_tokens),
-            ),
-        );
+        let mut response = capsule_response!("edit", mode, capsule, refs, store.recovery_tokens);
         response.content_type = Some(ContentType::Diff.to_string());
         if storage_error.is_some() {
             response.diagnostic = Some(cache_write_diagnostic(

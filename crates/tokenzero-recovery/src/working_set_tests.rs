@@ -31,15 +31,10 @@ fn replacement_tokens(path: &str) -> usize {
     ))
 }
 
-fn with_store() -> (tempfile::TempDir, RecoveryStore) {
-    let dir = tempdir().unwrap();
-    let store = RecoveryStore::new(Some(dir.path().join("recovery-cache.json")));
-    (dir, store)
-}
-
 #[test]
 fn under_budget_is_a_noop() {
-    let (_dir, mut store) = with_store();
+    let dir = tempdir().unwrap();
+    let mut store = RecoveryStore::new(Some(dir.path().join("recovery-cache.json")));
     let body = large("resident");
     let mut set = WorkingSet::new(count_tokens(&body));
     let admission = set
@@ -60,7 +55,8 @@ fn under_budget_is_a_noop() {
 
 #[test]
 fn over_budget_replaces_oldest_with_documented_ref_line() {
-    let (_dir, mut store) = with_store();
+    let dir = tempdir().unwrap();
+    let mut store = RecoveryStore::new(Some(dir.path().join("recovery-cache.json")));
     let first = large("first");
     let second = large("second");
     let mut set = WorkingSet::new(count_tokens(&first) + count_tokens(&second) + 256);
@@ -97,7 +93,8 @@ fn over_budget_replaces_oldest_with_documented_ref_line() {
 
 #[test]
 fn expand_round_trips_crlf_and_trailing_newline_byte_exactly() {
-    let (_dir, mut store) = with_store();
+    let dir = tempdir().unwrap();
+    let mut store = RecoveryStore::new(Some(dir.path().join("recovery-cache.json")));
     let payload = "alpha
 beta
 gamma
@@ -120,7 +117,8 @@ gamma
 
 #[test]
 fn touch_makes_recency_order_deterministic() {
-    let (_dir, mut store) = with_store();
+    let dir = tempdir().unwrap();
+    let mut store = RecoveryStore::new(Some(dir.path().join("recovery-cache.json")));
     let body = large("same");
     let mut set = WorkingSet::new(count_tokens(&body) * 2 + 256);
     let a = set
@@ -138,7 +136,8 @@ fn touch_makes_recency_order_deterministic() {
 
 #[test]
 fn full_fault_rehydrates_and_enforces_lru_budget() {
-    let (_dir, mut store) = with_store();
+    let dir = tempdir().unwrap();
+    let mut store = RecoveryStore::new(Some(dir.path().join("recovery-cache.json")));
     let first = large("first-fault");
     let second = large("second-resident");
     let budget = count_tokens(&first) + replacement_tokens("src/a.rs") + 32;
@@ -181,7 +180,8 @@ fn full_fault_rehydrates_and_enforces_lru_budget() {
 
 #[test]
 fn partial_fault_keeps_marker_and_admits_absolute_line_window() {
-    let (_dir, mut store) = with_store();
+    let dir = tempdir().unwrap();
+    let mut store = RecoveryStore::new(Some(dir.path().join("recovery-cache.json")));
     let payload = (1..=160)
         .map(|line| format!("line-{line} payload payload payload\n"))
         .collect::<String>();
@@ -222,7 +222,8 @@ fn partial_fault_keeps_marker_and_admits_absolute_line_window() {
 
 #[test]
 fn unowned_ref_is_lookup_only_and_does_not_fault() {
-    let (_dir, mut store) = with_store();
+    let dir = tempdir().unwrap();
+    let mut store = RecoveryStore::new(Some(dir.path().join("recovery-cache.json")));
     let mut set = WorkingSet::new(100);
 
     assert!(
@@ -259,7 +260,8 @@ impl PrefetchHook for RecordingHook {
 
 #[test]
 fn prefetch_hook_fires_but_queue_is_bounded_and_default_is_noop() {
-    let (_dir, mut store) = with_store();
+    let dir = tempdir().unwrap();
+    let mut store = RecoveryStore::new(Some(dir.path().join("recovery-cache.json")));
     let mut set = WorkingSet::new(0);
     let refs = (0..3)
         .map(|index| {
@@ -295,7 +297,8 @@ fn prefetch_hook_fires_but_queue_is_bounded_and_default_is_noop() {
 
 #[test]
 fn same_file_neighbor_prefetch_is_opt_in_and_conservative() {
-    let (_dir, mut store) = with_store();
+    let dir = tempdir().unwrap();
+    let mut store = RecoveryStore::new(Some(dir.path().join("recovery-cache.json")));
     let mut set = WorkingSet::new(0);
     let first = set
         .admit(&mut store, large("a"), anchor("src/a.rs"))
@@ -316,7 +319,8 @@ fn same_file_neighbor_prefetch_is_opt_in_and_conservative() {
 
 #[test]
 fn store_served_rehydration_is_low_latency() {
-    let (_dir, mut store) = with_store();
+    let dir = tempdir().unwrap();
+    let mut store = RecoveryStore::new(Some(dir.path().join("recovery-cache.json")));
     let mut set = WorkingSet::new(0);
     let admission = set
         .admit(&mut store, large("latency"), anchor("src/latency.rs"))

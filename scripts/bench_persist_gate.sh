@@ -23,13 +23,10 @@
 # -p tokenzero-recovery. No background processes.
 set -eu
 
-ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-cd "$ROOT"
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"; cd "$ROOT"
 
-BENCH=hotpaths
-GROUP=persist_path
-BASELINE=persist_gate
-THRESHOLD=25
+BENCH=hotpaths; GROUP=persist_path
+BASELINE=persist_gate; THRESHOLD=25
 SAVE=0
 
 while [ $# -gt 0 ]; do
@@ -61,8 +58,7 @@ fi
 # change report and, when a regression is detected, a line containing
 # "Performance has regressed". We capture the output, surface it, and then
 # enforce the numeric threshold on the reported median (p50) change.
-TARGET_DIR="${CARGO_TARGET_DIR:-target}"
-BASE_DIR="$TARGET_DIR/criterion"
+TARGET_DIR="${CARGO_TARGET_DIR:-target}"; BASE_DIR="$TARGET_DIR/criterion"
 if [ ! -d "$BASE_DIR" ]; then
     echo "no criterion data at $BASE_DIR; run --save-baseline first" >&2
     exit 3
@@ -82,8 +78,7 @@ cargo bench -p tokenzero-recovery --bench "$BENCH" -j 4 -- \
 WORST="$(awk -v thr="$THRESHOLD" '
     /[Mm]edian/ {
         for (i = 1; i <= NF; i++) {
-            v = $i
-            gsub(/[][%+]/, "", v)
+            v = $i; gsub(/[][%+]/, "", v)
             if (v ~ /^-?[0-9]+([.][0-9]+)?$/) {
                 n = v + 0
                 # the middle of the three bracketed values is the point estimate;

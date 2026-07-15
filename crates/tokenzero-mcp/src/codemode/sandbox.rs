@@ -39,7 +39,8 @@ const DENIED_TOKENS: &[(&str, &str)] = &[
 pub(crate) fn lower_code_plan(plan: &str, limits: &CodeModeLimits) -> Result<String, String> {
     let trimmed = plan.trim_start();
     let is_function_plan = ["export default", "function", "function"]
-        .iter().any(|prefix| trimmed.starts_with(prefix));
+        .iter()
+        .any(|prefix| trimmed.starts_with(prefix));
     if is_function_plan && plan.len() > limits.max_code_bytes {
         return Err(format!(
             "sandbox: code exceeds max_code_bytes {}",
@@ -100,7 +101,10 @@ fn rewrite_outside_strings(code: &str, token: &str, replacement: &str) -> String
 /// `process`/`spawn`.
 fn contains_token_at_identifier_boundary(haystack: &str, token: &str) -> bool {
     let bytes = haystack.as_bytes();
-    let check_end = token.as_bytes().last().is_some_and(|byte| is_identifier_byte(*byte));
+    let check_end = token
+        .as_bytes()
+        .last()
+        .is_some_and(|byte| is_identifier_byte(*byte));
     haystack.match_indices(token).any(|(start, _)| {
         let end = start + token.len();
         (start == 0 || !is_identifier_byte(bytes[start - 1]))
@@ -149,10 +153,18 @@ fn mask_string_literals(code: &str) -> String {
 }
 
 fn extract_function_body(code: &str) -> Result<String, String> {
-    let start = [") {", "){ ", "){\n", "){"].iter().find_map(|pattern| {
-        code.find(pattern).map(|position| position + pattern.find('{').unwrap())
-    }).ok_or_else(|| "sandbox: function body missing '{'".to_string())?;
-    let end = code.rfind('}').ok_or_else(|| "sandbox: function body missing '}'".to_string())?;
-    if end <= start { return Err("sandbox: malformed function body".to_string()); }
+    let start = [") {", "){ ", "){\n", "){"]
+        .iter()
+        .find_map(|pattern| {
+            code.find(pattern)
+                .map(|position| position + pattern.find('{').unwrap())
+        })
+        .ok_or_else(|| "sandbox: function body missing '{'".to_string())?;
+    let end = code
+        .rfind('}')
+        .ok_or_else(|| "sandbox: function body missing '}'".to_string())?;
+    if end <= start {
+        return Err("sandbox: malformed function body".to_string());
+    }
     Ok(code[start + 1..end].trim().to_string())
 }

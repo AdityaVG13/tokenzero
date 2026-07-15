@@ -1,9 +1,27 @@
 use super::*;
+use std::sync::Arc;
+use tempfile::tempdir;
+use tokenzero_core::MCP_SCHEMA_VERSION;
+
 use super::support::*;
 
 #[test]
 fn compact_shell_text_render_omits_ref_footer() {
-    let mut response = ToolResponse::ok("shell", Mode::Passthrough, "11.12.1".into(), vec![ref_record("stdout", "tz://blob/stdout".into(), 8), ref_record("combined", "tz://blob/combined".into(), 45)], Accounting { raw_tokens: 15, visible_tokens: 2, recovery_tokens: 0, exact_ref_tokens: Some(14) });
+    let mut response = ToolResponse::ok(
+        "shell",
+        Mode::Passthrough,
+        "11.12.1".to_string(),
+        vec![
+            ref_record("stdout", "tz://blob/stdout".to_string(), 8),
+            ref_record("combined", "tz://blob/combined".to_string(), 45),
+        ],
+        Accounting {
+            raw_tokens: 15,
+            visible_tokens: 2,
+            recovery_tokens: 0,
+            exact_ref_tokens: Some(14),
+        },
+    );
     response.telemetry = Some(json!({
         "output_strategy": "compact_adaptive_shell"
     }));
@@ -13,6 +31,9 @@ fn compact_shell_text_render_omits_ref_footer() {
 
 #[test]
 fn full_shell_text_render_does_not_duplicate_header_refs() {
+    // exact_first_adaptive_shell capsules carry stdout/stderr/combined
+    // refs in their header; the trailer must only add refs the visible
+    // text lacks (capture_ref), never repeat the anchored ones.
     let visible = "# shell\ncommand: seq 1 300\nstatus: command_success\n\
                        stdout_ref: tz://blob/bstdout\nstderr_ref: tz://blob/bstderr\n\
                        combined_ref: tz://blob/bcombined\n\n1\n2"
@@ -22,24 +43,33 @@ fn full_shell_text_render_does_not_duplicate_header_refs() {
         Mode::Auto,
         visible,
         vec![
-            ref_record("stdout", "tz://blob/bstdout".into(), 8), ref_record("stderr", "tz://blob/bstderr".into(), 0), ref_record("combined", "tz://blob/bcombined".into(), 45), ref_record("capture", "tz://blob/bcapture".into(), 60),
+            ref_record("stdout", "tz://blob/bstdout".to_string(), 8),
+            ref_record("stderr", "tz://blob/bstderr".to_string(), 0),
+            ref_record("combined", "tz://blob/bcombined".to_string(), 45),
+            ref_record("capture", "tz://blob/bcapture".to_string(), 60),
         ],
-        Accounting { raw_tokens: 100, visible_tokens: 40, recovery_tokens: 0, exact_ref_tokens: Some(28) },
+        Accounting {
+            raw_tokens: 100,
+            visible_tokens: 40,
+            recovery_tokens: 0,
+            exact_ref_tokens: Some(28),
+        },
     );
     response.telemetry = Some(json!({
         "output_strategy": "exact_first_adaptive_shell"
     }));
 
     let text = render_text(&response);
-    for r in ["tz://blob/bstdout", "tz://blob/bstderr", "tz://blob/bcombined"] {
-        assert_eq!(text.matches(r).count(), 1, "{text}");
-    }
+    assert_eq!(text.matches("tz://blob/bstdout").count(), 1, "{text}");
+    assert_eq!(text.matches("tz://blob/bstderr").count(), 1, "{text}");
+    assert_eq!(text.matches("tz://blob/bcombined").count(), 1, "{text}");
     assert!(text.contains("capture_ref: tz://blob/bcapture"), "{text}");
 }
 
 #[test]
 fn shell_exact_first_stores_stream_refs_and_status_truth() {
-    let (dir, engine) = setup_default();
+    let dir = tempdir().unwrap();
+    let engine = TokenZeroEngine::new(EngineConfig::for_root(dir.path()));
     let (command, argv, expanded_needle) = if cfg!(windows) {
         (
             "powershell -NoProfile -Command [Console]::Out.Write('alpha'); [Console]::Error.Write('beta'); exit 7",
@@ -55,22 +85,63 @@ fn shell_exact_first_stores_stream_refs_and_status_truth() {
         ("false | true", None, "$ false | true")
     };
 
-    let response = engine.shell(command, argv, Some(dir.path()), Mode::Auto, None, false, None, None, None);
+    let response = engine.shell(
+        command,
+        argv,
+        Some(dir.path()),
+        Mode::Auto,
+        None,
+        false,
+        None,
+        None,
+        None,
+    );
 
-    assert_status_ok(&response);
+    assert_eq!(response.status, "ok");
     assert_eq!(response.mode.as_deref(), Some("diagnostic"));
-    let tel = response.telemetry.as_ref().unwrap();
-    assert_eq!(tel["transport_status"], "ok");
-    assert_eq!(tel["command_success"], false);
-    assert!(response.refs.iter().any(|row| row.kind == "stdout" || row.kind == "stderr"));
-    assert!(expand_ok(&engine, &ref_of(&response, "combined")).contains(expanded_needle));
+    assert_eq!(
+        response.telemetry.as_ref().unwrap()["transport_status"],
+        "ok"
+    );
+    assert_eq!(
+        response.telemetry.as_ref().unwrap()["command_success"],
+        false
+    );
+    assert!(
+        response
+            .refs
+            .iter()
+            .any(|row| row.kind == "stdout" || row.kind == "stderr")
+    );
+    let combined_ref = response
+        .refs
+        .iter()
+        .find(|row| row.kind == "combined")
+        .unwrap()
+        .ref_id
+        .clone();
+    let expanded = engine.expand(&combined_ref, Some("raw"), None, None, None, None);
+    assert!(expanded.visible.unwrap().text.contains(expanded_needle));
 }
 
 #[test]
 fn shell_command_strings_preserve_shell_operators() {
-    let (dir, engine) = setup_default();
+    let dir = tempdir().unwrap();
+    let engine = TokenZeroEngine::new(EngineConfig::for_root(dir.path()));
 
-    let response = shell_ok(&engine, "echo one && echo two", None, Some(dir.path()));
+    let response = engine.shell(
+        "echo one && echo two",
+        None,
+        Some(dir.path()),
+        Mode::Auto,
+        None,
+        false,
+        None,
+        None,
+        None,
+    );
+
+    assert_eq!(response.status, "ok");
     assert_eq!(
         response.telemetry.as_ref().unwrap()["execution_mode"],
         "shell"
@@ -93,10 +164,21 @@ fn shell_command_strings_preserve_shell_operators() {
 
 #[test]
 fn shell_rejects_cwd_outside_allowed_roots() {
-    let (_allowed, engine) = setup_default();
+    let allowed = tempdir().unwrap();
     let outside = tempdir().unwrap();
+    let engine = TokenZeroEngine::new(EngineConfig::for_root(allowed.path()));
 
-    let response = engine.shell("echo nope", None, Some(outside.path()), Mode::Auto, None, false, None, None, None);
+    let response = engine.shell(
+        "echo nope",
+        None,
+        Some(outside.path()),
+        Mode::Auto,
+        None,
+        false,
+        None,
+        None,
+        None,
+    );
 
     assert_eq!(response.status, "error");
     assert_eq!(
@@ -107,11 +189,30 @@ fn shell_rejects_cwd_outside_allowed_roots() {
 
 #[test]
 fn shell_capture_record_is_compact_json() {
-    let (dir, engine) = setup_default();
+    let dir = tempdir().unwrap();
+    let engine = TokenZeroEngine::new(EngineConfig::for_root(dir.path()));
 
-    let response = shell_ok(&engine, "echo compact", None, Some(dir.path()));
+    let response = engine.shell(
+        "echo compact",
+        None,
+        Some(dir.path()),
+        Mode::Auto,
+        None,
+        false,
+        None,
+        None,
+        None,
+    );
 
-    let capture_text = expand_ok(&engine, &ref_of(&response, "capture"));
+    let capture_ref = response
+        .refs
+        .iter()
+        .find(|record| record.kind == "capture")
+        .unwrap()
+        .ref_id
+        .clone();
+    let expanded = engine.expand(&capture_ref, Some("raw"), None, None, None, None);
+    let capture_text = expanded.visible.unwrap().text;
     assert!(serde_json::from_str::<Value>(&capture_text).is_ok());
     assert_eq!(capture_text.lines().count(), 1);
 }
@@ -125,9 +226,19 @@ fn shell_truncation_is_explicit_and_degraded() {
     config.shell_spill_bytes = 6;
     let engine = TokenZeroEngine::new(config);
 
-    let response = engine.shell("yes x | head -c 100", None, Some(dir.path()), Mode::Auto, None, false, None, None, None);
+    let response = engine.shell(
+        "yes x | head -c 100",
+        None,
+        Some(dir.path()),
+        Mode::Auto,
+        None,
+        false,
+        None,
+        None,
+        None,
+    );
 
-    assert_status_ok(&response);
+    assert_eq!(response.status, "ok");
     assert_eq!(
         response.diagnostic.as_ref().unwrap().code,
         "shell_output_truncated"
@@ -156,7 +267,8 @@ fn shell_truncation_is_explicit_and_degraded() {
 #[cfg(windows)]
 #[test]
 fn shell_command_string_adapts_raw_powershell_variables() {
-    let (dir, engine) = setup_default();
+    let dir = tempdir().unwrap();
+    let engine = TokenZeroEngine::new(EngineConfig::for_root(dir.path()));
     let script = "$tzTmp = Join-Path $env:TEMP 'tz-quote'; [Console]::Out.Write($tzTmp)";
 
     let response = engine.shell(
@@ -171,7 +283,7 @@ fn shell_command_string_adapts_raw_powershell_variables() {
         None,
     );
 
-    assert_status_ok(&response);
+    assert_eq!(response.status, "ok");
     let telemetry = response.telemetry.as_ref().unwrap();
     assert_eq!(telemetry["command_success"], true);
     assert_eq!(telemetry["execution_mode"], "shell");
@@ -186,7 +298,8 @@ fn shell_command_string_adapts_raw_powershell_variables() {
 
 #[test]
 fn shell_accepts_common_command_argument_aliases() {
-    let (_dir, engine) = setup_default();
+    let dir = tempdir().unwrap();
+    let engine = TokenZeroEngine::new(EngineConfig::for_root(dir.path()));
 
     for args in [
         json!({"cmd": "echo alias"}),
@@ -207,9 +320,21 @@ fn shell_accepts_common_command_argument_aliases() {
 #[cfg(unix)]
 #[test]
 fn shell_children_inherit_tokenzero_inner_guard() {
-    let (dir, engine) = setup_default();
+    let dir = tempdir().unwrap();
+    let engine = TokenZeroEngine::new(EngineConfig::for_root(dir.path()));
 
-    let response = shell_ok_exact(&engine, "sh -c 'echo INNER=$TOKENZERO_INNER'", None, Some(dir.path()), None);
+    let response = engine.shell(
+        "sh -c 'echo INNER=$TOKENZERO_INNER'",
+        None,
+        Some(dir.path()),
+        Mode::Auto,
+        None,
+        true,
+        None,
+        None,
+        None,
+    );
+    assert_eq!(response.status, "ok");
     let preview = response.telemetry.as_ref().unwrap()["stdout_preview"]
         .as_str()
         .unwrap()
@@ -220,11 +345,23 @@ fn shell_children_inherit_tokenzero_inner_guard() {
 #[cfg(unix)]
 #[test]
 fn shell_caller_env_overrides_inner_guard() {
-    let (dir, engine) = setup_default();
+    let dir = tempdir().unwrap();
+    let engine = TokenZeroEngine::new(EngineConfig::for_root(dir.path()));
 
     let mut env = BTreeMap::new();
     env.insert("TOKENZERO_INNER".to_string(), "custom".to_string());
-    let response = shell_ok_exact(&engine, "sh -c 'echo INNER=$TOKENZERO_INNER'", None, Some(dir.path()), Some(env));
+    let response = engine.shell(
+        "sh -c 'echo INNER=$TOKENZERO_INNER'",
+        None,
+        Some(dir.path()),
+        Mode::Auto,
+        None,
+        true,
+        Some(env),
+        None,
+        None,
+    );
+    assert_eq!(response.status, "ok");
     let preview = response.telemetry.as_ref().unwrap()["stdout_preview"]
         .as_str()
         .unwrap()
@@ -262,11 +399,34 @@ fn shell_scrubs_inherited_orchestration_env() {
         return;
     }
 
-    let (dir, engine) = setup_default();
+    let dir = tempdir().unwrap();
+    let engine = TokenZeroEngine::new(EngineConfig::for_root(dir.path()));
     let script = r#"printf 'ZEROSTACK=%s\nFSZERO=%s\nGRAPHZERO=%s\nTOKENZERO_CACHE=%s\nTOKENZERO_ALLOWED=%s\nTOKENZERO_EXPLICIT=%s\nCONTROL=%s\nPATH_PRESENT=%s\n' "${ZEROSTACK_STORE_ROOT-absent}" "${FSZERO_ROOT-absent}" "${GRAPHZERO_ROOT-absent}" "${TOKENZERO_CACHE_PATH-absent}" "${TOKENZERO_ALLOWED_ROOTS-absent}" "${TOKENZERO_EXPLICIT_CHILD-absent}" "${SHELL_ENV_CONTROL-absent}" "${PATH:+yes}""#;
     let argv = Some(vec!["sh".to_string(), "-c".to_string(), script.to_string()]);
-    let response = shell_ok_exact(&engine, "env scrub probe", argv, Some(dir.path()), None);
-    let stdout = expand_ok(&engine, &ref_of(&response, "stdout"));
+    let response = engine.shell(
+        "env scrub probe",
+        argv,
+        Some(dir.path()),
+        Mode::Auto,
+        None,
+        true,
+        None,
+        None,
+        None,
+    );
+    assert_eq!(response.status, "ok");
+    let stdout_ref = response
+        .refs
+        .iter()
+        .find(|row| row.kind == "stdout")
+        .unwrap()
+        .ref_id
+        .clone();
+    let stdout = engine
+        .expand(&stdout_ref, Some("raw"), None, None, None, None)
+        .visible
+        .unwrap()
+        .text;
     assert_eq!(
         stdout.trim_end(),
         "ZEROSTACK=absent\nFSZERO=absent\nGRAPHZERO=absent\nTOKENZERO_CACHE=absent\nTOKENZERO_ALLOWED=absent\nTOKENZERO_EXPLICIT=absent\nCONTROL=preserved\nPATH_PRESENT=yes"
@@ -277,7 +437,33 @@ fn shell_scrubs_inherited_orchestration_env() {
         "TOKENZERO_EXPLICIT_CHILD".to_string(),
         "opted-in".to_string(),
     );
-    let response = shell_ok_exact(&engine, "explicit env probe", Some(vec!["sh".into(), "-c".into(), r#"printf '%s' "${TOKENZERO_EXPLICIT_CHILD-absent}""#.into()]), Some(dir.path()), Some(explicit_env));
-    let stdout = expand_ok(&engine, &ref_of(&response, "stdout"));
+    let response = engine.shell(
+        "explicit env probe",
+        Some(vec![
+            "sh".to_string(),
+            "-c".to_string(),
+            r#"printf '%s' "${TOKENZERO_EXPLICIT_CHILD-absent}""#.to_string(),
+        ]),
+        Some(dir.path()),
+        Mode::Auto,
+        None,
+        true,
+        Some(explicit_env),
+        None,
+        None,
+    );
+    assert_eq!(response.status, "ok");
+    let stdout_ref = response
+        .refs
+        .iter()
+        .find(|row| row.kind == "stdout")
+        .unwrap()
+        .ref_id
+        .clone();
+    let stdout = engine
+        .expand(&stdout_ref, Some("raw"), None, None, None, None)
+        .visible
+        .unwrap()
+        .text;
     assert_eq!(stdout, "opted-in");
 }

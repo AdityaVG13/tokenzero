@@ -60,14 +60,23 @@ impl TokenZeroEngine {
         // grep (find keeps identical substring semantics either way and may
         // fall back). Auto mode always falls back.
         let explicit_rg = matches!(self.config.search_backend, SearchBackend::Rg);
-        let backend_unavailable = |reason: &str| failure_response(
-            tool, "backend_unavailable",
-            format!("TOKENZERO_SEARCH_BACKEND=rg but ripgrep is unusable: {reason}"),
-            Some("install ripgrep, set TOKENZERO_RG_PATH, or use auto/internal \
-                  (internal matches literal substrings, not regex)"),
-        );
+        let backend_unavailable = |reason: &str| {
+            failure_response(
+                tool,
+                "backend_unavailable",
+                format!("TOKENZERO_SEARCH_BACKEND=rg but ripgrep is unusable: {reason}"),
+                Some(
+                    "install ripgrep, set TOKENZERO_RG_PATH, or use auto/internal \
+                  (internal matches literal substrings, not regex)",
+                ),
+            )
+        };
         let rg = match self.config.search_backend {
             SearchBackend::Internal => None,
+            SearchBackend::Auto if tool == "find" && roots.iter().all(|root| root.is_file()) => {
+                fallback_reason = Some("in_process_file_fast_path".to_owned());
+                None
+            }
             SearchBackend::Rg | SearchBackend::Auto => {
                 let resolved = self.rg_binary();
                 if resolved.is_none() {
@@ -91,7 +100,9 @@ impl TokenZeroEngine {
                 // semantics that would return different results.
                 Err(RgFailure::InvalidPattern(message)) => {
                     return failure_response(
-                        tool, "invalid_pattern", message,
+                        tool,
+                        "invalid_pattern",
+                        message,
                         Some("fix the regex, or use tz_find for literal substring search"),
                     );
                 }
@@ -112,16 +123,15 @@ impl TokenZeroEngine {
         let (visible_source, grouped) = pick_cheaper(&output, &compact);
         let mut store = self.recovery_store();
         let search_refs = store.store_search_output_deferred(&output, Some(query));
-        let stored = store.store_payload_deferred(
-            &output,
-            ContentType::SearchResult,
-            None,
-            None,
-            None,
-        );
+        let stored =
+            store.store_payload_deferred(&output, ContentType::SearchResult, None, None, None);
         let mut refs = Vec::with_capacity(2 + search_refs.len());
         push_payload_refs(&mut refs, &stored, output.len());
-        refs.extend(search_refs.into_iter().map(|id| ref_record("search", id, 0)));
+        refs.extend(
+            search_refs
+                .into_iter()
+                .map(|id| ref_record("search", id, 0)),
+        );
         let persisted = persist_refs(&mut store, &mut refs);
         let refs_complete = persisted.refs_complete;
         let storage_error = persisted.error;
@@ -191,7 +201,12 @@ impl TokenZeroEngine {
             mode,
             visible_text,
             refs,
-            (capsule.raw_tokens, final_visible_tokens, 0, Some(exact_ref_tokens)),
+            (
+                capsule.raw_tokens,
+                final_visible_tokens,
+                0,
+                Some(exact_ref_tokens),
+            ),
         );
         response.content_type = Some(ContentType::SearchResult.to_string());
         if storage_error.is_some() {
@@ -265,7 +280,10 @@ impl TokenZeroEngine {
             Ok(glob) => glob.compile_matcher(),
             Err(err) => {
                 return failure_response(
-                    "glob", "invalid_glob", err.to_string(), Some("check glob syntax"),
+                    "glob",
+                    "invalid_glob",
+                    err.to_string(),
+                    Some("check glob syntax"),
                 );
             }
         };
@@ -399,16 +417,15 @@ impl TokenZeroEngine {
     ) -> ToolResponse {
         let mut store = self.recovery_store();
         let search_refs = store.store_search_output_deferred(output, Some(key));
-        let stored = store.store_payload_deferred(
-            output,
-            ContentType::SearchResult,
-            None,
-            None,
-            None,
-        );
+        let stored =
+            store.store_payload_deferred(output, ContentType::SearchResult, None, None, None);
         let mut refs = Vec::with_capacity(2 + search_refs.len());
         push_payload_refs(&mut refs, &stored, output.len());
-        refs.extend(search_refs.into_iter().map(|id| ref_record("search", id, 0)));
+        refs.extend(
+            search_refs
+                .into_iter()
+                .map(|id| ref_record("search", id, 0)),
+        );
         let persisted = persist_refs(&mut store, &mut refs);
         let exact_ref_tokens = exact_ref_token_count(&refs);
         let capsule = recoverable_capsule(

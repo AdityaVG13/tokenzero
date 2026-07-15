@@ -9,7 +9,7 @@ use serde_json::{Value, json};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Instant;
-use tokenzero_core::count_tokens;
+use tokenzero_core::{ToolResponse, count_tokens};
 
 use crate::fastmcp_mode::fastmcp_content_texts_from_tool_result;
 use crate::tools::{dispatch_tool, mcp_tool_response};
@@ -116,10 +116,6 @@ pub fn workloads_for_root(root: &std::path::Path) -> Vec<Workload> {
     let root_str = root.to_string_lossy();
     let cargo_toml = format!("{root_str}/Cargo.toml");
     let crates_dir = format!("{root_str}/crates");
-    let _mcp_src = format!("{root_str}/crates/tokenzero-mcp/src");
-    let _bench_rs = format!("{root_str}/crates/tokenzero-mcp/src/codemode/bench.rs");
-    let _exec_rs = format!("{root_str}/crates/tokenzero-mcp/src/codemode/exec.rs");
-    let _result_rs = format!("{root_str}/crates/tokenzero-mcp/src/codemode/result.rs");
 
     // Deterministic synthetic corpus for scale workloads (no live git state).
     // Content is a pure function of loop indices and is written to a fixed
@@ -177,12 +173,7 @@ pub fn workloads_for_root(root: &std::path::Path) -> Vec<Workload> {
         let log_data = (1..=100u32)
             .map(|i| {
                 let hash = format!("{:07x}", i.wrapping_mul(2654435761) % 0x0fff_ffff);
-                let prefix = match i % 4 {
-                    0 => "feat",
-                    1 => "fix",
-                    2 => "docs",
-                    _ => "chore",
-                };
+                let prefix = ["feat", "fix", "docs", "chore"][(i % 4) as usize];
                 format!(
                     "{hash} {prefix}: synthetic commit {i} adjusting subsystem {}",
                     i % 12
@@ -332,6 +323,12 @@ fn raw_sh(command: String) -> RawCommand {
 
 const BENCHMARK_REPORT_VERSION: &str = "1.3.0";
 
+fn timed<T>(run: impl FnOnce() -> T) -> (T, u64) {
+    let start = Instant::now();
+    let value = run();
+    (value, start.elapsed().as_millis() as u64)
+}
+
 pub fn run_benchmark(root: &std::path::Path) -> BenchmarkReport {
     let root_buf = benchmark_root(root);
     let root = root_buf.as_path();
@@ -346,17 +343,9 @@ pub fn run_benchmark(root: &std::path::Path) -> BenchmarkReport {
         let plan_engine = engine_for_leg(root, plan_cache);
         let perop_engine = engine_for_leg(root, perop_cache);
 
-        let start = Instant::now();
-        let plan = measure_plan_leg(&plan_engine, &wl.plan);
-        let plan_ms = start.elapsed().as_millis() as u64;
-
-        let perop_start = Instant::now();
-        let perop = measure_perop_leg(&perop_engine, wl);
-        let perop_ms = perop_start.elapsed().as_millis() as u64;
-
-        let raw_start = Instant::now();
-        let raw = measure_raw_leg(root, wl);
-        let raw_ms = raw_start.elapsed().as_millis() as u64;
+        let (plan, plan_ms) = timed(|| measure_plan_leg(&plan_engine, &wl.plan));
+        let (perop, perop_ms) = timed(|| measure_perop_leg(&perop_engine, wl));
+        let (raw, raw_ms) = timed(|| measure_raw_leg(root, wl));
 
         results.push(BenchmarkResult {
             workload: wl.name.clone(),
@@ -439,7 +428,20 @@ fn engine_for_leg(root: &Path, cache_path: PathBuf) -> TokenZeroEngine {
     let workspace = benchmark_root(root);
     let mut config = EngineConfig::for_root(&workspace);
     config.cache_path = cache_path;
+    config.session_dedup = false;
     TokenZeroEngine::new(config)
+}
+
+fn wire_tokens(texts: &[String]) -> usize {
+    texts.iter().map(|text| count_tokens(text)).sum()
+}
+
+fn accounted_raw_tokens(response: &ToolResponse) -> usize {
+    response
+        .accounting
+        .as_ref()
+        .map(|a| a.raw_tokens)
+        .unwrap_or(0)
 }
 
 fn measure_plan_leg(engine: &TokenZeroEngine, plan: &str) -> PlanMeasurement {
@@ -461,11 +463,7 @@ fn measure_plan_leg(engine: &TokenZeroEngine, plan: &str) -> PlanMeasurement {
         }),
     )
     .expect("plan leg dispatch");
-    let raw_tokens = response
-        .accounting
-        .as_ref()
-        .map(|a| a.raw_tokens)
-        .unwrap_or(0);
+    let raw_tokens = accounted_raw_tokens(&response);
     let mcp = mcp_tool_response(response);
     let wire_texts = fastmcp_content_texts_from_tool_result(&mcp).expect("fastmcp render");
     let primary = wire_texts.first().cloned().unwrap_or_default();
@@ -477,7 +475,7 @@ fn measure_plan_leg(engine: &TokenZeroEngine, plan: &str) -> PlanMeasurement {
         .map(|text| count_tokens(&text))
         .or_else(|| folded_scalar_payload(&primary).map(|text| count_tokens(&text)))
         .unwrap_or(0);
-    let visible_tokens: usize = wire_texts.iter().map(|text| count_tokens(text)).sum();
+    let visible_tokens = wire_tokens(&wire_texts);
     let ops = parse_ops_from_ack(&primary);
     PlanMeasurement {
         visible_tokens,
@@ -517,17 +515,10 @@ fn measure_perop_leg(engine: &TokenZeroEngine, workload: &Workload) -> PerOpMeas
         args_tokens += count_tokens(&serde_json::to_string(&args).unwrap_or_default());
         let response =
             dispatch_tool(engine, call.canonical, call.name, &args).expect("per-op call");
-        raw_tokens += response
-            .accounting
-            .as_ref()
-            .map(|a| a.raw_tokens)
-            .unwrap_or(0);
+        raw_tokens += accounted_raw_tokens(&response);
         let mcp = mcp_tool_response(response);
         let contents = fastmcp_content_texts_from_tool_result(&mcp).expect("per-op fastmcp render");
-        visible_tokens += contents
-            .iter()
-            .map(|text| count_tokens(text))
-            .sum::<usize>();
+        visible_tokens += wire_tokens(&contents);
         previous_text = contents.first().cloned().unwrap_or_default();
         wire_chunks.push(contents.join("\n"));
     }
@@ -565,39 +556,49 @@ fn measure_raw_leg(root: &Path, workload: &Workload) -> RawMeasurement {
 mod bench_harness {
     use super::*;
 
-    fn measure(plan: &str, tag: &str) -> PlanMeasurement {
-        let root = std::env::current_dir().unwrap();
-        let engine = engine_for_leg(&root, hermetic_cache_path(0, tag, "plan"));
-        measure_plan_leg(&engine, plan)
+    struct Fixture {
+        root: PathBuf,
+        engine: TokenZeroEngine,
+    }
+    impl Fixture {
+        fn new(tag: &str) -> Self {
+            let root = std::env::current_dir().unwrap();
+            let engine = engine_for_leg(&root, hermetic_cache_path(0, tag, "plan"));
+            Self { root, engine }
+        }
+        fn workload(&self, name: &str) -> Workload {
+            workloads_for_root(&self.root)
+                .into_iter()
+                .find(|w| w.name == name)
+                .unwrap()
+        }
+        fn render(&self, plan: &str) -> Vec<String> {
+            let response = dispatch_tool(
+                &self.engine,
+                "execute_code",
+                "tz_execute_code",
+                &json!({"plan":plan,"envelope":"v2","ref_first":true}),
+            )
+            .unwrap();
+            fastmcp_content_texts_from_tool_result(&mcp_tool_response(response)).unwrap()
+        }
+        fn measure(&self, plan: &str) -> PlanMeasurement {
+            measure_plan_leg(&self.engine, plan)
+        }
     }
 
     #[test]
     fn scalar_return_plan_folds_into_primary_content() {
-        let root = std::env::current_dir().unwrap();
-        let engine = engine_for_leg(&root, hermetic_cache_path(0, "scalar-fold", "plan"));
-        let response = dispatch_tool(
-            &engine,
-            "execute_code",
-            "tz_execute_code",
-            &json!({"plan": "return await Promise.resolve(true)", "envelope": "v2", "ref_first": true}),
-        )
-        .unwrap();
-        let mcp = mcp_tool_response(response);
-        let rendered = fastmcp_content_texts_from_tool_result(&mcp).unwrap();
-        assert_eq!(rendered.len(), 1, "{:?}", rendered);
-        assert!(rendered[0].contains(" =true t:"), "{:?}", rendered);
+        let rendered = Fixture::new("scalar-fold").render("return await Promise.resolve(true)");
+        assert_eq!(rendered.len(), 1, "{rendered:?}");
+        assert!(rendered[0].contains(" =true t:"), "{rendered:?}");
         assert!(count_tokens(&rendered[0]) <= 14, "{}", rendered[0]);
     }
 
     #[test]
     fn pipe_composition_payload_is_ref_preview() {
-        let root = std::env::current_dir().unwrap();
-        let plan = workloads_for_root(&root)
-            .into_iter()
-            .find(|w| w.name == "pipe-composition")
-            .unwrap()
-            .plan;
-        let measured = measure(&plan, "pipe-payload");
+        let f = Fixture::new("pipe-payload");
+        let measured = f.measure(&f.workload("pipe-composition").plan);
         assert!(measured.payload_tokens < 40, "{measured:?}");
         assert_eq!(measured.wire_texts.len(), 2, "{:?}", measured.wire_texts);
         let value = serde_json::from_str::<Value>(&measured.wire_texts[1])
@@ -606,93 +607,91 @@ mod bench_harness {
             .unwrap()
             .clone();
         assert!(value.get("ref").and_then(Value::as_str).is_some());
-        assert!(value.get("preview").and_then(Value::as_str).unwrap_or("").chars().count() <= 32);
+        assert!(
+            value
+                .get("preview")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .chars()
+                .count()
+                <= 32
+        );
     }
 
     #[test]
     fn codemode_v2_structured_json_is_compact() {
-        let measured = measure("return { answer: 42 }", "compact-json");
+        let measured = Fixture::new("compact-json").measure("return { answer: 42 }");
         assert_eq!(measured.wire_texts.len(), 2);
         let structured = &measured.wire_texts[1];
-        assert!(!structured.contains(": "), "{structured}");
-        assert!(!structured.contains("\n"), "{structured}");
+        for forbidden in [": ", "\n", "null"] {
+            assert!(!structured.contains(forbidden), "{structured}");
+        }
         let value: Value = serde_json::from_str(structured).unwrap();
         assert!(value.get("refs").is_none());
-        assert!(!structured.contains("null"), "{structured}");
     }
 
-#[test]
-fn matrix_integrity_sums_exact_and_legs_nonzero() {
-    let report = run_benchmark(&std::env::current_dir().unwrap());
-    assert_eq!(report.version, BENCHMARK_REPORT_VERSION);
-    for workload in &report.workloads {
-        for (leg, tokens) in [
-            ("raw", workload.raw_visible_tokens),
-            ("per-op", workload.perop_visible_tokens),
-            ("plan", workload.plan_visible_tokens),
-            ("payload", workload.payload_tokens),
-            ("envelope", workload.envelope_tokens),
-        ] {
-            assert!(tokens > 0, "{} {leg}", workload.workload);
+    #[test]
+    fn matrix_integrity_sums_exact_and_legs_nonzero() {
+        let report = run_benchmark(&std::env::current_dir().unwrap());
+        assert_eq!(report.version, BENCHMARK_REPORT_VERSION);
+        for workload in &report.workloads {
+            for (leg, tokens) in [
+                ("raw", workload.raw_visible_tokens),
+                ("per-op", workload.perop_visible_tokens),
+                ("plan", workload.plan_visible_tokens),
+                ("payload", workload.payload_tokens),
+                ("envelope", workload.envelope_tokens),
+            ] {
+                assert!(tokens > 0, "{} {leg}", workload.workload);
+            }
+            assert_eq!(
+                workload.payload_tokens + workload.envelope_tokens,
+                workload.plan_visible_tokens,
+                "{} visible split",
+                workload.workload
+            );
         }
+        macro_rules! total {
+            ($total:ident, $field:ident, $label:literal) => {
+                assert_eq!(
+                    report.totals.$total,
+                    report.workloads.iter().map(|row| row.$field).sum::<usize>(),
+                    concat!($label, " total")
+                );
+            };
+        }
+        total!(total_raw_visible, raw_visible_tokens, "raw");
+        total!(total_perop_visible, perop_visible_tokens, "per-op");
+        total!(total_perop_args, perop_args_tokens, "per-op args");
+        total!(total_plan_visible, plan_visible_tokens, "plan");
         assert_eq!(
-            workload.payload_tokens + workload.envelope_tokens,
-            workload.plan_visible_tokens,
-            "{} visible split",
-            workload.workload,
+            report.totals.total_plan_visible,
+            report.totals.total_payload + report.totals.total_envelope
         );
     }
-    for (actual, expected, label) in [
-        (report.totals.total_raw_visible, report.workloads.iter().map(|r| r.raw_visible_tokens).sum::<usize>(), "raw"),
-        (report.totals.total_perop_visible, report.workloads.iter().map(|r| r.perop_visible_tokens).sum::<usize>(), "per-op"),
-        (report.totals.total_perop_args, report.workloads.iter().map(|r| r.perop_args_tokens).sum::<usize>(), "per-op args"),
-        (report.totals.total_plan_visible, report.workloads.iter().map(|r| r.plan_visible_tokens).sum::<usize>(), "plan"),
-    ] {
-        assert_eq!(actual, expected, "{label} total");
-    }
-    assert_eq!(
-        report.totals.total_plan_visible,
-        report.totals.total_payload + report.totals.total_envelope,
-    );
-}
 
     #[test]
     fn plan_leg_matches_fastmcp_v2_rendering_byte_for_byte() {
-        let root = std::env::current_dir().unwrap();
-        let workload = workloads_for_root(&root).remove(0);
-        let engine = engine_for_leg(&root, hermetic_cache_path(0, "render", "plan"));
-        let response = dispatch_tool(
-            &engine,
-            "execute_code",
-            "tz_execute_code",
-            &json!({"plan": workload.plan, "envelope": "v2", "ref_first": true}),
-        )
-        .unwrap();
-        let mcp = mcp_tool_response(response);
-        let rendered = fastmcp_content_texts_from_tool_result(&mcp).unwrap();
-        let measured = measure_plan_leg(&engine, &workload.plan);
-        assert_eq!(
-            measured.visible_tokens,
-            rendered
-                .iter()
-                .map(|text| count_tokens(text))
-                .sum::<usize>()
-        );
+        let f = Fixture::new("render");
+        let workload = workloads_for_root(&f.root).remove(0);
+        let rendered = f.render(&workload.plan);
+        let measured = f.measure(&workload.plan);
+        assert_eq!(measured.visible_tokens, wire_tokens(&rendered));
     }
 
     #[test]
     fn perop_leg_measures_classic_read_text() {
-        let root = std::env::current_dir().unwrap();
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         let workload = Workload {
-            name: "read-only".to_string(),
-            description: "read only".to_string(),
+            name: "read-only".into(),
+            description: "read only".into(),
             scale_workload: false,
             plan: String::new(),
-            raw_commands: vec![raw_sh("cat Cargo.toml".to_string())],
+            raw_commands: vec![raw_sh("cat Cargo.toml".into())],
             perop_calls: vec![direct(
                 "tz_read",
                 "read",
-                json!({"path": root.join("Cargo.toml").to_string_lossy().to_string()}),
+                json!({"path":root.join("Cargo.toml").to_string_lossy().to_string()}),
             )],
         };
         let engine = engine_for_leg(&root, hermetic_cache_path(0, "direct-read", "perop"));
@@ -708,64 +707,40 @@ fn matrix_integrity_sums_exact_and_legs_nonzero() {
 
     #[test]
     fn codemode_v2_refs_are_capped_to_returned_value_refs() {
-        let root = std::env::current_dir().unwrap();
-        let engine = engine_for_leg(&root, hermetic_cache_path(0, "refs-cap", "plan"));
+        let f = Fixture::new("refs-cap");
         let big = (0..300)
             .map(|index| format!("word{index}"))
             .collect::<Vec<_>>()
             .join(" ");
-        let plan = format!(
+        let rendered = f.render(&format!(
             "return {{ kept: {} }}",
             serde_json::to_string(&big).unwrap()
-        );
-        let response = dispatch_tool(
-            &engine,
-            "execute_code",
-            "tz_execute_code",
-            &json!({"plan": plan, "envelope": "v2", "ref_first": true}),
-        )
-        .unwrap();
-        let mcp = mcp_tool_response(response);
-        let rendered = fastmcp_content_texts_from_tool_result(&mcp).unwrap();
+        ));
         let structured: Value = serde_json::from_str(&rendered[1]).unwrap();
         let value_text = serde_json::to_string(structured.get("value").unwrap()).unwrap();
         let refs = structured.get("refs").and_then(Value::as_array).unwrap();
         assert_eq!(refs.len(), 1);
-        for ref_value in refs {
-            let ref_id = ref_value.as_str().unwrap();
-            assert!(value_text.contains(ref_id));
+        for reference in refs {
+            assert!(value_text.contains(reference.as_str().unwrap()));
         }
-        let telemetry_ref = structured.get("ref").and_then(Value::as_str).unwrap();
-        assert!(!value_text.contains(telemetry_ref));
+        assert!(!value_text.contains(structured.get("ref").and_then(Value::as_str).unwrap()));
     }
 
     #[test]
     fn benchmark_double_run_identity() {
-        // Two consecutive runs must produce identical plan-text tokens and
-        // operation counts. These are purely functions of the plan string
-        // and are the bedrock invariants of the benchmark. Per-op, raw, and
-        // visibility fields may vary slightly between runs due to filesystem
-        // state leakage in the full test suite; run this test in isolation
-        // (-- --exact benchmark_double_run_identity) for the full identity check.
         let root = std::env::current_dir().unwrap();
-        let run1 = run_benchmark(&root);
-        let run2 = run_benchmark(&root);
-
+        let [run1, run2] = [run_benchmark(&root), run_benchmark(&root)];
         assert_eq!(run1.version, run2.version);
         assert_eq!(run1.workloads.len(), run2.workloads.len());
-
-        for (i, (w1, w2)) in run1.workloads.iter().zip(run2.workloads.iter()).enumerate() {
-            assert_eq!(w1.workload, w2.workload, "workload {} name mismatch", i);
-            // Plan string is byte-stable between runs
+        for (index, (a, b)) in run1.workloads.iter().zip(&run2.workloads).enumerate() {
+            assert_eq!(a.workload, b.workload, "workload {index} name mismatch");
             assert_eq!(
-                w1.plan_text_tokens, w2.plan_text_tokens,
+                a.plan_text_tokens, b.plan_text_tokens,
                 "{} plan_text",
-                w1.workload
+                a.workload
             );
-            assert_eq!(w1.plan_ops, w2.plan_ops, "{} plan_ops", w1.workload);
+            assert_eq!(a.plan_ops, b.plan_ops, "{} plan_ops", a.workload);
         }
-
-        // Plan-text totals are purely additive
         assert_eq!(run1.totals.total_plan_text, run2.totals.total_plan_text);
     }
 
@@ -776,16 +751,12 @@ fn matrix_integrity_sums_exact_and_legs_nonzero() {
             "version": report.version,
             "description": "CodeMode plan composition benchmark: v2 CodeMode FastMCP wire vs raw subprocess output and equivalent classic per-op MCP tool responses",
             "methodology": "All legs run from the TokenZero repo root with the same count_tokens tokenizer. Plan and per-op legs use separate fresh recovery caches per workload. The plan leg calls tz_execute_code with the v2 ref-first CodeMode envelope and counts FastMCP content text exactly as emitted. The per-op leg calls the classic tz_* tool path for each equivalent operation, counts every FastMCP content text, and reports argument tokens separately. The raw leg executes real subprocess commands with std::process in the repo root and tokenizes the exact command text plus stdout and stderr that an agent without ZeroStack would consume. Raw excludes harness per-call framing, which is conservative in CodeMode's favor.",
-            "headline": {
-                "metric": "codemode_vs_raw_savings_pct",
-                "value": report.totals.headline_savings_pct
-            },
-            "workloads": report.workloads,
-            "totals": report.totals,
+            "headline": {"metric":"codemode_vs_raw_savings_pct","value":report.totals.headline_savings_pct},
+            "workloads": report.workloads, "totals": report.totals,
         });
         let serialized = serde_json::to_string_pretty(&document).unwrap();
-        if let Ok(out_path) = std::env::var("TOKENZERO_COMPOSITION_BENCHMARK_OUT") {
-            std::fs::write(out_path, serialized).unwrap();
+        if let Ok(path) = std::env::var("TOKENZERO_COMPOSITION_BENCHMARK_OUT") {
+            std::fs::write(path, serialized).unwrap();
         } else {
             println!("{serialized}");
         }

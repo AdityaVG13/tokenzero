@@ -57,9 +57,6 @@ use zerostack_store::{
     tokenzero_work_root,
 };
 
-/// Derive the migration manifest path from a recovery cache path.
-/// For unified stores: <store-root>/tokenzero/migration-manifest.json
-/// For legacy flat caches: <cache-parent>/migration-manifest.json
 fn emit_json_md<T, F, J, M>(output_json: J, output_md: M, as_json: bool, run: F) -> Result<()>
 where
     T: serde::Serialize,
@@ -88,11 +85,8 @@ fn with_legacy_migration<R>(
         tokenzero_recovery::shared_cas::SharedCas::attach_root_for_cache_path(&cache),
     );
     let mut adapter = tokenzero_recovery::migration::RecoveryStoreAdapter::new(&mut store);
-    let mut migration = tokenzero_recovery::migration::LegacyMigration::new(
-        &mut adapter,
-        &cas,
-        Some(manifest),
-    );
+    let mut migration =
+        tokenzero_recovery::migration::LegacyMigration::new(&mut adapter, &cas, Some(manifest));
     f(&mut migration)
 }
 
@@ -111,8 +105,31 @@ fn emit_migration_report(json: String, text: String, failed: bool, as_json: bool
 macro_rules! cache_migrate {
     ($root:expr, $cache:expr, $json:expr, $body:expr) => {{
         let report = with_legacy_migration($root, $cache, $body);
-        emit_migration_report(report.to_json(), report.to_text(), report.is_failure(), $json)
+        emit_migration_report(
+            report.to_json(),
+            report.to_text(),
+            report.is_failure(),
+            $json,
+        )
     }};
+}
+
+macro_rules! dispatch_command {
+($command:expr;
+@emit { $($ev:ident => $eh:ident),* $(,)? }
+@result { $($rv:ident => $rh:ident),* $(,)? }
+@json_md { $($jv:ident => $jr:expr),* $(,)? }
+@value { $($vv:ident($va:ident) => $value:expr;)* }
+@special { $($sv:ident($sa:ident) => $special:block)* }
+) => {
+match $command {
+$(Commands::$ev(args) => emit($eh(args)?)?,)*
+$(Commands::$rv(args) => $rh(args)?,)*
+$(Commands::$jv(args) => emit_json_md(args.output_json, args.output_md, args.json, $jr)?,)*
+$(Commands::$vv($va) => { let as_json = $va.json; emit_value($value, as_json)? },)*
+$(Commands::$sv($sa) => $special,)*
+}
+};
 }
 
 fn main() -> Result<()> {
@@ -122,155 +139,34 @@ fn main() -> Result<()> {
         println!();
         return Ok(());
     };
-    match command {
-        Commands::Read(args) => emit(handle_read(args)?)?,
-        Commands::Find(args) => emit(handle_find(args)?)?,
-        Commands::Grep(args) => emit(handle_grep(args)?)?,
-        Commands::Glob(args) => emit(handle_glob(args)?)?,
-        Commands::Tree(args) => emit(handle_tree(args)?)?,
-        Commands::Edit(args) => emit(handle_edit(args)?)?,
-        Commands::Recall(args) => emit(handle_recall(args)?)?,
-        Commands::Fetch(args) => emit(handle_fetch(args)?)?,
-        Commands::Run(args) => emit(handle_run(args)?)?,
-        Commands::Ingest(args) => emit(handle_ingest(args)?)?,
-        Commands::Expand(args) => emit(handle_expand(args)?)?,
-        Commands::SessionOpen(args) => {
-            let as_json = args.json;
-            emit_value(engine_from_common(&args).session_boot_snapshot(), as_json)?
+    dispatch_command!(command;
+    @emit { Read => handle_read, Find => handle_find, Grep => handle_grep, Glob => handle_glob, Tree => handle_tree, Edit => handle_edit, Recall => handle_recall, Fetch => handle_fetch, Run => handle_run, Ingest => handle_ingest, Expand => handle_expand, }
+    @result { Rewrite => emit_rewrite, Doctor => handle_doctor, Pulse => handle_pulse, SessionLedger => handle_session_ledger, Cache => handle_cache, Install => handle_install, Init => handle_init, Clients => handle_clients, ClientStatus => handle_client_status, Capabilities => handle_capabilities, CachePack => handle_cache_pack, Bench => handle_bench, Quote => handle_quote, }
+    @json_md { McpSmoke => |j, m| run_mcp_artifact(j, m, 1), McpSoak => |j, m| run_mcp_artifact(j, m, 25), ExactRecoveryShell => run_exact_recovery_shell, ExactRecoveryAudit => run_exact_recovery_audit, HarmEval => run_harm_eval, ProtectedAnchorAudit => run_protected_anchor_audit, FalseSuccessShell => run_false_success_shell, RepoInventory => run_repo_inventory, PromptCachePack => run_prompt_cache_pack, ShellMatrix => run_shell_matrix, OneShotEval => run_one_shot_eval, AdapterApprovalTemplate => run_adapter_approval_template, CompletionAudit => run_completion_audit, SecurityPrivacyAudit => run_security_privacy_audit, ArtifactHandoff => run_artifact_handoff, WsSkeleton => run_ws_skeleton, }
+    @value { SessionOpen(args) => engine_from_common(&args).session_boot_snapshot(); Stats(args) => handle_stats(args)?; InstallSmoke(args) => run_install_smoke(args.output_json)?; PackageAudit(args) => handle_package_audit(args); OsReachAudit(args) => run_os_reach_audit(args.output_json, args.output_md, args.root, args.os_artifact, args.release_approval,)?; OsReleaseArtifact(args) => run_os_release_artifact(args.output_json, args.output_md, args.root,)?; SourceCurrencyAudit(args) => run_source_currency_audit(args.output_json, args.output_md, args.refresh_ledger, args.refresh_git_heads,)?; AdapterApprovalAudit(args) => run_adapter_approval_audit(args.output_json, args.output_md, args.approval_file, args.execution_approval,)?; ClaimAudit(args) => run_claim_audit(args.output_json, args.output_md, args.release_approval, ClaimEvidenceInputs { source_artifact: args.source_artifact, benchmark_artifact: args.benchmark_artifact, adapter_approval_artifact: args.adapter_approval_artifact, recovery_artifact: args.recovery_artifact, task_success_artifact: args.task_success_artifact, os_artifact: args.os_artifact, },)?; Reach(args) => run_reach(args.root, args.output_json)?; }
+    @special {
+    Mem(args) => { emit_with_json(engine_from_common(&args).mem(), args.json)?; }
+    Hook(args) => { hook::handle_hook(args); }
+    Discover(args) => { emit_value(discover(), args.json)?; }
+    RobotDocs(args) => { handle_robot_docs(args); }
+    McpServer(args) => {
+        if args.supervise {
+            let program = std::env::current_exe().map(OsString::from).unwrap_or_else(|_| OsString::from("tokenzero"));
+            std::process::exit(tokenzero_mcp::run_supervised_stdio(program, supervised_child_args(&args)))
         }
-        Commands::Mem(args) => emit_with_json(engine_from_common(&args).mem(), args.json)?,
-        Commands::Rewrite(args) => emit_rewrite(args)?,
-        // Fail-open hook contract: handle_hook never errors and never sets a
-        // nonzero exit; a failing hook would degrade the harness's Bash tool.
-        Commands::Hook(args) => hook::handle_hook(args),
-        Commands::Discover(args) => emit_value(discover(), args.json)?,
-        Commands::Doctor(args) => handle_doctor(args)?,
-        Commands::Stats(args) => {
-            let as_json = args.json;
-            emit_value(handle_stats(args)?, as_json)?
-        }
-        Commands::Pulse(args) => handle_pulse(args)?,
-        Commands::SessionLedger(args) => handle_session_ledger(args)?,
-        Commands::Cache(args) => handle_cache(args)?,
-        Commands::Install(args) => handle_install(args)?,
-        Commands::Init(args) => handle_init(args)?,
-        Commands::Clients(args) => handle_clients(args)?,
-        Commands::ClientStatus(args) => handle_client_status(args)?,
-        Commands::Capabilities(args) => handle_capabilities(args)?,
-        Commands::RobotDocs(args) => handle_robot_docs(args),
-        Commands::CachePack(args) => handle_cache_pack(args)?,
-        Commands::Bench(args) => handle_bench(args)?,
-        Commands::McpServer(args) => {
-            if args.supervise {
-                let program = std::env::current_exe()
-                    .map(std::ffi::OsString::from)
-                    .unwrap_or_else(|_| std::ffi::OsString::from("tokenzero"));
-                std::process::exit(tokenzero_mcp::run_supervised_stdio(
-                    program,
-                    supervised_child_args(&args),
-                ))
-            }
-            tokenzero_mcp::run_fastmcp_stdio(engine_config_for_mcp(&args)?)
-        }
-        Commands::McpSmoke(args) => emit_json_md(args.output_json, args.output_md, args.json, |j, m| run_mcp_artifact(j, m, 1))?,
-        Commands::McpSoak(args) => emit_json_md(args.output_json, args.output_md, args.json, |j, m| run_mcp_artifact(j, m, 25))?,
-        Commands::ExactRecoveryShell(args) => emit_json_md(args.output_json, args.output_md, args.json, run_exact_recovery_shell)?,
-        Commands::ExactRecoveryAudit(args) => emit_json_md(args.output_json, args.output_md, args.json, run_exact_recovery_audit)?,
-        Commands::HarmEval(args) => emit_json_md(args.output_json, args.output_md, args.json, run_harm_eval)?,
-        Commands::ProtectedAnchorAudit(args) => emit_json_md(args.output_json, args.output_md, args.json, run_protected_anchor_audit)?,
-        Commands::FalseSuccessShell(args) => emit_json_md(args.output_json, args.output_md, args.json, run_false_success_shell)?,
-        Commands::RepoInventory(args) => emit_json_md(args.output_json, args.output_md, args.json, run_repo_inventory)?,
-        Commands::PromptCachePack(args) => emit_json_md(args.output_json, args.output_md, args.json, run_prompt_cache_pack)?,
-        Commands::InstallSmoke(args) => {
-            let as_json = args.json;
-            emit_value(run_install_smoke(args.output_json)?, as_json)?
-        }
-        Commands::PackageAudit(args) => {
-            let as_json = args.json;
-            emit_value(handle_package_audit(args), as_json)?
-        }
-        Commands::ShellMatrix(args) => emit_json_md(args.output_json, args.output_md, args.json, run_shell_matrix)?,
-        Commands::OsReachAudit(args) => emit_value(
-            run_os_reach_audit(
-                args.output_json,
-                args.output_md,
-                args.root,
-                args.os_artifact,
-                args.release_approval,
-            )?,
-            args.json,
-        )?,
-        Commands::OsReleaseArtifact(args) => emit_value(
-            run_os_release_artifact(args.output_json, args.output_md, args.root)?,
-            args.json,
-        )?,
-        Commands::OneShotEval(args) => emit_json_md(args.output_json, args.output_md, args.json, run_one_shot_eval)?,
-        Commands::SourceCurrencyAudit(args) => emit_value(
-            run_source_currency_audit(
-                args.output_json,
-                args.output_md,
-                args.refresh_ledger,
-                args.refresh_git_heads,
-            )?,
-            args.json,
-        )?,
-        Commands::AdapterApprovalAudit(args) => emit_value(
-            run_adapter_approval_audit(
-                args.output_json,
-                args.output_md,
-                args.approval_file,
-                args.execution_approval,
-            )?,
-            args.json,
-        )?,
-        Commands::AdapterApprovalTemplate(args) => emit_json_md(args.output_json, args.output_md, args.json, run_adapter_approval_template)?,
-        Commands::ClaimAudit(args) => emit_value(
-            run_claim_audit(
-                args.output_json,
-                args.output_md,
-                args.release_approval,
-                ClaimEvidenceInputs {
-                    source_artifact: args.source_artifact,
-                    benchmark_artifact: args.benchmark_artifact,
-                    adapter_approval_artifact: args.adapter_approval_artifact,
-                    recovery_artifact: args.recovery_artifact,
-                    task_success_artifact: args.task_success_artifact,
-                    os_artifact: args.os_artifact,
-                },
-            )?,
-            args.json,
-        )?,
-        Commands::CompletionAudit(args) => emit_json_md(args.output_json, args.output_md, args.json, run_completion_audit)?,
-        Commands::SecurityPrivacyAudit(args) => emit_json_md(args.output_json, args.output_md, args.json, run_security_privacy_audit)?,
-        Commands::ArtifactHandoff(args) => emit_json_md(args.output_json, args.output_md, args.json, run_artifact_handoff)?,
-        Commands::Reach(args) => emit_value(run_reach(args.root, args.output_json)?, args.json)?,
-        Commands::WsSkeleton(args) => emit_json_md(args.output_json, args.output_md, args.json, run_ws_skeleton)?,
-        Commands::CodeMode(args) => {
-            let plan = args.plan_text()?;
-            let result = execute_codemode_with_options(
-                &plan,
-                CodeModeOptions {
-                    root: args.root.clone(),
-                    allowed_roots: args.allowed_root.clone(),
-                    cache_path: args.cache_path.clone(),
-                    max_visible_tokens: args.max_visible_tokens,
-                    timeout_seconds: args.timeout_seconds,
-                    ..Default::default()
-                },
-            );
-            let failed = result.status == CodeModeStatus::Error;
-            if args.json {
-                println!("{}", serde_json::to_string(&result)?);
-            } else {
-                println!("{}", result.to_line());
-            }
-            if failed {
-                std::io::stdout().flush()?;
-                std::process::exit(1);
-            }
-        }
-        Commands::Quote(args) => handle_quote(args)?,
+        tokenzero_mcp::run_fastmcp_stdio(engine_config_for_mcp(&args)?)
     }
+    CodeMode(args) => {
+        let plan = args.plan_text()?;
+        let result = execute_codemode_with_options(&plan, CodeModeOptions {
+            root: args.root.clone(), allowed_roots: args.allowed_root.clone(), cache_path: args.cache_path.clone(),
+            max_visible_tokens: args.max_visible_tokens, timeout_seconds: args.timeout_seconds, ..Default::default()
+        });
+        let failed = result.status == CodeModeStatus::Error;
+        if args.json { println!("{}", serde_json::to_string(&result)?); } else { println!("{}", result.to_line()); }
+        if failed { std::io::stdout().flush()?; std::process::exit(1); }
+    }
+    });
     Ok(())
 }
 
@@ -282,7 +178,6 @@ where
     if argv.len() <= 1 {
         return argv;
     }
-
     if argv.len() == 2 && matches!(argv[1].to_str(), Some("--robot-help" | "robot-help")) {
         return vec![
             argv[0].clone(),
@@ -290,7 +185,6 @@ where
             OsString::from("guide"),
         ];
     }
-
     if argv[1]
         .to_str()
         .is_some_and(|arg| arg == "--mode" || arg.starts_with("--mode="))
@@ -301,22 +195,16 @@ where
         normalized.extend(argv[1..].iter().cloned());
         return normalized;
     }
-
-    if argv[1].to_str() == Some("rn") {
-        let mut normalized = argv;
-        normalized[1] = OsString::from("run");
-        return normalize_run_invocation_args(normalized);
+    match argv[1].to_str() {
+        Some("rn") => {
+            let mut normalized = argv;
+            normalized[1] = OsString::from("run");
+            normalize_run_invocation_args(normalized)
+        }
+        Some("run" | "shell") => normalize_run_invocation_args(argv),
+        Some("install") => normalize_install_invocation_args(argv),
+        _ => argv,
     }
-
-    if matches!(argv[1].to_str(), Some("run" | "shell")) {
-        return normalize_run_invocation_args(argv);
-    }
-
-    if argv[1].to_str() == Some("install") {
-        return normalize_install_invocation_args(argv);
-    }
-
-    argv
 }
 
 fn normalize_install_invocation_args(argv: Vec<OsString>) -> Vec<OsString> {
@@ -331,12 +219,24 @@ fn normalize_install_invocation_args(argv: Vec<OsString>) -> Vec<OsString> {
         }
         Some("status") => {
             let mut out = vec![argv[0].clone(), "clients".into(), "detect".into()];
-            out.extend(argv[3..].iter().filter(|arg| {
-                !matches!(
-                    arg.to_str(),
-                    Some("--global" | "--mcp" | "--shell" | "--instructions" | "--cli" | "--plan")
-                )
-            }).cloned());
+            out.extend(
+                argv[3..]
+                    .iter()
+                    .filter(|arg| {
+                        !matches!(
+                            arg.to_str(),
+                            Some(
+                                "--global"
+                                    | "--mcp"
+                                    | "--shell"
+                                    | "--instructions"
+                                    | "--cli"
+                                    | "--plan"
+                            )
+                        )
+                    })
+                    .cloned(),
+            );
             out
         }
         _ => argv,
@@ -347,7 +247,6 @@ fn normalize_run_invocation_args(argv: Vec<OsString>) -> Vec<OsString> {
     if argv.iter().skip(2).any(|arg| arg.to_str() == Some("--")) {
         return argv;
     }
-
     let Some((options, command)) = split_run_args_without_delimiter(&argv[2..]) else {
         return argv;
     };
@@ -360,127 +259,72 @@ fn normalize_run_invocation_args(argv: Vec<OsString>) -> Vec<OsString> {
     normalized
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum RunOptionKind {
+    Flag,
+    Value,
+    Json,
+}
+
+const RUN_OPTIONS: &[(&str, RunOptionKind)] = &[
+    ("--json", RunOptionKind::Json),
+    ("--jsno", RunOptionKind::Json),
+    ("--jason", RunOptionKind::Json),
+    ("--no-rewrite", RunOptionKind::Flag),
+    ("--stdin", RunOptionKind::Flag),
+    ("--explain-runtime", RunOptionKind::Flag),
+    ("--cwd", RunOptionKind::Value),
+    ("--rewrite", RunOptionKind::Value),
+    ("--env", RunOptionKind::Value),
+    ("--runtime-platform", RunOptionKind::Value),
+    ("--mode", RunOptionKind::Value),
+    ("--budget", RunOptionKind::Value),
+    ("--allowed-root", RunOptionKind::Value),
+    ("--cache-path", RunOptionKind::Value),
+    ("--timeout", RunOptionKind::Value),
+    ("--timeout-seconds", RunOptionKind::Value),
+    ("--timout", RunOptionKind::Value),
+];
+
+fn run_option(value: &str) -> Option<(RunOptionKind, bool)> {
+    RUN_OPTIONS.iter().find_map(|&(option, kind)| {
+        (value == option).then_some((kind, false)).or_else(|| {
+            value
+                .strip_prefix(option)
+                .is_some_and(|suffix| suffix.starts_with('='))
+                .then_some((kind, true))
+        })
+    })
+}
+
 fn split_run_args_without_delimiter(args: &[OsString]) -> Option<(Vec<OsString>, Vec<OsString>)> {
     let mut options = Vec::new();
     let mut idx = 0;
     while idx < args.len() {
         let value = args[idx].to_str()?;
-        if is_run_bool_option(value) || is_run_value_option_with_equals(value) {
-            options.push(args[idx].clone());
-            idx += 1;
-        } else if is_run_value_option(value) {
-            options.push(args[idx].clone());
-            idx += 1;
-            if idx < args.len() {
-                options.push(args[idx].clone());
-                idx += 1;
-            }
-        } else if value.starts_with('-') {
-            return None;
-        } else {
-            break;
-        }
+        let width = match run_option(value) {
+            Some((RunOptionKind::Value, false)) => usize::from(idx + 1 < args.len()) + 1,
+            Some(_) => 1,
+            None if value.starts_with('-') => return None,
+            None => break,
+        };
+        options.extend_from_slice(&args[idx..idx + width]);
+        idx += width;
     }
-
     if idx >= args.len() {
         return None;
     }
-
     let mut command = args[idx..].to_vec();
     while command
         .last()
         .and_then(|arg| arg.to_str())
-        .is_some_and(is_run_json_alias)
+        .is_some_and(|value| {
+            run_option(value).is_some_and(|(kind, inline)| kind == RunOptionKind::Json && !inline)
+        })
     {
-        if let Some(last) = command.pop() {
-            options.push(last);
-        }
+        options.push(command.pop().expect("last command argument exists"));
     }
-
-    if command.is_empty() {
-        None
-    } else {
-        Some((options, command))
-    }
-}
-
-fn is_run_bool_option(value: &str) -> bool {
-    matches!(
-        value,
-        "--json" | "--jsno" | "--jason" | "--no-rewrite" | "--stdin" | "--explain-runtime"
-    )
-}
-
-const RUN_VALUE_OPTIONS: &[&str] = &[
-    "--cwd",
-    "--rewrite",
-    "--env",
-    "--runtime-platform",
-    "--mode",
-    "--budget",
-    "--allowed-root",
-    "--cache-path",
-    "--timeout",
-    "--timeout-seconds",
-    "--timout",
-];
-
-fn is_run_value_option(value: &str) -> bool {
-    RUN_VALUE_OPTIONS.contains(&value)
-}
-
-fn is_run_value_option_with_equals(value: &str) -> bool {
-    RUN_VALUE_OPTIONS.iter().any(|option| {
-        value
-            .strip_prefix(option)
-            .is_some_and(|suffix| suffix.starts_with('='))
-    })
-}
-
-fn is_run_json_alias(value: &str) -> bool {
-    matches!(value, "--json" | "--jsno" | "--jason")
-}
-
-fn handle_read(args: ReadArgs) -> Result<EmitResponse> {
-    let mut paths = args.path;
-    if let Some(paths_from) = args.paths_from {
-        let root = tokenzero_work_root(None);
-        let allowed_roots = allowed_roots_for_workspace(&root, &args.tool.allowed_root);
-        if !existing_path_is_within_allowed_roots(&paths_from, &allowed_roots) {
-            return Ok(EmitResponse {
-                response: ToolResponse::error(
-                    "read",
-                    "path_not_allowed",
-                    "paths-from file is outside allowed roots",
-                    Some(
-                        "Move the paths-from file under an allowed root or pass an explicit --allowed-root for that file"
-                            .to_string(),
-                    ),
-                ),
-                json: args.tool.json,
-            });
-        }
-        let text = fs::read_to_string(paths_from)?;
-        paths.extend(
-            text.lines()
-                .filter(|l| !l.trim().is_empty() && !l.trim_start().starts_with('#'))
-                .map(PathBuf::from),
-        );
-    }
-    if paths.is_empty() {
-        anyhow::bail!("read requires a path");
-    }
-    let (engine, mode) = tool_engine_mode(&args.tool)?;
-    let response = engine.read(
-        &paths,
-        mode,
-        args.start_line,
-        args.end_line,
-        args.raw,
-        args.max_files,
-        args.max_visible_tokens,
-    );
-    tool_emit(response, args.tool.json, "read")
+    (!command.is_empty()).then_some((options, command))
 }
 
 fn default_paths(path: Vec<PathBuf>) -> Vec<PathBuf> {
@@ -505,170 +349,37 @@ fn tool_emit(response: ToolResponse, json: bool, tool: &str) -> Result<EmitRespo
     Ok(EmitResponse { response, json })
 }
 
-fn handle_find(args: FindArgs) -> Result<EmitResponse> {
-    let paths = default_paths(args.path);
-    let (engine, mode) = tool_engine_mode(&args.tool)?;
-    let response = engine.find(
-        &args.query,
-        &paths,
-        mode,
-        args.max_files,
-        args.max_visible_tokens,
-    );
-    tool_emit(response, args.tool.json, "find")
+macro_rules! engine_tool_handlers {
+(@ $($handler:ident($args_type:ty) |$args:ident, $engine:ident, $mode:ident| $tool:literal [$($prepare:tt)*] => $response:expr;)*) => {
+$(fn $handler(input: $args_type) -> Result<EmitResponse> {
+let $args = input;
+$($prepare)*
+let ($engine, $mode) = tool_engine_mode(&$args.tool)?;
+let response = $response;
+tool_emit(response, $args.tool.json, $tool)
+})*
+};
 }
 
-fn handle_recall(args: RecallArgs) -> Result<EmitResponse> {
-    let (engine, mode) = tool_engine_mode(&args.tool)?;
-    let response = engine.recall(&args.query, args.max_hits, mode, args.max_visible_tokens);
-    tool_emit(response, args.tool.json, "recall")
-}
-
-fn handle_fetch(args: FetchArgs) -> Result<EmitResponse> {
-    let (engine, mode) = tool_engine_mode(&args.tool)?;
-    let response = engine.fetch(
-        &args.url,
-        args.ttl_seconds,
-        args.fresh,
-        mode,
-        args.max_visible_tokens,
-    );
-    tool_emit(response, args.tool.json, "fetch")
-}
-
-fn handle_grep(args: FindArgs) -> Result<EmitResponse> {
-    let paths = default_paths(args.path);
-    let (engine, mode) = tool_engine_mode(&args.tool)?;
-    let response = engine.grep(
-        &args.query,
-        &paths,
-        mode,
-        args.max_files,
-        args.max_visible_tokens,
-    );
-    tool_emit(response, args.tool.json, "grep")
-}
-
-fn handle_glob(args: GlobArgs) -> Result<EmitResponse> {
-    let paths = default_paths(args.path);
-    let (engine, mode) = tool_engine_mode(&args.tool)?;
-    let response = engine.glob(
-        &args.pattern,
-        &paths,
-        args.include_hidden,
-        mode,
-        args.max_files,
-        args.max_visible_tokens,
-    );
-    tool_emit(response, args.tool.json, "glob")
-}
-
-fn handle_tree(args: TreeArgs) -> Result<EmitResponse> {
-    let paths = default_paths(args.path);
-    let (engine, mode) = tool_engine_mode(&args.tool)?;
-    let response = engine.tree(
-        &paths,
-        args.depth,
-        args.include_hidden,
-        mode,
-        args.max_files,
-        args.max_visible_tokens,
-    );
-    tool_emit(response, args.tool.json, "tree")
-}
-
-fn handle_edit(args: EditArgs) -> Result<EmitResponse> {
-    let edits_text = if args.stdin {
-        let mut buffer = String::new();
-        std::io::stdin().read_to_string(&mut buffer)?;
-        buffer
-    } else {
-        args.edits_json
-            .clone()
-            .ok_or_else(|| anyhow::anyhow!("edit requires --edits-json <json> or --stdin"))?
-    };
-    let hunks: Vec<EditHunk> = serde_json::from_str(&edits_text).map_err(|err| {
-        anyhow::anyhow!(
-            "invalid edits JSON ({err}); expected [{{\"find\": \"...\", \"replace\": \"...\", \"replace_all\": false}}]"
-        )
-    })?;
-    let (engine, mode) = tool_engine_mode(&args.tool)?;
-    let response = engine.edit(
-        &args.path,
-        &hunks,
-        args.create,
-        args.dry_run,
-        mode,
-        args.max_visible_tokens,
-    );
-    tool_emit(response, args.tool.json, "edit")
-}
-
-fn handle_run(args: RunArgs) -> Result<EmitResponse> {
-    if args.command.is_empty() && !args.stdin {
-        anyhow::bail!("run requires a command after --");
-    }
-    if args.explain_runtime {
-        let argv = normalize_command(&args.command);
-        let platform = args
-            .runtime_platform
-            .clone()
-            .unwrap_or_else(|| tokenzero_runtime::current_platform().to_string());
-        let plan = plan_command_for_platform(&argv, args.cwd.as_deref(), false, &platform)?;
-        println!("{}", serde_json::to_string_pretty(&plan)?);
-        std::process::exit(0);
-    }
-    let (engine, mode) = tool_engine_mode(&args.tool)?;
-    let mut stdin_payload = None;
-    if args.stdin {
-        let mut buffer = String::new();
-        std::io::stdin().read_to_string(&mut buffer)?;
-        stdin_payload = Some(buffer);
-    }
-    let env = env_map(&args.env_overrides)?;
-    let normalized_command = normalize_command(&args.command);
-    let command = display_command_for_platform(
-        &normalized_command,
-        args.cwd.as_deref(),
-        tokenzero_runtime::current_platform(),
-    );
-    let response = engine.shell(
-        &command,
-        Some(normalized_command),
-        args.cwd.as_deref(),
-        mode,
-        args.rewrite.as_deref(),
-        args.no_rewrite,
-        Some(env),
-        stdin_payload.as_deref(),
-        None,
-    );
-    tool_emit(response, args.tool.json, "shell")
-}
+engine_tool_handlers! { @
+handle_find(FindArgs) |args, engine, mode| "find" [] => { let paths = default_paths(args.path); engine.find(&args.query, &paths, mode, args.max_files, args.max_visible_tokens) };
+handle_recall(RecallArgs) |args, engine, mode| "recall" [] => engine.recall(&args.query, args.max_hits, mode, args.max_visible_tokens);
+handle_fetch(FetchArgs) |args, engine, mode| "fetch" [] => engine.fetch(&args.url, args.ttl_seconds, args.fresh, mode, args.max_visible_tokens);
+handle_grep(FindArgs) |args, engine, mode| "grep" [] => { let paths = default_paths(args.path); engine.grep(&args.query, &paths, mode, args.max_files, args.max_visible_tokens) };
+handle_glob(GlobArgs) |args, engine, mode| "glob" [] => { let paths = default_paths(args.path); engine.glob(&args.pattern, &paths, args.include_hidden, mode, args.max_files, args.max_visible_tokens) };
+handle_tree(TreeArgs) |args, engine, mode| "tree" [] => { let paths = default_paths(args.path); engine.tree(&paths, args.depth, args.include_hidden, mode, args.max_files, args.max_visible_tokens) };
+handle_edit(EditArgs) |args, engine, mode| "edit" [ let edits_text = if args.stdin { let mut buffer = String::new(); std::io::stdin().read_to_string(&mut buffer)?; buffer } else { args.edits_json.clone().ok_or_else(|| anyhow::anyhow!("edit requires --edits-json <json> or --stdin"))? }; let hunks: Vec<EditHunk> = serde_json::from_str(&edits_text).map_err(|err| anyhow::anyhow!("invalid edits JSON ({err}); expected [{{\"find\": \"...\", \"replace\": \"...\", \"replace_all\": false}}]"))?; ] => engine.edit(&args.path, &hunks, args.create, args.dry_run, mode, args.max_visible_tokens);
+handle_ingest(IngestArgs) |args, engine, mode| "ingest" [ let mut text = String::new(); if args.stdin || args.input.is_none() || args.input.as_deref() == Some(Path::new("-")) { std::io::stdin().read_to_string(&mut text)?; } else if let Some(input) = &args.input { text = fs::read_to_string(input)?; } let kind = content_type_from_kind(&args.kind, &text, args.input.as_deref()); let source = args.input.as_ref().map(|p| p.display().to_string()).unwrap_or_else(|| "stdin".to_string()); ] => engine.ingest(&text, kind, mode, &source);
+handle_read(ReadArgs) |args, engine, mode| "read" [ let mut paths = args.path; if let Some(paths_from) = args.paths_from { let root = tokenzero_work_root(None); let allowed_roots = allowed_roots_for_workspace(&root, &args.tool.allowed_root); if !existing_path_is_within_allowed_roots(&paths_from, &allowed_roots) { return Ok(EmitResponse { response: ToolResponse::error("read", "path_not_allowed", "paths-from file is outside allowed roots", Some("Move the paths-from file under an allowed root or pass an explicit --allowed-root for that file".to_string())), json: args.tool.json }); } let text = fs::read_to_string(paths_from)?; paths.extend(text.lines().filter(|l| !l.trim().is_empty() && !l.trim_start().starts_with('#')).map(PathBuf::from)); }
+if paths.is_empty() { anyhow::bail!("read requires a path"); } ] => engine.read(&paths, mode, args.start_line, args.end_line, args.raw, args.max_files, args.max_visible_tokens);
+handle_run(RunArgs) |args, engine, mode| "shell" [ if args.command.is_empty() && !args.stdin { anyhow::bail!("run requires a command after --"); }
+if args.explain_runtime { let argv = normalize_command(&args.command); let platform = args.runtime_platform.clone().unwrap_or_else(|| tokenzero_runtime::current_platform().to_string()); let plan = plan_command_for_platform(&argv, args.cwd.as_deref(), false, &platform)?; println!("{}", serde_json::to_string_pretty(&plan)?); std::process::exit(0); } let mut stdin_payload = None; if args.stdin { let mut buffer = String::new(); std::io::stdin().read_to_string(&mut buffer)?; stdin_payload = Some(buffer); } let env = env_map(&args.env_overrides)?; let normalized_command = normalize_command(&args.command); let command = display_command_for_platform(&normalized_command, args.cwd.as_deref(), tokenzero_runtime::current_platform()); ] => engine.shell(&command, Some(normalized_command), args.cwd.as_deref(), mode, args.rewrite.as_deref(), args.no_rewrite, Some(env), stdin_payload.as_deref(), None); }
 
 fn display_command_for_platform(argv: &[String], cwd: Option<&Path>, platform: &str) -> String {
     match plan_command_for_platform(argv, cwd, false, platform) {
         Ok(plan) if plan.execution_mode == ExecutionMode::Shell => argv.join(" "),
         _ => shell_display_command_from_argv_for_platform(argv, platform),
     }
-}
-
-fn handle_ingest(args: IngestArgs) -> Result<EmitResponse> {
-    let mut text = String::new();
-    if args.stdin || args.input.is_none() || args.input.as_deref() == Some(Path::new("-")) {
-        std::io::stdin().read_to_string(&mut text)?;
-    } else if let Some(input) = &args.input {
-        text = fs::read_to_string(input)?;
-    }
-    let (engine, mode) = tool_engine_mode(&args.tool)?;
-    let kind = content_type_from_kind(&args.kind, &text, args.input.as_deref());
-    let source = args
-        .input
-        .as_ref()
-        .map(|p| p.display().to_string())
-        .unwrap_or_else(|| "stdin".to_string());
-    let response = engine.ingest(&text, kind, mode, &source);
-    tool_emit(response, args.tool.json, "ingest")
 }
 
 fn handle_expand(args: ExpandArgs) -> Result<EmitResponse> {
@@ -686,108 +397,95 @@ fn handle_expand(args: ExpandArgs) -> Result<EmitResponse> {
         anyhow::bail!("expand requires a ref");
     };
     let root = tokenzero_work_root(None);
-    let engine = TokenZeroEngine::new(engine_config(
-        root.clone(),
+    let engine = engine_new(
+        &root,
         default_allowed_roots(&root),
-        resolve_recovery_cache_path(&root, args.cache_path.clone()),
+        args.cache_path.clone(),
         4000,
         Mode::Exact,
         default_shell_timeout(),
         None,
-    ));
-    let (selector, start, end) = expand_selector(&args);
-    let response = engine.expand(
-        ref_id,
-        selector.as_deref(),
-        start,
-        end,
-        args.anchor_kind.as_deref(),
-        args.symbol.as_deref(),
     );
-    tool_emit(response, args.json, "expand")
+    let (selector, start, end) = expand_selector(&args);
+    tool_emit(
+        engine.expand(
+            ref_id,
+            selector.as_deref(),
+            start,
+            end,
+            args.anchor_kind.as_deref(),
+            args.symbol.as_deref(),
+        ),
+        args.json,
+        "expand",
+    )
 }
 
 fn emit_rewrite(args: RewriteArgs) -> Result<()> {
     let command = match (&args.command, args.argv.is_empty()) {
         (Some(command), _) => command.clone(),
-        (None, false) => {
-            let argv = normalize_command(&args.argv);
-            display_command_for_platform(&argv, None, tokenzero_runtime::current_platform())
-        }
+        (None, false) => display_command_for_platform(
+            &normalize_command(&args.argv),
+            None,
+            tokenzero_runtime::current_platform(),
+        ),
         (None, true) => anyhow::bail!("rewrite requires a command string or `-- <command...>`"),
     };
     let result = rewrite_command(&command, &args.mode, args.mode != "off");
     if args.json {
         print_pretty(&result)
     } else {
-        let status = if result.applied { "rewrite" } else { "no-rewrite" };
-        println!("{status}: {} ({})", result.rewritten_command, result.reason);
+        println!(
+            "{}: {} ({})",
+            if result.applied {
+                "rewrite"
+            } else {
+                "no-rewrite"
+            },
+            result.rewritten_command,
+            result.reason
+        );
         Ok(())
     }
+}
+
+fn path_display(p: &Path) -> String {
+    p.display().to_string()
 }
 
 fn doctor_report(args: &DoctorArgs) -> serde_json::Value {
     let root = tokenzero_work_root(args.root.clone());
     let mut report = install::doctor(&root, args.cache_path.as_deref());
-    // wqw.5: doctor exposes effective allowed roots for the workspace root.
     let effective = allowed_roots_for_workspace(&root, &[]);
-    let path_str = |p: &Path| p.display().to_string();
-    report["effective_allowed_roots"] =
-        json!(effective.iter().map(|p| path_str(p)).collect::<Vec<_>>());
+    report["effective_allowed_roots"] = json!(
+        effective
+            .iter()
+            .map(|p| path_display(p))
+            .collect::<Vec<_>>()
+    );
     report["allowlist_algorithm"] = json!(
         "effective roots = doctor/call root union configured --allowed-root entries, deduped by canonical path. Relative CodeMode paths join to execute root."
     );
-    // wqw.2: multi-project store isolation status + mismatch findings.
     let store = zerostack_store::store_resolution_report(&root, args.cache_path.clone());
     report["store_resolution"] =
         zerostack_store::store_resolution_json(&root, args.cache_path.clone());
     report["effective_store_root"] =
-        json!(store.effective_store_root.as_ref().map(|p| path_str(p)));
-    report["effective_cache_path"] = json!(path_str(&store.effective_cache_path));
-    // migration/compatibility state (no content or paths)
-    let recovery = tokenzero_recovery::RecoveryStore::new(Some(store.effective_cache_path.clone()));
-    report["migration"] = recovery.migration_state();
-    // wqw.3: portable engine binary discovery (env → PATH → well-known).
+        json!(store.effective_store_root.as_ref().map(|p| path_display(p)));
+    report["effective_cache_path"] = json!(path_display(&store.effective_cache_path));
+    report["migration"] =
+        tokenzero_recovery::RecoveryStore::new(Some(store.effective_cache_path.clone()))
+            .migration_state();
     report["engine_binaries"] = tokenzero_mcp::engine_binaries_json();
     if let Some(summary) = &store.mismatch_summary {
-        let severity = if store.store_project_mismatch {
-            "warning"
-        } else {
-            "info"
-        };
-        let finding = json!({
-            "id": if store.store_project_mismatch {
-                "tz-store-project-mismatch"
-            } else {
-                "tz-store-global-pin-ignored"
-            },
-            "severity": severity,
-            "status": "detected",
-            "check": "store_resolution",
-            "summary": summary,
-            "evidence": {
-                "project_root": root.display().to_string(),
-                "effective_cache_path": store.effective_cache_path.display().to_string(),
-                "effective_store_root": store.effective_store_root.as_ref().map(|p| p.display().to_string()),
-                "shared_store_opt_in": store.shared_store_opt_in,
-                "global_pin_set": store.global_pin_set,
-                "isolation_mode": store.isolation_mode,
-            },
-            "auto_fix": false,
-            "fix_supported": false,
-            "next_step": if store.store_project_mismatch {
-                "Use a per-project store (unset TOKENZERO_SHARED_STORE / ZEROSTACK_SHARED_STORE) or pass --cache-path under the project root."
-            } else {
-                "Default is per-project isolation (wqw.2). Set TOKENZERO_SHARED_STORE=1 only for intentional meta-workspace sharing."
-            }
-        });
+        let mismatch = store.store_project_mismatch;
+        let finding = json!({"id": if mismatch {"tz-store-project-mismatch"} else {"tz-store-global-pin-ignored"}, "severity": if mismatch {"warning"} else {"info"}, "status": "detected", "check": "store_resolution", "summary": summary, "evidence": {"project_root": path_display(&root), "effective_cache_path": path_display(&store.effective_cache_path), "effective_store_root": store.effective_store_root.as_ref().map(|p| path_display(p)), "shared_store_opt_in": store.shared_store_opt_in, "global_pin_set": store.global_pin_set, "isolation_mode": store.isolation_mode}, "auto_fix": false, "fix_supported": false, "next_step": if mismatch {"Use a per-project store (unset TOKENZERO_SHARED_STORE / ZEROSTACK_SHARED_STORE) or pass --cache-path under the project root."} else {"Default is per-project isolation (wqw.2). Set TOKENZERO_SHARED_STORE=1 only for intentional meta-workspace sharing."}});
         if let Some(findings) = report.get_mut("findings").and_then(|v| v.as_array_mut()) {
             findings.push(finding);
         }
     }
     if args.runtime {
-        let argv = vec!["echo".to_string(), "ok".to_string()];
-        let plan = tokenzero_runtime::plan_command(&argv, Some(&root), false).ok();
+        let plan =
+            tokenzero_runtime::plan_command(&["echo".into(), "ok".into()], Some(&root), false).ok();
         report["runtime"] = serde_json::to_value(plan).unwrap_or(json!(null));
     }
     report
@@ -795,47 +493,35 @@ fn doctor_report(args: &DoctorArgs) -> serde_json::Value {
 
 fn handle_doctor(args: DoctorArgs) -> Result<()> {
     let root = || tokenzero_work_root(args.root.clone());
+    let cache = args.cache_path.as_deref();
     match args.command.clone() {
-        Some(DoctorCommand::Capabilities) => emit_doctor_json(install::doctor_capabilities()),
+        Some(DoctorCommand::Capabilities) => emit_exit_json(install::doctor_capabilities()),
         Some(DoctorCommand::Health) => emit_doctor_health(&args),
         Some(DoctorCommand::Fix) => {
-            emit_doctor_json(install::doctor_fix(&root(), args.cache_path.as_deref(), args.dry_run))
+            emit_exit_json(install::doctor_fix(&root(), cache, args.dry_run))
         }
         Some(DoctorCommand::Undo { run_id }) => {
-            emit_doctor_json(install::doctor_undo(&root(), &run_id))
+            emit_exit_json(install::doctor_undo(&root(), &run_id))
         }
-        Some(DoctorCommand::Ls) => emit_doctor_json(install::doctor_ls(&root())),
+        Some(DoctorCommand::Ls) => emit_exit_json(install::doctor_ls(&root())),
         Some(DoctorCommand::RobotDocs) => {
             print!("{}", install::doctor_robot_docs());
             Ok(())
         }
-        Some(DoctorCommand::Explain { finding_id }) => emit_doctor_json(install::doctor_explain(
-            &root(),
-            args.cache_path.as_deref(),
-            &finding_id,
-        )),
+        Some(DoctorCommand::Explain { finding_id }) => {
+            emit_exit_json(install::doctor_explain(&root(), cache, &finding_id))
+        }
         Some(DoctorCommand::Diagnose) | None => {
             if args.fix {
-                return emit_doctor_json(install::doctor_fix(
-                    &root(),
-                    args.cache_path.as_deref(),
-                    args.dry_run,
-                ));
+                return emit_exit_json(install::doctor_fix(&root(), cache, args.dry_run));
             }
             if let Some(finding_id) = args.explain.as_deref() {
-                return emit_doctor_json(install::doctor_explain(
-                    &root(),
-                    args.cache_path.as_deref(),
-                    finding_id,
-                ));
+                return emit_exit_json(install::doctor_explain(&root(), cache, finding_id));
             }
             if args.robot_triage {
-                return emit_doctor_json(install::doctor_robot_triage(
-                    &root(),
-                    args.cache_path.as_deref(),
-                ));
+                return emit_exit_json(install::doctor_robot_triage(&root(), cache));
             }
-            emit_doctor_json(doctor_report(&args))
+            emit_exit_json(doctor_report(&args))
         }
     }
 }
@@ -843,35 +529,30 @@ fn handle_doctor(args: DoctorArgs) -> Result<()> {
 fn emit_doctor_health(args: &DoctorArgs) -> Result<()> {
     let report = doctor_report(args);
     let u64f = |v: &serde_json::Value| v.as_u64().unwrap_or(0);
-    let ok = report["ok"].as_bool().unwrap_or(false);
-    let status = report["status"].as_str().unwrap_or("blocked");
-    let finding_count = u64f(&report["finding_count"]);
-    let blocking = u64f(&report["summary"]["blocking_findings"]);
-    let info = u64f(&report["summary"]["informational_findings"]);
+    let (ok, status) = (
+        report["ok"].as_bool().unwrap_or(false),
+        report["status"].as_str().unwrap_or("blocked"),
+    );
+    let (finding_count, blocking, info) = (
+        u64f(&report["finding_count"]),
+        u64f(&report["summary"]["blocking_findings"]),
+        u64f(&report["summary"]["informational_findings"]),
+    );
     let exit_code = doctor_exit_code(&report);
     let doctor_ver = report["doctor_version"]
         .as_str()
         .unwrap_or(env!("CARGO_PKG_VERSION"));
     let line = format!(
         "{status} tokenzero={} doctor={doctor_ver} findings={finding_count} blocking={blocking} info={info}",
-        env!("CARGO_PKG_VERSION"),
+        env!("CARGO_PKG_VERSION")
     );
     if args.json {
-        emit_doctor_json(json!({
-            "schema_version": "tokenzero.doctor.health.v1",
-            "status": status,
-            "ok": ok,
-            "line": line,
-            "finding_count": finding_count,
-            "blocking_findings": blocking,
-            "informational_findings": info,
-            "exit_code": exit_code
-        }))
+        emit_exit_json(
+            json!({"schema_version": "tokenzero.doctor.health.v1", "status": status, "ok": ok, "line": line, "finding_count": finding_count, "blocking_findings": blocking, "informational_findings": info, "exit_code": exit_code}),
+        )
     } else {
         println!("{line}");
-        if exit_code != 0 {
-            std::process::exit(exit_code);
-        }
+        exit_if_nonzero(exit_code);
         Ok(())
     }
 }
@@ -880,16 +561,16 @@ fn print_pretty<T: serde::Serialize>(value: &T) -> Result<()> {
     println!("{}", serde_json::to_string_pretty(value)?);
     Ok(())
 }
-
-fn emit_doctor_json(value: serde_json::Value) -> Result<()> {
-    print_pretty(&value)?;
-    let exit_code = doctor_exit_code(&value);
-    if exit_code != 0 {
-        std::process::exit(exit_code);
+fn exit_if_nonzero(code: i32) {
+    if code != 0 {
+        std::process::exit(code);
     }
+}
+fn emit_exit_json(value: serde_json::Value) -> Result<()> {
+    print_pretty(&value)?;
+    exit_if_nonzero(doctor_exit_code(&value));
     Ok(())
 }
-
 fn doctor_exit_code(value: &serde_json::Value) -> i32 {
     if let Some(code) = value.get("exit_code").and_then(serde_json::Value::as_i64) {
         return code.clamp(0, 255) as i32;
@@ -902,9 +583,9 @@ fn doctor_exit_code(value: &serde_json::Value) -> i32 {
 }
 
 fn handle_stats(args: CommonArgs) -> Result<serde_json::Value> {
-    let root = tokenzero_work_root(args.root);
-    let report = report_for_path(&default_ledger_path(&root))?;
-    Ok(serde_json::to_value(report)?)
+    Ok(serde_json::to_value(report_for_path(
+        &default_ledger_path(&tokenzero_work_root(args.root)),
+    )?)?)
 }
 
 fn handle_pulse(args: PulseArgs) -> Result<()> {
@@ -916,14 +597,14 @@ fn handle_pulse(args: PulseArgs) -> Result<()> {
         Some(PulseCommand::Doctor) => {
             emit_pulse_result("pulse doctor", doctor_jsonl_sqlite(&ledger_path), args.json)
         }
-        Some(PulseCommand::ExportJsonl(export_args)) => emit_pulse_result(
+        Some(PulseCommand::ExportJsonl(a)) => emit_pulse_result(
             "pulse export-jsonl",
-            export_jsonl(&ledger_path, &export_args.output),
+            export_jsonl(&ledger_path, &a.output),
             args.json,
         ),
-        Some(PulseCommand::ImportJsonl(import_args)) => emit_pulse_result(
+        Some(PulseCommand::ImportJsonl(a)) => emit_pulse_result(
             "pulse import-jsonl",
-            import_jsonl(&import_args.input, &ledger_path),
+            import_jsonl(&a.input, &ledger_path),
             args.json,
         ),
         Some(PulseCommand::Stats) | None => {
@@ -942,10 +623,25 @@ fn handle_pulse(args: PulseArgs) -> Result<()> {
 fn handle_session_ledger(args: SessionLedgerArgs) -> Result<()> {
     let root = tokenzero_work_root(args.root);
     let pulse_ledger_path = default_ledger_path(&root);
-    let cache_path = resolve_recovery_cache_path(&root, None);
-    let response_ledger_path = tokenzero_mcp::ledger::ledger_path_for_cache(&cache_path);
+    let response_ledger_path =
+        tokenzero_mcp::ledger::ledger_path_for_cache(&resolve_recovery_cache_path(&root, None));
     match args.command {
-        Some(SessionLedgerCommand::Schema) => print_pretty(&tokenzero_mcp::ledger::schema_example())?,
+        Some(SessionLedgerCommand::Schema) => {
+            print_pretty(&tokenzero_mcp::ledger::schema_example())?
+        }
+        Some(SessionLedgerCommand::Inspect(flags)) => {
+            let env_value = std::env::var(tokenzero_mcp::ledger::TELEMETRY_ENV).ok();
+            let enabled = tokenzero_mcp::ledger::resolve_telemetry(
+                flags.telemetry,
+                flags.no_telemetry,
+                None,
+                env_value.as_deref(),
+            );
+            emit_value(
+                tokenzero_mcp::ledger::inspect_telemetry(&response_ledger_path, enabled)?,
+                args.json,
+            )?;
+        }
         Some(SessionLedgerCommand::Export) => {
             print_pretty(&SessionLedgerReport::from_ledger(&pulse_ledger_path)?)?
         }
@@ -961,8 +657,8 @@ fn handle_session_ledger(args: SessionLedgerArgs) -> Result<()> {
             let since_ms = |days: u64| {
                 std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
-                    .map(|duration| {
-                        u64::try_from(duration.as_millis())
+                    .map(|d| {
+                        u64::try_from(d.as_millis())
                             .unwrap_or(u64::MAX)
                             .saturating_sub(days.saturating_mul(86_400_000))
                     })
@@ -1008,19 +704,11 @@ fn emit_pulse_result<T: serde::Serialize>(
         Ok(value) => emit_value(value, as_json),
         Err(err) if as_json => {
             let kind = err.kind();
-            let message = err.to_string();
             println!(
                 "{}",
-                serde_json::to_string_pretty(&json!({
-                    "schema_version": "tokenzero.pulse.error.v1",
-                    "ok": false,
-                    "status": "error",
-                    "operation": operation,
-                    "error_kind": io_error_kind_name(kind),
-                    "retryable": kind == std::io::ErrorKind::WouldBlock,
-                    "error": message,
-                    "exit_code": 1
-                }))?
+                serde_json::to_string_pretty(
+                    &json!({"schema_version": "tokenzero.pulse.error.v1", "ok": false, "status": "error", "operation": operation, "error_kind": io_error_kind_name(kind), "retryable": kind == std::io::ErrorKind::WouldBlock, "error": err.to_string(), "exit_code": 1})
+                )?
             );
             std::process::exit(1);
         }
@@ -1030,36 +718,33 @@ fn emit_pulse_result<T: serde::Serialize>(
 
 fn io_error_kind_name(kind: std::io::ErrorKind) -> &'static str {
     use std::io::ErrorKind as K;
-    const MAP: &[(K, &str)] = &[
-        (K::NotFound, "not_found"),
-        (K::PermissionDenied, "permission_denied"),
-        (K::ConnectionRefused, "connection_refused"),
-        (K::ConnectionReset, "connection_reset"),
-        (K::ConnectionAborted, "connection_aborted"),
-        (K::NotConnected, "not_connected"),
-        (K::AddrInUse, "addr_in_use"),
-        (K::AddrNotAvailable, "addr_not_available"),
-        (K::BrokenPipe, "broken_pipe"),
-        (K::AlreadyExists, "already_exists"),
-        (K::WouldBlock, "would_block"),
-        (K::InvalidInput, "invalid_input"),
-        (K::InvalidData, "invalid_data"),
-        (K::TimedOut, "timed_out"),
-        (K::WriteZero, "write_zero"),
-        (K::Interrupted, "interrupted"),
-        (K::Unsupported, "unsupported"),
-        (K::UnexpectedEof, "unexpected_eof"),
-        (K::OutOfMemory, "out_of_memory"),
-    ];
-    MAP.iter().find(|(k, _)| *k == kind).map(|(_, n)| *n).unwrap_or("other")
+    match kind {
+        K::NotFound => "not_found",
+        K::PermissionDenied => "permission_denied",
+        K::ConnectionRefused => "connection_refused",
+        K::ConnectionReset => "connection_reset",
+        K::ConnectionAborted => "connection_aborted",
+        K::NotConnected => "not_connected",
+        K::AddrInUse => "addr_in_use",
+        K::AddrNotAvailable => "addr_not_available",
+        K::BrokenPipe => "broken_pipe",
+        K::AlreadyExists => "already_exists",
+        K::WouldBlock => "would_block",
+        K::InvalidInput => "invalid_input",
+        K::InvalidData => "invalid_data",
+        K::TimedOut => "timed_out",
+        K::WriteZero => "write_zero",
+        K::Interrupted => "interrupted",
+        K::Unsupported => "unsupported",
+        K::UnexpectedEof => "unexpected_eof",
+        K::OutOfMemory => "out_of_memory",
+        _ => "other",
+    }
 }
 
 fn handle_cache(args: CacheArgs) -> Result<()> {
     match args.command {
-        CacheCommand::Status(args) => {
-            let engine = engine_from_common(&args);
-            emit_with_json(engine.mem(), args.json)?;
-        }
+        CacheCommand::Status(args) => emit_with_json(engine_from_common(&args).mem(), args.json)?,
         CacheCommand::Prune(args) => {
             let root = tokenzero_work_root(args.root);
             let cache = resolve_recovery_cache_path(&root, args.cache_path);
@@ -1070,20 +755,20 @@ fn handle_cache(args: CacheArgs) -> Result<()> {
             emit_value(report, args.json)?;
         }
         CacheCommand::MigrateRefs(args) => {
-            // Use the canonical SharedCas detection so migration writes to the
-            // same store root that RecoveryStore reads from at startup.
-            cache_migrate!(args.root, args.cache_path, args.json, |m| m.run(!args.apply))?;
+            cache_migrate!(args.root, args.cache_path, args.json, |m| m
+                .run(!args.apply))?
         }
         CacheCommand::MigrateVerify(args) => {
-            cache_migrate!(args.root, args.cache_path, args.json, |m| m.verify())?;
+            cache_migrate!(args.root, args.cache_path, args.json, |m| m.verify())?
         }
         CacheCommand::MigrateRollback(args) => {
-            cache_migrate!(args.root, args.cache_path, args.json, |m| m.rollback(args.apply))?;
+            cache_migrate!(args.root, args.cache_path, args.json, |m| m
+                .rollback(args.apply))?
         }
         CacheCommand::MigrateCleanup(args) => {
             cache_migrate!(args.root, args.cache_path, args.json, |m| {
                 m.cleanup(args.apply, args.confirm_cleanup)
-            })?;
+            })?
         }
     }
     Ok(())
@@ -1091,26 +776,25 @@ fn handle_cache(args: CacheArgs) -> Result<()> {
 
 fn handle_cache_pack(args: CachePackArgs) -> Result<()> {
     let root = tokenzero_work_root(args.root.clone());
-    let engine = TokenZeroEngine::new(engine_config(
-        root.clone(),
-        default_allowed_roots(&root),
-        resolve_recovery_cache_path(&root, args.cache_path.clone()),
-        4000,
-        Mode::Structured,
-        default_shell_timeout(),
-        None,
-    ));
-    emit_with_json(engine.cache_pack(&args.scope), args.json)
+    emit_with_json(
+        engine_new(
+            &root,
+            default_allowed_roots(&root),
+            args.cache_path.clone(),
+            4000,
+            Mode::Structured,
+            default_shell_timeout(),
+            None,
+        )
+        .cache_pack(&args.scope),
+        args.json,
+    )
 }
 
 fn handle_bench(args: BenchArgs) -> Result<()> {
-    match args.command {
-        BenchCommand::Competitors(args) => {
-            let as_json = args.json;
-            emit_value(run_bench_competitors(args)?, as_json)?;
-        }
-    }
-    Ok(())
+    let BenchCommand::Competitors(args) = args.command;
+    let as_json = args.json;
+    emit_value(run_bench_competitors(args)?, as_json)
 }
 
 fn install_apply_or_plan(
@@ -1157,16 +841,12 @@ fn handle_install(args: InstallArgs) -> Result<()> {
 
 fn handle_init(args: InitArgs) -> Result<()> {
     let _plan_requested = args.plan;
-    let agents = install_agents(&args.agents, false)?;
-    let capabilities = init_capabilities(&args);
-    let surface = parse_mcp_surface(&args.surface)?;
-    let root = install_root(args.root.clone(), args.global);
     install_apply_or_plan(
-        &root,
+        &install_root(args.root.clone(), args.global),
         args.global,
-        &capabilities,
-        &agents,
-        surface,
+        &init_capabilities(&args),
+        &install_agents(&args.agents, false)?,
+        parse_mcp_surface(&args.surface)?,
         args.apply,
         args.json,
     )
@@ -1187,12 +867,11 @@ fn handle_clients(args: ClientsArgs) -> Result<()> {
 /// written.
 fn handle_clients_scan(args: ClientStatusArgs) -> Result<()> {
     let home = install_root(args.root.clone(), true);
-    let path_env = std::env::var("PATH").ok();
-    let detected = install::detect_present_agents(&home, path_env.as_deref());
+    let detected = install::detect_present_agents(&home, std::env::var("PATH").ok().as_deref());
     let supported: Vec<&str> = detected
         .iter()
-        .filter(|agent| agent.supported)
-        .map(|agent| agent.agent.as_str())
+        .filter(|a| a.supported)
+        .map(|a| a.agent.as_str())
         .collect();
     let next_step = if supported.is_empty() {
         "no supported harnesses detected; docs/routing.md covers manual adapters".to_string()
@@ -1201,87 +880,91 @@ fn handle_clients_scan(args: ClientStatusArgs) -> Result<()> {
             "tokenzero install --global --apply --hooks{}",
             supported
                 .iter()
-                .map(|agent| format!(" --agent {agent}"))
+                .map(|a| format!(" --agent {a}"))
                 .collect::<String>()
         )
     };
     emit_value(
-        json!({
-            "schema_version": "tokenzero.clients.v1",
-            "command": "clients scan",
-            "status": "ok",
-            "home": home.display().to_string(),
-            "detected": detected,
-            "unsupported_note": "supported=false entries need the manual adapter snippets in docs/routing.md",
-            "next_step": next_step,
-        }),
+        json!({"schema_version": "tokenzero.clients.v1", "command": "clients scan", "status": "ok", "home": path_display(&home), "detected": detected, "unsupported_note": "supported=false entries need the manual adapter snippets in docs/routing.md", "next_step": next_step}),
         args.json,
     )
 }
 
 fn handle_client_status(args: ClientStatusArgs) -> Result<()> {
-    let agents = install_agents(&args.agents, args.grok)?;
-    let root = install_root(args.root.clone(), true);
-    emit_value(client_status_report(&root, &agents, "detect")?, args.json)
+    emit_value(
+        client_status_report(
+            &install_root(args.root.clone(), true),
+            &install_agents(&args.agents, args.grok)?,
+            "detect",
+        )?,
+        args.json,
+    )
 }
 
 fn handle_clients_plan(args: ClientsPlanArgs) -> Result<()> {
     let profile = clients_profile(&args.profile)?;
     let agents = install_agents(&args.agents, args.grok)?;
     let root = install_root(args.root.clone(), true);
-    let capabilities = clients_capabilities(&profile);
-    let plan = install::plan_for_agents(
+    let mut value = serde_json::to_value(install::plan_for_agents(
         &root,
         true,
-        &capabilities,
+        &clients_capabilities(&profile),
         &agents,
         clients_mcp_surface(&profile),
-    );
-    let mut value = serde_json::to_value(plan)?;
+    ))?;
     if let Some(object) = value.as_object_mut() {
-        object.insert(
-            "schema_version".to_string(),
-            json!("tokenzero.clients.plan.v1"),
-        );
-        object.insert("command".to_string(), json!("clients plan"));
-        object.insert("profile".to_string(), json!(profile));
-        object.insert("root".to_string(), json!(root.display().to_string()));
-        object.insert("agents".to_string(), json!(clients_agent_labels(&agents)));
+        object.extend([
+            ("schema_version".into(), json!("tokenzero.clients.plan.v1")),
+            ("command".into(), json!("clients plan")),
+            ("profile".into(), json!(profile)),
+            ("root".into(), json!(path_display(&root))),
+            ("agents".into(), json!(clients_agent_labels(&agents))),
+        ]);
     }
     emit_value(value, args.json)
 }
 
+const CLIENTS_DOCTOR_FINDINGS: &[(&str, &str, &str, &str, &str)] = &[
+    (
+        "installed",
+        "tz-clients-installed",
+        "info",
+        "TokenZero client integration surfaces are present",
+        "Run tokenzero doctor --json for runtime health.",
+    ),
+    (
+        "mixed",
+        "tz-clients-mixed",
+        "warning",
+        "Some TokenZero client integration surfaces are present and some are missing",
+        "Run tokenzero clients plan --profile standard --json, review the plan, then use tokenzero install --global --apply --mcp --json if approved.",
+    ),
+    (
+        "",
+        "tz-clients-missing",
+        "info",
+        "No TokenZero client integration surfaces were detected at the planned target paths",
+        "Run tokenzero clients plan --profile standard --json to inspect the read-only integration plan.",
+    ),
+];
+
 fn clients_doctor_findings(status: &str) -> Vec<serde_json::Value> {
-    let (id, severity, summary, next_step) = match status {
-        "installed" => (
-            "tz-clients-installed",
-            "info",
-            "TokenZero client integration surfaces are present",
-            "Run tokenzero doctor --json for runtime health.",
-        ),
-        "mixed" => (
-            "tz-clients-mixed",
-            "warning",
-            "Some TokenZero client integration surfaces are present and some are missing",
-            "Run tokenzero clients plan --profile standard --json, review the plan, then use tokenzero install --global --apply --mcp --json if approved.",
-        ),
-        _ => (
-            "tz-clients-missing",
-            "info",
-            "No TokenZero client integration surfaces were detected at the planned target paths",
-            "Run tokenzero clients plan --profile standard --json to inspect the read-only integration plan.",
-        ),
-    };
-    vec![json!({"id": id, "severity": severity, "summary": summary, "next_step": next_step})]
+    let row = CLIENTS_DOCTOR_FINDINGS
+        .iter()
+        .find(|(s, ..)| *s == status)
+        .unwrap_or(&CLIENTS_DOCTOR_FINDINGS[2]);
+    vec![json!({"id": row.1, "severity": row.2, "summary": row.3, "next_step": row.4})]
 }
 
 fn handle_clients_doctor(args: ClientStatusArgs) -> Result<()> {
-    let agents = install_agents(&args.agents, args.grok)?;
-    let root = install_root(args.root.clone(), true);
-    let mut report = client_status_report(&root, &agents, "doctor")?;
+    let mut report = client_status_report(
+        &install_root(args.root.clone(), true),
+        &install_agents(&args.agents, args.grok)?,
+        "doctor",
+    )?;
     let status = report
         .get("status")
-        .and_then(|value| value.as_str())
+        .and_then(|v| v.as_str())
         .unwrap_or("unknown");
     let findings = clients_doctor_findings(status);
     if let Some(object) = report.as_object_mut() {
@@ -1291,8 +974,10 @@ fn handle_clients_doctor(args: ClientStatusArgs) -> Result<()> {
 }
 
 fn handle_clients_rollback(args: ClientsRollbackArgs) -> Result<()> {
-    let root = install_root(args.root.clone(), true);
-    emit_value(install::rollback(&root, &args.id)?, args.json)
+    emit_value(
+        install::rollback(&install_root(args.root.clone(), true), &args.id)?,
+        args.json,
+    )
 }
 
 fn handle_capabilities(args: CapabilitiesArgs) -> Result<()> {
@@ -1300,12 +985,14 @@ fn handle_capabilities(args: CapabilitiesArgs) -> Result<()> {
 }
 
 fn handle_robot_docs(args: RobotDocsArgs) {
-    let text = match args.command {
-        RobotDocsCommand::Guide => robot_docs_guide(),
-        RobotDocsCommand::Commands => agent_surfaces::robot_docs_commands(),
-        RobotDocsCommand::Examples => agent_surfaces::robot_docs_examples(),
-    };
-    print!("{text}");
+    print!(
+        "{}",
+        match args.command {
+            RobotDocsCommand::Guide => robot_docs_guide(),
+            RobotDocsCommand::Commands => agent_surfaces::robot_docs_commands(),
+            RobotDocsCommand::Examples => agent_surfaces::robot_docs_examples(),
+        }
+    );
 }
 
 fn handle_package_audit(args: PackageAuditArgs) -> serde_json::Value {
@@ -1336,7 +1023,7 @@ fn handle_quote(args: QuoteArgs) -> Result<()> {
 }
 
 fn engine_config(
-    root: PathBuf,
+    root: &Path,
     allowed_roots: Vec<PathBuf>,
     cache_path: PathBuf,
     max_visible_tokens: usize,
@@ -1351,34 +1038,54 @@ fn engine_config(
         mode,
         shell_timeout,
         mcp_idle_timeout,
-        ..EngineConfig::for_root(&root)
+        ..EngineConfig::for_root(root)
     }
+}
+
+fn engine_new(
+    root: &Path,
+    allowed_roots: Vec<PathBuf>,
+    cache_path: Option<PathBuf>,
+    budget: usize,
+    mode: Mode,
+    shell_timeout: std::time::Duration,
+    mcp_idle: Option<std::time::Duration>,
+) -> TokenZeroEngine {
+    TokenZeroEngine::new(engine_config(
+        root,
+        allowed_roots,
+        resolve_recovery_cache_path(root, cache_path),
+        budget,
+        mode,
+        shell_timeout,
+        mcp_idle,
+    ))
 }
 
 fn engine_from_tool(args: &ToolArgs) -> Result<TokenZeroEngine> {
     let root = tokenzero_work_root(None);
-    Ok(TokenZeroEngine::new(engine_config(
-        root.clone(),
+    Ok(engine_new(
+        &root,
         allowed_roots_for_workspace(&root, &args.allowed_root),
-        resolve_recovery_cache_path(&root, args.cache_path.clone()),
+        args.cache_path.clone(),
         args.budget.unwrap_or(4000),
         parse_mode(&args.mode)?,
         shell_timeout_from_secs(args.timeout_seconds),
         None,
-    )))
+    ))
 }
 
 fn engine_from_common(args: &CommonArgs) -> TokenZeroEngine {
     let root = tokenzero_work_root(args.root.clone());
-    TokenZeroEngine::new(engine_config(
-        root.clone(),
+    engine_new(
+        &root,
         default_allowed_roots(&root),
-        resolve_recovery_cache_path(&root, args.cache_path.clone()),
+        args.cache_path.clone(),
         4000,
         Mode::Auto,
         default_shell_timeout(),
         None,
-    ))
+    )
 }
 
 fn engine_config_for_mcp(args: &McpServerArgs) -> Result<EngineConfig> {
@@ -1390,7 +1097,7 @@ fn engine_config_for_mcp(args: &McpServerArgs) -> Result<EngineConfig> {
         .parse::<McpToolSurface>()
         .map_err(anyhow::Error::msg)?;
     let mut config = engine_config(
-        root.clone(),
+        &root,
         allowed_roots_for_workspace(&root, &args.allowed_root),
         resolve_recovery_cache_path(&root, args.cache_path.clone()),
         4000,
@@ -1409,8 +1116,8 @@ fn mcp_work_root(allowed_roots: &[PathBuf]) -> PathBuf {
 /// Rebuilds the mcp-server invocation for the supervised inner child:
 /// same configuration, no --supervise (one supervisor only), and idle exit
 /// pinned off because the supervisor owns the session lifecycle.
-fn supervised_child_args(args: &McpServerArgs) -> Vec<std::ffi::OsString> {
-    let mut child_args: Vec<std::ffi::OsString> = vec![
+fn supervised_child_args(args: &McpServerArgs) -> Vec<OsString> {
+    let mut child_args: Vec<OsString> = vec![
         "mcp-server".into(),
         "--mode".into(),
         args.mode.clone().into(),
@@ -1449,15 +1156,8 @@ fn existing_path_is_within_allowed_roots(path: &Path, allowed_roots: &[PathBuf])
 }
 
 fn install_root(root: Option<PathBuf>, global: bool) -> PathBuf {
-    if let Some(root) = root {
-        return root;
-    }
-    if global {
-        if let Some(home) = platform_home_dir() {
-            return home;
-        }
-    }
-    tokenzero_work_root(None)
+    root.or_else(|| global.then(platform_home_dir).flatten())
+        .unwrap_or_else(|| tokenzero_work_root(None))
 }
 
 fn platform_home_dir() -> Option<PathBuf> {
@@ -1486,19 +1186,15 @@ fn parse_mode(value: &str) -> Result<Mode> {
 }
 
 fn normalize_command(command: &[String]) -> Vec<String> {
-    let parts = if command.first().map(String::as_str) == Some("--") {
-        &command[1..]
-    } else {
-        command
+    let parts = match command {
+        [first, rest @ ..] if first == "--" => rest,
+        _ => command,
     };
-    if parts.len() == 1
-        && contains_platform_shell_syntax(&parts[0], tokenzero_runtime::current_platform())
-    {
-        parts.to_vec()
-    } else if parts.len() == 1 {
-        split_command_string(&parts[0])
-    } else {
-        parts.to_vec()
+    match parts {
+        [part] if !contains_platform_shell_syntax(part, tokenzero_runtime::current_platform()) => {
+            split_command_string(part)
+        }
+        _ => parts.to_vec(),
     }
 }
 
@@ -1513,8 +1209,6 @@ fn content_type_from_kind(kind: &str, text: &str, path: Option<&Path>) -> Conten
         _ => detect_content_type(text, path),
     }
 }
-
-// Note: kind mapping kept as match for exhaustiveness readability of domain labels.
 
 fn parse_line_token(value: &str) -> Option<usize> {
     value.trim().trim_start_matches('L').parse().ok()
@@ -1607,8 +1301,7 @@ fn init_capabilities(args: &InitArgs) -> Vec<String> {
 }
 
 fn clients_profile(raw: &str) -> Result<String> {
-    let profile = raw.trim().to_ascii_lowercase();
-    match profile.as_str() {
+    match raw.trim().to_ascii_lowercase().as_str() {
         "standard" | "" => Ok("standard".to_string()),
         "codemode" | "code-mode" => Ok("codemode".to_string()),
         other => anyhow::bail!(
@@ -1626,15 +1319,12 @@ fn clients_capabilities(profile: &str) -> Vec<String> {
 }
 
 fn clients_mcp_surface(_profile: &str) -> McpToolSurface {
-    // MCP always uses the full classic tool surface regardless of profile.
     McpToolSurface::Classic
 }
-
 fn parse_mcp_surface(raw: &str) -> Result<McpToolSurface> {
     raw.parse()
         .map_err(|message: String| anyhow::anyhow!(message))
 }
-
 fn clients_agent_labels(agents: &[String]) -> Vec<String> {
     if agents.is_empty() {
         vec!["all".to_string()]
@@ -1648,22 +1338,20 @@ fn client_status_report(
     agents: &[String],
     command: &str,
 ) -> Result<serde_json::Value> {
-    let capabilities = clients_capabilities("standard");
-    let plan = install::plan_for_agents(root, true, &capabilities, agents, McpToolSurface::Classic);
+    let plan = install::plan_for_agents(
+        root,
+        true,
+        &clients_capabilities("standard"),
+        agents,
+        McpToolSurface::Classic,
+    );
     let surfaces: Vec<serde_json::Value> = plan
         .writes
         .iter()
         .map(|write| client_surface_status(write, root))
-        .collect::<Result<Vec<_>>>()?;
-    let count = |state: &str| {
-        surfaces
-            .iter()
-            .filter(|surface| surface["state"] == state)
-            .count()
-    };
-    let installed = count("installed");
-    let mixed = count("mixed");
-    let missing = count("missing");
+        .collect::<Result<_>>()?;
+    let count = |state: &str| surfaces.iter().filter(|s| s["state"] == state).count();
+    let (installed, mixed, missing) = (count("installed"), count("mixed"), count("missing"));
     let status = if installed > 0 && missing == 0 && mixed == 0 {
         "installed"
     } else if installed > 0 || mixed > 0 {
@@ -1671,29 +1359,9 @@ fn client_status_report(
     } else {
         "missing"
     };
-    Ok(json!({
-        "schema_version": "tokenzero.clients.v1",
-        "status": status,
-        "ok": true,
-        "command": format!("clients {command}"),
-        "root": root.display().to_string(),
-        "global": true,
-        "profile": "standard",
-        "agents": clients_agent_labels(agents),
-        "summary": {
-            "installed": installed,
-            "mixed": mixed,
-            "missing": missing,
-            "total": surfaces.len(),
-            "raw_bypass_risk": status != "installed"
-        },
-        "surfaces": surfaces,
-        "next_action": if status == "installed" {
-            "Run tokenzero doctor --json to verify runtime health."
-        } else {
-            "Run tokenzero clients plan --profile standard --json to review the read-only integration plan."
-        }
-    }))
+    Ok(
+        json!({"schema_version": "tokenzero.clients.v1", "status": status, "ok": true, "command": format!("clients {command}"), "root": path_display(root), "global": true, "profile": "standard", "agents": clients_agent_labels(agents), "summary": {"installed": installed, "mixed": mixed, "missing": missing, "total": surfaces.len(), "raw_bypass_risk": status != "installed"}, "surfaces": surfaces, "next_action": if status == "installed" {"Run tokenzero doctor --json to verify runtime health."} else {"Run tokenzero clients plan --profile standard --json to review the read-only integration plan."}}),
+    )
 }
 
 fn client_surface_status(write: &install::InstallWrite, root: &Path) -> Result<serde_json::Value> {
@@ -1757,8 +1425,6 @@ fn emit_with_json(response: ToolResponse, as_json: bool) -> Result<()> {
         println!("{}", cli_json(&response));
     } else if response.tool == "expand" && response.status == "ok" {
         if let Some(visible) = &response.visible {
-            // Exact recovery: emit recovered bytes verbatim (no forced
-            // trailing newline). Fixes F-004 (non-newline-terminated files).
             print!("{}", visible.text);
         }
     } else {
@@ -1794,10 +1460,8 @@ fn child_failure_exit_code(response: &ToolResponse) -> Option<i32> {
         .get("exit_code")
         .and_then(serde_json::Value::as_i64)
     {
-        // Masked pipeline: the shell itself reported 0; mirror sh semantics.
         Some(0) => None,
         Some(code) => Some(code.clamp(1, 255) as i32),
-        // Timeout or signal without an exit code.
         None => Some(1),
     }
 }
@@ -1805,11 +1469,7 @@ fn child_failure_exit_code(response: &ToolResponse) -> Option<i32> {
 fn emit_value<T: serde::Serialize>(value: T, _as_json: bool) -> Result<()> {
     let json_value = serde_json::to_value(value)?;
     print_pretty(&json_value)?;
-    if json_value.get("ok") == Some(&json!(false))
-        || json_value.get("status") == Some(&json!("blocked"))
-    {
-        std::process::exit(1);
-    }
+    exit_if_nonzero(doctor_exit_code(&json_value));
     Ok(())
 }
 
@@ -1836,11 +1496,7 @@ fn record_tool_pulse(response: &ToolResponse, root: PathBuf, tool: &str) -> Resu
 }
 
 mod audits;
-
 use audits::bench::*;
 use audits::os_reach::*;
 use audits::recovery::*;
 use audits::release::*;
-
-#[cfg(test)]
-mod tests;

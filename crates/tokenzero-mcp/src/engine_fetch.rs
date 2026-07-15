@@ -209,18 +209,12 @@ impl TokenZeroEngine {
             &format!("fetch {}", zero_hit_label(url)),
             refs_complete,
         );
-        let exact_ref_tokens = exact_ref_token_count(&refs);
-        let mut response = success_response(
+        let mut response = capsule_response!(
             "fetch",
             mode,
-            capsule.text,
+            capsule,
             refs,
-            (
-                capsule.raw_tokens,
-                capsule.visible_tokens,
-                recovery_tokens + store.recovery_tokens,
-                Some(exact_ref_tokens),
-            ),
+            recovery_tokens + store.recovery_tokens
         );
         response.content_type = Some(ctype.to_string());
         response.telemetry = Some(json!({
