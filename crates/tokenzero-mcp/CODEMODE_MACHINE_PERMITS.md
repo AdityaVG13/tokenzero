@@ -29,10 +29,11 @@ Example on a 16-core host: default analysis slots = 4, default index slots = 2. 
 
 ## Rules
 
-1. Permit directories are exclusive locks (or numbered `slot-N` children when concurrency > 1).
-2. Dead holders are reclaimed via pid liveness checks; incomplete dirs reclaim after a short grace.
+1. Permit directories always use numbered `slot-N` children under the base path — including when concurrency is 1 (`base/slot-0`). Never lock `base` itself for the slots==1 shortcut; mixed concurrency envs must not stack.
+2. Dead holders are reclaimed via pid liveness checks; incomplete dirs reclaim after a short grace. A live legacy exclusive permit at `base` (pid/owner directly under base) blocks all slots until reclaimed or released.
 3. Acquire waits until the wall deadline, then returns retryable busy — never silent success while the permit is held.
 4. Identical in-flight plans may coalesce under a bounded follower set; overflow is also retryable busy.
 5. Status / describe / containment snapshot probes stay ungated.
+6. Explicit `*_CONCURRENCY` env values are clamped to `*_CONCURRENCY_CAP` (`min(explicit, cap)`).
 
 TokenZero owns this contract (`tokenzero-npia`, `tokenzero-qisj`). FSZero (`fszero-gzw`) and GraphZero (`graphzero-01vw`) adopt it.

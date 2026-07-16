@@ -138,6 +138,16 @@ impl Default for Config {
     fn default() -> Self {
         let [max_active, max_queue_depth, cost_threshold] =
             CONFIG_LIMITS.map(|(name, default, minimum)| env_usize(name, default).max(minimum));
+        let analysis_cap = env_usize(
+            "TOKENZERO_CODEMODE_ANALYSIS_CONCURRENCY_CAP",
+            DEFAULT_ANALYSIS_CONCURRENCY_CAP,
+        )
+        .max(1);
+        let index_cap = env_usize(
+            "TOKENZERO_CODEMODE_INDEX_CONCURRENCY_CAP",
+            DEFAULT_INDEX_CONCURRENCY_CAP,
+        )
+        .max(1);
         Self {
             max_active,
             max_queue_depth,
@@ -146,12 +156,14 @@ impl Default for Config {
                 "TOKENZERO_CODEMODE_ANALYSIS_CONCURRENCY",
                 default_analysis_concurrency,
             )
-            .max(1),
+            .max(1)
+            .min(analysis_cap),
             index_max_active: env_usize_or_else(
                 "TOKENZERO_CODEMODE_INDEX_CONCURRENCY",
                 default_index_concurrency,
             )
-            .max(1),
+            .max(1)
+            .min(index_cap),
         }
     }
 }
@@ -530,19 +542,23 @@ impl MachinePermit {
         deadline: Instant,
         command: &str,
     ) -> Result<Self, String> {
+        // Always use base/slot-N — even when slots==1 — so mixed concurrency
+        // envs cannot stack an exclusive base lock with slot children.
+        // Pool size is the caller's requested budget (from env); do not freeze
+        // capacity to the first asker — that would let CONCURRENCY=1 starve the
+        // family-wide cores/4 analysis budget.
         let slots = slots.max(1);
-        if slots == 1 {
-            return Self::acquire(base, deadline, command);
-        }
-        let _ = fs::create_dir_all(base);
         let mut attempt = 0u32;
         loop {
-            for idx in 0..slots {
-                let path = base.join(format!("slot-{idx}"));
-                match Self::try_create(&path, command) {
-                    Ok(permit) => return Ok(permit),
-                    Err(TryPermit::Busy) => {}
-                    Err(TryPermit::Fatal(e)) => return Err(e),
+            if !legacy_exclusive_busy(base) {
+                let _ = fs::create_dir_all(base);
+                for idx in 0..slots {
+                    let path = base.join(format!("slot-{idx}"));
+                    match Self::try_create(&path, command) {
+                        Ok(permit) => return Ok(permit),
+                        Err(TryPermit::Busy) => {}
+                        Err(TryPermit::Fatal(e)) => return Err(e),
+                    }
                 }
             }
             if Instant::now() >= deadline {
@@ -668,6 +684,23 @@ fn reclaim_dead(path: &Path) -> bool {
         .is_some_and(|age| age >= INCOMPLETE_PERMIT_GRACE);
     stale && remove_permit(path)
 }
+
+/// Legacy exclusive layout put `pid`/`owner` directly under `base`. Slot layout
+/// keeps metadata only under `base/slot-N`.
+fn looks_like_legacy_exclusive_permit(base: &Path) -> bool {
+    base.is_dir() && (base.join("pid").is_file() || base.join("owner").is_file())
+}
+
+/// If `base` is a live legacy exclusive permit, reclaim dead holders; otherwise
+/// treat every slot as Busy so peers cannot create `slot-N` children underneath.
+fn legacy_exclusive_busy(base: &Path) -> bool {
+    if !looks_like_legacy_exclusive_permit(base) {
+        return false;
+    }
+    let _ = reclaim_dead(base);
+    looks_like_legacy_exclusive_permit(base)
+}
+
 #[cfg(unix)]
 fn process_alive(pid: u32) -> bool {
     std::process::Command::new("kill")
@@ -1194,5 +1227,133 @@ mod tests {
         assert_eq!(permit_backoff(0), PERMIT_POLL);
         assert!(permit_backoff(3) > permit_backoff(0));
         assert_eq!(permit_backoff(10), PERMIT_POLL_MAX);
+    }
+
+    #[test]
+    fn slots_one_uses_slot_zero_not_base() {
+        let base = std::env::temp_dir().join(format!(
+            "tokenzero-slot0-layout-{}-{}",
+            std::process::id(),
+            epoch_millis()
+        ));
+        let _ = fs::remove_dir_all(&base);
+        let permit = MachinePermit::acquire_slots(
+            &base,
+            1,
+            Instant::now() + Duration::from_secs(2),
+            "slot-one",
+        )
+        .expect("slots=1 must acquire");
+        assert!(
+            base.join("slot-0").join("pid").is_file(),
+            "slots=1 must lock base/slot-0, not base itself"
+        );
+        assert!(
+            !base.join("pid").is_file(),
+            "slots=1 must not write pid directly under base"
+        );
+        drop(permit);
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn mixed_concurrency_layouts_share_slot_namespace() {
+        let base = std::env::temp_dir().join(format!(
+            "tokenzero-mixed-slots-{}-{}",
+            std::process::id(),
+            epoch_millis()
+        ));
+        let _ = fs::remove_dir_all(&base);
+
+        // slots=1 holds slot-0; slots>1 peer must take another slot child (shared
+        // namespace), not invent a nested lock under an exclusive base.
+        let holder = MachinePermit::acquire_slots(
+            &base,
+            1,
+            Instant::now() + Duration::from_secs(5),
+            "holder-slots-1",
+        )
+        .expect("slots=1 holder");
+        let peer = MachinePermit::acquire_slots(
+            &base,
+            3,
+            Instant::now() + Duration::from_secs(2),
+            "peer-slots-3",
+        )
+        .expect("slots>1 peer must share slot namespace with slots=1 holder");
+        assert_eq!(peer.0.parent(), Some(base.as_path()));
+        let peer_name = peer.0.file_name().and_then(|n| n.to_str()).unwrap_or("");
+        assert!(
+            peer_name.starts_with("slot-") && peer_name != "slot-0",
+            "peer must occupy a free slot child, got {}",
+            peer.0.display()
+        );
+        drop(peer);
+        drop(holder);
+
+        // Saturated multi-slot pool must reject a slots=1 peer (no stacking past budget).
+        let holder = MachinePermit::acquire_slots(
+            &base,
+            2,
+            Instant::now() + Duration::from_secs(5),
+            "holder-slots-2",
+        )
+        .expect("slots=2 holder");
+        let holder2 = MachinePermit::acquire_slots(
+            &base,
+            2,
+            Instant::now() + Duration::from_secs(5),
+            "holder-slots-2b",
+        )
+        .expect("second slots=2 holder");
+        let contested = MachinePermit::acquire_slots(
+            &base,
+            1,
+            Instant::now() + Duration::from_millis(80),
+            "peer-slots-1",
+        );
+        assert!(
+            contested.is_err(),
+            "slots=1 peer must not stack when multi-slot pool is full: {contested:?}"
+        );
+        drop(holder);
+        drop(holder2);
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn live_legacy_exclusive_base_blocks_all_slots() {
+        let base = std::env::temp_dir().join(format!(
+            "tokenzero-legacy-excl-{}-{}",
+            std::process::id(),
+            epoch_millis()
+        ));
+        let _ = fs::remove_dir_all(&base);
+        let legacy = MachinePermit::acquire(
+            &base,
+            Instant::now() + Duration::from_secs(5),
+            "legacy-exclusive",
+        )
+        .expect("legacy exclusive at base");
+        let contested = MachinePermit::acquire_slots(
+            &base,
+            2,
+            Instant::now() + Duration::from_millis(80),
+            "slot-peer",
+        );
+        assert!(
+            contested.is_err(),
+            "live legacy exclusive base must block slot children: {contested:?}"
+        );
+        drop(legacy);
+        let after = MachinePermit::acquire_slots(
+            &base,
+            2,
+            Instant::now() + Duration::from_secs(2),
+            "after-legacy",
+        );
+        assert!(after.is_ok(), "slots acquire after legacy release: {after:?}");
+        drop(after);
+        let _ = fs::remove_dir_all(&base);
     }
 }
