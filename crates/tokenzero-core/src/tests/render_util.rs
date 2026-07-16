@@ -211,3 +211,19 @@ fn secret_masking_covers_key_prefix_and_known_tokens() {
     let api = mask_visible_secrets("api_key=z");
     assert!(api.contains("api_key=[masked]"), "{}", api);
 }
+
+#[test]
+fn secret_masking_covers_authorization_and_bearer_markers() {
+    // P20-F1 / tokenzero-g3y.20: SECRET_MARKERS classifies these but masking
+    // previously left the credential payload visible.
+    let auth = mask_visible_secrets("authorization: Bearer abcdefghijklmnop");
+    assert!(auth.contains("authorization:[masked]"), "{auth}");
+    assert!(!auth.contains("abcdefghijklmnop"), "{auth}");
+    assert!(!auth.contains("Bearer"), "{auth}");
+    let bearer = mask_visible_secrets("bearer abcdefghijklmnop");
+    assert!(bearer.contains("bearer [masked]"), "{bearer}");
+    assert!(!bearer.contains("abcdefghijklmnop"), "{bearer}");
+    let mixed_case = mask_visible_secrets("Authorization: Bearer xyz-secret-value");
+    assert!(mixed_case.starts_with("Authorization:[masked]"), "{mixed_case}");
+    assert!(!mixed_case.contains("xyz-secret-value"), "{mixed_case}");
+}

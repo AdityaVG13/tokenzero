@@ -1287,9 +1287,19 @@ pub fn mask_visible_secrets(text: &str) -> String {
 
 fn mask_secret_line(line: &str) -> String {
     let low = line.to_ascii_lowercase();
-    if let Some((key, pos)) = "token= password= secret= api_key= apikey="
-        .split_whitespace()
-        .find_map(|key| low.find(key).map(|pos| (key, pos)))
+    // Keep trailing space on "bearer " so the marker matches SECRET_MARKERS and
+    // the mask lands after the separator (not glued as "bearer[masked]").
+    if let Some((key, pos)) = [
+        "token=",
+        "password=",
+        "secret=",
+        "api_key=",
+        "apikey=",
+        "authorization:",
+        "bearer ",
+    ]
+    .into_iter()
+    .find_map(|key| low.find(key).map(|pos| (key, pos)))
     {
         return format!("{}[masked]", &line[..pos + key.len()]);
     }
