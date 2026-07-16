@@ -36,7 +36,7 @@ const METHOD_CATALOG: &[MethodDef] = methods! {
     "zero.edit", "zero", "Apply multi-hunk find/replace edits to one file atomically" =>
         "zero.edit(path: string, edits: Array<{ find: string, replace: string, replace_all?: boolean }>, opts?: { dry_run?, create? }): Promise<{ text: string, ref: string, hunks_applied: number }>";
     "zero.token.expand", "zero.token", "Recover exact bytes from a tz:// ref" =>
-        "zero.token.expand(ref: string, opts?: { start_line?, end_line?, selector?, symbol?, anchor_kind?, since?, fresh? }): Promise<{ text: string, status: string, ref?: string, visible_tokens?: number, raw_tokens?: number }>";
+        "zero.token.expand(ref: string | { ref, start_line?, end_line?, selector?, symbol?, since?, fresh? } | Array<string | { ref, ... }>, opts?: { start_line?, end_line?, selector?, symbol?, anchor_kind?, since?, fresh? }): Promise<{ text: string, status: string, ref?: string, visible_tokens?: number, raw_tokens?: number } | { items: Array<{ text: string }>, count: number }>";
     "zero.token.compact", "zero.token", "Store arbitrary text/data behind a tz:// recovery ref via ingest" =>
         "zero.token.compact(data: string): Promise<{ ref: string, raw_tokens: number }>";
     "zero.token.compactMany", "zero.token", "Batch compact many payloads in one CodeMode step with one visible ack" =>
@@ -46,7 +46,7 @@ const METHOD_CATALOG: &[MethodDef] = methods! {
     "zero.token.dedupe", "zero.token", "Deduplicate JSON/string values while preserving first occurrence order" =>
         "zero.token.dedupe(items: any[]): Promise<{ items: any[], count: number }>";
     "zero.expand", "zero", "Recover exact bytes from a tz:// ref (compatibility alias for zero.token.expand)" =>
-        "zero.expand(ref: string, opts?: { start_line?, end_line?, selector? }): Promise<{ text: string, status: string, ref?: string, visible_tokens?: number, raw_tokens?: number }>";
+        "zero.expand(ref: string | { ref, ... } | Array<string | { ref, ... }>, opts?: { start_line?, end_line?, selector? }): Promise<{ text: string, status: string, ref?: string, visible_tokens?: number, raw_tokens?: number } | { items: Array<{ text: string }>, count: number }>";
     "zero.compact", "zero", "Store arbitrary text/data behind a tz:// recovery ref via ingest (compatibility alias for zero.token.compact)" =>
         "zero.compact(data: string): Promise<{ ref: string, raw_tokens: number }>";
     "zero.ingest", "zero", "Ingest text into a compact TokenZero capsule with recovery ref" =>

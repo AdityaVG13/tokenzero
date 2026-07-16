@@ -3028,6 +3028,10 @@ pub(crate) fn exec_edit(engine: &TokenZeroEngine, work_root: &Path, args: &[Valu
 }
 
 fn exec_expand(engine: &TokenZeroEngine, args: &[Value]) -> OpResult {
+    // Array first arg → expandMany (agents often pass expand([ref, ...])).
+    if args.first().is_some_and(Value::is_array) {
+        return exec_expand_many(engine, args);
+    }
     let params = ExpandParams::from_codemode_args(args).map_err(operation_error)?;
     if !tokenzero_recovery::is_expandable_ref(&params.ref_id) {
         return Err(operation_error(format!(
