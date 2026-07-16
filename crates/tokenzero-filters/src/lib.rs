@@ -204,7 +204,10 @@ fn apply_rewrite<'a>(
     match family {
         "read" => match first {
             Some("cat") if parts.len() >= 2 => {
-                Some(Owned(format!("tokenzero read {}", shell_join(&parts[1..]))))
+                // Preserve the original argument span so expansions, globs,
+                // tilde, and comments keep their shell-denoted meaning.
+                let args = raw_args_after_first_word(command)?;
+                Some(Owned(format!("tokenzero read {args}")))
             }
             Some("head" | "tail") => Some(Borrowed(command)),
             _ => None,
@@ -583,20 +586,47 @@ fn split_words(command: &str) -> Vec<String> {
     words
 }
 
-fn shell_join(parts: &[String]) -> String {
-    parts
-        .iter()
-        .map(|p| {
-            if p.chars()
-                .all(|c| c.is_ascii_alphanumeric() || "-_./:@".contains(c))
-            {
-                p.clone()
-            } else {
-                format!("'{}'", p.replace('\'', "'\"'\"'"))
+/// Return the raw argument text after the first shell word, preserving quotes,
+/// expansions, globs, tilde, and comment syntax exactly as the user wrote them.
+fn raw_args_after_first_word(command: &str) -> Option<&str> {
+    let mut quote: Option<char> = None;
+    let mut escaped = false;
+    let mut in_first = false;
+    let mut past_first = false;
+    for (idx, ch) in command.char_indices() {
+        if past_first {
+            let rest = command[idx..].trim_start();
+            return (!rest.is_empty()).then_some(rest);
+        }
+        if escaped {
+            escaped = false;
+            in_first = true;
+            continue;
+        }
+        if ch == '\\' && quote != Some('\'') && !cfg!(windows) {
+            escaped = true;
+            in_first = true;
+            continue;
+        }
+        if Some(ch) == quote {
+            quote = None;
+            in_first = true;
+            continue;
+        }
+        if quote.is_none() && (ch == '\'' || ch == '"') {
+            quote = Some(ch);
+            in_first = true;
+            continue;
+        }
+        if quote.is_none() && ch.is_whitespace() {
+            if in_first {
+                past_first = true;
             }
-        })
-        .collect::<Vec<_>>()
-        .join(" ")
+            continue;
+        }
+        in_first = true;
+    }
+    None
 }
 
 #[cfg(test)]

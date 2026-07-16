@@ -132,6 +132,30 @@ fn quoted_operators_do_not_count_as_compound() {
     assert_eq!(r.family, "read");
 }
 
+/// P04-001: cat rewrites must preserve shell-denoted argument spans
+/// (expansions, globs, tilde, comments) instead of re-quoting them.
+#[test]
+fn cat_rewrite_preserves_shell_argument_semantics() {
+    for (command, expected) in [
+        ("cat $FILE", "tokenzero read $FILE"),
+        ("cat *.rs", "tokenzero read *.rs"),
+        ("cat ~/secret", "tokenzero read ~/secret"),
+        (
+            "cat visible # ignored words",
+            "tokenzero read visible # ignored words",
+        ),
+    ] {
+        let r = rewrite_command(command, "safe", true);
+        assert_rewritten_to(&r, expected);
+        assert!(r.safe, "{command}");
+        let again = rewrite_command(&r.rewritten_command, "safe", true);
+        assert_eq!(
+            again.rewritten_command, r.rewritten_command,
+            "idempotent: {command}"
+        );
+    }
+}
+
 // ── Destructive / unsafe ─────────────────────────────────────────────────────
 
 /// Covers all `unsafe_reason` categories: destructive first-words, git
