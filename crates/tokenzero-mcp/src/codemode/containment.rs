@@ -1,23 +1,29 @@
 //! Hard containment for expensive CodeMode execution.
 //!
-//! # ZeroStack machine-wide permit contract
+//! # ZeroStack machine-wide permit contract (v1)
 //!
 //! Sibling engines (TokenZero, FSZero, GraphZero) and the ZeroStack hub must
 //! share these paths so concurrent CodeMode processes cannot stack CPU:
 //!
-//! - Heavy (shell / high-cost): `/tmp/zerostack-codemode-heavy.permit`
+//! - Status/health/describe: ungated
 //! - Analysis (light find/search/plans): `/tmp/zerostack-codemode-analysis.permit`
+//! - Index (rebuild / watch.drain / `.index(`): `/tmp/zerostack-codemode-index.permit`
+//! - Heavy (shell / high-cost): `/tmp/zerostack-codemode-heavy.permit`
 //!
-//! Status/health/describe probes stay ungated.
+//! Contention waits then returns retryable `busy` / `machine_permit_busy` —
+//! never a silent ok while a permit is held.
 //!
 //! ## Multi-tenant default (100 sessions)
 //!
-//! Analysis concurrency defaults to ~25% of `available_parallelism` (min 1,
-//! soft-capped), not a hard single holder. Hundreds of sessions share that
-//! slot pool; each active holder is expected to use about one core because
-//! search backends are thread-capped (`rg --threads 1`). Override with
-//! `TOKENZERO_CODEMODE_ANALYSIS_CONCURRENCY` /
-//! `TOKENZERO_CODEMODE_ANALYSIS_CONCURRENCY_CAP`.
+//! Analysis concurrency defaults to `max(1, cores/4)` soft-capped at 8.
+//! Index concurrency defaults to `max(1, cores/8)` soft-capped at 2.
+//! Hundreds of sessions share those slot pools; each active holder is
+//! expected to use about one core because search backends are thread-capped
+//! (`rg --threads 1`). Override with the matching
+//! `TOKENZERO_CODEMODE_*_CONCURRENCY` / `*_CONCURRENCY_CAP` env vars.
+//!
+//! Canonical doc: `CODEMODE_MACHINE_PERMITS.md` (`tokenzero-npia`,
+//! `tokenzero-qisj`, `fszero-gzw`, `graphzero-01vw`).
 
 use serde::Serialize;
 use serde_json::{Value, json};
@@ -36,8 +42,10 @@ const DEFAULT_MAX_ACTIVE: usize = 1;
 const DEFAULT_MAX_QUEUE_DEPTH: usize = 8;
 const DEFAULT_COST_THRESHOLD: usize = 32;
 const DEFAULT_ANALYSIS_CONCURRENCY_CAP: usize = 8;
+const DEFAULT_INDEX_CONCURRENCY_CAP: usize = 2;
 const DEFAULT_MACHINE_PERMIT: &str = "/tmp/zerostack-codemode-heavy.permit";
 const DEFAULT_ANALYSIS_PERMIT: &str = "/tmp/zerostack-codemode-analysis.permit";
+const DEFAULT_INDEX_PERMIT: &str = "/tmp/zerostack-codemode-index.permit";
 const PERMIT_POLL: Duration = Duration::from_millis(20);
 const PERMIT_POLL_MAX: Duration = Duration::from_millis(200);
 const INCOMPLETE_PERMIT_GRACE: Duration = Duration::from_millis(250);
@@ -91,6 +99,7 @@ fn heavy_execution_id() -> Option<u64> {
 pub(crate) enum ExecutionClass {
     Status,
     Light,
+    Index,
     HeavyShell,
     HeavyEstimatedCost,
 }
@@ -123,6 +132,7 @@ struct Config {
     max_queue_depth: usize,
     cost_threshold: usize,
     analysis_max_active: usize,
+    index_max_active: usize,
 }
 impl Default for Config {
     fn default() -> Self {
@@ -135,6 +145,11 @@ impl Default for Config {
             analysis_max_active: env_usize_or_else(
                 "TOKENZERO_CODEMODE_ANALYSIS_CONCURRENCY",
                 default_analysis_concurrency,
+            )
+            .max(1),
+            index_max_active: env_usize_or_else(
+                "TOKENZERO_CODEMODE_INDEX_CONCURRENCY",
+                default_index_concurrency,
             )
             .max(1),
         }
@@ -296,6 +311,7 @@ impl Controller {
         let result = match class {
             ExecutionClass::Status => catch_worker_panic(run),
             ExecutionClass::Light => self.run_analysis(class, options, run),
+            ExecutionClass::Index => self.run_index(class, options, run),
             ExecutionClass::HeavyShell | ExecutionClass::HeavyEstimatedCost => {
                 self.run_heavy(class, options, run)
             }
@@ -331,6 +347,42 @@ impl Controller {
             self.config.analysis_max_active,
             deadline,
             "tokenzero-codemode-analysis",
+        ) {
+            Ok(v) => v,
+            Err(e) => {
+                drop(slot);
+                return busy_result("machine_permit_busy", &e);
+            }
+        };
+        let result = catch_worker_panic(run);
+        drop(slot);
+        drop(permit);
+        result
+    }
+
+    fn run_index<F>(
+        &self,
+        class: ExecutionClass,
+        options: &CodeModeOptions,
+        run: F,
+    ) -> CodeModeResult
+    where
+        F: FnOnce() -> CodeModeResult,
+    {
+        // Index rebuild / drain work shares a tighter family-wide slot pool
+        // than analysis so concurrent engines cannot stack index CPU.
+        let slot = match self.acquire_slot(class) {
+            Ok(v) => v,
+            Err(v) => return v,
+        };
+        let deadline = Instant::now()
+            .checked_add(Duration::from_millis(options.hard_max_wall_ms.max(1)))
+            .unwrap_or_else(Instant::now);
+        let permit = match MachinePermit::acquire_slots(
+            &index_permit_path(),
+            self.config.index_max_active,
+            deadline,
+            "tokenzero-codemode-index",
         ) {
             Ok(v) => v,
             Err(e) => {
@@ -416,6 +468,7 @@ impl Controller {
             "active_heavy": s.active_heavy,
             "worker_count": s.active_heavy,
             "analysis_max_active": self.config.analysis_max_active,
+            "index_max_active": self.config.index_max_active,
             "heavy_max_active": self.config.max_active,
             "child_pid": s.child_pid,
             "child_pgid": s.child_pgid,
@@ -657,6 +710,7 @@ const STATUS_MARKERS: &[&str] = &[
     "status",
 ];
 const SHELL_MARKERS: &[&str] = &[".shell(", "tz_shell", "\"shell\"", "'shell'"];
+const INDEX_MARKERS: &[&str] = &[".index(", "rebuild", "watch.drain"];
 
 fn contains_any(text: &str, markers: &[&str]) -> bool {
     markers.iter().any(|marker| text.contains(marker))
@@ -671,6 +725,9 @@ fn classify(plan: &str, cost_threshold: usize) -> ExecutionClass {
     }
     if contains_any(&p, SHELL_MARKERS) {
         return ExecutionClass::HeavyShell;
+    }
+    if contains_any(&p, INDEX_MARKERS) {
+        return ExecutionClass::Index;
     }
     let cost = p.matches("zero.").count() + p.matches("tz_").count() + p.matches("method").count();
     if cost > cost_threshold {
@@ -713,6 +770,19 @@ fn analysis_permit_path() -> PathBuf {
         })
 }
 
+fn index_permit_path() -> PathBuf {
+    std::env::var_os("TOKENZERO_CODEMODE_INDEX_PERMIT")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            if cfg!(test) {
+                let pid = std::process::id();
+                std::env::temp_dir().join(format!("zerostack-codemode-index-test-{pid}.permit"))
+            } else {
+                PathBuf::from(DEFAULT_INDEX_PERMIT)
+            }
+        })
+}
+
 fn env_usize(name: &str, default: usize) -> usize {
     std::env::var(name)
         .ok()
@@ -741,6 +811,24 @@ pub(crate) fn default_analysis_concurrency() -> usize {
     let cap = env_usize(
         "TOKENZERO_CODEMODE_ANALYSIS_CONCURRENCY_CAP",
         DEFAULT_ANALYSIS_CONCURRENCY_CAP,
+    )
+    .max(1);
+    budget.min(cap)
+}
+
+/// Machine-wide index slot budget for multi-tenant hosts.
+///
+/// Default: `max(1, cores/8)` soft-capped by
+/// `TOKENZERO_CODEMODE_INDEX_CONCURRENCY_CAP` (default 2). Tighter than
+/// analysis so concurrent rebuild/drain work cannot saturate the host.
+pub(crate) fn default_index_concurrency() -> usize {
+    let cores = std::thread::available_parallelism()
+        .map(std::num::NonZeroUsize::get)
+        .unwrap_or(4);
+    let budget = (cores / 8).max(1);
+    let cap = env_usize(
+        "TOKENZERO_CODEMODE_INDEX_CONCURRENCY_CAP",
+        DEFAULT_INDEX_CONCURRENCY_CAP,
     )
     .max(1);
     budget.min(cap)
@@ -899,6 +987,18 @@ mod tests {
     }
 
     #[test]
+    fn default_index_concurrency_is_core_budgeted() {
+        let cores = std::thread::available_parallelism()
+            .map(std::num::NonZeroUsize::get)
+            .unwrap_or(4);
+        let got = default_index_concurrency();
+        let expect = (cores / 8).max(1).min(DEFAULT_INDEX_CONCURRENCY_CAP);
+        assert_eq!(got, expect);
+        assert!(got >= 1);
+        assert!(got <= DEFAULT_INDEX_CONCURRENCY_CAP);
+    }
+
+    #[test]
     fn multi_slot_analysis_permit_allows_parallel_holders() {
         let base = std::env::temp_dir().join(format!(
             "tokenzero-analysis-slots-{}-{}",
@@ -932,6 +1032,161 @@ mod tests {
         );
         drop(a);
         drop(b);
+    }
+
+    #[test]
+    fn index_permit_is_exclusive_across_threads() {
+        let path = std::env::temp_dir().join(format!(
+            "tokenzero-index-excl-{}-{}",
+            std::process::id(),
+            epoch_millis()
+        ));
+        let _ = fs::remove_dir_all(&path);
+        let barrier = Arc::new(Barrier::new(2));
+        let path_holder = path.clone();
+        let barrier_holder = Arc::clone(&barrier);
+        let holder = thread::spawn(move || {
+            let permit = MachinePermit::acquire(
+                &path_holder,
+                Instant::now() + Duration::from_secs(5),
+                "test-index-holder",
+            )
+            .expect("holder acquires index permit");
+            barrier_holder.wait();
+            thread::sleep(Duration::from_millis(300));
+            drop(permit);
+        });
+
+        barrier.wait();
+        let contested = MachinePermit::acquire(
+            &path,
+            Instant::now() + Duration::from_millis(80),
+            "test-index-contender",
+        );
+        assert!(
+            contested.is_err(),
+            "second acquirer must not stack while holder is live: {contested:?}"
+        );
+        holder.join().unwrap();
+        let after = MachinePermit::acquire(
+            &path,
+            Instant::now() + Duration::from_secs(2),
+            "test-index-after",
+        );
+        assert!(after.is_ok(), "permit must release for the next waiter");
+    }
+
+    #[test]
+    fn multi_slot_index_permit_allows_parallel_holders() {
+        let base = std::env::temp_dir().join(format!(
+            "tokenzero-index-slots-{}-{}",
+            std::process::id(),
+            epoch_millis()
+        ));
+        let _ = fs::remove_dir_all(&base);
+        let a = MachinePermit::acquire_slots(
+            &base,
+            2,
+            Instant::now() + Duration::from_secs(2),
+            "index-slot-a",
+        )
+        .expect("first index slot");
+        let b = MachinePermit::acquire_slots(
+            &base,
+            2,
+            Instant::now() + Duration::from_secs(2),
+            "index-slot-b",
+        )
+        .expect("second index slot");
+        let contested = MachinePermit::acquire_slots(
+            &base,
+            2,
+            Instant::now() + Duration::from_millis(80),
+            "index-slot-c",
+        );
+        assert!(
+            contested.is_err(),
+            "third index holder must wait when only two slots exist"
+        );
+        drop(a);
+        drop(b);
+    }
+
+    #[test]
+    fn index_execute_returns_busy_when_index_permit_held() {
+        let path = index_permit_path();
+        let _ = fs::remove_dir_all(&path);
+        let slots = default_index_concurrency().max(1);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let holders: Vec<_> = (0..slots)
+            .map(|idx| {
+                MachinePermit::acquire_slots(
+                    &path,
+                    slots,
+                    deadline,
+                    &format!("test-index-holder-{idx}"),
+                )
+                .unwrap_or_else(|e| panic!("pre-hold index slot {idx}/{slots}: {e}"))
+            })
+            .collect();
+
+        let opts = CodeModeOptions {
+            hard_max_wall_ms: 120,
+            ..CodeModeOptions::default()
+        };
+        let result = execute(
+            "await zero.token.index({rebuild:true})",
+            &opts,
+            || CodeModeResult::completed(json!({"ok": true}), Vec::new(), 0, 0, 0),
+        );
+        let err = result
+            .error
+            .as_ref()
+            .expect("expected busy error from held index permit");
+        assert!(
+            err.retryable,
+            "index permit contention must be retryable: {err:?}"
+        );
+        assert!(
+            err.kind == "busy" || err.message.contains("machine_permit_busy"),
+            "unexpected error: {err:?}"
+        );
+        drop(holders);
+    }
+
+    #[test]
+    fn classify_routes_index_markers_before_light() {
+        assert_eq!(
+            classify("await zero.fs.index({path:'.'})", 32),
+            ExecutionClass::Index
+        );
+        assert_eq!(
+            classify("await watch.drain()", 32),
+            ExecutionClass::Index
+        );
+        assert_eq!(
+            classify("await rebuild_index()", 32),
+            ExecutionClass::Index
+        );
+        assert_eq!(
+            classify("return {ok:true}", 32),
+            ExecutionClass::Light
+        );
+        assert_eq!(
+            classify("await zero.token.shell('ls')", 32),
+            ExecutionClass::HeavyShell
+        );
+    }
+
+    #[test]
+    fn snapshot_exposes_index_max_active() {
+        let snap = snapshot();
+        assert!(
+            snap.get("index_max_active")
+                .and_then(|v| v.as_u64())
+                .is_some_and(|v| v >= 1),
+            "snapshot must expose index_max_active: {snap}"
+        );
     }
 
     #[test]
