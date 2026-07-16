@@ -420,8 +420,8 @@ impl TokenZeroEngine {
             timed_out: result.timed_out,
             mode,
             max_visible_tokens: self.config.max_visible_tokens,
-            stdout_ref: Some(&stdout_stored.blob_ref),
-            stderr_ref: Some(&stderr_stored.blob_ref),
+            stdout_ref: (!stdout_display.is_empty()).then_some(stdout_stored.blob_ref.as_str()),
+            stderr_ref: (!stderr_display.is_empty()).then_some(stderr_stored.blob_ref.as_str()),
             combined_ref: Some(&combined_stored.blob_ref),
         });
         let effective_cwd = result
@@ -462,12 +462,23 @@ impl TokenZeroEngine {
             "capture",
             ContentType::JsonConfig,
         );
-        let mut refs = vec![
-            shell_ref("stdout", &stdout_stored, stdout_display.len()),
-            shell_ref("stderr", &stderr_stored, stderr_display.len()),
-            shell_ref("combined", &combined_stored, output.len()),
-            shell_ref("capture", &capture_stored, capture_text.len()),
-        ];
+        let mut refs = Vec::new();
+        if !stdout_display.is_empty() {
+            refs.push(shell_ref(
+                "stdout",
+                &stdout_stored,
+                stdout_display.len(),
+            ));
+        }
+        if !stderr_display.is_empty() {
+            refs.push(shell_ref(
+                "stderr",
+                &stderr_stored,
+                stderr_display.len(),
+            ));
+        }
+        refs.push(shell_ref("combined", &combined_stored, output.len()));
+        refs.push(shell_ref("capture", &capture_stored, capture_text.len()));
         let persisted = persist_refs(&mut store, &mut refs);
         if let Some(error) = persisted.error {
             return degraded_shell_response(command, mode, &output, error);
@@ -540,12 +551,17 @@ impl TokenZeroEngine {
                 raw_tokens,
                 visible_tokens,
                 recovery_tokens: store.recovery_tokens,
-                exact_ref_tokens: Some(
-                    count_tokens(&stdout_stored.blob_ref)
-                        + count_tokens(&stderr_stored.blob_ref)
-                        + count_tokens(&combined_stored.blob_ref)
-                        + count_tokens(&capture_stored.blob_ref),
-                ),
+                exact_ref_tokens: Some({
+                    let mut total = count_tokens(&combined_stored.blob_ref)
+                        + count_tokens(&capture_stored.blob_ref);
+                    if !stdout_display.is_empty() {
+                        total += count_tokens(&stdout_stored.blob_ref);
+                    }
+                    if !stderr_display.is_empty() {
+                        total += count_tokens(&stderr_stored.blob_ref);
+                    }
+                    total
+                }),
             },
         );
         response.content_type = Some(ContentType::ShellOutput.to_string());
@@ -556,7 +572,7 @@ impl TokenZeroEngine {
                 repair: Some("rerun with a narrower command or increase TOKENZERO_SHELL_CAPTURE_BYTES".to_string()),
             });
         }
-        response.telemetry = Some(json!({
+        let mut telemetry = json!({
             "command": display_command,
             "argv": capture["argv"],
             "execution_mode": result.execution_mode,
@@ -589,10 +605,16 @@ impl TokenZeroEngine {
             "visible_tokens": visible_tokens,
             "recovery_tokens": store.recovery_tokens,
             "capture_ref": capture_stored.blob_ref,
-            "stdout_ref": stdout_stored.blob_ref,
-            "stderr_ref": stderr_stored.blob_ref,
             "combined_ref": combined_stored.blob_ref,
-            "output_strategy": output_strategy        }));
+            "output_strategy": output_strategy
+        });
+        if !stdout_display.is_empty() {
+            telemetry["stdout_ref"] = json!(stdout_stored.blob_ref);
+        }
+        if !stderr_display.is_empty() {
+            telemetry["stderr_ref"] = json!(stderr_stored.blob_ref);
+        }
+        response.telemetry = Some(telemetry);
         response.safety = Some(json!({
             "schema_version": "tokenzero.shell_safety.v1",
             "secret_masking": render.policy.policy != "exact" && render.policy.policy != "passthrough",

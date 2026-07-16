@@ -866,8 +866,21 @@ fn format_shell_status_header(
     push_shell_kv(&mut vis, "status", &status.status_label);
     vis.push_str(&format!("command_success: {}\n", status.command_success));
     push_shell_status(&mut vis, status, false);
-    push_optional_shell_kv(&mut vis, "stdout_ref", input.stdout_ref);
-    push_optional_shell_kv(&mut vis, "stderr_ref", input.stderr_ref);
+    // Never emit refs to empty payloads (empty-string SHA e3b0c44...).
+    push_optional_shell_kv(
+        &mut vis,
+        "stdout_ref",
+        input
+            .stdout_ref
+            .filter(|_| !input.stdout.is_empty()),
+    );
+    push_optional_shell_kv(
+        &mut vis,
+        "stderr_ref",
+        input
+            .stderr_ref
+            .filter(|_| !input.stderr.is_empty()),
+    );
     push_optional_shell_kv(&mut vis, "combined_ref", input.combined_ref);
     vis + "\n" + body.trim_end()
 }
@@ -1207,11 +1220,11 @@ fn compact_diagnostic_shell_capsule(
     let mut visible = "# shell\n".to_string();
     push_shell_kv(&mut visible, "status", &status.status_label);
     push_shell_status(&mut visible, status, true);
-    if input.stderr.trim().is_empty() {
-        if let Some(stdout_ref) = input.stdout_ref.filter(|_| !input.stdout.trim().is_empty()) {
+    if input.stderr.is_empty() {
+        if let Some(stdout_ref) = input.stdout_ref.filter(|_| !input.stdout.is_empty()) {
             push_shell_kv(&mut visible, "stdout_ref", stdout_ref);
         }
-    } else if let Some(stderr_ref) = input.stderr_ref {
+    } else if let Some(stderr_ref) = input.stderr_ref.filter(|_| !input.stderr.is_empty()) {
         push_shell_kv(&mut visible, "stderr_ref", stderr_ref);
     }
     push_optional_shell_kv(&mut visible, "combined_ref", input.combined_ref);

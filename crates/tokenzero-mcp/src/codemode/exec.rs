@@ -1281,7 +1281,17 @@ fn finalize_codemode_result(
         let root_was_explicit = options.root.is_some();
         let engine = make_engine_for_root_with_options(work_root.clone(), options);
         let journal_health = journal_doctor_json(&engine.config.cache_path);
-        telemetry_insert(&mut result, "plan_journals", journal_health);
+        let journals_have_signal = journal_health
+            .get("unresolved")
+            .and_then(Value::as_array)
+            .is_some_and(|items| !items.is_empty())
+            || journal_health
+                .get("corrupt")
+                .and_then(Value::as_array)
+                .is_some_and(|items| !items.is_empty());
+        if journals_have_signal {
+            telemetry_insert(&mut result, "plan_journals", journal_health);
+        }
         telemetry_insert(
             &mut result,
             "work_root",

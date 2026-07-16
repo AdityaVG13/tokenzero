@@ -245,10 +245,10 @@ fn exec_codemode_tool(
             engine.surface_health().record_substrate_down();
         }
     }
-    if codemode_envelope_version(args, &options) == "v1" {
-        json_tool_response(name, codemode_contract_payload_v1(&result))
-    } else {
-        codemode_v2_tool_response(name, &result)
+    match codemode_envelope_version(args, &options).as_str() {
+        "v1" => json_tool_response(name, codemode_contract_payload_v1(&result)),
+        "v2" => codemode_v2_tool_response(name, &result),
+        _ => codemode_v3_tool_response(name, &result),
     }
 }
 
@@ -297,7 +297,7 @@ fn codemode_envelope_version(args: &Value, options: &crate::CodeModeOptions) -> 
         return value.to_ascii_lowercase();
     }
     std::env::var("ZERO_ENVELOPE")
-        .unwrap_or_else(|_| "v2".to_string())
+        .unwrap_or_else(|_| "v3".to_string())
         .to_ascii_lowercase()
 }
 
@@ -500,18 +500,181 @@ fn codemode_v2_tool_response(
     Ok(response)
 }
 
+fn codemode_v3_ack(result: &crate::CodeModeResult) -> String {
+    let exec = result
+        .execution_id
+        .as_deref()
+        .unwrap_or("cm://exec/unknown");
+    match result.status {
+        crate::CodeModeStatus::Completed => {
+            let ops = result.telemetry.logical_ops;
+            let pct = if result.telemetry.raw_tokens > 0 {
+                format!(
+                    "{:.0}%",
+                    tokenzero_core::savings_ratio(
+                        result.telemetry.raw_tokens,
+                        result.telemetry.envelope_tokens + result.telemetry.payload_tokens,
+                    ) * 100.0
+                )
+            } else {
+                "-".to_string()
+            };
+            format!("ok tz{ops} {pct} {exec}")
+        }
+        crate::CodeModeStatus::Error => {
+            let (kind, retryable, message) =
+                result
+                    .error
+                    .as_ref()
+                    .map_or(("runtime", "final", "unknown error"), |error| {
+                        (
+                            error.kind.as_str(),
+                            if error.retryable {
+                                "retryable"
+                            } else {
+                                "final"
+                            },
+                            error.message.as_str(),
+                        )
+                    });
+            let first = message.chars().take(120).collect::<String>();
+            format!("err {kind} {retryable} {first} {exec}")
+        }
+    }
+}
+
+fn scalar_folded_codemode_v3_ack(ack: &str, value: &Value) -> Option<String> {
+    if !(value.is_string() || value.is_number() || value.is_boolean()) {
+        return None;
+    }
+    let value_text = serde_json::to_string(value).ok()?;
+    if count_tokens(&value_text) > 16 {
+        return None;
+    }
+    Some(format!("{ack} ={value_text}"))
+}
+
+fn codemode_v3_structured(
+    result: &crate::CodeModeResult,
+    ack: &str,
+    envelope_ref: Option<&str>,
+) -> Value {
+    let mut object = serde_json::Map::new();
+    object.insert("ack".to_string(), json!(ack));
+    if matches!(result.status, crate::CodeModeStatus::Completed) {
+        if let Some(value) = &result.value {
+            object.insert("value".to_string(), value.clone());
+        }
+    } else if let Some(error) = &result.error {
+        object.insert(
+            "error".to_string(),
+            json!({
+                "kind": error.kind,
+                "message": error.message,
+                "retryable": error.retryable,
+            }),
+        );
+    }
+    if let Some(execution_id) = result.execution_id.as_deref() {
+        object.insert("execution_id".to_string(), json!(execution_id));
+    }
+    if let Some(envelope_ref) = envelope_ref {
+        object.insert("ref".to_string(), json!(envelope_ref));
+    }
+    let value_refs = refs_referenced_by_value(result.value.as_ref(), &result.refs);
+    if !value_refs.is_empty()
+        && !result
+            .value
+            .as_ref()
+            .is_some_and(value_has_role_labeled_shell_refs)
+    {
+        object.insert("refs".to_string(), json!(value_refs));
+    }
+    Value::Object(object)
+}
+
+fn codemode_v3_tool_response(
+    name: &str,
+    result: &crate::CodeModeResult,
+) -> Result<ToolResponse, JsonRpcErrorData> {
+    let envelope_ref = codemode_envelope_ref(result);
+    let mut ack = codemode_v3_ack(result);
+    let mut structured = codemode_v3_structured(result, &ack, envelope_ref.as_deref());
+    let folded_scalar = matches!(result.status, crate::CodeModeStatus::Completed)
+        && result
+            .value
+            .as_ref()
+            .and_then(|value| scalar_folded_codemode_v3_ack(&ack, value))
+            .map(|folded| {
+                ack = folded;
+                structured = Value::Null;
+            })
+            .is_some();
+    let structured_tokens = if folded_scalar {
+        0
+    } else {
+        count_tokens(&serde_json::to_string(&structured).unwrap_or_default())
+    };
+    let envelope_tokens = count_tokens(&ack) + structured_tokens;
+    let credited_raw = if matches!(result.status, crate::CodeModeStatus::Error) {
+        0
+    } else {
+        result.telemetry.raw_tokens
+    };
+    let mut response = inline_response(name, Mode::Structured, ack, credited_raw);
+    let accounting = response.accounting.as_mut().expect("inline accounting");
+    accounting.visible_tokens = envelope_tokens;
+    accounting.exact_ref_tokens = None;
+    let mut telemetry = json!({
+        "envelope_tokens": envelope_tokens,
+        "payload_tokens": result.telemetry.payload_tokens,
+        "envelope": "v3",
+    });
+    if let Some(execution_id) = &result.execution_id {
+        telemetry["execution_id"] = json!(execution_id);
+    }
+    if let Some(envelope_ref) = &envelope_ref {
+        telemetry["telemetry_ref"] = json!(envelope_ref);
+    }
+    if !folded_scalar {
+        telemetry["structuredContent"] = structured;
+    }
+    response.telemetry = Some(telemetry);
+    if matches!(result.status, crate::CodeModeStatus::Error) {
+        response.status = "error".to_string();
+        response.error = result.error.as_ref().map(|error| tokenzero_core::CliError {
+            code: error.kind.clone(),
+            message: error.message.clone(),
+            repair: None,
+        });
+    }
+    Ok(response)
+}
+
+fn logical_execution_suffix(execution_id: &str, suffix: &str) -> String {
+    let normalized = execution_id
+        .strip_prefix("cm://exec/")
+        .unwrap_or(execution_id);
+    if suffix.is_empty() {
+        format!("tz://codemode/execution/{normalized}")
+    } else {
+        format!("tz://codemode/execution/{normalized}/{suffix}")
+    }
+}
+
 fn codemode_contract_payload_v1(result: &crate::CodeModeResult) -> Value {
     let ack = result.visible_ack.clone();
     let mut refs = serde_json::Map::new();
-    if let Some(execution_refs) = result.execution_refs.as_ref().and_then(Value::as_object) {
+    if let Some(execution_id) = result.execution_id.as_deref() {
         let status_ref = match result.status {
             crate::CodeModeStatus::Completed => "result",
             crate::CodeModeStatus::Error => "error",
         };
         for key in ["code", "steps", "telemetry", status_ref] {
-            if let Some(value) = execution_refs.get(key) {
-                refs.insert(key.to_string(), value.clone());
-            }
+            refs.insert(
+                key.to_string(),
+                json!(logical_execution_suffix(execution_id, key)),
+            );
         }
     }
     let mut payload = json!({
@@ -1214,12 +1377,8 @@ mod permit_busy_envelope_tests {
 
     #[test]
     fn busy_without_envelope_sets_is_error_and_skips_sentinel() {
-        let result = CodeModeResult::error_with_kind(
-            "busy",
-            "machine_permit_busy: held by pid 1",
-            99,
-            true,
-        );
+        let result =
+            CodeModeResult::error_with_kind("busy", "machine_permit_busy: held by pid 1", 99, true);
         let response = codemode_v2_tool_response("tz_execute_code", &result).unwrap();
         assert_eq!(response.status, "error");
         let accounting = response.accounting.as_ref().expect("accounting");

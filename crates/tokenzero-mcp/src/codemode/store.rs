@@ -220,22 +220,10 @@ pub fn finalize_result(
     let telemetry_logical_ref = logical_ref("telemetry");
     let result_logical_ref = logical_ref("result");
     let error_logical_ref = logical_ref("error");
+    let envelope_logical_ref = logical_ref("envelope");
 
-    let mut logical_refs = json!({
-        "execution": execution_logical_ref,
-        "code": code_logical_ref,
-        "steps": steps_logical_ref,
-        "telemetry": telemetry_logical_ref,
-        "result": result_logical_ref,
-        "error": error_logical_ref,
-        "stored": {
-            "code": code_ref,
-            "steps": steps_ref,
-            "telemetry": telemetry_ref,
-            "result": result_ref,
-            "error": error_ref,
-        }
-    });
+    // Persist full record + stream blobs for expand, but do not spell them in
+    // the visible envelope: every suffix is derivable from execution_id.
     let record = ExecutionRecord {
         execution_id: id.clone(),
         kind: kind.to_string(),
@@ -251,31 +239,16 @@ pub fn finalize_result(
     let record_value = serde_json::to_value(&record).unwrap_or(Value::Null);
     let execution_record_ref = stored(store.store_json(&record_value));
 
-    let envelope_logical_ref = logical_ref("envelope");
+    // envelope.v3: one execution_id replaces execution_refs + store blocks.
     let envelope_bundle = json!({
-        "schema": "tokenzero.codemode.envelope.v2",
+        "schema": "tokenzero.codemode.envelope.v3",
         "execution_id": id.clone(),
         "status": status_str,
         "ack": result.visible_ack.clone(),
         "telemetry": result.telemetry.clone(),
         "refs": result.refs.clone(),
-        "execution_refs": logical_refs.clone(),
-        "store": {
-            "code_ref": code_ref.clone(),
-            "steps_ref": steps_ref.clone(),
-            "telemetry_ref": telemetry_ref.clone(),
-            "result_ref": result_ref.clone(),
-            "error_ref": error_ref.clone(),
-            "execution_record_ref": execution_record_ref.clone(),
-        }
     });
     let envelope_ref = stored(store.store_json(&envelope_bundle));
-    if let Some(obj) = logical_refs.as_object_mut() {
-        obj.insert("envelope".to_string(), json!(envelope_logical_ref.clone()));
-        if let Some(stored) = obj.get_mut("stored").and_then(Value::as_object_mut) {
-            stored.insert("envelope".to_string(), json!(envelope_ref.clone()));
-        }
-    }
 
     for (logical, stored) in [
         (&execution_logical_ref, Some(execution_record_ref.as_str())),
@@ -294,7 +267,14 @@ pub fn finalize_result(
     if result.refs.len() < limits.max_refs_emitted {
         result.refs.push(execution_record_ref);
     }
-    result.execution_refs = Some(logical_refs);
+    // Visible execution_refs: execution + envelope only (suffixes are derivable).
+    result.execution_refs = Some(json!({
+        "execution": execution_logical_ref,
+        "envelope": envelope_logical_ref,
+        "stored": {
+            "envelope": envelope_ref,
+        }
+    }));
     guard_visible_output(&mut result, limits);
     result
 }

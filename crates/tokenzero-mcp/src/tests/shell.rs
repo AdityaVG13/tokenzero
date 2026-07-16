@@ -68,6 +68,48 @@ fn full_shell_text_render_does_not_duplicate_header_refs() {
 }
 
 #[test]
+fn clean_shell_omits_empty_stderr_ref() {
+    let dir = tempdir().unwrap();
+    let engine = TokenZeroEngine::new(EngineConfig::for_root(dir.path()));
+    let command = if cfg!(windows) {
+        "powershell -NoProfile -Command Write-Output clean-empty-stderr"
+    } else {
+        "printf 'clean-empty-stderr\\n'"
+    };
+    let response = engine.shell(
+        command,
+        None,
+        Some(dir.path()),
+        Mode::Auto,
+        None,
+        false,
+        None,
+        None,
+        None,
+    );
+    assert_eq!(response.status, "ok");
+    let visible = response
+        .visible
+        .as_ref()
+        .map(|v| v.text.as_str())
+        .unwrap_or("");
+    assert!(
+        !visible.contains("stderr_ref:"),
+        "empty stderr must not be referenced: {visible}"
+    );
+    assert!(
+        response.refs.iter().all(|row| row.kind != "stderr"),
+        "refs must omit empty stderr: {:?}",
+        response.refs
+    );
+    let telemetry = response.telemetry.as_ref().unwrap();
+    assert!(
+        telemetry.get("stderr_ref").is_none(),
+        "telemetry must omit empty stderr_ref: {telemetry}"
+    );
+}
+
+#[test]
 fn shell_exact_first_stores_stream_refs_and_status_truth() {
     let dir = tempdir().unwrap();
     let engine = TokenZeroEngine::new(EngineConfig::for_root(dir.path()));

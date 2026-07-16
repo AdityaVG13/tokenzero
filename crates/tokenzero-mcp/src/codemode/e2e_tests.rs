@@ -100,3 +100,90 @@ fn output_guard_keeps_large_result_behind_refs() {
     );
     assert!(result.execution_refs.is_some());
 }
+
+#[test]
+fn envelope_v3_collapses_execution_refs_and_hides_store_block() {
+    let work = tempfile::tempdir().unwrap();
+    let result = execute_codemode_with_options(
+        "return { answer: 42 }",
+        CodeModeOptions {
+            root: Some(work.path().to_path_buf()),
+            ..Default::default()
+        },
+    );
+    assert_eq!(
+        result.status,
+        CodeModeStatus::Completed,
+        "{:?}",
+        result.error
+    );
+    let refs = result.execution_refs.as_ref().unwrap();
+    assert!(refs.get("execution").and_then(|v| v.as_str()).is_some());
+    assert!(refs.get("envelope").and_then(|v| v.as_str()).is_some());
+    assert!(
+        refs.get("code").is_none(),
+        "code must be derivable, not spelled: {refs}"
+    );
+    assert!(refs.get("steps").is_none(), "{refs}");
+    assert!(refs.get("telemetry").is_none(), "{refs}");
+    assert!(refs.get("result").is_none(), "{refs}");
+    assert!(refs.get("error").is_none(), "{refs}");
+    assert!(
+        refs.pointer("/stored/code").is_none(),
+        "store block must stay hidden: {refs}"
+    );
+    assert!(
+        refs.pointer("/stored/envelope")
+            .and_then(|v| v.as_str())
+            .is_some_and(|r| r.starts_with("tz://")),
+        "{refs}"
+    );
+    assert!(
+        result
+            .telemetry
+            .extra
+            .as_ref()
+            .and_then(|extra| extra.get("plan_journals"))
+            .is_none(),
+        "empty plan_journals must not leak into telemetry"
+    );
+    assert!(
+        result
+            .execution_id
+            .as_deref()
+            .is_some_and(|id| id.starts_with("cm://exec/")),
+        "{:?}",
+        result.execution_id
+    );
+}
+
+#[test]
+fn envelope_v3_ack_uses_execution_id() {
+    use crate::tools;
+    use serde_json::json;
+
+    let work = tempfile::tempdir().unwrap();
+    let engine = crate::TokenZeroEngine::new(crate::EngineConfig::for_root(work.path()));
+    let response = tools::dispatch_tool(
+        &engine,
+        "execute_code",
+        "tz_execute_code",
+        &json!({
+            "plan": "return 7",
+            "envelope": "v3",
+            "root": work.path().to_string_lossy(),
+        }),
+    )
+    .expect("dispatch");
+    assert_eq!(response.status, "ok");
+    let text = response
+        .visible
+        .as_ref()
+        .map(|visible| visible.text.as_str())
+        .unwrap_or("");
+    assert!(
+        text.contains("cm://exec/"),
+        "v3 ack must include execution id: {text}"
+    );
+    assert!(!text.contains("execution_refs"), "{text}");
+}
