@@ -127,8 +127,11 @@ fn dot_zerostack_detected_and_used() {
     );
 
     let cache = sr["effective_cache_path"].as_str().unwrap();
+    let expected_suffix = Path::new(".zerostack")
+        .join("tokenzero")
+        .join("recovery-cache.json");
     assert!(
-        cache.ends_with(".zerostack/tokenzero/recovery-cache.json"),
+        Path::new(cache).ends_with(&expected_suffix),
         "effective_cache_path should be under .zerostack, got {cache}"
     );
 }
