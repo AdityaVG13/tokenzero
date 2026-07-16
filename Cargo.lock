@@ -2875,6 +2875,7 @@ dependencies = [
  "tokenzero-pulse",
  "tokenzero-recovery",
  "tokenzero-runtime",
+ "zerostack-machine-permit",
 ]
 
 [[package]]
@@ -3574,6 +3575,10 @@ dependencies = [
  "quote",
  "syn",
 ]
+
+[[package]]
+name = "zerostack-machine-permit"
+version = "1.4.0"
 
 [[package]]
 name = "zmij"

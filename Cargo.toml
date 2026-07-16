@@ -1,6 +1,7 @@
 [workspace]
 resolver = "3"
 members = [
+    "crates/zerostack-machine-permit",
     "crates/tokenzero-core",
     "crates/tokenzero-recovery",
     "crates/tokenzero-runtime",

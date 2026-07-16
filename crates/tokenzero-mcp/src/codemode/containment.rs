@@ -45,9 +45,7 @@ use std::time::{Duration, Instant};
 
 use super::{CodeModeOptions, CodeModeResult};
 
-#[path = "machine_permit.rs"]
-mod machine_permit;
-use machine_permit::{AcquireError, MachinePermit};
+use zerostack_machine_permit::{AcquireError, MachinePermit};
 
 const DEFAULT_MAX_ACTIVE: usize = 1;
 const DEFAULT_MAX_QUEUE_DEPTH: usize = 8;

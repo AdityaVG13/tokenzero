@@ -4,20 +4,28 @@
 //! under `/tmp/zerostack-codemode-*.permit` with `slot-N` children. Live holders
 //! block peers until wall deadline (retryable busy); dead / incomplete dirs are
 //! reclaimed. Fatal I/O (EACCES, etc.) stays non-retryable.
+//!
+//! Canonical policy: `tokenzero-mcp/CODEMODE_MACHINE_PERMITS.md`.
 
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-pub(crate) const PERMIT_POLL: Duration = Duration::from_millis(20);
-pub(crate) const PERMIT_POLL_MAX: Duration = Duration::from_millis(200);
+pub const PERMIT_POLL: Duration = Duration::from_millis(20);
+pub const PERMIT_POLL_MAX: Duration = Duration::from_millis(200);
 const INCOMPLETE_PERMIT_GRACE: Duration = Duration::from_millis(250);
 
+/// RAII machine permit for one slot (or legacy exclusive) directory.
 #[derive(Debug)]
-pub(crate) struct MachinePermit(pub(crate) PathBuf, String);
+pub struct MachinePermit(PathBuf, String);
 
 impl MachinePermit {
-    pub(crate) fn acquire_slots(
+    /// Path of the held permit directory (`base/slot-N` or legacy exclusive).
+    pub fn path(&self) -> &Path {
+        &self.0
+    }
+
+    pub fn acquire_slots(
         base: &Path,
         slots: usize,
         deadline: Instant,
@@ -59,8 +67,7 @@ impl MachinePermit {
 
     /// Legacy exclusive single-dir permit (pre-slot layout). Production paths
     /// use `acquire_slots`; this remains for reclaim interop tests.
-    #[cfg_attr(not(test), allow(dead_code))]
-    pub(crate) fn acquire(
+    pub fn acquire(
         path: &Path,
         deadline: Instant,
         command: &str,
@@ -123,7 +130,7 @@ enum TryPermit {
 }
 
 #[derive(Debug)]
-pub(crate) enum AcquireError {
+pub enum AcquireError {
     /// Live holder(s) still hold the permit after the wall deadline.
     Busy(String),
     /// Non-retryable I/O / policy failure creating the permit (EACCES, etc.).
@@ -137,6 +144,8 @@ impl std::fmt::Display for AcquireError {
         }
     }
 }
+
+impl std::error::Error for AcquireError {}
 
 impl Drop for MachinePermit {
     fn drop(&mut self) {
@@ -231,7 +240,7 @@ fn epoch_millis() -> u128 {
         .map_or(0, |v| v.as_millis())
 }
 
-pub(crate) fn permit_backoff(attempt: u32) -> Duration {
+pub fn permit_backoff(attempt: u32) -> Duration {
     // 20, 40, 80, 160, 200, 200, ...
     let shift = attempt.min(4);
     let millis = (PERMIT_POLL.as_millis() as u64)
@@ -250,7 +259,7 @@ mod tests {
     #[test]
     fn reclaims_incomplete_machine_permit_after_grace() {
         let path = std::env::temp_dir().join(format!(
-            "tokenzero-incomplete-permit-{}-{}",
+            "zerostack-incomplete-permit-{}-{}",
             std::process::id(),
             epoch_millis()
         ));
@@ -265,7 +274,7 @@ mod tests {
     #[test]
     fn analysis_permit_is_exclusive_across_threads() {
         let path = std::env::temp_dir().join(format!(
-            "tokenzero-analysis-excl-{}-{}",
+            "zerostack-analysis-excl-{}-{}",
             std::process::id(),
             epoch_millis()
         ));
@@ -307,7 +316,7 @@ mod tests {
     #[test]
     fn multi_slot_analysis_permit_allows_parallel_holders() {
         let base = std::env::temp_dir().join(format!(
-            "tokenzero-analysis-slots-{}-{}",
+            "zerostack-analysis-slots-{}-{}",
             std::process::id(),
             epoch_millis()
         ));
@@ -343,7 +352,7 @@ mod tests {
     #[test]
     fn index_permit_is_exclusive_across_threads() {
         let path = std::env::temp_dir().join(format!(
-            "tokenzero-index-excl-{}-{}",
+            "zerostack-index-excl-{}-{}",
             std::process::id(),
             epoch_millis()
         ));
@@ -385,7 +394,7 @@ mod tests {
     #[test]
     fn multi_slot_index_permit_allows_parallel_holders() {
         let base = std::env::temp_dir().join(format!(
-            "tokenzero-index-slots-{}-{}",
+            "zerostack-index-slots-{}-{}",
             std::process::id(),
             epoch_millis()
         ));
@@ -428,7 +437,7 @@ mod tests {
     #[test]
     fn slots_one_uses_slot_zero_not_base() {
         let base = std::env::temp_dir().join(format!(
-            "tokenzero-slot0-layout-{}-{}",
+            "zerostack-slot0-layout-{}-{}",
             std::process::id(),
             epoch_millis()
         ));
@@ -455,7 +464,7 @@ mod tests {
     #[test]
     fn mixed_concurrency_layouts_share_slot_namespace() {
         let base = std::env::temp_dir().join(format!(
-            "tokenzero-mixed-slots-{}-{}",
+            "zerostack-mixed-slots-{}-{}",
             std::process::id(),
             epoch_millis()
         ));
@@ -477,12 +486,16 @@ mod tests {
             "peer-slots-3",
         )
         .expect("slots>1 peer must share slot namespace with slots=1 holder");
-        assert_eq!(peer.0.parent(), Some(base.as_path()));
-        let peer_name = peer.0.file_name().and_then(|n| n.to_str()).unwrap_or("");
+        assert_eq!(peer.path().parent(), Some(base.as_path()));
+        let peer_name = peer
+            .path()
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("");
         assert!(
             peer_name.starts_with("slot-") && peer_name != "slot-0",
             "peer must occupy a free slot child, got {}",
-            peer.0.display()
+            peer.path().display()
         );
         drop(peer);
         drop(holder);
@@ -520,7 +533,7 @@ mod tests {
     #[test]
     fn live_legacy_exclusive_base_blocks_all_slots() {
         let base = std::env::temp_dir().join(format!(
-            "tokenzero-legacy-excl-{}-{}",
+            "zerostack-legacy-excl-{}-{}",
             std::process::id(),
             epoch_millis()
         ));
@@ -557,7 +570,7 @@ mod tests {
     fn acquire_slots_returns_fatal_when_parent_is_not_a_directory() {
         // Parent path is a file → create_dir for slot children fails as Fatal (not Busy).
         let blocker = std::env::temp_dir().join(format!(
-            "tokenzero-permit-fatal-blocker-{}-{}",
+            "zerostack-permit-fatal-blocker-{}-{}",
             std::process::id(),
             epoch_millis()
         ));

@@ -2,6 +2,8 @@
 
 Canonical family-wide ambient CPU budget contract for TokenZero, FSZero, GraphZero, and the ZeroStack hub.
 
+**Shared implementation:** `crates/zerostack-machine-permit` (`MachinePermit::acquire_slots`). FSZero/GraphZero should path-dep this crate instead of forking `host_permit` slot/reclaim/backoff logic.
+
 **Beads:** `tokenzero-npia` (epic), `tokenzero-qisj` (freeze), `fszero-gzw`, `graphzero-01vw`.
 
 | Class | Default path | Default concurrency | Env (TokenZero) |
