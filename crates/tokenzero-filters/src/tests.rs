@@ -40,10 +40,17 @@ fn discovers_launch_critical_families() {
     assert!(report.install_ready, "install_ready must be true");
     assert!(report.mcp_ready, "mcp_ready must be true");
     assert!(report.shell_ready, "shell_ready must be true");
-    assert!(
-        report.os_warnings.is_empty(),
-        "no OS warnings on this platform"
-    );
+    if cfg!(windows) {
+        assert_eq!(
+            report.os_warnings,
+            vec!["verify PowerShell and cmd quoting with the OS matrix before launch"]
+        );
+    } else {
+        assert!(
+            report.os_warnings.is_empty(),
+            "no OS warnings expected on this platform"
+        );
+    }
 
     // Every discovered filter must be structurally valid.
     assert_eq!(

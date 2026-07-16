@@ -5,23 +5,6 @@ All notable changes to TokenZero will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [1.4.3] -- 2026-07-15
-
-### Fixed
-- Workspace packaging declares the crates.io version for the pinned `fastmcp-rust` dependency, allowing `cargo package --workspace --locked` to verify published manifests.
-- Store-root precedence tests compare path components instead of Unix separators, preserving the same contract on Windows.
-
-## [1.4.2] -- 2026-07-15
-
-### Fixed
-- Ref-index test overrides are thread-local and scope-guarded, preventing parallel MCP tests from redirecting one another into deleted recovery stores.
-- Passthrough conformance uses one explicit recovery cache for shell capture and expansion, making ref recovery deterministic on Windows.
-
-## [1.4.1] -- 2026-07-15
-
-### Fixed
-- Windows release verification now streams its large decode-failure fixture from a temporary file, avoiding the Windows process argument-length limit while preserving the corruption taxonomy regression.
-
 ## [1.4.0] -- 2026-07-15
 
 ### Added
@@ -39,6 +22,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Recovery publication, garbage collection, concurrent writer synchronization, stale portable-reference hashes, malformed repeated fragments, and orphan segment cleanup now fail safely without exposing corrupted bytes or deleting live data.
 - Windows CodeMode journal persistence preserves I/O errors and durable replacement semantics.
 - MCP working-set admission, capability descriptor revisioning, async plan parsing, release telemetry audits, package-audit fixtures, and deleted regression coverage were restored and hardened.
+- Release verification is portable across Windows command-length limits, path separators, platform-specific warnings, and recovery-cache resolution.
+- Parallel MCP tests isolate ref-index overrides and content fixtures so short-lived test stores cannot interfere with one another.
+- Workspace package manifests declare the crates.io version for the pinned `fastmcp-rust` dependency.
 
 ## [1.3.0] -- 2026-07-12
 

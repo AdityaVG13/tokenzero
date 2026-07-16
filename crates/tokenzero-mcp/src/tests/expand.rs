@@ -131,7 +131,9 @@ fn expand_since_unchanged_and_diff() {
     use tokenzero_core::ContentType;
     let dir = tempdir().unwrap();
     let engine = TokenZeroEngine::new(EngineConfig::for_root(dir.path()));
-    let base = "alpha\nbeta\n";
+    // Keep this payload distinct from adjacent parallel expand tests. Shared
+    // ref-index entries must not point at another test's short-lived store.
+    let base = "since-diff-alpha\nbeta\n";
     let since_ref = engine
         .ingest(base, ContentType::Unknown, Mode::Exact, "test-since")
         .refs
@@ -140,7 +142,7 @@ fn expand_since_unchanged_and_diff() {
         .unwrap()
         .ref_id
         .clone();
-    let changed = "alpha\nBETA\n";
+    let changed = "since-diff-alpha\nBETA\n";
     let target_ref = engine
         .ingest(changed, ContentType::Unknown, Mode::Exact, "test-target")
         .refs
