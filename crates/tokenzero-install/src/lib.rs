@@ -37,7 +37,18 @@ install_records! {
     pub struct AppliedInstall { pub schema_version: String, pub status: String, pub dry_run: bool, pub written: Vec<String>, pub rollback: RollbackInfo, pub verification: Vec<VerificationRow> }
     pub struct VerificationRow { pub path: String, pub observed_sha256: String, pub byte_count: usize, pub verified: bool }
     struct RollbackManifest { schema_version: String, id: String, created_unix: u64, entries: Vec<RollbackEntry> }
-    struct RollbackEntry { path: String, existed: bool, previous_content: Option<String>, #[serde(default)] previous_bytes: Option<Vec<u8>>, previous_sha256: Option<String> }
+    struct RollbackEntry {
+        path: String,
+        existed: bool,
+        previous_content: Option<String>,
+        #[serde(default)]
+        previous_bytes: Option<Vec<u8>>,
+        previous_sha256: Option<String>,
+        /// SHA-256 of the bytes written by this install. Rollback refuses when the
+        /// live path no longer matches, so post-install user edits are not wiped.
+        #[serde(default)]
+        installed_sha256: Option<String>,
+    }
 }
 
 type PendingContent = Vec<u8>;
@@ -386,6 +397,7 @@ fn prepare_write(
         .map(sha256_bytes)
         .or_else(|| existing_bytes.as_deref().map(sha256_bytes))
         .or_else(|| previous.as_deref().map(sha256));
+    let installed_sha256 = Some(sha256_bytes(&content));
     Ok((
         content,
         RollbackEntry {
@@ -398,6 +410,7 @@ fn prepare_write(
             previous_sha256,
             previous_content: previous,
             previous_bytes,
+            installed_sha256,
         },
     ))
 }
@@ -495,6 +508,12 @@ pub fn rollback(root: &Path, rollback_id: &str) -> std::io::Result<serde_json::V
             .join(format!("{rollback_id}.json"))
     };
     let manifest: RollbackManifest = serde_json::from_str(&fs::read_to_string(&manifest_path)?)?;
+    // Optimistic-concurrency precondition: refuse before any mutation when a
+    // path drifted after install. Otherwise restoring the pre-install snapshot
+    // silently erases later user configuration.
+    for entry in &manifest.entries {
+        refuse_rollback_on_post_install_drift(entry)?;
+    }
     let mut restored = Vec::new();
     let mut removed = Vec::new();
     for entry in manifest.entries {
@@ -531,6 +550,34 @@ pub fn rollback(root: &Path, rollback_id: &str) -> std::io::Result<serde_json::V
         "removed": removed,
         "manifest_path": manifest_path.display().to_string(),
     }))
+}
+
+fn refuse_rollback_on_post_install_drift(entry: &RollbackEntry) -> std::io::Result<()> {
+    let Some(expected) = entry.installed_sha256.as_deref() else {
+        return Ok(());
+    };
+    let current = current_rollback_target_sha256(entry)?;
+    if current.as_deref() == Some(expected) {
+        return Ok(());
+    }
+    Err(Error::new(
+        ErrorKind::InvalidData,
+        format!(
+            "rollback conflict: {} changed after install; refusing to overwrite later edits",
+            entry.path
+        ),
+    ))
+}
+
+fn current_rollback_target_sha256(entry: &RollbackEntry) -> std::io::Result<Option<String>> {
+    if is_windows_user_path_entry(&entry.path) {
+        return Ok(windows_user_path()?.map(|text| sha256(&text)));
+    }
+    let path = PathBuf::from(&entry.path);
+    if !path.exists() {
+        return Ok(None);
+    }
+    Ok(Some(sha256_bytes(&fs::read(&path)?)))
 }
 
 macro_rules! install_helpers {
@@ -749,3 +796,55 @@ pub use doctor::{
     doctor_robot_docs, doctor_robot_triage, doctor_undo,
 };
 pub use inspect::inspect_client_surface;
+
+#[cfg(test)]
+mod rollback_drift_tests {
+    use super::*;
+    use serde_json::{Value, json};
+
+    #[test]
+    fn rollback_refuses_when_post_install_edit_drifts() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let config = root.path().join(".tokenzero/mcp-server.json");
+        fs::create_dir_all(config.parent().unwrap()).expect("mkdir");
+        fs::write(
+            &config,
+            serde_json::to_vec(&json!({"user_before": true})).expect("seed"),
+        )
+        .expect("write seed");
+        let applied = apply(root.path(), false, &["mcp".to_string()]).expect("apply");
+        let mut value: Value = serde_json::from_slice(&fs::read(&config).expect("read")).expect("json");
+        value["user_after"] = json!({"must_survive_rollback": true});
+        fs::write(&config, serde_json::to_vec_pretty(&value).expect("encode")).expect("edit");
+        let err = rollback(root.path(), &applied.rollback.id).expect_err("must conflict");
+        assert!(
+            err.to_string().contains("rollback conflict"),
+            "unexpected error: {err}"
+        );
+        let final_value: Value =
+            serde_json::from_slice(&fs::read(&config).expect("reread")).expect("final json");
+        assert!(
+            final_value.get("user_after").is_some(),
+            "post-install edit must remain untouched: {final_value}"
+        );
+    }
+
+    #[test]
+    fn rollback_restores_when_installed_bytes_unchanged() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let config = root.path().join(".tokenzero/mcp-server.json");
+        fs::create_dir_all(config.parent().unwrap()).expect("mkdir");
+        fs::write(
+            &config,
+            serde_json::to_vec(&json!({"user_before": true})).expect("seed"),
+        )
+        .expect("write seed");
+        let applied = apply(root.path(), false, &["mcp".to_string()]).expect("apply");
+        let result = rollback(root.path(), &applied.rollback.id).expect("rollback");
+        assert_eq!(result["status"], "ok");
+        let final_value: Value =
+            serde_json::from_slice(&fs::read(&config).expect("reread")).expect("final json");
+        assert_eq!(final_value, json!({"user_before": true}));
+        assert!(final_value.get("mcpServers").is_none());
+    }
+}
