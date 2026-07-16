@@ -15,9 +15,19 @@ def fail(message: str) -> None:
     raise AssertionError(message)
 
 
+def reject_duplicate_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    """Parse object pairs; raise JSONDecodeError on duplicate keys (SPEC §2)."""
+    out: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in out:
+            raise json.JSONDecodeError(f"duplicate object key: {key!r}", key, 0)
+        out[key] = value
+    return out
+
+
 def load_json(path: Path) -> Any:
     with path.open("r", encoding="utf-8") as stream:
-        return json.load(stream)
+        return json.load(stream, object_pairs_hook=reject_duplicate_keys)
 
 
 def type_matches(value: Any, expected: str) -> bool:
@@ -117,7 +127,9 @@ def main() -> int:
         if not schema.get("$id"):
             fail(f"{name}: missing $id")
 
-    contract_dirs = sorted(path for path in HERE.iterdir() if path.is_dir())
+    contract_dirs = sorted(
+        path for path in HERE.iterdir() if path.is_dir() and not path.name.startswith("_")
+    )
     if len(contract_dirs) != 8:
         fail(f"expected 8 contract directories, found {len(contract_dirs)}")
 
