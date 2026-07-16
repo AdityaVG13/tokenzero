@@ -82,6 +82,12 @@ binary SHA-256, methodology, and history live under `benchmarks/northstar/`:
 | Re-find stored content (`recall` vs re-running grep) | 85,453 | 46 | **99.0%** |
 | **Total** | **207,092** | **941** | **99.0%** |
 
+Treat the **99.0%** total as a fixed-suite point estimate for these six
+workloads only — not a workload-population or release claim. One checked-in
+snapshot gives no population confidence interval. Public/release-facing
+publication of this headline remains gated by `tokenzero claim-audit`
+(`public_claims_approved` / `release_publication_allowed`).
+
 Path-only outputs like `glob` pass through nearly unchanged: there is nothing
 to hide, and a capsule never costs more than raw.
 
