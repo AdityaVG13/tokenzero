@@ -313,7 +313,7 @@ fn codemode_envelope_ref(result: &crate::CodeModeResult) -> Option<String> {
         .map(str::to_string)
 }
 
-fn codemode_v2_ack(result: &crate::CodeModeResult, telemetry_ref: &str) -> String {
+fn codemode_v2_ack(result: &crate::CodeModeResult, telemetry_ref: Option<&str>) -> String {
     match result.status {
         crate::CodeModeStatus::Completed => {
             let ops = result.telemetry.logical_ops;
@@ -328,7 +328,10 @@ fn codemode_v2_ack(result: &crate::CodeModeResult, telemetry_ref: &str) -> Strin
             } else {
                 "-".to_string()
             };
-            format!("ok tz{ops} {pct} t:{telemetry_ref}")
+            match telemetry_ref {
+                Some(telemetry_ref) => format!("ok tz{ops} {pct} t:{telemetry_ref}"),
+                None => format!("ok tz{ops} {pct}"),
+            }
         }
         crate::CodeModeStatus::Error => {
             let (kind, retryable, message) =
@@ -347,7 +350,10 @@ fn codemode_v2_ack(result: &crate::CodeModeResult, telemetry_ref: &str) -> Strin
                         )
                     });
             let first = message.chars().take(120).collect::<String>();
-            format!("err {kind} {retryable} {first} t:{telemetry_ref}")
+            match telemetry_ref {
+                Some(telemetry_ref) => format!("err {kind} {retryable} {first} t:{telemetry_ref}"),
+                None => format!("err {kind} {retryable} {first}"),
+            }
         }
     }
 }
@@ -401,15 +407,30 @@ fn value_has_role_labeled_shell_refs(value: &Value) -> bool {
     })
 }
 
-fn codemode_v2_structured(result: &crate::CodeModeResult, ack: &str, telemetry_ref: &str) -> Value {
+fn codemode_v2_structured(
+    result: &crate::CodeModeResult,
+    ack: &str,
+    telemetry_ref: Option<&str>,
+) -> Value {
     let mut object = serde_json::Map::new();
     object.insert("ack".to_string(), json!(ack));
     if matches!(result.status, crate::CodeModeStatus::Completed) {
         if let Some(value) = &result.value {
             object.insert("value".to_string(), value.clone());
         }
+    } else if let Some(error) = &result.error {
+        object.insert(
+            "error".to_string(),
+            json!({
+                "kind": error.kind,
+                "message": error.message,
+                "retryable": error.retryable,
+            }),
+        );
     }
-    object.insert("ref".to_string(), json!(telemetry_ref));
+    if let Some(telemetry_ref) = telemetry_ref {
+        object.insert("ref".to_string(), json!(telemetry_ref));
+    }
     let value_refs = refs_referenced_by_value(result.value.as_ref(), &result.refs);
     if !value_refs.is_empty()
         && !result
@@ -426,10 +447,11 @@ fn codemode_v2_tool_response(
     name: &str,
     result: &crate::CodeModeResult,
 ) -> Result<ToolResponse, JsonRpcErrorData> {
-    let telemetry_ref =
-        codemode_envelope_ref(result).unwrap_or_else(|| "tz://missing-envelope".to_string());
-    let mut ack = codemode_v2_ack(result, &telemetry_ref);
-    let mut structured = codemode_v2_structured(result, &ack, &telemetry_ref);
+    // Never invent tz://missing-envelope — that sentinel was treated as a live
+    // success ref by hubs and savings ledgers when busy aborted before store.
+    let telemetry_ref = codemode_envelope_ref(result);
+    let mut ack = codemode_v2_ack(result, telemetry_ref.as_deref());
+    let mut structured = codemode_v2_structured(result, &ack, telemetry_ref.as_deref());
     let folded_scalar = matches!(result.status, crate::CodeModeStatus::Completed)
         && result
             .value
@@ -446,15 +468,23 @@ fn codemode_v2_tool_response(
         count_tokens(&serde_json::to_string(&structured).unwrap_or_default())
     };
     let envelope_tokens = count_tokens(&ack) + structured_tokens;
-    let mut response = inline_response(name, Mode::Structured, ack, result.telemetry.raw_tokens);
+    // Unexecuted / errored plans must not credit raw_tokens savings.
+    let credited_raw = if matches!(result.status, crate::CodeModeStatus::Error) {
+        0
+    } else {
+        result.telemetry.raw_tokens
+    };
+    let mut response = inline_response(name, Mode::Structured, ack, credited_raw);
     let accounting = response.accounting.as_mut().expect("inline accounting");
     accounting.visible_tokens = envelope_tokens;
     accounting.exact_ref_tokens = None;
     let mut telemetry = json!({
         "envelope_tokens": envelope_tokens,
         "payload_tokens": result.telemetry.payload_tokens,
-        "telemetry_ref": telemetry_ref,
     });
+    if let Some(telemetry_ref) = &telemetry_ref {
+        telemetry["telemetry_ref"] = json!(telemetry_ref);
+    }
     if !folded_scalar {
         telemetry["structuredContent"] = structured;
     }
@@ -856,29 +886,32 @@ pub(crate) fn mcp_tool_response(response: ToolResponse) -> Value {
         .cloned()
     {
         result["structuredContent"] = structured;
-        return result;
-    }
-    // structuredContent diverging from the text block makes several MCP
-    // clients render the JSON envelope instead of the tool text, and it
-    // roughly doubles the per-call context cost. Default is text-only; the
-    // envelope stays available for machine consumers via
-    // TOKENZERO_MCP_ENVELOPE=compact|full.
-    match envelope_mode() {
-        EnvelopeMode::None => {}
-        EnvelopeMode::Compact | EnvelopeMode::Full => {
-            let cli = if matches!(envelope_mode(), EnvelopeMode::Full) {
-                serde_json::to_value(&response).unwrap_or(Value::Null)
-            } else {
-                compact_cli_envelope(&response)
-            };
-            result["structuredContent"] = json!({
-                "schema_version": MCP_SCHEMA_VERSION,
-                "status": response.status,
-                "tool": response.tool,
-                "cli": cli
-            });
+    } else {
+        // structuredContent diverging from the text block makes several MCP
+        // clients render the JSON envelope instead of the tool text, and it
+        // roughly doubles the per-call context cost. Default is text-only; the
+        // envelope stays available for machine consumers via
+        // TOKENZERO_MCP_ENVELOPE=compact|full.
+        match envelope_mode() {
+            EnvelopeMode::None => {}
+            EnvelopeMode::Compact | EnvelopeMode::Full => {
+                let cli = if matches!(envelope_mode(), EnvelopeMode::Full) {
+                    serde_json::to_value(&response).unwrap_or(Value::Null)
+                } else {
+                    compact_cli_envelope(&response)
+                };
+                result["structuredContent"] = json!({
+                    "schema_version": MCP_SCHEMA_VERSION,
+                    "status": response.status,
+                    "tool": response.tool,
+                    "cli": cli
+                });
+            }
         }
     }
+    // Always stamp isError after structuredContent attachment. An early return
+    // previously dropped isError for CodeMode v2, so FastMCP treated retryable
+    // busy (machine_permit_busy) as a successful tool result.
     if is_error {
         result["isError"] = Value::Bool(true);
     }
@@ -1171,4 +1204,53 @@ fn string_array_arg(items: &[Value], label: &str) -> Result<Vec<String>, String>
                 .ok_or_else(|| format!("invalid {label}[{index}]; expected array of strings"))
         })
         .collect()
+}
+
+#[cfg(test)]
+mod permit_busy_envelope_tests {
+    use super::*;
+    use crate::CodeModeResult;
+    use crate::fastmcp_mode::fastmcp_content_texts_from_tool_result;
+
+    #[test]
+    fn busy_without_envelope_sets_is_error_and_skips_sentinel() {
+        let result = CodeModeResult::error_with_kind(
+            "busy",
+            "machine_permit_busy: held by pid 1",
+            99,
+            true,
+        );
+        let response = codemode_v2_tool_response("tz_execute_code", &result).unwrap();
+        assert_eq!(response.status, "error");
+        let accounting = response.accounting.as_ref().expect("accounting");
+        assert_eq!(
+            accounting.raw_tokens, 0,
+            "unexecuted busy must not credit raw_tokens for savings"
+        );
+
+        let mcp = mcp_tool_response(response);
+        assert_eq!(mcp.get("isError"), Some(&Value::Bool(true)));
+        let text = mcp["content"][0]["text"].as_str().unwrap_or("");
+        assert!(
+            text.starts_with("err busy retryable"),
+            "expected typed busy ack, got {text:?}"
+        );
+        assert!(
+            !text.contains("tz://missing-envelope"),
+            "sentinel must not appear as success ref: {text}"
+        );
+        let structured = mcp
+            .get("structuredContent")
+            .expect("structuredContent for v2 errors");
+        assert_eq!(structured["error"]["kind"], "busy");
+        assert_eq!(structured["error"]["retryable"], true);
+        assert!(
+            structured.get("ref").is_none(),
+            "no invented envelope ref: {structured}"
+        );
+        assert!(
+            fastmcp_content_texts_from_tool_result(&mcp).is_err(),
+            "FastMCP must treat busy as tool error, not dual-content success"
+        );
+    }
 }
