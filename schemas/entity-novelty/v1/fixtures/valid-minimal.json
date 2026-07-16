@@ -1,0 +1,11 @@
+{
+  "schema_version": "zerostack.entity-novelty.v1",
+  "record_type": "entity-novelty",
+  "scope_key": "session:fusion-demo",
+  "entity_ids": [
+    "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+  ],
+  "producing_engine": "graphzero",
+  "updated_at": "2026-07-16T22:00:00Z",
+  "cas_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+}

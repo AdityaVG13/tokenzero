@@ -29,6 +29,13 @@ pub mod segment_store;
 mod segment_store_tests;
 pub mod session_aliases;
 pub mod shared_cas;
+pub mod entity_novelty;
+pub use entity_novelty::{
+    ENTITY_NOVELTY_RECORD_TYPE, ENTITY_NOVELTY_REL_DIR, ENTITY_NOVELTY_SCHEMA_VERSION,
+    EntityNoveltyRecord, NoveltyError, entity_novelty_path, merge_entity_novelty,
+    parse_entity_ref, read_entity_novelty, scope_digest, write_entity_novelty,
+};
+
 pub mod working_set;
 
 pub use session_aliases::{
