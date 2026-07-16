@@ -200,6 +200,15 @@ def comparison_reasons(previous: dict[str, Any], current: dict[str, Any]) -> lis
             reasons.append(f"compression workloads missing: {', '.join(missing)}")
         if added:
             reasons.append(f"compression workloads added: {', '.join(added)}")
+    previous_expand = {row["size_class"] for row in previous["expand"]}
+    current_expand = {row["size_class"] for row in current["expand"]}
+    if previous_expand != current_expand:
+        missing = sorted(previous_expand - current_expand)
+        added = sorted(current_expand - previous_expand)
+        if missing:
+            reasons.append(f"expand size classes missing: {', '.join(missing)}")
+        if added:
+            reasons.append(f"expand size classes added: {', '.join(added)}")
     return reasons
 
 
@@ -226,7 +235,10 @@ def trend(previous: dict[str, Any] | None, current: dict[str, Any]) -> dict[str,
     deltas: dict[str, Any] = {
         "headline_savings_pct": round(current_headline - previous_headline, 6),
         "workload_savings_pct": {},
-        "boot_tokens": {}, "expand_p50_ms": {},
+        "boot_tokens": {},
+        "expand_p50_ms": {},
+        "expand_p95_ms": {},
+        "expand_p99_ms": {},
     }
     losses: list[str] = []
     if deltas["headline_savings_pct"] < 0:
@@ -253,13 +265,15 @@ def trend(previous: dict[str, Any] | None, current: dict[str, Any]) -> dict[str,
             losses.append(f"{row['corpus']} boot cost increased {delta} tokens")
     previous_expand = {row["size_class"]: row for row in previous["expand"]}
     for row in current["expand"]:
-        prior = previous_expand.get(row["size_class"])
-        if prior is None:
-            continue
-        delta = round(float(row["p50_ms"]) - float(prior["p50_ms"]), 6)
-        deltas["expand_p50_ms"][row["size_class"]] = delta
-        if delta > 0:
-            losses.append(f"{row['size_class']} expand p50 increased {delta:.6f} ms")
+        prior = previous_expand[row["size_class"]]
+        for percentile in ("p50", "p95", "p99"):
+            key = f"{percentile}_ms"
+            delta = round(float(row[key]) - float(prior[key]), 6)
+            deltas[f"expand_{key}"][row["size_class"]] = delta
+            if delta > 0:
+                losses.append(
+                    f"{row['size_class']} expand {percentile} increased {delta:.6f} ms"
+                )
     return {"previous_snapshot": previous["snapshot_id"], "comparable": True,
             "non_comparable_reasons": [], "deltas": deltas, "losses": losses}
 

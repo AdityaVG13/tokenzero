@@ -89,8 +89,37 @@ class RebaselineTests(unittest.TestCase):
         self.assertEqual(result["deltas"]["headline_savings_pct"], -2.0)
         self.assertEqual(result["deltas"]["boot_tokens"]["repository"], 3)
         self.assertEqual(result["deltas"]["expand_p50_ms"]["1KB"], 1.5)
+        self.assertEqual(result["deltas"]["expand_p95_ms"]["1KB"], 1.5)
+        self.assertEqual(result["deltas"]["expand_p99_ms"]["1KB"], 1.5)
         self.assertEqual(result["deltas"]["workload_savings_pct"]["read"], -2.0)
-        self.assertEqual(len(result["losses"]), 4)
+        self.assertEqual(len(result["losses"]), 6)
+
+    def test_trend_rejects_p50_gain_with_p99_regression(self) -> None:
+        previous = self.snapshot("before", 90.0, 21, 3.0)
+        current = self.snapshot("after", 90.0, 21, 3.0)
+        current["expand"][0]["p50_ms"] = 2.9
+        current["expand"][0]["p99_ms"] = 50.0
+        result = R.trend(previous, current)
+        self.assertTrue(result["comparable"])
+        self.assertLess(result["deltas"]["expand_p50_ms"]["1KB"], 0)
+        self.assertGreater(result["deltas"]["expand_p99_ms"]["1KB"], 0)
+        self.assertTrue(any("1KB expand p99 increased" in loss for loss in result["losses"]))
+        self.assertFalse(any("1KB expand p50 increased" in loss for loss in result["losses"]))
+
+    def test_trend_requires_identical_expand_size_classes(self) -> None:
+        previous = self.snapshot("before", 90.0, 21, 3.0)
+        previous["expand"].append(
+            {"size_class": "100MB", "samples": 5, "p50_ms": 10.0, "p95_ms": 11.0, "p99_ms": 12.0}
+        )
+        current = self.snapshot("after", 91.0, 21, 2.9)
+        current["expand"][0]["p99_ms"] = 50.0
+        result = R.trend(previous, current)
+        self.assertFalse(result["comparable"])
+        self.assertEqual(result["deltas"], {})
+        self.assertEqual(result["losses"], [])
+        self.assertTrue(
+            any("expand size classes missing: 100MB" in reason for reason in result["non_comparable_reasons"])
+        )
 
     def test_trend_rejects_headline_gain_with_workload_floor_loss(self) -> None:
         previous = self.snapshot("before", 90.0, 21, 3.0)
