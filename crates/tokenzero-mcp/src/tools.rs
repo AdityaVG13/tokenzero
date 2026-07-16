@@ -451,7 +451,8 @@ fn codemode_v2_tool_response(
     // success ref by hubs and savings ledgers when busy aborted before store.
     let telemetry_ref = codemode_envelope_ref(result);
     let mut ack = codemode_v2_ack(result, telemetry_ref.as_deref());
-    let mut structured = codemode_v2_structured(result, &ack, telemetry_ref.as_deref());
+    // Fold scalar into ack for short text, but never drop structuredContent.value
+    // (tokenzero-codemode-result-not-surfaced-jhh).
     let folded_scalar = matches!(result.status, crate::CodeModeStatus::Completed)
         && result
             .value
@@ -459,17 +460,20 @@ fn codemode_v2_tool_response(
             .and_then(|value| scalar_folded_codemode_v2_ack(&ack, value))
             .map(|folded| {
                 ack = folded;
-                structured = Value::Null;
             })
             .is_some();
-    let structured_tokens = if folded_scalar {
+    let structured = codemode_v2_structured(result, &ack, telemetry_ref.as_deref());
+    let result_surfaced = codemode_result_surfaced(result, &structured);
+    let (ack, structured, force_error) =
+        enforce_completed_result_surfaced(result, ack, structured, result_surfaced);
+    let structured_tokens = if folded_scalar && !force_error {
         0
     } else {
         count_tokens(&serde_json::to_string(&structured).unwrap_or_default())
     };
     let envelope_tokens = count_tokens(&ack) + structured_tokens;
     // Unexecuted / errored plans must not credit raw_tokens savings.
-    let credited_raw = if matches!(result.status, crate::CodeModeStatus::Error) {
+    let credited_raw = if matches!(result.status, crate::CodeModeStatus::Error) || force_error {
         0
     } else {
         result.telemetry.raw_tokens
@@ -481,21 +485,29 @@ fn codemode_v2_tool_response(
     let mut telemetry = json!({
         "envelope_tokens": envelope_tokens,
         "payload_tokens": result.telemetry.payload_tokens,
+        "result_surfaced": result_surfaced && !force_error,
+        "structuredContent": structured,
     });
     if let Some(telemetry_ref) = &telemetry_ref {
         telemetry["telemetry_ref"] = json!(telemetry_ref);
     }
-    if !folded_scalar {
-        telemetry["structuredContent"] = structured;
-    }
     response.telemetry = Some(telemetry);
-    if matches!(result.status, crate::CodeModeStatus::Error) {
+    if matches!(result.status, crate::CodeModeStatus::Error) || force_error {
         response.status = "error".to_string();
-        response.error = result.error.as_ref().map(|error| tokenzero_core::CliError {
-            code: error.kind.clone(),
-            message: error.message.clone(),
-            repair: None,
-        });
+        response.error = if force_error {
+            Some(tokenzero_core::CliError {
+                code: "result_not_surfaced".into(),
+                message: "completed plan had a result that was not attached to structuredContent"
+                    .into(),
+                repair: None,
+            })
+        } else {
+            result.error.as_ref().map(|error| tokenzero_core::CliError {
+                code: error.kind.clone(),
+                message: error.message.clone(),
+                repair: None,
+            })
+        };
     }
     Ok(response)
 }
@@ -593,13 +605,54 @@ fn codemode_v3_structured(
     Value::Object(object)
 }
 
+/// True when a completed plan's return value is present on structuredContent.
+fn codemode_result_surfaced(result: &crate::CodeModeResult, structured: &Value) -> bool {
+    matches!(result.status, crate::CodeModeStatus::Completed)
+        && result.value.is_some()
+        && structured.get("value").is_some()
+}
+
+/// Completed + in-memory value must ship structuredContent.value. Else downgrade
+/// so hubs never claim ok with result_surfaced=false (jhh).
+fn enforce_completed_result_surfaced(
+    result: &crate::CodeModeResult,
+    ack: String,
+    structured: Value,
+    result_surfaced: bool,
+) -> (String, Value, bool) {
+    let must_surface =
+        matches!(result.status, crate::CodeModeStatus::Completed) && result.value.is_some();
+    if !must_surface || result_surfaced {
+        return (ack, structured, false);
+    }
+    let exec = result
+        .execution_id
+        .as_deref()
+        .unwrap_or("cm://exec/unknown");
+    let message =
+        "completed plan result was stored but not attached to structuredContent; refuse ok ack";
+    let err_ack = format!("err result_not_surfaced final {message} {exec}");
+    let err_structured = json!({
+        "ack": err_ack,
+        "error": {
+            "kind": "result_not_surfaced",
+            "message": message,
+            "retryable": false,
+        },
+        "execution_id": result.execution_id,
+    });
+    (err_ack, err_structured, true)
+}
+
 fn codemode_v3_tool_response(
     name: &str,
     result: &crate::CodeModeResult,
 ) -> Result<ToolResponse, JsonRpcErrorData> {
     let envelope_ref = codemode_envelope_ref(result);
     let mut ack = codemode_v3_ack(result);
-    let mut structured = codemode_v3_structured(result, &ack, envelope_ref.as_deref());
+    // Fold scalar into ack for short text, but never drop structuredContent.value.
+    // v3 mechanical acks use execution_id (no `t:tz://` suffix), so hubs cannot
+    // recover folded scalars from text alone — structuredContent is mandatory.
     let folded_scalar = matches!(result.status, crate::CodeModeStatus::Completed)
         && result
             .value
@@ -607,16 +660,19 @@ fn codemode_v3_tool_response(
             .and_then(|value| scalar_folded_codemode_v3_ack(&ack, value))
             .map(|folded| {
                 ack = folded;
-                structured = Value::Null;
             })
             .is_some();
-    let structured_tokens = if folded_scalar {
+    let structured = codemode_v3_structured(result, &ack, envelope_ref.as_deref());
+    let result_surfaced = codemode_result_surfaced(result, &structured);
+    let (ack, structured, force_error) =
+        enforce_completed_result_surfaced(result, ack, structured, result_surfaced);
+    let structured_tokens = if folded_scalar && !force_error {
         0
     } else {
         count_tokens(&serde_json::to_string(&structured).unwrap_or_default())
     };
     let envelope_tokens = count_tokens(&ack) + structured_tokens;
-    let credited_raw = if matches!(result.status, crate::CodeModeStatus::Error) {
+    let credited_raw = if matches!(result.status, crate::CodeModeStatus::Error) || force_error {
         0
     } else {
         result.telemetry.raw_tokens
@@ -629,6 +685,8 @@ fn codemode_v3_tool_response(
         "envelope_tokens": envelope_tokens,
         "payload_tokens": result.telemetry.payload_tokens,
         "envelope": "v3",
+        "result_surfaced": result_surfaced && !force_error,
+        "structuredContent": structured,
     });
     if let Some(execution_id) = &result.execution_id {
         telemetry["execution_id"] = json!(execution_id);
@@ -636,17 +694,23 @@ fn codemode_v3_tool_response(
     if let Some(envelope_ref) = &envelope_ref {
         telemetry["telemetry_ref"] = json!(envelope_ref);
     }
-    if !folded_scalar {
-        telemetry["structuredContent"] = structured;
-    }
     response.telemetry = Some(telemetry);
-    if matches!(result.status, crate::CodeModeStatus::Error) {
+    if matches!(result.status, crate::CodeModeStatus::Error) || force_error {
         response.status = "error".to_string();
-        response.error = result.error.as_ref().map(|error| tokenzero_core::CliError {
-            code: error.kind.clone(),
-            message: error.message.clone(),
-            repair: None,
-        });
+        response.error = if force_error {
+            Some(tokenzero_core::CliError {
+                code: "result_not_surfaced".into(),
+                message: "completed plan had a result that was not attached to structuredContent"
+                    .into(),
+                repair: None,
+            })
+        } else {
+            result.error.as_ref().map(|error| tokenzero_core::CliError {
+                code: error.kind.clone(),
+                message: error.message.clone(),
+                repair: None,
+            })
+        };
     }
     Ok(response)
 }
@@ -1367,6 +1431,45 @@ fn string_array_arg(items: &[Value], label: &str) -> Result<Vec<String>, String>
                 .ok_or_else(|| format!("invalid {label}[{index}]; expected array of strings"))
         })
         .collect()
+}
+
+#[cfg(test)]
+mod result_surfaced_envelope_tests {
+    use super::*;
+    use crate::CodeModeResult;
+
+    #[test]
+    fn v3_completed_scalar_keeps_structured_value() {
+        let mut result = CodeModeResult::completed(json!(42), Vec::new(), 1, 1, 10);
+        result.execution_id = Some("cm://exec/jhh-test".into());
+        let response = codemode_v3_tool_response("tz_execute_code", &result).unwrap();
+        assert_eq!(response.status, "ok");
+        let telemetry = response.telemetry.as_ref().unwrap();
+        assert_eq!(telemetry.get("result_surfaced"), Some(&json!(true)));
+        assert_eq!(
+            telemetry.pointer("/structuredContent/value"),
+            Some(&json!(42))
+        );
+        let text = response.visible.as_ref().unwrap().text.as_str();
+        assert!(text.starts_with("ok "), "{text}");
+        assert!(text.contains("=42"), "{text}");
+        let mcp = mcp_tool_response(response);
+        assert_eq!(mcp.pointer("/structuredContent/value"), Some(&json!(42)));
+    }
+
+    #[test]
+    fn v3_object_result_always_surfaces_value() {
+        let mut result = CodeModeResult::completed(json!({"answer": 42}), Vec::new(), 1, 1, 10);
+        result.execution_id = Some("cm://exec/jhh-object".into());
+        let response = codemode_v3_tool_response("tz_execute_code", &result).unwrap();
+        assert_eq!(response.status, "ok");
+        let telemetry = response.telemetry.as_ref().unwrap();
+        assert_eq!(telemetry.get("result_surfaced"), Some(&json!(true)));
+        assert_eq!(
+            telemetry.pointer("/structuredContent/value/answer"),
+            Some(&json!(42))
+        );
+    }
 }
 
 #[cfg(test)]
