@@ -34,19 +34,34 @@ fn resolve_slice(
         symbol,
     );
     if result.found {
-        Ok(result)
-    } else {
-        Err(Box::new(annotate_expand_miss(
-            expansion_response(result, store.recovery_tokens),
-            &params.ref_id,
-            active_cache,
-        )))
+        return Ok(result);
     }
+    // Router-owned fallback (surface-exclusivity-1r9): try the legacy dual-
+    // filename sibling store before surfacing a miss to the agent.
+    if let Some(sibling_path) = legacy_sibling_holding_ref(&params.ref_id, active_cache) {
+        let mut sibling = RecoveryStore::new(Some(sibling_path));
+        let sibling_result = sibling.expand(
+            &params.ref_id,
+            selector,
+            params.start_line,
+            params.end_line,
+            anchor,
+            symbol,
+        );
+        if sibling_result.found {
+            return Ok(sibling_result);
+        }
+    }
+    Err(Box::new(annotate_expand_miss(
+        expansion_response(result, store.recovery_tokens),
+        &params.ref_id,
+        active_cache,
+    )))
 }
 
-/// When expand misses, name the active store. If a historical sibling
-/// (`codemode-recovery.json` ↔ `recovery-cache.json`) still holds the ref,
-/// upgrade to `store_mismatch` so agents can align `--cache-path` (wqw.8).
+/// When expand misses after internal sibling retry, name the active store.
+/// If a historical sibling still reports the ref but failed to expand, keep
+/// `store_mismatch` diagnostics for operators aligning `--cache-path`.
 fn annotate_expand_miss(
     mut response: ToolResponse,
     ref_id: &str,

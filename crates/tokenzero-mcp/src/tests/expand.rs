@@ -595,10 +595,8 @@ fn same_session_codemode_default_store_expands_without_rerun() {
 }
 
 #[test]
-fn wrong_cache_path_names_both_stores_on_miss() {
-    // wqw.8: producer and consumer on different cache files → store_mismatch.
-    // Write the producer cache as raw JSON (no RecoveryStore persist) so the
-    // per-user ref-index is not updated; that isolates dual-root messaging.
+fn wrong_cache_path_recovers_via_internal_sibling_retry() {
+    // Replaced store_mismatch agent lecture with engine-internal sibling expand.
     let dir = tempdir().unwrap();
     let root = dir.path();
     let consumer_cache = root.join("recovery-cache.json");
@@ -655,21 +653,10 @@ fn wrong_cache_path_names_both_stores_on_miss() {
     let expand_engine = TokenZeroEngine::new(consumer);
     let response = expand_engine.expand(&blob_ref, Some("raw"), None, None, None, None);
 
-    assert_eq!(response.status, "error", "{:?}", response);
-    let err = response.error.as_ref().unwrap();
-    assert_eq!(err.code, "store_mismatch", "{err:?}");
-    assert!(
-        err.message.contains(sibling.to_string_lossy().as_ref())
-            || err.message.contains("codemode-recovery"),
-        "must name producer store: {}",
-        err.message
-    );
-    assert!(
-        err.message
-            .contains(consumer_cache.to_string_lossy().as_ref())
-            || err.message.contains("recovery-cache"),
-        "must name consumer store: {}",
-        err.message
+    assert_eq!(response.status, "ok", "{:?}", response.error);
+    assert_eq!(
+        response.visible.as_ref().map(|v| v.text.as_str()),
+        Some(payload)
     );
 }
 
@@ -719,7 +706,45 @@ fn windowed_expand_same_store_and_oob_code() {
 }
 
 #[test]
-fn crash_only_expand_blocked_when_codemode_healthy() {
+fn codemode_tools_list_excludes_perop_even_when_unhealthy() {
+    use tokenzero_core::McpToolSurface;
+    let dir = tempdir().unwrap();
+    let mut config = EngineConfig::for_root(dir.path());
+    config.tool_surface = McpToolSurface::CodeMode;
+    let engine = TokenZeroEngine::new(config);
+    engine.surface_health().record_codemode_expand_x0();
+    assert!(!engine.surface_health().is_healthy());
+
+    let listed = handle_jsonrpc(
+        &engine,
+        &json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/list",
+            "params": {}
+        })
+        .to_string(),
+    )
+    .unwrap();
+    let parsed: Value = serde_json::from_str(&listed).unwrap();
+    let names: Vec<&str> = parsed["result"]["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|t| t["name"].as_str())
+        .collect();
+    assert!(
+        names.contains(&"tz_execute_code") && names.contains(&"tz_codemode_search"),
+        "primary tools must stay listed: {names:?}"
+    );
+    assert!(
+        !names.iter().any(|n| *n == "tz_expand" || *n == "expand" || *n == "tz_read" || *n == "tz_shell"),
+        "per-op / recovery must stay hidden for whole CodeMode session: {names:?}"
+    );
+}
+
+#[test]
+fn crash_only_expand_unknown_when_codemode_healthy() {
     use tokenzero_core::McpToolSurface;
     let dir = tempdir().unwrap();
     let mut config = EngineConfig::for_root(dir.path());
@@ -741,17 +766,11 @@ fn crash_only_expand_blocked_when_codemode_healthy() {
     .unwrap();
     let parsed: Value = serde_json::from_str(&blocked).unwrap();
     let data = &parsed["error"]["data"];
-    let msg = data["message"].as_str().unwrap_or_default();
-    assert!(
-        msg.contains("primary surface is healthy"),
-        "blocked message: {parsed}"
-    );
-    assert_eq!(data["kind"], "policy_refusal");
     assert_eq!(
-        engine.surface_health().telemetry()["telemetry"]["blocked_count"],
-        1
+        data["kind"], "unknown_tool",
+        "per-op must be unknown_tool not policy lecture: {parsed}"
     );
-    // Write/shell never unlock from health alone.
+    // Write/shell likewise unknown — not a policy lecture.
     let shell_blocked = handle_jsonrpc(
         &engine,
         &json!({
@@ -764,25 +783,20 @@ fn crash_only_expand_blocked_when_codemode_healthy() {
     )
     .unwrap();
     let shell_parsed: Value = serde_json::from_str(&shell_blocked).unwrap();
-    assert_eq!(shell_parsed["error"]["data"]["kind"], "policy_refusal");
-    assert!(
-        shell_parsed["error"]["data"]["message"]
-            .as_str()
-            .unwrap_or_default()
-            .contains("never unlocked"),
+    assert_eq!(
+        shell_parsed["error"]["data"]["kind"], "unknown_tool",
         "{shell_parsed}"
     );
 }
 
 #[test]
-fn crash_only_expand_unlocks_after_expand_x0_and_recovers_bytes() {
+fn crash_only_expand_stays_hidden_after_expand_x0() {
     use tokenzero_core::McpToolSurface;
     let dir = tempdir().unwrap();
     let file = dir.path().join("payload.txt");
     fs::write(&file, "recovery-ladder-bytes-wqw9\n").unwrap();
     let mut config = EngineConfig::for_root(dir.path());
     config.tool_surface = McpToolSurface::CodeMode;
-    // Same cache path for seed + recovery engine so expand finds the blob.
     let cache = dir.path().join(".tokenzero/recovery-cache.json");
     config.cache_path = cache.clone();
     let engine = TokenZeroEngine::new(config);
@@ -799,13 +813,12 @@ fn crash_only_expand_unlocks_after_expand_x0_and_recovers_bytes() {
         .ref_id
         .clone();
 
-    // Force expand surface unhealthy (mocked expand X0); healthy claim must be false.
     engine.surface_health().record_codemode_expand_x0();
     assert!(!engine.surface_health().is_healthy());
     assert!(!engine.surface_health().primary_surface_healthy_claim());
 
-    // Recovery path allowed — recover bytes without native Read.
-    let unlocked = handle_jsonrpc(
+    // MCP tz_expand stays unknown even after X0 — fallback is engine-internal.
+    let mcp = handle_jsonrpc(
         &engine,
         &json!({
             "jsonrpc": "2.0",
@@ -813,21 +826,27 @@ fn crash_only_expand_unlocks_after_expand_x0_and_recovers_bytes() {
             "method": "tools/call",
             "params": {
                 "name": "tz_expand",
-                "arguments": {"ref": blob_ref, "selector": "raw"}
+                "arguments": {"ref": blob_ref.clone(), "selector": "raw"}
             }
         })
         .to_string(),
     )
     .unwrap();
-    assert!(
-        unlocked.contains("recovery-ladder-bytes-wqw9"),
-        "must recover exact bytes via unlocked expand: {unlocked}"
+    let parsed: Value = serde_json::from_str(&mcp).unwrap();
+    assert_eq!(
+        parsed["error"]["data"]["kind"], "unknown_tool",
+        "tz_expand must stay off the agent surface: {parsed}"
     );
+
+    // Engine-direct expand still recovers bytes (router / CodeMode path).
+    let recovered = engine.expand(&blob_ref, Some("raw"), None, None, None, None);
+    assert_eq!(recovered.status, "ok", "{:?}", recovered.error);
     assert!(
-        engine.surface_health().telemetry()["telemetry"]["unlocked_count"]
-            .as_u64()
-            .unwrap_or(0)
-            >= 1
+        recovered
+            .visible
+            .as_ref()
+            .is_some_and(|v| v.text.contains("recovery-ladder-bytes-wqw9")),
+        "must recover exact bytes via engine expand: {recovered:?}"
     );
 }
 

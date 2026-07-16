@@ -1,15 +1,16 @@
-//! Crash-only recovery unlock when the CodeMode expand/read surface is unhealthy.
+//! Surface exclusivity + expand-health telemetry for CodeMode.
 //!
-//! Field bug (wqw.9 / zerostackbug6): agents are told the primary surface is
-//! healthy while `zero.token.expand` returns X0, and `tz_expand` stays locked
-//! as a crash-only shim — catch-22 that drives them to native Read.
+//! Field bug (tokenzero-surface-exclusivity-1r9): agents call `tz_expand`
+//! mid-CodeMode because crash-only recovery shims stay in `tools/list`, then
+//! burn tokens on a policy lecture. The router owns fallback; agents see one
+//! surface.
 //!
-//! Policy matrix (CodeMode surface):
-//! | Tool class              | Healthy | Unhealthy (expand X0 / substrate_down) |
-//! |-------------------------|---------|----------------------------------------|
-//! | codemode execute/search | allow   | allow                                  |
-//! | expand / read recovery  | **block** (crash-only) | **unlock** (audit + telemetry) |
-//! | shell / edit / write    | block   | block (never unlocked by expand health)|
+//! Policy (CodeMode surface):
+//! | Tool class              | tools/list | tools/call                          |
+//! |-------------------------|------------|-------------------------------------|
+//! | codemode execute/search | listed     | allow                               |
+//! | expand / read recovery  | **hidden** | **unknown_tool** (fallback internal)|
+//! | shell / edit / write    | **hidden** | **unknown_tool**                    |
 //!
 //! Classic surface is not gated: per-op tools are the primary surface.
 
@@ -26,13 +27,12 @@ const DEFAULT_WINDOW: Duration = Duration::from_secs(300);
 
 /// Documented recovery ladder (docs + skill + close reasons).
 pub const RECOVERY_LADDER: &str = "\
-CodeMode recovery ladder (expand/read only):\n\
+CodeMode recovery ladder (router-owned, agent-invisible):\n\
 1. Prefer zero.token.expand / zero.token.read inside tz_execute_code (primary).\n\
-2. If expand returns X0 or substrate_down, surface health opens crash-only recovery:\n\
-   call tz_expand / tz_read (or CLI `tokenzero expand` / `tokenzero read`) — not native Read.\n\
-3. Write/shell stay crash-only locked; do not permanently weaken mutation safety.\n\
-4. After a successful expand/read, the primary surface is healthy again and recovery re-locks.\n\
-Telemetry: resource://tokenzero/metrics → surface_health (blocked vs unlocked counts).";
+2. On expand miss / X0 the engine retries sibling stores internally before failing.\n\
+3. Per-op MCP tools (tz_expand, tz_read, tz_shell, …) stay hidden from tools/list.\n\
+4. CLI `tokenzero expand` / `tokenzero read` remain available outside MCP.\n\
+Telemetry: resource://tokenzero/metrics → surface_health.";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CrashOnlyDecision {
@@ -116,6 +116,9 @@ fn is_codemode_exclusive(tool_name: &str) -> bool {
 }
 
 /// Whether `tools/list` (and FastMCP registration) should advertise `tool_name`.
+///
+/// CodeMode is primary-only for the whole session (`tools.listChanged=false`).
+/// Recovery shims stay hidden; expand fallback is engine-internal.
 pub(crate) fn tool_listed_on_surface(
     surface: McpToolSurface,
     tool_name: &str,
@@ -123,8 +126,7 @@ pub(crate) fn tool_listed_on_surface(
 ) -> bool {
     match surface {
         McpToolSurface::Classic => !is_codemode_exclusive(tool_name),
-        // Recovery stays discoverable because registration is static; calls remain gated.
-        McpToolSurface::CodeMode => tool_class(tool_name) != ToolClass::Locked,
+        McpToolSurface::CodeMode => tool_class(tool_name) == ToolClass::Primary,
     }
 }
 
@@ -137,8 +139,11 @@ pub(crate) fn surface_includes(surface: McpToolSurface, tool_name: &str) -> bool
 pub(crate) fn admit_tools_call(surface: McpToolSurface, tool_name: &str) -> CallAdmission {
     match surface {
         McpToolSurface::Classic if is_codemode_exclusive(tool_name) => CallAdmission::UnknownTool,
-        // CodeMode: Primary/Recovery/Locked all reach allow_tool_call so agents
-        // get policy_refusal (ladder / never-unlocked) instead of unknown_tool.
+        // CodeMode: only Primary tools are callable. Per-op / recovery names
+        // return unknown_tool (no policy lecture) so agents stay on one surface.
+        McpToolSurface::CodeMode if tool_class(tool_name) != ToolClass::Primary => {
+            CallAdmission::UnknownTool
+        }
         _ => CallAdmission::Proceed,
     }
 }
@@ -337,6 +342,7 @@ impl SurfaceHealth {
             "recovery_ladder": RECOVERY_LADDER,
             "unlocks": ["expand", "read"],
             "never_unlocks": ["shell", "edit", "write"],
+            "agent_visible_recovery_tools": false,
             "codemode_containment": crate::codemode::containment_snapshot(),
         })
     }
@@ -345,9 +351,8 @@ impl SurfaceHealth {
 fn blocked_message(tool_name: &str) -> String {
     let short = strip_tool_alias(tool_name);
     format!(
-        "Policy: tz_{short} is a crash-only recovery tool; the CodeMode primary surface is healthy. \
-         Use zero.token.{short} via tz_execute_code. If expand fails with X0 or substrate_down, \
-         recovery unlocks automatically for expand/read only (not write/shell). \
+        "Policy: tz_{short} is not on the CodeMode agent surface. \
+         Use zero.token.{short} via tz_execute_code; expand fallback is engine-internal. \
          Ladder: see resource://tokenzero/metrics surface_health."
     )
 }

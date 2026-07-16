@@ -175,11 +175,10 @@ pub fn fastmcp_instructions() -> &'static str {
 /// CodeMode-mode instruction text for FastMCP .instructions().
 pub fn fastmcp_codemode_instructions() -> &'static str {
     "TokenZero CodeMode surface. Tools: tz_execute_code, tz_codemode_search, \
-     tz_codemode_describe, tz_report_tool_issue, plus crash-only tz_expand/tz_read. \
-     Recovery tools are listed but policy-gated while the primary surface is healthy. \
-     Write plans against the `zero` surface. Use tz_codemode_describe name=capabilities \
-     for the full contract manifest. \
-     Per-op MCP tools (read, find, shell, etc.) are unavailable in this mode."
+     tz_codemode_describe, tz_report_tool_issue. Expand/read fallback is \
+     engine-internal — per-op MCP tools (tz_expand, tz_read, shell, …) are not \
+     listed. Write plans against the `zero` surface. Use tz_codemode_describe \
+     name=capabilities for the full contract manifest."
 }
 
 /// Start the FastMCP stdio server, replacing the hand-rolled loop.
@@ -196,8 +195,8 @@ pub fn run_fastmcp_stdio(config: EngineConfig) -> ! {
         Server::new("TokenZero", env!("CARGO_PKG_VERSION")).instructions(instructions);
 
     for seed in canonical_tool_specs() {
-        // Same policy owner as tools/list / tools/call; recovery is registered
-        // once and remains health-gated at call time.
+        // Same policy owner as tools/list / tools/call; CodeMode registers
+        // primary tools only (expand fallback is engine-internal).
         if !surface_includes(surface, seed.name) {
             continue;
         }

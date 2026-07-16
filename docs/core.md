@@ -73,9 +73,9 @@ tokenzero expand tz://file/<id> --around 55:5
 tokenzero expand --refs-from refs.txt --summary --json
 ```
 
-### Crash-only recovery ladder (CodeMode)
+### Surface exclusivity (CodeMode)
 
-On `--mode=codemode`, per-op tools stay crash-only while the primary surface is healthy. Prefer `zero.token.expand` inside `tz_execute_code`. If expand returns X0 or the substrate is down, surface health unlocks **only** `tz_expand` / `tz_read` (and CLI `tokenzero expand` / `tokenzero read`) so agents recover bytes without native Read. Write/shell stay locked. After a successful expand, recovery re-locks. Telemetry: `resource://tokenzero/metrics` → `surface_health` (`blocked_count` / `unlocked_count`). Never claim "primary surface healthy" after expand X0.
+On `--mode=codemode`, `tools/list` advertises only CodeMode primary tools. Prefer `zero.token.expand` inside `tz_execute_code`. Expand miss / X0 retries sibling stores internally before failing; agents never call `tz_expand`. CLI `tokenzero expand` / `tokenzero read` remain available outside MCP. Telemetry: `resource://tokenzero/metrics` → `surface_health`. Never claim "primary surface healthy" after expand X0.
 
 ## Ingest
 

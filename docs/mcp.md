@@ -416,27 +416,22 @@ Common refs:
 - `tz://file/<id>#Lx-Ly` for file-like ranges.
 - `tz://search/<id>` for stored search hits.
 
-### Crash-only unlock ladder (CodeMode surface)
+### Surface exclusivity (CodeMode)
 
 When the server runs in CodeMode (`TOKENZERO_MCP_TOOL_SURFACE=codemode` /
-`--mode=codemode`), the primary tools, field-report tool, and crash-only
-`tz_expand` / `tz_read` recovery tools are advertised for the whole session.
-Recovery calls remain policy-gated while the primary surface is healthy. The
-stable list matches the server's `tools.listChanged=false` capability.
+`--mode=codemode`), `tools/list` advertises **only** the CodeMode primary
+tools (`tz_execute_code`, `tz_codemode_search`, `tz_codemode_describe`,
+`tz_report_tool_issue`) for the whole session (`tools.listChanged=false`).
+Per-op MCP tools (`tz_expand`, `tz_read`, shell, …) are not listed and
+`tools/call` returns `unknown_tool` — one agent-visible surface, always.
 
 1. Prefer `zero.token.expand` / `zero.token.read` inside `tz_execute_code`.
-2. If expand fails with a recovery error, or read reports a substrate error,
-   session surface health marks
-   the primary surface **unhealthy** and unlocks **only** crash-only recovery
-   tools `tz_expand` and `tz_read` so bytes can be recovered without native
-   Read. Write/shell stay locked.
-3. Successful expand/read clears the failure streak; recovery re-locks.
-4. Policy refusals never print "primary surface healthy" after expand X0.
-5. Telemetry: `resource://tokenzero/metrics` → `surface_health` with
-   `blocked_count` / `unlocked_count`.
+2. On expand miss / X0 the engine retries sibling stores and other internal
+   routes before surfacing failure. Agents never switch to `tz_expand`.
+3. Successful expand/read clears the failure streak in surface-health telemetry.
+4. Telemetry: `resource://tokenzero/metrics` → `surface_health`.
 
-CLI `tokenzero expand` / `tokenzero read` remain available outside MCP as the
-same recovery path.
+CLI `tokenzero expand` / `tokenzero read` remain available outside MCP.
 
 ## Shell Contract
 

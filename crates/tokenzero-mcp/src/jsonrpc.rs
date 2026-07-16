@@ -697,7 +697,7 @@ impl JsonRpcErrorData {
     /// unknown_tool so agents see the recovery ladder instead of "not found".
     pub(crate) fn policy_refusal(name: &str, message: String) -> Self {
         Self {
-            value: wire_json!({ "kind": "policy_refusal", "error_type": "POLICY", "message": message, "recoverable": true, "entity_type": "tool", "provided": name, "tool": name, "reason": message, "fix_hint": "When primary surface is healthy use zero.token.* via tz_execute_code. After expand X0, tz_expand/tz_read unlock for recovery only.", "policy": "crash_only_recovery", "suggested_tool_calls": [ {"method": "tools/call", "params": {"name": "tz_execute_code", "arguments": {"plan": "return await zero.token.expand('<ref>')"}}}, {"method": "resources/read", "params": {"uri": "resource://tokenzero/metrics"}} ] }),
+            value: wire_json!({ "kind": "policy_refusal", "error_type": "POLICY", "message": message, "recoverable": true, "entity_type": "tool", "provided": name, "tool": name, "reason": message, "fix_hint": "On CodeMode use zero.token.* via tz_execute_code only. Per-op tools are not listed; expand fallback is engine-internal.", "policy": "surface_exclusivity", "suggested_tool_calls": [ {"method": "tools/call", "params": {"name": "tz_execute_code", "arguments": {"plan": "return await zero.token.expand('<ref>')"}}}, {"method": "resources/read", "params": {"uri": "resource://tokenzero/metrics"}} ] }),
         }
     }
 
