@@ -154,7 +154,8 @@ fn shell_exact_first_stores_stream_refs_and_status_truth() {
         response
             .refs
             .iter()
-            .any(|row| row.kind == "stdout" || row.kind == "stderr")
+            .any(|row| row.kind == "combined"),
+        "shell must always emit a combined ref"
     );
     let combined_ref = response
         .refs
@@ -163,6 +164,10 @@ fn shell_exact_first_stores_stream_refs_and_status_truth() {
         .unwrap()
         .ref_id
         .clone();
+    assert!(
+        combined_ref.starts_with("tz://s/") || combined_ref.starts_with("tz://blob/"),
+        "combined ref must be recoverable: {combined_ref}"
+    );
     let expanded = engine.expand(&combined_ref, Some("raw"), None, None, None, None);
     assert!(expanded.visible.unwrap().text.contains(expanded_needle));
 }
@@ -573,4 +578,49 @@ fn shell_explicit_cwd_sets_cwd_source_explicit() {
     let telemetry = response.telemetry.as_ref().unwrap();
     assert_eq!(telemetry["cwd_source"], "explicit");
     assert!(telemetry["cwd"].as_str().is_some_and(|c| !c.is_empty()));
+}
+
+#[test]
+fn shell_visible_refs_use_session_short_aliases_and_expand() {
+    let dir = tempdir().unwrap();
+    let engine = TokenZeroEngine::new(EngineConfig::for_root(dir.path()));
+    let response = engine.shell(
+        "echo short-alias-probe",
+        None,
+        Some(dir.path()),
+        Mode::Auto,
+        None,
+        false,
+        None,
+        None,
+        None,
+    );
+    assert_eq!(response.status, "ok");
+    let visible = response.visible.as_ref().unwrap().text.clone();
+    assert!(
+        !visible.contains("tz://blob/")
+            || visible
+                .split("tz://blob/")
+                .skip(1)
+                .all(|rest| rest.chars().take(64).any(|c| !c.is_ascii_hexdigit())),
+        "visible must not embed full 64-hex blob refs: {visible}"
+    );
+    let combined = response
+        .refs
+        .iter()
+        .find(|row| row.kind == "combined")
+        .expect("combined ref")
+        .ref_id
+        .clone();
+    assert!(
+        combined.starts_with("tz://s/"),
+        "combined ref must be session short alias, got {combined}"
+    );
+    assert_eq!(combined.len(), "tz://s/".len() + 16);
+    let expanded = engine.expand(&combined, Some("raw"), None, None, None, None);
+    let text = expanded.visible.as_ref().unwrap().text.clone();
+    assert!(
+        text.contains("short-alias-probe"),
+        "expand via short alias must recover bytes: {text}"
+    );
 }

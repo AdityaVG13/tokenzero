@@ -51,6 +51,36 @@ pub(crate) fn push_payload_refs(
     refs.push(ref_record("file", stored.file_ref.clone(), bytes));
 }
 
+impl TokenZeroEngine {
+    /// Rewrite full-hash blob refs in a tool response to session-visible
+    /// `tz://s/<16hex>` aliases and persist the short→full alias table.
+    pub(crate) fn apply_session_visible_ref_aliases(&self, response: &mut ToolResponse) {
+        let mut store = self.recovery_store();
+        if let Some(visible) = response.visible.as_mut() {
+            visible.text = store.apply_session_visible_aliases_in_text(&visible.text);
+        }
+        for record in &mut response.refs {
+            record.ref_id = store.ensure_session_visible_alias(&record.ref_id);
+        }
+        if let Some(telemetry) = response.telemetry.as_mut() {
+            store.apply_session_visible_aliases_in_value(telemetry);
+        }
+        let _ = store.persist_pending();
+        if let Some(accounting) = response.accounting.as_mut() {
+            if let Some(visible) = response.visible.as_ref() {
+                accounting.visible_tokens = count_tokens(&visible.text);
+            }
+            accounting.exact_ref_tokens = Some(
+                response
+                    .refs
+                    .iter()
+                    .map(|record| count_tokens(&record.ref_id))
+                    .sum(),
+            );
+        }
+    }
+}
+
 pub(crate) fn served_record(content: &str, stored: &StoredPayload) -> ServedRecord {
     ServedRecord {
         content_sha256: sha256_hex(content),

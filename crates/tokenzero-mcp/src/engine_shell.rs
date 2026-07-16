@@ -525,6 +525,16 @@ impl TokenZeroEngine {
         } else {
             format!("cwd: {effective_cwd}\n{visible_text}")
         };
+        // Session-scoped short aliases in visible capsules (tokenzero-short-ref-aliases-dle).
+        let visible_text = store.apply_session_visible_aliases_in_text(&visible_text);
+        for record in &mut refs {
+            record.ref_id = store.ensure_session_visible_alias(&record.ref_id);
+        }
+        let stdout_vis = store.ensure_session_visible_alias(&stdout_stored.blob_ref);
+        let stderr_vis = store.ensure_session_visible_alias(&stderr_stored.blob_ref);
+        let combined_vis = store.ensure_session_visible_alias(&combined_stored.blob_ref);
+        let capture_vis = store.ensure_session_visible_alias(&capture_stored.blob_ref);
+        let _ = store.persist_pending();
         let visible_tokens = if inline_shell_output || refs_complete {
             count_tokens(&visible_text)
         } else {
@@ -552,13 +562,12 @@ impl TokenZeroEngine {
                 visible_tokens,
                 recovery_tokens: store.recovery_tokens,
                 exact_ref_tokens: Some({
-                    let mut total = count_tokens(&combined_stored.blob_ref)
-                        + count_tokens(&capture_stored.blob_ref);
+                    let mut total = count_tokens(&combined_vis) + count_tokens(&capture_vis);
                     if !stdout_display.is_empty() {
-                        total += count_tokens(&stdout_stored.blob_ref);
+                        total += count_tokens(&stdout_vis);
                     }
                     if !stderr_display.is_empty() {
-                        total += count_tokens(&stderr_stored.blob_ref);
+                        total += count_tokens(&stderr_vis);
                     }
                     total
                 }),
@@ -604,15 +613,15 @@ impl TokenZeroEngine {
             "raw_tokens": raw_tokens,
             "visible_tokens": visible_tokens,
             "recovery_tokens": store.recovery_tokens,
-            "capture_ref": capture_stored.blob_ref,
-            "combined_ref": combined_stored.blob_ref,
+            "capture_ref": capture_vis,
+            "combined_ref": combined_vis,
             "output_strategy": output_strategy
         });
         if !stdout_display.is_empty() {
-            telemetry["stdout_ref"] = json!(stdout_stored.blob_ref);
+            telemetry["stdout_ref"] = json!(stdout_vis);
         }
         if !stderr_display.is_empty() {
-            telemetry["stderr_ref"] = json!(stderr_stored.blob_ref);
+            telemetry["stderr_ref"] = json!(stderr_vis);
         }
         response.telemetry = Some(telemetry);
         response.safety = Some(json!({

@@ -69,6 +69,8 @@ fn dispatch_gated_tool(
     record_mcp_pulse(engine, canonical, args, &response, call_id);
     engine.ledger.record_response(canonical, &response);
     engine.record_tool_attribution(canonical, engine_elapsed, persist_started.elapsed());
+    let mut response = response;
+    engine.apply_session_visible_ref_aliases(&mut response);
     Ok(mcp_tool_response(response))
 }
 

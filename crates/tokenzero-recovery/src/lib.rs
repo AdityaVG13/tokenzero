@@ -27,8 +27,15 @@ pub mod migration;
 pub mod segment_store;
 #[cfg(test)]
 mod segment_store_tests;
+pub mod session_aliases;
 pub mod shared_cas;
 pub mod working_set;
+
+pub use session_aliases::{
+    canonical_full_blob_ref, is_full_hash_blob_bare, is_session_alias_bare,
+    rewrite_full_hash_blob_refs_in_text, rewrite_full_hash_blob_refs_in_value,
+    session_visible_blob_alias, split_ref_fragment, SESSION_ALIAS_HEX_LEN,
+};
 
 #[cfg(test)]
 mod tests;
@@ -1199,14 +1206,80 @@ impl RecoveryStore {
     }
 
     fn resolve_alias_chain(&self, ref_id: &str) -> Option<String> {
-        let mut current = ref_id;
+        let (bare, frag) = split_ref_fragment(ref_id);
+        let mut current = bare;
+        let mut advanced = false;
         for _ in 0..8 {
             let Some(next) = self.state.aliases.get(current) else {
-                return (current != ref_id).then(|| current.to_string());
+                if !advanced {
+                    return None;
+                }
+                return Some(match frag {
+                    Some(f) => format!("{current}#{f}"),
+                    None => current.to_string(),
+                });
             };
             current = next;
+            advanced = true;
         }
         None
+    }
+
+    /// Register `tz://s/<16hex>` → full-hash blob alias and return the short form
+    /// for visible capsules. Non-full-hash refs pass through unchanged.
+    pub fn ensure_session_visible_alias(&mut self, ref_id: &str) -> String {
+        let Some(short) = session_visible_blob_alias(ref_id) else {
+            return ref_id.to_string();
+        };
+        let (short_bare, _) = split_ref_fragment(&short);
+        if let Some(full_bare) = canonical_full_blob_ref(split_ref_fragment(ref_id).0) {
+            if self.alias_target(short_bare).as_deref() != Some(full_bare.as_str()) {
+                self.store_alias_deferred(short_bare, &full_bare);
+            }
+        }
+        short
+    }
+
+    /// Rewrite full-hash blob refs in text to session-visible short aliases,
+    /// registering each short → full mapping in the alias table.
+    pub fn apply_session_visible_aliases_in_text(&mut self, text: &str) -> String {
+        let mut cursor = 0usize;
+        while cursor < text.len() {
+            if let Some((end, full)) = crate::session_aliases::take_full_hash_blob_at(text, cursor) {
+                let _ = self.ensure_session_visible_alias(&full);
+                cursor = end;
+            } else {
+                cursor += 1;
+            }
+        }
+        rewrite_full_hash_blob_refs_in_text(text)
+    }
+
+    /// Shorten full-hash blob ref strings inside a JSON value.
+    pub fn apply_session_visible_aliases_in_value(&mut self, value: &mut serde_json::Value) {
+        fn walk(store: &mut RecoveryStore, value: &mut serde_json::Value) {
+            match value {
+                serde_json::Value::String(text) => {
+                    if session_visible_blob_alias(text).is_some() {
+                        *text = store.ensure_session_visible_alias(text);
+                    } else if text.contains("://blob/") {
+                        *text = store.apply_session_visible_aliases_in_text(text);
+                    }
+                }
+                serde_json::Value::Array(items) => {
+                    for item in items {
+                        walk(store, item);
+                    }
+                }
+                serde_json::Value::Object(map) => {
+                    for item in map.values_mut() {
+                        walk(store, item);
+                    }
+                }
+                _ => {}
+            }
+        }
+        walk(self, value);
     }
 
     pub fn has_ref(&self, ref_id: &str) -> bool {
@@ -1652,7 +1725,7 @@ fn parse_ref(ref_id: &str) -> Option<ParsedRef<'_>> {
     let (bare, fragment) = ref_id.split_once('#').map_or((ref_id, None), |(bare, fragment)| (bare, Some(fragment)));
     let rest = bare.strip_prefix("tz://")?;
     let (kind, id) = rest.split_once('/')?;
-    if id.is_empty() || !matches!(kind, "blob" | "file" | "unit" | "search" | "codemode") {
+    if id.is_empty() || !matches!(kind, "blob" | "file" | "unit" | "search" | "codemode" | "s") {
         return None;
     }
     if kind == "codemode" {
@@ -1664,6 +1737,9 @@ fn parse_ref(ref_id: &str) -> Option<ParsedRef<'_>> {
         {
             return None;
         }
+    }
+    if kind == "s" && !id.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return None;
     }
     Some(ParsedRef { kind, bare, fragment })
 }
