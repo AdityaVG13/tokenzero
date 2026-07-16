@@ -1807,18 +1807,17 @@ fn ref_index_enabled() -> bool {
 
 use std::sync::OnceLock;
 
-/// Test-only hook: override the ref index root directory.
+/// Test-only hook: override the ref index root directory on the current thread.
 /// Call with `Some(path)` to redirect, `None` to clear.
 #[doc(hidden)]
 pub fn set_ref_index_root_override(path: Option<PathBuf>) {
-    REF_INDEX_ROOT_OVERRIDE
-        .get_or_init(|| std::sync::Mutex::new(None))
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
-        .clone_from(&path);
+    REF_INDEX_ROOT_OVERRIDE.with(|root| root.replace(path));
 }
 
-static REF_INDEX_ROOT_OVERRIDE: OnceLock<std::sync::Mutex<Option<PathBuf>>> = OnceLock::new();
+std::thread_local! {
+    static REF_INDEX_ROOT_OVERRIDE: std::cell::RefCell<Option<PathBuf>> =
+        const { std::cell::RefCell::new(None) };
+}
 static REF_INDEX_DISABLED_OVERRIDE: OnceLock<std::sync::atomic::AtomicBool> = OnceLock::new();
 
 /// Test-only hook: disable the per-user ref-index/shared-CAS fallback entirely
@@ -1836,10 +1835,8 @@ fn ref_index_root() -> Option<PathBuf> {
             return None;
         }
     }
-    if let Some(lock) = REF_INDEX_ROOT_OVERRIDE.get() {
-        if let Some(ref path) = *lock.lock().unwrap_or_else(|p| p.into_inner()) {
-            return Some(path.clone());
-        }
+    if let Some(path) = REF_INDEX_ROOT_OVERRIDE.with(|root| root.borrow().clone()) {
+        return Some(path);
     }
     #[cfg(test)]
     if let Some((enabled, path)) = ref_index_test_override() {

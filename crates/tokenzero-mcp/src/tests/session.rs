@@ -5,6 +5,21 @@ use tokenzero_core::MCP_SCHEMA_VERSION;
 
 use super::support::*;
 
+struct RefIndexRootOverrideGuard;
+
+impl RefIndexRootOverrideGuard {
+    fn new(path: std::path::PathBuf) -> Self {
+        tokenzero_recovery::set_ref_index_root_override(Some(path));
+        Self
+    }
+}
+
+impl Drop for RefIndexRootOverrideGuard {
+    fn drop(&mut self) {
+        tokenzero_recovery::set_ref_index_root_override(None);
+    }
+}
+
 #[test]
 fn pipelined_identical_reads_dedup_exactly_once() {
     // Two reads of the same file issued concurrently on a shared engine must
@@ -192,7 +207,7 @@ fn fully_rewritten_file_serves_full() {
 fn missing_diff_base_falls_back_to_full() {
     let dir = tempdir().unwrap();
     let ref_index = dir.path().join("ref-index");
-    tokenzero_recovery::set_ref_index_root_override(Some(ref_index.clone()));
+    let _ref_index_override = RefIndexRootOverrideGuard::new(ref_index.clone());
     let file = dir.path().join("sample.rs");
     fs::write(&file, dedup_fixture_content()).unwrap();
     let engine = TokenZeroEngine::new(EngineConfig::for_root(dir.path()));
@@ -483,7 +498,7 @@ fn v1_session_state_resumes_with_zero_watermark() {
 fn resume_revalidates_gced_refs_and_resends_full() {
     let dir = tempdir().unwrap();
     let ref_index = dir.path().join("ref-index");
-    tokenzero_recovery::set_ref_index_root_override(Some(ref_index.clone()));
+    let _ref_index_override = RefIndexRootOverrideGuard::new(ref_index.clone());
     let file = dir.path().join("gc.rs");
     fs::write(&file, dedup_fixture_content()).unwrap();
     let config = EngineConfig::for_root(dir.path());

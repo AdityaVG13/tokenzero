@@ -81,6 +81,8 @@ fn run_sh(command: &str, cwd: &Path) -> Output {
         .env("NO_COLOR", "1")
         .env("CI", "true")
         .env("TERM", "dumb")
+        .env("TOKENZERO_CACHE_PATH", cwd.join("recovery-cache.json"))
+        .env("TOKENZERO_REF_INDEX", "0")
         .output()
         .unwrap()
 }
@@ -110,6 +112,8 @@ fn expand_ref(reference: &str, cwd: &Path) -> String {
         .args(["expand", reference, "--raw"])
         .current_dir(cwd)
         .env("NO_COLOR", "1")
+        .env("TOKENZERO_CACHE_PATH", cwd.join("recovery-cache.json"))
+        .env("TOKENZERO_REF_INDEX", "0")
         .output()
         .unwrap();
     assert!(
