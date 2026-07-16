@@ -151,6 +151,7 @@ NDH6SA~M
 !/scripts/rust_windows_global_rehearsal.ps1
 !/scripts/rust_windows_migrate.ps1
 !/scripts/rust_windows_verify.ps1
+!/scripts/test_windows_migrate_restore.py
 .code-upgrade/
 
 # bv (beads viewer) local config and caches
