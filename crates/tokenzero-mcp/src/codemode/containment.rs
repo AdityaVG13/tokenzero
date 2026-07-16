@@ -735,15 +735,17 @@ fn busy_result(code: &str, message: &str) -> CodeModeResult {
     r
 }
 const STATUS_PREFIXES: &[&str] = &["search:", "describe:"];
+/// API-shaped catalog markers only — bare "status"/"metrics" escape the gate.
 const STATUS_MARKERS: &[&str] = &[
     "codemode.limits",
+    "codemode.status",
+    "containment.status",
     "journaldoctor",
     "journal_doctor",
-    "metrics",
-    "status",
 ];
 const SHELL_MARKERS: &[&str] = &[".shell(", "tz_shell", "\"shell\"", "'shell'"];
-const INDEX_MARKERS: &[&str] = &[".index(", "rebuild", "watch.drain"];
+/// API-shaped index markers only — bare "rebuild" must not steal the scarce pool.
+const INDEX_MARKERS: &[&str] = &[".index(", "watch.drain"];
 
 fn contains_any(text: &str, markers: &[&str]) -> bool {
     markers.iter().any(|marker| text.contains(marker))
@@ -1198,7 +1200,7 @@ mod tests {
             ExecutionClass::Index
         );
         assert_eq!(
-            classify("await rebuild_index()", 32),
+            classify("await zero.token.index({rebuild:true})", 32),
             ExecutionClass::Index
         );
         assert_eq!(
@@ -1208,6 +1210,42 @@ mod tests {
         assert_eq!(
             classify("await zero.token.shell('ls')", 32),
             ExecutionClass::HeavyShell
+        );
+    }
+
+    #[test]
+    fn classify_rejects_bare_status_metrics_rebuild_false_positives() {
+        // Paths / return shapes / prose must not ungate Status or steal Index.
+        assert_eq!(
+            classify(
+                r#"await zero.fs.compound("read", {path: "docs/status.md"})"#,
+                32
+            ),
+            ExecutionClass::Light
+        );
+        assert_eq!(
+            classify(r#"return {status: "ok", metrics: 1}"#, 32),
+            ExecutionClass::Light
+        );
+        assert_eq!(
+            classify(r#"await zero.token.shell("echo status metrics")"#, 32),
+            ExecutionClass::HeavyShell
+        );
+        assert_eq!(
+            classify(r#"return {note: "rebuild later"}"#, 32),
+            ExecutionClass::Light
+        );
+        assert_eq!(
+            classify("await rebuild_index()", 32),
+            ExecutionClass::Light
+        );
+        // API-shaped markers still classify correctly.
+        assert_eq!(classify("codemode.status", 32), ExecutionClass::Status);
+        assert_eq!(classify("search: containment", 32), ExecutionClass::Status);
+        assert_eq!(classify("describe:zero.read", 32), ExecutionClass::Status);
+        assert_eq!(
+            classify("await zero.token.index({rebuild:true})", 32),
+            ExecutionClass::Index
         );
     }
 
