@@ -11,7 +11,8 @@
 //! - Heavy (shell / high-cost): `/tmp/zerostack-codemode-heavy.permit`
 //!
 //! Contention waits then returns retryable `busy` / `machine_permit_busy` —
-//! never a silent ok while a permit is held.
+//! never a silent ok while a permit is held. Fatal permit I/O (EACCES, etc.)
+//! maps to non-retryable `substrate` / `machine_permit_io`.
 //!
 //! ## Multi-tenant default (100 sessions)
 //!
@@ -363,7 +364,7 @@ impl Controller {
             Ok(v) => v,
             Err(e) => {
                 drop(slot);
-                return busy_result("machine_permit_busy", &e);
+                return map_acquire_error(e);
             }
         };
         let result = catch_worker_panic(run);
@@ -399,7 +400,7 @@ impl Controller {
             Ok(v) => v,
             Err(e) => {
                 drop(slot);
-                return busy_result("machine_permit_busy", &e);
+                return map_acquire_error(e);
             }
         };
         let result = catch_worker_panic(run);
@@ -433,7 +434,7 @@ impl Controller {
             Ok(v) => v,
             Err(e) => {
                 drop(slot);
-                return busy_result("machine_permit_busy", &e);
+                return map_acquire_error(e);
             }
         };
         let result = {
@@ -541,7 +542,7 @@ impl MachinePermit {
         slots: usize,
         deadline: Instant,
         command: &str,
-    ) -> Result<Self, String> {
+    ) -> Result<Self, AcquireError> {
         // Always use base/slot-N — even when slots==1 — so mixed concurrency
         // envs cannot stack an exclusive base lock with slot children.
         // Pool size is the caller's requested budget (from env); do not freeze
@@ -557,15 +558,15 @@ impl MachinePermit {
                     match Self::try_create(&path, command) {
                         Ok(permit) => return Ok(permit),
                         Err(TryPermit::Busy) => {}
-                        Err(TryPermit::Fatal(e)) => return Err(e),
+                        Err(TryPermit::Fatal(e)) => return Err(AcquireError::Fatal(e)),
                     }
                 }
             }
             if Instant::now() >= deadline {
-                return Err(format!(
+                return Err(AcquireError::Busy(format!(
                     "codemode permit {} is held by live process(es) across {slots} slots",
                     base.display()
-                ));
+                )));
             }
             // Back off under multi-waiter pressure so 100 idle sessions do not
             // wake-storm the slot directory every 20ms.
@@ -576,24 +577,24 @@ impl MachinePermit {
         }
     }
 
-    fn acquire(path: &Path, deadline: Instant, command: &str) -> Result<Self, String> {
+    fn acquire(path: &Path, deadline: Instant, command: &str) -> Result<Self, AcquireError> {
         let mut attempt = 0u32;
         loop {
             match Self::try_create(path, command) {
                 Ok(permit) => return Ok(permit),
                 Err(TryPermit::Busy) => {
                     if Instant::now() >= deadline {
-                        return Err(format!(
+                        return Err(AcquireError::Busy(format!(
                             "codemode permit {} is held by a live process",
                             path.display()
-                        ));
+                        )));
                     }
                     let sleep_for = permit_backoff(attempt)
                         .min(deadline.saturating_duration_since(Instant::now()));
                     attempt = attempt.saturating_add(1);
                     std::thread::sleep(sleep_for);
                 }
-                Err(TryPermit::Fatal(e)) => return Err(e),
+                Err(TryPermit::Fatal(e)) => return Err(AcquireError::Fatal(e)),
             }
         }
     }
@@ -632,6 +633,23 @@ enum TryPermit {
     Busy,
     Fatal(String),
 }
+
+#[derive(Debug)]
+enum AcquireError {
+    /// Live holder(s) still hold the permit after the wall deadline.
+    Busy(String),
+    /// Non-retryable I/O / policy failure creating the permit (EACCES, etc.).
+    Fatal(String),
+}
+
+impl std::fmt::Display for AcquireError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Busy(message) | Self::Fatal(message) => f.write_str(message),
+        }
+    }
+}
+
 impl Drop for MachinePermit {
     fn drop(&mut self) {
         cleanup_owned(&self.0, &self.1)
@@ -727,12 +745,24 @@ fn catch_worker_panic(run: impl FnOnce() -> CodeModeResult) -> CodeModeResult {
         )
     })
 }
+/// Live-holder timeout → retryable busy; Fatal I/O (EACCES etc.) → substrate.
+fn map_acquire_error(err: AcquireError) -> CodeModeResult {
+    match err {
+        AcquireError::Busy(message) => busy_result("machine_permit_busy", &message),
+        AcquireError::Fatal(message) => substrate_result("machine_permit_io", &message),
+    }
+}
+
 fn busy_result(code: &str, message: &str) -> CodeModeResult {
     let mut r = CodeModeResult::error_with_kind("busy", format!("{code}: {message}"), 0, true);
     r.telemetry.extra = Some(
         json!({"backpressure":{"class":"busy","code":code,"retryable":true,"retry_strategy":"exponential_backoff"}}),
     );
     r
+}
+
+fn substrate_result(code: &str, message: &str) -> CodeModeResult {
+    CodeModeResult::error_with_kind("substrate", format!("{code}: {message}"), 0, false)
 }
 const STATUS_PREFIXES: &[&str] = &["search:", "describe:"];
 /// API-shaped catalog markers only — bare "status"/"metrics" escape the gate.
@@ -1394,4 +1424,81 @@ mod tests {
         drop(after);
         let _ = fs::remove_dir_all(&base);
     }
+
+    #[test]
+    fn map_acquire_error_distinguishes_busy_vs_fatal() {
+        let busy = map_acquire_error(AcquireError::Busy(
+            "codemode permit /tmp/x is held by live process(es) across 1 slots".into(),
+        ));
+        let busy_err = busy
+            .error
+            .as_ref()
+            .expect("busy mapping must produce an error");
+        assert!(
+            busy_err.retryable,
+            "live-holder timeout must stay retryable: {busy_err:?}"
+        );
+        assert_eq!(busy_err.kind, "busy");
+        assert!(
+            busy_err.message.contains("machine_permit_busy"),
+            "unexpected busy mapping: {busy_err:?}"
+        );
+
+        let fatal = map_acquire_error(AcquireError::Fatal(
+            "create codemode permit /tmp/x/slot-0: Permission denied (os error 13)".into(),
+        ));
+        let fatal_err = fatal
+            .error
+            .as_ref()
+            .expect("fatal mapping must produce an error");
+        assert!(
+            !fatal_err.retryable,
+            "Fatal permit I/O must not be retryable: {fatal_err:?}"
+        );
+        assert_eq!(fatal_err.kind, "substrate");
+        assert!(
+            fatal_err.message.contains("machine_permit_io"),
+            "unexpected fatal mapping: {fatal_err:?}"
+        );
+        assert!(
+            !fatal_err.message.contains("machine_permit_busy"),
+            "Fatal must not be labeled busy: {fatal_err:?}"
+        );
+    }
+
+    #[test]
+    fn acquire_slots_returns_fatal_when_parent_is_not_a_directory() {
+        // Parent path is a file → create_dir for slot children fails as Fatal (not Busy).
+        let blocker = std::env::temp_dir().join(format!(
+            "tokenzero-permit-fatal-blocker-{}-{}",
+            std::process::id(),
+            epoch_millis()
+        ));
+        let _ = fs::remove_file(&blocker);
+        let _ = fs::remove_dir_all(&blocker);
+        fs::write(&blocker, b"not-a-directory").expect("write blocker file");
+        let base = blocker.join("nested-permit");
+
+        let err = MachinePermit::acquire_slots(
+            &base,
+            1,
+            Instant::now() + Duration::from_millis(80),
+            "test-fatal",
+        )
+        .expect_err("expected Fatal when permit parent is a file");
+        let _ = fs::remove_file(&blocker);
+
+        match err {
+            AcquireError::Fatal(message) => {
+                assert!(
+                    message.contains("create codemode permit"),
+                    "unexpected Fatal message: {message}"
+                );
+            }
+            AcquireError::Busy(message) => {
+                panic!("I/O failure must be Fatal, not Busy: {message}")
+            }
+        }
+    }
+
 }
