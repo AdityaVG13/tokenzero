@@ -658,3 +658,75 @@ fn tool_metrics_resource_is_served() {
         "slow_threshold_ms must be positive: {metrics:#}"
     );
 }
+
+#[test]
+fn batch_panic_isolates_sibling_responses() {
+    let (_dir, engine) = test_engine();
+    let batch = json!([
+        {
+            "jsonrpc": "2.0",
+            "id": 701,
+            "method": "tokenzero/internal/test-panic",
+            "params": {}
+        },
+        {
+            "jsonrpc": "2.0",
+            "id": 702,
+            "method": "ping",
+            "params": {}
+        }
+    ]);
+    let response = handle_jsonrpc(&engine, &batch.to_string()).unwrap();
+    let parsed = response_json(&response);
+    let responses = parsed
+        .as_array()
+        .unwrap_or_else(|| panic!("expected batch array, got {parsed:#}"));
+    assert_eq!(responses.len(), 2, "{parsed:#}");
+
+    let mut by_id = std::collections::BTreeMap::new();
+    for item in responses {
+        by_id.insert(item["id"].as_i64().unwrap(), item);
+    }
+    assert!(by_id.contains_key(&701), "missing panic id 701: {parsed:#}");
+    assert!(by_id.contains_key(&702), "missing sibling id 702: {parsed:#}");
+
+    assert_structured_error(by_id[&701], -32603, Some("INTERNAL"));
+    assert_eq!(by_id[&701]["error"]["message"], "Internal error");
+    assert!(by_id[&702].get("result").is_some(), "ping must succeed: {parsed:#}");
+    assert!(by_id[&702].get("error").is_none(), "ping must not error: {parsed:#}");
+}
+
+#[test]
+fn batch_panic_preserves_notification_suppression() {
+    let (_dir, engine) = test_engine();
+    // Notification (no id) must stay suppressed even when a sibling panics.
+    let batch = json!([
+        {
+            "jsonrpc": "2.0",
+            "method": "notifications/initialized",
+            "params": {}
+        },
+        {
+            "jsonrpc": "2.0",
+            "id": 701,
+            "method": "tokenzero/internal/test-panic",
+            "params": {}
+        },
+        {
+            "jsonrpc": "2.0",
+            "id": 702,
+            "method": "ping",
+            "params": {}
+        }
+    ]);
+    let response = handle_jsonrpc(&engine, &batch.to_string()).unwrap();
+    let parsed = response_json(&response);
+    let responses = parsed
+        .as_array()
+        .unwrap_or_else(|| panic!("expected batch array, got {parsed:#}"));
+    assert_eq!(responses.len(), 2, "notification must stay suppressed: {parsed:#}");
+    let ids: Vec<_> = responses.iter().map(|item| item["id"].as_i64().unwrap()).collect();
+    assert!(ids.contains(&701), "{parsed:#}");
+    assert!(ids.contains(&702), "{parsed:#}");
+}
+

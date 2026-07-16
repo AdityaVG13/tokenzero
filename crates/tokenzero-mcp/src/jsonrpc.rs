@@ -1,3 +1,5 @@
+use std::panic::{AssertUnwindSafe, catch_unwind};
+
 use serde_json::Value;
 use tokenzero_core::{MCP_SCHEMA_VERSION, McpToolSurface};
 
@@ -96,14 +98,47 @@ fn handle_jsonrpc_batch(engine: &TokenZeroEngine, batch: Vec<Value>) -> Option<V
         ));
     }
 
+    // Isolate panics per batch element so one fault cannot erase sibling
+    // response identities (JSON-RPC batch correlation).
     let responses = batch
         .into_iter()
-        .filter_map(|item| handle_jsonrpc_request(engine, item))
+        .filter_map(|item| handle_jsonrpc_batch_item(engine, item))
         .collect::<Vec<_>>();
     if responses.is_empty() {
         return None;
     }
     Some(Value::Array(responses))
+}
+
+fn handle_jsonrpc_batch_item(engine: &TokenZeroEngine, item: Value) -> Option<Value> {
+    let panic_id = batch_item_response_id(&item);
+    match catch_unwind(AssertUnwindSafe(|| handle_jsonrpc_request(engine, item))) {
+        Ok(response) => response,
+        Err(panic) => Some(jsonrpc_error(
+            panic_id,
+            -32603,
+            "Internal error",
+            JsonRpcErrorData::internal_error(panic_payload_text(panic.as_ref())),
+        )),
+    }
+}
+
+fn batch_item_response_id(item: &Value) -> Value {
+    item.as_object()
+        .and_then(|object| object.get("id"))
+        .filter(|id| is_valid_jsonrpc_id(id))
+        .cloned()
+        .unwrap_or(Value::Null)
+}
+
+fn panic_payload_text(panic: &(dyn std::any::Any + Send)) -> String {
+    if let Some(text) = panic.downcast_ref::<&str>() {
+        (*text).to_string()
+    } else if let Some(text) = panic.downcast_ref::<String>() {
+        text.clone()
+    } else {
+        "unknown panic".to_string()
+    }
 }
 
 macro_rules! rpc_try {
