@@ -10,6 +10,12 @@
 //! - Index (rebuild / watch.drain / `.index(`): `/tmp/zerostack-codemode-index.permit`
 //! - Heavy (shell / high-cost): `/tmp/zerostack-codemode-heavy.permit`
 //!
+//! In-process slot waits are wall-bounded (same `hard_max_wall_ms` as machine
+//! permits) and return retryable busy on deadline — never hang forever.
+//! Analysis / index / heavy use separate in-process active counters so machine
+//! `analysis_max_active` is reachable inside one multiplexed process
+//! (`tokenzero-jn1i`).
+//!
 //! Contention waits then returns retryable `busy` / `machine_permit_busy` —
 //! never a silent ok while a permit is held. Fatal permit I/O (EACCES, etc.)
 //! maps to non-retryable `substrate` / `machine_permit_io`.
@@ -109,7 +115,13 @@ struct BackgroundChild(u64, Option<u32>, bool);
 
 #[derive(Debug, Default)]
 struct State {
+    /// In-process heavy (shell / high-cost) holders — budgeted by `max_active`.
     active_heavy: usize,
+    /// In-process analysis (light) holders — budgeted by `analysis_max_active`
+    /// so machine analysis concurrency is reachable inside one multiplexed process.
+    active_analysis: usize,
+    /// In-process index holders — budgeted by `index_max_active`.
+    active_index: usize,
     queue_depth: usize,
     rejected_count: u64,
     active_started: Option<Instant>,
@@ -346,15 +358,14 @@ impl Controller {
     {
         // Analysis uses the shared machine permit so N concurrent TokenZero
         // (and later FSZero/GraphZero) processes cannot each burn a core on
-        // find/search at once. Share the in-process heavy slot so one process
-        // also cannot overlap analysis with shell work.
-        let slot = match self.acquire_slot(class) {
+        // find/search at once. In-process analysis slots are budgeted separately
+        // from heavy so machine analysis_max_active is reachable in one process
+        // (tokenzero-jn1i); wait is wall-bounded — never hang forever.
+        let deadline = wall_deadline(options);
+        let slot = match self.acquire_slot(class, deadline) {
             Ok(v) => v,
             Err(v) => return v,
         };
-        let deadline = Instant::now()
-            .checked_add(Duration::from_millis(options.hard_max_wall_ms.max(1)))
-            .unwrap_or_else(Instant::now);
         let permit = match MachinePermit::acquire_slots(
             &analysis_permit_path(),
             self.config.analysis_max_active,
@@ -384,13 +395,11 @@ impl Controller {
     {
         // Index rebuild / drain work shares a tighter family-wide slot pool
         // than analysis so concurrent engines cannot stack index CPU.
-        let slot = match self.acquire_slot(class) {
+        let deadline = wall_deadline(options);
+        let slot = match self.acquire_slot(class, deadline) {
             Ok(v) => v,
             Err(v) => return v,
         };
-        let deadline = Instant::now()
-            .checked_add(Duration::from_millis(options.hard_max_wall_ms.max(1)))
-            .unwrap_or_else(Instant::now);
         let permit = match MachinePermit::acquire_slots(
             &index_permit_path(),
             self.config.index_max_active,
@@ -418,13 +427,11 @@ impl Controller {
     where
         F: FnOnce() -> CodeModeResult,
     {
-        let slot = match self.acquire_slot(class) {
+        let deadline = wall_deadline(options);
+        let slot = match self.acquire_slot(class, deadline) {
             Ok(v) => v,
             Err(v) => return v,
         };
-        let deadline = Instant::now()
-            .checked_add(Duration::from_millis(options.hard_max_wall_ms.max(1)))
-            .unwrap_or_else(Instant::now);
         let permit = match MachinePermit::acquire_slots(
             &heavy_permit_path(),
             self.config.max_active,
@@ -449,37 +456,140 @@ impl Controller {
         drop(permit);
         result
     }
+
+    fn class_limit(&self, class: ExecutionClass) -> usize {
+        match class {
+            ExecutionClass::Status => 0,
+            ExecutionClass::Light => self.config.analysis_max_active,
+            ExecutionClass::Index => self.config.index_max_active,
+            ExecutionClass::HeavyShell | ExecutionClass::HeavyEstimatedCost => {
+                self.config.max_active
+            }
+        }
+    }
+
+    fn active_for(state: &State, class: ExecutionClass) -> usize {
+        match class {
+            ExecutionClass::Status => 0,
+            ExecutionClass::Light => state.active_analysis,
+            ExecutionClass::Index => state.active_index,
+            ExecutionClass::HeavyShell | ExecutionClass::HeavyEstimatedCost => state.active_heavy,
+        }
+    }
+
+    fn bump_active(state: &mut State, class: ExecutionClass, delta: isize) {
+        let counter = match class {
+            ExecutionClass::Status => return,
+            ExecutionClass::Light => &mut state.active_analysis,
+            ExecutionClass::Index => &mut state.active_index,
+            ExecutionClass::HeavyShell | ExecutionClass::HeavyEstimatedCost => {
+                &mut state.active_heavy
+            }
+        };
+        if delta >= 0 {
+            *counter = counter.saturating_add(delta as usize);
+        } else {
+            *counter = counter.saturating_sub((-delta) as usize);
+        }
+    }
+
+    fn queue_busy_code(class: ExecutionClass, full: bool) -> &'static str {
+        match (class, full) {
+            (ExecutionClass::Light, true) => "analysis_queue_full",
+            (ExecutionClass::Light, false) => "analysis_queue_busy",
+            (ExecutionClass::Index, true) => "index_queue_full",
+            (ExecutionClass::Index, false) => "index_queue_busy",
+            (ExecutionClass::HeavyShell | ExecutionClass::HeavyEstimatedCost, true) => {
+                "heavy_queue_full"
+            }
+            (ExecutionClass::HeavyShell | ExecutionClass::HeavyEstimatedCost, false) => {
+                "heavy_queue_busy"
+            }
+            (ExecutionClass::Status, _) => "heavy_queue_busy",
+        }
+    }
+
+    /// Acquire an in-process class slot, waiting at most until `deadline`.
+    ///
+    /// Analysis / index / heavy use separate active counters so light work is not
+    /// serialized behind `heavy max_active` (default 1). On wall deadline return
+    /// retryable busy — never hang forever ahead of the machine permit wait
+    /// (tokenzero-jn1i).
     #[allow(clippy::result_large_err)]
-    fn acquire_slot(&self, class: ExecutionClass) -> Result<HeavySlot<'_>, CodeModeResult> {
+    fn acquire_slot(
+        &self,
+        class: ExecutionClass,
+        deadline: Instant,
+    ) -> Result<HeavySlot<'_>, CodeModeResult> {
+        let limit = self.class_limit(class).max(1);
         let mut s = self.lock();
-        if s.active_heavy >= self.config.max_active {
+        if Self::active_for(&s, class) >= limit {
             if s.queue_depth >= self.config.max_queue_depth {
                 s.rejected_count = s.rejected_count.saturating_add(1);
                 return Err(busy_result(
-                    "heavy_queue_full",
-                    "bounded CodeMode heavy queue is full; retry with backoff",
+                    Self::queue_busy_code(class, true),
+                    "bounded CodeMode in-process queue is full; retry with backoff",
                 ));
             }
             s.queue_depth += 1;
-            while s.active_heavy >= self.config.max_active {
-                s = self.capacity.wait(s).unwrap_or_else(|p| p.into_inner());
+            loop {
+                if Self::active_for(&s, class) < limit {
+                    break;
+                }
+                let now = Instant::now();
+                if now >= deadline {
+                    s.queue_depth -= 1;
+                    s.rejected_count = s.rejected_count.saturating_add(1);
+                    return Err(busy_result(
+                        Self::queue_busy_code(class, false),
+                        "in-process CodeMode slot wait hit wall deadline; retry with backoff",
+                    ));
+                }
+                let wait = deadline.saturating_duration_since(now);
+                let (guard, wait_result) = self
+                    .capacity
+                    .wait_timeout(s, wait)
+                    .unwrap_or_else(|p| p.into_inner());
+                s = guard;
+                if wait_result.timed_out() && Self::active_for(&s, class) >= limit {
+                    s.queue_depth -= 1;
+                    s.rejected_count = s.rejected_count.saturating_add(1);
+                    return Err(busy_result(
+                        Self::queue_busy_code(class, false),
+                        "in-process CodeMode slot wait hit wall deadline; retry with backoff",
+                    ));
+                }
             }
             s.queue_depth -= 1;
         }
-        s.active_heavy += 1;
+        Self::bump_active(&mut s, class, 1);
         s.active_started = Some(Instant::now());
         s.operation_class = Some(class);
-        s.child_pid = None;
-        s.child_pgid = None;
-        s.cancellation_state = Some("not_cancelled");
-        Ok(HeavySlot(self))
+        if matches!(
+            class,
+            ExecutionClass::HeavyShell | ExecutionClass::HeavyEstimatedCost
+        ) {
+            s.child_pid = None;
+            s.child_pgid = None;
+            s.cancellation_state = Some("not_cancelled");
+        }
+        Ok(HeavySlot {
+            controller: self,
+            class,
+        })
     }
     fn snapshot(&self) -> Value {
         let s = self.lock();
+        let worker_count = s
+            .active_heavy
+            .saturating_add(s.active_analysis)
+            .saturating_add(s.active_index);
         json!({
             "queue_depth": s.queue_depth,
             "active_heavy": s.active_heavy,
-            "worker_count": s.active_heavy,
+            "active_analysis": s.active_analysis,
+            "active_index": s.active_index,
+            "worker_count": worker_count,
             "analysis_max_active": self.config.analysis_max_active,
             "index_max_active": self.config.index_max_active,
             "heavy_max_active": self.config.max_active,
@@ -493,17 +603,37 @@ impl Controller {
         })
     }
 }
-struct HeavySlot<'a>(&'a Controller);
+#[derive(Debug)]
+struct HeavySlot<'a> {
+    controller: &'a Controller,
+    class: ExecutionClass,
+}
 impl Drop for HeavySlot<'_> {
     fn drop(&mut self) {
-        let mut s = self.0.lock();
-        let owned_pgid = (s.cancellation_state == Some("running"))
-            .then_some(s.child_pgid)
-            .flatten();
-        s.active_heavy = s.active_heavy.saturating_sub(1);
-        if s.active_heavy == 0 {
+        let mut s = self.controller.lock();
+        let owned_pgid = matches!(
+            self.class,
+            ExecutionClass::HeavyShell | ExecutionClass::HeavyEstimatedCost
+        )
+        .then(|| {
+            (s.cancellation_state == Some("running"))
+                .then_some(s.child_pgid)
+                .flatten()
+        })
+        .flatten();
+        Controller::bump_active(&mut s, self.class, -1);
+        let idle = s.active_heavy == 0 && s.active_analysis == 0 && s.active_index == 0;
+        if idle {
             s.active_started = None;
             s.operation_class = None;
+            s.child_pid = None;
+            s.child_pgid = None;
+            s.cancellation_state = None;
+        } else if matches!(
+            self.class,
+            ExecutionClass::HeavyShell | ExecutionClass::HeavyEstimatedCost
+        ) && s.active_heavy == 0
+        {
             s.child_pid = None;
             s.child_pgid = None;
             s.cancellation_state = None;
@@ -512,7 +642,7 @@ impl Drop for HeavySlot<'_> {
         if let Some(pgid) = owned_pgid {
             terminate_owned_process_group(pgid);
         }
-        self.0.capacity.notify_one();
+        self.controller.capacity.notify_all();
     }
 }
 
@@ -759,6 +889,12 @@ fn busy_result(code: &str, message: &str) -> CodeModeResult {
         json!({"backpressure":{"class":"busy","code":code,"retryable":true,"retry_strategy":"exponential_backoff"}}),
     );
     r
+}
+
+fn wall_deadline(options: &CodeModeOptions) -> Instant {
+    Instant::now()
+        .checked_add(Duration::from_millis(options.hard_max_wall_ms.max(1)))
+        .unwrap_or_else(Instant::now)
 }
 
 fn substrate_result(code: &str, message: &str) -> CodeModeResult {
@@ -1570,6 +1706,118 @@ mod tests {
         assert!(
             !fatal_err.message.contains("machine_permit_busy"),
             "Fatal must not be labeled busy: {fatal_err:?}"
+        );
+    }
+
+    #[test]
+    fn in_process_analysis_slot_wait_returns_busy_on_wall_deadline() {
+        let ctrl = Controller::new(Config {
+            max_active: 1,
+            max_queue_depth: 8,
+            cost_threshold: 32,
+            analysis_max_active: 1,
+            index_max_active: 1,
+        });
+        let hold = ctrl
+            .acquire_slot(
+                ExecutionClass::Light,
+                Instant::now() + Duration::from_secs(30),
+            )
+            .expect("holder acquires analysis slot");
+        let started = Instant::now();
+        let err = ctrl
+            .acquire_slot(
+                ExecutionClass::Light,
+                Instant::now() + Duration::from_millis(80),
+            )
+            .expect_err("contender must not hang past wall deadline");
+        let elapsed = started.elapsed();
+        drop(hold);
+        let busy = err.error.as_ref().expect("busy error");
+        assert!(busy.retryable, "deadline busy must be retryable: {busy:?}");
+        assert_eq!(busy.kind, "busy");
+        assert!(
+            busy.message.contains("analysis_queue_busy"),
+            "unexpected busy code: {busy:?}"
+        );
+        assert!(
+            elapsed < Duration::from_millis(1500),
+            "wall-bounded wait must return promptly, took {elapsed:?}"
+        );
+    }
+
+    #[test]
+    fn analysis_in_process_slots_independent_of_heavy_max_active() {
+        let ctrl = Controller::new(Config {
+            max_active: 1,
+            max_queue_depth: 8,
+            cost_threshold: 32,
+            analysis_max_active: 2,
+            index_max_active: 1,
+        });
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let heavy = ctrl
+            .acquire_slot(ExecutionClass::HeavyShell, deadline)
+            .expect("heavy slot");
+        let a = ctrl
+            .acquire_slot(ExecutionClass::Light, deadline)
+            .expect("analysis must not wait on heavy max_active=1");
+        let b = ctrl
+            .acquire_slot(ExecutionClass::Light, deadline)
+            .expect("second analysis slot within analysis_max_active");
+        let contested = ctrl.acquire_slot(
+            ExecutionClass::Light,
+            Instant::now() + Duration::from_millis(80),
+        );
+        assert!(
+            contested.is_err(),
+            "third analysis must busy at analysis_max_active=2: {contested:?}"
+        );
+        drop(a);
+        drop(b);
+        drop(heavy);
+    }
+
+    #[test]
+    fn in_process_slot_wait_wakes_when_holder_releases() {
+        let ctrl = Arc::new(Controller::new(Config {
+            max_active: 1,
+            max_queue_depth: 8,
+            cost_threshold: 32,
+            analysis_max_active: 1,
+            index_max_active: 1,
+        }));
+        let hold = ctrl
+            .acquire_slot(
+                ExecutionClass::Index,
+                Instant::now() + Duration::from_secs(30),
+            )
+            .expect("index holder");
+        let ctrl_waiter = Arc::clone(&ctrl);
+        let waiter = thread::spawn(move || {
+            let slot = ctrl_waiter
+                .acquire_slot(
+                    ExecutionClass::Index,
+                    Instant::now() + Duration::from_secs(2),
+                )
+                .expect("waiter must acquire after release");
+            drop(slot);
+        });
+        thread::sleep(Duration::from_millis(50));
+        drop(hold);
+        waiter.join().expect("waiter thread");
+    }
+
+    #[test]
+    fn snapshot_exposes_separate_in_process_actives() {
+        let snap = snapshot();
+        assert!(
+            snap.get("active_analysis").and_then(|v| v.as_u64()).is_some(),
+            "snapshot must expose active_analysis: {snap}"
+        );
+        assert!(
+            snap.get("active_index").and_then(|v| v.as_u64()).is_some(),
+            "snapshot must expose active_index: {snap}"
         );
     }
 

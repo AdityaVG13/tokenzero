@@ -35,5 +35,6 @@ Example on a 16-core host: default analysis slots = 4, default index slots = 2. 
 4. Identical in-flight plans may coalesce under a bounded follower set; overflow is also retryable busy.
 5. Status / describe / containment snapshot probes stay ungated. Expand-only ref materialization (`zero.expand` / `zero.token.expand` / `expandMany` without find/search/FS work) is also ungated so recovery cannot peg an analysis slot and block family finds (`tokenzero-wawf`). Mixed expand+find plans remain analysis-gated.
 6. Explicit `*_CONCURRENCY` env values are clamped to `*_CONCURRENCY_CAP` (`min(explicit, cap)`).
+7. In-process slot waits (analysis / index / heavy) share the plan wall deadline and return retryable busy on expiry — never an unbounded Condvar wait ahead of the machine permit (`tokenzero-jn1i`). Analysis and index use separate in-process active counters from heavy so machine `analysis_max_active` is reachable inside one multiplexed process.
 
 TokenZero owns this contract (`tokenzero-npia`, `tokenzero-qisj`). FSZero (`fszero-gzw`) and GraphZero (`graphzero-01vw`) adopt it.
