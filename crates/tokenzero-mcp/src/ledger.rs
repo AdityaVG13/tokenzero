@@ -10,7 +10,6 @@
 //! Queries scan both generations and ignore malformed lines, including a torn
 //! final line.
 
-pub use crate::config::{TELEMETRY_ENV, resolve_telemetry};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
@@ -297,38 +296,12 @@ fn read_records(path: &Path) -> io::Result<Vec<LedgerRecord>> {
     Ok(records)
 }
 
-pub const TELEMETRY_SCHEMA: &str = "tokenzero.telemetry.v1";
-
-/// The complete shareable telemetry payload. No identifiers or content are included.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct TelemetryPayload {
-    pub schema: &'static str,
-    pub version: &'static str,
-    pub raw_tokens: u64,
-    pub saved_tokens: u64,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct TelemetryInspection {
-    pub enabled: bool,
-    pub exporter: &'static str,
-    pub payload: TelemetryPayload,
-}
-
-/// Summarize both ledger generations and build the exact dry-run payload.
-pub fn inspect_telemetry(path: &Path, enabled: bool) -> io::Result<TelemetryInspection> {
-    let (raw_tokens, saved_tokens) = aggregate_token_mass(path)?;
-    Ok(TelemetryInspection {
-        enabled,
-        exporter: "none",
-        payload: TelemetryPayload {
-            schema: TELEMETRY_SCHEMA,
-            version: env!("CARGO_PKG_VERSION"),
-            raw_tokens,
-            saved_tokens,
-        },
-    })
-}
+// Shareable usage telemetry lives in `usage_telemetry` (opt-in, three-field only).
+pub use crate::config::{TELEMETRY_ENV, resolve_telemetry, telemetry_env_enabled};
+pub use crate::usage_telemetry::{
+    ExecutionPath, TelemetryInspection, UsageRecord, inspect_usage_telemetry as inspect_telemetry,
+    usage_telemetry_path_for_cache,
+};
 
 /// Summarize every ledger entry's raw and prevented token mass.
 pub fn aggregate_token_mass(path: &Path) -> io::Result<(u64, u64)> {

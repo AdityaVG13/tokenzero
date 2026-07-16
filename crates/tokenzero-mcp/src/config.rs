@@ -67,8 +67,9 @@ pub struct EngineConfig {
     pub fetch_deny_hosts: Vec<String>,
     /// Installed MCP tool surface (`TOKENZERO_MCP_TOOL_SURFACE`).
     pub tool_surface: McpToolSurface,
-    /// Programmatic shareable-telemetry choice; `None` defers to the environment.
-    /// Permission is inspect-only because TokenZero has no telemetry exporter.
+    /// Programmatic shareable usage-telemetry choice; `None` defers to the environment.
+    /// When enabled, only `{execution_path, raw_tokens, spent_tokens}` may be recorded.
+    /// There is no exporter/upload path (`exporter=none`).
     pub telemetry_enabled: Option<bool>,
 }
 
@@ -125,7 +126,7 @@ pub fn telemetry_env_enabled(value: Option<&str>) -> bool {
     value.is_some_and(|value| matches_env_value(value, &["1", "on", "true", "yes"]))
 }
 
-/// Resolve shareable telemetry permission from highest to lowest precedence.
+/// Resolve shareable usage-telemetry permission from highest to lowest precedence.
 pub fn resolve_telemetry(
     cli_opt_in: bool,
     cli_opt_out: bool,

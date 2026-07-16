@@ -213,6 +213,7 @@ fn make_engine_for_root_with_options(root: PathBuf, options: &CodeModeOptions) -
         max_visible_tokens: options.max_visible_tokens,
         mode: Mode::Auto,
         shell_timeout: shell_timeout_from_secs(options.timeout_seconds),
+        telemetry_enabled: options.telemetry_enabled,
         ..EngineConfig::for_root(&root)
     };
     // Share session crash-only health when the MCP call path provided one so
@@ -1663,6 +1664,13 @@ fn finalize_codemode_result(
                 finalized.visible_ack.trim_end()
             );
         }
+        let enabled = crate::usage_telemetry_enabled(options.telemetry_enabled);
+        crate::record_codemode_accounting(
+            &engine.config.cache_path,
+            enabled,
+            finalized.telemetry.raw_tokens(),
+            finalized.telemetry.visible_tokens(),
+        );
         finalized
     }
 }
