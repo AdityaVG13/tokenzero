@@ -5,7 +5,7 @@
 //! Sibling engines (TokenZero, FSZero, GraphZero) and the ZeroStack hub must
 //! share these paths so concurrent CodeMode processes cannot stack CPU:
 //!
-//! - Status/health/describe: ungated
+//! - Status/health/describe/expand-only recovery: ungated
 //! - Analysis (light find/search/plans): `/tmp/zerostack-codemode-analysis.permit`
 //! - Index (rebuild / watch.drain / `.index(`): `/tmp/zerostack-codemode-index.permit`
 //! - Heavy (shell / high-cost): `/tmp/zerostack-codemode-heavy.permit`
@@ -776,9 +776,43 @@ const STATUS_MARKERS: &[&str] = &[
 const SHELL_MARKERS: &[&str] = &[".shell(", "tz_shell", "\"shell\"", "'shell'"];
 /// API-shaped index markers only — bare "rebuild" must not steal the scarce pool.
 const INDEX_MARKERS: &[&str] = &[".index(", "watch.drain"];
+/// API-shaped expand / expandMany markers — ref materialization, not analysis.
+const EXPAND_MARKERS: &[&str] = &[
+    "zero.token.expand",
+    "zero.expand",
+    ".expand(",
+    "zero.token.expandmany",
+    "zero.expandmany",
+    ".expandmany(",
+    "expand_many(",
+];
+/// When present alongside expand, keep the plan analysis-gated (find/search/FS).
+const ANALYSIS_WORK_MARKERS: &[&str] = &[
+    ".find(",
+    ".grep(",
+    ".glob(",
+    ".tree(",
+    ".read(",
+    ".compound(",
+    ".blast(",
+    ".orient(",
+    ".callers(",
+    ".delta(",
+    "zero.token.find",
+    "zero.find",
+    "zero.token.grep",
+    "zero.grep",
+];
 
 fn contains_any(text: &str, markers: &[&str]) -> bool {
     markers.iter().any(|marker| text.contains(marker))
+}
+
+/// Expand-only recovery: materialize `tz://` / `fz://` / `gz://` refs without
+/// holding the machine-wide analysis permit (tokenzero-wawf). Mixed expand+find
+/// plans stay Light so search still shares the analysis slot pool.
+fn is_expand_recovery_plan(p: &str) -> bool {
+    contains_any(p, EXPAND_MARKERS) && !contains_any(p, ANALYSIS_WORK_MARKERS)
 }
 
 fn classify(plan: &str, cost_threshold: usize) -> ExecutionClass {
@@ -793,6 +827,9 @@ fn classify(plan: &str, cost_threshold: usize) -> ExecutionClass {
     }
     if contains_any(&p, INDEX_MARKERS) {
         return ExecutionClass::Index;
+    }
+    if is_expand_recovery_plan(&p) {
+        return ExecutionClass::Status;
     }
     let cost = p.matches("zero.").count() + p.matches("tz_").count() + p.matches("method").count();
     if cost > cost_threshold {
@@ -1038,6 +1075,76 @@ mod tests {
             "status/search catalog plans must stay ungated: {result:?}"
         );
         drop(holder);
+    }
+
+    #[test]
+    fn expand_only_plans_bypass_analysis_permit() {
+        let path = analysis_permit_path();
+        let _ = fs::remove_dir_all(&path);
+        let slots = default_analysis_concurrency().max(1);
+        let holders: Vec<_> = (0..slots)
+            .map(|idx| {
+                MachinePermit::acquire_slots(
+                    &path,
+                    slots,
+                    Instant::now() + Duration::from_secs(5),
+                    &format!("test-expand-bypass-holder-{idx}"),
+                )
+                .unwrap_or_else(|e| panic!("pre-hold analysis slot {idx}/{slots}: {e}"))
+            })
+            .collect();
+
+        let result = execute(
+            r#"return await zero.expand("tz://blob/deadbeef")"#,
+            &CodeModeOptions::default(),
+            || CodeModeResult::completed(json!({"text": "ok"}), Vec::new(), 0, 0, 0),
+        );
+        assert!(
+            result.error.is_none(),
+            "expand-only recovery must not wait on analysis permit: {result:?}"
+        );
+        drop(holders);
+    }
+
+    #[test]
+    fn classify_expand_only_as_status_keeps_mixed_light() {
+        assert_eq!(
+            classify(r#"return await zero.expand("tz://blob/abc")"#, 32),
+            ExecutionClass::Status
+        );
+        assert_eq!(
+            classify(r#"return await zero.token.expand(ref)"#, 32),
+            ExecutionClass::Status
+        );
+        assert_eq!(
+            classify(
+                r#"return await zero.token.expandMany(["tz://blob/a","tz://blob/b"])"#,
+                32
+            ),
+            ExecutionClass::Status
+        );
+        assert_eq!(
+            classify(
+                r#"const e = await zero.expand(c.ref); return e;"#,
+                32
+            ),
+            ExecutionClass::Status
+        );
+        // Expand + find/search must stay analysis-gated.
+        assert_eq!(
+            classify(
+                r#"const hits = await zero.find("x"); return await zero.expand(hits.ref);"#,
+                32
+            ),
+            ExecutionClass::Light
+        );
+        assert_eq!(
+            classify(
+                r#"await zero.fs.compound("read", {path: "src/expand.rs"})"#,
+                32
+            ),
+            ExecutionClass::Light
+        );
     }
 
     #[test]

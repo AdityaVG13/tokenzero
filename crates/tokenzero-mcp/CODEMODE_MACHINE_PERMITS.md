@@ -6,7 +6,7 @@ Canonical family-wide ambient CPU budget contract for TokenZero, FSZero, GraphZe
 
 | Class | Default path | Default concurrency | Env (TokenZero) |
 |-------|--------------|---------------------|-----------------|
-| Status / describe / containment snapshot | ungated | n/a | n/a |
+| Status / describe / containment snapshot / expand-only recovery | ungated | n/a | n/a |
 | Analysis (light find/search/plans) | `/tmp/zerostack-codemode-analysis.permit` | `max(1, cores/4)` soft-capped at 8 | `TOKENZERO_CODEMODE_ANALYSIS_PERMIT`, `TOKENZERO_CODEMODE_ANALYSIS_CONCURRENCY`, `TOKENZERO_CODEMODE_ANALYSIS_CONCURRENCY_CAP` |
 | Index (rebuild / watch.drain / `.index(`) | `/tmp/zerostack-codemode-index.permit` | `max(1, cores/8)` soft-capped at 2 | `TOKENZERO_CODEMODE_INDEX_PERMIT`, `TOKENZERO_CODEMODE_INDEX_CONCURRENCY`, `TOKENZERO_CODEMODE_INDEX_CONCURRENCY_CAP` |
 | Heavy (shell / high-cost plans) | `/tmp/zerostack-codemode-heavy.permit` | 1 | `TOKENZERO_CODEMODE_HEAVY_PERMIT`, `TOKENZERO_CODEMODE_HEAVY_CONCURRENCY` |
@@ -33,7 +33,7 @@ Example on a 16-core host: default analysis slots = 4, default index slots = 2. 
 2. Dead holders are reclaimed via pid liveness checks; incomplete dirs reclaim after a short grace. A live legacy exclusive permit at `base` (pid/owner directly under base) blocks all slots until reclaimed or released.
 3. Acquire waits until the wall deadline, then returns retryable busy — never silent success while the permit is held.
 4. Identical in-flight plans may coalesce under a bounded follower set; overflow is also retryable busy.
-5. Status / describe / containment snapshot probes stay ungated.
+5. Status / describe / containment snapshot probes stay ungated. Expand-only ref materialization (`zero.expand` / `zero.token.expand` / `expandMany` without find/search/FS work) is also ungated so recovery cannot peg an analysis slot and block family finds (`tokenzero-wawf`). Mixed expand+find plans remain analysis-gated.
 6. Explicit `*_CONCURRENCY` env values are clamped to `*_CONCURRENCY_CAP` (`min(explicit, cap)`).
 
 TokenZero owns this contract (`tokenzero-npia`, `tokenzero-qisj`). FSZero (`fszero-gzw`) and GraphZero (`graphzero-01vw`) adopt it.
