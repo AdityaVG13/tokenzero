@@ -191,7 +191,27 @@ def comparison_reasons(previous: dict[str, Any], current: dict[str, Any]) -> lis
             )
     if previous.get("methodology") != current.get("methodology"):
         reasons.append("benchmark methodology differs or is missing")
+    previous_workloads = {row["workload"] for row in previous["compression"]["workloads"]}
+    current_workloads = {row["workload"] for row in current["compression"]["workloads"]}
+    if previous_workloads != current_workloads:
+        missing = sorted(previous_workloads - current_workloads)
+        added = sorted(current_workloads - previous_workloads)
+        if missing:
+            reasons.append(f"compression workloads missing: {', '.join(missing)}")
+        if added:
+            reasons.append(f"compression workloads added: {', '.join(added)}")
     return reasons
+
+
+def _savings_pct(raw_tokens: int, visible_tokens: int) -> float:
+    return 100.0 * (raw_tokens - visible_tokens) / raw_tokens
+
+
+def _recomputed_headline_savings(snapshot: dict[str, Any]) -> float:
+    rows = snapshot["compression"]["workloads"]
+    raw_tokens = sum(int(row["raw_tokens"]) for row in rows)
+    visible_tokens = sum(int(row["visible_tokens"]) for row in rows)
+    return _savings_pct(raw_tokens, visible_tokens)
 
 
 def trend(previous: dict[str, Any] | None, current: dict[str, Any]) -> dict[str, Any]:
@@ -201,15 +221,27 @@ def trend(previous: dict[str, Any] | None, current: dict[str, Any]) -> dict[str,
     if reasons:
         return {"previous_snapshot": previous["snapshot_id"], "comparable": False,
                 "non_comparable_reasons": reasons, "deltas": {}, "losses": []}
+    previous_headline = _recomputed_headline_savings(previous)
+    current_headline = _recomputed_headline_savings(current)
     deltas: dict[str, Any] = {
-        "headline_savings_pct": round(
-            float(current["compression"]["totals"]["savings_pct"])
-            - float(previous["compression"]["totals"]["savings_pct"]), 6),
+        "headline_savings_pct": round(current_headline - previous_headline, 6),
+        "workload_savings_pct": {},
         "boot_tokens": {}, "expand_p50_ms": {},
     }
     losses: list[str] = []
     if deltas["headline_savings_pct"] < 0:
         losses.append(f"headline savings fell {abs(deltas['headline_savings_pct']):.3f} percentage points")
+    previous_workloads = {row["workload"]: row for row in previous["compression"]["workloads"]}
+    for row in current["compression"]["workloads"]:
+        prior = previous_workloads[row["workload"]]
+        prior_savings = _savings_pct(int(prior["raw_tokens"]), int(prior["visible_tokens"]))
+        current_savings = _savings_pct(int(row["raw_tokens"]), int(row["visible_tokens"]))
+        delta = round(current_savings - prior_savings, 6)
+        deltas["workload_savings_pct"][row["workload"]] = delta
+        if delta < 0:
+            losses.append(
+                f"{row['workload']} savings fell {abs(delta):.3f} percentage points"
+            )
     previous_boot = {row["corpus"]: row for row in previous["boot"]}
     for row in current["boot"]:
         prior = previous_boot.get(row["corpus"])

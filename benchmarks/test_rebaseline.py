@@ -17,6 +17,8 @@ from benchmarks import rebaseline as R
 
 class RebaselineTests(unittest.TestCase):
     def snapshot(self, snapshot_id: str, savings: float, boot: int, expand: float) -> dict[str, Any]:
+        raw_tokens = 100
+        visible_tokens = int(round(raw_tokens * (1.0 - savings / 100.0)))
         return {
             "snapshot_id": snapshot_id,
             "environment": {
@@ -29,14 +31,14 @@ class RebaselineTests(unittest.TestCase):
                 "workloads": [
                     {
                         "workload": "read",
-                        "raw_tokens": 100,
-                        "visible_tokens": 10,
+                        "raw_tokens": raw_tokens,
+                        "visible_tokens": visible_tokens,
                         "savings_pct": savings,
                     }
                 ],
                 "totals": {
-                    "raw_tokens": 100,
-                    "visible_tokens": 10,
+                    "raw_tokens": raw_tokens,
+                    "visible_tokens": visible_tokens,
                     "savings_pct": savings,
                 },
             },
@@ -87,7 +89,49 @@ class RebaselineTests(unittest.TestCase):
         self.assertEqual(result["deltas"]["headline_savings_pct"], -2.0)
         self.assertEqual(result["deltas"]["boot_tokens"]["repository"], 3)
         self.assertEqual(result["deltas"]["expand_p50_ms"]["1KB"], 1.5)
-        self.assertEqual(len(result["losses"]), 3)
+        self.assertEqual(result["deltas"]["workload_savings_pct"]["read"], -2.0)
+        self.assertEqual(len(result["losses"]), 4)
+
+    def test_trend_rejects_headline_gain_with_workload_floor_loss(self) -> None:
+        previous = self.snapshot("before", 90.0, 21, 3.0)
+        previous["compression"] = {
+            "workloads": [
+                {"workload": "directory listing", "raw_tokens": 1000, "visible_tokens": 100, "savings_pct": 90.0},
+                {"workload": "cargo test", "raw_tokens": 1000, "visible_tokens": 900, "savings_pct": 10.0},
+            ],
+            "totals": {"raw_tokens": 2000, "visible_tokens": 1000, "savings_pct": 50.0},
+        }
+        current = self.snapshot("after", 50.0, 21, 3.0)
+        current["compression"] = {
+            "workloads": [
+                {"workload": "directory listing", "raw_tokens": 1000, "visible_tokens": 50, "savings_pct": 95.0},
+                {"workload": "cargo test", "raw_tokens": 1000, "visible_tokens": 920, "savings_pct": 8.0},
+            ],
+            # Published totals can lie; trend recomputes from workload rows.
+            "totals": {"raw_tokens": 2000, "visible_tokens": 1000, "savings_pct": 50.0},
+        }
+        result = R.trend(previous, current)
+        self.assertTrue(result["comparable"])
+        self.assertGreater(result["deltas"]["headline_savings_pct"], 0)
+        self.assertLess(result["deltas"]["workload_savings_pct"]["cargo test"], 0)
+        self.assertTrue(any("cargo test" in loss and "savings fell" in loss for loss in result["losses"]))
+
+    def test_trend_requires_identical_workload_row_sets(self) -> None:
+        previous = self.snapshot("before", 90.0, 21, 3.0)
+        current = self.snapshot("after", 91.0, 21, 3.0)
+        current["compression"]["workloads"] = [
+            {"workload": "read", "raw_tokens": 100, "visible_tokens": 9, "savings_pct": 91.0},
+            {"workload": "find", "raw_tokens": 100, "visible_tokens": 10, "savings_pct": 90.0},
+        ]
+        current["compression"]["totals"] = {
+            "raw_tokens": 200,
+            "visible_tokens": 19,
+            "savings_pct": 90.5,
+        }
+        result = R.trend(previous, current)
+        self.assertFalse(result["comparable"])
+        self.assertEqual(result["deltas"], {})
+        self.assertTrue(any("compression workloads added: find" in reason for reason in result["non_comparable_reasons"]))
 
     def test_write_outputs_keeps_history_and_current_report(self) -> None:
         snapshot = self.snapshot("stored", 90.0, 21, 3.0)
