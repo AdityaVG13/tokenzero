@@ -6,7 +6,8 @@ use std::cell::RefCell;
 use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
-use std::sync::{Mutex, OnceLock};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Condvar, Mutex, OnceLock};
 use std::time::Duration;
 use tokenzero_core::{
     Mode, ToolResponse, count_tokens, detect_content_type, pack_to_token_boundary_with_char_limit,
@@ -352,6 +353,9 @@ fn quickjs_plan_requests_mutation(plan: &str) -> bool {
 struct JsExecutionState {
     ops: usize,
     physical_ops: usize,
+    parallel_groups: usize,
+    in_flight: usize,
+    wave_peak: usize,
     visible_tokens: usize,
     raw_tokens: usize,
     prevented_read_bytes: usize,
@@ -359,6 +363,52 @@ struct JsExecutionState {
     steps: Vec<ExecutionStep>,
     started_ms: u128,
     limits: CodeModeLimits,
+}
+
+/// Bounded concurrent host-op gate for QuickJS Promise.all fan-out.
+struct ParallelWidthGate {
+    active: Mutex<usize>,
+    cv: Condvar,
+    max: usize,
+}
+
+impl ParallelWidthGate {
+    fn new(max: usize) -> Self {
+        Self {
+            active: Mutex::new(0),
+            cv: Condvar::new(),
+            max: max.max(1),
+        }
+    }
+
+    fn acquire(&self) {
+        let mut active = self.active.lock().unwrap_or_else(|e| e.into_inner());
+        while *active >= self.max {
+            active = self.cv.wait(active).unwrap_or_else(|e| e.into_inner());
+        }
+        *active += 1;
+    }
+
+    fn release(&self) {
+        let mut active = self.active.lock().unwrap_or_else(|e| e.into_inner());
+        *active = active.saturating_sub(1);
+        self.cv.notify_one();
+    }
+}
+
+struct AsyncHostJob {
+    /// `None` while running; `Some(json)` when the worker finishes.
+    result: Mutex<Option<String>>,
+    method: String,
+    /// True when begin reserved ops / in_flight (real scheduled work).
+    tracks_wave: bool,
+    applied: Mutex<bool>,
+}
+
+struct AsyncHostRuntime {
+    next_id: AtomicU64,
+    jobs: Mutex<HashMap<u64, Arc<AsyncHostJob>>>,
+    gate: Arc<ParallelWidthGate>,
 }
 
 fn wall_clock_limit_error(elapsed: u64, limits: &CodeModeLimits) -> Option<(String, &'static str)> {
@@ -384,6 +434,20 @@ fn tz_error_json(message: &str, fallback: &str) -> String {
         .unwrap_or_else(|_| format!(r#"{{"__tz_error":"{fallback}"}}"#))
 }
 
+fn logical_width_for_method(method: &str, args: &[Value]) -> usize {
+    if matches!(
+        method,
+        "zero.token.compactMany" | "zero.token.expandMany" | "zero.token.dedupe"
+    ) {
+        args.first()
+            .and_then(Value::as_array)
+            .map(|items| items.len().max(1))
+            .unwrap_or(1)
+    } else {
+        1
+    }
+}
+
 fn execute_quickjs_plan(
     plan: &str,
     options: CodeModeOptions,
@@ -402,7 +466,8 @@ fn execute_quickjs_plan(
     };
     {
         let work_root = tokenzero_work_root(options.root.clone());
-        let engine = Rc::new(make_engine_for_root_with_options(
+        let work_root_arc = Arc::new(work_root.clone());
+        let engine = Arc::new(make_engine_for_root_with_options(
             work_root.clone(),
             &options,
         ));
@@ -411,6 +476,11 @@ fn execute_quickjs_plan(
             limits: limits.clone(),
             ..Default::default()
         }));
+        let async_rt = Rc::new(AsyncHostRuntime {
+            next_id: AtomicU64::new(1),
+            jobs: Mutex::new(HashMap::new()),
+            gate: Arc::new(ParallelWidthGate::new(limits.max_parallel_width)),
+        });
         let runtime = match Runtime::new() {
             Ok(runtime) => runtime,
             Err(error) => return fail0(format!("sandbox: QuickJS runtime init failed: {error}")),
@@ -422,11 +492,12 @@ fn execute_quickjs_plan(
             Err(error) => return fail0(format!("sandbox: QuickJS context init failed: {error}")),
         };
         if let Err(error) = context.with(|ctx| {
-            install_js_generic_binding(
+            install_js_async_binding(
                 &ctx.globals(),
-                Rc::clone(&engine),
-                work_root.clone(),
+                Arc::clone(&engine),
+                Arc::clone(&work_root_arc),
                 Rc::clone(&state),
+                Rc::clone(&async_rt),
             )?;
             ctx.eval::<(), _>(js_prelude())
         }) {
@@ -498,109 +569,251 @@ fn execute_quickjs_plan(
             state.raw_tokens,
         );
         result.telemetry.physical_ops = state.physical_ops;
+        result.telemetry.parallel_groups = Some(state.parallel_groups);
+        telemetry_insert(&mut result, "parallel_groups", json!(state.parallel_groups));
         set_prevented_read_bytes(&mut result, state.prevented_read_bytes);
         finish(result, state.steps.clone())
     }
 }
-fn install_js_generic_binding<'js>(
+
+fn install_js_async_binding<'js>(
     globals: &rquickjs::Object<'js>,
-    engine: Rc<TokenZeroEngine>,
-    work_root: PathBuf,
+    engine: Arc<TokenZeroEngine>,
+    work_root: Arc<PathBuf>,
     state: Rc<RefCell<JsExecutionState>>,
+    async_rt: Rc<AsyncHostRuntime>,
 ) -> rquickjs::Result<()> {
+    let begin_state = Rc::clone(&state);
+    let begin_rt = Rc::clone(&async_rt);
+    let begin_engine = Arc::clone(&engine);
+    let begin_root = Arc::clone(&work_root);
     globals.set(
-        "__tz_call_json",
+        "__tz_begin",
         Func::from(move |method: String, args_json: String| {
-            let args = serde_json::from_str::<Vec<Value>>(&args_json).unwrap_or_default();
-            invoke_js_binding(&engine, &work_root, &method, args, &state)
+            begin_js_host_op(
+                &method,
+                &args_json,
+                &begin_engine,
+                &begin_root,
+                &begin_state,
+                &begin_rt,
+            )
         }),
-    )
+    )?;
+    let poll_state = Rc::clone(&state);
+    let poll_rt = Rc::clone(&async_rt);
+    globals.set(
+        "__tz_poll",
+        Func::from(move |id_text: String| poll_js_host_op(&id_text, &poll_state, &poll_rt)),
+    )?;
+    Ok(())
 }
 
-fn invoke_js_binding(
-    engine: &TokenZeroEngine,
-    work_root: &Path,
+fn begin_js_host_op(
     method: &str,
-    mut args: Vec<Value>,
+    args_json: &str,
+    engine: &Arc<TokenZeroEngine>,
+    work_root: &Arc<PathBuf>,
     state: &Rc<RefCell<JsExecutionState>>,
+    async_rt: &Rc<AsyncHostRuntime>,
 ) -> String {
+    let mut args = serde_json::from_str::<Vec<Value>>(args_json).unwrap_or_default();
+    if matches!(method, "codemode.recipeRun" | "recipeRun" | "recipe_run") {
+        args.push(json!(state.borrow().limits.max_code_bytes));
+    }
+    let logical_width = logical_width_for_method(method, &args);
+    let limit_error = {
+        let state_ref = state.borrow();
+        let elapsed = now_ms().saturating_sub(state_ref.started_ms) as u64;
+        wall_clock_limit_error(elapsed, &state_ref.limits).or_else(|| {
+            if state_ref.ops.saturating_add(logical_width) > state_ref.limits.max_logical_ops {
+                Some((
+                    format!(
+                        "runtime: max_logical_ops exceeded {}",
+                        state_ref.limits.max_logical_ops
+                    ),
+                    "logical op cap exceeded",
+                ))
+            } else if state_ref.physical_ops >= state_ref.limits.max_physical_ops {
+                Some((
+                    format!(
+                        "runtime: max_physical_ops exceeded {}",
+                        state_ref.limits.max_physical_ops
+                    ),
+                    "physical op cap exceeded",
+                ))
+            } else {
+                None
+            }
+        })
+    };
+    let id = async_rt.next_id.fetch_add(1, Ordering::Relaxed);
+    if let Some((message, fallback)) = limit_error {
+        let job = Arc::new(AsyncHostJob {
+            result: Mutex::new(Some(tz_error_json(&message, fallback))),
+            method: method.to_string(),
+            tracks_wave: false,
+            applied: Mutex::new(false),
+        });
+        async_rt
+            .jobs
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(id, job);
+        return id.to_string();
+    }
     {
-        if matches!(method, "codemode.recipeRun" | "recipeRun" | "recipe_run") {
-            args.push(json!(state.borrow().limits.max_code_bytes));
-        }
-        {
-            let state_ref = state.borrow();
-            let elapsed = now_ms().saturating_sub(state_ref.started_ms) as u64;
-            let limit_err = wall_clock_limit_error(elapsed, &state_ref.limits).or_else(|| {
-                if state_ref.ops >= state_ref.limits.max_logical_ops {
-                    Some((
-                        format!(
-                            "runtime: max_logical_ops exceeded {}",
-                            state_ref.limits.max_logical_ops
-                        ),
-                        "logical op cap exceeded",
-                    ))
-                } else if state_ref.physical_ops >= state_ref.limits.max_physical_ops {
-                    Some((
-                        format!(
-                            "runtime: max_physical_ops exceeded {}",
-                            state_ref.limits.max_physical_ops
-                        ),
-                        "physical op cap exceeded",
-                    ))
-                } else {
-                    None
-                }
-            });
-            if let Some((message, fallback)) = limit_err {
-                return tz_error_json(&message, fallback);
-            }
-        }
-        let outcome = match dispatch_values(engine, work_root, method, &args) {
-            Ok(outcome) => outcome,
-            Err(error) => {
-                return serde_json::to_string(&json!({
-                    "__tz_error": error.error.as_ref().map(|error| error.message.as_str()).unwrap_or("unknown error"),
-                    "__tz_error_kind": error.error.as_ref().map(|error| error.kind.as_str()).unwrap_or("runtime"),
-                })).unwrap_or_else(|_| "{\"__tz_error\":\"unknown error\",\"__tz_error_kind\":\"runtime\"}".to_string());
-            }
-        };
-        let prevented_read_bytes = outcome.prevented_read_bytes;
-        let value = outcome.into_value();
-        let refs = refs_from_value(&value);
         let mut state = state.borrow_mut();
-        let logical_width = if matches!(
-            method,
-            "zero.token.compactMany" | "zero.token.expandMany" | "zero.token.dedupe"
-        ) {
-            args.first()
-                .and_then(Value::as_array)
-                .map(|items| items.len().max(1))
-                .unwrap_or(1)
-        } else {
-            1
-        };
         state.ops = state.ops.saturating_add(logical_width);
         state.physical_ops = state.physical_ops.saturating_add(1);
-        state.visible_tokens = state
-            .visible_tokens
-            .saturating_add(result_token_field(&value, "visible_tokens"));
-        state.raw_tokens = state
-            .raw_tokens
-            .saturating_add(result_token_field(&value, "raw_tokens"));
-        state.prevented_read_bytes = state
-            .prevented_read_bytes
-            .saturating_add(prevented_read_bytes);
-        state.refs.extend(refs.iter().cloned());
+        state.in_flight = state.in_flight.saturating_add(1);
+        state.wave_peak = state.wave_peak.max(state.in_flight);
+    }
+    let job = Arc::new(AsyncHostJob {
+        result: Mutex::new(None),
+        method: method.to_string(),
+        tracks_wave: true,
+        applied: Mutex::new(false),
+    });
+    async_rt
+        .jobs
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .insert(id, Arc::clone(&job));
+    let gate = Arc::clone(&async_rt.gate);
+    let engine = Arc::clone(engine);
+    let work_root = Arc::clone(work_root);
+    let method_owned = method.to_string();
+    std::thread::spawn(move || {
+        gate.acquire();
+        let result_json = match dispatch_values(&engine, work_root.as_path(), &method_owned, &args) {
+            Ok(outcome) => {
+                let prevented_read_bytes = outcome.prevented_read_bytes;
+                let value = outcome.into_value();
+                serde_json::to_string(&json!({
+                    "__tz_ok": true,
+                    "value": value,
+                    "prevented_read_bytes": prevented_read_bytes,
+                }))
+                .unwrap_or_else(|_| {
+                    "{\"__tz_ok\":true,\"value\":null,\"prevented_read_bytes\":0}".to_string()
+                })
+            }
+            Err(error) => serde_json::to_string(&json!({
+                "__tz_error": error.error.as_ref().map(|error| error.message.as_str()).unwrap_or("unknown error"),
+                "__tz_error_kind": error.error.as_ref().map(|error| error.kind.as_str()).unwrap_or("runtime"),
+            }))
+            .unwrap_or_else(|_| {
+                "{\"__tz_error\":\"unknown error\",\"__tz_error_kind\":\"runtime\"}".to_string()
+            }),
+        };
+        *job.result.lock().unwrap_or_else(|e| e.into_inner()) = Some(result_json);
+        gate.release();
+    });
+    id.to_string()
+}
+
+fn poll_js_host_op(
+    id_text: &str,
+    state: &Rc<RefCell<JsExecutionState>>,
+    async_rt: &Rc<AsyncHostRuntime>,
+) -> String {
+    let Ok(id) = id_text.parse::<u64>() else {
+        return json!({"done": true, "result": tz_error_json("invalid async job id", "bad job id")})
+            .to_string();
+    };
+    let job = {
+        let jobs = async_rt.jobs.lock().unwrap_or_else(|e| e.into_inner());
+        jobs.get(&id).cloned()
+    };
+    let Some(job) = job else {
+        return json!({"done": true, "result": tz_error_json("unknown async job", "unknown job")})
+            .to_string();
+    };
+    let finished = job
+        .result
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone();
+    let Some(raw) = finished else {
+        // Bound JS microtask churn while host threads run (sleep/IO).
+        std::thread::sleep(Duration::from_millis(1));
+        return json!({"done": false}).to_string();
+    };
+    {
+        let mut applied = job.applied.lock().unwrap_or_else(|e| e.into_inner());
+        if !*applied {
+            *applied = true;
+            apply_js_host_result(state, &job.method, &raw);
+            if job.tracks_wave {
+                let mut state = state.borrow_mut();
+                if state.in_flight > 0 {
+                    state.in_flight -= 1;
+                }
+                if state.in_flight == 0 {
+                    if state.wave_peak > 1 {
+                        state.parallel_groups = state.parallel_groups.saturating_add(1);
+                    }
+                    state.wave_peak = 0;
+                }
+            }
+        }
+    }
+    let result_for_js = match serde_json::from_str::<Value>(&raw) {
+        Ok(Value::Object(mut map)) if map.get("__tz_ok").and_then(Value::as_bool) == Some(true) => {
+            map.remove("value")
+                .map(|v| serde_json::to_string(&v).unwrap_or_else(|_| "null".to_string()))
+                .unwrap_or_else(|| "null".to_string())
+        }
+        _ => raw,
+    };
+    json!({"done": true, "result": result_for_js}).to_string()
+}
+
+fn apply_js_host_result(state: &Rc<RefCell<JsExecutionState>>, method: &str, raw: &str) {
+    let parsed = serde_json::from_str::<Value>(raw).unwrap_or(Value::Null);
+    if parsed.get("__tz_error").is_some() {
+        let mut state = state.borrow_mut();
         let op = state.ops;
         state.steps.push(ExecutionStep {
             id: format!("js_step{op}"),
             method: method.to_string(),
-            status: "completed".to_string(),
-            refs,
+            status: "error".to_string(),
+            refs: Vec::new(),
         });
-        serde_json::to_string(&value).unwrap_or_else(|_| "null".to_string())
+        return;
     }
+    let (value, prevented_read_bytes) =
+        if parsed.get("__tz_ok").and_then(Value::as_bool) == Some(true) {
+            (
+                parsed.get("value").cloned().unwrap_or(Value::Null),
+                parsed
+                    .get("prevented_read_bytes")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(0) as usize,
+            )
+        } else {
+            (parsed, 0)
+        };
+    let refs = refs_from_value(&value);
+    let mut state = state.borrow_mut();
+    state.visible_tokens = state
+        .visible_tokens
+        .saturating_add(result_token_field(&value, "visible_tokens"));
+    state.raw_tokens = state
+        .raw_tokens
+        .saturating_add(result_token_field(&value, "raw_tokens"));
+    state.prevented_read_bytes = state
+        .prevented_read_bytes
+        .saturating_add(prevented_read_bytes);
+    state.refs.extend(refs.iter().cloned());
+    let op = state.ops;
+    state.steps.push(ExecutionStep {
+        id: format!("js_step{op}"),
+        method: method.to_string(),
+        status: "completed".to_string(),
+        refs,
+    });
 }
 
 fn js_prelude() -> &'static str {
@@ -610,7 +823,16 @@ fn js_prelude() -> &'static str {
           if (value && value.__tz_error) { const error = new Error(value.__tz_error); error.__tz_error_kind = value.__tz_error_kind || 'runtime'; throw error; }
           return value;
         };
-        const __tz_call = (method, args) => __tz_parse(__tz_call_json(method, JSON.stringify(args)));
+        const __tz_call = (method, args) => {
+          const id = __tz_begin(method, JSON.stringify(args));
+          return (async () => {
+            for (;;) {
+              const status = JSON.parse(__tz_poll(String(id)));
+              if (status.done) return __tz_parse(status.result);
+              await Promise.resolve();
+            }
+          })();
+        };
         const __tz_truthy = (value) => {
           if (typeof value === 'function') return Boolean(value());
           if (Array.isArray(value)) return value.length > 0;
@@ -629,7 +851,7 @@ fn js_prelude() -> &'static str {
           return value;
         };
         const __tz_run_recipe = async (name, args = {}) => {
-          const recipe = __tz_call('codemode.recipeRun', [String(name)]);
+          const recipe = await __tz_call('codemode.recipeRun', [String(name)]);
           const frozenArgs = __tz_deep_freeze(args === undefined ? {} : args);
           const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor;
           const invoke = new AsyncFunction('args', 'zero', 'ctx', 'token', recipe.source);
@@ -715,6 +937,7 @@ pub(super) fn limits_from_options(options: &CodeModeOptions) -> CodeModeLimits {
         max_code_bytes: options.max_code_bytes,
         max_wall_ms,
         hard_max_wall_ms,
+        max_parallel_width: options.max_parallel_width.max(1),
         ..Default::default()
     }
 }

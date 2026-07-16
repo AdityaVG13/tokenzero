@@ -284,3 +284,51 @@ fn envelope_v3_scalar_fold_keeps_structured_value() {
         "MCP wire must expose value for hub extractJsonPayload: {mcp}"
     );
 }
+
+#[test]
+fn promise_all_runs_independent_shells_concurrently() {
+    // tokenzero-codemode-parallel-broken-z28: Promise.all must fan out host ops.
+    let work = tempfile::tempdir().unwrap();
+    let plan = r#"
+        await Promise.all([
+          zero.shell("sleep 1"),
+          zero.shell("sleep 1"),
+          zero.shell("sleep 1"),
+        ]);
+        return { ok: true };
+    "#;
+    let result = execute_codemode_with_options(
+        plan,
+        CodeModeOptions {
+            root: Some(work.path().to_path_buf()),
+            max_parallel_width: 3,
+            max_wall_ms: 5000,
+            hard_max_wall_ms: 5000,
+            ..Default::default()
+        },
+    );
+    assert_eq!(
+        result.status,
+        CodeModeStatus::Completed,
+        "{:?}",
+        result.error
+    );
+    assert!(
+        result.telemetry.physical_ops >= 3,
+        "expected >=3 physical ops, got {}",
+        result.telemetry.physical_ops
+    );
+    assert!(
+        result.telemetry.parallel_groups.unwrap_or(0) >= 1,
+        "expected a parallel group, got {:?}",
+        result.telemetry.parallel_groups
+    );
+    assert!(
+        result.telemetry.wall_ms < 2500,
+        "3x sleep 1 under Promise.all must be ~1s not ~3s; wall_ms={} physical_ops={} parallel_groups={:?}",
+        result.telemetry.wall_ms,
+        result.telemetry.physical_ops,
+        result.telemetry.parallel_groups
+    );
+}
+

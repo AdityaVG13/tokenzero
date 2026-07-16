@@ -148,6 +148,8 @@ pub struct CodeModeOptions {
     pub max_wall_ms: u64,
     /// Hard plan wall clock (ms); plans abort past this even if soft is higher.
     pub hard_max_wall_ms: u64,
+    /// Bounded in-plan Promise.all / fan-out width for QuickJS host ops.
+    pub max_parallel_width: usize,
     pub envelope: Option<String>,
     pub ref_first: bool,
     pub ref_first_budget: usize,
@@ -173,6 +175,7 @@ impl Default for CodeModeOptions {
             max_code_bytes: super::store::DEFAULT_MAX_CODE_BYTES,
             max_wall_ms: super::store::DEFAULT_MAX_WALL_MS,
             hard_max_wall_ms: super::store::HARD_MAX_WALL_MS,
+            max_parallel_width: super::store::DEFAULT_MAX_PARALLEL_WIDTH,
             envelope: None,
             ref_first: true,
             ref_first_budget: crate::DEFAULT_SHELL_INLINE_BUDGET,
