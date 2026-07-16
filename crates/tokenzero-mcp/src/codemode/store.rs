@@ -275,7 +275,23 @@ pub fn finalize_result(
             "envelope": envelope_ref,
         }
     }));
-    guard_visible_output(&mut result, limits);
+    guard_visible_output(&mut result, limits, result_ref.as_deref());
+    // Autopage: expose the terminal result blob (never envelope) for one-hop expand.
+    if let Some(continuation) = result
+        .value
+        .as_ref()
+        .and_then(|value| value.get("continuation_ref"))
+        .and_then(Value::as_str)
+    {
+        if let Some(stored) = result
+            .execution_refs
+            .as_mut()
+            .and_then(|refs| refs.get_mut("stored"))
+            .and_then(Value::as_object_mut)
+        {
+            stored.insert("result".to_string(), json!(continuation));
+        }
+    }
     result
 }
 
@@ -286,7 +302,11 @@ fn record_visible_tokens(telemetry: &mut CodeModeTelemetry, visible: usize) {
     }
 }
 
-fn guard_visible_output(result: &mut CodeModeResult, limits: &CodeModeLimits) {
+fn guard_visible_output(
+    result: &mut CodeModeResult,
+    limits: &CodeModeLimits,
+    continuation_ref: Option<&str>,
+) {
     if result.refs.len() > limits.max_refs_emitted {
         result.refs.truncate(limits.max_refs_emitted);
     }
@@ -316,12 +336,76 @@ fn guard_visible_output(result: &mut CodeModeResult, limits: &CodeModeLimits) {
             .map(|bytes| bytes.len())
             .unwrap_or(0);
         if bytes > limits.max_output_bytes {
-            result.value = Some(json!({
-                "truncated": true,
-                "message": "visible result exceeded CodeMode max_output_bytes; expand result ref from execution_refs.stored.result",
-                "bytes": bytes,
-            }));
-            record_visible_tokens(&mut result.telemetry, count_tokens("C"));
+            let paged = autopage_over_cap(value, bytes, limits.max_output_bytes, continuation_ref);
+            if let Some(cref) = paged
+                .get("continuation_ref")
+                .and_then(Value::as_str)
+                .map(str::to_string)
+            {
+                if !result.refs.contains(&cref) && result.refs.len() < limits.max_refs_emitted {
+                    result.refs.push(cref);
+                }
+            }
+            let visible = count_tokens(&serde_json::to_string(&paged).unwrap_or_default());
+            result.value = Some(paged);
+            record_visible_tokens(&mut result.telemetry, visible);
+        }
+    }
+}
+
+/// Head slice within budget + one continuation ref to the terminal payload blob.
+/// Never points at an intermediate envelope (tokenzero-result-cap-autopage-be8).
+fn autopage_over_cap(
+    value: &Value,
+    bytes: usize,
+    max_output_bytes: usize,
+    continuation_ref: Option<&str>,
+) -> Value {
+    let Some(continuation_ref) = continuation_ref.filter(|r| {
+        r.starts_with("tz://") && !r.contains("/envelope") && !r.contains("envelope.v")
+    }) else {
+        return json!({
+            "truncated": true,
+            "message": "visible result exceeded CodeMode max_output_bytes; expand result ref from execution_refs.stored.result",
+            "bytes": bytes,
+        });
+    };
+
+    let head_seed = match value {
+        Value::String(text) => Value::String(text.clone()),
+        other => Value::String(serde_json::to_string(other).unwrap_or_default()),
+    };
+    let mut head = head_seed;
+    loop {
+        let candidate = json!({
+            "head": head,
+            "continuation_ref": continuation_ref,
+            "truncated": true,
+            "bytes": bytes,
+        });
+        let fits = serde_json::to_vec(&candidate)
+            .map(|serialized| serialized.len() <= max_output_bytes)
+            .unwrap_or(false);
+        if fits {
+            return candidate;
+        }
+        match &head {
+            Value::String(text) if !text.is_empty() => {
+                let keep = text.chars().count().saturating_mul(3) / 4;
+                if keep == 0 {
+                    head = Value::String(String::new());
+                } else {
+                    head = Value::String(text.chars().take(keep).collect());
+                }
+            }
+            _ => {
+                // Minimal page: continuation only (tiny budgets like test max=8).
+                return json!({
+                    "continuation_ref": continuation_ref,
+                    "truncated": true,
+                    "bytes": bytes,
+                });
+            }
         }
     }
 }

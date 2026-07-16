@@ -90,6 +90,27 @@ fn output_guard_keeps_large_result_behind_refs() {
     );
     let value = result.value.as_ref().unwrap();
     assert_eq!(value["truncated"].as_bool(), Some(true));
+    let continuation = value["continuation_ref"]
+        .as_str()
+        .expect("autopage must emit continuation_ref");
+    assert!(
+        continuation.starts_with("tz://"),
+        "continuation must be a tz ref: {continuation}"
+    );
+    assert!(
+        !continuation.contains("envelope"),
+        "continuation must point at terminal payload, not envelope: {continuation}"
+    );
+    assert!(
+        result
+            .execution_refs
+            .as_ref()
+            .and_then(|refs| refs.pointer("/stored/result"))
+            .and_then(|v| v.as_str())
+            == Some(continuation),
+        "stored.result must equal continuation_ref: {:?}",
+        result.execution_refs
+    );
     assert_eq!(
         result
             .telemetry
@@ -99,6 +120,41 @@ fn output_guard_keeps_large_result_behind_refs() {
         None
     );
     assert!(result.execution_refs.is_some());
+}
+
+#[test]
+fn output_guard_autopage_emits_head_within_budget() {
+    // tokenzero-result-cap-autopage-be8: oversized results must surface a head
+    // slice in-budget plus one continuation ref to the terminal payload.
+    // 400 ASCII chars → JSON string > 256-byte visible budget.
+    let result = execute_codemode_with_options(
+        "return \"abcdefghijklmnopqrstuvwxyz0123456789\".repeat(10)",
+        CodeModeOptions {
+            max_output_bytes: 256,
+            ref_first: false,
+            ..Default::default()
+        },
+    );
+    assert_eq!(
+        result.status,
+        CodeModeStatus::Completed,
+        "{:?}",
+        result.error
+    );
+    let value = result.value.as_ref().unwrap();
+    assert_eq!(value["truncated"].as_bool(), Some(true));
+    let head = value["head"].as_str().expect("head slice required");
+    assert!(!head.is_empty(), "head must be non-empty within budget");
+    let continuation = value["continuation_ref"]
+        .as_str()
+        .expect("continuation_ref required");
+    assert!(continuation.starts_with("tz://"));
+    assert!(!continuation.contains("envelope"));
+    let visible_bytes = serde_json::to_vec(value).unwrap().len();
+    assert!(
+        visible_bytes <= 256,
+        "autopage value must fit budget: {visible_bytes}"
+    );
 }
 
 #[test]
