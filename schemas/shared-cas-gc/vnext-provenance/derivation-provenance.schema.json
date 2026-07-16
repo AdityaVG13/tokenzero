@@ -1,8 +1,8 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://zerostack.dev/schemas/shared-cas-gc/vnext-provenance/derivation-provenance.schema.json",
-  "title": "ZeroStack derivation provenance record (vNext draft — not frozen)",
-  "description": "Draft shared shape for explainable derived rows. Not a freeze; see RFC.md. GraphZero emits schema_version zerostack.cas-gc.vnext-provenance until TokenZero freezes.",
+  "title": "ZeroStack derivation provenance record (historical draft \u2014 superseded)",
+  "description": "Historical draft. Normative freeze: schemas/derivation-provenance/v1/ (zerostack.derivation-provenance.v1). Do not emit this draft.",
   "type": "object",
   "additionalProperties": false,
   "required": [
@@ -26,45 +26,104 @@
         "zerostack.derivation-provenance.v1"
       ]
     },
-    "record_type": { "const": "derivation-provenance" },
-    "row_id": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "record_type": {
+      "const": "derivation-provenance"
+    },
+    "row_id": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
     "derived_kind": {
       "type": "string",
       "minLength": 1,
       "maxLength": 128,
       "pattern": "^[A-Za-z][A-Za-z0-9._-]*$"
     },
-    "derived_ref": { "type": "string", "minLength": 1, "maxLength": 512 },
-    "source_blob_digest": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "derived_ref": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 512
+    },
+    "source_blob_digest": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
     "byte_span": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["start", "end"],
+      "required": [
+        "start",
+        "end"
+      ],
       "properties": {
-        "start": { "type": "integer", "minimum": 0, "maximum": 4294967295 },
-        "end": { "type": "integer", "minimum": 0, "maximum": 4294967295 }
+        "start": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 4294967295
+        },
+        "end": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 4294967295
+        }
       }
     },
     "line_span": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["start", "end"],
+      "required": [
+        "start",
+        "end"
+      ],
       "properties": {
-        "start": { "type": "integer", "minimum": 1, "maximum": 4294967295 },
-        "end": { "type": "integer", "minimum": 1, "maximum": 4294967295 }
+        "start": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 4294967295
+        },
+        "end": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 4294967295
+        }
       }
     },
-    "producing_engine": { "enum": ["tokenzero", "fszero", "graphzero"] },
-    "producing_commit": { "type": "string", "minLength": 1, "maxLength": 128 },
+    "producing_engine": {
+      "enum": [
+        "tokenzero",
+        "fszero",
+        "graphzero"
+      ]
+    },
+    "producing_commit": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128
+    },
     "transform_id": {
       "type": "string",
       "minLength": 1,
       "maxLength": 256,
       "pattern": "^[A-Za-z][A-Za-z0-9._-]*$"
     },
-    "created_at": { "type": "string", "format": "date-time" },
-    "edge_src": { "type": "string", "minLength": 1, "maxLength": 512 },
-    "edge_dst": { "type": "string", "minLength": 1, "maxLength": 512 },
-    "edge_kind": { "type": "integer", "minimum": 0, "maximum": 255 }
+    "created_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "edge_src": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 512
+    },
+    "edge_dst": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 512
+    },
+    "edge_kind": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 255
+    }
   }
 }

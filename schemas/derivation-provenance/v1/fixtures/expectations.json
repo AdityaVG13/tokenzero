@@ -1,0 +1,36 @@
+{
+  "contract_point": "derivation-provenance-v1",
+  "cases": [
+    {
+      "file": "valid-graphzero-overlay-edge.json",
+      "schema_valid": true,
+      "store_path": "graphzero/provenance/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.json",
+      "path_valid": true
+    },
+    {
+      "file": "valid-minimal.json",
+      "schema_valid": true,
+      "store_path": "graphzero/provenance/cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc.json",
+      "path_valid": true
+    },
+    {
+      "file": "proposal-tag.invalid.json",
+      "schema_valid": false
+    },
+    {
+      "file": "bad-digest.invalid.json",
+      "schema_valid": false
+    },
+    {
+      "file": "missing-required.invalid.json",
+      "schema_valid": false
+    },
+    {
+      "file": "gc-path.edge.json",
+      "schema_valid": true,
+      "store_path": "gc/provenance/graphzero/proj/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.json",
+      "path_valid": false,
+      "note": "Phase B path is not conforming under this freeze"
+    }
+  ]
+}
