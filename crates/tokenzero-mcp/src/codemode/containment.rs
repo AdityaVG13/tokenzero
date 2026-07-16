@@ -1,4 +1,16 @@
 //! Hard containment for expensive CodeMode execution.
+//!
+//! # ZeroStack machine-wide permit contract
+//!
+//! Sibling engines (TokenZero, FSZero, GraphZero) and the ZeroStack hub must
+//! share these paths so concurrent CodeMode processes cannot stack CPU:
+//!
+//! - Heavy (shell / high-cost): `/tmp/zerostack-codemode-heavy.permit`
+//! - Analysis (light find/search/plans): `/tmp/zerostack-codemode-analysis.permit`
+//!
+//! Status/health/describe probes stay ungated. Default analysis concurrency is
+//! one machine-wide holder; override with `TOKENZERO_CODEMODE_ANALYSIS_CONCURRENCY`
+//! (TokenZero) / matching env once FSZero and GraphZero adopt the contract.
 
 use serde::Serialize;
 use serde_json::{Value, json};
@@ -17,9 +29,11 @@ const DEFAULT_MAX_ACTIVE: usize = 1;
 const DEFAULT_MAX_QUEUE_DEPTH: usize = 8;
 const DEFAULT_COST_THRESHOLD: usize = 32;
 const DEFAULT_MACHINE_PERMIT: &str = "/tmp/zerostack-codemode-heavy.permit";
+const DEFAULT_ANALYSIS_PERMIT: &str = "/tmp/zerostack-codemode-analysis.permit";
 const PERMIT_POLL: Duration = Duration::from_millis(20);
+const INCOMPLETE_PERMIT_GRACE: Duration = Duration::from_millis(250);
 const SNAPSHOT_PLANS: &[&str] = &["status", "codemode.status", "containment.status"];
-const CONFIG_LIMITS: [(&str, usize, usize); 3] = [
+const CONFIG_LIMITS: [(&str, usize, usize); 4] = [
     (
         "TOKENZERO_CODEMODE_HEAVY_CONCURRENCY",
         DEFAULT_MAX_ACTIVE,
@@ -33,6 +47,11 @@ const CONFIG_LIMITS: [(&str, usize, usize); 3] = [
     (
         "TOKENZERO_CODEMODE_HEAVY_COST_THRESHOLD",
         DEFAULT_COST_THRESHOLD,
+        1,
+    ),
+    (
+        "TOKENZERO_CODEMODE_ANALYSIS_CONCURRENCY",
+        DEFAULT_MAX_ACTIVE,
         1,
     ),
 ];
@@ -99,19 +118,17 @@ struct Config {
     max_active: usize,
     max_queue_depth: usize,
     cost_threshold: usize,
-    permit_path: PathBuf,
+    analysis_max_active: usize,
 }
 impl Default for Config {
     fn default() -> Self {
-        let [max_active, max_queue_depth, cost_threshold] =
+        let [max_active, max_queue_depth, cost_threshold, analysis_max_active] =
             CONFIG_LIMITS.map(|(name, default, minimum)| env_usize(name, default).max(minimum));
         Self {
             max_active,
             max_queue_depth,
             cost_threshold,
-            permit_path: std::env::var_os("TOKENZERO_CODEMODE_HEAVY_PERMIT")
-                .map(PathBuf::from)
-                .unwrap_or_else(default_machine_permit),
+            analysis_max_active,
         }
     }
 }
@@ -268,17 +285,54 @@ impl Controller {
             flight.followers.fetch_sub(1, Ordering::AcqRel);
             return result;
         }
-        let result = if matches!(
-            class,
-            ExecutionClass::HeavyShell | ExecutionClass::HeavyEstimatedCost
-        ) {
-            self.run_heavy(class, options, run)
-        } else {
-            catch_worker_panic(run)
+        let result = match class {
+            ExecutionClass::Status => catch_worker_panic(run),
+            ExecutionClass::Light => self.run_analysis(class, options, run),
+            ExecutionClass::HeavyShell | ExecutionClass::HeavyEstimatedCost => {
+                self.run_heavy(class, options, run)
+            }
         };
         *flight.result.lock().unwrap_or_else(|p| p.into_inner()) = Some(result.clone());
         flight.ready.notify_all();
         self.lock().flights.remove(&key);
+        result
+    }
+
+    fn run_analysis<F>(
+        &self,
+        class: ExecutionClass,
+        options: &CodeModeOptions,
+        run: F,
+    ) -> CodeModeResult
+    where
+        F: FnOnce() -> CodeModeResult,
+    {
+        // Analysis uses the shared machine permit so N concurrent TokenZero
+        // (and later FSZero/GraphZero) processes cannot each burn a core on
+        // find/search at once. Share the in-process heavy slot so one process
+        // also cannot overlap analysis with shell work.
+        let slot = match self.acquire_slot(class) {
+            Ok(v) => v,
+            Err(v) => return v,
+        };
+        let deadline = Instant::now()
+            .checked_add(Duration::from_millis(options.hard_max_wall_ms.max(1)))
+            .unwrap_or_else(Instant::now);
+        let permit = match MachinePermit::acquire_slots(
+            &analysis_permit_path(),
+            self.config.analysis_max_active,
+            deadline,
+            "tokenzero-codemode-analysis",
+        ) {
+            Ok(v) => v,
+            Err(e) => {
+                drop(slot);
+                return busy_result("machine_permit_busy", &e);
+            }
+        };
+        let result = catch_worker_panic(run);
+        drop(slot);
+        drop(permit);
         result
     }
 
@@ -298,7 +352,12 @@ impl Controller {
         let deadline = Instant::now()
             .checked_add(Duration::from_millis(options.hard_max_wall_ms.max(1)))
             .unwrap_or_else(Instant::now);
-        let permit = match MachinePermit::acquire(&self.config.permit_path, deadline) {
+        let permit = match MachinePermit::acquire_slots(
+            &heavy_permit_path(),
+            self.config.max_active,
+            deadline,
+            "tokenzero-codemode-heavy",
+        ) {
             Ok(v) => v,
             Err(e) => {
                 drop(slot);
@@ -402,29 +461,44 @@ fn terminate_owned_process_group(_: u32) {}
 #[derive(Debug)]
 struct MachinePermit(PathBuf, String);
 impl MachinePermit {
-    fn acquire(path: &Path, deadline: Instant) -> Result<Self, String> {
+    fn acquire_slots(
+        base: &Path,
+        slots: usize,
+        deadline: Instant,
+        command: &str,
+    ) -> Result<Self, String> {
+        let slots = slots.max(1);
+        if slots == 1 {
+            return Self::acquire(base, deadline, command);
+        }
+        let _ = fs::create_dir_all(base);
         loop {
-            match fs::create_dir(path) {
-                Ok(()) => {
-                    let owner = format!(
-                        "{}-{}-{:?}",
-                        std::process::id(),
-                        epoch_millis(),
-                        std::thread::current().id()
-                    );
-                    if let Err(e) = write_metadata(path, &owner) {
-                        cleanup_owned(path, &owner);
-                        return Err(format!("write heavy permit metadata: {e}"));
-                    }
-                    return Ok(Self(path.to_path_buf(), owner));
+            for idx in 0..slots {
+                let path = base.join(format!("slot-{idx}"));
+                match Self::try_create(&path, command) {
+                    Ok(permit) => return Ok(permit),
+                    Err(TryPermit::Busy) => {}
+                    Err(TryPermit::Fatal(e)) => return Err(e),
                 }
-                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-                    if reclaim_dead(path) {
-                        continue;
-                    }
+            }
+            if Instant::now() >= deadline {
+                return Err(format!(
+                    "codemode permit {} is held by live process(es) across {slots} slots",
+                    base.display()
+                ));
+            }
+            std::thread::sleep(PERMIT_POLL.min(deadline.saturating_duration_since(Instant::now())));
+        }
+    }
+
+    fn acquire(path: &Path, deadline: Instant, command: &str) -> Result<Self, String> {
+        loop {
+            match Self::try_create(path, command) {
+                Ok(permit) => return Ok(permit),
+                Err(TryPermit::Busy) => {
                     if Instant::now() >= deadline {
                         return Err(format!(
-                            "heavy permit {} is held by a live process",
+                            "codemode permit {} is held by a live process",
                             path.display()
                         ));
                     }
@@ -432,17 +506,51 @@ impl MachinePermit {
                         PERMIT_POLL.min(deadline.saturating_duration_since(Instant::now())),
                     );
                 }
-                Err(e) => return Err(format!("create heavy permit {}: {e}", path.display())),
+                Err(TryPermit::Fatal(e)) => return Err(e),
             }
         }
     }
+
+    fn try_create(path: &Path, command: &str) -> Result<Self, TryPermit> {
+        match fs::create_dir(path) {
+            Ok(()) => {
+                let owner = format!(
+                    "{}-{}-{:?}",
+                    std::process::id(),
+                    epoch_millis(),
+                    std::thread::current().id()
+                );
+                if let Err(e) = write_metadata(path, &owner, command) {
+                    cleanup_owned(path, &owner);
+                    return Err(TryPermit::Fatal(format!(
+                        "write codemode permit metadata: {e}"
+                    )));
+                }
+                Ok(Self(path.to_path_buf(), owner))
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                if reclaim_dead(path) {
+                    return Self::try_create(path, command);
+                }
+                Err(TryPermit::Busy)
+            }
+            Err(e) => Err(TryPermit::Fatal(format!(
+                "create codemode permit {}: {e}",
+                path.display()
+            ))),
+        }
+    }
+}
+enum TryPermit {
+    Busy,
+    Fatal(String),
 }
 impl Drop for MachinePermit {
     fn drop(&mut self) {
         cleanup_owned(&self.0, &self.1)
     }
 }
-fn write_metadata(path: &Path, owner: &str) -> std::io::Result<()> {
+fn write_metadata(path: &Path, owner: &str, command: &str) -> std::io::Result<()> {
     // Write ownership first so an error in any later metadata write remains
     // removable by the acquiring RAII guard.
     fs::write(path.join("owner"), owner)?;
@@ -456,7 +564,7 @@ fn write_metadata(path: &Path, owner: &str) -> std::io::Result<()> {
             .take(1024)
             .collect::<String>(),
     )?;
-    fs::write(path.join("command"), "tokenzero-codemode-heavy")?;
+    fs::write(path.join("command"), command)?;
     fs::write(path.join("started_at"), epoch_millis().to_string())
 }
 const PERMIT_METADATA: &[&str] = &["pid", "repository", "command", "started_at", "owner"];
@@ -472,13 +580,22 @@ fn cleanup_owned(path: &Path, owner: &str) {
     }
 }
 fn reclaim_dead(path: &Path) -> bool {
-    let Some(pid) = fs::read_to_string(path.join("pid"))
+    let pid = fs::read_to_string(path.join("pid"))
         .ok()
-        .and_then(|pid| pid.trim().parse::<u32>().ok())
-    else {
-        return false;
-    };
-    !process_alive(pid) && remove_permit(path)
+        .and_then(|pid| pid.trim().parse::<u32>().ok());
+    if let Some(pid) = pid {
+        return !process_alive(pid) && remove_permit(path);
+    }
+
+    // A process can die after create_dir() but before writing pid. Without a
+    // bounded incomplete-state recovery, that empty permit blocks every
+    // CodeMode client forever. The grace period avoids racing a live writer.
+    let stale = fs::metadata(path)
+        .and_then(|metadata| metadata.modified())
+        .ok()
+        .and_then(|modified| modified.elapsed().ok())
+        .is_some_and(|age| age >= INCOMPLETE_PERMIT_GRACE);
+    stale && remove_permit(path)
 }
 #[cfg(unix)]
 fn process_alive(pid: u32) -> bool {
@@ -553,13 +670,29 @@ fn dedup_key(plan: &str, options: &CodeModeOptions) -> String {
     h.update(plan.trim().as_bytes());
     h.finalize().iter().map(|v| format!("{v:02x}")).collect()
 }
-fn default_machine_permit() -> PathBuf {
-    if cfg!(test) {
-        let pid = std::process::id();
-        std::env::temp_dir().join(format!("zerostack-codemode-heavy-test-{pid}.permit"))
-    } else {
-        PathBuf::from(DEFAULT_MACHINE_PERMIT)
-    }
+fn heavy_permit_path() -> PathBuf {
+    std::env::var_os("TOKENZERO_CODEMODE_HEAVY_PERMIT")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            if cfg!(test) {
+                let pid = std::process::id();
+                std::env::temp_dir().join(format!("zerostack-codemode-heavy-test-{pid}.permit"))
+            } else {
+                PathBuf::from(DEFAULT_MACHINE_PERMIT)
+            }
+        })
+}
+fn analysis_permit_path() -> PathBuf {
+    std::env::var_os("TOKENZERO_CODEMODE_ANALYSIS_PERMIT")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            if cfg!(test) {
+                let pid = std::process::id();
+                std::env::temp_dir().join(format!("zerostack-codemode-analysis-test-{pid}.permit"))
+            } else {
+                PathBuf::from(DEFAULT_ANALYSIS_PERMIT)
+            }
+        })
 }
 
 fn env_usize(name: &str, default: usize) -> usize {
@@ -567,4 +700,127 @@ fn env_usize(name: &str, default: usize) -> usize {
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(default)
+}
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::{Arc, Barrier};
+    use std::thread;
+
+    #[test]
+    fn reclaims_incomplete_machine_permit_after_grace() {
+        let path = std::env::temp_dir().join(format!(
+            "tokenzero-incomplete-permit-{}-{}",
+            std::process::id(),
+            epoch_millis()
+        ));
+        fs::create_dir(&path).unwrap();
+        fs::write(path.join("owner"), "").unwrap();
+        std::thread::sleep(INCOMPLETE_PERMIT_GRACE + Duration::from_millis(20));
+
+        assert!(reclaim_dead(&path));
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn analysis_permit_is_exclusive_across_threads() {
+        let path = std::env::temp_dir().join(format!(
+            "tokenzero-analysis-excl-{}-{}",
+            std::process::id(),
+            epoch_millis()
+        ));
+        let _ = fs::remove_dir_all(&path);
+        let barrier = Arc::new(Barrier::new(2));
+        let path_holder = path.clone();
+        let barrier_holder = Arc::clone(&barrier);
+        let holder = thread::spawn(move || {
+            let permit = MachinePermit::acquire(
+                &path_holder,
+                Instant::now() + Duration::from_secs(5),
+                "test-analysis-holder",
+            )
+            .expect("holder acquires analysis permit");
+            barrier_holder.wait();
+            thread::sleep(Duration::from_millis(300));
+            drop(permit);
+        });
+
+        barrier.wait();
+        let contested = MachinePermit::acquire(
+            &path,
+            Instant::now() + Duration::from_millis(80),
+            "test-analysis-contender",
+        );
+        assert!(
+            contested.is_err(),
+            "second acquirer must not stack while holder is live: {contested:?}"
+        );
+        holder.join().unwrap();
+        let after = MachinePermit::acquire(
+            &path,
+            Instant::now() + Duration::from_secs(2),
+            "test-analysis-after",
+        );
+        assert!(after.is_ok(), "permit must release for the next waiter");
+    }
+
+    #[test]
+    fn light_execute_returns_busy_when_analysis_permit_held() {
+        let path = analysis_permit_path();
+        let _ = fs::remove_dir_all(&path);
+        let holder = MachinePermit::acquire(
+            &path,
+            Instant::now() + Duration::from_secs(5),
+            "test-analysis-holder",
+        )
+        .expect("pre-hold analysis permit");
+
+        let opts = CodeModeOptions {
+            hard_max_wall_ms: 120,
+            ..CodeModeOptions::default()
+        };
+        let result = execute(
+            "return {ok:true}",
+            &opts,
+            || CodeModeResult::completed(json!({"ok": true}), Vec::new(), 0, 0, 0),
+        );
+        let err = result
+            .error
+            .as_ref()
+            .expect("expected busy error from held analysis permit");
+        assert!(
+            err.retryable,
+            "analysis permit contention must be retryable: {err:?}"
+        );
+        assert!(
+            err.kind == "busy" || err.message.contains("machine_permit_busy"),
+            "unexpected error: {err:?}"
+        );
+        drop(holder);
+    }
+
+    #[test]
+    fn status_plans_bypass_analysis_permit() {
+        let path = analysis_permit_path();
+        let _ = fs::remove_dir_all(&path);
+        let holder = MachinePermit::acquire(
+            &path,
+            Instant::now() + Duration::from_secs(5),
+            "test-analysis-holder",
+        )
+        .expect("pre-hold analysis permit");
+
+        let result = execute(
+            "search: containment",
+            &CodeModeOptions::default(),
+            || CodeModeResult::completed(json!({"status": "ok"}), Vec::new(), 0, 0, 0),
+        );
+        assert!(
+            result.error.is_none(),
+            "status/search catalog plans must stay ungated: {result:?}"
+        );
+        drop(holder);
+    }
 }
