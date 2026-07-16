@@ -286,13 +286,23 @@ impl CodeModeResult {
                 } else {
                     Default::default()
                 };
-                format!(
+                let mut line = format!(
                     "codemode:ok C ops={} visible_tokens={} raw_tokens={}{}",
                     self.telemetry.operations(),
                     self.telemetry.visible_tokens(),
                     self.telemetry.raw_tokens(),
                     refs
-                )
+                );
+                if let Some(warning) = self
+                    .telemetry
+                    .extra
+                    .as_ref()
+                    .and_then(|extra| extra.get("root_fallback_warning"))
+                    .and_then(Value::as_str)
+                {
+                    line.push_str(&format!("\n# warning: root_fallback: {warning}"));
+                }
+                line
             }
             CodeModeStatus::Error => format!(
                 "codemode:error X0 ops={} {}",

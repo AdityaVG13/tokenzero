@@ -278,20 +278,29 @@ where
     let result_command = command_display.clone();
     let result_argv = plan.argv.clone();
     let (result_mode, result_alias_dependency) = (plan.execution_mode, plan.alias_dependency);
-    let result_cwd = cwd.map(|path| path.display().to_string());
+    // Always echo the effective cwd. When the caller omits cwd the child inherits
+    // process cwd — report that path instead of leaving telemetry null.
+    let effective_cwd = cwd
+        .map(Path::to_path_buf)
+        .or_else(|| std::env::current_dir().ok());
+    let result_cwd = effective_cwd
+        .as_ref()
+        .map(|path| path.display().to_string());
     let capture_limit_bytes = output_policy.per_stream_capture_bytes;
     let spill_threshold_bytes = output_policy.spill_threshold_bytes;
     let start = Instant::now();
     let (program, rest) = plan.argv.split_first().ok_or(RuntimeError::EmptyCommand)?;
     let mut command = match plan.execution_mode {
-        ExecutionMode::Argv => command_for_argv(program, rest, cwd, env_overrides),
+        ExecutionMode::Argv => {
+            command_for_argv(program, rest, effective_cwd.as_deref(), env_overrides)
+        }
         ExecutionMode::Shell => {
             let mut cmd = Command::new(program);
             cmd.args(rest);
             cmd
         }
     };
-    if let Some(cwd) = cwd {
+    if let Some(cwd) = effective_cwd.as_deref() {
         command.current_dir(cwd);
     }
     // Caller-selected commands only; explicit env overrides applied after scrub.

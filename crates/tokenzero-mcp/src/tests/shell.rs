@@ -1,4 +1,5 @@
 use super::*;
+use std::path::PathBuf;
 use std::sync::Arc;
 use tempfile::tempdir;
 use tokenzero_core::MCP_SCHEMA_VERSION;
@@ -466,4 +467,68 @@ fn shell_scrubs_inherited_orchestration_env() {
         .unwrap()
         .text;
     assert_eq!(stdout, "opted-in");
+}
+
+#[test]
+fn shell_defaults_cwd_to_call_root_and_echoes_it() {
+    let dir = tempdir().unwrap();
+    let marker = dir.path().join("cwd-marker.txt");
+    std::fs::write(&marker, "here").unwrap();
+    let engine = TokenZeroEngine::new(EngineConfig::for_root(dir.path()));
+
+    // No explicit cwd: must land in call_root, not silent process cwd.
+    let response = engine.shell(
+        if cfg!(windows) {
+            "powershell -NoProfile -Command Get-Location | Select-Object -ExpandProperty Path"
+        } else {
+            "pwd"
+        },
+        None,
+        None,
+        Mode::Auto,
+        None,
+        false,
+        None,
+        None,
+        None,
+    );
+
+    assert_eq!(response.status, "ok");
+    let telemetry = response.telemetry.as_ref().unwrap();
+    let cwd = telemetry["cwd"].as_str().unwrap();
+    let canonical_dir = dir
+        .path()
+        .canonicalize()
+        .unwrap_or_else(|_| dir.path().to_path_buf());
+    let canonical_cwd = PathBuf::from(cwd)
+        .canonicalize()
+        .unwrap_or_else(|_| PathBuf::from(cwd));
+    assert_eq!(canonical_cwd, canonical_dir, "cwd={cwd}");
+    assert_eq!(telemetry["cwd_source"], "call_root");
+    let visible = response.visible.as_ref().unwrap().text.clone();
+    assert!(
+        visible.contains("cwd: ") && visible.contains(cwd),
+        "visible must echo cwd: {visible}"
+    );
+}
+
+#[test]
+fn shell_explicit_cwd_sets_cwd_source_explicit() {
+    let dir = tempdir().unwrap();
+    let engine = TokenZeroEngine::new(EngineConfig::for_root(dir.path()));
+    let response = engine.shell(
+        "echo ok",
+        None,
+        Some(dir.path()),
+        Mode::Auto,
+        None,
+        false,
+        None,
+        None,
+        None,
+    );
+    assert_eq!(response.status, "ok");
+    let telemetry = response.telemetry.as_ref().unwrap();
+    assert_eq!(telemetry["cwd_source"], "explicit");
+    assert!(telemetry["cwd"].as_str().is_some_and(|c| !c.is_empty()));
 }

@@ -1206,13 +1206,9 @@ fn first_line_preview(text: &str, max_tokens: usize) -> String {
 }
 
 fn telemetry_insert(result: &mut CodeModeResult, key: &str, value: Value) {
-    if let Some(extra) = result
-        .telemetry
-        .extra
-        .as_mut()
-        .and_then(Value::as_object_mut)
-    {
-        extra.insert(key.to_string(), value);
+    let extra = result.telemetry.extra.get_or_insert_with(|| json!({}));
+    if let Some(obj) = extra.as_object_mut() {
+        obj.insert(key.to_string(), value);
     }
 }
 
@@ -1282,9 +1278,23 @@ fn finalize_codemode_result(
 ) -> CodeModeResult {
     {
         let work_root = tokenzero_work_root(options.root.clone());
-        let engine = make_engine_for_root_with_options(work_root, options);
+        let root_was_explicit = options.root.is_some();
+        let engine = make_engine_for_root_with_options(work_root.clone(), options);
         let journal_health = journal_doctor_json(&engine.config.cache_path);
         telemetry_insert(&mut result, "plan_journals", journal_health);
+        telemetry_insert(
+            &mut result,
+            "work_root",
+            json!(work_root.display().to_string()),
+        );
+        telemetry_insert(&mut result, "root_explicit", json!(root_was_explicit));
+        if !root_was_explicit {
+            let warning = format!(
+                "no root set; falling back to server/process cwd {}",
+                work_root.display()
+            );
+            telemetry_insert(&mut result, "root_fallback_warning", json!(warning));
+        }
         if matches!(result.status, CodeModeStatus::Completed) {
             if let Some(value) = result.value.take() {
                 let (value, refs) = ref_first_final_value(&engine, value, options);
@@ -1386,7 +1396,7 @@ fn finalize_codemode_result(
             }
         }
         result.telemetry.refs_count = Some(result.refs.len());
-        finalize_result(
+        let mut finalized = finalize_result(
             result,
             kind,
             plan,
@@ -1395,7 +1405,21 @@ fn finalize_codemode_result(
             ExecutionStore::new(engine.config.cache_path.clone()),
             limits,
             steps,
-        )
+        );
+        // One-line warning after store finalization (which resets visible_ack to C/X0).
+        if let Some(warning) = finalized
+            .telemetry
+            .extra
+            .as_ref()
+            .and_then(|extra| extra.get("root_fallback_warning"))
+            .and_then(Value::as_str)
+        {
+            finalized.visible_ack = format!(
+                "{}\n# warning: root_fallback: {warning}",
+                finalized.visible_ack.trim_end()
+            );
+        }
+        finalized
     }
 }
 
@@ -2641,28 +2665,32 @@ fn exec_shell(engine: &TokenZeroEngine, work_root: &Path, args: &[Value]) -> OpR
             "zero.shell requires a command string as first argument",
         )?;
         let opts = Opts::from_arg(args, 1);
-        let cwd = opts.str("cwd").map(|raw| {
-            let path = PathBuf::from(raw);
-            if path.is_absolute() {
-                path
-            } else {
-                work_root.join(path)
-            }
-        });
+        // Default cwd to the plan/work root (not silent process cwd).
+        let cwd = opts
+            .str("cwd")
+            .map(|raw| {
+                let path = PathBuf::from(raw);
+                if path.is_absolute() {
+                    path
+                } else {
+                    work_root.join(path)
+                }
+            })
+            .unwrap_or_else(|| work_root.to_path_buf());
         let mode = opts.mode_or("mode", Mode::Auto);
         let timeout = opts
             .usize("timeout_seconds")
             .map(|secs| Duration::from_secs(secs as u64));
         if opts.bool("background").unwrap_or(false) {
             return engine
-                .shell_background(command, cwd.as_deref(), timeout)
+                .shell_background(command, Some(cwd.as_path()), timeout)
                 .map(OpOutcome::from_catalog)
                 .map_err(operation_error);
         }
         let resp = engine.shell(
             command,
             None,
-            cwd.as_deref(),
+            Some(cwd.as_path()),
             mode,
             Some("safe"),
             false,
@@ -2677,6 +2705,12 @@ fn exec_shell(engine: &TokenZeroEngine, work_root: &Path, args: &[Value]) -> OpR
                 }
                 if let Some(success) = telem.get("command_success") {
                     value["success"] = success.clone();
+                }
+                if let Some(cwd_val) = telem.get("cwd") {
+                    value["cwd"] = cwd_val.clone();
+                }
+                if let Some(src) = telem.get("cwd_source") {
+                    value["cwd_source"] = src.clone();
                 }
             }
         }))

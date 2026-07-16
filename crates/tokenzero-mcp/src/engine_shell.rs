@@ -273,26 +273,50 @@ fn terminate_background_group(pgid: u32) {
 fn terminate_background_group(_: u32) {}
 
 impl TokenZeroEngine {
+    /// Resolve shell cwd: explicit wins; otherwise default to `call_root` (plan/server
+    /// root), never silent process-cwd inheritance without an echoed path.
+    fn resolve_shell_cwd(&self, cwd: Option<&Path>) -> Result<(PathBuf, &'static str), String> {
+        match cwd {
+            Some(path) => {
+                if !self.path_allowed(path) {
+                    return Err(format!("cwd is outside allowed roots: {}", path.display()));
+                }
+                Ok((path.to_path_buf(), "explicit"))
+            }
+            None => {
+                let root = self.config.call_root.clone();
+                if !self.path_allowed(&root) {
+                    return Err(format!(
+                        "call_root is outside allowed roots: {}",
+                        root.display()
+                    ));
+                }
+                Ok((root, "call_root"))
+            }
+        }
+    }
+
     pub(crate) fn shell_background(
         &self,
         command: &str,
         cwd: Option<&Path>,
         timeout_override: Option<Duration>,
     ) -> Result<Value, String> {
-        if let Some(cwd) = cwd {
-            if !self.path_allowed(cwd) {
-                return Err(format!("cwd is outside allowed roots: {}", cwd.display()));
-            }
-        }
+        let (resolved_cwd, cwd_source) = self.resolve_shell_cwd(cwd)?;
         let run_argv = shell_argv(command);
         let child_env = inner_env();
-        background_jobs().start(
+        let mut launched = background_jobs().start(
             run_argv,
-            cwd.map(Path::to_path_buf),
+            Some(resolved_cwd.clone()),
             child_env,
             timeout_override.unwrap_or(self.config.shell_timeout),
             shell_spill_dir(&self.config.cache_path),
-        )
+        )?;
+        if let Some(obj) = launched.as_object_mut() {
+            obj.insert("cwd".to_string(), json!(resolved_cwd.display().to_string()));
+            obj.insert("cwd_source".to_string(), json!(cwd_source));
+        }
+        Ok(launched)
     }
 
     pub(crate) fn shell_job(&self, id: &str) -> Result<Value, String> {
@@ -312,16 +336,18 @@ impl TokenZeroEngine {
         stdin: Option<&str>,
         timeout_override: Option<Duration>,
     ) -> ToolResponse {
-        if let Some(cwd) = cwd {
-            if !self.path_allowed(cwd) {
+        let (resolved_cwd, cwd_source) = match self.resolve_shell_cwd(cwd) {
+            Ok(resolved) => resolved,
+            Err(message) => {
                 return ToolResponse::error(
                     "shell",
                     "path_outside_allowed_roots",
-                    format!("cwd is outside allowed roots: {}", cwd.display()),
+                    message,
                     Some("set cwd under an allowed root".to_string()),
                 );
             }
-        }
+        };
+        let cwd = resolved_cwd.as_path();
         let rewrite_mode = rewrite.unwrap_or("off");
         let rewrite_result =
             rewrite_command(command, rewrite_mode, !no_rewrite && rewrite_mode != "off");
@@ -348,7 +374,7 @@ impl TokenZeroEngine {
         let output_policy = self.shell_output_policy();
         let result = match run_command_with_policy_observer(
             &run_argv,
-            cwd,
+            Some(cwd),
             Some(&child_env),
             stdin,
             timeout_override.unwrap_or(self.config.shell_timeout),
@@ -398,11 +424,16 @@ impl TokenZeroEngine {
             stderr_ref: Some(&stderr_stored.blob_ref),
             combined_ref: Some(&combined_stored.blob_ref),
         });
+        let effective_cwd = result
+            .cwd
+            .clone()
+            .unwrap_or_else(|| resolved_cwd.display().to_string());
         let capture = json!({
             "schema_version": "tokenzero.capture.v1",
             "command": display_command,
             "argv": result.argv,
-            "cwd": result.cwd,
+            "cwd": effective_cwd,
+            "cwd_source": cwd_source,
             "env_summary": env_summary,
             "timing": {"duration_ms": result.duration_ms, "timed_out": result.timed_out},
             "exit_code": result.exit_code,
@@ -467,6 +498,22 @@ impl TokenZeroEngine {
         } else {
             output.trim_end().to_string()
         };
+        // Every shell ack echoes effective cwd (tokenzero-shell-cwd-default-q73).
+        let visible_text = if visible_text.contains("\ncwd: ") || visible_text.starts_with("cwd: ")
+        {
+            visible_text
+        } else if visible_text.starts_with("# shell") {
+            let mut lines = visible_text.lines();
+            let first = lines.next().unwrap_or("# shell");
+            let rest: Vec<&str> = lines.collect();
+            if rest.is_empty() {
+                format!("{first}\ncwd: {effective_cwd}")
+            } else {
+                format!("{first}\ncwd: {effective_cwd}\n{}", rest.join("\n"))
+            }
+        } else {
+            format!("cwd: {effective_cwd}\n{visible_text}")
+        };
         let visible_tokens = if inline_shell_output || refs_complete {
             count_tokens(&visible_text)
         } else {
@@ -515,6 +562,7 @@ impl TokenZeroEngine {
             "execution_mode": result.execution_mode,
             "alias_dependency": result.alias_dependency,
             "cwd": capture["cwd"],
+            "cwd_source": capture["cwd_source"],
             "transport_status": if streams_truncated { "degraded" } else { "ok" },
             "command_success": capture["command_status"]["command_success"],
             "exit_code": capture["exit_code"],
