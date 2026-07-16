@@ -8,9 +8,16 @@
 //! - Heavy (shell / high-cost): `/tmp/zerostack-codemode-heavy.permit`
 //! - Analysis (light find/search/plans): `/tmp/zerostack-codemode-analysis.permit`
 //!
-//! Status/health/describe probes stay ungated. Default analysis concurrency is
-//! one machine-wide holder; override with `TOKENZERO_CODEMODE_ANALYSIS_CONCURRENCY`
-//! (TokenZero) / matching env once FSZero and GraphZero adopt the contract.
+//! Status/health/describe probes stay ungated.
+//!
+//! ## Multi-tenant default (100 sessions)
+//!
+//! Analysis concurrency defaults to ~25% of `available_parallelism` (min 1,
+//! soft-capped), not a hard single holder. Hundreds of sessions share that
+//! slot pool; each active holder is expected to use about one core because
+//! search backends are thread-capped (`rg --threads 1`). Override with
+//! `TOKENZERO_CODEMODE_ANALYSIS_CONCURRENCY` /
+//! `TOKENZERO_CODEMODE_ANALYSIS_CONCURRENCY_CAP`.
 
 use serde::Serialize;
 use serde_json::{Value, json};
@@ -28,12 +35,14 @@ use super::{CodeModeOptions, CodeModeResult};
 const DEFAULT_MAX_ACTIVE: usize = 1;
 const DEFAULT_MAX_QUEUE_DEPTH: usize = 8;
 const DEFAULT_COST_THRESHOLD: usize = 32;
+const DEFAULT_ANALYSIS_CONCURRENCY_CAP: usize = 8;
 const DEFAULT_MACHINE_PERMIT: &str = "/tmp/zerostack-codemode-heavy.permit";
 const DEFAULT_ANALYSIS_PERMIT: &str = "/tmp/zerostack-codemode-analysis.permit";
 const PERMIT_POLL: Duration = Duration::from_millis(20);
+const PERMIT_POLL_MAX: Duration = Duration::from_millis(200);
 const INCOMPLETE_PERMIT_GRACE: Duration = Duration::from_millis(250);
 const SNAPSHOT_PLANS: &[&str] = &["status", "codemode.status", "containment.status"];
-const CONFIG_LIMITS: [(&str, usize, usize); 4] = [
+const CONFIG_LIMITS: [(&str, usize, usize); 3] = [
     (
         "TOKENZERO_CODEMODE_HEAVY_CONCURRENCY",
         DEFAULT_MAX_ACTIVE,
@@ -47,11 +56,6 @@ const CONFIG_LIMITS: [(&str, usize, usize); 4] = [
     (
         "TOKENZERO_CODEMODE_HEAVY_COST_THRESHOLD",
         DEFAULT_COST_THRESHOLD,
-        1,
-    ),
-    (
-        "TOKENZERO_CODEMODE_ANALYSIS_CONCURRENCY",
-        DEFAULT_MAX_ACTIVE,
         1,
     ),
 ];
@@ -122,13 +126,17 @@ struct Config {
 }
 impl Default for Config {
     fn default() -> Self {
-        let [max_active, max_queue_depth, cost_threshold, analysis_max_active] =
+        let [max_active, max_queue_depth, cost_threshold] =
             CONFIG_LIMITS.map(|(name, default, minimum)| env_usize(name, default).max(minimum));
         Self {
             max_active,
             max_queue_depth,
             cost_threshold,
-            analysis_max_active,
+            analysis_max_active: env_usize_or_else(
+                "TOKENZERO_CODEMODE_ANALYSIS_CONCURRENCY",
+                default_analysis_concurrency,
+            )
+            .max(1),
         }
     }
 }
@@ -407,6 +415,8 @@ impl Controller {
             "queue_depth": s.queue_depth,
             "active_heavy": s.active_heavy,
             "worker_count": s.active_heavy,
+            "analysis_max_active": self.config.analysis_max_active,
+            "heavy_max_active": self.config.max_active,
             "child_pid": s.child_pid,
             "child_pgid": s.child_pgid,
             "operation_class": s.operation_class,
@@ -472,6 +482,7 @@ impl MachinePermit {
             return Self::acquire(base, deadline, command);
         }
         let _ = fs::create_dir_all(base);
+        let mut attempt = 0u32;
         loop {
             for idx in 0..slots {
                 let path = base.join(format!("slot-{idx}"));
@@ -487,11 +498,17 @@ impl MachinePermit {
                     base.display()
                 ));
             }
-            std::thread::sleep(PERMIT_POLL.min(deadline.saturating_duration_since(Instant::now())));
+            // Back off under multi-waiter pressure so 100 idle sessions do not
+            // wake-storm the slot directory every 20ms.
+            let sleep_for = permit_backoff(attempt)
+                .min(deadline.saturating_duration_since(Instant::now()));
+            attempt = attempt.saturating_add(1);
+            std::thread::sleep(sleep_for);
         }
     }
 
     fn acquire(path: &Path, deadline: Instant, command: &str) -> Result<Self, String> {
+        let mut attempt = 0u32;
         loop {
             match Self::try_create(path, command) {
                 Ok(permit) => return Ok(permit),
@@ -502,9 +519,10 @@ impl MachinePermit {
                             path.display()
                         ));
                     }
-                    std::thread::sleep(
-                        PERMIT_POLL.min(deadline.saturating_duration_since(Instant::now())),
-                    );
+                    let sleep_for = permit_backoff(attempt)
+                        .min(deadline.saturating_duration_since(Instant::now()));
+                    attempt = attempt.saturating_add(1);
+                    std::thread::sleep(sleep_for);
                 }
                 Err(TryPermit::Fatal(e)) => return Err(e),
             }
@@ -702,6 +720,42 @@ fn env_usize(name: &str, default: usize) -> usize {
         .unwrap_or(default)
 }
 
+fn env_usize_or_else(name: &str, default: impl FnOnce() -> usize) -> usize {
+    std::env::var(name)
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or_else(default)
+}
+
+/// Machine-wide analysis slot budget for multi-tenant hosts.
+///
+/// Default: `max(1, cores/4)` soft-capped by
+/// `TOKENZERO_CODEMODE_ANALYSIS_CONCURRENCY_CAP` (default 8). One hundred
+/// sessions share these slots; each active search is thread-capped so the
+/// aggregate stays near the budgeted core count instead of `sessions * cores`.
+pub(crate) fn default_analysis_concurrency() -> usize {
+    let cores = std::thread::available_parallelism()
+        .map(std::num::NonZeroUsize::get)
+        .unwrap_or(4);
+    let budget = (cores / 4).max(1);
+    let cap = env_usize(
+        "TOKENZERO_CODEMODE_ANALYSIS_CONCURRENCY_CAP",
+        DEFAULT_ANALYSIS_CONCURRENCY_CAP,
+    )
+    .max(1);
+    budget.min(cap)
+}
+
+fn permit_backoff(attempt: u32) -> Duration {
+    // 20, 40, 80, 160, 200, 200, ...
+    let shift = attempt.min(4);
+    let millis = (PERMIT_POLL.as_millis() as u64)
+        .saturating_mul(1u64 << shift)
+        .min(PERMIT_POLL_MAX.as_millis() as u64)
+        .max(PERMIT_POLL.as_millis() as u64);
+    Duration::from_millis(millis)
+}
+
 
 #[cfg(test)]
 mod tests {
@@ -770,12 +824,19 @@ mod tests {
     fn light_execute_returns_busy_when_analysis_permit_held() {
         let path = analysis_permit_path();
         let _ = fs::remove_dir_all(&path);
-        let holder = MachinePermit::acquire(
-            &path,
-            Instant::now() + Duration::from_secs(5),
-            "test-analysis-holder",
-        )
-        .expect("pre-hold analysis permit");
+        let slots = default_analysis_concurrency().max(1);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let holders: Vec<_> = (0..slots)
+            .map(|idx| {
+                MachinePermit::acquire_slots(
+                    &path,
+                    slots,
+                    deadline,
+                    &format!("test-analysis-holder-{idx}"),
+                )
+                .unwrap_or_else(|e| panic!("pre-hold analysis slot {idx}/{slots}: {e}"))
+            })
+            .collect();
 
         let opts = CodeModeOptions {
             hard_max_wall_ms: 120,
@@ -798,15 +859,17 @@ mod tests {
             err.kind == "busy" || err.message.contains("machine_permit_busy"),
             "unexpected error: {err:?}"
         );
-        drop(holder);
+        drop(holders);
     }
 
     #[test]
     fn status_plans_bypass_analysis_permit() {
         let path = analysis_permit_path();
         let _ = fs::remove_dir_all(&path);
-        let holder = MachinePermit::acquire(
+        let slots = default_analysis_concurrency().max(1);
+        let holder = MachinePermit::acquire_slots(
             &path,
+            slots,
             Instant::now() + Duration::from_secs(5),
             "test-analysis-holder",
         )
@@ -822,5 +885,59 @@ mod tests {
             "status/search catalog plans must stay ungated: {result:?}"
         );
         drop(holder);
+    }
+
+    #[test]
+    fn default_analysis_concurrency_is_core_budgeted() {
+        let cores = std::thread::available_parallelism()
+            .map(std::num::NonZeroUsize::get)
+            .unwrap_or(4);
+        let got = default_analysis_concurrency();
+        let expect = (cores / 4).max(1).min(DEFAULT_ANALYSIS_CONCURRENCY_CAP);
+        assert_eq!(got, expect);
+        assert!(got >= 1);
+    }
+
+    #[test]
+    fn multi_slot_analysis_permit_allows_parallel_holders() {
+        let base = std::env::temp_dir().join(format!(
+            "tokenzero-analysis-slots-{}-{}",
+            std::process::id(),
+            epoch_millis()
+        ));
+        let _ = fs::remove_dir_all(&base);
+        let a = MachinePermit::acquire_slots(
+            &base,
+            2,
+            Instant::now() + Duration::from_secs(2),
+            "slot-a",
+        )
+        .expect("first slot");
+        let b = MachinePermit::acquire_slots(
+            &base,
+            2,
+            Instant::now() + Duration::from_secs(2),
+            "slot-b",
+        )
+        .expect("second slot");
+        let contested = MachinePermit::acquire_slots(
+            &base,
+            2,
+            Instant::now() + Duration::from_millis(80),
+            "slot-c",
+        );
+        assert!(
+            contested.is_err(),
+            "third holder must wait when only two slots exist"
+        );
+        drop(a);
+        drop(b);
+    }
+
+    #[test]
+    fn permit_backoff_grows_then_caps() {
+        assert_eq!(permit_backoff(0), PERMIT_POLL);
+        assert!(permit_backoff(3) > permit_backoff(0));
+        assert_eq!(permit_backoff(10), PERMIT_POLL_MAX);
     }
 }

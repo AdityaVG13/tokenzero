@@ -18,7 +18,7 @@ pub const DEFAULT_MAX_MEMORY_BYTES: usize = 32 * 1024 * 1024;
 pub const DEFAULT_MAX_OUTPUT_BYTES: usize = 64 * 1024;
 pub const DEFAULT_MAX_RESULT_REF_BYTES: usize = 10 * 1024 * 1024;
 pub const DEFAULT_MAX_REFS_EMITTED: usize = 256;
-pub const DEFAULT_MAX_PARALLEL_WIDTH: usize = 16;
+pub const DEFAULT_MAX_PARALLEL_WIDTH: usize = 2;
 pub const DEFAULT_MAX_CODE_BYTES: usize = 64 * 1024;
 
 // serde(default): tool callers send PARTIAL limits objects (the documented

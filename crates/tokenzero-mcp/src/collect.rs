@@ -320,6 +320,12 @@ pub(crate) fn rg_search(
             "--hidden",
             "--no-ignore",
             "--with-filename",
+            // Multi-tenant hosts may run many TokenZero sessions. Cap rg's
+            // internal fanout so one find cannot saturate the machine; the
+            // machine-wide analysis permit then bounds how many such searches
+            // run at once.
+            "--threads",
+            "1",
         ]);
         // Mirror the internal scanner's skip list (`should_skip` with hidden
         // entries excluded): `!.*` also keeps the `.tokenzero` recovery cache
