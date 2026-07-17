@@ -23,6 +23,7 @@ Tracked tip on `main`: `68826cb` (post-`v1.4.0`). Includes permit/CodeMode batch
 - **README claims**: 99.0% northstar total scoped as fixed-suite point estimate only (`tokenzero-g3y.18`).
 
 ### Fixed
+- Visible-budget truncation keeps every line the budget proof counted (`prefix_end_for_kept_lines` used `keep-2` and dropped one fitting line when `keep >= 2`) (`tokenzero-g3y.10`, P01-001).
 - npm shim self-recursion detection uses realpath for `TOKENZERO_BIN` and a bounded prefix + npm cmd-shim structure match on PATH, so distinct binaries that merely mention the shim path are not refused and large candidates are not fully read (`tokenzero-g3y.3`).
 - CodeMode host ops (find/search/expand and session resume load) abort on `hard_max_wall_ms` mid-call via cooperative checkpoints, not only between QuickJS microtasks (`tokenzero-y1gi`).
 - Permit `Fatal` maps to non-retryable substrate errors (`tokenzero-091s`).
