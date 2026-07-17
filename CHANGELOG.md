@@ -23,6 +23,7 @@ Tracked tip on `main`: `68826cb` (post-`v1.4.0`). Includes permit/CodeMode batch
 - **README claims**: 99.0% northstar total scoped as fixed-suite point estimate only (`tokenzero-g3y.18`).
 
 ### Fixed
+- npm shim suite kills removal of PATH `looksLikeNpmShimInvocation` via `scripts/npm_shim_coverage_law.py`, covering distinct-shim vs npm-wrapper behavior (`tokenzero-g3y.16`, CE-P12-01).
 - Spill prune bounds metadata work with a scanned-entry budget and wall deadline, and engine construction coalesces automatic cache maintenance so concurrent constructors do not multiply spill-dir scan/sort (`tokenzero-g3y.22`, P22-001).
 - Homebrew formula `version`/download URLs track workspace release `1.4.0` so the install compatibility hard gate is feasible (`tokenzero-g3y.13`, P10-001).
 - Completed-split compatibility entry points validate module directories (and refuse leftover monoliths) instead of opening removed `.rs` files (`tokenzero-g3y.6`, P08-002).
