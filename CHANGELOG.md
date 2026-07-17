@@ -23,6 +23,7 @@ Tracked tip on `main`: `68826cb` (post-`v1.4.0`). Includes permit/CodeMode batch
 - **README claims**: 99.0% northstar total scoped as fixed-suite point estimate only (`tokenzero-g3y.18`).
 
 ### Fixed
+- Non-Unix shell cleanup joins inherited-pipe readers after Windows Job Object terminate (plus a final join grace / reaper), so blocked stdout/stderr workers are never detached when a descendant keeps the pipes open (`tokenzero-g3y.24`, P07-001).
 - Recovery working-set `enforce_budget` compares resident tokens to replacement-floor tokens (not bytes) and returns `BudgetUnsatisfiable` when the budget cannot be met (`tokenzero-g3y.19`, P13-F1).
 - npm shim suite kills removal of PATH `looksLikeNpmShimInvocation` via `package/npm/test/coverage_law_shim_detection.py`, covering distinct-shim vs npm-wrapper behavior (`tokenzero-g3y.16`, CE-P12-01).
 - Spill prune bounds metadata work with a scanned-entry budget and wall deadline, and engine construction coalesces automatic cache maintenance so concurrent constructors do not multiply spill-dir scan/sort (`tokenzero-g3y.22`, P22-001).

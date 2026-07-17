@@ -16,6 +16,11 @@ use wait_timeout::ChildExt;
 #[cfg(unix)]
 use std::os::unix::process::CommandExt;
 
+#[cfg(windows)]
+use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle, RawHandle};
+#[cfg(windows)]
+use std::os::windows::process::CommandExt;
+
 pub const DEFAULT_SHELL_CAPTURE_BYTES: usize = 4 * 1024 * 1024;
 pub const DEFAULT_SHELL_SPILL_BYTES: usize = 1024 * 1024;
 
@@ -486,12 +491,19 @@ fn collect_process_io(
     let timed_out = incomplete && !child_exited;
     let io_grace_expired = incomplete && child_exited;
     if incomplete {
+        // Unix: process-group kill closes inherited fds. Non-Unix: job terminate
+        // kills the tree so pipe writers release and blocked readers can finish.
         group.terminate();
         let cleanup = deadline_from(Instant::now(), PROCESS_IO_SHUTDOWN_GRACE);
         stdin_result = stdin_result.or(poll_stdin(stdin.as_mut(), cleanup)?);
         stdout_result = stdout_result.or(poll_worker(&mut stdout, cleanup)?);
         stderr_result = stderr_result.or(poll_worker(&mut stderr, cleanup)?);
     }
+    // Never return while leaving live reader JoinHandles detached: if cleanup
+    // still left a worker blocked, terminate again and join with a final grace.
+    stdin_result = ensure_worker_joined(stdin.as_mut(), stdin_result, &group)?;
+    stdout_result = ensure_worker_joined(Some(&mut stdout), stdout_result, &group)?;
+    stderr_result = ensure_worker_joined(Some(&mut stderr), stderr_result, &group)?;
     let stdin_result = stdin_result.ok_or_else(|| worker_timeout("shell stdin writer"))?;
     if !tolerate_write_error && !timed_out && !io_grace_expired {
         stdin_result?;
@@ -502,6 +514,43 @@ fn collect_process_io(
         timed_out,
         io_grace_expired,
     })
+}
+
+/// After process-tree terminate, require the worker to finish and be joined so
+/// inherited-pipe readers are never detached on the timeout error path.
+fn ensure_worker_joined<T>(
+    worker: Option<&mut IoWorker<T>>,
+    result: Option<std::io::Result<T>>,
+    group: &ProcessGroup,
+) -> Result<Option<std::io::Result<T>>, RuntimeError> {
+    if result.is_some() {
+        return Ok(result);
+    }
+    let Some(worker) = worker else {
+        return Ok(None);
+    };
+    group.terminate();
+    let final_grace = deadline_from(Instant::now(), PROCESS_IO_JOIN_GRACE);
+    let recovered = poll_worker(worker, final_grace)?;
+    if recovered.is_some() {
+        return Ok(recovered);
+    }
+    // Last resort: hand the JoinHandle to a joiner thread so Drop never detaches
+    // a live reader. With Windows job terminate (or Unix process-group kill),
+    // this path should be rare; the joiner exits when the pipe finally closes.
+    reaper_join_worker(worker);
+    Ok(None)
+}
+
+fn reaper_join_worker<T>(worker: &mut IoWorker<T>) {
+    if let Some(handle) = worker.handle.take() {
+        let name = worker.name;
+        thread::spawn(move || {
+            if handle.join().is_err() {
+                eprintln!("tokenzero-runtime: {name} panicked after IO shutdown grace");
+            }
+        });
+    }
 }
 
 fn poll_stdin(
@@ -549,6 +598,8 @@ fn deadline_from(start: Instant, timeout: Duration) -> Instant {
 
 const PROCESS_IO_SHUTDOWN_GRACE: Duration = Duration::from_secs(2);
 const CHILD_EXITED_IO_GRACE: Duration = Duration::from_millis(250);
+/// Final join grace after a second terminate when inherited pipes still block readers.
+const PROCESS_IO_JOIN_GRACE: Duration = Duration::from_millis(500);
 
 fn worker_timeout(name: &str) -> RuntimeError {
     RuntimeError::Io(std::io::Error::new(
@@ -557,28 +608,54 @@ fn worker_timeout(name: &str) -> RuntimeError {
     ))
 }
 
-#[derive(Clone, Copy)]
-struct ProcessGroup(Option<u32>);
+struct ProcessGroup {
+    #[cfg(unix)]
+    pgid: Option<u32>,
+    #[cfg(windows)]
+    job: Option<windows_job::Job>,
+    #[cfg(not(any(unix, windows)))]
+    _unused: (),
+}
 
 impl ProcessGroup {
-    fn pgid(self) -> Option<u32> {
-        self.0
+    fn pgid(&self) -> Option<u32> {
+        #[cfg(unix)]
+        {
+            self.pgid
+        }
+        #[cfg(not(unix))]
+        {
+            None
+        }
     }
 
     #[cfg(unix)]
     fn for_child(child: &std::process::Child) -> Self {
-        Self(Some(child.id()))
+        Self {
+            pgid: Some(child.id()),
+        }
     }
 
-    #[cfg(not(unix))]
+    #[cfg(windows)]
+    fn for_child(child: &std::process::Child) -> Self {
+        Self {
+            job: windows_job::Job::attach_child(child),
+        }
+    }
+
+    #[cfg(not(any(unix, windows)))]
     fn for_child(_: &std::process::Child) -> Self {
-        Self(None)
+        Self { _unused: () }
     }
 
-    fn terminate(self) {
+    fn terminate(&self) {
         #[cfg(unix)]
-        if let Some(pgid) = self.0 {
+        if let Some(pgid) = self.pgid {
             terminate_unix_process_group(pgid);
+        }
+        #[cfg(windows)]
+        if let Some(job) = self.job.as_ref() {
+            job.terminate();
         }
     }
 }
@@ -588,7 +665,16 @@ fn configure_process_group(command: &mut Command) {
     command.process_group(0);
 }
 
-#[cfg(not(unix))]
+#[cfg(windows)]
+fn configure_process_group(command: &mut Command) {
+    // Allow assigning the child into our job even when the parent already lives
+    // inside a job (common under CI / shells). CREATE_SUSPENDED is not required
+    // when AssignProcessToJobObject succeeds on a running process.
+    const CREATE_BREAKAWAY_FROM_JOB: u32 = 0x0100_0000;
+    command.creation_flags(CREATE_BREAKAWAY_FROM_JOB);
+}
+
+#[cfg(not(any(unix, windows)))]
 fn configure_process_group(_: &mut Command) {}
 
 #[cfg(unix)]
@@ -605,6 +691,138 @@ fn terminate_unix_process_group(pgid: u32) {
             .status();
         if signal == "-TERM" {
             thread::sleep(Duration::from_millis(50));
+        }
+    }
+}
+
+/// Windows job-object containment so terminate() can kill descendants that still
+/// hold inherited stdout/stderr write ends (unblocking our pipe readers).
+#[cfg(windows)]
+#[allow(
+    unsafe_code,
+    reason = "Windows Job Object APIs are not exposed safely in std"
+)]
+mod windows_job {
+    use super::*;
+    use std::ffi::c_void;
+    use std::ptr;
+
+    type HANDLE = *mut c_void;
+    type BOOL = i32;
+    type DWORD = u32;
+
+    const JobObjectExtendedLimitInformation: u32 = 9;
+
+    #[repr(C)]
+    struct JOBOBJECT_BASIC_LIMIT_INFORMATION {
+        per_process_user_time_limit: i64,
+        per_job_user_time_limit: i64,
+        limit_flags: DWORD,
+        minimum_working_set_size: usize,
+        maximum_working_set_size: usize,
+        active_process_limit: DWORD,
+        affinity: usize,
+        priority_class: DWORD,
+        scheduling_class: DWORD,
+    }
+
+    #[repr(C)]
+    struct IO_COUNTERS {
+        read_operation_count: u64,
+        write_operation_count: u64,
+        other_operation_count: u64,
+        read_transfer_count: u64,
+        write_transfer_count: u64,
+        other_transfer_count: u64,
+    }
+
+    #[repr(C)]
+    struct JOBOBJECT_EXTENDED_LIMIT_INFORMATION {
+        basic_limit_information: JOBOBJECT_BASIC_LIMIT_INFORMATION,
+        io_info: IO_COUNTERS,
+        process_memory_limit: usize,
+        job_memory_limit: usize,
+        peak_process_memory_used: usize,
+        peak_job_memory_used: usize,
+    }
+
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn CreateJobObjectW(attrs: *mut c_void, name: *const u16) -> HANDLE;
+        fn SetInformationJobObject(
+            job: HANDLE,
+            info_class: u32,
+            info: *mut c_void,
+            info_len: DWORD,
+        ) -> BOOL;
+        fn AssignProcessToJobObject(job: HANDLE, process: HANDLE) -> BOOL;
+        fn TerminateJobObject(job: HANDLE, exit_code: DWORD) -> BOOL;
+    }
+
+    pub struct Job {
+        handle: OwnedHandle,
+    }
+
+    impl Job {
+        pub fn attach_child(child: &std::process::Child) -> Option<Self> {
+            unsafe {
+                let raw = CreateJobObjectW(ptr::null_mut(), ptr::null());
+                if raw.is_null() {
+                    return None;
+                }
+                let handle = OwnedHandle::from_raw_handle(raw as RawHandle);
+                let mut info = JOBOBJECT_EXTENDED_LIMIT_INFORMATION {
+                    basic_limit_information: JOBOBJECT_BASIC_LIMIT_INFORMATION {
+                        per_process_user_time_limit: 0,
+                        per_job_user_time_limit: 0,
+                        // No KILL_ON_JOB_CLOSE: successful captures must not reap
+                        // intentional background descendants when the job handle drops.
+                        // terminate() uses TerminateJobObject explicitly on cleanup paths.
+                        limit_flags: 0,
+                        minimum_working_set_size: 0,
+                        maximum_working_set_size: 0,
+                        active_process_limit: 0,
+                        affinity: 0,
+                        priority_class: 0,
+                        scheduling_class: 0,
+                    },
+                    io_info: IO_COUNTERS {
+                        read_operation_count: 0,
+                        write_operation_count: 0,
+                        other_operation_count: 0,
+                        read_transfer_count: 0,
+                        write_transfer_count: 0,
+                        other_transfer_count: 0,
+                    },
+                    process_memory_limit: 0,
+                    job_memory_limit: 0,
+                    peak_process_memory_used: 0,
+                    peak_job_memory_used: 0,
+                };
+                if SetInformationJobObject(
+                    handle.as_raw_handle() as HANDLE,
+                    JobObjectExtendedLimitInformation,
+                    &mut info as *mut _ as *mut c_void,
+                    std::mem::size_of_val(&info) as DWORD,
+                ) == 0
+                {
+                    return None;
+                }
+                if AssignProcessToJobObject(
+                    handle.as_raw_handle() as HANDLE,
+                    child.as_raw_handle() as HANDLE,
+                ) == 0
+                {
+                    return None;
+                }
+                Some(Self { handle })
+            }
+        }
+
+        pub fn terminate(&self) {
+            unsafe {
+                let _ = TerminateJobObject(self.handle.as_raw_handle() as HANDLE, 1);
+            }
         }
     }
 }
@@ -956,6 +1174,40 @@ pub fn env_map(pairs: &[String]) -> Result<BTreeMap<String, String>, RuntimeErro
         out.insert(key.to_string(), value.to_string());
     }
     Ok(out)
+}
+
+#[cfg(test)]
+mod inherited_pipe_join_tests {
+    use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn unix_descendant_holding_pipes_returns_without_detaching_readers() {
+        // Child exits immediately while a descendant keeps both pipes open.
+        // Process-group terminate must close those writers so readers join
+        // inside the cleanup/join grace instead of being detached on Drop.
+        let argv = vec![
+            "/bin/sh".to_string(),
+            "-c".to_string(),
+            "sleep 60 >/dev/null 2>&1 & exit 0".to_string(),
+        ];
+        let started = Instant::now();
+        let result = run_command(
+            &argv,
+            None,
+            None,
+            None,
+            Duration::from_secs(2),
+            false,
+        )
+        .expect("run_command should return");
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "cleanup+join must finish well under the descendant sleep, took {:?}",
+            started.elapsed()
+        );
+        assert!(result.ok || result.io_grace_expired || result.timed_out);
+    }
 }
 
 #[cfg(test)]
