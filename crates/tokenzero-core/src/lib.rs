@@ -1469,6 +1469,7 @@ mod shell_family;
 mod shell_parse;
 mod shell_policy;
 mod shell_quote;
+pub mod token_classes;
 mod tokens;
 
 use render::domain::*;
