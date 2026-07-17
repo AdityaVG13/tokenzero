@@ -154,6 +154,8 @@ fn main() -> Result<()> {
             let program = std::env::current_exe().map(OsString::from).unwrap_or_else(|_| OsString::from("tokenzero"));
             std::process::exit(tokenzero_mcp::run_supervised_stdio(program, supervised_child_args(&args)))
         }
+        codemode_host_niceness();
+        enforce_surface_exclusivity(&args)?;
         tokenzero_mcp::run_fastmcp_stdio(engine_config_for_mcp(&args)?)
     }
     CodeMode(args) => {
@@ -1125,6 +1127,64 @@ fn engine_config_for_mcp(args: &McpServerArgs) -> Result<EngineConfig> {
 
 fn mcp_work_root(allowed_roots: &[PathBuf]) -> PathBuf {
     tokenzero_work_root(allowed_roots.first().cloned())
+}
+
+/// Long-lived MCP/CodeMode servers run at reduced scheduling priority so a
+/// busy worker cannot starve interactive sessions (multi-project runaway CPU,
+/// 2026-07-16 incident). `TOKENZERO_NO_RENICE=1` opts out.
+#[cfg(unix)]
+fn codemode_host_niceness() {
+    if std::env::var_os("TOKENZERO_NO_RENICE").is_some() {
+        return;
+    }
+    let _ = std::process::Command::new("renice")
+        .args(["-n", "5", "-p", &std::process::id().to_string()])
+        .output();
+}
+
+#[cfg(not(unix))]
+fn codemode_host_niceness() {}
+
+/// MCP XOR CodeMode: a harness runs exactly one surface per repo. When a
+/// CodeMode hub marked this root active, refuse the per-op MCP surface
+/// instead of silently double-serving (observed live: per-op MCP hangs while
+/// a CodeMode hub owns the same stores and machine permits).
+/// `TOKENZERO_ALLOW_DUAL=1` overrides for intentional side-by-side debugging.
+fn enforce_surface_exclusivity(args: &McpServerArgs) -> Result<()> {
+    #[cfg(not(unix))]
+    {
+        return Ok(());
+    }
+    #[cfg(unix)]
+    {
+        let surface = args.tool_surface.as_deref().unwrap_or(&args.mode);
+        if surface != "mcp" || std::env::var_os("TOKENZERO_ALLOW_DUAL").is_some() {
+            return Ok(());
+        }
+        let root = mcp_work_root(&args.allowed_root);
+        let sentinel = root.join(".zerostack").join("codemode.active");
+        let Ok(raw) = std::fs::read_to_string(&sentinel) else {
+            return Ok(());
+        };
+        let pid = serde_json::from_str::<serde_json::Value>(&raw)
+            .ok()
+            .and_then(|value| value.get("pid").and_then(serde_json::Value::as_u64));
+        let live = pid.is_some_and(|pid| {
+            std::process::Command::new("kill")
+                .args(["-0", &pid.to_string()])
+                .status()
+                .is_ok_and(|status| status.success())
+        });
+        if live {
+            anyhow::bail!(
+                "CodeMode hub is active for {} (pid {} via {}); per-op MCP and CodeMode must not run together for one repo. Stop the hub or set TOKENZERO_ALLOW_DUAL=1.",
+                root.display(),
+                pid.unwrap_or(0),
+                sentinel.display()
+            );
+        }
+        Ok(())
+    }
 }
 
 /// Rebuilds the mcp-server invocation for the supervised inner child:
