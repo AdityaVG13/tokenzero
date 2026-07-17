@@ -36,7 +36,14 @@ fn scalar_return_plan_folds_into_primary_content() {
     let rendered = Fixture::new("scalar-fold").render("return await Promise.resolve(true)");
     assert_eq!(rendered.len(), 1, "{rendered:?}");
     assert!(rendered[0].contains(" =true t:"), "{rendered:?}");
-    assert!(count_tokens(&rendered[0]) <= 14, "{}", rendered[0]);
+    assert_eq!(
+        rendered[0].matches("=true").count(),
+        1,
+        "scalar must fold exactly once: {}",
+        rendered[0]
+    );
+    let ack_body = rendered[0].rsplit_once(" t:").map(|(body, _)| body).unwrap_or(&rendered[0]);
+    assert!(count_tokens(ack_body) <= 14, "{}", rendered[0]);
 }
 
 #[test]

@@ -57,7 +57,15 @@ fn sandbox_denies_host_capabilities() {
         "db.query('select 1')",
         "indexedDB.open('x')",
     ] {
-        let result = execute_codemode_with_options(plan, CodeModeOptions::default());
+        let result = execute_codemode_with_options(
+            plan,
+            CodeModeOptions {
+                // Explicit root: the deny ack must not depend on the
+                // root_fallback warning that rides visible_ack otherwise.
+                root: Some(std::env::temp_dir()),
+                ..CodeModeOptions::default()
+            },
+        );
         assert_eq!(
             result.status,
             CodeModeStatus::Error,

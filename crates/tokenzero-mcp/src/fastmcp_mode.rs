@@ -82,6 +82,11 @@ fn scalar_folded_codemode_v2(primary_text: &str, structured: &Value) -> Option<S
         .get("ack")
         .and_then(Value::as_str)
         .unwrap_or(primary_text);
+    // Idempotent: the tools layer may already have folded this scalar into
+    // the ack; folding again rendered doubled values (=true =true).
+    if ack.contains(&format!(" ={value_text}")) {
+        return Some(ack.to_string());
+    }
     let (prefix, suffix) = ack.rsplit_once(" t:")?;
     Some(format!("{prefix} ={value_text} t:{suffix}"))
 }

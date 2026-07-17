@@ -386,6 +386,11 @@ fn scalar_folded_codemode_v2_ack(ack: &str, value: &Value) -> Option<String> {
     if count_tokens(&value_text) > 16 {
         return None;
     }
+    // Idempotent: v3 assembly may already have folded this scalar; folding
+    // again rendered doubled values ("ok tz0 - =true =true t:...").
+    if ack.contains(&format!(" ={value_text}")) {
+        return None;
+    }
     let (prefix, suffix) = ack.rsplit_once(" t:")?;
     Some(format!("{prefix} ={value_text} t:{suffix}"))
 }
@@ -581,6 +586,9 @@ fn scalar_folded_codemode_v3_ack(ack: &str, value: &Value) -> Option<String> {
     }
     let value_text = serde_json::to_string(value).ok()?;
     if count_tokens(&value_text) > 16 {
+        return None;
+    }
+    if ack.contains(&format!(" ={value_text}")) {
         return None;
     }
     Some(format!("{ack} ={value_text}"))
