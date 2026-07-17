@@ -427,7 +427,8 @@ impl WorkingSet {
                             "tz://blob/".to_string() + &"0".repeat(64),
                             &span.anchor,
                         );
-                        (count_tokens(text) > replacement_floor.len()).then_some((
+                        let floor_tokens = count_tokens(&replacement_floor);
+                        (count_tokens(text) > floor_tokens).then_some((
                             index,
                             span.last_touched,
                             count_tokens(text),
@@ -474,6 +475,12 @@ impl WorkingSet {
                 ref_id,
                 replacement,
                 bytes_evicted,
+            });
+        }
+        if self.used_tokens() > self.budget_tokens {
+            return Err(RecoveryError::BudgetUnsatisfiable {
+                used: self.used_tokens(),
+                budget: self.budget_tokens,
             });
         }
         Ok(evicted)
