@@ -99,7 +99,11 @@ totalled **38.1M tokens**; **17.9M of them (47%) never entered the model's
 context**. Counting back every token agents later recovered with `expand`,
 net savings were **30%** in that local Pulse ledger. Treat this as deployment
 telemetry, not a release claim; release-facing claims are gated by
-`tokenzero claim-audit` artifacts.
+`tokenzero claim-audit` artifacts. Auditable packaging for this paragraph
+lives in `benchmarks/claims/deployment-telemetry/evidence.json` (export via
+`tokenzero pulse export-jsonl`, reduce with
+`benchmarks/deployment_telemetry_reducer.py`); historical totals are not
+release-audited in this checkout until a matching ledger is attached.
 
 <h3 id="how-racc-works"><img src=".github/assets/h-how.svg" alt="How RACC works" width="100%"></h3>
 
