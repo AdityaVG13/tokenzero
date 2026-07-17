@@ -147,7 +147,7 @@ use std::thread;
             .map(std::num::NonZeroUsize::get)
             .unwrap_or(4);
         let got = default_analysis_concurrency();
-        let expect = (cores / 4).max(1).min(DEFAULT_ANALYSIS_CONCURRENCY_CAP);
+        let expect = (cores / 4).clamp(1, DEFAULT_ANALYSIS_CONCURRENCY_CAP);
         assert_eq!(got, expect);
         assert!(got >= 1);
     }
@@ -158,7 +158,7 @@ use std::thread;
             .map(std::num::NonZeroUsize::get)
             .unwrap_or(4);
         let got = default_index_concurrency();
-        let expect = (cores / 8).max(1).min(DEFAULT_INDEX_CONCURRENCY_CAP);
+        let expect = (cores / 8).clamp(1, DEFAULT_INDEX_CONCURRENCY_CAP);
         assert_eq!(got, expect);
         assert!(got >= 1);
         assert!(got <= DEFAULT_INDEX_CONCURRENCY_CAP);

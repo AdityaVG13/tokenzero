@@ -4,8 +4,8 @@
 //! this module only stores/loads 64-hex digests and always displays them as
 //! `gz://entity/<id>`. There is no `tz://entity/` namespace.
 
-use sha2::{Digest, Sha256};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::collections::BTreeSet;
 use std::fs;
 use std::io;
@@ -39,7 +39,10 @@ pub struct EntityNoveltyRecord {
 
 impl EntityNoveltyRecord {
     /// Build an empty validated record for `scope_key`.
-    pub fn empty(scope_key: impl Into<String>, producing_engine: &str) -> Result<Self, NoveltyError> {
+    pub fn empty(
+        scope_key: impl Into<String>,
+        producing_engine: &str,
+    ) -> Result<Self, NoveltyError> {
         let scope_key = scope_key.into();
         validate_scope_key(&scope_key)?;
         validate_engine(producing_engine)?;
@@ -322,11 +325,15 @@ mod tests {
     #[test]
     fn refuses_second_entity_namespace() {
         assert!(matches!(
-            parse_entity_ref("tz://entity/0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"),
+            parse_entity_ref(
+                "tz://entity/0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+            ),
             Err(NoveltyError::ForbiddenScheme(_))
         ));
         assert!(matches!(
-            parse_entity_ref("fz://entity/0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"),
+            parse_entity_ref(
+                "fz://entity/0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+            ),
             Err(NoveltyError::ForbiddenScheme(_))
         ));
         let id = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
@@ -346,7 +353,7 @@ mod tests {
         let written = merge_entity_novelty(
             dir.path(),
             scope,
-            &[id_a.clone()],
+            std::slice::from_ref(&id_a),
             "graphzero",
             Some("cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"),
         )
@@ -357,8 +364,14 @@ mod tests {
             Some("cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc")
         );
 
-        let merged = merge_entity_novelty(dir.path(), scope, &[id_b.clone()], "tokenzero", None)
-            .unwrap();
+        let merged = merge_entity_novelty(
+            dir.path(),
+            scope,
+            std::slice::from_ref(&id_b),
+            "tokenzero",
+            None,
+        )
+        .unwrap();
         assert!(merged.knows(&id_a));
         assert!(merged.knows(&id_b));
         assert_eq!(merged.producing_engine, "tokenzero");
