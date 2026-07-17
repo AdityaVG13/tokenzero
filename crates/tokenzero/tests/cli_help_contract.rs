@@ -516,14 +516,15 @@ fn cli_safe_subcommand_recoveries_choose_read_or_plan_surfaces() {
 
 #[test]
 fn cli_run_recovers_common_wrong_json_and_timeout_invocations() {
+    // Parent JSON / timeout typo recovery applies only to options parsed before
+    // the child executable. Trailing --json stays in child argv (CE-P02-01).
     let cases: &[&[&str]] = &[
         &["run", "--jsno", "rustc", "--version"],
         &["run", "--jason", "rustc", "--version"],
         &["run", "--json", "rustc", "--version"],
-        &["run", "rustc", "--version", "--json"],
-        &["shell", "rustc", "--version", "--jason"],
-        &["rn", "rustc", "--version", "--json"],
-        &["run", "--timout", "30", "rustc", "--version", "--json"],
+        &["run", "--timout", "30", "--json", "rustc", "--version"],
+        &["shell", "--jason", "rustc", "--version"],
+        &["rn", "--json", "rustc", "--version"],
     ];
 
     for args in cases {
@@ -554,6 +555,35 @@ fn cli_run_recovers_common_wrong_json_and_timeout_invocations() {
             "{args:?}"
         );
     }
+}
+
+#[test]
+fn cli_run_preserves_trailing_child_json_without_delimiter() {
+    // CE-P02-01: after the first child executable token, --json belongs to the
+    // child argv and must not promote the parent envelope.
+    let output = Command::cargo_bin("tokenzero")
+        .unwrap()
+        .args(["run", "printf", "%s\n", "--json"])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        serde_json::from_slice::<Value>(&output.stdout).is_err(),
+        "parent must not steal trailing --json into the JSON envelope; got {stdout}"
+    );
+    assert!(
+        stdout.contains("stdout:\n--json\n"),
+        "child must receive and print trailing --json; got {stdout}"
+    );
+    assert!(
+        stdout.contains("exit_code: 0"),
+        "text-mode run envelope expected; got {stdout}"
+    );
 }
 
 #[test]

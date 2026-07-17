@@ -314,16 +314,10 @@ fn split_run_args_without_delimiter(args: &[OsString]) -> Option<(Vec<OsString>,
     if idx >= args.len() {
         return None;
     }
-    let mut command = args[idx..].to_vec();
-    while command
-        .last()
-        .and_then(|arg| arg.to_str())
-        .is_some_and(|value| {
-            run_option(value).is_some_and(|(kind, inline)| kind == RunOptionKind::Json && !inline)
-        })
-    {
-        options.push(command.pop().expect("last command argument exists"));
-    }
+    // Once the first child executable token is seen, every remaining token is
+    // child argv. Trailing --json/--jsno/--jason must not be promoted to the
+    // parent envelope (CE-P02-01); put parent options before the child or use `--`.
+    let command = args[idx..].to_vec();
     (!command.is_empty()).then_some((options, command))
 }
 
