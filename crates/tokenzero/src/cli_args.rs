@@ -92,7 +92,9 @@ pub(crate) enum SessionLedgerCommand {
     Export,
     #[command(about = "Print the stable schema for the session ledger")]
     Schema,
-    #[command(about = "Inspect the exact default-off shareable telemetry payload; sends nothing")]
+    #[command(
+        about = "Inspect default-off usage telemetry records ({execution_path, raw_tokens, spent_tokens}); sends nothing"
+    )]
     Inspect(TelemetryInspectArgs),
     #[command(about = "Query the response ledger")]
     Query {
@@ -164,7 +166,7 @@ define_args! {
     @ PulseExportArgs(#[arg(value_name = "OUTPUT")] output: PathBuf;)
     @ PulseImportArgs(#[arg(value_name = "INPUT")] input: PathBuf;)
     @ SessionLedgerArgs(#[arg(long, global = true)] root: Option<PathBuf>; #[arg(long, global = true)] json: bool; #[command(subcommand)] command: Option<SessionLedgerCommand>;)
-    @ TelemetryInspectArgs(#[doc = "Explicitly opt in to shareable telemetry inspection (no exporter exists)."] #[arg(long)] telemetry: bool; #[doc = "Explicitly opt out; takes precedence over --telemetry."] #[arg(long)] no_telemetry: bool;)
+    @ TelemetryInspectArgs(#[doc = "Explicitly opt in to usage telemetry inspection/recording (no exporter exists)."] #[arg(long)] telemetry: bool; #[doc = "Explicitly opt out; takes precedence over --telemetry."] #[arg(long)] no_telemetry: bool;)
     @ CacheArgs(#[command(subcommand)] command: CacheCommand;)
     @ CachePackArgs(#[arg(long, default_value = "agent")] scope: String; #[arg(long)] root: Option<PathBuf>; #[arg(long)] cache_path: Option<PathBuf>; #[arg(long)] json: bool;)
     @ BenchArgs(#[command(subcommand)] command: BenchCommand;)

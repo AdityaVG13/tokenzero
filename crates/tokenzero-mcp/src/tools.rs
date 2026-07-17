@@ -67,6 +67,10 @@ fn dispatch_gated_tool(
     };
     // Expand health is recorded inside expand_with_params (CLI + CodeMode + MCP).
     record_mcp_pulse(engine, canonical, args, &response, call_id);
+    // Opt-in usage telemetry: MCP tools only. CodeMode execute records separately.
+    if canonical != "execute_code" {
+        record_opt_in_mcp_usage(engine, &response);
+    }
     engine.ledger.record_response(canonical, &response);
     engine.record_tool_attribution(canonical, engine_elapsed, persist_started.elapsed());
     let mut response = response;
@@ -149,6 +153,19 @@ fn record_mcp_pulse(
     let _ = tokenzero_pulse::record_event(&tokenzero_pulse::default_ledger_path(root), &event);
 }
 
+fn record_opt_in_mcp_usage(engine: &TokenZeroEngine, response: &ToolResponse) {
+    let enabled = crate::usage_telemetry_enabled(engine.config.telemetry_enabled);
+    let Some(accounting) = response.accounting.as_ref() else {
+        return;
+    };
+    crate::record_mcp_accounting(
+        &engine.config.cache_path,
+        enabled,
+        accounting.raw_tokens,
+        accounting.visible_tokens,
+    );
+}
+
 fn json_tool_response(name: &str, value: Value) -> Result<ToolResponse, JsonRpcErrorData> {
     let text = serde_json::to_string(&value).map_err(|err| err.to_string())?;
     let tokens = count_tokens(&text);
@@ -173,6 +190,7 @@ fn exec_codemode_tool(
         max_visible_tokens: engine.config.max_visible_tokens,
         // Share session health so plan expand outcomes unlock recovery here.
         surface_health: Some(engine.surface_health_handle()),
+        telemetry_enabled: engine.config.telemetry_enabled,
         ..Default::default()
     };
     // wqw.5: the per-call root defines the execution workspace boundary, which

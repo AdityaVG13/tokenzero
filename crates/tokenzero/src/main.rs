@@ -637,8 +637,11 @@ fn handle_session_ledger(args: SessionLedgerArgs) -> Result<()> {
                 None,
                 env_value.as_deref(),
             );
+            let usage_path = tokenzero_mcp::ledger::usage_telemetry_path_for_cache(
+                &resolve_recovery_cache_path(&root, None),
+            );
             emit_value(
-                tokenzero_mcp::ledger::inspect_telemetry(&response_ledger_path, enabled)?,
+                tokenzero_mcp::ledger::inspect_telemetry(&usage_path, enabled)?,
                 args.json,
             )?;
         }

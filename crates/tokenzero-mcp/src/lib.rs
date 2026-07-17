@@ -41,6 +41,7 @@ mod stdio;
 mod supervisor;
 mod surface_health;
 mod tools;
+pub mod usage_telemetry;
 mod workspace;
 mod write_ladder;
 
@@ -130,9 +131,15 @@ const DIFF_MAX_LINES: usize = 50_000;
 
 pub use config::{
     DEFAULT_SHELL_INLINE_BUDGET, EngineConfig, FETCH_ALLOW_ENV, FETCH_DENY_ENV, FETCH_ENABLED_ENV,
-    SHELL_INLINE_BUDGET_ENV, SearchBackend, default_mcp_idle_timeout, default_shell_timeout,
-    mcp_idle_timeout_from_secs, mcp_tool_surface_from_env, shell_inline_budget_from_env,
-    shell_timeout_from_secs,
+    SHELL_INLINE_BUDGET_ENV, SearchBackend, TELEMETRY_ENV, default_mcp_idle_timeout,
+    default_shell_timeout, mcp_idle_timeout_from_secs, mcp_tool_surface_from_env,
+    resolve_telemetry, shell_inline_budget_from_env, shell_timeout_from_secs,
+    telemetry_env_enabled,
+};
+pub use usage_telemetry::{
+    ExecutionPath, TelemetryInspection, UsageRecord, inspect_usage_telemetry,
+    record_codemode_accounting, record_mcp_accounting, usage_telemetry_enabled,
+    usage_telemetry_path_for_cache,
 };
 
 /// One find/replace hunk for [`TokenZeroEngine::edit`]. `find` must match the

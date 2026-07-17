@@ -50,17 +50,25 @@ Session memory does **not** replicate across machines. It is local to the filesy
 | `TOKENZERO_SESSION_SCOPE` | Overrides the session scope ID | If set to a shared value across users, could cause cross-user leakage. Only the owning user can set this (via shell env). |
 | `TOKENZERO_REF_INDEX_PATH` | Overrides the ref index root directory | If pointed at a shared location, could cause cross-user blob sharing. Permissions on the target directory control access. |
 | `HOME` | Fallback for user root | Standard; no elevated risk. |
-| `TOKENZERO_TELEMETRY` | Opts in only to the inspectable shareable token-count payload | Default off; no exporter exists. |
+| `TOKENZERO_TELEMETRY` | Opts in to local usage-telemetry recording + inspect (`execution_path`, `raw_tokens`, `spent_tokens` only) | Default off; no exporter exists. |
 
-### 3.1 Shareable Telemetry Permission
+### 3.1 Shareable Usage Telemetry Permission
 
-TokenZero's response ledger, ToolMetrics, and Pulse are local accounting surfaces and remain local by default. The separate shareable telemetry permission is **off by default**. Its only current surface is the dry-run inspection command:
+TokenZero's response ledger, ToolMetrics, and Pulse are local accounting surfaces and remain local by default. The separate shareable usage-telemetry permission is **off by default**. Absence, parse failure, or unknown configuration resolves to disabled.
+
+When explicitly enabled (`TOKENZERO_TELEMETRY=1|on|true|yes`, `--telemetry`, or `EngineConfig.telemetry_enabled = Some(true)`), MCP and CodeMode may append closed records containing only:
+
+- `execution_path` (`mcp` or `codemode`)
+- `raw_tokens` (authoritative uncompressed source mass)
+- `spent_tokens` (tokens actually presented; must be `<= raw_tokens`)
+
+Records live beside the recovery cache as `usage-telemetry.jsonl`. Response-local protocol metadata (for example shell `command_success`) is not usage analytics and is never exported on this path.
+
+Inspect with:
 
 `tokenzero session-ledger inspect --json [--telemetry | --no-telemetry]`
 
-Permission precedence is: explicit `--no-telemetry`, explicit `--telemetry`, a programmatic `EngineConfig.telemetry_enabled` override, `TOKENZERO_TELEMETRY`, then off. The environment variable enables only for `1`, `on`, `true`, or `yes` (case-insensitive); every other value is off.
-
-The exact payload allowlist is `schema` (`tokenzero.telemetry.v1`), current crate `version`, `raw_tokens`, and `saved_tokens`. It contains no content, path, query, session, repo, user, agent, or other identifier. Inspection also reports `enabled` and `exporter=none`; those are status fields outside the payload. TokenZero has no telemetry exporter, so opting in or inspecting performs no upload or network activity.
+Permission precedence is: explicit `--no-telemetry`, explicit `--telemetry`, a programmatic `EngineConfig.telemetry_enabled` override, `TOKENZERO_TELEMETRY`, then off. Inspection reports `enabled`, `exporter=none`, and `records`. TokenZero has no telemetry exporter, so opting in performs no upload or network activity.
 
 ### 3.2 Environment Variable Scrubbing (h2c)
 

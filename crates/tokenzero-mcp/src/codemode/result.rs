@@ -156,6 +156,8 @@ pub struct CodeModeOptions {
     /// Session crash-only health shared with the MCP engine (wqw.9).
     /// When set, plan expand/read outcomes update the same gate as tools/call.
     pub surface_health: Option<std::sync::Arc<crate::surface_health::SurfaceHealth>>,
+    /// Programmatic shareable usage-telemetry choice; `None` defers to env.
+    pub telemetry_enabled: Option<bool>,
 }
 
 impl Default for CodeModeOptions {
@@ -180,6 +182,7 @@ impl Default for CodeModeOptions {
             ref_first: true,
             ref_first_budget: crate::DEFAULT_SHELL_INLINE_BUDGET,
             surface_health: None,
+            telemetry_enabled: None,
         }
     }
 }
