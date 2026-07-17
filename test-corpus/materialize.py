@@ -3,13 +3,16 @@
 
 Enforces decompressed-size and expansion-ratio ceilings so a hostile
 gzip member cannot force unbounded live memory / disk during materialize.
-Each member is streamed into a temporary file and replaced atomically only
-after the ceilings pass.
+Members are streamed into a staging directory and the live ``expanded/``
+tree is replaced only after every member validates, so a late failure
+cannot leave a partially refreshed corpus.
 """
 
 from __future__ import annotations
 
 import gzip
+import os
+import shutil
 import sys
 import tempfile
 from pathlib import Path
@@ -64,11 +67,26 @@ def materialize_member(source: Path, destination: Path) -> None:
 def main() -> int:
     root = Path(__file__).parent
     out = root / "expanded"
-    out.mkdir(exist_ok=True)
+    sources = sorted(root.glob("*.rs.gz"))
+    staging = root / f".expanded.staging.{os.getpid()}"
+    backup = root / f".expanded.bak.{os.getpid()}"
     try:
-        for source in sorted(root.glob("*.rs.gz")):
-            materialize_member(source, out / source.name.removesuffix(".gz"))
+        if staging.exists():
+            shutil.rmtree(staging)
+        staging.mkdir()
+        for source in sources:
+            materialize_member(source, staging / source.name.removesuffix(".gz"))
+        # All members validated — publish staging as the live expanded tree.
+        if backup.exists():
+            shutil.rmtree(backup)
+        if out.exists():
+            out.rename(backup)
+        staging.rename(out)
+        if backup.exists():
+            shutil.rmtree(backup)
     except (OSError, EOFError, gzip.BadGzipFile, ValueError) as exc:
+        if staging.exists():
+            shutil.rmtree(staging, ignore_errors=True)
         print(f"materialize failed: {exc}", file=sys.stderr)
         return 1
     return 0

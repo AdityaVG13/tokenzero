@@ -76,6 +76,8 @@ __pycache__/
 !/test-corpus/*.rs.gz
 !/test-corpus/materialize.py
 !/test-corpus/test_materialize_bounds.py
+!/test-corpus/test_materialize_atomic.py
+
 
 # Local/generated outputs
 /codedb.snapshot

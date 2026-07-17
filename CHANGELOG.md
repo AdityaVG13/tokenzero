@@ -23,6 +23,7 @@ Tracked tip on `main`: `68826cb` (post-`v1.4.0`). Includes permit/CodeMode batch
 - **README claims**: 99.0% northstar total scoped as fixed-suite point estimate only (`tokenzero-g3y.18`).
 
 ### Fixed
+- Corpus `materialize.py` stages every gzip member and renames `expanded/` only after the full set validates, so a malformed later member cannot leave a partially refreshed corpus (`tokenzero-g3y.17`, P16-002).
 - Per-workload token gate refuses universal savings claims when any northstar workload expands, allowlisting only the known cargo-test counterexample until a compressor fix + full northstar rebaseline (`tokenzero-g3y.1`, P03-001; no full northstar run).
 - Corpus `materialize.py` streams gzip members with explicit max expanded bytes and expansion-ratio ceilings, writing via temp+atomic replace so a hostile member cannot force unbounded live space (`tokenzero-g3y.26`, P16-001).
 - Non-Unix shell cleanup joins inherited-pipe readers after Windows Job Object terminate (plus a final join grace / reaper), so blocked stdout/stderr workers are never detached when a descendant keeps the pipes open (`tokenzero-g3y.24`, P07-001).
