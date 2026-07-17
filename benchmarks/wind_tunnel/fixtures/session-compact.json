@@ -1,0 +1,21 @@
+{
+  "version": "tokenzero.plan-journal.v1",
+  "plan_id": "fixture-wind-tunnel-compact-0001",
+  "execution_id": "cm://exec/fixture-wind-tunnel-compact",
+  "project_id": "fixture-project",
+  "store_id": "fixture-store",
+  "atomic": true,
+  "state": "committed",
+  "operations": [
+    {
+      "index": 0,
+      "id": "many",
+      "method": "zero.token.compactMany",
+      "classification": "reversible_store_mutation",
+      "idempotency_key": "fixture-compact-many",
+      "state": "committed"
+    }
+  ],
+  "created_at_ms": 1784000001000,
+  "updated_at_ms": 1784000001001
+}

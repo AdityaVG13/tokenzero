@@ -10,6 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 Tracked tip on `main`: `68826cb` (post-`v1.4.0`). Includes permit/CodeMode batch, expand-arg coercion, session-resume CPU harden (`d3bc9bd`), and merged PR #26 telemetry (`tokenzero-f409`). Append here until the next tagged release; do not fold into `[1.4.0]`. Follow-up PR drains remaining ready beads; `tokenzero-readme-northstar-rebaseline-9c6c` refreshes README tables from a fresh northstar run before tag.
 
 ### Added
+- **Wind-tunnel replay MVP**: `benchmarks/wind_tunnel/` loads plan journals (or fixtures), replays under baseline vs candidate policy stubs, diffs action sequences, and exits non-zero on divergence (`tokenzero-wind-tunnel-replay-tyq`; stubs only, no model re-execution).
 - **Token-turn session ledger (DPMT)**: `session-ledger-v2` prices visible/raw mass × turns_remaining and reports decisions per million visible token-turns as the headline metric (`tokenzero-token-turn-mass-ledger-cy2`).
 - **Family-wide CodeMode CPU budget**: machine-wide analysis permit, fair multi-tenant slots, frozen permit contract v1 with index class, and shared crate `zerostack-machine-permit` (`tokenzero-nk6u`, `tokenzero-9tle`).
 - **CodeMode envelope v3**: mechanical ack path for scalar/structured results (`tokenzero-envelope-v3-mechanical-ack-my1`).
