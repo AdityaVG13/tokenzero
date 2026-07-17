@@ -1,4 +1,5 @@
 mod common;
+use assert_cmd::Command as AssertCmd;
 use common::*;
 macro_rules! argv { ($($arg:expr);+ $(;)?) => { &[$($arg),+] }; }
 macro_rules! fields {
@@ -295,6 +296,94 @@ fn cli_codemode_plan_error_exits_nonzero() {
     let json = parse_json_stdout(&output);
     assert_eq!(json["status"], "error");
     assert_json_contains(&json["error"]["message"], "unknown method");
+}
+
+#[test]
+fn cli_codemode_stdin_budget_tier_b_trampoline() {
+    let (dir, cache) = setup_temp_with_cache();
+    let plan = r#"const c = await zero.token.compact("tier-b-stdin"); return { ref: c.ref, text: c.text }"#;
+    let mut cmd = AssertCmd::cargo_bin("tokenzero").unwrap();
+    let output = assert_success(
+        cmd.args([
+            "codemode",
+            "--json",
+            "--budget",
+            "512",
+            "--root",
+            dir.path().to_str().unwrap(),
+            "--cache-path",
+            cache.to_str().unwrap(),
+            "--stdin",
+        ])
+        .write_stdin(plan)
+        .output()
+        .unwrap(),
+        "codemode-stdin-budget",
+    );
+    let json = parse_json_stdout(&output);
+    fields!(json;"/schema" =>"tokenzero.codemode.v1";"/status" =>"completed");
+    assert!(json["value"]["ref"].as_str().unwrap().starts_with("tz://"));
+    assert_json_contains(&json["value"]["text"], "tier-b-stdin");
+    assert!(
+        json["refs"].as_array().map(|a| !a.is_empty()).unwrap_or(false),
+        "Tier B envelope must surface refs like MCP"
+    );
+}
+
+#[test]
+fn cli_codemode_dash_plan_reads_stdin() {
+    let (dir, cache) = setup_temp_with_cache();
+    let mut cmd = AssertCmd::cargo_bin("tokenzero").unwrap();
+    let output = assert_success(
+        cmd.args([
+            "codemode",
+            "--json",
+            "--max-visible-tokens",
+            "400",
+            "--root",
+            dir.path().to_str().unwrap(),
+            "--cache-path",
+            cache.to_str().unwrap(),
+            "-",
+        ])
+        .write_stdin("return { ok: true, via: \"dash\" }")
+        .output()
+        .unwrap(),
+        "codemode-dash-stdin",
+    );
+    let json = parse_json_stdout(&output);
+    fields!(json;"/status" =>"completed");
+    assert_eq!(json["value"]["via"], "dash");
+}
+
+#[test]
+fn cli_codemode_conflicting_plan_sources_typed_error() {
+    let mut cmd = AssertCmd::cargo_bin("tokenzero").unwrap();
+    let output = cmd
+        .args(["codemode", "--json", "--stdin", "--plan", "return 1"])
+        .write_stdin("return 2")
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    let json = parse_json_stdout(&output);
+    fields!(json;"/schema" =>"tokenzero.codemode.v1";"/status" =>"error";"/error/kind" =>"validation");
+    assert_json_contains(&json["error"]["message"], "conflicting plan sources");
+}
+
+#[test]
+fn cli_codemode_empty_plan_typed_error_no_silent_partial() {
+    let mut cmd = AssertCmd::cargo_bin("tokenzero").unwrap();
+    let output = cmd
+        .args(["codemode", "--json", "--stdin"])
+        .write_stdin("")
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    let json = parse_json_stdout(&output);
+    fields!(json;"/schema" =>"tokenzero.codemode.v1";"/status" =>"error");
+    assert!(json["error"]["kind"].is_string());
+    assert_json_contains(&json["error"]["message"], "empty plan");
+    assert!(json["value"].is_null());
 }
 
 #[test]

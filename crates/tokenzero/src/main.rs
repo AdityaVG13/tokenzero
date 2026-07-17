@@ -18,9 +18,9 @@ use tokenzero_core::{
 use tokenzero_filters::{discover, rewrite_command};
 use tokenzero_install as install;
 use tokenzero_mcp::{
-    CodeModeOptions, CodeModeStatus, EditHunk, EngineConfig, TokenZeroEngine, cli_json,
-    default_shell_timeout, execute_codemode_with_options, mcp_idle_timeout_from_secs, render_text,
-    shell_timeout_from_secs,
+    CodeModeOptions, CodeModeResult, CodeModeStatus, EditHunk, EngineConfig, TokenZeroEngine,
+    cli_json, default_shell_timeout, execute_codemode_with_options, mcp_idle_timeout_from_secs,
+    render_text, shell_timeout_from_secs,
 };
 
 mod agent_surfaces;
@@ -157,7 +157,24 @@ fn main() -> Result<()> {
         tokenzero_mcp::run_fastmcp_stdio(engine_config_for_mcp(&args)?)
     }
     CodeMode(args) => {
-        let plan = args.plan_text()?;
+        let plan = match args.plan_text() {
+            Ok(plan) => plan,
+            Err(err) => {
+                let kind = if err.kind() == std::io::ErrorKind::InvalidInput {
+                    "validation"
+                } else {
+                    "io"
+                };
+                let result = CodeModeResult::error_with_kind(kind, err.to_string(), 0, false);
+                if args.json {
+                    println!("{}", serde_json::to_string(&result)?);
+                } else {
+                    println!("{}", result.to_line());
+                }
+                std::io::stdout().flush()?;
+                std::process::exit(1);
+            }
+        };
         let result = execute_codemode_with_options(&plan, CodeModeOptions {
             root: args.root.clone(), allowed_roots: args.allowed_root.clone(), cache_path: args.cache_path.clone(),
             max_visible_tokens: args.max_visible_tokens, timeout_seconds: args.timeout_seconds, ..Default::default()

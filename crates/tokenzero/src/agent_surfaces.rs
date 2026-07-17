@@ -201,8 +201,8 @@ const COMMANDS: &[CommandSurface] = &[
         "agent-contract",
         false,
         true,
-        "tokenzero codemode --json --plan '<plan>'",
-        "Compose multi-step plans on the same base tools as MCP, fewer round-trips. Cloudflare-style plan execution with progressive discovery.",
+        "tokenzero codemode --json --budget <n> --stdin <<'EOF' … EOF",
+        "Tier B shell trampoline: one line / heredoc runs a full plan; same tokenzero.codemode.v1 envelope and refs as MCP; --budget caps visible tokens.",
     ),
     cmd(
         "robot-docs guide",
@@ -348,15 +348,24 @@ pub fn capabilities_json() -> serde_json::Value {
         ],
         "codemode": {
             "schema": "tokenzero.codemode.v1",
-            "cli": "tokenzero codemode --json --plan '<plan>'",
+            "cli": "tokenzero codemode --json --budget <n> --stdin <<'EOF' … EOF",
+            "tier": "B",
+            "transport": "shell_trampoline",
             "discovery": [
                 "tokenzero codemode 'search:read'",
                 "tokenzero codemode 'describe:zero.read'"
             ],
+            "plan_sources": [
+                "--plan / PLAN positional",
+                "--plan-file <path>",
+                "--stdin or PLAN=-",
+                "non-TTY stdin auto-read (heredoc / pipe)"
+            ],
+            "budget_flag": "--budget / --max-visible-tokens",
             "cache_default": "recovery-cache.json",
             "cache_note": "CodeMode shares the default recovery-cache.json with CLI expand/MCP so refs expand without re-running the producer. Pass --cache-path only for an isolated store.",
             "pattern": "https://developers.cloudflare.com/agents/tools/codemode/",
-            "when_to_use": "Compose multi-step workflows on the same base tools as MCP but faster (fewer round-trips, composition via plans, progressive search:/describe: discovery). Not an MCP tool."
+            "when_to_use": "Compose multi-step workflows on the same base tools as MCP but faster (fewer round-trips, composition via plans, progressive search:/describe: discovery). Tier B shell trampoline for harnesses without MCP. Not an MCP tool."
         },
         "dangerous_operations": [
             {
@@ -381,7 +390,7 @@ pub fn capabilities_json() -> serde_json::Value {
             "`tokenzero install status --json` recovers to `tokenzero clients detect --json`.",
             "Use `tokenzero run --json -- <command>` for command telemetry; inspect `command_success`, not only process exit.",
             "Read resource://tokenzero/codemode for the full CodeMode method catalog.",
-            "CodeMode is a separate plan-based execution layer on the same base tools/engine. Faster for multi-step workflows (fewer round-trips). Use `tokenzero codemode --plan`."
+            "CodeMode is a separate plan-based execution layer on the same base tools/engine. Faster for multi-step workflows (fewer round-trips). Tier B trampoline: `tokenzero codemode --json --budget <n> --stdin` (heredoc OK)."
         ]
     })
 }
@@ -444,8 +453,17 @@ Stdout is data. Stderr is diagnostics. JSON commands include `schema_version` or
 
 CodeMode dispatches through the **exact same TokenZeroEngine and tool implementations** as the MCP `tz_*` surface. The difference is execution shape: instead of one round-trip per operation, you compose multi-step workflows in a single plan call.
 
+Tier B shell trampoline (any harness with a bash tool): one shell line / stdin heredoc runs a full plan, emits the same `tokenzero.codemode.v1` envelope and `tz://` refs as MCP, and honors `--budget` / `--max-visible-tokens` so output fits harness result caps. Errors are typed (`status=error` + `error.kind`); empty or conflicting plan sources never silently succeed.
+
 ```bash
-# Multi-step in one call (3 ops, 1 round-trip)
+# Tier B trampoline (stdin heredoc + visible-token budget)
+tokenzero codemode --json --budget 2000 --root . --stdin <<'EOF'
+const f = await zero.read("src/main.rs");
+const hits = await zero.grep("TODO", "src/");
+return { file: f.ref, todos: hits.text };
+EOF
+
+# Multi-step in one call (inline plan)
 tokenzero codemode --json --plan 'const f = await zero.read("src/main.rs"); const hits = await zero.grep("TODO", "src/"); return { file: f.ref, todos: hits.text }'
 
 # Progressive discovery

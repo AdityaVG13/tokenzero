@@ -131,9 +131,16 @@ fn cli_capabilities_json_exposes_agent_contract() {
     assert!(json["commands"].as_array().unwrap().iter().any(|row| {
         row["name"] == "codemode"
             && row["json"] == true
-            && row["primary_invocation"] == "tokenzero codemode --json --plan '<plan>'"
+            && row["primary_invocation"]
+                == "tokenzero codemode --json --budget <n> --stdin <<'EOF' … EOF"
     }));
     assert_eq!(json["codemode"]["schema"], "tokenzero.codemode.v1");
+    assert_eq!(json["codemode"]["tier"], "B");
+    assert_eq!(json["codemode"]["transport"], "shell_trampoline");
+    assert_eq!(
+        json["codemode"]["budget_flag"],
+        "--budget / --max-visible-tokens"
+    );
     assert!(
         json["codemode"].get("mcp_tool").is_none(),
         "codemode must not advertise an mcp_tool"
