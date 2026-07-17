@@ -7,7 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-Tracked tip on `main`: `f439c56` (post-`v1.4.0`). Prior batch `ae451b6..406905b` (31 commits) plus expand-arg coercion. Open PR #26 adds `tokenzero-f409` (`adc2d45`). Append here until the next tagged release; do not fold into `[1.4.0]`. Follow-up: `tokenzero-readme-northstar-rebaseline-9c6c` refreshes README tables from a fresh northstar run.
+Tracked tip on `main`: `68826cb` (post-`v1.4.0`). Includes permit/CodeMode batch, expand-arg coercion, session-resume CPU harden (`d3bc9bd`), and merged PR #26 telemetry (`tokenzero-f409`). Append here until the next tagged release; do not fold into `[1.4.0]`. Follow-up PR drains remaining ready beads; `tokenzero-readme-northstar-rebaseline-9c6c` refreshes README tables from a fresh northstar run before tag.
 
 ### Added
 - **Family-wide CodeMode CPU budget**: machine-wide analysis permit, fair multi-tenant slots, frozen permit contract v1 with index class, and shared crate `zerostack-machine-permit` (`tokenzero-nk6u`, `tokenzero-9tle`).
