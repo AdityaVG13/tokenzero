@@ -6,8 +6,9 @@ impl TokenZeroEngine {
     pub fn new(config: EngineConfig) -> Self {
         // Self-cleaning storage: every engine (one per MCP session or CLI
         // command) reclaims abandoned temp files and aged spills, so users
-        // never have to run cache maintenance by hand.
-        let _ = cache_maintenance(&config.cache_path, false);
+        // never have to run cache maintenance by hand. Coalesced so concurrent
+        // constructors do not multiply spill-dir scan/sort work.
+        let _ = cache_maintenance_coalesced(&config.cache_path, false);
         let metrics = metrics::ToolMetrics::new(&config.cache_path);
         let session_id = new_session_id();
         let repo = config

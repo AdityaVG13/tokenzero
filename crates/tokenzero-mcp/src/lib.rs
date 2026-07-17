@@ -54,7 +54,9 @@ pub use binary_resolve::{
     TOKENZERO_RG_PATH_ENV, engine_binaries_json, resolve_all_engine_binaries, resolve_curl_binary,
     resolve_rg_binary, resolve_tokenzero_binary,
 };
-pub use cache_maintenance::{cache_maintenance, session_pack, shell_spill_dir};
+pub use cache_maintenance::{
+    cache_maintenance, cache_maintenance_coalesced, session_pack, shell_spill_dir,
+};
 pub use catalog::{ResourceSpec, ToolSpec, resource_specs, tool_specs};
 pub use codemode::{
     CODEMODE_SCHEMA, CodeModeLimits, CodeModeOptions, CodeModeResult, CodeModeStatus,

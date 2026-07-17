@@ -709,6 +709,10 @@ impl SpillWriter {
 pub const DEFAULT_SPILL_TTL: Duration = Duration::from_secs(24 * 60 * 60);
 /// Post-age-pass byte ceiling; oldest spills reclaimed first.
 pub const DEFAULT_SPILL_MAX_TOTAL_BYTES: u64 = 256 * 1024 * 1024;
+/// Metadata-work ceiling: at most this many directory entries are visited per prune.
+pub const DEFAULT_SPILL_MAX_SCAN_ENTRIES: usize = 4096;
+/// Wall deadline for a prune pass; mid-scan work aborts once the deadline elapses.
+pub const DEFAULT_SPILL_PRUNE_DEADLINE: Duration = Duration::from_millis(500);
 
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct SpillPruneReport {
@@ -720,17 +724,48 @@ pub struct SpillPruneReport {
     pub kept_files: usize,
     pub kept_bytes: u64,
     pub failed_removals: usize,
+    /// Cap applied to directory enumeration (metadata-work bound).
+    pub scan_budget: usize,
+    /// True when enumeration stopped because `scan_budget` was exhausted.
+    pub scan_truncated: bool,
+    /// True when enumeration stopped because the prune deadline elapsed.
+    pub deadline_elapsed: bool,
 }
 
+/// Prune with default scan budget and wall deadline.
 pub fn prune_spill_dir(
     dir: &Path,
     max_age: Duration,
     max_total_bytes: u64,
     dry_run: bool,
 ) -> SpillPruneReport {
+    prune_spill_dir_bounded(
+        dir,
+        max_age,
+        max_total_bytes,
+        dry_run,
+        DEFAULT_SPILL_MAX_SCAN_ENTRIES,
+        Some(Instant::now() + DEFAULT_SPILL_PRUNE_DEADLINE),
+    )
+}
+
+/// Prune spill files with an explicit scanned-entry budget and optional deadline.
+///
+/// Storage-byte policy (`max_total_bytes`) is separate from metadata-work policy
+/// (`max_scan_entries` / `deadline`): the latter bounds queue size and sort work
+/// even when every visited file is a zero-byte fresh spill.
+pub fn prune_spill_dir_bounded(
+    dir: &Path,
+    max_age: Duration,
+    max_total_bytes: u64,
+    dry_run: bool,
+    max_scan_entries: usize,
+    deadline: Option<Instant>,
+) -> SpillPruneReport {
     let mut report = SpillPruneReport {
         dir: dir.display().to_string(),
         dry_run,
+        scan_budget: max_scan_entries,
         ..Default::default()
     };
     let Ok(entries) = fs::read_dir(dir) else {
@@ -738,7 +773,13 @@ pub fn prune_spill_dir(
     };
     let now = SystemTime::now();
     let mut fresh = Vec::new();
-    for entry in entries.flatten() {
+    let mut visited = 0usize;
+    for entry in entries.flatten().take(max_scan_entries) {
+        if deadline.is_some_and(|limit| Instant::now() >= limit) {
+            report.deadline_elapsed = true;
+            break;
+        }
+        visited += 1;
         let path = entry.path();
         let valid_name = path
             .file_name()
@@ -756,6 +797,8 @@ pub fn prune_spill_dir(
             fresh.push((modified, meta.len(), path));
         }
     }
+    report.scan_truncated = !report.deadline_elapsed && visited >= max_scan_entries;
+    // Queue is already capped by the scan budget; sort work is O(B log B), not O(N log N).
     fresh.sort_by_key(|item| item.0);
     let mut bytes = fresh.iter().map(|item| item.1).sum::<u64>();
     let split = fresh
@@ -913,4 +956,56 @@ pub fn env_map(pairs: &[String]) -> Result<BTreeMap<String, String>, RuntimeErro
         out.insert(key.to_string(), value.to_string());
     }
     Ok(out)
+}
+
+#[cfg(test)]
+mod spill_prune_bounds_tests {
+    use super::*;
+    use std::fs;
+    use tempfile::tempdir;
+
+    #[test]
+    fn prune_spill_dir_respects_scan_budget_before_sort() {
+        let dir = tempdir().unwrap();
+        for i in 0..64 {
+            let path = dir
+                .path()
+                .join(format!("tokenzero-{i}-stdout.log"));
+            fs::write(&path, vec![b'x'; (i % 8) + 1]).unwrap();
+        }
+        let report = prune_spill_dir_bounded(
+            dir.path(),
+            DEFAULT_SPILL_TTL,
+            0,
+            true,
+            16,
+            None,
+        );
+        assert_eq!(report.scan_budget, 16);
+        assert!(report.scan_truncated);
+        assert!(!report.deadline_elapsed);
+        assert_eq!(report.scanned_files, 16);
+        // Non-zero fresh spills with max_total_bytes=0 are all reclaimable.
+        assert_eq!(report.removed_files, 16);
+        assert_eq!(report.kept_files, 0);
+    }
+
+    #[test]
+    fn prune_spill_dir_aborts_when_deadline_already_elapsed() {
+        let dir = tempdir().unwrap();
+        for i in 0..8 {
+            fs::write(dir.path().join(format!("tokenzero-{i}-stdout.log")), []).unwrap();
+        }
+        let report = prune_spill_dir_bounded(
+            dir.path(),
+            DEFAULT_SPILL_TTL,
+            DEFAULT_SPILL_MAX_TOTAL_BYTES,
+            true,
+            128,
+            Some(Instant::now() - Duration::from_millis(1)),
+        );
+        assert!(report.deadline_elapsed);
+        assert_eq!(report.scanned_files, 0);
+        assert!(!report.scan_truncated);
+    }
 }

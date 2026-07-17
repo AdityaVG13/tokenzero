@@ -23,6 +23,7 @@ Tracked tip on `main`: `68826cb` (post-`v1.4.0`). Includes permit/CodeMode batch
 - **README claims**: 99.0% northstar total scoped as fixed-suite point estimate only (`tokenzero-g3y.18`).
 
 ### Fixed
+- Spill prune bounds metadata work with a scanned-entry budget and wall deadline, and engine construction coalesces automatic cache maintenance so concurrent constructors do not multiply spill-dir scan/sort (`tokenzero-g3y.22`, P22-001).
 - Homebrew formula `version`/download URLs track workspace release `1.4.0` so the install compatibility hard gate is feasible (`tokenzero-g3y.13`, P10-001).
 - Completed-split compatibility entry points validate module directories (and refuse leftover monoliths) instead of opening removed `.rs` files (`tokenzero-g3y.6`, P08-002).
 - Visible-budget truncation keeps every line the budget proof counted (`prefix_end_for_kept_lines` used `keep-2` and dropped one fitting line when `keep >= 2`) (`tokenzero-g3y.10`, P01-001).
