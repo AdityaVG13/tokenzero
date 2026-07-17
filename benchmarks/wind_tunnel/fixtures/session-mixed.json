@@ -1,0 +1,37 @@
+{
+  "version": "tokenzero.plan-journal.v1",
+  "plan_id": "fixture-wind-tunnel-pass-0001",
+  "execution_id": "cm://exec/fixture-wind-tunnel-pass",
+  "project_id": "fixture-project",
+  "store_id": "fixture-store",
+  "atomic": false,
+  "state": "committed",
+  "operations": [
+    {
+      "index": 0,
+      "id": "tree",
+      "method": "zero.token.tree",
+      "classification": "read_only",
+      "idempotency_key": "fixture-tree",
+      "state": "committed"
+    },
+    {
+      "index": 1,
+      "id": "read",
+      "method": "zero.token.read",
+      "classification": "read_only",
+      "idempotency_key": "fixture-read",
+      "state": "committed"
+    },
+    {
+      "index": 2,
+      "id": "status",
+      "method": "zero.token.shell",
+      "classification": "irreversible_external",
+      "idempotency_key": "fixture-shell",
+      "state": "skipped"
+    }
+  ],
+  "created_at_ms": 1784000000000,
+  "updated_at_ms": 1784000000001
+}

@@ -89,6 +89,7 @@ pub(crate) fn visible_tokens(response: &ToolResponse) -> usize {
 pub(crate) fn test_engine() -> (tempfile::TempDir, TokenZeroEngine) {
     let dir = tempfile::tempdir().unwrap();
     let engine = TokenZeroEngine::new(EngineConfig::for_root(dir.path()));
+    engine.mark_lifecycle_ready_for_tests();
     (dir, engine)
 }
 

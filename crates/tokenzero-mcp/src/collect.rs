@@ -7,6 +7,8 @@ pub(crate) struct SearchStats {
     pub(crate) matched_lines: usize,
     pub(crate) truncated_by_results: bool,
     pub(crate) truncated_by_visit: bool,
+    /// Host-op wall deadline exceeded mid-walk (CodeMode hard_max_wall_ms).
+    pub(crate) truncated_by_wall: bool,
     /// rg output rows that did not parse back into matches — a parity canary
     /// (silent row loss would otherwise read as "no match there").
     pub(crate) unparsed_rows: usize,
@@ -208,6 +210,9 @@ pub(crate) fn collect_search(
     stats: &mut SearchStats,
     matches: &mut Vec<SearchMatch>,
 ) {
+    if stats.truncated_by_wall {
+        return;
+    }
     if matches.len() >= max_results {
         stats.truncated_by_results = true;
         return;
@@ -221,6 +226,15 @@ pub(crate) fn collect_search(
     }
     if current.is_file() {
         stats.visited_files += 1;
+        if crate::wall::check_active_wall_deadline_every(
+            stats.visited_files,
+            crate::wall::WALL_CHECK_EVERY_N,
+        )
+        .is_some()
+        {
+            stats.truncated_by_wall = true;
+            return;
+        }
         if let Ok(bytes) = fs::read(current) {
             let text = String::from_utf8_lossy(&bytes);
             let before = matches.len();
@@ -270,7 +284,7 @@ pub(crate) fn collect_search(
             stats,
             matches,
         );
-        if stats.truncated_by_results || stats.truncated_by_visit {
+        if stats.truncated_by_results || stats.truncated_by_visit || stats.truncated_by_wall {
             break;
         }
     }
@@ -306,7 +320,11 @@ pub(crate) fn rg_search(
 ) -> Result<(Vec<SearchMatch>, SearchStats), RgFailure> {
     let mut matches: Vec<SearchMatch> = Vec::new();
     let mut stats = SearchStats::default();
-    for root in roots {
+    for (root_idx, root) in roots.iter().enumerate() {
+        if crate::wall::check_active_wall_deadline_every(root_idx, 1).is_some() {
+            stats.truncated_by_wall = true;
+            break;
+        }
         if matches.len() >= max_results {
             stats.truncated_by_results = true;
             break;

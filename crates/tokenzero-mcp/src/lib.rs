@@ -42,6 +42,7 @@ mod supervisor;
 mod surface_health;
 mod tools;
 pub mod usage_telemetry;
+mod wall;
 mod workspace;
 mod write_ladder;
 
@@ -53,7 +54,9 @@ pub use binary_resolve::{
     TOKENZERO_RG_PATH_ENV, engine_binaries_json, resolve_all_engine_binaries, resolve_curl_binary,
     resolve_rg_binary, resolve_tokenzero_binary,
 };
-pub use cache_maintenance::{cache_maintenance, session_pack, shell_spill_dir};
+pub use cache_maintenance::{
+    cache_maintenance, cache_maintenance_coalesced, session_pack, shell_spill_dir,
+};
 pub use catalog::{ResourceSpec, ToolSpec, resource_specs, tool_specs};
 pub use codemode::{
     CODEMODE_SCHEMA, CodeModeLimits, CodeModeOptions, CodeModeResult, CodeModeStatus,
@@ -197,4 +200,17 @@ pub struct TokenZeroEngine {
     surface_health: std::sync::Arc<surface_health::SurfaceHealth>,
     /// Fail-open append-only response accounting beside the recovery cache.
     ledger: ledger::LedgerWriter,
+    /// Per-connection MCP initialize lifecycle (stdio session / engine).
+    pub(crate) lifecycle: Mutex<InitializeState>,
+}
+
+/// MCP initialize lifecycle for one engine/connection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) enum InitializeState {
+    #[default]
+    Uninitialized,
+    /// `initialize` succeeded; waiting for `notifications/initialized`.
+    Negotiated,
+    /// Client completed initialize + initialized; tools/list and peers allowed.
+    Ready,
 }

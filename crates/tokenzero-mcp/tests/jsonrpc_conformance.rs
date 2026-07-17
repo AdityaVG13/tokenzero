@@ -11,9 +11,32 @@ mod conformance {
     }
     impl Server {
         fn new() -> Self {
+            let server = Self::uninitialized();
+            server.complete_lifecycle();
+            server
+        }
+        fn uninitialized() -> Self {
             let dir = tempfile::tempdir().unwrap();
             let engine = TokenZeroEngine::new(EngineConfig::for_root(dir.path()));
             Self { dir, engine }
+        }
+        fn complete_lifecycle(&self) {
+            let init = self.response(json!({
+                "jsonrpc": "2.0",
+                "id": "lifecycle-init",
+                "method": "initialize",
+                "params": {
+                    "protocolVersion": "2025-06-18",
+                    "capabilities": {},
+                    "clientInfo": {"name": "conformance", "version": "1.0.0"}
+                }
+            }));
+            assert!(init.get("result").is_some(), "lifecycle initialize failed: {init}");
+            assert!(
+                self.raw(r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#)
+                    .is_none(),
+                "initialized notification must be response-suppressed"
+            );
         }
         fn path(&self, name: &str) -> std::path::PathBuf {
             self.dir.path().join(name)

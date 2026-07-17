@@ -7,9 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-Tracked tip on `main`: `68826cb` (post-`v1.4.0`). Includes permit/CodeMode batch, expand-arg coercion, session-resume CPU harden (`d3bc9bd`), and merged PR #26 telemetry (`tokenzero-f409`). Append here until the next tagged release; do not fold into `[1.4.0]`. Follow-up PR drains remaining ready beads; `tokenzero-readme-northstar-rebaseline-9c6c` refreshes README tables from a fresh northstar run before tag.
+Tracked tip on `main`: `68826cb` (post-`v1.4.0`). Includes permit/CodeMode batch, expand-arg coercion, session-resume CPU harden (`d3bc9bd`), and merged PR #26 telemetry (`tokenzero-f409`). Append here until the next tagged release; do not fold into `[1.4.0]`. Follow-up PR drains remaining ready beads; `tokenzero-readme-northstar-rebaseline-9c6c` refreshed README/northstar numbers (snapshot `20260717T014139.658900Z-ab0b3ca3090a`).
 
 ### Added
+- **CLI CodeMode Tier B trampoline**: stdin/`--stdin`/PLAN=`-` (plus non-TTY auto-read), `--budget` alias for `--max-visible-tokens`, same `tokenzero.codemode.v1` envelope/refs as MCP, typed validation errors for conflicting plan sources (`tokenzero-cli-trampoline-tier-b-6b6`).
+- **Wind-tunnel replay MVP**: `benchmarks/wind_tunnel/` loads plan journals (or fixtures), replays under baseline vs candidate policy stubs, diffs action sequences, and exits non-zero on divergence (`tokenzero-wind-tunnel-replay-tyq`; stubs only, no model re-execution).
+- **Token-turn session ledger (DPMT)**: `session-ledger-v2` prices visible/raw mass × turns_remaining and reports decisions per million visible token-turns as the headline metric (`tokenzero-token-turn-mass-ledger-cy2`).
 - **Family-wide CodeMode CPU budget**: machine-wide analysis permit, fair multi-tenant slots, frozen permit contract v1 with index class, and shared crate `zerostack-machine-permit` (`tokenzero-nk6u`, `tokenzero-9tle`).
 - **CodeMode envelope v3**: mechanical ack path for scalar/structured results (`tokenzero-envelope-v3-mechanical-ack-my1`).
 - **Short session ref aliases**: visible capsules may use `tz://s/<16hex>` (`tokenzero-short-ref-aliases-dle`).
@@ -18,11 +21,30 @@ Tracked tip on `main`: `68826cb` (post-`v1.4.0`). Includes permit/CodeMode batch
 - **Opt-in usage telemetry**: default-off; when enabled, records only `{execution_path, raw_tokens, spent_tokens}` for MCP/CodeMode (`tokenzero-f409`, https://github.com/AdityaVG13/tokenzero/pull/26).
 
 ### Changed
+- **README / northstar**: regenerated fixed-suite tables from snapshot `20260717T014139.658900Z-ab0b3ca3090a` on warm `target/release/tokenzero` (`tokenzero-readme-northstar-rebaseline-9c6c`; SHA `b9c80c5`).
 - **Permit scheduling**: light CodeMode gated behind the analysis permit; expand-only plans ungated; in-process slot waits bound to wall deadline; `MachinePermit` extracted under the 1k containment limit (`tokenzero-wawf`, `tokenzero-jn1i`, `tokenzero-zcy8`).
 - **Northstar trend gates**: per-workload compression floors; expand size-class set equality; p50/p95/p99 non-regression so aggregate or p50 wins cannot mask regressions (`tokenzero-g3y.11`, `tokenzero-g3y.23`).
 - **README claims**: 99.0% northstar total scoped as fixed-suite point estimate only (`tokenzero-g3y.18`).
 
 ### Fixed
+- Pulse sync regression asserts a record completed before sync invocation appears in the successful SQLite snapshot; durable linearizability checker kept under benchmarks (`tokenzero-g3y.12`, P14-001).
+- Deployment telemetry evidence package + reducer/gate attach sampling-frame and uncertainty for README Pulse totals; historical ~20k figures stay gated until a matching ledger is checked in (`tokenzero-g3y.9`, P17-002).
+- Queue arrival/service gate keeps expand latency ESTIMATE_ONLY until observed lambda, E[S], and Var[S] are captured; micro harness records timestamped arrivals for the evidence path (`tokenzero-g3y.8`, P03-MG-002).
+- Paired wall-time gate refuses treating the northstar token-count ceiling as runtime speedup until complete paired raw/TokenZero wall samples exist; micro harness documents the evidence path without a northstar cold rebuild (`tokenzero-g3y.2`, P03-MG-001).
+- Corpus `materialize.py` stages every gzip member and renames `expanded/` only after the full set validates, so a malformed later member cannot leave a partially refreshed corpus (`tokenzero-g3y.17`, P16-002).
+- Per-workload token gate refuses universal savings claims when any northstar workload expands, allowlisting only the known cargo-test counterexample until a compressor fix + full northstar rebaseline (`tokenzero-g3y.1`, P03-001; no full northstar run).
+- Corpus `materialize.py` streams gzip members with explicit max expanded bytes and expansion-ratio ceilings, writing via temp+atomic replace so a hostile member cannot force unbounded live space (`tokenzero-g3y.26`, P16-001).
+- Non-Unix shell cleanup joins inherited-pipe readers after Windows Job Object terminate (plus a final join grace / reaper), so blocked stdout/stderr workers are never detached when a descendant keeps the pipes open (`tokenzero-g3y.24`, P07-001).
+- Recovery working-set `enforce_budget` compares resident tokens to replacement-floor tokens (not bytes) and returns `BudgetUnsatisfiable` when the budget cannot be met (`tokenzero-g3y.19`, P13-F1).
+- npm shim suite kills removal of PATH `looksLikeNpmShimInvocation` via `package/npm/test/coverage_law_shim_detection.py`, covering distinct-shim vs npm-wrapper behavior (`tokenzero-g3y.16`, CE-P12-01).
+- Spill prune bounds metadata work with a scanned-entry budget and wall deadline, and engine construction coalesces automatic cache maintenance so concurrent constructors do not multiply spill-dir scan/sort (`tokenzero-g3y.22`, P22-001).
+- Homebrew formula `version`/download URLs track workspace release `1.4.0` so the install compatibility hard gate is feasible (`tokenzero-g3y.13`, P10-001).
+- Completed-split compatibility entry points validate module directories (and refuse leftover monoliths) instead of opening removed `.rs` files (`tokenzero-g3y.6`, P08-002).
+- Visible-budget truncation keeps every line the budget proof counted (`prefix_end_for_kept_lines` used `keep-2` and dropped one fitting line when `keep >= 2`) (`tokenzero-g3y.10`, P01-001).
+- npm shim self-recursion detection uses realpath for `TOKENZERO_BIN` and a bounded prefix + npm cmd-shim structure match on PATH, so distinct binaries that merely mention the shim path are not refused and large candidates are not fully read (`tokenzero-g3y.3`).
+- Delimiter-free `tokenzero run` keeps trailing `--json`/`--jsno`/`--jason` in child argv instead of promoting them to the parent envelope (`tokenzero-g3y.4`).
+- MCP stdio/JSON-RPC gates `tools/list` (and other post-init methods) until `initialize` plus `notifications/initialized` (`tokenzero-g3y.15`).
+- CodeMode host ops (find/search/expand and session resume load) abort on `hard_max_wall_ms` mid-call via cooperative checkpoints, not only between QuickJS microtasks (`tokenzero-y1gi`).
 - Permit `Fatal` maps to non-retryable substrate errors (`tokenzero-091s`).
 - CodeMode STATUS/INDEX markers match API shapes; busy responses use `isError` without a missing envelope (`tokenzero-vt7s`).
 - Shell cwd defaults to `call_root` and is always echoed (`tokenzero-shell-cwd-default-q73`).

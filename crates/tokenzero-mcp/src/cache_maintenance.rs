@@ -1,5 +1,15 @@
 use serde_json::{Value, json};
 use std::path::{Path, PathBuf};
+use std::sync::{Mutex, OnceLock};
+use std::time::{Duration, Instant};
+
+/// Coalesce window for automatic engine-construction maintenance.
+const AUTO_MAINTENANCE_COALESCE: Duration = Duration::from_secs(30);
+
+fn auto_maintenance_state() -> &'static Mutex<Option<(PathBuf, Instant)>> {
+    static STATE: OnceLock<Mutex<Option<(PathBuf, Instant)>>> = OnceLock::new();
+    STATE.get_or_init(|| Mutex::new(None))
+}
 
 /// The disk-spill directory for shell streams, beside the recovery cache.
 pub fn shell_spill_dir(cache_path: &Path) -> PathBuf {
@@ -29,6 +39,33 @@ pub fn cache_maintenance(cache_path: &Path, dry_run: bool) -> Value {
         "tmp_sweep": tmp_sweep,
         "spill_prune": spill_prune,
     })
+}
+
+/// Automatic construction-time maintenance: serialize per process and skip
+/// when the same cache path was cleaned within [`AUTO_MAINTENANCE_COALESCE`].
+///
+/// Prevents concurrent `TokenZeroEngine::new` calls from multiplying spill-dir
+/// scan/sort work against the same directory.
+pub fn cache_maintenance_coalesced(cache_path: &Path, dry_run: bool) -> Value {
+    let Ok(mut guard) = auto_maintenance_state().lock() else {
+        return json!({
+            "coalesced": true,
+            "skipped": "lock_poisoned",
+        });
+    };
+    if let Some((prev_path, at)) = guard.as_ref()
+        && prev_path == cache_path
+        && at.elapsed() < AUTO_MAINTENANCE_COALESCE
+    {
+        return json!({
+            "coalesced": true,
+            "skipped": "recent",
+            "cache_path": cache_path.display().to_string(),
+        });
+    }
+    let report = cache_maintenance(cache_path, dry_run);
+    *guard = Some((cache_path.to_path_buf(), Instant::now()));
+    report
 }
 
 /// Build the post-compaction session pack over a workspace's recovery

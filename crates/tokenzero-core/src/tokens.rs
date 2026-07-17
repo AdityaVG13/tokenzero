@@ -72,8 +72,11 @@ pub fn enforce_token_budget_with_ref(
 }
 
 fn prefix_end_for_kept_lines(text: &str, keep: usize) -> usize {
+    // `keep` is the number of lines the budget loop retained. The newline
+    // after line N is at match index N-1 (`nth(keep - 1)`). Using `keep - 2`
+    // dropped one extra fitting line (P01-001 / tokenzero-g3y.10).
     text.match_indices('\n')
-        .nth(keep.saturating_sub(2))
+        .nth(keep.saturating_sub(1))
         .map_or(text.len(), |(index, _)| index)
 }
 
@@ -375,5 +378,42 @@ mod tokenizer_tests {
         let unicode = pack_to_token_boundary_for_model("ééééé", 1, Some("gpt-4o"));
         assert_eq!(unicode, "éééé");
         assert!(unicode.is_char_boundary(unicode.len()));
+    }
+
+    #[test]
+    fn visible_budget_prefix_retains_every_fitting_line() {
+        // Counterexample from math-review P01-001: budget=17 expected_keep=2.
+        let text = (0..50)
+            .map(|i| format!("line_{i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let marker = "... omitted by visible budget; exact refs available ...";
+        let marker_tokens = count_tokens(marker);
+        const SEPARATOR_TOKENS: usize = 1;
+        let budget = 17;
+        let (mut running, mut expected) = (0usize, 0usize);
+        for line in text.lines() {
+            let next = running
+                .saturating_add(count_tokens(line))
+                .saturating_add(SEPARATOR_TOKENS + marker_tokens);
+            if next > budget {
+                break;
+            }
+            running = running.saturating_add(count_tokens(line));
+            expected += 1;
+        }
+        assert!(expected >= 2, "fixture must exercise keep>=2; got {expected}");
+
+        let out = enforce_token_budget(&text, budget);
+        let actual = out.lines().take_while(|line| *line != marker).count();
+        assert_eq!(
+            actual, expected,
+            "prefix must retain all budget-fitting lines (P01-001); out={out:?}"
+        );
+        assert!(count_tokens(&out) <= budget);
+
+        assert_eq!(prefix_end_for_kept_lines("a\nb\nc", 1), 1);
+        assert_eq!(prefix_end_for_kept_lines("a\nb\nc", 2), 3);
+        assert_eq!(prefix_end_for_kept_lines("a\nb\nc", 3), 5);
     }
 }

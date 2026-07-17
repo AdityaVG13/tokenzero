@@ -51,6 +51,7 @@ fn tools_list_includes_aliases_with_stub_schema() {
 fn tools_call_rejects_mixed_type_argv_arrays() {
     let dir = tempdir().unwrap();
     let engine = TokenZeroEngine::new(EngineConfig::for_root(dir.path()));
+    engine.mark_lifecycle_ready_for_tests();
 
     for invalid_argv in [
         json!(["printf", 7, "ignored"]),
@@ -86,6 +87,7 @@ fn tools_call_rejects_mixed_type_argv_arrays() {
 fn tools_call_rejects_mixed_type_path_arrays() {
     let dir = tempdir().unwrap();
     let engine = TokenZeroEngine::new(EngineConfig::for_root(dir.path()));
+    engine.mark_lifecycle_ready_for_tests();
 
     for invalid_path in [
         json!(["missing.txt", 1]),
@@ -165,6 +167,7 @@ fn mcp_lists_and_calls_cache_pack_tool() {
     let dir = tempdir().unwrap();
     fs::write(dir.path().join("AGENTS.md"), "stable\n").unwrap();
     let engine = TokenZeroEngine::new(EngineConfig::for_root(dir.path()));
+    engine.mark_lifecycle_ready_for_tests();
     let listed: Value = serde_json::from_str(
         &handle_jsonrpc(
             &engine,
@@ -265,6 +268,7 @@ fn mcp_lists_and_calls_cache_pack_tool() {
 fn mcp_envelope_is_text_only_by_default() {
     let dir = tempdir().unwrap();
     let engine = TokenZeroEngine::new(EngineConfig::for_root(dir.path()));
+    engine.mark_lifecycle_ready_for_tests();
 
     let response: Value = serde_json::from_str(
             &handle_jsonrpc(
@@ -346,6 +350,7 @@ fn mcp_envelope_is_text_only_by_default() {
 fn initialize_echoes_supported_stable_protocol() {
     let dir = tempdir().unwrap();
     let engine = TokenZeroEngine::new(EngineConfig::for_root(dir.path()));
+    engine.mark_lifecycle_ready_for_tests();
     let response = handle_jsonrpc(
             &engine,
             r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"conformance-client","version":"1.0.0"}}}"#,
@@ -361,6 +366,7 @@ fn initialize_echoes_supported_stable_protocol() {
 fn resource_discovery_and_prompt_lists_are_supported() {
     let dir = tempdir().unwrap();
     let engine = TokenZeroEngine::new(EngineConfig::for_root(dir.path()));
+    engine.mark_lifecycle_ready_for_tests();
 
     let resources: Value = serde_json::from_str(
         &handle_jsonrpc(
@@ -417,6 +423,7 @@ fn resource_discovery_and_prompt_lists_are_supported() {
 fn mcp_error_data_guides_unknown_tools_and_resources() {
     let dir = tempdir().unwrap();
     let engine = TokenZeroEngine::new(EngineConfig::for_root(dir.path()));
+    engine.mark_lifecycle_ready_for_tests();
 
     let unknown_tool: Value = serde_json::from_str(
             &handle_jsonrpc(
@@ -491,6 +498,7 @@ fn mcp_error_data_guides_unknown_tools_and_resources() {
 fn mcp_error_data_guides_missing_params_and_unknown_methods() {
     let dir = tempdir().unwrap();
     let engine = TokenZeroEngine::new(EngineConfig::for_root(dir.path()));
+    engine.mark_lifecycle_ready_for_tests();
 
     let missing_tool_name: Value = serde_json::from_str(
         &handle_jsonrpc(
@@ -556,6 +564,7 @@ fn mcp_tool_calls_are_pulse_accounted_with_attribution() {
     let file = dir.path().join("sample.txt");
     fs::write(&file, "line one\nline two\n").unwrap();
     let engine = TokenZeroEngine::new(EngineConfig::for_root(dir.path()));
+    engine.mark_lifecycle_ready_for_tests();
 
     let read_request = serde_json::json!({
         "jsonrpc": "2.0", "id": 7, "method": "tools/call",
@@ -730,3 +739,57 @@ fn batch_panic_preserves_notification_suppression() {
     assert!(ids.contains(&702), "{parsed:#}");
 }
 
+
+#[test]
+fn tools_list_requires_initialize_lifecycle() {
+    let dir = tempdir().unwrap();
+    let engine = TokenZeroEngine::new(EngineConfig::for_root(dir.path()));
+
+    let before = handle_jsonrpc(
+        &engine,
+        r#"{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}"#,
+    )
+    .unwrap();
+    let before: Value = serde_json::from_str(&before).unwrap();
+    assert_eq!(before["error"]["code"], -32600, "{before:#}");
+    assert!(
+        before["error"]["data"]["reason"]
+            .as_str()
+            .unwrap_or("")
+            .contains("lifecycle"),
+        "{before:#}"
+    );
+
+    let init = handle_jsonrpc(
+        &engine,
+        r#"{"jsonrpc":"2.0","id":2,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"lifecycle","version":"1.0.0"}}}"#,
+    )
+    .unwrap();
+    let init: Value = serde_json::from_str(&init).unwrap();
+    assert!(init.get("result").is_some(), "{init:#}");
+
+    let still_gated = handle_jsonrpc(
+        &engine,
+        r#"{"jsonrpc":"2.0","id":3,"method":"tools/list","params":{}}"#,
+    )
+    .unwrap();
+    let still_gated: Value = serde_json::from_str(&still_gated).unwrap();
+    assert_eq!(still_gated["error"]["code"], -32600, "{still_gated:#}");
+
+    assert!(
+        handle_jsonrpc(
+            &engine,
+            r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#,
+        )
+        .is_none()
+    );
+
+    let after = handle_jsonrpc(
+        &engine,
+        r#"{"jsonrpc":"2.0","id":4,"method":"tools/list","params":{}}"#,
+    )
+    .unwrap();
+    let after: Value = serde_json::from_str(&after).unwrap();
+    assert!(after.get("result").is_some(), "{after:#}");
+    assert!(after["result"]["tools"].is_array(), "{after:#}");
+}

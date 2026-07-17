@@ -122,6 +122,9 @@ impl TokenZeroEngine {
     }
 
     fn expand_with_params_inner(&self, params: ExpandParams) -> ToolResponse {
+        if let Some((message, _)) = crate::wall::check_active_wall_deadline() {
+            return failure_response("expand", "hard_max_wall_ms", message, None);
+        }
         if !is_expandable_ref(&params.ref_id) {
             return failure_response(
                 "expand",

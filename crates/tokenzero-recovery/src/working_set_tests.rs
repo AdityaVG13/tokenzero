@@ -32,6 +32,28 @@ fn replacement_tokens(path: &str) -> usize {
 }
 
 #[test]
+fn tiny_over_budget_admit_errors_with_token_unit_floor() {
+    // P13-F1 / tokenzero-g3y.19: comparing resident tokens to replacement *bytes*
+    // left a 1-token resident ineligible against a ~120-byte floor, so admit
+    // returned Ok while used_tokens (1) exceeded budget_tokens (0).
+    let dir = tempdir().unwrap();
+    let mut store = RecoveryStore::new(Some(dir.path().join("recovery-cache.json")));
+    let mut set = WorkingSet::new(0);
+    let err = set
+        .admit(&mut store, "x".to_string(), anchor("src/tiny.rs"))
+        .expect_err("zero budget cannot admit a resident token");
+    assert!(
+        matches!(
+            err,
+            RecoveryError::BudgetUnsatisfiable { used: 1, budget: 0 }
+        ),
+        "unexpected error: {err:?}"
+    );
+    assert_eq!(set.used_tokens(), 0);
+    assert!(set.visible_lines().is_empty());
+}
+
+#[test]
 fn under_budget_is_a_noop() {
     let dir = tempdir().unwrap();
     let mut store = RecoveryStore::new(Some(dir.path().join("recovery-cache.json")));

@@ -4,7 +4,7 @@ use serde_json::Value;
 use tokenzero_core::{MCP_SCHEMA_VERSION, McpToolSurface};
 
 use crate::catalog::{tool_cluster_names, tool_specs_for_filter_with_health};
-use crate::{TokenZeroEngine, call_tool, read_resource, resource_specs, tool_specs};
+use crate::{InitializeState, TokenZeroEngine, call_tool, read_resource, resource_specs, tool_specs};
 
 macro_rules! wire_json {
     ($($token:tt)*) => { serde_json::json!($($token)*) };
@@ -56,6 +56,21 @@ rpc_methods! {
     SetLoggingLevel => "logging/setLevel",
     ListTools => "tools/list",
     CallTool => "tools/call",
+}
+
+impl RpcMethod {
+    fn requires_lifecycle_ready(self) -> bool {
+        matches!(
+            self,
+            Self::ListTools
+                | Self::CallTool
+                | Self::ListResources
+                | Self::ListResourceTemplates
+                | Self::ReadResource
+                | Self::ListPrompts
+                | Self::SetLoggingLevel
+        )
+    }
 }
 
 const JSONRPC_METHODS: &[&str] = RpcMethod::NAMES;
@@ -210,6 +225,13 @@ fn validate_request(parsed: &Value) -> Result<ValidatedRequest<'_>, Value> {
 
 fn handle_jsonrpc_request(engine: &TokenZeroEngine, parsed: Value) -> Option<Value> {
     let (object, method, id) = rpc_try!(validate_request(&parsed));
+    // Lifecycle: notifications/initialized advances InitializeState even when
+    // the notification has no id (response-suppressed).
+    if method == "notifications/initialized" {
+        advance_lifecycle_initialized(engine);
+        let id = id?;
+        return Some(wire_json!({"jsonrpc": "2.0", "id": id, "result": {}}));
+    }
     let id = id?;
     #[cfg(test)]
     if method == "tokenzero/internal/test-panic" {
@@ -226,6 +248,9 @@ fn handle_jsonrpc_request(engine: &TokenZeroEngine, parsed: Value) -> Option<Val
             ));
         }
     };
+    if method.requires_lifecycle_ready() {
+        rpc_try!(ensure_lifecycle_ready(engine, &id));
+    }
     let result = match method {
         RpcMethod::Initialize => {
             let requested = rpc_try!(initialize_protocol_version(object, &id));
@@ -235,9 +260,14 @@ fn handle_jsonrpc_request(engine: &TokenZeroEngine, parsed: Value) -> Option<Val
             } else {
                 DEFAULT_PROTOCOL_VERSION
             };
+            set_lifecycle_negotiated(engine);
             wire_json!({ "protocolVersion": protocol_version, "capabilities": { "logging": {}, "tools": {"listChanged": false}, "resources": {"listChanged": false}, "prompts": {"listChanged": false} }, "serverInfo": {"name": "tokenzero", "version": env!("CARGO_PKG_VERSION")}, "instructions": mcp_initialize_instructions(engine.config.tool_surface), "_meta": { "tokenzero/protocolNegotiation": { "requestedProtocolVersion": requested, "negotiatedProtocolVersion": protocol_version, "supportedProtocolVersions": SUPPORTED_PROTOCOL_VERSIONS, "fallback": !requested_is_supported } } })
         }
-        RpcMethod::Ping | RpcMethod::Initialized => wire_json!({}),
+        RpcMethod::Ping => wire_json!({}),
+        RpcMethod::Initialized => {
+            advance_lifecycle_initialized(engine);
+            wire_json!({})
+        }
         RpcMethod::Discover => {
             let params = rpc_try!(meta_only_params(object, &id, "server/discover"));
             wire_json!({ "resultType": "complete", "supportedVersions": SUPPORTED_PROTOCOL_VERSIONS, "capabilities": { "logging": {}, "tools": {"listChanged": false}, "resources": {"listChanged": false}, "prompts": {"listChanged": false} }, "serverInfo": {"name": "tokenzero", "version": env!("CARGO_PKG_VERSION")}, "instructions": mcp_discover_instructions(engine.config.tool_surface), "ttlMs": 60000, "cacheScope": "workspace", "_meta": { "schema_version": MCP_SCHEMA_VERSION, "status": "ok", "protocolVersions": SUPPORTED_PROTOCOL_VERSIONS, "toolFiltering": tool_filter_discovery(engine.config.tool_surface), "clientMetaAccepted": params.and_then(|params| params.get("_meta")).is_some() }, "protocolVersions": SUPPORTED_PROTOCOL_VERSIONS, "toolFiltering": tool_filter_discovery(engine.config.tool_surface) })
@@ -303,6 +333,43 @@ fn handle_jsonrpc_request(engine: &TokenZeroEngine, parsed: Value) -> Option<Val
         }
     };
     Some(wire_json!({"jsonrpc": "2.0", "id": id, "result": result}))
+}
+
+fn set_lifecycle_negotiated(engine: &TokenZeroEngine) {
+    if let Ok(mut state) = engine.lifecycle.lock() {
+        *state = InitializeState::Negotiated;
+    }
+}
+
+fn advance_lifecycle_initialized(engine: &TokenZeroEngine) {
+    if let Ok(mut state) = engine.lifecycle.lock() {
+        if matches!(
+            *state,
+            InitializeState::Negotiated | InitializeState::Ready
+        ) {
+            *state = InitializeState::Ready;
+        }
+    }
+}
+
+fn ensure_lifecycle_ready(engine: &TokenZeroEngine, id: &Value) -> RpcResult<()> {
+    let ready = engine
+        .lifecycle
+        .lock()
+        .map(|state| *state == InitializeState::Ready)
+        .unwrap_or(false);
+    if ready {
+        return Ok(());
+    }
+    Err(jsonrpc_error(
+        id.clone(),
+        -32600,
+        "Invalid Request",
+        JsonRpcErrorData::invalid_request(
+            "MCP lifecycle not ready; tools/list requires initialize then notifications/initialized",
+            "Send initialize, then notifications/initialized, then retry the request.",
+        ),
+    ))
 }
 
 type Object = serde_json::Map<String, Value>;
