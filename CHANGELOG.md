@@ -23,6 +23,7 @@ Tracked tip on `main`: `68826cb` (post-`v1.4.0`). Includes permit/CodeMode batch
 - **README claims**: 99.0% northstar total scoped as fixed-suite point estimate only (`tokenzero-g3y.18`).
 
 ### Fixed
+- Pulse sync regression asserts a record completed before sync invocation appears in the successful SQLite snapshot; durable linearizability checker kept under benchmarks (`tokenzero-g3y.12`, P14-001).
 - Deployment telemetry evidence package + reducer/gate attach sampling-frame and uncertainty for README Pulse totals; historical ~20k figures stay gated until a matching ledger is checked in (`tokenzero-g3y.9`, P17-002).
 - Queue arrival/service gate keeps expand latency ESTIMATE_ONLY until observed lambda, E[S], and Var[S] are captured; micro harness records timestamped arrivals for the evidence path (`tokenzero-g3y.8`, P03-MG-002).
 - Paired wall-time gate refuses treating the northstar token-count ceiling as runtime speedup until complete paired raw/TokenZero wall samples exist; micro harness documents the evidence path without a northstar cold rebuild (`tokenzero-g3y.2`, P03-MG-001).

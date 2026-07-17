@@ -1,0 +1,45 @@
+{
+  "cases": [
+    {
+      "expected": true,
+      "legal_orders_examined": 2,
+      "linearizable": true,
+      "name": "overlap_serializes_at_lock",
+      "real_time_edges": [],
+      "witness": [
+        "record-A",
+        "record-B",
+        "sync-AB"
+      ]
+    },
+    {
+      "expected": false,
+      "legal_orders_examined": 1,
+      "linearizable": false,
+      "name": "future_event_included_before_invocation",
+      "real_time_edges": [
+        [
+          "sync-future",
+          "record-late"
+        ]
+      ],
+      "witness": null
+    },
+    {
+      "expected": false,
+      "legal_orders_examined": 1,
+      "linearizable": false,
+      "name": "completed_event_missing_from_later_sync",
+      "real_time_edges": [
+        [
+          "record-done",
+          "sync-stale"
+        ]
+      ],
+      "witness": null
+    }
+  ],
+  "contract": "record appends one event; sync returns exact ordered ledger snapshot",
+  "passed": true,
+  "real_time_rule": "response(A) < invocation(B) implies A precedes B"
+}

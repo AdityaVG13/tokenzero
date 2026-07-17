@@ -721,6 +721,35 @@ fn sync_waits_for_transient_lock_contention() {
     assert_eq!(status.event_count, 1);
 }
 
+/// P14-001: a record that completed before sync invocation must appear in the
+/// successful sync snapshot (real-time order / happens-before).
+#[test]
+fn real_time_ordered_record_appears_in_later_sync_snapshot() {
+    let dir = tempdir().unwrap();
+    let ledger = dir.path().join("events.jsonl");
+    let marker_tool = "realtime-before-sync";
+
+    // Barrier: record_event returns only after the append is durable under the
+    // pulse lock. Invoking sync afterward must observe that exact event.
+    record_event(&ledger, &test_event(marker_tool)).unwrap();
+    let status = sync_jsonl_to_sqlite(&ledger).unwrap();
+
+    assert!(status.ok);
+    assert_eq!(status.event_count, 1);
+
+    let conn = Connection::open(&status.sqlite_path).unwrap();
+    let tool: String = conn
+        .query_row("SELECT tool FROM events WHERE line_no = 1", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    assert_eq!(tool, marker_tool);
+    let count: i64 = conn
+        .query_row("SELECT COUNT(*) FROM events", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(count, 1);
+}
+
 // ---------------------------------------------------------------------------
 // Session Ledger (bfu)
 // ---------------------------------------------------------------------------
