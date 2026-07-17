@@ -13,11 +13,12 @@ use std::time::Duration;
 pub const SESSION_SCOPE_ENV: &str = "TOKENZERO_SESSION_SCOPE";
 #[cfg(not(test))]
 const REF_INDEX_PATH_ENV: &str = "TOKENZERO_REF_INDEX_PATH";
-pub const MAX_SESSION_MEMORY_RECORDS: usize = 2048;
+pub const MAX_SESSION_MEMORY_RECORDS: usize = 512;
 const LOCK_RETRIES: usize = 240;
 const LOCK_RETRY_DELAY: Duration = Duration::from_millis(25);
 const STATE_VERSION: u32 = 2;
-const JOURNAL_COMPACT_BYTES: u64 = 8 * 1024 * 1024;
+/// Compact eagerly — large journals turn every resume into a CPU storm.
+const JOURNAL_COMPACT_BYTES: u64 = 256 * 1024;
 
 #[derive(Debug, Clone)]
 pub(crate) struct SessionPersistence {
@@ -50,6 +51,8 @@ impl SessionPersistence {
         let store = tokenzero_recovery::RecoveryStore::new(Some(self.cache_path.clone()));
         let mut ref_available = HashMap::new();
         // v1 has no watermark, so its first resumed turn must serve full.
+        // Use local/CAS reachability only — full has_ref walks ref-index and
+        // can reload multi-MB recovery journals once per unique blob_ref.
         let records = if state.version >= STATE_VERSION {
             scope
                 .records
@@ -57,7 +60,7 @@ impl SessionPersistence {
                 .filter(|entry| {
                     *ref_available
                         .entry(entry.record.blob_ref.as_str())
-                        .or_insert_with(|| store.has_ref(&entry.record.blob_ref))
+                        .or_insert_with(|| store.has_ref_local(&entry.record.blob_ref))
                 })
                 .map(|entry| (entry.key.clone(), entry.record.clone()))
                 .collect()

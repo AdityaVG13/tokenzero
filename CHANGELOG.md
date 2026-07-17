@@ -5,6 +5,42 @@ All notable changes to TokenZero will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+Tracked tip on `main`: `f439c56` (post-`v1.4.0`). Prior batch `ae451b6..406905b` (31 commits) plus expand-arg coercion. Open PR #26 adds `tokenzero-f409` (`adc2d45`). Append here until the next tagged release; do not fold into `[1.4.0]`. Follow-up: `tokenzero-readme-northstar-rebaseline-9c6c` refreshes README tables from a fresh northstar run.
+
+### Added
+- **Family-wide CodeMode CPU budget**: machine-wide analysis permit, fair multi-tenant slots, frozen permit contract v1 with index class, and shared crate `zerostack-machine-permit` (`tokenzero-nk6u`, `tokenzero-9tle`).
+- **CodeMode envelope v3**: mechanical ack path for scalar/structured results (`tokenzero-envelope-v3-mechanical-ack-my1`).
+- **Short session ref aliases**: visible capsules may use `tz://s/<16hex>` (`tokenzero-short-ref-aliases-dle`).
+- **Shared schemas**: freeze `zerostack.derivation-provenance.v1` and `zerostack.entity-novelty.v1` (recovery novelty fusion with GraphZero).
+- **Public claim gate**: `benchmarks/claim_public_gate.py` blocks treating the northstar 99% fixed-suite headline as a population/release claim (`tokenzero-g3y.18`).
+- **Opt-in usage telemetry**: default-off; when enabled, records only `{execution_path, raw_tokens, spent_tokens}` for MCP/CodeMode (`tokenzero-f409`, https://github.com/AdityaVG13/tokenzero/pull/26).
+
+### Changed
+- **Permit scheduling**: light CodeMode gated behind the analysis permit; expand-only plans ungated; in-process slot waits bound to wall deadline; `MachinePermit` extracted under the 1k containment limit (`tokenzero-wawf`, `tokenzero-jn1i`, `tokenzero-zcy8`).
+- **Northstar trend gates**: per-workload compression floors; expand size-class set equality; p50/p95/p99 non-regression so aggregate or p50 wins cannot mask regressions (`tokenzero-g3y.11`, `tokenzero-g3y.23`).
+- **README claims**: 99.0% northstar total scoped as fixed-suite point estimate only (`tokenzero-g3y.18`).
+
+### Fixed
+- Permit `Fatal` maps to non-retryable substrate errors (`tokenzero-091s`).
+- CodeMode STATUS/INDEX markers match API shapes; busy responses use `isError` without a missing envelope (`tokenzero-vt7s`).
+- Shell cwd defaults to `call_root` and is always echoed (`tokenzero-shell-cwd-default-q73`).
+- Over-cap results autopage with terminal continuation; v3 scalar fold keeps `structuredContent.value` (`tokenzero-result-cap-autopage-be8`, `tokenzero-result-not-surfaced-jhh`).
+- `Promise.all` runs host ops concurrently (`tokenzero-codemode-parallel-broken-z28`).
+- CodeMode surface exclusivity: hide per-op tools; expand fallback stays internal (`tokenzero-surface-exclusivity-1r9`).
+- Install rollback refuses when post-install config drifts (`tokenzero-g3y.5`).
+- Shared-CAS schema fixtures reject duplicate keys (`tokenzero-g3y.7`).
+- Cat rewrites preserve raw shell argument spans (`tokenzero-g3y.14`).
+- Secret masking covers `authorization:` and `bearer` (`tokenzero-g3y.20`).
+- JSON-RPC batch panics isolated per item with preserved ids (`tokenzero-g3y.21`).
+- Windows migrate catch auto-restores checkout after archive failure (`tokenzero-g3y.25`).
+- `zero.token.expand` coerces `{ref}` / array args and returns typed signature errors instead of opaque QuickJS failures (`tokenzero-expand-arg-coercion-inh`).
+- Session resume uses local/CAS reachability only (`has_ref_local`) so large session memories cannot reload multi-MB recovery journals thousands of times and peg a core; session journal compact threshold lowered and record cap tightened.
+
+### Docs
+- RFC draft for cas-gc vNext derivation provenance (paired with the frozen schema).
+
 ## [1.4.0] -- 2026-07-15
 
 ### Added

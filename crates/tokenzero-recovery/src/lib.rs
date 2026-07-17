@@ -4,7 +4,7 @@ use fs4::{FileExt, TryLockError};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::env;
 use std::ffi::OsString;
 use std::fs::{self, OpenOptions};
@@ -1305,6 +1305,35 @@ impl RecoveryStore {
         }
     }
 
+    /// Local/CAS reachability only — never opens sibling stores via ref-index.
+    ///
+    /// Session resume must use this: calling [`Self::has_ref`] per persisted
+    /// record can reload multi-MB journals thousands of times and peg a core.
+    pub fn has_ref_local(&self, ref_id: &str) -> bool {
+        let Some(lookup) = canonicalize_expand_ref(ref_id) else {
+            return false;
+        };
+        let lookup = self.resolve_alias_chain(&lookup).unwrap_or(lookup);
+        let Some(parsed) = parse_ref(&lookup) else {
+            return false;
+        };
+        match parsed.kind {
+            "blob" => {
+                self.state.blobs.contains_key(parsed.bare)
+                    || self
+                        .shared_cas
+                        .as_ref()
+                        .and_then(|cas| ref_index_id_part(parsed.bare).map(|hash| cas.contains(hash)))
+                        .unwrap_or(false)
+            }
+            "file" => self.state.files.contains_key(parsed.bare),
+            "unit" | "search" => {
+                recovery_unit_map(&self.state, parsed.kind).is_some_and(|m| m.contains_key(parsed.bare))
+            }
+            _ => false,
+        }
+    }
+
     fn blob_reachable(&self, bare: &str) -> bool {
         self.state.blobs.contains_key(bare)
             || self
@@ -1312,7 +1341,10 @@ impl RecoveryStore {
                 .as_ref()
                 .and_then(|cas| ref_index_id_part(bare).map(|hash| cas.contains(hash)))
                 .unwrap_or(false)
-            || blob_reachable_in_ref_index(bare, &self.config)
+            // Skip reloading this store via ref-index: `self.state` was already
+            // loaded (and journal-applied) in `new`. Reloading the same multi-MB
+            // cache+journal per has_ref pegs CPU on large session resumes.
+            || blob_reachable_in_ref_index(bare, &self.config, self.persistence_path.as_deref())
     }
 
     pub fn export_status(&self) -> serde_json::Value {
@@ -2121,7 +2153,11 @@ fn ref_index_blob_entries(ref_id: &str) -> Option<(PathBuf, Vec<RefIndexEntry>)>
     Some((root, entries))
 }
 
-fn blob_reachable_in_ref_index(ref_id: &str, config: &RecoveryConfig) -> bool {
+fn blob_reachable_in_ref_index(
+    ref_id: &str,
+    config: &RecoveryConfig,
+    skip_store: Option<&Path>,
+) -> bool {
     let Some((root, entries)) = ref_index_blob_entries(ref_id) else {
         return false;
     };
@@ -2133,13 +2169,21 @@ fn blob_reachable_in_ref_index(ref_id: &str, config: &RecoveryConfig) -> bool {
             return true;
         }
     }
+    // One load_state per unique sibling store path for this lookup. Without
+    // memoization, duplicate ref-index rows re-parse the same journal.
+    let mut loaded: HashMap<PathBuf, bool> = HashMap::new();
     entries.iter().any(|entry| {
         let store_path = PathBuf::from(&entry.store_path);
-        store_path.is_file()
-            && load_state(&store_path, config)
-                .ok()
-                .flatten()
-                .is_some_and(|state| state.blobs.contains_key(ref_id))
+        if skip_store.is_some_and(|skip| skip == store_path.as_path()) {
+            return false;
+        }
+        *loaded.entry(store_path.clone()).or_insert_with(|| {
+            store_path.is_file()
+                && load_state(&store_path, config)
+                    .ok()
+                    .flatten()
+                    .is_some_and(|state| state.blobs.contains_key(ref_id))
+        })
     })
 }
 
@@ -2157,15 +2201,18 @@ fn resolve_blob_from_ref_index(ref_id: &str, config: &RecoveryConfig) -> RefReso
         }
     }
     let mut stale = HashSet::new();
+    let mut loaded: HashMap<PathBuf, Option<RecoveryState>> = HashMap::new();
     for entry in entries {
         let store_path = PathBuf::from(&entry.store_path);
         if !store_path.is_file() {
             stale.insert(entry.store_path);
             continue;
         }
-        let resolved = load_state(&store_path, config)
-            .ok()
-            .flatten()
+        let state = loaded.entry(store_path.clone()).or_insert_with(|| {
+            load_state(&store_path, config).ok().flatten()
+        });
+        let resolved = state
+            .as_ref()
             .and_then(|state| state.blobs.get(ref_id).cloned())
             .map(|value| resolve_blob_value(Some(&store_path), ref_id, &value));
         match resolved {
