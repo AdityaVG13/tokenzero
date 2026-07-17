@@ -712,6 +712,7 @@ fn codemode_tools_list_excludes_perop_even_when_unhealthy() {
     let mut config = EngineConfig::for_root(dir.path());
     config.tool_surface = McpToolSurface::CodeMode;
     let engine = TokenZeroEngine::new(config);
+    engine.mark_lifecycle_ready_for_tests();
     engine.surface_health().record_codemode_expand_x0();
     assert!(!engine.surface_health().is_healthy());
 
@@ -750,6 +751,7 @@ fn crash_only_expand_unknown_when_codemode_healthy() {
     let mut config = EngineConfig::for_root(dir.path());
     config.tool_surface = McpToolSurface::CodeMode;
     let engine = TokenZeroEngine::new(config);
+    engine.mark_lifecycle_ready_for_tests();
     assert!(engine.surface_health().is_healthy());
     assert!(engine.surface_health().primary_surface_healthy_claim());
 
@@ -813,6 +815,7 @@ fn crash_only_expand_stays_hidden_after_expand_x0() {
         .ref_id
         .clone();
 
+    engine.mark_lifecycle_ready_for_tests();
     engine.surface_health().record_codemode_expand_x0();
     assert!(!engine.surface_health().is_healthy());
     assert!(!engine.surface_health().primary_surface_healthy_claim());
