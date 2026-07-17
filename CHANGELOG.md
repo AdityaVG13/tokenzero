@@ -23,6 +23,7 @@ Tracked tip on `main`: `68826cb` (post-`v1.4.0`). Includes permit/CodeMode batch
 - **README claims**: 99.0% northstar total scoped as fixed-suite point estimate only (`tokenzero-g3y.18`).
 
 ### Fixed
+- Queue arrival/service gate keeps expand latency ESTIMATE_ONLY until observed lambda, E[S], and Var[S] are captured; micro harness records timestamped arrivals for the evidence path (`tokenzero-g3y.8`, P03-MG-002).
 - Paired wall-time gate refuses treating the northstar token-count ceiling as runtime speedup until complete paired raw/TokenZero wall samples exist; micro harness documents the evidence path without a northstar cold rebuild (`tokenzero-g3y.2`, P03-MG-001).
 - Corpus `materialize.py` stages every gzip member and renames `expanded/` only after the full set validates, so a malformed later member cannot leave a partially refreshed corpus (`tokenzero-g3y.17`, P16-002).
 - Per-workload token gate refuses universal savings claims when any northstar workload expands, allowlisting only the known cargo-test counterexample until a compressor fix + full northstar rebaseline (`tokenzero-g3y.1`, P03-001; no full northstar run).
