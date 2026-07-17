@@ -621,7 +621,7 @@ fn handle_session_ledger(args: SessionLedgerArgs) -> Result<()> {
         tokenzero_mcp::ledger::ledger_path_for_cache(&resolve_recovery_cache_path(&root, None));
     match args.command {
         Some(SessionLedgerCommand::Schema) => {
-            print_pretty(&tokenzero_mcp::ledger::schema_example())?
+            print_pretty(&SessionLedgerReport::schema_json())?
         }
         Some(SessionLedgerCommand::Inspect(flags)) => {
             let env_value = std::env::var(tokenzero_mcp::ledger::TELEMETRY_ENV).ok();

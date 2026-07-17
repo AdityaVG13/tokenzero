@@ -968,8 +968,33 @@ fn hash_hint(value: &str) -> String {
     hex_encode(&hasher.finalize()[..8])
 }
 
-// Session Ledger (bfu): per-session mass × turns accounting.
-pub const SESSION_LEDGER_SCHEMA_VERSION: &str = "session-ledger-v1";
+// Session Ledger (bfu): rocket-equation token-turn pricing (mass × turns remaining).
+// Spec: ZeroStack Mars doc section 0 — DPMT is the headline metric.
+pub const SESSION_LEDGER_SCHEMA_VERSION: &str = "session-ledger-v2";
+
+/// Token-turns for a chronological mass series: mass at turn index `i` (0-based)
+/// of `N` turns contributes `mass * (N - i)` (rides for remaining turns including current).
+pub fn token_turns_for_masses(masses: &[usize]) -> u64 {
+    let n = masses.len();
+    masses
+        .iter()
+        .enumerate()
+        .map(|(i, &mass)| {
+            let turns_remaining = n.saturating_sub(i) as u64;
+            (mass as u64).saturating_mul(turns_remaining)
+        })
+        .fold(0u64, u64::saturating_add)
+}
+
+/// Decisions per million token-turns. `decisions` is the turn/tool-call count until a
+/// finer decision counter exists. Returns `None` when `token_turns == 0`.
+pub fn dpmt(decisions: usize, token_turns: u64) -> Option<f64> {
+    if token_turns == 0 {
+        None
+    } else {
+        Some((decisions as f64) * 1_000_000.0 / (token_turns as f64))
+    }
+}
 
 pulse_structs! {
     #[derive(Default)]
@@ -982,6 +1007,12 @@ pulse_structs! {
         exact_ref_count usize;
         failures usize;
         cache_hits usize;
+        /// Visible mass × turns_remaining (rocket-equation carried cost).
+        visible_token_turns u64;
+        /// Raw mass × turns_remaining (same schedule, uncompressed mass).
+        raw_token_turns u64;
+        /// Decisions per million visible token-turns; absent when token-turns are zero.
+        #[serde(default, skip_serializing_if = "Option::is_none")] dpmt Option<f64>;
         tools BTreeMap<String, usize>;
         source_hash Option<String>;
     }
@@ -995,60 +1026,148 @@ pulse_structs! {
         total_exact_refs usize;
         total_failures usize;
         total_cache_hits usize;
+        total_visible_token_turns u64;
+        total_raw_token_turns u64;
+        /// Headline metric: decisions per million visible token-turns (DPMT).
+        #[serde(default, skip_serializing_if = "Option::is_none")] dpmt Option<f64>;
         sessions Vec<SessionLedgerEntry>;
     }
 }
 
+#[derive(Default)]
+struct SessionAcc {
+    entry: SessionLedgerEntry,
+    visible_masses: Vec<usize>,
+    raw_masses: Vec<usize>,
+}
+
 impl SessionLedgerReport {
     pub fn from_ledger(path: &Path) -> IoResult<Self> {
-        let mut sessions: BTreeMap<String, SessionLedgerEntry> = BTreeMap::new();
+        let mut sessions: BTreeMap<String, SessionAcc> = BTreeMap::new();
         scan_jsonl(path, |event| {
             let sid = event
                 .session_id
                 .clone()
                 .unwrap_or_else(|| "unknown".to_string());
-            let entry = sessions
-                .entry(sid.clone())
-                .or_insert_with(|| SessionLedgerEntry {
+            let acc = sessions.entry(sid.clone()).or_insert_with(|| SessionAcc {
+                entry: SessionLedgerEntry {
                     session_id: sid,
                     source_hash: event.source_hash.clone(),
                     ..SessionLedgerEntry::default()
-                });
-            entry.turns += 1;
-            entry.raw_tokens += event.raw_tokens;
-            entry.visible_tokens += event.visible_tokens;
-            entry.recovery_tokens += event.recovery_tokens;
-            entry.exact_ref_count += event.exact_ref_count;
-            entry.failures += usize::from(event.failure);
-            entry.cache_hits += usize::from(event.cache_hit);
-            *entry.tools.entry(event.tool.clone()).or_insert(0) += 1;
+                },
+                ..SessionAcc::default()
+            });
+            acc.entry.turns += 1;
+            acc.entry.raw_tokens += event.raw_tokens;
+            acc.entry.visible_tokens += event.visible_tokens;
+            acc.entry.recovery_tokens += event.recovery_tokens;
+            acc.entry.exact_ref_count += event.exact_ref_count;
+            acc.entry.failures += usize::from(event.failure);
+            acc.entry.cache_hits += usize::from(event.cache_hit);
+            *acc.entry.tools.entry(event.tool.clone()).or_insert(0) += 1;
+            acc.visible_masses.push(event.visible_tokens);
+            acc.raw_masses.push(event.raw_tokens);
             Ok(())
         })?;
-        let sessions_vec: Vec<SessionLedgerEntry> = sessions.into_values().collect();
+        let sessions_vec: Vec<SessionLedgerEntry> = sessions
+            .into_values()
+            .map(|mut acc| {
+                acc.entry.visible_token_turns = token_turns_for_masses(&acc.visible_masses);
+                acc.entry.raw_token_turns = token_turns_for_masses(&acc.raw_masses);
+                acc.entry.dpmt = dpmt(acc.entry.turns, acc.entry.visible_token_turns);
+                acc.entry
+            })
+            .collect();
         let sum = |f: fn(&SessionLedgerEntry) -> usize| sessions_vec.iter().map(f).sum::<usize>();
+        let sum_u64 = |f: fn(&SessionLedgerEntry) -> u64| {
+            sessions_vec
+                .iter()
+                .map(f)
+                .fold(0u64, u64::saturating_add)
+        };
+        let total_turns = sum(|s| s.turns);
+        let total_visible_token_turns = sum_u64(|s| s.visible_token_turns);
         Ok(Self {
             schema_version: SESSION_LEDGER_SCHEMA_VERSION.to_string(),
             total_sessions: sessions_vec.len(),
-            total_turns: sum(|s| s.turns),
+            total_turns,
             total_raw_tokens: sum(|s| s.raw_tokens),
             total_visible_tokens: sum(|s| s.visible_tokens),
             total_recovery_tokens: sum(|s| s.recovery_tokens),
             total_exact_refs: sum(|s| s.exact_ref_count),
             total_failures: sum(|s| s.failures),
             total_cache_hits: sum(|s| s.cache_hits),
+            total_visible_token_turns,
+            total_raw_token_turns: sum_u64(|s| s.raw_token_turns),
+            dpmt: dpmt(total_turns, total_visible_token_turns),
             sessions: sessions_vec,
         })
     }
 
     pub fn schema_json() -> serde_json::Value {
-        serde_json::from_str("{\"schema_version\":\"session-ledger-v1\",\"description\":\"Per-session cost ledger: mass × turns accounting per session, per repo, per agent\",\"entry\":{\"session_id\":\"string — stable session identifier (MCP session id or 'unknown')\",\"turns\":\"usize — number of tool calls in this session\",\"raw_tokens\":\"usize — total raw (uncompressed) tokens across all turns\",\"visible_tokens\":\"usize — total visible (compressed) tokens across all turns\",\"recovery_tokens\":\"usize — tokens recovered via expand (charged back to original serve)\",\"exact_ref_count\":\"usize — total exact refs emitted across all turns\",\"failures\":\"usize — number of failed tool calls\",\"cache_hits\":\"usize — number of cache-hit serves\",\"tools\":\"BTreeMap<String, usize> — per-tool call counts\",\"source_hash\":\"Option<String> — repo source hash if available\"},\"report\":{\"schema_version\":\"string — session-ledger-v1\",\"total_sessions\":\"usize — number of distinct sessions\",\"total_turns\":\"usize — total tool calls across all sessions\",\"total_raw_tokens\":\"usize\",\"total_visible_tokens\":\"usize\",\"total_recovery_tokens\":\"usize\",\"total_exact_refs\":\"usize\",\"total_failures\":\"usize\",\"total_cache_hits\":\"usize\",\"sessions\":\"Vec<SessionLedgerEntry>\"},\"cli\":{\"stats\":\"tokenzero session-ledger stats [--json] [--root PATH]\",\"export\":\"tokenzero session-ledger export [--json] [--root PATH]\",\"schema\":\"tokenzero session-ledger schema\"}}")
-        .expect("static session ledger schema is valid JSON")
+        serde_json::json!({
+            "schema_version": SESSION_LEDGER_SCHEMA_VERSION,
+            "description": "Per-session cost ledger: rocket-equation token-turns (mass × turns_remaining); headline metric is DPMT (decisions per million visible token-turns)",
+            "pricing": {
+                "token_turns": "sum over turns i of mass_i * (N - i); mass is visible_tokens (carried context) or raw_tokens",
+                "dpmt": "decisions * 1e6 / visible_token_turns; decisions := turns (tool calls) until a finer counter exists"
+            },
+            "entry": {
+                "session_id": "string — stable session identifier (MCP session id or 'unknown')",
+                "turns": "usize — number of tool calls in this session (decision count proxy)",
+                "raw_tokens": "usize — total raw (uncompressed) tokens across all turns",
+                "visible_tokens": "usize — total visible (compressed) tokens across all turns",
+                "recovery_tokens": "usize — tokens recovered via expand (charged back to original serve)",
+                "exact_ref_count": "usize — total exact refs emitted across all turns",
+                "failures": "usize — number of failed tool calls",
+                "cache_hits": "usize — number of cache-hit serves",
+                "visible_token_turns": "u64 — priced visible mass × turns_remaining",
+                "raw_token_turns": "u64 — priced raw mass × turns_remaining",
+                "dpmt": "Option<f64> — decisions per million visible token-turns",
+                "tools": "BTreeMap<String, usize> — per-tool call counts",
+                "source_hash": "Option<String> — repo source hash if available"
+            },
+            "report": {
+                "schema_version": SESSION_LEDGER_SCHEMA_VERSION,
+                "total_sessions": "usize",
+                "total_turns": "usize",
+                "total_raw_tokens": "usize",
+                "total_visible_tokens": "usize",
+                "total_recovery_tokens": "usize",
+                "total_exact_refs": "usize",
+                "total_failures": "usize",
+                "total_cache_hits": "usize",
+                "total_visible_token_turns": "u64",
+                "total_raw_token_turns": "u64",
+                "dpmt": "Option<f64> — headline DPMT across all sessions",
+                "sessions": "Vec<SessionLedgerEntry>"
+            },
+            "cli": {
+                "stats": "tokenzero session-ledger stats [--json] [--root PATH]",
+                "export": "tokenzero session-ledger export [--json] [--root PATH]",
+                "schema": "tokenzero session-ledger schema"
+            }
+        })
     }
 
     pub fn render_text(&self) -> String {
         let mut out = String::from(
-            "Session Cost Ledger (session-ledger-v1)\n═══════════════════════════════════════\n\n",
+            "Session Cost Ledger (session-ledger-v2)\n═══════════════════════════════════════\n\n",
         );
+        match self.dpmt {
+            Some(dpmt) => writeln!(
+                out,
+                "DPMT (headline): {dpmt:.4} decisions / million visible token-turns"
+            )
+            .unwrap(),
+            None => out.push_str("DPMT (headline): n/a (no visible token-turns)\n"),
+        }
+        writeln!(
+            out,
+            "Visible token-turns: {}  Raw token-turns: {}",
+            self.total_visible_token_turns, self.total_raw_token_turns
+        )
+        .unwrap();
         writeln!(
             out,
             "Sessions: {}  Turns: {}  Raw: {}  Visible: {}  Refs: {}  Failures: {}\n",
@@ -1067,11 +1186,18 @@ impl SessionLedgerReport {
             } else {
                 0.0
             };
+            let dpmt_s = s
+                .dpmt
+                .map(|v| format!("{v:.4}"))
+                .unwrap_or_else(|| "n/a".to_string());
             writeln!(
                 out,
-                "  {} — turns={} raw={} visible={} (savings {:.1}%) refs={} failures={}",
+                "  {} — turns={} visible_tt={} raw_tt={} dpmt={} raw={} visible={} (savings {:.1}%) refs={} failures={}",
                 s.session_id,
                 s.turns,
+                s.visible_token_turns,
+                s.raw_token_turns,
+                dpmt_s,
                 s.raw_tokens,
                 s.visible_tokens,
                 savings,

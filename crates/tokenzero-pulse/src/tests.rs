@@ -771,7 +771,7 @@ fn session_ledger_groups_by_session_id() {
     let report = SessionLedgerReport::from_ledger(&path).unwrap();
     assert_eq!(report.total_sessions, 2);
     assert_eq!(report.total_turns, 3);
-    assert_eq!(report.schema_version, "session-ledger-v1");
+    assert_eq!(report.schema_version, "session-ledger-v2");
     let sess_a = report
         .sessions
         .iter()
@@ -780,6 +780,12 @@ fn session_ledger_groups_by_session_id() {
     assert_eq!(sess_a.turns, 2);
     assert_eq!(sess_a.tools.get("read"), Some(&1));
     assert_eq!(sess_a.tools.get("expand"), Some(&1));
+    // test_event visible=20: turn0 → 20*2, turn1 → 20*1 = 60 visible token-turns
+    assert_eq!(sess_a.visible_token_turns, 60);
+    assert_eq!(sess_a.raw_token_turns, 300); // raw=100: 100*2 + 100*1
+    let expected_dpmt = 2.0 * 1_000_000.0 / 60.0;
+    assert!((sess_a.dpmt.unwrap() - expected_dpmt).abs() < 1e-9);
+    assert!(report.dpmt.is_some());
 }
 
 #[test]
@@ -806,9 +812,66 @@ fn session_ledger_schema_json_has_expected_fields() {
     let schema = SessionLedgerReport::schema_json();
     assert_eq!(
         schema["schema_version"],
-        serde_json::json!("session-ledger-v1")
+        serde_json::json!("session-ledger-v2")
     );
     assert!(schema["entry"].is_object());
     assert!(schema["report"].is_object());
     assert!(schema["cli"].is_object());
+    assert!(schema["entry"]["visible_token_turns"].is_string());
+    assert!(schema["report"]["dpmt"].is_string());
+    assert!(schema["pricing"]["dpmt"].is_string());
+}
+
+#[test]
+fn token_turns_prices_early_mass_about_100x_late() {
+    // Mars doc: token saved at turn 2 of 200 ≈ 100× one saved at turn 199.
+    let mut early = vec![0usize; 200];
+    early[1] = 1; // turn 2 (1-based)
+    let mut late = vec![0usize; 200];
+    late[198] = 1; // turn 199
+    assert_eq!(token_turns_for_masses(&early), 199);
+    assert_eq!(token_turns_for_masses(&late), 2);
+    assert!((token_turns_for_masses(&early) as f64 / token_turns_for_masses(&late) as f64
+        - 99.5)
+        .abs()
+        < 1e-9);
+}
+
+#[test]
+fn token_turns_empty_and_dpmt_none_when_zero() {
+    assert_eq!(token_turns_for_masses(&[]), 0);
+    assert_eq!(token_turns_for_masses(&[0, 0]), 0);
+    assert_eq!(dpmt(3, 0), None);
+    assert_eq!(dpmt(2, 50), Some(40_000.0));
+}
+
+#[test]
+fn session_ledger_prices_token_turns_in_order() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("events.jsonl");
+    let mut e1 = test_event("read");
+    e1.session_id = Some("s".into());
+    e1.visible_tokens = 10;
+    e1.raw_tokens = 10;
+    let mut e2 = test_event("read");
+    e2.session_id = Some("s".into());
+    e2.visible_tokens = 5;
+    e2.raw_tokens = 5;
+    let mut e3 = test_event("read");
+    e3.session_id = Some("s".into());
+    e3.visible_tokens = 1;
+    e3.raw_tokens = 1;
+    record_event(&path, &e1).unwrap();
+    record_event(&path, &e2).unwrap();
+    record_event(&path, &e3).unwrap();
+    let report = SessionLedgerReport::from_ledger(&path).unwrap();
+    let s = &report.sessions[0];
+    // 10*3 + 5*2 + 1*1 = 41
+    assert_eq!(s.visible_token_turns, 41);
+    assert_eq!(s.raw_token_turns, 41);
+    assert_eq!(report.total_visible_token_turns, 41);
+    assert!((s.dpmt.unwrap() - (3.0 * 1_000_000.0 / 41.0)).abs() < 1e-9);
+    let text = report.render_text();
+    assert!(text.contains("DPMT (headline):"));
+    assert!(text.contains("session-ledger-v2"));
 }
