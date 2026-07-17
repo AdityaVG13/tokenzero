@@ -52,9 +52,6 @@ const DEFAULT_MAX_QUEUE_DEPTH: usize = 8;
 const DEFAULT_COST_THRESHOLD: usize = 32;
 const DEFAULT_ANALYSIS_CONCURRENCY_CAP: usize = 8;
 const DEFAULT_INDEX_CONCURRENCY_CAP: usize = 2;
-const DEFAULT_MACHINE_PERMIT: &str = "/tmp/zerostack-codemode-heavy.permit";
-const DEFAULT_ANALYSIS_PERMIT: &str = "/tmp/zerostack-codemode-analysis.permit";
-const DEFAULT_INDEX_PERMIT: &str = "/tmp/zerostack-codemode-index.permit";
 const SNAPSHOT_PLANS: &[&str] = &["status", "codemode.status", "containment.status"];
 const CONFIG_LIMITS: [(&str, usize, usize); 3] = [
     (
@@ -742,10 +739,12 @@ fn heavy_permit_path() -> PathBuf {
         .map(PathBuf::from)
         .unwrap_or_else(|| {
             if cfg!(test) {
-                let pid = std::process::id();
+                // Unique per test THREAD: parallel tests must not race on one
+                // permit dir (remove_dir_all vs acquire flake, RUST_TEST_THREADS=2).
+                let pid = format!("{}-{:?}", std::process::id(), std::thread::current().id());
                 std::env::temp_dir().join(format!("zerostack-codemode-heavy-test-{pid}.permit"))
             } else {
-                PathBuf::from(DEFAULT_MACHINE_PERMIT)
+                zerostack_machine_permit::scoped_permit_base("heavy")
             }
         })
 }
@@ -754,10 +753,12 @@ fn analysis_permit_path() -> PathBuf {
         .map(PathBuf::from)
         .unwrap_or_else(|| {
             if cfg!(test) {
-                let pid = std::process::id();
+                // Unique per test THREAD: parallel tests must not race on one
+                // permit dir (remove_dir_all vs acquire flake, RUST_TEST_THREADS=2).
+                let pid = format!("{}-{:?}", std::process::id(), std::thread::current().id());
                 std::env::temp_dir().join(format!("zerostack-codemode-analysis-test-{pid}.permit"))
             } else {
-                PathBuf::from(DEFAULT_ANALYSIS_PERMIT)
+                zerostack_machine_permit::scoped_permit_base("analysis")
             }
         })
 }
@@ -767,10 +768,12 @@ fn index_permit_path() -> PathBuf {
         .map(PathBuf::from)
         .unwrap_or_else(|| {
             if cfg!(test) {
-                let pid = std::process::id();
+                // Unique per test THREAD: parallel tests must not race on one
+                // permit dir (remove_dir_all vs acquire flake, RUST_TEST_THREADS=2).
+                let pid = format!("{}-{:?}", std::process::id(), std::thread::current().id());
                 std::env::temp_dir().join(format!("zerostack-codemode-index-test-{pid}.permit"))
             } else {
-                PathBuf::from(DEFAULT_INDEX_PERMIT)
+                zerostack_machine_permit::scoped_permit_base("index")
             }
         })
 }

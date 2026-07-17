@@ -15,6 +15,77 @@ pub const PERMIT_POLL: Duration = Duration::from_millis(20);
 pub const PERMIT_POLL_MAX: Duration = Duration::from_millis(200);
 const INCOMPLETE_PERMIT_GRACE: Duration = Duration::from_millis(250);
 
+/// Yield window a process must respect after releasing a slot under a base
+/// before contending for the SAME base again. Poll acquisition structurally
+/// favors a hot re-acquirer (20ms poll) over starved waiters (200ms backoff);
+/// the cooldown hands one poll window to peers so a busy session cannot
+/// monopolize a class (observed live 2026-07-16: one session starved every
+/// other machine session for 11+ minutes).
+pub const REACQUIRE_COOLDOWN: Duration = PERMIT_POLL_MAX;
+
+fn last_release_map() -> &'static std::sync::Mutex<std::collections::HashMap<PathBuf, Instant>> {
+    static MAP: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::HashMap<PathBuf, Instant>>,
+    > = std::sync::OnceLock::new();
+    MAP.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+}
+
+fn note_release(base: &Path) {
+    if let Ok(mut map) = last_release_map().lock() {
+        map.insert(base.to_path_buf(), Instant::now());
+    }
+}
+
+fn reacquire_cooldown_remaining(base: &Path) -> Option<Duration> {
+    let map = last_release_map().lock().ok()?;
+    let elapsed = map.get(base)?.elapsed();
+    (elapsed < REACQUIRE_COOLDOWN).then(|| REACQUIRE_COOLDOWN - elapsed)
+}
+
+/// Repo-scoped permit base: `/tmp/zerostack-codemode-<class>-<hash16>.permit`.
+///
+/// Scope comes from `ZEROSTACK_PERMIT_SCOPE_ROOT` or the per-child root envs
+/// the CodeMode hub already sets (`FSZERO_ROOT`, `TOKENZERO_ROOT`,
+/// `GZ_REPO_ROOT`), so concurrent repos stop serializing through one
+/// machine-global slot. Without a scope (bare CLI), fall back to the legacy
+/// machine-global base so unrelated processes keep excluding each other.
+pub fn scoped_permit_base(class: &str) -> PathBuf {
+    scoped_permit_base_for(class, permit_scope_root().as_deref())
+}
+
+pub fn scoped_permit_base_for(class: &str, scope_root: Option<&Path>) -> PathBuf {
+    let Some(root) = scope_root else {
+        return PathBuf::from(format!("/tmp/zerostack-codemode-{class}.permit"));
+    };
+    let canonical = fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
+    let scope = fnv1a64(canonical.to_string_lossy().as_bytes());
+    PathBuf::from(format!("/tmp/zerostack-codemode-{class}-{scope:016x}.permit"))
+}
+
+fn permit_scope_root() -> Option<PathBuf> {
+    for name in [
+        "ZEROSTACK_PERMIT_SCOPE_ROOT",
+        "FSZERO_ROOT",
+        "TOKENZERO_ROOT",
+        "GZ_REPO_ROOT",
+    ] {
+        match std::env::var_os(name) {
+            Some(value) if !value.is_empty() => return Some(PathBuf::from(value)),
+            _ => {}
+        }
+    }
+    None
+}
+
+fn fnv1a64(bytes: &[u8]) -> u64 {
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for byte in bytes {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    hash
+}
+
 /// RAII machine permit for one slot (or legacy exclusive) directory.
 #[derive(Debug)]
 pub struct MachinePermit(PathBuf, String);
@@ -37,6 +108,11 @@ impl MachinePermit {
         // capacity to the first asker — that would let CONCURRENCY=1 starve the
         // family-wide cores/4 analysis budget.
         let slots = slots.max(1);
+        // Anti-monopoly: a process that just released under this base yields
+        // one poll window to starved peers before contending again.
+        if let Some(wait) = reacquire_cooldown_remaining(base) {
+            std::thread::sleep(wait.min(deadline.saturating_duration_since(Instant::now())));
+        }
         let mut attempt = 0u32;
         loop {
             if !legacy_exclusive_busy(base) {
@@ -149,7 +225,22 @@ impl std::error::Error for AcquireError {}
 
 impl Drop for MachinePermit {
     fn drop(&mut self) {
-        cleanup_owned(&self.0, &self.1)
+        cleanup_owned(&self.0, &self.1);
+        // Record the release per class BASE (slot dirs live under it) so the
+        // re-acquire cooldown can yield a window to starved peers.
+        let base = if self
+            .0
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name.starts_with("slot-"))
+        {
+            self.0.parent().map(Path::to_path_buf)
+        } else {
+            Some(self.0.clone())
+        };
+        if let Some(base) = base {
+            note_release(&base);
+        }
     }
 }
 
