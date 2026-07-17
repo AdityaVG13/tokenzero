@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 Tracked tip on `main`: `68826cb` (post-`v1.4.0`). Includes permit/CodeMode batch, expand-arg coercion, session-resume CPU harden (`d3bc9bd`), and merged PR #26 telemetry (`tokenzero-f409`). Append here until the next tagged release; do not fold into `[1.4.0]`. Follow-up PR drains remaining ready beads; `tokenzero-readme-northstar-rebaseline-9c6c` refreshed README/northstar numbers (snapshot `20260717T014139.658900Z-ab0b3ca3090a`).
 
+### Fixed (2026-07-16 zerostack incident follow-ups)
+- **Per-repo machine permits with fairness**: permit bases scope to the workspace root (hash suffix) via hub-provided root envs; a releasing process yields one poll window before re-acquiring, so a busy session cannot monopolize a class (observed live: one session starved every other for 11+ minutes). Test permit dirs are per-thread (fixes the RUST_TEST_THREADS=2 remove_dir_all/acquire flake).
+- **Env-tunable hard wall**: `TOKENZERO_CODEMODE_HARD_MAX_WALL_MS` (clamped 1s..300s) raises the 5s ceiling that permit waits consumed entirely under contention.
+- **Server hygiene**: MCP/CodeMode servers renice to +5 (`TOKENZERO_NO_RENICE` opts out) and the per-op MCP surface refuses to start when a CodeMode hub marks the repo active (`.zerostack/codemode.active`, `TOKENZERO_ALLOW_DUAL=1` overrides).
+- **Fold-once acks**: scalar results fold into the ack exactly once across v2/v3/FastMCP assembly (was: `ok tz0 - =true =true t:...`).
+
 ### Added
 - **CLI CodeMode Tier B trampoline**: stdin/`--stdin`/PLAN=`-` (plus non-TTY auto-read), `--budget` alias for `--max-visible-tokens`, same `tokenzero.codemode.v1` envelope/refs as MCP, typed validation errors for conflicting plan sources (`tokenzero-cli-trampoline-tier-b-6b6`).
 - **Wind-tunnel replay MVP**: `benchmarks/wind_tunnel/` loads plan journals (or fixtures), replays under baseline vs candidate policy stubs, diffs action sequences, and exits non-zero on divergence (`tokenzero-wind-tunnel-replay-tyq`; stubs only, no model re-execution).
