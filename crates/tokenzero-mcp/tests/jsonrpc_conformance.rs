@@ -456,7 +456,7 @@ $(assert_eq!(data[$field], $expected, "{}: {}", $id, actual);)? $(assert!(array_
         assert!(
             lines
                 .get(1)
-                .is_some_and(|line| line.starts_with("refs: tz://blob/")),
+                .is_some_and(|line| line.starts_with("refs: tz://s/")),
             "ZERO-HIT: {text}"
         );
     }
@@ -506,12 +506,12 @@ fn beta() {}
             .lines()
             .find(|line| line.starts_with("refs: "))
             .unwrap_or_else(|| panic!("EDIT-CALL missing refs: {text}"));
-        assert!(footer.contains("tz://blob/"), "EDIT-CALL: {footer}");
+        assert!(footer.contains("tz://s/"), "EDIT-CALL: {footer}");
         let undo_ref = footer
             .split_whitespace()
             .find_map(|part| part.strip_prefix("undo:"))
             .unwrap_or_else(|| panic!("EDIT-CALL missing undo: {footer}"));
-        assert!(undo_ref.starts_with("tz://blob/"), "EDIT-CALL: {footer}");
+        assert!(undo_ref.starts_with("tz://s/"), "EDIT-CALL: {footer}");
         assert_eq!(
             fs::read_to_string(&file).unwrap(),
             "fn alpha() -> u8 { 1 }

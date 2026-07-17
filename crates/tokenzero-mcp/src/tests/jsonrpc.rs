@@ -309,7 +309,9 @@ fn mcp_envelope_is_text_only_by_default() {
         .unwrap();
     let read_text = read["result"]["content"][0]["text"].as_str().unwrap();
     assert!(read_text.contains("alpha"), "{read_text}");
-    assert!(read_text.contains("refs: tz://blob/"), "{read_text}");
+    // Visible capsules carry session-scoped short aliases (c9b1ca0); the
+    // full-hash blob ref stays recoverable behind the alias table.
+    assert!(read_text.contains("refs: tz://s/"), "{read_text}");
     // The edit hint rides the refs footer on read responses only: it steers
     // agents to tz_edit instead of a doomed native-Edit-after-tz_read loop.
     assert!(read_text.contains("edit: tz_edit"), "{read_text}");
@@ -575,8 +577,8 @@ fn mcp_tool_calls_are_pulse_accounted_with_attribution() {
     let text = parsed["result"]["content"][0]["text"].as_str().unwrap();
     let ref_id = text
         .split_whitespace()
-        .find(|word| word.starts_with("tz://blob/"))
-        .expect("read response advertises a blob ref")
+        .find(|word| word.starts_with("tz://s/") || word.starts_with("tz://blob/"))
+        .expect("read response advertises an expandable payload ref")
         .to_string();
 
     let expand_request = serde_json::json!({
@@ -602,7 +604,21 @@ fn mcp_tool_calls_are_pulse_accounted_with_attribution() {
     assert_eq!(read_event.tool, "read");
     assert_eq!(read_event.session_id.as_deref(), Some(engine.session_id()));
     assert_eq!(read_event.call_id.as_deref(), Some("7"));
-    assert!(read_event.ref_ids.contains(&ref_id));
+    // Pulse forensics keep full-hash refs for durable attribution; the
+    // visible capsule advertises the session short alias of the same blob.
+    let matches_visible_ref = |full: &String| {
+        full == &ref_id
+            || full.strip_prefix("tz://blob/").is_some_and(|hash| {
+                ref_id
+                    .strip_prefix("tz://s/")
+                    .is_some_and(|short| hash.starts_with(short))
+            })
+    };
+    assert!(
+        read_event.ref_ids.iter().any(matches_visible_ref),
+        "read event refs {:?} must cover visible ref {ref_id}",
+        read_event.ref_ids
+    );
     assert!(read_event.raw_tokens > 0);
 
     let expand_event = &lines[1];
@@ -613,8 +629,9 @@ fn mcp_tool_calls_are_pulse_accounted_with_attribution() {
         Some(engine.session_id())
     );
     assert!(
-        expand_event.ref_ids.contains(&ref_id),
-        "expand event must carry the expanded ref for attribution"
+        expand_event.ref_ids.iter().any(matches_visible_ref),
+        "expand event refs {:?} must carry the expanded ref {ref_id} for attribution",
+        expand_event.ref_ids
     );
 
     let string_id_event = &lines[2];

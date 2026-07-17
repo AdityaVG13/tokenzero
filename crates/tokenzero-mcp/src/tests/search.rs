@@ -615,6 +615,7 @@ fn fresh_arg_bypasses_dedup_via_tools_call() {
     let file = dir.path().join("sample.rs");
     fs::write(&file, dedup_fixture_content()).unwrap();
     let engine = TokenZeroEngine::new(EngineConfig::for_root(dir.path()));
+    engine.mark_lifecycle_ready_for_tests();
 
     let call = |id: u64, fresh: bool| -> String {
         let mut arguments = json!({"path": file.display().to_string()});
