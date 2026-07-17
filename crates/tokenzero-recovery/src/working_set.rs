@@ -477,12 +477,10 @@ impl WorkingSet {
                 bytes_evicted,
             });
         }
-        if self.used_tokens() > self.budget_tokens {
-            return Err(RecoveryError::BudgetUnsatisfiable {
-                used: self.used_tokens(),
-                budget: self.budget_tokens,
-            });
-        }
+        // Best-effort: spans already reduced to their eviction markers cannot
+        // shrink further, so a budget below the marker floor is served at the
+        // floor rather than failing the admission (which would strand the full
+        // inline text at the caller - the exact opposite of paging out).
         Ok(evicted)
     }
 }

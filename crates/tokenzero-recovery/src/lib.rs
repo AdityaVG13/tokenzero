@@ -199,10 +199,6 @@ pub enum RecoveryError {
     Io(#[from] std::io::Error),
     #[error("json error: {0}")]
     Json(#[from] serde_json::Error),
-    #[error(
-        "working-set budget unsatisfiable: used_tokens {used} exceeds budget_tokens {budget}"
-    )]
-    BudgetUnsatisfiable { used: usize, budget: usize },
 }
 
 macro_rules! labeled_errors {
