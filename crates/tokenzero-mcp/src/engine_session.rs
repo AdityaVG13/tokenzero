@@ -68,6 +68,16 @@ impl TokenZeroEngine {
             session_persist,
             session_boot,
             surface_health: std::sync::Arc::new(crate::surface_health::SurfaceHealth::new()),
+            lifecycle: Mutex::new(InitializeState::Uninitialized),
+        }
+    }
+
+    /// Mark the MCP initialize lifecycle Ready for unit tests that exercise
+    /// tools without replaying the full initialize handshake.
+    #[cfg(test)]
+    pub(crate) fn mark_lifecycle_ready_for_tests(&self) {
+        if let Ok(mut state) = self.lifecycle.lock() {
+            *state = InitializeState::Ready;
         }
     }
 

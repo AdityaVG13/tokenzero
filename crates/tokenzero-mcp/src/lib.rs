@@ -198,4 +198,17 @@ pub struct TokenZeroEngine {
     surface_health: std::sync::Arc<surface_health::SurfaceHealth>,
     /// Fail-open append-only response accounting beside the recovery cache.
     ledger: ledger::LedgerWriter,
+    /// Per-connection MCP initialize lifecycle (stdio session / engine).
+    pub(crate) lifecycle: Mutex<InitializeState>,
+}
+
+/// MCP initialize lifecycle for one engine/connection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) enum InitializeState {
+    #[default]
+    Uninitialized,
+    /// `initialize` succeeded; waiting for `notifications/initialized`.
+    Negotiated,
+    /// Client completed initialize + initialized; tools/list and peers allowed.
+    Ready,
 }
