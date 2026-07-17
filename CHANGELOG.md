@@ -7,7 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-Tracked tip on `main`: `68826cb` (post-`v1.4.0`). Includes permit/CodeMode batch, expand-arg coercion, session-resume CPU harden (`d3bc9bd`), and merged PR #26 telemetry (`tokenzero-f409`). Append here until the next tagged release; do not fold into `[1.4.0]`. Follow-up PR drains remaining ready beads; `tokenzero-readme-northstar-rebaseline-9c6c` refreshes README tables from a fresh northstar run before tag.
+Tracked tip on `main`: `68826cb` (post-`v1.4.0`). Includes permit/CodeMode batch, expand-arg coercion, session-resume CPU harden (`d3bc9bd`), and merged PR #26 telemetry (`tokenzero-f409`). Append here until the next tagged release; do not fold into `[1.4.0]`. Follow-up PR drains remaining ready beads; `tokenzero-readme-northstar-rebaseline-9c6c` refreshed README/northstar numbers (snapshot `20260717T014139.658900Z-ab0b3ca3090a`).
 
 ### Added
 - **CLI CodeMode Tier B trampoline**: stdin/`--stdin`/PLAN=`-` (plus non-TTY auto-read), `--budget` alias for `--max-visible-tokens`, same `tokenzero.codemode.v1` envelope/refs as MCP, typed validation errors for conflicting plan sources (`tokenzero-cli-trampoline-tier-b-6b6`).
@@ -21,6 +21,7 @@ Tracked tip on `main`: `68826cb` (post-`v1.4.0`). Includes permit/CodeMode batch
 - **Opt-in usage telemetry**: default-off; when enabled, records only `{execution_path, raw_tokens, spent_tokens}` for MCP/CodeMode (`tokenzero-f409`, https://github.com/AdityaVG13/tokenzero/pull/26).
 
 ### Changed
+- **README / northstar**: regenerated fixed-suite tables from snapshot `20260717T014139.658900Z-ab0b3ca3090a` on warm `target/release/tokenzero` (`tokenzero-readme-northstar-rebaseline-9c6c`).
 - **Permit scheduling**: light CodeMode gated behind the analysis permit; expand-only plans ungated; in-process slot waits bound to wall deadline; `MachinePermit` extracted under the 1k containment limit (`tokenzero-wawf`, `tokenzero-jn1i`, `tokenzero-zcy8`).
 - **Northstar trend gates**: per-workload compression floors; expand size-class set equality; p50/p95/p99 non-regression so aggregate or p50 wins cannot mask regressions (`tokenzero-g3y.11`, `tokenzero-g3y.23`).
 - **README claims**: 99.0% northstar total scoped as fixed-suite point estimate only (`tokenzero-g3y.18`).

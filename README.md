@@ -57,10 +57,10 @@ and read the `accounting` block:
 
 | Input | Raw tokens | Visible | Result |
 | :-- | --: | --: | :-- |
-| 237-line source file | 1,992 | 1,992 | returned whole; a capsule never costs more than raw |
-| 1,728-line source file | 13,764 | 203 | **98.5%** smaller, exact bytes one `expand` away |
-| 2,301-line source file | 16,712 | 150 | **99.1%** smaller, exact bytes one `expand` away |
-| noisy shell output | 1,012 | 435 | **57%** smaller, full stream recoverable |
+| 204-line source file | 1,698 | 1,698 | returned whole; a capsule never costs more than raw |
+| 796-line source file | 7,722 | 287 | **96.3%** smaller, exact bytes one `expand` away |
+| 1,539-line source file | 12,908 | 259 | **98.0%** smaller, exact bytes one `expand` away |
+| noisy shell output | 1,237 | 212 | **82.9%** smaller, full stream recoverable |
 
 Hot paths are measured, not asserted: `cargo bench` pins token counting, capsule
 framing, and shell rendering at microsecond scale on the workspace's criterion suite.
@@ -74,13 +74,13 @@ binary SHA-256, methodology, and history live under `benchmarks/northstar/`:
 
 | Workload | Raw tokens | TokenZero | Savings |
 | :-- | --: | --: | --: |
-| Large source read | 1,598 | 45 | **97.0%** |
-| Re-read the same file (seen-set dedup) | 1,598 | 45 | **97.0%** |
-| Repo-wide grep (`fn ` across `crates/`) | 85,453 | 36 | **99.0%** |
-| `cargo test` (`tokenzero-filters`) | 233 | 257 | **-11.0%** |
-| Directory listing (find vs tree, depth 3) | 32,757 | 512 | **98.0%** |
-| Re-find stored content (`recall` vs re-running grep) | 85,453 | 46 | **99.0%** |
-| **Total** | **207,092** | **941** | **99.0%** |
+| Large source read | 1,744 | 45 | **97.0%** |
+| Re-read the same file (seen-set dedup) | 1,744 | 45 | **97.0%** |
+| Repo-wide grep (`fn ` across `crates/`) | 90,541 | 487 | **99.0%** |
+| `cargo test` (`tokenzero-filters`) | 292 | 80 | **72.0%** |
+| Directory listing (find vs tree, depth 3) | 37,530 | 541 | **98.0%** |
+| Re-find stored content (`recall` vs re-running grep) | 90,541 | 46 | **99.0%** |
+| **Total** | **222,392** | **1,244** | **99.0%** |
 
 Treat the **99.0%** total as a fixed-suite point estimate for these six
 workloads only — not a workload-population or release claim. One checked-in
