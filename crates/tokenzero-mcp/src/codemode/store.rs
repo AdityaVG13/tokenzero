@@ -11,8 +11,23 @@ use super::result::{CodeModeResult, CodeModeStatus, CodeModeTelemetry};
 pub const CODEMODE_LIMITS_SCHEMA: &str = "tokenzero.codemode.limits.v1";
 pub const DEFAULT_MAX_LOGICAL_OPS: usize = 1000;
 pub const DEFAULT_MAX_PHYSICAL_OPS: usize = 256;
-pub const DEFAULT_MAX_WALL_MS: u64 = 5000;
 pub const HARD_MAX_WALL_MS: u64 = 5000;
+
+/// Deployment override for the server-level hard wall ceiling, clamped to
+/// [1s, 300s]. Five seconds serializes real work behind machine-permit waits
+/// on busy multi-session machines (2026-07-16 incident); hubs set
+/// `TOKENZERO_CODEMODE_HARD_MAX_WALL_MS` to trade latency for headroom while
+/// per-call limits still clamp to this ceiling.
+pub fn hard_max_wall_ms() -> u64 {
+    static VALUE: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+    *VALUE.get_or_init(|| {
+        std::env::var("TOKENZERO_CODEMODE_HARD_MAX_WALL_MS")
+            .ok()
+            .and_then(|raw| raw.parse::<u64>().ok())
+            .map(|ms| ms.clamp(1_000, 300_000))
+            .unwrap_or(HARD_MAX_WALL_MS)
+    })
+}
 pub const DEFAULT_MAX_MICROTASKS: usize = 4096;
 pub const DEFAULT_MAX_MEMORY_BYTES: usize = 32 * 1024 * 1024;
 pub const DEFAULT_MAX_OUTPUT_BYTES: usize = 64 * 1024;
@@ -47,8 +62,8 @@ impl Default for CodeModeLimits {
         Self {
             max_logical_ops: DEFAULT_MAX_LOGICAL_OPS,
             max_physical_ops: DEFAULT_MAX_PHYSICAL_OPS,
-            max_wall_ms: DEFAULT_MAX_WALL_MS,
-            hard_max_wall_ms: HARD_MAX_WALL_MS,
+            max_wall_ms: hard_max_wall_ms(),
+            hard_max_wall_ms: hard_max_wall_ms(),
             max_microtasks: DEFAULT_MAX_MICROTASKS,
             max_memory_bytes: DEFAULT_MAX_MEMORY_BYTES,
             max_output_bytes: DEFAULT_MAX_OUTPUT_BYTES,
