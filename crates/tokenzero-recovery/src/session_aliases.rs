@@ -72,17 +72,22 @@ pub fn is_session_alias_bare(bare: &str) -> bool {
 
 /// Replace every full-hash blob ref in `text` with its session-visible alias.
 pub fn rewrite_full_hash_blob_refs_in_text(text: &str) -> String {
-    let bytes = text.as_bytes();
     let mut out = String::with_capacity(text.len());
     let mut i = 0;
-    while i < bytes.len() {
+    while i < text.len() {
         if let Some((consumed, replacement)) = match_full_hash_blob_at(text, i) {
             out.push_str(&replacement);
             i += consumed;
             continue;
         }
-        out.push(bytes[i] as char);
-        i += 1;
+        // Advance one full character: refs are pure ASCII, so multibyte
+        // characters are copied verbatim (byte-wise `as char` casts would
+        // mojibake them, and mid-char slicing panics).
+        let next = (i + 1..=text.len())
+            .find(|&index| text.is_char_boundary(index))
+            .unwrap_or(text.len());
+        out.push_str(&text[i..next]);
+        i = next;
     }
     out
 }
@@ -96,6 +101,11 @@ pub fn take_full_hash_blob_at(text: &str, start: usize) -> Option<(usize, String
 }
 
 fn match_full_hash_blob_at(text: &str, start: usize) -> Option<(usize, String)> {
+    // Callers scan byte offsets; a mid-character offset can never start an
+    // ASCII ref and must not panic the slice below.
+    if !text.is_char_boundary(start) {
+        return None;
+    }
     let rest = &text[start..];
     for prefix in ["tz://blob/", "fz://blob/", "gz://blob/"] {
         if !rest.starts_with(prefix) {
