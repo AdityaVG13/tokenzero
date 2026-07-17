@@ -23,6 +23,7 @@ Tracked tip on `main`: `68826cb` (post-`v1.4.0`). Includes permit/CodeMode batch
 - **README claims**: 99.0% northstar total scoped as fixed-suite point estimate only (`tokenzero-g3y.18`).
 
 ### Fixed
+- npm shim self-recursion detection uses realpath for `TOKENZERO_BIN` and a bounded prefix + npm cmd-shim structure match on PATH, so distinct binaries that merely mention the shim path are not refused and large candidates are not fully read (`tokenzero-g3y.3`).
 - CodeMode host ops (find/search/expand and session resume load) abort on `hard_max_wall_ms` mid-call via cooperative checkpoints, not only between QuickJS microtasks (`tokenzero-y1gi`).
 - Permit `Fatal` maps to non-retryable substrate errors (`tokenzero-091s`).
 - CodeMode STATUS/INDEX markers match API shapes; busy responses use `isError` without a missing envelope (`tokenzero-vt7s`).

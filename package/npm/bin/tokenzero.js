@@ -3,6 +3,8 @@ const { spawnSync } = require("node:child_process");
 const fs = require("node:fs");
 const path = require("node:path");
 
+const SELF_PREFIX_BYTES = 8192;
+
 const candidate = resolveTokenZero();
 
 if (!candidate) {
@@ -52,7 +54,9 @@ function resolveTokenZero() {
   if (!configured) {
     return findTokenZero();
   }
-  if (isSelf(configured)) {
+  // Explicit TOKENZERO_BIN: refuse only realpath identity. Content heuristics
+  // falsely reject distinct binaries that merely mention the shim path.
+  if (isRealPathSelf(configured)) {
     console.error("TOKENZERO_BIN points to the npm shim; refusing recursive launch");
     process.exit(127);
   }
@@ -86,28 +90,70 @@ function isExecutable(candidate) {
   }
 }
 
-function isSelf(candidate) {
+function isRealPathSelf(candidate) {
   try {
     const realCandidate = fs.realpathSync(candidate);
     const realSelf = fs.realpathSync(__filename);
-    if (realCandidate === realSelf) {
-      return true;
-    }
-  } catch {
-    // Fall through to shim-content detection below.
-  }
-  return isSelfShim(candidate);
-}
-
-function isSelfShim(candidate) {
-  try {
-    const text = fs.readFileSync(candidate, "utf8").slice(0, 8192);
-    const normalizedText = normalizePathText(text);
-    const normalizedSelf = normalizePathText(__filename);
-    return normalizedText.includes(normalizedSelf);
+    return realCandidate === realSelf;
   } catch {
     return false;
   }
+}
+
+function isSelf(candidate) {
+  if (isRealPathSelf(candidate)) {
+    return true;
+  }
+  // PATH search only: skip npm-generated wrappers that invoke this shim.
+  return isNpmGeneratedShim(candidate);
+}
+
+function isNpmGeneratedShim(candidate) {
+  try {
+    const text = readPrefixUtf8(candidate, SELF_PREFIX_BYTES);
+    const normalizedText = normalizePathText(text);
+    const normalizedSelf = normalizePathText(__filename);
+    if (!normalizedText.includes(normalizedSelf)) {
+      return false;
+    }
+    return looksLikeNpmShimInvocation(normalizedText, normalizedSelf);
+  } catch {
+    return false;
+  }
+}
+
+function readPrefixUtf8(candidate, maxBytes) {
+  const fd = fs.openSync(candidate, "r");
+  try {
+    const buf = Buffer.alloc(maxBytes);
+    const n = fs.readSync(fd, buf, 0, maxBytes, 0);
+    return buf.subarray(0, n).toString("utf8");
+  } finally {
+    fs.closeSync(fd);
+  }
+}
+
+function looksLikeNpmShimInvocation(normalizedText, normalizedSelf) {
+  // npm cmd-shim (node): require("/abs/path/bin/tokenzero.js")
+  if (
+    normalizedText.includes(`require("${normalizedSelf}")`) ||
+    normalizedText.includes(`require('${normalizedSelf}')`)
+  ) {
+    return true;
+  }
+  // npm cmd-shim (shell): exec ... "/abs/path/bin/tokenzero.js" "$@"
+  if (
+    !normalizedText.startsWith("#!") ||
+    (!normalizedText.includes(`"${normalizedSelf}"`) &&
+      !normalizedText.includes(`'${normalizedSelf}'`))
+  ) {
+    return false;
+  }
+  return (
+    normalizedText.includes("exec ") ||
+    normalizedText.includes("basedir") ||
+    /\bnode\b/.test(normalizedText)
+  );
 }
 
 function normalizePathText(value) {
