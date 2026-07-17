@@ -42,6 +42,7 @@ mod supervisor;
 mod surface_health;
 mod tools;
 pub mod usage_telemetry;
+mod wall;
 mod workspace;
 mod write_ladder;
 

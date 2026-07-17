@@ -23,6 +23,7 @@ Tracked tip on `main`: `68826cb` (post-`v1.4.0`). Includes permit/CodeMode batch
 - **README claims**: 99.0% northstar total scoped as fixed-suite point estimate only (`tokenzero-g3y.18`).
 
 ### Fixed
+- CodeMode host ops (find/search/expand and session resume load) abort on `hard_max_wall_ms` mid-call via cooperative checkpoints, not only between QuickJS microtasks (`tokenzero-y1gi`).
 - Permit `Fatal` maps to non-retryable substrate errors (`tokenzero-091s`).
 - CodeMode STATUS/INDEX markers match API shapes; busy responses use `isError` without a missing envelope (`tokenzero-vt7s`).
 - Shell cwd defaults to `call_root` and is always echoed (`tokenzero-shell-cwd-default-q73`).

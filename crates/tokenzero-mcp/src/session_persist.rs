@@ -54,16 +54,25 @@ impl SessionPersistence {
         // Use local/CAS reachability only — full has_ref walks ref-index and
         // can reload multi-MB recovery journals once per unique blob_ref.
         let records = if state.version >= STATE_VERSION {
-            scope
-                .records
-                .iter()
-                .filter(|entry| {
-                    *ref_available
-                        .entry(entry.record.blob_ref.as_str())
-                        .or_insert_with(|| store.has_ref_local(&entry.record.blob_ref))
-                })
-                .map(|entry| (entry.key.clone(), entry.record.clone()))
-                .collect()
+            let mut out = HashMap::new();
+            for (idx, entry) in scope.records.iter().enumerate() {
+                if crate::wall::check_active_wall_deadline_every(
+                    idx,
+                    crate::wall::WALL_CHECK_EVERY_N,
+                )
+                .is_some()
+                {
+                    // Abort mid-load rather than burning past the host wall.
+                    return;
+                }
+                let available = *ref_available
+                    .entry(entry.record.blob_ref.as_str())
+                    .or_insert_with(|| store.has_ref_local(&entry.record.blob_ref));
+                if available {
+                    out.insert(entry.key.clone(), entry.record.clone());
+                }
+            }
+            out
         } else {
             HashMap::new()
         };

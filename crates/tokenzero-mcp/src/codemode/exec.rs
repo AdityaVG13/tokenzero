@@ -14,6 +14,7 @@ use tokenzero_core::{
 };
 use tokenzero_filters::{discover, rewrite_command};
 
+use crate::wall::{WallDeadline, with_host_wall_deadline};
 use crate::workspace::{
     allowed_roots_for_workspace, resolve_recovery_cache_path, tokenzero_work_root,
 };
@@ -414,6 +415,7 @@ struct AsyncHostRuntime {
 
 fn wall_clock_limit_error(elapsed: u64, limits: &CodeModeLimits) -> Option<(String, &'static str)> {
     if elapsed > limits.hard_max_wall_ms {
+        // Same message shape as `check_wall_deadline` (host-op checkpoints).
         Some((
             format!(
                 "runtime: hard_max_wall_ms exceeded {}",
@@ -429,6 +431,26 @@ fn wall_clock_limit_error(elapsed: u64, limits: &CodeModeLimits) -> Option<(Stri
     } else {
         None
     }
+}
+
+fn host_wall_deadline(started_ms: u128, hard_max_wall_ms: u64) -> WallDeadline {
+    let elapsed = now_ms().saturating_sub(started_ms) as u64;
+    WallDeadline::from_elapsed_ms(elapsed, hard_max_wall_ms)
+}
+
+fn tool_aborting_wall(resp: ToolResponse) -> OpResult {
+    if resp
+        .error
+        .as_ref()
+        .is_some_and(|error| error.code == "hard_max_wall_ms")
+    {
+        let message = resp
+            .error
+            .map(|error| error.message)
+            .unwrap_or_else(|| "runtime: hard_max_wall_ms exceeded".to_string());
+        return Err(operation_error(message));
+    }
+    tool(resp)
 }
 fn tz_error_json(message: &str, fallback: &str) -> String {
     serde_json::to_string(&json!({ "__tz_error": message }))
@@ -685,29 +707,35 @@ fn begin_js_host_op(
     let engine = Arc::clone(engine);
     let work_root = Arc::clone(work_root);
     let method_owned = method.to_string();
+    let wall = {
+        let state_ref = state.borrow();
+        host_wall_deadline(state_ref.started_ms, state_ref.limits.hard_max_wall_ms)
+    };
     std::thread::spawn(move || {
         gate.acquire();
-        let result_json = match dispatch_values(&engine, work_root.as_path(), &method_owned, &args) {
-            Ok(outcome) => {
-                let prevented_read_bytes = outcome.prevented_read_bytes;
-                let value = outcome.into_value();
-                serde_json::to_string(&json!({
-                    "__tz_ok": true,
-                    "value": value,
-                    "prevented_read_bytes": prevented_read_bytes,
+        let result_json = with_host_wall_deadline(wall, || {
+            match dispatch_values(&engine, work_root.as_path(), &method_owned, &args) {
+                Ok(outcome) => {
+                    let prevented_read_bytes = outcome.prevented_read_bytes;
+                    let value = outcome.into_value();
+                    serde_json::to_string(&json!({
+                        "__tz_ok": true,
+                        "value": value,
+                        "prevented_read_bytes": prevented_read_bytes,
+                    }))
+                    .unwrap_or_else(|_| {
+                        "{\"__tz_ok\":true,\"value\":null,\"prevented_read_bytes\":0}".to_string()
+                    })
+                }
+                Err(error) => serde_json::to_string(&json!({
+                    "__tz_error": error.error.as_ref().map(|error| error.message.as_str()).unwrap_or("unknown error"),
+                    "__tz_error_kind": error.error.as_ref().map(|error| error.kind.as_str()).unwrap_or("runtime"),
                 }))
                 .unwrap_or_else(|_| {
-                    "{\"__tz_ok\":true,\"value\":null,\"prevented_read_bytes\":0}".to_string()
-                })
+                    "{\"__tz_error\":\"unknown error\",\"__tz_error_kind\":\"runtime\"}".to_string()
+                }),
             }
-            Err(error) => serde_json::to_string(&json!({
-                "__tz_error": error.error.as_ref().map(|error| error.message.as_str()).unwrap_or("unknown error"),
-                "__tz_error_kind": error.error.as_ref().map(|error| error.kind.as_str()).unwrap_or("runtime"),
-            }))
-            .unwrap_or_else(|_| {
-                "{\"__tz_error\":\"unknown error\",\"__tz_error_kind\":\"runtime\"}".to_string()
-            }),
-        };
+        });
         *job.result.lock().unwrap_or_else(|e| e.into_inner()) = Some(result_json);
         gate.release();
     });
@@ -1294,15 +1322,22 @@ fn execute_lowered_plan(
             }
         };
         progress.ops += 1;
-        let outcome = match dispatch_journaled(
-            &boot.engine,
-            &boot.work_root,
-            call,
-            &progress.scope,
-            &mut boot.transaction,
-            journal_index,
-            JournalDispatchMode::Lowered,
-        ) {
+        let elapsed = now_ms().saturating_sub(started_ms) as u64;
+        if let Some((message, _)) = wall_clock_limit_error(elapsed, limits) {
+            return finish(CodeModeResult::error(message, progress.ops), progress.steps);
+        }
+        let wall = host_wall_deadline(started_ms, limits.hard_max_wall_ms);
+        let outcome = match with_host_wall_deadline(wall, || {
+            dispatch_journaled(
+                &boot.engine,
+                &boot.work_root,
+                call,
+                &progress.scope,
+                &mut boot.transaction,
+                journal_index,
+                JournalDispatchMode::Lowered,
+            )
+        }) {
             Ok(outcome) => outcome,
             Err(mut error) => {
                 stamp_ops_on_error(&mut error, progress.ops);
@@ -2013,15 +2048,22 @@ fn execute_json_plan(
             args,
         };
         progress.ops = index + 1;
-        let outcome = match dispatch_journaled(
-            &boot.engine,
-            &boot.work_root,
-            &call,
-            &progress.scope,
-            &mut boot.transaction,
-            index,
-            JournalDispatchMode::Json,
-        ) {
+        let elapsed = now_ms().saturating_sub(started_ms) as u64;
+        if let Some((message, _)) = wall_clock_limit_error(elapsed, limits) {
+            return finish(CodeModeResult::error(message, progress.ops), progress.steps);
+        }
+        let wall = host_wall_deadline(started_ms, limits.hard_max_wall_ms);
+        let outcome = match with_host_wall_deadline(wall, || {
+            dispatch_journaled(
+                &boot.engine,
+                &boot.work_root,
+                &call,
+                &progress.scope,
+                &mut boot.transaction,
+                index,
+                JournalDispatchMode::Json,
+            )
+        }) {
             Ok(outcome) => outcome,
             Err(mut error) => {
                 stamp_ops_on_error(&mut error, progress.ops);
@@ -2860,7 +2902,7 @@ fn exec_find(engine: &TokenZeroEngine, work_root: &Path, args: &[Value], exact: 
     } else {
         engine.find(pattern, &paths, mode, max_files, max_visible)
     };
-    tool(resp)
+    tool_aborting_wall(resp)
 }
 
 fn exec_glob(engine: &TokenZeroEngine, work_root: &Path, args: &[Value]) -> OpResult {
@@ -3059,6 +3101,13 @@ fn exec_expand(engine: &TokenZeroEngine, args: &[Value]) -> OpResult {
     {
         engine.surface_health().record_codemode_expand_x0();
     }
+    if resp
+        .error
+        .as_ref()
+        .is_some_and(|error| error.code == "hard_max_wall_ms")
+    {
+        return tool_aborting_wall(resp);
+    }
     let outcome = OpOutcome::from_tool_response(&resp);
     if resp.error.is_none() {
         Ok(outcome.mark_exact_expand())
@@ -3075,7 +3124,10 @@ fn exec_expand_many(engine: &TokenZeroEngine, args: &[Value]) -> OpResult {
     )?;
     let mut results = Vec::with_capacity(items.len());
     let mut prevented = 0usize;
-    for item in items {
+    for (idx, item) in items.iter().enumerate() {
+        if let Some((message, _)) = crate::wall::check_active_wall_deadline_every(idx, 1) {
+            return Err(operation_error(message));
+        }
         let params = ExpandParams::from_expand_many_item(item).map_err(operation_error)?;
         if !tokenzero_recovery::is_expandable_ref(&params.ref_id) {
             return Err(operation_error(format!(
@@ -3084,6 +3136,13 @@ fn exec_expand_many(engine: &TokenZeroEngine, args: &[Value]) -> OpResult {
             )));
         }
         let resp = engine.expand_with_params(params);
+        if resp
+            .error
+            .as_ref()
+            .is_some_and(|error| error.code == "hard_max_wall_ms")
+        {
+            return tool_aborting_wall(resp);
+        }
         prevented = prevented.saturating_add(estimate_prevented_read_bytes(&resp));
         results.push(
             OpOutcome::from_tool_response(&resp)

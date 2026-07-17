@@ -45,7 +45,7 @@ impl TokenZeroEngine {
                     stats,
                     matches,
                 );
-                if stats.truncated_by_results || stats.truncated_by_visit {
+                if stats.truncated_by_results || stats.truncated_by_visit || stats.truncated_by_wall {
                     break;
                 }
             }
@@ -116,6 +116,12 @@ impl TokenZeroEngine {
             },
             None => run_internal(&mut stats, &mut matches),
         }
+        if stats.truncated_by_wall {
+            let message = crate::wall::check_active_wall_deadline()
+                .map(|(message, _)| message)
+                .unwrap_or_else(|| "runtime: hard_max_wall_ms exceeded".to_string());
+            return failure_response(tool, "hard_max_wall_ms", message, None);
+        }
         // Canonical recoverable payload keeps the grep-compatible flat format;
         // the grouped rendering is visible-only and used when strictly cheaper.
         let output = flat_search_output(&matches);
@@ -178,6 +184,9 @@ impl TokenZeroEngine {
                 cross_session,
             } = self.session_lookup(&key, &content_sha256)
             {
+                if let Some((message, _)) = crate::wall::check_active_wall_deadline() {
+                    return failure_response(tool, "hard_max_wall_ms", message, None);
+                }
                 if !bypass {
                     let note = unchanged_search_note(tool, query, &output, &stored);
                     let note_tokens = count_tokens(&note);
