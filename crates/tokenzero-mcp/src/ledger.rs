@@ -10,6 +10,7 @@
 //! Queries scan both generations and ignore malformed lines, including a torn
 //! final line.
 
+use fs4::FileExt;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
@@ -160,26 +161,40 @@ fn append_record(path: &Path, record: &LedgerRecord, max_bytes: u64) -> io::Resu
     line.push(b'\n');
     let line_bytes = u64::try_from(line.len()).unwrap_or(u64::MAX);
     if line_bytes > max_bytes {
-        return Ok(());
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "ledger record exceeds rotation limit",
+        ));
     }
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
-    let current = fs::metadata(path).map(|meta| meta.len()).unwrap_or(0);
-    if current > 0 && current.saturating_add(line_bytes) > max_bytes {
-        let rotated = rotated_path(path);
-        if let Err(err) = fs::remove_file(&rotated) {
-            if err.kind() != io::ErrorKind::NotFound {
-                return Err(err);
+    let observed_len = fs::metadata(path).map(|metadata| metadata.len()).unwrap_or(0);
+    if observed_len > 0 && observed_len.saturating_add(line_bytes) > max_bytes {
+        let lock_path = PathBuf::from(format!("{}.rotation.lock", path.display()));
+        let rotation_lock = OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(lock_path)?;
+        FileExt::lock(&rotation_lock)?;
+        let locked_len = fs::metadata(path).map(|metadata| metadata.len()).unwrap_or(0);
+        if locked_len == observed_len
+            && locked_len > 0
+            && locked_len.saturating_add(line_bytes) > max_bytes
+        {
+            let rotated = rotated_path(path);
+            if let Err(error) = fs::rename(path, rotated)
+                && error.kind() != io::ErrorKind::NotFound
+            {
+                return Err(error);
             }
         }
-        fs::rename(path, rotated)?;
+        let _ = FileExt::unlock(&rotation_lock);
     }
-    OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(path)?
-        .write_all(&line)
+    let mut file = OpenOptions::new().create(true).append(true).open(path)?;
+    file.write_all(&line)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -340,4 +355,39 @@ fn now_ms() -> u64 {
         .duration_since(UNIX_EPOCH)
         .map(|duration| u64::try_from(duration.as_millis()).unwrap_or(u64::MAX))
         .unwrap_or(0)
+}
+
+
+#[cfg(test)]
+mod rotation_tests {
+    use super::*;
+    use std::sync::{Arc, Barrier};
+    use tempfile::tempdir;
+
+    #[test]
+    fn concurrent_rotation_does_not_rotate_twice() {
+        let directory = tempdir().unwrap();
+        let path = directory.path().join("ledger.jsonl");
+        let record: LedgerRecord = serde_json::from_value(schema_example()).unwrap();
+        let line_len = serde_json::to_vec(&record).unwrap().len() as u64 + 1;
+        let max_bytes = line_len + 8;
+        let original = vec![b'x'; 9];
+        fs::write(&path, &original).unwrap();
+        let barrier = Arc::new(Barrier::new(2));
+        let mut workers = Vec::new();
+        for _ in 0..2 {
+            let path = path.clone();
+            let record = record.clone();
+            let barrier = barrier.clone();
+            workers.push(std::thread::spawn(move || {
+                barrier.wait();
+                append_record(&path, &record, max_bytes).unwrap();
+            }));
+        }
+        for worker in workers {
+            worker.join().unwrap();
+        }
+        assert_eq!(fs::read(rotated_path(&path)).unwrap(), original);
+        assert_eq!(read_records(&path).unwrap().len(), 2);
+    }
 }

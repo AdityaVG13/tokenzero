@@ -24,6 +24,21 @@ fn threshold_lazy_exact() {
 }
 
 #[test]
+fn repeated_put_of_live_ref_does_not_append_payload() {
+    let d = tempdir().unwrap();
+    let p = d.path().join("recovery-cache.json");
+    let mut store = SegmentStore::create_shadow(p, None).unwrap();
+    store.put("same", b"payload", u64::MAX - 1).unwrap();
+    let data_path = d.path().join(&store.manifest().hot.data_file);
+    let first_len = std::fs::metadata(&data_path).unwrap().len();
+
+    store.put("same", b"payload", u64::MAX).unwrap();
+
+    assert_eq!(std::fs::metadata(data_path).unwrap().len(), first_len);
+    assert_eq!(store.manifest().hot.ref_count, 1);
+}
+
+#[test]
 fn segment_store_hashes_raw_non_utf8_bytes() {
     let d = tempdir().unwrap();
     let p = d.path().join("recovery-cache.json");

@@ -8,14 +8,14 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::env;
 use std::ffi::OsString;
 use std::fs::{self, OpenOptions};
-use std::io::{Read, Write};
+use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{
     LazyLock,
     atomic::{AtomicU64, Ordering},
 };
 use std::thread;
-use std::time::{Duration, SystemTime};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use thiserror::Error;
 use tokenzero_core::{ContentType, count_tokens, error_block, id_for, sha256_hex, symbol_block};
 
@@ -3119,4 +3119,85 @@ mod select_content_tests {
             "two\nthree\nfour\n"
         );
     }
+}
+
+
+/// Result of enforcing the legacy recovery sidecar byte budget.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct BlobSidecarPruneReport {
+    pub bytes_before: u64,
+    pub bytes_after: u64,
+    pub removed_files: usize,
+    pub retained_referenced: usize,
+}
+
+/// Remove oldest unreferenced legacy blob sidecars until the budget is met.
+/// Sidecars referenced by the authoritative snapshot or journal are retained.
+pub fn prune_blob_sidecars(
+    cache_path: &Path,
+    max_bytes: u64,
+    dry_run: bool,
+) -> Result<BlobSidecarPruneReport, RecoveryError> {
+    let _lock = PersistLock::acquire(recovery_lock_path(cache_path))?;
+    let config = RecoveryConfig::default();
+    let state = load_state(cache_path, &config)?.unwrap_or_else(|| RecoveryState::empty(&config));
+    let referenced: HashSet<String> = state
+        .blobs
+        .values()
+        .filter_map(|entry| match entry {
+            BlobEntry::Inline(value) => parse_blob_marker(value).map(|(hash, _)| hash.to_string()),
+            BlobEntry::FileRef { .. } => None,
+        })
+        .collect();
+    let directory = blob_sidecar_dir(cache_path);
+    let mut files = Vec::new();
+    let mut bytes_before = 0_u64;
+    let mut retained_referenced = 0_usize;
+    match fs::read_dir(&directory) {
+        Ok(entries) => {
+            for entry in entries {
+                let entry = entry?;
+                let metadata = entry.metadata()?;
+                if !metadata.is_file() {
+                    continue;
+                }
+                let path = entry.path();
+                let Some(hash) = path.file_stem().and_then(|value| value.to_str()) else {
+                    continue;
+                };
+                let len = metadata.len();
+                bytes_before = bytes_before.saturating_add(len);
+                if referenced.contains(hash) {
+                    retained_referenced += 1;
+                } else {
+                    files.push((metadata.modified().unwrap_or(UNIX_EPOCH), path, len));
+                }
+            }
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.into()),
+    }
+    files.sort_by_key(|(modified, _, _)| *modified);
+    let mut bytes_after = bytes_before;
+    let mut removed_files = 0_usize;
+    for (_, path, len) in files {
+        if bytes_after <= max_bytes {
+            break;
+        }
+        if !dry_run {
+            match fs::remove_file(&path) {
+                Ok(()) => {}
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error.into()),
+            }
+        }
+        bytes_after = bytes_after.saturating_sub(len);
+        removed_files += 1;
+    }
+    Ok(BlobSidecarPruneReport {
+        bytes_before,
+        bytes_after,
+        removed_files,
+        retained_referenced,
+    })
 }

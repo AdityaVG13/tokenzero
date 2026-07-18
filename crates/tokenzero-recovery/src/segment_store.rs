@@ -198,9 +198,71 @@ impl SegmentStore {
     pub fn put(&mut self, r: &str, b: &[u8], lease: u64) -> Result<(), SegmentStoreError> {
         let _l = Lock::get(lock_path(&self.cache_path))?;
         self.reload()?;
+        let content_hash = hash(b);
+        let now = now_ms();
+        if let Some(existing) = self.hot_index.entries.get(r).cloned()
+            && existing.lease_deadline_epoch_ms > now
+            && existing.len == b.len() as u64
+            && existing.sha256 == content_hash
+        {
+            if lease > existing.lease_deadline_epoch_ms {
+                self.hot_index
+                    .entries
+                    .get_mut(r)
+                    .expect("entry was just found")
+                    .lease_deadline_epoch_ms = lease;
+                write_index(&self.root, &mut self.manifest.hot, &self.hot_index)?;
+                self.manifest.hot.min_lease_deadline_epoch_ms = self
+                    .hot_index
+                    .entries
+                    .values()
+                    .map(|entry| entry.lease_deadline_epoch_ms)
+                    .min();
+                self.manifest.generation += 1;
+                self.publish()?;
+            }
+            return Ok(());
+        }
+        for index in (0..self.manifest.cold.len()).rev() {
+            let descriptor = self.manifest.cold[index].clone();
+            if !self.cold_indexes.contains_key(&descriptor.generation) {
+                self.cold_indexes
+                    .insert(descriptor.generation, load_index(&self.root, &descriptor)?);
+            }
+            let entries = self
+                .cold_indexes
+                .get_mut(&descriptor.generation)
+                .expect("cold index was just loaded");
+            let Some(existing) = entries.entries.get(r).cloned() else {
+                continue;
+            };
+            if existing.lease_deadline_epoch_ms <= now
+                || existing.len != b.len() as u64
+                || existing.sha256 != content_hash
+            {
+                continue;
+            }
+            if lease > existing.lease_deadline_epoch_ms {
+                entries
+                    .entries
+                    .get_mut(r)
+                    .expect("entry was just found")
+                    .lease_deadline_epoch_ms = lease;
+                let descriptor = &mut self.manifest.cold[index];
+                write_index(&self.root, descriptor, entries)?;
+                descriptor.min_lease_deadline_epoch_ms = entries
+                    .entries
+                    .values()
+                    .map(|entry| entry.lease_deadline_epoch_ms)
+                    .min();
+                self.manifest.generation += 1;
+                self.publish()?;
+            }
+            return Ok(());
+        }
         let m = Meta {
             ref_id: r.into(),
-            sha256: hash(b),
+            sha256: content_hash,
             lease_deadline_epoch_ms: lease,
         };
         let mb = serde_json::to_vec(&m)?;
