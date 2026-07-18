@@ -1241,7 +1241,7 @@ impl RecoveryStore {
         let (short_bare, _) = split_ref_fragment(&short);
         if let Some(full_bare) = canonical_full_blob_ref(split_ref_fragment(ref_id).0) {
             if self.alias_target(short_bare).as_deref() != Some(full_bare.as_str()) {
-                self.store_alias_deferred(short_bare, &full_bare);
+                let _ = self.store_alias(short_bare, &full_bare);
             }
         }
         short

@@ -140,6 +140,26 @@ fn restart_expand_is_byte_exact() {
 }
 
 #[test]
+fn session_visible_alias_expands_after_store_restart() {
+    let dir = tempdir().unwrap();
+    let cache = dir.path().join("cache.json");
+    let text = "durable session alias payload";
+    let alias = {
+        let mut store = RecoveryStore::new(Some(cache.clone()));
+        let stored = store
+            .store_payload(text, ContentType::Code, None, None, None)
+            .unwrap();
+        store.ensure_session_visible_alias(&stored.blob_ref)
+    };
+
+    assert!(alias.starts_with("tz://s/"));
+    let mut restarted = RecoveryStore::new(Some(cache));
+    let expanded = restarted.expand(&alias, Some("raw"), None, None, None, None);
+    assert!(expanded.found, "{}", expanded.reason);
+    assert_eq!(expanded.content, text);
+}
+
+#[test]
 fn ambiguous_alias_persists_when_pending_changes_flush() {
     let dir = tempdir().unwrap();
     let cache = dir.path().join("cache.json");
