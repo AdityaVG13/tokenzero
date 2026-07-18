@@ -445,3 +445,10 @@ fn quiet_injection_never_touches_mutations_or_compounds() {
         assert_not_rewritten(&r);
     }
 }
+
+#[test]
+fn quoted_search_argument_is_byte_identical_after_rewrite() {
+    let command = r"grep -n 'a\|b' input.txt";
+    let result = rewrite_command(command, "safe", true);
+    assert_eq!(result.rewritten_command, command);
+}

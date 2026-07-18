@@ -43,8 +43,8 @@ pub(crate) fn failed_segment(cmd: &str, out: &str, err: &str, code: Option<i32>)
 
 fn is_cd_failure_segment(segment: &str, exit_code: Option<i32>, failure_output: &str) -> bool {
     segment.to_ascii_lowercase().starts_with("cd ")
-        && (exit_code.is_some_and(|code| code != 0)
-            || contains_any(failure_output, "can't cd|no such file|not a directory"))
+        && exit_code.is_some_and(|code| code != 0)
+        && contains_any(failure_output, "can't cd|no such file|not a directory")
 }
 
 fn is_command_not_found_segment(segment: &str, failure_output: &str) -> bool {
@@ -592,4 +592,18 @@ pub(crate) fn is_abnormal_json(value: &serde_json::Value) -> bool {
         &value.to_string().to_ascii_lowercase(),
         "error failed unhealthy pending crash warning",
     )
+}
+
+
+#[cfg(test)]
+mod regression_tests {
+    use super::failed_segment;
+
+    #[test]
+    fn later_and_chain_failure_is_attributed_to_its_segment() {
+        assert_eq!(
+            failed_segment("cd . && false", "", "", Some(1)).as_deref(),
+            Some("false")
+        );
+    }
 }
