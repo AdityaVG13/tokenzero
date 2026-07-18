@@ -419,3 +419,57 @@ fn expand_bad_arg_shape_returns_typed_error() {
     );
 }
 
+#[test]
+fn shell_ref_is_canonical_and_expandable_in_subsequent_execution() {
+    let work = tempfile::tempdir().unwrap();
+    let cache_path = work.path().join("recovery-cache.json");
+    let command = if cfg!(windows) {
+        "powershell -NoProfile -Command Write-Output codemode-durable-shell-ref"
+    } else {
+        "printf 'codemode-durable-shell-ref\\n'"
+    };
+    let mint = execute_codemode_with_options(
+        &format!(
+            "const a = await zero.token.shell({}); return a.stdout_ref;",
+            serde_json::to_string(command).unwrap()
+        ),
+        CodeModeOptions {
+            root: Some(work.path().to_path_buf()),
+            cache_path: Some(cache_path.clone()),
+            ..Default::default()
+        },
+    );
+    assert_eq!(mint.status, CodeModeStatus::Completed, "{:?}", mint.error);
+    let shell_ref = mint.value.as_ref().unwrap().as_str().unwrap();
+    assert!(
+        shell_ref.starts_with("tz://blob/"),
+        "CodeMode must not return session aliases that replay caches can outlive: {shell_ref}"
+    );
+
+    let expanded = execute_codemode_with_options(
+        &format!(
+            "return await zero.token.expand({})",
+            serde_json::to_string(shell_ref).unwrap()
+        ),
+        CodeModeOptions {
+            root: Some(work.path().to_path_buf()),
+            cache_path: Some(cache_path),
+            ..Default::default()
+        },
+    );
+    assert_eq!(
+        expanded.status,
+        CodeModeStatus::Completed,
+        "{:?}",
+        expanded.error
+    );
+    let value = expanded.value.as_ref().unwrap();
+    let text = value
+        .as_str()
+        .or_else(|| value.get("text").and_then(serde_json::Value::as_str));
+    assert_eq!(
+        text,
+        Some("codemode-durable-shell-ref\n"),
+        "subsequent CodeMode execution did not recover exact stdout: {value:?}"
+    );
+}

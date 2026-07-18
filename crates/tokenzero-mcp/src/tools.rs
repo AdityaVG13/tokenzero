@@ -74,7 +74,12 @@ fn dispatch_gated_tool(
     engine.ledger.record_response(canonical, &response);
     engine.record_tool_attribution(canonical, engine_elapsed, persist_started.elapsed());
     let mut response = response;
-    engine.apply_session_visible_ref_aliases(&mut response);
+    // CodeMode results may be replayed by upstream execution caches after
+    // session aliases are pruned. Keep their content-addressed refs canonical;
+    // classic one-shot MCP tools may still use compact session aliases.
+    if canonical != "execute_code" {
+        engine.apply_session_visible_ref_aliases(&mut response);
+    }
     Ok(mcp_tool_response(response))
 }
 

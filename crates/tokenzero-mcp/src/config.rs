@@ -113,7 +113,7 @@ pub const FETCH_ENABLED_ENV: &str = "TOKENZERO_FETCH";
 pub const FETCH_ALLOW_ENV: &str = "TOKENZERO_FETCH_ALLOW";
 pub const FETCH_DENY_ENV: &str = "TOKENZERO_FETCH_DENY";
 pub const SHELL_INLINE_BUDGET_ENV: &str = "TOKENZERO_SHELL_INLINE_BUDGET";
-pub const DEFAULT_SHELL_INLINE_BUDGET: usize = 256;
+pub const DEFAULT_SHELL_INLINE_BUDGET: usize = 2000;
 
 fn matches_env_value(value: &str, accepted: &[&str]) -> bool {
     accepted

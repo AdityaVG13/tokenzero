@@ -397,6 +397,11 @@ impl TokenZeroEngine {
         let stderr_display = captured_stream_text(&result.stderr, &result.stderr_capture, "stderr");
         let streams_truncated = result.stdout_capture.truncated || result.stderr_capture.truncated;
         let display_command = result.command.as_str();
+        let render_command = if display_command.chars().count() > 60 {
+            format!("{}…", display_command.chars().take(59).collect::<String>())
+        } else {
+            display_command.to_string()
+        };
         let output = shell_combined_output(
             display_command,
             result.exit_code,
@@ -413,7 +418,7 @@ impl TokenZeroEngine {
             &command_digest,
         );
         let render = render_shell(ShellRenderInput {
-            command: display_command,
+            command: &render_command,
             stdout: &stdout_display,
             stderr: &stderr_display,
             exit_code: result.exit_code,
@@ -490,13 +495,10 @@ impl TokenZeroEngine {
             && render.command_status.command_success
             && self.config.shell_inline_budget > 0
             && raw_tokens <= self.config.shell_inline_budget;
+        let small_shell_output =
+            refs_complete && !streams_truncated && raw_tokens <= DEFAULT_SHELL_INLINE_BUDGET;
         let visible_text = if inline_shell_output {
-            let trimmed = output.trim_end();
-            if trimmed.is_empty() {
-                format!("combined_ref: {}", combined_stored.blob_ref)
-            } else {
-                format!("{trimmed}\ncombined_ref: {}", combined_stored.blob_ref)
-            }
+            output.trim_end().to_string()
         } else if refs_complete
             && self.config.shell_inline_budget == 0
             && !streams_truncated
@@ -509,9 +511,16 @@ impl TokenZeroEngine {
         } else {
             output.trim_end().to_string()
         };
-        // Every shell ack echoes effective cwd (tokenzero-shell-cwd-default-q73).
-        let visible_text = if visible_text.contains("\ncwd: ") || visible_text.starts_with("cwd: ")
-        {
+        let response_refs = if small_shell_output {
+            vec![shell_ref("combined", &combined_stored, output.len())]
+        } else {
+            refs
+        };
+        // The plan root is already part of the zero_execute request. Surface cwd only
+        // when the command deliberately runs somewhere else.
+        let visible_text = if resolved_cwd == self.config.call_root {
+            visible_text
+        } else if visible_text.contains("\ncwd: ") || visible_text.starts_with("cwd: ") {
             visible_text
         } else if visible_text.starts_with("# shell") {
             let mut lines = visible_text.lines();
@@ -525,16 +534,14 @@ impl TokenZeroEngine {
         } else {
             format!("cwd: {effective_cwd}\n{visible_text}")
         };
-        // Session-scoped short aliases in visible capsules (tokenzero-short-ref-aliases-dle).
-        let visible_text = store.apply_session_visible_aliases_in_text(&visible_text);
-        for record in &mut refs {
-            record.ref_id = store.ensure_session_visible_alias(&record.ref_id);
-        }
-        let stdout_vis = store.ensure_session_visible_alias(&stdout_stored.blob_ref);
-        let stderr_vis = store.ensure_session_visible_alias(&stderr_stored.blob_ref);
-        let combined_vis = store.ensure_session_visible_alias(&combined_stored.blob_ref);
-        let capture_vis = store.ensure_session_visible_alias(&capture_stored.blob_ref);
-        let _ = store.persist_pending();
+        // Shell refs leave the process and may be replayed by an upstream
+        // execution cache long after session aliases have been pruned. Emit
+        // canonical content-addressed refs only: persist_refs above has
+        // synchronously made these durable before this response is built.
+        let stdout_vis = stdout_stored.blob_ref.clone();
+        let stderr_vis = stderr_stored.blob_ref.clone();
+        let combined_vis = combined_stored.blob_ref.clone();
+        let capture_vis = capture_stored.blob_ref.clone();
         let visible_tokens = if inline_shell_output || refs_complete {
             count_tokens(&visible_text)
         } else {
@@ -556,12 +563,14 @@ impl TokenZeroEngine {
                 .parse()
                 .unwrap_or(mode.effective_policy()),
             visible_text,
-            refs,
+            response_refs,
             Accounting {
                 raw_tokens,
                 visible_tokens,
                 recovery_tokens: store.recovery_tokens,
-                exact_ref_tokens: Some({
+                exact_ref_tokens: Some(if small_shell_output {
+                    count_tokens(&combined_vis)
+                } else {
                     let mut total = count_tokens(&combined_vis) + count_tokens(&capture_vis);
                     if !stdout_display.is_empty() {
                         total += count_tokens(&stdout_vis);

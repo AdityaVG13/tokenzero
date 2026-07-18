@@ -110,6 +110,65 @@ fn clean_shell_omits_empty_stderr_ref() {
 }
 
 #[test]
+fn shell_emits_canonical_refs_recoverable_by_a_fresh_engine() {
+    let dir = tempdir().unwrap();
+    let command = if cfg!(windows) {
+        "powershell -NoProfile -Command Write-Output durable-shell-ref"
+    } else {
+        "printf 'durable-shell-ref\\n'"
+    };
+    let response = TokenZeroEngine::new(EngineConfig::for_root(dir.path())).shell(
+        command,
+        None,
+        Some(dir.path()),
+        Mode::Auto,
+        None,
+        false,
+        None,
+        None,
+        None,
+    );
+    let stdout_ref = response.telemetry.as_ref().unwrap()["stdout_ref"]
+        .as_str()
+        .unwrap();
+    assert!(
+        stdout_ref.starts_with("tz://blob/"),
+        "shell response refs must survive session alias pruning: {stdout_ref}"
+    );
+    let expanded = TokenZeroEngine::new(EngineConfig::for_root(dir.path()))
+        .expand(stdout_ref, Some("raw"), None, None, None, None);
+    assert_eq!(expanded.visible.unwrap().text, "durable-shell-ref\n");
+}
+
+#[test]
+fn short_similar_shell_output_stays_verbatim() {
+    let dir = tempdir().unwrap();
+    let command = if cfg!(windows) {
+        "powershell -NoProfile -Command 1..30 | ForEach-Object { 'similar-line-{0:D2}' -f $_ }"
+    } else {
+        "for i in $(seq 1 30); do printf 'similar-line-%02d\\n' \"$i\"; done"
+    };
+    let response = TokenZeroEngine::new(EngineConfig::for_root(dir.path())).shell(
+        command,
+        None,
+        Some(dir.path()),
+        Mode::Auto,
+        None,
+        false,
+        None,
+        None,
+        None,
+    );
+    let visible = response.visible.unwrap().text;
+    for i in 1..=30 {
+        assert!(
+            visible.contains(&format!("similar-line-{i:02}")),
+            "line {i} was compacted out of shell output: {visible}"
+        );
+    }
+}
+
+#[test]
 fn shell_exact_first_stores_stream_refs_and_status_truth() {
     let dir = tempdir().unwrap();
     let engine = TokenZeroEngine::new(EngineConfig::for_root(dir.path()));
@@ -122,10 +181,10 @@ fn shell_exact_first_stores_stream_refs_and_status_truth() {
                 "-Command".to_string(),
                 "[Console]::Out.Write('alpha'); [Console]::Error.Write('beta'); exit 7".to_string(),
             ]),
-            "$ powershell -NoProfile",
+            Some("alpha"),
         )
     } else {
-        ("false | true", None, "$ false | true")
+        ("false | true", None, None)
     };
 
     let response = engine.shell(
@@ -169,7 +228,11 @@ fn shell_exact_first_stores_stream_refs_and_status_truth() {
         "combined ref must be recoverable: {combined_ref}"
     );
     let expanded = engine.expand(&combined_ref, Some("raw"), None, None, None, None);
-    assert!(expanded.visible.unwrap().text.contains(expanded_needle));
+    let expanded_text = expanded.visible.unwrap().text;
+    if let Some(needle) = expanded_needle {
+        assert!(expanded_text.contains(needle));
+    }
+    assert!(!expanded_text.contains(command), "combined output must not echo the command");
 }
 
 #[test]
@@ -252,13 +315,10 @@ fn shell_capture_record_is_compact_json() {
         None,
     );
 
-    let capture_ref = response
-        .refs
-        .iter()
-        .find(|record| record.kind == "capture")
+    let capture_ref = response.telemetry.as_ref().unwrap()["capture_ref"]
+        .as_str()
         .unwrap()
-        .ref_id
-        .clone();
+        .to_string();
     let expanded = engine.expand(&capture_ref, Some("raw"), None, None, None, None);
     let capture_text = expanded.visible.unwrap().text;
     assert!(serde_json::from_str::<Value>(&capture_text).is_ok());
@@ -466,7 +526,7 @@ fn shell_scrubs_inherited_orchestration_env() {
     let stdout_ref = response
         .refs
         .iter()
-        .find(|row| row.kind == "stdout")
+        .find(|row| row.kind == "combined")
         .unwrap()
         .ref_id
         .clone();
@@ -504,7 +564,7 @@ fn shell_scrubs_inherited_orchestration_env() {
     let stdout_ref = response
         .refs
         .iter()
-        .find(|row| row.kind == "stdout")
+        .find(|row| row.kind == "combined")
         .unwrap()
         .ref_id
         .clone();
@@ -517,7 +577,7 @@ fn shell_scrubs_inherited_orchestration_env() {
 }
 
 #[test]
-fn shell_defaults_cwd_to_call_root_and_echoes_it() {
+fn shell_defaults_cwd_to_call_root_without_repeating_it_in_visible_output() {
     let dir = tempdir().unwrap();
     let marker = dir.path().join("cwd-marker.txt");
     std::fs::write(&marker, "here").unwrap();
@@ -554,10 +614,34 @@ fn shell_defaults_cwd_to_call_root_and_echoes_it() {
     assert_eq!(telemetry["cwd_source"], "call_root");
     let visible = response.visible.as_ref().unwrap().text.clone();
     assert!(
-        visible.contains("cwd: ") && visible.contains(cwd),
-        "visible must echo cwd: {visible}"
+        !visible.contains("cwd: "),
+        "plan-root cwd is request context and must not bloat visible output: {visible}"
     );
 }
+#[test]
+fn shell_small_success_has_one_ref_and_compact_visible_envelope() {
+    let dir = tempdir().unwrap();
+    let engine = TokenZeroEngine::new(EngineConfig::for_root(dir.path()));
+    let response = engine.shell(
+        "echo hi",
+        None,
+        None,
+        Mode::Auto,
+        None,
+        false,
+        None,
+        None,
+        None,
+    );
+
+    assert_eq!(response.refs.len(), 1);
+    assert_eq!(response.refs[0].kind, "combined");
+    let visible = &response.visible.as_ref().unwrap().text;
+    assert!(!visible.contains("$ echo hi"));
+    assert!(!visible.contains("cwd: "));
+    assert!(response.accounting.as_ref().unwrap().visible_tokens <= 40, "{visible}");
+}
+
 
 #[test]
 fn shell_explicit_cwd_sets_cwd_source_explicit() {
@@ -581,11 +665,10 @@ fn shell_explicit_cwd_sets_cwd_source_explicit() {
 }
 
 #[test]
-fn shell_visible_refs_use_session_short_aliases_and_expand() {
+fn shell_response_refs_are_canonical_and_expand_in_fresh_engine() {
     let dir = tempdir().unwrap();
-    let engine = TokenZeroEngine::new(EngineConfig::for_root(dir.path()));
-    let response = engine.shell(
-        "echo short-alias-probe",
+    let response = TokenZeroEngine::new(EngineConfig::for_root(dir.path())).shell(
+        "echo canonical-ref-probe",
         None,
         Some(dir.path()),
         Mode::Auto,
@@ -596,15 +679,6 @@ fn shell_visible_refs_use_session_short_aliases_and_expand() {
         None,
     );
     assert_eq!(response.status, "ok");
-    let visible = response.visible.as_ref().unwrap().text.clone();
-    assert!(
-        !visible.contains("tz://blob/")
-            || visible
-                .split("tz://blob/")
-                .skip(1)
-                .all(|rest| rest.chars().take(64).any(|c| !c.is_ascii_hexdigit())),
-        "visible must not embed full 64-hex blob refs: {visible}"
-    );
     let combined = response
         .refs
         .iter()
@@ -613,14 +687,14 @@ fn shell_visible_refs_use_session_short_aliases_and_expand() {
         .ref_id
         .clone();
     assert!(
-        combined.starts_with("tz://s/"),
-        "combined ref must be session short alias, got {combined}"
+        combined.starts_with("tz://blob/"),
+        "combined ref must be canonical, got {combined}"
     );
-    assert_eq!(combined.len(), "tz://s/".len() + 16);
-    let expanded = engine.expand(&combined, Some("raw"), None, None, None, None);
+    let expanded = TokenZeroEngine::new(EngineConfig::for_root(dir.path()))
+        .expand(&combined, Some("raw"), None, None, None, None);
     let text = expanded.visible.as_ref().unwrap().text.clone();
     assert!(
-        text.contains("short-alias-probe"),
-        "expand via short alias must recover bytes: {text}"
+        text.contains("canonical-ref-probe"),
+        "fresh-engine expand must recover bytes: {text}"
     );
 }

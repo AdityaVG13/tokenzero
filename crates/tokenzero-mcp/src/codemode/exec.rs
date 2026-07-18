@@ -1658,17 +1658,6 @@ fn finalize_codemode_result(
         result.telemetry.payload_tokens = payload_tokens;
         result.telemetry.envelope_tokens = count_tokens(&result.visible_ack);
         result.telemetry.ack_tokens = count_tokens(&result.visible_ack);
-        // Session-scoped short aliases before ref_string_tokens accounting.
-        {
-            let mut store = engine.recovery_store();
-            for ref_id in &mut result.refs {
-                *ref_id = store.ensure_session_visible_alias(ref_id);
-            }
-            if let Some(value) = result.value.as_mut() {
-                store.apply_session_visible_aliases_in_value(value);
-            }
-            let _ = store.persist_pending();
-        }
         let ref_strings = result.refs.join(" ");
         result.telemetry.ref_string_tokens = count_tokens(&ref_strings);
         result.telemetry.framing_tokens = result
@@ -3060,11 +3049,18 @@ fn exec_shell(engine: &TokenZeroEngine, work_root: &Path, args: &[Value]) -> OpR
                 if let Some(success) = telem.get("command_success") {
                     value["success"] = success.clone();
                 }
-                if let Some(cwd_val) = telem.get("cwd") {
-                    value["cwd"] = cwd_val.clone();
+                if cwd != work_root {
+                    if let Some(cwd_val) = telem.get("cwd") {
+                        value["cwd"] = cwd_val.clone();
+                    }
+                    if let Some(src) = telem.get("cwd_source") {
+                        value["cwd_source"] = src.clone();
+                    }
                 }
-                if let Some(src) = telem.get("cwd_source") {
-                    value["cwd_source"] = src.clone();
+                if telem.get("stdout_ref").is_some() && value.get("stdout_ref").is_none() {
+                    if let Some(combined) = value.get("combined_ref").cloned() {
+                        value["stdout_ref"] = combined;
+                    }
                 }
             }
         }))

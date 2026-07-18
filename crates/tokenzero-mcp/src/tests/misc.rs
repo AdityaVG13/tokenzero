@@ -176,6 +176,37 @@ fn classic_surface_rejects_tz_execute_code() {
 }
 
 #[test]
+fn codemode_mcp_wire_preserves_canonical_refs() {
+    use tokenzero_core::McpToolSurface;
+    let dir = tempdir().unwrap();
+    let mut config = EngineConfig::for_root(dir.path());
+    config.tool_surface = McpToolSurface::CodeMode;
+    let engine = TokenZeroEngine::new(config);
+    let command = if cfg!(windows) {
+        "powershell -NoProfile -Command Write-Output canonical-wire-ref"
+    } else {
+        "printf 'canonical-wire-ref\\n'"
+    };
+    let plan = format!(
+        "const a = await zero.token.shell({}); return a.stdout_ref;",
+        serde_json::to_string(command).unwrap()
+    );
+    let wire = call_tool(
+        &engine,
+        "tz_execute_code",
+        &json!({ "plan": plan, "root": dir.path().display().to_string() }),
+        None,
+    )
+    .expect("CodeMode shell call");
+    let text = wire.to_string();
+    assert!(text.contains("tz://blob/"), "{text}");
+    assert!(
+        !text.contains("tz://s/"),
+        "CodeMode MCP wire must not expose replay-unsafe session aliases: {text}"
+    );
+}
+
+#[test]
 fn mcp_execute_root_honors_foreign_workspace_and_denies_outside() {
     use tokenzero_core::McpToolSurface;
     let server = tempdir().unwrap();

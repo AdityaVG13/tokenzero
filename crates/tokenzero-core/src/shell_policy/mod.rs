@@ -139,12 +139,24 @@ pub fn classify_command_status(
 }
 
 pub fn shell_combined_output(
-    command: &str,
+    _command: &str,
     exit_code: Option<i32>,
     stdout: &str,
     stderr: &str,
 ) -> String {
-    let code = exit_code.map_or_else(|| "null".to_string(), |value| value.to_string());
-    let stderr_header = if stderr.is_empty() { "" } else { "\nstderr:\n" };
-    format!("$ {command}\nexit_code: {code}\nstdout:\n{stdout}{stderr_header}{stderr}")
+    let mut combined = stdout.to_string();
+    if !stderr.is_empty() {
+        if !combined.is_empty() && !combined.ends_with('\n') {
+            combined.push('\n');
+        }
+        combined.push_str("stderr:\n");
+        combined.push_str(stderr);
+    }
+    if combined.is_empty() && exit_code != Some(0) {
+        combined = format!(
+            "exit_code: {}",
+            exit_code.map_or_else(|| "null".to_string(), |value| value.to_string())
+        );
+    }
+    combined
 }
