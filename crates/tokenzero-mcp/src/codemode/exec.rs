@@ -1,7 +1,7 @@
 //! CodeMode plan executor and TokenZero operation dispatch.
 
-use rquickjs::{Context, Runtime, function::Func};
-use serde_json::{Value, json};
+use rquickjs::{function::Func, Context, Runtime};
+use serde_json::{json, Value};
 use std::cell::RefCell;
 use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
@@ -10,28 +10,28 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, OnceLock};
 use std::time::Duration;
 use tokenzero_core::{
-    Mode, ToolResponse, count_tokens, detect_content_type, pack_to_token_boundary_with_char_limit,
+    count_tokens, detect_content_type, pack_to_token_boundary_with_char_limit, Mode, ToolResponse,
 };
 use tokenzero_filters::{discover, rewrite_command};
 
-use crate::wall::{WallDeadline, with_host_wall_deadline};
+use crate::wall::{with_host_wall_deadline, WallDeadline};
 use crate::workspace::{
     allowed_roots_for_workspace, resolve_recovery_cache_path, tokenzero_work_root,
 };
-use crate::{EditHunk, EngineConfig, TokenZeroEngine, shell_timeout_from_secs};
+use crate::{shell_timeout_from_secs, EditHunk, EngineConfig, TokenZeroEngine};
 
 use super::catalog::{describe_method, search_catalog};
 use super::journal::{
+    atomic_write as journal_atomic_write, begin_plan, classify_method, current_digest,
+    doctor_json as journal_doctor_json, inspect as inspect_journal, open_unresolved, sha256_bytes,
     BeginOutcome, JournalOperation, JournalState, JournalTransaction, OperationClass,
-    OperationSpec, atomic_write as journal_atomic_write, begin_plan, classify_method,
-    current_digest, doctor_json as journal_doctor_json, inspect as inspect_journal,
-    open_unresolved, sha256_bytes,
+    OperationSpec,
 };
-use super::parser::{Expr, MethodCall, Statement, parse_plan, resolve_expr, resolve_return};
+use super::parser::{parse_plan, resolve_expr, resolve_return, Expr, MethodCall, Statement};
 use super::result::{CodeModeOptions, CodeModeResult, CodeModeStatus};
 use super::sandbox::lower_code_plan;
 use super::store::{
-    CodeModeLimits, ExecutionStep, ExecutionStore, execution_id, finalize_result, now_ms,
+    execution_id, finalize_result, now_ms, CodeModeLimits, ExecutionStep, ExecutionStore,
 };
 use crate::expand_params::ExpandParams;
 
@@ -1463,7 +1463,7 @@ fn ref_first_value(
                             refs.push(ref_id.clone());
                         }
                         let preview_budget = budget_tokens.saturating_sub(count_tokens(&ref_id));
-                        return json!({ "ref": ref_id, "preview": first_line_preview(&text, preview_budget) });
+                        return json!({ "ref": ref_id, "preview": compact_value_preview(&text, preview_budget) });
                     }
                 }
                 Value::String(text)
@@ -1521,9 +1521,9 @@ fn unwrap_raw_value(value: Value) -> Value {
     }
 }
 
-fn first_line_preview(text: &str, max_tokens: usize) -> String {
-    let line = text.lines().next().unwrap_or("").trim();
-    pack_to_token_boundary_with_char_limit(line, max_tokens, 32).to_string()
+fn compact_value_preview(text: &str, max_tokens: usize) -> String {
+    let value = crate::render::preview(text);
+    pack_to_token_boundary_with_char_limit(&value, max_tokens, 320).to_string()
 }
 
 fn telemetry_insert(result: &mut CodeModeResult, key: &str, value: Value) {
@@ -2595,12 +2595,11 @@ fn exec_filter_lines(args: &[Value]) -> OpResult {
         1,
         "zero.filter_lines requires a pattern string as second argument",
     )?;
-    catalog(json!(
-        text.lines()
-            .filter(|l| l.contains(pattern))
-            .collect::<Vec<_>>()
-            .join("\n")
-    ))
+    catalog(json!(text
+        .lines()
+        .filter(|l| l.contains(pattern))
+        .collect::<Vec<_>>()
+        .join("\n")))
 }
 fn exec_journal_inspect(engine: &TokenZeroEngine, args: &[Value]) -> OpResult {
     let execution_id = journal_execution_arg(args)?;
@@ -2989,12 +2988,11 @@ fn exec_glob(engine: &TokenZeroEngine, work_root: &Path, args: &[Value]) -> OpRe
 
 fn exec_tree(engine: &TokenZeroEngine, work_root: &Path, args: &[Value]) -> OpResult {
     let roots = resolve_paths_against_work_root(
-        vec![
-            args.first()
-                .and_then(|v| v.as_str())
-                .map(PathBuf::from)
-                .unwrap_or_else(|| work_root.to_path_buf()),
-        ],
+        vec![args
+            .first()
+            .and_then(|v| v.as_str())
+            .map(PathBuf::from)
+            .unwrap_or_else(|| work_root.to_path_buf())],
         work_root,
     );
     let opts = Opts::from_arg(args, 1);
@@ -3338,7 +3336,7 @@ fn exec_pipe(engine: &TokenZeroEngine, work_root: &Path, args: &[Value]) -> OpRe
         if ref_id.is_empty() {
             return Ok(OpOutcome::from_catalog(full).with_prevented_read_bytes(prevented));
         }
-        Ok(OpOutcome::from_catalog(json!({ "ref": ref_id, "preview": first_line_preview(&text, 256usize.saturating_sub(count_tokens(&ref_id))) })).with_prevented_read_bytes(prevented))
+        Ok(OpOutcome::from_catalog(json!({ "ref": ref_id, "preview": compact_value_preview(&text, 256usize.saturating_sub(count_tokens(&ref_id))) })).with_prevented_read_bytes(prevented))
     }
 }
 

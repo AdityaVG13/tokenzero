@@ -315,10 +315,63 @@ impl CodeModeResult {
                 self.telemetry.operations(),
                 self.error
                     .as_ref()
-                    .map(|error| error.message.as_str())
-                    .unwrap_or("unknown")
+                    .map(|error| structured_error_message(&error.message))
+                    .unwrap_or_else(|| "unknown".to_string())
             ),
         }
+    }
+}
+
+fn structured_error_message(message: &str) -> String {
+    let Ok(Value::Object(fields)) = serde_json::from_str::<Value>(message) else {
+        return message.replace(['\n', '\r'], " ");
+    };
+    let Some(error) = fields.get("error") else {
+        return message.replace(['\n', '\r'], " ");
+    };
+    let render = |value: &Value| match value {
+        Value::String(text) => text.replace(['\n', '\r'], " "),
+        Value::Array(values) => values
+            .iter()
+            .map(|item| {
+                item.as_str()
+                    .map_or_else(|| item.to_string(), str::to_string)
+            })
+            .collect::<Vec<_>>()
+            .join(", "),
+        other => other.to_string(),
+    };
+    let mut rendered = render(error);
+    if let Some(hint) = fields.get("hint") {
+        rendered.push_str("; hint: ");
+        rendered.push_str(&render(hint));
+    }
+    for (name, value) in fields {
+        if name == "error" || name == "hint" {
+            continue;
+        }
+        rendered.push_str("; ");
+        rendered.push_str(&name);
+        rendered.push_str(": ");
+        rendered.push_str(&render(&value));
+    }
+    rendered
+}
+
+#[cfg(test)]
+mod structured_error_tests {
+    use super::*;
+
+    #[test]
+    fn structured_json_error_keeps_punctuation_and_lists() {
+        let result = CodeModeResult::error(
+            r#"{"error":"unknown surface: framework","hint":"choose a supported surface","valid_surfaces":["authoring","constructors","ops"]}"#,
+            0,
+        );
+        assert_eq!(
+            result.to_line(),
+            "codemode:error X0 ops=0 unknown surface: framework; hint: choose a supported surface; valid_surfaces: authoring, constructors, ops"
+        );
     }
 }
 

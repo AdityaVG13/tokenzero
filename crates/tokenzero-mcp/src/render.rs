@@ -664,11 +664,41 @@ pub(crate) fn pick_cheaper<'a>(flat: &'a str, compact: &'a str) -> (&'a str, boo
 }
 
 pub(crate) fn preview(text: &str) -> String {
-    let mut value = text.lines().take(8).collect::<Vec<_>>().join("\n");
-    if value.len() > 1000 {
-        value.truncate(1000);
+    const MAX_LINES: usize = 6;
+    const MAX_CHARS: usize = 320;
+
+    let lines = text.lines().collect::<Vec<_>>();
+    let shown = lines.len().min(MAX_LINES);
+    let more = lines.len().saturating_sub(shown);
+    let marker = (more > 0).then(|| format!("\n+{more} more lines"));
+    let marker_chars = marker.as_deref().map_or(0, |value| value.chars().count());
+    let body_chars = MAX_CHARS.saturating_sub(marker_chars);
+    let mut value = lines[..shown].join("\n");
+    if value.chars().count() > body_chars {
+        value = value.chars().take(body_chars).collect();
+    }
+    if let Some(marker) = marker {
+        value.push_str(&marker);
     }
     value
+}
+
+#[cfg(test)]
+mod preview_tests {
+    use super::preview;
+
+    #[test]
+    fn multiline_preview_is_bounded_and_reports_omitted_lines() {
+        let text = (1..=9)
+            .map(|line| format!("line {line}: {}", "x".repeat(80)))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let rendered = preview(&text);
+        assert!(rendered.lines().count() <= 7);
+        assert!(rendered.chars().count() <= 320);
+        assert!(rendered.ends_with("+3 more lines"), "{rendered}");
+        assert!(rendered.contains('\n'));
+    }
 }
 
 pub(crate) fn captured_stream_text(
