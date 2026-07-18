@@ -347,8 +347,58 @@ fn should_run_quickjs(plan: &str) -> bool {
 }
 
 fn quickjs_plan_requests_mutation(plan: &str) -> bool {
-    let scanned = plan.replace(['\'', '"', '`'], " ");
-    scanned.contains(".edit(") || scanned.contains(" edit(")
+    let mut scrubbed = String::with_capacity(plan.len());
+    let mut quote = None;
+    let mut escaped = false;
+
+    for ch in plan.chars() {
+        if let Some(delimiter) = quote {
+            if escaped {
+                escaped = false;
+            } else if ch == '\\' {
+                escaped = true;
+            } else if ch == delimiter {
+                quote = None;
+            }
+            scrubbed.push(if ch == '\n' { '\n' } else { ' ' });
+        } else if matches!(ch, '\'' | '"' | '`') {
+            quote = Some(ch);
+            scrubbed.push(' ');
+        } else {
+            scrubbed.push(ch);
+        }
+    }
+
+    scrubbed.contains(".edit(")
+}
+
+#[cfg(test)]
+mod quickjs_mutation_classifier_tests {
+    use super::*;
+
+    #[test]
+    fn host_shell_output_does_not_exhaust_microtask_budget() {
+        let mut options = CodeModeOptions::default();
+        options.max_microtasks = 32;
+        let result = execute_codemode_with_options(
+            r#"return await zero.token.shell("yes x | head -c 100000");"#,
+            options,
+        );
+        assert!(result.error.is_none(), "{:?}", result.error);
+        assert_eq!(result.status, CodeModeStatus::Completed);
+    }
+
+    #[test]
+    fn ignores_mutation_tokens_inside_strings() {
+        let source = format!(r#"return {{ text: "token only: {}" }};"#, ".edit(");
+        assert!(!quickjs_plan_requests_mutation(&source));
+    }
+
+    #[test]
+    fn detects_real_free_form_mutation_call() {
+        let source = concat!("await zero.", "edit({ path: 'x' })");
+        assert!(quickjs_plan_requests_mutation(source));
+    }
 }
 
 #[derive(Default)]
@@ -538,7 +588,23 @@ fn execute_quickjs_plan(
             if let Some((message, _)) = wall_clock_limit_error(elapsed, limits) {
                 return fail_state(&state.borrow(), message);
             }
-            if drained >= limits.max_microtasks {
+            let host_op_pending = {
+                let jobs = async_rt
+                    .jobs
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner());
+                jobs.values().any(|job| {
+                    job.result
+                        .lock()
+                        .unwrap_or_else(|error| error.into_inner())
+                        .is_none()
+                })
+            };
+            if host_op_pending {
+                // Polling a host-bound operation schedules one Promise continuation per poll.
+                // Those jobs are executor bookkeeping, not plan-authored microtasks.
+                drained = 0;
+            } else if drained >= limits.max_microtasks {
                 return fail_state(
                     &state.borrow(),
                     format!("sandbox: microtask cap exceeded {}", limits.max_microtasks),
@@ -759,11 +825,7 @@ fn poll_js_host_op(
         return json!({"done": true, "result": tz_error_json("unknown async job", "unknown job")})
             .to_string();
     };
-    let finished = job
-        .result
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .clone();
+    let finished = job.result.lock().unwrap_or_else(|e| e.into_inner()).clone();
     let Some(raw) = finished else {
         // Bound JS microtask churn while host threads run (sleep/IO).
         std::thread::sleep(Duration::from_millis(1));
