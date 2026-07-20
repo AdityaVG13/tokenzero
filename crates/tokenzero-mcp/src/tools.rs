@@ -13,27 +13,6 @@ use crate::expand_params::ExpandParams;
 use crate::jsonrpc::JsonRpcErrorData;
 use crate::{EditHunk, ServeOptions, TokenZeroEngine, shell_timeout_from_secs};
 
-/// Domain-kernel dispatch errors (transport-neutral; not JSON-RPC framed).
-#[derive(Debug, Clone)]
-pub(crate) enum DomainDispatchError {
-    UnknownTool(String),
-    InvalidArgs { op: String, message: String },
-    /// CodeMode / FastMCP control tools must not enter the domain kernel.
-    TransportOnly(String),
-}
-
-impl From<DomainDispatchError> for JsonRpcErrorData {
-    fn from(err: DomainDispatchError) -> Self {
-        match err {
-            DomainDispatchError::UnknownTool(name) => JsonRpcErrorData::unknown_tool(&name),
-            DomainDispatchError::InvalidArgs { message, .. } => JsonRpcErrorData::from(message),
-            DomainDispatchError::TransportOnly(name) => JsonRpcErrorData::from(format!(
-                "{name} is transport-control only; not a domain engine op"
-            )),
-        }
-    }
-}
-
 
 macro_rules! gated_tool_entry {
     ($name:ident, $gate:ident) => {
@@ -846,7 +825,7 @@ fn pretty_json_response(
 
 /// Tool dispatch shared by direct calls and `tz_batch` sub-ops.
 ///
-/// Domain operations route through [`crate::dispatcher::dispatch_operation`].
+/// Domain operations route through [`tokenzero_engine::dispatch_operation`].
 /// Transport-control tools (execute_code / codemode search+describe) stay here.
 pub(crate) fn dispatch_tool(
     engine: &TokenZeroEngine,
@@ -865,9 +844,9 @@ pub(crate) fn dispatch_tool(
         ToolKind::CodemodeSearch => exec_codemode_search_tool(name, args),
         ToolKind::CodemodeDescribe => exec_codemode_describe_tool(name, args),
         _ => {
-            let outcome = crate::dispatcher::dispatch_operation(
+            let outcome = tokenzero_engine::dispatch_operation(
                 engine,
-                crate::dispatcher::DispatchSurface::Mcp,
+                tokenzero_engine::DispatchSurface::Mcp,
                 canonical,
                 args,
             );
@@ -890,204 +869,6 @@ pub(crate) fn dispatch_tool(
                 })
         }
     }
-}
-
-/// Domain kernel: execute one canonical domain op without transport framing.
-///
-/// Called only from [`crate::dispatcher`]. Adapters must not reimplement this
-/// match; CodeMode/CLI/raw worker go through `dispatch_operation`.
-pub(crate) fn execute_domain_op(
-    engine: &TokenZeroEngine,
-    op_name: &str,
-    args: &Value,
-) -> Result<ToolResponse, DomainDispatchError> {
-    let canonical = if op_name == "compact" {
-        "compact"
-    } else {
-        // Normalize aliases / CodeMode bindings to catalog names.
-        tokenzero_core::operation_abi::resolve_operation(op_name)
-            .map(|op| op.name)
-            .unwrap_or(op_name)
-    };
-    let bare = canonical.strip_prefix("tz_").unwrap_or(canonical);
-    if matches!(
-        bare,
-        "execute_code" | "codemode_search" | "codemode_describe"
-    ) {
-        return Err(DomainDispatchError::TransportOnly(canonical.to_string()));
-    }
-    let kind = if canonical == "compact" {
-        Some(ToolKind::Ingest)
-    } else {
-        ToolKind::from_canonical(canonical)
-    }
-    .ok_or_else(|| DomainDispatchError::UnknownTool(op_name.to_string()))?;
-
-    let map_args = |message: String| DomainDispatchError::InvalidArgs {
-        op: canonical.to_string(),
-        message,
-    };
-
-    let response = match kind {
-        ToolKind::ExecuteCode | ToolKind::CodemodeSearch | ToolKind::CodemodeDescribe => {
-            return Err(DomainDispatchError::TransportOnly(canonical.to_string()));
-        }
-        ToolKind::Read => engine.read_with_options(
-            &arg_path_list(args, "path").map_err(map_args)?,
-            arg_mode(args),
-            arg_u64(args, "start_line"),
-            arg_u64(args, "end_line"),
-            arg_bool(args, "raw"),
-            arg_u64_or(args, "max_files", 20),
-            arg_u64_or(args, "max_visible_tokens", 4000),
-            arg_serve_options(args),
-        ),
-        search @ (ToolKind::Find | ToolKind::Grep) => {
-            let query = arg_string_any(args, &["query", "pattern"]).map_err(map_args)?;
-            let path = arg_path_list(args, "path").unwrap_or_else(|_| vec![PathBuf::from(".")]);
-            macro_rules! call_search {
-                ($method:ident) => {
-                    engine.$method(
-                        query,
-                        &path,
-                        arg_mode(args),
-                        arg_u64_or(args, "max_files", 20),
-                        arg_u64_or(args, "max_visible_tokens", 4000),
-                        arg_serve_options(args),
-                    )
-                };
-            }
-            match search {
-                ToolKind::Find => call_search!(find_with_options),
-                ToolKind::Grep => call_search!(grep_with_options),
-                _ => unreachable!(),
-            }
-        }
-        ToolKind::Recall => engine.recall(
-            arg_string_any(args, &["query", "pattern"]).map_err(map_args)?,
-            arg_u64_or(args, "max_hits", 50),
-            arg_mode(args),
-            arg_u64_or(args, "max_visible_tokens", 4000),
-        ),
-        ToolKind::Glob => engine.glob(
-            arg_string_any(args, &["pattern", "glob", "query"]).map_err(map_args)?,
-            &arg_paths_or_dot(args),
-            arg_bool(args, "include_hidden"),
-            arg_mode(args),
-            arg_u64_or(args, "max_files", 200),
-            arg_u64_or(args, "max_visible_tokens", 4000),
-        ),
-        ToolKind::Tree => engine.tree(
-            &arg_paths_or_dot(args),
-            arg_u64_or(args, "depth", 2),
-            arg_bool(args, "include_hidden"),
-            arg_mode(args),
-            arg_u64_or(args, "max_files", 200),
-            arg_u64_or(args, "max_visible_tokens", 4000),
-        ),
-        ToolKind::Edit => {
-            let path = arg_string_any(args, &["path"]).map_err(map_args)?;
-            let mut response = engine.edit(
-                Path::new(path),
-                &arg_edit_hunks(args).map_err(map_args)?,
-                arg_bool(args, "create"),
-                arg_bool(args, "dry_run"),
-                arg_mode(args),
-                arg_u64_or(args, "max_visible_tokens", 4000),
-            );
-            if response.status == "error" {
-                if let Some(error) = response.error.as_mut() {
-                    error.message = crate::annotate_write_failure(&error.message, false);
-                }
-            }
-            response
-        }
-        ToolKind::Shell => {
-            let (command, argv) = arg_command(args).map_err(map_args)?;
-            engine.shell(
-                &command,
-                argv,
-                arg_str(args, "cwd").map(Path::new),
-                arg_mode(args),
-                arg_str(args, "rewrite"),
-                arg_bool(args, "no_rewrite"),
-                None,
-                arg_str(args, "stdin"),
-                arg_timeout_any(
-                    args,
-                    &[
-                        "timeout_seconds",
-                        "timeout_secs",
-                        "timeout",
-                        "shell_timeout_seconds",
-                    ],
-                ),
-            )
-        }
-        ToolKind::Ingest => {
-            let text =
-                arg_string_any(args, &["text", "input"]).map_err(map_args)?;
-            let tool = if canonical == "compact" || bare == "compact" {
-                "compact"
-            } else {
-                "mcp-ingest"
-            };
-            engine.ingest(text, ContentType::Unknown, arg_mode(args), tool)
-        }
-        ToolKind::Expand => engine
-            .expand_with_params(ExpandParams::from_tool_args(args).map_err(map_args)?),
-        ToolKind::Mem => engine.mem(),
-        ToolKind::CachePack => engine.cache_pack(arg_str(args, "scope").unwrap_or("agent")),
-        ToolKind::Rewrite => {
-            let (command, _) = arg_command(args).map_err(map_args)?;
-            pretty_json_response(
-                "rewrite",
-                Mode::Hybrid,
-                &rewrite_command(&command, arg_str(args, "mode").unwrap_or("safe"), true),
-                Some(count_tokens(&command)),
-            )
-        }
-        ToolKind::Discover => pretty_json_response("discover", Mode::Hybrid, &discover(), None),
-        ToolKind::ReportToolIssue => {
-            let tool = arg_string_any(args, &["tool", "name", "tool_name", "surface"]).map_err(map_args)?;
-            let summary = arg_string_any(args, &["summary", "message", "title"]).map_err(map_args)?;
-            let detail = arg_string_any(args, &["detail", "body", "repro", "context"])
-                .ok()
-                .or(Some(summary));
-            match crate::record_tool_issue(
-                &engine.config.cache_path,
-                tool,
-                summary,
-                detail,
-                Some(engine.session_id()),
-            ) {
-                Ok(report) => {
-                    pretty_json_response("report_tool_issue", Mode::Structured, &report, None)
-                }
-                Err(message) => ToolResponse::error(
-                    "report_tool_issue",
-                    "not_reportable",
-                    message,
-                    Some("use tool=zero_execute (or tz_execute_code / zero.token.*) for CodeMode failures".into()),
-                ),
-            }
-        }
-        ToolKind::Batch => batch_response(engine, args).map_err(|e| match e {
-            // batch_response returns JsonRpcErrorData today — normalize.
-            other => DomainDispatchError::InvalidArgs {
-                op: "tz_batch".into(),
-                message: other.message_text(),
-            },
-        })?,
-        ToolKind::Fetch => engine.fetch(
-            arg_string_any(args, &["url", "uri"]).map_err(map_args)?,
-            arg_u64(args, "ttl_seconds"),
-            arg_bool(args, "fresh"),
-            arg_mode(args),
-            arg_u64_or(args, "max_visible_tokens", 4000),
-        ),
-    };
-    Ok(response)
 }
 
 pub(crate) fn batch_response(

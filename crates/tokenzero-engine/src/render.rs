@@ -1,6 +1,6 @@
 use crate::*;
 
-pub(crate) struct PersistResult {
+pub struct PersistResult {
     pub(crate) refs_complete: bool,
     pub(crate) error: Option<String>,
 }
@@ -20,11 +20,11 @@ impl TokenZeroEngine {
     }
 }
 
-pub(crate) fn inner_env() -> BTreeMap<String, String> {
+pub fn inner_env() -> BTreeMap<String, String> {
     BTreeMap::from([("TOKENZERO_INNER".to_string(), "1".to_string())])
 }
 
-pub(crate) fn persist_refs(
+pub fn persist_refs(
     store: &mut RecoveryStore,
     refs: &mut Vec<tokenzero_core::RefRecord>,
 ) -> PersistResult {
@@ -42,7 +42,7 @@ pub(crate) fn persist_refs(
     }
 }
 
-pub(crate) fn push_payload_refs(
+pub fn push_payload_refs(
     refs: &mut Vec<tokenzero_core::RefRecord>,
     stored: &StoredPayload,
     bytes: usize,
@@ -54,7 +54,7 @@ pub(crate) fn push_payload_refs(
 impl TokenZeroEngine {
     /// Rewrite full-hash blob refs in a tool response to session-visible
     /// `tz://s/<16hex>` aliases and persist the short→full alias table.
-    pub(crate) fn apply_session_visible_ref_aliases(&self, response: &mut ToolResponse) {
+    pub fn apply_session_visible_ref_aliases(&self, response: &mut ToolResponse) {
         let mut store = self.recovery_store();
         if let Some(visible) = response.visible.as_mut() {
             visible.text = store.apply_session_visible_aliases_in_text(&visible.text);
@@ -81,7 +81,7 @@ impl TokenZeroEngine {
     }
 }
 
-pub(crate) fn served_record(content: &str, stored: &StoredPayload) -> ServedRecord {
+pub fn served_record(content: &str, stored: &StoredPayload) -> ServedRecord {
     ServedRecord {
         content_sha256: sha256_hex(content),
         blob_ref: stored.blob_ref.clone(),
@@ -94,7 +94,7 @@ pub(crate) fn served_record(content: &str, stored: &StoredPayload) -> ServedReco
     }
 }
 
-pub(crate) fn success_response(
+pub fn success_response(
     tool: &str,
     mode: Mode,
     text: String,
@@ -115,7 +115,7 @@ pub(crate) fn success_response(
     )
 }
 
-pub(crate) fn recoverable_capsule(
+pub fn recoverable_capsule(
     rendered: &str,
     fallback: &str,
     raw_tokens: usize,
@@ -137,7 +137,7 @@ pub(crate) fn recoverable_capsule(
     }
 }
 
-pub(crate) fn cache_write_diagnostic(message: impl Into<String>) -> tokenzero_core::Diagnostic {
+pub fn cache_write_diagnostic(message: impl Into<String>) -> tokenzero_core::Diagnostic {
     tokenzero_core::Diagnostic {
         code: "cache_write_failed".to_string(),
         message: message.into(),
@@ -145,7 +145,7 @@ pub(crate) fn cache_write_diagnostic(message: impl Into<String>) -> tokenzero_co
     }
 }
 
-pub(crate) fn failure_response(
+pub fn failure_response(
     tool: &str,
     code: &str,
     message: impl Into<String>,
@@ -154,7 +154,7 @@ pub(crate) fn failure_response(
     ToolResponse::error(tool, code, message.into(), repair.map(str::to_string))
 }
 
-pub(crate) fn path_not_allowed(tool: &str, path: &Path) -> ToolResponse {
+pub fn path_not_allowed(tool: &str, path: &Path) -> ToolResponse {
     failure_response(
         tool,
         "path_not_allowed",
@@ -163,7 +163,7 @@ pub(crate) fn path_not_allowed(tool: &str, path: &Path) -> ToolResponse {
     )
 }
 
-pub(crate) fn expansion_response(result: ExpansionResult, recovery_tokens: usize) -> ToolResponse {
+pub fn expansion_response(result: ExpansionResult, recovery_tokens: usize) -> ToolResponse {
     if result.found {
         return success_response(
             "expand",
@@ -241,18 +241,18 @@ pub(crate) fn expansion_response(result: ExpansionResult, recovery_tokens: usize
     ToolResponse::error("expand", code, message, Some(repair.to_string()))
 }
 
-pub(crate) fn unchanged_since_expand_ack(since_ref: &str) -> String {
+pub fn unchanged_since_expand_ack(since_ref: &str) -> String {
     format!("unchanged since {since_ref}")
 }
 
-pub(crate) fn expand_since_diff_text(since_ref: &str, target_ref: &str, diff_body: &str) -> String {
+pub fn expand_since_diff_text(since_ref: &str, target_ref: &str, diff_body: &str) -> String {
     format!(
         "# expand {target_ref} — diff since {since_ref}
 {diff_body}"
     )
 }
 
-pub(crate) fn common_content_type(content_types: &[ContentType]) -> ContentType {
+pub fn common_content_type(content_types: &[ContentType]) -> ContentType {
     let Some(first) = content_types.first().copied() else {
         return ContentType::Unknown;
     };
@@ -266,7 +266,7 @@ pub(crate) fn common_content_type(content_types: &[ContentType]) -> ContentType 
     }
 }
 
-pub(crate) fn exact_ref_token_count(refs: &[tokenzero_core::RefRecord]) -> usize {
+pub fn exact_ref_token_count(refs: &[tokenzero_core::RefRecord]) -> usize {
     refs.iter().map(|record| count_tokens(&record.ref_id)).sum()
 }
 
@@ -274,7 +274,7 @@ pub(crate) fn exact_ref_token_count(refs: &[tokenzero_core::RefRecord]) -> usize
 /// evict entries under byte/count pressure (including refs stored earlier in
 /// the same call), and a response must never advertise a ref that can no
 /// longer be expanded. Returns true when every ref survived.
-pub(crate) fn prune_dead_refs(
+pub fn prune_dead_refs(
     store: &RecoveryStore,
     refs: &mut Vec<tokenzero_core::RefRecord>,
 ) -> bool {
@@ -283,14 +283,14 @@ pub(crate) fn prune_dead_refs(
     refs.len() == before
 }
 
-pub(crate) struct AppliedEdits {
+pub struct AppliedEdits {
     pub(crate) text: String,
     pub(crate) diff: String,
     pub(crate) lines_added: usize,
     pub(crate) lines_removed: usize,
 }
 
-pub(crate) struct EditFailure {
+pub struct EditFailure {
     pub(crate) code: &'static str,
     pub(crate) message: String,
     pub(crate) repair: Option<String>,
@@ -309,7 +309,7 @@ fn edit_failure(
 }
 
 /// Whole-file hunk for `create=true`: `replace` becomes the file content.
-pub(crate) fn create_file_hunk(hunk: &EditHunk) -> Result<AppliedEdits, EditFailure> {
+pub fn create_file_hunk(hunk: &EditHunk) -> Result<AppliedEdits, EditFailure> {
     if hunk.replace.is_empty() {
         return edit_failure(
             "no_op_hunk",
@@ -330,7 +330,7 @@ pub(crate) fn create_file_hunk(hunk: &EditHunk) -> Result<AppliedEdits, EditFail
     })
 }
 
-pub(crate) fn apply_edit_hunks(
+pub fn apply_edit_hunks(
     original: &str,
     edits: &[EditHunk],
 ) -> Result<AppliedEdits, EditFailure> {
@@ -403,7 +403,7 @@ pub(crate) fn apply_edit_hunks(
 /// Hunk-labelled context-1 before/after rendering of one replacement (a
 /// deliberate lightweight projection, not a strict unified diff). Returns the
 /// section text plus added/removed line counts.
-pub(crate) fn render_edit_region(
+pub fn render_edit_region(
     text: &str,
     offset: usize,
     find: &str,
@@ -472,7 +472,7 @@ pub(crate) fn render_edit_region(
 
 /// Cheap near-miss hint for hunk_not_found: the first file line containing
 /// the find's first non-empty line, clamped for the error message.
-pub(crate) fn closest_line_hint(text: &str, find: &str) -> Option<String> {
+pub fn closest_line_hint(text: &str, find: &str) -> Option<String> {
     let probe = find.lines().find(|line| !line.trim().is_empty())?.trim();
     let (number, line) = text
         .lines()
@@ -490,7 +490,7 @@ pub(crate) fn closest_line_hint(text: &str, find: &str) -> Option<String> {
 
 /// Write via a temp file in the same directory plus rename so a crash or
 /// concurrent reader never observes a half-written file.
-pub(crate) fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+pub fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     let directory = match path.parent() {
         Some(parent) if !parent.as_os_str().is_empty() => parent,
         _ => Path::new("."),
@@ -510,7 +510,7 @@ pub(crate) fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     }
 }
 
-pub(crate) fn degraded_shell_response(
+pub fn degraded_shell_response(
     command: &str,
     mode: Mode,
     output: &str,
@@ -548,7 +548,7 @@ pub(crate) fn degraded_shell_response(
 /// A dedup/diff substitution computed during the read loop but applied only
 /// after the recovery refs it advertises have actually persisted — a note
 /// that replaces content with refs is only safe when the refs resolve.
-pub(crate) enum PendingSubstitution {
+pub enum PendingSubstitution {
     Dedup {
         idx: usize,
         note: String,
@@ -570,7 +570,7 @@ pub(crate) enum PendingSubstitution {
 /// are the freshly minted ones for this serve, so the note alone recovers
 /// the exact bytes even if the client compacted the earlier payload away.
 /// Callers must only emit it after those refs persisted.
-pub(crate) fn unchanged_read_note(path: &Path, text: &str, stored: &StoredPayload) -> String {
+pub fn unchanged_read_note(path: &Path, text: &str, stored: &StoredPayload) -> String {
     format!(
         "unchanged: {} (served earlier this session)\n# {} — {} lines, {} tokens; full bytes: expand {}",
         stored.file_ref,
@@ -583,7 +583,7 @@ pub(crate) fn unchanged_read_note(path: &Path, text: &str, stored: &StoredPayloa
 
 /// Seen-set note for identical re-run find/grep output; the echoed query is
 /// clamped exactly like zero-hit notes.
-pub(crate) fn unchanged_search_note(
+pub fn unchanged_search_note(
     tool: &str,
     query: &str,
     output: &str,
@@ -605,7 +605,7 @@ pub(crate) fn unchanged_search_note(
 /// pruned base, oversized side, tie or larger diff — returns `None` and the
 /// caller serves full. The base expansion is charged as recovery tokens on
 /// `store`, keeping recovery-adjusted savings honest.
-pub(crate) fn diff_since_served(
+pub fn diff_since_served(
     store: &mut RecoveryStore,
     path: &Path,
     text: &str,
@@ -655,7 +655,7 @@ pub(crate) fn diff_since_served(
     ))
 }
 
-pub(crate) fn pick_cheaper<'a>(flat: &'a str, compact: &'a str) -> (&'a str, bool) {
+pub fn pick_cheaper<'a>(flat: &'a str, compact: &'a str) -> (&'a str, bool) {
     if count_tokens(compact) < count_tokens(flat) {
         (compact, true)
     } else {
@@ -663,7 +663,7 @@ pub(crate) fn pick_cheaper<'a>(flat: &'a str, compact: &'a str) -> (&'a str, boo
     }
 }
 
-pub(crate) fn preview(text: &str) -> String {
+pub fn preview(text: &str) -> String {
     const MAX_LINES: usize = 6;
     const MAX_CHARS: usize = 320;
 
@@ -701,7 +701,7 @@ mod preview_tests {
     }
 }
 
-pub(crate) fn captured_stream_text(
+pub fn captured_stream_text(
     text: &str,
     capture: &StreamCapture,
     stream_name: &str,
@@ -753,7 +753,7 @@ pub fn render_text(response: &ToolResponse) -> String {
     out
 }
 
-pub(crate) fn is_compact_shell_response(response: &ToolResponse) -> bool {
+pub fn is_compact_shell_response(response: &ToolResponse) -> bool {
     response.tool == "shell"
         && matches!(
             response

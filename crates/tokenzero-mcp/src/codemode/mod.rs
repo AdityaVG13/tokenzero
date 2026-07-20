@@ -30,7 +30,7 @@ mod e2e_tests;
 
 /// Wire CodeMode containment into the domain shell hooks (idempotent).
 pub(crate) fn install_shell_hooks() {
-    crate::shell_hooks::install(crate::shell_hooks::ShellHooks {
+    tokenzero_engine::shell_hooks::install(tokenzero_engine::shell_hooks::ShellHooks {
         note_child: containment::note_child,
         reserve_background_job: containment::reserve_background_job,
         note_background_child: |id, pid, pgid| containment::note_background_child(id, pid, pgid),

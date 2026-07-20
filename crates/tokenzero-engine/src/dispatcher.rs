@@ -1,19 +1,19 @@
 //! In-process typed domain dispatcher (tokenzero-irx9.2).
 //!
 //! One entry point for FastMCP, CodeMode single-op paths, CLI compatibility,
-//! and the private raw worker. Adapters must not call each other, round-trip
-//! through JSON-RPC, or re-implement auth/root/mutation/ref/telemetry
-//! semantics. Transport framing stays at the edges; this module owns
-//! surface-tagged domain execution and dispatcher-only profiling.
+//! and the private raw worker. Lives in `tokenzero-engine` so transport crates
+//! depend inward; this module must never import MCP JSON-RPC, FastMCP, or
+//! CodeMode sandbox modules.
 
 use crate::TokenZeroEngine;
-use crate::tools::{self, DomainDispatchError};
+use crate::domain::{self, DomainDispatchError};
 use serde_json::{Value, json};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 use tokenzero_core::ToolResponse;
 use tokenzero_core::operation_abi::{
-    DomainError, DomainErrorKind, DomainResult, resolve_operation,
+    DomainError, DomainErrorKind, DomainResult, MigrationStatus, Operation, all_operations,
+    resolve_operation,
 };
 
 /// Which adapter invoked the shared domain dispatcher.
@@ -37,14 +37,11 @@ impl DispatchSurface {
     }
 }
 
-/// Result of one domain dispatch: transport-neutral domain envelope plus the
-/// existing `ToolResponse` product object adapters already understand.
+/// Result of one domain dispatch.
 #[derive(Debug, Clone)]
 pub struct DispatchOutcome {
     pub result: DomainResult,
-    /// Full product response (visible capsule, refs, accounting, tool errors).
     pub tool_response: Option<ToolResponse>,
-    /// When domain dispatch rejected before kernel work (unknown op / bad args).
     pub domain_error: Option<DomainError>,
     pub dispatcher_overhead_ns: u64,
     pub wall_ns: u64,
@@ -63,7 +60,6 @@ impl DispatchOutcome {
                 .unwrap_or(false)
     }
 
-    /// Map a tool-level error response into a DomainError when present.
     pub fn tool_domain_error(&self) -> Option<DomainError> {
         if let Some(err) = &self.domain_error {
             return Some(err.clone());
@@ -80,7 +76,6 @@ pub struct DispatchProfile {
     pub dispatcher_overhead_ns: u64,
     pub wall_ns: u64,
     pub kernel_ns: u64,
-    /// 1=cli 2=mcp 3=codemode 4=raw_worker
     pub surface: u8,
 }
 
@@ -98,7 +93,6 @@ fn record_profile(surface: DispatchSurface, overhead_ns: u64, wall_ns: u64, kern
     DISPATCH_COUNT.fetch_add(1, Ordering::Relaxed);
 }
 
-/// Profiling sample for the most recent dispatch (benchmark subtraction).
 pub fn last_dispatch_profile() -> DispatchProfile {
     DispatchProfile {
         dispatcher_overhead_ns: LAST_DISPATCH_OVERHEAD_NS.load(Ordering::Relaxed),
@@ -108,12 +102,10 @@ pub fn last_dispatch_profile() -> DispatchProfile {
     }
 }
 
-/// Number of domain dispatches since process start (tests / identity checks).
 pub fn dispatch_count() -> u64 {
     DISPATCH_COUNT.load(Ordering::Relaxed)
 }
 
-/// Convert a product `ToolResponse` into the ABI `DomainResult` envelope.
 pub fn tool_response_to_domain(response: &ToolResponse) -> DomainResult {
     let refs: Vec<String> = response.refs.iter().map(|r| r.ref_id.clone()).collect();
     let value = if response.status == "ok" {
@@ -175,7 +167,42 @@ fn domain_dispatch_error_to_domain(err: DomainDispatchError) -> DomainError {
     }
 }
 
-/// Typed domain dispatch by canonical name / alias / CodeMode binding + JSON args.
+/// Registry-metadata classification: domain ops are Canonical/LegacyAlias and
+/// not Resource. Adapter-owned control/composition ops are CodemodeControl or
+/// Resource. No hard-coded name mask.
+pub fn operation_is_domain(op: &Operation) -> bool {
+    match op.migration {
+        MigrationStatus::Canonical | MigrationStatus::LegacyAlias => {
+            op.exposure.resource_uri.is_none()
+        }
+        MigrationStatus::CodemodeControl | MigrationStatus::Resource => false,
+    }
+}
+
+/// Whether `op_name` (canonical or alias) is a domain engine operation.
+pub fn is_domain_operation(op_name: &str) -> bool {
+    resolve_operation(op_name)
+        .map(operation_is_domain)
+        .unwrap_or(false)
+}
+
+/// Canonical domain ops exposed on FastMCP (for exhaustive tests).
+pub fn domain_fastmcp_ops() -> Vec<&'static str> {
+    all_operations()
+        .iter()
+        .filter(|op| op.exposure.fastmcp_tool && operation_is_domain(op))
+        .map(|op| op.name)
+        .collect()
+}
+
+/// Every registry domain operation (exhaustive, metadata-driven).
+pub fn all_domain_operations() -> Vec<&'static Operation> {
+    all_operations()
+        .iter()
+        .filter(|op| operation_is_domain(op))
+        .collect()
+}
+
 pub fn dispatch_operation(
     engine: &TokenZeroEngine,
     surface: DispatchSurface,
@@ -189,7 +216,7 @@ pub fn dispatch_operation(
 
     let pre_kernel = wall_start.elapsed().as_nanos() as u64;
     let kernel_start = Instant::now();
-    let kernel = tools::execute_domain_op(engine, resolved, args);
+    let kernel = domain::execute_domain_op(engine, resolved, args);
     let kernel_ns = kernel_start.elapsed().as_nanos() as u64;
     let wall_ns = wall_start.elapsed().as_nanos() as u64;
     let overhead_ns = wall_ns.saturating_sub(kernel_ns).max(pre_kernel);
@@ -237,7 +264,6 @@ pub fn dispatch_operation(
     }
 }
 
-/// Private raw worker entry: typed op id + args, no transport framing.
 pub fn dispatch_raw_worker(
     engine: &TokenZeroEngine,
     op_name: &str,
@@ -246,33 +272,33 @@ pub fn dispatch_raw_worker(
     dispatch_operation(engine, DispatchSurface::RawWorker, op_name, args)
 }
 
-/// MCP / FastMCP tool name + args → domain dispatch (no MCP framing).
 pub fn dispatch_mcp_tool(
     engine: &TokenZeroEngine,
     name: &str,
     args: &Value,
 ) -> Result<DispatchOutcome, DomainError> {
-    // Transport-only CodeMode control tools are not domain engine ops.
-    let bare = name.strip_prefix("tz_").unwrap_or(name);
-    if matches!(
-        bare,
-        "execute_code" | "codemode_search" | "codemode_describe"
-    ) {
+    let op = resolve_operation(name).ok_or_else(|| {
+        DomainError::new(
+            DomainErrorKind::Validation,
+            format!("unknown mcp tool: {name}"),
+        )
+        .with_op(name)
+    })?;
+    if !operation_is_domain(op) {
         return Err(DomainError::new(
             DomainErrorKind::Validation,
-            format!("{name} is a transport control tool, not a domain dispatch target"),
+            format!("{} is a transport control tool, not a domain dispatch target", op.name),
         )
-        .with_op(name));
+        .with_op(op.name));
     }
     Ok(dispatch_operation(
         engine,
         DispatchSurface::Mcp,
-        name,
+        op.name,
         args,
     ))
 }
 
-/// CodeMode method path → domain dispatch (no sandbox / plan runtime).
 pub fn dispatch_codemode_method(
     engine: &TokenZeroEngine,
     method: &str,
@@ -285,18 +311,7 @@ pub fn dispatch_codemode_method(
         )
         .with_op(method)
     })?;
-    // CodeMode-only control methods stay in the plan executor.
-    if matches!(
-        op.migration,
-        tokenzero_core::operation_abi::MigrationStatus::CodemodeControl
-    ) || op.exposure.resource_uri.is_some()
-        || op.name.starts_with("resource.")
-        || op.name.starts_with("codemode.journal")
-        || op.name == "codemode.limits"
-        || op.name == "tz_execute_code"
-        || op.name == "tz_codemode_search"
-        || op.name == "tz_codemode_describe"
-    {
+    if !operation_is_domain(op) {
         return Err(DomainError::new(
             DomainErrorKind::Validation,
             format!("{} is not a domain engine op", op.name),
@@ -311,60 +326,6 @@ pub fn dispatch_codemode_method(
     ))
 }
 
-/// CLI compatibility path through the shared dispatcher.
-pub fn dispatch_cli(
-    engine: &TokenZeroEngine,
-    op_name: &str,
-    args: &Value,
-) -> DispatchOutcome {
+pub fn dispatch_cli(engine: &TokenZeroEngine, op_name: &str, args: &Value) -> DispatchOutcome {
     dispatch_operation(engine, DispatchSurface::Cli, op_name, args)
-}
-
-/// Whether `op_name` is a domain engine operation (not transport control).
-pub fn is_domain_operation(op_name: &str) -> bool {
-    let Some(op) = resolve_operation(op_name) else {
-        return false;
-    };
-    if op.exposure.resource_uri.is_some() {
-        return false;
-    }
-    if matches!(
-        op.migration,
-        tokenzero_core::operation_abi::MigrationStatus::CodemodeControl
-    ) {
-        return false;
-    }
-    !matches!(
-        op.name,
-        "tz_execute_code"
-            | "tz_codemode_search"
-            | "tz_codemode_describe"
-            | "codemode.limits"
-            | "codemode.journalDoctor"
-            | "codemode.journalInspect"
-            | "codemode.journalResume"
-            | "codemode.journalRollback"
-    ) && !op.name.starts_with("resource.")
-        && !op.name.starts_with("zero.pipe")
-        && !op.name.starts_with("zero.pick")
-        && !op.name.starts_with("zero.filter")
-        && !op.name.starts_with("zero.count")
-        && !op.name.starts_with("zero.first")
-        && !op.name.starts_with("zero.verdict")
-        && !op.name.starts_with("zero.raw")
-        && !op.name.starts_with("zero.assert")
-        && !op.name.starts_with("zero.token.compact")
-        && !op.name.starts_with("zero.token.expandMany")
-        && !op.name.starts_with("zero.token.dedupe")
-        && !op.name.starts_with("zero.compact_max")
-        && op.name != "zero.count_tokens"
-}
-
-/// Canonical FastMCP domain ops that participate in cross-surface identity tests.
-pub fn domain_fastmcp_ops() -> Vec<&'static str> {
-    tokenzero_core::operation_abi::all_operations()
-        .iter()
-        .filter(|op| op.exposure.fastmcp_tool && is_domain_operation(op.name))
-        .map(|op| op.name)
-        .collect()
 }

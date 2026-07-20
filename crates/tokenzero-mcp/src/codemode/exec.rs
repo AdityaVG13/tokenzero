@@ -2356,7 +2356,7 @@ fn dispatch_values(
         "zero.recall" | "recall" | "zero.token.recall" => exec_recall(engine, args),
         "zero.fetch" | "fetch" => exec_fetch(engine, args),
         "zero.cache_pack" | "cache_pack" | "cache-pack" => exec_cache_pack(engine, args),
-        "zero.rewrite" | "rewrite" | "zero.token.rewrite" => exec_rewrite(args),
+        "zero.rewrite" | "rewrite" | "zero.token.rewrite" => exec_rewrite(engine, args),
         "zero.discover" | "discover" => exec_discover(),
         "zero.batch" | "batch" => exec_batch(engine, args),
         "zero.pipe" | "pipe" => exec_pipe(engine, work_root, args),
@@ -2402,7 +2402,7 @@ fn journal_execution_arg(args: &[Value]) -> Result<&str, Box<CodeModeResult>> {
 
 /// Route a domain op through the shared typed dispatcher (tokenzero-irx9.2).
 fn domain_via_dispatcher(engine: &TokenZeroEngine, method: &str, args: &Value) -> OpResult {
-    let outcome = crate::dispatcher::dispatch_codemode_method(engine, method, args).map_err(|err| {
+    let outcome = tokenzero_engine::dispatch_codemode_method(engine, method, args).map_err(|err| {
         operation_error(format!("{}: {}", err.kind.as_str(), err.message))
     })?;
     if let Some(resp) = outcome.tool_response {
@@ -2446,7 +2446,7 @@ fn exec_ingest(engine: &TokenZeroEngine, args: &[Value]) -> OpResult {
     domain_via_dispatcher(engine, "zero.ingest", &payload)
 }
 
-fn exec_rewrite(args: &[Value]) -> OpResult {
+fn exec_rewrite(engine: &TokenZeroEngine, args: &[Value]) -> OpResult {
     let command = require_str_arg(
         args,
         0,
@@ -2454,12 +2454,11 @@ fn exec_rewrite(args: &[Value]) -> OpResult {
     )?;
     let opts = Opts::from_arg(args, 1);
     let mode = opts.str("mode").unwrap_or("safe");
-    // rewrite has no engine state; still go through dispatcher with a throwaway root engine path
-    // via the domain kernel (tz_rewrite does not need engine session). Callers without engine
-    // use catalog path only — keep local for pure filter rewrite when engine absent.
-    let value = serde_json::to_value(rewrite_command(command, mode, true))
-        .map_err(|err| operation_error(format!("zero.rewrite failed: {err}")))?;
-    catalog(value)
+    domain_via_dispatcher(
+        engine,
+        "zero.rewrite",
+        &json!({"command": command, "mode": mode}),
+    )
 }
 
 fn exec_cache_pack(engine: &TokenZeroEngine, args: &[Value]) -> OpResult {
@@ -2964,7 +2963,7 @@ fn exec_read(engine: &TokenZeroEngine, work_root: &Path, args: &[Value]) -> OpRe
     if let Some(e) = end_line {
         payload["end_line"] = json!(e);
     }
-    let outcome = crate::dispatcher::dispatch_codemode_method(engine, "zero.read", &payload)
+    let outcome = tokenzero_engine::dispatch_codemode_method(engine, "zero.read", &payload)
         .map_err(|err| operation_error(format!("{}: {}", err.kind.as_str(), err.message)))?;
     if let Some(resp) = outcome.tool_response {
         if resp.status == "error" {
@@ -3018,7 +3017,7 @@ fn exec_find(engine: &TokenZeroEngine, work_root: &Path, args: &[Value], exact: 
         "max_files": max_files,
         "max_visible_tokens": max_visible,
     });
-    let outcome = crate::dispatcher::dispatch_codemode_method(engine, method, &payload)
+    let outcome = tokenzero_engine::dispatch_codemode_method(engine, method, &payload)
         .map_err(|err| operation_error(format!("{}: {}", err.kind.as_str(), err.message)))?;
     if let Some(resp) = outcome.tool_response {
         return tool_aborting_wall(resp);

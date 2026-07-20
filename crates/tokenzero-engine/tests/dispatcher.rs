@@ -4,7 +4,7 @@ use serde_json::{Value, json};
 use std::fs;
 use std::path::{Path, PathBuf};
 use tokenzero_core::operation_abi::{DomainErrorKind, all_operations};
-use tokenzero_mcp::{
+use tokenzero_engine::{all_domain_operations, operation_is_domain, 
     DispatchSurface, EngineConfig, TokenZeroEngine, dispatch_cli, dispatch_codemode_method,
     dispatch_count, dispatch_mcp_tool, dispatch_operation, dispatch_raw_worker, domain_fastmcp_ops,
     is_domain_operation, last_dispatch_profile,
@@ -50,35 +50,50 @@ fn minimal_args(op: &str) -> Value {
 }
 
 fn domain_sources() -> Vec<PathBuf> {
-    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src");
-    let names = [
-        "dispatcher.rs",
-        "shell_hooks.rs",
-        "engine_common.rs",
-        "engine_edit.rs",
-        "engine_expand.rs",
-        "engine_fetch.rs",
-        "engine_find.rs",
-        "engine_ingest.rs",
-        "engine_misc.rs",
-        "engine_read.rs",
-        "engine_search.rs",
-        "engine_session.rs",
-        "engine_shell.rs",
-    ];
-    names.into_iter().map(|n| root.join(n)).collect()
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../tokenzero-mcp/src");
+    let mut out = Vec::new();
+    fn walk(dir: &Path, out: &mut Vec<PathBuf>) {
+        for entry in fs::read_dir(dir).unwrap() {
+            let entry = entry.unwrap();
+            let path = entry.path();
+            if path.is_dir() {
+                walk(&path, out);
+            } else if path.extension().and_then(|e| e.to_str()) == Some("rs") {
+                out.push(path);
+            }
+        }
+    }
+    walk(&root, &mut out);
+    out
 }
 
+
 #[test]
-fn domain_modules_do_not_import_surface_layers() {
-    // Code-level dependency rule: domain engine modules must not import
-    // FastMCP, MCP JSON-RPC, or CodeMode sandbox modules.
-    // Exact module/crate imports only (avoid false positives on names like
-    // domain_fastmcp_ops / fastmcp_tool exposure flags).
+fn engine_crate_does_not_depend_on_surface_layers() {
+    // Cargo-level dependency direction: tokenzero-engine must not link FastMCP,
+    // rquickjs/CodeMode sandbox, or MCP transport crates.
+    let manifest = fs::read_to_string(
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml"),
+    )
+    .unwrap();
+    for forbidden in [
+        "fastmcp-rust",
+        "fastmcp_rust",
+        "rquickjs",
+        "tokenzero-mcp",
+    ] {
+        assert!(
+            !manifest.contains(forbidden),
+            "tokenzero-engine Cargo.toml must not depend on {forbidden}"
+        );
+    }
+
+    // Source-level: no imports of surface modules.
     let forbidden_substrings = [
         "crate::codemode",
         "crate::fastmcp_mode",
         "crate::jsonrpc",
+        "tokenzero_mcp::",
         "fastmcp_rust::",
         "use fastmcp",
         "use rquickjs",
@@ -101,14 +116,17 @@ fn domain_modules_do_not_import_surface_layers() {
     }
     assert!(
         violations.is_empty(),
-        "domain modules import forbidden surface layers:\n{}",
-        violations.join("\n")
+        "engine sources import forbidden surface layers:
+{}",
+        violations.join("
+")
     );
 }
 
+
 #[test]
 fn no_fastmcp_codemode_cross_adapter_calls() {
-    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src");
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../tokenzero-mcp/src");
     let fastmcp = fs::read_to_string(root.join("fastmcp_mode.rs")).unwrap();
     assert!(
         !fastmcp.contains("crate::codemode") && !fastmcp.contains("execute_codemode"),
@@ -154,7 +172,7 @@ fn one_operation_same_dispatcher_from_all_adapters() {
     assert!(cli_out.is_ok(), "cli: {:?}", cli_out.tool_domain_error());
     assert!(cm_out.is_ok(), "cm: {:?}", cm_out.tool_domain_error());
 
-    let normalize = |out: &tokenzero_mcp::DispatchOutcome| {
+    let normalize = |out: &tokenzero_engine::DispatchOutcome| {
         let resp = out.tool_response.as_ref().expect("tool response");
         (
             resp.status.clone(),
@@ -211,7 +229,7 @@ fn differential_registry_domain_ops_raw_mcp_cli() {
         let mcp = dispatch_mcp_tool(&mcp_e, op, &args).expect("mcp dispatch");
         let cli = dispatch_cli(&cli_e, op, &args);
 
-        let norm = |o: &tokenzero_mcp::DispatchOutcome| {
+        let norm = |o: &tokenzero_engine::DispatchOutcome| {
             (
                 o.op.clone(),
                 o.is_ok(),
@@ -302,7 +320,7 @@ fn differential_policy_failure_agrees_across_surfaces() {
         assert!(err.is_some(), "expected domain/tool error");
     }
 
-    let code = |o: &tokenzero_mcp::DispatchOutcome| {
+    let code = |o: &tokenzero_engine::DispatchOutcome| {
         o.tool_response
             .as_ref()
             .and_then(|r| r.error.as_ref())
@@ -353,6 +371,54 @@ fn every_fastmcp_domain_op_is_dispatchable() {
                 domain_fastmcp_ops().contains(&op.name),
                 "missing from domain_fastmcp_ops: {}",
                 op.name
+            );
+        }
+    }
+}
+fn registry_domain_ops_are_metadata_driven_not_masked() {
+    // Every Canonical/LegacyAlias non-resource op must be classified domain;
+    // every CodemodeControl/Resource must not. No hard-coded name denylist.
+    use tokenzero_core::operation_abi::{MigrationStatus, all_operations};
+    // operation_is_domain is on engine dispatcher re-export
+    use tokenzero_engine::operation_is_domain as eng_is_domain;
+    for op in all_operations() {
+        let expected = matches!(
+            op.migration,
+            MigrationStatus::Canonical | MigrationStatus::LegacyAlias
+        ) && op.exposure.resource_uri.is_none();
+        assert_eq!(
+            eng_is_domain(op),
+            expected,
+            "classification drift for {}",
+            op.name
+        );
+        assert_eq!(
+            tokenzero_engine::is_domain_operation(op.name),
+            expected,
+            "name resolve drift for {}",
+            op.name
+        );
+    }
+}
+
+
+fn every_registry_domain_op_is_kernel_dispatchable() {
+    use tokenzero_engine::all_domain_operations;
+    let root = tempfile::tempdir().unwrap();
+    fs::write(root.path().join("note.txt"), b"dispatcher-identity").unwrap();
+    let engine = engine_for(root.path());
+    for op in all_domain_operations() {
+        // Minimal args; kernel may return tool-level errors but must not be TransportOnly.
+        let args = minimal_args(op.name);
+        let args = rebase_paths(args, root.path());
+        let outcome = dispatch_raw_worker(&engine, op.name, &args);
+        if let Some(err) = &outcome.domain_error {
+            assert_ne!(
+                err.message.contains("transport-control only"),
+                true,
+                "domain op {} rejected as transport-only: {}",
+                op.name,
+                err.message
             );
         }
     }

@@ -62,7 +62,7 @@ pub(crate) enum ToolClass {
 
 /// Whether a `tools/call` name is even a candidate on this surface.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum CallAdmission {
+pub enum CallAdmission {
     /// Surface does not own this tool (e.g. Classic calling `tz_execute_code`).
     UnknownTool,
     /// Proceed to crash-only [`SurfaceHealth::allow_tool_call`].
@@ -71,7 +71,7 @@ pub(crate) enum CallAdmission {
 
 /// How strictly to gate a tools/call.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum GateMode {
+pub enum GateMode {
     /// JSON-RPC: membership + crash-only health.
     Strict,
     /// FastMCP: health only. Registration already filters by surface; the call
@@ -82,12 +82,12 @@ pub(crate) enum GateMode {
 
 /// Refusal from [`SurfaceHealth::gate_tools_call`].
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum GateRefusal {
+pub enum GateRefusal {
     UnknownTool,
     Policy(String),
 }
 
-pub(crate) fn tool_class(tool_name: &str) -> ToolClass {
+pub fn tool_class(tool_name: &str) -> ToolClass {
     let canonical = strip_tool_alias(tool_name);
     match canonical {
         "execute_code" | "codemode_search" | "codemode_describe" | "codemode"
@@ -119,7 +119,7 @@ fn is_codemode_exclusive(tool_name: &str) -> bool {
 ///
 /// CodeMode is primary-only for the whole session (`tools.listChanged=false`).
 /// Recovery shims stay hidden; expand fallback is engine-internal.
-pub(crate) fn tool_listed_on_surface(
+pub fn tool_listed_on_surface(
     surface: McpToolSurface,
     tool_name: &str,
     _recovery_unlocked: bool,
@@ -131,12 +131,12 @@ pub(crate) fn tool_listed_on_surface(
 }
 
 /// Static membership used by one-time FastMCP registration.
-pub(crate) fn surface_includes(surface: McpToolSurface, tool_name: &str) -> bool {
+pub fn surface_includes(surface: McpToolSurface, tool_name: &str) -> bool {
     tool_listed_on_surface(surface, tool_name, false)
 }
 
 /// Admit a `tools/call` before the crash-only health gate.
-pub(crate) fn admit_tools_call(surface: McpToolSurface, tool_name: &str) -> CallAdmission {
+pub fn admit_tools_call(surface: McpToolSurface, tool_name: &str) -> CallAdmission {
     match surface {
         McpToolSurface::Classic if is_codemode_exclusive(tool_name) => CallAdmission::UnknownTool,
         // CodeMode: only Primary tools are callable. Per-op / recovery names
@@ -304,7 +304,7 @@ impl SurfaceHealth {
     }
 
     /// Single entry for tools/call: optional membership admit, then crash-only health.
-    pub(crate) fn gate_tools_call(
+    pub fn gate_tools_call(
         &self,
         surface: McpToolSurface,
         tool_name: &str,
