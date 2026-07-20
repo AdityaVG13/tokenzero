@@ -1,6 +1,6 @@
 SHELL := /bin/bash
 
-.PHONY: test readme-command-audit rust-test rust-verify rust-verify-report rust-release-build rust-proof package-check release-check cli-smoke doctor mcp-smoke mcp-soak shell-matrix install-smoke package-audit
+.PHONY: test readme-command-audit rust-test rust-verify rust-verify-report rust-release-build rust-proof package-check release-check irx9-gate cli-smoke doctor mcp-smoke mcp-soak shell-matrix install-smoke package-audit
 
 test: readme-command-audit rust-test
 
@@ -25,6 +25,10 @@ rust-proof: rust-verify rust-release-build mcp-smoke mcp-soak shell-matrix insta
 package-check: rust-release-build package-audit
 
 release-check: rust-proof
+
+# Focused irx9 parity/packaging/dispatcher/bench gates (no workspace-wide cargo).
+irx9-gate:
+	@scripts/irx9_release_gate.sh
 
 cli-smoke:
 	@target/debug/tokenzero read README.md --json >/dev/null
