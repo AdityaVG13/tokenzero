@@ -24,6 +24,11 @@ fn main() {
 
     let args: Vec<String> = env::args().collect();
 
+    // Private raw worker (tokenzero-irx9.4): OMP/router composition path.
+    if let Some(code) = tokenzero_mcp::maybe_run_raw_worker_from_args(&args) {
+        process::exit(code);
+    }
+
     if args.iter().any(|a| a == "help" || a == "--help" || a == "-h") {
         let id = package_identity(SURFACE);
         println!(
@@ -31,6 +36,7 @@ fn main() {
              semantic_contract_digest: {}\n\
              selection: legacy MCP-only clients install this package\n\
              usage: tokenzero-codemode | tokenzero-codemode doctor | tokenzero-codemode sbom | tokenzero-codemode install|uninstall\n\
+             usage: tokenzero-codemode raw-worker [--handshake|--once JSON|--root DIR]  # OMP private worker\n\
              identity: {}",
             semantic_contract_digest(),
             id

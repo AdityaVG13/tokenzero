@@ -141,6 +141,13 @@ $(Commands::$sv($sa) => $special,)*
 }
 
 fn main() -> Result<()> {
+    // Private raw worker (tokenzero-irx9.4) on the selected surface artifact / shim.
+    {
+        let argv: Vec<String> = std::env::args().collect();
+        if let Some(code) = tokenzero_mcp::maybe_run_raw_worker_from_args(&argv) {
+            std::process::exit(code);
+        }
+    }
     let cli = Cli::parse_from(normalize_agent_invocation_args(std::env::args_os()));
     let Some(command) = cli.command else {
         Cli::command().print_help()?;

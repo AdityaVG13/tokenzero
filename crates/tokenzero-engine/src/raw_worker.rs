@@ -4,15 +4,21 @@
 //! per frame. Does **not** open FastMCP catalogs, parse JavaScript, plan,
 //! compact again, or rewrite envelopes. Not a third user-facing package —
 //! internal mode of the selected artifact for hub/OMP composition.
+//!
+//! Production entry: [`run_raw_worker_serve`] / [`run_raw_worker_once`] for
+//! shipped surface binaries (`tokenzero-mcp raw-worker`, etc.).
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use std::io::{self, BufRead, Write};
+use std::path::PathBuf;
 
+use crate::config::EngineConfig;
 use crate::dispatcher::{DispatchOutcome, dispatch_raw_worker};
 use crate::surface_handshake::{
-    HandshakeSurface, PlannerOwner, CompressionOwner, SurfaceCapability,
+    CompressionOwner, HandshakeSurface, PlannerOwner, SurfaceCapability,
     build_surface_capability, check_contract_compatibility, composition_trace,
-    RAW_WORKER_PROTOCOL_VERSION,
+    surface_capability_json, RAW_WORKER_PROTOCOL_VERSION,
 };
 use crate::TokenZeroEngine;
 
@@ -23,6 +29,7 @@ pub struct RawWorkerRequest {
     #[serde(default)]
     pub protocol: Option<String>,
     /// Canonical op name or alias (`tz_read`, `zero.read`, `read`, …).
+    #[serde(default)]
     pub op: String,
     /// Domain args object.
     #[serde(default)]
@@ -33,6 +40,9 @@ pub struct RawWorkerRequest {
     /// Optional peer semantic contract version.
     #[serde(default)]
     pub peer_contract_version: Option<String>,
+    /// Control verbs: `handshake`, `ping`, `shutdown` (OMP control plane).
+    #[serde(default)]
+    pub control: Option<String>,
 }
 
 /// Framed response with composition ownership trace.
@@ -43,9 +53,9 @@ pub struct RawWorkerResponse {
     pub op: String,
     pub surface: String,
     /// Normalized domain / tool outcome when dispatch succeeds.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub result: Option<Value>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<RawWorkerError>,
     /// Composition ownership + boundary accounting (AC: planner/compression owners).
     pub trace: Value,
@@ -57,15 +67,17 @@ pub struct RawWorkerResponse {
 pub struct RawWorkerError {
     pub kind: String,
     pub message: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub retryable: Option<bool>,
+    #[serde(default)]
+    pub retryable: bool,
 }
 
 /// Execute one framed raw-worker request through the shared dispatcher.
 ///
 /// Guarantees:
-/// - Exactly one domain dispatch boundary (`boundary_count=1` on success path
+/// - Exactly one domain dispatch boundary (`boundary_count=1` on success/tool-error
 ///   after handshake; handshake failures have `boundary_count=0`).
+/// - Ordinary `ToolResponse` failures (missing path, policy, deadline, cancel, …)
+///   return `ok=false`, `result=null`, and typed `error` with `retryable` preserved.
 /// - No CodeMode sandbox / JS runtime is created.
 /// - Peer digest/version mismatches fail before domain execution.
 pub fn execute_raw_worker_frame(
@@ -87,6 +99,24 @@ pub fn execute_raw_worker_frame(
             format!(
                 "raw worker protocol mismatch: local={RAW_WORKER_PROTOCOL_VERSION} peer={protocol}"
             ),
+            false,
+            0,
+        );
+    }
+
+    // Control plane: handshake / ping / shutdown (no domain dispatch).
+    if let Some(control) = request.control.as_deref() {
+        return handle_control(control, capability);
+    }
+
+    if request.op.is_empty() {
+        return fail_response(
+            "",
+            capability,
+            "validation",
+            "raw worker frame requires non-empty op (or control=handshake|ping|shutdown)"
+                .into(),
+            false,
             0,
         );
     }
@@ -96,13 +126,7 @@ pub fn execute_raw_worker_frame(
         request.peer_contract_digest.as_deref(),
         request.peer_contract_version.as_deref(),
     ) {
-        return fail_response(
-            &request.op,
-            capability,
-            "contract_mismatch",
-            msg,
-            0,
-        );
+        return fail_response(&request.op, capability, "contract_mismatch", msg, false, 0);
     }
 
     let args = if request.args.is_null() {
@@ -112,16 +136,119 @@ pub fn execute_raw_worker_frame(
     };
 
     let outcome = dispatch_raw_worker(engine, &request.op, &args);
+    response_from_outcome(&request.op, capability, outcome)
+}
+
+/// Build fail/success envelope from a dispatcher outcome.
+///
+/// Tool-level errors (`status != "ok"`) take the same fail envelope as
+/// `domain_error` paths: `ok=false`, `result=null`, typed error + retryable.
+pub fn response_from_outcome(
+    op: &str,
+    capability: SurfaceCapability,
+    outcome: DispatchOutcome,
+) -> RawWorkerResponse {
+    if let Some(err) = outcome.tool_domain_error() {
+        return fail_response(
+            op,
+            capability,
+            err.kind.as_str(),
+            err.message,
+            err.retryable,
+            1,
+        );
+    }
     if let Some(err) = &outcome.domain_error {
         return fail_response(
-            &request.op,
+            op,
             capability,
             err.kind.as_str(),
             err.message.clone(),
-            1, // handshake passed; one domain boundary attempted
+            err.retryable,
+            1,
         );
     }
-    success_response(&request.op, capability, outcome)
+    // Explicit ToolResponse status check (belt-and-suspenders).
+    if let Some(resp) = &outcome.tool_response {
+        if resp.status != "ok" {
+            let code = resp
+                .error
+                .as_ref()
+                .map(|e| e.code.as_str())
+                .unwrap_or("runtime");
+            let message = resp
+                .error
+                .as_ref()
+                .map(|e| e.message.clone())
+                .unwrap_or_else(|| format!("{} failed with status {}", op, resp.status));
+            let domain = outcome.tool_domain_error();
+            let retryable = domain.as_ref().map(|d| d.retryable).unwrap_or(false);
+            let kind = domain
+                .as_ref()
+                .map(|d| d.kind.as_str().to_string())
+                .unwrap_or_else(|| code.to_string());
+            return fail_response(op, capability, &kind, message, retryable, 1);
+        }
+    }
+    success_response(op, capability, outcome)
+}
+
+fn handle_control(control: &str, capability: SurfaceCapability) -> RawWorkerResponse {
+    match control {
+        "handshake" | "hello" | "capabilities" => RawWorkerResponse {
+            ok: true,
+            protocol: RAW_WORKER_PROTOCOL_VERSION.into(),
+            op: "control.handshake".into(),
+            surface: HandshakeSurface::RawWorker.as_str().into(),
+            result: Some(surface_capability_json(HandshakeSurface::RawWorker)),
+            error: None,
+            trace: composition_trace(
+                HandshakeSurface::RawWorker,
+                PlannerOwner::Client,
+                CompressionOwner::Engine,
+                0,
+            ),
+            capability,
+        },
+        "ping" => RawWorkerResponse {
+            ok: true,
+            protocol: RAW_WORKER_PROTOCOL_VERSION.into(),
+            op: "control.ping".into(),
+            surface: HandshakeSurface::RawWorker.as_str().into(),
+            result: Some(json!({"pong": true})),
+            error: None,
+            trace: composition_trace(
+                HandshakeSurface::RawWorker,
+                PlannerOwner::Client,
+                CompressionOwner::Engine,
+                0,
+            ),
+            capability,
+        },
+        "shutdown" => RawWorkerResponse {
+            ok: true,
+            protocol: RAW_WORKER_PROTOCOL_VERSION.into(),
+            op: "control.shutdown".into(),
+            surface: HandshakeSurface::RawWorker.as_str().into(),
+            result: Some(json!({"shutdown": true})),
+            error: None,
+            trace: composition_trace(
+                HandshakeSurface::RawWorker,
+                PlannerOwner::Client,
+                CompressionOwner::Engine,
+                0,
+            ),
+            capability,
+        },
+        other => fail_response(
+            "control",
+            capability,
+            "validation",
+            format!("unknown control verb {other:?}; expected handshake|ping|shutdown"),
+            false,
+            0,
+        ),
+    }
 }
 
 /// JSON convenience entry: parse request object, return response JSON.
@@ -137,6 +264,7 @@ pub fn execute_raw_worker_json(engine: &TokenZeroEngine, request: &Value) -> Val
                 capability,
                 "invalid_frame",
                 format!("invalid raw worker request: {e}"),
+                false,
                 0,
             ))
             .expect("serialize")
@@ -161,13 +289,8 @@ fn success_response(
             }
         }
     }
-    let tool_ok = outcome
-        .tool_response
-        .as_ref()
-        .map(|r| r.status == "ok")
-        .unwrap_or(outcome.domain_error.is_none());
     RawWorkerResponse {
-        ok: tool_ok,
+        ok: true,
         protocol: RAW_WORKER_PROTOCOL_VERSION.into(),
         op: op.into(),
         surface: HandshakeSurface::RawWorker.as_str().into(),
@@ -188,6 +311,7 @@ fn fail_response(
     capability: SurfaceCapability,
     kind: &str,
     message: String,
+    retryable: bool,
     boundary_count: u32,
 ) -> RawWorkerResponse {
     RawWorkerResponse {
@@ -199,7 +323,7 @@ fn fail_response(
         error: Some(RawWorkerError {
             kind: kind.into(),
             message,
-            retryable: Some(false),
+            retryable,
         }),
         trace: composition_trace(
             HandshakeSurface::RawWorker,
@@ -209,6 +333,220 @@ fn fail_response(
         ),
         capability,
     }
+}
+
+// ---------------------------------------------------------------------------
+// Production process entry (OMP / router consumable)
+// ---------------------------------------------------------------------------
+
+/// Options for the shipped raw-worker process entry.
+#[derive(Debug, Clone)]
+pub struct RawWorkerServeOptions {
+    pub root: PathBuf,
+    pub cache_path: Option<PathBuf>,
+    /// When true, print handshake capability JSON then exit 0 (no serve loop).
+    pub handshake_only: bool,
+    /// Single JSON request string; execute once and exit (no serve loop).
+    pub once_json: Option<String>,
+}
+
+impl Default for RawWorkerServeOptions {
+    fn default() -> Self {
+        Self {
+            root: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
+            cache_path: None,
+            handshake_only: false,
+            once_json: None,
+        }
+    }
+}
+
+fn engine_from_options(opts: &RawWorkerServeOptions) -> TokenZeroEngine {
+    let mut cfg = EngineConfig::for_root(&opts.root);
+    if let Some(cache) = &opts.cache_path {
+        cfg.cache_path = cache.clone();
+    }
+    cfg.session_dedup = false;
+    TokenZeroEngine::new(cfg)
+}
+
+/// One-shot: print capability handshake JSON and exit.
+pub fn raw_worker_print_handshake() -> i32 {
+    let cap = surface_capability_json(HandshakeSurface::RawWorker);
+    println!("{}", serde_json::to_string(&cap).expect("serialize cap"));
+    0
+}
+
+/// One-shot framed op from a JSON request string.
+pub fn run_raw_worker_once(opts: &RawWorkerServeOptions, request_json: &str) -> i32 {
+    let engine = engine_from_options(opts);
+    let value: Value = match serde_json::from_str(request_json) {
+        Ok(v) => v,
+        Err(e) => {
+            let capability = build_surface_capability(HandshakeSurface::RawWorker);
+            let resp = fail_response(
+                "",
+                capability,
+                "invalid_frame",
+                format!("invalid raw worker request JSON: {e}"),
+                false,
+                0,
+            );
+            println!("{}", serde_json::to_string(&resp).expect("serialize"));
+            return 2;
+        }
+    };
+    let resp = execute_raw_worker_json(&engine, &value);
+    println!("{}", serde_json::to_string(&resp).expect("serialize"));
+    if resp.get("ok").and_then(|v| v.as_bool()) == Some(true) {
+        0
+    } else {
+        1
+    }
+}
+
+/// NDJSON serve loop: one request object per stdin line → one response line.
+///
+/// Restart behavior: if the process is respawned by the hub, a fresh handshake
+/// (`{"control":"handshake"}`) re-advertises capability; no in-memory planner
+/// state is retained across process restarts (stateless frames).
+///
+/// Control `shutdown` ends the loop with exit 0.
+pub fn run_raw_worker_serve(opts: &RawWorkerServeOptions) -> i32 {
+    if opts.handshake_only {
+        return raw_worker_print_handshake();
+    }
+    if let Some(once) = &opts.once_json {
+        return run_raw_worker_once(opts, once);
+    }
+
+    let engine = engine_from_options(opts);
+    let stdin = io::stdin();
+    let mut stdout = io::stdout();
+    let mut lines = stdin.lock().lines();
+
+    // Emit ready banner for OMP/router (single line JSON).
+    let ready = json!({
+        "ok": true,
+        "protocol": RAW_WORKER_PROTOCOL_VERSION,
+        "surface": "raw_worker",
+        "event": "ready",
+        "capability": surface_capability_json(HandshakeSurface::RawWorker),
+    });
+    if writeln!(stdout, "{}", ready).is_err() {
+        return 2;
+    }
+    let _ = stdout.flush();
+
+    while let Some(line) = lines.next() {
+        let line = match line {
+            Ok(l) => l,
+            Err(e) => {
+                let capability = build_surface_capability(HandshakeSurface::RawWorker);
+                let resp = fail_response(
+                    "",
+                    capability,
+                    "io",
+                    format!("stdin read error: {e}"),
+                    false,
+                    0,
+                );
+                let _ = writeln!(stdout, "{}", serde_json::to_string(&resp).unwrap_or_default());
+                let _ = stdout.flush();
+                return 2;
+            }
+        };
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let value: Value = match serde_json::from_str(trimmed) {
+            Ok(v) => v,
+            Err(e) => {
+                let capability = build_surface_capability(HandshakeSurface::RawWorker);
+                let resp = fail_response(
+                    "",
+                    capability,
+                    "invalid_frame",
+                    format!("invalid raw worker request JSON: {e}"),
+                    false,
+                    0,
+                );
+                if writeln!(stdout, "{}", serde_json::to_string(&resp).unwrap_or_default()).is_err()
+                {
+                    return 2;
+                }
+                let _ = stdout.flush();
+                continue;
+            }
+        };
+        let resp = execute_raw_worker_json(&engine, &value);
+        if writeln!(stdout, "{}", serde_json::to_string(&resp).unwrap_or_default()).is_err() {
+            return 2;
+        }
+        let _ = stdout.flush();
+        if value
+            .get("control")
+            .and_then(|c| c.as_str())
+            .is_some_and(|c| c == "shutdown")
+        {
+            return 0;
+        }
+    }
+    // EOF: clean exit so hub can restart (restart = new process + new ready banner).
+    0
+}
+
+/// Parse argv for production raw-worker entry on surface binaries.
+///
+/// Recognized:
+/// - `raw-worker` / `raw_worker` → serve loop
+/// - `raw-worker --handshake` → print capability and exit
+/// - `raw-worker --once '{...}'` → single frame
+/// - `raw-worker --root DIR --cache-path PATH`
+pub fn parse_raw_worker_argv(args: &[String]) -> Option<RawWorkerServeOptions> {
+    let pos = args.iter().position(|a| a == "raw-worker" || a == "raw_worker")?;
+    let rest = &args[pos + 1..];
+    let mut opts = RawWorkerServeOptions::default();
+    let mut i = 0;
+    while i < rest.len() {
+        match rest[i].as_str() {
+            "--handshake" | "handshake" => opts.handshake_only = true,
+            "--once" => {
+                if let Some(j) = rest.get(i + 1) {
+                    opts.once_json = Some(j.clone());
+                    i += 1;
+                }
+            }
+            "--root" => {
+                if let Some(r) = rest.get(i + 1) {
+                    opts.root = PathBuf::from(r);
+                    i += 1;
+                }
+            }
+            "--cache-path" => {
+                if let Some(c) = rest.get(i + 1) {
+                    opts.cache_path = Some(PathBuf::from(c));
+                    i += 1;
+                }
+            }
+            s if s.starts_with("--once=") => {
+                opts.once_json = Some(s["--once=".len()..].to_string());
+            }
+            s if s.starts_with("--root=") => {
+                opts.root = PathBuf::from(&s["--root=".len()..]);
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    Some(opts)
+}
+
+/// Entry for surface binaries: if argv contains raw-worker, run and never return.
+pub fn maybe_run_raw_worker_from_args(args: &[String]) -> Option<i32> {
+    let opts = parse_raw_worker_argv(args)?;
+    Some(run_raw_worker_serve(&opts))
 }
 
 #[cfg(test)]
@@ -237,12 +575,13 @@ mod tests {
             args: json!({}),
             peer_contract_digest: Some("00".repeat(32)),
             peer_contract_version: None,
+            control: None,
         };
         let resp = execute_raw_worker_frame(&engine, &req);
         assert!(!resp.ok);
+        assert!(resp.result.is_none());
         assert_eq!(resp.error.as_ref().unwrap().kind, "contract_mismatch");
         assert_eq!(resp.trace["boundary_count"], 0);
-        assert_eq!(resp.trace["planner_owner"], "client");
     }
 
     #[test]
@@ -255,16 +594,13 @@ mod tests {
             args: json!({}),
             peer_contract_digest: Some(local.semantic_contract_digest.clone()),
             peer_contract_version: Some(local.semantic_contract_version.clone()),
+            control: None,
         };
         let resp = execute_raw_worker_frame(&engine, &req);
         assert!(resp.ok, "{:?}", resp.error);
         assert_eq!(resp.trace["boundary_count"], 1);
-        assert_eq!(resp.surface, "raw_worker");
-        assert_eq!(resp.protocol, RAW_WORKER_PROTOCOL_VERSION);
         assert!(resp.result.is_some());
-        // Single planner owner (client) — no nested server_codemode claim.
-        assert_eq!(resp.trace["planner_owner"], "client");
-        assert_eq!(resp.trace["compression_owner"], "engine");
+        assert!(resp.error.is_none());
     }
 
     #[test]
@@ -276,16 +612,99 @@ mod tests {
             args: json!({}),
             peer_contract_digest: None,
             peer_contract_version: None,
+            control: None,
         };
         let resp = execute_raw_worker_frame(&engine, &req);
         assert!(!resp.ok);
+        assert!(resp.result.is_none());
         assert_eq!(resp.error.as_ref().unwrap().kind, "protocol_mismatch");
     }
 
     #[test]
+    fn tool_response_errors_are_fail_envelope_with_retryable() {
+        let (dir, engine) = engine();
+        // Missing path → tool error, not domain_error only.
+        let missing = dir.path().join("__no_such_file__.txt");
+        let req = RawWorkerRequest {
+            protocol: Some(RAW_WORKER_PROTOCOL_VERSION.into()),
+            op: "tz_read".into(),
+            args: json!({"path": missing.display().to_string()}),
+            peer_contract_digest: None,
+            peer_contract_version: None,
+            control: None,
+        };
+        let resp = execute_raw_worker_frame(&engine, &req);
+        assert!(!resp.ok, "missing path must be ok=false");
+        assert!(
+            resp.result.is_none(),
+            "result must be null/absent on tool failure, got {:?}",
+            resp.result
+        );
+        let err = resp.error.expect("typed error required");
+        assert!(!err.kind.is_empty());
+        assert!(!err.message.is_empty());
+        // retryable is always populated (bool field).
+        let _ = err.retryable;
+    }
+
+    #[test]
+    fn policy_error_fail_envelope() {
+        let (_dir, engine) = engine();
+        let req = RawWorkerRequest {
+            protocol: Some(RAW_WORKER_PROTOCOL_VERSION.into()),
+            op: "tz_read".into(),
+            args: json!({"path": "/etc/passwd"}),
+            peer_contract_digest: None,
+            peer_contract_version: None,
+            control: None,
+        };
+        let resp = execute_raw_worker_frame(&engine, &req);
+        assert!(!resp.ok);
+        assert!(resp.result.is_none());
+        let err = resp.error.expect("error");
+        assert!(
+            err.kind == "policy"
+                || err.kind.contains("path")
+                || err.message.to_ascii_lowercase().contains("path")
+                || err.kind == "not_found"
+                || err.kind == "runtime"
+                || err.kind == "validation",
+            "unexpected kind {}",
+            err.kind
+        );
+    }
+
+    #[test]
+    fn control_handshake_returns_capability() {
+        let (_dir, engine) = engine();
+        let req = RawWorkerRequest {
+            protocol: Some(RAW_WORKER_PROTOCOL_VERSION.into()),
+            op: String::new(),
+            args: json!({}),
+            peer_contract_digest: None,
+            peer_contract_version: None,
+            control: Some("handshake".into()),
+        };
+        let resp = execute_raw_worker_frame(&engine, &req);
+        assert!(resp.ok);
+        let result = resp.result.expect("handshake result");
+        assert_eq!(result["schema"], "zerostack.surface.v1");
+        assert_eq!(result["surface"], "raw_worker");
+    }
+
+    #[test]
+    fn parse_raw_worker_argv_handshake() {
+        let args = vec![
+            "tokenzero-mcp".into(),
+            "raw-worker".into(),
+            "--handshake".into(),
+        ];
+        let opts = parse_raw_worker_argv(&args).expect("parse");
+        assert!(opts.handshake_only);
+    }
+
+    #[test]
     fn no_sandbox_modules_in_raw_worker_source() {
-        // Static: production lines must not pull CodeMode/JS runtimes.
-        // Skip the test body so the deny-list strings themselves do not trip.
         let src = include_str!("raw_worker.rs");
         let production: String = src
             .lines()

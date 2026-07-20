@@ -65,8 +65,10 @@ pub use dispatcher::{
 };
 pub use domain::{DomainDispatchError, execute_domain_op};
 pub use raw_worker::{
-    RawWorkerError, RawWorkerRequest, RawWorkerResponse, execute_raw_worker_frame,
-    execute_raw_worker_json,
+    RawWorkerError, RawWorkerRequest, RawWorkerResponse, RawWorkerServeOptions,
+    execute_raw_worker_frame, execute_raw_worker_json, maybe_run_raw_worker_from_args,
+    parse_raw_worker_argv, raw_worker_print_handshake, response_from_outcome,
+    run_raw_worker_once, run_raw_worker_serve,
 };
 pub use surface_handshake::{
     CompressionOwner, HandshakeSurface, PlannerOwner, RAW_WORKER_PROTOCOL_VERSION,
