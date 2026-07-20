@@ -15,7 +15,6 @@ use tokenzero_core::{
     ContentType, Mode, ToolResponse, detect_content_type,
     shell_display_command_from_argv_for_platform,
 };
-use tokenzero_filters::discover;
 use tokenzero_install as install;
 use tokenzero_mcp::{
     CodeModeOptions, CodeModeResult, CodeModeStatus, EditHunk, EngineConfig, TokenZeroEngine,
