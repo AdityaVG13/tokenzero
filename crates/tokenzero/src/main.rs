@@ -35,6 +35,15 @@ mod reach;
 mod release_claims;
 mod source_currency;
 mod zerostack_store;
+// Process/artifact mutual exclusion (tokenzero-irx9.3): dual surface features
+// cannot compile into one binary (see also tokenzero-mcp compile_error).
+#[cfg(all(feature = "surface-mcp", feature = "surface-codemode"))]
+compile_error!(
+    "tokenzero surfaces are mutually exclusive (tokenzero-irx9.3): enable exactly one of \
+feature surface-mcp or surface-codemode — never both. The tokenzero CLI is a selected \
+shim or single-surface build; install tokenzero-mcp or tokenzero-codemode for servers."
+);
+
 use agent_surfaces::{capabilities_json, robot_docs_guide};
 use artifact_contracts::{json_artifact_path, release_candidate_id};
 use cli_args::*;
@@ -1145,39 +1154,38 @@ fn codemode_host_niceness() {
 #[cfg(not(unix))]
 fn codemode_host_niceness() {}
 
-/// MCP XOR CodeMode package surface exclusivity (tokenzero-irx9.3).
+/// MCP XOR CodeMode process/artifact mutual exclusion (tokenzero-irx9.3).
 ///
-/// 1. Dual argv / env selection fails closed with a precise diagnostic.
-/// 2. When a CodeMode hub marked this root active, refuse the per-op MCP
-///    surface instead of silently double-serving.
-/// `TOKENZERO_ALLOW_DUAL=1` overrides hub sentinel checks for intentional
-/// side-by-side debugging (does not bypass dual argv/env rejection).
+/// One running process must never expose both catalogs:
+/// 1. Dual compiled surfaces fail closed (also a compile_error).
+/// 2. Dual argv / env selection fails closed.
+/// 3. Startup surface is resolved to exactly one compiled surface.
+/// 4. Hub sentinel: when CodeMode hub owns the root, refuse per-op MCP.
+///
+/// `TOKENZERO_ALLOW_DUAL=1` only skips the hub sentinel (debug); it never
+/// permits dual catalog compilation or dual `--mode` selection.
 fn enforce_surface_exclusivity(args: &McpServerArgs) -> Result<()> {
-    // Fail closed on dual package surface selection (argv + env).
+    if let Err(err) = install::packaging::reject_dual_compiled_surfaces() {
+        anyhow::bail!("{err}");
+    }
     let argv: Vec<String> = std::env::args().collect();
-    if let Err(err) = install::packaging::modes_from_args(&argv) {
-        anyhow::bail!("{err}");
-    }
-    if let Err(err) = install::packaging::reject_dual_env_selection() {
-        anyhow::bail!("{err}");
-    }
+    let resolved = install::packaging::resolve_startup_surface(&argv)
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
 
-    // Baked single-surface artifacts refuse the opposite mode.
-    if let Some(baked) = install::packaging::baked_package_surface() {
-        let requested = args.tool_surface.as_deref().unwrap_or(&args.mode);
-        let requested_surface = install::packaging::PackageSurface::parse(requested)
-            .map_err(|e| anyhow::anyhow!("{e}"))?;
-        if requested_surface != baked {
-            anyhow::bail!(
-                "tokenzero: artifact {} is locked to surface '{}'; refused request for '{}'. \
-Install {} for that surface (mutually exclusive).",
-                baked.artifact_name(),
-                baked.as_str(),
-                requested_surface.as_str(),
-                requested_surface.artifact_name()
-            );
-        }
+    let requested = args.tool_surface.as_deref().unwrap_or(&args.mode);
+    let requested_surface = install::packaging::PackageSurface::parse(requested)
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
+    if requested_surface != resolved {
+        anyhow::bail!(
+            "tokenzero: process surface is locked to '{}'; refused request for '{}'. \
+Install {} for that surface (mutually exclusive — one process, one catalog).",
+            resolved.as_str(),
+            requested_surface.as_str(),
+            requested_surface.artifact_name()
+        );
     }
+    install::packaging::assert_surface_compiled(resolved)
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
 
     #[cfg(not(unix))]
     {
@@ -1205,7 +1213,7 @@ Install {} for that surface (mutually exclusive).",
         });
         if live {
             anyhow::bail!(
-                "CodeMode hub is active for {} (pid {} via {}); per-op MCP and CodeMode must not run together for one repo. Stop the hub or set TOKENZERO_ALLOW_DUAL=1.",
+                "CodeMode hub is active for {} (pid {} via {}); per-op MCP and CodeMode must not run together for one repo. Stop the hub or set TOKENZERO_ALLOW_DUAL=1 (hub sentinel only — never dual catalogs).",
                 root.display(),
                 pid.unwrap_or(0),
                 sentinel.display()

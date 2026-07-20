@@ -5,8 +5,9 @@
 use std::fs;
 use tokenzero_install::packaging::{
     ARTIFACT_CODEMODE, ARTIFACT_MCP, CLIENT_CONFIG_FILE, ClientConfig, PackageSurface,
-    install_surface, load_install_state, modes_from_args, package_identity, reject_dual_env_selection,
-    sbom_document, semantic_contract_digest, uninstall_report, uninstall_surface,
+    compile_time_surfaces, install_surface, load_install_state, modes_from_args, package_identity,
+    reject_dual_compiled_surfaces, reject_dual_env_selection, sbom_document,
+    semantic_contract_digest, uninstall_report, uninstall_surface,
 };
 
 #[test]
@@ -87,4 +88,18 @@ fn dual_surface_diagnostic_is_precise() {
     assert!(msg.contains(ARTIFACT_CODEMODE), "{msg}");
     // reject_dual_env_selection is covered by packaging_e2e via subprocess env.
     let _ = reject_dual_env_selection();
+}
+
+#[test]
+fn process_never_reports_dual_compiled_surfaces() {
+    // Default tokenzero package features enable exactly one surface.
+    let surfaces = compile_time_surfaces();
+    assert!(
+        surfaces.len() <= 1,
+        "process must not compile both catalogs: {surfaces:?}"
+    );
+    assert!(
+        reject_dual_compiled_surfaces().is_ok(),
+        "reject_dual_compiled_surfaces must pass for single-surface builds"
+    );
 }

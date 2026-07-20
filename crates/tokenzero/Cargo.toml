@@ -11,14 +11,14 @@ keywords.workspace = true
 categories.workspace = true
 rust-version.workspace = true
 
-# Mutually exclusive package surfaces (tokenzero-irx9.3). Default enables both
-# for local dev; release packages build one of:
-#   --no-default-features --features surface-mcp
-#   --no-default-features --features surface-codemode
-# The `tokenzero` binary is a compatibility shim / selected symlink target in
-# production installs — never a dual-catalog release artifact.
+# Mutually exclusive package surfaces (tokenzero-irx9.3).
+# Exactly one surface per process/artifact — enabling both is a compile error.
+# Default is surface-mcp only (selection matrix: native CodeMode clients).
+# CodeMode: --no-default-features --features surface-codemode
+# Production `tokenzero` is a selected symlink to one surface artifact, never
+# a dual-catalog binary.
 [features]
-default = ["surface-mcp", "surface-codemode"]
+default = ["surface-mcp"]
 surface-mcp = ["tokenzero-mcp/surface-mcp", "tokenzero-install/surface-mcp"]
 surface-codemode = ["tokenzero-mcp/surface-codemode", "tokenzero-install/surface-codemode"]
 

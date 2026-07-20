@@ -18,7 +18,9 @@ Users install **one** surface from the same revision and shared core — never b
 
 **Selection matrix:** native CodeMode client → install `tokenzero-mcp`; otherwise → install `tokenzero-codemode`.
 
-Dual surface selection (argv, env, or dual client registration) **fails closed** with a precise diagnostic. Installing one surface after the other cleanly replaces the prior registration and peer binary.
+**Process mutual exclusion (not release-only naming):** one installed/running process must never contain or expose both catalogs. Dual surface features are a **compile error**. Dual argv/env selection and dual client registration **fail closed** at startup. Default package features enable **exactly one** surface (`surface-mcp`); CodeMode builds use `--no-default-features --features surface-codemode`.
+
+Installing one surface after the other cleanly replaces the prior registration and peer binary. The installer writes `install-state.json` + `client-config.json` atomically itself and **never** starts a stdio server to write state.
 
 ### Surface installer (macOS / Linux)
 
@@ -32,9 +34,10 @@ Dual surface selection (argv, env, or dual client registration) **fails closed**
 ./packaging/install.sh --sbom --surface mcp
 ./packaging/install.sh --uninstall --prefix ~/.tokenzero-install
 
-# Single-surface cargo builds (excludes the other surface dependency when possible)
-cargo build -p tokenzero --bin tokenzero-mcp --no-default-features --features surface-mcp
+# Single-surface cargo builds (peer surface dependency excluded)
+cargo build -p tokenzero --bin tokenzero-mcp --features surface-mcp
 cargo build -p tokenzero --bin tokenzero-codemode --no-default-features --features surface-codemode
+# Enabling both surface-mcp and surface-codemode is a compile error.
 ```
 
 Surface binaries also accept non-hanging packaging subcommands:

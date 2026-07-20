@@ -11,12 +11,13 @@ keywords.workspace = true
 categories.workspace = true
 rust-version.workspace = true
 
-# Mutually exclusive package surfaces (tokenzero-irx9.3). Default enables both
-# for local dev; release packages build one of:
-#   --no-default-features --features surface-mcp
-#   --no-default-features --features surface-codemode
+# Mutually exclusive package surfaces (tokenzero-irx9.3).
+# Exactly one surface may be enabled per process/artifact — never both.
+# Enabling both triggers a compile_error in lib.rs (process mutual exclusion).
+# Default is FastMCP only (native CodeMode clients install tokenzero-mcp).
+# CodeMode artifact: --no-default-features --features surface-codemode
 [features]
-default = ["surface-mcp", "surface-codemode"]
+default = ["surface-mcp"]
 surface-mcp = ["dep:fastmcp-rust"]
 surface-codemode = ["dep:rquickjs"]
 

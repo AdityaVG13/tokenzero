@@ -84,21 +84,31 @@ impl std::fmt::Display for PackageSurface {
 
 /// Compile-time surfaces enabled in this binary (feature matrix).
 ///
-/// Features live on the `tokenzero` / `tokenzero-mcp` crates; install helpers
-/// that are not feature-gated report both so unit tests remain portable.
+/// Empty when the pure install helpers are built without surface markers.
+/// A process that serves a catalog must have exactly one surface feature;
+/// both features are a hard compile error (tokenzero-irx9.3).
 pub fn compile_time_surfaces() -> Vec<PackageSurface> {
     let mut out = Vec::new();
     #[cfg(feature = "surface-mcp")]
     out.push(PackageSurface::Mcp);
     #[cfg(feature = "surface-codemode")]
     out.push(PackageSurface::Codemode);
-    #[cfg(all(not(feature = "surface-mcp"), not(feature = "surface-codemode")))]
-    {
-        // tokenzero-install is feature-free; both surfaces are package options.
-        out.push(PackageSurface::Mcp);
-        out.push(PackageSurface::Codemode);
-    }
     out
+}
+
+/// Fail closed if this build compiled more than one package surface.
+///
+/// With mutual-exclusion `compile_error!` this is belt-and-suspenders for any
+/// residual dual-feature path; dual catalog startup must never succeed.
+pub fn reject_dual_compiled_surfaces() -> Result<(), String> {
+    let surfaces = compile_time_surfaces();
+    if surfaces.len() > 1 {
+        return Err(dual_surface_diagnostic(
+            "binary was compiled with both surface-mcp and surface-codemode; \
+one process must never contain both catalogs",
+        ));
+    }
+    Ok(())
 }
 
 /// Immutable package surface for single-surface release binaries.
@@ -414,7 +424,12 @@ pub fn modes_from_args(args: &[String]) -> Result<Option<PackageSurface>, String
 }
 
 /// Resolve the single surface this process is allowed to start.
+///
+/// Dual compiled surfaces, dual argv, and dual env always fail closed.
+/// When no surface feature is baked, resolve from install state / shim-target
+/// (selected symlink compatibility) or explicit `--mode` / env.
 pub fn resolve_startup_surface(args: &[String]) -> Result<PackageSurface, String> {
+    reject_dual_compiled_surfaces()?;
     reject_dual_env_selection()?;
     let from_args = modes_from_args(args)?;
 
@@ -435,25 +450,39 @@ Reinstall the matching package or use the {} compatibility shim after selecting 
     }
 
     if let Some(s) = from_args {
+        // Surface must be compiled into this process when starting a catalog server.
+        assert_surface_compiled(s)?;
         return Ok(s);
     }
 
     if let Ok(v) = env::var("TOKENZERO_SURFACE") {
-        return PackageSurface::parse(&v);
+        let s = PackageSurface::parse(&v)?;
+        assert_surface_compiled(s)?;
+        return Ok(s);
     }
 
     let prefix = default_install_prefix();
     if let Some(state) = load_install_state(&prefix)? {
+        assert_surface_compiled(state.surface)?;
         return Ok(state.surface);
     }
 
     let shim = prefix.join("shim-target");
     if let Ok(raw) = fs::read_to_string(&shim) {
-        return PackageSurface::parse(raw.trim());
+        let s = PackageSurface::parse(raw.trim())?;
+        assert_surface_compiled(s)?;
+        return Ok(s);
     }
 
-    // Dev default: multi-feature binary without install → MCP (historical default).
-    Ok(PackageSurface::Mcp)
+    // Single-surface default feature (surface-mcp) when nothing else selects.
+    let surfaces = compile_time_surfaces();
+    if surfaces.len() == 1 {
+        return Ok(surfaces[0]);
+    }
+    Err(dual_surface_diagnostic(
+        "no package surface selected and no single surface is baked into this binary; \
+install tokenzero-mcp or tokenzero-codemode, or pass --mode=mcp|codemode with a matching feature build",
+    ))
 }
 
 /// Whether this build can start the given surface (feature matrix on consumer crate).
@@ -476,22 +505,17 @@ Rebuild with --features surface-{} or install {}.",
 }
 
 /// Fail closed for packaged single-surface artifacts that accidentally include both features.
+///
+/// Dual compilation always fails closed (process mutual exclusion) — there is no
+/// dual-catalog "dev default" path (tokenzero-irx9.3).
 pub fn assert_packaged_surface_features(locked: PackageSurface) -> Result<(), String> {
+    reject_dual_compiled_surfaces()?;
     let surfaces = compile_time_surfaces();
     if surfaces.is_empty() {
         return Err(format!(
             "tokenzero: no package surface compiled; rebuild with --features surface-{}",
             locked.as_str()
         ));
-    }
-    if surfaces.len() > 1 {
-        // Dual-feature local/dev builds are allowed for the compatibility shim.
-        // Packaged single-surface server entry sets TOKENZERO_FAIL_CLOSED_DUAL_FEATURES.
-        if env::var_os("TOKENZERO_FAIL_CLOSED_DUAL_FEATURES").is_some() {
-            return Err(dual_surface_diagnostic(
-                "packaged binary was compiled with both surface-mcp and surface-codemode; rebuild single-surface release artifacts with --no-default-features --features surface-<one>",
-            ));
-        }
     }
     if !surfaces.contains(&locked) {
         return Err(format!(
@@ -651,5 +675,39 @@ mod tests {
         assert!(msg.contains("fail closed"), "{msg}");
         assert!(msg.contains(ARTIFACT_MCP), "{msg}");
         assert!(msg.contains(ARTIFACT_CODEMODE), "{msg}");
+    }
+
+    #[test]
+    fn compile_time_surfaces_never_reports_both_without_features() {
+        // This crate unit-tested without surface markers must not invent a
+        // dual-surface process (tokenzero-irx9.3 review correction).
+        let surfaces = compile_time_surfaces();
+        assert!(
+            surfaces.len() <= 1,
+            "compile_time_surfaces must not report dual catalogs: {surfaces:?}"
+        );
+        assert!(reject_dual_compiled_surfaces().is_ok());
+    }
+
+    #[test]
+    fn install_surface_replaces_peer_config_atomically() {
+        let dir = tempfile::tempdir().unwrap();
+        let prefix = dir.path();
+        let bin = prefix.join("bin");
+        fs::write(&bin, b"x").unwrap();
+        install_surface(PackageSurface::Mcp, prefix, &bin).unwrap();
+        let cfg_mcp = fs::read_to_string(prefix.join(CLIENT_CONFIG_FILE)).unwrap();
+        assert!(cfg_mcp.contains("--mode=mcp"));
+        // Replace with codemode — single surface config remains.
+        install_surface(PackageSurface::Codemode, prefix, &bin).unwrap();
+        let cfg = fs::read_to_string(prefix.join(CLIENT_CONFIG_FILE)).unwrap();
+        assert!(cfg.contains("--mode=codemode"));
+        assert!(!cfg.contains("--mode=mcp"));
+        let state = load_install_state(prefix).unwrap().unwrap();
+        assert_eq!(state.surface, PackageSurface::Codemode);
+        // Uninstall clears state + config (rollback endpoint).
+        uninstall_surface(prefix).unwrap();
+        assert!(load_install_state(prefix).unwrap().is_none());
+        assert!(!prefix.join(CLIENT_CONFIG_FILE).exists());
     }
 }

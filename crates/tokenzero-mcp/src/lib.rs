@@ -3,6 +3,15 @@
 // import what they need directly after the impl split.
 #![allow(unused_imports)]
 
+// Process/artifact mutual exclusion (tokenzero-irx9.3): one process must never
+// compile both user-facing surface runtimes (fastmcp-rust + rquickjs).
+#[cfg(all(feature = "surface-mcp", feature = "surface-codemode"))]
+compile_error!(
+    "tokenzero surfaces are mutually exclusive (tokenzero-irx9.3): enable exactly one of \
+feature surface-mcp or surface-codemode — never both. One process must not contain both \
+catalogs. Build tokenzero-mcp with surface-mcp, or tokenzero-codemode with surface-codemode."
+);
+
 mod binary_resolve;
 mod cache_maintenance;
 mod cache_pack;
