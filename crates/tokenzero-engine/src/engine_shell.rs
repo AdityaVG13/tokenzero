@@ -152,7 +152,7 @@ impl BackgroundJobRegistry {
             let _ = fs::remove_file(&log);
             return Err(error);
         }
-        crate::codemode::containment::reserve_background_job(&id);
+        crate::shell_hooks::reserve_background_job(&id);
         let worker_id = id.clone();
         let spawn = thread::Builder::new()
             .name(format!("tokenzero-{id}"))
@@ -175,7 +175,7 @@ impl BackgroundJobRegistry {
                             current.pid = pid;
                             current.pgid = pgid;
                             drop(current);
-                            crate::codemode::containment::note_background_child(
+                            crate::shell_hooks::note_background_child(
                                 &observed.id,
                                 pid,
                                 pgid,
@@ -201,11 +201,11 @@ impl BackgroundJobRegistry {
                 current.status = status;
                 current.exit_code = exit_code;
                 drop(current);
-                crate::codemode::containment::finish_background_job(&worker_id);
+                crate::shell_hooks::finish_background_job(&worker_id);
             });
         if let Err(err) = spawn {
             lock(&self.jobs).remove(&id);
-            crate::codemode::containment::finish_background_job(&id);
+            crate::shell_hooks::finish_background_job(&id);
             return Err(format!("spawn background worker: {err}"));
         }
         Ok(json!({"job": id, "log": log.display().to_string()}))
@@ -380,11 +380,11 @@ impl TokenZeroEngine {
             timeout_override.unwrap_or(self.config.shell_timeout),
             false,
             output_policy,
-            crate::codemode::containment::note_child,
+            crate::shell_hooks::note_child,
         ) {
             Ok(result) => result,
             Err(err) => {
-                crate::codemode::containment::note_child(None, None, "spawn_failed");
+                crate::shell_hooks::note_child(None, None, "spawn_failed");
                 return ToolResponse::error(
                     "shell",
                     "spawn_failed",

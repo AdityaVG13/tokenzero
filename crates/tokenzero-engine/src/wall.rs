@@ -9,11 +9,11 @@ use std::cell::Cell;
 use std::time::Instant;
 
 /// How often hot loops should sample the active wall deadline.
-pub(crate) const WALL_CHECK_EVERY_N: usize = 32;
+pub const WALL_CHECK_EVERY_N: usize = 32;
 
 /// Plan-start Instant plus the hard wall budget for host-op checkpoints.
 #[derive(Clone, Copy, Debug)]
-pub(crate) struct WallDeadline {
+pub struct WallDeadline {
     pub started: Instant,
     pub hard_max_wall_ms: u64,
 }
@@ -39,7 +39,7 @@ impl WallDeadline {
 ///
 /// Message shape matches CodeMode `wall_clock_limit_error` hard branch so host
 /// aborts and microtask aborts look the same to agents.
-pub(crate) fn check_wall_deadline(
+pub fn check_wall_deadline(
     started: Instant,
     hard_max_wall_ms: u64,
 ) -> Option<(String, &'static str)> {
@@ -63,7 +63,7 @@ fn replace_active(next: Option<WallDeadline>) -> Option<WallDeadline> {
 }
 
 /// Run `f` with `deadline` installed for cooperative host-op checkpoints.
-pub(crate) fn with_host_wall_deadline<R>(deadline: WallDeadline, f: impl FnOnce() -> R) -> R {
+pub fn with_host_wall_deadline<R>(deadline: WallDeadline, f: impl FnOnce() -> R) -> R {
     let previous = replace_active(Some(deadline));
     let result = f();
     replace_active(previous);
@@ -71,7 +71,7 @@ pub(crate) fn with_host_wall_deadline<R>(deadline: WallDeadline, f: impl FnOnce(
 }
 
 /// Check the thread-local host-op deadline, if one is installed.
-pub(crate) fn check_active_wall_deadline() -> Option<(String, &'static str)> {
+pub fn check_active_wall_deadline() -> Option<(String, &'static str)> {
     ACTIVE_HOST_WALL.with(|slot| {
         slot.get()
             .and_then(|deadline| check_wall_deadline(deadline.started, deadline.hard_max_wall_ms))
@@ -79,7 +79,7 @@ pub(crate) fn check_active_wall_deadline() -> Option<(String, &'static str)> {
 }
 
 /// Sample the active deadline every `every_n` steps (and on step 0).
-pub(crate) fn check_active_wall_deadline_every(
+pub fn check_active_wall_deadline_every(
     step: usize,
     every_n: usize,
 ) -> Option<(String, &'static str)> {

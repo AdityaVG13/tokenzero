@@ -21,7 +21,7 @@ const STATE_VERSION: u32 = 2;
 const JOURNAL_COMPACT_BYTES: u64 = 256 * 1024;
 
 #[derive(Debug, Clone)]
-pub(crate) struct SessionPersistence {
+pub struct SessionPersistence {
     path: PathBuf,
     cache_path: PathBuf,
     scope_id: String,
@@ -163,7 +163,7 @@ impl SessionPersistence {
     }
 }
 
-pub(crate) fn session_memory_path(cache_path: &Path) -> PathBuf {
+pub fn session_memory_path(cache_path: &Path) -> PathBuf {
     user_memory_root(cache_path).join("session-memory.json")
 }
 
@@ -209,7 +209,7 @@ fn user_memory_root_from(
         })
 }
 
-pub(crate) fn session_scope_id(_cache_path: &Path) -> String {
+pub fn session_scope_id(_cache_path: &Path) -> String {
     std::env::var(SESSION_SCOPE_ENV)
         .ok()
         .map(|value| value.trim().to_owned())
@@ -224,7 +224,7 @@ thread_local! {
 }
 
 #[cfg(test)]
-pub(crate) fn with_session_root<R>(root: &Path, f: impl FnOnce() -> R) -> R {
+pub fn with_session_root<R>(root: &Path, f: impl FnOnce() -> R) -> R {
     SESSION_ROOT_TEST_OVERRIDE.with(|slot| {
         let previous = slot.replace(Some(root.to_path_buf()));
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f));

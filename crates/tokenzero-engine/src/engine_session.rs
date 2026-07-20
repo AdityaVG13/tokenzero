@@ -76,7 +76,7 @@ impl TokenZeroEngine {
     /// Mark the MCP initialize lifecycle Ready for unit tests that exercise
     /// tools without replaying the full initialize handshake.
     #[cfg(test)]
-    pub(crate) fn mark_lifecycle_ready_for_tests(&self) {
+    pub fn mark_lifecycle_ready_for_tests(&self) {
         if let Ok(mut state) = self.lifecycle.lock() {
             *state = InitializeState::Ready;
         }
@@ -132,18 +132,18 @@ impl TokenZeroEngine {
     }
 
     /// Crash-only recovery health for CodeMode expand/read (wqw.9).
-    pub(crate) fn surface_health(&self) -> &crate::surface_health::SurfaceHealth {
+    pub fn surface_health(&self) -> &crate::surface_health::SurfaceHealth {
         &self.surface_health
     }
 
-    pub(crate) fn surface_health_handle(
+    pub fn surface_health_handle(
         &self,
     ) -> std::sync::Arc<crate::surface_health::SurfaceHealth> {
         std::sync::Arc::clone(&self.surface_health)
     }
 
     /// Record one tool-call outcome for observability. Fail-open.
-    pub(crate) fn record_tool_call(
+    pub fn record_tool_call(
         &self,
         tool: &str,
         elapsed: std::time::Duration,
@@ -152,7 +152,7 @@ impl TokenZeroEngine {
         self.metrics.record(tool, elapsed, is_error);
     }
 
-    pub(crate) fn record_tool_attribution(
+    pub fn record_tool_attribution(
         &self,
         tool: &str,
         engine: std::time::Duration,
@@ -172,7 +172,7 @@ impl TokenZeroEngine {
             );
             obj.insert(
                 "codemode_containment".to_string(),
-                crate::codemode::containment_snapshot(),
+                crate::shell_hooks::containment_snapshot(),
             );
             let working_set = self
                 .working_set

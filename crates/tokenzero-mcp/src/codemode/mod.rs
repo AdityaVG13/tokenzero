@@ -27,3 +27,14 @@ pub use store::{CODEMODE_LIMITS_SCHEMA, CodeModeLimits};
 
 #[cfg(test)]
 mod e2e_tests;
+
+/// Wire CodeMode containment into the domain shell hooks (idempotent).
+pub(crate) fn install_shell_hooks() {
+    tokenzero_engine::shell_hooks::install(tokenzero_engine::shell_hooks::ShellHooks {
+        note_child: containment::note_child,
+        reserve_background_job: containment::reserve_background_job,
+        note_background_child: |id, pid, pgid| containment::note_background_child(id, pid, pgid),
+        finish_background_job: containment::finish_background_job,
+        containment_snapshot: containment::snapshot,
+    });
+}

@@ -185,7 +185,7 @@ impl TokenZeroEngine {
         response
     }
 
-    pub(crate) fn path_allowed(&self, path: &Path) -> bool {
+    pub fn path_allowed(&self, path: &Path) -> bool {
         let abs = if path.is_absolute() {
             comparable_path(path)
         } else {
