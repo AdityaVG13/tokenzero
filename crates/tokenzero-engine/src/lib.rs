@@ -18,6 +18,8 @@ pub mod config;
 mod diff;
 mod dispatcher;
 mod domain;
+pub mod raw_worker;
+pub mod surface_handshake;
 mod engine_common;
 mod engine_edit;
 mod engine_expand;
@@ -62,6 +64,15 @@ pub use dispatcher::{
     operation_is_domain, tool_response_to_domain,
 };
 pub use domain::{DomainDispatchError, execute_domain_op};
+pub use raw_worker::{
+    RawWorkerError, RawWorkerRequest, RawWorkerResponse, execute_raw_worker_frame,
+    execute_raw_worker_json,
+};
+pub use surface_handshake::{
+    CompressionOwner, HandshakeSurface, PlannerOwner, RAW_WORKER_PROTOCOL_VERSION,
+    SURFACE_CAPABILITY_SCHEMA, SurfaceCapability, SurfaceLimits, build_surface_capability,
+    check_contract_compatibility, composition_trace, surface_capability_json,
+};
 pub use render::{cli_json, render_text};
 pub use report_tool::{build_tool_issue_report, is_reportable_tool_name, record_tool_issue};
 pub use shell_hooks::{ShellHooks, install as install_shell_hooks};
