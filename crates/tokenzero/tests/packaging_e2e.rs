@@ -306,10 +306,19 @@ fn install_each_surface_independent_prefix_exercises_runtime() {
             d.contains(surface) || d.contains(artifact),
             "doctor must identify surface: {d}"
         );
-        assert!(
-            !d.contains("dual") || !d.contains("both catalogs"),
-            "doctor must not report dual catalogs: {d}"
-        );
+        let lower = d.to_ascii_lowercase();
+        for banned in [
+            "dual catalog",
+            "dual catalogs",
+            "both catalogs",
+            "both surfaces",
+            "dual surface",
+        ] {
+            assert!(
+                !lower.contains(banned),
+                "doctor must not report dual catalog wording ({banned}): {d}"
+            );
+        }
 
         let sbom = Command::new(&installed).arg("sbom").output().expect("sbom");
         assert!(sbom.status.success());
