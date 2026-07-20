@@ -83,7 +83,7 @@ impl TokenZeroEngine {
     }
 
     /// Build an engine that shares crash-only health with a parent session.
-    pub(crate) fn with_shared_surface_health(
+    pub fn with_shared_surface_health(
         config: EngineConfig,
         surface_health: std::sync::Arc<crate::surface_health::SurfaceHealth>,
     ) -> Self {

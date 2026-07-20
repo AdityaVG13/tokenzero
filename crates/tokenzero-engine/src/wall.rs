@@ -27,7 +27,7 @@ impl WallDeadline {
     }
 
     /// Reconstruct a deadline from elapsed wall ms (CodeMode `started_ms`).
-    pub(crate) fn from_elapsed_ms(elapsed_ms: u64, hard_max_wall_ms: u64) -> Self {
+    pub fn from_elapsed_ms(elapsed_ms: u64, hard_max_wall_ms: u64) -> Self {
         let started = Instant::now()
             .checked_sub(std::time::Duration::from_millis(elapsed_ms))
             .unwrap_or_else(Instant::now);

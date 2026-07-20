@@ -296,7 +296,7 @@ impl TokenZeroEngine {
         }
     }
 
-    pub(crate) fn shell_background(
+    pub fn shell_background(
         &self,
         command: &str,
         cwd: Option<&Path>,
@@ -319,7 +319,7 @@ impl TokenZeroEngine {
         Ok(launched)
     }
 
-    pub(crate) fn shell_job(&self, id: &str) -> Result<Value, String> {
+    pub fn shell_job(&self, id: &str) -> Result<Value, String> {
         background_jobs().poll(id)
     }
 
