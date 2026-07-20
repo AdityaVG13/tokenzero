@@ -138,6 +138,7 @@ fn dispatch_all(
         args: args.clone(),
         peer_contract_digest: Some(cap.semantic_contract_digest),
         peer_contract_version: Some(cap.semantic_contract_version),
+        control: None,
     };
     let worker_resp = execute_raw_worker_frame(&worker_e, &req);
     let worker = Norm {

@@ -24,7 +24,9 @@ rust-proof: rust-verify rust-release-build mcp-smoke mcp-soak shell-matrix insta
 
 package-check: rust-release-build package-audit
 
-release-check: rust-proof
+# irx9-gate is mandatory: release-check cannot claim green without it.
+# Note: rust-proof may run broad verify; irx9-gate is the named-package irx9 path.
+release-check: irx9-gate rust-proof
 
 # Focused irx9 parity/packaging/dispatcher/bench gates (no workspace-wide cargo).
 irx9-gate:

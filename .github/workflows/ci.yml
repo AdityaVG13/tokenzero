@@ -143,6 +143,13 @@ jobs:
         uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2
         with:
           command: check
+      - name: irx9 release gate (mandatory)
+        # Named-package only; never cargo test --workspace. Blocks release if removed.
+        run: make irx9-gate
+        env:
+          CARGO_BUILD_JOBS: "2"
+          CARGO_JOBS: "2"
+          TEST_THREADS: "2"
       - name: Build release binary
         run: cargo build --release -p tokenzero
       - name: Doctor

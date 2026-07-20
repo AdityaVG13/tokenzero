@@ -68,6 +68,7 @@ fn run_once(engine: &TokenZeroEngine, surface: Surface) {
                 args,
                 peer_contract_digest: Some(cap.semantic_contract_digest),
                 peer_contract_version: Some(cap.semantic_contract_version),
+                control: None,
             };
             let _ = execute_raw_worker_frame(engine, &req);
         }
