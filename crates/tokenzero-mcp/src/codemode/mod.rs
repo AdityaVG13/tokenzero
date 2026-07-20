@@ -5,7 +5,12 @@
 
 pub(crate) mod catalog;
 pub(crate) mod containment;
+#[cfg(feature = "surface-codemode")]
 mod exec;
+#[cfg(not(feature = "surface-codemode"))]
+mod exec_stub;
+#[cfg(not(feature = "surface-codemode"))]
+use exec_stub as exec;
 pub(crate) mod journal;
 mod parser;
 mod result;
@@ -13,8 +18,10 @@ mod sandbox;
 mod store;
 
 #[allow(dead_code)]
+#[cfg(feature = "surface-codemode")]
 pub mod audit;
 #[allow(dead_code)]
+#[cfg(feature = "surface-codemode")]
 pub mod bench;
 
 pub use catalog::{
@@ -25,5 +32,5 @@ pub use exec::execute_codemode_with_options;
 pub use result::{CODEMODE_SCHEMA, CodeModeOptions, CodeModeResult, CodeModeStatus};
 pub use store::{CODEMODE_LIMITS_SCHEMA, CodeModeLimits};
 
-#[cfg(test)]
+#[cfg(all(test, feature = "surface-codemode"))]
 mod e2e_tests;

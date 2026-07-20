@@ -24,7 +24,12 @@ mod engine_search;
 mod engine_session;
 mod engine_shell;
 mod expand_params;
+#[cfg(feature = "surface-mcp")]
 mod fastmcp_mode;
+#[cfg(not(feature = "surface-mcp"))]
+mod fastmcp_stub;
+#[cfg(not(feature = "surface-mcp"))]
+use fastmcp_stub as fastmcp_mode;
 mod fetch_cache;
 mod fetch_guard;
 mod jsonrpc;

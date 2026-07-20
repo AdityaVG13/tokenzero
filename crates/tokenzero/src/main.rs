@@ -1145,12 +1145,40 @@ fn codemode_host_niceness() {
 #[cfg(not(unix))]
 fn codemode_host_niceness() {}
 
-/// MCP XOR CodeMode: a harness runs exactly one surface per repo. When a
-/// CodeMode hub marked this root active, refuse the per-op MCP surface
-/// instead of silently double-serving (observed live: per-op MCP hangs while
-/// a CodeMode hub owns the same stores and machine permits).
-/// `TOKENZERO_ALLOW_DUAL=1` overrides for intentional side-by-side debugging.
+/// MCP XOR CodeMode package surface exclusivity (tokenzero-irx9.3).
+///
+/// 1. Dual argv / env selection fails closed with a precise diagnostic.
+/// 2. When a CodeMode hub marked this root active, refuse the per-op MCP
+///    surface instead of silently double-serving.
+/// `TOKENZERO_ALLOW_DUAL=1` overrides hub sentinel checks for intentional
+/// side-by-side debugging (does not bypass dual argv/env rejection).
 fn enforce_surface_exclusivity(args: &McpServerArgs) -> Result<()> {
+    // Fail closed on dual package surface selection (argv + env).
+    let argv: Vec<String> = std::env::args().collect();
+    if let Err(err) = install::packaging::modes_from_args(&argv) {
+        anyhow::bail!("{err}");
+    }
+    if let Err(err) = install::packaging::reject_dual_env_selection() {
+        anyhow::bail!("{err}");
+    }
+
+    // Baked single-surface artifacts refuse the opposite mode.
+    if let Some(baked) = install::packaging::baked_package_surface() {
+        let requested = args.tool_surface.as_deref().unwrap_or(&args.mode);
+        let requested_surface = install::packaging::PackageSurface::parse(requested)
+            .map_err(|e| anyhow::anyhow!("{e}"))?;
+        if requested_surface != baked {
+            anyhow::bail!(
+                "tokenzero: artifact {} is locked to surface '{}'; refused request for '{}'. \
+Install {} for that surface (mutually exclusive).",
+                baked.artifact_name(),
+                baked.as_str(),
+                requested_surface.as_str(),
+                requested_surface.artifact_name()
+            );
+        }
+    }
+
     #[cfg(not(unix))]
     {
         return Ok(());

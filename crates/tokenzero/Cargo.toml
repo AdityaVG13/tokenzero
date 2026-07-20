@@ -11,9 +11,30 @@ keywords.workspace = true
 categories.workspace = true
 rust-version.workspace = true
 
+# Mutually exclusive package surfaces (tokenzero-irx9.3). Default enables both
+# for local dev; release packages build one of:
+#   --no-default-features --features surface-mcp
+#   --no-default-features --features surface-codemode
+# The `tokenzero` binary is a compatibility shim / selected symlink target in
+# production installs — never a dual-catalog release artifact.
+[features]
+default = ["surface-mcp", "surface-codemode"]
+surface-mcp = ["tokenzero-mcp/surface-mcp", "tokenzero-install/surface-mcp"]
+surface-codemode = ["tokenzero-mcp/surface-codemode", "tokenzero-install/surface-codemode"]
+
 [[bin]]
 name = "tokenzero"
 path = "src/main.rs"
+
+[[bin]]
+name = "tokenzero-mcp"
+path = "src/bin/tokenzero_mcp.rs"
+required-features = ["surface-mcp"]
+
+[[bin]]
+name = "tokenzero-codemode"
+path = "src/bin/tokenzero_codemode.rs"
+required-features = ["surface-codemode"]
 
 [dependencies]
 anyhow.workspace = true
@@ -23,8 +44,8 @@ serde_json.workspace = true
 tempfile.workspace = true
 tokenzero-core = { path = "../tokenzero-core", version = "1.0.2" }
 tokenzero-filters = { path = "../tokenzero-filters", version = "1.0.2" }
-tokenzero-install = { path = "../tokenzero-install", version = "1.0.2" }
-tokenzero-mcp = { path = "../tokenzero-mcp", version = "1.0.2" }
+tokenzero-install = { path = "../tokenzero-install", version = "1.0.2", default-features = false }
+tokenzero-mcp = { path = "../tokenzero-mcp", version = "1.0.2", default-features = false }
 tokenzero-pulse = { path = "../tokenzero-pulse", version = "1.0.2" }
 tokenzero-recovery = { path = "../tokenzero-recovery", version = "1.0.2" }
 tokenzero-runtime = { path = "../tokenzero-runtime", version = "1.0.2" }
