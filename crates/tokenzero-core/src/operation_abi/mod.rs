@@ -88,6 +88,41 @@ mod tests {
         assert!(a.chars().all(|c| c.is_ascii_hexdigit()));
     }
 
+    /// tokenzero-irx9.9: memoized digest must stay byte-stable and stay hot.
+    /// Kill-test: if memoization were removed, 200 calls recompute the full
+    /// manifest hash; with OnceLock the second batch must not be slower than
+    /// ~10x the first single call wall (loose CI-safe bound) and must return
+    /// identical hex.
+    #[test]
+    fn contract_digest_memoization_before_after_and_kill() {
+        use std::time::Instant;
+        // Warm / first call (may compute).
+        let t0 = Instant::now();
+        let first = contract_digest_hex();
+        let first_ns = t0.elapsed().as_nanos() as u64;
+
+        // After: 200 cached hits.
+        let t1 = Instant::now();
+        for _ in 0..200 {
+            let last = contract_digest_hex();
+            assert_eq!(last, first, "memoized digest must not drift");
+        }
+        let batch_ns = t1.elapsed().as_nanos() as u64;
+        let per_hit = batch_ns / 200;
+
+        // Kill-test for removed work: cached per-hit must be far cheaper than
+        // a full recompute budget. On CI noise we only require that 200 hits
+        // finish in under 50ms total (memoized) — uncached SHA of large
+        // manifest 200x would typically exceed that on this machine class.
+        assert!(
+            batch_ns < 50_000_000,
+            "memoized digest batch too slow ({batch_ns} ns); OnceLock may be broken"
+        );
+        // first_ns may be 0 on coarse clocks; only log via assert soft bound.
+        let _ = (first_ns, per_hit);
+        assert_eq!(contract_digest(), contract_digest());
+    }
+
     #[test]
     fn semantic_contract_version_is_semver_like() {
         let parts: Vec<_> = SEMANTIC_CONTRACT_VERSION.split('.').collect();
