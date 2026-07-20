@@ -229,20 +229,29 @@ fn surface_bins_handle_install_before_server() {
         "crates/tokenzero/src/bin/tokenzero_codemode.rs",
     ] {
         let src = read(path);
-        // install branch exits before server.
+        // Match server *call sites*, not imports (`use ... run_fastmcp_stdio`).
         let install_pos = src.find("if args.iter().any(|a| a == \"install\")");
         let server_pos = src
-            .find("run_fastmcp_stdio")
-            .or_else(|| src.find("run_stdio"));
+            .find("run_fastmcp_stdio(config)")
+            .or_else(|| src.find("let code = run_stdio(config)"))
+            .or_else(|| src.find("run_stdio(config)"));
         assert!(install_pos.is_some(), "{path}: missing install branch");
-        assert!(server_pos.is_some(), "{path}: missing server entry");
+        assert!(
+            server_pos.is_some(),
+            "{path}: missing server call site (run_fastmcp_stdio/run_stdio)"
+        );
         assert!(
             install_pos.unwrap() < server_pos.unwrap(),
             "{path}: install must be handled before server start"
         );
+        let after_install = &src[install_pos.unwrap()..];
+        let exit_before_server = after_install
+            .find("process::exit(0)")
+            .or_else(|| after_install.find("process::exit("));
+        let server_rel = server_pos.unwrap() - install_pos.unwrap();
         assert!(
-            src.contains("process::exit(0)") || src.contains("process::exit("),
-            "{path}: packaging subcommands must exit"
+            exit_before_server.is_some() && exit_before_server.unwrap() < server_rel,
+            "{path}: install path must process::exit before server call"
         );
         assert!(
             src.contains("install_surface") && src.contains("uninstall_surface"),

@@ -88,6 +88,8 @@ impl std::fmt::Display for PackageSurface {
 /// A process that serves a catalog must have exactly one surface feature;
 /// both features are a hard compile error (tokenzero-irx9.3).
 pub fn compile_time_surfaces() -> Vec<PackageSurface> {
+    // `mut` is used when a surface feature pushes; empty without markers.
+    #[allow(unused_mut)]
     let mut out = Vec::new();
     #[cfg(feature = "surface-mcp")]
     out.push(PackageSurface::Mcp);
