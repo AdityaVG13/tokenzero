@@ -12,6 +12,7 @@ mod codemode;
 mod collect;
 mod config;
 mod diff;
+mod dispatcher;
 mod engine_common;
 mod engine_edit;
 mod engine_expand;
@@ -38,6 +39,7 @@ mod report_tool;
 mod resources;
 mod session;
 mod session_persist;
+mod shell_hooks;
 mod stdio;
 mod supervisor;
 mod surface_health;
@@ -62,6 +64,11 @@ pub use catalog::{ResourceSpec, ToolSpec, resource_specs, tool_specs};
 pub use codemode::{
     CODEMODE_SCHEMA, CodeModeLimits, CodeModeOptions, CodeModeResult, CodeModeStatus,
     describe_codemode_method, execute_codemode_with_options, search_codemode_catalog,
+};
+pub use dispatcher::{
+    DispatchOutcome, DispatchProfile, DispatchSurface, dispatch_cli, dispatch_codemode_method,
+    dispatch_count, dispatch_mcp_tool, dispatch_operation, dispatch_raw_worker, domain_fastmcp_ops,
+    is_domain_operation, last_dispatch_profile, tool_response_to_domain,
 };
 pub use fastmcp_mode::{fastmcp_codemode_instructions, fastmcp_instructions, run_fastmcp_stdio};
 pub use jsonrpc::handle_jsonrpc;

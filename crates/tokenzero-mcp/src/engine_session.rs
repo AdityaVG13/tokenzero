@@ -172,7 +172,7 @@ impl TokenZeroEngine {
             );
             obj.insert(
                 "codemode_containment".to_string(),
-                crate::codemode::containment_snapshot(),
+                crate::shell_hooks::containment_snapshot(),
             );
             let working_set = self
                 .working_set

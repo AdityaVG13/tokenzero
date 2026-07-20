@@ -245,6 +245,8 @@ pub fn execute_codemode(plan: &str) -> CodeModeResult {
 }
 
 pub fn execute_codemode_with_options(plan: &str, options: CodeModeOptions) -> CodeModeResult {
+    crate::codemode::install_shell_hooks();
+
     let containment_options = options.clone();
     super::containment::execute(plan, &containment_options, move || {
         execute_codemode_uncontained(plan, options)
@@ -2397,6 +2399,22 @@ fn journal_execution_arg(args: &[Value]) -> Result<&str, Box<CodeModeResult>> {
     require_str_arg(args, 0, "journal command requires an execution_id string")
 }
 
+
+/// Route a domain op through the shared typed dispatcher (tokenzero-irx9.2).
+fn domain_via_dispatcher(engine: &TokenZeroEngine, method: &str, args: &Value) -> OpResult {
+    let outcome = crate::dispatcher::dispatch_codemode_method(engine, method, args).map_err(|err| {
+        operation_error(format!("{}: {}", err.kind.as_str(), err.message))
+    })?;
+    if let Some(resp) = outcome.tool_response {
+        return tool(resp);
+    }
+    if let Some(err) = outcome.domain_error {
+        return Err(operation_error(format!("{}: {}", err.kind.as_str(), err.message)));
+    }
+    Err(operation_error(format!("domain dispatch for {method} returned empty outcome")))
+}
+
+#[allow(unused_macros)]
 macro_rules! op_tool {
     ($name:ident ($($arg:ident : $ty:ty),*) => $body:expr) => {
         fn $name($($arg : $ty),*) -> OpResult { tool($body) }
@@ -2407,7 +2425,9 @@ macro_rules! op_catalog {
         fn $name($($arg : $ty),*) -> OpResult { catalog($body) }
     };
 }
-op_tool!(exec_mem(engine: &TokenZeroEngine) => engine.mem());
+fn exec_mem(engine: &TokenZeroEngine) -> OpResult {
+    domain_via_dispatcher(engine, "zero.mem", &json!({}))
+}
 op_catalog!(exec_discover() => serde_json::to_value(discover()).unwrap_or(Value::Null));
 op_catalog!(exec_raw(args: &[Value]) => json!({ "__tz_raw": true, "value": args.first().cloned().unwrap_or(Value::Null) }));
 
@@ -2416,10 +2436,14 @@ fn exec_ingest(engine: &TokenZeroEngine, args: &[Value]) -> OpResult {
     let opts = Opts::from_arg(args, 1);
     let mode = opts.mode_or("mode", Mode::Auto);
     let source = opts.str("source").unwrap_or("codemode-ingest");
-    let content_type = detect_content_type(text, None);
-
-    let resp = engine.ingest(text, content_type, mode, source);
-    tool(resp)
+    // Domain dispatcher uses tz_ingest schema (text/input); source is kernel-side label for MCP.
+    let payload = json!({
+        "text": text,
+        "mode": mode.to_string(),
+        "input": text,
+    });
+    let _ = source;
+    domain_via_dispatcher(engine, "zero.ingest", &payload)
 }
 
 fn exec_rewrite(args: &[Value]) -> OpResult {
@@ -2430,6 +2454,9 @@ fn exec_rewrite(args: &[Value]) -> OpResult {
     )?;
     let opts = Opts::from_arg(args, 1);
     let mode = opts.str("mode").unwrap_or("safe");
+    // rewrite has no engine state; still go through dispatcher with a throwaway root engine path
+    // via the domain kernel (tz_rewrite does not need engine session). Callers without engine
+    // use catalog path only — keep local for pure filter rewrite when engine absent.
     let value = serde_json::to_value(rewrite_command(command, mode, true))
         .map_err(|err| operation_error(format!("zero.rewrite failed: {err}")))?;
     catalog(value)
@@ -2438,8 +2465,7 @@ fn exec_rewrite(args: &[Value]) -> OpResult {
 fn exec_cache_pack(engine: &TokenZeroEngine, args: &[Value]) -> OpResult {
     let opts = Opts::from_arg(args, 0);
     let scope = opts.str("scope").unwrap_or("agent");
-    let resp = engine.cache_pack(scope);
-    tool(resp)
+    domain_via_dispatcher(engine, "zero.cache_pack", &json!({"scope": scope}))
 }
 
 fn exec_recall(engine: &TokenZeroEngine, args: &[Value]) -> OpResult {
@@ -2454,8 +2480,16 @@ fn exec_recall(engine: &TokenZeroEngine, args: &[Value]) -> OpResult {
     let max_visible = opts
         .usize("max_visible_tokens")
         .unwrap_or(engine.config.max_visible_tokens);
-    let resp = engine.recall(query, max_hits, mode, max_visible);
-    tool(resp)
+    domain_via_dispatcher(
+        engine,
+        "zero.recall",
+        &json!({
+            "query": query,
+            "max_hits": max_hits,
+            "mode": mode.to_string(),
+            "max_visible_tokens": max_visible,
+        }),
+    )
 }
 
 fn exec_fetch(engine: &TokenZeroEngine, args: &[Value]) -> OpResult {
@@ -2471,8 +2505,16 @@ fn exec_fetch(engine: &TokenZeroEngine, args: &[Value]) -> OpResult {
     let max_visible = opts
         .usize("max_visible_tokens")
         .unwrap_or(engine.config.max_visible_tokens);
-    let resp = engine.fetch(url, ttl_seconds, fresh, mode, max_visible);
-    tool(resp)
+    let mut payload = json!({
+        "url": url,
+        "fresh": fresh,
+        "mode": mode.to_string(),
+        "max_visible_tokens": max_visible,
+    });
+    if let Some(ttl) = ttl_seconds {
+        payload["ttl_seconds"] = json!(ttl);
+    }
+    domain_via_dispatcher(engine, "zero.fetch", &payload)
 }
 
 fn exec_batch(engine: &TokenZeroEngine, args: &[Value]) -> OpResult {
@@ -2894,19 +2936,37 @@ pub(crate) fn resolve_paths_against_work_root(
 }
 
 fn exec_read(engine: &TokenZeroEngine, work_root: &Path, args: &[Value]) -> OpResult {
-    {
-        let paths = require_paths_from_arg(
-            args,
-            0,
-            "zero.read requires a path string or array as first argument",
-        )?;
-        let paths = resolve_paths_against_work_root(paths, work_root);
-        let opts = Opts::from_arg(args, 1);
-        let mode = opts.mode_or("mode", Mode::Auto);
-        let start_line = opts.usize("start_line");
-        let end_line = opts.usize("end_line");
-        let max_visible = opts.max_visible(engine);
-        let resp = engine.read(&paths, mode, start_line, end_line, false, 20, max_visible);
+    let paths = require_paths_from_arg(
+        args,
+        0,
+        "zero.read requires a path string or array as first argument",
+    )?;
+    let paths = resolve_paths_against_work_root(paths, work_root);
+    let opts = Opts::from_arg(args, 1);
+    let mode = opts.mode_or("mode", Mode::Auto);
+    let start_line = opts.usize("start_line");
+    let end_line = opts.usize("end_line");
+    let max_visible = opts.max_visible(engine);
+    let path_vals: Vec<Value> = paths
+        .iter()
+        .map(|p| Value::String(p.display().to_string()))
+        .collect();
+    let mut payload = json!({
+        "path": path_vals,
+        "mode": mode.to_string(),
+        "raw": false,
+        "max_files": 20,
+        "max_visible_tokens": max_visible,
+    });
+    if let Some(s) = start_line {
+        payload["start_line"] = json!(s);
+    }
+    if let Some(e) = end_line {
+        payload["end_line"] = json!(e);
+    }
+    let outcome = crate::dispatcher::dispatch_codemode_method(engine, "zero.read", &payload)
+        .map_err(|err| operation_error(format!("{}: {}", err.kind.as_str(), err.message)))?;
+    if let Some(resp) = outcome.tool_response {
         if resp.status == "error" {
             let message = resp
                 .error
@@ -2929,8 +2989,9 @@ fn exec_read(engine: &TokenZeroEngine, work_root: &Path, args: &[Value]) -> OpRe
                 return Err(boxed_error("substrate", message));
             }
         }
-        tool(resp)
+        return tool(resp);
     }
+    Err(operation_error("zero.read: empty domain outcome"))
 }
 
 fn exec_find(engine: &TokenZeroEngine, work_root: &Path, args: &[Value], exact: bool) -> OpResult {
@@ -2944,13 +3005,25 @@ fn exec_find(engine: &TokenZeroEngine, work_root: &Path, args: &[Value], exact: 
     let mode = opts.mode_or("mode", Mode::Auto);
     let max_files = opts.usize_or("max_files", 20);
     let max_visible = opts.max_visible(engine);
-
-    let resp = if exact {
-        engine.grep(pattern, &paths, mode, max_files, max_visible)
-    } else {
-        engine.find(pattern, &paths, mode, max_files, max_visible)
-    };
-    tool_aborting_wall(resp)
+    let path_vals: Vec<Value> = paths
+        .iter()
+        .map(|p| Value::String(p.display().to_string()))
+        .collect();
+    let method = if exact { "zero.grep" } else { "zero.find" };
+    let payload = json!({
+        "query": pattern,
+        "pattern": pattern,
+        "path": path_vals,
+        "mode": mode.to_string(),
+        "max_files": max_files,
+        "max_visible_tokens": max_visible,
+    });
+    let outcome = crate::dispatcher::dispatch_codemode_method(engine, method, &payload)
+        .map_err(|err| operation_error(format!("{}: {}", err.kind.as_str(), err.message)))?;
+    if let Some(resp) = outcome.tool_response {
+        return tool_aborting_wall(resp);
+    }
+    Err(operation_error(format!("{method}: empty domain outcome")))
 }
 
 fn exec_glob(engine: &TokenZeroEngine, work_root: &Path, args: &[Value]) -> OpResult {

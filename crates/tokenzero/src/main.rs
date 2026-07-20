@@ -145,7 +145,14 @@ fn main() -> Result<()> {
     @json_md { McpSmoke => |j, m| run_mcp_artifact(j, m, 1), McpSoak => |j, m| run_mcp_artifact(j, m, 25), ExactRecoveryShell => run_exact_recovery_shell, ExactRecoveryAudit => run_exact_recovery_audit, HarmEval => run_harm_eval, ProtectedAnchorAudit => run_protected_anchor_audit, FalseSuccessShell => run_false_success_shell, RepoInventory => run_repo_inventory, PromptCachePack => run_prompt_cache_pack, ShellMatrix => run_shell_matrix, OneShotEval => run_one_shot_eval, AdapterApprovalTemplate => run_adapter_approval_template, CompletionAudit => run_completion_audit, SecurityPrivacyAudit => run_security_privacy_audit, ArtifactHandoff => run_artifact_handoff, WsSkeleton => run_ws_skeleton, }
     @value { SessionOpen(args) => engine_from_common(&args).session_boot_snapshot(); Stats(args) => handle_stats(args)?; InstallSmoke(args) => run_install_smoke(args.output_json)?; PackageAudit(args) => handle_package_audit(args); OsReachAudit(args) => run_os_reach_audit(args.output_json, args.output_md, args.root, args.os_artifact, args.release_approval,)?; OsReleaseArtifact(args) => run_os_release_artifact(args.output_json, args.output_md, args.root,)?; SourceCurrencyAudit(args) => run_source_currency_audit(args.output_json, args.output_md, args.refresh_ledger, args.refresh_git_heads,)?; AdapterApprovalAudit(args) => run_adapter_approval_audit(args.output_json, args.output_md, args.approval_file, args.execution_approval,)?; ClaimAudit(args) => run_claim_audit(args.output_json, args.output_md, args.release_approval, ClaimEvidenceInputs { source_artifact: args.source_artifact, benchmark_artifact: args.benchmark_artifact, adapter_approval_artifact: args.adapter_approval_artifact, recovery_artifact: args.recovery_artifact, task_success_artifact: args.task_success_artifact, os_artifact: args.os_artifact, },)?; Reach(args) => run_reach(args.root, args.output_json)?; }
     @special {
-    Mem(args) => { emit_with_json(engine_from_common(&args).mem(), args.json)?; }
+    Mem(args) => {
+        let engine = engine_from_common(&args);
+        let outcome = tokenzero_mcp::dispatch_cli(&engine, "tz_mem", &serde_json::json!({}));
+        let response = outcome
+            .tool_response
+            .unwrap_or_else(|| engine.mem());
+        emit_with_json(response, args.json)?;
+    }
     Hook(args) => { hook::handle_hook(args); }
     Discover(args) => { emit_value(discover(), args.json)?; }
     RobotDocs(args) => { handle_robot_docs(args); }

@@ -1,0 +1,103 @@
+//! Transport-neutral process-tracking hooks for the domain shell engine.
+//!
+//! CodeMode containment (and any other surface that needs process bookkeeping)
+//! installs implementations at process start. The domain engine never imports
+//! FastMCP, MCP JSON-RPC, or CodeMode sandbox modules directly.
+
+use std::sync::RwLock;
+
+type NoteChildFn = fn(Option<u32>, Option<u32>, &'static str);
+type ReserveBackgroundFn = fn(&str);
+type NoteBackgroundChildFn = fn(&str, Option<u32>, Option<u32>);
+type FinishBackgroundFn = fn(&str);
+type SnapshotFn = fn() -> serde_json::Value;
+
+#[derive(Clone, Copy)]
+struct Hooks {
+    note_child: NoteChildFn,
+    reserve_background_job: ReserveBackgroundFn,
+    note_background_child: NoteBackgroundChildFn,
+    finish_background_job: FinishBackgroundFn,
+    containment_snapshot: SnapshotFn,
+}
+
+fn noop_note_child(_pid: Option<u32>, _pgid: Option<u32>, _state: &'static str) {}
+fn noop_reserve(_id: &str) {}
+fn noop_note_background(_id: &str, _pid: Option<u32>, _pgid: Option<u32>) {}
+fn noop_finish(_id: &str) {}
+fn empty_snapshot() -> serde_json::Value {
+    serde_json::json!({})
+}
+
+fn default_hooks() -> Hooks {
+    Hooks {
+        note_child: noop_note_child,
+        reserve_background_job: noop_reserve,
+        note_background_child: noop_note_background,
+        finish_background_job: noop_finish,
+        containment_snapshot: empty_snapshot,
+    }
+}
+
+static HOOKS: RwLock<Hooks> = RwLock::new(Hooks {
+    note_child: noop_note_child,
+    reserve_background_job: noop_reserve,
+    note_background_child: noop_note_background,
+    finish_background_job: noop_finish,
+    containment_snapshot: empty_snapshot,
+});
+
+/// Install process-tracking hooks (typically from CodeMode containment init).
+pub fn install(hooks: ShellHooks) {
+    if let Ok(mut guard) = HOOKS.write() {
+        *guard = Hooks {
+            note_child: hooks.note_child,
+            reserve_background_job: hooks.reserve_background_job,
+            note_background_child: hooks.note_background_child,
+            finish_background_job: hooks.finish_background_job,
+            containment_snapshot: hooks.containment_snapshot,
+        };
+    }
+}
+
+/// Reset hooks to no-ops (tests).
+#[allow(dead_code)]
+pub fn reset() {
+    if let Ok(mut guard) = HOOKS.write() {
+        *guard = default_hooks();
+    }
+}
+
+/// Domain-facing hook bundle.
+#[derive(Clone, Copy)]
+pub struct ShellHooks {
+    pub note_child: NoteChildFn,
+    pub reserve_background_job: ReserveBackgroundFn,
+    pub note_background_child: NoteBackgroundChildFn,
+    pub finish_background_job: FinishBackgroundFn,
+    pub containment_snapshot: SnapshotFn,
+}
+
+fn current() -> Hooks {
+    HOOKS.read().map(|g| *g).unwrap_or_else(|_| default_hooks())
+}
+
+pub fn note_child(pid: Option<u32>, pgid: Option<u32>, cancellation_state: &'static str) {
+    (current().note_child)(pid, pgid, cancellation_state);
+}
+
+pub fn reserve_background_job(id: &str) {
+    (current().reserve_background_job)(id);
+}
+
+pub fn note_background_child(id: &str, pid: Option<u32>, pgid: Option<u32>) {
+    (current().note_background_child)(id, pid, pgid);
+}
+
+pub fn finish_background_job(id: &str) {
+    (current().finish_background_job)(id);
+}
+
+pub fn containment_snapshot() -> serde_json::Value {
+    (current().containment_snapshot)()
+}
