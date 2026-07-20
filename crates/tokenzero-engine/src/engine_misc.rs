@@ -54,8 +54,11 @@ impl TokenZeroEngine {
                 .collect::<Vec<_>>()
                 .join("\n")
         ));
-        let tool_schema = serde_json::to_string_pretty(&tool_specs()).unwrap_or_default();
-        stable_sections.push(format!("## mcp-tool-schema\n{tool_schema}"));
+        let operation_contract = serde_json::to_string_pretty(
+            &tokenzero_core::operation_abi::contract_manifest(),
+        )
+        .unwrap_or_default();
+        stable_sections.push(format!("## operation-abi\n{operation_contract}"));
         let stable_text = stable_sections.join("\n\n");
         let volatile_text = format!(
             "volatile_tail:\nroot: {}\nmanifest: {}\nexpand refs for exact current source bytes\n",

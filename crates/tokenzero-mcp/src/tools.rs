@@ -72,7 +72,7 @@ fn dispatch_gated_tool(
     if canonical != "execute_code" {
         record_opt_in_mcp_usage(engine, &response);
     }
-    engine.ledger.record_response(canonical, &response);
+    engine.record_ledger_response(canonical, &response);
     engine.record_tool_attribution(canonical, engine_elapsed, persist_started.elapsed());
     let mut response = response;
     // CodeMode results may be replayed by upstream execution caches after

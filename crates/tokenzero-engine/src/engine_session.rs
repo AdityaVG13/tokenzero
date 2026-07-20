@@ -161,8 +161,13 @@ impl TokenZeroEngine {
         self.metrics.record_attribution(tool, engine, persist);
     }
 
+    /// Append one response to the session ledger. Persistence is fail-open.
+    pub fn record_ledger_response(&self, tool: &str, response: &ToolResponse) {
+        self.ledger.record_response(tool, response);
+    }
+
     /// Snapshot served by `resource://tokenzero/metrics`.
-    pub(crate) fn tool_metrics_snapshot(&self) -> Value {
+    pub fn tool_metrics_snapshot(&self) -> Value {
         let mut snap = self.metrics.snapshot();
         if let Some(obj) = snap.as_object_mut() {
             obj.insert("session_boot".to_string(), self.session_boot_snapshot());

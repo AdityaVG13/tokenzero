@@ -5,10 +5,9 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use tokenzero_core::operation_abi::{DomainErrorKind, all_operations};
 use tokenzero_engine::{
-    DispatchSurface, EngineConfig, TokenZeroEngine, all_domain_operations, dispatch_cli,
-    dispatch_codemode_method, dispatch_count, dispatch_mcp_tool, dispatch_operation,
-    dispatch_raw_worker, domain_fastmcp_ops, is_domain_operation, last_dispatch_profile,
-    operation_is_domain,
+    DispatchSurface, EngineConfig, TokenZeroEngine, dispatch_cli, dispatch_codemode_method,
+    dispatch_count, dispatch_mcp_tool, dispatch_operation, dispatch_raw_worker, domain_fastmcp_ops,
+    is_domain_operation, last_dispatch_profile,
 };
 
 fn engine_for(root: &Path) -> TokenZeroEngine {
@@ -51,7 +50,7 @@ fn minimal_args(op: &str) -> Value {
 }
 
 fn domain_sources() -> Vec<PathBuf> {
-    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../tokenzero-mcp/src");
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src");
     let mut out = Vec::new();
     fn walk(dir: &Path, out: &mut Vec<PathBuf>) {
         for entry in fs::read_dir(dir).unwrap() {
@@ -376,6 +375,7 @@ fn every_fastmcp_domain_op_is_dispatchable() {
         }
     }
 }
+#[test]
 fn registry_domain_ops_are_metadata_driven_not_masked() {
     // Every Canonical/LegacyAlias non-resource op must be classified domain;
     // every CodemodeControl/Resource must not. No hard-coded name denylist.
@@ -403,6 +403,7 @@ fn registry_domain_ops_are_metadata_driven_not_masked() {
 }
 
 
+#[test]
 fn every_registry_domain_op_is_kernel_dispatchable() {
     use tokenzero_engine::all_domain_operations;
     let root = tempfile::tempdir().unwrap();

@@ -2830,6 +2830,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "tokenzero-engine"
+version = "1.4.0"
+dependencies = [
+ "fs4",
+ "globset",
+ "memchr",
+ "proptest",
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
+ "similar",
+ "tempfile",
+ "thiserror",
+ "tokenzero-core",
+ "tokenzero-filters",
+ "tokenzero-recovery",
+ "tokenzero-runtime",
+]
+
+[[package]]
 name = "tokenzero-filters"
 version = "1.4.0"
 dependencies = [
@@ -2871,6 +2891,7 @@ dependencies = [
  "tempfile",
  "thiserror",
  "tokenzero-core",
+ "tokenzero-engine",
  "tokenzero-filters",
  "tokenzero-pulse",
  "tokenzero-recovery",
