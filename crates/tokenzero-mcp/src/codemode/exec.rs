@@ -3025,6 +3025,33 @@ fn exec_find(engine: &TokenZeroEngine, work_root: &Path, args: &[Value], exact: 
     Err(operation_error(format!("{method}: empty domain outcome")))
 }
 
+fn expand_params_to_tool_args(params: &ExpandParams) -> Value {
+    let mut payload = json!({
+        "ref": params.ref_id,
+        "fresh": params.fresh,
+        "raw": params.raw,
+    });
+    if let Some(v) = &params.selector {
+        payload["selector"] = json!(v);
+    }
+    if let Some(v) = params.start_line {
+        payload["start_line"] = json!(v);
+    }
+    if let Some(v) = params.end_line {
+        payload["end_line"] = json!(v);
+    }
+    if let Some(v) = &params.anchor_kind {
+        payload["anchor_kind"] = json!(v);
+    }
+    if let Some(v) = &params.symbol {
+        payload["symbol"] = json!(v);
+    }
+    if let Some(v) = &params.since {
+        payload["since"] = json!(v);
+    }
+    payload
+}
+
 fn exec_glob(engine: &TokenZeroEngine, work_root: &Path, args: &[Value]) -> OpResult {
     let pattern = require_str_arg(
         args,
@@ -3033,16 +3060,19 @@ fn exec_glob(engine: &TokenZeroEngine, work_root: &Path, args: &[Value]) -> OpRe
     )?;
     let paths = paths_from_arg(args, 1, work_root.to_path_buf());
     let max_files = Opts::from_arg(args, 2).usize_or("max_files", 200);
-
-    let resp = engine.glob(
-        pattern,
-        &paths,
-        false,
-        Mode::Auto,
-        max_files,
-        engine.config.max_visible_tokens,
-    );
-    tool(resp)
+    let path_vals: Vec<Value> = paths
+        .iter()
+        .map(|p| Value::String(p.display().to_string()))
+        .collect();
+    let payload = json!({
+        "pattern": pattern,
+        "path": path_vals,
+        "include_hidden": false,
+        "mode": Mode::Auto.to_string(),
+        "max_files": max_files,
+        "max_visible_tokens": engine.config.max_visible_tokens,
+    });
+    domain_via_dispatcher(engine, "zero.glob", &payload)
 }
 
 fn exec_tree(engine: &TokenZeroEngine, work_root: &Path, args: &[Value]) -> OpResult {
@@ -3058,149 +3088,157 @@ fn exec_tree(engine: &TokenZeroEngine, work_root: &Path, args: &[Value]) -> OpRe
     let depth = opts.usize_or("depth", 3);
     let include_hidden = opts.bool("include_hidden").unwrap_or(false);
     let max_files = opts.usize_or("max_files", 200);
-
-    let resp = engine.tree(
-        &roots,
-        depth,
-        include_hidden,
-        Mode::Auto,
-        max_files,
-        engine.config.max_visible_tokens,
-    );
-    tool(resp)
+    let path_vals: Vec<Value> = roots
+        .iter()
+        .map(|p| Value::String(p.display().to_string()))
+        .collect();
+    let payload = json!({
+        "path": path_vals,
+        "depth": depth,
+        "include_hidden": include_hidden,
+        "mode": Mode::Auto.to_string(),
+        "max_files": max_files,
+        "max_visible_tokens": engine.config.max_visible_tokens,
+    });
+    domain_via_dispatcher(engine, "zero.tree", &payload)
 }
 
 fn exec_shell(engine: &TokenZeroEngine, work_root: &Path, args: &[Value]) -> OpResult {
-    {
-        let command = require_str_arg(
-            args,
-            0,
-            "zero.shell requires a command string as first argument",
-        )?;
-        let opts = Opts::from_arg(args, 1);
-        // Default cwd to the plan/work root (not silent process cwd).
-        let cwd = opts
-            .str("cwd")
-            .map(|raw| {
-                let path = PathBuf::from(raw);
-                if path.is_absolute() {
-                    path
-                } else {
-                    work_root.join(path)
+    let command = require_str_arg(
+        args,
+        0,
+        "zero.shell requires a command string as first argument",
+    )?;
+    let opts = Opts::from_arg(args, 1);
+    // Default cwd to the plan/work root (not silent process cwd).
+    let cwd = opts
+        .str("cwd")
+        .map(|raw| {
+            let path = PathBuf::from(raw);
+            if path.is_absolute() {
+                path
+            } else {
+                work_root.join(path)
+            }
+        })
+        .unwrap_or_else(|| work_root.to_path_buf());
+    let mode = opts.mode_or("mode", Mode::Auto);
+    let timeout = opts
+        .usize("timeout_seconds")
+        .map(|secs| Duration::from_secs(secs as u64));
+    // Background jobs are transport-side composition (not a registry domain op).
+    if opts.bool("background").unwrap_or(false) {
+        return engine
+            .shell_background(command, Some(cwd.as_path()), timeout)
+            .map(OpOutcome::from_catalog)
+            .map_err(operation_error);
+    }
+    let mut payload = json!({
+        "command": command,
+        "cwd": cwd.display().to_string(),
+        "mode": mode.to_string(),
+        "rewrite": "safe",
+    });
+    if let Some(secs) = opts.usize("timeout_seconds") {
+        payload["timeout_seconds"] = json!(secs);
+    }
+    let outcome = tokenzero_engine::dispatch_codemode_method(engine, "zero.shell", &payload)
+        .map_err(|err| operation_error(format!("{}: {}", err.kind.as_str(), err.message)))?;
+    let Some(resp) = outcome.tool_response else {
+        return Err(operation_error("zero.shell: empty domain outcome"));
+    };
+    Ok(OpOutcome::from_tool_response(&resp).with_value(|value| {
+        if let Some(telem) = &resp.telemetry {
+            if let Some(exit) = telem.get("exit_code") {
+                value["exit_code"] = exit.clone();
+            }
+            if let Some(success) = telem.get("command_success") {
+                value["success"] = success.clone();
+            }
+            if cwd != work_root {
+                if let Some(cwd_val) = telem.get("cwd") {
+                    value["cwd"] = cwd_val.clone();
                 }
-            })
-            .unwrap_or_else(|| work_root.to_path_buf());
-        let mode = opts.mode_or("mode", Mode::Auto);
-        let timeout = opts
-            .usize("timeout_seconds")
-            .map(|secs| Duration::from_secs(secs as u64));
-        if opts.bool("background").unwrap_or(false) {
-            return engine
-                .shell_background(command, Some(cwd.as_path()), timeout)
-                .map(OpOutcome::from_catalog)
-                .map_err(operation_error);
-        }
-        let resp = engine.shell(
-            command,
-            None,
-            Some(cwd.as_path()),
-            mode,
-            Some("safe"),
-            false,
-            None,
-            None,
-            timeout,
-        );
-        Ok(OpOutcome::from_tool_response(&resp).with_value(|value| {
-            if let Some(telem) = &resp.telemetry {
-                if let Some(exit) = telem.get("exit_code") {
-                    value["exit_code"] = exit.clone();
-                }
-                if let Some(success) = telem.get("command_success") {
-                    value["success"] = success.clone();
-                }
-                if cwd != work_root {
-                    if let Some(cwd_val) = telem.get("cwd") {
-                        value["cwd"] = cwd_val.clone();
-                    }
-                    if let Some(src) = telem.get("cwd_source") {
-                        value["cwd_source"] = src.clone();
-                    }
-                }
-                if telem.get("stdout_ref").is_some() && value.get("stdout_ref").is_none() {
-                    if let Some(combined) = value.get("combined_ref").cloned() {
-                        value["stdout_ref"] = combined;
-                    }
+                if let Some(src) = telem.get("cwd_source") {
+                    value["cwd_source"] = src.clone();
                 }
             }
-        }))
-    }
+            if telem.get("stdout_ref").is_some() && value.get("stdout_ref").is_none() {
+                if let Some(combined) = value.get("combined_ref").cloned() {
+                    value["stdout_ref"] = combined;
+                }
+            }
+        }
+    }))
 }
 
 pub(crate) fn exec_edit(engine: &TokenZeroEngine, work_root: &Path, args: &[Value]) -> OpResult {
-    {
-        let path = PathBuf::from(require_str_arg(
-            args,
-            0,
-            "zero.edit requires a path string as first argument",
-        )?);
-        let edits_val = require_array_arg(
-            args,
-            1,
-            "zero.edit requires an array of {find, replace} hunks as second argument",
-        )?;
-        let mut edits = Vec::with_capacity(edits_val.len());
-        for (idx, value) in edits_val.iter().enumerate() {
-            let hunk: EditHunk = serde_json::from_value(value.clone()).map_err(|err| {
-                operation_error(format!("zero.edit: invalid hunk at index {idx}: {err}"))
-            })?;
-            edits.push(hunk);
-        }
-        if edits.is_empty() {
-            return Err(operation_error("zero.edit: no edit hunks provided"));
-        }
-        let opts = Opts::from_arg(args, 2);
-        let dry_run = opts.bool("dry_run").unwrap_or(false);
-        let create = opts.bool("create").unwrap_or(false);
-        let path = resolve_paths_against_work_root(vec![path], work_root)
-            .into_iter()
-            .next()
-            .unwrap_or_else(|| work_root.to_path_buf());
-        let resp = engine.edit(
-            &path,
-            &edits,
-            create,
-            dry_run,
-            Mode::Auto,
-            engine.config.max_visible_tokens,
-        );
-        if resp.status == "error" {
-            let message = resp
-                .error
-                .as_ref()
-                .map(|e| e.message.clone())
-                .unwrap_or_else(|| "zero.edit failed".to_string());
-            let annotated = crate::annotate_write_failure(&message, false);
-            return Err(Box::new(CodeModeResult::error_with_kind(
-                resp.error
-                    .as_ref()
-                    .map(|e| e.code.as_str())
-                    .unwrap_or("edit_failed"),
-                annotated,
-                0,
-                false,
-            )));
-        }
-        let hunks_applied = resp
-            .telemetry
-            .as_ref()
-            .and_then(|t| t.get("hunks"))
-            .and_then(|v| v.as_u64())
-            .unwrap_or(edits.len() as u64);
-        Ok(OpOutcome::from_tool_response(&resp).with_value(|value| {
-            value["hunks_applied"] = json!(hunks_applied);
-        }))
+    let path = PathBuf::from(require_str_arg(
+        args,
+        0,
+        "zero.edit requires a path string as first argument",
+    )?);
+    let edits_val = require_array_arg(
+        args,
+        1,
+        "zero.edit requires an array of {find, replace} hunks as second argument",
+    )?;
+    let mut edits = Vec::with_capacity(edits_val.len());
+    for (idx, value) in edits_val.iter().enumerate() {
+        let hunk: EditHunk = serde_json::from_value(value.clone()).map_err(|err| {
+            operation_error(format!("zero.edit: invalid hunk at index {idx}: {err}"))
+        })?;
+        edits.push(hunk);
     }
+    if edits.is_empty() {
+        return Err(operation_error("zero.edit: no edit hunks provided"));
+    }
+    let opts = Opts::from_arg(args, 2);
+    let dry_run = opts.bool("dry_run").unwrap_or(false);
+    let create = opts.bool("create").unwrap_or(false);
+    let path = resolve_paths_against_work_root(vec![path], work_root)
+        .into_iter()
+        .next()
+        .unwrap_or_else(|| work_root.to_path_buf());
+    let payload = json!({
+        "path": path.display().to_string(),
+        "edits": edits_val,
+        "create": create,
+        "dry_run": dry_run,
+        "mode": Mode::Auto.to_string(),
+        "max_visible_tokens": engine.config.max_visible_tokens,
+    });
+    let outcome = tokenzero_engine::dispatch_codemode_method(engine, "zero.edit", &payload)
+        .map_err(|err| operation_error(format!("{}: {}", err.kind.as_str(), err.message)))?;
+    let Some(resp) = outcome.tool_response else {
+        return Err(operation_error("zero.edit: empty domain outcome"));
+    };
+    if resp.status == "error" {
+        let message = resp
+            .error
+            .as_ref()
+            .map(|e| e.message.clone())
+            .unwrap_or_else(|| "zero.edit failed".to_string());
+        let annotated = crate::annotate_write_failure(&message, false);
+        return Err(Box::new(CodeModeResult::error_with_kind(
+            resp.error
+                .as_ref()
+                .map(|e| e.code.as_str())
+                .unwrap_or("edit_failed"),
+            annotated,
+            0,
+            false,
+        )));
+    }
+    let hunks_applied = resp
+        .telemetry
+        .as_ref()
+        .and_then(|t| t.get("hunks"))
+        .and_then(|v| v.as_u64())
+        .unwrap_or(edits.len() as u64);
+    Ok(OpOutcome::from_tool_response(&resp).with_value(|value| {
+        value["hunks_applied"] = json!(hunks_applied);
+    }))
 }
 
 fn exec_expand(engine: &TokenZeroEngine, args: &[Value]) -> OpResult {
@@ -3217,7 +3255,12 @@ fn exec_expand(engine: &TokenZeroEngine, args: &[Value]) -> OpResult {
     }
     // Soft capsule on expand miss/error: plan continues with status in value.
     // Shared SurfaceHealth is updated inside expand_with_params (wqw.9).
-    let resp = engine.expand_with_params(params);
+    let payload = expand_params_to_tool_args(&params);
+    let outcome = tokenzero_engine::dispatch_codemode_method(engine, "zero.expand", &payload)
+        .map_err(|err| operation_error(format!("{}: {}", err.kind.as_str(), err.message)))?;
+    let Some(resp) = outcome.tool_response else {
+        return Err(operation_error("zero.expand: empty domain outcome"));
+    };
     // Strict ZeroRef parsing can classify a missing legacy-shaped blob as malformed.
     // In CodeMode that is still an expand-surface miss for crash-only recovery (wqw.9).
     if resp
@@ -3261,7 +3304,12 @@ fn exec_expand_many(engine: &TokenZeroEngine, args: &[Value]) -> OpResult {
                 params.ref_id
             )));
         }
-        let resp = engine.expand_with_params(params);
+        let payload = expand_params_to_tool_args(&params);
+        let outcome = tokenzero_engine::dispatch_codemode_method(engine, "zero.expand", &payload)
+            .map_err(|err| operation_error(format!("{}: {}", err.kind.as_str(), err.message)))?;
+        let Some(resp) = outcome.tool_response else {
+            return Err(operation_error("zero.expand: empty domain outcome"));
+        };
         if resp
             .error
             .as_ref()
