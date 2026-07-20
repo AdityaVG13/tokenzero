@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 use tokenzero_core::operation_abi::resolve_operation;
 use tokenzero_core::{
-    Accounting, ContentType, Mode, ToolResponse, count_tokens,
+    Accounting, ContentType, Mode, ToolResponse, count_tokens, detect_content_type,
     shell_display_command_from_argv_for_platform,
 };
 use tokenzero_filters::{discover, rewrite_command};
@@ -137,6 +137,7 @@ pub fn execute_domain_op(
         }
         "shell" => {
             let (command, argv) = arg_command(args).map_err(map_args)?;
+            let env = arg_env_map(args);
             engine.shell(
                 &command,
                 argv,
@@ -144,7 +145,7 @@ pub fn execute_domain_op(
                 arg_mode(args),
                 arg_str(args, "rewrite"),
                 arg_bool(args, "no_rewrite"),
-                None,
+                env,
                 arg_str(args, "stdin"),
                 arg_timeout_any(
                     args,
@@ -159,8 +160,13 @@ pub fn execute_domain_op(
         }
         "ingest" => {
             let text = arg_string_any(args, &["text", "input"]).map_err(map_args)?;
-            let tool = if op_name == "compact" { "compact" } else { "mcp-ingest" };
-            engine.ingest(text, ContentType::Unknown, arg_mode(args), tool)
+            let tool = if op_name == "compact" {
+                "compact"
+            } else {
+                arg_str(args, "source").unwrap_or("mcp-ingest")
+            };
+            let kind = content_type_from_arg(args, text);
+            engine.ingest(text, kind, arg_mode(args), tool)
         }
         "expand" => engine
             .expand_with_params(ExpandParams::from_tool_args(args).map_err(map_args)?),
@@ -425,16 +431,20 @@ fn arg_command(args: &Value) -> Result<(String, Option<Vec<String>>), String> {
         let argv = string_array_arg(items, "argv")?;
         return Ok((display_command_for_argv(&argv), Some(argv)));
     }
-    if let Ok(command) = arg_string_any(args, &["command", "cmd", "input", "script"]) {
-        return Ok((command.to_string(), None));
-    }
+    // Prefer structured argv when present so CLI/runtime plan fidelity is preserved.
     if let Some((key, items)) = ["argv", "args"].into_iter().find_map(|key| {
         args.get(key)
             .and_then(Value::as_array)
             .map(|items| (key, items))
     }) {
         let argv = string_array_arg(items, key)?;
-        return Ok((display_command_for_argv(&argv), Some(argv)));
+        let display = arg_string_any(args, &["command", "cmd", "input", "script"])
+            .map(|s| s.to_string())
+            .unwrap_or_else(|_| display_command_for_argv(&argv));
+        return Ok((display, Some(argv)));
+    }
+    if let Ok(command) = arg_string_any(args, &["command", "cmd", "input", "script"]) {
+        return Ok((command.to_string(), None));
     }
     Err("missing command; expected command/cmd/input/script string or argv/args array".to_string())
 }
@@ -533,4 +543,30 @@ fn arg_string_any<'a>(args: &'a Value, keys: &[&str]) -> Result<&'a str, String>
     keys.iter()
         .find_map(|key| args.get(*key).and_then(Value::as_str))
         .ok_or_else(|| format!("missing {}", keys.join("|")))
+}
+
+fn arg_env_map(args: &Value) -> Option<std::collections::BTreeMap<String, String>> {
+    let obj = args.get("env")?.as_object()?;
+    let mut out = std::collections::BTreeMap::new();
+    for (k, v) in obj {
+        if let Some(s) = v.as_str() {
+            out.insert(k.clone(), s.to_string());
+        }
+    }
+    Some(out)
+}
+
+fn content_type_from_arg(args: &Value, text: &str) -> ContentType {
+    match arg_str(args, "content_type").unwrap_or("unknown") {
+        "code" => ContentType::Code,
+        "shell" | "tool-output" | "shell_output" => ContentType::ShellOutput,
+        "diff" => ContentType::Diff,
+        "json" | "json_config" => ContentType::JsonConfig,
+        "markdown" | "pack" => ContentType::Markdown,
+        "log" | "logs" => ContentType::Logs,
+        "search_result" => ContentType::SearchResult,
+        "tree" => ContentType::Tree,
+        "unknown" => ContentType::Unknown,
+        _ => detect_content_type(text, None),
+    }
 }

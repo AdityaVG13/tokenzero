@@ -15,7 +15,7 @@ use tokenzero_core::{
     ContentType, Mode, ToolResponse, detect_content_type,
     shell_display_command_from_argv_for_platform,
 };
-use tokenzero_filters::{discover, rewrite_command};
+use tokenzero_filters::discover;
 use tokenzero_install as install;
 use tokenzero_mcp::{
     CodeModeOptions, CodeModeResult, CodeModeStatus, EditHunk, EngineConfig, TokenZeroEngine,
@@ -147,14 +147,22 @@ fn main() -> Result<()> {
     @special {
     Mem(args) => {
         let engine = engine_from_common(&args);
-        let outcome = tokenzero_mcp::dispatch_cli(&engine, "tz_mem", &serde_json::json!({}));
-        let response = outcome
-            .tool_response
-            .unwrap_or_else(|| engine.mem());
-        emit_with_json(response, args.json)?;
+        emit_with_json(dispatch_cli_tool(&engine, "tz_mem", json!({})), args.json)?;
     }
     Hook(args) => { hook::handle_hook(args); }
-    Discover(args) => { emit_value(discover(), args.json)?; }
+    Discover(args) => {
+        let root = tokenzero_work_root(None);
+        let engine = engine_new(
+            &root,
+            default_allowed_roots(&root),
+            None,
+            4000,
+            Mode::Auto,
+            default_shell_timeout(),
+            None,
+        );
+        emit_with_json(dispatch_cli_tool(&engine, "tz_discover", json!({})), args.json)?;
+    }
     RobotDocs(args) => { handle_robot_docs(args); }
     McpServer(args) => {
         if args.supervise {
@@ -369,31 +377,302 @@ fn tool_emit(response: ToolResponse, json: bool, tool: &str) -> Result<EmitRespo
     Ok(EmitResponse { response, json })
 }
 
-macro_rules! engine_tool_handlers {
-(@ $($handler:ident($args_type:ty) |$args:ident, $engine:ident, $mode:ident| $tool:literal [$($prepare:tt)*] => $response:expr;)*) => {
-$(fn $handler(input: $args_type) -> Result<EmitResponse> {
-let $args = input;
-$($prepare)*
-let ($engine, $mode) = tool_engine_mode(&$args.tool)?;
-let response = $response;
-tool_emit(response, $args.tool.json, $tool)
-})*
-};
+/// Route a CLI domain op through the shared engine dispatcher exactly once.
+fn dispatch_cli_tool(engine: &TokenZeroEngine, op: &str, args: serde_json::Value) -> ToolResponse {
+    let outcome = tokenzero_mcp::dispatch_cli(engine, op, &args);
+    if let Some(response) = outcome.tool_response {
+        return response;
+    }
+    if let Some(err) = outcome.domain_error {
+        return ToolResponse::error(
+            op,
+            err.kind.as_str(),
+            err.message,
+            None,
+        );
+    }
+    ToolResponse::error(
+        op,
+        "dispatch_empty",
+        "domain dispatch returned no tool response",
+        None,
+    )
 }
 
-engine_tool_handlers! { @
-handle_find(FindArgs) |args, engine, mode| "find" [] => { let paths = default_paths(args.path); engine.find(&args.query, &paths, mode, args.max_files, args.max_visible_tokens) };
-handle_recall(RecallArgs) |args, engine, mode| "recall" [] => engine.recall(&args.query, args.max_hits, mode, args.max_visible_tokens);
-handle_fetch(FetchArgs) |args, engine, mode| "fetch" [] => engine.fetch(&args.url, args.ttl_seconds, args.fresh, mode, args.max_visible_tokens);
-handle_grep(FindArgs) |args, engine, mode| "grep" [] => { let paths = default_paths(args.path); engine.grep(&args.query, &paths, mode, args.max_files, args.max_visible_tokens) };
-handle_glob(GlobArgs) |args, engine, mode| "glob" [] => { let paths = default_paths(args.path); engine.glob(&args.pattern, &paths, args.include_hidden, mode, args.max_files, args.max_visible_tokens) };
-handle_tree(TreeArgs) |args, engine, mode| "tree" [] => { let paths = default_paths(args.path); engine.tree(&paths, args.depth, args.include_hidden, mode, args.max_files, args.max_visible_tokens) };
-handle_edit(EditArgs) |args, engine, mode| "edit" [ let edits_text = if args.stdin { let mut buffer = String::new(); std::io::stdin().read_to_string(&mut buffer)?; buffer } else { args.edits_json.clone().ok_or_else(|| anyhow::anyhow!("edit requires --edits-json <json> or --stdin"))? }; let hunks: Vec<EditHunk> = serde_json::from_str(&edits_text).map_err(|err| anyhow::anyhow!("invalid edits JSON ({err}); expected [{{\"find\": \"...\", \"replace\": \"...\", \"replace_all\": false}}]"))?; ] => engine.edit(&args.path, &hunks, args.create, args.dry_run, mode, args.max_visible_tokens);
-handle_ingest(IngestArgs) |args, engine, mode| "ingest" [ let mut text = String::new(); if args.stdin || args.input.is_none() || args.input.as_deref() == Some(Path::new("-")) { std::io::stdin().read_to_string(&mut text)?; } else if let Some(input) = &args.input { text = fs::read_to_string(input)?; } let kind = content_type_from_kind(&args.kind, &text, args.input.as_deref()); let source = args.input.as_ref().map(|p| p.display().to_string()).unwrap_or_else(|| "stdin".to_string()); ] => engine.ingest(&text, kind, mode, &source);
-handle_read(ReadArgs) |args, engine, mode| "read" [ let mut paths = args.path; if let Some(paths_from) = args.paths_from { let root = tokenzero_work_root(None); let allowed_roots = allowed_roots_for_workspace(&root, &args.tool.allowed_root); if !existing_path_is_within_allowed_roots(&paths_from, &allowed_roots) { return Ok(EmitResponse { response: ToolResponse::error("read", "path_not_allowed", "paths-from file is outside allowed roots", Some("Move the paths-from file under an allowed root or pass an explicit --allowed-root for that file".to_string())), json: args.tool.json }); } let text = fs::read_to_string(paths_from)?; paths.extend(text.lines().filter(|l| !l.trim().is_empty() && !l.trim_start().starts_with('#')).map(PathBuf::from)); }
-if paths.is_empty() { anyhow::bail!("read requires a path"); } ] => engine.read(&paths, mode, args.start_line, args.end_line, args.raw, args.max_files, args.max_visible_tokens);
-handle_run(RunArgs) |args, engine, mode| "shell" [ if args.command.is_empty() && !args.stdin { anyhow::bail!("run requires a command after --"); }
-if args.explain_runtime { let argv = normalize_command(&args.command); let platform = args.runtime_platform.clone().unwrap_or_else(|| tokenzero_runtime::current_platform().to_string()); let plan = plan_command_for_platform(&argv, args.cwd.as_deref(), false, &platform)?; println!("{}", serde_json::to_string_pretty(&plan)?); std::process::exit(0); } let mut stdin_payload = None; if args.stdin { let mut buffer = String::new(); std::io::stdin().read_to_string(&mut buffer)?; stdin_payload = Some(buffer); } let env = env_map(&args.env_overrides)?; let normalized_command = normalize_command(&args.command); let command = display_command_for_platform(&normalized_command, args.cwd.as_deref(), tokenzero_runtime::current_platform()); ] => engine.shell(&command, Some(normalized_command), args.cwd.as_deref(), mode, args.rewrite.as_deref(), args.no_rewrite, Some(env), stdin_payload.as_deref(), None); }
+fn mode_json(mode: Mode) -> String {
+    mode.to_string()
+}
+
+fn paths_json(paths: &[PathBuf]) -> serde_json::Value {
+    json!(paths.iter().map(|p| p.display().to_string()).collect::<Vec<_>>())
+}
+
+
+
+fn handle_find(args: FindArgs) -> Result<EmitResponse> {
+    let (engine, mode) = tool_engine_mode(&args.tool)?;
+    let paths = default_paths(args.path);
+    let response = dispatch_cli_tool(
+        &engine,
+        "tz_find",
+        json!({
+            "query": args.query,
+            "path": paths_json(&paths),
+            "mode": mode_json(mode),
+            "max_files": args.max_files,
+            "max_visible_tokens": args.max_visible_tokens,
+        }),
+    );
+    tool_emit(response, args.tool.json, "find")
+}
+
+fn handle_recall(args: RecallArgs) -> Result<EmitResponse> {
+    let (engine, mode) = tool_engine_mode(&args.tool)?;
+    let response = dispatch_cli_tool(
+        &engine,
+        "tz_recall",
+        json!({
+            "query": args.query,
+            "max_hits": args.max_hits,
+            "mode": mode_json(mode),
+            "max_visible_tokens": args.max_visible_tokens,
+        }),
+    );
+    tool_emit(response, args.tool.json, "recall")
+}
+
+fn handle_fetch(args: FetchArgs) -> Result<EmitResponse> {
+    let (engine, mode) = tool_engine_mode(&args.tool)?;
+    let mut payload = json!({
+        "url": args.url,
+        "fresh": args.fresh,
+        "mode": mode_json(mode),
+        "max_visible_tokens": args.max_visible_tokens,
+    });
+    if let Some(ttl) = args.ttl_seconds {
+        payload["ttl_seconds"] = json!(ttl);
+    }
+    let response = dispatch_cli_tool(&engine, "tz_fetch", payload);
+    tool_emit(response, args.tool.json, "fetch")
+}
+
+fn handle_grep(args: FindArgs) -> Result<EmitResponse> {
+    let (engine, mode) = tool_engine_mode(&args.tool)?;
+    let paths = default_paths(args.path);
+    let response = dispatch_cli_tool(
+        &engine,
+        "tz_grep",
+        json!({
+            "query": args.query,
+            "path": paths_json(&paths),
+            "mode": mode_json(mode),
+            "max_files": args.max_files,
+            "max_visible_tokens": args.max_visible_tokens,
+        }),
+    );
+    tool_emit(response, args.tool.json, "grep")
+}
+
+fn handle_glob(args: GlobArgs) -> Result<EmitResponse> {
+    let (engine, mode) = tool_engine_mode(&args.tool)?;
+    let paths = default_paths(args.path);
+    let response = dispatch_cli_tool(
+        &engine,
+        "tz_glob",
+        json!({
+            "pattern": args.pattern,
+            "path": paths_json(&paths),
+            "include_hidden": args.include_hidden,
+            "mode": mode_json(mode),
+            "max_files": args.max_files,
+            "max_visible_tokens": args.max_visible_tokens,
+        }),
+    );
+    tool_emit(response, args.tool.json, "glob")
+}
+
+fn handle_tree(args: TreeArgs) -> Result<EmitResponse> {
+    let (engine, mode) = tool_engine_mode(&args.tool)?;
+    let paths = default_paths(args.path);
+    let response = dispatch_cli_tool(
+        &engine,
+        "tz_tree",
+        json!({
+            "path": paths_json(&paths),
+            "depth": args.depth,
+            "include_hidden": args.include_hidden,
+            "mode": mode_json(mode),
+            "max_files": args.max_files,
+            "max_visible_tokens": args.max_visible_tokens,
+        }),
+    );
+    tool_emit(response, args.tool.json, "tree")
+}
+
+fn handle_edit(args: EditArgs) -> Result<EmitResponse> {
+    let edits_text = if args.stdin {
+        let mut buffer = String::new();
+        std::io::stdin().read_to_string(&mut buffer)?;
+        buffer
+    } else {
+        args.edits_json
+            .clone()
+            .ok_or_else(|| anyhow::anyhow!("edit requires --edits-json <json> or --stdin"))?
+    };
+    let hunks: Vec<EditHunk> = serde_json::from_str(&edits_text).map_err(|err| {
+        anyhow::anyhow!(
+            "invalid edits JSON ({err}); expected [{{\"find\": \"...\", \"replace\": \"...\", \"replace_all\": false}}]"
+        )
+    })?;
+    let (engine, mode) = tool_engine_mode(&args.tool)?;
+    let edits_json: Vec<serde_json::Value> = hunks
+        .iter()
+        .map(|h| {
+            json!({
+                "find": h.find,
+                "replace": h.replace,
+                "replace_all": h.replace_all,
+            })
+        })
+        .collect();
+    let response = dispatch_cli_tool(
+        &engine,
+        "tz_edit",
+        json!({
+            "path": args.path.display().to_string(),
+            "edits": edits_json,
+            "create": args.create,
+            "dry_run": args.dry_run,
+            "mode": mode_json(mode),
+            "max_visible_tokens": args.max_visible_tokens,
+        }),
+    );
+    tool_emit(response, args.tool.json, "edit")
+}
+
+fn handle_ingest(args: IngestArgs) -> Result<EmitResponse> {
+    let mut text = String::new();
+    if args.stdin || args.input.is_none() || args.input.as_deref() == Some(Path::new("-")) {
+        std::io::stdin().read_to_string(&mut text)?;
+    } else if let Some(input) = &args.input {
+        text = fs::read_to_string(input)?;
+    }
+    let kind = content_type_from_kind(&args.kind, &text, args.input.as_deref());
+    let source = args
+        .input
+        .as_ref()
+        .map(|p| p.display().to_string())
+        .unwrap_or_else(|| "stdin".to_string());
+    let (engine, mode) = tool_engine_mode(&args.tool)?;
+    let response = dispatch_cli_tool(
+        &engine,
+        "tz_ingest",
+        json!({
+            "text": text,
+            "mode": mode_json(mode),
+            "source": source,
+            "content_type": kind.to_string(),
+        }),
+    );
+    tool_emit(response, args.tool.json, "ingest")
+}
+
+fn handle_read(args: ReadArgs) -> Result<EmitResponse> {
+    let mut paths = args.path;
+    if let Some(paths_from) = args.paths_from {
+        let root = tokenzero_work_root(None);
+        let allowed_roots = allowed_roots_for_workspace(&root, &args.tool.allowed_root);
+        if !existing_path_is_within_allowed_roots(&paths_from, &allowed_roots) {
+            return Ok(EmitResponse {
+                response: ToolResponse::error(
+                    "read",
+                    "path_not_allowed",
+                    "paths-from file is outside allowed roots",
+                    Some(
+                        "Move the paths-from file under an allowed root or pass an explicit --allowed-root for that file"
+                            .to_string(),
+                    ),
+                ),
+                json: args.tool.json,
+            });
+        }
+        let text = fs::read_to_string(paths_from)?;
+        paths.extend(
+            text.lines()
+                .filter(|l| !l.trim().is_empty() && !l.trim_start().starts_with('#'))
+                .map(PathBuf::from),
+        );
+    }
+    if paths.is_empty() {
+        anyhow::bail!("read requires a path");
+    }
+    let (engine, mode) = tool_engine_mode(&args.tool)?;
+    let mut payload = json!({
+        "path": paths_json(&paths),
+        "mode": mode_json(mode),
+        "raw": args.raw,
+        "max_files": args.max_files,
+        "max_visible_tokens": args.max_visible_tokens,
+    });
+    if let Some(s) = args.start_line {
+        payload["start_line"] = json!(s);
+    }
+    if let Some(e) = args.end_line {
+        payload["end_line"] = json!(e);
+    }
+    let response = dispatch_cli_tool(&engine, "tz_read", payload);
+    tool_emit(response, args.tool.json, "read")
+}
+
+fn handle_run(args: RunArgs) -> Result<EmitResponse> {
+    if args.command.is_empty() && !args.stdin {
+        anyhow::bail!("run requires a command after --");
+    }
+    if args.explain_runtime {
+        let argv = normalize_command(&args.command);
+        let platform = args
+            .runtime_platform
+            .clone()
+            .unwrap_or_else(|| tokenzero_runtime::current_platform().to_string());
+        let plan = plan_command_for_platform(&argv, args.cwd.as_deref(), false, &platform)?;
+        println!("{}", serde_json::to_string_pretty(&plan)?);
+        std::process::exit(0);
+    }
+    let mut stdin_payload = None;
+    if args.stdin {
+        let mut buffer = String::new();
+        std::io::stdin().read_to_string(&mut buffer)?;
+        stdin_payload = Some(buffer);
+    }
+    let env = env_map(&args.env_overrides)?;
+    let normalized_command = normalize_command(&args.command);
+    let command = display_command_for_platform(
+        &normalized_command,
+        args.cwd.as_deref(),
+        tokenzero_runtime::current_platform(),
+    );
+    let (engine, mode) = tool_engine_mode(&args.tool)?;
+    let mut payload = json!({
+        "command": command,
+        "argv": normalized_command,
+        "mode": mode_json(mode),
+        "no_rewrite": args.no_rewrite,
+    });
+    if let Some(cwd) = &args.cwd {
+        payload["cwd"] = json!(cwd.display().to_string());
+    }
+    if let Some(rewrite) = &args.rewrite {
+        payload["rewrite"] = json!(rewrite);
+    }
+    if let Some(stdin) = &stdin_payload {
+        payload["stdin"] = json!(stdin);
+    }
+    if !env.is_empty() {
+        payload["env"] = json!(env);
+    }
+    let response = dispatch_cli_tool(&engine, "tz_shell", payload);
+    tool_emit(response, args.tool.json, "shell")
+}
 
 fn display_command_for_platform(argv: &[String], cwd: Option<&Path>, platform: &str) -> String {
     match plan_command_for_platform(argv, cwd, false, platform) {
@@ -427,15 +706,24 @@ fn handle_expand(args: ExpandArgs) -> Result<EmitResponse> {
         None,
     );
     let (selector, start, end) = expand_selector(&args);
+    let mut payload = json!({ "ref": ref_id });
+    if let Some(sel) = selector {
+        payload["selector"] = json!(sel);
+    }
+    if let Some(s) = start {
+        payload["start_line"] = json!(s);
+    }
+    if let Some(e) = end {
+        payload["end_line"] = json!(e);
+    }
+    if let Some(k) = &args.anchor_kind {
+        payload["anchor_kind"] = json!(k);
+    }
+    if let Some(sym) = &args.symbol {
+        payload["symbol"] = json!(sym);
+    }
     tool_emit(
-        engine.expand(
-            ref_id,
-            selector.as_deref(),
-            start,
-            end,
-            args.anchor_kind.as_deref(),
-            args.symbol.as_deref(),
-        ),
+        dispatch_cli_tool(&engine, "tz_expand", payload),
         args.json,
         "expand",
     )
@@ -451,22 +739,22 @@ fn emit_rewrite(args: RewriteArgs) -> Result<()> {
         ),
         (None, true) => anyhow::bail!("rewrite requires a command string or `-- <command...>`"),
     };
-    let result = rewrite_command(&command, &args.mode, args.mode != "off");
-    if args.json {
-        print_pretty(&result)
-    } else {
-        println!(
-            "{}: {} ({})",
-            if result.applied {
-                "rewrite"
-            } else {
-                "no-rewrite"
-            },
-            result.rewritten_command,
-            result.reason
-        );
-        Ok(())
-    }
+    let root = tokenzero_work_root(None);
+    let engine = engine_new(
+        &root,
+        default_allowed_roots(&root),
+        None,
+        4000,
+        Mode::Auto,
+        default_shell_timeout(),
+        None,
+    );
+    let response = dispatch_cli_tool(
+        &engine,
+        "tz_rewrite",
+        json!({ "command": command, "mode": args.mode }),
+    );
+    emit_with_json(response, args.json)
 }
 
 fn path_display(p: &Path) -> String {
@@ -767,7 +1055,10 @@ fn io_error_kind_name(kind: std::io::ErrorKind) -> &'static str {
 
 fn handle_cache(args: CacheArgs) -> Result<()> {
     match args.command {
-        CacheCommand::Status(args) => emit_with_json(engine_from_common(&args).mem(), args.json)?,
+        CacheCommand::Status(args) => {
+            let engine = engine_from_common(&args);
+            emit_with_json(dispatch_cli_tool(&engine, "tz_mem", json!({})), args.json)?
+        }
         CacheCommand::Prune(args) => {
             let root = tokenzero_work_root(args.root);
             let cache = resolve_recovery_cache_path(&root, args.cache_path);
@@ -799,19 +1090,21 @@ fn handle_cache(args: CacheArgs) -> Result<()> {
 
 fn handle_cache_pack(args: CachePackArgs) -> Result<()> {
     let root = tokenzero_work_root(args.root.clone());
-    emit_with_json(
-        engine_new(
-            &root,
-            default_allowed_roots(&root),
-            args.cache_path.clone(),
-            4000,
-            Mode::Structured,
-            default_shell_timeout(),
-            None,
-        )
-        .cache_pack(&args.scope),
-        args.json,
-    )
+    let engine = engine_new(
+        &root,
+        default_allowed_roots(&root),
+        args.cache_path.clone(),
+        4000,
+        Mode::Structured,
+        default_shell_timeout(),
+        None,
+    );
+    let response = dispatch_cli_tool(
+        &engine,
+        "tz_cache_pack",
+        json!({ "scope": args.scope }),
+    );
+    emit_with_json(response, args.json)
 }
 
 fn handle_bench(args: BenchArgs) -> Result<()> {

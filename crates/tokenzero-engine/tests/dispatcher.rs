@@ -4,10 +4,11 @@ use serde_json::{Value, json};
 use std::fs;
 use std::path::{Path, PathBuf};
 use tokenzero_core::operation_abi::{DomainErrorKind, all_operations};
-use tokenzero_engine::{all_domain_operations, operation_is_domain, 
-    DispatchSurface, EngineConfig, TokenZeroEngine, dispatch_cli, dispatch_codemode_method,
-    dispatch_count, dispatch_mcp_tool, dispatch_operation, dispatch_raw_worker, domain_fastmcp_ops,
-    is_domain_operation, last_dispatch_profile,
+use tokenzero_engine::{
+    DispatchSurface, EngineConfig, TokenZeroEngine, all_domain_operations, dispatch_cli,
+    dispatch_codemode_method, dispatch_count, dispatch_mcp_tool, dispatch_operation,
+    dispatch_raw_worker, domain_fastmcp_ops, is_domain_operation, last_dispatch_profile,
+    operation_is_domain,
 };
 
 fn engine_for(root: &Path) -> TokenZeroEngine {
@@ -422,4 +423,107 @@ fn every_registry_domain_op_is_kernel_dispatchable() {
             );
         }
     }
+}
+
+
+#[test]
+fn cli_domain_handlers_use_dispatch_cli_only() {
+    // Static parity: CLI main routes domain ops through dispatch_cli_tool /
+    // dispatch_cli and does not call engine domain methods directly.
+    let main = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../tokenzero/src/main.rs");
+    let text = fs::read_to_string(&main).unwrap_or_else(|e| panic!("read {}: {e}", main.display()));
+    assert!(
+        text.contains("fn dispatch_cli_tool"),
+        "CLI must define dispatch_cli_tool thin adapter"
+    );
+    assert!(
+        text.contains("tokenzero_mcp::dispatch_cli")
+            || text.contains("tokenzero_engine::dispatch_cli"),
+        "CLI must call shared dispatch_cli"
+    );
+    let forbidden_direct = [
+        "engine.find(",
+        "engine.grep(",
+        "engine.read(",
+        "engine.glob(",
+        "engine.tree(",
+        "engine.edit(",
+        "engine.shell(",
+        "engine.ingest(",
+        "engine.expand(",
+        "engine.expand_with_params(",
+        "engine.mem(",
+        "engine.recall(",
+        "engine.fetch(",
+        "engine.cache_pack(",
+    ];
+    let mut hits = Vec::new();
+    for (lineno, line) in text.lines().enumerate() {
+        let trimmed = line.trim_start();
+        if trimmed.starts_with("//") {
+            continue;
+        }
+        for pat in forbidden_direct {
+            if trimmed.contains(pat) {
+                hits.push(format!("{}: {line}", lineno + 1));
+            }
+        }
+    }
+    assert!(
+        hits.is_empty(),
+        "CLI still calls engine domain methods directly:\n{}",
+        hits.join("\n")
+    );
+
+    // Every FastMCP domain op that has a CLI surface must appear as dispatch target.
+    let required_ops = [
+        "tz_read",
+        "tz_find",
+        "tz_grep",
+        "tz_recall",
+        "tz_fetch",
+        "tz_glob",
+        "tz_tree",
+        "tz_edit",
+        "tz_shell",
+        "tz_ingest",
+        "tz_expand",
+        "tz_mem",
+        "tz_cache_pack",
+        "tz_rewrite",
+        "tz_discover",
+    ];
+    for op in required_ops {
+        let needle = format!("\"{op}\"");
+        assert!(
+            text.contains(&needle),
+            "CLI missing dispatch target {op}"
+        );
+    }
+}
+
+#[test]
+fn non_domain_cli_commands_are_not_registry_domain_ops() {
+    // Administration / audit CLI commands must not be classified as domain ops.
+    let admin = [
+        "doctor",
+        "install",
+        "clients",
+        "pulse",
+        "session_ledger",
+        "bench",
+        "quote",
+        "hook",
+        "mcp",
+        "codemode",
+    ];
+    for name in admin {
+        assert!(
+            !is_domain_operation(name),
+            "admin CLI name {name} must not resolve as domain op"
+        );
+    }
+    // Domain ops that intentionally have no first-class CLI verb stay domain.
+    assert!(is_domain_operation("tz_batch"));
+    assert!(is_domain_operation("tz_report_tool_issue"));
 }
