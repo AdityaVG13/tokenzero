@@ -42,6 +42,10 @@ pub struct ToolSpec {
     pub description: String,
     #[serde(rename = "inputSchema")]
     pub input_schema: Value,
+    /// Normalized domain result envelope from the operation ABI (tokenzero-irx9.1).
+    /// Present on canonical tools; aliases omit it (empty object schema only).
+    #[serde(rename = "outputSchema", skip_serializing_if = "Option::is_none")]
+    pub output_schema: Option<Value>,
 }
 
 #[derive(Debug, Clone)]
@@ -97,18 +101,29 @@ pub(crate) fn tool_specs_for_filter_with_health(
                 && tool_listed_on_surface(surface, seed.name, recovery_unlocked)
                 && cluster.is_none_or(|cluster| seed.cluster == cluster)
         })
-        .map(|(name, seed)| ToolSpec {
-            name: name.to_string(),
-            description: if name == seed.name {
-                seed.summary.to_string()
+        .map(|(name, seed)| {
+            let canonical = name == seed.name;
+            // Wire schemas come from the ABI registry (single structural source of
+            // truth). Seed-local schema values remain for doc resource text only;
+            // tools/list and FastMCP must not drift from the registry envelope.
+            let (input_schema, output_schema) = if canonical {
+                match tokenzero_core::operation_abi::operation_by_name(seed.name) {
+                    Some(op) => (op.args.schema.clone(), Some(op.results.schema.clone())),
+                    None => (seed.input_schema.clone(), None),
+                }
             } else {
-                alias_summary(seed.name)
-            },
-            input_schema: if name == seed.name {
-                seed.input_schema.clone()
-            } else {
-                catalog_json!({"type": "object"})
-            },
+                (catalog_json!({"type": "object"}), None)
+            };
+            ToolSpec {
+                name: name.to_string(),
+                description: if canonical {
+                    seed.summary.to_string()
+                } else {
+                    alias_summary(seed.name)
+                },
+                input_schema,
+                output_schema,
+            }
         })
         .collect()
 }
@@ -134,7 +149,20 @@ pub(crate) fn tool_docs() -> Vec<Value> {
     catalog_entries(canonical)
         .map(|(name, seed)| {
             let canonical = name == seed.name;
-            let mut doc = catalog_json!({ "name": name, "cluster": seed.cluster, "summary": if canonical { seed.summary.to_string() } else { alias_summary(seed.name) }, "description": if canonical { seed.doc.clone() } else { alias_description(name, seed.name) }, "inputSchema": seed.input_schema, "resultType": "complete", "ttlMs": 60000, "cacheScope": "workspace" });
+            let (input_schema, output_schema) = if canonical {
+                match tokenzero_core::operation_abi::operation_by_name(seed.name) {
+                    Some(op) => (op.args.schema.clone(), Some(op.results.schema.clone())),
+                    None => (seed.input_schema.clone(), None),
+                }
+            } else {
+                (seed.input_schema.clone(), None)
+            };
+            let mut doc = catalog_json!({ "name": name, "cluster": seed.cluster, "summary": if canonical { seed.summary.to_string() } else { alias_summary(seed.name) }, "description": if canonical { seed.doc.clone() } else { alias_description(name, seed.name) }, "inputSchema": input_schema, "resultType": "complete", "ttlMs": 60000, "cacheScope": "workspace" });
+            if let Some(out) = output_schema {
+                doc.as_object_mut()
+                    .expect("doc object")
+                    .insert("outputSchema".to_string(), out);
+            }
             if canonical
                 && seed.arg_aliases.as_object().is_some_and(|map| !map.is_empty())
             {

@@ -18,6 +18,8 @@ struct EngineTool {
     name: String,
     description: String,
     schema: Value,
+    /// Complete domain output schema from the operation ABI (tokenzero-irx9.1).
+    output_schema: Option<Value>,
     engine: Arc<Mutex<TokenZeroEngine>>,
 }
 
@@ -97,7 +99,7 @@ impl ToolHandler for EngineTool {
             name: self.name.clone(),
             description: Some(self.description.clone()),
             input_schema: self.schema.clone(),
-            output_schema: None,
+            output_schema: self.output_schema.clone(),
             icon: None,
             version: None,
             tags: Vec::new(),
@@ -205,10 +207,16 @@ pub fn run_fastmcp_stdio(config: EngineConfig) -> ! {
         if !surface_includes(surface, seed.name) {
             continue;
         }
+        let (input_schema, output_schema) =
+            match tokenzero_core::operation_abi::operation_by_name(seed.name) {
+                Some(op) => (op.args.schema.clone(), Some(op.results.schema.clone())),
+                None => (seed.input_schema.clone(), None),
+            };
         let handler = EngineTool {
             name: seed.name.to_string(),
             description: seed.summary.to_string(),
-            schema: seed.input_schema.clone(),
+            schema: input_schema,
+            output_schema,
             engine: Arc::clone(&engine),
         };
         builder = builder.tool(handler);
@@ -224,6 +232,7 @@ pub fn run_fastmcp_stdio(config: EngineConfig) -> ! {
             name: alias.to_string(),
             description: crate::catalog::alias_summary(target),
             schema: serde_json::json!({"type": "object"}),
+            output_schema: None,
             engine: Arc::clone(&engine),
         };
         builder = builder.tool(handler);

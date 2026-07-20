@@ -206,7 +206,7 @@ pub fn describe_method(path: &str) -> Value {
         .iter()
         .find(|m| m.path.to_lowercase() == path_lower)
     {
-        json!({
+        let mut body = json!({
             "path": m.path,
             "description": m.description,
             "signature": m.signature,
@@ -219,7 +219,16 @@ pub fn describe_method(path: &str) -> Value {
             "safety": {
                 "sandbox": "fresh isolated context per execution; no network/env/process/raw-fs/module/timer capabilities"
             }
-        })
+        });
+        // Structural I/O schemas from the operation ABI (tokenzero-irx9.1) so
+        // CodeMode describe cannot drift from FastMCP tools/list envelopes.
+        if let Some(op) = tokenzero_core::operation_abi::resolve_operation(m.path) {
+            let obj = body.as_object_mut().expect("describe object");
+            obj.insert("inputSchema".into(), op.args.schema.clone());
+            obj.insert("outputSchema".into(), op.results.schema.clone());
+            obj.insert("canonical_op".into(), json!(op.name));
+        }
+        body
     } else {
         json!({
             "path": path,
@@ -232,12 +241,21 @@ pub fn describe_method(path: &str) -> Value {
 pub(crate) fn codemode_method_catalog() -> Value {
     json!({
         "schema_version": "tokenzero.codemode.catalog.v1",
-        "methods": METHOD_CATALOG.iter().map(|m| json!({
-            "path": m.path,
-            "connector": m.connector,
-            "description": m.description,
-            "signature": m.signature,
-        })).collect::<Vec<_>>(),
+        "methods": METHOD_CATALOG.iter().map(|m| {
+            let mut entry = json!({
+                "path": m.path,
+                "connector": m.connector,
+                "description": m.description,
+                "signature": m.signature,
+            });
+            if let Some(op) = tokenzero_core::operation_abi::resolve_operation(m.path) {
+                let obj = entry.as_object_mut().expect("method entry");
+                obj.insert("inputSchema".into(), op.args.schema.clone());
+                obj.insert("outputSchema".into(), op.results.schema.clone());
+                obj.insert("canonical_op".into(), json!(op.name));
+            }
+            entry
+        }).collect::<Vec<_>>(),
         "discovery": {
             "search_prefix": "search:<query>",
             "describe_prefix": "describe:<method>",
