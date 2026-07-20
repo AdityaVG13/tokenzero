@@ -631,6 +631,19 @@ struct ShellRenderContext<'a> {
     max_tokens: usize,
 }
 
+/// Token count of the full shell input against which a rendered diagnostic is
+/// measured. Stream recovery bytes remain unchanged and separately referenced.
+pub fn shell_raw_tokens(
+    command: &str,
+    exit_code: Option<i32>,
+    stdout: &str,
+    stderr: &str,
+) -> usize {
+    count_tokens(&shell_policy::shell_raw_accounting_output(
+        command, exit_code, stdout, stderr,
+    ))
+}
+
 pub fn render_shell(input: ShellRenderInput<'_>) -> ShellRender {
     let status = shell_input_status(&input);
     let policy = decide_shell_policy(
@@ -640,10 +653,10 @@ pub fn render_shell(input: ShellRenderInput<'_>) -> ShellRender {
         input.exit_code,
         input.mode,
     );
-    let combined =
-        shell_combined_output(input.command, input.exit_code, input.stdout, input.stderr);
-    let (combined_line_count, combined_tokens) =
-        (combined.lines().count(), count_tokens(&combined));
+    let combined = shell_policy::shell_stream_output(input.exit_code, input.stdout, input.stderr);
+    let combined_line_count = combined.lines().count();
+    let combined_tokens =
+        shell_raw_tokens(input.command, input.exit_code, input.stdout, input.stderr);
     let (mut minimal_envelope, mut success_compacted) = (false, false);
     let max_t = input.max_visible_tokens;
     let cp = should_compact_tiny_shell(&input, &policy, &status);
@@ -870,16 +883,12 @@ fn format_shell_status_header(
     push_optional_shell_kv(
         &mut vis,
         "stdout_ref",
-        input
-            .stdout_ref
-            .filter(|_| !input.stdout.is_empty()),
+        input.stdout_ref.filter(|_| !input.stdout.is_empty()),
     );
     push_optional_shell_kv(
         &mut vis,
         "stderr_ref",
-        input
-            .stderr_ref
-            .filter(|_| !input.stderr.is_empty()),
+        input.stderr_ref.filter(|_| !input.stderr.is_empty()),
     );
     push_optional_shell_kv(&mut vis, "combined_ref", input.combined_ref);
     vis + "\n" + body.trim_end()
@@ -902,12 +911,14 @@ pub fn render_shell_repeat(input: ShellRenderInput<'_>, repeat_seen: u32) -> She
     let status = shell_input_status(&input);
     if repeat_seen >= 2 && safe_auto_success(&input, &status) && input.combined_ref.is_some() {
         let combined =
-            shell_combined_output(input.command, input.exit_code, input.stdout, input.stderr);
+            shell_policy::shell_stream_output(input.exit_code, input.stdout, input.stderr);
+        let raw_tokens =
+            shell_raw_tokens(input.command, input.exit_code, input.stdout, input.stderr);
         let mut visible = format!("# shell ok (unchanged; run {repeat_seen})");
         if let Some(r) = input.combined_ref {
             visible += &format!("\ncombined_ref: {r}");
         }
-        if count_tokens(&visible) < count_tokens(&combined) {
+        if count_tokens(&visible) < raw_tokens {
             let visible = enforce_token_budget(&visible, input.max_visible_tokens);
             return ShellRender {
                 omitted_lines: combined

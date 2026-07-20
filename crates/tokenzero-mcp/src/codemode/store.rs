@@ -143,6 +143,11 @@ pub fn execution_ref(id: &str, suffix: &str) -> String {
     }
 }
 
+#[cfg(test)]
+thread_local! {
+    static COMMIT_CALLS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 pub struct ExecutionStore {
     store: RecoveryStore,
 }
@@ -153,28 +158,58 @@ impl ExecutionStore {
             store: RecoveryStore::new(Some(cache_path)),
         }
     }
-    pub fn store_json(&mut self, value: &Value) -> Result<String, String> {
-        self.store_text(
+    pub fn store_json_deferred(&mut self, value: &Value) -> Result<String, String> {
+        self.store_text_deferred(
             &serde_json::to_string_pretty(value).map_err(|error| error.to_string())?,
             ContentType::JsonConfig,
         )
     }
-    pub fn store_text(&mut self, text: &str, content_type: ContentType) -> Result<String, String> {
-        self.store
-            .store_payload(text, content_type, None, None, None)
-            .map(|stored| stored.blob_ref.as_str().to_string())
-            .map_err(|error| error.to_string())
+
+    pub fn store_text_deferred(
+        &mut self,
+        text: &str,
+        content_type: ContentType,
+    ) -> Result<String, String> {
+        Ok(self
+            .store
+            .store_payload_deferred_batch(text, content_type, None, None, None)
+            .blob_ref)
     }
-    pub fn alias(&mut self, logical_ref: &str, target_ref: &str) -> Result<(), String> {
+
+    pub fn alias_deferred(&mut self, logical_ref: &str, target_ref: &str) {
+        self.store.store_alias_deferred(logical_ref, target_ref);
+    }
+
+    pub fn commit(&mut self) -> Result<(), String> {
+        #[cfg(test)]
+        COMMIT_CALLS.with(|calls| calls.set(calls.get() + 1));
         self.store
-            .store_alias(logical_ref, target_ref)
+            .persist_pending_durable()
             .map_err(|error| error.to_string())
     }
 }
 
-fn stored(result: Result<String, String>) -> String {
-    result.unwrap_or_else(|error| format!("store-error:{error}"))
+fn storage_failure(message: String, operations: usize) -> CodeModeResult {
+    CodeModeResult::error_with_kind(
+        "store",
+        format!("execution record commit failed: {message}"),
+        operations,
+        false,
+    )
 }
+
+fn deferred_json(store: &mut ExecutionStore, value: &Value) -> String {
+    store
+        .store_json_deferred(value)
+        .unwrap_or_else(|error| format!("store-error:{error}"))
+}
+
+fn deferred_text(store: &mut ExecutionStore, text: &str, content_type: ContentType) -> String {
+    store
+        .store_text_deferred(text, content_type)
+        .unwrap_or_else(|error| format!("store-error:{error}"))
+}
+
 
 #[allow(clippy::too_many_arguments)]
 pub fn finalize_result(
@@ -213,20 +248,20 @@ pub fn finalize_result(
     extra.insert("finished_at_ms".to_string(), json!(finished_ms));
     result.telemetry.extra = Some(Value::Object(extra));
 
-    let code_ref = stored(store.store_text(plan, ContentType::Code));
-    let steps_ref = stored(store.store_json(&json!(steps)));
-    let telemetry_ref = stored(store.store_json(&json!(result.telemetry)));
+    let code_ref = deferred_text(&mut store, plan, ContentType::Code);
+    let steps_ref = deferred_json(&mut store, &json!(steps));
+    let telemetry_ref = deferred_json(&mut store, &json!(result.telemetry));
 
     let result_ref = result.value.as_ref().and_then(|value| {
         serde_json::to_vec(value)
             .ok()
             .filter(|bytes| bytes.len() <= limits.max_result_ref_bytes)
-            .and_then(|_| store.store_json(value).ok())
+            .map(|_| deferred_json(&mut store, value))
     });
     let error_ref = result
         .error
         .as_ref()
-        .and_then(|error| store.store_json(&json!(error)).ok());
+        .map(|error| deferred_json(&mut store, &json!(error)));
 
     let logical_ref = |suffix| execution_ref(&id, suffix);
     let execution_logical_ref = logical_ref("");
@@ -252,7 +287,7 @@ pub fn finalize_result(
         refs: result.refs.clone(),
     };
     let record_value = serde_json::to_value(&record).unwrap_or(Value::Null);
-    let execution_record_ref = stored(store.store_json(&record_value));
+    let execution_record_ref = deferred_json(&mut store, &record_value);
 
     // envelope.v3: one execution_id replaces execution_refs + store blocks.
     let envelope_bundle = json!({
@@ -263,7 +298,7 @@ pub fn finalize_result(
         "telemetry": result.telemetry.clone(),
         "refs": result.refs.clone(),
     });
-    let envelope_ref = stored(store.store_json(&envelope_bundle));
+    let envelope_ref = deferred_json(&mut store, &envelope_bundle);
 
     for (logical, stored) in [
         (&execution_logical_ref, Some(execution_record_ref.as_str())),
@@ -275,8 +310,12 @@ pub fn finalize_result(
         (&envelope_logical_ref, Some(envelope_ref.as_str())),
     ] {
         if let Some(stored) = stored {
-            let _ = store.alias(logical, stored);
+            store.alias_deferred(logical, stored);
         }
+    }
+
+    if let Err(error) = store.commit() {
+        return storage_failure(error, result.telemetry.operations());
     }
 
     if result.refs.len() < limits.max_refs_emitted {
@@ -487,5 +526,109 @@ fn strip_exact_expand_markers(value: &mut Value) {
         }
         Value::Array(items) => items.iter_mut().for_each(strip_exact_expand_markers),
         _ => {}
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn completed(value: Value) -> CodeModeResult {
+        CodeModeResult::completed(value, Vec::new(), 0, 1, 1)
+    }
+
+    #[test]
+    fn finalization_commits_one_batch_and_recovers_every_logical_ref() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = dir.path().join("cache.json");
+        COMMIT_CALLS.with(|calls| calls.set(0));
+        let finalized = finalize_result(
+            completed(json!({"ok": true})),
+            "code",
+            "return { ok: true }",
+            100,
+            101,
+            ExecutionStore::new(cache.clone()),
+            &CodeModeLimits::default(),
+            Vec::new(),
+        );
+
+        assert_eq!(finalized.status, CodeModeStatus::Completed);
+        assert_eq!(finalized.visible_ack, "C");
+        COMMIT_CALLS.with(|calls| assert_eq!(calls.get(), 1));
+
+        let id = finalized.execution_id.as_deref().unwrap();
+        let mut restarted = RecoveryStore::new(Some(cache));
+        for suffix in ["", "code", "steps", "telemetry", "result", "envelope"] {
+            let logical = execution_ref(id, suffix);
+            let expanded = restarted.expand(&logical, Some("raw"), None, None, None, None);
+            assert!(expanded.found, "{logical}: {}", expanded.reason);
+        }
+    }
+
+    #[test]
+    fn failed_batch_commit_never_returns_a_completed_ack() {
+        let dir = tempfile::tempdir().unwrap();
+        let blocked_parent = dir.path().join("not-a-directory");
+        std::fs::write(&blocked_parent, "block").unwrap();
+        let finalized = finalize_result(
+            completed(json!({"ok": true})),
+            "code",
+            "return true",
+            200,
+            201,
+            ExecutionStore::new(blocked_parent.join("cache.json")),
+            &CodeModeLimits::default(),
+            Vec::new(),
+        );
+
+        assert_eq!(finalized.status, CodeModeStatus::Error);
+        assert_ne!(finalized.visible_ack, "C");
+        assert!(finalized.execution_refs.is_none());
+        let error = finalized.error.as_ref().unwrap();
+        assert_eq!(error.kind, "store");
+        assert!(error.message.contains("execution record commit failed"));
+    }
+
+    #[test]
+    fn concurrent_finalizers_publish_isolated_replayable_batches() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = std::sync::Arc::new(dir.path().join("cache.json"));
+        let workers = [
+            ("return 'alpha'", 300_u128, "alpha"),
+            ("return 'beta'", 301_u128, "beta"),
+        ]
+        .into_iter()
+        .map(|(plan, started, value)| {
+            let cache = std::sync::Arc::clone(&cache);
+            std::thread::spawn(move || {
+                finalize_result(
+                    completed(json!(value)),
+                    "code",
+                    plan,
+                    started,
+                    started + 1,
+                    ExecutionStore::new((*cache).clone()),
+                    &CodeModeLimits::default(),
+                    Vec::new(),
+                )
+            })
+        })
+        .collect::<Vec<_>>();
+        let finalized = workers
+            .into_iter()
+            .map(|worker| worker.join().unwrap())
+            .collect::<Vec<_>>();
+
+        let mut restarted = RecoveryStore::new(Some((*cache).clone()));
+        for result in finalized {
+            assert_eq!(result.status, CodeModeStatus::Completed);
+            let id = result.execution_id.as_deref().unwrap();
+            for suffix in ["code", "result", "envelope"] {
+                let logical = execution_ref(id, suffix);
+                let expanded = restarted.expand(&logical, Some("raw"), None, None, None, None);
+                assert!(expanded.found, "{logical}: {}", expanded.reason);
+            }
+        }
     }
 }

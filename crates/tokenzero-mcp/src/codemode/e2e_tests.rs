@@ -299,9 +299,9 @@ fn promise_all_runs_independent_shells_concurrently() {
     let work = tempfile::tempdir().unwrap();
     let plan = r#"
         await Promise.all([
-          zero.shell("sleep 1"),
-          zero.shell("sleep 1"),
-          zero.shell("sleep 1"),
+          zero.shell('touch promise-all-a; i=0; while [ ! -f promise-all-b ] || [ ! -f promise-all-c ]; do i=$((i+1)); [ "$i" -lt 100 ] || exit 9; sleep 0.02; done'),
+          zero.shell('touch promise-all-b; i=0; while [ ! -f promise-all-a ] || [ ! -f promise-all-c ]; do i=$((i+1)); [ "$i" -lt 100 ] || exit 9; sleep 0.02; done'),
+          zero.shell('touch promise-all-c; i=0; while [ ! -f promise-all-a ] || [ ! -f promise-all-b ]; do i=$((i+1)); [ "$i" -lt 100 ] || exit 9; sleep 0.02; done'),
         ]);
         return { ok: true };
     "#;
@@ -321,22 +321,14 @@ fn promise_all_runs_independent_shells_concurrently() {
         "{:?}",
         result.error
     );
-    assert!(
-        result.telemetry.physical_ops >= 3,
-        "expected >=3 physical ops, got {}",
-        result.telemetry.physical_ops
+    assert_eq!(
+        result.telemetry.physical_ops, 3,
+        "expected exactly 3 physical ops"
     );
-    assert!(
-        result.telemetry.parallel_groups.unwrap_or(0) >= 1,
-        "expected a parallel group, got {:?}",
-        result.telemetry.parallel_groups
-    );
-    assert!(
-        result.telemetry.wall_ms < 2500,
-        "3x sleep 1 under Promise.all must be ~1s not ~3s; wall_ms={} physical_ops={} parallel_groups={:?}",
-        result.telemetry.wall_ms,
-        result.telemetry.physical_ops,
-        result.telemetry.parallel_groups
+    assert_eq!(
+        result.telemetry.parallel_groups,
+        Some(1),
+        "expected exactly one parallel group"
     );
 }
 
@@ -384,6 +376,10 @@ fn expand_array_arg_routes_to_expand_many() {
         plan,
         CodeModeOptions {
             root: Some(work.path().to_path_buf()),
+            // This proves argument routing, not the production five-second wall.
+            // Leave headroom for shared machine-permit contention in the full suite.
+            max_wall_ms: 60_000,
+            hard_max_wall_ms: 60_000,
             ..Default::default()
         },
     );

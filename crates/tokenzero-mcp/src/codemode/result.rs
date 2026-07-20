@@ -130,6 +130,8 @@ impl CodeModeTelemetry {
     }
 }
 
+const DEFAULT_REF_FIRST_BUDGET: usize = 256;
+
 #[derive(Debug, Clone)]
 pub struct CodeModeOptions {
     pub root: Option<PathBuf>,
@@ -180,7 +182,7 @@ impl Default for CodeModeOptions {
             max_parallel_width: super::store::DEFAULT_MAX_PARALLEL_WIDTH,
             envelope: None,
             ref_first: true,
-            ref_first_budget: crate::DEFAULT_SHELL_INLINE_BUDGET,
+            ref_first_budget: DEFAULT_REF_FIRST_BUDGET,
             surface_health: None,
             telemetry_enabled: None,
         }

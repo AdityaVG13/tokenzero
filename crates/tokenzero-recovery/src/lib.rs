@@ -47,6 +47,28 @@ pub use session_aliases::{
 #[cfg(test)]
 mod tests;
 
+#[cfg(test)]
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum DurableCommitFailPoint {
+    BeforePersist,
+    BeforeFileSync,
+    BeforeDirectorySync,
+}
+
+#[cfg(test)]
+thread_local! {
+    static DURABLE_COMMIT_FAIL_POINT: std::cell::Cell<Option<DurableCommitFailPoint>> =
+        const { std::cell::Cell::new(None) };
+}
+
+#[cfg(test)]
+fn fail_durable_commit_at(point: DurableCommitFailPoint) -> Result<(), RecoveryError> {
+    if DURABLE_COMMIT_FAIL_POINT.with(|configured| configured.get() == Some(point)) {
+        return Err(io::Error::other("durable commit fault injected").into());
+    }
+    Ok(())
+}
+
 const LOCK_RETRIES: usize = 240;
 const MAX_SHELL_OUTCOMES: usize = 256;
 const LOCK_RETRY_DELAY: Duration = Duration::from_millis(25);
@@ -949,6 +971,35 @@ impl RecoveryStore {
 
     pub fn persist_pending(&mut self) -> Result<(), RecoveryError> {
         self.persist()
+    }
+
+    /// Publish all deferred mutations as one recovery entry and make that
+    /// publication durable before returning to a caller that will acknowledge it.
+    pub fn persist_pending_durable(&mut self) -> Result<(), RecoveryError> {
+        #[cfg(test)]
+        fail_durable_commit_at(DurableCommitFailPoint::BeforePersist)?;
+        self.persist()?;
+        let Some(path) = self.persistence_path.as_deref() else {
+            return Ok(());
+        };
+        let journal = journal_path(path);
+        let published = if journal.exists() { &journal } else { path };
+        #[cfg(test)]
+        fail_durable_commit_at(DurableCommitFailPoint::BeforeFileSync)?;
+        if published.exists() {
+            fs::File::open(published)?.sync_all()?;
+        }
+        #[cfg(test)]
+        fail_durable_commit_at(DurableCommitFailPoint::BeforeDirectorySync)?;
+        #[cfg(unix)]
+        {
+            let parent = path
+                .parent()
+                .filter(|parent| !parent.as_os_str().is_empty())
+                .unwrap_or_else(|| Path::new("."));
+            fs::File::open(parent)?.sync_all()?;
+        }
+        Ok(())
     }
 
     pub fn store_alias(&mut self, alias: &str, target_ref: &str) -> Result<(), RecoveryError> {

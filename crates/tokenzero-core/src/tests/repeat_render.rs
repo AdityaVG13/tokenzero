@@ -68,7 +68,12 @@ fn repeat_render_never_compacts_failures_first_runs_or_explicit_modes() {
 #[test]
 fn repeat_render_keeps_adaptive_floor_for_tiny_outputs() {
     let input = success_input("true", "", "");
-    let raw = count_tokens(&shell_combined_output("true", Some(0), "", ""));
+    let raw = count_tokens(&shell_policy::shell_raw_accounting_output(
+        "true",
+        Some(0),
+        "",
+        "",
+    ));
     let rendered = render_shell_repeat(input, 9);
     assert!(
         count_tokens(&rendered.visible) <= raw,

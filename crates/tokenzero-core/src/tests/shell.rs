@@ -390,7 +390,12 @@ fn short_failing_shell_uses_compact_diagnostic_view_below_raw_tokens() {
         stderr_ref: Some("tz://blob/stderr"),
         combined_ref: Some("tz://blob/combined"),
     });
-    let raw_tokens = count_tokens(&shell_combined_output(command, Some(7), "", stderr));
+    let raw_tokens = count_tokens(&shell_policy::shell_raw_accounting_output(
+        command,
+        Some(7),
+        "",
+        stderr,
+    ));
     let visible_tokens = count_tokens(&rendered.visible);
 
     assert_eq!(rendered.policy.policy, "diagnostic");
@@ -431,7 +436,12 @@ fn short_mixed_failure_prioritizes_error_anchor_below_raw_tokens() {
         stderr_ref: Some("tz://blob/stderr"),
         combined_ref: Some("tz://blob/combined"),
     });
-    let raw_tokens = count_tokens(&shell_combined_output(command, Some(3), stdout, stderr));
+    let raw_tokens = count_tokens(&shell_policy::shell_raw_accounting_output(
+        command,
+        Some(3),
+        stdout,
+        stderr,
+    ));
     let visible_tokens = count_tokens(&rendered.visible);
 
     assert_eq!(rendered.output_strategy, "compact_diagnostic_shell");
@@ -470,7 +480,12 @@ fn short_repo_inventory_shell_view_stays_below_raw_tokens_with_ref() {
         stderr_ref: Some("tz://blob/stderr"),
         combined_ref: Some("tz://blob/combined"),
     });
-    let raw_tokens = count_tokens(&shell_combined_output(command, Some(0), stdout, ""));
+    let raw_tokens = count_tokens(&shell_policy::shell_raw_accounting_output(
+        command,
+        Some(0),
+        stdout,
+        "",
+    ));
     let visible_tokens = count_tokens(&rendered.visible);
 
     assert_eq!(rendered.policy.policy, "structured");

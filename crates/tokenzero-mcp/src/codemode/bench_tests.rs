@@ -171,6 +171,10 @@ fn codemode_v2_refs_are_capped_to_returned_value_refs() {
     let value_text = serde_json::to_string(structured.get("value").unwrap()).unwrap();
     let refs = structured.get("refs").and_then(Value::as_array).unwrap();
     assert_eq!(refs.len(), 1);
+    let ref_id = refs[0].as_str().unwrap();
+    let expanded = f.engine.expand(ref_id, Some("raw"), None, None, None, None);
+    assert_eq!(expanded.status, "ok");
+    assert_eq!(expanded.visible.as_ref().unwrap().text, big);
     for reference in refs {
         assert!(value_text.contains(reference.as_str().unwrap()));
     }

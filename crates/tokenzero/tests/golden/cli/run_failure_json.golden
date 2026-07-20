@@ -1,9 +1,9 @@
 {
   "accounting": {
     "exact_ref_tokens": 28,
-    "raw_tokens": 26,
+    "raw_tokens": 22,
     "recovery_tokens": 0,
-    "visible_tokens": 31
+    "visible_tokens": 46
   },
   "content_type": "shell_output",
   "mode": "diagnostic",
@@ -21,7 +21,7 @@
       "ref": "tz://blob/[BLOB_REF_2]"
     },
     {
-      "bytes": 87,
+      "bytes": 18,
       "kind": "combined",
       "live": true,
       "ref": "tz://blob/[BLOB_REF_3]"
@@ -59,6 +59,7 @@
     "command": "sh -c 'printf alpha; printf beta >&2; exit 7'",
     "command_success": false,
     "cwd": "[TMP]",
+    "cwd_source": "explicit",
     "execution_mode": "argv",
     "exit_code": 7,
     "failed_segment": "exit 7",
@@ -70,7 +71,7 @@
     "pipeline_rerun_command": null,
     "policy": "diagnostic",
     "policy_reason": "failure or diagnostic family",
-    "raw_tokens": 26,
+    "raw_tokens": 22,
     "recovery_tokens": 0,
     "rewrite_applied": false,
     "rewrite_skip_reason": "disabled",
@@ -104,11 +105,11 @@
     "stdout_ref": "tz://blob/[BLOB_REF_1]",
     "timeout": false,
     "transport_status": "ok",
-    "visible_tokens": 31
+    "visible_tokens": 46
   },
   "tool": "shell",
   "visible": {
     "kind": "capsule",
-    "text": "# shell\nstatus: command_failed\nexit_code: 7\nfailed_segment: exit 7\nstderr_ref: tz://blob/[BLOB_REF_2]\ncombined_ref: tz://blob/[BLOB_REF_3]\n\nalpha"
+    "text": "# shell\ncwd: [TMP]\nstatus: command_failed\nexit_code: 7\nfailed_segment: exit 7\nstderr_ref: tz://blob/[BLOB_REF_2]\ncombined_ref: tz://blob/[BLOB_REF_3]\n\nalpha"
   }
 }

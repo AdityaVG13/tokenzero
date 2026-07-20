@@ -591,6 +591,56 @@ fn cli_run_preserves_trailing_child_json_without_delimiter() {
         stdout.contains("exit_code: 0"),
         "text-mode run envelope expected; got {stdout}"
     );
+    assert!(
+        stdout.contains("combined_ref: tz://blob/"),
+        "exact combined recovery ref expected; got {stdout}"
+    );
+}
+
+#[test]
+fn cli_run_inline_shell_envelope_handles_empty_stdout() {
+    let output = Command::cargo_bin("tokenzero")
+        .unwrap()
+        .args(["run", "printf", ""])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(!stdout.contains("stdout:\n"), "{stdout}");
+    assert!(stdout.contains("combined_ref: tz://blob/"), "{stdout}");
+    assert!(stdout.contains("exit_code: 0"), "{stdout}");
+}
+
+#[test]
+fn cli_run_nonzero_exit_keeps_existing_failure_envelope() {
+    let output = Command::cargo_bin("tokenzero")
+        .unwrap()
+        .args(["run", "sh", "-c", "printf boom; exit 7"])
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(7));
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("exit_code: 7"), "{stdout}");
+    assert!(stdout.contains("combined_ref: tz://blob/"), "{stdout}");
+}
+
+#[test]
+fn cli_run_parent_json_keeps_inline_payload_unwrapped() {
+    let output = Command::cargo_bin("tokenzero")
+        .unwrap()
+        .args(["run", "--json", "printf", "%s\n", "--json"])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let json: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(json["visible"]["text"], "--json");
+    assert_eq!(json["telemetry"]["output_strategy"], "inline_shell");
+    assert_eq!(json["telemetry"]["exit_code"], 0);
+    assert!(
+        json["refs"]
+            .as_array()
+            .is_some_and(|refs| refs.iter().any(|record| record["kind"] == "combined"))
+    );
 }
 
 #[test]

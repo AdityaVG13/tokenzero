@@ -3579,6 +3579,10 @@ dependencies = [
 [[package]]
 name = "zerostack-machine-permit"
 version = "1.4.0"
+dependencies = [
+ "libc",
+ "windows-sys",
+]
 
 [[package]]
 name = "zmij"

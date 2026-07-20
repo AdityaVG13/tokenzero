@@ -5,12 +5,17 @@ use tokenzero_core::MCP_SCHEMA_VERSION;
 
 use super::support::*;
 
-struct RefIndexRootOverrideGuard;
+struct RefIndexRootOverrideGuard {
+    _lock: std::sync::MutexGuard<'static, ()>,
+}
 
 impl RefIndexRootOverrideGuard {
     fn new(path: std::path::PathBuf) -> Self {
+        let lock = super::REF_INDEX_OVERRIDE_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         tokenzero_recovery::set_ref_index_root_override(Some(path));
-        Self
+        Self { _lock: lock }
     }
 }
 

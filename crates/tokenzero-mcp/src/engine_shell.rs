@@ -489,20 +489,31 @@ impl TokenZeroEngine {
             return degraded_shell_response(command, mode, &output, error);
         }
         let refs_complete = persisted.refs_complete;
-        let raw_tokens = count_tokens(&output);
+        let raw_tokens = shell_raw_tokens(command, result.exit_code, &stdout_display, &stderr_display);
+        // Tokenizers can encode long repeated runs as a single token. Keep the
+        // token accounting exact, but bound inline transport by bytes as well.
+        let fits_default_inline_extent =
+            output.len() <= DEFAULT_SHELL_INLINE_BUDGET.saturating_mul(4);
+        let fits_configured_inline_extent =
+            output.len() <= self.config.shell_inline_budget.saturating_mul(4);
         let inline_shell_output = refs_complete
             && !streams_truncated
             && render.command_status.command_success
             && self.config.shell_inline_budget > 0
-            && raw_tokens <= self.config.shell_inline_budget;
-        let small_shell_output =
-            refs_complete && !streams_truncated && raw_tokens <= DEFAULT_SHELL_INLINE_BUDGET;
+            && raw_tokens <= self.config.shell_inline_budget
+            && fits_configured_inline_extent;
+        let small_shell_output = refs_complete
+            && !streams_truncated
+            && render.command_status.command_success
+            && raw_tokens <= DEFAULT_SHELL_INLINE_BUDGET
+            && fits_default_inline_extent;
         let visible_text = if inline_shell_output {
             output.trim_end().to_string()
         } else if refs_complete
             && self.config.shell_inline_budget == 0
             && !streams_truncated
             && raw_tokens <= DEFAULT_SHELL_INLINE_BUDGET
+            && fits_default_inline_extent
             && render.command_status.command_success
         {
             format!("# shell ok\ncombined_ref: {}", combined_stored.blob_ref)

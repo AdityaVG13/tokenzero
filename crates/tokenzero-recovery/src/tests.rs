@@ -1412,6 +1412,70 @@ fn corrupt_journal_tail_keeps_complete_entries() {
 }
 
 #[test]
+fn torn_deferred_batch_never_exposes_partial_aliases() {
+    let dir = tempdir().unwrap();
+    let cache = dir.path().join("cache.json");
+    let target = {
+        let mut store = RecoveryStore::new(Some(cache.clone()));
+        let stored = store.store_payload_deferred_batch(
+            "committed\n",
+            ContentType::Unknown,
+            None,
+            None,
+            None,
+        );
+        store.store_alias_deferred("tz://batch/committed", &stored.blob_ref);
+        store.persist_pending_durable().unwrap();
+        stored.blob_ref
+    };
+
+    let journal = journal_path(&cache);
+    let torn = format!(
+        "{{\"refs\":[],\"state\":{{\"aliases\":{{\"tz://batch/torn\":\"{target}\""
+    );
+    fs::write(&journal, torn).unwrap();
+
+    let mut restarted = RecoveryStore::new(Some(cache));
+    let committed = restarted.expand(
+        "tz://batch/committed",
+        Some("raw"),
+        None,
+        None,
+        None,
+        None,
+    );
+    assert!(committed.found, "{}", committed.reason);
+    assert_eq!(committed.content, "committed\n");
+    let partial = restarted.expand("tz://batch/torn", Some("raw"), None, None, None, None);
+    assert!(!partial.found, "torn alias batch became visible");
+}
+
+#[test]
+fn durable_batch_propagates_before_during_and_final_sync_failures() {
+    for point in [
+        DurableCommitFailPoint::BeforePersist,
+        DurableCommitFailPoint::BeforeFileSync,
+        DurableCommitFailPoint::BeforeDirectorySync,
+    ] {
+        let dir = tempdir().unwrap();
+        let cache = dir.path().join("cache.json");
+        let mut store = RecoveryStore::new(Some(cache));
+        let stored = store.store_payload_deferred_batch(
+            "faulted\n",
+            ContentType::Unknown,
+            None,
+            None,
+            None,
+        );
+        store.store_alias_deferred("tz://batch/faulted", &stored.blob_ref);
+        DURABLE_COMMIT_FAIL_POINT.with(|configured| configured.set(Some(point)));
+        let error = store.persist_pending_durable().unwrap_err();
+        DURABLE_COMMIT_FAIL_POINT.with(|configured| configured.set(None));
+        assert!(error.to_string().contains("durable commit fault injected"));
+    }
+}
+
+#[test]
 fn oversized_journal_compacts_into_fresh_snapshot() {
     let dir = tempdir().unwrap();
     let cache = dir.path().join("cache.json");

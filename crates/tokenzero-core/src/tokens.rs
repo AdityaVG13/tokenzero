@@ -338,11 +338,15 @@ pub(crate) fn count_tokens_tail(text: &str, start_byte_offset: usize) -> usize {
     tokens
 }
 
+/// Fraction of raw tokens avoided, bounded to the meaningful savings range.
+///
+/// When an envelope is larger than its input, the raw counts still expose that
+/// overhead; a "savings" ratio must not report a negative percentage.
 pub fn savings_ratio(raw_tokens: usize, used_tokens: usize) -> f64 {
     if raw_tokens == 0 {
         return 0.0;
     }
-    1.0 - (used_tokens as f64 / raw_tokens as f64)
+    (1.0 - (used_tokens as f64 / raw_tokens as f64)).max(0.0)
 }
 
 #[cfg(test)]
@@ -402,7 +406,10 @@ mod tokenizer_tests {
             running = running.saturating_add(count_tokens(line));
             expected += 1;
         }
-        assert!(expected >= 2, "fixture must exercise keep>=2; got {expected}");
+        assert!(
+            expected >= 2,
+            "fixture must exercise keep>=2; got {expected}"
+        );
 
         let out = enforce_token_budget(&text, budget);
         let actual = out.lines().take_while(|line| *line != marker).count();
@@ -415,5 +422,12 @@ mod tokenizer_tests {
         assert_eq!(prefix_end_for_kept_lines("a\nb\nc", 1), 1);
         assert_eq!(prefix_end_for_kept_lines("a\nb\nc", 2), 3);
         assert_eq!(prefix_end_for_kept_lines("a\nb\nc", 3), 5);
+    }
+    #[test]
+    fn savings_ratio_never_reports_negative_savings() {
+        assert_eq!(savings_ratio(0, 100), 0.0);
+        assert_eq!(savings_ratio(100, 120), 0.0);
+        assert_eq!(savings_ratio(100, 100), 0.0);
+        assert_eq!(savings_ratio(100, 25), 0.75);
     }
 }

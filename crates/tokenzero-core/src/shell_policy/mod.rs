@@ -138,8 +138,7 @@ pub fn classify_command_status(
     }
 }
 
-pub fn shell_combined_output(
-    _command: &str,
+pub(crate) fn shell_stream_output(
     exit_code: Option<i32>,
     stdout: &str,
     stderr: &str,
@@ -159,4 +158,30 @@ pub fn shell_combined_output(
         );
     }
     combined
+}
+
+pub fn shell_combined_output(
+    _command: &str,
+    exit_code: Option<i32>,
+    stdout: &str,
+    stderr: &str,
+) -> String {
+    shell_stream_output(exit_code, stdout, stderr)
+}
+
+pub(crate) fn shell_raw_accounting_output(
+    command: &str,
+    exit_code: Option<i32>,
+    stdout: &str,
+    stderr: &str,
+) -> String {
+    let payload = shell_stream_output(exit_code, stdout, stderr);
+    let mut raw = String::with_capacity(command.len() + payload.len() + 10);
+    raw.push_str("command: ");
+    raw.push_str(command);
+    if !payload.is_empty() {
+        raw.push('\n');
+        raw.push_str(&payload);
+    }
+    raw
 }

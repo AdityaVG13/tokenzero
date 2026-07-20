@@ -102,7 +102,7 @@ use std::time::{Duration, SystemTime};
 use tokenzero_core::{
     Accounting, CLI_SCHEMA_VERSION, ContentType, Mode, ShellRenderInput, ToolResponse,
     count_tokens, detect_content_type, make_capsule, make_capsule_with_raw_tokens, ref_record,
-    render_shell, sha256_hex, shell_combined_output,
+    render_shell, sha256_hex, shell_combined_output, shell_raw_tokens,
 };
 use tokenzero_filters::rewrite_command;
 use tokenzero_recovery::{ExpansionResult, RecoveryStore, StoredPayload};

@@ -1436,9 +1436,7 @@ fn ref_first_final_value(
     }
     let mut store = tokenzero_recovery::RecoveryStore::new(Some(engine.config.cache_path.clone()));
     let mut refs = Vec::new();
-    let budget_tokens = options
-        .ref_first_budget
-        .max(crate::shell_inline_budget_from_env());
+    let budget_tokens = options.ref_first_budget;
     let value = ref_first_value(value, budget_tokens, &mut store, &mut refs);
     (value, refs)
 }
@@ -1523,7 +1521,7 @@ fn unwrap_raw_value(value: Value) -> Value {
 
 fn compact_value_preview(text: &str, max_tokens: usize) -> String {
     let value = crate::render::preview(text);
-    pack_to_token_boundary_with_char_limit(&value, max_tokens, 320).to_string()
+    pack_to_token_boundary_with_char_limit(&value, max_tokens, 32).to_string()
 }
 
 fn telemetry_insert(result: &mut CodeModeResult, key: &str, value: Value) {

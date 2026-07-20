@@ -22,7 +22,6 @@ const DENIED_TOKENS: &[(&str, &str)] = &[
     ("store.", "direct store denied"),
     ("db.", "direct DB denied"),
     ("indexedDB", "direct DB denied"),
-    ("node:", "native module loading denied"),
     ("child_process", "process/spawn denied"),
     ("spawn", "process/spawn denied"),
     ("exec(", "process/spawn denied"),
@@ -167,4 +166,38 @@ fn extract_function_body(code: &str) -> Result<String, String> {
         return Err("sandbox: malformed function body".to_string());
     }
     Ok(code[start + 1..end].trim().to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn harmless_node_identifiers_and_object_keys_are_allowed() {
+        let limits = CodeModeLimits::default();
+        for plan in [
+            "const node = a.text; return { node };",
+            "const a=await zero.token.shell('printf ok'); return {node:a.text};",
+            "return { node: 'node:fs' };",
+        ] {
+            assert_eq!(lower_code_plan(plan, &limits).as_deref(), Ok(plan));
+        }
+    }
+
+    #[test]
+    fn actual_native_module_loads_are_denied() {
+        let limits = CodeModeLimits::default();
+        for plan in [
+            "const fs = await import('node:fs');",
+            "const fs = await import ('node:fs');",
+            "const fs = require('node:fs');",
+            "const fs = require ('node:fs');",
+        ] {
+            let error = lower_code_plan(plan, &limits).unwrap_err();
+            assert!(
+                error.starts_with("sandbox: native module loading denied:"),
+                "unexpected error for {plan:?}: {error}"
+            );
+        }
+    }
 }

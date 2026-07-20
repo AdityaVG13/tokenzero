@@ -7,6 +7,26 @@ use tokenzero_core::ContentType;
 use tokenzero_recovery::RecoveryStore;
 
 use super::support::*;
+struct RefIndexDisabledOverrideGuard {
+    _lock: std::sync::MutexGuard<'static, ()>,
+}
+
+impl RefIndexDisabledOverrideGuard {
+    fn new() -> Self {
+        let lock = super::REF_INDEX_OVERRIDE_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        tokenzero_recovery::set_ref_index_disabled_override(true);
+        Self { _lock: lock }
+    }
+}
+
+impl Drop for RefIndexDisabledOverrideGuard {
+    fn drop(&mut self) {
+        tokenzero_recovery::set_ref_index_disabled_override(false);
+    }
+}
+
 
 #[test]
 fn recall_finds_previously_served_payloads() {
@@ -129,6 +149,9 @@ fn expand_fresh_bypasses_seen_set() {
 #[test]
 fn expand_since_unchanged_and_diff() {
     use tokenzero_core::ContentType;
+    let _override_lock = super::REF_INDEX_OVERRIDE_TEST_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let dir = tempdir().unwrap();
     let engine = TokenZeroEngine::new(EngineConfig::for_root(dir.path()));
     // Keep this payload distinct from adjacent parallel expand tests. Shared
@@ -404,9 +427,9 @@ fn expand_across_engine_respawn_stays_byte_exact() {
 #[test]
 fn expand_stale_persisted_sha_rejects_payload_mutation() {
     use tokenzero_core::ContentType;
+    let _disabled_override = RefIndexDisabledOverrideGuard::new();
     // This contract targets the LOCAL snapshot: with the pay-once user CAS
     // attached, blobs publish there and the snapshot never holds the bytes.
-    tokenzero_recovery::set_ref_index_disabled_override(true);
     let dir = tempdir().unwrap();
     let config = EngineConfig::for_root(dir.path());
     let cache_path = config.cache_path.clone();
@@ -454,7 +477,6 @@ fn expand_stale_persisted_sha_rejects_payload_mutation() {
         ref_id: blob_ref,
         ..Default::default()
     });
-    tokenzero_recovery::set_ref_index_disabled_override(false);
     assert_eq!(resp.status, "error", "{:?}", resp.error);
     assert!(
         resp.visible.is_none(),

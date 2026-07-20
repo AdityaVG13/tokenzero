@@ -809,8 +809,8 @@ fn handle_cache_pack(args: CachePackArgs) -> Result<()> {
 
 fn handle_bench(args: BenchArgs) -> Result<()> {
     let BenchCommand::Competitors(args) = args.command;
-    let as_json = args.json;
-    emit_value(run_bench_competitors(args)?, as_json)
+    let report = run_bench_competitors(args)?;
+    print_pretty(&report)
 }
 
 fn install_apply_or_plan(
@@ -1493,6 +1493,44 @@ fn emit(value: EmitResponse) -> Result<()> {
     emit_with_json(value.response, value.json)
 }
 
+fn render_cli_text(response: &ToolResponse) -> String {
+    let rendered = render_text(response);
+    let Some(telemetry) = response
+        .telemetry
+        .as_ref()
+        .filter(|_| response.tool == "shell")
+    else {
+        return rendered;
+    };
+    if telemetry
+        .get("output_strategy")
+        .and_then(serde_json::Value::as_str)
+        != Some("inline_shell")
+    {
+        return rendered;
+    }
+
+    let mut out = String::new();
+    if telemetry
+        .pointer("/stdout_capture/bytes")
+        .and_then(serde_json::Value::as_u64)
+        .is_some_and(|bytes| bytes > 0)
+    {
+        out.push_str("stdout:\n");
+    }
+    out.push_str(&rendered);
+    if !out.ends_with('\n') {
+        out.push('\n');
+    }
+    if let Some(exit_code) = telemetry
+        .get("exit_code")
+        .and_then(serde_json::Value::as_i64)
+    {
+        out.push_str(&format!("exit_code: {exit_code}\n"));
+    }
+    out
+}
+
 fn emit_with_json(response: ToolResponse, as_json: bool) -> Result<()> {
     let exit_error = response.status == "error";
     if as_json {
@@ -1502,7 +1540,7 @@ fn emit_with_json(response: ToolResponse, as_json: bool) -> Result<()> {
             print!("{}", visible.text);
         }
     } else {
-        print!("{}", render_text(&response));
+        print!("{}", render_cli_text(&response));
     }
     if exit_error {
         std::process::exit(1);
