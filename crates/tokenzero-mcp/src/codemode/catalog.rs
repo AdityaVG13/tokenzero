@@ -100,6 +100,11 @@ const METHOD_CATALOG: &[MethodDef] = methods! {
     "codemode.limits", "codemode", "Return active CodeMode sandbox, output, ref, and operation limits" =>
         "codemode.limits(): Promise<CodeModeLimits>";
 };
+/// All CodeMode method paths (primary catalog entries, including aliases).
+pub fn method_paths() -> Vec<&'static str> {
+    METHOD_CATALOG.iter().map(|m| m.path).collect()
+}
+
 pub fn search_catalog(query: &str) -> Value {
     let query_lower = query.to_lowercase();
     let mut results: Vec<(f64, &MethodDef)> = METHOD_CATALOG

@@ -30,6 +30,7 @@ mod fetch_guard;
 mod jsonrpc;
 pub mod ledger;
 mod metrics;
+mod operation_abi_parity;
 mod paths;
 mod recall;
 mod render;
