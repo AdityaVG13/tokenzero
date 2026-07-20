@@ -54,21 +54,32 @@ pub fn contract_manifest() -> Value {
 }
 
 /// Raw digest bytes (SHA-256 over canonical JSON).
+///
+/// Memoized process-wide: the registry is static, so recomputing the full
+/// manifest hash on every handshake/SBOM/doctor call was pure overhead
+/// (tokenzero-irx9.9 hot-path).
 pub fn contract_digest() -> [u8; 32] {
-    let canonical = canonical_json(&contract_manifest());
-    let mut hasher = Sha256::new();
-    hasher.update(canonical.as_bytes());
-    hasher.finalize().into()
+    static DIGEST: std::sync::OnceLock<[u8; 32]> = std::sync::OnceLock::new();
+    *DIGEST.get_or_init(|| {
+        let canonical = canonical_json(&contract_manifest());
+        let mut hasher = Sha256::new();
+        hasher.update(canonical.as_bytes());
+        hasher.finalize().into()
+    })
 }
 
 /// Lowercase hex digest (64 chars). Deterministic across builds for the same registry.
 pub fn contract_digest_hex() -> String {
-    let d = contract_digest();
-    let mut out = String::with_capacity(64);
-    for b in d {
-        out.push_str(&format!("{b:02x}"));
-    }
-    out
+    static HEX: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    HEX.get_or_init(|| {
+        let d = contract_digest();
+        let mut out = String::with_capacity(64);
+        for b in d {
+            out.push_str(&format!("{b:02x}"));
+        }
+        out
+    })
+    .clone()
 }
 
 fn mutability_str(m: super::types::Mutability) -> &'static str {
