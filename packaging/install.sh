@@ -258,13 +258,26 @@ if [[ "$SKIP_BUILD" -eq 0 ]]; then
   )
   SRC="$ROOT/target/release/$ARTIFACT"
 else
-  if [[ -x "$ROOT/target/release/$ARTIFACT" ]]; then
-    SRC="$ROOT/target/release/$ARTIFACT"
-  elif [[ -x "$ROOT/target/debug/$ARTIFACT" ]]; then
-    SRC="$ROOT/target/debug/$ARTIFACT"
+  # Prefer explicitly provided artifact, else the newer of release/debug.
+  if [[ -n "${TOKENZERO_INSTALL_SRC:-}" && -x "${TOKENZERO_INSTALL_SRC}" ]]; then
+    SRC="${TOKENZERO_INSTALL_SRC}"
   else
-    echo "install: --skip-build but no prebuilt $ARTIFACT under target/" >&2
-    exit 1
+    REL="$ROOT/target/release/$ARTIFACT"
+    DBG="$ROOT/target/debug/$ARTIFACT"
+    if [[ -x "$REL" && -x "$DBG" ]]; then
+      if [[ "$DBG" -nt "$REL" ]]; then
+        SRC="$DBG"
+      else
+        SRC="$REL"
+      fi
+    elif [[ -x "$REL" ]]; then
+      SRC="$REL"
+    elif [[ -x "$DBG" ]]; then
+      SRC="$DBG"
+    else
+      echo "install: --skip-build but no prebuilt $ARTIFACT under target/" >&2
+      exit 1
+    fi
   fi
   echo "install: using prebuilt $SRC"
 fi

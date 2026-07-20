@@ -251,3 +251,98 @@ fn help_doctor_sbom_identify_surface() {
         assert!(doc["sbom"]["mutually_exclusive_with"].is_string());
     }
 }
+
+/// Install each surface into an independent temp prefix and exercise its real
+/// runtime (doctor/sbom/raw-worker handshake). Dual catalog must not appear.
+#[test]
+fn install_each_surface_independent_prefix_exercises_runtime() {
+    ensure_bins();
+    let tmp = tempfile::tempdir().unwrap();
+
+    for (surface, artifact, peer) in [
+        ("mcp", "tokenzero-mcp", "tokenzero-codemode"),
+        ("codemode", "tokenzero-codemode", "tokenzero-mcp"),
+    ] {
+        let prefix = tmp.path().join(format!("pfx-{surface}"));
+        let bin_dir = tmp.path().join(format!("bin-{surface}"));
+        fs::create_dir_all(&bin_dir).unwrap();
+
+        let (code, stdout, stderr) = run_install(surface, &prefix, &bin_dir, "linux");
+        assert_eq!(
+            code, 0,
+            "install {surface}: {stdout}\n{stderr}"
+        );
+        let state = read(&prefix.join("install-state.json"));
+        assert!(
+            state.contains(&format!("\"{surface}\"")),
+            "state for {surface}: {state}"
+        );
+        let cfg = read(&prefix.join("client-config.json"));
+        assert!(
+            cfg.contains(&format!("--mode={surface}")) || cfg.contains(surface),
+            "client-config {surface}: {cfg}"
+        );
+        assert!(
+            !cfg.contains(&format!("--mode={}", if surface == "mcp" { "codemode" } else { "mcp" })),
+            "dual mode in client-config: {cfg}"
+        );
+        assert!(bin_dir.join(artifact).exists(), "missing {artifact}");
+        assert!(
+            !bin_dir.join(peer).exists(),
+            "peer {peer} must not be installed alongside {artifact}"
+        );
+        // Shim points at selected surface only.
+        let shim = bin_dir.join("tokenzero");
+        assert!(shim.exists(), "shim missing for {surface}");
+
+        let installed = bin_dir.join(artifact);
+        let doctor = Command::new(&installed)
+            .arg("doctor")
+            .output()
+            .expect("doctor");
+        assert!(doctor.status.success(), "doctor {surface}");
+        let d = String::from_utf8_lossy(&doctor.stdout);
+        assert!(
+            d.contains(surface) || d.contains(artifact),
+            "doctor must identify surface: {d}"
+        );
+        assert!(
+            !d.contains("dual") || !d.contains("both catalogs"),
+            "doctor must not report dual catalogs: {d}"
+        );
+
+        let sbom = Command::new(&installed).arg("sbom").output().expect("sbom");
+        assert!(sbom.status.success());
+        let doc: serde_json::Value =
+            serde_json::from_str(String::from_utf8_lossy(&sbom.stdout).trim()).expect("sbom json");
+        assert_eq!(doc["surface"], surface);
+        assert_eq!(
+            doc["sbom"]["mutually_exclusive_with"].as_str().unwrap(),
+            peer
+        );
+
+        // Real private-worker entry on the installed artifact.
+        let hs = Command::new(&installed)
+            .args(["raw-worker", "--handshake"])
+            .output()
+            .expect("raw-worker handshake");
+        let hs_out = String::from_utf8_lossy(&hs.stdout);
+        let hs_err = String::from_utf8_lossy(&hs.stderr);
+        assert!(
+            hs.status.success(),
+            "raw-worker handshake {surface} bin={}: status={:?} stdout={hs_out:?} stderr={hs_err:?}",
+            installed.display(),
+            hs.status.code()
+        );
+        let cap: serde_json::Value = serde_json::from_str(hs_out.trim()).unwrap_or_else(|e| {
+            panic!(
+                "cap json {surface}: {e}; stdout={hs_out:?} stderr={hs_err:?}"
+            )
+        });
+        assert_eq!(cap["schema"], "zerostack.surface.v1");
+        assert_eq!(cap["surface"], "raw_worker");
+        // Catalog-free: no dual tool list.
+        assert!(cap.get("canonical_tools").is_none());
+        assert!(cap.get("tools").is_none());
+    }
+}
