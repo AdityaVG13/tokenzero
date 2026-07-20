@@ -1,8 +1,25 @@
 #![forbid(unsafe_code)]
 #![recursion_limit = "2048"]
 
+// Feature markers are mutually exclusive when propagated from tokenzero.
+#[cfg(all(feature = "surface-mcp", feature = "surface-codemode"))]
+compile_error!(
+    "tokenzero surfaces are mutually exclusive (tokenzero-irx9.3): enable exactly one of \
+feature surface-mcp or surface-codemode — never both."
+);
+
 mod package_audit;
+pub mod packaging;
 pub use package_audit::package_audit;
+pub use packaging::{
+    ARTIFACT_CODEMODE, ARTIFACT_MCP, ARTIFACT_SHIM, ClientConfig, InstallState, PackageSurface,
+    assert_packaged_surface_features, assert_surface_compiled, baked_package_surface,
+    client_config_for, compile_time_surfaces, current_platform, default_install_prefix,
+    dual_surface_diagnostic, install_surface, load_install_state, modes_from_args,
+    package_identity, reject_dual_compiled_surfaces, reject_dual_env_selection,
+    resolve_startup_surface, sbom_document, semantic_contract_digest, surface_compiled_in,
+    uninstall_report, uninstall_surface, write_client_config,
+};
 
 use fs4::{FileExt, TryLockError};
 use serde::{Deserialize, Serialize};

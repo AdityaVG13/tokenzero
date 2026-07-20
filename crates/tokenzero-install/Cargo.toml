@@ -11,6 +11,13 @@ keywords.workspace = true
 categories.workspace = true
 rust-version.workspace = true
 
+# Package surface markers (tokenzero-irx9.3). Empty features so packaging
+# helpers report the same compile-time matrix as the CLI release artifacts.
+[features]
+default = []
+surface-mcp = []
+surface-codemode = []
+
 [dependencies]
 flate2.workspace = true
 fs4.workspace = true

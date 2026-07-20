@@ -11,11 +11,21 @@ keywords.workspace = true
 categories.workspace = true
 rust-version.workspace = true
 
+# Mutually exclusive package surfaces (tokenzero-irx9.3).
+# Exactly one surface may be enabled per process/artifact — never both.
+# Enabling both triggers a compile_error in lib.rs (process mutual exclusion).
+# Default is FastMCP only (native CodeMode clients install tokenzero-mcp).
+# CodeMode artifact: --no-default-features --features surface-codemode
+[features]
+default = ["surface-mcp"]
+surface-mcp = ["dep:fastmcp-rust"]
+surface-codemode = ["dep:rquickjs"]
+
 [dependencies]
 fs4.workspace = true
 globset.workspace = true
 memchr.workspace = true
-rquickjs.workspace = true
+rquickjs = { workspace = true, optional = true }
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
@@ -29,7 +39,7 @@ tokenzero-pulse = { path = "../tokenzero-pulse", version = "1.0.2" }
 tokenzero-recovery = { path = "../tokenzero-recovery", version = "1.0.2" }
 tokenzero-runtime = { path = "../tokenzero-runtime", version = "1.0.2" }
 tokenzero-engine = { path = "../tokenzero-engine", version = "1.0.2" }
-fastmcp-rust.workspace = true
+fastmcp-rust = { workspace = true, optional = true }
 
 [dev-dependencies]
 assert_cmd.workspace = true

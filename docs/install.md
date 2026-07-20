@@ -2,16 +2,63 @@
 
 TokenZero is package-first for users after launch and source-checkout friendly
 for developers before launch. The public Core runtime target is the Rust
-`tokenzero` binary.
+`tokenzero` binary (compatibility shim / selected symlink after surface install).
 
 Launch offer: Compress aggressively. Recover exactly. One install.
+
+## Mutually exclusive package surfaces (tokenzero-irx9.3)
+
+Users install **one** surface from the same revision and shared core — never both:
+
+| Artifact | Surface | Who should install it |
+|---|---|---|
+| `tokenzero-mcp` | FastMCP per-operation tools | **Native CodeMode clients** (ZeroStack hub, CodeMode-capable harnesses) |
+| `tokenzero-codemode` | CodeMode plan catalog | **Legacy MCP-only clients** |
+| `tokenzero` | Compatibility shim | Symlink to the selected surface binary only — never a dual-catalog binary |
+
+**Selection matrix:** native CodeMode client → install `tokenzero-mcp`; otherwise → install `tokenzero-codemode`.
+
+**Process mutual exclusion (not release-only naming):** one installed/running process must never contain or expose both catalogs. Dual surface features are a **compile error**. Dual argv/env selection and dual client registration **fail closed** at startup. Default package features enable **exactly one** surface (`surface-mcp`); CodeMode builds use `--no-default-features --features surface-codemode`.
+
+Installing one surface after the other cleanly replaces the prior registration and peer binary. The installer writes `install-state.json` + `client-config.json` atomically itself and **never** starts a stdio server to write state.
+
+### Surface installer (macOS / Linux)
+
+```bash
+# Build + install one surface (writes install-state + client-config atomically;
+# never starts a stdio server to write state).
+./packaging/install.sh --surface mcp          # or: --surface codemode
+./packaging/install.sh --surface mcp --prefix ~/.tokenzero-install --bin-dir ~/.local/bin
+
+# Identity / SBOM / uninstall
+./packaging/install.sh --sbom --surface mcp
+./packaging/install.sh --uninstall --prefix ~/.tokenzero-install
+
+# Single-surface cargo builds (peer surface dependency excluded)
+cargo build -p tokenzero --bin tokenzero-mcp --features surface-mcp
+cargo build -p tokenzero --bin tokenzero-codemode --no-default-features --features surface-codemode
+# Enabling both surface-mcp and surface-codemode is a compile error.
+```
+
+Surface binaries also accept non-hanging packaging subcommands:
+
+```bash
+tokenzero-mcp install --surface mcp --prefix DIR
+tokenzero-mcp sbom
+tokenzero-mcp doctor
+tokenzero-mcp uninstall --prefix DIR
+```
+
+Help, doctor, SBOM, and uninstall output identify the selected surface and the
+shared semantic contract digest.
 
 ## Package Install
 
 The public launch path is a GitHub Release download. Download the archive for
 your OS from `https://github.com/AdityaVG13/tokenzero/releases`, verify the
 matching `.sha256` file, extract it, and put `tokenzero` or `tokenzero.exe`
-somewhere on `PATH`.
+somewhere on `PATH` (after a surface install, `tokenzero` is a symlink to the
+selected artifact).
 
 ```bash
 tokenzero install --global --plan --mcp --shell --cli --json

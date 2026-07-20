@@ -4,10 +4,23 @@
 //! Domain execution lives in [`tokenzero_engine`]. This crate depends inward and
 //! must not re-implement domain auth/root/mutation/ref/telemetry semantics.
 
+// Process/artifact mutual exclusion (tokenzero-irx9.3): one process must never
+// compile both user-facing surface runtimes (fastmcp-rust + rquickjs).
+#[cfg(all(feature = "surface-mcp", feature = "surface-codemode"))]
+compile_error!(
+    "tokenzero surfaces are mutually exclusive (tokenzero-irx9.3): enable exactly one of \
+feature surface-mcp or surface-codemode -- never both. One process must not contain both \
+catalogs. Build tokenzero-mcp with surface-mcp, or tokenzero-codemode with surface-codemode."
+);
 mod capability_descriptor;
 mod catalog;
 mod codemode;
+#[cfg(feature = "surface-mcp")]
 mod fastmcp_mode;
+#[cfg(not(feature = "surface-mcp"))]
+mod fastmcp_stub;
+#[cfg(not(feature = "surface-mcp"))]
+use fastmcp_stub as fastmcp_mode;
 mod jsonrpc;
 mod operation_abi_parity;
 mod resources;
