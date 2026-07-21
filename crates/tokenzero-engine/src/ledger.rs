@@ -68,7 +68,11 @@ pub(crate) struct LedgerWriter {
     cumulative_visible_tokens: Mutex<u64>,
     /// Kept-open append handle so warm MCP paths avoid open/close per call.
     open_file: Mutex<Option<File>>,
+    /// Small write-behind buffer: warm MCP batches several records into one write(2).
+    write_buf: Mutex<Vec<u8>>,
 }
+
+const LEDGER_FLUSH_BYTES: usize = 4 * 1024;
 
 impl LedgerWriter {
     pub(crate) fn new(
@@ -109,6 +113,7 @@ impl LedgerWriter {
             max_bytes,
             cumulative_visible_tokens: Mutex::new(0),
             open_file: Mutex::new(None),
+            write_buf: Mutex::new(Vec::with_capacity(LEDGER_FLUSH_BYTES)),
         }
     }
 
@@ -153,13 +158,32 @@ impl LedgerWriter {
     fn append_record(&self, record: &LedgerRecord) -> io::Result<()> {
         let mut line = serde_json::to_vec(record).map_err(io::Error::other)?;
         line.push(b'\n');
-        let line_bytes = u64::try_from(line.len()).unwrap_or(u64::MAX);
-        if line_bytes > self.max_bytes {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "ledger record exceeds rotation limit",
-            ));
+        let mut buf = self
+            .write_buf
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        buf.extend_from_slice(&line);
+        if buf.len() >= LEDGER_FLUSH_BYTES {
+            let pending = std::mem::take(&mut *buf);
+            drop(buf);
+            self.flush_bytes(&pending)?;
         }
+        Ok(())
+    }
+
+    pub(crate) fn flush(&self) {
+        let pending = match self.write_buf.lock() {
+            Ok(mut buf) if !buf.is_empty() => std::mem::take(&mut *buf),
+            _ => return,
+        };
+        let _ = self.flush_bytes(&pending);
+    }
+
+    fn flush_bytes(&self, bytes: &[u8]) -> io::Result<()> {
+        if bytes.is_empty() {
+            return Ok(());
+        }
+        let line_bytes = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
         if let Some(parent) = self.path.parent() {
             fs::create_dir_all(parent)?;
         }
@@ -206,7 +230,13 @@ impl LedgerWriter {
             );
         }
         let file = guard.as_mut().expect("ledger file just opened");
-        file.write_all(&line)
+        file.write_all(bytes)
+    }
+}
+
+impl Drop for LedgerWriter {
+    fn drop(&mut self) {
+        self.flush();
     }
 }
 
