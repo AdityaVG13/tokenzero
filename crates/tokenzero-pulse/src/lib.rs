@@ -28,7 +28,6 @@ impl<T, E: Into<Box<dyn std::error::Error + Send + Sync>>> IntoIo<T> for Result<
 const EVENT_SQL_COLUMNS: &str = "schema_version, event, timestamp_unix, tool, mode, raw_tokens, visible_tokens, recovery_tokens, task_lossless, cache_hit, retry_count, failure, exact_ref_count, latency_ms, source_hash, session_id, call_id, ref_ids";
 const PULSE_SOURCE_OF_TRUTH: &str = "jsonl";
 const PULSE_SYNC_SCHEMA_VERSION: &str = "pulse-sync-v1";
-const PULSE_EVENT_LOCK_TIMEOUT: Duration = Duration::from_secs(30);
 const PULSE_SYNC_LOCK_TIMEOUT: Duration = Duration::from_secs(5);
 macro_rules! pulse_structs {
     ($( $(#[$struct_attr:meta])* $name:ident { $($(#[$field_attr:meta])* $field:ident $ty:ty;)* })*) => {

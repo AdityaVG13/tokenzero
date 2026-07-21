@@ -3,7 +3,7 @@
     "exact_ref_tokens": 28,
     "raw_tokens": 22,
     "recovery_tokens": 0,
-    "visible_tokens": 46
+    "visible_tokens": 38
   },
   "content_type": "shell_output",
   "mode": "diagnostic",
@@ -105,7 +105,7 @@
     "stdout_ref": "tz://blob/[BLOB_REF_1]",
     "timeout": false,
     "transport_status": "ok",
-    "visible_tokens": 46
+    "visible_tokens": 38
   },
   "tool": "shell",
   "visible": {
