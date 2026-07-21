@@ -1,0 +1,79 @@
+    use super::*;
+
+    #[test]
+    fn tokenizer_registry_lookup_and_fallback_are_explicit() {
+        let o200k = tokenizer_metadata("openai/gpt-4o-2024-11-20").unwrap();
+        assert_eq!(o200k.family, TokenizerFamily::O200k);
+        assert!(o200k.approximate);
+
+        let sentencepiece = tokenizer_metadata("Llama-3.3-70B").unwrap();
+        assert_eq!(sentencepiece.family, TokenizerFamily::SentencePiece);
+        assert!(tokenizer_metadata("claude-sonnet-4").is_none());
+        assert_eq!(
+            count_tokens_for_model("alpha beta", Some("claude-sonnet-4")),
+            2,
+            "unknown models must retain the lexical fallback"
+        );
+    }
+
+    #[test]
+    fn token_boundary_packing_keeps_refs_atomic_and_drops_partial_preview_token() {
+        let reference = "tz://blob/0123456789abcdef";
+        let preview = "alpha betaGamma";
+        let packed = pack_to_token_boundary_for_model(preview, 1, None);
+
+        assert_eq!(packed, "alpha ");
+        assert_eq!(reference, "tz://blob/0123456789abcdef");
+        assert!(count_tokens_for_model(packed, None) <= 1);
+
+        let unicode = pack_to_token_boundary_for_model("ééééé", 1, Some("gpt-4o"));
+        assert_eq!(unicode, "éééé");
+        assert!(unicode.is_char_boundary(unicode.len()));
+    }
+
+    #[test]
+    fn visible_budget_prefix_retains_every_fitting_line() {
+        // Counterexample from math-review P01-001: budget=17 expected_keep=2.
+        let text = (0..50)
+            .map(|i| format!("line_{i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let marker = "... omitted by visible budget; exact refs available ...";
+        let marker_tokens = count_tokens(marker);
+        const SEPARATOR_TOKENS: usize = 1;
+        let budget = 17;
+        let (mut running, mut expected) = (0usize, 0usize);
+        for line in text.lines() {
+            let next = running
+                .saturating_add(count_tokens(line))
+                .saturating_add(SEPARATOR_TOKENS + marker_tokens);
+            if next > budget {
+                break;
+            }
+            running = running.saturating_add(count_tokens(line));
+            expected += 1;
+        }
+        assert!(
+            expected >= 2,
+            "fixture must exercise keep>=2; got {expected}"
+        );
+
+        let out = enforce_token_budget(&text, budget);
+        let actual = out.lines().take_while(|line| *line != marker).count();
+        assert_eq!(
+            actual, expected,
+            "prefix must retain all budget-fitting lines (P01-001); out={out:?}"
+        );
+        assert!(count_tokens(&out) <= budget);
+
+        assert_eq!(prefix_end_for_kept_lines("a\nb\nc", 1), 1);
+        assert_eq!(prefix_end_for_kept_lines("a\nb\nc", 2), 3);
+        assert_eq!(prefix_end_for_kept_lines("a\nb\nc", 3), 5);
+    }
+    #[test]
+    fn savings_ratio_never_reports_negative_savings() {
+        assert_eq!(savings_ratio(0, 100), 0.0);
+        assert_eq!(savings_ratio(100, 120), 0.0);
+        assert_eq!(savings_ratio(100, 100), 0.0);
+        assert_eq!(savings_ratio(100, 25), 0.75);
+    }
