@@ -1292,7 +1292,9 @@ impl RecoveryStore {
         let (short_bare, _) = split_ref_fragment(&short);
         if let Some(full_bare) = canonical_full_blob_ref(split_ref_fragment(ref_id).0) {
             if self.alias_target(short_bare).as_deref() != Some(full_bare.as_str()) {
-                let _ = self.store_alias(short_bare, &full_bare);
+                // Defer persist: callers (MCP alias pass, multi-ref responses)
+                // batch alias writes and call persist_pending once.
+                self.store_alias_deferred(short_bare, &full_bare);
             }
         }
         short
@@ -1301,6 +1303,10 @@ impl RecoveryStore {
     /// Rewrite full-hash blob refs in text to session-visible short aliases,
     /// registering each short → full mapping in the alias table.
     pub fn apply_session_visible_aliases_in_text(&mut self, text: &str) -> String {
+        // Skip the char-by-char scan when the payload has no full-hash blob refs.
+        if !text.contains("tz://blob/") && !text.contains("fz://blob/") && !text.contains("gz://blob/") {
+            return text.to_string();
+        }
         let mut cursor = 0usize;
         while cursor < text.len() {
             if let Some((end, full)) = crate::session_aliases::take_full_hash_blob_at(text, cursor) {

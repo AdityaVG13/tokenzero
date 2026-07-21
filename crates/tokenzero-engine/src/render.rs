@@ -6,8 +6,16 @@ pub struct PersistResult {
 }
 
 impl TokenZeroEngine {
-    pub(crate) fn recovery_store(&self) -> RecoveryStore {
-        RecoveryStore::new(Some(self.config.cache_path.clone()))
+    /// Borrow the engine-owned recovery store (loaded once at construction).
+    ///
+    /// Hot paths used to call `RecoveryStore::new` on every op, reloading the
+    /// full cache snapshot from disk and discarding in-process memoization.
+    /// Reusing the mutex-backed store keeps warm MCP/CLI sessions on the
+    /// in-memory state while still serializing concurrent mutations.
+    pub(crate) fn recovery_store(&self) -> std::sync::MutexGuard<'_, RecoveryStore> {
+        self.recovery_store
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
     pub(crate) fn shell_output_policy(&self) -> RunOutputPolicy {
@@ -55,6 +63,25 @@ impl TokenZeroEngine {
     /// Rewrite full-hash blob refs in a tool response to session-visible
     /// `tz://s/<16hex>` aliases and persist the short→full alias table.
     pub fn apply_session_visible_ref_aliases(&self, response: &mut ToolResponse) {
+        // Fast path: nothing to rewrite when no full-hash blob refs remain.
+        let needs_alias = response.refs.iter().any(|record| {
+            tokenzero_recovery::session_visible_blob_alias(&record.ref_id).is_some()
+        }) || response
+            .visible
+            .as_ref()
+            .map(|v| {
+                v.text.contains("tz://blob/")
+                    || v.text.contains("fz://blob/")
+                    || v.text.contains("gz://blob/")
+            })
+            .unwrap_or(false)
+            || response.telemetry.as_ref().is_some_and(|t| {
+                let s = t.to_string();
+                s.contains("tz://blob/") || s.contains("fz://blob/") || s.contains("gz://blob/")
+            });
+        if !needs_alias {
+            return;
+        }
         let mut store = self.recovery_store();
         if let Some(visible) = response.visible.as_mut() {
             visible.text = store.apply_session_visible_aliases_in_text(&visible.text);

@@ -300,6 +300,10 @@ impl TokenZeroEngine {
         }
         let exact_refs_available = !refs.is_empty();
         let exact_ref_tokens = exact_ref_token_count(&refs);
+        let recovery_tokens = store.recovery_tokens;
+        // Release the recovery-store lock before working-set admission, which
+        // re-locks the same mutex (std::sync::Mutex is not reentrant).
+        drop(store);
         let mut response = success_response(
             "read",
             mode,
@@ -308,7 +312,7 @@ impl TokenZeroEngine {
             (
                 raw_tokens,
                 visible_tokens,
-                store.recovery_tokens,
+                recovery_tokens,
                 Some(exact_ref_tokens),
             ),
         );

@@ -147,6 +147,16 @@ fn main() -> Result<()> {
         if let Some(code) = tokenzero_mcp::maybe_run_raw_worker_from_args(&argv) {
             std::process::exit(code);
         }
+        // Fast path: avoid building the full clap command tree for --version/-V.
+        if argv.len() == 2 {
+            match argv[1].as_str() {
+                "--version" | "-V" => {
+                    println!("tokenzero {}", env!("CARGO_PKG_VERSION"));
+                    return Ok(());
+                }
+                _ => {}
+            }
+        }
     }
     let cli = Cli::parse_from(normalize_agent_invocation_args(std::env::args_os()));
     let Some(command) = cli.command else {

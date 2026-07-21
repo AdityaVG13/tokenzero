@@ -14,7 +14,7 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
 use tokenzero_core::MCP_SCHEMA_VERSION;
@@ -22,6 +22,12 @@ use tokenzero_core::MCP_SCHEMA_VERSION;
 /// Default latency above which a call is flagged "slow". Override with
 /// `TOKENZERO_SLOW_TOOL_MS`.
 const DEFAULT_SLOW_TOOL_MS: u64 = 2000;
+
+/// Coalesce persistent sidecar RMW so warm MCP tools do not pay a full
+/// read-modify-write of `tool-metrics.json` on every call. Session counters
+/// stay exact; the on-disk cumulative sidecar remains approximate (already
+/// documented) and is flushed on this interval, on snapshot, and on drop.
+const PERSIST_COALESCE: Duration = Duration::from_millis(250);
 
 #[derive(Debug, Clone, Default)]
 struct ToolStat {
@@ -82,6 +88,9 @@ pub(crate) struct ToolMetrics {
     /// Most recent in-process engine/persistence split per canonical tool.
     /// Exposed only through the metrics resource for measurement and diagnosis.
     last_attribution_us: Mutex<BTreeMap<String, (u64, u64)>>,
+    /// Pending one-call deltas not yet merged to the on-disk sidecar.
+    dirty: Mutex<BTreeMap<String, ToolStat>>,
+    last_disk_flush: Mutex<Instant>,
 }
 
 impl ToolMetrics {
@@ -99,6 +108,8 @@ impl ToolMetrics {
             session: Mutex::new(BTreeMap::new()),
             persisted: Mutex::new(persisted),
             last_attribution_us: Mutex::new(BTreeMap::new()),
+            dirty: Mutex::new(BTreeMap::new()),
+            last_disk_flush: Mutex::new(Instant::now() - PERSIST_COALESCE),
         }
     }
 
@@ -114,18 +125,60 @@ impl ToolMetrics {
                 .record(ms, is_error, slow);
         }
 
-        // Merge this single call into the persistent sidecar. Reload from
-        // disk first so concurrent server processes can accumulate.
-        // Attribution is owned by tools.rs via record_attribution.
+        // Keep the in-memory cumulative mirror exact for this process.
+        if let Ok(mut mirror) = self.persisted.lock() {
+            mirror
+                .entry(tool.to_string())
+                .or_default()
+                .record(ms, is_error, slow);
+        }
+        if let Ok(mut dirty) = self.dirty.lock() {
+            dirty
+                .entry(tool.to_string())
+                .or_default()
+                .record(ms, is_error, slow);
+        }
+
+        // Disk RMW is coalesced: warm MCP paths should not rewrite the
+        // sidecar on every microsecond-scale tools/call.
+        let due = self
+            .last_disk_flush
+            .lock()
+            .map(|at| at.elapsed() >= PERSIST_COALESCE)
+            .unwrap_or(true);
+        if due {
+            self.flush_persisted();
+        }
+    }
+
+    /// Merge dirty deltas into the on-disk sidecar (fail-open).
+    pub(crate) fn flush_persisted(&self) {
+        let dirty = match self.dirty.lock() {
+            Ok(mut guard) => {
+                if guard.is_empty() {
+                    return;
+                }
+                std::mem::take(&mut *guard)
+            }
+            Err(_) => return,
+        };
+        // Reload from disk so concurrent server processes accumulate.
         let mut persisted = self.load_persisted();
-        persisted
-            .entry(tool.to_string())
-            .or_default()
-            .record(ms, is_error, slow);
+        for (tool, delta) in dirty {
+            let entry = persisted.entry(tool).or_default();
+            entry.calls += delta.calls;
+            entry.errors += delta.errors;
+            entry.slow_calls += delta.slow_calls;
+            entry.total_ms += delta.total_ms;
+            entry.max_ms = entry.max_ms.max(delta.max_ms);
+        }
         if let Ok(mut mirror) = self.persisted.lock() {
             *mirror = persisted.clone();
         }
         let _ = self.write_persisted(&persisted);
+        if let Ok(mut at) = self.last_disk_flush.lock() {
+            *at = Instant::now();
+        }
     }
 
     pub(crate) fn record_attribution(&self, tool: &str, engine: Duration, persist: Duration) {
@@ -138,6 +191,8 @@ impl ToolMetrics {
 
     /// Snapshot for `resource://tokenzero/metrics`.
     pub(crate) fn snapshot(&self) -> Value {
+        // Flush so the metrics resource reflects recent calls.
+        self.flush_persisted();
         let cumulative = match self.persisted.lock() {
             Ok(persisted) => Self::map_to_json(&persisted),
             Err(_) => Self::map_to_json(&self.load_persisted()),
@@ -238,4 +293,10 @@ fn load_persisted_from_path(path: &Path) -> BTreeMap<String, ToolStat> {
         }
     }
     out
+}
+
+impl Drop for ToolMetrics {
+    fn drop(&mut self) {
+        self.flush_persisted();
+    }
 }
