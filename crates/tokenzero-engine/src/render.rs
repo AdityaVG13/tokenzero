@@ -87,7 +87,8 @@ impl TokenZeroEngine {
             visible.text = store.apply_session_visible_aliases_in_text(&visible.text);
         }
         for record in &mut response.refs {
-            record.ref_id = store.ensure_session_visible_alias(&record.ref_id);
+            // Deferred: one persist_pending below batches all alias rows.
+            record.ref_id = store.register_session_visible_alias(&record.ref_id);
         }
         if let Some(telemetry) = response.telemetry.as_mut() {
             store.apply_session_visible_aliases_in_value(telemetry);

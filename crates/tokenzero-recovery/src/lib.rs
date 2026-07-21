@@ -1277,23 +1277,31 @@ impl RecoveryStore {
 
     /// Register `tz://s/<16hex>` → full-hash blob alias and return the short form
     /// for visible capsules. Non-full-hash refs pass through unchanged.
-    pub fn ensure_session_visible_alias(&mut self, ref_id: &str) -> String {
+    /// Register a session-visible short alias without flushing to disk.
+    /// Callers that batch many aliases should finish with `persist_pending`.
+    pub fn register_session_visible_alias(&mut self, ref_id: &str) -> String {
         let Some(short) = session_visible_blob_alias(ref_id) else {
             return ref_id.to_string();
         };
         let (short_bare, _) = split_ref_fragment(&short);
         if let Some(full_bare) = canonical_full_blob_ref(split_ref_fragment(ref_id).0) {
             if self.alias_target(short_bare).as_deref() != Some(full_bare.as_str()) {
-                // Defer persist: callers (MCP alias pass, multi-ref responses)
-                // batch alias writes and call persist_pending once.
                 self.store_alias_deferred(short_bare, &full_bare);
             }
         }
         short
     }
 
+    /// Ensure a full-hash blob ref has a durable session-visible short alias.
+    /// Persists immediately so a subsequent process restart can expand the short form.
+    pub fn ensure_session_visible_alias(&mut self, ref_id: &str) -> String {
+        let short = self.register_session_visible_alias(ref_id);
+        let _ = self.persist_pending();
+        short
+    }
+
     /// Rewrite full-hash blob refs in text to session-visible short aliases,
-    /// registering each short → full mapping in the alias table.
+    /// registering each short → full mapping in the alias table (deferred).
     pub fn apply_session_visible_aliases_in_text(&mut self, text: &str) -> String {
         // Skip the char-by-char scan when the payload has no full-hash blob refs.
         if !text.contains("tz://blob/") && !text.contains("fz://blob/") && !text.contains("gz://blob/") {
@@ -1302,7 +1310,7 @@ impl RecoveryStore {
         let mut cursor = 0usize;
         while cursor < text.len() {
             if let Some((end, full)) = crate::session_aliases::take_full_hash_blob_at(text, cursor) {
-                let _ = self.ensure_session_visible_alias(&full);
+                let _ = self.register_session_visible_alias(&full);
                 cursor = end;
             } else {
                 cursor += 1;
@@ -1317,7 +1325,7 @@ impl RecoveryStore {
             match value {
                 serde_json::Value::String(text) => {
                     if session_visible_blob_alias(text).is_some() {
-                        *text = store.ensure_session_visible_alias(text);
+                        *text = store.register_session_visible_alias(text);
                     } else if text.contains("://blob/") {
                         *text = store.apply_session_visible_aliases_in_text(text);
                     }
