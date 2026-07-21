@@ -187,18 +187,15 @@ fn with_pulse_lock<T>(
 }
 
 pub fn record_event(path: &Path, event: &PulseEvent) -> IoResult<()> {
-    with_pulse_lock(path, PULSE_EVENT_LOCK_TIMEOUT, || {
-        ensure_parent(path)?;
-        let file_existed = path.exists();
-        let mut file = OpenOptions::new().append(true).create(true).open(path)?;
-        // One logical JSONL record per append; no fsync (telemetry, crash-loss ok).
-        serde_json::to_writer(&mut file, event).into_io()?;
-        file.write_all(b"\n")?;
-        if !file_existed {
-            sync_parent(path)?;
-        }
-        Ok(())
-    })
+    // Hot path: one O_APPEND write of a single JSONL line. Avoids a cross-process
+    // lock+open/close on every MCP tools/call (lock is still used for sync/export).
+    // Small line writes under PIPE_BUF are typically atomic on local filesystems.
+    ensure_parent(path)?;
+    let mut line = serde_json::to_vec(event).into_io()?;
+    line.push(b'\n');
+    let mut file = OpenOptions::new().append(true).create(true).open(path)?;
+    file.write_all(&line)?;
+    Ok(())
 }
 
 pub fn sync_jsonl_to_sqlite(path: &Path) -> IoResult<PulseSyncStatus> {
