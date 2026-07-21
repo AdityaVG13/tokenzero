@@ -46,12 +46,12 @@ pub(crate) fn max_search_visited_files(max_results: usize) -> usize {
         .clamp(MIN_SEARCH_VISITED_FILES, MAX_SEARCH_VISITED_FILES)
 }
 
-pub(crate) struct SearchMatch {
-    pub(crate) base: String,
-    pub(crate) path: String,
-    pub(crate) rel: String,
-    pub(crate) line: usize,
-    pub(crate) text: String,
+pub struct SearchMatch {
+    pub base: String,
+    pub path: String,
+    pub rel: String,
+    pub line: usize,
+    pub text: String,
 }
 
 pub(crate) fn flat_search_output(matches: &[SearchMatch]) -> String {
@@ -302,7 +302,7 @@ pub(crate) enum RgFailure {
 }
 
 /// Portable rg discovery: env → PATH → well-known layouts (wqw.3).
-pub(crate) fn find_rg_in_path() -> Option<PathBuf> {
+pub fn find_rg_in_path() -> Option<PathBuf> {
     crate::binary_resolve::resolve_rg_binary()
         .ok()
         .map(|resolved| resolved.path)
@@ -422,7 +422,7 @@ pub(crate) fn rg_search(
 /// Parse one `path:line:text` row of rg output. The known root prefix is
 /// stripped before splitting so Windows drive colons (and roots that contain
 /// `:`) never confuse the parse; only the relative remainder is examined.
-pub(crate) fn parse_rg_line(line: &str, base: &str) -> Option<SearchMatch> {
+pub fn parse_rg_line(line: &str, base: &str) -> Option<SearchMatch> {
     let rest = line.strip_prefix(base)?;
     if let Some(tail) = rest.strip_prefix(':') {
         // Root is the matched file itself: "<base>:<line>:<text>"; rel falls

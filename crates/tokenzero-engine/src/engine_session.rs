@@ -63,7 +63,6 @@ impl TokenZeroEngine {
 
     /// Mark the MCP initialize lifecycle Ready for unit tests that exercise
     /// tools without replaying the full initialize handshake.
-    #[cfg(test)]
     pub fn mark_lifecycle_ready_for_tests(&self) {
         if let Ok(mut state) = self.lifecycle.lock() {
             *state = InitializeState::Ready;
@@ -335,7 +334,7 @@ impl TokenZeroEngine {
         replaced
     }
 
-    pub(crate) fn session_rollup(&self) -> Value {
+    pub fn session_rollup(&self) -> Value {
         match self.session.lock() {
             Ok(mut slot) => {
                 Self::load_session_memory(&mut slot, self.session_persist.as_ref()).rollup()

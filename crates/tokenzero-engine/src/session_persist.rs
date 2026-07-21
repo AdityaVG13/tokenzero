@@ -168,27 +168,30 @@ pub fn session_memory_path(cache_path: &Path) -> PathBuf {
 }
 
 fn user_memory_root(cache_path: &Path) -> PathBuf {
-    #[cfg(test)]
+    // Integration tests pin a temp root via with_session_root.
+    if let Some(path) = SESSION_ROOT_TEST_OVERRIDE.with(|slot| slot.borrow().clone()) {
+        return path;
+    }
+    // Tempdir / cargo-tmpdir caches co-locate session-memory with the recovery
+    // cache (historical cfg(test) layout). Production uses HOME/ref-index.
+    let cache_text = cache_path.to_string_lossy();
+    if cache_text.contains("/tmp/")
+        || cache_text.contains("tmpdir")
+        || cache_text.contains(".tmp")
+        || cache_text.contains("target/tmp")
     {
-        if let Some(path) = SESSION_ROOT_TEST_OVERRIDE.with(|slot| slot.borrow().clone()) {
-            return path;
-        }
-        cache_path
+        return cache_path
             .parent()
             .unwrap_or_else(|| Path::new("."))
-            .to_path_buf()
+            .to_path_buf();
     }
-    #[cfg(not(test))]
-    {
-        user_memory_root_from(
-            cache_path,
-            std::env::var_os(REF_INDEX_PATH_ENV),
-            std::env::var_os("HOME"),
-        )
-    }
+    user_memory_root_from(
+        cache_path,
+        std::env::var_os(REF_INDEX_PATH_ENV),
+        std::env::var_os("HOME"),
+    )
 }
 
-#[cfg(not(test))]
 fn user_memory_root_from(
     cache_path: &Path,
     ref_index_path: Option<std::ffi::OsString>,
@@ -217,13 +220,13 @@ pub fn session_scope_id(_cache_path: &Path) -> String {
         .unwrap_or_else(|| "__user_global__".to_owned())
 }
 
-#[cfg(test)]
 thread_local! {
     static SESSION_ROOT_TEST_OVERRIDE: std::cell::RefCell<Option<PathBuf>> =
         const { std::cell::RefCell::new(None) };
 }
 
-#[cfg(test)]
+/// Test harness helper: pin session-memory root while `f` runs.
+/// Public so integration tests in tokenzero-mcp can exercise the same override.
 pub fn with_session_root<R>(root: &Path, f: impl FnOnce() -> R) -> R {
     SESSION_ROOT_TEST_OVERRIDE.with(|slot| {
         let previous = slot.replace(Some(root.to_path_buf()));

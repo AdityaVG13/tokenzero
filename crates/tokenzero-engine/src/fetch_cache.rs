@@ -8,16 +8,16 @@ use std::time::{Duration, SystemTime};
 /// recovery cache; bodies themselves are in the content-addressed store.
 /// All IO here is fail-open — a lost index only costs a re-fetch.
 #[derive(serde::Serialize, serde::Deserialize, Default)]
-pub(crate) struct FetchIndex {
+pub struct FetchIndex {
     #[serde(default)]
-    pub(crate) entries: BTreeMap<String, FetchIndexEntry>,
+    pub entries: BTreeMap<String, FetchIndexEntry>,
 }
 
 #[derive(serde::Serialize, serde::Deserialize, Clone)]
-pub(crate) struct FetchIndexEntry {
-    pub(crate) blob_ref: String,
-    pub(crate) fetched_at_secs: u64,
-    pub(crate) bytes: usize,
+pub struct FetchIndexEntry {
+    pub blob_ref: String,
+    pub fetched_at_secs: u64,
+    pub bytes: usize,
 }
 
 pub(crate) fn fetch_index_path(cache_path: &Path) -> PathBuf {
@@ -27,7 +27,7 @@ pub(crate) fn fetch_index_path(cache_path: &Path) -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("fetch-cache.json"))
 }
 
-pub(crate) fn load_fetch_index(path: &Path) -> FetchIndex {
+pub fn load_fetch_index(path: &Path) -> FetchIndex {
     fs::read_to_string(path)
         .ok()
         .and_then(|raw| serde_json::from_str(&raw).ok())
@@ -41,7 +41,7 @@ pub(crate) fn epoch_secs() -> u64 {
         .as_secs()
 }
 
-pub(crate) fn record_fetch(path: &Path, url: &str, blob_ref: &str, bytes: usize) {
+pub fn record_fetch(path: &Path, url: &str, blob_ref: &str, bytes: usize) {
     const MAX_FETCH_INDEX_ENTRIES: usize = 200;
     if let Some(parent) = path.parent() {
         let _ = fs::create_dir_all(parent);

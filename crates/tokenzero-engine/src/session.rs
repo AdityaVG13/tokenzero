@@ -93,7 +93,7 @@ pub(crate) struct SessionRollup {
 }
 
 #[derive(Debug, Default)]
-pub(crate) struct SessionMemory {
+pub struct SessionMemory {
     records: HashMap<ServeKey, ServedRecord>,
     restored_content_hashes: HashSet<String>,
     rollup: SessionRollup,

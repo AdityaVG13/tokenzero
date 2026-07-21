@@ -75,7 +75,10 @@ pub use surface_handshake::{
     SURFACE_CAPABILITY_SCHEMA, SurfaceCapability, SurfaceLimits, build_surface_capability,
     check_contract_compatibility, composition_trace, surface_capability_json,
 };
-pub use render::{cli_json, render_text};
+pub use render::{cli_json, exact_ref_token_count, prune_dead_refs, render_text};
+pub use fetch_cache::{load_fetch_index, record_fetch};
+pub use collect::{find_rg_in_path, parse_rg_line};
+
 pub use report_tool::{build_tool_issue_report, is_reportable_tool_name, record_tool_issue};
 pub use shell_hooks::{ShellHooks, install as install_shell_hooks};
 pub use workspace::{
@@ -94,7 +97,7 @@ use cache_pack::{
 };
 use collect::*;
 use engine_common::*;
-use fetch_cache::{epoch_secs, fetch_index_path, load_fetch_index, record_fetch};
+use fetch_cache::{epoch_secs, fetch_index_path};
 use fetch_guard::{FETCH_META_MARKER, split_fetch_meta, validate_fetch_target};
 use globset::{GlobBuilder, GlobMatcher};
 use paths::*;
@@ -181,9 +184,11 @@ pub struct TokenZeroEngine {
     /// §5). Loaded from `session-memory.json` when dedup is enabled.
     // None until a tool actually needs the persisted working set. Session boot must not
     // deserialize session-memory.json on the compatible manifest+delta path.
-    session: Mutex<Option<SessionMemory>>,
+    /// Visible to integration tests in tokenzero-mcp (same-process harness).
+    pub session: Mutex<Option<SessionMemory>>,
     /// Prompt-resident spans; bodies page to durable refs under budget pressure.
-    working_set: Mutex<tokenzero_recovery::working_set::WorkingSet>,
+    /// Visible to integration tests in tokenzero-mcp.
+    pub working_set: Mutex<tokenzero_recovery::working_set::WorkingSet>,
     /// Reused RecoveryStore for working-set admission (one per engine lifetime).
     recovery_store: Mutex<tokenzero_recovery::RecoveryStore>,
     /// Single-flight gate: ServeKeys currently being served, with a condvar

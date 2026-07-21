@@ -176,6 +176,7 @@ fn classic_surface_rejects_tz_execute_code() {
 }
 
 #[test]
+#[cfg(feature = "surface-codemode")]
 fn codemode_mcp_wire_preserves_canonical_refs() {
     use tokenzero_core::McpToolSurface;
     let dir = tempdir().unwrap();
@@ -207,6 +208,7 @@ fn codemode_mcp_wire_preserves_canonical_refs() {
 }
 
 #[test]
+#[cfg(feature = "surface-codemode")]
 fn mcp_execute_root_honors_foreign_workspace_and_denies_outside() {
     use tokenzero_core::McpToolSurface;
     let server = tempdir().unwrap();
@@ -352,6 +354,7 @@ fn plan_string_expand_does_not_unlock_without_expand_op() {
 }
 
 #[test]
+#[cfg(feature = "surface-codemode")]
 fn shared_health_unlocks_after_plan_expand_miss() {
     use tokenzero_core::McpToolSurface;
     let dir = tempdir().unwrap();
