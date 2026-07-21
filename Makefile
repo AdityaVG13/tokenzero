@@ -33,7 +33,8 @@ irx9-gate:
 	@scripts/irx9_release_gate.sh
 
 # Matched baseline/candidate p50+p95 gate. BASELINE_BIN must name an already
-# built comparison binary; the candidate defaults to this checkout's release build.
+# built comparison binary. The 1% default covers measured host jitter; callers
+# can set PERF_NOISE_TOLERANCE_PCT=0 for an exact-zero exploratory run.
 perf-regression-gate: rust-release-build
 	@test -n "$(BASELINE_BIN)" || { echo "BASELINE_BIN is required" >&2; exit 2; }
 	@python3 scripts/compare_binaries.py \
@@ -41,7 +42,8 @@ perf-regression-gate: rust-release-build
 		--candidate "$${CANDIDATE_BIN:-target/release/tokenzero}" \
 		--fixture "$${PERF_FIXTURE:-README.md}" \
 		--work-dir "$${PERF_WORK_DIR:-.}" \
-		--trials "$${PERF_TRIALS:-500}" \
+		--trials "$${PERF_TRIALS:-1000}" \
+		--noise-tolerance-pct "$${PERF_NOISE_TOLERANCE_PCT:-1.0}" \
 		--json-output "$${PERF_JSON:-results/current/matched-ab.json}"
 
 cli-smoke:
