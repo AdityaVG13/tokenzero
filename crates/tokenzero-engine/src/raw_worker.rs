@@ -504,12 +504,14 @@ pub fn run_raw_worker_serve(opts: &RawWorkerServeOptions) -> i32 {
 /// - `raw-worker --handshake` → print capability and exit
 /// - `raw-worker --once '{...}'` → single frame
 /// - `raw-worker --root DIR --cache-path PATH`
-pub fn parse_raw_worker_argv(args: &[String]) -> Option<RawWorkerServeOptions> {
+pub fn parse_raw_worker_argv(
+    args: &[String],
+) -> Result<Option<RawWorkerServeOptions>, String> {
     if !args
         .get(1)
         .is_some_and(|arg| arg == "raw-worker" || arg == "raw_worker")
     {
-        return None;
+        return Ok(None);
     }
     let rest = &args[2..];
     let mut opts = RawWorkerServeOptions::default();
@@ -518,15 +520,25 @@ pub fn parse_raw_worker_argv(args: &[String]) -> Option<RawWorkerServeOptions> {
         match rest[i].as_str() {
             "--handshake" | "handshake" => opts.handshake_only = true,
             "--once" => {
-                opts.once_json = Some(rest.get(i + 1)?.clone());
+                opts.once_json = Some(
+                    rest.get(i + 1)
+                        .ok_or_else(|| "--once requires a value".to_string())?
+                        .clone(),
+                );
                 i += 1;
             }
             "--root" => {
-                opts.root = PathBuf::from(rest.get(i + 1)?);
+                opts.root = PathBuf::from(
+                    rest.get(i + 1)
+                        .ok_or_else(|| "--root requires a value".to_string())?,
+                );
                 i += 1;
             }
             "--cache-path" => {
-                opts.cache_path = Some(PathBuf::from(rest.get(i + 1)?));
+                opts.cache_path = Some(PathBuf::from(
+                    rest.get(i + 1)
+                        .ok_or_else(|| "--cache-path requires a value".to_string())?,
+                ));
                 i += 1;
             }
             s if s.starts_with("--once=") => {
@@ -539,13 +551,15 @@ pub fn parse_raw_worker_argv(args: &[String]) -> Option<RawWorkerServeOptions> {
         }
         i += 1;
     }
-    Some(opts)
+    Ok(Some(opts))
 }
 
 /// Entry for surface binaries: if argv contains raw-worker, run and never return.
-pub fn maybe_run_raw_worker_from_args(args: &[String]) -> Option<i32> {
-    let opts = parse_raw_worker_argv(args)?;
-    Some(run_raw_worker_serve(&opts))
+pub fn maybe_run_raw_worker_from_args(args: &[String]) -> Result<Option<i32>, String> {
+    let Some(opts) = parse_raw_worker_argv(args)? else {
+        return Ok(None);
+    };
+    Ok(Some(run_raw_worker_serve(&opts)))
 }
 
 #[cfg(test)]

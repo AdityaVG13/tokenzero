@@ -26,8 +26,13 @@ fn main() {
 
     // Private raw worker (tokenzero-irx9.4): OMP/router composition path.
     // Framing + handshake + NDJSON exec loop; not a second user catalog.
-    if let Some(code) = tokenzero_mcp::maybe_run_raw_worker_from_args(&args) {
-        process::exit(code);
+    match tokenzero_mcp::maybe_run_raw_worker_from_args(&args) {
+        Ok(Some(code)) => process::exit(code),
+        Ok(None) => {}
+        Err(error) => {
+            eprintln!("tokenzero-mcp: {error}");
+            process::exit(2);
+        }
     }
 
     if args.iter().any(|a| a == "help" || a == "--help" || a == "-h") {

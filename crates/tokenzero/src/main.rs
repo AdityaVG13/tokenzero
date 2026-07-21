@@ -187,6 +187,7 @@ fn main() -> Result<()> {
     // This private command is recognized only in argv[1], before Clap normalization.
     if raw_worker_is_first_command(&argv) {
         let code = tokenzero_mcp::maybe_run_raw_worker_from_args(&raw_worker_argv(argv)?)
+            .map_err(anyhow::Error::msg)?
             .context("leading raw-worker command did not parse")?;
         std::process::exit(code);
     }

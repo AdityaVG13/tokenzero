@@ -146,7 +146,9 @@
             "raw-worker".into(),
             "--handshake".into(),
         ];
-        let opts = parse_raw_worker_argv(&args).expect("parse");
+        let opts = parse_raw_worker_argv(&args)
+            .expect("valid arguments")
+            .expect("raw-worker command");
         assert!(opts.handshake_only);
     }
 
@@ -158,7 +160,7 @@
             "--prefix".into(),
             "raw-worker".into(),
         ];
-        assert!(parse_raw_worker_argv(&args).is_none());
+        assert!(parse_raw_worker_argv(&args).expect("valid arguments").is_none());
     }
 
     #[test]
@@ -169,10 +171,8 @@
                 "raw-worker".into(),
                 option.into(),
             ];
-            assert!(
-                parse_raw_worker_argv(&args).is_none(),
-                "{option} without a value must not start the worker"
-            );
+            let error = parse_raw_worker_argv(&args).expect_err("missing value must fail");
+            assert!(error.contains("requires a value"), "{option}: {error}");
         }
     }
 
