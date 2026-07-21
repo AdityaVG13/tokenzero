@@ -2432,12 +2432,14 @@ fn exec_ingest(engine: &TokenZeroEngine, args: &[Value]) -> OpResult {
 
 fn exec_rewrite(engine: &TokenZeroEngine, args: &[Value]) -> OpResult {
     let command = require_str_arg(args, 0, "zero.rewrite requires a command string as first argument")?;
-    let mode = Opts::from_arg(args, 1).str("mode").unwrap_or("safe");
+    let opts = Opts::from_arg(args, 1);
+    let mode = opts.str("mode").unwrap_or("safe");
     domain_via_dispatcher(engine, "zero.rewrite", &json!({"command": command, "mode": mode}))
 }
 
 fn exec_cache_pack(engine: &TokenZeroEngine, args: &[Value]) -> OpResult {
-    let scope = Opts::from_arg(args, 0).str("scope").unwrap_or("agent");
+    let opts = Opts::from_arg(args, 0);
+    let scope = opts.str("scope").unwrap_or("agent");
     domain_via_dispatcher(engine, "zero.cache_pack", &json!({"scope": scope}))
 }
 

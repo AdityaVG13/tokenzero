@@ -140,25 +140,64 @@ $(Commands::$sv($sa) => $special,)*
 };
 }
 
-fn main() -> Result<()> {
-    // Private raw worker (tokenzero-irx9.4) on the selected surface artifact / shim.
-    {
-        let argv: Vec<String> = std::env::args().collect();
-        if let Some(code) = tokenzero_mcp::maybe_run_raw_worker_from_args(&argv) {
-            std::process::exit(code);
-        }
-        // Fast path: avoid building the full clap command tree for --version/-V.
-        if argv.len() == 2 {
-            match argv[1].as_str() {
-                "--version" | "-V" => {
-                    println!("tokenzero {}", env!("CARGO_PKG_VERSION"));
-                    return Ok(());
-                }
-                _ => {}
-            }
-        }
+fn raw_worker_is_first_command(argv: &[OsString]) -> bool {
+    matches!(
+        argv.get(1).and_then(|arg| arg.to_str()),
+        Some("raw-worker" | "raw_worker")
+    )
+}
+
+fn raw_worker_argv(argv: Vec<OsString>) -> Result<Vec<String>> {
+    argv.into_iter()
+        .map(|arg| {
+            arg.into_string().map_err(|arg| {
+                anyhow::anyhow!("raw-worker argument is not valid UTF-8: {arg:?}")
+            })
+        })
+        .collect()
+}
+
+#[cfg(test)]
+mod startup_arg_tests {
+    use super::raw_worker_is_first_command;
+    use std::ffi::OsString;
+
+    #[test]
+    fn raw_worker_dispatch_requires_first_command_argument() {
+        let child_command = [
+            OsString::from("tokenzero"),
+            OsString::from("run"),
+            OsString::from("--"),
+            OsString::from("raw-worker"),
+        ];
+        assert!(!raw_worker_is_first_command(&child_command));
+
+        let raw_worker = [
+            OsString::from("tokenzero"),
+            OsString::from("raw-worker"),
+        ];
+        assert!(raw_worker_is_first_command(&raw_worker));
     }
-    let cli = Cli::parse_from(normalize_agent_invocation_args(std::env::args_os()));
+}
+
+fn main() -> Result<()> {
+    let argv: Vec<OsString> = std::env::args_os().collect();
+
+    // Private raw worker (tokenzero-irx9.4) on the selected surface artifact / shim.
+    // This private command is recognized only in argv[1], before Clap normalization.
+    if raw_worker_is_first_command(&argv) {
+        let code = tokenzero_mcp::maybe_run_raw_worker_from_args(&raw_worker_argv(argv)?)
+            .context("leading raw-worker command did not parse")?;
+        std::process::exit(code);
+    }
+
+    // Fast path: avoid building the full clap command tree for --version/-V.
+    if argv.len() == 2 && matches!(argv[1].to_str(), Some("--version" | "-V")) {
+        println!("tokenzero {}", env!("CARGO_PKG_VERSION"));
+        return Ok(());
+    }
+
+    let cli = Cli::parse_from(normalize_agent_invocation_args(argv));
     let Some(command) = cli.command else {
         Cli::command().print_help()?;
         println!();
@@ -229,30 +268,21 @@ fn main() -> Result<()> {
     Ok(())
 }
 
-fn normalize_agent_invocation_args<I>(args: I) -> Vec<OsString>
-where
-    I: IntoIterator<Item = OsString>,
-{
-    let argv: Vec<OsString> = args.into_iter().collect();
+fn normalize_agent_invocation_args(mut argv: Vec<OsString>) -> Vec<OsString> {
     if argv.len() <= 1 {
         return argv;
     }
     if argv.len() == 2 && matches!(argv[1].to_str(), Some("--robot-help" | "robot-help")) {
-        return vec![
-            argv[0].clone(),
-            OsString::from("robot-docs"),
-            OsString::from("guide"),
-        ];
+        argv[1] = OsString::from("robot-docs");
+        argv.push(OsString::from("guide"));
+        return argv;
     }
     if argv[1]
         .to_str()
         .is_some_and(|arg| arg == "--mode" || arg.starts_with("--mode="))
     {
-        let mut normalized = Vec::with_capacity(argv.len() + 1);
-        normalized.push(argv[0].clone());
-        normalized.push(OsString::from("mcp-server"));
-        normalized.extend(argv[1..].iter().cloned());
-        return normalized;
+        argv.insert(1, OsString::from("mcp-server"));
+        return argv;
     }
     match argv[1].to_str() {
         Some("rn") => {
@@ -405,23 +435,25 @@ fn tool_emit(response: ToolResponse, json: bool, tool: &str) -> Result<EmitRespo
 /// Route a CLI domain op through the shared engine dispatcher exactly once.
 fn dispatch_cli_tool(engine: &TokenZeroEngine, op: &str, args: serde_json::Value) -> ToolResponse {
     let outcome = tokenzero_mcp::dispatch_cli(engine, op, &args);
-    if let Some(response) = outcome.tool_response {
-        return response;
-    }
-    if let Some(err) = outcome.domain_error {
-        return ToolResponse::error(
+    let response = if let Some(response) = outcome.tool_response {
+        response
+    } else if let Some(err) = outcome.domain_error {
+        ToolResponse::error(
             op,
             err.kind.as_str(),
             err.message,
             None,
-        );
-    }
-    ToolResponse::error(
-        op,
-        "dispatch_empty",
-        "domain dispatch returned no tool response",
-        None,
-    )
+        )
+    } else {
+        ToolResponse::error(
+            op,
+            "dispatch_empty",
+            "domain dispatch returned no tool response",
+            None,
+        )
+    };
+    engine.record_ledger_response(op, &response);
+    response
 }
 
 fn mode_json(mode: Mode) -> String {
@@ -1392,7 +1424,7 @@ fn engine_new(
     shell_timeout: std::time::Duration,
     mcp_idle: Option<std::time::Duration>,
 ) -> TokenZeroEngine {
-    TokenZeroEngine::new(engine_config(
+    TokenZeroEngine::new_cli(engine_config(
         root,
         allowed_roots,
         resolve_recovery_cache_path(root, cache_path),

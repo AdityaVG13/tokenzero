@@ -134,10 +134,11 @@ impl TokenZeroEngine {
                 }
             };
             bytes_read += text.len();
+            let line_count = text.lines().count();
             if paths.len() == 1 {
                 let anchor_start = source_start.unwrap_or(1);
                 let anchor_end = source_end.unwrap_or_else(|| {
-                    anchor_start.saturating_add(text.lines().count().saturating_sub(1))
+                    anchor_start.saturating_add(line_count.saturating_sub(1))
                 });
                 working_set_anchor = Some(tokenzero_recovery::working_set::SpanAnchor {
                     path: path.clone(),
@@ -194,7 +195,12 @@ impl TokenZeroEngine {
                     start: source_start,
                     end: source_end,
                 };
-                let content_sha256 = sha256_hex(&text);
+                let content_sha256 = stored
+                    .blob_ref
+                    .strip_prefix("tz://blob/")
+                    .filter(|digest| digest.len() == 64)
+                    .map(str::to_owned)
+                    .unwrap_or_else(|| sha256_hex(&text));
                 // raw keeps the verbatim-slice contract, passthrough keeps
                 // its verbatim-payload contract, and fresh is the per-call
                 // opt-out; all three bypass the replacement render but still
@@ -240,7 +246,10 @@ impl TokenZeroEngine {
                     }
                     _ => {}
                 }
-                pending.push((key, served_record(&text, &stored)));
+                pending.push((
+                    key,
+                    served_record_with_metadata(content_sha256, text.len(), line_count, &stored),
+                ));
             }
             raw_tokens += capsule.raw_tokens;
             visible_tokens += part_tokens;
@@ -300,10 +309,6 @@ impl TokenZeroEngine {
         }
         let exact_refs_available = !refs.is_empty();
         let exact_ref_tokens = exact_ref_token_count(&refs);
-        let recovery_tokens = store.recovery_tokens;
-        // Release the recovery-store lock before working-set admission, which
-        // re-locks the same mutex (std::sync::Mutex is not reentrant).
-        drop(store);
         let mut response = success_response(
             "read",
             mode,
@@ -312,7 +317,7 @@ impl TokenZeroEngine {
             (
                 raw_tokens,
                 visible_tokens,
-                recovery_tokens,
+                store.recovery_tokens,
                 Some(exact_ref_tokens),
             ),
         );
@@ -330,8 +335,9 @@ impl TokenZeroEngine {
         }
         let working_set_replaced = !raw
             && !matches!(mode, Mode::Passthrough)
-            && working_set_anchor
-                .is_some_and(|anchor| self.admit_working_set_response(&mut response, anchor));
+            && working_set_anchor.is_some_and(|anchor| {
+                self.admit_working_set_response(&mut store, &mut response, anchor)
+            });
         // A serve whose refs failed to persist, or whose visible bytes were
         // replaced by working-set eviction, must not become a dedup base.
         if storage_errors.is_empty() && refs_complete && !working_set_replaced {

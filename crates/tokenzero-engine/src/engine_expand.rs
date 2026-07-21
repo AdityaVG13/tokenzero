@@ -17,6 +17,51 @@ fn expand_serve_key(params: &ExpandParams) -> ServeKey {
     }
 }
 
+/// Expand from the engine-owned warm store, reloading the active cache once only
+/// after a local miss. A successful warm lookup remains disk-free, while refs
+/// persisted by another process become visible without restarting the engine.
+fn expand_with_reload_on_miss(
+    store: &mut RecoveryStore,
+    active_cache: &Path,
+    ref_id: &str,
+    selector: Option<&str>,
+    start_line: Option<usize>,
+    end_line: Option<usize>,
+    anchor_kind: Option<&str>,
+    symbol: Option<&str>,
+) -> ExpansionResult {
+    let result = store.expand(
+        ref_id,
+        selector,
+        start_line,
+        end_line,
+        anchor_kind,
+        symbol,
+    );
+    if result.found {
+        return result;
+    }
+
+    let mut refreshed = RecoveryStore::new(Some(active_cache.to_path_buf()));
+    refreshed.recovery_count = store.recovery_count;
+    refreshed.recovery_tokens = store.recovery_tokens;
+    refreshed.legacy_read_count = store.legacy_read_count;
+    let refreshed_result = refreshed.expand(
+        ref_id,
+        selector,
+        start_line,
+        end_line,
+        anchor_kind,
+        symbol,
+    );
+    if refreshed_result.found {
+        *store = refreshed;
+        refreshed_result
+    } else {
+        result
+    }
+}
+
 fn resolve_slice(
     store: &mut RecoveryStore,
     params: &ExpandParams,
@@ -25,7 +70,9 @@ fn resolve_slice(
     let selector = params.selector.as_deref().or(Some("raw"));
     let anchor = params.anchor_kind.as_deref();
     let symbol = params.symbol.as_deref();
-    let result = store.expand(
+    let result = expand_with_reload_on_miss(
+        store,
+        active_cache,
         &params.ref_id,
         selector,
         params.start_line,
@@ -157,7 +204,9 @@ impl TokenZeroEngine {
                     None,
                 );
             }
-            let since_result = store.expand(
+            let since_result = expand_with_reload_on_miss(
+                &mut store,
+                &self.config.cache_path,
                 since_ref,
                 params.selector.as_deref().or(Some("raw")),
                 params.start_line,
@@ -405,5 +454,33 @@ impl TokenZeroEngine {
             }
         }
         response
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn engine_expands_alias_persisted_after_engine_construction() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = dir.path().join("recovery-cache.json");
+        let mut config = EngineConfig::for_root(dir.path());
+        config.cache_path = cache.clone();
+        config.session_dedup = false;
+        let engine = TokenZeroEngine::new(config);
+
+        let text = "payload persisted by another store view";
+        let alias = {
+            let mut other_process_store = RecoveryStore::new(Some(cache));
+            let stored = other_process_store
+                .store_payload(text, ContentType::Unknown, None, None, None)
+                .unwrap();
+            other_process_store.ensure_session_visible_alias(&stored.blob_ref)
+        };
+
+        let response = engine.expand(&alias, Some("raw"), None, None, None, None);
+        assert!(response.error.is_none(), "{:?}", response.error);
+        assert_eq!(response.visible.as_ref().unwrap().text, text);
     }
 }

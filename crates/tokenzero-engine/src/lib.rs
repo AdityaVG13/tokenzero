@@ -189,8 +189,10 @@ pub struct TokenZeroEngine {
     /// Prompt-resident spans; bodies page to durable refs under budget pressure.
     /// Visible to integration tests in tokenzero-mcp.
     pub working_set: Mutex<tokenzero_recovery::working_set::WorkingSet>,
-    /// Reused RecoveryStore for working-set admission (one per engine lifetime).
-    recovery_store: Mutex<tokenzero_recovery::RecoveryStore>,
+    /// Reusable RecoveryStore slot for long-lived MCP/CodeMode engines.
+    /// A request checks the store out instead of holding this mutex while it
+    /// performs filesystem work, so unrelated concurrent requests do not serialize.
+    recovery_store: Option<Mutex<Option<tokenzero_recovery::RecoveryStore>>>,
     /// Single-flight gate: ServeKeys currently being served, with a condvar
     /// to wake waiters. Two pipelined identical reads on the 4-worker pool
     /// would otherwise both miss the seen-set (the first has not recorded its
@@ -213,7 +215,7 @@ pub struct TokenZeroEngine {
     session_boot: OnceLock<Option<tokenzero_recovery::boot::SessionBoot>>,
     surface_health: std::sync::Arc<surface_health::SurfaceHealth>,
     /// Fail-open append-only response accounting beside the recovery cache.
-    ledger: ledger::LedgerWriter,
+    ledger: Option<ledger::LedgerWriter>,
     /// Per-connection MCP initialize lifecycle (stdio session / engine).
     pub lifecycle: Mutex<InitializeState>,
 }

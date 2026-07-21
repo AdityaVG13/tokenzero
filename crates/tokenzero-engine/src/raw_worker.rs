@@ -505,30 +505,29 @@ pub fn run_raw_worker_serve(opts: &RawWorkerServeOptions) -> i32 {
 /// - `raw-worker --once '{...}'` → single frame
 /// - `raw-worker --root DIR --cache-path PATH`
 pub fn parse_raw_worker_argv(args: &[String]) -> Option<RawWorkerServeOptions> {
-    let pos = args.iter().position(|a| a == "raw-worker" || a == "raw_worker")?;
-    let rest = &args[pos + 1..];
+    if !args
+        .get(1)
+        .is_some_and(|arg| arg == "raw-worker" || arg == "raw_worker")
+    {
+        return None;
+    }
+    let rest = &args[2..];
     let mut opts = RawWorkerServeOptions::default();
     let mut i = 0;
     while i < rest.len() {
         match rest[i].as_str() {
             "--handshake" | "handshake" => opts.handshake_only = true,
             "--once" => {
-                if let Some(j) = rest.get(i + 1) {
-                    opts.once_json = Some(j.clone());
-                    i += 1;
-                }
+                opts.once_json = Some(rest.get(i + 1)?.clone());
+                i += 1;
             }
             "--root" => {
-                if let Some(r) = rest.get(i + 1) {
-                    opts.root = PathBuf::from(r);
-                    i += 1;
-                }
+                opts.root = PathBuf::from(rest.get(i + 1)?);
+                i += 1;
             }
             "--cache-path" => {
-                if let Some(c) = rest.get(i + 1) {
-                    opts.cache_path = Some(PathBuf::from(c));
-                    i += 1;
-                }
+                opts.cache_path = Some(PathBuf::from(rest.get(i + 1)?));
+                i += 1;
             }
             s if s.starts_with("--once=") => {
                 opts.once_json = Some(s["--once=".len()..].to_string());

@@ -1,6 +1,6 @@
 SHELL := /bin/bash
 
-.PHONY: test readme-command-audit rust-test rust-verify rust-verify-report rust-release-build rust-proof package-check release-check irx9-gate cli-smoke doctor mcp-smoke mcp-soak shell-matrix install-smoke package-audit
+.PHONY: test readme-command-audit rust-test rust-verify rust-verify-report rust-release-build rust-proof package-check release-check irx9-gate perf-regression-gate cli-smoke doctor mcp-smoke mcp-soak shell-matrix install-smoke package-audit
 
 test: readme-command-audit rust-test
 
@@ -31,6 +31,18 @@ release-check: irx9-gate rust-proof
 # Focused irx9 parity/packaging/dispatcher/bench gates (no workspace-wide cargo).
 irx9-gate:
 	@scripts/irx9_release_gate.sh
+
+# Matched baseline/candidate p50+p95 gate. BASELINE_BIN must name an already
+# built comparison binary; the candidate defaults to this checkout's release build.
+perf-regression-gate: rust-release-build
+	@test -n "$(BASELINE_BIN)" || { echo "BASELINE_BIN is required" >&2; exit 2; }
+	@python3 scripts/compare_binaries.py \
+		--baseline "$(BASELINE_BIN)" \
+		--candidate "$${CANDIDATE_BIN:-target/release/tokenzero}" \
+		--fixture "$${PERF_FIXTURE:-README.md}" \
+		--work-dir "$${PERF_WORK_DIR:-.}" \
+		--trials "$${PERF_TRIALS:-500}" \
+		--json-output "$${PERF_JSON:-results/current/matched-ab.json}"
 
 cli-smoke:
 	@target/debug/tokenzero read README.md --json >/dev/null

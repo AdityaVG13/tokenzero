@@ -171,19 +171,6 @@ fn user_memory_root(cache_path: &Path) -> PathBuf {
     if let Some(path) = SESSION_ROOT_TEST_OVERRIDE.with(|slot| slot.borrow().clone()) {
         return path;
     }
-    // Tempdir / cargo-tmpdir caches co-locate session-memory with the recovery
-    // cache (historical cfg(test) layout). Production uses HOME/ref-index.
-    let cache_text = cache_path.to_string_lossy();
-    if cache_text.contains("/tmp/")
-        || cache_text.contains("tmpdir")
-        || cache_text.contains(".tmp")
-        || cache_text.contains("target/tmp")
-    {
-        return cache_path
-            .parent()
-            .unwrap_or_else(|| Path::new("."))
-            .to_path_buf();
-    }
     user_memory_root_from(
         cache_path,
         std::env::var_os(REF_INDEX_PATH_ENV),

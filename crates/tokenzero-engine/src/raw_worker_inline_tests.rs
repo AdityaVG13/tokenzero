@@ -151,6 +151,32 @@
     }
 
     #[test]
+    fn parse_raw_worker_argv_requires_first_command_argument() {
+        let args = vec![
+            "tokenzero-mcp".into(),
+            "install".into(),
+            "--prefix".into(),
+            "raw-worker".into(),
+        ];
+        assert!(parse_raw_worker_argv(&args).is_none());
+    }
+
+    #[test]
+    fn parse_raw_worker_argv_rejects_missing_option_values() {
+        for option in ["--once", "--root", "--cache-path"] {
+            let args = vec![
+                "tokenzero-mcp".into(),
+                "raw-worker".into(),
+                option.into(),
+            ];
+            assert!(
+                parse_raw_worker_argv(&args).is_none(),
+                "{option} without a value must not start the worker"
+            );
+        }
+    }
+
+    #[test]
     fn no_sandbox_modules_in_raw_worker_source() {
         let src = include_str!("raw_worker.rs");
         let production: String = src

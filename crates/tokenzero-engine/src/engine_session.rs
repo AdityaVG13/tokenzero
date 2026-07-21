@@ -4,38 +4,51 @@ use super::*;
 
 impl TokenZeroEngine {
     pub fn new(config: EngineConfig) -> Self {
-        // Self-cleaning storage: every engine (one per MCP session or CLI
-        // command) reclaims abandoned temp files and aged spills, so users
-        // never have to run cache maintenance by hand. Coalesced so concurrent
-        // constructors do not multiply spill-dir scan/sort work.
+        Self::new_with_response_ledger(config, true)
+    }
+
+    /// Build a one-shot CLI engine.
+    ///
+    /// The response ledger writes the first record directly without starting the
+    /// background flush scheduler, preserving accounting with no idle worker.
+    pub fn new_cli(config: EngineConfig) -> Self {
+        Self::new_with_response_ledger(config, true)
+    }
+
+    fn new_with_response_ledger(config: EngineConfig, response_ledger: bool) -> Self {
+        // Self-cleaning storage: every engine reclaims abandoned temp files and
+        // aged spills, so users never have to run cache maintenance by hand.
+        // Coalesced so concurrent constructors do not multiply scan/sort work.
         let _ = cache_maintenance_coalesced(&config.cache_path, false);
         let metrics = metrics::ToolMetrics::new(&config.cache_path);
         let session_id = new_session_id();
-        let repo = config
-            .allowed_roots
-            .first()
-            .map(PathBuf::as_path)
-            .or_else(|| config.cache_path.parent())
-            .unwrap_or_else(|| Path::new("."))
-            .to_string_lossy()
-            .into_owned();
-        let optimization_tags = vec![
-            format!(
-                "session_dedup:{}",
-                if config.session_dedup { "on" } else { "off" }
-            ),
-            format!(
-                "diff_reads:{}",
-                if config.diff_reads { "on" } else { "off" }
-            ),
-            format!("tool_surface:{}", config.tool_surface),
-        ];
-        let ledger = crate::ledger::LedgerWriter::new(
-            &config.cache_path,
-            session_id.clone(),
-            repo,
-            optimization_tags,
-        );
+        let ledger = response_ledger.then(|| {
+            let repo = config
+                .allowed_roots
+                .first()
+                .map(PathBuf::as_path)
+                .or_else(|| config.cache_path.parent())
+                .unwrap_or_else(|| Path::new("."))
+                .to_string_lossy()
+                .into_owned();
+            let optimization_tags = vec![
+                format!(
+                    "session_dedup:{}",
+                    if config.session_dedup { "on" } else { "off" }
+                ),
+                format!(
+                    "diff_reads:{}",
+                    if config.diff_reads { "on" } else { "off" }
+                ),
+                format!("tool_surface:{}", config.tool_surface),
+            ];
+            crate::ledger::LedgerWriter::new(
+                &config.cache_path,
+                session_id.clone(),
+                repo,
+                optimization_tags,
+            )
+        });
         let session_persist =
             SessionPersistence::for_cache(&config.cache_path, config.session_dedup);
         // Persisted session records are a demand-paged working set. Loading them
@@ -49,7 +62,8 @@ impl TokenZeroEngine {
             working_set: Mutex::new(tokenzero_recovery::working_set::WorkingSet::new(
                 tokenzero_recovery::working_set::DEFAULT_WORKING_SET_TOKENS,
             )),
-            recovery_store: Mutex::new(RecoveryStore::new(Some(cache_path))),
+            recovery_store: response_ledger
+                .then(|| Mutex::new(Some(RecoveryStore::new(Some(cache_path))))),
             in_flight: (Mutex::new(HashSet::new()), Condvar::new()),
             session_id,
             ledger,
@@ -168,9 +182,12 @@ impl TokenZeroEngine {
         self.metrics.record_attribution(tool, engine, persist);
     }
 
-    /// Append one response to the session ledger. Persistence is fail-open.
+    /// Append one response to the session ledger when this engine owns
+    /// accounting. Persistence is fail-open.
     pub fn record_ledger_response(&self, tool: &str, response: &ToolResponse) {
-        self.ledger.record_response(tool, response);
+        if let Some(ledger) = &self.ledger {
+            ledger.record_response(tool, response);
+        }
     }
 
     /// Snapshot served by `resource://tokenzero/metrics`.
@@ -273,6 +290,7 @@ impl TokenZeroEngine {
 
     pub(crate) fn admit_working_set_response(
         &self,
+        store: &mut RecoveryStore,
         response: &mut ToolResponse,
         anchor: tokenzero_recovery::working_set::SpanAnchor,
     ) -> bool {
@@ -286,13 +304,10 @@ impl TokenZeroEngine {
         if text.is_empty() {
             return false;
         }
-        let Ok(mut store) = self.recovery_store.lock() else {
-            return false;
-        };
         let Ok(mut working_set) = self.working_set.lock() else {
             return false;
         };
-        let Ok(admission) = working_set.admit(&mut store, text, anchor) else {
+        let Ok(admission) = working_set.admit(store, text, anchor) else {
             return false;
         };
         let replaced = admission.replacement.is_some();

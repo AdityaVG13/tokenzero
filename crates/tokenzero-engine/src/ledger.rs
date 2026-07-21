@@ -5,8 +5,10 @@
 //! diff.visible_tokens_saved telemetry. It is not a prevented-read estimate.
 //! saved_bytes separately preserves session_delta.saved_bytes.
 //!
-//! Writes use O_APPEND without per-turn fsync and fail open. Before a write
-//! would exceed DEFAULT_MAX_LEDGER_BYTES, the active file rotates to .jsonl.1.
+//! The first record writes synchronously through a retained O_APPEND handle.
+//! Later records batch for at most 250 ms under normal scheduler operation.
+//! Drop and explicit flush drain without per-turn fsync. Before a write would
+//! exceed DEFAULT_MAX_LEDGER_BYTES, the active file rotates to .jsonl.1.
 //! Queries scan both generations and ignore malformed lines, including a torn
 //! final line.
 
@@ -17,8 +19,8 @@ use std::collections::BTreeMap;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::sync::{Arc, Condvar, LazyLock, Mutex, Weak};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokenzero_core::ToolResponse;
 
 pub const LEDGER_SCHEMA: &str = "tokenzero.ledger.v1";
@@ -58,21 +60,70 @@ pub struct LedgerRecord {
 
 #[derive(Debug)]
 pub(crate) struct LedgerWriter {
-    path: PathBuf,
     session_id: String,
     repo: String,
     agent: Option<String>,
     version: VersionIdentity,
     optimization_tags: Vec<String>,
-    max_bytes: u64,
     cumulative_visible_tokens: Mutex<u64>,
+    path: PathBuf,
+    max_bytes: u64,
+    io: Mutex<LedgerMode>,
+}
+
+#[derive(Debug)]
+enum LedgerMode {
+    Direct {
+        open_file: Option<File>,
+        accepted_record: bool,
+    },
+    Buffered(Arc<LedgerIo>),
+}
+
+#[derive(Debug)]
+struct LedgerIo {
+    path: PathBuf,
+    max_bytes: u64,
+    state: Mutex<LedgerIoState>,
+}
+
+#[derive(Debug)]
+struct FlushScheduler {
+    registry: Mutex<FlushRegistry>,
+    wake: Condvar,
+}
+
+#[derive(Debug)]
+struct FlushRegistry {
+    targets: Vec<Weak<LedgerIo>>,
+    generation: u64,
+}
+
+#[derive(Debug)]
+struct LedgerIoState {
     /// Kept-open append handle so warm MCP paths avoid open/close per call.
-    open_file: Mutex<Option<File>>,
-    /// Small write-behind buffer: warm MCP batches several records into one write(2).
-    write_buf: Mutex<Vec<u8>>,
+    open_file: Option<File>,
+    /// Lazily allocated write-behind buffer: warm MCP batches records into one write(2).
+    write_buf: Vec<u8>,
+    buffered_at: Option<Instant>,
 }
 
 const LEDGER_FLUSH_BYTES: usize = 4 * 1024;
+const LEDGER_FLUSH_WINDOW: Duration = Duration::from_millis(250);
+
+static FLUSH_SCHEDULER: LazyLock<FlushScheduler> = LazyLock::new(|| FlushScheduler {
+    registry: Mutex::new(FlushRegistry {
+        targets: Vec::new(),
+        generation: 0,
+    }),
+    wake: Condvar::new(),
+});
+static FLUSH_THREAD: LazyLock<std::thread::JoinHandle<()>> = LazyLock::new(|| {
+    std::thread::Builder::new()
+        .name("tokenzero-ledger-flush".to_owned())
+        .spawn(run_flush_scheduler)
+        .expect("failed to start ledger flush scheduler")
+});
 
 impl LedgerWriter {
     pub(crate) fn new(
@@ -98,7 +149,6 @@ impl LedgerWriter {
         max_bytes: u64,
     ) -> Self {
         Self {
-            path: ledger_path_for_cache(cache_path),
             session_id,
             repo,
             agent: std::env::var(TOKENZERO_AGENT_ENV)
@@ -110,10 +160,13 @@ impl LedgerWriter {
                 git_describe: None,
             },
             optimization_tags,
-            max_bytes,
             cumulative_visible_tokens: Mutex::new(0),
-            open_file: Mutex::new(None),
-            write_buf: Mutex::new(Vec::with_capacity(LEDGER_FLUSH_BYTES)),
+            path: ledger_path_for_cache(cache_path),
+            max_bytes,
+            io: Mutex::new(LedgerMode::Direct {
+                open_file: None,
+                accepted_record: false,
+            }),
         }
     }
 
@@ -158,79 +211,273 @@ impl LedgerWriter {
     fn append_record(&self, record: &LedgerRecord) -> io::Result<()> {
         let mut line = serde_json::to_vec(record).map_err(io::Error::other)?;
         line.push(b'\n');
-        let mut buf = self
-            .write_buf
+        let mut mode = self
+            .io
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        buf.extend_from_slice(&line);
-        if buf.len() >= LEDGER_FLUSH_BYTES {
-            let pending = std::mem::take(&mut *buf);
-            drop(buf);
-            self.flush_bytes(&pending)?;
+        if let LedgerMode::Buffered(io) = &*mode {
+            return io.append(line);
+        }
+        let LedgerMode::Direct {
+            open_file,
+            accepted_record,
+        } = &mut *mode
+        else {
+            unreachable!()
+        };
+        if !*accepted_record {
+            *accepted_record = true;
+            if write_bytes_locked(&self.path, self.max_bytes, open_file, &line).is_ok() {
+                return Ok(());
+            }
+            // A failed first write is retained and retried on the bounded timer.
+        } else if line.len() >= LEDGER_FLUSH_BYTES {
+            return write_bytes_locked(&self.path, self.max_bytes, open_file, &line);
+        }
+        let io = Arc::new(LedgerIo {
+            path: self.path.clone(),
+            max_bytes: self.max_bytes,
+            state: Mutex::new(LedgerIoState {
+                open_file: open_file.take(),
+                write_buf: line,
+                buffered_at: Some(Instant::now()),
+            }),
+        });
+        *mode = LedgerMode::Buffered(Arc::clone(&io));
+        drop(mode);
+        register_flush_target(&io);
+        Ok(())
+    }
+
+    /// Drain buffered records during an orderly lifecycle shutdown. Fail-open.
+    pub(crate) fn flush(&self) {
+        let mode = self
+            .io
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let LedgerMode::Buffered(io) = &*mode {
+            let _ = io.flush();
+        }
+    }
+}
+
+impl LedgerIo {
+    fn append(&self, line: Vec<u8>) -> io::Result<()> {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if line.len() >= LEDGER_FLUSH_BYTES {
+            self.flush_locked(&mut state)?;
+            return write_bytes_locked(&self.path, self.max_bytes, &mut state.open_file, &line);
+        }
+        if state.write_buf.len().saturating_add(line.len()) > LEDGER_FLUSH_BYTES {
+            self.flush_locked(&mut state)?;
+        }
+        let starts_flush_window = state.write_buf.is_empty();
+        if starts_flush_window {
+            state.buffered_at = Some(Instant::now());
+        }
+        if starts_flush_window && state.write_buf.capacity() == 0 {
+            state.write_buf = line;
+        } else {
+            state.write_buf.extend_from_slice(&line);
+        }
+        drop(state);
+        if starts_flush_window {
+            wake_flush_scheduler();
         }
         Ok(())
     }
 
-    pub(crate) fn flush(&self) {
-        let pending = match self.write_buf.lock() {
-            Ok(mut buf) if !buf.is_empty() => std::mem::take(&mut *buf),
-            _ => return,
-        };
-        let _ = self.flush_bytes(&pending);
-    }
-
-    fn flush_bytes(&self, bytes: &[u8]) -> io::Result<()> {
-        if bytes.is_empty() {
-            return Ok(());
-        }
-        let line_bytes = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
-        if let Some(parent) = self.path.parent() {
-            fs::create_dir_all(parent)?;
-        }
-        let mut guard = self
-            .open_file
+    fn flush(&self) -> io::Result<()> {
+        let mut state = self
+            .state
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        // Rotate before writing when the active file would exceed the budget.
-        let observed_len = fs::metadata(&self.path)
-            .map(|metadata| metadata.len())
-            .unwrap_or(0);
-        if observed_len > 0 && observed_len.saturating_add(line_bytes) > self.max_bytes {
-            *guard = None; // drop handle before rename
-            let lock_path = PathBuf::from(format!("{}.rotation.lock", self.path.display()));
-            let rotation_lock = OpenOptions::new()
-                .create(true)
-                .truncate(false)
-                .read(true)
-                .write(true)
-                .open(lock_path)?;
-            FileExt::lock(&rotation_lock)?;
-            let locked_len = fs::metadata(&self.path)
-                .map(|metadata| metadata.len())
-                .unwrap_or(0);
-            if locked_len == observed_len
-                && locked_len > 0
-                && locked_len.saturating_add(line_bytes) > self.max_bytes
-            {
-                let rotated = rotated_path(&self.path);
-                if let Err(error) = fs::rename(&self.path, rotated)
-                    && error.kind() != io::ErrorKind::NotFound
-                {
-                    return Err(error);
-                }
+        self.flush_locked(&mut state)
+    }
+
+    fn flush_if_due(&self, now: Instant) {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let due = state
+            .buffered_at
+            .is_some_and(|buffered_at| now.duration_since(buffered_at) >= LEDGER_FLUSH_WINDOW);
+        if due && self.flush_locked(&mut state).is_err() {
+            // Retain the bytes and retry on the next bounded window without
+            // spinning if the filesystem is temporarily unavailable.
+            state.buffered_at = Some(now);
+        }
+    }
+
+    fn flush_deadline(&self) -> Option<Instant> {
+        self.state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .buffered_at
+            .map(|buffered_at| buffered_at + LEDGER_FLUSH_WINDOW)
+    }
+
+    fn flush_locked(&self, state: &mut LedgerIoState) -> io::Result<()> {
+        if state.write_buf.is_empty() {
+            state.buffered_at = None;
+            return Ok(());
+        }
+        let LedgerIoState {
+            open_file,
+            write_buf,
+            buffered_at,
+            ..
+        } = state;
+        write_bytes_locked(&self.path, self.max_bytes, open_file, write_buf)?;
+        write_buf.clear();
+        *buffered_at = None;
+        Ok(())
+    }
+}
+
+fn write_bytes_locked(
+    path: &Path,
+    max_bytes: u64,
+    open_file: &mut Option<File>,
+    bytes: &[u8],
+) -> io::Result<()> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let lock_path = PathBuf::from(format!("{}.rotation.lock", path.display()));
+    let rotation_lock = OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(lock_path)?;
+    FileExt::lock(&rotation_lock)?;
+
+    if open_file
+        .as_ref()
+        .is_some_and(|file| !open_file_matches_path(file, path))
+    {
+        *open_file = None;
+    }
+    let bytes_len = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
+    let observed_len = fs::metadata(path)
+        .map(|metadata| metadata.len())
+        .unwrap_or(0);
+    if observed_len > 0 && observed_len.saturating_add(bytes_len) > max_bytes {
+        *open_file = None;
+        let rotated = rotated_path(path);
+        if let Err(error) = fs::rename(path, rotated)
+            && error.kind() != io::ErrorKind::NotFound
+        {
+            return Err(error);
+        }
+    }
+    if open_file.is_none() {
+        *open_file = Some(OpenOptions::new().create(true).append(true).open(path)?);
+    }
+    open_file
+        .as_mut()
+        .expect("ledger file just opened")
+        .write_all(bytes)
+}
+
+#[cfg(unix)]
+fn open_file_matches_path(file: &File, path: &Path) -> bool {
+    use std::os::unix::fs::MetadataExt;
+
+    let Ok(open_metadata) = file.metadata() else {
+        return false;
+    };
+    let Ok(path_metadata) = fs::metadata(path) else {
+        return false;
+    };
+    open_metadata.dev() == path_metadata.dev() && open_metadata.ino() == path_metadata.ino()
+}
+
+#[cfg(not(unix))]
+fn open_file_matches_path(_file: &File, _path: &Path) -> bool {
+    false
+}
+
+fn wake_flush_scheduler() {
+    let mut registry = FLUSH_SCHEDULER
+        .registry
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    registry.generation = registry.generation.wrapping_add(1);
+    drop(registry);
+    FLUSH_SCHEDULER.wake.notify_one();
+}
+
+fn register_flush_target(target: &Arc<LedgerIo>) {
+    let mut registry = FLUSH_SCHEDULER
+        .registry
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    registry.targets.push(Arc::downgrade(target));
+    registry.generation = registry.generation.wrapping_add(1);
+    drop(registry);
+    LazyLock::force(&FLUSH_THREAD);
+    FLUSH_SCHEDULER.wake.notify_one();
+}
+
+fn run_flush_scheduler() {
+    let mut active = Vec::<Arc<LedgerIo>>::new();
+    let mut registry = FLUSH_SCHEDULER
+        .registry
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    loop {
+        let scan_generation = registry.generation;
+        active.clear();
+        registry.targets.retain(|target| {
+            let Some(target) = target.upgrade() else {
+                return false;
+            };
+            active.push(target);
+            true
+        });
+        drop(registry);
+
+        let now = Instant::now();
+        let mut next_deadline = None::<Instant>;
+        for target in &active {
+            target.flush_if_due(now);
+            if let Some(deadline) = target.flush_deadline() {
+                next_deadline = Some(
+                    next_deadline
+                        .map(|current| current.min(deadline))
+                        .unwrap_or(deadline),
+                );
             }
-            let _ = FileExt::unlock(&rotation_lock);
         }
-        if guard.is_none() {
-            *guard = Some(
-                OpenOptions::new()
-                    .create(true)
-                    .append(true)
-                    .open(&self.path)?,
-            );
+        // Do not let the process-wide worker extend writer or file-handle lifetime.
+        active.clear();
+
+        registry = FLUSH_SCHEDULER
+            .registry
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if registry.generation != scan_generation {
+            continue;
         }
-        let file = guard.as_mut().expect("ledger file just opened");
-        file.write_all(bytes)
+        registry = if let Some(deadline) = next_deadline {
+            let timeout = deadline.saturating_duration_since(Instant::now());
+            FLUSH_SCHEDULER
+                .wake
+                .wait_timeout(registry, timeout)
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .0
+        } else {
+            FLUSH_SCHEDULER
+                .wake
+                .wait(registry)
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+        };
     }
 }
 
@@ -449,12 +696,184 @@ fn now_ms() -> u64 {
         .unwrap_or(0)
 }
 
-
 #[cfg(test)]
-mod rotation_tests {
+mod ledger_tests {
     use super::*;
     use std::sync::{Arc, Barrier};
     use tempfile::tempdir;
+
+    fn test_writer(cache_path: &Path) -> LedgerWriter {
+        LedgerWriter::with_max_bytes(
+            cache_path,
+            "session-test".to_owned(),
+            "/workspace/repo".to_owned(),
+            vec!["session_dedup:on".to_owned()],
+            DEFAULT_MAX_LEDGER_BYTES,
+        )
+    }
+
+    fn test_record() -> LedgerRecord {
+        serde_json::from_value(schema_example()).unwrap()
+    }
+
+    fn buffered_io(writer: &LedgerWriter) -> Arc<LedgerIo> {
+        let mode = writer.io.lock().unwrap();
+        let LedgerMode::Buffered(io) = &*mode else {
+            panic!("writer has not entered buffered mode");
+        };
+        Arc::clone(io)
+    }
+
+    #[test]
+    fn first_record_is_persisted_without_scheduler_registration() {
+        let directory = tempdir().unwrap();
+        let cache_path = directory.path().join("cache.json");
+        let ledger_path = ledger_path_for_cache(&cache_path);
+        let writer = test_writer(&cache_path);
+
+        writer.append_record(&test_record()).unwrap();
+
+        let mode = writer.io.lock().unwrap();
+        let LedgerMode::Direct {
+            open_file,
+            accepted_record,
+        } = &*mode
+        else {
+            panic!("one record must not allocate buffered mode");
+        };
+        assert!(*accepted_record);
+        assert!(open_file.is_some());
+        drop(mode);
+        assert_eq!(read_records(&ledger_path).unwrap(), vec![test_record()]);
+    }
+
+    #[test]
+    fn flush_window_boundary_is_deterministic() {
+        let directory = tempdir().unwrap();
+        let cache_path = directory.path().join("cache.json");
+        let ledger_path = ledger_path_for_cache(&cache_path);
+        let writer = test_writer(&cache_path);
+        writer.append_record(&test_record()).unwrap();
+        writer.append_record(&test_record()).unwrap();
+        let io = buffered_io(&writer);
+        let buffered_at = io
+            .state
+            .lock()
+            .unwrap()
+            .buffered_at
+            .expect("second record is buffered");
+
+        io.flush_if_due(buffered_at + LEDGER_FLUSH_WINDOW - Duration::from_nanos(1));
+        assert_eq!(read_records(&ledger_path).unwrap(), vec![test_record()]);
+        io.flush_if_due(buffered_at + LEDGER_FLUSH_WINDOW);
+
+        assert_eq!(
+            read_records(&ledger_path).unwrap(),
+            vec![test_record(), test_record()]
+        );
+    }
+
+    #[test]
+    fn low_volume_record_flushes_after_bounded_window() {
+        let directory = tempdir().unwrap();
+        let cache_path = directory.path().join("cache.json");
+        let ledger_path = ledger_path_for_cache(&cache_path);
+        let writer = test_writer(&cache_path);
+
+        writer.append_record(&test_record()).unwrap();
+        writer.append_record(&test_record()).unwrap();
+        assert_eq!(read_records(&ledger_path).unwrap(), vec![test_record()]);
+
+        let deadline = Instant::now() + LEDGER_FLUSH_WINDOW + Duration::from_secs(2);
+        while read_records(&ledger_path).unwrap().len() < 2 && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(
+            read_records(&ledger_path).unwrap(),
+            vec![test_record(), test_record()]
+        );
+    }
+
+    #[test]
+    fn explicit_flush_drains_low_volume_record() {
+        let directory = tempdir().unwrap();
+        let cache_path = directory.path().join("cache.json");
+        let ledger_path = ledger_path_for_cache(&cache_path);
+        let writer = test_writer(&cache_path);
+
+        writer.append_record(&test_record()).unwrap();
+        writer.append_record(&test_record()).unwrap();
+        writer.flush();
+
+        assert_eq!(
+            read_records(&ledger_path).unwrap(),
+            vec![test_record(), test_record()]
+        );
+    }
+
+    #[test]
+    fn failed_timed_flush_is_retained_for_explicit_retry() {
+        let directory = tempdir().unwrap();
+        let blocked_parent = directory.path().join("blocked");
+        fs::write(&blocked_parent, b"not a directory").unwrap();
+        let cache_path = blocked_parent.join("cache.json");
+        let ledger_path = ledger_path_for_cache(&cache_path);
+        let writer = test_writer(&cache_path);
+        writer.append_record(&test_record()).unwrap();
+        let io = buffered_io(&writer);
+        let buffered_at = io
+            .state
+            .lock()
+            .unwrap()
+            .buffered_at
+            .expect("record is buffered");
+
+        let failed_at = buffered_at + LEDGER_FLUSH_WINDOW;
+        io.flush_if_due(failed_at);
+        assert_eq!(io.state.lock().unwrap().buffered_at, Some(failed_at));
+
+        fs::remove_file(&blocked_parent).unwrap();
+        fs::create_dir(&blocked_parent).unwrap();
+        writer.flush();
+        assert_eq!(read_records(&ledger_path).unwrap(), vec![test_record()]);
+    }
+
+    #[test]
+    fn drop_flushes_low_volume_record() {
+        let directory = tempdir().unwrap();
+        let cache_path = directory.path().join("cache.json");
+        let ledger_path = ledger_path_for_cache(&cache_path);
+        let writer = test_writer(&cache_path);
+
+        writer.append_record(&test_record()).unwrap();
+        writer.append_record(&test_record()).unwrap();
+        drop(writer);
+
+        assert_eq!(
+            read_records(&ledger_path).unwrap(),
+            vec![test_record(), test_record()]
+        );
+    }
+
+    #[test]
+    fn retained_handle_reopens_after_external_rotation() {
+        let directory = tempdir().unwrap();
+        let cache_path = directory.path().join("cache.json");
+        let path = ledger_path_for_cache(&cache_path);
+        let rotated = rotated_path(&path);
+        let first_writer = test_writer(&cache_path);
+
+        first_writer.append_record(&test_record()).unwrap();
+        fs::rename(&path, &rotated).unwrap();
+
+        let second_writer = test_writer(&cache_path);
+        second_writer.append_record(&test_record()).unwrap();
+        first_writer.append_record(&test_record()).unwrap();
+        first_writer.flush();
+
+        assert_eq!(fs::read_to_string(&rotated).unwrap().lines().count(), 1);
+        assert_eq!(fs::read_to_string(&path).unwrap().lines().count(), 2);
+    }
 
     #[test]
     fn concurrent_rotation_does_not_rotate_twice() {

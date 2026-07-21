@@ -5,17 +5,72 @@ pub struct PersistResult {
     pub(crate) error: Option<String>,
 }
 
-impl TokenZeroEngine {
-    /// Borrow the engine-owned recovery store (loaded once at construction).
-    ///
-    /// Hot paths used to call `RecoveryStore::new` on every op, reloading the
-    /// full cache snapshot from disk and discarding in-process memoization.
-    /// Reusing the mutex-backed store keeps warm MCP/CLI sessions on the
-    /// in-memory state while still serializing concurrent mutations.
-    pub(crate) fn recovery_store(&self) -> std::sync::MutexGuard<'_, RecoveryStore> {
-        self.recovery_store
+pub(crate) enum RecoveryStoreLease<'a> {
+    Shared {
+        store: Option<RecoveryStore>,
+        slot: &'a Mutex<Option<RecoveryStore>>,
+    },
+    Owned(RecoveryStore),
+}
+
+impl std::ops::Deref for RecoveryStoreLease<'_> {
+    type Target = RecoveryStore;
+
+    fn deref(&self) -> &Self::Target {
+        match self {
+            Self::Shared { store, .. } => store
+                .as_ref()
+                .expect("checked-out recovery store must remain present"),
+            Self::Owned(store) => store,
+        }
+    }
+}
+
+impl std::ops::DerefMut for RecoveryStoreLease<'_> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        match self {
+            Self::Shared { store, .. } => store
+                .as_mut()
+                .expect("checked-out recovery store must remain present"),
+            Self::Owned(store) => store,
+        }
+    }
+}
+
+impl Drop for RecoveryStoreLease<'_> {
+    fn drop(&mut self) {
+        let Self::Shared { store, slot } = self else {
+            return;
+        };
+        let Some(store) = store.take() else {
+            return;
+        };
+        let mut available = slot
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if available.is_none() {
+            *available = Some(store);
+        }
+    }
+}
+
+impl TokenZeroEngine {
+    /// Check out the reusable long-lived store, or construct a temporary store
+    /// when another request already has it. One-shot CLI commands own their store.
+    pub(crate) fn recovery_store(&self) -> RecoveryStoreLease<'_> {
+        match &self.recovery_store {
+            Some(slot) => {
+                let store = slot
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .take()
+                    .unwrap_or_else(|| RecoveryStore::new(Some(self.config.cache_path.clone())));
+                RecoveryStoreLease::Shared { store: Some(store), slot }
+            }
+            None => RecoveryStoreLease::Owned(RecoveryStore::new(Some(
+                self.config.cache_path.clone(),
+            ))),
+        }
     }
 
     pub(crate) fn shell_output_policy(&self) -> RunOutputPolicy {
@@ -59,6 +114,19 @@ pub fn push_payload_refs(
     refs.push(ref_record("file", stored.file_ref.clone(), bytes));
 }
 
+fn value_contains_blob_ref(value: &serde_json::Value) -> bool {
+    match value {
+        serde_json::Value::String(text) => {
+            text.contains("tz://blob/")
+                || text.contains("fz://blob/")
+                || text.contains("gz://blob/")
+        }
+        serde_json::Value::Array(values) => values.iter().any(value_contains_blob_ref),
+        serde_json::Value::Object(values) => values.values().any(value_contains_blob_ref),
+        _ => false,
+    }
+}
+
 impl TokenZeroEngine {
     /// Rewrite full-hash blob refs in a tool response to session-visible
     /// `tz://s/<16hex>` aliases and persist the short→full alias table.
@@ -75,10 +143,10 @@ impl TokenZeroEngine {
                     || v.text.contains("gz://blob/")
             })
             .unwrap_or(false)
-            || response.telemetry.as_ref().is_some_and(|t| {
-                let s = t.to_string();
-                s.contains("tz://blob/") || s.contains("fz://blob/") || s.contains("gz://blob/")
-            });
+            || response
+                .telemetry
+                .as_ref()
+                .is_some_and(value_contains_blob_ref);
         if !needs_alias {
             return;
         }
@@ -110,13 +178,27 @@ impl TokenZeroEngine {
 }
 
 pub fn served_record(content: &str, stored: &StoredPayload) -> ServedRecord {
+    served_record_with_metadata(
+        sha256_hex(content),
+        content.len(),
+        content.lines().count(),
+        stored,
+    )
+}
+
+pub(crate) fn served_record_with_metadata(
+    content_sha256: String,
+    byte_len: usize,
+    line_count: usize,
+    stored: &StoredPayload,
+) -> ServedRecord {
     ServedRecord {
-        content_sha256: sha256_hex(content),
+        content_sha256,
         blob_ref: stored.blob_ref.clone(),
         file_ref: stored.file_ref.clone(),
         raw_tokens: stored.raw_tokens,
-        line_count: content.lines().count(),
-        byte_len: content.len(),
+        line_count,
+        byte_len,
         served_at: SystemTime::now(),
         serve_count: 1,
     }
