@@ -5,12 +5,12 @@
 //! `gz://entity/<id>`. There is no `tz://entity/` namespace.
 
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 use std::collections::BTreeSet;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::SystemTime;
+use tokenzero_core::sha256_hex;
 
 /// Frozen schema id.
 pub const ENTITY_NOVELTY_SCHEMA_VERSION: &str = "zerostack.entity-novelty.v1";
@@ -148,9 +148,7 @@ impl From<serde_json::Error> for NoveltyError {
 
 /// SHA-256 hex of UTF-8 `scope_key` (filename under the shared novelty dir).
 pub fn scope_digest(scope_key: &str) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update(scope_key.as_bytes());
-    hex_encode(&hasher.finalize())
+    sha256_hex(scope_key)
 }
 
 /// Path to the mutable novelty pointer for `scope_key`.
@@ -277,44 +275,7 @@ fn validate_entity_id(hex: &str) -> Result<(), NoveltyError> {
 }
 
 fn now_rfc3339() -> String {
-    let secs = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
-    // Second precision UTC; avoid chrono dep. Format is RFC3339-compatible.
-    let days = secs / 86_400;
-    let tod = secs % 86_400;
-    let hour = tod / 3600;
-    let min = (tod % 3600) / 60;
-    let sec = tod % 60;
-    // Civil date from Unix days (proleptic Gregorian), adequate for novelty stamps.
-    let (y, m, d) = unix_days_to_ymd(days as i64);
-    format!("{y:04}-{m:02}-{d:02}T{hour:02}:{min:02}:{sec:02}Z")
-}
-
-fn unix_days_to_ymd(days: i64) -> (i32, u32, u32) {
-    // Algorithm from civil_from_days (Howard Hinnant), public domain.
-    let z = days + 719_468;
-    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
-    let doe = (z - era * 146_097) as u64;
-    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146_096) / 365;
-    let y = (yoe as i64) + era * 400;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let d = doy - (153 * mp + 2) / 5 + 1;
-    let m = if mp < 10 { mp + 3 } else { mp - 9 };
-    let y = if m <= 2 { y + 1 } else { y };
-    (y as i32, m as u32, d as u32)
-}
-
-fn hex_encode(bytes: &[u8]) -> String {
-    const HEX: &[u8; 16] = b"0123456789abcdef";
-    let mut out = String::with_capacity(bytes.len() * 2);
-    for &b in bytes {
-        out.push(HEX[(b >> 4) as usize] as char);
-        out.push(HEX[(b & 0xf) as usize] as char);
-    }
-    out
+    crate::shared_cas::format_system_time(SystemTime::now())
 }
 
 #[cfg(test)]

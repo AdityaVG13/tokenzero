@@ -207,14 +207,6 @@ macro_rules! persist_after_deferred {
     };
 }
 
-macro_rules! recovery_lib {
-    ($($tt:tt)*) => {
-        $($tt)*
-    };
-}
-
-recovery_lib! {
-
 #[derive(Debug, Error)]
 pub enum RecoveryError {
     #[error("io error: {0}")]
@@ -2434,12 +2426,7 @@ fn blob_value_len(value: &BlobEntry) -> usize {
 }
 
 fn encode_hex(bytes: &[u8]) -> String {
-    use std::fmt::Write as _;
-    let mut encoded = String::with_capacity(bytes.len() * 2);
-    for byte in bytes {
-        write!(&mut encoded, "{byte:02x}").expect("writing hex into String cannot fail");
-    }
-    encoded
+    crate::shared_cas::lower_hex(bytes)
 }
 
 fn digest_hex(hasher: Sha256) -> String {
@@ -3125,9 +3112,6 @@ fn file_meta(path: &Path) -> Option<fs::Metadata> {
 
 fn mtime_ns(meta: &fs::Metadata) -> u128 {
     meta.modified().ok().and_then(|m| m.duration_since(SystemTime::UNIX_EPOCH).ok()).map(|d| d.as_nanos()).unwrap_or_default()
-}
-
-
 }
 
 #[cfg(test)]

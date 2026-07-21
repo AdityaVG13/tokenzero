@@ -19,7 +19,6 @@
 //!   `--apply` and `--confirm-cleanup`.
 
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io::Write;
@@ -66,8 +65,7 @@ fn short_id_hex(ref_id: &str) -> Option<&str> {
 
 /// Compute the full 64-hex SHA-256 of `bytes`.
 pub fn full_sha256_hex(bytes: &[u8]) -> String {
-    let digest = Sha256::digest(bytes);
-    digest.iter().map(|b| format!("{b:02x}")).collect()
+    crate::shared_cas::content_sha256_hex(bytes)
 }
 
 fn now_unix() -> u64 {

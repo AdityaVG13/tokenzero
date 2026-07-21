@@ -14,7 +14,7 @@ use fs4::FileExt;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
-use std::fs::{self, OpenOptions};
+use std::fs::{self, File, OpenOptions};
 use std::io::{self, BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
@@ -66,6 +66,8 @@ pub(crate) struct LedgerWriter {
     optimization_tags: Vec<String>,
     max_bytes: u64,
     cumulative_visible_tokens: Mutex<u64>,
+    /// Kept-open append handle so warm MCP paths avoid open/close per call.
+    open_file: Mutex<Option<File>>,
 }
 
 impl LedgerWriter {
@@ -106,6 +108,7 @@ impl LedgerWriter {
             optimization_tags,
             max_bytes,
             cumulative_visible_tokens: Mutex::new(0),
+            open_file: Mutex::new(None),
         }
     }
 
@@ -144,7 +147,66 @@ impl LedgerWriter {
             cumulative_session_cost_tokens: *cumulative,
             optimization_tags: self.optimization_tags.clone(),
         };
-        let _ = append_record(&self.path, &record, self.max_bytes);
+        let _ = self.append_record(&record);
+    }
+
+    fn append_record(&self, record: &LedgerRecord) -> io::Result<()> {
+        let mut line = serde_json::to_vec(record).map_err(io::Error::other)?;
+        line.push(b'\n');
+        let line_bytes = u64::try_from(line.len()).unwrap_or(u64::MAX);
+        if line_bytes > self.max_bytes {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "ledger record exceeds rotation limit",
+            ));
+        }
+        if let Some(parent) = self.path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        let mut guard = self
+            .open_file
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        // Rotate before writing when the active file would exceed the budget.
+        let observed_len = fs::metadata(&self.path)
+            .map(|metadata| metadata.len())
+            .unwrap_or(0);
+        if observed_len > 0 && observed_len.saturating_add(line_bytes) > self.max_bytes {
+            *guard = None; // drop handle before rename
+            let lock_path = PathBuf::from(format!("{}.rotation.lock", self.path.display()));
+            let rotation_lock = OpenOptions::new()
+                .create(true)
+                .truncate(false)
+                .read(true)
+                .write(true)
+                .open(lock_path)?;
+            FileExt::lock(&rotation_lock)?;
+            let locked_len = fs::metadata(&self.path)
+                .map(|metadata| metadata.len())
+                .unwrap_or(0);
+            if locked_len == observed_len
+                && locked_len > 0
+                && locked_len.saturating_add(line_bytes) > self.max_bytes
+            {
+                let rotated = rotated_path(&self.path);
+                if let Err(error) = fs::rename(&self.path, rotated)
+                    && error.kind() != io::ErrorKind::NotFound
+                {
+                    return Err(error);
+                }
+            }
+            let _ = FileExt::unlock(&rotation_lock);
+        }
+        if guard.is_none() {
+            *guard = Some(
+                OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(&self.path)?,
+            );
+        }
+        let file = guard.as_mut().expect("ledger file just opened");
+        file.write_all(&line)
     }
 }
 

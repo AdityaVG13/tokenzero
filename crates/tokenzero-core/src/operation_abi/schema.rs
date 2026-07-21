@@ -55,13 +55,14 @@ pub fn canonical_json(value: &Value) -> String {
 
 /// Fingerprint of a schema for digest embedding.
 pub fn schema_fingerprint_hex(schema: &Value) -> String {
+    use crate::tokens::push_hex_byte;
     use sha2::{Digest, Sha256};
     let mut h = Sha256::new();
     h.update(canonical_schema_json(schema).as_bytes());
     let d: [u8; 32] = h.finalize().into();
     let mut out = String::with_capacity(64);
     for b in d {
-        out.push_str(&format!("{b:02x}"));
+        push_hex_byte(&mut out, b);
     }
     out
 }

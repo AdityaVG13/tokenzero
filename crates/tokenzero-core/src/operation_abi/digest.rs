@@ -27,12 +27,12 @@ pub fn contract_manifest() -> Value {
             "aliases": aliases,
             "cluster": op.cluster,
             "capabilities": capabilities,
-            "mutability": mutability_str(op.mutability),
-            "capability": capability_str(op.capability),
-            "cost_class": cost_str(op.cost_class),
-            "ref_ownership": ref_str(op.ref_ownership),
-            "cancellation": cancel_str(op.cancellation),
-            "migration": migration_str(op.migration),
+            "mutability": op.mutability.as_str(),
+            "capability": op.capability.as_str(),
+            "cost_class": op.cost_class.as_str(),
+            "ref_ownership": op.ref_ownership.as_str(),
+            "cancellation": op.cancellation.as_str(),
+            "migration": op.migration.as_str(),
             "fastmcp_tool": op.exposure.fastmcp_tool,
             "codemode_mcp_tool": op.exposure.codemode_mcp_tool,
             "codemode_binding": op.exposure.codemode_binding,
@@ -72,62 +72,13 @@ pub fn contract_digest() -> [u8; 32] {
 pub fn contract_digest_hex() -> String {
     static HEX: std::sync::OnceLock<String> = std::sync::OnceLock::new();
     HEX.get_or_init(|| {
+        use crate::tokens::push_hex_byte;
         let d = contract_digest();
         let mut out = String::with_capacity(64);
         for b in d {
-            out.push_str(&format!("{b:02x}"));
+            push_hex_byte(&mut out, b);
         }
         out
     })
     .clone()
-}
-
-fn mutability_str(m: super::types::Mutability) -> &'static str {
-    match m {
-        super::types::Mutability::ReadOnly => "read_only",
-        super::types::Mutability::WorkspaceMutating => "workspace_mutating",
-        super::types::Mutability::StoreOnly => "store_only",
-    }
-}
-
-fn capability_str(c: super::types::CapabilityRequirement) -> &'static str {
-    match c {
-        super::types::CapabilityRequirement::Public => "public",
-        super::types::CapabilityRequirement::PrivateWorker => "private_worker",
-    }
-}
-
-fn cost_str(c: super::types::CostClass) -> &'static str {
-    match c {
-        super::types::CostClass::Cheap => "cheap",
-        super::types::CostClass::Medium => "medium",
-        super::types::CostClass::Heavy => "heavy",
-    }
-}
-
-fn ref_str(r: super::types::RefOwnership) -> &'static str {
-    match r {
-        super::types::RefOwnership::None => "none",
-        super::types::RefOwnership::Blob => "blob",
-        super::types::RefOwnership::Session => "session",
-        super::types::RefOwnership::Multi => "multi",
-        super::types::RefOwnership::Execution => "execution",
-    }
-}
-
-fn cancel_str(c: super::types::CancellationSemantics) -> &'static str {
-    match c {
-        super::types::CancellationSemantics::None => "none",
-        super::types::CancellationSemantics::Cooperative => "cooperative",
-        super::types::CancellationSemantics::Deadline => "deadline",
-    }
-}
-
-fn migration_str(m: super::types::MigrationStatus) -> &'static str {
-    match m {
-        super::types::MigrationStatus::Canonical => "canonical",
-        super::types::MigrationStatus::LegacyAlias => "legacy_alias",
-        super::types::MigrationStatus::CodemodeControl => "codemode_control",
-        super::types::MigrationStatus::Resource => "resource",
-    }
 }

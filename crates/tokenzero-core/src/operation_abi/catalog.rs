@@ -39,22 +39,22 @@ pub fn resolve_operation(name: &str) -> Option<&'static Operation> {
     None
 }
 
-/// Canonical FastMCP tool names (classic mcp surface).
-pub fn fastmcp_tool_names() -> Vec<&'static str> {
+fn names_where(pred: impl Fn(&Operation) -> bool) -> Vec<&'static str> {
     all_operations()
         .iter()
-        .filter(|op| op.exposure.fastmcp_tool)
+        .filter(|op| pred(op))
         .map(|op| op.name)
         .collect()
 }
 
+/// Canonical FastMCP tool names (classic mcp surface).
+pub fn fastmcp_tool_names() -> Vec<&'static str> {
+    names_where(|op| op.exposure.fastmcp_tool)
+}
+
 /// CodeMode MCP control tool names (`--mode=codemode`).
 pub fn codemode_mcp_tool_names() -> Vec<&'static str> {
-    all_operations()
-        .iter()
-        .filter(|op| op.exposure.codemode_mcp_tool)
-        .map(|op| op.name)
-        .collect()
+    names_where(|op| op.exposure.codemode_mcp_tool)
 }
 
 /// All CodeMode binding paths registered in the ABI.

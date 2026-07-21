@@ -35,6 +35,16 @@ pub enum Mutability {
     StoreOnly,
 }
 
+impl Mutability {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::ReadOnly => "read_only",
+            Self::WorkspaceMutating => "workspace_mutating",
+            Self::StoreOnly => "store_only",
+        }
+    }
+}
+
 /// Relative cost class for budgeting and fusion decisions.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -42,6 +52,16 @@ pub enum CostClass {
     Cheap,
     Medium,
     Heavy,
+}
+
+impl CostClass {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Cheap => "cheap",
+            Self::Medium => "medium",
+            Self::Heavy => "heavy",
+        }
+    }
 }
 
 /// Who may invoke the operation.
@@ -52,6 +72,15 @@ pub enum CapabilityRequirement {
     Public,
     /// Private raw worker / hub composition only (tokenzero-irx9.4).
     PrivateWorker,
+}
+
+impl CapabilityRequirement {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Public => "public",
+            Self::PrivateWorker => "private_worker",
+        }
+    }
 }
 
 /// How refs produced by the operation are owned for RACC recovery.
@@ -66,6 +95,18 @@ pub enum RefOwnership {
     Execution,
 }
 
+impl RefOwnership {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::Blob => "blob",
+            Self::Session => "session",
+            Self::Multi => "multi",
+            Self::Execution => "execution",
+        }
+    }
+}
+
 /// Cancellation contract for in-flight work.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -76,6 +117,16 @@ pub enum CancellationSemantics {
     Cooperative,
     /// Hard deadline: must surface `deadline_exceeded` when wall budget elapses.
     Deadline,
+}
+
+impl CancellationSemantics {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::Cooperative => "cooperative",
+            Self::Deadline => "deadline",
+        }
+    }
 }
 
 /// Migration posture for aliases and legacy spellings.
@@ -90,6 +141,17 @@ pub enum MigrationStatus {
     CodemodeControl,
     /// MCP resource surface (URI), not a tools/call target.
     Resource,
+}
+
+impl MigrationStatus {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Canonical => "canonical",
+            Self::LegacyAlias => "legacy_alias",
+            Self::CodemodeControl => "codemode_control",
+            Self::Resource => "resource",
+        }
+    }
 }
 
 /// Where the operation appears on user-facing catalogs.

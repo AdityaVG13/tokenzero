@@ -75,7 +75,7 @@ impl SharedCas {
     }
 
     pub fn publish(&self, bytes: &[u8]) -> Result<String, SharedCasError> {
-        let full_hash = sha256_hex(bytes);
+        let full_hash = content_sha256_hex(bytes);
         let path = self.object_path(&full_hash);
         if path.exists() {
             return Self::verify_existing(&path, bytes, &full_hash);
@@ -118,7 +118,7 @@ impl SharedCas {
             }
             Err(err) => return Err(err),
         };
-        if bytes.len() as u64 != meta.len() || sha256_hex(&bytes) != full_hash {
+        if bytes.len() as u64 != meta.len() || content_sha256_hex(&bytes) != full_hash {
             return Err(SharedCasError::Corruption);
         }
         Ok(bytes)
@@ -198,7 +198,7 @@ impl SharedCas {
 
     pub fn repair_object(&self, full_hash: &str, bytes: &[u8]) -> Result<bool, SharedCasError> {
         self.validate_hash(full_hash)?;
-        let expected_hash = sha256_hex(bytes);
+        let expected_hash = content_sha256_hex(bytes);
         if expected_hash != full_hash {
             return Err(SharedCasError::InvalidHash(format!(
                 "provided bytes hash to {expected_hash}, expected {full_hash}"
@@ -275,7 +275,7 @@ impl SharedCas {
         let (meta, actual) = read_regular_file(path)?;
         if meta.len() != expected_bytes.len() as u64
             || actual != expected_bytes
-            || sha256_hex(&actual) != expected_hash
+            || content_sha256_hex(&actual) != expected_hash
         {
             return Err(SharedCasError::Corruption);
         }
@@ -439,7 +439,7 @@ impl Default for GcConfig {
 
 pub fn project_id(store_root: &Path) -> Result<String, GcError> {
     let canonical = store_root.canonicalize().map_err(GcError::Io)?;
-    Ok(sha256_hex(canonical.to_string_lossy().as_bytes()))
+    Ok(content_sha256_hex(canonical.to_string_lossy().as_bytes()))
 }
 
 pub fn gc_atomic_write(path: &Path, bytes: &[u8]) -> io::Result<()> {
@@ -582,7 +582,8 @@ fn parse_rfc3339(s: &str) -> Option<SystemTime> {
     (utc >= 0).then(|| UNIX_EPOCH + std::time::Duration::new(utc as u64, nanos as u32))
 }
 
-fn format_system_time(t: SystemTime) -> String {
+/// Format `t` as second-precision UTC RFC3339 (`YYYY-MM-DDTHH:MM:SSZ`).
+pub(crate) fn format_system_time(t: SystemTime) -> String {
     let seconds = t
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs())
@@ -597,10 +598,26 @@ fn format_system_time(t: SystemTime) -> String {
     )
 }
 
+/// Lowercase hex encoding of raw bytes (no separators).
+pub(crate) fn lower_hex(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for &b in bytes {
+        out.push(HEX[(b >> 4) as usize] as char);
+        out.push(HEX[(b & 0xf) as usize] as char);
+    }
+    out
+}
+
+/// Full 64-char lowercase SHA-256 hex digest of `bytes`.
+pub(crate) fn content_sha256_hex(bytes: &[u8]) -> String {
+    lower_hex(Sha256::digest(bytes).as_ref())
+}
+
 fn is_valid_hash(s: &str) -> bool {
     s.len() == 64
         && s.bytes()
-            .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
+            .all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
 }
 
 fn is_valid_pin_id(s: &str) -> bool {
@@ -1421,14 +1438,8 @@ pub fn publish_lease_record(store_root: &Path, lease: &LeaseRecord) -> Result<Pa
     Ok(path)
 }
 
-fn sha256_hex(bytes: &[u8]) -> String {
-    Sha256::digest(bytes)
-        .iter()
-        .map(|b| format!("{b:02x}"))
-        .collect()
-}
-
-fn unique_suffix() -> String {
+/// Process-unique suffix for temp object names (`{nanos}-{counter}`).
+pub(crate) fn unique_suffix() -> String {
     static COUNTER: AtomicU64 = AtomicU64::new(0);
     let n = COUNTER.fetch_add(1, Ordering::Relaxed);
     let ts = SystemTime::now()

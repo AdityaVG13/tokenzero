@@ -13,10 +13,8 @@
 use std::fs::OpenOptions;
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
 
 use serde_json::Value;
-use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 use tokenzero_core::ContentType;
@@ -531,13 +529,11 @@ fn store_root_for_cache_path(cache_path: &Path) -> PathBuf {
 }
 
 fn unique_probe_name(kind: &str) -> String {
-    static COUNTER: AtomicU64 = AtomicU64::new(0);
-    let n = COUNTER.fetch_add(1, Ordering::Relaxed);
-    let timestamp = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos();
-    format!(".{kind}-{}-{timestamp}-{n}", std::process::id())
+    format!(
+        ".{kind}-{}-{}",
+        std::process::id(),
+        crate::shared_cas::unique_suffix()
+    )
 }
 
 fn reject_symlinks_below(root: &Path, path: &Path) -> Result<(), TokenZeroStoreError> {
@@ -622,10 +618,7 @@ fn probe_durable_cache_target(
 }
 
 fn publication_target(cas: &SharedCas, bytes: &[u8]) -> PathBuf {
-    let hash = Sha256::digest(bytes)
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect::<String>();
+    let hash = crate::shared_cas::content_sha256_hex(bytes);
     cas.root()
         .join("blobs")
         .join("sha256")
@@ -754,25 +747,16 @@ fn path_file_name_eq(path: &Path, expected: &str) -> bool {
 /// Non-reversible path identity for telemetry. Never emits absolute/private
 /// path bytes or reversible encodings.
 fn redact_path_identity(path: &Path) -> String {
-    let mut hasher = Sha256::new();
     // Hash OS bytes when available so distinct paths stay distinct without
     // embedding the original string.
     #[cfg(unix)]
-    {
+    let digest = {
         use std::os::unix::ffi::OsStrExt;
-        hasher.update(path.as_os_str().as_bytes());
-    }
+        crate::shared_cas::content_sha256_hex(path.as_os_str().as_bytes())
+    };
     #[cfg(not(unix))]
-    {
-        hasher.update(path.to_string_lossy().as_bytes());
-    }
-    let digest = hasher.finalize();
-    let short = digest
-        .iter()
-        .take(8)
-        .map(|b| format!("{b:02x}"))
-        .collect::<String>();
-    format!("path:{short}")
+    let digest = crate::shared_cas::content_sha256_hex(path.to_string_lossy().as_bytes());
+    format!("path:{}", &digest[..16])
 }
 
 /// Establish actual CAS writability by attempting a tiny create/write/delete
@@ -782,10 +766,7 @@ fn probe_cas_writable(cas: &SharedCas) -> bool {
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     let prefix_seed = unique_probe_name("cas-prefix");
-    let hash = Sha256::digest(prefix_seed.as_bytes())
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect::<String>();
+    let hash = crate::shared_cas::content_sha256_hex(prefix_seed.as_bytes());
     let Ok((prefix, existed)) = prepare_canonical_prefix(cas, &hash[..2]) else {
         return false;
     };
@@ -928,13 +909,10 @@ fn parse_fragment_to_zeroref(fragment: &str) -> Result<ZeroRefFragment, TokenZer
 }
 
 fn temp_cas_dir() -> PathBuf {
-    static COUNTER: AtomicU64 = AtomicU64::new(0);
-    let n = COUNTER.fetch_add(1, Ordering::Relaxed);
-    let ts = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos();
-    std::env::temp_dir().join(format!("tokenzero-in-memory-cas-{ts}-{n}"))
+    std::env::temp_dir().join(format!(
+        "tokenzero-in-memory-cas-{}",
+        crate::shared_cas::unique_suffix()
+    ))
 }
 
 #[cfg(test)]
