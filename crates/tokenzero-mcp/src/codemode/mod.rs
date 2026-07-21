@@ -17,11 +17,8 @@ mod result;
 mod sandbox;
 mod store;
 
-#[allow(dead_code)]
-#[cfg(feature = "surface-codemode")]
-pub mod audit;
-#[allow(dead_code)]
-#[cfg(feature = "surface-codemode")]
+// Bench harness is test-only (never wired into production CodeMode runtime).
+#[cfg(all(test, feature = "surface-codemode"))]
 pub mod bench;
 
 pub use catalog::{

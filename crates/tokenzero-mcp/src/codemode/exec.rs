@@ -1155,15 +1155,6 @@ fn journal_op_replayed(
     })
 }
 
-fn tx_error(message: impl Into<String>, ops: usize) -> Box<CodeModeResult> {
-    Box::new(CodeModeResult::error_with_kind(
-        "transaction",
-        message,
-        ops,
-        false,
-    ))
-}
-
 fn dispatch_journaled(
     engine: &TokenZeroEngine,
     work_root: &Path,
@@ -1559,13 +1550,14 @@ fn tool(response: ToolResponse) -> OpResult {
 fn boxed_error(kind: &str, message: impl Into<String>) -> Box<CodeModeResult> {
     Box::new(CodeModeResult::error_with_kind(kind, message, 0, false))
 }
-
 fn operation_error(message: impl Into<String>) -> Box<CodeModeResult> {
-    Box::new(CodeModeResult::error(message.into(), 0))
+    Box::new(CodeModeResult::error(message, 0))
 }
-
 fn map_journal_err(kind: &'static str) -> impl FnOnce(String) -> Box<CodeModeResult> {
     move |message| boxed_error(kind, message)
+}
+fn tx_error(message: impl Into<String>, ops: usize) -> Box<CodeModeResult> {
+    Box::new(CodeModeResult::error_with_kind("transaction", message, ops, false))
 }
 
 fn stamp_ops_on_error(error: &mut CodeModeResult, ops: usize) {
@@ -2414,135 +2406,88 @@ fn domain_via_dispatcher(engine: &TokenZeroEngine, method: &str, args: &Value) -
     Err(operation_error(format!("domain dispatch for {method} returned empty outcome")))
 }
 
-#[allow(unused_macros)]
-macro_rules! op_tool {
-    ($name:ident ($($arg:ident : $ty:ty),*) => $body:expr) => {
-        fn $name($($arg : $ty),*) -> OpResult { tool($body) }
-    };
-}
 macro_rules! op_catalog {
     ($name:ident ($($arg:ident : $ty:ty),*) => $body:expr) => {
         fn $name($($arg : $ty),*) -> OpResult { catalog($body) }
     };
 }
+
 fn exec_mem(engine: &TokenZeroEngine) -> OpResult {
     domain_via_dispatcher(engine, "zero.mem", &json!({}))
 }
 op_catalog!(exec_discover() => serde_json::to_value(discover()).unwrap_or(Value::Null));
 op_catalog!(exec_raw(args: &[Value]) => json!({ "__tz_raw": true, "value": args.first().cloned().unwrap_or(Value::Null) }));
+op_catalog!(exec_count_tokens(args: &[Value]) => json!(count_tokens(text_from_value(args.first().unwrap_or(&Value::Null)).unwrap_or(""))));
 
 fn exec_ingest(engine: &TokenZeroEngine, args: &[Value]) -> OpResult {
     let text = require_str_arg(args, 0, "zero.ingest requires text as first argument")?;
-    let opts = Opts::from_arg(args, 1);
-    let mode = opts.mode_or("mode", Mode::Auto);
-    let source = opts.str("source").unwrap_or("codemode-ingest");
+    let mode = Opts::from_arg(args, 1).mode_or("mode", Mode::Auto);
     // Domain dispatcher uses tz_ingest schema (text/input); source is kernel-side label for MCP.
-    let payload = json!({
-        "text": text,
-        "mode": mode.to_string(),
-        "input": text,
-    });
-    let _ = source;
-    domain_via_dispatcher(engine, "zero.ingest", &payload)
-}
-
-fn exec_rewrite(engine: &TokenZeroEngine, args: &[Value]) -> OpResult {
-    let command = require_str_arg(
-        args,
-        0,
-        "zero.rewrite requires a command string as first argument",
-    )?;
-    let opts = Opts::from_arg(args, 1);
-    let mode = opts.str("mode").unwrap_or("safe");
     domain_via_dispatcher(
         engine,
-        "zero.rewrite",
-        &json!({"command": command, "mode": mode}),
+        "zero.ingest",
+        &json!({"text": text, "mode": mode.to_string(), "input": text}),
     )
 }
 
+fn exec_rewrite(engine: &TokenZeroEngine, args: &[Value]) -> OpResult {
+    let command = require_str_arg(args, 0, "zero.rewrite requires a command string as first argument")?;
+    let mode = Opts::from_arg(args, 1).str("mode").unwrap_or("safe");
+    domain_via_dispatcher(engine, "zero.rewrite", &json!({"command": command, "mode": mode}))
+}
+
 fn exec_cache_pack(engine: &TokenZeroEngine, args: &[Value]) -> OpResult {
-    let opts = Opts::from_arg(args, 0);
-    let scope = opts.str("scope").unwrap_or("agent");
+    let scope = Opts::from_arg(args, 0).str("scope").unwrap_or("agent");
     domain_via_dispatcher(engine, "zero.cache_pack", &json!({"scope": scope}))
 }
 
 fn exec_recall(engine: &TokenZeroEngine, args: &[Value]) -> OpResult {
-    let query = require_str_arg(
-        args,
-        0,
-        "zero.recall requires a query string as first argument",
-    )?;
+    let query = require_str_arg(args, 0, "zero.recall requires a query string as first argument")?;
     let opts = Opts::from_arg(args, 1);
-    let mode = opts.mode_or("mode", Mode::Auto);
-    let max_hits = opts.usize("max_hits").unwrap_or(50);
-    let max_visible = opts
-        .usize("max_visible_tokens")
-        .unwrap_or(engine.config.max_visible_tokens);
     domain_via_dispatcher(
         engine,
         "zero.recall",
         &json!({
             "query": query,
-            "max_hits": max_hits,
-            "mode": mode.to_string(),
-            "max_visible_tokens": max_visible,
+            "max_hits": opts.usize("max_hits").unwrap_or(50),
+            "mode": opts.mode_or("mode", Mode::Auto).to_string(),
+            "max_visible_tokens": opts.usize("max_visible_tokens").unwrap_or(engine.config.max_visible_tokens),
         }),
     )
 }
 
 fn exec_fetch(engine: &TokenZeroEngine, args: &[Value]) -> OpResult {
-    let url = require_str_arg(
-        args,
-        0,
-        "zero.fetch requires an http(s) URL as first argument",
-    )?;
+    let url = require_str_arg(args, 0, "zero.fetch requires an http(s) URL as first argument")?;
     let opts = Opts::from_arg(args, 1);
-    let mode = opts.mode_or("mode", Mode::Auto);
-    let ttl_seconds = opts.usize("ttl_seconds");
-    let fresh = opts.bool("fresh").unwrap_or(false);
-    let max_visible = opts
-        .usize("max_visible_tokens")
-        .unwrap_or(engine.config.max_visible_tokens);
     let mut payload = json!({
         "url": url,
-        "fresh": fresh,
-        "mode": mode.to_string(),
-        "max_visible_tokens": max_visible,
+        "fresh": opts.bool("fresh").unwrap_or(false),
+        "mode": opts.mode_or("mode", Mode::Auto).to_string(),
+        "max_visible_tokens": opts.usize("max_visible_tokens").unwrap_or(engine.config.max_visible_tokens),
     });
-    if let Some(ttl) = ttl_seconds {
+    if let Some(ttl) = opts.usize("ttl_seconds") {
         payload["ttl_seconds"] = json!(ttl);
     }
     domain_via_dispatcher(engine, "zero.fetch", &payload)
 }
 
 fn exec_batch(engine: &TokenZeroEngine, args: &[Value]) -> OpResult {
-    let ops = match args.first() {
-        Some(Value::Array(items)) => items.clone(),
-        Some(Value::String(text)) => serde_json::from_str(text)
-            .map_err(|err| operation_error(format!("zero.batch ops is not valid JSON: {err}")))?,
-        _ => {
-            return Err(operation_error(
-                "zero.batch requires an array of {tool, args} objects as first argument",
-            ));
-        }
-    };
+    let ops = array_or_json_arg(
+        args,
+        "zero.batch requires an array of {tool, args} objects as first argument",
+        |err| format!("zero.batch ops is not valid JSON: {err}"),
+    )?;
     if ops.is_empty() {
         return Err(operation_error("zero.batch requires at least one op"));
     }
-    let wrapped = json!({"ops": ops, "mode": "auto"});
-    match crate::tools::batch_response(engine, &wrapped) {
+    match crate::tools::batch_response(engine, &json!({"ops": ops, "mode": "auto"})) {
         Ok(resp) => tool(resp),
         Err(error) => Err(operation_error(error.message_text())),
     }
 }
 
 fn exec_compact_many(engine: &TokenZeroEngine, args: &[Value]) -> OpResult {
-    let items = require_array_arg(
-        args,
-        0,
-        "zero.token.compactMany requires an array of payloads",
-    )?;
+    let items = require_array_arg(args, 0, "zero.token.compactMany requires an array of payloads")?;
     let mut results = Vec::with_capacity(items.len());
     let mut refs = Vec::new();
     for item in items.iter().cloned() {
@@ -2550,24 +2495,16 @@ fn exec_compact_many(engine: &TokenZeroEngine, args: &[Value]) -> OpResult {
         collect_refs(outcome.as_value(), &mut refs);
         results.push(outcome.into_value());
     }
-    catalog(json!({
-        "items": results,
-        "count": results.len(),
-        "refs": refs,
-    }))
+    catalog(json!({"items": results, "count": results.len(), "refs": refs}))
 }
 
 fn exec_job(engine: &TokenZeroEngine, args: &[Value]) -> OpResult {
     engine
-        .shell_job(require_str_arg(
-            args,
-            0,
-            "zero.token.job requires a job id string",
-        )?)
+        .shell_job(require_str_arg(args, 0, "zero.token.job requires a job id string")?)
         .map(OpOutcome::from_catalog)
         .map_err(operation_error)
 }
-op_catalog!(exec_count_tokens(args: &[Value]) => json!(count_tokens(text_from_value(args.first().unwrap_or(&Value::Null)).unwrap_or(""))));
+
 fn exec_verdict(args: &[Value]) -> OpResult {
     let ok = args.first().map(value_truthy).unwrap_or(false);
     let detail = args
@@ -2583,9 +2520,7 @@ fn exec_verdict(args: &[Value]) -> OpResult {
 fn exec_assert(args: &[Value]) -> OpResult {
     if !value_truthy(args.first().unwrap_or(&Value::Null)) {
         return Err(operation_error(
-            args.get(1)
-                .and_then(Value::as_str)
-                .unwrap_or("assertion failed"),
+            args.get(1).and_then(Value::as_str).unwrap_or("assertion failed"),
         ));
     }
     catalog(json!(true))
@@ -2595,9 +2530,7 @@ fn exec_count(args: &[Value]) -> OpResult {
         .first()
         .ok_or_else(|| operation_error("zero.count requires a value as first argument"))?;
     let count = value.as_array().map(|i| i.len()).unwrap_or_else(|| {
-        text_from_value(value)
-            .map(|t| t.lines().count())
-            .unwrap_or(0)
+        text_from_value(value).map(|t| t.lines().count()).unwrap_or(0)
     });
     catalog(json!(count))
 }
@@ -2618,30 +2551,16 @@ fn exec_filter_lines(args: &[Value]) -> OpResult {
             .ok_or_else(|| operation_error("zero.filter_lines requires text"))?,
     )
     .unwrap_or("");
-    let pattern = require_str_arg(
-        args,
-        1,
-        "zero.filter_lines requires a pattern string as second argument",
-    )?;
-    catalog(json!(text
-        .lines()
-        .filter(|l| l.contains(pattern))
-        .collect::<Vec<_>>()
-        .join("\n")))
+    let pattern =
+        require_str_arg(args, 1, "zero.filter_lines requires a pattern string as second argument")?;
+    catalog(json!(text.lines().filter(|l| l.contains(pattern)).collect::<Vec<_>>().join("\n")))
 }
 fn exec_journal_inspect(engine: &TokenZeroEngine, args: &[Value]) -> OpResult {
     let execution_id = journal_execution_arg(args)?;
     inspect_journal(&engine.config.cache_path, execution_id)
         .and_then(|journal| serde_json::to_value(journal).map_err(|err| err.to_string()))
         .map(OpOutcome::from_catalog)
-        .map_err(|message| {
-            Box::new(CodeModeResult::error_with_kind(
-                "journal_inspect",
-                message,
-                0,
-                false,
-            ))
-        })
+        .map_err(map_journal_err("journal_inspect"))
 }
 
 fn exec_journal_resume(engine: &TokenZeroEngine, args: &[Value]) -> OpResult {
@@ -2873,6 +2792,13 @@ fn require_array_arg<'a>(
         .ok_or_else(|| operation_error(message.to_string()))
 }
 
+fn path_vals(paths: &[PathBuf]) -> Vec<Value> {
+    paths
+        .iter()
+        .map(|p| Value::String(p.display().to_string()))
+        .collect()
+}
+
 /// Collect path args, joining relative entries to `work_root` (wqw.5).
 /// When the path arg is omitted, returns `[work_root]`.
 fn paths_from_arg(args: &[Value], index: usize, work_root: PathBuf) -> Vec<PathBuf> {
@@ -2935,32 +2861,26 @@ pub(crate) fn resolve_paths_against_work_root(
 }
 
 fn exec_read(engine: &TokenZeroEngine, work_root: &Path, args: &[Value]) -> OpResult {
-    let paths = require_paths_from_arg(
-        args,
-        0,
-        "zero.read requires a path string or array as first argument",
-    )?;
-    let paths = resolve_paths_against_work_root(paths, work_root);
+    let paths = resolve_paths_against_work_root(
+        require_paths_from_arg(
+            args,
+            0,
+            "zero.read requires a path string or array as first argument",
+        )?,
+        work_root,
+    );
     let opts = Opts::from_arg(args, 1);
-    let mode = opts.mode_or("mode", Mode::Auto);
-    let start_line = opts.usize("start_line");
-    let end_line = opts.usize("end_line");
-    let max_visible = opts.max_visible(engine);
-    let path_vals: Vec<Value> = paths
-        .iter()
-        .map(|p| Value::String(p.display().to_string()))
-        .collect();
     let mut payload = json!({
-        "path": path_vals,
-        "mode": mode.to_string(),
+        "path": path_vals(&paths),
+        "mode": opts.mode_or("mode", Mode::Auto).to_string(),
         "raw": false,
         "max_files": 20,
-        "max_visible_tokens": max_visible,
+        "max_visible_tokens": opts.max_visible(engine),
     });
-    if let Some(s) = start_line {
+    if let Some(s) = opts.usize("start_line") {
         payload["start_line"] = json!(s);
     }
-    if let Some(e) = end_line {
+    if let Some(e) = opts.usize("end_line") {
         payload["end_line"] = json!(e);
     }
     let outcome = tokenzero_engine::dispatch_codemode_method(engine, "zero.read", &payload)
@@ -3001,21 +2921,14 @@ fn exec_find(engine: &TokenZeroEngine, work_root: &Path, args: &[Value], exact: 
     )?;
     let paths = paths_from_arg(args, 1, work_root.to_path_buf());
     let opts = Opts::from_arg(args, 2);
-    let mode = opts.mode_or("mode", Mode::Auto);
-    let max_files = opts.usize_or("max_files", 20);
-    let max_visible = opts.max_visible(engine);
-    let path_vals: Vec<Value> = paths
-        .iter()
-        .map(|p| Value::String(p.display().to_string()))
-        .collect();
     let method = if exact { "zero.grep" } else { "zero.find" };
     let payload = json!({
         "query": pattern,
         "pattern": pattern,
-        "path": path_vals,
-        "mode": mode.to_string(),
-        "max_files": max_files,
-        "max_visible_tokens": max_visible,
+        "path": path_vals(&paths),
+        "mode": opts.mode_or("mode", Mode::Auto).to_string(),
+        "max_files": opts.usize_or("max_files", 20),
+        "max_visible_tokens": opts.max_visible(engine),
     });
     let outcome = tokenzero_engine::dispatch_codemode_method(engine, method, &payload)
         .map_err(|err| operation_error(format!("{}: {}", err.kind.as_str(), err.message)))?;
@@ -3053,26 +2966,21 @@ fn expand_params_to_tool_args(params: &ExpandParams) -> Value {
 }
 
 fn exec_glob(engine: &TokenZeroEngine, work_root: &Path, args: &[Value]) -> OpResult {
-    let pattern = require_str_arg(
-        args,
-        0,
-        "zero.glob requires a pattern string as first argument",
-    )?;
+    let pattern =
+        require_str_arg(args, 0, "zero.glob requires a pattern string as first argument")?;
     let paths = paths_from_arg(args, 1, work_root.to_path_buf());
-    let max_files = Opts::from_arg(args, 2).usize_or("max_files", 200);
-    let path_vals: Vec<Value> = paths
-        .iter()
-        .map(|p| Value::String(p.display().to_string()))
-        .collect();
-    let payload = json!({
-        "pattern": pattern,
-        "path": path_vals,
-        "include_hidden": false,
-        "mode": Mode::Auto.to_string(),
-        "max_files": max_files,
-        "max_visible_tokens": engine.config.max_visible_tokens,
-    });
-    domain_via_dispatcher(engine, "zero.glob", &payload)
+    domain_via_dispatcher(
+        engine,
+        "zero.glob",
+        &json!({
+            "pattern": pattern,
+            "path": path_vals(&paths),
+            "include_hidden": false,
+            "mode": Mode::Auto.to_string(),
+            "max_files": Opts::from_arg(args, 2).usize_or("max_files", 200),
+            "max_visible_tokens": engine.config.max_visible_tokens,
+        }),
+    )
 }
 
 fn exec_tree(engine: &TokenZeroEngine, work_root: &Path, args: &[Value]) -> OpResult {
@@ -3085,22 +2993,18 @@ fn exec_tree(engine: &TokenZeroEngine, work_root: &Path, args: &[Value]) -> OpRe
         work_root,
     );
     let opts = Opts::from_arg(args, 1);
-    let depth = opts.usize_or("depth", 3);
-    let include_hidden = opts.bool("include_hidden").unwrap_or(false);
-    let max_files = opts.usize_or("max_files", 200);
-    let path_vals: Vec<Value> = roots
-        .iter()
-        .map(|p| Value::String(p.display().to_string()))
-        .collect();
-    let payload = json!({
-        "path": path_vals,
-        "depth": depth,
-        "include_hidden": include_hidden,
-        "mode": Mode::Auto.to_string(),
-        "max_files": max_files,
-        "max_visible_tokens": engine.config.max_visible_tokens,
-    });
-    domain_via_dispatcher(engine, "zero.tree", &payload)
+    domain_via_dispatcher(
+        engine,
+        "zero.tree",
+        &json!({
+            "path": path_vals(&roots),
+            "depth": opts.usize_or("depth", 3),
+            "include_hidden": opts.bool("include_hidden").unwrap_or(false),
+            "mode": Mode::Auto.to_string(),
+            "max_files": opts.usize_or("max_files", 200),
+            "max_visible_tokens": engine.config.max_visible_tokens,
+        }),
+    )
 }
 
 fn exec_shell(engine: &TokenZeroEngine, work_root: &Path, args: &[Value]) -> OpResult {

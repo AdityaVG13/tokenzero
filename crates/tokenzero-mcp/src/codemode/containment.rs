@@ -734,48 +734,28 @@ fn dedup_key(plan: &str, options: &CodeModeOptions) -> String {
     h.update(plan.trim().as_bytes());
     h.finalize().iter().map(|v| format!("{v:02x}")).collect()
 }
-fn heavy_permit_path() -> PathBuf {
-    std::env::var_os("TOKENZERO_CODEMODE_HEAVY_PERMIT")
+/// Machine permit path for a class. Unique per test thread so parallel tests
+/// never race one permit dir (remove_dir_all vs acquire flake).
+fn permit_path(kind: &str, env: &str) -> PathBuf {
+    std::env::var_os(env)
         .map(PathBuf::from)
         .unwrap_or_else(|| {
             if cfg!(test) {
-                // Unique per test THREAD: parallel tests must not race on one
-                // permit dir (remove_dir_all vs acquire flake, RUST_TEST_THREADS=2).
                 let pid = format!("{}-{:?}", std::process::id(), std::thread::current().id());
-                std::env::temp_dir().join(format!("zerostack-codemode-heavy-test-{pid}.permit"))
+                std::env::temp_dir().join(format!("zerostack-codemode-{kind}-test-{pid}.permit"))
             } else {
-                zerostack_machine_permit::scoped_permit_base("heavy")
+                zerostack_machine_permit::scoped_permit_base(kind)
             }
         })
+}
+fn heavy_permit_path() -> PathBuf {
+    permit_path("heavy", "TOKENZERO_CODEMODE_HEAVY_PERMIT")
 }
 fn analysis_permit_path() -> PathBuf {
-    std::env::var_os("TOKENZERO_CODEMODE_ANALYSIS_PERMIT")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| {
-            if cfg!(test) {
-                // Unique per test THREAD: parallel tests must not race on one
-                // permit dir (remove_dir_all vs acquire flake, RUST_TEST_THREADS=2).
-                let pid = format!("{}-{:?}", std::process::id(), std::thread::current().id());
-                std::env::temp_dir().join(format!("zerostack-codemode-analysis-test-{pid}.permit"))
-            } else {
-                zerostack_machine_permit::scoped_permit_base("analysis")
-            }
-        })
+    permit_path("analysis", "TOKENZERO_CODEMODE_ANALYSIS_PERMIT")
 }
-
 fn index_permit_path() -> PathBuf {
-    std::env::var_os("TOKENZERO_CODEMODE_INDEX_PERMIT")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| {
-            if cfg!(test) {
-                // Unique per test THREAD: parallel tests must not race on one
-                // permit dir (remove_dir_all vs acquire flake, RUST_TEST_THREADS=2).
-                let pid = format!("{}-{:?}", std::process::id(), std::thread::current().id());
-                std::env::temp_dir().join(format!("zerostack-codemode-index-test-{pid}.permit"))
-            } else {
-                zerostack_machine_permit::scoped_permit_base("index")
-            }
-        })
+    permit_path("index", "TOKENZERO_CODEMODE_INDEX_PERMIT")
 }
 
 fn env_usize(name: &str, default: usize) -> usize {
@@ -792,41 +772,30 @@ fn env_usize_or_else(name: &str, default: impl FnOnce() -> usize) -> usize {
         .unwrap_or_else(default)
 }
 
-/// Machine-wide analysis slot budget for multi-tenant hosts.
-///
-/// Default: `max(1, cores/4)` soft-capped by
-/// `TOKENZERO_CODEMODE_ANALYSIS_CONCURRENCY_CAP` (default 8). One hundred
-/// sessions share these slots; each active search is thread-capped so the
-/// aggregate stays near the budgeted core count instead of `sessions * cores`.
-pub(crate) fn default_analysis_concurrency() -> usize {
+fn default_class_concurrency(core_divisor: usize, cap_env: &str, cap_default: usize) -> usize {
     let cores = std::thread::available_parallelism()
         .map(std::num::NonZeroUsize::get)
         .unwrap_or(4);
-    let budget = (cores / 4).max(1);
-    let cap = env_usize(
+    let budget = (cores / core_divisor).max(1);
+    budget.min(env_usize(cap_env, cap_default).max(1))
+}
+
+/// Machine-wide analysis slot budget: `max(1, cores/4)` soft-capped (default 8).
+pub(crate) fn default_analysis_concurrency() -> usize {
+    default_class_concurrency(
+        4,
         "TOKENZERO_CODEMODE_ANALYSIS_CONCURRENCY_CAP",
         DEFAULT_ANALYSIS_CONCURRENCY_CAP,
     )
-    .max(1);
-    budget.min(cap)
 }
 
-/// Machine-wide index slot budget for multi-tenant hosts.
-///
-/// Default: `max(1, cores/8)` soft-capped by
-/// `TOKENZERO_CODEMODE_INDEX_CONCURRENCY_CAP` (default 2). Tighter than
-/// analysis so concurrent rebuild/drain work cannot saturate the host.
+/// Machine-wide index slot budget: `max(1, cores/8)` soft-capped (default 2).
 pub(crate) fn default_index_concurrency() -> usize {
-    let cores = std::thread::available_parallelism()
-        .map(std::num::NonZeroUsize::get)
-        .unwrap_or(4);
-    let budget = (cores / 8).max(1);
-    let cap = env_usize(
+    default_class_concurrency(
+        8,
         "TOKENZERO_CODEMODE_INDEX_CONCURRENCY_CAP",
         DEFAULT_INDEX_CONCURRENCY_CAP,
     )
-    .max(1);
-    budget.min(cap)
 }
 
 #[cfg(test)]
