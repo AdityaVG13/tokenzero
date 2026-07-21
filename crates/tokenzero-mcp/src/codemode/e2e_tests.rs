@@ -416,6 +416,55 @@ fn expand_bad_arg_shape_returns_typed_error() {
 }
 
 #[test]
+fn concurrent_direct_compact_expand_uses_requested_store() {
+    let work = tempfile::tempdir().unwrap();
+    let root = work.path().to_path_buf();
+    let cache_path = root.join("intended-store.json");
+    let barrier = std::sync::Arc::new(std::sync::Barrier::new(3));
+    let mut workers = Vec::new();
+
+    for payload in ["concurrent-alpha", "concurrent-beta"] {
+        let root = root.clone();
+        let cache_path = cache_path.clone();
+        let barrier = std::sync::Arc::clone(&barrier);
+        workers.push(std::thread::spawn(move || {
+            barrier.wait();
+            let plan = format!(
+                "const compacted = zero.token.compact({}); const expanded = zero.token.expand(compacted.ref); return {{ ref: compacted.ref, text: expanded.text }};",
+                serde_json::to_string(payload).unwrap()
+            );
+            let result = execute_codemode_with_options(
+                &plan,
+                CodeModeOptions {
+                    root: Some(root),
+                    cache_path: Some(cache_path),
+                    max_wall_ms: 30_000,
+                    hard_max_wall_ms: 30_000,
+                    ..Default::default()
+                },
+            );
+            assert_eq!(result.status, CodeModeStatus::Completed, "{:?}", result.error);
+            let value = result.value.unwrap();
+            (
+                payload.to_string(),
+                value["ref"].as_str().unwrap().to_string(),
+                value["text"].as_str().unwrap().to_string(),
+            )
+        }));
+    }
+
+    barrier.wait();
+    let outcomes: Vec<_> = workers.into_iter().map(|worker| worker.join().unwrap()).collect();
+    let mut store = tokenzero_recovery::RecoveryStore::new(Some(cache_path));
+    for (payload, ref_id, direct_text) in outcomes {
+        assert_eq!(direct_text, payload, "direct expand returned the wrong session payload");
+        let expanded = store.expand(&ref_id, None, None, None, None, None);
+        assert!(expanded.found, "ref was not persisted to requested store: {}", expanded.reason);
+        assert_eq!(expanded.content, payload);
+    }
+}
+
+#[test]
 fn shell_ref_is_canonical_and_expandable_in_subsequent_execution() {
     let work = tempfile::tempdir().unwrap();
     let cache_path = work.path().join("recovery-cache.json");

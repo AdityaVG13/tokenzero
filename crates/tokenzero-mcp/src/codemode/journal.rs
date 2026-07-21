@@ -196,10 +196,7 @@ mod flows {
     use sha2::{Digest, Sha256};
     use std::fs::{self, OpenOptions};
     use std::io::{self, Write};
-    use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
-
-    const MUTATION_LOCK_WAIT: Duration = Duration::from_secs(5);
-    const MUTATION_LOCK_RETRY: Duration = Duration::from_millis(10);
+    use std::time::{SystemTime, UNIX_EPOCH};
     pub fn sha256_bytes(bytes: &[u8]) -> String {
         let mut h = Sha256::new();
         h.update(bytes);
@@ -242,14 +239,6 @@ mod flows {
         cache_path: &Path,
         execution_id: &str,
     ) -> Result<(PathBuf, PathBuf, File), String> {
-        open_journal_lock_with_timeout(cache_path, execution_id, MUTATION_LOCK_WAIT)
-    }
-
-    fn open_journal_lock_with_timeout(
-        cache_path: &Path,
-        execution_id: &str,
-        wait: Duration,
-    ) -> Result<(PathBuf, PathBuf, File), String> {
         let root = journal_root(cache_path);
         fs::create_dir_all(&root).map_err(|e| format!("create journal directory: {e}"))?;
         let lock_path = root.join("mutation.lock");
@@ -260,20 +249,12 @@ mod flows {
             .write(true)
             .open(&lock_path)
             .map_err(|e| format!("open journal lock: {e}"))?;
-        let deadline = Instant::now() + wait;
-        loop {
-            match FileExt::try_lock(&lock) {
-                Ok(()) => break,
-                Err(_) if Instant::now() < deadline => std::thread::sleep(MUTATION_LOCK_RETRY),
-                Err(error) => {
-                    return Err(format!(
-                        "plan conflict: another mutation plan holds {} after {}ms: {error}",
-                        lock_path.display(),
-                        wait.as_millis()
-                    ));
-                }
-            }
-        }
+        FileExt::lock(&lock).map_err(|error| {
+            format!(
+                "wait for active mutation plan lock {}: {error}",
+                lock_path.display()
+            )
+        })?;
         Ok((
             root.clone(),
             root.join(format!("{}.json", safe_execution_id(execution_id))),
@@ -956,22 +937,20 @@ mod flows {
     #[cfg(test)]
     mod tests {
         use super::*;
+        use std::time::{Duration, Instant};
 
         #[test]
         fn mutation_lock_waits_for_an_active_peer() {
             let dir = tempfile::tempdir().unwrap();
             let cache = dir.path().join("recovery-cache.json");
-            let (_, _, first_lock) =
-                open_journal_lock_with_timeout(&cache, "first", Duration::from_millis(50))
-                    .unwrap();
+            let (_, _, first_lock) = open_journal_lock(&cache, "first").unwrap();
             let releaser = std::thread::spawn(move || {
                 std::thread::sleep(Duration::from_millis(60));
                 drop(first_lock);
             });
 
             let started = Instant::now();
-            let (_, _, second_lock) =
-                open_journal_lock_with_timeout(&cache, "second", Duration::from_secs(1)).unwrap();
+            let (_, _, second_lock) = open_journal_lock(&cache, "second").unwrap();
             assert!(
                 started.elapsed() >= Duration::from_millis(40),
                 "second mutation acquired the lock before its peer released it"
