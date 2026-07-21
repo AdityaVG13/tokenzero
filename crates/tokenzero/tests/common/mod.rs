@@ -193,7 +193,15 @@ pub fn assert_json_fields(value: &Value, expected: &[(&str, Value)]) {
 }
 
 pub fn tokenzero_cmd() -> Command {
-    Command::cargo_bin("tokenzero").unwrap()
+    let mut cmd = Command::cargo_bin("tokenzero").unwrap();
+    // Isolate from ambient agent env (e.g. TOKENZERO_ROOT=/ would disable path
+    // allowlisting and make every absolute path appear in-root).
+    cmd.env_remove("TOKENZERO_ROOT");
+    cmd.env_remove("TOKENZERO_CACHE_PATH");
+    cmd.env_remove("TOKENZERO_SHARED_STORE");
+    cmd.env_remove("ZEROSTACK_SHARED_STORE");
+    cmd.env_remove("ZEROSTACK_STORE_ROOT");
+    cmd
 }
 
 pub fn assert_success(output: Output, label: &str) -> Output {

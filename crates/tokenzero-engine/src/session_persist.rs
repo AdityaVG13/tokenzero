@@ -11,7 +11,6 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 pub const SESSION_SCOPE_ENV: &str = "TOKENZERO_SESSION_SCOPE";
-#[cfg(not(test))]
 const REF_INDEX_PATH_ENV: &str = "TOKENZERO_REF_INDEX_PATH";
 pub const MAX_SESSION_MEMORY_RECORDS: usize = 512;
 const LOCK_RETRIES: usize = 240;

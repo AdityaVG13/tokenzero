@@ -248,6 +248,7 @@ fn cli_grep_and_glob_are_exact_first_surfaces() {
 }
 
 #[test]
+#[cfg(feature = "surface-codemode")]
 fn cli_codemode_token_namespace_roundtrip_uses_explicit_cache() {
     let (dir, cache) = setup_temp_with_cache();
     let plan = r#"const c = await zero.token.compact("cli codemode payload"); const e = await zero.token.expand(c.ref); return { ref: c.ref, text: e.text }"#;
@@ -264,6 +265,7 @@ fn cli_codemode_token_namespace_roundtrip_uses_explicit_cache() {
 }
 
 #[test]
+#[cfg(feature = "surface-codemode")]
 fn cli_codemode_rejects_outside_root_without_leaking_contents() {
     let root = tempdir().unwrap();
     let outside_dir = tempdir().unwrap();
@@ -287,6 +289,7 @@ fn cli_codemode_rejects_outside_root_without_leaking_contents() {
 }
 
 #[test]
+#[cfg(feature = "surface-codemode")]
 fn cli_codemode_plan_error_exits_nonzero() {
     let output = tokenzero_cmd()
         .args(["codemode", "--json", "--plan", "await zero.nope()"])
@@ -299,6 +302,7 @@ fn cli_codemode_plan_error_exits_nonzero() {
 }
 
 #[test]
+#[cfg(feature = "surface-codemode")]
 fn cli_codemode_stdin_budget_tier_b_trampoline() {
     let (dir, cache) = setup_temp_with_cache();
     let plan = r#"const c = await zero.token.compact("tier-b-stdin"); return { ref: c.ref, text: c.text }"#;
@@ -331,6 +335,7 @@ fn cli_codemode_stdin_budget_tier_b_trampoline() {
 }
 
 #[test]
+#[cfg(feature = "surface-codemode")]
 fn cli_codemode_dash_plan_reads_stdin() {
     let (dir, cache) = setup_temp_with_cache();
     let mut cmd = AssertCmd::cargo_bin("tokenzero").unwrap();
@@ -371,6 +376,7 @@ fn cli_codemode_conflicting_plan_sources_typed_error() {
 }
 
 #[test]
+#[cfg(feature = "surface-codemode")]
 fn cli_codemode_empty_plan_typed_error_no_silent_partial() {
     let mut cmd = AssertCmd::cargo_bin("tokenzero").unwrap();
     let output = cmd
