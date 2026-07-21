@@ -203,7 +203,9 @@ pub struct TokenZeroEngine {
     session_persist: Option<session_persist::SessionPersistence>,
     /// Expand/read surface health + crash-only recovery unlock (wqw.9).
     /// Shared with CodeMode plan engines so expand outcomes update the same gate.
-    session_boot: Option<tokenzero_recovery::boot::SessionBoot>,
+    /// Lazily opened on first `session_boot_snapshot` so cheap CLI tools do not
+    /// pay boot I/O when they never ask for the capsule.
+    session_boot: OnceLock<Option<tokenzero_recovery::boot::SessionBoot>>,
     surface_health: std::sync::Arc<surface_health::SurfaceHealth>,
     /// Fail-open append-only response accounting beside the recovery cache.
     ledger: ledger::LedgerWriter,

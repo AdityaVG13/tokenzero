@@ -38,21 +38,9 @@ impl TokenZeroEngine {
         );
         let session_persist =
             SessionPersistence::for_cache(&config.cache_path, config.session_dedup);
-        // Persisted session records are a demand-paged working set. Loading them here
-        // would make cold boot proportional to prior session size.
-        let boot_root = config.allowed_roots.first().cloned().unwrap_or_else(|| {
-            config
-                .cache_path
-                .parent()
-                .unwrap_or_else(|| Path::new("."))
-                .to_path_buf()
-        });
-        let session_boot = tokenzero_recovery::boot::open_session_boot(
-            &config.cache_path,
-            &boot_root,
-            &config.allowed_roots,
-        )
-        .ok();
+        // Persisted session records are a demand-paged working set. Loading them
+        // (and session_boot) here would make cold CLI boot proportional to prior
+        // session size; both are opened on first use instead.
         let cache_path = config.cache_path.clone();
         Self {
             config,
@@ -67,7 +55,7 @@ impl TokenZeroEngine {
             ledger,
             metrics,
             session_persist,
-            session_boot,
+            session_boot: OnceLock::new(),
             surface_health: std::sync::Arc::new(crate::surface_health::SurfaceHealth::new()),
             lifecycle: Mutex::new(InitializeState::Uninitialized),
         }
@@ -99,7 +87,27 @@ impl TokenZeroEngine {
             .lock()
             .map(|slot| slot.is_some())
             .unwrap_or(false);
-        let mut snapshot = match &self.session_boot {
+        let boot = self.session_boot.get_or_init(|| {
+            let boot_root = self
+                .config
+                .allowed_roots
+                .first()
+                .cloned()
+                .unwrap_or_else(|| {
+                    self.config
+                        .cache_path
+                        .parent()
+                        .unwrap_or_else(|| Path::new("."))
+                        .to_path_buf()
+                });
+            tokenzero_recovery::boot::open_session_boot(
+                &self.config.cache_path,
+                &boot_root,
+                &self.config.allowed_roots,
+            )
+            .ok()
+        });
+        let mut snapshot = match boot {
             Some(boot) => serde_json::to_value(boot).unwrap_or_else(|_| json!({})),
             None => {
                 let total = count_tokens("TZ/1 fallback=metadata_unavailable");
