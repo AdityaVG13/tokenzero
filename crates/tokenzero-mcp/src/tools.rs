@@ -1,17 +1,10 @@
 use serde_json::{Value, json};
-use std::path::{Path, PathBuf};
-use std::time::Duration;
-use tokenzero_core::{
-    Accounting, ContentType, MCP_SCHEMA_VERSION, Mode, ToolResponse, count_tokens,
-    shell_display_command_from_argv_for_platform,
-};
-use tokenzero_filters::{discover, rewrite_command};
-use tokenzero_runtime::{ExecutionMode, plan_command_for_platform};
+use std::path::Path;
+use tokenzero_core::{Accounting, MCP_SCHEMA_VERSION, Mode, ToolResponse, count_tokens};
 
 use crate::catalog::ToolKind;
-use crate::expand_params::ExpandParams;
 use crate::jsonrpc::JsonRpcErrorData;
-use crate::{EditHunk, ServeOptions, TokenZeroEngine, shell_timeout_from_secs};
+use crate::TokenZeroEngine;
 
 
 macro_rules! gated_tool_entry {
@@ -812,17 +805,6 @@ fn inline_response(tool: &str, mode: Mode, text: String, raw_tokens: usize) -> T
     )
 }
 
-fn pretty_json_response(
-    tool: &str,
-    mode: Mode,
-    value: &impl serde::Serialize,
-    raw_tokens: Option<usize>,
-) -> ToolResponse {
-    let text = serde_json::to_string_pretty(value).unwrap_or_default();
-    let tokens = raw_tokens.unwrap_or_else(|| count_tokens(&text));
-    inline_response(tool, mode, text, tokens)
-}
-
 /// Tool dispatch shared by direct calls and `tz_batch` sub-ops.
 ///
 /// Domain operations route through [`tokenzero_engine::dispatch_operation`].
@@ -1177,174 +1159,20 @@ fn arg_mode(args: &Value) -> Mode {
         .unwrap_or(Mode::Auto)
 }
 
-/// Per-call session-redundancy options: `fresh: true` bypasses the seen-set
-/// dedup/diff layer for this call (the serve is still recorded).
-fn arg_serve_options(args: &Value) -> ServeOptions {
-    ServeOptions {
-        fresh: arg_bool(args, "fresh"),
-    }
-}
-
-// Alias tools advertise a permissive `{"type": "object"}` stub, so clients
-// without the canonical schema may serialize booleans and integers as
-// strings. Coerce those instead of silently dropping the argument.
-fn arg_bool(args: &Value, key: &str) -> bool {
-    args.get(key).is_some_and(|value| match value {
-        Value::Bool(value) => *value,
-        Value::String(value) => matches!(
-            value.trim().to_ascii_lowercase().as_str(),
-            "true" | "1" | "yes"
-        ),
-        _ => false,
-    })
-}
-
-fn arg_u64(args: &Value, key: &str) -> Option<usize> {
-    coerce_u64(args.get(key)?).and_then(|value| usize::try_from(value).ok())
-}
-
-fn arg_u64_or(args: &Value, key: &str, default: usize) -> usize {
-    arg_u64(args, key).unwrap_or(default)
-}
-
-fn arg_paths_or_dot(args: &Value) -> Vec<PathBuf> {
-    arg_path_list(args, "path").unwrap_or_else(|_| vec![PathBuf::from(".")])
-}
-
-fn arg_str<'a>(args: &'a Value, key: &str) -> Option<&'a str> {
-    args.get(key).and_then(Value::as_str)
-}
-
-fn coerce_u64(value: &Value) -> Option<u64> {
-    match value {
-        Value::Number(number) => number.as_u64(),
-        Value::String(text) => text.trim().parse::<u64>().ok(),
-        _ => None,
-    }
-}
-
-fn arg_timeout_any(args: &Value, keys: &[&str]) -> Option<Duration> {
-    keys.iter().find_map(|key| {
-        args.get(*key)
-            .and_then(coerce_u64)
-            .map(|seconds| shell_timeout_from_secs(Some(seconds)))
-    })
-}
-
 fn arg_string_any<'a>(args: &'a Value, keys: &[&str]) -> Result<&'a str, String> {
     keys.iter()
         .find_map(|key| args.get(*key).and_then(Value::as_str))
         .ok_or_else(|| format!("missing {}", keys.join("|")))
 }
 
-fn arg_command(args: &Value) -> Result<(String, Option<Vec<String>>), String> {
-    if let Some(value) = args.as_str() {
-        return Ok((value.to_string(), None));
-    }
-    if let Some(items) = args.as_array() {
-        let argv = string_array_arg(items, "argv")?;
-        return Ok((display_command_for_argv(&argv), Some(argv)));
-    }
-    if let Ok(command) = arg_string_any(args, &["command", "cmd", "input", "script"]) {
-        return Ok((command.to_string(), None));
-    }
-    if let Some((key, items)) = ["argv", "args"].into_iter().find_map(|key| {
-        args.get(key)
-            .and_then(Value::as_array)
-            .map(|items| (key, items))
-    }) {
-        let argv = string_array_arg(items, key)?;
-        return Ok((display_command_for_argv(&argv), Some(argv)));
-    }
-    Err("missing command; expected command/cmd/input/script string or argv/args array".to_string())
-}
-
-fn display_command_for_argv(argv: &[String]) -> String {
-    display_command_for_argv_on_platform(argv, tokenzero_runtime::current_platform())
-}
-
-fn display_command_for_argv_on_platform(argv: &[String], platform: &str) -> String {
-    match plan_command_for_platform(argv, None, false, platform) {
-        Ok(plan) if plan.execution_mode == ExecutionMode::Shell => argv.join(" "),
-        _ => shell_display_command_from_argv_for_platform(argv, platform),
-    }
-}
-
-fn arg_path_list(args: &Value, key: &str) -> Result<Vec<PathBuf>, String> {
-    let value = args.get(key).ok_or_else(|| format!("missing {key}"))?;
-    if let Some(path) = value.as_str() {
-        // Stub-schema clients may send a list as its JSON-encoded string.
-        if path.trim_start().starts_with('[') {
-            if let Ok(paths) = serde_json::from_str::<Vec<String>>(path) {
-                if paths.is_empty() {
-                    return Err(format!("invalid {key}; expected non-empty array"));
-                }
-                return Ok(paths.into_iter().map(PathBuf::from).collect());
-            }
-        }
-        return Ok(vec![PathBuf::from(path)]);
-    }
-    if let Some(items) = value.as_array() {
-        return Ok(string_array_arg(items, key)?
-            .into_iter()
-            .map(PathBuf::from)
-            .collect());
-    }
-    Err(format!("invalid {key}"))
-}
-
-// Stub-schema clients may serialize the edits array as its JSON-encoded
-// string; accept both shapes and coerce stringly-typed replace_all booleans.
-fn arg_edit_hunks(args: &Value) -> Result<Vec<EditHunk>, String> {
-    let value = args
-        .get("edits")
-        .ok_or_else(|| "missing edits".to_string())?;
-    let items: Vec<Value> = match value {
-        Value::Array(items) => items.clone(),
-        Value::String(text) => serde_json::from_str(text).map_err(|_| {
-            "invalid edits; expected a JSON array of {find, replace} objects".to_string()
-        })?,
-        _ => return Err("invalid edits; expected array of {find, replace} objects".to_string()),
+fn arg_u64(args: &Value, key: &str) -> Option<usize> {
+    let value = args.get(key)?;
+    let n = match value {
+        Value::Number(number) => number.as_u64()?,
+        Value::String(text) => text.trim().parse::<u64>().ok()?,
+        _ => return None,
     };
-    if items.is_empty() {
-        return Err("invalid edits; expected non-empty array".to_string());
-    }
-    items
-        .iter()
-        .enumerate()
-        .map(|(index, item)| {
-            let find = item
-                .get("find")
-                .and_then(Value::as_str)
-                .ok_or_else(|| format!("invalid edits[{index}].find; expected string"))?;
-            let replace = item
-                .get("replace")
-                .and_then(Value::as_str)
-                .ok_or_else(|| format!("invalid edits[{index}].replace; expected string"))?;
-            Ok(EditHunk {
-                find: find.to_string(),
-                replace: replace.to_string(),
-                replace_all: arg_bool(item, "replace_all"),
-            })
-        })
-        .collect()
-}
-
-fn string_array_arg(items: &[Value], label: &str) -> Result<Vec<String>, String> {
-    if items.is_empty() {
-        return Err(format!(
-            "invalid {label}; expected non-empty array of strings"
-        ));
-    }
-    items
-        .iter()
-        .enumerate()
-        .map(|(index, item)| {
-            item.as_str()
-                .map(str::to_string)
-                .ok_or_else(|| format!("invalid {label}[{index}]; expected array of strings"))
-        })
-        .collect()
+    usize::try_from(n).ok()
 }
 
 #[cfg(test)]
