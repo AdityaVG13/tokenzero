@@ -180,7 +180,7 @@ impl Default for CodeModeOptions {
             root: None,
             allowed_roots: Vec::new(),
             cache_path: None,
-            max_visible_tokens: 4000,
+            max_visible_tokens: super::store::default_max_visible_tokens(),
             timeout_seconds: None,
             max_output_bytes: super::store::DEFAULT_MAX_OUTPUT_BYTES,
             max_refs_emitted: super::store::DEFAULT_MAX_REFS_EMITTED,

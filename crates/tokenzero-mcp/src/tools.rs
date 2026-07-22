@@ -262,6 +262,7 @@ fn exec_codemode_tool(
             options.max_microtasks = limits.max_microtasks;
             options.max_memory_bytes = limits.max_memory_bytes;
             options.max_code_bytes = limits.max_code_bytes;
+            options.max_visible_tokens = limits.max_visible_tokens;
             options.hard_max_wall_ms = limits.hard_max_wall_ms.min(server_hard_max_wall_ms);
             options.max_wall_ms = limits.max_wall_ms.min(options.hard_max_wall_ms);
         }
@@ -322,7 +323,8 @@ fn codemode_capabilities_manifest() -> Value {
             "max_logical_ops": crate::CodeModeLimits::default().max_logical_ops,
             "max_microtasks": crate::CodeModeLimits::default().max_microtasks,
             "max_output_bytes": crate::CodeModeLimits::default().max_output_bytes,
-            "max_code_bytes": crate::CodeModeLimits::default().max_code_bytes
+            "max_code_bytes": crate::CodeModeLimits::default().max_code_bytes,
+            "max_visible_tokens": crate::CodeModeLimits::default().max_visible_tokens
         }
     })
 }

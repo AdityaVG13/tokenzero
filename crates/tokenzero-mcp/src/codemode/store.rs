@@ -35,6 +35,17 @@ pub const DEFAULT_MAX_RESULT_REF_BYTES: usize = 10 * 1024 * 1024;
 pub const DEFAULT_MAX_REFS_EMITTED: usize = 256;
 pub const DEFAULT_MAX_PARALLEL_WIDTH: usize = 2;
 pub const DEFAULT_MAX_CODE_BYTES: usize = 64 * 1024;
+pub const DEFAULT_MAX_VISIBLE_TOKENS: usize = 4000;
+
+/// Deployment default for the recipe and response token envelope. Per-call
+/// limits.max_visible_tokens remains authoritative when supplied.
+pub fn default_max_visible_tokens() -> usize {
+    std::env::var("TOKENZERO_CODEMODE_MAX_VISIBLE_TOKENS")
+        .ok()
+        .and_then(|raw| raw.parse::<usize>().ok())
+        .map(|tokens| tokens.clamp(1, 1_000_000))
+        .unwrap_or(DEFAULT_MAX_VISIBLE_TOKENS)
+}
 
 // serde(default): tool callers send PARTIAL limits objects (the documented
 // contract — e.g. {"max_output_bytes": 1024}); without per-field defaults a
@@ -55,6 +66,7 @@ pub struct CodeModeLimits {
     pub max_refs_emitted: usize,
     pub max_parallel_width: usize,
     pub max_code_bytes: usize,
+    pub max_visible_tokens: usize,
 }
 
 impl Default for CodeModeLimits {
@@ -71,6 +83,7 @@ impl Default for CodeModeLimits {
             max_refs_emitted: DEFAULT_MAX_REFS_EMITTED,
             max_parallel_width: DEFAULT_MAX_PARALLEL_WIDTH,
             max_code_bytes: DEFAULT_MAX_CODE_BYTES,
+            max_visible_tokens: default_max_visible_tokens(),
         }
     }
 }
@@ -90,6 +103,7 @@ impl CodeModeLimits {
             "max_refs_emitted": self.max_refs_emitted,
             "max_parallel_width": self.max_parallel_width,
             "max_code_bytes": self.max_code_bytes,
+            "max_visible_tokens": self.max_visible_tokens,
         })
     }
 }
@@ -535,6 +549,22 @@ mod tests {
 
     fn completed(value: Value) -> CodeModeResult {
         CodeModeResult::completed(value, Vec::new(), 0, 1, 1)
+    }
+
+    #[test]
+    fn visible_token_limit_is_backward_compatible_and_serialized() {
+        let legacy: CodeModeLimits = serde_json::from_value(json!({
+            "max_output_bytes": 1024
+        }))
+        .unwrap();
+        assert_eq!(legacy.max_visible_tokens, default_max_visible_tokens());
+
+        let explicit: CodeModeLimits = serde_json::from_value(json!({
+            "max_visible_tokens": 511
+        }))
+        .unwrap();
+        assert_eq!(explicit.max_visible_tokens, 511);
+        assert_eq!(explicit.as_json()["max_visible_tokens"], 511);
     }
 
     #[test]
