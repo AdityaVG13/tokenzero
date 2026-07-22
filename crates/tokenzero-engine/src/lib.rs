@@ -150,9 +150,10 @@ pub use config::{
     telemetry_env_enabled,
 };
 pub use usage_telemetry::{
-    ExecutionPath, TelemetryInspection, UsageRecord, inspect_usage_telemetry,
-    record_codemode_accounting, record_mcp_accounting, usage_telemetry_enabled,
-    usage_telemetry_path_for_cache,
+    AmplificationRecord, DirectionTokens, ExecutionPath, OperationClass, TA_REGISTRY,
+    TaClassReport, TelemetryInspection, UsageRecord, inspect_usage_telemetry,
+    record_codemode_accounting, record_mcp_accounting, record_operation_amplification,
+    replay_ta_table, usage_telemetry_enabled, usage_telemetry_path_for_cache,
 };
 
 /// One find/replace hunk for [`TokenZeroEngine::edit`]. `find` must match the

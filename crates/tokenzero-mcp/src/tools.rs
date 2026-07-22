@@ -63,7 +63,7 @@ fn dispatch_gated_tool(
     record_mcp_pulse(engine, canonical, args, &response, call_id);
     // Opt-in usage telemetry: MCP tools only. CodeMode execute records separately.
     if canonical != "execute_code" {
-        record_opt_in_mcp_usage(engine, &response);
+        record_opt_in_mcp_usage(engine, canonical, args, &response);
     }
     engine.record_ledger_response(canonical, &response);
     engine.record_tool_attribution(canonical, engine_elapsed, persist_started.elapsed());
@@ -152,7 +152,12 @@ fn record_mcp_pulse(
     let _ = tokenzero_pulse::record_event(&tokenzero_pulse::default_ledger_path(root), &event);
 }
 
-fn record_opt_in_mcp_usage(engine: &TokenZeroEngine, response: &ToolResponse) {
+fn record_opt_in_mcp_usage(
+    engine: &TokenZeroEngine,
+    operation: &str,
+    args: &Value,
+    response: &ToolResponse,
+) {
     let enabled = crate::usage_telemetry_enabled(engine.config.telemetry_enabled);
     let Some(accounting) = response.accounting.as_ref() else {
         return;
@@ -162,6 +167,18 @@ fn record_opt_in_mcp_usage(engine: &TokenZeroEngine, response: &ToolResponse) {
         enabled,
         accounting.raw_tokens,
         accounting.visible_tokens,
+    );
+    let input_tokens = count_tokens(&serde_json::to_string(args).unwrap_or_default());
+    crate::record_operation_amplification(
+        &engine.config.cache_path,
+        enabled,
+        crate::ExecutionPath::Mcp,
+        operation,
+        input_tokens,
+        accounting.raw_tokens,
+        accounting.visible_tokens,
+        0,
+        response.refs.len(),
     );
 }
 

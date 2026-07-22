@@ -182,7 +182,7 @@ pub fn inspect_usage_telemetry(path: &Path, enabled: bool) -> io::Result<Telemet
     })
 }
 
-fn append_record(path: &Path, record: &UsageRecord) -> io::Result<()> {
+fn append_record<T: Serialize>(path: &Path, record: &T) -> io::Result<()> {
     let mut line = serde_json::to_vec(record).map_err(io::Error::other)?;
     line.push(b'\n');
     if let Some(parent) = path.parent() {
@@ -210,6 +210,86 @@ fn read_records(path: &Path) -> io::Result<Vec<UsageRecord>> {
         records.push(record);
     }
     Ok(records)
+}
+
+
+/// Coarse operation classes keep telemetry useful without persisting tool arguments.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OperationClass { Read, Search, Mutate, Shell, Expand, Compact, Plan, Other }
+
+impl OperationClass {
+    pub fn classify(name: &str) -> Self {
+        match name {
+            "read" | "tree" | "list" | "glob" | "inventory" => Self::Read,
+            "search" | "grep" | "find" => Self::Search,
+            "edit" | "write" | "mutate" => Self::Mutate,
+            "shell" => Self::Shell,
+            "expand" | "expand_many" => Self::Expand,
+            "compact" | "cache_pack" => Self::Compact,
+            "execute_code" | "codemode" => Self::Plan,
+            _ => Self::Other,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DirectionTokens { pub raw: u64, pub visible: u64, pub billed: u64, pub cached: u64 }
+
+impl DirectionTokens {
+    pub fn measured(raw: usize, visible: usize, billed: usize, cached: usize) -> Self {
+        Self { raw: raw as u64, visible: visible as u64, billed: billed as u64, cached: cached as u64 }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AmplificationRecord {
+    pub execution_path: ExecutionPath,
+    pub operation_class: OperationClass,
+    pub input: DirectionTokens,
+    pub output: DirectionTokens,
+    pub decision_atoms: u64,
+    pub pointer_tokens: u64,
+    pub novel_bpe_tokens: u64,
+    pub floor_tokens: u64,
+    pub amplification_milli: u64,
+}
+
+impl AmplificationRecord {
+    pub fn new(execution_path: ExecutionPath, operation_class: OperationClass, input: DirectionTokens, output: DirectionTokens, decision_atoms: usize, pointer_tokens: usize, novel_bpe_tokens: usize) -> Self {
+        let floor_tokens = (decision_atoms as u64).saturating_add(pointer_tokens as u64).saturating_add(novel_bpe_tokens as u64).max(1);
+        let amplification_milli = output.visible.saturating_mul(1_000) / floor_tokens;
+        Self { execution_path, operation_class, input, output, decision_atoms: decision_atoms as u64, pointer_tokens: pointer_tokens as u64, novel_bpe_tokens: novel_bpe_tokens as u64, floor_tokens, amplification_milli }
+    }
+}
+
+pub const TA_REGISTRY: &[(OperationClass, u64)] = &[
+    (OperationClass::Read, 8_000), (OperationClass::Search, 8_000),
+    (OperationClass::Mutate, 4_000), (OperationClass::Shell, 12_000),
+    (OperationClass::Expand, 4_000), (OperationClass::Compact, 4_000),
+    (OperationClass::Plan, 16_000), (OperationClass::Other, 16_000),
+];
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct TaClassReport { pub operation_class: OperationClass, pub samples: u64, pub max_amplification_milli: u64, pub registered_bound_milli: u64, pub within_bound: bool }
+
+pub fn replay_ta_table(records: &[AmplificationRecord]) -> Vec<TaClassReport> {
+    use std::collections::BTreeMap;
+    let mut groups = BTreeMap::<OperationClass, (u64, u64)>::new();
+    for record in records { let entry = groups.entry(record.operation_class).or_default(); entry.0 += 1; entry.1 = entry.1.max(record.amplification_milli); }
+    groups.into_iter().map(|(operation_class, (samples, max))| {
+        let bound = TA_REGISTRY.iter().find(|(class, _)| *class == operation_class).map_or(u64::MAX, |(_, bound)| *bound);
+        TaClassReport { operation_class, samples, max_amplification_milli: max, registered_bound_milli: bound, within_bound: max <= bound }
+    }).collect()
+}
+
+pub fn record_operation_amplification(cache_path: &Path, enabled: bool, execution_path: ExecutionPath, operation: &str, input_tokens: usize, output_raw: usize, output_visible: usize, output_cached: usize, pointer_tokens: usize) {
+    if !enabled { return; }
+    let record = AmplificationRecord::new(execution_path, OperationClass::classify(operation), DirectionTokens::measured(input_tokens, input_tokens, input_tokens, 0), DirectionTokens::measured(output_raw, output_visible, output_visible, output_cached.min(output_visible)), 1, pointer_tokens, input_tokens);
+    let path = cache_path.with_file_name("token-amplification.jsonl");
+    let _ = append_record(&path, &record);
 }
 
 #[cfg(test)]

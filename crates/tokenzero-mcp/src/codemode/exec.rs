@@ -1749,6 +1749,17 @@ fn finalize_codemode_result(
             finalized.telemetry.raw_tokens(),
             finalized.telemetry.visible_tokens(),
         );
+        crate::record_operation_amplification(
+            &engine.config.cache_path,
+            enabled,
+            crate::ExecutionPath::Codemode,
+            "codemode",
+            count_tokens(plan),
+            finalized.telemetry.raw_tokens(),
+            finalized.telemetry.visible_tokens(),
+            0,
+            0,
+        );
         finalized
     }
 }
