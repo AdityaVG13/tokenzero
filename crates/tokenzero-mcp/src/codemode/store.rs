@@ -6,7 +6,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use tokenzero_core::{AckClass, ContentType, count_tokens, render_ack};
 use tokenzero_recovery::RecoveryStore;
 
-use super::journal::{OperationClass, classify_method};\nuse super::result::{CodeModeResult, CodeModeStatus, CodeModeTelemetry};
+use super::journal::{OperationClass, classify_method};
+use super::result::{CodeModeResult, CodeModeStatus, CodeModeTelemetry};
 
 pub const CODEMODE_LIMITS_SCHEMA: &str = "tokenzero.codemode.limits.v1";
 pub const DEFAULT_MAX_LOGICAL_OPS: usize = 1000;
