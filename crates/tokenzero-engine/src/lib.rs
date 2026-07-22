@@ -12,6 +12,7 @@
 
 pub mod binary_resolve;
 pub mod cache_maintenance;
+pub mod cache_meter;
 mod cache_pack;
 mod collect;
 pub mod config;
@@ -148,6 +149,11 @@ pub use config::{
     default_shell_timeout, mcp_idle_timeout_from_secs, mcp_tool_surface_from_env,
     resolve_telemetry, shell_inline_budget_from_env, shell_timeout_from_secs,
     telemetry_env_enabled,
+};
+pub use cache_meter::{
+    ANTHROPIC_CACHE_DIAGNOSIS_BETA, AnthropicCacheDiagnosisRequest, CacheMeter,
+    CacheMeterError, CacheObservation, CachePricing, CacheProvider, CacheSessionReport,
+    ProviderUsage, cache_miss_attribution, parse_provider_usage,
 };
 pub use usage_telemetry::{
     AmplificationRecord, DirectionTokens, ExecutionPath, OperationClass, TA_REGISTRY,
