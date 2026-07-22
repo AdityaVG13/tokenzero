@@ -307,7 +307,7 @@ impl TokenZeroEngine {
         let Ok(mut working_set) = self.working_set.lock() else {
             return false;
         };
-        let Ok(admission) = working_set.admit(store, text, anchor) else {
+        let Ok(admission) = working_set.rewrite_render(store, text, anchor) else {
             return false;
         };
         let replaced = admission.replacement.is_some();
@@ -341,7 +341,8 @@ impl TokenZeroEngine {
                 response,
                 json!({
                     "working_set_eviction": {
-                        "replacements": admission.evicted.iter().map(|entry| &entry.replacement).collect::<Vec<_>>()
+                        "replacements": admission.evicted.iter().map(|entry| &entry.replacement).collect::<Vec<_>>(),
+                        "amortized": working_set.telemetry().eviction_accounting
                     }
                 }),
             );

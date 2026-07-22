@@ -16,6 +16,8 @@ pub const EVICTION_REF_LINE_PREFIX: &str = "TZ-EVICT/1";
 /// Portable one-token response emitted when requested bytes are already resident.
 /// `0` is verified as one token by every tokenizer in fixtures/one-token-atoms.json.
 pub const ALREADY_RESIDENT_ATOM: &str = "0";
+/// Alarm threshold for pathological fault/re-eviction cycles.
+pub const THRASH_ALARM_FAULT_RATE: f64 = 0.5;
 const MAX_PREFETCH_HINTS_PER_FAULT: usize = 1;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -34,6 +36,17 @@ pub struct RehydrationLatencyTelemetry {
     pub max_us: u64,
 }
 
+/// Amortized eviction cost. Worst case is one largest-span fault per access.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
+pub struct EvictionAccounting {
+    pub p_fault: f64,
+    pub expected_rehydration_tokens: f64,
+    pub amortized_tokens_per_access: f64,
+    pub actual_rehydration_tokens: u64,
+    pub thrash_worst_case_tokens: u64,
+    pub alarm: bool,
+}
+
 #[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
 pub struct WorkingSetTelemetry {
     pub admissions: u64,
@@ -48,6 +61,10 @@ pub struct WorkingSetTelemetry {
     pub delta_renders: u64,
     pub dedup_tokens_saved: u64,
     pub churn: u64,
+    pub render_rewrites: u64,
+    pub fault_hook_calls: u64,
+    pub context_edits: u64,
+    pub eviction_accounting: EvictionAccounting,
     pub rehydration_latency: RehydrationLatencyTelemetry,
     #[serde(skip)]
     rehydration_latency_total_us: u64,
@@ -227,6 +244,8 @@ pub struct WorkingSet {
     telemetry: WorkingSetTelemetry,
     prefetch_hook: Box<dyn PrefetchHook>,
     prefetch_hints: VecDeque<PrefetchHint>,
+    evicted_tokens_total: u64,
+    max_evicted_tokens: u64,
 }
 
 impl WorkingSet {
@@ -239,6 +258,8 @@ impl WorkingSet {
             telemetry: WorkingSetTelemetry::default(),
             prefetch_hook: Box::<NoopPrefetchHook>::default(),
             prefetch_hints: VecDeque::new(),
+            evicted_tokens_total: 0,
+            max_evicted_tokens: 0,
         }
     }
 
@@ -256,6 +277,16 @@ impl WorkingSet {
 
     pub fn take_prefetch_hints(&mut self) -> Vec<PrefetchHint> {
         self.prefetch_hints.drain(..).collect()
+    }
+
+    pub fn rewrite_render(&mut self, store: &mut RecoveryStore, text: String, anchor: SpanAnchor) -> Result<Admission, RecoveryError> {
+        self.telemetry.render_rewrites = self.telemetry.render_rewrites.saturating_add(1);
+        self.admit(store, text, anchor)
+    }
+
+    pub fn apply_context_edit(&mut self, store: &mut RecoveryStore, text: String, anchor: SpanAnchor) -> Result<Admission, RecoveryError> {
+        self.telemetry.context_edits = self.telemetry.context_edits.saturating_add(1);
+        self.admit(store, text, anchor)
     }
 
     pub fn admit(
@@ -330,6 +361,11 @@ impl WorkingSet {
         })
     }
 
+    pub fn handle_fault_hook(&mut self, store: &mut RecoveryStore, ref_id: &str, start_line: Option<usize>, end_line: Option<usize>) -> Result<Option<Rehydration>, RecoveryError> {
+        self.telemetry.fault_hook_calls = self.telemetry.fault_hook_calls.saturating_add(1);
+        self.rehydrate_ref(store, ref_id, start_line, end_line)
+    }
+
     /// Demand-page an evicted ref. A ref not owned by this working set costs
     /// one hash-map lookup and returns immediately without touching the store.
     pub fn rehydrate_ref(
@@ -370,6 +406,7 @@ impl WorkingSet {
         if !result.found {
             return Ok(None);
         }
+        let rehydrated_tokens = count_tokens(&result.content) as u64;
 
         let source_anchor = self
             .spans
@@ -413,6 +450,8 @@ impl WorkingSet {
         };
 
         self.telemetry.rehydrations = self.telemetry.rehydrations.saturating_add(1);
+        self.telemetry.eviction_accounting.actual_rehydration_tokens = self.telemetry.eviction_accounting.actual_rehydration_tokens.saturating_add(rehydrated_tokens);
+        self.refresh_rates();
         self.queue_prefetch_hints(&resident_anchor, resident_id, lookup_ref);
         let evicted = self.enforce_budget(store)?;
         Ok(Some(Rehydration {
@@ -485,6 +524,12 @@ impl WorkingSet {
         } else {
             0.0
         };
+        let accounting = &mut self.telemetry.eviction_accounting;
+        accounting.p_fault = self.telemetry.fault_rate;
+        accounting.expected_rehydration_tokens = if self.telemetry.evictions == 0 { 0.0 } else { self.evicted_tokens_total as f64 / self.telemetry.evictions as f64 };
+        accounting.amortized_tokens_per_access = accounting.p_fault * accounting.expected_rehydration_tokens;
+        accounting.thrash_worst_case_tokens = self.max_evicted_tokens;
+        accounting.alarm = accounting.p_fault >= THRASH_ALARM_FAULT_RATE && accounting.amortized_tokens_per_access >= 1.0;
     }
 
     fn queue_prefetch_hints(&mut self, fault: &SpanAnchor, fault_id: u64, fault_ref: &str) {
@@ -563,6 +608,9 @@ impl WorkingSet {
             let ref_id = store.store_blob(bytes, ContentType::Unknown)?;
             let replacement = format_ref_line(ref_id.clone(), anchor);
             let bytes_evicted = bytes.len();
+            let tokens_evicted = count_tokens(bytes) as u64;
+            self.evicted_tokens_total = self.evicted_tokens_total.saturating_add(tokens_evicted);
+            self.max_evicted_tokens = self.max_evicted_tokens.max(tokens_evicted);
             self.spans[victim].body = SpanBody::Evicted {
                 ref_id: ref_id.clone(),
                 replacement: replacement.clone(),
@@ -578,6 +626,7 @@ impl WorkingSet {
                 .bytes_evicted
                 .saturating_add(bytes_evicted as u64);
             self.telemetry.refs_created = self.telemetry.refs_created.saturating_add(1);
+            self.refresh_rates();
             evicted.push(EvictedSpan {
                 id,
                 ref_id,

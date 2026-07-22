@@ -54,6 +54,8 @@ pub struct LedgerRecord {
     pub version: VersionIdentity,
     pub tool: String,
     pub token_mass: TokenMass,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub eviction_amortization: Option<Value>,
     pub cumulative_session_cost_tokens: u64,
     pub optimization_tags: Vec<String>,
 }
@@ -202,6 +204,9 @@ impl LedgerWriter {
                     .saturating_add(get("/diff/visible_tokens_saved")),
                 saved_bytes: get("/session_delta/saved_bytes"),
             },
+            eviction_amortization: telemetry
+                .and_then(|value| value.pointer("/working_set_eviction/amortized"))
+                .cloned(),
             cumulative_session_cost_tokens: *cumulative,
             optimization_tags: self.optimization_tags.clone(),
         };
@@ -684,6 +689,14 @@ pub fn schema_example() -> Value {
             "prevented_tokens": 80,
             "saved_bytes": 1024
         },
+        "eviction_amortization": {
+            "p_fault": 0.25,
+            "expected_rehydration_tokens": 80.0,
+            "amortized_tokens_per_access": 20.0,
+            "actual_rehydration_tokens": 80,
+            "thrash_worst_case_tokens": 120,
+            "alarm": false
+        },
         "cumulative_session_cost_tokens": 120,
         "optimization_tags": ["session_dedup:on", "diff_reads:on", "tool_surface:mcp"]
     })
@@ -722,6 +735,14 @@ mod ledger_tests {
             panic!("writer has not entered buffered mode");
         };
         Arc::clone(io)
+    }
+
+    #[test]
+    fn tz_evict_amortized_charge_round_trips_through_ledger() {
+        let charge = test_record().eviction_amortization.expect("eviction charge");
+        assert_eq!(charge["amortized_tokens_per_access"], 20.0);
+        assert_eq!(charge["thrash_worst_case_tokens"], 120);
+        assert_eq!(charge["alarm"], false);
     }
 
     #[test]
