@@ -43,8 +43,9 @@ pub mod working_set;
 
 pub use session_aliases::{
     canonical_full_blob_ref, is_full_hash_blob_bare, is_session_alias_bare,
+    is_session_ordinal_bare, parse_session_ordinal_bare,
     rewrite_full_hash_blob_refs_in_text, rewrite_full_hash_blob_refs_in_value,
-    session_visible_blob_alias, split_ref_fragment, SESSION_ALIAS_HEX_LEN,
+    session_ordinal_ref, session_visible_blob_alias, split_ref_fragment, SESSION_ALIAS_HEX_LEN,
 };
 
 #[cfg(test)]
@@ -545,6 +546,10 @@ pub(crate) struct RecoveryState {
     pub search_hits: BTreeMap<String, StoredUnit>,
     #[serde(default)]
     pub aliases: BTreeMap<String, String>,
+    #[serde(default = "initial_ordinal_generation")]
+    pub ordinal_generation: u64,
+    #[serde(default = "initial_next_ordinal")]
+    pub next_ordinal: u64,
     pub order: Vec<String>,
     #[serde(default)]
     pub shell_outcomes: BTreeMap<String, ShellOutcome>,
@@ -569,6 +574,21 @@ pub(crate) struct ShellOutcome {
 pub struct ShellRepeat {
     pub unchanged: bool,
     pub seen: u32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OrdinalRange {
+    pub generation: u64,
+    pub start: u64,
+    pub end_exclusive: u64,
+}
+
+impl OrdinalRange {
+    pub fn len(self) -> u64 { self.end_exclusive.saturating_sub(self.start) }
+    pub fn is_empty(self) -> bool { self.start == self.end_exclusive }
+    pub fn ref_for(self, offset: u64) -> Option<String> {
+        (offset < self.len()).then(|| session_ordinal_ref(self.generation, self.start + offset))
+    }
 }
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -638,6 +658,9 @@ fn ref_index_test_override() -> Option<(bool, PathBuf)> {
     REF_INDEX_TEST_OVERRIDE.with(|slot| slot.borrow().clone())
 }
 
+const fn initial_ordinal_generation() -> u64 { 1 }
+const fn initial_next_ordinal() -> u64 { 1 }
+
 impl RecoveryState {
     fn empty(config: &RecoveryConfig) -> Self {
         Self {
@@ -652,6 +675,8 @@ impl RecoveryState {
             units: BTreeMap::new(),
             search_hits: BTreeMap::new(),
             aliases: BTreeMap::new(),
+            ordinal_generation: initial_ordinal_generation(),
+            next_ordinal: initial_next_ordinal(),
             order: Vec::new(),
             shell_outcomes: BTreeMap::new(),
             shell_outcome_seq: 0,
@@ -997,6 +1022,42 @@ impl RecoveryStore {
             fs::File::open(parent)?.sync_all()?;
         }
         Ok(())
+    }
+
+    pub fn reserve_ordinal_range(&mut self, count: u64) -> Result<OrdinalRange, RecoveryError> {
+        if count == 0 {
+            return Err(io::Error::new(io::ErrorKind::InvalidInput, "ordinal range must be non-empty").into());
+        }
+        let Some(path) = self.persistence_path.clone() else {
+            let start = self.state.next_ordinal;
+            let end_exclusive = start.checked_add(count).ok_or_else(|| io::Error::other("ordinal counter overflow"))?;
+            self.state.next_ordinal = end_exclusive;
+            return Ok(OrdinalRange { generation: self.state.ordinal_generation, start, end_exclusive });
+        };
+        if let Some(parent) = path.parent() { fs::create_dir_all(parent)?; }
+        let _lock = PersistLock::acquire(recovery_lock_path(&path))?;
+        let existing = load_state(&path, &self.config)?.unwrap_or_else(|| RecoveryState::empty(&self.config));
+        let current = std::mem::replace(&mut self.state, RecoveryState::empty(&self.config));
+        self.state = merge_states(existing, current, &self.session_refs, &self.config);
+        let start = self.state.next_ordinal;
+        let end_exclusive = start.checked_add(count).ok_or_else(|| io::Error::other("ordinal counter overflow"))?;
+        let range = OrdinalRange { generation: self.state.ordinal_generation, start, end_exclusive };
+        self.state.next_ordinal = end_exclusive;
+        self.publish_snapshot(&path)?;
+        Ok(range)
+    }
+
+    pub fn store_ordinal_alias_deferred(
+        &mut self, range: OrdinalRange, offset: u64, target_ref: &str,
+    ) -> Result<String, RecoveryError> {
+        let alias = range.ref_for(offset).ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "ordinal offset outside reserved range"))?;
+        let target = canonical_full_blob_ref(split_ref_fragment(target_ref).0)
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "ordinal target must be a full-hash blob ref"))?;
+        if self.state.aliases.get(&alias).is_some_and(|existing| existing != &target) {
+            return Err(io::Error::new(io::ErrorKind::AlreadyExists, "ordinal alias already targets another ref").into());
+        }
+        self.store_alias_deferred(&alias, &target);
+        Ok(alias)
     }
 
     pub fn store_alias(&mut self, alias: &str, target_ref: &str) -> Result<(), RecoveryError> {
@@ -2782,6 +2843,12 @@ fn merge_states(existing: RecoveryState, current: RecoveryState, session_refs: &
     let mut merged = existing;
     recovery_maps!(merge &session, merged, current);
     merged.aliases.extend(current.aliases);
+    if current.ordinal_generation > merged.ordinal_generation {
+        merged.ordinal_generation = current.ordinal_generation;
+        merged.next_ordinal = current.next_ordinal;
+    } else if current.ordinal_generation == merged.ordinal_generation {
+        merged.next_ordinal = merged.next_ordinal.max(current.next_ordinal);
+    }
     merged.order.extend(session_refs.iter().cloned());
     let mut seen = HashSet::new();
     merged.order.retain(|ref_id| seen.insert(ref_id.clone()));
