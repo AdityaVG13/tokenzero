@@ -1474,6 +1474,8 @@ pub fn ref_record(kind: &str, ref_id: String, bytes: usize) -> RefRecord {
     }
 }
 
+pub mod operation_abi;
+mod protocol_atoms;
 mod render;
 mod shell_display;
 mod shell_family;
@@ -1481,7 +1483,6 @@ mod shell_parse;
 mod shell_policy;
 mod shell_quote;
 pub mod token_classes;
-pub mod operation_abi;
 mod tokens;
 
 use render::domain::*;
@@ -1490,6 +1491,10 @@ use shell_display::*;
 use shell_parse::*;
 use tokens::*;
 
+pub use protocol_atoms::{
+    PORTABLE_ONE_TOKEN_ATOMS, ProtocolTokenizer, is_verified_one_token_atom,
+    portable_one_token_atoms,
+};
 pub use render::domain::{
     diagnostic_shell_view, is_repo_inventory_command, repo_inventory_view, structured_shell_view,
 };
