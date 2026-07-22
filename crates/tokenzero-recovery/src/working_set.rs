@@ -13,6 +13,9 @@ mod tests;
 
 pub const DEFAULT_WORKING_SET_TOKENS: usize = 8192;
 pub const EVICTION_REF_LINE_PREFIX: &str = "TZ-EVICT/1";
+/// Portable one-token response emitted when requested bytes are already resident.
+/// `0` is verified as one token by every tokenizer in fixtures/one-token-atoms.json.
+pub const ALREADY_RESIDENT_ATOM: &str = "0";
 const MAX_PREFETCH_HINTS_PER_FAULT: usize = 1;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -41,6 +44,9 @@ pub struct WorkingSetTelemetry {
     pub faults: u64,
     pub fault_rate: f64,
     pub rehydrations: u64,
+    pub resident_hits: u64,
+    pub delta_renders: u64,
+    pub dedup_tokens_saved: u64,
     pub churn: u64,
     pub rehydration_latency: RehydrationLatencyTelemetry,
     #[serde(skip)]
@@ -60,6 +66,65 @@ pub struct Admission {
     pub id: u64,
     pub replacement: Option<String>,
     pub evicted: Vec<EvictedSpan>,
+    pub response: WorkingSetResponse,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WorkingSetResponse {
+    Full,
+    AlreadyResident,
+    Delta { acknowledgement: String, delta: WorkingSetDelta },
+}
+
+impl WorkingSetResponse {
+    pub fn visible_text(&self) -> Option<&str> {
+        match self {
+            Self::Full => None,
+            Self::AlreadyResident => Some(ALREADY_RESIDENT_ATOM),
+            Self::Delta { acknowledgement, .. } => Some(acknowledgement),
+        }
+    }
+}
+
+/// A single exact line hunk. Stored line chunks retain their terminators so
+/// integration is byte-identical, including a missing final newline.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkingSetDelta {
+    pub start_line: usize,
+    pub removed: Vec<String>,
+    pub inserted: Vec<String>,
+}
+
+impl WorkingSetDelta {
+    pub fn acknowledgement(&self) -> String {
+        let mut output = format!(
+            "@@ -{},{} +{},{} @@\n",
+            self.start_line,
+            self.removed.len(),
+            self.start_line,
+            self.inserted.len()
+        );
+        for line in &self.removed {
+            output.push('-');
+            output.push_str(line);
+            if !line.ends_with('\n') { output.push('\n'); }
+        }
+        for line in &self.inserted {
+            output.push('+');
+            output.push_str(line);
+            if !line.ends_with('\n') { output.push('\n'); }
+        }
+        output
+    }
+}
+
+pub fn integrate_delta(base: &str, delta: &WorkingSetDelta) -> Option<String> {
+    let mut lines = split_exact_lines(base);
+    let start = delta.start_line.checked_sub(1)?;
+    let end = start.checked_add(delta.removed.len())?;
+    if end > lines.len() || lines[start..end] != delta.removed { return None; }
+    lines.splice(start..end, delta.inserted.iter().cloned());
+    Some(lines.concat())
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -199,6 +264,48 @@ impl WorkingSet {
         text: String,
         anchor: SpanAnchor,
     ) -> Result<Admission, RecoveryError> {
+        if let Some(index) = self.spans.iter().position(|span| span.anchor == anchor) {
+            if let SpanBody::Resident(previous) = &self.spans[index].body {
+                if previous == &text {
+                    self.sequence = self.sequence.saturating_add(1);
+                    self.spans[index].last_touched = self.sequence;
+                    self.telemetry.resident_hits = self.telemetry.resident_hits.saturating_add(1);
+                    let saved = count_tokens(&text).saturating_sub(count_tokens(ALREADY_RESIDENT_ATOM));
+                    self.telemetry.dedup_tokens_saved = self.telemetry.dedup_tokens_saved.saturating_add(saved as u64);
+                    return Ok(Admission {
+                        id: self.spans[index].id,
+                        replacement: None,
+                        evicted: Vec::new(),
+                        response: WorkingSetResponse::AlreadyResident,
+                    });
+                }
+                let delta = delta_between(previous, &text);
+                let acknowledgement = delta.acknowledgement();
+                if count_tokens(&acknowledgement) < count_tokens(&text) {
+                    let id = self.spans[index].id;
+                    let saved = count_tokens(&text).saturating_sub(count_tokens(&acknowledgement));
+                    self.sequence = self.sequence.saturating_add(1);
+                    self.spans[index].last_touched = self.sequence;
+                    self.spans[index].body = SpanBody::Resident(text);
+                    self.telemetry.delta_renders = self.telemetry.delta_renders.saturating_add(1);
+                    self.telemetry.dedup_tokens_saved = self.telemetry.dedup_tokens_saved.saturating_add(saved as u64);
+                    let evicted = self.enforce_budget(store)?;
+                    return Ok(Admission {
+                        id,
+                        replacement: None,
+                        evicted,
+                        response: WorkingSetResponse::Delta { acknowledgement, delta },
+                    });
+                }
+            }
+            // A changed evicted span or a non-beneficial delta becomes the new
+            // baseline; remove the stale anchor before normal admission.
+            let stale = self.spans.remove(index);
+            if let SpanBody::Evicted { ref_id, .. } = stale.body {
+                self.remove_evicted_ref(&ref_id, stale.id);
+            }
+        }
+
         let id = self.push_resident(text, anchor);
         let evicted = match self.enforce_budget(store) {
             Ok(evicted) => evicted,
@@ -219,6 +326,7 @@ impl WorkingSet {
             id,
             replacement,
             evicted,
+            response: WorkingSetResponse::Full,
         })
     }
 
@@ -482,6 +590,24 @@ impl WorkingSet {
         // floor rather than failing the admission (which would strand the full
         // inline text at the caller - the exact opposite of paging out).
         Ok(evicted)
+    }
+}
+
+fn split_exact_lines(text: &str) -> Vec<String> {
+    text.split_inclusive('\n').map(str::to_owned).collect()
+}
+
+fn delta_between(old: &str, new: &str) -> WorkingSetDelta {
+    let old_lines = split_exact_lines(old);
+    let new_lines = split_exact_lines(new);
+    let prefix = old_lines.iter().zip(&new_lines).take_while(|(left, right)| left == right).count();
+    let suffix = old_lines[prefix..]
+        .iter().rev().zip(new_lines[prefix..].iter().rev())
+        .take_while(|(left, right)| left == right).count();
+    WorkingSetDelta {
+        start_line: prefix + 1,
+        removed: old_lines[prefix..old_lines.len().saturating_sub(suffix)].to_vec(),
+        inserted: new_lines[prefix..new_lines.len().saturating_sub(suffix)].to_vec(),
     }
 }
 
