@@ -46,6 +46,7 @@ pub mod session_persist;
 pub mod shell_hooks;
 pub mod surface_health;
 pub mod usage_telemetry;
+pub mod warmkeeper;
 pub mod wall;
 pub mod workspace;
 pub mod write_ladder;
@@ -154,6 +155,10 @@ pub use cache_meter::{
     ANTHROPIC_CACHE_DIAGNOSIS_BETA, AnthropicCacheDiagnosisRequest, CacheMeter,
     CacheMeterError, CacheObservation, CachePricing, CacheProvider, CacheSessionReport,
     ProviderUsage, cache_miss_attribution, parse_provider_usage,
+};
+pub use warmkeeper::{
+    WarmDecision, WarmDecisionKind, WarmLane, WarmLaneTier, WarmReplayLane,
+    WarmSimulationReport, ZeroOutputTouch, schedule_rewarms, simulate_warmkeeper,
 };
 pub use usage_telemetry::{
     AmplificationRecord, DirectionTokens, ExecutionPath, OperationClass, TA_REGISTRY,
