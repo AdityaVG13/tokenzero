@@ -45,3 +45,50 @@ pub fn is_verified_one_token_atom(tokenizer: ProtocolTokenizer, atom: &str) -> b
 pub const fn portable_one_token_atoms() -> &'static [&'static str] {
     &PORTABLE_ONE_TOKEN_ATOMS
 }
+
+/// ACK/2 classes use only atoms from the portable tokenizer intersection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AckClass {
+    Success,
+    Validation,
+    Policy,
+    Substrate,
+    Retryable,
+    Internal,
+}
+
+impl AckClass {
+    pub const fn atom(self) -> &'static str {
+        match self {
+            Self::Success => "0",
+            Self::Validation => "1",
+            Self::Policy => "2",
+            Self::Substrate => "3",
+            Self::Retryable => "4",
+            Self::Internal => "9",
+        }
+    }
+
+    /// Collapse transport-specific error kinds into the stable ACK/2 grammar.
+    pub fn from_error_kind(kind: &str, retryable: bool) -> Self {
+        if retryable {
+            return Self::Retryable;
+        }
+        match kind {
+            "validation" | "invalid_args" | "parse" => Self::Validation,
+            "policy" | "sandbox" | "permission" | "denied" => Self::Policy,
+            "substrate" | "store" | "not_found" | "io" => Self::Substrate,
+            _ => Self::Internal,
+        }
+    }
+}
+
+/// Render a deterministic class-1 ACK. Pure successful mutations are silent;
+/// detail refs travel in their dedicated envelope field and never perturb the atom.
+pub fn render_ack(class: AckClass, silent_success: bool) -> &'static str {
+    if silent_success && class == AckClass::Success {
+        ""
+    } else {
+        class.atom()
+    }
+}

@@ -71,7 +71,7 @@ fn sandbox_denies_host_capabilities() {
             CodeModeStatus::Error,
             "plan should fail: {plan}"
         );
-        assert_eq!(result.visible_ack, "X0");
+        assert_eq!(result.visible_ack, "2");
         assert!(
             result.error.as_ref().unwrap().message.contains("sandbox"),
             "unexpected error: {:?}",

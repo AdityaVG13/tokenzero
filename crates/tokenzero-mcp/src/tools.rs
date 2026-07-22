@@ -696,6 +696,7 @@ fn codemode_contract_payload_v1(result: &crate::CodeModeResult) -> Value {
     }
     let mut payload = json!({
         "ack": ack,
+        "detail_ref": result.detail_ref,
         "execution_id": result.execution_id,
         "refs": refs,
         "telemetry": result.telemetry,

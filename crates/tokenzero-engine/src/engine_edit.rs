@@ -166,6 +166,16 @@ impl TokenZeroEngine {
         let exact_refs_available = !refs.is_empty();
         let mut response = capsule_response!("edit", mode, capsule, refs, store.recovery_tokens);
         response.content_type = Some(ContentType::Diff.to_string());
+        if !dry_run {
+            response.ack = None;
+            if let Some(visible) = response.visible.as_mut() {
+                visible.text.clear();
+            }
+            if let Some(accounting) = response.accounting.as_mut() {
+                accounting.visible_tokens = 0;
+                accounting.billed_tokens = 0;
+            }
+        }
         if storage_error.is_some() {
             response.diagnostic = Some(cache_write_diagnostic(
                 "could not persist recovery cache for edit pre/post images",

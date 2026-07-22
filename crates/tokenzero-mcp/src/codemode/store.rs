@@ -3,10 +3,10 @@
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::time::{SystemTime, UNIX_EPOCH};
-use tokenzero_core::{ContentType, count_tokens};
+use tokenzero_core::{AckClass, ContentType, count_tokens, render_ack};
 use tokenzero_recovery::RecoveryStore;
 
-use super::result::{CodeModeResult, CodeModeStatus, CodeModeTelemetry};
+use super::journal::{OperationClass, classify_method};\nuse super::result::{CodeModeResult, CodeModeStatus, CodeModeTelemetry};
 
 pub const CODEMODE_LIMITS_SCHEMA: &str = "tokenzero.codemode.limits.v1";
 pub const DEFAULT_MAX_LOGICAL_OPS: usize = 1000;
@@ -238,13 +238,20 @@ pub fn finalize_result(
 ) -> CodeModeResult {
     let id = execution_id(plan, started_ms);
     let completed = matches!(result.status, CodeModeStatus::Completed);
-    let (status_str, ack, telemetry_status) = if completed {
-        ("completed", "C", "ok")
+    let silent_success = completed
+        && !steps.is_empty()
+        && steps.iter().all(|step| {
+            classify_method(&step.method) == OperationClass::ReversibleStoreMutation
+        });
+    let (status_str, telemetry_status) = if completed {
+        ("completed", "ok")
     } else {
-        ("error", "X0", "error")
+        ("error", "error")
     };
     result.execution_id = Some(id.clone());
-    result.visible_ack = ack.into();
+    if completed {
+        result.visible_ack = render_ack(AckClass::Success, silent_success).into();
+    }
     result.telemetry.kind = "codemode.execute".into();
     result.telemetry.status = telemetry_status.into();
     result.telemetry.wall_ms = finished_ms.saturating_sub(started_ms) as u64;
@@ -285,6 +292,13 @@ pub fn finalize_result(
     let result_logical_ref = logical_ref("result");
     let error_logical_ref = logical_ref("error");
     let envelope_logical_ref = logical_ref("envelope");
+    result.detail_ref = Some(if completed && result_ref.is_some() {
+        result_logical_ref.clone()
+    } else if completed {
+        execution_logical_ref.clone()
+    } else {
+        error_logical_ref.clone()
+    });
 
     // Persist full record + stream blobs for expand, but do not spell them in
     // the visible envelope: every suffix is derivable from execution_id.
@@ -309,6 +323,7 @@ pub fn finalize_result(
         "execution_id": id.clone(),
         "status": status_str,
         "ack": result.visible_ack.clone(),
+        "detail_ref": result.detail_ref.clone(),
         "telemetry": result.telemetry.clone(),
         "refs": result.refs.clone(),
     });
@@ -584,7 +599,7 @@ mod tests {
         );
 
         assert_eq!(finalized.status, CodeModeStatus::Completed);
-        assert_eq!(finalized.visible_ack, "C");
+        assert_eq!(finalized.visible_ack, "0");
         COMMIT_CALLS.with(|calls| assert_eq!(calls.get(), 1));
 
         let id = finalized.execution_id.as_deref().unwrap();
@@ -594,6 +609,28 @@ mod tests {
             let expanded = restarted.expand(&logical, Some("raw"), None, None, None, None);
             assert!(expanded.found, "{logical}: {}", expanded.reason);
         }
+    }
+
+    #[test]
+    fn ack2_pure_mutation_success_is_silent_and_has_detail_ref() {
+        let dir = tempfile::tempdir().unwrap();
+        let finalized = finalize_result(
+            completed(json!({"hunks_applied": 1})),
+            "code",
+            "return zero.edit('x', [])",
+            150,
+            151,
+            ExecutionStore::new(dir.path().join("cache.json")),
+            &CodeModeLimits::default(),
+            vec![ExecutionStep {
+                id: "step-1".into(),
+                method: "zero.edit".into(),
+                status: "ok".into(),
+                refs: Vec::new(),
+            }],
+        );
+        assert_eq!(finalized.visible_ack, "");
+        assert!(finalized.detail_ref.as_deref().is_some_and(|value| value.ends_with("/result")));
     }
 
     #[test]

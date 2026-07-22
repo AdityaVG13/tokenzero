@@ -3,6 +3,7 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::path::PathBuf;
+use tokenzero_core::{AckClass, render_ack};
 
 pub const CODEMODE_SCHEMA: &str = "tokenzero.codemode.v1";
 
@@ -13,6 +14,8 @@ pub struct CodeModeResult {
     pub schema: &'static str,
     pub status: CodeModeStatus,
     pub visible_ack: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub detail_ref: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub execution_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -262,7 +265,13 @@ impl CodeModeResult {
             } else {
                 CodeModeStatus::Error
             },
-            visible_ack: if ok { "C" } else { "X0" }.into(),
+            visible_ack: if ok {
+                render_ack(AckClass::Success, false).into()
+            } else {
+                let error = error.as_ref().expect("error result");
+                render_ack(AckClass::from_error_kind(&error.kind, error.retryable), false).into()
+            },
+            detail_ref: None,
             execution_id: None,
             value,
             refs,
@@ -311,7 +320,8 @@ impl CodeModeResult {
                     Default::default()
                 };
                 let mut line = format!(
-                    "codemode:ok C ops={} visible_tokens={} raw_tokens={}{}",
+                    "codemode:ok {} ops={} visible_tokens={} raw_tokens={}{}",
+                    self.visible_ack,
                     self.telemetry.operations(),
                     self.telemetry.visible_tokens(),
                     self.telemetry.raw_tokens(),
@@ -329,7 +339,8 @@ impl CodeModeResult {
                 line
             }
             CodeModeStatus::Error => format!(
-                "codemode:error X0 ops={} {}",
+                "codemode:error {} ops={} {}",
+                self.visible_ack,
                 self.telemetry.operations(),
                 self.error
                     .as_ref()
@@ -388,7 +399,7 @@ mod structured_error_tests {
         );
         assert_eq!(
             result.to_line(),
-            "codemode:error X0 ops=0 unknown surface: framework; hint: choose a supported surface; valid_surfaces: authoring, constructors, ops"
+            "codemode:error 9 ops=0 unknown surface: framework; hint: choose a supported surface; valid_surfaces: authoring, constructors, ops"
         );
     }
 }

@@ -209,6 +209,12 @@ pub struct ToolResponse {
     pub schema_version: String,
     pub status: String,
     pub tool: String,
+    /// ACK/2 one-token class atom. Pure mutation success is silent (None).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ack: Option<String>,
+    /// Expandable detail ref for the response body when one is available.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub detail_ref: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub mode: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -247,6 +253,8 @@ impl ToolResponse {
         accounting: Accounting,
     ) -> Self {
         Self {
+            ack: Some(AckClass::Success.atom().to_string()),
+            detail_ref: refs.first().map(|record| record.ref_id.clone()),
             mode: Some(mode.to_string()),
             visible: Some(Visible {
                 kind: "capsule".to_string(),
@@ -264,9 +272,12 @@ impl ToolResponse {
         message: impl Into<String>,
         repair: Option<String>,
     ) -> Self {
+        let code = code.into();
+        let ack = AckClass::from_error_kind(&code, false).atom().to_string();
         Self {
+            ack: Some(ack),
             error: Some(CliError {
-                code: code.into(),
+                code,
                 message: message.into(),
                 repair,
             }),
@@ -1498,8 +1509,8 @@ use shell_parse::*;
 use tokens::*;
 
 pub use protocol_atoms::{
-    PORTABLE_ONE_TOKEN_ATOMS, ProtocolTokenizer, is_verified_one_token_atom,
-    portable_one_token_atoms,
+    AckClass, PORTABLE_ONE_TOKEN_ATOMS, ProtocolTokenizer, is_verified_one_token_atom,
+    portable_one_token_atoms, render_ack,
 };
 pub use render::domain::{
     diagnostic_shell_view, is_repo_inventory_command, repo_inventory_view, structured_shell_view,

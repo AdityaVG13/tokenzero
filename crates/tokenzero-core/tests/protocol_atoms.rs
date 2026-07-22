@@ -3,8 +3,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use ah_ah_ah::{Backend, count_tokens};
 use serde::Deserialize;
 use tokenzero_core::{
-    PORTABLE_ONE_TOKEN_ATOMS, ProtocolTokenizer, is_verified_one_token_atom,
-    portable_one_token_atoms,
+    AckClass, PORTABLE_ONE_TOKEN_ATOMS, ProtocolTokenizer, is_verified_one_token_atom,
+    portable_one_token_atoms, render_ack,
 };
 
 #[derive(Debug, Deserialize)]
@@ -132,4 +132,31 @@ fn locally_available_tokenizers_reverify_the_portable_atoms() {
             "Claude: {atom:?}"
         );
     }
+}
+
+#[test]
+fn ack2_golden_atoms_are_portable_and_deterministic() {
+    let golden: serde_json::Value = serde_json::from_str(include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../fixtures/ack2-golden.json"
+    )))
+    .unwrap();
+    let classes = [
+        AckClass::Success,
+        AckClass::Validation,
+        AckClass::Policy,
+        AckClass::Substrate,
+        AckClass::Retryable,
+        AckClass::Internal,
+    ];
+    for (case, class) in golden["cases"].as_array().unwrap().iter().zip(classes) {
+        let atom = case["atom"].as_str().unwrap();
+        assert_eq!(render_ack(class, false), atom);
+        for tokenizer in ProtocolTokenizer::ALL {
+            assert!(is_verified_one_token_atom(tokenizer, atom));
+        }
+        assert_eq!(render_ack(class, false), render_ack(class, false));
+    }
+    assert_eq!(render_ack(AckClass::Success, true), "");
+    assert_eq!(golden["silent_pure_mutation_success"], "");
 }
