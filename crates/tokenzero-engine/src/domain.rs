@@ -295,6 +295,8 @@ fn batch_response(
             raw_tokens,
             visible_tokens,
             recovery_tokens,
+            billed_tokens: visible_tokens,
+            cached_tokens: 0,
             exact_ref_tokens: Some(exact_ref_tokens),
         },
     );
@@ -316,6 +318,8 @@ fn inline_response(tool: &str, mode: Mode, text: String, raw_tokens: usize) -> T
             raw_tokens,
             visible_tokens,
             recovery_tokens: 0,
+            billed_tokens: visible_tokens,
+            cached_tokens: 0,
             exact_ref_tokens: Some(0),
         },
     )

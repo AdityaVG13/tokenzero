@@ -1743,6 +1743,13 @@ fn finalize_codemode_result(
             );
         }
         let enabled = crate::usage_telemetry_enabled(options.telemetry_enabled);
+        finalized.telemetry.billed_input_tokens = count_tokens(plan);
+        finalized.telemetry.cached_input_tokens = 0;
+        finalized.telemetry.billed_output_tokens = finalized.telemetry.visible_tokens();
+        finalized.telemetry.cached_output_tokens = finalized
+            .telemetry
+            .prefix_cache_hits
+            .min(finalized.telemetry.billed_output_tokens);
         crate::record_codemode_accounting(
             &engine.config.cache_path,
             enabled,
@@ -1754,10 +1761,18 @@ fn finalize_codemode_result(
             enabled,
             crate::ExecutionPath::Codemode,
             "codemode",
-            count_tokens(plan),
-            finalized.telemetry.raw_tokens(),
-            finalized.telemetry.visible_tokens(),
-            0,
+            crate::DirectionTokens::measured(
+                count_tokens(plan),
+                count_tokens(plan),
+                finalized.telemetry.billed_input_tokens,
+                finalized.telemetry.cached_input_tokens,
+            ),
+            crate::DirectionTokens::measured(
+                finalized.telemetry.raw_tokens(),
+                finalized.telemetry.visible_tokens(),
+                finalized.telemetry.billed_output_tokens,
+                finalized.telemetry.cached_output_tokens,
+            ),
             0,
         );
         finalized

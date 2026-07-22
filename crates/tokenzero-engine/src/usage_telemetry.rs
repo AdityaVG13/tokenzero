@@ -285,9 +285,25 @@ pub fn replay_ta_table(records: &[AmplificationRecord]) -> Vec<TaClassReport> {
     }).collect()
 }
 
-pub fn record_operation_amplification(cache_path: &Path, enabled: bool, execution_path: ExecutionPath, operation: &str, input_tokens: usize, output_raw: usize, output_visible: usize, output_cached: usize, pointer_tokens: usize) {
+pub fn record_operation_amplification(
+    cache_path: &Path,
+    enabled: bool,
+    execution_path: ExecutionPath,
+    operation: &str,
+    input: DirectionTokens,
+    output: DirectionTokens,
+    pointer_tokens: usize,
+) {
     if !enabled { return; }
-    let record = AmplificationRecord::new(execution_path, OperationClass::classify(operation), DirectionTokens::measured(input_tokens, input_tokens, input_tokens, 0), DirectionTokens::measured(output_raw, output_visible, output_visible, output_cached.min(output_visible)), 1, pointer_tokens, input_tokens);
+    let record = AmplificationRecord::new(
+        execution_path,
+        OperationClass::classify(operation),
+        input,
+        output,
+        1,
+        pointer_tokens,
+        input.raw as usize,
+    );
     let path = cache_path.with_file_name("token-amplification.jsonl");
     let _ = append_record(&path, &record);
 }

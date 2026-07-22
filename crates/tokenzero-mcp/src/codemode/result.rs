@@ -70,6 +70,18 @@ pub struct CodeModeTelemetry {
     pub visible_tokens: usize,
     #[serde(skip)]
     pub raw_tokens: usize,
+    /// Measured plan-input tokens billed at the CodeMode boundary.
+    #[serde(default)]
+    pub billed_input_tokens: usize,
+    /// Input tokens served from a provider cache, when reported.
+    #[serde(default)]
+    pub cached_input_tokens: usize,
+    /// Measured visible output tokens billed at the CodeMode boundary.
+    #[serde(default)]
+    pub billed_output_tokens: usize,
+    /// Output tokens satisfied by the prefix-cache measurement.
+    #[serde(default)]
+    pub cached_output_tokens: usize,
     #[serde(skip)]
     pub steps_run: Option<usize>,
     #[serde(skip)]
@@ -202,6 +214,10 @@ fn telemetry(ops: usize, visible: usize, raw: usize, refs: usize, ok: bool) -> C
         operations: ops,
         visible_tokens: visible,
         raw_tokens: raw,
+        billed_input_tokens: 0,
+        cached_input_tokens: 0,
+        billed_output_tokens: 0,
+        cached_output_tokens: 0,
         steps_run: None,
         parallel_groups: Some(0),
         refs_count: Some(refs),

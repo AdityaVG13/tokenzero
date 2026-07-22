@@ -169,6 +169,12 @@ pub struct Accounting {
     pub raw_tokens: usize,
     pub visible_tokens: usize,
     pub recovery_tokens: usize,
+    /// Output tokens billed at the tool boundary. Defaults preserve older records.
+    #[serde(default)]
+    pub billed_tokens: usize,
+    /// Billed output tokens satisfied by the measured cache source.
+    #[serde(default)]
+    pub cached_tokens: usize,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub exact_ref_tokens: Option<usize>,
 }

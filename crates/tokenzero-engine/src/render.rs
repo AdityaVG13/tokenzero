@@ -220,6 +220,8 @@ pub fn success_response(
             raw_tokens: accounting.0,
             visible_tokens: accounting.1,
             recovery_tokens: accounting.2,
+            billed_tokens: accounting.1,
+            cached_tokens: 0,
             exact_ref_tokens: accounting.3,
         },
     )
@@ -635,6 +637,8 @@ pub fn degraded_shell_response(
             raw_tokens: count_tokens(output),
             visible_tokens: count_tokens(output),
             recovery_tokens: 0,
+            billed_tokens: count_tokens(output),
+            cached_tokens: 0,
             exact_ref_tokens: Some(0),
         },
     );

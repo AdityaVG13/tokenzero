@@ -579,6 +579,8 @@ impl TokenZeroEngine {
                 raw_tokens,
                 visible_tokens,
                 recovery_tokens: store.recovery_tokens,
+                billed_tokens: visible_tokens,
+                cached_tokens: 0,
                 exact_ref_tokens: Some(if small_shell_output {
                     count_tokens(&combined_vis)
                 } else {

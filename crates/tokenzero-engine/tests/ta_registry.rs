@@ -1,7 +1,26 @@
 use tokenzero_engine::{
-    AmplificationRecord, ExecutionPath, OperationClass, TA_REGISTRY,
+    AmplificationRecord, DirectionTokens, ExecutionPath, OperationClass, TA_REGISTRY,
     record_operation_amplification, replay_ta_table,
 };
+
+#[test]
+fn measured_billed_and_cached_tokens_reach_the_ledger() {
+    let dir = tempfile::tempdir().unwrap();
+    let cache_path = dir.path().join("recovery-cache.json");
+    record_operation_amplification(
+        &cache_path,
+        true,
+        ExecutionPath::Codemode,
+        "codemode",
+        DirectionTokens::measured(17, 17, 13, 3),
+        DirectionTokens::measured(41, 29, 23, 7),
+        2,
+    );
+    let ledger = std::fs::read_to_string(dir.path().join("token-amplification.jsonl")).unwrap();
+    let record: AmplificationRecord = serde_json::from_str(ledger.trim()).unwrap();
+    assert_eq!((record.input.billed, record.input.cached), (13, 3));
+    assert_eq!((record.output.billed, record.output.cached), (23, 7));
+}
 
 #[test]
 fn registry_covers_every_operation_class() {

@@ -174,10 +174,13 @@ fn record_opt_in_mcp_usage(
         enabled,
         crate::ExecutionPath::Mcp,
         operation,
-        input_tokens,
-        accounting.raw_tokens,
-        accounting.visible_tokens,
-        0,
+        crate::DirectionTokens::measured(input_tokens, input_tokens, input_tokens, 0),
+        crate::DirectionTokens::measured(
+            accounting.raw_tokens,
+            accounting.visible_tokens,
+            accounting.billed_tokens,
+            accounting.cached_tokens.min(accounting.billed_tokens),
+        ),
         response.refs.len(),
     );
 }
@@ -721,6 +724,8 @@ fn inline_response(tool: &str, mode: Mode, text: String, raw_tokens: usize) -> T
             raw_tokens,
             visible_tokens,
             recovery_tokens: 0,
+            billed_tokens: visible_tokens,
+            cached_tokens: 0,
             exact_ref_tokens: Some(0),
         },
     )
@@ -841,6 +846,8 @@ pub(crate) fn batch_response(
             raw_tokens,
             visible_tokens,
             recovery_tokens,
+            billed_tokens: visible_tokens,
+            cached_tokens: 0,
             exact_ref_tokens: Some(exact_ref_tokens),
         },
     );

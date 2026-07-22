@@ -20,6 +20,8 @@ fn compact_shell_text_render_omits_ref_footer() {
             raw_tokens: 15,
             visible_tokens: 2,
             recovery_tokens: 0,
+            billed_tokens: 2,
+            cached_tokens: 0,
             exact_ref_tokens: Some(14),
         },
     );
@@ -53,6 +55,8 @@ fn full_shell_text_render_does_not_duplicate_header_refs() {
             raw_tokens: 100,
             visible_tokens: 40,
             recovery_tokens: 0,
+            billed_tokens: 40,
+            cached_tokens: 0,
             exact_ref_tokens: Some(28),
         },
     );
