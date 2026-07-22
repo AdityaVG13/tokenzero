@@ -14,6 +14,7 @@ use exec_stub as exec;
 pub(crate) mod journal;
 mod parser;
 mod result;
+pub(crate) mod recipe_registry;
 mod sandbox;
 mod store;
 

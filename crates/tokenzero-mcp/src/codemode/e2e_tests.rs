@@ -518,3 +518,61 @@ fn shell_ref_is_canonical_and_expandable_in_subsequent_execution() {
         "subsequent CodeMode execution did not recover exact stdout: {value:?}"
     );
 }
+
+
+#[test]
+fn builtin_recipe_registry_is_discoverable_and_all_ten_fit_envelopes() {
+    let work = tempfile::tempdir().unwrap();
+    let file = work.path().join("sample.txt");
+    std::fs::write(&file, "needle\nsecond line\n").unwrap();
+    let path = serde_json::to_string(work.path()).unwrap();
+    let file_path = serde_json::to_string(&file).unwrap();
+    let plans = [
+        ("read_head", format!(r#"return zero.run("read_head", {{path: {file_path}}})"#)),
+        ("find_bounded", format!(r#"return zero.run("find_bounded", {{pattern: "needle", path: {path}}})"#)),
+        ("grep_bounded", format!(r#"return zero.run("grep_bounded", {{pattern: "needle", path: {path}}})"#)),
+        ("expand_head", r#"return zero.ingest("recipe payload").then(stored => zero.run("expand_head", {ref: stored.ref}))"#.to_string()),
+        ("tree_shallow", format!(r#"return zero.run("tree_shallow", {{path: {path}}})"#)),
+        ("glob_bounded", format!(r#"return zero.run("glob_bounded", {{pattern: "*.txt", path: {path}}})"#)),
+        ("shell_quiet", r#"return zero.run("shell_quiet", {command: "printf recipe"})"#.to_string()),
+        ("ingest_text", r#"return zero.run("ingest_text", {text: "recipe payload"})"#.to_string()),
+        ("recall_top", r#"return zero.run("recall_top", {query: "recipe payload"})"#.to_string()),
+        ("repo_snapshot", format!(r#"return zero.run("repo_snapshot", {{path: {path}, file: {file_path}}})"#)),
+    ];
+    assert_eq!(plans.len(), 10);
+    for (name, plan) in plans {
+        let result = execute_codemode_with_options(
+            &plan,
+            CodeModeOptions { root: Some(work.path().to_path_buf()), ..Default::default() },
+        );
+        assert_eq!(result.status, CodeModeStatus::Completed, "{name}: {:?}", result.error);
+        let definition = super::recipe_registry::get(name).unwrap();
+        assert!(
+            result.telemetry.visible_tokens <= definition.envelope_tokens(),
+            "{name}: measured {} > envelope {}",
+            result.telemetry.visible_tokens,
+            definition.envelope_tokens(),
+        );
+    }
+
+    let listed = execute_codemode_with_options("return zero.list()", Default::default());
+    assert_eq!(listed.status, CodeModeStatus::Completed, "{:?}", listed.error);
+    assert_eq!(listed.value.as_ref().unwrap().as_array().unwrap().len(), 10);
+    let described = execute_codemode_with_options(
+        r#"return zero.describeRecipe("read_head")"#,
+        Default::default(),
+    );
+    assert_eq!(described.status, CodeModeStatus::Completed, "{:?}", described.error);
+    assert_eq!(described.value.as_ref().unwrap()["registry_version"], "1.0.0");
+}
+
+#[test]
+fn builtin_recipe_rejects_envelope_above_declared_budget() {
+    let result = execute_codemode_with_options(
+        r#"return zero.run("read_head", {path: "Cargo.toml"})"#,
+        CodeModeOptions { max_visible_tokens: 511, ..Default::default() },
+    );
+    assert_eq!(result.status, CodeModeStatus::Error);
+    let message = &result.error.as_ref().unwrap().message;
+    assert!(message.contains("recipe_budget_exceeded") || message.contains("envelope 512"), "{message}");
+}

@@ -28,6 +28,7 @@ use super::journal::{
     OperationSpec,
 };
 use super::parser::{parse_plan, resolve_expr, resolve_return, Expr, MethodCall, Statement};
+use super::recipe_registry;
 use super::result::{CodeModeOptions, CodeModeResult, CodeModeStatus};
 use super::sandbox::lower_code_plan;
 use super::store::{
@@ -710,7 +711,12 @@ fn begin_js_host_op(
 ) -> String {
     let mut args = serde_json::from_str::<Vec<Value>>(args_json).unwrap_or_default();
     if matches!(method, "codemode.recipeRun" | "recipeRun" | "recipe_run") {
-        args.push(json!(state.borrow().limits.max_code_bytes));
+        let (max_code_bytes, max_visible_tokens) = {
+            let state = state.borrow();
+            (state.limits.max_code_bytes, state.limits.max_visible_tokens)
+        };
+        args.push(json!(max_code_bytes));
+        args.push(json!(max_visible_tokens));
     }
     let logical_width = logical_width_for_method(method, &args);
     let limit_error = {
@@ -966,6 +972,7 @@ fn js_prelude() -> &'static str {
           register: (name, source) => __tz_call('codemode.recipeRegister', [name, source]),
           run: (name, args = {}) => __tz_run_recipe(name, args),
           list: () => __tz_call('codemode.recipeList', []),
+          describeRecipe: (name) => __tz_call('codemode.recipeDescribe', [String(name)]),
           ...__tz_methods('zero.', ['read','find','grep','glob','tree','shell','expand','ingest','mem','recall','fetch','cache_pack','rewrite','discover','batch','pipe','pick','filter_lines','count_tokens','assert']),
           compact: __tz_json_bind('zero.token.compact'),
           compact_max: __tz_json_bind('zero.compact_max'),
@@ -2316,9 +2323,33 @@ fn dispatch_values(
         });
     }
     if matches!(method, "codemode.recipeList" | "recipeList" | "recipe_list") {
-        return catalog(json!(with_previous_outputs(|registry| {
+        let mut names = recipe_registry::list()
+            .into_iter()
+            .map(|recipe| recipe.name)
+            .collect::<Vec<_>>();
+        names.extend(with_previous_outputs(|registry| {
             registry.recipe_names(&engine.config.cache_path)
-        })));
+        }));
+        names.sort();
+        names.dedup();
+        return catalog(json!(names));
+    }
+    if matches!(method, "codemode.recipeDescribe" | "recipeDescribe" | "recipe_describe") {
+        let name = require_str_arg(args, 0, "recipe describe requires a name string")?;
+        if let Some(recipe) = recipe_registry::get(name) {
+            let envelope_tokens = recipe.envelope_tokens();
+            return catalog(json!({
+                "registry_version": recipe_registry::RECIPE_REGISTRY_VERSION,
+                "recipe": recipe,
+                "envelope_tokens": envelope_tokens,
+            }));
+        }
+        let custom = with_previous_outputs(|registry| {
+            registry.recipe_source(&engine.config.cache_path, name)
+        });
+        return custom
+            .map(|source| catalog(json!({"name": name, "version": "session", "source_bytes": source.len()})))
+            .unwrap_or_else(|| Err(boxed_error("recipe_not_found", format!("recipe not found: {name}"))));
     }
     if matches!(method, "codemode.recipeRun" | "recipeRun" | "recipe_run") {
         let name = require_str_arg(args, 0, "recipe run requires a name string")?;
@@ -2327,10 +2358,26 @@ fn dispatch_values(
             .and_then(Value::as_u64)
             .and_then(|value| usize::try_from(value).ok())
             .unwrap_or_else(|| CodeModeLimits::default().max_code_bytes);
+        let builtin = recipe_registry::get(name);
         let source = with_previous_outputs(|registry| {
             registry.recipe_source(&engine.config.cache_path, name)
         })
+        .or_else(|| builtin.as_ref().map(|recipe| recipe.source.clone()))
         .ok_or_else(|| boxed_error("recipe_not_found", format!("recipe not found: {name}")))?;
+        if let Some(recipe) = builtin.as_ref() {
+            let budget = args
+                .get(2)
+                .and_then(Value::as_u64)
+                .and_then(|value| usize::try_from(value).ok())
+                .unwrap_or_else(|| CodeModeLimits::default().max_visible_tokens);
+            let envelope = recipe.envelope_tokens();
+            if envelope > budget {
+                return Err(boxed_error(
+                    "recipe_budget_exceeded",
+                    format!("recipe {name}@{} envelope {envelope} exceeds declared budget {budget}", recipe.version),
+                ));
+            }
+        }
         if source.trim().is_empty() {
             return Err(boxed_error("validation", "recipe source must not be empty"));
         }
@@ -2346,7 +2393,13 @@ fn dispatch_values(
                 "sandbox: mutating binding denied without transaction support",
             ));
         }
-        return catalog(json!({"source": source}));
+        return catalog(match builtin {
+            Some(recipe) => {
+                let envelope_tokens = recipe.envelope_tokens();
+                json!({"source": source, "version": recipe.version, "envelope_tokens": envelope_tokens})
+            }
+            None => json!({"source": source, "version": "session"}),
+        });
     }
     match method {
         "zero.read" | "read" | "zero.token.read" => exec_read(engine, work_root, args),
