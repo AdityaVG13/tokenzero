@@ -1,6 +1,6 @@
 use tokenzero_engine::{
     AmplificationRecord, DirectionTokens, ExecutionPath, OperationClass, TA_REGISTRY,
-    record_operation_amplification, replay_ta_table,
+    enforce_ta_cost_locks, record_operation_amplification, replay_ta_table,
 };
 
 #[test]
@@ -44,6 +44,33 @@ fn replay_corpus_emits_bounded_per_class_table() {
     let table = replay_ta_table(&records);
     assert_eq!(table.len(), 3);
     assert!(table.iter().all(|row| row.samples > 0 && row.within_bound));
+}
+
+#[test]
+fn injected_amplification_regression_trips_cost_lock() {
+    let regression = AmplificationRecord::new(
+        ExecutionPath::Codemode,
+        OperationClass::Read,
+        DirectionTokens::measured(1, 1, 1, 0),
+        DirectionTokens::measured(9, 9, 9, 0),
+        1,
+        0,
+        0,
+    );
+    let violations = enforce_ta_cost_locks(&[regression]).unwrap_err();
+    assert_eq!(violations.len(), 1);
+    assert_eq!(violations[0].operation_class, OperationClass::Read);
+    assert_eq!(violations[0].observed_amplification_milli, 9_000);
+    assert_eq!(violations[0].registered_bound_milli, 8_000);
+}
+
+#[test]
+fn replay_fixture_passes_cost_lock() {
+    let value: serde_json::Value = serde_json::from_str(include_str!(
+        "../../../fixtures/token-amplification-replay.json"
+    )).unwrap();
+    let records: Vec<AmplificationRecord> = serde_json::from_value(value["cases"].clone()).unwrap();
+    assert!(enforce_ta_cost_locks(&records).is_ok());
 }
 
 #[test]

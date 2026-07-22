@@ -162,13 +162,12 @@ pub use warmkeeper::{
 };
 pub use usage_telemetry::{
     AmplificationRecord, DirectionTokens, ExecutionPath, OperationClass, TA_REGISTRY,
-    TaClassReport, TelemetryInspection, UsageRecord, inspect_usage_telemetry,
+    TaClassReport, TaCostLockViolation, TelemetryInspection, UsageRecord, enforce_ta_cost_locks, inspect_usage_telemetry,
     record_codemode_accounting, record_mcp_accounting, record_operation_amplification,
     replay_ta_table, usage_telemetry_enabled, usage_telemetry_path_for_cache,
 };
 
 /// One find/replace hunk for [`TokenZeroEngine::edit`]. `find` must match the
-/// evolving file text exactly once unless `replace_all` is set. for [`TokenZeroEngine::edit`]. `find` must match the
 /// evolving file text exactly once unless `replace_all` is set.
 #[derive(Debug, Clone, serde::Deserialize)]
 pub struct EditHunk {

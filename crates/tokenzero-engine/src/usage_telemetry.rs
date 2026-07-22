@@ -285,6 +285,35 @@ pub fn replay_ta_table(records: &[AmplificationRecord]) -> Vec<TaClassReport> {
     }).collect()
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct TaCostLockViolation {
+    pub operation_class: OperationClass,
+    pub observed_amplification_milli: u64,
+    pub registered_bound_milli: u64,
+}
+
+/// Enforce registered per-operation token-amplification bounds.
+/// Callers must treat any violation as a hard CI/release failure.
+pub fn enforce_ta_cost_locks(
+    records: &[AmplificationRecord],
+) -> Result<Vec<TaClassReport>, Vec<TaCostLockViolation>> {
+    let table = replay_ta_table(records);
+    let violations = table
+        .iter()
+        .filter(|row| !row.within_bound)
+        .map(|row| TaCostLockViolation {
+            operation_class: row.operation_class,
+            observed_amplification_milli: row.max_amplification_milli,
+            registered_bound_milli: row.registered_bound_milli,
+        })
+        .collect::<Vec<_>>();
+    if violations.is_empty() {
+        Ok(table)
+    } else {
+        Err(violations)
+    }
+}
+
 pub fn record_operation_amplification(
     cache_path: &Path,
     enabled: bool,
