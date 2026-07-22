@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""Measure manifest+delta boot cost on this repo and a 100k-file corpus."""
+"""Measure manifest+delta boot cost on this repo, a 23k-file corpus, and a 100k-file corpus."""
 from __future__ import annotations
 import argparse; import json; import tempfile; from pathlib import Path
 import os
 import harness as H; REPO = H.REPO; BIN = Path(os.environ.get('TOKENZERO_BOOT_BENCH_BIN', REPO / 'target/debug/tokenzero')); EVIDENCE = Path(__file__).with_suffix('')
-SYNTHETIC_FILES = 100000; COUNT_EXCLUDES = {'.git', 'target', '.zerostack'}
+SYNTHETIC_CORPORA = {'synthetic-23k': 23000, 'synthetic-100k': 100000}; COUNT_EXCLUDES = {'.git', 'target', '.zerostack'}
 
 def masked_argv(arguments: list[str], root: Path, cache: Path) -> list[str]:
     return ['<root>' if value == str(root) else '<temp-cache>' if value == str(cache) else value for value in arguments]
@@ -30,8 +30,10 @@ def run(label: str) -> Path:
         raise SystemExit(f'benchmark binary missing: {BIN}; build or select it with TOKENZERO_BOOT_BENCH_BIN')
     with H.heavy_guard(f'python3 benchmarks/boot-cost.py --label {label}'):
         with tempfile.TemporaryDirectory(prefix='tokenzero-boot-cost-') as raw:
-            tmp = Path(raw); synthetic = tmp / 'synthetic-100k'; synthetic.mkdir(); H.synthetic_tree(synthetic, SYNTHETIC_FILES)
-            result = {'schema': 'tokenzero.boot-cost.v1', 'environment': H.capture_environment(BIN, f'python3 benchmarks/boot-cost.py --label {label}', extra={'worktree_note': 'Measurements intentionally include the uncommitted bead implementation.', 'synthetic_generator': '100 directories x 1000 deterministic 8-byte text files'}), 'corpora': [measure('repository', REPO, tmp / 'repository-cache'), measure('synthetic-100k', synthetic, tmp / 'synthetic-cache')], 'assertions': {'max_boot_tokens_exclusive': 100, 'component_totals_match': True, 'working_set_demand_paged': True, 'all_passed': True}}; EVIDENCE.mkdir(parents=True, exist_ok=True); destination = EVIDENCE / f'{label}.json'; destination.write_text(json.dumps(result, indent=2) + '\n')
+            tmp = Path(raw); corpora = [measure('repository', REPO, tmp / 'repository-cache')]
+            for name, files in SYNTHETIC_CORPORA.items():
+                synthetic = tmp / name; synthetic.mkdir(); H.synthetic_tree(synthetic, files); corpora.append(measure(name, synthetic, tmp / f'{name}-cache'))
+            result = {'schema': 'tokenzero.boot-cost.v1', 'environment': H.capture_environment(BIN, f'python3 benchmarks/boot-cost.py --label {label}', extra={'synthetic_generator': 'deterministic 8-byte text files sharded 1000 per directory (23k-file and 100k-file trees)'}), 'corpora': corpora, 'assertions': {'max_boot_tokens_exclusive': 100, 'component_totals_match': True, 'working_set_demand_paged': True, 'all_passed': True}}; EVIDENCE.mkdir(parents=True, exist_ok=True); destination = EVIDENCE / f'{label}.json'; destination.write_text(json.dumps(result, indent=2) + '\n')
             return destination
 
 def main() -> int:
