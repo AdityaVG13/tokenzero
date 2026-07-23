@@ -10,7 +10,7 @@ pub struct DeterministicSchedule {
 }
 impl DeterministicSchedule {
     pub fn generate(seed: u64, width: usize) -> Self {
-        let mut order: (Vec<usize>) = (0..width).collect();
+        let mut order: Vec<usize> = (0..width).collect();
         let mut x = seed;
         for i in (1..width).rev() {
             x ^= x << 13;

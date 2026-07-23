@@ -2752,6 +2752,35 @@ fn recovery_blob_prune_prefers_never_expanded_blobs() {
 }
 
 #[test]
+fn transparency_log_survives_restart_with_valid_proofs() {
+    let (_dir, cache, mut store) = persisted_store();
+    let first = store
+        .store_payload("transparent-one", ContentType::Text, None, None, None)
+        .unwrap();
+    let old_size = store.transparency_len();
+    let old_root = store.transparency_root();
+    store
+        .store_alias("tz://audit/one", &first.blob_ref)
+        .unwrap();
+    let new_root = store.transparency_root();
+
+    let restarted = RecoveryStore::new(Some(cache));
+    assert_eq!(restarted.transparency_root(), new_root);
+    assert!(
+        restarted
+            .transparency_inclusion_proof(0)
+            .unwrap()
+            .verify(&new_root)
+    );
+    assert!(
+        restarted
+            .transparency_consistency_proof(old_size)
+            .unwrap()
+            .verify(&old_root, &new_root)
+    );
+}
+
+#[test]
 fn recovery_blob_age_cap_and_status_support_both_store_roots() {
     for relative in [
         ".tokenzero/recovery-cache.json",
