@@ -21,7 +21,7 @@ fn boot_cost_lock_covers_real_small_and_23k_corpora() {
     assert_eq!(large.saturating_sub(small), 0, "boot cost grew with repo size");
 
     let gate = include_str!("../../../benchmarks/boot-cost.py");
-    assert!(gate.contains("offending_component"));
+    assert!(gate.contains("component_attribution"));
     assert!(gate.contains("synthetic-23k"));
     assert!(gate.contains("--rebaseline"));
 }
