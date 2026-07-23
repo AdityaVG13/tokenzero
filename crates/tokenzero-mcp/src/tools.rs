@@ -504,6 +504,25 @@ fn codemode_structured(
 ) -> Value {
     let mut object = serde_json::Map::new();
     object.insert("ack".to_string(), json!(ack));
+    object.insert(
+        "telemetry".to_string(),
+        json!({
+            "kind": result.telemetry.kind,
+            "status": result.telemetry.status,
+            "logical_ops": result.telemetry.logical_ops,
+            "physical_ops": result.telemetry.physical_ops,
+            "batched_ops": result.telemetry.batched_ops,
+            "internal_actions": result.telemetry.internal_actions,
+            "cache_hits": result.telemetry.cache_hits,
+            "cache_misses": result.telemetry.cache_misses,
+            "store_writes": result.telemetry.store_writes,
+            "wall_ms": result.telemetry.wall_ms,
+            "bytes_materialized": result.telemetry.bytes_materialized,
+            "raw_tokens": result.telemetry.raw_tokens,
+            "visible_tokens": result.telemetry.visible_tokens,
+            "measurement_coverage_pct": result.telemetry.measurement_coverage_pct,
+        }),
+    );
     if matches!(result.status, crate::CodeModeStatus::Completed) {
         if let Some(value) = &result.value {
             object.insert("value".to_string(), value.clone());
