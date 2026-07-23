@@ -25,6 +25,7 @@ use crate::telemetry::CrossEngineTelemetry;
 pub mod telemetry;
 
 pub mod boot;
+pub mod dst;
 pub mod embedded_store;
 pub mod entity_novelty;
 pub mod migration;
@@ -33,6 +34,7 @@ pub mod segment_store;
 mod segment_store_tests;
 pub mod session_aliases;
 pub mod shared_cas;
+pub mod transparency;
 pub use entity_novelty::{
     ENTITY_NOVELTY_RECORD_TYPE, ENTITY_NOVELTY_REL_DIR, ENTITY_NOVELTY_SCHEMA_VERSION,
     EntityNoveltyRecord, NoveltyError, entity_novelty_path, merge_entity_novelty, parse_entity_ref,
@@ -590,6 +592,9 @@ pub(crate) struct RecoveryState {
     /// Short refs whose 16-hex prefix maps to multiple distinct full hashes.
     #[serde(default)]
     pub ambiguous_aliases: BTreeSet<String>,
+    /// Append-only audit commitment for acknowledged mint and alias-CAS mutations.
+    #[serde(default)]
+    pub transparency: crate::transparency::MmrLog,
 }
 
 // Capped shell-result index; blob payloads remain content-addressed.
@@ -732,6 +737,7 @@ impl RecoveryState {
             shell_outcomes: BTreeMap::new(),
             shell_outcome_seq: 0,
             ambiguous_aliases: BTreeSet::new(),
+            transparency: crate::transparency::MmrLog::default(),
         }
     }
 
@@ -1243,9 +1249,39 @@ impl RecoveryStore {
     /// Store an alias without persisting. Caller must call `persist_pending()`.
     pub fn store_alias_deferred(&mut self, alias: &str, target_ref: &str) {
         self.skip_empty_persist = false;
+        if self
+            .state
+            .aliases
+            .get(alias)
+            .is_none_or(|current| current != target_ref)
+        {
+            self.state
+                .transparency
+                .append(format!("alias-cas\0{alias}\0{target_ref}").as_bytes());
+        }
         self.state
             .aliases
             .insert(alias.to_string(), target_ref.to_string());
+    }
+
+    /// Current MMR transparency commitment for recovery mutations.
+    pub fn transparency_root(&self) -> String {
+        self.state.transparency.root()
+    }
+    pub fn transparency_len(&self) -> usize {
+        self.state.transparency.len()
+    }
+    pub fn transparency_inclusion_proof(
+        &self,
+        leaf_index: usize,
+    ) -> Option<crate::transparency::InclusionProof> {
+        self.state.transparency.inclusion_proof(leaf_index)
+    }
+    pub fn transparency_consistency_proof(
+        &self,
+        old_size: usize,
+    ) -> Option<crate::transparency::ConsistencyProof> {
+        self.state.transparency.consistency_proof(old_size)
     }
 
     /// Remove an alias after the next authoritative persist.
@@ -1849,6 +1885,12 @@ impl RecoveryStore {
 
     fn put_blob(&mut self, text: &str, content_type: ContentType) -> String {
         let full_hash = sha256_hex(text);
+        let canonical_ref = format!("tz://blob/{full_hash}");
+        if !self.state.blobs.contains_key(&canonical_ref) {
+            self.state
+                .transparency
+                .append(format!("mint\0{canonical_ref}").as_bytes());
+        }
         let published = self
             .shared_cas
             .as_ref()
@@ -3455,6 +3497,7 @@ fn merge_states(
     merged.shell_outcomes.extend(current.shell_outcomes);
     trim_shell_outcomes(&mut merged.shell_outcomes);
     merged.ambiguous_aliases.extend(current.ambiguous_aliases);
+    merged.transparency.merge_concurrent(&current.transparency);
     merged.configure(config);
     merged
 }
