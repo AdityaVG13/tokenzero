@@ -3289,6 +3289,74 @@ pub(crate) fn exec_edit(engine: &TokenZeroEngine, work_root: &Path, args: &[Valu
     }))
 }
 
+const DEFAULT_EXPAND_VISIBLE_TOKENS: usize = 1200;
+
+fn bound_default_expand_response(
+    params: &ExpandParams,
+    response: &mut ToolResponse,
+    configured_limit: usize,
+) -> bool {
+    if params.raw
+        || params.selector.is_some()
+        || params.start_line.is_some()
+        || params.end_line.is_some()
+        || params.symbol.is_some()
+        || params.anchor_kind.is_some()
+        || params.since.is_some()
+    {
+        return false;
+    }
+    let Some(text) = response
+        .visible
+        .as_ref()
+        .map(|visible| visible.text.clone())
+    else {
+        return false;
+    };
+    let raw_tokens = count_tokens(&text);
+    let limit = configured_limit.min(DEFAULT_EXPAND_VISIBLE_TOKENS).max(128);
+    if raw_tokens <= limit {
+        return false;
+    }
+    let content_type = detect_content_type(&text, None);
+    let capsule = tokenzero_core::make_capsule_content_aware(
+        &text,
+        raw_tokens,
+        content_type,
+        limit,
+        Some("expand"),
+        Some(&params.ref_id),
+        false,
+    );
+    if let Some(visible) = response.visible.as_mut() {
+        visible.text = capsule.text;
+    }
+    response.mode = Some(Mode::Auto.to_string());
+    response.detail_ref = Some(params.ref_id.clone());
+    if !response
+        .refs
+        .iter()
+        .any(|record| record.ref_id == params.ref_id)
+    {
+        response.refs.push(tokenzero_core::ref_record(
+            "blob",
+            params.ref_id.clone(),
+            text.len(),
+        ));
+    }
+    if let Some(accounting) = response.accounting.as_mut() {
+        accounting.raw_tokens = raw_tokens;
+        accounting.visible_tokens = capsule.visible_tokens;
+        accounting.exact_ref_tokens = Some(count_tokens(&params.ref_id));
+    }
+    let telemetry = response.telemetry.get_or_insert_with(|| json!({}));
+    telemetry["expand_bounded"] = json!(true);
+    telemetry["raw_tokens"] = json!(raw_tokens);
+    telemetry["visible_tokens"] = json!(capsule.visible_tokens);
+    telemetry["exact_recovery"] = json!("use {raw:true} or an explicit line/symbol window");
+    true
+}
+
 fn exec_expand(engine: &TokenZeroEngine, args: &[Value]) -> OpResult {
     // Array first arg → expandMany (agents often pass expand([ref, ...])).
     if args.first().is_some_and(Value::is_array) {
@@ -3306,7 +3374,7 @@ fn exec_expand(engine: &TokenZeroEngine, args: &[Value]) -> OpResult {
     let payload = expand_params_to_tool_args(&params);
     let outcome = tokenzero_engine::dispatch_codemode_method(engine, "zero.expand", &payload)
         .map_err(|err| operation_error(format!("{}: {}", err.kind.as_str(), err.message)))?;
-    let Some(resp) = outcome.tool_response else {
+    let Some(mut resp) = outcome.tool_response else {
         return Err(operation_error("zero.expand: empty domain outcome"));
     };
     // Strict ZeroRef parsing can classify a missing legacy-shaped blob as malformed.
@@ -3325,8 +3393,10 @@ fn exec_expand(engine: &TokenZeroEngine, args: &[Value]) -> OpResult {
     {
         return tool_aborting_wall(resp);
     }
+    let bounded = resp.error.is_none()
+        && bound_default_expand_response(&params, &mut resp, engine.config.max_visible_tokens);
     let outcome = OpOutcome::from_tool_response(&resp);
-    if resp.error.is_none() {
+    if resp.error.is_none() && !bounded {
         Ok(outcome.mark_exact_expand())
     } else {
         Ok(outcome)
@@ -3357,7 +3427,7 @@ fn exec_expand_many(engine: &TokenZeroEngine, args: &[Value]) -> OpResult {
             .map_err(|err| {
             operation_error(format!("{}: {}", err.kind.as_str(), err.message))
         })?;
-        let Some(resp) = outcome.tool_response else {
+        let Some(mut resp) = outcome.tool_response else {
             return Err(operation_error("zero.expand: empty domain outcome"));
         };
         if resp
@@ -3368,11 +3438,14 @@ fn exec_expand_many(engine: &TokenZeroEngine, args: &[Value]) -> OpResult {
             return tool_aborting_wall(resp);
         }
         prevented = prevented.saturating_add(estimate_prevented_read_bytes(&resp));
-        results.push(
-            OpOutcome::from_tool_response(&resp)
-                .mark_exact_expand()
-                .into_value(),
-        );
+        let bounded = resp.error.is_none()
+            && bound_default_expand_response(&params, &mut resp, engine.config.max_visible_tokens);
+        let outcome = OpOutcome::from_tool_response(&resp);
+        results.push(if bounded {
+            outcome.into_value()
+        } else {
+            outcome.mark_exact_expand().into_value()
+        });
     }
     Ok(OpOutcome::from_catalog(json!({
         "items": results,

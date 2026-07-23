@@ -212,6 +212,8 @@ failures can be recorded without leaving the harness. Reports land under
 | `tz_shell` | compressed shell/test/log output |
 | `tz_ingest` | external payload ingest with exact refs |
 | `tz_expand` | exact recovery from `tz://`, `fz://`, or `gz://` blob refs (same-store scheme alias; cross-engine blob expand under shared CAS is release-gated on retained multi-OS evidence; non-blob portable refs unsupported) |
+
+CodeMode `zero.token.expand(ref)` bounds large default results to 1,200 visible tokens and keeps the ref recoverable. Prefer `{start_line, end_line}` or `{symbol}` for exact windows. Use `{raw: true}` only when the complete byte-exact payload is required. The classic `tz_expand`/CLI recovery surfaces remain exact.
 | `tz_mem` | recovery/cache/config state |
 | `tz_cache_pack` | daemonless prompt-cache pack generation |
 | `tz_rewrite` | conservative command rewrite planning |
