@@ -32,6 +32,7 @@ mod engine_read;
 mod engine_search;
 mod engine_session;
 mod engine_shell;
+pub mod eviction_scheduler;
 pub mod expand_params;
 mod fetch_cache;
 mod fetch_guard;
@@ -155,6 +156,12 @@ pub use cache_meter::{
     ANTHROPIC_CACHE_DIAGNOSIS_BETA, AnthropicCacheDiagnosisRequest, CacheMeter,
     CacheMeterError, CacheObservation, CachePricing, CacheProvider, CacheSessionReport,
     ProviderUsage, cache_miss_attribution, parse_provider_usage,
+};
+pub use eviction_scheduler::{
+    CacheBreakpoint, EvictionBatch, EvictionCandidate, EvictionDecision, EvictionDecisionKind,
+    EvictionReplayItem, EvictionReplayReport, EvictionSavingsLedger, EvictionSchedule,
+    OPENAI_MAX_RETENTION_SECONDS, PrefixTier, provider_breakpoints, schedule_evictions,
+    simulate_eviction_replay, ttl_from_gaps,
 };
 pub use warmkeeper::{
     WarmDecision, WarmDecisionKind, WarmLane, WarmLaneTier, WarmReplayLane,
