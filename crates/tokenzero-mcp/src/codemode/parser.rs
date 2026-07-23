@@ -1,6 +1,6 @@
 //! JS-like plan parser for CodeMode execution.
 
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 use std::collections::HashMap;
 
 #[derive(Debug, Clone)]
