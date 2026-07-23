@@ -1,0 +1,29 @@
+{
+  "schema": "tokenzero.boot-cost-baseline.v1",
+  "thresholds": {
+    "max_visible_boot_tokens_exclusive": 100,
+    "max_repo_size_growth_tokens": 0,
+    "small_corpus": "repository",
+    "large_corpus": "synthetic-23k"
+  },
+  "components": {
+    "repository": {
+      "manifest": 12,
+      "delta": 3,
+      "toc_working_set": 6,
+      "other": 0,
+      "total": 21
+    },
+    "synthetic-23k": {
+      "manifest": 12,
+      "delta": 3,
+      "toc_working_set": 6,
+      "other": 0,
+      "total": 21
+    }
+  },
+  "rebaseline": {
+    "command": "TOKENZERO_BOOT_BENCH_BIN=target/release/tokenzero python3 benchmarks/boot-cost.py --label candidate --rebaseline",
+    "policy": "Threshold or attribution changes require an explicit committed edit to this file."
+  }
+}
