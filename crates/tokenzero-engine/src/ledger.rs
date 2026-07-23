@@ -26,6 +26,8 @@ use tokenzero_core::ToolResponse;
 pub const LEDGER_SCHEMA: &str = "tokenzero.ledger.v1";
 pub const TOKENZERO_AGENT_ENV: &str = "TOKENZERO_AGENT";
 pub const DEFAULT_MAX_LEDGER_BYTES: u64 = 8 * 1024 * 1024;
+pub const DEFAULT_MAX_LEDGER_GENERATIONS: usize = 4;
+pub const DEFAULT_MAX_LEDGER_TOTAL_BYTES: u64 = 32 * 1024 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct VersionIdentity {
@@ -374,12 +376,7 @@ fn write_bytes_locked(
         .unwrap_or(0);
     if observed_len > 0 && observed_len.saturating_add(bytes_len) > max_bytes {
         *open_file = None;
-        let rotated = rotated_path(path);
-        if let Err(error) = fs::rename(path, rotated)
-            && error.kind() != io::ErrorKind::NotFound
-        {
-            return Err(error);
-        }
+        rotate_ledger(path, max_bytes)?;
     }
     if open_file.is_none() {
         *open_file = Some(OpenOptions::new().create(true).append(true).open(path)?);
@@ -387,7 +384,8 @@ fn write_bytes_locked(
     open_file
         .as_mut()
         .expect("ledger file just opened")
-        .write_all(bytes)
+        .write_all(bytes)?;
+    enforce_ledger_total_bytes(path, max_bytes)
 }
 
 #[cfg(unix)]
@@ -497,7 +495,54 @@ pub fn ledger_path_for_cache(cache_path: &Path) -> PathBuf {
 }
 
 fn rotated_path(path: &Path) -> PathBuf {
-    path.with_extension("jsonl.1")
+    rotated_path_at(path, 1)
+}
+
+fn rotated_path_at(path: &Path, generation: usize) -> PathBuf {
+    path.with_extension(format!("jsonl.{generation}"))
+}
+
+fn ledger_rotation_limits(max_bytes: u64) -> (usize, u64) {
+    let generations = std::env::var("TOKENZERO_LEDGER_MAX_GENERATIONS")
+        .ok().and_then(|value| value.parse().ok()).filter(|value| *value > 0)
+        .unwrap_or(DEFAULT_MAX_LEDGER_GENERATIONS);
+    let total_bytes = std::env::var("TOKENZERO_LEDGER_MAX_TOTAL_BYTES")
+        .ok().and_then(|value| value.parse().ok()).filter(|value| *value >= max_bytes)
+        .unwrap_or(DEFAULT_MAX_LEDGER_TOTAL_BYTES.max(max_bytes));
+    (generations, total_bytes)
+}
+
+fn rotate_ledger(path: &Path, max_bytes: u64) -> io::Result<()> {
+    let (generations, _) = ledger_rotation_limits(max_bytes);
+    let _ = fs::remove_file(rotated_path_at(path, generations));
+    for generation in (1..generations).rev() {
+        let source = rotated_path_at(path, generation);
+        let destination = rotated_path_at(path, generation + 1);
+        if let Err(error) = fs::rename(source, destination)
+            && error.kind() != io::ErrorKind::NotFound { return Err(error); }
+    }
+    if let Err(error) = fs::rename(path, rotated_path(path))
+        && error.kind() != io::ErrorKind::NotFound { return Err(error); }
+    Ok(())
+}
+
+fn enforce_ledger_total_bytes(path: &Path, max_bytes: u64) -> io::Result<()> {
+    let (generations, total_limit) = ledger_rotation_limits(max_bytes);
+    let mut total = fs::metadata(path).map(|metadata| metadata.len()).unwrap_or(0);
+    for generation in 1..=generations {
+        total = total.saturating_add(fs::metadata(rotated_path_at(path, generation)).map(|metadata| metadata.len()).unwrap_or(0));
+    }
+    for generation in (1..=generations).rev() {
+        if total <= total_limit { break; }
+        let candidate = rotated_path_at(path, generation);
+        let bytes = fs::metadata(&candidate).map(|metadata| metadata.len()).unwrap_or(0);
+        match fs::remove_file(candidate) {
+            Ok(()) => total = total.saturating_sub(bytes),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(())
 }
 
 fn append_record(path: &Path, record: &LedgerRecord, max_bytes: u64) -> io::Result<()> {
@@ -528,17 +573,13 @@ fn append_record(path: &Path, record: &LedgerRecord, max_bytes: u64) -> io::Resu
             && locked_len > 0
             && locked_len.saturating_add(line_bytes) > max_bytes
         {
-            let rotated = rotated_path(path);
-            if let Err(error) = fs::rename(path, rotated)
-                && error.kind() != io::ErrorKind::NotFound
-            {
-                return Err(error);
-            }
+            rotate_ledger(path, max_bytes)?;
         }
         let _ = FileExt::unlock(&rotation_lock);
     }
     let mut file = OpenOptions::new().create(true).append(true).open(path)?;
-    file.write_all(&line)
+    file.write_all(&line)?;
+    enforce_ledger_total_bytes(path, max_bytes)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -636,7 +677,13 @@ pub fn query_ledger(path: &Path, query: &LedgerQuery) -> io::Result<Value> {
 
 fn read_records(path: &Path) -> io::Result<Vec<LedgerRecord>> {
     let mut records = Vec::new();
-    for candidate in [rotated_path(path), path.to_path_buf()] {
+    let (generations, _) = ledger_rotation_limits(DEFAULT_MAX_LEDGER_BYTES);
+    let mut candidates = (1..=generations)
+        .rev()
+        .map(|generation| rotated_path_at(path, generation))
+        .collect::<Vec<_>>();
+    candidates.push(path.to_path_buf());
+    for candidate in candidates {
         let file = match fs::File::open(candidate) {
             Ok(file) => file,
             Err(err) if err.kind() == io::ErrorKind::NotFound => continue,
@@ -921,5 +968,36 @@ mod ledger_tests {
         }
         assert_eq!(fs::read(rotated_path(&path)).unwrap(), original);
         assert_eq!(read_records(&path).unwrap().len(), 2);
+    }
+
+    #[test]
+    fn ledger_rotation_caps_generations_and_total_bytes() {
+        let directory = tempdir().unwrap();
+        let path = directory.path().join("ledger.jsonl");
+        for generation in 0..(DEFAULT_MAX_LEDGER_GENERATIONS + 2) {
+            fs::write(&path, [generation as u8]).unwrap();
+            rotate_ledger(&path, DEFAULT_MAX_LEDGER_BYTES).unwrap();
+        }
+        for generation in 1..=DEFAULT_MAX_LEDGER_GENERATIONS {
+            assert!(rotated_path_at(&path, generation).is_file());
+        }
+        assert!(!rotated_path_at(&path, DEFAULT_MAX_LEDGER_GENERATIONS + 1).exists());
+
+        fs::write(&path, [0]).unwrap();
+        for generation in 1..=DEFAULT_MAX_LEDGER_GENERATIONS {
+            OpenOptions::new()
+                .write(true)
+                .open(rotated_path_at(&path, generation))
+                .unwrap()
+                .set_len(10 * 1024 * 1024)
+                .unwrap();
+        }
+        enforce_ledger_total_bytes(&path, DEFAULT_MAX_LEDGER_BYTES).unwrap();
+        let total = std::iter::once(path.clone())
+            .chain((1..=DEFAULT_MAX_LEDGER_GENERATIONS).map(|generation| rotated_path_at(&path, generation)))
+            .filter_map(|candidate| fs::metadata(candidate).ok())
+            .map(|metadata| metadata.len())
+            .sum::<u64>();
+        assert!(total <= DEFAULT_MAX_LEDGER_TOTAL_BYTES);
     }
 }

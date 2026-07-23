@@ -80,3 +80,7 @@ The repository keeps the cqr.2 ZeroRef vectors as `tests/zeroref-v1-golden-vecto
 ## Shared-store hygiene
 
 Collectors scan published reachability snapshots for all three engine namespaces: tokenzero, fszero, and graphzero. A blob is collectible only when no engine root, pin, or lease within grace references it. Uncertain metadata retains the blob. Completed gc/reports JSON files form a configurable bounded ring; TokenZero defaults to 32 and excludes progress files.
+
+### Ledger bounds
+
+TokenZero ledger.jsonl rotation defaults to four archived generations and 32 MiB aggregate bytes. TOKENZERO_LEDGER_MAX_GENERATIONS and TOKENZERO_LEDGER_MAX_TOTAL_BYTES configure those caps. Rotation deletes the oldest generation first; aggregate enforcement removes oldest archives and never removes the active ledger.
