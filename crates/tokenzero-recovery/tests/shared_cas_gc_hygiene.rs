@@ -11,13 +11,23 @@ fn scans_references_from_all_engine_namespaces() {
     let mut hashes = Vec::new();
     for engine in ["tokenzero", "fszero", "graphzero"] {
         let hash = cas.publish(engine.as_bytes()).unwrap();
-        publish_reachability_snapshot(store.path(), engine, &project, 1, std::slice::from_ref(&hash))
-            .unwrap();
+        publish_reachability_snapshot(
+            store.path(),
+            engine,
+            &project,
+            1,
+            std::slice::from_ref(&hash),
+        )
+        .unwrap();
         hashes.push(hash);
     }
     let report = run_gc(store.path(), &GcConfig::default()).unwrap();
     for hash in hashes {
-        let object = report.objects.iter().find(|object| object.blob_hash == hash).unwrap();
+        let object = report
+            .objects
+            .iter()
+            .find(|object| object.blob_hash == hash)
+            .unwrap();
         assert_eq!(object.verdict, GcVerdict::Retain);
     }
 }
@@ -49,5 +59,10 @@ fn completed_gc_reports_are_a_fixed_ring() {
         ..GcConfig::default()
     };
     run_gc(store.path(), &config).unwrap();
-    assert!(store.path().join("gc/reports/current-report.json").is_file());
+    assert!(
+        store
+            .path()
+            .join("gc/reports/current-report.json")
+            .is_file()
+    );
 }

@@ -504,10 +504,14 @@ fn rotated_path_at(path: &Path, generation: usize) -> PathBuf {
 
 fn ledger_rotation_limits(max_bytes: u64) -> (usize, u64) {
     let generations = std::env::var("TOKENZERO_LEDGER_MAX_GENERATIONS")
-        .ok().and_then(|value| value.parse().ok()).filter(|value| *value > 0)
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .filter(|value| *value > 0)
         .unwrap_or(DEFAULT_MAX_LEDGER_GENERATIONS);
     let total_bytes = std::env::var("TOKENZERO_LEDGER_MAX_TOTAL_BYTES")
-        .ok().and_then(|value| value.parse().ok()).filter(|value| *value >= max_bytes)
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .filter(|value| *value >= max_bytes)
         .unwrap_or(DEFAULT_MAX_LEDGER_TOTAL_BYTES.max(max_bytes));
     (generations, total_bytes)
 }
@@ -519,23 +523,39 @@ fn rotate_ledger(path: &Path, max_bytes: u64) -> io::Result<()> {
         let source = rotated_path_at(path, generation);
         let destination = rotated_path_at(path, generation + 1);
         if let Err(error) = fs::rename(source, destination)
-            && error.kind() != io::ErrorKind::NotFound { return Err(error); }
+            && error.kind() != io::ErrorKind::NotFound
+        {
+            return Err(error);
+        }
     }
     if let Err(error) = fs::rename(path, rotated_path(path))
-        && error.kind() != io::ErrorKind::NotFound { return Err(error); }
+        && error.kind() != io::ErrorKind::NotFound
+    {
+        return Err(error);
+    }
     Ok(())
 }
 
 fn enforce_ledger_total_bytes(path: &Path, max_bytes: u64) -> io::Result<()> {
     let (generations, total_limit) = ledger_rotation_limits(max_bytes);
-    let mut total = fs::metadata(path).map(|metadata| metadata.len()).unwrap_or(0);
+    let mut total = fs::metadata(path)
+        .map(|metadata| metadata.len())
+        .unwrap_or(0);
     for generation in 1..=generations {
-        total = total.saturating_add(fs::metadata(rotated_path_at(path, generation)).map(|metadata| metadata.len()).unwrap_or(0));
+        total = total.saturating_add(
+            fs::metadata(rotated_path_at(path, generation))
+                .map(|metadata| metadata.len())
+                .unwrap_or(0),
+        );
     }
     for generation in (1..=generations).rev() {
-        if total <= total_limit { break; }
+        if total <= total_limit {
+            break;
+        }
         let candidate = rotated_path_at(path, generation);
-        let bytes = fs::metadata(&candidate).map(|metadata| metadata.len()).unwrap_or(0);
+        let bytes = fs::metadata(&candidate)
+            .map(|metadata| metadata.len())
+            .unwrap_or(0);
         match fs::remove_file(candidate) {
             Ok(()) => total = total.saturating_sub(bytes),
             Err(error) if error.kind() == io::ErrorKind::NotFound => {}
@@ -558,7 +578,9 @@ fn append_record(path: &Path, record: &LedgerRecord, max_bytes: u64) -> io::Resu
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
-    let observed_len = fs::metadata(path).map(|metadata| metadata.len()).unwrap_or(0);
+    let observed_len = fs::metadata(path)
+        .map(|metadata| metadata.len())
+        .unwrap_or(0);
     if observed_len > 0 && observed_len.saturating_add(line_bytes) > max_bytes {
         let lock_path = PathBuf::from(format!("{}.rotation.lock", path.display()));
         let rotation_lock = OpenOptions::new()
@@ -568,7 +590,9 @@ fn append_record(path: &Path, record: &LedgerRecord, max_bytes: u64) -> io::Resu
             .write(true)
             .open(lock_path)?;
         FileExt::lock(&rotation_lock)?;
-        let locked_len = fs::metadata(path).map(|metadata| metadata.len()).unwrap_or(0);
+        let locked_len = fs::metadata(path)
+            .map(|metadata| metadata.len())
+            .unwrap_or(0);
         if locked_len == observed_len
             && locked_len > 0
             && locked_len.saturating_add(line_bytes) > max_bytes
@@ -786,7 +810,9 @@ mod ledger_tests {
 
     #[test]
     fn tz_evict_amortized_charge_round_trips_through_ledger() {
-        let charge = test_record().eviction_amortization.expect("eviction charge");
+        let charge = test_record()
+            .eviction_amortization
+            .expect("eviction charge");
         assert_eq!(charge["amortized_tokens_per_access"], 20.0);
         assert_eq!(charge["thrash_worst_case_tokens"], 120);
         assert_eq!(charge["alarm"], false);
@@ -994,7 +1020,10 @@ mod ledger_tests {
         }
         enforce_ledger_total_bytes(&path, DEFAULT_MAX_LEDGER_BYTES).unwrap();
         let total = std::iter::once(path.clone())
-            .chain((1..=DEFAULT_MAX_LEDGER_GENERATIONS).map(|generation| rotated_path_at(&path, generation)))
+            .chain(
+                (1..=DEFAULT_MAX_LEDGER_GENERATIONS)
+                    .map(|generation| rotated_path_at(&path, generation)),
+            )
             .filter_map(|candidate| fs::metadata(candidate).ok())
             .map(|metadata| metadata.len())
             .sum::<u64>();

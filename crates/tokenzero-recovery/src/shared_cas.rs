@@ -619,9 +619,7 @@ pub(crate) fn content_sha256_hex(bytes: &[u8]) -> String {
 }
 
 fn is_valid_hash(s: &str) -> bool {
-    s.len() == 64
-        && s.bytes()
-            .all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+    s.len() == 64 && s.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
 }
 
 fn is_valid_pin_id(s: &str) -> bool {
@@ -1107,15 +1105,24 @@ fn prune_gc_reports(store_root: &Path, keep: usize, current: &Path) -> Result<()
     for entry in fs::read_dir(&reports_dir)? {
         let entry = entry?;
         let path = entry.path();
-        let name = path.file_name().and_then(|name| name.to_str()).unwrap_or_default();
-        if entry.file_type()?.is_file() && name.ends_with(".json") && !name.ends_with(".progress.json") {
+        let name = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or_default();
+        if entry.file_type()?.is_file()
+            && name.ends_with(".json")
+            && !name.ends_with(".progress.json")
+        {
             let modified = entry.metadata()?.modified().unwrap_or(UNIX_EPOCH);
             reports.push((modified, name.to_owned(), path));
         }
     }
     reports.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
     while reports.len() > keep {
-        let index = reports.iter().position(|(_, _, path)| path != current).unwrap_or(0);
+        let index = reports
+            .iter()
+            .position(|(_, _, path)| path != current)
+            .unwrap_or(0);
         let (_, _, path) = reports.remove(index);
         fs::remove_file(path)?;
     }
