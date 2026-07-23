@@ -1101,6 +1101,7 @@ impl Drop for GcCoordLock {
 }
 
 fn prune_gc_reports(store_root: &Path, keep: usize, current: &Path) -> Result<(), GcError> {
+    let keep = keep.max(1);
     let reports_dir = store_root.join("gc").join("reports");
     let mut reports = Vec::new();
     for entry in fs::read_dir(&reports_dir)? {
