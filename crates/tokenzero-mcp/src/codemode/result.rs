@@ -69,10 +69,12 @@ impl std::ops::Deref for CodeModeError {
 pub struct CodeModeTelemetry {
     #[serde(skip)]
     pub operations: usize,
-    #[serde(skip)]
+    #[serde(default)]
     pub visible_tokens: usize,
-    #[serde(skip)]
+    #[serde(default)]
     pub raw_tokens: usize,
+    #[serde(default)]
+    pub measurement_coverage_pct: u8,
     /// Measured plan-input tokens billed at the CodeMode boundary.
     #[serde(default)]
     pub billed_input_tokens: usize,
@@ -217,6 +219,7 @@ fn telemetry(ops: usize, visible: usize, raw: usize, refs: usize, ok: bool) -> C
         operations: ops,
         visible_tokens: visible,
         raw_tokens: raw,
+        measurement_coverage_pct: 100,
         billed_input_tokens: 0,
         cached_input_tokens: 0,
         billed_output_tokens: 0,
@@ -269,7 +272,11 @@ impl CodeModeResult {
                 render_ack(AckClass::Success, false).into()
             } else {
                 let error = error.as_ref().expect("error result");
-                render_ack(AckClass::from_error_kind(&error.kind, error.retryable), false).into()
+                render_ack(
+                    AckClass::from_error_kind(&error.kind, error.retryable),
+                    false,
+                )
+                .into()
             },
             detail_ref: None,
             execution_id: None,

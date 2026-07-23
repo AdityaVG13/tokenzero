@@ -509,3 +509,5 @@ depend on a source checkout, `target/release`, or `PATH`. Unix-like hosts use
 `cmd.exe /C`.
 
 See [`docs/install.md`](install.md) for rollback and global scope.
+
+CodeMode telemetry serializes observed `raw_tokens`, `visible_tokens`, `bytes_materialized`, and `measurement_coverage_pct`; zero-operation job/status calls report measured zero savings instead of a synthetic baseline.
