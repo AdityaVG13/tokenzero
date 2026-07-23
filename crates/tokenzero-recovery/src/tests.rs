@@ -2745,6 +2745,7 @@ fn recovery_blob_prune_prefers_never_expanded_blobs() {
         let expanded = store.store_payload(&expanded_text, ContentType::Unknown, None, None, None).unwrap();
         let cold = store.store_payload(&cold_text, ContentType::Unknown, None, None, None).unwrap();
         assert!(store.expand(&expanded.blob_ref, None, None, None, None, None).found);
+        store.persist_pending().unwrap();
         let report = prune_recovery_blobs(&cache, 75_000, Duration::from_secs(86_400), false).unwrap();
         assert_eq!(report.removed_files, 1);
         assert!(report.freed_bytes >= 70_000);
@@ -2761,9 +2762,13 @@ fn recovery_blob_age_cap_and_status_support_both_store_roots() {
         let cache = dir.path().join(relative);
         let index = dir.path().join("ref-index");
         with_ref_index_env(&index, false, || {
-            let text = format!("aged:{}", "z".repeat(70_000));
-            RecoveryStore::new(Some(cache.clone()))
-                .store_payload(&text, ContentType::Unknown, None, None, None).unwrap();
+            let sidecars = blob_sidecar_dir(&cache);
+            fs::create_dir_all(&sidecars).unwrap();
+            write_aged_file(
+                &sidecars.join(format!("{}.txt", "a".repeat(64))),
+                70_000,
+                Duration::from_secs(1),
+            );
             let report = prune_recovery_blobs(&cache, u64::MAX, Duration::ZERO, false).unwrap();
             assert_eq!(report.expired_files, 1);
             assert!(report.freed_bytes >= 70_000);
