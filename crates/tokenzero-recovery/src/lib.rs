@@ -525,6 +525,14 @@ pub struct ExpansionResult {
     pub tokens: usize,
     pub found: bool,
     pub reason: String,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub clamped: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub returned_start_line: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub returned_end_line: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub line_count: Option<usize>,
 }
 
 impl ExpansionResult {
@@ -537,6 +545,10 @@ impl ExpansionResult {
             tokens,
             found: true,
             reason: "ok".to_string(),
+            clamped: false,
+            returned_start_line: None,
+            returned_end_line: None,
+            line_count: None,
         }
     }
 
@@ -548,6 +560,10 @@ impl ExpansionResult {
             tokens: 0,
             found: false,
             reason: reason.into(),
+            clamped: false,
+            returned_start_line: None,
+            returned_end_line: None,
+            line_count: None,
         }
     }
 }
@@ -1526,6 +1542,14 @@ impl RecoveryStore {
         if parsed.kind == "file" && self.file_ref_is_stale(parsed.bare) {
             return miss!("stale-ref");
         }
+        let line_window = if matches!(fragment_spec, Some(Ok(FragmentSpec::Byte { .. }))) {
+            None
+        } else {
+            match clamp_line_window(&content, selected_start, &mut selected_end) {
+                Ok(window) => window,
+                Err(reason) => return miss!(reason),
+            }
+        };
         match expand_selected_content(
             content,
             &fragment_spec,
@@ -1535,7 +1559,16 @@ impl RecoveryStore {
             anchor_kind,
             symbol,
         ) {
-            Ok(selected) => self.expand_ok(requested_ref, selector_owned, &ref_id, selected),
+            Ok(selected) => {
+                let mut result = self.expand_ok(requested_ref, selector_owned, &ref_id, selected);
+                if let Some((clamped, start, end, line_count)) = line_window {
+                    result.clamped = clamped;
+                    result.returned_start_line = Some(start);
+                    result.returned_end_line = Some(end);
+                    result.line_count = Some(line_count);
+                }
+                result
+            }
             Err(reason) => miss!(reason),
         }
     }
@@ -2458,15 +2491,6 @@ fn expand_selected_content(
         }
         return Ok(String::from_utf8_lossy(&bytes[*start..*end]).into_owned());
     }
-    if let Some(start) = selected_start {
-        let end = selected_end.unwrap_or(start);
-        let line_count = content_line_count(&content);
-        if line_range_out_of_bounds(start, end, line_count) {
-            return Err(format!(
-                "window-out-of-range; start={start} end={end} lines={line_count}"
-            ));
-        }
-    }
     Ok(select_content(
         content,
         selector,
@@ -2475,6 +2499,31 @@ fn expand_selected_content(
         anchor_kind,
         symbol,
     ))
+}
+
+fn clamp_line_window(
+    content: &str,
+    selected_start: Option<usize>,
+    selected_end: &mut Option<usize>,
+) -> Result<Option<(bool, usize, usize, usize)>, String> {
+    let Some(start) = selected_start else {
+        return Ok(None);
+    };
+    let requested_end = selected_end.unwrap_or(start);
+    let line_count = content_line_count(content);
+    if start == 0 || start > requested_end || start > line_count {
+        return Err(format!(
+            "window-out-of-range; start={start} end={requested_end} line_count={line_count}"
+        ));
+    }
+    let returned_end = requested_end.min(line_count);
+    *selected_end = Some(returned_end);
+    Ok(Some((
+        returned_end != requested_end,
+        start,
+        returned_end,
+        line_count,
+    )))
 }
 
 fn ref_index_enabled() -> bool {

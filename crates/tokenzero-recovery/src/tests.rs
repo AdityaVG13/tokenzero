@@ -2086,7 +2086,7 @@ fn l_fragment_reversed_returns_error() {
 }
 
 #[test]
-fn l_fragment_oob_returns_error() {
+fn expand_line_window_fragment_overlong_clamps() {
     let (mut store, _cache, _dir) = temp_store();
     let payload = "a\nb\nc\n";
     let stored = store
@@ -2094,12 +2094,12 @@ fn l_fragment_oob_returns_error() {
         .unwrap();
     let l_ref = format!("{}#L1-L100", stored.blob_ref);
     let expanded = store.expand(&l_ref, Some("raw"), None, None, None, None);
-    assert!(!expanded.found, "#L oob must not succeed");
-    assert!(
-        expanded.reason.starts_with("window-out-of-range"),
-        "got: {}",
-        expanded.reason
-    );
+    assert!(expanded.found, "{}", expanded.reason);
+    assert_eq!(expanded.content, payload);
+    assert!(expanded.clamped);
+    assert_eq!(expanded.returned_start_line, Some(1));
+    assert_eq!(expanded.returned_end_line, Some(3));
+    assert_eq!(expanded.line_count, Some(3));
 }
 
 #[test]
@@ -2283,7 +2283,7 @@ fn windowed_expand_middle_edges_and_full() {
 }
 
 #[test]
-fn windowed_expand_oob_is_structured_not_ref_not_found() {
+fn expand_line_window_start_beyond_eof_reports_line_count() {
     let (mut store, _cache, _dir) = temp_store();
     let payload = multi_line_fixture(50);
     let stored = store
@@ -2298,23 +2298,16 @@ fn windowed_expand_oob_is_structured_not_ref_not_found() {
         None,
     );
     assert!(!oob.found);
-    assert!(
-        oob.reason.starts_with("window-out-of-range"),
-        "got {}",
-        oob.reason
-    );
-    assert!(
-        !oob.reason.contains("ref-not-found"),
-        "OOB must not look like missing ref: {}",
-        oob.reason
-    );
+    assert!(oob.reason.starts_with("window-out-of-range"));
+    assert!(oob.reason.contains("line_count=50"), "got {}", oob.reason);
+    assert!(!oob.reason.contains("ref-not-found"));
     assert_eq!(oob.ref_id, stored.blob_ref);
 
     let inverted = store.expand(&stored.blob_ref, Some("raw"), Some(10), Some(5), None, None);
     assert!(!inverted.found);
     assert!(inverted.reason.starts_with("window-out-of-range"));
 
-    let end_past_last_line = store.expand(
+    let clamped = store.expand(
         &stored.blob_ref,
         Some("raw"),
         Some(40),
@@ -2322,12 +2315,32 @@ fn windowed_expand_oob_is_structured_not_ref_not_found() {
         None,
         None,
     );
-    assert!(!end_past_last_line.found);
-    assert!(
-        end_past_last_line.reason.starts_with("window-out-of-range"),
-        "got {}",
-        end_past_last_line.reason
+    assert!(clamped.found, "{}", clamped.reason);
+    assert!(clamped.clamped);
+    assert_eq!(clamped.returned_start_line, Some(40));
+    assert_eq!(clamped.returned_end_line, Some(50));
+}
+
+#[test]
+fn expand_line_window_exact_fit_reports_unclamped_range() {
+    let (mut store, _cache, _dir) = temp_store();
+    let payload = multi_line_fixture(50);
+    let stored = store
+        .store_payload(&payload, ContentType::Unknown, None, None, None)
+        .unwrap();
+    let expanded = store.expand(
+        &stored.blob_ref,
+        Some("raw"),
+        Some(40),
+        Some(50),
+        None,
+        None,
     );
+    assert!(expanded.found, "{}", expanded.reason);
+    assert!(!expanded.clamped);
+    assert_eq!(expanded.returned_start_line, Some(40));
+    assert_eq!(expanded.returned_end_line, Some(50));
+    assert_eq!(expanded.line_count, Some(50));
 }
 
 #[test]
@@ -2371,12 +2384,9 @@ fn selector_lines_oob_is_structured_not_empty_success() {
         None,
         None,
     );
-    assert!(!end_past_last_line.found);
-    assert!(
-        end_past_last_line.reason.starts_with("window-out-of-range"),
-        "got {}",
-        end_past_last_line.reason
-    );
+    assert!(end_past_last_line.found, "{}", end_past_last_line.reason);
+    assert!(end_past_last_line.clamped);
+    assert_eq!(end_past_last_line.returned_end_line, Some(50));
 }
 
 #[test]

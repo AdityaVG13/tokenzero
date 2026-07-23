@@ -298,7 +298,7 @@ pub fn path_not_allowed(tool: &str, path: &Path) -> ToolResponse {
 
 pub fn expansion_response(result: ExpansionResult, recovery_tokens: usize) -> ToolResponse {
     if result.found {
-        return success_response(
+        let mut response = success_response(
             "expand",
             Mode::Exact,
             result.content,
@@ -310,6 +310,21 @@ pub fn expansion_response(result: ExpansionResult, recovery_tokens: usize) -> To
                 Some(count_tokens(&result.ref_id)),
             ),
         );
+        if let (Some(start_line), Some(end_line), Some(line_count)) = (
+            result.returned_start_line,
+            result.returned_end_line,
+            result.line_count,
+        ) {
+            response.telemetry = Some(serde_json::json!({
+                "window": {
+                    "clamped": result.clamped,
+                    "start_line": start_line,
+                    "end_line": end_line,
+                    "line_count": line_count,
+                }
+            }));
+        }
+        return response;
     }
     let full_ref = &result.ref_id;
     let reason = result.reason.as_str();
@@ -814,7 +829,32 @@ pub fn preview(text: &str) -> String {
 
 #[cfg(test)]
 mod preview_tests {
-    use super::preview;
+    use tokenzero_recovery::ExpansionResult;
+
+    use super::{expansion_response, preview};
+
+    #[test]
+    fn expansion_response_reports_clamped_window_metadata() {
+        let mut result = ExpansionResult::ok(
+            "tz://blob/test#L1-L200".to_string(),
+            Some("raw".to_string()),
+            "a
+b
+"
+            .to_string(),
+        );
+        result.clamped = true;
+        result.returned_start_line = Some(1);
+        result.returned_end_line = Some(2);
+        result.line_count = Some(2);
+
+        let response = expansion_response(result, 0);
+        let window = &response.telemetry.as_ref().unwrap()["window"];
+        assert_eq!(window["clamped"], true);
+        assert_eq!(window["start_line"], 1);
+        assert_eq!(window["end_line"], 2);
+        assert_eq!(window["line_count"], 2);
+    }
 
     #[test]
     fn multiline_preview_is_bounded_and_reports_omitted_lines() {
