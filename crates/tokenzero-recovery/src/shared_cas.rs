@@ -302,6 +302,7 @@ const GC_RECORD_TYPE_LEASE: &str = "lease";
 const GC_RECORD_TYPE_DRY_RUN: &str = "dry-run-report";
 const GC_RECORD_TYPE_SWEEP_PROGRESS: &str = "sweep-progress";
 pub const GC_MIN_GRACE_SECONDS: u64 = 60;
+pub const DEFAULT_GC_REPORT_LIMIT: usize = 32;
 
 fn require_gc_engine(engine: &str) -> Result<(), GcError> {
     if GC_ENGINES.contains(&engine) {
@@ -422,6 +423,8 @@ pub struct GcConfig {
     pub apply: bool,
     pub now: SystemTime,
     pub fault_after_deletes: Option<usize>,
+    /// Maximum completed JSON reports retained in `gc/reports`.
+    pub report_limit: usize,
 }
 
 impl Default for GcConfig {
@@ -433,6 +436,7 @@ impl Default for GcConfig {
             apply: false,
             now: SystemTime::now(),
             fault_after_deletes: None,
+            report_limit: DEFAULT_GC_REPORT_LIMIT,
         }
     }
 }
@@ -1096,6 +1100,27 @@ impl Drop for GcCoordLock {
     }
 }
 
+fn prune_gc_reports(store_root: &Path, keep: usize, current: &Path) -> Result<(), GcError> {
+    let reports_dir = store_root.join("gc").join("reports");
+    let mut reports = Vec::new();
+    for entry in fs::read_dir(&reports_dir)? {
+        let entry = entry?;
+        let path = entry.path();
+        let name = path.file_name().and_then(|name| name.to_str()).unwrap_or_default();
+        if entry.file_type()?.is_file() && name.ends_with(".json") && !name.ends_with(".progress.json") {
+            let modified = entry.metadata()?.modified().unwrap_or(UNIX_EPOCH);
+            reports.push((modified, name.to_owned(), path));
+        }
+    }
+    reports.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
+    while reports.len() > keep {
+        let index = reports.iter().position(|(_, _, path)| path != current).unwrap_or(0);
+        let (_, _, path) = reports.remove(index);
+        fs::remove_file(path)?;
+    }
+    Ok(())
+}
+
 pub fn run_gc(store_root: &Path, config: &GcConfig) -> Result<DryRunReport, GcError> {
     validate_run_id(&config.run_id)?;
     let _coord = GcCoordLock::acquire(store_root)?;
@@ -1135,6 +1160,7 @@ pub fn run_gc(store_root: &Path, config: &GcConfig) -> Result<DryRunReport, GcEr
     )?;
     let report_path = gc_join(store_root, &["reports", &format!("{}.json", config.run_id)]);
     write_gc_json(&report_path, &report)?;
+    prune_gc_reports(store_root, config.report_limit, &report_path)?;
     if !config.apply {
         return Ok(report);
     }
@@ -1203,6 +1229,7 @@ pub fn run_gc(store_root: &Path, config: &GcConfig) -> Result<DryRunReport, GcEr
         obj.evidence = vec!["re-check before delete showed a live reference or uncertainty".into()];
     }
     write_gc_json(&report_path, &final_report)?;
+    prune_gc_reports(store_root, config.report_limit, &report_path)?;
     let _ = fs::remove_file(&progress_path);
     Ok(final_report)
 }

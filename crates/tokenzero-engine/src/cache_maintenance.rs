@@ -181,6 +181,7 @@ fn gc_maintenance(cache_path: &Path, dry_run: bool) -> Value {
             apply: true,
             now,
             fault_after_deletes: None,
+                report_limit: tokenzero_recovery::shared_cas::DEFAULT_GC_REPORT_LIMIT,
         };
         match tokenzero_recovery::shared_cas::run_gc(&root, &config) {
             Ok(report) => json!({"evaluated": report.objects.len()}),

@@ -76,3 +76,7 @@ A conforming collector MUST validate the namespace/path equality, exact version,
 ## 10. Fixture organization
 
 The repository keeps the cqr.2 ZeroRef vectors as `tests/zeroref-v1-golden-vectors.json` and existing normative contracts under `docs/`, but `.gitignore` freezes `/docs/*` against new untracked documents. Therefore this new multi-document normative contract is a self-contained, versioned bundle at `schemas/shared-cas-gc/v1/`: this `SPEC.md`, the JSON Schemas, and fixtures are colocated so sibling engines can vendor or execute the directory unchanged without changing an existing index or ignore rule. Version naming follows the existing dotted `tokenzero.migration.v2` style while using the engine-neutral `zerostack` namespace.
+
+## Shared-store hygiene
+
+Collectors scan published reachability snapshots for all three engine namespaces: tokenzero, fszero, and graphzero. A blob is collectible only when no engine root, pin, or lease within grace references it. Uncertain metadata retains the blob. Completed gc/reports JSON files form a configurable bounded ring; TokenZero defaults to 32 and excludes progress files.
