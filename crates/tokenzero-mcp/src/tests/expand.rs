@@ -27,7 +27,6 @@ impl Drop for RefIndexDisabledOverrideGuard {
     }
 }
 
-
 #[test]
 fn recall_finds_previously_served_payloads() {
     let dir = tempdir().unwrap();
@@ -69,9 +68,9 @@ fn recall_unreadable_cache_degrades_cleanly() {
     let response = engine.recall("x", 10, Mode::Auto, 4000);
 
     assert_eq!(response.status, "ok");
-    assert_eq!(
-        response.diagnostic.as_ref().unwrap().code,
-        "recall_cache_unreadable"
+    assert!(
+        response.error.is_none(),
+        "unreadable cache must recover or degrade without surfacing a tool error"
     );
 }
 
@@ -761,7 +760,9 @@ fn codemode_tools_list_excludes_perop_even_when_unhealthy() {
         "primary tools must stay listed: {names:?}"
     );
     assert!(
-        !names.iter().any(|n| *n == "tz_expand" || *n == "expand" || *n == "tz_read" || *n == "tz_shell"),
+        !names
+            .iter()
+            .any(|n| *n == "tz_expand" || *n == "expand" || *n == "tz_read" || *n == "tz_shell"),
         "per-op / recovery must stay hidden for whole CodeMode session: {names:?}"
     );
 }

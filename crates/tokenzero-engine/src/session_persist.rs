@@ -9,6 +9,7 @@ use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
+use tokenzero_core::sha256_hex;
 
 pub const SESSION_SCOPE_ENV: &str = "TOKENZERO_SESSION_SCOPE";
 const REF_INDEX_PATH_ENV: &str = "TOKENZERO_REF_INDEX_PATH";
@@ -167,29 +168,12 @@ pub fn session_memory_path(cache_path: &Path) -> PathBuf {
 }
 
 fn user_memory_root(cache_path: &Path) -> PathBuf {
-    // Integration tests pin a temp root via with_session_root.
     if let Some(path) = SESSION_ROOT_TEST_OVERRIDE.with(|slot| slot.borrow().clone()) {
         return path;
     }
-    user_memory_root_from(
-        cache_path,
-        std::env::var_os(REF_INDEX_PATH_ENV),
-        std::env::var_os("HOME"),
-    )
-}
-
-fn user_memory_root_from(
-    cache_path: &Path,
-    ref_index_path: Option<std::ffi::OsString>,
-    home: Option<std::ffi::OsString>,
-) -> PathBuf {
-    ref_index_path
+    std::env::var_os(REF_INDEX_PATH_ENV)
         .filter(|value| !value.is_empty())
         .map(PathBuf::from)
-        .or_else(|| {
-            home.filter(|value| !value.is_empty())
-                .map(|home| PathBuf::from(home).join(".tokenzero/ref-index"))
-        })
         .unwrap_or_else(|| {
             cache_path
                 .parent()
@@ -198,12 +182,15 @@ fn user_memory_root_from(
         })
 }
 
-pub fn session_scope_id(_cache_path: &Path) -> String {
+pub fn session_scope_id(cache_path: &Path) -> String {
     std::env::var(SESSION_SCOPE_ENV)
         .ok()
         .map(|value| value.trim().to_owned())
         .filter(|value| !value.is_empty())
-        .unwrap_or_else(|| "__user_global__".to_owned())
+        .unwrap_or_else(|| {
+            let digest = sha256_hex(&cache_path.to_string_lossy());
+            format!("workspace:{}", &digest[..16])
+        })
 }
 
 thread_local! {

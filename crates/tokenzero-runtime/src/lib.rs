@@ -186,7 +186,13 @@ pub fn plan_command_for_platform(
             &["powershell", "-NoProfile", "-Command"],
         ),
         (true, false) => ("cmd", "/C", "cmd", &["cmd", "/C"]),
-        (false, _) => ("/bin/sh", "-c", "posix", &["/bin/sh", "-c"]),
+        // Pipefail prevents a successful final stage from masking an earlier failure.
+        (false, _) => (
+            "/bin/bash",
+            "-c",
+            "posix",
+            &["/bin/bash", "-o", "pipefail", "-c"],
+        ),
     };
     let mut shell_argv = prefix.iter().map(|s| (*s).into()).collect::<Vec<_>>();
     shell_argv.push(shell_command_string_from_argv(argv, syntax));
@@ -1192,15 +1198,8 @@ mod inherited_pipe_join_tests {
             "sleep 60 >/dev/null 2>&1 & exit 0".to_string(),
         ];
         let started = Instant::now();
-        let result = run_command(
-            &argv,
-            None,
-            None,
-            None,
-            Duration::from_secs(2),
-            false,
-        )
-        .expect("run_command should return");
+        let result = run_command(&argv, None, None, None, Duration::from_secs(2), false)
+            .expect("run_command should return");
         assert!(
             started.elapsed() < Duration::from_secs(5),
             "cleanup+join must finish well under the descendant sleep, took {:?}",
@@ -1220,19 +1219,10 @@ mod spill_prune_bounds_tests {
     fn prune_spill_dir_respects_scan_budget_before_sort() {
         let dir = tempdir().unwrap();
         for i in 0..64 {
-            let path = dir
-                .path()
-                .join(format!("tokenzero-{i}-stdout.log"));
+            let path = dir.path().join(format!("tokenzero-{i}-stdout.log"));
             fs::write(&path, vec![b'x'; (i % 8) + 1]).unwrap();
         }
-        let report = prune_spill_dir_bounded(
-            dir.path(),
-            DEFAULT_SPILL_TTL,
-            0,
-            true,
-            16,
-            None,
-        );
+        let report = prune_spill_dir_bounded(dir.path(), DEFAULT_SPILL_TTL, 0, true, 16, None);
         assert_eq!(report.scan_budget, 16);
         assert!(report.scan_truncated);
         assert!(!report.deadline_elapsed);

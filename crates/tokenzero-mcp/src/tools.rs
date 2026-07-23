@@ -997,7 +997,14 @@ fn refs_footer(response: &ToolResponse, text: &str) -> Option<String> {
         .into_iter()
         .find_map(|kind| response.refs.iter().find(|record| record.kind == kind))
         .or_else(|| response.refs.first())?;
-    Some(format!("refs: {}", primary.ref_id))
+    let undo = response
+        .refs
+        .iter()
+        .find(|record| record.kind == "undo" && record.ref_id != primary.ref_id);
+    Some(match undo {
+        Some(undo) => format!("refs: {} undo:{}", primary.ref_id, undo.ref_id),
+        None => format!("refs: {}", primary.ref_id),
+    })
 }
 
 enum EnvelopeMode {

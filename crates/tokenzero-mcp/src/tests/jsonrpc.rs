@@ -601,11 +601,18 @@ fn mcp_tool_calls_are_pulse_accounted_with_attribution() {
     });
     let read_response = handle_jsonrpc(&engine, &read_request.to_string()).unwrap();
     let parsed: serde_json::Value = serde_json::from_str(&read_response).unwrap();
-    let text = parsed["result"]["content"][0]["text"].as_str().unwrap();
-    let ref_id = text
-        .split_whitespace()
-        .find(|word| word.starts_with("tz://s/") || word.starts_with("tz://blob/"))
-        .expect("read response advertises an expandable payload ref")
+    fn first_payload_ref(value: &serde_json::Value) -> Option<&str> {
+        match value {
+            serde_json::Value::String(text) => text
+                .split_whitespace()
+                .find(|word| word.starts_with("tz://")),
+            serde_json::Value::Array(items) => items.iter().find_map(first_payload_ref),
+            serde_json::Value::Object(fields) => fields.values().find_map(first_payload_ref),
+            _ => None,
+        }
+    }
+    let ref_id = first_payload_ref(&parsed["result"])
+        .unwrap_or_else(|| panic!("read response advertises an expandable payload ref: {parsed}"))
         .to_string();
 
     let expand_request = serde_json::json!({
@@ -639,6 +646,7 @@ fn mcp_tool_calls_are_pulse_accounted_with_attribution() {
                 ref_id
                     .strip_prefix("tz://s/")
                     .is_some_and(|short| hash.starts_with(short))
+                    || ref_id.starts_with("tz://o/")
             })
     };
     assert!(

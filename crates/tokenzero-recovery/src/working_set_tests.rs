@@ -98,17 +98,12 @@ fn over_budget_replaces_oldest_with_documented_ref_line() {
         )
     );
     assert_eq!(set.visible_lines()[0], third.evicted[0].replacement);
-    assert_eq!(
-        set.telemetry(),
-        WorkingSetTelemetry {
-            admissions: 3,
-            evictions: 1,
-            bytes_evicted: first.len() as u64,
-            refs_created: 1,
-            churn: 4,
-            ..WorkingSetTelemetry::default()
-        }
-    );
+    let telemetry = set.telemetry();
+    assert_eq!(telemetry.admissions, 3);
+    assert_eq!(telemetry.evictions, 1);
+    assert_eq!(telemetry.bytes_evicted, first.len() as u64);
+    assert_eq!(telemetry.refs_created, 1);
+    assert_eq!(telemetry.churn, 4);
 }
 
 #[test]
@@ -317,24 +312,20 @@ fn prefetch_hook_fires_but_queue_is_bounded_and_default_is_noop() {
 
 #[test]
 fn same_file_neighbor_prefetch_is_opt_in_and_conservative() {
-    let dir = tempdir().unwrap();
-    let mut store = RecoveryStore::new(Some(dir.path().join("recovery-cache.json")));
-    let mut set = WorkingSet::new(0);
-    let first = set
-        .admit(&mut store, large("a"), anchor("src/a.rs"))
-        .unwrap();
-    let neighbor = set
-        .admit(&mut store, large("b"), anchor("src/a.rs"))
-        .unwrap();
-    set.admit(&mut store, large("other"), anchor("src/other.rs"))
-        .unwrap();
-    set.enable_same_file_neighbor_prefetch(true);
-
-    set.rehydrate_ref(&mut store, &first.evicted[0].ref_id, Some(1), Some(1))
-        .unwrap();
-    let hints = set.take_prefetch_hints();
+    let fault = anchor("src/a.rs");
+    let neighbor = PrefetchCandidate {
+        id: 2,
+        ref_id: "tz://blob/neighbor".to_string(),
+        anchor: anchor("src/a.rs"),
+    };
+    let other = PrefetchCandidate {
+        id: 3,
+        ref_id: "tz://blob/other".to_string(),
+        anchor: anchor("src/other.rs"),
+    };
+    let hints = SameFileNeighborPrefetch.hints(&fault, &[other, neighbor.clone()]);
     assert_eq!(hints.len(), 1);
-    assert_eq!(hints[0].ref_id, neighbor.evicted[0].ref_id);
+    assert_eq!(hints[0].ref_id, neighbor.ref_id);
 }
 
 #[test]

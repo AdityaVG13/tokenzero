@@ -1,11 +1,15 @@
 {
   "accounting": {
+    "billed_tokens": 2,
+    "cached_tokens": 0,
     "exact_ref_tokens": 14,
     "raw_tokens": 2,
     "recovery_tokens": 0,
     "visible_tokens": 2
   },
+  "ack": "0",
   "content_type": "unknown",
+  "detail_ref": "tz://blob/[BLOB_REF_1]",
   "mode": "auto",
   "refs": [
     {
