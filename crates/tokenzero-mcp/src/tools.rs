@@ -2,10 +2,9 @@ use serde_json::{Value, json};
 use std::path::Path;
 use tokenzero_core::{Accounting, MCP_SCHEMA_VERSION, Mode, ToolResponse, count_tokens};
 
+use crate::TokenZeroEngine;
 use crate::catalog::ToolKind;
 use crate::jsonrpc::JsonRpcErrorData;
-use crate::TokenZeroEngine;
-
 
 macro_rules! gated_tool_entry {
     ($name:ident, $gate:ident) => {
@@ -377,9 +376,10 @@ fn codemode_ack_pct(result: &crate::CodeModeResult) -> String {
 }
 
 fn codemode_error_parts(result: &crate::CodeModeResult) -> (&str, &str, String) {
-    result.error.as_ref().map_or(
-        ("runtime", "final", "unknown error".to_string()),
-        |error| {
+    result
+        .error
+        .as_ref()
+        .map_or(("runtime", "final", "unknown error".to_string()), |error| {
             (
                 error.kind.as_str(),
                 if error.retryable {
@@ -389,8 +389,7 @@ fn codemode_error_parts(result: &crate::CodeModeResult) -> (&str, &str, String) 
                 },
                 error.message.chars().take(120).collect(),
             )
-        },
-    )
+        })
 }
 
 fn codemode_ack_trailer(
@@ -399,9 +398,7 @@ fn codemode_ack_trailer(
     store_ref: Option<&str>,
 ) -> String {
     match envelope {
-        CodemodeEnvelope::V2 => store_ref
-            .map(|r| format!(" t:{r}"))
-            .unwrap_or_default(),
+        CodemodeEnvelope::V2 => store_ref.map(|r| format!(" t:{r}")).unwrap_or_default(),
         CodemodeEnvelope::V3 => format!(
             " {}",
             result
@@ -771,13 +768,9 @@ pub(crate) fn dispatch_tool(
                     _ => JsonRpcErrorData::from(err.message),
                 });
             }
-            outcome
-                .tool_response
-                .ok_or_else(|| {
-                    JsonRpcErrorData::from(
-                        "domain dispatch returned no tool response".to_string(),
-                    )
-                })
+            outcome.tool_response.ok_or_else(|| {
+                JsonRpcErrorData::from("domain dispatch returned no tool response".to_string())
+            })
         }
     }
 }
@@ -929,6 +922,14 @@ pub(crate) fn mcp_tool_response(response: ToolResponse) -> Value {
             );
         }
     }
+    if let Some(ack) = response.ack.as_deref() {
+        if !ack.is_empty() && text.trim() != ack {
+            if !text.is_empty() {
+                text.push(char::from(10));
+            }
+            text.push_str(ack);
+        }
+    }
     let mut result = json!({
         "content": [{"type": "text", "text": text}],
         "resultType": "complete"
@@ -980,34 +981,20 @@ pub(crate) fn mcp_tool_response(response: ToolResponse) -> Value {
 /// summarized by kind (their content stays recoverable through the listed
 /// blob/file refs plus visible line numbers).
 fn refs_footer(response: &ToolResponse, text: &str) -> Option<String> {
-    if response.refs.is_empty() || response.refs.iter().any(|r| text.contains(&r.ref_id)) {
-        return None;
-    }
-    let mut listed: Vec<String> = Vec::new();
-    let mut extra: std::collections::BTreeMap<&str, usize> = std::collections::BTreeMap::new();
-    for record in &response.refs {
-        // blob/file carry whole payloads; combined covers full shell output.
-        if record.kind == "blob" || record.kind == "file" || record.kind == "combined" {
-            listed.push(record.ref_id.clone());
-        } else if record.kind == "undo" {
-            listed.push(format!("undo:{}", record.ref_id));
-        } else {
-            *extra.entry(record.kind.as_str()).or_default() += 1;
-        }
-    }
-    if listed.is_empty() {
-        listed = response
+    if response.refs.is_empty()
+        || text.trim() == tokenzero_recovery::working_set::ALREADY_RESIDENT_ATOM
+        || response
             .refs
             .iter()
-            .map(|record| record.ref_id.clone())
-            .collect();
-        extra.clear();
+            .any(|record| text.contains(&record.ref_id))
+    {
+        return None;
     }
-    let mut line = format!("refs: {}", listed.join(" "));
-    for (kind, count) in extra {
-        line.push_str(&format!(" +{count}:{kind}"));
-    }
-    Some(line)
+    let primary = ["combined", "blob", "file", "undo"]
+        .into_iter()
+        .find_map(|kind| response.refs.iter().find(|record| record.kind == kind))
+        .or_else(|| response.refs.first())?;
+    Some(format!("refs: {}", primary.ref_id))
 }
 
 enum EnvelopeMode {

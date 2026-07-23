@@ -896,17 +896,9 @@ fn format_shell_status_header(
     push_shell_kv(&mut vis, "status", &status.status_label);
     vis.push_str(&format!("command_success: {}\n", status.command_success));
     push_shell_status(&mut vis, status, false);
-    // Never emit refs to empty payloads (empty-string SHA e3b0c44...).
-    push_optional_shell_kv(
-        &mut vis,
-        "stdout_ref",
-        input.stdout_ref.filter(|_| !input.stdout.is_empty()),
-    );
-    push_optional_shell_kv(
-        &mut vis,
-        "stderr_ref",
-        input.stderr_ref.filter(|_| !input.stderr.is_empty()),
-    );
+    // The combined payload is the single primary recovery anchor. Stream and
+    // capture refs remain machine-visible in ToolResponse::refs, but repeating
+    // them in the capsule made one shell action mint up to four visible refs.
     push_optional_shell_kv(&mut vis, "combined_ref", input.combined_ref);
     vis + "\n" + body.trim_end()
 }

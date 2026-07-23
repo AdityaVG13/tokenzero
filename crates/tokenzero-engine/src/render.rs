@@ -45,9 +45,7 @@ impl Drop for RecoveryStoreLease<'_> {
         let Some(store) = store.take() else {
             return;
         };
-        let mut available = slot
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut available = slot.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         if available.is_none() {
             *available = Some(store);
         }
@@ -65,11 +63,14 @@ impl TokenZeroEngine {
                     .unwrap_or_else(|poisoned| poisoned.into_inner())
                     .take()
                     .unwrap_or_else(|| RecoveryStore::new(Some(self.config.cache_path.clone())));
-                RecoveryStoreLease::Shared { store: Some(store), slot }
+                RecoveryStoreLease::Shared {
+                    store: Some(store),
+                    slot,
+                }
             }
-            None => RecoveryStoreLease::Owned(RecoveryStore::new(Some(
-                self.config.cache_path.clone(),
-            ))),
+            None => {
+                RecoveryStoreLease::Owned(RecoveryStore::new(Some(self.config.cache_path.clone())))
+            }
         }
     }
 
@@ -114,54 +115,58 @@ pub fn push_payload_refs(
     refs.push(ref_record("file", stored.file_ref.clone(), bytes));
 }
 
-fn value_contains_blob_ref(value: &serde_json::Value) -> bool {
-    match value {
-        serde_json::Value::String(text) => {
-            text.contains("tz://blob/")
-                || text.contains("fz://blob/")
-                || text.contains("gz://blob/")
-        }
-        serde_json::Value::Array(values) => values.iter().any(value_contains_blob_ref),
-        serde_json::Value::Object(values) => values.values().any(value_contains_blob_ref),
-        _ => false,
-    }
-}
-
 impl TokenZeroEngine {
     /// Rewrite full-hash blob refs in a tool response to session-visible
     /// `tz://s/<16hex>` aliases and persist the short→full alias table.
     pub fn apply_session_visible_ref_aliases(&self, response: &mut ToolResponse) {
-        // Fast path: nothing to rewrite when no full-hash blob refs remain.
-        let needs_alias = response.refs.iter().any(|record| {
-            tokenzero_recovery::session_visible_blob_alias(&record.ref_id).is_some()
-        }) || response
-            .visible
-            .as_ref()
-            .map(|v| {
-                v.text.contains("tz://blob/")
-                    || v.text.contains("fz://blob/")
-                    || v.text.contains("gz://blob/")
+        let full_refs = response
+            .refs
+            .iter()
+            .filter(|record| {
+                tokenzero_recovery::session_visible_blob_alias(&record.ref_id).is_some()
             })
-            .unwrap_or(false)
-            || response
-                .telemetry
-                .as_ref()
-                .is_some_and(value_contains_blob_ref);
-        if !needs_alias {
+            .map(|record| record.ref_id.clone())
+            .collect::<Vec<_>>();
+        if full_refs.is_empty() {
             return;
         }
         let mut store = self.recovery_store();
+        let Ok(range) = store.reserve_ordinal_range(full_refs.len() as u64) else {
+            return;
+        };
+        let mut aliases = Vec::with_capacity(full_refs.len());
+        for (offset, full_ref) in full_refs.iter().enumerate() {
+            let Ok(alias) = store.store_ordinal_alias_deferred(range, offset as u64, full_ref)
+            else {
+                return;
+            };
+            aliases.push((full_ref.clone(), alias));
+        }
+        if store.persist_pending().is_err() {
+            return;
+        }
         if let Some(visible) = response.visible.as_mut() {
-            visible.text = store.apply_session_visible_aliases_in_text(&visible.text);
+            for (full_ref, alias) in &aliases {
+                visible.text = visible.text.replace(full_ref, alias);
+            }
         }
         for record in &mut response.refs {
-            // Deferred: one persist_pending below batches all alias rows.
-            record.ref_id = store.register_session_visible_alias(&record.ref_id);
+            if let Some((_, alias)) = aliases
+                .iter()
+                .find(|(full_ref, _)| full_ref == &record.ref_id)
+            {
+                record.ref_id = alias.clone();
+            }
         }
         if let Some(telemetry) = response.telemetry.as_mut() {
-            store.apply_session_visible_aliases_in_value(telemetry);
+            let mut encoded = telemetry.to_string();
+            for (full_ref, alias) in &aliases {
+                encoded = encoded.replace(full_ref, alias);
+            }
+            if let Ok(rewritten) = serde_json::from_str(&encoded) {
+                *telemetry = rewritten;
+            }
         }
-        let _ = store.persist_pending();
         if let Some(accounting) = response.accounting.as_mut() {
             if let Some(visible) = response.visible.as_ref() {
                 accounting.visible_tokens = count_tokens(&visible.text);
@@ -386,10 +391,7 @@ pub fn exact_ref_token_count(refs: &[tokenzero_core::RefRecord]) -> usize {
 /// evict entries under byte/count pressure (including refs stored earlier in
 /// the same call), and a response must never advertise a ref that can no
 /// longer be expanded. Returns true when every ref survived.
-pub fn prune_dead_refs(
-    store: &RecoveryStore,
-    refs: &mut Vec<tokenzero_core::RefRecord>,
-) -> bool {
+pub fn prune_dead_refs(store: &RecoveryStore, refs: &mut Vec<tokenzero_core::RefRecord>) -> bool {
     let before = refs.len();
     refs.retain(|record| store.has_ref(&record.ref_id));
     refs.len() == before
@@ -442,10 +444,7 @@ pub fn create_file_hunk(hunk: &EditHunk) -> Result<AppliedEdits, EditFailure> {
     })
 }
 
-pub fn apply_edit_hunks(
-    original: &str,
-    edits: &[EditHunk],
-) -> Result<AppliedEdits, EditFailure> {
+pub fn apply_edit_hunks(original: &str, edits: &[EditHunk]) -> Result<AppliedEdits, EditFailure> {
     let mut text = original.to_string();
     let mut sections = Vec::new();
     let mut lines_added = 0usize;
@@ -815,11 +814,7 @@ mod preview_tests {
     }
 }
 
-pub fn captured_stream_text(
-    text: &str,
-    capture: &StreamCapture,
-    stream_name: &str,
-) -> String {
+pub fn captured_stream_text(text: &str, capture: &StreamCapture, stream_name: &str) -> String {
     if !capture.truncated {
         return text.to_string();
     }
