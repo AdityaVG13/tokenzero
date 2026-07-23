@@ -1,14 +1,10 @@
 use std::fs;
-use std::path::PathBuf;
 use std::process::Command;
 
 #[test]
 fn boot_cost_lock_covers_real_small_and_23k_corpora() {
-    let repo = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .and_then(|path| path.parent())
-        .expect("workspace root")
-        .to_path_buf();
+    let repo = std::env::current_dir().expect("workspace root");
+    assert!(repo.join("benchmarks/boot-cost.py").is_file());
     let label = format!("ci-lock-{}", std::process::id());
 
     let unit = Command::new("python3")
