@@ -3306,7 +3306,7 @@ fn session_delta(
     delta.aliases = state.aliases.clone();
     delta.shell_outcomes = state.shell_outcomes.clone();
     delta.shell_outcome_seq = state.shell_outcome_seq;
-    delta.ambiguous_aliases = state.ambiguous_aliases.clone();
+    delta.ambiguous_aliases = state.ambiguous_aliases.clone();\n    delta.transparency = state.transparency.clone();
     delta.order = session_refs
         .iter()
         .filter(|ref_id| state_entry_present(&delta, ref_id))
