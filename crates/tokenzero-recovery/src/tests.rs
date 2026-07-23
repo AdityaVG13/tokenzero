@@ -1436,20 +1436,11 @@ fn torn_deferred_batch_never_exposes_partial_aliases() {
     };
 
     let journal = journal_path(&cache);
-    let torn = format!(
-        "{{\"refs\":[],\"state\":{{\"aliases\":{{\"tz://batch/torn\":\"{target}\""
-    );
+    let torn = format!("{{\"refs\":[],\"state\":{{\"aliases\":{{\"tz://batch/torn\":\"{target}\"");
     fs::write(&journal, torn).unwrap();
 
     let mut restarted = RecoveryStore::new(Some(cache));
-    let committed = restarted.expand(
-        "tz://batch/committed",
-        Some("raw"),
-        None,
-        None,
-        None,
-        None,
-    );
+    let committed = restarted.expand("tz://batch/committed", Some("raw"), None, None, None, None);
     assert!(committed.found, "{}", committed.reason);
     assert_eq!(committed.content, "committed\n");
     let partial = restarted.expand("tz://batch/torn", Some("raw"), None, None, None, None);
@@ -1466,13 +1457,8 @@ fn durable_batch_propagates_before_during_and_final_sync_failures() {
         let dir = tempdir().unwrap();
         let cache = dir.path().join("cache.json");
         let mut store = RecoveryStore::new(Some(cache));
-        let stored = store.store_payload_deferred_batch(
-            "faulted\n",
-            ContentType::Unknown,
-            None,
-            None,
-            None,
-        );
+        let stored =
+            store.store_payload_deferred_batch("faulted\n", ContentType::Unknown, None, None, None);
         store.store_alias_deferred("tz://batch/faulted", &stored.blob_ref);
         DURABLE_COMMIT_FAIL_POINT.with(|configured| configured.set(Some(point)));
         let error = store.persist_pending_durable().unwrap_err();
@@ -2743,11 +2729,20 @@ fn recovery_blob_prune_prefers_never_expanded_blobs() {
         let cold_text = format!("cold:{}", "y".repeat(70_000));
         let mut store = RecoveryStore::new(Some(cache.clone()));
         store.shared_cas = None;
-        let expanded = store.store_payload(&expanded_text, ContentType::Unknown, None, None, None).unwrap();
-        let cold = store.store_payload(&cold_text, ContentType::Unknown, None, None, None).unwrap();
-        assert!(store.expand(&expanded.blob_ref, None, None, None, None, None).found);
+        let expanded = store
+            .store_payload(&expanded_text, ContentType::Unknown, None, None, None)
+            .unwrap();
+        let cold = store
+            .store_payload(&cold_text, ContentType::Unknown, None, None, None)
+            .unwrap();
+        assert!(
+            store
+                .expand(&expanded.blob_ref, None, None, None, None, None)
+                .found
+        );
         store.persist_pending().unwrap();
-        let report = prune_recovery_blobs(&cache, 75_000, Duration::from_secs(86_400), false).unwrap();
+        let report =
+            prune_recovery_blobs(&cache, 75_000, Duration::from_secs(86_400), false).unwrap();
         assert_eq!(report.removed_files, 1);
         assert!(report.freed_bytes >= 70_000);
         let restarted = RecoveryStore::new(Some(cache.clone()));
@@ -2758,7 +2753,10 @@ fn recovery_blob_prune_prefers_never_expanded_blobs() {
 
 #[test]
 fn recovery_blob_age_cap_and_status_support_both_store_roots() {
-    for relative in [".tokenzero/recovery-cache.json", ".zerostack/tokenzero/recovery-cache.json"] {
+    for relative in [
+        ".tokenzero/recovery-cache.json",
+        ".zerostack/tokenzero/recovery-cache.json",
+    ] {
         let dir = tempdir().unwrap();
         let cache = dir.path().join(relative);
         let index = dir.path().join("ref-index");

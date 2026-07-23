@@ -150,9 +150,8 @@ fn raw_worker_is_first_command(argv: &[OsString]) -> bool {
 fn raw_worker_argv(argv: Vec<OsString>) -> Result<Vec<String>> {
     argv.into_iter()
         .map(|arg| {
-            arg.into_string().map_err(|arg| {
-                anyhow::anyhow!("raw-worker argument is not valid UTF-8: {arg:?}")
-            })
+            arg.into_string()
+                .map_err(|arg| anyhow::anyhow!("raw-worker argument is not valid UTF-8: {arg:?}"))
         })
         .collect()
 }
@@ -172,10 +171,7 @@ mod startup_arg_tests {
         ];
         assert!(!raw_worker_is_first_command(&child_command));
 
-        let raw_worker = [
-            OsString::from("tokenzero"),
-            OsString::from("raw-worker"),
-        ];
+        let raw_worker = [OsString::from("tokenzero"), OsString::from("raw-worker")];
         assert!(raw_worker_is_first_command(&raw_worker));
     }
 }
@@ -439,12 +435,7 @@ fn dispatch_cli_tool(engine: &TokenZeroEngine, op: &str, args: serde_json::Value
     let response = if let Some(response) = outcome.tool_response {
         response
     } else if let Some(err) = outcome.domain_error {
-        ToolResponse::error(
-            op,
-            err.kind.as_str(),
-            err.message,
-            None,
-        )
+        ToolResponse::error(op, err.kind.as_str(), err.message, None)
     } else {
         ToolResponse::error(
             op,
@@ -462,10 +453,13 @@ fn mode_json(mode: Mode) -> String {
 }
 
 fn paths_json(paths: &[PathBuf]) -> serde_json::Value {
-    json!(paths.iter().map(|p| p.display().to_string()).collect::<Vec<_>>())
+    json!(
+        paths
+            .iter()
+            .map(|p| p.display().to_string())
+            .collect::<Vec<_>>()
+    )
 }
-
-
 
 fn handle_find(args: FindArgs) -> Result<EmitResponse> {
     let (engine, mode) = tool_engine_mode(&args.tool)?;
@@ -996,9 +990,7 @@ fn handle_session_ledger(args: SessionLedgerArgs) -> Result<()> {
     let response_ledger_path =
         tokenzero_mcp::ledger::ledger_path_for_cache(&resolve_recovery_cache_path(&root, None));
     match args.command {
-        Some(SessionLedgerCommand::Schema) => {
-            print_pretty(&SessionLedgerReport::schema_json())?
-        }
+        Some(SessionLedgerCommand::Schema) => print_pretty(&SessionLedgerReport::schema_json())?,
         Some(SessionLedgerCommand::Inspect(flags)) => {
             let env_value = std::env::var(tokenzero_mcp::ledger::TELEMETRY_ENV).ok();
             let enabled = tokenzero_mcp::ledger::resolve_telemetry(
@@ -1161,11 +1153,7 @@ fn handle_cache_pack(args: CachePackArgs) -> Result<()> {
         default_shell_timeout(),
         None,
     );
-    let response = dispatch_cli_tool(
-        &engine,
-        "tz_cache_pack",
-        json!({ "scope": args.scope }),
-    );
+    let response = dispatch_cli_tool(&engine, "tz_cache_pack", json!({ "scope": args.scope }));
     emit_with_json(response, args.json)
 }
 
@@ -1522,12 +1510,12 @@ fn enforce_surface_exclusivity(args: &McpServerArgs) -> Result<()> {
         anyhow::bail!("{err}");
     }
     let argv: Vec<String> = std::env::args().collect();
-    let resolved = install::packaging::resolve_startup_surface(&argv)
-        .map_err(|e| anyhow::anyhow!("{e}"))?;
+    let resolved =
+        install::packaging::resolve_startup_surface(&argv).map_err(|e| anyhow::anyhow!("{e}"))?;
 
     let requested = args.tool_surface.as_deref().unwrap_or(&args.mode);
-    let requested_surface = install::packaging::PackageSurface::parse(requested)
-        .map_err(|e| anyhow::anyhow!("{e}"))?;
+    let requested_surface =
+        install::packaging::PackageSurface::parse(requested).map_err(|e| anyhow::anyhow!("{e}"))?;
     if requested_surface != resolved {
         anyhow::bail!(
             "tokenzero: process surface is locked to '{}'; refused request for '{}'. \
@@ -1537,8 +1525,7 @@ Install {} for that surface (mutually exclusive — one process, one catalog).",
             requested_surface.artifact_name()
         );
     }
-    install::packaging::assert_surface_compiled(resolved)
-        .map_err(|e| anyhow::anyhow!("{e}"))?;
+    install::packaging::assert_surface_compiled(resolved).map_err(|e| anyhow::anyhow!("{e}"))?;
 
     #[cfg(not(unix))]
     {

@@ -43,10 +43,16 @@ fn atomic_touch(path: &Path) -> io::Result<()> {
     fs::create_dir_all(parent)?;
     let temporary = parent.join(format!(
         ".{}.{}.tmp",
-        path.file_name().and_then(|name| name.to_str()).unwrap_or("maintenance"),
+        path.file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("maintenance"),
         std::process::id()
     ));
-    match OpenOptions::new().create_new(true).write(true).open(&temporary) {
+    match OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .open(&temporary)
+    {
         Ok(file) => {
             file.sync_all()?;
             drop(file);
@@ -145,7 +151,10 @@ fn gc_maintenance(cache_path: &Path, dry_run: bool) -> Value {
         return json!({"would_run": true});
     }
     let now = SystemTime::now();
-    let now_ms = now.duration_since(UNIX_EPOCH).unwrap_or_default().as_millis() as u64;
+    let now_ms = now
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64;
     let segment = if tokenzero_recovery::segment_store::SegmentStore::exists(cache_path) {
         let cas = tokenzero_recovery::shared_cas::SharedCas::detect_from_cache_path(cache_path);
         match tokenzero_recovery::segment_store::SegmentStore::open(cache_path.to_path_buf(), cas)
@@ -168,10 +177,7 @@ fn gc_maintenance(cache_path: &Path, dry_run: bool) -> Value {
         let config = tokenzero_recovery::shared_cas::GcConfig {
             run_id: format!("startup-{}-{now_ms}", std::process::id()),
             grace_seconds,
-            min_age_seconds: env_u64(
-                "TOKENZERO_GC_MIN_AGE_SECONDS",
-                DEFAULT_GC_MIN_AGE_SECONDS,
-            ),
+            min_age_seconds: env_u64("TOKENZERO_GC_MIN_AGE_SECONDS", DEFAULT_GC_MIN_AGE_SECONDS),
             apply: true,
             now,
             fault_after_deletes: None,
@@ -183,9 +189,7 @@ fn gc_maintenance(cache_path: &Path, dry_run: bool) -> Value {
     } else {
         json!({"skipped": "shared_cas_absent"})
     };
-    let marker_result = atomic_touch(&marker)
-        .err()
-        .map(|error| error.to_string());
+    let marker_result = atomic_touch(&marker).err().map(|error| error.to_string());
     json!({
         "segment": segment,
         "shared_cas": shared_cas,
@@ -211,17 +215,17 @@ pub fn cache_maintenance(cache_path: &Path, dry_run: bool) -> Value {
         "TOKENZERO_RECOVERY_BLOB_MAX_AGE_SECONDS",
         DEFAULT_BLOB_MAX_AGE_SECONDS,
     ));
-    let blob_prune = tokenzero_recovery::prune_recovery_blobs(
-        cache_path,
-        blob_budget,
-        blob_max_age,
-        dry_run,
-    ).map_or_else(
-        |error| json!({"error": error.to_string()}),
-        |report| json!(report),
-    );
+    let blob_prune =
+        tokenzero_recovery::prune_recovery_blobs(cache_path, blob_budget, blob_max_age, dry_run)
+            .map_or_else(
+                |error| json!({"error": error.to_string()}),
+                |report| json!(report),
+            );
     let gc = gc_maintenance(cache_path, dry_run);
-    let freed_bytes = blob_prune.get("freed_bytes").and_then(Value::as_u64).unwrap_or(0);
+    let freed_bytes = blob_prune
+        .get("freed_bytes")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
     json!({
         "freed_bytes": freed_bytes,
         "tmp_sweep": tmp_sweep,
