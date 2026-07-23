@@ -42,6 +42,7 @@ pub mod paths;
 mod recall;
 pub mod render;
 mod report_tool;
+mod text_aliases;
 pub mod session;
 pub mod session_persist;
 pub mod shell_hooks;

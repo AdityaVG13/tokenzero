@@ -128,6 +128,18 @@ impl TokenZeroEngine {
             .map(|record| record.ref_id.clone())
             .collect::<Vec<_>>();
         if full_refs.is_empty() {
+            let mut store = self.recovery_store();
+            if let Some(visible) = response.visible.as_mut() {
+                visible.text = crate::text_aliases::alias_repeated_paths_and_symbols(
+                    &mut store,
+                    &visible.text,
+                );
+            }
+            if let (Some(accounting), Some(visible)) =
+                (response.accounting.as_mut(), response.visible.as_ref())
+            {
+                accounting.visible_tokens = count_tokens(&visible.text);
+            }
             return;
         }
         let mut store = self.recovery_store();
@@ -149,6 +161,10 @@ impl TokenZeroEngine {
             for (full_ref, alias) in &aliases {
                 visible.text = visible.text.replace(full_ref, alias);
             }
+            visible.text = crate::text_aliases::alias_repeated_paths_and_symbols(
+                &mut store,
+                &visible.text,
+            );
         }
         for record in &mut response.refs {
             if let Some((_, alias)) = aliases
