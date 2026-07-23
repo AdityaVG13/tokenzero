@@ -2738,10 +2738,11 @@ fn recovery_blob_prune_prefers_never_expanded_blobs() {
     let dir = tempdir().unwrap();
     let cache = dir.path().join(".tokenzero/recovery-cache.json");
     let index = dir.path().join("ref-index");
-    with_ref_index_env(&index, false, || {
+    with_ref_index_env(&index, true, || {
         let expanded_text = format!("expanded:{}", "x".repeat(70_000));
         let cold_text = format!("cold:{}", "y".repeat(70_000));
         let mut store = RecoveryStore::new(Some(cache.clone()));
+        store.shared_cas = None;
         let expanded = store.store_payload(&expanded_text, ContentType::Unknown, None, None, None).unwrap();
         let cold = store.store_payload(&cold_text, ContentType::Unknown, None, None, None).unwrap();
         assert!(store.expand(&expanded.blob_ref, None, None, None, None, None).found);
