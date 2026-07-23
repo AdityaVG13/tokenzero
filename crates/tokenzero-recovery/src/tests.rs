@@ -2738,7 +2738,7 @@ fn recovery_blob_prune_prefers_never_expanded_blobs() {
     let dir = tempdir().unwrap();
     let cache = dir.path().join(".tokenzero/recovery-cache.json");
     let index = dir.path().join("ref-index");
-    with_ref_index_env(&index, true, || {
+| {|    with_ref_index_env(&index, false, || {|| {
         let expanded_text = format!("expanded:{}", "x".repeat(70_000));
         let cold_text = format!("cold:{}", "y".repeat(70_000));
         let mut store = RecoveryStore::new(Some(cache.clone()));
@@ -2759,12 +2759,15 @@ fn recovery_blob_age_cap_and_status_support_both_store_roots() {
     for relative in [".tokenzero/recovery-cache.json", ".zerostack/tokenzero/recovery-cache.json"] {
         let dir = tempdir().unwrap();
         let cache = dir.path().join(relative);
-        let text = format!("aged:{}", "z".repeat(70_000));
-        RecoveryStore::new(Some(cache.clone()))
-            .store_payload(&text, ContentType::Unknown, None, None, None).unwrap();
-        let report = prune_recovery_blobs(&cache, u64::MAX, Duration::ZERO, false).unwrap();
-        assert_eq!(report.expired_files, 1);
-        assert!(report.freed_bytes >= 70_000);
-        assert_eq!(recovery_blob_status(&cache)["bytes"], 0);
+        let index = dir.path().join("ref-index");
+        with_ref_index_env(&index, false, || {
+            let text = format!("aged:{}", "z".repeat(70_000));
+            RecoveryStore::new(Some(cache.clone()))
+                .store_payload(&text, ContentType::Unknown, None, None, None).unwrap();
+            let report = prune_recovery_blobs(&cache, u64::MAX, Duration::ZERO, false).unwrap();
+            assert_eq!(report.expired_files, 1);
+            assert!(report.freed_bytes >= 70_000);
+            assert_eq!(recovery_blob_status(&cache)["bytes"], 0);
+        });
     }
 }
