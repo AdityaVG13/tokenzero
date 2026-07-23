@@ -2753,7 +2753,7 @@ fn recovery_blob_prune_prefers_never_expanded_blobs() {
 
 #[test]
 fn transparency_log_survives_restart_with_valid_proofs() {
-    let (_dir, cache, mut store) = persisted_store();
+    let (mut store, cache, _dir) = temp_store();
     let first = store
         .store_payload("transparent-one", ContentType::Text, None, None, None)
         .unwrap();
