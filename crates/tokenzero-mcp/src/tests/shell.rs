@@ -20,6 +20,8 @@ fn compact_shell_text_render_omits_ref_footer() {
             raw_tokens: 15,
             visible_tokens: 2,
             recovery_tokens: 0,
+            billed_tokens: 2,
+            cached_tokens: 0,
             exact_ref_tokens: Some(14),
         },
     );
@@ -53,6 +55,8 @@ fn full_shell_text_render_does_not_duplicate_header_refs() {
             raw_tokens: 100,
             visible_tokens: 40,
             recovery_tokens: 0,
+            billed_tokens: 40,
+            cached_tokens: 0,
             exact_ref_tokens: Some(28),
         },
     );
@@ -135,8 +139,14 @@ fn shell_emits_canonical_refs_recoverable_by_a_fresh_engine() {
         stdout_ref.starts_with("tz://blob/"),
         "shell response refs must survive session alias pruning: {stdout_ref}"
     );
-    let expanded = TokenZeroEngine::new(EngineConfig::for_root(dir.path()))
-        .expand(stdout_ref, Some("raw"), None, None, None, None);
+    let expanded = TokenZeroEngine::new(EngineConfig::for_root(dir.path())).expand(
+        stdout_ref,
+        Some("raw"),
+        None,
+        None,
+        None,
+        None,
+    );
     assert_eq!(expanded.visible.unwrap().text, "durable-shell-ref\n");
 }
 
@@ -210,10 +220,7 @@ fn shell_exact_first_stores_stream_refs_and_status_truth() {
         false
     );
     assert!(
-        response
-            .refs
-            .iter()
-            .any(|row| row.kind == "combined"),
+        response.refs.iter().any(|row| row.kind == "combined"),
         "shell must always emit a combined ref"
     );
     let combined_ref = response
@@ -232,7 +239,10 @@ fn shell_exact_first_stores_stream_refs_and_status_truth() {
     if let Some(needle) = expanded_needle {
         assert!(expanded_text.contains(needle));
     }
-    assert!(!expanded_text.contains(command), "combined output must not echo the command");
+    assert!(
+        !expanded_text.contains(command),
+        "combined output must not echo the command"
+    );
 }
 
 #[test]
@@ -335,7 +345,7 @@ fn shell_truncation_is_explicit_and_degraded() {
     let engine = TokenZeroEngine::new(config);
 
     let response = engine.shell(
-        "yes x | head -c 100",
+        "yes x | head -c 100 || true",
         None,
         Some(dir.path()),
         Mode::Auto,
@@ -639,9 +649,11 @@ fn shell_small_success_has_one_ref_and_compact_visible_envelope() {
     let visible = &response.visible.as_ref().unwrap().text;
     assert!(!visible.contains("$ echo hi"));
     assert!(!visible.contains("cwd: "));
-    assert!(response.accounting.as_ref().unwrap().visible_tokens <= 40, "{visible}");
+    assert!(
+        response.accounting.as_ref().unwrap().visible_tokens <= 40,
+        "{visible}"
+    );
 }
-
 
 #[test]
 fn shell_explicit_cwd_sets_cwd_source_explicit() {
@@ -690,11 +702,59 @@ fn shell_response_refs_are_canonical_and_expand_in_fresh_engine() {
         combined.starts_with("tz://blob/"),
         "combined ref must be canonical, got {combined}"
     );
-    let expanded = TokenZeroEngine::new(EngineConfig::for_root(dir.path()))
-        .expand(&combined, Some("raw"), None, None, None, None);
+    let expanded = TokenZeroEngine::new(EngineConfig::for_root(dir.path())).expand(
+        &combined,
+        Some("raw"),
+        None,
+        None,
+        None,
+        None,
+    );
     let text = expanded.visible.as_ref().unwrap().text.clone();
     assert!(
         text.contains("canonical-ref-probe"),
         "fresh-engine expand must recover bytes: {text}"
     );
+}
+
+#[cfg(unix)]
+#[test]
+fn shell_pipeline_propagates_upstream_failure() {
+    let dir = tempdir().unwrap();
+    let engine = TokenZeroEngine::new(EngineConfig::for_root(dir.path()));
+    let response = engine.shell(
+        "sh -c 'echo producer-failed >&2; exit 7' | cat",
+        None,
+        Some(dir.path()),
+        Mode::Auto,
+        None,
+        false,
+        None,
+        None,
+        None,
+    );
+    let telemetry = response.telemetry.as_ref().unwrap();
+    assert_eq!(telemetry["command_success"], false);
+    assert_eq!(telemetry["exit_code"], 7);
+}
+
+#[cfg(unix)]
+#[test]
+fn shell_pipeline_allows_explicit_failure_masking() {
+    let dir = tempdir().unwrap();
+    let engine = TokenZeroEngine::new(EngineConfig::for_root(dir.path()));
+    let response = engine.shell(
+        "sh -c 'exit 7' | cat || true",
+        None,
+        Some(dir.path()),
+        Mode::Auto,
+        None,
+        false,
+        None,
+        None,
+        None,
+    );
+    let telemetry = response.telemetry.as_ref().unwrap();
+    assert_eq!(telemetry["command_success"], true);
+    assert_eq!(telemetry["exit_code"], 0);
 }

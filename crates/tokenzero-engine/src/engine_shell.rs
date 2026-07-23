@@ -1,7 +1,8 @@
 use super::*;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Condvar};
 use std::thread;
+use std::time::Instant;
 use tokenzero_runtime::run_command_with_policy_observer;
 
 #[derive(Debug)]
@@ -28,6 +29,7 @@ struct BackgroundJob {
     sequence: u64,
     log: PathBuf,
     state: Mutex<BackgroundJobState>,
+    changed: Condvar,
 }
 
 fn background_job_is_complete(job: &BackgroundJob) -> bool {
@@ -147,6 +149,7 @@ impl BackgroundJobRegistry {
                 pgid: None,
                 exit_code: None,
             }),
+            changed: Condvar::new(),
         });
         if let Err(error) = self.insert_bounded(Arc::clone(&job)) {
             let _ = fs::remove_file(&log);
@@ -175,11 +178,7 @@ impl BackgroundJobRegistry {
                             current.pid = pid;
                             current.pgid = pgid;
                             drop(current);
-                            crate::shell_hooks::note_background_child(
-                                &observed.id,
-                                pid,
-                                pgid,
-                            );
+                            crate::shell_hooks::note_background_child(&observed.id, pid, pgid);
                         }
                     },
                 );
@@ -201,6 +200,7 @@ impl BackgroundJobRegistry {
                 current.status = status;
                 current.exit_code = exit_code;
                 drop(current);
+                job.changed.notify_all();
                 crate::shell_hooks::finish_background_job(&worker_id);
             });
         if let Err(err) = spawn {
@@ -210,29 +210,40 @@ impl BackgroundJobRegistry {
         }
         Ok(json!({"job": id, "log": log.display().to_string()}))
     }
-
-    fn poll(&self, id: &str) -> Result<Value, String> {
+    fn poll(&self, id: &str, wait: Duration, cursor: usize) -> Result<Value, String> {
         let job = lock(&self.jobs)
             .get(id)
             .cloned()
             .ok_or_else(|| format!("unknown background job: {id}"))?;
-        let state = lock(&job.state);
+        let mut state = lock(&job.state);
+        if state.status == "running" && !wait.is_zero() {
+            let deadline = Instant::now() + wait.min(Duration::from_secs(30));
+            while state.status == "running" {
+                let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
+                    break;
+                };
+                let observed = job
+                    .changed
+                    .wait_timeout(state, remaining)
+                    .unwrap_or_else(|poison| poison.into_inner());
+                state = observed.0;
+                if observed.1.timed_out() {
+                    break;
+                }
+            }
+        }
         let log_text = fs::read_to_string(&job.log).unwrap_or_default();
+        let total_chars = log_text.chars().count();
         let tail = log_text
             .chars()
-            .rev()
+            .skip(cursor.min(total_chars))
             .take(8192)
-            .collect::<String>()
-            .chars()
-            .rev()
             .collect::<String>();
-        Ok(json!({
-            "status": state.status,
-            "pid": state.pid,
-            "exitCode": state.exit_code,
-            "tail": tail,
-            "log": job.log.display().to_string(),
-        }))
+        Ok(
+            json!({"status": state.status, "pid": state.pid, "exitCode": state.exit_code,
+            "tail": tail, "log": job.log.display().to_string(), "cursor": total_chars,
+            "changed": total_chars > cursor || state.status != "running"}),
+        )
     }
 
     fn terminate_all(&self) {
@@ -320,7 +331,11 @@ impl TokenZeroEngine {
     }
 
     pub fn shell_job(&self, id: &str) -> Result<Value, String> {
-        background_jobs().poll(id)
+        background_jobs().poll(id, Duration::ZERO, 0)
+    }
+
+    pub fn shell_job_wait(&self, id: &str, wait: Duration, cursor: usize) -> Result<Value, String> {
+        background_jobs().poll(id, wait, cursor)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -469,18 +484,10 @@ impl TokenZeroEngine {
         );
         let mut refs = Vec::new();
         if !stdout_display.is_empty() {
-            refs.push(shell_ref(
-                "stdout",
-                &stdout_stored,
-                stdout_display.len(),
-            ));
+            refs.push(shell_ref("stdout", &stdout_stored, stdout_display.len()));
         }
         if !stderr_display.is_empty() {
-            refs.push(shell_ref(
-                "stderr",
-                &stderr_stored,
-                stderr_display.len(),
-            ));
+            refs.push(shell_ref("stderr", &stderr_stored, stderr_display.len()));
         }
         refs.push(shell_ref("combined", &combined_stored, output.len()));
         refs.push(shell_ref("capture", &capture_stored, capture_text.len()));
@@ -489,7 +496,8 @@ impl TokenZeroEngine {
             return degraded_shell_response(command, mode, &output, error);
         }
         let refs_complete = persisted.refs_complete;
-        let raw_tokens = shell_raw_tokens(command, result.exit_code, &stdout_display, &stderr_display);
+        let raw_tokens =
+            shell_raw_tokens(command, result.exit_code, &stdout_display, &stderr_display);
         // Tokenizers can encode long repeated runs as a single token. Keep the
         // token accounting exact, but bound inline transport by bytes as well.
         let fits_default_inline_extent =
@@ -579,6 +587,8 @@ impl TokenZeroEngine {
                 raw_tokens,
                 visible_tokens,
                 recovery_tokens: store.recovery_tokens,
+                billed_tokens: visible_tokens,
+                cached_tokens: 0,
                 exact_ref_tokens: Some(if small_shell_output {
                     count_tokens(&combined_vis)
                 } else {
@@ -660,6 +670,34 @@ mod background_tests {
     use super::*;
 
     #[test]
+    fn poll_waits_for_completion_and_advances_cursor() {
+        let dir = tempfile::tempdir().unwrap();
+        let registry = BackgroundJobRegistry::default();
+        let launched = registry
+            .start(
+                vec![
+                    "/bin/bash".to_string(),
+                    "-c".to_string(),
+                    "sleep 0.05; printf done".to_string(),
+                ],
+                None,
+                BTreeMap::new(),
+                Duration::from_secs(2),
+                dir.path().to_path_buf(),
+            )
+            .unwrap();
+        let id = launched["job"].as_str().unwrap();
+        let observed = registry.poll(id, Duration::from_secs(1), 0).unwrap();
+        assert_eq!(observed["status"], "exited");
+        assert!(observed["tail"].as_str().unwrap().contains("done"));
+        let cursor = observed["cursor"].as_u64().unwrap() as usize;
+        assert_eq!(
+            registry.poll(id, Duration::ZERO, cursor).unwrap()["tail"],
+            ""
+        );
+    }
+
+    #[test]
     fn registry_drop_kills_running_process_group() {
         let dir = tempfile::tempdir().unwrap();
         let registry = BackgroundJobRegistry::default();
@@ -675,7 +713,7 @@ mod background_tests {
         let id = launched["job"].as_str().unwrap();
         let pid = (0..50)
             .find_map(|_| {
-                let pid = registry.poll(id).unwrap()["pid"].as_u64();
+                let pid = registry.poll(id, Duration::ZERO, 0).unwrap()["pid"].as_u64();
                 if pid.is_none() {
                     thread::sleep(Duration::from_millis(10));
                 }
@@ -707,6 +745,7 @@ mod accumulator_bounds {
                 pgid: None,
                 exit_code: None,
             }),
+            changed: Condvar::new(),
         })
     }
 

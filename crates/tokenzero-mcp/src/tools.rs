@@ -2,10 +2,9 @@ use serde_json::{Value, json};
 use std::path::Path;
 use tokenzero_core::{Accounting, MCP_SCHEMA_VERSION, Mode, ToolResponse, count_tokens};
 
+use crate::TokenZeroEngine;
 use crate::catalog::ToolKind;
 use crate::jsonrpc::JsonRpcErrorData;
-use crate::TokenZeroEngine;
-
 
 macro_rules! gated_tool_entry {
     ($name:ident, $gate:ident) => {
@@ -63,7 +62,7 @@ fn dispatch_gated_tool(
     record_mcp_pulse(engine, canonical, args, &response, call_id);
     // Opt-in usage telemetry: MCP tools only. CodeMode execute records separately.
     if canonical != "execute_code" {
-        record_opt_in_mcp_usage(engine, &response);
+        record_opt_in_mcp_usage(engine, canonical, args, &response);
     }
     engine.record_ledger_response(canonical, &response);
     engine.record_tool_attribution(canonical, engine_elapsed, persist_started.elapsed());
@@ -152,8 +151,16 @@ fn record_mcp_pulse(
     let _ = tokenzero_pulse::record_event(&tokenzero_pulse::default_ledger_path(root), &event);
 }
 
-fn record_opt_in_mcp_usage(engine: &TokenZeroEngine, response: &ToolResponse) {
+fn record_opt_in_mcp_usage(
+    engine: &TokenZeroEngine,
+    operation: &str,
+    args: &Value,
+    response: &ToolResponse,
+) {
     let enabled = crate::usage_telemetry_enabled(engine.config.telemetry_enabled);
+    if !enabled {
+        return;
+    }
     let Some(accounting) = response.accounting.as_ref() else {
         return;
     };
@@ -162,6 +169,21 @@ fn record_opt_in_mcp_usage(engine: &TokenZeroEngine, response: &ToolResponse) {
         enabled,
         accounting.raw_tokens,
         accounting.visible_tokens,
+    );
+    let input_tokens = count_tokens(&serde_json::to_string(args).unwrap_or_default());
+    crate::record_operation_amplification(
+        &engine.config.cache_path,
+        enabled,
+        crate::ExecutionPath::Mcp,
+        operation,
+        crate::DirectionTokens::measured(input_tokens, input_tokens, input_tokens, 0),
+        crate::DirectionTokens::measured(
+            accounting.raw_tokens,
+            accounting.visible_tokens,
+            accounting.billed_tokens,
+            accounting.cached_tokens.min(accounting.billed_tokens),
+        ),
+        response.refs.len(),
     );
 }
 
@@ -242,6 +264,7 @@ fn exec_codemode_tool(
             options.max_microtasks = limits.max_microtasks;
             options.max_memory_bytes = limits.max_memory_bytes;
             options.max_code_bytes = limits.max_code_bytes;
+            options.max_visible_tokens = limits.max_visible_tokens;
             options.hard_max_wall_ms = limits.hard_max_wall_ms.min(server_hard_max_wall_ms);
             options.max_wall_ms = limits.max_wall_ms.min(options.hard_max_wall_ms);
         }
@@ -302,7 +325,8 @@ fn codemode_capabilities_manifest() -> Value {
             "max_logical_ops": crate::CodeModeLimits::default().max_logical_ops,
             "max_microtasks": crate::CodeModeLimits::default().max_microtasks,
             "max_output_bytes": crate::CodeModeLimits::default().max_output_bytes,
-            "max_code_bytes": crate::CodeModeLimits::default().max_code_bytes
+            "max_code_bytes": crate::CodeModeLimits::default().max_code_bytes,
+            "max_visible_tokens": crate::CodeModeLimits::default().max_visible_tokens
         }
     })
 }
@@ -355,9 +379,10 @@ fn codemode_ack_pct(result: &crate::CodeModeResult) -> String {
 }
 
 fn codemode_error_parts(result: &crate::CodeModeResult) -> (&str, &str, String) {
-    result.error.as_ref().map_or(
-        ("runtime", "final", "unknown error".to_string()),
-        |error| {
+    result
+        .error
+        .as_ref()
+        .map_or(("runtime", "final", "unknown error".to_string()), |error| {
             (
                 error.kind.as_str(),
                 if error.retryable {
@@ -367,8 +392,7 @@ fn codemode_error_parts(result: &crate::CodeModeResult) -> (&str, &str, String) 
                 },
                 error.message.chars().take(120).collect(),
             )
-        },
-    )
+        })
 }
 
 fn codemode_ack_trailer(
@@ -377,9 +401,7 @@ fn codemode_ack_trailer(
     store_ref: Option<&str>,
 ) -> String {
     match envelope {
-        CodemodeEnvelope::V2 => store_ref
-            .map(|r| format!(" t:{r}"))
-            .unwrap_or_default(),
+        CodemodeEnvelope::V2 => store_ref.map(|r| format!(" t:{r}")).unwrap_or_default(),
         CodemodeEnvelope::V3 => format!(
             " {}",
             result
@@ -674,6 +696,7 @@ fn codemode_contract_payload_v1(result: &crate::CodeModeResult) -> Value {
     }
     let mut payload = json!({
         "ack": ack,
+        "detail_ref": result.detail_ref,
         "execution_id": result.execution_id,
         "refs": refs,
         "telemetry": result.telemetry,
@@ -704,6 +727,8 @@ fn inline_response(tool: &str, mode: Mode, text: String, raw_tokens: usize) -> T
             raw_tokens,
             visible_tokens,
             recovery_tokens: 0,
+            billed_tokens: visible_tokens,
+            cached_tokens: 0,
             exact_ref_tokens: Some(0),
         },
     )
@@ -746,13 +771,9 @@ pub(crate) fn dispatch_tool(
                     _ => JsonRpcErrorData::from(err.message),
                 });
             }
-            outcome
-                .tool_response
-                .ok_or_else(|| {
-                    JsonRpcErrorData::from(
-                        "domain dispatch returned no tool response".to_string(),
-                    )
-                })
+            outcome.tool_response.ok_or_else(|| {
+                JsonRpcErrorData::from("domain dispatch returned no tool response".to_string())
+            })
         }
     }
 }
@@ -824,6 +845,8 @@ pub(crate) fn batch_response(
             raw_tokens,
             visible_tokens,
             recovery_tokens,
+            billed_tokens: visible_tokens,
+            cached_tokens: 0,
             exact_ref_tokens: Some(exact_ref_tokens),
         },
     );
@@ -902,6 +925,14 @@ pub(crate) fn mcp_tool_response(response: ToolResponse) -> Value {
             );
         }
     }
+    if let Some(ack) = response.ack.as_deref() {
+        if !ack.is_empty() && text.trim() != ack {
+            if !text.is_empty() {
+                text.push(char::from(10));
+            }
+            text.push_str(ack);
+        }
+    }
     let mut result = json!({
         "content": [{"type": "text", "text": text}],
         "resultType": "complete"
@@ -953,34 +984,27 @@ pub(crate) fn mcp_tool_response(response: ToolResponse) -> Value {
 /// summarized by kind (their content stays recoverable through the listed
 /// blob/file refs plus visible line numbers).
 fn refs_footer(response: &ToolResponse, text: &str) -> Option<String> {
-    if response.refs.is_empty() || response.refs.iter().any(|r| text.contains(&r.ref_id)) {
-        return None;
-    }
-    let mut listed: Vec<String> = Vec::new();
-    let mut extra: std::collections::BTreeMap<&str, usize> = std::collections::BTreeMap::new();
-    for record in &response.refs {
-        // blob/file carry whole payloads; combined covers full shell output.
-        if record.kind == "blob" || record.kind == "file" || record.kind == "combined" {
-            listed.push(record.ref_id.clone());
-        } else if record.kind == "undo" {
-            listed.push(format!("undo:{}", record.ref_id));
-        } else {
-            *extra.entry(record.kind.as_str()).or_default() += 1;
-        }
-    }
-    if listed.is_empty() {
-        listed = response
+    if response.refs.is_empty()
+        || text.trim() == tokenzero_recovery::working_set::ALREADY_RESIDENT_ATOM
+        || response
             .refs
             .iter()
-            .map(|record| record.ref_id.clone())
-            .collect();
-        extra.clear();
+            .any(|record| text.contains(&record.ref_id))
+    {
+        return None;
     }
-    let mut line = format!("refs: {}", listed.join(" "));
-    for (kind, count) in extra {
-        line.push_str(&format!(" +{count}:{kind}"));
-    }
-    Some(line)
+    let primary = ["combined", "blob", "file", "undo"]
+        .into_iter()
+        .find_map(|kind| response.refs.iter().find(|record| record.kind == kind))
+        .or_else(|| response.refs.first())?;
+    let undo = response
+        .refs
+        .iter()
+        .find(|record| record.kind == "undo" && record.ref_id != primary.ref_id);
+    Some(match undo {
+        Some(undo) => format!("refs: {} undo:{}", primary.ref_id, undo.ref_id),
+        None => format!("refs: {}", primary.ref_id),
+    })
 }
 
 enum EnvelopeMode {

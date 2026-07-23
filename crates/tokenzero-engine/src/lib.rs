@@ -12,6 +12,7 @@
 
 pub mod binary_resolve;
 pub mod cache_maintenance;
+pub mod cache_meter;
 mod cache_pack;
 mod collect;
 pub mod config;
@@ -31,6 +32,7 @@ mod engine_read;
 mod engine_search;
 mod engine_session;
 mod engine_shell;
+pub mod eviction_scheduler;
 pub mod expand_params;
 mod fetch_cache;
 mod fetch_guard;
@@ -40,11 +42,13 @@ pub mod paths;
 mod recall;
 pub mod render;
 mod report_tool;
+mod text_aliases;
 pub mod session;
 pub mod session_persist;
 pub mod shell_hooks;
 pub mod surface_health;
 pub mod usage_telemetry;
+pub mod warmkeeper;
 pub mod wall;
 pub mod workspace;
 pub mod write_ladder;
@@ -149,14 +153,30 @@ pub use config::{
     resolve_telemetry, shell_inline_budget_from_env, shell_timeout_from_secs,
     telemetry_env_enabled,
 };
+pub use cache_meter::{
+    ANTHROPIC_CACHE_DIAGNOSIS_BETA, AnthropicCacheDiagnosisRequest, CacheMeter,
+    CacheMeterError, CacheObservation, CachePricing, CacheProvider, CacheSessionReport,
+    CacheSloConfig, CacheSloDashboard,
+    ProviderUsage, cache_miss_attribution, parse_provider_usage,
+};
+pub use eviction_scheduler::{
+    CacheBreakpoint, EvictionBatch, EvictionCandidate, EvictionDecision, EvictionDecisionKind,
+    EvictionReplayItem, EvictionReplayReport, EvictionSavingsLedger, EvictionSchedule,
+    OPENAI_MAX_RETENTION_SECONDS, PrefixTier, provider_breakpoints, schedule_evictions,
+    simulate_eviction_replay, ttl_from_gaps,
+};
+pub use warmkeeper::{
+    WarmDecision, WarmDecisionKind, WarmLane, WarmLaneTier, WarmReplayLane,
+    WarmSimulationReport, ZeroOutputTouch, schedule_rewarms, simulate_warmkeeper,
+};
 pub use usage_telemetry::{
-    ExecutionPath, TelemetryInspection, UsageRecord, inspect_usage_telemetry,
-    record_codemode_accounting, record_mcp_accounting, usage_telemetry_enabled,
-    usage_telemetry_path_for_cache,
+    AmplificationRecord, DirectionTokens, ExecutionPath, OperationClass, TA_REGISTRY,
+    TaClassReport, TaCostLockViolation, TelemetryInspection, UsageRecord, enforce_ta_cost_locks, inspect_usage_telemetry,
+    record_codemode_accounting, record_mcp_accounting, record_operation_amplification,
+    replay_ta_table, usage_telemetry_enabled, usage_telemetry_path_for_cache,
 };
 
 /// One find/replace hunk for [`TokenZeroEngine::edit`]. `find` must match the
-/// evolving file text exactly once unless `replace_all` is set. for [`TokenZeroEngine::edit`]. `find` must match the
 /// evolving file text exactly once unless `replace_all` is set.
 #[derive(Debug, Clone, serde::Deserialize)]
 pub struct EditHunk {

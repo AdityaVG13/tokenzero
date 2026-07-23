@@ -152,6 +152,12 @@ jobs:
           TEST_THREADS: "2"
       - name: Build release binary
         run: cargo build --release -p tokenzero
+      - name: GVKV token-amplification and boot-cost locks
+        env:
+          TOKENZERO_BOOT_BENCH_BIN: target/release/tokenzero
+        run: |
+          cargo test -p tokenzero-engine --test ta_registry
+          cargo test -p tokenzero --test boot_cost_lock -- --test-threads=1
       - name: Doctor
         run: target/release/tokenzero doctor --root . --runtime --json
       - name: Package audit

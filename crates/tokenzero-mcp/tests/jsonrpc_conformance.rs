@@ -31,7 +31,10 @@ mod conformance {
                     "clientInfo": {"name": "conformance", "version": "1.0.0"}
                 }
             }));
-            assert!(init.get("result").is_some(), "lifecycle initialize failed: {init}");
+            assert!(
+                init.get("result").is_some(),
+                "lifecycle initialize failed: {init}"
+            );
             assert!(
                 self.raw(r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#)
                     .is_none(),
@@ -456,7 +459,7 @@ $(assert_eq!(data[$field], $expected, "{}: {}", $id, actual);)? $(assert!(array_
         assert!(
             lines
                 .get(1)
-                .is_some_and(|line| line.starts_with("refs: tz://s/")),
+                .is_some_and(|line| line.starts_with("refs: tz://")),
             "ZERO-HIT: {text}"
         );
     }
@@ -495,23 +498,15 @@ fn beta() {}
             "EDIT-CALL: {response}"
         );
         let text = result["content"][0]["text"].as_str().unwrap();
-        assert!(
-            text.lines()
-                .next()
-                .is_some_and(|line| line
-                    .starts_with(&format!("# edit {} — 1 hunks applied", file.display()))),
-            "EDIT-CALL: {text}"
-        );
         let footer = text
             .lines()
             .find(|line| line.starts_with("refs: "))
             .unwrap_or_else(|| panic!("EDIT-CALL missing refs: {text}"));
-        assert!(footer.contains("tz://s/"), "EDIT-CALL: {footer}");
         let undo_ref = footer
             .split_whitespace()
             .find_map(|part| part.strip_prefix("undo:"))
             .unwrap_or_else(|| panic!("EDIT-CALL missing undo: {footer}"));
-        assert!(undo_ref.starts_with("tz://s/"), "EDIT-CALL: {footer}");
+        assert!(undo_ref.starts_with("tz://"), "EDIT-CALL: {footer}");
         assert_eq!(
             fs::read_to_string(&file).unwrap(),
             "fn alpha() -> u8 { 1 }

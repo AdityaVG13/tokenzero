@@ -71,7 +71,7 @@ fn sandbox_denies_host_capabilities() {
             CodeModeStatus::Error,
             "plan should fail: {plan}"
         );
-        assert_eq!(result.visible_ack, "X0");
+        assert_eq!(result.visible_ack, "2");
         assert!(
             result.error.as_ref().unwrap().message.contains("sandbox"),
             "unexpected error: {:?}",
@@ -277,7 +277,10 @@ fn envelope_v3_scalar_fold_keeps_structured_value() {
         .as_ref()
         .map(|visible| visible.text.as_str())
         .unwrap_or("");
-    assert!(text.contains("=7"), "scalar should fold into v3 ack: {text}");
+    assert!(
+        text.contains("=7"),
+        "scalar should fold into v3 ack: {text}"
+    );
     let telemetry = response.telemetry.as_ref().expect("telemetry");
     assert_eq!(telemetry.get("result_surfaced"), Some(&json!(true)));
     assert_eq!(
@@ -454,12 +457,22 @@ fn concurrent_direct_compact_expand_uses_requested_store() {
     }
 
     barrier.wait();
-    let outcomes: Vec<_> = workers.into_iter().map(|worker| worker.join().unwrap()).collect();
+    let outcomes: Vec<_> = workers
+        .into_iter()
+        .map(|worker| worker.join().unwrap())
+        .collect();
     let mut store = tokenzero_recovery::RecoveryStore::new(Some(cache_path));
     for (payload, ref_id, direct_text) in outcomes {
-        assert_eq!(direct_text, payload, "direct expand returned the wrong session payload");
+        assert_eq!(
+            direct_text, payload,
+            "direct expand returned the wrong session payload"
+        );
         let expanded = store.expand(&ref_id, None, None, None, None, None);
-        assert!(expanded.found, "ref was not persisted to requested store: {}", expanded.reason);
+        assert!(
+            expanded.found,
+            "ref was not persisted to requested store: {}",
+            expanded.reason
+        );
         assert_eq!(expanded.content, payload);
     }
 }
@@ -516,5 +529,133 @@ fn shell_ref_is_canonical_and_expandable_in_subsequent_execution() {
         text,
         Some("codemode-durable-shell-ref\n"),
         "subsequent CodeMode execution did not recover exact stdout: {value:?}"
+    );
+}
+
+#[test]
+fn full_artifact_durability_matrix_includes_same_call_shell_stdout_expand() {
+    let work = tempfile::tempdir().unwrap();
+    std::fs::write(work.path().join("matrix.txt"), "matrix-file-bytes\n").unwrap();
+    let cache_path = work.path().join("recovery-cache.json");
+    let plan = r#"
+        const read = zero.read("matrix.txt");
+        const tree = zero.tree(".", { depth: 1 });
+        const shell = zero.shell("printf 'matrix-shell-bytes\n'");
+        const compact = zero.token.compact("matrix-plan-bytes");
+        const shellNow = zero.token.expand(shell.stdout_ref);
+        return { refs: [read.ref, tree.ref, shell.stdout_ref, compact.ref], shell_now: shellNow.text || shellNow };
+    "#;
+    let run = execute_codemode_with_options(
+        plan,
+        CodeModeOptions {
+            root: Some(work.path().to_path_buf()),
+            cache_path: Some(cache_path.clone()),
+            max_wall_ms: 30_000,
+            hard_max_wall_ms: 30_000,
+            ..Default::default()
+        },
+    );
+    assert_eq!(run.status, CodeModeStatus::Completed, "{:?}", run.error);
+    let value = run.value.unwrap();
+    assert_eq!(value["shell_now"].as_str(), Some("matrix-shell-bytes\n"));
+    let refs = value["refs"].as_array().unwrap();
+    assert_eq!(refs.len(), 4);
+    let mut restarted = tokenzero_recovery::RecoveryStore::new(Some(cache_path));
+    for ref_id in refs {
+        let ref_id = ref_id.as_str().expect("artifact ref");
+        let expanded = restarted.expand(ref_id, None, None, None, None, None);
+        assert!(
+            expanded.found,
+            "durability matrix lost {ref_id}: {}",
+            expanded.reason
+        );
+        assert!(
+            !expanded.content.is_empty(),
+            "durability matrix stored empty {ref_id}"
+        );
+    }
+}
+
+#[test]
+fn builtin_recipe_registry_is_discoverable_and_all_ten_fit_envelopes() {
+    let work = tempfile::tempdir().unwrap();
+    let file = work.path().join("sample.txt");
+    std::fs::write(&file, "needle\nsecond line\n").unwrap();
+    let path = serde_json::to_string(work.path()).unwrap();
+    let file_path = serde_json::to_string(&file).unwrap();
+    let plans = [
+        ("read_head", format!(r#"return zero.run("read_head", {{path: {file_path}}})"#)),
+        ("find_bounded", format!(r#"return zero.run("find_bounded", {{pattern: "needle", path: {path}}})"#)),
+        ("grep_bounded", format!(r#"return zero.run("grep_bounded", {{pattern: "needle", path: {path}}})"#)),
+        ("expand_head", r#"return zero.ingest("recipe payload").then(stored => zero.run("expand_head", {ref: stored.ref}))"#.to_string()),
+        ("tree_shallow", format!(r#"return zero.run("tree_shallow", {{path: {path}}})"#)),
+        ("glob_bounded", format!(r#"return zero.run("glob_bounded", {{pattern: "*.txt", path: {path}}})"#)),
+        ("shell_quiet", r#"return zero.run("shell_quiet", {command: "printf recipe"})"#.to_string()),
+        ("ingest_text", r#"return zero.run("ingest_text", {text: "recipe payload"})"#.to_string()),
+        ("recall_top", r#"return zero.run("recall_top", {query: "recipe payload"})"#.to_string()),
+        ("repo_snapshot", format!(r#"return zero.run("repo_snapshot", {{path: {path}, file: {file_path}}})"#)),
+    ];
+    assert_eq!(plans.len(), 10);
+    for (name, plan) in plans {
+        let result = execute_codemode_with_options(
+            &plan,
+            CodeModeOptions {
+                root: Some(work.path().to_path_buf()),
+                ..Default::default()
+            },
+        );
+        assert_eq!(
+            result.status,
+            CodeModeStatus::Completed,
+            "{name}: {:?}",
+            result.error
+        );
+        let definition = super::recipe_registry::get(name).unwrap();
+        assert!(
+            result.telemetry.visible_tokens <= definition.envelope_tokens(),
+            "{name}: measured {} > envelope {}",
+            result.telemetry.visible_tokens,
+            definition.envelope_tokens(),
+        );
+    }
+
+    let listed = execute_codemode_with_options("return zero.list()", Default::default());
+    assert_eq!(
+        listed.status,
+        CodeModeStatus::Completed,
+        "{:?}",
+        listed.error
+    );
+    assert_eq!(listed.value.as_ref().unwrap().as_array().unwrap().len(), 10);
+    let described = execute_codemode_with_options(
+        r#"return zero.describeRecipe("read_head")"#,
+        Default::default(),
+    );
+    assert_eq!(
+        described.status,
+        CodeModeStatus::Completed,
+        "{:?}",
+        described.error
+    );
+    assert_eq!(
+        described.value.as_ref().unwrap()["registry_version"],
+        "1.0.0"
+    );
+}
+
+#[test]
+fn builtin_recipe_rejects_envelope_above_declared_budget() {
+    let result = execute_codemode_with_options(
+        r#"return zero.run("read_head", {path: "Cargo.toml"})"#,
+        CodeModeOptions {
+            max_visible_tokens: 511,
+            ..Default::default()
+        },
+    );
+    assert_eq!(result.status, CodeModeStatus::Error);
+    let message = &result.error.as_ref().unwrap().message;
+    assert!(
+        message.contains("recipe_budget_exceeded") || message.contains("envelope 512"),
+        "{message}"
     );
 }

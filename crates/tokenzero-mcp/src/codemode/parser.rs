@@ -1,6 +1,6 @@
 //! JS-like plan parser for CodeMode execution.
 
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 use std::collections::HashMap;
 
 #[derive(Debug, Clone)]
@@ -27,6 +27,7 @@ pub(crate) enum Expr {
     Object(Vec<(String, Expr)>),
     VarRef(String),
     PropAccess(String, String),
+    LogicalOr(Box<Expr>, Box<Expr>),
 }
 
 #[derive(Debug, Clone)]
@@ -137,6 +138,13 @@ pub(crate) fn parse_expr(s: &str) -> Result<Expr, String> {
     let s = s.trim();
     if s.is_empty() {
         return Ok(Expr::Null);
+    }
+
+    if let Some(index) = find_top_level_logical_or(s) {
+        return Ok(Expr::LogicalOr(
+            Box::new(parse_expr(&s[..index])?),
+            Box::new(parse_expr(&s[index + 2..])?),
+        ));
     }
 
     if s == "null" || s == "undefined" {
@@ -349,6 +357,18 @@ fn split_statements(input: &str) -> Vec<String> {
     }
     parts
 }
+fn find_top_level_logical_or(s: &str) -> Option<usize> {
+    let mut scanner = Scanner::default();
+    let mut chars = s.char_indices().peekable();
+    while let Some((index, ch)) = chars.next() {
+        if ch == '|' && scanner.at_top() && chars.peek().is_some_and(|(_, next)| *next == '|') {
+            return Some(index);
+        }
+        scanner.consume(ch);
+    }
+    None
+}
+
 fn split_top_level_commas(s: &str) -> Vec<&str> {
     let (mut parts, mut start, mut scanner) = (Vec::new(), 0, Scanner::default());
     for (index, ch) in s.char_indices() {
@@ -391,6 +411,18 @@ fn resolve_fields(
         .collect::<Result<serde_json::Map<_, _>, _>>()
         .map(Value::Object)
 }
+fn js_truthy(value: &Value) -> bool {
+    match value {
+        Value::Null => false,
+        Value::Bool(value) => *value,
+        Value::Number(value) => value
+            .as_f64()
+            .is_some_and(|number| number != 0.0 && !number.is_nan()),
+        Value::String(value) => !value.is_empty(),
+        Value::Array(_) | Value::Object(_) => true,
+    }
+}
+
 pub(crate) fn resolve_expr(expr: &Expr, scope: &HashMap<String, Value>) -> Result<Value, String> {
     match expr {
         Expr::StringLit(value) => Ok(Value::String(value.clone())),
@@ -407,6 +439,14 @@ pub(crate) fn resolve_expr(expr: &Expr, scope: &HashMap<String, Value>) -> Resul
         Expr::Object(fields) => resolve_fields(fields, scope),
         Expr::VarRef(name) => resolve_name(scope, name, None),
         Expr::PropAccess(object, property) => resolve_name(scope, object, Some(property)),
+        Expr::LogicalOr(left, right) => {
+            let left = resolve_expr(left, scope)?;
+            if js_truthy(&left) {
+                Ok(left)
+            } else {
+                resolve_expr(right, scope)
+            }
+        }
     }
 }
 pub(crate) fn resolve_return(

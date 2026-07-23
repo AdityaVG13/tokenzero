@@ -15,6 +15,9 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tempfile::NamedTempFile;
 use tokenzero_core::{PULSE_SCHEMA_VERSION, savings_ratio};
 
+mod eprocess;
+pub use eprocess::{AnytimeFailureMonitor, EProcessSnapshot, MonitorConfigError};
+
 trait IntoIo<T> {
     fn into_io(self) -> IoResult<T>;
 }

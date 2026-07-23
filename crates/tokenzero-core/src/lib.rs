@@ -169,6 +169,12 @@ pub struct Accounting {
     pub raw_tokens: usize,
     pub visible_tokens: usize,
     pub recovery_tokens: usize,
+    /// Output tokens billed at the tool boundary. Defaults preserve older records.
+    #[serde(default)]
+    pub billed_tokens: usize,
+    /// Billed output tokens satisfied by the measured cache source.
+    #[serde(default)]
+    pub cached_tokens: usize,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub exact_ref_tokens: Option<usize>,
 }
@@ -203,6 +209,12 @@ pub struct ToolResponse {
     pub schema_version: String,
     pub status: String,
     pub tool: String,
+    /// ACK/2 one-token class atom. Pure mutation success is silent (None).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ack: Option<String>,
+    /// Expandable detail ref for the response body when one is available.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub detail_ref: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub mode: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -241,6 +253,8 @@ impl ToolResponse {
         accounting: Accounting,
     ) -> Self {
         Self {
+            ack: Some(AckClass::Success.atom().to_string()),
+            detail_ref: refs.first().map(|record| record.ref_id.clone()),
             mode: Some(mode.to_string()),
             visible: Some(Visible {
                 kind: "capsule".to_string(),
@@ -258,9 +272,12 @@ impl ToolResponse {
         message: impl Into<String>,
         repair: Option<String>,
     ) -> Self {
+        let code = code.into();
+        let ack = AckClass::from_error_kind(&code, false).atom().to_string();
         Self {
+            ack: Some(ack),
             error: Some(CliError {
-                code: code.into(),
+                code,
                 message: message.into(),
                 repair,
             }),
@@ -879,17 +896,9 @@ fn format_shell_status_header(
     push_shell_kv(&mut vis, "status", &status.status_label);
     vis.push_str(&format!("command_success: {}\n", status.command_success));
     push_shell_status(&mut vis, status, false);
-    // Never emit refs to empty payloads (empty-string SHA e3b0c44...).
-    push_optional_shell_kv(
-        &mut vis,
-        "stdout_ref",
-        input.stdout_ref.filter(|_| !input.stdout.is_empty()),
-    );
-    push_optional_shell_kv(
-        &mut vis,
-        "stderr_ref",
-        input.stderr_ref.filter(|_| !input.stderr.is_empty()),
-    );
+    // The combined payload is the single primary recovery anchor. Stream and
+    // capture refs remain machine-visible in ToolResponse::refs, but repeating
+    // them in the capsule made one shell action mint up to four visible refs.
     push_optional_shell_kv(&mut vis, "combined_ref", input.combined_ref);
     vis + "\n" + body.trim_end()
 }
@@ -1474,6 +1483,8 @@ pub fn ref_record(kind: &str, ref_id: String, bytes: usize) -> RefRecord {
     }
 }
 
+pub mod operation_abi;
+mod protocol_atoms;
 mod render;
 mod shell_display;
 mod shell_family;
@@ -1481,7 +1492,6 @@ mod shell_parse;
 mod shell_policy;
 mod shell_quote;
 pub mod token_classes;
-pub mod operation_abi;
 mod tokens;
 
 use render::domain::*;
@@ -1490,6 +1500,10 @@ use shell_display::*;
 use shell_parse::*;
 use tokens::*;
 
+pub use protocol_atoms::{
+    AckClass, PORTABLE_ONE_TOKEN_ATOMS, ProtocolTokenizer, is_verified_one_token_atom,
+    portable_one_token_atoms, render_ack,
+};
 pub use render::domain::{
     diagnostic_shell_view, is_repo_inventory_command, repo_inventory_view, structured_shell_view,
 };

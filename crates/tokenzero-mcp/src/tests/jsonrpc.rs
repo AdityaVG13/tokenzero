@@ -287,6 +287,20 @@ fn mcp_envelope_is_text_only_by_default() {
     let text = result["content"][0]["text"].as_str().unwrap();
     assert!(text.contains("compact-envelope-check"), "{text}");
     assert!(
+        text.ends_with(
+            "
+0"
+        ),
+        "MCP status footer is one ACK/2 atom: {text}"
+    );
+    assert!(
+        text.lines()
+            .filter(|line| line.contains("_ref:") || line.starts_with("refs:"))
+            .count()
+            <= 1,
+        "shell action must expose at most one primary ref line: {text}"
+    );
+    assert!(
         text.contains("combined_ref: tz://") || text.contains("refs: tz://"),
         "shell text must keep a recovery anchor: {text}"
     );
@@ -311,7 +325,20 @@ fn mcp_envelope_is_text_only_by_default() {
     assert!(read_text.contains("alpha"), "{read_text}");
     // Visible capsules carry session-scoped short aliases (c9b1ca0); the
     // full-hash blob ref stays recoverable behind the alias table.
-    assert!(read_text.contains("refs: tz://s/"), "{read_text}");
+    assert!(read_text.contains("refs: tz://o/"), "{read_text}");
+    assert_eq!(
+        read_text
+            .lines()
+            .filter(|line| line.starts_with("refs:"))
+            .count(),
+        1,
+        "one primary ref footer per action: {read_text}"
+    );
+    let legacy_multi_ref = format!("{read_text} tz://s/aaaaaaaaaaaaaaaa tz://s/bbbbbbbbbbbbbbbb");
+    assert!(
+        tokenzero_core::count_tokens(read_text) < tokenzero_core::count_tokens(&legacy_multi_ref),
+        "ordinal primary footer must reduce TA against multi-ref corpus"
+    );
     // The edit hint rides the refs footer on read responses only: it steers
     // agents to tz_edit instead of a doomed native-Edit-after-tz_read loop.
     assert!(read_text.contains("edit: tz_edit"), "{read_text}");
@@ -574,11 +601,18 @@ fn mcp_tool_calls_are_pulse_accounted_with_attribution() {
     });
     let read_response = handle_jsonrpc(&engine, &read_request.to_string()).unwrap();
     let parsed: serde_json::Value = serde_json::from_str(&read_response).unwrap();
-    let text = parsed["result"]["content"][0]["text"].as_str().unwrap();
-    let ref_id = text
-        .split_whitespace()
-        .find(|word| word.starts_with("tz://s/") || word.starts_with("tz://blob/"))
-        .expect("read response advertises an expandable payload ref")
+    fn first_payload_ref(value: &serde_json::Value) -> Option<&str> {
+        match value {
+            serde_json::Value::String(text) => text
+                .split_whitespace()
+                .find(|word| word.starts_with("tz://")),
+            serde_json::Value::Array(items) => items.iter().find_map(first_payload_ref),
+            serde_json::Value::Object(fields) => fields.values().find_map(first_payload_ref),
+            _ => None,
+        }
+    }
+    let ref_id = first_payload_ref(&parsed["result"])
+        .unwrap_or_else(|| panic!("read response advertises an expandable payload ref: {parsed}"))
         .to_string();
 
     let expand_request = serde_json::json!({
@@ -612,6 +646,7 @@ fn mcp_tool_calls_are_pulse_accounted_with_attribution() {
                 ref_id
                     .strip_prefix("tz://s/")
                     .is_some_and(|short| hash.starts_with(short))
+                    || ref_id.starts_with("tz://o/")
             })
     };
     assert!(
@@ -714,12 +749,21 @@ fn batch_panic_isolates_sibling_responses() {
         by_id.insert(item["id"].as_i64().unwrap(), item);
     }
     assert!(by_id.contains_key(&701), "missing panic id 701: {parsed:#}");
-    assert!(by_id.contains_key(&702), "missing sibling id 702: {parsed:#}");
+    assert!(
+        by_id.contains_key(&702),
+        "missing sibling id 702: {parsed:#}"
+    );
 
     assert_structured_error(by_id[&701], -32603, Some("INTERNAL"));
     assert_eq!(by_id[&701]["error"]["message"], "Internal error");
-    assert!(by_id[&702].get("result").is_some(), "ping must succeed: {parsed:#}");
-    assert!(by_id[&702].get("error").is_none(), "ping must not error: {parsed:#}");
+    assert!(
+        by_id[&702].get("result").is_some(),
+        "ping must succeed: {parsed:#}"
+    );
+    assert!(
+        by_id[&702].get("error").is_none(),
+        "ping must not error: {parsed:#}"
+    );
 }
 
 #[test]
@@ -750,12 +794,18 @@ fn batch_panic_preserves_notification_suppression() {
     let responses = parsed
         .as_array()
         .unwrap_or_else(|| panic!("expected batch array, got {parsed:#}"));
-    assert_eq!(responses.len(), 2, "notification must stay suppressed: {parsed:#}");
-    let ids: Vec<_> = responses.iter().map(|item| item["id"].as_i64().unwrap()).collect();
+    assert_eq!(
+        responses.len(),
+        2,
+        "notification must stay suppressed: {parsed:#}"
+    );
+    let ids: Vec<_> = responses
+        .iter()
+        .map(|item| item["id"].as_i64().unwrap())
+        .collect();
     assert!(ids.contains(&701), "{parsed:#}");
     assert!(ids.contains(&702), "{parsed:#}");
 }
-
 
 #[test]
 fn tools_list_requires_initialize_lifecycle() {

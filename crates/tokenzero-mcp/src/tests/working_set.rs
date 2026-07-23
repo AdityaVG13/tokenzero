@@ -39,6 +39,8 @@ fn session_working_set_eviction_is_visible_in_metrics() {
     assert_eq!(metrics["working_set"]["evictions"], 2);
     assert!(metrics["working_set"]["bytes_evicted"].as_u64().unwrap() > 0);
     assert_eq!(metrics["working_set"]["refs_created"], 2);
+    assert_eq!(metrics["working_set"]["render_rewrites"], 2);
+    assert!(metrics["working_set"]["eviction_accounting"]["expected_rehydration_tokens"].as_f64().unwrap() > 0.0);
 }
 
 #[test]
@@ -105,6 +107,8 @@ fn session_expand_fault_is_byte_exact_and_updates_working_set_metrics() {
     assert_eq!(metrics["working_set"]["faults"], 1);
     assert_eq!(metrics["working_set"]["fault_rate"], 1.0);
     assert_eq!(metrics["working_set"]["rehydrations"], 1);
+    assert_eq!(metrics["working_set"]["fault_hook_calls"], 1);
+    assert_eq!(metrics["working_set"]["eviction_accounting"]["alarm"], true);
     assert_eq!(metrics["working_set"]["rehydration_latency"]["samples"], 1);
     assert!(metrics["working_set"]["churn"].as_u64().unwrap() >= 3);
 }

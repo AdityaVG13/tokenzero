@@ -44,6 +44,10 @@ impl TokenZeroEngine {
             !row.rel.contains("recovery-cache")
                 && !row.rel.contains("cache.json")
                 && !row.rel.contains("cache-packs")
+                && !row.rel.ends_with(".lock")
+                && !row.rel.starts_with("ledger.jsonl")
+                && !row.rel.starts_with("maintenance.")
+                && !row.rel.starts_with("gc.")
                 && !row.rel.starts_with(".tokenzero")
         });
         stable_sections.push(format!(
@@ -54,10 +58,9 @@ impl TokenZeroEngine {
                 .collect::<Vec<_>>()
                 .join("\n")
         ));
-        let operation_contract = serde_json::to_string_pretty(
-            &tokenzero_core::operation_abi::contract_manifest(),
-        )
-        .unwrap_or_default();
+        let operation_contract =
+            serde_json::to_string_pretty(&tokenzero_core::operation_abi::contract_manifest())
+                .unwrap_or_default();
         stable_sections.push(format!("## operation-abi\n{operation_contract}"));
         let stable_text = stable_sections.join("\n\n");
         let volatile_text = format!(

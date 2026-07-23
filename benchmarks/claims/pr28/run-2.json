@@ -1,0 +1,523 @@
+{
+  "environment": {
+    "baseline": {
+      "path": "/private/tmp/tokenzero-pr28-origin-main/target/release/tokenzero",
+      "sha256": "f3742dfb12d328857853419131ebdc5c5783ff67ea1409e64cfdeb681304fb7b",
+      "version": "tokenzero 1.4.0"
+    },
+    "candidate": {
+      "path": "/Users/aditya/AI/TokenZero/target/release/tokenzero",
+      "sha256": "ace8417838006394ee354daf036f82140f512c11eb851f315bfce8cff8992ba4",
+      "version": "tokenzero 1.4.0"
+    },
+    "fixture": {
+      "bytes": 23275,
+      "path": "/Users/aditya/AI/TokenZero/README.md",
+      "sha256": "32673d5148e7112b62ea81e755933f742e313fcd2f1fddec9917f53d89be23ed"
+    },
+    "machine": "arm64",
+    "platform": "macOS-26.5-arm64-arm-64bit",
+    "python": "3.9.6",
+    "work_dir": "/Users/aditya/AI/TokenZero"
+  },
+  "gate": {
+    "noise_tolerance_pct": 1.0,
+    "passed": false,
+    "regressions": [
+      {
+        "baseline": 6.533792,
+        "candidate": 6.759375,
+        "change_pct": 3.452559,
+        "metric": "wall_ms",
+        "operation": "read",
+        "percentile": "p95"
+      },
+      {
+        "baseline": 5.331,
+        "candidate": 5.424,
+        "change_pct": 1.744513,
+        "metric": "cpu_ms",
+        "operation": "read",
+        "percentile": "p95"
+      },
+      {
+        "baseline": 6.072,
+        "candidate": 6.176,
+        "change_pct": 1.71278,
+        "metric": "cpu_ms",
+        "operation": "find",
+        "percentile": "p95"
+      },
+      {
+        "baseline": 7.072458,
+        "candidate": 7.154916,
+        "change_pct": 1.165903,
+        "metric": "wall_ms",
+        "operation": "tree",
+        "percentile": "p95"
+      },
+      {
+        "baseline": 5.672,
+        "candidate": 5.789,
+        "change_pct": 2.062764,
+        "metric": "cpu_ms",
+        "operation": "tree",
+        "percentile": "p95"
+      },
+      {
+        "baseline": 7.86025,
+        "candidate": 8.03325,
+        "change_pct": 2.200948,
+        "metric": "wall_ms",
+        "operation": "expand",
+        "percentile": "p50"
+      },
+      {
+        "baseline": 8.463958,
+        "candidate": 8.625083,
+        "change_pct": 1.90366,
+        "metric": "wall_ms",
+        "operation": "expand",
+        "percentile": "p95"
+      },
+      {
+        "baseline": 6.581,
+        "candidate": 6.709,
+        "change_pct": 1.944993,
+        "metric": "cpu_ms",
+        "operation": "expand",
+        "percentile": "p50"
+      },
+      {
+        "baseline": 7.138,
+        "candidate": 7.266,
+        "change_pct": 1.793219,
+        "metric": "cpu_ms",
+        "operation": "expand",
+        "percentile": "p95"
+      },
+      {
+        "baseline": 1.217875,
+        "candidate": 1.6715,
+        "change_pct": 37.247254,
+        "metric": "wall_ms",
+        "operation": "mcp_read_warm",
+        "percentile": "p50"
+      },
+      {
+        "baseline": 1.480416,
+        "candidate": 1.829208,
+        "change_pct": 23.560405,
+        "metric": "wall_ms",
+        "operation": "mcp_read_warm",
+        "percentile": "p95"
+      }
+    ],
+    "rule": "fail when any available candidate p50 or p95 wall_ms/cpu_ms exceeds baseline by more than noise_tolerance_pct"
+  },
+  "measurement_limitations": [
+    "CLI CPU is the portable RUSAGE_CHILDREN user+system delta and may include descendant work; it excludes parent harness CPU.",
+    "Long-lived MCP CPU is sampled directly from the child process around each request (ps cumulative CPU time on macOS, /proc/<pid>/stat on Linux); scheduler accounting granularity may yield zero for very short requests.",
+    "Wall time includes process startup for CLI operations and JSON-RPC framing/pipe scheduling for MCP operations.",
+    "The harness does not pin CPU frequency, affinity, thermal state, or competing system load."
+  ],
+  "methodology": {
+    "expand_seed": "identical deterministic 131072-byte repetition of fixture bytes; refs required to match",
+    "isolation": "separate temporary HOME, XDG cache/config, recovery cache, and ref index per binary; identical immutable inputs",
+    "mcp": "one long-lived stdio process per binary; initialize, notifications/initialized, one unmeasured operation warmup, then alternating measured requests",
+    "percentile": "nearest rank",
+    "sample_order": "AB on even trials, BA on odd trials, independently for every operation",
+    "trials_per_binary": 50,
+    "units": {
+      "cpu_ms": "milliseconds",
+      "wall_ms": "milliseconds"
+    }
+  },
+  "results": {
+    "expand": {
+      "metrics": {
+        "cpu_ms": {
+          "baseline": {
+            "max": 7.359,
+            "min": 5.828,
+            "n": 50,
+            "p50": 6.581,
+            "p95": 7.138
+          },
+          "candidate": {
+            "max": 7.322,
+            "min": 5.817,
+            "n": 50,
+            "p50": 6.709,
+            "p95": 7.266
+          },
+          "change_pct": {
+            "max": -0.502786,
+            "min": -0.188744,
+            "p50": 1.944993,
+            "p95": 1.793219
+          }
+        },
+        "wall_ms": {
+          "baseline": {
+            "max": 20.03425,
+            "min": 7.005125,
+            "n": 50,
+            "p50": 7.86025,
+            "p95": 8.463958
+          },
+          "candidate": {
+            "max": 18.602417,
+            "min": 7.008625,
+            "n": 50,
+            "p50": 8.03325,
+            "p95": 8.625083
+          },
+          "change_pct": {
+            "max": -7.146926,
+            "min": 0.049963,
+            "p50": 2.200948,
+            "p95": 1.90366
+          }
+        }
+      }
+    },
+    "find": {
+      "metrics": {
+        "cpu_ms": {
+          "baseline": {
+            "max": 6.495,
+            "min": 4.823,
+            "n": 50,
+            "p50": 5.683,
+            "p95": 6.072
+          },
+          "candidate": {
+            "max": 6.579,
+            "min": 4.853,
+            "n": 50,
+            "p50": 5.425,
+            "p95": 6.176
+          },
+          "change_pct": {
+            "max": 1.293303,
+            "min": 0.622019,
+            "p50": -4.539856,
+            "p95": 1.71278
+          }
+        },
+        "wall_ms": {
+          "baseline": {
+            "max": 17.447208,
+            "min": 5.803375,
+            "n": 50,
+            "p50": 6.930459,
+            "p95": 7.836417
+          },
+          "candidate": {
+            "max": 18.43625,
+            "min": 6.058458,
+            "n": 50,
+            "p50": 6.632916,
+            "p95": 7.436917
+          },
+          "change_pct": {
+            "max": 5.668769,
+            "min": 4.395425,
+            "p50": -4.293265,
+            "p95": -5.097993
+          }
+        }
+      }
+    },
+    "mcp_read_warm": {
+      "metrics": {
+        "cpu_ms": {
+          "baseline": {
+            "max": 10.0,
+            "min": 0.0,
+            "n": 50,
+            "p50": 0.0,
+            "p95": 10.0
+          },
+          "candidate": {
+            "max": 10.0,
+            "min": 0.0,
+            "n": 50,
+            "p50": 0.0,
+            "p95": 10.0
+          },
+          "change_pct": {
+            "max": 0.0,
+            "min": 0.0,
+            "p50": 0.0,
+            "p95": 0.0
+          }
+        },
+        "wall_ms": {
+          "baseline": {
+            "max": 14.33625,
+            "min": 0.869583,
+            "n": 50,
+            "p50": 1.217875,
+            "p95": 1.480416
+          },
+          "candidate": {
+            "max": 1.907291,
+            "min": 1.562583,
+            "n": 50,
+            "p50": 1.6715,
+            "p95": 1.829208
+          },
+          "change_pct": {
+            "max": -86.696026,
+            "min": 79.69337,
+            "p50": 37.247254,
+            "p95": 23.560405
+          }
+        }
+      }
+    },
+    "mcp_tools_list_warm": {
+      "metrics": {
+        "cpu_ms": {
+          "baseline": {
+            "max": 10.0,
+            "min": 0.0,
+            "n": 50,
+            "p50": 0.0,
+            "p95": 0.0
+          },
+          "candidate": {
+            "max": 10.0,
+            "min": 0.0,
+            "n": 50,
+            "p50": 0.0,
+            "p95": 0.0
+          },
+          "change_pct": {
+            "max": 0.0,
+            "min": 0.0,
+            "p50": 0.0,
+            "p95": 0.0
+          }
+        },
+        "wall_ms": {
+          "baseline": {
+            "max": 6.824208,
+            "min": 6.196833,
+            "n": 50,
+            "p50": 6.302458,
+            "p95": 6.632542
+          },
+          "candidate": {
+            "max": 6.708041,
+            "min": 6.185667,
+            "n": 50,
+            "p50": 6.321333,
+            "p95": 6.561625
+          },
+          "change_pct": {
+            "max": -1.702278,
+            "min": -0.180189,
+            "p50": 0.299486,
+            "p95": -1.069228
+          }
+        }
+      }
+    },
+    "read": {
+      "metrics": {
+        "cpu_ms": {
+          "baseline": {
+            "max": 5.442,
+            "min": 4.212,
+            "n": 50,
+            "p50": 4.893,
+            "p95": 5.331
+          },
+          "candidate": {
+            "max": 5.617,
+            "min": 4.24,
+            "n": 50,
+            "p50": 4.911,
+            "p95": 5.424
+          },
+          "change_pct": {
+            "max": 3.21573,
+            "min": 0.664767,
+            "p50": 0.367872,
+            "p95": 1.744513
+          }
+        },
+        "wall_ms": {
+          "baseline": {
+            "max": 14.607541,
+            "min": 5.446917,
+            "n": 50,
+            "p50": 6.058416,
+            "p95": 6.533792
+          },
+          "candidate": {
+            "max": 13.910667,
+            "min": 5.4015,
+            "n": 50,
+            "p50": 6.09575,
+            "p95": 6.759375
+          },
+          "change_pct": {
+            "max": -4.770646,
+            "min": -0.833811,
+            "p50": 0.616234,
+            "p95": 3.452559
+          }
+        }
+      }
+    },
+    "run_echo": {
+      "metrics": {
+        "cpu_ms": {
+          "baseline": {
+            "max": 6.803,
+            "min": 5.191,
+            "n": 50,
+            "p50": 5.729,
+            "p95": 6.447
+          },
+          "candidate": {
+            "max": 6.608,
+            "min": 5.114,
+            "n": 50,
+            "p50": 5.574,
+            "p95": 6.176
+          },
+          "change_pct": {
+            "max": -2.866382,
+            "min": -1.483337,
+            "p50": -2.705533,
+            "p95": -4.203506
+          }
+        },
+        "wall_ms": {
+          "baseline": {
+            "max": 31.377709,
+            "min": 6.287292,
+            "n": 50,
+            "p50": 6.883417,
+            "p95": 7.990875
+          },
+          "candidate": {
+            "max": 30.925875,
+            "min": 6.117416,
+            "n": 50,
+            "p50": 6.7615,
+            "p95": 7.851125
+          },
+          "change_pct": {
+            "max": -1.439984,
+            "min": -2.701895,
+            "p50": -1.77117,
+            "p95": -1.74887
+          }
+        }
+      }
+    },
+    "tree": {
+      "metrics": {
+        "cpu_ms": {
+          "baseline": {
+            "max": 5.963,
+            "min": 4.405,
+            "n": 50,
+            "p50": 5.084,
+            "p95": 5.672
+          },
+          "candidate": {
+            "max": 6.194,
+            "min": 4.536,
+            "n": 50,
+            "p50": 5.081,
+            "p95": 5.789
+          },
+          "change_pct": {
+            "max": 3.873889,
+            "min": 2.973893,
+            "p50": -0.059009,
+            "p95": 2.062764
+          }
+        },
+        "wall_ms": {
+          "baseline": {
+            "max": 17.20975,
+            "min": 5.596084,
+            "n": 50,
+            "p50": 6.204542,
+            "p95": 7.072458
+          },
+          "candidate": {
+            "max": 17.89225,
+            "min": 5.57875,
+            "n": 50,
+            "p50": 6.191291,
+            "p95": 7.154916
+          },
+          "change_pct": {
+            "max": 3.965775,
+            "min": -0.309752,
+            "p50": -0.213569,
+            "p95": 1.165903
+          }
+        }
+      }
+    },
+    "version": {
+      "metrics": {
+        "cpu_ms": {
+          "baseline": {
+            "max": 3.061,
+            "min": 2.471,
+            "n": 50,
+            "p50": 2.588,
+            "p95": 2.782
+          },
+          "candidate": {
+            "max": 2.851,
+            "min": 2.376,
+            "n": 50,
+            "p50": 2.564,
+            "p95": 2.738
+          },
+          "change_pct": {
+            "max": -6.860503,
+            "min": -3.844597,
+            "p50": -0.927357,
+            "p95": -1.581596
+          }
+        },
+        "wall_ms": {
+          "baseline": {
+            "max": 4.250292,
+            "min": 3.384333,
+            "n": 50,
+            "p50": 3.659375,
+            "p95": 3.97775
+          },
+          "candidate": {
+            "max": 4.052875,
+            "min": 3.2285,
+            "n": 50,
+            "p50": 3.674042,
+            "p95": 3.9635
+          },
+          "change_pct": {
+            "max": -4.644787,
+            "min": -4.604541,
+            "p50": 0.400806,
+            "p95": -0.358243
+          }
+        }
+      }
+    }
+  },
+  "schema": "tokenzero.matched-ab.v1"
+}

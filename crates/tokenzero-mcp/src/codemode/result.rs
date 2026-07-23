@@ -3,6 +3,7 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::path::PathBuf;
+use tokenzero_core::{AckClass, render_ack};
 
 pub const CODEMODE_SCHEMA: &str = "tokenzero.codemode.v1";
 
@@ -13,6 +14,8 @@ pub struct CodeModeResult {
     pub schema: &'static str,
     pub status: CodeModeStatus,
     pub visible_ack: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub detail_ref: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub execution_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -70,6 +73,18 @@ pub struct CodeModeTelemetry {
     pub visible_tokens: usize,
     #[serde(skip)]
     pub raw_tokens: usize,
+    /// Measured plan-input tokens billed at the CodeMode boundary.
+    #[serde(default)]
+    pub billed_input_tokens: usize,
+    /// Input tokens served from a provider cache, when reported.
+    #[serde(default)]
+    pub cached_input_tokens: usize,
+    /// Measured visible output tokens billed at the CodeMode boundary.
+    #[serde(default)]
+    pub billed_output_tokens: usize,
+    /// Output tokens satisfied by the prefix-cache measurement.
+    #[serde(default)]
+    pub cached_output_tokens: usize,
     #[serde(skip)]
     pub steps_run: Option<usize>,
     #[serde(skip)]
@@ -168,7 +183,7 @@ impl Default for CodeModeOptions {
             root: None,
             allowed_roots: Vec::new(),
             cache_path: None,
-            max_visible_tokens: 4000,
+            max_visible_tokens: super::store::default_max_visible_tokens(),
             timeout_seconds: None,
             max_output_bytes: super::store::DEFAULT_MAX_OUTPUT_BYTES,
             max_refs_emitted: super::store::DEFAULT_MAX_REFS_EMITTED,
@@ -202,6 +217,10 @@ fn telemetry(ops: usize, visible: usize, raw: usize, refs: usize, ok: bool) -> C
         operations: ops,
         visible_tokens: visible,
         raw_tokens: raw,
+        billed_input_tokens: 0,
+        cached_input_tokens: 0,
+        billed_output_tokens: 0,
+        cached_output_tokens: 0,
         steps_run: None,
         parallel_groups: Some(0),
         refs_count: Some(refs),
@@ -246,7 +265,13 @@ impl CodeModeResult {
             } else {
                 CodeModeStatus::Error
             },
-            visible_ack: if ok { "C" } else { "X0" }.into(),
+            visible_ack: if ok {
+                render_ack(AckClass::Success, false).into()
+            } else {
+                let error = error.as_ref().expect("error result");
+                render_ack(AckClass::from_error_kind(&error.kind, error.retryable), false).into()
+            },
+            detail_ref: None,
             execution_id: None,
             value,
             refs,
@@ -295,7 +320,8 @@ impl CodeModeResult {
                     Default::default()
                 };
                 let mut line = format!(
-                    "codemode:ok C ops={} visible_tokens={} raw_tokens={}{}",
+                    "codemode:ok {} ops={} visible_tokens={} raw_tokens={}{}",
+                    self.visible_ack,
                     self.telemetry.operations(),
                     self.telemetry.visible_tokens(),
                     self.telemetry.raw_tokens(),
@@ -313,7 +339,8 @@ impl CodeModeResult {
                 line
             }
             CodeModeStatus::Error => format!(
-                "codemode:error X0 ops={} {}",
+                "codemode:error {} ops={} {}",
+                self.visible_ack,
                 self.telemetry.operations(),
                 self.error
                     .as_ref()
@@ -372,7 +399,7 @@ mod structured_error_tests {
         );
         assert_eq!(
             result.to_line(),
-            "codemode:error X0 ops=0 unknown surface: framework; hint: choose a supported surface; valid_surfaces: authoring, constructors, ops"
+            "codemode:error 9 ops=0 unknown surface: framework; hint: choose a supported surface; valid_surfaces: authoring, constructors, ops"
         );
     }
 }

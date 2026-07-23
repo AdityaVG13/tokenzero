@@ -1,11 +1,15 @@
 {
   "accounting": {
+    "billed_tokens": 46,
+    "cached_tokens": 0,
     "exact_ref_tokens": 28,
     "raw_tokens": 22,
     "recovery_tokens": 0,
-    "visible_tokens": 38
+    "visible_tokens": 46
   },
+  "ack": "0",
   "content_type": "shell_output",
+  "detail_ref": "tz://blob/[BLOB_REF_1]",
   "mode": "diagnostic",
   "refs": [
     {
@@ -105,7 +109,7 @@
     "stdout_ref": "tz://blob/[BLOB_REF_1]",
     "timeout": false,
     "transport_status": "ok",
-    "visible_tokens": 38
+    "visible_tokens": 46
   },
   "tool": "shell",
   "visible": {

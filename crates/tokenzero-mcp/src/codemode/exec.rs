@@ -1,7 +1,7 @@
 //! CodeMode plan executor and TokenZero operation dispatch.
 
-use rquickjs::{function::Func, Context, Runtime};
-use serde_json::{json, Value};
+use rquickjs::{Context, Runtime, function::Func};
+use serde_json::{Value, json};
 use std::cell::RefCell;
 use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
@@ -10,28 +10,29 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, OnceLock};
 use std::time::Duration;
 use tokenzero_core::{
-    count_tokens, detect_content_type, pack_to_token_boundary_with_char_limit, Mode, ToolResponse,
+    Mode, ToolResponse, count_tokens, detect_content_type, pack_to_token_boundary_with_char_limit,
 };
 use tokenzero_filters::{discover, rewrite_command};
 
-use crate::wall::{with_host_wall_deadline, WallDeadline};
+use crate::wall::{WallDeadline, with_host_wall_deadline};
 use crate::workspace::{
     allowed_roots_for_workspace, resolve_recovery_cache_path, tokenzero_work_root,
 };
-use crate::{shell_timeout_from_secs, EditHunk, EngineConfig, TokenZeroEngine};
+use crate::{EditHunk, EngineConfig, TokenZeroEngine, shell_timeout_from_secs};
 
 use super::catalog::{describe_method, search_catalog};
 use super::journal::{
-    atomic_write as journal_atomic_write, begin_plan, classify_method, current_digest,
-    doctor_json as journal_doctor_json, inspect as inspect_journal, open_unresolved, sha256_bytes,
     BeginOutcome, JournalOperation, JournalState, JournalTransaction, OperationClass,
-    OperationSpec,
+    OperationSpec, atomic_write as journal_atomic_write, begin_plan, classify_method,
+    current_digest, doctor_json as journal_doctor_json, inspect as inspect_journal,
+    open_unresolved, sha256_bytes,
 };
-use super::parser::{parse_plan, resolve_expr, resolve_return, Expr, MethodCall, Statement};
+use super::parser::{Expr, MethodCall, Statement, parse_plan, resolve_expr, resolve_return};
+use super::recipe_registry;
 use super::result::{CodeModeOptions, CodeModeResult, CodeModeStatus};
 use super::sandbox::lower_code_plan;
 use super::store::{
-    execution_id, finalize_result, now_ms, CodeModeLimits, ExecutionStep, ExecutionStore,
+    CodeModeLimits, ExecutionStep, ExecutionStore, execution_id, finalize_result, now_ms,
 };
 use crate::expand_params::ExpandParams;
 
@@ -710,7 +711,12 @@ fn begin_js_host_op(
 ) -> String {
     let mut args = serde_json::from_str::<Vec<Value>>(args_json).unwrap_or_default();
     if matches!(method, "codemode.recipeRun" | "recipeRun" | "recipe_run") {
-        args.push(json!(state.borrow().limits.max_code_bytes));
+        let (max_code_bytes, max_visible_tokens) = {
+            let state = state.borrow();
+            (state.limits.max_code_bytes, state.limits.max_visible_tokens)
+        };
+        args.push(json!(max_code_bytes));
+        args.push(json!(max_visible_tokens));
     }
     let logical_width = logical_width_for_method(method, &args);
     let limit_error = {
@@ -966,6 +972,7 @@ fn js_prelude() -> &'static str {
           register: (name, source) => __tz_call('codemode.recipeRegister', [name, source]),
           run: (name, args = {}) => __tz_run_recipe(name, args),
           list: () => __tz_call('codemode.recipeList', []),
+          describeRecipe: (name) => __tz_call('codemode.recipeDescribe', [String(name)]),
           ...__tz_methods('zero.', ['read','find','grep','glob','tree','shell','expand','ingest','mem','recall','fetch','cache_pack','rewrite','discover','batch','pipe','pick','filter_lines','count_tokens','assert']),
           compact: __tz_json_bind('zero.token.compact'),
           compact_max: __tz_json_bind('zero.compact_max'),
@@ -1028,6 +1035,7 @@ pub(super) fn limits_from_options(options: &CodeModeOptions) -> CodeModeLimits {
         max_microtasks: options.max_microtasks,
         max_memory_bytes: options.max_memory_bytes,
         max_code_bytes: options.max_code_bytes,
+        max_visible_tokens: options.max_visible_tokens,
         max_wall_ms,
         hard_max_wall_ms,
         max_parallel_width: options.max_parallel_width.max(1),
@@ -1557,7 +1565,12 @@ fn map_journal_err(kind: &'static str) -> impl FnOnce(String) -> Box<CodeModeRes
     move |message| boxed_error(kind, message)
 }
 fn tx_error(message: impl Into<String>, ops: usize) -> Box<CodeModeResult> {
-    Box::new(CodeModeResult::error_with_kind("transaction", message, ops, false))
+    Box::new(CodeModeResult::error_with_kind(
+        "transaction",
+        message,
+        ops,
+        false,
+    ))
 }
 
 fn stamp_ops_on_error(error: &mut CodeModeResult, ops: usize) {
@@ -1743,11 +1756,37 @@ fn finalize_codemode_result(
             );
         }
         let enabled = crate::usage_telemetry_enabled(options.telemetry_enabled);
+        finalized.telemetry.billed_input_tokens = count_tokens(plan);
+        finalized.telemetry.cached_input_tokens = 0;
+        finalized.telemetry.billed_output_tokens = finalized.telemetry.visible_tokens();
+        finalized.telemetry.cached_output_tokens = finalized
+            .telemetry
+            .prefix_cache_hits
+            .min(finalized.telemetry.billed_output_tokens);
         crate::record_codemode_accounting(
             &engine.config.cache_path,
             enabled,
             finalized.telemetry.raw_tokens(),
             finalized.telemetry.visible_tokens(),
+        );
+        crate::record_operation_amplification(
+            &engine.config.cache_path,
+            enabled,
+            crate::ExecutionPath::Codemode,
+            "codemode",
+            crate::DirectionTokens::measured(
+                count_tokens(plan),
+                count_tokens(plan),
+                finalized.telemetry.billed_input_tokens,
+                finalized.telemetry.cached_input_tokens,
+            ),
+            crate::DirectionTokens::measured(
+                finalized.telemetry.raw_tokens(),
+                finalized.telemetry.visible_tokens(),
+                finalized.telemetry.billed_output_tokens,
+                finalized.telemetry.cached_output_tokens,
+            ),
+            0,
         );
         finalized
     }
@@ -2290,9 +2329,43 @@ fn dispatch_values(
         });
     }
     if matches!(method, "codemode.recipeList" | "recipeList" | "recipe_list") {
-        return catalog(json!(with_previous_outputs(|registry| {
+        let mut names = recipe_registry::list()
+            .into_iter()
+            .map(|recipe| recipe.name)
+            .collect::<Vec<_>>();
+        names.extend(with_previous_outputs(|registry| {
             registry.recipe_names(&engine.config.cache_path)
-        })));
+        }));
+        names.sort();
+        names.dedup();
+        return catalog(json!(names));
+    }
+    if matches!(
+        method,
+        "codemode.recipeDescribe" | "recipeDescribe" | "recipe_describe"
+    ) {
+        let name = require_str_arg(args, 0, "recipe describe requires a name string")?;
+        if let Some(recipe) = recipe_registry::get(name) {
+            let envelope_tokens = recipe.envelope_tokens();
+            return catalog(json!({
+                "registry_version": recipe_registry::RECIPE_REGISTRY_VERSION,
+                "recipe": recipe,
+                "envelope_tokens": envelope_tokens,
+            }));
+        }
+        let custom = with_previous_outputs(|registry| {
+            registry.recipe_source(&engine.config.cache_path, name)
+        });
+        return custom
+            .map(|source| {
+                catalog(json!({"name": name, "version": "session", "source_bytes": source.len()}))
+            })
+            .unwrap_or_else(|| {
+                Err(boxed_error(
+                    "recipe_not_found",
+                    format!("recipe not found: {name}"),
+                ))
+            });
     }
     if matches!(method, "codemode.recipeRun" | "recipeRun" | "recipe_run") {
         let name = require_str_arg(args, 0, "recipe run requires a name string")?;
@@ -2301,10 +2374,29 @@ fn dispatch_values(
             .and_then(Value::as_u64)
             .and_then(|value| usize::try_from(value).ok())
             .unwrap_or_else(|| CodeModeLimits::default().max_code_bytes);
+        let builtin = recipe_registry::get(name);
         let source = with_previous_outputs(|registry| {
             registry.recipe_source(&engine.config.cache_path, name)
         })
+        .or_else(|| builtin.as_ref().map(|recipe| recipe.source.clone()))
         .ok_or_else(|| boxed_error("recipe_not_found", format!("recipe not found: {name}")))?;
+        if let Some(recipe) = builtin.as_ref() {
+            let budget = args
+                .get(2)
+                .and_then(Value::as_u64)
+                .and_then(|value| usize::try_from(value).ok())
+                .unwrap_or_else(|| CodeModeLimits::default().max_visible_tokens);
+            let envelope = recipe.envelope_tokens();
+            if envelope > budget {
+                return Err(boxed_error(
+                    "recipe_budget_exceeded",
+                    format!(
+                        "recipe {name}@{} envelope {envelope} exceeds declared budget {budget}",
+                        recipe.version
+                    ),
+                ));
+            }
+        }
         if source.trim().is_empty() {
             return Err(boxed_error("validation", "recipe source must not be empty"));
         }
@@ -2320,7 +2412,13 @@ fn dispatch_values(
                 "sandbox: mutating binding denied without transaction support",
             ));
         }
-        return catalog(json!({"source": source}));
+        return catalog(match builtin {
+            Some(recipe) => {
+                let envelope_tokens = recipe.envelope_tokens();
+                json!({"source": source, "version": recipe.version, "envelope_tokens": envelope_tokens})
+            }
+            None => json!({"source": source, "version": "session"}),
+        });
     }
     match method {
         "zero.read" | "read" | "zero.token.read" => exec_read(engine, work_root, args),
@@ -2391,19 +2489,23 @@ fn journal_execution_arg(args: &[Value]) -> Result<&str, Box<CodeModeResult>> {
     require_str_arg(args, 0, "journal command requires an execution_id string")
 }
 
-
 /// Route a domain op through the shared typed dispatcher (tokenzero-irx9.2).
 fn domain_via_dispatcher(engine: &TokenZeroEngine, method: &str, args: &Value) -> OpResult {
-    let outcome = tokenzero_engine::dispatch_codemode_method(engine, method, args).map_err(|err| {
-        operation_error(format!("{}: {}", err.kind.as_str(), err.message))
-    })?;
+    let outcome = tokenzero_engine::dispatch_codemode_method(engine, method, args)
+        .map_err(|err| operation_error(format!("{}: {}", err.kind.as_str(), err.message)))?;
     if let Some(resp) = outcome.tool_response {
         return tool(resp);
     }
     if let Some(err) = outcome.domain_error {
-        return Err(operation_error(format!("{}: {}", err.kind.as_str(), err.message)));
+        return Err(operation_error(format!(
+            "{}: {}",
+            err.kind.as_str(),
+            err.message
+        )));
     }
-    Err(operation_error(format!("domain dispatch for {method} returned empty outcome")))
+    Err(operation_error(format!(
+        "domain dispatch for {method} returned empty outcome"
+    )))
 }
 
 macro_rules! op_catalog {
@@ -2431,10 +2533,18 @@ fn exec_ingest(engine: &TokenZeroEngine, args: &[Value]) -> OpResult {
 }
 
 fn exec_rewrite(engine: &TokenZeroEngine, args: &[Value]) -> OpResult {
-    let command = require_str_arg(args, 0, "zero.rewrite requires a command string as first argument")?;
+    let command = require_str_arg(
+        args,
+        0,
+        "zero.rewrite requires a command string as first argument",
+    )?;
     let opts = Opts::from_arg(args, 1);
     let mode = opts.str("mode").unwrap_or("safe");
-    domain_via_dispatcher(engine, "zero.rewrite", &json!({"command": command, "mode": mode}))
+    domain_via_dispatcher(
+        engine,
+        "zero.rewrite",
+        &json!({"command": command, "mode": mode}),
+    )
 }
 
 fn exec_cache_pack(engine: &TokenZeroEngine, args: &[Value]) -> OpResult {
@@ -2444,7 +2554,11 @@ fn exec_cache_pack(engine: &TokenZeroEngine, args: &[Value]) -> OpResult {
 }
 
 fn exec_recall(engine: &TokenZeroEngine, args: &[Value]) -> OpResult {
-    let query = require_str_arg(args, 0, "zero.recall requires a query string as first argument")?;
+    let query = require_str_arg(
+        args,
+        0,
+        "zero.recall requires a query string as first argument",
+    )?;
     let opts = Opts::from_arg(args, 1);
     domain_via_dispatcher(
         engine,
@@ -2459,7 +2573,11 @@ fn exec_recall(engine: &TokenZeroEngine, args: &[Value]) -> OpResult {
 }
 
 fn exec_fetch(engine: &TokenZeroEngine, args: &[Value]) -> OpResult {
-    let url = require_str_arg(args, 0, "zero.fetch requires an http(s) URL as first argument")?;
+    let url = require_str_arg(
+        args,
+        0,
+        "zero.fetch requires an http(s) URL as first argument",
+    )?;
     let opts = Opts::from_arg(args, 1);
     let mut payload = json!({
         "url": url,
@@ -2489,7 +2607,11 @@ fn exec_batch(engine: &TokenZeroEngine, args: &[Value]) -> OpResult {
 }
 
 fn exec_compact_many(engine: &TokenZeroEngine, args: &[Value]) -> OpResult {
-    let items = require_array_arg(args, 0, "zero.token.compactMany requires an array of payloads")?;
+    let items = require_array_arg(
+        args,
+        0,
+        "zero.token.compactMany requires an array of payloads",
+    )?;
     let mut results = Vec::with_capacity(items.len());
     let mut refs = Vec::new();
     for item in items.iter().cloned() {
@@ -2501,8 +2623,12 @@ fn exec_compact_many(engine: &TokenZeroEngine, args: &[Value]) -> OpResult {
 }
 
 fn exec_job(engine: &TokenZeroEngine, args: &[Value]) -> OpResult {
+    let id = require_str_arg(args, 0, "zero.token.job requires a job id string")?;
+    let opts = Opts::from_arg(args, 1);
+    let wait = Duration::from_millis(opts.usize("wait_ms").unwrap_or(0) as u64);
+    let cursor = opts.usize("cursor").unwrap_or(0);
     engine
-        .shell_job(require_str_arg(args, 0, "zero.token.job requires a job id string")?)
+        .shell_job_wait(id, wait, cursor)
         .map(OpOutcome::from_catalog)
         .map_err(operation_error)
 }
@@ -2522,7 +2648,9 @@ fn exec_verdict(args: &[Value]) -> OpResult {
 fn exec_assert(args: &[Value]) -> OpResult {
     if !value_truthy(args.first().unwrap_or(&Value::Null)) {
         return Err(operation_error(
-            args.get(1).and_then(Value::as_str).unwrap_or("assertion failed"),
+            args.get(1)
+                .and_then(Value::as_str)
+                .unwrap_or("assertion failed"),
         ));
     }
     catalog(json!(true))
@@ -2532,7 +2660,9 @@ fn exec_count(args: &[Value]) -> OpResult {
         .first()
         .ok_or_else(|| operation_error("zero.count requires a value as first argument"))?;
     let count = value.as_array().map(|i| i.len()).unwrap_or_else(|| {
-        text_from_value(value).map(|t| t.lines().count()).unwrap_or(0)
+        text_from_value(value)
+            .map(|t| t.lines().count())
+            .unwrap_or(0)
     });
     catalog(json!(count))
 }
@@ -2553,9 +2683,17 @@ fn exec_filter_lines(args: &[Value]) -> OpResult {
             .ok_or_else(|| operation_error("zero.filter_lines requires text"))?,
     )
     .unwrap_or("");
-    let pattern =
-        require_str_arg(args, 1, "zero.filter_lines requires a pattern string as second argument")?;
-    catalog(json!(text.lines().filter(|l| l.contains(pattern)).collect::<Vec<_>>().join("\n")))
+    let pattern = require_str_arg(
+        args,
+        1,
+        "zero.filter_lines requires a pattern string as second argument",
+    )?;
+    catalog(json!(
+        text.lines()
+            .filter(|l| l.contains(pattern))
+            .collect::<Vec<_>>()
+            .join("\n")
+    ))
 }
 fn exec_journal_inspect(engine: &TokenZeroEngine, args: &[Value]) -> OpResult {
     let execution_id = journal_execution_arg(args)?;
@@ -2968,8 +3106,11 @@ fn expand_params_to_tool_args(params: &ExpandParams) -> Value {
 }
 
 fn exec_glob(engine: &TokenZeroEngine, work_root: &Path, args: &[Value]) -> OpResult {
-    let pattern =
-        require_str_arg(args, 0, "zero.glob requires a pattern string as first argument")?;
+    let pattern = require_str_arg(
+        args,
+        0,
+        "zero.glob requires a pattern string as first argument",
+    )?;
     let paths = paths_from_arg(args, 1, work_root.to_path_buf());
     domain_via_dispatcher(
         engine,
@@ -2987,11 +3128,12 @@ fn exec_glob(engine: &TokenZeroEngine, work_root: &Path, args: &[Value]) -> OpRe
 
 fn exec_tree(engine: &TokenZeroEngine, work_root: &Path, args: &[Value]) -> OpResult {
     let roots = resolve_paths_against_work_root(
-        vec![args
-            .first()
-            .and_then(|v| v.as_str())
-            .map(PathBuf::from)
-            .unwrap_or_else(|| work_root.to_path_buf())],
+        vec![
+            args.first()
+                .and_then(|v| v.as_str())
+                .map(PathBuf::from)
+                .unwrap_or_else(|| work_root.to_path_buf()),
+        ],
         work_root,
     );
     let opts = Opts::from_arg(args, 1);
@@ -3212,7 +3354,9 @@ fn exec_expand_many(engine: &TokenZeroEngine, args: &[Value]) -> OpResult {
         }
         let payload = expand_params_to_tool_args(&params);
         let outcome = tokenzero_engine::dispatch_codemode_method(engine, "zero.expand", &payload)
-            .map_err(|err| operation_error(format!("{}: {}", err.kind.as_str(), err.message)))?;
+            .map_err(|err| {
+            operation_error(format!("{}: {}", err.kind.as_str(), err.message))
+        })?;
         let Some(resp) = outcome.tool_response else {
             return Err(operation_error("zero.expand: empty domain outcome"));
         };

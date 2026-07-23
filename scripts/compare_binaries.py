@@ -98,6 +98,41 @@ def decode_json(stdout: bytes, label: str) -> Any:
         raise HarnessError(f"{label} returned invalid JSON: {exc}; stdout={preview!r}") from exc
 
 
+def process_cpu_ms(pid: int) -> float:
+    """Return cumulative user+system CPU for a live process."""
+    if sys.platform == "darwin":
+        observed = subprocess.run(
+            ["ps", "-p", str(pid), "-o", "time="],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        if observed.returncode != 0 or not observed.stdout.strip():
+            raise HarnessError(f"ps CPU snapshot failed for pid {pid}: {observed.stderr.strip()}")
+        value = observed.stdout.strip()
+        days = 0
+        if "-" in value:
+            day_text, value = value.split("-", 1)
+            days = int(day_text)
+        fields = value.split(":")
+        if len(fields) == 2:
+            hours = 0
+            minutes, seconds = fields
+        elif len(fields) == 3:
+            hours, minutes, seconds = fields
+        else:
+            raise HarnessError(f"unexpected ps CPU time for pid {pid}: {value!r}")
+        return 1000.0 * (days * 86400 + int(hours) * 3600 + int(minutes) * 60 + float(seconds))
+
+    if sys.platform.startswith("linux"):
+        stat = Path(f"/proc/{pid}/stat").read_text(encoding="utf-8")
+        fields = stat[stat.rfind(")") + 2 :].split()
+        ticks = int(fields[11]) + int(fields[12])
+        return 1000.0 * ticks / os.sysconf("SC_CLK_TCK")
+
+    raise HarnessError(f"live process CPU measurement is unsupported on {sys.platform}")
+
+
 def run_cli(
     binary: Path,
     arguments: list[str],
@@ -163,7 +198,7 @@ class McpClient:
             bufsize=0,
         )
         self.next_id = 1
-        response, _ = self.request(
+        response, _, _ = self.request(
             "initialize",
             {
                 "protocolVersion": MCP_PROTOCOL_VERSION,
@@ -197,7 +232,7 @@ class McpClient:
             )
         return line
 
-    def request(self, method: str, params: dict[str, Any]) -> tuple[dict[str, Any], float]:
+    def request(self, method: str, params: dict[str, Any]) -> tuple[dict[str, Any], float, float]:
         assert self.child.stdin is not None
         request_id = self.next_id
         self.next_id += 1
@@ -207,6 +242,7 @@ class McpClient:
             "method": method,
             "params": params,
         }
+        cpu_before = process_cpu_ms(self.child.pid)
         started = time.perf_counter_ns()
         try:
             self.child.stdin.write(json.dumps(payload, separators=(",", ":")).encode() + b"\n")
@@ -232,7 +268,8 @@ class McpClient:
             if "result" not in response:
                 raise HarnessError(f"{self.name} MCP {method} response has no result")
             elapsed_ms = (time.perf_counter_ns() - started) / 1_000_000
-            return response, elapsed_ms
+            cpu_ms = max(0.0, process_cpu_ms(self.child.pid) - cpu_before)
+            return response, elapsed_ms, cpu_ms
 
     def notify(self, method: str, params: dict[str, Any]) -> None:
         assert self.child.stdin is not None
@@ -463,17 +500,18 @@ def run(args: argparse.Namespace) -> tuple[dict[str, Any], bool]:
             }
             for operation, (method, params) in mcp_specs.items():
                 for name in ("baseline", "candidate"):
-                    warm, _ = clients[name].request(method, params)
+                    warm, _, _ = clients[name].request(method, params)
                     validate_mcp(operation, name, warm)
                 raw[operation] = {
-                    name: {"wall_ms": []} for name in ("baseline", "candidate")
+                    name: {"wall_ms": [], "cpu_ms": []} for name in ("baseline", "candidate")
                 }
                 for trial in range(args.trials):
                     order = ("baseline", "candidate") if trial % 2 == 0 else ("candidate", "baseline")
                     for name in order:
-                        response, wall_ms = clients[name].request(method, params)
+                        response, wall_ms, cpu_ms = clients[name].request(method, params)
                         validate_mcp(operation, name, response)
                         raw[operation][name]["wall_ms"].append(wall_ms)
+                        raw[operation][name]["cpu_ms"].append(cpu_ms)
         finally:
             close_errors = []
             for client in clients.values():
@@ -531,7 +569,7 @@ def run(args: argparse.Namespace) -> tuple[dict[str, Any], bool]:
             },
             "measurement_limitations": [
                 "CLI CPU is the portable RUSAGE_CHILDREN user+system delta and may include descendant work; it excludes parent harness CPU.",
-                "Per-request CPU is not reported for long-lived MCP processes because Python exposes no portable, sufficiently precise process-CPU snapshot API; MCP gating therefore uses wall time only.",
+                "Long-lived MCP CPU is sampled directly from the child process around each request (ps cumulative CPU time on macOS, /proc/<pid>/stat on Linux); scheduler accounting granularity may yield zero for very short requests.",
                 "Wall time includes process startup for CLI operations and JSON-RPC framing/pipe scheduling for MCP operations.",
                 "The harness does not pin CPU frequency, affinity, thermal state, or competing system load.",
             ],

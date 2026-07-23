@@ -25,26 +25,29 @@ use crate::telemetry::CrossEngineTelemetry;
 pub mod telemetry;
 
 pub mod boot;
+pub mod dst;
 pub mod embedded_store;
+pub mod entity_novelty;
 pub mod migration;
 pub mod segment_store;
 #[cfg(test)]
 mod segment_store_tests;
 pub mod session_aliases;
 pub mod shared_cas;
-pub mod entity_novelty;
+pub mod transparency;
 pub use entity_novelty::{
     ENTITY_NOVELTY_RECORD_TYPE, ENTITY_NOVELTY_REL_DIR, ENTITY_NOVELTY_SCHEMA_VERSION,
-    EntityNoveltyRecord, NoveltyError, entity_novelty_path, merge_entity_novelty,
-    parse_entity_ref, read_entity_novelty, scope_digest, write_entity_novelty,
+    EntityNoveltyRecord, NoveltyError, entity_novelty_path, merge_entity_novelty, parse_entity_ref,
+    read_entity_novelty, scope_digest, write_entity_novelty,
 };
 
 pub mod working_set;
 
 pub use session_aliases::{
-    canonical_full_blob_ref, is_full_hash_blob_bare, is_session_alias_bare,
-    rewrite_full_hash_blob_refs_in_text, rewrite_full_hash_blob_refs_in_value,
-    session_visible_blob_alias, split_ref_fragment, SESSION_ALIAS_HEX_LEN,
+    SESSION_ALIAS_HEX_LEN, canonical_full_blob_ref, is_full_hash_blob_bare, is_session_alias_bare,
+    is_session_ordinal_bare, parse_session_ordinal_bare, rewrite_full_hash_blob_refs_in_text,
+    rewrite_full_hash_blob_refs_in_value, session_ordinal_ref, session_visible_blob_alias,
+    split_ref_fragment,
 };
 
 #[cfg(test)]
@@ -243,7 +246,6 @@ labeled_errors! { FragmentError {
     DuplicateFragment => "duplicate_fragment",
 }}
 
-
 // Parsed byte or line fragment.
 enum FragmentSpec {
     /// Zero-based half-open byte range `start..end`.
@@ -268,8 +270,14 @@ fn parse_fragment_bounds_core(
         None if allow_single => (value, value),
         None => return Err(false),
     };
-    let start = start.trim_start_matches(repeated_kind).parse::<usize>().map_err(|_| false)?;
-    let end = end.trim_start_matches(repeated_kind).parse::<usize>().map_err(|_| false)?;
+    let start = start
+        .trim_start_matches(repeated_kind)
+        .parse::<usize>()
+        .map_err(|_| false)?;
+    let end = end
+        .trim_start_matches(repeated_kind)
+        .parse::<usize>()
+        .map_err(|_| false)?;
     if require_nonzero_start && start == 0 {
         return Err(false);
     }
@@ -294,7 +302,8 @@ fn parse_fragment_spec(fragment: &str) -> Result<FragmentSpec, FragmentError> {
             FragmentError::Malformed
         }
     };
-    let (start, end) = parse_fragment_bounds_core(&fragment[1..], kind, true, kind == 'L').map_err(map_err)?;
+    let (start, end) =
+        parse_fragment_bounds_core(&fragment[1..], kind, true, kind == 'L').map_err(map_err)?;
     match kind {
         'B' => Ok(FragmentSpec::Byte { start, end }),
         'L' => Ok(FragmentSpec::Line { start, end }),
@@ -354,8 +363,13 @@ pub enum ZeroRefFragment {
 /// Only full lowercase SHA-256 identities are accepted. `#Bstart-end` is a
 /// zero-based half-open byte range; `#Lstart-end` is a one-based inclusive
 /// line range. Legacy short IDs return [`ZeroRefError::LegacyAmbiguity`].
-pub fn parse_zeroref_v1_blob(ref_id: &str, byte_length: Option<usize>) -> Result<ZeroRefV1Blob, ZeroRefError> {
-    let (bare, fragment) = ref_id.split_once('#').map_or((ref_id, None), |(bare, fragment)| (bare, Some(fragment)));
+pub fn parse_zeroref_v1_blob(
+    ref_id: &str,
+    byte_length: Option<usize>,
+) -> Result<ZeroRefV1Blob, ZeroRefError> {
+    let (bare, fragment) = ref_id
+        .split_once('#')
+        .map_or((ref_id, None), |(bare, fragment)| (bare, Some(fragment)));
     let (scheme, hash) = blob_ref_scheme_hash(bare).ok_or(ZeroRefError::Unsupported)?;
     if hash.is_empty() || hash.contains('/') {
         return Err(ZeroRefError::Malformed);
@@ -363,7 +377,10 @@ pub fn parse_zeroref_v1_blob(ref_id: &str, byte_length: Option<usize>) -> Result
     if hash.len() != 64 {
         return Err(ZeroRefError::LegacyAmbiguity);
     }
-    if hash.bytes().any(|byte| !byte.is_ascii_hexdigit() || byte.is_ascii_uppercase()) {
+    if hash
+        .bytes()
+        .any(|byte| !byte.is_ascii_hexdigit() || byte.is_ascii_uppercase())
+    {
         return Err(ZeroRefError::Malformed);
     }
     let fragment = fragment
@@ -373,15 +390,22 @@ pub fn parse_zeroref_v1_blob(ref_id: &str, byte_length: Option<usize>) -> Result
                 Some(&b'L') => ('L', &fragment[1..]),
                 _ => return Err(ZeroRefError::Malformed),
             };
-            let (start, end) = parse_fragment_bounds_core(value, kind, kind == 'L', kind == 'L').map_err(|_| ZeroRefError::Malformed)?;
+            let (start, end) = parse_fragment_bounds_core(value, kind, kind == 'L', kind == 'L')
+                .map_err(|_| ZeroRefError::Malformed)?;
             match kind {
-                'B' if byte_length.is_none_or(|len| end <= len) => Ok(ZeroRefFragment::Byte { start, end }),
+                'B' if byte_length.is_none_or(|len| end <= len) => {
+                    Ok(ZeroRefFragment::Byte { start, end })
+                }
                 'L' => Ok(ZeroRefFragment::Line { start, end }),
                 _ => Err(ZeroRefError::Malformed),
             }
         })
         .transpose()?;
-    Ok(ZeroRefV1Blob { scheme: scheme.to_string(), hash: hash.to_string(), fragment })
+    Ok(ZeroRefV1Blob {
+        scheme: scheme.to_string(),
+        hash: hash.to_string(),
+        fragment,
+    })
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -506,7 +530,14 @@ pub struct ExpansionResult {
 impl ExpansionResult {
     pub fn ok(ref_id: String, selector: Option<String>, content: String) -> Self {
         let tokens = count_tokens(&content);
-        Self { ref_id, selector, content, tokens, found: true, reason: "ok".to_string() }
+        Self {
+            ref_id,
+            selector,
+            content,
+            tokens,
+            found: true,
+            reason: "ok".to_string(),
+        }
     }
 
     pub fn missing(ref_id: String, selector: Option<String>, reason: impl Into<String>) -> Self {
@@ -528,7 +559,11 @@ pub enum BlobEntry {
     /// deserialize into this variant and serialize back to the same JSON shape.
     Inline(String),
     /// Pointer to an exact, one-based inclusive source line range.
-    FileRef { path: PathBuf, source_start_line: usize, source_end_line: usize },
+    FileRef {
+        path: PathBuf,
+        source_start_line: usize,
+        source_end_line: usize,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -545,6 +580,10 @@ pub(crate) struct RecoveryState {
     pub search_hits: BTreeMap<String, StoredUnit>,
     #[serde(default)]
     pub aliases: BTreeMap<String, String>,
+    #[serde(default = "initial_ordinal_generation")]
+    pub ordinal_generation: u64,
+    #[serde(default = "initial_next_ordinal")]
+    pub next_ordinal: u64,
     pub order: Vec<String>,
     #[serde(default)]
     pub shell_outcomes: BTreeMap<String, ShellOutcome>,
@@ -553,6 +592,9 @@ pub(crate) struct RecoveryState {
     /// Short refs whose 16-hex prefix maps to multiple distinct full hashes.
     #[serde(default)]
     pub ambiguous_aliases: BTreeSet<String>,
+    /// Append-only audit commitment for acknowledged mint and alias-CAS mutations.
+    #[serde(default)]
+    pub transparency: crate::transparency::MmrLog,
 }
 
 // Capped shell-result index; blob payloads remain content-addressed.
@@ -571,7 +613,28 @@ pub struct ShellRepeat {
     pub seen: u32,
 }
 
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OrdinalRange {
+    pub generation: u64,
+    pub start: u64,
+    pub end_exclusive: u64,
+}
+
+impl OrdinalRange {
+    pub fn len(self) -> u64 {
+        self.end_exclusive.saturating_sub(self.start)
+    }
+    pub fn is_empty(self) -> bool {
+        self.start == self.end_exclusive
+    }
+    pub fn ref_for(self, offset: u64) -> Option<String> {
+        (offset < self.len()).then(|| session_ordinal_ref(self.generation, self.start + offset))
+    }
+}
+
+#[derive(
+    Debug, Default, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize,
+)]
 #[serde(rename_all = "PascalCase")]
 pub enum ContentClass {
     SourceFile,
@@ -601,9 +664,10 @@ fn classify_ref(ref_id: &str, content_type: Option<ContentType>) -> ContentClass
             Some(ContentType::Code) => ContentClass::SourceFile,
             Some(ContentType::Diff) => ContentClass::Diff,
             Some(ContentType::ShellOutput) => ContentClass::ShellOutput,
-            Some(ContentType::Markdown) | Some(ContentType::Logs) | Some(ContentType::Tree) | Some(ContentType::JsonConfig) => {
-                ContentClass::Doc
-            }
+            Some(ContentType::Markdown)
+            | Some(ContentType::Logs)
+            | Some(ContentType::Tree)
+            | Some(ContentType::JsonConfig) => ContentClass::Doc,
             Some(ContentType::SearchResult) => ContentClass::SearchHits,
             _ => ContentClass::BinaryPreview,
         },
@@ -620,6 +684,14 @@ struct RefIndexEntry {
     content_class: ContentClass,
     #[serde(default)]
     expanded: bool,
+    #[serde(default, skip_serializing_if = "is_zero_u64")]
+    expansion_count: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    last_expanded_ts: Option<u128>,
+}
+
+fn is_zero_u64(value: &u64) -> bool {
+    *value == 0
 }
 
 #[cfg(test)]
@@ -638,6 +710,13 @@ fn ref_index_test_override() -> Option<(bool, PathBuf)> {
     REF_INDEX_TEST_OVERRIDE.with(|slot| slot.borrow().clone())
 }
 
+const fn initial_ordinal_generation() -> u64 {
+    1
+}
+const fn initial_next_ordinal() -> u64 {
+    1
+}
+
 impl RecoveryState {
     fn empty(config: &RecoveryConfig) -> Self {
         Self {
@@ -652,10 +731,13 @@ impl RecoveryState {
             units: BTreeMap::new(),
             search_hits: BTreeMap::new(),
             aliases: BTreeMap::new(),
+            ordinal_generation: initial_ordinal_generation(),
+            next_ordinal: initial_next_ordinal(),
             order: Vec::new(),
             shell_outcomes: BTreeMap::new(),
             shell_outcome_seq: 0,
             ambiguous_aliases: BTreeSet::new(),
+            transparency: crate::transparency::MmrLog::default(),
         }
     }
 
@@ -732,15 +814,26 @@ impl DiskIdentity {
         #[cfg(unix)]
         {
             use std::os::unix::fs::MetadataExt;
-            Some(Self { len: meta.len(), modified, dev: meta.dev(), ino: meta.ino() })
+            Some(Self {
+                len: meta.len(),
+                modified,
+                dev: meta.dev(),
+                ino: meta.ino(),
+            })
         }
         #[cfg(not(unix))]
-        Some(Self { len: meta.len(), modified })
+        Some(Self {
+            len: meta.len(),
+            modified,
+        })
     }
 }
 
 fn cache_identities(path: &Path) -> (Option<DiskIdentity>, Option<DiskIdentity>) {
-    (DiskIdentity::capture(path), DiskIdentity::capture(&journal_path(path)))
+    (
+        DiskIdentity::capture(path),
+        DiskIdentity::capture(&journal_path(path)),
+    )
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -757,14 +850,25 @@ impl RecoveryStore {
     }
 
     pub fn with_config(persistence_path: Option<PathBuf>, config: RecoveryConfig) -> Self {
-        let loaded = persistence_path.as_ref().and_then(|path| load_state(path, &config).ok().flatten());
-        let (disk_identity, journal_identity) =
-            loaded.as_ref().and(persistence_path.as_deref()).map(cache_identities).unwrap_or_default();
+        let loaded = persistence_path
+            .as_ref()
+            .and_then(|path| load_state(path, &config).ok().flatten());
+        let (disk_identity, journal_identity) = loaded
+            .as_ref()
+            .and(persistence_path.as_deref())
+            .map(cache_identities)
+            .unwrap_or_default();
         let state = loaded.unwrap_or_else(|| RecoveryState::empty(&config));
         let shared_cas = persistence_path
             .as_deref()
             .and_then(SharedCas::detect_from_cache_path)
-            .or_else(|| persistence_path.is_some().then(ref_index_root).flatten().map(SharedCas::new));
+            .or_else(|| {
+                persistence_path
+                    .is_some()
+                    .then(ref_index_root)
+                    .flatten()
+                    .map(SharedCas::new)
+            });
         Self {
             config,
             persistence_path,
@@ -787,7 +891,11 @@ impl RecoveryStore {
 
     /// Persist exact bytes as a durable content-addressed blob without
     /// creating file/unit index entries. Used when prompt spans are paged out.
-    pub fn store_blob(&mut self, text: &str, content_type: ContentType) -> Result<String, RecoveryError> {
+    pub fn store_blob(
+        &mut self,
+        text: &str,
+        content_type: ContentType,
+    ) -> Result<String, RecoveryError> {
         let ref_id = self.put_blob(text, content_type);
         self.persist_evicted(ref_id)
     }
@@ -813,7 +921,13 @@ impl RecoveryStore {
             .into());
         }
         let text = line_slice_exact(&source, source_start_line, source_end_line);
-        let ref_id = self.put_file_backed_blob(&text, path, source_start_line, source_end_line, content_type);
+        let ref_id = self.put_file_backed_blob(
+            &text,
+            path,
+            source_start_line,
+            source_end_line,
+            content_type,
+        );
         self.persist_evicted(ref_id)
     }
 
@@ -836,7 +950,13 @@ impl RecoveryStore {
         source_start_line: Option<usize>,
         source_end_line: Option<usize>,
     ) -> StoredPayload {
-        let stored = self.store_payload_deferred_batch(text, content_type, path, source_start_line, source_end_line);
+        let stored = self.store_payload_deferred_batch(
+            text,
+            content_type,
+            path,
+            source_start_line,
+            source_end_line,
+        );
         if !self.skip_empty_persist {
             self.evict();
         }
@@ -851,23 +971,57 @@ impl RecoveryStore {
         source_start_line: Option<usize>,
         source_end_line: Option<usize>,
     ) -> StoredPayload {
-        if let Some(stored) = self.admit_memoized_payload(text, content_type, path, source_start_line, source_end_line, false) {
+        if let Some(stored) = self.admit_memoized_payload(
+            text,
+            content_type,
+            path,
+            source_start_line,
+            source_end_line,
+            false,
+        ) {
             return stored;
         }
         let blob_ref = self.put_blob(text, content_type);
         let file_ref = self.put_file(text, content_type, path, source_start_line, source_end_line);
-        let stored = self.finish_payload(blob_ref, file_ref, text, content_type, source_start_line, source_end_line);
-        self.memoize_payload(text, content_type, path, (source_start_line, source_end_line), false, &stored);
+        let stored = self.finish_payload(
+            blob_ref,
+            file_ref,
+            text,
+            content_type,
+            source_start_line,
+            source_end_line,
+        );
+        self.memoize_payload(
+            text,
+            content_type,
+            path,
+            (source_start_line, source_end_line),
+            false,
+            &stored,
+        );
         stored
     }
 
     /// Admit an already-read complete source file without duplicating its payload.
-    pub fn store_source_backed_payload_deferred_batch(&mut self, text: &str, content_type: ContentType, path: &Path) -> StoredPayload {
-        if let Some(stored) = self.admit_memoized_payload(text, content_type, Some(path), None, None, true) {
+    pub fn store_source_backed_payload_deferred_batch(
+        &mut self,
+        text: &str,
+        content_type: ContentType,
+        path: &Path,
+    ) -> StoredPayload {
+        if let Some(stored) =
+            self.admit_memoized_payload(text, content_type, Some(path), None, None, true)
+        {
             return stored;
         }
         let source_sha256 = sha256_hex(text);
-        let blob_ref = self.put_file_backed_blob_hashed(path, 1, content_line_count(text), content_type, &source_sha256);
+        let blob_ref = self.put_file_backed_blob_hashed(
+            path,
+            1,
+            content_line_count(text),
+            content_type,
+            &source_sha256,
+        );
         let file_ref = self.put_source_backed_file(text, content_type, path, &source_sha256);
         let stored = self.finish_payload(blob_ref, file_ref, text, content_type, None, None);
         self.memoize_payload(text, content_type, Some(path), (None, None), true, &stored);
@@ -896,7 +1050,11 @@ impl RecoveryStore {
             )
             .then_some(self.payload_memo.as_ref()?)?;
         let refs_live = self.state.files.contains_key(&memo.stored.file_ref)
-            && memo.stored.unit_refs.iter().all(|ref_id| self.state.units.contains_key(ref_id))
+            && memo
+                .stored
+                .unit_refs
+                .iter()
+                .all(|ref_id| self.state.units.contains_key(ref_id))
             && self.has_ref(&memo.stored.blob_ref);
         refs_live.then(|| memo.stored.clone())
     }
@@ -910,7 +1068,14 @@ impl RecoveryStore {
         source_end_line: Option<usize>,
         source_backed: bool,
     ) -> Option<StoredPayload> {
-        let stored = self.memoized_payload(text, content_type, path, source_start_line, source_end_line, source_backed)?;
+        let stored = self.memoized_payload(
+            text,
+            content_type,
+            path,
+            source_start_line,
+            source_end_line,
+            source_backed,
+        )?;
         self.skip_empty_persist = true;
         Some(stored)
     }
@@ -999,6 +1164,83 @@ impl RecoveryStore {
         Ok(())
     }
 
+    pub fn reserve_ordinal_range(&mut self, count: u64) -> Result<OrdinalRange, RecoveryError> {
+        if count == 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "ordinal range must be non-empty",
+            )
+            .into());
+        }
+        let Some(path) = self.persistence_path.clone() else {
+            let start = self.state.next_ordinal;
+            let end_exclusive = start
+                .checked_add(count)
+                .ok_or_else(|| io::Error::other("ordinal counter overflow"))?;
+            self.state.next_ordinal = end_exclusive;
+            return Ok(OrdinalRange {
+                generation: self.state.ordinal_generation,
+                start,
+                end_exclusive,
+            });
+        };
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        let _lock = PersistLock::acquire(recovery_lock_path(&path))?;
+        let existing =
+            load_state(&path, &self.config)?.unwrap_or_else(|| RecoveryState::empty(&self.config));
+        let current = std::mem::replace(&mut self.state, RecoveryState::empty(&self.config));
+        self.state = merge_states(existing, current, &self.session_refs, &self.config);
+        let start = self.state.next_ordinal;
+        let end_exclusive = start
+            .checked_add(count)
+            .ok_or_else(|| io::Error::other("ordinal counter overflow"))?;
+        let range = OrdinalRange {
+            generation: self.state.ordinal_generation,
+            start,
+            end_exclusive,
+        };
+        self.state.next_ordinal = end_exclusive;
+        self.publish_snapshot(&path)?;
+        Ok(range)
+    }
+
+    pub fn store_ordinal_alias_deferred(
+        &mut self,
+        range: OrdinalRange,
+        offset: u64,
+        target_ref: &str,
+    ) -> Result<String, RecoveryError> {
+        let alias = range.ref_for(offset).ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "ordinal offset outside reserved range",
+            )
+        })?;
+        let target =
+            canonical_full_blob_ref(split_ref_fragment(target_ref).0).ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "ordinal target must be a full-hash blob ref",
+                )
+            })?;
+        if self
+            .state
+            .aliases
+            .get(&alias)
+            .is_some_and(|existing| existing != &target)
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::AlreadyExists,
+                "ordinal alias already targets another ref",
+            )
+            .into());
+        }
+        self.store_alias_deferred(&alias, &target);
+        Ok(alias)
+    }
+
     pub fn store_alias(&mut self, alias: &str, target_ref: &str) -> Result<(), RecoveryError> {
         self.store_alias_deferred(alias, target_ref);
         self.persist()
@@ -1007,7 +1249,39 @@ impl RecoveryStore {
     /// Store an alias without persisting. Caller must call `persist_pending()`.
     pub fn store_alias_deferred(&mut self, alias: &str, target_ref: &str) {
         self.skip_empty_persist = false;
-        self.state.aliases.insert(alias.to_string(), target_ref.to_string());
+        if self
+            .state
+            .aliases
+            .get(alias)
+            .is_none_or(|current| current != target_ref)
+        {
+            self.state
+                .transparency
+                .append(format!("alias-cas\0{alias}\0{target_ref}").as_bytes());
+        }
+        self.state
+            .aliases
+            .insert(alias.to_string(), target_ref.to_string());
+    }
+
+    /// Current MMR transparency commitment for recovery mutations.
+    pub fn transparency_root(&self) -> String {
+        self.state.transparency.root()
+    }
+    pub fn transparency_len(&self) -> usize {
+        self.state.transparency.len()
+    }
+    pub fn transparency_inclusion_proof(
+        &self,
+        leaf_index: usize,
+    ) -> Option<crate::transparency::InclusionProof> {
+        self.state.transparency.inclusion_proof(leaf_index)
+    }
+    pub fn transparency_consistency_proof(
+        &self,
+        old_size: usize,
+    ) -> Option<crate::transparency::ConsistencyProof> {
+        self.state.transparency.consistency_proof(old_size)
     }
 
     /// Remove an alias after the next authoritative persist.
@@ -1049,9 +1323,11 @@ impl RecoveryStore {
     /// Resolve a blob's content by its full ref ID.
     /// Returns None if not found or if the stored value cannot be resolved.
     pub(crate) fn resolve_blob_content(&self, ref_id: &str) -> Option<String> {
-        self.state.blobs.get(ref_id).and_then(|value| match resolve_blob_value(self.persistence_path.as_deref(), ref_id, value) {
-            RefResolve::Found(content) => Some(content),
-            RefResolve::NotFound | RefResolve::Stale | RefResolve::DecodeFailed => None,
+        self.state.blobs.get(ref_id).and_then(|value| {
+            match resolve_blob_value(self.persistence_path.as_deref(), ref_id, value) {
+                RefResolve::Found(content) => Some(content),
+                RefResolve::NotFound | RefResolve::Stale | RefResolve::DecodeFailed => None,
+            }
         })
     }
 
@@ -1077,8 +1353,17 @@ impl RecoveryStore {
         }
         let canonical = canonicalize_expand_ref(requested_ref)?;
         let mut sibling_store = RecoveryStore::new(Some(sibling_cache));
-        let result = sibling_store.expand(&canonical, selector, start_line, end_line, anchor_kind, symbol);
-        result.found.then(|| ExpansionResult::ok(requested_ref.to_string(), result.selector, result.content))
+        let result = sibling_store.expand(
+            &canonical,
+            selector,
+            start_line,
+            end_line,
+            anchor_kind,
+            symbol,
+        );
+        result.found.then(|| {
+            ExpansionResult::ok(requested_ref.to_string(), result.selector, result.content)
+        })
     }
 
     /// Return migration/compatibility state for doctor JSON output.
@@ -1111,7 +1396,11 @@ impl RecoveryStore {
         store_search_output_deferred(output: &str, query: Option<&str>) -> Vec<String>
     );
 
-    pub fn store_search_output_deferred(&mut self, output: &str, query: Option<&str>) -> Vec<String> {
+    pub fn store_search_output_deferred(
+        &mut self,
+        output: &str,
+        query: Option<&str>,
+    ) -> Vec<String> {
         let path_line = &*SEARCH_PATH_LINE;
         let mut refs = Vec::new();
         for (idx, line) in output.lines().enumerate() {
@@ -1124,7 +1413,12 @@ impl RecoveryStore {
             let hit_id = id_for('h', &format!("search:{idx}:{line}"));
             let ref_id = format!("tz://search/{hit_id}");
             refs.push(self.insert_stored_unit(
-                true, ref_id, line, ContentType::SearchResult, None, (Some(idx + 1), Some(idx + 1)),
+                true,
+                ref_id,
+                line,
+                ContentType::SearchResult,
+                None,
+                (Some(idx + 1), Some(idx + 1)),
             ));
         }
         self.evict();
@@ -1133,8 +1427,13 @@ impl RecoveryStore {
 
     pub fn expand(
         // Validate routing and fragments before resolving CAS/local content and selectors.
-        &mut self, ref_id: &str, selector: Option<&str>, start_line: Option<usize>, end_line: Option<usize>,
-        anchor_kind: Option<&str>, symbol: Option<&str>,
+        &mut self,
+        ref_id: &str,
+        selector: Option<&str>,
+        start_line: Option<usize>,
+        end_line: Option<usize>,
+        anchor_kind: Option<&str>,
+        symbol: Option<&str>,
     ) -> ExpansionResult {
         self.recovery_count += 1;
         let requested_ref = ref_id.to_string();
@@ -1227,7 +1526,15 @@ impl RecoveryStore {
         if parsed.kind == "file" && self.file_ref_is_stale(parsed.bare) {
             return miss!("stale-ref");
         }
-        match expand_selected_content(content, &fragment_spec, selector, selected_start, selected_end, anchor_kind, symbol) {
+        match expand_selected_content(
+            content,
+            &fragment_spec,
+            selector,
+            selected_start,
+            selected_end,
+            anchor_kind,
+            symbol,
+        ) {
             Ok(selected) => self.expand_ok(requested_ref, selector_owned, &ref_id, selected),
             Err(reason) => miss!(reason),
         }
@@ -1247,7 +1554,13 @@ impl RecoveryStore {
         None
     }
 
-    fn expand_ok(&mut self, requested_ref: String, selector: Option<String>, ref_id: &str, content: String) -> ExpansionResult {
+    fn expand_ok(
+        &mut self,
+        requested_ref: String,
+        selector: Option<String>,
+        ref_id: &str,
+        content: String,
+    ) -> ExpansionResult {
         self.note_expand(ref_id, &content);
         ExpansionResult::ok(requested_ref, selector, content)
     }
@@ -1255,7 +1568,11 @@ impl RecoveryStore {
     fn note_expand(&mut self, ref_id: &str, content: &str) {
         self.recovery_tokens += count_tokens(content);
         if let Some(store_path) = self.persistence_path.as_ref() {
-            let content_class = self.ref_classes.get(ref_id).copied().unwrap_or_else(|| classify_ref(ref_id, None));
+            let content_class = self
+                .ref_classes
+                .get(ref_id)
+                .copied()
+                .unwrap_or_else(|| classify_ref(ref_id, None));
             record_ref_index_expanded(store_path, ref_id, content_class);
         }
     }
@@ -1309,12 +1626,16 @@ impl RecoveryStore {
     /// registering each short → full mapping in the alias table (deferred).
     pub fn apply_session_visible_aliases_in_text(&mut self, text: &str) -> String {
         // Skip the char-by-char scan when the payload has no full-hash blob refs.
-        if !text.contains("tz://blob/") && !text.contains("fz://blob/") && !text.contains("gz://blob/") {
+        if !text.contains("tz://blob/")
+            && !text.contains("fz://blob/")
+            && !text.contains("gz://blob/")
+        {
             return text.to_string();
         }
         let mut cursor = 0usize;
         while cursor < text.len() {
-            if let Some((end, full)) = crate::session_aliases::take_full_hash_blob_at(text, cursor) {
+            if let Some((end, full)) = crate::session_aliases::take_full_hash_blob_at(text, cursor)
+            {
                 let _ = self.register_session_visible_alias(&full);
                 cursor = end;
             } else {
@@ -1362,7 +1683,8 @@ impl RecoveryStore {
         match parsed.kind {
             "blob" => self.blob_reachable(parsed.bare),
             "file" => self.state.files.contains_key(parsed.bare),
-            "unit" | "search" => recovery_unit_map(&self.state, parsed.kind).is_some_and(|m| m.contains_key(parsed.bare)),
+            "unit" | "search" => recovery_unit_map(&self.state, parsed.kind)
+                .is_some_and(|m| m.contains_key(parsed.bare)),
             _ => false,
         }
     }
@@ -1385,13 +1707,14 @@ impl RecoveryStore {
                     || self
                         .shared_cas
                         .as_ref()
-                        .and_then(|cas| ref_index_id_part(parsed.bare).map(|hash| cas.contains(hash)))
+                        .and_then(|cas| {
+                            ref_index_id_part(parsed.bare).map(|hash| cas.contains(hash))
+                        })
                         .unwrap_or(false)
             }
             "file" => self.state.files.contains_key(parsed.bare),
-            "unit" | "search" => {
-                recovery_unit_map(&self.state, parsed.kind).is_some_and(|m| m.contains_key(parsed.bare))
-            }
+            "unit" | "search" => recovery_unit_map(&self.state, parsed.kind)
+                .is_some_and(|m| m.contains_key(parsed.bare)),
             _ => false,
         }
     }
@@ -1430,7 +1753,13 @@ impl RecoveryStore {
     }
 
     pub fn prune_stale(&mut self, dry_run: bool) -> Result<serde_json::Value, RecoveryError> {
-        let stale: Vec<String> = self.state.files.keys().filter(|ref_id| self.file_ref_is_stale(ref_id)).cloned().collect();
+        let stale: Vec<String> = self
+            .state
+            .files
+            .keys()
+            .filter(|ref_id| self.file_ref_is_stale(ref_id))
+            .cloned()
+            .collect();
         if !dry_run {
             for ref_id in &stale {
                 self.drop_ref(ref_id);
@@ -1475,10 +1804,20 @@ impl RecoveryStore {
         let seq = self.state.shell_outcome_seq.wrapping_add(1);
         self.state.shell_outcome_seq = seq;
         let (unchanged, seen) = match self.state.shell_outcomes.get(&key) {
-            Some(prev) if prev.combined_sha == combined_sha && prev.exit_code == exit_code => (true, prev.seen.saturating_add(1)),
+            Some(prev) if prev.combined_sha == combined_sha && prev.exit_code == exit_code => {
+                (true, prev.seen.saturating_add(1))
+            }
             _ => (false, 1),
         };
-        self.state.shell_outcomes.insert(key, ShellOutcome { combined_sha, exit_code, seen, seq });
+        self.state.shell_outcomes.insert(
+            key,
+            ShellOutcome {
+                combined_sha,
+                exit_code,
+                seen,
+                seq,
+            },
+        );
         trim_shell_outcomes(&mut self.state.shell_outcomes);
         ShellRepeat { unchanged, seen }
     }
@@ -1491,7 +1830,13 @@ impl RecoveryStore {
         source_end_line: usize,
         content_type: ContentType,
     ) -> String {
-        self.put_file_backed_blob_hashed(path, source_start_line, source_end_line, content_type, &sha256_hex(text))
+        self.put_file_backed_blob_hashed(
+            path,
+            source_start_line,
+            source_end_line,
+            content_type,
+            &sha256_hex(text),
+        )
     }
 
     fn put_file_backed_blob_hashed(
@@ -1506,15 +1851,26 @@ impl RecoveryStore {
             full_hash,
             format!("tz://blob/b{}", &full_hash[..16]),
             content_type,
-            Some(BlobEntry::FileRef { path: path.to_path_buf(), source_start_line, source_end_line }),
+            Some(BlobEntry::FileRef {
+                path: path.to_path_buf(),
+                source_start_line,
+                source_end_line,
+            }),
         )
     }
 
     fn track_ref_class(&mut self, ref_id: &str, content_type: ContentType) {
-        self.ref_classes.insert(ref_id.to_string(), classify_ref(ref_id, Some(content_type)));
+        self.ref_classes
+            .insert(ref_id.to_string(), classify_ref(ref_id, Some(content_type)));
     }
 
-    fn register_blob(&mut self, full_hash: &str, legacy_ref: String, content_type: ContentType, value: Option<BlobEntry>) -> String {
+    fn register_blob(
+        &mut self,
+        full_hash: &str,
+        legacy_ref: String,
+        content_type: ContentType,
+        value: Option<BlobEntry>,
+    ) -> String {
         let ref_id = format!("tz://blob/{full_hash}");
         self.track_ref_class(&ref_id, content_type);
         if legacy_ref != ref_id {
@@ -1529,7 +1885,16 @@ impl RecoveryStore {
 
     fn put_blob(&mut self, text: &str, content_type: ContentType) -> String {
         let full_hash = sha256_hex(text);
-        let published = self.shared_cas.as_ref().is_some_and(|cas| cas.publish(text.as_bytes()).is_ok());
+        let canonical_ref = format!("tz://blob/{full_hash}");
+        if !self.state.blobs.contains_key(&canonical_ref) {
+            self.state
+                .transparency
+                .append(format!("mint\0{canonical_ref}").as_bytes());
+        }
+        let published = self
+            .shared_cas
+            .as_ref()
+            .is_some_and(|cas| cas.publish(text.as_bytes()).is_ok());
         let value = if published {
             None
         } else {
@@ -1540,7 +1905,12 @@ impl RecoveryStore {
                 .unwrap_or_else(|| text.to_string());
             Some(BlobEntry::Inline(text))
         };
-        self.register_blob(&full_hash, format!("tz://blob/{}", id_for('b', text)), content_type, value)
+        self.register_blob(
+            &full_hash,
+            format!("tz://blob/{}", id_for('b', text)),
+            content_type,
+            value,
+        )
     }
 
     fn put_file(
@@ -1562,8 +1932,22 @@ impl RecoveryStore {
         )
     }
 
-    fn put_source_backed_file(&mut self, text: &str, content_type: ContentType, path: &Path, source_sha256: &str) -> String {
-        self.put_file_entry(text, content_type, Some(path), true, || source_fingerprint_from_sha256(path, source_sha256), None, None)
+    fn put_source_backed_file(
+        &mut self,
+        text: &str,
+        content_type: ContentType,
+        path: &Path,
+        source_sha256: &str,
+    ) -> String {
+        self.put_file_entry(
+            text,
+            content_type,
+            Some(path),
+            true,
+            || source_fingerprint_from_sha256(path, source_sha256),
+            None,
+            None,
+        )
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1586,7 +1970,11 @@ impl RecoveryStore {
                 path: path.map(|path| path.to_string_lossy().into_owned()),
                 path_identity: path.map(path_identity_text),
                 source_backed,
-                text: if source_backed { String::new() } else { text.to_string() },
+                text: if source_backed {
+                    String::new()
+                } else {
+                    text.to_string()
+                },
                 content_type: content_type.to_string(),
                 source_fingerprint: source_fingerprint(),
                 source_start_line,
@@ -1597,12 +1985,23 @@ impl RecoveryStore {
         ref_id
     }
 
-    fn index_units(&mut self, text: &str, content_type: ContentType, source_ref: &str) -> Vec<String> {
+    fn index_units(
+        &mut self,
+        text: &str,
+        content_type: ContentType,
+        source_ref: &str,
+    ) -> Vec<String> {
         let mut refs = Vec::new();
         for (idx, line) in text.lines().enumerate() {
             let stripped = line.trim();
             if stripped.len() >= 12 {
-                refs.push(self.put_unit(stripped, content_type, Some(source_ref), Some(idx + 1), Some(idx + 1)));
+                refs.push(self.put_unit(
+                    stripped,
+                    content_type,
+                    Some(source_ref),
+                    Some(idx + 1),
+                    Some(idx + 1),
+                ));
             }
             if refs.len() >= 64 {
                 break;
@@ -1612,10 +2011,21 @@ impl RecoveryStore {
     }
 
     fn put_unit(
-        &mut self, text: &str, content_type: ContentType, source_ref: Option<&str>,
-        start_line: Option<usize>, end_line: Option<usize>,
+        &mut self,
+        text: &str,
+        content_type: ContentType,
+        source_ref: Option<&str>,
+        start_line: Option<usize>,
+        end_line: Option<usize>,
     ) -> String {
-        self.insert_stored_unit(false, format!("tz://unit/{}", id_for('u', text)), text, content_type, source_ref, (start_line, end_line))
+        self.insert_stored_unit(
+            false,
+            format!("tz://unit/{}", id_for('u', text)),
+            text,
+            content_type,
+            source_ref,
+            (start_line, end_line),
+        )
     }
 
     fn insert_stored_unit(
@@ -1648,10 +2058,19 @@ impl RecoveryStore {
 
     fn resolve_ref(&self, kind: &str, bare: &str) -> RefResolve {
         match kind {
-            "blob" => self.state.blobs.get(bare).map_or(RefResolve::NotFound, |value| {
-                resolve_blob_value(self.persistence_path.as_deref(), bare, value)
-            }),
-            "file" => self.state.files.get(bare).map(resolve_file_value).unwrap_or(RefResolve::NotFound),
+            "blob" => self
+                .state
+                .blobs
+                .get(bare)
+                .map_or(RefResolve::NotFound, |value| {
+                    resolve_blob_value(self.persistence_path.as_deref(), bare, value)
+                }),
+            "file" => self
+                .state
+                .files
+                .get(bare)
+                .map(resolve_file_value)
+                .unwrap_or(RefResolve::NotFound),
             "unit" | "search" => recovery_unit_map(&self.state, kind)
                 .and_then(|units| units.get(bare))
                 .map_or(RefResolve::NotFound, |u| RefResolve::Found(u.text.clone())),
@@ -1661,18 +2080,26 @@ impl RecoveryStore {
 
     fn resolve_ref_with_index(&self, kind: &str, bare: &str) -> RefResolve {
         match self.resolve_ref(kind, bare) {
-            RefResolve::NotFound if kind == "blob" => resolve_blob_from_ref_index(bare, &self.config),
+            RefResolve::NotFound if kind == "blob" => {
+                resolve_blob_from_ref_index(bare, &self.config)
+            }
             other => other,
         }
     }
 
     fn file_ref_is_stale(&self, bare: &str) -> bool {
-        let Some(stored) = self.state.files.get(bare) else { return false };
+        let Some(stored) = self.state.files.get(bare) else {
+            return false;
+        };
         if is_ephemeral_source_path(stored.path.as_deref().unwrap_or_default()) {
             return false;
         }
-        let Some(expected) = stored.source_fingerprint.as_ref() else { return false };
-        let Some(source_path) = stored_source_path(stored) else { return false };
+        let Some(expected) = stored.source_fingerprint.as_ref() else {
+            return false;
+        };
+        let Some(source_path) = stored_source_path(stored) else {
+            return false;
+        };
         source_fingerprint(&source_path).is_none_or(|actual| actual != *expected)
     }
 
@@ -1686,7 +2113,13 @@ impl RecoveryStore {
         recovery_maps!(evict self);
         while self.approx_bytes() > self.config.max_bytes {
             // CAS reachability must not pin a local eviction victim.
-            let Some(victim) = self.state.order.iter().find(|ref_id| self.local_entry_present(ref_id)).cloned() else {
+            let Some(victim) = self
+                .state
+                .order
+                .iter()
+                .find(|ref_id| self.local_entry_present(ref_id))
+                .cloned()
+            else {
                 break;
             };
             self.drop_ref(&victim);
@@ -1706,15 +2139,28 @@ impl RecoveryStore {
     fn compact_order(&mut self) {
         let live: HashSet<String> = recovery_maps!(keys self.state).cloned().collect();
         let mut seen = HashSet::new();
-        self.state.order.retain(|ref_id| live.contains(ref_id) && seen.insert(ref_id.clone()));
+        self.state
+            .order
+            .retain(|ref_id| live.contains(ref_id) && seen.insert(ref_id.clone()));
     }
 
     fn approx_bytes(&self) -> usize {
         // Externalized blob markers account at their original payload size so
         // eviction pressure reflects real content, not marker bytes.
         self.state.blobs.values().map(blob_value_len).sum::<usize>()
-            + self.state.files.values().map(|v| v.text.len() + v.path.as_deref().unwrap_or_default().len()).sum::<usize>()
-            + self.state.units.values().chain(self.state.search_hits.values()).map(|v| v.text.len()).sum::<usize>()
+            + self
+                .state
+                .files
+                .values()
+                .map(|v| v.text.len() + v.path.as_deref().unwrap_or_default().len())
+                .sum::<usize>()
+            + self
+                .state
+                .units
+                .values()
+                .chain(self.state.search_hits.values())
+                .map(|v| v.text.len())
+                .sum::<usize>()
     }
 
     fn persist(&mut self) -> Result<(), RecoveryError> {
@@ -1736,22 +2182,28 @@ impl RecoveryStore {
             fs::create_dir_all(parent)?;
         }
         let _lock = PersistLock::acquire(recovery_lock_path(&path))?;
-        let snap_unchanged = self.disk_identity.is_some_and(|identity| DiskIdentity::capture(&path) == Some(identity));
-        let journal_unchanged = self.journal_identity == DiskIdentity::capture(&journal_path(&path));
+        let snap_unchanged = self
+            .disk_identity
+            .is_some_and(|identity| DiskIdentity::capture(&path) == Some(identity));
+        let journal_unchanged =
+            self.journal_identity == DiskIdentity::capture(&journal_path(&path));
         let unchanged_since_last_write = snap_unchanged && journal_unchanged;
         if !unchanged_since_last_write {
-            let existing = load_state(&path, &self.config)?.unwrap_or_else(|| RecoveryState::empty(&self.config));
+            let existing = load_state(&path, &self.config)?
+                .unwrap_or_else(|| RecoveryState::empty(&self.config));
             let current = std::mem::replace(&mut self.state, RecoveryState::empty(&self.config));
             self.state = merge_states(existing, current, &self.session_refs, &self.config);
         }
         self.evict();
-        let has_pending_deletions = !self.pending_alias_deletions.is_empty() || !self.pending_blob_deletions.is_empty();
+        let has_pending_deletions =
+            !self.pending_alias_deletions.is_empty() || !self.pending_blob_deletions.is_empty();
         apply_deletions(
             &mut self.state,
             self.pending_blob_deletions.iter().map(String::as_str),
             self.pending_alias_deletions.iter().map(String::as_str),
         );
-        if self.try_append_session_journal(&path, unchanged_since_last_write, has_pending_deletions) {
+        if self.try_append_session_journal(&path, unchanged_since_last_write, has_pending_deletions)
+        {
             return Ok(());
         }
         self.publish_snapshot(&path)
@@ -1782,7 +2234,8 @@ impl RecoveryStore {
             deleted_blob_refs: self.pending_blob_deletions.iter().cloned().collect(),
             deleted_aliases: self.pending_alias_deletions.iter().cloned().collect(),
         };
-        let segment_limit = journal_compact_threshold(self.disk_identity.map_or(0, |identity| identity.len));
+        let segment_limit =
+            journal_compact_threshold(self.disk_identity.map_or(0, |identity| identity.len));
         match append_journal(path, &entry, segment_limit) {
             Ok(JournalAppend::Appended) => {
                 self.journal_identity = DiskIdentity::capture(&journal_path(path));
@@ -1823,7 +2276,9 @@ struct ParsedRef<'a> {
 }
 
 fn parse_ref(ref_id: &str) -> Option<ParsedRef<'_>> {
-    let (bare, fragment) = ref_id.split_once('#').map_or((ref_id, None), |(bare, fragment)| (bare, Some(fragment)));
+    let (bare, fragment) = ref_id
+        .split_once('#')
+        .map_or((ref_id, None), |(bare, fragment)| (bare, Some(fragment)));
     let rest = bare.strip_prefix("tz://")?;
     let (kind, id) = rest.split_once('/')?;
     if id.is_empty() || !matches!(kind, "blob" | "file" | "unit" | "search" | "codemode" | "s") {
@@ -1833,7 +2288,10 @@ fn parse_ref(ref_id: &str) -> Option<ParsedRef<'_>> {
         let mut parts = id.split('/');
         if parts.next() != Some("execution")
             || parts.next().is_none()
-            || !matches!(parts.next(), Some("code" | "steps" | "telemetry" | "result" | "error"))
+            || !matches!(
+                parts.next(),
+                Some("code" | "steps" | "telemetry" | "result" | "error")
+            )
             || parts.next().is_some()
         {
             return None;
@@ -1842,20 +2300,37 @@ fn parse_ref(ref_id: &str) -> Option<ParsedRef<'_>> {
     if kind == "s" && !id.bytes().all(|b| b.is_ascii_hexdigit()) {
         return None;
     }
-    Some(ParsedRef { kind, bare, fragment })
+    Some(ParsedRef {
+        kind,
+        bare,
+        fragment,
+    })
 }
 
 fn parse_line_fragment(fragment: &str) -> (Option<usize>, Option<usize>) {
     let value = fragment.trim().trim_start_matches('L');
     let (start, end) = value.split_once('-').unwrap_or((value, value));
-    (start.trim_start_matches('L').parse().ok(), end.trim_start_matches('L').parse().ok())
+    (
+        start.trim_start_matches('L').parse().ok(),
+        end.trim_start_matches('L').parse().ok(),
+    )
 }
 
 fn parse_around_selector(value: &str) -> (Option<usize>, Option<usize>) {
-    let (line_text, radius_text) = value.split_once(':').or_else(|| value.split_once(',')).unwrap_or((value, "3"));
-    let line = line_text.trim().trim_start_matches('L').parse::<usize>().unwrap_or(1);
+    let (line_text, radius_text) = value
+        .split_once(':')
+        .or_else(|| value.split_once(','))
+        .unwrap_or((value, "3"));
+    let line = line_text
+        .trim()
+        .trim_start_matches('L')
+        .parse::<usize>()
+        .unwrap_or(1);
     let radius = radius_text.trim().parse::<usize>().unwrap_or(3);
-    (Some(line.saturating_sub(radius).max(1)), Some(line.saturating_add(radius)))
+    (
+        Some(line.saturating_sub(radius).max(1)),
+        Some(line.saturating_add(radius)),
+    )
 }
 
 // Line count matching exact split-inclusive slicing.
@@ -1870,11 +2345,18 @@ fn content_line_count(text: &str) -> usize {
 // Return an exact one-based inclusive line slice.
 fn line_slice_exact(text: &str, start: usize, end: usize) -> String {
     let start = start.max(1);
-    text.split_inclusive('\n').skip(start - 1).take(end.max(start) - start + 1).collect()
+    text.split_inclusive('\n')
+        .skip(start - 1)
+        .take(end.max(start) - start + 1)
+        .collect()
 }
 
 // Resolve a selector line window in place.
-fn resolve_selector_line_window(selector: Option<&str>, selected_start: &mut Option<usize>, selected_end: &mut Option<usize>) {
+fn resolve_selector_line_window(
+    selector: Option<&str>,
+    selected_start: &mut Option<usize>,
+    selected_end: &mut Option<usize>,
+) {
     let Some(selector) = selector else { return };
     let window = ["range:", "lines:", "line:"]
         .into_iter()
@@ -1903,7 +2385,10 @@ fn select_content<'a>(
     if let Some(start) = selected_start {
         return line_slice_exact(&content, start, selected_end.unwrap_or(start));
     }
-    if let Some(symbol) = selector.and_then(|value| value.strip_prefix("symbol:")).or(symbol) {
+    if let Some(symbol) = selector
+        .and_then(|value| value.strip_prefix("symbol:"))
+        .or(symbol)
+    {
         return symbol_block(&content, symbol);
     }
     if anchor_kind.is_some() || selector.is_some_and(|value| value.starts_with("anchor:")) {
@@ -1911,7 +2396,11 @@ fn select_content<'a>(
             .lines()
             .filter(|line| {
                 let line = line.trim_start();
-                ["fn ", "def ", "class ", "struct ", "impl ", "use ", "import "].iter().any(|prefix| line.starts_with(prefix))
+                [
+                    "fn ", "def ", "class ", "struct ", "impl ", "use ", "import ",
+                ]
+                .iter()
+                .any(|prefix| line.starts_with(prefix))
             })
             .collect::<Vec<_>>()
             .join("\n");
@@ -1920,7 +2409,8 @@ fn select_content<'a>(
 }
 fn ref_not_found_reason(kind: &str) -> String {
     if kind == "blob" && ref_index_enabled() {
-        "ref-not-found; tiers tried: explicit/env cache, current-root store, per-user ref-index".to_string()
+        "ref-not-found; tiers tried: explicit/env cache, current-root store, per-user ref-index"
+            .to_string()
     } else if kind == "blob" {
         "ref-not-found; tiers tried: explicit/env cache, current-root store (per-user ref-index disabled)".to_string()
     } else {
@@ -1928,7 +2418,11 @@ fn ref_not_found_reason(kind: &str) -> String {
     }
 }
 
-fn resolve_to_expand_content(resolve: RefResolve, requested_ref: &str, kind: &str) -> Result<String, String> {
+fn resolve_to_expand_content(
+    resolve: RefResolve,
+    requested_ref: &str,
+    kind: &str,
+) -> Result<String, String> {
     match resolve {
         RefResolve::Found(content) => Ok(content),
         RefResolve::Stale => Err("stale-ref".into()),
@@ -1968,10 +2462,19 @@ fn expand_selected_content(
         let end = selected_end.unwrap_or(start);
         let line_count = content_line_count(&content);
         if line_range_out_of_bounds(start, end, line_count) {
-            return Err(format!("window-out-of-range; start={start} end={end} lines={line_count}"));
+            return Err(format!(
+                "window-out-of-range; start={start} end={end} lines={line_count}"
+            ));
         }
     }
-    Ok(select_content(content, selector, selected_start, selected_end, anchor_kind, symbol))
+    Ok(select_content(
+        content,
+        selector,
+        selected_start,
+        selected_end,
+        anchor_kind,
+        symbol,
+    ))
 }
 
 fn ref_index_enabled() -> bool {
@@ -1979,7 +2482,9 @@ fn ref_index_enabled() -> bool {
     if let Some((enabled, _)) = ref_index_test_override() {
         return enabled;
     }
-    env::var(REF_INDEX_DISABLE_ENV).map(|value| value.trim() != "0").unwrap_or(true)
+    env::var(REF_INDEX_DISABLE_ENV)
+        .map(|value| value.trim() != "0")
+        .unwrap_or(true)
 }
 
 use std::sync::OnceLock;
@@ -2029,7 +2534,9 @@ fn ref_index_root() -> Option<PathBuf> {
         if let Some(path) = env::var_os(REF_INDEX_PATH_ENV).filter(|value| !value.is_empty()) {
             return Some(PathBuf::from(path));
         }
-        env::var_os("HOME").filter(|value| !value.is_empty()).map(|home| PathBuf::from(home).join(".tokenzero").join("ref-index"))
+        env::var_os("HOME")
+            .filter(|value| !value.is_empty())
+            .map(|home| PathBuf::from(home).join(".tokenzero").join("ref-index"))
     }
 }
 
@@ -2044,13 +2551,20 @@ fn create_ref_index_dir(path: &Path) -> std::io::Result<()> {
 }
 
 fn ref_index_id_part(ref_id: &str) -> Option<&str> {
-    ref_id.rsplit_once('/').map(|(_, id)| id).filter(|id| !id.is_empty())
+    ref_id
+        .rsplit_once('/')
+        .map(|(_, id)| id)
+        .filter(|id| !id.is_empty())
 }
 
 fn ref_index_shard_path(root: &Path, ref_id: &str) -> PathBuf {
     let id = ref_index_id_part(ref_id).unwrap_or(ref_id);
     let mut chars = id.chars();
-    root.join(format!("{}{}.ndjson", chars.next().unwrap_or('x'), chars.next().unwrap_or('x')))
+    root.join(format!(
+        "{}{}.ndjson",
+        chars.next().unwrap_or('x'),
+        chars.next().unwrap_or('x')
+    ))
 }
 
 fn ref_index_lock_path(shard: &Path) -> PathBuf {
@@ -2058,19 +2572,33 @@ fn ref_index_lock_path(shard: &Path) -> PathBuf {
 }
 
 fn ref_index_timestamp() -> u128 {
-    SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).map(|duration| duration.as_nanos()).unwrap_or_default()
+    SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
+        .unwrap_or_default()
 }
 
 fn ref_index_text(path: &Path) -> Option<String> {
-    read_limited_utf8(fs::File::open(path).ok()?, (REF_INDEX_MAX_BYTES as usize).saturating_mul(4)).ok().flatten()
+    read_limited_utf8(
+        fs::File::open(path).ok()?,
+        (REF_INDEX_MAX_BYTES as usize).saturating_mul(4),
+    )
+    .ok()
+    .flatten()
 }
 
 fn parsed_ref_index_entries(text: &str) -> impl Iterator<Item = RefIndexEntry> + '_ {
-    text.lines().map(str::trim).filter(|line| !line.is_empty()).map_while(|line| serde_json::from_str(line).ok())
+    text.lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map_while(|line| serde_json::from_str(line).ok())
 }
 
 fn ref_index_store_path(store_path: &Path) -> Option<PathBuf> {
-    store_path.canonicalize().or_else(|_| Ok::<_, std::io::Error>(store_path.to_path_buf())).ok()
+    store_path
+        .canonicalize()
+        .or_else(|_| Ok::<_, std::io::Error>(store_path.to_path_buf()))
+        .ok()
 }
 
 fn ref_index_root_store(store_path: &Path) -> Option<(PathBuf, PathBuf)> {
@@ -2079,7 +2607,9 @@ fn ref_index_root_store(store_path: &Path) -> Option<(PathBuf, PathBuf)> {
 
 fn locked_ref_index_shard(root: &Path, ref_id: &str) -> Option<(PathBuf, PersistLock)> {
     let shard = ref_index_shard_path(root, ref_id);
-    PersistLock::acquire_with_retries(ref_index_lock_path(&shard), LOCK_RETRIES).ok().map(|lock| (shard, lock))
+    PersistLock::acquire_with_retries(ref_index_lock_path(&shard), LOCK_RETRIES)
+        .ok()
+        .map(|lock| (shard, lock))
 }
 
 fn compact_ref_index_if_needed(shard: &Path) {
@@ -2088,25 +2618,42 @@ fn compact_ref_index_if_needed(shard: &Path) {
     }
 }
 
-fn append_blob_refs_to_ref_index(store_path: &Path, refs: &[String], classes: Option<&BTreeMap<String, ContentClass>>) {
-    let Some((root, store_path)) = ref_index_root_store(store_path) else { return };
-    let mut refs = refs.iter().filter(|ref_id| ref_id.starts_with("tz://blob/")).peekable();
+fn append_blob_refs_to_ref_index(
+    store_path: &Path,
+    refs: &[String],
+    classes: Option<&BTreeMap<String, ContentClass>>,
+) {
+    let Some((root, store_path)) = ref_index_root_store(store_path) else {
+        return;
+    };
+    let mut refs = refs
+        .iter()
+        .filter(|ref_id| ref_id.starts_with("tz://blob/"))
+        .peekable();
     if refs.peek().is_none() || create_ref_index_dir(&root).is_err() {
         return;
     }
     let ts = ref_index_timestamp();
     for ref_id in refs {
-        let Some((shard, _lock)) = locked_ref_index_shard(&root, ref_id) else { continue };
-        if newest_ref_index_store_path(&shard, ref_id).as_deref() == Some(store_path.to_string_lossy().as_ref()) {
+        let Some((shard, _lock)) = locked_ref_index_shard(&root, ref_id) else {
+            continue;
+        };
+        if newest_ref_index_store_path(&shard, ref_id).as_deref()
+            == Some(store_path.to_string_lossy().as_ref())
+        {
             continue;
         }
-        let class = classes.and_then(|classes| classes.get(ref_id)).copied().unwrap_or_else(|| classify_ref(ref_id, None));
-        if append_ref_index_line(&shard, ref_id, &store_path, ts, class, false).is_ok() {
+        let class = classes
+            .and_then(|classes| classes.get(ref_id))
+            .copied()
+            .unwrap_or_else(|| classify_ref(ref_id, None));
+        if append_ref_index_line(&shard, ref_id, &store_path, ts, class, false, 0, None).is_ok() {
             compact_ref_index_if_needed(&shard);
         }
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn append_ref_index_line(
     shard: &Path,
     ref_id: &str,
@@ -2114,8 +2661,12 @@ fn append_ref_index_line(
     ts: u128,
     content_class: ContentClass,
     expanded: bool,
+    expansion_count: u64,
+    last_expanded_ts: Option<u128>,
 ) -> Result<(), RecoveryError> {
-    let Some(parent) = shard.parent() else { return Ok(()) };
+    let Some(parent) = shard.parent() else {
+        return Ok(());
+    };
     create_ref_index_dir(parent)?;
     let entry = RefIndexEntry {
         ref_id: ref_id.to_string(),
@@ -2123,10 +2674,16 @@ fn append_ref_index_line(
         ts,
         content_class,
         expanded,
+        expansion_count,
+        last_expanded_ts,
     };
     let mut line = serde_json::to_string(&entry)?;
     line.push('\n');
-    private_open_options().create(true).append(true).open(shard)?.write_all(line.as_bytes())?;
+    private_open_options()
+        .create(true)
+        .append(true)
+        .open(shard)?
+        .write_all(line.as_bytes())?;
     Ok(())
 }
 
@@ -2139,8 +2696,11 @@ fn open_optional_file(path: &Path) -> Result<Option<fs::File>, RecoveryError> {
 }
 
 fn compact_ref_index_shard(shard: &Path) -> Result<(), RecoveryError> {
-    let Some(file) = open_optional_file(shard)? else { return Ok(()) };
-    let Some(text) = read_limited_utf8(file, (REF_INDEX_MAX_BYTES as usize).saturating_mul(4))? else {
+    let Some(file) = open_optional_file(shard)? else {
+        return Ok(());
+    };
+    let Some(text) = read_limited_utf8(file, (REF_INDEX_MAX_BYTES as usize).saturating_mul(4))?
+    else {
         return Ok(());
     };
     write_ref_index_entries(shard, newest_ref_index_entries(&text, None).values())
@@ -2151,32 +2711,47 @@ fn prune_ref_index_stale_entries(ref_id: &str, stale: &HashSet<String>) {
         return;
     }
     let Some(root) = ref_index_root() else { return };
-    let Some((shard, _lock)) = locked_ref_index_shard(&root, ref_id) else { return };
-    let Some(text) = ref_index_text(&shard) else { return };
-    let entries: Vec<_> =
-        parsed_ref_index_entries(&text).filter(|entry| entry.ref_id != ref_id || !stale.contains(&entry.store_path)).collect();
+    let Some((shard, _lock)) = locked_ref_index_shard(&root, ref_id) else {
+        return;
+    };
+    let Some(text) = ref_index_text(&shard) else {
+        return;
+    };
+    let entries: Vec<_> = parsed_ref_index_entries(&text)
+        .filter(|entry| entry.ref_id != ref_id || !stale.contains(&entry.store_path))
+        .collect();
     let _ = write_ref_index_entries(&shard, &entries);
 }
 
 fn newest_ref_index_store_path(shard: &Path, ref_id: &str) -> Option<String> {
-    parsed_ref_index_entries(&ref_index_text(shard)?).filter(|entry| entry.ref_id == ref_id).fold(None, |newest, entry| {
-        if newest.as_ref().is_none_or(|current: &RefIndexEntry| entry.ts > current.ts) {
-            Some(entry)
-        } else {
-            newest
-        }
-    }).map(|entry| entry.store_path)
+    parsed_ref_index_entries(&ref_index_text(shard)?)
+        .filter(|entry| entry.ref_id == ref_id)
+        .fold(None, |newest, entry| {
+            if newest
+                .as_ref()
+                .is_none_or(|current: &RefIndexEntry| entry.ts > current.ts)
+            {
+                Some(entry)
+            } else {
+                newest
+            }
+        })
+        .map(|entry| entry.store_path)
 }
 
 fn ref_index_entries_for_ref(text: &str, ref_id: &str) -> Vec<RefIndexEntry> {
-    let mut entries: Vec<_> = parsed_ref_index_entries(text).filter(|entry| entry.ref_id == ref_id).collect();
+    let mut entries: Vec<_> = parsed_ref_index_entries(text)
+        .filter(|entry| entry.ref_id == ref_id)
+        .collect();
     entries.sort_by_key(|entry| std::cmp::Reverse(entry.ts));
     entries
 }
 
 fn newest_ref_index_entries(text: &str, skip_ref: Option<&str>) -> BTreeMap<String, RefIndexEntry> {
     let mut entries = BTreeMap::new();
-    for mut entry in parsed_ref_index_entries(text).filter(|entry| skip_ref != Some(entry.ref_id.as_str())) {
+    for mut entry in
+        parsed_ref_index_entries(text).filter(|entry| skip_ref != Some(entry.ref_id.as_str()))
+    {
         match entries.entry(entry.ref_id.clone()) {
             std::collections::btree_map::Entry::Vacant(slot) => {
                 slot.insert(entry);
@@ -2185,9 +2760,14 @@ fn newest_ref_index_entries(text: &str, skip_ref: Option<&str>) -> BTreeMap<Stri
                 let existing = slot.get_mut();
                 if entry.ts >= existing.ts {
                     entry.expanded |= existing.expanded;
+                    entry.expansion_count = entry.expansion_count.max(existing.expansion_count);
+                    entry.last_expanded_ts = entry.last_expanded_ts.max(existing.last_expanded_ts);
                     slot.insert(entry);
                 } else {
                     existing.expanded |= entry.expanded;
+                    existing.expansion_count = existing.expansion_count.max(entry.expansion_count);
+                    existing.last_expanded_ts =
+                        existing.last_expanded_ts.max(entry.last_expanded_ts);
                 }
             }
         }
@@ -2195,7 +2775,10 @@ fn newest_ref_index_entries(text: &str, skip_ref: Option<&str>) -> BTreeMap<Stri
     entries
 }
 
-fn write_ref_index_entries<'a>(shard: &Path, entries: impl IntoIterator<Item = &'a RefIndexEntry>) -> Result<(), RecoveryError> {
+fn write_ref_index_entries<'a>(
+    shard: &Path,
+    entries: impl IntoIterator<Item = &'a RefIndexEntry>,
+) -> Result<(), RecoveryError> {
     create_ref_index_dir(shard.parent().unwrap_or_else(|| Path::new(".")))?;
     let tmp = recovery_tmp_path(shard);
     {
@@ -2257,7 +2840,9 @@ fn resolve_blob_from_ref_index(ref_id: &str, config: &RecoveryConfig) -> RefReso
         if let Some(hash) = ref_index_id_part(ref_id) {
             match shared_cas_utf8(&SharedCas::new(root), hash) {
                 Ok(content) => return RefResolve::Found(content),
-                Err(None) | Err(Some(SharedCasError::Corruption)) => return RefResolve::DecodeFailed,
+                Err(None) | Err(Some(SharedCasError::Corruption)) => {
+                    return RefResolve::DecodeFailed;
+                }
                 Err(_) => {}
             }
         }
@@ -2270,9 +2855,9 @@ fn resolve_blob_from_ref_index(ref_id: &str, config: &RecoveryConfig) -> RefReso
             stale.insert(entry.store_path);
             continue;
         }
-        let state = loaded.entry(store_path.clone()).or_insert_with(|| {
-            load_state(&store_path, config).ok().flatten()
-        });
+        let state = loaded
+            .entry(store_path.clone())
+            .or_insert_with(|| load_state(&store_path, config).ok().flatten());
         let resolved = state
             .as_ref()
             .and_then(|state| state.blobs.get(ref_id).cloned())
@@ -2293,14 +2878,34 @@ fn resolve_blob_from_ref_index(ref_id: &str, config: &RecoveryConfig) -> RefReso
 }
 
 fn record_ref_index_expanded(store_path: &Path, ref_id: &str, fallback: ContentClass) {
-    let Some((root, store_path)) = ref_index_root_store(store_path) else { return };
-    let Some((shard, _lock)) = locked_ref_index_shard(&root, ref_id) else { return };
-    let existing = ref_index_text(&shard).and_then(|text| ref_index_entries_for_ref(&text, ref_id).into_iter().next());
-    if existing.as_ref().is_some_and(|entry| entry.expanded) {
+    let Some((root, store_path)) = ref_index_root_store(store_path) else {
         return;
-    }
-    let class = existing.map_or(fallback, |entry| entry.content_class);
-    let _ = append_ref_index_line(&shard, ref_id, &store_path, ref_index_timestamp(), class, true);
+    };
+    let Some((shard, _lock)) = locked_ref_index_shard(&root, ref_id) else {
+        return;
+    };
+    let existing = ref_index_text(&shard)
+        .and_then(|text| ref_index_entries_for_ref(&text, ref_id).into_iter().next());
+    let class = existing
+        .as_ref()
+        .map_or(fallback, |entry| entry.content_class);
+    let expansion_count = existing.as_ref().map_or(1, |entry| {
+        entry
+            .expansion_count
+            .max(u64::from(entry.expanded))
+            .saturating_add(1)
+    });
+    let now = ref_index_timestamp();
+    let _ = append_ref_index_line(
+        &shard,
+        ref_id,
+        &store_path,
+        now,
+        class,
+        true,
+        expansion_count,
+        Some(now),
+    );
     compact_ref_index_if_needed(&shard);
 }
 
@@ -2333,7 +2938,9 @@ pub fn export_class_stats() -> serde_json::Value {
             continue;
         };
         for entry in parsed_ref_index_entries(&text) {
-            let current = per_ref.entry(entry.ref_id).or_insert((0, entry.content_class, false));
+            let current = per_ref
+                .entry(entry.ref_id)
+                .or_insert((0, entry.content_class, false));
             current.2 |= entry.expanded;
             if entry.ts > current.0 {
                 current.0 = entry.ts;
@@ -2384,16 +2991,25 @@ pub fn export_class_stats() -> serde_json::Value {
     })
 }
 
-fn load_state(path: &Path, config: &RecoveryConfig) -> Result<Option<RecoveryState>, RecoveryError> {
-    let Some(file) = open_optional_file(path)? else { return Ok(None) };
+fn load_state(
+    path: &Path,
+    config: &RecoveryConfig,
+) -> Result<Option<RecoveryState>, RecoveryError> {
+    let Some(file) = open_optional_file(path)? else {
+        return Ok(None);
+    };
     let meta = file.metadata()?;
     // Compare as u64 so a file larger than usize can't truncate and slip past
     // the load-size guard on 32-bit targets (which would risk an OOM on read).
     if !meta.is_file() || meta.len() > config.max_load_bytes as u64 {
         return Ok(None);
     }
-    let Some(text) = read_limited_utf8(file, config.max_load_bytes)? else { return Ok(None) };
-    let Ok(mut state) = serde_json::from_str::<RecoveryState>(&text) else { return Ok(None) };
+    let Some(text) = read_limited_utf8(file, config.max_load_bytes)? else {
+        return Ok(None);
+    };
+    let Ok(mut state) = serde_json::from_str::<RecoveryState>(&text) else {
+        return Ok(None);
+    };
     state.configure(config);
     Ok(Some(apply_journal(state, path, config)))
 }
@@ -2434,7 +3050,9 @@ fn parse_blob_marker(value: &str) -> Option<(&str, usize)> {
 fn blob_value_len(value: &BlobEntry) -> usize {
     match value {
         BlobEntry::Inline(text) => parse_blob_marker(text).map_or(text.len(), |(_, len)| len),
-        BlobEntry::FileRef { path, .. } => std::mem::size_of::<BlobEntry>() + path.as_os_str().len(),
+        BlobEntry::FileRef { path, .. } => {
+            std::mem::size_of::<BlobEntry>() + path.as_os_str().len()
+        }
     }
 }
 
@@ -2461,7 +3079,10 @@ fn line_range_out_of_bounds(start: usize, end: usize, line_count: usize) -> bool
     start == 0 || start > end || end > line_count
 }
 
-fn read_file_chunks<R: Read>(reader: &mut R, mut on_chunk: impl FnMut(&[u8]) -> std::io::Result<()>) -> std::io::Result<()> {
+fn read_file_chunks<R: Read>(
+    reader: &mut R,
+    mut on_chunk: impl FnMut(&[u8]) -> std::io::Result<()>,
+) -> std::io::Result<()> {
     let mut buffer = [0_u8; STREAM_READ_BUFFER_BYTES];
     loop {
         let read = reader.read(&mut buffer)?;
@@ -2475,7 +3096,9 @@ fn read_file_chunks<R: Read>(reader: &mut R, mut on_chunk: impl FnMut(&[u8]) -> 
 
 fn read_utf8_hashed(path: &Path, expected_len: Option<usize>) -> std::io::Result<(String, String)> {
     let mut file = fs::File::open(path)?;
-    let capacity = expected_len.or_else(|| file.metadata().ok()?.len().try_into().ok()).unwrap_or(STREAM_READ_BUFFER_BYTES);
+    let capacity = expected_len
+        .or_else(|| file.metadata().ok()?.len().try_into().ok())
+        .unwrap_or(STREAM_READ_BUFFER_BYTES);
     let mut bytes = Vec::with_capacity(capacity);
     let mut hasher = Sha256::new();
     read_file_chunks(&mut file, |chunk| {
@@ -2487,12 +3110,18 @@ fn read_utf8_hashed(path: &Path, expected_len: Option<usize>) -> std::io::Result
         Ok(())
     })?;
     if expected_len.is_some_and(|len| bytes.len() != len) {
-        return Err(invalid_data("streamed payload does not match its recorded length"));
+        return Err(invalid_data(
+            "streamed payload does not match its recorded length",
+        ));
     }
     finalize_utf8_digest(bytes, hasher)
 }
 
-fn read_utf8_line_range_hashed(path: &Path, start_line: usize, end_line: usize) -> std::io::Result<(String, String)> {
+fn read_utf8_line_range_hashed(
+    path: &Path,
+    start_line: usize,
+    end_line: usize,
+) -> std::io::Result<(String, String)> {
     let mut file = fs::File::open(path)?;
     let mut selected = Vec::new();
     let mut hasher = Sha256::new();
@@ -2525,7 +3154,11 @@ fn read_utf8_line_range_hashed(path: &Path, start_line: usize, end_line: usize) 
         }
         Ok(())
     })?;
-    let line_count = if bytes_seen == 0 { 0 } else { newline_count + usize::from(last_byte != Some(b'\n')) };
+    let line_count = if bytes_seen == 0 {
+        0
+    } else {
+        newline_count + usize::from(last_byte != Some(b'\n'))
+    };
     if line_range_out_of_bounds(start_line, end_line, line_count) {
         return Err(invalid_data("streamed line range is outside the source"));
     }
@@ -2534,15 +3167,17 @@ fn read_utf8_line_range_hashed(path: &Path, start_line: usize, end_line: usize) 
 
 fn stored_source_path(stored: &StoredFile) -> Option<PathBuf> {
     let path_text = stored.path.as_deref()?;
-    Some(stored.path_identity.as_deref().and_then(path_from_identity_text).unwrap_or_else(|| PathBuf::from(path_text)))
+    Some(
+        stored
+            .path_identity
+            .as_deref()
+            .and_then(path_from_identity_text)
+            .unwrap_or_else(|| PathBuf::from(path_text)),
+    )
 }
 
 fn resolve_found_if(ok: bool, text: String, fail: RefResolve) -> RefResolve {
-    if ok {
-        RefResolve::Found(text)
-    } else {
-        fail
-    }
+    if ok { RefResolve::Found(text) } else { fail }
 }
 
 fn blob_ref_digest_matches(ref_id: &str, text: &str, sha256: &str) -> bool {
@@ -2559,11 +3194,23 @@ fn resolve_file_value(stored: &StoredFile) -> RefResolve {
     if !stored.source_backed {
         return RefResolve::Found(stored.text.clone());
     }
-    let Some(path) = stored_source_path(stored) else { return RefResolve::DecodeFailed };
-    let Some(expected) = stored.source_fingerprint.as_ref() else { return RefResolve::DecodeFailed };
-    let Ok(expected_len) = usize::try_from(expected.size) else { return RefResolve::Stale };
-    let Ok((text, sha256)) = read_utf8_hashed(&path, Some(expected_len)) else { return RefResolve::Stale };
-    resolve_found_if(source_fingerprint_from_sha256(&path, &sha256).as_ref() == Some(expected), text, RefResolve::Stale)
+    let Some(path) = stored_source_path(stored) else {
+        return RefResolve::DecodeFailed;
+    };
+    let Some(expected) = stored.source_fingerprint.as_ref() else {
+        return RefResolve::DecodeFailed;
+    };
+    let Ok(expected_len) = usize::try_from(expected.size) else {
+        return RefResolve::Stale;
+    };
+    let Ok((text, sha256)) = read_utf8_hashed(&path, Some(expected_len)) else {
+        return RefResolve::Stale;
+    };
+    resolve_found_if(
+        source_fingerprint_from_sha256(&path, &sha256).as_ref() == Some(expected),
+        text,
+        RefResolve::Stale,
+    )
 }
 
 fn resolve_blob_value(cache_path: Option<&Path>, ref_id: &str, value: &BlobEntry) -> RefResolve {
@@ -2572,18 +3219,30 @@ fn resolve_blob_value(cache_path: Option<&Path>, ref_id: &str, value: &BlobEntry
             let Some((hash, expected_len)) = parse_blob_marker(value) else {
                 return RefResolve::Found(value.clone());
             };
-            let Some(cache_path) = cache_path else { return RefResolve::DecodeFailed };
+            let Some(cache_path) = cache_path else {
+                return RefResolve::DecodeFailed;
+            };
             let path = blob_sidecar_dir(cache_path).join(format!("{hash}.txt"));
             let Ok((text, actual_hash)) = read_utf8_hashed(&path, Some(expected_len)) else {
                 return RefResolve::DecodeFailed;
             };
             resolve_found_if(actual_hash == hash, text, RefResolve::DecodeFailed)
         }
-        BlobEntry::FileRef { path, source_start_line, source_end_line } => {
-            let Ok((text, sha256)) = read_utf8_line_range_hashed(path, *source_start_line, *source_end_line) else {
+        BlobEntry::FileRef {
+            path,
+            source_start_line,
+            source_end_line,
+        } => {
+            let Ok((text, sha256)) =
+                read_utf8_line_range_hashed(path, *source_start_line, *source_end_line)
+            else {
                 return RefResolve::Stale;
             };
-            resolve_found_if(blob_ref_digest_matches(ref_id, &text, &sha256), text, RefResolve::Stale)
+            resolve_found_if(
+                blob_ref_digest_matches(ref_id, &text, &sha256),
+                text,
+                RefResolve::Stale,
+            )
         }
     }
 }
@@ -2633,8 +3292,11 @@ fn state_entry_present(state: &RecoveryState, ref_id: &str) -> bool {
     recovery_maps!(contains state, ref_id)
 }
 
-
-fn session_delta(state: &RecoveryState, session_refs: &[String], config: &RecoveryConfig) -> RecoveryState {
+fn session_delta(
+    state: &RecoveryState,
+    session_refs: &[String],
+    config: &RecoveryConfig,
+) -> RecoveryState {
     let mut delta = RecoveryState::empty(config);
     for ref_id in session_refs {
         recovery_maps!(copy delta, state, ref_id);
@@ -2645,11 +3307,20 @@ fn session_delta(state: &RecoveryState, session_refs: &[String], config: &Recove
     delta.shell_outcomes = state.shell_outcomes.clone();
     delta.shell_outcome_seq = state.shell_outcome_seq;
     delta.ambiguous_aliases = state.ambiguous_aliases.clone();
-    delta.order = session_refs.iter().filter(|ref_id| state_entry_present(&delta, ref_id)).cloned().collect();
+    delta.transparency = state.transparency.clone();
+    delta.order = session_refs
+        .iter()
+        .filter(|ref_id| state_entry_present(&delta, ref_id))
+        .cloned()
+        .collect();
     delta
 }
 
-fn copy_map_entry<T: Clone>(destination: &mut BTreeMap<String, T>, source: &BTreeMap<String, T>, ref_id: &str) {
+fn copy_map_entry<T: Clone>(
+    destination: &mut BTreeMap<String, T>,
+    source: &BTreeMap<String, T>,
+    ref_id: &str,
+) {
     if let Some(value) = source.get(ref_id) {
         destination.insert(ref_id.to_string(), value.clone());
     }
@@ -2679,7 +3350,11 @@ fn remove_journal_segments(path: &Path) {
     }
 }
 
-fn append_journal(snapshot_path: &Path, entry: &JournalEntry, segment_limit: u64) -> Result<JournalAppend, RecoveryError> {
+fn append_journal(
+    snapshot_path: &Path,
+    entry: &JournalEntry,
+    segment_limit: u64,
+) -> Result<JournalAppend, RecoveryError> {
     let mut line = serde_json::to_string(entry)?;
     line.push('\n');
     let line_len = line.len() as u64;
@@ -2728,7 +3403,6 @@ fn read_capped_journal_text(path: &Path, remaining: &mut u64) -> Option<Option<S
     }
 }
 
-
 // Replay complete journal entries; any bad tail fails open to recovered state.
 fn apply_journal(mut state: RecoveryState, path: &Path, config: &RecoveryConfig) -> RecoveryState {
     let journals = (1..=JOURNAL_MAX_SEALED_SEGMENTS)
@@ -2737,20 +3411,36 @@ fn apply_journal(mut state: RecoveryState, path: &Path, config: &RecoveryConfig)
         .chain(std::iter::once(journal_path(path)));
     let mut remaining = config.max_load_bytes as u64;
     for journal in journals {
-        let Some(maybe_text) = read_capped_journal_text(&journal, &mut remaining) else { return state };
+        let Some(maybe_text) = read_capped_journal_text(&journal, &mut remaining) else {
+            return state;
+        };
         let Some(text) = maybe_text else { continue };
         for line in text.lines().map(str::trim).filter(|line| !line.is_empty()) {
-            let Ok(entry) = serde_json::from_str::<JournalEntry>(line) else { return state };
-            let JournalEntry { refs, state: delta, deleted_blob_refs, deleted_aliases } = entry;
+            let Ok(entry) = serde_json::from_str::<JournalEntry>(line) else {
+                return state;
+            };
+            let JournalEntry {
+                refs,
+                state: delta,
+                deleted_blob_refs,
+                deleted_aliases,
+            } = entry;
             let accumulated = std::mem::replace(&mut state, RecoveryState::empty(config));
             state = merge_states(accumulated, delta, &refs, config);
-            apply_deletions(&mut state, deleted_blob_refs.iter().map(String::as_str), deleted_aliases.iter().map(String::as_str));
+            apply_deletions(
+                &mut state,
+                deleted_blob_refs.iter().map(String::as_str),
+                deleted_aliases.iter().map(String::as_str),
+            );
         }
     }
     state
 }
 
-fn read_limited_utf8<R: Read>(reader: R, max_load_bytes: usize) -> Result<Option<String>, RecoveryError> {
+fn read_limited_utf8<R: Read>(
+    reader: R,
+    max_load_bytes: usize,
+) -> Result<Option<String>, RecoveryError> {
     let mut limited = reader.take((max_load_bytes as u64).saturating_add(1));
     let mut bytes = Vec::new();
     limited.read_to_end(&mut bytes)?;
@@ -2760,7 +3450,11 @@ fn read_limited_utf8<R: Read>(reader: R, max_load_bytes: usize) -> Result<Option
     Ok(String::from_utf8(bytes).ok())
 }
 
-fn merge_map_entries<T>(session: &HashSet<&str>, dst: &mut BTreeMap<String, T>, src: BTreeMap<String, T>) {
+fn merge_map_entries<T>(
+    session: &HashSet<&str>,
+    dst: &mut BTreeMap<String, T>,
+    src: BTreeMap<String, T>,
+) {
     for (ref_id, value) in src {
         if session.contains(ref_id.as_str()) || dst.contains_key(&ref_id) {
             dst.insert(ref_id, value);
@@ -2770,18 +3464,33 @@ fn merge_map_entries<T>(session: &HashSet<&str>, dst: &mut BTreeMap<String, T>, 
 
 fn trim_shell_outcomes(outcomes: &mut BTreeMap<String, ShellOutcome>) {
     while outcomes.len() > MAX_SHELL_OUTCOMES {
-        let Some(victim) = outcomes.iter().min_by_key(|(_, outcome)| outcome.seq).map(|(key, _)| key.clone()) else {
+        let Some(victim) = outcomes
+            .iter()
+            .min_by_key(|(_, outcome)| outcome.seq)
+            .map(|(key, _)| key.clone())
+        else {
             break;
         };
         outcomes.remove(&victim);
     }
 }
 
-fn merge_states(existing: RecoveryState, current: RecoveryState, session_refs: &[String], config: &RecoveryConfig) -> RecoveryState {
+fn merge_states(
+    existing: RecoveryState,
+    current: RecoveryState,
+    session_refs: &[String],
+    config: &RecoveryConfig,
+) -> RecoveryState {
     let session: HashSet<&str> = session_refs.iter().map(String::as_str).collect();
     let mut merged = existing;
-    recovery_maps!(merge &session, merged, current);
+    recovery_maps!(merge & session, merged, current);
     merged.aliases.extend(current.aliases);
+    if current.ordinal_generation > merged.ordinal_generation {
+        merged.ordinal_generation = current.ordinal_generation;
+        merged.next_ordinal = current.next_ordinal;
+    } else if current.ordinal_generation == merged.ordinal_generation {
+        merged.next_ordinal = merged.next_ordinal.max(current.next_ordinal);
+    }
     merged.order.extend(session_refs.iter().cloned());
     let mut seen = HashSet::new();
     merged.order.retain(|ref_id| seen.insert(ref_id.clone()));
@@ -2789,17 +3498,26 @@ fn merge_states(existing: RecoveryState, current: RecoveryState, session_refs: &
     merged.shell_outcomes.extend(current.shell_outcomes);
     trim_shell_outcomes(&mut merged.shell_outcomes);
     merged.ambiguous_aliases.extend(current.ambiguous_aliases);
+    merged.transparency.merge_concurrent(&current.transparency);
     merged.configure(config);
     merged
 }
 
-fn evict_prefix<T>(items: &mut BTreeMap<String, T>, order: &mut Vec<String>, prefix: &str, limit: usize) {
+fn evict_prefix<T>(
+    items: &mut BTreeMap<String, T>,
+    order: &mut Vec<String>,
+    prefix: &str,
+    limit: usize,
+) {
     let excess = items.len().saturating_sub(limit);
     if excess == 0 {
         return;
     }
     let mut victims = HashSet::with_capacity(excess);
-    for ref_id in order.iter().filter(|ref_id| ref_id.starts_with(prefix) && items.contains_key(*ref_id)) {
+    for ref_id in order
+        .iter()
+        .filter(|ref_id| ref_id.starts_with(prefix) && items.contains_key(*ref_id))
+    {
         victims.insert(ref_id.clone());
         if victims.len() == excess {
             break;
@@ -2827,7 +3545,10 @@ fn private_open_options() -> OpenOptions {
 }
 
 fn create_private_new(path: &Path) -> std::io::Result<fs::File> {
-    private_open_options().write(true).create_new(true).open(path)
+    private_open_options()
+        .write(true)
+        .create_new(true)
+        .open(path)
 }
 
 fn atomic_write_json(path: &Path, state: &RecoveryState) -> Result<(), RecoveryError> {
@@ -2858,7 +3579,10 @@ fn atomic_write_json(path: &Path, state: &RecoveryState) -> Result<(), RecoveryE
         .unwrap_or_else(|| {
             std::io::Error::new(
                 std::io::ErrorKind::AlreadyExists,
-                format!("could not allocate recovery temp file for {} after {TMP_RETRIES} attempts", path.display()),
+                format!(
+                    "could not allocate recovery temp file for {} after {TMP_RETRIES} attempts",
+                    path.display()
+                ),
             )
         })
         .into())
@@ -2870,7 +3594,9 @@ fn write_json_to_tmp(tmp: &Path, state: &RecoveryState) -> Result<(), RecoveryEr
     let mut writer = std::io::BufWriter::with_capacity(1 << 20, file);
     serde_json::to_writer(&mut writer, state)?;
     writer.write_all(b"\n")?;
-    let _file = writer.into_inner().map_err(std::io::IntoInnerError::into_error)?;
+    let _file = writer
+        .into_inner()
+        .map_err(std::io::IntoInnerError::into_error)?;
     Ok(())
 }
 
@@ -2882,7 +3608,6 @@ fn recovery_file_ref(text: &str, path: Option<&Path>) -> String {
     format!("tz://file/f{}", &digest_hex(hasher)[..16])
 }
 
-
 macro_rules! path_identity_platform {
     (unix) => {
         fn path_identity_text(path: &Path) -> String {
@@ -2891,7 +3616,9 @@ macro_rules! path_identity_platform {
         }
         fn path_from_identity_text(identity: &str) -> Option<PathBuf> {
             use std::os::unix::ffi::OsStringExt;
-            Some(PathBuf::from(OsString::from_vec(decode_hex_bytes(identity.strip_prefix("unix:")?)?)))
+            Some(PathBuf::from(OsString::from_vec(decode_hex_bytes(
+                identity.strip_prefix("unix:")?,
+            )?)))
         }
     };
     (windows) => {
@@ -2907,7 +3634,10 @@ macro_rules! path_identity_platform {
             use std::os::windows::ffi::OsStringExt;
             let bytes = decode_hex_bytes(identity.strip_prefix("windows:")?)?;
             let mut chunks = bytes.chunks_exact(2);
-            let units: Vec<u16> = chunks.by_ref().map(|p| u16::from_be_bytes([p[0], p[1]])).collect();
+            let units: Vec<u16> = chunks
+                .by_ref()
+                .map(|p| u16::from_be_bytes([p[0], p[1]]))
+                .collect();
             if !chunks.remainder().is_empty() {
                 return None;
             }
@@ -2960,7 +3690,11 @@ fn recovery_lock_path(path: &Path) -> PathBuf {
 fn recovery_tmp_path(path: &Path) -> PathBuf {
     let parent = path.parent().unwrap_or_else(|| Path::new("."));
     let mut tmp_name = OsString::from(".");
-    tmp_name.push(path.file_name().map(OsString::from).unwrap_or_else(|| OsString::from("recovery")));
+    tmp_name.push(
+        path.file_name()
+            .map(OsString::from)
+            .unwrap_or_else(|| OsString::from("recovery")),
+    );
     let nonce = TMP_COUNTER.fetch_add(1, Ordering::Relaxed);
     tmp_name.push(format!(".{}.{nonce}.tmp", std::process::id()));
     parent.join(tmp_name)
@@ -2984,9 +3718,19 @@ pub struct TmpSweepReport {
 
 /// Remove matching recovery temp files older than `max_age`.
 /// Dry runs report candidates; per-file failures are counted and fail open.
-pub fn sweep_stale_tmp_files(cache_path: &Path, max_age: Duration, dry_run: bool) -> TmpSweepReport {
-    let mut report = TmpSweepReport { dry_run, ..TmpSweepReport::default() };
-    let Some((parent, cache_name)) = cache_path.parent().zip(cache_path.file_name().and_then(|name| name.to_str())) else {
+pub fn sweep_stale_tmp_files(
+    cache_path: &Path,
+    max_age: Duration,
+    dry_run: bool,
+) -> TmpSweepReport {
+    let mut report = TmpSweepReport {
+        dry_run,
+        ..TmpSweepReport::default()
+    };
+    let Some((parent, cache_name)) = cache_path
+        .parent()
+        .zip(cache_path.file_name().and_then(|name| name.to_str()))
+    else {
         return report;
     };
     let Ok(entries) = fs::read_dir(parent) else {
@@ -3006,7 +3750,11 @@ pub fn sweep_stale_tmp_files(cache_path: &Path, max_age: Duration, dry_run: bool
             continue;
         }
         report.scanned += 1;
-        let expired = meta.modified().ok().and_then(|modified| now.duration_since(modified).ok()).is_some_and(|age| age > max_age);
+        let expired = meta
+            .modified()
+            .ok()
+            .and_then(|modified| now.duration_since(modified).ok())
+            .is_some_and(|age| age > max_age);
         if !expired {
             continue;
         }
@@ -3022,7 +3770,10 @@ pub fn sweep_stale_tmp_files(cache_path: &Path, max_age: Duration, dry_run: bool
 
 fn append_file_name_suffix(path: &Path, suffix: &str) -> PathBuf {
     let parent = path.parent().unwrap_or_else(|| Path::new("."));
-    let mut file_name = path.file_name().map(OsString::from).unwrap_or_else(|| OsString::from("recovery"));
+    let mut file_name = path
+        .file_name()
+        .map(OsString::from)
+        .unwrap_or_else(|| OsString::from("recovery"));
     file_name.push(suffix);
     parent.join(file_name)
 }
@@ -3060,7 +3811,11 @@ impl PersistLock {
                 Err(_) => {}
             }
         }
-        Err(std::io::Error::new(std::io::ErrorKind::TimedOut, format!("timed out waiting for lock {}", path.display())).into())
+        Err(std::io::Error::new(
+            std::io::ErrorKind::TimedOut,
+            format!("timed out waiting for lock {}", path.display()),
+        )
+        .into())
     }
 }
 
@@ -3124,7 +3879,11 @@ fn file_meta(path: &Path) -> Option<fs::Metadata> {
 }
 
 fn mtime_ns(meta: &fs::Metadata) -> u128 {
-    meta.modified().ok().and_then(|m| m.duration_since(SystemTime::UNIX_EPOCH).ok()).map(|d| d.as_nanos()).unwrap_or_default()
+    meta.modified()
+        .ok()
+        .and_then(|m| m.duration_since(SystemTime::UNIX_EPOCH).ok())
+        .map(|d| d.as_nanos())
+        .unwrap_or_default()
 }
 
 #[cfg(test)]
@@ -3174,7 +3933,6 @@ mod select_content_tests {
         );
     }
 }
-
 
 /// Result of enforcing the legacy recovery sidecar byte budget.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -3254,4 +4012,149 @@ pub fn prune_blob_sidecars(
         removed_files,
         retained_referenced,
     })
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RecoveryBlobPruneReport {
+    pub bytes_before: u64,
+    pub bytes_after: u64,
+    pub freed_bytes: u64,
+    pub removed_files: usize,
+    pub removed_referenced: usize,
+    pub expired_files: usize,
+    pub max_bytes: u64,
+    pub max_age_seconds: u64,
+    pub dry_run: bool,
+}
+
+/// Enforce byte and age bounds over the complete recovery sidecar store.
+/// Never-expanded blobs are selected before expanded blobs; expanded blobs use
+/// their durable ref-index last-expand timestamp as the LRU key.
+pub fn prune_recovery_blobs(
+    cache_path: &Path,
+    max_bytes: u64,
+    max_age: Duration,
+    dry_run: bool,
+) -> Result<RecoveryBlobPruneReport, RecoveryError> {
+    let directory = blob_sidecar_dir(cache_path);
+    let mut store = RecoveryStore::new(Some(cache_path.to_path_buf()));
+    let mut files = Vec::new();
+    let mut bytes_before = 0_u64;
+    let now = SystemTime::now();
+    match fs::read_dir(&directory) {
+        Ok(entries) => {
+            for entry in entries {
+                let entry = entry?;
+                let metadata = entry.metadata()?;
+                if !metadata.is_file() {
+                    continue;
+                }
+                let path = entry.path();
+                let Some(hash) = path.file_stem().and_then(|value| value.to_str()) else {
+                    continue;
+                };
+                let ref_id = format!("tz://blob/{hash}");
+                let len = metadata.len();
+                bytes_before = bytes_before.saturating_add(len);
+                let modified = metadata.modified().unwrap_or(UNIX_EPOCH);
+                let expired = now.duration_since(modified).unwrap_or_default() >= max_age;
+                let (expansion_count, last_expanded) = ref_index_blob_entries(&ref_id)
+                    .map(|(_, entries)| {
+                        entries.into_iter().fold((0_u64, 0_u128), |acc, item| {
+                            (
+                                acc.0
+                                    .max(item.expansion_count.max(u64::from(item.expanded))),
+                                acc.1.max(item.last_expanded_ts.unwrap_or(0)),
+                            )
+                        })
+                    })
+                    .unwrap_or_default();
+                let referenced = store.state.blobs.contains_key(&ref_id);
+                files.push((
+                    !expired,
+                    expansion_count > 0,
+                    last_expanded,
+                    modified,
+                    path,
+                    ref_id,
+                    len,
+                    referenced,
+                ));
+            }
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.into()),
+    }
+    files.sort_by(|left, right| {
+        left.0
+            .cmp(&right.0)
+            .then(left.1.cmp(&right.1))
+            .then(left.2.cmp(&right.2))
+            .then(left.3.cmp(&right.3))
+            .then(left.5.cmp(&right.5))
+    });
+    let mut bytes_after = bytes_before;
+    let mut victims = Vec::new();
+    let mut expired_files = 0_usize;
+    for (not_expired, _, _, _, path, ref_id, len, referenced) in files {
+        if not_expired && bytes_after <= max_bytes {
+            continue;
+        }
+        if !not_expired {
+            expired_files += 1;
+        }
+        bytes_after = bytes_after.saturating_sub(len);
+        victims.push((path, ref_id, len, referenced));
+    }
+    let removed_referenced = victims.iter().filter(|item| item.3).count();
+    if !dry_run {
+        for (_, ref_id, _, referenced) in &victims {
+            if *referenced {
+                let aliases: Vec<_> = store
+                    .state
+                    .aliases
+                    .iter()
+                    .filter(|(_, target)| *target == ref_id)
+                    .map(|(alias, _)| alias.clone())
+                    .collect();
+                for alias in aliases {
+                    store.remove_alias(&alias);
+                }
+                store.remove_blob(ref_id);
+            }
+        }
+        store.persist_pending()?;
+        for (path, _, _, _) in &victims {
+            match fs::remove_file(path) {
+                Ok(()) => {}
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error.into()),
+            }
+        }
+    }
+    Ok(RecoveryBlobPruneReport {
+        bytes_before,
+        bytes_after,
+        freed_bytes: bytes_before.saturating_sub(bytes_after),
+        removed_files: victims.len(),
+        removed_referenced,
+        expired_files,
+        max_bytes,
+        max_age_seconds: max_age.as_secs(),
+        dry_run,
+    })
+}
+
+pub fn recovery_blob_status(cache_path: &Path) -> serde_json::Value {
+    let bytes = fs::read_dir(blob_sidecar_dir(cache_path))
+        .ok()
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter_map(|entry| entry.metadata().ok())
+        .filter(|metadata| metadata.is_file())
+        .fold(0_u64, |total, metadata| {
+            total.saturating_add(metadata.len())
+        });
+    serde_json::json!({"bytes": bytes, "freed_bytes": 0, "path": blob_sidecar_dir(cache_path)})
 }

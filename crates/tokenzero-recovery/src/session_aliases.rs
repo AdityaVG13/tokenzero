@@ -12,6 +12,25 @@ use serde_json::Value;
 pub const SESSION_ALIAS_HEX_LEN: usize = 16;
 
 const SESSION_ALIAS_PREFIX: &str = "tz://s/";
+const SESSION_ORDINAL_PREFIX: &str = "tz://o/";
+
+/// Format a generation-qualified dense ordinal alias.
+pub fn session_ordinal_ref(generation: u64, ordinal: u64) -> String {
+    format!("{SESSION_ORDINAL_PREFIX}{generation}/{ordinal}")
+}
+
+/// Parse a generation-qualified ordinal alias, excluding fragments.
+pub fn parse_session_ordinal_bare(bare: &str) -> Option<(u64, u64)> {
+    let (generation, ordinal) = bare.strip_prefix(SESSION_ORDINAL_PREFIX)?.split_once('/')?;
+    let generation = generation.parse().ok()?;
+    let ordinal = ordinal.parse().ok()?;
+    (generation > 0 && ordinal > 0).then_some((generation, ordinal))
+}
+
+/// True when `bare` is a valid generation-qualified ordinal alias.
+pub fn is_session_ordinal_bare(bare: &str) -> bool {
+    parse_session_ordinal_bare(bare).is_some()
+}
 
 /// Split a ref into bare identity + optional `#B`/`#L` fragment.
 pub fn split_ref_fragment(ref_id: &str) -> (&str, Option<&str>) {
@@ -241,5 +260,15 @@ mod tests {
         let (end, full) = take_full_hash_blob_at(&text, 2).unwrap();
         assert_eq!(full, format!("tz://blob/{hash}"));
         assert_eq!(&text[end..], " y");
+    }
+
+    #[test]
+    fn ordinal_refs_are_generation_qualified() {
+        let alias = session_ordinal_ref(7, 23);
+        assert_eq!(alias, "tz://o/7/23");
+        assert_eq!(parse_session_ordinal_bare(&alias), Some((7, 23)));
+        assert!(!is_session_ordinal_bare("tz://o/0/1"));
+        assert!(!is_session_ordinal_bare("tz://o/1/0"));
+        assert!(!is_session_ordinal_bare("tz://o/1/2/3"));
     }
 }

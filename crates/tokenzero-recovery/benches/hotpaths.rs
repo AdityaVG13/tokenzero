@@ -192,11 +192,25 @@ fn cache_footprint(path: &std::path::Path) -> u64 {
 fn measure_repeat_read_220kb_cache_bytes(c: &mut Criterion) {
     const PAYLOAD_BYTES: usize = 220 * 1024;
     const REPEATS: usize = 8;
+    tokenzero_recovery::set_ref_index_disabled_override(true);
     let dir = TempDir::new().expect("temp dir");
     let source = dir.path().join("repeat-read-220kb.txt");
-    let file_cache = dir.path().join("file-ref-cache.json");
-    let inline_cache = dir.path().join("inline-cache.json");
-    std::fs::write(&source, vec![b'x'; PAYLOAD_BYTES]).expect("write deterministic source");
+    let file_dir = dir.path().join("file-ref");
+    let inline_dir = dir.path().join("inline");
+    std::fs::create_dir_all(&file_dir).expect("create FileRef cache dir");
+    std::fs::create_dir_all(&inline_dir).expect("create Inline cache dir");
+    let file_cache = file_dir.join("recovery-cache.json");
+    let inline_cache = inline_dir.join("recovery-cache.json");
+    let mut state = 0x9e37_79b9_7f4a_7c15_u64;
+    let payload_bytes = (0..PAYLOAD_BYTES)
+        .map(|_| {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            b' ' + (state % 95) as u8
+        })
+        .collect::<Vec<_>>();
+    std::fs::write(&source, payload_bytes).expect("write deterministic source");
 
     let mut file_store = RecoveryStore::new(Some(file_cache.clone()));
     for _ in 0..REPEATS {
@@ -211,9 +225,14 @@ fn measure_repeat_read_220kb_cache_bytes(c: &mut Criterion) {
             .store_blob(&payload, ContentType::Unknown)
             .expect("store Inline");
     }
+    file_store.persist_pending().expect("persist FileRef cache");
+    inline_store
+        .persist_pending()
+        .expect("persist Inline cache");
 
     let file_ref_cache_bytes = cache_footprint(&file_cache);
     let inline_cache_bytes = cache_footprint(&inline_cache);
+    tokenzero_recovery::set_ref_index_disabled_override(false);
     assert!(
         file_ref_cache_bytes < inline_cache_bytes,
         "FileRef footprint {file_ref_cache_bytes} must be below Inline {inline_cache_bytes}"

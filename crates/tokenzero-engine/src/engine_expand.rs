@@ -301,7 +301,7 @@ impl TokenZeroEngine {
             return;
         };
         let _ =
-            working_set.rehydrate_ref(store, &params.ref_id, params.start_line, params.end_line);
+            working_set.handle_fault_hook(store, &params.ref_id, params.start_line, params.end_line);
     }
 
     fn pending_expand_record(

@@ -15,12 +15,14 @@ use std::fs;
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 use tempfile::tempdir;
 
 /// Incremented only inside [`spawn_child`] / [`run_status`] on a real OS spawn.
 static PROCESS_STARTS: AtomicU64 = AtomicU64::new(0);
+static PROCESS_TEST_LOCK: Mutex<()> = Mutex::new(());
 
 fn repo_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -314,6 +316,7 @@ fn measure_mcp_framing(root: &Path, path: &Path, samples: usize) -> Value {
 
 #[test]
 fn real_process_surface_bench_records_starts_cpu_serialization() {
+    let _guard = PROCESS_TEST_LOCK.lock().unwrap();
     ensure_mcp_bins();
     PROCESS_STARTS.store(0, Ordering::SeqCst);
     let dir = tempdir().unwrap();
@@ -337,9 +340,7 @@ fn real_process_surface_bench_records_starts_cpu_serialization() {
     assert_ne!(measured_starts, 0);
 
     // Serialization costs must be non-zero measured bytes, not a static note.
-    assert!(
-        rw["serialization"]["response_bytes_p50"].as_u64().unwrap() > 0
-    );
+    assert!(rw["serialization"]["response_bytes_p50"].as_u64().unwrap() > 0);
     assert!(
         mcp["serialization"]["response_frame_bytes_p50"]
             .as_u64()
@@ -354,8 +355,8 @@ fn real_process_surface_bench_records_starts_cpu_serialization() {
         "extra_process_detected": false,
         "surfaces": [rw, cli, mcp],
     });
-    let out = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../target/irx9_surface_bench_process.json");
+    let out =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/irx9_surface_bench_process.json");
     if let Some(p) = out.parent() {
         let _ = fs::create_dir_all(p);
     }
@@ -367,6 +368,7 @@ fn real_process_surface_bench_records_starts_cpu_serialization() {
 /// only through [`spawn_child`] / [`run_status`]. Manual fetch_add is not used.
 #[test]
 fn kill_test_detects_deliberate_extra_process() {
+    let _guard = PROCESS_TEST_LOCK.lock().unwrap();
     ensure_mcp_bins();
     PROCESS_STARTS.store(0, Ordering::SeqCst);
     let baseline = PROCESS_STARTS.load(Ordering::SeqCst);

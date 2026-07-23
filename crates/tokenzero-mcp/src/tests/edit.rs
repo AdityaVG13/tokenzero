@@ -21,15 +21,18 @@ fn edit_applies_multi_hunk_batches_byte_exact() {
     assert_eq!(response.status, "ok", "{:?}", response.error);
     assert_eq!(fs::read(&file).unwrap(), b"ALPHA\nbeta\ngamma\ndelta");
 
-    let text = &response.visible.as_ref().unwrap().text;
-    assert!(
-        text.starts_with(&format!(
-            "# edit {} — 2 hunks applied (+2 -1 lines)",
-            file.display()
-        )),
-        "{text}"
+    assert_eq!(
+        response
+            .visible
+            .as_ref()
+            .map(|visible| visible.text.as_str()),
+        Some(""),
+        "ACK/2 keeps successful pure mutations payload-silent"
     );
-    assert!(text.contains("-alpha") && text.contains("+ALPHA"), "{text}");
+    assert!(
+        response.detail_ref.is_some(),
+        "silent mutation needs a detail ref"
+    );
 
     let kinds: Vec<&str> = response.refs.iter().map(|r| r.kind.as_str()).collect();
     for kind in ["blob", "file", "undo"] {

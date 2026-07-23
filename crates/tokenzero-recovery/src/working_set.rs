@@ -13,6 +13,11 @@ mod tests;
 
 pub const DEFAULT_WORKING_SET_TOKENS: usize = 8192;
 pub const EVICTION_REF_LINE_PREFIX: &str = "TZ-EVICT/1";
+/// Portable one-token response emitted when requested bytes are already resident.
+/// `0` is verified as one token by every tokenizer in fixtures/one-token-atoms.json.
+pub const ALREADY_RESIDENT_ATOM: &str = "0";
+/// Alarm threshold for pathological fault/re-eviction cycles.
+pub const THRASH_ALARM_FAULT_RATE: f64 = 0.5;
 const MAX_PREFETCH_HINTS_PER_FAULT: usize = 1;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -31,6 +36,17 @@ pub struct RehydrationLatencyTelemetry {
     pub max_us: u64,
 }
 
+/// Amortized eviction cost. Worst case is one largest-span fault per access.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
+pub struct EvictionAccounting {
+    pub p_fault: f64,
+    pub expected_rehydration_tokens: f64,
+    pub amortized_tokens_per_access: f64,
+    pub actual_rehydration_tokens: u64,
+    pub thrash_worst_case_tokens: u64,
+    pub alarm: bool,
+}
+
 #[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
 pub struct WorkingSetTelemetry {
     pub admissions: u64,
@@ -41,7 +57,14 @@ pub struct WorkingSetTelemetry {
     pub faults: u64,
     pub fault_rate: f64,
     pub rehydrations: u64,
+    pub resident_hits: u64,
+    pub delta_renders: u64,
+    pub dedup_tokens_saved: u64,
     pub churn: u64,
+    pub render_rewrites: u64,
+    pub fault_hook_calls: u64,
+    pub context_edits: u64,
+    pub eviction_accounting: EvictionAccounting,
     pub rehydration_latency: RehydrationLatencyTelemetry,
     #[serde(skip)]
     rehydration_latency_total_us: u64,
@@ -60,6 +83,65 @@ pub struct Admission {
     pub id: u64,
     pub replacement: Option<String>,
     pub evicted: Vec<EvictedSpan>,
+    pub response: WorkingSetResponse,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WorkingSetResponse {
+    Full,
+    AlreadyResident,
+    Delta { acknowledgement: String, delta: WorkingSetDelta },
+}
+
+impl WorkingSetResponse {
+    pub fn visible_text(&self) -> Option<&str> {
+        match self {
+            Self::Full => None,
+            Self::AlreadyResident => Some(ALREADY_RESIDENT_ATOM),
+            Self::Delta { acknowledgement, .. } => Some(acknowledgement),
+        }
+    }
+}
+
+/// A single exact line hunk. Stored line chunks retain their terminators so
+/// integration is byte-identical, including a missing final newline.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkingSetDelta {
+    pub start_line: usize,
+    pub removed: Vec<String>,
+    pub inserted: Vec<String>,
+}
+
+impl WorkingSetDelta {
+    pub fn acknowledgement(&self) -> String {
+        let mut output = format!(
+            "@@ -{},{} +{},{} @@\n",
+            self.start_line,
+            self.removed.len(),
+            self.start_line,
+            self.inserted.len()
+        );
+        for line in &self.removed {
+            output.push('-');
+            output.push_str(line);
+            if !line.ends_with('\n') { output.push('\n'); }
+        }
+        for line in &self.inserted {
+            output.push('+');
+            output.push_str(line);
+            if !line.ends_with('\n') { output.push('\n'); }
+        }
+        output
+    }
+}
+
+pub fn integrate_delta(base: &str, delta: &WorkingSetDelta) -> Option<String> {
+    let mut lines = split_exact_lines(base);
+    let start = delta.start_line.checked_sub(1)?;
+    let end = start.checked_add(delta.removed.len())?;
+    if end > lines.len() || lines[start..end] != delta.removed { return None; }
+    lines.splice(start..end, delta.inserted.iter().cloned());
+    Some(lines.concat())
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -162,6 +244,8 @@ pub struct WorkingSet {
     telemetry: WorkingSetTelemetry,
     prefetch_hook: Box<dyn PrefetchHook>,
     prefetch_hints: VecDeque<PrefetchHint>,
+    evicted_tokens_total: u64,
+    max_evicted_tokens: u64,
 }
 
 impl WorkingSet {
@@ -174,6 +258,8 @@ impl WorkingSet {
             telemetry: WorkingSetTelemetry::default(),
             prefetch_hook: Box::<NoopPrefetchHook>::default(),
             prefetch_hints: VecDeque::new(),
+            evicted_tokens_total: 0,
+            max_evicted_tokens: 0,
         }
     }
 
@@ -193,12 +279,64 @@ impl WorkingSet {
         self.prefetch_hints.drain(..).collect()
     }
 
+    pub fn rewrite_render(&mut self, store: &mut RecoveryStore, text: String, anchor: SpanAnchor) -> Result<Admission, RecoveryError> {
+        self.telemetry.render_rewrites = self.telemetry.render_rewrites.saturating_add(1);
+        self.admit(store, text, anchor)
+    }
+
+    pub fn apply_context_edit(&mut self, store: &mut RecoveryStore, text: String, anchor: SpanAnchor) -> Result<Admission, RecoveryError> {
+        self.telemetry.context_edits = self.telemetry.context_edits.saturating_add(1);
+        self.admit(store, text, anchor)
+    }
+
     pub fn admit(
         &mut self,
         store: &mut RecoveryStore,
         text: String,
         anchor: SpanAnchor,
     ) -> Result<Admission, RecoveryError> {
+        if let Some(index) = self.spans.iter().position(|span| span.anchor == anchor) {
+            if let SpanBody::Resident(previous) = &self.spans[index].body {
+                if previous == &text {
+                    self.sequence = self.sequence.saturating_add(1);
+                    self.spans[index].last_touched = self.sequence;
+                    self.telemetry.resident_hits = self.telemetry.resident_hits.saturating_add(1);
+                    let saved = count_tokens(&text).saturating_sub(count_tokens(ALREADY_RESIDENT_ATOM));
+                    self.telemetry.dedup_tokens_saved = self.telemetry.dedup_tokens_saved.saturating_add(saved as u64);
+                    return Ok(Admission {
+                        id: self.spans[index].id,
+                        replacement: None,
+                        evicted: Vec::new(),
+                        response: WorkingSetResponse::AlreadyResident,
+                    });
+                }
+                let delta = delta_between(previous, &text);
+                let acknowledgement = delta.acknowledgement();
+                if count_tokens(&acknowledgement) < count_tokens(&text) {
+                    let id = self.spans[index].id;
+                    let saved = count_tokens(&text).saturating_sub(count_tokens(&acknowledgement));
+                    self.sequence = self.sequence.saturating_add(1);
+                    self.spans[index].last_touched = self.sequence;
+                    self.spans[index].body = SpanBody::Resident(text);
+                    self.telemetry.delta_renders = self.telemetry.delta_renders.saturating_add(1);
+                    self.telemetry.dedup_tokens_saved = self.telemetry.dedup_tokens_saved.saturating_add(saved as u64);
+                    let evicted = self.enforce_budget(store)?;
+                    return Ok(Admission {
+                        id,
+                        replacement: None,
+                        evicted,
+                        response: WorkingSetResponse::Delta { acknowledgement, delta },
+                    });
+                }
+            }
+            // A changed evicted span or a non-beneficial delta becomes the new
+            // baseline; remove the stale anchor before normal admission.
+            let stale = self.spans.remove(index);
+            if let SpanBody::Evicted { ref_id, .. } = stale.body {
+                self.remove_evicted_ref(&ref_id, stale.id);
+            }
+        }
+
         let id = self.push_resident(text, anchor);
         let evicted = match self.enforce_budget(store) {
             Ok(evicted) => evicted,
@@ -219,7 +357,13 @@ impl WorkingSet {
             id,
             replacement,
             evicted,
+            response: WorkingSetResponse::Full,
         })
+    }
+
+    pub fn handle_fault_hook(&mut self, store: &mut RecoveryStore, ref_id: &str, start_line: Option<usize>, end_line: Option<usize>) -> Result<Option<Rehydration>, RecoveryError> {
+        self.telemetry.fault_hook_calls = self.telemetry.fault_hook_calls.saturating_add(1);
+        self.rehydrate_ref(store, ref_id, start_line, end_line)
     }
 
     /// Demand-page an evicted ref. A ref not owned by this working set costs
@@ -262,6 +406,7 @@ impl WorkingSet {
         if !result.found {
             return Ok(None);
         }
+        let rehydrated_tokens = count_tokens(&result.content) as u64;
 
         let source_anchor = self
             .spans
@@ -305,6 +450,8 @@ impl WorkingSet {
         };
 
         self.telemetry.rehydrations = self.telemetry.rehydrations.saturating_add(1);
+        self.telemetry.eviction_accounting.actual_rehydration_tokens = self.telemetry.eviction_accounting.actual_rehydration_tokens.saturating_add(rehydrated_tokens);
+        self.refresh_rates();
         self.queue_prefetch_hints(&resident_anchor, resident_id, lookup_ref);
         let evicted = self.enforce_budget(store)?;
         Ok(Some(Rehydration {
@@ -377,6 +524,12 @@ impl WorkingSet {
         } else {
             0.0
         };
+        let accounting = &mut self.telemetry.eviction_accounting;
+        accounting.p_fault = self.telemetry.fault_rate;
+        accounting.expected_rehydration_tokens = if self.telemetry.evictions == 0 { 0.0 } else { self.evicted_tokens_total as f64 / self.telemetry.evictions as f64 };
+        accounting.amortized_tokens_per_access = accounting.p_fault * accounting.expected_rehydration_tokens;
+        accounting.thrash_worst_case_tokens = self.max_evicted_tokens;
+        accounting.alarm = accounting.p_fault >= THRASH_ALARM_FAULT_RATE && accounting.amortized_tokens_per_access >= 1.0;
     }
 
     fn queue_prefetch_hints(&mut self, fault: &SpanAnchor, fault_id: u64, fault_ref: &str) {
@@ -455,6 +608,9 @@ impl WorkingSet {
             let ref_id = store.store_blob(bytes, ContentType::Unknown)?;
             let replacement = format_ref_line(ref_id.clone(), anchor);
             let bytes_evicted = bytes.len();
+            let tokens_evicted = count_tokens(bytes) as u64;
+            self.evicted_tokens_total = self.evicted_tokens_total.saturating_add(tokens_evicted);
+            self.max_evicted_tokens = self.max_evicted_tokens.max(tokens_evicted);
             self.spans[victim].body = SpanBody::Evicted {
                 ref_id: ref_id.clone(),
                 replacement: replacement.clone(),
@@ -470,6 +626,7 @@ impl WorkingSet {
                 .bytes_evicted
                 .saturating_add(bytes_evicted as u64);
             self.telemetry.refs_created = self.telemetry.refs_created.saturating_add(1);
+            self.refresh_rates();
             evicted.push(EvictedSpan {
                 id,
                 ref_id,
@@ -482,6 +639,24 @@ impl WorkingSet {
         // floor rather than failing the admission (which would strand the full
         // inline text at the caller - the exact opposite of paging out).
         Ok(evicted)
+    }
+}
+
+fn split_exact_lines(text: &str) -> Vec<String> {
+    text.split_inclusive('\n').map(str::to_owned).collect()
+}
+
+fn delta_between(old: &str, new: &str) -> WorkingSetDelta {
+    let old_lines = split_exact_lines(old);
+    let new_lines = split_exact_lines(new);
+    let prefix = old_lines.iter().zip(&new_lines).take_while(|(left, right)| left == right).count();
+    let suffix = old_lines[prefix..]
+        .iter().rev().zip(new_lines[prefix..].iter().rev())
+        .take_while(|(left, right)| left == right).count();
+    WorkingSetDelta {
+        start_line: prefix + 1,
+        removed: old_lines[prefix..old_lines.len().saturating_sub(suffix)].to_vec(),
+        inserted: new_lines[prefix..new_lines.len().saturating_sub(suffix)].to_vec(),
     }
 }
 
