@@ -2611,6 +2611,7 @@ fn append_blob_refs_to_ref_index(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn append_ref_index_line(
     shard: &Path,
     ref_id: &str,
