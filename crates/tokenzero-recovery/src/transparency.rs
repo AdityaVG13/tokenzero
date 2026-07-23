@@ -261,6 +261,9 @@ mod tests {
         let mut tampered = log.inclusion_proof(3).unwrap();
         tampered.leaf_hash.push('0');
         assert!(!tampered.verify(&log.root()));
+        let mut inconsistent = log.consistency_proof(7).unwrap();
+        inconsistent.appended_leaf_hashes[0].push('0');
+        assert!(!inconsistent.verify(&roots[6], &log.root()));
     }
     #[test]
     fn concurrent_prefix_merge_preserves_both_suffixes() {
