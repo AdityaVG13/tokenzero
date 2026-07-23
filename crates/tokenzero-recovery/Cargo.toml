@@ -28,3 +28,7 @@ criterion = "0.5"
 [[bench]]
 name = "hotpaths"
 harness = false
+
+[[bench]]
+name = "context_view_replay"
+harness = false

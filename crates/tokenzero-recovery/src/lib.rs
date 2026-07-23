@@ -25,6 +25,7 @@ use crate::telemetry::CrossEngineTelemetry;
 pub mod telemetry;
 
 pub mod boot;
+pub mod context_view;
 pub mod dst;
 pub mod embedded_store;
 pub mod entity_novelty;
