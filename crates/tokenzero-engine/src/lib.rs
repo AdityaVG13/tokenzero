@@ -155,6 +155,7 @@ pub use config::{
 pub use cache_meter::{
     ANTHROPIC_CACHE_DIAGNOSIS_BETA, AnthropicCacheDiagnosisRequest, CacheMeter,
     CacheMeterError, CacheObservation, CachePricing, CacheProvider, CacheSessionReport,
+    CacheSloConfig, CacheSloDashboard,
     ProviderUsage, cache_miss_attribution, parse_provider_usage,
 };
 pub use eviction_scheduler::{

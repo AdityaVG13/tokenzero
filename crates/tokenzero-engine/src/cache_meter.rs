@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use thiserror::Error;
 use tokenzero_core::count_tokens;
+use tokenzero_pulse::{AnytimeFailureMonitor, EProcessSnapshot};
 
 pub const ANTHROPIC_CACHE_DIAGNOSIS_BETA: &str = "cache-diagnosis-2026-04-07";
 
@@ -31,6 +32,8 @@ pub enum CacheMeterError {
     MissingField(&'static str),
     #[error("provider usage field is not an unsigned integer: {0}")]
     InvalidField(&'static str),
+    #[error("invalid cache uptime SLO configuration")]
+    InvalidSloConfig,
 }
 
 fn object_at<'a>(value: &'a Value, key: &str) -> &'a Value { value.get(key).unwrap_or(value) }
@@ -83,8 +86,47 @@ pub fn cache_miss_attribution(value: &Value) -> Option<String> {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CacheObservation { pub provider: CacheProvider, pub request_tokens: u64, pub stable_prefix_tokens: u64, pub churn_depth_tokens: u64, pub usage: ProviderUsage, pub realized_dollars: f64, #[serde(skip_serializing_if = "Option::is_none")] pub miss_attribution: Option<String> }
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct CacheSessionReport { pub requests: u64, pub prefix_stability_ratio: f64, pub average_churn_depth_tokens: f64, pub hit_rate: f64, pub realized_dollars_per_request: f64, pub exact_miss_attributions: Vec<String> }
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct CacheSloConfig {
+    pub target_hit_rate: f64,
+    pub regression_hit_rate: f64,
+    pub alpha: f64,
+    pub novelty_budget_tokens: u64,
+}
+
+impl Default for CacheSloConfig {
+    fn default() -> Self {
+        Self { target_hit_rate: 0.8, regression_hit_rate: 0.5, alpha: 0.05, novelty_budget_tokens: 1_000 }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct CacheSloDashboard {
+    pub target_hit_rate: f64,
+    pub measured_hit_rate: f64,
+    pub error_budget_tokens: u64,
+    pub error_budget_consumed_tokens: u64,
+    pub error_budget_remaining_tokens: u64,
+    pub novelty_budget_tokens: u64,
+    pub novel_tokens: u64,
+    pub novelty_budget_remaining_tokens: u64,
+    pub burn_alert: bool,
+    pub burn_monitor: EProcessSnapshot,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct CacheSessionReport {
+    pub requests: u64,
+    pub prefix_stability_ratio: f64,
+    pub average_churn_depth_tokens: f64,
+    pub hit_rate: f64,
+    pub realized_dollars_per_request: f64,
+    pub exact_miss_attributions: Vec<String>,
+    pub token_amplification_milli: Option<u64>,
+    pub effective_rate_limit_multiplier: f64,
+    pub rate_limit_multiplier_certified: bool,
+    pub cache_uptime: CacheSloDashboard,
+}
 #[derive(Debug, Default)]
 pub struct CacheMeter { previous_request: Option<String>, observations: Vec<CacheObservation> }
 
@@ -99,6 +141,10 @@ impl CacheMeter {
     }
     pub fn observations(&self) -> &[CacheObservation] { &self.observations }
     pub fn report(&self) -> CacheSessionReport {
+        self.report_with_slo(CacheSloConfig::default(), None)
+            .expect("default cache SLO is valid")
+    }
+    pub fn report_with_slo(&self, config: CacheSloConfig, token_amplification_milli: Option<u64>) -> Result<CacheSessionReport, CacheMeterError> {
         let requests = self.observations.len() as u64;
         let stable = self.observations.iter().map(|item| item.stable_prefix_tokens).sum::<u64>();
         let request_mass = self.observations.iter().map(|item| item.request_tokens).sum::<u64>();
@@ -107,7 +153,42 @@ impl CacheMeter {
         let churn = self.observations.iter().skip(1).map(|item| item.churn_depth_tokens).sum::<u64>();
         let transitions = requests.saturating_sub(1);
         let dollars = self.observations.iter().map(|item| item.realized_dollars).sum::<f64>();
-        CacheSessionReport { requests, prefix_stability_ratio: ratio(stable, request_mass), average_churn_depth_tokens: if transitions == 0 { 0.0 } else { churn as f64 / transitions as f64 }, hit_rate: ratio(cached, input), realized_dollars_per_request: if requests == 0 { 0.0 } else { dollars / requests as f64 }, exact_miss_attributions: self.observations.iter().filter_map(|item| item.miss_attribution.clone()).collect() }
+        let hit_rate = ratio(cached, input);
+        let novel_tokens = input.saturating_sub(cached);
+        let null_failure_rate = 1.0 - config.target_hit_rate;
+        let alternative_failure_rate = 1.0 - config.regression_hit_rate;
+        let mut burn_monitor = AnytimeFailureMonitor::new(config.alpha, null_failure_rate, alternative_failure_rate)
+            .map_err(|_| CacheMeterError::InvalidSloConfig)?;
+        let burn_snapshot = burn_monitor.observe_counts(novel_tokens, cached);
+        let error_budget_tokens = (input as f64 * null_failure_rate).floor() as u64;
+        let effective_rate_limit_multiplier = if novel_tokens == 0 {
+            if input == 0 { 1.0 } else { input as f64 }
+        } else {
+            input as f64 / novel_tokens as f64
+        };
+        Ok(CacheSessionReport {
+            requests,
+            prefix_stability_ratio: ratio(stable, request_mass),
+            average_churn_depth_tokens: if transitions == 0 { 0.0 } else { churn as f64 / transitions as f64 },
+            hit_rate,
+            realized_dollars_per_request: if requests == 0 { 0.0 } else { dollars / requests as f64 },
+            exact_miss_attributions: self.observations.iter().filter_map(|item| item.miss_attribution.clone()).collect(),
+            token_amplification_milli,
+            effective_rate_limit_multiplier,
+            rate_limit_multiplier_certified: input > 0,
+            cache_uptime: CacheSloDashboard {
+                target_hit_rate: config.target_hit_rate,
+                measured_hit_rate: hit_rate,
+                error_budget_tokens,
+                error_budget_consumed_tokens: novel_tokens,
+                error_budget_remaining_tokens: error_budget_tokens.saturating_sub(novel_tokens),
+                novelty_budget_tokens: config.novelty_budget_tokens,
+                novel_tokens,
+                novelty_budget_remaining_tokens: config.novelty_budget_tokens.saturating_sub(novel_tokens),
+                burn_alert: burn_snapshot.tripped,
+                burn_monitor: burn_snapshot,
+            },
+        })
     }
 }
 fn common_prefix<'a>(left: &'a str, right: &str) -> &'a str {
