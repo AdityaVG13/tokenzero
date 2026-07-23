@@ -2726,3 +2726,39 @@ fn repeated_payload_reuses_refs_without_persistent_mutation() {
     assert!(store.session_refs.is_empty());
     set_ref_index_test_override(previous_override);
 }
+
+#[test]
+fn recovery_blob_prune_prefers_never_expanded_blobs() {
+    let dir = tempdir().unwrap();
+    let cache = dir.path().join(".tokenzero/recovery-cache.json");
+    let index = dir.path().join("ref-index");
+    with_ref_index_env(&index, true, || {
+        let expanded_text = format!("expanded:{}", "x".repeat(70_000));
+        let cold_text = format!("cold:{}", "y".repeat(70_000));
+        let mut store = RecoveryStore::new(Some(cache.clone()));
+        let expanded = store.store_payload(&expanded_text, ContentType::Unknown, None, None, None).unwrap();
+        let cold = store.store_payload(&cold_text, ContentType::Unknown, None, None, None).unwrap();
+        assert!(store.expand(&expanded.blob_ref, None, None, None, None, None).found);
+        let report = prune_recovery_blobs(&cache, 75_000, Duration::from_secs(86_400), false).unwrap();
+        assert_eq!(report.removed_files, 1);
+        assert!(report.freed_bytes >= 70_000);
+        let restarted = RecoveryStore::new(Some(cache.clone()));
+        assert!(restarted.has_ref_local(&expanded.blob_ref));
+        assert!(!restarted.has_ref_local(&cold.blob_ref));
+    });
+}
+
+#[test]
+fn recovery_blob_age_cap_and_status_support_both_store_roots() {
+    for relative in [".tokenzero/recovery-cache.json", ".zerostack/tokenzero/recovery-cache.json"] {
+        let dir = tempdir().unwrap();
+        let cache = dir.path().join(relative);
+        let text = format!("aged:{}", "z".repeat(70_000));
+        RecoveryStore::new(Some(cache.clone()))
+            .store_payload(&text, ContentType::Unknown, None, None, None).unwrap();
+        let report = prune_recovery_blobs(&cache, u64::MAX, Duration::ZERO, false).unwrap();
+        assert_eq!(report.expired_files, 1);
+        assert!(report.freed_bytes >= 70_000);
+        assert_eq!(recovery_blob_status(&cache)["bytes"], 0);
+    }
+}

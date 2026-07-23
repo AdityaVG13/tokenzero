@@ -841,6 +841,8 @@ fn doctor_report(args: &DoctorArgs) -> serde_json::Value {
     report["migration"] =
         tokenzero_recovery::RecoveryStore::new(Some(store.effective_cache_path.clone()))
             .migration_state();
+    report["recovery_blobs"] =
+        tokenzero_recovery::recovery_blob_status(&store.effective_cache_path);
     report["engine_binaries"] = tokenzero_mcp::engine_binaries_json();
     if let Some(summary) = &store.mismatch_summary {
         let mismatch = store.store_project_mismatch;
@@ -949,9 +951,11 @@ fn doctor_exit_code(value: &serde_json::Value) -> i32 {
 }
 
 fn handle_stats(args: CommonArgs) -> Result<serde_json::Value> {
-    Ok(serde_json::to_value(report_for_path(
-        &default_ledger_path(&tokenzero_work_root(args.root)),
-    )?)?)
+    let root = tokenzero_work_root(args.root);
+    let mut report = serde_json::to_value(report_for_path(&default_ledger_path(&root))?)?;
+    let cache = resolve_recovery_cache_path(&root, None);
+    report["recovery_blobs"] = tokenzero_recovery::recovery_blob_status(&cache);
+    Ok(report)
 }
 
 fn handle_pulse(args: PulseArgs) -> Result<()> {

@@ -12,6 +12,7 @@ const GC_INTERVAL: Duration = Duration::from_secs(24 * 60 * 60);
 const JOURNAL_MAX_AGE: Duration = Duration::from_secs(7 * 24 * 60 * 60);
 const JOURNAL_MAX_COUNT: usize = 500;
 const DEFAULT_BLOB_BUDGET: u64 = 2 * 1024 * 1024 * 1024;
+const DEFAULT_BLOB_MAX_AGE_SECONDS: u64 = 30 * 24 * 60 * 60;
 const DEFAULT_GC_MIN_AGE_SECONDS: u64 = 7 * 24 * 60 * 60;
 
 fn auto_maintenance_state() -> &'static Mutex<Option<(PathBuf, Instant)>> {
@@ -206,13 +207,23 @@ pub fn cache_maintenance(cache_path: &Path, dry_run: bool) -> Value {
     );
     let plan_journals = prune_plan_journals(cache_path, dry_run);
     let blob_budget = env_u64("TOKENZERO_RECOVERY_BLOB_MAX_BYTES", DEFAULT_BLOB_BUDGET);
-    let blob_prune = tokenzero_recovery::prune_blob_sidecars(cache_path, blob_budget, dry_run)
-        .map_or_else(
-            |error| json!({"error": error.to_string()}),
-            |report| json!(report),
-        );
+    let blob_max_age = Duration::from_secs(env_u64(
+        "TOKENZERO_RECOVERY_BLOB_MAX_AGE_SECONDS",
+        DEFAULT_BLOB_MAX_AGE_SECONDS,
+    ));
+    let blob_prune = tokenzero_recovery::prune_recovery_blobs(
+        cache_path,
+        blob_budget,
+        blob_max_age,
+        dry_run,
+    ).map_or_else(
+        |error| json!({"error": error.to_string()}),
+        |report| json!(report),
+    );
     let gc = gc_maintenance(cache_path, dry_run);
+    let freed_bytes = blob_prune.get("freed_bytes").and_then(Value::as_u64).unwrap_or(0);
     json!({
+        "freed_bytes": freed_bytes,
         "tmp_sweep": tmp_sweep,
         "spill_prune": spill_prune,
         "plan_journals": plan_journals,

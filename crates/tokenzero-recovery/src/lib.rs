@@ -640,7 +640,13 @@ struct RefIndexEntry {
     content_class: ContentClass,
     #[serde(default)]
     expanded: bool,
+    #[serde(default, skip_serializing_if = "is_zero_u64")]
+    expansion_count: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    last_expanded_ts: Option<u128>,
 }
+
+fn is_zero_u64(value: &u64) -> bool { *value == 0 }
 
 #[cfg(test)]
 thread_local! {
@@ -2162,7 +2168,7 @@ fn append_blob_refs_to_ref_index(store_path: &Path, refs: &[String], classes: Op
             continue;
         }
         let class = classes.and_then(|classes| classes.get(ref_id)).copied().unwrap_or_else(|| classify_ref(ref_id, None));
-        if append_ref_index_line(&shard, ref_id, &store_path, ts, class, false).is_ok() {
+        if append_ref_index_line(&shard, ref_id, &store_path, ts, class, false, 0, None).is_ok() {
             compact_ref_index_if_needed(&shard);
         }
     }
@@ -2175,6 +2181,8 @@ fn append_ref_index_line(
     ts: u128,
     content_class: ContentClass,
     expanded: bool,
+    expansion_count: u64,
+    last_expanded_ts: Option<u128>,
 ) -> Result<(), RecoveryError> {
     let Some(parent) = shard.parent() else { return Ok(()) };
     create_ref_index_dir(parent)?;
@@ -2184,6 +2192,8 @@ fn append_ref_index_line(
         ts,
         content_class,
         expanded,
+        expansion_count,
+        last_expanded_ts,
     };
     let mut line = serde_json::to_string(&entry)?;
     line.push('\n');
@@ -2246,9 +2256,13 @@ fn newest_ref_index_entries(text: &str, skip_ref: Option<&str>) -> BTreeMap<Stri
                 let existing = slot.get_mut();
                 if entry.ts >= existing.ts {
                     entry.expanded |= existing.expanded;
+                    entry.expansion_count = entry.expansion_count.max(existing.expansion_count);
+                    entry.last_expanded_ts = entry.last_expanded_ts.max(existing.last_expanded_ts);
                     slot.insert(entry);
                 } else {
                     existing.expanded |= entry.expanded;
+                    existing.expansion_count = existing.expansion_count.max(entry.expansion_count);
+                    existing.last_expanded_ts = existing.last_expanded_ts.max(entry.last_expanded_ts);
                 }
             }
         }
@@ -2357,11 +2371,12 @@ fn record_ref_index_expanded(store_path: &Path, ref_id: &str, fallback: ContentC
     let Some((root, store_path)) = ref_index_root_store(store_path) else { return };
     let Some((shard, _lock)) = locked_ref_index_shard(&root, ref_id) else { return };
     let existing = ref_index_text(&shard).and_then(|text| ref_index_entries_for_ref(&text, ref_id).into_iter().next());
-    if existing.as_ref().is_some_and(|entry| entry.expanded) {
-        return;
-    }
-    let class = existing.map_or(fallback, |entry| entry.content_class);
-    let _ = append_ref_index_line(&shard, ref_id, &store_path, ref_index_timestamp(), class, true);
+    let class = existing.as_ref().map_or(fallback, |entry| entry.content_class);
+    let expansion_count = existing.as_ref().map_or(1, |entry| {
+        entry.expansion_count.max(u64::from(entry.expanded)).saturating_add(1)
+    });
+    let now = ref_index_timestamp();
+    let _ = append_ref_index_line(&shard, ref_id, &store_path, now, class, true, expansion_count, Some(now));
     compact_ref_index_if_needed(&shard);
 }
 
@@ -3321,4 +3336,107 @@ pub fn prune_blob_sidecars(
         removed_files,
         retained_referenced,
     })
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RecoveryBlobPruneReport {
+    pub bytes_before: u64,
+    pub bytes_after: u64,
+    pub freed_bytes: u64,
+    pub removed_files: usize,
+    pub removed_referenced: usize,
+    pub expired_files: usize,
+    pub max_bytes: u64,
+    pub max_age_seconds: u64,
+    pub dry_run: bool,
+}
+
+/// Enforce byte and age bounds over the complete recovery sidecar store.
+/// Never-expanded blobs are selected before expanded blobs; expanded blobs use
+/// their durable ref-index last-expand timestamp as the LRU key.
+pub fn prune_recovery_blobs(
+    cache_path: &Path,
+    max_bytes: u64,
+    max_age: Duration,
+    dry_run: bool,
+) -> Result<RecoveryBlobPruneReport, RecoveryError> {
+    let directory = blob_sidecar_dir(cache_path);
+    let mut store = RecoveryStore::new(Some(cache_path.to_path_buf()));
+    let mut files = Vec::new();
+    let mut bytes_before = 0_u64;
+    let now = SystemTime::now();
+    match fs::read_dir(&directory) {
+        Ok(entries) => for entry in entries {
+            let entry = entry?;
+            let metadata = entry.metadata()?;
+            if !metadata.is_file() { continue; }
+            let path = entry.path();
+            let Some(hash) = path.file_stem().and_then(|value| value.to_str()) else { continue };
+            let ref_id = format!("tz://blob/{hash}");
+            let len = metadata.len();
+            bytes_before = bytes_before.saturating_add(len);
+            let modified = metadata.modified().unwrap_or(UNIX_EPOCH);
+            let expired = now.duration_since(modified).unwrap_or_default() >= max_age;
+            let (expansion_count, last_expanded) = ref_index_blob_entries(&ref_id)
+                .map(|(_, entries)| entries.into_iter().fold((0_u64, 0_u128), |acc, item| {
+                    (acc.0.max(item.expansion_count.max(u64::from(item.expanded))), acc.1.max(item.last_expanded_ts.unwrap_or(0)))
+                }))
+                .unwrap_or_default();
+            let referenced = store.state.blobs.contains_key(&ref_id);
+            files.push((!expired, expansion_count > 0, last_expanded, modified, path, ref_id, len, referenced));
+        },
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {},
+        Err(error) => return Err(error.into()),
+    }
+    files.sort_by(|left, right| left.0.cmp(&right.0)
+        .then(left.1.cmp(&right.1))
+        .then(left.2.cmp(&right.2))
+        .then(left.3.cmp(&right.3))
+        .then(left.5.cmp(&right.5)));
+    let mut bytes_after = bytes_before;
+    let mut victims = Vec::new();
+    let mut expired_files = 0_usize;
+    for (not_expired, _, _, _, path, ref_id, len, referenced) in files {
+        if not_expired && bytes_after <= max_bytes { continue; }
+        if !not_expired { expired_files += 1; }
+        bytes_after = bytes_after.saturating_sub(len);
+        victims.push((path, ref_id, len, referenced));
+    }
+    let removed_referenced = victims.iter().filter(|item| item.3).count();
+    if !dry_run {
+        for (_, ref_id, _, referenced) in &victims {
+            if *referenced {
+                let aliases: Vec<_> = store.state.aliases.iter()
+                    .filter(|(_, target)| *target == ref_id).map(|(alias, _)| alias.clone()).collect();
+                for alias in aliases { store.remove_alias(&alias); }
+                store.remove_blob(ref_id);
+            }
+        }
+        store.persist_pending()?;
+        for (path, _, _, _) in &victims {
+            match fs::remove_file(path) {
+                Ok(()) => {},
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {},
+                Err(error) => return Err(error.into()),
+            }
+        }
+    }
+    Ok(RecoveryBlobPruneReport {
+        bytes_before,
+        bytes_after,
+        freed_bytes: bytes_before.saturating_sub(bytes_after),
+        removed_files: victims.len(),
+        removed_referenced,
+        expired_files,
+        max_bytes,
+        max_age_seconds: max_age.as_secs(),
+        dry_run,
+    })
+}
+
+pub fn recovery_blob_status(cache_path: &Path) -> serde_json::Value {
+    let bytes = fs::read_dir(blob_sidecar_dir(cache_path)).ok().into_iter().flatten().flatten()
+        .filter_map(|entry| entry.metadata().ok()).filter(|metadata| metadata.is_file())
+        .fold(0_u64, |total, metadata| total.saturating_add(metadata.len()));
+    serde_json::json!({"bytes": bytes, "freed_bytes": 0, "path": blob_sidecar_dir(cache_path)})
 }
