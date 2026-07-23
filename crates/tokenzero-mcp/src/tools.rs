@@ -158,6 +158,9 @@ fn record_opt_in_mcp_usage(
     response: &ToolResponse,
 ) {
     let enabled = crate::usage_telemetry_enabled(engine.config.telemetry_enabled);
+    if !enabled {
+        return;
+    }
     let Some(accounting) = response.accounting.as_ref() else {
         return;
     };
