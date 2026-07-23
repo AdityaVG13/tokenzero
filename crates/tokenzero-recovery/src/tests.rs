@@ -2755,7 +2755,7 @@ fn recovery_blob_prune_prefers_never_expanded_blobs() {
 fn transparency_log_survives_restart_with_valid_proofs() {
     let (mut store, cache, _dir) = temp_store();
     let first = store
-        .store_payload("transparent-one", ContentType::Text, None, None, None)
+        .store_payload("transparent-one", ContentType::Unknown, None, None, None)
         .unwrap();
     let old_size = store.transparency_len();
     let old_root = store.transparency_root();
