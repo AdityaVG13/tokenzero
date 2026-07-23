@@ -1,0 +1,104 @@
+{
+  "caveats": [
+    "The operation taxonomy is a proxy: Pulse records tool outputs, not full model context composition.",
+    "A zero class fraction means no matching operation occurred; it does not prove zero global spend.",
+    "Fits assume independent observations and are descriptive, not causal or workload forecasts.",
+    "Small distinct-operation and Hill-tail samples can produce wide or unstable intervals."
+  ],
+  "corpus": {
+    "duplicate_event_ids_skipped": 0,
+    "events_analyzed": 17706,
+    "file_sha256": {
+      "events.jsonl.1": "00e02945390c5659f54760d8c7fab0472f352ed187694f6e841aeaba234b627a"
+    },
+    "files": [
+      "events.jsonl.1"
+    ],
+    "malformed_records": 0
+  },
+  "methodology": {
+    "amdahl": "Each class fraction is p for an optimization confined to that class.",
+    "classification": {
+      "content": "read, find, grep, glob, tree, and code-map operations",
+      "history": "expand, recall, history, and memory operations",
+      "plan": "shell, run, exec, plan, and batch operations",
+      "prose": "compact, rewrite, summarize, ingest, and prose operations",
+      "protocol": "all other operations"
+    },
+    "confidence_intervals": "Asymptotic 95% intervals: normal OLS slope and log-scale Hill; not bootstrap intervals.",
+    "hill_tail_size": "floor(sqrt(distinct items)), with a minimum of two",
+    "refs": "All tz://, fz://, and gz:// strings in event metadata; values are not emitted."
+  },
+  "rank_frequency": {
+    "operations": {
+      "distinct": 11,
+      "hill": {
+        "confidence_interval_95": [
+          0.1318014323719069,
+          1.267129702688172
+        ],
+        "exponent": 0.40866797013625816,
+        "method": "Hill tail index converted with s=1/alpha",
+        "sample_size": 3
+      },
+      "log_log": {
+        "confidence_interval_95": [
+          0.8143798123441723,
+          2.2787360049993586
+        ],
+        "exponent": 1.5465579086717653,
+        "method": "log-log OLS",
+        "sample_size": 11
+      },
+      "observations": 17706
+    },
+    "refs": {
+      "distinct": 10792,
+      "hill": {
+        "confidence_interval_95": [
+          0.44328299809581206,
+          0.6522692683989606
+        ],
+        "exponent": 0.5377172833949576,
+        "method": "Hill tail index converted with s=1/alpha",
+        "sample_size": 103
+      },
+      "log_log": {
+        "confidence_interval_95": [
+          0.320824912383365,
+          0.3287605489799939
+        ],
+        "exponent": 0.32479273068167946,
+        "method": "log-log OLS",
+        "sample_size": 10792
+      },
+      "observations": 14165
+    }
+  },
+  "schema_version": "tokenzero.pulse-spend-zipf.v1",
+  "spend": {
+    "amdahl_p_by_class": {
+      "content": 0.6046701806459467,
+      "history": 0.2957032020610608,
+      "plan": 0.09962661729299249,
+      "prose": 0.0,
+      "protocol": 0.0
+    },
+    "fractions": {
+      "content": 0.6046701806459467,
+      "history": 0.2957032020610608,
+      "plan": 0.09962661729299249,
+      "prose": 0.0,
+      "protocol": 0.0
+    },
+    "metric": "visible_tokens",
+    "tokens_by_class": {
+      "content": 9894119,
+      "history": 4838543,
+      "plan": 1630174,
+      "prose": 0,
+      "protocol": 0
+    },
+    "total": 16362836
+  }
+}

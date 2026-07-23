@@ -8,6 +8,7 @@ queries, session identifiers, or ref values.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import math
 import re
@@ -113,13 +114,13 @@ def hill_fit(counts: Mapping[str, int], tail_size: int | None = None) -> Fit | N
     if denominator <= 0:
         return None
     alpha = k / denominator
-    alpha_margin = 1.96 * alpha / math.sqrt(k)
-    alpha_low = max(alpha - alpha_margin, math.nextafter(0.0, 1.0))
-    alpha_high = alpha + alpha_margin
     exponent = 1.0 / alpha
+    # A log-scale interval stays positive for small tails, unlike a symmetric
+    # normal interval. The delta-method standard error of log(alpha) is 1/sqrt(k).
+    factor = math.exp(1.96 / math.sqrt(k))
     return Fit(
         exponent,
-        (1.0 / alpha_high, 1.0 / alpha_low),
+        (exponent / factor, exponent * factor),
         k,
         "Hill tail index converted with s=1/alpha",
     )
@@ -168,6 +169,9 @@ def analyze(paths: Sequence[Path]) -> dict[str, object]:
         "schema_version": "tokenzero.pulse-spend-zipf.v1",
         "corpus": {
             "files": [path.name for path in paths],
+            "file_sha256": {
+                path.name: hashlib.sha256(path.read_bytes()).hexdigest() for path in paths
+            },
             "events_analyzed": parsed,
             "malformed_records": malformed,
             "duplicate_event_ids_skipped": duplicates,
@@ -193,21 +197,96 @@ def analyze(paths: Sequence[Path]) -> dict[str, object]:
             },
             "amdahl": "Each class fraction is p for an optimization confined to that class.",
             "refs": "All tz://, fz://, and gz:// strings in event metadata; values are not emitted.",
-            "confidence_intervals": "Asymptotic normal 95% intervals; not bootstrap intervals.",
+            "confidence_intervals": (
+                "Asymptotic 95% intervals: normal OLS slope and log-scale Hill; "
+                "not bootstrap intervals."
+            ),
+            "hill_tail_size": "floor(sqrt(distinct items)), with a minimum of two",
         },
+        "caveats": [
+            "The operation taxonomy is a proxy: Pulse records tool outputs, not full model context composition.",
+            "A zero class fraction means no matching operation occurred; it does not prove zero global spend.",
+            "Fits assume independent observations and are descriptive, not causal or workload forecasts.",
+            "Small distinct-operation and Hill-tail samples can produce wide or unstable intervals.",
+        ],
     }
+
+
+def render_markdown(report: Mapping[str, object]) -> str:
+    """Render a compact, aggregate-only Markdown report."""
+    corpus = report["corpus"]
+    spend = report["spend"]
+    rank = report["rank_frequency"]
+    assert isinstance(corpus, Mapping) and isinstance(spend, Mapping)
+    assert isinstance(rank, Mapping)
+    fractions = spend["fractions"]
+    assert isinstance(fractions, Mapping)
+    lines = [
+        "# Pulse spend and rank-frequency report",
+        "",
+        f"Corpus: {corpus['events_analyzed']:,} valid events from {', '.join(corpus['files'])}; "
+        f"{corpus['malformed_records']} malformed and {corpus['duplicate_event_ids_skipped']} duplicates skipped.",
+        "",
+        "## Spend fractions and Amdahl p",
+        "",
+        "The metric is visible tokens. For an optimization confined to one class, its fraction is Amdahl p.",
+        "",
+        "| Class | Tokens | Fraction / p |",
+        "|---|---:|---:|",
+    ]
+    tokens = spend["tokens_by_class"]
+    assert isinstance(tokens, Mapping)
+    for name in CLASSES:
+        lines.append(f"| {name} | {tokens[name]:,} | {fractions[name]:.6f} |")
+    lines.extend(
+        [
+            "",
+            "## Zipf exponent fits",
+            "",
+            "| Kind | Method | s | 95% CI | n |",
+            "|---|---|---:|---:|---:|",
+        ]
+    )
+    for kind in ("refs", "operations"):
+        item = rank[kind]
+        assert isinstance(item, Mapping)
+        for method in ("hill", "log_log"):
+            fit = item[method]
+            if not isinstance(fit, Mapping):
+                lines.append(f"| {kind} | {method} | unavailable | unavailable | 0 |")
+                continue
+            low, high = fit["confidence_interval_95"]
+            lines.append(
+                f"| {kind} | {method} | {fit['exponent']:.6f} | "
+                f"[{low:.6f}, {high:.6f}] | {fit['sample_size']} |"
+            )
+    lines.extend(["", "## Caveats", ""])
+    for caveat in report["caveats"]:
+        lines.append(f"- {caveat}")
+    event_count = corpus["events_analyzed"]
+    if isinstance(event_count, int) and event_count < 20_000:
+        lines.append(
+            f"- This corpus has {event_count:,} events, below the approximate "
+            "20,000-event target; no events were synthesized."
+        )
+    return "\n".join(lines) + "\n"
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("inputs", nargs="+", type=Path, help="Pulse JSONL files")
     parser.add_argument("--output", type=Path, help="Write JSON report to this path")
+    parser.add_argument("--markdown-output", type=Path, help="Write Markdown report")
     args = parser.parse_args()
     report = json.dumps(analyze(args.inputs), indent=2, sort_keys=True) + "\n"
     if args.output:
         args.output.write_text(report, encoding="utf-8")
     else:
         print(report, end="")
+    if args.markdown_output:
+        args.markdown_output.write_text(
+            render_markdown(json.loads(report)), encoding="utf-8"
+        )
     return 0
 
 
