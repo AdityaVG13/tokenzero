@@ -463,6 +463,8 @@ fn ref_index_compaction_keeps_newest_entry_per_ref() {
         1,
         ContentClass::Unknown,
         false,
+        0,
+        None,
     )
     .unwrap();
     append_ref_index_line(
@@ -472,6 +474,8 @@ fn ref_index_compaction_keeps_newest_entry_per_ref() {
         1,
         ContentClass::Unknown,
         false,
+        0,
+        None,
     )
     .unwrap();
     append_ref_index_line(
@@ -481,6 +485,8 @@ fn ref_index_compaction_keeps_newest_entry_per_ref() {
         2,
         ContentClass::Unknown,
         false,
+        0,
+        None,
     )
     .unwrap();
 
