@@ -13,9 +13,10 @@ mod exec_stub;
 use exec_stub as exec;
 pub(crate) mod journal;
 mod parser;
-mod result;
 pub(crate) mod recipe_registry;
+mod result;
 mod sandbox;
+pub mod sentinel;
 mod store;
 
 // Bench harness is test-only (never wired into production CodeMode runtime).
