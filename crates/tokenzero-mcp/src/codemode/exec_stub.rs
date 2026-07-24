@@ -23,6 +23,7 @@ use the CodeMode catalog surface package. tokenzero-mcp never embeds the JS runt
 }
 
 /// No-op telemetry helper when JS sandbox is absent.
+pub(crate) fn register_exact_expand_payload(_text: &str) {}
 pub(crate) fn record_exact_expand_payload(_text: &str) {}
 
 /// Expand-value detection is JS-runtime-specific; stub always returns false.

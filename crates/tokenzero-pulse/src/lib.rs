@@ -28,10 +28,21 @@ impl<T, E: Into<Box<dyn std::error::Error + Send + Sync>>> IntoIo<T> for Result<
     }
 }
 
-const EVENT_SQL_COLUMNS: &str = "schema_version, event, timestamp_unix, tool, mode, raw_tokens, visible_tokens, recovery_tokens, task_lossless, cache_hit, retry_count, failure, exact_ref_count, latency_ms, source_hash, session_id, call_id, ref_ids";
+const EVENT_SQL_COLUMNS: &str = "schema_version, event, timestamp_unix, tool, mode, raw_tokens, visible_tokens, recovery_tokens, task_lossless, cache_hit, retry_count, failure, exact_ref_count, latency_ms, source_hash, session_id, call_id, ref_ids, tokenizer_id";
 const PULSE_SOURCE_OF_TRUTH: &str = "jsonl";
 const PULSE_SYNC_SCHEMA_VERSION: &str = "pulse-sync-v1";
 const PULSE_SYNC_LOCK_TIMEOUT: Duration = Duration::from_secs(5);
+
+fn default_tokenizer_id() -> String {
+    "estimator:tokenzero-core".to_string()
+}
+
+fn valid_tokenizer_id(id: &str) -> bool {
+    !id.is_empty()
+        && !id.chars().any(char::is_whitespace)
+        && (!id.contains("estimat") || id.starts_with("estimator:"))
+}
+
 macro_rules! pulse_structs {
     ($( $(#[$struct_attr:meta])* $name:ident { $($(#[$field_attr:meta])* $field:ident $ty:ty;)* })*) => {
         $(
@@ -57,6 +68,8 @@ pulse_structs! {
         raw_tokens usize;
         visible_tokens usize;
         recovery_tokens usize;
+        /// Tokenizer used for all counts; estimators are explicitly labelled.
+        #[serde(default = "default_tokenizer_id")] tokenizer_id String;
         task_lossless bool;
         cache_hit bool;
         retry_count usize;
@@ -149,6 +162,7 @@ impl PulseEvent {
             raw_tokens = raw_tokens;
             visible_tokens = visible_tokens;
             recovery_tokens = recovery_tokens;
+            tokenizer_id = default_tokenizer_id();
             task_lossless = true;
             cache_hit = false;
             retry_count = 0;
@@ -172,6 +186,18 @@ impl PulseEvent {
         self.call_id = call_id;
         self.ref_ids = ref_ids;
         self
+    }
+
+    pub fn with_tokenizer_id(mut self, tokenizer_id: &str) -> Result<Self, &'static str> {
+        let id = tokenizer_id.trim();
+        if id.is_empty()
+            || id.chars().any(char::is_whitespace)
+            || (id.contains("estimat") && !id.starts_with("estimator:"))
+        {
+            return Err("tokenizer id must name a real tokenizer or use estimator:<name>");
+        }
+        self.tokenizer_id = id.to_string();
+        Ok(self)
     }
 }
 
@@ -415,7 +441,7 @@ fn init_sqlite(conn: &Connection) -> IoResult<()> {
             raw_tokens INTEGER NOT NULL, visible_tokens INTEGER NOT NULL, recovery_tokens INTEGER NOT NULL,
             task_lossless INTEGER NOT NULL, cache_hit INTEGER NOT NULL, retry_count INTEGER NOT NULL,
             failure INTEGER NOT NULL, exact_ref_count INTEGER NOT NULL, latency_ms INTEGER NOT NULL,
-            source_hash TEXT, session_id TEXT, call_id TEXT, ref_ids TEXT, record_hash TEXT NOT NULL
+            source_hash TEXT, session_id TEXT, call_id TEXT, ref_ids TEXT, tokenizer_id TEXT NOT NULL DEFAULT 'estimator:tokenzero-core', record_hash TEXT NOT NULL
         );
         CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
         CREATE INDEX IF NOT EXISTS idx_events_tool_time ON events(tool, timestamp_unix DESC);
@@ -426,6 +452,7 @@ fn init_sqlite(conn: &Connection) -> IoResult<()> {
         "ALTER TABLE events ADD COLUMN session_id TEXT",
         "ALTER TABLE events ADD COLUMN call_id TEXT",
         "ALTER TABLE events ADD COLUMN ref_ids TEXT",
+        "ALTER TABLE events ADD COLUMN tokenizer_id TEXT NOT NULL DEFAULT 'estimator:tokenzero-core'",
     ] {
         let _ = conn.execute(ddl, []);
     }
@@ -444,7 +471,7 @@ fn write_sqlite_events_from_jsonl(conn: &mut Connection, path: &Path) -> IoResul
     tx.execute("DELETE FROM events", []).into_io()?;
     let scan = {
         let mut stmt = tx.prepare(
-            "INSERT INTO events (line_no, schema_version, event, timestamp_unix, tool, mode, raw_tokens, visible_tokens, recovery_tokens, task_lossless, cache_hit, retry_count, failure, exact_ref_count, latency_ms, source_hash, session_id, call_id, ref_ids, record_hash) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20)",
+            "INSERT INTO events (line_no, schema_version, event, timestamp_unix, tool, mode, raw_tokens, visible_tokens, recovery_tokens, task_lossless, cache_hit, retry_count, failure, exact_ref_count, latency_ms, source_hash, session_id, call_id, ref_ids, tokenizer_id, record_hash) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21)",
         ).into_io()?;
         let mut line_no = 0i64;
         scan_jsonl(path, |event| {
@@ -469,6 +496,7 @@ fn write_sqlite_events_from_jsonl(conn: &mut Connection, path: &Path) -> IoResul
                 event.session_id.as_deref(),
                 event.call_id.as_deref(),
                 ref_ids_to_column(&event.ref_ids)?,
+                &event.tokenizer_id,
                 hex_sha256(&serde_json::to_vec(event).into_io()?),
             ])
             .into_io()?;
@@ -691,6 +719,7 @@ fn pulse_event_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<PulseEvent>
         session_id = row.get(15)?;
         call_id = row.get(16)?;
         ref_ids = ref_ids_from_column(row.get(17)?);
+        tokenizer_id = row.get(18)?;
     })
 }
 
@@ -969,7 +998,7 @@ fn hash_hint(value: &str) -> String {
 
 // Session Ledger (bfu): rocket-equation token-turn pricing (mass × turns remaining).
 // Spec: ZeroStack Mars doc section 0 — DPMT is the headline metric.
-pub const SESSION_LEDGER_SCHEMA_VERSION: &str = "session-ledger-v2";
+pub const SESSION_LEDGER_SCHEMA_VERSION: &str = "session-ledger-v3";
 
 /// Token-turns for a chronological mass series: mass at turn index `i` (0-based)
 /// of `N` turns contributes `mass * (N - i)` (rides for remaining turns including current).
@@ -999,6 +1028,7 @@ pulse_structs! {
     #[derive(Default)]
     SessionLedgerEntry {
         session_id String;
+        tokenizer_id String;
         turns usize;
         raw_tokens usize;
         visible_tokens usize;
@@ -1008,8 +1038,16 @@ pulse_structs! {
         cache_hits usize;
         /// Visible mass × turns_remaining (rocket-equation carried cost).
         visible_token_turns u64;
+        /// Recovery mass (M_rec) × turns_remaining.
+        recovery_token_turns u64;
+        /// Recovery-adjusted cost: visible_token_turns + recovery_token_turns.
+        recovery_adjusted_token_turn_cost u64;
         /// Raw mass × turns_remaining (same schedule, uncompressed mass).
         raw_token_turns u64;
+        /// M_full - (M_vis + M_rec); intentionally signed and may be negative.
+        token_turn_savings i128;
+        /// Signed savings ratio over raw token-turns.
+        recovery_adjusted_savings f64;
         /// Decisions per million visible token-turns; absent when token-turns are zero.
         #[serde(default, skip_serializing_if = "Option::is_none")] dpmt Option<f64>;
         tools BTreeMap<String, usize>;
@@ -1026,7 +1064,11 @@ pulse_structs! {
         total_failures usize;
         total_cache_hits usize;
         total_visible_token_turns u64;
+        total_recovery_token_turns u64;
+        total_recovery_adjusted_token_turn_cost u64;
         total_raw_token_turns u64;
+        total_token_turn_savings i128;
+        total_recovery_adjusted_savings f64;
         /// Headline metric: decisions per million visible token-turns (DPMT).
         #[serde(default, skip_serializing_if = "Option::is_none")] dpmt Option<f64>;
         sessions Vec<SessionLedgerEntry>;
@@ -1036,69 +1078,114 @@ pulse_structs! {
 #[derive(Default)]
 struct SessionAcc {
     entry: SessionLedgerEntry,
-    visible_masses: Vec<usize>,
-    raw_masses: Vec<usize>,
+}
+
+fn signed_savings_ratio(raw: u64, charged: u64) -> f64 {
+    if raw == 0 {
+        0.0
+    } else {
+        (raw as f64 - charged as f64) / raw as f64
+    }
 }
 
 impl SessionLedgerReport {
     pub fn from_ledger(path: &Path) -> IoResult<Self> {
-        let mut sessions: BTreeMap<String, SessionAcc> = BTreeMap::new();
+        let mut timelines: BTreeMap<String, Vec<PulseEvent>> = BTreeMap::new();
         scan_jsonl(path, |event| {
-            let sid = event
+            let session_id = event
                 .session_id
                 .clone()
                 .unwrap_or_else(|| "unknown".to_string());
-            let acc = sessions.entry(sid.clone()).or_insert_with(|| SessionAcc {
-                entry: SessionLedgerEntry {
-                    session_id: sid,
-                    source_hash: event.source_hash.clone(),
-                    ..SessionLedgerEntry::default()
-                },
-                ..SessionAcc::default()
-            });
-            acc.entry.turns += 1;
-            acc.entry.raw_tokens += event.raw_tokens;
-            acc.entry.visible_tokens += event.visible_tokens;
-            acc.entry.recovery_tokens += event.recovery_tokens;
-            acc.entry.exact_ref_count += event.exact_ref_count;
-            acc.entry.failures += usize::from(event.failure);
-            acc.entry.cache_hits += usize::from(event.cache_hit);
-            *acc.entry.tools.entry(event.tool.clone()).or_insert(0) += 1;
-            acc.visible_masses.push(event.visible_tokens);
-            acc.raw_masses.push(event.raw_tokens);
+            timelines.entry(session_id).or_default().push(event.clone());
             Ok(())
         })?;
+
+        let mut sessions: BTreeMap<(String, String), SessionAcc> = BTreeMap::new();
+        for (session_id, events) in timelines {
+            let horizon = events.len();
+            for (index, event) in events.into_iter().enumerate() {
+                let tokenizer_id = event.tokenizer_id.clone();
+                let key = (session_id.clone(), tokenizer_id.clone());
+                let acc = sessions.entry(key).or_insert_with(|| SessionAcc {
+                    entry: SessionLedgerEntry {
+                        session_id: session_id.clone(),
+                        tokenizer_id,
+                        source_hash: event.source_hash.clone(),
+                        ..SessionLedgerEntry::default()
+                    },
+                });
+                let remaining = horizon.saturating_sub(index) as u64;
+                acc.entry.turns += 1;
+                acc.entry.raw_tokens += event.raw_tokens;
+                acc.entry.visible_tokens += event.visible_tokens;
+                acc.entry.recovery_tokens += event.recovery_tokens;
+                acc.entry.visible_token_turns = acc
+                    .entry
+                    .visible_token_turns
+                    .saturating_add((event.visible_tokens as u64).saturating_mul(remaining));
+                acc.entry.recovery_token_turns = acc
+                    .entry
+                    .recovery_token_turns
+                    .saturating_add((event.recovery_tokens as u64).saturating_mul(remaining));
+                acc.entry.raw_token_turns = acc
+                    .entry
+                    .raw_token_turns
+                    .saturating_add((event.raw_tokens as u64).saturating_mul(remaining));
+                acc.entry.exact_ref_count += event.exact_ref_count;
+                acc.entry.failures += usize::from(event.failure);
+                acc.entry.cache_hits += usize::from(event.cache_hit);
+                *acc.entry.tools.entry(event.tool).or_insert(0) += 1;
+            }
+        }
+
         let sessions_vec: Vec<SessionLedgerEntry> = sessions
             .into_values()
             .map(|mut acc| {
-                acc.entry.visible_token_turns = token_turns_for_masses(&acc.visible_masses);
-                acc.entry.raw_token_turns = token_turns_for_masses(&acc.raw_masses);
-                acc.entry.dpmt = dpmt(acc.entry.turns, acc.entry.visible_token_turns);
+                acc.entry.recovery_adjusted_token_turn_cost = acc
+                    .entry
+                    .visible_token_turns
+                    .saturating_add(acc.entry.recovery_token_turns);
+                acc.entry.token_turn_savings = i128::from(acc.entry.raw_token_turns)
+                    - i128::from(acc.entry.recovery_adjusted_token_turn_cost);
+                acc.entry.recovery_adjusted_savings = signed_savings_ratio(
+                    acc.entry.raw_token_turns,
+                    acc.entry.recovery_adjusted_token_turn_cost,
+                );
+                acc.entry.dpmt = dpmt(acc.entry.turns, acc.entry.recovery_adjusted_token_turn_cost);
                 acc.entry
             })
             .collect();
         let sum = |f: fn(&SessionLedgerEntry) -> usize| sessions_vec.iter().map(f).sum::<usize>();
         let sum_u64 = |f: fn(&SessionLedgerEntry) -> u64| {
-            sessions_vec
-                .iter()
-                .map(f)
-                .fold(0u64, u64::saturating_add)
+            sessions_vec.iter().map(f).fold(0u64, u64::saturating_add)
         };
-        let total_turns = sum(|s| s.turns);
-        let total_visible_token_turns = sum_u64(|s| s.visible_token_turns);
+        let total_turns = sum(|entry| entry.turns);
+        let total_visible_token_turns = sum_u64(|entry| entry.visible_token_turns);
+        let total_recovery_token_turns = sum_u64(|entry| entry.recovery_token_turns);
+        let total_recovery_adjusted_token_turn_cost =
+            total_visible_token_turns.saturating_add(total_recovery_token_turns);
+        let total_raw_token_turns = sum_u64(|entry| entry.raw_token_turns);
         Ok(Self {
             schema_version: SESSION_LEDGER_SCHEMA_VERSION.to_string(),
             total_sessions: sessions_vec.len(),
             total_turns,
-            total_raw_tokens: sum(|s| s.raw_tokens),
-            total_visible_tokens: sum(|s| s.visible_tokens),
-            total_recovery_tokens: sum(|s| s.recovery_tokens),
-            total_exact_refs: sum(|s| s.exact_ref_count),
-            total_failures: sum(|s| s.failures),
-            total_cache_hits: sum(|s| s.cache_hits),
+            total_raw_tokens: sum(|entry| entry.raw_tokens),
+            total_visible_tokens: sum(|entry| entry.visible_tokens),
+            total_recovery_tokens: sum(|entry| entry.recovery_tokens),
+            total_exact_refs: sum(|entry| entry.exact_ref_count),
+            total_failures: sum(|entry| entry.failures),
+            total_cache_hits: sum(|entry| entry.cache_hits),
             total_visible_token_turns,
-            total_raw_token_turns: sum_u64(|s| s.raw_token_turns),
-            dpmt: dpmt(total_turns, total_visible_token_turns),
+            total_recovery_token_turns,
+            total_recovery_adjusted_token_turn_cost,
+            total_raw_token_turns,
+            total_token_turn_savings: i128::from(total_raw_token_turns)
+                - i128::from(total_recovery_adjusted_token_turn_cost),
+            total_recovery_adjusted_savings: signed_savings_ratio(
+                total_raw_token_turns,
+                total_recovery_adjusted_token_turn_cost,
+            ),
+            dpmt: dpmt(total_turns, total_recovery_adjusted_token_turn_cost),
             sessions: sessions_vec,
         })
     }
@@ -1106,13 +1193,15 @@ impl SessionLedgerReport {
     pub fn schema_json() -> serde_json::Value {
         serde_json::json!({
             "schema_version": SESSION_LEDGER_SCHEMA_VERSION,
-            "description": "Per-session cost ledger: rocket-equation token-turns (mass × turns_remaining); headline metric is DPMT (decisions per million visible token-turns)",
+            "description": "Recovery-adjusted per-session token-turn ledger keyed by tokenizer id",
             "pricing": {
-                "token_turns": "sum over turns i of mass_i * (N - i); mass is visible_tokens (carried context) or raw_tokens",
-                "dpmt": "decisions * 1e6 / visible_token_turns; decisions := turns (tool calls) until a finer counter exists"
+                "token_turns": "M_vis and M_rec each sum mass_i * (N - i); recovery_adjusted_token_turn_cost = M_vis + M_rec",
+                "token_turn_savings": "M_full - (M_vis + M_rec); signed and may be negative",
+                "dpmt": "decisions * 1e6 / recovery_adjusted_token_turn_cost"
             },
             "entry": {
                 "session_id": "string — stable session identifier (MCP session id or 'unknown')",
+                "tokenizer_id": "real tokenizer id or estimator:<name>",
                 "turns": "usize — number of tool calls in this session (decision count proxy)",
                 "raw_tokens": "usize — total raw (uncompressed) tokens across all turns",
                 "visible_tokens": "usize — total visible (compressed) tokens across all turns",
@@ -1120,9 +1209,13 @@ impl SessionLedgerReport {
                 "exact_ref_count": "usize — total exact refs emitted across all turns",
                 "failures": "usize — number of failed tool calls",
                 "cache_hits": "usize — number of cache-hit serves",
-                "visible_token_turns": "u64 — priced visible mass × turns_remaining",
-                "raw_token_turns": "u64 — priced raw mass × turns_remaining",
-                "dpmt": "Option<f64> — decisions per million visible token-turns",
+                "visible_token_turns": "u64 — M_vis",
+                "recovery_token_turns": "u64 — M_rec",
+                "recovery_adjusted_token_turn_cost": "u64 — M_vis + M_rec",
+                "raw_token_turns": "u64 — M_full",
+                "token_turn_savings": "i128 — M_full - M_vis - M_rec",
+                "recovery_adjusted_savings": "f64 — signed ratio; may be negative",
+                "dpmt": "Option<f64> — decisions per million recovery-adjusted token-turns",
                 "tools": "BTreeMap<String, usize> — per-tool call counts",
                 "source_hash": "Option<String> — repo source hash if available"
             },
@@ -1137,7 +1230,11 @@ impl SessionLedgerReport {
                 "total_failures": "usize",
                 "total_cache_hits": "usize",
                 "total_visible_token_turns": "u64",
+                "total_recovery_token_turns": "u64",
+                "total_recovery_adjusted_token_turn_cost": "u64",
                 "total_raw_token_turns": "u64",
+                "total_token_turn_savings": "i128",
+                "total_recovery_adjusted_savings": "f64",
                 "dpmt": "Option<f64> — headline DPMT across all sessions",
                 "sessions": "Vec<SessionLedgerEntry>"
             },
@@ -1151,61 +1248,64 @@ impl SessionLedgerReport {
 
     pub fn render_text(&self) -> String {
         let mut out = String::from(
-            "Session Cost Ledger (session-ledger-v2)\n═══════════════════════════════════════\n\n",
+            "Session Cost Ledger (session-ledger-v3)\n═══════════════════════════════════════\n\n",
         );
         match self.dpmt {
             Some(dpmt) => writeln!(
                 out,
-                "DPMT (headline): {dpmt:.4} decisions / million visible token-turns"
+                "DPMT (headline): {dpmt:.4} decisions / million recovery-adjusted token-turns"
             )
             .unwrap(),
-            None => out.push_str("DPMT (headline): n/a (no visible token-turns)\n"),
+            None => out.push_str("DPMT (headline): n/a (no recovery-adjusted token-turns)\n"),
         }
         writeln!(
             out,
-            "Visible token-turns: {}  Raw token-turns: {}",
-            self.total_visible_token_turns, self.total_raw_token_turns
+            "Token-turns: visible={} recovery={} adjusted={} raw={} net_savings={} ({:.2}%)",
+            self.total_visible_token_turns,
+            self.total_recovery_token_turns,
+            self.total_recovery_adjusted_token_turn_cost,
+            self.total_raw_token_turns,
+            self.total_token_turn_savings,
+            self.total_recovery_adjusted_savings * 100.0,
         )
         .unwrap();
         writeln!(
             out,
-            "Sessions: {}  Turns: {}  Raw: {}  Visible: {}  Refs: {}  Failures: {}\n",
+            "Sessions: {}  Turns: {}  Raw: {}  Visible: {}  Recovered: {}  Refs: {}  Failures: {}\n",
             self.total_sessions,
             self.total_turns,
             self.total_raw_tokens,
             self.total_visible_tokens,
+            self.total_recovery_tokens,
             self.total_exact_refs,
             self.total_failures,
         )
         .unwrap();
-        out.push_str("Per-session breakdown:\n───────────────────────────────────────\n");
-        for s in &self.sessions {
-            let savings = if s.raw_tokens > 0 {
-                ((s.raw_tokens - s.visible_tokens) as f64 / s.raw_tokens as f64) * 100.0
-            } else {
-                0.0
-            };
-            let dpmt_s = s
+        out.push_str("Per-session/tokenizer breakdown:\n───────────────────────────────────────\n");
+        for entry in &self.sessions {
+            let dpmt = entry
                 .dpmt
-                .map(|v| format!("{v:.4}"))
+                .map(|value| format!("{value:.4}"))
                 .unwrap_or_else(|| "n/a".to_string());
             writeln!(
                 out,
-                "  {} — turns={} visible_tt={} raw_tt={} dpmt={} raw={} visible={} (savings {:.1}%) refs={} failures={}",
-                s.session_id,
-                s.turns,
-                s.visible_token_turns,
-                s.raw_token_turns,
-                dpmt_s,
-                s.raw_tokens,
-                s.visible_tokens,
-                savings,
-                s.exact_ref_count,
-                s.failures,
+                "  {} [{}] — turns={} adjusted_tt={} (visible={} recovery={}) raw_tt={} net={} ({:.2}%) dpmt={} refs={} failures={}",
+                entry.session_id,
+                entry.tokenizer_id,
+                entry.turns,
+                entry.recovery_adjusted_token_turn_cost,
+                entry.visible_token_turns,
+                entry.recovery_token_turns,
+                entry.raw_token_turns,
+                entry.token_turn_savings,
+                entry.recovery_adjusted_savings * 100.0,
+                dpmt,
+                entry.exact_ref_count,
+                entry.failures,
             )
             .unwrap();
             out.push_str("    tools: ");
-            for (index, (tool, count)) in s.tools.iter().enumerate() {
+            for (index, (tool, count)) in entry.tools.iter().enumerate() {
                 write!(out, "{}{tool}:{count}", if index == 0 { "" } else { ", " }).unwrap();
             }
             out.push('\n');

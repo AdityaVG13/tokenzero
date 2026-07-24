@@ -71,8 +71,14 @@ pub struct CodeModeTelemetry {
     pub operations: usize,
     #[serde(default)]
     pub visible_tokens: usize,
+    /// Exact tokens recovered by expand and consumed during this plan.
+    #[serde(default)]
+    pub recovery_tokens: usize,
     #[serde(default)]
     pub raw_tokens: usize,
+    /// Signed percent: (raw - visible - recovery) / raw. May be negative.
+    #[serde(default)]
+    pub recovery_adjusted_savings_pct: f64,
     #[serde(default)]
     pub measurement_coverage_pct: u8,
     /// Measured plan-input tokens billed at the CodeMode boundary.
@@ -144,6 +150,10 @@ impl CodeModeTelemetry {
 
     pub fn raw_tokens(&self) -> usize {
         self.raw_tokens
+    }
+
+    pub fn recovery_tokens(&self) -> usize {
+        self.recovery_tokens
     }
 }
 
@@ -218,7 +228,13 @@ fn telemetry(ops: usize, visible: usize, raw: usize, refs: usize, ok: bool) -> C
     CodeModeTelemetry {
         operations: ops,
         visible_tokens: visible,
+        recovery_tokens: 0,
         raw_tokens: raw,
+        recovery_adjusted_savings_pct: if raw == 0 {
+            0.0
+        } else {
+            (raw as f64 - visible as f64) * 100.0 / raw as f64
+        },
         measurement_coverage_pct: 100,
         billed_input_tokens: 0,
         cached_input_tokens: 0,

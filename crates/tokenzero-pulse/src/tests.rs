@@ -771,7 +771,7 @@ fn session_ledger_groups_by_session_id() {
     let report = SessionLedgerReport::from_ledger(&path).unwrap();
     assert_eq!(report.total_sessions, 2);
     assert_eq!(report.total_turns, 3);
-    assert_eq!(report.schema_version, "session-ledger-v2");
+    assert_eq!(report.schema_version, "session-ledger-v3");
     let sess_a = report
         .sessions
         .iter()
@@ -812,14 +812,84 @@ fn session_ledger_schema_json_has_expected_fields() {
     let schema = SessionLedgerReport::schema_json();
     assert_eq!(
         schema["schema_version"],
-        serde_json::json!("session-ledger-v2")
+        serde_json::json!("session-ledger-v3")
     );
     assert!(schema["entry"].is_object());
     assert!(schema["report"].is_object());
     assert!(schema["cli"].is_object());
     assert!(schema["entry"]["visible_token_turns"].is_string());
+    assert!(schema["entry"]["recovery_token_turns"].is_string());
+    assert!(schema["entry"]["token_turn_savings"].is_string());
+    assert!(schema["report"]["total_recovery_adjusted_token_turn_cost"].is_string());
     assert!(schema["report"]["dpmt"].is_string());
     assert!(schema["pricing"]["dpmt"].is_string());
+}
+
+#[test]
+fn session_ledger_debits_m_rec_and_allows_negative_net_savings() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("events.jsonl");
+    let mut event = test_event("expand");
+    event.session_id = Some("negative".into());
+    event.raw_tokens = 10;
+    event.visible_tokens = 8;
+    event.recovery_tokens = 8;
+    record_event(&path, &event).unwrap();
+
+    let report = SessionLedgerReport::from_ledger(&path).unwrap();
+    let entry = &report.sessions[0];
+    assert_eq!(entry.visible_token_turns, 8);
+    assert_eq!(entry.recovery_token_turns, 8);
+    assert_eq!(entry.recovery_adjusted_token_turn_cost, 16);
+    assert_eq!(entry.raw_token_turns, 10);
+    assert_eq!(entry.token_turn_savings, -6);
+    assert!((entry.recovery_adjusted_savings - -0.6).abs() < 1e-9);
+    assert_eq!(report.total_token_turn_savings, -6);
+    assert!((report.total_recovery_adjusted_savings - -0.6).abs() < 1e-9);
+}
+
+#[test]
+fn session_ledger_is_keyed_by_session_and_tokenizer_id() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("events.jsonl");
+    let mut real = test_event("read");
+    real.session_id = Some("same-session".into());
+    real = real.with_tokenizer_id("qwen3.5").unwrap();
+    let mut estimated = test_event("expand");
+    estimated.session_id = Some("same-session".into());
+    estimated = estimated
+        .with_tokenizer_id("estimator:tokenzero-core")
+        .unwrap();
+    record_event(&path, &real).unwrap();
+    record_event(&path, &estimated).unwrap();
+
+    let report = SessionLedgerReport::from_ledger(&path).unwrap();
+    assert_eq!(report.total_sessions, 2);
+    assert_eq!(report.sessions[0].session_id, "same-session");
+    assert_ne!(
+        report.sessions[0].tokenizer_id,
+        report.sessions[1].tokenizer_id
+    );
+    let real_entry = report
+        .sessions
+        .iter()
+        .find(|entry| entry.tokenizer_id == "qwen3.5")
+        .unwrap();
+    let estimator_entry = report
+        .sessions
+        .iter()
+        .find(|entry| entry.tokenizer_id.starts_with("estimator:"))
+        .unwrap();
+    assert_eq!(
+        real_entry.visible_token_turns, 40,
+        "first event keeps the full two-turn horizon"
+    );
+    assert_eq!(estimator_entry.visible_token_turns, 20);
+    assert!(
+        PulseEvent::tool_call("read", "raw", 1, 1, 0, 0, 0, None)
+            .with_tokenizer_id("cl100k-estimate")
+            .is_err()
+    );
 }
 
 #[test]
@@ -831,10 +901,10 @@ fn token_turns_prices_early_mass_about_100x_late() {
     late[198] = 1; // turn 199
     assert_eq!(token_turns_for_masses(&early), 199);
     assert_eq!(token_turns_for_masses(&late), 2);
-    assert!((token_turns_for_masses(&early) as f64 / token_turns_for_masses(&late) as f64
-        - 99.5)
-        .abs()
-        < 1e-9);
+    assert!(
+        (token_turns_for_masses(&early) as f64 / token_turns_for_masses(&late) as f64 - 99.5).abs()
+            < 1e-9
+    );
 }
 
 #[test]
@@ -873,5 +943,5 @@ fn session_ledger_prices_token_turns_in_order() {
     assert!((s.dpmt.unwrap() - (3.0 * 1_000_000.0 / 41.0)).abs() < 1e-9);
     let text = report.render_text();
     assert!(text.contains("DPMT (headline):"));
-    assert!(text.contains("session-ledger-v2"));
+    assert!(text.contains("session-ledger-v3"));
 }

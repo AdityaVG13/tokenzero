@@ -408,7 +408,7 @@ fn guard_visible_output(
                     serde_json::to_string(candidate)
                         .is_ok_and(|serialized| serialized.len() <= limits.max_output_bytes)
                 });
-                super::exec::record_exact_expand_payload(&fitted);
+                super::exec::register_exact_expand_payload(&fitted);
                 *value = Value::String(fitted);
                 let visible = count_tokens(&serde_json::to_string(value).unwrap_or_default());
                 result.telemetry.visible_tokens = visible;
@@ -509,7 +509,7 @@ fn truncate_string_to_fit(mut text: String, mut fits: impl FnMut(&str) -> bool) 
 
 fn record_exact_text(value: &Value) {
     if let Some(text) = value.get("text").and_then(Value::as_str) {
-        super::exec::record_exact_expand_payload(text);
+        super::exec::register_exact_expand_payload(text);
     }
 }
 

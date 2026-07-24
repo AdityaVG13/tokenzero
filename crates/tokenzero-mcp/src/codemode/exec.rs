@@ -168,6 +168,9 @@ thread_local! {
     /// (dda8627) survives the JS-side envelope unwrap.
     static EXACT_EXPAND_REGISTRY: std::cell::RefCell<std::collections::HashSet<u64>> =
         std::cell::RefCell::new(std::collections::HashSet::new());
+    /// Re-expanding the same bytes is charged again, so this is a counter, not a set.
+    static RECOVERED_TOKENS: std::cell::Cell<usize> =
+        const { std::cell::Cell::new(0) };
 }
 
 fn exact_expand_hash(text: &str) -> u64 {
@@ -177,7 +180,7 @@ fn exact_expand_hash(text: &str) -> u64 {
     hasher.finish()
 }
 
-pub(crate) fn record_exact_expand_payload(text: &str) {
+pub(crate) fn register_exact_expand_payload(text: &str) {
     EXACT_EXPAND_REGISTRY.with(|registry| {
         let mut registry = registry.borrow_mut();
         registry.insert(exact_expand_hash(text));
@@ -187,6 +190,13 @@ pub(crate) fn record_exact_expand_payload(text: &str) {
             }
         }
     });
+}
+
+pub(crate) fn record_exact_expand_payload(text: &str) {
+    RECOVERED_TOKENS.with(|tokens| {
+        tokens.set(tokens.get().saturating_add(count_tokens(text)));
+    });
+    register_exact_expand_payload(text);
 }
 
 pub(crate) fn is_exact_expand_value(value: &Value) -> bool {
@@ -256,6 +266,7 @@ pub fn execute_codemode_with_options(plan: &str, options: CodeModeOptions) -> Co
 
 fn execute_codemode_uncontained(plan: &str, options: CodeModeOptions) -> CodeModeResult {
     EXACT_EXPAND_REGISTRY.with(|registry| registry.borrow_mut().clear());
+    RECOVERED_TOKENS.with(|tokens| tokens.set(0));
     let plan = plan.trim();
     let started_ms = now_ms();
     let limits = limits_from_options(&options);
@@ -1602,6 +1613,25 @@ fn finalize_codemode_result(
     limits: &CodeModeLimits,
     steps: Vec<ExecutionStep>,
 ) -> CodeModeResult {
+    let recovered_tokens = RECOVERED_TOKENS.with(std::cell::Cell::get);
+    result.telemetry.recovery_tokens = recovered_tokens;
+    let raw_tokens = result.telemetry.raw_tokens();
+    let charged_tokens = result
+        .telemetry
+        .visible_tokens()
+        .saturating_add(recovered_tokens);
+    result.telemetry.recovery_adjusted_savings_pct = if raw_tokens == 0 {
+        0.0
+    } else {
+        (raw_tokens as f64 - charged_tokens as f64) * 100.0 / raw_tokens as f64
+    };
+    telemetry_insert(&mut result, "recovery_tokens", json!(recovered_tokens));
+    let adjusted_pct = result.telemetry.recovery_adjusted_savings_pct;
+    telemetry_insert(
+        &mut result,
+        "recovery_adjusted_savings_pct",
+        json!(adjusted_pct),
+    );
     {
         let work_root = tokenzero_work_root(options.root.clone());
         let root_was_explicit = options.root.is_some();
@@ -1769,6 +1799,26 @@ fn finalize_codemode_result(
             finalized.telemetry.raw_tokens(),
             finalized.telemetry.visible_tokens(),
         );
+        if let Some(root) = engine.config.allowed_roots.first() {
+            let mut event = tokenzero_pulse::PulseEvent::tool_call(
+                "codemode",
+                "codemode",
+                finalized.telemetry.raw_tokens(),
+                finalized.telemetry.visible_tokens(),
+                finalized.telemetry.recovery_tokens(),
+                finalized.refs.len(),
+                u128::from(finalized.telemetry.wall_ms),
+                None,
+            )
+            .with_attribution(
+                Some(engine.session_id().to_string()),
+                finalized.execution_id.clone(),
+                finalized.refs.clone(),
+            );
+            event.failure = !matches!(finalized.status, CodeModeStatus::Completed);
+            let _ =
+                tokenzero_pulse::record_event(&tokenzero_pulse::default_ledger_path(root), &event);
+        }
         crate::record_operation_amplification(
             &engine.config.cache_path,
             enabled,
@@ -3715,12 +3765,18 @@ mod accumulator_bounds {
     #[test]
     fn exact_expand_registry_is_execution_scoped() {
         let stale = Value::String("stale exact payload".to_string());
+        RECOVERED_TOKENS.with(|tokens| tokens.set(0));
+        record_exact_expand_payload(stale.as_str().unwrap());
         record_exact_expand_payload(stale.as_str().unwrap());
         assert!(is_exact_expand_value(&stale));
         assert_eq!(
-            execute_codemode("return 'fresh'").status,
-            CodeModeStatus::Completed
+            RECOVERED_TOKENS.with(std::cell::Cell::get),
+            count_tokens(stale.as_str().unwrap()) * 2,
+            "re-presenting identical recovered bytes must debit M_rec again",
         );
+        let fresh = execute_codemode("return 'fresh'");
+        assert_eq!(fresh.status, CodeModeStatus::Completed);
+        assert_eq!(fresh.telemetry.recovery_tokens(), 0);
         assert!(!is_exact_expand_value(&stale));
     }
 }
