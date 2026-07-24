@@ -403,6 +403,48 @@ mod quickjs_mutation_classifier_tests {
     }
 
     #[test]
+    fn microtask_cap_error_reports_limit_count_and_batching_fix() {
+        let mut options = CodeModeOptions::default();
+        options.max_microtasks = 16;
+        // Pure promise churn with no host op pending: every .then() drains one
+        // plan-authored microtask, so this exceeds the cap deterministically.
+        let result = execute_codemode_with_options(
+            r#"let p = Promise.resolve(0);
+               for (let i = 0; i < 500; i++) { p = p.then((v) => v + 1); }
+               return await p;"#,
+            options,
+        );
+        let error = result.error.expect("plan must exceed the microtask cap");
+        let msg = &error.message;
+        assert!(msg.contains("microtask cap exceeded"), "{msg}");
+        assert!(msg.contains("limit 16"), "must name the effective limit: {msg}");
+        assert!(msg.contains("drained 16"), "must report the observed count: {msg}");
+        assert!(
+            msg.contains("Promise.all") && msg.contains("limits.max_microtasks"),
+            "must include a corrective batching example and the raise-cap knob: {msg}"
+        );
+    }
+
+    #[test]
+    fn promise_all_host_batch_stays_under_microtask_cap() {
+        let mut options = CodeModeOptions::default();
+        options.max_microtasks = 32;
+        // Six independent host ops batched with Promise.all: host-op polling
+        // resets the drain counter, so the corrective advice actually works.
+        let result = execute_codemode_with_options(
+            r#"const outs = await Promise.all([
+                   zero.token.shell("echo a"), zero.token.shell("echo b"),
+                   zero.token.shell("echo c"), zero.token.shell("echo d"),
+                   zero.token.shell("echo e"), zero.token.shell("echo f"),
+               ]);
+               return outs.length;"#,
+            options,
+        );
+        assert!(result.error.is_none(), "{:?}", result.error);
+        assert_eq!(result.status, CodeModeStatus::Completed);
+    }
+
+    #[test]
     fn ignores_mutation_tokens_inside_strings() {
         let source = format!(r#"return {{ text: "token only: {}" }};"#, ".edit(");
         assert!(!quickjs_plan_requests_mutation(&source));
@@ -619,9 +661,16 @@ fn execute_quickjs_plan(
                 // Those jobs are executor bookkeeping, not plan-authored microtasks.
                 drained = 0;
             } else if drained >= limits.max_microtasks {
+                let snapshot = state.borrow();
                 return fail_state(
-                    &state.borrow(),
-                    format!("sandbox: microtask cap exceeded {}", limits.max_microtasks),
+                    &snapshot,
+                    format!(
+                        "sandbox: microtask cap exceeded: drained {drained} promise continuations against limit {} with no host op pending ({} host ops completed, {} parallel groups so far). Plan-authored promise churn drives this count — batch independent host calls with Promise.all (host width is capped at {}), split the work into smaller zero_execute plans, or pass limits.max_microtasks to raise the cap for this call.",
+                        limits.max_microtasks,
+                        snapshot.ops,
+                        snapshot.parallel_groups,
+                        limits.max_parallel_width,
+                    ),
                 );
             }
             if let Err(error) = runtime.execute_pending_job() {
