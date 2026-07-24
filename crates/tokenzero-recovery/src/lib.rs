@@ -298,6 +298,16 @@ fn parse_fragment_spec(fragment: &str) -> Result<FragmentSpec, FragmentError> {
         return Err(FragmentError::DuplicateFragment);
     }
     let kind = fragment.as_bytes()[0] as char;
+    // Shared-contract legacy byte alias `B<start>+<len>`: the strict zero-ref
+    // grammar accepts it, so every expand surface must too (bytes only).
+    if kind == 'B' {
+        if let Some((start, len)) = fragment[1..].split_once('+') {
+            let start = start.parse::<usize>().map_err(|_| FragmentError::Malformed)?;
+            let len = len.parse::<usize>().map_err(|_| FragmentError::Malformed)?;
+            let end = start.checked_add(len).ok_or(FragmentError::Malformed)?;
+            return Ok(FragmentSpec::Byte { start, end });
+        }
+    }
     let map_err = |reversed| {
         if reversed {
             FragmentError::Reversed

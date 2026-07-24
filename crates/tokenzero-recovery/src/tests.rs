@@ -2648,6 +2648,19 @@ fn zeroref_v1_accepts_legacy_plus_byte_alias() {
     );
 }
 
+#[test]
+fn expand_accepts_legacy_plus_byte_alias() {
+    let (mut store, _cache, _dir) = temp_store();
+    let payload = "0123456789abcdef";
+    let stored = store
+        .store_payload(payload, ContentType::Unknown, None, None, None)
+        .unwrap();
+    let b_ref = format!("{}#B4+6", stored.blob_ref);
+    let expanded = store.expand(&b_ref, Some("raw"), None, None, None, None);
+    assert!(expanded.found, "{}", expanded.reason);
+    assert_eq!(expanded.content, "456789");
+}
+
 #[cfg(target_pointer_width = "32")]
 #[test]
 fn zeroref_v1_rejects_fragment_bounds_that_overflow_usize() {
