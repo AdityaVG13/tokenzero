@@ -2952,6 +2952,7 @@ dependencies = [
  "serde_json",
  "sha2 0.11.0",
  "tiktoken-rs",
+ "zero-abi",
 ]
 
 [[package]]
@@ -3696,6 +3697,15 @@ checksum = "32e45ad4206f6d2479085147f02bc2ef834ac85886624a23575ae137c8aa8156"
 dependencies = [
  "libc",
  "rustix",
+]
+
+[[package]]
+name = "zero-abi"
+version = "0.1.0"
+source = "git+https://github.com/AdityaVG13/zerostack?rev=142b2f829f5869b74a43437effdf33a467e0af47#142b2f829f5869b74a43437effdf33a467e0af47"
+dependencies = [
+ "serde_json",
+ "sha2 0.10.9",
 ]
 
 [[package]]

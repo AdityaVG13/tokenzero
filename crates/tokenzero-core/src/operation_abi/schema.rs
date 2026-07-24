@@ -1,208 +1,20 @@
 //! Canonical JSON Schema compare for operation ABI parity.
 //!
-//! Catalogs and bindings must match the registry on the full structural
-//! schema (types, requiredness, nested constraints), not merely property-
-//! name sets. Description/title text is ignored so prose edits do not
-//! mask real drift.
+//! The structural machinery (normalization, canonical encoding, fingerprints,
+//! diff) lives in the shared zero-abi foundation crate so TokenZero, FSZero,
+//! and GraphZero can never drift on contract encoding. This module re-exports
+//! it and keeps the TokenZero-specific parity assertion.
 
-use serde_json::{Map, Value, json};
-use std::collections::BTreeSet;
+use serde_json::Value;
 
-/// Keys treated as non-structural documentation (ignored in parity compare).
-const DOC_KEYS: &[&str] = &["description", "title", "examples", "$comment"];
-
-/// Deep structural equality of two JSON Schema fragments.
-pub fn schemas_structurally_equal(a: &Value, b: &Value) -> bool {
-    normalize_schema(a) == normalize_schema(b)
-}
-
-/// Human-readable first structural divergence (for kill-test assertions).
-pub fn schema_diff(a: &Value, b: &Value) -> Option<String> {
-    diff_normalized(&normalize_schema(a), &normalize_schema(b), "$")
-}
-
-/// Canonical JSON string of a schema (sorted keys, sorted required/enum where
-/// order is not semantically significant). Used by the contract digest.
-pub fn canonical_schema_json(schema: &Value) -> String {
-    canonical_json(&normalize_schema(schema))
-}
-
-/// Deterministic JSON encoding with sorted object keys (recursive).
-pub fn canonical_json(value: &Value) -> String {
-    match value {
-        Value::Null => "null".into(),
-        Value::Bool(b) => b.to_string(),
-        Value::Number(n) => n.to_string(),
-        Value::String(s) => serde_json::to_string(s).unwrap_or_else(|_| "\"\"".into()),
-        Value::Array(arr) => {
-            let parts: Vec<String> = arr.iter().map(canonical_json).collect();
-            format!("[{}]", parts.join(","))
-        }
-        Value::Object(map) => {
-            let mut keys: Vec<&String> = map.keys().collect();
-            keys.sort();
-            let parts: Vec<String> = keys
-                .into_iter()
-                .map(|k| {
-                    let key = serde_json::to_string(k).unwrap_or_else(|_| "\"\"".into());
-                    format!("{key}:{}", canonical_json(&map[k]))
-                })
-                .collect();
-            format!("{{{}}}", parts.join(","))
-        }
-    }
-}
-
-/// Fingerprint of a schema for digest embedding.
-pub fn schema_fingerprint_hex(schema: &Value) -> String {
-    use crate::tokens::push_hex_byte;
-    use sha2::{Digest, Sha256};
-    let mut h = Sha256::new();
-    h.update(canonical_schema_json(schema).as_bytes());
-    let d: [u8; 32] = h.finalize().into();
-    let mut out = String::with_capacity(64);
-    for b in d {
-        push_hex_byte(&mut out, b);
-    }
-    out
-}
-
-/// Normalize a schema for structural compare / digest.
-pub fn normalize_schema(value: &Value) -> Value {
-    match value {
-        Value::Object(map) => {
-            let mut out = Map::new();
-            for (k, v) in map {
-                if DOC_KEYS.contains(&k.as_str()) {
-                    continue;
-                }
-                let normalized = match k.as_str() {
-                    "required" => normalize_required(v),
-                    "enum" => normalize_enum(v),
-                    "properties" | "patternProperties" | "definitions" | "$defs" => {
-                        normalize_schema_map(v)
-                    }
-                    "items" => {
-                        if v.is_array() {
-                            Value::Array(
-                                v.as_array()
-                                    .unwrap()
-                                    .iter()
-                                    .map(normalize_schema)
-                                    .collect(),
-                            )
-                        } else {
-                            normalize_schema(v)
-                        }
-                    }
-                    "additionalProperties"
-                    | "additionalItems"
-                    | "not"
-                    | "contains"
-                    | "propertyNames" => {
-                        if v.is_boolean() {
-                            v.clone()
-                        } else {
-                            normalize_schema(v)
-                        }
-                    }
-                    "allOf" | "anyOf" | "oneOf" | "prefixItems" => Value::Array(
-                        v.as_array()
-                            .map(|a| a.iter().map(normalize_schema).collect())
-                            .unwrap_or_default(),
-                    ),
-                    _ => normalize_schema(v),
-                };
-                out.insert(k.clone(), normalized);
-            }
-            Value::Object(out)
-        }
-        Value::Array(arr) => Value::Array(arr.iter().map(normalize_schema).collect()),
-        other => other.clone(),
-    }
-}
-
-fn normalize_schema_map(v: &Value) -> Value {
-    let Some(obj) = v.as_object() else {
-        return normalize_schema(v);
-    };
-    let mut out = Map::new();
-    for (k, child) in obj {
-        out.insert(k.clone(), normalize_schema(child));
-    }
-    Value::Object(out)
-}
-
-fn normalize_required(v: &Value) -> Value {
-    let mut keys: Vec<String> = v
-        .as_array()
-        .map(|a| {
-            a.iter()
-                .filter_map(|x| x.as_str().map(str::to_string))
-                .collect()
-        })
-        .unwrap_or_default();
-    keys.sort();
-    json!(keys)
-}
-
-fn normalize_enum(v: &Value) -> Value {
-    let Some(arr) = v.as_array() else {
-        return v.clone();
-    };
-    if arr.iter().all(|x| x.is_string()) {
-        let mut s: Vec<String> = arr
-            .iter()
-            .filter_map(|x| x.as_str().map(str::to_string))
-            .collect();
-        s.sort();
-        return json!(s);
-    }
-    v.clone()
-}
-
-fn diff_normalized(a: &Value, b: &Value, path: &str) -> Option<String> {
-    if a == b {
-        return None;
-    }
-    match (a, b) {
-        (Value::Object(am), Value::Object(bm)) => {
-            let ak: BTreeSet<_> = am.keys().collect();
-            let bk: BTreeSet<_> = bm.keys().collect();
-            for k in ak.difference(&bk) {
-                return Some(format!("{path}: missing key in right: {k}"));
-            }
-            for k in bk.difference(&ak) {
-                return Some(format!("{path}: extra key in right: {k}"));
-            }
-            for k in &ak {
-                if let Some(d) = diff_normalized(&am[*k], &bm[*k], &format!("{path}.{k}")) {
-                    return Some(d);
-                }
-            }
-            Some(format!("{path}: object values differ"))
-        }
-        (Value::Array(aa), Value::Array(ba)) => {
-            if aa.len() != ba.len() {
-                return Some(format!(
-                    "{path}: array length {} != {}",
-                    aa.len(),
-                    ba.len()
-                ));
-            }
-            for (i, (l, r)) in aa.iter().zip(ba.iter()).enumerate() {
-                if let Some(d) = diff_normalized(l, r, &format!("{path}[{i}]")) {
-                    return Some(d);
-                }
-            }
-            Some(format!("{path}: arrays differ"))
-        }
-        _ => Some(format!("{path}: {a} != {b}")),
-    }
-}
+pub use zero_abi::schema::{
+    canonical_json, canonical_schema_json, normalize_schema, schema_diff,
+    schema_fingerprint_hex, schema_property_keys, schema_required_keys,
+    schemas_structurally_equal,
+};
 
 /// Assert full I/O schema parity between a surface tool and a registry op.
-/// Compares `inputSchema` / `outputSchema` when present on the tool object.
+/// Compares inputSchema / outputSchema when present on the tool object.
 pub fn assert_tool_schema_parity(tool: &Value, op: &super::types::Operation) {
     if let Some(input) = tool.get("inputSchema").or_else(|| tool.get("input_schema")) {
         assert!(
@@ -223,30 +35,4 @@ pub fn assert_tool_schema_parity(tool: &Value, op: &super::types::Operation) {
             schema_diff(output, &op.results.schema)
         );
     }
-}
-
-/// Property names from an object schema's `properties` map (sorted).
-pub fn schema_property_keys(schema: &Value) -> Vec<String> {
-    let mut keys: Vec<String> = schema
-        .get("properties")
-        .and_then(|p| p.as_object())
-        .map(|m| m.keys().cloned().collect())
-        .unwrap_or_default();
-    keys.sort();
-    keys
-}
-
-/// Required keys from an object schema (sorted).
-pub fn schema_required_keys(schema: &Value) -> Vec<String> {
-    let mut keys: Vec<String> = schema
-        .get("required")
-        .and_then(|r| r.as_array())
-        .map(|a| {
-            a.iter()
-                .filter_map(|v| v.as_str().map(str::to_string))
-                .collect()
-        })
-        .unwrap_or_default();
-    keys.sort();
-    keys
 }

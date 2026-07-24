@@ -43,6 +43,14 @@
         assert!(a.chars().all(|c| c.is_ascii_hexdigit()));
     }
 
+    #[test]
+    fn contract_digest_matches_frozen_operation_abi() {
+        assert_eq!(
+            contract_digest_hex(),
+            "bf1dace4bcc6bdddda15b87f45f1157ede4c35f1e0a369c6493b375f8f28b86a"
+        );
+    }
+
     /// tokenzero-irx9.9: memoized digest must stay byte-stable and stay hot.
     /// Kill-test: if memoization were removed, 200 calls recompute the full
     /// manifest hash; with OnceLock the second batch must not be slower than
