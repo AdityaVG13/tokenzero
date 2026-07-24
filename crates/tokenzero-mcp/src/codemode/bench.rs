@@ -28,6 +28,7 @@ pub struct BenchmarkResult {
     pub perop_args_tokens: usize,
     pub perop_raw_tokens: usize,
     pub plan_visible_tokens: usize,
+    pub plan_recovery_tokens: usize,
     pub plan_text_tokens: usize,
     pub payload_tokens: usize,
     pub envelope_tokens: usize,
@@ -35,8 +36,11 @@ pub struct BenchmarkResult {
     pub plan_duration_ms: u64,
     pub perop_duration_ms: u64,
     pub raw_duration_ms: u64,
+    /// Recovery-adjusted savings: plan visible tokens plus M_rec debits.
     pub codemode_vs_raw_savings_pct: f64,
     pub codemode_vs_perop_savings_pct: f64,
+    pub gross_codemode_vs_raw_savings_pct: f64,
+    pub gross_codemode_vs_perop_savings_pct: f64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -53,12 +57,16 @@ pub struct BenchmarkTotals {
     pub total_perop_args: usize,
     pub total_perop_raw: usize,
     pub total_plan_visible: usize,
+    pub total_plan_recovery: usize,
     pub total_plan_text: usize,
     pub total_payload: usize,
     pub total_envelope: usize,
     pub total_plan_raw: usize,
+    /// Recovery-adjusted savings: total visible tokens plus M_rec debits.
     pub codemode_vs_raw_savings_pct: f64,
     pub codemode_vs_perop_savings_pct: f64,
+    pub gross_codemode_vs_raw_savings_pct: f64,
+    pub gross_codemode_vs_perop_savings_pct: f64,
     pub headline_savings_pct: f64,
 }
 
@@ -89,6 +97,7 @@ struct RawCommand {
 #[derive(Debug)]
 struct PlanMeasurement {
     visible_tokens: usize,
+    recovery_tokens: usize,
     payload_tokens: usize,
     envelope_tokens: usize,
     raw_tokens: usize,
@@ -321,7 +330,7 @@ fn raw_sh(command: String) -> RawCommand {
     }
 }
 
-const BENCHMARK_REPORT_VERSION: &str = "1.3.0";
+const BENCHMARK_REPORT_VERSION: &str = "1.4.0";
 
 fn timed<T>(run: impl FnOnce() -> T) -> (T, u64) {
     let start = Instant::now();
@@ -359,6 +368,7 @@ pub fn run_benchmark(root: &std::path::Path) -> BenchmarkReport {
             perop_args_tokens: perop.args_tokens,
             perop_raw_tokens: perop.raw_tokens,
             plan_visible_tokens: plan.visible_tokens,
+            plan_recovery_tokens: plan.recovery_tokens,
             plan_text_tokens: count_tokens(&wl.plan),
             payload_tokens: plan.payload_tokens,
             envelope_tokens: plan.envelope_tokens,
@@ -366,8 +376,19 @@ pub fn run_benchmark(root: &std::path::Path) -> BenchmarkReport {
             plan_duration_ms: plan_ms,
             perop_duration_ms: perop_ms,
             raw_duration_ms: raw_ms,
-            codemode_vs_raw_savings_pct: savings_pct(plan.visible_tokens, raw.visible_tokens),
-            codemode_vs_perop_savings_pct: savings_pct(plan.visible_tokens, perop.visible_tokens),
+            codemode_vs_raw_savings_pct: savings_pct(
+                plan.visible_tokens.saturating_add(plan.recovery_tokens),
+                raw.visible_tokens,
+            ),
+            codemode_vs_perop_savings_pct: savings_pct(
+                plan.visible_tokens.saturating_add(plan.recovery_tokens),
+                perop.visible_tokens,
+            ),
+            gross_codemode_vs_raw_savings_pct: savings_pct(plan.visible_tokens, raw.visible_tokens),
+            gross_codemode_vs_perop_savings_pct: savings_pct(
+                plan.visible_tokens,
+                perop.visible_tokens,
+            ),
         });
     }
 
@@ -376,12 +397,16 @@ pub fn run_benchmark(root: &std::path::Path) -> BenchmarkReport {
     let total_perop_args: usize = results.iter().map(|r| r.perop_args_tokens).sum();
     let total_perop_raw: usize = results.iter().map(|r| r.perop_raw_tokens).sum();
     let total_plan_visible: usize = results.iter().map(|r| r.plan_visible_tokens).sum();
+    let total_plan_recovery: usize = results.iter().map(|r| r.plan_recovery_tokens).sum();
     let total_plan_text: usize = results.iter().map(|r| r.plan_text_tokens).sum();
     let total_payload: usize = results.iter().map(|r| r.payload_tokens).sum();
     let total_envelope: usize = results.iter().map(|r| r.envelope_tokens).sum();
     let total_plan_raw: usize = results.iter().map(|r| r.plan_raw_tokens).sum();
-    let vs_raw = savings_pct(total_plan_visible, total_raw_visible);
-    let vs_perop = savings_pct(total_plan_visible, total_perop_visible);
+    let recovery_adjusted_plan = total_plan_visible.saturating_add(total_plan_recovery);
+    let vs_raw = savings_pct(recovery_adjusted_plan, total_raw_visible);
+    let vs_perop = savings_pct(recovery_adjusted_plan, total_perop_visible);
+    let gross_vs_raw = savings_pct(total_plan_visible, total_raw_visible);
+    let gross_vs_perop = savings_pct(total_plan_visible, total_perop_visible);
 
     BenchmarkReport {
         version: BENCHMARK_REPORT_VERSION.to_string(),
@@ -392,12 +417,15 @@ pub fn run_benchmark(root: &std::path::Path) -> BenchmarkReport {
             total_perop_args,
             total_perop_raw,
             total_plan_visible,
+            total_plan_recovery,
             total_plan_text,
             total_payload,
             total_envelope,
             total_plan_raw,
             codemode_vs_raw_savings_pct: vs_raw,
             codemode_vs_perop_savings_pct: vs_perop,
+            gross_codemode_vs_raw_savings_pct: gross_vs_raw,
+            gross_codemode_vs_perop_savings_pct: gross_vs_perop,
             headline_savings_pct: vs_raw,
         },
     }
@@ -436,6 +464,15 @@ fn wire_tokens(texts: &[String]) -> usize {
     texts.iter().map(|text| count_tokens(text)).sum()
 }
 
+fn recovery_tokens_from_response(response: &ToolResponse) -> usize {
+    response
+        .telemetry
+        .as_ref()
+        .and_then(|telemetry| telemetry.pointer("/structuredContent/telemetry/recovery_tokens"))
+        .and_then(Value::as_u64)
+        .unwrap_or(0) as usize
+}
+
 fn accounted_raw_tokens(response: &ToolResponse) -> usize {
     response
         .accounting
@@ -464,6 +501,9 @@ fn measure_plan_leg(engine: &TokenZeroEngine, plan: &str) -> PlanMeasurement {
     )
     .expect("plan leg dispatch");
     let raw_tokens = accounted_raw_tokens(&response);
+    // Read M_rec from the response telemetry before FastMCP scalar folding can
+    // elide structuredContent from the visible wire representation.
+    let recovery_tokens = recovery_tokens_from_response(&response);
     let mcp = mcp_tool_response(response);
     let wire_texts = fastmcp_content_texts_from_tool_result(&mcp).expect("fastmcp render");
     let primary = wire_texts.first().cloned().unwrap_or_default();
@@ -479,6 +519,7 @@ fn measure_plan_leg(engine: &TokenZeroEngine, plan: &str) -> PlanMeasurement {
     let ops = parse_ops_from_ack(&primary);
     PlanMeasurement {
         visible_tokens,
+        recovery_tokens,
         payload_tokens,
         envelope_tokens: visible_tokens.saturating_sub(payload_tokens),
         raw_tokens,

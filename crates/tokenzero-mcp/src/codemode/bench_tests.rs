@@ -1,5 +1,28 @@
 use super::*;
 
+#[test]
+fn recovery_tokens_debit_benchmark_savings_and_may_go_negative() {
+    assert_eq!(savings_pct(70, 100), 30.0, "gross visible-only savings");
+    assert_eq!(
+        savings_pct(70usize.saturating_add(40), 100),
+        -10.0,
+        "M_rec debit must be allowed to make savings negative"
+    );
+}
+
+#[test]
+fn recovery_tokens_are_read_before_fastmcp_scalar_folding() {
+    let response = ToolResponse {
+        telemetry: Some(json!({
+            "structuredContent": {
+                "telemetry": { "recovery_tokens": 40 }
+            }
+        })),
+        ..ToolResponse::default()
+    };
+    assert_eq!(recovery_tokens_from_response(&response), 40);
+}
+
 struct Fixture {
     root: PathBuf,
     engine: TokenZeroEngine,
@@ -42,7 +65,10 @@ fn scalar_return_plan_folds_into_primary_content() {
         "scalar must fold exactly once: {}",
         rendered[0]
     );
-    let ack_body = rendered[0].rsplit_once(" t:").map(|(body, _)| body).unwrap_or(&rendered[0]);
+    let ack_body = rendered[0]
+        .rsplit_once(" t:")
+        .map(|(body, _)| body)
+        .unwrap_or(&rendered[0]);
     assert!(count_tokens(ack_body) <= 14, "{}", rendered[0]);
 }
 
@@ -205,8 +231,8 @@ fn run_composition_benchmark() {
     let document = json!({
         "version": report.version,
         "description": "CodeMode plan composition benchmark: v2 CodeMode FastMCP wire vs raw subprocess output and equivalent classic per-op MCP tool responses",
-        "methodology": "All legs run from the TokenZero repo root with the same count_tokens tokenizer. Plan and per-op legs use separate fresh recovery caches per workload. The plan leg calls tz_execute_code with the v2 ref-first CodeMode envelope and counts FastMCP content text exactly as emitted. The per-op leg calls the classic tz_* tool path for each equivalent operation, counts every FastMCP content text, and reports argument tokens separately. The raw leg executes real subprocess commands with std::process in the repo root and tokenizes the exact command text plus stdout and stderr that an agent without ZeroStack would consume. Raw excludes harness per-call framing, which is conservative in CodeMode's favor.",
-        "headline": {"metric":"codemode_vs_raw_savings_pct","value":report.totals.headline_savings_pct},
+        "methodology": "All legs run from the TokenZero repo root with the same count_tokens tokenizer. Plan and per-op legs use separate fresh recovery caches per workload. The plan leg calls tz_execute_code with the v2 ref-first CodeMode envelope, counts FastMCP content text exactly as emitted, and debits telemetry.recovery_tokens (M_rec) from recovery-adjusted savings and the headline. The per-op leg calls the classic tz_* tool path for each equivalent operation, counts every FastMCP content text, and reports argument tokens separately. The raw leg executes real subprocess commands with std::process in the repo root and tokenizes the exact command text plus stdout and stderr that an agent without ZeroStack would consume. Raw excludes harness per-call framing, which is conservative in CodeMode's favor.",
+        "headline": {"metric":"recovery_adjusted_codemode_vs_raw_savings_pct","value":report.totals.headline_savings_pct},
         "workloads": report.workloads, "totals": report.totals,
     });
     let serialized = serde_json::to_string_pretty(&document).unwrap();

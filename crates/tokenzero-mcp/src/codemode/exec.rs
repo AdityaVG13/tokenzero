@@ -3546,7 +3546,10 @@ fn exec_compact_inner(engine: &TokenZeroEngine, args: &[Value], aggressive: bool
             "content_aware"
         };
         let ref_id = stored.as_ref().map(|s| s.blob_ref.as_str()).unwrap_or("");
-        let mut value = json!({ "text": capsule.text, "status": "ok", "raw_tokens": raw_tokens, "visible_tokens": capsule.visible_tokens, "compression_strategy": strategy, "savings_pct": format!("{:.0}%", tokenzero_core::savings_ratio(raw_tokens, capsule.visible_tokens) * 100.0) });
+        // A compact call cannot know which bytes a later operation or turn will
+        // recover. Label this one-shot figure gross rather than presenting it
+        // as recovery-adjusted session savings.
+        let mut value = json!({ "text": capsule.text, "status": "ok", "raw_tokens": raw_tokens, "visible_tokens": capsule.visible_tokens, "compression_strategy": strategy, "gross_savings_pct": format!("{:.0}%", tokenzero_core::savings_ratio(raw_tokens, capsule.visible_tokens) * 100.0), "savings_scope": "initial_compaction_before_future_recovery" });
         if !ref_id.is_empty() {
             value["ref"] = json!(ref_id);
         }
@@ -3760,6 +3763,24 @@ mod accumulator_bounds {
         );
         assert!(outputs.entries.contains_key(&first));
         assert!(!outputs.entries.contains_key(&PathBuf::from("session-1")));
+    }
+
+    #[test]
+    fn compact_max_recovery_unaware_savings_are_labeled_gross() {
+        let payload = "decisive evidence ".repeat(2_000);
+        let plan = format!(
+            "return zero.compact_max({})",
+            serde_json::to_string(&payload).unwrap()
+        );
+        let result = execute_codemode(&plan);
+        assert_eq!(result.status, CodeModeStatus::Completed);
+        let value = result.value.expect("compact_max value");
+        assert!(value.get("gross_savings_pct").is_some(), "{value}");
+        assert!(value.get("savings_pct").is_none(), "{value}");
+        assert_eq!(
+            value.get("savings_scope").and_then(Value::as_str),
+            Some("initial_compaction_before_future_recovery")
+        );
     }
 
     #[test]

@@ -520,6 +520,8 @@ fn codemode_structured(
             "bytes_materialized": result.telemetry.bytes_materialized,
             "raw_tokens": result.telemetry.raw_tokens,
             "visible_tokens": result.telemetry.visible_tokens,
+            "recovery_tokens": result.telemetry.recovery_tokens,
+            "recovery_adjusted_savings_pct": result.telemetry.recovery_adjusted_savings_pct,
             "measurement_coverage_pct": result.telemetry.measurement_coverage_pct,
         }),
     );
@@ -1157,6 +1159,22 @@ mod result_surfaced_envelope_tests {
         assert_eq!(
             telemetry.pointer("/structuredContent/value/answer"),
             Some(&json!(42))
+        );
+    }
+
+    #[test]
+    fn codemode_structured_surfaces_recovery_adjusted_telemetry() {
+        let mut result = CodeModeResult::completed(json!({"answer": 42}), Vec::new(), 100, 20, 10);
+        result.telemetry.recovery_tokens = 40;
+        result.telemetry.recovery_adjusted_savings_pct = 40.0;
+        let structured = codemode_structured(&result, "ok", None, CodemodeEnvelope::V2);
+        assert_eq!(
+            structured.pointer("/telemetry/recovery_tokens"),
+            Some(&json!(40))
+        );
+        assert_eq!(
+            structured.pointer("/telemetry/recovery_adjusted_savings_pct"),
+            Some(&json!(40.0))
         );
     }
 }

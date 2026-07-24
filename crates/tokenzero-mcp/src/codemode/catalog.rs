@@ -72,7 +72,7 @@ const METHOD_CATALOG: &[MethodDef] = methods! {
     "zero.filter_lines", "zero", "Filter lines in a text value by substring match" =>
         "zero.filter_lines(source: { text: string } | string, pattern: string): Promise<{ text: string, lines: number, pattern: string }>";
     "zero.compact_max", "zero", "Max compression with guaranteed byte-exact recovery: content-type-aware aggressive compaction with tz:// ref" =>
-        "zero.compact_max(data: string | any): Promise<{ text: string, ref: string, raw_tokens: number, visible_tokens: number, compression_strategy: string, savings_pct: string }>";
+        "zero.compact_max(data: string | any): Promise<{ text: string, ref: string, raw_tokens: number, visible_tokens: number, compression_strategy: string, gross_savings_pct: string, savings_scope: string }>";
     "zero.count", "zero", "Count lines in a text value or items in an array without materializing extra payload" =>
         "zero.count(x: string | { text: string } | any[]): number";
     "zero.first", "zero", "Return the first line or array item, or the first n lines/items" =>
