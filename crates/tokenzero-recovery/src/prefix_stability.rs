@@ -6,6 +6,11 @@ use thiserror::Error;
 use tokenzero_core::{count_tokens, sha256_hex};
 
 pub const MAX_CACHE_BLOCKS_PER_TURN: usize = 15;
+/// The public-runtime estimator and provider tokenizers differ near cache
+/// floors. Requiring 5 estimator tokens for every 4 provider tokens is a
+/// conservative 25% boundary tolerance: warn early rather than claim caching.
+pub const ESTIMATOR_FLOOR_SAFETY_NUMERATOR: usize = 5;
+pub const ESTIMATOR_FLOOR_SAFETY_DENOMINATOR: usize = 4;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -22,6 +27,12 @@ impl CacheModelTier {
             Self::FableOrSonnet46 => 2_048,
             Self::OlderSonnet => 1_024,
         }
+    }
+
+    pub const fn min_cacheable_estimator_tokens(self) -> usize {
+        self.min_cacheable_tokens()
+            .saturating_mul(ESTIMATOR_FLOOR_SAFETY_NUMERATOR)
+            .div_ceil(ESTIMATOR_FLOOR_SAFETY_DENOMINATOR)
     }
 }
 
@@ -69,6 +80,7 @@ pub enum PrefixStabilityViolation {
 pub struct PrefixStabilityGuard {
     last_prefix: Option<String>,
     renders: HashMap<(String, String, String), String>,
+    prefix_observations: usize,
 }
 
 impl PrefixStabilityGuard {
@@ -95,8 +107,9 @@ impl PrefixStabilityGuard {
             }
         }
         self.last_prefix = Some(prefix.bytes.clone());
+        self.prefix_observations = self.prefix_observations.saturating_add(1);
         let observed_tokens = count_tokens(&prefix.bytes);
-        let required_tokens = model_tier.min_cacheable_tokens();
+        let required_tokens = model_tier.min_cacheable_estimator_tokens();
         Ok((observed_tokens < required_tokens).then_some(
             PrefixStabilityAlert::BelowCacheableFloor {
                 observed_tokens,
@@ -128,6 +141,10 @@ impl PrefixStabilityGuard {
             .entry(key)
             .or_insert_with(|| observation.rendered.to_owned());
         Ok(sha256_hex(observation.rendered))
+    }
+
+    pub fn observation_counts(&self) -> (usize, usize) {
+        (self.prefix_observations, self.renders.len())
     }
 }
 
@@ -161,6 +178,23 @@ mod tests {
             CacheModelTier::OlderSonnet,
         );
         assert_eq!(violation, Err(PrefixStabilityViolation::NonMonotonePrefix));
+    }
+
+    #[test]
+    fn golden_breakpoint_may_reset_to_a_non_extending_prefix() {
+        let mut guard = PrefixStabilityGuard::default();
+        guard
+            .observe_prefix(
+                &prefix("old provider prefix ".repeat(1_300), false, 1),
+                CacheModelTier::OlderSonnet,
+            )
+            .unwrap();
+        guard
+            .observe_prefix(
+                &prefix("replacement prefix ".repeat(1_300), true, 1),
+                CacheModelTier::OlderSonnet,
+            )
+            .expect("an explicit provider breakpoint permits a prefix reset");
     }
 
     #[test]
@@ -211,12 +245,13 @@ mod tests {
 
     #[test]
     fn golden_model_floors_alert_before_caching_silently_stops() {
-        for (tier, required) in [
-            (CacheModelTier::Opus, 4_096),
-            (CacheModelTier::FableOrSonnet46, 2_048),
-            (CacheModelTier::OlderSonnet, 1_024),
+        for (tier, provider_floor, required) in [
+            (CacheModelTier::Opus, 4_096, 5_120),
+            (CacheModelTier::FableOrSonnet46, 2_048, 2_560),
+            (CacheModelTier::OlderSonnet, 1_024, 1_280),
         ] {
-            assert_eq!(tier.min_cacheable_tokens(), required);
+            assert_eq!(tier.min_cacheable_tokens(), provider_floor);
+            assert_eq!(tier.min_cacheable_estimator_tokens(), required);
             let mut guard = PrefixStabilityGuard::default();
             let alert = guard
                 .observe_prefix(&prefix("too short".into(), true, 1), tier)

@@ -1,9 +1,13 @@
 //! Cache-safe materialized context views over the recovery timeline.
 
 use serde::{Deserialize, Serialize};
+use std::cell::RefCell;
 use std::collections::BTreeSet;
 use tokenzero_core::{ContentType, count_tokens, sha256_hex};
 
+use crate::prefix_stability::{
+    CacheModelTier, CacheablePrefix, PrefixStabilityGuard, RenderObservation,
+};
 use crate::{RecoveryError, RecoveryStore};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -55,10 +59,27 @@ pub struct ContextView {
     records: Vec<ContextRecord>,
     next_id: u64,
     resident_ids: BTreeSet<u64>,
+    prefix_guard: RefCell<PrefixStabilityGuard>,
+    cache_model_tier: CacheModelTier,
+    tokenizer_id: String,
 }
 
 impl ContextView {
     pub fn new(stable_prefix: impl Into<String>, config: ContextViewConfig) -> Self {
+        Self::new_with_cache_contract(
+            stable_prefix,
+            config,
+            CacheModelTier::OlderSonnet,
+            "estimator:tokenzero-core",
+        )
+    }
+
+    pub fn new_with_cache_contract(
+        stable_prefix: impl Into<String>,
+        config: ContextViewConfig,
+        cache_model_tier: CacheModelTier,
+        tokenizer_id: impl Into<String>,
+    ) -> Self {
         assert!(
             config.hot_tail_tokens <= config.working_set_tokens,
             "hot tail must fit inside the working-set budget"
@@ -69,6 +90,9 @@ impl ContextView {
             records: Vec::new(),
             next_id: 1,
             resident_ids: BTreeSet::new(),
+            prefix_guard: RefCell::new(PrefixStabilityGuard::default()),
+            cache_model_tier,
+            tokenizer_id: tokenizer_id.into(),
         }
     }
 
@@ -171,6 +195,35 @@ impl ContextView {
         let stable_prefix_sha256 = sha256_hex(&self.stable_prefix);
         let stable_prefix_tokens = count_tokens(&self.stable_prefix);
         let input_tokens = count_tokens(&rendered);
+        let source_identity = working_set
+            .iter()
+            .chain(hot_tail.iter())
+            .map(|record| record.ref_id.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        // ContextView emits no provider cache-control blocks; downstream
+        // provider adapters populate block attribution when they add markers.
+        let prefix = CacheablePrefix {
+            bytes: self.stable_prefix.clone(),
+            cache_breakpoint,
+            blocks_per_turn: Default::default(),
+        };
+        let mut guard = self.prefix_guard.borrow_mut();
+        let prefix_result = guard.observe_prefix(&prefix, self.cache_model_tier);
+        debug_assert!(
+            prefix_result.is_ok(),
+            "production ContextView prefix violated cache contract: {prefix_result:?}"
+        );
+        let render_result = guard.observe_render(RenderObservation {
+            content: &source_identity,
+            rendered: &rendered,
+            level: "context_projection",
+            tokenizer_id: &self.tokenizer_id,
+        });
+        debug_assert!(
+            render_result.is_ok(),
+            "production ContextView output violated deterministic-render contract: {render_result:?}"
+        );
         ContextProjection {
             rendered,
             stable_prefix: self.stable_prefix.clone(),
@@ -184,6 +237,11 @@ impl ContextView {
             as_of,
             cache_breakpoint,
         }
+    }
+
+    #[cfg(test)]
+    fn guard_observation_counts(&self) -> (usize, usize) {
+        self.prefix_guard.borrow().observation_counts()
     }
 }
 
@@ -272,6 +330,28 @@ mod tests {
         assert!(second.cache_breakpoint);
         assert_ne!(first.working_set_ids, second.working_set_ids);
         assert!(!second.evicted_ids.is_empty());
+    }
+
+    #[test]
+    fn production_projection_runs_through_prefix_guard() {
+        let dir = tempdir().unwrap();
+        let mut store = RecoveryStore::new(Some(dir.path().join("recovery-cache.json")));
+        let mut view = ContextView::new(
+            "stable ".repeat(1_500),
+            ContextViewConfig {
+                working_set_tokens: 256,
+                hot_tail_tokens: 64,
+            },
+        );
+        view.append(&mut store, 1, 1_000, "real renderer evidence")
+            .unwrap();
+
+        let projection = view.reproject_at_cache_breakpoint(None);
+        assert!(projection.rendered.contains("real renderer evidence"));
+        assert_eq!(view.guard_observation_counts(), (1, 1));
+        let replay = view.project(None);
+        assert_eq!(projection.rendered, replay.rendered);
+        assert_eq!(view.guard_observation_counts(), (2, 1));
     }
 
     #[test]
