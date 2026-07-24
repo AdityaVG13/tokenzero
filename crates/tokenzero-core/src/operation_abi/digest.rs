@@ -1,10 +1,9 @@
 //! Deterministic semantic contract digest.
 
 use serde_json::{Value, json};
-use sha2::{Digest, Sha256};
 
 use super::registry::all_operations;
-use super::schema::{canonical_json, normalize_schema, schema_fingerprint_hex};
+use super::schema::{normalize_schema, schema_fingerprint_hex};
 use super::types::SEMANTIC_CONTRACT_VERSION;
 
 /// Full contract manifest used as digest input.
@@ -60,25 +59,12 @@ pub fn contract_manifest() -> Value {
 /// (tokenzero-irx9.9 hot-path).
 pub fn contract_digest() -> [u8; 32] {
     static DIGEST: std::sync::OnceLock<[u8; 32]> = std::sync::OnceLock::new();
-    *DIGEST.get_or_init(|| {
-        let canonical = canonical_json(&contract_manifest());
-        let mut hasher = Sha256::new();
-        hasher.update(canonical.as_bytes());
-        hasher.finalize().into()
-    })
+    *DIGEST.get_or_init(|| zero_abi::contract_digest(&contract_manifest()))
 }
 
 /// Lowercase hex digest (64 chars). Deterministic across builds for the same registry.
 pub fn contract_digest_hex() -> String {
     static HEX: std::sync::OnceLock<String> = std::sync::OnceLock::new();
-    HEX.get_or_init(|| {
-        use crate::tokens::push_hex_byte;
-        let d = contract_digest();
-        let mut out = String::with_capacity(64);
-        for b in d {
-            push_hex_byte(&mut out, b);
-        }
-        out
-    })
-    .clone()
+    HEX.get_or_init(|| zero_abi::contract_digest_hex(&contract_manifest()))
+        .clone()
 }
