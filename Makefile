@@ -1,6 +1,6 @@
 SHELL := /bin/bash
 
-.PHONY: test readme-command-audit rust-test rust-verify rust-verify-report rust-release-build rust-proof package-check release-check irx9-gate perf-regression-gate cli-smoke doctor mcp-smoke mcp-soak shell-matrix install-smoke package-audit
+.PHONY: test readme-command-audit rust-test rust-verify rust-verify-report rust-release-build rust-codemode-build rust-proof package-check release-check irx9-gate perf-regression-gate cli-smoke doctor mcp-smoke mcp-soak shell-matrix install-smoke package-audit
 
 test: readme-command-audit rust-test
 
@@ -17,8 +17,16 @@ rust-verify:
 rust-verify-report:
 	@scripts/rust_verify.sh --robot --output-json results/current/rust_verify.json
 
+# CodeMode is a separate binary behind mutually-exclusive surface features:
+# a bare "cargo build --release" never produces it. This is THE command.
+rust-codemode-build:
+	@cargo build --release -p tokenzero --bin tokenzero-codemode --no-default-features --features surface-codemode
+	@test -x target/release/tokenzero-codemode || { echo "irx9: missing target/release/tokenzero-codemode"; exit 1; }
+	@if [ "$$(uname -s)" = "Darwin" ]; then 		file target/release/tokenzero-codemode | grep -q "$$(uname -m)" 		|| { echo "irx9: tokenzero-codemode is not native: $$(file target/release/tokenzero-codemode)"; exit 1; }; 	fi
+
 rust-release-build:
 	@cargo build --release -p tokenzero
+	@$(MAKE) --no-print-directory rust-codemode-build
 
 rust-proof: rust-verify rust-release-build mcp-smoke mcp-soak shell-matrix install-smoke package-audit
 
