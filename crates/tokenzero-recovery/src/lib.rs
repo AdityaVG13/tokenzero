@@ -363,9 +363,13 @@ pub enum ZeroRefFragment {
 }
 
 /// Parse a portable `(tz|fz|gz)://blob/<sha256>` ZeroRef v1 reference.
-/// Only full lowercase SHA-256 identities are accepted. `#Bstart-end` is a
-/// zero-based half-open byte range; `#Lstart-end` is a one-based inclusive
-/// line range. Legacy short IDs return [`ZeroRefError::LegacyAmbiguity`].
+/// Only full lowercase SHA-256 identities are accepted. Grammar is delegated
+/// to the shared zero-ref foundation crate, which also accepts the contract's
+/// legacy `#B<start>+<len>` alias; TokenZero's wider lenient fragment forms
+/// (`#L2-L5`, comma separators, single line values) remain accepted as a
+/// fallback. `#Bstart-end` is a zero-based half-open byte range;
+/// `#Lstart-end` is a one-based inclusive line range. Legacy short IDs
+/// return [`ZeroRefError::LegacyAmbiguity`].
 pub fn parse_zeroref_v1_blob(
     ref_id: &str,
     byte_length: Option<usize>,
@@ -378,37 +382,59 @@ pub fn parse_zeroref_v1_blob(
         return Err(ZeroRefError::Malformed);
     }
     if hash.len() != 64 {
+        // TokenZero-owned migration tier: short IDs fall through to the
+        // legacy same-store alias resolution, not a hard parse error.
         return Err(ZeroRefError::LegacyAmbiguity);
     }
-    if hash
-        .bytes()
-        .any(|byte| !byte.is_ascii_hexdigit() || byte.is_ascii_uppercase())
-    {
+    if !zero_ref::is_full_lower_hex(hash) {
         return Err(ZeroRefError::Malformed);
     }
     let fragment = fragment
-        .map(|fragment| {
-            let (kind, value) = match fragment.as_bytes().first() {
-                Some(&b'B') => ('B', &fragment[1..]),
-                Some(&b'L') => ('L', &fragment[1..]),
-                _ => return Err(ZeroRefError::Malformed),
-            };
-            let (start, end) = parse_fragment_bounds_core(value, kind, kind == 'L', kind == 'L')
-                .map_err(|_| ZeroRefError::Malformed)?;
-            match kind {
-                'B' if byte_length.is_none_or(|len| end <= len) => {
-                    Ok(ZeroRefFragment::Byte { start, end })
-                }
-                'L' => Ok(ZeroRefFragment::Line { start, end }),
-                _ => Err(ZeroRefError::Malformed),
-            }
-        })
+        .map(|frag| parse_portable_or_lenient_fragment(ref_id, frag))
         .transpose()?;
+    if let (Some(ZeroRefFragment::Byte { end, .. }), Some(len)) = (&fragment, byte_length) {
+        if *end > len {
+            return Err(ZeroRefError::Malformed);
+        }
+    }
     Ok(ZeroRefV1Blob {
         scheme: scheme.to_string(),
         hash: hash.to_string(),
         fragment,
     })
+}
+
+/// Strict shared-contract fragment grammar first (which includes the legacy
+/// `+` byte alias), then TokenZero's lenient forms as a fallback.
+fn parse_portable_or_lenient_fragment(
+    ref_id: &str,
+    fragment: &str,
+) -> Result<ZeroRefFragment, ZeroRefError> {
+    if let Ok(parsed) = zero_ref::ZeroRefV1::parse(ref_id) {
+        return match parsed.fragment {
+            zero_ref::ZeroFragment::Bytes { start, end } => Ok(ZeroRefFragment::Byte {
+                start: start as usize,
+                end: end as usize,
+            }),
+            zero_ref::ZeroFragment::Lines { start, end } => Ok(ZeroRefFragment::Line {
+                start: start as usize,
+                end: end as usize,
+            }),
+            zero_ref::ZeroFragment::None => Err(ZeroRefError::Malformed),
+        };
+    }
+    let (kind, value) = match fragment.as_bytes().first() {
+        Some(&b'B') => ('B', &fragment[1..]),
+        Some(&b'L') => ('L', &fragment[1..]),
+        _ => return Err(ZeroRefError::Malformed),
+    };
+    let (start, end) = parse_fragment_bounds_core(value, kind, kind == 'L', kind == 'L')
+        .map_err(|_| ZeroRefError::Malformed)?;
+    match kind {
+        'B' => Ok(ZeroRefFragment::Byte { start, end }),
+        'L' => Ok(ZeroRefFragment::Line { start, end }),
+        _ => Err(ZeroRefError::Malformed),
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

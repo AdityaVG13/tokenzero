@@ -2637,6 +2637,18 @@ fn zeroref_v1_legacy_short_ids_parsed_by_existing_parse_ref() {
 }
 
 #[test]
+fn zeroref_v1_accepts_legacy_plus_byte_alias() {
+    // Shared-contract conformance: the deprecated GraphZero #B<start>+<len>
+    // alias is accepted on input (normalized to half-open) and never emitted.
+    let input = format!("tz://blob/{FULL_HASH}#B4+6");
+    let parsed = parse_zeroref_v1_blob(&input, None).unwrap();
+    assert_eq!(
+        parsed.fragment,
+        Some(ZeroRefFragment::Byte { start: 4, end: 10 })
+    );
+}
+
+#[test]
 fn zeroref_v1_rejects_repeated_fragment_prefixes() {
     for fragment in ["BB0-1", "LL1-L2"] {
         let input = format!("tz://blob/{FULL_HASH}#{fragment}");
