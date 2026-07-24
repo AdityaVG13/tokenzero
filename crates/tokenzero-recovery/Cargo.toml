@@ -32,3 +32,7 @@ harness = false
 [[bench]]
 name = "context_view_replay"
 harness = false
+
+[[bench]]
+name = "cow_fork"
+harness = false

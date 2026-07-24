@@ -26,6 +26,7 @@ pub mod telemetry;
 
 pub mod boot;
 pub mod context_view;
+pub mod cow_fork;
 pub mod dst;
 pub mod embedded_store;
 pub mod entity_novelty;
@@ -916,6 +917,12 @@ impl RecoveryStore {
     ) -> Result<String, RecoveryError> {
         let ref_id = self.put_blob(text, content_type);
         self.persist_evicted(ref_id)
+    }
+
+    /// Stage exact bytes in the current recovery transaction. Callers batching
+    /// related blobs and indexes must finish with `persist_pending()`.
+    pub fn store_blob_deferred(&mut self, text: &str, content_type: ContentType) -> String {
+        self.put_blob(text, content_type)
     }
 
     /// Persist a blob as a pointer to an exact source-file line range.
