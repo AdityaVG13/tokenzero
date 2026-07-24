@@ -30,6 +30,7 @@ pub mod dst;
 pub mod embedded_store;
 pub mod entity_novelty;
 pub mod migration;
+pub mod prefix_stability;
 pub mod segment_store;
 #[cfg(test)]
 mod segment_store_tests;
