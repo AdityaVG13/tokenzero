@@ -25,6 +25,12 @@ TokenZero may omit payload text from the visible capsule only when one of these 
 
 Exact refs are not model-readable payloads. They are local handles. A response that only emits an exact ref has high visible savings, but honest evaluation must count any later `expand` output used by the agent.
 
+### Omission enforcement (RACC backport)
+
+Capsule emission validates this rule at runtime. Exact recovery evidence must be a visible `tz://` handle with a concrete byte, line, or symbol selector. Protected-anchor evidence must name a visible `[[anchor:...]]`. A capsule without either must set `mode: lossy`, provide non-empty `lossy_spans` whose entries declare `recovery_may_be_needed: true`, and name a stable `lossy_policy_id`. The visible text repeats the lossy declaration so that consumers which render only capsule text cannot silently discard the warning.
+
+The backport intentionally treats the omission declaration as a correctness floor: for an impossibly small token budget, the complete declaration may exceed the budget rather than degrade to unclassified text such as `omitted`.
+
 ## Public Objective
 
 TokenZero tracks:

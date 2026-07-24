@@ -37,13 +37,16 @@ pub fn enforce_token_budget_with_ref(
         return text.to_string();
     }
     let marker = recovery_ref.map_or_else(
-        || "... omitted by visible budget; exact refs available ...".to_string(),
+        || "[mode=lossy lossy_policy_id=tokenzero.visible-compression.v1 lossy_spans=[{description=omitted-bytes reason=visible-budget recovery_may_be_needed=true}]]".to_string(),
         |ref_id| format!("... omitted by visible budget; expand {ref_id} for the full output ..."),
     );
     let marker = marker.as_str();
     let marker_tokens = count_tokens(marker);
     if marker_tokens > max_visible_tokens {
-        return "omitted".to_string();
+        // The omission declaration is a correctness floor. It may exceed an
+        // impossibly small visible budget, but must never be replaced by an
+        // unclassified free-text omission.
+        return marker.to_string();
     }
     const SEPARATOR_TOKENS: usize = 1;
     let mut running: usize = 0;

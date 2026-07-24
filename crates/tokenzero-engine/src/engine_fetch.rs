@@ -207,6 +207,7 @@ impl TokenZeroEngine {
             mode,
             max_visible_tokens,
             &format!("fetch {}", zero_hit_label(url)),
+            Some(&stored.blob_ref),
             refs_complete,
         );
         let mut response = capsule_response!(

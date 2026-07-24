@@ -161,6 +161,7 @@ impl TokenZeroEngine {
             mode,
             max_visible_tokens,
             &format!("edit {}", path.display()),
+            None,
             refs_complete,
         );
         let exact_refs_available = !refs.is_empty();

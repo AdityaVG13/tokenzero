@@ -42,6 +42,7 @@ string_enum! {
         Dedupe => "dedupe",
         DiffAware => "diff-aware",
         Exact => "exact",
+        Lossy => "lossy",
         Hybrid => "hybrid",
         Critical => "critical",
         Fidelity => "fidelity",
@@ -59,6 +60,7 @@ impl std::str::FromStr for Mode {
             (&["dedupe"], Mode::Dedupe),
             (&["diff-aware", "diff_aware", "diffaware"], Mode::DiffAware),
             (&["exact"], Mode::Exact),
+            (&["lossy"], Mode::Lossy),
         ];
         MAP.iter()
             .find(|(aliases, _)| aliases.contains(&s))
@@ -72,7 +74,7 @@ impl Mode {
         match self {
             Self::Hybrid => Self::Auto,
             Self::Critical => Self::Diagnostic,
-            Self::Fidelity => Self::Structured,
+            Self::Fidelity | Self::Lossy => Self::Structured,
             other => other,
         }
     }
@@ -287,12 +289,134 @@ impl ToolResponse {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LossySpan {
+    pub description: String,
+    pub reason: String,
+    pub recovery_may_be_needed: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Capsule {
     pub text: String,
     pub raw_tokens: usize,
     pub visible_tokens: usize,
     pub omitted_lines: usize,
     pub mode: Mode,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub protected_anchors: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub exact_refs: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub lossy_spans: Vec<LossySpan>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lossy_policy_id: Option<String>,
+}
+
+impl Capsule {
+    /// Enforce RACC omission rule: transformed bytes require an exact selector,
+    /// a visible protected anchor, or an explicit lossy declaration.
+    pub fn validate_omission_rule(&self, original: &str) -> Result<(), String> {
+        let original = original.trim_end();
+        if original.is_empty() || self.text.contains(original) {
+            return Ok(());
+        }
+        if self
+            .protected_anchors
+            .iter()
+            .any(|anchor| !anchor.is_empty() && self.text.contains(&format!("[[anchor:{anchor}]]")))
+        {
+            return Ok(());
+        }
+        if self
+            .exact_refs
+            .iter()
+            .any(|reference| exact_ref_has_selector(reference) && self.text.contains(reference))
+        {
+            return Ok(());
+        }
+        let lossy_declared = self.mode == Mode::Lossy
+            && self
+                .lossy_policy_id
+                .as_ref()
+                .is_some_and(|id| !id.is_empty())
+            && !self.lossy_spans.is_empty()
+            && self.lossy_spans.iter().all(|span| {
+                !span.description.is_empty()
+                    && !span.reason.is_empty()
+                    && span.recovery_may_be_needed
+            })
+            && self.text.contains("mode=lossy")
+            && self.text.contains("lossy_policy_id=");
+        lossy_declared.then_some(()).ok_or_else(|| {
+            "capsule omitted bytes without a protected anchor, exact tz:// selector, or explicit lossy declaration".to_string()
+        })
+    }
+}
+
+fn exact_ref_has_selector(reference: &str) -> bool {
+    let Some((base, selector)) = reference.split_once('#') else {
+        return false;
+    };
+    if !base.starts_with("tz://") || selector.is_empty() {
+        return false;
+    }
+    if let Some(bytes) = selector.strip_prefix('B') {
+        return bytes.split_once('-').is_some_and(|(start, len)| {
+            start.parse::<usize>().is_ok() && len.parse::<usize>().is_ok()
+        });
+    }
+    if let Some(lines) = selector.strip_prefix('L') {
+        return lines.split_once("-L").is_some_and(|(start, end)| {
+            start.parse::<usize>().is_ok() && end.parse::<usize>().is_ok()
+        });
+    }
+    selector
+        .strip_prefix("symbol=")
+        .is_some_and(|symbol| !symbol.is_empty())
+}
+
+fn exact_recovery_ref(reference: &str, byte_len: usize) -> Option<String> {
+    reference.starts_with("tz://").then(|| {
+        if reference.contains('#') {
+            reference.to_string()
+        } else {
+            format!("{reference}#B0-{byte_len}")
+        }
+    })
+}
+
+fn finalize_capsule_omission(
+    mut capsule: Capsule,
+    original: &str,
+    max_visible_tokens: usize,
+    exact_ref: Option<String>,
+) -> Capsule {
+    let original_trimmed = original.trim_end();
+    let omitted = !original_trimmed.is_empty() && !capsule.text.contains(original_trimmed);
+    if omitted {
+        if let Some(reference) = exact_ref.filter(|value| exact_ref_has_selector(value)) {
+            capsule.exact_refs.push(reference);
+        } else {
+            capsule.mode = Mode::Lossy;
+            capsule.lossy_policy_id = Some("tokenzero.visible-compression.v1".to_string());
+            capsule.lossy_spans.push(LossySpan {
+                description: "bytes omitted from the visible capsule".to_string(),
+                reason: "visible token budget or selected compression policy".to_string(),
+                recovery_may_be_needed: true,
+            });
+            let declaration = "[mode=lossy lossy_policy_id=tokenzero.visible-compression.v1 lossy_spans=[{description=omitted-bytes reason=visible-budget recovery_may_be_needed=true}]]";
+            if !capsule.text.contains("mode=lossy") {
+                capsule.text.push('\n');
+                capsule.text.push_str(declaration);
+            }
+            capsule.text = enforce_token_budget_with_ref(&capsule.text, max_visible_tokens, None);
+            capsule.visible_tokens = count_tokens(&capsule.text);
+        }
+    }
+    capsule
+        .validate_omission_rule(original)
+        .expect("capsule emission violated the omission rule");
+    capsule
 }
 
 pub fn make_capsule(
@@ -325,6 +449,7 @@ pub fn make_capsule_with_recovery_ref(
     recovery_ref: Option<&str>,
 ) -> Capsule {
     let prefix = capsule_prefix(label, max_tokens, raw_tokens);
+    let exact_ref = recovery_ref.and_then(|reference| exact_recovery_ref(reference, text.len()));
     let policy = mode.effective_policy();
     let mut visible = match policy {
         Mode::Exact => format!("{prefix}[exact payload stored; use expand for raw bytes]"),
@@ -343,7 +468,7 @@ pub fn make_capsule_with_recovery_ref(
         _ => unreachable!(),
     };
     if policy != Mode::Passthrough {
-        visible = enforce_token_budget_with_ref(&visible, max_tokens, recovery_ref);
+        visible = enforce_token_budget_with_ref(&visible, max_tokens, exact_ref.as_deref());
     }
     let mut visible_tokens = count_tokens(&visible);
     if policy != Mode::Exact
@@ -357,13 +482,22 @@ pub fn make_capsule_with_recovery_ref(
             visible = fallback;
         }
     }
-    Capsule {
-        visible_tokens,
-        raw_tokens,
-        omitted_lines: text.lines().count().saturating_sub(visible.lines().count()),
-        text: visible,
-        mode,
-    }
+    finalize_capsule_omission(
+        Capsule {
+            visible_tokens,
+            raw_tokens,
+            omitted_lines: text.lines().count().saturating_sub(visible.lines().count()),
+            text: visible,
+            mode,
+            protected_anchors: Vec::new(),
+            exact_refs: Vec::new(),
+            lossy_spans: Vec::new(),
+            lossy_policy_id: None,
+        },
+        text,
+        max_tokens,
+        exact_ref,
+    )
 }
 
 /// Creates a domain-aware summary with byte-exact recovery via `recovery_ref`.
@@ -387,6 +521,7 @@ pub fn make_capsule_content_aware(
         );
     }
     let prefix = capsule_prefix(label, max_visible_tokens, raw_tokens);
+    let exact_ref = recovery_ref.and_then(|reference| exact_recovery_ref(reference, text.len()));
     let budget = if aggressive {
         max_visible_tokens / 3
     } else {
@@ -400,15 +535,24 @@ pub fn make_capsule_content_aware(
         ContentType::SearchResult => summarize_lines(text, 20, 5, &prefix),
         _ => summarize_lines(text, 18, 12, &prefix),
     };
-    let visible = enforce_token_budget_with_ref(&visible, max_visible_tokens, recovery_ref);
+    let visible = enforce_token_budget_with_ref(&visible, max_visible_tokens, exact_ref.as_deref());
     let visible_tokens = count_tokens(&visible);
-    Capsule {
-        text: visible,
-        raw_tokens,
-        visible_tokens,
-        omitted_lines: text.lines().count().saturating_sub(visible_tokens),
-        mode: if aggressive { Mode::Exact } else { Mode::Auto },
-    }
+    finalize_capsule_omission(
+        Capsule {
+            omitted_lines: text.lines().count().saturating_sub(visible.lines().count()),
+            text: visible,
+            raw_tokens,
+            visible_tokens,
+            mode: if aggressive { Mode::Exact } else { Mode::Auto },
+            protected_anchors: Vec::new(),
+            exact_refs: Vec::new(),
+            lossy_spans: Vec::new(),
+            lossy_policy_id: None,
+        },
+        text,
+        max_visible_tokens,
+        exact_ref,
+    )
 }
 
 /// Summarize code: show first N lines (imports/signatures) + last M lines.

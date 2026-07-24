@@ -45,7 +45,8 @@ impl TokenZeroEngine {
                     stats,
                     matches,
                 );
-                if stats.truncated_by_results || stats.truncated_by_visit || stats.truncated_by_wall {
+                if stats.truncated_by_results || stats.truncated_by_visit || stats.truncated_by_wall
+                {
                     break;
                 }
             }
@@ -150,6 +151,7 @@ impl TokenZeroEngine {
             mode,
             max_visible_tokens,
             &format!("{tool} {query}"),
+            Some(&stored.blob_ref),
             refs_complete,
         );
         let full_bytes = capsule.text.len();
@@ -444,6 +446,7 @@ impl TokenZeroEngine {
             mode,
             max_visible_tokens,
             &format!("{tool} {key}"),
+            Some(&stored.blob_ref),
             persisted.refs_complete,
         );
         let mut response = success_response(

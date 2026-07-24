@@ -161,10 +161,8 @@ impl TokenZeroEngine {
             for (full_ref, alias) in &aliases {
                 visible.text = visible.text.replace(full_ref, alias);
             }
-            visible.text = crate::text_aliases::alias_repeated_paths_and_symbols(
-                &mut store,
-                &visible.text,
-            );
+            visible.text =
+                crate::text_aliases::alias_repeated_paths_and_symbols(&mut store, &visible.text);
         }
         for record in &mut response.refs {
             if let Some((_, alias)) = aliases
@@ -255,10 +253,18 @@ pub fn recoverable_capsule(
     mode: Mode,
     max_visible_tokens: usize,
     label: &str,
+    recovery_ref: Option<&str>,
     refs_complete: bool,
 ) -> tokenzero_core::Capsule {
     if refs_complete {
-        make_capsule_with_raw_tokens(rendered, raw_tokens, mode, max_visible_tokens, Some(label))
+        tokenzero_core::make_capsule_with_recovery_ref(
+            rendered,
+            raw_tokens,
+            mode,
+            max_visible_tokens,
+            Some(label),
+            recovery_ref,
+        )
     } else {
         tokenzero_core::Capsule {
             text: fallback.trim_end().to_string(),
@@ -266,6 +272,10 @@ pub fn recoverable_capsule(
             visible_tokens: raw_tokens,
             omitted_lines: 0,
             mode,
+            protected_anchors: Vec::new(),
+            exact_refs: Vec::new(),
+            lossy_spans: Vec::new(),
+            lossy_policy_id: None,
         }
     }
 }

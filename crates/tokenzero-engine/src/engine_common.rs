@@ -3,15 +3,16 @@ use super::*;
 macro_rules! capsule_response {
     ($tool:expr, $mode:expr, $capsule:expr, $refs:expr, $recovery_tokens:expr) => {{
         let refs = $refs;
+        let capsule = $capsule;
         let exact_ref_tokens = exact_ref_token_count(&refs);
         success_response(
             $tool,
-            $mode,
-            $capsule.text,
+            capsule.mode,
+            capsule.text,
             refs,
             (
-                $capsule.raw_tokens,
-                $capsule.visible_tokens,
+                capsule.raw_tokens,
+                capsule.visible_tokens,
                 $recovery_tokens,
                 Some(exact_ref_tokens),
             ),

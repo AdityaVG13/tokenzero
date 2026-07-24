@@ -137,9 +137,8 @@ impl TokenZeroEngine {
             let line_count = text.lines().count();
             if paths.len() == 1 {
                 let anchor_start = source_start.unwrap_or(1);
-                let anchor_end = source_end.unwrap_or_else(|| {
-                    anchor_start.saturating_add(line_count.saturating_sub(1))
-                });
+                let anchor_end = source_end
+                    .unwrap_or_else(|| anchor_start.saturating_add(line_count.saturating_sub(1)));
                 working_set_anchor = Some(tokenzero_recovery::working_set::SpanAnchor {
                     path: path.clone(),
                     symbol: None,
@@ -173,6 +172,10 @@ impl TokenZeroEngine {
                     visible_tokens: stored.raw_tokens,
                     omitted_lines: 0,
                     mode,
+                    protected_anchors: Vec::new(),
+                    exact_refs: Vec::new(),
+                    lossy_spans: Vec::new(),
+                    lossy_policy_id: None,
                 }
             } else {
                 tokenzero_core::make_capsule_with_recovery_ref(
