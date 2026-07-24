@@ -214,6 +214,14 @@ fn expand_applies_byte_and_line_fragments_after_whole_object_verify() {
 }
 
 #[test]
+fn expand_accepts_legacy_plus_byte_alias() {
+    let mut store = TokenZeroStore::in_memory();
+    let ref_id = store.put(b"abcdef", None).unwrap();
+    let alias = format!("{ref_id}#B1+3");
+    assert_eq!(store.expand(&alias).unwrap(), b"bcd");
+}
+
+#[test]
 fn expand_fragment_out_of_range_is_typed_error() {
     let mut store = TokenZeroStore::in_memory();
     let ref_id = store.put(b"short", None).unwrap();

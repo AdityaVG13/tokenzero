@@ -413,12 +413,12 @@ fn parse_portable_or_lenient_fragment(
     if let Ok(parsed) = zero_ref::ZeroRefV1::parse(ref_id) {
         return match parsed.fragment {
             zero_ref::ZeroFragment::Bytes { start, end } => Ok(ZeroRefFragment::Byte {
-                start: start as usize,
-                end: end as usize,
+                start: usize::try_from(start).map_err(|_| ZeroRefError::Malformed)?,
+                end: usize::try_from(end).map_err(|_| ZeroRefError::Malformed)?,
             }),
             zero_ref::ZeroFragment::Lines { start, end } => Ok(ZeroRefFragment::Line {
-                start: start as usize,
-                end: end as usize,
+                start: usize::try_from(start).map_err(|_| ZeroRefError::Malformed)?,
+                end: usize::try_from(end).map_err(|_| ZeroRefError::Malformed)?,
             }),
             zero_ref::ZeroFragment::None => Err(ZeroRefError::Malformed),
         };

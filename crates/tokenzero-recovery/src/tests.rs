@@ -2648,6 +2648,16 @@ fn zeroref_v1_accepts_legacy_plus_byte_alias() {
     );
 }
 
+#[cfg(target_pointer_width = "32")]
+#[test]
+fn zeroref_v1_rejects_fragment_bounds_that_overflow_usize() {
+    let input = format!("tz://blob/{FULL_HASH}#B4294967296-4294967297");
+    assert_eq!(
+        parse_zeroref_v1_blob(&input, None).unwrap_err(),
+        ZeroRefError::Malformed
+    );
+}
+
 #[test]
 fn zeroref_v1_rejects_repeated_fragment_prefixes() {
     for fragment in ["BB0-1", "LL1-L2"] {
