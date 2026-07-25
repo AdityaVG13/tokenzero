@@ -243,6 +243,10 @@ pub(crate) fn run_security_privacy_audit(
             raw_tokens: 8,
             visible_tokens: 2,
             recovery_tokens: 1,
+            // Fixed audit counts, not a real tokenizer's output, so this
+            // declares the estimator rather than claiming a tokenizer identity
+            // it never used.
+            tokenizer_id: "estimator:tokenzero-core".into(),
             task_lossless: true,
             cache_hit: false,
             retry_count: 0,
