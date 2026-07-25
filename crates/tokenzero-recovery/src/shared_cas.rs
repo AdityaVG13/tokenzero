@@ -8,6 +8,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 use thiserror::Error;
@@ -75,6 +76,11 @@ impl SharedCas {
     }
 
     pub fn publish(&self, bytes: &[u8]) -> Result<String, SharedCasError> {
+        // Held shared across hash -> dest check -> rename so a concurrent sweep
+        // cannot unlink this object between the moment we observe/create it and
+        // the moment the caller can reference it (zerostack-rhd). Publishers do
+        // not exclude each other; only an active sweep does.
+        let _coord = GcCoordLock::acquire_shared(&self.root)?;
         let full_hash = content_sha256_hex(bytes);
         let path = self.object_path(&full_hash);
         if path.exists() {
@@ -175,7 +181,14 @@ impl SharedCas {
         Ok(objects)
     }
 
-    pub fn remove_object(&self, full_hash: &str) -> Result<(), SharedCasError> {
+    /// Unlink an object. Requires the caller to prove it holds the exclusive
+    /// coordinator lock, so a sweeper cannot forget it (zerostack-rhd). The
+    /// token is otherwise unused.
+    pub fn remove_object(
+        &self,
+        full_hash: &str,
+        _coord: &GcCoordLock,
+    ) -> Result<(), SharedCasError> {
         self.validate_hash(full_hash)?;
         let path = self.object_path(full_hash);
         if !self.object_path_chain_is_safe(full_hash) {
@@ -415,7 +428,10 @@ pub struct DryRunReport {
     pub objects: Vec<GcCandidate>,
 }
 
-#[derive(Debug, Clone)]
+/// See [`GcConfig::before_unlink`].
+pub type BeforeUnlinkHook = Arc<dyn Fn(&str) + Send + Sync>;
+
+#[derive(Clone)]
 pub struct GcConfig {
     pub run_id: String,
     pub grace_seconds: u64,
@@ -425,6 +441,26 @@ pub struct GcConfig {
     pub fault_after_deletes: Option<usize>,
     /// Maximum completed JSON reports retained in `gc/reports`.
     pub report_limit: usize,
+    /// Test seam: invoked with each hash immediately before it is unlinked,
+    /// while the exclusive coordinator lock is held. Lets a regression pin the
+    /// sweeper at the exact TOCTOU window without relying on timing
+    /// (zerostack-rhd). Always `None` in production.
+    pub before_unlink: Option<BeforeUnlinkHook>,
+}
+
+impl std::fmt::Debug for GcConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("GcConfig")
+            .field("run_id", &self.run_id)
+            .field("grace_seconds", &self.grace_seconds)
+            .field("min_age_seconds", &self.min_age_seconds)
+            .field("apply", &self.apply)
+            .field("now", &self.now)
+            .field("fault_after_deletes", &self.fault_after_deletes)
+            .field("report_limit", &self.report_limit)
+            .field("before_unlink", &self.before_unlink.is_some())
+            .finish()
+    }
 }
 
 impl Default for GcConfig {
@@ -437,6 +473,7 @@ impl Default for GcConfig {
             now: SystemTime::now(),
             fault_after_deletes: None,
             report_limit: DEFAULT_GC_REPORT_LIMIT,
+            before_unlink: None,
         }
     }
 }
@@ -1072,22 +1109,45 @@ fn read_sweep_progress(path: &Path) -> Result<SweepProgress, GcError> {
     Ok(progress)
 }
 
-struct GcCoordLock {
+/// Advisory lock at `<store_root>/gc/coordinator.lock` shared by publishers and
+/// the sweeper (zerostack-rhd).
+///
+/// Publishers take it shared across hash -> dest check -> rename, so concurrent
+/// publishes still proceed in parallel. The sweeper takes it exclusive across
+/// mark -> report -> recheck -> unlink, which is what makes "no live reference"
+/// stay true through the unlink instead of going stale between the recheck and
+/// the `remove_file`. There is exactly one lock, so there is no lock order to
+/// get wrong, and the kernel drops it if a holder dies.
+pub struct GcCoordLock {
     file: File,
 }
 
 impl GcCoordLock {
-    fn acquire(store_root: &Path) -> Result<Self, GcError> {
+    fn open_lock_file(store_root: &Path) -> Result<File, io::Error> {
         let path = store_root.join("gc").join("coordinator.lock");
         fs::create_dir_all(path.parent().unwrap_or(store_root))?;
-        let file = OpenOptions::new()
+        // Never truncate: truncation races with a concurrent holder's open and
+        // the file's contents are irrelevant, only its identity as a lock.
+        OpenOptions::new()
             .create(true)
-            .truncate(true)
+            .truncate(false)
             .read(true)
             .write(true)
             .open(&path)
-            .map_err(GcError::Io)?;
+    }
+
+    /// Exclusive: blocks publishers and other sweepers. Used by the sweep and by
+    /// the protection-record publishers.
+    fn acquire(store_root: &Path) -> Result<Self, GcError> {
+        let file = Self::open_lock_file(store_root).map_err(GcError::Io)?;
         FileExt::lock(&file).map_err(GcError::Io)?;
+        Ok(Self { file })
+    }
+
+    /// Shared: excluded by an in-progress sweep, but not by other publishers.
+    fn acquire_shared(store_root: &Path) -> Result<Self, io::Error> {
+        let file = Self::open_lock_file(store_root)?;
+        FileExt::lock_shared(&file)?;
         Ok(Self { file })
     }
 }
@@ -1131,7 +1191,7 @@ fn prune_gc_reports(store_root: &Path, keep: usize, current: &Path) -> Result<()
 
 pub fn run_gc(store_root: &Path, config: &GcConfig) -> Result<DryRunReport, GcError> {
     validate_run_id(&config.run_id)?;
-    let _coord = GcCoordLock::acquire(store_root)?;
+    let coord = GcCoordLock::acquire(store_root)?;
     let cas = SharedCas::new(store_root.to_path_buf());
     let store_root_key = store_root.to_string_lossy().into_owned();
     let progress_path = gc_join(
@@ -1214,7 +1274,10 @@ pub fn run_gc(store_root: &Path, config: &GcConfig) -> Result<DryRunReport, GcEr
         if re_state.live.contains_key(hash) || re_state.uncertain {
             continue;
         }
-        cas.remove_object(hash)?;
+        if let Some(hook) = config.before_unlink.as_ref() {
+            hook(hash);
+        }
+        cas.remove_object(hash, &coord)?;
         deleted.push(hash.clone());
         persist(&deleted)?;
         if config.fault_after_deletes == Some(deleted.len()) {
