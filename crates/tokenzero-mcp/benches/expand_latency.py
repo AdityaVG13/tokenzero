@@ -23,7 +23,7 @@ from typing import Any
 REPO = Path(__file__).resolve().parents[3]
 import sys
 sys.path.insert(0, str(REPO / "benchmarks"))
-from bench_common import find_ref as _find_ref, percentile, summary as _summary
+from bench_common import find_ref as _find_ref, percentile, portable_path, summary as _summary
 summary = lambda values: _summary(values, include_p99=True)
 find_ref = lambda value: _find_ref(value, pattern=REF_RE.pattern)
 BIN = Path(os.environ.get("TOKENZERO_EXPAND_BENCH_BIN", REPO / "target/debug/tokenzero"))
@@ -254,7 +254,7 @@ def run(
             "machine": platform.machine(),
             "python": platform.python_version(),
             "commit": commit,
-            "binary_path": str(BIN),
+            "binary_path": portable_path(BIN, REPO),
             "binary_mtime_ns": BIN.stat().st_mtime_ns,
             "binary_sha256": hashlib.sha256(BIN.read_bytes()).hexdigest(),
             "samples_by_size": {item["size_class"]: item["samples_n"] for item in results},

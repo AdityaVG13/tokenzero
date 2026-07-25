@@ -4,6 +4,10 @@ from __future__ import annotations
 import argparse, hashlib, json; import os, platform, random, shutil, string; import subprocess, sys, tempfile, time; from contextlib import contextmanager
 from datetime import datetime, timezone; from pathlib import Path; GUARD = Path('/tmp/zerostack-heavy-process.guard'); RECOVERY_CACHE = Path.home() / '.tokenzero' / 'recovery-cache.json'
 REPO = Path(__file__).resolve().parents[1]
+try:
+    from benchmarks.bench_common import portable_argv, portable_command, portable_path, portable_text, portable_tree
+except ModuleNotFoundError:
+    from bench_common import portable_argv, portable_command, portable_path, portable_text, portable_tree
 
 def bin_path(profile='release', env_var='TOKENZERO_BIN', required=True):
     candidates = []
@@ -59,11 +63,8 @@ def run_json(argv, cwd=None, check=True):
     return {'argv': list(map(str, argv)), 'elapsed_ms': round((time.perf_counter() - started) * 1000, 3), 'stdout_bytes': len(proc.stdout.encode()), 'raw_json': raw, 'stderr': proc.stderr}
 
 def capture_environment(binary, harness_command, extra=None):
-    try:
-        binary_name = str(binary.relative_to(REPO))
-    except ValueError:
-        binary_name = str(binary)
-    exists = binary.is_file(); result = {'generated_at_utc': datetime.now(timezone.utc).isoformat().replace('+00:00', 'Z'), 'harness_command': harness_command, 'cwd': str(REPO), 'os': platform.platform(), 'machine': platform.machine(), 'python': platform.python_version(), 'commit': git_commit(), 'binary': binary_name, 'binary_sha256': sha256(binary) if exists else '', 'binary_mtime_ns': binary.stat().st_mtime_ns if exists else 0, 'cargo_build_jobs': os.environ.get('CARGO_BUILD_JOBS'), 'cargo_incremental': os.environ.get('CARGO_INCREMENTAL')}; result.update(extra or {})
+    binary_name = portable_path(binary, REPO)
+    exists = binary.is_file(); result = {'generated_at_utc': datetime.now(timezone.utc).isoformat().replace('+00:00', 'Z'), 'harness_command': harness_command, 'cwd': portable_path(REPO, REPO), 'os': platform.platform(), 'machine': platform.machine(), 'python': platform.python_version(), 'commit': git_commit(), 'binary': binary_name, 'binary_sha256': sha256(binary) if exists else '', 'binary_mtime_ns': binary.stat().st_mtime_ns if exists else 0, 'cargo_build_jobs': os.environ.get('CARGO_BUILD_JOBS'), 'cargo_incremental': os.environ.get('CARGO_INCREMENTAL')}; result.update(extra or {})
     return result
 
 def _clear_guard():

@@ -3,12 +3,12 @@
   "environment": {
     "generated_at_utc": "2026-07-23T08:42:09.898209Z",
     "harness_command": "python3 benchmarks/boot-cost.py --label pr29-matched-base",
-    "cwd": "/Users/aditya/AI/TokenZero",
+    "cwd": ".",
     "os": "macOS-26.5-arm64-arm-64bit-Mach-O",
     "machine": "arm64",
     "python": "3.14.6",
     "commit": "c7592c408881a32d1e0960c02f55dd297b84ce2a",
-    "binary": "/tmp/tokenzero-pr29-baseline/target/release/tokenzero",
+    "binary": "<tmp>/tokenzero-pr29-baseline/target/release/tokenzero",
     "binary_sha256": "f3742dfb12d328857853419131ebdc5c5783ff67ea1409e64cfdeb681304fb7b",
     "binary_mtime_ns": 1784795343189646865,
     "cargo_build_jobs": null,
@@ -18,7 +18,7 @@
   "corpora": [
     {
       "label": "repository",
-      "root": "/Users/aditya/AI/TokenZero",
+      "root": ".",
       "file_count": 12160,
       "file_count_excludes": [
         ".git",
@@ -27,7 +27,7 @@
       ],
       "metadata_initialization": {
         "argv": [
-          "/tmp/tokenzero-pr29-baseline/target/release/tokenzero",
+          "<tmp>/tokenzero-pr29-baseline/target/release/tokenzero",
           "session-open",
           "--root",
           "<root>",
@@ -38,13 +38,13 @@
         "elapsed_ms": 16.905,
         "stdout_bytes": 687,
         "raw_json": {
-          "delta_path": "/var/folders/tw/wpjfrh5s60j_yldw1nv2k4300000gn/T/tokenzero-boot-cost-tmnk79ps/repository-cache/boot-session-delta.json",
+          "delta_path": "<tmp>/tokenzero-boot-cost-tmnk79ps/repository-cache/boot-session-delta.json",
           "delta_ref": "000000000000",
           "demand_paging": {
             "working_set_loaded": false
           },
           "manifest_id": "963b9f4a0319",
-          "manifest_path": "/var/folders/tw/wpjfrh5s60j_yldw1nv2k4300000gn/T/tokenzero-boot-cost-tmnk79ps/repository-cache/boot-manifest.json",
+          "manifest_path": "<tmp>/tokenzero-boot-cost-tmnk79ps/repository-cache/boot-manifest.json",
           "mode": "manifest_delta",
           "schema": "tokenzero.session-boot.v1",
           "telemetry": {
@@ -60,7 +60,7 @@
       },
       "recorded_manifest_delta_boot": {
         "argv": [
-          "/tmp/tokenzero-pr29-baseline/target/release/tokenzero",
+          "<tmp>/tokenzero-pr29-baseline/target/release/tokenzero",
           "session-open",
           "--root",
           "<root>",
@@ -71,13 +71,13 @@
         "elapsed_ms": 17.088,
         "stdout_bytes": 687,
         "raw_json": {
-          "delta_path": "/var/folders/tw/wpjfrh5s60j_yldw1nv2k4300000gn/T/tokenzero-boot-cost-tmnk79ps/repository-cache/boot-session-delta.json",
+          "delta_path": "<tmp>/tokenzero-boot-cost-tmnk79ps/repository-cache/boot-session-delta.json",
           "delta_ref": "000000000000",
           "demand_paging": {
             "working_set_loaded": false
           },
           "manifest_id": "963b9f4a0319",
-          "manifest_path": "/var/folders/tw/wpjfrh5s60j_yldw1nv2k4300000gn/T/tokenzero-boot-cost-tmnk79ps/repository-cache/boot-manifest.json",
+          "manifest_path": "<tmp>/tokenzero-boot-cost-tmnk79ps/repository-cache/boot-manifest.json",
           "mode": "manifest_delta",
           "schema": "tokenzero.session-boot.v1",
           "telemetry": {
@@ -103,7 +103,7 @@
     },
     {
       "label": "synthetic-23k",
-      "root": "/var/folders/tw/wpjfrh5s60j_yldw1nv2k4300000gn/T/tokenzero-boot-cost-tmnk79ps/synthetic-23k",
+      "root": "<tmp>/tokenzero-boot-cost-tmnk79ps/synthetic-23k",
       "file_count": 23000,
       "file_count_excludes": [
         ".git",
@@ -112,7 +112,7 @@
       ],
       "metadata_initialization": {
         "argv": [
-          "/tmp/tokenzero-pr29-baseline/target/release/tokenzero",
+          "<tmp>/tokenzero-pr29-baseline/target/release/tokenzero",
           "session-open",
           "--root",
           "<root>",
@@ -123,13 +123,13 @@
         "elapsed_ms": 5.604,
         "stdout_bytes": 693,
         "raw_json": {
-          "delta_path": "/var/folders/tw/wpjfrh5s60j_yldw1nv2k4300000gn/T/tokenzero-boot-cost-tmnk79ps/synthetic-23k-cache/boot-session-delta.json",
+          "delta_path": "<tmp>/tokenzero-boot-cost-tmnk79ps/synthetic-23k-cache/boot-session-delta.json",
           "delta_ref": "000000000000",
           "demand_paging": {
             "working_set_loaded": false
           },
           "manifest_id": "0ca3d46f2c33",
-          "manifest_path": "/var/folders/tw/wpjfrh5s60j_yldw1nv2k4300000gn/T/tokenzero-boot-cost-tmnk79ps/synthetic-23k-cache/boot-manifest.json",
+          "manifest_path": "<tmp>/tokenzero-boot-cost-tmnk79ps/synthetic-23k-cache/boot-manifest.json",
           "mode": "manifest_delta",
           "schema": "tokenzero.session-boot.v1",
           "telemetry": {
@@ -145,7 +145,7 @@
       },
       "recorded_manifest_delta_boot": {
         "argv": [
-          "/tmp/tokenzero-pr29-baseline/target/release/tokenzero",
+          "<tmp>/tokenzero-pr29-baseline/target/release/tokenzero",
           "session-open",
           "--root",
           "<root>",
@@ -156,13 +156,13 @@
         "elapsed_ms": 24.392,
         "stdout_bytes": 693,
         "raw_json": {
-          "delta_path": "/var/folders/tw/wpjfrh5s60j_yldw1nv2k4300000gn/T/tokenzero-boot-cost-tmnk79ps/synthetic-23k-cache/boot-session-delta.json",
+          "delta_path": "<tmp>/tokenzero-boot-cost-tmnk79ps/synthetic-23k-cache/boot-session-delta.json",
           "delta_ref": "000000000000",
           "demand_paging": {
             "working_set_loaded": false
           },
           "manifest_id": "0ca3d46f2c33",
-          "manifest_path": "/var/folders/tw/wpjfrh5s60j_yldw1nv2k4300000gn/T/tokenzero-boot-cost-tmnk79ps/synthetic-23k-cache/boot-manifest.json",
+          "manifest_path": "<tmp>/tokenzero-boot-cost-tmnk79ps/synthetic-23k-cache/boot-manifest.json",
           "mode": "manifest_delta",
           "schema": "tokenzero.session-boot.v1",
           "telemetry": {
@@ -188,7 +188,7 @@
     },
     {
       "label": "synthetic-100k",
-      "root": "/var/folders/tw/wpjfrh5s60j_yldw1nv2k4300000gn/T/tokenzero-boot-cost-tmnk79ps/synthetic-100k",
+      "root": "<tmp>/tokenzero-boot-cost-tmnk79ps/synthetic-100k",
       "file_count": 100000,
       "file_count_excludes": [
         ".git",
@@ -197,7 +197,7 @@
       ],
       "metadata_initialization": {
         "argv": [
-          "/tmp/tokenzero-pr29-baseline/target/release/tokenzero",
+          "<tmp>/tokenzero-pr29-baseline/target/release/tokenzero",
           "session-open",
           "--root",
           "<root>",
@@ -208,13 +208,13 @@
         "elapsed_ms": 5.43,
         "stdout_bytes": 695,
         "raw_json": {
-          "delta_path": "/var/folders/tw/wpjfrh5s60j_yldw1nv2k4300000gn/T/tokenzero-boot-cost-tmnk79ps/synthetic-100k-cache/boot-session-delta.json",
+          "delta_path": "<tmp>/tokenzero-boot-cost-tmnk79ps/synthetic-100k-cache/boot-session-delta.json",
           "delta_ref": "000000000000",
           "demand_paging": {
             "working_set_loaded": false
           },
           "manifest_id": "190d413f022d",
-          "manifest_path": "/var/folders/tw/wpjfrh5s60j_yldw1nv2k4300000gn/T/tokenzero-boot-cost-tmnk79ps/synthetic-100k-cache/boot-manifest.json",
+          "manifest_path": "<tmp>/tokenzero-boot-cost-tmnk79ps/synthetic-100k-cache/boot-manifest.json",
           "mode": "manifest_delta",
           "schema": "tokenzero.session-boot.v1",
           "telemetry": {
@@ -230,7 +230,7 @@
       },
       "recorded_manifest_delta_boot": {
         "argv": [
-          "/tmp/tokenzero-pr29-baseline/target/release/tokenzero",
+          "<tmp>/tokenzero-pr29-baseline/target/release/tokenzero",
           "session-open",
           "--root",
           "<root>",
@@ -241,13 +241,13 @@
         "elapsed_ms": 20.085,
         "stdout_bytes": 695,
         "raw_json": {
-          "delta_path": "/var/folders/tw/wpjfrh5s60j_yldw1nv2k4300000gn/T/tokenzero-boot-cost-tmnk79ps/synthetic-100k-cache/boot-session-delta.json",
+          "delta_path": "<tmp>/tokenzero-boot-cost-tmnk79ps/synthetic-100k-cache/boot-session-delta.json",
           "delta_ref": "000000000000",
           "demand_paging": {
             "working_set_loaded": false
           },
           "manifest_id": "190d413f022d",
-          "manifest_path": "/var/folders/tw/wpjfrh5s60j_yldw1nv2k4300000gn/T/tokenzero-boot-cost-tmnk79ps/synthetic-100k-cache/boot-manifest.json",
+          "manifest_path": "<tmp>/tokenzero-boot-cost-tmnk79ps/synthetic-100k-cache/boot-manifest.json",
           "mode": "manifest_delta",
           "schema": "tokenzero.session-boot.v1",
           "telemetry": {

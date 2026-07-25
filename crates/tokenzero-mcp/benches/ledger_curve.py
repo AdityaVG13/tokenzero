@@ -14,7 +14,7 @@ from typing import Iterable
 REPO = Path(__file__).resolve().parents[3]
 import sys
 sys.path.insert(0, str(REPO / "benchmarks"))
-from bench_common import percentile, write_json
+from bench_common import percentile, portable_path, write_json
 DEFAULT_OUTPUT = Path(__file__).with_suffix("").with_name("ledger_curve") / "starter.json"
 LEDGER_SCHEMA = "tokenzero.ledger.v1"
 CURVE_SCHEMA = "tokenzero.ledger-curve.v1"
@@ -88,7 +88,7 @@ def aggregate(paths: Iterable[Path]) -> dict:
             records.append(record)
             valid_here += 1
         source_rows.append({
-            "path": str(path),
+            "path": portable_path(path, REPO),
             "sha256": hashlib.sha256(payload).hexdigest(),
             "bytes": len(payload),
             "valid_records": valid_here,

@@ -16,7 +16,7 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parents[3]
 import sys
 sys.path.insert(0, str(REPO / "benchmarks"))
-from bench_common import find_ref as _find_ref, write_json
+from bench_common import find_ref as _find_ref, portable_path, write_json
 find_ref = lambda value: _find_ref(value, strip_punctuation=True)
 BIN = REPO / "target/debug/tokenzero"
 EVIDENCE = Path(__file__).with_suffix("").with_name("session_observatory")
@@ -186,7 +186,7 @@ def observe(
             "prevented_read_metric": "ledger token_mass.prevented_tokens is retained per turn and never presented as observed cost",
         },
         "source": {
-            "ledger": str(ledger_path),
+            "ledger": portable_path(ledger_path, REPO),
             "ledger_sha256": hashlib.sha256(ledger_path.read_bytes()).hexdigest(),
             "capture": capture,
         },

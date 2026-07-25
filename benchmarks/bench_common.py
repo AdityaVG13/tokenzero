@@ -8,6 +8,82 @@ import time
 from pathlib import Path
 from typing import Iterable
 
+TMP_PLACEHOLDER = '<tmp>'
+HOME_PLACEHOLDER = '<home>'
+_ABSOLUTE = re.compile(r'^(?:/|[A-Za-z]:[\\/])')
+
+def _distinct(paths: Iterable[Path]) -> list[Path]:
+    seen: set[str] = set()
+    result: list[Path] = []
+    for path in paths:
+        key = str(path)
+        if key not in seen:
+            seen.add(key)
+            result.append(path)
+    return result
+
+def _temp_roots() -> list[Path]:
+    import tempfile
+    roots = [Path(tempfile.gettempdir()), Path('/tmp'), Path('/private/tmp'), Path('/var/folders'), Path('/private/var/folders')]
+    return _distinct(root for candidate in roots for root in (candidate, Path(os.path.realpath(candidate))))
+
+def _placed(candidates: list[Path], bases: Iterable[Path], render) -> str | None:
+    for base in bases:
+        for candidate in candidates:
+            try:
+                relative = candidate.relative_to(base)
+            except ValueError:
+                continue
+            return render(relative.as_posix())
+    return None
+
+def portable_path(value: object, repo: Path) -> str:
+    """Render a filesystem path without host-identifying components."""
+    text = str(value)
+    if not _ABSOLUTE.match(text):
+        return text
+    candidates = _distinct([Path(text), Path(os.path.realpath(text))])
+    repos = _distinct([Path(repo), Path(os.path.realpath(repo))])
+    inside_repo = _placed(candidates, repos, lambda relative: relative or '.')
+    if inside_repo is not None:
+        return inside_repo
+    inside_tmp = _placed(candidates, _temp_roots(), lambda relative: f'{TMP_PLACEHOLDER}/{relative}' if relative not in ('', '.') else TMP_PLACEHOLDER)
+    if inside_tmp is not None:
+        return inside_tmp
+    inside_home = _placed(candidates, _distinct([Path.home(), Path(os.path.realpath(Path.home()))]), lambda relative: f'{HOME_PLACEHOLDER}/{relative}' if relative not in ('', '.') else HOME_PLACEHOLDER)
+    return inside_home if inside_home is not None else text
+
+def portable_argv(argv: Iterable[object], repo: Path) -> list[str]:
+    return [portable_path(value, repo) for value in argv]
+
+def portable_command(argv: Iterable[object], repo: Path) -> str:
+    return ' '.join(portable_argv(argv, repo))
+
+def _prefix_rules(repo: Path) -> list[tuple[str, str]]:
+    rules = [(str(base), '.') for base in _distinct([Path(repo), Path(os.path.realpath(repo))])]
+    rules += [(str(base), TMP_PLACEHOLDER) for base in _temp_roots()]
+    rules += [(str(base), HOME_PLACEHOLDER) for base in _distinct([Path.home(), Path(os.path.realpath(Path.home()))])]
+    return sorted(rules, key=lambda rule: -len(rule[0]))
+
+def portable_text(value: str, repo: Path) -> str:
+    if _ABSOLUTE.match(value):
+        rendered = portable_path(value, repo)
+        if rendered != value:
+            return rendered
+    result = value
+    for prefix, placeholder in _prefix_rules(repo):
+        result = re.sub(re.escape(prefix) + '(?=[/\\s\'\"]|$)', placeholder, result)
+    return result
+
+def portable_tree(value: object, repo: Path) -> object:
+    if isinstance(value, str):
+        return portable_text(value, repo)
+    if isinstance(value, dict):
+        return {key: portable_tree(item, repo) for key, item in value.items()}
+    if isinstance(value, list):
+        return [portable_tree(item, repo) for item in value]
+    return value
+
 def process_is_alive(pid: int) -> bool:
     try:
         os.kill(pid, 0)

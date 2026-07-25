@@ -21,7 +21,7 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parents[3]
 import sys
 sys.path.insert(0, str(REPO / "benchmarks"))
-from bench_common import acquire_guard as _acquire_guard, find_ref, percentile, release_guard as _release_guard, summary
+from bench_common import acquire_guard as _acquire_guard, find_ref, percentile, portable_command, release_guard as _release_guard, summary
 acquire_guard = lambda command: _acquire_guard(GUARD, REPO, command)
 release_guard = lambda: _release_guard(GUARD)
 BIN = REPO / "target/debug/tokenzero"
@@ -222,7 +222,7 @@ def run(label: str) -> Path:
                 },
                 "commands": {
                     "mcp": "one tokenzero mcp-server process; NDJSON JSON-RPC; initialize once; serial tools/call",
-                    "cli": {key: " ".join(command) for key, command in cli_commands.items()},
+                    "cli": {key: portable_command(command, REPO) for key, command in cli_commands.items()},
                     "cli_start_proxy": "tokenzero --version",
                 },
                 "methodology": {

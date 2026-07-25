@@ -40,6 +40,24 @@ class TestMath(unittest.TestCase):
         root, rel = H.glob_root_and_first({'visible': {'text': '# root: /tmp/r\nmod/a.rs\n'}})
         self.assertEqual((root, rel), ('/tmp/r', 'mod/a.rs'))
 
+    def test_portable_paths_hide_host_components(self) -> None:
+        self.assertEqual(H.portable_path(ROOT, ROOT), '.')
+        self.assertEqual(H.portable_path(ROOT / 'target/release/tokenzero', ROOT), 'target/release/tokenzero')
+        self.assertEqual(H.portable_path(Path.home() / 'AI/FSZero/fszero', ROOT), '<home>/AI/FSZero/fszero')
+        self.assertEqual(H.portable_path('relative/kept', ROOT), 'relative/kept')
+        with tempfile.TemporaryDirectory(prefix='tz-portable-') as raw:
+            tmp = Path(raw)
+            self.assertEqual(H.portable_path(tmp / 'cache.json', ROOT), f'<tmp>/{tmp.name}/cache.json')
+            self.assertEqual(H.portable_command([str(ROOT / 'target/debug/tokenzero'), 'read', str(tmp / 'corpus.txt')], ROOT), f'target/debug/tokenzero read <tmp>/{tmp.name}/corpus.txt')
+            tree = H.portable_tree({'argv': [str(ROOT / 'x')], 'note': f'failed under {tmp}/y', 'count': 7}, ROOT)
+            self.assertEqual(tree, {'argv': ['x'], 'note': f'failed under <tmp>/{tmp.name}/y', 'count': 7})
+
+    def test_capture_environment_records_no_host_path(self) -> None:
+        environment = H.capture_environment(ROOT / 'target/release/tokenzero', 'python3 benchmarks/boot-cost.py --label probe')
+        self.assertEqual(environment['cwd'], '.')
+        self.assertEqual(environment['binary'], 'target/release/tokenzero')
+        self.assertNotIn('/Users/', json.dumps(environment))
+
     def test_cli_surface(self) -> None:
         env = {**os.environ, 'PYTHONPATH': str(ROOT)}; out = subprocess.run([sys.executable, '-m', 'benchmarks.harness', 'tok', '--bytes', '5'], cwd=ROOT, capture_output=True, text=True, env=env, check=True); self.assertEqual(out.stdout.strip(), '2'); q = subprocess.run([sys.executable, '-m', 'benchmarks.harness', 'quality', 'read_file'], cwd=ROOT, capture_output=True, text=True, env=env, input=json.dumps({'visible': {'text': '[workspace]\n'}}), check=True)
         self.assertEqual(q.stdout.strip(), 'PASS')

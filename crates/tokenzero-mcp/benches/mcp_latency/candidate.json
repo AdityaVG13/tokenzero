@@ -261,9 +261,9 @@
   },
   "commands": {
     "cli": {
-      "expand": "/Users/aditya/AI/TokenZero/target/debug/tokenzero expand tz://blob/b6026f0145ed409b1d569c8585575718190ec56ddab816669a6441f13ea19f75 --cache-path /var/folders/tw/wpjfrh5s60j_yldw1nv2k4300000gn/T/tokenzero-mcp-latency-io9hcj7l/cache.json --raw",
-      "find": "/Users/aditya/AI/TokenZero/target/debug/tokenzero find needle /var/folders/tw/wpjfrh5s60j_yldw1nv2k4300000gn/T/tokenzero-mcp-latency-io9hcj7l/corpus.txt --allowed-root /var/folders/tw/wpjfrh5s60j_yldw1nv2k4300000gn/T/tokenzero-mcp-latency-io9hcj7l --cache-path /var/folders/tw/wpjfrh5s60j_yldw1nv2k4300000gn/T/tokenzero-mcp-latency-io9hcj7l/cache.json --json",
-      "read": "/Users/aditya/AI/TokenZero/target/debug/tokenzero read /var/folders/tw/wpjfrh5s60j_yldw1nv2k4300000gn/T/tokenzero-mcp-latency-io9hcj7l/corpus.txt --allowed-root /var/folders/tw/wpjfrh5s60j_yldw1nv2k4300000gn/T/tokenzero-mcp-latency-io9hcj7l --cache-path /var/folders/tw/wpjfrh5s60j_yldw1nv2k4300000gn/T/tokenzero-mcp-latency-io9hcj7l/cache.json --raw"
+      "expand": "target/debug/tokenzero expand tz://blob/b6026f0145ed409b1d569c8585575718190ec56ddab816669a6441f13ea19f75 --cache-path <tmp>/tokenzero-mcp-latency-io9hcj7l/cache.json --raw",
+      "find": "target/debug/tokenzero find needle <tmp>/tokenzero-mcp-latency-io9hcj7l/corpus.txt --allowed-root <tmp>/tokenzero-mcp-latency-io9hcj7l --cache-path <tmp>/tokenzero-mcp-latency-io9hcj7l/cache.json --json",
+      "read": "target/debug/tokenzero read <tmp>/tokenzero-mcp-latency-io9hcj7l/corpus.txt --allowed-root <tmp>/tokenzero-mcp-latency-io9hcj7l --cache-path <tmp>/tokenzero-mcp-latency-io9hcj7l/cache.json --raw"
     },
     "cli_start_proxy": "tokenzero --version",
     "mcp": "one tokenzero mcp-server process; NDJSON JSON-RPC; initialize once; serial tools/call"

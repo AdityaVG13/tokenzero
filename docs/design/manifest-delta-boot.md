@@ -63,7 +63,7 @@ Wire examples:
 
 ```
 # Full state boot (today)
-TZ/1 {"root":"/Users/aditya/AI/TokenZero","refs":["tz://file/abc...","tz://blob/def...",...],"version":7,"ts":...
+TZ/1 {"root":".","refs":["tz://file/abc...","tz://blob/def...",...],"version":7,"ts":...
 
 # Manifest + delta boot (target)
 TZ/1 root=a3f7b2c9d1e8 m=9c4e2a1b8d6f v=7 t=1752357600000 s=01 d=2e5a8b4c9d7e
@@ -96,7 +96,7 @@ or a missing-ref marker.
 
 ```
 → tokenzero session-open
-← TZ/1 {"root":"/Users/aditya/AI/TokenZero","allowed_roots":["/Users/aditya/AI/TokenZero"],"refs":["tz://file/abc123...","tz://blob/def456...","tz://run/ghi789..."],"version":7,"ts":1752357600000}
+← TZ/1 {"root":".","allowed_roots":["."],"refs":["tz://file/abc123...","tz://blob/def456...","tz://run/ghi789..."],"version":7,"ts":1752357600000}
 
 # Boot cost: ~180-220 tokens depending on ref count.
 ```
