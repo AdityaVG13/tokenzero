@@ -232,10 +232,7 @@ fn surface_bin_install_never_hangs() {
 fn help_doctor_sbom_identify_surface() {
     ensure_bins();
     let root = repo_root();
-    for (bin, surface) in [
-        ("tokenzero-mcp", "mcp"),
-        ("tokenzero-codemode", "codemode"),
-    ] {
+    for (bin, surface) in [("tokenzero-mcp", "mcp"), ("tokenzero-codemode", "codemode")] {
         let path = root.join("target/debug").join(bin);
         let help = Command::new(&path).arg("--help").output().expect("help");
         let h = String::from_utf8_lossy(&help.stdout);
@@ -268,10 +265,7 @@ fn install_each_surface_independent_prefix_exercises_runtime() {
         fs::create_dir_all(&bin_dir).unwrap();
 
         let (code, stdout, stderr) = run_install(surface, &prefix, &bin_dir, "linux");
-        assert_eq!(
-            code, 0,
-            "install {surface}: {stdout}\n{stderr}"
-        );
+        assert_eq!(code, 0, "install {surface}: {stdout}\n{stderr}");
         let state = read(&prefix.join("install-state.json"));
         assert!(
             state.contains(&format!("\"{surface}\"")),
@@ -283,7 +277,10 @@ fn install_each_surface_independent_prefix_exercises_runtime() {
             "client-config {surface}: {cfg}"
         );
         assert!(
-            !cfg.contains(&format!("--mode={}", if surface == "mcp" { "codemode" } else { "mcp" })),
+            !cfg.contains(&format!(
+                "--mode={}",
+                if surface == "mcp" { "codemode" } else { "mcp" }
+            )),
             "dual mode in client-config: {cfg}"
         );
         assert!(bin_dir.join(artifact).exists(), "missing {artifact}");
@@ -344,9 +341,7 @@ fn install_each_surface_independent_prefix_exercises_runtime() {
             hs.status.code()
         );
         let cap: serde_json::Value = serde_json::from_str(hs_out.trim()).unwrap_or_else(|e| {
-            panic!(
-                "cap json {surface}: {e}; stdout={hs_out:?} stderr={hs_err:?}"
-            )
+            panic!("cap json {surface}: {e}; stdout={hs_out:?} stderr={hs_err:?}")
         });
         assert_eq!(cap["schema"], "zerostack.surface.v1");
         assert_eq!(cap["surface"], "raw_worker");
@@ -355,3 +350,76 @@ fn install_each_surface_independent_prefix_exercises_runtime() {
         assert!(cap.get("tools").is_none());
     }
 }
+
+
+/// Every documented or automated way to build a surface must pass
+/// `--no-default-features`.
+///
+/// `default = ["surface-mcp"]`, so naming a surface without it leaves
+/// surface-mcp enabled too, and both surfaces at once is a hard compile error.
+/// The obvious command for codemode therefore FAILS:
+///
+///   cargo build --release --bin tokenzero-codemode --features surface-codemode
+///     error: tokenzero surfaces are mutually exclusive ... never both.
+///
+/// and plain `cargo build --release` silently produces only tokenzero-mcp.
+/// This asserts the docs and the release workflow keep saying the version that
+/// actually works, so the trap is not rediscovered by trial and error.
+#[test]
+fn documented_surface_builds_disable_default_features() {
+    let root = repo_root();
+    for rel in ["docs/install.md", ".github/workflows/release.yml"] {
+        let path = root.join(rel);
+        let Ok(text) = fs::read_to_string(&path) else {
+            continue;
+        };
+        for (index, line) in text.lines().enumerate() {
+            let trimmed = line.trim_start();
+            // Comments are exempt: docs deliberately quote the command that
+            // FAILS so readers recognize the trap. Constraining those would
+            // forbid explaining the bug.
+            if trimmed.starts_with('#') {
+                continue;
+            }
+            if !trimmed.starts_with("cargo build") {
+                continue;
+            }
+            // Only lines that select a surface are constrained.
+            if !line.contains("--features surface-") {
+                continue;
+            }
+            assert!(
+                line.contains("--no-default-features"),
+                "{rel}:{} selects a surface without --no-default-features, \
+                 which enables surface-mcp too and fails to compile:\n  {line}",
+                index + 1
+            );
+        }
+    }
+}
+
+/// The release must ship BOTH surface artifacts.
+///
+/// The workflow previously ran only `cargo build -p tokenzero`, which takes
+/// the default feature set and produces tokenzero-mcp alone. tokenzero-codemode
+/// was never built or published, so the surface users are told to install for
+/// legacy MCP-only clients did not exist in any release archive.
+#[test]
+fn release_workflow_builds_and_ships_both_surfaces() {
+    let path = repo_root().join(".github/workflows/release.yml");
+    let Ok(text) = fs::read_to_string(&path) else {
+        return;
+    };
+    for artifact in ["tokenzero-mcp", "tokenzero-codemode"] {
+        assert!(
+            text.contains(&format!("--bin {artifact}")),
+            "release workflow never builds {artifact}"
+        );
+        assert!(
+            text.contains(&format!("$rel/{artifact}"))
+                || text.contains(&format!("{artifact}.exe")),
+            "release workflow builds {artifact} but never packages it"
+        );
+    }
+}
+

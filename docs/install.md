@@ -34,10 +34,19 @@ Installing one surface after the other cleanly replaces the prior registration a
 ./packaging/install.sh --sbom --surface mcp
 ./packaging/install.sh --uninstall --prefix ~/.tokenzero-install
 
-# Single-surface cargo builds (peer surface dependency excluded)
-cargo build -p tokenzero --bin tokenzero-mcp --features surface-mcp
-cargo build -p tokenzero --bin tokenzero-codemode --no-default-features --features surface-codemode
-# Enabling both surface-mcp and surface-codemode is a compile error.
+# Single-surface cargo builds (peer surface dependency excluded).
+# Always pass --no-default-features: default = ["surface-mcp"], so naming a
+# surface WITHOUT it leaves surface-mcp on too, and enabling both surfaces is a
+# hard compile error (tokenzero-irx9.3). This bites hardest for codemode, where
+# the obvious command fails:
+#   cargo build --release --bin tokenzero-codemode --features surface-codemode
+#     error: tokenzero surfaces are mutually exclusive ... never both.
+# Plain `cargo build --release` also silently builds only tokenzero-mcp.
+cargo build --release -p tokenzero --bin tokenzero-mcp --no-default-features --features surface-mcp
+cargo build --release -p tokenzero --bin tokenzero-codemode --no-default-features --features surface-codemode
+
+# Or let the installer pick the flags for you (it uses exactly the above):
+./packaging/install.sh --surface codemode
 ```
 
 Surface binaries also accept non-hanging packaging subcommands:
