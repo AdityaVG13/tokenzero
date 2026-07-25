@@ -302,7 +302,9 @@ fn parse_fragment_spec(fragment: &str) -> Result<FragmentSpec, FragmentError> {
     // grammar accepts it, so every expand surface must too (bytes only).
     if kind == 'B' {
         if let Some((start, len)) = fragment[1..].split_once('+') {
-            let start = start.parse::<usize>().map_err(|_| FragmentError::Malformed)?;
+            let start = start
+                .parse::<usize>()
+                .map_err(|_| FragmentError::Malformed)?;
             let len = len.parse::<usize>().map_err(|_| FragmentError::Malformed)?;
             let end = start.checked_add(len).ok_or(FragmentError::Malformed)?;
             return Ok(FragmentSpec::Byte { start, end });
@@ -2534,7 +2536,12 @@ fn expand_selected_content(
                 bytes.len()
             ));
         }
-        return Ok(String::from_utf8_lossy(&bytes[*start..*end]).into_owned());
+        return content.get(*start..*end).map(str::to_owned).ok_or_else(|| {
+            format!(
+                "fragment-not-utf8-boundary; start={start} end={end} len={}",
+                bytes.len()
+            )
+        });
     }
     Ok(select_content(
         content,

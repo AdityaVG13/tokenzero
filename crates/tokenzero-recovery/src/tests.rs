@@ -1972,6 +1972,66 @@ fn b_fragment_returns_middle_slice() {
     assert_eq!(expanded.content, "world");
 }
 
+fn assert_multibyte_byte_fragment_boundaries(
+    store: &mut RecoveryStore,
+    blob_ref: &str,
+    tier: &str,
+) {
+    for (start, end, boundary) in [
+        (2, 3, "start-inside"),
+        (1, 2, "end-inside"),
+        (4, 5, "both-inside"),
+    ] {
+        let fragment = format!("{blob_ref}#B{start}-{end}");
+        let expanded = store.expand(&fragment, Some("raw"), None, None, None, None);
+        assert!(!expanded.found, "{tier} {boundary} unexpectedly succeeded");
+        assert!(
+            expanded.reason.starts_with("fragment-not-utf8-boundary"),
+            "{tier} {boundary}: {}",
+            expanded.reason
+        );
+        assert!(expanded.content.is_empty());
+    }
+
+    let valid = format!("{blob_ref}#B1-3");
+    let expanded = store.expand(&valid, Some("raw"), None, None, None, None);
+    assert!(expanded.found, "{tier} valid boundary: {}", expanded.reason);
+    assert_eq!(expanded.content, "é");
+}
+
+#[test]
+fn multibyte_byte_fragment_boundaries_error_from_local_store() {
+    let (mut store, _cache, _dir) = temp_store();
+    let stored = store
+        .store_payload("Aé中Z", ContentType::Unknown, None, None, None)
+        .unwrap();
+    assert_multibyte_byte_fragment_boundaries(&mut store, &stored.blob_ref, "local");
+}
+
+#[test]
+fn multibyte_byte_fragment_boundaries_error_from_shared_cas() {
+    let (mut store, _cache, _dir, _cas) = canonical_shared_store();
+    let stored = store
+        .store_payload("Aé中Z", ContentType::Unknown, None, None, None)
+        .unwrap();
+    assert_multibyte_byte_fragment_boundaries(&mut store, &stored.blob_ref, "shared-cas");
+}
+
+#[test]
+fn multibyte_byte_fragment_boundaries_error_from_ref_index() {
+    let index_dir = tempdir().unwrap();
+    with_ref_index_env(index_dir.path(), true, || {
+        let source_dir = tempdir().unwrap();
+        let target_dir = tempdir().unwrap();
+        let stored = RecoveryStore::new(Some(source_dir.path().join("recovery-cache.json")))
+            .store_payload("Aé中Z", ContentType::Unknown, None, None, None)
+            .unwrap();
+        let mut other_root =
+            RecoveryStore::new(Some(target_dir.path().join("recovery-cache.json")));
+        assert_multibyte_byte_fragment_boundaries(&mut other_root, &stored.blob_ref, "ref-index");
+    });
+}
+
 #[test]
 fn b_fragment_reversed_returns_error() {
     let (mut store, _cache, _dir) = temp_store();
