@@ -2086,7 +2086,7 @@ fn l_fragment_reversed_returns_error() {
 }
 
 #[test]
-fn expand_line_window_fragment_overlong_clamps() {
+fn portable_line_fragment_end_past_eof_uses_canonical_clamp() {
     let (mut store, _cache, _dir) = temp_store();
     let payload = "a\nb\nc\n";
     let stored = store
@@ -2100,6 +2100,20 @@ fn expand_line_window_fragment_overlong_clamps() {
     assert_eq!(expanded.returned_start_line, Some(1));
     assert_eq!(expanded.returned_end_line, Some(3));
     assert_eq!(expanded.line_count, Some(3));
+}
+
+#[test]
+fn portable_line_fragment_start_past_eof_remains_strict() {
+    let (mut store, _cache, _dir) = temp_store();
+    let payload = "a\nb\nc\n";
+    let stored = store
+        .store_payload(payload, ContentType::Unknown, None, None, None)
+        .unwrap();
+    let l_ref = format!("{}#L4-L100", stored.blob_ref);
+    let expanded = store.expand(&l_ref, Some("raw"), None, None, None, None);
+    assert!(!expanded.found, "line start past EOF must not clamp");
+    assert!(expanded.reason.starts_with("window-out-of-range"));
+    assert_eq!(expanded.ref_id, l_ref);
 }
 
 #[test]

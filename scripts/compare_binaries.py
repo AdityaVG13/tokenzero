@@ -18,6 +18,10 @@ import time
 from pathlib import Path
 from typing import Any, Callable
 
+REPO = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(REPO / "benchmarks"))
+from bench_common import portable_path
+
 SCHEMA = "tokenzero.matched-ab.v1"
 TIMEOUT_SECONDS = 60
 MCP_PROTOCOL_VERSION = "2024-11-05"
@@ -553,10 +557,10 @@ def run(args: argparse.Namespace) -> tuple[dict[str, Any], bool]:
                 "platform": platform.platform(),
                 "machine": platform.machine(),
                 "python": platform.python_version(),
-                "baseline": {"path": str(baseline), "sha256": hashlib.sha256(baseline.read_bytes()).hexdigest(), "version": versions["baseline"]},
-                "candidate": {"path": str(candidate), "sha256": hashlib.sha256(candidate.read_bytes()).hexdigest(), "version": versions["candidate"]},
-                "fixture": {"path": str(fixture), "sha256": hashlib.sha256(fixture_bytes).hexdigest(), "bytes": len(fixture_bytes)},
-                "work_dir": str(work_dir),
+                "baseline": {"path": portable_path(baseline, REPO), "sha256": hashlib.sha256(baseline.read_bytes()).hexdigest(), "version": versions["baseline"]},
+                "candidate": {"path": portable_path(candidate, REPO), "sha256": hashlib.sha256(candidate.read_bytes()).hexdigest(), "version": versions["candidate"]},
+                "fixture": {"path": portable_path(fixture, REPO), "sha256": hashlib.sha256(fixture_bytes).hexdigest(), "bytes": len(fixture_bytes)},
+                "work_dir": portable_path(work_dir, REPO),
             },
             "methodology": {
                 "trials_per_binary": args.trials,

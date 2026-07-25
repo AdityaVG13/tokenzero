@@ -49,7 +49,7 @@ Every JSON report includes p50/p95 wall and CPU for all six CLI and two warm MCP
 ```sh
 RCH_COMPRESSION_LEVEL=0 RCH_FORCE_REMOTE=1 rch exec -- cargo test -p tokenzero-engine ledger_tests -- --nocapture
 RCH_COMPRESSION_LEVEL=0 RCH_FORCE_REMOTE=1 rch exec -- cargo test -p tokenzero --test packaging_e2e install_each_surface -- --test-threads=1 --nocapture
-RCH_COMPRESSION_LEVEL=0 RCH_FORCE_REMOTE=1 PERF_TRIALS=50 PERF_NOISE_TOLERANCE_PCT=1.0 PERF_JSON=benchmarks/claims/pr28/run-N.json CANDIDATE_BIN=/Users/aditya/AI/TokenZero/target/release/tokenzero rch exec -- make perf-regression-gate BASELINE_BIN=/tmp/tokenzero-pr28-origin-main/target/release/tokenzero
+RCH_COMPRESSION_LEVEL=0 RCH_FORCE_REMOTE=1 PERF_TRIALS=50 PERF_NOISE_TOLERANCE_PCT=1.0 PERF_JSON=benchmarks/claims/pr28/run-N.json CANDIDATE_BIN=target/release/tokenzero rch exec -- make perf-regression-gate BASELINE_BIN=<tmp>/tokenzero-pr28-origin-main/target/release/tokenzero
 ```
 
 Acceptance is not met because performance fails and fresh cross-process replay remains unverified.

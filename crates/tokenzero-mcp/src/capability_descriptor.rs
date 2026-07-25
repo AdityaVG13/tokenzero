@@ -15,7 +15,7 @@ use crate::jsonrpc::{SUPPORTED_PROTOCOL_VERSIONS, tool_filter_discovery};
 
 /// PR18 policy descriptor revision. Bump whenever the tool or capability
 /// contract changes.
-pub const PR18_DESCRIPTOR_VERSION: &str = "PR18.2";
+pub const PR18_DESCRIPTOR_VERSION: &str = "PR18.3";
 
 /// Machine-readable policy descriptor enumerating every TokenZero tool,
 /// capability tag, and ZeroRef v1 feature.
@@ -143,6 +143,7 @@ impl Default for ZeroRefCapabilities {
             ]),
             limitations: strings(&[
                 "Cross-engine portability is limited to full-hash ZeroRef v1 blob refs and #B/#L fragments.",
+                "ZeroRef v1 uses strict byte bounds and line starts with clamped line ends; this fixed protocol rule is not separately negotiated.",
                 "Correctness evidence does not establish zero-copy, latency, or performance claims.",
             ]),
             features: strings(&[
@@ -204,9 +205,20 @@ mod tests {
         let descriptor = CapabilityDescriptor::for_surface(McpToolSurface::Classic);
         let payload = descriptor.to_json();
 
-        assert_eq!(payload["descriptorVersion"], "PR18.2");
+        assert_eq!(payload["descriptorVersion"], "PR18.3");
         assert_eq!(payload["zeroref_v1"]["portable_ref_kinds"], json!(["blob"]));
         assert!(payload["zeroref_v1"]["unsupported_portable_ref_kinds"].is_array());
         assert!(payload["zeroref_v1"]["limitations"].is_array());
+        assert!(payload["zeroref_v1"].get("clamp_policy").is_none());
+        assert!(payload["zeroref_v1"].get("selection_policy").is_none());
+        assert!(
+            payload["zeroref_v1"]["limitations"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|item| item
+                    .as_str()
+                    .is_some_and(|text| text.contains("clamped line ends")))
+        );
     }
 }

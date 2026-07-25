@@ -39,6 +39,7 @@ _REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
+from benchmarks.bench_common import portable_path
 from benchmarks.wind_tunnel.policies import get_policy
 from benchmarks.wind_tunnel.types import Action, SequenceDiff
 
@@ -116,7 +117,7 @@ def diff_journal(
     baseline = replay_under_policy(recorded, baseline_policy)
     candidate = replay_under_policy(recorded, candidate_policy)
     return SequenceDiff(
-        journal=str(path),
+        journal=portable_path(path, _REPO_ROOT),
         baseline=baseline,
         candidate=candidate,
         first_divergence=first_divergence(baseline, candidate),

@@ -14,6 +14,10 @@ from pathlib import Path
 from typing import Any
 
 REPO = Path(__file__).resolve().parents[1]
+try:
+    from benchmarks.bench_common import portable_path
+except ModuleNotFoundError:
+    from bench_common import portable_path
 DEFAULT_BINARY = REPO / "target/release/tokenzero"
 DEFAULT_OUTPUT = REPO / "benchmarks/northstar"
 BOOT = REPO / "benchmarks/boot-cost/candidate.json"
@@ -111,19 +115,24 @@ def normalize_expand(data: dict[str, Any]) -> list[dict[str, Any]]:
     ]
 
 
-def binary_provenance(binary: Path) -> dict[str, str]:
+def resolve_binary(binary: Path) -> Path:
     resolved = binary.expanduser().resolve()
     if not resolved.is_file() or not os.access(resolved, os.X_OK):
         raise SystemExit(f"benchmark binary is missing or not executable: {resolved}")
+    return resolved
+
+
+def binary_provenance(binary: Path) -> dict[str, str]:
+    resolved = resolve_binary(binary)
     return {
-        "path": str(resolved),
+        "path": portable_path(resolved, REPO),
         "sha256": hashlib.sha256(resolved.read_bytes()).hexdigest(),
         "selected_via": "--binary",
     }
 
 
 def run_components(binary: Path, temp: Path) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
-    selected = binary_provenance(binary)["path"]
+    selected = str(resolve_binary(binary))
     env = os.environ.copy()
     env["TOKENZERO_BOOT_BENCH_BIN"] = selected
     env["TOKENZERO_EXPAND_BENCH_BIN"] = selected
@@ -425,10 +434,10 @@ def main() -> int:
     history = args.output_root / "history"
     prior = previous_snapshot(history)
     with tempfile.TemporaryDirectory(prefix="tokenzero-rebaseline-") as raw_temp:
-        compression, boot, expand = run_components(Path(provenance["path"]), Path(raw_temp))
+        compression, boot, expand = run_components(args.binary, Path(raw_temp))
         snapshot = build_snapshot(compression, boot, expand, "run-components", prior, provenance)
     paths = write_outputs(snapshot, args.output_root)
-    print(json.dumps({"snapshot_id": snapshot["snapshot_id"], "outputs": [str(path) for path in paths]}, sort_keys=True))
+    print(json.dumps({"snapshot_id": snapshot["snapshot_id"], "outputs": [portable_path(path, REPO) for path in paths]}, sort_keys=True))
     return 0
 
 

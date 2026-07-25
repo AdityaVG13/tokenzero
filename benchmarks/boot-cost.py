@@ -41,8 +41,8 @@ def measure(label: str, root: Path, cache_dir: Path) -> dict[str, object]:
         str(cache),
         "--json",
     ]
-    initialized = H.run_json(command)
-    recorded = H.run_json(command)
+    initialized = H.portable_tree(H.run_json(command), REPO)
+    recorded = H.portable_tree(H.run_json(command), REPO)
     boot = recorded["raw_json"]
     components = boot["telemetry"]
     component_sum = sum(int(components[name]) for name in COMPONENT_NAMES)
@@ -60,7 +60,7 @@ def measure(label: str, root: Path, cache_dir: Path) -> dict[str, object]:
         blob.pop("stdout", None)
     return {
         "label": label,
-        "root": str(root),
+        "root": H.portable_path(root, REPO),
         "file_count": H.file_count(root, COUNT_EXCLUDES),
         "file_count_excludes": sorted(COUNT_EXCLUDES),
         "metadata_initialization": initialized,

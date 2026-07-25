@@ -34,7 +34,8 @@ The blob identity is the full lowercase 64-hex-character SHA-256 digest of the c
 
 - One-based, inclusive range (`start..=end`).
 - Exact newline retention is required; a line slice ending on a blank line must keep that line's trailing newline.
-- `start == 0`, reversed ranges (`start > end`), and out-of-bounds ranges are rejected.
+- `start == 0`, reversed ranges (`start > end`), and a start past the available line count are rejected.
+- An end past EOF clamps to the final available line when the start is valid. The empty blob has zero lines, so every line start is out of bounds.
 
 ## 4. Digest verification
 
@@ -104,6 +105,11 @@ rather than infer support from a URI scheme. Evidence-backed support requires
 `#B` and `#L`; and `unsupported_portable_ref_kinds` names execution, error,
 session, file, graph, index, and unit refs. The descriptor's limitations keep
 correctness separate from deferred performance claims.
+
+The boundary policy is fixed by ZeroRef v1: byte endpoints and line starts are
+strict, while line ends clamp. It is not a per-engine negotiable capability, so
+the descriptor advertises the ZeroRef version and selectors but must not add a
+`clamp_policy` or `selection_policy` field.
 
 ## 10. Multi-OS evidence gate
 

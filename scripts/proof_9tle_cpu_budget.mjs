@@ -61,6 +61,35 @@ for (const [name, bin] of [
   }
 }
 
+const PORTABLE_RULES = [
+  [TOKENZERO_ROOT, "."],
+  [os.tmpdir(), "<tmp>"],
+  ["/tmp", "<tmp>"],
+  ["/var/folders", "<tmp>"],
+  ["/private/var/folders", "<tmp>"],
+  [os.homedir(), "<home>"],
+].sort((a, b) => b[0].length - a[0].length);
+
+function portableText(input) {
+  let text = String(input);
+  for (const [base, placeholder] of PORTABLE_RULES) {
+    const pattern = new RegExp(base.replace(/[.*+?^${}()|[\]\\]/g, "\\$&") + '(?:/([^\\s"\']*))?', "g");
+    text = text.replace(pattern, (_match, rest) =>
+      rest ? (placeholder === "." ? rest : `${placeholder}/${rest}`) : placeholder,
+    );
+  }
+  return text;
+}
+
+function portableTree(value) {
+  if (typeof value === "string") return portableText(value);
+  if (Array.isArray(value)) return value.map(portableTree);
+  if (value && typeof value === "object") {
+    return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, portableTree(item)]));
+  }
+  return value;
+}
+
 function rmPermit(base) {
   fs.rmSync(base, { recursive: true, force: true });
 }
@@ -480,8 +509,8 @@ async function main() {
     if (!fs.existsSync(path.dirname(dir))) continue;
     fs.mkdirSync(dir, { recursive: true });
     const outPath = path.join(dir, "tokenzero-9tle-proof.json");
-    fs.writeFileSync(outPath, JSON.stringify(proof, null, 2) + "\n");
-    console.log(`wrote ${outPath}`);
+    fs.writeFileSync(outPath, JSON.stringify(portableTree(proof), null, 2) + "\n");
+    console.log(`wrote ${portableText(outPath)}`);
   }
 
   console.log(

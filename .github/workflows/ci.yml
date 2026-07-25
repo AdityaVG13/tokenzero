@@ -139,6 +139,8 @@ jobs:
         run: python3 scripts/check_embedded_tests.py
       - name: Module boundaries
         run: python3 scripts/check_module_boundaries.py
+      - name: No host paths in tracked files
+        run: python3 scripts/check_no_host_paths.py
       - name: Cargo deny (licenses, advisories, sources)
         uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2
         with:

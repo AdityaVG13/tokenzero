@@ -1,24 +1,24 @@
 {
   "environment": {
     "baseline": {
-      "path": "/private/tmp/tokenzero-pr28-origin-main/target/release/tokenzero",
+      "path": "<tmp>/tokenzero-pr28-origin-main/target/release/tokenzero",
       "sha256": "f3742dfb12d328857853419131ebdc5c5783ff67ea1409e64cfdeb681304fb7b",
       "version": "tokenzero 1.4.0"
     },
     "candidate": {
-      "path": "/Users/aditya/AI/TokenZero/target/release/tokenzero",
+      "path": "target/release/tokenzero",
       "sha256": "ace8417838006394ee354daf036f82140f512c11eb851f315bfce8cff8992ba4",
       "version": "tokenzero 1.4.0"
     },
     "fixture": {
       "bytes": 23275,
-      "path": "/Users/aditya/AI/TokenZero/README.md",
+      "path": "README.md",
       "sha256": "32673d5148e7112b62ea81e755933f742e313fcd2f1fddec9917f53d89be23ed"
     },
     "machine": "arm64",
     "platform": "macOS-26.5-arm64-arm-64bit",
     "python": "3.9.6",
-    "work_dir": "/Users/aditya/AI/TokenZero"
+    "work_dir": "."
   },
   "gate": {
     "noise_tolerance_pct": 1.0,

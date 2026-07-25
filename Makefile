@@ -1,8 +1,11 @@
 SHELL := /bin/bash
 
-.PHONY: test readme-command-audit rust-test rust-verify rust-verify-report rust-release-build rust-codemode-build rust-proof package-check release-check irx9-gate perf-regression-gate cli-smoke doctor mcp-smoke mcp-soak shell-matrix install-smoke package-audit
+.PHONY: test readme-command-audit host-path-audit rust-test rust-verify rust-verify-report rust-release-build rust-codemode-build rust-proof package-check release-check irx9-gate perf-regression-gate cli-smoke doctor mcp-smoke mcp-soak shell-matrix install-smoke package-audit
 
-test: readme-command-audit rust-test
+test: readme-command-audit host-path-audit rust-test
+
+host-path-audit:
+	@python3 scripts/check_no_host_paths.py
 
 readme-command-audit:
 	@python3 scripts/readme_command_audit.py

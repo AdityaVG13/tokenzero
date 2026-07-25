@@ -115,6 +115,39 @@ fn sha256_bytes(bytes: &[u8]) -> String {
         .collect()
 }
 
+fn portable_path(path: &Path) -> String {
+    let mut rules: Vec<(PathBuf, &str)> = Vec::new();
+    if let Some(workspace) = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(Path::parent)
+    {
+        if let Ok(canonical) = workspace.canonicalize() {
+            rules.push((canonical, ""));
+        }
+        rules.push((workspace.to_path_buf(), ""));
+    }
+    rules.push((env::temp_dir(), "<tmp>"));
+    if let Ok(canonical) = env::temp_dir().canonicalize() {
+        rules.push((canonical, "<tmp>"));
+    }
+    rules.push((PathBuf::from("/tmp"), "<tmp>"));
+    if let Some(home) = env::var_os("HOME") {
+        rules.push((PathBuf::from(home), "<home>"));
+    }
+    for (base, placeholder) in &rules {
+        if let Ok(relative) = path.strip_prefix(base) {
+            let rendered = relative.display().to_string();
+            return match (placeholder.is_empty(), rendered.is_empty()) {
+                (true, true) => ".".to_string(),
+                (true, false) => rendered,
+                (false, true) => (*placeholder).to_string(),
+                (false, false) => format!("{placeholder}/{rendered}"),
+            };
+        }
+    }
+    path.display().to_string()
+}
+
 fn discover_binary(engine: Engine) -> BinaryMeta {
     let name = engine.as_str();
     let path = engine.bin();
@@ -287,7 +320,7 @@ fn run_cell(h: &Harness, w: Engine, r: Engine, name: &str, payload: &[u8]) -> Va
         "writer": w.as_str(), "reader": r.as_str(), "payload": name, "reference": reference,
         "expected_hash": expected_hash, "actual_hash": actual_hash, "status": status, "notes": notes,
         "consumer": consumer.engine, "consumer_version": consumer.version,
-        "consumer_path": consumer.path, "consumer_sha256": consumer.sha256,
+        "consumer_path": portable_path(&consumer.path), "consumer_sha256": consumer.sha256,
     })
 }
 
@@ -445,7 +478,7 @@ fn zeroref_conformance_matrix() {
     let wrong_store = run_wrong_store(&h);
     let concurrent = run_concurrent_writes(&h);
     let sibling_shas: Vec<_> = h.binaries.iter().map(|m| json!({
-        "engine": m.engine, "path": m.path, "sha256": m.sha256, "version": m.version, "commit": m.commit, "os": OS
+        "engine": m.engine, "path": portable_path(&m.path), "sha256": m.sha256, "version": m.version, "commit": m.commit, "os": OS
     })).collect();
     let fail = rows.iter().any(|row| {
         row["cells"]

@@ -10,14 +10,14 @@
     "configured_slot_ceiling": 2,
     "workers": 9,
     "roots": [
-      "/Users/aditya/AI/TokenZero",
-      "/Users/aditya/AI/ZeroStack"
+      ".",
+      "<home>/AI/ZeroStack"
     ],
-    "permit": "/tmp/zerostack-9tle-analysis-28783.permit",
+    "permit": "<tmp>/zerostack-9tle-analysis-28783.permit",
     "bins": {
-      "tokenzero": "/Users/aditya/AI/TokenZero/target/release/tokenzero",
-      "fszero": "/Users/aditya/AI/FSZero/target/release/fszero",
-      "graphzero": "/Users/aditya/AI/graphzero/target/debug/graphzero"
+      "tokenzero": "target/release/tokenzero",
+      "fszero": "<home>/AI/FSZero/target/release/fszero",
+      "graphzero": "<home>/AI/graphzero/target/debug/graphzero"
     }
   },
   "claims": {
@@ -40,17 +40,17 @@
     "busy": {
       "tz": {
         "engine": "tz",
-        "root": "/Users/aditya/AI/TokenZero",
+        "root": ".",
         "workerId": 900,
         "status": 1,
         "wall_ms": 5031,
         "busy": true,
         "ok": false,
-        "out_head": "codemode:error X0 ops=0 machine_permit_busy: codemode permit /tmp/zerostack-9tle-analysis-28783.permit is held by live process(es) across 8 slots"
+        "out_head": "codemode:error X0 ops=0 machine_permit_busy: codemode permit <tmp>/zerostack-9tle-analysis-28783.permit is held by live process(es) across 8 slots"
       },
       "fz": {
         "engine": "fz",
-        "root": "/Users/aditya/AI/TokenZero",
+        "root": ".",
         "workerId": 901,
         "status": 0,
         "wall_ms": 204,
@@ -60,19 +60,19 @@
       },
       "gz": {
         "engine": "gz",
-        "root": "/Users/aditya/AI/ZeroStack",
+        "root": "<home>/AI/ZeroStack",
         "workerId": 902,
         "status": 0,
         "wall_ms": 1052,
         "busy": true,
         "ok": false,
-        "out_head": "err busy retryable machine_permit_busy: codemode permit /tmp/zerostack-9tle-analysis-28783.permit i t:gz://codemode/execution/cm___exec_1784235507654-7e72c42e94c5/error"
+        "out_head": "err busy retryable machine_permit_busy: codemode permit <tmp>/zerostack-9tle-analysis-28783.permit i t:gz://codemode/execution/cm___exec_1784235507654-7e72c42e94c5/error"
       }
     },
     "retry": {
       "tz": {
         "engine": "tz",
-        "root": "/Users/aditya/AI/TokenZero",
+        "root": ".",
         "workerId": 910,
         "status": 0,
         "wall_ms": 108,
@@ -82,7 +82,7 @@
       },
       "fz": {
         "engine": "fz",
-        "root": "/Users/aditya/AI/ZeroStack",
+        "root": "<home>/AI/ZeroStack",
         "workerId": 911,
         "status": 0,
         "wall_ms": 108,
@@ -92,7 +92,7 @@
       },
       "gz": {
         "engine": "gz",
-        "root": "/Users/aditya/AI/TokenZero",
+        "root": ".",
         "workerId": 912,
         "status": 0,
         "wall_ms": 12,
