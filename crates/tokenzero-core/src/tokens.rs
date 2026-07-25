@@ -23,6 +23,17 @@ pub fn sha256_hex(text: &str) -> String {
     out
 }
 
+/// The lossy declaration emitted when the visible budget drops bytes and no
+/// recovery ref is available.
+///
+/// Single source of truth. This literal was previously duplicated in
+/// `enforce_token_budget_with_ref` and in the capsule emitter, and the budget
+/// test modelled a THIRD, shorter string. The test computed how many lines
+/// should survive using a 14-token marker while the real marker costs 33, so
+/// it demanded more lines than the budget could hold and failed as
+/// P01-001. Keep every user pointed at this constant.
+pub const VISIBLE_BUDGET_LOSSY_DECLARATION: &str = "[mode=lossy lossy_policy_id=tokenzero.visible-compression.v1 lossy_spans=[{description=omitted-bytes reason=visible-budget recovery_may_be_needed=true}]]";
+
 pub fn enforce_token_budget(text: &str, max_visible_tokens: usize) -> String {
     enforce_token_budget_with_ref(text, max_visible_tokens, None)
 }
@@ -37,7 +48,7 @@ pub fn enforce_token_budget_with_ref(
         return text.to_string();
     }
     let marker = recovery_ref.map_or_else(
-        || "[mode=lossy lossy_policy_id=tokenzero.visible-compression.v1 lossy_spans=[{description=omitted-bytes reason=visible-budget recovery_may_be_needed=true}]]".to_string(),
+        || VISIBLE_BUDGET_LOSSY_DECLARATION.to_string(),
         |ref_id| format!("... omitted by visible budget; expand {ref_id} for the full output ..."),
     );
     let marker = marker.as_str();

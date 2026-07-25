@@ -33,15 +33,25 @@
 
     #[test]
     fn visible_budget_prefix_retains_every_fitting_line() {
-        // Counterexample from math-review P01-001: budget=17 expected_keep=2.
+        // Counterexample from math-review P01-001: the visible budget must keep
+        // every line that fits alongside the omission marker.
         let text = (0..50)
             .map(|i| format!("line_{i}"))
             .collect::<Vec<_>>()
             .join("\n");
-        let marker = "... omitted by visible budget; exact refs available ...";
+        // Must be the SAME marker enforce_token_budget emits. Modelling a
+        // different, shorter string here is what made this test fail: it
+        // predicted a keep count the real 33-token declaration cannot afford.
+        let marker = VISIBLE_BUDGET_LOSSY_DECLARATION;
         let marker_tokens = count_tokens(marker);
         const SEPARATOR_TOKENS: usize = 1;
-        let budget = 17;
+        // Derive the budget from the real marker so the fixture stays valid if
+        // the declaration wording changes. The hard-coded 17 was smaller than
+        // the marker itself, leaving no room for even one line.
+        // Room for exactly the first three lines, so keep>=2 is truly exercised.
+        let budget = marker_tokens
+            + SEPARATOR_TOKENS
+            + text.lines().take(3).map(count_tokens).sum::<usize>();
         let (mut running, mut expected) = (0usize, 0usize);
         for line in text.lines() {
             let next = running

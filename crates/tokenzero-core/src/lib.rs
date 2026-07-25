@@ -404,7 +404,7 @@ fn finalize_capsule_omission(
                 reason: "visible token budget or selected compression policy".to_string(),
                 recovery_may_be_needed: true,
             });
-            let declaration = "[mode=lossy lossy_policy_id=tokenzero.visible-compression.v1 lossy_spans=[{description=omitted-bytes reason=visible-budget recovery_may_be_needed=true}]]";
+            let declaration = VISIBLE_BUDGET_LOSSY_DECLARATION;
             if !capsule.text.contains("mode=lossy") {
                 capsule.text.push('\n');
                 capsule.text.push_str(declaration);
