@@ -3054,6 +3054,7 @@ dependencies = [
  "tempfile",
  "thiserror",
  "tokenzero-core",
+ "zero-ref",
 ]
 
 [[package]]
@@ -3702,9 +3703,17 @@ dependencies = [
 [[package]]
 name = "zero-abi"
 version = "0.1.0"
-source = "git+https://github.com/AdityaVG13/zerostack?rev=142b2f829f5869b74a43437effdf33a467e0af47#142b2f829f5869b74a43437effdf33a467e0af47"
+source = "git+https://github.com/AdityaVG13/zerostack?rev=90cdbfad5fa5bc5d601e841def2416d64810a487#90cdbfad5fa5bc5d601e841def2416d64810a487"
 dependencies = [
  "serde_json",
+ "sha2 0.10.9",
+]
+
+[[package]]
+name = "zero-ref"
+version = "0.1.0"
+source = "git+https://github.com/AdityaVG13/zerostack?rev=90cdbfad5fa5bc5d601e841def2416d64810a487#90cdbfad5fa5bc5d601e841def2416d64810a487"
+dependencies = [
  "sha2 0.10.9",
 ]
 
