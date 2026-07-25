@@ -56,6 +56,16 @@ fn segment_is_bare_ls(lower: &str) -> bool {
         .any(|segment| segment == "ls" || segment.starts_with("ls -") || segment.starts_with("ls "))
 }
 
+/// Commands whose output is a listing of paths, or a filter over one.
+///
+/// `cat` is deliberately absent. It emits FILE CONTENT, not paths, and the
+/// inventory view keeps any line containing `/` or `.` as a "path". A command
+/// like `ls dir && cat report.json` was therefore classified as inventory and
+/// the JSON body was shredded into sample_paths, one entry per line, e.g.
+/// `"contract_version": "1.0",` and `"name": "ctx.step",`.
+/// The content was unreadable in the visible output and had to be recovered
+/// through the ref. Keeping `cat` out means such a pipeline falls through to
+/// normal rendering, which is what the caller wanted.
 const INVENTORY_COMMANDS: &[&str] = &[
     "ls",
     "find",
@@ -70,7 +80,6 @@ const INVENTORY_COMMANDS: &[&str] = &[
     "uniq",
     "cut",
     "echo",
-    "cat",
     "sort-object",
     "select-object",
     "where-object",
@@ -114,10 +123,15 @@ pub fn repo_inventory_view(command: &str, output: &str) -> String {
 pub fn structured_shell_view(command: &str, stdout: &str, stderr: &str) -> String {
     let combined = format!("{stdout}\n{stderr}");
     if is_repo_inventory_command(command) {
-        return repo_inventory_view(command, &combined);
+        // stdout only: an inventory is a stdout concept, and folding stderr in
+        // put diagnostics into sample_paths as though they were paths, e.g.
+        //   - ls: /nope: No such file or directory
+        // sitting beside real entries. A consumer reading sample_paths as paths
+        // cannot tell the difference.
+        return repo_inventory_view(command, stdout);
     }
     if is_search_shell_command(command) {
-        return search_shell_view(stdout, stderr);
+        return search_shell_view(command, stdout, stderr);
     }
     if let Ok(value) = serde_json::from_str::<serde_json::Value>(stdout.trim()) {
         let mut out = String::from("json_summary:\n");
@@ -339,7 +353,41 @@ pub(crate) fn git_subcommand_index(words: &[String]) -> Option<usize> {
     None
 }
 
-pub(crate) fn search_shell_view(stdout: &str, stderr: &str) -> String {
+/// Largest `-A`/`-B`/`-C` value in a search command, if any.
+///
+/// A bare `grep pattern file` yields one line per match, so a 20-line sample is
+/// a fair summary. `grep -A 30` does not: the caller has explicitly said the
+/// surrounding lines ARE the answer, and a 20-line cap can cut off before the
+/// first match's context ends, leaving the one thing that was asked for
+/// reachable only through a second expand of the ref.
+fn requested_context_lines(command: &str) -> Option<usize> {
+    let words = split_shell_words(command);
+    let mut largest: Option<usize> = None;
+    for (index, word) in words.iter().enumerate() {
+        let flag = word.trim_start_matches('-');
+        let Some(kind) = flag.chars().next().filter(|c| matches!(c, 'A' | 'B' | 'C')) else {
+            continue;
+        };
+        if !word.starts_with('-') || word.starts_with("--") {
+            continue;
+        }
+        // Both -A30 and -A 30 are valid.
+        let inline = &flag[kind.len_utf8()..];
+        let value = if inline.is_empty() {
+            words
+                .get(index + 1)
+                .and_then(|next| next.parse::<usize>().ok())
+        } else {
+            inline.parse::<usize>().ok()
+        };
+        if let Some(value) = value {
+            largest = Some(largest.map_or(value, |current: usize| current.max(value)));
+        }
+    }
+    largest
+}
+
+pub(crate) fn search_shell_view(command: &str, stdout: &str, stderr: &str) -> String {
     let matches: Vec<_> = stdout
         .lines()
         .map(str::trim_end)
@@ -359,15 +407,21 @@ pub(crate) fn search_shell_view(stdout: &str, stderr: &str) -> String {
             out.push_str(&format!("- {line}\n"));
         }
     }
+    // Honor an explicit context request: show enough lines to cover the
+    // context the caller asked for, rather than a flat 20.
+    let limit = match requested_context_lines(command) {
+        Some(context) => 20.max((context + 1) * 4),
+        None => 20,
+    };
     if !matches.is_empty() {
         out.push_str("sample_matches:\n");
-        for line in matches.iter().take(20) {
+        for line in matches.iter().take(limit) {
             out.push_str(&format!("- {line}\n"));
         }
-        if matches.len() > 20 {
+        if matches.len() > limit {
             out.push_str(&format!(
                 "... omitted {} matches; exact ref available ...\n",
-                matches.len() - 20
+                matches.len() - limit
             ));
         }
     }

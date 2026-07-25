@@ -464,6 +464,87 @@ fn short_mixed_failure_prioritizes_error_anchor_below_raw_tokens() {
     );
 }
 
+/// `cat` output must never be rendered as an inventory.
+///
+/// `ls dir && cat report.json` used to classify as repo inventory because
+/// `cat` was in INVENTORY_COMMANDS. Every JSON line contains `.` or `/`, so
+/// the inventory view counted the file body as "paths" and emitted it as
+/// sample_paths entries. The payload the caller actually asked for was
+/// destroyed in the visible output.
+#[test]
+fn cat_output_is_not_rendered_as_repo_inventory() {
+    let command = "ls /tmp/reports/ && cat /tmp/reports/gz.json";
+    let stdout = "gz.json
+{
+  \"contract_version\": \"1.0\",
+  \"passed\": false,
+  \"name\": \"ctx.step\"
+}
+";
+    let rendered = render_shell(ShellRenderInput {
+        command,
+        stdout,
+        stderr: "",
+        exit_code: Some(0),
+        timed_out: false,
+        mode: Mode::Auto,
+        max_visible_tokens: 4000,
+        stdout_ref: Some("tz://blob/stdout"),
+        stderr_ref: Some("tz://blob/stderr"),
+        combined_ref: Some("tz://blob/combined"),
+    });
+
+    assert!(
+        !rendered.visible.contains("repo_inventory"),
+        "cat output must not be classified as an inventory listing:\n{}",
+        rendered.visible
+    );
+    assert!(
+        !rendered.visible.contains("sample_paths"),
+        "file content must not be shredded into sample_paths:\n{}",
+        rendered.visible
+    );
+    assert!(
+        rendered.visible.contains("contract_version"),
+        "the payload the caller asked for must survive:\n{}",
+        rendered.visible
+    );
+}
+
+/// stderr must not reach sample_paths. An `ls` over a missing path emits
+/// "ls: /nope: No such file or directory" on stderr; folded into the inventory
+/// it appeared as a sample_paths entry indistinguishable from a real path.
+#[test]
+fn inventory_view_keeps_stderr_out_of_sample_paths() {
+    let command = "ls /repo/a.txt /repo/missing.txt";
+    let rendered = render_shell(ShellRenderInput {
+        command,
+        stdout: "/repo/a.txt
+",
+        stderr: "ls: /repo/missing.txt: No such file or directory
+",
+        exit_code: Some(1),
+        timed_out: false,
+        mode: Mode::Auto,
+        max_visible_tokens: 4000,
+        stdout_ref: Some("tz://blob/stdout"),
+        stderr_ref: Some("tz://blob/stderr"),
+        combined_ref: Some("tz://blob/combined"),
+    });
+
+    assert!(rendered.visible.contains("repo_inventory"));
+    assert!(
+        !rendered.visible.contains("No such file or directory"),
+        "stderr must not be rendered as inventory paths:\n{}",
+        rendered.visible
+    );
+    assert!(
+        rendered.visible.contains("files_seen: 1"),
+        "only the real stdout entry counts:\n{}",
+        rendered.visible
+    );
+}
+
 #[test]
 fn short_repo_inventory_shell_view_stays_below_raw_tokens_with_ref() {
     let command = "powershell -NoProfile -Command Get-ChildItem -Recurse -File | Sort-Object FullName | Select-Object -ExpandProperty FullName";
