@@ -1,7 +1,6 @@
 [workspace]
 resolver = "3"
 members = [
-    "crates/zerostack-machine-permit",
     "crates/tokenzero-core",
     "crates/tokenzero-recovery",
     "crates/tokenzero-runtime",
@@ -49,6 +48,7 @@ wait-timeout = "0.2.1"
 fastmcp-rust = { version = "0.3.2", git = "https://github.com/Dicklesworthstone/fastmcp_rust", rev = "1c66097b15dea9550e833ee9e433beeb66eefece" }
 zero-abi = { git = "https://github.com/AdityaVG13/zerostack", rev = "90cdbfad5fa5bc5d601e841def2416d64810a487" }
 zero-ref = { git = "https://github.com/AdityaVG13/zerostack", rev = "90cdbfad5fa5bc5d601e841def2416d64810a487" }
+zerostack-machine-permit = { git = "https://github.com/AdityaVG13/zerostack", rev = "3e6d49db0b4f6a1e275eeddec334f366a46626c9" }
 
 [profile.release-perf]
 inherits = "release"
