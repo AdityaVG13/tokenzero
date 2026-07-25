@@ -6,13 +6,13 @@
 use std::env;
 use std::path::PathBuf;
 use std::process;
+use tokenzero_core::McpToolSurface;
 use tokenzero_install::packaging::{
     PackageSurface, assert_packaged_surface_features, assert_surface_compiled,
-    default_install_prefix, install_surface, package_identity, sbom_document,
-    semantic_contract_digest, uninstall_report, uninstall_surface,
+    default_install_prefix, install_surface, package_identity, reject_non_stdio_args,
+    sbom_document, semantic_contract_digest, uninstall_report, uninstall_surface,
 };
 use tokenzero_mcp::{EngineConfig, run_fastmcp_stdio};
-use tokenzero_core::McpToolSurface;
 
 const SURFACE: PackageSurface = PackageSurface::Mcp;
 
@@ -35,7 +35,10 @@ fn main() {
         }
     }
 
-    if args.iter().any(|a| a == "help" || a == "--help" || a == "-h") {
+    if args
+        .iter()
+        .any(|a| a == "help" || a == "--help" || a == "-h")
+    {
         let id = package_identity(SURFACE);
         println!(
             "tokenzero-mcp — FastMCP per-operation surface (mutually exclusive with tokenzero-codemode)\n\
@@ -81,12 +84,22 @@ fn main() {
     }
 
     if args.iter().any(|a| a == "--mode=codemode")
-        || args.windows(2).any(|w| w[0] == "--mode" && w[1] == "codemode")
+        || args
+            .windows(2)
+            .any(|w| w[0] == "--mode" && w[1] == "codemode")
     {
         eprintln!(
             "tokenzero-mcp: artifact is locked to surface 'mcp'; refused --mode=codemode. \
 Install tokenzero-codemode for the CodeMode catalog (mutually exclusive)."
         );
+        process::exit(2);
+    }
+
+    // Every supported subcommand has already exited above, so anything left on
+    // argv is a caller mistake. Reject it instead of serving stdio, which would
+    // read EOF and exit 0 with no output (tokenzero-j0cn).
+    if let Err(e) = reject_non_stdio_args("tokenzero-mcp", &args) {
+        eprintln!("{e}");
         process::exit(2);
     }
 

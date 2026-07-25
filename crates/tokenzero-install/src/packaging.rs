@@ -377,9 +377,7 @@ pub fn modes_from_args(args: &[String]) -> Result<Option<PackageSurface>, String
                 "mcp" => mcp = true,
                 "codemode" => codemode = true,
                 "both" | "all" | "mcp+codemode" | "codemode+mcp" => {
-                    return Err(dual_surface_diagnostic(&format!(
-                        "invalid --mode={rest}"
-                    )));
+                    return Err(dual_surface_diagnostic(&format!("invalid --mode={rest}")));
                 }
                 _ => {}
             }
@@ -392,9 +390,7 @@ pub fn modes_from_args(args: &[String]) -> Result<Option<PackageSurface>, String
                     "mcp" => mcp = true,
                     "codemode" => codemode = true,
                     "both" | "all" | "mcp+codemode" | "codemode+mcp" => {
-                        return Err(dual_surface_diagnostic(&format!(
-                            "invalid --mode {rest}"
-                        )));
+                        return Err(dual_surface_diagnostic(&format!("invalid --mode {rest}")));
                     }
                     _ => {}
                 }
@@ -423,6 +419,48 @@ pub fn modes_from_args(args: &[String]) -> Result<Option<PackageSurface>, String
         return Ok(Some(PackageSurface::Codemode));
     }
     Ok(None)
+}
+
+/// Argument shapes a stdio surface binary legitimately accepts before serving.
+///
+/// Anything else is a caller mistake (usually a `tokenzero` CLI verb aimed at the
+/// wrong binary) and must fail loudly.
+const STDIO_SURFACE_ALLOWED_FLAG_PREFIXES: &[&str] = &[
+    "--mode",
+    "--tool-surface",
+    "--root",
+    "--repo",
+    "--log-level",
+    "--surface",
+];
+
+/// Reject argv a stdio surface binary cannot serve (tokenzero-j0cn).
+///
+/// `tokenzero-codemode expand --raw <ref>` used to fall through every packaging
+/// branch into the stdio server, which then read EOF from a non-tty stdin and exited
+/// 0 with no output. Valid and invalid refs were indistinguishable, so the silent
+/// empty success masked whatever the caller actually got wrong. Surface binaries only
+/// speak MCP/CodeMode over stdio; CLI verbs belong to the `tokenzero` binary.
+pub fn reject_non_stdio_args(artifact: &str, args: &[String]) -> Result<(), String> {
+    // args[0] is the executable path.
+    for arg in args.iter().skip(1) {
+        if arg.starts_with('-') {
+            let name = arg.split('=').next().unwrap_or(arg);
+            if STDIO_SURFACE_ALLOWED_FLAG_PREFIXES.contains(&name) {
+                continue;
+            }
+            return Err(format!(
+                "{artifact}: unsupported option {arg:?}. This artifact only serves the stdio surface; it has no CLI subcommands. Run `tokenzero {arg}` for CLI operations (expand, ingest, run, capabilities), or `{artifact} help` for the surface contract."
+            ));
+        }
+        // A bare positional at this point is an unrecognized subcommand: every
+        // supported one (help/sbom/doctor/install/uninstall/raw-worker) already
+        // returned before this check.
+        return Err(format!(
+            "{artifact}: unknown subcommand {arg:?}. This artifact only serves the stdio surface; it has no CLI subcommands. Run `tokenzero {arg}` for CLI operations (expand, ingest, run, capabilities), or `{artifact} help` for the surface contract."
+        ));
+    }
+    Ok(())
 }
 
 /// Resolve the single surface this process is allowed to start.

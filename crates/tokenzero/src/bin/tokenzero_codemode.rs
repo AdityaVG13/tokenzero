@@ -9,8 +9,8 @@ use std::process;
 use tokenzero_core::McpToolSurface;
 use tokenzero_install::packaging::{
     PackageSurface, assert_packaged_surface_features, assert_surface_compiled,
-    default_install_prefix, install_surface, package_identity, sbom_document,
-    semantic_contract_digest, uninstall_report, uninstall_surface,
+    default_install_prefix, install_surface, package_identity, reject_non_stdio_args,
+    sbom_document, semantic_contract_digest, uninstall_report, uninstall_surface,
 };
 use tokenzero_mcp::{EngineConfig, run_stdio};
 
@@ -34,7 +34,10 @@ fn main() {
         }
     }
 
-    if args.iter().any(|a| a == "help" || a == "--help" || a == "-h") {
+    if args
+        .iter()
+        .any(|a| a == "help" || a == "--help" || a == "-h")
+    {
         let id = package_identity(SURFACE);
         println!(
             "tokenzero-codemode — CodeMode plan surface (mutually exclusive with tokenzero-mcp)\n\
@@ -89,6 +92,14 @@ Install tokenzero-mcp for the FastMCP catalog (mutually exclusive)."
         process::exit(2);
     }
 
+    // Every supported subcommand has already exited above, so anything left on
+    // argv is a caller mistake. Reject it instead of serving stdio, which would
+    // read EOF and exit 0 with no output (tokenzero-j0cn).
+    if let Err(e) = reject_non_stdio_args("tokenzero-codemode", &args) {
+        eprintln!("{e}");
+        process::exit(2);
+    }
+
     if let Err(e) = assert_surface_compiled(SURFACE) {
         eprintln!("{e}");
         process::exit(2);
@@ -135,9 +146,11 @@ fn run_install(args: &[String]) {
     let prefix = parse_flag(args, "--prefix")
         .map(PathBuf::from)
         .unwrap_or_else(default_install_prefix);
-    let binary = parse_flag(args, "--binary").map(PathBuf::from).unwrap_or_else(|| {
-        env::current_exe().unwrap_or_else(|_| PathBuf::from("tokenzero-codemode"))
-    });
+    let binary = parse_flag(args, "--binary")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            env::current_exe().unwrap_or_else(|_| PathBuf::from("tokenzero-codemode"))
+        });
     match install_surface(SURFACE, &prefix, &binary) {
         Ok(state) => {
             println!(
