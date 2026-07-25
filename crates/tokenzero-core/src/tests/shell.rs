@@ -545,6 +545,98 @@ fn inventory_view_keeps_stderr_out_of_sample_paths() {
     );
 }
 
+/// Every listing entry must survive the inventory view.
+///
+/// `inventory_stats` classified a line as a dir only on a trailing slash and as
+/// a file only via the caller's predicate, with no else arm. A bare `ls` prints
+/// dotless relative names like `src` or `alpha`, which matched neither, so they
+/// were dropped from the counts AND from sample_paths with no marker. The view
+/// then made a confident but false claim about the size of the listing.
+#[test]
+fn inventory_view_never_silently_drops_dotless_entries() {
+    let command = "ls /repo; ls /repo/missing";
+    let stdout = "alpha\nbeta\ngamma\nnotes.txt\n";
+    let rendered = render_shell(ShellRenderInput {
+        command,
+        stdout,
+        stderr: "",
+        exit_code: Some(1),
+        timed_out: false,
+        mode: Mode::Auto,
+        max_visible_tokens: 4000,
+        stdout_ref: Some("tz://blob/stdout"),
+        stderr_ref: Some("tz://blob/stderr"),
+        combined_ref: Some("tz://blob/combined"),
+    });
+
+    assert!(rendered.visible.contains("repo_inventory"));
+    for entry in ["alpha", "beta", "gamma", "notes.txt"] {
+        assert!(
+            rendered.visible.contains(entry),
+            "entry {entry} vanished from the inventory view:\n{}",
+            rendered.visible
+        );
+    }
+    // The three dotless names are accounted for rather than discarded.
+    assert!(
+        rendered.visible.contains("other_entries_seen: 3"),
+        "unclassified entries must be counted, not dropped:\n{}",
+        rendered.visible
+    );
+}
+
+/// A cleanly classified listing must not grow the extra counter, so the common
+/// case stays exactly as cheap as it was.
+#[test]
+fn inventory_view_omits_other_counter_when_everything_classifies() {
+    let command = "ls /repo/a.txt /repo/b.txt";
+    let rendered = render_shell(ShellRenderInput {
+        command,
+        stdout: "/repo/a.txt\n/repo/b.txt\n",
+        stderr: "",
+        exit_code: Some(0),
+        timed_out: false,
+        mode: Mode::Auto,
+        max_visible_tokens: 4000,
+        stdout_ref: Some("tz://blob/stdout"),
+        stderr_ref: Some("tz://blob/stderr"),
+        combined_ref: Some("tz://blob/combined"),
+    });
+
+    assert!(rendered.visible.contains("repo_inventory"));
+    assert!(
+        !rendered.visible.contains("other_entries_seen"),
+        "no unclassified entries means no extra line:\n{}",
+        rendered.visible
+    );
+}
+
+/// stderr exclusion (zerostack-je4) must keep working now that unclassified
+/// lines are retained: a diagnostic must not sneak in through the new arm.
+#[test]
+fn inventory_other_bucket_still_excludes_stderr() {
+    let command = "ls /repo/a.txt /repo/missing.txt";
+    let rendered = render_shell(ShellRenderInput {
+        command,
+        stdout: "/repo/a.txt\n",
+        stderr: "ls: /repo/missing.txt: No such file or directory\n",
+        exit_code: Some(1),
+        timed_out: false,
+        mode: Mode::Auto,
+        max_visible_tokens: 4000,
+        stdout_ref: Some("tz://blob/stdout"),
+        stderr_ref: Some("tz://blob/stderr"),
+        combined_ref: Some("tz://blob/combined"),
+    });
+
+    assert!(
+        !rendered.visible.contains("No such file or directory"),
+        "stderr must stay out of the inventory view:\n{}",
+        rendered.visible
+    );
+    assert!(rendered.visible.contains("files_seen: 1"));
+}
+
 #[test]
 fn short_repo_inventory_shell_view_stays_below_raw_tokens_with_ref() {
     let command = "powershell -NoProfile -Command Get-ChildItem -Recurse -File | Sort-Object FullName | Select-Object -ExpandProperty FullName";

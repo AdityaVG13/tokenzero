@@ -5,6 +5,9 @@ use crate::*;
 pub(crate) struct InventoryStats<'a> {
     pub files: usize,
     pub dirs: usize,
+    /// Entries matching neither the dir nor the file predicate. They are still
+    /// real listing entries and must never vanish without a trace.
+    pub other: usize,
     pub line_counts: Vec<&'a str>,
     pub paths: Vec<&'a str>,
 }
@@ -21,8 +24,17 @@ pub(crate) fn inventory_stats<'a>(
         }
         if line.ends_with('/') {
             stats.dirs += 1;
-        } else if is_file(line) {
-            stats.files += 1;
+        } else {
+            if is_file(line) {
+                stats.files += 1;
+            } else {
+                // A bare `ls` prints relative names with no trailing slash, so a
+                // dotless entry like `src`, `target` or `README` satisfies neither
+                // arm. Dropping it made the view claim a smaller listing than the
+                // command actually produced, with no marker that anything was
+                // omitted, so the caller silently read a truncated directory.
+                stats.other += 1;
+            }
             if stats.paths.len() < sample_limit {
                 stats.paths.push(line);
             }
@@ -104,6 +116,11 @@ pub fn repo_inventory_view(command: &str, output: &str) -> String {
         "files_seen: {}\ndirs_seen: {}\n",
         stats.files, stats.dirs
     ));
+    // Only emitted when nonzero, so a cleanly classified listing renders exactly
+    // as before and only an otherwise-lossy one grows a line.
+    if stats.other > 0 {
+        out.push_str(&format!("other_entries_seen: {}\n", stats.other));
+    }
     for (label, values, limit) in [
         ("linecount_summary", &stats.line_counts, 12),
         ("sample_paths", &stats.paths, 20),

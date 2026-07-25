@@ -54,6 +54,9 @@ pub(crate) fn compact_repo_inventory_view(command: &str, output: &str) -> String
     if stats.dirs > 0 {
         out.push_str(&format!("dirs_seen: {}\n", stats.dirs));
     }
+    if stats.other > 0 {
+        out.push_str(&format!("other_entries_seen: {}\n", stats.other));
+    }
     if !stats.paths.is_empty() {
         out.push_str("sample_paths:\n");
         for file in stats.paths {
