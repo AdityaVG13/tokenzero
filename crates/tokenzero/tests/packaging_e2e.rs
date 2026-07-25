@@ -423,3 +423,59 @@ fn release_workflow_builds_and_ships_both_surfaces() {
     }
 }
 
+
+/// zerostack-vpa: automatic CI must stay off in this repo to preserve the
+/// GitHub Actions budget. `development-contract.yml` shipped with
+/// `push`/`pull_request` triggers and was left untracked, so a single
+/// `git add -A` would have started a 3-OS matrix on every push and every PR.
+///
+/// Committing it with the trigger fixed is only half a fix; this asserts the
+/// property directly so no workflow can reintroduce an automatic trigger.
+#[test]
+fn no_workflow_runs_automatically() {
+    let workflows = repo_root().join(".github/workflows");
+    let mut checked = 0;
+    for entry in std::fs::read_dir(&workflows).expect("read workflows dir") {
+        let path = entry.expect("workflow entry").path();
+        if path.extension().is_none_or(|e| e != "yml" && e != "yaml") {
+            continue;
+        }
+        let text = std::fs::read_to_string(&path).expect("read workflow");
+        let name = path.file_name().unwrap().to_string_lossy().into_owned();
+
+        // Triggers are the keys of the top-level `on:` block, so scan exactly
+        // that block. Matching anywhere in the file would trip over these words
+        // in a comment or a job step; matching at column zero would miss them
+        // entirely, since they are indented under `on:`.
+        let triggers: Vec<&str> = text
+            .lines()
+            .skip_while(|l| !l.starts_with("on:"))
+            .skip(1)
+            .take_while(|l| l.trim().is_empty() || l.starts_with(char::is_whitespace))
+            .filter_map(|l| {
+                let t = l.trim();
+                (!t.is_empty() && !t.starts_with('#') && t.ends_with(':'))
+                    .then(|| t.trim_end_matches(':'))
+            })
+            .collect();
+
+        for forbidden in ["push", "pull_request", "pull_request_target", "schedule"] {
+            assert!(
+                !triggers.contains(&forbidden),
+                "{name} declares the automatic trigger '{forbidden}'; \
+                 only workflow_dispatch is allowed (zerostack-vpa). \
+                 Triggers found: {triggers:?}"
+            );
+        }
+        assert!(
+            triggers.contains(&"workflow_dispatch"),
+            "{name} must be manually dispatchable; triggers found: {triggers:?}"
+        );
+        checked += 1;
+    }
+    assert!(
+        checked > 0,
+        "no workflows found under {}",
+        workflows.display()
+    );
+}
