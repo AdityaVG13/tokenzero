@@ -334,6 +334,7 @@ fn shared_cas_error_reason(err: SharedCasError) -> &'static str {
         SharedCasError::Io(_) => "shared-cas-io",
         SharedCasError::InvalidHash(_) => "zeroref-malformed",
         SharedCasError::NotFound => "shared-cas-missing",
+        SharedCasError::Gc(_) => "shared-cas-gc",
     }
 }
 

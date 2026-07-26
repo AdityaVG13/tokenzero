@@ -90,6 +90,7 @@ impl From<SharedCasError> for TokenZeroStoreError {
             SharedCasError::Io(e) => Self::Io(e.to_string()),
             SharedCasError::Policy => Self::Policy,
             SharedCasError::InvalidHash(_) => Self::Malformed,
+            SharedCasError::Gc(_) => Self::Policy,
         }
     }
 }

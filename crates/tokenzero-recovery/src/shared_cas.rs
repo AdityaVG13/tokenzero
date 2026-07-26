@@ -25,6 +25,8 @@ pub enum SharedCasError {
     Policy,
     #[error("invalid hash: {0}")]
     InvalidHash(String),
+    #[error("gc record error: {0}")]
+    Gc(String),
 }
 
 #[derive(Debug, Clone)]
@@ -81,6 +83,13 @@ impl SharedCas {
         // the moment the caller can reference it (zerostack-rhd). Publishers do
         // not exclude each other; only an active sweep does.
         let _coord = GcCoordLock::acquire_shared(&self.root)?;
+        self.publish_locked(bytes)
+    }
+
+    /// Publish assuming the caller already holds the shared GC coordination
+    /// lock. Split out so publication and lease protection can happen under one
+    /// lock acquisition rather than two.
+    fn publish_locked(&self, bytes: &[u8]) -> Result<String, SharedCasError> {
         let full_hash = content_sha256_hex(bytes);
         let path = self.object_path(&full_hash);
         if path.exists() {
@@ -113,6 +122,74 @@ impl SharedCas {
             let _ = parent_dir.sync_all();
         }
         Ok(full_hash)
+    }
+
+    /// Publish `bytes` and, before releasing the shared GC coordination lock,
+    /// write a lease covering the resulting hash.
+    ///
+    /// `publish` alone only protects an object while the shared lock is held.
+    /// A caller that publishes an object now and commits a root referencing it
+    /// later is unprotected in between, which is the exact window the
+    /// publish/GC race exploits (zerostack-rhd, tokenzero-8tdg). The lease
+    /// records that gap as liveness so a sweep in that window retains the
+    /// object instead of collecting it.
+    ///
+    /// Publication and protection are joined here rather than left to two calls
+    /// so there is no ordering in which the object exists unprotected.
+    pub fn publish_leased(
+        &self,
+        bytes: &[u8],
+        project_id: &str,
+        operation_id: &str,
+        lease_seconds: u64,
+    ) -> Result<String, SharedCasError> {
+        let _coord = GcCoordLock::acquire_shared(&self.root)?;
+        let full_hash = self.publish_locked(bytes)?;
+        let now = SystemTime::now();
+        let lease = LeaseRecord {
+            schema_version: GC_SCHEMA_VERSION.to_string(),
+            record_type: GC_RECORD_TYPE_LEASE.to_string(),
+            engine: GC_ENGINE_TOKENZERO.to_string(),
+            project_id: project_id.to_string(),
+            operation_id: operation_id.to_string(),
+            // read_lease_record enforces epoch >= 1; a 0 here is silently
+            // rejected at read time and degrades the sweep to "uncertain"
+            // instead of protecting anything.
+            epoch: 1,
+            owner: LeaseOwner {
+                pid: std::process::id() as u64,
+                host: std::env::var("HOSTNAME").unwrap_or_else(|_| "unknown".to_string()),
+            },
+            started_at: format_system_time(now),
+            expires_at: format_system_time(
+                now + std::time::Duration::from_secs(lease_seconds.max(GC_MIN_GRACE_SECONDS)),
+            ),
+            grace_seconds: GC_MIN_GRACE_SECONDS,
+            blob_hashes: vec![full_hash.clone()],
+        };
+        publish_lease_record_locked(&self.root, &lease)
+            .map_err(|err| SharedCasError::Gc(err.to_string()))?;
+        Ok(full_hash)
+    }
+
+    /// Release the lease taken by [`SharedCas::publish_leased`] once the caller
+    /// has committed a root that makes the object reachable on its own.
+    pub fn release_lease(&self, project_id: &str, operation_id: &str) -> Result<(), SharedCasError> {
+        let _coord = GcCoordLock::acquire_shared(&self.root)?;
+        let path = gc_join(
+            &self.root,
+            &[
+                "leases",
+                GC_ENGINE_TOKENZERO,
+                project_id,
+                &format!("{operation_id}.json"),
+            ],
+        );
+        match fs::remove_file(&path) {
+            Ok(()) => Ok(()),
+            Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(()),
+            Err(err) => Err(err.into()),
+        }
     }
 
     pub fn resolve(&self, full_hash: &str) -> Result<Vec<u8>, SharedCasError> {
@@ -353,6 +430,7 @@ impl From<SharedCasError> for GcError {
                 GcError::SchemaViolation(format!("invalid CAS hash {s}"))
             }
             SharedCasError::NotFound => GcError::UncertainMetadata("CAS object not found".into()),
+            SharedCasError::Gc(m) => GcError::SchemaViolation(m),
         }
     }
 }
@@ -1504,6 +1582,25 @@ pub fn publish_pin_record(store_root: &Path, pin: &PinRecord) -> Result<PathBuf,
 }
 
 pub fn publish_lease_record(store_root: &Path, lease: &LeaseRecord) -> Result<PathBuf, GcError> {
+    let path = validate_lease_record(store_root, lease)?;
+    let _coord = GcCoordLock::acquire(store_root)?;
+    write_gc_json(&path, lease)?;
+    Ok(path)
+}
+
+/// Write a lease assuming the caller already holds a GC coordination lock.
+/// `publish_leased` runs under the SHARED lock, so it must not re-acquire the
+/// exclusive one here.
+pub(crate) fn publish_lease_record_locked(
+    store_root: &Path,
+    lease: &LeaseRecord,
+) -> Result<PathBuf, GcError> {
+    let path = validate_lease_record(store_root, lease)?;
+    write_gc_json(&path, lease)?;
+    Ok(path)
+}
+
+fn validate_lease_record(store_root: &Path, lease: &LeaseRecord) -> Result<PathBuf, GcError> {
     require_schema(
         &lease.schema_version,
         &lease.record_type,
@@ -1512,6 +1609,10 @@ pub fn publish_lease_record(store_root: &Path, lease: &LeaseRecord) -> Result<Pa
     require_gc_engine(&lease.engine)?;
     require_schema_field(is_valid_hash(&lease.project_id), "project_id")?;
     require_schema_field(is_valid_pin_id(&lease.operation_id), "operation_id")?;
+    // Writer and reader must agree. read_lease_record requires epoch >= 1, so
+    // accepting 0 here would let a caller persist a lease that the sweep then
+    // discards as corrupt -- protection that silently does not exist.
+    require_schema_field(lease.epoch >= 1, "epoch")?;
     if lease.grace_seconds < GC_MIN_GRACE_SECONDS {
         return Err(GcError::SchemaViolation(format!(
             "grace_seconds < {}",
@@ -1530,10 +1631,12 @@ pub fn publish_lease_record(store_root: &Path, lease: &LeaseRecord) -> Result<Pa
         lease.blob_hashes.iter().all(|h| is_valid_hash(h)),
         "blob_hash",
     )?;
-    let path = gc_record_path(store_root, "leases", lease, &lease.operation_id);
-    let _coord = GcCoordLock::acquire(store_root)?;
-    write_gc_json(&path, lease)?;
-    Ok(path)
+    Ok(gc_record_path(
+        store_root,
+        "leases",
+        lease,
+        &lease.operation_id,
+    ))
 }
 
 /// Process-unique suffix for temp object names (`{nanos}-{counter}`).
