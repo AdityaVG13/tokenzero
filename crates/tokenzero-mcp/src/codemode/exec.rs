@@ -2954,6 +2954,17 @@ fn record_outcome(
     *total_prevented_read_bytes += outcome.prevented_read_bytes;
 }
 
+/// Millisecond shell-deadline spellings, mirroring the engine dispatcher.
+const SHELL_TIMEOUT_MS_KEYS: &[&str] = &["timeout_ms", "timeoutMs", "shell_timeout_ms"];
+
+/// Reads a shell deadline in milliseconds from any accepted spelling.
+fn shell_timeout_ms_opt(opts: &Opts<'_>) -> Option<u64> {
+    SHELL_TIMEOUT_MS_KEYS
+        .iter()
+        .find_map(|key| opts.u64(key))
+        .filter(|millis| *millis > 0)
+}
+
 struct Opts<'a>(Option<&'a serde_json::Map<String, Value>>);
 
 impl<'a> Opts<'a> {
@@ -2963,6 +2974,10 @@ impl<'a> Opts<'a> {
 
     fn usize(&self, key: &str) -> Option<usize> {
         self.0?.get(key)?.as_u64().map(|n| n as usize)
+    }
+
+    fn u64(&self, key: &str) -> Option<u64> {
+        self.0?.get(key)?.as_u64()
     }
 
     fn usize_or(&self, key: &str, default: usize) -> usize {
@@ -3270,9 +3285,13 @@ fn exec_shell(engine: &TokenZeroEngine, work_root: &Path, args: &[Value]) -> OpR
         })
         .unwrap_or_else(|| work_root.to_path_buf());
     let mode = opts.mode_or("mode", Mode::Auto);
-    let timeout = opts
-        .usize("timeout_seconds")
-        .map(|secs| Duration::from_secs(secs as u64));
+    // Both units are accepted. Reading only `timeout_seconds` here is what made
+    // `{ timeout_ms: 1000 }` a no-op: an unrecognized key, dropped in silence,
+    // so the command ran under the 60s default and reported success.
+    let timeout_ms = shell_timeout_ms_opt(&opts);
+    let timeout = timeout_ms
+        .map(Duration::from_millis)
+        .or_else(|| opts.usize("timeout_seconds").map(|secs| Duration::from_secs(secs as u64)));
     // Background jobs are transport-side composition (not a registry domain op).
     if opts.bool("background").unwrap_or(false) {
         return engine
@@ -3286,7 +3305,11 @@ fn exec_shell(engine: &TokenZeroEngine, work_root: &Path, args: &[Value]) -> OpR
         "mode": mode.to_string(),
         "rewrite": "safe",
     });
-    if let Some(secs) = opts.usize("timeout_seconds") {
+    // Forward milliseconds verbatim so sub-second deadlines survive; the
+    // dispatcher owns the clamping for both units.
+    if let Some(millis) = timeout_ms {
+        payload["timeout_ms"] = json!(millis);
+    } else if let Some(secs) = opts.usize("timeout_seconds") {
         payload["timeout_seconds"] = json!(secs);
     }
     let outcome = tokenzero_engine::dispatch_codemode_method(engine, "zero.shell", &payload)

@@ -45,9 +45,14 @@
 
     #[test]
     fn contract_digest_matches_frozen_operation_abi() {
+        // Bumped 2026-07-26 (tokenzero-gpa0): `tz_shell` gained an optional
+        // `timeout_ms` property. Additive and backward compatible -- existing
+        // callers that spell the deadline in seconds are unaffected -- but the
+        // published ABI surface changed, so the freeze is re-pinned here
+        // deliberately rather than relaxed.
         assert_eq!(
             contract_digest_hex(),
-            "bf1dace4bcc6bdddda15b87f45f1157ede4c35f1e0a369c6493b375f8f28b86a"
+            "f8c415afad6870926d0d22907e8f350b11854ab2f73164d211bd467ce1d42b04"
         );
     }
 

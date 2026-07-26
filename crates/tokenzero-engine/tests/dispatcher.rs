@@ -528,3 +528,63 @@ fn non_domain_cli_commands_are_not_registry_domain_ops() {
     assert!(is_domain_operation("tz_batch"));
     assert!(is_domain_operation("tz_report_tool_issue"));
 }
+
+/// A shell deadline spelled in milliseconds must actually bound the command.
+///
+/// Regression for tokenzero-gpa0: `timeout_ms` was not among the keys the shell
+/// dispatcher consulted, so it was accepted and discarded. The command then ran
+/// to completion under the default 60s timeout and reported success. Measured
+/// through the live router before the fix, `{ timeout_ms: 1000 }` on an 8s
+/// command returned after 8048ms with status `ok`.
+///
+/// This asserts on elapsed wall time rather than the response shape: the bug
+/// was that the command KEPT RUNNING, which only a clock can observe.
+#[test]
+fn shell_timeout_ms_actually_bounds_the_command() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let engine = engine_for(dir.path());
+
+    let started = std::time::Instant::now();
+    let _ = dispatch_codemode_method(
+        &engine,
+        "zero.shell",
+        &json!({"command": "sleep 10", "timeout_ms": 1500}),
+    );
+    let elapsed = started.elapsed();
+
+    assert!(
+        elapsed < std::time::Duration::from_secs(6),
+        "timeout_ms was ignored: a 10s command under a 1500ms deadline took {elapsed:?}"
+    );
+}
+
+/// The two spellings must not disagree. Equivalent requests in different units
+/// producing different behavior is how the millisecond path stayed broken while
+/// the seconds path looked fine.
+#[test]
+fn shell_timeout_units_agree() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let engine = engine_for(dir.path());
+
+    let ms_started = std::time::Instant::now();
+    let _ = dispatch_codemode_method(
+        &engine,
+        "zero.shell",
+        &json!({"command": "sleep 10", "timeout_ms": 2000}),
+    );
+    let ms_elapsed = ms_started.elapsed();
+
+    let secs_started = std::time::Instant::now();
+    let _ = dispatch_codemode_method(
+        &engine,
+        "zero.shell",
+        &json!({"command": "sleep 10", "timeout_seconds": 2}),
+    );
+    let secs_elapsed = secs_started.elapsed();
+
+    let delta = ms_elapsed.abs_diff(secs_elapsed);
+    assert!(
+        delta < std::time::Duration::from_secs(2),
+        "timeout_ms ({ms_elapsed:?}) and timeout_seconds ({secs_elapsed:?}) disagree"
+    );
+}

@@ -5,7 +5,10 @@
 //! re-implement auth/root/mutation/ref/telemetry here or below.
 
 use crate::expand_params::ExpandParams;
-use crate::{EditHunk, ServeOptions, TokenZeroEngine, annotate_write_failure, shell_timeout_from_secs};
+use crate::{
+    EditHunk, ServeOptions, TokenZeroEngine, annotate_write_failure, shell_timeout_from_millis,
+    shell_timeout_from_secs,
+};
 use serde_json::{Value, json};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -147,15 +150,7 @@ pub fn execute_domain_op(
                 arg_bool(args, "no_rewrite"),
                 env,
                 arg_str(args, "stdin"),
-                arg_timeout_any(
-                    args,
-                    &[
-                        "timeout_seconds",
-                        "timeout_secs",
-                        "timeout",
-                        "shell_timeout_seconds",
-                    ],
-                ),
+                arg_shell_timeout(args),
             )
         }
         "ingest" => {
@@ -425,6 +420,37 @@ fn arg_timeout_any(args: &Value, keys: &[&str]) -> Option<Duration> {
             .and_then(coerce_u64)
             .map(|seconds| shell_timeout_from_secs(Some(seconds)))
     })
+}
+
+/// Shell deadline spellings accepted in milliseconds.
+const SHELL_TIMEOUT_MS_KEYS: &[&str] = &["timeout_ms", "timeoutMs", "shell_timeout_ms"];
+
+/// Shell deadline spellings accepted in seconds.
+const SHELL_TIMEOUT_SECS_KEYS: &[&str] = &[
+    "timeout_seconds",
+    "timeout_secs",
+    "timeout",
+    "shell_timeout_seconds",
+];
+
+/// Resolves a shell deadline from any accepted spelling, in either unit.
+///
+/// `timeout_ms` was previously not among the keys consulted here, so callers
+/// that spelled the deadline in milliseconds had it silently discarded: the
+/// command ran to completion under the default 60s timeout and was reported as
+/// a success. Measured before this fix, a `{ timeout_ms: 1000 }` request ran
+/// 8048ms and returned status `ok`. Milliseconds are checked first because they
+/// are the more precise unit, so a caller passing both gets the tighter bound
+/// rather than a unit-dependent coin flip.
+fn arg_shell_timeout(args: &Value) -> Option<Duration> {
+    SHELL_TIMEOUT_MS_KEYS
+        .iter()
+        .find_map(|key| {
+            args.get(*key)
+                .and_then(coerce_u64)
+                .map(|millis| shell_timeout_from_millis(Some(millis)))
+        })
+        .or_else(|| arg_timeout_any(args, SHELL_TIMEOUT_SECS_KEYS))
 }
 
 fn arg_command(args: &Value) -> Result<(String, Option<Vec<String>>), String> {

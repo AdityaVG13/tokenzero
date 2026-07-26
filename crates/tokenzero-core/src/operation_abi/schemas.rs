@@ -247,7 +247,12 @@ pub fn shell_schema() -> Value {
             "rewrite": {"type": "string", "description": "Rewrite mode applied before execution."},
             "no_rewrite": {"type": "boolean", "default": false},
             "stdin": {"type": "string"},
-            "timeout_seconds": positive_usize(ABI_DEFAULT_SHELL_TIMEOUT_SECS as usize)
+            "timeout_seconds": positive_usize(ABI_DEFAULT_SHELL_TIMEOUT_SECS as usize),
+            "timeout_ms": {
+                "type": "integer",
+                "minimum": 1,
+                "description": "Shell deadline in milliseconds. Takes precedence over timeout_seconds and preserves sub-second deadlines."
+            }
         }),
         &[],
     )

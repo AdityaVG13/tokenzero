@@ -112,6 +112,21 @@ pub fn golden_vectors() -> Vec<GoldenVector> {
                     .with_retryable(true),
             ),
         },
+        // The millisecond spelling must reach the same deadline machinery as
+        // the seconds spelling. It was previously an unrecognized key, so the
+        // command outlived its timeout and reported success.
+        GoldenVector {
+            id: "shell_deadline_millis",
+            op: "tz_shell",
+            tags: &["typed_failure", "deadline"],
+            args: json!({ "command": "sleep 999", "timeout_ms": 250 }),
+            expected_ok: None,
+            expected_err: Some(
+                DomainError::new(DomainErrorKind::DeadlineExceeded, "shell wall budget exceeded")
+                    .with_op("tz_shell")
+                    .with_retryable(true),
+            ),
+        },
         GoldenVector {
             id: "execute_code_cancelled",
             op: "tz_execute_code",

@@ -225,6 +225,23 @@ pub fn shell_timeout_from_secs(seconds: Option<u64>) -> Duration {
     Duration::from_secs(seconds)
 }
 
+/// Millisecond-precision counterpart of [`shell_timeout_from_secs`].
+///
+/// Callers that spell a shell deadline in milliseconds must get the deadline
+/// they asked for, including sub-second ones. Routing them through the seconds
+/// path would floor a 300ms request to 0 and then clamp it back up to the 1s
+/// minimum, which is a *different* bound than the caller requested -- the
+/// silent substitution this whole contract exists to prevent.
+pub fn shell_timeout_from_millis(millis: Option<u64>) -> Duration {
+    let Some(millis) = millis else {
+        return Duration::from_secs(DEFAULT_SHELL_TIMEOUT_SECS);
+    };
+    // A zero/negative-ish request is not "no timeout"; it is an unusable value.
+    // Keep it representable rather than silently disabling the deadline.
+    let millis = millis.clamp(1, MAX_SHELL_TIMEOUT_SECS.saturating_mul(1_000));
+    Duration::from_millis(millis)
+}
+
 pub fn default_mcp_idle_timeout() -> Option<Duration> {
     let from_env = std::env::var("TOKENZERO_MCP_IDLE_TIMEOUT_SECS")
         .ok()
@@ -272,5 +289,53 @@ mod telemetry_tests {
         assert!(!resolve_telemetry(false, false, Some(false), Some("yes")));
         assert!(resolve_telemetry(false, false, None, Some("yes")));
         assert!(!resolve_telemetry(false, false, None, None));
+    }
+
+    /// A sub-second deadline must stay sub-second. Routing milliseconds through
+    /// the seconds path floored 300ms to 0 and clamped it back to 1s, handing
+    /// the caller a bound 3x larger than the one they asked for.
+    #[test]
+    fn millis_timeout_preserves_sub_second_deadlines() {
+        assert_eq!(
+            shell_timeout_from_millis(Some(300)),
+            Duration::from_millis(300)
+        );
+        assert_eq!(shell_timeout_from_millis(Some(1)), Duration::from_millis(1));
+        assert_eq!(
+            shell_timeout_from_millis(Some(1_500)),
+            Duration::from_millis(1_500)
+        );
+    }
+
+    #[test]
+    fn millis_and_secs_agree_on_equivalent_requests() {
+        assert_eq!(
+            shell_timeout_from_millis(Some(2_000)),
+            shell_timeout_from_secs(Some(2))
+        );
+    }
+
+    /// Zero is not "no timeout"; it is an unusable request. It must not silently
+    /// disable the deadline.
+    #[test]
+    fn millis_timeout_rejects_disabling_values() {
+        assert_eq!(shell_timeout_from_millis(Some(0)), Duration::from_millis(1));
+    }
+
+    #[test]
+    fn millis_timeout_clamps_to_the_same_ceiling_as_secs() {
+        let absurd = MAX_SHELL_TIMEOUT_SECS * 1_000 * 10;
+        assert_eq!(
+            shell_timeout_from_millis(Some(absurd)),
+            Duration::from_secs(MAX_SHELL_TIMEOUT_SECS)
+        );
+    }
+
+    #[test]
+    fn millis_timeout_defaults_when_absent() {
+        assert_eq!(
+            shell_timeout_from_millis(None),
+            Duration::from_secs(DEFAULT_SHELL_TIMEOUT_SECS)
+        );
     }
 }

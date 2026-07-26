@@ -150,8 +150,8 @@ pub use config::{
     DEFAULT_SHELL_INLINE_BUDGET, EngineConfig, FETCH_ALLOW_ENV, FETCH_DENY_ENV, FETCH_ENABLED_ENV,
     SHELL_INLINE_BUDGET_ENV, SearchBackend, TELEMETRY_ENV, default_mcp_idle_timeout,
     default_shell_timeout, mcp_idle_timeout_from_secs, mcp_tool_surface_from_env,
-    resolve_telemetry, shell_inline_budget_from_env, shell_timeout_from_secs,
-    telemetry_env_enabled,
+    resolve_telemetry, shell_inline_budget_from_env, shell_timeout_from_millis,
+    shell_timeout_from_secs, telemetry_env_enabled,
 };
 pub use cache_meter::{
     ANTHROPIC_CACHE_DIAGNOSIS_BETA, AnthropicCacheDiagnosisRequest, CacheMeter,
