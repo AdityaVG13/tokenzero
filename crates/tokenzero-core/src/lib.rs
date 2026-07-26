@@ -1709,7 +1709,6 @@ mod core_safety_regressions {
     }
 }
 
-
 #[cfg(test)]
 mod capsule_omission_exact_ref {
     use super::*;
@@ -1753,7 +1752,12 @@ mod capsule_omission_exact_ref {
             "recovery ref must be visible, not merely recorded: {}",
             capsule.text
         );
-        assert!(capsule.exact_refs.iter().any(|r| r == "tz://blob/abc#B0-100"));
+        assert!(
+            capsule
+                .exact_refs
+                .iter()
+                .any(|r| r == "tz://blob/abc#B0-100")
+        );
         capsule
             .validate_omission_rule(&original)
             .expect("omission rule must hold");

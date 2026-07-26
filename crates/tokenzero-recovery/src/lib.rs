@@ -929,7 +929,10 @@ fn tolerate_unsupported_sync(result: io::Result<()>) -> io::Result<()> {
 }
 
 fn sync_unsupported(err: &io::Error) -> bool {
-    if matches!(err.kind(), io::ErrorKind::Unsupported | io::ErrorKind::PermissionDenied) {
+    if matches!(
+        err.kind(),
+        io::ErrorKind::Unsupported | io::ErrorKind::PermissionDenied
+    ) {
         return true;
     }
     // ErrorKind::Unsupported does not cover every platform spelling: macOS

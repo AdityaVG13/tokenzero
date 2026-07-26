@@ -128,4 +128,3 @@ fn expired_lease_still_protects_through_the_grace_floor() {
         "grace window must outlive the lease itself"
     );
 }
-

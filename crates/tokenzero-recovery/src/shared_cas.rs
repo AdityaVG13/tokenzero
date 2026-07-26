@@ -174,7 +174,11 @@ impl SharedCas {
 
     /// Release the lease taken by [`SharedCas::publish_leased`] once the caller
     /// has committed a root that makes the object reachable on its own.
-    pub fn release_lease(&self, project_id: &str, operation_id: &str) -> Result<(), SharedCasError> {
+    pub fn release_lease(
+        &self,
+        project_id: &str,
+        operation_id: &str,
+    ) -> Result<(), SharedCasError> {
         let _coord = GcCoordLock::acquire_shared(&self.root)?;
         let path = gc_join(
             &self.root,
@@ -1600,7 +1604,10 @@ pub fn remove_pin_record(
     require_gc_engine(engine)?;
     require_schema_field(is_valid_hash(project_id), "project_id")?;
     require_schema_field(is_valid_pin_id(pin_id), "pin_id")?;
-    let path = gc_join(store_root, &[ "pins", engine, project_id, &format!("{pin_id}.json")]);
+    let path = gc_join(
+        store_root,
+        &["pins", engine, project_id, &format!("{pin_id}.json")],
+    );
     let _coord = GcCoordLock::acquire(store_root)?;
     match fs::remove_file(&path) {
         Ok(()) => Ok(()),

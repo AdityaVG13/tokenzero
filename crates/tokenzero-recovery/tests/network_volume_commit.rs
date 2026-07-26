@@ -49,7 +49,9 @@ fn commit_succeeds_on_a_network_volume_that_cannot_fsync() {
         eprintln!("skipped: no writable smbfs/nfs mount present");
         return;
     };
-    let dir = mount.join(".tz794r").join(format!("{}", std::process::id()));
+    let dir = mount
+        .join(".tz794r")
+        .join(format!("{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
 
     // Prove the fixture really is a filesystem that rejects the fsync, so a

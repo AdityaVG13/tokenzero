@@ -56,10 +56,16 @@ fn packing_never_exceeds_the_budget_under_a_registered_model() {
         }
     }
 
-    for text in ["\n\n\n\n", "a\n\nb\n\nc\n", "\na\n", "trailing\n\n\n", "x", ""] {
+    for text in [
+        "\n\n\n\n",
+        "a\n\nb\n\nc\n",
+        "\na\n",
+        "trailing\n\n\n",
+        "x",
+        "",
+    ] {
         for budget in 1..220usize {
             assert_within_budget(text, budget);
         }
     }
 }
-
