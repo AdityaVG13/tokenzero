@@ -195,6 +195,9 @@ mod flows {
     use serde_json::{Value, json};
     use sha2::{Digest, Sha256};
     use std::fs::{self, OpenOptions};
+    use tokenzero_recovery::shared_cas::{
+        PinRecord, SharedCas, publish_pin_record, remove_pin_record,
+    };
     use std::io::{self, Write};
     use std::time::{SystemTime, UNIX_EPOCH};
     pub fn sha256_bytes(bytes: &[u8]) -> String {
@@ -816,51 +819,66 @@ mod flows {
         .then(|| hash.into())
     }
 
-    fn pin_path(root: &Path, execution_id: &str, index: usize, hash: &str) -> PathBuf {
-        root.join("pins").join(format!(
-            "plan-{}-{index}-{}.json",
-            safe_execution_id(execution_id),
-            &hash[..12]
-        ))
+    /// GC store root for a journal root.
+    ///
+    /// `journal_root` is `<engine-dir>/plan-journals`, and the CAS store root is
+    /// resolved from the cache path by `SharedCas::attach_root_for_cache_path`,
+    /// which climbs ABOVE the engine directory when it is named `tokenzero`.
+    /// Writing pins relative to the journal root therefore placed them one or
+    /// two levels below `gc/`, where `walk_gc_json` never looks.
+    fn gc_store_root(journal_root: &Path) -> PathBuf {
+        let engine_dir = journal_root.parent().unwrap_or(journal_root);
+        SharedCas::attach_root_for_cache_path(&engine_dir.join("recovery-cache.json"))
     }
 
-    fn pins<'a>(
-        root: &'a Path,
-        journal: &'a PlanJournal,
-    ) -> impl Iterator<Item = (PathBuf, usize, String)> + 'a {
+    /// Pin id for one journal operation. Must be stable across write and
+    /// remove, and must satisfy the GC schema's pin-id rules.
+    fn pin_id_for(journal: &PlanJournal, index: usize) -> String {
+        format!(
+            "plan-{}-{}",
+            &sha256_bytes(journal.execution_id.as_bytes())[..24],
+            index
+        )
+    }
+
+    fn pins<'a>(journal: &'a PlanJournal) -> impl Iterator<Item = (usize, String)> + 'a {
         journal.operations.iter().flat_map(move |operation| {
-            operation.undo_refs.iter().filter_map(move |reference| {
-                pin_hash(reference).map(|hash| {
-                    let path = pin_path(root, &journal.execution_id, operation.index, &hash);
-                    (path, operation.index, hash)
-                })
-            })
+            operation
+                .undo_refs
+                .iter()
+                .filter_map(move |reference| pin_hash(reference).map(|h| (operation.index, h)))
         })
     }
 
     fn write_pins(root: &Path, journal: &PlanJournal) -> Result<(), String> {
-        for (path, index, hash) in pins(root, journal) {
-            let pin_id = format!(
-                "plan-{}-{}",
-                &sha256_bytes(journal.execution_id.as_bytes())[..24],
-                index
-            );
-            let record = json!({"schema_version":PIN_SCHEMA_VERSION,"record_type":"pin","engine":"tokenzero","project_id":journal.project_id,"pin_id":pin_id,"created_at":rfc3339_now(),"blob_hash":hash});
-            let bytes = serde_json::to_vec_pretty(&record).map_err(|e| e.to_string())?;
-            atomic_write(&path, &bytes).map_err(|e| format!("persist undo pin: {e}"))?;
+        let store_root = gc_store_root(root);
+        for (index, hash) in pins(journal) {
+            let record = PinRecord {
+                schema_version: PIN_SCHEMA_VERSION.to_string(),
+                record_type: "pin".to_string(),
+                engine: "tokenzero".to_string(),
+                project_id: journal.project_id.clone(),
+                pin_id: pin_id_for(journal, index),
+                created_at: rfc3339_now(),
+                expires_at: None,
+                blob_hash: hash,
+            };
+            // Publish through the shared writer rather than hand-rolling the
+            // path, so the pin location is owned in exactly one place and the
+            // record is schema-validated before it can claim to protect
+            // anything.
+            publish_pin_record(&store_root, &record)
+                .map_err(|e| format!("persist undo pin: {e}"))?;
         }
         Ok(())
     }
 
     fn remove_pins(root: &Path, journal: &PlanJournal) -> Result<(), String> {
-        for (path, _, _) in pins(root, journal) {
-            match fs::remove_file(&path) {
-                Ok(()) => {}
-                Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-                Err(error) => {
-                    return Err(format!("remove resolved pin {}: {error}", path.display()));
-                }
-            }
+        let store_root = gc_store_root(root);
+        for (index, _) in pins(journal) {
+            let pin_id = pin_id_for(journal, index);
+            remove_pin_record(&store_root, "tokenzero", &journal.project_id, &pin_id)
+                .map_err(|e| format!("remove resolved pin {pin_id}: {e}"))?;
         }
         Ok(())
     }
@@ -938,6 +956,72 @@ mod flows {
     mod tests {
         use super::*;
         use std::time::{Duration, Instant};
+
+        /// tokenzero-4xvw: write_pins wrote well-formed pin JSON, but to
+        /// journal_root/pins/, i.e. <engine-dir>/plan-journals/pins/. GC only
+        /// walks <store_root>/gc/, so an in-flight plan's undo objects were
+        /// collectible while a valid-looking pin file sat on disk.
+        ///
+        /// Asserts the pin lands where the GC READER looks, using the reader
+        /// itself rather than a hardcoded path, so the two cannot drift apart.
+        #[test]
+        fn undo_pins_are_published_where_gc_actually_reads_them() {
+            let dir = tempfile::tempdir().unwrap();
+            // Mirror the real layout: <store_root>/tokenzero/recovery-cache.json,
+            // which is the case where the store root climbs ABOVE the engine dir.
+            let cache = dir.path().join("tokenzero").join("recovery-cache.json");
+            let store_root = SharedCas::attach_root_for_cache_path(&cache);
+            assert_eq!(store_root, dir.path(), "fixture must exercise the climb");
+
+            let cas = SharedCas::new(store_root.clone());
+            let blob_hash = cas.publish(b"undo-payload").unwrap();
+
+            let journal = PlanJournal {
+                version: "1".into(),
+                plan_id: "plan-1".into(),
+                execution_id: "exec-1".into(),
+                project_id: sha256_bytes(b"project"),
+                store_id: "store".into(),
+                atomic: true,
+                downgrade_reason: None,
+                state: JournalState::Applying,
+                operations: vec![JournalOperation {
+                    index: 0,
+                    id: "op-0".into(),
+                    method: "fs.write".into(),
+                    classification: OperationClass::ReversibleStoreMutation,
+                    idempotency_key: "key-0".into(),
+                    target: None,
+                    precondition_digest: None,
+                    precondition_exists: None,
+                    postcondition_digest: None,
+                    undo_refs: vec![format!("tz://blob/{blob_hash}")],
+                    compensation_refs: Vec::new(),
+                    size: None,
+                    state: StepState::Applied,
+                    diagnostic: None,
+                }],
+                original_error: None,
+                rollback_errors: Vec::new(),
+                created_at_ms: 0,
+                updated_at_ms: 0,
+            };
+
+            let root = journal_root(&cache);
+            write_pins(&root, &journal).unwrap();
+
+            // The point of the bead: the pin must be visible to the sweep.
+            assert!(
+                cas.is_pinned(&blob_hash),
+                "GC cannot see the pin write_pins just published"
+            );
+
+            remove_pins(&root, &journal).unwrap();
+            assert!(
+                !cas.is_pinned(&blob_hash),
+                "unpin must be visible to GC too, or objects leak forever"
+            );
+        }
 
         #[test]
         fn mutation_lock_waits_for_an_active_peer() {

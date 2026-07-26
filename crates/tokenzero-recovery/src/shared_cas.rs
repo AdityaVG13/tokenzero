@@ -211,7 +211,12 @@ impl SharedCas {
         self.validate_hash(full_hash).is_ok() && self.object_path(full_hash).is_file()
     }
 
-    pub(crate) fn is_pinned(&self, full_hash: &str) -> bool {
+    /// Whether the GC sweep would treat `full_hash` as pinned.
+    ///
+    /// Deliberately conservative: an unreadable pin set reports pinned, since
+    /// the sweep must not collect while its own evidence is in doubt. Callers
+    /// asserting the NEGATIVE therefore also prove the pin set is readable.
+    pub fn is_pinned(&self, full_hash: &str) -> bool {
         if self.validate_hash(full_hash).is_err() {
             return false;
         }
@@ -1579,6 +1584,29 @@ pub fn publish_pin_record(store_root: &Path, pin: &PinRecord) -> Result<PathBuf,
     let _coord = GcCoordLock::acquire(store_root)?;
     write_gc_json(&path, pin)?;
     Ok(path)
+}
+
+/// Remove a previously published pin. Idempotent: a pin that is already gone is
+/// not an error, since callers unpin on resolution paths that may be retried.
+///
+/// Takes the same exclusive coordinator lock as `publish_pin_record` so a sweep
+/// cannot observe a half-removed pin set.
+pub fn remove_pin_record(
+    store_root: &Path,
+    engine: &str,
+    project_id: &str,
+    pin_id: &str,
+) -> Result<(), GcError> {
+    require_gc_engine(engine)?;
+    require_schema_field(is_valid_hash(project_id), "project_id")?;
+    require_schema_field(is_valid_pin_id(pin_id), "pin_id")?;
+    let path = gc_join(store_root, &[ "pins", engine, project_id, &format!("{pin_id}.json")]);
+    let _coord = GcCoordLock::acquire(store_root)?;
+    match fs::remove_file(&path) {
+        Ok(()) => Ok(()),
+        Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(err) => Err(err.into()),
+    }
 }
 
 pub fn publish_lease_record(store_root: &Path, lease: &LeaseRecord) -> Result<PathBuf, GcError> {
