@@ -902,6 +902,52 @@ enum RefResolve {
     DecodeFailed,
 }
 
+/// Absorb fsync failures that mean "this filesystem cannot fsync", not
+/// "this write failed".
+///
+/// Network mounts do not implement the durability primitives POSIX advertises.
+/// On macOS SMB, `sync_all` on a DIRECTORY returns ENOTSUP (45), and on a file
+/// opened read-only it returns EPERM (13) -- both verified against a live
+/// smbfs mount. Propagating those aborted the entire CodeMode plan AFTER its
+/// work had already run, so a read-only plan against a network-mounted repo
+/// failed nondeterministically depending on whether a commit happened to be
+/// triggered.
+///
+/// The data is already written and `persist()` has already succeeded; what is
+/// lost is only the ORDERING guarantee against power loss, which the mount was
+/// never able to provide. Refusing to proceed does not recover that guarantee,
+/// it just denies service on filesystems that cannot offer it.
+///
+/// Deliberately narrow: only "the operation itself is unavailable here" codes
+/// are absorbed. ENOSPC, EIO and friends still fail loudly, because those mean
+/// the write really is in doubt.
+fn tolerate_unsupported_sync(result: io::Result<()>) -> io::Result<()> {
+    match result {
+        Err(err) if sync_unsupported(&err) => Ok(()),
+        other => other,
+    }
+}
+
+fn sync_unsupported(err: &io::Error) -> bool {
+    if matches!(err.kind(), io::ErrorKind::Unsupported | io::ErrorKind::PermissionDenied) {
+        return true;
+    }
+    // ErrorKind::Unsupported does not cover every platform spelling: macOS
+    // smbfs reports raw ENOTSUP/EOPNOTSUPP as Uncategorized, which no stable
+    // ErrorKind matches. Match the raw codes so the check works there.
+    // The numeric values differ per platform (ENOTSUP is 45 on macOS but 95 on
+    // Linux), so they must be spelled per target rather than hardcoded once.
+    #[cfg(target_vendor = "apple")]
+    const UNSUPPORTED_CODES: &[i32] = &[45, 102]; // ENOTSUP, EOPNOTSUPP
+    #[cfg(all(unix, not(target_vendor = "apple")))]
+    const UNSUPPORTED_CODES: &[i32] = &[95, 524]; // EOPNOTSUPP, ENOTSUP
+    #[cfg(not(unix))]
+    const UNSUPPORTED_CODES: &[i32] = &[];
+
+    err.raw_os_error()
+        .is_some_and(|code| UNSUPPORTED_CODES.contains(&code))
+}
+
 impl RecoveryStore {
     pub fn new(persistence_path: Option<PathBuf>) -> Self {
         Self::with_config(persistence_path, RecoveryConfig::default())
@@ -1213,7 +1259,7 @@ impl RecoveryStore {
         #[cfg(test)]
         fail_durable_commit_at(DurableCommitFailPoint::BeforeFileSync)?;
         if published.exists() {
-            fs::File::open(published)?.sync_all()?;
+            tolerate_unsupported_sync(fs::File::open(published)?.sync_all())?;
         }
         #[cfg(test)]
         fail_durable_commit_at(DurableCommitFailPoint::BeforeDirectorySync)?;
@@ -1223,7 +1269,7 @@ impl RecoveryStore {
                 .parent()
                 .filter(|parent| !parent.as_os_str().is_empty())
                 .unwrap_or_else(|| Path::new("."));
-            fs::File::open(parent)?.sync_all()?;
+            tolerate_unsupported_sync(fs::File::open(parent)?.sync_all())?;
         }
         Ok(())
     }
