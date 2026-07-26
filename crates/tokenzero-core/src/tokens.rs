@@ -59,30 +59,43 @@ pub fn enforce_token_budget_with_ref(
         // unclassified free-text omission.
         return marker.to_string();
     }
-    const SEPARATOR_TOKENS: usize = 1;
-    let mut running: usize = 0;
+    // Count the candidate we would actually emit, not a per-line estimate.
+    //
+    // Summing ceil(chars(line)/q) per line discards each line's fractional
+    // residue, while the registered-model counter is ceil(total scalars/q) over
+    // the whole assembled string including every newline. Across enough lines
+    // those residues add up to real tokens, so the estimate could admit output
+    // that counts over budget once assembled (tokenzero-t99g: twelve 12-char
+    // lines admitted at budget 64 counted 65).
     let mut keep: usize = 0;
-    for line in text.lines() {
-        let lt = count_tokens(line);
-        let next_total = running
-            .saturating_add(lt)
-            .saturating_add(SEPARATOR_TOKENS + marker_tokens);
-        if next_total > max_visible_tokens {
+    let mut candidate_end: usize = 0;
+    for line_count in 1..=text.lines().count() {
+        let end = prefix_end_for_kept_lines(text, line_count);
+        if assembled_tokens(&text[..end], marker) > max_visible_tokens {
             break;
         }
-        running = running.saturating_add(lt);
-        keep += 1;
+        keep = line_count;
+        candidate_end = end;
     }
     if keep == 0 {
         return marker.to_string();
     }
-    let end = prefix_end_for_kept_lines(text, keep);
-    let prefix = &text[..end];
-    let mut out = String::with_capacity(prefix.len() + 1 + marker.len());
-    out.push_str(prefix);
+    let mut out = String::with_capacity(candidate_end + 1 + marker.len());
+    out.push_str(&text[..candidate_end]);
     out.push('\n');
     out.push_str(marker);
     out
+}
+
+/// Token count of the exact string [`enforce_token_budget_with_ref`] would
+/// return for a given kept prefix, so the admission test and the emitted output
+/// can never disagree.
+fn assembled_tokens(prefix: &str, marker: &str) -> usize {
+    let mut candidate = String::with_capacity(prefix.len() + 1 + marker.len());
+    candidate.push_str(prefix);
+    candidate.push('\n');
+    candidate.push_str(marker);
+    count_tokens(&candidate)
 }
 
 fn prefix_end_for_kept_lines(text: &str, keep: usize) -> usize {
@@ -366,3 +379,69 @@ pub fn savings_ratio(raw_tokens: usize, used_tokens: usize) -> f64 {
 #[cfg(test)]
 #[path = "tokens_inline_tests.rs"]
 mod tokenizer_tests;
+
+#[cfg(test)]
+mod visible_budget_never_exceeds {
+    use super::*;
+
+    /// tokenzero-t99g: the packer summed ceil(chars(line)/q) per line plus one
+    /// separator token, but the registered-model counter is ceil(total scalars/q)
+    /// over the WHOLE constructed output including every newline. Per-line
+    /// ceilings hide the newlines' fractional residue, so the packer admitted
+    /// output it then over-counted.
+    ///
+    /// The invariant is the only thing that matters here: whatever comes back
+    /// must count at or under the budget it was given.
+    fn assert_within_budget(text: &str, budget: usize) {
+        // Documented exception: the omission declaration is a correctness floor
+        // and may exceed an impossibly small budget rather than be replaced by
+        // an unclassified free-text omission. Only budgets that can actually
+        // hold the marker are in scope for the packing invariant.
+        if budget < count_tokens(VISIBLE_BUDGET_LOSSY_DECLARATION) {
+            return;
+        }
+        let out = enforce_token_budget(text, budget);
+        let counted = count_tokens(&out);
+        assert!(
+            counted <= budget,
+            "budget {budget} exceeded: counted {counted} for {out:?}"
+        );
+    }
+
+    #[test]
+    fn documented_falsifiers_stay_within_budget() {
+        // From the omega-math finding: eight 4-char lines at budget 48 counted
+        // 49; five 7-char lines at budget 55 counted 56.
+        assert_within_budget(&"abcd\n".repeat(8), 48);
+        assert_within_budget(&"abcdefg\n".repeat(5), 55);
+    }
+
+    #[test]
+    fn width_boundaries_stay_within_budget() {
+        for line_width in 1..24usize {
+            let line = "x".repeat(line_width);
+            for lines in 1..12usize {
+                let text = format!("{}\n", vec![line.clone(); lines].join("\n"));
+                for budget in 1..96usize {
+                    assert_within_budget(&text, budget);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn blank_lines_and_trailing_newlines_stay_within_budget() {
+        for text in [
+            "\n\n\n\n",
+            "a\n\nb\n\nc\n",
+            "\na\n",
+            "trailing\n\n\n",
+            "no-trailing-newline",
+            "",
+        ] {
+            for budget in 1..96usize {
+                assert_within_budget(text, budget);
+            }
+        }
+    }
+}

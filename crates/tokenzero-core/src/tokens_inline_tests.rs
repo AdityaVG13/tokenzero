@@ -52,29 +52,36 @@
         let budget = marker_tokens
             + SEPARATOR_TOKENS
             + text.lines().take(3).map(count_tokens).sum::<usize>();
-        let (mut running, mut expected) = (0usize, 0usize);
-        for line in text.lines() {
-            let next = running
-                .saturating_add(count_tokens(line))
-                .saturating_add(SEPARATOR_TOKENS + marker_tokens);
-            if next > budget {
-                break;
-            }
-            running = running.saturating_add(count_tokens(line));
-            expected += 1;
-        }
-        assert!(
-            expected >= 2,
-            "fixture must exercise keep>=2; got {expected}"
-        );
-
         let out = enforce_token_budget(&text, budget);
         let actual = out.lines().take_while(|line| *line != marker).count();
-        assert_eq!(
-            actual, expected,
-            "prefix must retain all budget-fitting lines (P01-001); out={out:?}"
+
+        // P01-001 is a MAXIMALITY property: keep every line that fits. It was
+        // previously asserted by replaying the packer's own per-line estimate,
+        // which pinned the implementation rather than the property and went red
+        // when that estimate was corrected (tokenzero-t99g). Assert the property
+        // directly instead: the output must fit, and adding one more line must
+        // not fit.
+        assert!(actual >= 2, "fixture must exercise keep>=2; got {actual}");
+        assert!(
+            count_tokens(&out) <= budget,
+            "kept prefix must fit the budget; out={out:?}"
         );
-        assert!(count_tokens(&out) <= budget);
+
+        let total_lines = text.lines().count();
+        if actual < total_lines {
+            let one_more = text
+                .lines()
+                .take(actual + 1)
+                .collect::<Vec<_>>()
+                .join("\n");
+            let with_marker = format!("{one_more}\n{marker}");
+            assert!(
+                count_tokens(&with_marker) > budget,
+                "packer dropped a line that would have fit (P01-001); \
+                 kept {actual}, but {} more tokens still fits budget {budget}",
+                count_tokens(&with_marker)
+            );
+        }
 
         assert_eq!(prefix_end_for_kept_lines("a\nb\nc", 1), 1);
         assert_eq!(prefix_end_for_kept_lines("a\nb\nc", 2), 3);
