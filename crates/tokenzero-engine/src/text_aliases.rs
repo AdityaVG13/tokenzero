@@ -30,8 +30,11 @@ fn classify(value: &str) -> Option<AliasKind> {
     .then_some(AliasKind::Symbol)
 }
 
-fn candidates(text: &str) -> Vec<(String, Vec<(usize, usize)>)> {
-    let mut found = BTreeMap::<String, Vec<(usize, usize)>>::new();
+/// Borrows every candidate out of `text` rather than allocating a `String` per
+/// token. This runs on every response, so an allocation per whitespace-delimited
+/// token was pure per-request cost on text that usually has nothing to alias.
+fn candidates(text: &str) -> Vec<(&str, Vec<(usize, usize)>)> {
+    let mut found = BTreeMap::<&str, Vec<(usize, usize)>>::new();
     let mut start = None;
     for (index, character) in text
         .char_indices()
@@ -62,10 +65,7 @@ fn candidates(text: &str) -> Vec<(String, Vec<(usize, usize)>)> {
                 .map_or(token_end, |(_, suffix)| token_end - suffix.len() - 1);
             let value = &text[token_start..value_end];
             if classify(value).is_some() {
-                found
-                    .entry(value.to_string())
-                    .or_default()
-                    .push((token_start, value_end));
+                found.entry(value).or_default().push((token_start, value_end));
             }
         }
     }
@@ -82,12 +82,70 @@ fn candidates(text: &str) -> Vec<(String, Vec<(usize, usize)>)> {
 /// Each ordinal and its content-addressed short/full forms resolve through the
 /// RecoveryStore alias table to byte-identical payloads.
 pub fn alias_repeated_paths_and_symbols(store: &mut RecoveryStore, text: &str) -> String {
+    match alias_repeated_paths_and_symbols_if_changed(store, text) {
+        Some(rewritten) => rewritten,
+        None => text.to_string(),
+    }
+}
+
+/// True when `text` contains at least one repeated path/symbol atom worth
+/// aliasing. This is a pure scan: it opens no store and mints no ordinal, so
+/// callers can skip the whole aliasing pipeline on the common no-candidate
+/// response instead of paying for a store lease and a full-text token recount.
+pub fn has_alias_candidates(text: &str) -> bool {
+    if !may_contain_alias_atom(text) {
+        return false;
+    }
+    let floor = ordinal_token_floor();
+    candidates(text)
+        .into_iter()
+        .any(|(value, _)| count_tokens(value) > floor)
+}
+
+/// Cheap necessary condition for an alias candidate. `classify` only ever
+/// accepts a value containing `/` (path) or `::` (symbol), so text with neither
+/// cannot produce a candidate and does not need the char-by-char scan or any
+/// tokenizer call. This is a conservative prefilter: it may say "maybe" and let
+/// the real scan decide, but it never says "no" to text `classify` would accept.
+fn may_contain_alias_atom(text: &str) -> bool {
+    let bytes = text.as_bytes();
+    let mut previous_colon = false;
+    for &byte in bytes {
+        if byte == b'/' {
+            return true;
+        }
+        if byte == b':' {
+            if previous_colon {
+                return true;
+            }
+            previous_colon = true;
+        } else {
+            previous_colon = false;
+        }
+    }
+    false
+}
+
+/// `count_tokens` runs a real tokenizer, so the shortest possible ordinal form
+/// is measured once per process instead of once per candidate.
+fn ordinal_token_floor() -> usize {
+    static FLOOR: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *FLOOR.get_or_init(|| count_tokens("tz://o/1/1"))
+}
+
+/// Returns `Some(rewritten)` only when aliasing actually replaced something, so
+/// callers can tell "nothing changed" from "changed" without comparing strings.
+pub fn alias_repeated_paths_and_symbols_if_changed(
+    store: &mut RecoveryStore,
+    text: &str,
+) -> Option<String> {
     let mut replacements = Vec::<(usize, usize, String)>::new();
+    let floor = ordinal_token_floor();
     for (value, spans) in candidates(text) {
-        if count_tokens(&value) <= count_tokens("tz://o/1/1") {
+        if count_tokens(value) <= floor {
             continue;
         }
-        let Ok(full_ref) = store.store_blob(&value, ContentType::Unknown) else {
+        let Ok(full_ref) = store.store_blob(value, ContentType::Unknown) else {
             continue;
         };
         let _short_ref = store.register_session_visible_alias(&full_ref);
@@ -97,7 +155,7 @@ pub fn alias_repeated_paths_and_symbols(store: &mut RecoveryStore, text: &str) -
         let Ok(ordinal_ref) = store.store_ordinal_alias_deferred(range, 0, &full_ref) else {
             continue;
         };
-        if count_tokens(&value) <= count_tokens(&ordinal_ref) || store.persist_pending().is_err() {
+        if count_tokens(value) <= count_tokens(&ordinal_ref) || store.persist_pending().is_err() {
             continue;
         }
         replacements.extend(
@@ -106,12 +164,15 @@ pub fn alias_repeated_paths_and_symbols(store: &mut RecoveryStore, text: &str) -
                 .map(|(start, end)| (start, end, ordinal_ref.clone())),
         );
     }
+    if replacements.is_empty() {
+        return None;
+    }
     replacements.sort_by_key(|(start, _, _)| *start);
     let mut rewritten = text.to_string();
     for (start, end, alias) in replacements.into_iter().rev() {
         rewritten.replace_range(start..end, &alias);
     }
-    rewritten
+    Some(rewritten)
 }
 
 #[cfg(test)]
@@ -156,6 +217,69 @@ mod tests {
         let restarted = RecoveryStore::new(Some(cache));
         for ordinal in ["tz://o/1/1", "tz://o/1/2"] {
             assert!(restarted.has_ref(ordinal));
+        }
+    }
+}
+
+
+#[cfg(test)]
+mod prefilter_soundness {
+    use super::*;
+
+    /// The prefilter is only safe if it never rejects text the real scan would
+    /// have accepted. Assert the implication directly rather than trusting the
+    /// reasoning about `classify`.
+    #[test]
+    fn prefilter_never_rejects_text_the_scan_would_accept() {
+        let corpus = include_str!("../tests/fixtures/path_heavy_aliases.txt");
+        let mut cases: Vec<String> = vec![
+            String::new(),
+            "plain prose with no atoms at all".into(),
+            "a:b c:d single colons only".into(),
+            "repeated_word repeated_word repeated_word".into(),
+            "aaaaaaaaaaaaaaaaaaaaaaaa bbbbbbbbbbbbbbbbbbbbbbbb".into(),
+            corpus.to_string(),
+            "crates/tokenzero-engine/src/render.rs crates/tokenzero-engine/src/render.rs".into(),
+            "tokenzero_engine::render::alias tokenzero_engine::render::alias".into(),
+        ];
+        // Long homogeneous text of the shape the warm-read workload actually sees.
+        cases.push(
+            (0..200)
+                .map(|i| format!("line {i} alpha beta gamma delta epsilon token content sample\n"))
+                .collect(),
+        );
+        for text in &cases {
+            let scan_found = !candidates(text).is_empty();
+            if scan_found {
+                assert!(
+                    may_contain_alias_atom(text),
+                    "prefilter rejected text the scan accepts: {text:?}"
+                );
+            }
+        }
+    }
+
+    /// Whole-function equivalence: gating on the prefilter must not change the
+    /// answer of has_alias_candidates for any of these inputs.
+    #[test]
+    fn prefilter_does_not_change_the_answer() {
+        let corpus = include_str!("../tests/fixtures/path_heavy_aliases.txt");
+        let floor = ordinal_token_floor();
+        for text in [
+            "",
+            "no atoms here",
+            "a::b::c a::b::c short",
+            corpus,
+            "/very/long/path/to/a/file.rs /very/long/path/to/a/file.rs",
+        ] {
+            let unfiltered = candidates(text)
+                .into_iter()
+                .any(|(value, _)| count_tokens(value) > floor);
+            assert_eq!(
+                has_alias_candidates(text),
+                unfiltered,
+                "prefilter changed the answer for {text:?}"
+            );
         }
     }
 }

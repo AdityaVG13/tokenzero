@@ -128,17 +128,28 @@ impl TokenZeroEngine {
             .map(|record| record.ref_id.clone())
             .collect::<Vec<_>>();
         if full_refs.is_empty() {
-            let mut store = self.recovery_store();
-            if let Some(visible) = response.visible.as_mut() {
-                visible.text = crate::text_aliases::alias_repeated_paths_and_symbols(
-                    &mut store,
-                    &visible.text,
-                );
+            // Scan before leasing. Most responses have no repeated path/symbol
+            // atom worth aliasing, and for those the old code still took the
+            // recovery-store lease and re-counted tokens over the entire visible
+            // text -- pure overhead on every warm read, which measured as a
+            // ~30-60% p50 regression on the warm MCP read workload.
+            let Some(visible) = response.visible.as_mut() else {
+                return;
+            };
+            if !crate::text_aliases::has_alias_candidates(&visible.text) {
+                return;
             }
-            if let (Some(accounting), Some(visible)) =
-                (response.accounting.as_mut(), response.visible.as_ref())
-            {
-                accounting.visible_tokens = count_tokens(&visible.text);
+            let mut store = self.recovery_store();
+            let Some(rewritten) = crate::text_aliases::alias_repeated_paths_and_symbols_if_changed(
+                &mut store,
+                &visible.text,
+            ) else {
+                return;
+            };
+            visible.text = rewritten;
+            let visible_tokens = count_tokens(&visible.text);
+            if let Some(accounting) = response.accounting.as_mut() {
+                accounting.visible_tokens = visible_tokens;
             }
             return;
         }
@@ -161,8 +172,17 @@ impl TokenZeroEngine {
             for (full_ref, alias) in &aliases {
                 visible.text = visible.text.replace(full_ref, alias);
             }
-            visible.text =
-                crate::text_aliases::alias_repeated_paths_and_symbols(&mut store, &visible.text);
+            // Same prefilter as the no-refs branch above: only pay for the
+            // path/symbol scan when the text can actually contain an atom.
+            if crate::text_aliases::has_alias_candidates(&visible.text)
+                && let Some(rewritten) =
+                    crate::text_aliases::alias_repeated_paths_and_symbols_if_changed(
+                        &mut store,
+                        &visible.text,
+                    )
+            {
+                visible.text = rewritten;
+            }
         }
         for record in &mut response.refs {
             if let Some((_, alias)) = aliases
