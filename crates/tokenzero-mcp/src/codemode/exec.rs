@@ -402,6 +402,55 @@ mod quickjs_mutation_classifier_tests {
         assert_eq!(result.status, CodeModeStatus::Completed);
     }
 
+    /// tokenzero-codemode-shell-output-unreachable-ref-qr4o: large shell output
+    /// is compacted to {ref, preview}, and the preview is capped at 32 chars.
+    /// The content was always reachable via zero.token.expand, but nothing in
+    /// the value said so, so agents re-ran commands with narrower filters or
+    /// routed output through a file instead.
+    #[test]
+    fn compacted_shell_output_states_how_to_reach_the_full_content() {
+        let options = CodeModeOptions::default();
+        let result = execute_codemode_with_options(
+            r#"const out = await zero.token.shell("seq 1 400");
+               return out.text;"#,
+            options,
+        );
+        assert!(result.error.is_none(), "{:?}", result.error);
+        let value = result.value.expect("plan must return a value");
+        let obj = value.as_object().expect("large output must compact to an object");
+
+        let ref_id = obj["ref"].as_str().expect("compacted value must carry its ref");
+        // The recovery must name THIS ref, not a generic hint: an agent should
+        // be able to copy it verbatim.
+        let expand = obj["expand"].as_str().expect("compacted value must say how to expand");
+        assert!(expand.contains(ref_id), "expand hint must name the ref: {expand}");
+        assert!(expand.contains("zero.token.expand"), "{expand}");
+
+        // Size must be visible too. Without it the preview's "+394 more lines"
+        // is the only clue how much was withheld.
+        assert!(obj["chars"].as_u64().unwrap_or(0) > 1000, "must report full size: {value}");
+    }
+
+    /// The hint has to be true, not decorative: following it must yield the
+    /// whole output, not another ref.
+    #[test]
+    fn the_expand_hint_actually_recovers_the_full_shell_output() {
+        let options = CodeModeOptions::default();
+        let result = execute_codemode_with_options(
+            r#"const out = await zero.token.shell("seq 1 400");
+               const full = await zero.token.expand(out.stdout_ref);
+               return { type: typeof full, len: full.length,
+                        head: full.slice(0, 2), tail: full.slice(-4) };"#,
+            options,
+        );
+        assert!(result.error.is_none(), "{:?}", result.error);
+        let value = result.value.expect("plan must return a value");
+        assert_eq!(value["type"], "string", "expand must yield text, not another ref: {value}");
+        assert!(value["len"].as_u64().unwrap_or(0) > 1000, "expand must yield ALL of it: {value}");
+        assert_eq!(value["head"], "1\n", "{value}");
+        assert_eq!(value["tail"], "400\n", "must reach the LAST line, not a prefix: {value}");
+    }
+
     #[test]
     fn microtask_cap_error_reports_limit_count_and_batching_fix() {
         let mut options = CodeModeOptions::default();
@@ -1522,7 +1571,19 @@ fn ref_first_value(
                             refs.push(ref_id.clone());
                         }
                         let preview_budget = budget_tokens.saturating_sub(count_tokens(&ref_id));
-                        return json!({ "ref": ref_id, "preview": compact_value_preview(&text, preview_budget) });
+                        // The preview alone is a dead end: it is capped at 32
+                        // chars, so an agent that only sees {ref, preview} has
+                        // no way to know the full text is one expand away and
+                        // re-runs the command with a narrower filter instead
+                        // (tokenzero-codemode-shell-output-unreachable-ref-qr4o).
+                        // State the recovery inline, next to the ref it applies
+                        // to, rather than relying on out-of-band documentation.
+                        return json!({
+                            "ref": ref_id,
+                            "preview": compact_value_preview(&text, preview_budget),
+                            "chars": text.chars().count(),
+                            "expand": format!("await zero.token.expand('{ref_id}')"),
+                        });
                     }
                 }
                 Value::String(text)
