@@ -1,8 +1,24 @@
 SHELL := /bin/bash
 
-.PHONY: test readme-command-audit host-path-audit rust-test rust-verify rust-verify-report rust-release-build rust-codemode-build rust-proof package-check release-check irx9-gate perf-regression-gate cli-smoke doctor mcp-smoke mcp-soak shell-matrix install-smoke package-audit
+.PHONY: test readme-command-audit host-path-audit rust-test rust-verify rust-verify-report rust-release-build rust-codemode-build rust-proof package-check release-check irx9-gate perf-regression-gate cli-smoke doctor mcp-smoke mcp-soak shell-matrix install-smoke package-audit scripts-test perf-persist-gate linux-docker-verify linux-perf-budget
 
-test: readme-command-audit host-path-audit rust-test
+test: readme-command-audit host-path-audit scripts-test rust-test
+
+# Unit tests for the scripts/ helpers themselves (stdlib unittest, no pytest).
+scripts-test:
+	@python3 -m unittest discover -s scripts -p 'test_*.py' -q
+
+# Criterion persist-path regression gate (>25% p50 regression fails).
+perf-persist-gate:
+	@scripts/bench_persist_gate.sh
+
+# Dockerized Linux verification for macOS/Windows contributors.
+linux-docker-verify:
+	@scripts/rust_linux_docker_verify.sh
+
+# Linux perf budget check (runs inside Docker).
+linux-perf-budget:
+	@scripts/rust_linux_perf_budget.sh
 
 host-path-audit:
 	@python3 scripts/check_no_host_paths.py
