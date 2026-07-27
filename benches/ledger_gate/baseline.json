@@ -1,1 +1,0 @@
-{"corpus_id":"ledger-gate-v1","jsonl_records":5,"mass":{"prevented_tokens":761644159,"raw_tokens":880260337,"visible_tokens":118616178},"schema_version":"tokenzero.ledger-gate.evidence.v1","sessions":318,"threshold_percent":5,"tools":{"codemode":1,"expand":1,"read":1,"search":1,"shell":1},"turns":14317}
