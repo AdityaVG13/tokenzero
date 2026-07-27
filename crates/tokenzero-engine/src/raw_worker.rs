@@ -13,14 +13,14 @@ use serde_json::{Value, json};
 use std::io::{self, BufRead, Write};
 use std::path::PathBuf;
 
+use crate::TokenZeroEngine;
 use crate::config::EngineConfig;
 use crate::dispatcher::{DispatchOutcome, dispatch_raw_worker};
 use crate::surface_handshake::{
-    CompressionOwner, HandshakeSurface, PlannerOwner, SurfaceCapability,
-    build_surface_capability, check_contract_compatibility, composition_trace,
-    surface_capability_json, RAW_WORKER_PROTOCOL_VERSION,
+    CompressionOwner, HandshakeSurface, PlannerOwner, RAW_WORKER_PROTOCOL_VERSION,
+    SurfaceCapability, build_surface_capability, check_contract_compatibility, composition_trace,
+    surface_capability_json,
 };
-use crate::TokenZeroEngine;
 
 /// Framed request: one domain op, optional peer contract for fail-closed handshake.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -114,8 +114,7 @@ pub fn execute_raw_worker_frame(
             "",
             capability,
             "validation",
-            "raw worker frame requires non-empty op (or control=handshake|ping|shutdown)"
-                .into(),
+            "raw worker frame requires non-empty op (or control=handshake|ping|shutdown)".into(),
             false,
             0,
         );
@@ -413,6 +412,11 @@ pub fn run_raw_worker_once(opts: &RawWorkerServeOptions, request_json: &str) -> 
 ///
 /// Control `shutdown` ends the loop with exit 0.
 pub fn run_raw_worker_serve(opts: &RawWorkerServeOptions) -> i32 {
+    if std::env::var("ZEROSTACK_RAW_WORKER_PROTOCOL").is_ok_and(|value| {
+        value == raw_worker_v2_protocol::RAW_WORKER_PROTOCOL_VERSION || value == "v2"
+    }) {
+        return run_raw_worker_v2_serve(opts);
+    }
     if opts.handshake_only {
         return raw_worker_print_handshake();
     }
@@ -451,7 +455,11 @@ pub fn run_raw_worker_serve(opts: &RawWorkerServeOptions) -> i32 {
                     false,
                     0,
                 );
-                let _ = writeln!(stdout, "{}", serde_json::to_string(&resp).unwrap_or_default());
+                let _ = writeln!(
+                    stdout,
+                    "{}",
+                    serde_json::to_string(&resp).unwrap_or_default()
+                );
                 let _ = stdout.flush();
                 return 2;
             }
@@ -472,7 +480,12 @@ pub fn run_raw_worker_serve(opts: &RawWorkerServeOptions) -> i32 {
                     false,
                     0,
                 );
-                if writeln!(stdout, "{}", serde_json::to_string(&resp).unwrap_or_default()).is_err()
+                if writeln!(
+                    stdout,
+                    "{}",
+                    serde_json::to_string(&resp).unwrap_or_default()
+                )
+                .is_err()
                 {
                     return 2;
                 }
@@ -481,7 +494,13 @@ pub fn run_raw_worker_serve(opts: &RawWorkerServeOptions) -> i32 {
             }
         };
         let resp = execute_raw_worker_json(&engine, &value);
-        if writeln!(stdout, "{}", serde_json::to_string(&resp).unwrap_or_default()).is_err() {
+        if writeln!(
+            stdout,
+            "{}",
+            serde_json::to_string(&resp).unwrap_or_default()
+        )
+        .is_err()
+        {
             return 2;
         }
         let _ = stdout.flush();
@@ -504,9 +523,7 @@ pub fn run_raw_worker_serve(opts: &RawWorkerServeOptions) -> i32 {
 /// - `raw-worker --handshake` → print capability and exit
 /// - `raw-worker --once '{...}'` → single frame
 /// - `raw-worker --root DIR --cache-path PATH`
-pub fn parse_raw_worker_argv(
-    args: &[String],
-) -> Result<Option<RawWorkerServeOptions>, String> {
+pub fn parse_raw_worker_argv(args: &[String]) -> Result<Option<RawWorkerServeOptions>, String> {
     if !args
         .get(1)
         .is_some_and(|arg| arg == "raw-worker" || arg == "raw_worker")
@@ -535,10 +552,10 @@ pub fn parse_raw_worker_argv(
                 i += 1;
             }
             "--cache-path" => {
-                opts.cache_path = Some(PathBuf::from(
-                    rest.get(i + 1)
-                        .ok_or_else(|| "--cache-path requires a value".to_string())?,
-                ));
+                opts.cache_path =
+                    Some(PathBuf::from(rest.get(i + 1).ok_or_else(|| {
+                        "--cache-path requires a value".to_string()
+                    })?));
                 i += 1;
             }
             s if s.starts_with("--once=") => {
@@ -565,3 +582,11 @@ pub fn maybe_run_raw_worker_from_args(args: &[String]) -> Result<Option<i32>, St
 #[cfg(test)]
 #[path = "raw_worker_inline_tests.rs"]
 mod tests;
+
+#[path = "raw_worker_v2_impl.rs"]
+mod raw_worker_v2_impl;
+#[path = "raw_worker_v2_protocol.rs"]
+pub mod raw_worker_v2_protocol;
+pub use raw_worker_v2_impl::{
+    RawWorkerV2Session, execute_raw_worker_v2_frame, run_raw_worker_v2_serve,
+};
