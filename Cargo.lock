@@ -3703,8 +3703,9 @@ dependencies = [
 [[package]]
 name = "zero-abi"
 version = "0.1.0"
-source = "git+https://github.com/AdityaVG13/zerostack?rev=90cdbfad5fa5bc5d601e841def2416d64810a487#90cdbfad5fa5bc5d601e841def2416d64810a487"
+source = "git+https://github.com/AdityaVG13/zerostack?rev=a132567565f4cb43264f2bbcaab759944407453d#a132567565f4cb43264f2bbcaab759944407453d"
 dependencies = [
+ "serde",
  "serde_json",
  "sha2 0.10.9",
 ]
@@ -3712,7 +3713,7 @@ dependencies = [
 [[package]]
 name = "zero-ref"
 version = "0.1.0"
-source = "git+https://github.com/AdityaVG13/zerostack?rev=90cdbfad5fa5bc5d601e841def2416d64810a487#90cdbfad5fa5bc5d601e841def2416d64810a487"
+source = "git+https://github.com/AdityaVG13/zerostack?rev=a132567565f4cb43264f2bbcaab759944407453d#a132567565f4cb43264f2bbcaab759944407453d"
 dependencies = [
  "sha2 0.10.9",
 ]
