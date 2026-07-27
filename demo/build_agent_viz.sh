@@ -1,3 +1,63 @@
+#!/usr/bin/env bash
+# Emit a self-contained, auto-refreshing live viewer for agent runs.
+# Bash port of build_agent_viz.ps1: writes a single static HTML page whose only
+# JS is a tiny fetch+render loop against agent_results.json. No CDN, no frameworks.
+#
+# Usage:
+#   ./demo/build_agent_viz.sh [--out PATH] [--data PATH] [--refresh-ms N] [--port N] [--open]
+set -euo pipefail
+
+DEMO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+OUT_PATH=""
+DATA_PATH="agent_results.json"
+REFRESH_MS=1500
+PORT=8765
+OPEN=0
+
+usage() {
+    cat <<'USAGE'
+Usage: build_agent_viz.sh [options]
+
+  -o, --out PATH        Output HTML path           (default: demo/agent_viz.html)
+  -d, --data PATH       JSON the page fetches      (default: agent_results.json)
+  -r, --refresh-ms N    Browser poll interval, ms  (default: 1500)
+  -p, --port N          Port for --open's server   (default: 8765)
+      --open            Serve demo/ over HTTP and open the viewer
+  -h, --help            Show this help
+USAGE
+}
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        -o|--out)
+            [[ $# -ge 2 ]] || { echo "Missing value for $1" >&2; exit 2; }
+            OUT_PATH="$2"; shift 2 ;;
+        -d|--data)
+            [[ $# -ge 2 ]] || { echo "Missing value for $1" >&2; exit 2; }
+            DATA_PATH="$2"; shift 2 ;;
+        -r|--refresh-ms)
+            [[ $# -ge 2 ]] || { echo "Missing value for $1" >&2; exit 2; }
+            REFRESH_MS="$2"; shift 2 ;;
+        -p|--port)
+            [[ $# -ge 2 ]] || { echo "Missing value for $1" >&2; exit 2; }
+            PORT="$2"; shift 2 ;;
+        --open)
+            OPEN=1; shift ;;
+        -h|--help)
+            usage; exit 0 ;;
+        *)
+            echo "Unknown argument: $1" >&2; usage >&2; exit 2 ;;
+    esac
+done
+
+[[ "$REFRESH_MS" =~ ^[0-9]+$ ]] || { echo "--refresh-ms must be a non-negative integer, got: $REFRESH_MS" >&2; exit 2; }
+[[ "$PORT" =~ ^[0-9]+$ ]]       || { echo "--port must be a non-negative integer, got: $PORT" >&2; exit 2; }
+[[ -z "$OUT_PATH" ]] && OUT_PATH="$DEMO_DIR/agent_viz.html"
+
+TMP_HTML="$(mktemp "${TMPDIR:-/tmp}/agent_viz.XXXXXX")"
+trap 'rm -f "$TMP_HTML"' EXIT
+
+cat > "$TMP_HTML" <<'HTMLEOF'
 <!doctype html>
 <html lang="en">
 <head>
@@ -73,8 +133,8 @@ footer.page code { font-size:11px; background:var(--bg-row); padding:1px 5px; bo
 <header class="page">
   <h1><span class="live-dot" id="dot"></span>TokenZero &mdash; live agent runs</h1>
   <p class="sub">Real Copilot CLI sessions on the JSON-RPC-errors task &middot;
-     baseline vs TokenZero-only &middot; updates every 1500 ms &middot;
-     data: <code id="data-path">agent_results.json</code> &middot;
+     baseline vs TokenZero-only &middot; updates every __REFRESH_MS__ ms &middot;
+     data: <code id="data-path">__DATA_URL__</code> &middot;
      <span id="status">connecting&hellip;</span></p>
 </header>
 
@@ -100,9 +160,10 @@ footer.page code { font-size:11px; background:var(--bg-row); padding:1px 5px; bo
   Combined report (perf + bugs + live runs) at <a href="demo_viz.html">demo_viz.html</a>.
 </footer>
 
-</div><script>
-const DATA_URL = "agent_results.json";
-const REFRESH_MS = 1500;
+</div>
+<script>
+const DATA_URL = "__DATA_URL__";
+const REFRESH_MS = __REFRESH_MS__;
 const fmt = n => (n == null || n === '') ? '\u2014'
                 : (typeof n === 'number' ? n.toLocaleString() : String(n));
 const esc = v => String(v == null ? '' : v)
@@ -207,3 +268,34 @@ setInterval(tick, REFRESH_MS);
 </script>
 </body>
 </html>
+HTMLEOF
+
+# Inject the dynamic values into the template (sed-escaped replacements).
+sed_escape() { printf '%s' "$1" | sed -e 's/[\\&|]/\\&/g'; }
+sed -e "s|__DATA_URL__|$(sed_escape "$DATA_PATH")|g" \
+    -e "s|__REFRESH_MS__|$(sed_escape "$REFRESH_MS")|g" \
+    "$TMP_HTML" > "$OUT_PATH"
+
+echo "Wrote: $OUT_PATH"
+
+if [[ "$OPEN" -eq 1 ]]; then
+    PY=""
+    if command -v python3 >/dev/null 2>&1; then
+        PY=python3
+    elif command -v python >/dev/null 2>&1; then
+        PY=python
+    fi
+    if [[ -n "$PY" ]]; then
+        (cd "$DEMO_DIR" && "$PY" -m http.server "$PORT" --bind 127.0.0.1 >/dev/null 2>&1 &)
+        sleep 0.4
+        URL="http://127.0.0.1:$PORT/$(basename "$OUT_PATH")"
+        case "$(uname -s)" in
+            Darwin)
+                open "$URL" ;;
+            *)
+                xdg-open "$URL" >/dev/null 2>&1 & ;;
+        esac
+    else
+        echo "warning: python3/python not found; open the viewer through a local HTTP server so fetch($DATA_PATH) works." >&2
+    fi
+fi

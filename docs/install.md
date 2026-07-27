@@ -179,6 +179,21 @@ registry files under `~/.config/tokenzero/agents/`. Windows client discovery
 uses `%APPDATA%`-style paths such as `AppData/Roaming/Claude` and
 `AppData/Roaming/Cursor` in addition to dotfile registries.
 
+### Manual MCP config (no installer)
+
+If you wire a client by hand instead of running `tokenzero install`, the
+server entry is:
+
+```json
+{"mcpServers":{"tokenzero":{"type":"local","command":"__TOKENZERO_BIN__","args":["mcp-server","--allowed-root","__REPO__","--cache-path","__CACHE__"],"tools":["*"]}}}
+```
+
+Substitute `__TOKENZERO_BIN__` (installed binary), `__REPO__` (allowed root),
+and `__CACHE__` (cache file path). The installer writes exactly this shape and
+merge-patches only the `tokenzero` entry. (Formerly shipped as
+demo/tokenzero-mcp.template.json; MCP vs CodeMode surface selection is covered
+by the mutually exclusive package surfaces section above.)
+
 ## Hooks and Shims
 
 ```bash

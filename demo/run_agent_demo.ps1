@@ -70,7 +70,8 @@ foreach ($message in @("tokenzero: $BinaryPath", "copilot:   $CopilotPath", "rep
     Write-Host $message
 }
 
-$template = Get-Content -LiteralPath (Join-Path $DemoDir 'tokenzero-mcp.template.json') -Raw
+# Template shape lives in docs/install.md ("Manual MCP config"); embedded inline here.
+$template = '{"mcpServers":{"tokenzero":{"type":"local","command":"__TOKENZERO_BIN__","args":["mcp-server","--allowed-root","__REPO__","--cache-path","__CACHE__"],"tools":["*"]}}}'
 $jsonValues = @($BinaryPath, $RepoDir, (Join-Path $Paths.Cache 'agent-tokenzero.json')) | ForEach-Object {
     $_ -replace '\\','\\' -replace '"','\"'
 }

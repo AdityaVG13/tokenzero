@@ -10,6 +10,23 @@ A self-contained, byte-honest demo that walks an AI agent's "day in the life"
 through TokenZero and reports how many tokens it hid versus how many it
 actually fed back to the agent.
 
+Every file in this directory is explained below. There is no npm, no Remotion,
+and no recorded result JSON here: the scripts PRODUCE the numbers and the
+HTML; generated artifacts are gitignored (see `.gitignore`).
+
+## Files
+
+| File | What it is |
+| :-- | :-- |
+| `run_demo.sh` / `run_demo.ps1` | Main demo driver. Seven scenarios against this repo's own source tree, writes `demo_results.json`, renders `demo_viz.html` (via `build_viz`). macOS/Linux run the `.sh`, Windows the `.ps1`; both produce the same table and the same JSON schema. |
+| `run_agent_demo.sh` / `run_agent_demo.ps1` | Agent A/B demo: drives the GitHub `copilot` CLI with and without TokenZero across replicates, writes `agent_results.json`, renders `agent_viz.html` (via `build_agent_viz`). Requires `copilot` on PATH (or `--copilot-path`). |
+| `build_viz.sh` / `build_viz.ps1` | Re-render `demo_viz.html` from an existing `demo_results.json` without re-running the demo. |
+| `build_agent_viz.sh` / `build_agent_viz.ps1` | Re-render `agent_viz.html` from an existing `agent_results.json`. |
+| `.gitignore` | Ignores everything the scripts generate: `.tokenzero-bin/`, `.cache/`, `*_results.json`, `gap_report.json`, `composition_benchmark.json`, `*_viz.html`. |
+
+The MCP server config that `run_agent_demo` writes is generated inline; its
+canonical shape is documented in `docs/install.md` ("Manual MCP config").
+
 ## What it shows
 
 Seven real scenarios run against this repository's own source tree:
@@ -32,12 +49,12 @@ sides → the savings number is fair.
 ## Visualization
 
 The driver writes `demo_results.json` and then renders a fully self-contained
-`demo_viz.html` (inline CSS + inline SVG, no CDN, no JS). Pass `-OpenViz` to
-have it pop in your default browser at the end:
+`demo_viz.html` (inline CSS + inline SVG, no CDN, no JS). Pass `--open-viz`
+(`-OpenViz` on Windows) to have it pop in your default browser at the end:
 
 ```bash
-# macOS / Linux (PowerShell 7+, install: brew install --cask powershell)
-pwsh -File ./demo/run_demo.ps1 -OpenViz
+# macOS / Linux
+./demo/run_demo.sh --open-viz
 ```
 
 ```powershell
@@ -64,7 +81,7 @@ Re-render without re-running the demo:
 
 ```bash
 # macOS / Linux
-pwsh -File ./demo/build_viz.ps1 -Open
+./demo/build_viz.sh --open
 # Windows
 pwsh -File .\demo\build_viz.ps1 -Open
 ```
@@ -73,7 +90,7 @@ Re-render against a custom gap report:
 
 ```bash
 # macOS / Linux
-pwsh -File ./demo/build_viz.ps1 -GapReportPath ./my_gaps.json -Open
+./demo/build_viz.sh --gap-report ./my_gaps.json --open
 # Windows
 pwsh -File .\demo\build_viz.ps1 -GapReportPath .\my_gaps.json -Open
 ```
@@ -82,23 +99,19 @@ Skip the viz entirely (just write `demo_results.json`):
 
 ```bash
 # macOS / Linux
-pwsh -File ./demo/run_demo.ps1 -NoViz
+./demo/run_demo.sh --no-viz
 # Windows
 pwsh -File .\demo\run_demo.ps1 -NoViz
 ```
 
 ## Run it
 
-The demo is a single PowerShell script that runs identically on every OS.
-Install PowerShell 7+ first if you do not have it (`pwsh`):
-
-- macOS: `brew install --cask powershell`
-- Linux: see https://learn.microsoft.com/powershell/scripting/install/installing-powershell-on-linux
-- Windows: ships with `pwsh` (PowerShell 7+) or the built-in `powershell` (5.1)
+Pick the script for your OS: `run_demo.sh` (macOS/Linux, needs `bash`, `curl`,
+and `jq` or `python3`) or `run_demo.ps1` (Windows, PowerShell 5.1+).
 
 ```bash
 # macOS / Linux, from the repo root
-pwsh -File ./demo/run_demo.ps1
+./demo/run_demo.sh
 ```
 
 ```powershell
@@ -122,10 +135,12 @@ run) so the demo never touches your real TokenZero cache or telemetry.
 ### Options
 
 ```text
--BinaryPath <path>   Use a specific tokenzero binary (skip PATH/download)
--ReleaseTag <vX.Y.Z> Release to download if no binary is found (default: v1.0.1)
--SkipDownload        Fail instead of downloading when no binary is found
+--binary-path <path>  (-BinaryPath)   Use a specific tokenzero binary (skip PATH/download)
+--release-tag <vX.Y.Z> (-ReleaseTag)  Release to download if no binary is found (default: v1.0.1)
+--skip-download       (-SkipDownload) Fail instead of downloading when no binary is found
 ```
+
+The `.sh` also honors `TOKENZERO_BINARY_PATH` and `TOKENZERO_RELEASE_TAG`.
 
 ## What the output looks like
 
@@ -154,6 +169,6 @@ recover wouldn't be a saving.
 
 ## Extending the demo
 
-Each scenario is one block in `run_demo.ps1` that ends in `Add-Row`. Copy
-one, point it at another path / command / query, and it will show up in
-the summary and the JSON automatically.
+Each scenario is one block in `run_demo.sh` / `run_demo.ps1` that ends in an
+`add_row` / `Add-Row` call. Copy one, point it at another path / command /
+query, and it will show up in the summary and the JSON automatically.
