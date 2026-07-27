@@ -200,7 +200,13 @@ impl ExecutionStore {
         COMMIT_CALLS.with(|calls| calls.set(calls.get() + 1));
         self.store
             .persist_pending_durable()
-            .map_err(|error| error.to_string())
+            .map_err(|error| error.to_string())?;
+        // Non-blocking CAS publication post-commit (zerostack-5u7).
+        // Inline bodies are already durable in the recovery root; CAS is an
+        // acceleration layer for cross-session dedup. The background thread
+        // moves fsync barriers off the response critical path.
+        self.store.publish_pending_cas_background();
+        Ok(())
     }
 }
 

@@ -481,6 +481,11 @@ impl TokenZeroStore {
             let _ = self
                 .recovery
                 .store_blob(&descriptor, ContentType::JsonConfig);
+            // Deferred CAS (zerostack-5u7): put_blob no longer publishes to
+            // CAS during staging. TokenZeroStore::expand for full-hash refs
+            // resolves from CAS only (no inline fallback), so publish_pending_cas
+            // is required here to keep the capability descriptor resolvable.
+            let _ = self.recovery.publish_pending_cas();
         }
     }
 }

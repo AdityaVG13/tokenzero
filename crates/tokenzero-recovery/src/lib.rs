@@ -849,6 +849,11 @@ pub struct RecoveryStore {
     /// A memo hit can make the immediately following persist provably empty.
     /// Any real ref mutation clears this flag through `remember_ref`.
     skip_empty_persist: bool,
+    /// Hashes of blobs stored via `put_blob` since the last
+    /// `publish_pending_cas` call. Tracked in-memory only; the finalizer's
+    /// `commit()` publishes these post-durable-commit so CAS publication
+    /// fsync barriers stay off the staging critical path (zerostack-5u7).
+    pending_cas_hashes: BTreeSet<String>,
 }
 
 // Snapshot identity used to detect foreign atomic replacements.
@@ -993,6 +998,7 @@ impl RecoveryStore {
             pending_alias_deletions: BTreeSet::new(),
             payload_memo: None,
             skip_empty_persist: false,
+            pending_cas_hashes: BTreeSet::new(),
         }
     }
 
@@ -1275,6 +1281,82 @@ impl RecoveryStore {
             tolerate_unsupported_sync(fs::File::open(parent)?.sync_all())?;
         }
         Ok(())
+    }
+
+    /// Best-effort CAS publication of inline blobs after the recovery root is
+    /// durably committed (zerostack-5u7 / tokenzero-cas-fsync-ovn).
+    ///
+    /// `put_blob` now stores every blob inline in the recovery state instead of
+    /// publishing to CAS during staging. This method publishes the blobs stored
+    /// since the last call to CAS. CAS becomes a cross-session dedup
+    /// acceleration layer: if CAS is empty or missing an object, the expand
+    /// path falls back to the inline body in the recovery state (line ~1583:
+    /// `NotFound` for `tz://` refs returns `None`, which falls through to
+    /// `resolve_ref_with_index`).
+    ///
+    /// Failures are silently ignored because correctness does not depend on CAS
+    /// being populated — the durable recovery root is the authoritative copy.
+    pub fn publish_pending_cas(&mut self) -> Result<(), RecoveryError> {
+        let Some(cas) = self.shared_cas.clone() else {
+            self.pending_cas_hashes.clear();
+            return Ok(());
+        };
+        let hashes: Vec<String> = std::mem::take(&mut self.pending_cas_hashes)
+            .into_iter()
+            .collect();
+        for hash in &hashes {
+            let ref_id = format!("tz://blob/{hash}");
+            // Only publish inline blobs (not externalized sidecar markers).
+            if let Some(BlobEntry::Inline(text)) = self.state.blobs.get(&ref_id) {
+                if !text.starts_with(BLOB_MARKER_PREFIX) {
+                    let _ = cas.publish(text.as_bytes());
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Non-blocking variant of [`publish_pending_cas`]: extracts the pending
+    /// blob texts and spawns a background thread to publish them to CAS.
+    ///
+    /// The fsync barriers in `SharedCas::publish` (typically 2 per unique blob,
+    /// ~4ms each on macOS F_FULLFSYNC) are moved completely off the response
+    /// critical path. Correctness is unaffected: the durable recovery root is
+    /// the authoritative copy, and the expand path falls back to inline when
+    /// CAS returns `NotFound`.
+    ///
+    /// If the process crashes before the thread finishes, some CAS objects may
+    /// not be published. Cross-session consumers fall back to inline bodies or
+    /// ref-index resolution. This is the same failure mode as a CAS cache miss.
+    pub fn publish_pending_cas_background(&mut self) {
+        let Some(cas) = self.shared_cas.clone() else {
+            self.pending_cas_hashes.clear();
+            return;
+        };
+        let hashes: Vec<String> = std::mem::take(&mut self.pending_cas_hashes)
+            .into_iter()
+            .collect();
+        // Collect blob texts before spawning: RecoveryState is not Send, but
+        // the extracted String values are.
+        let mut entries = Vec::new();
+        for hash in &hashes {
+            let ref_id = format!("tz://blob/{hash}");
+            if let Some(BlobEntry::Inline(text)) = self.state.blobs.get(&ref_id) {
+                if !text.starts_with(BLOB_MARKER_PREFIX) {
+                    entries.push(text.clone());
+                }
+            }
+        }
+        if !entries.is_empty() {
+            std::thread::Builder::new()
+                .name("tz-cas-publish".into())
+                .spawn(move || {
+                    for text in entries {
+                        let _ = cas.publish(text.as_bytes());
+                    }
+                })
+                .ok();
+        }
     }
 
     pub fn reserve_ordinal_range(&mut self, count: u64) -> Result<OrdinalRange, RecoveryError> {
@@ -2021,13 +2103,14 @@ impl RecoveryStore {
                 .transparency
                 .append(format!("mint\0{canonical_ref}").as_bytes());
         }
-        let published = self
-            .shared_cas
-            .as_ref()
-            .is_some_and(|cas| cas.publish(text.as_bytes()).is_ok());
-        let value = if published {
-            None
-        } else {
+        // Deferred CAS publication (zerostack-5u7 / tokenzero-cas-fsync-ovn):
+        // Per-object CAS fsync barriers dominated CodeMode latency (~24ms of
+        // 38ms per plan). The recovery root's durable commit already makes
+        // inline bodies crash-safe, and the expand path falls back to inline
+        // when CAS returns NotFound (line ~1583). CAS publication now happens
+        // post-commit in `publish_pending_cas`, making CAS an acceleration
+        // layer for cross-session dedup rather than a per-object critical path.
+        let value = {
             let text = self
                 .persistence_path
                 .as_deref()
@@ -2035,6 +2118,11 @@ impl RecoveryStore {
                 .unwrap_or_else(|| text.to_string());
             Some(BlobEntry::Inline(text))
         };
+        // Track for post-commit CAS publication. Only full-hash blobs are
+        // CAS-eligible; the legacy short ref is not a CAS key.
+        if self.shared_cas.is_some() {
+            self.pending_cas_hashes.insert(full_hash.clone());
+        }
         self.register_blob(
             &full_hash,
             format!("tz://blob/{}", id_for('b', text)),

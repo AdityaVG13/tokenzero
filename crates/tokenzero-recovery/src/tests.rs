@@ -362,9 +362,13 @@ with exact bytes
 
         let first = {
             let mut store = RecoveryStore::new(Some(cache_a.clone()));
-            store
+            let stored = store
                 .store_payload(payload, ContentType::Unknown, None, None, None)
-                .unwrap()
+                .unwrap();
+            // Deferred CAS: publish_pending_cas must be called on the same
+            // store instance that tracked the blob via put_blob.
+            store.publish_pending_cas().unwrap();
+            stored
         };
         let second = {
             let mut store = RecoveryStore::new(Some(cache_b.clone()));
@@ -376,7 +380,8 @@ with exact bytes
         assert_eq!(first.blob_ref, second.blob_ref);
         let hash = ref_index_id_part(&first.blob_ref).unwrap();
         let cas = SharedCas::new(index_dir.path().to_path_buf());
-        assert!(cas.contains(hash));
+        // CAS is populated by publish_pending_cas above.
+        assert!(cas.contains(hash), "CAS must be populated after publish_pending_cas");
         let object_dir = index_dir
             .path()
             .join("blobs")
@@ -384,10 +389,16 @@ with exact bytes
             .join(&hash[..2]);
         assert_eq!(fs::read_dir(object_dir).unwrap().count(), 1);
 
+        // Deferred CAS: inline bodies are now always stored in the recovery
+        // state (they are the authoritative durable copy). The old assertion
+        // that blobs.len() == 0 is no longer valid.
         for cache in [&cache_a, &cache_b] {
             let snapshot: serde_json::Value =
                 serde_json::from_str(&fs::read_to_string(cache).unwrap()).unwrap();
-            assert_eq!(snapshot["blobs"].as_object().unwrap().len(), 0);
+            assert!(
+                snapshot["blobs"].as_object().unwrap().len() > 0,
+                "inline body must be present in recovery state for deferred CAS"
+            );
         }
 
         let shard = ref_index_shard_path(index_dir.path(), &first.blob_ref);
@@ -399,6 +410,62 @@ with exact bytes
             RefResolve::Found(content) if content == payload
         ));
     });
+}
+
+#[test]
+fn deferred_cas_inline_survives_without_cas_publication() {
+    let dir = tempdir().unwrap();
+    let cache = dir.path().join("recovery-cache.json");
+    let text = "deferred-cas-inline-payload\n";
+
+    let blob_ref = {
+        let mut store = RecoveryStore::new(Some(cache.clone()));
+        let stored = store
+            .store_payload(text, ContentType::Unknown, None, None, None)
+            .unwrap();
+        // persist_pending_durable makes inline durable; do NOT call
+        // publish_pending_cas — simulate crash before CAS publish.
+        store.persist_pending_durable().unwrap();
+        stored.blob_ref
+    };
+
+    // CAS may or may not be populated, but the ref MUST resolve via inline.
+    let mut restarted = RecoveryStore::new(Some(cache));
+    let expanded = restarted.expand(&blob_ref, Some("raw"), None, None, None, None);
+    assert!(expanded.found, "inline fallback must work: {}", expanded.reason);
+    assert_eq!(expanded.content, text);
+}
+
+#[test]
+fn deferred_cas_publish_pending_populates_cas() {
+    let dir = tempdir().unwrap();
+    let cache = dir.path().join("recovery-cache.json");
+    let text = "post-commit-cas-payload\n";
+
+    let (_blob_ref, hash) = {
+        let mut store = RecoveryStore::new(Some(cache.clone()));
+        let stored = store
+            .store_payload(text, ContentType::Unknown, None, None, None)
+            .unwrap();
+        let blob_ref = stored.blob_ref.clone();
+        let hash = stored.blob_ref.strip_prefix("tz://blob/").unwrap().to_string();
+        store.persist_pending_durable().unwrap();
+        // Before publish_pending_cas: CAS should not contain the blob.
+        if let Some(cas) = &store.shared_cas {
+            assert!(!cas.contains(&hash), "CAS must not be populated before publish_pending_cas");
+        }
+        // publish_pending_cas must be called on the same store that has the
+        // pending_cas_hashes tracking from put_blob.
+        store.publish_pending_cas().unwrap();
+        (blob_ref, hash)
+    };
+
+    // After publish_pending_cas: CAS should contain the blob.
+    if let Some(cas) = SharedCas::detect_from_cache_path(&cache) {
+        assert!(cas.contains(&hash), "CAS must be populated after publish_pending_cas");
+        let resolved = cas.resolve(&hash).unwrap();
+        assert_eq!(resolved, text.as_bytes());
+    }
 }
 
 #[test]
