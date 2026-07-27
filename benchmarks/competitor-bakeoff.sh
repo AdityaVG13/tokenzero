@@ -12,7 +12,8 @@ row() {
   if [[ "$tool" != tokenzero && "$tool" != raw-cli ]] && ! command -v "$tool" >/dev/null 2>&1; then
     emit "$task" "$tool" - - - "not installed"; return
   fi
-  read -r m b e <<<"$(measure "$tool:$task" "$cmd")"; emit "$task" "$tool" "$m" "$b" "$e" ""
+  read -r m b e <<<"$(measure "$tool:$task" "$cmd")"
+  if [[ "$b" == 0 ]]; then emit "$task" "$tool" "$m" "$b" "$e" "ran but produced no output (arg mismatch with installed version)"; else emit "$task" "$tool" "$m" "$b" "$e" ""; fi
 }
 command_for() {
   local task="$1" tool="$2" exe="$tool"; [[ "$tool" == tokenzero ]] && exe="$BIN"

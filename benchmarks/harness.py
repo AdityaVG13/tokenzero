@@ -205,7 +205,12 @@ def accounting_tokens(payload, key='raw_tokens'):
 
 def first_blob_ref(data):
     data = _json(data)
-    return next((str(item.get('ref', '')) for item in data.get('refs', []) if item.get('kind') == 'blob'), '') if isinstance(data, dict) else ''
+    if not isinstance(data, dict):
+        return ''
+    found = next((str(item.get('ref', '')) for item in data.get('refs', []) if item.get('kind') == 'blob'), '')
+    if not found:
+        found = str(data.get('detail_ref') or data.get('ref') or '')
+    return found
 
 def glob_root_and_first(data):
     data = _json(data); text = str(data.get('visible', {}).get('text', '')) if isinstance(data, dict) else ''
