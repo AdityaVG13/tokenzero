@@ -70,7 +70,7 @@ framing, and shell rendering at microsecond scale on the workspace's criterion s
 Six reproducible workloads on this repository, measured with one pinned
 release binary. Both sides use TokenZero's own accounting, and every hidden
 byte remains recoverable through an exact `tz://` ref. The current snapshot,
-binary SHA-256, methodology, and history live under `benchmarks/northstar/`:
+methodology, provenance, and per-cell spread live in `docs/benchmarks.md`, regenerated end-to-end by one command, `benchmarks/run_all.sh`:
 
 | Workload | Raw tokens | TokenZero | Savings |
 | :-- | --: | --: | --: |
@@ -88,6 +88,40 @@ snapshot gives no population confidence interval. Public/release-facing
 publication of this headline remains gated by `tokenzero claim-audit`
 (`public_claims_approved` / `release_publication_allowed`).
 
+#### Suite snapshot (as of version v1.4.0)
+
+Regenerated 2026-07-27 on an Apple M5 Max (RUNS=5, WARMUP=1, tokenzero 1.4.0)
+by `benchmarks/run_all.sh`; full tables, spread, and provenance in
+`docs/benchmarks.md`.
+
+Cold-start latency (hyperfine p50): process start 4 ms, store open 107 ms,
+first read 116 ms, first expand 342 ms. Startup tax (cold first read minus
+process start): 112 ms.
+
+Token cost vs raw CLI, same corpus and identical task:
+
+| Task | raw CLI (est tokens) | TokenZero | Savings |
+| :-- | --: | --: | :-- |
+| Read 500 lines | 5,817 | 24 | **99.6%** |
+| Grep + read | 370 | 242 | **34.6%** |
+| Tree + glob + read | 10,492 | 555 | **94.7%** |
+| Edit + verify | 5 | 195 | raw CLI cheaper (tiny edit; capsule overhead stated, not hidden) |
+| Multi-step navigation | 27,831 | 443 | **98.4%** |
+
+Other measured tools: rtk, lean-ctx, headroom, and context-mode were not
+installed (marked, never fabricated); ztk 0.3.0 produced no output on these
+arguments (marked as arg mismatch, not measured warm-vs-cold).
+
+Million-line synthetic repo (1,000 files, planted needle): all 5 navigation
+tasks complete in 1,349 visible tokens against a 32,000-token budget (4.2%
+utilization), with byte-exact recovery verified on every task.
+
+CodeMode vs MCP schema: identical tasks executed as CodeMode plans pass all
+quality checks while paying zero per-call tool-schema tokens; the equivalent
+MCP-schema rows pay 52-199 input tokens per call before any work happens.
+CodeMode rows cold-boot a stdio server per plan (2.5-5.7 s wall), the stated
+worst case.
+
 Path-only outputs like `glob` pass through nearly unchanged: there is nothing
 to hide, and a capsule never costs more than raw.
 
@@ -99,11 +133,10 @@ totalled **38.1M tokens**; **17.9M of them (47%) never entered the model's
 context**. Counting back every token agents later recovered with `expand`,
 net savings were **30%** in that local Pulse ledger. Treat this as deployment
 telemetry, not a release claim; release-facing claims are gated by
-`tokenzero claim-audit` artifacts. Auditable packaging for this paragraph
-lives in `benchmarks/claims/deployment-telemetry/evidence.json` (export via
-`tokenzero pulse export-jsonl`, reduce with
-`benchmarks/deployment_telemetry_reducer.py`); historical totals are not
-release-audited in this checkout until a matching ledger is attached.
+`tokenzero claim-audit` artifacts. The auditable evidence bundle for this paragraph was pruned from the public
+checkout; regenerate the ledger with `tokenzero pulse export-jsonl` if you
+need it. Historical totals are not release-audited in this checkout until a
+matching ledger is attached.
 
 <h3 id="how-racc-works"><img src=".github/assets/h-how.svg" alt="How RACC works" width="100%"></h3>
 
