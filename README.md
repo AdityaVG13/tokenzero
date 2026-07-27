@@ -108,10 +108,6 @@ Token cost vs raw CLI, same corpus and identical task:
 | Edit + verify | 5 | 195 | raw CLI cheaper (tiny edit; capsule overhead stated, not hidden) |
 | Multi-step navigation | 27,831 | 443 | **98.4%** |
 
-Other measured tools: rtk, lean-ctx, headroom, and context-mode were not
-installed (marked, never fabricated); ztk 0.3.0 produced no output on these
-arguments (marked as arg mismatch, not measured warm-vs-cold).
-
 Million-line synthetic repo (1,000 files, planted needle): all 5 navigation
 tasks complete in 1,349 visible tokens against a 32,000-token budget (4.2%
 utilization), with byte-exact recovery verified on every task.
