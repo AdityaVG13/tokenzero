@@ -72,7 +72,7 @@ fn scheduler_is_ttl_aware_ev_gated_and_paid_first() {
 #[test]
 fn replay_corpus_ev_gate_beats_no_warm_and_always_warm() {
     let fixture: serde_json::Value = serde_json::from_str(include_str!(
-        "../../../fixtures/cache-meter-session-demo.json"
+        "fixtures/cache-meter-session-demo.json"
     ))
     .unwrap();
     let lanes: Vec<WarmReplayLane> =

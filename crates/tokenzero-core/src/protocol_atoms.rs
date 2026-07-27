@@ -1,7 +1,7 @@
 //! Verified one-token protocol alphabets for the 1TP wire protocol.
 //!
 //! Provider tokenizers are not all distributable. Exact counts therefore live in
-//! a reviewed snapshot (`fixtures/one-token-atoms.json`), while this module
+//! a reviewed snapshot (`tests/fixtures/one-token-atoms.json`), while this module
 //! exposes the portable intersection without requiring network access.
 
 /// Stable identifier for a tokenizer-specific verification table.

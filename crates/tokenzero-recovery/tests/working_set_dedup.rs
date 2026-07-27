@@ -83,7 +83,7 @@ proptest! {
 #[test]
 fn dedup_ta_registry_stays_within_bounds() {
     let registry: serde_json::Value = serde_json::from_str(include_str!(
-        "../../../fixtures/working-set-dedup-ta.json"
+        "fixtures/working-set-dedup-ta.json"
     ))
     .unwrap();
     for case in registry["cases"].as_array().unwrap() {

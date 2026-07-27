@@ -128,7 +128,7 @@ impl Default for ZeroRefCapabilities {
             symbol_aware: true,
             diff_baseline: true,
             // Evidence-backed blob expand across engines under a shared CAS
-            // (fixtures/zeroref-conformance-evidence.json). Non-blob portable
+            // (tests/fixtures/zeroref-conformance-evidence.json). Non-blob portable
             // refs remain unsupported.
             cross_engine: true,
             portable_ref_kinds: strings(&["blob"]),

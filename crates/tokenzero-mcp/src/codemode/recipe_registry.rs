@@ -42,7 +42,7 @@ fn registry() -> &'static Vec<RecipeDefinition> {
     static REGISTRY: OnceLock<Vec<RecipeDefinition>> = OnceLock::new();
     REGISTRY.get_or_init(|| {
         let recipes: Vec<RecipeDefinition> = serde_json::from_str(include_str!(
-            "../../../../fixtures/codemode-recipes.json"
+            "fixtures/codemode-recipes.json"
         ))
         .expect("committed CodeMode recipe registry must be valid JSON");
         assert_eq!(recipes.len(), 10, "registry must contain the pulse top ten");

@@ -34,7 +34,7 @@ struct Verification {
 fn fixture() -> Fixture {
     serde_json::from_str(include_str!(concat!(
         env!("CARGO_MANIFEST_DIR"),
-        "/../../fixtures/one-token-atoms.json"
+        "/tests/fixtures/one-token-atoms.json"
     )))
     .expect("one-token atom fixture must be valid JSON")
 }
@@ -138,7 +138,7 @@ fn locally_available_tokenizers_reverify_the_portable_atoms() {
 fn ack2_golden_atoms_are_portable_and_deterministic() {
     let golden: serde_json::Value = serde_json::from_str(include_str!(concat!(
         env!("CARGO_MANIFEST_DIR"),
-        "/../../fixtures/ack2-golden.json"
+        "/tests/fixtures/ack2-golden.json"
     )))
     .unwrap();
     let classes = [

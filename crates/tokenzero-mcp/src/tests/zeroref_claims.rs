@@ -41,7 +41,7 @@ fn evidence_path() -> PathBuf {
         .map(PathBuf::from)
         .unwrap_or_else(|| {
             PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-                .join("../../fixtures/zeroref-conformance-evidence.json")
+                .join("tests/fixtures/zeroref-conformance-evidence.json")
         })
 }
 

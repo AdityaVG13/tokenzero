@@ -14,7 +14,7 @@ mod tests;
 pub const DEFAULT_WORKING_SET_TOKENS: usize = 8192;
 pub const EVICTION_REF_LINE_PREFIX: &str = "TZ-EVICT/1";
 /// Portable one-token response emitted when requested bytes are already resident.
-/// `0` is verified as one token by every tokenizer in fixtures/one-token-atoms.json.
+/// `0` is verified as one token by every tokenizer in tokenzero-core's tests/fixtures/one-token-atoms.json.
 pub const ALREADY_RESIDENT_ATOM: &str = "0";
 /// Alarm threshold for pathological fault/re-eviction cycles.
 pub const THRASH_ALARM_FAULT_RATE: f64 = 0.5;

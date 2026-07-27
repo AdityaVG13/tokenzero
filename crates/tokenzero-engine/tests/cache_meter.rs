@@ -38,7 +38,7 @@ fn anthropic_cache_diagnosis_contract_carries_previous_message_id() {
 }
 #[test]
 fn sanitized_real_session_demo_replays_all_provider_shapes() {
-    let fixture: serde_json::Value = serde_json::from_str(include_str!("../../../fixtures/cache-meter-session-demo.json")).unwrap();
+    let fixture: serde_json::Value = serde_json::from_str(include_str!("fixtures/cache-meter-session-demo.json")).unwrap();
     assert_eq!(fixture["source"]["session_id"], "tz-39598-18c1624c22cf65e8");
     let mut meter = CacheMeter::default();
     for turn in fixture["turns"].as_array().unwrap() {

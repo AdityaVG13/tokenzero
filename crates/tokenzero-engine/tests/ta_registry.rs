@@ -38,7 +38,7 @@ fn registry_covers_every_operation_class() {
 #[test]
 fn replay_corpus_emits_bounded_per_class_table() {
     let value: serde_json::Value = serde_json::from_str(include_str!(
-        "../../../fixtures/token-amplification-replay.json"
+        "fixtures/token-amplification-replay.json"
     )).unwrap();
     let records: Vec<AmplificationRecord> = serde_json::from_value(value["cases"].clone()).unwrap();
     let table = replay_ta_table(&records);
@@ -67,7 +67,7 @@ fn injected_amplification_regression_trips_cost_lock() {
 #[test]
 fn replay_fixture_passes_cost_lock() {
     let value: serde_json::Value = serde_json::from_str(include_str!(
-        "../../../fixtures/token-amplification-replay.json"
+        "fixtures/token-amplification-replay.json"
     )).unwrap();
     let records: Vec<AmplificationRecord> = serde_json::from_value(value["cases"].clone()).unwrap();
     assert!(enforce_ta_cost_locks(&records).is_ok());
@@ -76,7 +76,7 @@ fn replay_fixture_passes_cost_lock() {
 #[test]
 fn replay_keeps_billed_and_cached_counts_for_both_directions() {
     let value: serde_json::Value = serde_json::from_str(include_str!(
-        "../../../fixtures/token-amplification-replay.json"
+        "fixtures/token-amplification-replay.json"
     )).unwrap();
     let records: Vec<AmplificationRecord> = serde_json::from_value(value["cases"].clone()).unwrap();
     assert_eq!(records[0].input.billed, 8);
