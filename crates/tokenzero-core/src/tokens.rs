@@ -44,67 +44,119 @@ pub fn enforce_token_budget_with_ref(
     max_visible_tokens: usize,
     recovery_ref: Option<&str>,
 ) -> String {
-    if max_visible_tokens == 0 || count_tokens(text) <= max_visible_tokens {
+    if count_tokens(text) <= max_visible_tokens {
         return text.to_string();
     }
+
     let marker = recovery_ref.map_or_else(
         || VISIBLE_BUDGET_LOSSY_DECLARATION.to_string(),
-        |ref_id| format!("... omitted by visible budget; expand {ref_id} for the full output ..."),
+        |reference| format!("{VISIBLE_BUDGET_LOSSY_DECLARATION} recovery_ref={reference}"),
     );
-    let marker = marker.as_str();
-    let marker_tokens = count_tokens(marker);
-    if marker_tokens > max_visible_tokens {
-        // The omission declaration is a correctness floor. It may exceed an
-        // impossibly small visible budget, but must never be replaced by an
-        // unclassified free-text omission.
-        return marker.to_string();
+    let marker_tokens = count_tokens(&marker);
+
+    // Structured elision can fit below the longer plain-text correctness floor.
+    // Try it first so valid objects and arrays remain valid whenever their minimal
+    // sentinel representation fits.
+    if let Some(json) = elide_top_level_json(text, max_visible_tokens, recovery_ref) {
+        return json;
     }
-    // Count the candidate we would actually emit, not a per-line estimate.
-    //
-    // Summing ceil(chars(line)/q) per line discards each line's fractional
-    // residue, while the registered-model counter is ceil(total scalars/q) over
-    // the whole assembled string including every newline. Across enough lines
-    // those residues add up to real tokens, so the estimate could admit output
-    // that counts over budget once assembled (tokenzero-t99g: twelve 12-char
-    // lines admitted at budget 64 counted 65).
-    let mut keep: usize = 0;
-    let mut candidate_end: usize = 0;
-    for line_count in 1..=text.lines().count() {
-        let end = prefix_end_for_kept_lines(text, line_count);
-        if assembled_tokens(&text[..end], marker) > max_visible_tokens {
+    if matches!(
+        serde_json::from_str::<serde_json::Value>(text),
+        Ok(serde_json::Value::Object(_) | serde_json::Value::Array(_))
+    ) {
+        // A structured payload reached here only because the minimal sentinel did
+        // not fit or its reserved object key collided. Never emit a JSON prefix.
+        return marker;
+    }
+
+    if marker_tokens > max_visible_tokens {
+        // The canonical lossy declaration is a correctness floor. An impossibly
+        // small budget must not turn an omission into unclassified free text.
+        return marker;
+    }
+
+    retain_plain_lines_after_marker(text, max_visible_tokens, marker)
+}
+
+const INLINE_ELISION_SENTINEL_KEY: &str = "__tokenzero_elision__";
+
+fn elide_top_level_json(
+    text: &str,
+    max_visible_tokens: usize,
+    recovery_ref: Option<&str>,
+) -> Option<String> {
+    let value = serde_json::from_str::<serde_json::Value>(text).ok()?;
+    let sentinel = serde_json::json!({
+        "lossy": true,
+        "reason": "visible-budget",
+        "recovery_ref": recovery_ref,
+    });
+    let sentinel = serde_json::to_string(&sentinel).expect("sentinel is serializable");
+    let key = serde_json::to_string(INLINE_ELISION_SENTINEL_KEY)
+        .expect("sentinel key is serializable");
+
+    match value {
+        serde_json::Value::Object(entries) => {
+            if entries.contains_key(INLINE_ELISION_SENTINEL_KEY) {
+                return None;
+            }
+            let mut out = format!("{{{key}:{sentinel}");
+            if count_tokens(&format!("{out}}}")) > max_visible_tokens {
+                return None;
+            }
+            for (entry_key, value) in entries.iter().take(entries.len().saturating_sub(1)) {
+                let entry_key = serde_json::to_string(entry_key).ok()?;
+                let value = serde_json::to_string(value).ok()?;
+                let candidate = format!("{out},{entry_key}:{value}}}");
+                if count_tokens(&candidate) > max_visible_tokens {
+                    break;
+                }
+                out.push(',');
+                out.push_str(&entry_key);
+                out.push(':');
+                out.push_str(&value);
+            }
+            out.push('}');
+            Some(out)
+        }
+        serde_json::Value::Array(items) => {
+            let mut out = format!("[{{{key}:{sentinel}}}");
+            if count_tokens(&format!("{out}]")) > max_visible_tokens {
+                return None;
+            }
+            for value in items.iter().take(items.len().saturating_sub(1)) {
+                let value = serde_json::to_string(value).ok()?;
+                let candidate = format!("{out},{value}]");
+                if count_tokens(&candidate) > max_visible_tokens {
+                    break;
+                }
+                out.push(',');
+                out.push_str(&value);
+            }
+            out.push(']');
+            Some(out)
+        }
+        _ => None,
+    }
+}
+
+fn retain_plain_lines_after_marker(
+    text: &str,
+    max_visible_tokens: usize,
+    marker: String,
+) -> String {
+    let mut out = marker;
+    for line in text.split_inclusive('\n') {
+        let mut candidate = String::with_capacity(out.len() + 1 + line.len());
+        candidate.push_str(&out);
+        candidate.push('\n');
+        candidate.push_str(line);
+        if count_tokens(&candidate) > max_visible_tokens {
             break;
         }
-        keep = line_count;
-        candidate_end = end;
+        out = candidate;
     }
-    if keep == 0 {
-        return marker.to_string();
-    }
-    let mut out = String::with_capacity(candidate_end + 1 + marker.len());
-    out.push_str(&text[..candidate_end]);
-    out.push('\n');
-    out.push_str(marker);
     out
-}
-
-/// Token count of the exact string [`enforce_token_budget_with_ref`] would
-/// return for a given kept prefix, so the admission test and the emitted output
-/// can never disagree.
-fn assembled_tokens(prefix: &str, marker: &str) -> usize {
-    let mut candidate = String::with_capacity(prefix.len() + 1 + marker.len());
-    candidate.push_str(prefix);
-    candidate.push('\n');
-    candidate.push_str(marker);
-    count_tokens(&candidate)
-}
-
-fn prefix_end_for_kept_lines(text: &str, keep: usize) -> usize {
-    // `keep` is the number of lines the budget loop retained. The newline
-    // after line N is at match index N-1 (`nth(keep - 1)`). Using `keep - 2`
-    // dropped one extra fitting line (P01-001 / tokenzero-g3y.10).
-    text.match_indices('\n')
-        .nth(keep.saturating_sub(1))
-        .map_or(text.len(), |(index, _)| index)
 }
 
 /// Tokenizer families whose local token-cost characteristics TokenZero knows.
@@ -377,8 +429,139 @@ pub fn savings_ratio(raw_tokens: usize, used_tokens: usize) -> f64 {
 }
 
 #[cfg(test)]
+fn prefix_end_for_kept_lines(text: &str, kept_lines: usize) -> usize {
+    if kept_lines == 0 {
+        return 0;
+    }
+
+    text.match_indices('\n')
+        .nth(kept_lines - 1)
+        .map_or(text.len(), |(index, _)| index)
+}
+
+#[cfg(test)]
 #[path = "tokens_inline_tests.rs"]
 mod tokenizer_tests;
+
+#[cfg(test)]
+mod inline_elision_tests {
+    use super::*;
+
+    fn plain_marker(recovery_ref: Option<&str>) -> String {
+        recovery_ref.map_or_else(
+            || VISIBLE_BUDGET_LOSSY_DECLARATION.to_string(),
+            |reference| format!("{VISIBLE_BUDGET_LOSSY_DECLARATION} recovery_ref={reference}"),
+        )
+    }
+
+    #[test]
+    fn inline_elision_plain_marker_is_head_visible() {
+        let marker = plain_marker(None);
+        let budget = count_tokens(&format!("{marker}\nalpha\n"));
+        let text = format!("alpha\n{}", "payload ".repeat(100));
+        let out = enforce_token_budget(&text, budget);
+        assert_eq!(out.lines().next(), Some(marker.as_str()));
+    }
+
+    #[test]
+    fn inline_elision_respects_budget_when_marker_fits() {
+        let marker = plain_marker(None);
+        let budget = count_tokens(&format!("{marker}\nfirst\nsecond\n"));
+        let text = format!("first\nsecond\n{}", "tail ".repeat(100));
+        let out = enforce_token_budget(&text, budget);
+        assert!(count_tokens(&out) <= budget, "{out:?}");
+    }
+
+    #[test]
+    fn inline_elision_keeps_recovery_ref_explicit() {
+        let recovery = "tz://blob/0123456789abcdef";
+        let marker = plain_marker(Some(recovery));
+        let out = enforce_token_budget_with_ref(
+            &"payload ".repeat(100),
+            count_tokens(&marker),
+            Some(recovery),
+        );
+        assert!(out.starts_with(VISIBLE_BUDGET_LOSSY_DECLARATION));
+        assert!(out.contains(recovery));
+    }
+
+    #[test]
+    fn inline_elision_json_object_is_parseable_and_keeps_whole_values() {
+        let text = format!(
+            r#"{{"a":{{"nested":[1,2,3]}},"b":"kept","z":"{}"}}"#,
+            "tail ".repeat(100)
+        );
+        let maximal = elide_top_level_json(&text, usize::MAX, Some("tz://object")).unwrap();
+        let budget = count_tokens(&maximal);
+        let out = enforce_token_budget_with_ref(&text, budget, Some("tz://object"));
+        let parsed: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert!(out.starts_with("{\"__tokenzero_elision__\":{"));
+        assert_eq!(parsed["a"]["nested"], serde_json::json!([1, 2, 3]));
+        assert_eq!(parsed["b"], "kept");
+        assert!(parsed.get("z").is_none());
+        assert!(count_tokens(&out) <= budget);
+    }
+
+    #[test]
+    fn inline_elision_json_array_is_parseable_and_keeps_whole_values() {
+        let text = format!(
+            r#"[{{"nested":[1,2,3]}},["whole",{{"value":4}}],"{}"]"#,
+            "tail ".repeat(100)
+        );
+        let maximal = elide_top_level_json(&text, usize::MAX, Some("tz://array")).unwrap();
+        let budget = count_tokens(&maximal);
+        let out = enforce_token_budget_with_ref(&text, budget, Some("tz://array"));
+        let parsed: serde_json::Value = serde_json::from_str(&out).unwrap();
+        let items = parsed.as_array().unwrap();
+        assert!(out.starts_with("[{\"__tokenzero_elision__\":{"));
+        assert_eq!(items[1]["nested"], serde_json::json!([1, 2, 3]));
+        assert_eq!(items[2], serde_json::json!(["whole", {"value": 4}]));
+        assert_eq!(items.len(), 3);
+        assert!(count_tokens(&out) <= budget);
+    }
+
+    #[test]
+    fn inline_elision_reserved_key_collision_falls_back_safely() {
+        let text = format!(
+            r#"{{"__tokenzero_elision__":{{"user":true}},"payload":"{}"}}"#,
+            "tail ".repeat(100)
+        );
+        let marker = plain_marker(None);
+        let out = enforce_token_budget(&text, count_tokens(&marker));
+        assert_eq!(out, marker);
+        assert!(serde_json::from_str::<serde_json::Value>(&out).is_err());
+    }
+
+    #[test]
+    fn inline_elision_tiny_budget_uses_marker_correctness_floor() {
+        let marker = plain_marker(None);
+        let budget = count_tokens(&marker).saturating_sub(1);
+        let out = enforce_token_budget(&"payload ".repeat(100), budget);
+        assert_eq!(out, marker);
+        assert!(count_tokens(&out) > budget);
+
+        let json_out = enforce_token_budget(r#"{"payload":"long long long"}"#, 0);
+        assert_eq!(json_out, VISIBLE_BUDGET_LOSSY_DECLARATION);
+    }
+
+    #[test]
+    fn inline_elision_nonlossy_output_is_byte_identical() {
+        let text = "  exact\nJSON-ish: { \"x\": 1 }\n";
+        assert_eq!(enforce_token_budget(text, count_tokens(text)), text);
+    }
+
+    #[test]
+    fn inline_elision_utf8_retains_only_whole_lines() {
+        let marker = plain_marker(None);
+        let retained = "αβ🙂\n";
+        let budget = count_tokens(&format!("{marker}\n{retained}"));
+        let text = format!("{retained}{}", "終わり ".repeat(100));
+        let out = enforce_token_budget(&text, budget);
+        assert_eq!(out, format!("{marker}\n{retained}"));
+        assert!(out.is_char_boundary(out.len()));
+        assert!(count_tokens(&out) <= budget);
+    }
+}
 
 #[cfg(test)]
 mod visible_budget_never_exceeds {
