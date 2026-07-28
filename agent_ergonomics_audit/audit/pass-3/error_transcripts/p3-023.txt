@@ -1,7 +1,0 @@
-$ tokenzero read
-exit=1
---- stdout ---
-
---- stderr ---
-Error: read requires a path
-

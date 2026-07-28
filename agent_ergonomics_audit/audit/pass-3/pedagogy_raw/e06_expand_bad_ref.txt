@@ -1,7 +1,0 @@
-$ tokenzero expand tz://blob/notarealref
-exit=1
----stdout---
-error: zeroref-legacy_ambiguity: tz://blob/notarealref (zeroref_malformed)
-
----stderr---
-

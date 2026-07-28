@@ -1,7 +1,0 @@
-$ tokenzero run --json
-exit=1
----stdout---
-
----stderr---
-Error: run requires a command after --
-

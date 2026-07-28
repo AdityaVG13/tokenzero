@@ -1,6 +1,0 @@
-$ tokenzero read --jsno
-Error: read requires a path
-exit=1
----stdout---
----stderr---
-Error: read requires a path

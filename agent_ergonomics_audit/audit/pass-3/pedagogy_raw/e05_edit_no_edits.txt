@@ -1,7 +1,0 @@
-$ tokenzero edit README.md --dry-run
-exit=1
----stdout---
-
----stderr---
-Error: edit requires --edits-json <json> or --stdin
-

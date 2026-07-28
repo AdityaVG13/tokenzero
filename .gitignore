@@ -202,3 +202,11 @@ NDH6SA~M
 # local ubs multi-pass artifacts
 ubs_audit/
 xtask/target/
+
+# agent session artifacts (local-only, never commit)
+.pi-subagents/
+.radc-pack/
+agent_ergonomics_audit/
+.agent-tmp-*
+.tmp-*
+_tmp_*
