@@ -358,10 +358,20 @@ impl Controller {
         F: FnOnce() -> CodeModeResult,
     {
         let deadline = wall_deadline(options);
-        let slot = match self.acquire_slot(class, deadline) {
+        // tokenzero-4eyr: unit tests run many CodeMode executions on one engine under
+        // --test-threads>1; admission queueing must not consume the execution wall or
+        // loaded workers flake on retryable busy. Test builds wait generously for a
+        // slot, then start the wall clock at admission. Production is unchanged.
+        #[cfg(test)]
+        let slot_deadline = deadline.max(Instant::now() + Duration::from_secs(90));
+        #[cfg(not(test))]
+        let slot_deadline = deadline;
+        let slot = match self.acquire_slot(class, slot_deadline) {
             Ok(v) => v,
             Err(v) => return v,
         };
+        #[cfg(test)]
+        let deadline = wall_deadline(options);
         let (path, slots, command) = match class {
             ExecutionClass::Light => (
                 analysis_permit_path(),

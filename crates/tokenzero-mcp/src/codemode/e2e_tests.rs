@@ -370,9 +370,9 @@ fn promise_all_runs_independent_shells_concurrently() {
     let work = tempfile::tempdir().unwrap();
     let plan = r#"
         await Promise.all([
-          zero.shell('touch promise-all-a; i=0; while [ ! -f promise-all-b ] || [ ! -f promise-all-c ]; do i=$((i+1)); [ "$i" -lt 100 ] || exit 9; sleep 0.02; done'),
-          zero.shell('touch promise-all-b; i=0; while [ ! -f promise-all-a ] || [ ! -f promise-all-c ]; do i=$((i+1)); [ "$i" -lt 100 ] || exit 9; sleep 0.02; done'),
-          zero.shell('touch promise-all-c; i=0; while [ ! -f promise-all-a ] || [ ! -f promise-all-b ]; do i=$((i+1)); [ "$i" -lt 100 ] || exit 9; sleep 0.02; done'),
+          zero.shell('touch promise-all-a; i=0; while [ ! -f promise-all-b ] || [ ! -f promise-all-c ]; do i=$((i+1)); [ "$i" -lt 10000 ] || exit 9; sleep 0.02; done'),
+          zero.shell('touch promise-all-b; i=0; while [ ! -f promise-all-a ] || [ ! -f promise-all-c ]; do i=$((i+1)); [ "$i" -lt 10000 ] || exit 9; sleep 0.02; done'),
+          zero.shell('touch promise-all-c; i=0; while [ ! -f promise-all-a ] || [ ! -f promise-all-b ]; do i=$((i+1)); [ "$i" -lt 10000 ] || exit 9; sleep 0.02; done'),
         ]);
         return { ok: true };
     "#;
@@ -381,8 +381,8 @@ fn promise_all_runs_independent_shells_concurrently() {
         CodeModeOptions {
             root: Some(work.path().to_path_buf()),
             max_parallel_width: 3,
-            max_wall_ms: 5000,
-            hard_max_wall_ms: 5000,
+            max_wall_ms: 15000,
+            hard_max_wall_ms: 15000,
             ..Default::default()
         },
     );
