@@ -185,7 +185,7 @@ fn perop_leg_measures_classic_read_text() {
     assert!(
         measured
             .wire_text
-            .starts_with("[package]\nname = \"tokenzero-mcp\"")
+            .starts_with("[package]\nname = \"tokenzero-mcp-compat\"")
     );
     assert!(measured.wire_text.contains("tokenzero"));
 }

@@ -123,7 +123,7 @@ pub fn workloads_for_root(root: &std::path::Path) -> Vec<Workload> {
     let root_buf = benchmark_root(root);
     let root = root_buf.as_path();
     let root_str = root.to_string_lossy();
-    let cargo_toml = format!("{root_str}/Cargo.toml");
+    let cargo_toml = format!("{root_str}/crates/tokenzero-mcp-compat/Cargo.toml");
     let crates_dir = format!("{root_str}/crates");
 
     // Deterministic synthetic corpus for scale workloads (no live git state).
@@ -242,7 +242,7 @@ pub fn workloads_for_root(root: &std::path::Path) -> Vec<Workload> {
             raw_commands: vec![raw_sh(format!("cat {cargo_toml}"))],
             perop_calls: vec![
                 direct("tz_read", "read", json!({"path": cargo_toml})),
-                DirectCall { name: "tz_compact", canonical: "compact", args: json!({"text": ""}), text_from_previous: Some("text") },
+                DirectCall { name: "tz_ingest", canonical: "ingest", args: json!({"text": ""}), text_from_previous: Some("text") },
             ],
         },
         Workload {
