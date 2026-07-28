@@ -23,10 +23,12 @@ fn recovery_tokens_are_read_before_fastmcp_scalar_folding() {
     assert_eq!(recovery_tokens_from_response(&response), 40);
 }
 
+#[cfg(feature = "surface-mcp")]
 struct Fixture {
     root: PathBuf,
     engine: TokenZeroEngine,
 }
+#[cfg(feature = "surface-mcp")]
 impl Fixture {
     fn new(tag: &str) -> Self {
         let root = std::env::current_dir().unwrap();
@@ -54,6 +56,7 @@ impl Fixture {
     }
 }
 
+#[cfg(feature = "surface-mcp")]
 #[test]
 fn scalar_return_plan_folds_into_primary_content() {
     let rendered = Fixture::new("scalar-fold").render("return await Promise.resolve(true)");
@@ -72,6 +75,7 @@ fn scalar_return_plan_folds_into_primary_content() {
     assert!(count_tokens(ack_body) <= 14, "{}", rendered[0]);
 }
 
+#[cfg(feature = "surface-mcp")]
 #[test]
 fn pipe_composition_payload_is_ref_preview() {
     let f = Fixture::new("pipe-payload");
@@ -95,6 +99,7 @@ fn pipe_composition_payload_is_ref_preview() {
     );
 }
 
+#[cfg(feature = "surface-mcp")]
 #[test]
 fn codemode_v2_structured_json_is_compact() {
     let measured = Fixture::new("compact-json").measure("return { answer: 42 }");
@@ -107,6 +112,7 @@ fn codemode_v2_structured_json_is_compact() {
     assert!(value.get("refs").is_none());
 }
 
+#[cfg(feature = "surface-mcp")]
 #[test]
 fn matrix_integrity_sums_exact_and_legs_nonzero() {
     let report = run_benchmark(&std::env::current_dir().unwrap());
@@ -147,6 +153,7 @@ fn matrix_integrity_sums_exact_and_legs_nonzero() {
     );
 }
 
+#[cfg(feature = "surface-mcp")]
 #[test]
 fn plan_leg_matches_fastmcp_v2_rendering_byte_for_byte() {
     let f = Fixture::new("render");
@@ -156,6 +163,7 @@ fn plan_leg_matches_fastmcp_v2_rendering_byte_for_byte() {
     assert_eq!(measured.visible_tokens, wire_tokens(&rendered));
 }
 
+#[cfg(feature = "surface-mcp")]
 #[test]
 fn perop_leg_measures_classic_read_text() {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
@@ -182,6 +190,7 @@ fn perop_leg_measures_classic_read_text() {
     assert!(measured.wire_text.contains("tokenzero"));
 }
 
+#[cfg(feature = "surface-mcp")]
 #[test]
 fn codemode_v2_refs_are_capped_to_returned_value_refs() {
     let f = Fixture::new("refs-cap");
@@ -207,6 +216,7 @@ fn codemode_v2_refs_are_capped_to_returned_value_refs() {
     assert!(!value_text.contains(structured.get("ref").and_then(Value::as_str).unwrap()));
 }
 
+#[cfg(feature = "surface-mcp")]
 #[test]
 fn benchmark_double_run_identity() {
     let root = std::env::current_dir().unwrap();
@@ -225,6 +235,7 @@ fn benchmark_double_run_identity() {
     assert_eq!(run1.totals.total_plan_text, run2.totals.total_plan_text);
 }
 
+#[cfg(feature = "surface-mcp")]
 #[test]
 fn run_composition_benchmark() {
     let report = run_benchmark(&std::env::current_dir().unwrap());

@@ -365,6 +365,7 @@ mod tests {
     #[cfg(feature = "surface-codemode")]
     #[test]
     fn production_takeover_executes_mapped_recipe() {
+        let work = tempfile::tempdir().unwrap();
         let outcome = execute_sentinel(
             "5",
             SentinelMode::Takeover,
@@ -372,7 +373,7 @@ mod tests {
             "s1",
             10,
             None,
-            &serde_json::json!({"path": "."}),
+            &serde_json::json!({"path": work.path()}),
         );
         assert!(matches!(
             outcome,
