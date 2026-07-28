@@ -12,10 +12,10 @@
 
 use serde_json::{Value, json};
 use std::fs;
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::Mutex;
+use std::sync::{Mutex, OnceLock};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 use tempfile::tempdir;
@@ -34,32 +34,34 @@ fn repo_root() -> PathBuf {
 }
 
 fn bin(name: &str) -> PathBuf {
-    repo_root().join("target/debug").join(name)
+    repo_root().join("target/irx9-surface-mcp-bin").join(name)
 }
 
 fn ensure_mcp_bins() {
-    let root = repo_root();
-    for b in ["tokenzero", "tokenzero-mcp"] {
-        if root.join("target/debug").join(b).is_file() {
-            continue;
+    static READY: OnceLock<()> = OnceLock::new();
+    READY.get_or_init(|| {
+        let root = repo_root();
+        fs::create_dir_all(root.join("target/irx9-surface-mcp-bin")).unwrap();
+        for b in ["tokenzero", "tokenzero-mcp"] {
+            let st = Command::new("cargo")
+                .args([
+                    "build",
+                    "-p",
+                    "tokenzero",
+                    "--bin",
+                    b,
+                    "--jobs",
+                    "2",
+                    "--features",
+                    "surface-mcp",
+                ])
+                .current_dir(&root)
+                .status()
+                .unwrap();
+            assert!(st.success());
+            fs::copy(root.join("target/debug").join(b), bin(b)).unwrap();
         }
-        let st = Command::new("cargo")
-            .args([
-                "build",
-                "-p",
-                "tokenzero",
-                "--bin",
-                b,
-                "--jobs",
-                "2",
-                "--features",
-                "surface-mcp",
-            ])
-            .current_dir(&root)
-            .status()
-            .unwrap();
-        assert!(st.success());
-    }
+    });
 }
 
 /// Only place that increments PROCESS_STARTS — always paired with a real spawn.
@@ -247,20 +249,35 @@ fn measure_mcp_framing(root: &Path, path: &Path, samples: usize) -> Value {
     ])
     .stdin(Stdio::piped())
     .stdout(Stdio::piped())
-    .stderr(Stdio::null());
+    .stderr(Stdio::piped());
     let mut child = spawn_child(&mut cmd);
     let mut stdin = child.stdin.take().unwrap();
     let mut reader = BufReader::new(child.stdout.take().unwrap());
+    let mut stderr = child.stderr.take().unwrap();
     let mut line = String::new();
     let mut frame_req = Vec::new();
     let mut frame_resp = Vec::new();
-    let write = |s: &mut std::process::ChildStdin, v: &Value, sizes: &mut Vec<u64>| {
+    let mut write = |
+        child: &mut std::process::Child,
+        s: &mut std::process::ChildStdin,
+        v: &Value,
+        sizes: &mut Vec<u64>,
+    | {
         let bytes = v.to_string();
         sizes.push(bytes.len() as u64);
-        writeln!(s, "{bytes}").unwrap();
-        s.flush().unwrap();
+        let result = writeln!(s, "{bytes}").and_then(|()| s.flush());
+        if let Err(error) = result {
+            let _ = child.kill();
+            let status = child.wait().ok();
+            let mut stderr_text = String::new();
+            let _ = stderr.read_to_string(&mut stderr_text);
+            panic!(
+                "surface-mcp child rejected a benchmark frame: {error}; status={status:?}; stderr={stderr_text:?}"
+            );
+        }
     };
     write(
+        &mut child,
         &mut stdin,
         &json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{
             "protocolVersion":"2024-11-05","capabilities":{},
@@ -272,6 +289,7 @@ fn measure_mcp_framing(root: &Path, path: &Path, samples: usize) -> Value {
     reader.read_line(&mut line).unwrap();
     frame_resp.push(line.len() as u64);
     write(
+        &mut child,
         &mut stdin,
         &json!({"jsonrpc":"2.0","method":"notifications/initialized"}),
         &mut frame_req,
@@ -280,6 +298,7 @@ fn measure_mcp_framing(root: &Path, path: &Path, samples: usize) -> Value {
     for i in 0..samples {
         let t0 = Instant::now();
         write(
+            &mut child,
             &mut stdin,
             &json!({"jsonrpc":"2.0","id": i+10, "method":"tools/call","params":{
                 "name":"tz_read",
