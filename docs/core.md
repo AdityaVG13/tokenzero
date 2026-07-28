@@ -121,7 +121,7 @@ evidence.
 
 ## Safety
 
-CLI and MCP file access is confined to the configured allowed roots — the workspace root (`TOKENZERO_ROOT` or the current directory) by default, extended with `--allowed-root`. The root check is component-wise and fails closed on paths whose `..` segments cannot be resolved. Mutating commands remain explicit. Install, rollback, cache prune, and Pulse compaction are dry-run-first or require explicit apply.
+CLI and MCP file access is confined to the configured allowed roots — the workspace root (`TOKENZERO_ROOT` or the current directory) by default, extended with `--allowed-root`. The root check is component-wise and fails closed on paths whose `..` segments cannot be resolved. The CodeMode `execute_code` `root`/`cwd`/`workspace` and `allowed_root(s)` arguments pass through this same allowlist gate: a foreign path is refused even when it contains workspace-evidence markers (`.git`, `Cargo.toml`, `package.json`, `pyproject.toml`, `go.mod`, `.zerostack`, `CHANGELOG.md`), so a plan can only rebase the execution workspace inside an already-allowed tree, and multi-root execution requires every root to be allowlisted. Mutating commands remain explicit. Install, rollback, cache prune, and Pulse compaction are dry-run-first or require explicit apply.
 
 The recovery cache stores the exact bytes of everything TokenZero has served for its workspace, and `tz_expand`/`tz_recall` serve cache contents by ref without re-checking the origin path against the current allowed roots. The cache file is therefore part of the workspace trust domain: point a server or CLI at a workspace's cache (`--cache-path`) only when its operator is allowed to read that workspace.
 

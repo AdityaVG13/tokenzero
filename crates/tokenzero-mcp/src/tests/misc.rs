@@ -208,76 +208,66 @@ fn codemode_mcp_wire_preserves_canonical_refs() {
 }
 
 #[test]
-#[cfg(feature = "surface-codemode")]
-fn mcp_execute_root_honors_foreign_workspace_and_denies_outside() {
+fn mcp_execute_root_with_workspace_markers_requires_allowlist() {
+    // tokenzero-nbl3: workspace-evidence markers (.git, Cargo.toml, ...,
+    // CHANGELOG.md) must not bypass the server allowlist (F-MCP-011 /
+    // F-INT-010). A marker-present foreign root is refused just like a
+    // markerless one.
     use tokenzero_core::McpToolSurface;
     let server = tempdir().unwrap();
     let foreign = tempdir().unwrap();
-    let outside = tempdir().unwrap();
     std::fs::write(
         foreign.path().join("CHANGELOG.md"),
         "FOREIGN-WORKSPACE-MARKER\n",
     )
     .unwrap();
-    std::fs::write(outside.path().join("secret.txt"), "SECRET\n").unwrap();
     let mut config = EngineConfig::for_root(server.path());
     config.tool_surface = McpToolSurface::CodeMode;
     let engine = TokenZeroEngine::new(config);
-    let foreign_root = foreign.path().display().to_string();
-
-    let rel = call_tool(
+    let err = call_tool(
         &engine,
         "tz_execute_code",
         &json!({
-            "plan": "return zero.token.read(\"CHANGELOG.md\")",
-            "root": foreign_root.clone(),
+            "plan": "return zero.read('CHANGELOG.md')",
+            "root": foreign.path().display().to_string()
         }),
         None,
     )
-    .expect("relative read should succeed");
+    .expect_err("marker-present foreign root must be refused");
+    let msg = err.message_text();
     assert!(
-        rel.to_string().contains("FOREIGN-WORKSPACE-MARKER"),
-        "relative read result: {rel}"
+        msg.contains("path_not_allowed") || msg.contains("outside"),
+        "{msg}"
     );
+}
 
-    let changelog_path = foreign.path().join("CHANGELOG.md");
-    let abs_plan = format!(
-        "return zero.token.read({});",
-        serde_json::to_string(&changelog_path.display().to_string()).unwrap()
-    );
-    let abs = call_tool(
+#[test]
+#[cfg(feature = "surface-codemode")]
+fn mcp_execute_root_rebase_inside_allowed_tree_is_accepted() {
+    // Legitimate rebase stays: a root nested inside an allowlisted tree is
+    // accepted and unions into the execution workspace.
+    use tokenzero_core::McpToolSurface;
+    let server = tempdir().unwrap();
+    let nested = server.path().join("nested");
+    std::fs::create_dir_all(&nested).unwrap();
+    std::fs::write(nested.join("Cargo.toml"), "[package]\n").unwrap();
+    std::fs::write(nested.join("marker.txt"), "NESTED-ALLOWED\n").unwrap();
+    let mut config = EngineConfig::for_root(server.path());
+    config.tool_surface = McpToolSurface::CodeMode;
+    let engine = TokenZeroEngine::new(config);
+    let ok = call_tool(
         &engine,
         "tz_execute_code",
         &json!({
-            "plan": abs_plan,
-            "root": foreign_root.clone(),
+            "plan": "return zero.read('marker.txt')",
+            "root": nested.display().to_string()
         }),
         None,
     )
-    .expect("absolute read should succeed");
+    .expect("rebase inside an allowed tree should succeed");
     assert!(
-        abs.to_string().contains("FOREIGN-WORKSPACE-MARKER"),
-        "absolute read result: {abs}"
-    );
-
-    let secret_plan = format!(
-        "return zero.token.read({});",
-        serde_json::to_string(&outside.path().join("secret.txt").display().to_string()).unwrap()
-    );
-    let denied = call_tool(
-        &engine,
-        "tz_execute_code",
-        &json!({
-            "plan": secret_plan,
-            "root": foreign_root,
-        }),
-        None,
-    )
-    .expect("outside-root failure must use the structured CodeMode result");
-    let denied_text = denied.to_string();
-    assert!(
-        denied_text.contains("path_not_allowed") || denied_text.contains("outside allowed roots"),
-        "{denied_text}"
+        ok.to_string().contains("NESTED-ALLOWED"),
+        "nested read result: {ok}"
     );
 }
 

@@ -76,20 +76,6 @@ fn dispatch_gated_tool(
     Ok(mcp_tool_response(response))
 }
 
-/// A routed execution root may rebase onto an independently recognizable workspace (wqw.5).
-fn has_workspace_evidence(path: &Path) -> bool {
-    const MARKERS: &[&str] = &[
-        ".git",
-        ".zerostack",
-        "Cargo.toml",
-        "package.json",
-        "pyproject.toml",
-        "go.mod",
-        "CHANGELOG.md",
-    ];
-    path.is_dir() && MARKERS.iter().any(|marker| path.join(marker).exists())
-}
-
 /// Reject MCP-supplied roots that escape the server's configured allowlist.
 fn ensure_path_under_server_allowlist(
     engine: &TokenZeroEngine,
@@ -214,14 +200,13 @@ fn exec_codemode_tool(
         telemetry_enabled: engine.config.telemetry_enabled,
         ..Default::default()
     };
-    // wqw.5: the per-call root defines the execution workspace boundary, which
-    // CodeMode unions with the configured roots. Per-operation policy still
-    // denies paths outside every effective root.
+    // The per-call root is unioned into the execution workspace, so it must
+    // pass the same server allowlist gate as allowed_root (tokenzero-nbl3:
+    // workspace-evidence markers must not bypass it). Per-operation policy
+    // still denies paths outside every effective root.
     if let Ok(root) = arg_string_any(args, &["root", "cwd", "workspace"]) {
         let root_path = std::path::PathBuf::from(root);
-        if !engine.path_allowed(&root_path) && !has_workspace_evidence(&root_path) {
-            ensure_path_under_server_allowlist(engine, &root_path)?;
-        }
+        ensure_path_under_server_allowlist(engine, &root_path)?;
         options.root = Some(root_path);
     } else if let Some(root) = engine.config.allowed_roots.first() {
         options.root = Some(root.clone());
