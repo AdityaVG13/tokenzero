@@ -72,6 +72,8 @@ release binary. Both sides use TokenZero's own accounting, and every hidden
 byte remains recoverable through an exact `tz://` ref. The current snapshot,
 methodology, provenance, and per-cell spread live in `docs/benchmarks.md`, regenerated end-to-end by one command, `benchmarks/run_all.sh`:
 
+Large synthetic fixtures are generated on demand from `tests/perf-corpus-manifest.json`; they are never source or release artifacts. Use `uv run python scripts/perf_corpus.py generate`, then `verify`, and finish with `clean --all`. Remote runs use the same disposable path: `rch exec -- uv run python scripts/perf_corpus.py generate`.
+
 | Workload | Raw tokens | TokenZero | Savings |
 | :-- | --: | --: | --: |
 | Large source read | 1,744 | 45 | **97.0%** |

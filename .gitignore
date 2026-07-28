@@ -146,6 +146,7 @@ NDH6SA~M
 !/scripts/benchmark_tokens.sh
 !/scripts/check_embedded_tests.py
 !/scripts/check_module_boundaries.py
+!/scripts/perf_corpus.py
 !/scripts/readme_command_audit.py
 !/scripts/rust_linux_docker_verify.sh
 !/scripts/rust_linux_perf_budget.sh
