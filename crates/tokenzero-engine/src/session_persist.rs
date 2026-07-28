@@ -346,8 +346,11 @@ fn append_json_line(path: &Path, body: &str) -> std::io::Result<()> {
         }
     }
     file.seek(SeekFrom::End(0))?;
-    file.write_all(body.as_bytes())?;
-    file.write_all(b"\n")?;
+    // tokenzero-nxyd: one write syscall per journal append (body + newline together).
+    let mut line = Vec::with_capacity(body.len() + 1);
+    line.extend_from_slice(body.as_bytes());
+    line.push(b'\n');
+    file.write_all(&line)?;
     file.flush()
 }
 
@@ -431,7 +434,8 @@ impl SessionPersistLock {
         for attempt in 0..LOCK_RETRIES {
             match FileExt::try_lock(&file) {
                 Ok(()) => {
-                    let _ = writeln!(file, "{}", std::process::id());
+                    // tokenzero-nxyd: the flock alone carries the lock; the pid
+                    // breadcrumb was never read and cost one write() per acquire.
                     return Ok(Self(file));
                 }
                 Err(_) if attempt + 1 < LOCK_RETRIES => std::thread::sleep(LOCK_RETRY_DELAY),
