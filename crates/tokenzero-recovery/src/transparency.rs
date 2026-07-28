@@ -189,7 +189,7 @@ fn hex(bytes: &[u8]) -> String {
 fn peak_heights(mut size: usize) -> Vec<u32> {
     let mut out = Vec::new();
     while size > 0 {
-        let h = (usize::BITS - 1 - size.leading_zeros()) as u32;
+        let h: u32 = usize::BITS - 1 - size.leading_zeros();
         out.push(h);
         size -= 1usize << h;
     }
@@ -252,11 +252,10 @@ mod tests {
             assert!(log.inclusion_proof(i).unwrap().verify(&log.root()));
         }
         for old in 1..log.len() {
-            assert!(
-                log.consistency_proof(old)
-                    .unwrap()
-                    .verify(&roots[old - 1], &log.root())
-            );
+            assert!(log
+                .consistency_proof(old)
+                .unwrap()
+                .verify(&roots[old - 1], &log.root()));
         }
         let mut tampered = log.inclusion_proof(3).unwrap();
         tampered.leaf_hash.push('0');
@@ -275,10 +274,9 @@ mod tests {
         b.append(b"b");
         a.merge_concurrent(&b);
         assert_eq!(a.len(), 3);
-        assert!(
-            a.consistency_proof(1)
-                .unwrap()
-                .verify(&base.root(), &a.root())
-        );
+        assert!(a
+            .consistency_proof(1)
+            .unwrap()
+            .verify(&base.root(), &a.root()));
     }
 }

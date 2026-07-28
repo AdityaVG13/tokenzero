@@ -1,7 +1,7 @@
 //! CodeMode plan executor and TokenZero operation dispatch.
 
-use rquickjs::{Context, Runtime, function::Func};
-use serde_json::{Value, json};
+use rquickjs::{function::Func, Context, Runtime};
+use serde_json::{json, Value};
 use std::cell::RefCell;
 use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
@@ -10,29 +10,29 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, OnceLock};
 use std::time::Duration;
 use tokenzero_core::{
-    Mode, ToolResponse, count_tokens, detect_content_type, pack_to_token_boundary_with_char_limit,
+    count_tokens, detect_content_type, pack_to_token_boundary_with_char_limit, Mode, ToolResponse,
 };
 use tokenzero_filters::{discover, rewrite_command};
 
-use crate::wall::{WallDeadline, with_host_wall_deadline};
+use crate::wall::{with_host_wall_deadline, WallDeadline};
 use crate::workspace::{
     allowed_roots_for_workspace, resolve_recovery_cache_path, tokenzero_work_root,
 };
-use crate::{EditHunk, EngineConfig, TokenZeroEngine, shell_timeout_from_secs};
+use crate::{shell_timeout_from_secs, EditHunk, EngineConfig, TokenZeroEngine};
 
 use super::catalog::{describe_method, search_catalog};
 use super::journal::{
+    atomic_write as journal_atomic_write, begin_plan, classify_method, current_digest,
+    doctor_json as journal_doctor_json, inspect as inspect_journal, open_unresolved, sha256_bytes,
     BeginOutcome, JournalOperation, JournalState, JournalTransaction, OperationClass,
-    OperationSpec, atomic_write as journal_atomic_write, begin_plan, classify_method,
-    current_digest, doctor_json as journal_doctor_json, inspect as inspect_journal,
-    open_unresolved, sha256_bytes,
+    OperationSpec,
 };
-use super::parser::{Expr, MethodCall, Statement, parse_plan, resolve_expr, resolve_return};
+use super::parser::{parse_plan, resolve_expr, resolve_return, Expr, MethodCall, Statement};
 use super::recipe_registry;
 use super::result::{CodeModeOptions, CodeModeResult, CodeModeStatus};
 use super::sandbox::lower_code_plan;
 use super::store::{
-    CodeModeLimits, ExecutionStep, ExecutionStore, execution_id, finalize_result, now_ms,
+    execution_id, finalize_result, now_ms, CodeModeLimits, ExecutionStep, ExecutionStore,
 };
 use crate::expand_params::ExpandParams;
 
@@ -324,20 +324,9 @@ fn execute_codemode_uncontained(plan: &str, options: CodeModeOptions) -> CodeMod
         Err(message) => return finish(CodeModeResult::error(message, 0), "code", Vec::new()),
     };
     let use_quickjs = should_run_quickjs(plan) || parse_plan(&lowered).is_err();
-    if use_quickjs && quickjs_plan_requests_mutation(plan) {
-        let message = crate::annotate_write_failure(
-            concat!(
-                "sandbox: mutating binding denied without transaction support ",
-                "(use the lowered zero.edit / tz_edit path, not free-form JS mutation)",
-            ),
-            false,
-        );
-        return finish(
-            CodeModeResult::error_with_kind("sandbox", message, 0, false),
-            "code",
-            Vec::new(),
-        );
-    }
+    // Mutation denial is enforced at the canonical dispatch boundary
+    // (begin_js_host_op) from resolved effect metadata, not by scanning plan
+    // source (tokenzero-b452).
     if use_quickjs {
         execute_quickjs_plan(plan, options, &limits, started_ms)
     } else {
@@ -358,179 +347,6 @@ fn should_run_quickjs(plan: &str) -> bool {
         || plan.contains("=>")
         || plan.contains("Promise")
         || plan.contains('`')
-}
-
-fn quickjs_plan_requests_mutation(plan: &str) -> bool {
-    let mut scrubbed = String::with_capacity(plan.len());
-    let mut quote = None;
-    let mut escaped = false;
-
-    for ch in plan.chars() {
-        if let Some(delimiter) = quote {
-            if escaped {
-                escaped = false;
-            } else if ch == '\\' {
-                escaped = true;
-            } else if ch == delimiter {
-                quote = None;
-            }
-            scrubbed.push(if ch == '\n' { '\n' } else { ' ' });
-        } else if matches!(ch, '\'' | '"' | '`') {
-            quote = Some(ch);
-            scrubbed.push(' ');
-        } else {
-            scrubbed.push(ch);
-        }
-    }
-
-    scrubbed.contains(".edit(")
-}
-
-#[cfg(test)]
-mod quickjs_mutation_classifier_tests {
-    use super::*;
-
-    #[test]
-    fn host_shell_output_does_not_exhaust_microtask_budget() {
-        let mut options = CodeModeOptions::default();
-        options.max_microtasks = 32;
-        let result = execute_codemode_with_options(
-            r#"return await zero.token.shell("yes x | head -c 100000");"#,
-            options,
-        );
-        assert!(result.error.is_none(), "{:?}", result.error);
-        assert_eq!(result.status, CodeModeStatus::Completed);
-    }
-
-    /// tokenzero-codemode-shell-output-unreachable-ref-qr4o: large shell output
-    /// is compacted to {ref, preview}, and the preview is capped at 32 chars.
-    /// The content was always reachable via zero.token.expand, but nothing in
-    /// the value said so, so agents re-ran commands with narrower filters or
-    /// routed output through a file instead.
-    #[test]
-    fn compacted_shell_output_states_how_to_reach_the_full_content() {
-        let options = CodeModeOptions::default();
-        let result = execute_codemode_with_options(
-            r#"const out = await zero.token.shell("seq 1 400");
-               return out.text;"#,
-            options,
-        );
-        assert!(result.error.is_none(), "{:?}", result.error);
-        let value = result.value.expect("plan must return a value");
-        let obj = value
-            .as_object()
-            .expect("large output must compact to an object");
-
-        let ref_id = obj["ref"]
-            .as_str()
-            .expect("compacted value must carry its ref");
-        // The recovery must name THIS ref, not a generic hint: an agent should
-        // be able to copy it verbatim.
-        let expand = obj["expand"]
-            .as_str()
-            .expect("compacted value must say how to expand");
-        assert!(
-            expand.contains(ref_id),
-            "expand hint must name the ref: {expand}"
-        );
-        assert!(expand.contains("zero.token.expand"), "{expand}");
-
-        // Size must be visible too. Without it the preview's "+394 more lines"
-        // is the only clue how much was withheld.
-        assert!(
-            obj["chars"].as_u64().unwrap_or(0) > 1000,
-            "must report full size: {value}"
-        );
-    }
-
-    /// The hint has to be true, not decorative: following it must yield the
-    /// whole output, not another ref.
-    #[test]
-    fn the_expand_hint_actually_recovers_the_full_shell_output() {
-        let options = CodeModeOptions::default();
-        let result = execute_codemode_with_options(
-            r#"const out = await zero.token.shell("seq 1 400");
-               const full = await zero.token.expand(out.stdout_ref);
-               return { type: typeof full, len: full.length,
-                        head: full.slice(0, 2), tail: full.slice(-4) };"#,
-            options,
-        );
-        assert!(result.error.is_none(), "{:?}", result.error);
-        let value = result.value.expect("plan must return a value");
-        assert_eq!(
-            value["type"], "string",
-            "expand must yield text, not another ref: {value}"
-        );
-        assert!(
-            value["len"].as_u64().unwrap_or(0) > 1000,
-            "expand must yield ALL of it: {value}"
-        );
-        assert_eq!(value["head"], "1\n", "{value}");
-        assert_eq!(
-            value["tail"], "400\n",
-            "must reach the LAST line, not a prefix: {value}"
-        );
-    }
-
-    #[test]
-    fn microtask_cap_error_reports_limit_count_and_batching_fix() {
-        let mut options = CodeModeOptions::default();
-        options.max_microtasks = 16;
-        // Pure promise churn with no host op pending: every .then() drains one
-        // plan-authored microtask, so this exceeds the cap deterministically.
-        let result = execute_codemode_with_options(
-            r#"let p = Promise.resolve(0);
-               for (let i = 0; i < 500; i++) { p = p.then((v) => v + 1); }
-               return await p;"#,
-            options,
-        );
-        let error = result.error.expect("plan must exceed the microtask cap");
-        let msg = &error.message;
-        assert!(msg.contains("microtask cap exceeded"), "{msg}");
-        assert!(
-            msg.contains("limit 16"),
-            "must name the effective limit: {msg}"
-        );
-        assert!(
-            msg.contains("drained 16"),
-            "must report the observed count: {msg}"
-        );
-        assert!(
-            msg.contains("Promise.all") && msg.contains("limits.max_microtasks"),
-            "must include a corrective batching example and the raise-cap knob: {msg}"
-        );
-    }
-
-    #[test]
-    fn promise_all_host_batch_stays_under_microtask_cap() {
-        let mut options = CodeModeOptions::default();
-        options.max_microtasks = 32;
-        // Six independent host ops batched with Promise.all: host-op polling
-        // resets the drain counter, so the corrective advice actually works.
-        let result = execute_codemode_with_options(
-            r#"const outs = await Promise.all([
-                   zero.token.shell("echo a"), zero.token.shell("echo b"),
-                   zero.token.shell("echo c"), zero.token.shell("echo d"),
-                   zero.token.shell("echo e"), zero.token.shell("echo f"),
-               ]);
-               return outs.length;"#,
-            options,
-        );
-        assert!(result.error.is_none(), "{:?}", result.error);
-        assert_eq!(result.status, CodeModeStatus::Completed);
-    }
-
-    #[test]
-    fn ignores_mutation_tokens_inside_strings() {
-        let source = format!(r#"return {{ text: "token only: {}" }};"#, ".edit(");
-        assert!(!quickjs_plan_requests_mutation(&source));
-    }
-
-    #[test]
-    fn detects_real_free_form_mutation_call() {
-        let source = concat!("await zero.", "edit({ path: 'x' })");
-        assert!(quickjs_plan_requests_mutation(source));
-    }
 }
 
 #[derive(Default)]
@@ -922,6 +738,42 @@ fn begin_js_host_op(
         args.push(json!(max_code_bytes));
         args.push(json!(max_visible_tokens));
     }
+    // Canonical dispatch authorization (tokenzero-b452): mutation denial is
+    // decided from the resolved operation's effect metadata at this dispatch
+    // boundary, not from scanning plan source. The quickjs bridge has no
+    // journal/transaction support, so the workspace-mutating edit family is
+    // refused regardless of alias, computed, or obfuscated spellings.
+    if quickjs_edit_dispatch_denied(method) {
+        let message = crate::annotate_write_failure(
+            concat!(
+                "sandbox: mutating binding denied without transaction support ",
+                "(use the lowered zero.edit / tz_edit path, not free-form JS mutation)",
+            ),
+            false,
+        );
+        let id = async_rt.next_id.fetch_add(1, Ordering::Relaxed);
+        let job = Arc::new(AsyncHostJob {
+            result: Mutex::new(Some(
+                serde_json::to_string(&json!({
+                    "__tz_error": message,
+                    "__tz_error_kind": "sandbox",
+                }))
+                .unwrap_or_else(|_| {
+                    r#"{"__tz_error":"mutating binding denied","__tz_error_kind":"sandbox"}"#
+                        .to_string()
+                }),
+            )),
+            method: method.to_string(),
+            tracks_wave: false,
+            applied: Mutex::new(false),
+        });
+        async_rt
+            .jobs
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(id, job);
+        return id.to_string();
+    }
     let logical_width = logical_width_for_method(method, &args);
     let limit_error = {
         let state_ref = state.borrow();
@@ -1287,6 +1139,23 @@ pub(super) fn limits_from_options(options: &CodeModeOptions) -> CodeModeLimits {
 
 fn is_journaled_edit(method: &str) -> bool {
     matches!(method, "zero.edit" | "edit" | "zero.token.edit" | "tz_edit")
+}
+
+/// Canonical mutation authorization for the quickjs dispatch boundary
+/// (tokenzero-b452): deny the workspace-mutating edit family by resolved
+/// effect metadata (cluster == "edit"), covering canonical, alias, and
+/// legacy spellings alike. Unknown names are not denied here; the dispatcher
+/// fails closed on them with an unknown-method error.
+fn quickjs_edit_dispatch_denied(method: &str) -> bool {
+    if is_journaled_edit(method) {
+        return true;
+    }
+    matches!(
+        tokenzero_core::operation_abi::resolve_operation(method),
+        Some(op)
+            if op.cluster == "edit"
+                && op.mutability == tokenzero_core::operation_abi::Mutability::WorkspaceMutating
+    )
 }
 
 struct PlanBootstrap {
@@ -2699,12 +2568,6 @@ fn dispatch_values(
                 format!("recipe exceeds max_code_bytes {max_code_bytes}"),
             ));
         }
-        if quickjs_plan_requests_mutation(&source) {
-            return Err(boxed_error(
-                "sandbox",
-                "sandbox: mutating binding denied without transaction support",
-            ));
-        }
         return catalog(match builtin {
             Some(recipe) => {
                 let envelope_tokens = recipe.envelope_tokens();
@@ -2981,12 +2844,11 @@ fn exec_filter_lines(args: &[Value]) -> OpResult {
         1,
         "zero.filter_lines requires a pattern string as second argument",
     )?;
-    catalog(json!(
-        text.lines()
-            .filter(|l| l.contains(pattern))
-            .collect::<Vec<_>>()
-            .join("\n")
-    ))
+    catalog(json!(text
+        .lines()
+        .filter(|l| l.contains(pattern))
+        .collect::<Vec<_>>()
+        .join("\n")))
 }
 fn exec_journal_inspect(engine: &TokenZeroEngine, args: &[Value]) -> OpResult {
     let execution_id = journal_execution_arg(args)?;
@@ -3436,12 +3298,11 @@ fn exec_glob(engine: &TokenZeroEngine, work_root: &Path, args: &[Value]) -> OpRe
 
 fn exec_tree(engine: &TokenZeroEngine, work_root: &Path, args: &[Value]) -> OpResult {
     let roots = resolve_paths_against_work_root(
-        vec![
-            args.first()
-                .and_then(|v| v.as_str())
-                .map(PathBuf::from)
-                .unwrap_or_else(|| work_root.to_path_buf()),
-        ],
+        vec![args
+            .first()
+            .and_then(|v| v.as_str())
+            .map(PathBuf::from)
+            .unwrap_or_else(|| work_root.to_path_buf())],
         work_root,
     );
     let opts = Opts::from_arg(args, 1);

@@ -216,6 +216,25 @@ fn classify_routes_index_markers_before_light() {
 }
 
 #[test]
+fn classify_ignores_markers_inside_string_literals() {
+    // Quoted prose is not a work-class signal (tokenzero-b452): shell/index
+    // markers inside string literals must not steal the heavy pools.
+    assert_eq!(
+        classify(r#"const s = "tz_shell .shell( watch.drain"; return s;"#, 32),
+        ExecutionClass::Light
+    );
+    assert_eq!(
+        classify(r#"return {note: "zero.token.shell('ls') was here"}"#, 32),
+        ExecutionClass::Light
+    );
+    // Real call sites (markers outside strings) still route as before.
+    assert_eq!(
+        classify("await zero.token.shell('ls')", 32),
+        ExecutionClass::HeavyShell
+    );
+}
+
+#[test]
 fn classify_rejects_bare_status_metrics_rebuild_false_positives() {
     // Paths / return shapes / prose must not ungate Status or steal Index.
     assert_eq!(

@@ -1,7 +1,7 @@
 //! Exact-payload session deduplication, delta telemetry, and persisted rollup state.
 
 use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::time::SystemTime;
@@ -30,7 +30,7 @@ pub(crate) enum ServeKey {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub(crate) struct ServedRecord {
+pub struct ServedRecord {
     pub content_sha256: String,
     pub blob_ref: String,
     #[allow(dead_code)]
@@ -207,7 +207,7 @@ pub(crate) struct SessionSummary {
 }
 
 #[derive(Debug, Clone)]
-pub(crate) struct DiffTelemetry {
+pub struct DiffTelemetry {
     pub hunks: usize,
     pub plus: usize,
     pub minus: usize,

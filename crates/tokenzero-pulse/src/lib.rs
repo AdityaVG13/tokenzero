@@ -1,7 +1,7 @@
 #![forbid(unsafe_code)]
 
 use fs4::{FileExt, TryLockError};
-use rusqlite::{Connection, params};
+use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
@@ -13,7 +13,7 @@ use std::io::{
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tempfile::NamedTempFile;
-use tokenzero_core::{PULSE_SCHEMA_VERSION, savings_ratio};
+use tokenzero_core::{savings_ratio, PULSE_SCHEMA_VERSION};
 
 mod eprocess;
 pub use eprocess::{AnytimeFailureMonitor, EProcessSnapshot, MonitorConfigError};
@@ -35,12 +35,6 @@ const PULSE_SYNC_LOCK_TIMEOUT: Duration = Duration::from_secs(5);
 
 fn default_tokenizer_id() -> String {
     "estimator:tokenzero-core".to_string()
-}
-
-fn valid_tokenizer_id(id: &str) -> bool {
-    !id.is_empty()
-        && !id.chars().any(char::is_whitespace)
-        && (!id.contains("estimat") || id.starts_with("estimator:"))
 }
 
 macro_rules! pulse_structs {

@@ -33,7 +33,7 @@
 //! `tokenzero-qisj`, `fszero-gzw`, `graphzero-01vw`).
 
 use serde::Serialize;
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::cell::Cell;
 use std::collections::HashMap;
@@ -702,8 +702,39 @@ fn is_expand_recovery_plan(p: &str) -> bool {
     contains_any(p, EXPAND_MARKERS) && !contains_any(p, ANALYSIS_WORK_MARKERS)
 }
 
+/// Blank out string/template literal contents (preserving newlines) so quoted
+/// prose is never read as a work-class signal. The scan below is advisory
+/// scheduling only; authorization lives at the canonical dispatch boundary
+/// (tokenzero-b452).
+fn scrub_plan_literals(plan: &str) -> String {
+    let mut scrubbed = String::with_capacity(plan.len());
+    let mut quote = None;
+    let mut escaped = false;
+
+    for ch in plan.chars() {
+        if let Some(delimiter) = quote {
+            if escaped {
+                escaped = false;
+            } else if ch == '\\' {
+                escaped = true;
+            } else if ch == delimiter {
+                quote = None;
+            }
+            scrubbed.push(if ch == '\n' { '\n' } else { ' ' });
+        } else if matches!(ch, '\'' | '"' | '`') {
+            quote = Some(ch);
+            scrubbed.push(' ');
+        } else {
+            scrubbed.push(ch);
+        }
+    }
+
+    scrubbed
+}
+
 fn classify(plan: &str, cost_threshold: usize) -> ExecutionClass {
-    let p = plan.trim().to_ascii_lowercase();
+    let scrubbed = scrub_plan_literals(plan);
+    let p = scrubbed.trim().to_ascii_lowercase();
     if STATUS_PREFIXES.iter().any(|prefix| p.starts_with(prefix))
         || contains_any(&p, STATUS_MARKERS)
     {

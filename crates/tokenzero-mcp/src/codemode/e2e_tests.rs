@@ -1,4 +1,4 @@
-use super::{CodeModeOptions, CodeModeStatus, execute_codemode_with_options};
+use super::{execute_codemode_with_options, CodeModeOptions, CodeModeStatus};
 
 #[test]
 fn async_function_wrapper_is_lowered_and_size_limited() {
@@ -52,7 +52,7 @@ fn sandbox_denies_host_capabilities() {
         "process.env",
         "require('fs')",
         "setTimeout(() => 1, 1)",
-        "const f = () => zero.edit('file.txt', []); return f();",
+        "const f = () => __tz_call('zero.edit', ['file.txt', []]); return f();",
         "store.put('x')",
         "db.query('select 1')",
         "indexedDB.open('x')",
@@ -79,6 +79,74 @@ fn sandbox_denies_host_capabilities() {
         );
         assert!(result.execution_refs.is_some());
     }
+}
+
+#[test]
+fn edit_denial_is_canonical_not_lexical() {
+    // Alias/computed/obfuscated spellings all resolve to the canonical edit
+    // op at the dispatch bridge; every one must be denied (tokenzero-b452).
+    for plan in [
+        "return __tz_call('zero.edit', ['f.txt', []]);",
+        "const c = __tz_call; return c('tz_edit', ['f.txt', []]);",
+        "const c = __tz_call; return c('edit', ['f.txt', []]);",
+        "return __tz_call('zero.token.edit', ['f.txt', []]);",
+    ] {
+        let result = execute_codemode_with_options(
+            plan,
+            CodeModeOptions {
+                root: Some(std::env::temp_dir()),
+                ..CodeModeOptions::default()
+            },
+        );
+        assert_eq!(
+            result.status,
+            CodeModeStatus::Error,
+            "plan should be denied: {plan}"
+        );
+        let message = &result.error.as_ref().unwrap().message;
+        assert!(
+            message.contains("mutating binding denied"),
+            "expected canonical dispatch denial, got: {message} (plan: {plan})"
+        );
+    }
+}
+
+#[test]
+fn harmless_edit_keywords_in_strings_do_not_fail() {
+    // Quoted prose mentioning the edit surface never dispatches it; the plan
+    // must complete (tokenzero-b452 false-positive fix).
+    let result = execute_codemode_with_options(
+        "const s = \"zero.edit.edit( tz_edit .edit( mutating binding denied\"; return s.length;",
+        CodeModeOptions {
+            root: Some(std::env::temp_dir()),
+            ..CodeModeOptions::default()
+        },
+    );
+    assert_eq!(
+        result.status,
+        CodeModeStatus::Completed,
+        "harmless literal plan should complete: {:?}",
+        result.error
+    );
+}
+
+#[test]
+fn unknown_edit_shaped_name_fails_closed() {
+    // No binding/registry entry exists for this spelling: it must fail closed
+    // with an unknown-name error, never reach an edit executor (tokenzero-b452).
+    let result = execute_codemode_with_options(
+        "return __tz_call('zero.fs.edit', ['f.txt', []]);",
+        CodeModeOptions {
+            root: Some(std::env::temp_dir()),
+            ..CodeModeOptions::default()
+        },
+    );
+    assert_eq!(result.status, CodeModeStatus::Error);
+    let message = &result.error.as_ref().unwrap().message;
+    assert!(
+        !message.contains("mutating binding denied"),
+        "unknown names are not the edit family: {message}"
+    );
 }
 
 #[test]
