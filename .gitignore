@@ -201,3 +201,4 @@ NDH6SA~M
 
 # local ubs multi-pass artifacts
 ubs_audit/
+xtask/target/
