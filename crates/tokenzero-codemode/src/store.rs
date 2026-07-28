@@ -9,105 +9,13 @@ use tokenzero_recovery::RecoveryStore;
 use super::journal::{OperationClass, classify_method};
 use super::result::{CodeModeResult, CodeModeStatus, CodeModeTelemetry};
 
-pub const CODEMODE_LIMITS_SCHEMA: &str = "tokenzero.codemode.limits.v1";
-pub const DEFAULT_MAX_LOGICAL_OPS: usize = 1000;
-pub const DEFAULT_MAX_PHYSICAL_OPS: usize = 256;
-pub const HARD_MAX_WALL_MS: u64 = 5000;
-
-/// Deployment override for the server-level hard wall ceiling, clamped to
-/// [1s, 300s]. Five seconds serializes real work behind machine-permit waits
-/// on busy multi-session machines (2026-07-16 incident); hubs set
-/// `TOKENZERO_CODEMODE_HARD_MAX_WALL_MS` to trade latency for headroom while
-/// per-call limits still clamp to this ceiling.
-pub fn hard_max_wall_ms() -> u64 {
-    static VALUE: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
-    *VALUE.get_or_init(|| {
-        std::env::var("TOKENZERO_CODEMODE_HARD_MAX_WALL_MS")
-            .ok()
-            .and_then(|raw| raw.parse::<u64>().ok())
-            .map(|ms| ms.clamp(1_000, 300_000))
-            .unwrap_or(HARD_MAX_WALL_MS)
-    })
-}
-pub const DEFAULT_MAX_MICROTASKS: usize = 4096;
-pub const DEFAULT_MAX_MEMORY_BYTES: usize = 32 * 1024 * 1024;
-pub const DEFAULT_MAX_OUTPUT_BYTES: usize = 64 * 1024;
-pub const DEFAULT_MAX_RESULT_REF_BYTES: usize = 10 * 1024 * 1024;
-pub const DEFAULT_MAX_REFS_EMITTED: usize = 256;
-pub const DEFAULT_MAX_PARALLEL_WIDTH: usize = 2;
-pub const DEFAULT_MAX_CODE_BYTES: usize = 64 * 1024;
-pub const DEFAULT_MAX_VISIBLE_TOKENS: usize = 4000;
-
-/// Deployment default for the recipe and response token envelope. Per-call
-/// limits.max_visible_tokens remains authoritative when supplied.
-pub fn default_max_visible_tokens() -> usize {
-    std::env::var("TOKENZERO_CODEMODE_MAX_VISIBLE_TOKENS")
-        .ok()
-        .and_then(|raw| raw.parse::<usize>().ok())
-        .map(|tokens| tokens.clamp(1, 1_000_000))
-        .unwrap_or(DEFAULT_MAX_VISIBLE_TOKENS)
-}
-
-// serde(default): tool callers send PARTIAL limits objects (the documented
-// contract — e.g. {"max_output_bytes": 1024}); without per-field defaults a
-// partial object fails deserialization and tools.rs's `if let Ok` silently
-// DROPS the caller's limits (observed in PR 16 review — the exact
-// silent-failure class this codebase hunts).
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(default)]
-pub struct CodeModeLimits {
-    pub max_logical_ops: usize,
-    pub max_physical_ops: usize,
-    pub max_wall_ms: u64,
-    pub hard_max_wall_ms: u64,
-    pub max_microtasks: usize,
-    pub max_memory_bytes: usize,
-    pub max_output_bytes: usize,
-    pub max_result_ref_bytes: usize,
-    pub max_refs_emitted: usize,
-    pub max_parallel_width: usize,
-    pub max_code_bytes: usize,
-    pub max_visible_tokens: usize,
-}
-
-impl Default for CodeModeLimits {
-    fn default() -> Self {
-        Self {
-            max_logical_ops: DEFAULT_MAX_LOGICAL_OPS,
-            max_physical_ops: DEFAULT_MAX_PHYSICAL_OPS,
-            max_wall_ms: hard_max_wall_ms(),
-            hard_max_wall_ms: hard_max_wall_ms(),
-            max_microtasks: DEFAULT_MAX_MICROTASKS,
-            max_memory_bytes: DEFAULT_MAX_MEMORY_BYTES,
-            max_output_bytes: DEFAULT_MAX_OUTPUT_BYTES,
-            max_result_ref_bytes: DEFAULT_MAX_RESULT_REF_BYTES,
-            max_refs_emitted: DEFAULT_MAX_REFS_EMITTED,
-            max_parallel_width: DEFAULT_MAX_PARALLEL_WIDTH,
-            max_code_bytes: DEFAULT_MAX_CODE_BYTES,
-            max_visible_tokens: default_max_visible_tokens(),
-        }
-    }
-}
-
-impl CodeModeLimits {
-    pub fn as_json(&self) -> Value {
-        json!({
-            "schema": CODEMODE_LIMITS_SCHEMA,
-            "max_logical_ops": self.max_logical_ops,
-            "max_physical_ops": self.max_physical_ops,
-            "max_wall_ms": self.max_wall_ms,
-            "hard_max_wall_ms": self.hard_max_wall_ms,
-            "max_microtasks": self.max_microtasks,
-            "max_memory_bytes": self.max_memory_bytes,
-            "max_output_bytes": self.max_output_bytes,
-            "max_result_ref_bytes": self.max_result_ref_bytes,
-            "max_refs_emitted": self.max_refs_emitted,
-            "max_parallel_width": self.max_parallel_width,
-            "max_code_bytes": self.max_code_bytes,
-            "max_visible_tokens": self.max_visible_tokens,
-        })
-    }
-}
+pub use tokenzero_engine::codemode_wire::{
+    CODEMODE_LIMITS_SCHEMA, CodeModeLimits, DEFAULT_MAX_CODE_BYTES, DEFAULT_MAX_LOGICAL_OPS,
+    DEFAULT_MAX_MEMORY_BYTES, DEFAULT_MAX_MICROTASKS, DEFAULT_MAX_OUTPUT_BYTES,
+    DEFAULT_MAX_PARALLEL_WIDTH, DEFAULT_MAX_PHYSICAL_OPS, DEFAULT_MAX_REFS_EMITTED,
+    DEFAULT_MAX_RESULT_REF_BYTES, DEFAULT_MAX_VISIBLE_TOKENS, HARD_MAX_WALL_MS,
+    default_max_visible_tokens, hard_max_wall_ms,
+};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExecutionStep {

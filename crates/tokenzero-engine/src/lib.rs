@@ -14,6 +14,8 @@ pub mod binary_resolve;
 pub mod cache_maintenance;
 pub mod cache_meter;
 mod cache_pack;
+pub mod codemode_catalog;
+pub mod codemode_wire;
 mod collect;
 pub mod config;
 mod diff;

@@ -12,7 +12,7 @@ use tokenzero_install::packaging::{
     default_install_prefix, install_surface, package_identity, reject_non_stdio_args,
     sbom_document, semantic_contract_digest, uninstall_report, uninstall_surface,
 };
-use tokenzero_mcp::{EngineConfig, run_fastmcp_stdio};
+use tokenzero_mcp_compat::{EngineConfig, run_fastmcp_stdio};
 
 const SURFACE: PackageSurface = PackageSurface::Mcp;
 
@@ -26,7 +26,7 @@ fn main() {
 
     // Private raw worker (tokenzero-irx9.4): OMP/router composition path.
     // Framing + handshake + NDJSON exec loop; not a second user catalog.
-    match tokenzero_mcp::maybe_run_raw_worker_from_args(&args) {
+    match tokenzero_mcp_compat::maybe_run_raw_worker_from_args(&args) {
         Ok(Some(code)) => process::exit(code),
         Ok(None) => {}
         Err(error) => {

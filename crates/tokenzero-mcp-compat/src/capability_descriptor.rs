@@ -10,8 +10,8 @@ use crate::catalog::{
     ResourceSpec, canonical_tool_names_for_surface, canonical_tool_specs, resource_specs,
     tool_clusters,
 };
-use crate::codemode::journal::{OperationClass, classify_descriptor_tool};
 use crate::jsonrpc::{SUPPORTED_PROTOCOL_VERSIONS, tool_filter_discovery};
+use tokenzero_engine::codemode_wire::{OperationClass, classify_descriptor_tool};
 
 /// PR18 policy descriptor revision. Bump whenever the tool or capability
 /// contract changes.

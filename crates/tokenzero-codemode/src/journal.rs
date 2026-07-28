@@ -5,56 +5,15 @@ use serde::{Deserialize, Serialize};
 use std::fs::File;
 use std::path::{Path, PathBuf};
 
+pub use tokenzero_engine::codemode_wire::{
+    OperationClass, classify_descriptor_tool, classify_method,
+};
+
 pub const PLAN_JOURNAL_VERSION: &str = "tokenzero.plan-journal.v1";
 pub const PIN_SCHEMA_VERSION: &str = "zerostack.cas-gc.v1";
 const MAX_DIAGNOSTIC_BYTES: usize = 2048;
 const MAX_RESOLVED_JOURNALS: usize = 128;
 const MAX_RESOLVED_BYTES: u64 = 8 * 1024 * 1024;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum OperationClass {
-    ReadOnly,
-    ReversibleStoreMutation,
-    IrreversibleExternal,
-    Unknown,
-}
-
-/// Classification table derived from the canonical PR18 operation descriptor.
-pub fn classify_method(method: &str) -> OperationClass {
-    let bare = method
-        .strip_prefix("zero.token.")
-        .or_else(|| method.strip_prefix("zero."))
-        .or_else(|| method.strip_prefix("tz_"))
-        .unwrap_or(method)
-        .replace('-', "_");
-    let classes = [
-        (
-            "read,find,grep,glob,tree,expand,expandMany,expand_many,dedupe,mem,recall,rewrite,discover,pick,filter_lines,count,first,verdict,raw,count_tokens,assert,codemode.search,codemode.describe,codemode.limits,codemode.journalDoctor,journalDoctor,journal_doctor,codemode.journalInspect,journalInspect,journal_inspect,codemode.journalResume,journalResume,journal_resume,search,describe,limits",
-            OperationClass::ReadOnly,
-        ),
-        (
-            "edit,codemode.journalRollback,journalRollback,journal_rollback,compact,compactMany,compact_many,compact_max,ingest,cache_pack,store_put,store_alias,migration_apply",
-            OperationClass::ReversibleStoreMutation,
-        ),
-        (
-            "shell,fetch,network,external",
-            OperationClass::IrreversibleExternal,
-        ),
-    ];
-    classes
-        .into_iter()
-        .find(|(methods, _)| methods.split(',').any(|candidate| candidate == bare))
-        .map_or(OperationClass::Unknown, |(_, class)| class)
-}
-
-pub fn classify_descriptor_tool(tool: &str) -> OperationClass {
-    match tool {
-        "tz_execute_code" | "tz_batch" => OperationClass::Unknown,
-        "tz_report_tool_issue" => OperationClass::IrreversibleExternal,
-        other => classify_method(other),
-    }
-}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

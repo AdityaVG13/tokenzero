@@ -176,8 +176,8 @@ fn classic_surface_rejects_tz_execute_code() {
 }
 
 #[test]
-#[cfg(feature = "surface-codemode")]
 fn codemode_mcp_wire_preserves_canonical_refs() {
+    tokenzero_codemode::install_mcp_bridge();
     use tokenzero_core::McpToolSurface;
     let dir = tempdir().unwrap();
     let mut config = EngineConfig::for_root(dir.path());
@@ -242,8 +242,8 @@ fn mcp_execute_root_with_workspace_markers_requires_allowlist() {
 }
 
 #[test]
-#[cfg(feature = "surface-codemode")]
 fn mcp_execute_root_rebase_inside_allowed_tree_is_accepted() {
+    tokenzero_codemode::install_mcp_bridge();
     // Legitimate rebase stays: a root nested inside an allowlisted tree is
     // accepted and unions into the execution workspace.
     use tokenzero_core::McpToolSurface;
@@ -344,8 +344,8 @@ fn plan_string_expand_does_not_unlock_without_expand_op() {
 }
 
 #[test]
-#[cfg(feature = "surface-codemode")]
 fn shared_health_unlocks_after_plan_expand_miss() {
+    tokenzero_codemode::install_mcp_bridge();
     use tokenzero_core::McpToolSurface;
     let dir = tempdir().unwrap();
     let mut config = EngineConfig::for_root(dir.path());
@@ -372,9 +372,9 @@ fn shared_health_unlocks_after_plan_expand_miss() {
     );
 }
 
-#[cfg(feature = "surface-codemode")]
 #[test]
 fn envelope_v3_ack_uses_execution_id() {
+    tokenzero_codemode::install_mcp_bridge();
     use crate::tools;
     use serde_json::json;
 
@@ -404,9 +404,9 @@ fn envelope_v3_ack_uses_execution_id() {
     assert!(!text.contains("execution_refs"), "{text}");
 }
 
-#[cfg(feature = "surface-codemode")]
 #[test]
 fn envelope_v3_scalar_fold_keeps_structured_value() {
+    tokenzero_codemode::install_mcp_bridge();
     // tokenzero-codemode-result-not-surfaced-jhh
     use crate::tools;
     use serde_json::json;

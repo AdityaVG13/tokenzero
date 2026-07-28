@@ -339,6 +339,7 @@ fn timed<T>(run: impl FnOnce() -> T) -> (T, u64) {
 }
 
 pub fn run_benchmark(root: &std::path::Path) -> BenchmarkReport {
+    tokenzero_codemode::install_mcp_bridge();
     let root_buf = benchmark_root(root);
     let root = root_buf.as_path();
     let workloads = workloads_for_root(root);

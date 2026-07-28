@@ -16,7 +16,7 @@ use tokenzero_core::{
     shell_display_command_from_argv_for_platform,
 };
 use tokenzero_install as install;
-use tokenzero_mcp::{
+use tokenzero_mcp_compat::{
     CodeModeOptions, CodeModeResult, CodeModeStatus, EditHunk, EngineConfig, TokenZeroEngine,
     cli_json, default_shell_timeout, execute_codemode_with_options, mcp_idle_timeout_from_secs,
     render_text, shell_timeout_from_secs,
@@ -182,7 +182,7 @@ fn main() -> Result<()> {
     // Private raw worker (tokenzero-irx9.4) on the selected surface artifact / shim.
     // This private command is recognized only in argv[1], before Clap normalization.
     if raw_worker_is_first_command(&argv) {
-        let code = tokenzero_mcp::maybe_run_raw_worker_from_args(&raw_worker_argv(argv)?)
+        let code = tokenzero_mcp_compat::maybe_run_raw_worker_from_args(&raw_worker_argv(argv)?)
             .map_err(anyhow::Error::msg)?
             .context("leading raw-worker command did not parse")?;
         std::process::exit(code);
@@ -228,11 +228,11 @@ fn main() -> Result<()> {
     McpServer(args) => {
         if args.supervise {
             let program = std::env::current_exe().map(OsString::from).unwrap_or_else(|_| OsString::from("tokenzero"));
-            std::process::exit(tokenzero_mcp::run_supervised_stdio(program, supervised_child_args(&args)))
+            std::process::exit(tokenzero_mcp_compat::run_supervised_stdio(program, supervised_child_args(&args)))
         }
         codemode_host_niceness();
         enforce_surface_exclusivity(&args)?;
-        tokenzero_mcp::run_fastmcp_stdio(engine_config_for_mcp(&args)?)
+        tokenzero_mcp_compat::run_fastmcp_stdio(engine_config_for_mcp(&args)?)
     }
     CodeMode(args) => {
         let plan = match args.plan_text() {
@@ -431,7 +431,7 @@ fn tool_emit(response: ToolResponse, json: bool, tool: &str) -> Result<EmitRespo
 
 /// Route a CLI domain op through the shared engine dispatcher exactly once.
 fn dispatch_cli_tool(engine: &TokenZeroEngine, op: &str, args: serde_json::Value) -> ToolResponse {
-    let outcome = tokenzero_mcp::dispatch_cli(engine, op, &args);
+    let outcome = tokenzero_mcp_compat::dispatch_cli(engine, op, &args);
     let response = if let Some(response) = outcome.tool_response {
         response
     } else if let Some(err) = outcome.domain_error {
@@ -837,7 +837,7 @@ fn doctor_report(args: &DoctorArgs) -> serde_json::Value {
             .migration_state();
     report["recovery_blobs"] =
         tokenzero_recovery::recovery_blob_status(&store.effective_cache_path);
-    report["engine_binaries"] = tokenzero_mcp::engine_binaries_json();
+    report["engine_binaries"] = tokenzero_mcp_compat::engine_binaries_json();
     if let Some(summary) = &store.mismatch_summary {
         let mismatch = store.store_project_mismatch;
         let finding = json!({"id": if mismatch {"tz-store-project-mismatch"} else {"tz-store-global-pin-ignored"}, "severity": if mismatch {"warning"} else {"info"}, "status": "detected", "check": "store_resolution", "summary": summary, "evidence": {"project_root": path_display(&root), "effective_cache_path": path_display(&store.effective_cache_path), "effective_store_root": store.effective_store_root.as_ref().map(|p| path_display(p)), "shared_store_opt_in": store.shared_store_opt_in, "global_pin_set": store.global_pin_set, "isolation_mode": store.isolation_mode}, "auto_fix": false, "fix_supported": false, "next_step": if mismatch {"Use a per-project store (unset TOKENZERO_SHARED_STORE / ZEROSTACK_SHARED_STORE) or pass --cache-path under the project root."} else {"Default is per-project isolation (wqw.2). Set TOKENZERO_SHARED_STORE=1 only for intentional meta-workspace sharing."}});
@@ -987,23 +987,24 @@ fn handle_pulse(args: PulseArgs) -> Result<()> {
 fn handle_session_ledger(args: SessionLedgerArgs) -> Result<()> {
     let root = tokenzero_work_root(args.root);
     let pulse_ledger_path = default_ledger_path(&root);
-    let response_ledger_path =
-        tokenzero_mcp::ledger::ledger_path_for_cache(&resolve_recovery_cache_path(&root, None));
+    let response_ledger_path = tokenzero_mcp_compat::ledger::ledger_path_for_cache(
+        &resolve_recovery_cache_path(&root, None),
+    );
     match args.command {
         Some(SessionLedgerCommand::Schema) => print_pretty(&SessionLedgerReport::schema_json())?,
         Some(SessionLedgerCommand::Inspect(flags)) => {
-            let env_value = std::env::var(tokenzero_mcp::ledger::TELEMETRY_ENV).ok();
-            let enabled = tokenzero_mcp::ledger::resolve_telemetry(
+            let env_value = std::env::var(tokenzero_mcp_compat::ledger::TELEMETRY_ENV).ok();
+            let enabled = tokenzero_mcp_compat::ledger::resolve_telemetry(
                 flags.telemetry,
                 flags.no_telemetry,
                 None,
                 env_value.as_deref(),
             );
-            let usage_path = tokenzero_mcp::ledger::usage_telemetry_path_for_cache(
+            let usage_path = tokenzero_mcp_compat::ledger::usage_telemetry_path_for_cache(
                 &resolve_recovery_cache_path(&root, None),
             );
             emit_value(
-                tokenzero_mcp::ledger::inspect_telemetry(&usage_path, enabled)?,
+                tokenzero_mcp_compat::ledger::inspect_telemetry(&usage_path, enabled)?,
                 args.json,
             )?;
         }
@@ -1031,7 +1032,7 @@ fn handle_session_ledger(args: SessionLedgerArgs) -> Result<()> {
             };
             let query = match query {
                 LedgerQueryCommand::Repo { repo, days } => {
-                    tokenzero_mcp::ledger::LedgerQuery::RepoCost {
+                    tokenzero_mcp_compat::ledger::LedgerQuery::RepoCost {
                         repo: repo.to_string_lossy().into_owned(),
                         since_ms: since_ms(days),
                     }
@@ -1040,19 +1041,19 @@ fn handle_session_ledger(args: SessionLedgerArgs) -> Result<()> {
                     baseline,
                     candidate,
                     days,
-                } => tokenzero_mcp::ledger::LedgerQuery::VersionDelta {
+                } => tokenzero_mcp_compat::ledger::LedgerQuery::VersionDelta {
                     baseline,
                     candidate,
                     since_ms: since_ms(days),
                 },
                 LedgerQueryCommand::AgentSpend { days } => {
-                    tokenzero_mcp::ledger::LedgerQuery::AgentSpend {
+                    tokenzero_mcp_compat::ledger::LedgerQuery::AgentSpend {
                         since_ms: since_ms(days),
                     }
                 }
             };
             emit_value(
-                tokenzero_mcp::ledger::query_ledger(&response_ledger_path, &query)?,
+                tokenzero_mcp_compat::ledger::query_ledger(&response_ledger_path, &query)?,
                 args.json,
             )?;
         }
@@ -1119,7 +1120,7 @@ fn handle_cache(args: CacheArgs) -> Result<()> {
             let dry_run = !args.apply;
             let mut store = tokenzero_recovery::RecoveryStore::new(Some(cache.clone()));
             let mut report = store.prune_stale(dry_run)?;
-            report["maintenance"] = tokenzero_mcp::cache_maintenance(&cache, dry_run);
+            report["maintenance"] = tokenzero_mcp_compat::cache_maintenance(&cache, dry_run);
             emit_value(report, args.json)?;
         }
         CacheCommand::MigrateRefs(args) => {

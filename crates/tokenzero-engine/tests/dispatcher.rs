@@ -82,7 +82,7 @@ fn engine_crate_does_not_depend_on_surface_layers() {
 
     // Source-level: no imports of surface modules.
     let forbidden_substrings = [
-        "crate::codemode",
+        "crate::codemode::",
         "crate::fastmcp_mode",
         "crate::jsonrpc",
         "tokenzero_mcp::",
@@ -120,7 +120,7 @@ fn engine_crate_does_not_depend_on_surface_layers() {
 
 #[test]
 fn no_fastmcp_codemode_cross_adapter_calls() {
-    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../tokenzero-mcp/src");
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../tokenzero-mcp-compat/src");
     let fastmcp = fs::read_to_string(root.join("fastmcp_mode.rs")).unwrap();
     assert!(
         !fastmcp.contains("crate::codemode") && !fastmcp.contains("execute_codemode"),
@@ -430,7 +430,7 @@ fn cli_domain_handlers_use_dispatch_cli_only() {
         "CLI must define dispatch_cli_tool thin adapter"
     );
     assert!(
-        text.contains("tokenzero_mcp::dispatch_cli")
+        text.contains("tokenzero_mcp_compat::dispatch_cli")
             || text.contains("tokenzero_engine::dispatch_cli"),
         "CLI must call shared dispatch_cli"
     );

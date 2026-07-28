@@ -4,17 +4,8 @@
 //! Domain execution lives in [`tokenzero_engine`]. This crate depends inward and
 //! must not re-implement domain auth/root/mutation/ref/telemetry semantics.
 
-// Process/artifact mutual exclusion (tokenzero-irx9.3): one process must never
-// compile both user-facing surface runtimes (fastmcp-rust + rquickjs).
-#[cfg(all(feature = "surface-mcp", feature = "surface-codemode"))]
-compile_error!(
-    "tokenzero surfaces are mutually exclusive (tokenzero-irx9.3): enable exactly one of \
-feature surface-mcp or surface-codemode -- never both. One process must not contain both \
-catalogs. Build tokenzero-mcp with surface-mcp, or tokenzero-codemode with surface-codemode."
-);
 mod capability_descriptor;
 mod catalog;
-mod codemode;
 #[cfg(feature = "surface-mcp")]
 mod fastmcp_mode;
 #[cfg(not(feature = "surface-mcp"))]
@@ -29,6 +20,10 @@ mod supervisor;
 mod tools;
 
 #[cfg(test)]
+#[path = "bench.rs"]
+mod bench;
+
+#[cfg(test)]
 mod tests;
 
 // Re-export the domain engine (types, dispatcher, modules) for CLI + adapters.
@@ -39,10 +34,19 @@ pub use tokenzero_engine::{
 };
 
 pub use catalog::{ResourceSpec, ToolSpec, resource_specs, tool_specs};
-pub use codemode::{
-    CODEMODE_SCHEMA, CodeModeLimits, CodeModeOptions, CodeModeResult, CodeModeStatus,
-    describe_codemode_method, execute_codemode_with_options, search_codemode_catalog,
+pub use tokenzero_engine::codemode_catalog::{
+    describe_method as describe_codemode_method, search_catalog as search_codemode_catalog,
 };
+pub use tokenzero_engine::codemode_wire::{
+    CODEMODE_SCHEMA, CodeModeLimits, CodeModeOptions, CodeModeResult, CodeModeStatus,
+};
+
+/// zero.execute over the canonical engine hook. The real JS executor is
+/// installed by tokenzero-codemode::install_mcp_bridge(); without it this
+/// fails closed with the unavailable payload.
+pub fn execute_codemode_with_options(plan: &str, options: CodeModeOptions) -> CodeModeResult {
+    tokenzero_engine::codemode_wire::codemode_execute(plan, &options)
+}
 pub use fastmcp_mode::{fastmcp_codemode_instructions, fastmcp_instructions, run_fastmcp_stdio};
 pub use jsonrpc::handle_jsonrpc;
 pub use stdio::run_stdio;

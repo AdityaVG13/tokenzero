@@ -39,3 +39,12 @@ pub fn install_shell_hooks() {
         containment_snapshot: containment::snapshot,
     });
 }
+
+/// Install the real JS-backed executor into the canonical engine hook so the
+/// MCP compatibility adapter (tokenzero-mcp-compat) serves zero.execute over
+/// one dispatcher. Safe to call once at process start; later calls are no-ops.
+pub fn install_mcp_bridge() {
+    let _ = tokenzero_engine::codemode_wire::register_codemode_execute_hook(|plan, options| {
+        execute_codemode_with_options(plan, options.clone())
+    });
+}

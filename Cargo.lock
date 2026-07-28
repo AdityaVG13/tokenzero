@@ -2932,10 +2932,11 @@ dependencies = [
  "serde",
  "serde_json",
  "tempfile",
+ "tokenzero-codemode",
  "tokenzero-core",
  "tokenzero-filters",
  "tokenzero-install",
- "tokenzero-mcp",
+ "tokenzero-mcp-compat",
  "tokenzero-pulse",
  "tokenzero-recovery",
  "tokenzero-runtime",
@@ -3019,7 +3020,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "tokenzero-mcp"
+name = "tokenzero-mcp-compat"
 version = "1.4.0"
 dependencies = [
  "assert_cmd",

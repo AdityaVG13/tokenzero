@@ -3,8 +3,8 @@ use tokenzero_core::MCP_SCHEMA_VERSION;
 
 use crate::TokenZeroEngine;
 use crate::catalog::{resource_specs, tool_clusters, tool_docs};
-use crate::codemode::catalog::codemode_method_catalog;
 use crate::jsonrpc::{JsonRpcErrorData, tool_filter_discovery};
+use tokenzero_engine::codemode_catalog::codemode_method_catalog;
 
 /// Build the JSON payload string for a resource URI. Used by both the
 /// hand-rolled resources/read dispatch and the FastMCP ResourceHandler impls.

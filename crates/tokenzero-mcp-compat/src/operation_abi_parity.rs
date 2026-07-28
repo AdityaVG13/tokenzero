@@ -19,7 +19,6 @@ mod tests {
         TOOL_ALIASES, ToolKind, canonical_tool_specs, resource_specs, tool_specs,
         tool_specs_for_filter,
     };
-    use crate::codemode::catalog::{describe_method, method_paths};
     use serde_json::{Value, json};
     use std::collections::BTreeSet;
     use tokenzero_core::McpToolSurface;
@@ -27,6 +26,7 @@ mod tests {
         all_operations, contract_digest_hex, golden_vectors, operation_by_name, resolve_operation,
         resource_uris, schema_diff, schemas_structurally_equal,
     };
+    use tokenzero_engine::codemode_catalog::{describe_method, method_paths};
 
     /// Independent product inventory: every `tool_table!` seed name.
     /// This is the live MCP product list, maintained next to handlers — not a
