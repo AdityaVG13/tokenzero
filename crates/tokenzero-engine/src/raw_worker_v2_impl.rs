@@ -51,8 +51,9 @@ fn error(id: Option<&str>, kind: &str, message: impl Into<String>, trace: Option
 fn encode(mut value: Value) -> Vec<u8> {
     let mut bytes = serde_json::to_vec(&value).unwrap_or_default();
     if bytes.len() + 1 > raw_worker_v2_protocol::DEFAULT_MAX_FRAME_BYTES {
+        let request_id = value["request_id"].as_str().map(str::to_string);
         value = error(
-            None,
+            request_id.as_deref(),
             "frame_too_large",
             "outbound frame exceeds 1 MiB",
             None,
@@ -121,19 +122,11 @@ pub fn execute_raw_worker_v2_frame(
     session: &mut RawWorkerV2Session,
     line: &[u8],
 ) -> Vec<u8> {
-    if line.len() > raw_worker_v2_protocol::DEFAULT_MAX_FRAME_BYTES {
-        return encode(error(
-            None,
-            "frame_too_large",
-            "inbound frame exceeds 1 MiB",
-            None,
-        ));
-    }
     if let Err(e) = raw_worker_v2_protocol::decode_request_frame(
         line,
         raw_worker_v2_protocol::DEFAULT_MAX_FRAME_BYTES,
     ) {
-        return encode(error(None, "invalid_frame", e.to_string(), None));
+        return encode(error(None, e.kind(), e.to_string(), None));
     }
     let frame: Value = match serde_json::from_slice(line) {
         Ok(v) => v,
@@ -442,6 +435,61 @@ mod tests {
         ))
         .unwrap();
         assert_eq!(response["error"]["kind"], "frame_too_large");
+    }
+
+    #[test]
+    fn oversized_frame_fails_closed_without_parsing_request_id() {
+        let mut session = RawWorkerV2Session::default();
+        let mut frame = serde_json::to_vec(&json!({
+            "kind": "call",
+            "request": {"request_id": "req-oversized", "op": "token.read"}
+        }))
+        .unwrap();
+        frame.extend(std::iter::repeat(b' ').take(1_048_600));
+        let response: Value =
+            serde_json::from_slice(&execute_raw_worker_v2_frame(&engine(), &mut session, &frame))
+                .unwrap();
+        assert_eq!(response["error"]["kind"], "frame_too_large");
+        assert!(response.get("request_id").is_none());
+    }
+
+    #[test]
+    fn in_bound_typed_frame_error_round_trips_request_id() {
+        let mut session = RawWorkerV2Session::default();
+        let line = br#"{"kind":"call","request":{"request_id":"req-7"},"extra":}"#.to_vec();
+        let response: Value =
+            serde_json::from_slice(&execute_raw_worker_v2_frame(&engine(), &mut session, &line))
+                .unwrap();
+        assert_eq!(response["error"]["kind"], "invalid_frame");
+        assert!(response.get("request_id").is_none());
+    }
+
+    #[test]
+    fn empty_and_malformed_frames_return_typed_invalid_frame() {
+        let mut session = RawWorkerV2Session::default();
+        for line in [b"\n".to_vec(), b"{not json".to_vec()] {
+            let response: Value = serde_json::from_slice(&execute_raw_worker_v2_frame(
+                &engine(),
+                &mut session,
+                &line,
+            ))
+            .unwrap();
+            assert_eq!(response["error"]["kind"], "invalid_frame");
+        }
+    }
+
+    #[test]
+    fn bounded_reader_rejects_oversized_line_without_unbounded_growth() {
+        let mut oversized = vec![b'x'; 1_048_600];
+        oversized.push(b'\n');
+        oversized.extend_from_slice(b"{}\n");
+        let mut reader = std::io::BufReader::new(std::io::Cursor::new(oversized));
+        let first =
+            read_bounded_frame(&mut reader, raw_worker_v2_protocol::DEFAULT_MAX_FRAME_BYTES).unwrap();
+        assert!(matches!(first, BoundedFrame::TooLarge));
+        let second =
+            read_bounded_frame(&mut reader, raw_worker_v2_protocol::DEFAULT_MAX_FRAME_BYTES).unwrap();
+        assert!(matches!(second, BoundedFrame::Line(line) if line == b"{}\n"));
     }
 
     #[test]
