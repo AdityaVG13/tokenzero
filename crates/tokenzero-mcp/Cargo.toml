@@ -19,13 +19,12 @@ rust-version.workspace = true
 [features]
 default = ["surface-mcp"]
 surface-mcp = ["dep:fastmcp-rust"]
-surface-codemode = ["dep:rquickjs"]
+surface-codemode = ["tokenzero-codemode/js"]
 
 [dependencies]
 fs4.workspace = true
 globset.workspace = true
 memchr.workspace = true
-rquickjs = { workspace = true, optional = true }
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
@@ -33,6 +32,7 @@ similar.workspace = true
 thiserror.workspace = true
 tempfile.workspace = true
 zerostack-machine-permit.workspace = true
+tokenzero-codemode = { path = "../tokenzero-codemode", version = "1.4.0", default-features = false }
 tokenzero-core = { path = "../tokenzero-core", version = "1.0.2" }
 tokenzero-filters = { path = "../tokenzero-filters", version = "1.0.2" }
 tokenzero-pulse = { path = "../tokenzero-pulse", version = "1.0.2" }

@@ -68,7 +68,7 @@ pub use dispatcher::{
     dispatch_raw_worker, domain_fastmcp_ops, is_domain_operation, last_dispatch_profile,
     operation_is_domain, tool_response_to_domain,
 };
-pub use domain::{DomainDispatchError, execute_domain_op};
+pub use domain::{DomainDispatchError, batch_response, execute_domain_op};
 pub use fetch_cache::{load_fetch_index, record_fetch};
 pub use raw_worker::{
     RawWorkerError, RawWorkerRequest, RawWorkerResponse, RawWorkerServeOptions,

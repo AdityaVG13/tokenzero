@@ -6,6 +6,7 @@ members = [
     "crates/tokenzero-runtime",
     "crates/tokenzero-engine",
     "crates/tokenzero-filters",
+    "crates/tokenzero-codemode",
     "crates/tokenzero-mcp",
     "crates/tokenzero",
     "crates/tokenzero-install",

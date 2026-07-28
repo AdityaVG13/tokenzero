@@ -131,7 +131,10 @@ fn no_fastmcp_codemode_cross_adapter_calls() {
         "FastMCP should use shared tool/dispatch path"
     );
 
-    let connector = fs::read_to_string(root.join("codemode/exec.rs")).unwrap();
+    let connector = fs::read_to_string(
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../tokenzero-codemode/src/exec.rs"),
+    )
+    .unwrap();
     assert!(
         !connector.contains("crate::fastmcp_mode") && !connector.contains("run_fastmcp"),
         "CodeMode must not call FastMCP"

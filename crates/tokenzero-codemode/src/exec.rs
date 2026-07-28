@@ -1,7 +1,7 @@
 //! CodeMode plan executor and TokenZero operation dispatch.
 
-use rquickjs::{function::Func, Context, Runtime};
-use serde_json::{json, Value};
+use rquickjs::{Context, Runtime, function::Func};
+use serde_json::{Value, json};
 use std::cell::RefCell;
 use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
@@ -10,31 +10,31 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, OnceLock};
 use std::time::Duration;
 use tokenzero_core::{
-    count_tokens, detect_content_type, pack_to_token_boundary_with_char_limit, Mode, ToolResponse,
+    Mode, ToolResponse, count_tokens, detect_content_type, pack_to_token_boundary_with_char_limit,
 };
-use tokenzero_filters::{discover, rewrite_command};
+use tokenzero_filters::discover;
 
-use crate::wall::{with_host_wall_deadline, WallDeadline};
-use crate::workspace::{
+use tokenzero_engine::wall::{WallDeadline, with_host_wall_deadline};
+use tokenzero_engine::workspace::{
     allowed_roots_for_workspace, resolve_recovery_cache_path, tokenzero_work_root,
 };
-use crate::{shell_timeout_from_secs, EditHunk, EngineConfig, TokenZeroEngine};
+use tokenzero_engine::{EditHunk, EngineConfig, TokenZeroEngine, shell_timeout_from_secs};
 
 use super::catalog::{describe_method, search_catalog};
 use super::journal::{
-    atomic_write as journal_atomic_write, begin_plan, classify_method, current_digest,
-    doctor_json as journal_doctor_json, inspect as inspect_journal, open_unresolved, sha256_bytes,
     BeginOutcome, JournalOperation, JournalState, JournalTransaction, OperationClass,
-    OperationSpec,
+    OperationSpec, atomic_write as journal_atomic_write, begin_plan, classify_method,
+    current_digest, doctor_json as journal_doctor_json, inspect as inspect_journal,
+    open_unresolved, sha256_bytes,
 };
-use super::parser::{parse_plan, resolve_expr, resolve_return, Expr, MethodCall, Statement};
+use super::parser::{Expr, MethodCall, Statement, parse_plan, resolve_expr, resolve_return};
 use super::recipe_registry;
 use super::result::{CodeModeOptions, CodeModeResult, CodeModeStatus};
 use super::sandbox::lower_code_plan;
 use super::store::{
-    execution_id, finalize_result, now_ms, CodeModeLimits, ExecutionStep, ExecutionStore,
+    CodeModeLimits, ExecutionStep, ExecutionStore, execution_id, finalize_result, now_ms,
 };
-use crate::expand_params::ExpandParams;
+use tokenzero_engine::expand_params::ExpandParams;
 
 const EXACT_EXPAND_MARKER: &str = "__tz_exact_expand";
 
@@ -256,7 +256,7 @@ pub fn execute_codemode(plan: &str) -> CodeModeResult {
 }
 
 pub fn execute_codemode_with_options(plan: &str, options: CodeModeOptions) -> CodeModeResult {
-    crate::codemode::install_shell_hooks();
+    crate::install_shell_hooks();
 
     let containment_options = options.clone();
     super::containment::execute(plan, &containment_options, move || {
@@ -744,7 +744,7 @@ fn begin_js_host_op(
     // journal/transaction support, so the workspace-mutating edit family is
     // refused regardless of alias, computed, or obfuscated spellings.
     if quickjs_edit_dispatch_denied(method) {
-        let message = crate::annotate_write_failure(
+        let message = tokenzero_engine::annotate_write_failure(
             concat!(
                 "sandbox: mutating binding denied without transaction support ",
                 "(use the lowered zero.edit / tz_edit path, not free-form JS mutation)",
@@ -1644,7 +1644,7 @@ fn unwrap_raw_value(value: Value) -> Value {
 }
 
 fn compact_value_preview(text: &str, max_tokens: usize) -> String {
-    let value = crate::render::preview(text);
+    let value = tokenzero_engine::render::preview(text);
     pack_to_token_boundary_with_char_limit(&value, max_tokens, 32).to_string()
 }
 
@@ -1897,7 +1897,7 @@ fn finalize_codemode_result(
                 finalized.visible_ack.trim_end()
             );
         }
-        let enabled = crate::usage_telemetry_enabled(options.telemetry_enabled);
+        let enabled = tokenzero_engine::usage_telemetry_enabled(options.telemetry_enabled);
         finalized.telemetry.billed_input_tokens = count_tokens(plan);
         finalized.telemetry.cached_input_tokens = 0;
         finalized.telemetry.billed_output_tokens = finalized.telemetry.visible_tokens();
@@ -1905,7 +1905,7 @@ fn finalize_codemode_result(
             .telemetry
             .prefix_cache_hits
             .min(finalized.telemetry.billed_output_tokens);
-        crate::record_codemode_accounting(
+        tokenzero_engine::record_codemode_accounting(
             &engine.config.cache_path,
             enabled,
             finalized.telemetry.raw_tokens(),
@@ -1931,18 +1931,18 @@ fn finalize_codemode_result(
             let _ =
                 tokenzero_pulse::record_event(&tokenzero_pulse::default_ledger_path(root), &event);
         }
-        crate::record_operation_amplification(
+        tokenzero_engine::record_operation_amplification(
             &engine.config.cache_path,
             enabled,
-            crate::ExecutionPath::Codemode,
+            tokenzero_engine::ExecutionPath::Codemode,
             "codemode",
-            crate::DirectionTokens::measured(
+            tokenzero_engine::DirectionTokens::measured(
                 count_tokens(plan),
                 count_tokens(plan),
                 finalized.telemetry.billed_input_tokens,
                 finalized.telemetry.cached_input_tokens,
             ),
-            crate::DirectionTokens::measured(
+            tokenzero_engine::DirectionTokens::measured(
                 finalized.telemetry.raw_tokens(),
                 finalized.telemetry.visible_tokens(),
                 finalized.telemetry.billed_output_tokens,
@@ -2756,9 +2756,9 @@ fn exec_batch(engine: &TokenZeroEngine, args: &[Value]) -> OpResult {
     if ops.is_empty() {
         return Err(operation_error("zero.batch requires at least one op"));
     }
-    match crate::tools::batch_response(engine, &json!({"ops": ops, "mode": "auto"})) {
+    match tokenzero_engine::batch_response(engine, &json!({"ops": ops, "mode": "auto"})) {
         Ok(resp) => tool(resp),
-        Err(error) => Err(operation_error(error.message_text())),
+        Err(error) => Err(operation_error(&error)),
     }
 }
 
@@ -2844,11 +2844,12 @@ fn exec_filter_lines(args: &[Value]) -> OpResult {
         1,
         "zero.filter_lines requires a pattern string as second argument",
     )?;
-    catalog(json!(text
-        .lines()
-        .filter(|l| l.contains(pattern))
-        .collect::<Vec<_>>()
-        .join("\n")))
+    catalog(json!(
+        text.lines()
+            .filter(|l| l.contains(pattern))
+            .collect::<Vec<_>>()
+            .join("\n")
+    ))
 }
 fn exec_journal_inspect(engine: &TokenZeroEngine, args: &[Value]) -> OpResult {
     let execution_id = journal_execution_arg(args)?;
@@ -3298,11 +3299,12 @@ fn exec_glob(engine: &TokenZeroEngine, work_root: &Path, args: &[Value]) -> OpRe
 
 fn exec_tree(engine: &TokenZeroEngine, work_root: &Path, args: &[Value]) -> OpResult {
     let roots = resolve_paths_against_work_root(
-        vec![args
-            .first()
-            .and_then(|v| v.as_str())
-            .map(PathBuf::from)
-            .unwrap_or_else(|| work_root.to_path_buf())],
+        vec![
+            args.first()
+                .and_then(|v| v.as_str())
+                .map(PathBuf::from)
+                .unwrap_or_else(|| work_root.to_path_buf()),
+        ],
         work_root,
     );
     let opts = Opts::from_arg(args, 1);
@@ -3445,7 +3447,7 @@ pub(crate) fn exec_edit(engine: &TokenZeroEngine, work_root: &Path, args: &[Valu
             .as_ref()
             .map(|e| e.message.clone())
             .unwrap_or_else(|| "zero.edit failed".to_string());
-        let annotated = crate::annotate_write_failure(&message, false);
+        let annotated = tokenzero_engine::annotate_write_failure(&message, false);
         return Err(Box::new(CodeModeResult::error_with_kind(
             resp.error
                 .as_ref()
@@ -3492,7 +3494,7 @@ fn bound_default_expand_response(
         return false;
     };
     let raw_tokens = count_tokens(&text);
-    let limit = configured_limit.min(DEFAULT_EXPAND_VISIBLE_TOKENS).max(128);
+    let limit = configured_limit.clamp(128, DEFAULT_EXPAND_VISIBLE_TOKENS);
     if raw_tokens <= limit {
         return false;
     }
@@ -3590,7 +3592,8 @@ fn exec_expand_many(engine: &TokenZeroEngine, args: &[Value]) -> OpResult {
     let mut results = Vec::with_capacity(items.len());
     let mut prevented = 0usize;
     for (idx, item) in items.iter().enumerate() {
-        if let Some((message, _)) = crate::wall::check_active_wall_deadline_every(idx, 1) {
+        if let Some((message, _)) = tokenzero_engine::wall::check_active_wall_deadline_every(idx, 1)
+        {
             return Err(operation_error(message));
         }
         let params = ExpandParams::from_expand_many_item(item).map_err(operation_error)?;

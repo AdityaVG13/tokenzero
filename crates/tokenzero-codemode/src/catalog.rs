@@ -238,7 +238,7 @@ pub fn describe_method(path: &str) -> Value {
     }
 }
 
-pub(crate) fn codemode_method_catalog() -> Value {
+pub fn codemode_method_catalog() -> Value {
     json!({
         "schema_version": "tokenzero.codemode.catalog.v1",
         "methods": METHOD_CATALOG.iter().map(|m| {

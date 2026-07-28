@@ -184,7 +184,7 @@ pub struct CodeModeOptions {
     pub ref_first_budget: usize,
     /// Session crash-only health shared with the MCP engine (wqw.9).
     /// When set, plan expand/read outcomes update the same gate as tools/call.
-    pub surface_health: Option<std::sync::Arc<crate::surface_health::SurfaceHealth>>,
+    pub surface_health: Option<std::sync::Arc<tokenzero_engine::surface_health::SurfaceHealth>>,
     /// Programmatic shareable usage-telemetry choice; `None` defers to env.
     pub telemetry_enabled: Option<bool>,
 }
@@ -410,23 +410,6 @@ fn structured_error_message(message: &str) -> String {
     rendered
 }
 
-#[cfg(test)]
-mod structured_error_tests {
-    use super::*;
-
-    #[test]
-    fn structured_json_error_keeps_punctuation_and_lists() {
-        let result = CodeModeResult::error(
-            r#"{"error":"unknown surface: framework","hint":"choose a supported surface","valid_surfaces":["authoring","constructors","ops"]}"#,
-            0,
-        );
-        assert_eq!(
-            result.to_line(),
-            "codemode:error 9 ops=0 unknown surface: framework; hint: choose a supported surface; valid_surfaces: authoring, constructors, ops"
-        );
-    }
-}
-
 fn classify_error_kind(message: &str) -> &'static str {
     let lower = message.to_ascii_lowercase();
     if lower.contains("mutating binding denied")
@@ -454,5 +437,22 @@ fn classify_error_kind(message: &str) -> &'static str {
         "substrate"
     } else {
         "runtime"
+    }
+}
+
+#[cfg(test)]
+mod structured_error_tests {
+    use super::*;
+
+    #[test]
+    fn structured_json_error_keeps_punctuation_and_lists() {
+        let result = CodeModeResult::error(
+            r#"{"error":"unknown surface: framework","hint":"choose a supported surface","valid_surfaces":["authoring","constructors","ops"]}"#,
+            0,
+        );
+        assert_eq!(
+            result.to_line(),
+            "codemode:error 9 ops=0 unknown surface: framework; hint: choose a supported surface; valid_surfaces: authoring, constructors, ops"
+        );
     }
 }

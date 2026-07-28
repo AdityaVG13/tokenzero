@@ -11,8 +11,7 @@ use tokenzero_engine::{
 };
 
 fn exec_rs() -> String {
-    let path =
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../tokenzero-mcp/src/codemode/exec.rs");
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../tokenzero-codemode/src/exec.rs");
     fs::read_to_string(&path).unwrap()
 }
 

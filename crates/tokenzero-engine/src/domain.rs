@@ -227,7 +227,7 @@ pub fn execute_domain_op(
     Ok(response)
 }
 
-fn batch_response(engine: &TokenZeroEngine, args: &Value) -> Result<ToolResponse, String> {
+pub fn batch_response(engine: &TokenZeroEngine, args: &Value) -> Result<ToolResponse, String> {
     let ops = batch_ops(args)?;
     let mut sections = Vec::with_capacity(ops.len());
     let mut refs: Vec<tokenzero_core::RefRecord> = Vec::new();

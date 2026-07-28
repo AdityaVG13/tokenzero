@@ -195,7 +195,7 @@ where
 
 /// Production CodeMode sentinel entrypoint. Recipe arguments are server-side;
 /// only the opcode and ACK are counted as model-visible protocol tokens.
-#[cfg(feature = "surface-codemode")]
+#[cfg(feature = "js")]
 pub fn execute_sentinel(
     input: &str,
     mode: SentinelMode,
@@ -273,7 +273,8 @@ mod tests {
             ProtocolTokenizer::Anthropic,
             "5"
         ));
-        assert!(2 < 10, "sentinel call must remain single-digit");
+        #[allow(clippy::assertions_on_constants)]
+        const _: () = assert!(2 < 10, "sentinel call must remain single-digit");
     }
 
     #[test]
@@ -362,7 +363,7 @@ mod tests {
         assert_eq!(calls.load(Ordering::Relaxed), 1);
     }
 
-    #[cfg(feature = "surface-codemode")]
+    #[cfg(feature = "js")]
     #[test]
     fn production_takeover_executes_mapped_recipe() {
         let work = tempfile::tempdir().unwrap();

@@ -1,4 +1,4 @@
-use super::{execute_codemode_with_options, CodeModeOptions, CodeModeStatus};
+use super::{CodeModeOptions, CodeModeStatus, execute_codemode_with_options};
 
 #[test]
 fn async_function_wrapper_is_lowered_and_size_limited() {
@@ -286,81 +286,6 @@ fn envelope_v3_collapses_execution_refs_and_hides_store_block() {
             .is_some_and(|id| id.starts_with("cm://exec/")),
         "{:?}",
         result.execution_id
-    );
-}
-
-#[test]
-fn envelope_v3_ack_uses_execution_id() {
-    use crate::tools;
-    use serde_json::json;
-
-    let work = tempfile::tempdir().unwrap();
-    let engine = crate::TokenZeroEngine::new(crate::EngineConfig::for_root(work.path()));
-    let response = tools::dispatch_tool(
-        &engine,
-        "execute_code",
-        "tz_execute_code",
-        &json!({
-            "plan": "return 7",
-            "envelope": "v3",
-            "root": work.path().to_string_lossy(),
-        }),
-    )
-    .expect("dispatch");
-    assert_eq!(response.status, "ok");
-    let text = response
-        .visible
-        .as_ref()
-        .map(|visible| visible.text.as_str())
-        .unwrap_or("");
-    assert!(
-        text.contains("cm://exec/"),
-        "v3 ack must include execution id: {text}"
-    );
-    assert!(!text.contains("execution_refs"), "{text}");
-}
-
-#[test]
-fn envelope_v3_scalar_fold_keeps_structured_value() {
-    // tokenzero-codemode-result-not-surfaced-jhh
-    use crate::tools;
-    use serde_json::json;
-
-    let work = tempfile::tempdir().unwrap();
-    let engine = crate::TokenZeroEngine::new(crate::EngineConfig::for_root(work.path()));
-    let response = tools::dispatch_tool(
-        &engine,
-        "execute_code",
-        "tz_execute_code",
-        &json!({
-            "plan": "return 7",
-            "envelope": "v3",
-            "root": work.path().to_string_lossy(),
-        }),
-    )
-    .expect("dispatch");
-    assert_eq!(response.status, "ok");
-    let text = response
-        .visible
-        .as_ref()
-        .map(|visible| visible.text.as_str())
-        .unwrap_or("");
-    assert!(
-        text.contains("=7"),
-        "scalar should fold into v3 ack: {text}"
-    );
-    let telemetry = response.telemetry.as_ref().expect("telemetry");
-    assert_eq!(telemetry.get("result_surfaced"), Some(&json!(true)));
-    assert_eq!(
-        telemetry.pointer("/structuredContent/value"),
-        Some(&json!(7)),
-        "structuredContent.value must survive scalar fold"
-    );
-    let mcp = tools::mcp_tool_response(response);
-    assert_eq!(
-        mcp.pointer("/structuredContent/value"),
-        Some(&json!(7)),
-        "MCP wire must expose value for hub extractJsonPayload: {mcp}"
     );
 }
 

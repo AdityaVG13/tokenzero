@@ -1,46 +1,10 @@
-//! TokenZero CodeMode surface — a CodeMode-style code-plan executor that
-//! exposes TokenZero operations as typed methods. Models write JS-like
-//! plans; the executor parses, dispatches through TokenZeroEngine, and returns
-//! only the final shaped result. Classic MCP and CodeMode are mutually exclusive install surfaces.
+//! TokenZero CodeMode surface adapter: the runtime lives in the standalone
+//! tokenzero-codemode crate over the canonical dispatcher (tokenzero-4uql.8.1).
+//! This module re-exports it and keeps the MCP-side FastMCP parity bench.
 
-pub(crate) mod catalog;
-pub(crate) mod containment;
-#[cfg(feature = "surface-codemode")]
-mod exec;
-#[cfg(not(feature = "surface-codemode"))]
-mod exec_stub;
-#[cfg(not(feature = "surface-codemode"))]
-use exec_stub as exec;
-pub(crate) mod journal;
-mod parser;
-pub(crate) mod recipe_registry;
-mod result;
-mod sandbox;
-pub mod sentinel;
-mod store;
+pub use tokenzero_codemode::*;
 
-// Bench harness is test-only (never wired into production CodeMode runtime).
+// Bench harness is test-only and compares against the FastMCP renderer, so it
+// stays on the MCP surface side (tokenzero-wpay / e99a0d8).
 #[cfg(all(test, feature = "surface-codemode"))]
 pub mod bench;
-
-pub use catalog::{
-    describe_method as describe_codemode_method, search_catalog as search_codemode_catalog,
-};
-pub(crate) use containment::snapshot as containment_snapshot;
-pub use exec::execute_codemode_with_options;
-pub use result::{CODEMODE_SCHEMA, CodeModeOptions, CodeModeResult, CodeModeStatus};
-pub use store::{CODEMODE_LIMITS_SCHEMA, CodeModeLimits};
-
-#[cfg(all(test, feature = "surface-codemode"))]
-mod e2e_tests;
-
-/// Wire CodeMode containment into the domain shell hooks (idempotent).
-pub(crate) fn install_shell_hooks() {
-    tokenzero_engine::shell_hooks::install(tokenzero_engine::shell_hooks::ShellHooks {
-        note_child: containment::note_child,
-        reserve_background_job: containment::reserve_background_job,
-        note_background_child: |id, pid, pgid| containment::note_background_child(id, pid, pgid),
-        finish_background_job: containment::finish_background_job,
-        containment_snapshot: containment::snapshot,
-    });
-}
