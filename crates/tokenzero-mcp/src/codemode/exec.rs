@@ -553,6 +553,46 @@ impl ParallelWidthGate {
     }
 }
 
+/// Completion signal shared by host-job workers and pollers: workers bump the
+/// epoch and notify on every job resolution so pollers block on the condvar
+/// instead of spinning the JS microtask loop.
+struct CompletionGate {
+    epoch: Mutex<u64>,
+    cv: Condvar,
+}
+
+impl CompletionGate {
+    fn new() -> Self {
+        Self {
+            epoch: Mutex::new(0),
+            cv: Condvar::new(),
+        }
+    }
+
+    fn epoch(&self) -> u64 {
+        *self.epoch.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    fn bump_and_notify(&self) {
+        let mut epoch = self.epoch.lock().unwrap_or_else(|e| e.into_inner());
+        *epoch = epoch.saturating_add(1);
+        self.cv.notify_all();
+    }
+
+    /// Block until the epoch moves past `since` or `max` elapses. Returns
+    /// immediately when the epoch already moved.
+    fn wait_for_change(&self, since: u64, max: Duration) {
+        let epoch = self.epoch.lock().unwrap_or_else(|e| e.into_inner());
+        if *epoch != since {
+            return;
+        }
+        let _ = self
+            .cv
+            .wait_timeout(epoch, max)
+            .unwrap_or_else(|e| e.into_inner());
+    }
+}
+
 struct AsyncHostJob {
     /// `None` while running; `Some(json)` when the worker finishes.
     result: Mutex<Option<String>>,
@@ -566,6 +606,33 @@ struct AsyncHostRuntime {
     next_id: AtomicU64,
     jobs: Mutex<HashMap<u64, Arc<AsyncHostJob>>>,
     gate: Arc<ParallelWidthGate>,
+    completion: Arc<CompletionGate>,
+}
+
+/// Guarantees every begun host job resolves: when the worker thread exits for
+/// any reason (panic included), the job result is populated (error payload
+/// when the worker died before producing one), pollers are woken, and the
+/// width-gate slot is released so later fan-out cannot stall on a leaked slot.
+struct HostJobFinisher {
+    job: Arc<AsyncHostJob>,
+    completion: Arc<CompletionGate>,
+    width_gate: Arc<ParallelWidthGate>,
+}
+
+impl Drop for HostJobFinisher {
+    fn drop(&mut self) {
+        {
+            let mut slot = self.job.result.lock().unwrap_or_else(|e| e.into_inner());
+            if slot.is_none() {
+                *slot = Some(tz_error_json(
+                    "runtime: host op worker exited before producing a result",
+                    "host op worker lost",
+                ));
+            }
+        }
+        self.completion.bump_and_notify();
+        self.width_gate.release();
+    }
 }
 
 fn wall_clock_limit_error(elapsed: u64, limits: &CodeModeLimits) -> Option<(String, &'static str)> {
@@ -658,6 +725,7 @@ fn execute_quickjs_plan(
             next_id: AtomicU64::new(1),
             jobs: Mutex::new(HashMap::new()),
             gate: Arc::new(ParallelWidthGate::new(limits.max_parallel_width)),
+            completion: Arc::new(CompletionGate::new()),
         });
         let runtime = match Runtime::new() {
             Ok(runtime) => runtime,
@@ -887,6 +955,7 @@ fn begin_js_host_op(
         .unwrap_or_else(|e| e.into_inner())
         .insert(id, Arc::clone(&job));
     let gate = Arc::clone(&async_rt.gate);
+    let completion = Arc::clone(&async_rt.completion);
     let engine = Arc::clone(engine);
     let work_root = Arc::clone(work_root);
     let method_owned = method.to_string();
@@ -896,6 +965,11 @@ fn begin_js_host_op(
     };
     std::thread::spawn(move || {
         gate.acquire();
+        let finisher = HostJobFinisher {
+            job,
+            completion,
+            width_gate: gate,
+        };
         let result_json = with_host_wall_deadline(wall, || {
             match dispatch_values(&engine, work_root.as_path(), &method_owned, &args) {
                 Ok(outcome) => {
@@ -919,8 +993,11 @@ fn begin_js_host_op(
                 }),
             }
         });
-        *job.result.lock().unwrap_or_else(|e| e.into_inner()) = Some(result_json);
-        gate.release();
+        *finisher.job.result.lock().unwrap_or_else(|e| e.into_inner()) =
+            Some(result_json);
+        // Finisher drop wakes pollers and releases the width-gate slot; on a
+        // dispatch panic it also fills the result with an error payload.
+        drop(finisher);
     });
     id.to_string()
 }
@@ -944,8 +1021,34 @@ fn poll_js_host_op(
     };
     let finished = job.result.lock().unwrap_or_else(|e| e.into_inner()).clone();
     let Some(raw) = finished else {
-        // Bound JS microtask churn while host threads run (sleep/IO).
-        std::thread::sleep(Duration::from_millis(1));
+        // Block on the completion gate until any worker resolves or the hard
+        // wall budget expires; never busy-spin the JS microtask loop.
+        let (wait_ms, hard_exceeded, hard_limit) = {
+            let state_ref = state.borrow();
+            let elapsed = now_ms().saturating_sub(state_ref.started_ms) as u64;
+            let hard = state_ref.limits.hard_max_wall_ms;
+            (
+                hard.saturating_sub(elapsed).clamp(1, 5_000),
+                elapsed > hard,
+                hard,
+            )
+        };
+        if hard_exceeded {
+            // Resolve the promise with the same hard-wall error the host-op
+            // checkpoints produce instead of polling forever.
+            return json!({
+                "done": true,
+                "result": tz_error_json(
+                    &format!("runtime: hard_max_wall_ms exceeded {hard_limit}"),
+                    "hard wall clock exceeded",
+                ),
+            })
+            .to_string();
+        }
+        let epoch = async_rt.completion.epoch();
+        async_rt
+            .completion
+            .wait_for_change(epoch, Duration::from_millis(wait_ms));
         return json!({"done": false}).to_string();
     };
     {
@@ -3932,5 +4035,124 @@ mod accumulator_bounds {
         assert_eq!(fresh.status, CodeModeStatus::Completed);
         assert_eq!(fresh.telemetry.recovery_tokens(), 0);
         assert!(!is_exact_expand_value(&stale));
+    }
+}
+
+#[cfg(test)]
+mod async_host_runtime_tests {
+    use super::*;
+
+    fn test_runtime() -> Rc<AsyncHostRuntime> {
+        Rc::new(AsyncHostRuntime {
+            next_id: AtomicU64::new(1),
+            jobs: Mutex::new(HashMap::new()),
+            gate: Arc::new(ParallelWidthGate::new(4)),
+            completion: Arc::new(CompletionGate::new()),
+        })
+    }
+
+    fn test_state(started_ms: u128) -> Rc<RefCell<JsExecutionState>> {
+        Rc::new(RefCell::new(JsExecutionState {
+            started_ms,
+            limits: limits_from_options(&CodeModeOptions::default()),
+            ..JsExecutionState::default()
+        }))
+    }
+
+    fn pending_job(rt: &AsyncHostRuntime, id: u64) -> Arc<AsyncHostJob> {
+        let job = Arc::new(AsyncHostJob {
+            result: Mutex::new(None),
+            method: "zero.test".to_string(),
+            tracks_wave: true,
+            applied: Mutex::new(false),
+        });
+        rt.jobs
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(id, Arc::clone(&job));
+        job
+    }
+
+    #[test]
+    fn finisher_resolves_job_and_releases_width_gate_on_panic() {
+        let rt = test_runtime();
+        let job = pending_job(&rt, 1);
+        let finisher = HostJobFinisher {
+            job: Arc::clone(&job),
+            completion: Arc::clone(&rt.completion),
+            width_gate: Arc::clone(&rt.gate),
+        };
+        rt.gate.acquire();
+        let worker = std::thread::spawn(move || {
+            let _finisher = finisher;
+            panic!("simulated dispatch panic");
+        });
+        assert!(worker.join().is_err(), "worker must have panicked");
+        let resolved = job
+            .result
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+            .expect("finisher must resolve the job on panic");
+        assert!(
+            resolved.contains("__tz_error"),
+            "expected error payload: {resolved}"
+        );
+        let active = *rt.gate.active.lock().unwrap_or_else(|e| e.into_inner());
+        assert_eq!(active, 0, "width-gate slot must be released on panic");
+        let state = test_state(now_ms());
+        let status = poll_js_host_op("1", &state, &rt);
+        let parsed: Value = serde_json::from_str(&status).expect("poll json");
+        assert_eq!(parsed.get("done").and_then(Value::as_bool), Some(true));
+    }
+
+    #[test]
+    fn poll_blocks_on_completion_gate_instead_of_spinning() {
+        let rt = test_runtime();
+        let job = pending_job(&rt, 1);
+        let completer = {
+            let job = Arc::clone(&job);
+            let completion = Arc::clone(&rt.completion);
+            std::thread::spawn(move || {
+                std::thread::sleep(Duration::from_millis(80));
+                *job.result.lock().unwrap_or_else(|e| e.into_inner()) = Some(
+                    "{\"__tz_ok\":true,\"value\":null,\"prevented_read_bytes\":0}".to_string(),
+                );
+                completion.bump_and_notify();
+            })
+        };
+        let state = test_state(now_ms());
+        let started = std::time::Instant::now();
+        let status = poll_js_host_op("1", &state, &rt);
+        let blocked_ms = started.elapsed().as_millis();
+        assert!(
+            blocked_ms >= 50,
+            "poll must block on the completion gate, not return after 1ms: {blocked_ms}ms"
+        );
+        let parsed: Value = serde_json::from_str(&status).expect("poll json");
+        assert_eq!(parsed.get("done").and_then(Value::as_bool), Some(false));
+        completer.join().expect("completer thread");
+        let status = poll_js_host_op("1", &state, &rt);
+        let parsed: Value = serde_json::from_str(&status).expect("poll json");
+        assert_eq!(parsed.get("done").and_then(Value::as_bool), Some(true));
+    }
+
+    #[test]
+    fn poll_resolves_hard_wall_error_when_budget_exceeded() {
+        let rt = test_runtime();
+        let _job = pending_job(&rt, 1);
+        let hard = limits_from_options(&CodeModeOptions::default()).hard_max_wall_ms;
+        let state = test_state(now_ms().saturating_sub(u128::from(hard) + 5_000));
+        let status = poll_js_host_op("1", &state, &rt);
+        let parsed: Value = serde_json::from_str(&status).expect("poll json");
+        assert_eq!(parsed.get("done").and_then(Value::as_bool), Some(true));
+        let result = parsed
+            .get("result")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        assert!(
+            result.contains("hard_max_wall_ms exceeded"),
+            "expected hard-wall error payload: {result}"
+        );
     }
 }

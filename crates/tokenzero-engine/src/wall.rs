@@ -64,10 +64,16 @@ fn replace_active(next: Option<WallDeadline>) -> Option<WallDeadline> {
 
 /// Run `f` with `deadline` installed for cooperative host-op checkpoints.
 pub fn with_host_wall_deadline<R>(deadline: WallDeadline, f: impl FnOnce() -> R) -> R {
-    let previous = replace_active(Some(deadline));
-    let result = f();
-    replace_active(previous);
-    result
+    // Restore the previous deadline even when `f` panics so the thread-local
+    // slot never leaks a stale deadline into unrelated host work.
+    struct RestoreActive(Option<WallDeadline>);
+    impl Drop for RestoreActive {
+        fn drop(&mut self) {
+            replace_active(self.0.take());
+        }
+    }
+    let _restore = RestoreActive(replace_active(Some(deadline)));
+    f()
 }
 
 /// Check the thread-local host-op deadline, if one is installed.
