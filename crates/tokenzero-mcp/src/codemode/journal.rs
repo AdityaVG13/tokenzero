@@ -195,11 +195,11 @@ mod flows {
     use serde_json::{Value, json};
     use sha2::{Digest, Sha256};
     use std::fs::{self, OpenOptions};
+    use std::io::{self, Write};
+    use std::time::{SystemTime, UNIX_EPOCH};
     use tokenzero_recovery::shared_cas::{
         PinRecord, SharedCas, publish_pin_record, remove_pin_record,
     };
-    use std::io::{self, Write};
-    use std::time::{SystemTime, UNIX_EPOCH};
     pub fn sha256_bytes(bytes: &[u8]) -> String {
         let mut h = Sha256::new();
         h.update(bytes);
@@ -1043,7 +1043,6 @@ mod flows {
             releaser.join().unwrap();
         }
     }
-
 }
 
 pub(crate) use flows::atomic_write;

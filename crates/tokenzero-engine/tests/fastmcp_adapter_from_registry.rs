@@ -6,11 +6,12 @@ use std::fs;
 use std::path::PathBuf;
 use tempfile::tempdir;
 use tokenzero_core::operation_abi::{
-    MigrationStatus, all_operations, input_schema_for, output_schema_for, schemas_structurally_equal,
+    MigrationStatus, all_operations, input_schema_for, output_schema_for,
+    schemas_structurally_equal,
 };
 use tokenzero_engine::{
-    EngineConfig, TokenZeroEngine, dispatch_mcp_tool, dispatch_operation, domain_fastmcp_ops,
-    DispatchSurface,
+    DispatchSurface, EngineConfig, TokenZeroEngine, dispatch_mcp_tool, dispatch_operation,
+    domain_fastmcp_ops,
 };
 
 fn mcp_root() -> PathBuf {
@@ -68,7 +69,9 @@ fn runtime_one_call_one_domain_dispatch_per_tool() {
         }
         let args = match op {
             "tz_read" => json!({"path": note}),
-            "tz_find" | "tz_grep" => json!({"query": "adapter", "path": dir.path().display().to_string()}),
+            "tz_find" | "tz_grep" => {
+                json!({"query": "adapter", "path": dir.path().display().to_string()})
+            }
             "tz_recall" => json!({"query": "adapter"}),
             "tz_glob" => json!({"pattern": "*.txt", "path": dir.path().display().to_string()}),
             "tz_tree" => json!({"path": dir.path().display().to_string(), "depth": 1}),
@@ -79,7 +82,9 @@ fn runtime_one_call_one_domain_dispatch_per_tool() {
             }),
             "tz_shell" => json!({"command": "true", "cwd": dir.path().display().to_string()}),
             "tz_ingest" => json!({"text": "x"}),
-            "tz_expand" => json!({"ref": "tz://0000000000000000000000000000000000000000000000000000000000000000"}),
+            "tz_expand" => {
+                json!({"ref": "tz://0000000000000000000000000000000000000000000000000000000000000000"})
+            }
             "tz_mem" => json!({}),
             "tz_cache_pack" => json!({"scope": "agent"}),
             "tz_rewrite" => json!({"command": "echo hi"}),
@@ -91,11 +96,7 @@ fn runtime_one_call_one_domain_dispatch_per_tool() {
         let mcp = dispatch_mcp_tool(&engine, op, &args).expect("mcp");
         let raw = dispatch_operation(&engine, DispatchSurface::Mcp, op, &args);
         // Same dispatcher entry → matching status class.
-        assert_eq!(
-            mcp.is_ok(),
-            raw.is_ok(),
-            "{op}: mcp vs raw ok class"
-        );
+        assert_eq!(mcp.is_ok(), raw.is_ok(), "{op}: mcp vs raw ok class");
         if let Some(resp) = mcp.tool_response.as_ref() {
             assert!(
                 !resp.tool.is_empty(),
@@ -109,10 +110,7 @@ fn runtime_one_call_one_domain_dispatch_per_tool() {
 #[test]
 fn registry_to_tools_golden_catalog_snapshot() {
     let mut rows = Vec::new();
-    for op in all_operations()
-        .iter()
-        .filter(|o| o.exposure.fastmcp_tool)
-    {
+    for op in all_operations().iter().filter(|o| o.exposure.fastmcp_tool) {
         let input = input_schema_for(op.name).unwrap_or(json!({}));
         let output = output_schema_for(op.name).unwrap_or(json!({}));
         rows.push(json!({
@@ -140,7 +138,10 @@ fn registry_to_tools_golden_catalog_snapshot() {
         .filter_map(|t| t["name"].as_str())
         .collect();
     for required in ["tz_read", "tz_shell", "tz_mem", "tz_edit"] {
-        assert!(snap.contains(required), "missing {required} in golden catalog");
+        assert!(
+            snap.contains(required),
+            "missing {required} in golden catalog"
+        );
     }
     let expected: BTreeSet<_> = all_operations()
         .iter()

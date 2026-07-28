@@ -1,6 +1,6 @@
 //! Static inventory of every public TokenZero operation (tokenzero-irx9.1).
 
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use super::schemas::{
     args, batch_schema, cache_pack_schema, codemode_describe_schema, codemode_search_schema,

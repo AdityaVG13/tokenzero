@@ -41,10 +41,9 @@ impl RecipeDefinition {
 fn registry() -> &'static Vec<RecipeDefinition> {
     static REGISTRY: OnceLock<Vec<RecipeDefinition>> = OnceLock::new();
     REGISTRY.get_or_init(|| {
-        let recipes: Vec<RecipeDefinition> = serde_json::from_str(include_str!(
-            "fixtures/codemode-recipes.json"
-        ))
-        .expect("committed CodeMode recipe registry must be valid JSON");
+        let recipes: Vec<RecipeDefinition> =
+            serde_json::from_str(include_str!("fixtures/codemode-recipes.json"))
+                .expect("committed CodeMode recipe registry must be valid JSON");
         assert_eq!(recipes.len(), 10, "registry must contain the pulse top ten");
         for recipe in &recipes {
             assert_eq!(recipe.version, RECIPE_REGISTRY_VERSION);
@@ -56,7 +55,10 @@ fn registry() -> &'static Vec<RecipeDefinition> {
 }
 
 pub fn get(name: &str) -> Option<RecipeDefinition> {
-    registry().iter().find(|recipe| recipe.name == name).cloned()
+    registry()
+        .iter()
+        .find(|recipe| recipe.name == name)
+        .cloned()
 }
 
 pub fn list() -> Vec<RecipeDefinition> {
@@ -73,7 +75,11 @@ mod tests {
         assert_eq!(recipes.len(), 10);
         for recipe in recipes {
             assert_eq!(recipe.version, RECIPE_REGISTRY_VERSION);
-            assert!(recipe.pulse_calls > 0, "{} lacks pulse evidence", recipe.name);
+            assert!(
+                recipe.pulse_calls > 0,
+                "{} lacks pulse evidence",
+                recipe.name
+            );
             assert!(recipe.measured_visible_tokens <= recipe.envelope_tokens());
         }
     }
@@ -81,11 +87,27 @@ mod tests {
     #[test]
     fn envelope_uses_min_plus_composition() {
         let recipe = RecipeDefinition {
-            name: "test".into(), version: RECIPE_REGISTRY_VERSION.into(), source: String::new(),
-            pulse_operation: "test".into(), pulse_calls: 1, measured_visible_tokens: 3,
+            name: "test".into(),
+            version: RECIPE_REGISTRY_VERSION.into(),
+            source: String::new(),
+            pulse_operation: "test".into(),
+            pulse_calls: 1,
+            measured_visible_tokens: 3,
             alternatives: vec![
-                vec![EnvelopeComponent { operation: "a".into(), worst_case_visible_tokens: 5 }, EnvelopeComponent { operation: "b".into(), worst_case_visible_tokens: 7 }],
-                vec![EnvelopeComponent { operation: "c".into(), worst_case_visible_tokens: 9 }],
+                vec![
+                    EnvelopeComponent {
+                        operation: "a".into(),
+                        worst_case_visible_tokens: 5,
+                    },
+                    EnvelopeComponent {
+                        operation: "b".into(),
+                        worst_case_visible_tokens: 7,
+                    },
+                ],
+                vec![EnvelopeComponent {
+                    operation: "c".into(),
+                    worst_case_visible_tokens: 9,
+                }],
             ],
         };
         assert_eq!(recipe.envelope_tokens(), 9);

@@ -224,6 +224,9 @@ fn secret_masking_covers_authorization_and_bearer_markers() {
     assert!(bearer.contains("bearer [masked]"), "{bearer}");
     assert!(!bearer.contains("abcdefghijklmnop"), "{bearer}");
     let mixed_case = mask_visible_secrets("Authorization: Bearer xyz-secret-value");
-    assert!(mixed_case.starts_with("Authorization:[masked]"), "{mixed_case}");
+    assert!(
+        mixed_case.starts_with("Authorization:[masked]"),
+        "{mixed_case}"
+    );
     assert!(!mixed_case.contains("xyz-secret-value"), "{mixed_case}");
 }

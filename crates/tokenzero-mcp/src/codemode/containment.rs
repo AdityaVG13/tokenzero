@@ -737,16 +737,14 @@ fn dedup_key(plan: &str, options: &CodeModeOptions) -> String {
 /// Machine permit path for a class. Unique per test thread so parallel tests
 /// never race one permit dir (remove_dir_all vs acquire flake).
 fn permit_path(kind: &str, env: &str) -> PathBuf {
-    std::env::var_os(env)
-        .map(PathBuf::from)
-        .unwrap_or_else(|| {
-            if cfg!(test) {
-                let pid = format!("{}-{:?}", std::process::id(), std::thread::current().id());
-                std::env::temp_dir().join(format!("zerostack-codemode-{kind}-test-{pid}.permit"))
-            } else {
-                zerostack_machine_permit::scoped_permit_base(kind)
-            }
-        })
+    std::env::var_os(env).map(PathBuf::from).unwrap_or_else(|| {
+        if cfg!(test) {
+            let pid = format!("{}-{:?}", std::process::id(), std::thread::current().id());
+            std::env::temp_dir().join(format!("zerostack-codemode-{kind}-test-{pid}.permit"))
+        } else {
+            zerostack_machine_permit::scoped_permit_base(kind)
+        }
+    })
 }
 fn heavy_permit_path() -> PathBuf {
     permit_path("heavy", "TOKENZERO_CODEMODE_HEAVY_PERMIT")

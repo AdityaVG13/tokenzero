@@ -192,10 +192,7 @@ fn packaging_rs_rejects_dual_compiled_surfaces() {
         src.contains("install_surface") && src.contains("uninstall_surface"),
         "lifecycle owner API required"
     );
-    assert!(
-        src.contains("atomic_write"),
-        "state writes must be atomic"
-    );
+    assert!(src.contains("atomic_write"), "state writes must be atomic");
 }
 
 /// Runtime exclusivity chokepoint on mcp-server path.
@@ -207,8 +204,7 @@ fn main_enforces_resolve_startup_surface() {
         "mcp-server must call exclusivity gate"
     );
     assert!(
-        main.contains("resolve_startup_surface")
-            || main.contains("reject_dual_compiled_surfaces"),
+        main.contains("resolve_startup_surface") || main.contains("reject_dual_compiled_surfaces"),
         "must resolve single surface / reject dual compile at runtime"
     );
     assert!(

@@ -229,7 +229,12 @@ fn surface_latency_bench_writes_evidence() {
     });
 
     assert_eq!(evidence["schema"], "tokenzero.irx9.surface_bench.v1");
-    assert!(!evidence["provenance"]["git_sha"].as_str().unwrap().is_empty());
+    assert!(
+        !evidence["provenance"]["git_sha"]
+            .as_str()
+            .unwrap()
+            .is_empty()
+    );
     assert_eq!(evidence["extra_process_detected"], false);
     assert_eq!(evidence["surfaces"].as_array().unwrap().len(), 5);
 

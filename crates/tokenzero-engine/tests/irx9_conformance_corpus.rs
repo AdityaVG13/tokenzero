@@ -33,7 +33,9 @@ fn minimal_args(op: &str, root: &Path) -> Value {
     let note = root.join("note.txt").display().to_string();
     match op {
         "tz_read" => json!({"path": note}),
-        "tz_find" | "tz_grep" => json!({"query": "conformance", "path": root.display().to_string()}),
+        "tz_find" | "tz_grep" => {
+            json!({"query": "conformance", "path": root.display().to_string()})
+        }
         "tz_recall" => json!({"query": "conformance"}),
         "tz_glob" => json!({"pattern": "*.txt", "path": root.display().to_string()}),
         "tz_tree" => json!({"path": root.display().to_string(), "depth": 1}),
@@ -44,7 +46,9 @@ fn minimal_args(op: &str, root: &Path) -> Value {
         }),
         "tz_shell" => json!({"command": "true", "cwd": root.display().to_string()}),
         "tz_ingest" => json!({"text": "conformance-ingest"}),
-        "tz_expand" => json!({"ref": "tz://0000000000000000000000000000000000000000000000000000000000000000"}),
+        "tz_expand" => {
+            json!({"ref": "tz://0000000000000000000000000000000000000000000000000000000000000000"})
+        }
         "tz_mem" => json!({}),
         "tz_cache_pack" => json!({"scope": "agent"}),
         "tz_rewrite" => json!({"command": "echo hi"}),
@@ -78,16 +82,15 @@ fn norm_outcome(out: &DispatchOutcome) -> Norm {
             .map(|r| r.status.clone())
             .unwrap_or_else(|| if ok { "ok".into() } else { "error".into() }),
         error_code: tr.and_then(|r| r.error.as_ref().map(|e| e.code.clone())),
-        error_kind: out.domain_error.as_ref().map(|e| e.kind.as_str().to_string()),
+        error_kind: out
+            .domain_error
+            .as_ref()
+            .map(|e| e.kind.as_str().to_string()),
         tool: tr.map(|r| r.tool.clone()).or_else(|| Some(out.op.clone())),
     }
 }
 
-fn dispatch_all(
-    root: &Path,
-    op: &str,
-    args: &Value,
-) -> (Norm, Norm, Norm, Option<Norm>, Norm) {
+fn dispatch_all(root: &Path, op: &str, args: &Value) -> (Norm, Norm, Norm, Option<Norm>, Norm) {
     let raw_e = engine_for(root);
     let mcp_e = engine_for(root);
     let cli_e = engine_for(root);
@@ -156,7 +159,14 @@ fn dispatch_all(
     (raw, mcp, cli, cm, worker)
 }
 
-fn assert_surfaces_agree(op: &str, raw: &Norm, mcp: &Norm, cli: &Norm, cm: Option<&Norm>, worker: &Norm) {
+fn assert_surfaces_agree(
+    op: &str,
+    raw: &Norm,
+    mcp: &Norm,
+    cli: &Norm,
+    cm: Option<&Norm>,
+    worker: &Norm,
+) {
     assert_eq!(raw.ok, mcp.ok, "{op}: raw.ok vs mcp.ok");
     assert_eq!(raw.status, mcp.status, "{op}: raw.status vs mcp.status");
     assert_eq!(raw.ok, cli.ok, "{op}: raw.ok vs cli.ok");
@@ -190,7 +200,11 @@ fn differential_registry_domain_ops_all_surfaces() {
         .filter(|op| operation_is_domain(op))
         .map(|op| op.name)
         .collect();
-    assert!(domain_ops.len() >= 10, "domain op count {}", domain_ops.len());
+    assert!(
+        domain_ops.len() >= 10,
+        "domain op count {}",
+        domain_ops.len()
+    );
 
     for op in &domain_ops {
         // Network-bound fetch is still exercised but may fail consistently.
@@ -209,19 +223,27 @@ fn boundary_and_failure_vectors_agree() {
 
     let cases: Vec<(&str, Value, bool)> = vec![
         // missing path → error
-        ("tz_read", json!({"path": root.join("__no_such__.txt").display().to_string()}), false),
+        (
+            "tz_read",
+            json!({"path": root.join("__no_such__.txt").display().to_string()}),
+            false,
+        ),
         // outside roots → policy error
         ("tz_read", json!({"path": "/etc/passwd"}), false),
         // empty pattern → error or empty-ok; must agree across surfaces
-        ("tz_glob", json!({"pattern": "", "path": root.display().to_string()}), false),
-        // invalid expand ref → error
         (
-            "tz_expand",
-            json!({"ref": "not-a-ref"}),
+            "tz_glob",
+            json!({"pattern": "", "path": root.display().to_string()}),
             false,
         ),
+        // invalid expand ref → error
+        ("tz_expand", json!({"ref": "not-a-ref"}), false),
         // shell false → may be ok with exit_code or error; compare agreement only
-        ("tz_shell", json!({"command": "false", "cwd": root.display().to_string()}), true),
+        (
+            "tz_shell",
+            json!({"command": "false", "cwd": root.display().to_string()}),
+            true,
+        ),
         // success control
         ("tz_mem", json!({}), true),
     ];
@@ -248,11 +270,7 @@ fn mutation_edit_filesystem_agrees_across_surfaces() {
     };
 
     // Isolate per surface with fresh file contents.
-    for (label, dispatch) in [
-        ("raw", "raw"),
-        ("mcp", "mcp"),
-        ("cli", "cli"),
-    ] {
+    for (label, dispatch) in [("raw", "raw"), ("mcp", "mcp"), ("cli", "cli")] {
         fs::write(&path, "before-mutation\n").unwrap();
         let eng = engine_for(root);
         let args = args_template(label);
@@ -262,7 +280,11 @@ fn mutation_edit_filesystem_agrees_across_surfaces() {
             "cli" => dispatch_cli(&eng, "tz_edit", &args),
             _ => unreachable!(),
         };
-        assert!(out.is_ok(), "{label} edit failed: {:?}", out.tool_domain_error());
+        assert!(
+            out.is_ok(),
+            "{label} edit failed: {:?}",
+            out.tool_domain_error()
+        );
         let bytes = fs::read_to_string(&path).unwrap();
         assert_eq!(
             bytes,
@@ -277,10 +299,7 @@ fn mutation_edit_filesystem_agrees_across_surfaces() {
     let args = args_template("codemode");
     let out = dispatch_codemode_method(&eng, "zero.edit", &args).expect("cm");
     assert!(out.is_ok(), "codemode edit: {:?}", out.tool_domain_error());
-    assert_eq!(
-        fs::read_to_string(&path).unwrap(),
-        "after-codemode\n"
-    );
+    assert_eq!(fs::read_to_string(&path).unwrap(), "after-codemode\n");
 }
 
 /// Kill-test: deliberate adapter status drift is detectable by the norm helper.

@@ -25,11 +25,8 @@ pub fn golden_vectors() -> Vec<GoldenVector> {
             tags: &["success", "ref_recovery"],
             args: json!({ "path": "README.md" }),
             expected_ok: Some(
-                DomainResult::new(
-                    "tz_read",
-                    json!({ "text": "…", "status": "ok" }),
-                )
-                .with_refs(vec!["tz://blob/example".into()]),
+                DomainResult::new("tz_read", json!({ "text": "…", "status": "ok" }))
+                    .with_refs(vec!["tz://blob/example".into()]),
             ),
             expected_err: None,
         },
@@ -50,11 +47,8 @@ pub fn golden_vectors() -> Vec<GoldenVector> {
             tags: &["success", "ref_recovery"],
             args: json!({ "ref": "tz://blob/deadbeef" }),
             expected_ok: Some(
-                DomainResult::new(
-                    "tz_expand",
-                    json!({ "text": "payload", "status": "ok" }),
-                )
-                .with_refs(vec!["tz://blob/deadbeef".into()]),
+                DomainResult::new("tz_expand", json!({ "text": "payload", "status": "ok" }))
+                    .with_refs(vec!["tz://blob/deadbeef".into()]),
             ),
             expected_err: None,
         },
@@ -107,9 +101,12 @@ pub fn golden_vectors() -> Vec<GoldenVector> {
             args: json!({ "command": "sleep 999", "timeout_seconds": 1 }),
             expected_ok: None,
             expected_err: Some(
-                DomainError::new(DomainErrorKind::DeadlineExceeded, "shell wall budget exceeded")
-                    .with_op("tz_shell")
-                    .with_retryable(true),
+                DomainError::new(
+                    DomainErrorKind::DeadlineExceeded,
+                    "shell wall budget exceeded",
+                )
+                .with_op("tz_shell")
+                .with_retryable(true),
             ),
         },
         // The millisecond spelling must reach the same deadline machinery as
@@ -122,9 +119,12 @@ pub fn golden_vectors() -> Vec<GoldenVector> {
             args: json!({ "command": "sleep 999", "timeout_ms": 250 }),
             expected_ok: None,
             expected_err: Some(
-                DomainError::new(DomainErrorKind::DeadlineExceeded, "shell wall budget exceeded")
-                    .with_op("tz_shell")
-                    .with_retryable(true),
+                DomainError::new(
+                    DomainErrorKind::DeadlineExceeded,
+                    "shell wall budget exceeded",
+                )
+                .with_op("tz_shell")
+                .with_retryable(true),
             ),
         },
         GoldenVector {
@@ -156,11 +156,8 @@ pub fn golden_vectors() -> Vec<GoldenVector> {
             tags: &["success", "ref_recovery", "mutation"],
             args: json!({ "text": "external payload" }),
             expected_ok: Some(
-                DomainResult::new(
-                    "tz_ingest",
-                    json!({ "text": "…", "status": "ok" }),
-                )
-                .with_refs(vec!["tz://blob/ingested".into()]),
+                DomainResult::new("tz_ingest", json!({ "text": "…", "status": "ok" }))
+                    .with_refs(vec!["tz://blob/ingested".into()]),
             ),
             expected_err: None,
         },

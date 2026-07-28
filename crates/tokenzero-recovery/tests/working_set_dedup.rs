@@ -23,8 +23,12 @@ fn resident_and_changed_reads_emit_minimal_responses() {
     let mut store = RecoveryStore::new(Some(dir.path().join("store")));
     let mut set = WorkingSet::new(4096);
     let original = (0..40)
-        .map(|n| format!("line {n}
-"))
+        .map(|n| {
+            format!(
+                "line {n}
+"
+            )
+        })
         .collect::<String>();
     assert!(matches!(
         set.admit(&mut store, original.clone(), anchor())
@@ -34,9 +38,12 @@ fn resident_and_changed_reads_emit_minimal_responses() {
     ));
     let hit = set.admit(&mut store, original.clone(), anchor()).unwrap();
     assert_eq!(hit.response.visible_text(), Some(ALREADY_RESIDENT_ATOM));
-    let changed = original.replace("line 20
-", "line twenty
-");
+    let changed = original.replace(
+        "line 20
+",
+        "line twenty
+",
+    );
     let admission = set.admit(&mut store, changed.clone(), anchor()).unwrap();
     let WorkingSetResponse::Delta {
         acknowledgement,
@@ -82,10 +89,8 @@ proptest! {
 
 #[test]
 fn dedup_ta_registry_stays_within_bounds() {
-    let registry: serde_json::Value = serde_json::from_str(include_str!(
-        "fixtures/working-set-dedup-ta.json"
-    ))
-    .unwrap();
+    let registry: serde_json::Value =
+        serde_json::from_str(include_str!("fixtures/working-set-dedup-ta.json")).unwrap();
     for case in registry["cases"].as_array().unwrap() {
         let visible = case["visible_tokens"].as_f64().unwrap();
         let floor = case["floor_tokens"].as_f64().unwrap();

@@ -69,14 +69,16 @@ impl ExpandParams {
             }
             return Self::from_expand_many_item(first);
         }
-        let ref_id = first.as_str().ok_or_else(|| {
-            format!(
-                "zero.token.expand/zero.expand requires a tz:// ref string, {{ref}} object, \
+        let ref_id = first
+            .as_str()
+            .ok_or_else(|| {
+                format!(
+                    "zero.token.expand/zero.expand requires a tz:// ref string, {{ref}} object, \
                  or array of refs as first argument — got {}",
-                value_shape(first)
-            )
-        })?
-        .to_string();
+                    value_shape(first)
+                )
+            })?
+            .to_string();
         let opts = args.get(1).and_then(Value::as_object);
         let mut params = Self {
             ref_id,
@@ -244,9 +246,6 @@ mod tests {
     #[test]
     fn from_codemode_args_object_missing_ref_is_typed() {
         let err = ExpandParams::from_codemode_args(&[json!({"path": "nope.txt"})]).unwrap_err();
-        assert!(
-            err.contains("requires ref"),
-            "unexpected: {err}"
-        );
+        assert!(err.contains("requires ref"), "unexpected: {err}");
     }
 }

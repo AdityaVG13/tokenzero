@@ -30,14 +30,7 @@ fn expand_with_reload_on_miss(
     anchor_kind: Option<&str>,
     symbol: Option<&str>,
 ) -> ExpansionResult {
-    let result = store.expand(
-        ref_id,
-        selector,
-        start_line,
-        end_line,
-        anchor_kind,
-        symbol,
-    );
+    let result = store.expand(ref_id, selector, start_line, end_line, anchor_kind, symbol);
     if result.found {
         return result;
     }
@@ -46,14 +39,8 @@ fn expand_with_reload_on_miss(
     refreshed.recovery_count = store.recovery_count;
     refreshed.recovery_tokens = store.recovery_tokens;
     refreshed.legacy_read_count = store.legacy_read_count;
-    let refreshed_result = refreshed.expand(
-        ref_id,
-        selector,
-        start_line,
-        end_line,
-        anchor_kind,
-        symbol,
-    );
+    let refreshed_result =
+        refreshed.expand(ref_id, selector, start_line, end_line, anchor_kind, symbol);
     if refreshed_result.found {
         *store = refreshed;
         refreshed_result
@@ -300,8 +287,12 @@ impl TokenZeroEngine {
         let Ok(mut working_set) = self.working_set.lock() else {
             return;
         };
-        let _ =
-            working_set.handle_fault_hook(store, &params.ref_id, params.start_line, params.end_line);
+        let _ = working_set.handle_fault_hook(
+            store,
+            &params.ref_id,
+            params.start_line,
+            params.end_line,
+        );
     }
 
     fn pending_expand_record(

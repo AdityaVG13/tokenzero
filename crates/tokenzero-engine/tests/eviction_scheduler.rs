@@ -4,7 +4,13 @@ use tokenzero_engine::{
     schedule_evictions, simulate_eviction_replay, ttl_from_gaps,
 };
 
-fn candidate(id: &str, tier: PrefixTier, expected: u64, savings: u64, rewrite: u64) -> EvictionCandidate {
+fn candidate(
+    id: &str,
+    tier: PrefixTier,
+    expected: u64,
+    savings: u64,
+    rewrite: u64,
+) -> EvictionCandidate {
     EvictionCandidate {
         id: id.to_owned(),
         tier,
@@ -18,12 +24,41 @@ fn candidate(id: &str, tier: PrefixTier, expected: u64, savings: u64, rewrite: u
 #[test]
 fn provider_ttls_follow_measured_gaps_and_documented_break_evens() {
     let anthropic = provider_breakpoints(CacheProvider::Anthropic);
-    assert_eq!((anthropic[0].ttl_seconds, anthropic[0].minimum_requests, anthropic[0].write_multiplier), (300, 2, 1.25));
-    assert_eq!((anthropic[1].ttl_seconds, anthropic[1].minimum_requests, anthropic[1].write_multiplier), (3_600, 3, 2.0));
-    assert_eq!(ttl_from_gaps(CacheProvider::Anthropic, &[120]).unwrap().ttl_seconds, 300);
-    assert_eq!(ttl_from_gaps(CacheProvider::Anthropic, &[900, 900]).unwrap().ttl_seconds, 3_600);
+    assert_eq!(
+        (
+            anthropic[0].ttl_seconds,
+            anthropic[0].minimum_requests,
+            anthropic[0].write_multiplier
+        ),
+        (300, 2, 1.25)
+    );
+    assert_eq!(
+        (
+            anthropic[1].ttl_seconds,
+            anthropic[1].minimum_requests,
+            anthropic[1].write_multiplier
+        ),
+        (3_600, 3, 2.0)
+    );
+    assert_eq!(
+        ttl_from_gaps(CacheProvider::Anthropic, &[120])
+            .unwrap()
+            .ttl_seconds,
+        300
+    );
+    assert_eq!(
+        ttl_from_gaps(CacheProvider::Anthropic, &[900, 900])
+            .unwrap()
+            .ttl_seconds,
+        3_600
+    );
     assert!(ttl_from_gaps(CacheProvider::Anthropic, &[4_000, 4_000]).is_none());
-    assert_eq!(ttl_from_gaps(CacheProvider::OpenAi, &[80_000]).unwrap().ttl_seconds, OPENAI_MAX_RETENTION_SECONDS);
+    assert_eq!(
+        ttl_from_gaps(CacheProvider::OpenAi, &[80_000])
+            .unwrap()
+            .ttl_seconds,
+        OPENAI_MAX_RETENTION_SECONDS
+    );
     assert_eq!(OPENAI_MAX_RETENTION_SECONDS, 86_400);
 }
 
@@ -37,13 +72,25 @@ fn strict_break_even_only_evicts_messages_and_batches_at_breakpoint() {
         candidate("positive-a", PrefixTier::Messages, 3, 100, 100),
     ];
     let schedule = schedule_evictions(CacheProvider::Anthropic, 1_000, &[100], &candidates);
-    assert_eq!(schedule.decisions[0].kind, EvictionDecisionKind::PreserveProtectedTier);
-    assert_eq!(schedule.decisions[1].kind, EvictionDecisionKind::PreserveProtectedTier);
-    assert_eq!(schedule.decisions[2].kind, EvictionDecisionKind::PreserveNegativeExpectedValue);
+    assert_eq!(
+        schedule.decisions[0].kind,
+        EvictionDecisionKind::PreserveProtectedTier
+    );
+    assert_eq!(
+        schedule.decisions[1].kind,
+        EvictionDecisionKind::PreserveProtectedTier
+    );
+    assert_eq!(
+        schedule.decisions[2].kind,
+        EvictionDecisionKind::PreserveNegativeExpectedValue
+    );
     assert_eq!(schedule.decisions[3].kind, EvictionDecisionKind::Evict);
     assert_eq!(schedule.batches.len(), 1);
     assert_eq!(schedule.batches[0].cache_breakpoint_at_seconds, 1_300);
-    assert_eq!(schedule.batches[0].candidate_ids, ["positive-a", "positive-b"]);
+    assert_eq!(
+        schedule.batches[0].candidate_ids,
+        ["positive-a", "positive-b"]
+    );
 }
 
 #[test]

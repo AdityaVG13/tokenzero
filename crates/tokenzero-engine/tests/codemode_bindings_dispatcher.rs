@@ -84,7 +84,10 @@ fn every_codemode_domain_binding_is_registry_backed() {
         "zero.shell",
         "zero.token.expand",
     ] {
-        assert!(bindings.contains(required), "missing {required} in {bindings:?}");
+        assert!(
+            bindings.contains(required),
+            "missing {required} in {bindings:?}"
+        );
     }
 }
 
@@ -161,10 +164,7 @@ fn recipe_json_path_is_direct_dispatcher() {
     // Source-level: recipe path does not allocate QuickJS for domain-only dispatch.
     let src = exec_rs();
     // domain_via_dispatcher / dispatch_codemode_method must not call rquickjs.
-    let domain_fn = src
-        .split("fn domain_via_dispatcher")
-        .nth(1)
-        .unwrap_or("");
+    let domain_fn = src.split("fn domain_via_dispatcher").nth(1).unwrap_or("");
     let domain_body = domain_fn.split("fn ").next().unwrap_or("");
     assert!(
         !domain_body.contains("rquickjs") && !domain_body.contains("Runtime::new"),

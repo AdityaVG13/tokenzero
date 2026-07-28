@@ -127,7 +127,10 @@ fn extract_refs(v: &Value) -> Vec<String> {
 fn collect_tz_refs(hay: &str) -> Vec<String> {
     hay.split_whitespace()
         .filter(|t| t.starts_with("tz://"))
-        .map(|s| s.trim_matches(|c: char| c == ',' || c == '"' || c == '\'').to_string())
+        .map(|s| {
+            s.trim_matches(|c: char| c == ',' || c == '"' || c == '\'')
+                .to_string()
+        })
         .collect()
 }
 
@@ -219,10 +222,7 @@ fn mcp_call(root: &Path, tool: &str, args: Value) -> Norm {
     let _ = child.kill();
     let resp: Value = serde_json::from_str(line.trim()).unwrap_or(json!({}));
     if let Some(err) = resp.get("error") {
-        return fail(
-            err["message"].as_str().unwrap_or("rpc_error"),
-            false,
-        );
+        return fail(err["message"].as_str().unwrap_or("rpc_error"), false);
     }
     let is_error = resp["result"]["isError"].as_bool() == Some(true);
     let texts: Vec<String> = resp["result"]["content"]

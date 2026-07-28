@@ -90,7 +90,10 @@ pub struct Admission {
 pub enum WorkingSetResponse {
     Full,
     AlreadyResident,
-    Delta { acknowledgement: String, delta: WorkingSetDelta },
+    Delta {
+        acknowledgement: String,
+        delta: WorkingSetDelta,
+    },
 }
 
 impl WorkingSetResponse {
@@ -98,7 +101,9 @@ impl WorkingSetResponse {
         match self {
             Self::Full => None,
             Self::AlreadyResident => Some(ALREADY_RESIDENT_ATOM),
-            Self::Delta { acknowledgement, .. } => Some(acknowledgement),
+            Self::Delta {
+                acknowledgement, ..
+            } => Some(acknowledgement),
         }
     }
 }
@@ -124,12 +129,16 @@ impl WorkingSetDelta {
         for line in &self.removed {
             output.push('-');
             output.push_str(line);
-            if !line.ends_with('\n') { output.push('\n'); }
+            if !line.ends_with('\n') {
+                output.push('\n');
+            }
         }
         for line in &self.inserted {
             output.push('+');
             output.push_str(line);
-            if !line.ends_with('\n') { output.push('\n'); }
+            if !line.ends_with('\n') {
+                output.push('\n');
+            }
         }
         output
     }
@@ -139,7 +148,9 @@ pub fn integrate_delta(base: &str, delta: &WorkingSetDelta) -> Option<String> {
     let mut lines = split_exact_lines(base);
     let start = delta.start_line.checked_sub(1)?;
     let end = start.checked_add(delta.removed.len())?;
-    if end > lines.len() || lines[start..end] != delta.removed { return None; }
+    if end > lines.len() || lines[start..end] != delta.removed {
+        return None;
+    }
     lines.splice(start..end, delta.inserted.iter().cloned());
     Some(lines.concat())
 }
@@ -279,12 +290,22 @@ impl WorkingSet {
         self.prefetch_hints.drain(..).collect()
     }
 
-    pub fn rewrite_render(&mut self, store: &mut RecoveryStore, text: String, anchor: SpanAnchor) -> Result<Admission, RecoveryError> {
+    pub fn rewrite_render(
+        &mut self,
+        store: &mut RecoveryStore,
+        text: String,
+        anchor: SpanAnchor,
+    ) -> Result<Admission, RecoveryError> {
         self.telemetry.render_rewrites = self.telemetry.render_rewrites.saturating_add(1);
         self.admit(store, text, anchor)
     }
 
-    pub fn apply_context_edit(&mut self, store: &mut RecoveryStore, text: String, anchor: SpanAnchor) -> Result<Admission, RecoveryError> {
+    pub fn apply_context_edit(
+        &mut self,
+        store: &mut RecoveryStore,
+        text: String,
+        anchor: SpanAnchor,
+    ) -> Result<Admission, RecoveryError> {
         self.telemetry.context_edits = self.telemetry.context_edits.saturating_add(1);
         self.admit(store, text, anchor)
     }
@@ -301,8 +322,12 @@ impl WorkingSet {
                     self.sequence = self.sequence.saturating_add(1);
                     self.spans[index].last_touched = self.sequence;
                     self.telemetry.resident_hits = self.telemetry.resident_hits.saturating_add(1);
-                    let saved = count_tokens(&text).saturating_sub(count_tokens(ALREADY_RESIDENT_ATOM));
-                    self.telemetry.dedup_tokens_saved = self.telemetry.dedup_tokens_saved.saturating_add(saved as u64);
+                    let saved =
+                        count_tokens(&text).saturating_sub(count_tokens(ALREADY_RESIDENT_ATOM));
+                    self.telemetry.dedup_tokens_saved = self
+                        .telemetry
+                        .dedup_tokens_saved
+                        .saturating_add(saved as u64);
                     return Ok(Admission {
                         id: self.spans[index].id,
                         replacement: None,
@@ -319,13 +344,19 @@ impl WorkingSet {
                     self.spans[index].last_touched = self.sequence;
                     self.spans[index].body = SpanBody::Resident(text);
                     self.telemetry.delta_renders = self.telemetry.delta_renders.saturating_add(1);
-                    self.telemetry.dedup_tokens_saved = self.telemetry.dedup_tokens_saved.saturating_add(saved as u64);
+                    self.telemetry.dedup_tokens_saved = self
+                        .telemetry
+                        .dedup_tokens_saved
+                        .saturating_add(saved as u64);
                     let evicted = self.enforce_budget(store)?;
                     return Ok(Admission {
                         id,
                         replacement: None,
                         evicted,
-                        response: WorkingSetResponse::Delta { acknowledgement, delta },
+                        response: WorkingSetResponse::Delta {
+                            acknowledgement,
+                            delta,
+                        },
                     });
                 }
             }
@@ -361,7 +392,13 @@ impl WorkingSet {
         })
     }
 
-    pub fn handle_fault_hook(&mut self, store: &mut RecoveryStore, ref_id: &str, start_line: Option<usize>, end_line: Option<usize>) -> Result<Option<Rehydration>, RecoveryError> {
+    pub fn handle_fault_hook(
+        &mut self,
+        store: &mut RecoveryStore,
+        ref_id: &str,
+        start_line: Option<usize>,
+        end_line: Option<usize>,
+    ) -> Result<Option<Rehydration>, RecoveryError> {
         self.telemetry.fault_hook_calls = self.telemetry.fault_hook_calls.saturating_add(1);
         self.rehydrate_ref(store, ref_id, start_line, end_line)
     }
@@ -450,7 +487,11 @@ impl WorkingSet {
         };
 
         self.telemetry.rehydrations = self.telemetry.rehydrations.saturating_add(1);
-        self.telemetry.eviction_accounting.actual_rehydration_tokens = self.telemetry.eviction_accounting.actual_rehydration_tokens.saturating_add(rehydrated_tokens);
+        self.telemetry.eviction_accounting.actual_rehydration_tokens = self
+            .telemetry
+            .eviction_accounting
+            .actual_rehydration_tokens
+            .saturating_add(rehydrated_tokens);
         self.refresh_rates();
         self.queue_prefetch_hints(&resident_anchor, resident_id, lookup_ref);
         let evicted = self.enforce_budget(store)?;
@@ -526,10 +567,16 @@ impl WorkingSet {
         };
         let accounting = &mut self.telemetry.eviction_accounting;
         accounting.p_fault = self.telemetry.fault_rate;
-        accounting.expected_rehydration_tokens = if self.telemetry.evictions == 0 { 0.0 } else { self.evicted_tokens_total as f64 / self.telemetry.evictions as f64 };
-        accounting.amortized_tokens_per_access = accounting.p_fault * accounting.expected_rehydration_tokens;
+        accounting.expected_rehydration_tokens = if self.telemetry.evictions == 0 {
+            0.0
+        } else {
+            self.evicted_tokens_total as f64 / self.telemetry.evictions as f64
+        };
+        accounting.amortized_tokens_per_access =
+            accounting.p_fault * accounting.expected_rehydration_tokens;
         accounting.thrash_worst_case_tokens = self.max_evicted_tokens;
-        accounting.alarm = accounting.p_fault >= THRASH_ALARM_FAULT_RATE && accounting.amortized_tokens_per_access >= 1.0;
+        accounting.alarm = accounting.p_fault >= THRASH_ALARM_FAULT_RATE
+            && accounting.amortized_tokens_per_access >= 1.0;
     }
 
     fn queue_prefetch_hints(&mut self, fault: &SpanAnchor, fault_id: u64, fault_ref: &str) {
@@ -649,10 +696,17 @@ fn split_exact_lines(text: &str) -> Vec<String> {
 fn delta_between(old: &str, new: &str) -> WorkingSetDelta {
     let old_lines = split_exact_lines(old);
     let new_lines = split_exact_lines(new);
-    let prefix = old_lines.iter().zip(&new_lines).take_while(|(left, right)| left == right).count();
+    let prefix = old_lines
+        .iter()
+        .zip(&new_lines)
+        .take_while(|(left, right)| left == right)
+        .count();
     let suffix = old_lines[prefix..]
-        .iter().rev().zip(new_lines[prefix..].iter().rev())
-        .take_while(|(left, right)| left == right).count();
+        .iter()
+        .rev()
+        .zip(new_lines[prefix..].iter().rev())
+        .take_while(|(left, right)| left == right)
+        .count();
     WorkingSetDelta {
         start_line: prefix + 1,
         removed: old_lines[prefix..old_lines.len().saturating_sub(suffix)].to_vec(),

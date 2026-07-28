@@ -67,21 +67,13 @@ fn domain_sources() -> Vec<PathBuf> {
     out
 }
 
-
 #[test]
 fn engine_crate_does_not_depend_on_surface_layers() {
     // Cargo-level dependency direction: tokenzero-engine must not link FastMCP,
     // rquickjs/CodeMode sandbox, or MCP transport crates.
-    let manifest = fs::read_to_string(
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml"),
-    )
-    .unwrap();
-    for forbidden in [
-        "fastmcp-rust",
-        "fastmcp_rust",
-        "rquickjs",
-        "tokenzero-mcp",
-    ] {
+    let manifest =
+        fs::read_to_string(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml")).unwrap();
+    for forbidden in ["fastmcp-rust", "fastmcp_rust", "rquickjs", "tokenzero-mcp"] {
         assert!(
             !manifest.contains(forbidden),
             "tokenzero-engine Cargo.toml must not depend on {forbidden}"
@@ -101,7 +93,8 @@ fn engine_crate_does_not_depend_on_surface_layers() {
     ];
     let mut violations = Vec::new();
     for path in domain_sources() {
-        let text = fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
+        let text =
+            fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
         for (lineno, line) in text.lines().enumerate() {
             let trimmed = line.trim_start();
             if trimmed.starts_with("//") {
@@ -118,11 +111,12 @@ fn engine_crate_does_not_depend_on_surface_layers() {
         violations.is_empty(),
         "engine sources import forbidden surface layers:
 {}",
-        violations.join("
-")
+        violations.join(
+            "
+"
+        )
     );
 }
-
 
 #[test]
 fn no_fastmcp_codemode_cross_adapter_calls() {
@@ -185,7 +179,9 @@ fn one_operation_same_dispatcher_from_all_adapters() {
                 })
                 .collect::<Vec<_>>(),
             resp.visible.as_ref().map(|v| v.text.clone()),
-            resp.error.as_ref().map(|e| (e.code.clone(), e.message.clone())),
+            resp.error
+                .as_ref()
+                .map(|e| (e.code.clone(), e.message.clone())),
         )
     };
 
@@ -238,9 +234,7 @@ fn differential_registry_domain_ops_raw_mcp_cli() {
                     .as_ref()
                     .and_then(|r| r.error.as_ref())
                     .map(|e| e.code.clone()),
-                o.domain_error
-                    .as_ref()
-                    .map(|e| e.kind.as_str().to_string()),
+                o.domain_error.as_ref().map(|e| e.kind.as_str().to_string()),
             )
         };
         assert_eq!(norm(&raw), norm(&mcp), "raw vs mcp for {op}");
@@ -253,10 +247,7 @@ fn rebase_paths(mut args: Value, root: &Path) -> Value {
         if let Some(path) = obj.get("path").cloned() {
             match path {
                 Value::String(s) if !Path::new(&s).is_absolute() => {
-                    obj.insert(
-                        "path".into(),
-                        json!(root.join(s).display().to_string()),
-                    );
+                    obj.insert("path".into(), json!(root.join(s).display().to_string()));
                 }
                 Value::Array(items) => {
                     let mapped: Vec<Value> = items
@@ -402,7 +393,6 @@ fn registry_domain_ops_are_metadata_driven_not_masked() {
     }
 }
 
-
 #[test]
 fn every_registry_domain_op_is_kernel_dispatchable() {
     use tokenzero_engine::all_domain_operations;
@@ -425,7 +415,6 @@ fn every_registry_domain_op_is_kernel_dispatchable() {
         }
     }
 }
-
 
 #[test]
 fn cli_domain_handlers_use_dispatch_cli_only() {
@@ -496,10 +485,7 @@ fn cli_domain_handlers_use_dispatch_cli_only() {
     ];
     for op in required_ops {
         let needle = format!("\"{op}\"");
-        assert!(
-            text.contains(&needle),
-            "CLI missing dispatch target {op}"
-        );
+        assert!(text.contains(&needle), "CLI missing dispatch target {op}");
     }
 }
 

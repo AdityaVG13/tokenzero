@@ -4,7 +4,9 @@ use serde_json::Value;
 use tokenzero_core::{MCP_SCHEMA_VERSION, McpToolSurface};
 
 use crate::catalog::{tool_cluster_names, tool_specs_for_filter_with_health};
-use crate::{InitializeState, TokenZeroEngine, call_tool, read_resource, resource_specs, tool_specs};
+use crate::{
+    InitializeState, TokenZeroEngine, call_tool, read_resource, resource_specs, tool_specs,
+};
 
 macro_rules! wire_json {
     ($($token:tt)*) => { serde_json::json!($($token)*) };
@@ -343,10 +345,7 @@ fn set_lifecycle_negotiated(engine: &TokenZeroEngine) {
 
 fn advance_lifecycle_initialized(engine: &TokenZeroEngine) {
     if let Ok(mut state) = engine.lifecycle.lock() {
-        if matches!(
-            *state,
-            InitializeState::Negotiated | InitializeState::Ready
-        ) {
+        if matches!(*state, InitializeState::Negotiated | InitializeState::Ready) {
             *state = InitializeState::Ready;
         }
     }

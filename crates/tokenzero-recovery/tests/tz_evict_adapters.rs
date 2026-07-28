@@ -25,7 +25,11 @@ fn tz_evict_context_edit_shrinks_window_and_fault_hook_rehydrates() {
         .apply_context_edit(&mut store, body.clone(), anchor)
         .unwrap();
     let eviction = admission.evicted.first().expect("context must page out");
-    assert!(eviction.replacement.starts_with("TZ-EVICT/1 ref=tz://blob/"));
+    assert!(
+        eviction
+            .replacement
+            .starts_with("TZ-EVICT/1 ref=tz://blob/")
+    );
     assert!(working_set.used_tokens() < tokenzero_core::count_tokens(&body));
 
     let rehydration = working_set

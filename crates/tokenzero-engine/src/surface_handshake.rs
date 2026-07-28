@@ -7,9 +7,7 @@
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use tokenzero_core::operation_abi::{
-    SEMANTIC_CONTRACT_VERSION, contract_digest_hex,
-};
+use tokenzero_core::operation_abi::{SEMANTIC_CONTRACT_VERSION, contract_digest_hex};
 
 /// Shared family capability schema name (identical field names across engines).
 pub const SURFACE_CAPABILITY_SCHEMA: &str = "zerostack.surface.v1";
@@ -126,16 +124,9 @@ pub fn build_surface_capability(surface: HandshakeSurface) -> SurfaceCapability 
         HandshakeSurface::Mcp => (PlannerOwner::None, vec!["none".into()]),
         HandshakeSurface::Codemode => (
             PlannerOwner::ServerCodemode,
-            vec![
-                "recipe".into(),
-                "json".into(),
-                "javascript".into(),
-            ],
+            vec!["recipe".into(), "json".into(), "javascript".into()],
         ),
-        HandshakeSurface::RawWorker => (
-            PlannerOwner::Client,
-            vec!["raw_frame".into()],
-        ),
+        HandshakeSurface::RawWorker => (PlannerOwner::Client, vec!["raw_frame".into()]),
     };
     SurfaceCapability {
         schema: SURFACE_CAPABILITY_SCHEMA.into(),
@@ -156,7 +147,8 @@ pub fn build_surface_capability(surface: HandshakeSurface) -> SurfaceCapability 
         limits: SurfaceLimits {
             max_visible_tokens: 4000,
             hard_max_wall_ms: tokenzero_core::operation_abi::ABI_HARD_MAX_WALL_MS,
-            default_shell_timeout_secs: tokenzero_core::operation_abi::ABI_DEFAULT_SHELL_TIMEOUT_SECS,
+            default_shell_timeout_secs:
+                tokenzero_core::operation_abi::ABI_DEFAULT_SHELL_TIMEOUT_SECS,
         },
     }
 }

@@ -73,10 +73,7 @@ pub fn canonical_full_blob_ref(bare: &str) -> Option<String> {
 pub fn session_visible_blob_alias(ref_id: &str) -> Option<String> {
     let (bare, frag) = split_ref_fragment(ref_id);
     let hash = full_hash_blob_parts(bare)?;
-    let short = format!(
-        "{SESSION_ALIAS_PREFIX}{}",
-        &hash[..SESSION_ALIAS_HEX_LEN]
-    );
+    let short = format!("{SESSION_ALIAS_PREFIX}{}", &hash[..SESSION_ALIAS_HEX_LEN]);
     Some(match frag {
         Some(f) => format!("{short}#{f}"),
         None => short,

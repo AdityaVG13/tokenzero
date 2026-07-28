@@ -66,7 +66,11 @@ impl DispatchOutcome {
         }
         let resp = self.tool_response.as_ref()?;
         let cli = resp.error.as_ref()?;
-        Some(map_tool_error_to_domain(&resp.tool, cli.code.as_str(), &cli.message))
+        Some(map_tool_error_to_domain(
+            &resp.tool,
+            cli.code.as_str(),
+            &cli.message,
+        ))
     }
 }
 
@@ -239,7 +243,10 @@ pub fn dispatch_operation(
         Err(err) => {
             record_profile(surface, overhead_ns, wall_ns, kernel_ns);
             let domain_error = domain_dispatch_error_to_domain(err);
-            let op = domain_error.op.clone().unwrap_or_else(|| resolved.to_string());
+            let op = domain_error
+                .op
+                .clone()
+                .unwrap_or_else(|| resolved.to_string());
             DispatchOutcome {
                 result: DomainResult::new(
                     op.clone(),
@@ -287,7 +294,10 @@ pub fn dispatch_mcp_tool(
     if !operation_is_domain(op) {
         return Err(DomainError::new(
             DomainErrorKind::Validation,
-            format!("{} is a transport control tool, not a domain dispatch target", op.name),
+            format!(
+                "{} is a transport control tool, not a domain dispatch target",
+                op.name
+            ),
         )
         .with_op(op.name));
     }

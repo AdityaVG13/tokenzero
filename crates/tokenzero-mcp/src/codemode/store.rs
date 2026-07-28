@@ -231,7 +231,6 @@ fn deferred_text(store: &mut ExecutionStore, text: &str, content_type: ContentTy
         .unwrap_or_else(|error| format!("store-error:{error}"))
 }
 
-
 #[allow(clippy::too_many_arguments)]
 pub fn finalize_result(
     mut result: CodeModeResult,
@@ -247,9 +246,9 @@ pub fn finalize_result(
     let completed = matches!(result.status, CodeModeStatus::Completed);
     let silent_success = completed
         && !steps.is_empty()
-        && steps.iter().all(|step| {
-            classify_method(&step.method) == OperationClass::ReversibleStoreMutation
-        });
+        && steps
+            .iter()
+            .all(|step| classify_method(&step.method) == OperationClass::ReversibleStoreMutation);
     let (status_str, telemetry_status) = if completed {
         ("completed", "ok")
     } else {
@@ -637,7 +636,12 @@ mod tests {
             }],
         );
         assert_eq!(finalized.visible_ack, "");
-        assert!(finalized.detail_ref.as_deref().is_some_and(|value| value.ends_with("/result")));
+        assert!(
+            finalized
+                .detail_ref
+                .as_deref()
+                .is_some_and(|value| value.ends_with("/result"))
+        );
     }
 
     #[test]

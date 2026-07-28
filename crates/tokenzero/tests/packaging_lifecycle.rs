@@ -29,7 +29,10 @@ fn selection_matrix_docs() {
         ARTIFACT_CODEMODE
     );
     let id = package_identity(PackageSurface::Mcp);
-    assert_eq!(id["selection_matrix"]["native_codemode_client"], ARTIFACT_MCP);
+    assert_eq!(
+        id["selection_matrix"]["native_codemode_client"],
+        ARTIFACT_MCP
+    );
     assert_eq!(
         id["selection_matrix"]["legacy_mcp_client"],
         ARTIFACT_CODEMODE

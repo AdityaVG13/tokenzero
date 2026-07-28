@@ -351,7 +351,6 @@ fn install_each_surface_independent_prefix_exercises_runtime() {
     }
 }
 
-
 /// Every documented or automated way to build a surface must pass
 /// `--no-default-features`.
 ///
@@ -416,13 +415,11 @@ fn release_workflow_builds_and_ships_both_surfaces() {
             "release workflow never builds {artifact}"
         );
         assert!(
-            text.contains(&format!("$rel/{artifact}"))
-                || text.contains(&format!("{artifact}.exe")),
+            text.contains(&format!("$rel/{artifact}")) || text.contains(&format!("{artifact}.exe")),
             "release workflow builds {artifact} but never packages it"
         );
     }
 }
-
 
 /// zerostack-vpa: automatic CI must stay off in this repo to preserve the
 /// GitHub Actions budget. `development-contract.yml` shipped with

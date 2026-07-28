@@ -1,9 +1,8 @@
 #[test]
 fn boot_cost_lock_covers_real_small_and_23k_corpora() {
-    let baseline: serde_json::Value = serde_json::from_str(include_str!(
-        "../../../benchmarks/boot-cost/baseline.json",
-    ))
-    .expect("boot-cost baseline JSON");
+    let baseline: serde_json::Value =
+        serde_json::from_str(include_str!("../../../benchmarks/boot-cost/baseline.json",))
+            .expect("boot-cost baseline JSON");
     let thresholds = &baseline["thresholds"];
     assert_eq!(thresholds["max_visible_boot_tokens_exclusive"], 100);
     assert_eq!(thresholds["max_repo_size_growth_tokens"], 0);
@@ -18,7 +17,11 @@ fn boot_cost_lock_covers_real_small_and_23k_corpora() {
         .expect("large total");
     assert!(small < 100, "small-corpus boot cost exceeds lock: {small}");
     assert!(large < 100, "23k-corpus boot cost exceeds lock: {large}");
-    assert_eq!(large.saturating_sub(small), 0, "boot cost grew with repo size");
+    assert_eq!(
+        large.saturating_sub(small),
+        0,
+        "boot cost grew with repo size"
+    );
 
     let gate = include_str!("../../../benchmarks/boot-cost.py");
     assert!(gate.contains("component_attribution"));

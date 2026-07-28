@@ -26,8 +26,16 @@ pub struct CacheBreakpoint {
 
 pub fn provider_breakpoints(provider: CacheProvider) -> &'static [CacheBreakpoint] {
     const ANTHROPIC: [CacheBreakpoint; 2] = [
-        CacheBreakpoint { ttl_seconds: 300, minimum_requests: 2, write_multiplier: 1.25 },
-        CacheBreakpoint { ttl_seconds: 3_600, minimum_requests: 3, write_multiplier: 2.0 },
+        CacheBreakpoint {
+            ttl_seconds: 300,
+            minimum_requests: 2,
+            write_multiplier: 1.25,
+        },
+        CacheBreakpoint {
+            ttl_seconds: 3_600,
+            minimum_requests: 3,
+            write_multiplier: 2.0,
+        },
     ];
     const OPENAI: [CacheBreakpoint; 1] = [CacheBreakpoint {
         ttl_seconds: OPENAI_MAX_RETENTION_SECONDS,
@@ -50,19 +58,22 @@ pub fn provider_breakpoints(provider: CacheProvider) -> &'static [CacheBreakpoin
 /// retain enough requests to amortize its write. The initial request counts
 /// toward the provider's documented break-even.
 pub fn ttl_from_gaps(provider: CacheProvider, gaps_seconds: &[u64]) -> Option<CacheBreakpoint> {
-    provider_breakpoints(provider).iter().copied().find(|breakpoint| {
-        let retained_requests = 1_u64.saturating_add(
-            gaps_seconds
-                .iter()
-                .scan(0_u64, |elapsed, gap| {
-                    *elapsed = elapsed.saturating_add(*gap);
-                    Some(*elapsed)
-                })
-                .take_while(|elapsed| *elapsed <= breakpoint.ttl_seconds)
-                .count() as u64,
-        );
-        retained_requests >= breakpoint.minimum_requests
-    })
+    provider_breakpoints(provider)
+        .iter()
+        .copied()
+        .find(|breakpoint| {
+            let retained_requests = 1_u64.saturating_add(
+                gaps_seconds
+                    .iter()
+                    .scan(0_u64, |elapsed, gap| {
+                        *elapsed = elapsed.saturating_add(*gap);
+                        Some(*elapsed)
+                    })
+                    .take_while(|elapsed| *elapsed <= breakpoint.ttl_seconds)
+                    .count() as u64,
+            );
+            retained_requests >= breakpoint.minimum_requests
+        })
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -137,8 +148,7 @@ pub fn schedule_evictions(
                 candidate,
                 kind,
                 ttl_seconds,
-                cache_breakpoint_at_seconds: ttl_seconds
-                    .map(|ttl| now_seconds.saturating_add(ttl)),
+                cache_breakpoint_at_seconds: ttl_seconds.map(|ttl| now_seconds.saturating_add(ttl)),
                 expected_read_savings_tokens,
             }
         })
@@ -146,19 +156,26 @@ pub fn schedule_evictions(
 
     let mut grouped = BTreeMap::<(u64, u64), Vec<String>>::new();
     for decision in &decisions {
-        if let (Some(at), Some(ttl)) = (
-            decision.cache_breakpoint_at_seconds,
-            decision.ttl_seconds,
-        ) {
-            grouped.entry((at, ttl)).or_default().push(decision.candidate.id.clone());
+        if let (Some(at), Some(ttl)) = (decision.cache_breakpoint_at_seconds, decision.ttl_seconds)
+        {
+            grouped
+                .entry((at, ttl))
+                .or_default()
+                .push(decision.candidate.id.clone());
         }
     }
     let batches = grouped
         .into_iter()
-        .map(|((cache_breakpoint_at_seconds, ttl_seconds), mut candidate_ids)| {
-            candidate_ids.sort();
-            EvictionBatch { cache_breakpoint_at_seconds, ttl_seconds, candidate_ids }
-        })
+        .map(
+            |((cache_breakpoint_at_seconds, ttl_seconds), mut candidate_ids)| {
+                candidate_ids.sort();
+                EvictionBatch {
+                    cache_breakpoint_at_seconds,
+                    ttl_seconds,
+                    candidate_ids,
+                }
+            },
+        )
         .collect();
     EvictionSchedule { decisions, batches }
 }
@@ -183,18 +200,25 @@ pub fn simulate_eviction_replay(
     measured_gaps_seconds: &[u64],
     replay: &[EvictionReplayItem],
 ) -> EvictionReplayReport {
-    let candidates = replay.iter().map(|item| item.candidate.clone()).collect::<Vec<_>>();
+    let candidates = replay
+        .iter()
+        .map(|item| item.candidate.clone())
+        .collect::<Vec<_>>();
     let schedule = schedule_evictions(provider, now_seconds, measured_gaps_seconds, &candidates);
     let mut naive_billed_tokens = 0_u64;
     let mut scheduled_billed_tokens = 0_u64;
     for (item, decision) in replay.iter().zip(&schedule.decisions) {
-        let uncached = item.observed_remaining_requests.saturating_mul(item.candidate.prefix_tokens);
+        let uncached = item
+            .observed_remaining_requests
+            .saturating_mul(item.candidate.prefix_tokens);
         naive_billed_tokens = naive_billed_tokens.saturating_add(uncached);
         scheduled_billed_tokens = scheduled_billed_tokens.saturating_add(
             if decision.kind == EvictionDecisionKind::Evict {
                 item.candidate.prefix_rewrite_cost_tokens.saturating_add(
                     item.observed_remaining_requests.saturating_mul(
-                        item.candidate.prefix_tokens.saturating_sub(item.candidate.read_savings_tokens),
+                        item.candidate
+                            .prefix_tokens
+                            .saturating_sub(item.candidate.read_savings_tokens),
                     ),
                 )
             } else {
@@ -227,7 +251,9 @@ impl EvictionSavingsLedger {
         true
     }
 
-    pub fn saved_billed_tokens(&self) -> u64 { self.saved_billed_tokens }
+    pub fn saved_billed_tokens(&self) -> u64 {
+        self.saved_billed_tokens
+    }
 
     pub fn eviction_amortization(&self) -> Value {
         json!({

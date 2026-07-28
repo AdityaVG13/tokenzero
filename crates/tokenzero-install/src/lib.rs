@@ -830,7 +830,8 @@ mod rollback_drift_tests {
         )
         .expect("write seed");
         let applied = apply(root.path(), false, &["mcp".to_string()]).expect("apply");
-        let mut value: Value = serde_json::from_slice(&fs::read(&config).expect("read")).expect("json");
+        let mut value: Value =
+            serde_json::from_slice(&fs::read(&config).expect("read")).expect("json");
         value["user_after"] = json!({"must_survive_rollback": true});
         fs::write(&config, serde_json::to_vec_pretty(&value).expect("encode")).expect("edit");
         let err = rollback(root.path(), &applied.rollback.id).expect_err("must conflict");

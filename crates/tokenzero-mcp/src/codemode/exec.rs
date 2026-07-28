@@ -417,18 +417,30 @@ mod quickjs_mutation_classifier_tests {
         );
         assert!(result.error.is_none(), "{:?}", result.error);
         let value = result.value.expect("plan must return a value");
-        let obj = value.as_object().expect("large output must compact to an object");
+        let obj = value
+            .as_object()
+            .expect("large output must compact to an object");
 
-        let ref_id = obj["ref"].as_str().expect("compacted value must carry its ref");
+        let ref_id = obj["ref"]
+            .as_str()
+            .expect("compacted value must carry its ref");
         // The recovery must name THIS ref, not a generic hint: an agent should
         // be able to copy it verbatim.
-        let expand = obj["expand"].as_str().expect("compacted value must say how to expand");
-        assert!(expand.contains(ref_id), "expand hint must name the ref: {expand}");
+        let expand = obj["expand"]
+            .as_str()
+            .expect("compacted value must say how to expand");
+        assert!(
+            expand.contains(ref_id),
+            "expand hint must name the ref: {expand}"
+        );
         assert!(expand.contains("zero.token.expand"), "{expand}");
 
         // Size must be visible too. Without it the preview's "+394 more lines"
         // is the only clue how much was withheld.
-        assert!(obj["chars"].as_u64().unwrap_or(0) > 1000, "must report full size: {value}");
+        assert!(
+            obj["chars"].as_u64().unwrap_or(0) > 1000,
+            "must report full size: {value}"
+        );
     }
 
     /// The hint has to be true, not decorative: following it must yield the
@@ -445,10 +457,19 @@ mod quickjs_mutation_classifier_tests {
         );
         assert!(result.error.is_none(), "{:?}", result.error);
         let value = result.value.expect("plan must return a value");
-        assert_eq!(value["type"], "string", "expand must yield text, not another ref: {value}");
-        assert!(value["len"].as_u64().unwrap_or(0) > 1000, "expand must yield ALL of it: {value}");
+        assert_eq!(
+            value["type"], "string",
+            "expand must yield text, not another ref: {value}"
+        );
+        assert!(
+            value["len"].as_u64().unwrap_or(0) > 1000,
+            "expand must yield ALL of it: {value}"
+        );
         assert_eq!(value["head"], "1\n", "{value}");
-        assert_eq!(value["tail"], "400\n", "must reach the LAST line, not a prefix: {value}");
+        assert_eq!(
+            value["tail"], "400\n",
+            "must reach the LAST line, not a prefix: {value}"
+        );
     }
 
     #[test]
@@ -466,8 +487,14 @@ mod quickjs_mutation_classifier_tests {
         let error = result.error.expect("plan must exceed the microtask cap");
         let msg = &error.message;
         assert!(msg.contains("microtask cap exceeded"), "{msg}");
-        assert!(msg.contains("limit 16"), "must name the effective limit: {msg}");
-        assert!(msg.contains("drained 16"), "must report the observed count: {msg}");
+        assert!(
+            msg.contains("limit 16"),
+            "must name the effective limit: {msg}"
+        );
+        assert!(
+            msg.contains("drained 16"),
+            "must report the observed count: {msg}"
+        );
         assert!(
             msg.contains("Promise.all") && msg.contains("limits.max_microtasks"),
             "must include a corrective batching example and the raise-cap knob: {msg}"
@@ -993,8 +1020,11 @@ fn begin_js_host_op(
                 }),
             }
         });
-        *finisher.job.result.lock().unwrap_or_else(|e| e.into_inner()) =
-            Some(result_json);
+        *finisher
+            .job
+            .result
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = Some(result_json);
         // Finisher drop wakes pollers and releases the width-gate slot; on a
         // dispatch panic it also fills the result with an error payload.
         drop(finisher);
@@ -3453,9 +3483,10 @@ fn exec_shell(engine: &TokenZeroEngine, work_root: &Path, args: &[Value]) -> OpR
     // `{ timeout_ms: 1000 }` a no-op: an unrecognized key, dropped in silence,
     // so the command ran under the 60s default and reported success.
     let timeout_ms = shell_timeout_ms_opt(&opts);
-    let timeout = timeout_ms
-        .map(Duration::from_millis)
-        .or_else(|| opts.usize("timeout_seconds").map(|secs| Duration::from_secs(secs as u64)));
+    let timeout = timeout_ms.map(Duration::from_millis).or_else(|| {
+        opts.usize("timeout_seconds")
+            .map(|secs| Duration::from_secs(secs as u64))
+    });
     // Background jobs are transport-side composition (not a registry domain op).
     if opts.bool("background").unwrap_or(false) {
         return engine

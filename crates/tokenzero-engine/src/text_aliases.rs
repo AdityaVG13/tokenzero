@@ -40,8 +40,8 @@ fn candidates(text: &str) -> Vec<(&str, Vec<(usize, usize)>)> {
         .char_indices()
         .chain(std::iter::once((text.len(), ' ')))
     {
-        let allowed = character.is_ascii_alphanumeric()
-            || matches!(character, '_' | '-' | '.' | '/' | ':');
+        let allowed =
+            character.is_ascii_alphanumeric() || matches!(character, '_' | '-' | '.' | '/' | ':');
         if allowed {
             start.get_or_insert(index);
             continue;
@@ -65,7 +65,10 @@ fn candidates(text: &str) -> Vec<(&str, Vec<(usize, usize)>)> {
                 .map_or(token_end, |(_, suffix)| token_end - suffix.len() - 1);
             let value = &text[token_start..value_end];
             if classify(value).is_some() {
-                found.entry(value).or_default().push((token_start, value_end));
+                found
+                    .entry(value)
+                    .or_default()
+                    .push((token_start, value_end));
             }
         }
     }
@@ -220,7 +223,6 @@ mod tests {
         }
     }
 }
-
 
 #[cfg(test)]
 mod prefilter_soundness {

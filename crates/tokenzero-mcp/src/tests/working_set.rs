@@ -40,7 +40,12 @@ fn session_working_set_eviction_is_visible_in_metrics() {
     assert!(metrics["working_set"]["bytes_evicted"].as_u64().unwrap() > 0);
     assert_eq!(metrics["working_set"]["refs_created"], 2);
     assert_eq!(metrics["working_set"]["render_rewrites"], 2);
-    assert!(metrics["working_set"]["eviction_accounting"]["expected_rehydration_tokens"].as_f64().unwrap() > 0.0);
+    assert!(
+        metrics["working_set"]["eviction_accounting"]["expected_rehydration_tokens"]
+            .as_f64()
+            .unwrap()
+            > 0.0
+    );
 }
 
 #[test]

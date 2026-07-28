@@ -24,7 +24,10 @@ use tokenzero_runtime::{ExecutionMode, plan_command_for_platform};
 #[derive(Debug, Clone)]
 pub enum DomainDispatchError {
     UnknownTool(String),
-    InvalidArgs { op: String, message: String },
+    InvalidArgs {
+        op: String,
+        message: String,
+    },
     /// Adapter-owned control/composition/resource ops must not enter the kernel.
     TransportOnly(String),
 }
@@ -41,16 +44,14 @@ impl DomainDispatchError {
     }
 }
 
-
 /// Execute one canonical domain operation without transport framing.
 pub fn execute_domain_op(
     engine: &TokenZeroEngine,
     op_name: &str,
     args: &Value,
 ) -> Result<ToolResponse, DomainDispatchError> {
-    let op = resolve_operation(op_name).ok_or_else(|| {
-        DomainDispatchError::UnknownTool(op_name.to_string())
-    })?;
+    let op = resolve_operation(op_name)
+        .ok_or_else(|| DomainDispatchError::UnknownTool(op_name.to_string()))?;
     if !crate::dispatcher::operation_is_domain(op) {
         return Err(DomainDispatchError::TransportOnly(op.name.to_string()));
     }
@@ -163,8 +164,9 @@ pub fn execute_domain_op(
             let kind = content_type_from_arg(args, text);
             engine.ingest(text, kind, arg_mode(args), tool)
         }
-        "expand" => engine
-            .expand_with_params(ExpandParams::from_tool_args(args).map_err(map_args)?),
+        "expand" => {
+            engine.expand_with_params(ExpandParams::from_tool_args(args).map_err(map_args)?)
+        }
         "mem" => engine.mem(),
         "cache_pack" => engine.cache_pack(arg_str(args, "scope").unwrap_or("agent")),
         "rewrite" => {
@@ -178,8 +180,10 @@ pub fn execute_domain_op(
         }
         "discover" => pretty_json_response("discover", Mode::Hybrid, &discover(), None),
         "report_tool_issue" => {
-            let tool = arg_string_any(args, &["tool", "name", "tool_name", "surface"]).map_err(map_args)?;
-            let summary = arg_string_any(args, &["summary", "message", "title"]).map_err(map_args)?;
+            let tool = arg_string_any(args, &["tool", "name", "tool_name", "surface"])
+                .map_err(map_args)?;
+            let summary =
+                arg_string_any(args, &["summary", "message", "title"]).map_err(map_args)?;
             let detail = arg_string_any(args, &["detail", "body", "repro", "context"])
                 .ok()
                 .or(Some(summary));
@@ -201,10 +205,12 @@ pub fn execute_domain_op(
                 ),
             }
         }
-        "batch" => batch_response(engine, args).map_err(|message| DomainDispatchError::InvalidArgs {
-            op: "tz_batch".into(),
-            message,
-        })?,
+        "batch" => {
+            batch_response(engine, args).map_err(|message| DomainDispatchError::InvalidArgs {
+                op: "tz_batch".into(),
+                message,
+            })?
+        }
         "fetch" => engine.fetch(
             arg_string_any(args, &["url", "uri"]).map_err(map_args)?,
             arg_u64(args, "ttl_seconds"),
@@ -221,11 +227,7 @@ pub fn execute_domain_op(
     Ok(response)
 }
 
-
-fn batch_response(
-    engine: &TokenZeroEngine,
-    args: &Value,
-) -> Result<ToolResponse, String> {
+fn batch_response(engine: &TokenZeroEngine, args: &Value) -> Result<ToolResponse, String> {
     let ops = batch_ops(args)?;
     let mut sections = Vec::with_capacity(ops.len());
     let mut refs: Vec<tokenzero_core::RefRecord> = Vec::new();
@@ -234,7 +236,10 @@ fn batch_response(
     let mut recovery_tokens = 0usize;
     let mut per_op = Vec::with_capacity(ops.len());
     for (index, (tool, op_args)) in ops.iter().enumerate() {
-        let canonical = tool.strip_prefix("tz_").map(|_| tool.as_str()).unwrap_or(tool.as_str());
+        let canonical = tool
+            .strip_prefix("tz_")
+            .map(|_| tool.as_str())
+            .unwrap_or(tool.as_str());
         let position = index + 1;
         if canonical == "batch" || canonical == "tz_batch" {
             sections.push(format!(

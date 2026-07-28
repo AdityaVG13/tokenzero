@@ -191,3 +191,12 @@ NDH6SA~M
 .asgrep/
 .cyclomatic-reduction/
 .zero-tech-debt/
+
+# Local Pareto research aggregation (multi-AI review drop zone)
+/Pareto/
+
+# Multi-pass bug hunt private run artifacts
+.bug-hunt-run/
+
+# local ubs multi-pass artifacts
+ubs_audit/

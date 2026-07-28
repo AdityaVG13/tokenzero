@@ -103,15 +103,8 @@ fn forbidden(op: &str) -> bool {
 
 fn effect_class(op: &str) -> &'static str {
     match op {
-        "shell"
-        | "tz_shell"
-        | "zero.shell"
-        | "compact"
-        | "tz_compact"
-        | "zero.compact"
-        | "ingest"
-        | "tz_ingest"
-        | "zero.ingest" => "irreversible",
+        "shell" | "tz_shell" | "zero.shell" | "compact" | "tz_compact" | "zero.compact"
+        | "ingest" | "tz_ingest" | "zero.ingest" => "irreversible",
         _ => "read_only",
     }
 }

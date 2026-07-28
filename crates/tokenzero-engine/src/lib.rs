@@ -19,8 +19,6 @@ pub mod config;
 mod diff;
 mod dispatcher;
 mod domain;
-pub mod raw_worker;
-pub mod surface_handshake;
 mod engine_common;
 mod engine_edit;
 mod engine_expand;
@@ -39,17 +37,19 @@ mod fetch_guard;
 pub mod ledger;
 pub mod metrics;
 pub mod paths;
+pub mod raw_worker;
 mod recall;
 pub mod render;
 mod report_tool;
-mod text_aliases;
 pub mod session;
 pub mod session_persist;
 pub mod shell_hooks;
+pub mod surface_handshake;
 pub mod surface_health;
+mod text_aliases;
 pub mod usage_telemetry;
-pub mod warmkeeper;
 pub mod wall;
+pub mod warmkeeper;
 pub mod workspace;
 pub mod write_ladder;
 
@@ -61,6 +61,7 @@ pub use binary_resolve::{
 pub use cache_maintenance::{
     cache_maintenance, cache_maintenance_coalesced, session_pack, shell_spill_dir,
 };
+pub use collect::{find_rg_in_path, parse_rg_line};
 pub use dispatcher::{
     DispatchOutcome, DispatchProfile, DispatchSurface, all_domain_operations, dispatch_cli,
     dispatch_codemode_method, dispatch_count, dispatch_mcp_tool, dispatch_operation,
@@ -68,20 +69,19 @@ pub use dispatcher::{
     operation_is_domain, tool_response_to_domain,
 };
 pub use domain::{DomainDispatchError, execute_domain_op};
+pub use fetch_cache::{load_fetch_index, record_fetch};
 pub use raw_worker::{
     RawWorkerError, RawWorkerRequest, RawWorkerResponse, RawWorkerServeOptions,
     execute_raw_worker_frame, execute_raw_worker_json, maybe_run_raw_worker_from_args,
-    parse_raw_worker_argv, raw_worker_print_handshake, response_from_outcome,
-    run_raw_worker_once, run_raw_worker_serve,
+    parse_raw_worker_argv, raw_worker_print_handshake, response_from_outcome, run_raw_worker_once,
+    run_raw_worker_serve,
 };
+pub use render::{cli_json, exact_ref_token_count, prune_dead_refs, render_text};
 pub use surface_handshake::{
     CompressionOwner, HandshakeSurface, PlannerOwner, RAW_WORKER_PROTOCOL_VERSION,
     SURFACE_CAPABILITY_SCHEMA, SurfaceCapability, SurfaceLimits, build_surface_capability,
     check_contract_compatibility, composition_trace, surface_capability_json,
 };
-pub use render::{cli_json, exact_ref_token_count, prune_dead_refs, render_text};
-pub use fetch_cache::{load_fetch_index, record_fetch};
-pub use collect::{find_rg_in_path, parse_rg_line};
 
 pub use report_tool::{build_tool_issue_report, is_reportable_tool_name, record_tool_issue};
 pub use shell_hooks::{ShellHooks, install as install_shell_hooks};
@@ -146,6 +146,11 @@ pub const DIFF_READS_ENV: &str = "TOKENZERO_MCP_DIFF_READS";
 const DIFF_MAX_BYTES: usize = 2 * 1024 * 1024;
 const DIFF_MAX_LINES: usize = 50_000;
 
+pub use cache_meter::{
+    ANTHROPIC_CACHE_DIAGNOSIS_BETA, AnthropicCacheDiagnosisRequest, CacheMeter, CacheMeterError,
+    CacheObservation, CachePricing, CacheProvider, CacheSessionReport, CacheSloConfig,
+    CacheSloDashboard, ProviderUsage, cache_miss_attribution, parse_provider_usage,
+};
 pub use config::{
     DEFAULT_SHELL_INLINE_BUDGET, EngineConfig, FETCH_ALLOW_ENV, FETCH_DENY_ENV, FETCH_ENABLED_ENV,
     SHELL_INLINE_BUDGET_ENV, SearchBackend, TELEMETRY_ENV, default_mcp_idle_timeout,
@@ -153,27 +158,22 @@ pub use config::{
     resolve_telemetry, shell_inline_budget_from_env, shell_timeout_from_millis,
     shell_timeout_from_secs, telemetry_env_enabled,
 };
-pub use cache_meter::{
-    ANTHROPIC_CACHE_DIAGNOSIS_BETA, AnthropicCacheDiagnosisRequest, CacheMeter,
-    CacheMeterError, CacheObservation, CachePricing, CacheProvider, CacheSessionReport,
-    CacheSloConfig, CacheSloDashboard,
-    ProviderUsage, cache_miss_attribution, parse_provider_usage,
-};
 pub use eviction_scheduler::{
     CacheBreakpoint, EvictionBatch, EvictionCandidate, EvictionDecision, EvictionDecisionKind,
     EvictionReplayItem, EvictionReplayReport, EvictionSavingsLedger, EvictionSchedule,
     OPENAI_MAX_RETENTION_SECONDS, PrefixTier, provider_breakpoints, schedule_evictions,
     simulate_eviction_replay, ttl_from_gaps,
 };
-pub use warmkeeper::{
-    WarmDecision, WarmDecisionKind, WarmLane, WarmLaneTier, WarmReplayLane,
-    WarmSimulationReport, ZeroOutputTouch, schedule_rewarms, simulate_warmkeeper,
-};
 pub use usage_telemetry::{
     AmplificationRecord, DirectionTokens, ExecutionPath, OperationClass, TA_REGISTRY,
-    TaClassReport, TaCostLockViolation, TelemetryInspection, UsageRecord, enforce_ta_cost_locks, inspect_usage_telemetry,
-    record_codemode_accounting, record_mcp_accounting, record_operation_amplification,
-    replay_ta_table, usage_telemetry_enabled, usage_telemetry_path_for_cache,
+    TaClassReport, TaCostLockViolation, TelemetryInspection, UsageRecord, enforce_ta_cost_locks,
+    inspect_usage_telemetry, record_codemode_accounting, record_mcp_accounting,
+    record_operation_amplification, replay_ta_table, usage_telemetry_enabled,
+    usage_telemetry_path_for_cache,
+};
+pub use warmkeeper::{
+    WarmDecision, WarmDecisionKind, WarmLane, WarmLaneTier, WarmReplayLane, WarmSimulationReport,
+    ZeroOutputTouch, schedule_rewarms, simulate_warmkeeper,
 };
 
 /// One find/replace hunk for [`TokenZeroEngine::edit`]. `find` must match the

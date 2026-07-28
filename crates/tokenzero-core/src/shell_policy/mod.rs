@@ -138,11 +138,7 @@ pub fn classify_command_status(
     }
 }
 
-pub(crate) fn shell_stream_output(
-    exit_code: Option<i32>,
-    stdout: &str,
-    stderr: &str,
-) -> String {
+pub(crate) fn shell_stream_output(exit_code: Option<i32>, stdout: &str, stderr: &str) -> String {
     let mut combined = stdout.to_string();
     if !stderr.is_empty() {
         if !combined.is_empty() && !combined.ends_with('\n') {

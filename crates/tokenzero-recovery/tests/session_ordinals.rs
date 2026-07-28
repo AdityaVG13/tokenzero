@@ -10,7 +10,9 @@ fn ordinal_short_and_full_refs_expand_identical_bytes() {
     let dir = tempdir().unwrap();
     let path = dir.path().join("recovery.json");
     let mut store = RecoveryStore::new(Some(path));
-    let full = store.store_blob("gauge-orbit-bytes\n", ContentType::Code).unwrap();
+    let full = store
+        .store_blob("gauge-orbit-bytes\n", ContentType::Code)
+        .unwrap();
     let short = store.ensure_session_visible_alias(&full);
     let range = store.reserve_ordinal_range(4).unwrap();
     let ordinal = store.store_ordinal_alias_deferred(range, 0, &full).unwrap();
@@ -42,7 +44,10 @@ fn concurrent_range_allocation_is_dense_and_linearizable() {
             store.reserve_ordinal_range(BATCH).unwrap()
         }));
     }
-    let mut ranges = handles.into_iter().map(|handle| handle.join().unwrap()).collect::<Vec<_>>();
+    let mut ranges = handles
+        .into_iter()
+        .map(|handle| handle.join().unwrap())
+        .collect::<Vec<_>>();
     ranges.sort_by_key(|range| range.start);
     for (index, range) in ranges.iter().enumerate() {
         assert_eq!(range.generation, 1);
@@ -50,5 +55,8 @@ fn concurrent_range_allocation_is_dense_and_linearizable() {
         assert_eq!(range.end_exclusive, range.start + BATCH);
     }
     let mut restarted = RecoveryStore::new(Some(path));
-    assert_eq!(restarted.reserve_ordinal_range(1).unwrap().start, 1 + WORKERS as u64 * BATCH);
+    assert_eq!(
+        restarted.reserve_ordinal_range(1).unwrap().start,
+        1 + WORKERS as u64 * BATCH
+    );
 }

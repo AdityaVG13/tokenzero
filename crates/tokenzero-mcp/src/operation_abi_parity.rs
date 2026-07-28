@@ -16,7 +16,7 @@
 #[cfg(test)]
 mod tests {
     use crate::catalog::{
-        ToolKind, TOOL_ALIASES, canonical_tool_specs, resource_specs, tool_specs,
+        TOOL_ALIASES, ToolKind, canonical_tool_specs, resource_specs, tool_specs,
         tool_specs_for_filter,
     };
     use crate::codemode::catalog::{describe_method, method_paths};
@@ -171,20 +171,14 @@ mod tests {
     #[test]
     fn live_resources_match_registry() {
         let live = live_resource_uris();
-        let registry: BTreeSet<_> = resource_uris()
-            .into_iter()
-            .map(|u| u.to_string())
-            .collect();
+        let registry: BTreeSet<_> = resource_uris().into_iter().map(|u| u.to_string()).collect();
         assert_eq!(live, registry);
     }
 
     #[test]
     fn kill_extra_or_missing_resource_uri() {
         let mut live = live_resource_uris();
-        let registry: BTreeSet<_> = resource_uris()
-            .into_iter()
-            .map(|u| u.to_string())
-            .collect();
+        let registry: BTreeSet<_> = resource_uris().into_iter().map(|u| u.to_string()).collect();
         assert_eq!(live, registry);
         live.insert("resource://tokenzero/not-real".into());
         assert_ne!(live, registry);
@@ -378,7 +372,10 @@ mod tests {
         assert_eq!(d.len(), 64);
         assert_eq!(d, contract_digest_hex());
         let vectors = golden_vectors();
-        let tags: BTreeSet<_> = vectors.iter().flat_map(|v| v.tags.iter().copied()).collect();
+        let tags: BTreeSet<_> = vectors
+            .iter()
+            .flat_map(|v| v.tags.iter().copied())
+            .collect();
         for required in [
             "success",
             "typed_failure",

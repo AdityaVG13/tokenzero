@@ -329,7 +329,10 @@ fn cli_codemode_stdin_budget_tier_b_trampoline() {
     assert!(json["value"]["ref"].as_str().unwrap().starts_with("tz://"));
     assert_json_contains(&json["value"]["text"], "tier-b-stdin");
     assert!(
-        json["refs"].as_array().map(|a| !a.is_empty()).unwrap_or(false),
+        json["refs"]
+            .as_array()
+            .map(|a| !a.is_empty())
+            .unwrap_or(false),
         "Tier B envelope must surface refs like MCP"
     );
 }

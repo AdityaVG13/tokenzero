@@ -594,7 +594,6 @@ pub(crate) fn is_abnormal_json(value: &serde_json::Value) -> bool {
     )
 }
 
-
 #[cfg(test)]
 mod regression_tests {
     use super::failed_segment;

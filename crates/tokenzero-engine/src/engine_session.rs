@@ -157,19 +157,12 @@ impl TokenZeroEngine {
         &self.surface_health
     }
 
-    pub fn surface_health_handle(
-        &self,
-    ) -> std::sync::Arc<crate::surface_health::SurfaceHealth> {
+    pub fn surface_health_handle(&self) -> std::sync::Arc<crate::surface_health::SurfaceHealth> {
         std::sync::Arc::clone(&self.surface_health)
     }
 
     /// Record one tool-call outcome for observability. Fail-open.
-    pub fn record_tool_call(
-        &self,
-        tool: &str,
-        elapsed: std::time::Duration,
-        is_error: bool,
-    ) {
+    pub fn record_tool_call(&self, tool: &str, elapsed: std::time::Duration, is_error: bool) {
         self.metrics.record(tool, elapsed, is_error);
     }
 

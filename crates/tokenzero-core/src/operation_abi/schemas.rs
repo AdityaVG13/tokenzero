@@ -5,10 +5,13 @@
 
 use serde_json::{Value, json};
 
-use super::types::{ABI_DEFAULT_SHELL_TIMEOUT_SECS, ABI_HARD_MAX_WALL_MS, OperationArgs, OperationResults};
+use super::types::{
+    ABI_DEFAULT_SHELL_TIMEOUT_SECS, ABI_HARD_MAX_WALL_MS, OperationArgs, OperationResults,
+};
 
 fn object_schema(properties: Value, required: &[&str]) -> Value {
-    let mut schema = json!({ "type": "object", "additionalProperties": false, "properties": properties });
+    let mut schema =
+        json!({ "type": "object", "additionalProperties": false, "properties": properties });
     if !required.is_empty() {
         schema
             .as_object_mut()

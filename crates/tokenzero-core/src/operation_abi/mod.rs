@@ -37,7 +37,7 @@ pub use types::{
     ABI_DEFAULT_SHELL_TIMEOUT_SECS, ABI_HARD_MAX_WALL_MS, CancellationSemantics,
     CapabilityRequirement, CostClass, DomainError, DomainErrorKind, DomainResult, MigrationStatus,
     Mutability, Operation, OperationArgs, OperationId, OperationResults, RefOwnership,
-    SurfaceExposure, SEMANTIC_CONTRACT_VERSION,
+    SEMANTIC_CONTRACT_VERSION, SurfaceExposure,
 };
 pub use vectors::{GoldenVector, golden_vectors};
 

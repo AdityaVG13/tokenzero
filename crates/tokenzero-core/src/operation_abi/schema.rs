@@ -8,9 +8,8 @@
 use serde_json::Value;
 
 pub use zero_abi::schema::{
-    canonical_json, canonical_schema_json, normalize_schema, schema_diff,
-    schema_fingerprint_hex, schema_property_keys, schema_required_keys,
-    schemas_structurally_equal,
+    canonical_json, canonical_schema_json, normalize_schema, schema_diff, schema_fingerprint_hex,
+    schema_property_keys, schema_required_keys, schemas_structurally_equal,
 };
 
 /// Assert full I/O schema parity between a surface tool and a registry op.

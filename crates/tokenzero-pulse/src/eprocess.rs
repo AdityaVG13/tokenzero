@@ -85,10 +85,13 @@ impl AnytimeFailureMonitor {
 
     /// Consume aggregated Bernoulli outcomes without expanding token-level streams.
     pub fn observe_counts(&mut self, failures: u64, successes: u64) -> EProcessSnapshot {
-        self.events = self.events.saturating_add(failures).saturating_add(successes);
+        self.events = self
+            .events
+            .saturating_add(failures)
+            .saturating_add(successes);
         self.failures = self.failures.saturating_add(failures);
-        self.log_e_value += failures as f64
-            * (self.alternative_failure_rate / self.null_failure_rate).ln();
+        self.log_e_value +=
+            failures as f64 * (self.alternative_failure_rate / self.null_failure_rate).ln();
         self.log_e_value += successes as f64
             * ((1.0 - self.alternative_failure_rate) / (1.0 - self.null_failure_rate)).ln();
         if self.crossing_event.is_none() && self.log_e_value >= (1.0 / self.alpha).ln() {
@@ -162,8 +165,8 @@ mod tests {
                 monitor.observe(&event(failed));
             }
             if monitor.snapshot().tripped {
-                crossing_probability += null_rate.powi(failures)
-                    * (1.0 - null_rate).powi(horizon - failures);
+                crossing_probability +=
+                    null_rate.powi(failures) * (1.0 - null_rate).powi(horizon - failures);
             }
         }
 
