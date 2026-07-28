@@ -1,0 +1,25 @@
+[EC] Pr[S1=S2] enumerated over theta x theta at the vertex = 7/25 = p_c = 7/25  PASS
+[EC] r_A(Q) = dim pi_Q(span 1^4) = 1 for all 15 nonempty Q subseteq [4]  PASS
+[EC] parity fiber collapse: x_j = parity + sum_{i != j} x_i  verified on all 16 x in {0,1}^4, all j  PASS
+
+[EC] n=4 theta table (grid + named points):
+  theta                  p_c          Fable (M,D,L)  E[#exp]  r_A   Kimi (M,D,L)
+  uniform                1/4 (35/4, 0, 41/8)       7/4    1 (8, 0, 4)
+  down vertex           7/25 (218/25, 0, 127/25)     43/25    1 (8, 0, 4)
+  (1/2,1/6,1/6,1/6)      1/3 (26/3, 0, 5)       5/3    1 (8, 0, 4)
+  (3/8,3/8,1/8,1/8)     5/16 (139/16, 0, 161/32)     27/16    1 (8, 0, 4)
+  (1/2,1/4,1/8,1/8)    11/32 (277/32, 0, 319/64)     53/32    1 (8, 0, 4)
+  (7/10,1/10,1/10,1/10)   13/25 (212/25, 0, 118/25)     37/25    1 (8, 0, 4)
+[EC] 6 distinct p_c values on 6 thetas: p_c VARIES; r_A and the
+     Kimi ledger are theta-INDEPENDENT (constant rows above)  PASS
+
+[EC] permutation witness: distinct thetas, equal p_c => equal Fable ledgers;
+     Fable's ledger is theta-affine (through p_c), Kimi's is theta-free  PASS
+[EC] affine slopes dM/dp_c = -1, dL/dp_c = -3/2 (nonzero => nonconstant)  PASS
+
+M6 RESULT: both quantities measure demand overlap, but in different categories:
+  p_c = Pr[S1=S2] is PROBABILISTIC (Renyi-2 collision mass), varies with theta;
+  r_A = 1 is ALGEBRAIC (parity-fiber collapse), theta-independent.
+Hence Fable ledgers are theta-affine, Kimi ledgers theta-free; no
+gauge-respecting reparameterization can identify a nonconstant affine law
+with a constant one.  This is the structural root of non-reducibility.

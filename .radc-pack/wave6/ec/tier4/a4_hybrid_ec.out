@@ -1,0 +1,39 @@
+== (1) Grok chord theorem rho_exp=1: hybrid rate >= f(D) on grid ==
+min [R_hybrid - f(D)] = 0.001779 >= 0   [W6-GROK-AG-HYBRID-TV confirmed]
+point certificate: H2(1/4) = 0.811278 > 1/2
+== (2) sharp threshold rho*(D) = 1 + log2(1-D) ==
+sup Phi == 1+log2(1-D): max |err| = 1.38e-07; above/below-threshold behavior certified on grid
+== (3) rho_exp=0 collapse: optimal hybrid rate = 0 ==
+D=0.05: coin-flip hybrid rate R=0.0 vs R_ag=f(D)=0.713603
+D=0.2: coin-flip hybrid rate R=0.0 vs R_ag=f(D)=0.278072
+D=0.4: coin-flip hybrid rate R=0.0 vs R_ag=f(D)=0.029049
+D=0.499: coin-flip hybrid rate R=0.0 vs R_ag=f(D)=0.000003
+== (4) closed-form optimal hybrid for 0 <= rho <= rho*(D) ==
+D=0.1: rho*(D)=0.847997; closed form R_opt(D;rho)=rho-D*log2((1-D0*)/D0*), D0*=1-2^(rho-1) matches grid (1e-4)
+D=0.25: rho*(D)=0.584963; closed form R_opt(D;rho)=rho-D*log2((1-D0*)/D0*), D0*=1-2^(rho-1) matches grid (1e-4)
+D=0.4: rho*(D)=0.263034; closed form R_opt(D;rho)=rho-D*log2((1-D0*)/D0*), D0*=1-2^(rho-1) matches grid (1e-4)
+== (5) ledger Model H: coin-flip hybrid vs recovery-aware soft, (h,q,c)=(1,0,1) ==
+Ddagger solving H2(D)=2D(1+s)=6D: 0.041587
+D=0.01: dM(CF-RA)=+0.020793 dL(CF-RA)=+0.020793  -> RA dominates CF
+D=0.02: dM(CF-RA)=+0.021441 dL(CF-RA)=+0.021441  -> RA dominates CF
+D=0.1: dM(CF-RA)=-0.131004 dL(CF-RA)=-0.131004  -> CF dominates RA
+D=0.2: dM(CF-RA)=-0.478072 dL(CF-RA)=-0.478072  -> CF dominates RA
+D=0.35: dM(CF-RA)=-1.165932 dL(CF-RA)=-1.165932  -> CF dominates RA
+== (6) corridor-endpoint fragment: uniform theta, RA at D* vs CF ==
+n=2 s=0.5: D*=0.110028  H2(D*)=0.500000  2*min(1+s,1+2h+q)*D*=0.330084  -> split margins (incomparable)
+n=4 s=0.5: D*=0.264413  H2(D*)=0.833333  2*min(1+s,1+2h+q)*D*=0.793240  -> split margins (incomparable)
+n=4 s=1.0: D*=0.173952  H2(D*)=0.666667  2*min(1+s,1+2h+q)*D*=0.695809  -> CF dominates RA at D*
+n=4 s=2.0: D*=0.061490  H2(D*)=0.333333  2*min(1+s,1+2h+q)*D*=0.368943  -> CF dominates RA at D*
+n=4 s=2.5: D*=0.024623  H2(D*)=0.166667  2*min(1+s,1+2h+q)*D*=0.147741  -> split margins (incomparable)
+n=8 s=0.5: D*=0.343975  H2(D*)=0.928571  2*min(1+s,1+2h+q)*D*=1.031924  -> CF dominates RA at D*
+n=8 s=1.0: D*=0.281246  H2(D*)=0.857143  2*min(1+s,1+2h+q)*D*=1.124984  -> CF dominates RA at D*
+n=8 s=2.0: D*=0.196211  H2(D*)=0.714286  2*min(1+s,1+2h+q)*D*=1.177268  -> CF dominates RA at D*
+n=8 s=2.5: D*=0.163602  H2(D*)=0.642857  2*min(1+s,1+2h+q)*D*=0.981611  -> CF dominates RA at D*
+== (7) full hybrid frontier scan, n=4 uniform, (h,q,c)=(1,0,1): does ANY hybrid dominate RA? ==
+D=0.02: RA (M=4.8586,L=3.8586); exists hybrid dominating RA on (M,L): False
+D=0.05: RA (M=4.7136,L=3.7136); exists hybrid dominating RA on (M,L): True
+D=0.1: RA (M=4.5310,L=3.5310); exists hybrid dominating RA on (M,L): True
+D=0.2: RA (M=4.2781,L=3.2781); exists hybrid dominating RA on (M,L): True
+D=0.3: RA (M=4.1187,L=3.1187); exists hybrid dominating RA on (M,L): True
+D=0.45: RA (M=4.0072,L=3.0072); exists hybrid dominating RA on (M,L): True
+PASS a4: hybrid audit + threshold theorem

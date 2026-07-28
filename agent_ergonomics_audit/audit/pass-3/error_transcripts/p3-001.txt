@@ -1,0 +1,59 @@
+$ tokenzero read --jsno README.md
+exit=0
+--- stdout ---
+{
+  "schema_version": "tokenzero.cli.v1",
+  "status": "ok",
+  "tool": "read",
+  "ack": "0",
+  "detail_ref": "tz://blob/32673d5148e7112b62ea81e755933f742e313fcd2f1fddec9917f53d89be23ed",
+  "mode": "auto",
+  "visible": {
+    "kind": "capsule",
+    "text": "unchanged: tz://file/f69c5b3673df15362 (served earlier this session)\n# README.md — 502 lines, 6720 tokens; full bytes: expand tz://blob/32673d5148e7112b62ea81e755933f742e313fcd2f1fddec9917f53d89be23ed"
+  },
+  "refs": [
+    {
+      "kind": "blob",
+      "ref": "tz://blob/32673d5148e7112b62ea81e755933f742e313fcd2f1fddec9917f53d89be23ed",
+      "bytes": 23275,
+      "live": true
+    },
+    {
+      "kind": "file",
+      "ref": "tz://file/f69c5b3673df15362",
+      "bytes": 23275,
+      "live": true
+    }
+  ],
+  "accounting": {
+    "raw_tokens": 6720,
+    "visible_tokens": 37,
+    "recovery_tokens": 0,
+    "billed_tokens": 37,
+    "cached_tokens": 0,
+    "exact_ref_tokens": 14
+  },
+  "content_type": "markdown",
+  "telemetry": {
+    "cache_hit": true,
+    "dedup": {
+      "cross_session_bytes_saved": 1073,
+      "cross_session_hits": 1,
+      "hits": 1,
+      "serve_count": 5,
+      "visible_tokens_saved": 414
+    },
+    "output_strategy": "seen_set_dedup",
+    "session_delta": {
+      "delta_bytes": 202,
+      "from_hwm": 121,
+      "full_bytes": 1275,
+      "saved_bytes": 1073,
+      "to_hwm": 122
+    }
+  }
+}
+
+--- stderr ---
+

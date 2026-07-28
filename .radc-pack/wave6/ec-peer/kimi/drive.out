@@ -1,0 +1,165 @@
+=== RADC Wave-5 exact certificate run ===
+harness: g++ -O2 w5dp.cpp (C++ __int128/long long exact integers) + Python Fraction driver
+cross-check: independent pure-Python Fraction DP (py_dp)
+
+--- A1. split-comparison count ---
+Q4 run split comparisons: 21457825  (closed form sum_{k=2}^16 C(16,k)(2^(k-1)-1) = 21457825)  PASS
+--- A2. Wave-4 envelope reproduction (leaf1, c=2, a=2) ---
+[Theta4cap] theta=(1/5,1/5,3/10,3/10)  W=10
+  supported pairs (D=2^n*l, E=W*2^n*e): got [(0, 80), (16, 48), (32, 28), (64, 0)]
+    claimed [(0, 80), (16, 48), (32, 28), (64, 0)]  ->  PASS
+  breakpoints: got ['10', '16', '160/7']
+    claimed ['10', '16', '160/7']  ->  PASS
+  policy lines: 2+2*0 + t*1/2; 2+2*1 + t*3/10; 2+2*2 + t*7/40; 2+2*4 + t*0
+  envelope completeness @ t=10: DP=7 line0=7 line1=7  PASS
+  envelope completeness @ t=16: DP=44/5 line1=44/5 line2=44/5  PASS
+  envelope completeness @ t=160/7: DP=10 line2=10 line3=10  PASS
+  F(10) = 7  (claimed 7)  PASS
+  F(16) = 44/5  (claimed 44/5)  PASS
+  F(40/3) = 8  (claimed 8)  PASS
+  F(120/7) = 9  (claimed 9)  PASS
+  F(160/7) = 10  (claimed 10)  PASS
+  F(40) = 10  (claimed 10)  PASS
+  DP oracle evaluations for discovery: 7
+
+[Theta4down] theta=(2/5,1/5,1/5,1/5)  W=5
+  supported pairs (D=2^n*l, E=W*2^n*e): got [(0, 40), (16, 22), (32, 12), (64, 0)]
+    claimed [(0, 40), (16, 22), (32, 12), (64, 0)]  ->  PASS
+  breakpoints: got ['80/9', '16', '80/3']
+    claimed ['80/9', '16', '80/3']  ->  PASS
+  policy lines: 2+2*0 + t*1/2; 2+2*1 + t*11/40; 2+2*2 + t*3/20; 2+2*4 + t*0
+  envelope completeness @ t=80/9: DP=58/9 line0=58/9 line1=58/9  PASS
+  envelope completeness @ t=16: DP=42/5 line1=42/5 line2=42/5  PASS
+  envelope completeness @ t=80/3: DP=10 line2=10 line3=10  PASS
+  F(40) = 10  (claimed 10)  PASS
+  DP oracle evaluations for discovery: 7
+
+[Q4unif] theta=(1/4,1/4,1/4,1/4)  W=4
+  supported pairs (D=2^n*l, E=W*2^n*e): got [(0, 32), (16, 20), (32, 12), (42, 8), (64, 0)]
+    claimed [(0, 32), (16, 20), (32, 12), (42, 8), (64, 0)]  ->  PASS
+  breakpoints: got ['32/3', '16', '20', '22']
+    claimed ['32/3', '16', '20', '22']  ->  PASS
+  policy lines: 2+2*0 + t*1/2; 2+2*1 + t*5/16; 2+2*2 + t*3/16; 2+2*21/8 + t*1/8; 2+2*4 + t*0
+  variable-length code certified: D=42 -> ell=21/8 (not a multiple of 2^4, hence NOT fixed-depth)  PASS
+  envelope completeness @ t=32/3: DP=22/3 line0=22/3 line1=22/3  PASS
+  envelope completeness @ t=16: DP=9 line1=9 line2=9  PASS
+  envelope completeness @ t=20: DP=39/4 line2=39/4 line3=39/4  PASS
+  envelope completeness @ t=22: DP=10 line3=10 line4=10  PASS
+  F(20) = 39/4  (claimed 39/4)  PASS
+  F(40) = 10  (claimed 10)  PASS
+  DP oracle evaluations for discovery: 9
+
+[Theta3down] theta=(7/15,4/15,4/15)  W=15
+  supported pairs (D=2^n*l, E=W*2^n*e): got [(0, 60), (8, 30), (15, 16), (24, 0)]
+    claimed [(0, 60), (8, 30), (15, 16), (24, 0)]  ->  PASS
+  breakpoints: got ['8', '15', '135/8']
+    claimed ['8', '15', '135/8']  ->  PASS
+  policy lines: 2+2*0 + t*1/2; 2+2*1 + t*1/4; 2+2*15/8 + t*2/15; 2+2*3 + t*0
+  variable-length code certified: D=15 -> ell=15/8 (not a multiple of 2^3, hence NOT fixed-depth)  PASS
+  envelope completeness @ t=8: DP=6 line0=6 line1=6  PASS
+  envelope completeness @ t=15: DP=31/4 line1=31/4 line2=31/4  PASS
+  envelope completeness @ t=135/8: DP=8 line2=8 line3=8  PASS
+  F(40) = 8  (claimed 8)  PASS
+  DP oracle evaluations for discovery: 7
+
+A2 subtotal: PASS=33 FAIL=0
+
+--- A3. e_anti(n) = sum_k C(n-1,k) min{4k,5n-4k} / (5n*2^(n-1)) ---
+  n= 3: e_anti = 1/4 = 0.250000   table 1/4  PASS
+  n= 4: e_anti = 11/40 = 0.275000   table 11/40  PASS
+  n= 5: e_anti = 121/400 = 0.302500   table 121/400  PASS
+  n= 6: e_anti = 5/16 = 0.312500   table 5/16  PASS
+  n= 7: e_anti = 145/448 = 0.323661   table 145/448  PASS
+  n= 8: e_anti = 43/128 = 0.335938   table 43/128  PASS
+  n= 9: e_anti = 781/2304 = 0.338976
+  n=10: e_anti = 2213/6400 = 0.345781
+  n=11: e_anti = 247/704 = 0.350852
+  n=12: e_anti = 453/1280 = 0.353906
+  n=13: e_anti = 95467/266240 = 0.358575
+  n=14: e_anti = 103463/286720 = 0.360850
+  n=15: e_anti = 148887/409600 = 0.363494
+  n=16: e_anti = 24045/65536 = 0.366898
+  n=17: e_anti = 409909/1114112 = 0.367924
+  n=18: e_anti = 1091567/2949120 = 0.370133
+  n=19: e_anti = 2315813/6225920 = 0.371963
+  n=20: e_anti = 1222699/3276800 = 0.373138
+A3 subtotal: PASS=6 FAIL=0
+
+--- A4/A5. one-bit two-prototype enumeration at Theta_n down heavy vertex ---
+  n=3 Nstrict=28 Nmulti=36 Emin=30 Eanti=30 EminDiag=60 cntMin=4 cntAntipodalType=4 cntNonComplementTie=0 (0,7)
+  A5 n=3: e_min=1/4  e_anti=1/4  -> ANTIPODAL EXACT OPTIMUM; argmins: total=4, complement-pair type={p,~p}=4, NON-complement-symmetric ties=0; counts OK; table PASS
+  n=4 Nstrict=120 Nmulti=136 Emin=88 Eanti=88 EminDiag=160 cntMin=8 cntAntipodalType=8 cntNonComplementTie=0 (0,15)
+  A5 n=4: e_min=11/40  e_anti=11/40  -> ANTIPODAL EXACT OPTIMUM; argmins: total=8, complement-pair type={p,~p}=8, NON-complement-symmetric ties=0; counts OK; table PASS
+  n=5 Nstrict=496 Nmulti=528 Emin=242 Eanti=242 EminDiag=400 cntMin=16 cntAntipodalType=16 cntNonComplementTie=0 (0,31)
+  A4 (Q5): C(32,2)=496 strict codebooks; antipodal E=242 at scale 32*25=800; Emin=242  PASS
+  A5 n=5: e_min=121/400  e_anti=121/400  -> ANTIPODAL EXACT OPTIMUM; argmins: total=16, complement-pair type={p,~p}=16, NON-complement-symmetric ties=0; counts OK; table PASS
+  n=6 Nstrict=2016 Nmulti=2080 Emin=600 Eanti=600 EminDiag=960 cntMin=32 cntAntipodalType=32 cntNonComplementTie=0 (0,63)
+  A5 n=6: e_min=5/16  e_anti=5/16  -> ANTIPODAL EXACT OPTIMUM; argmins: total=32, complement-pair type={p,~p}=32, NON-complement-symmetric ties=0; counts OK; table PASS
+  n=7 Nstrict=8128 Nmulti=8256 Emin=1450 Eanti=1450 EminDiag=2240 cntMin=64 cntAntipodalType=64 cntNonComplementTie=0 (0,127)
+  A5 n=7: e_min=145/448  e_anti=145/448  -> ANTIPODAL EXACT OPTIMUM; argmins: total=64, complement-pair type={p,~p}=64, NON-complement-symmetric ties=0; counts OK; table PASS
+  n=8 Nstrict=32640 Nmulti=32896 Emin=3440 Eanti=3440 EminDiag=5120 cntMin=1024 cntAntipodalType=128 cntNonComplementTie=896 (0,127) (0,191) (0,223) (0,239) (0,247) (0,251) (0,253) (1,126)
+  A5 n=8: e_min=43/128  e_anti=43/128  -> ANTIPODAL EXACT OPTIMUM; argmins: total=1024, complement-pair type={p,~p}=128, NON-complement-symmetric ties=896; counts OK; table PASS
+A4/A5 subtotal: PASS=19 FAIL=0
+
+--- A6. Psi_down_{4,40} > 8 certificate ---
+  257*17^3 = 1262641  vs  2^21 = 2097152: 1262641 < 2097152  PASS
+
+--- Cross-check: py_dp (independent Python Fractions) vs C++ w5dp ---
+  Theta3down t=0: py F=2  C++ F=2  splits py=3025 C++=3025  PASS
+  Theta3down t=8: py F=6  C++ F=6  splits py=3025 C++=3025  PASS
+  Theta3down t=15: py F=31/4  C++ F=31/4  splits py=3025 C++=3025  PASS
+  Theta3down t=135/8: py F=8  C++ F=8  splits py=3025 C++=3025  PASS
+  Theta3down t=40: py F=8  C++ F=8  splits py=3025 C++=3025  PASS
+  Theta3down t=1/10: py F=41/20  C++ F=41/20  splits py=3025 C++=3025  PASS
+  Theta3down t=12: py F=7  C++ F=7  splits py=3025 C++=3025  PASS
+  Theta3down t=100: py F=8  C++ F=8  splits py=3025 C++=3025  PASS
+  Theta4cap t=40/3: py G*3=288 F=8  C++ F=8 (claimed 8, scaled G=288)  splits py=21457825 C++=21457825  PASS
+  two-demand Theta4down t=40: py F2_batch=10  C++ F2_batch=10  splits py=21457825 C++=21457825  PASS
+Cross-check subtotal: PASS=10 FAIL=0
+
+--- B7. two-demand BATCH floor F2_batch (c=2, a=2) ---
+[F2batch@Theta4down] theta=(2/5,1/5,1/5,1/5)  W=5, e2 denominator 25
+  supported pairs (D=16*ell, E=25*16*e2): [(0, 272), (16, 182), (32, 108), (64, 0)]
+    ell=0  e2=17/25   line: 2 + t*17/25
+    ell=1  e2=91/200   line: 4 + t*91/200
+    ell=2  e2=27/100   line: 6 + t*27/100
+    ell=4  e2=0   line: 10 + t*0
+  breakpoints: ['80/9', '400/37', '400/27']
+  F2_batch(40) = 10  (active line ell=4, e2=0; t=40 in (400/27, inf))  PASS
+  discovery evals: 7
+
+[F2batch@Theta4cap] theta=(1/5,1/5,3/10,3/10)  W=10, e2 denominator 100
+  supported pairs (D=16*ell, E=100*16*e2): [(0, 1096), (16, 776), (32, 492), (64, 0)]
+    ell=0  e2=137/200   line: 2 + t*137/200
+    ell=1  e2=97/200   line: 4 + t*97/200
+    ell=2  e2=123/400   line: 6 + t*123/400
+    ell=4  e2=0   line: 10 + t*0
+  breakpoints: ['10', '800/71', '1600/123']
+  F2_batch(40) = 10  (active line ell=4, e2=0; t=40 in (1600/123, inf))  PASS
+  discovery evals: 7
+
+--- B8. two-demand SEQUENTIAL floors at Theta4down: G2 (c=3,a=3), H2 (c=2,a=2) ---
+[G2@Theta4down] line 3+3*ell+t*e2
+  supported pairs (D=16*ell, E=25*16*e2): [(0, 272), (16, 182), (32, 108), (64, 0)]
+    ell=0  e2=17/25   line: 3 + t*17/25
+    ell=1  e2=91/200   line: 6 + t*91/200
+    ell=2  e2=27/100   line: 9 + t*27/100
+    ell=4  e2=0   line: 15 + t*0
+  breakpoints: ['40/3', '600/37', '200/9']
+  G2(40) = 15  (active line ell=4, e2=0; t=40 in (200/9, inf))  PASS
+[H2@Theta4down] line 2+2*ell+t*e2  (identical DP weighting as F2_batch@Theta4down)
+  supported pairs: [(0, 272), (16, 182), (32, 108), (64, 0)]
+  breakpoints: ['80/9', '400/37', '400/27']
+  H2(40) = 10  (active line ell=4, e2=0; t=40 in (400/27, inf))  PASS
+
+--- B9. frontier summary around t=40 ---
+  F2batch@Theta4down: value(40)=10; supported (D,E)=[(0, 272), (16, 182), (32, 108), (64, 0)]; breakpoints around 40: [400/27, +inf]; all bps=['80/9', '400/37', '400/27']
+  F2batch@Theta4cap: value(40)=10; supported (D,E)=[(0, 1096), (16, 776), (32, 492), (64, 0)]; breakpoints around 40: [1600/123, +inf]; all bps=['10', '800/71', '1600/123']
+  G2@Theta4down: value(40)=15; supported (D,E)=[(0, 272), (16, 182), (32, 108), (64, 0)]; breakpoints around 40: [200/9, +inf]; all bps=['40/3', '600/37', '200/9']
+B subtotal: PASS=4 FAIL=0
+
+=== RUN COMPLETE ===
+
+real	0m5.646s
+user	0m5.109s
+sys	0m0.333s

@@ -1,0 +1,10 @@
+EPIC [gauntlet]: clippy -D warnings fails tokenzero-core operation_abi (too_many_arguments ×5)
+
+pillar:conformance severity:P0 external-tool-oracle
+hypothesis: registry helpers classic/binding/binding_ex exceed clippy::too_many_arguments (7); blocks -D warnings CI gate.
+expected_signal: cargo clippy -p tokenzero-core --lib -- -D warnings exits 0 after packing params into structs.
+one_line_invocation: cargo clippy -p tokenzero-core --lib -- -D warnings
+falsifiability: still fails after struct-pack OR allows-without-justification.
+closure_predicate: Retry when clippy -D warnings green on core without allow(too_many_arguments) blanket.
+evidence: F-003,CC1-R4-004,CC4-R8-001,R5-CC3-001 remediation sketch
+oracle_sample: implementer/oracle_sample/cargo_clippy_core.txt

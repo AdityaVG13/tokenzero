@@ -1,0 +1,16 @@
+codemode policy: replace lexical keyword guards with canonical dispatch authorization
+
+DEFECT
+CodeMode mutation denial and machine-permit classification inspect source strings. That both false-positives on harmless literals and can be bypassed or downgraded through aliases, computed properties, or obfuscation.
+
+SCOPE
+Resolve the canonical operation first, then enforce effect metadata and permit/approval policy immediately before dispatch. Source scanning remains advisory diagnostics only. Apply the same path to direct, aliased, computed, lowered, and raw-worker calls.
+
+NON-GOALS
+No new user permission model.
+
+## Steps to Reproduce
+Call the same mutating or permit-bound operation through direct, aliased, computed-property, and obfuscated spellings; compare authorization and permit class. Also place blocked keywords inside harmless string literals.
+
+## Acceptance Criteria
+Alias/computed/obfuscated adversarial corpus cannot bypass mutation denial or downgrade permits; harmless keyword strings no longer fail; unknown/missing effect metadata fails closed; canonical dispatch is the single authorization boundary across standalone CodeMode and raw worker.

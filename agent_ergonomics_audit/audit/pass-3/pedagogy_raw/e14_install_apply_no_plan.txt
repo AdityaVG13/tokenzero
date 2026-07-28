@@ -1,0 +1,42 @@
+$ tokenzero install --apply
+exit=0
+---stdout---
+{
+  "dry_run": false,
+  "rollback": {
+    "available": true,
+    "id": "rollback-1785193839",
+    "manifest_path": "/Users/aditya/AI/TokenZero/.tokenzero/install/rollback-1785193839.json"
+  },
+  "schema_version": "tokenzero.install_plan.v1",
+  "status": "ok",
+  "verification": [
+    {
+      "byte_count": 841,
+      "observed_sha256": "1401c61fa6bfcee81ed9ec45ca4acb4669d4b26290753374e93a16fe378f2bf4",
+      "path": "/Users/aditya/AI/TokenZero/.tokenzero/mcp-server.json",
+      "verified": true
+    },
+    {
+      "byte_count": 180,
+      "observed_sha256": "b87f768f670c2c19dde3e96eb4c76fe136862ebb186ca850f13c988bc08ccc89",
+      "path": "/Users/aditya/AI/TokenZero/AGENTS.md",
+      "verified": true
+    },
+    {
+      "byte_count": 64,
+      "observed_sha256": "5e93c02779fdd232252837049ba44a7f4cd4d8864d58101417dbc230a6c023e1",
+      "path": "/Users/aditya/AI/TokenZero/.tokenzero/bin/tokenzero-shell",
+      "verified": true
+    }
+  ],
+  "written": [
+    "/Users/aditya/AI/TokenZero/.tokenzero/mcp-server.json",
+    "/Users/aditya/AI/TokenZero/AGENTS.md",
+    "/Users/aditya/AI/TokenZero/.tokenzero/bin/tokenzero-shell",
+    "/Users/aditya/AI/TokenZero/.tokenzero/install/rollback-1785193839.json"
+  ]
+}
+
+---stderr---
+

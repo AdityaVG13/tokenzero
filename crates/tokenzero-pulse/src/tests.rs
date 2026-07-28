@@ -885,11 +885,9 @@ fn session_ledger_is_keyed_by_session_and_tokenizer_id() {
         "first event keeps the full two-turn horizon"
     );
     assert_eq!(estimator_entry.visible_token_turns, 20);
-    assert!(
-        PulseEvent::tool_call("read", "raw", 1, 1, 0, 0, 0, None)
-            .with_tokenizer_id("cl100k-estimate")
-            .is_err()
-    );
+    assert!(PulseEvent::tool_call("read", "raw", 1, 1, 0, 0, 0, None)
+        .with_tokenizer_id("cl100k-estimate")
+        .is_err());
 }
 
 #[test]

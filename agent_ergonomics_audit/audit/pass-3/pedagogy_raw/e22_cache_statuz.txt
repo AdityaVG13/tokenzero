@@ -1,0 +1,25 @@
+$ tokenzero cache statuz --json
+exit=0
+---stdout---
+{
+  "schema_version": "tokenzero.cli.v1",
+  "status": "ok",
+  "tool": "mem",
+  "ack": "0",
+  "mode": "hybrid",
+  "visible": {
+    "kind": "capsule",
+    "text": "{\n  \"approx_bytes\": 151799,\n  \"blobs\": 14,\n  \"files\": 40,\n  \"max_blobs\": 128,\n  \"max_bytes\": 8000000,\n  \"max_files\": 256,\n  \"max_search_hits\": 1024,\n  \"max_units\": 2048,\n  \"persistence_path\": \"/Users/aditya/.tokenzero/recovery-cache.json\",\n  \"persistent\": true,\n  \"recovery_count\": 0,\n  \"recovery_tokens\": 0,\n  \"schema_version\": \"tokenzero.recovery.v1\",\n  \"search_hits\": 58,\n  \"session_dedup\": {\n    \"dedup_hits\": 74,\n    \"delta_bytes\": 63381,\n    \"diff_hits\": 0,\n    \"diff_tokens_saved\": 0,\n    \"full_bytes\": 206668,\n    \"records\": 11,\n    \"session_hwm\": 127,\n    \"visible_tokens_saved\": 40893\n  },\n  \"units\": 336\n}"
+  },
+  "accounting": {
+    "raw_tokens": 165,
+    "visible_tokens": 165,
+    "recovery_tokens": 0,
+    "billed_tokens": 165,
+    "cached_tokens": 0,
+    "exact_ref_tokens": 0
+  }
+}
+
+---stderr---
+

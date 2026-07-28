@@ -1,0 +1,183 @@
+$ tokenzero grep TokenZero README.md --json
+exit=0
+--- stdout ---
+{
+  "schema_version": "tokenzero.cli.v1",
+  "status": "ok",
+  "tool": "grep",
+  "ack": "0",
+  "detail_ref": "tz://blob/19e72c2085e10c0d6f4299afc404dee900b69c48349e05abc7219d87d740dc37",
+  "mode": "auto",
+  "visible": {
+    "kind": "capsule",
+    "text": "unchanged: tz://file/fc5fa17918517b69e (served earlier this session)\n# grep TokenZero — 18 matches, 428 tokens; full results: expand tz://blob/19e72c2085e10c0d6f4299afc404dee900b69c48349e05abc7219d87d740dc37"
+  },
+  "refs": [
+    {
+      "kind": "blob",
+      "ref": "tz://blob/19e72c2085e10c0d6f4299afc404dee900b69c48349e05abc7219d87d740dc37",
+      "bytes": 1656,
+      "live": true
+    },
+    {
+      "kind": "file",
+      "ref": "tz://file/fc5fa17918517b69e",
+      "bytes": 1656,
+      "live": true
+    },
+    {
+      "kind": "search",
+      "ref": "tz://search/h3dfeaed5ad40e300",
+      "bytes": 0,
+      "live": true
+    },
+    {
+      "kind": "search",
+      "ref": "tz://search/hc252a2e7c3b64121",
+      "bytes": 0,
+      "live": true
+    },
+    {
+      "kind": "search",
+      "ref": "tz://search/h1ea2670a7817efd5",
+      "bytes": 0,
+      "live": true
+    },
+    {
+      "kind": "search",
+      "ref": "tz://search/h904ecacb39db7644",
+      "bytes": 0,
+      "live": true
+    },
+    {
+      "kind": "search",
+      "ref": "tz://search/h5521af6a08a4dc79",
+      "bytes": 0,
+      "live": true
+    },
+    {
+      "kind": "search",
+      "ref": "tz://search/h52aa19ab64e0020a",
+      "bytes": 0,
+      "live": true
+    },
+    {
+      "kind": "search",
+      "ref": "tz://search/he0016e9a740ae42b",
+      "bytes": 0,
+      "live": true
+    },
+    {
+      "kind": "search",
+      "ref": "tz://search/h834ace3358301192",
+      "bytes": 0,
+      "live": true
+    },
+    {
+      "kind": "search",
+      "ref": "tz://search/h3a7ac78e2c4fa324",
+      "bytes": 0,
+      "live": true
+    },
+    {
+      "kind": "search",
+      "ref": "tz://search/ha5cb7efd56dada2e",
+      "bytes": 0,
+      "live": true
+    },
+    {
+      "kind": "search",
+      "ref": "tz://search/h826afaefd61f548c",
+      "bytes": 0,
+      "live": true
+    },
+    {
+      "kind": "search",
+      "ref": "tz://search/hbfe3c5cc5c05948b",
+      "bytes": 0,
+      "live": true
+    },
+    {
+      "kind": "search",
+      "ref": "tz://search/h84ec996c136bb53f",
+      "bytes": 0,
+      "live": true
+    },
+    {
+      "kind": "search",
+      "ref": "tz://search/h86b5a11710c12d1b",
+      "bytes": 0,
+      "live": true
+    },
+    {
+      "kind": "search",
+      "ref": "tz://search/he07130baaea83db6",
+      "bytes": 0,
+      "live": true
+    },
+    {
+      "kind": "search",
+      "ref": "tz://search/h0947b6320425c1fd",
+      "bytes": 0,
+      "live": true
+    },
+    {
+      "kind": "search",
+      "ref": "tz://search/h473699fdd384eac2",
+      "bytes": 0,
+      "live": true
+    },
+    {
+      "kind": "search",
+      "ref": "tz://search/h40466902634ec146",
+      "bytes": 0,
+      "live": true
+    }
+  ],
+  "accounting": {
+    "raw_tokens": 428,
+    "visible_tokens": 36,
+    "recovery_tokens": 0,
+    "billed_tokens": 36,
+    "cached_tokens": 0,
+    "exact_ref_tokens": 140
+  },
+  "content_type": "search_result",
+  "telemetry": {
+    "cache_hit": true,
+    "dedup": {
+      "cross_session_bytes_saved": 1367,
+      "cross_session_hits": 1,
+      "hits": 1,
+      "serve_count": 2,
+      "visible_tokens_saved": 333
+    },
+    "degraded": false,
+    "exact_refs_available": true,
+    "matched_files": 1,
+    "matches": 18,
+    "output_strategy": "seen_set_dedup",
+    "query": "TokenZero",
+    "result_limit": 20,
+    "roots": [
+      "README.md"
+    ],
+    "search_backend": "rg",
+    "session_delta": {
+      "delta_bytes": 209,
+      "from_hwm": 126,
+      "full_bytes": 1576,
+      "saved_bytes": 1367,
+      "to_hwm": 127
+    },
+    "storage_error": null,
+    "transport_status": "ok",
+    "truncated_by_results": false,
+    "truncated_by_visit": false,
+    "visit_limit": 10000,
+    "visited_files": 1
+  }
+}
+
+--- stderr ---
+

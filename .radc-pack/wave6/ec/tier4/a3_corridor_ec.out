@@ -1,0 +1,18 @@
+theta=unif4 s=0.5: D*=0.264413, unique root, gamma_L>0 below D*, gamma_M chain ok
+theta=unif4 s=1.0: D*=0.173952, unique root, gamma_L>0 below D*, gamma_M chain ok
+theta=unif4 s=2.0: D*=0.061490, unique root, gamma_L>0 below D*, gamma_M chain ok
+theta=skew s=0.5: D*=0.249364, unique root, gamma_L>0 below D*, gamma_M chain ok
+theta=skew s=1.0: D*=0.158214, unique root, gamma_L>0 below D*, gamma_M chain ok
+theta=skew s=2.0: D*=0.052530, unique root, gamma_L>0 below D*, gamma_M chain ok
+theta=mid s=0.5: D*=0.259088, unique root, gamma_L>0 below D*, gamma_M chain ok
+theta=mid s=1.0: D*=0.167957, unique root, gamma_L>0 below D*, gamma_M chain ok
+theta=mid s=2.0: D*=0.057336, unique root, gamma_L>0 below D*, gamma_M chain ok
+n=2 s=0.25: D*=0.214502 == H2^-1(1-s/(n-1))=0.214502  [uniform endpoint]
+n=2 s=0.5: D*=0.110028 == H2^-1(1-s/(n-1))=0.110028  [uniform endpoint]
+n=4 s=0.25: D*=0.331713 == H2^-1(1-s/(n-1))=0.331713  [uniform endpoint]
+n=4 s=1.0: D*=0.173952 == H2^-1(1-s/(n-1))=0.173952  [uniform endpoint]
+n=4 s=2.5: D*=0.024623 == H2^-1(1-s/(n-1))=0.024623  [uniform endpoint]
+n=8 s=0.25: D*=0.389207 == H2^-1(1-s/(n-1))=0.389207  [uniform endpoint]
+n=8 s=1.0: D*=0.281246 == H2^-1(1-s/(n-1))=0.281246  [uniform endpoint]
+n=8 s=6.5: D*=0.008610 == H2^-1(1-s/(n-1))=0.008610  [uniform endpoint]
+PASS a3: corridor endpoint audit

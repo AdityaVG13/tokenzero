@@ -1,0 +1,16 @@
+EPIC: Harden TokenZero raw-worker v2 framing, binding, and cancellation
+
+SCOPE
+Adopt the shared raw-worker-v2 semantics: bounded inbound/outbound frames, request IDs, deadline/cancel control frames, root+session binding, typed errors, effect/ref metadata, and live cancellation propagation. Make search/per-call limits effective or stop advertising them.
+
+INVARIANT
+The worker dispatches canonical operations only; it contains no JavaScript planner or MCP catalog.
+
+NON-GOALS
+No aggregate sidecar implementation.
+
+## Steps to Reproduce
+Send an oversized raw-worker frame, then cancel a long search or shell request after dispatch; observe current frame/cancellation claims against actual work.
+
+## Acceptance Criteria
+Oversized/malformed frames fail before allocation beyond the bound; cancel stops a long search/shell and its process group; deadline reaches active work; handshake advertises only demonstrated capabilities; root/session/digest mismatch fails closed; shared v2 conformance and fuzz corpus pass.

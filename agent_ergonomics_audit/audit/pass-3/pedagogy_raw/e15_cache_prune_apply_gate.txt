@@ -1,0 +1,58 @@
+$ tokenzero cache prune --apply --json
+exit=0
+---stdout---
+{
+  "candidates": [],
+  "dry_run": false,
+  "maintenance": {
+    "blob_prune": {
+      "bytes_after": 282100837,
+      "bytes_before": 282100837,
+      "dry_run": false,
+      "expired_files": 0,
+      "freed_bytes": 0,
+      "max_age_seconds": 2592000,
+      "max_bytes": 2147483648,
+      "removed_files": 0,
+      "removed_referenced": 0
+    },
+    "freed_bytes": 0,
+    "gc": {
+      "skipped": "recent"
+    },
+    "plan_journals": {
+      "removed": 0,
+      "scanned": 128
+    },
+    "spill_prune": {
+      "deadline_elapsed": false,
+      "dir": "/Users/aditya/.tokenzero/shell-spills",
+      "dry_run": false,
+      "failed_removals": 0,
+      "kept_bytes": 0,
+      "kept_files": 0,
+      "removed_bytes": 0,
+      "removed_files": 0,
+      "scan_budget": 4096,
+      "scan_truncated": false,
+      "scanned_files": 0
+    },
+    "telemetry": {
+      "action": "skipped",
+      "owner": "hub"
+    },
+    "tmp_sweep": {
+      "dry_run": false,
+      "failed": 0,
+      "removed": 0,
+      "removed_bytes": 0,
+      "scanned": 0
+    }
+  },
+  "reclaimed_bytes": 0,
+  "schema_version": "tokenzero.cache.v1",
+  "status": "ok"
+}
+
+---stderr---
+

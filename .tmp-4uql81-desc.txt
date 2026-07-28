@@ -1,0 +1,3 @@
+Extract tokenzero-codemode over the canonical dispatcher
+
+Move the standalone CodeMode runtime and entrypoint out of tokenzero-mcp into tokenzero-codemode over a surface-neutral canonical dispatcher. Preserve behavior before optimization and source the router artifact from this crate.

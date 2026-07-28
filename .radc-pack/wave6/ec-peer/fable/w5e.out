@@ -1,0 +1,27 @@
+caterpillar(1,2,3,3) at t=1600/121: min value = 8263/968 = 8.53616  >=8 (no kill)
+caterpillar(1,2,3,3) at t=14: min value = 3477/400 = 8.69250  >=8 (no kill)
+
+rho_cert(5) numeric = 17.577411   Psi5(17.55)=7.99420  Psi5(17.6)=8.00477  Psi5(18)=8.08838
+cert: 7^25 > 2^69: True 1341068619663964900807 590295810358705651712
+cert: 3^25 > 2^39: True
+cert: 71*11^4 < 4*64*8^4: 1039511 < 1048576 : True
+W4 n=4 cert: 257*17^3 = 1262641 < 2^21 = 2097152 : True
+MDC-5 cert: 129^2 * 9^8 < 3*128^2*8^8: 716340484161 < 824633720832 : True
+MDC-5 cert: 3^5 < 2^8: True
+Phi6 cert: 463^4 <= 2*400^4: 45954068161 <= 51200000000 : True
+Phi6 cert: (63/400)^3 > 1/256 i.e. 63^3*256 > 400^3: 64012032 > 64000000 : True
+
+Q4 cap: max split-gain density = 5 (den d=10: = 5/10 of prob mass) at |A|=2, full set? False
+   s1 = d*(1/2 - e1) = 2 -> density bound equals? 5
+Q4 down: max split-gain density = 5/2 (den d=5: = 5/2/5 of prob mass) at |A|=2, full set? False
+   s1 = 9/8 matches max density? False
+Q4 uniform: max split-gain density = 2 (den d=4: = 2/4 of prob mass) at |A|=2, full set? False
+   s1 = 3/4 matches? False
+Q3 down: max split-gain density = 15/2 (den d=15: = 15/2/15 of prob mass) at |A|=2, full set? False
+   s1 = 15/4 matches? False
+Q3 uniform: max split-gain density = 3/2 (den d=3: = 3/2/3 of prob mass) at |A|=2, full set? False
+   s1 = 3/4 matches? False
+
+real	0m5.319s
+user	0m5.060s
+sys	0m0.101s

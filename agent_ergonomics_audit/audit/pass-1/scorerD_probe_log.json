@@ -1,0 +1,402 @@
+[
+  {
+    "surface_id": "verb__read",
+    "probes": {
+      "help": {
+        "exit": 0,
+        "out_head": "Read bounded file content with exact recovery refs\n\nUsage: tokenzero read [OPTIONS] [PATH]...\n\nArguments:\n  [PATH]...  \n",
+        "err_head": ""
+      },
+      "bare": {
+        "exit": 1,
+        "out_head": "",
+        "err_head": "Error: read requires a path\n"
+      },
+      "err": {
+        "exit": 0,
+        "out_head": "{\n  \"schema_version\": \"tokenzero.cli.v1\",\n  \"status\": \"ok\",\n  \"tool\": \"read\",\n  \"ack\": \"0\",\n  \"detail_ref\": \"tz://blob/0",
+        "err_head": ""
+      },
+      "good": {
+        "exit": 0,
+        "out_head": "{\n  \"schema_version\": \"tokenzero.cli.v1\",\n  \"status\": \"ok\",\n  \"tool\": \"read\",\n  \"ack\": \"0\",\n  \"detail_ref\": \"tz://blob/0",
+        "err_head": ""
+      }
+    }
+  },
+  {
+    "surface_id": "verb__find",
+    "probes": {
+      "help": {
+        "exit": 0,
+        "out_head": "Search local text and return compact matches\n\nUsage: tokenzero find [OPTIONS] <QUERY> [PATH]...\n\nArguments:\n  <QUERY>   ",
+        "err_head": ""
+      },
+      "bare": {
+        "exit": 2,
+        "out_head": "",
+        "err_head": "error: the following required arguments were not provided:\n  <QUERY>\n\nUsage: tok"
+      },
+      "err": {
+        "exit": 0,
+        "out_head": "{\n  \"schema_version\": \"tokenzero.cli.v1\",\n  \"status\": \"ok\",\n  \"tool\": \"find\",\n  \"ack\": \"0\",\n  \"detail_ref\": \"tz://blob/9",
+        "err_head": ""
+      },
+      "good": {
+        "exit": 0,
+        "out_head": "{\n  \"schema_version\": \"tokenzero.cli.v1\",\n  \"status\": \"ok\",\n  \"tool\": \"find\",\n  \"ack\": \"0\",\n  \"detail_ref\": \"tz://blob/5",
+        "err_head": ""
+      }
+    }
+  },
+  {
+    "surface_id": "verb__grep",
+    "probes": {
+      "help": {
+        "exit": 0,
+        "out_head": "Alias for find\n\nUsage: tokenzero grep [OPTIONS] <QUERY> [PATH]...\n\nArguments:\n  <QUERY>    \n  [PATH]...  \n\nOptions:\n    ",
+        "err_head": ""
+      },
+      "bare": {
+        "exit": 2,
+        "out_head": "",
+        "err_head": "error: the following required arguments were not provided:\n  <QUERY>\n\nUsage: tok"
+      },
+      "err": {
+        "exit": 0,
+        "out_head": "{\n  \"schema_version\": \"tokenzero.cli.v1\",\n  \"status\": \"ok\",\n  \"tool\": \"grep\",\n  \"ack\": \"0\",\n  \"detail_ref\": \"tz://blob/f",
+        "err_head": ""
+      }
+    }
+  },
+  {
+    "surface_id": "verb__glob",
+    "probes": {
+      "help": {
+        "exit": 0,
+        "out_head": "List matching paths without dumping file contents\n\nUsage: tokenzero glob [OPTIONS] <PATTERN> [PATH]...\n\nArguments:\n  <PA",
+        "err_head": ""
+      },
+      "bare": {
+        "exit": 2,
+        "out_head": "",
+        "err_head": "error: the following required arguments were not provided:\n  <PATTERN>\n\nUsage: t"
+      },
+      "err": {
+        "exit": 0,
+        "out_head": "{\n  \"schema_version\": \"tokenzero.cli.v1\",\n  \"status\": \"ok\",\n  \"tool\": \"glob\",\n  \"ack\": \"0\",\n  \"detail_ref\": \"tz://blob/3",
+        "err_head": ""
+      }
+    }
+  },
+  {
+    "surface_id": "verb__tree",
+    "probes": {
+      "help": {
+        "exit": 0,
+        "out_head": "Inspect a bounded directory tree\n\nUsage: tokenzero tree [OPTIONS] [PATH]...\n\nArguments:\n  [PATH]...  \n\nOptions:\n      --",
+        "err_head": ""
+      },
+      "bare": {
+        "exit": 0,
+        "out_head": "# tree\nAGENTS.md\nCHANGELOG.md\nCLAUDE.md\nCONTRIBUTING.md\nCargo.lock\nCargo.toml\nDROID.md\nGEMINI.md\nLICENSE\nMakefile\nPareto",
+        "err_head": ""
+      },
+      "err": {
+        "exit": 0,
+        "out_head": "{\n  \"schema_version\": \"tokenzero.cli.v1\",\n  \"status\": \"ok\",\n  \"tool\": \"tree\",\n  \"ack\": \"0\",\n  \"detail_ref\": \"tz://blob/d",
+        "err_head": ""
+      },
+      "good": {
+        "exit": 0,
+        "out_head": "{\n  \"schema_version\": \"tokenzero.cli.v1\",\n  \"status\": \"ok\",\n  \"tool\": \"tree\",\n  \"ack\": \"0\",\n  \"detail_ref\": \"tz://blob/d",
+        "err_head": ""
+      }
+    }
+  },
+  {
+    "surface_id": "verb__edit",
+    "probes": {
+      "help": {
+        "exit": 0,
+        "out_head": "Apply multi-hunk find/replace edits to one file with undo refs\n\nUsage: tokenzero edit [OPTIONS] <PATH>\n\nArguments:\n  <PA",
+        "err_head": ""
+      },
+      "bare": {
+        "exit": 2,
+        "out_head": "",
+        "err_head": "error: the following required arguments were not provided:\n  <PATH>\n\nUsage: toke"
+      },
+      "err": {
+        "exit": 2,
+        "out_head": "",
+        "err_head": "error: unexpected argument '--force' found\n\n  tip: to pass '--force' as a value,"
+      }
+    }
+  },
+  {
+    "surface_id": "verb__recall",
+    "probes": {
+      "help": {
+        "exit": 0,
+        "out_head": "Search payloads already stored in the recovery cache\n\nUsage: tokenzero recall [OPTIONS] <QUERY>\n\nArguments:\n  <QUERY>  \n",
+        "err_head": ""
+      },
+      "bare": {
+        "exit": 2,
+        "out_head": "",
+        "err_head": "error: the following required arguments were not provided:\n  <QUERY>\n\nUsage: tok"
+      },
+      "err": {
+        "exit": 2,
+        "out_head": "",
+        "err_head": "error: the following required arguments were not provided:\n  <QUERY>\n\nUsage: tok"
+      }
+    }
+  },
+  {
+    "surface_id": "verb__fetch",
+    "probes": {
+      "help": {
+        "exit": 0,
+        "out_head": "Fetch an http(s) URL via curl with a TTL cache and exact refs\n\nUsage: tokenzero fetch [OPTIONS] <URL>\n\nArguments:\n  <URL",
+        "err_head": ""
+      },
+      "bare": {
+        "exit": 2,
+        "out_head": "",
+        "err_head": "error: the following required arguments were not provided:\n  <URL>\n\nUsage: token"
+      },
+      "err": {
+        "exit": 2,
+        "out_head": "",
+        "err_head": "error: the following required arguments were not provided:\n  <URL>\n\nUsage: token"
+      }
+    }
+  },
+  {
+    "surface_id": "verb__expand",
+    "probes": {
+      "help": {
+        "exit": 0,
+        "out_head": "Recover exact bytes from a prior TokenZero ref\n\nUsage: tokenzero expand [OPTIONS] [REF]...\n\nArguments:\n  [REF]...  \n\nOpt",
+        "err_head": ""
+      },
+      "bare": {
+        "exit": 1,
+        "out_head": "",
+        "err_head": "Error: expand requires a ref\n"
+      },
+      "err": {
+        "exit": 1,
+        "out_head": "error: ref must start with tz://, fz://, or gz://, got: badref (invalid_ref)\n",
+        "err_head": ""
+      },
+      "good": {
+        "exit": 2,
+        "out_head": "",
+        "err_head": "error: unexpected argument '--jsno' found\n\n  tip: a similar argument exists: '--"
+      }
+    }
+  },
+  {
+    "surface_id": "verb__ingest",
+    "probes": {
+      "help": {
+        "exit": 0,
+        "out_head": "Ingest text or a file into a compact TokenZero capsule\n\nUsage: tokenzero ingest [OPTIONS] [INPUT]\n\nArguments:\n  [INPUT] ",
+        "err_head": ""
+      },
+      "bare": {
+        "exit": 0,
+        "out_head": "# ingest \u2014 0 bytes\nblob_ref: tz://blob/e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855\nfile_ref: tz://f",
+        "err_head": ""
+      },
+      "err": {
+        "exit": 0,
+        "out_head": "{\n  \"schema_version\": \"tokenzero.cli.v1\",\n  \"status\": \"ok\",\n  \"tool\": \"ingest\",\n  \"ack\": \"0\",\n  \"detail_ref\": \"tz://blob",
+        "err_head": ""
+      }
+    }
+  },
+  {
+    "surface_id": "verb__session-open",
+    "probes": {
+      "help": {
+        "exit": 0,
+        "out_head": "Open a bounded manifest+delta session\n\nUsage: tokenzero session-open [OPTIONS]\n\nOptions:\n      --root <ROOT>            ",
+        "err_head": ""
+      },
+      "bare": {
+        "exit": 0,
+        "out_head": "{\n  \"delta_path\": \"/Users/aditya/.tokenzero/boot-session-delta.json\",\n  \"delta_ref\": \"000000000000\",\n  \"demand_paging\": ",
+        "err_head": ""
+      },
+      "err": {
+        "exit": 0,
+        "out_head": "{\n  \"delta_path\": \"/Users/aditya/.tokenzero/boot-session-delta.json\",\n  \"delta_ref\": \"000000000000\",\n  \"demand_paging\": ",
+        "err_head": ""
+      }
+    }
+  },
+  {
+    "surface_id": "verb__mem",
+    "probes": {
+      "help": {
+        "exit": 0,
+        "out_head": "Inspect recovery-cache state\n\nUsage: tokenzero mem [OPTIONS]\n\nOptions:\n      --root <ROOT>              \n      --cache-p",
+        "err_head": ""
+      },
+      "bare": {
+        "exit": 0,
+        "out_head": "{\n  \"approx_bytes\": 149311,\n  \"blobs\": 12,\n  \"files\": 24,\n  \"max_blobs\": 128,\n  \"max_bytes\": 8000000,\n  \"max_files\": 256",
+        "err_head": ""
+      },
+      "err": {
+        "exit": 0,
+        "out_head": "{\n  \"schema_version\": \"tokenzero.cli.v1\",\n  \"status\": \"ok\",\n  \"tool\": \"mem\",\n  \"ack\": \"0\",\n  \"mode\": \"hybrid\",\n  \"visibl",
+        "err_head": ""
+      }
+    }
+  },
+  {
+    "surface_id": "verb__rewrite",
+    "probes": {
+      "help": {
+        "exit": 0,
+        "out_head": "Rewrite a shell command with TokenZero-safe routing\n\nUsage: tokenzero rewrite [OPTIONS] [COMMAND] [-- <ARGV>...]\n\nArgume",
+        "err_head": ""
+      },
+      "bare": {
+        "exit": 1,
+        "out_head": "",
+        "err_head": "Error: rewrite requires a command string or `-- <command...>`\n"
+      },
+      "err": {
+        "exit": 1,
+        "out_head": "",
+        "err_head": "Error: rewrite requires a command string or `-- <command...>`\n"
+      }
+    }
+  },
+  {
+    "surface_id": "verb__run",
+    "probes": {
+      "help": {
+        "exit": 0,
+        "out_head": "Run a command with status-truth telemetry\n\nUsage: tokenzero run [OPTIONS] [-- <COMMAND>...]\n\nArguments:\n  [COMMAND]...  ",
+        "err_head": ""
+      },
+      "bare": {
+        "exit": 1,
+        "out_head": "",
+        "err_head": "Error: run requires a command after --\n"
+      },
+      "err": {
+        "exit": 0,
+        "out_head": "{\n  \"schema_version\": \"tokenzero.cli.v1\",\n  \"status\": \"ok\",\n  \"tool\": \"shell\",\n  \"ack\": \"0\",\n  \"detail_ref\": \"tz://blob/",
+        "err_head": ""
+      },
+      "good": {
+        "exit": 0,
+        "out_head": "{\n  \"schema_version\": \"tokenzero.cli.v1\",\n  \"status\": \"ok\",\n  \"tool\": \"shell\",\n  \"ack\": \"0\",\n  \"detail_ref\": \"tz://blob/",
+        "err_head": ""
+      }
+    }
+  },
+  {
+    "surface_id": "verb__capabilities",
+    "probes": {
+      "help": {
+        "exit": 0,
+        "out_head": "Print the machine-readable CLI contract for agents\n\nUsage: tokenzero capabilities [OPTIONS]\n\nOptions:\n      --json  \n  -",
+        "err_head": ""
+      },
+      "bare": {
+        "exit": 0,
+        "out_head": "{\n  \"agent_next_steps\": [\n    \"Start with `tokenzero capabilities --json` to discover the contract.\",\n    \"Use `--json` ",
+        "err_head": ""
+      }
+    }
+  },
+  {
+    "surface_id": "verb__robot-docs",
+    "probes": {
+      "help": {
+        "exit": 0,
+        "out_head": "Print in-tool documentation for agents\n\nUsage: tokenzero robot-docs <COMMAND>\n\nCommands:\n  guide     \n  commands  Print ",
+        "err_head": ""
+      },
+      "bare": {
+        "exit": 0,
+        "out_head": "# TokenZero Robot Guide\n\nTokenZero is an agent-facing context runtime. Use it when you need bounded file reads, search, ",
+        "err_head": ""
+      }
+    }
+  },
+  {
+    "surface_id": "verb__doctor",
+    "probes": {
+      "help": {
+        "exit": 0,
+        "out_head": "Check local TokenZero health and next steps\n\nUsage: tokenzero doctor [OPTIONS] [COMMAND]\n\nCommands:\n  diagnose      Run ",
+        "err_head": ""
+      },
+      "bare": {
+        "exit": 0,
+        "out_head": "{\n  \"allowlist_algorithm\": \"effective roots = doctor/call root union configured --allowed-root entries, deduped by canon",
+        "err_head": ""
+      },
+      "err": {
+        "exit": 0,
+        "out_head": "{\n  \"actions_planned\": [],\n  \"capabilities_url\": \"tokenzero doctor capabilities --json\",\n  \"findings\": [],\n  \"mutation_p",
+        "err_head": ""
+      }
+    }
+  },
+  {
+    "surface_id": "verb__codemode",
+    "probes": {
+      "help": {
+        "exit": 0,
+        "out_head": "Execute JS-like plans that compose the same TokenZero operations as MCP (zero.read, zero.find, zero.shell, ...) in one c",
+        "err_head": ""
+      },
+      "bare": {
+        "exit": 1,
+        "out_head": "codemode:error 9 ops=0 CodeMode JavaScript sandbox was not compiled into this artifact (missing feature surface-codemode",
+        "err_head": ""
+      }
+    }
+  },
+  {
+    "surface_id": "flag__global__help",
+    "probes": {
+      "help": {
+        "exit": 0,
+        "out_head": "Rust TokenZero RACC runtime\n\nUsage: tokenzero [COMMAND]\n\nCommands:\n  read                       Read bounded file conten",
+        "err_head": ""
+      },
+      "err": {
+        "exit": 2,
+        "out_head": "",
+        "err_head": "error: unexpected argument '--halp' found\n\n  tip: a similar argument exists: '--"
+      }
+    }
+  },
+  {
+    "surface_id": "flag__global__version",
+    "probes": {
+      "help": {
+        "exit": 0,
+        "out_head": "tokenzero 1.4.0\n",
+        "err_head": ""
+      },
+      "err": {
+        "exit": 2,
+        "out_head": "",
+        "err_head": "error: unexpected argument '--verion' found\n\n  tip: a similar argument exists: '"
+      }
+    }
+  }
+]

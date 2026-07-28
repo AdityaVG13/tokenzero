@@ -1,0 +1,16 @@
+$ tokenzero doctor status --json
+exit=0
+---stdout---
+{
+  "blocking_findings": 0,
+  "exit_code": 0,
+  "finding_count": 0,
+  "informational_findings": 0,
+  "line": "ok tokenzero=1.4.0 doctor=1.4.0 findings=0 blocking=0 info=0",
+  "ok": true,
+  "schema_version": "tokenzero.doctor.health.v1",
+  "status": "ok"
+}
+
+---stderr---
+

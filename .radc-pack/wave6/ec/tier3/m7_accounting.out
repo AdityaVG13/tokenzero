@@ -1,0 +1,17 @@
+[EC] Fable from shared primitives: M = 3(1+h)+2(1+q)+(1+q)(1-p_c) = 218/25 = 9-p_c  PASS
+[EC] Fable L from Convention A:    L = 1+h+c0+(1+q+c1)(2-p_c) = 127/25 = 11/2-3p_c/2  PASS
+[EC] Kimi seq from SAME primitives: M = 3(1+h)+2(1+q) = 8 = 8  PASS
+[EC] Kimi seq L from Convention A:  L = 4 = 4  PASS
+[EC] Kimi batch from SAME primitives: M = 2(1+h)+(1+q) = 5 = 5  PASS
+[EC] identity baselines: seq M = 15, batch M = 10, L = 5  PASS
+[EC] symbolic check at p_c in {1/4, 7/25, 1/5, 9/25}: primitive-derived
+     ledgers == peer formulas identically  PASS
+
+M7 RESULT: accounting audit CONFIRMED.
+One shared carried-token rule (seq: capsule x3, R1 x2, R2 x1; batch: x2, x1)
+and one shared Convention-A latency generate BOTH camps' ledgers exactly.
+The entire M gap decomposes as:
+  seq:  M_fable - M_kimi = (9-p_c) - 8 = 1 - p_c = (1+q)*P(S2!=S1)*[R2 factor 1]
+       = expected cost of Fable's CONDITIONAL SECOND EXPAND, which PARITY-DUAL
+       never pays (residual rank 1).  Difference = candidate, not accounting.
+[EC] gaps: vertex 18/25, uniform 3/4  PASS

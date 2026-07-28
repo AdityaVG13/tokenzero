@@ -1,0 +1,48 @@
+$ tokenzero 
+exit=0
+---stdout---
+Rust TokenZero RACC runtime
+
+Usage: tokenzero [COMMAND]
+
+Commands:
+  read                       Read bounded file content with exact recovery refs
+  find                       Search local text and return compact matches
+  grep                       Alias for find
+  glob                       List matching paths without dumping file contents
+  tree                       Inspect a bounded directory tree
+  edit                       Apply multi-hunk find/replace edits to one file with undo refs
+  recall                     Search payloads already stored in the recovery cache
+  fetch                      Fetch an http(s) URL via curl with a TTL cache and exact refs
+  run                        Run a command with status-truth telemetry
+  ingest                     Ingest text or a file into a compact TokenZero capsule
+  expand                     Recover exact bytes from a prior TokenZero ref
+  session-open               Open a bounded manifest+delta session
+  mem                        Inspect recovery-cache state
+  rewrite                    Rewrite a shell command with TokenZero-safe routing
+  hook                       Agent-harness hook adapters: stdin JSON in, decision JSON out
+  discover                   List local TokenZero tool-discovery metadata
+  doctor                     Check local TokenZero health and next steps
+  stats                      Print local TokenZero usage statistics
+  pulse                      Inspect or sync local Pulse telemetry
+  session-ledger             Session cost ledger: token-turns (mass × turns_remaining); headline DPMT
+  cache                      Inspect or prune TokenZero recovery-cache state
+  install                    Plan or apply local integration writes with rollback data
+  init                       Compatibility alias for install --mcp --agent <name>
+  clients                    Inspect AI client TokenZero integration state
+  client-status              Alias for clients detect
+  capabilities               Print the machine-readable CLI contract for agents
+  robot-docs                 Print in-tool documentation for agents
+  cache-pack                 
+  bench                      
+  mcp-server                 
+  mcp-smoke                  
+  mcp-soak                   
+  exact-recovery-shell       
+  exact-recovery-audit       
+  codemode                   Compose multi-step plans on the same base tools as MCP (fewer round-trips, Cloudflare-style)
+  harm-eval                  
+  protected-anchor-audit     
+  
+---stderr---
+

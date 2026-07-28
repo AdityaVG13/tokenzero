@@ -1,0 +1,26 @@
+== AOT-1: I(X_1..K; A_1..K) = 0 exactly, n=2, K=2, N=4 ==
+p(c,a) = 1/192 = p(c)p(a) exactly => I = 0  [AOT-1 endorsed, hypotheses: uniform+injective+independent]
+== AOT-2: post-expand I = H(X_S) = 1 exactly ==
+H(X_S) = 1 bit exactly (X_S ~ Bern(1/2))  [AOT-2 endorsed for the binary uniform ISC slice]
+== AOT-5: re-issue draw bound (exact) ==
+K=2 N=4: E[draws] = 7/3 = 2.3333 <= KN/(N-K+1) = 8/3 = 2.6667
+K=3 N=8: E[draws] = 73/21 = 3.4762 <= KN/(N-K+1) = 4 = 4.0000
+K=4 N=16: E[draws] = 6061/1365 = 4.4403 <= KN/(N-K+1) = 64/13 = 4.9231
+K=2 N=3: E[draws] = 5/2 = 2.5000 <= KN/(N-K+1) = 3 = 3.0000
+K=5 N=16: E[draws] = 2627/455 = 5.7736 <= KN/(N-K+1) = 20/3 = 6.6667
+K=1 N=2: E[draws] = 1 = 1.0000 <= KN/(N-K+1) = 1 = 1.0000
+== AOT-6: dichotomy audit ==
+injective content hash: I = n = 2 exactly, never opaque  [endorsed]
+mixed alias beta=1/2: I(X;A) = 1 = 1.0000 bits in (0,2)  => interpolation EXISTS
+mixed alias beta=1/4: I(X;A) = 1/2 = 0.5000 bits in (0,2)  => interpolation EXISTS
+mixed alias beta=3/4: I(X;A) = 3/2 = 1.5000 bits in (0,2)  => interpolation EXISTS
+CORRECTION: 'dichotomy, no interpolation' holds only within the two canonical families;
+the mixture construction gives every I = beta*n; W5-DLU-STRUCT already exhibits I = (3/4)log2(3) > 1.
+check (3/4)*log2(3) = 1.188722 in (0,2)
+== capacity K*2^r <= N (counting) ==
+K=4 r=1 N=8: K*2^r = 8 <= 8  ok
+K=4 r=1 N=16: K*2^r = 8 <= 16  ok
+K=2 r=2 N=8: K*2^r = 8 <= 8  ok
+K=4 r=2 N=16: K*2^r = 16 <= 16  ok
+parity namespace feasibility 2^(n-1) <= N_tau: n=4 => 8 <= N_tau (registered family, counting only)
+PASS a6: opacity audit

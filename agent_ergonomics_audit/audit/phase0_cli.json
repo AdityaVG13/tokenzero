@@ -1,0 +1,26 @@
+{
+  "target_path": "/Users/aditya/AI/TokenZero",
+  "discovered_at": "2026-07-27T22:55:26Z",
+  "corrected_at": "2026-07-27T23:00:00Z",
+  "languages": ["rust"],
+  "build_system": "cargo",
+  "binaries": [
+    {
+      "name": "tokenzero",
+      "path": "/Users/aditya/.local/bin/tokenzero",
+      "also": ["target/release/tokenzero", "target/debug/tokenzero"],
+      "version": "1.4.0"
+    }
+  ],
+  "env_var_prefix": "TOKENZERO_",
+  "existing_surfaces": {
+    "robot_mode": true,
+    "capabilities": true,
+    "robot_docs": true,
+    "json_flag": true,
+    "stdout_contract": "stdout is data; stderr is diagnostics"
+  },
+  "recommended_mode": "audit-only",
+  "mode_lock_reason": "User objective: distill findings into beads; multi-round audit thoroughness; no Phase-5 apply",
+  "notes": "discover-cli.sh initially returned empty binaries; runtime probe filled from PATH + --help + capabilities --json"
+}

@@ -1,0 +1,6 @@
+theta=[0.25, 0.25, 0.25, 0.25]: KKT ok, D(mu) strictly decreasing, envelope -mu exact, G>0
+theta=[0.4, 0.2, 0.2, 0.2]: KKT ok, D(mu) strictly decreasing, envelope -mu exact, G>0
+theta=[0.3, 0.3, 0.2, 0.2]: KKT ok, D(mu) strictly decreasing, envelope -mu exact, G>0
+min G over grid = 0.000162 > 0   (strict recovery advantage, all three thetas)
+RD checks: ok for all three thetas   [reproduces Cont-1 §3.6 expected line]
+PASS a2: water-filling audit

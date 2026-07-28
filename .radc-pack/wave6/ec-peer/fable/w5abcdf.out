@@ -1,0 +1,238 @@
+########## w5a_single ##########
+Q4 split-comparison count per scalar run: 21457825  (W4 claims 21,457,825)
+Q4 cap G at t=40 (scaled q=1): 128  -> F = 14/5
+
+Q4 cap vertex  (weights (3, 3, 2, 2)/d=10)
+  supported pairs (Ltot,Etot): [(0, 80), (16, 48), (32, 28), (64, 0)]
+    F-line: 2 + 1/2*t    [ell=0, e=1/2]
+    F-line: 4 + 3/10*t    [ell=1, e=3/10]
+    F-line: 6 + 7/40*t    [ell=2, e=7/40]
+    F-line: 10 + 0*t    [ell=4, e=0]
+  breakpoints t: [Fraction(10, 1), Fraction(16, 1), Fraction(160, 7)]
+  F(40) = 10
+  least t with F >= 5: 6
+  least t with F >= 8: 40/3
+  least t with F >= 9: 120/7
+  least t with F >= 10: 160/7
+
+Q4 down vertex  (weights (2, 1, 1, 1)/d=5)
+  supported pairs (Ltot,Etot): [(0, 40), (16, 22), (32, 12), (64, 0)]
+    F-line: 2 + 1/2*t    [ell=0, e=1/2]
+    F-line: 4 + 11/40*t    [ell=1, e=11/40]
+    F-line: 6 + 3/20*t    [ell=2, e=3/20]
+    F-line: 10 + 0*t    [ell=4, e=0]
+  breakpoints t: [Fraction(80, 9), Fraction(16, 1), Fraction(80, 3)]
+  F(40) = 10
+  least t with F >= 5: 6
+  least t with F >= 8: 160/11
+  least t with F >= 9: 20
+  least t with F >= 10: 80/3
+
+Q4 uniform  (weights (1, 1, 1, 1)/d=4)
+  supported pairs (Ltot,Etot): [(0, 32), (16, 20), (32, 12), (42, 8), (64, 0)]
+    F-line: 2 + 1/2*t    [ell=0, e=1/2]
+    F-line: 4 + 5/16*t    [ell=1, e=5/16]
+    F-line: 6 + 3/16*t    [ell=2, e=3/16]
+    F-line: 29/4 + 1/8*t    [ell=21/8, e=1/8]
+    F-line: 10 + 0*t    [ell=4, e=0]
+  breakpoints t: [Fraction(32, 3), Fraction(16, 1), Fraction(20, 1), Fraction(22, 1)]
+  F(40) = 10
+  least t with F >= 5: 6
+  least t with F >= 8: 64/5
+  least t with F >= 9: 16
+  least t with F >= 10: 22
+
+Q3 down vertex  (weights (7, 4, 4)/d=15)
+  supported pairs (Ltot,Etot): [(0, 60), (8, 30), (15, 16), (24, 0)]
+    F-line: 2 + 1/2*t    [ell=0, e=1/2]
+    F-line: 4 + 1/4*t    [ell=1, e=1/4]
+    F-line: 23/4 + 2/15*t    [ell=15/8, e=2/15]
+    F-line: 8 + 0*t    [ell=3, e=0]
+  breakpoints t: [Fraction(8, 1), Fraction(15, 1), Fraction(135, 8)]
+  F(40) = 8
+  least t with F >= 5: 6
+  least t with F >= 8: 135/8
+  least t with F >= 9: None
+  least t with F >= 10: None
+
+Q3 uniform  (weights (1, 1, 1)/d=3)
+  supported pairs (Ltot,Etot): [(0, 12), (8, 6), (24, 0)]
+    F-line: 2 + 1/2*t    [ell=0, e=1/2]
+    F-line: 4 + 1/4*t    [ell=1, e=1/4]
+    F-line: 8 + 0*t    [ell=3, e=0]
+  breakpoints t: [Fraction(8, 1), Fraction(16, 1)]
+  F(40) = 8
+  least t with F >= 5: 6
+  least t with F >= 8: 16
+  least t with F >= 9: None
+  least t with F >= 10: None
+
+elapsed 26.1s
+
+real	0m26.118s
+user	0m24.648s
+sys	0m0.532s
+
+########## w5b_twodemand ##########
+
+Q4 uniform alpha=3: pairs=[(0, 176), (16, 128), (33, 80), (42, 56), (64, 0)]
+    line 3 + 11/16*t   [ell=0, e2=11/16]
+    line 6 + 1/2*t   [ell=1, e2=1/2]
+    line 147/16 + 5/16*t   [ell=33/16, e2=5/16]
+    line 87/8 + 7/32*t   [ell=21/8, e2=7/32]
+    line 15 + 0*t   [ell=4, e2=0]
+    least t with F2_3 >= 35/4: 92/11
+    least t with F2_3 >= 8: 80/11
+
+Q4 uniform alpha=2: pairs=[(0, 176), (16, 128), (33, 80), (42, 56), (64, 0)]
+    line 2 + 11/16*t   [ell=0, e2=11/16]
+    line 4 + 1/2*t   [ell=1, e2=1/2]
+    line 49/8 + 5/16*t   [ell=33/16, e2=5/16]
+    line 29/4 + 7/32*t   [ell=21/8, e2=7/32]
+    line 10 + 0*t   [ell=4, e2=0]
+    least t with F2_2 >= 41/4: None
+  candidate at this vertex: p_c=1/4  M2=35/4  L2=41/8  2L2=41/4
+  identity: M=15  L=5   [n=4]
+  (24s)
+
+Q4 down vertex alpha=3: pairs=[(0, 272), (16, 182), (32, 108), (64, 0)]
+    line 3 + 17/25*t   [ell=0, e2=17/25]
+    line 6 + 91/200*t   [ell=1, e2=91/200]
+    line 9 + 27/100*t   [ell=2, e2=27/100]
+    line 15 + 0*t   [ell=4, e2=0]
+    least t with F2_3 >= 218/25: 143/17
+    least t with F2_3 >= 8: 125/17
+
+Q4 down vertex alpha=2: pairs=[(0, 272), (16, 182), (32, 108), (64, 0)]
+    line 2 + 17/25*t   [ell=0, e2=17/25]
+    line 4 + 91/200*t   [ell=1, e2=91/200]
+    line 6 + 27/100*t   [ell=2, e2=27/100]
+    line 10 + 0*t   [ell=4, e2=0]
+    least t with F2_2 >= 254/25: None
+  candidate at this vertex: p_c=7/25  M2=218/25  L2=127/25  2L2=254/25
+  identity: M=15  L=5   [n=4]
+  (19s)
+
+Q3 down vertex alpha=3: pairs=[(0, 1188), (8, 738), (24, 0)]
+    line 3 + 33/50*t   [ell=0, e2=33/50]
+    line 6 + 41/100*t   [ell=1, e2=41/100]
+    line 12 + 0*t   [ell=3, e2=0]
+    least t with F2_3 >= 216/25: 94/11
+    least t with F2_3 >= 8: 250/33
+
+Q3 down vertex alpha=2: pairs=[(0, 1188), (8, 738), (24, 0)]
+    line 2 + 33/50*t   [ell=0, e2=33/50]
+    line 4 + 41/100*t   [ell=1, e2=41/100]
+    line 8 + 0*t   [ell=3, e2=0]
+    least t with F2_2 >= 248/25: None
+  candidate at this vertex: p_c=9/25  M2=216/25  L2=124/25  2L2=248/25
+  identity: M=12  L=4   [n=3]
+  (0s)
+
+Q3 uniform alpha=3: pairs=[(0, 48), (8, 30), (24, 0)]
+    line 3 + 2/3*t   [ell=0, e2=2/3]
+    line 6 + 5/12*t   [ell=1, e2=5/12]
+    line 12 + 0*t   [ell=3, e2=0]
+    least t with F2_3 >= 26/3: 17/2
+    least t with F2_3 >= 8: 15/2
+
+Q3 uniform alpha=2: pairs=[(0, 48), (8, 30), (24, 0)]
+    line 2 + 2/3*t   [ell=0, e2=2/3]
+    line 4 + 5/12*t   [ell=1, e2=5/12]
+    line 8 + 0*t   [ell=3, e2=0]
+    least t with F2_2 >= 10: None
+  candidate at this vertex: p_c=1/3  M2=26/3  L2=5  2L2=10
+  identity: M=12  L=4   [n=3]
+  (0s)
+
+real	0m43.124s
+user	0m40.625s
+sys	0m0.956s
+
+########## w5c_onebit ##########
+ n  best(b,m)      g_anti      g_best   gap_to_runnerup   e1=g/(2^n*5n)
+  2  [(1, 0), (1, 1)]   8   8   0   1/5 = 0.200000 ***FAIL***
+  3  [(1, 2)]   30   30   2   1/4 = 0.250000 OK
+  4  [(1, 3)]   88   88   8   11/40 = 0.275000 OK
+  5  [(1, 4)]   242   242   2   121/400 = 0.302500 OK
+  6  [(1, 5)]   600   600   16   5/16 = 0.312500 OK
+  7  [(1, 6)]   1450   1450   30   145/448 = 0.323661 OK
+  8  [(1, 6), (1, 7)]   3440   3440   0   43/128 = 0.335938 ***FAIL***
+  9  [(1, 8)]   7810   7810   126   781/2304 = 0.338976 OK
+ 10  [(1, 9)]   17704   17704   112   2213/6400 = 0.345781 OK
+ 11  [(1, 10)]   39520   39520   168   247/704 = 0.350852 OK
+ 12  [(1, 11)]   86976   86976   960   453/1280 = 0.353906 OK
+ 16  [(1, 14), (1, 15)]   1923600   1923600   0   24045/65536 = 0.366898 ***FAIL***
+ 24  [(1, 22), (1, 23)]   762248576   762248576   0   5955067/15728640 = 0.378613 ***FAIL***
+ 32  [(1, 30), (1, 31)]   264306878240   264306878240   0   1651917989/4294967296 = 0.384617 ***FAIL***
+ 40  [(1, 38), (1, 39)]   85360566646720   85360566646720   0   266751770771/687194767360 = 0.388175 ***FAIL***
+ 48  [(1, 46), (1, 47)]   26378478058505824   26378478058505824   0   824327439328307/2111062325329920 = 0.390480 ***FAIL***
+ 56  [(1, 54), (1, 55)]   7910443784514437600   7910443784514437600   0   7062896236173605/18014398509481984 = 0.392070 ***FAIL***
+ 60  [(1, 59)]   135807833795265095264   135807833795265095264   26741193683524320   4243994806102034227/10808639105689190400 = 0.392648 OK
+
+antipodal (b,m)=(1,n-1) is the UNIQUE class optimum for all n in 2..60: False
+  e_anti(3) = 1/4 matches W4
+  e_anti(4) = 11/40 matches W4
+  e_anti(5) = 121/400 matches W4
+  e_anti(6) = 5/16 matches W4
+  e_anti(7) = 145/448 matches W4
+  e_anti(8) = 43/128 matches W4
+
+ proof data: Delta_m(n) = g(1,m) - g(1,m+1) (want >= 0), and g(0,m)-g(1,m):
+  n=3: min Delta_m = 0, all >=0: True; min g(0,m)-g(1,m) = 12, all >0: True
+  n=5: min Delta_m = 0, all >=0: True; min g(0,m)-g(1,m) = 60, all >0: True
+  n=8: min Delta_m = 0, all >=0: True; min g(0,m)-g(1,m) = 560, all >0: True
+  n=13: min Delta_m = 0, all >=0: True; min g(0,m)-g(1,m) = 30624, all >0: True
+  n=21: min Delta_m = 0, all >=0: True; min g(0,m)-g(1,m) = 12697776, all >0: True
+  n=34: min Delta_m = 0, all >=0: True; min g(0,m)-g(1,m) = 175634573400, all >0: True
+  n=55: min Delta_m = 0, all >=0: True; min g(0,m)-g(1,m) = 650266785113933176, all >0: True
+
+real	0m0.036s
+user	0m0.026s
+sys	0m0.008s
+
+########## w5d_q5 ##########
+1-bit optimum: E=242, e1=121/400  (antipodal 121/400? True, pair=(0, 31), antipodal=True)
+  1-bit kill line 4 + t*e1 hits 8 at t = 1600/121 = 13.2231
+  optimal pairs: [(0, 31), (1, 30), (2, 29), (3, 28), (4, 27), (5, 26), (6, 25), (7, 24), (8, 23), (9, 22), (10, 21), (11, 20), (12, 19), (13, 18), (14, 17), (15, 16)]
+2-bit optimum: E=160, e2=1/5=0.20000, quad=(0, 1, 14, 15) = ['00000', '00001', '01110', '01111']
+  2-bit line 6 + t*e2 hits 8 at t = 10 = 10.0000
+mixed(1+2+2) at t=1600/121: policy value=16233/1936=8.38481  protos=['00000', '00001', '11111']  >=8
+mixed(1+2+2) at t=27/2: policy value=13527/1600=8.45438  protos=['00000', '00001', '11111']  >=8
+mixed(1+2+2) at t=14: policy value=429/50=8.58000  protos=['00000', '00001', '11111']  >=8
+mixed(1+2+2) at t=29/2: policy value=13929/1600=8.70562  protos=['00000', '00001', '11111']  >=8
+mixed(1+2+2) at t=15: policy value=1413/160=8.83125  protos=['00000', '00001', '11111']  >=8
+
+at t=1600/121=13.2231: 1-bit value = 8 (should be exactly 8)
+  2-bit value = 1046/121 = 8.64463
+
+2-bit kill extends to t = 2/e2 = 10 = 10.0000  -> improved rho_kill lower bound if > 1600/121=13.2231
+
+real	0m0.418s
+user	0m0.389s
+sys	0m0.015s
+
+########## w5f_final_checks ##########
+Delta formula exact for all n in 3..40, all m: True
+tie law: final-step tie iff 8|n; never a third tied class: verified n in 3..40
+b=0 always strictly worse (n<=30): True
+
+certificates:
+  n=6: 65^2 * 463^10 <= 8 * 64^2 * 400^10 : True
+  n=7: 2075^2 * 309^12 <= 32 * 2048^2 * 256^12 : True
+  n=7 aux: 27^7 >= 2^33 : True ; 53^7 >= 2^40 : True
+  chord: 125 <= 128 (log2(5/4) <= 1/3): True
+  chord: 17^11 <= 2^45 (log2(17/16) <= 1/11): True 34271896307633 35184372088832
+  n>=8 tail: need 20/11 + (16(n-1)/n)(2/3) >= 9 at n=8: 20/11 + 28/3 = 11.151515151515152 >= 9: True
+  MDC-5: 16641 * 43046721 = 716340484161 < 3*16384*16777216 = 824633720832
+  MDC-5: 3^5 = 243 < 2^8 = 256
+  Psi(5,18) cert: 7^25 > 2^69: True ; 3^25 > 2^39: True ; 71*11^4 =  1039511 < 2^20 = 1048576
+  p_c at Theta_3^down vertex = 9/25; (9-2n)/3 = 1; vertex >= threshold? False
+  p_c at Theta_4^down vertex = 7/25; (9-2n)/3 = 1/3; vertex >= threshold? False
+  p_c at Theta_5^down vertex = 29/125; (9-2n)/3 = -1/3; vertex >= threshold? True
+  p_c at Theta_6^down vertex = 1/5; (9-2n)/3 = -1; vertex >= threshold? True
+
+real	0m0.029s
+user	0m0.019s
+sys	0m0.007s
+

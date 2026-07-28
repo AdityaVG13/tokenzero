@@ -1,0 +1,11 @@
+C_8  (r=1..8)  = (0, 8, 10, 13, 16, 20, 22, 24)
+C_16 (r=1..16) = (0, 16, 18, 21, 24, 28, 32, 36, 40, 45, 50, 53, 56, 60, 62, 64)
+C_32 (r=1..32) = (0, 32, 34, 37, 40, 44, 48, 52, 56, 61, 66, 71, 76, 81, 86, 91, 96, 102, 108, 114, 120, 124, 128, 132, 136, 141, 146, 149, 152, 156, 158, 160)
+C_64 (r=1..12) = (0, 64, 66, 69, 72, 76, 80, 84, 88, 93, 98, 103)
+PASS Grok C_8, C_16, C_32[1..8], C_32(32)=160 all reproduced exactly
+PASS C_N(N) = N log2 N for N=8,16,32 (identity tree extremal at r=N)
+PASS spectra nondecreasing in r
+PASS small-r entries match N + U_{r-1} closed form where U_{r-1} <= N
+N=8: least r with C_N(r) >= 2N (ell>=2 barrier case) is r = 5
+N=16: least r with C_N(r) >= 2N (ell>=2 barrier case) is r = 7
+N=32: least r with C_N(r) >= 2N (ell>=2 barrier case) is r = 11

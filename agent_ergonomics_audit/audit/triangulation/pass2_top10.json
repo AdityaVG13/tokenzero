@@ -1,0 +1,456 @@
+{
+  "audit": "tokenzero_agent_ergonomics",
+  "phase": 4,
+  "pass": 2,
+  "mode": "audit_only",
+  "triangulator": "independent_re_eval",
+  "target": "/Users/aditya/AI/TokenZero",
+  "binary": "tokenzero 1.4.0",
+  "generated_at": "2026-07-27T23:30:00Z",
+  "hard_rules": ["no_cargo_test_workspace", "audit_only_no_product_edits"],
+  "inputs": [
+    "agent_ergonomics_audit/audit/recommendations.jsonl",
+    "agent_ergonomics_audit/audit/playbook.md",
+    "agent_ergonomics_audit/audit/scorecard.md",
+    "agent_ergonomics_audit/audit/intent_inference_corpus.jsonl",
+    "agent_ergonomics_audit/audit/partial/intent_sample_results.jsonl",
+    "agent_ergonomics_audit/audit/partial/deep_probes.txt",
+    "agent_ergonomics_audit/audit/partial/deep_probes2.txt",
+    "agent_ergonomics_audit/audit/agent_surfaces.jsonl",
+    "agent_ergonomics_audit/audit/pass-2/family_cross_cut.md",
+    "agent_ergonomics_audit/audit/pass-1/parity_mcp_cli.md",
+    "live_cli_probes_2026-07-27"
+  ],
+  "scorecard_lowest_medians": {
+    "regression_resistance": 357,
+    "intent_inference": 390,
+    "error_pedagogy": 427,
+    "self_documentation_empty_verb_min": 107
+  },
+  "live_evidence": [
+    {
+      "command": "tokenzero --robot-triage",
+      "exit": 2,
+      "excerpt": "error: unexpected argument '--robot-triage' found"
+    },
+    {
+      "command": "tokenzero robot-triage",
+      "exit": 2,
+      "excerpt": "unrecognized subcommand 'robot-triage'; tip robot-docs"
+    },
+    {
+      "command": "tokenzero --jsno",
+      "exit": 2,
+      "excerpt": "unexpected argument '--jsno' found; no did-you-mean --json"
+    },
+    {
+      "command": "tokenzero --jsonn",
+      "exit": 2,
+      "excerpt": "unexpected argument '--jsonn' found"
+    },
+    {
+      "command": "tokenzero read --jsno Cargo.toml",
+      "exit": 0,
+      "excerpt": "schema_version tokenzero.cli.v1 status ok tool read"
+    },
+    {
+      "command": "tokenzero capabilities --jsno",
+      "exit": 0,
+      "excerpt": "full capabilities contract"
+    },
+    {
+      "command": "tokenzero --exlpain",
+      "exit": 2,
+      "excerpt": "tip: a similar argument exists: '--help'"
+    },
+    {
+      "command": "tokenzero read",
+      "exit": 1,
+      "excerpt": "Error: read requires a path"
+    },
+    {
+      "command": "tokenzero edit --force",
+      "exit": 2,
+      "excerpt": "tip: to pass '--force' as a value, use '-- --force'"
+    },
+    {
+      "command": "tokenzero search foo",
+      "exit": 0,
+      "excerpt": "works; not listed as top-level help verb"
+    },
+    {
+      "command": "tokenzero rn --json -- true",
+      "exit": 0,
+      "excerpt": "recovers; tool field shell"
+    },
+    {
+      "command": "tokenzero reed Cargo.toml",
+      "exit": 2,
+      "excerpt": "tip includes read among similar subcommands; does not auto-act"
+    },
+    {
+      "command": "tokenzero capabilities --json",
+      "exit": 0,
+      "excerpt": "commands_count=17; no mcp_tools; dangerous_operations=[install, cache prune]"
+    },
+    {
+      "command": "tokenzero --help empty descriptions",
+      "exit": 0,
+      "excerpt": "empty_help_count=28"
+    },
+    {
+      "command": "intent_sample_results.jsonl",
+      "exit": null,
+      "excerpt": "n=180 useless_error=168 useful_hint=12"
+    },
+    {
+      "command": "ls audit/regression_tests",
+      "exit": 0,
+      "excerpt": "only .gitkeep"
+    }
+  ],
+  "evaluations": [
+    {
+      "id": "R-001",
+      "title": "Add --robot-triage mega-command",
+      "playbook_rank": 1,
+      "playbook_priority": 0,
+      "playbook_score": 980,
+      "verdict": "modify",
+      "triangulated_priority": 1,
+      "triangulated_score": 820,
+      "agree_disagree_modify": "modify_demote_and_merge",
+      "rationale": "Gap real (EC2) but discovery already covered by capabilities+doctor+robot-docs; mega-command is composition not the top blast.",
+      "evidence_ids": ["tokenzero --robot-triage", "tokenzero robot-triage", "tokenzero doctor bare multi-slice"],
+      "strengths_contradiction": [
+        "capabilities --json + agent_next_steps already canonical first hop",
+        "bare doctor multi-slice JSON (weighted_mean 712.9)",
+        "robot-docs guide paste-ready"
+      ],
+      "merge_with": ["R-010"],
+      "split_into": null,
+      "final_top8_rank": 8
+    },
+    {
+      "id": "R-002",
+      "title": "Global Levenshtein-1 flag typo recovery",
+      "playbook_rank": 2,
+      "playbook_priority": 0,
+      "playbook_score": 950,
+      "verdict": "agree",
+      "triangulated_priority": 0,
+      "triangulated_score": 960,
+      "agree_disagree_modify": "agree_p0_scope_tighten",
+      "rationale": "intent_inference median 390; 168/180 useless; islands confirmed (subcommand --jsno works, global dies). Merge quality gate from R-013.",
+      "evidence_ids": ["tokenzero --jsno", "tokenzero --jsonn", "tokenzero read --jsno", "intent 168/180"],
+      "strengths_contradiction": [
+        "read/capabilities --jsno already recover",
+        "feature_flags.intent_inference_aliases true overclaims global coverage",
+        "robot-docs lists recoveries agents may expect everywhere"
+      ],
+      "merge_with": ["R-013"],
+      "split_into": null,
+      "final_top8_rank": 2
+    },
+    {
+      "id": "R-004",
+      "title": "Fill empty --help + include thin verbs in capabilities",
+      "playbook_rank": 3,
+      "playbook_priority": 1,
+      "playbook_score": 920,
+      "verdict": "modify",
+      "triangulated_priority": 0,
+      "triangulated_score": 990,
+      "agree_disagree_modify": "modify_uplift_p0_and_split",
+      "rationale": "Family cross-cut #1 blast: 17 caps vs 57 help. Split R-004a (caps tree P0) from R-004b (blurbs, merge R-015).",
+      "evidence_ids": ["capabilities commands_count=17", "empty_help_count=28"],
+      "strengths_contradiction": [
+        "included 17 commands are high quality contract surfaces",
+        "robot-docs already documents search alias and recoveries"
+      ],
+      "merge_with": ["R-015"],
+      "split_into": ["R-004a", "R-004b"],
+      "final_top8_rank": 1
+    },
+    {
+      "id": "R-003",
+      "title": "Error-Teaches exact corrected invocation",
+      "playbook_rank": 4,
+      "playbook_priority": 1,
+      "playbook_score": 900,
+      "verdict": "agree",
+      "triangulated_priority": 1,
+      "triangulated_score": 910,
+      "agree_disagree_modify": "agree_p1_share_formatter",
+      "rationale": "read missing path / edit --force / clap defaults lack copy-pasteable command. Share central formatter with R-002.",
+      "evidence_ids": ["tokenzero read", "tokenzero edit --force", "tokenzero find --foo"],
+      "strengths_contradiction": [
+        "JSON envelope errors when --json present are structured",
+        "expand badref already teaches prefix rules"
+      ],
+      "merge_with": ["R-002", "R-013"],
+      "split_into": null,
+      "final_top8_rank": 3
+    },
+    {
+      "id": "R-005",
+      "title": "Pin ergonomics contracts with regression_tests/",
+      "playbook_rank": 5,
+      "playbook_priority": 1,
+      "playbook_score": 880,
+      "verdict": "agree",
+      "triangulated_priority": 1,
+      "triangulated_score": 900,
+      "agree_disagree_modify": "agree_p1_schedule_earlier",
+      "rationale": "regression_tests only .gitkeep; median 357 lowest dimension. Pins must land with R-004a/R-002 not after.",
+      "evidence_ids": ["ls regression_tests only .gitkeep", "scorecard regression_resistance 357"],
+      "strengths_contradiction": [
+        "caps determinism PASS but unguarded",
+        "probe dumps exist in partial/ but not golden tests"
+      ],
+      "merge_with": null,
+      "split_into": ["R-005a", "R-005b", "R-005c", "R-005d"],
+      "final_top8_rank": 4
+    },
+    {
+      "id": "R-009",
+      "title": "MCP-CLI parity map in capabilities",
+      "playbook_rank": 6,
+      "playbook_priority": 1,
+      "playbook_score": 860,
+      "verdict": "agree",
+      "triangulated_priority": 1,
+      "triangulated_score": 850,
+      "agree_disagree_modify": "agree_p1_slight_demote_vs_cli_gaps",
+      "rationale": "No mcp_tools in caps; pass-1 parity doc shows 20 tz_* with name/semantic divergences. CLI-first agents hit R-004a harder.",
+      "evidence_ids": ["capabilities has mcp_tools=false", "pass-1/parity_mcp_cli.md"],
+      "strengths_contradiction": [
+        "doctor.mcp ready signal exists",
+        "robot-docs codemode section documents same engine as MCP"
+      ],
+      "merge_with": null,
+      "split_into": null,
+      "final_top8_rank": 6
+    },
+    {
+      "id": "R-015",
+      "title": "Hide/gate experimental eval verbs",
+      "playbook_rank": 7,
+      "playbook_priority": 2,
+      "playbook_score": 840,
+      "verdict": "modify",
+      "triangulated_priority": 1,
+      "triangulated_score": 880,
+      "agree_disagree_modify": "modify_uplift_p1_merge_004b",
+      "rationale": "28 empty-desc verbs are active noise; lowest surfaces self_doc=107. Uplift from P2.",
+      "evidence_ids": ["empty_help 28 verbs", "scorecard lowest 25 empty verbs"],
+      "strengths_contradiction": [
+        "core path help blurbs are good",
+        "hiding improves discovery of strengths"
+      ],
+      "merge_with": ["R-004b"],
+      "split_into": null,
+      "final_top8_rank": 5
+    },
+    {
+      "id": "R-008",
+      "title": "Dangerous-op surface expansion",
+      "playbook_rank": 8,
+      "playbook_priority": 1,
+      "playbook_score": 820,
+      "verdict": "agree",
+      "triangulated_priority": 1,
+      "triangulated_score": 830,
+      "agree_disagree_modify": "agree_p1",
+      "rationale": "edit mutates with --dry-run opt-in not in dangerous_operations; cache migrate* and clients rollback exist outside registry.",
+      "evidence_ids": ["dangerous_operations only install+cache prune", "edit --help --dry-run", "cache migrate-*", "clients rollback"],
+      "strengths_contradiction": [
+        "install/cache prune --apply model is flagship strength — extend registry pattern"
+      ],
+      "merge_with": null,
+      "split_into": null,
+      "final_top8_rank": 7
+    },
+    {
+      "id": "R-013",
+      "title": "Wrong did-you-mean quality gate",
+      "playbook_rank": 9,
+      "playbook_priority": 1,
+      "playbook_score": 800,
+      "verdict": "modify",
+      "triangulated_priority": 0,
+      "triangulated_score": 960,
+      "agree_disagree_modify": "merge_into_R-002",
+      "rationale": "--exlpain suggests --help; 12 useful_hints overstate pedagogy quality. Gate is part of intent recovery.",
+      "evidence_ids": ["tokenzero --exlpain", "useful_hint sample almost all help typos"],
+      "strengths_contradiction": [
+        "--halp->--help tip is correct; gate must be family-aware not tip-disable"
+      ],
+      "merge_with": ["R-002"],
+      "split_into": null,
+      "final_top8_rank": 2
+    },
+    {
+      "id": "R-010",
+      "title": "Doctor as default mega-path",
+      "playbook_rank": 10,
+      "playbook_priority": 2,
+      "playbook_score": 780,
+      "verdict": "modify",
+      "triangulated_priority": 1,
+      "triangulated_score": 820,
+      "agree_disagree_modify": "merge_into_R-001_as_implementation",
+      "rationale": "Doctor already multi-slice; best vehicle for robot-triage shape without parallel engine.",
+      "evidence_ids": ["doctor bare keys include cache capabilities mcp next_steps", "no recommendations field"],
+      "strengths_contradiction": [
+        "doctor weighted_mean 712.9 already top-tier ergonomics"
+      ],
+      "merge_with": ["R-001"],
+      "split_into": null,
+      "final_top8_rank": 8
+    }
+  ],
+  "final_top8": [
+    {
+      "rank": 1,
+      "id": "R-004a",
+      "source_ids": ["R-004"],
+      "title": "Complete capabilities.commands from clap tree with stability tags",
+      "priority_label": "P0",
+      "score": 990,
+      "dimensions": ["self_documentation", "agent_ease_of_use", "agent_intuitiveness", "agent_ergonomics"]
+    },
+    {
+      "rank": 2,
+      "id": "R-002+R-013",
+      "source_ids": ["R-002", "R-013"],
+      "title": "Intent recovery (Levenshtein-1) + did-you-mean quality gate",
+      "priority_label": "P0",
+      "score": 960,
+      "dimensions": ["intent_inference", "error_pedagogy", "agent_intuitiveness"]
+    },
+    {
+      "rank": 3,
+      "id": "R-003",
+      "source_ids": ["R-003"],
+      "title": "Error-Teaches: every usage error names exact corrected invocation",
+      "priority_label": "P1",
+      "score": 910,
+      "dimensions": ["error_pedagogy", "agent_intuitiveness"]
+    },
+    {
+      "rank": 4,
+      "id": "R-005",
+      "source_ids": ["R-005"],
+      "title": "Pin ergonomics contracts in regression_tests/ (schema, stdout purity, typos)",
+      "priority_label": "P1",
+      "score": 900,
+      "dimensions": ["regression_resistance", "output_parseability", "determinism_and_reproducibility"]
+    },
+    {
+      "rank": 5,
+      "id": "R-015+R-004b",
+      "source_ids": ["R-015", "R-004"],
+      "title": "Gate/hide experimental empty verbs or fill one-line About",
+      "priority_label": "P1",
+      "score": 880,
+      "dimensions": ["agent_ease_of_use", "self_documentation", "agent_intuitiveness"]
+    },
+    {
+      "rank": 6,
+      "id": "R-009",
+      "source_ids": ["R-009"],
+      "title": "Export MCP tool map and parity notes in capabilities",
+      "priority_label": "P1",
+      "score": 850,
+      "dimensions": ["self_documentation", "agent_ergonomics", "composability"]
+    },
+    {
+      "rank": 7,
+      "id": "R-008",
+      "source_ids": ["R-008"],
+      "title": "Expand dangerous_operations (edit, cache migrate*, clients rollback)",
+      "priority_label": "P1",
+      "score": 830,
+      "dimensions": ["safety_with_recovery", "error_pedagogy"]
+    },
+    {
+      "rank": 8,
+      "id": "R-001+R-010",
+      "source_ids": ["R-001", "R-010"],
+      "title": "Mega-path via doctor/capabilities composition (robot-triage shape)",
+      "priority_label": "P1",
+      "score": 820,
+      "dimensions": ["agent_ergonomics", "self_documentation", "agent_intuitiveness"]
+    }
+  ],
+  "merges": [
+    {"ids": ["R-001", "R-010"], "merged_id": "R-001+R-010", "reason": "doctor is implementation vehicle for mega-path"},
+    {"ids": ["R-002", "R-013"], "merged_id": "R-002+R-013", "reason": "DYM quality is intent recovery acceptance criterion"},
+    {"ids": ["R-015", "R-004b"], "merged_id": "R-015+R-004b", "reason": "hide or describe; never blank noise"}
+  ],
+  "splits": [
+    {
+      "from": "R-004",
+      "into": [
+        {"id": "R-004a", "scope": "capabilities.commands full clap export + stability", "priority": 0},
+        {"id": "R-004b", "scope": "one-line About for remaining verbs", "priority": 1}
+      ]
+    }
+  ],
+  "priority_deltas": [
+    {"id": "R-004a", "from": "P1", "to": "P0", "reason": "discovery lie-by-omission largest blast"},
+    {"id": "R-015", "from": "P2", "to": "P1", "reason": "28 empty verbs active noise"},
+    {"id": "R-001", "from": "P0", "to": "P1", "reason": "partial discovery stack already strong"},
+    {"id": "R-002", "from": "P0", "to": "P0", "reason": "confirmed islands + corpus"},
+    {"id": "R-013", "from": "standalone_P1", "to": "merged_into_R-002_P0", "reason": "quality gate"}
+  ],
+  "residual_gaps": {
+    "intent_inference": [
+      {"gap": "global flag typos clap-die", "linked": ["R-002"]},
+      {"gap": "bad DYM tips counted as useful_hint", "linked": ["R-013", "R-002"]},
+      {"gap": "verb typos suggest but do not act", "linked": ["R-011"]},
+      {"gap": "caps overclaim intent_inference_aliases", "linked": ["R-004a"]},
+      {"gap": "corpus bias category A global-only", "linked": ["corpus_widen"]}
+    ],
+    "error_pedagogy": [
+      {"gap": "missing exact invocation on required-arg errors", "linked": ["R-003"]},
+      {"gap": "clap pass-as-value tips for unknown flags", "linked": ["R-003"]},
+      {"gap": "four pedagogies coexist", "linked": ["R-003", "R-016_envelope"]},
+      {"gap": "missing-arg exit 1 vs 2 split", "linked": ["R-007"]},
+      {"gap": "run process EC0 with command_success false", "linked": ["family_X11"]}
+    ],
+    "regression_resistance": [
+      {"gap": "regression_tests only .gitkeep", "linked": ["R-005"]},
+      {"gap": "caps schema unpinned", "linked": ["R-005a"]},
+      {"gap": "intent recovery unpinned", "linked": ["R-005c"]},
+      {"gap": "no stdout/stderr purity harness", "linked": ["R-005b"]}
+    ],
+    "self_documentation_empty_verbs": [
+      {"gap": "28 blank help blurbs", "linked": ["R-004b", "R-015"]},
+      {"gap": "caps 17/57 under-export", "linked": ["R-004a"]},
+      {"gap": "mcp-server blank and no mcp_tools field", "linked": ["R-009", "R-015"]},
+      {"gap": "audit/eval cluster pollution", "linked": ["R-015"]},
+      {"gap": "search in robot-docs not in help list", "linked": ["R-006"]}
+    ],
+    "additional_high_blast_not_in_original_top10": [
+      {"gap": "envelope polymorphism 7+ schema families", "suggested_rec": "R-016"},
+      {"gap": "codemode_surface true while binary lacks rquickjs", "suggested_rec": "R-017"},
+      {"gap": "tool field drift grep/find shell/run", "suggested_rec": "R-018"}
+    ]
+  },
+  "strengths_to_preserve": [
+    "capabilities --json contract quality",
+    "robot-docs / robot-help / --robot-help aliases",
+    "doctor multi-slice JSON",
+    "subcommand --jsno recovery islands",
+    "install/cache prune --apply safe defaults",
+    "search alias runtime works",
+    "capabilities re-run determinism"
+  ],
+  "artifacts_written": [
+    "agent_ergonomics_audit/audit/pass-2/triangulation_top10.md",
+    "agent_ergonomics_audit/audit/triangulation/pass2_top10.json",
+    "agent_ergonomics_audit/audit/pass-2/uplift_notes.md"
+  ]
+}

@@ -1,0 +1,188 @@
+$ tokenzero find --jsno TokenZero .
+exit=0
+--- stdout ---
+{
+  "schema_version": "tokenzero.cli.v1",
+  "status": "ok",
+  "tool": "find",
+  "ack": "0",
+  "detail_ref": "tz://blob/ec56e8bb14c73e7d9c734db4f9463a57354ded14211dee1c3991cdadab0ca28d",
+  "mode": "auto",
+  "visible": {
+    "kind": "capsule",
+    "text": "# find TokenZero\n# root: .\nCHANGELOG.md:\n  3: All notable changes to TokenZero will be documented in this file.\n  42: - Paired wall-time gate refuses treating the northstar token-count ceiling as runtime speedup until complete paired raw/TokenZero wall samples exist; micro harness documents the evidence path without a northstar cold rebuild (`tokenzero-g3y.2`, P03-MG-001).\n  78: - **Embeddable recovery API**: `TokenZeroStore` exposes the shared recovery store as a reusable Rust handle with byte-exact put, get, expand, pin, and lifecycle contracts.\n  255: - TokenZero 1.0.0 through 1.0.2: initial public release with CLI tools, MCP\nCLAUDE.md:\n  2: ## TokenZero: Mandatory Default for ALL Operations\n  4: Every I/O operation MUST route through TokenZero MCP. No raw Read/Grep/Glob/LS/Execute unless TokenZero is confirmed down.\n  6: ### Operation → TokenZero Mapping\n  32: 5. Invisible to user — never mention TokenZero unless debugging or asked.\n  33: 6. If both MCP and CLI fail: `TokenZero unavailable: <reason>`, then raw tools as last resort.\nCONTRIBUTING.md:3:TokenZero is a public runtime for recovery-aware context compression.\nDROID.md:\n  2: ## TokenZero: Mandatory Default for ALL Operations\n  4: Every I/O operation MUST route through TokenZero MCP. No raw Read/Grep/Glob/LS/Execute unless TokenZero is confirmed down.\n  6: ### Operation → TokenZero Mapping\n  32: 5. Invisible to user — never mention TokenZero unless debugging or asked.\nGEMINI.md:\n  2: MUST use TokenZero MCP aliases/canonical tz_*: `read`/`tz_read`, `find`/`tz_find`, `tree`/`tz_tree`, `shell`/`tz_shell`, `expand`/`tz_expand`.\n  3: TokenZero aliases count as TokenZero MCP; discover tools first.\n  5: If blocked, say `TokenZero unavailable: <reason>`; use non-tokenzero raw tools only as last-resort fallback.\nMakefile:78:\t@target/debug/tokenzero grep TokenZero README.md docs crates --json >/dev/null\nPareto/IMPL_BEAD_GRAPH.md:1:# RADC → TokenZero Implementation Bead Graph\nPareto/README.md:3:**Path:** `/Users/aditya/AI/TokenZero/Pareto/`"
+  },
+  "refs": [
+    {
+      "kind": "blob",
+      "ref": "tz://blob/ec56e8bb14c73e7d9c734db4f9463a57354ded14211dee1c3991cdadab0ca28d",
+      "bytes": 2124,
+      "live": true
+    },
+    {
+      "kind": "file",
+      "ref": "tz://file/fabf9895537e55ca0",
+      "bytes": 2124,
+      "live": true
+    },
+    {
+      "kind": "search",
+      "ref": "tz://search/ha2884871fee8f043",
+      "bytes": 0,
+      "live": true
+    },
+    {
+      "kind": "search",
+      "ref": "tz://search/ha1ce22fc79a6a472",
+      "bytes": 0,
+      "live": true
+    },
+    {
+      "kind": "search",
+      "ref": "tz://search/h923f066be0109b5d",
+      "bytes": 0,
+      "live": true
+    },
+    {
+      "kind": "search",
+      "ref": "tz://search/h920ddf85c6570006",
+      "bytes": 0,
+      "live": true
+    },
+    {
+      "kind": "search",
+      "ref": "tz://search/h6bac6e2c4b3af18a",
+      "bytes": 0,
+      "live": true
+    },
+    {
+      "kind": "search",
+      "ref": "tz://search/h7ee57f11658d1de3",
+      "bytes": 0,
+      "live": true
+    },
+    {
+      "kind": "search",
+      "ref": "tz://search/had5542496c47d60f",
+      "bytes": 0,
+      "live": true
+    },
+    {
+      "kind": "search",
+      "ref": "tz://search/h4d0108ba34f65e82",
+      "bytes": 0,
+      "live": true
+    },
+    {
+      "kind": "search",
+      "ref": "tz://search/hfdb9d5725a96293e",
+      "bytes": 0,
+      "live": true
+    },
+    {
+      "kind": "search",
+      "ref": "tz://search/h9c617074d35e56b6",
+      "bytes": 0,
+      "live": true
+    },
+    {
+      "kind": "search",
+      "ref": "tz://search/h414f2fb83617b207",
+      "bytes": 0,
+      "live": true
+    },
+    {
+      "kind": "search",
+      "ref": "tz://search/h151a99b1021b51e3",
+      "bytes": 0,
+      "live": true
+    },
+    {
+      "kind": "search",
+      "ref": "tz://search/h233332877d4698d7",
+      "bytes": 0,
+      "live": true
+    },
+    {
+      "kind": "search",
+      "ref": "tz://search/h69444ad5a78312f0",
+      "bytes": 0,
+      "live": true
+    },
+    {
+      "kind": "search",
+      "ref": "tz://search/hd51af4b782739f8b",
+      "bytes": 0,
+      "live": true
+    },
+    {
+      "kind": "search",
+      "ref": "tz://search/h293e9ac06522de07",
+      "bytes": 0,
+      "live": true
+    },
+    {
+      "kind": "search",
+      "ref": "tz://search/hb36ff15b44d007cd",
+      "bytes": 0,
+      "live": true
+    },
+    {
+      "kind": "search",
+      "ref": "tz://search/h5f1c269c48a8e948",
+      "bytes": 0,
+      "live": true
+    },
+    {
+      "kind": "search",
+      "ref": "tz://search/hd0d69cd6597bf5a0",
+      "bytes": 0,
+      "live": true
+    },
+    {
+      "kind": "search",
+      "ref": "tz://search/he8ddf588e65802a9",
+      "bytes": 0,
+      "live": true
+    }
+  ],
+  "accounting": {
+    "raw_tokens": 575,
+    "visible_tokens": 494,
+    "recovery_tokens": 0,
+    "billed_tokens": 494,
+    "cached_tokens": 0,
+    "exact_ref_tokens": 154
+  },
+  "content_type": "search_result",
+  "telemetry": {
+    "cache_hit": false,
+    "degraded": false,
+    "exact_refs_available": true,
+    "matched_files": 8,
+    "matches": 20,
+    "output_strategy": "full",
+    "query": "TokenZero",
+    "result_limit": 20,
+    "roots": [
+      "."
+    ],
+    "search_backend": "rg",
+    "session_delta": {
+      "delta_bytes": 2035,
+      "from_hwm": 122,
+      "full_bytes": 2035,
+      "saved_bytes": 0,
+      "to_hwm": 123
+    },
+    "storage_error": null,
+    "transport_status": "ok",
+    "truncated_by_results": true,
+    "truncated_by_visit": false,
+    "visit_limit": 10000,
+    "visited_files": 8
+  }
+}
+
+--- stderr ---
+

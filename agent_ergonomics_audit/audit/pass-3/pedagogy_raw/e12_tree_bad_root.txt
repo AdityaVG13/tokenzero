@@ -1,0 +1,7 @@
+$ tokenzero tree /no/such/dir
+exit=1
+---stdout---
+error: path is outside allowed roots: /no/such/dir (path_not_allowed)
+
+---stderr---
+

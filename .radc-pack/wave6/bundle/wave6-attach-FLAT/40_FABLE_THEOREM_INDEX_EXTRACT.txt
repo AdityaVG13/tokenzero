@@ -1,0 +1,21 @@
+## 4. Theorem index
+
+| ID | statement (short) | status |
+|---|---|---|
+| W5-MDC-0 | single-prototype two-demand decoding is strictly suboptimal; O5.2 is the exact leaf law | PROVED (DR) |
+| W5-MDC-1 | two-demand candidate ledger identities; exact dedup interaction `M_naive − M = p_c` | PROVED |
+| W5-MDC-2 | ZE-class two-demand dominance at θ ⟺ `p_c(θ) ≥ (9−2n)/3` (all gauges, penalty-robust) | PROVED |
+| W5-MDC-3 | on `Θ_n^↓`: two-demand ZE dominance holds ∀θ iff `n ≥ 5`; margins `(3n−6+1/n, 0, n−9/2+3/(2n))`; class-level kill at `n ≤ 4` | PROVED |
+| W5-MDC-4 | gauge `(40,20)`, full lossy hull, `Θ_n^↓`: two-demand dominance ∀ `n ≥ 5`; impossible ∀ `n ≤ 4` | PROVED (integer certificates + EC floors) |
+| W5-MDC-5 | exact two-demand floors `F²_α` at five vertices; exact `M`-side thresholds `92/11, 143/17, 94/11, 17/2` | EC (exact DP) |
+| W5-ANTI-OPT | antipodal is the exact one-bit optimum at the `Θ_n^↓` vertex for every `n ≥ 2`; exact `Δ_m` formula; unique class iff `8 ∤ n` (n ≥ 3); tie class `(1, n−2)` iff `8 | n` | PROVED |
+| W5-BP1 | first breakpoint of `F` = `2/(1/2 − e^(1))` ⟺ amortized tangent inequality; holds exactly for the five computed classes; local-greed obstruction | PROVED (reduction) + EC (n ≤ 4) + OPEN (n ≥ 5) |
+| W5-AOT | joint multi-entry alias independence; exact visible-transcript ledger (0 bits pre-, 1 bit post-demand); collision lemma; capacity gate | PROVED |
+| W5-DLU | ledger floor + uniqueness at `(5,0,4)`; discrete spectrum gap (`M < 6 ⟹` exact EDC ledger); exact frontier `M(Δ) = 5 − Δ` | PROVED |
+| W5-RACE | exact uniqueness cone `K(ρ)` as finite half-space intersection over supported pairs; closed form at saturation | PROVED |
+| W5-SMC | closed-form corridor inverses `ρ*_class(T)` for all four W4 classes + Δ-aware dominance test + capacity gate; reproduces W4 `ρ*(h)` tables | PROVED |
+| W5-Q3U | Q3-uniform exact floor `min(2+t/2, 4+t/4, 8)`, threshold 16; `n=3` class ordering `16 < 135/8` | EC (exact DP) |
+| W5-Q5-SW | Q5 sandwich narrowed: `ρ_cert(5) ≤ 18` (new certificate); no ≤ 4-leaf code kills past `1600/121` | PROVED (certificate) + EC |
+
+---
+

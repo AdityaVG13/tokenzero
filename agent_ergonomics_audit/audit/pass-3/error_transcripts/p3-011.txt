@@ -1,0 +1,9 @@
+$ tokenzero run true --json
+exit=0
+--- stdout ---
+
+combined_ref: tz://blob/e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
+exit_code: 0
+
+--- stderr ---
+

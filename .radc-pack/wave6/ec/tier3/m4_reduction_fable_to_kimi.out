@@ -1,0 +1,27 @@
+[EC] expand-count distributions (the invariant any reduction must preserve)
+  theta = uniform n=4 (1/4)^4
+    p_c = 1/4;  Fable #exp dist {1: Fraction(1, 4), 2: Fraction(3, 4)}  E = 7/4;  carried C dist {2: Fraction(1, 4), 3: Fraction(3, 4)}  E = 11/4
+    Kimi  #exp dist {1: Fraction(1, 1)}  E = 1;  carried C dist {2: Fraction(1, 1)} (seq)
+    -> P(#exp=2) = 3/4 > 0 vs Kimi Dirac at 1:  DISTRIBUTIONS DIFFER  PASS
+  theta = Theta_4^down vertex (2/5,1/5,1/5,1/5)
+    p_c = 7/25;  Fable #exp dist {1: Fraction(7, 25), 2: Fraction(18, 25)}  E = 43/25;  carried C dist {2: Fraction(7, 25), 3: Fraction(18, 25)}  E = 68/25
+    Kimi  #exp dist {1: Fraction(1, 1)}  E = 1;  carried C dist {2: Fraction(1, 1)} (seq)
+    -> P(#exp=2) = 18/25 > 0 vs Kimi Dirac at 1:  DISTRIBUTIONS DIFFER  PASS
+  theta = near-Dirac (97/100,1/100,1/100,1/100)
+    p_c = 2353/2500;  Fable #exp dist {1: Fraction(2353, 2500), 2: Fraction(147, 2500)}  E = 2647/2500;  carried C dist {2: Fraction(2353, 2500), 3: Fraction(147, 2500)}  E = 5147/2500
+    Kimi  #exp dist {1: Fraction(1, 1)}  E = 1;  carried C dist {2: Fraction(1, 1)} (seq)
+    -> P(#exp=2) = 147/2500 > 0 vs Kimi Dirac at 1:  DISTRIBUTIONS DIFFER  PASS
+
+[EC] mean-matching equations:
+  3 - p_c = 2  <=>  p_c = 1  (Dirac only, excluded by full support)
+  3 - p_c = 1  <=>  p_c = 2  (impossible: p_c = sum theta_i^2 <= (sum theta_i)^2 = 1)
+  verified for p_c in {7/25, 1/4, 1}  PASS
+
+[EC] invariant ranges on Theta_4^down: Fable E[#exp] in [43/25, 7/4], Kimi = 1
+  43/25 = 1.72 > 1 and 7/4 = 1.75 > 1:  NO overlap with Kimi's a.s. value  PASS
+
+M4 RESULT: reduction Fable -> Kimi IMPOSSIBLE (EC+DR).
+Gauge-respecting reductions preserve the carried expand-count distribution;
+Fable's is supported on {1,2} with P(2)=1-p_c>0 on full support, Kimi's is
+Dirac at 1.  Coincidence requires p_c=1 (Dirac theta), outside every
+full-support polytope Theta_n^down.  QED.

@@ -1,0 +1,18 @@
+p_10 = 6560848/9765625 = 0.6718308352
+r=2: Cont-2 B_r = 10769686/1953125 = 5.514079; true grid min over m in [10,18] = 26394686/1953125 = 13.514079 (attained m=10)
+r=3: Cont-2 B_r = 97023471/15625000 = 6.209502; true grid min over m in [10,18] = 206398471/15625000 = 13.209502 (attained m=10)
+r=4: Cont-2 B_r = 252888283/31250000 = 8.092425; true grid min over m in [10,18] = 424763283/31250000 = 13.592425 (attained m=10)
+r=5: Cont-2 B_r = 38966203/3906250 = 9.975348; true grid min over m in [10,18] = 54591203/3906250 = 13.975348 (attained m=10)
+r=6: Cont-2 B_r = 20384017/1562500 = 13.045771; true grid min over m in [10,18] = 23509017/1562500 = 15.045771 (attained m=10)
+PASS G4: all five B_r fractions reproduce Cont-2 exactly and exceed 1
+PASS G4: r>=7 barrier Gamma_T >= (m+1)*2-(2m+1) = 1 exactly (C_16(r)>=32 for r>=7: [32, 36, 40, 45, 50, 53, 56, 60, 62, 64])
+gamma_0,18 down = 277615146191/762939453125 = 0.3638757244154675
+gamma_0,18 cap  = 20074685943080277/50000000000000000 = 0.40149371886160556
+gamma_0,17 down = 71088276063/30517578125 = 2.329420630032384
+gamma_0,17 cap  = 475055717444931/200000000000000 = 2.375278587224655
+PASS G5: m=18 margins exact, in (0,1) sharp; m=17 margins > 1
+PASS G5: integer certificates 20 m^m < (m+1)^(m+1), m=10..17; no-message gap strictly decreasing on [10,18] both classes
+gamma_0,19 down = -1227337666073/762939453125 = -1.6086960256752025
+gamma_0,19 cap  = -157792852435281487/100000000000000000 = -1.577928524352815
+PASS G6: universal m>=19 obstruction, 73/2-2m = -3/2 at m=19; exact negative m=19 gaps reproduced
+PASS G1-sanity: exact no-message P_{0,m} <= 1 - p_m(1-1/16) at down vertex, m=2,10,18

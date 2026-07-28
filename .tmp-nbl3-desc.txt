@@ -1,0 +1,34 @@
+GOAL
+Close the P0 sandbox hole where CodeMode execute_code accepts a foreign root that is outside the server allowlist whenever the path contains workspace markers (.git, Cargo.toml, package.json, pyproject.toml, go.mod, .zerostack, CHANGELOG.md).
+
+WHY
+F-MCP-011 / F-INT-010 / Round2 CONFIRM. In tools.rs, root is accepted when path_allowed OR has_workspace_evidence. Engine then unions that root into the plan workspace, so subsequent ops can touch the foreign tree. allowed_root* is strict; root is not — inconsistency (F-R2 sibling).
+
+RISK
+Agent or malicious plan can pivot MCP session from a locked root into any recognizable project tree on the host filesystem. Local multi-tenant / shared-host risk.
+
+PATHS / SYMPTOMS
+- crates/tokenzero-mcp/src/tools.rs has_workspace_evidence (~80) and execute_code root handling (~222)
+- Engine root union in codemode options
+
+CONSTRAINTS
+- Preserve intentional multi-root workflows only when each root is allowlisted or explicitly admin-granted
+- Do not break legitimate workspace rebase inside already-allowed trees
+- Security audit inventory must include execute_code root path
+
+done_when
+1) Foreign path with Cargo.toml/.git outside allowlist is rejected for execute_code root
+2) allowed_root and root use the same allowlist gate
+3) Regression test covers marker-present escape and marker-absent denial
+4) Security audit / robot-docs mention the contract
+
+verify
+Static: grep shows has_workspace_evidence not used to skip allowlist; tests assert deny.
+NO full cargo workspace run required for close if targeted tests green.
+
+anti-goals
+- Do not disable multi-root entirely
+- Do not re-open closed wqw.5 foreign readability design without owner sign-off; this epic is the DENY residual only
+
+evidence_ids: F-MCP-011, F-INT-010, F-R2-*, round2-p0-confirm.md
+labels: bug-hunt,security,p0,codemode,mcp

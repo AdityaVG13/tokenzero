@@ -1,0 +1,107 @@
+{
+  "runId": "06964ddf-9ef8-4cc1-88c9-c08685140e50",
+  "agent": "worker-sol",
+  "task": "Wave 7 xhigh peer-matrix integrator, READ-ONLY. Read every report analysis/xhigh/00_substrate_methods.md through 60_qwen_w6.md completely, plus source paths cited there. Produce one exhaustive, deduplicated table with columns peer | exact theorem ID | one-line claim shape | exact bundle-relative path | own verdict (ACCEPT/RECHECK-PASS/RECHECK-FAIL/OPEN/INEQUIVALENT) | status/dependency caveat. Include every theorem ID from every present peer, no ranges unless the peer itself defines a family. Also produce complete peer log, NOT_IN_ZIP merge, and conflict-resolution matrix for m_crit, MDC, BP1, agency, master phase. Do not restate peer proofs. No edits, no subagents.\n\n---\n**Output:**\nWrite your findings to exactly this path: /Users/aditya/AI/TokenZero/.pi-subagents/artifacts/outputs/06964ddf-9ef8-4cc1-88c9-c08685140e50/analysis-xhigh/81_peer_matrix.md\nThis path is authoritative for this run.\nIgnore any other output filename or output path mentioned elsewhere, including output destinations in the base agent prompt, system prompt, or task instructions.\n\n## Acceptance Contract\nAcceptance level: attested\nCompletion is not accepted from prose alone. End with a structured acceptance report.\n\nCriteria:\n- criterion-1: Return concrete findings with file paths and severity when applicable\n\nRequired evidence: review-findings, residual-risks\n\nFinish with a fenced JSON block tagged `acceptance-report` in this shape:\nUse empty arrays when no items apply; array fields contain strings unless object entries are shown.\n`criteriaSatisfied[].status` must be exactly one of: satisfied, not-satisfied, not-applicable.\n`commandsRun[].result` must be exactly one of: passed, failed, not-run.\n`manualNotes` and `notes` are optional strings; an empty string means no note and does not satisfy `manual-notes` evidence.\n```acceptance-report\n{\n  \"criteriaSatisfied\": [\n    {\n      \"id\": \"criterion-1\",\n      \"status\": \"satisfied\",\n      \"evidence\": \"specific proof\"\n    }\n  ],\n  \"changedFiles\": [\n    \"src/file.ts\"\n  ],\n  \"testsAddedOrUpdated\": [\n    \"test/file.test.ts\"\n  ],\n  \"commandsRun\": [\n    {\n      \"command\": \"command\",\n      \"result\": \"passed\",\n      \"summary\": \"short result\"\n    }\n  ],\n  \"validationOutput\": [\n    \"validation output or concise summary\"\n  ],\n  \"residualRisks\": [\n    \"none\"\n  ],\n  \"noStagedFiles\": true,\n  \"diffSummary\": \"short description of the diff\",\n  \"reviewFindings\": [\n    \"blocker: file.ts:12 - issue found, or no blockers\"\n  ],\n  \"manualNotes\": \"anything else the parent should know\"\n}\n```",
+  "exitCode": 0,
+  "model": "openai-codex/gpt-5.6-sol:xhigh",
+  "attemptedModels": [
+    "openai-codex/gpt-5.6-sol:xhigh"
+  ],
+  "modelAttempts": [
+    {
+      "model": "openai-codex/gpt-5.6-sol:xhigh",
+      "success": true,
+      "exitCode": 0,
+      "usage": {
+        "input": 266412,
+        "output": 64258,
+        "cacheRead": 11471872,
+        "cacheWrite": 0,
+        "cost": 8.995735999999997,
+        "turns": 155
+      }
+    }
+  ],
+  "acceptance": {
+    "status": "attested",
+    "explicit": false,
+    "effectiveAcceptance": {
+      "level": "attested",
+      "explicit": false,
+      "inferredReason": [
+        "read-only task wording"
+      ],
+      "criteria": [
+        {
+          "id": "criterion-1",
+          "must": "Return concrete findings with file paths and severity when applicable",
+          "evidence": [
+            "review-findings",
+            "residual-risks"
+          ],
+          "severity": "required"
+        }
+      ],
+      "evidence": [
+        "review-findings",
+        "residual-risks"
+      ],
+      "verify": [],
+      "stopRules": []
+    },
+    "inferredReason": [
+      "read-only task wording"
+    ],
+    "criteria": [
+      {
+        "id": "criterion-1",
+        "must": "Return concrete findings with file paths and severity when applicable",
+        "evidence": [
+          "review-findings",
+          "residual-risks"
+        ],
+        "severity": "required"
+      }
+    ],
+    "runtimeChecks": [],
+    "verifyRuns": [],
+    "childReport": {
+      "criteriaSatisfied": [
+        {
+          "id": "criterion-1",
+          "status": "satisfied",
+          "evidence": "145 path-specific theorem rows plus severity findings, peer log, NOT_IN_ZIP merge, conflict matrix, and residual risks."
+        }
+      ],
+      "changedFiles": [
+        "/Users/aditya/AI/TokenZero/.pi-subagents/artifacts/outputs/06964ddf-9ef8-4cc1-88c9-c08685140e50/analysis-xhigh/81_peer_matrix.md"
+      ],
+      "testsAddedOrUpdated": [],
+      "commandsRun": [
+        {
+          "command": "Validate artifact structure, row uniqueness, verdict vocabulary, acceptance JSON, and staging state",
+          "result": "passed",
+          "summary": "145 unique rows; JSON valid; zero staged files."
+        }
+      ],
+      "validationOutput": [
+        "Artifact SHA-256: d6d14def18af994c7e7ee79ea4645e97d594794c89fa2dcfdafc965065ee11c2",
+        "Full source bundle read: 337 files, 26255300 bytes."
+      ],
+      "residualRisks": [
+        "Missing imported W4/W5/Fable/Kimi sources leave conditional rows provenance-unattested."
+      ],
+      "noStagedFiles": true,
+      "diffSummary": "Created only the requested peer-matrix artifact.",
+      "reviewFindings": [
+        "critical: 31_KIMI_W6_PACKAGE.md:361-385 - adaptive-demand invariance is false.",
+        "high: 61_QWEN_W6_PACKAGE.md:530-565 - n=6 phase certificate misses a negative interval.",
+        "high: 21_SOLPRO_W6_THEORY.txt:2937-2969 - independent C++ checker source is absent."
+      ],
+      "manualNotes": "No source file was edited."
+    }
+  },
+  "transcriptPath": "/Users/aditya/AI/TokenZero/.pi-subagents/artifacts/06964ddf-9ef8-4cc1-88c9-c08685140e50_worker-sol_0_transcript.jsonl",
+  "skills": [],
+  "timestamp": 1785208036305
+}
