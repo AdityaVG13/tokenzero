@@ -98,6 +98,8 @@ PY
     'Command: `benchmarks/code-exec-vs-mcp-bakeoff.sh`. Identical tasks executed via CodeMode plans vs MCP schema loading. CodeMode rows cold-boot a full `tokenzero-codemode` stdio server per plan (measured: ~3-5s server init); production clients hold a persistent session, so wall_ms here is the cold-start worst case, stated rather than hidden.' \
     bash "$ROOT/benchmarks/code-exec-vs-mcp-bakeoff.sh"
 
+  run_section 'CodeMode server CPU gate (busy-poll regression)'     'Command: `benchmarks/codemode-cpu-gate.sh`. A codemode server must idle at ~0% CPU with a host op pending and after plans complete; budgets: 25%% of a 2s pending window, 2%% of a 10s idle window. Guards the tokenzero-osn1 regression class.'     bash "$ROOT/benchmarks/codemode-cpu-gate.sh"
+
 } > "$OUT"
 
 log "wrote $OUT"
