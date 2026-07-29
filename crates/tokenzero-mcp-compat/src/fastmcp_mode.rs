@@ -23,6 +23,20 @@ struct EngineTool {
     engine: Arc<Mutex<TokenZeroEngine>>,
 }
 
+/// Lock the shared engine, failing closed with a typed error when a prior
+/// panic poisoned the mutex instead of panicking the whole tool/resource
+/// path (RA NS-C01).
+fn lock_engine(
+    engine: &Arc<Mutex<TokenZeroEngine>>,
+) -> McpResult<std::sync::MutexGuard<'_, TokenZeroEngine>> {
+    engine.lock().map_err(|_| {
+        McpError::new(
+            McpErrorCode::Custom(-32000),
+            "engine lock poisoned by a prior panic; failing closed".to_string(),
+        )
+    })
+}
+
 pub(crate) fn fastmcp_content_texts_from_tool_result(
     result: &Value,
 ) -> Result<Vec<String>, String> {
@@ -109,7 +123,7 @@ impl ToolHandler for EngineTool {
 
     fn call(&self, ctx: &McpContext, arguments: Value) -> McpResult<Vec<Content>> {
         ctx.checkpoint()?;
-        let engine = self.engine.lock().expect("engine mutex");
+        let engine = lock_engine(&self.engine)?;
         match call_tool_fastmcp(&engine, &self.name, &arguments, None) {
             Ok(result) => {
                 // Dual-content pattern: content[0] = old primary text VERBATIM
@@ -154,7 +168,7 @@ impl ResourceHandler for TokenZeroResource {
     }
 
     fn read(&self, _ctx: &McpContext) -> McpResult<Vec<ResourceContent>> {
-        let engine = self.engine.lock().expect("engine mutex");
+        let engine = lock_engine(&self.engine)?;
         match build_resource_payload(&engine, &self.uri) {
             Ok(text) => Ok(vec![ResourceContent {
                 uri: self.uri.clone(),
@@ -251,4 +265,36 @@ pub fn run_fastmcp_stdio(config: EngineConfig) -> ! {
     }
 
     builder.build().run_stdio()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn poisoned_engine_lock_fails_closed_instead_of_panicking() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let engine = Arc::new(Mutex::new(TokenZeroEngine::new(EngineConfig::for_root(
+            dir.path(),
+        ))));
+        let poisoned = Arc::clone(&engine);
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+            let _guard = poisoned.lock().expect("test lock");
+            panic!("deliberate poison");
+        }));
+        let err = lock_engine(&engine).expect_err("poisoned lock must be a typed error");
+        assert!(
+            format!("{err:?}").contains("poisoned"),
+            "error must name the poison cause: {err:?}"
+        );
+    }
+
+    #[test]
+    fn healthy_engine_lock_still_serves() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let engine = Arc::new(Mutex::new(TokenZeroEngine::new(EngineConfig::for_root(
+            dir.path(),
+        ))));
+        assert!(lock_engine(&engine).is_ok());
+    }
 }
