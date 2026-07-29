@@ -282,6 +282,126 @@ fn pn93_over_budget_values_stay_ref_first() {
     assert!(result.refs.iter().any(|r| r == ref_id));
 }
 
+// vz89.10 session exposure ledger: deterministic mid-entropy payload between
+// the 64-token ref floor and the explicit 2048-token inline budget.
+const VZ89_10_PLAN: &str = "return Array.from({length: 600}, (_, i) => i.toString(36)).join('|')";
+
+fn vz89_10_options(root: &std::path::Path) -> CodeModeOptions {
+    CodeModeOptions {
+        root: Some(root.to_path_buf()),
+        cache_path: Some(root.join("recovery-cache.json")),
+        ref_first_budget: 2048,
+        ..Default::default()
+    }
+}
+
+#[test]
+fn vz89_10_second_reference_in_scope_sends_ref_not_bytes() {
+    let work = tempfile::tempdir().unwrap();
+    let first = execute_codemode_with_options(VZ89_10_PLAN, vz89_10_options(work.path()));
+    assert_eq!(first.status, CodeModeStatus::Completed, "{:?}", first.error);
+    let text = first
+        .value
+        .as_ref()
+        .unwrap()
+        .as_str()
+        .expect("first reference must inline the full string")
+        .to_string();
+    let ref_id = first
+        .refs
+        .iter()
+        .find(|r| r.starts_with("tz://blob/"))
+        .expect("inline value must still mint its ref")
+        .clone();
+
+    let second = execute_codemode_with_options(VZ89_10_PLAN, vz89_10_options(work.path()));
+    assert_eq!(
+        second.status,
+        CodeModeStatus::Completed,
+        "{:?}",
+        second.error
+    );
+    let value = second.value.as_ref().unwrap();
+    assert!(
+        value.as_str().is_none(),
+        "held bytes must not re-inline, got: {value}"
+    );
+    assert_eq!(value["session_exposure"].as_str(), Some("held"), "{value}");
+    assert_eq!(value["ref"].as_str(), Some(ref_id.as_str()));
+    assert!(value["expand"].as_str().unwrap().contains(&ref_id));
+    assert!(
+        serde_json::to_string(value).unwrap().len() < text.len(),
+        "ref-only envelope must be smaller than the payload"
+    );
+}
+
+#[test]
+fn vz89_10_different_scope_inlines_freshly() {
+    let work_a = tempfile::tempdir().unwrap();
+    let work_b = tempfile::tempdir().unwrap();
+    let first = execute_codemode_with_options(VZ89_10_PLAN, vz89_10_options(work_a.path()));
+    assert!(first.value.as_ref().unwrap().as_str().is_some());
+    let second = execute_codemode_with_options(VZ89_10_PLAN, vz89_10_options(work_b.path()));
+    assert_eq!(
+        second.status,
+        CodeModeStatus::Completed,
+        "{:?}",
+        second.error
+    );
+    assert!(
+        second.value.as_ref().unwrap().as_str().is_some(),
+        "a new session scope must receive the full bytes, got: {:?}",
+        second.value
+    );
+}
+
+#[test]
+fn vz89_10_held_ref_expand_succeeds_and_marks_session_replay() {
+    let work = tempfile::tempdir().unwrap();
+    let first = execute_codemode_with_options(VZ89_10_PLAN, vz89_10_options(work.path()));
+    let ref_id = first
+        .refs
+        .iter()
+        .find(|r| r.starts_with("tz://blob/"))
+        .expect("ref minted")
+        .clone();
+    let cache_path = work.path().join("recovery-cache.json");
+    // Fresh engine on the same session scope: expand of a session-known ref
+    // is always available and tagged as a replay (recovery accounting class).
+    let engine = tokenzero_engine::TokenZeroEngine::new(tokenzero_engine::EngineConfig {
+        cache_path,
+        ..tokenzero_engine::EngineConfig::for_root(work.path())
+    });
+    let response = engine.expand_with_params(tokenzero_engine::expand_params::ExpandParams {
+        ref_id: ref_id.clone(),
+        raw: true,
+        ..Default::default()
+    });
+    assert!(
+        response.error.is_none(),
+        "held ref must expand: {:?}",
+        response.error
+    );
+    assert_eq!(
+        response
+            .telemetry
+            .as_ref()
+            .and_then(|t| t.get("session_exposure_replay"))
+            .and_then(serde_json::Value::as_u64),
+        Some(1),
+        "first replay of a held ref must be tagged: {:?}",
+        response.telemetry
+    );
+    // A ref the session never saw is ordinary recovery, not a replay.
+    let foreign = engine.expand_with_params(tokenzero_engine::expand_params::ExpandParams {
+        ref_id: "tz://blob/0000000000000000000000000000000000000000000000000000000000000000"
+            .to_string(),
+        raw: true,
+        ..Default::default()
+    });
+    assert!(foreign.error.is_some(), "foreign digest must not resolve");
+}
+
 #[test]
 fn envelope_v3_collapses_execution_refs_and_hides_store_block() {
     let work = tempfile::tempdir().unwrap();

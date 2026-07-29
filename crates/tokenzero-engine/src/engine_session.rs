@@ -55,6 +55,7 @@ impl TokenZeroEngine {
         // (and session_boot) here would make cold CLI boot proportional to prior
         // session size; both are opened on first use instead.
         let cache_path = config.cache_path.clone();
+        let exposure_scope = crate::session_persist::session_scope_id(&config.cache_path);
         Self {
             config,
             rg_binary: OnceLock::new(),
@@ -71,8 +72,25 @@ impl TokenZeroEngine {
             session_persist,
             session_boot: OnceLock::new(),
             surface_health: std::sync::Arc::new(crate::surface_health::SurfaceHealth::new()),
+            exposure: crate::exposure::session_exposure_ledger(&exposure_scope),
             lifecycle: Mutex::new(InitializeState::Uninitialized),
         }
+    }
+
+    /// The session exposure ledger for this engine's scope (vz89.10).
+    pub fn session_exposure(
+        &self,
+    ) -> std::sync::Arc<Mutex<crate::exposure::SessionExposureLedger>> {
+        std::sync::Arc::clone(&self.exposure)
+    }
+
+    /// Record a re-expansion of a session-known object; returns the running
+    /// replay count when the ref was previously exposed to this session.
+    pub fn record_session_reexpansion(&self, ref_id: &str) -> Option<u64> {
+        self.exposure
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .record_reexpansion(ref_id, None)
     }
 
     /// Mark the MCP initialize lifecycle Ready for unit tests that exercise

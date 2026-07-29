@@ -24,6 +24,7 @@ mod domain;
 mod engine_common;
 mod engine_edit;
 mod engine_expand;
+pub mod exposure;
 mod engine_fetch;
 mod engine_find;
 mod engine_ingest;
@@ -236,6 +237,9 @@ pub struct TokenZeroEngine {
     /// pay boot I/O when they never ask for the capsule.
     session_boot: OnceLock<Option<tokenzero_recovery::boot::SessionBoot>>,
     surface_health: std::sync::Arc<surface_health::SurfaceHealth>,
+    /// vz89.10 session exposure ledger, shared process-wide per session scope
+    /// so per-call CodeMode engines never re-inline bytes the session holds.
+    exposure: std::sync::Arc<Mutex<exposure::SessionExposureLedger>>,
     /// Fail-open append-only response accounting beside the recovery cache.
     ledger: Option<ledger::LedgerWriter>,
     /// Per-connection MCP initialize lifecycle (stdio session / engine).

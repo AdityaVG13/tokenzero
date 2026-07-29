@@ -146,12 +146,28 @@ fn legacy_sibling_holding_ref(ref_id: &str, active_cache: &Path) -> Option<PathB
 
 impl TokenZeroEngine {
     pub fn expand_with_params(&self, params: ExpandParams) -> ToolResponse {
-        let response = self.expand_with_params_inner(params);
+        let ref_id = params.ref_id.clone();
+        let mut response = self.expand_with_params_inner(params);
         let ok = response.error.is_none();
         let code = response.error.as_ref().map(|err| err.code.as_str());
         // Health probe for crash-only unlock (wqw.9). invalid_ref is a client
         // mistake and does not open recovery.
         self.surface_health().record_expand_outcome(ok, code);
+        if ok {
+            // vz89.10: re-expansion of a session-exposed object always succeeds
+            // and is marked as a session replay (recovery accounting class).
+            if let Some(replays) = self.record_session_reexpansion(&ref_id) {
+                let telemetry = response
+                    .telemetry
+                    .get_or_insert_with(|| serde_json::json!({}));
+                if let Some(map) = telemetry.as_object_mut() {
+                    map.insert(
+                        "session_exposure_replay".to_string(),
+                        serde_json::json!(replays),
+                    );
+                }
+            }
+        }
         response
     }
 

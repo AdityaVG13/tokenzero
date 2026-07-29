@@ -1571,7 +1571,14 @@ fn ref_first_final_value(
     let mut store = tokenzero_recovery::RecoveryStore::new(Some(engine.config.cache_path.clone()));
     let mut refs = Vec::new();
     let budget_tokens = options.ref_first_budget;
-    let value = ref_first_value(value, budget_tokens, &mut store, &mut refs);
+    // vz89.10: one session turn per codemode execution; the ledger is shared
+    // per session scope across the per-call engines CodeMode builds.
+    let exposure_ledger = engine.session_exposure();
+    let mut exposure = exposure_ledger
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    exposure.next_turn();
+    let value = ref_first_value(value, budget_tokens, &mut store, &mut refs, &mut exposure);
     (value, refs)
 }
 
@@ -1580,6 +1587,7 @@ fn ref_first_value(
     budget_tokens: usize,
     store: &mut tokenzero_recovery::RecoveryStore,
     refs: &mut Vec<String>,
+    exposure: &mut tokenzero_engine::exposure::SessionExposureLedger,
 ) -> Value {
     {
         if is_exact_expand_value(&value) {
@@ -1617,6 +1625,21 @@ fn ref_first_value(
                     let content_type = detect_content_type(&text, None);
                     if let Ok(stored) = store.store_payload(&text, content_type, None, None, None) {
                         let ref_id = stored.blob_ref.as_str().to_string();
+                        // vz89.10: the session already holds these bytes, so a
+                        // second reference sends the short ref instead of
+                        // re-inlining. Expand always recovers the full bytes.
+                        if exposure.exposure(&ref_id, None).is_some() {
+                            if !refs.contains(&ref_id) {
+                                refs.push(ref_id.clone());
+                            }
+                            return json!({
+                                "ref": ref_id,
+                                "chars": text.chars().count(),
+                                "expand": format!("await zero.token.expand('{ref_id}')"),
+                                "session_exposure": "held",
+                            });
+                        }
+                        exposure.record(&ref_id, None, text.len() as u64);
                         if !refs.contains(&ref_id) {
                             refs.push(ref_id);
                         }
@@ -1627,7 +1650,7 @@ fn ref_first_value(
             Value::Array(items) => Value::Array(
                 items
                     .into_iter()
-                    .map(|item| ref_first_value(item, budget_tokens, store, refs))
+                    .map(|item| ref_first_value(item, budget_tokens, store, refs, exposure))
                     .collect(),
             ),
             Value::Object(mut map) => {
@@ -1649,7 +1672,7 @@ fn ref_first_value(
                 Value::Object(
                     map.into_iter()
                         .map(|(key, value)| {
-                            (key, ref_first_value(value, budget_tokens, store, refs))
+                            (key, ref_first_value(value, budget_tokens, store, refs, exposure))
                         })
                         .collect(),
                 )
