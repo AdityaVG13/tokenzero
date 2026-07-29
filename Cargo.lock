@@ -2995,6 +2995,8 @@ dependencies = [
  "tokenzero-recovery",
  "tokenzero-runtime",
  "zero-abi",
+ "zero-gate",
+ "zero-ledger",
 ]
 
 [[package]]
@@ -3729,6 +3731,37 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2 0.10.9",
+]
+
+[[package]]
+name = "zero-cert"
+version = "0.1.0"
+source = "git+https://github.com/AdityaVG13/zerostack?rev=3e12d0aed8c8aba4cedb28e1ad178c5e72c1b4a1#3e12d0aed8c8aba4cedb28e1ad178c5e72c1b4a1"
+dependencies = [
+ "serde",
+ "serde_json",
+ "zero-abi",
+ "zero-ref",
+]
+
+[[package]]
+name = "zero-gate"
+version = "0.1.0"
+source = "git+https://github.com/AdityaVG13/zerostack?rev=3e12d0aed8c8aba4cedb28e1ad178c5e72c1b4a1#3e12d0aed8c8aba4cedb28e1ad178c5e72c1b4a1"
+dependencies = [
+ "serde",
+ "zero-abi",
+ "zero-cert",
+]
+
+[[package]]
+name = "zero-ledger"
+version = "0.1.0"
+source = "git+https://github.com/AdityaVG13/zerostack?rev=3e12d0aed8c8aba4cedb28e1ad178c5e72c1b4a1#3e12d0aed8c8aba4cedb28e1ad178c5e72c1b4a1"
+dependencies = [
+ "serde",
+ "serde_json",
+ "zero-abi",
 ]
 
 [[package]]
