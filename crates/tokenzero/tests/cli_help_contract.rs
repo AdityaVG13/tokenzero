@@ -625,6 +625,35 @@ fn cli_run_nonzero_exit_keeps_existing_failure_envelope() {
 }
 
 #[test]
+fn cli_mcp_tool_name_suggests_cli_verb_not_nearest_string() {
+    // bara (R-016): tz_read must suggest 'read', never clap's generic 'tree'.
+    let output = Command::cargo_bin("tokenzero")
+        .unwrap()
+        .args(["tz_read", "some/file.rs"])
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(2));
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(stderr.contains("the CLI verb is 'read'"), "{stderr}");
+    assert!(
+        stderr.contains("corrected command: tokenzero read some/file.rs"),
+        "{stderr}"
+    );
+    assert!(!stderr.contains("'tree'"), "{stderr}");
+
+    // Non-MCP typos keep clap's generic suggestion path.
+    let output = Command::cargo_bin("tokenzero")
+        .unwrap()
+        .args(["tre"])
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(2));
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(stderr.contains("similar subcommand"), "{stderr}");
+    assert!(!stderr.contains("MCP tool name"), "{stderr}");
+}
+
+#[test]
 fn cli_run_json_child_exit_opt_in_mirrors_child_failure() {
     // nt0i: default --json keeps the exit-0 envelope contract; the opt-in
     // mirrors the child exit code so harnesses can gate on it.

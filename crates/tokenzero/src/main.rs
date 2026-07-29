@@ -194,7 +194,42 @@ fn main() -> Result<()> {
         return Ok(());
     }
 
-    let cli = Cli::parse_from(normalize_agent_invocation_args(argv));
+    let normalized_argv = normalize_agent_invocation_args(argv);
+    let cli = match Cli::try_parse_from(&normalized_argv) {
+        Ok(cli) => cli,
+        Err(err) => {
+            // bara (R-016): an unknown subcommand that is an MCP tz_* tool name
+            // must suggest the mapped CLI verb (tz_read -> read), never clap's
+            // generic nearest string (which sent tz_read to 'tree').
+            if let Some(verb) = mcp_name_to_cli_verb(
+                normalized_argv
+                    .get(1)
+                    .and_then(|arg| arg.to_str())
+                    .unwrap_or_default(),
+            ) {
+                if matches!(err.kind(), clap::error::ErrorKind::InvalidSubcommand) {
+                    let corrected: Vec<String> = normalized_argv
+                        .iter()
+                        .skip(1)
+                        .map(|arg| arg.to_string_lossy().into_owned())
+                        .collect();
+                    let corrected = std::iter::once(verb.to_string())
+                        .chain(corrected.into_iter().skip(1))
+                        .collect::<Vec<_>>()
+                        .join(" ");
+                    eprintln!(
+                        "error: unrecognized subcommand '{}'\n\n  tip: '{}' is an MCP tool name; the CLI verb is '{}'\n\n  corrected command: tokenzero {}\n",
+                        normalized_argv[1].to_string_lossy(),
+                        normalized_argv[1].to_string_lossy(),
+                        verb,
+                        corrected,
+                    );
+                    std::process::exit(2);
+                }
+            }
+            err.exit();
+        }
+    };
     let Some(command) = cli.command else {
         Cli::command().print_help()?;
         println!();
@@ -263,6 +298,30 @@ fn main() -> Result<()> {
     }
     });
     Ok(())
+}
+
+/// bara (R-016): MCP tz_* tool name -> CLI verb. Consulted when clap rejects
+/// an unknown subcommand so the tip names the real CLI verb.
+fn mcp_name_to_cli_verb(name: &str) -> Option<&'static str> {
+    Some(match name {
+        "tz_read" => "read",
+        "tz_find" => "find",
+        "tz_grep" => "grep",
+        "tz_glob" => "glob",
+        "tz_tree" => "tree",
+        "tz_edit" => "edit",
+        "tz_recall" => "recall",
+        "tz_fetch" => "fetch",
+        "tz_shell" => "run",
+        "tz_ingest" => "ingest",
+        "tz_expand" => "expand",
+        "tz_batch" => "codemode",
+        "tz_mem" => "cache",
+        "tz_discover" => "capabilities",
+        "tz_rewrite" => "rewrite",
+        "tz_cache_pack" => "cache-pack",
+        _ => return None,
+    })
 }
 
 fn normalize_agent_invocation_args(mut argv: Vec<OsString>) -> Vec<OsString> {
