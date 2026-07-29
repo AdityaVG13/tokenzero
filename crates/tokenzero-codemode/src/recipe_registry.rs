@@ -41,17 +41,24 @@ impl RecipeDefinition {
 fn registry() -> &'static Vec<RecipeDefinition> {
     static REGISTRY: OnceLock<Vec<RecipeDefinition>> = OnceLock::new();
     REGISTRY.get_or_init(|| {
-        let recipes: Vec<RecipeDefinition> =
-            serde_json::from_str(include_str!("fixtures/codemode-recipes.json"))
-                .expect("committed CodeMode recipe registry must be valid JSON");
-        assert_eq!(recipes.len(), 10, "registry must contain the pulse top ten");
-        for recipe in &recipes {
-            assert_eq!(recipe.version, RECIPE_REGISTRY_VERSION);
-            assert!(!recipe.alternatives.is_empty());
-            assert!(recipe.measured_visible_tokens <= recipe.envelope_tokens());
-        }
-        recipes
+        // Resilient in production (RA-ASSERT): a corrupt or contract-violating
+        // fixture must never panic the release path. Strict validation of the
+        // committed fixture lives in the test suite.
+        load_registry(include_str!("fixtures/codemode-recipes.json")).unwrap_or_default()
     })
+}
+
+fn load_registry(source: &str) -> Result<Vec<RecipeDefinition>, String> {
+    let recipes: Vec<RecipeDefinition> = serde_json::from_str(source)
+        .map_err(|err| format!("CodeMode recipe registry is not valid JSON: {err}"))?;
+    Ok(recipes
+        .into_iter()
+        .filter(|recipe| {
+            recipe.version == RECIPE_REGISTRY_VERSION
+                && !recipe.alternatives.is_empty()
+                && recipe.measured_visible_tokens <= recipe.envelope_tokens()
+        })
+        .collect())
 }
 
 pub fn get(name: &str) -> Option<RecipeDefinition> {
@@ -82,6 +89,23 @@ mod tests {
             );
             assert!(recipe.measured_visible_tokens <= recipe.envelope_tokens());
         }
+    }
+
+    #[test]
+    fn corrupt_fixture_fails_without_panicking() {
+        assert!(load_registry("{ not json").is_err());
+        assert!(load_registry("[]").expect("empty registry parses").is_empty());
+    }
+
+    #[test]
+    fn invariant_violating_recipes_are_filtered_not_fatal() {
+        let mut recipes: Vec<serde_json::Value> =
+            serde_json::from_str(include_str!("fixtures/codemode-recipes.json"))
+                .expect("fixture parses");
+        recipes[0]["version"] = serde_json::Value::String("bogus".into());
+        let loaded = load_registry(&serde_json::to_string(&recipes).expect("serialize"))
+            .expect("loads with one bad recipe");
+        assert_eq!(loaded.len(), 9);
     }
 
     #[test]
