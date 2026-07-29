@@ -919,9 +919,83 @@ pub fn captured_stream_text(text: &str, capture: &StreamCapture, stream_name: &s
     value
 }
 
+/// 0ok7: opt-in slim CLI envelope. Off by default; the full envelope stays
+/// byte-identical until the coordinated schema bump (tokenzero-jfet/1cwf).
+pub const SLIM_ENVELOPE_ENV: &str = "TOKENZERO_SLIM_ENVELOPE";
+
+pub fn slim_envelope_enabled() -> bool {
+    std::env::var(SLIM_ENVELOPE_ENV)
+        .map(|raw| {
+            matches!(
+                raw.trim().to_ascii_lowercase().as_str(),
+                "1" | "on" | "true" | "yes"
+            )
+        })
+        .unwrap_or(false)
+}
+
 pub fn cli_json(response: &ToolResponse) -> String {
+    if slim_envelope_enabled() {
+        return slim_cli_json(response);
+    }
     serde_json::to_string_pretty(response).unwrap_or_else(|_| {
         format!("{{\"schema_version\":\"{CLI_SCHEMA_VERSION}\",\"status\":\"error\"}}")
+    })
+}
+
+/// Slim projection: keeps status truth, the one-token ack, the payload, and
+/// every durable ref (as bare strings); drops advisory blocks (schema_version,
+/// mode, content_type, accounting, telemetry) recoverable by unsetting the
+/// env. Deterministic: same op under the same gate => same bytes.
+fn slim_cli_json(response: &ToolResponse) -> String {
+    let mut doc = serde_json::Map::new();
+    doc.insert("status".into(), serde_json::json!(response.status));
+    doc.insert("tool".into(), serde_json::json!(response.tool));
+    if let Some(ack) = &response.ack {
+        doc.insert("ack".into(), serde_json::json!(ack));
+    }
+    if let Some(visible) = &response.visible {
+        doc.insert(
+            "visible".into(),
+            serde_json::to_value(visible).unwrap_or(serde_json::Value::Null),
+        );
+    }
+    if !response.refs.is_empty() {
+        doc.insert(
+            "refs".into(),
+            serde_json::json!(response
+                .refs
+                .iter()
+                .map(|record| record.ref_id.as_str())
+                .collect::<Vec<_>>()),
+        );
+    }
+    if let Some(detail_ref) = &response.detail_ref {
+        doc.insert("detail_ref".into(), serde_json::json!(detail_ref));
+    }
+    if let Some(error) = &response.error {
+        doc.insert(
+            "error".into(),
+            serde_json::to_value(error).unwrap_or(serde_json::Value::Null),
+        );
+        if let Some(diagnostic) = &response.diagnostic {
+            doc.insert(
+                "diagnostic".into(),
+                serde_json::to_value(diagnostic).unwrap_or(serde_json::Value::Null),
+            );
+        }
+    }
+    if let Some(safety) = &response.safety {
+        doc.insert("safety".into(), safety.clone());
+    }
+    if let Some(channels) = &response.channels {
+        doc.insert(
+            "channels".into(),
+            serde_json::to_value(channels).unwrap_or(serde_json::Value::Null),
+        );
+    }
+    serde_json::to_string(&serde_json::Value::Object(doc)).unwrap_or_else(|_| {
+        format!("{{\"status\":\"error\",\"tool\":\"{}\"}}", response.tool)
     })
 }
 

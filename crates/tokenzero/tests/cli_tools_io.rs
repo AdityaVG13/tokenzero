@@ -37,6 +37,54 @@ fn cli_read_expand_json_roundtrip() {
 }
 
 #[test]
+fn cli_slim_envelope_opt_in_drops_advisory_blocks_and_keeps_durable_refs() {
+    // 0ok7: TOKENZERO_SLIM_ENVELOPE=1 slims the CLI JSON envelope; the full
+    // envelope is the unchanged default.
+    let (dir, cache) = setup_temp_with_cache();
+    let file = dir.path().join("tiny.txt");
+    std::fs::write(&file, "tiny payload\n").unwrap();
+    let file_arg = file.to_str().unwrap().to_string();
+    let root_arg = dir.path().to_str().unwrap().to_string();
+    let cache_arg = cache.to_str().unwrap().to_string();
+    let args = vec![
+        "read",
+        file_arg.as_str(),
+        "--cache-path",
+        cache_arg.as_str(),
+        "--allowed-root",
+        root_arg.as_str(),
+        "--json",
+    ];
+
+    let full = run_tokenzero_json_in_with_env(&args, dir.path(), &[]);
+    fields!(full;"/schema_version" =>"tokenzero.cli.v1");
+    assert!(full.get("telemetry").is_some(), "full envelope carries telemetry");
+    assert!(full.get("accounting").is_some(), "full envelope carries accounting");
+
+    let slim = run_tokenzero_json_in_with_env(&args, dir.path(), &[("TOKENZERO_SLIM_ENVELOPE", "1")]);
+    fields!(slim;"/status" =>"ok"; "/tool" =>"read");
+    for dropped in ["schema_version", "telemetry", "accounting", "mode", "content_type"] {
+        assert!(slim.get(dropped).is_none(), "slim envelope drops {dropped}: {slim}");
+    }
+    assert_json_contains(&slim["visible"]["text"], "tiny payload");
+    let ref_id = slim["refs"][0]
+        .as_str()
+        .expect("slim refs are bare ref strings");
+    assert!(ref_id.starts_with("tz://blob/"), "{ref_id}");
+    assert_eq!(
+        expand_raw_text(ref_id, Some(&cache), None, &[]),
+        "tiny payload\n",
+        "slim refs stay durable and expand to exact bytes"
+    );
+    let slim_bytes = serde_json::to_string(&slim).unwrap().len();
+    let full_bytes = serde_json::to_string(&full).unwrap().len();
+    assert!(
+        slim_bytes * 2 < full_bytes,
+        "slim {slim_bytes}B must be under half of full {full_bytes}B"
+    );
+}
+
+#[test]
 fn cli_expand_recovers_blob_across_roots_via_ref_index() {
     let (root_a, root_b, index_dir) = (tempdir().unwrap(), tempdir().unwrap(), tempdir().unwrap());
     let file = root_a.path().join("sample.txt");
