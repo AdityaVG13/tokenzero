@@ -840,14 +840,55 @@ pub fn doctor_robot_triage(root: &Path, cache_path: Option<&Path>) -> serde_json
             .and_then(Value::as_str)
             .unwrap_or("tokenzero doctor --json")
     };
+    let recommendations: Vec<Value> = report["findings"]
+        .as_array()
+        .map(|findings| {
+            findings
+                .iter()
+                .map(|finding| {
+                    serde_json::json!({
+                        "finding_id": finding["id"],
+                        "severity": finding["severity"],
+                        "next_step": finding["next_step"]
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    // pec5 (R-001): quick_ref + recommendations + commands + health so agents
+    // following the Polish Bar get the whole triage in one object.
     serde_json::json!({
         "schema_version": "tokenzero.doctor.robot_triage.v1",
         "status": report["status"],
         "ok": report["ok"],
+        "health": {
+            "ok": report["ok"],
+            "status": report["status"],
+            "summary": report["summary"]
+        },
         "summary": report["summary"],
         "findings": report["findings"],
         "actions_planned": actions_planned,
+        "recommendations": recommendations,
         "recommended_command": recommended_command,
+        "quick_ref": {
+            "diagnose": "tokenzero doctor --json",
+            "triage": "tokenzero --robot-triage",
+            "plan_fix": "tokenzero doctor --dry-run --fix --json",
+            "apply_fix": "tokenzero doctor --fix --json",
+            "explain_finding": "tokenzero doctor explain <finding-id>",
+            "capabilities": "tokenzero capabilities --json",
+            "guide": "tokenzero robot-docs guide"
+        },
+        "commands": {
+            "diagnose": "tokenzero doctor --json",
+            "robot_triage": "tokenzero doctor --robot-triage --json",
+            "dry_run_fix": "tokenzero doctor --dry-run --fix --json",
+            "fix": "tokenzero doctor --fix --json",
+            "undo": "tokenzero doctor undo <run-id> --json",
+            "capabilities": "tokenzero doctor capabilities --json",
+            "robot_docs": "tokenzero doctor robot-docs"
+        },
         "capabilities_url": "tokenzero doctor capabilities --json",
         "robot_docs_command": "tokenzero doctor robot-docs",
         "mutation_policy": "read-only by default; run --dry-run --fix before --fix"

@@ -654,6 +654,59 @@ fn cli_mcp_tool_name_suggests_cli_verb_not_nearest_string() {
 }
 
 #[test]
+fn cli_robot_triage_root_alias_matches_doctor_envelope() {
+    // pec5 (R-001): root mega-command aliases reach doctor --robot-triage.
+    for args in [
+        vec!["--robot-triage"],
+        vec!["robot-triage"],
+        vec!["doctor", "--robot-triage"],
+    ] {
+        let output = Command::cargo_bin("tokenzero")
+            .unwrap()
+            .args(&args)
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{args:?}: {}", String::from_utf8_lossy(&output.stderr));
+        let json: Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(
+            json["schema_version"], "tokenzero.doctor.robot_triage.v1",
+            "{args:?}"
+        );
+        for key in [
+            "health",
+            "quick_ref",
+            "recommendations",
+            "commands",
+            "findings",
+            "recommended_command",
+        ] {
+            assert!(json.get(key).is_some(), "{args:?} missing {key}");
+        }
+    }
+
+    // The help footer advertises the mega-command.
+    let output = Command::cargo_bin("tokenzero")
+        .unwrap()
+        .arg("--help")
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(stdout.contains("tokenzero --robot-triage"), "{stdout}");
+
+    // capabilities pins the triage schema.
+    let output = Command::cargo_bin("tokenzero")
+        .unwrap()
+        .args(["capabilities", "--json"])
+        .output()
+        .unwrap();
+    let json: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(
+        json["output_schemas"]["doctor_robot_triage"]["schema_version"],
+        "tokenzero.doctor.robot_triage.v1"
+    );
+}
+
+#[test]
 fn cli_flag_typo_distance_one_offers_corrected_command() {
     // bdki (R-002): distance-1 flag typo -> did-you-mean + corrected command.
     let output = Command::cargo_bin("tokenzero")

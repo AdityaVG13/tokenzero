@@ -309,6 +309,28 @@ pub fn capabilities_json() -> serde_json::Value {
                     "telemetry.failed_segment",
                     "refs"
                 ]
+            },
+            "doctor_robot_triage": {
+                "schema_version": "tokenzero.doctor.robot_triage.v1",
+                "invocations": [
+                    "tokenzero --robot-triage",
+                    "tokenzero robot-triage",
+                    "tokenzero doctor --robot-triage"
+                ],
+                "required_keys": [
+                    "schema_version",
+                    "status",
+                    "ok",
+                    "health",
+                    "summary",
+                    "findings",
+                    "actions_planned",
+                    "recommendations",
+                    "recommended_command",
+                    "quick_ref",
+                    "commands",
+                    "mutation_policy"
+                ]
             }
         },
         "exit_codes": EXIT_CODES,

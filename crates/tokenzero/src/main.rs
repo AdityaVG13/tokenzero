@@ -498,6 +498,12 @@ fn normalize_agent_invocation_args(mut argv: Vec<OsString>) -> Vec<OsString> {
         argv.push(OsString::from("guide"));
         return argv;
     }
+    // pec5 (R-001): root mega-command aliases -> doctor --robot-triage.
+    if matches!(argv[1].to_str(), Some("--robot-triage" | "robot-triage")) {
+        argv[1] = OsString::from("doctor");
+        argv.insert(2, OsString::from("--robot-triage"));
+        return argv;
+    }
     if argv[1]
         .to_str()
         .is_some_and(|arg| arg == "--mode" || arg.starts_with("--mode="))
