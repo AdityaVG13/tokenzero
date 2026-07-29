@@ -61,7 +61,20 @@ fn cli_capabilities_json_exposes_agent_contract() {
             .any(|feature| feature == "non_tty_output_discipline")
     );
     assert_eq!(json["feature_flags"]["capabilities_json"], true);
-    assert_eq!(json["feature_flags"]["codemode_surface"], true);
+    // o574 (R-019): the flag must reflect compile-time availability, not a
+    // hardcoded true. The test binary and the CLI under test share features.
+    assert_eq!(
+        json["feature_flags"]["codemode_surface"],
+        cfg!(feature = "surface-codemode")
+    );
+    assert_eq!(
+        json["features"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|feature| feature == "codemode_surface"),
+        cfg!(feature = "surface-codemode")
+    );
     assert_eq!(json["feature_flags"]["robot_docs_guide"], true);
     assert_eq!(json["feature_flags"]["intent_inference_aliases"], true);
     assert_eq!(
@@ -270,20 +283,22 @@ fn cli_agent_contract_outputs_are_deterministic_and_env_clean() {
         .iter()
         .map(|feature| feature.as_str().unwrap())
         .collect();
-    assert_eq!(
-        features,
-        vec![
-            "capabilities_json",
-            "codemode_surface",
-            "exact_recovery_refs",
-            "intent_inference_aliases",
-            "json_output",
-            "non_tty_output_discipline",
-            "pipeline_rerun_guidance",
-            "robot_docs_guide",
-            "status_truth_shell"
-        ]
-    );
+    // o574 (R-019): codemode_surface appears only in codemode builds.
+    let mut expected = vec![
+        "capabilities_json",
+        "exact_recovery_refs",
+        "intent_inference_aliases",
+        "json_output",
+        "non_tty_output_discipline",
+        "pipeline_rerun_guidance",
+        "robot_docs_guide",
+        "status_truth_shell",
+    ];
+    if cfg!(feature = "surface-codemode") {
+        expected.push("codemode_surface");
+        expected.sort();
+    }
+    assert_eq!(features, expected);
 }
 
 #[test]

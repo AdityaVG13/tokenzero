@@ -387,9 +387,12 @@ const EXIT_CODES: &[ExitCode] = &[
     ),
 ];
 
-const FEATURES: &[&str] = &[
+/// o574 (R-019): codemode is advertised only when the binary was compiled
+/// with the surface-codemode feature; otherwise the contract would lie.
+pub(crate) const CODEMODE_COMPILED: bool = cfg!(feature = "surface-codemode");
+
+const FEATURES_ALWAYS: &[&str] = &[
     "capabilities_json",
-    "codemode_surface",
     "exact_recovery_refs",
     "intent_inference_aliases",
     "json_output",
@@ -398,6 +401,15 @@ const FEATURES: &[&str] = &[
     "robot_docs_guide",
     "status_truth_shell",
 ];
+
+fn features() -> Vec<&'static str> {
+    let mut out = FEATURES_ALWAYS.to_vec();
+    if CODEMODE_COMPILED {
+        out.push("codemode_surface");
+    }
+    out.sort();
+    out
+}
 
 fn commands_by_name() -> BTreeMap<&'static str, CommandSurface> {
     COMMANDS
@@ -413,7 +425,7 @@ pub fn capabilities_json() -> serde_json::Value {
         "tool": "tokenzero",
         "version": env!("CARGO_PKG_VERSION"),
         "contract_version": 1,
-        "features": FEATURES,
+        "features": features(),
         "stdout_contract": {
             "rule": "stdout is data; stderr is diagnostics",
             "json_flag": "--json",
@@ -426,7 +438,7 @@ pub fn capabilities_json() -> serde_json::Value {
             "pipeline_rerun_guidance": true,
             "intent_inference_aliases": true,
             "capabilities_json": true,
-            "codemode_surface": true,
+            "codemode_surface": CODEMODE_COMPILED,
             "robot_docs_guide": true
         },
         "commands": COMMANDS,
