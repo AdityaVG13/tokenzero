@@ -2931,6 +2931,7 @@ dependencies = [
  "proptest",
  "serde",
  "serde_json",
+ "sha2 0.11.0",
  "tempfile",
  "tokenzero-codemode",
  "tokenzero-core",
@@ -2993,6 +2994,7 @@ dependencies = [
  "tokenzero-pulse",
  "tokenzero-recovery",
  "tokenzero-runtime",
+ "zero-abi",
 ]
 
 [[package]]
@@ -3722,7 +3724,7 @@ dependencies = [
 [[package]]
 name = "zero-abi"
 version = "0.1.0"
-source = "git+https://github.com/AdityaVG13/zerostack?rev=a132567565f4cb43264f2bbcaab759944407453d#a132567565f4cb43264f2bbcaab759944407453d"
+source = "git+https://github.com/AdityaVG13/zerostack?rev=3e12d0aed8c8aba4cedb28e1ad178c5e72c1b4a1#3e12d0aed8c8aba4cedb28e1ad178c5e72c1b4a1"
 dependencies = [
  "serde",
  "serde_json",
@@ -3732,8 +3734,9 @@ dependencies = [
 [[package]]
 name = "zero-ref"
 version = "0.1.0"
-source = "git+https://github.com/AdityaVG13/zerostack?rev=a132567565f4cb43264f2bbcaab759944407453d#a132567565f4cb43264f2bbcaab759944407453d"
+source = "git+https://github.com/AdityaVG13/zerostack?rev=3e12d0aed8c8aba4cedb28e1ad178c5e72c1b4a1#3e12d0aed8c8aba4cedb28e1ad178c5e72c1b4a1"
 dependencies = [
+ "serde",
  "sha2 0.10.9",
 ]
 

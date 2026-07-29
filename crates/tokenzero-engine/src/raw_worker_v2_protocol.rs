@@ -419,20 +419,39 @@ pub fn validate_handshake_request(
 }
 
 pub fn raw_worker_protocol_manifest() -> Value {
-    json!({
-        "protocol_version": RAW_WORKER_PROTOCOL_VERSION,
-        "framing": "bounded_ndjson",
-        "request_frames": ["handshake", "call", "cancel", "shutdown"],
-        "response_frames": ["handshake_ack", "result", "error", "cancel_ack", "shutdown_ack"],
-        "binding": ["engine", "root", "session_id", "worker_revision", "semantic_contract_digest", "operation_registry_digest"],
-        "call": ["request_id", "op", "args", "deadline_unix_ms", "trace"],
-        "result_metadata": ["effect", "approval", "revert", "ownership", "trace"],
-        "negative_space": ["planner", "javascript_runtime", "mcp_catalog", "nested_codemode"],
-    })
+    let mut manifest = zero_abi::raw_worker_protocol_manifest();
+    stabilize_field_name_inventories(&mut manifest);
+    manifest
 }
 
 pub fn raw_worker_protocol_digest_hex() -> String {
     contract_digest_hex(&raw_worker_protocol_manifest())
+}
+
+fn stabilize_field_name_inventories(manifest: &mut Value) {
+    const FIELD_LISTS: &[&str] = &[
+        "binding",
+        "handshake_request",
+        "capabilities",
+        "limits",
+        "call",
+        "trace",
+        "result_metadata",
+    ];
+    let Some(obj) = manifest.as_object_mut() else {
+        return;
+    };
+    for key in FIELD_LISTS {
+        let Some(Value::Array(items)) = obj.get_mut(*key) else {
+            continue;
+        };
+        let mut names: Vec<String> = items
+            .iter()
+            .filter_map(|value| value.as_str().map(str::to_owned))
+            .collect();
+        names.sort();
+        *items = names.into_iter().map(Value::String).collect();
+    }
 }
 
 #[cfg(test)]
@@ -443,7 +462,7 @@ mod protocol_digest_tests {
     fn protocol_digest_matches_canonical_zerostack_manifest() {
         assert_eq!(
             raw_worker_protocol_digest_hex(),
-            "074a9df08b5f9e27484d71f30af78fb95632984275c8a973e8f28f6b2cdbe4d7"
+            "5c887d5b3443ec572b153cbd635b205d3e68f54308a3815d5878b59842e9fd38"
         );
     }
 }

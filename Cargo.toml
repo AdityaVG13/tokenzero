@@ -47,8 +47,8 @@ thiserror = "2.0.18"
 toml = "1.1.2"
 wait-timeout = "0.2.1"
 fastmcp-rust = { version = "0.3.2", git = "https://github.com/Dicklesworthstone/fastmcp_rust", rev = "1c66097b15dea9550e833ee9e433beeb66eefece" }
-zero-abi = { git = "https://github.com/AdityaVG13/zerostack", rev = "a132567565f4cb43264f2bbcaab759944407453d" }
-zero-ref = { git = "https://github.com/AdityaVG13/zerostack", rev = "a132567565f4cb43264f2bbcaab759944407453d" }
+zero-abi = { git = "https://github.com/AdityaVG13/zerostack", rev = "3e12d0aed8c8aba4cedb28e1ad178c5e72c1b4a1" }
+zero-ref = { git = "https://github.com/AdityaVG13/zerostack", rev = "3e12d0aed8c8aba4cedb28e1ad178c5e72c1b4a1" }
 zerostack-machine-permit = { git = "https://github.com/AdityaVG13/zerostack", rev = "3e6d49db0b4f6a1e275eeddec334f366a46626c9" }
 
 [profile.release-perf]
