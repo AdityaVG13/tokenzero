@@ -63,6 +63,7 @@ __pycache__/
 !/docs/easy-start.tokenzero.md
 !/docs/mcp-tokenzero.portable.json
 !/docs/privacy-and-scoping.md
+!/docs/spec/
 
 # Local execution/handoff records
 /RECOVERY_RUNBOOK.md
