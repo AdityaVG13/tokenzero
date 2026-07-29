@@ -58,13 +58,29 @@ fn cli_slim_envelope_opt_in_drops_advisory_blocks_and_keeps_durable_refs() {
 
     let full = run_tokenzero_json_in_with_env(&args, dir.path(), &[]);
     fields!(full;"/schema_version" =>"tokenzero.cli.v1");
-    assert!(full.get("telemetry").is_some(), "full envelope carries telemetry");
-    assert!(full.get("accounting").is_some(), "full envelope carries accounting");
+    assert!(
+        full.get("telemetry").is_some(),
+        "full envelope carries telemetry"
+    );
+    assert!(
+        full.get("accounting").is_some(),
+        "full envelope carries accounting"
+    );
 
-    let slim = run_tokenzero_json_in_with_env(&args, dir.path(), &[("TOKENZERO_SLIM_ENVELOPE", "1")]);
+    let slim =
+        run_tokenzero_json_in_with_env(&args, dir.path(), &[("TOKENZERO_SLIM_ENVELOPE", "1")]);
     fields!(slim;"/status" =>"ok"; "/tool" =>"read");
-    for dropped in ["schema_version", "telemetry", "accounting", "mode", "content_type"] {
-        assert!(slim.get(dropped).is_none(), "slim envelope drops {dropped}: {slim}");
+    for dropped in [
+        "schema_version",
+        "telemetry",
+        "accounting",
+        "mode",
+        "content_type",
+    ] {
+        assert!(
+            slim.get(dropped).is_none(),
+            "slim envelope drops {dropped}: {slim}"
+        );
     }
     assert_json_contains(&slim["visible"]["text"], "tiny payload");
     let ref_id = slim["refs"][0]

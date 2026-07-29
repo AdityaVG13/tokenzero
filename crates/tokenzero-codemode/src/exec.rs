@@ -459,9 +459,7 @@ impl Drop for AsyncHostRuntime {
     fn drop(&mut self) {
         // Join every detached worker. Workers are wall-deadline bounded and
         // the finisher guarantees gate release, so these joins terminate.
-        let handles = std::mem::take(
-            &mut *self.workers.lock().unwrap_or_else(|e| e.into_inner()),
-        );
+        let handles = std::mem::take(&mut *self.workers.lock().unwrap_or_else(|e| e.into_inner()));
         for handle in handles {
             let _ = handle.join();
         }
@@ -1574,9 +1572,7 @@ fn ref_first_final_value(
     // vz89.10: one session turn per codemode execution; the ledger is shared
     // per session scope across the per-call engines CodeMode builds.
     let exposure_ledger = engine.session_exposure();
-    let mut exposure = exposure_ledger
-        .lock()
-        .unwrap_or_else(|e| e.into_inner());
+    let mut exposure = exposure_ledger.lock().unwrap_or_else(|e| e.into_inner());
     exposure.next_turn();
     let value = ref_first_value(value, budget_tokens, &mut store, &mut refs, &mut exposure);
     (value, refs)
@@ -1672,7 +1668,10 @@ fn ref_first_value(
                 Value::Object(
                     map.into_iter()
                         .map(|(key, value)| {
-                            (key, ref_first_value(value, budget_tokens, store, refs, exposure))
+                            (
+                                key,
+                                ref_first_value(value, budget_tokens, store, refs, exposure),
+                            )
                         })
                         .collect(),
                 )

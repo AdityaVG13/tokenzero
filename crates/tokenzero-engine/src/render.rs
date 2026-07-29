@@ -1031,11 +1031,13 @@ fn slim_cli_json(response: &ToolResponse) -> String {
     if !response.refs.is_empty() {
         doc.insert(
             "refs".into(),
-            serde_json::json!(response
-                .refs
-                .iter()
-                .map(|record| record.ref_id.as_str())
-                .collect::<Vec<_>>()),
+            serde_json::json!(
+                response
+                    .refs
+                    .iter()
+                    .map(|record| record.ref_id.as_str())
+                    .collect::<Vec<_>>()
+            ),
         );
     }
     if let Some(detail_ref) = &response.detail_ref {
@@ -1062,9 +1064,8 @@ fn slim_cli_json(response: &ToolResponse) -> String {
             serde_json::to_value(channels).unwrap_or(serde_json::Value::Null),
         );
     }
-    serde_json::to_string(&serde_json::Value::Object(doc)).unwrap_or_else(|_| {
-        format!("{{\"status\":\"error\",\"tool\":\"{}\"}}", response.tool)
-    })
+    serde_json::to_string(&serde_json::Value::Object(doc))
+        .unwrap_or_else(|_| format!("{{\"status\":\"error\",\"tool\":\"{}\"}}", response.tool))
 }
 
 pub fn render_text(response: &ToolResponse) -> String {

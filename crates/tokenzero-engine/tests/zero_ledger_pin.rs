@@ -7,10 +7,9 @@ use zero_ledger::{
 };
 
 fn test_identity() -> TokenizerIdentity {
-    let digest = Digest::from_hex(
-        "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
-    )
-    .expect("valid hex digest");
+    let digest =
+        Digest::from_hex("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef")
+            .expect("valid hex digest");
     TokenizerIdentity::new("tokenzero-test-tokenizer", digest)
 }
 
@@ -51,10 +50,8 @@ fn zero_ledger_rejects_foreign_tokenizer_identity() {
     let mut gauge = ResourceGauge::new(LedgerConfig::new(identity));
     let foreign = TokenizerIdentity::new(
         "some-other-tokenizer",
-        Digest::from_hex(
-            "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
-        )
-        .unwrap(),
+        Digest::from_hex("ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff")
+            .unwrap(),
     );
     let err = gauge
         .charge(&foreign, &representative_charge())
@@ -68,10 +65,7 @@ fn zero_ledger_rejects_unclassified_or_double_counted_input() {
     let mut gauge = ResourceGauge::new(LedgerConfig::new(identity.clone()));
 
     let mut under = representative_charge();
-    under.input_tokens = under.billed_tokens
-        + under.recovery_tokens
-        + under.reexpansion_tokens
-        + 1;
+    under.input_tokens = under.billed_tokens + under.recovery_tokens + under.reexpansion_tokens + 1;
     let err = gauge
         .charge(&identity, &under)
         .expect_err("under-classified input must fail");

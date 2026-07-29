@@ -270,10 +270,7 @@ fn spawn_bound(root: &Path, session: &str, cap: &Value) -> BoundWorker {
     BoundWorker {
         worker,
         revision: binding["worker_revision"].as_str().unwrap().into(),
-        contract: binding["semantic_contract_digest"]
-            .as_str()
-            .unwrap()
-            .into(),
+        contract: binding["semantic_contract_digest"].as_str().unwrap().into(),
         ack,
     }
 }
@@ -471,7 +468,10 @@ fn crash_eof_and_sigkill_are_restart_survivable() {
 
         let mut reborn = spawn_bound(dir.path(), "s-crash-kill", &cap);
         reborn.worker.send(&shutdown_frame("restart complete"));
-        assert_eq!(reborn.worker.recv("restart shutdown")["kind"], "shutdown_ack");
+        assert_eq!(
+            reborn.worker.recv("restart shutdown")["kind"],
+            "shutdown_ack"
+        );
         assert_eq!(reborn.worker.close().code(), Some(0));
     }
 }
@@ -585,7 +585,10 @@ fn parser_fuzz_never_hangs_or_emits_untyped_frames() {
         assert_eq!(response["kind"], "error", "frame {index}: {response}");
         let kind = response["error"]["kind"].as_str().unwrap_or_default();
         assert!(
-            matches!(kind, "invalid_frame" | "frame_too_large" | "handshake_required"),
+            matches!(
+                kind,
+                "invalid_frame" | "frame_too_large" | "handshake_required"
+            ),
             "frame {index}: unexpected error kind {kind}: {response}"
         );
         assert_eq!(
@@ -695,7 +698,10 @@ fn deadlines_are_enforced_before_and_during_dispatch() {
     );
 
     bound.worker.send(&shutdown_frame("deadline complete"));
-    assert_eq!(bound.worker.recv("deadline shutdown")["kind"], "shutdown_ack");
+    assert_eq!(
+        bound.worker.recv("deadline shutdown")["kind"],
+        "shutdown_ack"
+    );
     assert_eq!(bound.worker.close().code(), Some(0));
 }
 
@@ -752,7 +758,10 @@ fn protocol_invariant_mutations_fail_closed() {
     stale["request"]["expected_worker_revision"] = json!("stale-revision");
     worker.send(&stale);
     let response = worker.recv("stale revision pin");
-    assert_eq!(response["error"]["kind"], "worker_revision_changed", "{response}");
+    assert_eq!(
+        response["error"]["kind"], "worker_revision_changed",
+        "{response}"
+    );
     assert_eq!(response["error"]["retryable"], true, "{response}");
 
     // A rejected session stays unbound: the valid handshake still lands.
@@ -768,9 +777,18 @@ fn protocol_invariant_mutations_fail_closed() {
 
     // Trace invariants: request id and contract digest must match the binding.
     let mut trace = trace_for("other-id", &revision, &contract);
-    worker.send(&call_frame("req-trace-id", "mem", json!({}), None, trace.clone()));
+    worker.send(&call_frame(
+        "req-trace-id",
+        "mem",
+        json!({}),
+        None,
+        trace.clone(),
+    ));
     let response = worker.recv("trace id mutation");
-    assert_eq!(response["error"]["kind"], "trace_binding_mismatch", "{response}");
+    assert_eq!(
+        response["error"]["kind"], "trace_binding_mismatch",
+        "{response}"
+    );
 
     trace["request_id"] = json!("req-trace-contract");
     trace["contract_digest"] = json!("deadbeef");
@@ -782,7 +800,10 @@ fn protocol_invariant_mutations_fail_closed() {
         trace.clone(),
     ));
     let response = worker.recv("trace contract mutation");
-    assert_eq!(response["error"]["kind"], "trace_binding_mismatch", "{response}");
+    assert_eq!(
+        response["error"]["kind"], "trace_binding_mismatch",
+        "{response}"
+    );
 
     // Stale trace revision is retryable; re-handshake plus a fresh trace
     // recovers over stdio.
@@ -795,7 +816,10 @@ fn protocol_invariant_mutations_fail_closed() {
         stale_trace.clone(),
     ));
     let response = worker.recv("stale trace mutation");
-    assert_eq!(response["error"]["kind"], "worker_revision_changed", "{response}");
+    assert_eq!(
+        response["error"]["kind"], "worker_revision_changed",
+        "{response}"
+    );
     assert_eq!(response["error"]["retryable"], true, "{response}");
     let rebind = handshake_on(&mut worker, dir.path(), "s-mut", &cap);
     assert_eq!(rebind["kind"], "handshake_ack");
@@ -815,16 +839,29 @@ fn protocol_invariant_mutations_fail_closed() {
         let trace = trace_for(&id, &revision, &contract);
         worker.send(&call_frame(&id, op, json!({}), None, trace));
         let response = worker.recv("forbidden op");
-        assert_eq!(response["error"]["kind"], "unsupported_operation", "{op}: {response}");
+        assert_eq!(
+            response["error"]["kind"], "unsupported_operation",
+            "{op}: {response}"
+        );
         assert_eq!(response["request_id"], json!(id));
     }
 
     // Unknown domain ops fail typed, never silently.
     let trace = trace_for("req-unknown", &revision, &contract);
-    worker.send(&call_frame("req-unknown", "no_such_op_xyz", json!({}), None, trace));
+    worker.send(&call_frame(
+        "req-unknown",
+        "no_such_op_xyz",
+        json!({}),
+        None,
+        trace,
+    ));
     let response = worker.recv("unknown op");
     assert_eq!(response["kind"], "error", "{response}");
-    assert!(response["error"]["kind"].as_str().is_some_and(|k| !k.is_empty()));
+    assert!(
+        response["error"]["kind"]
+            .as_str()
+            .is_some_and(|k| !k.is_empty())
+    );
     assert_eq!(response["request_id"], "req-unknown");
 
     // Cancel of unknown ids reports cancelled=false.
@@ -842,7 +879,10 @@ fn protocol_invariant_mutations_fail_closed() {
         let frame = handshake_request(other_root, other_session, &cap, None);
         worker.send(&frame);
         let response = worker.recv("foreign re-handshake");
-        assert_eq!(response["error"]["kind"], "already_bound", "{label}: {response}");
+        assert_eq!(
+            response["error"]["kind"], "already_bound",
+            "{label}: {response}"
+        );
         assert_eq!(response["error"]["retryable"], false, "{label}: {response}");
     }
 
@@ -858,8 +898,8 @@ fn report_pins_source_and_artifact_digests() {
     let artifact = assert_cmd::cargo::cargo_bin("tokenzero");
     let artifact_sha = sha256_hex(&fs::read(&artifact).expect("artifact readable"));
     let fixture_sha = sha256_hex(&fs::read(fixture_path()).expect("fixture readable"));
-    let test_source =
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/raw_worker_v2_packaged_conformance.rs");
+    let test_source = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/raw_worker_v2_packaged_conformance.rs");
     let test_sha = sha256_hex(&fs::read(&test_source).expect("test source readable"));
 
     let dir = tempdir().unwrap();

@@ -265,12 +265,8 @@ mod channel_tests {
     fn channels_gate_off_leaves_response_byte_identical() {
         let response = ToolResponse::default();
         let before = serde_json::to_string(&response).unwrap();
-        let after = attach_channels_gated(
-            response,
-            "read",
-            &json!({"path": ["src/main.rs"]}),
-            false,
-        );
+        let after =
+            attach_channels_gated(response, "read", &json!({"path": ["src/main.rs"]}), false);
         assert!(after.channels.is_none());
         assert_eq!(serde_json::to_string(&after).unwrap(), before);
     }
@@ -341,22 +337,21 @@ fn channel_status_line(bare: &str, args: &Value) -> String {
         out
     }
     fn str_arg<'a>(args: &'a Value, keys: &[&str]) -> Option<&'a str> {
-        keys.iter().find_map(|key| args.get(*key).and_then(Value::as_str))
+        keys.iter()
+            .find_map(|key| args.get(*key).and_then(Value::as_str))
     }
-    let paths = args
-        .get("path")
-        .and_then(|value| match value {
-            Value::String(single) => Some(clip(single, 80)),
-            Value::Array(items) => {
-                let joined = items
-                    .iter()
-                    .filter_map(Value::as_str)
-                    .collect::<Vec<_>>()
-                    .join(", ");
-                (!joined.is_empty()).then(|| clip(&joined, 80))
-            }
-            _ => None,
-        });
+    let paths = args.get("path").and_then(|value| match value {
+        Value::String(single) => Some(clip(single, 80)),
+        Value::Array(items) => {
+            let joined = items
+                .iter()
+                .filter_map(Value::as_str)
+                .collect::<Vec<_>>()
+                .join(", ");
+            (!joined.is_empty()).then(|| clip(&joined, 80))
+        }
+        _ => None,
+    });
     let query = str_arg(args, &["query", "pattern"]).map(|text| clip(text, 60));
     match bare {
         "read" => format!("Reading {}", paths.unwrap_or_else(|| "file".into())),
@@ -379,7 +374,10 @@ fn channel_status_line(bare: &str, args: &Value) -> String {
                         .join(" ")
                 })
             });
-            format!("Running {}", command.map(|c| clip(&c, 80)).unwrap_or_default())
+            format!(
+                "Running {}",
+                command.map(|c| clip(&c, 80)).unwrap_or_default()
+            )
         }
         "ingest" => "Storing payload".to_string(),
         "expand" => format!("Expanding {}", str_arg(args, &["ref"]).unwrap_or("ref")),

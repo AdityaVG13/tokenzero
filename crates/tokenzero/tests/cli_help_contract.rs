@@ -673,9 +673,18 @@ fn cli_usage_errors_name_exact_corrected_invocation() {
     // dzb2 (R-003): every usage error names the exact corrected command.
     let cases: &[(&[&str], &str)] = &[
         (&["read"], "corrected command: tokenzero read <path> --json"),
-        (&["find"], "corrected command: tokenzero find --json <QUERY>"),
-        (&["run"], "corrected command: tokenzero run --json -- <command>"),
-        (&["expand"], "corrected command: tokenzero expand <tz-ref> --raw"),
+        (
+            &["find"],
+            "corrected command: tokenzero find --json <QUERY>",
+        ),
+        (
+            &["run"],
+            "corrected command: tokenzero run --json -- <command>",
+        ),
+        (
+            &["expand"],
+            "corrected command: tokenzero expand <tz-ref> --raw",
+        ),
     ];
     for (args, needle) in cases {
         let output = Command::cargo_bin("tokenzero")
@@ -689,7 +698,10 @@ fn cli_usage_errors_name_exact_corrected_invocation() {
             String::from_utf8_lossy(&output.stdout),
             String::from_utf8_lossy(&output.stderr)
         );
-        assert!(combined.contains(needle), "{args:?} missing {needle:?}: {combined}");
+        assert!(
+            combined.contains(needle),
+            "{args:?} missing {needle:?}: {combined}"
+        );
     }
 }
 
@@ -741,7 +753,10 @@ fn cli_help_has_no_empty_subcommand_blurbs() {
         "quote",
         "mcp-server",
     ] {
-        assert!(names.contains(&verb), "capabilities.commands missing {verb}");
+        assert!(
+            names.contains(&verb),
+            "capabilities.commands missing {verb}"
+        );
     }
     let experimental: Vec<&str> = json["experimental_commands"]
         .as_array()
@@ -771,7 +786,11 @@ fn cli_robot_triage_root_alias_matches_doctor_envelope() {
             .args(&args)
             .output()
             .unwrap();
-        assert!(output.status.success(), "{args:?}: {}", String::from_utf8_lossy(&output.stderr));
+        assert!(
+            output.status.success(),
+            "{args:?}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
         let json: Value = serde_json::from_slice(&output.stdout).unwrap();
         assert_eq!(
             json["schema_version"], "tokenzero.doctor.robot_triage.v1",
@@ -849,7 +868,10 @@ fn cli_flag_typo_distance_one_offers_corrected_command() {
         .unwrap();
     assert_eq!(output.status.code(), Some(2));
     let stderr = String::from_utf8(output.stderr).unwrap();
-    assert!(stderr.contains("unexpected argument '--exlpain'"), "{stderr}");
+    assert!(
+        stderr.contains("unexpected argument '--exlpain'"),
+        "{stderr}"
+    );
     assert!(!stderr.contains("did you mean"), "{stderr}");
     assert!(!stderr.contains("similar argument"), "{stderr}");
 }

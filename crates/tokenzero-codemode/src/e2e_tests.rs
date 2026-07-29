@@ -267,7 +267,12 @@ fn pn93_sub_threshold_strings_inline_fully_with_ref_attached() {
             ..Default::default()
         },
     );
-    assert_eq!(result.status, CodeModeStatus::Completed, "{:?}", result.error);
+    assert_eq!(
+        result.status,
+        CodeModeStatus::Completed,
+        "{:?}",
+        result.error
+    );
     let value = result.value.as_ref().unwrap();
     let text = value
         .as_str()
@@ -293,7 +298,12 @@ fn pn93_over_budget_values_stay_ref_first() {
             ..Default::default()
         },
     );
-    assert_eq!(result.status, CodeModeStatus::Completed, "{:?}", result.error);
+    assert_eq!(
+        result.status,
+        CodeModeStatus::Completed,
+        "{:?}",
+        result.error
+    );
     let value = result.value.as_ref().unwrap();
     let ref_id = value["ref"]
         .as_str()
@@ -434,7 +444,12 @@ fn vz89_11_channels_absent_by_default() {
                 ..Default::default()
             },
         );
-        assert_eq!(result.status, CodeModeStatus::Completed, "{:?}", result.error);
+        assert_eq!(
+            result.status,
+            CodeModeStatus::Completed,
+            "{:?}",
+            result.error
+        );
         let serialized = serde_json::to_string(&result).unwrap();
         assert!(
             !serialized.contains("channels"),
@@ -819,7 +834,10 @@ fn shell_result_exposes_documented_top_level_owner_ref() {
     assert_eq!(run.status, CodeModeStatus::Completed, "{:?}", run.error);
     let value = run.value.as_ref().unwrap();
     let owner = value["ref"].as_str().expect("shell result exposes .ref");
-    assert!(owner.starts_with("tz://blob/"), "owner ref is canonical: {owner}");
+    assert!(
+        owner.starts_with("tz://blob/"),
+        "owner ref is canonical: {owner}"
+    );
     assert_eq!(
         Some(owner),
         value["combined"].as_str(),
@@ -837,7 +855,12 @@ fn shell_result_exposes_documented_top_level_owner_ref() {
             ..Default::default()
         },
     );
-    assert_eq!(expanded.status, CodeModeStatus::Completed, "{:?}", expanded.error);
+    assert_eq!(
+        expanded.status,
+        CodeModeStatus::Completed,
+        "{:?}",
+        expanded.error
+    );
     let text = expanded
         .value
         .as_ref()

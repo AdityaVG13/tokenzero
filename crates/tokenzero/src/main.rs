@@ -238,10 +238,7 @@ fn main() -> Result<()> {
                 }
             }
             // dzb2 (R-003): missing required args name the exact invocation.
-            if matches!(
-                err.kind(),
-                clap::error::ErrorKind::MissingRequiredArgument
-            ) {
+            if matches!(err.kind(), clap::error::ErrorKind::MissingRequiredArgument) {
                 if let Some(hint) = missing_arg_message(&normalized_argv, &err) {
                     eprintln!("{hint}");
                     std::process::exit(2);
@@ -952,7 +949,9 @@ fn handle_read(args: ReadArgs) -> Result<EmitResponse> {
 
 fn handle_run(args: RunArgs) -> Result<EmitResponse> {
     if args.command.is_empty() && !args.stdin {
-        anyhow::bail!("run requires a command after --\n\n  corrected command: tokenzero run --json -- <command>");
+        anyhow::bail!(
+            "run requires a command after --\n\n  corrected command: tokenzero run --json -- <command>"
+        );
     }
     if args.explain_runtime {
         let argv = normalize_command(&args.command);
@@ -1019,7 +1018,9 @@ fn handle_expand(args: ExpandArgs) -> Result<EmitResponse> {
         );
     }
     let Some(ref_id) = refs.first() else {
-        anyhow::bail!("expand requires a ref\n\n  corrected command: tokenzero expand <tz-ref> --raw");
+        anyhow::bail!(
+            "expand requires a ref\n\n  corrected command: tokenzero expand <tz-ref> --raw"
+        );
     };
     let root = tokenzero_work_root(None);
     let engine = engine_new(
@@ -1063,7 +1064,9 @@ fn emit_rewrite(args: RewriteArgs) -> Result<()> {
             None,
             tokenzero_runtime::current_platform(),
         ),
-        (None, true) => anyhow::bail!("rewrite requires a command string or `-- <command...>`\n\n  corrected command: tokenzero rewrite --json -- <command>"),
+        (None, true) => anyhow::bail!(
+            "rewrite requires a command string or `-- <command...>`\n\n  corrected command: tokenzero rewrite --json -- <command>"
+        ),
     };
     let root = tokenzero_work_root(None);
     let engine = engine_new(

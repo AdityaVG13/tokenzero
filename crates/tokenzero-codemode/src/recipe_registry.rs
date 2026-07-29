@@ -94,7 +94,11 @@ mod tests {
     #[test]
     fn corrupt_fixture_fails_without_panicking() {
         assert!(load_registry("{ not json").is_err());
-        assert!(load_registry("[]").expect("empty registry parses").is_empty());
+        assert!(
+            load_registry("[]")
+                .expect("empty registry parses")
+                .is_empty()
+        );
     }
 
     #[test]

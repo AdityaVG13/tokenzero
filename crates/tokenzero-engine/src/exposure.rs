@@ -110,13 +110,19 @@ mod tests {
         let mut ledger = SessionExposureLedger::default();
         ledger.next_turn();
         assert!(ledger.record("tz://blob/aa", None, 2048));
-        assert!(!ledger.record("tz://blob/aa", None, 2048), "second record is a hit");
+        assert!(
+            !ledger.record("tz://blob/aa", None, 2048),
+            "second record is a hit"
+        );
         let row = ledger.exposure("tz://blob/aa", None).expect("row present");
         assert_eq!(row.first_exposure_turn, 1);
         assert_eq!(row.byte_len, 2048);
         assert_eq!(ledger.record_reexpansion("tz://blob/aa", None), Some(1));
         assert_eq!(ledger.record_reexpansion("tz://blob/aa", None), Some(2));
-        assert_eq!(ledger.exposure("tz://blob/aa", None).unwrap().reexpansions, 2);
+        assert_eq!(
+            ledger.exposure("tz://blob/aa", None).unwrap().reexpansions,
+            2
+        );
         assert_eq!(
             ledger.record_reexpansion("tz://blob/foreign", None),
             None,

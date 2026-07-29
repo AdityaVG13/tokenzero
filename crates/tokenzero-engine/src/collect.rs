@@ -64,8 +64,20 @@ const TARGET_CONTEXT_LINES: usize = 2;
 /// `(file-scope)` fallback. Kept byte-compatible with FSZero's DECLARATORS.
 fn enclosing_symbol(lines: &[String], line_no: usize) -> Option<String> {
     const DECLARATORS: &[&str] = &[
-        "fn ", "pub fn ", "async fn ", "struct ", "enum ", "impl ", "trait ", "mod ",
-        "class ", "def ", "function ", "type ", "const ", "static ",
+        "fn ",
+        "pub fn ",
+        "async fn ",
+        "struct ",
+        "enum ",
+        "impl ",
+        "trait ",
+        "mod ",
+        "class ",
+        "def ",
+        "function ",
+        "type ",
+        "const ",
+        "static ",
     ];
     for line in lines[..line_no.min(lines.len())].iter().rev() {
         let trimmed = line.trim();
@@ -745,7 +757,9 @@ mod tests {
         let rendered = hit_search_output(&matches, "literal");
         // Declarator head drops the trailing " {" like FSZero does.
         assert!(
-            rendered.starts_with(&format!("HIT {path}#L3-L7 kind=literal sym=pub fn parse_config()\n")),
+            rendered.starts_with(&format!(
+                "HIT {path}#L3-L7 kind=literal sym=pub fn parse_config()\n"
+            )),
             "{rendered}"
         );
     }
@@ -754,8 +768,11 @@ mod tests {
     fn hit_output_infers_python_def_and_hit_on_declarator_line() {
         let dir = tempfile::tempdir().unwrap();
         let file = dir.path().join("app.py");
-        std::fs::write(&file, "import os\n\ndef handle():\n    needle = 1\n    return needle\n")
-            .unwrap();
+        std::fs::write(
+            &file,
+            "import os\n\ndef handle():\n    needle = 1\n    return needle\n",
+        )
+        .unwrap();
         let path = file.display().to_string();
         let matches = vec![SearchMatch {
             base: dir.path().display().to_string(),
@@ -779,7 +796,9 @@ mod tests {
         }];
         let rendered = hit_search_output(&matches, "literal");
         assert!(
-            rendered.starts_with(&format!("HIT {path}#L1-L5 kind=literal sym=def handle():\n")),
+            rendered.starts_with(&format!(
+                "HIT {path}#L1-L5 kind=literal sym=def handle():\n"
+            )),
             "{rendered}"
         );
     }
