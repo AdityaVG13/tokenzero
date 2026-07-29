@@ -820,10 +820,11 @@ pub fn diff_since_served(
         return None;
     }
     // Diff bases are an internal session optimization, not a user recovery
-    // request. If the current cache no longer has the base, fall back to the
-    // full render instead of reviving an older same-ref payload through the
-    // per-user cross-root index.
-    if !store.has_ref(&previous.blob_ref) {
+    // request. If the base is no longer DURABLE (external prune removed the
+    // cache/ref-index under this live process), fall back to the full render:
+    // serving a diff would reference a base the agent cannot expand later.
+    // In-memory state alone does not count (bxqo.1 / F-021).
+    if !store.has_ref_durable(&previous.blob_ref) {
         return None;
     }
     let base = store.expand(&previous.blob_ref, Some("raw"), None, None, None, None);

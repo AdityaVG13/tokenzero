@@ -1931,6 +1931,39 @@ impl RecoveryStore {
         }
     }
 
+    /// Durability check for internal reuse of a ref as a diff/ack base: the
+    /// ref must be reachable from PERSISTED state (shared CAS or a fresh read
+    /// of the store file), not merely from this process's in-memory state.
+    /// An external prune (cache file and/or ref-index removed) invalidates
+    /// memory-only blobs so served output never references a base the agent
+    /// cannot expand later (bxqo.1 / F-021). Without a persistence path the
+    /// in-memory state is the whole truth (tests, embedded handles).
+    pub fn has_ref_durable(&self, ref_id: &str) -> bool {
+        let Some(lookup) = canonicalize_expand_ref(ref_id) else {
+            return false;
+        };
+        let lookup = self.resolve_alias_chain(&lookup).unwrap_or(lookup);
+        let Some(parsed) = parse_ref(&lookup) else {
+            return false;
+        };
+        if parsed.kind == "blob" {
+            if let Some(cas) = &self.shared_cas {
+                if let Some(hash) = ref_index_id_part(parsed.bare) {
+                    if cas.contains(hash) {
+                        return true;
+                    }
+                }
+            }
+        }
+        let Some(path) = &self.persistence_path else {
+            return self.has_ref_local(ref_id);
+        };
+        if !path.exists() {
+            return false;
+        }
+        RecoveryStore::new(Some(path.clone())).has_ref_local(ref_id)
+    }
+
     fn blob_reachable(&self, bare: &str) -> bool {
         self.state.blobs.contains_key(bare)
             || self
