@@ -2,48 +2,30 @@
 
 TokenZero Pulse is the recovery-aware observability layer for TokenZero tool calls. It answers the question that a plain savings counter cannot answer: did compression actually help after exact recovery, cache behavior, failed writes, negative-savings events, and latency are counted?
 
-Pulse has four parts:
+The shipped surface is the Recovery Flight Recorder plus a bounded local report:
 
-- Recovery Flight Recorder: append-only event ledger for TokenZero tool calls.
-- Pulseboard: terminal dashboard from `tokenzero pulse --tui`, `tokenzero pulse --live`, or `tokenzero dashboard`.
-- Pulse Forecast: deterministic Monte Carlo projection from recent events.
-- Pulse graphs: local SVG/Markdown/JSON artifacts under `results/current/`.
+- Recovery Flight Recorder: append-only JSONL event ledger for TokenZero tool calls.
+- SQLite query cache: rebuilt from JSONL by `tokenzero pulse sync`; never the source of truth.
+- Local report: `tokenzero pulse stats` (alias `status`) prints the aggregate summary.
 
 ## Commands
 
+The actual clap surface (verified against `tokenzero pulse --help`):
+
 ```bash
-tokenzero pulse
-tokenzero pulse --session
-tokenzero pulse --today
-tokenzero pulse --json
-tokenzero pulse --today --json --detail summary
-tokenzero pulse --today --json --detail drains --max-items 20
-tokenzero pulse --today --json --detail tools --max-items 20
-tokenzero pulse --today --json --detail sessions --max-items 20
-tokenzero pulse --today --json --detail timeline --max-events 100
-tokenzero pulse --today --json --detail raw-events --max-events 100
-tokenzero pulse expand pulse://event/<event_id>
-tokenzero pulse --live
-tokenzero pulse --tui
-tokenzero pulse replay
-tokenzero pulse replay --session
-tokenzero pulse replay --today --json
-tokenzero pulse forecast --seed 13 --samples 500 --horizon session
-tokenzero pulse graph
-tokenzero pulse export
-tokenzero pulse export-jsonl /tmp/tokenzero-pulse.jsonl
-tokenzero pulse import-jsonl /tmp/tokenzero-pulse.jsonl
-tokenzero pulse sync
-tokenzero pulse doctor
-tokenzero pulse compact --dry-run
-tokenzero pulse compact --apply
-tokenzero pulse clear --older-than 30d
-tokenzero pulse doctor
-tokenzero pulse import-stats --dry-run
-tokenzero dashboard
-tokenzero graph
-tokenzero expand pulse://event/<event_id>
+tokenzero pulse                    # same as `pulse stats`, human-readable report
+tokenzero pulse stats [--json]     # aggregate report (alias: status)
+tokenzero pulse sync [--json]      # reconcile JSONL ledger into the SQLite cache
+tokenzero pulse doctor [--json]    # check markers, PRAGMA integrity_check, hot index
+tokenzero pulse export-jsonl <OUTPUT>   # atomic JSONL snapshot from the reconciled cache
+tokenzero pulse import-jsonl <INPUT>    # validate snapshot, replace ledger, rebuild cache
 ```
+
+All subcommands accept the global `--root <ROOT>` (override the ledger root) and `--json` (machine-readable envelope).
+
+### Not in the shipped binary
+
+The following were drafted for Pulse but are not implemented in this CLI; listing them here as design intent, not as runnable commands. They are excluded because the bounded stats envelope above is sufficient for agent self-inspection without becoming its own context bomb, and the richer views were never wired to a clap surface: `--today`, `--session`, `--detail` modes, `--live`, `--tui`, `replay`, `forecast`, `graph`, `compact`, `clear`, `import-stats`, `dashboard`, `perf-budget`, and `pulse expand pulse://...` recovery refs. Do not script against them; this section is the contract that they do not exist yet.
 
 Where hooks or slash commands are supported, `/tz pulse` and `/tz pulse session` can be mapped to the same CLI calls.
 
@@ -96,48 +78,29 @@ Pulse never collapses these into one headline:
 
 Hidden exact refs are useful because they guarantee local recovery. They are not counted as readable context until `tz_expand` returns visible text, and those recovery tokens are charged.
 
-`tokenzero pulse --json` returns a bounded summary by default. It intentionally omits raw event rows, timeline walls, raw command output, payloads, and debug-only fields so Pulse cannot become its own context bomb. The default JSON shape is decision-focused:
+`tokenzero pulse stats --json` returns a bounded aggregate summary. It contains no raw event rows, raw command output, payloads, or debug-only fields, so Pulse cannot become its own context bomb. The JSON shape (schema `tokenzero.pulse.v1`):
 
 ```json
 {
-  "ok": true,
-  "summary": {},
-  "rates": {},
-  "top_wins": [],
-  "top_drains": [],
-  "tool_rollup": {},
-  "strategy_rollup": {},
-  "cache_health": {},
-  "exact_ref_health": {},
-  "next_action": {},
-  "recovery_refs": [],
-  "truncated": true,
-  "omitted_events": 0
+  "schema_version": "tokenzero.pulse.v1",
+  "status": "ok",
+  "event_count": 34810,
+  "raw_tokens": 836693768,
+  "visible_tokens": 670084004,
+  "recovery_tokens": 109956688,
+  "task_lossless_tokens": 779957692,
+  "failures": 606,
+  "cache_hits": 0,
+  "exact_ref_count": 184009,
+  "visible_savings": 0.199,
+  "recovery_adjusted_savings": 0.0677,
+  "skipped_lines": 0
 }
 ```
 
-Use explicit detail modes for bounded deeper views:
+`visible_savings` and `recovery_adjusted_savings` are fractions (0.199 = 19.9%). Recovery tokens for `tz_expand` re-expansion are charged into the ledger, so inspecting TokenZero output is counted in recovery-adjusted accounting.
 
-- `--detail summary`: default compact decision view.
-- `--detail drains --max-items N`: top token drains and recovery drains.
-- `--detail tools --max-items N`: bounded per-tool rollup.
-- `--detail sessions --max-items N`: bounded recent session rollup.
-- `--detail timeline --max-events N`: compact event timeline.
-- `--detail raw-events --max-events N`: explicit sanitized event rows.
-
-`--events` remains as a legacy alias for `--detail raw-events`, but new scripts should prefer the detail flag. `tokenzero pulse compact --dry-run` reports compaction candidates; `--apply` rewrites sanitized JSONL segments and a summary sidecar without adding raw payloads.
-
-Normal Pulse JSON enforces `--max-json-bytes`, `--max-items`, `--max-events`, and recovery-ref caps before printing. Over-budget output is trimmed from bounded rows first and includes `truncated`, `omitted_events`, and a `next_detail_command`.
-
-Pulse summaries include `pulse://` recovery refs. Recover exact sanitized event rows with:
-
-```bash
-tokenzero pulse expand pulse://event/<event_id>
-tokenzero pulse expand pulse://range/<first_event_id>..<last_event_id>
-tokenzero expand pulse://event/<event_id>
-```
-
-Pulse recovery expansions are recorded as recovery-cost events, so inspecting Pulse itself is counted in recovery-adjusted accounting.
+There are no `--detail`/`--max-items`/`--max-events` flags and no `pulse://` recovery refs in the shipped binary; the aggregate above is the entire report. Deeper inspection is done by reading the JSONL ledger or querying the SQLite cache directly.
 
 ## Stateless ROI Guard
 
@@ -155,110 +118,10 @@ Pulse records these as positive behavior, not failures. The purpose is to avoid 
 
 Normal MCP/CLI display is also part of the guard: tiny outputs are shown as compact text with lowercase `tz_*` labels, while full metadata remains available only in JSON/debug or explicit structured paths. Pulse records `display_tokens`, `model_visible_tokens`, and `debug_tokens`; `visible_tokens` tracks the model-visible display, not the debug JSON envelope, structured tree rows, or hidden exact payload. Raw payloads are still not logged.
 
-## Pulse Forecast
+## Configuration surface
 
-`tokenzero pulse forecast` uses deterministic Monte Carlo sampling from recent Pulse events. A fixed seed produces stable results.
-
-Forecast output includes:
-
-- expected visible tokens saved.
-- expected recovery-adjusted tokens saved.
-- p10/p50/p90 bands.
-- probability that savings go negative.
-- probability recovery cost exceeds the threshold.
-- projected cache hit rate.
-- projected latency p95.
-- likely token wins and drains.
-- confidence and low-sample warnings.
-
-Forecasts are projections, not guarantees.
-
-## Pulseboard
-
-Pulseboard sections:
-
-- Real Score: visible, recovery-adjusted, recovery drag, negative events.
-- Integrity: exact refs emitted/expanded, exact-ref success, hidden-token accounting, anchor risk.
-- Cache: cache hit rate and exact-cache byte-lossless savings.
-- Forecast: p10/p50/p90 trajectory, negative-savings risk, next best lever.
-- Flow: tool mix, per-tool contribution, top wins/drains, latency p95.
-- Health: fail-open events, parser errors, corruption skipped, storage/retention status.
-- ROI Guard: raw passthroughs, near-raw responses, empty results, tiny-output passthroughs, guarded expansions, and compression-increase skips.
-
-Normal mode shows summaries only. Debug mode may show sanitized event summaries.
-
-`tokenzero pulse replay` renders the session/day as a readable timeline instead of a JSON wall. Each row shows the tool, visible tokens saved, recovery-adjusted tokens saved, recovery cost, exact-ref status, cache hit, latency, negative-savings moments, and turning points where recovery erased the visible benefit. JSON mode returns the same stable fields under `timeline`, `top_wins`, `top_drains`, `turning_points`, and `suggested_next_lever`.
-
-## Graphs
-
-`tokenzero pulse graph` generates:
-
-- `results/current/pulse_dashboard.md`
-- `results/current/pulse_metrics.json`
-- `results/current/pulse_graphs/*.svg`
-
-Current SVGs include recovery-adjusted trend, visible vs recovery-adjusted trend, recovery drag waterfall, cache trend, exact-ref expansion trend, negative-savings timeline, latency trend, per-tool contribution, top drains Pareto, hour/tool heatmap, forecast fan chart, recovery-cost histogram, savings density, integrity gauge, cache reuse flow, and tool mix.
-
-`tokenzero pulse graph --json` and `tokenzero graph --json` print only artifact paths and graph names. The larger metrics payload is written to `pulse_metrics.json` instead of being dumped into the model-visible reply.
-
-Foundation budget artifacts are generated by:
-```bash
-tokenzero perf-budget --json
-```
-This writes `results/current/perf_budget.json` and `results/current/perf_budget.md`. The checks are small release guards for event-write overhead, aggregation, replay rendering, graph generation, command rewriting, bounded tree walking, and MCP startup. They are not public performance claims.
-
-## Config
-
-Pulse defaults are safe:
-
-```json
-{
-  "pulse": {
-    "enabled": true,
-    "global_event_path": "~/.tokenzero/pulse/events.jsonl",
-    "project_event_path": ".tokenzero/pulse/events.jsonl",
-    "record_raw_payloads": false,
-    "max_event_bytes": 8192,
-    "max_events_per_day": 100000,
-    "max_storage_mb": 25,
-    "retention_days": 30,
-    "redact_secrets": true,
-    "post_response_summary": true,
-    "dashboard_artifact_dir": "results/current",
-    "session_id_source": "env",
-    "forecast": {
-      "enabled": true,
-      "samples": 500,
-      "seed": 13,
-      "default_horizon": "session"
-    }
-  }
-}
-```
-
-Disable event writing:
-
-```bash
-TOKENZERO_PULSE_DISABLED=1 tokenzero read tokenzero/cli.py
-```
-
-Delete old local history:
-
-```bash
-tokenzero pulse clear --older-than 30d
-```
+There is no `pulse` config-file block in the shipped binary, and `TOKENZERO_PULSE_DISABLED` is not read by the implementation; it does not disable local Pulse recording. There is also no `clear`, `compact`, or `import-stats` subcommand: retention and compaction are not yet automated, so prune the JSONL ledger by hand if it grows beyond what you want to keep. This documents the current behavior exactly; do not rely on variables or commands listed here as absent.
 
 ## Fail-Open Behavior
 
-Pulse recording is best-effort. If the event ledger is locked, corrupt, missing, oversized, or unwritable, TokenZero tools still return their normal compressed response. `tokenzero pulse doctor` reports skipped corrupt rows and storage status.
-
-## Legacy Stats
-
-If `.tokenzero/stats.jsonl` exists, import safe summary rows with:
-
-```bash
-tokenzero pulse import-stats --dry-run
-tokenzero pulse import-stats
-```
-
-Unavailable fields are left empty. Imported events are marked `source=legacy_stats`.
+Pulse recording is best-effort. If the event ledger is locked, corrupt, missing, oversized, or unwritable, TokenZero tools still return their normal compressed response. `tokenzero pulse doctor` reports store integrity, marker agreement between JSONL and SQLite, and the hot `tool + timestamp` index plan.
