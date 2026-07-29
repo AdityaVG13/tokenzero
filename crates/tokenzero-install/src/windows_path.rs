@@ -129,3 +129,34 @@ pub(crate) fn delete_windows_user_path() -> std::io::Result<()> {
 pub(crate) fn delete_windows_user_path() -> std::io::Result<()> {
     Ok(())
 }
+
+#[cfg(all(test, not(windows)))]
+mod tests {
+    use super::*;
+
+    fn write_row(capability: &str, action: &str, path: &str) -> InstallWrite {
+        InstallWrite {
+            path: path.to_string(),
+            action: action.to_string(),
+            backup_id: String::new(),
+            capability: capability.to_string(),
+            global: false,
+        }
+    }
+
+    #[test]
+    fn off_windows_path_predicates_are_always_false() {
+        // Registry semantics must never engage on macOS/Linux installs.
+        // (The registry key constant itself is cfg(windows); use its value.)
+        const KEY: &str = "HKCU\\Environment\\Path";
+        assert!(!is_windows_user_path_entry(KEY));
+        assert!(!is_windows_user_path_write(&write_row("path", "prepend", KEY)));
+    }
+
+    #[test]
+    fn off_windows_registry_writes_are_noop_ok() {
+        // Off-Windows hosts must fail open: no registry, no error.
+        write_windows_user_path("C:\\x").expect("noop write");
+        delete_windows_user_path().expect("noop delete");
+    }
+}
