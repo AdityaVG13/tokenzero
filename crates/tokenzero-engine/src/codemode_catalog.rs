@@ -22,9 +22,9 @@ macro_rules! methods {
 const METHOD_CATALOG: &[MethodDef] = methods! {
     "zero.read", "zero", "Read file(s) with token-budget capsule compression and exact recovery refs" =>
         "zero.read(path: string | string[], opts?: { mode?, start_line?, end_line?, max_visible_tokens? }): Promise<{ text: string, ref: string, visible_tokens: number, raw_tokens: number }>";
-    "zero.find", "zero", "Search file contents for a pattern (regex or literal) with compact results" =>
+    "zero.find", "zero", "Literal substring search with compact, recoverable matches (never regex; use zero.grep for regex)" =>
         "zero.find(pattern: string, path?: string | string[], opts?: { mode?, max_files?, max_visible_tokens? }): Promise<{ text: string, ref: string, status: string, visible_tokens?: number, raw_tokens?: number }>";
-    "zero.grep", "zero", "Exact literal substring search (no regex interpretation)" =>
+    "zero.grep", "zero", "Grep-style content search: regex when the ripgrep backend is active, literal substring otherwise (invalid regex fails typed as invalid_pattern)" =>
         "zero.grep(pattern: string, path?: string | string[], opts?: { mode?, max_files?, max_visible_tokens? }): Promise<{ text: string, ref: string, status: string, visible_tokens?: number, raw_tokens?: number }>";
     "zero.glob", "zero", "List file paths matching a glob pattern (no file contents)" =>
         "zero.glob(pattern: string, path?: string | string[], opts?: { max_files? }): Promise<{ text: string, ref: string, status: string, visible_tokens?: number, raw_tokens?: number }>";
@@ -277,4 +277,33 @@ pub fn codemode_method_catalog() -> Value {
             "Same tools/engine as MCP tz_* surface; CodeMode composes them in one plan for fewer round-trips."
         ]
     })
+}
+
+#[cfg(test)]
+mod catalog_tests {
+    use super::*;
+
+    #[test]
+    fn find_grep_prose_matches_engine_semantics_not_inverted() {
+        // wk0t.1 (F-005): find is literal-only; grep is regex under the
+        // ripgrep backend. The catalog previously claimed the inverse.
+        let find = &describe_method("zero.find")["description"]
+            .as_str()
+            .unwrap()
+            .to_lowercase();
+        let grep = &describe_method("zero.grep")["description"]
+            .as_str()
+            .unwrap()
+            .to_lowercase();
+        assert!(find.contains("literal"), "find prose: {find}");
+        assert!(
+            !find.contains("regex or literal") && find.contains("never regex"),
+            "find must not advertise regex: {find}"
+        );
+        assert!(grep.contains("regex"), "grep prose names regex: {grep}");
+        assert!(
+            grep.contains("literal substring otherwise"),
+            "grep prose names the literal fallback: {grep}"
+        );
+    }
 }
