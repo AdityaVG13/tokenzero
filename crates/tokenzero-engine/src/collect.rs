@@ -671,7 +671,11 @@ mod tests {
     fn hit_output_matches_fszero_target_ref_grammar() {
         let dir = tempfile::tempdir().unwrap();
         let file = dir.path().join("demo.rs");
-        std::fs::write(&file, "fn a() {}\nfn b() {}\nneedle here\nfn c() {}\nfn d() {}\n").unwrap();
+        std::fs::write(
+            &file,
+            "fn a() {}\nfn b() {}\nneedle here\nfn c() {}\nfn d() {}\n",
+        )
+        .unwrap();
         let path = file.display().to_string();
         let matches = vec![SearchMatch {
             base: dir.path().display().to_string(),

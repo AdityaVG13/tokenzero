@@ -15,8 +15,8 @@ use std::fs;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::{Mutex, OnceLock};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Mutex, OnceLock};
 use std::time::Instant;
 use tempfile::tempdir;
 
@@ -257,12 +257,10 @@ fn measure_mcp_framing(root: &Path, path: &Path, samples: usize) -> Value {
     let mut line = String::new();
     let mut frame_req = Vec::new();
     let mut frame_resp = Vec::new();
-    let mut write = |
-        child: &mut std::process::Child,
-        s: &mut std::process::ChildStdin,
-        v: &Value,
-        sizes: &mut Vec<u64>,
-    | {
+    let mut write = |child: &mut std::process::Child,
+                     s: &mut std::process::ChildStdin,
+                     v: &Value,
+                     sizes: &mut Vec<u64>| {
         let bytes = v.to_string();
         sizes.push(bytes.len() as u64);
         let result = writeln!(s, "{bytes}").and_then(|()| s.flush());

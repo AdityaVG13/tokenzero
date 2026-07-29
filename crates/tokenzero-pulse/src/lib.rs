@@ -1,7 +1,7 @@
 #![forbid(unsafe_code)]
 
 use fs4::{FileExt, TryLockError};
-use rusqlite::{params, Connection};
+use rusqlite::{Connection, params};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
@@ -13,7 +13,7 @@ use std::io::{
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tempfile::NamedTempFile;
-use tokenzero_core::{savings_ratio, PULSE_SCHEMA_VERSION};
+use tokenzero_core::{PULSE_SCHEMA_VERSION, savings_ratio};
 
 mod eprocess;
 pub use eprocess::{AnytimeFailureMonitor, EProcessSnapshot, MonitorConfigError};

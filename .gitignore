@@ -210,3 +210,8 @@ agent_ergonomics_audit/
 .agent-tmp-*
 .tmp-*
 _tmp_*
+AGENTS.md
+CLAUDE.md
+
+# Beads compliance audit dir (managed by /beads-compliance-and-completion-verification skill)
+/beads_compliance_audit/

@@ -279,7 +279,7 @@ fn route_frame(session: &mut RawWorkerV2Session, line: &[u8]) -> RoutedFrame {
     let frame: Value = match serde_json::from_slice(line) {
         Ok(v) => v,
         Err(e) => {
-            return RoutedFrame::Respond(encode(error(None, "invalid_json", e.to_string(), None)))
+            return RoutedFrame::Respond(encode(error(None, "invalid_json", e.to_string(), None)));
         }
     };
     let kind = frame["kind"].as_str().unwrap_or_default();
@@ -537,7 +537,9 @@ pub fn run_raw_worker_v2_serve(opts: &RawWorkerServeOptions) -> i32 {
         opts.root.to_string_lossy().into_owned(),
         session_id,
     )));
-    crate::shell_hooks::install(crate::shell_hooks::ShellHooks::with_note_child(v2_note_child));
+    crate::shell_hooks::install(crate::shell_hooks::ShellHooks::with_note_child(
+        v2_note_child,
+    ));
     let (tx, rx) = std::sync::mpsc::channel::<CallJob>();
     let worker = {
         let session = Arc::clone(&session);
@@ -912,10 +914,10 @@ mod tests {
 
     #[test]
     fn cancel_control_frame_stops_dispatched_shell_work() {
-        let _dispatch_guard = DISPATCH_TEST_LOCK
-            .lock()
-            .unwrap_or_else(|p| p.into_inner());
-        crate::shell_hooks::install(crate::shell_hooks::ShellHooks::with_note_child(v2_note_child));
+        let _dispatch_guard = DISPATCH_TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        crate::shell_hooks::install(crate::shell_hooks::ShellHooks::with_note_child(
+            v2_note_child,
+        ));
         let mut session = RawWorkerV2Session::default();
         let rev = revision();
         let cap = local_capability();
@@ -968,9 +970,7 @@ mod tests {
 
     #[test]
     fn deadline_reaches_dispatched_shell_work() {
-        let _dispatch_guard = DISPATCH_TEST_LOCK
-            .lock()
-            .unwrap_or_else(|p| p.into_inner());
+        let _dispatch_guard = DISPATCH_TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         let mut session = RawWorkerV2Session::default();
         let rev = revision();
         let cap = local_capability();

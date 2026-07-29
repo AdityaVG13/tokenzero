@@ -1,7 +1,7 @@
 //! Exact-payload session deduplication, delta telemetry, and persisted rollup state.
 
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::time::SystemTime;

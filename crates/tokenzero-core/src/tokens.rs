@@ -92,8 +92,8 @@ fn elide_top_level_json(
         "recovery_ref": recovery_ref,
     });
     let sentinel = serde_json::to_string(&sentinel).expect("sentinel is serializable");
-    let key = serde_json::to_string(INLINE_ELISION_SENTINEL_KEY)
-        .expect("sentinel key is serializable");
+    let key =
+        serde_json::to_string(INLINE_ELISION_SENTINEL_KEY).expect("sentinel key is serializable");
 
     match value {
         serde_json::Value::Object(entries) => {
