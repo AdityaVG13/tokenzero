@@ -669,6 +669,31 @@ fn cli_mcp_tool_name_suggests_cli_verb_not_nearest_string() {
 }
 
 #[test]
+fn cli_usage_errors_name_exact_corrected_invocation() {
+    // dzb2 (R-003): every usage error names the exact corrected command.
+    let cases: &[(&[&str], &str)] = &[
+        (&["read"], "corrected command: tokenzero read <path> --json"),
+        (&["find"], "corrected command: tokenzero find --json <QUERY>"),
+        (&["run"], "corrected command: tokenzero run --json -- <command>"),
+        (&["expand"], "corrected command: tokenzero expand <tz-ref> --raw"),
+    ];
+    for (args, needle) in cases {
+        let output = Command::cargo_bin("tokenzero")
+            .unwrap()
+            .args(*args)
+            .output()
+            .unwrap();
+        assert!(!output.status.success(), "{args:?} unexpectedly succeeded");
+        let combined = format!(
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(combined.contains(needle), "{args:?} missing {needle:?}: {combined}");
+    }
+}
+
+#[test]
 fn cli_help_has_no_empty_subcommand_blurbs() {
     // 45lv (R-004): every top-level subcommand carries a one-line about.
     let output = Command::cargo_bin("tokenzero")

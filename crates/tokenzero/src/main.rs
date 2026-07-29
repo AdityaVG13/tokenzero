@@ -237,6 +237,16 @@ fn main() -> Result<()> {
                     std::process::exit(2);
                 }
             }
+            // dzb2 (R-003): missing required args name the exact invocation.
+            if matches!(
+                err.kind(),
+                clap::error::ErrorKind::MissingRequiredArgument
+            ) {
+                if let Some(hint) = missing_arg_message(&normalized_argv, &err) {
+                    eprintln!("{hint}");
+                    std::process::exit(2);
+                }
+            }
             err.exit();
         }
     };
@@ -470,6 +480,40 @@ fn flag_typo_message(argv: &[OsString], err: &clap::Error) -> Option<String> {
         out.push_str(&format!("Usage:{}", tail.trim_end()));
     }
     Some(out)
+}
+
+/// dzb2 (R-003): for a missing required argument, append the exact
+/// corrected invocation for the resolved subcommand.
+fn missing_arg_message(argv: &[OsString], err: &clap::Error) -> Option<String> {
+    let root = Cli::command();
+    let sub_name = argv
+        .iter()
+        .skip(1)
+        .filter_map(|arg| arg.to_str())
+        .find(|text| !text.starts_with('-') && root.find_subcommand(text).is_some())?;
+    let sub = root.find_subcommand(sub_name)?;
+    let usage = sub
+        .clone()
+        .render_usage()
+        .to_string()
+        .trim()
+        .trim_start_matches("Usage: ")
+        .to_string();
+    // usage renders as "<verb> [OPTIONS] <REQ>..."; drop the bin-prefixed
+    // verb and rebuild as `tokenzero <verb> --json <required positionals>`.
+    let positionals = usage
+        .split_whitespace()
+        .skip(1)
+        .filter(|tok| *tok != "[OPTIONS]")
+        .collect::<Vec<_>>()
+        .join(" ");
+    let rendered = err.to_string();
+    Some(format!(
+        "{}\n  corrected command: tokenzero {} --json {}\n",
+        rendered.trim_end(),
+        sub_name,
+        positionals
+    ))
 }
 
 /// bdki (R-002): classic Levenshtein distance over chars.
@@ -886,7 +930,7 @@ fn handle_read(args: ReadArgs) -> Result<EmitResponse> {
         );
     }
     if paths.is_empty() {
-        anyhow::bail!("read requires a path");
+        anyhow::bail!("read requires a path\n\n  corrected command: tokenzero read <path> --json");
     }
     let (engine, mode) = tool_engine_mode(&args.tool)?;
     let mut payload = json!({
@@ -908,7 +952,7 @@ fn handle_read(args: ReadArgs) -> Result<EmitResponse> {
 
 fn handle_run(args: RunArgs) -> Result<EmitResponse> {
     if args.command.is_empty() && !args.stdin {
-        anyhow::bail!("run requires a command after --");
+        anyhow::bail!("run requires a command after --\n\n  corrected command: tokenzero run --json -- <command>");
     }
     if args.explain_runtime {
         let argv = normalize_command(&args.command);
@@ -975,7 +1019,7 @@ fn handle_expand(args: ExpandArgs) -> Result<EmitResponse> {
         );
     }
     let Some(ref_id) = refs.first() else {
-        anyhow::bail!("expand requires a ref");
+        anyhow::bail!("expand requires a ref\n\n  corrected command: tokenzero expand <tz-ref> --raw");
     };
     let root = tokenzero_work_root(None);
     let engine = engine_new(
@@ -1019,7 +1063,7 @@ fn emit_rewrite(args: RewriteArgs) -> Result<()> {
             None,
             tokenzero_runtime::current_platform(),
         ),
-        (None, true) => anyhow::bail!("rewrite requires a command string or `-- <command...>`"),
+        (None, true) => anyhow::bail!("rewrite requires a command string or `-- <command...>`\n\n  corrected command: tokenzero rewrite --json -- <command>"),
     };
     let root = tokenzero_work_root(None);
     let engine = engine_new(
