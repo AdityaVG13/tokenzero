@@ -654,6 +654,49 @@ fn cli_mcp_tool_name_suggests_cli_verb_not_nearest_string() {
 }
 
 #[test]
+fn cli_flag_typo_distance_one_offers_corrected_command() {
+    // bdki (R-002): distance-1 flag typo -> did-you-mean + corrected command.
+    let output = Command::cargo_bin("tokenzero")
+        .unwrap()
+        .args(["read", "--jsonn", "some/file.rs"])
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(2));
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(stderr.contains("did you mean: '--json'"), "{stderr}");
+    assert!(
+        stderr.contains("corrected command: tokenzero read --json some/file.rs"),
+        "{stderr}"
+    );
+
+    // A real flag placed before the verb is reordered, not renamed.
+    let output = Command::cargo_bin("tokenzero")
+        .unwrap()
+        .args(["--jsno", "read", "some/file.rs"])
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(2));
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(stderr.contains("belongs after the subcommand"), "{stderr}");
+    assert!(
+        stderr.contains("corrected command: tokenzero read --jsno some/file.rs"),
+        "{stderr}"
+    );
+
+    // Far-off typos get no misleading suggestion (rejects --exlpain->--help).
+    let output = Command::cargo_bin("tokenzero")
+        .unwrap()
+        .args(["grep", "--exlpain", "needle"])
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(2));
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(stderr.contains("unexpected argument '--exlpain'"), "{stderr}");
+    assert!(!stderr.contains("did you mean"), "{stderr}");
+    assert!(!stderr.contains("similar argument"), "{stderr}");
+}
+
+#[test]
 fn cli_run_json_child_exit_opt_in_mirrors_child_failure() {
     // nt0i: default --json keeps the exit-0 envelope contract; the opt-in
     // mirrors the child exit code so harnesses can gate on it.

@@ -227,6 +227,16 @@ fn main() -> Result<()> {
                     std::process::exit(2);
                 }
             }
+            // bdki (R-002): Levenshtein-1 flag typo recovery. Distance-1 typos
+            // get did-you-mean + copy-pasteable corrected command; anything
+            // else gets a plain error without clap's misleading nearest-string
+            // tip (which sent --exlpain to --help).
+            if matches!(err.kind(), clap::error::ErrorKind::UnknownArgument) {
+                if let Some(message) = flag_typo_message(&normalized_argv, &err) {
+                    eprintln!("{message}");
+                    std::process::exit(2);
+                }
+            }
             err.exit();
         }
     };
@@ -322,6 +332,161 @@ fn mcp_name_to_cli_verb(name: &str) -> Option<&'static str> {
         "tz_cache_pack" => "cache-pack",
         _ => return None,
     })
+}
+
+/// bdki (R-002): build an error message for an unknown long flag. Returns
+/// None when the offending token cannot be identified (caller falls back to
+/// clap's own rendering).
+fn flag_typo_message(argv: &[OsString], err: &clap::Error) -> Option<String> {
+    let root = Cli::command();
+    let mut context = &root;
+    // The flag may precede the verb (tokenzero --jsno read x): fall back to
+    // the first positional that names a subcommand so the known-flag set is
+    // the verb's, not just the top level's.
+    let mut sub_name: Option<String> = None;
+    for token in argv.iter().skip(1) {
+        let Some(text) = token.to_str() else {
+            continue;
+        };
+        if text.starts_with('-') {
+            continue;
+        }
+        if let Some(sub) = root.find_subcommand(text) {
+            context = sub;
+            sub_name = Some(text.to_string());
+            break;
+        }
+    }
+    let mut known: Vec<String> = Vec::new();
+    for arg in context.get_arguments() {
+        if let Some(long) = arg.get_long() {
+            known.push(long.to_string());
+        }
+        // Hidden aliases (jsno/jason/timout) count as known so a valid flag
+        // placed before the verb is treated as mispositioned, not a typo.
+        if let Some(aliases) = arg.get_aliases() {
+            known.extend(aliases.into_iter().map(str::to_string));
+        }
+    }
+    known.push("help".to_string());
+    if sub_name.is_none() {
+        known.push("version".to_string());
+    }
+    // Position of the verb token, so flags before it count as mispositioned.
+    let sub_index = sub_name.as_ref().and_then(|sub| {
+        argv.iter()
+            .skip(1)
+            .position(|arg| arg.to_str() == Some(sub.as_str()))
+            .map(|pos| pos + 1)
+    });
+    let mut bad: Option<(String, String, bool)> = None;
+    for (index, token) in argv.iter().enumerate().skip(1) {
+        let Some(text) = token.to_str() else {
+            continue;
+        };
+        if text == "--" {
+            break;
+        }
+        let Some(name) = text.strip_prefix("--") else {
+            continue;
+        };
+        let name = name.split('=').next().unwrap_or(name);
+        if name.is_empty() {
+            continue;
+        }
+        if known.iter().any(|flag| flag == name) {
+            // A flag the verb owns, but placed before the verb: recoverable
+            // by reordering, not renaming.
+            if sub_index.is_some_and(|pos| index < pos) {
+                bad = Some((text.to_string(), name.to_string(), true));
+                break;
+            }
+            continue;
+        }
+        bad = Some((text.to_string(), name.to_string(), false));
+        break;
+    }
+    let (bad_token, bad_name, mispositioned) = bad?;
+    let mut candidates: Vec<&String> = known
+        .iter()
+        .filter(|flag| levenshtein(flag, &bad_name) == 1)
+        .collect();
+    candidates.sort();
+    let mut out = format!("error: unexpected argument '{bad_token}' found\n\n");
+    if mispositioned {
+        let mut rest: Vec<String> = Vec::new();
+        let mut sub_seen = false;
+        for arg in argv.iter().skip(1) {
+            let text = arg.to_string_lossy();
+            if !sub_seen && sub_name.as_deref() == Some(text.as_ref()) {
+                sub_seen = true;
+                continue;
+            }
+            rest.push(text.into_owned());
+        }
+        let mut parts = vec!["tokenzero".to_string()];
+        if let Some(sub) = &sub_name {
+            parts.push(sub.clone());
+        }
+        parts.extend(rest);
+        out.push_str(&format!(
+            "  tip: '{bad_token}' belongs after the subcommand\n\n  corrected command: {}\n\n",
+            parts.join(" ")
+        ));
+    } else if let Some(good) = candidates.first() {
+        // Rebuild with the flag fixed; if the flag preceded the verb, move
+        // the verb first so the corrected command actually parses.
+        let mut rest: Vec<String> = Vec::new();
+        let mut sub_seen = false;
+        for arg in argv.iter().skip(1) {
+            let text = arg.to_string_lossy();
+            if !sub_seen && sub_name.as_deref() == Some(text.as_ref()) {
+                sub_seen = true;
+                continue;
+            }
+            if text == bad_token {
+                rest.push(format!("--{good}"));
+            } else if let Some(value) = text
+                .strip_prefix(bad_token.as_str())
+                .and_then(|tail| tail.strip_prefix('='))
+            {
+                rest.push(format!("--{good}={value}"));
+            } else {
+                rest.push(text.into_owned());
+            }
+        }
+        let mut parts = vec!["tokenzero".to_string()];
+        if let Some(sub) = &sub_name {
+            parts.push(sub.clone());
+        }
+        parts.extend(rest);
+        let corrected = parts.join(" ");
+        out.push_str(&format!(
+            "  tip: did you mean: '--{good}'?\n\n  corrected command: {corrected}\n\n"
+        ));
+    }
+    let rendered = err.to_string();
+    if let Some((_, tail)) = rendered.split_once("Usage:") {
+        out.push_str(&format!("Usage:{}", tail.trim_end()));
+    }
+    Some(out)
+}
+
+/// bdki (R-002): classic Levenshtein distance over chars.
+fn levenshtein(a: &str, b: &str) -> usize {
+    let b: Vec<char> = b.chars().collect();
+    let mut prev: Vec<usize> = (0..=b.len()).collect();
+    let mut curr = vec![0usize; b.len() + 1];
+    for (i, ca) in a.chars().enumerate() {
+        curr[0] = i + 1;
+        for (j, &cb) in b.iter().enumerate() {
+            curr[j + 1] = (prev[j] + usize::from(ca != cb))
+                .min(prev[j + 1] + 1)
+                .min(curr[j] + 1);
+        }
+        std::mem::swap(&mut prev, &mut curr);
+    }
+    prev[b.len()]
 }
 
 fn normalize_agent_invocation_args(mut argv: Vec<OsString>) -> Vec<OsString> {
