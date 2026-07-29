@@ -115,6 +115,12 @@ Install tokenzero-mcp for the FastMCP catalog (mutually exclusive)."
 
     let cwd = env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     let mut config = EngineConfig::for_root(&cwd);
+    // pn93: honor the documented TOKENZERO_CACHE_PATH override so hosts that
+    // pin a session store (pi-zerostack) get refs minted into the store they
+    // read back from, not the repo-local default.
+    if let Some(path) = env::var_os("TOKENZERO_CACHE_PATH").filter(|v| !v.is_empty()) {
+        config.cache_path = PathBuf::from(path);
+    }
     config.tool_surface = McpToolSurface::CodeMode;
     // Hand-rolled stdio for CodeMode catalog (does not require fastmcp-rust).
     let code = run_stdio(config);

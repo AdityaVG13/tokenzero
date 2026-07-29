@@ -1565,7 +1565,8 @@ fn ref_first_value(
         }
         match value {
             Value::String(text) => {
-                if count_tokens(&text) > budget_tokens {
+                let text_tokens = count_tokens(&text);
+                if text_tokens > budget_tokens {
                     let content_type = detect_content_type(&text, None);
                     if let Ok(stored) = store.store_payload(&text, content_type, None, None, None) {
                         let ref_id = stored.blob_ref.as_str().to_string();
@@ -1586,6 +1587,17 @@ fn ref_first_value(
                             "chars": text.chars().count(),
                             "expand": format!("await zero.token.expand('{ref_id}')"),
                         });
+                    }
+                } else if text_tokens > REF_FIRST_INLINE_REF_FLOOR_TOKENS {
+                    // pn93: the value inlines fully below, but a nontrivial
+                    // payload still mints its exact-recovery ref so the agent
+                    // can re-expand later without re-running the plan.
+                    let content_type = detect_content_type(&text, None);
+                    if let Ok(stored) = store.store_payload(&text, content_type, None, None, None) {
+                        let ref_id = stored.blob_ref.as_str().to_string();
+                        if !refs.contains(&ref_id) {
+                            refs.push(ref_id);
+                        }
                     }
                 }
                 Value::String(text)
@@ -1642,6 +1654,10 @@ fn unwrap_raw_value(value: Value) -> Value {
         other => other,
     }
 }
+
+/// Strings at or below this size inline without minting a recovery ref: the
+/// store write would cost more than the recovery option is worth.
+const REF_FIRST_INLINE_REF_FLOOR_TOKENS: usize = 64;
 
 fn compact_value_preview(text: &str, max_tokens: usize) -> String {
     let value = tokenzero_engine::render::preview(text);

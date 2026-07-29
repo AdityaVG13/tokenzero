@@ -234,6 +234,55 @@ fn output_guard_autopage_emits_head_within_budget() {
 }
 
 #[test]
+fn pn93_sub_threshold_strings_inline_fully_with_ref_attached() {
+    // pn93: a ~2KB plan value is under the ref-first inline budget and must
+    // come back as the full string, not {ref, 32-char preview}; the ref is
+    // still minted into result.refs for exact recovery.
+    let work = tempfile::tempdir().unwrap();
+    let result = execute_codemode_with_options(
+        "return 'abcdefghijklmnopqrstuvwxyz0123456789'.repeat(40)",
+        CodeModeOptions {
+            root: Some(work.path().to_path_buf()),
+            ..Default::default()
+        },
+    );
+    assert_eq!(result.status, CodeModeStatus::Completed, "{:?}", result.error);
+    let value = result.value.as_ref().unwrap();
+    let text = value
+        .as_str()
+        .unwrap_or_else(|| panic!("2KB value must inline as a string, got: {value}"));
+    assert_eq!(text.len(), 36 * 40);
+    assert!(
+        result.refs.iter().any(|r| r.starts_with("tz://")),
+        "inlined value must still attach an exact-recovery ref: {:?}",
+        result.refs
+    );
+}
+
+#[test]
+fn pn93_over_budget_values_stay_ref_first() {
+    // pn93: past the inline budget the ref-first contract is unchanged:
+    // {ref, preview, chars, expand} plus the ref in result.refs.
+    let work = tempfile::tempdir().unwrap();
+    let result = execute_codemode_with_options(
+        // varied tokens; a repeated pattern BPE-compresses under the budget
+        "return Array.from({length: 3000}, (_, i) => i.toString(36)).join('|')",
+        CodeModeOptions {
+            root: Some(work.path().to_path_buf()),
+            ..Default::default()
+        },
+    );
+    assert_eq!(result.status, CodeModeStatus::Completed, "{:?}", result.error);
+    let value = result.value.as_ref().unwrap();
+    let ref_id = value["ref"]
+        .as_str()
+        .unwrap_or_else(|| panic!("over-budget value must be ref-first, got: {value}"));
+    assert!(ref_id.starts_with("tz://"));
+    assert!(value["preview"].as_str().is_some());
+    assert!(result.refs.iter().any(|r| r == ref_id));
+}
+
+#[test]
 fn envelope_v3_collapses_execution_refs_and_hides_store_block() {
     let work = tempfile::tempdir().unwrap();
     let result = execute_codemode_with_options(

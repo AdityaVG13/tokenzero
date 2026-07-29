@@ -307,7 +307,20 @@ impl CodeModeTelemetry {
     }
 }
 
-const DEFAULT_REF_FIRST_BUDGET: usize = 256;
+// pn93: a plan value under this bound must inline fully with its ref
+// attached; hiding 1-4KB outputs behind a ref forces a re-fetch round-trip
+// that costs more than the bytes it claims to save.
+const DEFAULT_REF_FIRST_BUDGET: usize = 1024;
+
+/// Deployment default for the ref-first inline budget. Per-call
+/// limits.ref_first_budget remains authoritative when supplied.
+pub fn default_ref_first_budget() -> usize {
+    std::env::var("TOKENZERO_REF_FIRST_BUDGET")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .map(|tokens| tokens.clamp(1, 1_000_000))
+        .unwrap_or(DEFAULT_REF_FIRST_BUDGET)
+}
 
 #[derive(Debug, Clone)]
 pub struct CodeModeOptions {
@@ -359,7 +372,7 @@ impl Default for CodeModeOptions {
             max_parallel_width: DEFAULT_MAX_PARALLEL_WIDTH,
             envelope: None,
             ref_first: true,
-            ref_first_budget: DEFAULT_REF_FIRST_BUDGET,
+            ref_first_budget: default_ref_first_budget(),
             surface_health: None,
             telemetry_enabled: None,
         }

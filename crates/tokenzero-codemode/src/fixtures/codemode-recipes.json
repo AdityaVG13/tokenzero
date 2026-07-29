@@ -133,12 +133,12 @@
     "source": "return zero.recall(String(args.query || ''), { max_hits: 5, max_visible_tokens: 512 });",
     "pulse_operation": "recall",
     "pulse_calls": 8,
-    "measured_visible_tokens": 197,
+    "measured_visible_tokens": 845,
     "alternatives": [
       [
         {
           "operation": "recall",
-          "worst_case_visible_tokens": 512
+          "worst_case_visible_tokens": 1024
         }
       ]
     ]
