@@ -625,6 +625,33 @@ fn cli_run_nonzero_exit_keeps_existing_failure_envelope() {
 }
 
 #[test]
+fn cli_run_json_child_exit_opt_in_mirrors_child_failure() {
+    // nt0i: default --json keeps the exit-0 envelope contract; the opt-in
+    // mirrors the child exit code so harnesses can gate on it.
+    let default = Command::cargo_bin("tokenzero")
+        .unwrap()
+        .args(["run", "--json", "sh", "-c", "printf boom; exit 7"])
+        .output()
+        .unwrap();
+    assert!(default.status.success(), "default keeps exit 0");
+    let json: Value = serde_json::from_slice(&default.stdout).unwrap();
+    assert_eq!(json["status"], "ok");
+    assert_eq!(json["telemetry"]["command_success"], false);
+    assert_eq!(json["telemetry"]["exit_code"], 7);
+
+    let gated = Command::cargo_bin("tokenzero")
+        .unwrap()
+        .env("TOKENZERO_RUN_CHILD_EXIT", "1")
+        .args(["run", "--json", "sh", "-c", "printf boom; exit 7"])
+        .output()
+        .unwrap();
+    assert_eq!(gated.status.code(), Some(7), "opt-in mirrors child exit");
+    let json: Value = serde_json::from_slice(&gated.stdout).unwrap();
+    assert_eq!(json["status"], "ok", "envelope content unchanged");
+    assert_eq!(json["telemetry"]["exit_code"], 7);
+}
+
+#[test]
 fn cli_run_parent_json_keeps_inline_payload_unwrapped() {
     let output = Command::cargo_bin("tokenzero")
         .unwrap()

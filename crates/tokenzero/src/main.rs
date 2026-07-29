@@ -1922,12 +1922,29 @@ fn emit_with_json(response: ToolResponse, as_json: bool) -> Result<()> {
     if exit_error {
         std::process::exit(1);
     }
-    if !as_json {
+    // nt0i: text mode always mirrors the child; JSON mode historically keeps
+    // exit 0 (machine consumers read telemetry.command_success). The opt-in
+    // gate mirrors the child in JSON mode too, for harnesses that gate on the
+    // process exit code. Default flip rides the 1cwf envelope contract bump.
+    if !as_json || run_child_exit_enabled() {
         if let Some(code) = child_failure_exit_code(&response) {
             std::process::exit(code);
         }
     }
     Ok(())
+}
+
+/// nt0i: opt-in (TOKENZERO_RUN_CHILD_EXIT) child exit-code mirroring for
+/// --json `run` envelopes.
+pub fn run_child_exit_enabled() -> bool {
+    std::env::var("TOKENZERO_RUN_CHILD_EXIT")
+        .map(|raw| {
+            matches!(
+                raw.trim().to_ascii_lowercase().as_str(),
+                "1" | "on" | "true" | "yes"
+            )
+        })
+        .unwrap_or(false)
 }
 
 /// Text-mode `run` mirrors the child's exit status so `&&`/`||` chains and CI
