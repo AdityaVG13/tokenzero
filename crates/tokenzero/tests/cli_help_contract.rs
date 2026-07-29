@@ -654,6 +654,71 @@ fn cli_mcp_tool_name_suggests_cli_verb_not_nearest_string() {
 }
 
 #[test]
+fn cli_help_has_no_empty_subcommand_blurbs() {
+    // 45lv (R-004): every top-level subcommand carries a one-line about.
+    let output = Command::cargo_bin("tokenzero")
+        .unwrap()
+        .arg("--help")
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    let commands_section = stdout.split("Commands:").nth(1).expect("Commands section");
+    let commands_section = commands_section.split("Options:").next().unwrap();
+    for line in commands_section.lines() {
+        let line = line.trim_end();
+        if line.len() <= 2 {
+            continue;
+        }
+        assert!(
+            line.split_whitespace().count() > 1,
+            "empty help blurb: {line:?}"
+        );
+    }
+
+    // capabilities lists the thin verbs and quarantines eval commands.
+    let output = Command::cargo_bin("tokenzero")
+        .unwrap()
+        .args(["capabilities", "--json"])
+        .output()
+        .unwrap();
+    let json: Value = serde_json::from_slice(&output.stdout).unwrap();
+    let names: Vec<&str> = json["commands"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|row| row["name"].as_str())
+        .collect();
+    for verb in [
+        "grep",
+        "ingest",
+        "rewrite",
+        "discover",
+        "stats",
+        "session-ledger",
+        "cache",
+        "clients",
+        "cache-pack",
+        "quote",
+        "mcp-server",
+    ] {
+        assert!(names.contains(&verb), "capabilities.commands missing {verb}");
+    }
+    let experimental: Vec<&str> = json["experimental_commands"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(Value::as_str)
+        .collect();
+    for eval in ["bench", "harm-eval", "claim-audit", "reach"] {
+        assert!(
+            experimental.contains(&eval),
+            "experimental_commands missing {eval}"
+        );
+        assert!(!names.contains(&eval), "{eval} must stay out of commands");
+    }
+}
+
+#[test]
 fn cli_robot_triage_root_alias_matches_doctor_envelope() {
     // pec5 (R-001): root mega-command aliases reach doctor --robot-triage.
     for args in [
