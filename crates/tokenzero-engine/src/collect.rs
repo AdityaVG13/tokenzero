@@ -58,6 +58,25 @@ pub struct SearchMatch {
 /// TARGET_CONTEXT_LINES policy for one-call actionable discovery results.
 const TARGET_CONTEXT_LINES: usize = 2;
 
+/// Enclosing-symbol inference mirroring FSZero's `enclosing_symbol()`
+/// (FSZero src/core/target_ref.rs): nearest declarator line at or above the
+/// hit, declarator head capped at 80 chars; None => the grammar's truthful
+/// `(file-scope)` fallback. Kept byte-compatible with FSZero's DECLARATORS.
+fn enclosing_symbol(lines: &[String], line_no: usize) -> Option<String> {
+    const DECLARATORS: &[&str] = &[
+        "fn ", "pub fn ", "async fn ", "struct ", "enum ", "impl ", "trait ", "mod ",
+        "class ", "def ", "function ", "type ", "const ", "static ",
+    ];
+    for line in lines[..line_no.min(lines.len())].iter().rev() {
+        let trimmed = line.trim();
+        if DECLARATORS.iter().any(|d| trimmed.starts_with(d)) {
+            let head = trimmed.trim_end_matches(['{', ' ']);
+            return Some(head.chars().take(80).collect());
+        }
+    }
+    None
+}
+
 /// FSZero snap-to-file hit rendering (FSZero docs/design/target-ref-grammar.md):
 /// every match becomes one `HIT <path>#L<start>-L<end> kind=<kind>
 /// sym=<sym>` header plus an inlined `| <line-no>: <text>` window covering
@@ -85,9 +104,17 @@ pub(crate) fn hit_search_output(matches: &[SearchMatch], kind: &str) -> String {
                 ),
                 _ => (line, line),
             };
+            // 631q: carry the inferred enclosing symbol when the file is
+            // readable; unreadable/binary files keep (file-scope).
+            let sym = match &file_lines {
+                Some(lines) if !lines.is_empty() => {
+                    enclosing_symbol(lines, line).unwrap_or_else(|| "(file-scope)".to_string())
+                }
+                _ => "(file-scope)".to_string(),
+            };
             out.push_str(&format!(
-                "HIT {}#L{}-L{} kind={} sym=(file-scope)\n",
-                hit.path, start, stop, kind
+                "HIT {}#L{}-L{} kind={} sym={}\n",
+                hit.path, start, stop, kind, sym
             ));
             match &file_lines {
                 Some(lines) if !lines.is_empty() => {
@@ -685,8 +712,10 @@ mod tests {
             text: "needle here".to_string(),
         }];
         let rendered = hit_search_output(&matches, "literal");
+        // 631q: the nearest declarator at/above the hit (fn b() at L2) is the
+        // enclosing symbol, matching FSZero's enclosing_symbol() inference.
         let expected = format!(
-            "HIT {path}#L1-L5 kind=literal sym=(file-scope)\n\
+            "HIT {path}#L1-L5 kind=literal sym=fn b() {{}}\n\
              | 1: fn a() {{}}\n\
              | 2: fn b() {{}}\n\
              | 3: needle here\n\
@@ -694,6 +723,85 @@ mod tests {
              | 5: fn d() {{}}"
         );
         assert_eq!(rendered, expected);
+    }
+
+    #[test]
+    fn hit_output_infers_enclosing_symbol_for_function_body() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("config.rs");
+        std::fs::write(
+            &file,
+            "use std::io;\n\npub fn parse_config() {\n    let a = 1;\n    let needle_line = a;\n    println!(\"{}\", needle_line);\n}\n",
+        )
+        .unwrap();
+        let path = file.display().to_string();
+        let matches = vec![SearchMatch {
+            base: dir.path().display().to_string(),
+            path: path.clone(),
+            rel: "config.rs".to_string(),
+            line: 5,
+            text: "    let needle_line = a;".to_string(),
+        }];
+        let rendered = hit_search_output(&matches, "literal");
+        // Declarator head drops the trailing " {" like FSZero does.
+        assert!(
+            rendered.starts_with(&format!("HIT {path}#L3-L7 kind=literal sym=pub fn parse_config()\n")),
+            "{rendered}"
+        );
+    }
+
+    #[test]
+    fn hit_output_infers_python_def_and_hit_on_declarator_line() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("app.py");
+        std::fs::write(&file, "import os\n\ndef handle():\n    needle = 1\n    return needle\n")
+            .unwrap();
+        let path = file.display().to_string();
+        let matches = vec![SearchMatch {
+            base: dir.path().display().to_string(),
+            path: path.clone(),
+            rel: "app.py".to_string(),
+            line: 4,
+            text: "    needle = 1".to_string(),
+        }];
+        let rendered = hit_search_output(&matches, "regex");
+        assert!(
+            rendered.starts_with(&format!("HIT {path}#L2-L5 kind=regex sym=def handle():\n")),
+            "{rendered}"
+        );
+        // A hit ON the declarator line itself reports that declarator.
+        let matches = vec![SearchMatch {
+            base: dir.path().display().to_string(),
+            path: path.clone(),
+            rel: "app.py".to_string(),
+            line: 3,
+            text: "def handle():".to_string(),
+        }];
+        let rendered = hit_search_output(&matches, "literal");
+        assert!(
+            rendered.starts_with(&format!("HIT {path}#L1-L5 kind=literal sym=def handle():\n")),
+            "{rendered}"
+        );
+    }
+
+    #[test]
+    fn hit_output_file_scope_when_no_declarator_above() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("notes.txt");
+        std::fs::write(&file, "# comment\nneedle here\nfn x() {}\n").unwrap();
+        let path = file.display().to_string();
+        let matches = vec![SearchMatch {
+            base: dir.path().display().to_string(),
+            path: path.clone(),
+            rel: "notes.txt".to_string(),
+            line: 2,
+            text: "needle here".to_string(),
+        }];
+        let rendered = hit_search_output(&matches, "literal");
+        assert!(
+            rendered.starts_with(&format!("HIT {path}#L1-L3 kind=literal sym=(file-scope)\n")),
+            "{rendered}"
+        );
     }
 
     #[test]
