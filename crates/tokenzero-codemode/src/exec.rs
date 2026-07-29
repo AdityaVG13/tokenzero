@@ -2995,6 +2995,18 @@ fn tool_response_to_value(resp: &ToolResponse) -> Value {
         for record in &resp.refs {
             obj[format!("{}_ref", record.kind)] = json!(record.ref_id);
         }
+        // yevj: the catalog documents `ref` as the stable top-level owner ref
+        // for every op. Shell previously exposed only <kind>_ref keys, so
+        // `result.ref` was undefined (Grok session 019fa59e evidence). The
+        // owner is the combined-stream blob (always minted, full fidelity).
+        if !refs.is_empty() {
+            let owner = resp
+                .refs
+                .iter()
+                .find(|record| record.kind == "combined")
+                .unwrap_or(&resp.refs[0]);
+            obj["ref"] = json!(owner.ref_id);
+        }
     } else if !refs.is_empty() {
         obj["ref"] = json!(refs[0]);
         if refs.len() > 1 {

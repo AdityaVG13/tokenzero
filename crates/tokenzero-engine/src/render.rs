@@ -404,6 +404,11 @@ pub fn expansion_response(result: ExpansionResult, recovery_tokens: usize) -> To
         ("window_out_of_range", format!("{reason} (ref: {full_ref})"))
     } else if reason.starts_with("zeroref-") {
         ("zeroref_malformed", format!("{reason}: {full_ref}"))
+    } else if let Some(code) = fragment_error_code(reason) {
+        // yevj: invalid fragments fail typed ONCE — the code names the
+        // fragment defect so adapters stop instead of retrying a ref that can
+        // never resolve. The reason carries the parsed bounds detail.
+        (code, format!("{reason} (ref: {full_ref})"))
     } else if let Some((_, code, message)) = exact.iter().find(|entry| entry.0 == reason) {
         (*code, format!("{message}: {full_ref}"))
     } else {
@@ -411,12 +416,32 @@ pub fn expansion_response(result: ExpansionResult, recovery_tokens: usize) -> To
     };
     let repair = if is_window_oob {
         "choose start_line/end_line within the stored payload line count (1-based inclusive)"
+    } else if fragment_error_code(reason).is_some() {
+        "drop the fragment suffix to expand the whole payload, or re-issue it within the stored extents"
     } else if reason == "unsupported-ref-kind" {
         "route the ref to the engine named by its scheme"
     } else {
         "align the producer and consumer shared store root, then retry with the exact ref"
     };
     ToolResponse::error("expand", code, message, Some(repair.to_string()))
+}
+
+/// Map a recovery-store fragment failure reason to a stable typed error
+/// code. Reasons may carry `; key=value` bounds detail after the kind tag.
+fn fragment_error_code(reason: &str) -> Option<&'static str> {
+    const FRAGMENT_REASONS: &[(&str, &str)] = &[
+        ("fragment-malformed", "fragment_malformed"),
+        ("fragment-reversed", "fragment_reversed"),
+        ("fragment-out-of-range", "fragment_out_of_range"),
+        ("fragment-not-utf8-boundary", "fragment_not_utf8_boundary"),
+        ("non_utf8_line_fragment", "fragment_not_utf8_boundary"),
+        ("fragment-unknown-kind", "fragment_unknown_kind"),
+        ("fragment-duplicate", "fragment_duplicate"),
+    ];
+    FRAGMENT_REASONS
+        .iter()
+        .find(|(tag, _)| reason == *tag || reason.starts_with(&format!("{tag};")))
+        .map(|(_, code)| *code)
 }
 
 pub fn unchanged_since_expand_ack(since_ref: &str) -> String {
@@ -884,6 +909,48 @@ b
         assert_eq!(window["start_line"], 1);
         assert_eq!(window["end_line"], 2);
         assert_eq!(window["line_count"], 2);
+    }
+
+    #[test]
+    fn expansion_response_maps_fragment_failures_to_typed_codes() {
+        let cases = [
+            ("fragment-malformed", "fragment_malformed"),
+            ("fragment-reversed", "fragment_reversed"),
+            (
+                "fragment-out-of-range; start=0 end=99 len=4",
+                "fragment_out_of_range",
+            ),
+            (
+                "fragment-not-utf8-boundary; start=1 end=3 len=4",
+                "fragment_not_utf8_boundary",
+            ),
+            ("non_utf8_line_fragment", "fragment_not_utf8_boundary"),
+            ("fragment-unknown-kind", "fragment_unknown_kind"),
+            ("fragment-duplicate", "fragment_duplicate"),
+        ];
+        for (reason, code) in cases {
+            let result = ExpansionResult::missing(
+                "tz://blob/test#B0+99".to_string(),
+                Some("raw".to_string()),
+                reason,
+            );
+            let response = expansion_response(result, 0);
+            let error = response.error.as_ref().expect(reason);
+            assert_eq!(error.code, code, "reason {reason}");
+            assert!(
+                error.message.contains(reason.split(';').next().unwrap()),
+                "message keeps the typed reason detail: {}",
+                error.message
+            );
+            assert!(
+                error
+                    .repair
+                    .as_deref()
+                    .is_some_and(|repair| repair.contains("fragment")),
+                "fragment repair hint: {:?}",
+                error.repair
+            );
+        }
     }
 
     #[test]

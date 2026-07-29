@@ -793,6 +793,67 @@ fn shell_ref_is_canonical_and_expandable_in_subsequent_execution() {
 }
 
 #[test]
+fn shell_result_exposes_documented_top_level_owner_ref() {
+    // yevj: the catalog documents `ref` on every op result; shell results
+    // previously exposed only <kind>_ref keys (Grok session 019fa59e hit
+    // `undefined property: skill.ref`). The owner ref is the combined blob
+    // and must expand to the exact combined bytes.
+    let work = tempfile::tempdir().unwrap();
+    let cache_path = work.path().join("recovery-cache.json");
+    let command = if cfg!(windows) {
+        "powershell -NoProfile -Command Write-Output owner-ref-probe"
+    } else {
+        "printf 'owner-ref-probe\\n'"
+    };
+    let run = execute_codemode_with_options(
+        &format!(
+            "const r = await zero.token.shell({}); return {{ ref: r.ref, combined: r.combined_ref, stdout: r.stdout_ref }};",
+            serde_json::to_string(command).unwrap()
+        ),
+        CodeModeOptions {
+            root: Some(work.path().to_path_buf()),
+            cache_path: Some(cache_path.clone()),
+            ..Default::default()
+        },
+    );
+    assert_eq!(run.status, CodeModeStatus::Completed, "{:?}", run.error);
+    let value = run.value.as_ref().unwrap();
+    let owner = value["ref"].as_str().expect("shell result exposes .ref");
+    assert!(owner.starts_with("tz://blob/"), "owner ref is canonical: {owner}");
+    assert_eq!(
+        Some(owner),
+        value["combined"].as_str(),
+        "owner ref is the combined-stream blob"
+    );
+
+    let expanded = execute_codemode_with_options(
+        &format!(
+            "return await zero.token.expand({})",
+            serde_json::to_string(owner).unwrap()
+        ),
+        CodeModeOptions {
+            root: Some(work.path().to_path_buf()),
+            cache_path: Some(cache_path),
+            ..Default::default()
+        },
+    );
+    assert_eq!(expanded.status, CodeModeStatus::Completed, "{:?}", expanded.error);
+    let text = expanded
+        .value
+        .as_ref()
+        .and_then(|value| {
+            value
+                .as_str()
+                .or_else(|| value.get("text").and_then(serde_json::Value::as_str))
+        })
+        .unwrap_or_default();
+    assert!(
+        text.contains("owner-ref-probe"),
+        "owner ref expands to the combined shell bytes: {text}"
+    );
+}
+
+#[test]
 fn full_artifact_durability_matrix_includes_same_call_shell_stdout_expand() {
     let work = tempfile::tempdir().unwrap();
     std::fs::write(work.path().join("matrix.txt"), "matrix-file-bytes\n").unwrap();
