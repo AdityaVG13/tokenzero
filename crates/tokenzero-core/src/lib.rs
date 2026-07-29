@@ -444,20 +444,36 @@ fn finalize_capsule_omission(
             }
             capsule.exact_refs.push(reference);
         } else {
-            capsule.mode = Mode::Lossy;
-            capsule.lossy_policy_id = Some("tokenzero.visible-compression.v1".to_string());
-            capsule.lossy_spans.push(LossySpan {
-                description: "bytes omitted from the visible capsule".to_string(),
-                reason: "visible token budget or selected compression policy".to_string(),
-                recovery_may_be_needed: true,
-            });
-            let declaration = VISIBLE_BUDGET_LOSSY_DECLARATION;
-            if !capsule.text.contains("mode=lossy") {
-                capsule.text.push('\n');
-                capsule.text.push_str(declaration);
+            let mut declared = capsule.text.clone();
+            if !declared.contains("mode=lossy") {
+                declared.push('\n');
+                declared.push_str(VISIBLE_BUDGET_LOSSY_DECLARATION);
             }
-            capsule.text = enforce_token_budget_with_ref(&capsule.text, max_visible_tokens, None);
-            capsule.visible_tokens = count_tokens(&capsule.text);
+            let declared_tokens = count_tokens(&declared);
+            let raw_full_tokens = count_tokens(original_trimmed);
+            if declared_tokens >= raw_full_tokens && capsule.mode != Mode::Exact {
+                // Inflation guard: with no exact ref to point at, the lossy
+                // declaration plus summary can cost more tokens than the raw
+                // bytes it replaces (tiny inputs / budgets). Emit the raw text
+                // instead: nothing is omitted, no declaration is required, the
+                // visible cost never exceeds the raw cost, and the decision is
+                // budget-independent so visible cost stays monotone in budget.
+                // Exact mode is exempt: its whole point is hiding the payload,
+                // so falling back to raw text would break that contract.
+                capsule.text = original_trimmed.to_string();
+                capsule.visible_tokens = raw_full_tokens;
+                capsule.omitted_lines = 0;
+            } else {
+                capsule.mode = Mode::Lossy;
+                capsule.lossy_policy_id = Some("tokenzero.visible-compression.v1".to_string());
+                capsule.lossy_spans.push(LossySpan {
+                    description: "bytes omitted from the visible capsule".to_string(),
+                    reason: "visible token budget or selected compression policy".to_string(),
+                    recovery_may_be_needed: true,
+                });
+                capsule.text = enforce_token_budget_with_ref(&declared, max_visible_tokens, None);
+                capsule.visible_tokens = count_tokens(&capsule.text);
+            }
         }
     }
     capsule
