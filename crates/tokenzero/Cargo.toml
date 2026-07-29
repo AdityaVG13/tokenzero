@@ -55,4 +55,5 @@ tokenzero-runtime = { path = "../tokenzero-runtime", version = "1.0.2" }
 assert_cmd.workspace = true
 predicates.workspace = true
 proptest.workspace = true
+sha2.workspace = true
 tempfile.workspace = true
