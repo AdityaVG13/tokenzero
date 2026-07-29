@@ -450,6 +450,22 @@ struct AsyncHostRuntime {
     jobs: Mutex<HashMap<u64, Arc<AsyncHostJob>>>,
     gate: Arc<ParallelWidthGate>,
     completion: Arc<CompletionGate>,
+    /// Join handles for detached host workers (RA-13808): workers resolve via
+    /// the jobs map, but the runtime must not drop while threads are live.
+    workers: Mutex<Vec<std::thread::JoinHandle<()>>>,
+}
+
+impl Drop for AsyncHostRuntime {
+    fn drop(&mut self) {
+        // Join every detached worker. Workers are wall-deadline bounded and
+        // the finisher guarantees gate release, so these joins terminate.
+        let handles = std::mem::take(
+            &mut *self.workers.lock().unwrap_or_else(|e| e.into_inner()),
+        );
+        for handle in handles {
+            let _ = handle.join();
+        }
+    }
 }
 
 /// Guarantees every begun host job resolves: when the worker thread exits for
@@ -569,6 +585,7 @@ fn execute_quickjs_plan(
             jobs: Mutex::new(HashMap::new()),
             gate: Arc::new(ParallelWidthGate::new(limits.max_parallel_width)),
             completion: Arc::new(CompletionGate::new()),
+            workers: Mutex::new(Vec::new()),
         });
         let runtime = match Runtime::new() {
             Ok(runtime) => runtime,
@@ -842,7 +859,7 @@ fn begin_js_host_op(
         let state_ref = state.borrow();
         host_wall_deadline(state_ref.started_ms, state_ref.limits.hard_max_wall_ms)
     };
-    std::thread::spawn(move || {
+    let worker_handle = std::thread::spawn(move || {
         gate.acquire();
         let finisher = HostJobFinisher {
             job,
@@ -881,6 +898,11 @@ fn begin_js_host_op(
         // dispatch panic it also fills the result with an error payload.
         drop(finisher);
     });
+    async_rt
+        .workers
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .push(worker_handle);
     id.to_string()
 }
 
@@ -3959,7 +3981,28 @@ mod async_host_runtime_tests {
             jobs: Mutex::new(HashMap::new()),
             gate: Arc::new(ParallelWidthGate::new(4)),
             completion: Arc::new(CompletionGate::new()),
+            workers: Mutex::new(Vec::new()),
         })
+    }
+
+    #[test]
+    fn runtime_drop_joins_detached_workers() {
+        let rt = test_runtime();
+        let flag = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let worker_flag = Arc::clone(&flag);
+        let handle = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(150));
+            worker_flag.store(true, std::sync::atomic::Ordering::SeqCst);
+        });
+        rt.workers
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push(handle);
+        drop(rt);
+        assert!(
+            flag.load(std::sync::atomic::Ordering::SeqCst),
+            "runtime drop must join detached workers"
+        );
     }
 
     fn test_state(started_ms: u128) -> Rc<RefCell<JsExecutionState>> {
