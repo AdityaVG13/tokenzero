@@ -1613,6 +1613,68 @@ fn big_blob_externalizes_to_sidecar_and_roundtrips() {
 }
 
 #[test]
+fn blob_sidecar_publish_is_atomic_and_litter_free() {
+    let (mut store, cache, _dir) = temp_store();
+    let big = "z".repeat(200 * 1024);
+    let stored = store
+        .store_payload(&big, ContentType::Unknown, None, None, None)
+        .unwrap();
+    let sidecar = blob_sidecar_dir(&cache);
+    let names: Vec<String> = fs::read_dir(&sidecar)
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .collect();
+    assert!(
+        names.iter().all(|n| !n.ends_with(".tmp")),
+        "temp publish files must not survive: {names:?}"
+    );
+    drop(store);
+    let mut restarted = RecoveryStore::new(Some(cache));
+    let expanded = restarted.expand(&stored.blob_ref, Some("raw"), None, None, None, None);
+    assert!(expanded.found);
+    assert_eq!(expanded.content, big);
+}
+
+#[test]
+fn concurrent_duplicate_blob_publish_never_serves_torn_bytes() {
+    // RA-14203 regression: concurrent publishers of the same content hash must
+    // leave exactly one complete sidecar; every reader sees the full payload.
+    let dir = tempdir().unwrap();
+    let cache = dir.path().join("cache.json");
+    let big = std::sync::Arc::new("q".repeat(200 * 1024));
+    let hash = sha256_hex(&big);
+    let mut handles = Vec::new();
+    for _ in 0..8 {
+        let cache = cache.clone();
+        let big = std::sync::Arc::clone(&big);
+        let hash = hash.clone();
+        handles.push(std::thread::spawn(move || {
+            let sidecar = blob_sidecar_dir(&cache).join(format!("{hash}.txt"));
+            for _ in 0..25 {
+                let marker = externalize_blob_value(&cache, &big, &hash);
+                assert!(marker.is_some(), "publish must succeed");
+                if let Ok(bytes) = fs::read(&sidecar) {
+                    // Not-yet-published is fine mid-storm; torn is not.
+                    assert_eq!(bytes.len(), big.len(), "reader must never see a torn blob");
+                }
+            }
+        }));
+    }
+    for handle in handles {
+        handle.join().expect("publisher thread");
+    }
+    let final_bytes = fs::read(blob_sidecar_dir(&cache).join(format!("{hash}.txt"))).unwrap();
+    assert_eq!(final_bytes.len(), big.len());
+    let litter = fs::read_dir(blob_sidecar_dir(&cache))
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .filter(|e| e.file_name().to_string_lossy().ends_with(".tmp"))
+        .count();
+    assert_eq!(litter, 0, "no temp files survive the storm");
+}
+
+#[test]
 fn corrupt_blob_sidecar_is_a_miss_not_bad_bytes() {
     let dir = tempdir().unwrap();
     let cache = dir.path().join("cache.json");

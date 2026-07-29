@@ -3271,7 +3271,21 @@ fn externalize_blob_value(cache_path: &Path, text: &str, hash: &str) -> Option<S
     let path = dir.join(format!("{hash}.txt"));
     // Content-addressed: an existing file already holds these exact bytes.
     if !path.exists() {
-        fs::write(&path, text).ok()?;
+        // Atomic publish (RA-14203): write a unique temp sibling, then rename,
+        // so concurrent readers never observe a torn blob.
+        let tmp = dir.join(format!(
+            ".{hash}.{}.{}.tmp",
+            std::process::id(),
+            TMP_COUNTER.fetch_add(1, Ordering::Relaxed)
+        ));
+        if fs::write(&tmp, text).is_err() {
+            let _ = fs::remove_file(&tmp);
+            return None;
+        }
+        if fs::rename(&tmp, &path).is_err() {
+            let _ = fs::remove_file(&tmp);
+            return None;
+        }
     }
     Some(format!("{BLOB_MARKER_PREFIX}{hash}:{}:", text.len()))
 }
