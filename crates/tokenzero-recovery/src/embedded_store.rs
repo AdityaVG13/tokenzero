@@ -854,74 +854,15 @@ fn apply_fragment_to_bytes(
 }
 
 /// Parse and validate a #B/#L fragment into a ZeroRefFragment.
-/// Uses the same taxonomy as RecoveryStore so embedded and standalone agree.
+/// Delegates to the single shared fragment parser (`parse_fragment_spec`)
+/// so RecoveryStore and the embedded TokenZeroStore cannot diverge on the
+/// fragment grammar (CC1-R4-005).
 fn parse_fragment_to_zeroref(fragment: &str) -> Result<ZeroRefFragment, TokenZeroStoreError> {
-    if fragment.is_empty() {
-        return Err(TokenZeroStoreError::Fragment(
-            "fragment-malformed".to_string(),
-        ));
-    }
-    if fragment.contains('#') {
-        return Err(TokenZeroStoreError::Fragment(
-            "fragment-duplicate".to_string(),
-        ));
-    }
-    let kind = &fragment[..1];
-    let rest = &fragment[1..];
-    match kind {
-        "B" => {
-            let (start_str, end_str, is_len_alias) = rest
-                .split_once('-')
-                .map(|(start, end)| (start, end, false))
-                .or_else(|| rest.split_once(',').map(|(start, end)| (start, end, false)))
-                .or_else(|| rest.split_once('+').map(|(start, len)| (start, len, true)))
-                .unwrap_or((rest, rest, false));
-            let start = start_str
-                .trim_start_matches('B')
-                .parse::<usize>()
-                .map_err(|_| TokenZeroStoreError::Fragment("fragment-malformed".to_string()))?;
-            let end_or_len = end_str
-                .trim_start_matches('B')
-                .parse::<usize>()
-                .map_err(|_| TokenZeroStoreError::Fragment("fragment-malformed".to_string()))?;
-            let end = if is_len_alias {
-                start.checked_add(end_or_len).ok_or_else(|| {
-                    TokenZeroStoreError::Fragment("fragment-malformed".to_string())
-                })?
-            } else {
-                end_or_len
-            };
-            if start > end {
-                return Err(TokenZeroStoreError::Fragment(
-                    "fragment-reversed".to_string(),
-                ));
-            }
-            Ok(ZeroRefFragment::Byte { start, end })
-        }
-        "L" => {
-            let (start_str, end_str) = rest.split_once('-').unwrap_or((rest, rest));
-            let start = start_str
-                .trim_start_matches('L')
-                .parse::<usize>()
-                .map_err(|_| TokenZeroStoreError::Fragment("fragment-malformed".to_string()))?;
-            let end = end_str
-                .trim_start_matches('L')
-                .parse::<usize>()
-                .map_err(|_| TokenZeroStoreError::Fragment("fragment-malformed".to_string()))?;
-            if start == 0 {
-                return Err(TokenZeroStoreError::Fragment(
-                    "fragment-malformed".to_string(),
-                ));
-            }
-            if start > end {
-                return Err(TokenZeroStoreError::Fragment(
-                    "fragment-reversed".to_string(),
-                ));
-            }
-            Ok(ZeroRefFragment::Line { start, end })
-        }
-        _ => Err(TokenZeroStoreError::Fragment(
-            "fragment-unknown-kind".to_string(),
+    match crate::parse_fragment_spec(fragment) {
+        Ok(crate::FragmentSpec::Byte { start, end }) => Ok(ZeroRefFragment::Byte { start, end }),
+        Ok(crate::FragmentSpec::Line { start, end }) => Ok(ZeroRefFragment::Line { start, end }),
+        Err(err) => Err(TokenZeroStoreError::Fragment(
+            crate::fragment_error_reason(err).to_string(),
         )),
     }
 }

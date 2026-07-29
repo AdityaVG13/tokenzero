@@ -249,8 +249,10 @@ labeled_errors! { FragmentError {
     DuplicateFragment => "duplicate_fragment",
 }}
 
-// Parsed byte or line fragment.
-enum FragmentSpec {
+// Parsed byte or line fragment. Shared by every expand surface in this
+// crate (RecoveryStore and the embedded TokenZeroStore) so the fragment
+// grammar cannot diverge between dual-path expand stores.
+pub(crate) enum FragmentSpec {
     /// Zero-based half-open byte range `start..end`.
     Byte { start: usize, end: usize },
     /// One-based inclusive line range `start..=end`.
@@ -290,7 +292,7 @@ fn parse_fragment_bounds_core(
     Ok((start, end))
 }
 
-fn parse_fragment_spec(fragment: &str) -> Result<FragmentSpec, FragmentError> {
+pub(crate) fn parse_fragment_spec(fragment: &str) -> Result<FragmentSpec, FragmentError> {
     if fragment.is_empty() {
         return Err(FragmentError::Malformed);
     }
@@ -346,7 +348,7 @@ fn shared_cas_utf8(cas: &SharedCas, hash: &str) -> Result<String, Option<SharedC
     }
 }
 
-fn fragment_error_reason(err: FragmentError) -> &'static str {
+pub(crate) fn fragment_error_reason(err: FragmentError) -> &'static str {
     match err {
         FragmentError::Malformed => "fragment-malformed",
         FragmentError::Reversed => "fragment-reversed",
