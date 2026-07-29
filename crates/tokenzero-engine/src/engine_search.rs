@@ -123,11 +123,18 @@ impl TokenZeroEngine {
                 .unwrap_or_else(|| "runtime: hard_max_wall_ms exceeded".to_string());
             return failure_response(tool, "hard_max_wall_ms", message, None);
         }
-        // Canonical recoverable payload keeps the grep-compatible flat format;
-        // the grouped rendering is visible-only and used when strictly cheaper.
+        // Canonical recoverable payload keeps the grep-compatible flat format
+        // for byte-stable replay. The visible rendering uses the FSZero
+        // snap-to-file hit grammar (FSZero docs/design/target-ref-grammar.md):
+        // one HIT record per match with a `#L<start>-L<end>` target ref and an
+        // inlined context window, so discovery results are one-call actionable.
         let output = flat_search_output(&matches);
-        let compact = grouped_search_output(&matches);
-        let (visible_source, grouped) = pick_cheaper(&output, &compact);
+        let hit_kind = match (tool, backend) {
+            ("grep", "rg") => "regex",
+            _ => "literal",
+        };
+        let visible_source = hit_search_output(&matches, hit_kind);
+        let grouped = false;
         let mut store = self.recovery_store();
         let search_refs = store.store_search_output_deferred(&output, Some(query));
         let stored =
@@ -145,7 +152,7 @@ impl TokenZeroEngine {
         let exact_ref_tokens = exact_ref_token_count(&refs);
         let exact_refs_available = !refs.is_empty();
         let capsule = recoverable_capsule(
-            visible_source,
+            &visible_source,
             &output,
             stored.raw_tokens,
             mode,
@@ -236,7 +243,7 @@ impl TokenZeroEngine {
             "truncated_by_results": stats.truncated_by_results,
             "truncated_by_visit": stats.truncated_by_visit,
             "search_backend": backend,
-            "output_strategy": if grouped { "grouped_by_file" } else { "exact_first_search" },
+            "output_strategy": if grouped { "grouped_by_file" } else { "hit_target_v1" },
             "transport_status": if storage_error.is_some() { "degraded" } else { "ok" },
             "degraded": storage_error.is_some(),
             "storage_error": storage_error,

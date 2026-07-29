@@ -54,6 +54,59 @@ pub struct SearchMatch {
     pub text: String,
 }
 
+/// Context lines inlined on each side of a hit, matching FSZero's
+/// TARGET_CONTEXT_LINES policy for one-call actionable discovery results.
+const TARGET_CONTEXT_LINES: usize = 2;
+
+/// FSZero snap-to-file hit rendering (FSZero docs/design/target-ref-grammar.md):
+/// every match becomes one `HIT <path>#L<start>-L<end> kind=<kind>
+/// sym=<sym>` header plus an inlined `| <line-no>: <text>` window covering
+/// the matched line and TARGET_CONTEXT_LINES on each side, so agents snap to
+/// file:line without a second discovery call. Each file is read once for all
+/// of its hits; unreadable files fall back to the matched line only.
+pub(crate) fn hit_search_output(matches: &[SearchMatch], kind: &str) -> String {
+    let mut out = String::new();
+    let mut idx = 0;
+    while idx < matches.len() {
+        let m = &matches[idx];
+        let mut end = idx + 1;
+        while end < matches.len() && matches[end].path == m.path {
+            end += 1;
+        }
+        let file_lines: Option<Vec<String>> = std::fs::read_to_string(&m.path)
+            .ok()
+            .map(|content| content.lines().map(str::to_string).collect());
+        for hit in &matches[idx..end] {
+            let line = hit.line.max(1);
+            let (start, stop) = match &file_lines {
+                Some(lines) if !lines.is_empty() => (
+                    line.saturating_sub(TARGET_CONTEXT_LINES).max(1),
+                    (line + TARGET_CONTEXT_LINES).min(lines.len()),
+                ),
+                _ => (line, line),
+            };
+            out.push_str(&format!(
+                "HIT {}#L{}-L{} kind={} sym=(file-scope)\n",
+                hit.path, start, stop, kind
+            ));
+            match &file_lines {
+                Some(lines) if !lines.is_empty() => {
+                    for no in start..=stop {
+                        let text = lines.get(no - 1).map(String::as_str).unwrap_or("");
+                        out.push_str(&format!("| {}: {}\n", no, text));
+                    }
+                }
+                _ => out.push_str(&format!("| {}: {}\n", line, hit.text)),
+            }
+        }
+        idx = end;
+    }
+    while out.ends_with('\n') {
+        out.pop();
+    }
+    out
+}
+
 pub(crate) fn flat_search_output(matches: &[SearchMatch]) -> String {
     matches
         .iter()
@@ -354,12 +407,20 @@ pub(crate) fn rg_search(
         if tool == "find" {
             command.arg("--fixed-strings");
         }
-        let output = command
+        let child = command
             .arg("--")
             .arg(query)
             .arg(root)
-            .output()
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
             .map_err(|err| RgFailure::Unavailable(format!("rg spawn failed: {err}")))?;
+        // Register the child so raw-worker v2 cancellation can stop a long
+        // search; rg runs single-threaded with no subprocess tree of its own.
+        crate::shell_hooks::note_child(Some(child.id()), None, "running");
+        let output = child
+            .wait_with_output()
+            .map_err(|err| RgFailure::Unavailable(format!("rg wait failed: {err}")))?;
         match output.status.code() {
             Some(0) => {}
             // Exit code 1 is rg's "searched fine, found nothing".
@@ -600,4 +661,50 @@ pub(crate) fn should_skip(path: &Path, include_hidden: bool) -> bool {
         .unwrap_or_default();
     matches!(name, ".git" | "target" | ".venv" | "__pycache__")
         || (!include_hidden && name.starts_with('.'))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn hit_output_matches_fszero_target_ref_grammar() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("demo.rs");
+        std::fs::write(&file, "fn a() {}\nfn b() {}\nneedle here\nfn c() {}\nfn d() {}\n").unwrap();
+        let path = file.display().to_string();
+        let matches = vec![SearchMatch {
+            base: dir.path().display().to_string(),
+            path: path.clone(),
+            rel: "demo.rs".to_string(),
+            line: 3,
+            text: "needle here".to_string(),
+        }];
+        let rendered = hit_search_output(&matches, "literal");
+        let expected = format!(
+            "HIT {path}#L1-L5 kind=literal sym=(file-scope)\n\
+             | 1: fn a() {{}}\n\
+             | 2: fn b() {{}}\n\
+             | 3: needle here\n\
+             | 4: fn c() {{}}\n\
+             | 5: fn d() {{}}"
+        );
+        assert_eq!(rendered, expected);
+    }
+
+    #[test]
+    fn hit_output_falls_back_to_matched_line_when_file_unreadable() {
+        let matches = vec![SearchMatch {
+            base: "/base".to_string(),
+            path: "/base/gone.txt".to_string(),
+            rel: "gone.txt".to_string(),
+            line: 7,
+            text: "hit text".to_string(),
+        }];
+        let rendered = hit_search_output(&matches, "regex");
+        assert_eq!(
+            rendered,
+            "HIT /base/gone.txt#L7-L7 kind=regex sym=(file-scope)\n| 7: hit text"
+        );
+    }
 }
