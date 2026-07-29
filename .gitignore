@@ -207,7 +207,11 @@ xtask/target/
 # agent session artifacts (local-only, never commit)
 .pi-subagents/
 .radc-pack/
-agent_ergonomics_audit/
+agent_ergonomics_audit/*
+# fud9 (R-005): regression probes are tracked contracts, not session artifacts.
+!/agent_ergonomics_audit/audit/
+agent_ergonomics_audit/audit/*
+!/agent_ergonomics_audit/audit/regression_tests/
 .agent-tmp-*
 .tmp-*
 _tmp_*
