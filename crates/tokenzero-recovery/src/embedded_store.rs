@@ -838,13 +838,16 @@ fn apply_fragment_to_bytes(
                     "fragment-reversed".to_string(),
                 ));
             }
-            if *start > line_count || *end > line_count {
+            // zzmd.1 (CC1-R1-001): clamp end-past-EOF exactly like
+            // RecoveryStore::clamp_line_window — start past EOF stays a typed
+            // error, but an overshot end returns the available suffix.
+            if *start > line_count {
                 return Err(TokenZeroStoreError::Fragment(format!(
                     "fragment-out-of-range; start={start} end={end} lines={line_count}"
                 )));
             }
             let lo = start - 1;
-            let hi = *end;
+            let hi = (*end).min(line_count);
             Ok(segments[lo..hi].concat().into_bytes())
         }
     }

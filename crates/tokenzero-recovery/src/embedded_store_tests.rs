@@ -239,6 +239,33 @@ fn expand_fragment_out_of_range_is_typed_error() {
 }
 
 #[test]
+fn expand_line_fragment_end_past_eof_clamps_like_recovery_store() {
+    // zzmd.1 (CC1-R1-001): EmbeddedStore must clamp an overshot #L end to the
+    // line count exactly like RecoveryStore::clamp_line_window, while a start
+    // past EOF stays a typed error.
+    let mut store = TokenZeroStore::in_memory();
+    let payload = b"a\nb\nc\n";
+    let ref_id = store.put(payload, None).unwrap();
+
+    let clamped = format!("{ref_id}#L1-L100");
+    assert_eq!(store.expand(&clamped).unwrap(), payload);
+
+    let partial = format!("{ref_id}#L2-L100");
+    assert_eq!(store.expand(&partial).unwrap(), b"b\nc\n");
+
+    let start_oob = format!("{ref_id}#L4-L100");
+    match store.expand(&start_oob).unwrap_err() {
+        TokenZeroStoreError::Fragment(reason) => {
+            assert!(
+                reason.starts_with("fragment-out-of-range"),
+                "reason={reason}"
+            );
+        }
+        other => panic!("expected Fragment, got {other:?}"),
+    }
+}
+
+#[test]
 fn expand_full_hash_missing_is_not_found_not_none_fallback() {
     let mut store = TokenZeroStore::in_memory();
     let missing = "tz://blob/0000000000000000000000000000000000000000000000000000000000000000";
