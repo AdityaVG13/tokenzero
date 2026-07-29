@@ -14,8 +14,8 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 use tokenzero_core::operation_abi::resolve_operation;
 use tokenzero_core::{
-    Accounting, ContentType, Mode, ToolResponse, count_tokens, detect_content_type,
-    shell_display_command_from_argv_for_platform,
+    Accounting, ChannelSeparation, ContentType, Mode, ToolResponse, count_tokens,
+    detect_content_type, shell_display_command_from_argv_for_platform,
 };
 use tokenzero_filters::{discover, rewrite_command};
 use tokenzero_runtime::{ExecutionMode, plan_command_for_platform};
@@ -224,7 +224,179 @@ pub fn execute_domain_op(
             )));
         }
     };
-    Ok(response)
+    Ok(attach_channels(response, bare, args))
+}
+
+/// vz89.11: attach the opt-in machine-action channel. Gate off leaves the
+/// response untouched, so default serialization stays byte-identical.
+fn attach_channels(response: ToolResponse, bare: &str, args: &Value) -> ToolResponse {
+    attach_channels_gated(
+        response,
+        bare,
+        args,
+        tokenzero_core::channel_separation_enabled(),
+    )
+}
+
+/// Pure core of the gate so tests can drive both directions without touching
+/// process env (the engine crate forbids unsafe env mutation).
+fn attach_channels_gated(
+    mut response: ToolResponse,
+    bare: &str,
+    args: &Value,
+    enabled: bool,
+) -> ToolResponse {
+    if !enabled {
+        return response;
+    }
+    response.channels = Some(ChannelSeparation {
+        action: bare.to_string(),
+        status_line: channel_status_line(bare, args),
+        user_message: None,
+    });
+    response
+}
+
+#[cfg(test)]
+mod channel_tests {
+    use super::*;
+
+    #[test]
+    fn channels_gate_off_leaves_response_byte_identical() {
+        let response = ToolResponse::default();
+        let before = serde_json::to_string(&response).unwrap();
+        let after = attach_channels_gated(
+            response,
+            "read",
+            &json!({"path": ["src/main.rs"]}),
+            false,
+        );
+        assert!(after.channels.is_none());
+        assert_eq!(serde_json::to_string(&after).unwrap(), before);
+    }
+
+    #[test]
+    fn channels_gate_on_attaches_action_status_and_null_user_message() {
+        let response = attach_channels_gated(
+            ToolResponse::default(),
+            "read",
+            &json!({"path": ["src/main.rs"]}),
+            true,
+        );
+        let channels = response.channels.as_ref().expect("channels attached");
+        assert_eq!(channels.action, "read");
+        assert_eq!(channels.status_line, "Reading src/main.rs");
+        assert_eq!(channels.user_message, None);
+        let serialized = serde_json::to_value(&response).unwrap();
+        let user_message = serialized
+            .get("channels")
+            .and_then(|c| c.get("user_message"));
+        assert!(
+            user_message.is_some(),
+            "nullable user_message key must serialize, not be skipped"
+        );
+        assert_eq!(user_message, Some(&Value::Null));
+    }
+
+    #[test]
+    fn status_lines_are_deterministic_per_op() {
+        let shell = attach_channels_gated(
+            ToolResponse::default(),
+            "shell",
+            &json!({"command": "cargo test -p foo"}),
+            true,
+        );
+        assert_eq!(
+            shell.channels.unwrap().status_line,
+            "Running cargo test -p foo"
+        );
+        let expand = attach_channels_gated(
+            ToolResponse::default(),
+            "expand",
+            &json!({"ref": "tz://blob/ab12"}),
+            true,
+        );
+        assert_eq!(
+            expand.channels.unwrap().status_line,
+            "Expanding tz://blob/ab12"
+        );
+        let glob = attach_channels_gated(
+            ToolResponse::default(),
+            "glob",
+            &json!({"pattern": "**/*.rs"}),
+            true,
+        );
+        assert_eq!(glob.channels.unwrap().status_line, "Globbing **/*.rs");
+    }
+}
+
+/// Deterministic harness-renderable status line derived from the operation
+/// and its arguments; no model prose involved (vz89.11).
+fn channel_status_line(bare: &str, args: &Value) -> String {
+    fn clip(text: &str, max: usize) -> String {
+        let mut out: String = text.chars().take(max).collect();
+        if text.chars().count() > max {
+            out.push('…');
+        }
+        out
+    }
+    fn str_arg<'a>(args: &'a Value, keys: &[&str]) -> Option<&'a str> {
+        keys.iter().find_map(|key| args.get(*key).and_then(Value::as_str))
+    }
+    let paths = args
+        .get("path")
+        .and_then(|value| match value {
+            Value::String(single) => Some(clip(single, 80)),
+            Value::Array(items) => {
+                let joined = items
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                (!joined.is_empty()).then(|| clip(&joined, 80))
+            }
+            _ => None,
+        });
+    let query = str_arg(args, &["query", "pattern"]).map(|text| clip(text, 60));
+    match bare {
+        "read" => format!("Reading {}", paths.unwrap_or_else(|| "file".into())),
+        "find" => format!("Finding {}", query.unwrap_or_default()),
+        "grep" => format!("Searching for {}", query.unwrap_or_default()),
+        "glob" => format!(
+            "Globbing {}",
+            str_arg(args, &["pattern", "glob", "query"])
+                .map(|text| clip(text, 60))
+                .unwrap_or_default()
+        ),
+        "tree" => format!("Listing {}", paths.unwrap_or_else(|| ".".into())),
+        "edit" => format!("Editing {}", paths.unwrap_or_default()),
+        "shell" => {
+            let command = str_arg(args, &["command"]).map(str::to_string).or_else(|| {
+                args.get("argv").and_then(Value::as_array).map(|argv| {
+                    argv.iter()
+                        .filter_map(Value::as_str)
+                        .collect::<Vec<_>>()
+                        .join(" ")
+                })
+            });
+            format!("Running {}", command.map(|c| clip(&c, 80)).unwrap_or_default())
+        }
+        "ingest" => "Storing payload".to_string(),
+        "expand" => format!("Expanding {}", str_arg(args, &["ref"]).unwrap_or("ref")),
+        "mem" => "Inspecting recovery cache".to_string(),
+        "cache_pack" => "Building cache pack".to_string(),
+        "rewrite" => "Planning rewrite".to_string(),
+        "discover" => "Discovering capabilities".to_string(),
+        "fetch" => format!(
+            "Fetching {}",
+            str_arg(args, &["url", "uri"])
+                .map(|text| clip(text, 80))
+                .unwrap_or_default()
+        ),
+        "report_tool_issue" => "Reporting tool issue".to_string(),
+        "batch" => "Running batch ops".to_string(),
+        other => format!("Running {other}"),
+    }
 }
 
 pub fn batch_response(engine: &TokenZeroEngine, args: &Value) -> Result<ToolResponse, String> {

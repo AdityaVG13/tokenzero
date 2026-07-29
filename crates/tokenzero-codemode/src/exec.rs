@@ -2011,6 +2011,29 @@ fn finalize_codemode_result(
             ),
             0,
         );
+        // vz89.11: opt-in machine-action channel on the codemode envelope.
+        // Gate off leaves the envelope byte-identical.
+        if tokenzero_core::channel_separation_enabled() {
+            let status_line = match finalized.status {
+                CodeModeStatus::Completed => format!(
+                    "Executed {kind} plan ({} physical op(s))",
+                    finalized.telemetry.physical_ops
+                ),
+                CodeModeStatus::Error => {
+                    let error_kind = finalized
+                        .error
+                        .as_ref()
+                        .map(|error| error.kind.as_str())
+                        .unwrap_or("error");
+                    format!("Plan failed ({error_kind})")
+                }
+            };
+            finalized.channels = Some(tokenzero_core::ChannelSeparation {
+                action: format!("codemode.{kind}"),
+                status_line,
+                user_message: None,
+            });
+        }
         finalized
     }
 }

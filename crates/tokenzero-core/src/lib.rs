@@ -235,6 +235,40 @@ pub struct ToolResponse {
     pub telemetry: Option<serde_json::Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub safety: Option<serde_json::Value>,
+    /// vz89.11 output channel separation: present only when the harness opted
+    /// in (TOKENZERO_CHANNEL_SEPARATION). Absent means byte-identical default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub channels: Option<ChannelSeparation>,
+}
+
+/// Machine-action channel separated from user-facing prose (hub vz89.11).
+/// The harness renders `status_line` deterministically at zero model-output
+/// cost; `user_message` stays null between tool calls and may carry one brief
+/// final explanation at completion.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct ChannelSeparation {
+    /// Machine-readable action atom (canonical op name, e.g. "read").
+    pub action: String,
+    /// Deterministic status line derivable from the operation + receipt.
+    pub status_line: String,
+    /// Nullable by contract: None serializes as an explicit null.
+    pub user_message: Option<String>,
+}
+
+/// Env var opting a harness into channel-separated responses.
+pub const CHANNEL_SEPARATION_ENV: &str = "TOKENZERO_CHANNEL_SEPARATION";
+
+/// Whether the harness opted into channel separation (vz89.11). Default off:
+/// responses are byte-identical to the pre-gate contract.
+pub fn channel_separation_enabled() -> bool {
+    std::env::var(CHANNEL_SEPARATION_ENV)
+        .map(|raw| {
+            matches!(
+                raw.trim().to_ascii_lowercase().as_str(),
+                "1" | "on" | "true" | "yes"
+            )
+        })
+        .unwrap_or(false)
 }
 
 impl ToolResponse {

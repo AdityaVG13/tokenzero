@@ -177,6 +177,10 @@ pub struct CodeModeResult {
     pub telemetry: CodeModeTelemetry,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<CodeModeError>,
+    /// vz89.11 output channel separation; present only when the harness opted
+    /// in via TOKENZERO_CHANNEL_SEPARATION.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub channels: Option<tokenzero_core::ChannelSeparation>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -464,6 +468,7 @@ impl CodeModeResult {
             execution_refs: None,
             telemetry,
             error,
+            channels: None,
         }
     }
 

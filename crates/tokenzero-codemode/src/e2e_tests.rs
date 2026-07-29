@@ -1,5 +1,26 @@
 use super::{CodeModeOptions, CodeModeStatus, execute_codemode_with_options};
 
+// Serializes tests that mutate TOKENZERO_CHANNEL_SEPARATION (vz89.11).
+static CHANNEL_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+fn with_channel_gate<R>(value: Option<&str>, f: impl FnOnce() -> R) -> R {
+    let _guard = CHANNEL_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    // SAFETY: gated by CHANNEL_ENV_LOCK; no other test reads this var.
+    unsafe {
+        match value {
+            Some(v) => std::env::set_var(tokenzero_core::CHANNEL_SEPARATION_ENV, v),
+            None => std::env::remove_var(tokenzero_core::CHANNEL_SEPARATION_ENV),
+        }
+    }
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f));
+    // SAFETY: same lock still held; restores the unset default.
+    unsafe { std::env::remove_var(tokenzero_core::CHANNEL_SEPARATION_ENV) };
+    match result {
+        Ok(value) => value,
+        Err(payload) => std::panic::resume_unwind(payload),
+    }
+}
+
 #[test]
 fn async_function_wrapper_is_lowered_and_size_limited() {
     let work = tempfile::tempdir().unwrap();
@@ -400,6 +421,83 @@ fn vz89_10_held_ref_expand_succeeds_and_marks_session_replay() {
         ..Default::default()
     });
     assert!(foreign.error.is_some(), "foreign digest must not resolve");
+}
+
+#[test]
+fn vz89_11_channels_absent_by_default() {
+    with_channel_gate(None, || {
+        let work = tempfile::tempdir().unwrap();
+        let result = execute_codemode_with_options(
+            "return { ok: true }",
+            CodeModeOptions {
+                root: Some(work.path().to_path_buf()),
+                ..Default::default()
+            },
+        );
+        assert_eq!(result.status, CodeModeStatus::Completed, "{:?}", result.error);
+        let serialized = serde_json::to_string(&result).unwrap();
+        assert!(
+            !serialized.contains("channels"),
+            "gate off must be byte-identical to the pre-gate envelope: {serialized}"
+        );
+    });
+}
+
+#[test]
+fn vz89_11_channels_present_when_gated() {
+    with_channel_gate(Some("1"), || {
+        let work = tempfile::tempdir().unwrap();
+        let completed = execute_codemode_with_options(
+            "return { ok: true }",
+            CodeModeOptions {
+                root: Some(work.path().to_path_buf()),
+                ..Default::default()
+            },
+        );
+        assert_eq!(
+            completed.status,
+            CodeModeStatus::Completed,
+            "{:?}",
+            completed.error
+        );
+        let value = serde_json::to_value(&completed).unwrap();
+        let channels = value
+            .get("channels")
+            .unwrap_or_else(|| panic!("gated response must carry channels: {value}"));
+        assert_eq!(channels["action"].as_str(), Some("codemode.code"));
+        assert!(
+            channels["status_line"]
+                .as_str()
+                .unwrap_or_default()
+                .starts_with("Executed code plan"),
+            "deterministic status line from the receipt: {channels}"
+        );
+        assert!(
+            channels.get("user_message").is_some(),
+            "nullable user_message key must be present"
+        );
+        assert!(channels["user_message"].is_null());
+
+        // Error receipts get a deterministic failure status line too.
+        let failed = execute_codemode_with_options(
+            "return 1",
+            CodeModeOptions {
+                root: Some(work.path().to_path_buf()),
+                max_code_bytes: 1,
+                ..Default::default()
+            },
+        );
+        assert_eq!(failed.status, CodeModeStatus::Error);
+        let failed_value = serde_json::to_value(&failed).unwrap();
+        let failed_channels = failed_value
+            .get("channels")
+            .expect("error envelope carries channels when gated");
+        assert_eq!(
+            failed_channels["status_line"].as_str(),
+            Some("Plan failed (validation)")
+        );
+        assert!(failed_channels["user_message"].is_null());
+    });
 }
 
 #[test]
