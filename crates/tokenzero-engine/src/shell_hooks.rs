@@ -6,11 +6,11 @@
 
 use std::sync::RwLock;
 
-type NoteChildFn = fn(Option<u32>, Option<u32>, &'static str);
-type ReserveBackgroundFn = fn(&str);
-type NoteBackgroundChildFn = fn(&str, Option<u32>, Option<u32>);
-type FinishBackgroundFn = fn(&str);
-type SnapshotFn = fn() -> serde_json::Value;
+pub type NoteChildFn = fn(Option<u32>, Option<u32>, &'static str);
+pub type ReserveBackgroundFn = fn(&str);
+pub type NoteBackgroundChildFn = fn(&str, Option<u32>, Option<u32>);
+pub type FinishBackgroundFn = fn(&str);
+pub type SnapshotFn = fn() -> serde_json::Value;
 
 #[derive(Clone, Copy)]
 struct Hooks {
@@ -65,6 +65,20 @@ pub fn install(hooks: ShellHooks) {
 pub fn reset() {
     if let Ok(mut guard) = HOOKS.write() {
         *guard = default_hooks();
+    }
+}
+
+impl ShellHooks {
+    /// Hooks that only track the foreground child process (raw-worker v2
+    /// cancellation); every other slot stays a no-op.
+    pub fn with_note_child(note_child: NoteChildFn) -> Self {
+        Self {
+            note_child,
+            reserve_background_job: noop_reserve,
+            note_background_child: noop_note_background,
+            finish_background_job: noop_finish,
+            containment_snapshot: empty_snapshot,
+        }
     }
 }
 

@@ -1,7 +1,9 @@
 use super::*;
 use serde_json::{Value, json};
 use std::io::{BufRead, Write};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 #[derive(Debug, Default)]
 pub struct RawWorkerV2Session {
@@ -9,6 +11,7 @@ pub struct RawWorkerV2Session {
     shutdown: bool,
     expected_root: Option<String>,
     expected_session_id: Option<String>,
+    cancel_registry: std::collections::HashMap<String, Arc<CancelState>>,
 }
 
 #[derive(Debug)]
@@ -26,7 +29,75 @@ impl RawWorkerV2Session {
             shutdown: false,
             expected_root: Some(root.into()),
             expected_session_id: Some(session_id.into()),
+            cancel_registry: std::collections::HashMap::new(),
         }
+    }
+}
+
+/// Cancellation state for one in-flight v2 call. The cancel control frame
+/// sets `flag` and kills the recorded child; the worker thread observes the
+/// flag after dispatch returns.
+#[derive(Debug, Default)]
+struct CancelState {
+    flag: AtomicBool,
+    process: Mutex<ChildProcess>,
+}
+
+#[derive(Debug, Default, Clone, Copy)]
+struct ChildProcess {
+    pid: Option<u32>,
+    pgid: Option<u32>,
+}
+
+/// The cancel state of the call currently executing on the serve worker
+/// thread (at most one: `max_in_flight` is 1).
+static ACTIVE_CANCEL: Mutex<Option<Arc<CancelState>>> = Mutex::new(None);
+
+#[cfg(unix)]
+fn kill_process_tree(pid: Option<u32>, pgid: Option<u32>) {
+    // `--` before the target is load-bearing: without it a negative process
+    // group id is misparsed as a signal/option and the kill silently no-ops.
+    if let Some(group) = pgid {
+        let _ = std::process::Command::new("kill")
+            .args(["-KILL", "--", &format!("-{group}")])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status();
+    } else if let Some(pid) = pid {
+        let _ = std::process::Command::new("kill")
+            .args(["-KILL", "--", &pid.to_string()])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status();
+    }
+}
+
+#[cfg(not(unix))]
+fn kill_process_tree(_pid: Option<u32>, _pgid: Option<u32>) {}
+
+/// shell_hooks entry: record the dispatched child under the active cancel
+/// state; when cancellation already landed, kill immediately (spawn/cancel
+/// race is decided in favor of the cancel).
+fn v2_note_child(pid: Option<u32>, pgid: Option<u32>, _state: &'static str) {
+    let Some(cancel) = ACTIVE_CANCEL
+        .lock()
+        .ok()
+        .and_then(|slot| slot.as_ref().cloned())
+    else {
+        return;
+    };
+    {
+        let mut process = cancel.process.lock().unwrap_or_else(|p| p.into_inner());
+        if pid.is_some() {
+            process.pid = pid;
+        }
+        if pgid.is_some() {
+            process.pgid = pgid;
+        }
+    }
+    if cancel.flag.load(Ordering::SeqCst) {
+        let process = *cancel.process.lock().unwrap_or_else(|p| p.into_inner());
+        kill_process_tree(process.pid, process.pgid);
     }
 }
 
@@ -112,6 +183,46 @@ fn forbidden(op: &str) -> bool {
         || op.starts_with("mcp.")
 }
 
+impl RawWorkerV2Session {
+    fn register_cancel(&mut self, id: &str) -> Arc<CancelState> {
+        let cancel = Arc::new(CancelState::default());
+        self.cancel_registry.insert(id.to_string(), cancel.clone());
+        cancel
+    }
+
+    fn finish_call(&mut self, id: &str) {
+        self.cancel_registry.remove(id);
+    }
+
+    /// Cancel an in-flight call: set the flag, then kill the recorded child
+    /// process (group) so shell and search work stop inside the declared
+    /// bound. Returns false for unknown or already-finished request ids.
+    fn cancel_call(&mut self, id: &str) -> bool {
+        match self.cancel_registry.remove(id) {
+            Some(cancel) => {
+                cancel.flag.store(true, Ordering::SeqCst);
+                let process = *cancel.process.lock().unwrap_or_else(|p| p.into_inner());
+                kill_process_tree(process.pid, process.pgid);
+                true
+            }
+            None => false,
+        }
+    }
+}
+
+fn unix_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64
+}
+
+const DEFAULT_DEADLINE_MS: u64 = 30_000;
+
+fn is_shell_op(op: &str) -> bool {
+    matches!(op, "shell" | "tz_shell" | "zero.shell")
+}
+
 fn effect_class(op: &str) -> &'static str {
     match op {
         "shell" | "tz_shell" | "zero.shell" | "compact" | "tz_compact" | "zero.compact"
@@ -120,20 +231,56 @@ fn effect_class(op: &str) -> &'static str {
     }
 }
 
+/// A validated call ready for dispatch, carrying cloned binding fields so
+/// the session lock is never held while work runs.
+#[derive(Debug)]
+struct CallCtx {
+    id: String,
+    op: String,
+    args: Value,
+    trace: Value,
+    deadline_unix_ms: Option<u64>,
+    session_id: String,
+    contract: String,
+}
+
+enum RoutedFrame {
+    Respond(Vec<u8>),
+    Dispatch(CallCtx),
+}
+
 pub fn execute_raw_worker_v2_frame(
     engine: &TokenZeroEngine,
     session: &mut RawWorkerV2Session,
     line: &[u8],
 ) -> Vec<u8> {
+    match route_frame(session, line) {
+        RoutedFrame::Respond(bytes) => bytes,
+        RoutedFrame::Dispatch(ctx) => {
+            let id = ctx.id.clone();
+            let cancel = session.register_cancel(&ctx.id);
+            let value = run_call_registered(engine, ctx, cancel);
+            session.finish_call(&id);
+            encode(value)
+        }
+    }
+}
+
+/// Frame routing without dispatch: control frames (handshake/shutdown/cancel)
+/// and validation failures produce an encoded response; valid calls come back
+/// for dispatch so the serve loop can run them off the read loop.
+fn route_frame(session: &mut RawWorkerV2Session, line: &[u8]) -> RoutedFrame {
     if let Err(e) = raw_worker_v2_protocol::decode_request_frame(
         line,
         raw_worker_v2_protocol::DEFAULT_MAX_FRAME_BYTES,
     ) {
-        return encode(error(None, e.kind(), e.to_string(), None));
+        return RoutedFrame::Respond(encode(error(None, e.kind(), e.to_string(), None)));
     }
     let frame: Value = match serde_json::from_slice(line) {
         Ok(v) => v,
-        Err(e) => return encode(error(None, "invalid_json", e.to_string(), None)),
+        Err(e) => {
+            return RoutedFrame::Respond(encode(error(None, "invalid_json", e.to_string(), None)))
+        }
     };
     let kind = frame["kind"].as_str().unwrap_or_default();
     let request = &frame["request"];
@@ -152,12 +299,12 @@ pub fn execute_raw_worker_v2_frame(
             // root+session may re-handshake to rebind. A different root or
             // session on an established binding stays terminal.
             if existing.root != root || existing.session_id != session_id {
-                return encode(error(
+                return RoutedFrame::Respond(encode(error(
                     None,
                     "already_bound",
                     "session is already bound",
                     None,
-                ));
+                )));
             }
         }
         let revision_mismatch = request
@@ -183,23 +330,23 @@ pub fn execute_raw_worker_v2_frame(
                 .and_then(Value::as_str)
                 .is_some_and(|v| v != registry);
         if mismatch {
-            return encode(error(
+            return RoutedFrame::Respond(encode(error(
                 None,
                 "binding_mismatch",
                 "worker handshake binding mismatch",
                 None,
-            ));
+            )));
         }
         if revision_mismatch {
             // Stale revision pin: retryable so the host re-handshakes against
             // the current revision instead of terminally aborting the plan.
-            return encode(error_with(
+            return RoutedFrame::Respond(encode(error_with(
                 None,
                 "worker_revision_changed",
                 "worker revision changed; re-handshake without the stale expected_worker_revision pin",
                 None,
                 true,
-            ));
+            )));
         }
         session.binding = Some(Binding {
             root: root.into(),
@@ -207,49 +354,58 @@ pub fn execute_raw_worker_v2_frame(
             revision: rev.clone(),
             contract: contract.into(),
         });
-        return encode(json!({"kind":"handshake_ack","ack":{
+        return RoutedFrame::Respond(encode(json!({"kind":"handshake_ack","ack":{
             "protocol_version":raw_worker_v2_protocol::RAW_WORKER_PROTOCOL_VERSION,
             "binding":{"engine":"tokenzero","root":root,"session_id":session_id,"worker_revision":rev,
                 "semantic_contract_version":cap["semantic_contract_version"],"semantic_contract_digest":contract,
                 "operation_registry_digest":registry,"ref_scheme":"tz"},
-            "capabilities":{"cancellation":false,"deadlines":true,"approvals":false,"revert":false,"snapshots":false},
-            "limits":{"max_frame_bytes":1048576,"max_output_bytes":65536,"max_in_flight":1,"default_deadline_ms":30000},
+            "capabilities":{"cancellation":true,"deadlines":true,"approvals":false,"revert":false,"snapshots":false},
+            "limits":{"max_frame_bytes":1048576,"max_output_bytes":65536,"max_in_flight":1,"default_deadline_ms":DEFAULT_DEADLINE_MS},
             "protocol_digest":raw_worker_v2_protocol::raw_worker_protocol_digest_hex()
-        }}));
+        }})));
     }
     if kind == "shutdown" {
         session.shutdown = true;
-        return encode(json!({"kind":"shutdown_ack"}));
+        return RoutedFrame::Respond(encode(json!({"kind":"shutdown_ack"})));
     }
-    let Some(binding) = session.binding.as_ref() else {
-        return encode(error(
+    if session.binding.is_none() {
+        return RoutedFrame::Respond(encode(error(
             None,
             "handshake_required",
             "v2 handshake required before calls",
             None,
-        ));
-    };
+        )));
+    }
     if session.shutdown {
-        return encode(error(
+        return RoutedFrame::Respond(encode(error(
             None,
             "session_shutdown",
             "session has shut down",
             None,
-        ));
+        )));
     }
     if kind == "cancel" {
-        return encode(
-            json!({"kind":"cancel_ack","request_id":request["request_id"],"cancelled":false}),
-        );
+        let cancelled = session.cancel_call(request["request_id"].as_str().unwrap_or_default());
+        return RoutedFrame::Respond(encode(
+            json!({"kind":"cancel_ack","request_id":request["request_id"],"cancelled":cancelled,"process_kill_supported":cfg!(unix)}),
+        ));
     }
+    let binding = session.binding.as_ref().expect("binding checked above");
+    match validate_call(binding, &frame) {
+        Ok(ctx) => RoutedFrame::Dispatch(ctx),
+        Err(value) => RoutedFrame::Respond(encode(value)),
+    }
+}
 
+fn validate_call(binding: &Binding, frame: &Value) -> Result<CallCtx, Value> {
+    let request = &frame["request"];
     let id = request["request_id"].as_str().unwrap_or_default();
     let op = request["op"].as_str().unwrap_or_default();
     let trace = request["trace"].clone();
     if trace["request_id"].as_str() != Some(id)
         || trace["contract_digest"].as_str() != Some(binding.contract.as_str())
     {
-        return encode(error(
+        return Err(error(
             Some(id),
             "trace_binding_mismatch",
             "trace does not match handshake binding",
@@ -259,7 +415,7 @@ pub fn execute_raw_worker_v2_frame(
     if trace["worker_revision"].as_str() != Some(binding.revision.as_str()) {
         // Revision drift between handshake and call: typed retryable so the
         // host re-handshakes and retries instead of killing the plan.
-        return encode(error_with(
+        return Err(error_with(
             Some(id),
             "worker_revision_changed",
             "worker revision changed since handshake; re-handshake and retry the call",
@@ -267,16 +423,9 @@ pub fn execute_raw_worker_v2_frame(
             true,
         ));
     }
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis() as u64;
-    if request
-        .get("deadline_unix_ms")
-        .and_then(Value::as_u64)
-        .is_some_and(|v| v <= now)
-    {
-        return encode(error(
+    let deadline_unix_ms = request.get("deadline_unix_ms").and_then(Value::as_u64);
+    if deadline_unix_ms.is_some_and(|v| v <= unix_ms()) {
+        return Err(error(
             Some(id),
             "deadline_exceeded",
             "deadline expired before dispatch",
@@ -284,49 +433,138 @@ pub fn execute_raw_worker_v2_frame(
         ));
     }
     if forbidden(op) {
-        return encode(error(
+        return Err(error(
             Some(id),
             "unsupported_operation",
             "planner, JavaScript, and MCP operations are forbidden",
             Some(trace),
         ));
     }
-    let v1 =
-        json!({"id":id,"op":op,"args":request["args"],"peer_contract_digest":binding.contract});
-    let response = execute_raw_worker_json(engine, &v1);
+    Ok(CallCtx {
+        id: id.to_string(),
+        op: op.to_string(),
+        args: request["args"].clone(),
+        trace,
+        deadline_unix_ms,
+        session_id: binding.session_id.clone(),
+        contract: binding.contract.clone(),
+    })
+}
+
+/// Run a validated call under the active cancel registration and the wall
+/// deadline derived from `deadline_unix_ms` (default 30 s, matching the
+/// advertised handshake limit).
+fn run_call_registered(engine: &TokenZeroEngine, ctx: CallCtx, cancel: Arc<CancelState>) -> Value {
+    *ACTIVE_CANCEL.lock().unwrap_or_else(|p| p.into_inner()) = Some(cancel.clone());
+    let value = dispatch_call(engine, &ctx, &cancel);
+    *ACTIVE_CANCEL.lock().unwrap_or_else(|p| p.into_inner()) = None;
+    value
+}
+
+/// Dispatch a validated call. Cancellation observed after dispatch maps to a
+/// typed `cancelled` error; the remaining deadline is pushed into shell work
+/// as a process timeout and into search/expand loops as wall checkpoints.
+fn dispatch_call(engine: &TokenZeroEngine, ctx: &CallCtx, cancel: &Arc<CancelState>) -> Value {
+    let remaining = ctx
+        .deadline_unix_ms
+        .map(|deadline| deadline.saturating_sub(unix_ms()))
+        .unwrap_or(DEFAULT_DEADLINE_MS)
+        .max(1);
+    let wall = crate::wall::WallDeadline::new(Instant::now(), remaining);
+    let response = crate::wall::with_host_wall_deadline(wall, || {
+        let mut args = ctx.args.clone();
+        if is_shell_op(&ctx.op) {
+            if let Value::Object(ref mut map) = args {
+                let requested = ["timeout_ms", "timeoutMs", "shell_timeout_ms"]
+                    .iter()
+                    .find_map(|key| map.get(*key).and_then(Value::as_u64));
+                map.insert(
+                    "timeout_ms".to_string(),
+                    json!(requested.map_or(remaining, |r| r.min(remaining))),
+                );
+            }
+        }
+        let v1 = json!({"id":ctx.id.clone(),"op":ctx.op.clone(),"args":args,"peer_contract_digest":ctx.contract.clone()});
+        execute_raw_worker_json(engine, &v1)
+    });
+    if cancel.flag.load(Ordering::SeqCst) {
+        return json!({"kind":"error","request_id":ctx.id.clone(),"error":{
+            "kind":"cancelled","message":"call cancelled by control frame","retryable":false
+        },"trace":ctx.trace.clone()});
+    }
     if response["ok"].as_bool() != Some(true) {
         let e = &response["error"];
-        return encode(json!({"kind":"error","request_id":id,"error":{
+        return json!({"kind":"error","request_id":ctx.id.clone(),"error":{
             "kind":e["kind"].as_str().unwrap_or("operation_failed"),
             "message":e["message"].as_str().unwrap_or("operation failed"),
             "retryable":e["retryable"].as_bool().unwrap_or(false),"details":e.get("details").cloned().unwrap_or(Value::Null)
-        },"trace":trace}));
+        },"trace":ctx.trace.clone()});
     }
     let value = response.get("result").cloned().unwrap_or(Value::Null);
     let mut owned_refs = Vec::new();
     refs(&value, &mut owned_refs);
-    encode(
-        json!({"kind":"result","request_id":id,"result":{"value":value,"metadata":{
-            "effect":effect_class(op),
-            "approval":{"state":"not_required"},"revert":{"supported":false},
-            "ownership":{"engine":"tokenzero","session_id":binding.session_id,"refs":owned_refs},"trace":trace
-        }}}),
-    )
+    json!({"kind":"result","request_id":ctx.id.clone(),"result":{"value":value,"metadata":{
+        "effect":effect_class(ctx.op.as_str()),
+        "approval":{"state":"not_required"},"revert":{"supported":false},
+        "ownership":{"engine":"tokenzero","session_id":ctx.session_id.clone(),"refs":owned_refs},"trace":ctx.trace.clone()
+    }}})
 }
 
+struct CallJob {
+    ctx: CallCtx,
+    cancel: Arc<CancelState>,
+}
+
+fn write_response(writer: &Mutex<std::io::Stdout>, response: &[u8]) -> std::io::Result<()> {
+    let mut out = writer
+        .lock()
+        .map_err(|_| std::io::Error::new(std::io::ErrorKind::Other, "writer poisoned"))?;
+    out.write_all(response)?;
+    out.flush()
+}
+
+/// Serve loop: the read loop handles control frames immediately (handshake,
+/// shutdown, and cancel — cancellation must reach active work, so it can
+/// never queue behind a running call) while calls dispatch on a single worker
+/// thread, preserving the advertised `max_in_flight: 1` execution bound.
 pub fn run_raw_worker_v2_serve(opts: &RawWorkerServeOptions) -> i32 {
-    let engine = engine_from_options(opts);
     let stdin = std::io::stdin();
     let mut input = stdin.lock();
-    let stdout = std::io::stdout();
-    let mut output = stdout.lock();
+    let writer = Arc::new(Mutex::new(std::io::stdout()));
     let session_id =
         std::env::var("ZEROSTACK_SESSION_ID").unwrap_or_else(|_| "tokenzero-raw-worker".into());
-    let mut session =
-        RawWorkerV2Session::for_binding(opts.root.to_string_lossy().into_owned(), session_id);
+    let session = Arc::new(Mutex::new(RawWorkerV2Session::for_binding(
+        opts.root.to_string_lossy().into_owned(),
+        session_id,
+    )));
+    crate::shell_hooks::install(crate::shell_hooks::ShellHooks::with_note_child(v2_note_child));
+    let (tx, rx) = std::sync::mpsc::channel::<CallJob>();
+    let worker = {
+        let session = Arc::clone(&session);
+        let writer = Arc::clone(&writer);
+        let worker_opts = RawWorkerServeOptions {
+            root: opts.root.clone(),
+            cache_path: opts.cache_path.clone(),
+            handshake_only: false,
+            once_json: None,
+        };
+        std::thread::spawn(move || {
+            let engine = engine_from_options(&worker_opts);
+            while let Ok(job) = rx.recv() {
+                let id = job.ctx.id.clone();
+                let value = run_call_registered(&engine, job.ctx, job.cancel);
+                if let Ok(mut guard) = session.lock() {
+                    guard.finish_call(&id);
+                }
+                if write_response(&writer, &encode(value)).is_err() {
+                    return;
+                }
+            }
+        })
+    };
     loop {
         match read_bounded_frame(&mut input, raw_worker_v2_protocol::DEFAULT_MAX_FRAME_BYTES) {
-            Ok(BoundedFrame::Eof) => return 0,
+            Ok(BoundedFrame::Eof) => break,
             Ok(BoundedFrame::TooLarge) => {
                 let response = encode(error(
                     None,
@@ -334,30 +572,38 @@ pub fn run_raw_worker_v2_serve(opts: &RawWorkerServeOptions) -> i32 {
                     "inbound frame exceeds 1 MiB",
                     None,
                 ));
-                if output
-                    .write_all(&response)
-                    .and_then(|_| output.flush())
-                    .is_err()
-                {
+                if write_response(&writer, &response).is_err() {
                     return 2;
                 }
             }
             Ok(BoundedFrame::Line(line)) => {
-                let response = execute_raw_worker_v2_frame(&engine, &mut session, &line);
-                if output
-                    .write_all(&response)
-                    .and_then(|_| output.flush())
-                    .is_err()
-                {
-                    return 2;
-                }
-                if session.shutdown {
-                    return 0;
+                let mut guard = session.lock().unwrap_or_else(|p| p.into_inner());
+                match route_frame(&mut guard, &line) {
+                    RoutedFrame::Respond(response) => {
+                        let shutdown = guard.shutdown;
+                        drop(guard);
+                        if write_response(&writer, &response).is_err() {
+                            return 2;
+                        }
+                        if shutdown {
+                            break;
+                        }
+                    }
+                    RoutedFrame::Dispatch(ctx) => {
+                        let cancel = guard.register_cancel(&ctx.id);
+                        drop(guard);
+                        if tx.send(CallJob { ctx, cancel }).is_err() {
+                            return 2;
+                        }
+                    }
                 }
             }
             Err(_) => return 2,
         }
     }
+    drop(tx);
+    let _ = worker.join();
+    0
 }
 
 enum BoundedFrame {
@@ -440,7 +686,7 @@ mod tests {
         assert_eq!(response["ack"]["binding"]["worker_revision"], rev);
         assert_eq!(response["ack"]["binding"]["ref_scheme"], "tz");
         assert_eq!(response["ack"]["limits"]["max_frame_bytes"], 1_048_576);
-        assert_eq!(response["ack"]["capabilities"]["cancellation"], false);
+        assert_eq!(response["ack"]["capabilities"]["cancellation"], true);
     }
 
     #[test]
@@ -606,6 +852,147 @@ mod tests {
             json!({"kind":"cancel","request":{"request_id":"unknown"}}),
         );
         assert_eq!(response["cancelled"], false);
+    }
+
+    #[test]
+    fn cross_root_replay_against_bound_session_fails_closed() {
+        let mut session = RawWorkerV2Session::default();
+        let rev = revision();
+        send(&mut session, handshake(&rev));
+        let cap = local_capability();
+        let replay = json!({"kind":"handshake","request":{
+            "protocol_version":"zerostack.raw_worker.v2","root":"/fixture/other","session_id":"session-1",
+            "expected_engine":"tokenzero","expected_worker_revision":rev,
+            "expected_contract_digest":cap["semantic_contract_digest"],
+            "expected_registry_digest":cap["operation_registry_digest"]
+        }});
+        let response = send(&mut session, replay);
+        assert_eq!(response["error"]["kind"], "already_bound");
+        assert_eq!(response["error"]["retryable"], false);
+    }
+
+    #[test]
+    fn registry_engine_and_contract_mismatches_fail_closed_typed() {
+        let cap = local_capability();
+        let rev = revision();
+        for (field, bad) in [
+            ("expected_registry_digest", json!("deadbeef")),
+            ("expected_engine", json!("not-tokenzero")),
+            ("expected_contract_digest", json!("deadbeef")),
+        ] {
+            let mut session = RawWorkerV2Session::default();
+            let mut frame = handshake(&rev);
+            frame["request"][field] = bad;
+            let response = send(&mut session, frame);
+            assert_eq!(
+                response["error"]["kind"], "binding_mismatch",
+                "field {field} must fail closed"
+            );
+            assert_eq!(response["error"]["retryable"], false);
+            assert!(session.binding.is_none());
+        }
+        let _ = cap;
+    }
+
+    #[test]
+    fn absent_optional_digest_pins_are_allowed_skew() {
+        let mut session = RawWorkerV2Session::default();
+        let rev = revision();
+        let mut frame = handshake(&rev);
+        let request = frame["request"].as_object_mut().unwrap();
+        request.remove("expected_registry_digest");
+        request.remove("expected_worker_revision");
+        let response = send(&mut session, frame);
+        assert_eq!(response["kind"], "handshake_ack");
+    }
+
+    /// Serializes tests that dispatch through the process-global
+    /// ACTIVE_CANCEL slot so parallel test threads cannot clobber it.
+    static DISPATCH_TEST_LOCK: Mutex<()> = Mutex::new(());
+
+    #[test]
+    fn cancel_control_frame_stops_dispatched_shell_work() {
+        let _dispatch_guard = DISPATCH_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        crate::shell_hooks::install(crate::shell_hooks::ShellHooks::with_note_child(v2_note_child));
+        let mut session = RawWorkerV2Session::default();
+        let rev = revision();
+        let cap = local_capability();
+        send(&mut session, handshake(&rev));
+        let trace = json!({"runtime_id":"rt","cell_id":"cell","request_id":"req-cancel","trace_id":"trace",
+            "worker_revision":rev,"contract_digest":cap["semantic_contract_digest"]});
+        let frame = json!({"kind":"call","request":{"request_id":"req-cancel","op":"shell",
+            "args":{"command":"sleep 30"},"trace":trace}});
+        let ctx = validate_call(session.binding.as_ref().unwrap(), &frame).unwrap();
+        let cancel = session.register_cancel(&ctx.id);
+        let (ready_tx, ready_rx) = std::sync::mpsc::channel::<()>();
+        let worker = std::thread::spawn(move || {
+            let engine = engine();
+            // Engine construction is slow on cold stores; only the dispatch
+            // window counts for the cancel bound.
+            ready_tx.send(()).expect("ready signal");
+            run_call_registered(&engine, ctx, cancel)
+        });
+        ready_rx.recv().expect("worker ready");
+        let started = std::time::Instant::now();
+        std::thread::sleep(std::time::Duration::from_millis(400));
+        let ack = send(
+            &mut session,
+            json!({"kind":"cancel","request":{"request_id":"req-cancel"}}),
+        );
+        assert_eq!(ack["kind"], "cancel_ack");
+        assert_eq!(ack["cancelled"], true);
+        assert_eq!(ack["process_kill_supported"], cfg!(unix));
+        let value = worker.join().expect("worker joins after cancel");
+        assert_eq!(value["error"]["kind"], "cancelled");
+        assert_eq!(value["error"]["retryable"], false);
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(20),
+            "cancelled call must not run to completion"
+        );
+        crate::shell_hooks::reset();
+    }
+
+    #[test]
+    fn cancel_of_unknown_request_id_reports_false() {
+        let mut session = RawWorkerV2Session::default();
+        let rev = revision();
+        send(&mut session, handshake(&rev));
+        let ack = send(
+            &mut session,
+            json!({"kind":"cancel","request":{"request_id":"missing"}}),
+        );
+        assert_eq!(ack["cancelled"], false);
+    }
+
+    #[test]
+    fn deadline_reaches_dispatched_shell_work() {
+        let _dispatch_guard = DISPATCH_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        let mut session = RawWorkerV2Session::default();
+        let rev = revision();
+        let cap = local_capability();
+        send(&mut session, handshake(&rev));
+        let trace = json!({"runtime_id":"rt","cell_id":"cell","request_id":"req-dl","trace_id":"trace",
+            "worker_revision":rev,"contract_digest":cap["semantic_contract_digest"]});
+        let deadline = unix_ms() + 800;
+        let started = std::time::Instant::now();
+        let response = send(
+            &mut session,
+            json!({"kind":"call","request":{"request_id":"req-dl","op":"shell",
+            "args":{"command":"sleep 30"},"deadline_unix_ms":deadline,"trace":trace}}),
+        );
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(10),
+            "deadline must reach the dispatched shell process"
+        );
+        let text = response.to_string();
+        assert!(
+            text.contains("\"timeout\":true") || text.contains("timed_out"),
+            "shell run must report timeout enforcement: {text}"
+        );
     }
 
     #[test]
