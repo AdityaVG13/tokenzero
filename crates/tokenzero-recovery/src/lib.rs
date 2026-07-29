@@ -443,7 +443,9 @@ fn parse_portable_or_lenient_fragment(
         Some(&b'L') => ('L', &fragment[1..]),
         _ => return Err(ZeroRefError::Malformed),
     };
-    let (start, end) = parse_fragment_bounds_core(value, kind, kind == 'L', kind == 'L')
+    // allow_single=true for both kinds, matching the shared grammar
+    // (parse_fragment_spec): `#B0` is a valid single-byte selector.
+    let (start, end) = parse_fragment_bounds_core(value, kind, true, kind == 'L')
         .map_err(|_| ZeroRefError::Malformed)?;
     match kind {
         'B' => Ok(ZeroRefFragment::Byte { start, end }),
@@ -2708,6 +2710,11 @@ fn expand_selected_content(
                 "fragment-out-of-range; start={start} end={end} len={}",
                 bytes.len()
             ));
+        }
+        // An empty range carries no bytes, so a char boundary is irrelevant;
+        // byte-addressable stores (TokenZeroStore) already allow this.
+        if start == end {
+            return Ok(String::new());
         }
         return content.get(*start..*end).map(str::to_owned).ok_or_else(|| {
             format!(
