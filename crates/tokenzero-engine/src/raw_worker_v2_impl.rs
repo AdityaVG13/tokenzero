@@ -13,6 +13,7 @@ pub struct RawWorkerV2Session {
 
 #[derive(Debug)]
 struct Binding {
+    root: String,
     session_id: String,
     revision: String,
     contract: String,
@@ -37,8 +38,17 @@ fn revision() -> String {
 }
 
 fn error(id: Option<&str>, kind: &str, message: impl Into<String>, trace: Option<Value>) -> Value {
-    let mut value =
-        json!({"kind":"error","error":{"kind":kind,"message":message.into(),"retryable":false}});
+    error_with(id, kind, message, trace, false)
+}
+
+fn error_with(
+    id: Option<&str>,
+    kind: &str,
+    message: impl Into<String>,
+    trace: Option<Value>,
+    retryable: bool,
+) -> Value {
+    let mut value = json!({"kind":"error","error":{"kind":kind,"message":message.into(),"retryable":retryable}});
     if let Some(id) = id {
         value["request_id"] = json!(id);
     }
@@ -104,15 +114,8 @@ fn forbidden(op: &str) -> bool {
 
 fn effect_class(op: &str) -> &'static str {
     match op {
-        "shell"
-        | "tz_shell"
-        | "zero.shell"
-        | "compact"
-        | "tz_compact"
-        | "zero.compact"
-        | "ingest"
-        | "tz_ingest"
-        | "zero.ingest" => "irreversible",
+        "shell" | "tz_shell" | "zero.shell" | "compact" | "tz_compact" | "zero.compact"
+        | "ingest" | "tz_ingest" | "zero.ingest" => "irreversible",
         _ => "read_only",
     }
 }
@@ -136,14 +139,6 @@ pub fn execute_raw_worker_v2_frame(
     let request = &frame["request"];
 
     if kind == "handshake" {
-        if session.binding.is_some() {
-            return encode(error(
-                None,
-                "already_bound",
-                "session is already bound",
-                None,
-            ));
-        }
         let cap = local_capability();
         let rev = revision();
         let contract = cap["semantic_contract_digest"].as_str().unwrap_or_default();
@@ -152,6 +147,23 @@ pub fn execute_raw_worker_v2_frame(
             .unwrap_or_default();
         let root = request["root"].as_str().unwrap_or_default();
         let session_id = request["session_id"].as_str().unwrap_or_default();
+        if let Some(existing) = session.binding.as_ref() {
+            // A revision swap on the host side is survivable: the same
+            // root+session may re-handshake to rebind. A different root or
+            // session on an established binding stays terminal.
+            if existing.root != root || existing.session_id != session_id {
+                return encode(error(
+                    None,
+                    "already_bound",
+                    "session is already bound",
+                    None,
+                ));
+            }
+        }
+        let revision_mismatch = request
+            .get("expected_worker_revision")
+            .and_then(Value::as_str)
+            .is_some_and(|v| v != rev);
         let mismatch = request["protocol_version"].as_str()
             != Some(raw_worker_v2_protocol::RAW_WORKER_PROTOCOL_VERSION)
             || root.is_empty()
@@ -169,11 +181,7 @@ pub fn execute_raw_worker_v2_frame(
             || request
                 .get("expected_registry_digest")
                 .and_then(Value::as_str)
-                .is_some_and(|v| v != registry)
-            || request
-                .get("expected_worker_revision")
-                .and_then(Value::as_str)
-                .is_some_and(|v| v != rev);
+                .is_some_and(|v| v != registry);
         if mismatch {
             return encode(error(
                 None,
@@ -182,7 +190,19 @@ pub fn execute_raw_worker_v2_frame(
                 None,
             ));
         }
+        if revision_mismatch {
+            // Stale revision pin: retryable so the host re-handshakes against
+            // the current revision instead of terminally aborting the plan.
+            return encode(error_with(
+                None,
+                "worker_revision_changed",
+                "worker revision changed; re-handshake without the stale expected_worker_revision pin",
+                None,
+                true,
+            ));
+        }
         session.binding = Some(Binding {
+            root: root.into(),
             session_id: session_id.into(),
             revision: rev.clone(),
             contract: contract.into(),
@@ -227,7 +247,6 @@ pub fn execute_raw_worker_v2_frame(
     let op = request["op"].as_str().unwrap_or_default();
     let trace = request["trace"].clone();
     if trace["request_id"].as_str() != Some(id)
-        || trace["worker_revision"].as_str() != Some(binding.revision.as_str())
         || trace["contract_digest"].as_str() != Some(binding.contract.as_str())
     {
         return encode(error(
@@ -235,6 +254,17 @@ pub fn execute_raw_worker_v2_frame(
             "trace_binding_mismatch",
             "trace does not match handshake binding",
             Some(trace),
+        ));
+    }
+    if trace["worker_revision"].as_str() != Some(binding.revision.as_str()) {
+        // Revision drift between handshake and call: typed retryable so the
+        // host re-handshakes and retries instead of killing the plan.
+        return encode(error_with(
+            Some(id),
+            "worker_revision_changed",
+            "worker revision changed since handshake; re-handshake and retry the call",
+            Some(trace),
+            true,
         ));
     }
     let now = SystemTime::now()
@@ -417,12 +447,71 @@ mod tests {
     fn skew_and_pre_handshake_calls_are_rejected() {
         let mut session = RawWorkerV2Session::default();
         let response = send(&mut session, handshake("skewed"));
-        assert_eq!(response["error"]["kind"], "binding_mismatch");
+        assert_eq!(response["error"]["kind"], "worker_revision_changed");
+        assert_eq!(response["error"]["retryable"], true);
         let response = send(
             &mut session,
             json!({"kind":"cancel","request":{"request_id":"r"}}),
         );
         assert_eq!(response["error"]["kind"], "handshake_required");
+    }
+
+    #[test]
+    fn handshake_rebind_after_revision_swap_is_survivable() {
+        let mut session = RawWorkerV2Session::default();
+        let rev = revision();
+        let first = send(&mut session, handshake(&rev));
+        assert_eq!(first["kind"], "handshake_ack");
+        // Same root+session re-handshakes cleanly (host-side revision swap).
+        let second = send(&mut session, handshake(&rev));
+        assert_eq!(second["kind"], "handshake_ack");
+        assert_eq!(second["ack"]["binding"]["worker_revision"], rev);
+    }
+
+    #[test]
+    fn rehandshake_with_foreign_session_stays_terminal() {
+        let mut session = RawWorkerV2Session::default();
+        let rev = revision();
+        send(&mut session, handshake(&rev));
+        let cap = local_capability();
+        let foreign = json!({"kind":"handshake","request":{
+            "protocol_version":"zerostack.raw_worker.v2","root":"/fixture/repo","session_id":"session-2",
+            "expected_engine":"tokenzero","expected_worker_revision":rev,
+            "expected_contract_digest":cap["semantic_contract_digest"],
+            "expected_registry_digest":cap["operation_registry_digest"]
+        }});
+        let response = send(&mut session, foreign);
+        assert_eq!(response["error"]["kind"], "already_bound");
+        assert_eq!(response["error"]["retryable"], false);
+    }
+
+    #[test]
+    fn stale_trace_revision_is_retryable_and_recoverable() {
+        let mut session = RawWorkerV2Session::default();
+        let rev = revision();
+        let cap = local_capability();
+        send(&mut session, handshake(&rev));
+        let stale = json!({"runtime_id":"rt","cell_id":"cell","request_id":"req","trace_id":"trace",
+            "worker_revision":"stale-rev","contract_digest":cap["semantic_contract_digest"]});
+        let response = send(
+            &mut session,
+            json!({"kind":"call","request":{"request_id":"req","op":"read",
+            "args":{},"trace":stale}}),
+        );
+        assert_eq!(response["error"]["kind"], "worker_revision_changed");
+        assert_eq!(response["error"]["retryable"], true);
+        assert_eq!(response["trace"]["trace_id"], "trace");
+        // Recovery: re-handshake, then the call dispatches with a fresh trace.
+        let rebind = send(&mut session, handshake(&rev));
+        assert_eq!(rebind["kind"], "handshake_ack");
+        let fresh = json!({"runtime_id":"rt","cell_id":"cell","request_id":"req","trace_id":"trace",
+            "worker_revision":rev,"contract_digest":cap["semantic_contract_digest"]});
+        let response = send(
+            &mut session,
+            json!({"kind":"call","request":{"request_id":"req","op":"read",
+            "args":{},"trace":fresh}}),
+        );
+        assert_ne!(response["error"]["kind"], "worker_revision_changed");
     }
 
     #[test]
@@ -446,9 +535,12 @@ mod tests {
         }))
         .unwrap();
         frame.extend(std::iter::repeat(b' ').take(1_048_600));
-        let response: Value =
-            serde_json::from_slice(&execute_raw_worker_v2_frame(&engine(), &mut session, &frame))
-                .unwrap();
+        let response: Value = serde_json::from_slice(&execute_raw_worker_v2_frame(
+            &engine(),
+            &mut session,
+            &frame,
+        ))
+        .unwrap();
         assert_eq!(response["error"]["kind"], "frame_too_large");
         assert!(response.get("request_id").is_none());
     }
@@ -485,10 +577,12 @@ mod tests {
         oversized.extend_from_slice(b"{}\n");
         let mut reader = std::io::BufReader::new(std::io::Cursor::new(oversized));
         let first =
-            read_bounded_frame(&mut reader, raw_worker_v2_protocol::DEFAULT_MAX_FRAME_BYTES).unwrap();
+            read_bounded_frame(&mut reader, raw_worker_v2_protocol::DEFAULT_MAX_FRAME_BYTES)
+                .unwrap();
         assert!(matches!(first, BoundedFrame::TooLarge));
         let second =
-            read_bounded_frame(&mut reader, raw_worker_v2_protocol::DEFAULT_MAX_FRAME_BYTES).unwrap();
+            read_bounded_frame(&mut reader, raw_worker_v2_protocol::DEFAULT_MAX_FRAME_BYTES)
+                .unwrap();
         assert!(matches!(second, BoundedFrame::Line(line) if line == b"{}\n"));
     }
 
