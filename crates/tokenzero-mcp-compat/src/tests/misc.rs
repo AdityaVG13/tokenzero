@@ -221,6 +221,9 @@ fn mcp_execute_root_with_workspace_markers_requires_allowlist() {
         "FOREIGN-WORKSPACE-MARKER\n",
     )
     .unwrap();
+    // 5ar1 done_when literal: a foreign root carrying Cargo.toml (the
+    // strongest workspace-evidence marker) is rejected exactly like any other.
+    std::fs::write(foreign.path().join("Cargo.toml"), "[package]\n").unwrap();
     let mut config = EngineConfig::for_root(server.path());
     config.tool_surface = McpToolSurface::CodeMode;
     let engine = TokenZeroEngine::new(config);
@@ -228,7 +231,7 @@ fn mcp_execute_root_with_workspace_markers_requires_allowlist() {
         &engine,
         "tz_execute_code",
         &json!({
-            "plan": "return zero.read('CHANGELOG.md')",
+            "plan": "return zero.read('Cargo.toml')",
             "root": foreign.path().display().to_string()
         }),
         None,
