@@ -161,18 +161,20 @@ impl Default for Config {
             max_active,
             max_queue_depth,
             cost_threshold,
-            analysis_max_active: env_usize_or_else(
-                "TOKENZERO_CODEMODE_ANALYSIS_CONCURRENCY",
-                default_analysis_concurrency,
-            )
-            .max(1)
-            .min(analysis_cap),
-            index_max_active: env_usize_or_else(
-                "TOKENZERO_CODEMODE_INDEX_CONCURRENCY",
-                default_index_concurrency,
-            )
-            .max(1)
-            .min(index_cap),
+            analysis_max_active: clamp_class_concurrency(
+                env_usize_or_else(
+                    "TOKENZERO_CODEMODE_ANALYSIS_CONCURRENCY",
+                    default_analysis_concurrency,
+                ),
+                analysis_cap,
+            ),
+            index_max_active: clamp_class_concurrency(
+                env_usize_or_else(
+                    "TOKENZERO_CODEMODE_INDEX_CONCURRENCY",
+                    default_index_concurrency,
+                ),
+                index_cap,
+            ),
         }
     }
 }
@@ -809,6 +811,10 @@ fn env_usize_or_else(name: &str, default: impl FnOnce() -> usize) -> usize {
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or_else(default)
+}
+
+fn clamp_class_concurrency(explicit: usize, cap: usize) -> usize {
+    explicit.max(1).min(cap.max(1))
 }
 
 fn default_class_concurrency(core_divisor: usize, cap_env: &str, cap_default: usize) -> usize {

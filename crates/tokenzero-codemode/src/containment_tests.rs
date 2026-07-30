@@ -135,6 +135,13 @@ fn classify_expand_only_as_status_keeps_mixed_light() {
 }
 
 #[test]
+fn explicit_concurrency_is_clamped_to_cap() {
+    assert_eq!(clamp_class_concurrency(64, 8), 8);
+    assert_eq!(clamp_class_concurrency(1, 8), 1);
+    assert_eq!(clamp_class_concurrency(0, 0), 1);
+}
+
+#[test]
 fn default_analysis_concurrency_is_core_budgeted() {
     let cores = std::thread::available_parallelism()
         .map(std::num::NonZeroUsize::get)
