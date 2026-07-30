@@ -803,6 +803,41 @@ fn concurrent_direct_compact_expand_uses_requested_store() {
     }
 }
 
+#[cfg(unix)]
+#[test]
+fn background_shell_can_outlive_launch_and_return_via_job_wait() {
+    let work = tempfile::tempdir().unwrap();
+    let result = execute_codemode_with_options(
+        r#"
+        const started = await zero.token.shell(
+            "sleep 0.05; printf async-shell-complete",
+            { background: true, timeout_ms: 2000 }
+        );
+        return await zero.token.job(started.job, { wait_ms: 1000, cursor: 0 });
+        "#,
+        CodeModeOptions {
+            root: Some(work.path().to_path_buf()),
+            ..Default::default()
+        },
+    );
+
+    assert_eq!(
+        result.status,
+        CodeModeStatus::Completed,
+        "{:?}",
+        result.error
+    );
+    let value = result.value.as_ref().unwrap();
+    assert_eq!(value["status"], "exited");
+    assert_eq!(value["exitCode"], 0);
+    assert!(
+        value["tail"]
+            .as_str()
+            .unwrap()
+            .contains("async-shell-complete")
+    );
+}
+
 #[test]
 fn single_shell_with_large_stdout_does_not_exhaust_microtasks() {
     let work = tempfile::tempdir().unwrap();
