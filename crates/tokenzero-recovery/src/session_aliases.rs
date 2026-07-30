@@ -3,10 +3,71 @@
 //! Full-hash `tz://blob/<64hex>` / `fz://blob/<64hex>` refs cost ~18-25 BPE tokens
 //! each. Visible text emits `tz://s/<16hex>` (GraphZero-aligned prefix length)
 //! while the recovery store keeps `short → full` in the alias table so expand
-//! accepts either form. Aliases are content-addressed (first 16 hex of the hash),
-//! so concurrent engines sharing a store agree on the short form.
+//! accepts either form.
+//!
+//! Opacity (W4-OPAQUE-CAS-ALIAS): visible alias bytes MUST NOT be derived
+//! from the raw content hash. Emission routes through the keyed derivation
+//! `session_alias_hex_keyed` (HMAC-SHA-256 under a per-store key held inside
+//! the recovery store state), so concurrent engines sharing a store agree on
+//! the short form while the visible handle reveals nothing about payload
+//! identity. The legacy content-derived helpers below remain only as shape
+//! checkers (`*_is_some` gates) and for reading pre-opacity alias tables; new
+//! emission must use the `*_keyed` variants.
 
 use serde_json::Value;
+use sha2::{Digest, Sha256};
+
+/// Byte length of the per-store alias derivation key.
+pub const ALIAS_KEY_BYTES: usize = 32;
+
+/// HMAC-SHA-256 (RFC 2104) over `msg` with a 32-byte key. Implemented on the
+/// sha2 crate already in the tree; the block size for SHA-256 is 64 bytes.
+fn hmac_sha256(key: &[u8; ALIAS_KEY_BYTES], msg: &[u8]) -> [u8; 32] {
+    const BLOCK: usize = 64;
+    let mut ipad = [0x36u8; BLOCK];
+    let mut opad = [0x5cu8; BLOCK];
+    for i in 0..ALIAS_KEY_BYTES {
+        ipad[i] ^= key[i];
+        opad[i] ^= key[i];
+    }
+    let mut inner = Sha256::new();
+    inner.update(ipad);
+    inner.update(msg);
+    let inner = inner.finalize();
+    let mut outer = Sha256::new();
+    outer.update(opad);
+    outer.update(inner);
+    outer.finalize().into()
+}
+
+/// Opaque 16-hex alias body for a 64-hex content hash under `key`.
+///
+/// Keyed derivation (HMAC-SHA-256 truncated to 8 bytes): the visible bytes
+/// are computationally independent of the content hash without the key, and
+/// deterministic for every engine sharing the store key.
+pub fn session_alias_hex_keyed(key: &[u8; ALIAS_KEY_BYTES], hash: &str) -> String {
+    let mac = hmac_sha256(key, hash.as_bytes());
+    let mut out = String::with_capacity(SESSION_ALIAS_HEX_LEN);
+    for byte in &mac[..SESSION_ALIAS_HEX_LEN / 2] {
+        out.push_str(&format!("{byte:02x}"));
+    }
+    out
+}
+
+/// Session-visible short form under the store's alias key, preserving
+/// fragments. Keyed twin of [`session_visible_blob_alias`].
+pub fn session_visible_blob_alias_keyed(
+    key: &[u8; ALIAS_KEY_BYTES],
+    ref_id: &str,
+) -> Option<String> {
+    let (bare, frag) = split_ref_fragment(ref_id);
+    let hash = full_hash_blob_parts(bare)?;
+    let short = format!("{SESSION_ALIAS_PREFIX}{}", session_alias_hex_keyed(key, hash));
+    Some(match frag {
+        Some(f) => format!("{short}#{f}"),
+        None => short,
+    })
+}
 
 /// Prefix length for session-visible short aliases (matches GraphZero's 16-hex habit).
 pub const SESSION_ALIAS_HEX_LEN: usize = 16;
@@ -66,6 +127,10 @@ pub fn canonical_full_blob_ref(bare: &str) -> Option<String> {
     full_hash_blob_parts(bare).map(|hash| format!("tz://blob/{hash}"))
 }
 
+/// LEGACY content-derived short form (first 16 hex of the content hash).
+/// Retained for shape checks and pre-opacity alias tables only; emission
+/// must use [`session_visible_blob_alias_keyed`] (W4-OPAQUE-CAS-ALIAS).
+///
 /// Session-visible short form for a full-hash blob ref, preserving fragments.
 ///
 /// Returns `None` when `ref_id` is not a portable full-hash blob ref (already
@@ -220,6 +285,45 @@ pub fn rewrite_full_hash_blob_refs_in_value(value: &mut Value) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn hmac_sha256_matches_rfc4231_case2_layout() {
+        // RFC 4231 test case 2 layout: key "Jefe" zero-padded to our fixed
+        // 32-byte key contract, data "what do ya want for nothing?". HMAC
+        // zero-pads short keys to the block size, so HMAC-SHA256 over the
+        // padded key equals this independently computed golden vector
+        // (Python hmac.new(b"Jefe" + 28*NUL, msg, sha256)).
+        let mut key = [0u8; ALIAS_KEY_BYTES];
+        key[..4].copy_from_slice(b"Jefe");
+        let mac = hmac_sha256(&key, b"what do ya want for nothing?");
+        let hex: String = mac.iter().map(|b| format!("{b:02x}")).collect();
+        assert_eq!(
+            hex,
+            "5bdcc146bf60754e6a042426089575c75a003f089d2739839dec58b964ec3843"
+        );
+    }
+
+    #[test]
+    fn keyed_alias_is_opaque_and_deterministic() {
+        // W4-OPAQUE-CAS-ALIAS: visible alias bytes must be independent of the
+        // content hash (keyed derivation), deterministic per store key.
+        let hash = "ab".repeat(32);
+        let key_a = [7u8; ALIAS_KEY_BYTES];
+        let key_b = [9u8; ALIAS_KEY_BYTES];
+        let alias_a = session_alias_hex_keyed(&key_a, &hash);
+        assert_eq!(alias_a.len(), SESSION_ALIAS_HEX_LEN);
+        // Golden vector (python hmac.new(bytes([7]*32), b"abab...", sha256)):
+        // the alias is the keyed MAC prefix, not the content-hash prefix.
+        assert_eq!(alias_a, "c31200b508a114fd");
+        assert_ne!(alias_a, hash[..SESSION_ALIAS_HEX_LEN], "alias must not be the content-hash prefix");
+        assert_eq!(alias_a, session_alias_hex_keyed(&key_a, &hash), "same key => same alias");
+        assert_eq!(session_alias_hex_keyed(&key_b, &hash), "c66bacbc69f7418b", "different key => different alias");
+        let full = format!("tz://blob/{hash}");
+        let short = session_visible_blob_alias_keyed(&key_a, &full).unwrap();
+        assert_eq!(short, format!("tz://s/{alias_a}"));
+        let with_frag = session_visible_blob_alias_keyed(&key_a, &format!("{full}#B0-4")).unwrap();
+        assert_eq!(with_frag, format!("tz://s/{alias_a}#B0-4"));
+    }
 
     #[test]
     fn aliases_full_hash_to_sixteen_hex_session_form() {

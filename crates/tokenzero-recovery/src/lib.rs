@@ -49,7 +49,8 @@ pub mod working_set;
 pub use session_aliases::{
     SESSION_ALIAS_HEX_LEN, canonical_full_blob_ref, is_full_hash_blob_bare, is_session_alias_bare,
     is_session_ordinal_bare, parse_session_ordinal_bare, rewrite_full_hash_blob_refs_in_text,
-    rewrite_full_hash_blob_refs_in_value, session_ordinal_ref, session_visible_blob_alias,
+    rewrite_full_hash_blob_refs_in_value, session_alias_hex_keyed, session_ordinal_ref,
+    session_visible_blob_alias, session_visible_blob_alias_keyed,
     split_ref_fragment,
 };
 
@@ -661,6 +662,12 @@ pub(crate) struct RecoveryState {
     /// Append-only audit commitment for acknowledged mint and alias-CAS mutations.
     #[serde(default)]
     pub transparency: crate::transparency::MmrLog,
+    /// Hex-encoded 32-byte HMAC key for opaque session alias derivation
+    /// (W4-OPAQUE-CAS-ALIAS). Generated lazily on first alias mint, persisted
+    /// with the store so every engine sharing this store agrees on aliases.
+    /// Internal-only: the key never appears in visible transcripts.
+    #[serde(default)]
+    pub alias_key: Option<String>,
 }
 
 // Capped shell-result index; blob payloads remain content-addressed.
@@ -804,6 +811,7 @@ impl RecoveryState {
             shell_outcome_seq: 0,
             ambiguous_aliases: BTreeSet::new(),
             transparency: crate::transparency::MmrLog::default(),
+            alias_key: None,
         }
     }
 
@@ -1817,12 +1825,46 @@ impl RecoveryStore {
         None
     }
 
+    /// The store's alias derivation key, generating and persisting it into
+    /// the state on first use (lazily; in-memory stores get an ephemeral key).
+    fn alias_key(&mut self) -> [u8; crate::session_aliases::ALIAS_KEY_BYTES] {
+        if let Some(hex_key) = self.state.alias_key.as_deref() {
+            let mut key = [0u8; crate::session_aliases::ALIAS_KEY_BYTES];
+            if hex_key.len() == 64
+                && hex_key
+                    .bytes()
+                    .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+            {
+                for (i, chunk) in hex_key.as_bytes().chunks_exact(2).enumerate() {
+                    let hi = (chunk[0] as char).to_digit(16).unwrap() as u8;
+                    let lo = (chunk[1] as char).to_digit(16).unwrap() as u8;
+                    key[i] = (hi << 4) | lo;
+                }
+                return key;
+            }
+            // Corrupt key field: fall through and regenerate (aliases minted
+            // under the corrupt key remain in the alias table and still
+            // resolve; only the derivation input changes).
+        }
+        let mut key = [0u8; crate::session_aliases::ALIAS_KEY_BYTES];
+        getrandom::getrandom(&mut key).expect("OS entropy for alias key");
+        let mut hex_key = String::with_capacity(64);
+        for byte in key {
+            hex_key.push_str(&format!("{byte:02x}"));
+        }
+        self.state.alias_key = Some(hex_key);
+        key
+    }
+
     /// Register `tz://s/<16hex>` → full-hash blob alias and return the short form
     /// for visible capsules. Non-full-hash refs pass through unchanged.
+    /// The short form is the keyed (opaque) derivation: visible alias bytes
+    /// are independent of the payload content hash (W4-OPAQUE-CAS-ALIAS).
     /// Register a session-visible short alias without flushing to disk.
     /// Callers that batch many aliases should finish with `persist_pending`.
     pub fn register_session_visible_alias(&mut self, ref_id: &str) -> String {
-        let Some(short) = session_visible_blob_alias(ref_id) else {
+        let key = self.alias_key();
+        let Some(short) = session_aliases::session_visible_blob_alias_keyed(&key, ref_id) else {
             return ref_id.to_string();
         };
         let (short_bare, _) = split_ref_fragment(&short);
@@ -1844,6 +1886,8 @@ impl RecoveryStore {
 
     /// Rewrite full-hash blob refs in text to session-visible short aliases,
     /// registering each short → full mapping in the alias table (deferred).
+    /// Single keyed pass: the emitted short form is the opaque alias produced
+    /// by registration, never the content-derived legacy form.
     pub fn apply_session_visible_aliases_in_text(&mut self, text: &str) -> String {
         // Skip the char-by-char scan when the payload has no full-hash blob refs.
         if !text.contains("tz://blob/")
@@ -1852,17 +1896,25 @@ impl RecoveryStore {
         {
             return text.to_string();
         }
+        let mut out = String::with_capacity(text.len());
         let mut cursor = 0usize;
         while cursor < text.len() {
             if let Some((end, full)) = crate::session_aliases::take_full_hash_blob_at(text, cursor)
             {
-                let _ = self.register_session_visible_alias(&full);
+                let short = self.register_session_visible_alias(&full);
+                out.push_str(&short);
                 cursor = end;
             } else {
-                cursor += 1;
+                // Advance one full character (refs are pure ASCII; mid-char
+                // slicing would mojibake or panic).
+                let next = (cursor + 1..=text.len())
+                    .find(|&index| text.is_char_boundary(index))
+                    .unwrap_or(text.len());
+                out.push_str(&text[cursor..next]);
+                cursor = next;
             }
         }
-        rewrite_full_hash_blob_refs_in_text(text)
+        out
     }
 
     /// Shorten full-hash blob ref strings inside a JSON value.
@@ -1870,7 +1922,9 @@ impl RecoveryStore {
         fn walk(store: &mut RecoveryStore, value: &mut serde_json::Value) {
             match value {
                 serde_json::Value::String(text) => {
-                    if session_visible_blob_alias(text).is_some() {
+                    // Shape check only; the registered short form is keyed.
+                    let key_ready = session_visible_blob_alias(text).is_some();
+                    if key_ready {
                         *text = store.register_session_visible_alias(text);
                     } else if text.contains("://blob/") {
                         *text = store.apply_session_visible_aliases_in_text(text);
@@ -3607,6 +3661,9 @@ fn session_delta(
     delta.shell_outcome_seq = state.shell_outcome_seq;
     delta.ambiguous_aliases = state.ambiguous_aliases.clone();
     delta.transparency = state.transparency.clone();
+    // The alias derivation key aliases share semantics with the alias table:
+    // it must survive journal-append persists, not only snapshots.
+    delta.alias_key = state.alias_key.clone();
     delta.order = session_refs
         .iter()
         .filter(|ref_id| state_entry_present(&delta, ref_id))
@@ -3798,6 +3855,11 @@ fn merge_states(
     trim_shell_outcomes(&mut merged.shell_outcomes);
     merged.ambiguous_aliases.extend(current.ambiguous_aliases);
     merged.transparency.merge_concurrent(&current.transparency);
+    // Alias derivation key: prefer the existing (already-shared) key so all
+    // engines keep agreeing; adopt the current key only when none exists yet.
+    if merged.alias_key.is_none() {
+        merged.alias_key = current.alias_key;
+    }
     merged.configure(config);
     merged
 }

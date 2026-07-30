@@ -181,7 +181,7 @@ pub fn alias_repeated_paths_and_symbols_if_changed(
 #[cfg(test)]
 mod tests {
     use tempfile::tempdir;
-    use tokenzero_recovery::{RecoveryStore, session_visible_blob_alias};
+    use tokenzero_recovery::RecoveryStore;
 
     use super::*;
 
@@ -203,7 +203,8 @@ mod tests {
         for value in expected {
             assert!(!rewritten.contains(value));
             let full = store.store_blob(value, ContentType::Unknown).unwrap();
-            let short = session_visible_blob_alias(&full).unwrap();
+            // The visible short form is the store's keyed (opaque) alias.
+            let short = store.register_session_visible_alias(&full);
             let ordinal = if value.starts_with('/') {
                 "tz://o/1/1"
             } else {

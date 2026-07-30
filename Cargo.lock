@@ -3069,6 +3069,7 @@ version = "1.4.0"
 dependencies = [
  "criterion",
  "fs4",
+ "getrandom 0.2.17",
  "proptest",
  "regex",
  "serde",
