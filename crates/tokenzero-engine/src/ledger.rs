@@ -1,9 +1,24 @@
 //! Queryable, append-only accounting for served TokenZero responses.
 //!
-//! Every JSONL line is a tokenzero.ledger.v1 LedgerRecord. prevented_tokens is
-//! derived only from existing per-response dedup.visible_tokens_saved and
+//! Every JSONL line is a tokenzero.ledger.v2 LedgerRecord (migration note:
+//! v2 is a strict superset of v1 — it adds the `recovery_costs` block with
+//! recovery-adjusted fields and the RATC identity, ratc = visible + expand +
+//! rho_fail*retries + lambda_fail*fails. v1 lines remain readable: the
+//! recovery_costs field defaults to the honest zero/unknown state, and the
+//! reader accepts both schema tags). prevented_tokens is derived only from
+//! existing per-response dedup.visible_tokens_saved and
 //! diff.visible_tokens_saved telemetry. It is not a prevented-read estimate.
-//! saved_bytes separately preserves session_delta.saved_bytes.
+//! saved_bytes separately preserves session_delta.saved_bytes. Recovery-cost
+//! fields are telemetry-only counters; no payload bytes ever enter a record.
+//!
+//! Telemetry pointer contract (produced by the expand surface, bead h470.3):
+//!   /expand/visible_tokens     -> recovery_costs.expand_tokens
+//!   /expand/count              -> recovery_costs.expand_count
+//!   /expand/retry_count        -> recovery_costs.retry_count
+//!   /expand/fail_count         -> recovery_costs.fail_count
+//!   /expand/dangling_ref_count -> recovery_costs.dangling_ref_count
+//! task_success and anchor_recall_ok are per-task facts (E1.2 grouping is out
+//! of scope); they serialize as null until a per-task roll-up sets them.
 //!
 //! The first record writes synchronously through a retained O_APPEND handle.
 //! Later records batch for at most 250 ms under normal scheduler operation.
@@ -24,6 +39,13 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokenzero_core::ToolResponse;
 
 pub const LEDGER_SCHEMA: &str = "tokenzero.ledger.v1";
+pub const LEDGER_SCHEMA_V2: &str = "tokenzero.ledger.v2";
+/// Weight applied to retry counts in the RATC identity. The config surface
+/// (bead radc-e3-9ax3.3) will make these operator-settable; until then the
+/// honest default is 0 so no unmeasured cost is fabricated.
+pub const DEFAULT_RHO_FAIL: f64 = 0.0;
+/// Weight applied to fail counts in the RATC identity.
+pub const DEFAULT_LAMBDA_FAIL: f64 = 0.0;
 pub const TOKENZERO_AGENT_ENV: &str = "TOKENZERO_AGENT";
 pub const DEFAULT_MAX_LEDGER_BYTES: u64 = 8 * 1024 * 1024;
 pub const DEFAULT_MAX_LEDGER_GENERATIONS: usize = 4;
@@ -36,6 +58,65 @@ pub struct VersionIdentity {
     pub git_describe: Option<String>,
 }
 
+/// Recovery-adjusted cost block added by tokenzero.ledger.v2. All fields are
+/// telemetry-only counters/bools; the block is self-contained so the RATC
+/// identity can be audited arithmetically from one record line.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RecoveryCosts {
+    /// Mirrors token_mass.visible_tokens so `ratc` is self-contained.
+    pub visible_tokens: u64,
+    /// Billed tokens spent on ref expansion (recovery), 0 until h470.3 counts them.
+    pub expand_tokens: u64,
+    pub expand_count: u64,
+    pub retry_count: u64,
+    pub fail_count: u64,
+    /// Weight per retry in the RATC identity (DEFAULT_RHO_FAIL until E3.3 config).
+    pub rho_fail: f64,
+    /// Weight per failure in the RATC identity (DEFAULT_LAMBDA_FAIL until E3.3 config).
+    pub lambda_fail: f64,
+    /// Per-task outcome; null = unknown (E1.2 per-task grouping out of scope).
+    pub task_success: Option<bool>,
+    /// Whether anchor recall succeeded for the task; null = unknown.
+    pub anchor_recall_ok: Option<bool>,
+    pub dangling_ref_count: u64,
+    /// Recovery-adjusted token cost: visible + expand + rho_fail*retries +
+    /// lambda_fail*fails. Stored on the record so auditors read one field.
+    pub ratc: f64,
+}
+
+impl Default for RecoveryCosts {
+    fn default() -> Self {
+        Self {
+            visible_tokens: 0,
+            expand_tokens: 0,
+            expand_count: 0,
+            retry_count: 0,
+            fail_count: 0,
+            rho_fail: DEFAULT_RHO_FAIL,
+            lambda_fail: DEFAULT_LAMBDA_FAIL,
+            task_success: None,
+            anchor_recall_ok: None,
+            dangling_ref_count: 0,
+            ratc: 0.0,
+        }
+    }
+}
+
+impl RecoveryCosts {
+    /// The RATC identity, computed from this block's own fields.
+    pub fn compute_ratc(&self) -> f64 {
+        (self.visible_tokens + self.expand_tokens) as f64
+            + self.rho_fail * self.retry_count as f64
+            + self.lambda_fail * self.fail_count as f64
+    }
+
+    /// Return a copy whose ratc field satisfies the identity exactly.
+    pub fn with_ratc(mut self) -> Self {
+        self.ratc = self.compute_ratc();
+        self
+    }
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TokenMass {
     pub visible_tokens: u64,
@@ -45,8 +126,9 @@ pub struct TokenMass {
     pub saved_bytes: u64,
 }
 
-/// One served response in the versioned tokenzero.ledger.v1 JSONL schema.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+/// One served response in the versioned tokenzero.ledger JSONL schema
+/// (v2 since 1.4.x; v1 lines remain readable, see module docs).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct LedgerRecord {
     pub schema: String,
     pub timestamp_ms: u64,
@@ -60,6 +142,10 @@ pub struct LedgerRecord {
     pub eviction_amortization: Option<Value>,
     pub cumulative_session_cost_tokens: u64,
     pub optimization_tags: Vec<String>,
+    /// tokenzero.ledger.v2 recovery-adjusted block. serde(default) keeps
+    /// tokenzero.ledger.v1 lines readable with the honest zero/unknown state.
+    #[serde(default)]
+    pub recovery_costs: RecoveryCosts,
 }
 
 #[derive(Debug)]
@@ -191,8 +277,27 @@ impl LedgerWriter {
             return;
         };
         *cumulative = cumulative.saturating_add(visible_tokens);
+        let get_bool = |pointer: &str| {
+            telemetry
+                .and_then(|value| value.pointer(pointer))
+                .and_then(Value::as_bool)
+        };
+        let recovery_costs = RecoveryCosts {
+            visible_tokens,
+            expand_tokens: get("/expand/visible_tokens"),
+            expand_count: get("/expand/count"),
+            retry_count: get("/expand/retry_count"),
+            fail_count: get("/expand/fail_count"),
+            rho_fail: DEFAULT_RHO_FAIL,
+            lambda_fail: DEFAULT_LAMBDA_FAIL,
+            task_success: get_bool("/task/success"),
+            anchor_recall_ok: get_bool("/task/anchor_recall_ok"),
+            dangling_ref_count: get("/expand/dangling_ref_count"),
+            ratc: 0.0,
+        }
+        .with_ratc();
         let record = LedgerRecord {
-            schema: LEDGER_SCHEMA.to_string(),
+            schema: LEDGER_SCHEMA_V2.to_string(),
             timestamp_ms: now_ms(),
             session_id: self.session_id.clone(),
             repo: self.repo.clone(),
@@ -211,6 +316,7 @@ impl LedgerWriter {
                 .cloned(),
             cumulative_session_cost_tokens: *cumulative,
             optimization_tags: self.optimization_tags.clone(),
+            recovery_costs,
         };
         let _ = self.append_record(&record);
     }
@@ -639,7 +745,7 @@ pub fn query_ledger(path: &Path, query: &LedgerQuery) -> io::Result<Value> {
                     )
                 });
             Ok(json!({
-                "schema": LEDGER_SCHEMA,
+                "schema": LEDGER_SCHEMA_V2,
                 "query": "cost_per_repo",
                 "repo": repo,
                 "since_ms": since_ms,
@@ -662,7 +768,7 @@ pub fn query_ledger(path: &Path, query: &LedgerQuery) -> io::Result<Value> {
             let baseline_cost = totals.get(baseline.as_str()).copied().unwrap_or(0);
             let candidate_cost = totals.get(candidate.as_str()).copied().unwrap_or(0);
             Ok(json!({
-                "schema": LEDGER_SCHEMA,
+                "schema": LEDGER_SCHEMA_V2,
                 "query": "version_delta",
                 "since_ms": since_ms,
                 "baseline": {"version": baseline, "visible_cost_tokens": baseline_cost},
@@ -690,7 +796,7 @@ pub fn query_ledger(path: &Path, query: &LedgerQuery) -> io::Result<Value> {
                 })
                 .collect::<Vec<_>>();
             Ok(json!({
-                "schema": LEDGER_SCHEMA,
+                "schema": LEDGER_SCHEMA_V2,
                 "query": "per_agent_spend",
                 "since_ms": since_ms,
                 "agents": agents
@@ -718,7 +824,9 @@ fn read_records(path: &Path) -> io::Result<Vec<LedgerRecord>> {
             let Ok(record) = serde_json::from_str::<LedgerRecord>(&line) else {
                 continue;
             };
-            if record.schema == LEDGER_SCHEMA {
+            // v1 lines parse via serde(default) recovery_costs; both schema
+            // tags are accepted so mixed-generation ledgers stay queryable.
+            if record.schema == LEDGER_SCHEMA || record.schema == LEDGER_SCHEMA_V2 {
                 records.push(record);
             }
         }
@@ -747,7 +855,7 @@ pub fn aggregate_token_mass(path: &Path) -> io::Result<(u64, u64)> {
 
 pub fn schema_example() -> Value {
     json!({
-        "schema": LEDGER_SCHEMA,
+        "schema": LEDGER_SCHEMA_V2,
         "timestamp_ms": 1_700_000_000_000_u64,
         "session_id": "session-123",
         "repo": "/workspace/repo",
@@ -769,7 +877,20 @@ pub fn schema_example() -> Value {
             "alarm": false
         },
         "cumulative_session_cost_tokens": 120,
-        "optimization_tags": ["session_dedup:on", "diff_reads:on", "tool_surface:mcp"]
+        "optimization_tags": ["session_dedup:on", "diff_reads:on", "tool_surface:mcp"],
+        "recovery_costs": {
+            "visible_tokens": 120,
+            "expand_tokens": 40,
+            "expand_count": 2,
+            "retry_count": 1,
+            "fail_count": 0,
+            "rho_fail": 0.0,
+            "lambda_fail": 0.0,
+            "task_success": null,
+            "anchor_recall_ok": null,
+            "dangling_ref_count": 0,
+            "ratc": 160.0
+        }
     })
 }
 
@@ -806,6 +927,96 @@ mod ledger_tests {
             panic!("writer has not entered buffered mode");
         };
         Arc::clone(io)
+    }
+
+    /// Golden v2 fixture: the stored ratc must equal the RATC identity
+    /// computed arithmetically from the record's own fields.
+    const GOLDEN_V2: &str = r#"{
+        "schema": "tokenzero.ledger.v2",
+        "timestamp_ms": 1700000000000,
+        "session_id": "session-golden",
+        "repo": "/workspace/repo",
+        "agent": "claude-code",
+        "version": {"crate": "1.4.0", "git_describe": null},
+        "tool": "expand",
+        "token_mass": {"visible_tokens": 120, "raw_tokens": 400, "prevented_tokens": 80, "saved_bytes": 1024},
+        "cumulative_session_cost_tokens": 120,
+        "optimization_tags": ["session_dedup:on"],
+        "recovery_costs": {
+            "visible_tokens": 120,
+            "expand_tokens": 40,
+            "expand_count": 2,
+            "retry_count": 3,
+            "fail_count": 1,
+            "rho_fail": 2.5,
+            "lambda_fail": 10.0,
+            "task_success": true,
+            "anchor_recall_ok": false,
+            "dangling_ref_count": 1,
+            "ratc": 177.5
+        }
+    }"#;
+
+    #[test]
+    fn golden_v2_ratc_identity_holds_arithmetically() {
+        let record: LedgerRecord = serde_json::from_str(GOLDEN_V2).unwrap();
+        let rc = &record.recovery_costs;
+        let expected = (rc.visible_tokens + rc.expand_tokens) as f64
+            + rc.rho_fail * rc.retry_count as f64
+            + rc.lambda_fail * rc.fail_count as f64;
+        // 120 + 40 + 2.5*3 + 10.0*1 = 177.5
+        assert_eq!(expected, 177.5);
+        assert_eq!(rc.ratc, expected, "stored ratc must equal the identity");
+        assert_eq!(rc.compute_ratc(), rc.ratc);
+        assert_eq!(record.schema, LEDGER_SCHEMA_V2);
+    }
+
+    #[test]
+    fn golden_v2_round_trips_without_payload_keys() {
+        let record: LedgerRecord = serde_json::from_str(GOLDEN_V2).unwrap();
+        let text = serde_json::to_string(&record).unwrap();
+        // Telemetry-only rule: no payload bytes in ledger records.
+        for key in ["payload", "content", "bytes_b64", "text"] {
+            assert!(
+                !text.contains(&format!("\"{key}\"")),
+                "ledger record must not carry a '{key}' key: {text}"
+            );
+        }
+        let back: LedgerRecord = serde_json::from_str(&text).unwrap();
+        assert_eq!(back, record);
+    }
+
+    #[test]
+    fn v1_lines_remain_readable_with_defaulted_recovery_costs() {
+        let v1_line = r#"{
+            "schema": "tokenzero.ledger.v1",
+            "timestamp_ms": 1700000000000,
+            "session_id": "session-old",
+            "repo": "/workspace/repo",
+            "agent": null,
+            "version": {"crate": "1.3.0", "git_describe": null},
+            "tool": "read",
+            "token_mass": {"visible_tokens": 10, "raw_tokens": 20, "prevented_tokens": 5, "saved_bytes": 64},
+            "cumulative_session_cost_tokens": 10,
+            "optimization_tags": []
+        }"#;
+        let record: LedgerRecord = serde_json::from_str(v1_line).unwrap();
+        assert_eq!(record.schema, LEDGER_SCHEMA);
+        let rc = &record.recovery_costs;
+        assert_eq!(rc.expand_tokens, 0);
+        assert_eq!(rc.rho_fail, DEFAULT_RHO_FAIL);
+        assert_eq!(rc.task_success, None);
+        assert_eq!(rc.ratc, 0.0);
+        // And read_records accepts the v1 tag on disk (JSONL: one compact
+        // record per line).
+        let directory = tempdir().unwrap();
+        let ledger = directory.path().join("ledger.jsonl");
+        let compact = serde_json::to_string(&record).unwrap();
+        let compact = compact.replace(LEDGER_SCHEMA_V2, LEDGER_SCHEMA);
+        fs::write(&ledger, format!("{compact}\n")).unwrap();
+        let records = read_records(&ledger).unwrap();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].schema, LEDGER_SCHEMA);
     }
 
     #[test]
