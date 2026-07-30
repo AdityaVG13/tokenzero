@@ -19,26 +19,73 @@ pub(crate) fn failed_segment(cmd: &str, out: &str, err: &str, code: Option<i32>)
     } else {
         combined.clone()
     };
+    // With exit_code 0 only pipelines, sequences, and or-lists can hide an upstream
+    // status; an and-list that reached the end reported every status it produced. So
+    // reporting a failed segment there would contradict the exit code.
+    if code == Some(0) && !can_mask_upstream_status(cmd) {
+        return None;
+    }
+    let not_found = not_found_actors(&fail_out);
     if let Some(s) = segments.iter().find(|s| {
         is_explicit_false_segment(s)
             || is_cd_failure_segment(s, code, &fail_out)
-            || is_command_not_found_segment(s, &fail_out)
+            || is_command_not_found_segment(s, &not_found)
     }) {
         return Some((*s).clone());
     }
     code.is_some_and(|c| c != 0)
         .then(|| {
+            if let Some(s) = evidence_named_segment(&segments, out, err) {
+                return Some(s);
+            }
             if looks_diagnostic(&combined) {
-                if let Some(s) = segments
-                    .iter()
-                    .find(|s| is_diagnostic_failure_segment(s, out, err))
-                {
-                    return Some((*s).clone());
+                if let Some(s) = diagnostic_attributed_segment(&segments, out, err) {
+                    return Some(s);
                 }
             }
             segments.last().cloned().filter(|v| !v.is_empty())
         })
         .flatten()
+}
+
+pub(crate) fn can_mask_upstream_status(command: &str) -> bool {
+    shell_operator_features(command)
+        .iter()
+        .any(|f| matches!(*f, "pipeline" | "sequence" | "or-list"))
+}
+
+/// A leading `!` negates a segment's exit status, so its own diagnostic output is
+/// expected rather than evidence of a failure elsewhere in the chain.
+pub(crate) fn strip_segment_negation(segment: &str) -> (&str, bool) {
+    let trimmed = segment.trim();
+    if let Some(rest) = trimmed.strip_prefix('!') {
+        let rest = rest.trim_start();
+        if !rest.is_empty() && !rest.starts_with('=') {
+            return (rest, true);
+        }
+    }
+    (trimmed, false)
+}
+
+fn segment_command_name(segment: &str) -> Option<String> {
+    let (bare, _) = strip_segment_negation(segment);
+    split_shell_words(&shell_analysis_command(bare))
+        .first()
+        .map(|word| shell_command_basename(word).to_ascii_lowercase())
+        .filter(|name| !name.is_empty())
+}
+
+/// Command names named by a "not found" diagnostic, so the segment that could not
+/// be executed is attributed instead of an earlier segment that ran fine.
+fn not_found_actors(failure_output: &str) -> Vec<String> {
+    const NOISE: &str = "sh bash zsh command not found such file or directory no";
+    failure_output
+        .lines()
+        .filter(|line| line.contains("not found"))
+        .flat_map(|line| line.split([':', ' ', '\t', '`', '\'', '"']))
+        .map(|token| shell_command_basename(token.trim()).to_ascii_lowercase())
+        .filter(|token| !token.is_empty() && !contains_any_ws(token, NOISE))
+        .collect()
 }
 
 fn is_cd_failure_segment(segment: &str, exit_code: Option<i32>, failure_output: &str) -> bool {
@@ -47,8 +94,91 @@ fn is_cd_failure_segment(segment: &str, exit_code: Option<i32>, failure_output: 
         && contains_any(failure_output, "can't cd|no such file|not a directory")
 }
 
-fn is_command_not_found_segment(segment: &str, failure_output: &str) -> bool {
-    !segment.is_empty() && contains_any(failure_output, "command not found|not found")
+fn is_command_not_found_segment(segment: &str, not_found_actors: &[String]) -> bool {
+    !not_found_actors.is_empty()
+        && segment_command_name(segment).is_some_and(|name| not_found_actors.contains(&name))
+}
+
+/// The segment whose own command name prefixes an error line, e.g. `tail: cannot
+/// open` in `cargo test | tail -5` or `npm ERR!` in a pipefail chain. This is the
+/// strongest available signal for which segment produced the controlling status.
+fn evidence_named_segment(segments: &[String], stdout: &str, stderr: &str) -> Option<String> {
+    let scanned = if stderr.trim().is_empty() {
+        stdout
+    } else {
+        stderr
+    };
+    let names: Vec<_> = segments
+        .iter()
+        .map(|segment| segment_command_name(segment))
+        .collect();
+    for line in scanned.lines() {
+        let mut words = line.split_whitespace();
+        let Some(first) = words.next() else {
+            continue;
+        };
+        // An actor prefix is `name: message` or `name ERR! message`; a bare word
+        // that merely contains "error" is message text, not an attribution.
+        let prefixed = first.ends_with(':')
+            || words
+                .next()
+                .is_some_and(|second| second.to_ascii_uppercase().starts_with("ERR"));
+        let actor = shell_command_basename(first.trim_end_matches(':')).to_ascii_lowercase();
+        if actor.is_empty() || !prefixed {
+            continue;
+        }
+        if let Some(index) = names
+            .iter()
+            .position(|name| name.as_deref() == Some(actor.as_str()))
+        {
+            return Some(segments[index].clone());
+        }
+    }
+    None
+}
+
+/// Families the failure output itself points at, used to break ties when several
+/// segments of an and-list or sequence belong to a diagnostic-producing family.
+fn output_indicated_family(stdout: &str, stderr: &str) -> Option<&'static str> {
+    let combined = format!("{stdout}\n{stderr}").to_ascii_lowercase();
+    if contains_any(
+        &combined,
+        "test failed|test result: failed|tests failed|assertion failed|panicked at|failures:",
+    ) {
+        return Some("test");
+    }
+    if contains_any(&combined, "could not compile|error[e") {
+        return Some("build");
+    }
+    None
+}
+
+fn diagnostic_attributed_segment(
+    segments: &[String],
+    stdout: &str,
+    stderr: &str,
+) -> Option<String> {
+    let negated = |segment: &String| strip_segment_negation(segment).1;
+    let bare = |segment: &String| strip_segment_negation(segment).0.to_string();
+    if let Some(family) = output_indicated_family(stdout, stderr) {
+        for want_negated in [true, false] {
+            if let Some(segment) = segments.iter().find(|segment| {
+                negated(segment) == want_negated
+                    && shell_family(&bare(segment), stdout, stderr) == family
+            }) {
+                return Some(segment.clone());
+            }
+        }
+    }
+    for want_negated in [true, false] {
+        if let Some(segment) = segments.iter().find(|segment| {
+            negated(segment) == want_negated
+                && is_diagnostic_failure_segment(&bare(segment), stdout, stderr)
+        }) {
+            return Some(segment.clone());
+        }
+    }
+    None
 }
 
 pub(crate) fn is_diagnostic_failure_segment(segment: &str, stdout: &str, stderr: &str) -> bool {
@@ -67,10 +197,17 @@ pub(crate) fn masked_or_failure_segment(
     if code != Some(0) || is_masked_expected_false_or(cmd, out, err, code) {
         return None;
     }
-    let s = first_or_list_lhs(cmd)?;
-    let s = s.trim();
+    // Only the final element of the `||` left-hand side supplies its exit status, so
+    // attribution must land there rather than on an earlier `&&`/`;` element.
+    let lhs = first_or_list_lhs(cmd)?;
+    let elements = split_shell_list_elements(&lhs);
+    let s = elements.last()?.trim();
     if s.is_empty() || is_expected_false_segment(s, out, err) {
         return None;
+    }
+    let segments = split_shell_segments(s);
+    if let Some(named) = evidence_named_segment(&segments, out, err) {
+        return Some(named);
     }
     looks_masked_failure_evidence(out, err, Some(s)).then(|| s.to_string())
 }
@@ -84,13 +221,20 @@ pub(crate) fn masked_pipeline_failure_segment(
     if code != Some(0)
         || is_masked_expected_false_pipeline(cmd, out, err, code)
         || !shell_operator_features(cmd).contains(&"pipeline")
-        || !looks_masked_failure_evidence(out, err, first_nonempty_shell_segment(cmd).as_deref())
     {
         return None;
     }
-    split_shell_segments(cmd)
-        .into_iter()
-        .find(|s| !s.is_empty())
+    // Only the last list element decides the reported status, so a masked pipeline
+    // failure must be attributed inside it and never to an earlier `&&`/`;` segment.
+    let element = split_shell_list_elements(cmd).into_iter().next_back()?;
+    let segments = split_shell_segments(&element);
+    let named = evidence_named_segment(&segments, out, err);
+    if named.is_none()
+        && !looks_masked_failure_evidence(out, err, segments.first().map(String::as_str))
+    {
+        return None;
+    }
+    named.or_else(|| segments.into_iter().find(|s| !s.is_empty()))
 }
 
 pub(crate) fn masking_warning(
@@ -114,6 +258,9 @@ pub(crate) fn masking_warning(
             .iter()
             .any(|s| is_explicit_false_segment(s))
             || looks_masked_failure_evidence(out, err, first_nonempty_shell_segment(cmd).as_deref())
+            // A masked failure reported as command_success:false with exit_code:0 must
+            // always carry the warning explaining why the two disagree.
+            || failed_segment(cmd, out, err, code).is_some()
     } else {
         let comb = format!("{out}\n{err}").to_ascii_lowercase();
         split_shell_segments(cmd)
@@ -279,6 +426,35 @@ pub(crate) fn raw_shell_operator_features(command: &str) -> Vec<&'static str> {
         }
     }
     features
+}
+
+/// Top-level list elements, split on `&&`, `||`, and `;` but NOT on `|`: a
+/// pipeline is one element whose internal stages share a single exit status.
+pub(crate) fn split_shell_list_elements(command: &str) -> Vec<String> {
+    let command = shell_analysis_command(command);
+    let mut elements = Vec::new();
+    let (mut start, mut cursor) = (0, QuoteCursor::new(&command));
+    while let Some((idx, ch, next)) = cursor.next_unquoted() {
+        let len = match (ch, next) {
+            ('&', Some('&')) | ('|', Some('|')) => {
+                cursor.chars.next();
+                2
+            }
+            ('|', _) => continue,
+            (';', _) => 1,
+            _ => continue,
+        };
+        let element = command[start..idx].trim();
+        if !element.is_empty() {
+            elements.push(element.to_string());
+        }
+        start = idx + len;
+    }
+    let element = command[start..].trim();
+    if !element.is_empty() {
+        elements.push(element.to_string());
+    }
+    elements
 }
 
 pub(crate) fn split_shell_segments(command: &str) -> Vec<String> {
