@@ -36,6 +36,8 @@ pub struct EngineConfig {
     pub call_root: PathBuf,
     pub cache_path: PathBuf,
     pub max_visible_tokens: usize,
+    /// Local payloads larger than this default to an exact ref in Auto mode.
+    pub capsule_exact_ref_threshold_bytes: usize,
     pub mode: Mode,
     pub shell_timeout: Duration,
     pub shell_capture_bytes: usize,
@@ -81,6 +83,7 @@ impl EngineConfig {
             call_root: root.to_path_buf(),
             cache_path: root.join(".tokenzero/recovery-cache.json"),
             max_visible_tokens: 4000,
+            capsule_exact_ref_threshold_bytes: capsule_exact_ref_threshold_from_env(),
             mode: Mode::Auto,
             shell_timeout: default_shell_timeout(),
             shell_capture_bytes: output_policy.per_stream_capture_bytes,
@@ -114,6 +117,8 @@ pub const FETCH_ALLOW_ENV: &str = "TOKENZERO_FETCH_ALLOW";
 pub const FETCH_DENY_ENV: &str = "TOKENZERO_FETCH_DENY";
 pub const SHELL_INLINE_BUDGET_ENV: &str = "TOKENZERO_SHELL_INLINE_BUDGET";
 pub const DEFAULT_SHELL_INLINE_BUDGET: usize = 2000;
+pub const CAPSULE_EXACT_REF_THRESHOLD_ENV: &str = "TOKENZERO_CAPSULE_EXACT_REF_THRESHOLD_BYTES";
+pub const DEFAULT_CAPSULE_EXACT_REF_THRESHOLD_BYTES: usize = 64 * 1024;
 
 fn matches_env_value(value: &str, accepted: &[&str]) -> bool {
     accepted
@@ -203,6 +208,21 @@ pub fn shell_inline_budget_from_env() -> usize {
         .unwrap_or(DEFAULT_SHELL_INLINE_BUDGET)
 }
 
+pub fn capsule_exact_ref_threshold(value: Option<&str>) -> usize {
+    value
+        .and_then(|value| value.trim().parse::<usize>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(DEFAULT_CAPSULE_EXACT_REF_THRESHOLD_BYTES)
+}
+
+pub fn capsule_exact_ref_threshold_from_env() -> usize {
+    capsule_exact_ref_threshold(
+        std::env::var(CAPSULE_EXACT_REF_THRESHOLD_ENV)
+            .ok()
+            .as_deref(),
+    )
+}
+
 /// Opt-out toggle parse: unset means enabled; `0`/`off`/`false`/`no`
 /// (case-insensitive) disable.
 pub(crate) fn env_toggle_enabled(name: &str) -> bool {
@@ -289,6 +309,23 @@ mod telemetry_tests {
         assert!(!resolve_telemetry(false, false, Some(false), Some("yes")));
         assert!(resolve_telemetry(false, false, None, Some("yes")));
         assert!(!resolve_telemetry(false, false, None, None));
+    }
+
+    #[test]
+    fn capsule_exact_ref_threshold_is_configurable_and_rejects_zero() {
+        assert_eq!(
+            capsule_exact_ref_threshold(None),
+            DEFAULT_CAPSULE_EXACT_REF_THRESHOLD_BYTES
+        );
+        assert_eq!(capsule_exact_ref_threshold(Some("1024")), 1024);
+        assert_eq!(
+            capsule_exact_ref_threshold(Some("0")),
+            DEFAULT_CAPSULE_EXACT_REF_THRESHOLD_BYTES
+        );
+        assert_eq!(
+            capsule_exact_ref_threshold(Some("invalid")),
+            DEFAULT_CAPSULE_EXACT_REF_THRESHOLD_BYTES
+        );
     }
 
     /// A sub-second deadline must stay sub-second. Routing milliseconds through

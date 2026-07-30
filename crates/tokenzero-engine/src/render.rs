@@ -266,6 +266,27 @@ pub fn success_response(
     )
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LocalPayloadPolicy {
+    Inline,
+    ExactRef,
+}
+
+/// Auto mode keeps local payloads inline through the configured boundary and
+/// prefers an exact selector only above it. Explicit modes always win.
+pub fn local_payload_policy(
+    payload_bytes: usize,
+    exact_ref_threshold_bytes: usize,
+    mode: Mode,
+    exact_ref_available: bool,
+) -> LocalPayloadPolicy {
+    if mode == Mode::Auto && exact_ref_available && payload_bytes > exact_ref_threshold_bytes {
+        LocalPayloadPolicy::ExactRef
+    } else {
+        LocalPayloadPolicy::Inline
+    }
+}
+
 pub fn recoverable_capsule(
     rendered: &str,
     fallback: &str,
@@ -895,9 +916,40 @@ pub fn preview(text: &str) -> String {
 
 #[cfg(test)]
 mod preview_tests {
+    use tokenzero_core::Mode;
     use tokenzero_recovery::ExpansionResult;
 
-    use super::{expansion_response, preview};
+    use super::{LocalPayloadPolicy, expansion_response, local_payload_policy, preview};
+
+    #[test]
+    fn capsule_payload_policy_respects_threshold_boundaries_and_modes() {
+        let threshold = 1024;
+        let fixtures = [
+            (threshold - 1, Mode::Auto, true, LocalPayloadPolicy::Inline),
+            (threshold, Mode::Auto, true, LocalPayloadPolicy::Inline),
+            (
+                threshold + 1,
+                Mode::Auto,
+                true,
+                LocalPayloadPolicy::ExactRef,
+            ),
+            (threshold + 1, Mode::Auto, false, LocalPayloadPolicy::Inline),
+            (
+                threshold + 1,
+                Mode::Passthrough,
+                true,
+                LocalPayloadPolicy::Inline,
+            ),
+            (threshold + 1, Mode::Exact, true, LocalPayloadPolicy::Inline),
+        ];
+        for (bytes, mode, exact_ref_available, expected) in fixtures {
+            assert_eq!(
+                local_payload_policy(bytes, threshold, mode, exact_ref_available),
+                expected,
+                "bytes={bytes} mode={mode:?} exact_ref_available={exact_ref_available}"
+            );
+        }
+    }
 
     #[test]
     fn expansion_response_reports_clamped_window_metadata() {

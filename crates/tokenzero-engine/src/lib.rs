@@ -155,11 +155,13 @@ pub use cache_meter::{
     CacheSloDashboard, ProviderUsage, cache_miss_attribution, parse_provider_usage,
 };
 pub use config::{
+    CAPSULE_EXACT_REF_THRESHOLD_ENV, DEFAULT_CAPSULE_EXACT_REF_THRESHOLD_BYTES,
     DEFAULT_SHELL_INLINE_BUDGET, EngineConfig, FETCH_ALLOW_ENV, FETCH_DENY_ENV, FETCH_ENABLED_ENV,
-    SHELL_INLINE_BUDGET_ENV, SearchBackend, TELEMETRY_ENV, default_mcp_idle_timeout,
-    default_shell_timeout, mcp_idle_timeout_from_secs, mcp_tool_surface_from_env,
-    resolve_telemetry, shell_inline_budget_from_env, shell_timeout_from_millis,
-    shell_timeout_from_secs, telemetry_env_enabled,
+    SHELL_INLINE_BUDGET_ENV, SearchBackend, TELEMETRY_ENV, capsule_exact_ref_threshold,
+    capsule_exact_ref_threshold_from_env, default_mcp_idle_timeout, default_shell_timeout,
+    mcp_idle_timeout_from_secs, mcp_tool_surface_from_env, resolve_telemetry,
+    shell_inline_budget_from_env, shell_timeout_from_millis, shell_timeout_from_secs,
+    telemetry_env_enabled,
 };
 pub use eviction_scheduler::{
     CacheBreakpoint, EvictionBatch, EvictionCandidate, EvictionDecision, EvictionDecisionKind,

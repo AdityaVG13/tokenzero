@@ -178,10 +178,19 @@ impl TokenZeroEngine {
                     lossy_policy_id: None,
                 }
             } else {
+                let capsule_mode = match local_payload_policy(
+                    text.len(),
+                    self.config.capsule_exact_ref_threshold_bytes,
+                    mode,
+                    true,
+                ) {
+                    LocalPayloadPolicy::Inline => mode,
+                    LocalPayloadPolicy::ExactRef => Mode::Exact,
+                };
                 tokenzero_core::make_capsule_with_recovery_ref(
                     &text,
                     stored.raw_tokens,
-                    mode,
+                    capsule_mode,
                     max_visible_tokens,
                     Some(&path.display().to_string()),
                     Some(&stored.file_ref),
@@ -366,5 +375,37 @@ impl TokenZeroEngine {
             apply_zero_hit_note(&mut response, mode, format!("# read {label} — 0 bytes"));
         }
         response
+    }
+}
+
+#[cfg(test)]
+mod capsule_policy_tests {
+    use std::fs;
+
+    use tempfile::tempdir;
+
+    use super::*;
+
+    #[test]
+    fn auto_read_inlines_at_threshold_and_uses_exact_ref_above_it() {
+        let dir = tempdir().unwrap();
+        let inline_path = dir.path().join("inline.txt");
+        let exact_path = dir.path().join("exact.txt");
+        fs::write(&inline_path, "abcdefgh").unwrap();
+        fs::write(&exact_path, "abcdefghi").unwrap();
+
+        let mut config = EngineConfig::for_root(dir.path());
+        config.capsule_exact_ref_threshold_bytes = 8;
+        config.session_dedup = false;
+        let engine = TokenZeroEngine::new(config);
+
+        let inline = engine.read(&[inline_path], Mode::Auto, None, None, false, 1, 4000);
+        assert_eq!(inline.visible.unwrap().text, "abcdefgh");
+
+        let exact = engine.read(&[exact_path], Mode::Auto, None, None, false, 1, 4000);
+        let visible = exact.visible.unwrap().text;
+        assert!(!visible.contains("abcdefghi"), "{visible}");
+        assert!(visible.contains("exact payload stored"), "{visible}");
+        assert!(visible.contains("#B0-9"), "{visible}");
     }
 }
