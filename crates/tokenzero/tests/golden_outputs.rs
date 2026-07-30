@@ -168,25 +168,30 @@ fn cli_primary_and_artifact_golden_matrix() {
 #[test]
 fn cli_run_failure_json_envelope_matches_golden() {
     let (dir, cache) = setup_temp_with_cache();
-    let output = assert_success(
-        tokenzero_cmd()
-            .args([
-                "run",
-                "--json",
-                "--cache-path",
-                cache.to_str().unwrap(),
-                "--allowed-root",
-                dir.path().to_str().unwrap(),
-                "--cwd",
-                dir.path().to_str().unwrap(),
-                "--",
-                "sh",
-                "-c",
-                "printf alpha; printf beta >&2; exit 7",
-            ])
-            .output()
-            .unwrap(),
-        "run failure golden",
+    let output = tokenzero_cmd()
+        .args([
+            "run",
+            "--json",
+            "--cache-path",
+            cache.to_str().unwrap(),
+            "--allowed-root",
+            dir.path().to_str().unwrap(),
+            "--cwd",
+            dir.path().to_str().unwrap(),
+            "--",
+            "sh",
+            "-c",
+            "printf alpha; printf beta >&2; exit 7",
+        ])
+        .output()
+        .unwrap();
+    // nt0i (1cwf flip): the process mirrors the child exit code; the JSON
+    // envelope itself is unchanged and still matches the golden.
+    assert_eq!(
+        output.status.code(),
+        Some(7),
+        "run failure golden must mirror child exit: {}",
+        String::from_utf8_lossy(&output.stderr)
     );
     assert_golden(
         "cli/run_failure_json.golden",

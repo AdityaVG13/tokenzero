@@ -2220,22 +2220,24 @@ fn emit_with_json(response: ToolResponse, as_json: bool) -> Result<()> {
     Ok(())
 }
 
-/// nt0i: opt-in (TOKENZERO_RUN_CHILD_EXIT) child exit-code mirroring for
-/// --json `run` envelopes.
+/// nt0i (1cwf flip): --json `run` mirrors the child exit code by default so
+/// harnesses gating on process exit observe child failure. Set
+/// TOKENZERO_RUN_CHILD_EXIT=0/off/false/no to keep the legacy exit-0 envelope
+/// contract; envelope content is unchanged either way (status/telemetry stay
+/// truthful: `telemetry.command_success` and `telemetry.exit_code`).
 pub fn run_child_exit_enabled() -> bool {
     std::env::var("TOKENZERO_RUN_CHILD_EXIT")
         .map(|raw| {
-            matches!(
+            !matches!(
                 raw.trim().to_ascii_lowercase().as_str(),
-                "1" | "on" | "true" | "yes"
+                "0" | "off" | "false" | "no"
             )
         })
-        .unwrap_or(false)
+        .unwrap_or(true)
 }
 
-/// Text-mode `run` mirrors the child's exit status so `&&`/`||` chains and CI
-/// wrappers observe failures. `--json` keeps the exit-0 envelope contract:
-/// machine consumers read `telemetry.command_success` instead.
+/// `run` mirrors the child's exit status so `&&`/`||` chains and CI wrappers
+/// observe failures; --json does the same unless explicitly opted out.
 fn child_failure_exit_code(response: &ToolResponse) -> Option<i32> {
     if response.tool != "shell" {
         return None;

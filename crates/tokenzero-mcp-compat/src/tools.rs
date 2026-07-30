@@ -901,7 +901,17 @@ fn batch_ops(args: &Value) -> Result<Vec<(String, Value)>, String> {
 }
 
 pub(crate) fn mcp_tool_response(response: ToolResponse) -> Value {
-    let is_error = response.status == "error";
+    // F-MCP-006 (nt0i/1cwf): a shell child that ran but failed is a tool
+    // error for MCP clients — isError mirrors telemetry.command_success so
+    // agents do not treat failed commands as successful results.
+    let child_failed = response.tool == "shell"
+        && response
+            .telemetry
+            .as_ref()
+            .and_then(|t| t.get("command_success"))
+            .and_then(Value::as_bool)
+            == Some(false);
+    let is_error = response.status == "error" || child_failed;
     let mut text = response
         .visible
         .as_ref()

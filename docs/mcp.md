@@ -467,11 +467,14 @@ exits, missing `cd` paths, and likely pipeline-masked failures expose
 `exit_code`, `failed_segment`, `pipeline_masking_warning`, `status_label`, and
 exact refs for stdout, stderr, combined output, and the capture record.
 
-CLI `tokenzero run` in text mode mirrors the child's exit status, so `&&`/`||`
-chains, CI steps, and agent harnesses observe failures directly (a masked
-pipeline that itself exits 0 still exits 0, matching `sh` semantics).
-`tokenzero run --json` keeps the exit-0 envelope contract: machine consumers
-read `telemetry.command_success` and `telemetry.exit_code` instead.
+CLI `tokenzero run` mirrors the child's exit status in both text and `--json`
+modes, so `&&`/`||` chains, CI steps, and agent harnesses observe failures
+directly (a masked pipeline that itself exits 0 still exits 0, matching `sh`
+semantics). The `--json` envelope content is unchanged: machine consumers can
+still read `telemetry.command_success` and `telemetry.exit_code`. Set
+`TOKENZERO_RUN_CHILD_EXIT=0` to keep the legacy exit-0 envelope contract.
+Over MCP, a child that ran but failed sets `isError: true` on the tool result
+while the envelope keeps `transport_status: ok` and `command_success: false`.
 
 Large shell streams are read concurrently and capped per stream instead of held
 unbounded in memory. Defaults capture 4 MiB per stream and spill full streams to

@@ -435,6 +435,26 @@ fn shell_accepts_common_command_argument_aliases() {
     }
 }
 
+#[test]
+fn shell_child_failure_sets_is_error() {
+    // F-MCP-006 (nt0i/1cwf): a child that ran but exited nonzero is a tool
+    // error for MCP clients; the envelope itself stays truthful (command
+    // executed, transport ok, command_success=false in telemetry).
+    let dir = tempdir().unwrap();
+    let engine = TokenZeroEngine::new(EngineConfig::for_root(dir.path()));
+    let response = call_tool(&engine, "shell", &json!({"cmd": "exit 7"}), None).unwrap();
+    assert_eq!(
+        response.get("isError").and_then(Value::as_bool),
+        Some(true),
+        "child failure must surface as MCP isError: {response}"
+    );
+    let ok = call_tool(&engine, "shell", &json!({"cmd": "true"}), None).unwrap();
+    assert!(
+        ok.get("isError").is_none(),
+        "successful child must not set isError: {ok}"
+    );
+}
+
 #[cfg(unix)]
 #[test]
 fn shell_children_inherit_tokenzero_inner_guard() {

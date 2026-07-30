@@ -877,29 +877,37 @@ fn cli_flag_typo_distance_one_offers_corrected_command() {
 }
 
 #[test]
-fn cli_run_json_child_exit_opt_in_mirrors_child_failure() {
-    // nt0i: default --json keeps the exit-0 envelope contract; the opt-in
-    // mirrors the child exit code so harnesses can gate on it.
+fn cli_run_json_child_exit_default_mirrors_child_failure() {
+    // nt0i (1cwf flip): --json run mirrors the child exit code by default so
+    // harnesses gating on process exit observe failure; envelope content is
+    // unchanged (status/telemetry stay truthful).
     let default = Command::cargo_bin("tokenzero")
         .unwrap()
         .args(["run", "--json", "sh", "-c", "printf boom; exit 7"])
         .output()
         .unwrap();
-    assert!(default.status.success(), "default keeps exit 0");
+    assert_eq!(
+        default.status.code(),
+        Some(7),
+        "default mirrors child exit"
+    );
     let json: Value = serde_json::from_slice(&default.stdout).unwrap();
-    assert_eq!(json["status"], "ok");
+    assert_eq!(json["status"], "ok", "envelope content unchanged");
     assert_eq!(json["telemetry"]["command_success"], false);
     assert_eq!(json["telemetry"]["exit_code"], 7);
 
-    let gated = Command::cargo_bin("tokenzero")
+    let legacy = Command::cargo_bin("tokenzero")
         .unwrap()
-        .env("TOKENZERO_RUN_CHILD_EXIT", "1")
+        .env("TOKENZERO_RUN_CHILD_EXIT", "0")
         .args(["run", "--json", "sh", "-c", "printf boom; exit 7"])
         .output()
         .unwrap();
-    assert_eq!(gated.status.code(), Some(7), "opt-in mirrors child exit");
-    let json: Value = serde_json::from_slice(&gated.stdout).unwrap();
-    assert_eq!(json["status"], "ok", "envelope content unchanged");
+    assert!(
+        legacy.status.success(),
+        "explicit opt-out keeps the legacy exit-0 envelope contract"
+    );
+    let json: Value = serde_json::from_slice(&legacy.stdout).unwrap();
+    assert_eq!(json["status"], "ok");
     assert_eq!(json["telemetry"]["exit_code"], 7);
 }
 
