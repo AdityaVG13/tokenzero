@@ -1,9 +1,11 @@
 use super::*;
+use std::fs::OpenOptions;
+use std::io::Write;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Condvar};
 use std::thread;
 use std::time::Instant;
-use tokenzero_runtime::run_command_with_policy_observer;
+use tokenzero_runtime::{run_command_with_policy_observer, run_command_with_policy_observers};
 
 #[derive(Debug)]
 struct BackgroundJobState {
@@ -11,9 +13,15 @@ struct BackgroundJobState {
     pid: Option<u32>,
     pgid: Option<u32>,
     exit_code: Option<i32>,
+    version: u64,
+    completed_at: Option<Instant>,
 }
 
 const MAX_BACKGROUND_JOBS: usize = 256;
+const MAX_JOB_TAIL_BYTES: usize = 64 * 1024;
+const DEFAULT_JOB_TAIL_BYTES: usize = 8 * 1024;
+const COMPLETED_JOB_TTL: Duration = Duration::from_secs(15 * 60);
+const UNCHANGED_NEXT_POLL_MS: u64 = 20_000;
 
 fn shell_argv(command: &str) -> Vec<String> {
     if contains_platform_shell_syntax(command, tokenzero_runtime::current_platform()) {
@@ -34,6 +42,12 @@ struct BackgroundJob {
 
 fn background_job_is_complete(job: &BackgroundJob) -> bool {
     matches!(lock(&job.state).status, "exited" | "failed")
+}
+
+fn background_job_is_expired(job: &BackgroundJob, now: Instant) -> bool {
+    lock(&job.state)
+        .completed_at
+        .is_some_and(|completed| now.saturating_duration_since(completed) >= COMPLETED_JOB_TTL)
 }
 
 #[derive(Debug, Default)]
@@ -109,6 +123,8 @@ macro_rules! shell_stream_capture {
 impl BackgroundJobRegistry {
     fn insert_bounded(&self, job: Arc<BackgroundJob>) -> Result<(), String> {
         let mut jobs = lock(&self.jobs);
+        let now = Instant::now();
+        jobs.retain(|_, existing| !background_job_is_expired(existing, now));
         while jobs.len() >= MAX_BACKGROUND_JOBS {
             let oldest_completed = jobs
                 .iter()
@@ -139,6 +155,11 @@ impl BackgroundJobRegistry {
         let id = format!("tzjob-{}-{sequence}", std::process::id());
         let log = log_dir.join(format!("{id}.log"));
         fs::write(&log, []).map_err(|err| format!("create background log: {err}"))?;
+        let live_log = OpenOptions::new()
+            .append(true)
+            .open(&log)
+            .map_err(|err| format!("open background log: {err}"))?;
+        let live_log = Arc::new(Mutex::new(live_log));
         let job = Arc::new(BackgroundJob {
             id: id.clone(),
             sequence,
@@ -148,6 +169,8 @@ impl BackgroundJobRegistry {
                 pid: None,
                 pgid: None,
                 exit_code: None,
+                version: 0,
+                completed_at: None,
             }),
             changed: Condvar::new(),
         });
@@ -161,7 +184,10 @@ impl BackgroundJobRegistry {
             .name(format!("tokenzero-{id}"))
             .spawn(move || {
                 let observed = Arc::clone(&job);
-                let result = run_command_with_policy_observer(
+                let stream_job = Arc::clone(&job);
+                let stream_log = Arc::clone(&live_log);
+                let completion_log = Arc::clone(&live_log);
+                let result = run_command_with_policy_observers(
                     &argv,
                     cwd.as_deref(),
                     Some(&env),
@@ -181,24 +207,35 @@ impl BackgroundJobRegistry {
                             crate::shell_hooks::note_background_child(&observed.id, pid, pgid);
                         }
                     },
+                    move |_, chunk| {
+                        let mut log = lock(&stream_log);
+                        let _ = log.write_all(chunk);
+                        let _ = log.flush();
+                        drop(log);
+                        let mut current = lock(&stream_job.state);
+                        current.version = current.version.saturating_add(1);
+                        drop(current);
+                        stream_job.changed.notify_all();
+                    },
                 );
-                let (text, exit_code, status) = match result {
-                    Ok(result) => (
-                        shell_combined_output(
-                            &result.command,
-                            result.exit_code,
-                            &result.stdout,
-                            &result.stderr,
-                        ),
-                        result.exit_code,
-                        "exited",
+                let (failure_text, exit_code, status) = match result {
+                    Ok(result) => (None, result.exit_code, "exited"),
+                    Err(err) => (
+                        Some(format!("background shell failed: {err}")),
+                        None,
+                        "failed",
                     ),
-                    Err(err) => (format!("background shell failed: {err}\n"), None, "failed"),
                 };
-                let _ = fs::write(&job.log, text);
+                if let Some(text) = failure_text {
+                    let mut log = lock(&completion_log);
+                    let _ = writeln!(log, "{text}");
+                    let _ = log.flush();
+                }
                 let mut current = lock(&job.state);
                 current.status = status;
                 current.exit_code = exit_code;
+                current.completed_at = Some(Instant::now());
+                current.version = current.version.saturating_add(1);
                 drop(current);
                 job.changed.notify_all();
                 crate::shell_hooks::finish_background_job(&worker_id);
@@ -208,17 +245,31 @@ impl BackgroundJobRegistry {
             crate::shell_hooks::finish_background_job(&id);
             return Err(format!("spawn background worker: {err}"));
         }
-        Ok(json!({"job": id, "log": log.display().to_string()}))
+        Ok(json!({"job": id, "log": log.display().to_string(), "cursor": 0, "version": 0}))
     }
-    fn poll(&self, id: &str, wait: Duration, cursor: usize) -> Result<Value, String> {
-        let job = lock(&self.jobs)
-            .get(id)
-            .cloned()
-            .ok_or_else(|| format!("unknown background job: {id}"))?;
+    fn poll(
+        &self,
+        id: &str,
+        wait: Duration,
+        since: usize,
+        tail_bytes: usize,
+    ) -> Result<Value, String> {
+        let job = {
+            let mut jobs = lock(&self.jobs);
+            let now = Instant::now();
+            jobs.retain(|_, existing| !background_job_is_expired(existing, now));
+            jobs.get(id)
+                .cloned()
+                .ok_or_else(|| format!("unknown background job: {id}"))?
+        };
+        let available_before_wait = fs::metadata(&job.log)
+            .map(|metadata| metadata.len() as usize)
+            .unwrap_or(0);
         let mut state = lock(&job.state);
-        if state.status == "running" && !wait.is_zero() {
+        let observed_version = state.version;
+        if state.status == "running" && !wait.is_zero() && since >= available_before_wait {
             let deadline = Instant::now() + wait.min(Duration::from_secs(30));
-            while state.status == "running" {
+            while state.status == "running" && state.version == observed_version {
                 let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
                     break;
                 };
@@ -232,18 +283,50 @@ impl BackgroundJobRegistry {
                 }
             }
         }
-        let log_text = fs::read_to_string(&job.log).unwrap_or_default();
-        let total_chars = log_text.chars().count();
-        let tail = log_text
-            .chars()
-            .skip(cursor.min(total_chars))
-            .take(8192)
-            .collect::<String>();
-        Ok(
-            json!({"status": state.status, "pid": state.pid, "exitCode": state.exit_code,
-            "tail": tail, "log": job.log.display().to_string(), "cursor": total_chars,
-            "changed": total_chars > cursor || state.status != "running"}),
-        )
+        let status = state.status;
+        let pid = state.pid;
+        let exit_code = state.exit_code;
+        let version = state.version;
+        drop(state);
+
+        let log_bytes = fs::read(&job.log).unwrap_or_default();
+        let start = since.min(log_bytes.len());
+        let limit = tail_bytes.clamp(1, MAX_JOB_TAIL_BYTES);
+        let end = start.saturating_add(limit).min(log_bytes.len());
+        let changed = end > start || status != "running";
+        if !changed {
+            return Ok(json!({
+                "status": status,
+                "pid": pid,
+                "unchanged": true,
+                "cursor": start,
+                "version": version,
+                "nextPollMs": UNCHANGED_NEXT_POLL_MS,
+            }));
+        }
+
+        let tail = String::from_utf8_lossy(&log_bytes[start..end]).into_owned();
+        let mut response = json!({
+            "status": status,
+            "pid": pid,
+            "exitCode": exit_code,
+            "tail": tail,
+            "tailBytes": end.saturating_sub(start),
+            "log": job.log.display().to_string(),
+            "logBytes": log_bytes.len(),
+            "cursor": end,
+            "version": version,
+            "changed": true,
+            "unchanged": false,
+        });
+        if status == "running" {
+            response["nextPollMs"] = json!(if end < log_bytes.len() {
+                0
+            } else {
+                UNCHANGED_NEXT_POLL_MS
+            });
+        }
+        Ok(response)
     }
 
     fn terminate_all(&self) {
@@ -331,11 +414,17 @@ impl TokenZeroEngine {
     }
 
     pub fn shell_job(&self, id: &str) -> Result<Value, String> {
-        background_jobs().poll(id, Duration::ZERO, 0)
+        background_jobs().poll(id, Duration::ZERO, 0, DEFAULT_JOB_TAIL_BYTES)
     }
 
-    pub fn shell_job_wait(&self, id: &str, wait: Duration, cursor: usize) -> Result<Value, String> {
-        background_jobs().poll(id, wait, cursor)
+    pub fn shell_job_wait(
+        &self,
+        id: &str,
+        wait: Duration,
+        since: usize,
+        tail_bytes: usize,
+    ) -> Result<Value, String> {
+        background_jobs().poll(id, wait, since, tail_bytes)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -670,7 +759,7 @@ mod background_tests {
     use super::*;
 
     #[test]
-    fn poll_waits_for_completion_and_advances_cursor() {
+    fn poll_returns_output_change_then_terminal_state() {
         let dir = tempfile::tempdir().unwrap();
         let registry = BackgroundJobRegistry::default();
         let launched = registry
@@ -687,14 +776,92 @@ mod background_tests {
             )
             .unwrap();
         let id = launched["job"].as_str().unwrap();
-        let observed = registry.poll(id, Duration::from_secs(1), 0).unwrap();
-        assert_eq!(observed["status"], "exited");
-        assert!(observed["tail"].as_str().unwrap().contains("done"));
-        let cursor = observed["cursor"].as_u64().unwrap() as usize;
+        let output = registry
+            .poll(id, Duration::from_secs(1), 0, DEFAULT_JOB_TAIL_BYTES)
+            .unwrap();
+        assert!(output["tail"].as_str().unwrap().contains("done"));
+        let cursor = output["cursor"].as_u64().unwrap() as usize;
+        let terminal = if output["status"] == "exited" {
+            output
+        } else {
+            registry
+                .poll(id, Duration::from_secs(1), cursor, DEFAULT_JOB_TAIL_BYTES)
+                .unwrap()
+        };
+        assert_eq!(terminal["status"], "exited");
         assert_eq!(
-            registry.poll(id, Duration::ZERO, cursor).unwrap()["tail"],
+            registry
+                .poll(id, Duration::ZERO, cursor, DEFAULT_JOB_TAIL_BYTES)
+                .unwrap()["tail"],
             ""
         );
+    }
+
+    #[test]
+    fn poll_returns_live_bounded_delta_before_exit() {
+        let dir = tempfile::tempdir().unwrap();
+        let registry = BackgroundJobRegistry::default();
+        let launched = registry
+            .start(
+                vec![
+                    "/bin/bash".to_string(),
+                    "-c".to_string(),
+                    "printf first; sleep 0.2; printf second".to_string(),
+                ],
+                None,
+                BTreeMap::new(),
+                Duration::from_secs(2),
+                dir.path().to_path_buf(),
+            )
+            .unwrap();
+        let id = launched["job"].as_str().unwrap();
+
+        let first = registry.poll(id, Duration::from_secs(1), 0, 5).unwrap();
+        assert_eq!(first["tail"], "first");
+        assert_eq!(first["tailBytes"], 5);
+        assert_eq!(first["cursor"], 5);
+        assert!(first["version"].as_u64().unwrap() >= 1);
+
+        let second = registry.poll(id, Duration::from_secs(1), 5, 64).unwrap();
+        assert!(second["tail"].as_str().unwrap().contains("second"));
+        let cursor = second["cursor"].as_u64().unwrap() as usize;
+        assert!(cursor > 5);
+        let terminal = registry
+            .poll(id, Duration::from_secs(1), cursor, 64)
+            .unwrap();
+        assert_eq!(terminal["status"], "exited");
+    }
+
+    #[test]
+    fn unchanged_poll_is_tiny_and_supplies_backoff() {
+        let dir = tempfile::tempdir().unwrap();
+        let registry = BackgroundJobRegistry::default();
+        let launched = registry
+            .start(
+                vec!["sleep".to_string(), "1".to_string()],
+                None,
+                BTreeMap::new(),
+                Duration::from_secs(2),
+                dir.path().to_path_buf(),
+            )
+            .unwrap();
+        let id = launched["job"].as_str().unwrap();
+
+        let observed = registry
+            .poll(id, Duration::from_millis(10), 0, DEFAULT_JOB_TAIL_BYTES)
+            .unwrap();
+        assert_eq!(observed["status"], "running");
+        assert_eq!(observed["unchanged"], true);
+        assert_eq!(observed["nextPollMs"], UNCHANGED_NEXT_POLL_MS);
+        assert!(observed.get("tail").is_none());
+        assert!(observed.get("log").is_none());
+    }
+
+    #[test]
+    fn five_minute_silent_job_needs_at_most_seven_visible_observations() {
+        let five_minutes_ms = 5 * 60 * 1_000_u64;
+        let observation_cycle_ms = 30_000 + UNCHANGED_NEXT_POLL_MS;
+        assert!(five_minutes_ms.div_ceil(observation_cycle_ms) <= 7);
     }
 
     #[test]
@@ -713,7 +880,10 @@ mod background_tests {
         let id = launched["job"].as_str().unwrap();
         let pid = (0..50)
             .find_map(|_| {
-                let pid = registry.poll(id, Duration::ZERO, 0).unwrap()["pid"].as_u64();
+                let pid = registry
+                    .poll(id, Duration::ZERO, 0, DEFAULT_JOB_TAIL_BYTES)
+                    .unwrap()["pid"]
+                    .as_u64();
                 if pid.is_none() {
                     thread::sleep(Duration::from_millis(10));
                 }
@@ -744,9 +914,25 @@ mod accumulator_bounds {
                 pid: None,
                 pgid: None,
                 exit_code: None,
+                version: u64::from(status != "running"),
+                completed_at: (status != "running").then(Instant::now),
             }),
             changed: Condvar::new(),
         })
+    }
+
+    #[test]
+    fn expired_terminal_jobs_are_pruned_but_recent_terminal_jobs_are_retained() {
+        let registry = BackgroundJobRegistry::default();
+        let expired = job(0, "exited");
+        lock(&expired.state).completed_at =
+            Instant::now().checked_sub(COMPLETED_JOB_TTL + Duration::from_secs(1));
+        lock(&registry.jobs).insert(expired.id.clone(), expired);
+        registry.insert_bounded(job(1, "exited")).unwrap();
+
+        let retained = lock(&registry.jobs);
+        assert!(!retained.contains_key("job-0"));
+        assert!(retained.contains_key("job-1"));
     }
 
     #[test]

@@ -2889,15 +2889,97 @@ fn exec_compact_many(engine: &TokenZeroEngine, args: &[Value]) -> OpResult {
     catalog(json!({"items": results, "count": results.len(), "refs": refs}))
 }
 
+const DEFAULT_JOB_WAIT_MS: u64 = 30_000;
+const MAX_JOB_WAIT_MS: u64 = 30_000;
+const DEFAULT_JOB_TAIL_BYTES: usize = 8 * 1024;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct JobPollOptions {
+    wait_ms: u64,
+    since: usize,
+    tail_bytes: usize,
+}
+
+fn job_poll_options(opts: &Opts<'_>) -> JobPollOptions {
+    let wait_ms = ["waitMs", "wait_ms"]
+        .iter()
+        .find_map(|key| opts.u64(key))
+        .unwrap_or(DEFAULT_JOB_WAIT_MS)
+        .min(MAX_JOB_WAIT_MS);
+    let since = ["since", "cursor"]
+        .iter()
+        .find_map(|key| opts.usize(key))
+        .unwrap_or(0);
+    let tail_bytes = ["tailBytes", "tail_bytes"]
+        .iter()
+        .find_map(|key| opts.usize(key))
+        .unwrap_or(DEFAULT_JOB_TAIL_BYTES);
+    JobPollOptions {
+        wait_ms,
+        since,
+        tail_bytes,
+    }
+}
+
 fn exec_job(engine: &TokenZeroEngine, args: &[Value]) -> OpResult {
     let id = require_str_arg(args, 0, "zero.token.job requires a job id string")?;
-    let opts = Opts::from_arg(args, 1);
-    let wait = Duration::from_millis(opts.usize("wait_ms").unwrap_or(0) as u64);
-    let cursor = opts.usize("cursor").unwrap_or(0);
+    let opts = job_poll_options(&Opts::from_arg(args, 1));
     engine
-        .shell_job_wait(id, wait, cursor)
+        .shell_job_wait(
+            id,
+            Duration::from_millis(opts.wait_ms),
+            opts.since,
+            opts.tail_bytes,
+        )
         .map(OpOutcome::from_catalog)
         .map_err(operation_error)
+}
+
+#[cfg(test)]
+mod job_poll_option_tests {
+    use super::*;
+
+    fn parse(value: Value) -> JobPollOptions {
+        let args = vec![Value::String("job".to_string()), value];
+        job_poll_options(&Opts::from_arg(&args, 1))
+    }
+
+    #[test]
+    fn bare_job_defaults_to_server_side_thirty_second_long_poll() {
+        assert_eq!(
+            parse(Value::Null),
+            JobPollOptions {
+                wait_ms: 30_000,
+                since: 0,
+                tail_bytes: 8 * 1024,
+            }
+        );
+    }
+
+    #[test]
+    fn camel_case_contract_and_legacy_aliases_are_supported() {
+        assert_eq!(
+            parse(json!({"waitMs": 0, "since": 17, "tailBytes": 99})),
+            JobPollOptions {
+                wait_ms: 0,
+                since: 17,
+                tail_bytes: 99,
+            }
+        );
+        assert_eq!(
+            parse(json!({"wait_ms": 1_000, "cursor": 7, "tail_bytes": 42})),
+            JobPollOptions {
+                wait_ms: 1_000,
+                since: 7,
+                tail_bytes: 42,
+            }
+        );
+    }
+
+    #[test]
+    fn excessive_wait_is_clamped_to_server_bound() {
+        assert_eq!(parse(json!({"waitMs": 90_000})).wait_ms, 30_000);
+    }
 }
 
 fn exec_verdict(args: &[Value]) -> OpResult {

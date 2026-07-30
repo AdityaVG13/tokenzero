@@ -837,15 +837,26 @@ fn shell_defaults_to_plan_root_for_relative_paths() {
 }
 #[cfg(unix)]
 #[test]
-fn background_shell_can_outlive_launch_and_return_via_job_wait() {
+fn background_job_long_poll_returns_live_delta_then_terminal_delta() {
     let work = tempfile::tempdir().unwrap();
     let result = execute_codemode_with_options(
         r#"
         const started = await zero.token.shell(
-            "sleep 0.05; printf async-shell-complete",
+            "printf live; sleep 0.4; printf done",
             { background: true, timeout_ms: 2000 }
         );
-        return await zero.token.job(started.job, { wait_ms: 1000, cursor: 0 });
+        const first = await zero.token.job(started.job);
+        const second = await zero.token.job(started.job, {
+            waitMs: 1000,
+            since: first.cursor,
+            tailBytes: 64
+        });
+        const terminal = await zero.token.job(started.job, {
+            waitMs: 1000,
+            since: second.cursor,
+            tailBytes: 64
+        });
+        return { first, second, terminal };
         "#,
         CodeModeOptions {
             root: Some(work.path().to_path_buf()),
@@ -860,10 +871,51 @@ fn background_shell_can_outlive_launch_and_return_via_job_wait() {
         result.error
     );
     let value = result.value.as_ref().unwrap();
-    assert_eq!(value["status"], "exited");
-    assert_eq!(value["exitCode"], 0);
+    assert_eq!(value["first"]["tail"], "live");
+    assert_eq!(value["first"]["cursor"], 4);
+    assert!(value["first"]["version"].as_u64().unwrap() >= 1);
+    assert_eq!(value["second"]["tail"], "done");
+    assert_eq!(value["second"]["tailBytes"], 4);
+    assert_eq!(value["terminal"]["status"], "exited");
+    assert_eq!(value["terminal"]["exitCode"], 0);
     assert!(
-        value["tail"]
+        value["second"]["version"].as_u64().unwrap() >= value["first"]["version"].as_u64().unwrap()
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn background_shell_can_outlive_launch_and_return_via_job_wait() {
+    let work = tempfile::tempdir().unwrap();
+    let result = execute_codemode_with_options(
+        r#"
+        const started = await zero.token.shell(
+            "sleep 0.05; printf async-shell-complete",
+            { background: true, timeout_ms: 2000 }
+        );
+        const output = await zero.token.job(started.job, { wait_ms: 1000, cursor: 0 });
+        const terminal = output.status === "exited"
+            ? output
+            : await zero.token.job(started.job, { wait_ms: 1000, cursor: output.cursor });
+        return { output, terminal };
+        "#,
+        CodeModeOptions {
+            root: Some(work.path().to_path_buf()),
+            ..Default::default()
+        },
+    );
+
+    assert_eq!(
+        result.status,
+        CodeModeStatus::Completed,
+        "{:?}",
+        result.error
+    );
+    let value = result.value.as_ref().unwrap();
+    assert_eq!(value["terminal"]["status"], "exited");
+    assert_eq!(value["terminal"]["exitCode"], 0);
+    assert!(
+        value["output"]["tail"]
             .as_str()
             .unwrap()
             .contains("async-shell-complete")

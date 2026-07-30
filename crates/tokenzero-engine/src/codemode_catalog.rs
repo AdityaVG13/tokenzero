@@ -30,8 +30,10 @@ const METHOD_CATALOG: &[MethodDef] = methods! {
         "zero.glob(pattern: string, path?: string | string[], opts?: { max_files? }): Promise<{ text: string, ref: string, status: string, visible_tokens?: number, raw_tokens?: number }>";
     "zero.tree", "zero", "Inspect a bounded directory tree for orientation" =>
         "zero.tree(path?: string, opts?: { depth?, include_hidden?, max_files? }): Promise<{ text: string, ref: string }>";
-    "zero.shell", "zero", "Run a shell command with status-truth telemetry and compact output" =>
-        "zero.shell(command: string, opts?: { cwd?, mode?, timeout_seconds? }): Promise<{ text: string, ref: string, exit_code: number, success: boolean }>";
+    "zero.shell", "zero", "Run a shell command with status-truth telemetry and compact output; background:true returns a durable job handle" =>
+        "zero.shell(command: string, opts?: { cwd?, mode?, timeout_ms?, timeout_seconds?, background? }): Promise<{ text: string, ref: string, exit_code: number, success: boolean } | { job: string, cursor: number, version: number }>;";
+    "zero.token.job", "zero.token", "Long-poll a background shell job; returns only bytes after since and a backoff hint when unchanged" =>
+        "zero.token.job(id: string, opts?: { waitMs?: number, since?: number, tailBytes?: number }): Promise<{ status: string, cursor: number, version: number, tail?: string, tailBytes?: number, unchanged: boolean, nextPollMs?: number, exitCode?: number }>;";
     "zero.edit", "zero", "Apply multi-hunk find/replace edits to one file atomically" =>
         "zero.edit(path: string, edits: Array<{ find: string, replace: string, replace_all?: boolean }>, opts?: { dry_run?, create? }): Promise<{ text: string, ref: string, hunks_applied: number }>";
     "zero.token.expand", "zero.token", "Recover exact bytes from a tz:// ref" =>
@@ -147,6 +149,9 @@ fn make_example(path: &str) -> &'static str {
         "zero.glob" => r#"zero.glob("**/*.rs", "crates/")"#,
         "zero.tree" => r#"zero.tree("src", { depth: 2 })"#,
         "zero.shell" => r#"zero.shell("cargo test --quiet")"#,
+        "zero.token.job" => {
+            r#"zero.token.job(jobId, { waitMs: 30000, since: cursor, tailBytes: 8192 })"#
+        }
         "zero.edit" => r#"zero.edit("src/lib.rs", [{ find: "old", replace: "new" }])"#,
         "zero.expand" | "zero.token.expand" => r#"zero.expand("tz://blob/abc123")"#,
         "zero.compact" | "zero.token.compact" => r#"zero.compact(large_output)"#,
@@ -181,7 +186,8 @@ fn related_methods(path: &str) -> Vec<&'static str> {
         "zero.find" | "zero.grep" => vec!["zero.filter_lines", "zero.recall", "zero.read"],
         "zero.glob" => vec!["zero.tree", "zero.read"],
         "zero.tree" => vec!["zero.glob", "zero.read"],
-        "zero.shell" => vec!["zero.compact", "zero.filter_lines"],
+        "zero.shell" => vec!["zero.token.job", "zero.compact", "zero.filter_lines"],
+        "zero.token.job" => vec!["zero.shell"],
         "zero.edit" => vec!["zero.read", "zero.find"],
         "zero.expand" | "zero.token.expand" => vec!["zero.compact", "zero.read"],
         "zero.compact" | "zero.token.compact" | "zero.compact_max" => {
@@ -305,5 +311,21 @@ mod catalog_tests {
             grep.contains("literal substring otherwise"),
             "grep prose names the literal fallback: {grep}"
         );
+    }
+
+    #[test]
+    fn job_signature_publishes_long_poll_cursor_and_backoff_contract() {
+        let method = describe_method("zero.token.job");
+        let signature = method["signature"].as_str().unwrap();
+        for field in [
+            "waitMs",
+            "since",
+            "tailBytes",
+            "cursor",
+            "version",
+            "nextPollMs",
+        ] {
+            assert!(signature.contains(field), "missing {field}: {signature}");
+        }
     }
 }

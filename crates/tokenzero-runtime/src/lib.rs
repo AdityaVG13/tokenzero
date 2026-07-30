@@ -6,6 +6,7 @@ use std::fs::{self, File};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{ChildStdin, Command, Stdio};
+use std::sync::Arc;
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -273,10 +274,39 @@ pub fn run_command_with_policy_observer<F>(
     timeout: Duration,
     explicit_shell: bool,
     output_policy: RunOutputPolicy,
-    mut observer: F,
+    observer: F,
 ) -> Result<RunResult, RuntimeError>
 where
     F: FnMut(Option<u32>, Option<u32>, &'static str),
+{
+    run_command_with_policy_observers(
+        argv,
+        cwd,
+        env_overrides,
+        stdin,
+        timeout,
+        explicit_shell,
+        output_policy,
+        observer,
+        |_, _| {},
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn run_command_with_policy_observers<F, G>(
+    argv: &[String],
+    cwd: Option<&Path>,
+    env_overrides: Option<&BTreeMap<String, String>>,
+    stdin: Option<&str>,
+    timeout: Duration,
+    explicit_shell: bool,
+    output_policy: RunOutputPolicy,
+    mut observer: F,
+    stream_observer: G,
+) -> Result<RunResult, RuntimeError>
+where
+    F: FnMut(Option<u32>, Option<u32>, &'static str),
+    G: Fn(&'static str, &[u8]) + Send + Sync + 'static,
 {
     let output_policy = output_policy.normalized();
     let plan = plan_command(argv, cwd, explicit_shell)?;
@@ -333,11 +363,18 @@ where
     let stderr = child.stderr.take().expect("stderr is piped");
     let stdout_policy = output_policy.clone();
     let stderr_policy = output_policy.clone();
+    let stream_observer = Arc::new(stream_observer);
+    let stdout_observer = Arc::clone(&stream_observer);
+    let stderr_observer = Arc::clone(&stream_observer);
     let stdout_reader = spawn_io_worker("stdout reader", move || {
-        capture_reader(stdout, "stdout", stdout_policy)
+        capture_reader_with_observer(stdout, "stdout", stdout_policy, move |chunk| {
+            stdout_observer("stdout", chunk);
+        })
     });
     let stderr_reader = spawn_io_worker("stderr reader", move || {
-        capture_reader(stderr, "stderr", stderr_policy)
+        capture_reader_with_observer(stderr, "stderr", stderr_policy, move |chunk| {
+            stderr_observer("stderr", chunk);
+        })
     });
     // Stdin writes can block; keep them off the wait_timeout path.
     let stdin_writer = spawn_stdin_writer(stdin, child.stdin.take());
@@ -834,9 +871,18 @@ mod windows_job {
 }
 
 fn capture_reader<R: Read>(
+    reader: R,
+    stream_name: &str,
+    policy: RunOutputPolicy,
+) -> std::io::Result<CapturedStream> {
+    capture_reader_with_observer(reader, stream_name, policy, |_| {})
+}
+
+fn capture_reader_with_observer<R: Read, F: FnMut(&[u8])>(
     mut reader: R,
     stream_name: &str,
     policy: RunOutputPolicy,
+    mut observer: F,
 ) -> std::io::Result<CapturedStream> {
     let policy = policy.normalized();
     let mut captured = Vec::with_capacity(policy.per_stream_capture_bytes.min(64 * 1024));
@@ -849,6 +895,7 @@ fn capture_reader<R: Read>(
             break;
         }
         let chunk = &buf[..read];
+        observer(chunk);
         bytes_seen = bytes_seen.saturating_add(read);
         let captured_before = captured.len();
         if captured.len() < policy.per_stream_capture_bytes {
