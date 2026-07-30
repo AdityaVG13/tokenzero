@@ -176,7 +176,7 @@ named_test!(public_claim_surfaces_do_not_say_cross_engine_pending, {
         "README.md",
         "docs/core.md",
         "docs/mcp.md",
-        "crates/tokenzero-mcp/src/catalog.rs",
+        "crates/tokenzero-mcp-compat/src/catalog.rs",
     ];
     let banned = [
         "cross-engine expansion pending",
