@@ -2012,7 +2012,8 @@ fn finalize_codemode_result(
         );
         // vz89.11: opt-in machine-action channel on the codemode envelope.
         // Gate off leaves the envelope byte-identical.
-        if tokenzero_core::channel_separation_enabled() {
+        let channel_mode = tokenzero_core::channel_mode();
+        if channel_mode.enabled() {
             let status_line = match finalized.status {
                 CodeModeStatus::Completed => format!(
                     "Executed {kind} plan ({} physical op(s))",
@@ -2027,14 +2028,41 @@ fn finalize_codemode_result(
                     format!("Plan failed ({error_kind})")
                 }
             };
+            let user_message = channel_mode
+                .emits_user_message()
+                .then(|| terminal_user_message(&finalized));
             finalized.channels = Some(tokenzero_core::ChannelSeparation {
                 action: format!("codemode.{kind}"),
                 status_line,
-                user_message: None,
+                user_message,
             });
         }
         finalized
     }
+}
+
+/// vz89.11: the one brief final explanation, generated from the plan receipt
+/// rather than from model prose. Failures name the error; successes report the
+/// work done and the refs left behind for follow-up.
+fn terminal_user_message(result: &CodeModeResult) -> String {
+    if let Some(error) = &result.error {
+        return format!("Plan failed ({}): {}", error.kind, error.message);
+    }
+    let ops = result.telemetry.physical_ops;
+    let mut message = format!(
+        "Done: {ops} operation{} in {}ms",
+        if ops == 1 { "" } else { "s" },
+        result.telemetry.wall_ms
+    );
+    let refs = result.refs.len();
+    if refs > 0 {
+        message.push_str(&format!(
+            ", {refs} ref{} available to expand",
+            if refs == 1 { "" } else { "s" }
+        ));
+    }
+    message.push('.');
+    message
 }
 
 fn lower_recipe_plan(plan: &str) -> Option<String> {

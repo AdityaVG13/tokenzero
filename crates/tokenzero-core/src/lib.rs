@@ -276,17 +276,49 @@ pub struct ChannelSeparation {
 /// Env var opting a harness into channel-separated responses.
 pub const CHANNEL_SEPARATION_ENV: &str = "TOKENZERO_CHANNEL_SEPARATION";
 
+/// How much of the channel contract the harness opted into (vz89.11).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChannelMode {
+    /// No channel block; responses stay byte-identical to the pre-gate contract.
+    Off,
+    /// Machine action + deterministic status line, `user_message` always null.
+    /// The between-tool-calls mode: no model narration is paid for.
+    Action,
+    /// Action mode plus one brief receipt-derived `user_message` on a terminal
+    /// envelope. Still zero model-output cost: the text comes from receipts.
+    Terminal,
+}
+
+impl ChannelMode {
+    pub fn from_env_value(raw: &str) -> Self {
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "1" | "on" | "true" | "yes" | "action" => Self::Action,
+            "terminal" | "final" => Self::Terminal,
+            _ => Self::Off,
+        }
+    }
+
+    pub fn enabled(self) -> bool {
+        !matches!(self, Self::Off)
+    }
+
+    /// Whether a terminal envelope may carry a receipt-derived user message.
+    pub fn emits_user_message(self) -> bool {
+        matches!(self, Self::Terminal)
+    }
+}
+
+/// The channel mode the harness opted into. Default `Off`.
+pub fn channel_mode() -> ChannelMode {
+    std::env::var(CHANNEL_SEPARATION_ENV)
+        .map(|raw| ChannelMode::from_env_value(&raw))
+        .unwrap_or(ChannelMode::Off)
+}
+
 /// Whether the harness opted into channel separation (vz89.11). Default off:
 /// responses are byte-identical to the pre-gate contract.
 pub fn channel_separation_enabled() -> bool {
-    std::env::var(CHANNEL_SEPARATION_ENV)
-        .map(|raw| {
-            matches!(
-                raw.trim().to_ascii_lowercase().as_str(),
-                "1" | "on" | "true" | "yes"
-            )
-        })
-        .unwrap_or(false)
+    channel_mode().enabled()
 }
 
 impl ToolResponse {
@@ -1766,6 +1798,41 @@ mod tests {
 #[cfg(test)]
 #[path = "tests/mod.rs"]
 mod semantic_tests;
+
+#[cfg(test)]
+mod channel_mode_tests {
+    use super::*;
+
+    #[test]
+    fn legacy_truthy_values_stay_action_only() {
+        for raw in ["1", "on", "TRUE", " yes ", "action"] {
+            let mode = ChannelMode::from_env_value(raw);
+            assert_eq!(mode, ChannelMode::Action, "{raw}");
+            assert!(mode.enabled());
+            assert!(!mode.emits_user_message(), "{raw} must stay action-only");
+        }
+    }
+
+    #[test]
+    fn terminal_mode_opts_into_receipt_user_message() {
+        for raw in ["terminal", "Final"] {
+            let mode = ChannelMode::from_env_value(raw);
+            assert_eq!(mode, ChannelMode::Terminal, "{raw}");
+            assert!(mode.enabled());
+            assert!(mode.emits_user_message());
+        }
+    }
+
+    #[test]
+    fn unknown_and_falsy_values_are_off() {
+        for raw in ["", "0", "off", "nonsense"] {
+            let mode = ChannelMode::from_env_value(raw);
+            assert_eq!(mode, ChannelMode::Off, "{raw}");
+            assert!(!mode.enabled());
+            assert!(!mode.emits_user_message());
+        }
+    }
+}
 
 #[cfg(test)]
 mod core_safety_regressions {

@@ -252,6 +252,9 @@ fn attach_channels_gated(
     response.channels = Some(ChannelSeparation {
         action: bare.to_string(),
         status_line: channel_status_line(bare, args),
+        // Per-tool responses are always between tool calls: action-only, never
+        // prose. The single receipt-derived user_message belongs to the terminal
+        // plan envelope (see codemode exec::terminal_user_message).
         user_message: None,
     });
     response

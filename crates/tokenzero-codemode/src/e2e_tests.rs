@@ -516,6 +516,57 @@ fn vz89_11_channels_present_when_gated() {
 }
 
 #[test]
+fn vz89_11_terminal_mode_emits_one_receipt_derived_user_message() {
+    with_channel_gate(Some("terminal"), || {
+        let work = tempfile::tempdir().unwrap();
+        let completed = execute_codemode_with_options(
+            "return { ok: true }",
+            CodeModeOptions {
+                root: Some(work.path().to_path_buf()),
+                ..Default::default()
+            },
+        );
+        assert_eq!(
+            completed.status,
+            CodeModeStatus::Completed,
+            "{:?}",
+            completed.error
+        );
+        let value = serde_json::to_value(&completed).unwrap();
+        let channels = value
+            .get("channels")
+            .unwrap_or_else(|| panic!("terminal mode must carry channels: {value}"));
+        assert_eq!(channels["action"].as_str(), Some("codemode.code"));
+        let message = channels["user_message"]
+            .as_str()
+            .unwrap_or_else(|| panic!("terminal mode fills user_message: {channels}"));
+        assert!(
+            message.starts_with("Done: ")
+                && message.contains(&format!("{} operation", completed.telemetry.physical_ops)),
+            "user_message is derived from the receipt, not model prose: {message}"
+        );
+
+        let failed = execute_codemode_with_options(
+            "return 1",
+            CodeModeOptions {
+                root: Some(work.path().to_path_buf()),
+                max_code_bytes: 1,
+                ..Default::default()
+            },
+        );
+        assert_eq!(failed.status, CodeModeStatus::Error);
+        let failed_value = serde_json::to_value(&failed).unwrap();
+        let failed_message = failed_value["channels"]["user_message"]
+            .as_str()
+            .expect("error envelope explains itself in terminal mode");
+        assert!(
+            failed_message.starts_with("Plan failed (validation):"),
+            "{failed_message}"
+        );
+    });
+}
+
+#[test]
 fn envelope_v3_collapses_execution_refs_and_hides_store_block() {
     let work = tempfile::tempdir().unwrap();
     let result = execute_codemode_with_options(
