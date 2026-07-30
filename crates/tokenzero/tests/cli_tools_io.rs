@@ -82,7 +82,14 @@ fn cli_slim_envelope_opt_in_drops_advisory_blocks_and_keeps_durable_refs() {
             "slim envelope drops {dropped}: {slim}"
         );
     }
-    assert_json_contains(&slim["visible"]["text"], "tiny payload");
+    // Slim flattens the visible capsule to bare text: "capsule" is the only
+    // kind the CLI emits, so the {kind,text} wrapper is pure overhead.
+    assert_json_contains(&slim["visible"], "tiny payload");
+    // detail_ref is refs.first(); slim must not restate it as a second 74B ref.
+    assert!(
+        slim.get("detail_ref").is_none(),
+        "slim drops detail_ref when refs already carry it: {slim}"
+    );
     let ref_id = slim["refs"][0]
         .as_str()
         .expect("slim refs are bare ref strings");
@@ -92,11 +99,65 @@ fn cli_slim_envelope_opt_in_drops_advisory_blocks_and_keeps_durable_refs() {
         "tiny payload\n",
         "slim refs stay durable and expand to exact bytes"
     );
+    assert_eq!(
+        slim["detail_ref"].as_str().or(Some(ref_id)),
+        Some(ref_id),
+        "detail_ref stays recoverable as refs[0]"
+    );
     let slim_bytes = serde_json::to_string(&slim).unwrap().len();
     let full_bytes = serde_json::to_string(&full).unwrap().len();
     assert!(
         slim_bytes * 2 < full_bytes,
         "slim {slim_bytes}B must be under half of full {full_bytes}B"
+    );
+}
+
+#[test]
+fn cli_slim_envelope_overhead_is_a_flat_constant_not_a_payload_multiple() {
+    // 0ok7 acceptance: for sub-1KB payloads the slim envelope must add a small
+    // fixed cost (refs + status truth), never a cost that scales with content.
+    let (dir, cache) = setup_temp_with_cache();
+    let cache_arg = cache.to_str().unwrap().to_string();
+    let root_arg = dir.path().to_str().unwrap().to_string();
+
+    let mut overheads = Vec::new();
+    for size in [64_usize, 256, 900] {
+        let file = dir.path().join(format!("payload_{size}.txt"));
+        let body = "x".repeat(size);
+        std::fs::write(&file, &body).unwrap();
+        let file_arg = file.to_str().unwrap().to_string();
+        let slim = run_tokenzero_json_in_with_env(
+            &[
+                "read",
+                file_arg.as_str(),
+                "--cache-path",
+                cache_arg.as_str(),
+                "--allowed-root",
+                root_arg.as_str(),
+                "--json",
+            ],
+            dir.path(),
+            &[("TOKENZERO_SLIM_ENVELOPE", "1")],
+        );
+        let bytes = serde_json::to_string(&slim).unwrap().len();
+        let payload = slim["visible"].as_str().unwrap_or_default().len();
+        assert!(payload >= size, "payload {payload} carries {size} content");
+        overheads.push(bytes - payload);
+    }
+
+    // Overhead must be flat across a 14x payload range: no per-byte tax.
+    let (min, max) = (
+        *overheads.iter().min().unwrap(),
+        *overheads.iter().max().unwrap(),
+    );
+    assert!(
+        max - min <= 32,
+        "slim overhead must be constant, saw {overheads:?}"
+    );
+    // Two durable refs (~74B each) plus status/tool/ack is the floor.
+    assert!(
+        max <= 260,
+        "slim overhead must stay within the ref-dominated floor, saw {overheads:?}"
     );
 }
 

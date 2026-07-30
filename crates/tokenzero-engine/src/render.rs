@@ -1023,10 +1023,9 @@ fn slim_cli_json(response: &ToolResponse) -> String {
         doc.insert("ack".into(), serde_json::json!(ack));
     }
     if let Some(visible) = &response.visible {
-        doc.insert(
-            "visible".into(),
-            serde_json::to_value(visible).unwrap_or(serde_json::Value::Null),
-        );
+        // The capsule wrapper ({kind,text}) costs ~28B per call and "capsule"
+        // is the only kind the CLI ever emits, so slim carries the bare text.
+        doc.insert("visible".into(), serde_json::json!(visible.text));
     }
     if !response.refs.is_empty() {
         doc.insert(
@@ -1040,8 +1039,17 @@ fn slim_cli_json(response: &ToolResponse) -> String {
             ),
         );
     }
+    // detail_ref is defined as refs.first() (tokenzero-core ToolResponse::new),
+    // so restating it costs a full 74B ref for zero information. Emit it only
+    // when it is not already recoverable from the refs array.
     if let Some(detail_ref) = &response.detail_ref {
-        doc.insert("detail_ref".into(), serde_json::json!(detail_ref));
+        if !response
+            .refs
+            .iter()
+            .any(|record| record.ref_id == *detail_ref)
+        {
+            doc.insert("detail_ref".into(), serde_json::json!(detail_ref));
+        }
     }
     if let Some(error) = &response.error {
         doc.insert(

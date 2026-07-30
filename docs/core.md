@@ -112,6 +112,15 @@ response includes `cache_key`, `content_digest`, `cacheable_tokens`,
 `volatile_tokens`, source refs, volatile-tail refs, and invalidation reason. It
 does not start a watcher or service.
 
+`TOKENZERO_SLIM_ENVELOPE=1` (also `on`/`true`/`yes`) slims the CLI `--json`
+envelope for small calls. It keeps status truth (`status`, `tool`, `ack`,
+`error`, `diagnostic`, `safety`, `channels`), the payload as bare `visible`
+text, and every durable ref as a flat string array; it drops the advisory
+blocks (`schema_version`, `mode`, `content_type`, `accounting`, `telemetry`)
+and omits `detail_ref` when it is already `refs[0]`. Nothing is lost: unset the
+variable for the full envelope, and refs still expand to exact bytes. The full
+envelope remains the default and is byte-stable.
+
 `tokenzero bench competitors --suite <suite> --json` writes internal benchmark
 rows to a private artifact path by default. Rows include raw, visible, and
 recovery tokens, recovery-adjusted savings, byte-perfect recovery, task success,
