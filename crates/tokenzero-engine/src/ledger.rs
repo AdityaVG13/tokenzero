@@ -712,6 +712,153 @@ fn append_record(path: &Path, record: &LedgerRecord, max_bytes: u64) -> io::Resu
     enforce_ledger_total_bytes(path, max_bytes)
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TaskCostSummary {
+    pub task_id: String,
+    pub success: bool,
+    pub visible: u64,
+    pub expand: u64,
+    pub retries: u64,
+    pub fails: u64,
+    pub ratc: f64,
+    pub expand_count: u64,
+    pub dangling_refs: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TaskCostReport {
+    pub schema: String,
+    pub task_count: u64,
+    pub successful_tasks: u64,
+    pub success_rate: f64,
+    pub tasks: Vec<TaskCostSummary>,
+}
+
+#[derive(Default)]
+struct TaskCostAccumulator {
+    visible: u64,
+    expand: u64,
+    retries: u64,
+    fails: u64,
+    ratc: f64,
+    expand_count: u64,
+    dangling_refs: u64,
+    saw_success: bool,
+    saw_failure: bool,
+}
+
+/// Group ledger v2 records by their stable session/task identity.
+///
+/// Until the task surface emits a narrower task id, LedgerRecord.session_id is
+/// the canonical task grouping key. Unknown outcomes are conservatively not
+/// successful. Every observed task is retained in the denominator, including
+/// tasks with fail_count > 0.
+pub fn task_cost_report(path: &Path) -> io::Result<TaskCostReport> {
+    let records = read_records(path)?;
+    let mut grouped = BTreeMap::<String, TaskCostAccumulator>::new();
+    for record in records {
+        let costs = &record.recovery_costs;
+        let task = grouped.entry(record.session_id.clone()).or_default();
+        let visible = if record.schema == LEDGER_SCHEMA {
+            record.token_mass.visible_tokens
+        } else {
+            costs.visible_tokens
+        };
+        task.visible = task.visible.saturating_add(visible);
+        task.expand = task.expand.saturating_add(costs.expand_tokens);
+        task.retries = task.retries.saturating_add(costs.retry_count);
+        task.fails = task.fails.saturating_add(costs.fail_count);
+        task.ratc += if record.schema == LEDGER_SCHEMA {
+            visible as f64
+        } else {
+            costs.ratc
+        };
+        task.expand_count = task.expand_count.saturating_add(costs.expand_count);
+        task.dangling_refs = task.dangling_refs.saturating_add(costs.dangling_ref_count);
+        task.saw_success |= costs.task_success == Some(true);
+        task.saw_failure |= costs.task_success == Some(false) || costs.fail_count > 0;
+    }
+
+    let tasks = grouped
+        .into_iter()
+        .map(|(task_id, task)| TaskCostSummary {
+            task_id,
+            success: task.saw_success && !task.saw_failure,
+            visible: task.visible,
+            expand: task.expand,
+            retries: task.retries,
+            fails: task.fails,
+            ratc: task.ratc,
+            expand_count: task.expand_count,
+            dangling_refs: task.dangling_refs,
+        })
+        .collect::<Vec<_>>();
+    let task_count = u64::try_from(tasks.len()).unwrap_or(u64::MAX);
+    let successful_tasks =
+        u64::try_from(tasks.iter().filter(|task| task.success).count()).unwrap_or(u64::MAX);
+    let success_rate = if task_count == 0 {
+        0.0
+    } else {
+        successful_tasks as f64 / task_count as f64
+    };
+    Ok(TaskCostReport {
+        schema: "tokenzero.task-cost-report.v1".to_owned(),
+        task_count,
+        successful_tasks,
+        success_rate,
+        tasks,
+    })
+}
+
+pub fn render_task_cost_csv(report: &TaskCostReport) -> String {
+    fn field(value: &str) -> String {
+        if value
+            .chars()
+            .any(|character| matches!(character, ',' | '"' | '\n' | '\r'))
+        {
+            format!(r#""{}""#, value.replace('"', r#""""#))
+        } else {
+            value.to_owned()
+        }
+    }
+
+    let mut out = String::from(
+        "task_id,success,visible,expand,retries,fails,ratc,expand_count,dangling_refs\n",
+    );
+    for task in &report.tasks {
+        out.push_str(&format!(
+            "{},{},{},{},{},{},{},{},{}\n",
+            field(&task.task_id),
+            task.success,
+            task.visible,
+            task.expand,
+            task.retries,
+            task.fails,
+            task.ratc,
+            task.expand_count,
+            task.dangling_refs,
+        ));
+    }
+    out
+}
+
+pub fn write_task_cost_report(
+    ledger_path: &Path,
+    json_path: &Path,
+    csv_path: &Path,
+) -> io::Result<TaskCostReport> {
+    let report = task_cost_report(ledger_path)?;
+    for output in [json_path, csv_path] {
+        if let Some(parent) = output.parent() {
+            fs::create_dir_all(parent)?;
+        }
+    }
+    let json = serde_json::to_vec_pretty(&report).map_err(io::Error::other)?;
+    fs::write(json_path, json)?;
+    fs::write(csv_path, render_task_cost_csv(&report))?;
+    Ok(report)
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LedgerQuery {
     RepoCost {
@@ -1017,6 +1164,98 @@ mod ledger_tests {
         let records = read_records(&ledger).unwrap();
         assert_eq!(records.len(), 1);
         assert_eq!(records[0].schema, LEDGER_SCHEMA);
+    }
+
+    fn task_record(
+        task_id: &str,
+        visible: u64,
+        expand: u64,
+        retries: u64,
+        fails: u64,
+        success: Option<bool>,
+        expand_count: u64,
+        dangling_refs: u64,
+    ) -> LedgerRecord {
+        let mut record = test_record();
+        record.session_id = task_id.to_owned();
+        record.token_mass.visible_tokens = visible;
+        record.recovery_costs = RecoveryCosts {
+            visible_tokens: visible,
+            expand_tokens: expand,
+            expand_count,
+            retry_count: retries,
+            fail_count: fails,
+            rho_fail: 2.0,
+            lambda_fail: 10.0,
+            task_success: success,
+            anchor_recall_ok: None,
+            dangling_ref_count: dangling_refs,
+            ratc: 0.0,
+        }
+        .with_ratc();
+        record
+    }
+
+    #[test]
+    fn task_cost_report_matches_hand_computed_json_and_csv_golden() {
+        let directory = tempdir().unwrap();
+        let ledger = directory.path().join("ledger.jsonl");
+        let json_output = directory.path().join("reports/tasks.json");
+        let csv_output = directory.path().join("reports/tasks.csv");
+        let records = [
+            task_record("task,a", 10, 4, 1, 0, Some(true), 1, 1),
+            task_record("task,a", 6, 1, 0, 0, None, 1, 0),
+            task_record("task-b", 8, 2, 1, 1, Some(true), 1, 2),
+        ];
+        let fixture = records
+            .iter()
+            .map(|record| serde_json::to_string(record).unwrap())
+            .collect::<Vec<_>>()
+            .join("\n");
+        fs::write(&ledger, format!("{fixture}\n")).unwrap();
+        let report = write_task_cost_report(&ledger, &json_output, &csv_output).unwrap();
+        assert_eq!(
+            report,
+            TaskCostReport {
+                schema: "tokenzero.task-cost-report.v1".to_owned(),
+                task_count: 2,
+                successful_tasks: 1,
+                success_rate: 0.5,
+                tasks: vec![
+                    TaskCostSummary {
+                        task_id: "task,a".to_owned(),
+                        success: true,
+                        visible: 16,
+                        expand: 5,
+                        retries: 1,
+                        fails: 0,
+                        ratc: 23.0,
+                        expand_count: 2,
+                        dangling_refs: 1
+                    },
+                    TaskCostSummary {
+                        task_id: "task-b".to_owned(),
+                        success: false,
+                        visible: 8,
+                        expand: 2,
+                        retries: 1,
+                        fails: 1,
+                        ratc: 22.0,
+                        expand_count: 1,
+                        dangling_refs: 2
+                    },
+                ],
+            }
+        );
+        let json_back: TaskCostReport =
+            serde_json::from_slice(&fs::read(json_output).unwrap()).unwrap();
+        assert_eq!(json_back, report);
+        let expected_csv = concat!(
+            "task_id,success,visible,expand,retries,fails,ratc,expand_count,dangling_refs\n",
+            "\"task,a\",true,16,5,1,0,23,2,1\n",
+            "task-b,false,8,2,1,1,22,1,2\n",
+        );
+        assert_eq!(fs::read_to_string(csv_output).unwrap(), expected_csv);
     }
 
     #[test]

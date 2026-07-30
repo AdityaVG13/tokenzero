@@ -134,6 +134,16 @@ pub(crate) enum LedgerQueryCommand {
         #[arg(long, default_value_t = 30)]
         days: u64,
     },
+    #[command(
+        name = "task-cost",
+        about = "Group response ledger v2 by task/session and write CSV plus JSON"
+    )]
+    TaskCost {
+        #[arg(long, value_name = "PATH")]
+        json_out: PathBuf,
+        #[arg(long, value_name = "PATH")]
+        csv_out: PathBuf,
+    },
 }
 
 define_subcommands! {

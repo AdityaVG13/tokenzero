@@ -1316,32 +1316,52 @@ fn handle_session_ledger(args: SessionLedgerArgs) -> Result<()> {
                     })
                     .unwrap_or(0)
             };
-            let query = match query {
-                LedgerQueryCommand::Repo { repo, days } => {
-                    tokenzero_mcp_compat::ledger::LedgerQuery::RepoCost {
-                        repo: repo.to_string_lossy().into_owned(),
-                        since_ms: since_ms(days),
+            if let LedgerQueryCommand::TaskCost { json_out, csv_out } = &query {
+                let report = tokenzero_mcp_compat::ledger::write_task_cost_report(
+                    &response_ledger_path,
+                    json_out,
+                    csv_out,
+                )?;
+                emit_value(
+                    json!({
+                        "schema": report.schema,
+                        "task_count": report.task_count,
+                        "successful_tasks": report.successful_tasks,
+                        "success_rate": report.success_rate,
+                        "json_path": json_out,
+                        "csv_path": csv_out,
+                    }),
+                    args.json,
+                )?;
+            } else {
+                let query = match query {
+                    LedgerQueryCommand::Repo { repo, days } => {
+                        tokenzero_mcp_compat::ledger::LedgerQuery::RepoCost {
+                            repo: repo.to_string_lossy().into_owned(),
+                            since_ms: since_ms(days),
+                        }
                     }
-                }
-                LedgerQueryCommand::VersionDelta {
-                    baseline,
-                    candidate,
-                    days,
-                } => tokenzero_mcp_compat::ledger::LedgerQuery::VersionDelta {
-                    baseline,
-                    candidate,
-                    since_ms: since_ms(days),
-                },
-                LedgerQueryCommand::AgentSpend { days } => {
-                    tokenzero_mcp_compat::ledger::LedgerQuery::AgentSpend {
+                    LedgerQueryCommand::VersionDelta {
+                        baseline,
+                        candidate,
+                        days,
+                    } => tokenzero_mcp_compat::ledger::LedgerQuery::VersionDelta {
+                        baseline,
+                        candidate,
                         since_ms: since_ms(days),
+                    },
+                    LedgerQueryCommand::AgentSpend { days } => {
+                        tokenzero_mcp_compat::ledger::LedgerQuery::AgentSpend {
+                            since_ms: since_ms(days),
+                        }
                     }
-                }
-            };
-            emit_value(
-                tokenzero_mcp_compat::ledger::query_ledger(&response_ledger_path, &query)?,
-                args.json,
-            )?;
+                    LedgerQueryCommand::TaskCost { .. } => unreachable!(),
+                };
+                emit_value(
+                    tokenzero_mcp_compat::ledger::query_ledger(&response_ledger_path, &query)?,
+                    args.json,
+                )?;
+            }
         }
     }
     Ok(())
