@@ -339,7 +339,7 @@ impl TokenZeroEngine {
             if !since_result.found {
                 let code = match since_result.reason.as_str() {
                     "stale-ref" => "ref_stale",
-                    "dangling-ref" => "ref_not_found",
+                    "dangling-ref" => "dangling_ref",
                     "invalid-ref" => "invalid_ref",
                     _ => "expand_failed",
                 };

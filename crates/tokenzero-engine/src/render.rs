@@ -398,7 +398,9 @@ pub fn expansion_response(result: ExpansionResult, recovery_tokens: usize) -> To
             "ref was found but could not be decoded",
         ),
     ];
-    let (code, message) = if reason.starts_with("ref-not-found") || reason == "dangling-ref" {
+    let (code, message) = if reason == "dangling-ref" {
+        ("dangling_ref", format!("{reason} (ref: {full_ref})"))
+    } else if reason.starts_with("ref-not-found") {
         ("ref_not_found", format!("{reason} (ref: {full_ref})"))
     } else if is_window_oob {
         ("window_out_of_range", format!("{reason} (ref: {full_ref})"))
@@ -423,7 +425,15 @@ pub fn expansion_response(result: ExpansionResult, recovery_tokens: usize) -> To
     } else {
         "align the producer and consumer shared store root, then retry with the exact ref"
     };
-    ToolResponse::error("expand", code, message, Some(repair.to_string()))
+    let mut response = ToolResponse::error("expand", code, message, Some(repair.to_string()));
+    response.telemetry = Some(serde_json::json!({
+        "expand": {
+            "fail_count": 1,
+            "dangling_ref_count": u64::from(reason == "dangling-ref"),
+            "miss_kind": code,
+        }
+    }));
+    response
 }
 
 /// Map a recovery-store fragment failure reason to a stable typed error
@@ -951,6 +961,24 @@ b
                 "fragment repair hint: {:?}",
                 error.repair
             );
+        }
+    }
+
+    #[test]
+    fn expansion_response_preserves_typed_misses_for_ledger() {
+        for (reason, code, dangling) in [
+            ("dangling-ref", "dangling_ref", 1),
+            ("stale-ref", "ref_stale", 0),
+            ("ref-not-found", "ref_not_found", 0),
+        ] {
+            let result =
+                ExpansionResult::missing("tz://o/7/23".to_owned(), Some("raw".to_owned()), reason);
+            let response = expansion_response(result, 0);
+            assert_eq!(response.error.as_ref().unwrap().code, code);
+            let expand = &response.telemetry.as_ref().unwrap()["expand"];
+            assert_eq!(expand["fail_count"], 1);
+            assert_eq!(expand["dangling_ref_count"], dangling);
+            assert_eq!(expand["miss_kind"], code);
         }
     }
 

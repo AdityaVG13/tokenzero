@@ -790,6 +790,75 @@ const fn initial_next_ordinal() -> u64 {
     1
 }
 
+fn ordinal_generation_path(path: &Path) -> PathBuf {
+    let mut value = path.as_os_str().to_os_string();
+    value.push(".ordinal-generation");
+    PathBuf::from(value)
+}
+
+fn read_ordinal_generation(path: &Path) -> u64 {
+    fs::read_to_string(ordinal_generation_path(path))
+        .ok()
+        .and_then(|value| value.trim().parse().ok())
+        .unwrap_or(0)
+}
+
+fn write_ordinal_generation(path: &Path, generation: u64) -> Result<(), RecoveryError> {
+    let destination = ordinal_generation_path(path);
+    if let Some(parent) = destination.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let mut collision = None;
+    for _ in 0..TMP_RETRIES {
+        let tmp = recovery_tmp_path(&destination);
+        match create_private_new(&tmp) {
+            Ok(mut file) => {
+                writeln!(file, "{generation}")?;
+                file.sync_all()?;
+                if let Err(error) = fs::rename(&tmp, &destination) {
+                    let _ = fs::remove_file(&tmp);
+                    return Err(error.into());
+                }
+                return Ok(());
+            }
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+                collision = Some(error);
+            }
+            Err(error) => return Err(error.into()),
+        }
+    }
+    Err(collision
+        .unwrap_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::AlreadyExists,
+                "ordinal generation temp collision",
+            )
+        })
+        .into())
+}
+
+fn ensure_ordinal_generation_floor(path: &Path, generation: u64) -> Result<(), RecoveryError> {
+    if read_ordinal_generation(path) < generation {
+        write_ordinal_generation(path, generation)?;
+    }
+    Ok(())
+}
+
+fn next_ordinal_generation(path: &Path) -> Result<u64, RecoveryError> {
+    let current = read_ordinal_generation(path);
+    // Generation one predates the durable sidecar. Never allocate it again, so
+    // an upgraded cache cannot ABA-reuse a legacy ordinal after snapshot loss.
+    let next = if current == 0 {
+        2
+    } else {
+        current
+            .checked_add(1)
+            .ok_or_else(|| io::Error::other("ordinal generation counter exhausted"))?
+    };
+    write_ordinal_generation(path, next)?;
+    Ok(next)
+}
+
 impl RecoveryState {
     fn empty(config: &RecoveryConfig) -> Self {
         Self {
@@ -1399,8 +1468,20 @@ impl RecoveryStore {
             fs::create_dir_all(parent)?;
         }
         let _lock = PersistLock::acquire(recovery_lock_path(&path))?;
-        let existing =
-            load_state(&path, &self.config)?.unwrap_or_else(|| RecoveryState::empty(&self.config));
+        let existing = match load_state(&path, &self.config)? {
+            Some(existing) => {
+                ensure_ordinal_generation_floor(&path, existing.ordinal_generation)?;
+                existing
+            }
+            None => {
+                let generation = next_ordinal_generation(&path)?;
+                self.state.ordinal_generation = generation;
+                self.state.next_ordinal = initial_next_ordinal();
+                let mut empty = RecoveryState::empty(&self.config);
+                empty.ordinal_generation = generation;
+                empty
+            }
+        };
         let current = std::mem::replace(&mut self.state, RecoveryState::empty(&self.config));
         self.state = merge_states(existing, current, &self.session_refs, &self.config);
         let start = self.state.next_ordinal;
@@ -1672,6 +1753,16 @@ impl RecoveryStore {
         if let Some(reason) = self.note_legacy_expand(&lookup_ref) {
             return miss!(reason);
         }
+        let ordinal_bare = split_ref_fragment(&lookup_ref).0;
+        let requested_alias = self.state.aliases.contains_key(ordinal_bare);
+        if let Some((generation, _)) = parse_session_ordinal_bare(ordinal_bare) {
+            if generation != self.state.ordinal_generation {
+                return miss!("stale-ref");
+            }
+            if !self.state.aliases.contains_key(ordinal_bare) {
+                return miss!("dangling-ref");
+            }
+        }
         let resolved_ref = self.resolve_alias_chain(&lookup_ref).unwrap_or(lookup_ref);
         let portable_resolved = parse_zeroref_v1_blob(&resolved_ref, None).ok();
         let shared_content = match (&portable_resolved, &self.shared_cas) {
@@ -1725,6 +1816,9 @@ impl RecoveryStore {
                 parsed.kind,
             ) {
                 Ok(content) => content,
+                Err(reason) if requested_alias && reason.starts_with("ref-not-found") => {
+                    return miss!("dangling-ref");
+                }
                 Err(reason) => return miss!(reason),
             }
         };
@@ -2502,8 +2596,20 @@ impl RecoveryStore {
             self.journal_identity == DiskIdentity::capture(&journal_path(&path));
         let unchanged_since_last_write = snap_unchanged && journal_unchanged;
         if !unchanged_since_last_write {
-            let existing = load_state(&path, &self.config)?
-                .unwrap_or_else(|| RecoveryState::empty(&self.config));
+            let existing = match load_state(&path, &self.config)? {
+                Some(existing) => {
+                    ensure_ordinal_generation_floor(&path, existing.ordinal_generation)?;
+                    existing
+                }
+                None => {
+                    let generation = next_ordinal_generation(&path)?;
+                    self.state.ordinal_generation = generation;
+                    self.state.next_ordinal = initial_next_ordinal();
+                    let mut empty = RecoveryState::empty(&self.config);
+                    empty.ordinal_generation = generation;
+                    empty
+                }
+            };
             let current = std::mem::replace(&mut self.state, RecoveryState::empty(&self.config));
             self.state = merge_states(existing, current, &self.session_refs, &self.config);
         }

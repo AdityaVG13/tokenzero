@@ -262,17 +262,24 @@ impl LedgerWriter {
 
     /// Snapshot existing response accounting and append one record. Fail-open.
     pub(crate) fn record_response(&self, tool: &str, response: &ToolResponse) {
-        let Some(accounting) = response.accounting.as_ref() else {
-            return;
-        };
+        let accounting = response.accounting.as_ref();
         let telemetry = response.telemetry.as_ref();
+        let typed_expand_miss = telemetry
+            .and_then(|value| value.pointer("/expand/fail_count"))
+            .and_then(Value::as_u64)
+            .is_some_and(|count| count > 0);
+        if accounting.is_none() && !typed_expand_miss {
+            return;
+        }
         let get = |pointer: &str| {
             telemetry
                 .and_then(|value| value.pointer(pointer))
                 .and_then(Value::as_u64)
                 .unwrap_or(0)
         };
-        let visible_tokens = u64::try_from(accounting.visible_tokens).unwrap_or(u64::MAX);
+        let visible_tokens = accounting
+            .map(|accounting| u64::try_from(accounting.visible_tokens).unwrap_or(u64::MAX))
+            .unwrap_or(0);
         let Ok(mut cumulative) = self.cumulative_visible_tokens.lock() else {
             return;
         };
@@ -306,7 +313,9 @@ impl LedgerWriter {
             tool: tool.to_string(),
             token_mass: TokenMass {
                 visible_tokens,
-                raw_tokens: u64::try_from(accounting.raw_tokens).unwrap_or(u64::MAX),
+                raw_tokens: accounting
+                    .map(|accounting| u64::try_from(accounting.raw_tokens).unwrap_or(u64::MAX))
+                    .unwrap_or(0),
                 prevented_tokens: get("/dedup/visible_tokens_saved")
                     .saturating_add(get("/diff/visible_tokens_saved")),
                 saved_bytes: get("/session_delta/saved_bytes"),
@@ -1289,6 +1298,37 @@ mod ledger_tests {
         assert!(open_file.is_some());
         drop(mode);
         assert_eq!(read_records(&ledger_path).unwrap(), vec![test_record()]);
+    }
+
+    #[test]
+    fn typed_expand_miss_is_not_dropped_without_accounting() {
+        let directory = tempdir().unwrap();
+        let cache_path = directory.path().join("cache.json");
+        let ledger_path = ledger_path_for_cache(&cache_path);
+        let writer = test_writer(&cache_path);
+        let mut response = ToolResponse::error(
+            "expand",
+            "dangling_ref",
+            "dangling ref",
+            Some("re-run producer".to_owned()),
+        );
+        response.telemetry = Some(json!({
+            "expand": {
+                "fail_count": 1,
+                "dangling_ref_count": 1,
+                "miss_kind": "dangling_ref",
+            }
+        }));
+
+        writer.record_response("expand", &response);
+        writer.flush();
+
+        let records = read_records(&ledger_path).unwrap();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].token_mass.visible_tokens, 0);
+        assert_eq!(records[0].token_mass.raw_tokens, 0);
+        assert_eq!(records[0].recovery_costs.fail_count, 1);
+        assert_eq!(records[0].recovery_costs.dangling_ref_count, 1);
     }
 
     #[test]
