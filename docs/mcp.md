@@ -35,7 +35,7 @@ Clients should reuse one launched stdio process while the session is connected.
 
 ### Multi-project store isolation
 
-Recovery cache paths default **per allowed root** (see docs/core.md). A process
+Recovery cache paths default **per allowed root** (see codemode.md). A process
 env `ZEROSTACK_STORE_ROOT` does not collate unrelated projects unless
 `TOKENZERO_SHARED_STORE=1` or `ZEROSTACK_SHARED_STORE=1` is set. Prefer
 `--cache-path` / `TOKENZERO_CACHE_PATH` for explicit stores. Inspect
@@ -44,7 +44,7 @@ env `ZEROSTACK_STORE_ROOT` does not collate unrelated projects unless
 ### Portable binary discovery (wqw.3)
 
 Prefer `command: "tokenzero"` on PATH in MCP client configs (see
-`docs/mcp-tokenzero.portable.json`). Optional env overrides:
+`mcp.md`). Optional env overrides:
 `TOKENZERO_BIN`, `TOKENZERO_RG_PATH`, `TOKENZERO_CURL_PATH`. Discovery order:
 env → PATH → well-known layouts → clear error. Never hardcode personal
 `/Users/.../AI/*/target/release` paths. `tokenzero doctor --json` reports

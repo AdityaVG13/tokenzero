@@ -145,7 +145,7 @@ pub const RG_PATH_ENV: &str = "TOKENZERO_RG_PATH";
 pub const SESSION_DEDUP_ENV: &str = "TOKENZERO_MCP_DEDUP";
 pub const DIFF_READS_ENV: &str = "TOKENZERO_MCP_DIFF_READS";
 /// Diff-aware re-reads skip diffing when either side exceeds these bounds;
-/// oversized payloads get a full serve instead (docs/routing.md §5b).
+/// oversized payloads get a full serve instead (docs/codemode.md §5b).
 const DIFF_MAX_BYTES: usize = 2 * 1024 * 1024;
 const DIFF_MAX_LINES: usize = 50_000;
 
@@ -203,7 +203,7 @@ pub struct TokenZeroEngine {
     pub config: EngineConfig,
     /// Resolved rg binary, looked up once per engine instance.
     rg_binary: OnceLock<Option<PathBuf>>,
-    /// Session-lifetime seen-set for the redundancy layer (docs/routing.md
+    /// Session-lifetime seen-set for the redundancy layer (docs/codemode.md
     /// §5). Loaded from `session-memory.json` when dedup is enabled.
     // None until a tool actually needs the persisted working set. Session boot must not
     // deserialize session-memory.json on the compatible manifest+delta path.

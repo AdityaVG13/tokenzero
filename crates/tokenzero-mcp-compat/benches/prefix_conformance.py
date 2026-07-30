@@ -21,7 +21,7 @@ sys.path.insert(0, str(REPO / "benchmarks"))
 from bench_common import environment as _environment, sha256_bytes as sha256, write_json
 environment = lambda: _environment(REPO, BIN)
 BIN = REPO / "target/debug/tokenzero"
-EASY_START = REPO / "docs/easy-start.tokenzero.md"
+EASY_START = REPO / "docs/codemode.md"
 SESSION_DELTA = Path(__file__).with_name("session_delta") / "evidence.json"
 OUT = Path(__file__).with_suffix("") / "evidence.json"
 

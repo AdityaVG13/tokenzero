@@ -48,22 +48,14 @@ __pycache__/
 
 # Public docs allowlist
 /docs/*
+!/docs/benchmarks.md
+!/docs/codemode.md
 !/docs/command-coverage.md
-!/docs/core.md
 !/docs/development.md
 !/docs/install.md
 !/docs/mcp.md
 !/docs/pulse.md
-!/docs/benchmarks.md
-!/docs/pulse-recovery-runbook.md
-!/docs/pulse-sync-strategy.md
 !/docs/racc.md
-!/docs/routing.md
-!/docs/windows-systemwide.md
-!/docs/easy-start.tokenzero.md
-!/docs/mcp-tokenzero.portable.json
-!/docs/privacy-and-scoping.md
-!/docs/spec/
 
 # Local execution/handoff records
 /RECOVERY_RUNBOOK.md

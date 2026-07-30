@@ -99,7 +99,7 @@ TokenZero never requires host-absolute personal checkout paths
 1. Install a release binary on each machine (`tokenzero install --global` or
    put the release binary on `PATH`).
 2. Wire MCP with a portable config — use `command: "tokenzero"` (PATH), not a
-   personal absolute path. See `docs/mcp-tokenzero.portable.json`.
+   personal absolute path. See `mcp.md`.
 3. Inspect resolved paths: `tokenzero doctor --json` → `engine_binaries`.
 
 Optional overrides when PATH cannot be controlled (CI, restricted shells):
@@ -213,7 +213,7 @@ binaries on PATH — Claude Code, Codex, Cursor, Gemini, Factory droid,
 OpenCode, Grok, and manual-adapter harnesses like Windsurf, Aider, Zed, and
 Crush) and emits the exact `tokenzero install` invocation that wires the
 supported ones. Detection never writes; harnesses marked `supported: false`
-are adapted manually with the snippets in `docs/routing.md`.
+are adapted manually with the snippets in `docs/codemode.md`.
 
 `--hooks` merge-patches only the TokenZero-owned `PreToolUse` entry into
 `.claude/settings.json` (the entry whose command runs `tokenzero hook
@@ -345,3 +345,23 @@ linkpath overrides, path escapes, invalid UTF-8 or control characters in member
 names or link targets, private tool-state members, and nested archive members are
 blockers until the artifact is regenerated or the parser support is expanded
 deliberately.
+
+## ZeroRef store migration and rollback
+
+Portable ZeroRef v1 support is limited to full-hash blob refs, including '#B'
+and '#L' fragments. Inspect capabilities and effective roots, retain the
+migration manifest, and dry-run before applying:
+
+~~~bash
+tokenzero capabilities --json
+tokenzero cache migrate-refs --json
+tokenzero cache migrate-refs --apply --json
+tokenzero cache migrate-verify --json
+tokenzero cache migrate-rollback --json
+tokenzero cache migrate-rollback --apply --json
+~~~
+
+A shared store requires explicit opt-in. Project-local '.zerostack' takes
+precedence over a shared pin; '--cache-path' and 'TOKENZERO_CACHE_PATH' remain
+higher-priority cache overrides. Migration never broadens non-blob portability.
+Retain the original cache and manifest until verification passes.

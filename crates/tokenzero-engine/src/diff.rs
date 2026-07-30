@@ -1,5 +1,5 @@
 //! Unified-diff rendering for the session redundancy layer's diff-aware
-//! re-reads (docs/routing.md §5b). Hunk headers only — the caller supplies
+//! re-reads (docs/codemode.md §5b). Hunk headers only — the caller supplies
 //! the `# read <path> — changed since served this session` framing and the
 //! `full file: expand <ref>` tail, so no `---`/`+++` file header is emitted.
 

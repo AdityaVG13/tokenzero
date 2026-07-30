@@ -1,8 +1,17 @@
 //! Workspace root and cache-path resolution shared by CodeMode, MCP, and CLI.
 //!
-//! Multi-project isolation (wqw.2): process-global `ZEROSTACK_STORE_ROOT` does
-//! **not** pin every call root into one store by default. Shared/meta store
-//! requires `TOKENZERO_SHARED_STORE` / `ZEROSTACK_SHARED_STORE` opt-in.
+//! Frozen precedence invariants:
+//! - workspace root: explicit root, then TOKENZERO_ROOT, then process cwd;
+//! - cache path: explicit cache path, TOKENZERO_CACHE_PATH, project .zerostack,
+//!   then project .tokenzero;
+//! - store root: project .zerostack always wins over a shared environment pin;
+//! - ZEROSTACK_STORE_ROOT and ZERO_STACK_STORE_ROOT are ignored unless
+//!   TOKENZERO_SHARED_STORE or ZEROSTACK_SHARED_STORE explicitly opts in;
+//! - relative shared pins resolve against the workspace root, and equal project
+//!   basenames never share a store accidentally.
+//!
+//! The store_root_precedence integration tests pin every ordering and isolation
+//! case. Resolution intentionally does not require a selected path to exist.
 
 use std::env;
 use std::ffi::{OsStr, OsString};
@@ -73,7 +82,7 @@ fn first_env(names: &[&str]) -> Option<OsString> {
     names.iter().find_map(env::var_os)
 }
 
-/// Pure store-root selection (wqw.2). See crate docs / `docs/core.md`.
+/// Pure store-root selection; the frozen precedence is documented at module level.
 pub fn resolve_store_root_with_env(
     repo_root: &Path,
     store_root_pin: Option<&OsStr>,

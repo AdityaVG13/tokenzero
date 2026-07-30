@@ -161,7 +161,7 @@ pub struct DetectedAgent {
     pub agent: String,
     pub evidence: String,
     /// Whether `tokenzero install --agent <agent>` can wire it today;
-    /// unsupported harnesses are adapted manually per docs/routing.md.
+    /// unsupported harnesses are adapted manually per docs/install.md.
     pub supported: bool,
 }
 

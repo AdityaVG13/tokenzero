@@ -46,11 +46,11 @@ pub struct EngineConfig {
     /// Explicit rg binary path (`TOKENZERO_RG_PATH`); skips the PATH lookup.
     /// Tests set this field directly instead of mutating process-global env.
     pub rg_path_override: Option<PathBuf>,
-    /// Session redundancy layer master switch (seen-set dedup; docs/routing.md
+    /// Session redundancy layer master switch (seen-set dedup; docs/codemode.md
     /// §5a). Default comes from `TOKENZERO_MCP_DEDUP`, parsed once at
     /// construction; tests set this field instead of mutating env.
     pub session_dedup: bool,
-    /// Diff-aware re-reads (docs/routing.md §5b). Default comes from
+    /// Diff-aware re-reads (docs/codemode.md §5b). Default comes from
     /// `TOKENZERO_MCP_DIFF_READS`, parsed once at construction; only
     /// consulted while `session_dedup` is on.
     pub diff_reads: bool,

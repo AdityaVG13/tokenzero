@@ -69,9 +69,6 @@ ALLOWLIST_LINE_RES: dict[str, list[re.Pattern[str]]] = {
     "docs/install.md": [
         re.compile(r'/Users/you/AI/tokenzero/target/release/tokenzero'),
     ],
-    "docs/windows-systemwide.md": [
-        re.compile(r'C:\\Users\\you(?:\\|\b)'),
-    ],
 }
 
 

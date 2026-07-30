@@ -174,7 +174,7 @@ named_test!(public_claim_surfaces_do_not_say_cross_engine_pending, {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
     let surfaces = [
         "README.md",
-        "docs/core.md",
+        "docs/codemode.md",
         "docs/mcp.md",
         "crates/tokenzero-mcp-compat/src/catalog.rs",
     ];
@@ -196,17 +196,27 @@ named_test!(public_claim_surfaces_do_not_say_cross_engine_pending, {
             "{rel}: missing CAS posture"
         );
     }
-    let contract = fs::read_to_string(root.join("docs/zeroref-v1-contract.md")).unwrap();
-    for required in [
-        "The only portable ZeroRef v1 refs are blob refs",
-        "unsupported_portable_ref_kinds",
+    let install = fs::read_to_string(root.join("docs/install.md")).unwrap();
+    for command in [
         "tokenzero cache migrate-refs --apply --json",
         "tokenzero cache migrate-rollback --apply --json",
-        ".github/scripts/aggregate_zeroref_evidence.py",
-        "Correctness evidence does not authorize",
     ] {
-        assert!(contract.contains(required), "contract missing {required}");
+        assert!(install.contains(command), "install guide missing {command}");
     }
+    let codemode = fs::read_to_string(root.join("docs/codemode.md")).unwrap();
+    for invariant in [
+        "Only full-hash ZeroRef v1 blob refs are portable",
+        "unit refs are engine-local",
+        "Correctness evidence does not imply zero-copy",
+    ] {
+        assert!(
+            codemode.contains(invariant),
+            "CodeMode guide missing {invariant}"
+        );
+    }
+    let gate =
+        fs::read_to_string(root.join(".github/scripts/aggregate_zeroref_evidence.py")).unwrap();
+    assert!(gate.contains("Correctness evidence does not authorize"));
 });
 
 named_test!(lifecycle_smokes_required_cells_pass_when_present, {

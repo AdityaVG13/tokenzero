@@ -11,7 +11,7 @@ pub(crate) fn cache_pack_sources(root: &Path, scope: &str) -> Vec<PathBuf> {
         "GEMINI.md",
         "README.md",
         "Cargo.toml",
-        "docs/core.md",
+        "docs/codemode.md",
         "docs/mcp.md",
         "docs/command-coverage.md",
     ];

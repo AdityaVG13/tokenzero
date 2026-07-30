@@ -189,7 +189,7 @@ impl TokenZeroEngine {
             };
             let part_text = capsule.text;
             let part_tokens = capsule.visible_tokens;
-            // Session redundancy layer (docs/routing.md §5). Zero-payload
+            // Session redundancy layer (docs/codemode.md §5). Zero-payload
             // notes are cheap and stay untouched: empty payloads skip the
             // layer entirely (notes are never deduped).
             if self.config.session_dedup && !text.is_empty() {

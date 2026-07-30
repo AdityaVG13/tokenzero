@@ -166,7 +166,7 @@ impl TokenZeroEngine {
         let mut final_visible_tokens = capsule.visible_tokens;
         let mut summary = SessionSummary::default();
         let mut pending: Vec<(ServeKey, ServedRecord)> = Vec::new();
-        // Session redundancy layer (docs/routing.md §5a): identical flat
+        // Session redundancy layer (docs/codemode.md §5a): identical flat
         // output already served this session collapses to a note. Zero-hit
         // notes below stay untouched (empty output skips the layer; notes
         // are never deduped), and changed output gets a full serve — search

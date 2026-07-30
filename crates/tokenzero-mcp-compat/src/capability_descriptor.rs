@@ -54,6 +54,15 @@ pub struct ToolCapability {
 }
 
 /// ZeroRef v1 capability contract.
+///
+/// Portability is deliberately narrow: only full-hash blob refs, with optional
+/// byte or line fragments, cross engine boundaries under a compatible shared
+/// content-addressed store. The tz, fz, and gz schemes identify the same blob
+/// digest; they do not make execution, error, session, file, graph, index, or
+/// unit refs portable. Expand must verify the complete blob digest before
+/// applying a fragment and must fail typed on missing, incompatible, stale,
+/// dangling, or corrupt refs. Correctness evidence never authorizes zero-copy,
+/// latency, or performance claims.
 #[derive(Debug, Clone, Serialize)]
 pub struct ZeroRefCapabilities {
     pub version: String,

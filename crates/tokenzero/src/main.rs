@@ -1547,7 +1547,7 @@ fn handle_clients_scan(args: ClientStatusArgs) -> Result<()> {
         .map(|a| a.agent.as_str())
         .collect();
     let next_step = if supported.is_empty() {
-        "no supported harnesses detected; docs/routing.md covers manual adapters".to_string()
+        "no supported harnesses detected; docs/install.md covers manual adapters".to_string()
     } else {
         format!(
             "tokenzero install --global --apply --hooks{}",
@@ -1558,7 +1558,7 @@ fn handle_clients_scan(args: ClientStatusArgs) -> Result<()> {
         )
     };
     emit_value(
-        json!({"schema_version": "tokenzero.clients.v1", "command": "clients scan", "status": "ok", "home": path_display(&home), "detected": detected, "unsupported_note": "supported=false entries need the manual adapter snippets in docs/routing.md", "next_step": next_step}),
+        json!({"schema_version": "tokenzero.clients.v1", "command": "clients scan", "status": "ok", "home": path_display(&home), "detected": detected, "unsupported_note": "supported=false entries need the manual adapter snippets in docs/install.md", "next_step": next_step}),
         args.json,
     )
 }

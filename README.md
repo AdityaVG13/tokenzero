@@ -484,7 +484,7 @@ TokenZero store. Release publication of cross-engine **blob** expand under a ver
 ZeroStack CAS (and sibling-engine store fallback) is blocked until CI retains a
 green macOS/Linux/Windows ZeroRef v1 3×3 matrix. The checked-in fixture may be
 a host-only diagnostic snapshot and does not authorize release. Non-blob
-portable refs remain unsupported; see `docs/zeroref-v1-contract.md`.
+portable refs remain unsupported; see `docs/codemode.md`.
 
 The [ZeroStack hub](https://github.com/AdityaVG13/ZeroStack) ships the unified
 CodeMode server (one `zero_execute` tool spanning all three engines), an
@@ -494,18 +494,14 @@ agent-executable install runbook, and the combined benchmark suite.
 
 | Doc | Covers |
 | :-- | :-- |
-| [`docs/core.md`](docs/core.md) | Core command surfaces |
-| [`docs/racc.md`](docs/racc.md) | RACC contract and savings accounting |
-| [`docs/benchmarks.md`](docs/benchmarks.md) | Reproducible savings + microbenchmarks |
-| [`docs/mcp.md`](docs/mcp.md) | MCP server contract and protocol versions |
-| [`docs/install.md`](docs/install.md) | Install, plan, apply, rollback |
-| [`docs/pulse.md`](docs/pulse.md) | Telemetry ledger and savings measurement |
-| [`docs/pulse-sync-strategy.md`](docs/pulse-sync-strategy.md) | JSONL ↔ SQLite sync design |
-| [`docs/pulse-recovery-runbook.md`](docs/pulse-recovery-runbook.md) | Ledger recovery runbook |
-| [`docs/routing.md`](docs/routing.md) | Agent / client routing |
-| [`docs/command-coverage.md`](docs/command-coverage.md) | Command surface coverage |
-| [`docs/development.md`](docs/development.md) | Build from source, test, verify, workspace |
-| [`docs/windows-systemwide.md`](docs/windows-systemwide.md) | Windows systemwide migration runbook |
+| [docs/codemode.md](docs/codemode.md) | Plan execution, MCP comparison, background jobs, refs, and bounds |
+| [docs/mcp.md](docs/mcp.md) | Direct MCP compatibility contract and protocol versions |
+| [docs/install.md](docs/install.md) | Install, surface selection, migration, and rollback |
+| [docs/command-coverage.md](docs/command-coverage.md) | Command surface coverage |
+| [docs/pulse.md](docs/pulse.md) | Telemetry, sync strategy, and recovery runbook |
+| [docs/racc.md](docs/racc.md) | RACC contract and savings accounting |
+| [docs/benchmarks.md](docs/benchmarks.md) | Reproducible savings and microbenchmarks |
+| [docs/development.md](docs/development.md) | Build from source, targeted verification, and workspace layout |
 
 <h3 id="contributing"><img src=".github/assets/h-contributing.svg" alt="Contributing" width="100%"></h3>
 

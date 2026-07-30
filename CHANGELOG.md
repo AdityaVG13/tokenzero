@@ -100,7 +100,7 @@ Tracked tip on `main`: `68826cb` (post-`v1.4.0`). Includes permit/CodeMode batch
   `(tz|fz|gz)://blob/<sha256>[#fragment]` with full-hash identity, digest
   verification before fragment selection, and a stable error taxonomy
   (`malformed`, `missing`, `corruption`, `unsupported`, …). Spec and golden
-  vectors live under `docs/zeroref-v1-contract.md`.
+  vectors live under `docs/codemode.md`.
 - **Shared-CAS adapter**: canonical content-addressed storage for ZeroRef v1
   blobs, with reachability/pin schema v1 frozen so GC and multi-engine
   expand share one truth.
@@ -193,7 +193,7 @@ Tracked tip on `main`: `68826cb` (post-`v1.4.0`). Includes permit/CodeMode batch
 ### Security / privacy
 - User-scoped session memory and ref index with 0700/0600 permissions;
   cross-user isolation via home directory; documented threat model and
-  known gaps in `docs/privacy-and-scoping.md`.
+  known gaps in `docs/pulse.md`.
 - h2c-style orchestration env scrub on user-command spawns.
 
 ## [1.2.0] -- 2026-07-05

@@ -775,7 +775,7 @@ pub enum PendingSubstitution {
     },
 }
 
-/// Seen-set note for an identical re-read (docs/routing.md §5a). Both refs
+/// Seen-set note for an identical re-read (docs/codemode.md §5a). Both refs
 /// are the freshly minted ones for this serve, so the note alone recovers
 /// the exact bytes even if the client compacted the earlier payload away.
 /// Callers must only emit it after those refs persisted.
@@ -808,7 +808,7 @@ pub fn unchanged_search_note(
     )
 }
 
-/// Diff-aware re-read (docs/routing.md §5b): recover the previously served
+/// Diff-aware re-read (docs/codemode.md §5b): recover the previously served
 /// bytes through the existing recovery API, render a unified diff, and
 /// return it only when strictly cheaper than the full render. Any miss —
 /// pruned base, oversized side, tie or larger diff — returns `None` and the
