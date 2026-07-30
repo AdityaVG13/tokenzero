@@ -1,0 +1,116 @@
+Manage comments
+
+Usage: br comments [OPTIONS] [ID] [COMMAND]
+
+Commands:
+  add   
+  list  
+  help  Print this message or the help of the given subcommand(s)
+
+Arguments:
+  [ID]  Issue ID (for listing comments)
+
+Options:
+      --wrap                         Wrap long lines instead of truncating in text output
+      --db <DB>                      Database path (auto-discover .beads/*.db if not set)
+      --actor <ACTOR>                Actor name for audit trail
+      --json                         Output as JSON
+      --no-daemon                    Force direct mode (no daemon) - effectively no-op in br v1
+      --no-auto-flush                Skip auto JSONL export
+      --no-auto-import               Skip auto import check
+      --allow-stale                  Allow stale DB (bypass freshness check warning)
+      --lock-timeout <LOCK_TIMEOUT>  `SQLite` busy/write-lock timeout in ms
+      --no-db                        JSONL-only mode (no DB connection)
+  -v, --verbose...                   Increase logging verbosity (-v, -vv)
+  -q, --quiet                        Quiet mode (no output except errors)
+      --no-color                     Disable colored output
+  -h, --help                         Print help
+=== update ===
+Update an issue
+
+Usage: br update [OPTIONS] [IDS]...
+
+Arguments:
+  [IDS]...  Issue IDs to update
+
+Options:
+      --title <TITLE>
+          Update title
+  -d, --description <DESCRIPTION>
+          Update description [aliases: --body]
+      --design <DESIGN>
+          Update design notes
+      --acceptance-criteria <ACCEPTANCE_CRITERIA>
+          Update acceptance criteria [aliases: --acceptance]
+      --notes <NOTES>
+          Update additional notes
+  -s, --status <STATUS>
+          Change status. Terminal states (`closed`, `tombstone`) are refused — use the dedicated `br close` / `br delete` commands so close-policy and dependency-rewiring are enforced (beads_rust#301)
+  -p, --priority <PRIORITY>
+          Change priority (0-4 or P0-P4)
+  -t, --type <TYPE>
+          Change issue type
+      --assignee <ASSIGNEE>
+          Assign to user (empty string clears)
+      --owner <OWNER>
+          Set owner (empty string clears)
+      --claim
+          Atomic claim (assignee=actor + `status=in_progress`)
+      --force
+          Force update even if issue is blocked
+      --due <DUE>
+          Set due date (empty string clears)
+      --defer <DEFER>
+          Set defer until date (empty string clears)
+      --estimate <ESTIMATE>
+          Set time estimate
+      --add-label <ADD_LABEL>
+          Add label(s)
+      --remove-label <REMOVE_LABEL>
+          Remove label(s)
+      --set-labels <SET_LABELS>
+          Set label(s) (replaces all) - repeatable like bd [aliases: --labels]
+      --parent <PARENT>
+          Reparent to new parent (empty string removes parent)
+      --external-ref <EXTERNAL_REF>
+          Set external reference
+      --source-repo <SOURCE_REPO>
+          Override `source_repo` (display name; usually the repo's basename, e.g. `widget_engine`)
+      --source-repo-path <SOURCE_REPO_PATH>
+          Override `source_repo_path` (absolute path to the directory containing the `.beads` folder; populates the canonical filesystem location of the repo for cross-machine sync awareness — see #289)
+      --agent-context <AGENT_CONTEXT>
+          Set the `agent_context` governing-instructions JSON (beads_rust#297). Accepts inline JSON or a `@path` to a JSON or YAML file (extension determines parser; YAML is normalized to JSON before storage). Pass `--agent-context ""` (empty string) to clear the field back to NULL. Emitted on descendant `br show` / `br update --status in_progress` / `--claim` when `inherited_context.enabled` is set in `.beads/config.yaml`
+      --session <SESSION>
+          Set `closed_by_session` when closing
+      --agent-name <NAME>
+          Tier 1 attribution: agent name (env: BR_AGENT_NAME). Recorded only [env: BR_AGENT_NAME=]
+      --harness <HARNESS>
+          Tier 1 attribution: harness identifier (env: BR_HARNESS). Recorded only [env: BR_HARNESS=]
+      --model <MODEL>
+          Tier 1 attribution: model identifier (env: BR_MODEL). Recorded only [env: BR_MODEL=]
+      --db <DB>
+          Database path (auto-discover .beads/*.db if not set)
+      --actor <ACTOR>
+          Actor name for audit trail
+      --json
+          Output as JSON
+      --no-daemon
+          Force direct mode (no daemon) - effectively no-op in br v1
+      --no-auto-flush
+          Skip auto JSONL export
+      --no-auto-import
+          Skip auto import check
+      --allow-stale
+          Allow stale DB (bypass freshness check warning)
+      --lock-timeout <LOCK_TIMEOUT>
+          `SQLite` busy/write-lock timeout in ms
+      --no-db
+          JSONL-only mode (no DB connection)
+  -v, --verbose...
+          Increase logging verbosity (-v, -vv)
+  -q, --quiet
+          Quiet mode (no output except errors)
+      --no-color
+          Disable colored output
+  -h, --help
+          Print help

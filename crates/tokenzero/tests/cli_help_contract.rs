@@ -886,11 +886,7 @@ fn cli_run_json_child_exit_default_mirrors_child_failure() {
         .args(["run", "--json", "sh", "-c", "printf boom; exit 7"])
         .output()
         .unwrap();
-    assert_eq!(
-        default.status.code(),
-        Some(7),
-        "default mirrors child exit"
-    );
+    assert_eq!(default.status.code(), Some(7), "default mirrors child exit");
     let json: Value = serde_json::from_slice(&default.stdout).unwrap();
     assert_eq!(json["status"], "ok", "envelope content unchanged");
     assert_eq!(json["telemetry"]["command_success"], false);

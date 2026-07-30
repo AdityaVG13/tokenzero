@@ -50,8 +50,7 @@ pub use session_aliases::{
     SESSION_ALIAS_HEX_LEN, canonical_full_blob_ref, is_full_hash_blob_bare, is_session_alias_bare,
     is_session_ordinal_bare, parse_session_ordinal_bare, rewrite_full_hash_blob_refs_in_text,
     rewrite_full_hash_blob_refs_in_value, session_alias_hex_keyed, session_ordinal_ref,
-    session_visible_blob_alias, session_visible_blob_alias_keyed,
-    split_ref_fragment,
+    session_visible_blob_alias, session_visible_blob_alias_keyed, split_ref_fragment,
 };
 
 #[cfg(test)]

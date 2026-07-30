@@ -14,15 +14,25 @@ fn visible_alias_contains_neither_payload_nor_content_hash() {
     let hash = full.strip_prefix("tz://blob/").expect("blob ref");
 
     // The exact-ref visible form: text rewritten through the alias tier.
-    let transcript = store.apply_session_visible_aliases_in_text(&format!("see {full} for details"));
+    let transcript =
+        store.apply_session_visible_aliases_in_text(&format!("see {full} for details"));
 
-    assert!(!transcript.contains(payload), "transcript leaks payload: {transcript}");
-    assert!(!transcript.contains(hash), "transcript leaks content hash: {transcript}");
+    assert!(
+        !transcript.contains(payload),
+        "transcript leaks payload: {transcript}"
+    );
+    assert!(
+        !transcript.contains(hash),
+        "transcript leaks content hash: {transcript}"
+    );
     assert!(
         !transcript.contains(&hash[..16]),
         "transcript leaks content-hash prefix: {transcript}"
     );
-    assert!(transcript.contains("tz://s/"), "expected an alias: {transcript}");
+    assert!(
+        transcript.contains("tz://s/"),
+        "expected an alias: {transcript}"
+    );
 
     // Resolution stays internal: the alias expands back to the payload bytes.
     let alias = transcript
@@ -31,7 +41,11 @@ fn visible_alias_contains_neither_payload_nor_content_hash() {
         .expect("alias token")
         .to_string();
     let expanded = store.expand(&alias, None, None, None, None, None);
-    assert!(expanded.found, "alias must resolve internally: {}", expanded.reason);
+    assert!(
+        expanded.found,
+        "alias must resolve internally: {}",
+        expanded.reason
+    );
     assert_eq!(expanded.content, payload);
 }
 
@@ -49,7 +63,10 @@ fn alias_agrees_across_store_restart_and_stays_opaque() {
         (full, alias)
     };
     let hash = full.strip_prefix("tz://blob/").unwrap();
-    assert!(!alias.contains(&hash[..16]), "alias is content-derived: {alias}");
+    assert!(
+        !alias.contains(&hash[..16]),
+        "alias is content-derived: {alias}"
+    );
 
     // A fresh process on the same store root derives the SAME alias (shared
     // persisted key) and resolves it to the same bytes.
@@ -73,5 +90,8 @@ fn distinct_stores_mint_distinct_aliases_for_identical_payload() {
     assert_eq!(full_a, full_b, "CAS identity is internal and unchanged");
     let alias_a = a.register_session_visible_alias(&full_a);
     let alias_b = b.register_session_visible_alias(&full_b);
-    assert_ne!(alias_a, alias_b, "visible handles must not correlate across stores");
+    assert_ne!(
+        alias_a, alias_b,
+        "visible handles must not correlate across stores"
+    );
 }

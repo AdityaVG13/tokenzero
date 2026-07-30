@@ -62,7 +62,10 @@ pub fn session_visible_blob_alias_keyed(
 ) -> Option<String> {
     let (bare, frag) = split_ref_fragment(ref_id);
     let hash = full_hash_blob_parts(bare)?;
-    let short = format!("{SESSION_ALIAS_PREFIX}{}", session_alias_hex_keyed(key, hash));
+    let short = format!(
+        "{SESSION_ALIAS_PREFIX}{}",
+        session_alias_hex_keyed(key, hash)
+    );
     Some(match frag {
         Some(f) => format!("{short}#{f}"),
         None => short,
@@ -315,9 +318,21 @@ mod tests {
         // Golden vector (python hmac.new(bytes([7]*32), b"abab...", sha256)):
         // the alias is the keyed MAC prefix, not the content-hash prefix.
         assert_eq!(alias_a, "c31200b508a114fd");
-        assert_ne!(alias_a, hash[..SESSION_ALIAS_HEX_LEN], "alias must not be the content-hash prefix");
-        assert_eq!(alias_a, session_alias_hex_keyed(&key_a, &hash), "same key => same alias");
-        assert_eq!(session_alias_hex_keyed(&key_b, &hash), "c66bacbc69f7418b", "different key => different alias");
+        assert_ne!(
+            alias_a,
+            hash[..SESSION_ALIAS_HEX_LEN],
+            "alias must not be the content-hash prefix"
+        );
+        assert_eq!(
+            alias_a,
+            session_alias_hex_keyed(&key_a, &hash),
+            "same key => same alias"
+        );
+        assert_eq!(
+            session_alias_hex_keyed(&key_b, &hash),
+            "c66bacbc69f7418b",
+            "different key => different alias"
+        );
         let full = format!("tz://blob/{hash}");
         let short = session_visible_blob_alias_keyed(&key_a, &full).unwrap();
         assert_eq!(short, format!("tz://s/{alias_a}"));

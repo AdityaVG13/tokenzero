@@ -150,7 +150,9 @@ mod tests {
         // (The registry key constant itself is cfg(windows); use its value.)
         const KEY: &str = "HKCU\\Environment\\Path";
         assert!(!is_windows_user_path_entry(KEY));
-        assert!(!is_windows_user_path_write(&write_row("path", "prepend", KEY)));
+        assert!(!is_windows_user_path_write(&write_row(
+            "path", "prepend", KEY
+        )));
     }
 
     #[test]

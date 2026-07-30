@@ -7,7 +7,7 @@
 //!   visible budget. Counterexample before the fix: vis_low=33@budget=22
 //!   vs vis_high=23@budget=441.
 use proptest::prelude::*;
-use tokenzero_core::{count_tokens, make_capsule, Mode};
+use tokenzero_core::{Mode, count_tokens, make_capsule};
 
 fn text_strategy() -> impl Strategy<Value = String> {
     prop_oneof![
@@ -16,8 +16,11 @@ fn text_strategy() -> impl Strategy<Value = String> {
         prop::collection::vec("[a-z]{1,8}( [a-z]{1,8}){0,4}", 0..24usize)
             .prop_map(|ls| ls.join("\n")),
         "[ -~]{0,200}".prop_map(|s| s),
-        prop::collection::vec(0u8..32, 1..16usize)
-            .prop_map(|ns| ns.iter().map(u8::to_string).collect::<Vec<_>>().join(" ")),
+        prop::collection::vec(0u8..32, 1..16usize).prop_map(|ns| ns
+            .iter()
+            .map(u8::to_string)
+            .collect::<Vec<_>>()
+            .join(" ")),
     ]
 }
 
@@ -56,11 +59,18 @@ proptest! {
 
 #[test]
 fn regression_visible_33_raw_15_budget_1() {
-    let text = (1..=15).map(|i| i.to_string()).collect::<Vec<_>>().join(" ");
+    let text = (1..=15)
+        .map(|i| i.to_string())
+        .collect::<Vec<_>>()
+        .join(" ");
     let raw = count_tokens(&text);
     assert_eq!(raw, 15);
     let capsule = make_capsule(&text, Mode::Auto, 1, Some("probe"));
-    assert!(capsule.visible_tokens <= raw, "visible={} raw={raw}", capsule.visible_tokens);
+    assert!(
+        capsule.visible_tokens <= raw,
+        "visible={} raw={raw}",
+        capsule.visible_tokens
+    );
     let high = make_capsule(&text, Mode::Auto, 441, Some("probe"));
     assert!(high.visible_tokens >= capsule.visible_tokens);
 }
