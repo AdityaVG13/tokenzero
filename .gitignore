@@ -220,3 +220,7 @@ CLAUDE.md
 
 # Beads compliance audit dir (managed by /beads-compliance-and-completion-verification skill)
 /beads_compliance_audit/
+
+# cargo-fuzz scratch (regenerable; never commit)
+/fuzz/artifacts/
+/fuzz/corpus/

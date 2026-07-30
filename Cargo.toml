@@ -12,6 +12,7 @@ members = [
     "crates/tokenzero-install",
     "crates/tokenzero-pulse",
 ]
+exclude = ["fuzz"]
 
 [workspace.package]
 version = "1.4.0"

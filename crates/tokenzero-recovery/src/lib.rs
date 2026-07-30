@@ -299,7 +299,11 @@ pub(crate) fn parse_fragment_spec(fragment: &str) -> Result<FragmentSpec, Fragme
     if fragment.contains('#') {
         return Err(FragmentError::DuplicateFragment);
     }
-    let kind = fragment.as_bytes()[0] as char;
+    let kind_byte = fragment.as_bytes()[0];
+    if !kind_byte.is_ascii() {
+        return Err(FragmentError::UnknownKind);
+    }
+    let kind = kind_byte as char;
     // Shared-contract legacy byte alias `B<start>+<len>`: the strict zero-ref
     // grammar accepts it, so every expand surface must too (bytes only).
     if kind == 'B' {
