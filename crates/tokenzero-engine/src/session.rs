@@ -204,6 +204,8 @@ pub(crate) struct SessionSummary {
     pub delta_bytes: Option<usize>,
     pub from_hwm: u64,
     pub to_hwm: u64,
+    /// Spans masked by the expand secret gate (yevj); 0 = no masking.
+    pub secret_masked: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -238,18 +240,35 @@ impl SessionSummary {
         self.to_hwm = to_hwm;
     }
 
+    pub fn note_secret_masking(&mut self, masked_spans: usize) {
+        self.secret_masked += masked_spans;
+    }
+
+    pub fn secret_masked_count(&self) -> usize {
+        self.secret_masked
+    }
+
     pub fn telemetry(&self) -> Option<Value> {
         let strategy = match (self.dedup_notes > 0, self.diff_serves > 0) {
             (true, true) => "seen_set_dedup+diff_since_served",
             (true, false) => "seen_set_dedup",
             (false, true) => "diff_since_served",
             (false, false) if self.full_bytes.is_some() => "full",
+            (false, false) if self.secret_masked > 0 => "exact_masked",
             (false, false) => return None,
         };
         let mut value = json!({
             "output_strategy": strategy,
             "cache_hit": self.dedup_notes > 0 || self.diff_serves > 0
         });
+        if self.secret_masked > 0 {
+            // Loud receipt for the yevj secret gate: how many spans were
+            // masked and that stored bytes are untouched.
+            value["secret_masking"] = json!({
+                "masked_spans": self.secret_masked,
+                "stored_bytes_modified": false
+            });
+        }
         if let (Some(full_bytes), Some(delta_bytes)) = (self.full_bytes, self.delta_bytes) {
             value["session_delta"] = json!({
                 "from_hwm": self.from_hwm,

@@ -120,6 +120,51 @@ fn expand_repeated_serves_stay_byte_exact() {
 }
 
 #[test]
+fn expand_terminal_receipt_and_secret_gate() {
+    // yevj acceptance on the standalone MCP adapter surface: successful
+    // expands carry the ToolResponse recovery receipt (terminal +
+    // do-not-recompact); default expands mask unambiguous credentials while
+    // `raw: true` is the explicit authorization returning exact bytes.
+    let dir = tempdir().unwrap();
+    let file = dir.path().join("deploy.txt");
+    let secret = format!("ghp_{}", "a1B2".repeat(9));
+    let content = format!("deploy token = {secret}\ntrailer\n");
+    fs::write(&file, &content).unwrap();
+    let engine = TokenZeroEngine::new(EngineConfig::for_root(dir.path()));
+
+    let response = read_ok(&engine, &file);
+    let blob_ref = response
+        .refs
+        .iter()
+        .find(|record| record.kind == "blob")
+        .unwrap()
+        .ref_id
+        .clone();
+
+    let masked = engine.expand_with_params(tokenzero_engine::expand_params::ExpandParams {
+        ref_id: blob_ref.clone(),
+        ..Default::default()
+    });
+    assert_eq!(masked.status, "ok");
+    let body = &masked.visible.as_ref().unwrap().text;
+    assert!(body.contains("[tz-masked:github-pat]"), "{body}");
+    assert!(!body.contains(&secret), "secret leaked: {body}");
+    let receipt = masked.recovery.expect("terminal receipt on expand");
+    assert!(receipt.terminal && receipt.do_not_recompact);
+    assert!(!receipt.exact_bytes, "masked body is not byte-exact");
+
+    let exact = engine.expand_with_params(tokenzero_engine::expand_params::ExpandParams {
+        ref_id: blob_ref,
+        raw: true,
+        ..Default::default()
+    });
+    assert_eq!(exact.status, "ok");
+    assert_eq!(exact.visible.as_ref().unwrap().text, content);
+    let receipt = exact.recovery.expect("terminal receipt on raw expand");
+    assert!(receipt.terminal && receipt.do_not_recompact && receipt.exact_bytes);
+}
+
+#[test]
 fn expand_fresh_bypasses_seen_set() {
     let dir = tempdir().unwrap();
     let file = dir.path().join("sample.rs");

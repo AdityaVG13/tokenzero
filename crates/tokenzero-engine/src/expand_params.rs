@@ -12,9 +12,16 @@ pub struct ExpandParams {
     pub symbol: Option<String>,
     pub since: Option<String>,
     pub fresh: bool,
-    /// When true, return full body (byte-exact). When false (default) and no
-    /// window/selector is specified, return a capsule (preview + ref + estimates)
-    /// instead of the full payload (wqw.13).
+    /// When true, explicitly authorize byte-exact raw recovery. Contract
+    /// (yevj): raw expands return exact bytes up to the documented cap
+    /// (EXPAND_RAW_MAX_BYTES, default 256 KiB, env override
+    /// TOKENZERO_EXPAND_RAW_MAX_BYTES) and fail typed
+    /// (`expand_raw_cap_exceeded`) beyond it — never a silent no-op or
+    /// silent truncation. raw also bypasses the secret gate: without it,
+    /// unambiguous credential shapes are masked in the visible body (stored
+    /// bytes are never modified). When false (default) the expand still
+    /// returns the recovered body (exact unless masked), per the capability
+    /// doctrine; byte/line fragments narrow to the requested range.
     pub raw: bool,
 }
 

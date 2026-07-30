@@ -287,6 +287,10 @@ fn main() -> Result<()> {
         tokenzero_mcp_compat::run_fastmcp_stdio(engine_config_for_mcp(&args)?)
     }
     CodeMode(args) => {
+        // clc3: install the real JS executor into the engine hook; without
+        // this the shipped codemode artifact served only the stub error.
+        #[cfg(feature = "surface-codemode")]
+        tokenzero_codemode::install_mcp_bridge();
         let plan = match args.plan_text() {
             Ok(plan) => plan,
             Err(err) => {
@@ -1034,6 +1038,11 @@ fn handle_expand(args: ExpandArgs) -> Result<EmitResponse> {
     );
     let (selector, start, end) = expand_selector(&args);
     let mut payload = json!({ "ref": ref_id });
+    // yevj: --raw is the explicit raw-recovery authorization (cap-gated,
+    // secret-gate bypass), not just the legacy "raw" selector shape.
+    if args.raw {
+        payload["raw"] = json!(true);
+    }
     if let Some(sel) = selector {
         payload["selector"] = json!(sel);
     }

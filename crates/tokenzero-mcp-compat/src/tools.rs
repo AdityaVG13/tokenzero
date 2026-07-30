@@ -943,6 +943,16 @@ pub(crate) fn mcp_tool_response(response: ToolResponse) -> Value {
         "content": [{"type": "text", "text": text}],
         "resultType": "complete"
     });
+    // yevj: the recovery receipt rides the wire unconditionally (three bools,
+    // no envelope-mode gate) so adapters can honor do-not-recompact without
+    // parsing text. The text block stays byte-exact.
+    if let Some(recovery) = &response.recovery {
+        result["recovery"] = json!({
+            "terminal": recovery.terminal,
+            "do_not_recompact": recovery.do_not_recompact,
+            "exact_bytes": recovery.exact_bytes,
+        });
+    }
     if let Some(structured) = response
         .telemetry
         .as_ref()

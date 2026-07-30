@@ -239,6 +239,24 @@ pub struct ToolResponse {
     /// in (TOKENZERO_CHANNEL_SEPARATION). Absent means byte-identical default.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub channels: Option<ChannelSeparation>,
+    /// Recovery receipt marking terminal (do-not-recompact) exact-byte
+    /// recovery. Present only on expand-family responses that return stored
+    /// bytes verbatim; adapters must not re-compact or re-summarize the
+    /// visible body of a response carrying this receipt.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recovery: Option<RecoveryReceipt>,
+}
+
+/// Terminal-recovery marker for adapter compaction pipelines (yevj).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RecoveryReceipt {
+    /// True when this response IS the recovered content: re-running it
+    /// through compaction would destroy the bytes the agent paid to recover.
+    pub terminal: bool,
+    /// Adapter contract: never re-compact the visible body.
+    pub do_not_recompact: bool,
+    /// True when the visible body is byte-exact recovered content.
+    pub exact_bytes: bool,
 }
 
 /// Machine-action channel separated from user-facing prose (hub vz89.11).

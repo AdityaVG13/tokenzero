@@ -3016,6 +3016,15 @@ fn tool_response_to_value(resp: &ToolResponse) -> Value {
         obj["visible_tokens"] = json!(acc.visible_tokens);
         obj["raw_tokens"] = json!(acc.raw_tokens);
     }
+    // yevj: surface the ToolResponse recovery receipt so plans can branch on
+    // the terminal/do-not-recompact contract instead of guessing from size.
+    if let Some(recovery) = &resp.recovery {
+        obj["recovery"] = json!({
+            "terminal": recovery.terminal,
+            "do_not_recompact": recovery.do_not_recompact,
+            "exact_bytes": recovery.exact_bytes,
+        });
+    }
     if let Some(err) = &resp.error {
         obj["error"] = json!(err.message);
     }
@@ -3670,8 +3679,15 @@ fn exec_expand(engine: &TokenZeroEngine, args: &[Value]) -> OpResult {
     }
     let bounded = resp.error.is_none()
         && bound_default_expand_response(&params, &mut resp, engine.config.max_visible_tokens);
+    // yevj: the typed receipt is the do-not-recompact source of truth;
+    // legacy responses without one keep the prior terminal default.
+    let terminal = resp
+        .recovery
+        .as_ref()
+        .map(|receipt| receipt.do_not_recompact)
+        .unwrap_or(true);
     let outcome = OpOutcome::from_tool_response(&resp);
-    if resp.error.is_none() && !bounded {
+    if resp.error.is_none() && !bounded && terminal {
         Ok(outcome.mark_exact_expand())
     } else {
         Ok(outcome)
@@ -3716,8 +3732,13 @@ fn exec_expand_many(engine: &TokenZeroEngine, args: &[Value]) -> OpResult {
         prevented = prevented.saturating_add(estimate_prevented_read_bytes(&resp));
         let bounded = resp.error.is_none()
             && bound_default_expand_response(&params, &mut resp, engine.config.max_visible_tokens);
+        let terminal = resp
+            .recovery
+            .as_ref()
+            .map(|receipt| receipt.do_not_recompact)
+            .unwrap_or(true);
         let outcome = OpOutcome::from_tool_response(&resp);
-        results.push(if bounded {
+        results.push(if bounded || !terminal {
             outcome.into_value()
         } else {
             outcome.mark_exact_expand().into_value()

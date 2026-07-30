@@ -631,3 +631,290 @@ fn real_mutation_and_exact_expand_bytes() {
         );
     }
 }
+
+// --- yevj: expand terminal/raw conformance matrix (CLI, MCP stdio, CodeMode) ---
+
+const YEVJ_SECRET: &str = "ghp_a1B2a1B2a1B2a1B2a1B2a1B2a1B2a1B2a1B2";
+
+fn yevj_seed(root: &Path) -> PathBuf {
+    let path = root.join("yevj-secret.txt");
+    fs::write(
+        &path,
+        format!("deploy token = {YEVJ_SECRET}\ntrailer line\n"),
+    )
+    .unwrap();
+    path
+}
+
+fn cli_expand_json(root: &Path, ref_id: &str, raw: bool, cap_env: Option<usize>) -> Value {
+    let mut cmd = Command::new(bin("tokenzero"));
+    cmd.args(["expand", ref_id, "--json", "--cache-path"])
+        .arg(root.join("cli-cache.json"))
+        .current_dir(root);
+    if raw {
+        cmd.arg("--raw");
+    }
+    if let Some(cap) = cap_env {
+        cmd.env("TOKENZERO_EXPAND_RAW_MAX_BYTES", cap.to_string());
+    }
+    let out = cmd.output().expect("cli expand");
+    serde_json::from_str(String::from_utf8_lossy(&out.stdout).trim())
+        .unwrap_or_else(|_| panic!("cli expand must emit JSON: {out:?}"))
+}
+
+/// Read + expand inside ONE stdio session: the session-visible alias
+/// (tz://o/...) minted by read is session-scoped, so the expand must happen
+/// in the same process. Returns the expand response envelope.
+fn mcp_read_then_expand(root: &Path, path: &Path, raw: bool, fragment: &str) -> Value {
+    let mut child = Command::new(bin("tokenzero"))
+        .args([
+            "mcp-server",
+            "--allowed-root",
+            root.to_str().unwrap(),
+            "--cache-path",
+            root.join("mcp-cache.json").to_str().unwrap(),
+        ])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("mcp-server");
+    let mut stdin = child.stdin.take().unwrap();
+    let mut reader = BufReader::new(child.stdout.take().unwrap());
+    let mut line = String::new();
+    writeln!(
+        stdin,
+        "{}",
+        json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{
+            "protocolVersion":"2024-11-05","capabilities":{},
+            "clientInfo":{"name":"yevj-matrix","version":"1"}
+        }})
+    )
+    .unwrap();
+    stdin.flush().unwrap();
+    reader.read_line(&mut line).unwrap();
+    writeln!(
+        stdin,
+        "{}",
+        json!({"jsonrpc":"2.0","method":"notifications/initialized"})
+    )
+    .unwrap();
+    stdin.flush().unwrap();
+    let mut exchange = |req: Value| -> Value {
+        writeln!(stdin, "{req}").unwrap();
+        stdin.flush().unwrap();
+        line.clear();
+        reader.read_line(&mut line).unwrap();
+        serde_json::from_str(line.trim()).unwrap_or(json!({}))
+    };
+    let read = exchange(
+        json!({"jsonrpc":"2.0","id":2,"method":"tools/call","params":{
+            "name":"read","arguments":{"path": path.display().to_string()}
+        }}),
+    );
+    let texts: Vec<&str> = read["result"]["content"]
+        .as_array()
+        .map(|a| a.iter().filter_map(|c| c["text"].as_str()).collect())
+        .unwrap_or_default();
+    let joined = texts.join("\n");
+    let alias = collect_tz_refs(&joined)
+        .into_iter()
+        .next()
+        .unwrap_or_else(|| panic!("mcp read must mint a tz:// ref: {read}"));
+    let resp = exchange(
+        json!({"jsonrpc":"2.0","id":3,"method":"tools/call","params":{
+            "name":"expand","arguments":{"ref": format!("{alias}{fragment}"), "raw": raw}
+        }}),
+    );
+    let _ = child.kill();
+    resp
+}
+
+/// Read + expand inside ONE codemode plan: session-visible aliases are
+/// session-scoped, so mint and expand must share the process. The JS binding
+/// unwraps terminal expands to the bare body string (string contract), so
+/// assert on the body itself; the typed receipt is asserted at the adapter
+/// layer (mcp-compat in-process) and on the dispatch value (codemode exec).
+fn codemode_read_then_expand(root: &Path, path: &Path, raw: bool) -> Value {
+    let plan = format!(
+        r#"const f = await zero.read({path});
+const refId = f.ref || (f.refs && f.refs[0]);
+const r = await zero.token.expand(refId, {{raw: {raw}}});
+const body = String(r);
+return {{ masked: body.includes('[tz-masked:github-pat]'), exact: body.includes({secret}) }};"#,
+        path = serde_json::to_string(&path.display().to_string()).unwrap(),
+        raw = raw,
+        secret = serde_json::to_string(YEVJ_SECRET).unwrap()
+    );
+    let out = Command::new(codemode_cli())
+        .args([
+            "codemode",
+            "--json",
+            "--root",
+            root.to_str().unwrap(),
+            "--cache-path",
+            root.join("cm-yevj-cache.json").to_str().unwrap(),
+            "--plan",
+            &plan,
+        ])
+        .output()
+        .expect("codemode");
+    serde_json::from_str(String::from_utf8_lossy(&out.stdout).trim())
+        .unwrap_or_else(|_| panic!("codemode must emit JSON: {out:?}"))
+}
+
+fn mint_blob_cli(root: &Path, path: &Path) -> String {
+    let read = cli_read(root, path);
+    assert!(read.ok, "seed read must succeed: {read:?}");
+    read.refs
+        .iter()
+        .find(|r| r.starts_with("tz://blob/"))
+        .cloned()
+        .expect("read must mint a tz://blob/ ref")
+}
+
+/// FastMCP dual-content: content[0] is the body verbatim, content[1] is the
+/// metadata JSON (resultType + recovery receipt).
+fn mcp_meta_recovery(resp: &Value) -> Value {
+    resp["result"]["content"]
+        .as_array()
+        .and_then(|items| {
+            items
+                .iter()
+                .filter_map(|c| c["text"].as_str())
+                .find_map(|t| {
+                    serde_json::from_str::<Value>(t)
+                        .ok()
+                        .and_then(|v| v.get("recovery").cloned())
+                })
+        })
+        .unwrap_or(Value::Null)
+}
+
+fn assert_receipt(receipt: &Value, surface: &str, exact_bytes: bool) {
+    assert_eq!(
+        receipt["terminal"].as_bool(),
+        Some(true),
+        "{surface}: recovery.terminal must be true: {receipt}"
+    );
+    assert_eq!(
+        receipt["do_not_recompact"].as_bool(),
+        Some(true),
+        "{surface}: recovery.do_not_recompact must be true: {receipt}"
+    );
+    assert_eq!(
+        receipt["exact_bytes"].as_bool(),
+        Some(exact_bytes),
+        "{surface}: recovery.exact_bytes mismatch: {receipt}"
+    );
+}
+
+#[test]
+fn expand_terminal_raw_secret_contract_matrix() {
+    ensure_bins();
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    let path = yevj_seed(root);
+
+    // --- CLI leg ---
+    let blob = mint_blob_cli(root, &path);
+    let masked = cli_expand_json(root, &blob, false, None);
+    assert_eq!(masked["status"].as_str(), Some("ok"), "{masked}");
+    let body = masked["visible"]["text"].as_str().unwrap_or("");
+    assert!(
+        body.contains("[tz-masked:github-pat]"),
+        "CLI default expand must mask the credential: {body}"
+    );
+    assert!(
+        !body.contains(YEVJ_SECRET),
+        "CLI masked body leaked: {body}"
+    );
+    assert_receipt(&masked["recovery"], "CLI", false);
+
+    let exact = cli_expand_json(root, &blob, true, None);
+    assert_eq!(exact["status"].as_str(), Some("ok"), "{exact}");
+    let body = exact["visible"]["text"].as_str().unwrap_or("");
+    assert!(
+        body.contains(YEVJ_SECRET),
+        "CLI --raw is explicit authorization and returns exact bytes: {body}"
+    );
+    assert_receipt(&exact["recovery"], "CLI raw", true);
+
+    // Reversed byte fragment fails typed once (never a silent no-op).
+    let bad = cli_expand_json(root, &format!("{blob}#B50-B10"), false, None);
+    assert_eq!(bad["status"].as_str(), Some("error"), "{bad}");
+    assert_eq!(
+        bad["error"]["code"].as_str(),
+        Some("fragment_reversed"),
+        "{bad}"
+    );
+
+    // Raw cap: over the documented cap the raw expand fails typed with a
+    // fragment repair hint.
+    let capped = cli_expand_json(root, &blob, true, Some(16));
+    assert_eq!(capped["status"].as_str(), Some("error"), "{capped}");
+    assert_eq!(
+        capped["error"]["code"].as_str(),
+        Some("expand_raw_cap_exceeded"),
+        "{capped}"
+    );
+
+    // --- MCP stdio leg ---
+    let resp = mcp_read_then_expand(root, &path, false, "");
+    assert!(
+        resp["result"]["isError"].as_bool() != Some(true),
+        "mcp expand failed: {resp}"
+    );
+    let texts: Vec<&str> = resp["result"]["content"]
+        .as_array()
+        .map(|a| a.iter().filter_map(|c| c["text"].as_str()).collect())
+        .unwrap_or_default();
+    let joined = texts.join("\n");
+    assert!(
+        joined.contains("[tz-masked:github-pat]"),
+        "MCP default expand must mask: {resp}"
+    );
+    assert!(
+        !joined.contains(YEVJ_SECRET),
+        "MCP masked body leaked: {joined}"
+    );
+    assert_receipt(&mcp_meta_recovery(&resp), "MCP", false);
+
+    let resp = mcp_read_then_expand(root, &path, true, "");
+    let texts: Vec<&str> = resp["result"]["content"]
+        .as_array()
+        .map(|a| a.iter().filter_map(|c| c["text"].as_str()).collect())
+        .unwrap_or_default();
+    assert!(
+        texts.join("\n").contains(YEVJ_SECRET),
+        "MCP raw expand must return exact bytes: {resp}"
+    );
+    assert_receipt(&mcp_meta_recovery(&resp), "MCP raw", true);
+
+    let resp = mcp_read_then_expand(root, &path, false, "#B50-B10");
+    assert_eq!(
+        resp["result"]["isError"].as_bool(),
+        Some(true),
+        "MCP invalid fragment must be isError: {resp}"
+    );
+
+    // --- CodeMode (Pi) leg ---
+    let v = codemode_read_then_expand(root, &path, false);
+    assert_eq!(
+        v["value"]["masked"].as_bool(),
+        Some(true),
+        "CodeMode default expand must mask: {v}"
+    );
+    assert_eq!(
+        v["value"]["exact"].as_bool(),
+        Some(false),
+        "CodeMode masked body leaked: {v}"
+    );
+
+    let v = codemode_read_then_expand(root, &path, true);
+    assert_eq!(
+        v["value"]["exact"].as_bool(),
+        Some(true),
+        "CodeMode raw expand must return exact bytes: {v}"
+    );
+}

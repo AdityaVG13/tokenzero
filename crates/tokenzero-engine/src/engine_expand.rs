@@ -2,6 +2,125 @@ use super::expand_params::ExpandParams;
 use super::*;
 use tokenzero_recovery::is_expandable_ref;
 
+/// Documented cap for `raw: true` expands (yevj): exact bytes are returned up
+/// to this many bytes; beyond it the expand fails typed with a fragment
+/// repair hint. Env-overridable for harnesses with larger budgets.
+pub const EXPAND_RAW_MAX_BYTES: usize = 256 * 1024;
+pub const EXPAND_RAW_MAX_BYTES_ENV: &str = "TOKENZERO_EXPAND_RAW_MAX_BYTES";
+
+fn expand_raw_max_bytes() -> usize {
+    expand_raw_max_bytes_from(std::env::var(EXPAND_RAW_MAX_BYTES_ENV).ok().as_deref())
+}
+
+fn expand_raw_max_bytes_from(raw: Option<&str>) -> usize {
+    raw.and_then(|raw| raw.parse().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(EXPAND_RAW_MAX_BYTES)
+}
+
+/// High-precision secret patterns masked on expands where raw recovery was
+/// NOT explicitly authorized (`raw` absent/false). Deliberately narrow:
+/// every pattern here is an unambiguous credential shape. The stored bytes
+/// are never modified; only the visible body is masked.
+const SECRET_PREFIXES: &[(&str, &str)] = &[
+    ("AKIA", "aws-access-key"),                 // AKIA + 16 uppercase/digits
+    ("ASIA", "aws-session-key"),                // ASIA + 16 uppercase/digits
+    ("ghp_", "github-pat"),                     // ghp_ + 36
+    ("gho_", "github-oauth"),                   // gho_ + 36
+    ("ghs_", "github-server"),                  // ghs_ + 36
+    ("ghr_", "github-refresh"),                 // ghr_ + 36
+    ("github_pat_", "github-fine-grained-pat"), // github_pat_ + 22+
+    ("xoxb-", "slack-bot"),
+    ("xoxp-", "slack-user"),
+    ("xoxa-", "slack-app"),
+    ("xoxr-", "slack-refresh"),
+    ("xoxs-", "slack-session"),
+    ("sk-", "api-key-sk"), // sk- + 20+ token chars
+];
+
+const PRIVATE_KEY_BEGIN: &str = "-----BEGIN";
+const PRIVATE_KEY_MARKER: &str = "PRIVATE KEY-----";
+
+fn is_token_char(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_')
+}
+
+/// Mask unambiguous credential shapes in `text`, returning the masked text
+/// and the number of masked spans. Conservative by design: false positives
+/// cost exactness, false negatives leak, so only credential shapes with no
+/// legitimate prose reading are matched.
+pub(crate) fn mask_expansion_secrets(text: &str) -> (String, usize) {
+    let bytes = text.as_bytes();
+    let mut out = String::with_capacity(text.len());
+    let mut masked = 0usize;
+    let mut cursor = 0usize;
+    while cursor < bytes.len() {
+        // PEM private key block: mask from BEGIN line through the END line.
+        let first_line_end = text[cursor..].find('\n').unwrap_or(text.len() - cursor);
+        if text[cursor..].starts_with(PRIVATE_KEY_BEGIN)
+            && text[cursor..cursor + first_line_end].contains(PRIVATE_KEY_MARKER)
+        {
+            let after_begin = &text[cursor..];
+            if let Some(end_rel) = after_begin.find("-----END") {
+                let end_line_rel = after_begin[end_rel..]
+                    .find('\n')
+                    .map(|i| end_rel + i + 1)
+                    .unwrap_or(after_begin.len());
+                out.push_str("[tz-masked:private-key-block]");
+                if end_line_rel < after_begin.len() {
+                    out.push('\n');
+                }
+                cursor += end_line_rel;
+                masked += 1;
+                continue;
+            }
+        }
+        let mut matched = false;
+        for (prefix, kind) in SECRET_PREFIXES {
+            if !text[cursor..].starts_with(prefix) {
+                continue;
+            }
+            let run_start = cursor + prefix.len();
+            let mut run_end = run_start;
+            while run_end < bytes.len() && is_token_char(bytes[run_end]) {
+                run_end += 1;
+            }
+            let run_len = run_end - run_start;
+            let min_run = match *prefix {
+                "AKIA" | "ASIA" => 16,
+                "sk-" => 20,
+                "github_pat_" => 22,
+                _ => 10,
+            };
+            // AWS key ids are uppercase+digits only; enforce that shape.
+            if (*prefix == "AKIA" || *prefix == "ASIA")
+                && !bytes[run_start..run_end]
+                    .iter()
+                    .all(|b| b.is_ascii_uppercase() || b.is_ascii_digit())
+            {
+                continue;
+            }
+            if run_len >= min_run {
+                out.push_str(&format!("[tz-masked:{kind}]"));
+                cursor = run_end;
+                masked += 1;
+                matched = true;
+                break;
+            }
+        }
+        if matched {
+            continue;
+        }
+        // Copy one full character (never split a multibyte char).
+        let next = (cursor + 1..=text.len())
+            .find(|&index| text.is_char_boundary(index))
+            .unwrap_or(text.len());
+        out.push_str(&text[cursor..next]);
+        cursor = next;
+    }
+    (out, masked)
+}
+
 fn norm_opt(value: &Option<String>) -> String {
     value.clone().unwrap_or_default()
 }
@@ -271,6 +390,13 @@ impl TokenZeroEngine {
                     Some(count_tokens(&params.ref_id)),
                 ),
             );
+            // since= diffs are terminal recovery output too: adapters must
+            // not re-compact the diff body.
+            response.recovery = Some(tokenzero_core::RecoveryReceipt {
+                terminal: true,
+                do_not_recompact: true,
+                exact_bytes: false, // diff render, not verbatim bytes
+            });
             response.telemetry = summary.telemetry();
             self.session_apply(pending, &summary);
             return response;
@@ -282,6 +408,27 @@ impl TokenZeroEngine {
         };
         self.rehydrate_working_set_expand(&mut store, &params);
 
+        // yevj: `raw: true` is the explicitly-authorized exact-bytes request
+        // and is bounded by its documented cap; beyond the cap the expand
+        // fails typed once with a fragment repair hint (never a silent
+        // truncation).
+        if params.raw && target.content.len() > expand_raw_max_bytes() {
+            return failure_response(
+                "expand",
+                "expand_raw_cap_exceeded",
+                format!(
+                    "raw expand of {} is {} bytes, over the {}-byte raw cap",
+                    params.ref_id,
+                    target.content.len(),
+                    expand_raw_max_bytes()
+                ),
+                Some(
+                    "request a bounded window instead: append a byte fragment (#B<start>-<end>) \
+                     or line window (#L<a>-L<b>) to the ref, or raise TOKENZERO_EXPAND_RAW_MAX_BYTES",
+                ),
+            );
+        }
+
         // Explicit expand is the recovery contract: it ALWAYS returns exact
         // bytes. Replacing content with an "identical to … (unchanged)" ack
         // here broke byte-exact recovery (release-claim audits) and forced a
@@ -290,11 +437,48 @@ impl TokenZeroEngine {
         // Seen-set economics stay on the implicit serve paths (read/find
         // spills) and on explicit `since=` diffs; serves are still RECORDED
         // below so those paths keep learning from expands.
+        //
+        // yevj secret gate: when raw recovery was NOT explicitly authorized
+        // (raw absent/false), unambiguous credential shapes are masked in the
+        // visible body; the stored bytes are never modified. `raw: true` is
+        // the explicit authorization and returns exact bytes.
+        let target = if params.raw {
+            target
+        } else {
+            let (masked_text, masked_count) = mask_expansion_secrets(&target.content);
+            if masked_count == 0 {
+                target
+            } else {
+                let mut masked_target = target;
+                masked_target.content = masked_text;
+                summary.note_secret_masking(masked_count);
+                masked_target
+            }
+        };
 
         if self.config.session_dedup {
             pending.push(self.pending_expand_record(key, &params, &target.content, &mut store));
         }
-        let response = expansion_response(target, store.recovery_tokens);
+        let mut response = expansion_response(target, store.recovery_tokens);
+        if response.error.is_none() {
+            response.recovery = Some(tokenzero_core::RecoveryReceipt {
+                terminal: true,
+                do_not_recompact: true,
+                exact_bytes: params.raw || summary.secret_masked_count() == 0,
+            });
+        }
+        // Merge (not replace): windowed expands already carry window metadata
+        // in telemetry, and masking notes must survive alongside it.
+        if let Some(extra) = summary.telemetry() {
+            let telemetry = response
+                .telemetry
+                .get_or_insert_with(|| serde_json::json!({}));
+            if let (Some(map), Some(extra_map)) = (telemetry.as_object_mut(), extra.as_object()) {
+                for (key, value) in extra_map {
+                    map.insert(key.clone(), value.clone());
+                }
+            }
+        }
         self.session_apply(pending, &summary);
         response
     }
@@ -489,5 +673,117 @@ mod tests {
         let response = engine.expand(&alias, Some("raw"), None, None, None, None);
         assert!(response.error.is_none(), "{:?}", response.error);
         assert_eq!(response.visible.as_ref().unwrap().text, text);
+    }
+
+    fn engine_with_store(dir: &tempfile::TempDir) -> (TokenZeroEngine, RecoveryStore) {
+        let cache = dir.path().join("recovery-cache.json");
+        let mut config = EngineConfig::for_root(dir.path());
+        config.cache_path = cache.clone();
+        config.session_dedup = false;
+        let store = RecoveryStore::new(Some(cache));
+        (TokenZeroEngine::new(config), store)
+    }
+
+    fn store_blob(store: &mut RecoveryStore, text: &str) -> String {
+        store
+            .store_payload(text, ContentType::Unknown, None, None, None)
+            .unwrap()
+            .blob_ref
+    }
+
+    fn expand_raw(engine: &TokenZeroEngine, ref_id: &str, raw: bool) -> ToolResponse {
+        engine.expand_with_params(ExpandParams {
+            ref_id: ref_id.to_string(),
+            selector: None,
+            start_line: None,
+            end_line: None,
+            anchor_kind: None,
+            symbol: None,
+            since: None,
+            fresh: false,
+            raw,
+        })
+    }
+
+    #[test]
+    fn raw_expand_over_cap_fails_typed_with_fragment_repair_hint() {
+        let dir = tempfile::tempdir().unwrap();
+        let (engine, mut store) = engine_with_store(&dir);
+        let payload = "x".repeat(EXPAND_RAW_MAX_BYTES + 64);
+        let blob = store_blob(&mut store, &payload);
+        let response = expand_raw(&engine, &blob, true);
+        let error = response.error.expect("over-cap raw expand must fail typed");
+        assert_eq!(error.code, "expand_raw_cap_exceeded");
+        assert!(
+            error.repair.as_deref().unwrap_or_default().contains("#B"),
+            "repair hint must point at byte fragments: {:?}",
+            error.repair
+        );
+        // The cap gates explicit raw recovery only; a normal expand still
+        // returns the body (masked-gate aside, plain payload here).
+        let response = expand_raw(&engine, &blob, false);
+        assert!(response.error.is_none(), "{:?}", response.error);
+        assert_eq!(response.visible.as_ref().unwrap().text, payload);
+    }
+
+    #[test]
+    fn expand_raw_cap_env_parse_contract() {
+        assert_eq!(expand_raw_max_bytes_from(None), EXPAND_RAW_MAX_BYTES);
+        assert_eq!(expand_raw_max_bytes_from(Some("1024")), 1024);
+        assert_eq!(expand_raw_max_bytes_from(Some("0")), EXPAND_RAW_MAX_BYTES);
+        assert_eq!(
+            expand_raw_max_bytes_from(Some("junk")),
+            EXPAND_RAW_MAX_BYTES
+        );
+    }
+
+    #[test]
+    fn expand_masks_unambiguous_secret_unless_raw_authorized() {
+        let dir = tempfile::tempdir().unwrap();
+        let (engine, mut store) = engine_with_store(&dir);
+        let secret = format!("ghp_{}", "a1B2".repeat(9));
+        let text = format!("deploy token: {secret} eof");
+        let blob = store_blob(&mut store, &text);
+
+        let masked = expand_raw(&engine, &blob, false);
+        assert!(masked.error.is_none(), "{:?}", masked.error);
+        let body = &masked.visible.as_ref().unwrap().text;
+        assert!(body.contains("[tz-masked:github-pat]"), "{body}");
+        assert!(!body.contains(&secret), "secret must not leak: {body}");
+        let receipt = masked.recovery.as_ref().expect("terminal receipt");
+        assert!(receipt.terminal && receipt.do_not_recompact);
+        assert!(!receipt.exact_bytes, "masked body is not byte-exact");
+        let telemetry = masked.telemetry.expect("masking telemetry");
+        assert_eq!(telemetry["secret_masking"]["masked_spans"], 1);
+        assert_eq!(telemetry["secret_masking"]["stored_bytes_modified"], false);
+
+        // raw=true is the explicit authorization: exact bytes, and proves the
+        // store itself was never modified by the masked expand.
+        let exact = expand_raw(&engine, &blob, true);
+        assert!(exact.error.is_none(), "{:?}", exact.error);
+        assert_eq!(exact.visible.as_ref().unwrap().text, text);
+        let receipt = exact.recovery.as_ref().expect("terminal receipt");
+        assert!(receipt.terminal && receipt.do_not_recompact && receipt.exact_bytes);
+    }
+
+    #[test]
+    fn expand_masks_pem_private_key_block() {
+        let dir = tempfile::tempdir().unwrap();
+        let (engine, mut store) = engine_with_store(&dir);
+        let text =
+            "-----BEGIN PRIVATE KEY-----\nMIIEvgIBADANBg==\n-----END PRIVATE KEY-----\nafter";
+        let blob = store_blob(&mut store, text);
+        let masked = expand_raw(&engine, &blob, false);
+        let body = &masked.visible.as_ref().unwrap().text;
+        assert!(body.contains("[tz-masked:private-key-block]"), "{body}");
+        assert!(!body.contains("MIIEvgIBADANBg=="), "{body}");
+        assert!(body.contains("after"), "{body}");
+    }
+
+    #[test]
+    fn masking_ignores_prose_and_short_lookalikes() {
+        let (out, count) = mask_expansion_secrets("ask- politely, sk-short, ghp_abc, AKIA123 done");
+        assert_eq!(count, 0, "{out}");
+        assert_eq!(out, "ask- politely, sk-short, ghp_abc, AKIA123 done");
     }
 }

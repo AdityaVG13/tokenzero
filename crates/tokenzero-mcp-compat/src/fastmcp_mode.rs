@@ -77,6 +77,11 @@ pub(crate) fn fastmcp_content_texts_from_tool_result(
     if let Some(rt) = result.get("resultType").and_then(Value::as_str) {
         meta.insert("resultType".into(), Value::String(rt.to_string()));
     }
+    // yevj: forward the recovery receipt in the metadata content so FastMCP
+    // adapters can honor terminal/do-not-recompact without envelope mode.
+    if let Some(receipt) = result.get("recovery") {
+        meta.insert("recovery".into(), receipt.clone());
+    }
     let meta_json = serde_json::to_string(&Value::Object(meta)).unwrap_or_default();
     if meta_json != "{}" {
         contents.push(meta_json);
