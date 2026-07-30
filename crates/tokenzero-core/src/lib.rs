@@ -997,6 +997,12 @@ fn build_shell_body(
                 combined.to_string()
             } else {
                 match policy.policy.as_str() {
+                    "diagnostic"
+                        if input.exit_code == Some(0)
+                            && status.pipeline_masking_warning.is_some() =>
+                    {
+                        diagnostic_shell_view_with_tail(input.stdout, input.stderr, max_tokens)
+                    }
                     "diagnostic" => diagnostic_shell_view(input.stdout, input.stderr, max_tokens),
                     "structured" => {
                         structured_shell_view(input.command, input.stdout, input.stderr)
@@ -1458,6 +1464,7 @@ fn should_compact_short_failure_shell(
         && !status.command_success
         && input.exit_code.is_some()
         && !input.timed_out
+        && !(input.exit_code == Some(0) && status.pipeline_masking_warning.is_some())
         && input.combined_ref.is_some()
         && (!input.stdout.trim().is_empty() || !input.stderr.trim().is_empty())
         && !has_visible_secret_marker(combined)
@@ -1762,7 +1769,8 @@ pub use protocol_atoms::{
     portable_one_token_atoms, render_ack,
 };
 pub use render::domain::{
-    diagnostic_shell_view, is_repo_inventory_command, repo_inventory_view, structured_shell_view,
+    diagnostic_shell_view, diagnostic_shell_view_with_tail, is_repo_inventory_command,
+    repo_inventory_view, structured_shell_view,
 };
 pub use shell_display::{
     shell_display_command_from_argv, shell_display_command_from_argv_for_platform,

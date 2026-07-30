@@ -420,6 +420,37 @@ fn short_failing_shell_uses_compact_diagnostic_view_below_raw_tokens() {
 }
 
 #[test]
+fn masked_zero_exit_preserves_final_stdout_and_exit_marker() {
+    let command = "cargo build 2>&1 | tail -1; ./target/debug/demo; echo EXIT=$?";
+    let stdout = "error: stale build diagnostic\nREPRO_STDOUT={hello: 2}\nEXIT=0\n";
+    let rendered = render_shell(ShellRenderInput {
+        command,
+        stdout,
+        stderr: "",
+        exit_code: Some(0),
+        timed_out: false,
+        mode: Mode::Auto,
+        max_visible_tokens: 4000,
+        stdout_ref: Some("tz://blob/stdout"),
+        stderr_ref: Some("tz://blob/stderr"),
+        combined_ref: Some("tz://blob/combined"),
+    });
+
+    assert_eq!(rendered.policy.policy, "diagnostic");
+    assert_eq!(rendered.output_strategy, "exact_first_adaptive_shell");
+    assert!(rendered.visible.contains("exit_code: 0"));
+    assert!(rendered.visible.contains("pipeline_masking_warning"));
+    assert!(rendered.visible.contains("# final stdout:"));
+    assert!(rendered.visible.contains("REPRO_STDOUT={hello: 2}"));
+    assert!(rendered.visible.contains("EXIT=0"));
+    assert!(
+        rendered
+            .visible
+            .contains("combined_ref: tz://blob/combined")
+    );
+}
+
+#[test]
 fn short_mixed_failure_prioritizes_error_anchor_below_raw_tokens() {
     let command = "powershell -NoProfile -Command Write-Output 'warning: note'; [Console]::Error.WriteLine('error: fail'); exit 3";
     let stdout = "warning: note\n";

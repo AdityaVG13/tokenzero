@@ -455,3 +455,49 @@ pub fn diagnostic_shell_view(stdout: &str, stderr: &str, max_visible_tokens: usi
     };
     enforce_token_budget(&view, max_visible_tokens)
 }
+
+/// Preserve the final bytes of both streams when a zero-exit shell pipeline is
+/// diagnostically hazardous. The normal diagnostic view prioritizes critical
+/// lines, which can otherwise hide the downstream command's stdout and exit marker.
+pub fn diagnostic_shell_view_with_tail(
+    stdout: &str,
+    stderr: &str,
+    max_visible_tokens: usize,
+) -> String {
+    let mut view = String::new();
+    for (label, stream) in [("# final stdout:\n", stdout), ("# final stderr:\n", stderr)] {
+        let mut tail: Vec<_> = stream
+            .lines()
+            .filter(|line| !line.trim().is_empty())
+            .rev()
+            .take(12)
+            .collect();
+        tail.reverse();
+        if tail.is_empty() {
+            continue;
+        }
+        if !view.is_empty() {
+            view.push('\n');
+        }
+        view.push_str(label);
+        view.push_str(&tail.join("\n"));
+        view.push('\n');
+    }
+
+    let combined = format!("{stdout}\n{stderr}");
+    let critical = critical_lines(&combined, 3);
+    if critical
+        .lines()
+        .any(|line| !line.trim().is_empty() && !view.lines().any(|visible| visible == line))
+    {
+        if !view.is_empty() {
+            view.push('\n');
+        }
+        view.push_str("# critical diagnostics:\n");
+        view.push_str(critical.trim_end());
+    }
+    if view.trim().is_empty() {
+        view = summarize_lines(&combined, 16, 12, "");
+    }
+    enforce_token_budget(&view, max_visible_tokens)
+}
