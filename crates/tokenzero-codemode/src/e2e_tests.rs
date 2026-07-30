@@ -805,6 +805,38 @@ fn concurrent_direct_compact_expand_uses_requested_store() {
 
 #[cfg(unix)]
 #[test]
+fn shell_defaults_to_plan_root_for_relative_paths() {
+    let work = tempfile::tempdir().unwrap();
+    std::fs::write(
+        work.path().join("plan-root-probe.txt"),
+        "plan-root-cwd-ok\n",
+    )
+    .unwrap();
+    let result = execute_codemode_with_options(
+        r#"
+        const shell = await zero.token.shell("cat plan-root-probe.txt");
+        return await zero.token.expand(shell.stdout_ref);
+        "#,
+        CodeModeOptions {
+            root: Some(work.path().to_path_buf()),
+            ..Default::default()
+        },
+    );
+
+    assert_eq!(
+        result.status,
+        CodeModeStatus::Completed,
+        "{:?}",
+        result.error
+    );
+    let value = result.value.as_ref().unwrap();
+    let text = value
+        .as_str()
+        .or_else(|| value.get("text").and_then(serde_json::Value::as_str));
+    assert_eq!(text, Some("plan-root-cwd-ok\n"));
+}
+#[cfg(unix)]
+#[test]
 fn background_shell_can_outlive_launch_and_return_via_job_wait() {
     let work = tempfile::tempdir().unwrap();
     let result = execute_codemode_with_options(
