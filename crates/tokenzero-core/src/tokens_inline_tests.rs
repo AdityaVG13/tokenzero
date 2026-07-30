@@ -52,7 +52,10 @@ fn visible_budget_prefix_retains_every_fitting_line() {
     let budget =
         marker_tokens + SEPARATOR_TOKENS + text.lines().take(3).map(count_tokens).sum::<usize>();
     let out = enforce_token_budget(&text, budget);
-    let actual = out.lines().take_while(|line| *line != marker).count();
+    // The typed declaration is deliberately head-visible; retained payload
+    // lines follow it.
+    assert_eq!(out.lines().next(), Some(marker));
+    let actual = out.lines().skip(1).count();
 
     // P01-001 is a MAXIMALITY property: keep every line that fits. It was
     // previously asserted by replaying the packer's own per-line estimate,
@@ -69,7 +72,10 @@ fn visible_budget_prefix_retains_every_fitting_line() {
     let total_lines = text.lines().count();
     if actual < total_lines {
         let one_more = text.lines().take(actual + 1).collect::<Vec<_>>().join("\n");
-        let with_marker = format!("{one_more}\n{marker}");
+        let with_marker = format!(
+            "{marker}
+{one_more}"
+        );
         assert!(
             count_tokens(&with_marker) > budget,
             "packer dropped a line that would have fit (P01-001); \

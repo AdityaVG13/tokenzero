@@ -34,6 +34,17 @@ pub fn sha256_hex(text: &str) -> String {
 /// P01-001. Keep every user pointed at this constant.
 pub const VISIBLE_BUDGET_LOSSY_DECLARATION: &str = "[mode=lossy lossy_policy_id=tokenzero.visible-compression.v1 lossy_spans=[{description=omitted-bytes reason=visible-budget recovery_may_be_needed=true}]]";
 
+fn visible_budget_marker(recovery_ref: Option<&str>) -> String {
+    recovery_ref.map_or_else(
+        || VISIBLE_BUDGET_LOSSY_DECLARATION.to_string(),
+        |reference| {
+            format!(
+                "{VISIBLE_BUDGET_LOSSY_DECLARATION} recovery_ref={reference};                  expand {reference} for the full output"
+            )
+        },
+    )
+}
+
 pub fn enforce_token_budget(text: &str, max_visible_tokens: usize) -> String {
     enforce_token_budget_with_ref(text, max_visible_tokens, None)
 }
@@ -48,10 +59,7 @@ pub fn enforce_token_budget_with_ref(
         return text.to_string();
     }
 
-    let marker = recovery_ref.map_or_else(
-        || VISIBLE_BUDGET_LOSSY_DECLARATION.to_string(),
-        |reference| format!("{VISIBLE_BUDGET_LOSSY_DECLARATION} recovery_ref={reference}"),
-    );
+    let marker = visible_budget_marker(recovery_ref);
     let marker_tokens = count_tokens(&marker);
 
     // Structured elision can fit below the longer plain-text correctness floor.
@@ -448,10 +456,7 @@ mod inline_elision_tests {
     use super::*;
 
     fn plain_marker(recovery_ref: Option<&str>) -> String {
-        recovery_ref.map_or_else(
-            || VISIBLE_BUDGET_LOSSY_DECLARATION.to_string(),
-            |reference| format!("{VISIBLE_BUDGET_LOSSY_DECLARATION} recovery_ref={reference}"),
-        )
+        visible_budget_marker(recovery_ref)
     }
 
     #[test]
