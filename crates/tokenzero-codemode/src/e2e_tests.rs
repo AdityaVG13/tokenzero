@@ -804,6 +804,43 @@ fn concurrent_direct_compact_expand_uses_requested_store() {
 }
 
 #[test]
+fn single_shell_with_large_stdout_does_not_exhaust_microtasks() {
+    let work = tempfile::tempdir().unwrap();
+    let command = if cfg!(windows) {
+        r#"powershell -NoProfile -Command "[Console]::Out.Write('x' * 100000)""#
+    } else {
+        r#"python3 -c "import sys; sys.stdout.write('x' * 100000)""#
+    };
+    let result = execute_codemode_with_options(
+        &format!(
+            "return await zero.token.shell({})",
+            serde_json::to_string(command).unwrap()
+        ),
+        CodeModeOptions {
+            root: Some(work.path().to_path_buf()),
+            max_microtasks: 64,
+            max_output_bytes: 2_048,
+            ..Default::default()
+        },
+    );
+
+    assert_eq!(
+        result.status,
+        CodeModeStatus::Completed,
+        "{:?}",
+        result.error
+    );
+    assert!(
+        result
+            .error
+            .as_ref()
+            .is_none_or(|error| !error.message.contains("microtask cap exceeded")),
+        "host polling must not consume the authored microtask budget: {:?}",
+        result.error
+    );
+}
+
+#[test]
 fn shell_ref_is_canonical_and_expandable_in_subsequent_execution() {
     let work = tempfile::tempdir().unwrap();
     let cache_path = work.path().join("recovery-cache.json");
