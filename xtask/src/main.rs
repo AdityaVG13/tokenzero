@@ -1,15 +1,16 @@
-use anyhow::{Context, Result, bail};
+use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
+    collections::HashSet,
     fs,
     path::{Path, PathBuf},
 };
-use tokenzero_core::{ContentType, Mode, ToolResponse, count_tokens, make_capsule};
+use tokenzero_core::{count_tokens, make_capsule, ContentType, Mode, ToolResponse};
 use tokenzero_engine::config::EngineConfig;
 use tokenzero_engine::expand_params::ExpandParams;
-use tokenzero_engine::{DEFAULT_CAPSULE_EXACT_REF_THRESHOLD_BYTES, TokenZeroEngine};
-use tokenzero_recovery::{RecoveryConfig, RecoveryStore, set_ref_index_root_override};
+use tokenzero_engine::{TokenZeroEngine, DEFAULT_CAPSULE_EXACT_REF_THRESHOLD_BYTES};
+use tokenzero_recovery::{set_ref_index_root_override, RecoveryConfig, RecoveryStore};
 
 const MANIFEST: &str = include_str!("../../benchmarks/pilot/manifest-v1.json");
 const FROZEN_MANIFEST_SHA256: &str =
@@ -43,13 +44,13 @@ struct Fixture {
     sha256: String,
 }
 
-#[derive(Debug, Clone, Serialize, PartialEq)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 struct TaskCostSummary {
-    record_type: &'static str,
+    record_type: String,
     task_id: String,
     task_name: String,
-    mode: &'static str,
-    engine: &'static str,
+    mode: String,
+    engine: String,
     seed: u64,
     success: bool,
     visible: u64,
@@ -72,9 +73,9 @@ struct Report {
     results: Vec<TaskCostSummary>,
 }
 
-#[derive(Debug, Serialize, PartialEq)]
+#[derive(Debug, Deserialize, Serialize, PartialEq)]
 struct ModeAggregate {
-    mode: &'static str,
+    mode: String,
     task_count: usize,
     success_rate: f64,
     anchor_recall: f64,
@@ -83,13 +84,13 @@ struct ModeAggregate {
     visible_tokens: u64,
     expand_tokens: u64,
     expand_rate: f64,
-    expand_rate_denominator: &'static str,
+    expand_rate_denominator: String,
     dangling_ref_rate: f64,
     retries: u64,
     fails: u64,
 }
 
-#[derive(Debug, Serialize, PartialEq)]
+#[derive(Debug, Deserialize, Serialize, PartialEq)]
 struct TaskDelta {
     success: i8,
     anchor_recall: i16,
@@ -102,7 +103,7 @@ struct TaskDelta {
     dangling_refs: i128,
 }
 
-#[derive(Debug, Serialize, PartialEq)]
+#[derive(Debug, Deserialize, Serialize, PartialEq)]
 struct TaskComparison {
     task_id: String,
     task_name: String,
@@ -111,7 +112,7 @@ struct TaskComparison {
     delta_exact_ref_minus_baseline: TaskDelta,
 }
 
-#[derive(Debug, Serialize, PartialEq)]
+#[derive(Debug, Deserialize, Serialize, PartialEq)]
 struct ParetoPair {
     task_id: String,
     task_name: String,
@@ -121,14 +122,38 @@ struct ParetoPair {
     exact_ref_ratc: f64,
 }
 
-#[derive(Debug, Serialize, PartialEq)]
+const MAX_PER_TASK_RATC_RATIO: f64 = 2.0;
+
+#[derive(Debug, Deserialize, Serialize, PartialEq)]
+struct PromotionCheck {
+    name: String,
+    passed: bool,
+    observed: String,
+    requirement: String,
+}
+
+#[derive(Debug, Deserialize, Serialize, PartialEq)]
+struct PromotionVerdict {
+    eligible: bool,
+    verdict: String,
+    max_per_task_ratc_ratio: f64,
+    dangling_unresolved: u64,
+    catastrophic_task_ids: Vec<String>,
+    success_regression_task_ids: Vec<String>,
+    anchor_regression_task_ids: Vec<String>,
+    failed_checks: Vec<String>,
+    checks: Vec<PromotionCheck>,
+}
+
+#[derive(Debug, Deserialize, Serialize, PartialEq)]
 struct AbReport {
-    schema_version: &'static str,
-    source_schema_version: &'static str,
+    schema_version: String,
+    source_schema_version: String,
     suite_version: String,
     seed: u64,
     network: String,
-    limitation: &'static str,
+    limitation: String,
+    promotion: PromotionVerdict,
     aggregates: Vec<ModeAggregate>,
     per_task: Vec<TaskComparison>,
     pareto_pairs: Vec<ParetoPair>,
@@ -612,11 +637,11 @@ fn run_task(manifest: &Manifest, task: &Task, mode: &'static str) -> Result<Task
     let ratc = (visible_tokens + expand_tokens + fails.saturating_mul(1_000)) as f64;
 
     Ok(TaskCostSummary {
-        record_type: "TaskCostSummary",
+        record_type: "TaskCostSummary".to_owned(),
         task_id: task.id.to_string(),
         task_name: task.name.clone(),
-        mode,
-        engine: "tokenzero-engine::TokenZeroEngine",
+        mode: mode.to_owned(),
+        engine: "tokenzero-engine::TokenZeroEngine".to_owned(),
         seed: manifest.seed,
         success,
         visible: visible_tokens,
@@ -673,7 +698,7 @@ fn aggregate(mode: &'static str, rows: &[&TaskCostSummary]) -> Result<ModeAggreg
     let read_count = rows.iter().map(|row| row.read_count).sum();
     let dangling_refs = rows.iter().map(|row| row.dangling_refs).sum();
     Ok(ModeAggregate {
-        mode,
+        mode: mode.to_owned(),
         task_count: rows.len(),
         success_rate: rows.iter().filter(|row| row.success).count() as f64 / rows.len() as f64,
         anchor_recall: rows.iter().map(|row| row.anchor_recall as u64).sum::<u64>() as f64
@@ -683,31 +708,160 @@ fn aggregate(mode: &'static str, rows: &[&TaskCostSummary]) -> Result<ModeAggreg
         visible_tokens,
         expand_tokens,
         expand_rate: ratio(expand_count, read_count),
-        expand_rate_denominator: "read_count",
+        expand_rate_denominator: "read_count".to_owned(),
         dangling_ref_rate: ratio(dangling_refs, expand_count),
         retries: rows.iter().map(|row| row.retries).sum(),
         fails: rows.iter().map(|row| row.fails).sum(),
     })
 }
 
+fn resolved_dangling_fallback(task: &TaskComparison) -> bool {
+    task.task_name == "eviction-stress"
+        && task.exact_ref.success
+        && task.exact_ref.dangling_refs == 1
+        && task.exact_ref.fails == 1
+}
+
+fn evaluate_promotion(
+    aggregates: &[ModeAggregate],
+    per_task: &[TaskComparison],
+) -> Result<PromotionVerdict> {
+    let baseline = aggregates
+        .iter()
+        .find(|row| row.mode == "baseline")
+        .context("promotion gate missing baseline aggregate")?;
+    let exact = aggregates
+        .iter()
+        .find(|row| row.mode == "exact-ref")
+        .context("promotion gate missing exact-ref aggregate")?;
+    let catastrophic_task_ids: Vec<String> = per_task
+        .iter()
+        .filter(|task| {
+            if task.baseline.ratc == 0.0 {
+                task.exact_ref.ratc > 0.0
+            } else {
+                task.exact_ref.ratc / task.baseline.ratc > MAX_PER_TASK_RATC_RATIO
+            }
+        })
+        .map(|task| task.task_id.clone())
+        .collect();
+    let success_regression_task_ids: Vec<String> = per_task
+        .iter()
+        .filter(|task| task.baseline.success && !task.exact_ref.success)
+        .map(|task| task.task_id.clone())
+        .collect();
+    let anchor_regression_task_ids: Vec<String> = per_task
+        .iter()
+        .filter(|task| task.exact_ref.anchor_recall < task.baseline.anchor_recall)
+        .map(|task| task.task_id.clone())
+        .collect();
+    let dangling_unresolved: u64 = per_task
+        .iter()
+        .filter(|task| task.exact_ref.dangling_refs > 0 && !resolved_dangling_fallback(task))
+        .map(|task| task.exact_ref.dangling_refs)
+        .sum();
+    let checks = vec![
+        PromotionCheck {
+            name: "aggregate_ratc_win".to_owned(),
+            passed: exact.ratc_mean < baseline.ratc_mean,
+            observed: format!("exact={} baseline={}", exact.ratc_mean, baseline.ratc_mean),
+            requirement: "exact-ref mean RATC must be lower than baseline mean RATC".to_owned(),
+        },
+        PromotionCheck {
+            name: "per_task_ratc_cap".to_owned(),
+            passed: catastrophic_task_ids.is_empty(),
+            observed: format!("catastrophic_task_ids={catastrophic_task_ids:?}"),
+            requirement: "no task may exceed 2.0x its baseline RATC".to_owned(),
+        },
+        PromotionCheck {
+            name: "success_no_regression".to_owned(),
+            passed: exact.success_rate >= baseline.success_rate
+                && success_regression_task_ids.is_empty(),
+            observed: format!(
+                "exact={} baseline={} task_ids={success_regression_task_ids:?}",
+                exact.success_rate, baseline.success_rate
+            ),
+            requirement: "exact-ref success must not regress in aggregate or per task".to_owned(),
+        },
+        PromotionCheck {
+            name: "anchor_no_regression".to_owned(),
+            passed: exact.anchor_recall >= baseline.anchor_recall
+                && anchor_regression_task_ids.is_empty(),
+            observed: format!(
+                "exact={} baseline={} task_ids={anchor_regression_task_ids:?}",
+                exact.anchor_recall, baseline.anchor_recall
+            ),
+            requirement: "exact-ref protected-anchor recall must not regress".to_owned(),
+        },
+        PromotionCheck {
+            name: "dangling_unresolved".to_owned(),
+            passed: dangling_unresolved == 0,
+            observed: dangling_unresolved.to_string(),
+            requirement: "unresolved dangling refs must equal zero".to_owned(),
+        },
+    ];
+    let failed_checks: Vec<String> = checks
+        .iter()
+        .filter(|check| !check.passed)
+        .map(|check| check.name.clone())
+        .collect();
+    let eligible = failed_checks.is_empty();
+    Ok(PromotionVerdict {
+        eligible,
+        verdict: if eligible { "promote" } else { "reject" }.to_owned(),
+        max_per_task_ratc_ratio: MAX_PER_TASK_RATC_RATIO,
+        dangling_unresolved,
+        catastrophic_task_ids,
+        success_regression_task_ids,
+        anchor_regression_task_ids,
+        failed_checks,
+        checks,
+    })
+}
 fn build_ab_report(source: &Report) -> Result<AbReport> {
+    if source.schema_version != "tokenzero.task-cost-summary.v2" {
+        bail!(
+            "unsupported TaskCostSummary schema: {}",
+            source.schema_version
+        )
+    }
+    if source.suite_version.is_empty() || source.network != "disabled" {
+        bail!("invalid pilot report metadata")
+    }
     if source.results.len() % 2 != 0 {
         bail!("TaskCostSummary stream has an unpaired row")
     }
+    let mut seen_task_ids = HashSet::with_capacity(source.results.len() / 2);
     let mut per_task = Vec::with_capacity(source.results.len() / 2);
     let mut pareto_pairs = Vec::with_capacity(source.results.len() / 2);
-    for pair in source.results.chunks_exact(2) {
+    for (index, pair) in source.results.chunks_exact(2).enumerate() {
         let baseline = &pair[0];
         let exact = &pair[1];
+        let expected_task_id = (index + 1).to_string();
         if baseline.mode != "baseline"
             || exact.mode != "exact-ref"
             || baseline.task_id != exact.task_id
+            || baseline.task_id != expected_task_id
+            || !seen_task_ids.insert(baseline.task_id.clone())
+            || baseline.task_name.is_empty()
             || baseline.task_name != exact.task_name
         {
-            bail!(
-                "invalid baseline/exact-ref pair at task {}",
-                baseline.task_id
-            )
+            bail!("invalid or missing baseline/exact-ref pair at task {expected_task_id}")
+        }
+        if baseline.seed != source.seed
+            || exact.seed != source.seed
+            || baseline.engine != "tokenzero-engine::TokenZeroEngine"
+            || exact.engine != baseline.engine
+            || baseline.record_type.is_empty()
+            || exact.record_type != baseline.record_type
+            || baseline.anchor_recall > 1
+            || exact.anchor_recall > 1
+            || !baseline.ratc.is_finite()
+            || !exact.ratc.is_finite()
+            || baseline.ratc < 0.0
+            || exact.ratc < 0.0
+        {
+            bail!("incompatible TaskCostSummary metadata at task {expected_task_id}")
         }
         let delta = TaskDelta {
             success: u8::from(exact.success) as i8 - u8::from(baseline.success) as i8,
@@ -746,22 +900,25 @@ fn build_ab_report(source: &Report) -> Result<AbReport> {
         .iter()
         .filter(|row| row.mode == "exact-ref")
         .collect();
+    let aggregates = vec![
+        aggregate("baseline", &baseline)?,
+        aggregate("exact-ref", &exact)?,
+    ];
+    let promotion = evaluate_promotion(&aggregates, &per_task)?;
     Ok(AbReport {
-        schema_version: "tokenzero.pilot-ab-report.v1",
-        source_schema_version: source.schema_version,
+        schema_version: "tokenzero.pilot-ab-report.v2".to_owned(),
+        source_schema_version: source.schema_version.to_owned(),
         suite_version: source.suite_version.clone(),
         seed: source.seed,
         network: source.network.clone(),
-        limitation: "Fixed-suite deltas only; this report makes no statistical-significance claim.",
-        aggregates: vec![
-            aggregate("baseline", &baseline)?,
-            aggregate("exact-ref", &exact)?,
-        ],
+        limitation: "Fixed-suite deltas only; this report makes no statistical-significance claim."
+            .to_owned(),
+        promotion,
+        aggregates,
         per_task,
         pareto_pairs,
     })
 }
-
 fn csv_cell(value: &str) -> String {
     if value.contains([',', '"', '\n']) {
         format!("\"{}\"", value.replace('"', "\"\""))
@@ -800,6 +957,53 @@ fn render_csv(report: &AbReport) -> String {
     lines.join("\n")
 }
 
+fn write_ab_report(report: &AbReport, json_path: &str, csv_path: &str) -> Result<()> {
+    fs::write(
+        json_path,
+        format!("{}\n", serde_json::to_string_pretty(report)?),
+    )
+    .with_context(|| format!("write report JSON {json_path}"))?;
+    fs::write(csv_path, render_csv(report))
+        .with_context(|| format!("write report CSV {csv_path}"))?;
+    Ok(())
+}
+
+fn rebuild_consumed_report(report: AbReport) -> Result<AbReport> {
+    if report.schema_version != "tokenzero.pilot-ab-report.v2"
+        || report.source_schema_version != "tokenzero.task-cost-summary.v2"
+    {
+        bail!("unsupported pilot A/B report schema")
+    }
+    let mut results = Vec::with_capacity(report.per_task.len() * 2);
+    for task in report.per_task {
+        results.push(task.baseline);
+        results.push(task.exact_ref);
+    }
+    build_ab_report(&Report {
+        schema_version: "tokenzero.task-cost-summary.v2",
+        suite_version: report.suite_version,
+        seed: report.seed,
+        network: report.network,
+        results,
+    })
+}
+
+fn gate_report_files(json_path: &str, csv_path: &str) -> Result<AbReport> {
+    let encoded =
+        fs::read_to_string(json_path).with_context(|| format!("read report JSON {json_path}"))?;
+    let consumed: AbReport =
+        serde_json::from_str(&encoded).with_context(|| format!("parse report JSON {json_path}"))?;
+    let report = rebuild_consumed_report(consumed)?;
+    write_ab_report(&report, json_path, csv_path)?;
+    if !report.promotion.eligible {
+        bail!(
+            "promotion rejected; failed checks: {} (verdict written to {json_path})",
+            report.promotion.failed_checks.join(",")
+        )
+    }
+    Ok(report)
+}
+
 fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     match args.as_slice() {
@@ -807,21 +1011,17 @@ fn main() -> Result<()> {
         [command] if command == "pilot" => println!("{}", serde_json::to_string_pretty(&run()?)?),
         [command, json_path, csv_path] if command == "pilot-report" => {
             let report = build_ab_report(&run()?)?;
-            fs::write(
-                json_path,
-                format!("{}\n", serde_json::to_string_pretty(&report)?),
-            )
-            .with_context(|| format!("write report JSON {json_path}"))?;
-            fs::write(csv_path, render_csv(&report))
-                .with_context(|| format!("write report CSV {csv_path}"))?;
+            write_ab_report(&report, json_path, csv_path)?;
+        }
+        [command, json_path, csv_path] if command == "pilot-gate" => {
+            gate_report_files(json_path, csv_path)?;
         }
         _ => bail!(
-            "usage: cargo run -p tokenzero-xtask -- pilot | pilot-report <report.json> <report.csv>"
+            "usage: cargo run -p tokenzero-xtask -- pilot | pilot-report|pilot-gate <report.json> <report.csv>"
         ),
     }
     Ok(())
 }
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -961,12 +1161,12 @@ mod tests {
 
     #[test]
     fn golden_sample_report_matches_json_and_csv() {
-        let sample = |mode, visible, expand, ratc, expand_count| TaskCostSummary {
-            record_type: "task-cost-summary",
+        let sample = |mode: &str, visible, expand, ratc, expand_count| TaskCostSummary {
+            record_type: "task-cost-summary".to_owned(),
             task_id: "1".to_owned(),
             task_name: "sample".to_owned(),
-            mode,
-            engine: "tokenzero-engine::TokenZeroEngine",
+            mode: mode.to_owned(),
+            engine: "tokenzero-engine::TokenZeroEngine".to_owned(),
             seed: 7,
             success: true,
             visible,
@@ -991,7 +1191,7 @@ mod tests {
         };
         let report = build_ab_report(&source).unwrap();
         let value = serde_json::to_value(&report).unwrap();
-        assert_eq!(value["schema_version"], "tokenzero.pilot-ab-report.v1");
+        assert_eq!(value["schema_version"], "tokenzero.pilot-ab-report.v2");
         assert_eq!(value["aggregates"][0]["success_rate"], 1.0);
         assert_eq!(value["aggregates"][1]["expand_rate"], 0.5);
         assert_eq!(
@@ -1003,6 +1203,8 @@ mod tests {
             -50.0
         );
         assert_eq!(value["pareto_pairs"][0]["exact_ref_visible"], 40);
+        assert_eq!(value["promotion"]["verdict"], "promote");
+        assert_eq!(value["promotion"]["eligible"], true);
         let csv = render_csv(&report);
         assert!(csv.starts_with("record_type,mode,task_id,task_name"));
         assert!(csv.contains("aggregate,baseline"));
@@ -1027,12 +1229,198 @@ mod tests {
         assert_eq!(first.aggregates[1].task_count, 14);
         assert_eq!(first.aggregates[0].success_rate, 1.0);
         assert_eq!(first.aggregates[1].success_rate, 1.0);
+        assert!(!first.promotion.eligible);
+        assert_eq!(first.promotion.verdict, "reject");
+        assert!(first
+            .promotion
+            .failed_checks
+            .contains(&"aggregate_ratc_win".to_owned()));
+        assert!(first
+            .per_task
+            .iter()
+            .all(|task| task.baseline.mode == "baseline" && task.exact_ref.mode == "exact-ref"));
+    }
+
+    #[test]
+    fn visible_only_win_and_catastrophic_regression_are_rejected() {
+        let row = |mode: &str, visible, ratc| TaskCostSummary {
+            record_type: "task-cost-summary".to_owned(),
+            task_id: "1".to_owned(),
+            task_name: "visible-only".to_owned(),
+            mode: mode.to_owned(),
+            engine: "tokenzero-engine::TokenZeroEngine".to_owned(),
+            seed: 9,
+            success: true,
+            visible,
+            expand: 0,
+            retries: 0,
+            fails: 0,
+            ratc,
+            expand_count: 0,
+            dangling_refs: 0,
+            anchor_recall: 1,
+            read_count: 1,
+        };
+        let mut source = Report {
+            schema_version: "tokenzero.task-cost-summary.v2",
+            suite_version: "gate-fixture-v1".to_owned(),
+            seed: 9,
+            network: "disabled".to_owned(),
+            results: vec![row("baseline", 100, 100.0), row("exact-ref", 1, 110.0)],
+        };
+        let visible_only = build_ab_report(&source).unwrap();
+        assert!(!visible_only.promotion.eligible);
+        assert_eq!(visible_only.promotion.verdict, "reject");
+        assert!(visible_only
+            .promotion
+            .failed_checks
+            .contains(&"aggregate_ratc_win".to_owned()));
         assert!(
-            first
-                .per_task
-                .iter()
-                .all(|task| task.baseline.mode == "baseline" && task.exact_ref.mode == "exact-ref")
+            visible_only.per_task[0]
+                .delta_exact_ref_minus_baseline
+                .visible
+                < 0
         );
+
+        source.results[1].ratc = 201.0;
+        let catastrophic = build_ab_report(&source).unwrap();
+        assert!(catastrophic
+            .promotion
+            .failed_checks
+            .contains(&"per_task_ratc_cap".to_owned()));
+        assert_eq!(catastrophic.promotion.catastrophic_task_ids, ["1"]);
+    }
+
+    #[test]
+    fn unexpected_dangling_is_rejected_and_typed_eviction_fallback_is_resolved() {
+        let row = |mode: &str| TaskCostSummary {
+            record_type: "task-cost-summary".to_owned(),
+            task_id: "1".to_owned(),
+            task_name: "unexpected-dangling".to_owned(),
+            mode: mode.to_owned(),
+            engine: "tokenzero-engine::TokenZeroEngine".to_owned(),
+            seed: 11,
+            success: true,
+            visible: if mode == "baseline" { 100 } else { 20 },
+            expand: 0,
+            retries: 0,
+            fails: 0,
+            ratc: if mode == "baseline" { 100.0 } else { 90.0 },
+            expand_count: 0,
+            dangling_refs: u64::from(mode == "exact-ref"),
+            anchor_recall: 1,
+            read_count: 1,
+        };
+        let mut source = Report {
+            schema_version: "tokenzero.task-cost-summary.v2",
+            suite_version: "dangling-fixture-v1".to_owned(),
+            seed: 11,
+            network: "disabled".to_owned(),
+            results: vec![row("baseline"), row("exact-ref")],
+        };
+        let rejected = build_ab_report(&source).unwrap();
+        assert!(!rejected.promotion.eligible);
+        assert_eq!(rejected.promotion.dangling_unresolved, 1);
+        assert!(rejected
+            .promotion
+            .failed_checks
+            .contains(&"dangling_unresolved".to_owned()));
+
+        for task in &mut source.results {
+            task.task_name = "eviction-stress".to_owned();
+        }
+        source.results[1].fails = 1;
+        let resolved = build_ab_report(&source).unwrap();
+        assert!(resolved.promotion.eligible);
+        assert_eq!(resolved.promotion.dangling_unresolved, 0);
+    }
+
+    #[test]
+    fn consumed_report_is_revalidated_rewritten_and_rejected() {
+        let row = |mode: &str, ratc: f64| TaskCostSummary {
+            record_type: "task-cost-summary".to_owned(),
+            task_id: "1".to_owned(),
+            task_name: "consumed-visible-only".to_owned(),
+            mode: mode.to_owned(),
+            engine: "tokenzero-engine::TokenZeroEngine".to_owned(),
+            seed: 13,
+            success: true,
+            visible: if mode == "baseline" { 100 } else { 1 },
+            expand: 0,
+            retries: 0,
+            fails: 0,
+            ratc,
+            expand_count: 0,
+            dangling_refs: 0,
+            anchor_recall: 1,
+            read_count: 1,
+        };
+        let source = Report {
+            schema_version: "tokenzero.task-cost-summary.v2",
+            suite_version: "consumed-gate-v1".to_owned(),
+            seed: 13,
+            network: "disabled".to_owned(),
+            results: vec![row("baseline", 100.0), row("exact-ref", 110.0)],
+        };
+        let mut report = build_ab_report(&source).unwrap();
+        report.promotion.eligible = true;
+        report.promotion.verdict = "promote".to_owned();
+        report.promotion.failed_checks.clear();
+        let stem = format!("tokenzero-pilot-gate-test-{}", std::process::id());
+        let json_path = std::env::temp_dir().join(format!("{stem}.json"));
+        let csv_path = std::env::temp_dir().join(format!("{stem}.csv"));
+        fs::write(&json_path, serde_json::to_vec_pretty(&report).unwrap()).unwrap();
+        let error =
+            gate_report_files(json_path.to_str().unwrap(), csv_path.to_str().unwrap()).unwrap_err();
+        assert!(error.to_string().contains("promotion rejected"));
+        let rewritten: AbReport = serde_json::from_slice(&fs::read(&json_path).unwrap()).unwrap();
+        assert!(!rewritten.promotion.eligible);
+        assert_eq!(rewritten.promotion.verdict, "reject");
+        assert!(rewritten
+            .promotion
+            .failed_checks
+            .contains(&"aggregate_ratc_win".to_owned()));
+        assert!(fs::metadata(csv_path).unwrap().len() > 0);
+    }
+
+    #[test]
+    fn invalid_pair_metadata_and_missing_task_ids_are_rejected() {
+        let row = |mode: &str| TaskCostSummary {
+            record_type: "task-cost-summary".to_owned(),
+            task_id: "2".to_owned(),
+            task_name: "invalid-metadata".to_owned(),
+            mode: mode.to_owned(),
+            engine: "tokenzero-engine::TokenZeroEngine".to_owned(),
+            seed: 17,
+            success: true,
+            visible: 10,
+            expand: 0,
+            retries: 0,
+            fails: 0,
+            ratc: 10.0,
+            expand_count: 0,
+            dangling_refs: 0,
+            anchor_recall: 1,
+            read_count: 1,
+        };
+        let mut source = Report {
+            schema_version: "tokenzero.task-cost-summary.v2",
+            suite_version: "invalid-pair-v1".to_owned(),
+            seed: 17,
+            network: "disabled".to_owned(),
+            results: vec![row("baseline"), row("exact-ref")],
+        };
+        assert!(build_ab_report(&source)
+            .unwrap_err()
+            .to_string()
+            .contains("missing baseline/exact-ref pair"));
+        source.results[0].task_id = "1".to_owned();
+        source.results[1].task_id = "1".to_owned();
+        source.results[1].seed += 1;
+        assert!(build_ab_report(&source)
+            .unwrap_err()
+            .to_string()
+            .contains("incompatible TaskCostSummary metadata"));
     }
 
     #[test]
