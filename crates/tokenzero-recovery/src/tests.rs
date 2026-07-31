@@ -410,7 +410,7 @@ with exact bytes
         assert_eq!(entries.len(), 2);
         assert!(matches!(
             resolve_blob_from_ref_index(&first.blob_ref, &RecoveryConfig::default()),
-            RefResolve::Found(content) if content == payload
+            (RefResolve::Found(content), _) if content == payload
         ));
     });
 }
@@ -723,13 +723,26 @@ fn legacy_ref_index_generation_remains_expandable() {
             &source_cache,
             1,
             ContentClass::Unknown,
+            true,
+            7,
+            Some(1),
+        )
+        .unwrap();
+        append_ref_index_line(
+            &legacy,
+            &stored.blob_ref,
+            &index_dir.path().join("newer-stale-store.json"),
+            2,
+            ContentClass::Unknown,
             false,
             0,
             None,
         )
         .unwrap();
+        let legacy_before = fs::read(&legacy).unwrap();
+        let current = ref_index_shard_path(index_dir.path(), &stored.blob_ref);
         assert!(
-            !ref_index_shard_path(index_dir.path(), &stored.blob_ref).exists(),
+            !current.exists(),
             "fixture must resolve exclusively through the legacy generation"
         );
 
@@ -738,6 +751,26 @@ fn legacy_ref_index_generation_remains_expandable() {
         let expanded = other.expand(&stored.blob_ref, Some("raw"), None, None, None, None);
         assert!(expanded.found, "{}", expanded.reason);
         assert_eq!(expanded.content, "legacy generation payload\n");
+        let first = ref_index_text(&current)
+            .and_then(|text| newest_ref_index_entries(&text, None).remove(&stored.blob_ref))
+            .unwrap();
+        assert_eq!(first.expansion_count, 8);
+        assert_eq!(
+            first.store_path,
+            source_cache.canonicalize().unwrap().to_string_lossy()
+        );
+        assert!(first.metadata_migrated);
+        assert!(first.last_expanded_ts.is_some_and(|ts| ts > 1));
+        assert_eq!(fs::read(&legacy).unwrap(), legacy_before);
+
+        let expanded = other.expand(&stored.blob_ref, Some("raw"), None, None, None, None);
+        assert!(expanded.found, "{}", expanded.reason);
+        let second = ref_index_text(&current)
+            .and_then(|text| newest_ref_index_entries(&text, None).remove(&stored.blob_ref))
+            .unwrap();
+        assert_eq!(second.expansion_count, 9);
+        assert!(second.metadata_migrated);
+        assert_eq!(fs::read(&legacy).unwrap(), legacy_before);
     });
 }
 

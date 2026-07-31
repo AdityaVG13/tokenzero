@@ -766,6 +766,8 @@ struct RefIndexEntry {
     expansion_count: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     last_expanded_ts: Option<u128>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    metadata_migrated: bool,
 }
 
 fn is_zero_u64(value: &u64) -> bool {
@@ -1812,14 +1814,14 @@ impl RecoveryStore {
             selected_end = Some(*end);
         }
         resolve_selector_line_window(selector, &mut selected_start, &mut selected_end);
+        let mut index_store_path = None;
         let content = if let Some(content) = shared_content {
             content
         } else {
-            match resolve_to_expand_content(
-                self.resolve_ref_with_index(parsed.kind, parsed.bare),
-                &requested_ref,
-                parsed.kind,
-            ) {
+            let (resolved, source_store_path) =
+                self.resolve_ref_with_index(parsed.kind, parsed.bare);
+            index_store_path = source_store_path;
+            match resolve_to_expand_content(resolved, &requested_ref, parsed.kind) {
                 Ok(content) => content,
                 Err(reason) if requested_alias && reason.starts_with("ref-not-found") => {
                     return miss!("dangling-ref");
@@ -1854,7 +1856,13 @@ impl RecoveryStore {
             symbol,
         ) {
             Ok(selected) => {
-                let mut result = self.expand_ok(requested_ref, selector_owned, &ref_id, selected);
+                let mut result = self.expand_ok(
+                    requested_ref,
+                    selector_owned,
+                    &ref_id,
+                    selected,
+                    index_store_path.as_deref(),
+                );
                 if let Some((clamped, start, end, line_count)) = line_window {
                     result.clamped = clamped;
                     result.returned_start_line = Some(start);
@@ -1887,14 +1895,15 @@ impl RecoveryStore {
         selector: Option<String>,
         ref_id: &str,
         content: String,
+        index_store_path: Option<&Path>,
     ) -> ExpansionResult {
-        self.note_expand(ref_id, &content);
+        self.note_expand(ref_id, &content, index_store_path);
         ExpansionResult::ok(requested_ref, selector, content)
     }
 
-    fn note_expand(&mut self, ref_id: &str, content: &str) {
+    fn note_expand(&mut self, ref_id: &str, content: &str, index_store_path: Option<&Path>) {
         self.recovery_tokens += count_tokens(content);
-        if let Some(store_path) = self.persistence_path.as_ref() {
+        if let Some(store_path) = index_store_path.or(self.persistence_path.as_deref()) {
             let content_class = self
                 .ref_classes
                 .get(ref_id)
@@ -2490,12 +2499,12 @@ impl RecoveryStore {
         }
     }
 
-    fn resolve_ref_with_index(&self, kind: &str, bare: &str) -> RefResolve {
+    fn resolve_ref_with_index(&self, kind: &str, bare: &str) -> (RefResolve, Option<PathBuf>) {
         match self.resolve_ref(kind, bare) {
             RefResolve::NotFound if kind == "blob" => {
                 resolve_blob_from_ref_index(bare, &self.config)
             }
-            other => other,
+            other => (other, None),
         }
     }
 
@@ -3140,6 +3149,10 @@ fn append_ref_index_line(
         expanded,
         expansion_count,
         last_expanded_ts,
+        metadata_migrated: expanded
+            && shard
+                .parent()
+                .is_some_and(|root| shard == ref_index_shard_path(root, ref_id)),
     };
     let mut line = serde_json::to_string(&entry)?;
     line.push('\n');
@@ -3225,12 +3238,14 @@ fn newest_ref_index_entries(text: &str, skip_ref: Option<&str>) -> BTreeMap<Stri
                     entry.expanded |= existing.expanded;
                     entry.expansion_count = entry.expansion_count.max(existing.expansion_count);
                     entry.last_expanded_ts = entry.last_expanded_ts.max(existing.last_expanded_ts);
+                    entry.metadata_migrated |= existing.metadata_migrated;
                     slot.insert(entry);
                 } else {
                     existing.expanded |= entry.expanded;
                     existing.expansion_count = existing.expansion_count.max(entry.expansion_count);
                     existing.last_expanded_ts =
                         existing.last_expanded_ts.max(entry.last_expanded_ts);
+                    existing.metadata_migrated |= entry.metadata_migrated;
                 }
             }
         }
@@ -3273,6 +3288,7 @@ fn ref_index_blob_entries(ref_id: &str) -> Option<(PathBuf, Vec<RefIndexEntry>)>
                         entry.expansion_count = entry.expansion_count.max(existing.expansion_count);
                         entry.last_expanded_ts =
                             entry.last_expanded_ts.max(existing.last_expanded_ts);
+                        entry.metadata_migrated |= existing.metadata_migrated;
                         slot.insert(entry);
                     } else {
                         existing.expanded |= entry.expanded;
@@ -3280,6 +3296,7 @@ fn ref_index_blob_entries(ref_id: &str) -> Option<(PathBuf, Vec<RefIndexEntry>)>
                             existing.expansion_count.max(entry.expansion_count);
                         existing.last_expanded_ts =
                             existing.last_expanded_ts.max(entry.last_expanded_ts);
+                        existing.metadata_migrated |= entry.metadata_migrated;
                     }
                 }
             }
@@ -3324,16 +3341,23 @@ fn blob_reachable_in_ref_index(
     })
 }
 
-fn resolve_blob_from_ref_index(ref_id: &str, config: &RecoveryConfig) -> RefResolve {
+fn resolve_blob_from_ref_index(
+    ref_id: &str,
+    config: &RecoveryConfig,
+) -> (RefResolve, Option<PathBuf>) {
     let Some((root, entries)) = ref_index_blob_entries(ref_id) else {
-        return RefResolve::NotFound;
+        return (RefResolve::NotFound, None);
     };
+    let indexed_store_path = entries
+        .iter()
+        .map(|entry| PathBuf::from(&entry.store_path))
+        .find(|path| path.is_file());
     if !entries.is_empty() {
         if let Some(hash) = ref_index_id_part(ref_id) {
             match shared_cas_utf8(&SharedCas::new(root), hash) {
-                Ok(content) => return RefResolve::Found(content),
+                Ok(content) => return (RefResolve::Found(content), indexed_store_path),
                 Err(None) | Err(Some(SharedCasError::Corruption)) => {
-                    return RefResolve::DecodeFailed;
+                    return (RefResolve::DecodeFailed, indexed_store_path);
                 }
                 Err(_) => {}
             }
@@ -3357,27 +3381,51 @@ fn resolve_blob_from_ref_index(ref_id: &str, config: &RecoveryConfig) -> RefReso
         match resolved {
             Some(result @ (RefResolve::Found(_) | RefResolve::DecodeFailed)) => {
                 prune_ref_index_stale_entries(ref_id, &stale);
-                return result;
+                return (result, Some(store_path));
             }
-            Some(RefResolve::Stale) => return RefResolve::Stale,
+            Some(RefResolve::Stale) => return (RefResolve::Stale, Some(store_path)),
             Some(RefResolve::NotFound) | None => {
                 stale.insert(entry.store_path);
             }
         }
     }
     prune_ref_index_stale_entries(ref_id, &stale);
-    RefResolve::NotFound
+    (RefResolve::NotFound, None)
 }
 
 fn record_ref_index_expanded(store_path: &Path, ref_id: &str, fallback: ContentClass) {
-    let Some((root, store_path)) = ref_index_root_store(store_path) else {
+    let Some((root, request_store_path)) = ref_index_root_store(store_path) else {
         return;
     };
     let Some((shard, _lock)) = locked_ref_index_shard(&root, ref_id) else {
         return;
     };
-    let existing = ref_index_text(&shard)
-        .and_then(|text| ref_index_entries_for_ref(&text, ref_id).into_iter().next());
+    let mut existing = ref_index_text(&shard)
+        .and_then(|text| newest_ref_index_entries(&text, None).remove(ref_id));
+    if !existing
+        .as_ref()
+        .is_some_and(|entry| entry.metadata_migrated)
+    {
+        let legacy = legacy_ref_index_shard_path(&root, ref_id);
+        let legacy_entry = if legacy != shard && legacy.exists() {
+            let Some(text) = ref_index_text(&legacy) else {
+                return;
+            };
+            newest_ref_index_entries(&text, None).remove(ref_id)
+        } else {
+            None
+        };
+        if let Some(legacy_entry) = legacy_entry {
+            if let Some(current) = existing.as_mut() {
+                current.expanded |= legacy_entry.expanded;
+                current.expansion_count = current.expansion_count.max(legacy_entry.expansion_count);
+                current.last_expanded_ts =
+                    current.last_expanded_ts.max(legacy_entry.last_expanded_ts);
+            } else {
+                existing = Some(legacy_entry);
+            }
+        }
+    }
     let class = existing
         .as_ref()
         .map_or(fallback, |entry| entry.content_class);
@@ -3391,7 +3439,7 @@ fn record_ref_index_expanded(store_path: &Path, ref_id: &str, fallback: ContentC
     let _ = append_ref_index_line(
         &shard,
         ref_id,
-        &store_path,
+        &request_store_path,
         now,
         class,
         true,
