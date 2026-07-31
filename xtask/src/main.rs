@@ -72,6 +72,68 @@ struct Report {
     results: Vec<TaskCostSummary>,
 }
 
+#[derive(Debug, Serialize, PartialEq)]
+struct ModeAggregate {
+    mode: &'static str,
+    task_count: usize,
+    success_rate: f64,
+    anchor_recall: f64,
+    ratc_mean: f64,
+    ratc_median: f64,
+    visible_tokens: u64,
+    expand_tokens: u64,
+    expand_rate: f64,
+    expand_rate_denominator: &'static str,
+    dangling_ref_rate: f64,
+    retries: u64,
+    fails: u64,
+}
+
+#[derive(Debug, Serialize, PartialEq)]
+struct TaskDelta {
+    success: i8,
+    anchor_recall: i16,
+    visible: i128,
+    expand: i128,
+    retries: i128,
+    fails: i128,
+    ratc: f64,
+    expand_count: i128,
+    dangling_refs: i128,
+}
+
+#[derive(Debug, Serialize, PartialEq)]
+struct TaskComparison {
+    task_id: String,
+    task_name: String,
+    baseline: TaskCostSummary,
+    exact_ref: TaskCostSummary,
+    delta_exact_ref_minus_baseline: TaskDelta,
+}
+
+#[derive(Debug, Serialize, PartialEq)]
+struct ParetoPair {
+    task_id: String,
+    task_name: String,
+    baseline_visible: u64,
+    baseline_ratc: f64,
+    exact_ref_visible: u64,
+    exact_ref_ratc: f64,
+}
+
+#[derive(Debug, Serialize, PartialEq)]
+struct AbReport {
+    schema_version: &'static str,
+    source_schema_version: &'static str,
+    suite_version: String,
+    seed: u64,
+    network: String,
+    limitation: &'static str,
+    aggregates: Vec<ModeAggregate>,
+    per_task: Vec<TaskComparison>,
+    pareto_pairs: Vec<ParetoPair>,
+}
+
 #[derive(Debug)]
 struct EvictionOutcome {
     recovered: String,
@@ -585,11 +647,178 @@ fn run() -> Result<Report> {
     })
 }
 
-fn main() -> Result<()> {
-    if std::env::args().skip(1).any(|arg| arg != "pilot") {
-        bail!("usage: cargo run -p tokenzero-xtask -- pilot")
+fn ratio(numerator: u64, denominator: u64) -> f64 {
+    if denominator == 0 {
+        0.0
+    } else {
+        numerator as f64 / denominator as f64
     }
-    println!("{}", serde_json::to_string_pretty(&run()?)?);
+}
+
+fn aggregate(mode: &'static str, rows: &[&TaskCostSummary]) -> Result<ModeAggregate> {
+    if rows.is_empty() {
+        bail!("cannot aggregate empty {mode} rows")
+    }
+    let mut ratc: Vec<f64> = rows.iter().map(|row| row.ratc).collect();
+    ratc.sort_by(f64::total_cmp);
+    let middle = ratc.len() / 2;
+    let ratc_median = if ratc.len() % 2 == 0 {
+        (ratc[middle - 1] + ratc[middle]) / 2.0
+    } else {
+        ratc[middle]
+    };
+    let visible_tokens = rows.iter().map(|row| row.visible).sum();
+    let expand_tokens = rows.iter().map(|row| row.expand).sum();
+    let expand_count = rows.iter().map(|row| row.expand_count).sum();
+    let read_count = rows.iter().map(|row| row.read_count).sum();
+    let dangling_refs = rows.iter().map(|row| row.dangling_refs).sum();
+    Ok(ModeAggregate {
+        mode,
+        task_count: rows.len(),
+        success_rate: rows.iter().filter(|row| row.success).count() as f64 / rows.len() as f64,
+        anchor_recall: rows.iter().map(|row| row.anchor_recall as u64).sum::<u64>() as f64
+            / rows.len() as f64,
+        ratc_mean: ratc.iter().sum::<f64>() / ratc.len() as f64,
+        ratc_median,
+        visible_tokens,
+        expand_tokens,
+        expand_rate: ratio(expand_count, read_count),
+        expand_rate_denominator: "read_count",
+        dangling_ref_rate: ratio(dangling_refs, expand_count),
+        retries: rows.iter().map(|row| row.retries).sum(),
+        fails: rows.iter().map(|row| row.fails).sum(),
+    })
+}
+
+fn build_ab_report(source: &Report) -> Result<AbReport> {
+    if source.results.len() % 2 != 0 {
+        bail!("TaskCostSummary stream has an unpaired row")
+    }
+    let mut per_task = Vec::with_capacity(source.results.len() / 2);
+    let mut pareto_pairs = Vec::with_capacity(source.results.len() / 2);
+    for pair in source.results.chunks_exact(2) {
+        let baseline = &pair[0];
+        let exact = &pair[1];
+        if baseline.mode != "baseline"
+            || exact.mode != "exact-ref"
+            || baseline.task_id != exact.task_id
+            || baseline.task_name != exact.task_name
+        {
+            bail!(
+                "invalid baseline/exact-ref pair at task {}",
+                baseline.task_id
+            )
+        }
+        let delta = TaskDelta {
+            success: u8::from(exact.success) as i8 - u8::from(baseline.success) as i8,
+            anchor_recall: exact.anchor_recall as i16 - baseline.anchor_recall as i16,
+            visible: exact.visible as i128 - baseline.visible as i128,
+            expand: exact.expand as i128 - baseline.expand as i128,
+            retries: exact.retries as i128 - baseline.retries as i128,
+            fails: exact.fails as i128 - baseline.fails as i128,
+            ratc: exact.ratc - baseline.ratc,
+            expand_count: exact.expand_count as i128 - baseline.expand_count as i128,
+            dangling_refs: exact.dangling_refs as i128 - baseline.dangling_refs as i128,
+        };
+        pareto_pairs.push(ParetoPair {
+            task_id: baseline.task_id.clone(),
+            task_name: baseline.task_name.clone(),
+            baseline_visible: baseline.visible,
+            baseline_ratc: baseline.ratc,
+            exact_ref_visible: exact.visible,
+            exact_ref_ratc: exact.ratc,
+        });
+        per_task.push(TaskComparison {
+            task_id: baseline.task_id.clone(),
+            task_name: baseline.task_name.clone(),
+            baseline: baseline.clone(),
+            exact_ref: exact.clone(),
+            delta_exact_ref_minus_baseline: delta,
+        });
+    }
+    let baseline: Vec<&TaskCostSummary> = source
+        .results
+        .iter()
+        .filter(|row| row.mode == "baseline")
+        .collect();
+    let exact: Vec<&TaskCostSummary> = source
+        .results
+        .iter()
+        .filter(|row| row.mode == "exact-ref")
+        .collect();
+    Ok(AbReport {
+        schema_version: "tokenzero.pilot-ab-report.v1",
+        source_schema_version: source.schema_version,
+        suite_version: source.suite_version.clone(),
+        seed: source.seed,
+        network: source.network.clone(),
+        limitation: "Fixed-suite deltas only; this report makes no statistical-significance claim.",
+        aggregates: vec![
+            aggregate("baseline", &baseline)?,
+            aggregate("exact-ref", &exact)?,
+        ],
+        per_task,
+        pareto_pairs,
+    })
+}
+
+fn csv_cell(value: &str) -> String {
+    if value.contains([',', '"', '\n']) {
+        format!("\"{}\"", value.replace('"', "\"\""))
+    } else {
+        value.to_owned()
+    }
+}
+
+fn render_csv(report: &AbReport) -> String {
+    let mut lines = vec!["record_type,mode,task_id,task_name,task_count,success,success_rate,anchor_recall,ratc,ratc_mean,ratc_median,visible,visible_total,expand,expand_total,expand_count,expand_rate,dangling_refs,dangling_ref_rate,retries,fails,visible_delta,expand_delta,ratc_delta,success_delta,anchor_recall_delta".to_owned()];
+    for a in &report.aggregates {
+        lines.push(format!("aggregate,{a_mode},,,{task_count},,{success_rate},{anchor_recall},,{ratc_mean},{ratc_median},,{visible_tokens},,{expand_tokens},,{expand_rate},,{dangling_ref_rate},{retries},{fails},,,,,",
+            a_mode=a.mode, task_count=a.task_count, success_rate=a.success_rate, anchor_recall=a.anchor_recall,
+            ratc_mean=a.ratc_mean, ratc_median=a.ratc_median, visible_tokens=a.visible_tokens,
+            expand_tokens=a.expand_tokens, expand_rate=a.expand_rate, dangling_ref_rate=a.dangling_ref_rate,
+            retries=a.retries, fails=a.fails));
+    }
+    for task in &report.per_task {
+        for (row, delta) in [
+            (&task.baseline, None),
+            (&task.exact_ref, Some(&task.delta_exact_ref_minus_baseline)),
+        ] {
+            lines.push(format!("task,{mode},{task_id},{task_name},,{success},,{anchor_recall},{ratc},,,{visible},,{expand},,{expand_count},{expand_rate},{dangling_refs},{dangling_rate},{retries},{fails},{visible_delta},{expand_delta},{ratc_delta},{success_delta},{anchor_delta}",
+                mode=row.mode, task_id=row.task_id, task_name=csv_cell(&row.task_name), success=u8::from(row.success),
+                anchor_recall=row.anchor_recall, ratc=row.ratc, visible=row.visible, expand=row.expand,
+                expand_count=row.expand_count, expand_rate=ratio(row.expand_count,row.read_count), dangling_refs=row.dangling_refs,
+                dangling_rate=ratio(row.dangling_refs,row.expand_count), retries=row.retries, fails=row.fails,
+                visible_delta=delta.map(|d| d.visible.to_string()).unwrap_or_default(),
+                expand_delta=delta.map(|d| d.expand.to_string()).unwrap_or_default(),
+                ratc_delta=delta.map(|d| d.ratc.to_string()).unwrap_or_default(),
+                success_delta=delta.map(|d| d.success.to_string()).unwrap_or_default(),
+                anchor_delta=delta.map(|d| d.anchor_recall.to_string()).unwrap_or_default()));
+        }
+    }
+    lines.push(String::new());
+    lines.join("\n")
+}
+
+fn main() -> Result<()> {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    match args.as_slice() {
+        [] => println!("{}", serde_json::to_string_pretty(&run()?)?),
+        [command] if command == "pilot" => println!("{}", serde_json::to_string_pretty(&run()?)?),
+        [command, json_path, csv_path] if command == "pilot-report" => {
+            let report = build_ab_report(&run()?)?;
+            fs::write(
+                json_path,
+                format!("{}\n", serde_json::to_string_pretty(&report)?),
+            )
+            .with_context(|| format!("write report JSON {json_path}"))?;
+            fs::write(csv_path, render_csv(&report))
+                .with_context(|| format!("write report CSV {csv_path}"))?;
+        }
+        _ => bail!(
+            "usage: cargo run -p tokenzero-xtask -- pilot | pilot-report <report.json> <report.csv>"
+        ),
+    }
     Ok(())
 }
 
@@ -728,6 +957,82 @@ mod tests {
         assert!(outcome.recovered.contains("EVICT_0"));
         assert!(outcome.recovered.contains("EVICT_5"));
         assert!(outcome.recovered.contains("dangling-ref"));
+    }
+
+    #[test]
+    fn golden_sample_report_matches_json_and_csv() {
+        let sample = |mode, visible, expand, ratc, expand_count| TaskCostSummary {
+            record_type: "task-cost-summary",
+            task_id: "1".to_owned(),
+            task_name: "sample".to_owned(),
+            mode,
+            engine: "tokenzero-engine::TokenZeroEngine",
+            seed: 7,
+            success: true,
+            visible,
+            expand,
+            retries: 0,
+            fails: 0,
+            ratc,
+            expand_count,
+            dangling_refs: 0,
+            anchor_recall: 1,
+            read_count: 2,
+        };
+        let source = Report {
+            schema_version: "tokenzero.task-cost-summary.v2",
+            suite_version: "golden-v1".to_owned(),
+            seed: 7,
+            network: "disabled".to_owned(),
+            results: vec![
+                sample("baseline", 100, 0, 100.0, 0),
+                sample("exact-ref", 40, 10, 50.0, 1),
+            ],
+        };
+        let report = build_ab_report(&source).unwrap();
+        let value = serde_json::to_value(&report).unwrap();
+        assert_eq!(value["schema_version"], "tokenzero.pilot-ab-report.v1");
+        assert_eq!(value["aggregates"][0]["success_rate"], 1.0);
+        assert_eq!(value["aggregates"][1]["expand_rate"], 0.5);
+        assert_eq!(
+            value["per_task"][0]["delta_exact_ref_minus_baseline"]["visible"],
+            -60
+        );
+        assert_eq!(
+            value["per_task"][0]["delta_exact_ref_minus_baseline"]["ratc"],
+            -50.0
+        );
+        assert_eq!(value["pareto_pairs"][0]["exact_ref_visible"], 40);
+        let csv = render_csv(&report);
+        assert!(csv.starts_with("record_type,mode,task_id,task_name"));
+        assert!(csv.contains("aggregate,baseline"));
+        assert!(csv.contains("aggregate,exact-ref"));
+        assert!(csv.contains("task,baseline,1,sample"));
+        assert!(csv.contains("task,exact-ref,1,sample"));
+        assert!(csv.contains(",-60,10,-50,0,0\n"));
+        let widths: Vec<usize> = csv.lines().map(|line| line.split(',').count()).collect();
+        assert!(widths.iter().all(|width| *width == widths[0]), "{widths:?}");
+    }
+
+    #[test]
+    fn full_ab_report_is_paired_complete_and_deterministic() {
+        let source = run().unwrap();
+        let first = build_ab_report(&source).unwrap();
+        let second = build_ab_report(&source).unwrap();
+        assert_eq!(first, second);
+        assert_eq!(first.aggregates.len(), 2);
+        assert_eq!(first.per_task.len(), 14);
+        assert_eq!(first.pareto_pairs.len(), 14);
+        assert_eq!(first.aggregates[0].task_count, 14);
+        assert_eq!(first.aggregates[1].task_count, 14);
+        assert_eq!(first.aggregates[0].success_rate, 1.0);
+        assert_eq!(first.aggregates[1].success_rate, 1.0);
+        assert!(
+            first
+                .per_task
+                .iter()
+                .all(|task| task.baseline.mode == "baseline" && task.exact_ref.mode == "exact-ref")
+        );
     }
 
     #[test]
