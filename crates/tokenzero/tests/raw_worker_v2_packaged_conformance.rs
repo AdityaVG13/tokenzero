@@ -1,7 +1,8 @@
 //! Packaged raw-worker v2 conformance gate.
 //!
 //! Drives the shipped `tokenzero` binary over v2 NDJSON stdio
-//! (`tokenzero raw-worker --root DIR` with ZEROSTACK_RAW_WORKER_PROTOCOL=v2)
+//! (`tokenzero raw-worker --root DIR` with ZEROSTACK_RAW_WORKER_PROTOCOL=v2).
+//! `TOKENZERO_RAW_WORKER_BIN` can select an exact installed release artifact.
 //! through the shared suite families: golden-frame fixture replay,
 //! cancellation, crash/restart, ref ownership, parser fuzz, capability
 //! truthfulness, deadlines, and a mutation matrix where every protocol
@@ -57,6 +58,12 @@ fn unix_ms() -> u64 {
         .as_millis() as u64
 }
 
+fn packaged_worker_bin() -> PathBuf {
+    std::env::var_os("TOKENZERO_RAW_WORKER_BIN")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| assert_cmd::cargo::cargo_bin("tokenzero"))
+}
+
 /// Strip ambient agent env so the worker under test is hermetic.
 fn scrub_env(cmd: &mut Command) {
     for key in [
@@ -79,7 +86,7 @@ fn scrub_env(cmd: &mut Command) {
 
 /// One-shot capability probe on the packaged artifact (`raw-worker --handshake`).
 fn probe_surface_capability() -> Value {
-    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin("tokenzero"));
+    let mut cmd = Command::new(packaged_worker_bin());
     scrub_env(&mut cmd);
     cmd.args(["raw-worker", "--handshake"]);
     let out = cmd.output().expect("probe spawns");
@@ -99,7 +106,7 @@ struct Worker {
 
 impl Worker {
     fn spawn(root: &Path, session: &str) -> Self {
-        let mut cmd = Command::new(assert_cmd::cargo::cargo_bin("tokenzero"));
+        let mut cmd = Command::new(packaged_worker_bin());
         scrub_env(&mut cmd);
         cmd.args(["raw-worker", "--root", &root.display().to_string()])
             .env("ZEROSTACK_RAW_WORKER_PROTOCOL", "v2")
@@ -179,6 +186,84 @@ impl Drop for Worker {
         let _ = self.child.kill();
         let _ = self.child.wait();
     }
+}
+
+#[cfg(target_os = "linux")]
+fn unix_process_cpu_millis(pid: u32) -> u64 {
+    let stat = fs::read_to_string(format!("/proc/{pid}/stat")).expect("worker stat readable");
+    let after_comm = stat
+        .get(stat.rfind(')').expect("worker stat command closes") + 1..)
+        .expect("worker stat fields follow command");
+    let fields: Vec<&str> = after_comm.split_whitespace().collect();
+    // `after_comm` starts at field 3; utime/stime are fields 14/15.
+    let ticks = fields[11].parse::<u64>().expect("user ticks parse")
+        + fields[12].parse::<u64>().expect("system ticks parse");
+    let clock = Command::new("getconf")
+        .arg("CLK_TCK")
+        .output()
+        .expect("clock tick probe runs");
+    assert!(clock.status.success(), "clock tick probe succeeds");
+    let ticks_per_second = String::from_utf8(clock.stdout)
+        .expect("clock tick rate is UTF-8")
+        .trim()
+        .parse::<u64>()
+        .expect("clock tick rate parses");
+    ticks.saturating_mul(1_000) / ticks_per_second
+}
+
+#[cfg(all(unix, not(target_os = "linux")))]
+fn unix_process_cpu_millis(pid: u32) -> u64 {
+    let output = Command::new("ps")
+        .args(["-o", "time=", "-p", &pid.to_string()])
+        .output()
+        .expect("worker CPU time probe runs");
+    assert!(output.status.success(), "worker CPU time probe succeeds");
+    let text = String::from_utf8(output.stdout)
+        .expect("worker CPU time is UTF-8")
+        .trim()
+        .to_string();
+    let (days, clock) = text
+        .split_once('-')
+        .map_or((0, text.as_str()), |(days, clock)| {
+            (days.parse::<u64>().expect("CPU days parse"), clock)
+        });
+    let mut fields = clock.rsplit(':');
+    let seconds = fields.next().expect("CPU seconds present");
+    let minutes = fields
+        .next()
+        .unwrap_or("0")
+        .parse::<u64>()
+        .expect("CPU minutes parse");
+    let hours = fields
+        .next()
+        .unwrap_or("0")
+        .parse::<u64>()
+        .expect("CPU hours parse");
+    let (seconds, fraction) = seconds.split_once('.').unwrap_or((seconds, "0"));
+    let mut millis = fraction.chars().take(3).collect::<String>();
+    while millis.len() < 3 {
+        millis.push('0');
+    }
+    (((days * 24 + hours) * 60 + minutes) * 60 + seconds.parse::<u64>().expect("CPU seconds parse"))
+        * 1_000
+        + millis.parse::<u64>().expect("CPU milliseconds parse")
+}
+
+#[cfg(unix)]
+fn unix_direct_children(pid: u32) -> Vec<u32> {
+    let output = Command::new("pgrep")
+        .args(["-P", &pid.to_string()])
+        .output()
+        .expect("worker child probe runs");
+    assert!(
+        output.status.success() || output.status.code() == Some(1),
+        "worker child probe succeeds"
+    );
+    String::from_utf8(output.stdout)
+        .expect("worker child PIDs are UTF-8")
+        .split_whitespace()
+        .map(|value| value.parse::<u32>().expect("child pid parses"))
+        .collect()
 }
 
 struct XorShift(u64);
@@ -430,6 +515,149 @@ fn cancel_control_frame_stops_live_shell_work_over_stdio() {
     bound.worker.send(&shutdown_frame("cancel complete"));
     assert_eq!(bound.worker.recv("cancel shutdown")["kind"], "shutdown_ack");
     assert_eq!(bound.worker.close().code(), Some(0));
+}
+
+/// An idle raw worker must block on input rather than spin. The duration is
+/// configurable so release gates can promote the default smoke to a soak.
+#[cfg(unix)]
+#[test]
+fn idle_worker_blocks_without_cpu_or_orphan_tail() {
+    let dir = tempdir().unwrap();
+    let cap = probe_surface_capability();
+    let mut worker = Worker::spawn(dir.path(), "s-idle-soak");
+    handshake_on(&mut worker, dir.path(), "s-idle-soak", &cap);
+    let pid = worker.child.id();
+    let soak_seconds = std::env::var("TOKENZERO_IDLE_SOAK_SECS")
+        .ok()
+        .map(|value| value.parse::<u64>().expect("soak seconds parse"))
+        .unwrap_or(10);
+    assert!(
+        soak_seconds >= 10,
+        "idle soak must run at least ten seconds"
+    );
+
+    let cpu_before = unix_process_cpu_millis(pid);
+    assert!(
+        unix_direct_children(pid).is_empty(),
+        "idle worker started a child process"
+    );
+    thread::sleep(Duration::from_secs(soak_seconds));
+    assert!(worker.child.try_wait().expect("worker try_wait").is_none());
+    let cpu_delta = unix_process_cpu_millis(pid).saturating_sub(cpu_before);
+    assert!(
+        cpu_delta <= 200,
+        "idle worker consumed {cpu_delta}ms CPU during {soak_seconds}s"
+    );
+    assert!(
+        unix_direct_children(pid).is_empty(),
+        "idle worker retained a child process"
+    );
+
+    let started = Instant::now();
+    drop(worker.stdin.take());
+    assert!(worker.wait_bounded(1).success());
+    assert!(
+        started.elapsed() < Duration::from_secs(1),
+        "idle worker did not exit within one second of EOF"
+    );
+    let alive = Command::new("kill")
+        .args(["-0", "--", &pid.to_string()])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .expect("worker liveness probe runs")
+        .success();
+    assert!(!alive, "idle worker left a process tail");
+}
+
+/// Session EOF is cancellation: live shell work and its process group must
+/// be reaped before the raw worker exits.
+#[cfg(unix)]
+#[test]
+fn eof_cancels_live_shell_and_reaps_descendant_within_one_second() {
+    let dir = tempdir().unwrap();
+    let cap = probe_surface_capability();
+    let mut bound = spawn_bound(dir.path(), "s-eof-live", &cap);
+    let pid_file = dir.path().join("eof-child.pid");
+    let trace = trace_for("req-eof", &bound.revision, &bound.contract);
+    bound.worker.send(&call_frame(
+        "req-eof",
+        "shell",
+        json!({
+            "command": format!(
+                "printf '%s\\n' $$ > {}; exec sleep 30",
+                pid_file.display()
+            )
+        }),
+        None,
+        trace,
+    ));
+
+    let child_ready_deadline = Instant::now() + Duration::from_secs(5);
+    while !pid_file.exists() {
+        assert!(
+            Instant::now() < child_ready_deadline,
+            "shell descendant did not publish its pid"
+        );
+        thread::sleep(Duration::from_millis(10));
+    }
+    let descendant_pid = fs::read_to_string(&pid_file)
+        .expect("descendant pid file readable")
+        .trim()
+        .parse::<u32>()
+        .expect("descendant pid parses");
+
+    let started = Instant::now();
+    drop(bound.worker.stdin.take());
+    let exit_deadline = started + Duration::from_secs(3);
+    let status = loop {
+        if let Some(status) = bound.worker.child.try_wait().expect("worker try_wait") {
+            break status;
+        }
+        if Instant::now() >= exit_deadline {
+            let _ = Command::new("kill")
+                .args(["-KILL", "--", &descendant_pid.to_string()])
+                .status();
+            let _ = bound.worker.child.kill();
+            let _ = bound.worker.child.wait();
+            panic!("worker did not exit within three seconds of stdin EOF");
+        }
+        thread::sleep(Duration::from_millis(10));
+    };
+    assert!(
+        status.success(),
+        "EOF teardown must exit cleanly: {status:?}"
+    );
+    let exit_elapsed = started.elapsed();
+    assert!(
+        exit_elapsed < Duration::from_secs(1),
+        "worker EOF teardown took {}ms",
+        exit_elapsed.as_millis()
+    );
+
+    let descendant_deadline = Instant::now() + Duration::from_secs(1);
+    let descendant_gone = loop {
+        let alive = Command::new("kill")
+            .args(["-0", "--", &descendant_pid.to_string()])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .expect("kill -0 descendant probe")
+            .success();
+        if !alive {
+            break true;
+        }
+        if Instant::now() >= descendant_deadline {
+            break false;
+        }
+        thread::sleep(Duration::from_millis(10));
+    };
+    if !descendant_gone {
+        let _ = Command::new("kill")
+            .args(["-KILL", "--", &descendant_pid.to_string()])
+            .status();
+    }
+    assert!(descendant_gone, "shell descendant survived session EOF");
 }
 
 /// Crash suite: EOF without shutdown exits cleanly; SIGKILL mid-call is
@@ -895,7 +1123,7 @@ fn protocol_invariant_mutations_fail_closed() {
 /// digests plus the live binding digests into a machine-readable report.
 #[test]
 fn report_pins_source_and_artifact_digests() {
-    let artifact = assert_cmd::cargo::cargo_bin("tokenzero");
+    let artifact = packaged_worker_bin();
     let artifact_sha = sha256_hex(&fs::read(&artifact).expect("artifact readable"));
     let fixture_sha = sha256_hex(&fs::read(fixture_path()).expect("fixture readable"));
     let test_source = PathBuf::from(env!("CARGO_MANIFEST_DIR"))

@@ -39,7 +39,7 @@ impl RawWorkerV2Session {
 /// flag after dispatch returns.
 #[derive(Debug, Default)]
 struct CancelState {
-    flag: AtomicBool,
+    flag: Arc<AtomicBool>,
     process: Mutex<ChildProcess>,
 }
 
@@ -206,6 +206,17 @@ impl RawWorkerV2Session {
                 true
             }
             None => false,
+        }
+    }
+
+    /// Cancel every active or queued call before the session dispatch thread
+    /// is joined. A child spawned after this point observes the flag in
+    /// `v2_note_child` and is killed immediately.
+    fn cancel_all(&mut self) {
+        for (_, cancel) in self.cancel_registry.drain() {
+            cancel.flag.store(true, Ordering::SeqCst);
+            let process = *cancel.process.lock().unwrap_or_else(|p| p.into_inner());
+            kill_process_tree(process.pid, process.pgid);
         }
     }
 }
@@ -455,6 +466,11 @@ fn validate_call(binding: &Binding, frame: &Value) -> Result<CallCtx, Value> {
 /// deadline derived from `deadline_unix_ms` (default 30 s, matching the
 /// advertised handshake limit).
 fn run_call_registered(engine: &TokenZeroEngine, ctx: CallCtx, cancel: Arc<CancelState>) -> Value {
+    if cancel.flag.load(Ordering::SeqCst) {
+        return json!({"kind":"error","request_id":ctx.id,"error":{
+            "kind":"cancelled","message":"call cancelled before dispatch","retryable":false
+        },"trace":ctx.trace});
+    }
     *ACTIVE_CANCEL.lock().unwrap_or_else(|p| p.into_inner()) = Some(cancel.clone());
     let value = dispatch_call(engine, &ctx, &cancel);
     *ACTIVE_CANCEL.lock().unwrap_or_else(|p| p.into_inner()) = None;
@@ -471,22 +487,26 @@ fn dispatch_call(engine: &TokenZeroEngine, ctx: &CallCtx, cancel: &Arc<CancelSta
         .unwrap_or(DEFAULT_DEADLINE_MS)
         .max(1);
     let wall = crate::wall::WallDeadline::new(Instant::now(), remaining);
-    let response = crate::wall::with_host_wall_deadline(wall, || {
-        let mut args = ctx.args.clone();
-        if is_shell_op(&ctx.op) {
-            if let Value::Object(ref mut map) = args {
-                let requested = ["timeout_ms", "timeoutMs", "shell_timeout_ms"]
-                    .iter()
-                    .find_map(|key| map.get(*key).and_then(Value::as_u64));
-                map.insert(
-                    "timeout_ms".to_string(),
-                    json!(requested.map_or(remaining, |r| r.min(remaining))),
-                );
+    let response = crate::wall::with_host_wall_deadline_and_cancel(
+        wall,
+        Arc::clone(&cancel.flag),
+        || {
+            let mut args = ctx.args.clone();
+            if is_shell_op(&ctx.op) {
+                if let Value::Object(ref mut map) = args {
+                    let requested = ["timeout_ms", "timeoutMs", "shell_timeout_ms"]
+                        .iter()
+                        .find_map(|key| map.get(*key).and_then(Value::as_u64));
+                    map.insert(
+                        "timeout_ms".to_string(),
+                        json!(requested.map_or(remaining, |r| r.min(remaining))),
+                    );
+                }
             }
-        }
-        let v1 = json!({"id":ctx.id.clone(),"op":ctx.op.clone(),"args":args,"peer_contract_digest":ctx.contract.clone()});
-        execute_raw_worker_json(engine, &v1)
-    });
+            let v1 = json!({"id":ctx.id.clone(),"op":ctx.op.clone(),"args":args,"peer_contract_digest":ctx.contract.clone()});
+            execute_raw_worker_json(engine, &v1)
+        },
+    );
     if cancel.flag.load(Ordering::SeqCst) {
         return json!({"kind":"error","request_id":ctx.id.clone(),"error":{
             "kind":"cancelled","message":"call cancelled by control frame","retryable":false
@@ -564,9 +584,9 @@ pub fn run_raw_worker_v2_serve(opts: &RawWorkerServeOptions) -> i32 {
             }
         })
     };
-    loop {
+    let exit_code = loop {
         match read_bounded_frame(&mut input, raw_worker_v2_protocol::DEFAULT_MAX_FRAME_BYTES) {
-            Ok(BoundedFrame::Eof) => break,
+            Ok(BoundedFrame::Eof) => break 0,
             Ok(BoundedFrame::TooLarge) => {
                 let response = encode(error(
                     None,
@@ -575,7 +595,7 @@ pub fn run_raw_worker_v2_serve(opts: &RawWorkerServeOptions) -> i32 {
                     None,
                 ));
                 if write_response(&writer, &response).is_err() {
-                    return 2;
+                    break 2;
                 }
             }
             Ok(BoundedFrame::Line(line)) => {
@@ -585,27 +605,35 @@ pub fn run_raw_worker_v2_serve(opts: &RawWorkerServeOptions) -> i32 {
                         let shutdown = guard.shutdown;
                         drop(guard);
                         if write_response(&writer, &response).is_err() {
-                            return 2;
+                            break 2;
                         }
                         if shutdown {
-                            break;
+                            break 0;
                         }
                     }
                     RoutedFrame::Dispatch(ctx) => {
                         let cancel = guard.register_cancel(&ctx.id);
                         drop(guard);
                         if tx.send(CallJob { ctx, cancel }).is_err() {
-                            return 2;
+                            break 2;
                         }
                     }
                 }
             }
-            Err(_) => return 2,
+            Err(_) => break 2,
         }
+    };
+    {
+        let mut guard = session.lock().unwrap_or_else(|p| p.into_inner());
+        guard.cancel_all();
     }
     drop(tx);
-    let _ = worker.join();
-    0
+    // Raw-worker entrypoints immediately pass this code to `process::exit`.
+    // Joining here would let disconnected work retain the dedicated process
+    // past the session boundary; dropping the handle lets process teardown
+    // stop any non-cooperative in-process work after descendants are killed.
+    drop(worker);
+    exit_code
 }
 
 enum BoundedFrame {

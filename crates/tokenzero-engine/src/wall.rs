@@ -5,7 +5,11 @@
 //! resume) can still burn past the budget. Install an active deadline around
 //! host dispatch and checkpoint every N steps inside hot loops.
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+};
 use std::time::Instant;
 
 /// How often hot loops should sample the active wall deadline.
@@ -56,28 +60,66 @@ pub fn check_wall_deadline(
 
 thread_local! {
     static ACTIVE_HOST_WALL: Cell<Option<WallDeadline>> = const { Cell::new(None) };
+    static ACTIVE_HOST_CANCEL: RefCell<Option<Arc<AtomicBool>>> = const { RefCell::new(None) };
 }
 
 fn replace_active(next: Option<WallDeadline>) -> Option<WallDeadline> {
     ACTIVE_HOST_WALL.with(|slot| slot.replace(next))
 }
 
-/// Run `f` with `deadline` installed for cooperative host-op checkpoints.
-pub fn with_host_wall_deadline<R>(deadline: WallDeadline, f: impl FnOnce() -> R) -> R {
-    // Restore the previous deadline even when `f` panics so the thread-local
-    // slot never leaks a stale deadline into unrelated host work.
-    struct RestoreActive(Option<WallDeadline>);
+fn replace_active_cancel(next: Option<Arc<AtomicBool>>) -> Option<Arc<AtomicBool>> {
+    ACTIVE_HOST_CANCEL.with(|slot| std::mem::replace(&mut *slot.borrow_mut(), next))
+}
+
+fn with_host_controls<R>(
+    deadline: WallDeadline,
+    cancel: Option<Arc<AtomicBool>>,
+    f: impl FnOnce() -> R,
+) -> R {
+    // Restore both controls even when `f` panics so thread-local state never
+    // leaks into unrelated host work.
+    struct RestoreActive {
+        deadline: Option<WallDeadline>,
+        cancel: Option<Arc<AtomicBool>>,
+    }
     impl Drop for RestoreActive {
         fn drop(&mut self) {
-            replace_active(self.0.take());
+            replace_active(self.deadline.take());
+            replace_active_cancel(self.cancel.take());
         }
     }
-    let _restore = RestoreActive(replace_active(Some(deadline)));
+    let _restore = RestoreActive {
+        deadline: replace_active(Some(deadline)),
+        cancel: replace_active_cancel(cancel),
+    };
     f()
 }
 
-/// Check the thread-local host-op deadline, if one is installed.
+/// Run `f` with `deadline` installed for cooperative host-op checkpoints.
+pub fn with_host_wall_deadline<R>(deadline: WallDeadline, f: impl FnOnce() -> R) -> R {
+    with_host_controls(deadline, None, f)
+}
+
+/// Run raw-worker host work with both its wall deadline and session cancel
+/// flag installed for the same cooperative checkpoints.
+pub(crate) fn with_host_wall_deadline_and_cancel<R>(
+    deadline: WallDeadline,
+    cancel: Arc<AtomicBool>,
+    f: impl FnOnce() -> R,
+) -> R {
+    with_host_controls(deadline, Some(cancel), f)
+}
+
+/// Check the thread-local host-op deadline or cancellation flag, if installed.
 pub fn check_active_wall_deadline() -> Option<(String, &'static str)> {
+    let cancelled = ACTIVE_HOST_CANCEL.with(|slot| {
+        slot.borrow()
+            .as_ref()
+            .is_some_and(|flag| flag.load(Ordering::SeqCst))
+    });
+    if cancelled {
+        return Some(("runtime: operation cancelled".into(), "operation cancelled"));
+    }
     ACTIVE_HOST_WALL.with(|slot| {
         slot.get()
             .and_then(|deadline| check_wall_deadline(deadline.started, deadline.hard_max_wall_ms))
@@ -128,6 +170,23 @@ mod tests {
         let deadline = WallDeadline::new(started, 0);
         let hit = with_host_wall_deadline(deadline, || check_active_wall_deadline_every(0, 32));
         assert!(hit.is_some());
+        assert!(check_active_wall_deadline().is_none());
+    }
+
+    #[test]
+    fn active_cancel_interrupts_the_same_host_checkpoints() {
+        let cancel = Arc::new(AtomicBool::new(false));
+        let observed = Arc::clone(&cancel);
+        let hit = with_host_wall_deadline_and_cancel(
+            WallDeadline::new(Instant::now(), 60_000),
+            cancel,
+            || {
+                observed.store(true, Ordering::SeqCst);
+                check_active_wall_deadline_every(0, 32)
+            },
+        )
+        .expect("cancelled host work must stop at its next checkpoint");
+        assert_eq!(hit.1, "operation cancelled");
         assert!(check_active_wall_deadline().is_none());
     }
 }
