@@ -83,6 +83,12 @@ const MAX_SHELL_OUTCOMES: usize = 256;
 const LOCK_RETRY_DELAY: Duration = Duration::from_millis(25);
 const TMP_RETRIES: usize = 16;
 const REF_INDEX_MAX_BYTES: u64 = 1_048_576;
+const REF_INDEX_READ_MAX_BYTES: usize = (REF_INDEX_MAX_BYTES as usize) * 16;
+// Two-character shards saturated in production, making every append recompact
+// an irreducible multi-megabyte file. New writes use three characters while
+// reads retain compatibility with the immutable two-character generation.
+const REF_INDEX_SHARD_PREFIX_LEN: usize = 3;
+const REF_INDEX_LEGACY_SHARD_PREFIX_LEN: usize = 2;
 const REF_INDEX_DISABLE_ENV: &str = "TOKENZERO_REF_INDEX";
 #[cfg(not(test))]
 const REF_INDEX_PATH_ENV: &str = "TOKENZERO_REF_INDEX_PATH";
@@ -3001,14 +3007,31 @@ fn ref_index_id_part(ref_id: &str) -> Option<&str> {
         .filter(|id| !id.is_empty())
 }
 
-fn ref_index_shard_path(root: &Path, ref_id: &str) -> PathBuf {
+fn ref_index_shard_path_with_prefix(root: &Path, ref_id: &str, prefix_len: usize) -> PathBuf {
     let id = ref_index_id_part(ref_id).unwrap_or(ref_id);
-    let mut chars = id.chars();
-    root.join(format!(
-        "{}{}.ndjson",
-        chars.next().unwrap_or('x'),
-        chars.next().unwrap_or('x')
-    ))
+    let mut prefix: String = id.chars().take(prefix_len).collect();
+    while prefix.chars().count() < prefix_len {
+        prefix.push('x');
+    }
+    root.join(format!("{prefix}.ndjson"))
+}
+
+fn ref_index_shard_path(root: &Path, ref_id: &str) -> PathBuf {
+    ref_index_shard_path_with_prefix(root, ref_id, REF_INDEX_SHARD_PREFIX_LEN)
+}
+
+fn legacy_ref_index_shard_path(root: &Path, ref_id: &str) -> PathBuf {
+    ref_index_shard_path_with_prefix(root, ref_id, REF_INDEX_LEGACY_SHARD_PREFIX_LEN)
+}
+
+fn ref_index_read_shard_paths(root: &Path, ref_id: &str) -> Vec<PathBuf> {
+    let current = ref_index_shard_path(root, ref_id);
+    let legacy = legacy_ref_index_shard_path(root, ref_id);
+    if current == legacy {
+        vec![current]
+    } else {
+        vec![current, legacy]
+    }
 }
 
 fn ref_index_lock_path(shard: &Path) -> PathBuf {
@@ -3023,12 +3046,9 @@ fn ref_index_timestamp() -> u128 {
 }
 
 fn ref_index_text(path: &Path) -> Option<String> {
-    read_limited_utf8(
-        fs::File::open(path).ok()?,
-        (REF_INDEX_MAX_BYTES as usize).saturating_mul(4),
-    )
-    .ok()
-    .flatten()
+    read_limited_utf8(fs::File::open(path).ok()?, REF_INDEX_READ_MAX_BYTES)
+        .ok()
+        .flatten()
 }
 
 fn parsed_ref_index_entries(text: &str) -> impl Iterator<Item = RefIndexEntry> + '_ {
@@ -3143,8 +3163,7 @@ fn compact_ref_index_shard(shard: &Path) -> Result<(), RecoveryError> {
     let Some(file) = open_optional_file(shard)? else {
         return Ok(());
     };
-    let Some(text) = read_limited_utf8(file, (REF_INDEX_MAX_BYTES as usize).saturating_mul(4))?
-    else {
+    let Some(text) = read_limited_utf8(file, REF_INDEX_READ_MAX_BYTES)? else {
         return Ok(());
     };
     write_ref_index_entries(shard, newest_ref_index_entries(&text, None).values())
@@ -3237,8 +3256,37 @@ fn write_ref_index_entries<'a>(
 
 fn ref_index_blob_entries(ref_id: &str) -> Option<(PathBuf, Vec<RefIndexEntry>)> {
     let root = ref_index_root()?;
-    let text = ref_index_text(&ref_index_shard_path(&root, ref_id))?;
-    let entries = ref_index_entries_for_ref(&text, ref_id);
+    let mut by_store = BTreeMap::<String, RefIndexEntry>::new();
+    for shard in ref_index_read_shard_paths(&root, ref_id) {
+        let Some(text) = ref_index_text(&shard) else {
+            continue;
+        };
+        for mut entry in ref_index_entries_for_ref(&text, ref_id) {
+            match by_store.entry(entry.store_path.clone()) {
+                std::collections::btree_map::Entry::Vacant(slot) => {
+                    slot.insert(entry);
+                }
+                std::collections::btree_map::Entry::Occupied(mut slot) => {
+                    let existing = slot.get_mut();
+                    if entry.ts >= existing.ts {
+                        entry.expanded |= existing.expanded;
+                        entry.expansion_count = entry.expansion_count.max(existing.expansion_count);
+                        entry.last_expanded_ts =
+                            entry.last_expanded_ts.max(existing.last_expanded_ts);
+                        slot.insert(entry);
+                    } else {
+                        existing.expanded |= entry.expanded;
+                        existing.expansion_count =
+                            existing.expansion_count.max(entry.expansion_count);
+                        existing.last_expanded_ts =
+                            existing.last_expanded_ts.max(entry.last_expanded_ts);
+                    }
+                }
+            }
+        }
+    }
+    let mut entries: Vec<_> = by_store.into_values().collect();
+    entries.sort_by_key(|entry| std::cmp::Reverse(entry.ts));
     Some((root, entries))
 }
 

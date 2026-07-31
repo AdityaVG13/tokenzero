@@ -632,10 +632,112 @@ fn ref_index_concurrent_append_smoke() {
             thread.join().unwrap();
         }
 
-        let shard = index_dir.path().join("ba.ndjson");
+        let shard = index_dir.path().join("ba0.ndjson");
         let text = fs::read_to_string(shard).unwrap();
         let entries = newest_ref_index_entries(&text, None);
         assert_eq!(entries.len(), 16);
+    });
+}
+
+#[test]
+fn saturated_legacy_ref_index_shard_is_read_only_and_compatible() {
+    let index_dir = tempdir().unwrap();
+    with_ref_index_env(index_dir.path(), true, || {
+        let ref_id = "tz://blob/ba0saturated-legacy".to_string();
+        let legacy_store = index_dir.path().join("legacy-store.json");
+        let current_store = index_dir.path().join("current-store.json");
+        let legacy = legacy_ref_index_shard_path(index_dir.path(), &ref_id);
+        let current = ref_index_shard_path(index_dir.path(), &ref_id);
+        assert_eq!(legacy.file_name().unwrap(), "ba.ndjson");
+        assert_eq!(current.file_name().unwrap(), "ba0.ndjson");
+
+        append_ref_index_line(
+            &legacy,
+            &ref_id,
+            &legacy_store,
+            1,
+            ContentClass::Unknown,
+            false,
+            0,
+            None,
+        )
+        .unwrap();
+        OpenOptions::new()
+            .append(true)
+            .open(&legacy)
+            .unwrap()
+            .write_all(&vec![b' '; REF_INDEX_MAX_BYTES as usize])
+            .unwrap();
+        let legacy_before = fs::read(&legacy).unwrap();
+        assert!(legacy_before.len() as u64 > REF_INDEX_MAX_BYTES);
+
+        append_blob_refs_to_ref_index(&current_store, &[ref_id.clone()], None);
+
+        assert_eq!(
+            fs::read(&legacy).unwrap(),
+            legacy_before,
+            "new persists must never scan-and-rewrite saturated legacy shards"
+        );
+        let current_text = fs::read_to_string(&current).unwrap();
+        assert!(current_text.contains(&ref_id));
+        assert!(current_text.contains(current_store.to_string_lossy().as_ref()));
+        let (_, entries) = ref_index_blob_entries(&ref_id).unwrap();
+        assert!(
+            entries
+                .iter()
+                .any(|entry| entry.store_path == legacy_store.to_string_lossy().as_ref()),
+            "legacy generation must remain readable"
+        );
+        assert!(
+            entries
+                .iter()
+                .any(|entry| entry.store_path == current_store.to_string_lossy().as_ref()),
+            "current generation must be readable"
+        );
+    });
+}
+
+#[test]
+fn legacy_ref_index_generation_remains_expandable() {
+    let index_dir = tempdir().unwrap();
+    let source_dir = tempdir().unwrap();
+    let source_cache = source_dir.path().join("source-cache.json");
+    let stored = with_ref_index_env(index_dir.path(), false, || {
+        let mut source = RecoveryStore::new(Some(source_cache.clone()));
+        source
+            .store_payload(
+                "legacy generation payload\n",
+                ContentType::Unknown,
+                None,
+                None,
+                None,
+            )
+            .unwrap()
+    });
+
+    with_ref_index_env(index_dir.path(), true, || {
+        let legacy = legacy_ref_index_shard_path(index_dir.path(), &stored.blob_ref);
+        append_ref_index_line(
+            &legacy,
+            &stored.blob_ref,
+            &source_cache,
+            1,
+            ContentClass::Unknown,
+            false,
+            0,
+            None,
+        )
+        .unwrap();
+        assert!(
+            !ref_index_shard_path(index_dir.path(), &stored.blob_ref).exists(),
+            "fixture must resolve exclusively through the legacy generation"
+        );
+
+        let other_dir = tempdir().unwrap();
+        let mut other = RecoveryStore::new(Some(other_dir.path().join("other-cache.json")));
+        let expanded = other.expand(&stored.blob_ref, Some("raw"), None, None, None, None);
+        assert!(expanded.found, "{}", expanded.reason);
+        assert_eq!(expanded.content, "legacy generation payload\n");
     });
 }
 
