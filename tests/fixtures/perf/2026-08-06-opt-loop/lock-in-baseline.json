@@ -1,0 +1,26 @@
+{
+  "name": "S4_whole_clean",
+  "locked_at_utc": "2026-08-06T19:42:19Z",
+  "product_git": "d39041e1ee3fe48681fb8d5e16fe718def59d2f3",
+  "binary_sha256": "aa616e4ab05d79a9f1ef1beb1ab2318f77568dd821710d3d8241a51af6822d45",
+  "tokenzero_version": "tokenzero 1.4.0",
+  "source": "tests/artifacts/perf/2026-08-06-opt-loop/final-sweep/hyperfine-S4_whole.json",
+  "n": 20,
+  "p50_ms": 21.733,
+  "p95_ms": 22.2,
+  "mean_ms": 21.776,
+  "std_ms": 0.298,
+  "ref": "tz://blob/e179e885d1e6c39cd3d35ed21d7820461ef75af429b0e331892aef8240003274",
+  "golden_stdout_sha256": "e179e885d1e6c39cd3d35ed21d7820461ef75af429b0e331892aef8240003274",
+  "thresholds": {
+    "abs_p50_ms": 30.0,
+    "relative_pct": 25.0,
+    "warn_p50_ms": 25.0
+  },
+  "keep_commits": [
+    "5bab208",
+    "5608dcf",
+    "30061eb",
+    "d39041e"
+  ]
+}

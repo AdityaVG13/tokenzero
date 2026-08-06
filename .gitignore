@@ -136,6 +136,7 @@ NDH6SA~M
 # Public helper scripts allowlist
 /scripts/*
 !/scripts/bench_persist_gate.sh
+!/scripts/bench_s4_whole_gate.sh
 !/scripts/benchmark_tokens.sh
 !/scripts/check_embedded_tests.py
 !/scripts/check_module_boundaries.py
