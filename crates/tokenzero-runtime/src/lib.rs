@@ -29,6 +29,8 @@ pub const DEFAULT_SHELL_SPILL_BYTES: usize = 1024 * 1024;
 pub enum RuntimeError {
     #[error("empty command")]
     EmptyCommand,
+    #[error("spawned command {0} pipe is unavailable")]
+    MissingPipe(&'static str),
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
 }
@@ -358,9 +360,32 @@ where
     configure_process_group(&mut command);
     let mut child = command.spawn()?;
     let process_group = ProcessGroup::for_child(&child);
+    let stdout = match required_child_pipe(child.stdout.take(), "stdout") {
+        Ok(stdout) => stdout,
+        Err(error) => {
+            terminate_child_after_setup_error(&mut child, &process_group);
+            return Err(error);
+        }
+    };
+    let stderr = match required_child_pipe(child.stderr.take(), "stderr") {
+        Ok(stderr) => stderr,
+        Err(error) => {
+            terminate_child_after_setup_error(&mut child, &process_group);
+            return Err(error);
+        }
+    };
+    let child_stdin = if stdin.is_some() {
+        match required_child_pipe(child.stdin.take(), "stdin") {
+            Ok(stdin) => Some(stdin),
+            Err(error) => {
+                terminate_child_after_setup_error(&mut child, &process_group);
+                return Err(error);
+            }
+        }
+    } else {
+        None
+    };
     observer(Some(child.id()), process_group.pgid(), "running");
-    let stdout = child.stdout.take().expect("stdout is piped");
-    let stderr = child.stderr.take().expect("stderr is piped");
     let stdout_policy = output_policy.clone();
     let stderr_policy = output_policy.clone();
     let stream_observer = Arc::new(stream_observer);
@@ -377,7 +402,7 @@ where
         })
     });
     // Stdin writes can block; keep them off the wait_timeout path.
-    let stdin_writer = spawn_stdin_writer(stdin, child.stdin.take());
+    let stdin_writer = spawn_stdin_writer(stdin, child_stdin);
     let mut force_timed_out = false;
     let status = match child.wait_timeout(timeout)? {
         Some(status) => status,
@@ -503,10 +528,19 @@ fn spawn_io_worker<T: Send + 'static>(
     }
 }
 
+fn required_child_pipe<T>(pipe: Option<T>, name: &'static str) -> Result<T, RuntimeError> {
+    pipe.ok_or(RuntimeError::MissingPipe(name))
+}
+
+fn terminate_child_after_setup_error(child: &mut std::process::Child, group: &ProcessGroup) {
+    group.terminate();
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
 fn spawn_stdin_writer(input: Option<&str>, stdin: Option<ChildStdin>) -> Option<IoWorker<()>> {
-    input.map(|input| {
+    input.zip(stdin).map(|(input, mut stdin)| {
         let input = input.as_bytes().to_vec();
-        let mut stdin = stdin.expect("stdin is piped");
         spawn_io_worker("stdin writer", move || stdin.write_all(&input))
     })
 }
@@ -1227,6 +1261,43 @@ pub fn env_map(pairs: &[String]) -> Result<BTreeMap<String, String>, RuntimeErro
         out.insert(key.to_string(), value.to_string());
     }
     Ok(out)
+}
+
+#[cfg(test)]
+mod stdio_error_tests {
+    use super::*;
+
+    #[test]
+    fn missing_spawn_pipe_is_a_typed_runtime_error() {
+        let error = required_child_pipe::<()>(None, "stdout").unwrap_err();
+        assert!(matches!(&error, RuntimeError::MissingPipe("stdout")));
+        assert_eq!(
+            error.to_string(),
+            "spawned command stdout pipe is unavailable"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn command_pipes_capture_both_streams_and_write_stdin() {
+        let argv = vec![
+            "/bin/sh".to_string(),
+            "-c".to_string(),
+            "cat; printf err >&2".to_string(),
+        ];
+        let result = run_command(
+            &argv,
+            None,
+            None,
+            Some("input"),
+            Duration::from_secs(2),
+            false,
+        )
+        .unwrap();
+        assert!(result.ok);
+        assert_eq!(result.stdout, "input");
+        assert_eq!(result.stderr, "err");
+    }
 }
 
 #[cfg(test)]
