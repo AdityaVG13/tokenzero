@@ -7,7 +7,7 @@ pub struct PersistResult {
 
 pub(crate) enum RecoveryStoreLease<'a> {
     Shared {
-        store: Option<RecoveryStore>,
+        store: RecoveryStore,
         slot: &'a Mutex<Option<RecoveryStore>>,
     },
     Owned(RecoveryStore),
@@ -18,10 +18,7 @@ impl std::ops::Deref for RecoveryStoreLease<'_> {
 
     fn deref(&self) -> &Self::Target {
         match self {
-            Self::Shared { store, .. } => store
-                .as_ref()
-                .expect("checked-out recovery store must remain present"),
-            Self::Owned(store) => store,
+            Self::Shared { store, .. } | Self::Owned(store) => store,
         }
     }
 }
@@ -29,10 +26,7 @@ impl std::ops::Deref for RecoveryStoreLease<'_> {
 impl std::ops::DerefMut for RecoveryStoreLease<'_> {
     fn deref_mut(&mut self) -> &mut Self::Target {
         match self {
-            Self::Shared { store, .. } => store
-                .as_mut()
-                .expect("checked-out recovery store must remain present"),
-            Self::Owned(store) => store,
+            Self::Shared { store, .. } | Self::Owned(store) => store,
         }
     }
 }
@@ -42,12 +36,10 @@ impl Drop for RecoveryStoreLease<'_> {
         let Self::Shared { store, slot } = self else {
             return;
         };
-        let Some(store) = store.take() else {
-            return;
-        };
         let mut available = slot.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         if available.is_none() {
-            *available = Some(store);
+            let placeholder = RecoveryStore::new(None);
+            *available = Some(std::mem::replace(store, placeholder));
         }
     }
 }
@@ -63,10 +55,7 @@ impl TokenZeroEngine {
                     .unwrap_or_else(|poisoned| poisoned.into_inner())
                     .take()
                     .unwrap_or_else(|| RecoveryStore::new(Some(self.config.cache_path.clone())));
-                RecoveryStoreLease::Shared {
-                    store: Some(store),
-                    slot,
-                }
+                RecoveryStoreLease::Shared { store, slot }
             }
             None => {
                 RecoveryStoreLease::Owned(RecoveryStore::new(Some(self.config.cache_path.clone())))
@@ -916,10 +905,31 @@ pub fn preview(text: &str) -> String {
 
 #[cfg(test)]
 mod preview_tests {
-    use tokenzero_core::Mode;
-    use tokenzero_recovery::ExpansionResult;
+    use std::sync::Mutex;
 
-    use super::{LocalPayloadPolicy, expansion_response, local_payload_policy, preview};
+    use tokenzero_core::Mode;
+    use tokenzero_recovery::{ExpansionResult, RecoveryStore};
+
+    use super::{
+        LocalPayloadPolicy, RecoveryStoreLease, expansion_response, local_payload_policy, preview,
+    };
+
+    #[test]
+    fn shared_recovery_store_lease_returns_its_store_without_optional_state() {
+        let slot = Mutex::new(None);
+        {
+            let mut lease = RecoveryStoreLease::Shared {
+                store: RecoveryStore::new(None),
+                slot: &slot,
+            };
+            lease.recovery_count = 7;
+        }
+        let available = slot.lock().unwrap();
+        assert_eq!(
+            available.as_ref().map(|store| store.recovery_count),
+            Some(7)
+        );
+    }
 
     #[test]
     fn capsule_payload_policy_respects_threshold_boundaries_and_modes() {
