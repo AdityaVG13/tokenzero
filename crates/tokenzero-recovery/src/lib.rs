@@ -3563,6 +3563,51 @@ fn blob_sidecar_dir(cache_path: &Path) -> PathBuf {
     append_file_name_suffix(cache_path, ".blobs")
 }
 
+/// Prove blob reachability from on-disk sidecar / SharedCas without loading
+/// the multi-MB recovery snapshot and journal.
+///
+/// Session-memory resume used to call [`RecoveryStore::new`] solely for
+/// [`RecoveryStore::has_ref_local`], which re-parsed the full cache on every
+/// one-shot CLI expand (~20+ ms on the S4_whole corpus). Large externalized
+/// blobs already have a content-addressed sidecar; SharedCas has the same
+/// full-hash objects. When either proves the ref, the seen-set record is
+/// safe to restore without touching the recovery JSON.
+///
+/// Contract:
+/// - `true` means presence is proven on disk (isomorphic to a successful
+///   `has_ref_local` for that blob).
+/// - `false` does **not** prove absence from the snapshot (small inline-only
+///   blobs, file/unit/search refs, aliases). Callers must fall back to
+///   [`RecoveryStore::has_ref_local`] for those cases.
+pub fn blob_ref_proven_on_disk(cache_path: &Path, ref_id: &str) -> bool {
+    let Some(lookup) = canonicalize_expand_ref(ref_id) else {
+        return false;
+    };
+    let Some(parsed) = parse_ref(&lookup) else {
+        return false;
+    };
+    if parsed.kind != "blob" {
+        return false;
+    }
+    let Some(hash) = ref_index_id_part(parsed.bare) else {
+        return false;
+    };
+    // Externalized large-blob sidecar: `<cache>.blobs/<full-hash>.txt`.
+    if hash.len() == 64 {
+        let sidecar = blob_sidecar_dir(cache_path).join(format!("{hash}.txt"));
+        if sidecar.is_file() {
+            return true;
+        }
+    }
+    // Unified / sibling SharedCas object store.
+    if let Some(cas) = SharedCas::detect_from_cache_path(cache_path) {
+        if cas.contains(hash) {
+            return true;
+        }
+    }
+    false
+}
+
 fn externalize_blob_value(cache_path: &Path, text: &str, hash: &str) -> Option<String> {
     if text.len() < BLOB_EXTERNALIZE_MIN_BYTES {
         return None;

@@ -48,13 +48,18 @@ impl SessionPersistence {
         let Some(scope) = state.scopes.get(&self.scope_id) else {
             return;
         };
-        let store = tokenzero_recovery::RecoveryStore::new(Some(self.cache_path.clone()));
-        let mut ref_available = HashMap::new();
         // v1 has no watermark, so its first resumed turn must serve full.
-        // Use local/CAS reachability only — full has_ref walks ref-index and
-        // can reload multi-MB recovery journals once per unique blob_ref.
+        //
+        // H3: Prefer O(1) on-disk sidecar/CAS proofs before constructing
+        // RecoveryStore::new (full snapshot+journal parse, ~20+ ms on S4_whole).
+        // When every residual blob proves on disk, skip the store entirely.
+        // When any ref is unproven, fall back once to RecoveryStore::has_ref_local
+        // so inline-only / non-sidecar blobs restore exactly (isomorphism).
+        // Full has_ref is never used here (ref-index walks reload journals).
         let records = if state.version >= STATE_VERSION {
             let mut out = HashMap::new();
+            let mut ref_available: HashMap<&str, bool> = HashMap::new();
+            let mut unresolved: Vec<&PersistedRecordEntry> = Vec::new();
             for (idx, entry) in scope.records.iter().enumerate() {
                 if crate::wall::check_active_wall_deadline_every(
                     idx,
@@ -65,11 +70,32 @@ impl SessionPersistence {
                     // Abort mid-load rather than burning past the host wall.
                     return;
                 }
-                let available = *ref_available
-                    .entry(entry.record.blob_ref.as_str())
-                    .or_insert_with(|| store.has_ref_local(&entry.record.blob_ref));
+                let blob = entry.record.blob_ref.as_str();
+                let available = *ref_available.entry(blob).or_insert_with(|| {
+                    tokenzero_recovery::blob_ref_proven_on_disk(&self.cache_path, blob)
+                });
                 if available {
                     out.insert(entry.key.clone(), entry.record.clone());
+                } else {
+                    unresolved.push(entry);
+                }
+            }
+            if !unresolved.is_empty() {
+                let store =
+                    tokenzero_recovery::RecoveryStore::new(Some(self.cache_path.clone()));
+                for entry in unresolved {
+                    let blob = entry.record.blob_ref.as_str();
+                    let available = match ref_available.get(blob).copied() {
+                        Some(true) => true,
+                        Some(false) | None => {
+                            let ok = store.has_ref_local(blob);
+                            ref_available.insert(blob, ok);
+                            ok
+                        }
+                    };
+                    if available {
+                        out.insert(entry.key.clone(), entry.record.clone());
+                    }
                 }
             }
             out
