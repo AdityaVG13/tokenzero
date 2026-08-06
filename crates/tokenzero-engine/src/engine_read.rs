@@ -167,8 +167,8 @@ impl TokenZeroEngine {
             };
             refs.push(ref_record("blob", stored.blob_ref.clone(), text.len()));
             refs.push(ref_record("file", stored.file_ref.clone(), text.len()));
-            let capsule = if raw {
-                tokenzero_core::Capsule {
+            let capsule_result = if raw {
+                Ok(tokenzero_core::Capsule {
                     text: text.clone(),
                     raw_tokens: stored.raw_tokens,
                     visible_tokens: stored.raw_tokens,
@@ -178,7 +178,7 @@ impl TokenZeroEngine {
                     exact_refs: Vec::new(),
                     lossy_spans: Vec::new(),
                     lossy_policy_id: None,
-                }
+                })
             } else {
                 let capsule_mode = match local_payload_policy(
                     text.len(),
@@ -197,6 +197,10 @@ impl TokenZeroEngine {
                     Some(&path.display().to_string()),
                     Some(&stored.file_ref),
                 )
+            };
+            let capsule = match capsule_result {
+                Ok(capsule) => capsule,
+                Err(error) => return capsule_error_response("read", error),
             };
             let part_text = capsule.text;
             let part_tokens = capsule.visible_tokens;

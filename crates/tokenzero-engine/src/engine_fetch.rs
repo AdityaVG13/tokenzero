@@ -200,7 +200,7 @@ impl TokenZeroEngine {
         if !cache_hit && storage_error.is_none() && refs_complete {
             record_fetch(index_path, url, &stored.blob_ref, body.len());
         }
-        let capsule = recoverable_capsule(
+        let capsule = match recoverable_capsule(
             body,
             body,
             stored.raw_tokens,
@@ -209,7 +209,10 @@ impl TokenZeroEngine {
             &format!("fetch {}", zero_hit_label(url)),
             Some(&stored.blob_ref),
             refs_complete,
-        );
+        ) {
+            Ok(capsule) => capsule,
+            Err(error) => return capsule_error_response("fetch", error),
+        };
         let mut response = capsule_response!(
             "fetch",
             mode,

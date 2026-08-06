@@ -469,12 +469,17 @@ fn exact_recovery_ref(reference: &str, byte_len: usize) -> Option<String> {
     })
 }
 
+fn validated_capsule(capsule: Capsule, original: &str) -> Result<Capsule, String> {
+    capsule.validate_omission_rule(original)?;
+    Ok(capsule)
+}
+
 fn finalize_capsule_omission(
     mut capsule: Capsule,
     original: &str,
     max_visible_tokens: usize,
     exact_ref: Option<String>,
-) -> Capsule {
+) -> Result<Capsule, String> {
     let original_trimmed = original.trim_end();
     let omitted = !original_trimmed.is_empty() && !capsule.text.contains(original_trimmed);
     if omitted {
@@ -526,10 +531,7 @@ fn finalize_capsule_omission(
             }
         }
     }
-    capsule
-        .validate_omission_rule(original)
-        .expect("capsule emission violated the omission rule");
-    capsule
+    validated_capsule(capsule, original)
 }
 
 pub fn make_capsule(
@@ -537,7 +539,7 @@ pub fn make_capsule(
     mode: Mode,
     max_visible_tokens: usize,
     label: Option<&str>,
-) -> Capsule {
+) -> Result<Capsule, String> {
     let raw_tokens = count_tokens(text);
     make_capsule_with_raw_tokens(text, raw_tokens, mode, max_visible_tokens, label)
 }
@@ -548,7 +550,7 @@ pub fn make_capsule_with_raw_tokens(
     mode: Mode,
     max_visible_tokens: usize,
     label: Option<&str>,
-) -> Capsule {
+) -> Result<Capsule, String> {
     make_capsule_with_recovery_ref(text, raw_tokens, mode, max_visible_tokens, label, None)
 }
 
@@ -560,7 +562,7 @@ pub fn make_capsule_with_recovery_ref(
     max_tokens: usize,
     label: Option<&str>,
     recovery_ref: Option<&str>,
-) -> Capsule {
+) -> Result<Capsule, String> {
     let prefix = capsule_prefix(label, max_tokens, raw_tokens);
     let exact_ref = recovery_ref.and_then(|reference| exact_recovery_ref(reference, text.len()));
     let policy = mode.effective_policy();
@@ -622,7 +624,7 @@ pub fn make_capsule_content_aware(
     label: Option<&str>,
     recovery_ref: Option<&str>,
     aggressive: bool,
-) -> Capsule {
+) -> Result<Capsule, String> {
     if !aggressive && (max_visible_tokens == 0 || raw_tokens <= max_visible_tokens) {
         return make_capsule_with_recovery_ref(
             text,
@@ -1876,6 +1878,12 @@ mod capsule_omission_exact_ref {
         }
     }
 
+    #[test]
+    fn omission_validation_failure_is_returned_without_panicking() {
+        let error = validated_capsule(truncated_capsule(), &big_original()).unwrap_err();
+        assert!(error.contains("capsule omitted bytes without"), "{error}");
+    }
+
     /// tokenzero-kt7z: `tokenzero read --json` aborted with exit 101 on any file
     /// large enough to be budgeted, because this branch recorded the recovery ref
     /// in `exact_refs` but never put it in the visible text -- and
@@ -1889,7 +1897,8 @@ mod capsule_omission_exact_ref {
             &original,
             0,
             Some("tz://blob/abc#B0-100".to_string()),
-        );
+        )
+        .expect("capsule should satisfy the omission rule");
         assert!(
             capsule.text.contains("tz://blob/abc#B0-100"),
             "recovery ref must be visible, not merely recorded: {}",
@@ -1917,7 +1926,8 @@ mod capsule_omission_exact_ref {
             &original,
             0,
             Some("tz://blob/abc".to_string()),
-        );
+        )
+        .expect("capsule should satisfy the omission rule");
         assert_eq!(capsule.mode, Mode::Lossy);
         assert!(capsule.text.contains("mode=lossy"), "{}", capsule.text);
         assert!(capsule.exact_refs.is_empty());

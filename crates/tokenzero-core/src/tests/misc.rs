@@ -7,7 +7,8 @@ fn long_labels_do_not_crowd_out_tiny_payloads() {
         Mode::Auto,
         20,
         Some("C:\\Users\\Ada\\AppData\\Local\\Temp\\tokenzero-long-label\\tiny.md"),
-    );
+    )
+    .expect("capsule should satisfy the omission rule");
 
     assert!(c.text.contains("ok"), "{}", c.text);
     assert!(!c.text.contains("omitted"), "{}", c.text);

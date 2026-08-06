@@ -154,7 +154,7 @@ impl TokenZeroEngine {
             format!("{header}\n{}", applied.diff)
         };
         let assembled_tokens = count_tokens(&assembled);
-        let capsule = recoverable_capsule(
+        let capsule = match recoverable_capsule(
             &assembled,
             &assembled,
             assembled_tokens,
@@ -163,7 +163,10 @@ impl TokenZeroEngine {
             &format!("edit {}", path.display()),
             None,
             refs_complete,
-        );
+        ) {
+            Ok(capsule) => capsule,
+            Err(error) => return capsule_error_response("edit", error),
+        };
         let exact_refs_available = !refs.is_empty();
         let mut response = capsule_response!("edit", mode, capsule, refs, store.recovery_tokens);
         response.content_type = Some(ContentType::Diff.to_string());

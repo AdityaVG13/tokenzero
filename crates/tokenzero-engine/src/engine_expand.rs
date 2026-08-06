@@ -636,13 +636,16 @@ impl TokenZeroEngine {
         }
         let assembled = lines.join("\n");
         let raw_tokens = count_tokens(&assembled);
-        let capsule = make_capsule_with_raw_tokens(
+        let capsule = match make_capsule_with_raw_tokens(
             &assembled,
             raw_tokens,
             mode,
             max_visible_tokens,
             Some(&format!("recall {}", zero_hit_label(query))),
-        );
+        ) {
+            Ok(capsule) => capsule,
+            Err(error) => return capsule_error_response("recall", error),
+        };
         let mut response = capsule_response!("recall", mode, capsule, refs, 0);
         response.content_type = Some(ContentType::SearchResult.to_string());
         response.telemetry = Some(json!({
@@ -689,13 +692,16 @@ impl TokenZeroEngine {
         let mut response = self.ingest(stored_text, kind, mode, source);
         response.tool = tool.to_string();
         if let Some(accounting) = response.accounting.as_mut() {
-            let capsule = make_capsule_with_raw_tokens(
+            let capsule = match make_capsule_with_raw_tokens(
                 rendered_text,
                 accounting.raw_tokens,
                 mode,
                 max_visible_tokens,
                 Some(source),
-            );
+            ) {
+                Ok(capsule) => capsule,
+                Err(error) => return capsule_error_response(tool, error),
+            };
             accounting.visible_tokens = capsule.visible_tokens;
             if let Some(visible) = response.visible.as_mut() {
                 visible.text = capsule.text;

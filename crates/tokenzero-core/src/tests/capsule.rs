@@ -2,7 +2,8 @@ use super::*;
 
 #[test]
 fn capsule_exact_hides_payload() {
-    let c = make_capsule("secret payload", Mode::Exact, 10, Some("file"));
+    let c = make_capsule("secret payload", Mode::Exact, 10, Some("file"))
+        .expect("capsule should satisfy the omission rule");
     assert!(!c.text.contains("secret payload"));
     assert!(c.raw_tokens > 0);
 }
@@ -15,7 +16,8 @@ fn capsule_never_costs_more_than_raw_text() {
         Mode::Auto,
         4000,
         Some("docs/some/deeply/nested/path/readme.md"),
-    );
+    )
+    .expect("capsule should satisfy the omission rule");
 
     assert!(
         capsule.visible_tokens <= capsule.raw_tokens,
@@ -41,7 +43,8 @@ fn auto_capsule_honors_visible_budget_for_short_token_heavy_files() {
         .collect::<Vec<_>>()
         .join("\n");
 
-    let c = make_capsule(&text, Mode::Auto, 120, Some("state.md"));
+    let c = make_capsule(&text, Mode::Auto, 120, Some("state.md"))
+        .expect("capsule should satisfy the omission rule");
 
     assert!(c.raw_tokens > 120);
     assert!(
@@ -90,7 +93,8 @@ fn budget_truncation_marker_names_recovery_ref_when_known() {
         60,
         Some("big.txt"),
         Some("tz://file/fabc123"),
-    );
+    )
+    .expect("capsule should satisfy the omission rule");
     assert!(
         capsule.text.contains("tz://file/fabc123"),
         "{}",

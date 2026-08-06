@@ -158,7 +158,7 @@ impl TokenZeroEngine {
         let storage_error = persisted.error;
         let exact_ref_tokens = exact_ref_token_count(&refs);
         let exact_refs_available = !refs.is_empty();
-        let capsule = recoverable_capsule(
+        let capsule = match recoverable_capsule(
             &visible_source,
             &output,
             stored.raw_tokens,
@@ -167,7 +167,10 @@ impl TokenZeroEngine {
             &format!("{tool} {query}"),
             Some(&stored.blob_ref),
             refs_complete,
-        );
+        ) {
+            Ok(capsule) => capsule,
+            Err(error) => return capsule_error_response(tool, error),
+        };
         let full_bytes = capsule.text.len();
         let mut visible_text = capsule.text;
         let mut final_visible_tokens = capsule.visible_tokens;
@@ -453,7 +456,7 @@ impl TokenZeroEngine {
         );
         let persisted = persist_refs(&mut store, &mut refs);
         let exact_ref_tokens = exact_ref_token_count(&refs);
-        let capsule = recoverable_capsule(
+        let capsule = match recoverable_capsule(
             rendered.unwrap_or(output),
             output,
             stored.raw_tokens,
@@ -462,7 +465,10 @@ impl TokenZeroEngine {
             &format!("{tool} {key}"),
             Some(&stored.blob_ref),
             persisted.refs_complete,
-        );
+        ) {
+            Ok(capsule) => capsule,
+            Err(error) => return capsule_error_response(tool, error),
+        };
         let mut response = success_response(
             tool,
             mode,

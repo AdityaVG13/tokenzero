@@ -17,7 +17,7 @@ impl TokenZeroEngine {
             }
         }
         let refs_complete = prune_dead_refs(&store, &mut refs);
-        let capsule = if refs_complete {
+        let capsule_result = if refs_complete {
             tokenzero_core::make_capsule_with_recovery_ref(
                 text,
                 count_tokens(text),
@@ -28,7 +28,7 @@ impl TokenZeroEngine {
             )
         } else {
             let raw_tokens = count_tokens(text);
-            tokenzero_core::Capsule {
+            Ok(tokenzero_core::Capsule {
                 text: text.trim_end().to_string(),
                 raw_tokens,
                 visible_tokens: raw_tokens,
@@ -38,7 +38,11 @@ impl TokenZeroEngine {
                 exact_refs: Vec::new(),
                 lossy_spans: Vec::new(),
                 lossy_policy_id: None,
-            }
+            })
+        };
+        let capsule = match capsule_result {
+            Ok(capsule) => capsule,
+            Err(error) => return capsule_error_response("ingest", error),
         };
         let mut response = capsule_response!("ingest", mode, capsule, refs, store.recovery_tokens);
         response.content_type = Some(kind.to_string());

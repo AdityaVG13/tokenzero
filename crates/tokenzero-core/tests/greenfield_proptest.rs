@@ -34,7 +34,8 @@ proptest! {
     #[test]
     fn prop_visible_le_raw(text in text_strategy(), budget in budget_strategy()) {
         let raw = count_tokens(&text);
-        let capsule = make_capsule(&text, Mode::Auto, budget, Some("probe"));
+        let capsule = make_capsule(&text, Mode::Auto, budget, Some("probe"))
+            .expect("capsule should satisfy the omission rule");
         prop_assert!(
             capsule.visible_tokens <= raw,
             "visible={} raw={} budget={} text={:?}",
@@ -47,8 +48,10 @@ proptest! {
         text in text_strategy(),
         (lo, hi) in (0usize..256).prop_flat_map(|lo| (Just(lo), lo..512usize)),
     ) {
-        let low = make_capsule(&text, Mode::Auto, lo, Some("probe"));
-        let high = make_capsule(&text, Mode::Auto, hi, Some("probe"));
+        let low = make_capsule(&text, Mode::Auto, lo, Some("probe"))
+            .expect("capsule should satisfy the omission rule");
+        let high = make_capsule(&text, Mode::Auto, hi, Some("probe"))
+            .expect("capsule should satisfy the omission rule");
         prop_assert!(
             high.visible_tokens >= low.visible_tokens,
             "budget {} -> visible {}, budget {} -> visible {} for text {:?}",
@@ -65,12 +68,14 @@ fn regression_visible_33_raw_15_budget_1() {
         .join(" ");
     let raw = count_tokens(&text);
     assert_eq!(raw, 15);
-    let capsule = make_capsule(&text, Mode::Auto, 1, Some("probe"));
+    let capsule = make_capsule(&text, Mode::Auto, 1, Some("probe"))
+        .expect("capsule should satisfy the omission rule");
     assert!(
         capsule.visible_tokens <= raw,
         "visible={} raw={raw}",
         capsule.visible_tokens
     );
-    let high = make_capsule(&text, Mode::Auto, 441, Some("probe"));
+    let high = make_capsule(&text, Mode::Auto, 441, Some("probe"))
+        .expect("capsule should satisfy the omission rule");
     assert!(high.visible_tokens >= capsule.visible_tokens);
 }

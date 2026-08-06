@@ -296,7 +296,7 @@ pub fn recoverable_capsule(
     label: &str,
     recovery_ref: Option<&str>,
     refs_complete: bool,
-) -> tokenzero_core::Capsule {
+) -> Result<tokenzero_core::Capsule, String> {
     if refs_complete {
         tokenzero_core::make_capsule_with_recovery_ref(
             rendered,
@@ -307,7 +307,7 @@ pub fn recoverable_capsule(
             recovery_ref,
         )
     } else {
-        tokenzero_core::Capsule {
+        Ok(tokenzero_core::Capsule {
             text: fallback.trim_end().to_string(),
             raw_tokens,
             visible_tokens: raw_tokens,
@@ -317,7 +317,7 @@ pub fn recoverable_capsule(
             exact_refs: Vec::new(),
             lossy_spans: Vec::new(),
             lossy_policy_id: None,
-        }
+        })
     }
 }
 

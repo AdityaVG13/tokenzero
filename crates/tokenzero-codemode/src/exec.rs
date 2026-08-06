@@ -1744,6 +1744,12 @@ fn boxed_error(kind: &str, message: impl Into<String>) -> Box<CodeModeResult> {
 fn operation_error(message: impl Into<String>) -> Box<CodeModeResult> {
     Box::new(CodeModeResult::error(message, 0))
 }
+fn capsule_operation_error(error: String) -> Box<CodeModeResult> {
+    boxed_error(
+        "capsule_omission_invalid",
+        format!("capsule omission validation failed: {error}"),
+    )
+}
 fn map_journal_err(kind: &'static str) -> impl FnOnce(String) -> Box<CodeModeResult> {
     move |message| boxed_error(kind, message)
 }
@@ -3807,7 +3813,7 @@ fn bound_default_expand_response(
     params: &ExpandParams,
     response: &mut ToolResponse,
     configured_limit: usize,
-) -> bool {
+) -> Result<bool, Box<CodeModeResult>> {
     if params.raw
         || params.selector.is_some()
         || params.start_line.is_some()
@@ -3816,19 +3822,19 @@ fn bound_default_expand_response(
         || params.anchor_kind.is_some()
         || params.since.is_some()
     {
-        return false;
+        return Ok(false);
     }
     let Some(text) = response
         .visible
         .as_ref()
         .map(|visible| visible.text.clone())
     else {
-        return false;
+        return Ok(false);
     };
     let raw_tokens = count_tokens(&text);
     let limit = configured_limit.clamp(128, DEFAULT_EXPAND_VISIBLE_TOKENS);
     if raw_tokens <= limit {
-        return false;
+        return Ok(false);
     }
     let content_type = detect_content_type(&text, None);
     let capsule = tokenzero_core::make_capsule_content_aware(
@@ -3839,7 +3845,8 @@ fn bound_default_expand_response(
         Some("expand"),
         Some(&params.ref_id),
         false,
-    );
+    )
+    .map_err(capsule_operation_error)?;
     if let Some(visible) = response.visible.as_mut() {
         visible.text = capsule.text;
     }
@@ -3866,7 +3873,7 @@ fn bound_default_expand_response(
     telemetry["raw_tokens"] = json!(raw_tokens);
     telemetry["visible_tokens"] = json!(capsule.visible_tokens);
     telemetry["exact_recovery"] = json!("use {raw:true} or an explicit line/symbol window");
-    true
+    Ok(true)
 }
 
 fn exec_expand(engine: &TokenZeroEngine, args: &[Value]) -> OpResult {
@@ -3906,7 +3913,7 @@ fn exec_expand(engine: &TokenZeroEngine, args: &[Value]) -> OpResult {
         return tool_aborting_wall(resp);
     }
     let bounded = resp.error.is_none()
-        && bound_default_expand_response(&params, &mut resp, engine.config.max_visible_tokens);
+        && bound_default_expand_response(&params, &mut resp, engine.config.max_visible_tokens)?;
     // yevj: the typed receipt is the do-not-recompact source of truth;
     // legacy responses without one keep the prior terminal default.
     let terminal = resp
@@ -3959,7 +3966,7 @@ fn exec_expand_many(engine: &TokenZeroEngine, args: &[Value]) -> OpResult {
         }
         prevented = prevented.saturating_add(estimate_prevented_read_bytes(&resp));
         let bounded = resp.error.is_none()
-            && bound_default_expand_response(&params, &mut resp, engine.config.max_visible_tokens);
+            && bound_default_expand_response(&params, &mut resp, engine.config.max_visible_tokens)?;
         let terminal = resp
             .recovery
             .as_ref()
@@ -4001,7 +4008,8 @@ fn exec_compact_inner(engine: &TokenZeroEngine, args: &[Value], aggressive: bool
             Some("compact"),
             recovery_ref,
             aggressive,
-        );
+        )
+        .map_err(capsule_operation_error)?;
         let mut refs_out = Vec::new();
         if let Some(s) = &stored {
             refs_out.push(tokenzero_core::ref_record(
@@ -4238,6 +4246,14 @@ mod accumulator_bounds {
         );
         assert!(outputs.entries.contains_key(&first));
         assert!(!outputs.entries.contains_key(&PathBuf::from("session-1")));
+    }
+
+    #[test]
+    fn capsule_operation_error_has_a_stable_kind() {
+        let result = capsule_operation_error("synthetic invariant failure".to_string());
+        let error = result.error.as_ref().expect("typed CodeMode error");
+        assert_eq!(error.kind, "capsule_omission_invalid");
+        assert!(error.message.contains("synthetic invariant failure"));
     }
 
     #[test]

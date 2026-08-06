@@ -21,7 +21,8 @@ fn tiny_inputs_never_inflate() {
         let raw = count_tokens(t);
         for budget in [1usize, 22, 441] {
             for label in [Some("shell"), Some("probe"), None] {
-                let c = make_capsule(t, Mode::Auto, budget, label);
+                let c = make_capsule(t, Mode::Auto, budget, label)
+                    .expect("capsule should satisfy the omission rule");
                 assert!(
                     c.visible_tokens <= raw,
                     "INFLATE raw={raw} budget={budget} visible={} label={label:?} text={t:?}",
