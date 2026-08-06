@@ -80,7 +80,9 @@ impl SessionPersistence {
     }
 
     pub(crate) fn persist(&self, memory: &SessionMemory, changed_keys: &[ServeKey]) {
-        let _ = self.persist_inner(memory, changed_keys);
+        let _ = crate::perf_profile::_profile_session_persist(|| {
+            self.persist_inner(memory, changed_keys)
+        });
     }
 
     fn persist_inner(

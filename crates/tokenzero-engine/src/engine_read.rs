@@ -36,16 +36,18 @@ impl TokenZeroEngine {
         max_visible_tokens: usize,
         options: ServeOptions,
     ) -> ToolResponse {
-        let response = self.read_with_options_inner(
-            paths,
-            mode,
-            start_line,
-            end_line,
-            raw,
-            max_files,
-            max_visible_tokens,
-            options,
-        );
+        let response = crate::perf_profile::_profile_read_inner(|| {
+            self.read_with_options_inner(
+                paths,
+                mode,
+                start_line,
+                end_line,
+                raw,
+                max_files,
+                max_visible_tokens,
+                options,
+            )
+        });
         let ok = response.error.is_none();
         let code = response.error.as_ref().map(|err| err.code.as_str());
         self.surface_health().record_read_outcome(ok, code);

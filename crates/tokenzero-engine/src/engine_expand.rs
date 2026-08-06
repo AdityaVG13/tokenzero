@@ -326,16 +326,18 @@ impl TokenZeroEngine {
                     None,
                 );
             }
-            let since_result = expand_with_reload_on_miss(
-                &mut store,
-                &self.config.cache_path,
-                since_ref,
-                params.selector.as_deref().or(Some("raw")),
-                params.start_line,
-                params.end_line,
-                params.anchor_kind.as_deref(),
-                params.symbol.as_deref(),
-            );
+            let since_result = crate::perf_profile::_profile_expand_resolve(|| {
+                expand_with_reload_on_miss(
+                    &mut store,
+                    &self.config.cache_path,
+                    since_ref,
+                    params.selector.as_deref().or(Some("raw")),
+                    params.start_line,
+                    params.end_line,
+                    params.anchor_kind.as_deref(),
+                    params.symbol.as_deref(),
+                )
+            });
             if !since_result.found {
                 let code = match since_result.reason.as_str() {
                     "stale-ref" => "ref_stale",
@@ -350,7 +352,9 @@ impl TokenZeroEngine {
                     None,
                 );
             }
-            let target = match resolve_slice(&mut store, &params, &self.config.cache_path) {
+            let target = match crate::perf_profile::_profile_expand_resolve(|| {
+                resolve_slice(&mut store, &params, &self.config.cache_path)
+            }) {
                 Ok(target) => target,
                 Err(response) => return *response,
             };
@@ -398,11 +402,15 @@ impl TokenZeroEngine {
                 exact_bytes: false, // diff render, not verbatim bytes
             });
             response.telemetry = summary.telemetry();
-            self.session_apply(pending, &summary);
+            crate::perf_profile::_profile_expand_session_apply(|| {
+                self.session_apply(pending, &summary);
+            });
             return response;
         }
 
-        let target = match resolve_slice(&mut store, &params, &self.config.cache_path) {
+        let target = match crate::perf_profile::_profile_expand_resolve(|| {
+            resolve_slice(&mut store, &params, &self.config.cache_path)
+        }) {
             Ok(t) => t,
             Err(resp) => return *resp,
         };
@@ -445,15 +453,17 @@ impl TokenZeroEngine {
         let target = if params.raw {
             target
         } else {
-            let (masked_text, masked_count) = mask_expansion_secrets(&target.content);
-            if masked_count == 0 {
-                target
-            } else {
-                let mut masked_target = target;
-                masked_target.content = masked_text;
-                summary.note_secret_masking(masked_count);
-                masked_target
-            }
+            crate::perf_profile::_profile_expand_mask(|| {
+                let (masked_text, masked_count) = mask_expansion_secrets(&target.content);
+                if masked_count == 0 {
+                    target
+                } else {
+                    let mut masked_target = target;
+                    masked_target.content = masked_text;
+                    summary.note_secret_masking(masked_count);
+                    masked_target
+                }
+            })
         };
 
         if self.config.session_dedup {
@@ -479,7 +489,9 @@ impl TokenZeroEngine {
                 }
             }
         }
-        self.session_apply(pending, &summary);
+        crate::perf_profile::_profile_expand_session_apply(|| {
+            self.session_apply(pending, &summary);
+        });
         response
     }
 

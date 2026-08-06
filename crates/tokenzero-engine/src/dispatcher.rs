@@ -228,6 +228,15 @@ pub fn dispatch_operation(
     match kernel {
         Ok(response) => {
             record_profile(surface, overhead_ns, wall_ns, kernel_ns);
+            let ok = response.status == "ok";
+            crate::perf_profile::sample_collected(
+                resolved,
+                surface.as_str(),
+                wall_ns,
+                kernel_ns,
+                overhead_ns,
+                ok,
+            );
             let result = tool_response_to_domain(&response);
             DispatchOutcome {
                 result,
@@ -242,6 +251,14 @@ pub fn dispatch_operation(
         }
         Err(err) => {
             record_profile(surface, overhead_ns, wall_ns, kernel_ns);
+            crate::perf_profile::sample_collected(
+                resolved,
+                surface.as_str(),
+                wall_ns,
+                kernel_ns,
+                overhead_ns,
+                false,
+            );
             let domain_error = domain_dispatch_error_to_domain(err);
             let op = domain_error
                 .op

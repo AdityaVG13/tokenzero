@@ -28,15 +28,17 @@ impl TokenZeroEngine {
         max_visible_tokens: usize,
         options: ServeOptions,
     ) -> ToolResponse {
-        self.search(
-            "find",
-            query,
-            roots,
-            mode,
-            max_files,
-            max_visible_tokens,
-            options,
-        )
+        crate::perf_profile::_profile_find_search(|| {
+            self.search(
+                "find",
+                query,
+                roots,
+                mode,
+                max_files,
+                max_visible_tokens,
+                options,
+            )
+        })
     }
 
     pub fn grep(

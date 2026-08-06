@@ -39,6 +39,8 @@ mod fetch_cache;
 mod fetch_guard;
 pub mod ledger;
 pub mod metrics;
+/// Profiling-only measurement hooks (`TOKENZERO_PERF_PROFILE`). Not a product surface.
+pub mod perf_profile;
 pub mod paths;
 pub mod raw_worker;
 mod recall;
