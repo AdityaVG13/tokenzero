@@ -45,36 +45,77 @@ fn is_token_char(byte: u8) -> bool {
     byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_')
 }
 
+/// First bytes that can start a secret prefix or PEM begin (`-----BEGIN`).
+/// All are ASCII, so in valid UTF-8 they are always char boundaries (UTF-8
+/// continuation bytes never equal these values).
+///
+/// Important: never run an unbounded memchr for absent needles from every
+/// candidate -- that is O(n²) on corpora dense in one starter (e.g. `->`
+/// hyphens) when A/g/x never appear. Bound the A/g/x search to the span
+/// before the first s/- hit.
+#[inline]
+fn find_secret_candidate(haystack: &[u8]) -> Option<usize> {
+    // A=AKIA/ASIA, g=gh*/github_pat_, x=xox*, s=sk-, -=PEM -----BEGIN
+    let s_or_dash = memchr::memchr2(b's', b'-', haystack);
+    let limit = s_or_dash.unwrap_or(haystack.len());
+    if let Some(i) = memchr::memchr3(b'A', b'g', b'x', &haystack[..limit]) {
+        return Some(i);
+    }
+    s_or_dash
+}
+
 /// Mask unambiguous credential shapes in `text`, returning the masked text
 /// and the number of masked spans. Conservative by design: false positives
 /// cost exactness, false negatives leak, so only credential shapes with no
 /// legitimate prose reading are matched.
+///
+/// H1a: candidate-driven bulk scan -- jump to next possible starter via memchr,
+/// bulk-copy non-candidate spans, and only then run PEM/prefix validation.
+/// Output is isomorphic to the previous char-by-char walk.
 pub(crate) fn mask_expansion_secrets(text: &str) -> (String, usize) {
     let bytes = text.as_bytes();
     let mut out = String::with_capacity(text.len());
     let mut masked = 0usize;
     let mut cursor = 0usize;
     while cursor < bytes.len() {
-        // PEM private key block: mask from BEGIN line through the END line.
-        let first_line_end = text[cursor..].find('\n').unwrap_or(text.len() - cursor);
-        if text[cursor..].starts_with(PRIVATE_KEY_BEGIN)
-            && text[cursor..cursor + first_line_end].contains(PRIVATE_KEY_MARKER)
-        {
-            let after_begin = &text[cursor..];
-            if let Some(end_rel) = after_begin.find("-----END") {
-                let end_line_rel = after_begin[end_rel..]
-                    .find('\n')
-                    .map(|i| end_rel + i + 1)
-                    .unwrap_or(after_begin.len());
-                out.push_str("[tz-masked:private-key-block]");
-                if end_line_rel < after_begin.len() {
-                    out.push('\n');
-                }
-                cursor += end_line_rel;
-                masked += 1;
-                continue;
-            }
+        // Bulk-skip spans that cannot start any pattern.
+        let Some(rel) = find_secret_candidate(&bytes[cursor..]) else {
+            out.push_str(&text[cursor..]);
+            break;
+        };
+        let candidate = cursor + rel;
+        if candidate > cursor {
+            out.push_str(&text[cursor..candidate]);
         }
+        cursor = candidate;
+
+        // '-' only starts PEM, never a SECRET_PREFIX. Fast-path non-PEM dashes
+        // (common: `->` in source) without the prefix table walk.
+        if bytes[cursor] == b'-' {
+            let first_line_end = text[cursor..].find('\n').unwrap_or(text.len() - cursor);
+            if text[cursor..].starts_with(PRIVATE_KEY_BEGIN)
+                && text[cursor..cursor + first_line_end].contains(PRIVATE_KEY_MARKER)
+            {
+                let after_begin = &text[cursor..];
+                if let Some(end_rel) = after_begin.find("-----END") {
+                    let end_line_rel = after_begin[end_rel..]
+                        .find('\n')
+                        .map(|i| end_rel + i + 1)
+                        .unwrap_or(after_begin.len());
+                    out.push_str("[tz-masked:private-key-block]");
+                    if end_line_rel < after_begin.len() {
+                        out.push('\n');
+                    }
+                    cursor += end_line_rel;
+                    masked += 1;
+                    continue;
+                }
+            }
+            out.push('-');
+            cursor += 1;
+            continue;
+        }
+
         let mut matched = false;
         for (prefix, kind) in SECRET_PREFIXES {
             if !text[cursor..].starts_with(prefix) {
@@ -101,7 +142,10 @@ pub(crate) fn mask_expansion_secrets(text: &str) -> (String, usize) {
                 continue;
             }
             if run_len >= min_run {
-                out.push_str(&format!("[tz-masked:{kind}]"));
+                // Same marker bytes as format!("[tz-masked:{kind}]") without alloc.
+                out.push_str("[tz-masked:");
+                out.push_str(kind);
+                out.push(']');
                 cursor = run_end;
                 masked += 1;
                 matched = true;
@@ -111,7 +155,8 @@ pub(crate) fn mask_expansion_secrets(text: &str) -> (String, usize) {
         if matched {
             continue;
         }
-        // Copy one full character (never split a multibyte char).
+        // Candidate did not validate: copy one full character (never split UTF-8).
+        // Starters are ASCII so this is one byte; keep char-boundary walk for safety.
         let next = (cursor + 1..=text.len())
             .find(|&index| text.is_char_boundary(index))
             .unwrap_or(text.len());
