@@ -60,6 +60,13 @@ impl TokenZeroEngine {
         // would change result semantics, so unavailability is an error for
         // grep (find keeps identical substring semantics either way and may
         // fall back). Auto mode always falls back.
+        //
+        // Auto+find always stays in-process: find is fixed-string isomorphic
+        // with collect_search, and parent spawn/wait on rg dominates agent
+        // finds (S3_find). Internal DFS can also early-exit on max_results;
+        // rg_search must wait for the full child before sorting. Explicit
+        // TOKENZERO_SEARCH_BACKEND=rg still forces the subprocess path.
+        // Auto+grep still prefers rg for true regex semantics.
         let explicit_rg = matches!(self.config.search_backend, SearchBackend::Rg);
         let backend_unavailable = |reason: &str| {
             failure_response(
@@ -74,8 +81,8 @@ impl TokenZeroEngine {
         };
         let rg = match self.config.search_backend {
             SearchBackend::Internal => None,
-            SearchBackend::Auto if tool == "find" && roots.iter().all(|root| root.is_file()) => {
-                fallback_reason = Some("in_process_file_fast_path".to_owned());
+            SearchBackend::Auto if tool == "find" => {
+                fallback_reason = Some("in_process_find_literal".to_owned());
                 None
             }
             SearchBackend::Rg | SearchBackend::Auto => {

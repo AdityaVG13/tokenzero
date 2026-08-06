@@ -344,7 +344,7 @@ fn auto_find_single_file_uses_literal_fast_path_without_changing_output() {
 
     let telemetry = fast.telemetry.as_ref().unwrap();
     assert_eq!(telemetry["search_backend"], "internal");
-    assert_eq!(telemetry["fallback_reason"], "in_process_file_fast_path");
+    assert_eq!(telemetry["fallback_reason"], "in_process_find_literal");
     assert_eq!(
         expanded_flat_output(&auto_engine, &fast),
         expanded_flat_output(&rg_engine, &rg)
@@ -458,7 +458,27 @@ fn grep_invalid_regex_under_rg_backend_is_a_pattern_error() {
 }
 
 #[test]
-fn auto_backend_without_rg_falls_back_to_internal_with_telemetry() {
+fn auto_find_uses_in_process_literal_without_spawning_rg() {
+    let dir = tempdir().unwrap();
+    search_backend_fixture(dir.path());
+    let mut config = EngineConfig::for_root(dir.path());
+    config.search_backend = SearchBackend::Auto;
+    // Point at a missing binary so any accidental spawn would fail hard.
+    config.rg_path_override = Some(dir.path().join("missing-rg-binary"));
+    let engine = TokenZeroEngine::new(config);
+
+    let response = engine.find("needle", &[dir.path().to_path_buf()], Mode::Auto, 20, 4000);
+
+    assert_eq!(response.status, "ok");
+    let telemetry = response.telemetry.as_ref().unwrap();
+    assert_eq!(telemetry["search_backend"], "internal");
+    assert_eq!(telemetry["fallback_reason"], "in_process_find_literal");
+    let flat = expanded_flat_output(&engine, &response).replace('\\', "/");
+    assert!(flat.contains("sub/beta.rs:1:needle here"));
+}
+
+#[test]
+fn auto_grep_without_rg_falls_back_to_internal_with_telemetry() {
     let dir = tempdir().unwrap();
     search_backend_fixture(dir.path());
     let mut config = EngineConfig::for_root(dir.path());
@@ -466,7 +486,9 @@ fn auto_backend_without_rg_falls_back_to_internal_with_telemetry() {
     config.rg_path_override = Some(dir.path().join("missing-rg-binary"));
     let engine = TokenZeroEngine::new(config);
 
-    let response = engine.find("needle", &[dir.path().to_path_buf()], Mode::Auto, 20, 4000);
+    // Grep under Auto still tries rg first (regex semantics); missing rg
+    // falls back to the internal substring scanner with telemetry.
+    let response = engine.grep("needle", &[dir.path().to_path_buf()], Mode::Auto, 20, 4000);
 
     assert_eq!(response.status, "ok");
     let telemetry = response.telemetry.as_ref().unwrap();
