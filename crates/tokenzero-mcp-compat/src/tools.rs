@@ -261,7 +261,8 @@ fn exec_codemode_tool(
         options.ref_first = ref_first;
     }
     if let Some(budget) = args.get("ref_first_budget").and_then(Value::as_u64) {
-        options.ref_first_budget = budget as usize;
+        options.ref_first_budget =
+            checked_ref_first_budget(budget).map_err(JsonRpcErrorData::from)?;
     }
     let result = crate::execute_codemode_with_options(plan, options.clone());
     // wqw.9: expand outcomes are recorded on the shared SurfaceHealth inside
@@ -1119,6 +1120,15 @@ fn arg_string_any<'a>(args: &'a Value, keys: &[&str]) -> Result<&'a str, String>
         .ok_or_else(|| format!("missing {}", keys.join("|")))
 }
 
+fn checked_ref_first_budget(budget: u64) -> Result<usize, String> {
+    usize::try_from(budget).map_err(|_| {
+        format!(
+            "ref_first_budget {budget} exceeds this platform's maximum {}",
+            usize::MAX
+        )
+    })
+}
+
 fn arg_u64(args: &Value, key: &str) -> Option<usize> {
     let value = args.get(key)?;
     let n = match value {
@@ -1133,6 +1143,18 @@ fn arg_u64(args: &Value, key: &str) -> Option<usize> {
 mod result_surfaced_envelope_tests {
     use super::*;
     use crate::CodeModeResult;
+
+    #[test]
+    fn ref_first_budget_conversion_never_truncates() {
+        assert_eq!(checked_ref_first_budget(2048), Ok(2048));
+        let maximum = checked_ref_first_budget(u64::MAX);
+        if usize::BITS < u64::BITS {
+            let error = maximum.unwrap_err();
+            assert!(error.contains("exceeds this platform's maximum"), "{error}");
+        } else {
+            assert_eq!(maximum, Ok(usize::MAX));
+        }
+    }
 
     #[test]
     fn v3_completed_scalar_keeps_structured_value() {
