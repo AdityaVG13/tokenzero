@@ -404,6 +404,15 @@ fn cas_probe_uses_canonical_subtree_and_leaves_no_artifacts() {
 }
 
 #[test]
+fn publication_hash_prefix_rejects_missing_filename_bytes() {
+    assert_eq!(publication_hash_prefix("ab"), Ok("ab"));
+    assert_eq!(
+        publication_hash_prefix("a"),
+        Err(TokenZeroStoreError::Malformed)
+    );
+}
+
+#[test]
 fn publish_preserves_containment_conflict_and_corruption_categories() {
     let dir = tempdir().unwrap();
 

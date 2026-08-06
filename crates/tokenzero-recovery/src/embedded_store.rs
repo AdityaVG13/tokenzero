@@ -623,13 +623,8 @@ fn probe_durable_cache_target(
     })
 }
 
-fn publication_target(cas: &SharedCas, bytes: &[u8]) -> PathBuf {
-    let hash = crate::shared_cas::content_sha256_hex(bytes);
-    cas.root()
-        .join("blobs")
-        .join("sha256")
-        .join(&hash[..2])
-        .join(hash)
+fn publication_hash_prefix(hash: &str) -> Result<&str, TokenZeroStoreError> {
+    hash.get(..2).ok_or(TokenZeroStoreError::Malformed)
 }
 
 fn prepare_canonical_prefix(
@@ -686,12 +681,15 @@ fn prepare_canonical_prefix(
 }
 
 fn validate_publication_target(cas: &SharedCas, bytes: &[u8]) -> Result<(), TokenZeroStoreError> {
-    let target = publication_target(cas, bytes);
-    let hash = target
-        .file_name()
-        .and_then(|name| name.to_str())
-        .expect("publication target has hash filename");
-    let _ = prepare_canonical_prefix(cas, &hash[..2])?;
+    let hash = crate::shared_cas::content_sha256_hex(bytes);
+    let prefix = publication_hash_prefix(&hash)?;
+    let target = cas
+        .root()
+        .join("blobs")
+        .join("sha256")
+        .join(prefix)
+        .join(&hash);
+    let _ = prepare_canonical_prefix(cas, prefix)?;
     match std::fs::symlink_metadata(&target) {
         Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_file() => {
             Err(TokenZeroStoreError::PublishConflict)
