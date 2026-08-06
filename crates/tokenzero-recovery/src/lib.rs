@@ -12,10 +12,10 @@ use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{
     LazyLock,
-    atomic::{AtomicU64, Ordering},
+    atomic::{AtomicU8, AtomicU64, Ordering},
 };
 use std::thread;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use thiserror::Error;
 use tokenzero_core::{ContentType, count_tokens, error_block, id_for, sha256_hex, symbol_block};
 
@@ -93,6 +93,41 @@ const REF_INDEX_DISABLE_ENV: &str = "TOKENZERO_REF_INDEX";
 #[cfg(not(test))]
 const REF_INDEX_PATH_ENV: &str = "TOKENZERO_REF_INDEX_PATH";
 const JOURNAL_MAX_SEALED_SEGMENTS: usize = 4;
+
+
+/// Profiling-only leaf spans for expand (TOKENZERO_PERF_PROFILE). No product effect when off.
+fn expand_leaf_span<R>(span: &'static str, f: impl FnOnce() -> R) -> R {
+    static ENABLED: AtomicU8 = AtomicU8::new(0);
+    let on = match ENABLED.load(Ordering::Relaxed) {
+        2 => true,
+        1 => false,
+        _ => {
+            let on = env::var("TOKENZERO_PERF_PROFILE")
+                .ok()
+                .as_deref()
+                .map(|raw| {
+                    matches!(
+                        raw.trim().to_ascii_lowercase().as_str(),
+                        "1" | "true" | "yes" | "on"
+                    )
+                })
+                .unwrap_or(false);
+            ENABLED.store(if on { 2 } else { 1 }, Ordering::Relaxed);
+            on
+        }
+    };
+    if !on {
+        return f();
+    }
+    let t0 = Instant::now();
+    let out = f();
+    let us = u64::try_from(t0.elapsed().as_micros()).unwrap_or(u64::MAX);
+    let _ = writeln!(
+        io::stderr(),
+        r#"{{"event":"perf.profile.span_summary","span":"{span}","category":"expand.leaf","cumulative_us":{us},"count":1,"p50_us":{us},"p95_us":{us},"evidence":"recovery expand leaf Instant when TOKENZERO_PERF_PROFILE=1"}}"#
+    );
+    out
+}
 
 /// ZeroStack schemes accepted by expand. Full-hash portable blob refs first use the
 /// configured canonical shared CAS. Legacy short blob refs retain a clearly separated
@@ -594,6 +629,16 @@ pub struct ExpansionResult {
 impl ExpansionResult {
     pub fn ok(ref_id: String, selector: Option<String>, content: String) -> Self {
         let tokens = count_tokens(&content);
+        Self::ok_with_tokens(ref_id, selector, content, tokens)
+    }
+
+    /// Like [`Self::ok`] but reuses a precomputed token count (expand success path).
+    pub fn ok_with_tokens(
+        ref_id: String,
+        selector: Option<String>,
+        content: String,
+        tokens: usize,
+    ) -> Self {
         Self {
             ref_id,
             selector,
@@ -994,9 +1039,20 @@ fn cache_identities(path: &Path) -> (Option<DiskIdentity>, Option<DiskIdentity>)
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum RefResolve {
     Found(String),
+    /// Content bytes already integrity-checked against lowercase hex `sha256`.
+    FoundVerified { content: String, sha256: String },
     NotFound,
     Stale,
     DecodeFailed,
+}
+
+impl RefResolve {
+    fn verified_sha256(&self) -> Option<&str> {
+        match self {
+            Self::FoundVerified { sha256, .. } => Some(sha256.as_str()),
+            _ => None,
+        }
+    }
 }
 
 /// Absorb fsync failures that mean "this filesystem cannot fsync", not
@@ -1624,7 +1680,8 @@ impl RecoveryStore {
     pub(crate) fn resolve_blob_content(&self, ref_id: &str) -> Option<String> {
         self.state.blobs.get(ref_id).and_then(|value| {
             match resolve_blob_value(self.persistence_path.as_deref(), ref_id, value) {
-                RefResolve::Found(content) => Some(content),
+                RefResolve::Found(content)
+                | RefResolve::FoundVerified { content, .. } => Some(content),
                 RefResolve::NotFound | RefResolve::Stale | RefResolve::DecodeFailed => None,
             }
         })
@@ -1773,25 +1830,29 @@ impl RecoveryStore {
         let resolved_ref = self.resolve_alias_chain(&lookup_ref).unwrap_or(lookup_ref);
         let portable_resolved = parse_zeroref_v1_blob(&resolved_ref, None).ok();
         let shared_content = match (&portable_resolved, &self.shared_cas) {
-            (Some(portable), Some(cas)) => match shared_cas_utf8(cas, &portable.hash) {
-                Ok(content) => Some(content),
-                Err(None) => return miss!("shared-cas-non-utf8"),
-                Err(Some(SharedCasError::NotFound)) if requested_ref.starts_with("tz://") => None,
-                Err(Some(SharedCasError::NotFound)) => {
-                    if let Some(result) = self.expand_in_sibling_engine_store(
-                        &requested_ref,
-                        selector,
-                        start_line,
-                        end_line,
-                        anchor_kind,
-                        symbol,
-                    ) {
-                        return result;
+            (Some(portable), Some(cas)) => {
+                let hash = &portable.hash;
+                match expand_leaf_span("expand.leaf.shared_cas_utf8", || shared_cas_utf8(cas, hash))
+                {
+                    Ok(content) => Some(content),
+                    Err(None) => return miss!("shared-cas-non-utf8"),
+                    Err(Some(SharedCasError::NotFound)) if requested_ref.starts_with("tz://") => None,
+                    Err(Some(SharedCasError::NotFound)) => {
+                        if let Some(result) = self.expand_in_sibling_engine_store(
+                            &requested_ref,
+                            selector,
+                            start_line,
+                            end_line,
+                            anchor_kind,
+                            symbol,
+                        ) {
+                            return result;
+                        }
+                        return miss!("shared-cas-missing");
                     }
-                    return miss!("shared-cas-missing");
+                    Err(Some(err)) => return miss!(shared_cas_error_reason(err)),
                 }
-                Err(Some(err)) => return miss!(shared_cas_error_reason(err)),
-            },
+            }
             _ => None,
         };
         let ref_id = resolved_ref;
@@ -1815,12 +1876,24 @@ impl RecoveryStore {
         }
         resolve_selector_line_window(selector, &mut selected_start, &mut selected_end);
         let mut index_store_path = None;
+        // When content load already verified a digest, portable integrity can compare
+        // hex digests instead of re-hashing the full body (R1).
+        let mut content_verified_sha256: Option<String> = None;
         let content = if let Some(content) = shared_content {
+            // SharedCas::resolve already checked content_sha256_hex == lookup hash.
+            content_verified_sha256 = portable_resolved.as_ref().map(|p| p.hash.clone());
             content
         } else {
-            let (resolved, source_store_path) =
-                self.resolve_ref_with_index(parsed.kind, parsed.bare);
-            index_store_path = source_store_path;
+            let load = expand_leaf_span("expand.leaf.local_resolve", || {
+                let (resolved, source_store_path) =
+                    self.resolve_ref_with_index(parsed.kind, parsed.bare);
+                (resolved, source_store_path)
+            });
+            index_store_path = load.1;
+            let resolved = load.0;
+            if let Some(h) = resolved.verified_sha256() {
+                content_verified_sha256 = Some(h.to_string());
+            }
             match resolve_to_expand_content(resolved, &requested_ref, parsed.kind) {
                 Ok(content) => content,
                 Err(reason) if requested_alias && reason.starts_with("ref-not-found") => {
@@ -1829,10 +1902,14 @@ impl RecoveryStore {
                 Err(reason) => return miss!(reason),
             }
         };
-        if portable
-            .as_ref()
-            .is_some_and(|portable| sha256_hex(&content) != portable.hash)
-        {
+        if portable.as_ref().is_some_and(|portable| {
+            expand_leaf_span("expand.leaf.portable_integrity", || {
+                if content_verified_sha256.as_deref() == Some(portable.hash.as_str()) {
+                    return false;
+                }
+                sha256_hex(&content) != portable.hash
+            })
+        }) {
             return miss!("zeroref-corruption");
         }
         if parsed.kind == "file" && self.file_ref_is_stale(parsed.bare) {
@@ -1856,13 +1933,15 @@ impl RecoveryStore {
             symbol,
         ) {
             Ok(selected) => {
-                let mut result = self.expand_ok(
-                    requested_ref,
-                    selector_owned,
-                    &ref_id,
-                    selected,
-                    index_store_path.as_deref(),
-                );
+                let mut result = expand_leaf_span("expand.leaf.expand_ok", || {
+                    self.expand_ok(
+                        requested_ref,
+                        selector_owned,
+                        &ref_id,
+                        selected,
+                        index_store_path.as_deref(),
+                    )
+                });
                 if let Some((clamped, start, end, line_count)) = line_window {
                     result.clamped = clamped;
                     result.returned_start_line = Some(start);
@@ -1897,19 +1976,29 @@ impl RecoveryStore {
         content: String,
         index_store_path: Option<&Path>,
     ) -> ExpansionResult {
-        self.note_expand(ref_id, &content, index_store_path);
-        ExpansionResult::ok(requested_ref, selector, content)
+        // Single lexical pass: recovery_tokens and ExpansionResult.tokens share one count.
+        let tokens =
+            expand_leaf_span("expand.leaf.expand_ok_count_tokens", || count_tokens(&content));
+        self.note_expand_with_tokens(ref_id, tokens, index_store_path);
+        ExpansionResult::ok_with_tokens(requested_ref, selector, content, tokens)
     }
 
-    fn note_expand(&mut self, ref_id: &str, content: &str, index_store_path: Option<&Path>) {
-        self.recovery_tokens += count_tokens(content);
+    fn note_expand_with_tokens(
+        &mut self,
+        ref_id: &str,
+        tokens: usize,
+        index_store_path: Option<&Path>,
+    ) {
+        self.recovery_tokens += tokens;
         if let Some(store_path) = index_store_path.or(self.persistence_path.as_deref()) {
             let content_class = self
                 .ref_classes
                 .get(ref_id)
                 .copied()
                 .unwrap_or_else(|| classify_ref(ref_id, None));
-            record_ref_index_expanded(store_path, ref_id, content_class);
+            expand_leaf_span("expand.leaf.record_ref_index_expanded", || {
+                record_ref_index_expanded(store_path, ref_id, content_class);
+            });
         }
     }
 
@@ -2857,7 +2946,7 @@ fn resolve_to_expand_content(
     kind: &str,
 ) -> Result<String, String> {
     match resolve {
-        RefResolve::Found(content) => Ok(content),
+        RefResolve::Found(content) | RefResolve::FoundVerified { content, .. } => Ok(content),
         RefResolve::Stale => Err("stale-ref".into()),
         RefResolve::DecodeFailed => Err("decode-failed".into()),
         RefResolve::NotFound if is_foreign_blob_ref(requested_ref) => Err("ref-not-found".into()),
@@ -3355,7 +3444,15 @@ fn resolve_blob_from_ref_index(
     if !entries.is_empty() {
         if let Some(hash) = ref_index_id_part(ref_id) {
             match shared_cas_utf8(&SharedCas::new(root), hash) {
-                Ok(content) => return (RefResolve::Found(content), indexed_store_path),
+                Ok(content) => {
+                    return (
+                        RefResolve::FoundVerified {
+                            content,
+                            sha256: hash.to_string(),
+                        },
+                        indexed_store_path,
+                    );
+                }
                 Err(None) | Err(Some(SharedCasError::Corruption)) => {
                     return (RefResolve::DecodeFailed, indexed_store_path);
                 }
@@ -3379,7 +3476,7 @@ fn resolve_blob_from_ref_index(
             .and_then(|state| state.blobs.get(ref_id).cloned())
             .map(|value| resolve_blob_value(Some(&store_path), ref_id, &value));
         match resolved {
-            Some(result @ (RefResolve::Found(_) | RefResolve::DecodeFailed)) => {
+            Some(result @ (RefResolve::Found(_) | RefResolve::FoundVerified { .. } | RefResolve::DecodeFailed)) => {
                 prune_ref_index_stale_entries(ref_id, &stale);
                 return (result, Some(store_path));
             }
@@ -3776,7 +3873,22 @@ fn stored_source_path(stored: &StoredFile) -> Option<PathBuf> {
 }
 
 fn resolve_found_if(ok: bool, text: String, fail: RefResolve) -> RefResolve {
-    if ok { RefResolve::Found(text) } else { fail }
+    if ok {
+        RefResolve::Found(text)
+    } else {
+        fail
+    }
+}
+
+fn resolve_found_verified(ok: bool, text: String, sha256: String, fail: RefResolve) -> RefResolve {
+    if ok {
+        RefResolve::FoundVerified {
+            content: text,
+            sha256,
+        }
+    } else {
+        fail
+    }
 }
 
 fn blob_ref_digest_matches(ref_id: &str, text: &str, sha256: &str) -> bool {
@@ -3825,7 +3937,8 @@ fn resolve_blob_value(cache_path: Option<&Path>, ref_id: &str, value: &BlobEntry
             let Ok((text, actual_hash)) = read_utf8_hashed(&path, Some(expected_len)) else {
                 return RefResolve::DecodeFailed;
             };
-            resolve_found_if(actual_hash == hash, text, RefResolve::DecodeFailed)
+            let ok = actual_hash == hash;
+            resolve_found_verified(ok, text, actual_hash, RefResolve::DecodeFailed)
         }
         BlobEntry::FileRef {
             path,
@@ -3837,11 +3950,8 @@ fn resolve_blob_value(cache_path: Option<&Path>, ref_id: &str, value: &BlobEntry
             else {
                 return RefResolve::Stale;
             };
-            resolve_found_if(
-                blob_ref_digest_matches(ref_id, &text, &sha256),
-                text,
-                RefResolve::Stale,
-            )
+            let ok = blob_ref_digest_matches(ref_id, &text, &sha256);
+            resolve_found_verified(ok, text, sha256, RefResolve::Stale)
         }
     }
 }
