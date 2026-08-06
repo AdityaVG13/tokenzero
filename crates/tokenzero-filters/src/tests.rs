@@ -132,6 +132,22 @@ fn quoted_operators_do_not_count_as_compound() {
     assert_eq!(r.family, "read");
 }
 
+#[test]
+fn shell_parser_helpers_recover_an_empty_command_list() {
+    let mut commands = Vec::new();
+    let nested: Vec<char> = "rm x)".chars().collect();
+    push_nested(&mut commands, &nested, 0, ')');
+    assert_eq!(commands.len(), 1);
+    assert_eq!(commands[0].nested_commands, ["rm x"]);
+
+    commands.clear();
+    let mut word = "cat".to_owned();
+    flush_shell_word(&mut commands, &mut word);
+    assert!(word.is_empty());
+    assert_eq!(commands.len(), 1);
+    assert_eq!(commands[0].words, ["cat"]);
+}
+
 /// P04-001: cat rewrites must preserve shell-denoted argument spans
 /// (expansions, globs, tilde, comments) instead of re-quoting them.
 #[test]

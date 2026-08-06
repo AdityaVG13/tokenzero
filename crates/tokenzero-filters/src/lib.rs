@@ -379,27 +379,34 @@ fn parse_shell_commands(command: &str) -> (Vec<ShellCommand>, bool) {
 }
 
 fn push_nested(
-    commands: &mut [ShellCommand],
+    commands: &mut Vec<ShellCommand>,
     chars: &[char],
     start: usize,
     delimiter: char,
 ) -> usize {
     let (nested, next) = take_nested_command(chars, start, delimiter);
-    commands
-        .last_mut()
-        .expect("parser always has a command")
-        .nested_commands
-        .push(nested);
+    if let Some(command) = commands.last_mut() {
+        command.nested_commands.push(nested);
+    } else {
+        commands.push(ShellCommand {
+            nested_commands: vec![nested],
+            ..ShellCommand::default()
+        });
+    }
     next
 }
 
-fn flush_shell_word(commands: &mut [ShellCommand], word: &mut String) {
+fn flush_shell_word(commands: &mut Vec<ShellCommand>, word: &mut String) {
     if !word.is_empty() {
-        commands
-            .last_mut()
-            .expect("parser always has a command")
-            .words
-            .push(std::mem::take(word));
+        let word = std::mem::take(word);
+        if let Some(command) = commands.last_mut() {
+            command.words.push(word);
+        } else {
+            commands.push(ShellCommand {
+                words: vec![word],
+                ..ShellCommand::default()
+            });
+        }
     }
 }
 
