@@ -3238,9 +3238,93 @@ fn shell_timeout_ms_opt(opts: &Opts<'_>) -> Option<u64> {
 
 struct Opts<'a>(Option<&'a serde_json::Map<String, Value>>);
 
+#[derive(Clone, Copy)]
+enum OptionType {
+    Bool,
+    PositiveInteger,
+    String,
+    Mode,
+}
+
+const READ_OPTION_CONTRACT: &[(&str, OptionType)] = &[
+    ("mode", OptionType::Mode),
+    ("start_line", OptionType::PositiveInteger),
+    ("end_line", OptionType::PositiveInteger),
+    ("raw", OptionType::Bool),
+    ("fresh", OptionType::Bool),
+    ("max_files", OptionType::PositiveInteger),
+    ("max_visible_tokens", OptionType::PositiveInteger),
+];
+
+const SHELL_OPTION_CONTRACT: &[(&str, OptionType)] = &[
+    ("cwd", OptionType::String),
+    ("mode", OptionType::Mode),
+    ("rewrite", OptionType::String),
+    ("no_rewrite", OptionType::Bool),
+    ("stdin", OptionType::String),
+    ("timeout_ms", OptionType::PositiveInteger),
+    ("timeout_seconds", OptionType::PositiveInteger),
+    ("background", OptionType::Bool),
+];
+
 impl<'a> Opts<'a> {
     fn from_arg(args: &'a [Value], index: usize) -> Self {
         Self(args.get(index).and_then(|v| v.as_object()))
+    }
+
+    fn checked(
+        args: &'a [Value],
+        index: usize,
+        method: &str,
+        contract: &[(&str, OptionType)],
+    ) -> Result<Self, Box<CodeModeResult>> {
+        let Some(value) = args.get(index) else {
+            return Ok(Self(None));
+        };
+        let object = value.as_object().ok_or_else(|| {
+            boxed_error(
+                "validation",
+                format!("{method} options must be an object, got {value}"),
+            )
+        })?;
+        for (key, value) in object {
+            let Some((_, expected)) = contract.iter().find(|(name, _)| *name == key) else {
+                let supported = contract
+                    .iter()
+                    .map(|(name, _)| *name)
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                let advice = if method == "zero.shell" && key == "raw" {
+                    r#"; use { mode: "exact" } for exact shell output"#
+                } else {
+                    ""
+                };
+                return Err(boxed_error(
+                    "validation",
+                    format!(
+                        "{method} unknown option '{key}'; supported options: {supported}{advice}"
+                    ),
+                ));
+            };
+            let valid = match expected {
+                OptionType::Bool => value.is_boolean(),
+                OptionType::PositiveInteger => value
+                    .as_u64()
+                    .and_then(|number| usize::try_from(number).ok())
+                    .is_some_and(|number| number > 0),
+                OptionType::String => value.is_string(),
+                OptionType::Mode => value
+                    .as_str()
+                    .is_some_and(|mode| mode.parse::<Mode>().is_ok()),
+            };
+            if !valid {
+                return Err(boxed_error(
+                    "validation",
+                    format!("{method} option '{key}' has an invalid value: {value}"),
+                ));
+            }
+        }
+        Ok(Self(Some(object)))
     }
 
     fn usize(&self, key: &str) -> Option<usize> {
@@ -3394,12 +3478,13 @@ fn exec_read(engine: &TokenZeroEngine, work_root: &Path, args: &[Value]) -> OpRe
         )?,
         work_root,
     );
-    let opts = Opts::from_arg(args, 1);
+    let opts = Opts::checked(args, 1, "zero.read", READ_OPTION_CONTRACT)?;
     let mut payload = json!({
         "path": path_vals(&paths),
         "mode": opts.mode_or("mode", Mode::Auto).to_string(),
-        "raw": false,
-        "max_files": 20,
+        "raw": opts.bool("raw").unwrap_or(false),
+        "fresh": opts.bool("fresh").unwrap_or(false),
+        "max_files": opts.usize_or("max_files", 20),
         "max_visible_tokens": opts.max_visible(engine),
     });
     if let Some(s) = opts.usize("start_line") {
@@ -3537,12 +3622,30 @@ fn exec_tree(engine: &TokenZeroEngine, work_root: &Path, args: &[Value]) -> OpRe
 }
 
 fn exec_shell(engine: &TokenZeroEngine, work_root: &Path, args: &[Value]) -> OpResult {
-    let command = require_str_arg(
-        args,
-        0,
-        "zero.shell requires a command string as first argument",
-    )?;
-    let opts = Opts::from_arg(args, 1);
+    let (command, argv) = match args.first() {
+        Some(Value::String(command)) => (Some(command.as_str()), None),
+        Some(Value::Array(items)) => {
+            let argv = items
+                .iter()
+                .map(|item| item.as_str().map(str::to_string))
+                .collect::<Option<Vec<_>>>()
+                .filter(|argv| !argv.is_empty())
+                .ok_or_else(|| {
+                    boxed_error(
+                        "validation",
+                        "zero.shell argv must be a non-empty array of strings",
+                    )
+                })?;
+            (None, Some(argv))
+        }
+        _ => {
+            return Err(boxed_error(
+                "validation",
+                "zero.shell requires a command string or argv string array as first argument",
+            ));
+        }
+    };
+    let opts = Opts::checked(args, 1, "zero.shell", SHELL_OPTION_CONTRACT)?;
     // Default cwd to the plan/work root (not silent process cwd).
     let cwd = opts
         .str("cwd")
@@ -3566,17 +3669,32 @@ fn exec_shell(engine: &TokenZeroEngine, work_root: &Path, args: &[Value]) -> OpR
     });
     // Background jobs are transport-side composition (not a registry domain op).
     if opts.bool("background").unwrap_or(false) {
+        let command = command.ok_or_else(|| {
+            boxed_error(
+                "validation",
+                "zero.shell background mode requires a command string, not argv",
+            )
+        })?;
         return engine
             .shell_background(command, Some(cwd.as_path()), timeout)
             .map(OpOutcome::from_catalog)
             .map_err(operation_error);
     }
     let mut payload = json!({
-        "command": command,
         "cwd": cwd.display().to_string(),
         "mode": mode.to_string(),
-        "rewrite": "safe",
+        "rewrite": opts.str("rewrite").unwrap_or("safe"),
+        "no_rewrite": opts.bool("no_rewrite").unwrap_or(false),
     });
+    if let Some(command) = command {
+        payload["command"] = json!(command);
+    }
+    if let Some(argv) = argv {
+        payload["argv"] = json!(argv);
+    }
+    if let Some(stdin) = opts.str("stdin") {
+        payload["stdin"] = json!(stdin);
+    }
     // Forward milliseconds verbatim so sub-second deadlines survive; the
     // dispatcher owns the clamping for both units.
     if let Some(millis) = timeout_ms {

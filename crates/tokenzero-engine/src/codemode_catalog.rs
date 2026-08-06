@@ -21,7 +21,7 @@ macro_rules! methods {
 
 const METHOD_CATALOG: &[MethodDef] = methods! {
     "zero.read", "zero", "Read file(s) with token-budget capsule compression and exact recovery refs" =>
-        "zero.read(path: string | string[], opts?: { mode?, start_line?, end_line?, max_visible_tokens? }): Promise<{ text: string, ref: string, visible_tokens: number, raw_tokens: number }>";
+        "zero.read(path: string | string[], opts?: { mode?, start_line?, end_line?, raw?, fresh?, max_files?, max_visible_tokens? }): Promise<{ text: string, ref: string, visible_tokens: number, raw_tokens: number }>";
     "zero.find", "zero", "Literal substring search with compact, recoverable matches (never regex; use zero.grep for regex)" =>
         "zero.find(pattern: string, path?: string | string[], opts?: { mode?, max_files?, max_visible_tokens? }): Promise<{ text: string, ref: string, status: string, visible_tokens?: number, raw_tokens?: number }>";
     "zero.grep", "zero", "Grep-style content search: regex when the ripgrep backend is active, literal substring otherwise (invalid regex fails typed as invalid_pattern)" =>
@@ -30,8 +30,8 @@ const METHOD_CATALOG: &[MethodDef] = methods! {
         "zero.glob(pattern: string, path?: string | string[], opts?: { max_files? }): Promise<{ text: string, ref: string, status: string, visible_tokens?: number, raw_tokens?: number }>";
     "zero.tree", "zero", "Inspect a bounded directory tree for orientation" =>
         "zero.tree(path?: string, opts?: { depth?, include_hidden?, max_files? }): Promise<{ text: string, ref: string }>";
-    "zero.shell", "zero", "Run a shell command with status-truth telemetry and compact output; background:true returns a durable job handle" =>
-        "zero.shell(command: string, opts?: { cwd?, mode?, timeout_ms?, timeout_seconds?, background? }): Promise<{ text: string, ref: string, exit_code: number, success: boolean } | { job: string, cursor: number, version: number }>;";
+    "zero.shell", "zero", "Run a shell command with status-truth telemetry and compact output; use mode: exact for contiguous output; background:true returns a durable job handle" =>
+        "zero.shell(command: string | string[], opts?: { cwd?, mode?, rewrite?, no_rewrite?, stdin?, timeout_ms?, timeout_seconds?, background? }): Promise<{ text: string, ref: string, exit_code: number, success: boolean } | { job: string, cursor: number, version: number }>;";
     "zero.token.job", "zero.token", "Long-poll a background shell job; returns only bytes after since and a backoff hint when unchanged" =>
         "zero.token.job(id: string, opts?: { waitMs?: number, since?: number, tailBytes?: number }): Promise<{ status: string, cursor: number, version: number, tail?: string, tailBytes?: number, unchanged: boolean, nextPollMs?: number, exitCode?: number }>;";
     "zero.edit", "zero", "Apply multi-hunk find/replace edits to one file atomically" =>
@@ -143,12 +143,14 @@ pub fn search_catalog(query: &str) -> Value {
 
 fn make_example(path: &str) -> &'static str {
     match path {
-        "zero.read" => r#"const f = zero.read("src/main.rs"); return f"#,
+        "zero.read" => {
+            r#"const f = zero.read("src/main.rs", { raw: true, fresh: true }); return f"#
+        }
         "zero.find" => r#"zero.find("TODO", "src/")"#,
         "zero.grep" => r#"zero.grep("fn main", "crates/")"#,
         "zero.glob" => r#"zero.glob("**/*.rs", "crates/")"#,
         "zero.tree" => r#"zero.tree("src", { depth: 2 })"#,
-        "zero.shell" => r#"zero.shell("cargo test --quiet")"#,
+        "zero.shell" => r#"zero.shell("cargo test --quiet", { mode: "exact" })"#,
         "zero.token.job" => {
             r#"zero.token.job(jobId, { waitMs: 30000, since: cursor, tailBytes: 8192 })"#
         }
@@ -311,6 +313,57 @@ mod catalog_tests {
             grep.contains("literal substring otherwise"),
             "grep prose names the literal fallback: {grep}"
         );
+    }
+
+    #[test]
+    fn read_contract_publishes_raw_fresh_and_matches_schema() {
+        let method = describe_method("zero.read");
+        let signature = method["signature"].as_str().unwrap();
+        let example = method["example"].as_str().unwrap();
+        let properties = method["inputSchema"]["properties"].as_object().unwrap();
+        for field in [
+            "mode",
+            "start_line",
+            "end_line",
+            "raw",
+            "fresh",
+            "max_files",
+            "max_visible_tokens",
+        ] {
+            assert!(
+                signature.contains(field),
+                "signature missing {field}: {signature}"
+            );
+            assert!(properties.contains_key(field), "schema missing {field}");
+        }
+        assert!(example.contains("raw: true"), "example: {example}");
+        assert!(example.contains("fresh: true"), "example: {example}");
+    }
+
+    #[test]
+    fn shell_contract_recommends_exact_mode_without_advertising_raw() {
+        let method = describe_method("zero.shell");
+        let signature = method["signature"].as_str().unwrap();
+        let example = method["example"].as_str().unwrap();
+        assert!(!signature.contains("raw?"), "signature: {signature}");
+        for field in [
+            "mode?",
+            "rewrite?",
+            "no_rewrite?",
+            "stdin?",
+            "timeout_ms?",
+            "timeout_seconds?",
+        ] {
+            assert!(
+                signature.contains(field),
+                "signature missing {field}: {signature}"
+            );
+        }
+        assert!(signature.contains("string[]"), "signature: {signature}");
+        assert!(example.contains(r#"mode: "exact""#), "example: {example}");
+        let properties = method["inputSchema"]["properties"].as_object().unwrap();
+        assert!(properties.contains_key("argv"));
+        assert!(!properties.contains_key("raw"));
     }
 
     #[test]

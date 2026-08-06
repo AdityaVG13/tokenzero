@@ -805,6 +805,129 @@ fn concurrent_direct_compact_expand_uses_requested_store() {
 
 #[cfg(unix)]
 #[test]
+fn read_raw_fresh_is_forwarded_on_every_call() {
+    let work = tempfile::tempdir().unwrap();
+    let expected = "fresh raw line one
+fresh raw line two
+";
+    std::fs::write(work.path().join("fresh-raw.txt"), expected).unwrap();
+    let result = execute_codemode_with_options(
+        r#"
+        const first = await zero.read("fresh-raw.txt", { raw: true, fresh: true });
+        const second = await zero.read("fresh-raw.txt", { raw: true, fresh: true });
+        return { first: first.text, second: second.text, refs: [first.ref, second.ref] };
+        "#,
+        CodeModeOptions {
+            root: Some(work.path().to_path_buf()),
+            ..Default::default()
+        },
+    );
+    assert_eq!(
+        result.status,
+        CodeModeStatus::Completed,
+        "{:?}",
+        result.error
+    );
+    let value = result.value.as_ref().unwrap();
+    assert_eq!(value["first"].as_str(), Some(expected));
+    assert_eq!(value["second"].as_str(), Some(expected));
+    assert!(value["refs"].as_array().unwrap().iter().all(|reference| {
+        reference
+            .as_str()
+            .is_some_and(|reference| reference.starts_with("tz://blob/"))
+    }));
+}
+
+#[test]
+fn shell_raw_option_fails_before_execution_with_exact_mode_advice() {
+    let work = tempfile::tempdir().unwrap();
+    let marker = work.path().join("must-not-exist");
+    let command = format!("printf ran > {}", marker.display());
+    let plan = format!(
+        "return await zero.shell({}, {{ raw: true }});",
+        serde_json::to_string(&command).unwrap()
+    );
+    let result = execute_codemode_with_options(
+        &plan,
+        CodeModeOptions {
+            root: Some(work.path().to_path_buf()),
+            ..Default::default()
+        },
+    );
+    assert_eq!(result.status, CodeModeStatus::Error);
+    let error = result.error.as_ref().unwrap();
+    assert_eq!(error.kind, "validation");
+    assert!(
+        error.message.contains("unknown option 'raw'"),
+        "{}",
+        error.message
+    );
+    assert!(
+        error.message.contains(r#"mode: "exact""#),
+        "{}",
+        error.message
+    );
+    assert!(
+        !marker.exists(),
+        "invalid options must fail before shell execution"
+    );
+}
+
+#[test]
+fn read_unknown_and_invalid_options_fail_typed() {
+    let work = tempfile::tempdir().unwrap();
+    std::fs::write(
+        work.path().join("options.txt"),
+        "options
+",
+    )
+    .unwrap();
+    for plan in [
+        r#"return await zero.read("options.txt", { mystery: true });"#,
+        r#"return await zero.read("options.txt", { fresh: "yes" });"#,
+        r#"return await zero.read("options.txt", { max_files: 0 });"#,
+    ] {
+        let result = execute_codemode_with_options(
+            plan,
+            CodeModeOptions {
+                root: Some(work.path().to_path_buf()),
+                ..Default::default()
+            },
+        );
+        assert_eq!(result.status, CodeModeStatus::Error, "plan={plan}");
+        assert_eq!(result.error.as_ref().unwrap().kind, "validation");
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn shell_schema_options_forward_argv_stdin_and_exact_mode() {
+    let work = tempfile::tempdir().unwrap();
+    let result = execute_codemode_with_options(
+        r#"
+        const argv = await zero.shell(["printf", "argv-forwarded"], { mode: "exact", no_rewrite: true });
+        const stdin = await zero.shell("cat", { mode: "exact", stdin: "stdin-forwarded", rewrite: "off" });
+        return { argv: argv.text, stdin: stdin.text, argvExit: argv.exit_code, stdinExit: stdin.exit_code };
+        "#,
+        CodeModeOptions {
+            root: Some(work.path().to_path_buf()),
+            ..Default::default()
+        },
+    );
+    assert_eq!(
+        result.status,
+        CodeModeStatus::Completed,
+        "{:?}",
+        result.error
+    );
+    let value = result.value.as_ref().unwrap();
+    assert_eq!(value["argv"].as_str(), Some("argv-forwarded"));
+    assert_eq!(value["stdin"].as_str(), Some("stdin-forwarded"));
+    assert_eq!(value["argvExit"].as_i64(), Some(0));
+    assert_eq!(value["stdinExit"].as_i64(), Some(0));
+}
+
+#[test]
 fn shell_defaults_to_plan_root_for_relative_paths() {
     let work = tempfile::tempdir().unwrap();
     std::fs::write(

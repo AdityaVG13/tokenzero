@@ -169,7 +169,7 @@ impl TokenZeroEngine {
             refs.push(ref_record("file", stored.file_ref.clone(), text.len()));
             let capsule = if raw {
                 tokenzero_core::Capsule {
-                    text: text.trim_end().to_string(),
+                    text: text.clone(),
                     raw_tokens: stored.raw_tokens,
                     visible_tokens: stored.raw_tokens,
                     omitted_lines: 0,
