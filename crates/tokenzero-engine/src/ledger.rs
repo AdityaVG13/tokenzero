@@ -208,11 +208,10 @@ static FLUSH_SCHEDULER: LazyLock<FlushScheduler> = LazyLock::new(|| FlushSchedul
     }),
     wake: Condvar::new(),
 });
-static FLUSH_THREAD: LazyLock<std::thread::JoinHandle<()>> = LazyLock::new(|| {
+static FLUSH_THREAD: LazyLock<io::Result<std::thread::JoinHandle<()>>> = LazyLock::new(|| {
     std::thread::Builder::new()
         .name("tokenzero-ledger-flush".to_owned())
         .spawn(run_flush_scheduler)
-        .expect("failed to start ledger flush scheduler")
 });
 
 impl LedgerWriter {
@@ -367,8 +366,13 @@ impl LedgerWriter {
         });
         *mode = LedgerMode::Buffered(Arc::clone(&io));
         drop(mode);
-        register_flush_target(&io);
-        Ok(())
+        match register_flush_target(&io) {
+            Ok(()) => Ok(()),
+            Err(error) => {
+                io.flush()?;
+                Err(error)
+            }
+        }
     }
 
     /// Drain buffered records during an orderly lifecycle shutdown. Fail-open.
@@ -407,7 +411,10 @@ impl LedgerIo {
         }
         drop(state);
         if starts_flush_window {
-            wake_flush_scheduler();
+            if let Err(error) = wake_flush_scheduler() {
+                self.flush()?;
+                return Err(error);
+            }
         }
         Ok(())
     }
@@ -521,7 +528,21 @@ fn open_file_matches_path(_file: &File, _path: &Path) -> bool {
     false
 }
 
-fn wake_flush_scheduler() {
+fn flush_thread_result(result: &io::Result<std::thread::JoinHandle<()>>) -> io::Result<()> {
+    result.as_ref().map(|_| ()).map_err(|error| {
+        io::Error::new(
+            error.kind(),
+            format!("failed to start ledger flush scheduler: {error}"),
+        )
+    })
+}
+
+fn ensure_flush_thread_started() -> io::Result<()> {
+    flush_thread_result(LazyLock::force(&FLUSH_THREAD))
+}
+
+fn wake_flush_scheduler() -> io::Result<()> {
+    ensure_flush_thread_started()?;
     let mut registry = FLUSH_SCHEDULER
         .registry
         .lock()
@@ -529,9 +550,11 @@ fn wake_flush_scheduler() {
     registry.generation = registry.generation.wrapping_add(1);
     drop(registry);
     FLUSH_SCHEDULER.wake.notify_one();
+    Ok(())
 }
 
-fn register_flush_target(target: &Arc<LedgerIo>) {
+fn register_flush_target(target: &Arc<LedgerIo>) -> io::Result<()> {
+    ensure_flush_thread_started()?;
     let mut registry = FLUSH_SCHEDULER
         .registry
         .lock()
@@ -539,8 +562,8 @@ fn register_flush_target(target: &Arc<LedgerIo>) {
     registry.targets.push(Arc::downgrade(target));
     registry.generation = registry.generation.wrapping_add(1);
     drop(registry);
-    LazyLock::force(&FLUSH_THREAD);
     FLUSH_SCHEDULER.wake.notify_one();
+    Ok(())
 }
 
 fn run_flush_scheduler() {
@@ -1083,6 +1106,21 @@ mod ledger_tests {
             panic!("writer has not entered buffered mode");
         };
         Arc::clone(io)
+    }
+
+    #[test]
+    fn flush_thread_spawn_failure_is_a_typed_io_error() {
+        let spawn: io::Result<std::thread::JoinHandle<()>> = Err(io::Error::new(
+            io::ErrorKind::OutOfMemory,
+            "synthetic spawn failure",
+        ));
+        let error = flush_thread_result(&spawn).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::OutOfMemory);
+        assert!(
+            error
+                .to_string()
+                .contains("failed to start ledger flush scheduler")
+        );
     }
 
     /// Golden v2 fixture: the stored ratc must equal the RATC identity
