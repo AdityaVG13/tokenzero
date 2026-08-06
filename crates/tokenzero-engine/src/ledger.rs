@@ -468,6 +468,12 @@ impl LedgerIo {
     }
 }
 
+fn required_ledger_file(open_file: &mut Option<File>) -> io::Result<&mut File> {
+    open_file
+        .as_mut()
+        .ok_or_else(|| io::Error::other("ledger file handle is unavailable after open"))
+}
+
 fn write_bytes_locked(
     path: &Path,
     max_bytes: u64,
@@ -503,10 +509,7 @@ fn write_bytes_locked(
     if open_file.is_none() {
         *open_file = Some(OpenOptions::new().create(true).append(true).open(path)?);
     }
-    open_file
-        .as_mut()
-        .expect("ledger file just opened")
-        .write_all(bytes)?;
+    required_ledger_file(open_file)?.write_all(bytes)?;
     enforce_ledger_total_bytes(path, max_bytes)
 }
 
@@ -1106,6 +1109,18 @@ mod ledger_tests {
             panic!("writer has not entered buffered mode");
         };
         Arc::clone(io)
+    }
+
+    #[test]
+    fn missing_open_ledger_file_is_a_typed_io_error() {
+        let mut open_file = None;
+        let error = required_ledger_file(&mut open_file).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::Other);
+        assert!(
+            error
+                .to_string()
+                .contains("ledger file handle is unavailable")
+        );
     }
 
     #[test]
