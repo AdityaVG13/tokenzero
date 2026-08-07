@@ -2902,16 +2902,12 @@ fn exec_batch(engine: &TokenZeroEngine, args: &[Value]) -> OpResult {
             error.value = Some(response_value);
             error.refs = response_refs;
             error.telemetry.refs_count = Some(error.refs.len());
-            error.telemetry.internal_actions = operations.saturating_add(error.refs.len());
-            error.telemetry.store_writes = error.refs.len();
             if let Some(accounting) = accounting {
                 error.telemetry.visible_tokens = accounting.visible_tokens;
                 error.telemetry.raw_tokens = accounting.raw_tokens;
                 error.telemetry.recovery_tokens = accounting.recovery_tokens;
                 error.telemetry.billed_output_tokens = accounting.billed_tokens;
                 error.telemetry.cached_output_tokens = accounting.cached_tokens;
-                error.telemetry.bytes_materialized = accounting.raw_tokens;
-                error.telemetry.payload_tokens = accounting.visible_tokens;
             }
             if let Some(telemetry) = resp.telemetry {
                 telemetry_insert(&mut error, "batch", telemetry);
@@ -3112,6 +3108,10 @@ mod store_and_batch_truth_tests {
             response["accounting"]["raw_tokens"].as_u64().unwrap() as usize
         );
         assert_eq!(error.telemetry.refs_count, Some(response_refs.len()));
+        assert_eq!(error.telemetry.internal_actions, 2);
+        assert_eq!(error.telemetry.store_writes, 0);
+        assert_eq!(error.telemetry.bytes_materialized, 0);
+        assert_eq!(error.telemetry.payload_tokens, 0);
 
         let success = exec_batch(
             &engine,
