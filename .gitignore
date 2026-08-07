@@ -228,3 +228,9 @@ CLAUDE.md
 .beads/embeddeddolt/
 .beads/.br_history/
 .beads/.fszero/
+.beads/.auto-import-issues.jsonl
+.beads/.local_version
+.beads/interactions.jsonl
+.beads/metadata.json
+.beads/config.yaml
+.beads/.gitignore
