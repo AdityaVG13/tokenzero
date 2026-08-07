@@ -14,7 +14,7 @@ target/release/tokenzero read README.md --json
 target/release/tokenzero find "TokenZero" docs --json
 target/release/tokenzero tree . --depth 2 --json
 target/release/tokenzero run -- cargo test --workspace
-target/release/tokenzero expand tz://blob/<id> --selector raw --force
+target/release/tokenzero expand tz://blob/<id> --selector raw
 ```
 
 ## Verify

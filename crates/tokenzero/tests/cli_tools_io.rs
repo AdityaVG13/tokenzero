@@ -37,6 +37,92 @@ fn cli_read_expand_json_roundtrip() {
 }
 
 #[test]
+fn cli_expand_honors_all_refs_and_refs_from_without_unwired_force() {
+    let (dir, cache) = setup_temp_with_cache();
+    let first = dir.path().join("first.txt");
+    let second = dir.path().join("second.txt");
+    fs::write(&first, "alpha\n").unwrap();
+    fs::write(&second, "beta\n").unwrap();
+    let first_ref = first_ref_with_kind(
+        &run_tool_json("read", &[first.to_str().unwrap()], dir.path(), &cache),
+        "blob",
+    );
+    let second_ref = first_ref_with_kind(
+        &run_tool_json("read", &[second.to_str().unwrap()], dir.path(), &cache),
+        "blob",
+    );
+    let cache_arg = cache.to_str().unwrap();
+
+    let direct = assert_success(
+        tokenzero_cmd()
+            .current_dir(dir.path())
+            .args([
+                "expand",
+                &first_ref,
+                &second_ref,
+                "--cache-path",
+                cache_arg,
+                "--raw",
+            ])
+            .output()
+            .unwrap(),
+        "direct multi-ref expand",
+    );
+    assert_eq!(String::from_utf8(direct.stdout).unwrap(), "alpha\nbeta\n");
+
+    let refs_file = dir.path().join("refs.txt");
+    fs::write(&refs_file, format!("{first_ref}\n{second_ref}\n")).unwrap();
+    let from_file = assert_success(
+        tokenzero_cmd()
+            .current_dir(dir.path())
+            .args([
+                "expand",
+                "--refs-from",
+                refs_file.to_str().unwrap(),
+                "--cache-path",
+                cache_arg,
+                "--raw",
+                "--json",
+            ])
+            .output()
+            .unwrap(),
+        "refs-from multi-ref expand",
+    );
+    let batch = parse_json_stdout(&from_file);
+    assert_eq!(batch.as_array().unwrap().len(), 2, "{batch}");
+    assert_eq!(batch[0]["visible"]["text"], "alpha\n");
+    assert_eq!(batch[1]["visible"]["text"], "beta\n");
+
+    let invalid_ref = "tz://blob/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+    let loud_error = tokenzero_cmd()
+        .current_dir(dir.path())
+        .args([
+            "expand",
+            &first_ref,
+            invalid_ref,
+            "--cache-path",
+            cache_arg,
+            "--raw",
+            "--json",
+        ])
+        .output()
+        .unwrap();
+    assert!(!loud_error.status.success());
+    let batch = parse_json_stdout(&loud_error);
+    assert_eq!(batch[0]["status"], "ok");
+    assert_eq!(batch[1]["status"], "error");
+    assert_eq!(batch[1]["error"]["code"], "ref_not_found");
+
+    let help = assert_success(
+        tokenzero_cmd().args(["expand", "--help"]).output().unwrap(),
+        "expand help",
+    );
+    let help = String::from_utf8(help.stdout).unwrap();
+    assert!(help.contains("--refs-from"), "{help}");
+    assert!(!help.contains("--force"), "{help}");
+}
+
+#[test]
 fn cli_slim_envelope_opt_in_drops_advisory_blocks_and_keeps_durable_refs() {
     // 0ok7: TOKENZERO_SLIM_ENVELOPE=1 slims the CLI JSON envelope; the full
     // envelope is the unchanged default.

@@ -695,13 +695,20 @@ fn tool_engine_mode(tool: &ToolArgs) -> Result<(TokenZeroEngine, Mode)> {
 }
 
 struct EmitResponse {
-    response: ToolResponse,
+    responses: Vec<ToolResponse>,
     json: bool,
 }
 
+fn tools_emit(responses: Vec<ToolResponse>, json: bool, tool: &str) -> Result<EmitResponse> {
+    let root = tokenzero_work_root(None);
+    for response in &responses {
+        record_tool_pulse(response, root.clone(), tool)?;
+    }
+    Ok(EmitResponse { responses, json })
+}
+
 fn tool_emit(response: ToolResponse, json: bool, tool: &str) -> Result<EmitResponse> {
-    record_tool_pulse(&response, tokenzero_work_root(None), tool)?;
-    Ok(EmitResponse { response, json })
+    tools_emit(vec![response], json, tool)
 }
 
 /// Route a CLI domain op through the shared engine dispatcher exactly once.
@@ -911,7 +918,7 @@ fn handle_read(args: ReadArgs) -> Result<EmitResponse> {
         let allowed_roots = allowed_roots_for_workspace(&root, &args.tool.allowed_root);
         if !existing_path_is_within_allowed_roots(&paths_from, &allowed_roots) {
             return Ok(EmitResponse {
-                response: ToolResponse::error(
+                responses: vec![ToolResponse::error(
                     "read",
                     "path_not_allowed",
                     "paths-from file is outside allowed roots",
@@ -919,7 +926,7 @@ fn handle_read(args: ReadArgs) -> Result<EmitResponse> {
                         "Move the paths-from file under an allowed root or pass an explicit --allowed-root for that file"
                             .to_string(),
                     ),
-                ),
+                )],
                 json: args.tool.json,
             });
         }
@@ -1021,11 +1028,11 @@ fn handle_expand(args: ExpandArgs) -> Result<EmitResponse> {
                 .map(str::to_string),
         );
     }
-    let Some(ref_id) = refs.first() else {
+    if refs.is_empty() {
         anyhow::bail!(
             "expand requires a ref\n\n  corrected command: tokenzero expand <tz-ref> --raw"
         );
-    };
+    }
     let root = tokenzero_work_root(None);
     let engine = engine_new(
         &root,
@@ -1037,32 +1044,36 @@ fn handle_expand(args: ExpandArgs) -> Result<EmitResponse> {
         None,
     );
     let (selector, start, end) = expand_selector(&args);
-    let mut payload = json!({ "ref": ref_id });
+    let mut common = json!({});
     // yevj: --raw is the explicit raw-recovery authorization (cap-gated,
     // secret-gate bypass), not just the legacy "raw" selector shape.
     if args.raw {
-        payload["raw"] = json!(true);
+        common["raw"] = json!(true);
     }
     if let Some(sel) = selector {
-        payload["selector"] = json!(sel);
+        common["selector"] = json!(sel);
     }
     if let Some(s) = start {
-        payload["start_line"] = json!(s);
+        common["start_line"] = json!(s);
     }
     if let Some(e) = end {
-        payload["end_line"] = json!(e);
+        common["end_line"] = json!(e);
     }
     if let Some(k) = &args.anchor_kind {
-        payload["anchor_kind"] = json!(k);
+        common["anchor_kind"] = json!(k);
     }
     if let Some(sym) = &args.symbol {
-        payload["symbol"] = json!(sym);
+        common["symbol"] = json!(sym);
     }
-    tool_emit(
-        dispatch_cli_tool(&engine, "tz_expand", payload),
-        args.json,
-        "expand",
-    )
+    let responses = refs
+        .into_iter()
+        .map(|ref_id| {
+            let mut payload = common.clone();
+            payload["ref"] = json!(ref_id);
+            dispatch_cli_tool(&engine, "tz_expand", payload)
+        })
+        .collect();
+    tools_emit(responses, args.json, "expand")
 }
 
 fn emit_rewrite(args: RewriteArgs) -> Result<()> {
@@ -2173,7 +2184,39 @@ fn push_agent(agents: &mut Vec<String>, raw: &str) -> Result<()> {
 }
 
 fn emit(value: EmitResponse) -> Result<()> {
-    emit_with_json(value.response, value.json)
+    let mut responses = value.responses;
+    if responses.len() == 1 {
+        let response = responses
+            .pop()
+            .ok_or_else(|| anyhow::anyhow!("internal error: command produced no response"))?;
+        return emit_with_json(response, value.json);
+    }
+    if responses.is_empty() {
+        anyhow::bail!("internal error: command produced no response");
+    }
+
+    let exit_error = responses.iter().any(|response| response.status == "error");
+    if value.json {
+        let values = responses
+            .iter()
+            .map(|response| serde_json::from_str::<serde_json::Value>(&cli_json(response)))
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        println!("{}", serde_json::to_string_pretty(&values)?);
+    } else {
+        for response in &responses {
+            if response.tool == "expand" && response.status == "ok" {
+                if let Some(visible) = &response.visible {
+                    print!("{}", visible.text);
+                }
+            } else {
+                print!("{}", render_cli_text(response));
+            }
+        }
+    }
+    if exit_error {
+        std::process::exit(1);
+    }
+    Ok(())
 }
 
 fn render_cli_text(response: &ToolResponse) -> String {
