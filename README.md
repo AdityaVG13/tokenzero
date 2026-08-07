@@ -38,6 +38,17 @@ A local-first Rust runtime that shrinks what AI agents see, while keeping a
 
 ---
 
+### Privacy and usage telemetry
+
+Shareable usage telemetry is **off by default**. To opt in, set
+`TOKENZERO_TELEMETRY=1`. To turn it off, unset the variable or set it to `0`.
+When enabled, TokenZero appends only these three fields:
+`execution_path`, `raw_tokens`, and `spent_tokens`.
+
+Records stay in the local `usage-telemetry.jsonl` file beside the recovery
+cache. TokenZero has no telemetry exporter. Nothing leaves the machine unless
+you deliberately copy or export local data.
+
 <h3 id="highlights"><img src=".github/assets/h-highlights.svg" alt="Highlights" width="100%"></h3>
 
 <div align="center">

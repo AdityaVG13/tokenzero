@@ -65,6 +65,7 @@ fn run_install(
         .arg(bin_dir)
         .arg("--skip-build")
         .env("TOKENZERO_INSTALL_PLATFORM", platform)
+        .env_remove("TOKENZERO_TELEMETRY")
         .env("HOME", prefix)
         .current_dir(repo_root())
         .output()
@@ -120,6 +121,28 @@ fn installer_e2e_fresh_replace_upgrade_rollback_uninstall() {
         assert!(!cfg.contains("--mode=codemode"), "{cfg}");
         assert!(bin_dir.join("tokenzero-mcp").exists());
         assert!(bin_dir.join("tokenzero").exists());
+        let first_run = Command::new(bin_dir.join("tokenzero-mcp"))
+            .arg("--help")
+            .env_remove("TOKENZERO_TELEMETRY")
+            .env("HOME", &prefix)
+            .output()
+            .expect("fresh-installed tokenzero-mcp --help");
+        assert!(
+            first_run.status.success(),
+            "first run failed: {first_run:?}"
+        );
+        for telemetry in [
+            prefix.join("usage-telemetry.jsonl"),
+            prefix.join("token-amplification.jsonl"),
+            prefix.join(".tokenzero/usage-telemetry.jsonl"),
+            prefix.join(".tokenzero/pulse/events.jsonl"),
+        ] {
+            assert!(
+                !telemetry.exists(),
+                "fresh default-off install wrote {}",
+                telemetry.display()
+            );
+        }
 
         // Replace with codemode (upgrade / peer replace).
         let (code, stdout, stderr) = run_install("codemode", &prefix, &bin_dir, platform);

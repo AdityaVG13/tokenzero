@@ -62,7 +62,7 @@ fn dispatch_gated_tool(
     record_mcp_pulse(engine, canonical, args, &response, call_id);
     // Opt-in usage telemetry: MCP tools only. CodeMode execute records separately.
     if canonical != "execute_code" {
-        record_opt_in_mcp_usage(engine, canonical, args, &response);
+        record_opt_in_mcp_usage(engine, &response);
     }
     engine.record_ledger_response(canonical, &response);
     engine.record_tool_attribution(canonical, engine_elapsed, persist_started.elapsed());
@@ -137,12 +137,7 @@ fn record_mcp_pulse(
     let _ = tokenzero_pulse::record_event(&tokenzero_pulse::default_ledger_path(root), &event);
 }
 
-fn record_opt_in_mcp_usage(
-    engine: &TokenZeroEngine,
-    operation: &str,
-    args: &Value,
-    response: &ToolResponse,
-) {
+fn record_opt_in_mcp_usage(engine: &TokenZeroEngine, response: &ToolResponse) {
     let enabled = crate::usage_telemetry_enabled(engine.config.telemetry_enabled);
     if !enabled {
         return;
@@ -155,21 +150,6 @@ fn record_opt_in_mcp_usage(
         enabled,
         accounting.raw_tokens,
         accounting.visible_tokens,
-    );
-    let input_tokens = count_tokens(&serde_json::to_string(args).unwrap_or_default());
-    crate::record_operation_amplification(
-        &engine.config.cache_path,
-        enabled,
-        crate::ExecutionPath::Mcp,
-        operation,
-        crate::DirectionTokens::measured(input_tokens, input_tokens, input_tokens, 0),
-        crate::DirectionTokens::measured(
-            accounting.raw_tokens,
-            accounting.visible_tokens,
-            accounting.billed_tokens,
-            accounting.cached_tokens.min(accounting.billed_tokens),
-        ),
-        response.refs.len(),
     );
 }
 
@@ -1143,6 +1123,37 @@ fn arg_u64(args: &Value, key: &str) -> Option<usize> {
 mod result_surfaced_envelope_tests {
     use super::*;
     use crate::CodeModeResult;
+
+    #[test]
+    fn opt_in_mcp_usage_writes_only_the_closed_usage_record() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut config = crate::EngineConfig::for_root(dir.path());
+        config.cache_path = dir.path().join("recovery-cache.json");
+        config.telemetry_enabled = Some(true);
+        let engine = TokenZeroEngine::new(config);
+        let response = inline_response("read", Mode::Auto, "ok".to_string(), 2);
+
+        record_opt_in_mcp_usage(&engine, &response);
+
+        let usage_path = crate::usage_telemetry_path_for_cache(&engine.config.cache_path);
+        let record: Value =
+            serde_json::from_str(std::fs::read_to_string(usage_path).unwrap().trim()).unwrap();
+        let mut fields = record
+            .as_object()
+            .unwrap()
+            .keys()
+            .cloned()
+            .collect::<Vec<_>>();
+        fields.sort();
+        assert_eq!(fields, ["execution_path", "raw_tokens", "spent_tokens"]);
+        assert!(
+            !engine
+                .config
+                .cache_path
+                .with_file_name("token-amplification.jsonl")
+                .exists()
+        );
+    }
 
     #[test]
     fn ref_first_budget_conversion_never_truncates() {

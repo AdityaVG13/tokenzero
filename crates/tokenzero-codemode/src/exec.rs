@@ -1997,25 +1997,6 @@ fn finalize_codemode_result(
             let _ =
                 tokenzero_pulse::record_event(&tokenzero_pulse::default_ledger_path(root), &event);
         }
-        tokenzero_engine::record_operation_amplification(
-            &engine.config.cache_path,
-            enabled,
-            tokenzero_engine::ExecutionPath::Codemode,
-            "codemode",
-            tokenzero_engine::DirectionTokens::measured(
-                count_tokens(plan),
-                count_tokens(plan),
-                finalized.telemetry.billed_input_tokens,
-                finalized.telemetry.cached_input_tokens,
-            ),
-            tokenzero_engine::DirectionTokens::measured(
-                finalized.telemetry.raw_tokens(),
-                finalized.telemetry.visible_tokens(),
-                finalized.telemetry.billed_output_tokens,
-                finalized.telemetry.cached_output_tokens,
-            ),
-            0,
-        );
         // vz89.11: opt-in machine-action channel on the codemode envelope.
         // Gate off leaves the envelope byte-identical.
         let channel_mode = tokenzero_core::channel_mode();

@@ -22,6 +22,52 @@ fn with_channel_gate<R>(value: Option<&str>, f: impl FnOnce() -> R) -> R {
 }
 
 #[test]
+fn opt_in_codemode_usage_writes_only_the_closed_usage_record() {
+    let work = tempfile::tempdir().unwrap();
+    let cache = work.path().join("recovery-cache.json");
+    std::fs::write(
+        work.path().join("large.txt"),
+        "telemetry payload\n".repeat(5_000),
+    )
+    .unwrap();
+    let result = execute_codemode_with_options(
+        r#"return zero.read("large.txt");"#,
+        CodeModeOptions {
+            root: Some(work.path().to_path_buf()),
+            allowed_roots: vec![work.path().to_path_buf()],
+            cache_path: Some(cache.clone()),
+            max_visible_tokens: 64,
+            telemetry_enabled: Some(true),
+            ..Default::default()
+        },
+    );
+    assert_eq!(
+        result.status,
+        CodeModeStatus::Completed,
+        "{:?}",
+        result.error
+    );
+    assert!(
+        result.telemetry.raw_tokens() >= result.telemetry.visible_tokens(),
+        "invalid usage accounting: {:?}",
+        result.telemetry
+    );
+
+    let path = cache.with_file_name("usage-telemetry.jsonl");
+    let record: serde_json::Value =
+        serde_json::from_str(std::fs::read_to_string(path).unwrap().trim()).unwrap();
+    let mut fields = record
+        .as_object()
+        .unwrap()
+        .keys()
+        .cloned()
+        .collect::<Vec<_>>();
+    fields.sort();
+    assert_eq!(fields, ["execution_path", "raw_tokens", "spent_tokens"]);
+    assert!(!cache.with_file_name("token-amplification.jsonl").exists());
+}
+
+#[test]
 fn async_function_wrapper_is_lowered_and_size_limited() {
     let work = tempfile::tempdir().unwrap();
     let plan = r#"
