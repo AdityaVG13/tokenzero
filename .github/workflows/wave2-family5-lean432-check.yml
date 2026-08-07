@@ -35,4 +35,5 @@ jobs:
           lean verification/wave2_family5/Wave2Family5.lean
           lean verification/wave2_family5/BoolEnumExplicit.lean
           lean verification/wave2_family5/StatefulGeneric.lean
+          lean verification/wave2_family5/Wave2Family5Publication.lean
           printf 'LEAN_COMPILE_EXIT=0\n'
