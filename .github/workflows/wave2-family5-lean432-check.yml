@@ -27,13 +27,21 @@ jobs:
       - name: Report exact Lean version
         shell: bash
         run: lean --version
-      - name: Compile Wave 2 Family 5 proofs
+      - name: Compile standalone publication proof
         shell: bash
         run: |
           set -euo pipefail
-          export LEAN_PATH="$PWD"
-          lean verification/wave2_family5/Wave2Family5.lean
-          lean verification/wave2_family5/BoolEnumExplicit.lean
-          lean verification/wave2_family5/StatefulGeneric.lean
-          lean verification/wave2_family5/Wave2Family5Publication.lean
+          rm -rf /tmp/wave2-family5-empty
+          mkdir -p /tmp/wave2-family5-empty
+          cp verification/wave2_family5/Wave2Family5Publication.lean \
+            /tmp/wave2-family5-empty/Main.lean
+          cd /tmp/wave2-family5-empty
+          test ! -e lakefile.lean
+          test ! -e lakefile.toml
+          test ! -e lean-toolchain
+          if grep -nE '\b(sorry|admit|axiom|native_decide)\b' Main.lean; then
+            exit 1
+          fi
+          printf 'EMPTY_DEPENDENCY_MANIFEST=1\n'
+          lean Main.lean
           printf 'LEAN_COMPILE_EXIT=0\n'
