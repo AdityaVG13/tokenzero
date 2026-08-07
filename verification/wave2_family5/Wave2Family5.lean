@@ -69,11 +69,15 @@ theorem mem_map_of_mem
     {x : α} {xs : List α}
     (h : x ∈ xs) :
     f x ∈ xs.map f := by
-  induction h with
-  | head =>
-      exact .head _
-  | tail a _ ih =>
-      exact .tail a ih
+  induction xs with
+  | nil =>
+      cases h
+  | cons a xs ih =>
+      cases h with
+      | head =>
+          exact .head _
+      | tail _ hTail =>
+          exact .tail _ (ih hTail)
 
 inductive DeletesOne
     {α : Type u}
@@ -110,23 +114,25 @@ theorem deletesOne_length_eq_succ
 theorem deletesOne_mem_of_ne
     {α : Type u}
     {a z : α} {xs ys : List α}
-    (hDelete : DeletesOne a xs ys)
-    (hNe : z ≠ a)
-    (hMem : z ∈ xs) :
+    (hDelete : DeletesOne a xs ys) :
+    z ≠ a →
+    z ∈ xs →
     z ∈ ys := by
   induction hDelete with
   | head tail =>
+      intro hNe hMem
       cases hMem with
       | head =>
           exact False.elim (hNe rfl)
       | tail _ hTail =>
           exact hTail
   | tail b hDelete ih =>
+      intro hNe hMem
       cases hMem with
       | head =>
           exact .head _
       | tail _ hTail =>
-          exact .tail b (ih hNe hTail)
+          exact .tail _ (ih hNe hTail)
 
 theorem finiteList_noninjective_collision
     {S : Type u} {C : Type v}
