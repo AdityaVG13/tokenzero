@@ -38,24 +38,69 @@ const MAX_RESPAWN_BACKOFF: Duration = Duration::from_millis(5);
 /// forwarded for up to this long before the supervisor exits.
 const SHUTDOWN_DRAIN_TIMEOUT: Duration = Duration::from_secs(10);
 
+/// Runs the supervisor until client input stops or a forced shutdown occurs.
+///
+/// Client EOF joins both input pumps and returns. A forced shutdown exits after
+/// reaping the child because a blocking stdin read cannot be cancelled portably.
 pub fn run_supervised_stdio(program: OsString, child_args: Vec<OsString>) -> i32 {
     let (event_tx, event_rx) = mpsc::channel();
     let client_tx = event_tx.clone();
-    thread::spawn(move || {
+    let client_pumps = spawn_client_pumps(client_tx, move |raw_tx| {
         let stdin = std::io::stdin();
         let mut reader = BufReader::new(stdin.lock());
-        let (raw_tx, raw_rx) = mpsc::channel();
-        thread::spawn(move || {
-            while let Ok(event) = raw_rx.recv() {
-                if client_tx.send(SupervisorEvent::FromClient(event)).is_err() {
-                    break;
-                }
-            }
-        });
         read_stdio_events_from_reader(&mut reader, raw_tx);
     });
     let spawner = move || spawn_server_child(&program, &child_args);
-    run_supervisor_loop(spawner, event_tx, event_rx, std::io::stdout())
+    let outcome = run_supervisor_loop(spawner, event_tx, event_rx, std::io::stdout());
+    if outcome.client_stopped {
+        return match client_pumps.join() {
+            Ok(()) => outcome.exit_code,
+            Err(message) => {
+                eprintln!("{message}");
+                1
+            }
+        };
+    }
+
+    // A blocking std::io::stdin read cannot be cancelled portably. The loop
+    // has already terminated any child it owned; exit here rather than return
+    // while either client pump remains detached.
+    std::process::exit(outcome.exit_code)
+}
+
+struct ClientPumps {
+    reader: thread::JoinHandle<()>,
+    forwarder: thread::JoinHandle<()>,
+}
+
+impl ClientPumps {
+    fn join(self) -> Result<(), &'static str> {
+        let reader = self.reader.join();
+        let forwarder = self.forwarder.join();
+        if reader.is_err() {
+            return Err("TokenZero MCP supervisor stdin reader panicked during shutdown");
+        }
+        if forwarder.is_err() {
+            return Err("TokenZero MCP supervisor stdin forwarder panicked during shutdown");
+        }
+        Ok(())
+    }
+}
+
+fn spawn_client_pumps(
+    client_tx: mpsc::Sender<SupervisorEvent>,
+    read: impl FnOnce(mpsc::Sender<StdioEvent>) + Send + 'static,
+) -> ClientPumps {
+    let (raw_tx, raw_rx) = mpsc::channel();
+    let reader = thread::spawn(move || read(raw_tx));
+    let forwarder = thread::spawn(move || {
+        while let Ok(event) = raw_rx.recv() {
+            if client_tx.send(SupervisorEvent::FromClient(event)).is_err() {
+                break;
+            }
+        }
+    });
+    ClientPumps { reader, forwarder }
 }
 
 pub(crate) enum SupervisorEvent {
@@ -107,6 +152,28 @@ struct ActiveChild {
     generation: u64,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct SupervisorLoopOutcome {
+    exit_code: i32,
+    client_stopped: bool,
+}
+
+impl SupervisorLoopOutcome {
+    const fn client(exit_code: i32) -> Self {
+        Self {
+            exit_code,
+            client_stopped: true,
+        }
+    }
+
+    const fn forced(exit_code: i32) -> Self {
+        Self {
+            exit_code,
+            client_stopped: false,
+        }
+    }
+}
+
 #[derive(Default)]
 struct SupervisorState {
     generation: u64,
@@ -131,15 +198,17 @@ pub(crate) fn run_supervisor_loop<W: Write>(
     event_tx: mpsc::Sender<SupervisorEvent>,
     event_rx: mpsc::Receiver<SupervisorEvent>,
     mut client_out: W,
-) -> i32 {
+) -> SupervisorLoopOutcome {
     let mut state = SupervisorState::default();
     let mut child = match start_child(&mut spawn, &event_tx, &mut state) {
         Some(child) => child,
-        None => return 1,
+        None => return SupervisorLoopOutcome::forced(1),
     };
 
-    let exit_code = loop {
-        let Ok(event) = event_rx.recv() else { break 0 };
+    let outcome = loop {
+        let Ok(event) = event_rx.recv() else {
+            break SupervisorLoopOutcome::forced(0);
+        };
         match event {
             SupervisorEvent::FromClient(StdioEvent::Message { framed, text }) => {
                 let line = text.trim_end_matches(['\r', '\n']).to_string();
@@ -158,7 +227,7 @@ pub(crate) fn run_supervisor_loop<W: Write>(
                         &mut client_out,
                     );
                     if !respawned {
-                        break 1;
+                        break SupervisorLoopOutcome::forced(1);
                     }
                 }
             }
@@ -175,19 +244,20 @@ pub(crate) fn run_supervisor_loop<W: Write>(
                 )
                 .to_string();
                 if write_stdio_response(&mut client_out, framed, &response).is_err() {
-                    break 0;
+                    break SupervisorLoopOutcome::forced(0);
                 }
                 if !recoverable {
-                    break 0;
+                    break SupervisorLoopOutcome::client(0);
                 }
             }
             SupervisorEvent::FromClient(StdioEvent::Eof) => {
-                break drain_child_after_client_eof(
+                let exit_code = drain_child_after_client_eof(
                     &mut child,
                     &event_rx,
                     &mut state,
                     &mut client_out,
                 );
+                break SupervisorLoopOutcome::client(exit_code);
             }
             SupervisorEvent::FromChild { generation, text } => {
                 if forward_child_response(
@@ -199,7 +269,7 @@ pub(crate) fn run_supervisor_loop<W: Write>(
                 )
                 .is_err()
                 {
-                    break 0;
+                    break SupervisorLoopOutcome::forced(0);
                 }
             }
             SupervisorEvent::ChildExited {
@@ -216,14 +286,14 @@ pub(crate) fn run_supervisor_loop<W: Write>(
                     &mut client_out,
                 );
                 if !respawned {
-                    break 1;
+                    break SupervisorLoopOutcome::forced(1);
                 }
             }
         }
     };
 
     (child.terminate)();
-    exit_code
+    outcome
 }
 
 /// After the client hangs up, closes the child's stdin and keeps forwarding
@@ -503,4 +573,81 @@ fn pump_child_stdout(
         let _ = forward.join();
         let _ = event_tx.send(SupervisorEvent::ChildExited { generation });
     });
+}
+
+#[cfg(test)]
+mod lifecycle_tests {
+    use super::*;
+    use std::io::Cursor;
+
+    #[test]
+    fn client_pumps_forward_input_and_join_after_eof() {
+        let (client_tx, client_rx) = mpsc::channel();
+        let input = b"{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"ping\"}\n".to_vec();
+        let pumps = spawn_client_pumps(client_tx, move |raw_tx| {
+            let mut reader = BufReader::new(Cursor::new(input));
+            read_stdio_events_from_reader(&mut reader, raw_tx);
+        });
+
+        match client_rx.recv().expect("message event") {
+            SupervisorEvent::FromClient(StdioEvent::Message { text, .. }) => {
+                assert!(text.contains("\"method\":\"ping\""));
+            }
+            _ => panic!("expected a forwarded client message"),
+        }
+        assert!(matches!(
+            client_rx.recv().expect("EOF event"),
+            SupervisorEvent::FromClient(StdioEvent::Eof)
+        ));
+        assert_eq!(pumps.join(), Ok(()));
+    }
+
+    #[test]
+    fn client_eof_selects_the_joinable_shutdown_path() {
+        let (event_tx, event_rx) = mpsc::channel();
+        event_tx
+            .send(SupervisorEvent::FromClient(StdioEvent::Eof))
+            .expect("queue EOF");
+        let spawn = || {
+            Ok(ChildHandles {
+                stdin: Box::new(std::io::sink()),
+                stdout: Box::new(Cursor::new(Vec::<u8>::new())),
+                terminate: Box::new(|| {}),
+            })
+        };
+
+        let outcome = run_supervisor_loop(spawn, event_tx, event_rx, Vec::<u8>::new());
+
+        assert_eq!(outcome, SupervisorLoopOutcome::client(0));
+    }
+
+    #[test]
+    fn client_pumps_join_after_unrecoverable_framed_parse_error() {
+        let (client_tx, client_rx) = mpsc::channel();
+        let input = b"Content-Length: 5\r\n\r\n{}".to_vec();
+        let pumps = spawn_client_pumps(client_tx, move |raw_tx| {
+            let mut reader = BufReader::new(Cursor::new(input));
+            read_stdio_events_from_reader(&mut reader, raw_tx);
+        });
+
+        assert!(matches!(
+            client_rx.recv().expect("parse-error event"),
+            SupervisorEvent::FromClient(StdioEvent::ParseError {
+                recoverable: false,
+                ..
+            })
+        ));
+        assert_eq!(pumps.join(), Ok(()));
+    }
+
+    #[test]
+    fn client_pumps_join_forwarder_after_reader_panic() {
+        let (client_tx, _client_rx) = mpsc::channel();
+        let pumps = spawn_client_pumps(client_tx, |_raw_tx| panic!("reader panic fixture"));
+
+        assert_eq!(
+            pumps.join(),
+            Err("TokenZero MCP supervisor stdin reader panicked during shutdown")
+        );
+    }
 }
