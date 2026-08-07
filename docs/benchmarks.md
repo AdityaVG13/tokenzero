@@ -56,7 +56,7 @@ Command: `benchmarks/cli-cold-read.sh`. Cold = recovery cache removed per cell; 
 
 ## Token savings vs alternatives (competitor bake-off)
 
-Command: `benchmarks/competitor-bakeoff.sh`. Same corpus, same task, same measurement point per row. Tools that are not installed are marked. The TokenZero `grep_read` row is explicitly warm/dedup: each suite invocation creates a fresh isolated cache and runs one successful primer outside timing and output accounting. Its live full-results blob expands byte-exactly to every returned match line; only redundant per-hit text footers are elided. The exact `Q99-Input` denominator is captured raw-CLI stdout, 419 estimated tokens. The numerator is 366 saved estimated tokens, giving a receipt of 873508 ppm and passing the >=850000 ppm gate. For `edit_verify`, `harness.py --prepare` restores the exact 16-byte fixture before every warmup, measured sample, and captured-byte probe; preparation stays outside timing and output accounting. The corrected valid pre-change baseline was 349 bytes / 88 estimated tokens; the old 779 / 195 row exercised an outside-root failure and is not used. Current output is 16 bytes / 4 estimated tokens.
+Command: `benchmarks/competitor-bakeoff.sh`. Same corpus, same task, same measurement point per row. Tools that are not installed are marked. The TokenZero `grep_read` row is explicitly warm/dedup: each suite invocation creates a fresh isolated cache and runs one successful primer outside timing and output accounting. Its live full-results blob expands byte-exactly to every returned match line; only redundant per-hit text footers are elided. `estimator:bytes-ceil-div4/v1` maps the exact captured stdout byte counts to `ceil(bytes/4)` heuristic estimates. It is not provider-locked and is not a Q99 receipt. The heuristic raw-CLI baseline is 419 estimated tokens; the candidate is 53, for 366 estimated tokens saved and 873508 ppm against the >=850000 ppm target. Provider-locked Q99-Input certification remains tracked by `tokenzero-5wfr`. For `edit_verify`, `harness.py --prepare` restores the exact 16-byte fixture before every warmup, measured sample, and captured-byte probe; preparation stays outside timing and output accounting. The corrected valid pre-change baseline was 349 bytes / 88 estimated tokens; the old 779 / 195 row exercised an outside-root failure and is not used. Current output is 16 bytes / 4 estimated tokens.
 
 | task | tool | wall_ms | output_bytes | est_tokens | note |
 |---|---|---:|---:|---:|---|
@@ -67,8 +67,8 @@ Command: `benchmarks/competitor-bakeoff.sh`. Same corpus, same task, same measur
 | `read_500` | `headroom` | - | - | - | not installed |
 | `read_500` | `ztk` | 6 | 0 | 0 | ran but produced no output (arg mismatch with installed version) |
 | `read_500` | `context-mode` | - | - | - | not installed |
-| `grep_read` | `tokenzero` | 9 | 210 | 53 | warm/dedup; Q99-Input candidate |
-| `grep_read` | `raw-cli` | 3 | 1676 | 419 | Q99-Input denominator |
+| `grep_read` | `tokenzero` | 9 | 210 | 53 | warm/dedup; `estimator:bytes-ceil-div4/v1` |
+| `grep_read` | `raw-cli` | 3 | 1676 | 419 | `estimator:bytes-ceil-div4/v1` baseline |
 | `grep_read` | `rtk` | - | - | - | not installed |
 | `grep_read` | `lean-ctx` | - | - | - | not installed |
 | `grep_read` | `headroom` | - | - | - | not installed |

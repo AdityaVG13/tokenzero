@@ -25,9 +25,9 @@ row() {
   if [[ "$b" == 0 ]]; then
     emit "$task" "$tool" "$m" "$b" "$e" "ran but produced no output (arg mismatch with installed version)"
   elif [[ "$task" == grep_read && "$tool" == tokenzero ]]; then
-    emit "$task" "$tool" "$m" "$b" "$e" "warm/dedup; Q99-Input candidate"
+    emit "$task" "$tool" "$m" "$b" "$e" "warm/dedup; estimator:bytes-ceil-div4/v1 candidate"
   elif [[ "$task" == grep_read && "$tool" == raw-cli ]]; then
-    emit "$task" "$tool" "$m" "$b" "$e" "Q99-Input denominator"
+    emit "$task" "$tool" "$m" "$b" "$e" "estimator:bytes-ceil-div4/v1 raw baseline"
   else
     emit "$task" "$tool" "$m" "$b" "$e" ""
   fi
@@ -70,16 +70,16 @@ for task in read_500 grep_read tree_glob_read edit_verify multi_step; do
   for tool in "${tools[@]}"; do row "$task" "$tool" "$(command_for "$task" "$tool")" "$(prepare_for "$task")"; done
 done
 if [[ -z "${GREP_TOKENZERO_TOKENS:-}" || -z "${GREP_RAW_TOKENS:-}" || "$GREP_RAW_TOKENS" -le 0 ]]; then
-  log 'FAILED: missing Q99-Input grep receipt'
+  log 'FAILED: missing estimated-token grep comparison'
   exit 1
 fi
-q99_input_saved_tokens=$((GREP_RAW_TOKENS - GREP_TOKENZERO_TOKENS))
-q99_input_savings_ppm=$((q99_input_saved_tokens * 1000000 / GREP_RAW_TOKENS))
-printf '\nQ99-Input receipt: candidate=%s bytes/%s estimated tokens; denominator raw-cli=%s bytes/%s estimated tokens; numerator saved=%s estimated tokens; savings=%s ppm; gate >=850000 ppm: %s.\n' \
+estimated_saved_tokens=$((GREP_RAW_TOKENS - GREP_TOKENZERO_TOKENS))
+estimated_savings_ppm=$((estimated_saved_tokens * 1000000 / GREP_RAW_TOKENS))
+printf '\nEstimated-token comparison (estimator:bytes-ceil-div4/v1; not Q99): candidate=%s bytes/%s estimated tokens; raw-cli baseline=%s bytes/%s estimated tokens; estimated numerator saved=%s tokens; heuristic savings=%s ppm; target >=850000 ppm: %s.\n' \
   "$GREP_TOKENZERO_BYTES" "$GREP_TOKENZERO_TOKENS" "$GREP_RAW_BYTES" "$GREP_RAW_TOKENS" \
-  "$q99_input_saved_tokens" "$q99_input_savings_ppm" \
-  "$([[ "$q99_input_savings_ppm" -ge 850000 ]] && printf PASS || printf FAIL)"
-if [[ "$q99_input_savings_ppm" -lt 850000 ]]; then
+  "$estimated_saved_tokens" "$estimated_savings_ppm" \
+  "$([[ "$estimated_savings_ppm" -ge 850000 ]] && printf PASS || printf FAIL)"
+if [[ "$estimated_savings_ppm" -lt 850000 ]]; then
   exit 1
 fi
 log done.
