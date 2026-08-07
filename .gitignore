@@ -154,7 +154,6 @@ NDH6SA~M
 .bv/
 
 # Local agent/tool workspaces
-.beads/
 .cargo/
 .codegraph/
 .codegraphrc.json
@@ -218,3 +217,14 @@ CLAUDE.md
 
 # Local agent papercuts log
 .papercuts.jsonl
+
+# Beads runtime (keep issues.jsonl tracked)
+.beads/*.db
+.beads/*.db-*
+.beads/dolt*
+.beads/beads.base.jsonl
+.beads/.*.lock
+.beads/backup/
+.beads/embeddeddolt/
+.beads/.br_history/
+.beads/.fszero/
