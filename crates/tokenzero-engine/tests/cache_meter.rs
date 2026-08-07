@@ -1,6 +1,8 @@
 use tokenzero_engine::{
-    ANTHROPIC_CACHE_DIAGNOSIS_BETA, AnthropicCacheDiagnosisRequest, CacheMeter, CachePricing,
-    CacheProvider, cache_miss_attribution, parse_provider_usage,
+    ANTHROPIC_CACHE_DIAGNOSIS_BETA, AnthropicCacheDiagnosisRequest, CacheMeter, CacheMeterError,
+    CacheObservation, CachePricing, CacheProvider, ProviderCacheEligibility,
+    ProviderCacheEligibilityStatus, ProviderCacheTelemetry, cache_miss_attribution,
+    parse_provider_usage,
 };
 fn pricing() -> CachePricing {
     CachePricing {
@@ -43,6 +45,7 @@ fn normalizes_anthropic_openai_and_gemini_usage() {
             usage.total_input_tokens(),
             expected.0 + expected.1 + expected.2
         );
+        assert!(usage.cache_read_input_tokens_reported);
     }
 }
 #[test]
@@ -107,4 +110,203 @@ fn sanitized_real_session_demo_replays_all_provider_shapes() {
     assert!(report.prefix_stability_ratio > 0.0);
     assert!(report.hit_rate > 0.0);
     assert_eq!(report.exact_miss_attributions, ["prefix_changed"]);
+}
+
+#[test]
+fn legacy_observation_deserializes_to_unknown_eligibility_and_unavailable_telemetry() {
+    let observation: CacheObservation = serde_json::from_value(serde_json::json!({
+        "provider": "open_ai",
+        "request_tokens": 10,
+        "stable_prefix_tokens": 5,
+        "churn_depth_tokens": 5,
+        "usage": {
+            "input_tokens": 10,
+            "output_tokens": 1,
+            "cache_read_input_tokens": 0,
+            "cache_creation_input_tokens": 0
+        },
+        "realized_dollars": 0.01
+    }))
+    .unwrap();
+    assert_eq!(
+        observation.eligibility.status(),
+        ProviderCacheEligibilityStatus::NotEvaluated
+    );
+    assert_eq!(
+        observation.provider_telemetry,
+        ProviderCacheTelemetry::Unavailable
+    );
+    assert!(!observation.usage.cache_read_input_tokens_reported);
+}
+
+#[test]
+fn absent_cache_tokens_are_unavailable_and_excluded_from_hit_denominators() {
+    let missing = parse_provider_usage(
+        CacheProvider::OpenAi,
+        &serde_json::json!({"usage":{"prompt_tokens":1_000}}),
+    )
+    .unwrap();
+    assert_eq!(missing.cache_read_input_tokens, 0);
+    assert!(!missing.cache_read_input_tokens_reported);
+
+    let mut meter = CacheMeter::default();
+    meter
+        .observe(
+            CacheProvider::OpenAi,
+            "stable prefix",
+            &serde_json::json!({"usage":{"prompt_tokens":100,"prompt_tokens_details":{"cached_tokens":50}}}),
+            pricing(),
+            None,
+        )
+        .unwrap();
+    let unavailable = meter
+        .observe(
+            CacheProvider::OpenAi,
+            "stable prefix",
+            &serde_json::json!({"usage":{"prompt_tokens":1_000}}),
+            pricing(),
+            None,
+        )
+        .unwrap();
+    assert!(unavailable.stable_prefix_tokens > 0);
+    assert_eq!(
+        unavailable.eligibility.status(),
+        ProviderCacheEligibilityStatus::NotEvaluated
+    );
+    assert_eq!(
+        unavailable.provider_telemetry,
+        ProviderCacheTelemetry::Unavailable
+    );
+
+    let report = meter.report();
+    assert_eq!(report.requests, 2);
+    assert_eq!(report.provider_telemetry_requests, 1);
+    assert_eq!(report.provider_reported_hit_requests, 1);
+    assert_eq!(report.provider_unavailable_requests, 1);
+    assert_eq!(report.provider_reported_hit_rate, Some(1.0));
+    assert_eq!(report.provider_reported_cached_token_ratio, Some(0.5));
+    assert!((report.hit_rate - 50.0 / 1_100.0).abs() < 1e-12);
+    assert_eq!(report.prefix_eligibility_rate, None);
+    assert!(report.cache_uptime.provider_measurement_available);
+    assert_eq!(report.cache_uptime.error_budget_consumed_tokens, 50);
+}
+
+#[test]
+fn provider_eligibility_and_reported_results_remain_independent() {
+    let mut meter = CacheMeter::default();
+    let observation = meter
+        .observe_with_eligibility(
+            CacheProvider::Anthropic,
+            "request",
+            ProviderCacheEligibility::ineligible(
+                "anthropic-cache-policy-v1",
+                "below provider minimum",
+            )
+            .unwrap(),
+            &serde_json::json!({"usage":{"input_tokens":50,"cache_read_input_tokens":50}}),
+            pricing(),
+            None,
+        )
+        .unwrap();
+    assert_eq!(
+        observation.eligibility.status(),
+        ProviderCacheEligibilityStatus::Ineligible
+    );
+    assert_eq!(
+        observation.provider_telemetry,
+        ProviderCacheTelemetry::ReportedHit {
+            cached_input_tokens: 50.try_into().unwrap()
+        }
+    );
+
+    let report = meter.report();
+    assert_eq!(report.eligibility_evaluated_requests, 1);
+    assert_eq!(report.eligible_requests, 0);
+    assert_eq!(report.prefix_eligibility_rate, Some(0.0));
+    assert_eq!(report.provider_reported_hit_requests, 1);
+    assert_eq!(report.provider_reported_hit_rate, Some(1.0));
+}
+
+#[test]
+fn contradictory_provider_cache_receipts_fail_loudly() {
+    let cases = [
+        (1, "expired", "positive cached tokens reported with expiry"),
+        (
+            0,
+            "unknown",
+            "known cached-token count reported with unknown status",
+        ),
+        (
+            1,
+            "provider_unknown",
+            "known cached-token count reported with unknown status",
+        ),
+    ];
+    for (cached_input_tokens, reason, expected) in cases {
+        let mut meter = CacheMeter::default();
+        let error = meter
+            .observe(
+                CacheProvider::Anthropic,
+                "request",
+                &serde_json::json!({"usage":{
+                    "input_tokens":100,
+                    "cache_read_input_tokens":cached_input_tokens
+                }}),
+                pricing(),
+                Some(&serde_json::json!({"cache_diagnosis":{
+                    "cache_miss_reason":reason
+                }})),
+            )
+            .unwrap_err();
+        assert_eq!(error, CacheMeterError::ContradictoryTelemetry(expected));
+        assert!(meter.observations().is_empty());
+    }
+}
+
+#[test]
+fn provider_expiry_is_not_counted_as_a_reported_miss() {
+    let mut meter = CacheMeter::default();
+    let observation = meter
+        .observe(
+            CacheProvider::Anthropic,
+            "request",
+            &serde_json::json!({"usage":{"input_tokens":100,"cache_read_input_tokens":0}}),
+            pricing(),
+            Some(&serde_json::json!({"cache_diagnosis":{"cache_miss_reason":"expired"}})),
+        )
+        .unwrap();
+    assert_eq!(
+        observation.provider_telemetry,
+        ProviderCacheTelemetry::Expired
+    );
+    let report = meter.report();
+    assert_eq!(report.provider_expired_requests, 1);
+    assert_eq!(report.provider_telemetry_requests, 0);
+    assert_eq!(report.provider_reported_miss_requests, 0);
+    assert_eq!(report.provider_reported_hit_rate, None);
+    assert_eq!(report.provider_reported_cached_token_ratio, None);
+    assert!(!report.cache_uptime.provider_measurement_available);
+    assert!(!report.rate_limit_multiplier_certified);
+}
+
+#[test]
+fn unknown_without_cached_token_field_remains_unknown_not_miss() {
+    let mut meter = CacheMeter::default();
+    let observation = meter
+        .observe(
+            CacheProvider::Anthropic,
+            "request",
+            &serde_json::json!({"usage":{"input_tokens":100}}),
+            pricing(),
+            Some(&serde_json::json!({"cache_diagnosis":{"cache_miss_reason":"unknown"}})),
+        )
+        .unwrap();
+    assert_eq!(
+        observation.provider_telemetry,
+        ProviderCacheTelemetry::ReportedUnknown
+    );
+    let report = meter.report();
+    assert_eq!(report.provider_reported_unknown_requests, 1);
+    assert_eq!(report.provider_telemetry_requests, 0);
+    assert_eq!(report.provider_reported_hit_rate, None);
 }

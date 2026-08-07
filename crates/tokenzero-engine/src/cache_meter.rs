@@ -4,6 +4,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use thiserror::Error;
 use tokenzero_core::count_tokens;
+pub use tokenzero_core::provider_cache::{
+    ProviderCacheEligibility, ProviderCacheEligibilityStatus, ProviderCacheTelemetry,
+};
 use tokenzero_pulse::{AnytimeFailureMonitor, EProcessSnapshot};
 
 pub const ANTHROPIC_CACHE_DIAGNOSIS_BETA: &str = "cache-diagnosis-2026-04-07";
@@ -21,6 +24,9 @@ pub struct ProviderUsage {
     pub input_tokens: u64,
     pub output_tokens: u64,
     pub cache_read_input_tokens: u64,
+    /// True only when the provider response contained the cached-token field.
+    #[serde(default)]
+    pub cache_read_input_tokens_reported: bool,
     pub cache_creation_input_tokens: u64,
 }
 
@@ -40,6 +46,8 @@ pub enum CacheMeterError {
     InvalidField(&'static str),
     #[error("invalid cache uptime SLO configuration")]
     InvalidSloConfig,
+    #[error("contradictory provider cache telemetry: {0}")]
+    ContradictoryTelemetry(&'static str),
 }
 
 fn object_at<'a>(value: &'a Value, key: &str) -> &'a Value {
@@ -58,6 +66,16 @@ fn optional_u64(value: &Value, key: &'static str) -> Result<u64, CacheMeterError
     })
 }
 
+fn optional_observed_u64(value: &Value, key: &'static str) -> Result<(u64, bool), CacheMeterError> {
+    match value.get(key) {
+        Some(field) => field
+            .as_u64()
+            .map(|value| (value, true))
+            .ok_or(CacheMeterError::InvalidField(key)),
+        None => Ok((0, false)),
+    }
+}
+
 pub fn parse_provider_usage(
     provider: CacheProvider,
     value: &Value,
@@ -65,39 +83,49 @@ pub fn parse_provider_usage(
     match provider {
         CacheProvider::Anthropic => {
             let usage = object_at(value, "usage");
+            let (cache_read_input_tokens, cache_read_input_tokens_reported) =
+                optional_observed_u64(usage, "cache_read_input_tokens")?;
             Ok(ProviderUsage {
                 input_tokens: required_u64(usage, "input_tokens")?,
                 output_tokens: optional_u64(usage, "output_tokens")?,
-                cache_read_input_tokens: optional_u64(usage, "cache_read_input_tokens")?,
+                cache_read_input_tokens,
+                cache_read_input_tokens_reported,
                 cache_creation_input_tokens: optional_u64(usage, "cache_creation_input_tokens")?,
             })
         }
         CacheProvider::OpenAi => {
             let usage = object_at(value, "usage");
             let prompt = required_u64(usage, "prompt_tokens")?;
-            let cached = usage
+            let cached_field = usage
                 .get("prompt_tokens_details")
-                .and_then(|details| details.get("cached_tokens"))
-                .map_or(Ok(0), |field| {
+                .and_then(|details| details.get("cached_tokens"));
+            let (cached, cache_read_input_tokens_reported) = match cached_field {
+                Some(field) => (
                     field.as_u64().ok_or(CacheMeterError::InvalidField(
                         "prompt_tokens_details.cached_tokens",
-                    ))
-                })?;
+                    ))?,
+                    true,
+                ),
+                None => (0, false),
+            };
             Ok(ProviderUsage {
                 input_tokens: prompt.saturating_sub(cached),
                 output_tokens: optional_u64(usage, "completion_tokens")?,
                 cache_read_input_tokens: cached,
+                cache_read_input_tokens_reported,
                 cache_creation_input_tokens: 0,
             })
         }
         CacheProvider::Gemini => {
             let usage = object_at(value, "usageMetadata");
             let prompt = required_u64(usage, "promptTokenCount")?;
-            let cached = optional_u64(usage, "cachedContentTokenCount")?;
+            let (cached, cache_read_input_tokens_reported) =
+                optional_observed_u64(usage, "cachedContentTokenCount")?;
             Ok(ProviderUsage {
                 input_tokens: prompt.saturating_sub(cached),
                 output_tokens: optional_u64(usage, "candidatesTokenCount")?,
                 cache_read_input_tokens: cached,
+                cache_read_input_tokens_reported,
                 cache_creation_input_tokens: 0,
             })
         }
@@ -148,6 +176,36 @@ pub fn cache_miss_attribution(value: &Value) -> Option<String> {
         })
 }
 
+fn provider_cache_telemetry(
+    usage: ProviderUsage,
+    diagnosis: Option<&Value>,
+) -> Result<ProviderCacheTelemetry, CacheMeterError> {
+    let reported_tokens = usage
+        .cache_read_input_tokens_reported
+        .then_some(usage.cache_read_input_tokens);
+    match diagnosis.and_then(cache_miss_attribution).as_deref() {
+        Some("expired" | "cache_expired" | "ttl_expired") => {
+            if reported_tokens.is_some_and(|tokens| tokens > 0) {
+                return Err(CacheMeterError::ContradictoryTelemetry(
+                    "positive cached tokens reported with expiry",
+                ));
+            }
+            Ok(ProviderCacheTelemetry::Expired)
+        }
+        Some("unknown" | "provider_unknown") => {
+            if reported_tokens.is_some() {
+                return Err(CacheMeterError::ContradictoryTelemetry(
+                    "known cached-token count reported with unknown status",
+                ));
+            }
+            Ok(ProviderCacheTelemetry::ReportedUnknown)
+        }
+        _ => Ok(ProviderCacheTelemetry::from_reported_cached_tokens(
+            reported_tokens,
+        )),
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CacheObservation {
     pub provider: CacheProvider,
@@ -155,6 +213,12 @@ pub struct CacheObservation {
     pub stable_prefix_tokens: u64,
     pub churn_depth_tokens: u64,
     pub usage: ProviderUsage,
+    /// Explicit provider-policy result; prefix identity alone never sets this.
+    #[serde(default)]
+    pub eligibility: ProviderCacheEligibility,
+    /// Presence-sensitive provider response telemetry.
+    #[serde(default)]
+    pub provider_telemetry: ProviderCacheTelemetry,
     pub realized_dollars: f64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub miss_attribution: Option<String>,
@@ -181,7 +245,9 @@ impl Default for CacheSloConfig {
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct CacheSloDashboard {
     pub target_hit_rate: f64,
+    /// Legacy numeric value; inspect `provider_measurement_available` first.
     pub measured_hit_rate: f64,
+    pub provider_measurement_available: bool,
     pub error_budget_tokens: u64,
     pub error_budget_consumed_tokens: u64,
     pub error_budget_remaining_tokens: u64,
@@ -197,7 +263,19 @@ pub struct CacheSessionReport {
     pub requests: u64,
     pub prefix_stability_ratio: f64,
     pub average_churn_depth_tokens: f64,
+    /// Legacy ratio; unavailable cached-token telemetry contributes zero.
     pub hit_rate: f64,
+    pub eligibility_evaluated_requests: u64,
+    pub eligible_requests: u64,
+    pub prefix_eligibility_rate: Option<f64>,
+    pub provider_telemetry_requests: u64,
+    pub provider_reported_hit_requests: u64,
+    pub provider_reported_miss_requests: u64,
+    pub provider_unavailable_requests: u64,
+    pub provider_reported_unknown_requests: u64,
+    pub provider_expired_requests: u64,
+    pub provider_reported_hit_rate: Option<f64>,
+    pub provider_reported_cached_token_ratio: Option<f64>,
     pub realized_dollars_per_request: f64,
     pub exact_miss_attributions: Vec<String>,
     pub token_amplification_milli: Option<u64>,
@@ -220,7 +298,28 @@ impl CacheMeter {
         pricing: CachePricing,
         diagnosis: Option<&Value>,
     ) -> Result<&CacheObservation, CacheMeterError> {
+        self.observe_with_eligibility(
+            provider,
+            request,
+            ProviderCacheEligibility::not_evaluated(),
+            usage_value,
+            pricing,
+            diagnosis,
+        )
+    }
+
+    /// Observe one request with an explicit provider-policy evaluation.
+    pub fn observe_with_eligibility(
+        &mut self,
+        provider: CacheProvider,
+        request: &str,
+        eligibility: ProviderCacheEligibility,
+        usage_value: &Value,
+        pricing: CachePricing,
+        diagnosis: Option<&Value>,
+    ) -> Result<&CacheObservation, CacheMeterError> {
         let usage = parse_provider_usage(provider, usage_value)?;
+        let provider_telemetry = provider_cache_telemetry(usage, diagnosis)?;
         let request_tokens = count_tokens(request) as u64;
         let stable_prefix_tokens = self.previous_request.as_deref().map_or(0, |previous| {
             count_tokens(common_prefix(previous, request)) as u64
@@ -231,6 +330,8 @@ impl CacheMeter {
             stable_prefix_tokens,
             churn_depth_tokens: stable_prefix_tokens,
             usage,
+            eligibility,
+            provider_telemetry,
             realized_dollars: pricing.realized_dollars(usage),
             miss_attribution: diagnosis.and_then(cache_miss_attribution),
         });
@@ -263,16 +364,69 @@ impl CacheMeter {
             .iter()
             .map(|item| item.request_tokens)
             .sum::<u64>();
-        let cached = self
+        let eligibility_evaluated_requests = self
             .observations
             .iter()
-            .map(|item| item.usage.cache_read_input_tokens)
-            .sum::<u64>();
-        let input = self
+            .filter(|item| item.eligibility.is_evaluated())
+            .count() as u64;
+        let eligible_requests = self
             .observations
             .iter()
-            .map(|item| item.usage.total_input_tokens())
-            .sum::<u64>();
+            .filter(|item| item.eligibility.is_eligible())
+            .count() as u64;
+        let provider_reported_hit_requests = self
+            .observations
+            .iter()
+            .filter(|item| item.provider_telemetry.is_reported_hit())
+            .count() as u64;
+        let provider_reported_miss_requests = self
+            .observations
+            .iter()
+            .filter(|item| item.provider_telemetry.is_reported_miss())
+            .count() as u64;
+        let provider_unavailable_requests = self
+            .observations
+            .iter()
+            .filter(|item| matches!(item.provider_telemetry, ProviderCacheTelemetry::Unavailable))
+            .count() as u64;
+        let provider_reported_unknown_requests = self
+            .observations
+            .iter()
+            .filter(|item| {
+                matches!(
+                    item.provider_telemetry,
+                    ProviderCacheTelemetry::ReportedUnknown
+                )
+            })
+            .count() as u64;
+        let provider_expired_requests = self
+            .observations
+            .iter()
+            .filter(|item| matches!(item.provider_telemetry, ProviderCacheTelemetry::Expired))
+            .count() as u64;
+        let provider_telemetry_requests =
+            provider_reported_hit_requests.saturating_add(provider_reported_miss_requests);
+        let legacy_cached = self.observations.iter().fold(0u64, |total, item| {
+            total.saturating_add(item.usage.cache_read_input_tokens)
+        });
+        let legacy_input = self.observations.iter().fold(0u64, |total, item| {
+            total.saturating_add(item.usage.total_input_tokens())
+        });
+        let reported = self
+            .observations
+            .iter()
+            .filter(|item| item.provider_telemetry.is_hit_rate_observation())
+            .collect::<Vec<_>>();
+        let cached = reported.iter().fold(0u64, |total, item| {
+            total.saturating_add(
+                item.provider_telemetry
+                    .cached_input_tokens()
+                    .expect("hit-rate observations carry cached-token telemetry"),
+            )
+        });
+        let input = reported.iter().fold(0u64, |total, item| {
+            total.saturating_add(item.usage.total_input_tokens())
+        });
         let churn = self
             .observations
             .iter()
@@ -285,7 +439,13 @@ impl CacheMeter {
             .iter()
             .map(|item| item.realized_dollars)
             .sum::<f64>();
-        let hit_rate = ratio(cached, input);
+        let provider_reported_cached_token_ratio = optional_ratio(cached, input);
+        let provider_reported_hit_rate =
+            optional_ratio(provider_reported_hit_requests, provider_telemetry_requests);
+        let prefix_eligibility_rate =
+            optional_ratio(eligible_requests, eligibility_evaluated_requests);
+        let legacy_hit_rate = ratio(legacy_cached, legacy_input);
+        let measured_provider_hit_rate = provider_reported_cached_token_ratio.unwrap_or(0.0);
         let novel_tokens = input.saturating_sub(cached);
         let null_failure_rate = 1.0 - config.target_hit_rate;
         let alternative_failure_rate = 1.0 - config.regression_hit_rate;
@@ -307,7 +467,18 @@ impl CacheMeter {
             } else {
                 churn as f64 / transitions as f64
             },
-            hit_rate,
+            hit_rate: legacy_hit_rate,
+            eligibility_evaluated_requests,
+            eligible_requests,
+            prefix_eligibility_rate,
+            provider_telemetry_requests,
+            provider_reported_hit_requests,
+            provider_reported_miss_requests,
+            provider_unavailable_requests,
+            provider_reported_unknown_requests,
+            provider_expired_requests,
+            provider_reported_hit_rate,
+            provider_reported_cached_token_ratio,
             realized_dollars_per_request: if requests == 0 {
                 0.0
             } else {
@@ -323,7 +494,8 @@ impl CacheMeter {
             rate_limit_multiplier_certified: input > 0,
             cache_uptime: CacheSloDashboard {
                 target_hit_rate: config.target_hit_rate,
-                measured_hit_rate: hit_rate,
+                measured_hit_rate: measured_provider_hit_rate,
+                provider_measurement_available: provider_reported_cached_token_ratio.is_some(),
                 error_budget_tokens,
                 error_budget_consumed_tokens: novel_tokens,
                 error_budget_remaining_tokens: error_budget_tokens.saturating_sub(novel_tokens),
@@ -350,9 +522,9 @@ fn common_prefix<'a>(left: &'a str, right: &str) -> &'a str {
     &left[..end]
 }
 fn ratio(numerator: u64, denominator: u64) -> f64 {
-    if denominator == 0 {
-        0.0
-    } else {
-        numerator as f64 / denominator as f64
-    }
+    optional_ratio(numerator, denominator).unwrap_or(0.0)
+}
+
+fn optional_ratio(numerator: u64, denominator: u64) -> Option<f64> {
+    (denominator != 0).then(|| numerator as f64 / denominator as f64)
 }

@@ -1753,6 +1753,7 @@ pub mod decision_view;
 pub mod model_artifacts;
 pub mod operation_abi;
 mod protocol_atoms;
+pub mod provider_cache;
 mod render;
 mod shell_display;
 mod shell_family;

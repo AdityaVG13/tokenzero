@@ -154,7 +154,8 @@ const DIFF_MAX_LINES: usize = 50_000;
 pub use cache_meter::{
     ANTHROPIC_CACHE_DIAGNOSIS_BETA, AnthropicCacheDiagnosisRequest, CacheMeter, CacheMeterError,
     CacheObservation, CachePricing, CacheProvider, CacheSessionReport, CacheSloConfig,
-    CacheSloDashboard, ProviderUsage, cache_miss_attribution, parse_provider_usage,
+    CacheSloDashboard, ProviderCacheEligibility, ProviderCacheEligibilityStatus,
+    ProviderCacheTelemetry, ProviderUsage, cache_miss_attribution, parse_provider_usage,
 };
 pub use config::{
     CAPSULE_EXACT_REF_THRESHOLD_ENV, DEFAULT_CAPSULE_EXACT_REF_THRESHOLD_BYTES,
