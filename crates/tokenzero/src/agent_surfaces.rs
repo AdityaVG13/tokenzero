@@ -194,7 +194,7 @@ const COMMANDS: &[CommandSurface] = &[
         false,
         true,
         "tokenzero hook claude-code",
-        "Claude Code PreToolUse adapter: reads hook JSON on stdin, rewrites Bash commands to run under `tokenzero run`, and always exits 0 (fail-open).",
+        "Claude Code PreToolUse adapter: reads hook JSON on stdin and rewrites Bash commands under `tokenzero run`; valid pass-through events exit 0, while empty or malformed stdin exits 2 with an exact usage example.",
     ),
     cmd(
         "capabilities",

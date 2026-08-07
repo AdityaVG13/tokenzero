@@ -27,19 +27,39 @@ const READ_GUARD_DEFAULT_MAX_BYTES: u64 = 65536;
 pub(crate) fn handle_hook(args: HookArgs) {
     match args.target {
         HookTarget::ClaudeCode(hook) => run_claude_code_hook(&hook.mode),
-        HookTarget::ClaudeCodeSessionStart(hook) => {
-            run_hook(|input| session_start_decision(input, hook.max_tokens))
-        }
+        HookTarget::ClaudeCodeSessionStart(hook) => run_hook(
+            "claude-code-session-start",
+            r#"printf '%s\n' '{"hook_event_name":"SessionStart","source":"resume","cwd":"."}' | tokenzero hook claude-code-session-start"#,
+            |input| session_start_decision(input, hook.max_tokens),
+        ),
     }
 }
 
-fn run_hook(decide: impl FnOnce(&str) -> Option<Value>) {
+fn run_hook(target: &str, example: &str, decide: impl FnOnce(&str) -> Option<Value>) {
     let mut input = String::new();
-    if std::io::stdin().read_to_string(&mut input).is_ok()
-        && let Some(decision) = decide(&input)
-    {
+    if let Err(error) = std::io::stdin().read_to_string(&mut input) {
+        eprintln!("error: failed to read JSON for hook {target}: {error}");
+        std::process::exit(1);
+    }
+    if input.trim().is_empty() {
+        hook_input_error(target, example, "stdin was empty");
+    }
+    if let Err(error) = serde_json::from_str::<Value>(&input) {
+        hook_input_error(
+            target,
+            example,
+            &format!("stdin was not valid JSON: {error}"),
+        );
+    }
+    if let Some(decision) = decide(&input) {
         let _ = writeln!(std::io::stdout(), "{decision}");
     }
+}
+
+fn hook_input_error(target: &str, example: &str, problem: &str) -> ! {
+    eprintln!("error: hook {target} requires JSON on stdin ({problem})");
+    eprintln!("usage: {example}");
+    std::process::exit(2);
 }
 
 fn session_start_decision(input: &str, max_tokens: usize) -> Option<Value> {
@@ -58,15 +78,19 @@ fn session_start_decision(input: &str, max_tokens: usize) -> Option<Value> {
 }
 
 fn run_claude_code_hook(mode: &str) {
-    run_hook(|input| {
-        let exe = std::env::current_exe().ok()?;
-        claude_code_decision(
-            mode,
-            input,
-            exe.to_str()?,
-            no_wrap_enabled(std::env::var("TOKENZERO_NO_WRAP").ok()),
-        )
-    });
+    run_hook(
+        "claude-code",
+        r#"printf '%s\n' '{"tool_name":"Bash","tool_input":{"command":"git status"}}' | tokenzero hook claude-code"#,
+        |input| {
+            let exe = std::env::current_exe().ok()?;
+            claude_code_decision(
+                mode,
+                input,
+                exe.to_str()?,
+                no_wrap_enabled(std::env::var("TOKENZERO_NO_WRAP").ok()),
+            )
+        },
+    );
 }
 
 fn claude_code_decision(mode: &str, input: &str, self_exe: &str, no_wrap: bool) -> Option<Value> {

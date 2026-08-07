@@ -1,6 +1,7 @@
 use assert_cmd::prelude::*;
 use serde_json::Value;
-use std::process::Command;
+use std::io::Write;
+use std::process::{Command, Stdio};
 use tempfile::tempdir;
 use tokenzero_core::operation_abi::all_operations;
 
@@ -28,6 +29,82 @@ fn cli_bare_invocation_prints_useful_help() {
     assert!(
         stdout.contains("COMMAND") || stdout.contains("command"),
         "help should mention commands"
+    );
+}
+
+#[test]
+fn cli_hook_requires_json_but_preserves_valid_fail_open_events() {
+    let run_with_stdin = |input: &str| {
+        let mut child = Command::cargo_bin("tokenzero")
+            .unwrap()
+            .args(["hook", "claude-code"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(input.as_bytes())
+            .unwrap();
+        child.wait_with_output().unwrap()
+    };
+
+    // m80o (R-023): missing hook input is usage failure, never silent success.
+    let output = Command::cargo_bin("tokenzero")
+        .unwrap()
+        .args(["hook", "claude-code"])
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(2));
+    assert!(output.stdout.is_empty());
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(
+        stderr.contains("hook claude-code requires JSON on stdin (stdin was empty)"),
+        "{stderr}"
+    );
+    assert!(
+        stderr.contains(
+            r#"usage: printf '%s\n' '{"tool_name":"Bash","tool_input":{"command":"git status"}}' | tokenzero hook claude-code"#
+        ),
+        "{stderr}"
+    );
+
+    // Malformed JSON names the parse failure and repeats the copyable repair.
+    let output = run_with_stdin("{");
+    assert_eq!(output.status.code(), Some(2));
+    assert!(output.stdout.is_empty());
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(stderr.contains("stdin was not valid JSON"), "{stderr}");
+    assert!(stderr.contains("| tokenzero hook claude-code"), "{stderr}");
+
+    // A syntactically valid unsupported event remains intentionally fail-open.
+    let output = run_with_stdin(r#"{"tool_name":"Other","tool_input":{}}"#);
+    assert_eq!(output.status.code(), Some(0));
+    assert!(output.stdout.is_empty());
+    assert!(output.stderr.is_empty());
+
+    // A valid actionable event keeps the established decision JSON schema.
+    let output =
+        run_with_stdin(r#"{"tool_name":"Bash","tool_input":{"command":"printf hook-ok"}}"#);
+    assert_eq!(output.status.code(), Some(0));
+    assert!(output.stderr.is_empty());
+    let decision: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(
+        decision["hookSpecificOutput"]["hookEventName"],
+        "PreToolUse"
+    );
+    assert_eq!(
+        decision["hookSpecificOutput"]["permissionDecision"],
+        "allow"
+    );
+    assert!(
+        decision["hookSpecificOutput"]["updatedInput"]["command"]
+            .as_str()
+            .unwrap()
+            .contains(" run -- sh -c ")
     );
 }
 
