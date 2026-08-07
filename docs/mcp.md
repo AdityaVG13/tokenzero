@@ -393,6 +393,22 @@ calls. Parse and invalid-request errors also include `error_type`, `recoverable`
 `fix_hint`, and `available_options` so clients can repair malformed requests
 without guessing.
 
+### Expand range taxonomy
+
+Range failures have three related but intentionally distinct names:
+
+| Surface | Class | Meaning |
+| --- | --- | --- |
+| Cross-engine ZeroRef fixture | `range_out_of_bounds` | Portable umbrella class for a `#B` or `#L` fragment outside the stored object. |
+| TokenZero expand API | `fragment_out_of_range` | The immutable fragment encoded in the ref is outside the stored object. Retry only with a corrected ref suffix or no suffix. |
+| TokenZero expand API | `window_out_of_range` | Call-time `start_line`/`end_line` selection is outside the materialized payload. Retry with a valid 1-based inclusive window. |
+
+The conformance matrix records each engine's native class and normalizes only
+portable fragment failures to `range_out_of_bounds`. It never folds a call-time
+window failure into the portable fragment class. Internal recovery reasons use
+hyphens (`fragment-out-of-range`, `window-out-of-range`); MCP error codes use
+underscores as shown above.
+
 `logging/setLevel` errors expose the accepted syslog severity values in
 `available_options` and `available_levels`, plus a retryable suggested call.
 

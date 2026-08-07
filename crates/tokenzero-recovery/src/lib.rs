@@ -1927,7 +1927,18 @@ impl RecoveryStore {
         } else {
             match clamp_line_window(&content, selected_start, &mut selected_end) {
                 Ok(window) => window,
-                Err(reason) => return miss!(reason),
+                Err(reason) => {
+                    let reason = if matches!(fragment_spec, Some(Ok(FragmentSpec::Line { .. }))) {
+                        reason.replacen(
+                            "window-out-of-range",
+                            fragment_error_reason(FragmentError::OutOfRange),
+                            1,
+                        )
+                    } else {
+                        reason
+                    };
+                    return miss!(reason);
+                }
             }
         };
         match expand_selected_content(

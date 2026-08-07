@@ -2538,7 +2538,7 @@ fn portable_line_fragment_start_past_eof_remains_strict() {
     let l_ref = format!("{}#L4-L100", stored.blob_ref);
     let expanded = store.expand(&l_ref, Some("raw"), None, None, None, None);
     assert!(!expanded.found, "line start past EOF must not clamp");
-    assert!(expanded.reason.starts_with("window-out-of-range"));
+    assert!(expanded.reason.starts_with("fragment-out-of-range"));
     assert_eq!(expanded.ref_id, l_ref);
 }
 
@@ -2553,7 +2553,7 @@ fn l_fragment_empty_file_returns_error() {
     let expanded = store.expand(&l_ref, Some("raw"), None, None, None, None);
     assert!(!expanded.found, "#L1 on empty file must not succeed");
     assert!(
-        expanded.reason.starts_with("window-out-of-range"),
+        expanded.reason.starts_with("fragment-out-of-range"),
         "got: {}",
         expanded.reason
     );

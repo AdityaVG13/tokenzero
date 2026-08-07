@@ -3,6 +3,10 @@
 //! Drives real FSZero/Graph `zeroref-fixture` binaries and Token
 //! recovery/shared-CAS paths; writes retained evidence for release gates.
 //!
+//! The external matrix stays `#[ignore]` in generic test lanes because peer
+//! binaries are required. CI is the mandatory lane: it builds pinned peers and
+//! invokes this exact test with `--ignored` (CC1-R1-003).
+//!
 //! Run from the tokenzero repo root:
 //!     env -u TOKENZERO_CACHE_PATH -u ZEROSTACK_STORE_ROOT \
 //!       CARGO_BUILD_JOBS=1 FSZERO_BIN=/path/to/fszero \
@@ -344,6 +348,124 @@ fn run_fragment_cell(h: &Harness, writer: Engine, reader: Engine) -> Vec<Value> 
     }).collect()
 }
 
+/// FSZero and GraphZero expose the portable ZeroRef fixture class
+/// `range_out_of_bounds`. TokenZero keeps the more precise domain reason
+/// `fragment-out-of-range`; the conformance evidence normalizes only those
+/// equivalent ref-fragment failures. Call-time window failures remain the
+/// distinct `window-out-of-range` class.
+fn portable_range_error_class(native: &str) -> Option<&'static str> {
+    let tag = native.split(';').next().unwrap_or(native);
+    matches!(
+        tag,
+        "range_out_of_bounds" | "fragment-out-of-range" | "fragment_out_of_range"
+    )
+    .then_some("range_out_of_bounds")
+}
+
+fn fixture_error_class(output: &Output) -> Option<String> {
+    String::from_utf8_lossy(&output.stderr)
+        .lines()
+        .rev()
+        .find_map(|line| serde_json::from_str::<Value>(line).ok())
+        .and_then(|diag| diag["error_class"].as_str().map(str::to_string))
+}
+
+fn native_range_error(
+    h: &Harness,
+    reader: Engine,
+    root: &Path,
+    reference: &str,
+    out: &Path,
+) -> String {
+    if reader.is_fixture() {
+        let run = fixture_run(
+            &h.meta(reader).path,
+            "expand",
+            root,
+            &h.shared_cas,
+            &[("--ref", reference), ("--out", out.to_str().unwrap())],
+        );
+        assert!(
+            !run.status.success(),
+            "out-of-range fragment unexpectedly expanded"
+        );
+        fixture_error_class(&run).expect("fixture error_class")
+    } else {
+        let mut store =
+            RecoveryStore::new(Some(h.shared_cas.join("tokenzero/recovery-cache.json")));
+        let expanded = store.expand(reference, None, None, None, None, None);
+        assert!(
+            !expanded.found,
+            "out-of-range fragment unexpectedly expanded"
+        );
+        expanded
+            .reason
+            .split(';')
+            .next()
+            .unwrap_or(expanded.reason.as_str())
+            .to_string()
+    }
+}
+
+fn run_range_error_cells(h: &Harness, writer: Engine, reader: Engine) -> Vec<Value> {
+    let (rroot, reference) = pair_put(
+        h,
+        "range-error-store",
+        writer,
+        reader,
+        "range_error_text",
+        FRAG_SRC,
+    );
+    let invalid = [format!("B0-{}", FRAG_SRC.len() + 1), "L99-100".to_string()];
+    invalid
+        .into_iter()
+        .map(|fragment| {
+            let ref_with_fragment = format!("{reference}#{fragment}");
+            let out = h.out("range-error-out", writer, reader, &fragment);
+            let expected_native = if reader.is_fixture() {
+                "range_out_of_bounds"
+            } else {
+                "fragment-out-of-range"
+            };
+            let result = std::panic::catch_unwind(|| {
+                let native = native_range_error(h, reader, &rroot, &ref_with_fragment, &out);
+                assert_eq!(native, expected_native);
+                let portable = portable_range_error_class(&native);
+                assert_eq!(portable, Some("range_out_of_bounds"));
+                native
+            });
+            let (status, native_error_class, notes) = match result {
+                Ok(native) => ("pass", Some(native), String::new()),
+                Err(err) => ("fail", None, panic_notes(err)),
+            };
+            json!({
+                "writer": writer.as_str(), "reader": reader.as_str(),
+                "fragment": fragment, "reference": ref_with_fragment,
+                "portable_error_class": "range_out_of_bounds",
+                "expected_native_error_class": expected_native,
+                "native_error_class": native_error_class,
+                "status": status, "notes": notes,
+            })
+        })
+        .collect()
+}
+
+#[test]
+fn portable_range_taxonomy_keeps_call_windows_distinct() {
+    assert_eq!(
+        portable_range_error_class("range_out_of_bounds"),
+        Some("range_out_of_bounds")
+    );
+    assert_eq!(
+        portable_range_error_class("fragment-out-of-range; start=0 end=9 len=4"),
+        Some("range_out_of_bounds")
+    );
+    assert_eq!(
+        portable_range_error_class("window-out-of-range; start=9 end=9 line_count=4"),
+        None
+    );
+}
+
 fn run_wrong_store(h: &Harness) -> Value {
     let (wroot, rroot) = h.roots("corrupt", Engine::Fs, Engine::Graph);
     let put = fixture_put(
@@ -475,6 +597,11 @@ fn zeroref_conformance_matrix() {
         .flat_map(|w| ENGINES.into_iter().map(move |r| (w, r)))
         .flat_map(|(w, r)| run_fragment_cell(&h, w, r))
         .collect();
+    let range_error_rows: Vec<_> = ENGINES
+        .into_iter()
+        .flat_map(|w| ENGINES.into_iter().map(move |r| (w, r)))
+        .flat_map(|(w, r)| run_range_error_cells(&h, w, r))
+        .collect();
     let wrong_store = run_wrong_store(&h);
     let concurrent = run_concurrent_writes(&h);
     let sibling_shas: Vec<_> = h.binaries.iter().map(|m| json!({
@@ -487,6 +614,7 @@ fn zeroref_conformance_matrix() {
             .iter()
             .any(|c| c["status"] == "fail")
     }) || fragment_rows.iter().any(|f| f["status"] == "fail")
+        || range_error_rows.iter().any(|row| row["status"] == "fail")
         || wrong_store["status"] != "pass"
         || concurrent["status"] != "pass";
     let status = if fail { "red" } else { "green" };
@@ -502,6 +630,7 @@ fn zeroref_conformance_matrix() {
             "sibling_shas": sibling_shas,
             "rows": rows,
             "fragment_rows": fragment_rows,
+            "range_error_rows": range_error_rows,
             "wrong_store": wrong_store,
             "concurrent": concurrent
         }
