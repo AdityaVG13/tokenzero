@@ -247,7 +247,10 @@ pub fn shell_schema() -> Value {
             },
             "cwd": {"type": "string", "description": "Working directory under an allowed root."},
             "mode": mode_property(),
-            "rewrite": {"type": "string", "description": "Rewrite mode applied before execution."},
+            "rewrite": {
+                "type": "string",
+                "description": "Rewrite mode applied to `command` before execution when `argv` is omitted. Explicit `argv` is authoritative and skips command rewriting."
+            },
             "no_rewrite": {"type": "boolean", "default": false},
             "stdin": {"type": "string"},
             "timeout_seconds": positive_usize(ABI_DEFAULT_SHELL_TIMEOUT_SECS as usize),
@@ -485,4 +488,20 @@ pub fn ref_first_results() -> OperationResults {
 
 pub fn args(schema: Value) -> OperationArgs {
     OperationArgs { schema }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn shell_rewrite_description_declares_explicit_argv_authority() {
+        let schema = shell_schema();
+        let description = schema["properties"]["rewrite"]["description"]
+            .as_str()
+            .expect("shell rewrite description");
+
+        assert!(description.contains("when `argv` is omitted"));
+        assert!(description.contains("Explicit `argv` is authoritative"));
+    }
 }
