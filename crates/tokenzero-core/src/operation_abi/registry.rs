@@ -66,6 +66,14 @@ fn shell_errors() -> &'static [DomainErrorKind] {
     ]
 }
 
+fn job_errors() -> &'static [DomainErrorKind] {
+    &[
+        DomainErrorKind::Validation,
+        DomainErrorKind::NotFound,
+        DomainErrorKind::Runtime,
+    ]
+}
+
 fn expand_errors() -> &'static [DomainErrorKind] {
     &[
         DomainErrorKind::Validation,
@@ -338,7 +346,7 @@ fn build_registry() -> Vec<Operation> {
         classic(ClassicSpec {
             name: "tz_read",
             description: "Read file(s) under allowed roots: compact visible output plus exact tz:// recovery refs.",
-            aliases: &["read"],
+            aliases: &["read", "zero.token.read"],
             mutability: M::ReadOnly,
             cost_class: K::Medium,
             ref_ownership: R::Blob,
@@ -352,7 +360,7 @@ fn build_registry() -> Vec<Operation> {
         classic(ClassicSpec {
             name: "tz_find",
             description: "Search file contents for a literal substring and return compact, recoverable matches.",
-            aliases: &["find"],
+            aliases: &["find", "zero.token.find"],
             mutability: M::ReadOnly,
             cost_class: K::Medium,
             ref_ownership: R::Blob,
@@ -366,7 +374,7 @@ fn build_registry() -> Vec<Operation> {
         classic(ClassicSpec {
             name: "tz_grep",
             description: "Grep-style exact-first content search: regex when ripgrep is active, literal otherwise.",
-            aliases: &["grep"],
+            aliases: &["grep", "zero.token.grep"],
             mutability: M::ReadOnly,
             cost_class: K::Medium,
             ref_ownership: R::Blob,
@@ -382,7 +390,7 @@ fn build_registry() -> Vec<Operation> {
         classic(ClassicSpec {
             name: "tz_recall",
             description: "Search every payload already stored in the recovery cache.",
-            aliases: &["recall"],
+            aliases: &["recall", "zero.token.recall"],
             mutability: M::ReadOnly,
             cost_class: K::Cheap,
             ref_ownership: R::Blob,
@@ -424,7 +432,7 @@ fn build_registry() -> Vec<Operation> {
         classic_ex(ClassicExSpec {
             name: "tz_glob",
             description: "List file paths matching a glob pattern (no contents).",
-            aliases: &["glob"],
+            aliases: &["glob", "zero.token.glob"],
             mutability: M::ReadOnly,
             cost_class: K::Cheap,
             ref_ownership: R::Blob,
@@ -440,7 +448,7 @@ fn build_registry() -> Vec<Operation> {
         classic(ClassicSpec {
             name: "tz_tree",
             description: "Inspect a bounded directory tree for orientation.",
-            aliases: &["tree"],
+            aliases: &["tree", "zero.token.tree"],
             mutability: M::ReadOnly,
             cost_class: K::Cheap,
             ref_ownership: R::Blob,
@@ -454,7 +462,7 @@ fn build_registry() -> Vec<Operation> {
         classic(ClassicSpec {
             name: "tz_edit",
             description: "Apply multi-hunk find/replace edits to one file atomically with undo via tz:// ref.",
-            aliases: &["edit"],
+            aliases: &["edit", "zero.token.edit"],
             mutability: M::WorkspaceMutating,
             cost_class: K::Medium,
             ref_ownership: R::Blob,
@@ -468,7 +476,7 @@ fn build_registry() -> Vec<Operation> {
         classic_ex(ClassicExSpec {
             name: "tz_shell",
             description: "Run a local command: compact output, exact stream refs, command_success telemetry.",
-            aliases: &["shell"],
+            aliases: &["shell", "zero.token.shell"],
             mutability: M::WorkspaceMutating,
             cost_class: K::Heavy,
             ref_ownership: R::Blob,
@@ -525,7 +533,7 @@ fn build_registry() -> Vec<Operation> {
         classic_ex(ClassicExSpec {
             name: "tz_mem",
             description: "Inspect local recovery-cache and configuration state.",
-            aliases: &["mem"],
+            aliases: &["mem", "zero.token.mem"],
             mutability: M::ReadOnly,
             cost_class: K::Cheap,
             ref_ownership: R::None,
@@ -555,7 +563,7 @@ fn build_registry() -> Vec<Operation> {
         classic_ex(ClassicExSpec {
             name: "tz_rewrite",
             description: "Plan a conservative TokenZero-safe rewrite of a shell command without executing it.",
-            aliases: &["rewrite"],
+            aliases: &["rewrite", "zero.token.rewrite"],
             mutability: M::ReadOnly,
             cost_class: K::Cheap,
             ref_ownership: R::None,
@@ -676,7 +684,7 @@ fn build_registry() -> Vec<Operation> {
         binding_ex(BindingExSpec {
             name: "zero.token.compact",
             description: "Store arbitrary text/data behind a tz:// recovery ref via ingest.",
-            aliases: &["zero.compact"],
+            aliases: &["zero.compact", "zero.ref"],
             mutability: M::StoreOnly,
             cost_class: K::Cheap,
             ref_ownership: R::Blob,
@@ -690,9 +698,10 @@ fn build_registry() -> Vec<Operation> {
             results: ref_first_results(),
             error_kinds: read_errors(),
         }),
-        binding(BindingSpec {
+        binding_ex(BindingExSpec {
             name: "zero.token.compactMany",
             description: "Batch compact many payloads in one CodeMode step.",
+            aliases: &["zero.compactMany"],
             mutability: M::StoreOnly,
             cost_class: K::Medium,
             ref_ownership: R::Multi,
@@ -706,9 +715,10 @@ fn build_registry() -> Vec<Operation> {
             results: ref_first_results(),
             error_kinds: read_errors(),
         }),
-        binding(BindingSpec {
+        binding_ex(BindingExSpec {
             name: "zero.token.expandMany",
             description: "Batch expand many tz:// refs in one CodeMode step.",
+            aliases: &["zero.expandMany"],
             mutability: M::ReadOnly,
             cost_class: K::Medium,
             ref_ownership: R::Multi,
@@ -722,9 +732,32 @@ fn build_registry() -> Vec<Operation> {
             results: ref_first_results(),
             error_kinds: expand_errors(),
         }),
-        binding(BindingSpec {
+        binding_ex(BindingExSpec {
+            name: "zero.token.job",
+            description: "Long-poll a session-owned background shell job from a byte cursor.",
+            aliases: &["zero.job"],
+            mutability: M::ReadOnly,
+            cost_class: K::Cheap,
+            ref_ownership: R::Session,
+            cancellation: C::None,
+            capabilities: &["shell", "background-job", "codemode"],
+            schema: json!({
+                "type": "object",
+                "properties": {
+                    "id": { "type": "string", "minLength": 1 },
+                    "waitMs": { "type": "integer", "minimum": 0, "maximum": 30_000 },
+                    "since": { "type": "integer", "minimum": 0 },
+                    "tailBytes": { "type": "integer", "minimum": 0 }
+                },
+                "required": ["id"]
+            }),
+            results: default_results(),
+            error_kinds: job_errors(),
+        }),
+        binding_ex(BindingExSpec {
             name: "zero.token.dedupe",
             description: "Deduplicate JSON/string values while preserving first occurrence order.",
+            aliases: &["zero.dedupe"],
             mutability: M::ReadOnly,
             cost_class: K::Cheap,
             ref_ownership: R::None,

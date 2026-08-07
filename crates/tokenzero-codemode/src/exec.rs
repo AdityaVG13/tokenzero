@@ -2681,7 +2681,7 @@ fn dispatch_values(
         "zero.glob" | "glob" | "zero.token.glob" => exec_glob(engine, work_root, args),
         "zero.tree" | "tree" | "zero.token.tree" => exec_tree(engine, work_root, args),
         "zero.shell" | "shell" | "zero.token.shell" => exec_shell(engine, work_root, args),
-        "zero.job" | "job" | "zero.token.job" => exec_job(engine, args),
+        "zero.token.job" | "zero.job" | "job" => exec_job(engine, args),
         "zero.edit" | "edit" | "zero.token.edit" => exec_edit(engine, work_root, args),
         "zero.token.expand" | "zero.expand" | "expand" => exec_expand(engine, args),
         "zero.token.expandMany" | "zero.expandMany" | "expandMany" | "expand_many" => {
@@ -2920,6 +2920,39 @@ fn exec_job(engine: &TokenZeroEngine, args: &[Value]) -> OpResult {
         )
         .map(OpOutcome::from_catalog)
         .map_err(operation_error)
+}
+
+#[cfg(test)]
+mod method_inventory_tests {
+    use super::*;
+
+    fn error_message(result: &CodeModeResult) -> &str {
+        result
+            .error
+            .as_ref()
+            .map(|error| error.message.as_str())
+            .unwrap_or(result.visible_ack.as_str())
+    }
+
+    #[test]
+    fn every_catalog_path_reaches_a_real_dispatch_arm() {
+        let root = tempfile::tempdir().expect("temp root");
+        let engine = TokenZeroEngine::new(EngineConfig::for_root(root.path()));
+
+        for path in tokenzero_engine::codemode_catalog::method_paths() {
+            if let Err(result) = dispatch_values(&engine, root.path(), path, &[]) {
+                let message = error_message(&result);
+                assert!(
+                    !message.starts_with("unknown method:"),
+                    "catalog path {path} has no executor arm: {message}"
+                );
+            }
+        }
+
+        let unknown = dispatch_values(&engine, root.path(), "zero.not_registered", &[])
+            .expect_err("kill control must reach the unknown-method arm");
+        assert!(error_message(&unknown).starts_with("unknown method: zero.not_registered"));
+    }
 }
 
 #[cfg(test)]

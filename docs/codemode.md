@@ -47,6 +47,23 @@ JSON recipe plans remain available for clients that do not author JavaScript.
 Use 'tokenzero codemode search:<term>' and 'describe:<method>' to discover the
 live typed catalog.
 
+## Batch choices
+
+The batch families are distinct contracts:
+
+- `zero.batch` runs up to 16 independent, potentially mixed operations and
+  returns one combined capsule with per-operation sections and unioned refs.
+  Its ABI is conservatively workspace-mutating because a member may mutate.
+- `zero.token.compactMany` stores a homogeneous `items` array. Use it when
+  every item needs its own recovery ref.
+- `zero.token.expandMany` expands a homogeneous `items` array of refs. Use it
+  when every result must preserve input order and per-ref status.
+- `zero.pipe` is not a batch alias. It runs ordered dependent steps and passes
+  `_prev` into the next step.
+
+Do not interchange these names or schemas. Compatibility aliases resolve to
+these same canonical operations; they do not create a second batch contract.
+
 ## Background commands
 
 Launch a command with '{ background: true }', then observe it with a cursor. A

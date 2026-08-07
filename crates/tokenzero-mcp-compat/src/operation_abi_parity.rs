@@ -23,6 +23,7 @@ mod tests {
     use std::collections::BTreeSet;
     use tokenzero_core::McpToolSurface;
     use tokenzero_core::operation_abi::{
+        CancellationSemantics, CostClass, DomainErrorKind, Mutability, RefOwnership,
         all_operations, contract_digest_hex, golden_vectors, operation_by_name, resolve_operation,
         resource_uris, schema_diff, schemas_structurally_equal,
     };
@@ -48,6 +49,36 @@ mod tests {
     /// Independent CodeMode method inventory.
     fn live_codemode_paths() -> BTreeSet<&'static str> {
         method_paths().into_iter().collect()
+    }
+
+    /// Parse the primary CodeMode executor match without deriving it from the
+    /// ABI or METHOD_CATALOG. Each returned group is one real match arm; the
+    /// first name is canonical and the remainder are compatibility aliases.
+    fn live_executor_method_groups() -> Vec<Vec<&'static str>> {
+        const SOURCE: &str = include_str!("../../tokenzero-codemode/src/exec.rs");
+        let dispatch = SOURCE
+            .split_once("fn dispatch_values(")
+            .expect("dispatch_values source")
+            .1;
+        let arms = dispatch
+            .split_once("    match method {")
+            .expect("method match")
+            .1
+            .split_once("        _ => Err(operation_error")
+            .expect("unknown-method arm")
+            .0;
+        arms.lines()
+            .filter(|line| line.starts_with("        \"") && line.contains("=>"))
+            .map(|line| {
+                line.split_once("=>")
+                    .expect("dispatch arm")
+                    .0
+                    .split('\"')
+                    .skip(1)
+                    .step_by(2)
+                    .collect::<Vec<_>>()
+            })
+            .collect()
     }
 
     /// Wire tools/list boundary (classic surface, aliases off).
@@ -214,6 +245,118 @@ mod tests {
                 schema_diff(output, &op.results.schema)
             );
         }
+    }
+
+    #[test]
+    fn every_executor_arm_maps_to_the_catalog_and_operation_abi() {
+        let catalog_ops: BTreeSet<_> = live_codemode_paths()
+            .into_iter()
+            .map(|path| {
+                resolve_operation(path)
+                    .unwrap_or_else(|| panic!("catalog path {path} missing ABI"))
+                    .name
+            })
+            .collect();
+        let groups = live_executor_method_groups();
+        assert!(
+            !groups.is_empty(),
+            "executor inventory parser found no arms"
+        );
+        let mut executor_ops = BTreeSet::new();
+        for group in groups {
+            let primary = group.first().expect("executor arm name");
+            let op = resolve_operation(primary)
+                .unwrap_or_else(|| panic!("executor primary {primary} missing ABI"));
+            executor_ops.insert(op.name);
+            for alias in group.iter().skip(1).filter(|name| name.contains('.')) {
+                let alias_op = resolve_operation(alias)
+                    .unwrap_or_else(|| panic!("qualified executor alias {alias} missing ABI"));
+                assert_eq!(
+                    alias_op.name, op.name,
+                    "executor alias {alias} does not resolve to primary {primary}"
+                );
+            }
+        }
+        assert_eq!(
+            executor_ops, catalog_ops,
+            "CodeMode executor and METHOD_CATALOG operation inventories drifted"
+        );
+    }
+
+    #[test]
+    fn executor_only_recipe_controls_are_explicitly_outside_the_engine_abi() {
+        // These four JS-host controls move recipe source inside one CodeMode
+        // session. They are not engine operations, MCP tools, or raw-worker
+        // methods, so they stay outside the operation ABI and discovery catalog.
+        const RECIPE_CONTROLS: &[&str] = &[
+            "codemode.recipeRegister",
+            "codemode.recipeList",
+            "codemode.recipeDescribe",
+            "codemode.recipeRun",
+        ];
+        const SOURCE: &str = include_str!("../../tokenzero-codemode/src/exec.rs");
+        let dispatch = SOURCE
+            .split_once("fn dispatch_values(")
+            .expect("dispatch_values source")
+            .1
+            .split_once("fn journal_execution_arg")
+            .expect("dispatch_values end")
+            .0;
+        let catalog = live_codemode_paths();
+        for control in RECIPE_CONTROLS {
+            assert!(dispatch.contains(&format!("\"{control}\"")));
+            assert!(!catalog.contains(control));
+            assert!(resolve_operation(control).is_none());
+        }
+    }
+
+    #[test]
+    fn background_job_is_typed_codemode_only_and_bounded_without_cancel_claims() {
+        let job = resolve_operation("zero.token.job").expect("job operation");
+        assert_eq!(
+            resolve_operation("zero.job").map(|op| op.name),
+            Some(job.name)
+        );
+        assert_eq!(job.mutability, Mutability::ReadOnly);
+        assert_eq!(job.cost_class, CostClass::Cheap);
+        assert_eq!(job.ref_ownership, RefOwnership::Session);
+        assert_eq!(job.cancellation, CancellationSemantics::None);
+        assert!(!job.exposure.fastmcp_tool && !job.exposure.codemode_mcp_tool);
+        assert_eq!(job.exposure.codemode_binding, Some("zero.token.job"));
+        assert_eq!(job.args.schema["required"], json!(["id"]));
+        assert_eq!(job.args.schema["properties"]["waitMs"]["maximum"], 30_000);
+        for kind in [
+            DomainErrorKind::Validation,
+            DomainErrorKind::NotFound,
+            DomainErrorKind::Runtime,
+        ] {
+            assert!(
+                job.error_kinds.contains(&kind),
+                "missing job error {kind:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn mixed_and_homogeneous_batch_families_stay_distinct() {
+        let mixed = resolve_operation("zero.batch").expect("mixed batch");
+        let compact_many = resolve_operation("zero.token.compactMany").expect("compact-many batch");
+        let expand_many = resolve_operation("zero.token.expandMany").expect("expand-many batch");
+
+        assert_eq!(mixed.name, "tz_batch");
+        assert_eq!(mixed.mutability, Mutability::WorkspaceMutating);
+        assert!(mixed.args.schema["properties"].get("ops").is_some());
+        assert_eq!(compact_many.mutability, Mutability::StoreOnly);
+        assert!(
+            compact_many.args.schema["properties"]
+                .get("items")
+                .is_some()
+        );
+        assert_eq!(expand_many.mutability, Mutability::ReadOnly);
+        assert!(expand_many.args.schema["properties"].get("items").is_some());
+        assert_ne!(mixed.name, compact_many.name);
+        assert_ne!(mixed.name, expand_many.name);
+        assert_ne!(compact_many.name, expand_many.name);
     }
 
     #[test]

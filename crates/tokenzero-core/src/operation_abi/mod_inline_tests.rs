@@ -41,13 +41,12 @@ fn contract_digest_is_deterministic() {
 
 #[test]
 fn contract_digest_matches_frozen_operation_abi() {
-    // Re-pinned 2026-07-30 (tokenzero-3vzz) after the shared zero-abi
-    // implementation moved from hub rev a132567 to 3e12d0a. The local
-    // operation registry is unchanged since its prior pin; the shared
-    // canonical digest implementation changed, so freeze the new receipt.
+    // Re-pinned 2026-08-07 after F-004 registered the existing
+    // zero.token.job CodeMode operation and fully-qualified executor aliases.
+    // The digest change is the receipt for that semantic ABI expansion.
     assert_eq!(
         contract_digest_hex(),
-        "ac35a285e417e175baefff608ab3e2771193412c458a696b91559014b92fd822"
+        "8b8c1f36bfa746aed33706edbf395830e65dc44b12ee975ff6a14d44db07e1bd"
     );
 }
 
