@@ -217,7 +217,10 @@ pub fn finalize_result(
                 );
             }
         };
-        if bytes.len() <= limits.max_result_ref_bytes {
+        // A result that cannot fit the visible envelope must always have a
+        // terminal payload ref. The result-ref cap still suppresses optional
+        // refs for values that remain fully visible.
+        if bytes.len() <= limits.max_result_ref_bytes || bytes.len() > limits.max_output_bytes {
             Some(store_or_fail!(deferred_json(&mut store, value)))
         } else {
             None
@@ -593,6 +596,51 @@ mod tests {
                 .detail_ref
                 .as_deref()
                 .is_some_and(|value| value.ends_with("/result"))
+        );
+    }
+
+    #[test]
+    fn oversized_result_ignores_optional_ref_cap_and_keeps_exact_continuation() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = dir.path().join("cache.json");
+        let payload = "x".repeat(200);
+        let limits = CodeModeLimits {
+            max_output_bytes: 64,
+            max_result_ref_bytes: 8,
+            ..CodeModeLimits::default()
+        };
+        let finalized = finalize_result(
+            completed(json!(payload)),
+            "code",
+            "return 'x'.repeat(200)",
+            175,
+            176,
+            ExecutionStore::new(cache.clone()),
+            &limits,
+            Vec::new(),
+        );
+
+        assert_eq!(finalized.status, CodeModeStatus::Completed);
+        let page = finalized.value.as_ref().unwrap();
+        assert_eq!(page["truncated"], true);
+        let continuation = page["continuation_ref"]
+            .as_str()
+            .expect("oversized result must carry a continuation ref");
+        assert!(continuation.starts_with("tz://blob/"), "{continuation}");
+        assert_eq!(
+            finalized
+                .execution_refs
+                .as_ref()
+                .and_then(|refs| refs.pointer("/stored/result"))
+                .and_then(Value::as_str),
+            Some(continuation)
+        );
+        let mut restarted = RecoveryStore::new(Some(cache));
+        let expanded = restarted.expand(continuation, Some("raw"), None, None, None, None);
+        assert!(expanded.found, "{}", expanded.reason);
+        assert_eq!(
+            serde_json::from_str::<Value>(&expanded.content).unwrap(),
+            json!(payload)
         );
     }
 
