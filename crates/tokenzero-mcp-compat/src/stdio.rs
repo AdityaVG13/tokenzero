@@ -13,10 +13,36 @@ pub(crate) const MAX_MCP_STDIO_HEADER_SECTION_BYTES: usize = 256 * 1024;
 /// traffic (ping, initialize, tools/list) is never starved by a slow tool.
 pub(crate) const MCP_TOOL_WORKER_THREADS: usize = 4;
 
+/// Run the hand-rolled MCP stdio server.
+///
+/// Normal client EOF joins the stdin reader and returns an exit code. A forced
+/// shutdown exits the process after draining workers because a blocking stdin
+/// read cannot be cancelled portably without leaving a detached reader.
 pub fn run_stdio(config: EngineConfig) -> i32 {
     let (event_tx, event_rx) = mpsc::channel();
-    thread::spawn(move || read_stdio_events(event_tx));
-    run_stdio_core(config, event_rx, std::io::stdout())
+    let reader_thread = thread::spawn(move || read_stdio_events(event_tx));
+    let outcome = run_stdio_core(config, event_rx, std::io::stdout());
+    if outcome.stdin_stopped {
+        return match reader_thread.join() {
+            Ok(()) => outcome.exit_code,
+            Err(_) => {
+                eprintln!("TokenZero MCP stdin reader panicked during shutdown");
+                1
+            }
+        };
+    }
+
+    // A blocking std::io::stdin read cannot be cancelled portably. The only
+    // non-input shutdowns are an explicit idle timeout or a broken downstream
+    // transport, and the CLI caller exits immediately after this entry point.
+    // Exit here rather than return and silently detach the live reader.
+    std::process::exit(outcome.exit_code)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct StdioLoopOutcome {
+    exit_code: i32,
+    stdin_stopped: bool,
 }
 
 /// Transport-agnostic server loop. Lightweight JSON-RPC methods are answered
@@ -27,7 +53,7 @@ fn run_stdio_core<W: Write + Send + 'static>(
     config: EngineConfig,
     events: mpsc::Receiver<StdioEvent>,
     writer: W,
-) -> i32 {
+) -> StdioLoopOutcome {
     let engine = Arc::new(TokenZeroEngine::new(config));
     let idle_timeout = engine.config.mcp_idle_timeout;
 
@@ -65,12 +91,18 @@ fn run_stdio_core<W: Write + Send + 'static>(
         }));
     }
 
-    loop {
+    let stdin_stopped = 'server: loop {
         let event = match idle_timeout {
-            Some(timeout) => events.recv_timeout(timeout).ok(),
-            None => events.recv().ok(),
+            Some(timeout) => match events.recv_timeout(timeout) {
+                Ok(event) => event,
+                Err(mpsc::RecvTimeoutError::Timeout) => break 'server false,
+                Err(mpsc::RecvTimeoutError::Disconnected) => break 'server true,
+            },
+            None => match events.recv() {
+                Ok(event) => event,
+                Err(_) => break 'server true,
+            },
         };
-        let Some(event) = event else { break };
 
         match event {
             StdioEvent::Message { framed, text } => {
@@ -78,7 +110,7 @@ fn run_stdio_core<W: Write + Send + 'static>(
                     Ok(value) => value,
                     Err(err) => {
                         if send_parse_error(&response_tx, framed, err.to_string()).is_err() {
-                            break;
+                            break 'server false;
                         }
                         continue;
                     }
@@ -91,12 +123,12 @@ fn run_stdio_core<W: Write + Send + 'static>(
                         })
                         .is_err()
                     {
-                        break;
+                        break 'server false;
                     }
                 } else if let Some(text) = dispatch_jsonrpc(&engine, parsed) {
                     let outgoing = OutgoingResponse { framed, text };
                     if response_tx.send(outgoing).is_err() {
-                        break;
+                        break 'server false;
                     }
                 }
             }
@@ -106,15 +138,15 @@ fn run_stdio_core<W: Write + Send + 'static>(
                 recoverable,
             } => {
                 if send_parse_error(&response_tx, framed, error).is_err() {
-                    break;
+                    break 'server false;
                 }
                 if !recoverable {
-                    break;
+                    break 'server true;
                 }
             }
-            StdioEvent::Eof => break,
+            StdioEvent::Eof => break 'server true,
         }
-    }
+    };
 
     // Orderly shutdown: let in-flight tool calls finish and flush their
     // responses before the process exits.
@@ -124,7 +156,10 @@ fn run_stdio_core<W: Write + Send + 'static>(
     }
     drop(response_tx);
     let _ = writer_thread.join();
-    0
+    StdioLoopOutcome {
+        exit_code: 0,
+        stdin_stopped,
+    }
 }
 
 struct WorkItem {
@@ -481,4 +516,45 @@ pub(crate) fn write_framed_jsonrpc<W: Write>(
         response
     )?;
     writer.flush()
+}
+
+#[cfg(test)]
+mod lifecycle_tests {
+    use super::*;
+    use std::time::Duration;
+
+    #[test]
+    fn eof_marks_stdin_reader_safe_to_join() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = EngineConfig::for_root(dir.path());
+        let (event_tx, event_rx) = mpsc::channel();
+        event_tx.send(StdioEvent::Eof).unwrap();
+        drop(event_tx);
+
+        let outcome = run_stdio_core(config, event_rx, Vec::<u8>::new());
+        assert_eq!(
+            outcome,
+            StdioLoopOutcome {
+                exit_code: 0,
+                stdin_stopped: true,
+            }
+        );
+    }
+
+    #[test]
+    fn idle_timeout_requires_process_shutdown_instead_of_reader_detach() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut config = EngineConfig::for_root(dir.path());
+        config.mcp_idle_timeout = Some(Duration::from_millis(1));
+        let (_event_tx, event_rx) = mpsc::channel();
+
+        let outcome = run_stdio_core(config, event_rx, Vec::<u8>::new());
+        assert_eq!(
+            outcome,
+            StdioLoopOutcome {
+                exit_code: 0,
+                stdin_stopped: false,
+            }
+        );
+    }
 }
