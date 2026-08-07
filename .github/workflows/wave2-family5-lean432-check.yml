@@ -31,6 +31,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          export LEAN_PATH="$PWD"
           lean verification/wave2_family5/Wave2Family5.lean
           lean verification/wave2_family5/BoolEnumExplicit.lean
           printf 'LEAN_COMPILE_EXIT=0\n'
