@@ -11,6 +11,10 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use sha2::{Digest, Sha256};
+pub use zero_abi::{
+    EngineStageSpanV1, EngineStageTimelineV1, TelemetryRequestV1, WorkerTokenAccountingV1,
+    WorkerTokenCountKind,
+};
 
 fn canonical_json(value: &serde_json::Value) -> String {
     match value {
@@ -204,6 +208,8 @@ pub struct CallRequest {
     pub args: Value,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub deadline_unix_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub telemetry_request: Option<TelemetryRequestV1>,
     pub trace: WorkerTrace,
 }
 
@@ -273,6 +279,10 @@ pub enum WorkerResponseFrame {
     Result {
         request_id: String,
         result: WorkerResult,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        engine_timeline: Option<EngineStageTimelineV1>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        worker_token_accounting: Option<WorkerTokenAccountingV1>,
     },
     Error {
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -280,6 +290,10 @@ pub enum WorkerResponseFrame {
         error: WorkerError,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         trace: Option<WorkerTrace>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        engine_timeline: Option<EngineStageTimelineV1>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        worker_token_accounting: Option<WorkerTokenAccountingV1>,
     },
     CancelAck {
         request_id: String,
@@ -462,7 +476,7 @@ mod protocol_digest_tests {
     fn protocol_digest_matches_canonical_zerostack_manifest() {
         assert_eq!(
             raw_worker_protocol_digest_hex(),
-            "5c887d5b3443ec572b153cbd635b205d3e68f54308a3815d5878b59842e9fd38"
+            "e2daca4d95cbd2780f2e10b30b823e9398747bfe15e38ca0810f634a387aeace"
         );
     }
 }

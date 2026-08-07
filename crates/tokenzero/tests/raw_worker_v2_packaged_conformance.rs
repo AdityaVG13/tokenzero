@@ -23,7 +23,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tempfile::tempdir;
 
 const PROTOCOL_VERSION: &str = "zerostack.raw_worker.v2";
-const PROTOCOL_DIGEST: &str = "5c887d5b3443ec572b153cbd635b205d3e68f54308a3815d5878b59842e9fd38";
+const PROTOCOL_DIGEST: &str = "e2daca4d95cbd2780f2e10b30b823e9398747bfe15e38ca0810f634a387aeace";
 const MAX_FRAME_BYTES: usize = 1_048_576;
 
 fn repo_root() -> PathBuf {
@@ -702,6 +702,72 @@ fn crash_eof_and_sigkill_are_restart_survivable() {
         );
         assert_eq!(reborn.worker.close().code(), Some(0));
     }
+}
+
+/// Transport-telemetry suite: hub-requested accounting is typed, truthful,
+/// and absent from legacy response bytes when not requested.
+#[test]
+fn requested_worker_accounting_round_trips_on_packaged_artifact() {
+    let dir = tempdir().unwrap();
+    let cap = probe_surface_capability();
+    let mut bound = spawn_bound(dir.path(), "s-accounting", &cap);
+
+    let trace = trace_for("req-accounting", &bound.revision, &bound.contract);
+    let mut call = call_frame("req-accounting", "mem", json!({}), None, trace);
+    call["request"]["telemetry_request"] = json!({
+        "engine_stage_timeline": true,
+        "worker_token_accounting": true
+    });
+    bound.worker.send(&call);
+    let frame = bound.worker.recv("accounted call");
+    assert_eq!(frame["kind"], "result", "{frame}");
+    let accounting = &frame["worker_token_accounting"];
+    assert_eq!(accounting["count_kind"], "estimate", "{frame}");
+    assert!(
+        accounting["tokenizer_id"]
+            .as_str()
+            .is_some_and(|id| id.starts_with("estimator:")),
+        "{frame}"
+    );
+    let domain = &frame["result"]["value"]["accounting"];
+    for field in [
+        "raw_tokens",
+        "visible_tokens",
+        "recovery_tokens",
+        "billed_tokens",
+        "cached_tokens",
+        "exact_ref_tokens",
+    ] {
+        assert_eq!(accounting[field], domain[field], "field {field}: {frame}");
+    }
+    assert!(
+        accounting["cached_tokens"].as_u64().unwrap()
+            <= accounting["billed_tokens"].as_u64().unwrap(),
+        "{frame}"
+    );
+    let timeline = &frame["engine_timeline"];
+    assert!(timeline["total_ns"].as_u64().unwrap() > 0, "{frame}");
+    assert_eq!(timeline["spans"][0]["start_ns"], 0, "{frame}");
+    assert_eq!(
+        timeline["spans"][0]["duration_ns"], timeline["total_ns"],
+        "{frame}"
+    );
+
+    let trace = trace_for("req-legacy", &bound.revision, &bound.contract);
+    bound
+        .worker
+        .send(&call_frame("req-legacy", "mem", json!({}), None, trace));
+    let legacy = bound.worker.recv("legacy call");
+    assert_eq!(legacy["kind"], "result", "{legacy}");
+    assert!(legacy.get("worker_token_accounting").is_none(), "{legacy}");
+    assert!(legacy.get("engine_timeline").is_none(), "{legacy}");
+
+    bound.worker.send(&shutdown_frame("accounting complete"));
+    assert_eq!(
+        bound.worker.recv("accounting shutdown")["kind"],
+        "shutdown_ack"
+    );
+    assert_eq!(bound.worker.close().code(), Some(0));
 }
 
 /// Ref-ownership suite: every result carries engine/session ownership and

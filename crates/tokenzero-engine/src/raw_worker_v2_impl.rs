@@ -4,6 +4,7 @@ use std::io::{BufRead, Write};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use tokenzero_core::{Accounting, TokenizerFamily, active_tokenizer_metadata};
 
 #[derive(Debug, Default)]
 pub struct RawWorkerV2Session {
@@ -242,6 +243,67 @@ fn effect_class(op: &str) -> &'static str {
     }
 }
 
+fn worker_tokenizer_id() -> &'static str {
+    match active_tokenizer_metadata().map(|metadata| metadata.family) {
+        Some(TokenizerFamily::Cl100k) => "estimator:tokenzero-cl100k-average-v1",
+        Some(TokenizerFamily::O200k) => "estimator:tokenzero-o200k-average-v1",
+        Some(TokenizerFamily::SentencePiece) => "estimator:tokenzero-sentencepiece-average-v1",
+        None => "estimator:tokenzero-lexical-v1",
+    }
+}
+
+fn checked_u64_count(field: &str, value: usize) -> Result<u64, String> {
+    u64::try_from(value).map_err(|_| format!("{field} exceeds the raw-worker accounting range"))
+}
+
+fn worker_token_accounting(
+    value: &Value,
+) -> Result<raw_worker_v2_protocol::WorkerTokenAccountingV1, String> {
+    let accounting_value = value
+        .get("accounting")
+        .ok_or_else(|| "successful domain result omitted accounting".to_string())?;
+    let accounting: Accounting = serde_json::from_value(accounting_value.clone())
+        .map_err(|error| format!("invalid domain accounting: {error}"))?;
+    let worker = raw_worker_v2_protocol::WorkerTokenAccountingV1 {
+        tokenizer_id: worker_tokenizer_id().to_string(),
+        count_kind: raw_worker_v2_protocol::WorkerTokenCountKind::Estimate,
+        raw_tokens: checked_u64_count("raw_tokens", accounting.raw_tokens)?,
+        visible_tokens: checked_u64_count("visible_tokens", accounting.visible_tokens)?,
+        recovery_tokens: checked_u64_count("recovery_tokens", accounting.recovery_tokens)?,
+        billed_tokens: checked_u64_count("billed_tokens", accounting.billed_tokens)?,
+        cached_tokens: checked_u64_count("cached_tokens", accounting.cached_tokens)?,
+        exact_ref_tokens: accounting
+            .exact_ref_tokens
+            .map(|tokens| checked_u64_count("exact_ref_tokens", tokens))
+            .transpose()?,
+    };
+    zero_abi::validate_worker_token_accounting_v1(&worker)
+        .map_err(|error| format!("invalid worker token accounting: {error}"))?;
+    Ok(worker)
+}
+
+fn attach_engine_timeline(
+    mut frame: Value,
+    requested: bool,
+    elapsed: std::time::Duration,
+) -> Value {
+    if requested {
+        let duration_ns = elapsed.as_nanos().min(u128::from(u64::MAX)) as u64;
+        let duration_ns = duration_ns.max(1);
+        let timeline = raw_worker_v2_protocol::EngineStageTimelineV1 {
+            total_ns: duration_ns,
+            spans: vec![raw_worker_v2_protocol::EngineStageSpanV1 {
+                stage: "tokenzero.raw_worker_call".to_string(),
+                start_ns: 0,
+                duration_ns,
+            }],
+        };
+        frame["engine_timeline"] =
+            serde_json::to_value(timeline).expect("engine timeline serializes");
+    }
+    frame
+}
+
 /// A validated call ready for dispatch, carrying cloned binding fields so
 /// the session lock is never held while work runs.
 #[derive(Debug)]
@@ -251,6 +313,8 @@ struct CallCtx {
     args: Value,
     trace: Value,
     deadline_unix_ms: Option<u64>,
+    engine_stage_timeline_requested: bool,
+    worker_token_accounting_requested: bool,
     session_id: String,
     contract: String,
 }
@@ -402,9 +466,21 @@ fn route_frame(session: &mut RawWorkerV2Session, line: &[u8]) -> RoutedFrame {
         ));
     }
     let binding = session.binding.as_ref().expect("binding checked above");
+    let validation_started = Instant::now();
     match validate_call(binding, &frame) {
         Ok(ctx) => RoutedFrame::Dispatch(ctx),
-        Err(value) => RoutedFrame::Respond(encode(value)),
+        Err(value) => {
+            let timeline_requested = request
+                .get("telemetry_request")
+                .and_then(|request| request.get("engine_stage_timeline"))
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            RoutedFrame::Respond(encode(attach_engine_timeline(
+                value,
+                timeline_requested,
+                validation_started.elapsed(),
+            )))
+        }
     }
 }
 
@@ -435,6 +511,15 @@ fn validate_call(binding: &Binding, frame: &Value) -> Result<CallCtx, Value> {
         ));
     }
     let deadline_unix_ms = request.get("deadline_unix_ms").and_then(Value::as_u64);
+    let telemetry_request = request.get("telemetry_request");
+    let engine_stage_timeline_requested = telemetry_request
+        .and_then(|request| request.get("engine_stage_timeline"))
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let worker_token_accounting_requested = telemetry_request
+        .and_then(|request| request.get("worker_token_accounting"))
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
     if deadline_unix_ms.is_some_and(|v| v <= unix_ms()) {
         return Err(error(
             Some(id),
@@ -457,6 +542,8 @@ fn validate_call(binding: &Binding, frame: &Value) -> Result<CallCtx, Value> {
         args: request["args"].clone(),
         trace,
         deadline_unix_ms,
+        engine_stage_timeline_requested,
+        worker_token_accounting_requested,
         session_id: binding.session_id.clone(),
         contract: binding.contract.clone(),
     })
@@ -466,15 +553,22 @@ fn validate_call(binding: &Binding, frame: &Value) -> Result<CallCtx, Value> {
 /// deadline derived from `deadline_unix_ms` (default 30 s, matching the
 /// advertised handshake limit).
 fn run_call_registered(engine: &TokenZeroEngine, ctx: CallCtx, cancel: Arc<CancelState>) -> Value {
-    if cancel.flag.load(Ordering::SeqCst) {
-        return json!({"kind":"error","request_id":ctx.id,"error":{
+    let started = Instant::now();
+    let value = if cancel.flag.load(Ordering::SeqCst) {
+        json!({"kind":"error","request_id":ctx.id.clone(),"error":{
             "kind":"cancelled","message":"call cancelled before dispatch","retryable":false
-        },"trace":ctx.trace});
-    }
-    *ACTIVE_CANCEL.lock().unwrap_or_else(|p| p.into_inner()) = Some(cancel.clone());
-    let value = dispatch_call(engine, &ctx, &cancel);
-    *ACTIVE_CANCEL.lock().unwrap_or_else(|p| p.into_inner()) = None;
-    value
+        },"trace":ctx.trace.clone()})
+    } else {
+        *ACTIVE_CANCEL.lock().unwrap_or_else(|p| p.into_inner()) = Some(cancel.clone());
+        let value = dispatch_call(engine, &ctx, &cancel);
+        *ACTIVE_CANCEL.lock().unwrap_or_else(|p| p.into_inner()) = None;
+        value
+    };
+    attach_engine_timeline(
+        value,
+        ctx.engine_stage_timeline_requested,
+        started.elapsed(),
+    )
 }
 
 /// Dispatch a validated call. Cancellation observed after dispatch maps to a
@@ -521,13 +615,30 @@ fn dispatch_call(engine: &TokenZeroEngine, ctx: &CallCtx, cancel: &Arc<CancelSta
         },"trace":ctx.trace.clone()});
     }
     let value = response.get("result").cloned().unwrap_or(Value::Null);
+    let worker_token_accounting = if ctx.worker_token_accounting_requested {
+        match worker_token_accounting(&value) {
+            Ok(accounting) => Some(accounting),
+            Err(message) => {
+                return json!({"kind":"error","request_id":ctx.id.clone(),"error":{
+                    "kind":"invalid_token_accounting","message":message,"retryable":false
+                },"trace":ctx.trace.clone()});
+            }
+        }
+    } else {
+        None
+    };
     let mut owned_refs = Vec::new();
     refs(&value, &mut owned_refs);
-    json!({"kind":"result","request_id":ctx.id.clone(),"result":{"value":value,"metadata":{
+    let mut frame = json!({"kind":"result","request_id":ctx.id.clone(),"result":{"value":value,"metadata":{
         "effect":effect_class(ctx.op.as_str()),
         "approval":{"state":"not_required"},"revert":{"supported":false},
         "ownership":{"engine":"tokenzero","session_id":ctx.session_id.clone(),"refs":owned_refs},"trace":ctx.trace.clone()
-    }}})
+    }}});
+    if let Some(accounting) = worker_token_accounting {
+        frame["worker_token_accounting"] =
+            serde_json::to_value(accounting).expect("worker token accounting serializes");
+    }
+    frame
 }
 
 struct CallJob {
@@ -717,6 +828,147 @@ mod tests {
         assert_eq!(response["ack"]["binding"]["ref_scheme"], "tz");
         assert_eq!(response["ack"]["limits"]["max_frame_bytes"], 1_048_576);
         assert_eq!(response["ack"]["capabilities"]["cancellation"], true);
+    }
+
+    #[test]
+    fn requested_worker_token_accounting_matches_domain_accounting_and_hub_abi() {
+        let mut session = RawWorkerV2Session::default();
+        let rev = revision();
+        let cap = local_capability();
+        send(&mut session, handshake(&rev));
+        let trace = json!({"runtime_id":"rt","cell_id":"cell","request_id":"req-accounting","trace_id":"trace",
+            "worker_revision":rev,"contract_digest":cap["semantic_contract_digest"]});
+        let response = send(
+            &mut session,
+            json!({"kind":"call","request":{
+                "request_id":"req-accounting",
+                "op":"mem",
+                "args":{},
+                "telemetry_request":{
+                    "engine_stage_timeline":true,
+                    "worker_token_accounting":true
+                },
+                "trace":trace
+            }}),
+        );
+        assert_eq!(response["kind"], "result", "{response}");
+        let accounting: raw_worker_v2_protocol::WorkerTokenAccountingV1 =
+            serde_json::from_value(response["worker_token_accounting"].clone()).unwrap();
+        zero_abi::validate_worker_token_accounting_v1(&accounting).unwrap();
+        assert_eq!(
+            accounting.count_kind,
+            raw_worker_v2_protocol::WorkerTokenCountKind::Estimate
+        );
+        assert!(accounting.tokenizer_id.starts_with("estimator:"));
+        let timeline: raw_worker_v2_protocol::EngineStageTimelineV1 =
+            serde_json::from_value(response["engine_timeline"].clone()).unwrap();
+        zero_abi::validate_engine_stage_timeline_v1(&timeline).unwrap();
+        assert_eq!(timeline.spans[0].stage, "tokenzero.raw_worker_call");
+        let domain = &response["result"]["value"]["accounting"];
+        assert_eq!(
+            accounting.raw_tokens,
+            domain["raw_tokens"].as_u64().unwrap()
+        );
+        assert_eq!(
+            accounting.visible_tokens,
+            domain["visible_tokens"].as_u64().unwrap()
+        );
+        assert_eq!(
+            accounting.recovery_tokens,
+            domain["recovery_tokens"].as_u64().unwrap()
+        );
+        assert_eq!(
+            accounting.billed_tokens,
+            domain["billed_tokens"].as_u64().unwrap()
+        );
+        assert_eq!(
+            accounting.cached_tokens,
+            domain["cached_tokens"].as_u64().unwrap()
+        );
+        let encoded = serde_json::to_vec(&response).unwrap();
+        let decoded = zero_abi::decode_response_frame(
+            &encoded,
+            raw_worker_v2_protocol::DEFAULT_MAX_FRAME_BYTES,
+        )
+        .unwrap();
+        assert!(matches!(
+            decoded,
+            zero_abi::WorkerResponseFrame::Result {
+                worker_token_accounting: Some(_),
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn unrequested_accounting_preserves_the_legacy_response_shape() {
+        let mut session = RawWorkerV2Session::default();
+        let rev = revision();
+        let cap = local_capability();
+        send(&mut session, handshake(&rev));
+        let trace = json!({"runtime_id":"rt","cell_id":"cell","request_id":"req-legacy","trace_id":"trace",
+            "worker_revision":rev,"contract_digest":cap["semantic_contract_digest"]});
+        let response = send(
+            &mut session,
+            json!({"kind":"call","request":{
+                "request_id":"req-legacy","op":"mem","args":{},"trace":trace
+            }}),
+        );
+        assert_eq!(response["kind"], "result", "{response}");
+        assert!(response.get("worker_token_accounting").is_none());
+        assert!(response.get("engine_timeline").is_none());
+    }
+
+    #[test]
+    fn requested_timeline_is_preserved_on_typed_dispatch_errors() {
+        let mut session = RawWorkerV2Session::default();
+        let rev = revision();
+        let cap = local_capability();
+        send(&mut session, handshake(&rev));
+        let trace = json!({"runtime_id":"rt","cell_id":"cell","request_id":"req-error","trace_id":"trace",
+            "worker_revision":rev,"contract_digest":cap["semantic_contract_digest"]});
+        let response = send(
+            &mut session,
+            json!({"kind":"call","request":{
+                "request_id":"req-error",
+                "op":"execute_code",
+                "args":{},
+                "telemetry_request":{
+                    "engine_stage_timeline":true,
+                    "worker_token_accounting":true
+                },
+                "trace":trace
+            }}),
+        );
+        assert_eq!(response["kind"], "error");
+        assert_eq!(response["error"]["kind"], "unsupported_operation");
+        assert!(response.get("worker_token_accounting").is_none());
+        let timeline: raw_worker_v2_protocol::EngineStageTimelineV1 =
+            serde_json::from_value(response["engine_timeline"].clone()).unwrap();
+        zero_abi::validate_engine_stage_timeline_v1(&timeline).unwrap();
+        zero_abi::decode_response_frame(
+            &serde_json::to_vec(&response).unwrap(),
+            raw_worker_v2_protocol::DEFAULT_MAX_FRAME_BYTES,
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn missing_or_inconsistent_domain_accounting_fails_loudly() {
+        assert!(worker_token_accounting(&json!({})).is_err());
+        let error = worker_token_accounting(&json!({"accounting":{
+            "raw_tokens":10,
+            "visible_tokens":5,
+            "recovery_tokens":0,
+            "billed_tokens":1,
+            "cached_tokens":2,
+            "exact_ref_tokens":0
+        }}))
+        .unwrap_err();
+        assert!(
+            error.contains("cached_tokens exceeds billed_tokens"),
+            "{error}"
+        );
     }
 
     #[test]
