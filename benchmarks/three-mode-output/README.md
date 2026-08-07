@@ -26,8 +26,12 @@ harness hashes canonical JSON and rejects every trial whose `lbi_sha256` differs
 Required pins cover:
 
 - model provider, model id, weights revision, and execution identity;
+- `backend_identity` id, revision, and routing-policy digest;
+- `reasoning_config` effort and full configuration digest;
 - decoder/sampling law and random stream;
 - tokenizer revision and canonical rendering schema;
+- `output_cap` maximum tokens and cap-policy digest;
+- `transcript_policy` assembly and prefix-policy digests;
 - repository commits and tree digests;
 - the canonical task-manifest digest;
 - tool/effect interfaces and verifier command;
@@ -36,7 +40,14 @@ Required pins cover:
 - fresh-work accounting, an inline USD/micro-USD price card plus its canonical
   digest, and the cost policy;
 - the exact `cold` and `retained` cache states;
-- seeds, exclusions, and statistical rule.
+- `amortization_policy` horizon, schema-charge rule, and policy digest;
+- seeds, exclusions, and statistical rule;
+- `trial_order_policy` randomization algorithm/seed and the full `trial_order`.
+
+Randomize the paired cell order before freezing the LBI. Record the method as
+`randomized_before_lock`, the algorithm, and its seed. The harness requires the
+raw JSONL rows to match the locked `trial_order` exactly; a reordered, missing,
+duplicate, or extra cell fails closed.
 
 The task manifest uses `tokenzero.three-mode.tasks.v1`. Each task pins its prompt,
 snapshot, expected artifact, scale group, and scale rank. Every task must have

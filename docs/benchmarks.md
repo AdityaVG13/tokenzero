@@ -162,11 +162,14 @@ This harness has no committed performance result. It validates raw trials from a
 provider run and makes no fixture-only product, speed, savings, or release claim.
 See `benchmarks/three-mode-output/README.md` for the schemas.
 
-Before trials, the Z7 locked benchmark identity pins the model, decoder,
-tokenizer, snapshots, tasks, tool/effect interfaces, verifier, hardware, setup,
-index, fallback, timeout, resources, accounting, pricing, seeds, exclusions,
-and statistical rule. Every task runs all three output modes under both `cold`
-and `retained` cache states with the same seeds.
+Before trials, the Z7 locked benchmark identity explicitly pins the model,
+backend identity, reasoning effort/config, decoder, tokenizer, output cap,
+transcript assembly/prefix policy, snapshots, tasks, tool/effect interfaces,
+verifier, hardware, setup, index, fallback, timeout, resources, accounting,
+pricing, amortization, seeds, exclusions, and statistical rule. Randomize every
+paired `(task, mode, seed, cache_state)` cell before lock and record the order
+algorithm and seed. Raw JSONL must match that locked order exactly. Every task
+runs all three output modes under both `cold` and `retained` cache states.
 
 The report retains every primary, repair, failed, and fallback raw output. It
 publishes explicit trial/success/failure/fallback denominators, provider usage,

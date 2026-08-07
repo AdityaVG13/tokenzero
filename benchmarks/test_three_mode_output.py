@@ -3,6 +3,7 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
+import random
 import tempfile
 import unittest
 from pathlib import Path
@@ -95,6 +96,18 @@ class Fixture:
                 "output_per_million_tokens": 5_000_000,
             },
         }
+        trial_order = [
+            {
+                "task_id": task["task_id"],
+                "requested_mode": mode,
+                "seed": 7,
+                "cache_state": cache_state,
+            }
+            for task in tasks
+            for mode in ("full_file", "text_diff", "edit_protocol")
+            for cache_state in CACHE_STATES
+        ]
+        random.Random(41).shuffle(trial_order)
         self.lbi = {
             "schema_version": LBI_SCHEMA,
             "identity_label": "fixture-only",
@@ -105,6 +118,15 @@ class Fixture:
                 "weights_revision": "fixture-revision",
                 "execution_identity": "deterministic-test",
             },
+            "backend_identity": {
+                "backend_id": "fixture-backend",
+                "revision": "fixture-backend-v1",
+                "routing_policy_digest": "d" * 64,
+            },
+            "reasoning_config": {
+                "effort": "high",
+                "config_digest": "e" * 64,
+            },
             "decoder": {
                 "sampling_law": "deterministic",
                 "random_stream": "seed-7",
@@ -113,6 +135,14 @@ class Fixture:
                 "tokenizer_id": "fixture-tokenizer",
                 "revision": "v1",
                 "rendering_schema": "fixture",
+            },
+            "output_cap": {
+                "max_output_tokens": 8192,
+                "policy_digest": "f" * 64,
+            },
+            "transcript_policy": {
+                "assembly_policy_digest": "0" * 64,
+                "prefix_policy_digest": "1" * 64,
             },
             "snapshots": [
                 {"repository": "fixture", "commit": "fixture", "tree_sha256": snapshot}
@@ -139,11 +169,22 @@ class Fixture:
                 "cost_policy": "provider-billed-microusd",
                 "cache_states": list(CACHE_STATES),
             },
+            "amortization_policy": {
+                "policy_digest": "2" * 64,
+                "horizon_trials": len(trial_order),
+                "schema_charge_policy": "charge-once-at-cold-prefix",
+            },
             "statistics": {
                 "seeds": [7],
                 "rule_digest": "b" * 64,
                 "exclusions_digest": "c" * 64,
             },
+            "trial_order_policy": {
+                "method": "randomized_before_lock",
+                "algorithm": "python-random-v1-fixture",
+                "seed": 41,
+            },
+            "trial_order": trial_order,
         }
         self.lbi_path.write_text(json.dumps(self.lbi))
         self.lbi_sha256 = canonical_sha256(self.lbi)
@@ -200,6 +241,26 @@ class Fixture:
                             "verifier_receipt_path": verifier.name,
                         }
                     )
+        trials_by_cell = {
+            (
+                trial["task_id"],
+                trial["requested_mode"],
+                trial["seed"],
+                trial["cache_state"],
+            ): trial
+            for trial in self.trials
+        }
+        self.trials = [
+            trials_by_cell[
+                (
+                    cell["task_id"],
+                    cell["requested_mode"],
+                    cell["seed"],
+                    cell["cache_state"],
+                )
+            ]
+            for cell in trial_order
+        ]
         self.write_trials()
 
     def write_trials(self) -> None:
@@ -266,6 +327,7 @@ class ThreeModeOutputTests(unittest.TestCase):
             400,
         )
         self.assertTrue(report["raw_trials"]["retained"])
+        self.assertTrue(report["raw_trials"]["preregistered_order_validated"])
         self.assertNotIn(str(self.root), json.dumps(report))
 
     def test_absent_usage_is_not_coerced_to_zero(self) -> None:
@@ -346,6 +408,21 @@ class ThreeModeOutputTests(unittest.TestCase):
         ] += 1
         self.fixture.lbi_path.write_text(json.dumps(self.fixture.lbi))
         with self.assertRaisesRegex(HarnessError, "does not bind pricing assumptions"):
+            self.report()
+
+    def test_explicit_backend_identity_drift_fails_closed(self) -> None:
+        self.fixture.lbi["backend_identity"]["revision"] = "drifted-backend"
+        self.fixture.lbi_path.write_text(json.dumps(self.fixture.lbi))
+        with self.assertRaisesRegex(HarnessError, "benchmark identity drift"):
+            self.report()
+
+    def test_jsonl_order_drift_fails_closed(self) -> None:
+        self.fixture.trials[0], self.fixture.trials[1] = (
+            self.fixture.trials[1],
+            self.fixture.trials[0],
+        )
+        self.fixture.write_trials()
+        with self.assertRaisesRegex(HarnessError, "preregistered LBI order"):
             self.report()
 
     def test_identity_drift_fails_closed(self) -> None:

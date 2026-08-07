@@ -174,8 +174,12 @@ def validate_lbi(lbi: dict[str, Any], task_manifest_sha256: str) -> None:
             "identity_label",
             "phase",
             "model",
+            "backend_identity",
+            "reasoning_config",
             "decoder",
             "tokenizer",
+            "output_cap",
+            "transcript_policy",
             "snapshots",
             "task_manifest_sha256",
             "tools",
@@ -186,7 +190,10 @@ def validate_lbi(lbi: dict[str, Any], task_manifest_sha256: str) -> None:
             "timeouts",
             "resources",
             "accounting",
+            "amortization_policy",
             "statistics",
+            "trial_order_policy",
+            "trial_order",
         ),
         "lbi",
     )
@@ -200,6 +207,21 @@ def validate_lbi(lbi: dict[str, Any], task_manifest_sha256: str) -> None:
         ("provider", "model_id", "weights_revision", "execution_identity"),
         "lbi.model",
     )
+    backend = _pin_object(
+        lbi["backend_identity"],
+        ("backend_id", "revision", "routing_policy_digest"),
+        "lbi.backend_identity",
+    )
+    for field in ("backend_id", "revision"):
+        _string(backend[field], f"lbi.backend_identity.{field}")
+    _digest_fields(backend, ("routing_policy_digest",), "lbi.backend_identity")
+    reasoning = _pin_object(
+        lbi["reasoning_config"],
+        ("effort", "config_digest"),
+        "lbi.reasoning_config",
+    )
+    _string(reasoning["effort"], "lbi.reasoning_config.effort")
+    _digest_fields(reasoning, ("config_digest",), "lbi.reasoning_config")
     _pin_object(
         lbi["decoder"],
         ("sampling_law", "random_stream"),
@@ -209,6 +231,27 @@ def validate_lbi(lbi: dict[str, Any], task_manifest_sha256: str) -> None:
         lbi["tokenizer"],
         ("tokenizer_id", "revision", "rendering_schema"),
         "lbi.tokenizer",
+    )
+    output_cap = _pin_object(
+        lbi["output_cap"],
+        ("max_output_tokens", "policy_digest"),
+        "lbi.output_cap",
+    )
+    if (
+        _integer(output_cap["max_output_tokens"], "lbi.output_cap.max_output_tokens")
+        == 0
+    ):
+        raise HarnessError("lbi.output_cap.max_output_tokens: expected a positive cap")
+    _digest_fields(output_cap, ("policy_digest",), "lbi.output_cap")
+    transcript = _pin_object(
+        lbi["transcript_policy"],
+        ("assembly_policy_digest", "prefix_policy_digest"),
+        "lbi.transcript_policy",
+    )
+    _digest_fields(
+        transcript,
+        ("assembly_policy_digest", "prefix_policy_digest"),
+        "lbi.transcript_policy",
     )
     snapshots = lbi["snapshots"]
     if not isinstance(snapshots, list) or not snapshots:
@@ -277,6 +320,37 @@ def validate_lbi(lbi: dict[str, Any], task_manifest_sha256: str) -> None:
         raise HarnessError(
             "lbi.accounting.pricing_digest: does not bind pricing assumptions"
         )
+    amortization = _pin_object(
+        lbi["amortization_policy"],
+        ("policy_digest", "horizon_trials", "schema_charge_policy"),
+        "lbi.amortization_policy",
+    )
+    _digest_fields(amortization, ("policy_digest",), "lbi.amortization_policy")
+    _string(
+        amortization["schema_charge_policy"],
+        "lbi.amortization_policy.schema_charge_policy",
+    )
+    if (
+        _integer(
+            amortization["horizon_trials"],
+            "lbi.amortization_policy.horizon_trials",
+        )
+        == 0
+    ):
+        raise HarnessError("lbi.amortization_policy.horizon_trials: expected positive")
+    order_policy = _pin_object(
+        lbi["trial_order_policy"],
+        ("method", "algorithm", "seed"),
+        "lbi.trial_order_policy",
+    )
+    if order_policy["method"] != "randomized_before_lock":
+        raise HarnessError(
+            "lbi.trial_order_policy.method: expected randomized_before_lock"
+        )
+    _string(order_policy["algorithm"], "lbi.trial_order_policy.algorithm")
+    _integer(order_policy["seed"], "lbi.trial_order_policy.seed")
+    if not isinstance(lbi["trial_order"], list) or not lbi["trial_order"]:
+        raise HarnessError("lbi.trial_order: expected a nonempty locked order")
     statistics = _pin_object(
         lbi["statistics"],
         ("seeds", "rule_digest", "exclusions_digest"),
@@ -340,6 +414,48 @@ def validate_tasks(
         _digest(task["expected_artifact_sha256"], f"{context}.expected_artifact_sha256")
         tasks[task_id] = dict(task)
     return tasks
+
+
+def validate_trial_order(
+    lbi: dict[str, Any],
+    tasks: dict[str, dict[str, Any]],
+) -> list[tuple[str, str, int, str]]:
+    fields = {"task_id", "requested_mode", "seed", "cache_state"}
+    locked: list[tuple[str, str, int, str]] = []
+    for index, entry in enumerate(lbi["trial_order"]):
+        context = f"lbi.trial_order[{index}]"
+        if not isinstance(entry, dict) or set(entry) != fields:
+            raise HarnessError(
+                f"{context}: expected exactly task_id, requested_mode, seed, cache_state"
+            )
+        task_id = _string(entry["task_id"], f"{context}.task_id")
+        mode = entry["requested_mode"]
+        seed = _integer(entry["seed"], f"{context}.seed")
+        cache_state = entry["cache_state"]
+        if task_id not in tasks:
+            raise HarnessError(f"{context}.task_id: not in the locked task manifest")
+        if mode not in MODES:
+            raise HarnessError(f"{context}.requested_mode: invalid mode")
+        if cache_state not in CACHE_STATES:
+            raise HarnessError(f"{context}.cache_state: expected cold or retained")
+        locked.append((task_id, mode, seed, cache_state))
+    expected = {
+        (task_id, mode, seed, cache_state)
+        for task_id in tasks
+        for mode in MODES
+        for seed in lbi["statistics"]["seeds"]
+        for cache_state in CACHE_STATES
+    }
+    counts = Counter(locked)
+    duplicates = [cell for cell, count in counts.items() if count != 1]
+    missing = sorted(expected - set(locked))
+    extra = sorted(set(locked) - expected)
+    if duplicates or missing or extra:
+        raise HarnessError(
+            "lbi.trial_order: paired coverage mismatch "
+            f"duplicates={duplicates} missing={missing} extra={extra}"
+        )
+    return locked
 
 
 def validate_observation(value: object, context: str) -> dict[str, Any]:
@@ -951,6 +1067,7 @@ def build_report(lbi_path: Path, tasks_path: Path, trials_path: Path) -> dict[st
     lbi_sha256 = canonical_sha256(lbi)
     snapshot_digests = {snapshot["tree_sha256"] for snapshot in lbi["snapshots"]}
     tasks = validate_tasks(task_manifest, snapshot_digests)
+    locked_order = validate_trial_order(lbi, tasks)
     raw_trials = _load_jsonl(trials_path)
     seeds = set(lbi["statistics"]["seeds"])
     root = trials_path.parent
@@ -985,6 +1102,19 @@ def build_report(lbi_path: Path, tasks_path: Path, trials_path: Path) -> dict[st
             "trials: paired coverage mismatch "
             f"duplicates={duplicates} missing={missing} extra={extra}"
         )
+    actual_order = [
+        (
+            trial["task_id"],
+            trial["requested_mode"],
+            trial["seed"],
+            trial["cache_state"],
+        )
+        for trial in trials
+    ]
+    if actual_order != locked_order:
+        raise HarnessError(
+            "trials: JSONL order differs from the preregistered LBI order"
+        )
     mode_reports = [_aggregate_mode(mode, trials) for mode in MODES]
     return {
         "schema_version": REPORT_SCHEMA,
@@ -1002,6 +1132,7 @@ def build_report(lbi_path: Path, tasks_path: Path, trials_path: Path) -> dict[st
             "sha256": file_sha256(trials_path),
             "trial_count": len(trials),
             "retained": True,
+            "preregistered_order_validated": True,
         },
         "denominators": {
             "trials": len(trials),
