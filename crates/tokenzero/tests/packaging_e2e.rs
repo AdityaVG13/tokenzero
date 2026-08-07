@@ -4,6 +4,8 @@
 //! binaries: fresh install, replacement, upgrade, rollback, uninstall, dual fail-closed.
 
 use std::fs;
+#[cfg(unix)]
+use std::os::unix::fs::{PermissionsExt, symlink};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, Instant};
@@ -98,6 +100,229 @@ fn run_uninstall(prefix: &Path, bin_dir: &Path, platform: &str) -> (i32, String,
 
 fn read(path: &Path) -> String {
     fs::read_to_string(path).unwrap_or_default()
+}
+
+#[cfg(unix)]
+struct PriorInstall {
+    peer_bytes: Vec<u8>,
+    state_bytes: Vec<u8>,
+    config_bytes: Vec<u8>,
+    shim_target_bytes: Vec<u8>,
+    peer_mode: u32,
+    state_mode: u32,
+    config_mode: u32,
+    shim_target_mode: u32,
+    compat_target: PathBuf,
+}
+
+#[cfg(unix)]
+fn write_mode(path: &Path, bytes: &[u8], mode: u32) {
+    fs::write(path, bytes).unwrap();
+    fs::set_permissions(path, fs::Permissions::from_mode(mode)).unwrap();
+}
+
+#[cfg(unix)]
+fn seed_prior_codemode_install(prefix: &Path, bin_dir: &Path) -> PriorInstall {
+    fs::create_dir_all(prefix).unwrap();
+    fs::create_dir_all(bin_dir).unwrap();
+    let peer = bin_dir.join("tokenzero-codemode");
+    let compat = bin_dir.join("tokenzero");
+    let state = prefix.join("install-state.json");
+    let config = prefix.join("client-config.json");
+    let shim_target = prefix.join("shim-target");
+    let peer_bytes = b"#!/bin/sh\nprintf 'prior-peer\\n'\n".to_vec();
+    let state_bytes = b"{\"surface\":\"codemode\",\"sentinel\":\"prior-state\"}\n".to_vec();
+    let config_bytes = b"{\"surface\":\"codemode\",\"args\":[\"--mode=codemode\"],\"sentinel\":\"prior-config\"}\n".to_vec();
+    let shim_target_bytes = b"codemode\n".to_vec();
+    let peer_mode = 0o751;
+    let state_mode = 0o640;
+    let config_mode = 0o600;
+    let shim_target_mode = 0o644;
+    write_mode(&peer, &peer_bytes, peer_mode);
+    write_mode(&state, &state_bytes, state_mode);
+    write_mode(&config, &config_bytes, config_mode);
+    write_mode(&shim_target, &shim_target_bytes, shim_target_mode);
+    symlink(&peer, &compat).unwrap();
+    PriorInstall {
+        peer_bytes,
+        state_bytes,
+        config_bytes,
+        shim_target_bytes,
+        peer_mode,
+        state_mode,
+        config_mode,
+        shim_target_mode,
+        compat_target: peer,
+    }
+}
+
+#[cfg(unix)]
+fn mode(path: &Path) -> u32 {
+    fs::metadata(path).unwrap().permissions().mode() & 0o777
+}
+
+#[cfg(unix)]
+fn assert_prior_install_restored(
+    prefix: &Path,
+    bin_dir: &Path,
+    prior: &PriorInstall,
+    selected_artifact: Option<(&[u8], u32)>,
+) {
+    let selected = bin_dir.join("tokenzero-mcp");
+    let peer = bin_dir.join("tokenzero-codemode");
+    let compat = bin_dir.join("tokenzero");
+    let state = prefix.join("install-state.json");
+    let config = prefix.join("client-config.json");
+    let shim_target = prefix.join("shim-target");
+    match selected_artifact {
+        Some((bytes, expected_mode)) => {
+            assert_eq!(fs::read(&selected).unwrap(), bytes);
+            assert_eq!(mode(&selected), expected_mode);
+        }
+        None => assert!(!selected.exists()),
+    }
+    assert_eq!(fs::read(&peer).unwrap(), prior.peer_bytes);
+    assert_eq!(fs::read(&state).unwrap(), prior.state_bytes);
+    assert_eq!(fs::read(&config).unwrap(), prior.config_bytes);
+    assert_eq!(fs::read(&shim_target).unwrap(), prior.shim_target_bytes);
+    assert_eq!(mode(&peer), prior.peer_mode);
+    assert_eq!(mode(&state), prior.state_mode);
+    assert_eq!(mode(&config), prior.config_mode);
+    assert_eq!(mode(&shim_target), prior.shim_target_mode);
+    assert!(
+        fs::symlink_metadata(&compat)
+            .unwrap()
+            .file_type()
+            .is_symlink()
+    );
+    assert_eq!(fs::read_link(&compat).unwrap(), prior.compat_target);
+    assert!(fs::read_dir(prefix).unwrap().flatten().all(|entry| {
+        !entry
+            .file_name()
+            .to_string_lossy()
+            .starts_with(".install-rollback.")
+    }));
+    assert!(
+        fs::read_dir(bin_dir)
+            .unwrap()
+            .flatten()
+            .all(|entry| !entry.file_name().to_string_lossy().contains(".candidate."))
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn unverified_candidate_preserves_installed_peer_and_state() {
+    let tmp = tempfile::tempdir().unwrap();
+    let prefix = tmp.path().join("prefix");
+    let bin_dir = tmp.path().join("bin");
+    let prior = seed_prior_codemode_install(&prefix, &bin_dir);
+    let bad_candidate = tmp.path().join("bad-tokenzero-mcp");
+    write_mode(
+        &bad_candidate,
+        b"#!/bin/sh\nprintf 'not-an-sbom\\n'\n",
+        0o755,
+    );
+
+    let output = Command::new("bash")
+        .arg(install_sh())
+        .args(["--surface", "mcp", "--skip-build"])
+        .arg("--prefix")
+        .arg(&prefix)
+        .arg("--bin-dir")
+        .arg(&bin_dir)
+        .env("TOKENZERO_INSTALL_SRC", &bad_candidate)
+        .env("TOKENZERO_INSTALL_PLATFORM", "linux")
+        .env("HOME", &prefix)
+        .current_dir(repo_root())
+        .output()
+        .unwrap();
+
+    assert!(!output.status.success(), "{output:?}");
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("candidate SBOM digest"),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_prior_install_restored(&prefix, &bin_dir, &prior, None);
+}
+
+#[cfg(unix)]
+#[test]
+fn post_replace_failure_restores_binary_peer_json_modes_and_symlink() {
+    let tmp = tempfile::tempdir().unwrap();
+    let prefix = tmp.path().join("prefix");
+    let bin_dir = tmp.path().join("bin");
+    let prior = seed_prior_codemode_install(&prefix, &bin_dir);
+    let prior_selected = b"#!/bin/sh\nprintf 'prior-selected\\n'\n".to_vec();
+    let prior_selected_mode = 0o711;
+    write_mode(
+        &bin_dir.join("tokenzero-mcp"),
+        &prior_selected,
+        prior_selected_mode,
+    );
+    let candidate = tmp.path().join("valid-tokenzero-mcp");
+    let digest = "a".repeat(64);
+    write_mode(
+        &candidate,
+        format!(
+            "#!/bin/sh\nif [ \"${{1:-}}\" = sbom ]; then\n  printf '%s\\n' '{{\"semantic_contract_digest\":\"{digest}\"}}'\nfi\n"
+        )
+        .as_bytes(),
+        0o755,
+    );
+
+    let real_python_output = Command::new("sh")
+        .args(["-c", "command -v python3"])
+        .output()
+        .unwrap();
+    assert!(real_python_output.status.success());
+    let real_python = String::from_utf8(real_python_output.stdout)
+        .unwrap()
+        .trim()
+        .to_string();
+    let fake_bin = tmp.path().join("fake-bin");
+    fs::create_dir(&fake_bin).unwrap();
+    let python_wrapper = fake_bin.join("python3");
+    write_mode(
+        &python_wrapper,
+        b"#!/bin/sh\ncount=0\nif [ -f \"$PY_COUNT_FILE\" ]; then count=$(cat \"$PY_COUNT_FILE\"); fi\ncount=$((count + 1))\nprintf '%s\\n' \"$count\" >\"$PY_COUNT_FILE\"\nif [ \"$count\" -ge 3 ]; then exit 97; fi\nexec \"$REAL_PYTHON\" \"$@\"\n",
+        0o755,
+    );
+    let search_path = std::env::join_paths(std::iter::once(fake_bin.clone()).chain(
+        std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default()),
+    ))
+    .unwrap();
+    let count_file = tmp.path().join("python-count");
+
+    let output = Command::new("bash")
+        .arg(install_sh())
+        .args(["--surface", "mcp", "--skip-build"])
+        .arg("--prefix")
+        .arg(&prefix)
+        .arg("--bin-dir")
+        .arg(&bin_dir)
+        .env("TOKENZERO_INSTALL_SRC", &candidate)
+        .env("TOKENZERO_INSTALL_PLATFORM", "linux")
+        .env("REAL_PYTHON", real_python)
+        .env("PY_COUNT_FILE", &count_file)
+        .env("PATH", search_path)
+        .env("HOME", &prefix)
+        .current_dir(repo_root())
+        .output()
+        .unwrap();
+
+    assert!(!output.status.success(), "{output:?}");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("client-config dual/malformed"), "{stderr}");
+    assert!(stderr.contains("restoring exact prior"), "{stderr}");
+    assert_eq!(fs::read_to_string(&count_file).unwrap().trim(), "3");
+    assert_prior_install_restored(
+        &prefix,
+        &bin_dir,
+        &prior,
+        Some((&prior_selected, prior_selected_mode)),
+    );
 }
 
 #[test]

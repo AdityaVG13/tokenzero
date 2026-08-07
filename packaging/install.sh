@@ -165,7 +165,16 @@ except Exception:
     print("unknown")
 PY
   else
-    echo "unknown"
+    local output digest
+    output="$("$bin" sbom 2>/dev/null || true)"
+    digest="$(
+      printf '%s\n' "$output" \
+        | grep -Eo '"semantic_contract_digest"[[:space:]]*:[[:space:]]*"[0-9a-f]{64}"' \
+        | head -n 1 \
+        | grep -Eo '[0-9a-f]{64}' \
+        || true
+    )"
+    echo "${digest:-unknown}"
   fi
 }
 
@@ -288,45 +297,88 @@ if [[ ! -x "$SRC" ]]; then
 fi
 
 mkdir -p "$PREFIX" "$BIN_DIR"
-# Snapshot prior state for rollback if post-copy verification fails.
-ROLLBACK_STATE=""
-ROLLBACK_CFG=""
-ROLLBACK_SHIM=""
-if [[ -f "$PREFIX/install-state.json" ]]; then
-  ROLLBACK_STATE="$(cat "$PREFIX/install-state.json")"
-fi
-if [[ -f "$PREFIX/client-config.json" ]]; then
-  ROLLBACK_CFG="$(cat "$PREFIX/client-config.json")"
-fi
-if [[ -f "$PREFIX/shim-target" ]]; then
-  ROLLBACK_SHIM="$(cat "$PREFIX/shim-target")"
-fi
-
-install -m 755 "$SRC" "$BIN_DIR/$ARTIFACT"
-
-# Peer removal before shim so only one surface remains.
 PEER="$([[ "$SURFACE" == mcp ]] && echo tokenzero-codemode || echo tokenzero-mcp)"
-if [[ -e "$BIN_DIR/$PEER" ]]; then
+CANDIDATE="$(mktemp "$BIN_DIR/.${ARTIFACT}.candidate.XXXXXX")"
+ROLLBACK_DIR=""
+ROLLBACK_ACTIVE=0
+
+snapshot_path() {
+  local source="$1" key="$2"
+  if [[ -e "$source" || -L "$source" ]]; then
+    cp -pP "$source" "$ROLLBACK_DIR/$key"
+    : >"$ROLLBACK_DIR/$key.present"
+  fi
+}
+
+restore_snapshot() {
+  local destination="$1" key="$2"
+  rm -f "$destination" || return 1
+  if [[ -f "$ROLLBACK_DIR/$key.present" ]]; then
+    cp -pP "$ROLLBACK_DIR/$key" "$destination" || return 1
+  fi
+}
+
+cleanup_transaction() {
+  local status=$? rollback_failed=0
+  trap - EXIT
+  if [[ "$ROLLBACK_ACTIVE" -eq 1 ]]; then
+    echo "install: failure after replacement; restoring exact prior binaries and state" >&2
+    restore_snapshot "$BIN_DIR/$ARTIFACT" artifact || rollback_failed=1
+    restore_snapshot "$BIN_DIR/$PEER" peer || rollback_failed=1
+    restore_snapshot "$BIN_DIR/tokenzero" compat-shim || rollback_failed=1
+    restore_snapshot "$PREFIX/install-state.json" install-state || rollback_failed=1
+    restore_snapshot "$PREFIX/client-config.json" client-config || rollback_failed=1
+    restore_snapshot "$PREFIX/shim-target" shim-target || rollback_failed=1
+    if [[ "$rollback_failed" -ne 0 ]]; then
+      echo "install: FAIL rollback incomplete; inspect $ROLLBACK_DIR" >&2
+      exit 1
+    fi
+  fi
+  rm -f "$CANDIDATE" 2>/dev/null || true
+  if [[ -n "$ROLLBACK_DIR" ]]; then
+    rm -rf "$ROLLBACK_DIR" 2>/dev/null || true
+  fi
+  exit "$status"
+}
+trap cleanup_transaction EXIT
+
+# Copy and verify one private candidate before touching any installed surface.
+install -m 755 "$SRC" "$CANDIDATE"
+DIGEST="$(read_digest_from_sbom "$CANDIDATE")"
+if [[ ! "$DIGEST" =~ ^[0-9a-f]{64}$ ]]; then
+  echo "install: FAIL candidate SBOM digest is absent or invalid: $DIGEST" >&2
+  exit 1
+fi
+
+# Snapshot exact prior bytes, modes, and symlink targets before replacement.
+ROLLBACK_DIR="$(mktemp -d "$PREFIX/.install-rollback.XXXXXX")"
+snapshot_path "$BIN_DIR/$ARTIFACT" artifact
+snapshot_path "$BIN_DIR/$PEER" peer
+snapshot_path "$BIN_DIR/tokenzero" compat-shim
+snapshot_path "$PREFIX/install-state.json" install-state
+snapshot_path "$PREFIX/client-config.json" client-config
+snapshot_path "$PREFIX/shim-target" shim-target
+ROLLBACK_ACTIVE=1
+
+# Move the verified candidate itself into place, then verify it again before
+# removing the peer. This does not re-read the mutable source path.
+mv -f "$CANDIDATE" "$BIN_DIR/$ARTIFACT"
+INSTALLED_DIGEST="$(read_digest_from_sbom "$BIN_DIR/$ARTIFACT")"
+if [[ "$INSTALLED_DIGEST" != "$DIGEST" ]]; then
+  echo "install: FAIL installed binary digest mismatch: candidate=$DIGEST installed=$INSTALLED_DIGEST" >&2
+  exit 1
+fi
+
+if [[ -e "$BIN_DIR/$PEER" || -L "$BIN_DIR/$PEER" ]]; then
   echo "install: replacing peer artifact $PEER (mutual exclusion)"
   rm -f "$BIN_DIR/$PEER"
 fi
-# Compatibility shim: selected symlink only — never a dual-surface binary.
+# Compatibility shim: selected symlink only; never a dual-surface binary.
 ln -sfn "$BIN_DIR/$ARTIFACT" "$BIN_DIR/tokenzero"
-
-DIGEST="$(read_digest_from_sbom "$BIN_DIR/$ARTIFACT")"
 write_install_state "$SURFACE" "$ARTIFACT" "$BIN_DIR/$ARTIFACT" "$DIGEST" "$PLATFORM"
 
 if [[ ! -f "$PREFIX/install-state.json" || ! -f "$PREFIX/client-config.json" ]]; then
-  echo "install: FAIL state/config not written; restoring prior if any" >&2
-  if [[ -n "$ROLLBACK_STATE" ]]; then
-    atomic_write "$PREFIX/install-state.json" <<<"$ROLLBACK_STATE"
-  fi
-  if [[ -n "$ROLLBACK_CFG" ]]; then
-    atomic_write "$PREFIX/client-config.json" <<<"$ROLLBACK_CFG"
-  fi
-  if [[ -n "$ROLLBACK_SHIM" ]]; then
-    atomic_write "$PREFIX/shim-target" <<<"$ROLLBACK_SHIM"
-  fi
+  echo "install: FAIL state/config not written" >&2
   exit 1
 fi
 
@@ -344,20 +396,14 @@ assert not any("mcp" in a and "codemode" in a for a in args)
 print("ok")
 PY
   then
-    echo "install: FAIL client-config dual/malformed surface; restoring prior if any" >&2
-    if [[ -n "$ROLLBACK_STATE" ]]; then
-      atomic_write "$PREFIX/install-state.json" <<<"$ROLLBACK_STATE"
-    fi
-    if [[ -n "$ROLLBACK_CFG" ]]; then
-      atomic_write "$PREFIX/client-config.json" <<<"$ROLLBACK_CFG"
-    fi
-    if [[ -n "$ROLLBACK_SHIM" ]]; then
-      atomic_write "$PREFIX/shim-target" <<<"$ROLLBACK_SHIM"
-    fi
+    echo "install: FAIL client-config dual/malformed surface" >&2
     exit 1
   fi
 fi
 
+ROLLBACK_ACTIVE=0
+trap - EXIT
+rm -rf "$ROLLBACK_DIR"
 echo "install: ok surface=$SURFACE artifact=$ARTIFACT prefix=$PREFIX bin=$BIN_DIR/$ARTIFACT shim=$BIN_DIR/tokenzero platform=$PLATFORM semantic_contract_digest=$DIGEST"
 echo "client_config: $PREFIX/client-config.json"
 echo "selection: native CodeMode client -> tokenzero-mcp; otherwise -> tokenzero-codemode"
