@@ -3,6 +3,10 @@
 MCP is the structured-tool adapter for the Rust TokenZero Core runtime. The CLI
 remains the universal fallback for hosts without MCP.
 
+See the [MCP compatibility contract](mcp-compat.md) for the dated support
+window, feature freeze, operation-complete CodeMode migration, and surface
+switch/rollback instructions.
+
 ## Protocol Compatibility
 
 TokenZero supports the legacy initialization flow for existing clients, the

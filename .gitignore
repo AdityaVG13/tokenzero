@@ -52,6 +52,7 @@ __pycache__/
 !/docs/codemode.md
 !/docs/command-coverage.md
 !/docs/development.md
+!/docs/mcp-compat.md
 !/docs/install.md
 !/docs/mcp.md
 !/docs/pulse.md

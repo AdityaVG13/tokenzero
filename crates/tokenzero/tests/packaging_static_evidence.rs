@@ -272,3 +272,75 @@ fn selection_matrix_documented() {
         "docs must state installer never starts stdio for state"
     );
 }
+
+/// The public compat contract must cover every canonical tool and lifecycle
+/// obligation. Deriving names from the catalog makes a new tool fail this gate
+/// until its migration row is documented.
+#[test]
+fn compat_support_and_migration_contract_is_complete() {
+    let catalog = read("crates/tokenzero-mcp-compat/src/catalog.rs");
+    let docs = read("docs/mcp-compat.md");
+    let mut canonical_tools = catalog
+        .lines()
+        .filter_map(|line| {
+            let (_, rest) = line.split_once("=> { name: \"")?;
+            let (name, _) = rest.split_once('"')?;
+            Some(name)
+        })
+        .collect::<Vec<_>>();
+    canonical_tools.sort_unstable();
+    canonical_tools.dedup();
+
+    assert_eq!(
+        canonical_tools.len(),
+        20,
+        "unexpected canonical catalog size; review the migration contract"
+    );
+    for tool in canonical_tools {
+        assert!(
+            docs.contains(&format!("`{tool}`")),
+            "compat migration contract is missing {tool}"
+        );
+    }
+
+    let alias_block = catalog
+        .split_once("pub(crate) const TOOL_ALIASES")
+        .and_then(|(_, rest)| rest.split_once("];"))
+        .map(|(block, _)| block)
+        .expect("TOOL_ALIASES block");
+    for alias in alias_block.lines().filter_map(|line| {
+        line.trim()
+            .strip_prefix("(\"")?
+            .split_once("\",")
+            .map(|(alias, _)| alias)
+    }) {
+        assert!(
+            docs.contains(&format!("`{alias}`")),
+            "compat migration contract is missing alias {alias}"
+        );
+    }
+
+    for marker in [
+        "2026-08-07",
+        "2026-11-05",
+        "2027-02-03",
+        "feature-frozen",
+        "security or privacy fixes",
+        "correctness fixes",
+        "migration-blocker fixes",
+        "stdout remains JSON-RPC only",
+        "initialize",
+        "notifications/initialized",
+        "tools/list",
+        "tools/call",
+        "resources/read",
+        "server/discover",
+        "./packaging/install.sh --surface codemode",
+        "./packaging/install.sh --surface mcp",
+        "tokenzero install --rollback latest",
+        "./packaging/install.sh --uninstall",
+        "github.com/AdityaVG13/tokenzero/issues",
+    ] {
+        assert!(docs.contains(marker), "compat contract is missing {marker}");
+    }
+}
