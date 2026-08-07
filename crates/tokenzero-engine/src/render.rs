@@ -908,7 +908,7 @@ mod preview_tests {
 
     use super::{
         EngineConfig, LocalPayloadPolicy, RecoveryStoreLease, TokenZeroEngine, expansion_response,
-        local_payload_policy, preview,
+        local_payload_policy, preview, render_text, render_text_with_complete_read,
     };
 
     #[test]
@@ -1098,6 +1098,123 @@ b
     }
 
     #[test]
+    fn text_render_elides_only_exact_small_complete_read_footers() {
+        let blob_ref = "tz://blob/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let file_ref = "tz://file/f0000000000000000";
+        let response = |visible: String, bytes: usize| {
+            let mut response = ToolResponse::ok(
+                "read",
+                Mode::Auto,
+                visible,
+                vec![
+                    RefRecord {
+                        kind: "blob".into(),
+                        ref_id: blob_ref.into(),
+                        bytes,
+                        live: true,
+                    },
+                    RefRecord {
+                        kind: "file".into(),
+                        ref_id: file_ref.into(),
+                        bytes,
+                        live: true,
+                    },
+                ],
+                Accounting {
+                    raw_tokens: 3,
+                    visible_tokens: 3,
+                    recovery_tokens: 0,
+                    billed_tokens: 3,
+                    cached_tokens: 0,
+                    exact_ref_tokens: None,
+                },
+            );
+            response.telemetry = Some(serde_json::json!({"output_strategy": "full"}));
+            response
+        };
+
+        let complete = response("alpha\nBETA\ngamma".into(), 16);
+        assert!(render_text(&complete).contains(blob_ref));
+        assert_eq!(
+            render_text_with_complete_read(&complete),
+            "alpha\nBETA\ngamma"
+        );
+
+        let partial = response("BETA".into(), 4);
+        let partial_text = render_text(&partial);
+        assert!(partial_text.contains(blob_ref), "{partial_text}");
+
+        for trimmed_source in ["trailing space", "trailing tab", "trailing newline"] {
+            let trimmed = response("abc".into(), 4);
+            let text = render_text_with_complete_read(&trimmed);
+            assert!(text.contains(blob_ref), "{trimmed_source}: {text}");
+        }
+
+        let large = response("x".repeat(257), 257);
+        let large_text = render_text_with_complete_read(&large);
+        assert!(large_text.contains(blob_ref), "{large_text}");
+
+        let binary_like = response("a\0b".into(), 3);
+        assert!(render_text_with_complete_read(&binary_like).contains(blob_ref));
+
+        let mut lossy = response("alpha\nBETA\ngamma".into(), 16);
+        lossy.telemetry = Some(serde_json::json!({"output_strategy": "seen_set_dedup"}));
+        assert!(render_text_with_complete_read(&lossy).contains(blob_ref));
+    }
+
+    #[test]
+    fn text_render_quiets_only_verified_exact_edit_success() {
+        let mut response = ToolResponse::ok(
+            "edit",
+            Mode::Auto,
+            String::new(),
+            vec![
+                RefRecord {
+                    kind: "blob".into(),
+                    ref_id:
+                        "tz://blob/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                            .into(),
+                    bytes: 17,
+                    live: true,
+                },
+                RefRecord {
+                    kind: "undo".into(),
+                    ref_id:
+                        "tz://blob/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+                            .into(),
+                    bytes: 17,
+                    live: true,
+                },
+            ],
+            Accounting {
+                raw_tokens: 3,
+                visible_tokens: 0,
+                recovery_tokens: 0,
+                billed_tokens: 0,
+                cached_tokens: 0,
+                exact_ref_tokens: None,
+            },
+        );
+        response.ack = None;
+        response.telemetry = Some(serde_json::json!({
+            "transport_status": "ok",
+            "exact_refs_available": true,
+            "dry_run": false,
+            "degraded": false,
+            "storage_error": null
+        }));
+        assert_eq!(render_text(&response), "");
+
+        let mut warned = response.clone();
+        warned.safety = Some(serde_json::json!({"warning": "review"}));
+        assert!(render_text(&warned).contains("undo_ref:"));
+
+        let mut dead_ref = response;
+        dead_ref.refs[1].live = false;
+        assert!(render_text(&dead_ref).contains("undo_ref:"));
+    }
+
+    #[test]
     fn multiline_preview_is_bounded_and_reports_omitted_lines() {
         let text = (1..=9)
             .map(|line| format!("line {line}: {}", "x".repeat(80)))
@@ -1243,9 +1360,111 @@ fn slim_cli_json(response: &ToolResponse) -> String {
     })
 }
 
+const INLINE_EXACT_READ_MAX_BYTES: usize = 256;
+
+fn quiet_verified_edit(response: &ToolResponse) -> bool {
+    if response.status != "ok"
+        || response.tool != "edit"
+        || response.ack.is_some()
+        || response
+            .visible
+            .as_ref()
+            .is_none_or(|visible| !visible.text.is_empty())
+        || response.diagnostic.is_some()
+        || response.safety.is_some()
+        || response.recovery.is_some()
+        || response.channels.is_some()
+        || response.refs.is_empty()
+        || response.refs.iter().any(|record| !record.live)
+        || !response.refs.iter().any(|record| record.kind == "undo")
+    {
+        return false;
+    }
+    let Some(telemetry) = response
+        .telemetry
+        .as_ref()
+        .and_then(serde_json::Value::as_object)
+    else {
+        return false;
+    };
+    telemetry
+        .get("transport_status")
+        .and_then(serde_json::Value::as_str)
+        == Some("ok")
+        && telemetry
+            .get("exact_refs_available")
+            .and_then(serde_json::Value::as_bool)
+            == Some(true)
+        && telemetry
+            .get("dry_run")
+            .and_then(serde_json::Value::as_bool)
+            == Some(false)
+        && telemetry
+            .get("degraded")
+            .and_then(serde_json::Value::as_bool)
+            == Some(false)
+        && telemetry.get("warning").is_none()
+        && telemetry
+            .get("storage_error")
+            .is_none_or(serde_json::Value::is_null)
+}
+
+fn inline_exact_small_read(response: &ToolResponse, complete_source: bool) -> Option<String> {
+    if !complete_source
+        || response.status != "ok"
+        || response.tool != "read"
+        || response.diagnostic.is_some()
+        || response.safety.is_some()
+        || response.recovery.is_some()
+        || response.channels.is_some()
+        || response
+            .telemetry
+            .as_ref()
+            .and_then(|value| value.get("output_strategy"))
+            .and_then(serde_json::Value::as_str)
+            != Some("full")
+    {
+        return None;
+    }
+    let visible = response.visible.as_ref()?;
+    if visible.text.len() > INLINE_EXACT_READ_MAX_BYTES
+        || visible
+            .text
+            .chars()
+            .any(|ch| ch.is_control() && !matches!(ch, '\n' | '\r' | '\t'))
+    {
+        return None;
+    }
+    let mut blob_refs = response
+        .refs
+        .iter()
+        .filter(|record| record.kind == "blob" && record.live);
+    let blob = blob_refs.next()?;
+    if blob_refs.next().is_some() {
+        return None;
+    }
+    (visible.text.len() == blob.bytes).then(|| visible.text.clone())
+}
+
 pub fn render_text(response: &ToolResponse) -> String {
+    render_text_inner(response, false)
+}
+
+/// Render a CLI text response whose resolved read input is one complete source.
+/// Eligibility stays out-of-band so JSON, MCP, and ranged responses are unchanged.
+pub fn render_text_with_complete_read(response: &ToolResponse) -> String {
+    render_text_inner(response, true)
+}
+
+fn render_text_inner(response: &ToolResponse, complete_source: bool) -> String {
     if let Some(error) = &response.error {
         return format!("error: {} ({})\n", error.message, error.code);
+    }
+    if quiet_verified_edit(response) {
+        return String::new();
+    }
+    if let Some(inline) = inline_exact_small_read(response, complete_source) {
+        return inline;
     }
     let mut out = String::new();
     if let Some(visible) = &response.visible {

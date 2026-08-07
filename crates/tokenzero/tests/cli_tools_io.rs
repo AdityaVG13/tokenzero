@@ -240,6 +240,142 @@ fn cli_slim_envelope_is_default_and_full_is_an_exact_opt_in() {
 }
 
 #[test]
+fn cli_small_complete_read_is_inline_and_successful_edit_is_silent() {
+    let (dir, cache) = setup_temp_with_cache();
+    let file = dir.path().join("edit.txt");
+    fs::write(&file, b"alpha\nbeta\ngamma").unwrap();
+    let file_arg = file.to_str().unwrap();
+    let cache_arg = cache.to_str().unwrap();
+
+    let edit = tokenzero_cmd()
+        .current_dir(dir.path())
+        .args([
+            "edit",
+            "--edits-json",
+            r#"[{"find":"beta","replace":"BETA"}]"#,
+            file_arg,
+            "--cache-path",
+            cache_arg,
+        ])
+        .output()
+        .unwrap();
+    assert_success_ref(&edit, "small exact edit");
+    assert!(edit.stdout.is_empty(), "{:?}", edit.stdout);
+    assert_eq!(fs::read(&file).unwrap(), b"alpha\nBETA\ngamma");
+
+    let forensic = tokenzero_cmd()
+        .current_dir(dir.path())
+        .args([
+            "edit",
+            "--edits-json",
+            r#"[{"find":"BETA","replace":"beta"}]"#,
+            file_arg,
+            "--cache-path",
+            cache_arg,
+            "--json=full",
+        ])
+        .output()
+        .unwrap();
+    assert_success_ref(&forensic, "full edit envelope");
+    let forensic = parse_json_stdout(&forensic);
+    assert_eq!(forensic["tool"], "edit");
+    assert!(
+        forensic["refs"]
+            .as_array()
+            .is_some_and(|refs| refs.iter().any(|record| record["kind"] == "undo")),
+        "{forensic}"
+    );
+
+    let edit = tokenzero_cmd()
+        .current_dir(dir.path())
+        .args([
+            "edit",
+            "--edits-json",
+            r#"[{"find":"beta","replace":"BETA"}]"#,
+            file_arg,
+            "--cache-path",
+            cache_arg,
+        ])
+        .output()
+        .unwrap();
+    assert_success_ref(&edit, "second small exact edit");
+    assert!(edit.stdout.is_empty(), "{:?}", edit.stdout);
+    assert_eq!(fs::read(&file).unwrap(), b"alpha\nBETA\ngamma");
+
+    let read = tokenzero_cmd()
+        .current_dir(dir.path())
+        .args(["read", file_arg, "--cache-path", cache_arg])
+        .output()
+        .unwrap();
+    assert_success_ref(&read, "small complete read");
+    assert_eq!(read.stdout, b"alpha\nBETA\ngamma");
+
+    let partial = tokenzero_cmd()
+        .current_dir(dir.path())
+        .args([
+            "read",
+            file_arg,
+            "--start-line",
+            "2",
+            "--end-line",
+            "2",
+            "--cache-path",
+            cache_arg,
+        ])
+        .output()
+        .unwrap();
+    assert_success_ref(&partial, "partial read");
+    let partial = String::from_utf8(partial.stdout).unwrap();
+    assert!(partial.contains("blob_ref: tz://blob/"), "{partial}");
+
+    for (name, bytes) in [
+        ("trailing-space.txt", &b"abc "[..]),
+        ("trailing-tab.txt", &b"abc\t"[..]),
+        ("trailing-newline.txt", &b"abc\n"[..]),
+    ] {
+        let mutant = dir.path().join(name);
+        fs::write(&mutant, bytes).unwrap();
+        let output = tokenzero_cmd()
+            .current_dir(dir.path())
+            .args(["read", mutant.to_str().unwrap(), "--cache-path", cache_arg])
+            .output()
+            .unwrap();
+        assert_success_ref(&output, name);
+        let output = String::from_utf8(output.stdout).unwrap();
+        assert!(output.contains("blob_ref: tz://blob/"), "{name}: {output}");
+    }
+
+    fs::write(&file, format!("{}\n", "x".repeat(257))).unwrap();
+    let large = tokenzero_cmd()
+        .current_dir(dir.path())
+        .args(["read", file_arg, "--cache-path", cache_arg])
+        .output()
+        .unwrap();
+    assert_success_ref(&large, "large read");
+    let large = String::from_utf8(large.stdout).unwrap();
+    assert!(large.contains("blob_ref: tz://blob/"), "{large}");
+
+    let failed = tokenzero_cmd()
+        .current_dir(dir.path())
+        .args([
+            "edit",
+            "--edits-json",
+            r#"[{"find":"missing","replace":"nope"}]"#,
+            file_arg,
+            "--cache-path",
+            cache_arg,
+        ])
+        .output()
+        .unwrap();
+    assert!(!failed.status.success());
+    assert!(
+        String::from_utf8_lossy(&failed.stdout).contains("error:"),
+        "failure must stay loud: {:?}",
+        failed.stdout
+    );
+}
+
+#[test]
 fn cli_default_envelope_has_a_labeled_sub_kib_overhead_gate() {
     let (dir, cache) = setup_temp_with_cache();
     let cache_arg = cache.to_str().unwrap().to_string();

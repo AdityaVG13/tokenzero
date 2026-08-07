@@ -723,6 +723,7 @@ fn tool_engine_mode(tool: &ToolArgs) -> Result<(TokenZeroEngine, Mode)> {
 struct EmitResponse {
     responses: Vec<ToolResponse>,
     json: bool,
+    complete_read_source: bool,
 }
 
 fn tools_emit(
@@ -740,7 +741,11 @@ fn tools_emit(
             engine.apply_session_visible_ref_aliases(response);
         }
     }
-    Ok(EmitResponse { responses, json })
+    Ok(EmitResponse {
+        responses,
+        json,
+        complete_read_source: false,
+    })
 }
 
 fn tool_emit(
@@ -988,6 +993,7 @@ fn handle_read(args: ReadArgs) -> Result<EmitResponse> {
                     ),
                 )],
                 json: args.tool.json,
+                complete_read_source: false,
             });
         }
         let text = fs::read_to_string(paths_from)?;
@@ -1015,7 +1021,10 @@ fn handle_read(args: ReadArgs) -> Result<EmitResponse> {
         payload["end_line"] = json!(e);
     }
     let response = dispatch_cli_tool(&engine, "tz_read", payload);
-    tool_emit(&engine, response, args.tool.json, "read")
+    let mut emitted = tool_emit(&engine, response, args.tool.json, "read")?;
+    emitted.complete_read_source =
+        paths.len() == 1 && args.start_line.is_none() && args.end_line.is_none();
+    Ok(emitted)
 }
 
 fn handle_run(args: RunArgs) -> Result<EmitResponse> {
@@ -2266,12 +2275,13 @@ fn push_agent(agents: &mut Vec<String>, raw: &str) -> Result<()> {
 }
 
 fn emit(value: EmitResponse) -> Result<()> {
+    let complete_read_source = value.complete_read_source;
     let mut responses = value.responses;
     if responses.len() == 1 {
         let response = responses
             .pop()
             .ok_or_else(|| anyhow::anyhow!("internal error: command produced no response"))?;
-        return emit_with_json(response, value.json);
+        return emit_with_json_options(response, value.json, complete_read_source);
     }
     if responses.is_empty() {
         anyhow::bail!("internal error: command produced no response");
@@ -2291,7 +2301,10 @@ fn emit(value: EmitResponse) -> Result<()> {
                     print!("{}", visible.text);
                 }
             } else {
-                print!("{}", render_cli_text(response));
+                print!(
+                    "{}",
+                    render_cli_text_options(response, complete_read_source)
+                );
             }
         }
     }
@@ -2301,8 +2314,12 @@ fn emit(value: EmitResponse) -> Result<()> {
     Ok(())
 }
 
-fn render_cli_text(response: &ToolResponse) -> String {
-    let rendered = render_text(response);
+fn render_cli_text_options(response: &ToolResponse, complete_read_source: bool) -> String {
+    let rendered = if complete_read_source {
+        tokenzero_engine::render::render_text_with_complete_read(response)
+    } else {
+        render_text(response)
+    };
     let Some(telemetry) = response
         .telemetry
         .as_ref()
@@ -2340,6 +2357,14 @@ fn render_cli_text(response: &ToolResponse) -> String {
 }
 
 fn emit_with_json(response: ToolResponse, as_json: bool) -> Result<()> {
+    emit_with_json_options(response, as_json, false)
+}
+
+fn emit_with_json_options(
+    response: ToolResponse,
+    as_json: bool,
+    complete_read_source: bool,
+) -> Result<()> {
     let exit_error = response.status == "error";
     if as_json {
         println!("{}", cli_json(&response));
@@ -2348,7 +2373,10 @@ fn emit_with_json(response: ToolResponse, as_json: bool) -> Result<()> {
             print!("{}", visible.text);
         }
     } else {
-        print!("{}", render_cli_text(&response));
+        print!(
+            "{}",
+            render_cli_text_options(&response, complete_read_source)
+        );
     }
     if exit_error {
         std::process::exit(1);

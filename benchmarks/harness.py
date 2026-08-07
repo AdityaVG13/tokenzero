@@ -126,16 +126,44 @@ def file_count(root, excludes=('.git', 'target', '.zerostack')):
         dirs[:] = [name for name in dirs if name not in excludes]; total += len(files)
     return total
 
-def _times(command, runs, warmup, prepare, name, cold_warmup=False):
+def _run_prepare(command: str) -> None:
+    prepared = subprocess.run(['bash', '-c', command], capture_output=True)
+    if prepared.returncode != 0:
+        raise RuntimeError(
+            f"benchmark prepare failed with {prepared.returncode}: "
+            f"{prepared.stderr.decode('utf-8', errors='replace')}"
+        )
+
+
+def _times(
+    command: str,
+    runs: int,
+    warmup: int,
+    prepare: str,
+    name: str,
+    cold_warmup: bool = False,
+) -> list[float]:
+    # Preflight exposes the preparation command's real stderr. Hyperfine then
+    # repeats the same command outside every warmup and measured sample.
+    _run_prepare(prepare)
     if shutil.which('hyperfine'):
         with tempfile.TemporaryDirectory(prefix='tz-hf-') as tmp:
-            artifact = Path(tmp) / 'hf.json'; subprocess.run(['hyperfine', '--warmup', str(warmup), '--runs', str(runs), '--style', 'basic', '--export-json', str(artifact), '--prepare', prepare, '--command-name', name, command], capture_output=True, text=True)
+            artifact = Path(tmp) / 'hf.json'
+            probe = subprocess.run(['hyperfine', '--warmup', str(warmup), '--runs', str(runs), '--style', 'basic', '--export-json', str(artifact), '--prepare', prepare, '--command-name', name, command], capture_output=True, text=True)
+            if probe.returncode != 0 and 'preparation command' in probe.stderr.lower():
+                raise RuntimeError(f"benchmark preparation failed with {probe.returncode}: {probe.stderr}")
             try:
                 return json.loads(artifact.read_text()).get('results', [{}])[0].get('times', []) or []
             except (json.JSONDecodeError, OSError, IndexError, KeyError, TypeError):
                 pass
-    if cold_warmup:
-        subprocess.run(['bash', '-c', f'{prepare}; {command}'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    fallback_warmups = 1 if cold_warmup else warmup
+    for _ in range(fallback_warmups):
+        _run_prepare(prepare)
+        subprocess.run(
+            ['bash', '-c', command],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
     probe = subprocess.run(['/usr/bin/time', '-f', '%e', 'true'], capture_output=True, text=True)
     try:
         float((probe.stderr or probe.stdout).strip().splitlines()[-1]); gnu_time = probe.returncode == 0
@@ -143,7 +171,7 @@ def _times(command, runs, warmup, prepare, name, cold_warmup=False):
         gnu_time = False
     times = []
     for _ in range(runs):
-        subprocess.run(['bash', '-c', prepare], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        _run_prepare(prepare)
         if not gnu_time:
             started = time.perf_counter(); subprocess.run(['bash', '-c', command], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL); times.append(time.perf_counter() - started)
             continue
@@ -162,12 +190,16 @@ def measure_cell(label, command, cold=False, runs=50, warmup=3):
     prepare = f'rm -f {RECOVERY_CACHE}' if cold else 'true'
     return tuple(percentiles_ms(_times(command, runs, warmup, prepare, label, cold)))
 
-def measure_median(label, command, runs=5, warmup=1):
-    wall = median_ms(_times(command, runs, warmup, 'true', label))
-    try:
-        output = subprocess.run(['bash', '-c', command], capture_output=True).stdout
-    except OSError:
-        output = b''
+def measure_median(
+    label: str,
+    command: str,
+    runs: int = 5,
+    warmup: int = 1,
+    prepare: str = 'true',
+) -> tuple[int, int, int]:
+    wall = median_ms(_times(command, runs, warmup, prepare, label))
+    _run_prepare(prepare)
+    output = subprocess.run(['bash', '-c', command], capture_output=True).stdout
     return (wall, len(output), token_estimate(output))
 
 def _json(data):
@@ -227,7 +259,7 @@ def main(argv=None):
             command.add_argument(*flags, **options)
     add('resolve_bin', (('--profile',), {'default': 'release'})); add('now_ms'); add('tok', (('--bytes',), {'type': int})); percentile = sub.add_parser('percentiles')
     group = percentile.add_mutually_exclusive_group(required=True); group.add_argument('--json'); group.add_argument('--times'); add('measure_cell', (('label',), {}), (('cmd',), {}), (('--cold',), {'action': 'store_true'}), (('--runs',), {'type': int, 'default': 50}), (('--warmup',), {'type': int, 'default': 3}))
-    add('measure_median', (('label',), {}), (('cmd',), {}), (('--runs',), {'type': int, 'default': 5}), (('--warmup',), {'type': int, 'default': 1})); add('mcp_schema_tokens', (('cap_file',), {}), (('tools',), {})); add('quality', (('task',), {})); add('clear_cache')
+    add('measure_median', (('label',), {}), (('cmd',), {}), (('--runs',), {'type': int, 'default': 5}), (('--warmup',), {'type': int, 'default': 1}), (('--prepare',), {'default': 'true'})); add('mcp_schema_tokens', (('cap_file',), {}), (('tools',), {})); add('quality', (('task',), {})); add('clear_cache')
     add('git_commit', (('--short',), {'action': 'store_true'})); add('accounting', (('--file',), {}), (('--key',), {'default': 'raw_tokens'})); add('first_blob_ref', (('file',), {})); add('glob_pick', (('file',), {}))
     add('generate_million', (('root',), {}), (('--dirs',), {'type': int, 'default': 100}), (('--files',), {'type': int, 'default': 10}), (('--lines',), {'type': int, 'default': 1000}), (('--needle',), {'default': 'BENCH_NEEDLE_FN'})); add('tz_metrics', (('file',), {}), (('wall',), {})); args = parser.parse_args(argv); action = args.action
     if action == 'resolve_bin':
@@ -241,7 +273,7 @@ def main(argv=None):
     elif action == 'measure_cell':
         result = '\t'.join(map(str, measure_cell(args.label, args.cmd, args.cold, args.runs, args.warmup)))
     elif action == 'measure_median':
-        result = '\t'.join(map(str, measure_median(args.label, args.cmd, args.runs, args.warmup)))
+        result = '\t'.join(map(str, measure_median(args.label, args.cmd, args.runs, args.warmup, args.prepare)))
     elif action == 'mcp_schema_tokens':
         result = mcp_schema_tokens(args.cap_file, args.tools)
     elif action == 'quality':

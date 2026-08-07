@@ -56,7 +56,7 @@ Command: `benchmarks/cli-cold-read.sh`. Cold = recovery cache removed per cell; 
 
 ## Token savings vs alternatives (competitor bake-off)
 
-Command: `benchmarks/competitor-bakeoff.sh`. Same corpus, same task, same measurement point per row. Tools that are not installed are marked, never measured warm-vs-cold.
+Command: `benchmarks/competitor-bakeoff.sh`. Same corpus, same task, same measurement point per row. Tools that are not installed are marked, never measured warm-vs-cold. For `edit_verify`, `harness.py --prepare` restores the exact 16-byte fixture before every warmup, measured sample, and captured-byte probe; preparation stays outside timing and output accounting. The corrected valid pre-change baseline was 349 bytes / 88 estimated tokens; the old 779 / 195 row exercised an outside-root failure and is not used. Current output is 16 bytes / 4 estimated tokens.
 
 | task | tool | wall_ms | output_bytes | est_tokens | note |
 |---|---|---:|---:|---:|---|
@@ -81,8 +81,8 @@ Command: `benchmarks/competitor-bakeoff.sh`. Same corpus, same task, same measur
 | `tree_glob_read` | `headroom` | - | - | - | not installed |
 | `tree_glob_read` | `ztk` | 14 | 0 | 0 | ran but produced no output (arg mismatch with installed version) |
 | `tree_glob_read` | `context-mode` | - | - | - | not installed |
-| `edit_verify` | `tokenzero` | 45 | 779 | 195 |  |
-| `edit_verify` | `raw-cli` | 11 | 17 | 5 |  |
+| `edit_verify` | `tokenzero` | 170 | 16 | 4 |  |
+| `edit_verify` | `raw-cli` | 7 | 16 | 4 |  |
 | `edit_verify` | `rtk` | - | - | - | not installed |
 | `edit_verify` | `lean-ctx` | - | - | - | not installed |
 | `edit_verify` | `headroom` | - | - | - | not installed |
