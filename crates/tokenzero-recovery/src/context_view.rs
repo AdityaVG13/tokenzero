@@ -34,6 +34,17 @@ pub struct ContextViewConfig {
     pub hot_tail_tokens: usize,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum ContextViewConfigError {
+    #[error(
+        "hot_tail_tokens ({hot_tail_tokens}) must not exceed working_set_tokens ({working_set_tokens})"
+    )]
+    HotTailExceedsWorkingSet {
+        hot_tail_tokens: usize,
+        working_set_tokens: usize,
+    },
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ContextProjection {
     pub rendered: String,
@@ -65,7 +76,10 @@ pub struct ContextView {
 }
 
 impl ContextView {
-    pub fn new(stable_prefix: impl Into<String>, config: ContextViewConfig) -> Self {
+    pub fn new(
+        stable_prefix: impl Into<String>,
+        config: ContextViewConfig,
+    ) -> Result<Self, ContextViewConfigError> {
         Self::new_with_cache_contract(
             stable_prefix,
             config,
@@ -79,12 +93,14 @@ impl ContextView {
         config: ContextViewConfig,
         cache_model_tier: CacheModelTier,
         tokenizer_id: impl Into<String>,
-    ) -> Self {
-        assert!(
-            config.hot_tail_tokens <= config.working_set_tokens,
-            "hot tail must fit inside the working-set budget"
-        );
-        Self {
+    ) -> Result<Self, ContextViewConfigError> {
+        if config.hot_tail_tokens > config.working_set_tokens {
+            return Err(ContextViewConfigError::HotTailExceedsWorkingSet {
+                hot_tail_tokens: config.hot_tail_tokens,
+                working_set_tokens: config.working_set_tokens,
+            });
+        }
+        Ok(Self {
             stable_prefix: stable_prefix.into(),
             config,
             records: Vec::new(),
@@ -93,7 +109,7 @@ impl ContextView {
             prefix_guard: RefCell::new(PrefixStabilityGuard::default()),
             cache_model_tier,
             tokenizer_id: tokenizer_id.into(),
-        }
+        })
     }
 
     /// Persist a timeline record before making it visible to projections.
@@ -286,6 +302,30 @@ mod tests {
     }
 
     #[test]
+    fn invalid_hot_tail_budget_returns_typed_error() {
+        let error = ContextView::new(
+            "SYSTEM stable\n",
+            ContextViewConfig {
+                working_set_tokens: 64,
+                hot_tail_tokens: 65,
+            },
+        )
+        .unwrap_err();
+
+        assert_eq!(
+            error,
+            ContextViewConfigError::HotTailExceedsWorkingSet {
+                hot_tail_tokens: 65,
+                working_set_tokens: 64,
+            }
+        );
+        assert_eq!(
+            error.to_string(),
+            "hot_tail_tokens (65) must not exceed working_set_tokens (64)"
+        );
+    }
+
+    #[test]
     fn as_of_reprojects_turn_and_timestamp_without_future_records() {
         let dir = tempdir().unwrap();
         let mut store = RecoveryStore::new(Some(dir.path().join("recovery-cache.json")));
@@ -295,7 +335,8 @@ mod tests {
                 working_set_tokens: 512,
                 hot_tail_tokens: 256,
             },
-        );
+        )
+        .unwrap();
         view.append(&mut store, 1, 100, "one").unwrap();
         view.append(&mut store, 2, 200, "two").unwrap();
         view.append(&mut store, 3, 300, "three").unwrap();
@@ -316,7 +357,8 @@ mod tests {
                 working_set_tokens: 160,
                 hot_tail_tokens: 80,
             },
-        );
+        )
+        .unwrap();
         for turn in 1..=3 {
             view.append(&mut store, turn, turn * 100, payload(turn))
                 .unwrap();
@@ -342,7 +384,8 @@ mod tests {
                 working_set_tokens: 256,
                 hot_tail_tokens: 64,
             },
-        );
+        )
+        .unwrap();
         view.append(&mut store, 1, 1_000, "real renderer evidence")
             .unwrap();
 
@@ -365,7 +408,8 @@ mod tests {
                 working_set_tokens: budget,
                 hot_tail_tokens: 96,
             },
-        );
+        )
+        .unwrap();
         let mut max_dynamic = 0;
         let mut prefix_digest = None;
         for turn in 1..=200 {

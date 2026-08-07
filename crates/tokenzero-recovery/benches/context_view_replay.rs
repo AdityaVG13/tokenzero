@@ -16,7 +16,8 @@ fn replay_context_view(c: &mut Criterion) {
             working_set_tokens: W,
             hot_tail_tokens: W / 2,
         },
-    );
+    )
+    .expect("benchmark ContextView config is valid");
     let mut max_input_tokens = 0;
     let mut stable_prefix = None;
     for turn in 1..=TURNS {
