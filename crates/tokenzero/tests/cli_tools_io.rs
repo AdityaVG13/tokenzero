@@ -32,6 +32,7 @@ fn run_default_envelope_json(args: &[&str], cwd: &std::path::Path) -> serde_json
     parse_json_stdout(&output)
 }
 
+use sha2::{Digest, Sha256};
 use std::fs;
 use tempfile::tempdir;
 
@@ -46,6 +47,103 @@ fn cli_read_expand_json_roundtrip() {
         expand_raw_text(&first_ref_with_kind(&json, "blob"), Some(&cache), None, &[]),
         "alpha\nbeta\n"
     );
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    Sha256::digest(bytes)
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
+fn boundary_payload(size: usize, label: &str) -> String {
+    let prefix = format!("BEGIN-{label}\n");
+    let suffix = format!("\nEND-{label}\n");
+    assert!(prefix.len() + suffix.len() <= size);
+    let mut payload = prefix;
+    let fill = size - payload.len() - suffix.len();
+    payload.extend((0..fill).map(|idx| if idx % 2 == 0 { 'x' } else { ' ' }));
+    payload.push_str(&suffix);
+    assert_eq!(payload.len(), size);
+    payload
+}
+
+#[test]
+fn cli_auto_read_default_cutoff_preserves_quality_and_exact_restart_expansion() {
+    const CUTOFF: usize = 40_960;
+    let (dir, cache) = setup_temp_with_cache();
+    let cache_arg = cache.to_str().unwrap();
+    let root_arg = dir.path().to_str().unwrap();
+    let mut responses = Vec::new();
+
+    for (label, size) in [("below", CUTOFF - 1), ("at", CUTOFF), ("above", CUTOFF + 1)] {
+        let payload = boundary_payload(size, label);
+        let file = dir.path().join(format!("{label}-boundary.txt"));
+        fs::write(&file, &payload).unwrap();
+        let output = tokenzero_cmd()
+            .env_remove("TOKENZERO_CAPSULE_EXACT_REF_THRESHOLD_BYTES")
+            .current_dir(dir.path())
+            .args([
+                "read",
+                file.to_str().unwrap(),
+                "--max-visible-tokens",
+                "128",
+                "--cache-path",
+                cache_arg,
+                "--allowed-root",
+                root_arg,
+                "--json",
+            ])
+            .output()
+            .unwrap();
+        assert_success_ref(&output, label);
+        responses.push((label, payload, parse_json_stdout(&output)));
+    }
+
+    for (label, payload, response) in &responses[..2] {
+        let visible = response["visible"]["text"].as_str().unwrap();
+        assert!(
+            !visible.contains("[exact payload stored; use expand for raw bytes]"),
+            "{label} must stay on the inclusive preview side of the cutoff: {visible}"
+        );
+        assert!(
+            visible.contains(&format!("{label}-boundary.txt")),
+            "bounded preview must identify its source: {visible}"
+        );
+        assert!(
+            visible.contains(&format!("BEGIN-{label}")),
+            "bounded preview must retain source content: {visible}"
+        );
+        assert!(
+            visible.len() < payload.len(),
+            "preview must stay bounded below the full {label} payload"
+        );
+    }
+
+    let (_, payload, above) = &responses[2];
+    let visible = above["visible"]["text"].as_str().unwrap();
+    assert!(
+        visible.contains("[exact payload stored; use expand for raw bytes]"),
+        "only bytes strictly above the cutoff switch to exact-ref Auto mode: {visible}"
+    );
+    assert!(
+        visible.contains("above-boundary.txt"),
+        "exact-ref output must identify the source selected for expansion: {visible}"
+    );
+    let blob_ref = first_ref_with_kind(above, "blob");
+    let file_ref = first_ref_with_kind(above, "file");
+    let expected_digest = sha256_hex(payload.as_bytes());
+    assert_eq!(blob_ref, format!("tz://blob/{expected_digest}"));
+    assert!(
+        visible.contains(&file_ref),
+        "live selector must be visible: {visible}"
+    );
+
+    // expand_raw_text launches a fresh CLI process after the read process has
+    // exited. The entire source, not the bounded preview, must round-trip.
+    let expanded = expand_raw_text(&file_ref, Some(&cache), None, &[]);
+    assert_eq!(expanded.as_bytes(), payload.as_bytes());
+    assert_eq!(sha256_hex(expanded.as_bytes()), expected_digest);
 }
 
 #[test]
@@ -691,6 +789,53 @@ needle three
             file.display(),
             file.display()
         )
+    );
+}
+
+#[test]
+fn cli_glob_prefix_trie_keeps_a_durable_exact_full_path_set() {
+    let (dir, cache) = setup_temp_with_cache();
+    let mut paths = Vec::new();
+    for group in ["alpha space", "βeta"] {
+        let folder = dir.path().join("src").join(group);
+        fs::create_dir_all(&folder).unwrap();
+        for idx in 0..24 {
+            let path = folder.join(format!("item-{idx:02}.rs"));
+            fs::write(&path, format!("// {group} {idx}\n")).unwrap();
+            paths.push(path);
+        }
+    }
+    paths.sort();
+    let glob = run_tool_json(
+        "glob",
+        &[
+            "**/*.rs",
+            dir.path().to_str().unwrap(),
+            "--max-visible-tokens",
+            "128",
+        ],
+        dir.path(),
+        &cache,
+    );
+    let visible = glob["visible"]["text"].as_str().unwrap();
+    assert!(visible.contains("# root: "), "{visible}");
+    assert!(visible.contains("\"src\"/"), "{visible}");
+    assert!(
+        visible.contains("omitted"),
+        "fixture must exercise recovery: {visible}"
+    );
+
+    let expected = paths
+        .iter()
+        .map(|path| path.display().to_string().replace('\\', "/"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let blob_ref = first_ref_with_kind(&glob, "blob");
+    let expanded = expand_raw_text(&blob_ref, Some(&cache), None, &[]);
+    assert_eq!(expanded, expected);
+    assert_eq!(
+        sha256_hex(expanded.as_bytes()),
+        sha256_hex(expected.as_bytes())
     );
 }
 

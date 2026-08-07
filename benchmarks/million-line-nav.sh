@@ -60,8 +60,19 @@ capture_raw "grep -rn \"$NEEDLE\" \"$SYNTH\" | sed -n '1,20p'" || exit 1; read -
 log "task C: tree + glob + read"
 capture_tz "$BIN tree --json \"$SYNTH\" --depth 2 --max-files 50 --allowed-root \"$SYNTH\"" || exit 1; read -r ms_c1 tz_bytes_c1 <<<"$TZ_RESULT"
 capture_tz "$BIN glob --json '*.rs' \"$SYNTH\" --max-files 10 --allowed-root \"$SYNTH\"" || exit 1; read -r ms_c2 tz_bytes_c2 <<<"$TZ_RESULT"
-IFS=$'\t' read -r GLOB_ROOT GLOB_REL <<<"$("${H[@]}" glob_pick "$TMP_JSON")"
-GLOB_FILE="${GLOB_ROOT}/${GLOB_REL}"; [[ -z "$GLOB_FILE" || "$GLOB_FILE" == / ]] && GLOB_FILE="$TARGET_FILE"
+if ! GLOB_PICK=$("${H[@]}" glob_pick "$TMP_JSON"); then
+  log 'FAILED: glob response is malformed; refusing fallback read'
+  exit 1
+fi
+IFS=$'\t' read -r GLOB_ROOT GLOB_REL <<<"$GLOB_PICK"
+if [[ -z "$GLOB_ROOT" && -z "$GLOB_REL" ]]; then
+  GLOB_FILE="$TARGET_FILE"
+elif [[ -z "$GLOB_ROOT" || -z "$GLOB_REL" ]]; then
+  log 'FAILED: glob parser returned a partial path; refusing fallback read'
+  exit 1
+else
+  GLOB_FILE="${GLOB_ROOT}/${GLOB_REL}"
+fi
 capture_tz "$BIN read --json --start-line 1 --end-line 50 \"$GLOB_FILE\" --allowed-root \"$SYNTH\"" || exit 1; read -r ms_c3 tz_bytes_c3 <<<"$TZ_RESULT"
 ms_c=$((ms_c1+ms_c2+ms_c3)); tz_bytes_c=$((tz_bytes_c1+tz_bytes_c2+tz_bytes_c3)); TOTAL_ESTIMATED=$((TOTAL_ESTIMATED + $(estimated_units "$tz_bytes_c"))); emit_tz C tree_glob_read "$ms_c" "$tz_bytes_c" "tree+glob+read"
 capture_raw "find \"$SYNTH\" -maxdepth 2 -type f | sort | sed -n '1,20p'; find \"$SYNTH\" -name '*.rs' -type f -print -quit; head -n 50 \"$GLOB_FILE\"" || exit 1; read -r bytes_c ms_raw_c <<<"$RAW_RESULT"

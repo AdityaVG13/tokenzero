@@ -60,38 +60,40 @@ Command: `benchmarks/competitor-bakeoff.sh`. Same corpus, same task, same measur
 
 The earlier 95-byte `read_500` row was also an outside-root `path_not_allowed` error and is invalid. The corrected command runs from `$WORK_DIR` against the identical 500-line corpus and produces 231 exact stdout bytes / 58 `estimator:bytes-ceil-div4/v1` units. Candidate or raw-baseline failure aborts the suite. An optional competitor that exits nonzero is labeled `execution failed; excluded from gate`; its stdout never becomes a measurement.
 
+The `tree_glob_read` acceptance row was regenerated with `RUNS=1 WARMUP=0`; its byte counts do not depend on the timing sample count. Preparation creates a new row-local cache before every warmup, sample, and captured-byte probe. The tree/glob/read operations, flags, and corpus are unchanged; preparation only selects a fresh row-local cache path. Production glob output uses a JSON-escaped, reversible prefix trie without dropping paths. Auto reads remain on the bounded-preview policy through 40,960 bytes and switch to the exact-only capsule strictly above that cutoff; every omission retains a visible durable selector. The 46,575-byte fixture expands byte-for-byte and digest-for-digest in a fresh process. Candidate output is 1,892 bytes / 473 estimated units against 47,700 bytes / 11,925 estimated units, or 960335 ppm heuristic savings against the >=960000 ppm target. The candidate is 16 bytes below the 1,908-byte maximum for that frozen estimator target. This is not Q99 evidence.
+
 | task | tool | wall_ms | output_bytes | est_tokens | note |
 |---|---|---:|---:|---:|---|
-| `read_500` | `tokenzero` | 80 | 231 | 58 |  |
-| `read_500` | `raw-cli` | 3 | 23342 | 5836 |  |
+| `read_500` | `tokenzero` | 349 | 231 | 58 |  |
+| `read_500` | `raw-cli` | 4 | 23342 | 5836 |  |
 | `read_500` | `rtk` | - | - | - | not installed |
 | `read_500` | `lean-ctx` | - | - | - | not installed |
 | `read_500` | `headroom` | - | - | - | not installed |
 | `read_500` | `ztk` | - | - | - | execution failed; excluded from gate |
 | `read_500` | `context-mode` | - | - | - | not installed |
-| `grep_read` | `tokenzero` | 9 | 210 | 53 | warm/dedup; estimator:bytes-ceil-div4/v1 candidate |
-| `grep_read` | `raw-cli` | 3 | 1676 | 419 | estimator:bytes-ceil-div4/v1 raw baseline |
+| `grep_read` | `tokenzero` | 11 | 210 | 53 | warm/dedup; estimator:bytes-ceil-div4/v1 candidate |
+| `grep_read` | `raw-cli` | 7 | 1676 | 419 | estimator:bytes-ceil-div4/v1 raw baseline |
 | `grep_read` | `rtk` | - | - | - | not installed |
 | `grep_read` | `lean-ctx` | - | - | - | not installed |
 | `grep_read` | `headroom` | - | - | - | not installed |
 | `grep_read` | `ztk` | - | - | - | execution failed; excluded from gate |
 | `grep_read` | `context-mode` | - | - | - | not installed |
-| `tree_glob_read` | `tokenzero` | 144 | 2352 | 588 |  |
-| `tree_glob_read` | `raw-cli` | 46 | 47700 | 11925 |  |
+| `tree_glob_read` | `tokenzero` | 50 | 1892 | 473 | fresh cache; lossless prefix trie; 40KiB Auto exact cutoff; estimator:bytes-ceil-div4/v1 candidate |
+| `tree_glob_read` | `raw-cli` | 48 | 47700 | 11925 | same corpus; estimator:bytes-ceil-div4/v1 raw baseline |
 | `tree_glob_read` | `rtk` | - | - | - | not installed |
 | `tree_glob_read` | `lean-ctx` | - | - | - | not installed |
 | `tree_glob_read` | `headroom` | - | - | - | not installed |
 | `tree_glob_read` | `ztk` | - | - | - | execution failed; excluded from gate |
 | `tree_glob_read` | `context-mode` | - | - | - | not installed |
-| `edit_verify` | `tokenzero` | 109 | 16 | 4 |  |
+| `edit_verify` | `tokenzero` | 187 | 16 | 4 |  |
 | `edit_verify` | `raw-cli` | 7 | 16 | 4 |  |
 | `edit_verify` | `rtk` | - | - | - | not installed |
 | `edit_verify` | `lean-ctx` | - | - | - | not installed |
 | `edit_verify` | `headroom` | - | - | - | not installed |
 | `edit_verify` | `ztk` | - | - | - | execution failed; excluded from gate |
 | `edit_verify` | `context-mode` | - | - | - | not installed |
-| `multi_step` | `tokenzero` | 202 | 1011 | 253 |  |
-| `multi_step` | `raw-cli` | 19 | 102543 | 25636 |  |
+| `multi_step` | `tokenzero` | 365 | 984 | 246 |  |
+| `multi_step` | `raw-cli` | 16 | 102543 | 25636 |  |
 | `multi_step` | `rtk` | - | - | - | not installed |
 | `multi_step` | `lean-ctx` | - | - | - | not installed |
 | `multi_step` | `headroom` | - | - | - | not installed |
@@ -106,13 +108,15 @@ Suite: `competitor-bakeoff`. Surface: `captured-stdout-bytes/v1`. Unit: `estimat
 |---|---:|---:|---:|---:|---:|---|
 | `read_500` | 231 | 23342 | 58 | 5836 | 5778 | **PASS** |
 | `grep_read` | 210 | 1676 | 53 | 419 | 366 | **PASS** |
-| `tree_glob_read` | 2352 | 47700 | 588 | 11925 | 11337 | **PASS** |
+| `tree_glob_read` | 1892 | 47700 | 473 | 11925 | 11452 | **PASS** |
 | `edit_verify` | 16 | 16 | 4 | 4 | 0 | **PASS** |
-| `multi_step` | 1011 | 102543 | 253 | 25636 | 25383 | **PASS** |
+| `multi_step` | 984 | 102543 | 246 | 25636 | 25390 | **PASS** |
 
 > **Result: PASS** -- every TokenZero row must be <= its same-task raw-cli baseline in `estimator:bytes-ceil-div4/v1` units.
 
 Estimated-token comparison (estimator:bytes-ceil-div4/v1; not Q99): candidate=210 bytes/53 estimated tokens; raw-cli baseline=1676 bytes/419 estimated tokens; estimated numerator saved=366 tokens; heuristic savings=873508 ppm; target >=850000 ppm: PASS.
+
+Tree/glob/read comparison (estimator:bytes-ceil-div4/v1; not Q99): candidate=1892 bytes/473 estimated tokens; raw-cli baseline=47700 bytes/11925 estimated tokens; estimated numerator saved=11452 tokens; heuristic savings=960335 ppm; target >=960000 ppm: PASS; byte ceiling=1908; byte margin=16.
 
 ## Large-repo navigation (million-line synthetic repo)
 
@@ -120,16 +124,16 @@ Command: `benchmarks/million-line-nav.sh`. The 1000-file synthetic repository us
 
 | # | Task | Tool | est_tokens | wall_ms | output_bytes | notes |
 |---|------|------|---:|---:|---:|------|
-| A | `read_50_lines` | `tokenzero` | 82 | 340 | 326 |  |
-| A | `read_50_lines` | `raw-cli` | 625 | 43 | 2500 | head -n 50 |
-| B | `grep_expand` | `tokenzero` | 1466 | 240 | 5862 | find+expand |
-| B | `grep_expand` | `raw-cli` | 605 | 224 | 2420 | grep -rn | first 20 |
-| C | `tree_glob_read` | `tokenzero` | 473 | 340 | 1891 | tree+glob+read |
-| C | `tree_glob_read` | `raw-cli` | 909 | 58 | 3634 | find+find+head |
-| D | `grep_expand_edit_verify` | `tokenzero` | 345 | 504 | 1378 | 4-step |
-| D | `grep_expand_edit_verify` | `raw-cli` | 65 | 48 | 258 | grep+sed+sed |
-| E | `recall` | `tokenzero` | 456 | 71 | 1823 | cache search |
-| E | `recall` | `raw-cli` | 303 | 228 | 1210 | grep -rn | first 10 |
+| A | `read_50_lines` | `tokenzero` | 82 | 322 | 326 |  |
+| A | `read_50_lines` | `raw-cli` | 625 | 44 | 2500 | head -n 50 |
+| B | `grep_expand` | `tokenzero` | 1466 | 249 | 5862 | find+expand |
+| B | `grep_expand` | `raw-cli` | 605 | 219 | 2420 | grep -rn | first 20 |
+| C | `tree_glob_read` | `tokenzero` | 470 | 361 | 1880 | tree+glob+read |
+| C | `tree_glob_read` | `raw-cli` | 909 | 68 | 3634 | find+find+head |
+| D | `grep_expand_edit_verify` | `tokenzero` | 345 | 606 | 1378 | 4-step |
+| D | `grep_expand_edit_verify` | `raw-cli` | 65 | 46 | 258 | grep+sed+sed |
+| E | `recall` | `tokenzero` | 456 | 64 | 1823 | cache search |
+| E | `recall` | `raw-cli` | 303 | 221 | 1210 | grep -rn | first 10 |
 
 ## Never-worse estimated-token budget assertion
 
@@ -139,7 +143,7 @@ Suite: `million-line-nav`. Surface: `captured-stdout-bytes/v1`. Unit: `estimator
 |---|---:|---:|---:|---:|---:|---|
 | `read_50_lines` | 326 | 2500 | 82 | 625 | 543 | **PASS** |
 | `grep_expand` | 5862 | 2420 | 1466 | 605 | -861 | **FAIL** |
-| `tree_glob_read` | 1891 | 3634 | 473 | 909 | 436 | **PASS** |
+| `tree_glob_read` | 1880 | 3634 | 470 | 909 | 439 | **PASS** |
 | `grep_expand_edit_verify` | 1378 | 258 | 345 | 65 | -280 | **FAIL** |
 | `recall` | 1823 | 1210 | 456 | 303 | -153 | **FAIL** |
 

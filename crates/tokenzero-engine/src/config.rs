@@ -118,7 +118,7 @@ pub const FETCH_DENY_ENV: &str = "TOKENZERO_FETCH_DENY";
 pub const SHELL_INLINE_BUDGET_ENV: &str = "TOKENZERO_SHELL_INLINE_BUDGET";
 pub const DEFAULT_SHELL_INLINE_BUDGET: usize = 2000;
 pub const CAPSULE_EXACT_REF_THRESHOLD_ENV: &str = "TOKENZERO_CAPSULE_EXACT_REF_THRESHOLD_BYTES";
-pub const DEFAULT_CAPSULE_EXACT_REF_THRESHOLD_BYTES: usize = 64 * 1024;
+pub const DEFAULT_CAPSULE_EXACT_REF_THRESHOLD_BYTES: usize = 40 * 1024;
 
 fn matches_env_value(value: &str, accepted: &[&str]) -> bool {
     accepted
@@ -313,6 +313,7 @@ mod telemetry_tests {
 
     #[test]
     fn capsule_exact_ref_threshold_is_configurable_and_rejects_zero() {
+        assert_eq!(DEFAULT_CAPSULE_EXACT_REF_THRESHOLD_BYTES, 40_960);
         assert_eq!(
             capsule_exact_ref_threshold(None),
             DEFAULT_CAPSULE_EXACT_REF_THRESHOLD_BYTES

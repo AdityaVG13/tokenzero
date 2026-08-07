@@ -183,34 +183,98 @@ pub(crate) fn grouped_search_output(matches: &[SearchMatch]) -> String {
     lines.join("\n")
 }
 
-/// Lossless compact projection of glob matches: relative paths under one
-/// `# root:` header per contributing root.
+/// Lossless compact projection of glob matches as an indented prefix trie.
+///
+/// Root and component labels are JSON strings. A trailing `/` marks a
+/// directory component and two spaces encode one level. This keeps whitespace,
+/// newlines, separator-like characters, and Unicode unambiguous while emitting
+/// each shared directory prefix only once. Roots are sorted and deduplicated,
+/// and overlapping paths bind to the most-specific root, so caller ordering
+/// cannot change the bytes. Paths outside every declared root remain full JSON
+/// strings after an explicit marker.
 pub(crate) fn grouped_path_output(paths: &[PathBuf], roots: &[PathBuf]) -> String {
-    let mut sections: Vec<(String, Vec<String>)> = roots
-        .iter()
-        .map(|root| (root.display().to_string(), Vec::new()))
-        .collect();
+    let mut canonical_roots = roots.to_vec();
+    canonical_roots.sort_by(|left, right| {
+        display_path(left)
+            .cmp(&display_path(right))
+            .then_with(|| left.cmp(right))
+    });
+    canonical_roots.dedup();
+
+    let mut sections: Vec<Vec<Vec<String>>> = vec![Vec::new(); canonical_roots.len()];
     let mut leftovers: Vec<String> = Vec::new();
-    'outer: for path in paths {
-        for (idx, root) in roots.iter().enumerate() {
-            if let Ok(rel) = path.strip_prefix(root) {
-                if !rel.as_os_str().is_empty() {
-                    sections[idx].1.push(display_path(rel));
-                    continue 'outer;
-                }
+    for path in paths {
+        let mut selected: Option<(usize, usize, Vec<String>)> = None;
+        for (idx, root) in canonical_roots.iter().enumerate() {
+            let Ok(rel) = path.strip_prefix(root) else {
+                continue;
+            };
+            let components = rel
+                .components()
+                .filter_map(|component| match component {
+                    std::path::Component::Normal(value) => {
+                        Some(value.to_string_lossy().into_owned())
+                    }
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            if components.is_empty() {
+                continue;
+            }
+            let specificity = root.components().count();
+            let replace = match &selected {
+                Some((_, best_specificity, _)) => specificity > *best_specificity,
+                None => true,
+            };
+            if replace {
+                selected = Some((idx, specificity, components));
             }
         }
-        leftovers.push(display_path(path));
+        if let Some((idx, _, components)) = selected {
+            sections[idx].push(components);
+        } else {
+            leftovers.push(display_path(path));
+        }
     }
+
     let mut lines = Vec::new();
-    for (root, rows) in sections {
+    for (root, mut rows) in canonical_roots.iter().zip(sections) {
         if rows.is_empty() {
             continue;
         }
-        lines.push(format!("# root: {root}"));
-        lines.extend(rows);
+        rows.sort();
+        lines.push(format!(
+            "# root: {}",
+            serde_json::to_string(&display_path(root)).expect("path display is serializable")
+        ));
+        let mut previous_dirs: Vec<String> = Vec::new();
+        for components in rows {
+            let (dirs, file) = components.split_at(components.len() - 1);
+            let shared = dirs
+                .iter()
+                .zip(&previous_dirs)
+                .take_while(|(left, right)| left == right)
+                .count();
+            for (depth, component) in dirs.iter().enumerate().skip(shared) {
+                let label = serde_json::to_string(component)
+                    .expect("path component display is serializable");
+                lines.push(format!("{}{label}/", "  ".repeat(depth)));
+            }
+            let label =
+                serde_json::to_string(&file[0]).expect("path component display is serializable");
+            lines.push(format!("{}{label}", "  ".repeat(dirs.len())));
+            previous_dirs = dirs.to_vec();
+        }
     }
-    lines.extend(leftovers);
+    if !leftovers.is_empty() {
+        leftovers.sort();
+        lines.push("# outside-roots".to_string());
+        lines.extend(
+            leftovers
+                .into_iter()
+                .map(|path| serde_json::to_string(&path).expect("path display is serializable")),
+        );
+    }
     lines.join("\n")
 }
 
@@ -705,6 +769,123 @@ pub(crate) fn should_skip(path: &Path, include_hidden: bool) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn decode_grouped_paths(rendered: &str) -> Vec<PathBuf> {
+        let mut root: Option<PathBuf> = None;
+        let mut directories: Vec<String> = Vec::new();
+        let mut outside_roots = false;
+        let mut paths = Vec::new();
+        for line in rendered.lines() {
+            if let Some(encoded) = line.strip_prefix("# root: ") {
+                let decoded: String = serde_json::from_str(encoded).unwrap();
+                root = Some(PathBuf::from(decoded));
+                directories.clear();
+                outside_roots = false;
+                continue;
+            }
+            if line == "# outside-roots" {
+                root = None;
+                directories.clear();
+                outside_roots = true;
+                continue;
+            }
+            if outside_roots {
+                let decoded: String = serde_json::from_str(line).unwrap();
+                paths.push(PathBuf::from(decoded));
+                continue;
+            }
+            let spaces = line.bytes().take_while(|byte| *byte == b' ').count();
+            assert_eq!(spaces % 2, 0, "indentation must use two spaces: {line:?}");
+            let depth = spaces / 2;
+            let encoded = &line[spaces..];
+            let is_directory = encoded.ends_with('/');
+            let encoded = encoded.strip_suffix('/').unwrap_or(encoded);
+            let component: String = serde_json::from_str(encoded).unwrap();
+            directories.truncate(depth);
+            if is_directory {
+                assert_eq!(directories.len(), depth);
+                directories.push(component);
+                continue;
+            }
+            assert_eq!(directories.len(), depth);
+            let mut path = root.clone().expect("path row requires a root header");
+            for directory in &directories {
+                path.push(directory);
+            }
+            path.push(component);
+            paths.push(path);
+        }
+        paths
+    }
+
+    #[test]
+    fn grouped_path_output_round_trips_escaped_prefix_trie() {
+        let root = PathBuf::from("workspace root");
+        let second_root = PathBuf::from("unicode-root");
+        let mut paths = vec![
+            root.join("src").join(" leading space.rs"),
+            root.join("src").join("line\nbreak.rs"),
+            root.join("src").join("quote\"name.rs"),
+            root.join("src").join("nested[name]").join("µ.rs"),
+            second_root.join("δ").join("tail.rs"),
+            PathBuf::from("outside").join("orphan.rs"),
+        ];
+        let mut expected = paths.clone();
+        expected.sort();
+        paths.reverse();
+        let roots = vec![root, second_root];
+        let rendered = grouped_path_output(&paths, &roots);
+        assert_eq!(rendered, grouped_path_output(&expected, &roots));
+        let mut decoded = decode_grouped_paths(&rendered);
+        decoded.sort();
+        assert_eq!(decoded, expected);
+        assert_eq!(rendered.matches("\"src\"/").count(), 1);
+        assert!(rendered.contains("line\\nbreak.rs"));
+        assert!(rendered.contains("quote\\\"name.rs"));
+        assert!(rendered.contains("µ.rs"));
+        assert!(rendered.contains("# outside-roots"));
+    }
+
+    #[test]
+    fn grouped_path_output_canonicalizes_roots_and_uses_most_specific_match() {
+        let broad = PathBuf::from("workspace");
+        let nested = broad.join("src");
+        let disjoint = PathBuf::from("other");
+        let mut expected = vec![
+            nested.join("lib.rs"),
+            broad.join("README.md"),
+            disjoint.join("tail.rs"),
+        ];
+        let mut reversed_paths = expected.clone();
+        reversed_paths.reverse();
+
+        let canonical = grouped_path_output(
+            &expected,
+            &[
+                broad.clone(),
+                nested.clone(),
+                disjoint.clone(),
+                broad.clone(),
+            ],
+        );
+        let permuted = grouped_path_output(&reversed_paths, &[disjoint, nested.clone(), broad]);
+        assert_eq!(canonical, permuted);
+        assert_eq!(canonical.matches("# root: ").count(), 3);
+
+        let nested_header = format!(
+            "# root: {}\n\"lib.rs\"",
+            serde_json::to_string(&display_path(&nested)).unwrap()
+        );
+        assert!(
+            canonical.contains(&nested_header),
+            "nested file must bind to its most-specific root: {canonical}"
+        );
+
+        let mut decoded = decode_grouped_paths(&canonical);
+        decoded.sort();
+        expected.sort();
+        assert_eq!(decoded, expected);
+    }
 
     #[test]
     fn hit_output_matches_fszero_target_ref_grammar() {

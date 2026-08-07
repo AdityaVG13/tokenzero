@@ -347,17 +347,77 @@ def first_blob_ref(data):
 def glob_root_and_first(data):
     data = _json(data)
     if not isinstance(data, dict):
-        return ('', '')
+        raise ValueError('malformed glob output: response is not an object')
     visible = data.get('visible')
     if isinstance(visible, str):
         text = visible
     elif isinstance(visible, dict) and isinstance(visible.get('text'), str):
         text = visible['text']
     else:
-        return ('', '')
-    root = next((line.split(':', 1)[1].strip() for line in text.splitlines() if line.startswith('# root:')), '')
-    rel = next((line.strip() for line in text.splitlines() if line.strip() and (not line.strip().startswith('#'))), '')
-    return (root, rel)
+        raise ValueError('malformed glob output: visible text is missing')
+    lines = text.splitlines()
+    try:
+        root_index = next(
+            index for index, line in enumerate(lines) if line.startswith('# root: ')
+        )
+    except StopIteration:
+        valid_no_match = (
+            data.get('status') == 'ok'
+            and data.get('tool') == 'glob'
+            and len(lines) == 1
+            and lines[0].startswith('# glob ')
+            and lines[0].endswith(' — 0 matches')
+        )
+        if valid_no_match:
+            return ('', '')
+        raise ValueError('malformed glob output: root header is missing')
+    encoded_root = lines[root_index].removeprefix('# root: ').strip()
+    if not encoded_root:
+        raise ValueError('malformed glob output: root label is empty')
+    if not encoded_root.startswith('"'):
+        for line in lines[root_index + 1 :]:
+            if line.lstrip().startswith('#'):
+                raise ValueError('malformed legacy glob output: file row is missing')
+            if line.strip():
+                relative = line.strip()
+                if relative.endswith('/'):
+                    raise ValueError('malformed legacy glob output: file row is incomplete')
+                return (encoded_root, relative)
+        raise ValueError('malformed legacy glob output: file row is missing')
+    try:
+        root = json.loads(encoded_root)
+    except json.JSONDecodeError as error:
+        raise ValueError('malformed glob output: root label is invalid JSON') from error
+    if not isinstance(root, str) or not root:
+        raise ValueError('malformed glob output: root label is not a string')
+    directories = []
+    for line in lines[root_index + 1 :]:
+        if line.lstrip().startswith('#') or not line:
+            raise ValueError('malformed glob output: trie ends before a file row')
+        spaces = len(line) - len(line.lstrip(' '))
+        if spaces % 2:
+            raise ValueError('malformed glob output: trie indentation is odd')
+        depth = spaces // 2
+        encoded = line[spaces:]
+        is_directory = encoded.endswith('/')
+        if is_directory:
+            encoded = encoded[:-1]
+        if len(encoded) < 2 or not encoded.startswith('"') or not encoded.endswith('"'):
+            raise ValueError('malformed glob output: component label is not a JSON string')
+        try:
+            component = json.loads(encoded)
+        except json.JSONDecodeError as error:
+            raise ValueError('malformed glob output: component label is invalid JSON') from error
+        if not isinstance(component, str) or not component or '/' in component:
+            raise ValueError('malformed glob output: component label is invalid')
+        if depth != len(directories):
+            raise ValueError('malformed glob output: trie depth skips a parent')
+        if is_directory:
+            directories.append(component)
+            continue
+        return (root, '/'.join([*directories, component]))
+    raise ValueError('malformed glob output: trie ends before a file row')
+
 
 def main(argv=None):
     parser = argparse.ArgumentParser(prog='harness.py'); sub = parser.add_subparsers(dest='action', required=True)
@@ -397,7 +457,11 @@ def main(argv=None):
     elif action == 'first_blob_ref':
         result = first_blob_ref(Path(args.file).read_text())
     elif action == 'glob_pick':
-        result = '\t'.join(glob_root_and_first(Path(args.file).read_text()))
+        try:
+            result = '\t'.join(glob_root_and_first(Path(args.file).read_text()))
+        except ValueError as error:
+            print(f'glob_pick failed: {error}', file=sys.stderr)
+            return 2
     elif action == 'generate_million':
         million_line_repo(Path(args.root), args.dirs, args.files, args.lines, args.needle); result = 'done'
     else:

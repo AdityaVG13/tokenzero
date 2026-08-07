@@ -3,7 +3,7 @@
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"; cd "$ROOT"; H=(python3 "$ROOT/benchmarks/harness.py")
 BIN="$("${H[@]}" resolve_bin)" || { echo "ERROR: tokenzero binary not found. Set TOKENZERO_BIN=/path/to/tokenzero" >&2; exit 1; }; RUNS="${RUNS:-5}"; WARMUP="${WARMUP:-1}"; README="$ROOT/README.md"; CRATES="$ROOT/crates"; PATTERN="pub fn"
-WORK_DIR="$(mktemp -d /tmp/tz-bakeoff.XXXXXX)"; SAMPLE="$WORK_DIR/sample_500.txt"; EDIT_FILE="$WORK_DIR/edit_sample.txt"; GREP_CACHE="$WORK_DIR/grep-cache.json"; NEVER_WORSE_RECEIPT="$WORK_DIR/never-worse.tsv"
+WORK_DIR="$(mktemp -d /tmp/tz-bakeoff.XXXXXX)"; SAMPLE="$WORK_DIR/sample_500.txt"; EDIT_FILE="$WORK_DIR/edit_sample.txt"; GREP_CACHE="$WORK_DIR/grep-cache.json"; TREE_CACHE_POINTER="$WORK_DIR/tree-cache-current"; NEVER_WORSE_RECEIPT="$WORK_DIR/never-worse.tsv"
 trap 'rm -rf "$WORK_DIR"' EXIT
 log() { printf '[bakeoff] %s\n' "$*" >&2; }; measure() { "${H[@]}" measure_median "$1" "$2" --runs "$RUNS" --warmup "$WARMUP" --prepare "$3"; }
 emit() { printf '| `%s` | `%s` | %s | %s | %s | %s |\n' "$1" "$2" "$3" "$4" "$5" "$6"; }
@@ -33,6 +33,10 @@ row() {
     emit "$task" "$tool" "$m" "$b" "$e" "warm/dedup; estimator:bytes-ceil-div4/v1 candidate"
   elif [[ "$task" == grep_read && "$tool" == raw-cli ]]; then
     emit "$task" "$tool" "$m" "$b" "$e" "estimator:bytes-ceil-div4/v1 raw baseline"
+  elif [[ "$task" == tree_glob_read && "$tool" == tokenzero ]]; then
+    emit "$task" "$tool" "$m" "$b" "$e" "fresh cache; lossless prefix trie; 40KiB Auto exact cutoff; estimator:bytes-ceil-div4/v1 candidate"
+  elif [[ "$task" == tree_glob_read && "$tool" == raw-cli ]]; then
+    emit "$task" "$tool" "$m" "$b" "$e" "same corpus; estimator:bytes-ceil-div4/v1 raw baseline"
   else
     emit "$task" "$tool" "$m" "$b" "$e" ""
   fi
@@ -40,6 +44,7 @@ row() {
 prepare_for() {
   case "$1" in
     edit_verify) printf "%s > %q" "printf 'alpha\\nbeta\\ngamma'" "$EDIT_FILE" ;;
+    tree_glob_read) printf 'cache_dir=$(mktemp -d "%s/tree-cache.XXXXXX"); printf "%%s" "$cache_dir/recovery-cache.json" > "%s"' "$WORK_DIR" "$TREE_CACHE_POINTER" ;;
     *) printf 'true' ;;
   esac
 }
@@ -53,7 +58,7 @@ command_for() {
     grep_read:tokenzero) echo "TOKENZERO_CACHE_PATH=\"$GREP_CACHE\" $exe grep 'TokenZero' \"$README\"";;
     grep_read:raw-cli) echo "grep -n 'TokenZero' \"$README\"";; grep_read:*) echo "$exe grep 'TokenZero' \"$README\"";;
     tree_glob_read:raw-cli) echo "find \"$CRATES\" -maxdepth 2 -type f | sort; find \"$CRATES\" -name '*.rs' -type f | head -n 1; cat \"$first_rs\"";;
-    tree_glob_read:tokenzero) echo "$exe tree \"$CRATES\" --depth 2; $exe glob '*.rs' \"$CRATES\"; $exe read \"$first_rs\"";;
+    tree_glob_read:tokenzero) echo "export TOKENZERO_CACHE_PATH=\$(cat \"$TREE_CACHE_POINTER\"); $exe tree \"$CRATES\" --depth 2; $exe glob '*.rs' \"$CRATES\"; $exe read \"$first_rs\"";;
     tree_glob_read:*) echo "$exe tree \"$CRATES\"; $exe glob '*.rs' \"$CRATES\"; $exe read \"$first_rs\"";;
     edit_verify:tokenzero) echo "cd \"$WORK_DIR\"; $exe edit --edits-json '[{\"find\":\"beta\",\"replace\":\"BETA\"}]' \"$EDIT_FILE\" && $exe read \"$EDIT_FILE\"";;
     edit_verify:raw-cli) echo "sed -i.bak 's/beta/BETA/g' \"$EDIT_FILE\"; rm -f \"$EDIT_FILE.bak\"; cat \"$EDIT_FILE\"";;
@@ -94,6 +99,22 @@ printf '\nEstimated-token comparison (estimator:bytes-ceil-div4/v1; not Q99): ca
   "$estimated_saved_tokens" "$estimated_savings_ppm" \
   "$([[ "$estimated_savings_ppm" -ge 850000 ]] && printf PASS || printf FAIL)"
 if [[ "$estimated_savings_ppm" -lt 850000 ]]; then
+  exit 1
+fi
+
+tree_saved_units=$((RAW_UNITS[tree_glob_read] - TOKENZERO_UNITS[tree_glob_read]))
+tree_savings_ppm=$((tree_saved_units * 1000000 / RAW_UNITS[tree_glob_read]))
+tree_required_saved_units=$(((960000 * RAW_UNITS[tree_glob_read] + 999999) / 1000000))
+tree_max_candidate_units=$((RAW_UNITS[tree_glob_read] - tree_required_saved_units))
+tree_max_candidate_bytes=$((tree_max_candidate_units * 4))
+tree_byte_margin=$((tree_max_candidate_bytes - TOKENZERO_BYTES[tree_glob_read]))
+printf '\nTree/glob/read comparison (estimator:bytes-ceil-div4/v1; not Q99): candidate=%s bytes/%s estimated tokens; raw-cli baseline=%s bytes/%s estimated tokens; estimated numerator saved=%s tokens; heuristic savings=%s ppm; target >=960000 ppm: %s; byte ceiling=%s; byte margin=%s.\n' \
+  "${TOKENZERO_BYTES[tree_glob_read]}" "${TOKENZERO_UNITS[tree_glob_read]}" \
+  "${RAW_BYTES[tree_glob_read]}" "${RAW_UNITS[tree_glob_read]}" \
+  "$tree_saved_units" "$tree_savings_ppm" \
+  "$([[ "$tree_savings_ppm" -ge 960000 ]] && printf PASS || printf FAIL)" \
+  "$tree_max_candidate_bytes" "$tree_byte_margin"
+if [[ "$tree_savings_ppm" -lt 960000 ]]; then
   exit 1
 fi
 log done.

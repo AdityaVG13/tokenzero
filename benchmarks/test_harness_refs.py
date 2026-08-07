@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import shlex
 import subprocess
 import tempfile
@@ -59,7 +60,119 @@ class FirstBlobRefTests(unittest.TestCase):
             glob_root_and_first({"visible": {"text": text}}),
             ("/work", "src/lib.rs"),
         )
-        self.assertEqual(glob_root_and_first({"visible": 7}), ("", ""))
+        with self.assertRaisesRegex(ValueError, "visible text is missing"):
+            glob_root_and_first({"visible": 7})
+
+    def test_glob_parser_reconstructs_first_escaped_trie_file(self) -> None:
+        from benchmarks.harness import glob_root_and_first
+
+        root = '/work space/µ\n"quoted"'
+        directories = ["src space", 'β\n"branch"']
+        file_name = "item [separator-like].rs"
+        text = "\n".join(
+            [
+                f"# root: {json.dumps(root, ensure_ascii=False)}",
+                f"{json.dumps(directories[0], ensure_ascii=False)}/",
+                f"  {json.dumps(directories[1], ensure_ascii=False)}/",
+                f"    {json.dumps(file_name, ensure_ascii=False)}",
+                '"later.rs"',
+            ]
+        )
+        self.assertEqual(
+            glob_root_and_first({"visible": {"text": text}}),
+            (root, "/".join([*directories, file_name])),
+        )
+
+    def test_glob_parser_rejects_malformed_or_truncated_tries(self) -> None:
+        from benchmarks.harness import glob_root_and_first
+
+        root = "/work"
+        encoded_root = json.dumps(root)
+        malformed = [
+            "# root: \nlegacy.rs",
+            "# root: /work\nlegacy-directory/",
+            f'# root: {encoded_root}\n"src"/',
+            f'# root: {encoded_root}\n "odd-indent.rs"',
+            f'# root: {encoded_root}\n    "skip-depth.rs"',
+            f'# root: {encoded_root}\n"src"/\n"missing-child.rs"',
+            f"# root: {encoded_root}\n17",
+            f'# root: {encoded_root}\n"bad/name.rs"',
+            f'# root: {encoded_root}\n"spaced-directory" /',
+            f'# root: {encoded_root}\n# outside-roots\n"orphan.rs"',
+        ]
+        for text in malformed:
+            with self.subTest(text=text):
+                with self.assertRaisesRegex(ValueError, "malformed"):
+                    glob_root_and_first({"visible": text})
+        with self.assertRaisesRegex(ValueError, "malformed"):
+            glob_root_and_first({"visible": '# root: "unterminated\n"file.rs"'})
+
+    def test_glob_parser_returns_empty_only_for_typed_valid_no_match(self) -> None:
+        from benchmarks.harness import glob_root_and_first
+
+        response = {
+            "status": "ok",
+            "tool": "glob",
+            "visible": "# glob no-match-*.rs — 0 matches",
+        }
+        self.assertEqual(glob_root_and_first(response), ("", ""))
+        for mutation in [
+            {**response, "status": "error"},
+            {**response, "tool": "read"},
+            {**response, "visible": "# glob no-match-*.rs — unknown"},
+        ]:
+            with self.subTest(mutation=mutation):
+                with self.assertRaisesRegex(ValueError, "root header is missing"):
+                    glob_root_and_first(mutation)
+
+    def test_glob_pick_cli_status_cannot_be_hidden_by_command_substitution(
+        self,
+    ) -> None:
+        harness = Path(__file__).with_name("harness.py")
+        malformed = json.dumps(
+            {"status": "ok", "tool": "glob", "visible": '# root: "/work"\n"src"/'}
+        )
+        reject_script = r"""
+set -euo pipefail
+if ! GLOB_PICK=$(printf '%s' "$1" | python3 "$2" glob_pick /dev/stdin); then
+  printf 'rejected\n'
+  exit 0
+fi
+printf 'SURVIVED:%s\n' "$GLOB_PICK"
+exit 99
+"""
+        rejected = subprocess.run(
+            ["bash", "-c", reject_script, "glob-pick-test", malformed, str(harness)],
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(rejected.returncode, 0, rejected.stderr)
+        self.assertEqual(rejected.stdout, "rejected\n")
+        self.assertIn("glob_pick failed: malformed glob output", rejected.stderr)
+
+        no_match = json.dumps(
+            {
+                "status": "ok",
+                "tool": "glob",
+                "visible": "# glob no-match-*.rs — 0 matches",
+            }
+        )
+        fallback_script = r"""
+set -euo pipefail
+if ! GLOB_PICK=$(printf '%s' "$1" | python3 "$2" glob_pick /dev/stdin); then
+  exit 90
+fi
+IFS=$'\t' read -r GLOB_ROOT GLOB_REL <<<"$GLOB_PICK"
+[[ -z "$GLOB_ROOT" && -z "$GLOB_REL" ]] || exit 91
+printf 'valid-no-match-fallback\n'
+"""
+        fallback = subprocess.run(
+            ["bash", "-c", fallback_script, "glob-pick-test", no_match, str(harness)],
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(fallback.returncode, 0, fallback.stderr)
+        self.assertEqual(fallback.stdout, "valid-no-match-fallback\n")
 
 
 class MeasurementFailureTests(unittest.TestCase):
