@@ -73,12 +73,16 @@ thread_local! {
 
 pub struct ExecutionStore {
     store: RecoveryStore,
+    #[cfg(test)]
+    fail_next_deferred: Option<String>,
 }
 
 impl ExecutionStore {
     pub fn new(cache_path: std::path::PathBuf) -> Self {
         Self {
             store: RecoveryStore::new(Some(cache_path)),
+            #[cfg(test)]
+            fail_next_deferred: None,
         }
     }
     pub fn store_json_deferred(&mut self, value: &Value) -> Result<String, String> {
@@ -93,6 +97,10 @@ impl ExecutionStore {
         text: &str,
         content_type: ContentType,
     ) -> Result<String, String> {
+        #[cfg(test)]
+        if let Some(error) = self.fail_next_deferred.take() {
+            return Err(error);
+        }
         Ok(self
             .store
             .store_payload_deferred_batch(text, content_type, None, None, None)
@@ -118,25 +126,25 @@ impl ExecutionStore {
     }
 }
 
-fn storage_failure(message: String, operations: usize) -> CodeModeResult {
+fn storage_failure(stage: &str, message: String, operations: usize) -> CodeModeResult {
     CodeModeResult::error_with_kind(
         "store",
-        format!("execution record commit failed: {message}"),
+        format!("execution record {stage} failed: {message}"),
         operations,
         false,
     )
 }
 
-fn deferred_json(store: &mut ExecutionStore, value: &Value) -> String {
-    store
-        .store_json_deferred(value)
-        .unwrap_or_else(|error| format!("store-error:{error}"))
+fn deferred_json(store: &mut ExecutionStore, value: &Value) -> Result<String, String> {
+    store.store_json_deferred(value)
 }
 
-fn deferred_text(store: &mut ExecutionStore, text: &str, content_type: ContentType) -> String {
-    store
-        .store_text_deferred(text, content_type)
-        .unwrap_or_else(|error| format!("store-error:{error}"))
+fn deferred_text(
+    store: &mut ExecutionStore,
+    text: &str,
+    content_type: ContentType,
+) -> Result<String, String> {
+    store.store_text_deferred(text, content_type)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -183,20 +191,45 @@ pub fn finalize_result(
     extra.insert("finished_at_ms".to_string(), json!(finished_ms));
     result.telemetry.extra = Some(Value::Object(extra));
 
-    let code_ref = deferred_text(&mut store, plan, ContentType::Code);
-    let steps_ref = deferred_json(&mut store, &json!(steps));
-    let telemetry_ref = deferred_json(&mut store, &json!(result.telemetry));
+    macro_rules! store_or_fail {
+        ($value:expr) => {
+            match $value {
+                Ok(stored) => stored,
+                Err(error) => {
+                    return storage_failure("storage", error, result.telemetry.operations());
+                }
+            }
+        };
+    }
 
-    let result_ref = result.value.as_ref().and_then(|value| {
-        serde_json::to_vec(value)
-            .ok()
-            .filter(|bytes| bytes.len() <= limits.max_result_ref_bytes)
-            .map(|_| deferred_json(&mut store, value))
-    });
-    let error_ref = result
-        .error
-        .as_ref()
-        .map(|error| deferred_json(&mut store, &json!(error)));
+    let code_ref = store_or_fail!(deferred_text(&mut store, plan, ContentType::Code));
+    let steps_ref = store_or_fail!(deferred_json(&mut store, &json!(steps)));
+    let telemetry_ref = store_or_fail!(deferred_json(&mut store, &json!(result.telemetry)));
+
+    let result_ref = if let Some(value) = result.value.as_ref() {
+        let bytes = match serde_json::to_vec(value) {
+            Ok(bytes) => bytes,
+            Err(error) => {
+                return storage_failure(
+                    "serialization",
+                    error.to_string(),
+                    result.telemetry.operations(),
+                );
+            }
+        };
+        if bytes.len() <= limits.max_result_ref_bytes {
+            Some(store_or_fail!(deferred_json(&mut store, value)))
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+    let error_ref = if let Some(error) = result.error.as_ref() {
+        Some(store_or_fail!(deferred_json(&mut store, &json!(error))))
+    } else {
+        None
+    };
 
     let logical_ref = |suffix| execution_ref(&id, suffix);
     let execution_logical_ref = logical_ref("");
@@ -228,8 +261,17 @@ pub fn finalize_result(
         error_ref: error_ref.clone(),
         refs: result.refs.clone(),
     };
-    let record_value = serde_json::to_value(&record).unwrap_or(Value::Null);
-    let execution_record_ref = deferred_json(&mut store, &record_value);
+    let record_value = match serde_json::to_value(&record) {
+        Ok(value) => value,
+        Err(error) => {
+            return storage_failure(
+                "serialization",
+                error.to_string(),
+                result.telemetry.operations(),
+            );
+        }
+    };
+    let execution_record_ref = store_or_fail!(deferred_json(&mut store, &record_value));
 
     // envelope.v3: one execution_id replaces execution_refs + store blocks.
     let envelope_bundle = json!({
@@ -241,7 +283,7 @@ pub fn finalize_result(
         "telemetry": result.telemetry.clone(),
         "refs": result.refs.clone(),
     });
-    let envelope_ref = deferred_json(&mut store, &envelope_bundle);
+    let envelope_ref = store_or_fail!(deferred_json(&mut store, &envelope_bundle));
 
     for (logical, stored) in [
         (&execution_logical_ref, Some(execution_record_ref.as_str())),
@@ -258,7 +300,7 @@ pub fn finalize_result(
     }
 
     if let Err(error) = store.commit() {
-        return storage_failure(error, result.telemetry.operations());
+        return storage_failure("commit", error, result.telemetry.operations());
     }
 
     if result.refs.len() < limits.max_refs_emitted {
@@ -576,6 +618,43 @@ mod tests {
         let error = finalized.error.as_ref().unwrap();
         assert_eq!(error.kind, "store");
         assert!(error.message.contains("execution record commit failed"));
+    }
+
+    #[test]
+    fn deferred_store_failure_aborts_before_aliases_or_commit() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = dir.path().join("cache.json");
+        COMMIT_CALLS.with(|calls| calls.set(0));
+        let mut store = ExecutionStore::new(cache.clone());
+        store.fail_next_deferred = Some("injected deferred failure".to_string());
+
+        let finalized = finalize_result(
+            completed(json!({"ok": true})),
+            "code",
+            "return true",
+            250,
+            251,
+            store,
+            &CodeModeLimits::default(),
+            Vec::new(),
+        );
+
+        assert_eq!(finalized.status, CodeModeStatus::Error);
+        assert!(finalized.execution_refs.is_none());
+        let error = finalized.error.as_ref().unwrap();
+        assert_eq!(error.kind, "store");
+        assert!(error.message.contains("execution record storage failed"));
+        assert!(error.message.contains("injected deferred failure"));
+        assert!(
+            !serde_json::to_string(&finalized)
+                .unwrap()
+                .contains("store-error:")
+        );
+        COMMIT_CALLS.with(|calls| assert_eq!(calls.get(), 0));
+        assert!(
+            !cache.exists(),
+            "failed deferred refs must not be published"
+        );
     }
 
     #[test]
