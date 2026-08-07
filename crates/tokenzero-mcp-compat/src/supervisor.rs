@@ -259,6 +259,9 @@ pub(crate) fn run_supervisor_loop<W: Write>(
                 );
                 break SupervisorLoopOutcome::client(exit_code);
             }
+            SupervisorEvent::FromClient(StdioEvent::OutputFailed) => {
+                break SupervisorLoopOutcome::forced(1);
+            }
             SupervisorEvent::FromChild { generation, text } => {
                 if forward_child_response(
                     generation,
@@ -567,7 +570,7 @@ fn pump_child_stdout(
                     }
                 }
                 StdioEvent::ParseError { .. } => continue,
-                StdioEvent::Eof => break,
+                StdioEvent::Eof | StdioEvent::OutputFailed => break,
             }
         }
         let _ = forward.join();

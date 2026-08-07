@@ -20,8 +20,9 @@ pub(crate) const MCP_TOOL_WORKER_THREADS: usize = 4;
 /// read cannot be cancelled portably without leaving a detached reader.
 pub fn run_stdio(config: EngineConfig) -> i32 {
     let (event_tx, event_rx) = mpsc::channel();
-    let reader_thread = thread::spawn(move || read_stdio_events(event_tx));
-    let outcome = run_stdio_core(config, event_rx, std::io::stdout());
+    let reader_tx = event_tx.clone();
+    let reader_thread = thread::spawn(move || read_stdio_events(reader_tx));
+    let outcome = run_stdio_core(config, event_tx, event_rx, std::io::stdout());
     if outcome.stdin_stopped {
         return match reader_thread.join() {
             Ok(()) => outcome.exit_code,
@@ -51,6 +52,7 @@ struct StdioLoopOutcome {
 /// through a single writer thread that owns the output stream.
 fn run_stdio_core<W: Write + Send + 'static>(
     config: EngineConfig,
+    event_tx: mpsc::Sender<StdioEvent>,
     events: mpsc::Receiver<StdioEvent>,
     writer: W,
 ) -> StdioLoopOutcome {
@@ -58,7 +60,19 @@ fn run_stdio_core<W: Write + Send + 'static>(
     let idle_timeout = engine.config.mcp_idle_timeout;
 
     let (response_tx, response_rx) = mpsc::channel::<OutgoingResponse>();
-    let writer_thread = thread::spawn(move || write_stdio_responses(writer, response_rx));
+    let writer_thread = thread::spawn(move || {
+        let outcome = match catch_unwind(AssertUnwindSafe(|| {
+            write_stdio_responses(writer, response_rx)
+        })) {
+            Ok(Ok(())) => WriterOutcome::Clean,
+            Ok(Err(error)) => WriterOutcome::Failed(error.to_string()),
+            Err(_) => WriterOutcome::Panicked,
+        };
+        if !matches!(outcome, WriterOutcome::Clean) {
+            let _ = event_tx.send(StdioEvent::OutputFailed);
+        }
+        outcome
+    });
 
     let (work_tx, work_rx) = mpsc::channel::<WorkItem>();
     let work_rx = Arc::new(Mutex::new(work_rx));
@@ -91,6 +105,7 @@ fn run_stdio_core<W: Write + Send + 'static>(
         }));
     }
 
+    let mut exit_code = 0;
     let stdin_stopped = 'server: loop {
         let event = match idle_timeout {
             Some(timeout) => match events.recv_timeout(timeout) {
@@ -145,6 +160,10 @@ fn run_stdio_core<W: Write + Send + 'static>(
                 }
             }
             StdioEvent::Eof => break 'server true,
+            StdioEvent::OutputFailed => {
+                exit_code = 1;
+                break 'server false;
+            }
         }
     };
 
@@ -155,9 +174,23 @@ fn run_stdio_core<W: Write + Send + 'static>(
         let _ = worker.join();
     }
     drop(response_tx);
-    let _ = writer_thread.join();
+    let writer_outcome = match writer_thread.join() {
+        Ok(outcome) => outcome,
+        Err(_) => WriterOutcome::Panicked,
+    };
+    match writer_outcome {
+        WriterOutcome::Clean => {}
+        WriterOutcome::Failed(error) => {
+            eprintln!("TokenZero MCP stdout writer failed: {error}");
+            exit_code = 1;
+        }
+        WriterOutcome::Panicked => {
+            eprintln!("TokenZero MCP stdout writer panicked during shutdown");
+            exit_code = 1;
+        }
+    }
     StdioLoopOutcome {
-        exit_code: 0,
+        exit_code,
         stdin_stopped,
     }
 }
@@ -170,6 +203,12 @@ struct WorkItem {
 struct OutgoingResponse {
     framed: bool,
     text: String,
+}
+
+enum WriterOutcome {
+    Clean,
+    Failed(String),
+    Panicked,
 }
 
 /// tools/call requests and batches go to the worker pool; everything else
@@ -232,12 +271,14 @@ fn send_parse_error(
 
 /// Single owner of the output stream. Stops draining only when the stream
 /// itself fails (client side of the pipe is gone).
-fn write_stdio_responses<W: Write>(mut writer: W, responses: mpsc::Receiver<OutgoingResponse>) {
+fn write_stdio_responses<W: Write>(
+    mut writer: W,
+    responses: mpsc::Receiver<OutgoingResponse>,
+) -> std::io::Result<()> {
     while let Ok(response) = responses.recv() {
-        if write_jsonrpc_response(&mut writer, response.framed, &response.text).is_err() {
-            break;
-        }
+        write_jsonrpc_response(&mut writer, response.framed, &response.text)?;
     }
+    Ok(())
 }
 
 pub(crate) fn write_jsonrpc_response<W: Write>(
@@ -273,6 +314,8 @@ pub(crate) enum StdioEvent {
         recoverable: bool,
     },
     Eof,
+    /// Internal wakeup emitted when the response writer fails or panics.
+    OutputFailed,
 }
 
 fn read_stdio_events(tx: mpsc::Sender<StdioEvent>) {
@@ -523,15 +566,123 @@ mod lifecycle_tests {
     use super::*;
     use std::time::Duration;
 
+    struct FailingWriter;
+    struct PanickingWriter;
+
+    impl Write for FailingWriter {
+        fn write(&mut self, _buffer: &[u8]) -> std::io::Result<usize> {
+            Err(Error::new(ErrorKind::BrokenPipe, "closed stdout fixture"))
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl Write for PanickingWriter {
+        fn write(&mut self, _buffer: &[u8]) -> std::io::Result<usize> {
+            panic!("stdout panic fixture")
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn stdout_failure_wakes_loop_without_idle_timeout() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = EngineConfig::for_root(dir.path());
+        assert_eq!(config.mcp_idle_timeout, None);
+        let (event_tx, event_rx) = mpsc::channel();
+        event_tx
+            .send(StdioEvent::Message {
+                framed: false,
+                text: r#"{"jsonrpc":"2.0","id":1,"method":"ping"}"#.to_string(),
+            })
+            .unwrap();
+
+        let (outcome_tx, outcome_rx) = mpsc::channel();
+        let core = thread::spawn(move || {
+            let outcome = run_stdio_core(config, event_tx, event_rx, FailingWriter);
+            let _ = outcome_tx.send(outcome);
+        });
+        let outcome = outcome_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("stdout failure must wake the loop without an idle timeout");
+        core.join().expect("stdio core thread");
+
+        assert_eq!(
+            outcome,
+            StdioLoopOutcome {
+                exit_code: 1,
+                stdin_stopped: false,
+            }
+        );
+    }
+
+    #[test]
+    fn stdout_panic_wakes_loop_without_idle_timeout() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = EngineConfig::for_root(dir.path());
+        let (event_tx, event_rx) = mpsc::channel();
+        event_tx
+            .send(StdioEvent::Message {
+                framed: false,
+                text: r#"{"jsonrpc":"2.0","id":1,"method":"ping"}"#.to_string(),
+            })
+            .unwrap();
+        let (outcome_tx, outcome_rx) = mpsc::channel();
+        let core = thread::spawn(move || {
+            let outcome = run_stdio_core(config, event_tx, event_rx, PanickingWriter);
+            let _ = outcome_tx.send(outcome);
+        });
+        let outcome = outcome_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("stdout panic must wake the loop without an idle timeout");
+        core.join().expect("stdio core thread");
+
+        assert_eq!(
+            outcome,
+            StdioLoopOutcome {
+                exit_code: 1,
+                stdin_stopped: false,
+            }
+        );
+    }
+
+    #[test]
+    fn eof_before_writer_failure_still_returns_nonzero() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = EngineConfig::for_root(dir.path());
+        let (event_tx, event_rx) = mpsc::channel();
+        event_tx
+            .send(StdioEvent::Message {
+                framed: false,
+                text: r#"{"jsonrpc":"2.0","id":1,"method":"ping"}"#.to_string(),
+            })
+            .unwrap();
+        event_tx.send(StdioEvent::Eof).unwrap();
+
+        let outcome = run_stdio_core(config, event_tx, event_rx, FailingWriter);
+
+        assert_eq!(
+            outcome,
+            StdioLoopOutcome {
+                exit_code: 1,
+                stdin_stopped: true,
+            }
+        );
+    }
+
     #[test]
     fn eof_marks_stdin_reader_safe_to_join() {
         let dir = tempfile::tempdir().unwrap();
         let config = EngineConfig::for_root(dir.path());
         let (event_tx, event_rx) = mpsc::channel();
         event_tx.send(StdioEvent::Eof).unwrap();
-        drop(event_tx);
 
-        let outcome = run_stdio_core(config, event_rx, Vec::<u8>::new());
+        let outcome = run_stdio_core(config, event_tx, event_rx, Vec::<u8>::new());
         assert_eq!(
             outcome,
             StdioLoopOutcome {
@@ -546,9 +697,9 @@ mod lifecycle_tests {
         let dir = tempfile::tempdir().unwrap();
         let mut config = EngineConfig::for_root(dir.path());
         config.mcp_idle_timeout = Some(Duration::from_millis(1));
-        let (_event_tx, event_rx) = mpsc::channel();
+        let (event_tx, event_rx) = mpsc::channel();
 
-        let outcome = run_stdio_core(config, event_rx, Vec::<u8>::new());
+        let outcome = run_stdio_core(config, event_tx, event_rx, Vec::<u8>::new());
         assert_eq!(
             outcome,
             StdioLoopOutcome {
