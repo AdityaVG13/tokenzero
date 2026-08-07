@@ -928,7 +928,7 @@ fn advertised_capabilities_and_limits_are_behaviorally_true() {
     assert_eq!(ack["protocol_version"], PROTOCOL_VERSION);
     assert_eq!(ack["protocol_digest"], PROTOCOL_DIGEST);
     assert_eq!(ack["binding"]["engine"], "tokenzero");
-    assert_eq!(ack["binding"]["ref_scheme"], "tz");
+    assert_eq!(ack["binding"]["ref_scheme"], "tz://");
     // Claimed capabilities: cancellation/deadlines have behavioral tests in
     // this gate; approvals/revert/snapshots must stay honestly false.
     assert_eq!(

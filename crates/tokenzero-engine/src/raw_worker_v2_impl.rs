@@ -433,7 +433,7 @@ fn route_frame(session: &mut RawWorkerV2Session, line: &[u8]) -> RoutedFrame {
             "protocol_version":raw_worker_v2_protocol::RAW_WORKER_PROTOCOL_VERSION,
             "binding":{"engine":"tokenzero","root":root,"session_id":session_id,"worker_revision":rev,
                 "semantic_contract_version":cap["semantic_contract_version"],"semantic_contract_digest":contract,
-                "operation_registry_digest":registry,"ref_scheme":"tz"},
+                "operation_registry_digest":registry,"ref_scheme":"tz://"},
             "capabilities":{"cancellation":true,"deadlines":true,"approvals":false,"revert":false,"snapshots":false},
             "limits":{"max_frame_bytes":1048576,"max_output_bytes":65536,"max_in_flight":1,"default_deadline_ms":DEFAULT_DEADLINE_MS},
             "protocol_digest":raw_worker_v2_protocol::raw_worker_protocol_digest_hex()
@@ -847,7 +847,7 @@ mod tests {
         let response = send(&mut session, handshake(&rev));
         assert_eq!(response["kind"], "handshake_ack");
         assert_eq!(response["ack"]["binding"]["worker_revision"], rev);
-        assert_eq!(response["ack"]["binding"]["ref_scheme"], "tz");
+        assert_eq!(response["ack"]["binding"]["ref_scheme"], "tz://");
         assert_eq!(response["ack"]["limits"]["max_frame_bytes"], 1_048_576);
         assert_eq!(response["ack"]["capabilities"]["cancellation"], true);
     }
