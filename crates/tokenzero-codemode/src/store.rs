@@ -164,7 +164,7 @@ pub fn finalize_result(
     };
     result.execution_id = Some(id.clone());
     if completed {
-        result.visible_ack = render_ack(AckClass::Success, silent_success).into();
+        result.set_visible_ack(render_ack(AckClass::Success, silent_success));
     }
     result.telemetry.kind = "codemode.execute".into();
     result.telemetry.status = telemetry_status.into();
@@ -514,6 +514,7 @@ mod tests {
 
         assert_eq!(finalized.status, CodeModeStatus::Completed);
         assert_eq!(finalized.visible_ack, "0");
+        assert_eq!(finalized.ack, finalized.visible_ack);
         COMMIT_CALLS.with(|calls| assert_eq!(calls.get(), 1));
 
         let id = finalized.execution_id.as_deref().unwrap();
@@ -544,6 +545,7 @@ mod tests {
             }],
         );
         assert_eq!(finalized.visible_ack, "");
+        assert_eq!(finalized.ack, finalized.visible_ack);
         assert!(
             finalized
                 .detail_ref

@@ -111,10 +111,11 @@ pub fn doctor(root: &Path, cache_path: Option<&Path>) -> serde_json::Value {
     let informational_findings = findings.len().saturating_sub(blocking_findings);
     serde_json::json!({
         "schema_version": "tokenzero.doctor.v1",
-        "tool": "tokenzero",
+        "status": if has_blocking_finding { "blocked" } else { "ok" },
+        "tool": "doctor",
+        "ack": if has_blocking_finding { "blocked" } else { "ok" },
         "doctor_version": env!("CARGO_PKG_VERSION"),
         "doctor_contract_version": DOCTOR_CONTRACT_VERSION,
-        "status": if has_blocking_finding { "blocked" } else { "ok" },
         "ok": !has_blocking_finding,
         "exit_code": exit_code,
         "root": root.display().to_string(),

@@ -37,6 +37,26 @@ fn doctor_on_healthy_root_has_no_missing_root_finding() {
 }
 
 #[test]
+fn doctor_pins_minimum_agent_envelope_fields() {
+    let tmp = tempfile::tempdir().unwrap();
+    let report = doctor(&tmp.path().join("does-not-exist"), None);
+    assert_eq!(
+        serde_json::json!({
+            "schema_version": report["schema_version"],
+            "status": report["status"],
+            "tool": report["tool"],
+            "ack": report["ack"],
+        }),
+        serde_json::json!({
+            "schema_version": "tokenzero.doctor.v1",
+            "status": "blocked",
+            "tool": "doctor",
+            "ack": "blocked",
+        })
+    );
+}
+
+#[test]
 fn doctor_ls_is_stable_envelope() {
     let tmp = tempfile::tempdir().unwrap();
     let report = doctor_ls(tmp.path());

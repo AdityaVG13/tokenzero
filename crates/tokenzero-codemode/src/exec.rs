@@ -1957,11 +1957,13 @@ fn finalize_codemode_result(
             .as_ref()
             .and_then(|extra| extra.get("root_fallback_warning"))
             .and_then(Value::as_str)
+            .map(str::to_owned)
         {
-            finalized.visible_ack = format!(
+            let ack = format!(
                 "{}\n# warning: root_fallback: {warning}",
                 finalized.visible_ack.trim_end()
             );
+            finalized.set_visible_ack(ack);
         }
         let enabled = tokenzero_engine::usage_telemetry_enabled(options.telemetry_enabled);
         finalized.telemetry.billed_input_tokens = count_tokens(plan);
