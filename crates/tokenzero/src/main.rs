@@ -469,6 +469,17 @@ fn missing_arg_message(argv: &[OsString], err: &clap::Error) -> Option<String> {
         .filter_map(|arg| arg.to_str())
         .find(|text| !text.starts_with('-') && root.find_subcommand(text).is_some())?;
     let sub = root.find_subcommand(sub_name)?;
+    if let Some(corrected) = match sub_name {
+        "read" => Some("tokenzero read <path> --json"),
+        "run" => Some("tokenzero run --json -- <command>"),
+        "expand" => Some("tokenzero expand <tz-ref> --raw"),
+        _ => None,
+    } {
+        return Some(format!(
+            "{}\n  corrected command: {corrected}\n",
+            err.to_string().trim_end()
+        ));
+    }
     let usage = sub
         .clone()
         .render_usage()

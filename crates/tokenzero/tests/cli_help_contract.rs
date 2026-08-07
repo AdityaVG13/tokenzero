@@ -54,6 +54,24 @@ fn cli_capabilities_json_exposes_agent_contract() {
     assert_eq!(json["tool"], "tokenzero");
     assert_eq!(json["contract_version"], 1);
     assert_eq!(json["stdout_contract"]["json_flag"], "--json");
+    let exit_codes = json["exit_codes"].as_array().expect("exit-code contract");
+    let blocked = exit_codes
+        .iter()
+        .find(|row| row["code"] == 1)
+        .expect("blocked exit code");
+    let usage = exit_codes
+        .iter()
+        .find(|row| row["code"] == 2)
+        .expect("usage exit code");
+    assert_eq!(blocked["label"], "blocked");
+    assert_eq!(usage["label"], "usage");
+    assert!(
+        blocked["meaning"]
+            .as_str()
+            .unwrap()
+            .contains("refused or could not complete")
+    );
+    assert!(usage["meaning"].as_str().unwrap().contains("malformed"));
     let features = json["features"].as_array().unwrap();
     assert!(features.iter().any(|feature| feature == "json_output"));
     assert!(
@@ -815,6 +833,7 @@ fn cli_usage_errors_name_exact_corrected_invocation() {
             &["find"],
             "corrected command: tokenzero find --json <QUERY>",
         ),
+        (&["edit"], "corrected command: tokenzero edit --json <PATH>"),
         (
             &["run"],
             "corrected command: tokenzero run --json -- <command>",
@@ -830,7 +849,13 @@ fn cli_usage_errors_name_exact_corrected_invocation() {
             .args(*args)
             .output()
             .unwrap();
-        assert!(!output.status.success(), "{args:?} unexpectedly succeeded");
+        assert_eq!(
+            output.status.code(),
+            Some(2),
+            "{args:?} must be a usage error: stdout={} stderr={}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
         let combined = format!(
             "{}{}",
             String::from_utf8_lossy(&output.stdout),
