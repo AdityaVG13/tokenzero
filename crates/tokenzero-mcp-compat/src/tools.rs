@@ -775,15 +775,22 @@ pub(crate) fn batch_response(
     let mut listed: std::collections::HashSet<String> = std::collections::HashSet::new();
     let mut raw_tokens = 0usize;
     let mut recovery_tokens = 0usize;
+    let mut failed_ops = 0usize;
     let mut per_op = Vec::with_capacity(ops.len());
     for (index, (tool, op_args)) in ops.iter().enumerate() {
         let canonical = canonical_tool(tool);
         let position = index + 1;
         if canonical == "batch" {
+            failed_ops += 1;
             sections.push(format!(
                 "## {position} {tool} — error: nested batch is not allowed"
             ));
-            per_op.push(json!({"tool": tool, "status": "error", "code": "nested_batch"}));
+            per_op.push(json!({
+                "tool": tool,
+                "status": "error",
+                "code": "nested_batch",
+                "message": "nested batch is not allowed",
+            }));
             continue;
         }
         match dispatch_tool(engine, canonical, tool, op_args) {
@@ -800,7 +807,22 @@ pub(crate) fn batch_response(
                     })
                     .unwrap_or_default();
                 sections.push(format!("## {position} {canonical}\n{text}"));
-                per_op.push(json!({"tool": tool, "status": response.status}));
+                if response.status == "ok" {
+                    per_op.push(json!({"tool": tool, "status": "ok"}));
+                } else {
+                    failed_ops += 1;
+                    let (code, message) = response
+                        .error
+                        .as_ref()
+                        .map(|error| (error.code.as_str(), error.message.as_str()))
+                        .unwrap_or(("operation_failed", "operation returned a non-ok status"));
+                    per_op.push(json!({
+                        "tool": tool,
+                        "status": "error",
+                        "code": code,
+                        "message": message,
+                    }));
+                }
                 if let Some(accounting) = &response.accounting {
                     raw_tokens += accounting.raw_tokens;
                     recovery_tokens += accounting.recovery_tokens;
@@ -812,11 +834,15 @@ pub(crate) fn batch_response(
                 }
             }
             Err(error) => {
-                sections.push(format!(
-                    "## {position} {canonical} — error: {}",
-                    error.message_text()
-                ));
-                per_op.push(json!({"tool": tool, "status": "error"}));
+                failed_ops += 1;
+                let message = error.message_text();
+                sections.push(format!("## {position} {canonical} — error: {message}"));
+                per_op.push(json!({
+                    "tool": tool,
+                    "status": "error",
+                    "code": "dispatch_error",
+                    "message": message,
+                }));
             }
         }
     }
@@ -839,8 +865,21 @@ pub(crate) fn batch_response(
     );
     response.telemetry = Some(json!({
         "ops": per_op.len(),
+        "succeeded_ops": per_op.len().saturating_sub(failed_ops),
+        "failed_ops": failed_ops,
         "per_op": per_op,
     }));
+    if failed_ops > 0 {
+        let error = ToolResponse::error(
+            "batch",
+            "batch_operation_failed",
+            format!("{failed_ops} of {} batch operations failed", ops.len()),
+            Some("inspect telemetry.per_op and retry only the failed operations".to_string()),
+        );
+        response.status = error.status;
+        response.ack = error.ack;
+        response.error = error.error;
+    }
     Ok(response)
 }
 
@@ -1165,6 +1204,59 @@ mod result_surfaced_envelope_tests {
         } else {
             assert_eq!(maximum, Ok(usize::MAX));
         }
+    }
+
+    #[test]
+    fn batch_is_error_when_any_or_all_sub_operations_fail() {
+        let dir = tempfile::tempdir().unwrap();
+        let engine = TokenZeroEngine::new(crate::EngineConfig::for_root(dir.path()));
+        let mixed = batch_response(
+            &engine,
+            &json!({
+                "ops": [
+                    {"tool": "ingest", "args": {"text": "batch-retained"}},
+                    {"tool": "batch", "args": {"ops": []}}
+                ]
+            }),
+        )
+        .unwrap();
+        assert_eq!(mixed.status, "error");
+        assert_eq!(mixed.error.as_ref().unwrap().code, "batch_operation_failed");
+        assert!(mixed.visible.as_ref().unwrap().text.contains("## 1 ingest"));
+        assert!(mixed.accounting.is_some());
+        assert!(
+            !mixed.refs.is_empty(),
+            "successful sub-op refs must survive"
+        );
+        let telemetry = mixed.telemetry.as_ref().unwrap();
+        assert_eq!(telemetry["ops"], 2);
+        assert_eq!(telemetry["succeeded_ops"], 1);
+        assert_eq!(telemetry["failed_ops"], 1);
+        assert_eq!(telemetry["per_op"][1]["code"], "nested_batch");
+        assert_eq!(mcp_tool_response(mixed)["isError"], true);
+
+        let success = batch_response(
+            &engine,
+            &json!({"ops": [{"tool": "ingest", "args": {"text": "success"}}]}),
+        )
+        .unwrap();
+        assert_eq!(success.status, "ok");
+        assert_eq!(success.telemetry.as_ref().unwrap()["succeeded_ops"], 1);
+        assert_eq!(success.telemetry.as_ref().unwrap()["failed_ops"], 0);
+
+        let all_failed = batch_response(
+            &engine,
+            &json!({
+                "ops": [
+                    {"tool": "batch", "args": {"ops": []}},
+                    {"tool": "not_a_tool", "args": {}}
+                ]
+            }),
+        )
+        .unwrap();
+        assert_eq!(all_failed.status, "error");
+        assert_eq!(all_failed.telemetry.as_ref().unwrap()["failed_ops"], 2);
+        assert_eq!(all_failed.telemetry.as_ref().unwrap()["succeeded_ops"], 0);
     }
 
     #[test]

@@ -2857,7 +2857,67 @@ fn exec_batch(engine: &TokenZeroEngine, args: &[Value]) -> OpResult {
         return Err(operation_error("zero.batch requires at least one op"));
     }
     match tokenzero_engine::batch_response(engine, &json!({"ops": ops, "mode": "auto"})) {
-        Ok(resp) => tool(resp),
+        Ok(resp) => {
+            let operations = resp
+                .telemetry
+                .as_ref()
+                .and_then(|telemetry| telemetry.get("ops"))
+                .and_then(Value::as_u64)
+                .unwrap_or(0) as usize;
+            let failed_operations = resp
+                .telemetry
+                .as_ref()
+                .and_then(|telemetry| telemetry.get("failed_ops"))
+                .and_then(Value::as_u64)
+                .unwrap_or_else(|| {
+                    resp.telemetry
+                        .as_ref()
+                        .and_then(|telemetry| telemetry.get("per_op"))
+                        .and_then(Value::as_array)
+                        .map(|rows| {
+                            rows.iter()
+                                .filter(|row| row.get("status") == Some(&json!("error")))
+                                .count() as u64
+                        })
+                        .unwrap_or(0)
+                }) as usize;
+            if resp.status == "ok" && failed_operations == 0 {
+                return tool(resp);
+            }
+            let message = resp
+                .error
+                .as_ref()
+                .map(|error| error.message.clone())
+                .unwrap_or_else(|| {
+                    format!("{failed_operations} of {operations} batch operations failed")
+                });
+            let response_value = json!(&resp);
+            let response_refs = resp
+                .refs
+                .iter()
+                .map(|record| record.ref_id.clone())
+                .collect::<Vec<_>>();
+            let accounting = resp.accounting.clone();
+            let mut error = CodeModeResult::error_with_kind("batch", message, operations, false);
+            error.value = Some(response_value);
+            error.refs = response_refs;
+            error.telemetry.refs_count = Some(error.refs.len());
+            error.telemetry.internal_actions = operations.saturating_add(error.refs.len());
+            error.telemetry.store_writes = error.refs.len();
+            if let Some(accounting) = accounting {
+                error.telemetry.visible_tokens = accounting.visible_tokens;
+                error.telemetry.raw_tokens = accounting.raw_tokens;
+                error.telemetry.recovery_tokens = accounting.recovery_tokens;
+                error.telemetry.billed_output_tokens = accounting.billed_tokens;
+                error.telemetry.cached_output_tokens = accounting.cached_tokens;
+                error.telemetry.bytes_materialized = accounting.raw_tokens;
+                error.telemetry.payload_tokens = accounting.visible_tokens;
+            }
+            if let Some(telemetry) = resp.telemetry {
+                telemetry_insert(&mut error, "batch", telemetry);
+            }
+            Err(Box::new(error))
+        }
         Err(error) => Err(operation_error(&error)),
     }
 }
@@ -2954,6 +3014,112 @@ mod method_inventory_tests {
         let unknown = dispatch_values(&engine, root.path(), "zero.not_registered", &[])
             .expect_err("kill control must reach the unknown-method arm");
         assert!(error_message(&unknown).starts_with("unknown method: zero.not_registered"));
+    }
+}
+
+#[cfg(test)]
+mod store_and_batch_truth_tests {
+    use super::*;
+
+    fn engine_with_blocked_cache() -> (tempfile::TempDir, TokenZeroEngine) {
+        let dir = tempfile::tempdir().unwrap();
+        let blocker = dir.path().join("not-a-directory");
+        std::fs::write(&blocker, "block").unwrap();
+        let mut config = EngineConfig::for_root(dir.path());
+        config.cache_path = blocker.join("cache.json");
+        let engine = TokenZeroEngine::new(config);
+        (dir, engine)
+    }
+
+    #[test]
+    fn compact_and_pipe_fail_typed_when_recovery_storage_is_unavailable() {
+        let (dir, engine) = engine_with_blocked_cache();
+        let compact = exec_compact_inner(&engine, &[json!("payload")], false).unwrap_err();
+        assert_eq!(compact.error.as_ref().unwrap().kind, "store");
+        assert!(
+            compact
+                .error
+                .as_ref()
+                .unwrap()
+                .message
+                .contains("zero.token.compact")
+        );
+
+        let pipe = exec_pipe(
+            &engine,
+            dir.path(),
+            &[json!([{"method": "zero.count", "args": [[1, 2, 3]]}])],
+        )
+        .unwrap_err();
+        assert_eq!(pipe.error.as_ref().unwrap().kind, "store");
+        assert!(pipe.error.as_ref().unwrap().message.contains("zero.pipe"));
+    }
+
+    #[test]
+    fn codemode_batch_failure_is_an_error_with_structured_per_op_truth() {
+        let dir = tempfile::tempdir().unwrap();
+        let engine = TokenZeroEngine::new(EngineConfig::for_root(dir.path()));
+        let error = exec_batch(
+            &engine,
+            &[json!([
+                {"tool": "ingest", "args": {"text": "batch-retained"}},
+                {"tool": "batch", "args": {"ops": []}}
+            ])],
+        )
+        .unwrap_err();
+
+        assert_eq!(error.error.as_ref().unwrap().kind, "batch");
+        let batch = error
+            .telemetry
+            .extra
+            .as_ref()
+            .and_then(|extra| extra.get("batch"))
+            .expect("batch telemetry must survive CodeMode error conversion");
+        assert_eq!(batch["ops"], 2);
+        assert_eq!(batch["succeeded_ops"], 1);
+        assert_eq!(batch["failed_ops"], 1);
+        assert_eq!(batch["per_op"][1]["code"], "nested_batch");
+
+        let response = error
+            .value
+            .as_ref()
+            .expect("complete failing ToolResponse must survive as the error value");
+        assert_eq!(response["status"], "error");
+        assert_eq!(response["error"]["code"], "batch_operation_failed");
+        assert!(
+            response["visible"]["text"]
+                .as_str()
+                .unwrap()
+                .contains("## 1 ingest")
+        );
+        assert!(
+            response["visible"]["text"]
+                .as_str()
+                .unwrap()
+                .contains("nested batch is not allowed")
+        );
+        assert_eq!(&response["telemetry"], batch);
+        let response_refs = response["refs"].as_array().unwrap();
+        assert!(!response_refs.is_empty());
+        let retained_ref = response_refs[0]["ref"].as_str().unwrap();
+        assert!(error.refs.iter().any(|ref_id| ref_id == retained_ref));
+        assert_eq!(
+            error.telemetry.visible_tokens,
+            response["accounting"]["visible_tokens"].as_u64().unwrap() as usize
+        );
+        assert_eq!(
+            error.telemetry.raw_tokens,
+            response["accounting"]["raw_tokens"].as_u64().unwrap() as usize
+        );
+        assert_eq!(error.telemetry.refs_count, Some(response_refs.len()));
+
+        let success = exec_batch(
+            &engine,
+            &[json!([{"tool": "ingest", "args": {"text": "success"}}])],
+        )
+        .unwrap();
+        assert_eq!(success.as_value()["status"], "ok");
+        assert!(success.as_value().get("ref").is_some());
     }
 }
 
@@ -4012,9 +4178,18 @@ fn exec_compact_inner(engine: &TokenZeroEngine, args: &[Value], aggressive: bool
         let raw_tokens = count_tokens(&data);
         let mut store =
             tokenzero_recovery::RecoveryStore::new(Some(engine.config.cache_path.clone()));
-        let stored = store
-            .store_payload(&data, content_type, None, None, None)
-            .ok();
+        let stored = Some(
+            store
+                .store_payload(&data, content_type, None, None, None)
+                .map_err(|error| {
+                    boxed_error(
+                        "store",
+                        format!(
+                            "zero.token.compact could not persist its recovery payload: {error}"
+                        ),
+                    )
+                })?,
+        );
         let recovery_ref = stored.as_ref().map(|s| s.blob_ref.as_str());
         let capsule = tokenzero_core::make_capsule_content_aware(
             &data,
@@ -4115,9 +4290,18 @@ fn exec_pipe(engine: &TokenZeroEngine, work_root: &Path, args: &[Value]) -> OpRe
         let content_type = detect_content_type(&text, None);
         let mut store =
             tokenzero_recovery::RecoveryStore::new(Some(engine.config.cache_path.clone()));
-        let stored = store
-            .store_payload(&text, content_type, None, None, None)
-            .ok();
+        let stored = Some(
+            store
+                .store_payload(&text, content_type, None, None, None)
+                .map_err(|error| {
+                    boxed_error(
+                        "store",
+                        format!(
+                            "zero.pipe could not persist its aggregate recovery payload: {error}"
+                        ),
+                    )
+                })?,
+        );
         let ref_id = stored
             .as_ref()
             .map(|s| s.blob_ref.as_str().to_string())
