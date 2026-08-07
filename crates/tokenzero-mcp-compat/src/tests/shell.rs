@@ -406,12 +406,12 @@ fn shell_capture_record_is_compact_json() {
 
 #[cfg(not(windows))]
 #[test]
-fn shell_truncation_is_explicit_and_degraded() {
+fn shell_truncation_preserves_complete_durable_stream_refs() {
     let dir = tempdir().unwrap();
     let mut config = EngineConfig::for_root(dir.path());
     config.shell_capture_bytes = 12;
     config.shell_spill_bytes = 6;
-    let engine = TokenZeroEngine::new(config);
+    let engine = TokenZeroEngine::new(config.clone());
 
     let response = engine.shell(
         "yes x | head -c 100 || true",
@@ -428,7 +428,7 @@ fn shell_truncation_is_explicit_and_degraded() {
     assert_eq!(response.status, "ok");
     assert_eq!(
         response.diagnostic.as_ref().unwrap().code,
-        "shell_output_truncated"
+        "shell_output_preview_truncated"
     );
     assert!(
         response
@@ -439,16 +439,118 @@ fn shell_truncation_is_explicit_and_degraded() {
             .contains("tokenzero:stdout truncated")
     );
     let telemetry = response.telemetry.as_ref().unwrap();
-    assert_eq!(telemetry["transport_status"], "degraded");
+    assert_eq!(telemetry["transport_status"], "ok");
     assert_eq!(telemetry["output_truncated"], true);
+    assert_eq!(telemetry["preview_truncated"], true);
+    assert_eq!(telemetry["refs_cover_full_output"], true);
     assert_eq!(telemetry["stdout_capture"]["truncated"], true);
     assert_eq!(telemetry["stdout_capture"]["bytes_seen"], 100);
+    assert_eq!(
+        telemetry["stdout_capture"]["sha256"],
+        telemetry["stdout_capture"]["full_stream_sha256"]
+    );
     let spill_path = telemetry["stdout_capture"]["spill_path"].as_str().unwrap();
     assert_eq!(std::fs::metadata(spill_path).unwrap().len(), 100);
     assert_eq!(
         response.safety.as_ref().unwrap()["refs_cover_full_output"],
-        false
+        true
     );
+    assert_eq!(
+        response.safety.as_ref().unwrap()["combined_witness_temporal_interleaving"],
+        "not_claimed"
+    );
+    let stdout_ref = telemetry["stdout_ref"].as_str().unwrap();
+    let restarted = TokenZeroEngine::new(config);
+    let expanded = restarted.expand(stdout_ref, Some("raw"), None, None, None, None);
+    assert_eq!(expanded.visible.unwrap().text, "x\n".repeat(50));
+}
+
+#[cfg(not(windows))]
+#[test]
+fn shell_truncation_recovers_utf8_when_preview_ends_mid_codepoint() {
+    let dir = tempdir().unwrap();
+    let mut config = EngineConfig::for_root(dir.path());
+    config.shell_capture_bytes = 1;
+    config.shell_spill_bytes = 1;
+    let engine = TokenZeroEngine::new(config.clone());
+
+    let response = engine.shell(
+        "printf '\\303\\251'",
+        None,
+        Some(dir.path()),
+        Mode::Auto,
+        None,
+        false,
+        None,
+        None,
+        None,
+    );
+
+    let telemetry = response.telemetry.as_ref().unwrap();
+    assert_eq!(telemetry["preview_truncated"], true);
+    assert_eq!(telemetry["refs_cover_full_output"], true);
+    let stdout_ref = telemetry["stdout_ref"].as_str().unwrap();
+    let restarted = TokenZeroEngine::new(config);
+    let expanded = restarted.expand(stdout_ref, Some("raw"), None, None, None, None);
+    assert_eq!(expanded.visible.unwrap().text, "é");
+}
+
+#[cfg(not(windows))]
+#[test]
+fn shell_non_utf8_output_never_claims_an_exact_text_witness() {
+    let dir = tempdir().unwrap();
+    let engine = TokenZeroEngine::new(EngineConfig::for_root(dir.path()));
+
+    let response = engine.shell(
+        "printf '\\377'",
+        None,
+        Some(dir.path()),
+        Mode::Auto,
+        None,
+        false,
+        None,
+        None,
+        None,
+    );
+
+    assert_eq!(response.status, "ok");
+    assert_eq!(
+        response.diagnostic.as_ref().unwrap().code,
+        "cache_write_failed"
+    );
+    assert!(response.refs.is_empty());
+    let telemetry = response.telemetry.as_ref().unwrap();
+    assert_eq!(telemetry["transport_status"], "degraded");
+    let storage_error = telemetry["storage_error"].as_str().unwrap();
+    assert!(storage_error.contains("not valid UTF-8"), "{storage_error}");
+}
+
+#[cfg(not(windows))]
+#[test]
+fn shell_timeout_preserves_partial_stdout_in_a_durable_ref() {
+    let dir = tempdir().unwrap();
+    let config = EngineConfig::for_root(dir.path());
+    let engine = TokenZeroEngine::new(config.clone());
+
+    let response = engine.shell(
+        "printf partial-before-timeout; sleep 5",
+        None,
+        Some(dir.path()),
+        Mode::Auto,
+        None,
+        false,
+        None,
+        None,
+        Some(Duration::from_millis(50)),
+    );
+
+    let telemetry = response.telemetry.as_ref().unwrap();
+    assert_eq!(telemetry["timeout"], true);
+    assert_eq!(telemetry["refs_cover_full_output"], true);
+    let stdout_ref = telemetry["stdout_ref"].as_str().unwrap();
+    let restarted = TokenZeroEngine::new(config);
+    let expanded = restarted.expand(stdout_ref, Some("raw"), None, None, None, None);
+    assert_eq!(expanded.visible.unwrap().text, "partial-before-timeout");
 }
 
 #[cfg(windows)]
@@ -810,7 +912,8 @@ fn shell_response_refs_are_canonical_and_expand_in_fresh_engine() {
 #[test]
 fn shell_pipeline_propagates_upstream_failure() {
     let dir = tempdir().unwrap();
-    let engine = TokenZeroEngine::new(EngineConfig::for_root(dir.path()));
+    let config = EngineConfig::for_root(dir.path());
+    let engine = TokenZeroEngine::new(config.clone());
     let response = engine.shell(
         "sh -c 'echo producer-failed >&2; exit 7' | cat",
         None,
@@ -825,6 +928,11 @@ fn shell_pipeline_propagates_upstream_failure() {
     let telemetry = response.telemetry.as_ref().unwrap();
     assert_eq!(telemetry["command_success"], false);
     assert_eq!(telemetry["exit_code"], 7);
+    assert_eq!(telemetry["refs_cover_full_output"], true);
+    let stderr_ref = telemetry["stderr_ref"].as_str().unwrap();
+    let restarted = TokenZeroEngine::new(config);
+    let expanded = restarted.expand(stderr_ref, Some("raw"), None, None, None, None);
+    assert_eq!(expanded.visible.unwrap().text, "producer-failed\n");
 }
 
 #[cfg(unix)]

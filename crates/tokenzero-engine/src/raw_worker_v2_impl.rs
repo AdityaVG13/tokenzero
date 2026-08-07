@@ -571,6 +571,20 @@ fn run_call_registered(engine: &TokenZeroEngine, ctx: CallCtx, cancel: Arc<Cance
     )
 }
 
+fn verified_cancelled_shell_partial_result(ctx: &CallCtx, response: &Value) -> Option<Value> {
+    if !is_shell_op(&ctx.op) || response["ok"].as_bool() != Some(true) {
+        return None;
+    }
+    let result = response.get("result")?;
+    let tool_response = result.get("tool_response")?;
+    let refs = tool_response.get("refs")?.as_array()?;
+    let verified = !refs.is_empty()
+        && tool_response["status"].as_str() == Some("ok")
+        && tool_response["safety"]["refs_cover_full_output"].as_bool() == Some(true)
+        && tool_response["telemetry"]["refs_cover_full_output"].as_bool() == Some(true);
+    verified.then(|| result.clone())
+}
+
 /// Dispatch a validated call. Cancellation observed after dispatch maps to a
 /// typed `cancelled` error; the remaining deadline is pushed into shell work
 /// as a process timeout and into search/expand loops as wall checkpoints.
@@ -602,9 +616,17 @@ fn dispatch_call(engine: &TokenZeroEngine, ctx: &CallCtx, cancel: &Arc<CancelSta
         },
     );
     if cancel.flag.load(Ordering::SeqCst) {
-        return json!({"kind":"error","request_id":ctx.id.clone(),"error":{
+        let mut cancelled = json!({"kind":"error","request_id":ctx.id.clone(),"error":{
             "kind":"cancelled","message":"call cancelled by control frame","retryable":false
         },"trace":ctx.trace.clone()});
+        if let Some(partial_result) = verified_cancelled_shell_partial_result(ctx, &response) {
+            cancelled["error"]["details"] = json!({
+                "partial_result": partial_result,
+                "artifact_scope": "full_observed_stdout_stderr_streams",
+                "temporal_interleaving_claimed": false
+            });
+        }
+        return cancelled;
     }
     if response["ok"].as_bool() != Some(true) {
         let e = &response["error"];
@@ -1205,7 +1227,7 @@ mod tests {
         let trace = json!({"runtime_id":"rt","cell_id":"cell","request_id":"req-cancel","trace_id":"trace",
             "worker_revision":rev,"contract_digest":cap["semantic_contract_digest"]});
         let frame = json!({"kind":"call","request":{"request_id":"req-cancel","op":"shell",
-            "args":{"command":"sleep 30"},"trace":trace}});
+            "args":{"command":"printf partial-before-cancel; sleep 30"},"trace":trace}});
         let ctx = validate_call(session.binding.as_ref().unwrap(), &frame).unwrap();
         let cancel = session.register_cancel(&ctx.id);
         let (ready_tx, ready_rx) = std::sync::mpsc::channel::<()>();
@@ -1229,6 +1251,18 @@ mod tests {
         let value = worker.join().expect("worker joins after cancel");
         assert_eq!(value["error"]["kind"], "cancelled");
         assert_eq!(value["error"]["retryable"], false);
+        let details = &value["error"]["details"];
+        assert_eq!(
+            details["artifact_scope"],
+            "full_observed_stdout_stderr_streams"
+        );
+        assert_eq!(details["temporal_interleaving_claimed"], false);
+        let partial = &details["partial_result"]["tool_response"];
+        assert_eq!(partial["safety"]["refs_cover_full_output"], true);
+        assert_eq!(partial["telemetry"]["refs_cover_full_output"], true);
+        let stdout_ref = partial["telemetry"]["stdout_ref"].as_str().unwrap();
+        let expanded = engine().expand(stdout_ref, Some("raw"), None, None, None, None);
+        assert_eq!(expanded.visible.unwrap().text, "partial-before-cancel");
         assert!(
             started.elapsed() < std::time::Duration::from_secs(20),
             "cancelled call must not run to completion"

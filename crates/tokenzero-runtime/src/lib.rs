@@ -1,6 +1,7 @@
 #![deny(unsafe_code)]
 
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::fs::{self, File};
 use std::io::{Read, Write};
@@ -65,6 +66,14 @@ pub struct StreamCapture {
     pub bytes_seen: usize,
     pub captured_bytes: usize,
     pub truncated: bool,
+    /// Whether the in-memory captured bytes were valid UTF-8 without replacement.
+    /// Defaults false for older records, so absence never authorizes exact text recovery.
+    #[serde(default)]
+    pub captured_utf8_lossless: bool,
+    /// SHA-256 over every byte read from the stream, including bytes beyond
+    /// the in-memory preview. Absence never authorizes exact recovery.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub full_stream_sha256: Option<String>,
     pub spill_path: Option<String>,
     pub spill_bytes: usize,
 }
@@ -904,6 +913,16 @@ mod windows_job {
     }
 }
 
+fn lowercase_hex(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut encoded = String::with_capacity(bytes.len().saturating_mul(2));
+    for byte in bytes {
+        encoded.push(char::from(HEX[usize::from(byte >> 4)]));
+        encoded.push(char::from(HEX[usize::from(byte & 0x0f)]));
+    }
+    encoded
+}
+
 fn capture_reader<R: Read>(
     reader: R,
     stream_name: &str,
@@ -921,6 +940,7 @@ fn capture_reader_with_observer<R: Read, F: FnMut(&[u8])>(
     let policy = policy.normalized();
     let mut captured = Vec::with_capacity(policy.per_stream_capture_bytes.min(64 * 1024));
     let mut bytes_seen = 0usize;
+    let mut full_stream_hasher = Sha256::new();
     let mut spill = SpillWriter::new(stream_name, policy.spill_dir.as_deref());
     let mut buf = [0u8; 16 * 1024];
     loop {
@@ -929,6 +949,7 @@ fn capture_reader_with_observer<R: Read, F: FnMut(&[u8])>(
             break;
         }
         let chunk = &buf[..read];
+        full_stream_hasher.update(chunk);
         observer(chunk);
         bytes_seen = bytes_seen.saturating_add(read);
         let captured_before = captured.len();
@@ -946,6 +967,8 @@ fn capture_reader_with_observer<R: Read, F: FnMut(&[u8])>(
             bytes_seen,
             captured_bytes: captured.len(),
             truncated: bytes_seen > captured.len(),
+            captured_utf8_lossless: std::str::from_utf8(&captured).is_ok(),
+            full_stream_sha256: Some(lowercase_hex(&full_stream_hasher.finalize())),
             spill_path: spill.path.as_ref().map(|path| path.display().to_string()),
             spill_bytes: spill.bytes_written,
         },
@@ -1297,6 +1320,34 @@ mod stdio_error_tests {
         assert!(result.ok);
         assert_eq!(result.stdout, "input");
         assert_eq!(result.stderr, "err");
+        assert!(result.stdout_capture.captured_utf8_lossless);
+        assert!(result.stderr_capture.captured_utf8_lossless);
+        assert_eq!(
+            result.stdout_capture.full_stream_sha256.as_deref(),
+            Some(tokenzero_core::sha256_hex("input").as_str())
+        );
+        assert_eq!(
+            result.stderr_capture.full_stream_sha256.as_deref(),
+            Some(tokenzero_core::sha256_hex("err").as_str())
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn invalid_utf8_capture_is_never_labeled_lossless() {
+        let argv = vec![
+            "/bin/sh".to_string(),
+            "-c".to_string(),
+            "printf '\\377'".to_string(),
+        ];
+        let result = run_command(&argv, None, None, None, Duration::from_secs(2), false).unwrap();
+        assert!(result.ok);
+        assert!(!result.stdout_capture.captured_utf8_lossless);
+        assert_eq!(result.stdout_capture.bytes_seen, 1);
+        assert_eq!(
+            result.stdout_capture.full_stream_sha256.as_deref(),
+            Some(lowercase_hex(&Sha256::digest([0xff])).as_str())
+        );
     }
 }
 

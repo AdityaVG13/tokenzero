@@ -1752,6 +1752,7 @@ pub fn ref_record(kind: &str, ref_id: String, bytes: usize) -> RefRecord {
 pub mod decision_view;
 pub mod model_artifacts;
 pub mod operation_abi;
+pub mod output_novelty;
 mod protocol_atoms;
 pub mod provider_cache;
 pub mod reasoning_state;

@@ -1,6 +1,6 @@
 use super::*;
 use std::fs::OpenOptions;
-use std::io::Write;
+use std::io::{Read, Write};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Condvar};
 use std::thread;
@@ -176,30 +176,191 @@ fn store_shell_outputs(
             store,
             combined,
             digest,
-            "combined",
+            "canonical-combined-witness",
             ContentType::ShellOutput,
         ),
     )
+}
+
+fn verify_full_stream_digest(
+    text: &str,
+    capture: &StreamCapture,
+    stream: &str,
+) -> Result<(), String> {
+    let expected = capture
+        .full_stream_sha256
+        .as_deref()
+        .ok_or_else(|| format!("{stream} exact witness omitted its observer-time digest"))?;
+    let actual = sha256_hex(text);
+    if actual != expected {
+        return Err(format!(
+            "{stream} exact witness digest changed: expected {expected}, got {actual}"
+        ));
+    }
+    Ok(())
+}
+
+fn exact_shell_stream_text(
+    display: &str,
+    capture: &StreamCapture,
+    stream: &str,
+    max_bytes: usize,
+) -> Result<String, String> {
+    if capture.bytes_seen > max_bytes {
+        return Err(format!(
+            "{stream} exact witness is {} bytes; configured recovery read limit is {max_bytes}",
+            capture.bytes_seen
+        ));
+    }
+    if capture.truncated {
+        let path = capture
+            .spill_path
+            .as_deref()
+            .ok_or_else(|| format!("{stream} capture was truncated without a spill file"))?;
+        if capture.spill_bytes != capture.bytes_seen {
+            return Err(format!(
+                "{stream} spill covers {} of {} observed bytes",
+                capture.spill_bytes, capture.bytes_seen
+            ));
+        }
+        let file = fs::File::open(path).map_err(|error| format!("open {stream} spill: {error}"))?;
+        let mut bytes = Vec::with_capacity(capture.bytes_seen);
+        file.take(
+            u64::try_from(max_bytes)
+                .unwrap_or(u64::MAX)
+                .saturating_add(1),
+        )
+        .read_to_end(&mut bytes)
+        .map_err(|error| format!("read {stream} spill: {error}"))?;
+        if bytes.len() != capture.bytes_seen {
+            return Err(format!(
+                "{stream} spill length changed: expected {}, got {}",
+                capture.bytes_seen,
+                bytes.len()
+            ));
+        }
+        let text = String::from_utf8(bytes)
+            .map_err(|_| format!("{stream} exact witness is not valid UTF-8"))?;
+        verify_full_stream_digest(&text, capture, stream)?;
+        return Ok(text);
+    }
+    if !capture.captured_utf8_lossless {
+        return Err(format!("{stream} exact witness is not valid UTF-8"));
+    }
+    if capture.captured_bytes != capture.bytes_seen || display.len() != capture.bytes_seen {
+        return Err(format!(
+            "{stream} in-memory capture covers {} display bytes of {} observed bytes",
+            display.len(),
+            capture.bytes_seen
+        ));
+    }
+    verify_full_stream_digest(display, capture, stream)?;
+    Ok(display.to_string())
+}
+
+#[cfg(test)]
+mod exact_stream_witness_tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    #[test]
+    fn same_length_spill_mutation_degrades_without_refs() {
+        let dir = tempdir().unwrap();
+        let spill = dir.path().join("stdout.log");
+        let observed = "original";
+        fs::write(&spill, observed).unwrap();
+        let capture = StreamCapture {
+            bytes_seen: observed.len(),
+            captured_bytes: 3,
+            truncated: true,
+            captured_utf8_lossless: true,
+            full_stream_sha256: Some(sha256_hex(observed)),
+            spill_path: Some(spill.display().to_string()),
+            spill_bytes: observed.len(),
+        };
+        fs::write(&spill, "mutation").unwrap();
+
+        let error = exact_shell_stream_text("ori", &capture, "stdout", 1024).unwrap_err();
+        assert!(error.contains("digest changed"), "{error}");
+        let response = degraded_shell_response("probe", Mode::Auto, "preview", error);
+        assert!(response.refs.is_empty());
+        assert_eq!(
+            response.telemetry.as_ref().unwrap()["transport_status"],
+            "degraded"
+        );
+        assert!(response.safety.is_none());
+    }
+
+    #[test]
+    fn absent_observer_digest_never_authorizes_exact_recovery() {
+        let capture = StreamCapture {
+            bytes_seen: 3,
+            captured_bytes: 3,
+            truncated: false,
+            captured_utf8_lossless: true,
+            full_stream_sha256: None,
+            spill_path: None,
+            spill_bytes: 0,
+        };
+        let error = exact_shell_stream_text("abc", &capture, "stdout", 1024).unwrap_err();
+        assert!(
+            error.contains("omitted its observer-time digest"),
+            "{error}"
+        );
+    }
 }
 
 fn shell_ref(kind: &str, stored: &StoredPayload, bytes: usize) -> tokenzero_core::RefRecord {
     ref_record(kind, stored.blob_ref.clone(), bytes)
 }
 
+fn verify_persisted_shell_witnesses(
+    cache_path: &Path,
+    witnesses: &[(&str, &StoredPayload, &str)],
+) -> Result<(), String> {
+    let mut verifier = RecoveryStore::new(Some(cache_path.to_path_buf()));
+    for (kind, stored, expected) in witnesses {
+        if !verifier.has_ref_local(&stored.blob_ref) {
+            return Err(format!(
+                "persisted {kind} witness ref is not durable: {}",
+                stored.blob_ref
+            ));
+        }
+        let expanded = verifier.expand(&stored.blob_ref, Some("raw"), None, None, None, None);
+        if !expanded.found {
+            return Err(format!(
+                "persisted {kind} witness cannot expand: {}",
+                expanded.reason
+            ));
+        }
+        if expanded.content.as_bytes() != expected.as_bytes() {
+            return Err(format!(
+                "persisted {kind} witness content does not match its exact stream"
+            ));
+        }
+    }
+    Ok(())
+}
+
 macro_rules! shell_stream_capture {
-    ($display:expr, $capture:expr, $stored:expr) => {
+    ($display:expr, $full:expr, $capture:expr, $stored:expr) => {
         json!({
-            "bytes": $display.len(),
+            "bytes": $full.len(),
             "bytes_seen": $capture.bytes_seen,
             "captured_bytes": $capture.captured_bytes,
+            "preview_bytes": $display.len(),
             "truncated": $capture.truncated,
+            "preview_truncated": $capture.truncated,
+            "captured_utf8_lossless": $capture.captured_utf8_lossless,
+            "full_stream_sha256": $capture.full_stream_sha256,
             "spill_path": $capture.spill_path,
             "spill_bytes": $capture.spill_bytes,
             "sha256": $stored
                 .blob_ref
                 .strip_prefix("tz://blob/")
                 .unwrap_or(&$stored.blob_ref),
-            "sha256_scope": "captured_display",
+            "sha256_scope": "full_stream",
+            "ref_covers_full_stream": true,
             "ref": $stored.blob_ref
         })
     };
@@ -596,12 +757,39 @@ impl TokenZeroEngine {
             &stderr_display,
         );
         let mut store = self.recovery_store();
+        let exact_witness_limit = store.config.max_load_bytes;
+        let stdout_full = match exact_shell_stream_text(
+            &stdout_display,
+            &result.stdout_capture,
+            "stdout",
+            exact_witness_limit,
+        ) {
+            Ok(text) => text,
+            Err(error) => return degraded_shell_response(command, mode, &output, error),
+        };
+        let stderr_full = match exact_shell_stream_text(
+            &stderr_display,
+            &result.stderr_capture,
+            "stderr",
+            exact_witness_limit,
+        ) {
+            Ok(text) => text,
+            Err(error) => return degraded_shell_response(command, mode, &output, error),
+        };
+        // This is a deterministic recovery witness built from two exact streams.
+        // It is not evidence of the process's temporal stdout/stderr interleaving.
+        let full_output = shell_combined_output(
+            display_command,
+            result.exit_code,
+            &stdout_full,
+            &stderr_full,
+        );
         let command_digest = sha256_hex(display_command);
         let (stdout_stored, stderr_stored, combined_stored) = store_shell_outputs(
             &mut store,
-            &stdout_display,
-            &stderr_display,
-            &output,
+            &stdout_full,
+            &stderr_full,
+            &full_output,
             &command_digest,
         );
         let render = render_shell(ShellRenderInput {
@@ -629,12 +817,17 @@ impl TokenZeroEngine {
             "env_summary": env_summary,
             "timing": {"duration_ms": result.duration_ms, "timed_out": result.timed_out},
             "exit_code": result.exit_code,
-            "stdout": shell_stream_capture!(&stdout_display, result.stdout_capture, stdout_stored),
-            "stderr": shell_stream_capture!(&stderr_display, result.stderr_capture, stderr_stored),
+            "stdout": shell_stream_capture!(&stdout_display, &stdout_full, result.stdout_capture, stdout_stored),
+            "stderr": shell_stream_capture!(&stderr_display, &stderr_full, result.stderr_capture, stderr_stored),
             "combined": {
-                "bytes": output.len(),
-                "truncated": streams_truncated,
+                "bytes": full_output.len(),
+                "preview_bytes": output.len(),
+                "preview_truncated": streams_truncated,
+                "kind": "canonical_stdout_stderr_witness",
+                "temporal_interleaving_claimed": false,
                 "sha256": combined_stored.blob_ref.strip_prefix("tz://blob/").unwrap_or(&combined_stored.blob_ref),
+                "sha256_scope": "canonical_full_stream_witness",
+                "ref_covers_full_streams": true,
                 "ref": combined_stored.blob_ref
             },
             "allocator_pressure_relief": result.allocator_pressure_relief,
@@ -655,21 +848,30 @@ impl TokenZeroEngine {
             ContentType::JsonConfig,
         );
         let mut refs = Vec::new();
-        if !stdout_display.is_empty() {
-            refs.push(shell_ref("stdout", &stdout_stored, stdout_display.len()));
+        if !stdout_full.is_empty() {
+            refs.push(shell_ref("stdout", &stdout_stored, stdout_full.len()));
         }
-        if !stderr_display.is_empty() {
-            refs.push(shell_ref("stderr", &stderr_stored, stderr_display.len()));
+        if !stderr_full.is_empty() {
+            refs.push(shell_ref("stderr", &stderr_stored, stderr_full.len()));
         }
-        refs.push(shell_ref("combined", &combined_stored, output.len()));
+        refs.push(shell_ref("combined", &combined_stored, full_output.len()));
         refs.push(shell_ref("capture", &capture_stored, capture_text.len()));
         let persisted = persist_refs(&mut store, &mut refs);
         if let Some(error) = persisted.error {
             return degraded_shell_response(command, mode, &output, error);
         }
+        if let Err(error) = verify_persisted_shell_witnesses(
+            &self.config.cache_path,
+            &[
+                ("stdout", &stdout_stored, &stdout_full),
+                ("stderr", &stderr_stored, &stderr_full),
+                ("combined", &combined_stored, &full_output),
+            ],
+        ) {
+            return degraded_shell_response(command, mode, &output, error);
+        }
         let refs_complete = persisted.refs_complete;
-        let raw_tokens =
-            shell_raw_tokens(command, result.exit_code, &stdout_display, &stderr_display);
+        let raw_tokens = shell_raw_tokens(command, result.exit_code, &stdout_full, &stderr_full);
         // Tokenizers can encode long repeated runs as a single token. Keep the
         // token accounting exact, but bound inline transport by bytes as well.
         let fits_default_inline_extent =
@@ -703,7 +905,7 @@ impl TokenZeroEngine {
             output.trim_end().to_string()
         };
         let response_refs = if small_shell_output {
-            vec![shell_ref("combined", &combined_stored, output.len())]
+            vec![shell_ref("combined", &combined_stored, full_output.len())]
         } else {
             refs
         };
@@ -775,10 +977,10 @@ impl TokenZeroEngine {
                     count_tokens(&combined_vis)
                 } else {
                     let mut total = count_tokens(&combined_vis) + count_tokens(&capture_vis);
-                    if !stdout_display.is_empty() {
+                    if !stdout_full.is_empty() {
                         total += count_tokens(&stdout_vis);
                     }
-                    if !stderr_display.is_empty() {
+                    if !stderr_full.is_empty() {
                         total += count_tokens(&stderr_vis);
                     }
                     total
@@ -788,9 +990,9 @@ impl TokenZeroEngine {
         response.content_type = Some(ContentType::ShellOutput.to_string());
         if streams_truncated {
             response.diagnostic = Some(tokenzero_core::Diagnostic {
-                code: "shell_output_truncated".to_string(),
-                message: "shell output exceeded per-stream capture limits; refs contain captured display output and spill paths point to full local stream logs".to_string(),
-                repair: Some("rerun with a narrower command or increase TOKENZERO_SHELL_CAPTURE_BYTES".to_string()),
+                code: "shell_output_preview_truncated".to_string(),
+                message: "visible shell previews were truncated; durable stdout/stderr refs retain the complete UTF-8 streams".to_string(),
+                repair: Some("expand stdout_ref or stderr_ref for the complete stream".to_string()),
             });
         }
         let mut telemetry = json!({
@@ -800,7 +1002,9 @@ impl TokenZeroEngine {
             "alias_dependency": result.alias_dependency,
             "cwd": capture["cwd"],
             "cwd_source": capture["cwd_source"],
-            "transport_status": if streams_truncated { "degraded" } else { "ok" },
+            "transport_status": "ok",
+            "preview_truncated": streams_truncated,
+            "refs_cover_full_output": true,
             "command_success": capture["command_status"]["command_success"],
             "exit_code": capture["exit_code"],
             "failed_segment": capture["command_status"]["failed_segment"],
@@ -829,10 +1033,10 @@ impl TokenZeroEngine {
             "combined_ref": combined_vis,
             "output_strategy": output_strategy
         });
-        if !stdout_display.is_empty() {
+        if !stdout_full.is_empty() {
             telemetry["stdout_ref"] = json!(stdout_vis);
         }
-        if !stderr_display.is_empty() {
+        if !stderr_full.is_empty() {
             telemetry["stderr_ref"] = json!(stderr_vis);
         }
         response.telemetry = Some(telemetry);
@@ -841,7 +1045,8 @@ impl TokenZeroEngine {
             "secret_masking": mask_visible_output,
             "hidden_critical_evidence_requires_ref": true,
             "refs_available": true,
-            "refs_cover_full_output": !streams_truncated
+            "refs_cover_full_output": true,
+            "combined_witness_temporal_interleaving": "not_claimed"
         }));
         response
     }
