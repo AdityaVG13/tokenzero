@@ -108,7 +108,10 @@ pub fn os_warnings() -> Vec<String> {
 }
 
 fn classify_words(parts: &[String]) -> &'static str {
-    let first = parts.first().map(String::as_str).unwrap_or_default();
+    let first = parts
+        .first()
+        .map(|word| executable_name(word))
+        .unwrap_or_default();
     let second = parts.get(1).map(String::as_str).unwrap_or_default();
     CLASS_RULES
         .iter()
@@ -200,6 +203,9 @@ fn apply_rewrite<'a>(
     parts: &[String],
 ) -> Option<std::borrow::Cow<'a, str>> {
     use std::borrow::Cow::{Borrowed, Owned};
+    // Classification and safety normalize Windows/path-qualified executables.
+    // Rewrites intentionally require the canonical command spelling so a
+    // filter never changes the executable identity the caller selected.
     let first = parts.first().map(String::as_str);
     match family {
         "read" => match first {
@@ -456,14 +462,16 @@ fn take_nested_command(chars: &[char], start: usize, delimiter: char) -> (String
 }
 
 fn is_shell_interpreter(words: &[String]) -> bool {
-    words.first().is_some_and(|word| {
-        let executable = word.rsplit('/').next().unwrap_or(word);
-        matches!(executable, "sh" | "bash" | "dash" | "zsh" | "ksh")
+    command_words(words).first().is_some_and(|word| {
+        matches!(
+            executable_name(word),
+            "sh" | "bash" | "dash" | "zsh" | "ksh"
+        )
     })
 }
 
 fn shell_command_payload(words: &[String]) -> Option<&str> {
-    words.windows(2).find_map(|pair| {
+    command_words(words).windows(2).find_map(|pair| {
         let flag = pair[0].as_str();
         (flag == "-c"
             || (flag.starts_with('-')
@@ -473,8 +481,85 @@ fn shell_command_payload(words: &[String]) -> Option<&str> {
     })
 }
 
+fn command_words(words: &[String]) -> &[String] {
+    let mut index = 0;
+    while let Some(word) = words.get(index) {
+        if matches!(
+            word.as_str(),
+            "{" | "}" | "if" | "then" | "elif" | "else" | "while" | "until" | "do"
+        ) || is_shell_assignment(word)
+        {
+            index += 1;
+        } else {
+            break;
+        }
+    }
+    &words[index..]
+}
+
+fn is_shell_assignment(word: &str) -> bool {
+    let Some((name, _)) = word.split_once('=') else {
+        return false;
+    };
+    let name = name.strip_suffix('+').unwrap_or(name);
+    let mut chars = name.chars();
+    chars
+        .next()
+        .is_some_and(|ch| ch == '_' || ch.is_ascii_alphabetic())
+        && chars.all(|ch| ch == '_' || ch.is_ascii_alphanumeric())
+}
+
+fn executable_name(word: &str) -> &str {
+    let basename = word.rsplit(['/', '\\']).next().unwrap_or(word);
+    for suffix in [".exe", ".cmd", ".bat", ".com"] {
+        if basename.len() > suffix.len()
+            && basename[basename.len() - suffix.len()..].eq_ignore_ascii_case(suffix)
+        {
+            return &basename[..basename.len() - suffix.len()];
+        }
+    }
+    basename
+}
+
+/// Embedded language payloads are intentionally opaque. Without a language
+/// parser TokenZero cannot prove that `python -c`, `node -e`, or equivalent
+/// code avoids mutations, so the safety surface must never vouch for it.
+fn has_embedded_interpreter_payload(words: &[String]) -> bool {
+    let words = command_words(words);
+    let Some(first) = words.first() else {
+        return false;
+    };
+    let executable = executable_name(first).to_ascii_lowercase();
+    let executable = executable.as_str();
+    let flags = words.iter().skip(1).map(String::as_str);
+    let python = executable == "python"
+        || executable
+            .strip_prefix("python")
+            .is_some_and(|suffix| suffix.chars().next().is_some_and(|ch| ch.is_ascii_digit()));
+    if python {
+        return flags.into_iter().any(|flag| flag == "-c");
+    }
+    match executable {
+        "node" | "deno" | "bun" => flags
+            .into_iter()
+            .any(|flag| matches!(flag, "-e" | "--eval")),
+        "perl" | "ruby" => flags.into_iter().any(|flag| flag == "-e"),
+        "cmd" => flags
+            .into_iter()
+            .any(|flag| flag.eq_ignore_ascii_case("/c") || flag.eq_ignore_ascii_case("/k")),
+        "powershell" | "pwsh" => flags.into_iter().any(|flag| {
+            matches!(
+                flag.to_ascii_lowercase().as_str(),
+                "-c" | "-command" | "-encodedcommand"
+            )
+        }),
+        _ => false,
+    }
+}
+
 const DESTRUCTIVE: &str = "rm rmdir unlink mv cp chmod chown dd shutdown reboot shred truncate wipefs parted fdisk mount umount ln rsync systemctl service launchctl iptables nft ufw crontab";
-const DISPATCHERS: &str = "xargs eval exec source env sudo doas nohup timeout watch npx";
+const DISPATCHERS: &str =
+    "xargs eval exec source env sudo doas nohup timeout watch npx command time builtin nice ionice";
 const GIT_MUTATIONS: &str = "push reset clean checkout switch rebase merge commit restore rm mv apply am cherry-pick revert stash tag branch remote";
 const DOCKER_MUTATIONS: &str =
     "rm rmi cp import stop kill push login run exec build prune system restart update";
@@ -492,13 +577,12 @@ fn listed(list: &str, word: &str) -> bool {
 }
 
 fn unsafe_reason_for_words(parts: &[String]) -> Option<String> {
+    let parts = command_words(parts);
     let first = parts
         .first()
-        .map(String::as_str)
-        .unwrap_or_default()
-        .rsplit('/')
-        .next()
+        .map(|word| executable_name(word).to_ascii_lowercase())
         .unwrap_or_default();
+    let first = first.as_str();
     let second = parts.get(1).map(String::as_str).unwrap_or_default();
     let flags = parts.get(1..).unwrap_or_default();
     let in_place_edit = matches!(first, "sed" | "awk" | "gawk")
@@ -517,6 +601,8 @@ fn unsafe_reason_for_words(parts: &[String]) -> Option<String> {
         "remote execution left unmodified"
     } else if in_place_edit {
         "in-place file edit left unmodified"
+    } else if has_embedded_interpreter_payload(parts) {
+        "embedded interpreter payload left unmodified"
     } else if first == "find"
         && parts.iter().any(|p| {
             matches!(
@@ -634,6 +720,60 @@ fn raw_args_after_first_word(command: &str) -> Option<&str> {
         in_first = true;
     }
     None
+}
+
+#[cfg(test)]
+mod bypass_regression_tests {
+    use super::*;
+
+    #[test]
+    fn safety_finds_mutations_behind_shell_prefixes() {
+        for command in [
+            "{ rm -rf /tmp/tokenzero-bypass; }",
+            "TOKENZERO_TEST=1 rm -rf /tmp/tokenzero-bypass",
+            "time rm -rf /tmp/tokenzero-bypass",
+            "command rm -rf /tmp/tokenzero-bypass",
+        ] {
+            let result = rewrite_command(command, "on", true);
+            assert!(!result.safe, "unexpectedly vouched: {command}");
+            assert!(
+                result.reason.contains("mutation") || result.reason.contains("dispatcher"),
+                "mutation prefix was not classified for {command}: {}",
+                result.reason
+            );
+        }
+    }
+
+    #[test]
+    fn embedded_interpreter_payloads_are_never_vouched() {
+        for command in [
+            "python3 -c 'from pathlib import Path; Path(\"x\").unlink()'",
+            "node -e 'require(\"fs\").rmSync(\"x\")'",
+            "cmd.exe /C del x",
+            "pwsh -Command 'Remove-Item x'",
+        ] {
+            let result = rewrite_command(command, "on", true);
+            assert!(!result.safe, "unexpectedly vouched: {command}");
+            assert_eq!(
+                result.reason, "embedded interpreter payload left unmodified",
+                "embedded payload was not classified for {command}"
+            );
+        }
+    }
+
+    #[test]
+    fn windows_executable_suffixes_and_backslashes_reach_safety_rules() {
+        let words = vec![
+            r"C:\Tools\RM.EXE".to_string(),
+            "-rf".to_string(),
+            "target".to_string(),
+        ];
+        assert_eq!(executable_name(&words[0]), "RM");
+        assert_eq!(
+            unsafe_reason_for_words(&words).as_deref(),
+            Some("unsafe destructive mutation left unmodified")
+        );
+    }
 }
 
 #[cfg(test)]
