@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """Shared, stdlib-only benchmark measurement helpers."""
 from __future__ import annotations
+import math
+
 import argparse, hashlib, json; import os, platform, random, re, shutil, string; import subprocess, sys, tempfile, time; from contextlib import contextmanager
 from datetime import datetime, timezone; from pathlib import Path; GUARD = Path('/tmp/zerostack-heavy-process.guard'); RECOVERY_CACHE = Path.home() / '.tokenzero' / 'recovery-cache.json'
 REPO = Path(__file__).resolve().parents[1]
@@ -126,13 +128,51 @@ def file_count(root, excludes=('.git', 'target', '.zerostack')):
         dirs[:] = [name for name in dirs if name not in excludes]; total += len(files)
     return total
 
+_MAX_BENCHMARK_STDERR_CHARS = 4096
+
+
+def _bounded_stderr(value: bytes | str | None) -> str:
+    if isinstance(value, bytes):
+        text = value.decode('utf-8', errors='replace')
+    else:
+        text = value or ''
+    if len(text) <= _MAX_BENCHMARK_STDERR_CHARS:
+        return text
+    return '[... stderr truncated ...]\n' + text[-_MAX_BENCHMARK_STDERR_CHARS:]
+
+
+def _bounded_stderr_file(path: Path) -> str:
+    try:
+        with path.open('rb') as stream:
+            stream.seek(0, os.SEEK_END)
+            size = stream.tell()
+            stream.seek(max(0, size - _MAX_BENCHMARK_STDERR_CHARS * 4))
+            return _bounded_stderr(stream.read())
+    except OSError:
+        return ''
+
+
 def _run_prepare(command: str) -> None:
     prepared = subprocess.run(['bash', '-c', command], capture_output=True)
     if prepared.returncode != 0:
         raise RuntimeError(
             f"benchmark prepare failed with {prepared.returncode}: "
-            f"{prepared.stderr.decode('utf-8', errors='replace')}"
+            f"{_bounded_stderr(prepared.stderr)}"
         )
+
+
+def _run_benchmark_command(command: str, stage: str, capture_stdout: bool = False) -> bytes:
+    completed = subprocess.run(
+        ['bash', '-c', command],
+        stdout=subprocess.PIPE if capture_stdout else subprocess.DEVNULL,
+        stderr=subprocess.PIPE,
+    )
+    if completed.returncode != 0:
+        raise RuntimeError(
+            f"benchmark {stage} failed with {completed.returncode}: "
+            f"{_bounded_stderr(completed.stderr)}"
+        )
+    return completed.stdout if capture_stdout else b''
 
 
 def _times(
@@ -143,48 +183,85 @@ def _times(
     name: str,
     cold_warmup: bool = False,
 ) -> list[float]:
+    if runs < 1 or warmup < 0:
+        raise ValueError('benchmark requires runs >= 1 and warmup >= 0')
     # Preflight exposes the preparation command's real stderr. Hyperfine then
     # repeats the same command outside every warmup and measured sample.
     _run_prepare(prepare)
-    if shutil.which('hyperfine'):
+    hyperfine = shutil.which('hyperfine')
+    if hyperfine:
         with tempfile.TemporaryDirectory(prefix='tz-hf-') as tmp:
             artifact = Path(tmp) / 'hf.json'
-            probe = subprocess.run(['hyperfine', '--warmup', str(warmup), '--runs', str(runs), '--style', 'basic', '--export-json', str(artifact), '--prepare', prepare, '--command-name', name, command], capture_output=True, text=True)
-            if probe.returncode != 0 and 'preparation command' in probe.stderr.lower():
-                raise RuntimeError(f"benchmark preparation failed with {probe.returncode}: {probe.stderr}")
+            stderr_log = Path(tmp) / 'command.stderr'
+            stderr_path = json.dumps(str(stderr_log))
+            timed_prepare = f"{{ {prepare}; }} 2>>{stderr_path}"
+            timed_command = f"{{ {command}; }} 2>>{stderr_path}"
             try:
-                return json.loads(artifact.read_text()).get('results', [{}])[0].get('times', []) or []
-            except (json.JSONDecodeError, OSError, IndexError, KeyError, TypeError):
-                pass
+                probe = subprocess.run(
+                    [
+                        hyperfine,
+                        '--warmup',
+                        str(warmup),
+                        '--runs',
+                        str(runs),
+                        '--style',
+                        'basic',
+                        '--export-json',
+                        str(artifact),
+                        '--prepare',
+                        timed_prepare,
+                        '--command-name',
+                        name,
+                        timed_command,
+                    ],
+                    capture_output=True,
+                    text=True,
+                )
+            except FileNotFoundError:
+                # The executable disappeared after discovery. This is the one
+                # present-hyperfine condition that may select the fallback.
+                hyperfine = None
+            except OSError as error:
+                raise RuntimeError(f'could not execute hyperfine: {error}') from error
+            else:
+                if probe.returncode != 0:
+                    diagnostic = _bounded_stderr_file(stderr_log) or _bounded_stderr(
+                        probe.stderr
+                    )
+                    raise RuntimeError(
+                        f"benchmark hyperfine execution failed with {probe.returncode}: "
+                        f"{diagnostic}"
+                    )
+                try:
+                    times = json.loads(artifact.read_text())['results'][0]['times']
+                except (json.JSONDecodeError, OSError, IndexError, KeyError, TypeError) as error:
+                    raise RuntimeError('hyperfine succeeded without a valid timing artifact') from error
+                if (
+                    not isinstance(times, list)
+                    or len(times) != runs
+                    or not all(
+                        isinstance(value, (int, float))
+                        and not isinstance(value, bool)
+                        and math.isfinite(value)
+                        and value >= 0
+                        for value in times
+                    )
+                ):
+                    raise RuntimeError('hyperfine timing artifact has invalid samples')
+                return [float(value) for value in times]
+    # Fallback is allowed only when hyperfine was absent or disappeared.
     fallback_warmups = 1 if cold_warmup else warmup
-    for _ in range(fallback_warmups):
+    for index in range(fallback_warmups):
         _run_prepare(prepare)
-        subprocess.run(
-            ['bash', '-c', command],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
-    probe = subprocess.run(['/usr/bin/time', '-f', '%e', 'true'], capture_output=True, text=True)
-    try:
-        float((probe.stderr or probe.stdout).strip().splitlines()[-1]); gnu_time = probe.returncode == 0
-    except (ValueError, IndexError):
-        gnu_time = False
+        _run_benchmark_command(command, f'fallback warmup {index + 1}')
     times = []
-    for _ in range(runs):
+    for index in range(runs):
         _run_prepare(prepare)
-        if not gnu_time:
-            started = time.perf_counter(); subprocess.run(['bash', '-c', command], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL); times.append(time.perf_counter() - started)
-            continue
-        with tempfile.NamedTemporaryFile('w+', delete=False) as stream:
-            output = Path(stream.name)
-        script = f"/usr/bin/time -f '%e' bash -c {json.dumps(command)} >/dev/null 2>>{json.dumps(str(output))}"; subprocess.run(['bash', '-c', script])
-        try:
-            times.extend((float(line) for line in output.read_text().splitlines() if line.strip()))
-        except (OSError, ValueError):
-            pass
-        finally:
-            output.unlink(missing_ok=True)
+        started = time.perf_counter()
+        _run_benchmark_command(command, f'fallback sample {index + 1}')
+        times.append(time.perf_counter() - started)
     return times
+
 
 def measure_cell(label, command, cold=False, runs=50, warmup=3):
     prepare = f'rm -f {RECOVERY_CACHE}' if cold else 'true'
@@ -199,7 +276,7 @@ def measure_median(
 ) -> tuple[int, int, int]:
     wall = median_ms(_times(command, runs, warmup, prepare, label))
     _run_prepare(prepare)
-    output = subprocess.run(['bash', '-c', command], capture_output=True).stdout
+    output = _run_benchmark_command(command, 'captured-byte probe', capture_stdout=True)
     return (wall, len(output), token_estimate(output))
 
 def _json(data):

@@ -58,42 +58,44 @@ Command: `benchmarks/cli-cold-read.sh`. Cold = recovery cache removed per cell; 
 
 Command: `benchmarks/competitor-bakeoff.sh`. Same corpus, same task, same measurement point per row. Tools that are not installed are marked. The TokenZero `grep_read` row is explicitly warm/dedup: each suite invocation creates a fresh isolated cache and runs one successful primer outside timing and output accounting. Its live full-results blob expands byte-exactly to every returned match line; only redundant per-hit text footers are elided. `estimator:bytes-ceil-div4/v1` maps the exact captured stdout byte counts to `ceil(bytes/4)` heuristic estimates. It is not provider-locked and is not a Q99 receipt. The heuristic raw-CLI baseline is 419 estimated tokens; the candidate is 53, for 366 estimated tokens saved and 873508 ppm against the >=850000 ppm target. Provider-locked Q99-Input certification remains tracked by `tokenzero-5wfr`. The same-unit never-worse gate passes all five competitor tasks; this is an estimator-labeled engineering gate, not Q99 evidence. For `edit_verify`, `harness.py --prepare` restores the exact 16-byte fixture before every warmup, measured sample, and captured-byte probe; preparation stays outside timing and output accounting. The corrected valid pre-change baseline was 349 bytes / 88 estimated tokens; the old 779 / 195 row exercised an outside-root failure and is not used. Current output is 16 bytes / 4 estimated tokens.
 
+The earlier 95-byte `read_500` row was also an outside-root `path_not_allowed` error and is invalid. The corrected command runs from `$WORK_DIR` against the identical 500-line corpus and produces 231 exact stdout bytes / 58 `estimator:bytes-ceil-div4/v1` units. Candidate or raw-baseline failure aborts the suite. An optional competitor that exits nonzero is labeled `execution failed; excluded from gate`; its stdout never becomes a measurement.
+
 | task | tool | wall_ms | output_bytes | est_tokens | note |
 |---|---|---:|---:|---:|---|
-| `read_500` | `tokenzero` | 19 | 95 | 24 |  |
+| `read_500` | `tokenzero` | 80 | 231 | 58 |  |
 | `read_500` | `raw-cli` | 3 | 23342 | 5836 |  |
 | `read_500` | `rtk` | - | - | - | not installed |
 | `read_500` | `lean-ctx` | - | - | - | not installed |
 | `read_500` | `headroom` | - | - | - | not installed |
-| `read_500` | `ztk` | 5 | 0 | 0 | ran but produced no output (arg mismatch with installed version) |
+| `read_500` | `ztk` | - | - | - | execution failed; excluded from gate |
 | `read_500` | `context-mode` | - | - | - | not installed |
 | `grep_read` | `tokenzero` | 9 | 210 | 53 | warm/dedup; estimator:bytes-ceil-div4/v1 candidate |
 | `grep_read` | `raw-cli` | 3 | 1676 | 419 | estimator:bytes-ceil-div4/v1 raw baseline |
 | `grep_read` | `rtk` | - | - | - | not installed |
 | `grep_read` | `lean-ctx` | - | - | - | not installed |
 | `grep_read` | `headroom` | - | - | - | not installed |
-| `grep_read` | `ztk` | 5 | 0 | 0 | ran but produced no output (arg mismatch with installed version) |
+| `grep_read` | `ztk` | - | - | - | execution failed; excluded from gate |
 | `grep_read` | `context-mode` | - | - | - | not installed |
 | `tree_glob_read` | `tokenzero` | 144 | 2352 | 588 |  |
 | `tree_glob_read` | `raw-cli` | 46 | 47700 | 11925 |  |
 | `tree_glob_read` | `rtk` | - | - | - | not installed |
 | `tree_glob_read` | `lean-ctx` | - | - | - | not installed |
 | `tree_glob_read` | `headroom` | - | - | - | not installed |
-| `tree_glob_read` | `ztk` | 9 | 0 | 0 | ran but produced no output (arg mismatch with installed version) |
+| `tree_glob_read` | `ztk` | - | - | - | execution failed; excluded from gate |
 | `tree_glob_read` | `context-mode` | - | - | - | not installed |
 | `edit_verify` | `tokenzero` | 109 | 16 | 4 |  |
 | `edit_verify` | `raw-cli` | 7 | 16 | 4 |  |
 | `edit_verify` | `rtk` | - | - | - | not installed |
 | `edit_verify` | `lean-ctx` | - | - | - | not installed |
 | `edit_verify` | `headroom` | - | - | - | not installed |
-| `edit_verify` | `ztk` | 7 | 0 | 0 | ran but produced no output (arg mismatch with installed version) |
+| `edit_verify` | `ztk` | - | - | - | execution failed; excluded from gate |
 | `edit_verify` | `context-mode` | - | - | - | not installed |
 | `multi_step` | `tokenzero` | 202 | 1011 | 253 |  |
 | `multi_step` | `raw-cli` | 19 | 102543 | 25636 |  |
 | `multi_step` | `rtk` | - | - | - | not installed |
 | `multi_step` | `lean-ctx` | - | - | - | not installed |
 | `multi_step` | `headroom` | - | - | - | not installed |
-| `multi_step` | `ztk` | 11 | 0 | 0 | ran but produced no output (arg mismatch with installed version) |
+| `multi_step` | `ztk` | - | - | - | execution failed; excluded from gate |
 | `multi_step` | `context-mode` | - | - | - | not installed |
 
 ## Never-worse estimated-token budget assertion
@@ -102,7 +104,7 @@ Suite: `competitor-bakeoff`. Surface: `captured-stdout-bytes/v1`. Unit: `estimat
 
 | task | TokenZero bytes | raw-cli bytes | TokenZero est_tokens | raw-cli est_tokens | delta | result |
 |---|---:|---:|---:|---:|---:|---|
-| `read_500` | 95 | 23342 | 24 | 5836 | 5812 | **PASS** |
+| `read_500` | 231 | 23342 | 58 | 5836 | 5778 | **PASS** |
 | `grep_read` | 210 | 1676 | 53 | 419 | 366 | **PASS** |
 | `tree_glob_read` | 2352 | 47700 | 588 | 11925 | 11337 | **PASS** |
 | `edit_verify` | 16 | 16 | 4 | 4 | 0 | **PASS** |

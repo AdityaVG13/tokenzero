@@ -15,6 +15,10 @@ row() {
   fi
   if ! metrics=$(measure "$tool:$task" "$cmd" "$prepare"); then
     log "FAILED: $tool:$task"
+    if [[ "$tool" != tokenzero && "$tool" != raw-cli ]]; then
+      emit "$task" "$tool" - - - "execution failed; excluded from gate"
+      return 0
+    fi
     return 1
   fi
   read -r m b e <<<"$metrics"
@@ -42,7 +46,7 @@ prepare_for() {
 command_for() {
   local task="$1" tool="$2" exe="$tool"; [[ "$tool" == tokenzero ]] && exe="$BIN"
   case "$task:$tool" in
-    read_500:tokenzero) echo "$exe read --end-line 500 \"$SAMPLE\"";; read_500:raw-cli) echo "cat \"$SAMPLE\"";;
+    read_500:tokenzero) echo "cd \"$WORK_DIR\"; $exe read --end-line 500 \"$SAMPLE\"";; read_500:raw-cli) echo "cat \"$SAMPLE\"";;
     read_500:rtk) echo "rtk read --limit 500 \"$SAMPLE\"";; read_500:lean-ctx) echo "lean-ctx read \"$SAMPLE\" --limit 500";;
     read_500:headroom) echo "headroom read --lines 500 \"$SAMPLE\"";; read_500:ztk) echo "ztk read --end-line 500 \"$SAMPLE\"";;
     read_500:context-mode) echo "context-mode read --limit 500 \"$SAMPLE\"";;
@@ -58,7 +62,7 @@ command_for() {
     multi_step:*) echo "$exe grep '$PATTERN' $files_str; for f in $files_str; do $exe read \"\$f\"; done";;
   esac
 }
-log "binary: $BIN"; log "hyperfine: $(command -v hyperfine || echo 'fallback: /usr/bin/time')"; head -n 500 "$README" > "$SAMPLE" 2>/dev/null || { : > "$SAMPLE"; while [[ $(wc -l < "$SAMPLE") -lt 500 ]]; do printf 'padding line %d\n' $(($(wc -l < "$SAMPLE")+1)) >> "$SAMPLE"; done; }
+log "binary: $BIN"; log "hyperfine: $(command -v hyperfine || echo 'fallback: Python perf_counter')"; head -n 500 "$README" > "$SAMPLE" 2>/dev/null || { : > "$SAMPLE"; while [[ $(wc -l < "$SAMPLE") -lt 500 ]]; do printf 'padding line %d\n' $(($(wc -l < "$SAMPLE")+1)) >> "$SAMPLE"; done; }
 first_rs=$(find "$CRATES" -name "*.rs" -type f -print -quit)
 hits=(); while IFS= read -r line; do hits+=("$line"); done < <(grep -rl "$PATTERN" "$CRATES" 2>/dev/null | sed -n '1,3p')
 files_str=""; for file in "${hits[@]}"; do files_str="$files_str $(printf '%q' "$file")"; done
