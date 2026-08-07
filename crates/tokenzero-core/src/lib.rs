@@ -1749,6 +1749,7 @@ pub fn ref_record(kind: &str, ref_id: String, bytes: usize) -> RefRecord {
     }
 }
 
+pub mod decision_view;
 pub mod model_artifacts;
 pub mod operation_abi;
 mod protocol_atoms;
