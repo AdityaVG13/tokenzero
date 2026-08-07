@@ -27,13 +27,14 @@ jobs:
       - name: Report exact Lean version
         shell: bash
         run: lean --version
-      - name: Compile standalone publication proof
+      - name: Compile empty-manifest core and auxiliaries
         shell: bash
         run: |
           set -euo pipefail
+
           rm -rf /tmp/wave2-family5-empty
           mkdir -p /tmp/wave2-family5-empty
-          cp verification/wave2_family5/Wave2Family5Publication.lean \
+          cp verification/wave2_family5/Wave2Family5.lean \
             /tmp/wave2-family5-empty/Main.lean
           cd /tmp/wave2-family5-empty
           test ! -e lakefile.lean
@@ -44,4 +45,11 @@ jobs:
           fi
           printf 'EMPTY_DEPENDENCY_MANIFEST=1\n'
           lean Main.lean
+
+          cd "$GITHUB_WORKSPACE"
+          export LEAN_PATH="$PWD"
+          lean -o verification/wave2_family5/Wave2Family5.olean \
+            verification/wave2_family5/Wave2Family5.lean
+          lean verification/wave2_family5/BoolEnumExplicit.lean
+          lean verification/wave2_family5/StatefulGeneric.lean
           printf 'LEAN_COMPILE_EXIT=0\n'
