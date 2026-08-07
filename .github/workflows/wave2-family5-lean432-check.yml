@@ -32,4 +32,5 @@ jobs:
         run: |
           set -euo pipefail
           lean verification/wave2_family5/Wave2Family5.lean
+          lean verification/wave2_family5/BoolEnumExplicit.lean
           printf 'LEAN_COMPILE_EXIT=0\n'
