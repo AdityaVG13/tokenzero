@@ -16,6 +16,9 @@ serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
 zero-abi.workspace = true
+zero-gauge.workspace = true
+zero-ledger.workspace = true
+zero-ref.workspace = true
 
 [dev-dependencies]
 ah-ah-ah = "0.1"

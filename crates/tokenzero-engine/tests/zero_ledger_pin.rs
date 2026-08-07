@@ -3,7 +3,8 @@
 //! zerostack rev and their core charge path must behave per contract.
 
 use zero_ledger::{
-    Digest, LedgerConfig, LedgerError, ResourceGauge, TokenCharge, TokenizerIdentity,
+    Digest, FreshWorkVector, LedgerConfig, LedgerError, ResourceGauge, TokenCharge,
+    TokenizerIdentity,
 };
 
 fn test_identity() -> TokenizerIdentity {
@@ -26,6 +27,8 @@ fn representative_charge() -> TokenCharge {
         model_output_tokens: 120,
         model_calls: 1,
         retries: 0,
+        fresh_work: FreshWorkVector::new(800, 0, 100, 0)
+            .expect("fresh-work decomposition is exact"),
     }
 }
 

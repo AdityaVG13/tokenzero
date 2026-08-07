@@ -49,11 +49,12 @@ thiserror = "2.0.19"
 toml = "1.1.4"
 wait-timeout = "0.2.1"
 fastmcp-rust = { version = "0.3.2", git = "https://github.com/Dicklesworthstone/fastmcp_rust", rev = "1c66097b15dea9550e833ee9e433beeb66eefece" }
-zero-abi = { git = "https://github.com/AdityaVG13/zerostack", rev = "3e12d0aed8c8aba4cedb28e1ad178c5e72c1b4a1" }
-zero-gate = { git = "https://github.com/AdityaVG13/zerostack", rev = "3e12d0aed8c8aba4cedb28e1ad178c5e72c1b4a1" }
-zero-ledger = { git = "https://github.com/AdityaVG13/zerostack", rev = "3e12d0aed8c8aba4cedb28e1ad178c5e72c1b4a1" }
-zero-ref = { git = "https://github.com/AdityaVG13/zerostack", rev = "3e12d0aed8c8aba4cedb28e1ad178c5e72c1b4a1" }
-zerostack-machine-permit = { version = "0.1.0", git = "https://github.com/AdityaVG13/zerostack", rev = "3e6d49db0b4f6a1e275eeddec334f366a46626c9" }
+zero-abi = { git = "https://github.com/AdityaVG13/zerostack", rev = "4a85daff7d00bdf1053388a7e8151d9e63bff2e5" }
+zero-gate = { git = "https://github.com/AdityaVG13/zerostack", rev = "4a85daff7d00bdf1053388a7e8151d9e63bff2e5" }
+zero-gauge = { git = "https://github.com/AdityaVG13/zerostack", rev = "4a85daff7d00bdf1053388a7e8151d9e63bff2e5" }
+zero-ledger = { git = "https://github.com/AdityaVG13/zerostack", rev = "4a85daff7d00bdf1053388a7e8151d9e63bff2e5" }
+zero-ref = { git = "https://github.com/AdityaVG13/zerostack", rev = "4a85daff7d00bdf1053388a7e8151d9e63bff2e5" }
+zerostack-machine-permit = { version = "0.1.0", git = "https://github.com/AdityaVG13/zerostack", rev = "4a85daff7d00bdf1053388a7e8151d9e63bff2e5" }
 
 [profile.release-perf]
 inherits = "release"
