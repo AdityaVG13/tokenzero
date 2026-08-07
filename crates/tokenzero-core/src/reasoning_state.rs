@@ -6,7 +6,7 @@
 //! refused unless every binding matches. Headroom arithmetic delegates to the
 //! canonical ZeroStack [`ReasoningContractV1`] contract.
 
-use crate::decision_view::DecisionView;
+use crate::decision_view::{DecisionView, DecisionViewIdentity};
 use serde::Serialize;
 use std::{error::Error, fmt};
 use zero_abi::{
@@ -511,6 +511,563 @@ impl fmt::Debug for OpaqueReasoningStateEnvelopeV1 {
     }
 }
 
+/// Exactness class for one model-state continuation assessment.
+///
+/// Only `ExactNeutral` describes identical native continuation state. Scoped
+/// and empirical evidence stay non-pointwise and never authorize exact replay.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case", tag = "class")]
+enum ModelStateContinuationClassV1 {
+    ExactNeutral {
+        state_content_digest: DigestV1,
+    },
+    ScopedCertificate {
+        state_content_digest: DigestV1,
+        certificate_digest: DigestV1,
+        declared_scope_digest: DigestV1,
+    },
+    Empirical {
+        state_content_digest: DigestV1,
+        frozen_distribution_digest: DigestV1,
+        evaluation_receipt_digest: DigestV1,
+        declared_scope_digest: DigestV1,
+        evidence_valid_until_unix_ms: Option<u64>,
+    },
+    Unavailable {
+        reason: ModelStateUnavailableReasonV1,
+    },
+}
+
+/// Public discriminant for the validated continuation class. It is descriptive
+/// only; the unforgeable receipt is `ModelStateContinuationAssessmentV1`.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ModelStateContinuationKindV1 {
+    ExactNeutral,
+    ScopedCertificate,
+    Empirical,
+    Unavailable,
+}
+
+impl ModelStateContinuationClassV1 {
+    const fn kind(&self) -> ModelStateContinuationKindV1 {
+        match self {
+            Self::ExactNeutral { .. } => ModelStateContinuationKindV1::ExactNeutral,
+            Self::ScopedCertificate { .. } => ModelStateContinuationKindV1::ScopedCertificate,
+            Self::Empirical { .. } => ModelStateContinuationKindV1::Empirical,
+            Self::Unavailable { .. } => ModelStateContinuationKindV1::Unavailable,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ModelStateUnavailableReasonV1 {
+    ProviderUnavailable,
+    StateExpired,
+    StateRejected,
+    IdentityMismatch,
+    ScopedEvidenceAbsent,
+    EmpiricalEvidenceAbsent,
+    EmpiricalEvidenceExpired,
+}
+
+/// Evidence supplied with an assessment. Evidence can only preserve the
+/// class already declared by the validated opaque-state reference.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ModelStateContinuationEvidenceV1 {
+    None,
+    Scoped {
+        certificate_digest: DigestV1,
+        declared_scope_digest: DigestV1,
+    },
+    Empirical {
+        frozen_distribution_digest: DigestV1,
+        evaluation_receipt_digest: DigestV1,
+        declared_scope_digest: DigestV1,
+        valid_until_unix_ms: Option<u64>,
+    },
+}
+
+impl ModelStateContinuationEvidenceV1 {
+    pub fn scoped(
+        certificate_digest: DigestV1,
+        declared_scope_digest: DigestV1,
+    ) -> Result<Self, ModelStateContinuationErrorV1> {
+        require_continuation_digest("certificate", certificate_digest)?;
+        require_continuation_digest("declared scope", declared_scope_digest)?;
+        Ok(Self::Scoped {
+            certificate_digest,
+            declared_scope_digest,
+        })
+    }
+
+    pub fn empirical(
+        frozen_distribution_digest: DigestV1,
+        evaluation_receipt_digest: DigestV1,
+        declared_scope_digest: DigestV1,
+        valid_until_unix_ms: Option<u64>,
+    ) -> Result<Self, ModelStateContinuationErrorV1> {
+        require_continuation_digest("frozen distribution", frozen_distribution_digest)?;
+        require_continuation_digest("evaluation receipt", evaluation_receipt_digest)?;
+        require_continuation_digest("declared scope", declared_scope_digest)?;
+        if valid_until_unix_ms == Some(0) {
+            return Err(ModelStateContinuationErrorV1::InvalidEvidenceExpiry);
+        }
+        Ok(Self::Empirical {
+            frozen_distribution_digest,
+            evaluation_receipt_digest,
+            declared_scope_digest,
+            valid_until_unix_ms,
+        })
+    }
+}
+
+/// Serializable raw Decision View recovery metadata. The exact bytes live only
+/// in `RawDecisionViewRecoveryEnvelopeV1` and never enter this receipt.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct RawDecisionViewRecoveryRefV1 {
+    decision_view_identity: DecisionViewIdentity,
+    decision_view_digest: DigestV1,
+    exact_token_map_digest: DigestV1,
+    raw_bytes_digest: DigestV1,
+    raw_byte_len: u64,
+    total_tokens: u64,
+    caller_raw_baseline_identity_digest: DigestV1,
+    caller_hub_safepoint_digest: DigestV1,
+}
+
+impl RawDecisionViewRecoveryRefV1 {
+    pub fn decision_view_identity(&self) -> &DecisionViewIdentity {
+        &self.decision_view_identity
+    }
+
+    pub const fn decision_view_digest(&self) -> DigestV1 {
+        self.decision_view_digest
+    }
+
+    pub const fn exact_token_map_digest(&self) -> DigestV1 {
+        self.exact_token_map_digest
+    }
+
+    pub const fn raw_bytes_digest(&self) -> DigestV1 {
+        self.raw_bytes_digest
+    }
+
+    pub const fn raw_byte_len(&self) -> u64 {
+        self.raw_byte_len
+    }
+
+    pub const fn total_tokens(&self) -> u64 {
+        self.total_tokens
+    }
+
+    pub const fn caller_raw_baseline_identity_digest(&self) -> DigestV1 {
+        self.caller_raw_baseline_identity_digest
+    }
+
+    pub const fn caller_hub_safepoint_digest(&self) -> DigestV1 {
+        self.caller_hub_safepoint_digest
+    }
+}
+
+/// In-memory exact raw Decision View carrier for guarded fallback.
+///
+/// This type does not verify or create hub safepoints, persist CAS objects, or
+/// trigger deoptimization. It only binds caller-supplied hub identities to the
+/// exact canonical Decision View bytes and checks them before recovery.
+pub struct RawDecisionViewRecoveryEnvelopeV1 {
+    reference: RawDecisionViewRecoveryRefV1,
+    raw_decision_view_bytes: Vec<u8>,
+}
+
+impl RawDecisionViewRecoveryEnvelopeV1 {
+    pub fn capture(
+        decision_view: &DecisionView,
+        caller_raw_baseline_identity_digest: DigestV1,
+        caller_hub_safepoint_digest: DigestV1,
+    ) -> Result<Self, ModelStateContinuationErrorV1> {
+        require_continuation_digest(
+            "caller raw-baseline identity",
+            caller_raw_baseline_identity_digest,
+        )?;
+        require_continuation_digest("caller hub safepoint", caller_hub_safepoint_digest)?;
+        let raw_decision_view_bytes = decision_view.rendered().to_vec();
+        let raw_byte_len = u64::try_from(raw_decision_view_bytes.len())
+            .map_err(|_| ModelStateContinuationErrorV1::RawByteLengthOverflow)?;
+        let reference = RawDecisionViewRecoveryRefV1 {
+            decision_view_identity: decision_view.identity().clone(),
+            decision_view_digest: decision_view.digest(),
+            exact_token_map_digest: decision_view.exact_token_map_digest(),
+            raw_bytes_digest: digest(&raw_decision_view_bytes),
+            raw_byte_len,
+            total_tokens: decision_view.total_tokens(),
+            caller_raw_baseline_identity_digest,
+            caller_hub_safepoint_digest,
+        };
+        Ok(Self {
+            reference,
+            raw_decision_view_bytes,
+        })
+    }
+
+    pub fn reference(&self) -> &RawDecisionViewRecoveryRefV1 {
+        &self.reference
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn exact_raw_decision_view_bytes(
+        &self,
+        expected_decision_view_identity: &DecisionViewIdentity,
+        expected_decision_view_digest: DigestV1,
+        expected_exact_token_map_digest: DigestV1,
+        expected_raw_baseline_identity_digest: DigestV1,
+        expected_hub_safepoint_digest: DigestV1,
+    ) -> Result<&[u8], ModelStateContinuationErrorV1> {
+        if &self.reference.decision_view_identity != expected_decision_view_identity {
+            return Err(ModelStateContinuationErrorV1::DecisionViewIdentityMismatch);
+        }
+        if self.reference.decision_view_digest != expected_decision_view_digest {
+            return Err(ModelStateContinuationErrorV1::DecisionViewDigestMismatch);
+        }
+        if self.reference.exact_token_map_digest != expected_exact_token_map_digest {
+            return Err(ModelStateContinuationErrorV1::ExactTokenMapDigestMismatch);
+        }
+        if self.reference.caller_raw_baseline_identity_digest
+            != expected_raw_baseline_identity_digest
+        {
+            return Err(ModelStateContinuationErrorV1::RawBaselineIdentityMismatch);
+        }
+        if self.reference.caller_hub_safepoint_digest != expected_hub_safepoint_digest {
+            return Err(ModelStateContinuationErrorV1::HubSafepointDigestMismatch);
+        }
+        let actual_len = u64::try_from(self.raw_decision_view_bytes.len())
+            .map_err(|_| ModelStateContinuationErrorV1::RawByteLengthOverflow)?;
+        if actual_len != self.reference.raw_byte_len {
+            return Err(ModelStateContinuationErrorV1::RawByteLengthMismatch);
+        }
+        if digest(&self.raw_decision_view_bytes) != self.reference.raw_bytes_digest {
+            return Err(ModelStateContinuationErrorV1::RawBytesDigestMismatch);
+        }
+        Ok(&self.raw_decision_view_bytes)
+    }
+}
+
+impl fmt::Debug for RawDecisionViewRecoveryEnvelopeV1 {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("RawDecisionViewRecoveryEnvelopeV1")
+            .field("reference", &self.reference)
+            .field(
+                "raw_decision_view_bytes",
+                &format_args!("<redacted:{} bytes>", self.raw_decision_view_bytes.len()),
+            )
+            .finish()
+    }
+}
+
+/// Receipt-visible continuation classification plus an exact raw fallback.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct ModelStateContinuationAssessmentV1 {
+    state_reference: OpaqueReasoningStateRefV1,
+    class: ModelStateContinuationClassV1,
+    raw_recovery: RawDecisionViewRecoveryRefV1,
+}
+
+impl ModelStateContinuationAssessmentV1 {
+    pub fn assess(
+        state_reference: &OpaqueReasoningStateRefV1,
+        evidence: ModelStateContinuationEvidenceV1,
+        raw_recovery: &RawDecisionViewRecoveryRefV1,
+        now_unix_ms: u64,
+    ) -> Result<Self, ModelStateContinuationErrorV1> {
+        validate_continuation_evidence_for_state(state_reference, &evidence)?;
+        let expired = state_reference
+            .valid_until_unix_ms()
+            .is_some_and(|expiry| now_unix_ms >= expiry);
+        let class = if expired {
+            ModelStateContinuationClassV1::Unavailable {
+                reason: ModelStateUnavailableReasonV1::StateExpired,
+            }
+        } else {
+            match (state_reference.status(), evidence) {
+                (ReasoningContinuationStatusV1::Exact, ModelStateContinuationEvidenceV1::None) => {
+                    ModelStateContinuationClassV1::ExactNeutral {
+                        state_content_digest: state_reference.content_digest(),
+                    }
+                }
+                (
+                    ReasoningContinuationStatusV1::ScopedCertificate,
+                    ModelStateContinuationEvidenceV1::Scoped {
+                        certificate_digest,
+                        declared_scope_digest,
+                    },
+                ) => {
+                    if state_reference.continuation_certificate_digest() != Some(certificate_digest)
+                    {
+                        return Err(ModelStateContinuationErrorV1::ScopedCertificateMismatch);
+                    }
+                    ModelStateContinuationClassV1::ScopedCertificate {
+                        state_content_digest: state_reference.content_digest(),
+                        certificate_digest,
+                        declared_scope_digest,
+                    }
+                }
+                (
+                    ReasoningContinuationStatusV1::ScopedCertificate,
+                    ModelStateContinuationEvidenceV1::None,
+                ) => ModelStateContinuationClassV1::Unavailable {
+                    reason: ModelStateUnavailableReasonV1::ScopedEvidenceAbsent,
+                },
+                (
+                    ReasoningContinuationStatusV1::Approximate,
+                    ModelStateContinuationEvidenceV1::Empirical {
+                        frozen_distribution_digest: _,
+                        evaluation_receipt_digest: _,
+                        declared_scope_digest: _,
+                        valid_until_unix_ms,
+                    },
+                ) if valid_until_unix_ms.is_some_and(|expiry| now_unix_ms >= expiry) => {
+                    ModelStateContinuationClassV1::Unavailable {
+                        reason: ModelStateUnavailableReasonV1::EmpiricalEvidenceExpired,
+                    }
+                }
+                (
+                    ReasoningContinuationStatusV1::Approximate,
+                    ModelStateContinuationEvidenceV1::Empirical {
+                        frozen_distribution_digest,
+                        evaluation_receipt_digest,
+                        declared_scope_digest,
+                        valid_until_unix_ms,
+                    },
+                ) => ModelStateContinuationClassV1::Empirical {
+                    state_content_digest: state_reference.content_digest(),
+                    frozen_distribution_digest,
+                    evaluation_receipt_digest,
+                    declared_scope_digest,
+                    evidence_valid_until_unix_ms: valid_until_unix_ms,
+                },
+                (
+                    ReasoningContinuationStatusV1::Approximate,
+                    ModelStateContinuationEvidenceV1::None,
+                ) => ModelStateContinuationClassV1::Unavailable {
+                    reason: ModelStateUnavailableReasonV1::EmpiricalEvidenceAbsent,
+                },
+                (
+                    ReasoningContinuationStatusV1::Unavailable,
+                    ModelStateContinuationEvidenceV1::None,
+                ) => ModelStateContinuationClassV1::Unavailable {
+                    reason: ModelStateUnavailableReasonV1::ProviderUnavailable,
+                },
+                (
+                    ReasoningContinuationStatusV1::Expired,
+                    ModelStateContinuationEvidenceV1::None,
+                ) => ModelStateContinuationClassV1::Unavailable {
+                    reason: ModelStateUnavailableReasonV1::StateExpired,
+                },
+                (
+                    ReasoningContinuationStatusV1::Rejected,
+                    ModelStateContinuationEvidenceV1::None,
+                ) => ModelStateContinuationClassV1::Unavailable {
+                    reason: ModelStateUnavailableReasonV1::StateRejected,
+                },
+                (
+                    ReasoningContinuationStatusV1::IdentityMismatch,
+                    ModelStateContinuationEvidenceV1::None,
+                ) => ModelStateContinuationClassV1::Unavailable {
+                    reason: ModelStateUnavailableReasonV1::IdentityMismatch,
+                },
+                _ => return Err(ModelStateContinuationErrorV1::EvidenceStatusMismatch),
+            }
+        };
+        Ok(Self {
+            state_reference: state_reference.clone(),
+            class,
+            raw_recovery: raw_recovery.clone(),
+        })
+    }
+
+    pub fn state_reference(&self) -> &OpaqueReasoningStateRefV1 {
+        &self.state_reference
+    }
+
+    pub const fn class(&self) -> ModelStateContinuationKindV1 {
+        self.class.kind()
+    }
+
+    pub const fn unavailable_reason(&self) -> Option<ModelStateUnavailableReasonV1> {
+        match self.class {
+            ModelStateContinuationClassV1::Unavailable { reason } => Some(reason),
+            _ => None,
+        }
+    }
+
+    pub const fn scoped_evidence(&self) -> Option<(DigestV1, DigestV1)> {
+        match self.class {
+            ModelStateContinuationClassV1::ScopedCertificate {
+                certificate_digest,
+                declared_scope_digest,
+                ..
+            } => Some((certificate_digest, declared_scope_digest)),
+            _ => None,
+        }
+    }
+
+    pub const fn empirical_evidence(&self) -> Option<(DigestV1, DigestV1, DigestV1, Option<u64>)> {
+        match self.class {
+            ModelStateContinuationClassV1::Empirical {
+                frozen_distribution_digest,
+                evaluation_receipt_digest,
+                declared_scope_digest,
+                evidence_valid_until_unix_ms,
+                ..
+            } => Some((
+                frozen_distribution_digest,
+                evaluation_receipt_digest,
+                declared_scope_digest,
+                evidence_valid_until_unix_ms,
+            )),
+            _ => None,
+        }
+    }
+
+    pub fn raw_recovery(&self) -> &RawDecisionViewRecoveryRefV1 {
+        &self.raw_recovery
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ModelStateContinuationErrorV1 {
+    ZeroIdentity(&'static str),
+    InvalidEvidenceExpiry,
+    EvidenceStatusMismatch,
+    ScopedCertificateMismatch,
+    RawByteLengthOverflow,
+    DecisionViewIdentityMismatch,
+    DecisionViewDigestMismatch,
+    ExactTokenMapDigestMismatch,
+    RawBaselineIdentityMismatch,
+    HubSafepointDigestMismatch,
+    RawByteLengthMismatch,
+    RawBytesDigestMismatch,
+}
+
+impl fmt::Display for ModelStateContinuationErrorV1 {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::ZeroIdentity(field) => {
+                write!(f, "model-state continuation {field} digest is zero")
+            }
+            Self::InvalidEvidenceExpiry => {
+                f.write_str("model-state empirical evidence expiry must be nonzero")
+            }
+            Self::EvidenceStatusMismatch => {
+                f.write_str("model-state evidence does not match the declared continuation status")
+            }
+            Self::ScopedCertificateMismatch => f.write_str(
+                "model-state scoped evidence certificate differs from the state reference",
+            ),
+            Self::RawByteLengthOverflow => {
+                f.write_str("raw Decision View byte length exceeds the receipt range")
+            }
+            Self::DecisionViewIdentityMismatch => {
+                f.write_str("raw Decision View identity differs from the expected identity")
+            }
+            Self::DecisionViewDigestMismatch => {
+                f.write_str("raw Decision View digest differs from the expected digest")
+            }
+            Self::ExactTokenMapDigestMismatch => {
+                f.write_str("raw Decision View token map differs from the expected token map")
+            }
+            Self::RawBaselineIdentityMismatch => {
+                f.write_str("caller raw-baseline identity differs from the recovery binding")
+            }
+            Self::HubSafepointDigestMismatch => {
+                f.write_str("caller hub safepoint digest differs from the recovery binding")
+            }
+            Self::RawByteLengthMismatch => {
+                f.write_str("raw Decision View byte length differs from recovery metadata")
+            }
+            Self::RawBytesDigestMismatch => {
+                f.write_str("raw Decision View bytes differ from recovery metadata")
+            }
+        }
+    }
+}
+
+impl Error for ModelStateContinuationErrorV1 {}
+
+fn validate_continuation_evidence_for_state(
+    state_reference: &OpaqueReasoningStateRefV1,
+    evidence: &ModelStateContinuationEvidenceV1,
+) -> Result<(), ModelStateContinuationErrorV1> {
+    match evidence {
+        ModelStateContinuationEvidenceV1::None => {}
+        ModelStateContinuationEvidenceV1::Scoped {
+            certificate_digest,
+            declared_scope_digest,
+        } => {
+            require_continuation_digest("certificate", *certificate_digest)?;
+            require_continuation_digest("declared scope", *declared_scope_digest)?;
+        }
+        ModelStateContinuationEvidenceV1::Empirical {
+            frozen_distribution_digest,
+            evaluation_receipt_digest,
+            declared_scope_digest,
+            valid_until_unix_ms,
+        } => {
+            require_continuation_digest("frozen distribution", *frozen_distribution_digest)?;
+            require_continuation_digest("evaluation receipt", *evaluation_receipt_digest)?;
+            require_continuation_digest("declared scope", *declared_scope_digest)?;
+            if *valid_until_unix_ms == Some(0) {
+                return Err(ModelStateContinuationErrorV1::InvalidEvidenceExpiry);
+            }
+        }
+    }
+    match (state_reference.status(), evidence) {
+        (ReasoningContinuationStatusV1::Exact, ModelStateContinuationEvidenceV1::None)
+        | (
+            ReasoningContinuationStatusV1::ScopedCertificate,
+            ModelStateContinuationEvidenceV1::None,
+        )
+        | (ReasoningContinuationStatusV1::Approximate, ModelStateContinuationEvidenceV1::None)
+        | (
+            ReasoningContinuationStatusV1::Approximate,
+            ModelStateContinuationEvidenceV1::Empirical { .. },
+        )
+        | (
+            ReasoningContinuationStatusV1::Unavailable
+            | ReasoningContinuationStatusV1::Expired
+            | ReasoningContinuationStatusV1::Rejected
+            | ReasoningContinuationStatusV1::IdentityMismatch,
+            ModelStateContinuationEvidenceV1::None,
+        ) => Ok(()),
+        (
+            ReasoningContinuationStatusV1::ScopedCertificate,
+            ModelStateContinuationEvidenceV1::Scoped {
+                certificate_digest, ..
+            },
+        ) if state_reference.continuation_certificate_digest() == Some(*certificate_digest) => {
+            Ok(())
+        }
+        (
+            ReasoningContinuationStatusV1::ScopedCertificate,
+            ModelStateContinuationEvidenceV1::Scoped { .. },
+        ) => Err(ModelStateContinuationErrorV1::ScopedCertificateMismatch),
+        _ => Err(ModelStateContinuationErrorV1::EvidenceStatusMismatch),
+    }
+}
+
+fn require_continuation_digest(
+    field: &'static str,
+    digest: DigestV1,
+) -> Result<(), ModelStateContinuationErrorV1> {
+    if digest == DigestV1::ZERO {
+        Err(ModelStateContinuationErrorV1::ZeroIdentity(field))
+    } else {
+        Ok(())
+    }
+}
+
 /// Receipt-visible proof that input rendering preserved all protected reserves.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct DecisionViewHeadroomPlanV1 {
@@ -951,6 +1508,310 @@ mod tests {
         .unwrap();
         let contract = contract(adapter.identity().digest(), tool_schema);
         (view, contract)
+    }
+
+    #[test]
+    fn raw_decision_view_recovery_is_exact_bound_and_redacted() {
+        let (view, _) = decision_view(d(5));
+        let mut recovery = RawDecisionViewRecoveryEnvelopeV1::capture(&view, d(40), d(41)).unwrap();
+
+        assert_eq!(
+            recovery
+                .exact_raw_decision_view_bytes(
+                    view.identity(),
+                    view.digest(),
+                    view.exact_token_map_digest(),
+                    d(40),
+                    d(41),
+                )
+                .unwrap(),
+            view.rendered()
+        );
+        assert_eq!(
+            recovery.reference().raw_bytes_digest(),
+            digest(view.rendered())
+        );
+        assert!(!format!("{recovery:?}").contains("TOKENZERO-DECISION-VIEW"));
+        assert!(
+            !serde_json::to_string(recovery.reference())
+                .unwrap()
+                .contains("TOKENZERO-DECISION-VIEW")
+        );
+        assert!(matches!(
+            recovery.exact_raw_decision_view_bytes(
+                view.identity(),
+                view.digest(),
+                view.exact_token_map_digest(),
+                d(42),
+                d(41),
+            ),
+            Err(ModelStateContinuationErrorV1::RawBaselineIdentityMismatch)
+        ));
+
+        recovery.raw_decision_view_bytes[0] ^= 1;
+        assert!(matches!(
+            recovery.exact_raw_decision_view_bytes(
+                view.identity(),
+                view.digest(),
+                view.exact_token_map_digest(),
+                d(40),
+                d(41),
+            ),
+            Err(ModelStateContinuationErrorV1::RawBytesDigestMismatch)
+        ));
+    }
+
+    #[test]
+    fn continuation_classes_preserve_exact_scoped_empirical_and_unavailable() {
+        let (view, exact_contract) = decision_view(d(5));
+        let recovery = RawDecisionViewRecoveryEnvelopeV1::capture(&view, d(40), d(41)).unwrap();
+        let order = ReasoningStateOrderV1::new(0, None).unwrap();
+        let exact_binding = state_binding(&exact_contract);
+        let exact = OpaqueReasoningStateEnvelopeV1::capture(
+            OpaqueReasoningStateKindV1::ProviderReasoningItems,
+            ReasoningContinuationStatusV1::Exact,
+            exact_binding,
+            order,
+            None,
+            None,
+            b"exact-native-state".to_vec(),
+        )
+        .unwrap();
+        let exact_assessment = ModelStateContinuationAssessmentV1::assess(
+            exact.reference(),
+            ModelStateContinuationEvidenceV1::None,
+            recovery.reference(),
+            10,
+        )
+        .unwrap();
+        assert_eq!(
+            exact_assessment.class(),
+            ModelStateContinuationKindV1::ExactNeutral
+        );
+
+        let scoped_contract =
+            contract_with_policy(d(3), d(5), NativeStatePolicyV1::ScopedCertificate);
+        let scoped = OpaqueReasoningStateEnvelopeV1::capture(
+            OpaqueReasoningStateKindV1::SignedThinkingBlocks,
+            ReasoningContinuationStatusV1::ScopedCertificate,
+            state_binding(&scoped_contract),
+            order,
+            Some(d(50)),
+            None,
+            b"scoped-state".to_vec(),
+        )
+        .unwrap();
+        let scoped_assessment = ModelStateContinuationAssessmentV1::assess(
+            scoped.reference(),
+            ModelStateContinuationEvidenceV1::scoped(d(50), d(51)).unwrap(),
+            recovery.reference(),
+            10,
+        )
+        .unwrap();
+        assert_eq!(
+            scoped_assessment.class(),
+            ModelStateContinuationKindV1::ScopedCertificate
+        );
+        assert_eq!(scoped_assessment.scoped_evidence(), Some((d(50), d(51))));
+        assert!(matches!(
+            scoped.exact_replay_bytes(scoped.reference().binding(), order, 10),
+            Err(ReasoningStateError::NotExact(
+                ReasoningContinuationStatusV1::ScopedCertificate
+            ))
+        ));
+
+        let approximate_contract =
+            contract_with_policy(d(3), d(5), NativeStatePolicyV1::ExactIfAvailable);
+        let approximate = OpaqueReasoningStateEnvelopeV1::capture(
+            OpaqueReasoningStateKindV1::ProviderContinuationId,
+            ReasoningContinuationStatusV1::Approximate,
+            state_binding(&approximate_contract),
+            order,
+            None,
+            None,
+            b"approximate-state".to_vec(),
+        )
+        .unwrap();
+        let empirical = ModelStateContinuationAssessmentV1::assess(
+            approximate.reference(),
+            ModelStateContinuationEvidenceV1::empirical(d(60), d(61), d(62), Some(100)).unwrap(),
+            recovery.reference(),
+            10,
+        )
+        .unwrap();
+        assert_eq!(empirical.class(), ModelStateContinuationKindV1::Empirical);
+        assert_eq!(
+            empirical.empirical_evidence(),
+            Some((d(60), d(61), d(62), Some(100)))
+        );
+        assert!(matches!(
+            approximate.exact_replay_bytes(approximate.reference().binding(), order, 10),
+            Err(ReasoningStateError::NotExact(
+                ReasoningContinuationStatusV1::Approximate
+            ))
+        ));
+        let no_empirical_evidence = ModelStateContinuationAssessmentV1::assess(
+            approximate.reference(),
+            ModelStateContinuationEvidenceV1::None,
+            recovery.reference(),
+            10,
+        )
+        .unwrap();
+        assert_eq!(
+            no_empirical_evidence.class(),
+            ModelStateContinuationKindV1::Unavailable
+        );
+        assert_eq!(
+            no_empirical_evidence.unavailable_reason(),
+            Some(ModelStateUnavailableReasonV1::EmpiricalEvidenceAbsent)
+        );
+
+        let unavailable = OpaqueReasoningStateRefV1::unavailable(state_binding(&exact_contract));
+        let unavailable_assessment = ModelStateContinuationAssessmentV1::assess(
+            &unavailable,
+            ModelStateContinuationEvidenceV1::None,
+            recovery.reference(),
+            10,
+        )
+        .unwrap();
+        assert_eq!(
+            unavailable_assessment.class(),
+            ModelStateContinuationKindV1::Unavailable
+        );
+        assert_eq!(
+            unavailable_assessment.unavailable_reason(),
+            Some(ModelStateUnavailableReasonV1::ProviderUnavailable)
+        );
+    }
+
+    #[test]
+    fn continuation_evidence_mismatch_and_expiry_fail_closed() {
+        let (view, _) = decision_view(d(5));
+        let recovery = RawDecisionViewRecoveryEnvelopeV1::capture(&view, d(40), d(41)).unwrap();
+        let order = ReasoningStateOrderV1::new(0, None).unwrap();
+        let scoped_contract =
+            contract_with_policy(d(3), d(5), NativeStatePolicyV1::ScopedCertificate);
+        let scoped = OpaqueReasoningStateEnvelopeV1::capture(
+            OpaqueReasoningStateKindV1::SignedThinkingBlocks,
+            ReasoningContinuationStatusV1::ScopedCertificate,
+            state_binding(&scoped_contract),
+            order,
+            Some(d(50)),
+            Some(100),
+            b"scoped-state".to_vec(),
+        )
+        .unwrap();
+        assert!(matches!(
+            ModelStateContinuationAssessmentV1::assess(
+                scoped.reference(),
+                ModelStateContinuationEvidenceV1::scoped(d(52), d(51)).unwrap(),
+                recovery.reference(),
+                10,
+            ),
+            Err(ModelStateContinuationErrorV1::ScopedCertificateMismatch)
+        ));
+        for (evidence, field) in [
+            (
+                ModelStateContinuationEvidenceV1::Scoped {
+                    certificate_digest: DigestV1::ZERO,
+                    declared_scope_digest: d(51),
+                },
+                "certificate",
+            ),
+            (
+                ModelStateContinuationEvidenceV1::Scoped {
+                    certificate_digest: d(50),
+                    declared_scope_digest: DigestV1::ZERO,
+                },
+                "declared scope",
+            ),
+        ] {
+            assert_eq!(
+                ModelStateContinuationAssessmentV1::assess(
+                    scoped.reference(),
+                    evidence,
+                    recovery.reference(),
+                    10,
+                )
+                .unwrap_err(),
+                ModelStateContinuationErrorV1::ZeroIdentity(field)
+            );
+        }
+
+        let approximate_contract =
+            contract_with_policy(d(3), d(5), NativeStatePolicyV1::ExactIfAvailable);
+        let approximate = OpaqueReasoningStateEnvelopeV1::capture(
+            OpaqueReasoningStateKindV1::ProviderContinuationId,
+            ReasoningContinuationStatusV1::Approximate,
+            state_binding(&approximate_contract),
+            order,
+            None,
+            None,
+            b"approximate-state".to_vec(),
+        )
+        .unwrap();
+        for (evidence, expected_error) in [
+            (
+                ModelStateContinuationEvidenceV1::Empirical {
+                    frozen_distribution_digest: DigestV1::ZERO,
+                    evaluation_receipt_digest: d(61),
+                    declared_scope_digest: d(62),
+                    valid_until_unix_ms: None,
+                },
+                ModelStateContinuationErrorV1::ZeroIdentity("frozen distribution"),
+            ),
+            (
+                ModelStateContinuationEvidenceV1::Empirical {
+                    frozen_distribution_digest: d(60),
+                    evaluation_receipt_digest: DigestV1::ZERO,
+                    declared_scope_digest: d(62),
+                    valid_until_unix_ms: None,
+                },
+                ModelStateContinuationErrorV1::ZeroIdentity("evaluation receipt"),
+            ),
+            (
+                ModelStateContinuationEvidenceV1::Empirical {
+                    frozen_distribution_digest: d(60),
+                    evaluation_receipt_digest: d(61),
+                    declared_scope_digest: DigestV1::ZERO,
+                    valid_until_unix_ms: None,
+                },
+                ModelStateContinuationErrorV1::ZeroIdentity("declared scope"),
+            ),
+            (
+                ModelStateContinuationEvidenceV1::Empirical {
+                    frozen_distribution_digest: d(60),
+                    evaluation_receipt_digest: d(61),
+                    declared_scope_digest: d(62),
+                    valid_until_unix_ms: Some(0),
+                },
+                ModelStateContinuationErrorV1::InvalidEvidenceExpiry,
+            ),
+        ] {
+            assert_eq!(
+                ModelStateContinuationAssessmentV1::assess(
+                    approximate.reference(),
+                    evidence,
+                    recovery.reference(),
+                    10,
+                )
+                .unwrap_err(),
+                expected_error
+            );
+        }
+
+        let expired = ModelStateContinuationAssessmentV1::assess(
+            scoped.reference(),
+            ModelStateContinuationEvidenceV1::scoped(d(50), d(51)).unwrap(),
+            recovery.reference(),
+            100,
+        )
+        .unwrap();
+        assert_eq!(expired.class(), ModelStateContinuationKindV1::Unavailable);
+        assert_eq!(
+            expired.unavailable_reason(),
+            Some(ModelStateUnavailableReasonV1::StateExpired)
+        );
     }
 
     #[test]
