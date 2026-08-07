@@ -215,3 +215,6 @@ CLAUDE.md
 # cargo-fuzz scratch (regenerable; never commit)
 /fuzz/artifacts/
 /fuzz/corpus/
+
+# Local agent papercuts log
+.papercuts.jsonl
