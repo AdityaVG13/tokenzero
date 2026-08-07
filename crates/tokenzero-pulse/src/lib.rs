@@ -1294,13 +1294,21 @@ impl SessionLedgerReport {
         serde_json::json!({
             "schema_version": SESSION_LEDGER_SCHEMA_VERSION,
             "description": "Recovery-adjusted per-session token-turn ledger keyed by tokenizer id",
+            "privacy": {
+                "scope": "local Pulse JSONL/SQLite and explicit local exports; no uploader exists",
+                "session_id": "stored verbatim in Pulse events and exposed as the session aggregate key; correlatable and not anonymized",
+                "call_id": "stored verbatim in Pulse events; omitted from this aggregate report",
+                "ref_ids": "stored verbatim in Pulse events as stable local join keys; this aggregate exposes only exact_ref_count",
+                "source_hash": "public event field is unvalidated; tool_call normally stores the first 64 bits (16 hex characters) of source_hint SHA-256, which is correlatable, guessable for low-entropy hints, and collision-prone",
+                "upload": "none"
+            },
             "pricing": {
                 "token_turns": "M_vis and M_rec each sum mass_i * (N - i); recovery_adjusted_token_turn_cost = M_vis + M_rec",
                 "token_turn_savings": "M_full - (M_vis + M_rec); signed and may be negative",
                 "dpmt": "decisions * 1e6 / recovery_adjusted_token_turn_cost"
             },
             "entry": {
-                "session_id": "string — stable session identifier (MCP session id or 'unknown')",
+                "session_id": "string — verbatim local Pulse session identifier (MCP session id or 'unknown'); correlatable and not anonymized",
                 "tokenizer_id": "real tokenizer id or estimator:<name>",
                 "turns": "usize — number of tool calls in this session (decision count proxy)",
                 "raw_tokens": "usize — total raw (uncompressed) tokens across all turns",
@@ -1317,7 +1325,7 @@ impl SessionLedgerReport {
                 "recovery_adjusted_savings": "f64 — signed ratio; may be negative",
                 "dpmt": "Option<f64> — decisions per million recovery-adjusted token-turns",
                 "tools": "BTreeMap<String, usize> — per-tool call counts",
-                "source_hash": "Option<String> — repo source hash if available"
+                "source_hash": "Option<String> — unvalidated public event field; tool_call normally supplies a 64-bit truncated SHA-256 correlation digest"
             },
             "report": {
                 "schema_version": SESSION_LEDGER_SCHEMA_VERSION,

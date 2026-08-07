@@ -942,6 +942,39 @@ fn session_ledger_schema_json_has_expected_fields() {
     assert!(schema["entry"]["visible_token_turns"].is_string());
     assert!(schema["entry"]["recovery_token_turns"].is_string());
     assert!(schema["entry"]["token_turn_savings"].is_string());
+    assert!(schema["privacy"].is_object());
+    assert_eq!(schema["privacy"]["upload"], "none");
+    assert!(
+        schema["privacy"]["session_id"]
+            .as_str()
+            .unwrap()
+            .contains("stored verbatim")
+    );
+    assert!(
+        schema["privacy"]["call_id"]
+            .as_str()
+            .unwrap()
+            .contains("stored verbatim")
+    );
+    assert!(
+        schema["privacy"]["ref_ids"]
+            .as_str()
+            .unwrap()
+            .contains("stable local join keys")
+    );
+    let source_hash = schema["privacy"]["source_hash"].as_str().unwrap();
+    for required in ["unvalidated", "first 64 bits", "correlatable", "collision"] {
+        assert!(
+            source_hash.contains(required),
+            "missing {required:?}: {source_hash}"
+        );
+    }
+    assert!(
+        schema["entry"]["session_id"]
+            .as_str()
+            .unwrap()
+            .contains("not anonymized")
+    );
     assert!(schema["report"]["total_recovery_adjusted_token_turn_cost"].is_string());
     assert!(schema["report"]["dpmt"].is_string());
     assert!(schema["pricing"]["dpmt"].is_string());
