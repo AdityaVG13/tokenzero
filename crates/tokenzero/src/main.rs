@@ -358,9 +358,12 @@ fn flag_typo_message(argv: &[OsString], err: &clap::Error) -> Option<String> {
         }
     }
     let mut known: Vec<String> = Vec::new();
+    let mut canonical: Vec<String> = Vec::new();
     for arg in context.get_arguments() {
         if let Some(long) = arg.get_long() {
-            known.push(long.to_string());
+            let long = long.to_string();
+            canonical.push(long.clone());
+            known.push(long);
         }
         // Hidden aliases (jsno/jason/timout) count as known so a valid flag
         // placed before the verb is treated as mispositioned, not a typo.
@@ -368,8 +371,10 @@ fn flag_typo_message(argv: &[OsString], err: &clap::Error) -> Option<String> {
             known.extend(aliases.into_iter().map(str::to_string));
         }
     }
+    canonical.push("help".to_string());
     known.push("help".to_string());
     if sub_name.is_none() {
+        canonical.push("version".to_string());
         known.push("version".to_string());
     }
     // Position of the verb token, so flags before it count as mispositioned.
@@ -464,6 +469,24 @@ fn flag_typo_message(argv: &[OsString], err: &clap::Error) -> Option<String> {
         out.push_str(&format!(
             "  tip: did you mean: '--{good}'?\n\n  corrected command: {corrected}\n\n"
         ));
+    } else {
+        canonical.sort();
+        canonical.dedup();
+        let valid = canonical
+            .iter()
+            .map(|flag| format!("--{flag}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let family = sub_name.as_deref().unwrap_or("tokenzero");
+        out.push_str(&format!("  valid flags for '{family}': {valid}\n\n"));
+        let usage = context.clone().render_usage().to_string();
+        if sub_name.is_some() {
+            out.push_str("Usage: tokenzero ");
+            out.push_str(usage.trim().trim_start_matches("Usage: "));
+        } else {
+            out.push_str(usage.trim_end());
+        }
+        return Some(out);
     }
     let rendered = err.to_string();
     if let Some((_, tail)) = rendered.split_once("Usage:") {

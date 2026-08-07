@@ -1209,6 +1209,40 @@ fn cli_flag_typo_distance_one_offers_corrected_command() {
     );
     assert!(!stderr.contains("did you mean"), "{stderr}");
     assert!(!stderr.contains("similar argument"), "{stderr}");
+    assert!(stderr.contains("valid flags for 'grep'"), "{stderr}");
+    assert!(stderr.contains("--json"), "{stderr}");
+    assert!(stderr.contains("--max-files"), "{stderr}");
+    assert!(
+        stderr.contains("Usage: tokenzero grep [OPTIONS] <QUERY> [PATH]..."),
+        "{stderr}"
+    );
+    assert!(!stderr.contains("Usage: tokenzero grep --help"), "{stderr}");
+    assert!(!stderr.contains("try '--help'"), "{stderr}");
+
+    // A global flag typo must not match a subcommand-only flag family.
+    let output = Command::cargo_bin("tokenzero")
+        .unwrap()
+        .args(["--versio", "read", "some/file.rs"])
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(2));
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(stderr.contains("valid flags for 'read'"), "{stderr}");
+    assert!(!stderr.contains("did you mean: '--version'"), "{stderr}");
+
+    // The same distance-1 spelling is corrected in the global family.
+    let output = Command::cargo_bin("tokenzero")
+        .unwrap()
+        .arg("--versio")
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(2));
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(stderr.contains("did you mean: '--version'"), "{stderr}");
+    assert!(
+        stderr.contains("corrected command: tokenzero --version"),
+        "{stderr}"
+    );
 }
 
 #[test]
