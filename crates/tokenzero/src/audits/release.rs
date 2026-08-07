@@ -373,14 +373,33 @@ pub(crate) fn run_ws_skeleton(output_json: PathBuf, output_md: Option<PathBuf>) 
     finish!(output_json, output_md, report, "WS-001 walking skeleton")
 }
 
-pub(crate) fn run_install_smoke(output_json: Option<PathBuf>) -> Result<Json> {
+pub(crate) fn run_install_smoke(output_json: Option<PathBuf>, apply: bool) -> Result<Json> {
     let temp = tempdir()?;
     let root = temp.path();
     fs::write(root.join("AGENTS.md"), "original\n")?;
     let plan = install::plan(root, false, &[]);
-    let applied = install::apply(root, false, &[])?;
-    let rolled = install::rollback(root, "latest")?;
-    let report = object!({"schema_version":"tokenzero.install_smoke.v1","status":"ok","ok":true,"plan":plan,"applied":applied,"rollback":rolled,"global_writes":false});
+    let (applied, rollback) = if apply {
+        (
+            Some(install::apply(root, false, &[])?),
+            Some(install::rollback(root, "latest")?),
+        )
+    } else {
+        (None, None)
+    };
+    let artifact_write_requested = output_json.is_some();
+    let report = object!({
+        "schema_version": "tokenzero.install_smoke.v1",
+        "status": "ok",
+        "ok": true,
+        "mode": if apply { "apply_and_rollback" } else { "plan" },
+        "apply_requested": apply,
+        "scope": "disposable_temporary_root",
+        "plan": plan,
+        "applied": applied,
+        "rollback": rollback,
+        "artifact_write_requested": artifact_write_requested,
+        "global_writes": false,
+    });
     if let Some(o) = output_json {
         write_artifacts(&o, None, &report, "Rust install smoke")?;
     }

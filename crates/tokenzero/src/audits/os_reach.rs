@@ -112,7 +112,7 @@ pub(crate) fn run_os_reach_audit(
 ) -> Result<serde_json::Value> {
     let temp = tempdir()?;
     let sm = run_shell_matrix(temp.path().join("shell-matrix.json"), None)?;
-    let install = run_install_smoke(None)?;
+    let install = run_install_smoke(None, true)?;
     let reach = run_reach(root, None)?;
     let cs = run_core_surface_audit(&sm, &install)?;
     let ext = load_os_release_artifacts(&os_artifacts)?;
@@ -181,7 +181,7 @@ pub(crate) fn run_os_release_artifact(
 ) -> Result<serde_json::Value> {
     let temp = tempdir()?;
     let sm = run_shell_matrix(temp.path().join("shell-matrix.json"), None)?;
-    let install = run_install_smoke(None)?;
+    let install = run_install_smoke(None, true)?;
     let reach = run_reach(root, None)?;
     let cs = run_core_surface_audit(&sm, &install)?;
     let cur = release_os();

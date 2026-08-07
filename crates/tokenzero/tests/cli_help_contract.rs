@@ -319,6 +319,64 @@ fn cli_robot_docs_guide_is_paste_ready_for_agents() {
 }
 
 #[test]
+fn cli_install_smoke_defaults_to_plan_and_gates_apply() {
+    let work = tempdir().unwrap();
+    let help = Command::cargo_bin("tokenzero")
+        .unwrap()
+        .args(["install-smoke", "--help"])
+        .output()
+        .unwrap();
+    assert!(help.status.success());
+    let help = String::from_utf8(help.stdout).unwrap();
+    assert!(help.contains("--apply"), "{help}");
+    assert!(help.contains("disposable temporary root"), "{help}");
+
+    let planned = Command::cargo_bin("tokenzero")
+        .unwrap()
+        .current_dir(work.path())
+        .args(["install-smoke", "--json"])
+        .output()
+        .unwrap();
+    assert!(
+        planned.status.success(),
+        "{}",
+        String::from_utf8_lossy(&planned.stderr)
+    );
+    let planned: Value = serde_json::from_slice(&planned.stdout).unwrap();
+    assert_eq!(planned["mode"], "plan");
+    assert_eq!(planned["apply_requested"], false);
+    assert_eq!(planned["scope"], "disposable_temporary_root");
+    assert!(planned["applied"].is_null());
+    assert!(planned["rollback"].is_null());
+    assert_eq!(planned["artifact_write_requested"], false);
+    assert_eq!(planned["global_writes"], false);
+    assert!(
+        !work.path().join("results").exists(),
+        "default install-smoke must not write an artifact tree"
+    );
+
+    let applied = Command::cargo_bin("tokenzero")
+        .unwrap()
+        .current_dir(work.path())
+        .args(["install-smoke", "--apply", "--json"])
+        .output()
+        .unwrap();
+    assert!(
+        applied.status.success(),
+        "{}",
+        String::from_utf8_lossy(&applied.stderr)
+    );
+    let applied: Value = serde_json::from_slice(&applied.stdout).unwrap();
+    assert_eq!(applied["mode"], "apply_and_rollback");
+    assert_eq!(applied["apply_requested"], true);
+    assert!(!applied["applied"].is_null());
+    assert!(!applied["rollback"].is_null());
+    assert_eq!(applied["artifact_write_requested"], false);
+    assert_eq!(applied["global_writes"], false);
+    assert!(!work.path().join("results").exists());
+}
+
+#[test]
 fn cli_agent_contract_outputs_are_deterministic_and_env_clean() {
     let first = tokenzero_with_agent_env(&["capabilities", "--json"]);
     let second = tokenzero_with_agent_env(&["capabilities", "--json"]);
