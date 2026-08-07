@@ -1754,6 +1754,7 @@ pub mod model_artifacts;
 pub mod operation_abi;
 mod protocol_atoms;
 pub mod provider_cache;
+pub mod reasoning_state;
 mod render;
 mod shell_display;
 mod shell_family;
