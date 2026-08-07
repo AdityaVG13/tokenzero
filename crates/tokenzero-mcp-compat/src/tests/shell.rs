@@ -151,6 +151,75 @@ fn shell_emits_canonical_refs_recoverable_by_a_fresh_engine() {
 }
 
 #[test]
+fn default_shell_masks_visible_secrets_and_previews_but_raw_ref_stays_exact() {
+    let dir = tempdir().unwrap();
+    let engine = TokenZeroEngine::new(EngineConfig::for_root(dir.path()));
+    let command = if cfg!(windows) {
+        "powershell -NoProfile -Command Write-Output 'token=abc123'; [Console]::Error.Write('password=xyz789')"
+    } else {
+        "printf 'token=abc123'; printf 'password=xyz789' >&2"
+    };
+    let response = engine.shell(
+        command,
+        None,
+        Some(dir.path()),
+        Mode::Auto,
+        None,
+        false,
+        None,
+        None,
+        None,
+    );
+
+    assert_eq!(response.status, "ok");
+    let visible = response.visible.as_ref().unwrap().text.as_str();
+    assert!(visible.contains("token=[masked]"), "{visible}");
+    assert!(visible.contains("password=[masked]"), "{visible}");
+    assert!(!visible.contains("abc123"), "{visible}");
+    assert!(!visible.contains("xyz789"), "{visible}");
+    let telemetry = response.telemetry.as_ref().unwrap();
+    let stdout_preview = telemetry["stdout_preview"].as_str().unwrap();
+    let stderr_preview = telemetry["stderr_preview"].as_str().unwrap();
+    assert!(stdout_preview.contains("token=[masked]"), "{telemetry}");
+    assert!(stderr_preview.contains("password=[masked]"), "{telemetry}");
+    assert_eq!(response.safety.as_ref().unwrap()["secret_masking"], true);
+
+    let combined_ref = response
+        .refs
+        .iter()
+        .find(|row| row.kind == "combined")
+        .unwrap()
+        .ref_id
+        .as_str();
+    let expanded = engine.expand(combined_ref, Some("raw"), None, None, None, None);
+    let raw = expanded.visible.unwrap().text;
+    assert!(raw.contains("token=abc123"), "{raw}");
+    assert!(raw.contains("password=xyz789"), "{raw}");
+
+    let explicit = engine.shell(
+        command,
+        None,
+        Some(dir.path()),
+        Mode::Passthrough,
+        None,
+        false,
+        None,
+        None,
+        None,
+    );
+    let explicit_visible = explicit.visible.as_ref().unwrap().text.as_str();
+    assert!(
+        explicit_visible.contains("token=abc123"),
+        "{explicit_visible}"
+    );
+    assert_eq!(explicit.safety.as_ref().unwrap()["secret_masking"], false);
+    assert_eq!(
+        explicit.telemetry.as_ref().unwrap()["stdout_preview"],
+        "token=[masked]"
+    );
+}
+
+#[test]
 fn short_similar_shell_output_stays_verbatim() {
     let dir = tempdir().unwrap();
     let command = if cfg!(windows) {

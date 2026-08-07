@@ -725,6 +725,16 @@ impl TokenZeroEngine {
         } else {
             format!("cwd: {effective_cwd}\n{visible_text}")
         };
+        // Presentation masking never changes bytes persisted above. Explicit
+        // exact/passthrough modes remain deliberate escapes; auto and all
+        // compact policies mask recognized secrets before agent exposure.
+        let mask_visible_output =
+            !matches!(mode.effective_policy(), Mode::Exact | Mode::Passthrough);
+        let visible_text = if mask_visible_output {
+            tokenzero_core::mask_visible_secrets(&visible_text)
+        } else {
+            visible_text
+        };
         // Shell refs leave the process and may be replayed by an upstream
         // execution cache long after session aliases have been pruned. Emit
         // canonical content-addressed refs only: persist_refs above has
@@ -803,8 +813,8 @@ impl TokenZeroEngine {
             "family": capture["parser_metadata"]["family"],
             "timeout": result.timed_out,
             "background_io_terminated": result.io_grace_expired,
-            "stdout_preview": preview(&stdout_display),
-            "stderr_preview": preview(&stderr_display),
+            "stdout_preview": preview(&tokenzero_core::mask_visible_secrets(&stdout_display)),
+            "stderr_preview": preview(&tokenzero_core::mask_visible_secrets(&stderr_display)),
             "stdout_capture": capture["stdout"],
             "stderr_capture": capture["stderr"],
             "allocator_pressure_relief": capture["allocator_pressure_relief"],
@@ -828,7 +838,7 @@ impl TokenZeroEngine {
         response.telemetry = Some(telemetry);
         response.safety = Some(json!({
             "schema_version": "tokenzero.shell_safety.v1",
-            "secret_masking": render.policy.policy != "exact" && render.policy.policy != "passthrough",
+            "secret_masking": mask_visible_output,
             "hidden_critical_evidence_requires_ref": true,
             "refs_available": true,
             "refs_cover_full_output": !streams_truncated

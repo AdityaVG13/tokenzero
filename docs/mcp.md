@@ -464,6 +464,13 @@ envelope — policy, policy reason, command family, accounting, refs, and the
 command-status truth model under `structuredContent.cli` — is available with
 `TOKENZERO_MCP_ENVELOPE=compact|full`.
 
+Default auto and compact presentations mask recognized secrets in visible shell
+text. Telemetry previews are masked in every mode. This is presentation masking,
+not storage redaction: durable refs retain exact captured bytes, and
+`tokenzero expand <ref> --raw` intentionally recovers them. Treat those refs as
+sensitive. Explicit `exact` and `passthrough` modes retain their requested
+visible-byte semantics.
+
 ### Timeout and process-group kill (wqw.4)
 
 Default shell timeout is 60s (`TOKENZERO_SHELL_TIMEOUT_SECS`,
