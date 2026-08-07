@@ -1,9 +1,12 @@
-# Build outputs
+# =============================================================================
+# TokenZero — .gitignore (public engine)
+# Track .beads/issues.jsonl only under beads; ignore DB/runtime sidecars.
+# =============================================================================
+
+# --- Build / caches ---
 /target/
 /build/
 /dist/
-
-# Dependency and tool caches
 /.cache/
 /.pytest_cache/
 /.ruff_cache/
@@ -16,7 +19,7 @@
 __pycache__/
 *.py[cod]
 
-# Secrets and local config
+# --- Secrets / local config ---
 .env
 .env.*
 !.env.example
@@ -31,9 +34,13 @@ __pycache__/
 /.opencode/
 /.deepseek/
 
-# Local agent instructions and sessions
-/AGENTS.md
-/CLAUDE.md
+# --- Agent law (private; live on disk, never remote) ---
+AGENTS.md
+Agents.md
+CLAUDE.md
+Claude.md
+AGENTS.md.*
+CLAUDE.md.*
 /DROID.md
 /GEMINI.md
 /GROK.md
@@ -45,8 +52,10 @@ __pycache__/
 /ROADMAP.md
 /TOKENZERO-MCP-SPEC.md
 /TOOL-DESIGN-EVIDENCE.md
+.papercuts.jsonl
+.skill-loop-progress.md
 
-# Public docs allowlist
+# --- Public docs allowlist ---
 /docs/*
 !/docs/benchmarks.md
 !/docs/codemode.md
@@ -58,22 +67,21 @@ __pycache__/
 !/docs/pulse.md
 !/docs/racc.md
 
-# Local execution/handoff records
+# --- Local execution / handoff records ---
 /RECOVERY_RUNBOOK.md
 /SYNC_STRATEGY.md
 /UPGRADE_LOG.md
 /claude-upgrade-progress.json
 /docs/advanced-adr-execution-record.md
 
-# Public Rust fixtures allowlist
+# --- Public Rust fixtures allowlist ---
 /test-corpus/*
 !/test-corpus/*.rs.gz
 !/test-corpus/materialize.py
 !/test-corpus/test_materialize_bounds.py
 !/test-corpus/test_materialize_atomic.py
 
-
-# Local/generated outputs
+# --- Local / generated outputs ---
 /codedb.snapshot
 /results/
 results/
@@ -86,7 +94,7 @@ results/
 *.raw-pr-dump.json
 *.scraped-issues.json
 
-# Non-release local material
+# --- Non-release local material ---
 /archive/
 /audits/
 /cache_dumps/
@@ -107,7 +115,7 @@ docs/release-audit.md
 docs/session-runtime.md
 docs/theory-cards/
 
-# Large/generated assets
+# --- Large / generated assets ---
 *.bin
 *.db
 *.docx
@@ -130,11 +138,11 @@ docs/theory-cards/
 *.tgz
 *.zip
 
-# macOS and editor noise
+# --- OS / editor noise ---
 .DS_Store
 NDH6SA~M
 
-# Public helper scripts allowlist
+# --- Public helper scripts allowlist ---
 /scripts/*
 !/scripts/check_embedded_tests.py
 !/scripts/check_module_boundaries.py
@@ -150,75 +158,8 @@ NDH6SA~M
 !/scripts/test_windows_migrate_restore.py
 .code-upgrade/
 
-# bv (beads viewer) local config and caches
+# --- Beads runtime (track issues.jsonl; ignore everything else local) ---
 .bv/
-
-# Local agent/tool workspaces
-.cargo/
-.codegraph/
-.codegraphrc.json
-.ntm/
-.optloop/
-
-# local audit artifacts (regenerable; never publish)
-.debloat/
-.math-review/
-.github/assets/how-racc-works.mmd
-
-# skill-loop working state
-.skill-loop-progress.md
-
-# demo/ per-machine artifacts (regenerable by demo scripts)
-/demo/.cache/
-/demo/.tokenzero/
-/demo/.tokenzero-bin/
-/demo/tokenzero-mcp.json
-/demo/agent_runs/
-
-# ZeroStack engine state (consolidated + per-engine)
-.zerostack/
-.fszero/
-.graphzero/
-.verification-purpose/
-.asgrep/
-.cyclomatic-reduction/
-.zero-tech-debt/
-
-# Local Pareto research aggregation (multi-AI review drop zone)
-/Pareto/
-
-# Multi-pass bug hunt private run artifacts
-.bug-hunt-run/
-
-# local ubs multi-pass artifacts
-ubs_audit/
-
-# Retired local-only scaffolding
-/agent_ergonomics_audit/
-/schemas/
-/xtask/
-/.h.txt
-
-# agent session artifacts (local-only, never commit)
-.pi-subagents/
-.radc-pack/
-.agent-tmp-*
-.tmp-*
-_tmp_*
-AGENTS.md
-CLAUDE.md
-
-# Beads compliance audit dir (managed by /beads-compliance-and-completion-verification skill)
-/beads_compliance_audit/
-
-# cargo-fuzz scratch (regenerable; never commit)
-/fuzz/artifacts/
-/fuzz/corpus/
-
-# Local agent papercuts log
-.papercuts.jsonl
-
-# Beads runtime (keep issues.jsonl tracked)
 .beads/*.db
 .beads/*.db-*
 .beads/dolt*
@@ -234,3 +175,41 @@ CLAUDE.md
 .beads/metadata.json
 .beads/config.yaml
 .beads/.gitignore
+.beads/*.bak*
+
+# --- Local agent / tool workspaces ---
+.cargo/
+.codegraph/
+.codegraphrc.json
+.ntm/
+.optloop/
+.debloat/
+.math-review/
+.github/assets/how-racc-works.mmd
+/demo/.cache/
+/demo/.tokenzero/
+/demo/.tokenzero-bin/
+/demo/tokenzero-mcp.json
+/demo/agent_runs/
+.zerostack/
+.fszero/
+.graphzero/
+.verification-purpose/
+.asgrep/
+.cyclomatic-reduction/
+.zero-tech-debt/
+/Pareto/
+.bug-hunt-run/
+ubs_audit/
+/agent_ergonomics_audit/
+/schemas/
+/xtask/
+/.h.txt
+.pi-subagents/
+.radc-pack/
+.agent-tmp-*
+.tmp-*
+_tmp_*
+/beads_compliance_audit/
+/fuzz/artifacts/
+/fuzz/corpus/
