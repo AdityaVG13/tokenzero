@@ -8,7 +8,9 @@ def boolExactEnumExplicit : ExactEnum Bool where
     apply List.nodup_cons.mpr
     constructor
     · intro hMem
-      cases hMem
+      cases hMem with
+      | tail _ hNil =>
+          cases hNil
     · apply List.nodup_cons.mpr
       constructor
       · intro hMem
