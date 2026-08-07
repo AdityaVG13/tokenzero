@@ -44,6 +44,15 @@ mod rewrite_execution_tests {
             explicit
         );
     }
+
+    #[test]
+    fn explicit_argv_skip_retains_an_unsafe_command_reason() {
+        let rewrite = rewrite_for_shell("rm -rf target", "on", false, true);
+
+        assert!(!rewrite.applied);
+        assert!(!rewrite.safe);
+        assert!(rewrite.reason.contains("unsafe destructive mutation"));
+    }
 }
 
 #[derive(Debug)]
@@ -77,9 +86,17 @@ fn rewrite_for_shell(
     explicit_argv: bool,
 ) -> tokenzero_filters::RewriteResult {
     let rewrite_requested = !no_rewrite && rewrite_mode != "off";
-    let mut result = rewrite_command(command, rewrite_mode, rewrite_requested && !explicit_argv);
+    let mut result = rewrite_command(command, rewrite_mode, rewrite_requested);
     if explicit_argv && rewrite_requested {
-        result.reason = "explicit argv is authoritative; command rewrite skipped".to_string();
+        let safety_reason = (!result.safe).then(|| result.reason.clone());
+        result.applied = false;
+        result.rewritten_command = command.to_string();
+        result.reason = match safety_reason {
+            Some(reason) => {
+                format!("explicit argv is authoritative; command rewrite skipped; {reason}")
+            }
+            None => "explicit argv is authoritative; command rewrite skipped".to_string(),
+        };
     }
     result
 }
