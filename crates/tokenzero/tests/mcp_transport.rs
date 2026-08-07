@@ -1,7 +1,9 @@
 use assert_cmd::prelude::*;
 use serde_json::{Value, json};
 use std::io::Write;
+use std::path::PathBuf;
 use std::process::{Command, Output, Stdio};
+use std::sync::OnceLock;
 use tempfile::tempdir;
 macro_rules! rpc {
     (initialize, $id:expr) => { json!({"jsonrpc":"2.0", "id":$id, "method":"initialize", "params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"tokenzero-mcp-smoke","version":"1.0.0"}}}).to_string() }; (tools, $id:expr) => { json!({"jsonrpc":"2.0", "id":$id, "method":"tools/list", "params":{}}).to_string() };
@@ -11,10 +13,44 @@ macro_rules! checks {
         assert!($condition, $message $(, $argument)*);
     )+};
 }
+fn compatibility_mcp_bin() -> &'static PathBuf {
+    static BIN: OnceLock<PathBuf> = OnceLock::new();
+    BIN.get_or_init(|| {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .to_path_buf();
+        let target = std::env::var_os("CARGO_TARGET_DIR")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| root.join("target"))
+            .join("mcp-transport-compat");
+        let status = Command::new("cargo")
+            .args([
+                "build",
+                "-p",
+                "tokenzero-cli",
+                "--bin",
+                "tokenzero",
+                "--no-default-features",
+                "--features",
+                "surface-mcp",
+            ])
+            .env("CARGO_TARGET_DIR", &target)
+            .current_dir(root)
+            .status()
+            .unwrap();
+        assert!(status.success(), "build explicit MCP compatibility CLI");
+        target
+            .join("debug")
+            .join(format!("tokenzero{}", std::env::consts::EXE_SUFFIX))
+    })
+}
+
 fn feed(lines: &[&str]) -> Output {
     let dir = tempdir().unwrap();
-    let mut child = Command::cargo_bin("tokenzero")
-        .unwrap()
+    let mut child = Command::new(compatibility_mcp_bin())
         .args([
             "mcp-server",
             "--allowed-root",
@@ -65,8 +101,7 @@ fn mcp_server_handles_ndjson_transcript() {
 }
 #[test]
 fn mcp_smoke_verifies_initialize_success() {
-    let output = Command::cargo_bin("tokenzero")
-        .unwrap()
+    let output = Command::new(compatibility_mcp_bin())
         .args(["mcp-smoke", "--json"])
         .output()
         .unwrap();
@@ -75,4 +110,18 @@ fn mcp_smoke_verifies_initialize_success() {
     assert_eq!(json["ok"], true, "{json}");
     assert_eq!(json["initialize_successes_observed"], 1, "{json}");
     assert_eq!(json["initialize_failures"], 0, "{json}");
+}
+
+#[test]
+fn canonical_default_cli_fails_loud_for_mcp_host_commands() {
+    for command in ["mcp-server", "mcp-smoke"] {
+        let output = Command::cargo_bin("tokenzero")
+            .unwrap()
+            .arg(command)
+            .output()
+            .unwrap();
+        assert!(!output.status.success(), "default CLI hosted {command}");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(stderr.contains("surface-mcp"), "{command}: {stderr}");
+    }
 }

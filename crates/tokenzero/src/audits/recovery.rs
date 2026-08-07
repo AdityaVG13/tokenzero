@@ -492,6 +492,7 @@ pub(crate) fn ws_sibling_artifact_path(output_json: &Path, filename: &str) -> Pa
         .map_or_else(|| PathBuf::from(filename), |p| p.join(filename))
 }
 
+#[cfg(feature = "surface-mcp")]
 pub(crate) fn measure_rss_mb(pid: u32) -> Option<f64> {
     if !cfg!(unix) {
         return None;
@@ -507,6 +508,7 @@ pub(crate) fn measure_rss_mb(pid: u32) -> Option<f64> {
     Some(text.trim().parse::<f64>().ok()? / 1024.0)
 }
 
+#[cfg(feature = "surface-mcp")]
 pub(crate) fn p95_f64(values: &mut [f64]) -> Option<f64> {
     if values.is_empty() {
         return None;

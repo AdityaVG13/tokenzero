@@ -1,32 +1,67 @@
 [package]
-name = "tokenzero-codemode"
+name = "tokenzero-worker"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "Standalone TokenZero CodeMode runtime over the canonical dispatcher."
+description = "Planner-free raw worker for ZeroStack composition."
 homepage.workspace = true
 readme.workspace = true
 keywords.workspace = true
 categories.workspace = true
 rust-version.workspace = true
+autobins = false
 
-# js (default) links the QuickJS runtime; without it the crate compiles a
-# fail-closed exec stub so surface adapters can still serve the catalog.
+[lib]
+name = "tokenzero_codemode"
+path = "src/lib.rs"
+
+[[bin]]
+name = "tokenzero-codemode"
+path = "src/main.rs"
+
 [features]
-default = ["js"]
+default = []
 js = ["dep:rquickjs"]
+surface-codemode = [
+    "js",
+    "dep:base64",
+    "dep:fs4",
+    "dep:serde",
+    "dep:serde_json",
+    "dep:sha2",
+    "dep:shell-words",
+    "dep:thiserror",
+    "dep:tempfile",
+    "dep:tokenzero-core",
+    "dep:tokenzero-filters",
+    "dep:tokenzero-pulse",
+    "dep:tokenzero-recovery",
+    "dep:tokenzero-runtime",
+    "dep:zerostack-machine-permit",
+]
 
 [dependencies]
-fs4.workspace = true
-rquickjs = { workspace = true, optional = true }
-serde.workspace = true
-serde_json.workspace = true
-sha2.workspace = true
-tempfile.workspace = true
-zerostack-machine-permit.workspace = true
-tokenzero-core = { path = "../tokenzero-core", version = "1.0.2" }
 tokenzero-engine = { path = "../tokenzero-engine", version = "1.0.2" }
-tokenzero-filters = { path = "../tokenzero-filters", version = "1.0.2" }
-tokenzero-pulse = { path = "../tokenzero-pulse", version = "1.0.2" }
-tokenzero-recovery = { path = "../tokenzero-recovery", version = "1.0.2" }
+zero-abi.workspace = true
+
+# Compatibility-only engine-local CodeMode dependencies. None are present in
+# the canonical --no-default-features worker graph.
+base64 = { version = "0.22.1", optional = true }
+fs4 = { workspace = true, optional = true }
+serde = { workspace = true, optional = true }
+serde_json = { workspace = true, optional = true }
+sha2 = { workspace = true, optional = true }
+tokenzero-core = { path = "../tokenzero-core", version = "1.0.2", optional = true }
+tokenzero-filters = { path = "../tokenzero-filters", version = "1.0.2", optional = true }
+tokenzero-pulse = { path = "../tokenzero-pulse", version = "1.0.2", optional = true }
+tokenzero-recovery = { path = "../tokenzero-recovery", version = "1.0.2", optional = true }
+tokenzero-runtime = { path = "../tokenzero-runtime", version = "1.0.2", optional = true }
+zerostack-machine-permit = { workspace = true, optional = true }
+rquickjs = { workspace = true, optional = true }
+shell-words = { version = "1.1.1", optional = true }
+thiserror = { workspace = true, optional = true }
+tempfile = { workspace = true, optional = true }
+
+[dev-dependencies]
+proptest.workspace = true

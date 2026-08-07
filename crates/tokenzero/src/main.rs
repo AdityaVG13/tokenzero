@@ -15,12 +15,14 @@ use tokenzero_core::{
     ContentType, Mode, ToolResponse, detect_content_type,
     shell_display_command_from_argv_for_platform,
 };
-use tokenzero_install as install;
-use tokenzero_mcp_compat::{
-    CodeModeOptions, CodeModeResult, CodeModeStatus, EditHunk, EngineConfig, TokenZeroEngine,
-    cli_json, default_shell_timeout, execute_codemode_with_options, mcp_idle_timeout_from_secs,
-    render_text, shell_timeout_from_secs,
+use tokenzero_engine::codemode_wire::{CodeModeOptions, CodeModeResult, CodeModeStatus};
+#[cfg(feature = "surface-mcp")]
+use tokenzero_engine::mcp_idle_timeout_from_secs;
+use tokenzero_engine::{
+    EditHunk, EngineConfig, TokenZeroEngine, cli_json, default_shell_timeout, render_text,
+    shell_timeout_from_secs,
 };
+use tokenzero_install as install;
 
 mod agent_surfaces;
 mod artifact_contracts;
@@ -29,6 +31,7 @@ mod cli_args;
 mod competitor_adapters;
 mod completion_handoff;
 mod hook;
+#[cfg(feature = "surface-mcp")]
 mod mcp_artifact;
 mod reach;
 mod release_claims;
@@ -49,7 +52,6 @@ use cli_args::*;
 use competitor_adapters::{
     competitor_adapter_matrix, competitor_adapter_rows, load_benchmark_adapter_approval,
 };
-use mcp_artifact::run_mcp_artifact;
 use reach::{installed_tokenzero_command_audit, run_reach};
 use release_claims::{ClaimEvidenceInputs, run_claim_audit};
 use tokenzero_pulse::{
@@ -153,53 +155,28 @@ $(Commands::$sv($sa) => $special,)*
 };
 }
 
-fn raw_worker_is_first_command(argv: &[OsString]) -> bool {
-    matches!(
-        argv.get(1).and_then(|arg| arg.to_str()),
-        Some("raw-worker" | "raw_worker")
+#[cfg(feature = "surface-mcp")]
+fn run_mcp_artifact(
+    output_json: PathBuf,
+    output_md: Option<PathBuf>,
+    iterations: usize,
+) -> Result<serde_json::Value> {
+    mcp_artifact::run_mcp_artifact(output_json, output_md, iterations)
+}
+
+#[cfg(not(feature = "surface-mcp"))]
+fn run_mcp_artifact(
+    _output_json: PathBuf,
+    _output_md: Option<PathBuf>,
+    _iterations: usize,
+) -> Result<serde_json::Value> {
+    anyhow::bail!(
+        "mcp-smoke and mcp-soak require explicit compatibility feature surface-mcp; use the ZeroStack aggregate host for canonical MCP"
     )
-}
-
-fn raw_worker_argv(argv: Vec<OsString>) -> Result<Vec<String>> {
-    argv.into_iter()
-        .map(|arg| {
-            arg.into_string()
-                .map_err(|arg| anyhow::anyhow!("raw-worker argument is not valid UTF-8: {arg:?}"))
-        })
-        .collect()
-}
-
-#[cfg(test)]
-mod startup_arg_tests {
-    use super::raw_worker_is_first_command;
-    use std::ffi::OsString;
-
-    #[test]
-    fn raw_worker_dispatch_requires_first_command_argument() {
-        let child_command = [
-            OsString::from("tokenzero"),
-            OsString::from("run"),
-            OsString::from("--"),
-            OsString::from("raw-worker"),
-        ];
-        assert!(!raw_worker_is_first_command(&child_command));
-
-        let raw_worker = [OsString::from("tokenzero"), OsString::from("raw-worker")];
-        assert!(raw_worker_is_first_command(&raw_worker));
-    }
 }
 
 fn main() -> Result<()> {
     let argv: Vec<OsString> = std::env::args_os().collect();
-
-    // Private raw worker (tokenzero-irx9.4) on the selected surface artifact / shim.
-    // This private command is recognized only in argv[1], before Clap normalization.
-    if raw_worker_is_first_command(&argv) {
-        let code = tokenzero_mcp_compat::maybe_run_raw_worker_from_args(&raw_worker_argv(argv)?)
-            .map_err(anyhow::Error::msg)?
-            .context("leading raw-worker command did not parse")?;
-        std::process::exit(code);
-    }
 
     // Fast path: avoid building the full clap command tree for --version/-V.
     if argv.len() == 2 && matches!(argv[1].to_str(), Some("--version" | "-V")) {
@@ -291,13 +268,21 @@ fn main() -> Result<()> {
     }
     RobotDocs(args) => { handle_robot_docs(args); }
     McpServer(args) => {
-        if args.supervise {
-            let program = std::env::current_exe().map(OsString::from).unwrap_or_else(|_| OsString::from("tokenzero"));
-            std::process::exit(tokenzero_mcp_compat::run_supervised_stdio(program, supervised_child_args(&args)))
+        #[cfg(feature = "surface-mcp")]
+        {
+            if args.supervise {
+                let program = std::env::current_exe().map(OsString::from).unwrap_or_else(|_| OsString::from("tokenzero"));
+                std::process::exit(tokenzero_mcp_compat::run_supervised_stdio(program, supervised_child_args(&args)))
+            }
+            codemode_host_niceness();
+            enforce_surface_exclusivity(&args)?;
+            tokenzero_mcp_compat::run_fastmcp_stdio(engine_config_for_mcp(&args)?)
         }
-        codemode_host_niceness();
-        enforce_surface_exclusivity(&args)?;
-        tokenzero_mcp_compat::run_fastmcp_stdio(engine_config_for_mcp(&args)?)
+        #[cfg(not(feature = "surface-mcp"))]
+        {
+            let _ = args;
+            anyhow::bail!("MCP compatibility adapter is not compiled; rebuild tokenzero-cli with --features surface-mcp")
+        }
     }
     CodeMode(args) => {
         // clc3: install the real JS executor into the engine hook; without
@@ -322,10 +307,11 @@ fn main() -> Result<()> {
                 std::process::exit(1);
             }
         };
-        let result = execute_codemode_with_options(&plan, CodeModeOptions {
+        let options = CodeModeOptions {
             root: args.root.clone(), allowed_roots: args.allowed_root.clone(), cache_path: args.cache_path.clone(),
             max_visible_tokens: args.max_visible_tokens, timeout_seconds: args.timeout_seconds, ..Default::default()
-        });
+        };
+        let result = tokenzero_engine::codemode_wire::codemode_execute(&plan, &options);
         let failed = result.status == CodeModeStatus::Error;
         if args.json { println!("{}", serde_json::to_string(&result)?); } else { println!("{}", result.to_line()); }
         if failed { std::io::stdout().flush()?; std::process::exit(1); }
@@ -748,7 +734,7 @@ fn with_safe_alternative(mut response: ToolResponse, command: &str) -> ToolRespo
 
 /// Route a CLI domain op through the shared engine dispatcher exactly once.
 fn dispatch_cli_tool(engine: &TokenZeroEngine, op: &str, args: serde_json::Value) -> ToolResponse {
-    let outcome = tokenzero_mcp_compat::dispatch_cli(engine, op, &args);
+    let outcome = tokenzero_engine::dispatch_cli(engine, op, &args);
     let response = if let Some(response) = outcome.tool_response {
         response
     } else if let Some(err) = outcome.domain_error {
@@ -1176,7 +1162,7 @@ fn doctor_report(args: &DoctorArgs) -> serde_json::Value {
             .migration_state();
     report["recovery_blobs"] =
         tokenzero_recovery::recovery_blob_status(&store.effective_cache_path);
-    report["engine_binaries"] = tokenzero_mcp_compat::engine_binaries_json();
+    report["engine_binaries"] = tokenzero_engine::engine_binaries_json();
     if let Some(summary) = &store.mismatch_summary {
         let mismatch = store.store_project_mismatch;
         let finding = json!({"id": if mismatch {"tz-store-project-mismatch"} else {"tz-store-global-pin-ignored"}, "severity": if mismatch {"warning"} else {"info"}, "status": "detected", "check": "store_resolution", "summary": summary, "evidence": {"project_root": path_display(&root), "effective_cache_path": path_display(&store.effective_cache_path), "effective_store_root": store.effective_store_root.as_ref().map(|p| path_display(p)), "shared_store_opt_in": store.shared_store_opt_in, "global_pin_set": store.global_pin_set, "isolation_mode": store.isolation_mode}, "auto_fix": false, "fix_supported": false, "next_step": if mismatch {"Use a per-project store (unset TOKENZERO_SHARED_STORE / ZEROSTACK_SHARED_STORE) or pass --cache-path under the project root."} else {"Default is per-project isolation (wqw.2). Set TOKENZERO_SHARED_STORE=1 only for intentional meta-workspace sharing."}});
@@ -1326,24 +1312,23 @@ fn handle_pulse(args: PulseArgs) -> Result<()> {
 fn handle_session_ledger(args: SessionLedgerArgs) -> Result<()> {
     let root = tokenzero_work_root(args.root);
     let pulse_ledger_path = default_ledger_path(&root);
-    let response_ledger_path = tokenzero_mcp_compat::ledger::ledger_path_for_cache(
-        &resolve_recovery_cache_path(&root, None),
-    );
+    let response_ledger_path =
+        tokenzero_engine::ledger::ledger_path_for_cache(&resolve_recovery_cache_path(&root, None));
     match args.command {
         Some(SessionLedgerCommand::Schema) => print_pretty(&SessionLedgerReport::schema_json())?,
         Some(SessionLedgerCommand::Inspect(flags)) => {
-            let env_value = std::env::var(tokenzero_mcp_compat::ledger::TELEMETRY_ENV).ok();
-            let enabled = tokenzero_mcp_compat::ledger::resolve_telemetry(
+            let env_value = std::env::var(tokenzero_engine::ledger::TELEMETRY_ENV).ok();
+            let enabled = tokenzero_engine::ledger::resolve_telemetry(
                 flags.telemetry,
                 flags.no_telemetry,
                 None,
                 env_value.as_deref(),
             );
-            let usage_path = tokenzero_mcp_compat::ledger::usage_telemetry_path_for_cache(
+            let usage_path = tokenzero_engine::ledger::usage_telemetry_path_for_cache(
                 &resolve_recovery_cache_path(&root, None),
             );
             emit_value(
-                tokenzero_mcp_compat::ledger::inspect_telemetry(&usage_path, enabled)?,
+                tokenzero_engine::ledger::inspect_telemetry(&usage_path, enabled)?,
                 args.json,
             )?;
         }
@@ -1370,7 +1355,7 @@ fn handle_session_ledger(args: SessionLedgerArgs) -> Result<()> {
                     .unwrap_or(0)
             };
             if let LedgerQueryCommand::TaskCost { json_out, csv_out } = &query {
-                let report = tokenzero_mcp_compat::ledger::write_task_cost_report(
+                let report = tokenzero_engine::ledger::write_task_cost_report(
                     &response_ledger_path,
                     json_out,
                     csv_out,
@@ -1389,7 +1374,7 @@ fn handle_session_ledger(args: SessionLedgerArgs) -> Result<()> {
             } else {
                 let query = match query {
                     LedgerQueryCommand::Repo { repo, days } => {
-                        tokenzero_mcp_compat::ledger::LedgerQuery::RepoCost {
+                        tokenzero_engine::ledger::LedgerQuery::RepoCost {
                             repo: repo.to_string_lossy().into_owned(),
                             since_ms: since_ms(days),
                         }
@@ -1398,20 +1383,20 @@ fn handle_session_ledger(args: SessionLedgerArgs) -> Result<()> {
                         baseline,
                         candidate,
                         days,
-                    } => tokenzero_mcp_compat::ledger::LedgerQuery::VersionDelta {
+                    } => tokenzero_engine::ledger::LedgerQuery::VersionDelta {
                         baseline,
                         candidate,
                         since_ms: since_ms(days),
                     },
                     LedgerQueryCommand::AgentSpend { days } => {
-                        tokenzero_mcp_compat::ledger::LedgerQuery::AgentSpend {
+                        tokenzero_engine::ledger::LedgerQuery::AgentSpend {
                             since_ms: since_ms(days),
                         }
                     }
                     LedgerQueryCommand::TaskCost { .. } => unreachable!(),
                 };
                 emit_value(
-                    tokenzero_mcp_compat::ledger::query_ledger(&response_ledger_path, &query)?,
+                    tokenzero_engine::ledger::query_ledger(&response_ledger_path, &query)?,
                     args.json,
                 )?;
             }
@@ -1481,7 +1466,7 @@ fn handle_cache(args: CacheArgs) -> Result<()> {
             let mut report = store.prune_stale(dry_run).with_context(
                 || "cache prune failed; safe alternative: tokenzero cache prune --json",
             )?;
-            report["maintenance"] = tokenzero_mcp_compat::cache_maintenance(&cache, dry_run);
+            report["maintenance"] = tokenzero_engine::cache_maintenance(&cache, dry_run);
             emit_value(report, args.json)?;
         }
         CacheCommand::MigrateRefs(args) => cache_migrate!(
@@ -1833,6 +1818,7 @@ fn engine_from_common(args: &CommonArgs) -> TokenZeroEngine {
     )
 }
 
+#[cfg(feature = "surface-mcp")]
 fn engine_config_for_mcp(args: &McpServerArgs) -> Result<EngineConfig> {
     let root = mcp_work_root(&args.allowed_root);
     let tool_surface = args
@@ -1854,6 +1840,7 @@ fn engine_config_for_mcp(args: &McpServerArgs) -> Result<EngineConfig> {
     Ok(config)
 }
 
+#[cfg(feature = "surface-mcp")]
 fn mcp_work_root(allowed_roots: &[PathBuf]) -> PathBuf {
     tokenzero_work_root(allowed_roots.first().cloned())
 }
@@ -1861,7 +1848,7 @@ fn mcp_work_root(allowed_roots: &[PathBuf]) -> PathBuf {
 /// Long-lived MCP/CodeMode servers run at reduced scheduling priority so a
 /// busy worker cannot starve interactive sessions (multi-project runaway CPU,
 /// 2026-07-16 incident). `TOKENZERO_NO_RENICE=1` opts out.
-#[cfg(unix)]
+#[cfg(all(unix, feature = "surface-mcp"))]
 fn codemode_host_niceness() {
     if std::env::var_os("TOKENZERO_NO_RENICE").is_some() {
         return;
@@ -1871,7 +1858,7 @@ fn codemode_host_niceness() {
         .output();
 }
 
-#[cfg(not(unix))]
+#[cfg(all(not(unix), feature = "surface-mcp"))]
 fn codemode_host_niceness() {}
 
 /// MCP XOR CodeMode process/artifact mutual exclusion (tokenzero-irx9.3).
@@ -1884,6 +1871,7 @@ fn codemode_host_niceness() {}
 ///
 /// `TOKENZERO_ALLOW_DUAL=1` only skips the hub sentinel (debug); it never
 /// permits dual catalog compilation or dual `--mode` selection.
+#[cfg(feature = "surface-mcp")]
 fn enforce_surface_exclusivity(args: &McpServerArgs) -> Result<()> {
     if let Err(err) = install::packaging::reject_dual_compiled_surfaces() {
         anyhow::bail!("{err}");
@@ -1945,6 +1933,7 @@ Install {} for that surface (mutually exclusive — one process, one catalog).",
 /// Rebuilds the mcp-server invocation for the supervised inner child:
 /// same configuration, no --supervise (one supervisor only), and idle exit
 /// pinned off because the supervisor owns the session lifecycle.
+#[cfg(feature = "surface-mcp")]
 fn supervised_child_args(args: &McpServerArgs) -> Vec<OsString> {
     let mut child_args: Vec<OsString> = vec![
         "mcp-server".into(),

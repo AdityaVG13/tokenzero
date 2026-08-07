@@ -1,3 +1,6 @@
+#![forbid(unsafe_code)]
+#![cfg(feature = "surface-codemode")]
+
 //! TokenZero CodeMode surface: a CodeMode-style code-plan executor that
 //! exposes TokenZero operations as typed methods. Models write JS-like
 //! plans; the executor parses, dispatches through TokenZeroEngine, and returns

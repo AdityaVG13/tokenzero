@@ -6,7 +6,7 @@
 //! - CodeMode **recipe** (`compact:` / `expand:`)
 //! - CodeMode **JSON** plan (`{"steps":[...]}`)
 //! - CodeMode **JavaScript** plan
-//! - Raw-worker framing (`tokenzero-mcp raw-worker --once`)
+//! - Raw-worker framing (`tokenzero-codemode raw-worker --once`)
 //!
 //! Success, failure, mutation, and exact expand recovery are compared with
 //! strict ok=false + typed error requirements on failures.
@@ -16,6 +16,7 @@ use std::fs;
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::OnceLock;
 use tempfile::tempdir;
 
 fn repo_root() -> PathBuf {
@@ -28,57 +29,91 @@ fn repo_root() -> PathBuf {
 }
 
 fn ensure_bins() {
-    let root = repo_root();
-    for b in ["tokenzero", "tokenzero-mcp"] {
-        if root.join("target/debug").join(b).is_file() {
-            continue;
-        }
-        let st = Command::new("cargo")
+    static READY: OnceLock<()> = OnceLock::new();
+    READY.get_or_init(|| {
+        let root = repo_root();
+        let mcp_target = build_target("mcp");
+        let cli = Command::new("cargo")
             .args([
                 "build",
                 "-p",
-                "tokenzero",
-                "--bin",
-                b,
-                "--jobs",
-                "2",
-                "--features",
-                "surface-mcp",
-            ])
-            .current_dir(&root)
-            .status()
-            .unwrap();
-        assert!(st.success(), "build {b}");
-    }
-    let cm = root.join("target/codemode/debug/tokenzero");
-    if !cm.is_file() {
-        let st = Command::new("cargo")
-            .args([
-                "build",
-                "-p",
-                "tokenzero",
+                "tokenzero-cli",
                 "--bin",
                 "tokenzero",
                 "--jobs",
                 "2",
                 "--no-default-features",
                 "--features",
-                "surface-codemode",
+                "surface-mcp",
             ])
-            .env("CARGO_TARGET_DIR", root.join("target/codemode"))
+            .env("CARGO_TARGET_DIR", &mcp_target)
             .current_dir(&root)
             .status()
             .unwrap();
-        assert!(st.success(), "build codemode CLI");
-    }
+        assert!(cli.success(), "build compatibility CLI");
+
+        let worker = Command::new("cargo")
+            .args([
+                "build",
+                "-p",
+                "tokenzero-worker",
+                "--bin",
+                "tokenzero-codemode",
+                "--jobs",
+                "2",
+                "--no-default-features",
+            ])
+            .env("CARGO_TARGET_DIR", &mcp_target)
+            .current_dir(&root)
+            .status()
+            .unwrap();
+        assert!(worker.success(), "build canonical raw worker");
+
+        let cm = codemode_cli();
+        if !cm.is_file() {
+            let st = Command::new("cargo")
+                .args([
+                    "build",
+                    "-p",
+                    "tokenzero-cli",
+                    "--bin",
+                    "tokenzero",
+                    "--jobs",
+                    "2",
+                    "--no-default-features",
+                    "--features",
+                    "surface-codemode",
+                ])
+                .env("CARGO_TARGET_DIR", build_target("codemode"))
+                .current_dir(&root)
+                .status()
+                .unwrap();
+            assert!(st.success(), "build codemode compatibility CLI");
+        }
+    });
+}
+
+fn build_target(surface: &str) -> PathBuf {
+    std::env::var_os("CARGO_TARGET_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| repo_root().join("target"))
+        .join(format!("irx9-transport-{surface}"))
+}
+
+fn executable_name(name: &str) -> String {
+    format!("{name}{}", std::env::consts::EXE_SUFFIX)
 }
 
 fn bin(name: &str) -> PathBuf {
-    repo_root().join("target/debug").join(name)
+    build_target("mcp")
+        .join("debug")
+        .join(executable_name(name))
 }
 
 fn codemode_cli() -> PathBuf {
-    repo_root().join("target/codemode/debug/tokenzero")
+    build_target("codemode")
+        .join("debug")
+        .join(executable_name("tokenzero"))
 }
 
 /// Normalized multi-surface outcome for comparison.
@@ -418,7 +453,7 @@ fn codemode_recipe_roundtrip(root: &Path, payload: &str) -> Norm {
 // --- Raw worker ---
 
 fn raw_once(root: &Path, req: &Value, cache: &str) -> Norm {
-    let out = Command::new(bin("tokenzero-mcp"))
+    let out = Command::new(bin("tokenzero-codemode"))
         .args([
             "raw-worker",
             "--root",

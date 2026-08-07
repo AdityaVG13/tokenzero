@@ -27,10 +27,12 @@ echo "irx9_release_gate: start (CARGO_BUILD_JOBS=$CARGO_BUILD_JOBS jobs=$JOBS th
 # 1) Packaging mutual exclusion (static + lifecycle + install-prefix runtime)
 run cargo test -p tokenzero-install --jobs "$JOBS" --lib packaging -- --test-threads="$THREADS" \
   || fail "packaging unit tests (surface=install)"
-run cargo test -p tokenzero --jobs "$JOBS" --test packaging_static_evidence --test packaging_lifecycle -- --test-threads="$THREADS" \
+run cargo test -p tokenzero-cli --jobs "$JOBS" --test packaging_static_evidence --test packaging_lifecycle -- --test-threads="$THREADS" \
   || fail "packaging static/lifecycle (surface=package)"
-run cargo test -p tokenzero --jobs "$JOBS" --test packaging_e2e install_each_surface -- --test-threads="$THREADS" \
-  || fail "install-prefix surface runtime smoke (surface=package)"
+run cargo build -p tokenzero-worker --bin tokenzero-codemode --no-default-features --jobs "$JOBS" \
+  || fail "canonical worker build (surface=package)"
+run cargo test -p tokenzero-cli --jobs "$JOBS" --test packaging_e2e -- --test-threads="$THREADS" \
+  || fail "canonical packaging selector/block/uninstall smoke (surface=package)"
 
 # 2) Operation ABI + digest ratchet
 run cargo test -p tokenzero-core --jobs "$JOBS" --lib operation_abi -- --test-threads="$THREADS" \
@@ -53,13 +55,13 @@ run cargo test -p tokenzero-engine --jobs "$JOBS" --lib surface_handshake:: -- -
 # 5) In-process corpus + REAL transport matrix
 run cargo test -p tokenzero-engine --jobs "$JOBS" --test irx9_conformance_corpus -- --test-threads="$THREADS" \
   || fail "conformance corpus (surface=parity)"
-run cargo test -p tokenzero --jobs "$JOBS" --test irx9_transport_matrix -- --test-threads=1 \
+run cargo test -p tokenzero-cli --jobs "$JOBS" --test irx9_transport_matrix -- --test-threads=1 \
   || fail "real transport matrix CLI/MCP/CodeMode/raw-worker (surface=transport)"
 
 # 6) Surface latency: in-process + real process starts kill-test
 run cargo test -p tokenzero-engine --jobs "$JOBS" --test irx9_surface_bench -- --test-threads="$THREADS" \
   || fail "in-process surface bench (surface=bench)"
-run cargo test -p tokenzero --jobs "$JOBS" --test irx9_surface_bench_process -- --test-threads=1 \
+run cargo test -p tokenzero-cli --jobs "$JOBS" --test irx9_surface_bench_process -- --test-threads=1 \
   || fail "real process surface bench + kill-test (surface=bench_process)"
 
 # 7) Dual-feature compile refusal (one package, fail closed)

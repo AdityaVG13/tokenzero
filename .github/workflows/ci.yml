@@ -59,7 +59,7 @@ jobs:
       - name: Rust clippy
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - name: Rust shell matrix
-        run: cargo run --locked -p tokenzero -- shell-matrix --output-json results/current/rust_shell_matrix_${{ matrix.os }}.json --json
+        run: cargo run --locked -p tokenzero-cli --bin tokenzero --no-default-features -- shell-matrix --output-json results/current/rust_shell_matrix_${{ matrix.os }}.json --json
       - name: Windows verifier
         if: matrix.os == 'windows-latest'
         shell: pwsh
@@ -69,7 +69,8 @@ jobs:
         run: |
           cargo build --release --locked --manifest-path _siblings/fszero/Cargo.toml --bin fszero
           cargo build --release --locked --manifest-path _siblings/graphzero/Cargo.toml --bin graphzero
-          cargo build --release --locked -p tokenzero
+          cargo build --release --locked -p tokenzero-cli --bin tokenzero --no-default-features
+          cargo build --release --locked -p tokenzero-worker --bin tokenzero-codemode --no-default-features
       - name: Run native ZeroRef conformance row
         shell: bash
         env:
@@ -166,14 +167,16 @@ jobs:
           CARGO_BUILD_JOBS: "2"
           CARGO_JOBS: "2"
           TEST_THREADS: "2"
-      - name: Build release binary
-        run: cargo build --release -p tokenzero
+      - name: Build release binaries
+        run: |
+          cargo build --release -p tokenzero-cli --bin tokenzero --no-default-features
+          cargo build --release -p tokenzero-worker --bin tokenzero-codemode --no-default-features
       - name: GVKV token-amplification and boot-cost locks
         env:
           TOKENZERO_BOOT_BENCH_BIN: target/release/tokenzero
         run: |
           cargo test -p tokenzero-engine --test ta_registry
-          cargo test -p tokenzero --test boot_cost_lock -- --test-threads=1
+          cargo test -p tokenzero-cli --test boot_cost_lock -- --test-threads=1
       - name: Doctor
         run: target/release/tokenzero doctor --root . --runtime --json
       - name: Package audit
@@ -187,7 +190,9 @@ jobs:
         run: npm pack --dry-run
       - name: Homebrew formula syntax
         run: ruby -c packaging/homebrew/tokenzero.rb
-      - name: MCP smoke
-        run: target/release/tokenzero mcp-smoke --output-json results/current/rust_mcp_smoke_ci.json --json
+      - name: MCP compatibility smoke
+        run: |
+          cargo build --release -p tokenzero-cli --bin tokenzero --no-default-features --features surface-mcp --target-dir target/mcp-compat
+          target/mcp-compat/release/tokenzero mcp-smoke --output-json results/current/rust_mcp_smoke_ci.json --json
       - name: Install smoke
         run: target/release/tokenzero install-smoke --output-json results/current/rust_install_smoke_ci.json --json

@@ -91,14 +91,24 @@ Run-Step "cargo test workspace" "results/current/rust_windows_cargo_test.log" {
   cargo test --workspace --locked
 }
 
-Run-Step "cargo build tokenzero release" "results/current/rust_windows_cargo_build.log" {
-  cargo build -p tokenzero --locked --release
+Run-Step "cargo build canonical release artifacts" "results/current/rust_windows_cargo_build.log" {
+  cargo build -p tokenzero-cli --bin tokenzero --no-default-features --locked --release
+  if ($LASTEXITCODE -eq 0) {
+    cargo build -p tokenzero-worker --bin tokenzero-codemode --no-default-features --locked --release
+  }
+  if ($LASTEXITCODE -eq 0) {
+    cargo build -p tokenzero-cli --bin tokenzero --no-default-features --features surface-mcp --locked --release --target-dir "$env:CARGO_TARGET_DIR\mcp-compat"
+  }
 }
 
 $tokenzero = Join-Path (Get-Location) "$env:CARGO_TARGET_DIR\release\tokenzero.exe"
-if (!(Test-Path $tokenzero)) {
-  Add-Step -Name "resolve tokenzero binary" -Ok $false -ExitCode 1 -Log ""; Write-Report -Status "blocked" -Ok $false
-  throw "tokenzero.exe not found at $tokenzero"
+$worker = Join-Path (Get-Location) "$env:CARGO_TARGET_DIR\release\tokenzero-codemode.exe"
+$mcpCompat = Join-Path (Get-Location) "$env:CARGO_TARGET_DIR\mcp-compat\release\tokenzero.exe"
+foreach ($artifact in @($tokenzero, $worker, $mcpCompat)) {
+  if (!(Test-Path $artifact)) {
+    Add-Step -Name "resolve release artifact" -Ok $false -ExitCode 1 -Log ""; Write-Report -Status "blocked" -Ok $false
+    throw "release artifact not found at $artifact"
+  }
 }
 
 Run-Json-Step "adaptive scorecard" `
@@ -130,7 +140,7 @@ Run-Json-Step "global install rehearsal" `
   "results/current/rust_windows_global_rehearsal.log" {
   powershell -NoProfile -ExecutionPolicy Bypass `
     -File scripts/rust_windows_global_rehearsal.ps1 `
-    -TokenZeroExe $tokenzero `
+    -TokenZeroExe $mcpCompat `
     -ReportPath results/current/rust_windows_global_rehearsal.json `
     -SkipBuild
 }

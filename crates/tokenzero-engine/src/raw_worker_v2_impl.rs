@@ -130,20 +130,82 @@ fn error_with(
     value
 }
 
-fn encode(mut value: Value) -> Vec<u8> {
-    let mut bytes = serde_json::to_vec(&value).unwrap_or_default();
-    if bytes.len() + 1 > raw_worker_v2_protocol::DEFAULT_MAX_FRAME_BYTES {
-        let request_id = value["request_id"].as_str().map(str::to_string);
-        value = error(
-            request_id.as_deref(),
-            "frame_too_large",
-            "outbound frame exceeds 1 MiB",
-            None,
-        );
-        bytes = serde_json::to_vec(&value).expect("fixed error serializes");
+fn worker_error_frame(
+    request_id: Option<String>,
+    kind: &str,
+    message: &str,
+) -> zero_abi::WorkerResponseFrame {
+    zero_abi::WorkerResponseFrame::Error {
+        request_id,
+        error: zero_abi::WorkerError {
+            kind: kind.to_string(),
+            message: message.to_string(),
+            retryable: false,
+            details: None,
+        },
+        trace: None,
+        engine_timeline: None,
+        worker_token_accounting: None,
     }
-    bytes.push(b'\n');
-    bytes
+}
+
+fn encode_fallback(request_id: Option<String>, kind: &str, message: &str) -> Vec<u8> {
+    let correlated = worker_error_frame(request_id, kind, message);
+    if zero_abi::validate_response_frame(&correlated).is_ok() {
+        if let Ok(bytes) = zero_abi::encode_frame(&correlated, zero_abi::DEFAULT_MAX_FRAME_BYTES) {
+            return bytes;
+        }
+    }
+    let fixed = worker_error_frame(None, kind, message);
+    zero_abi::validate_response_frame(&fixed).expect("fixed worker error frame is valid");
+    zero_abi::encode_frame(&fixed, zero_abi::DEFAULT_MAX_FRAME_BYTES)
+        .expect("fixed worker error frame fits the protocol bound")
+}
+
+fn encode(value: Value) -> Vec<u8> {
+    let request_id = value
+        .get("request_id")
+        .and_then(Value::as_str)
+        .filter(|request_id| !request_id.is_empty())
+        .map(str::to_string);
+    // Stage through the shared encoder so the hub decoder can enforce strict
+    // wire rules (including unit-variant unknown fields) before final typed
+    // encoding. TokenZero owns no response serializer or validator here.
+    let staged = match zero_abi::encode_frame(&value, zero_abi::DEFAULT_MAX_FRAME_BYTES) {
+        Ok(bytes) => bytes,
+        Err(error) => {
+            return encode_fallback(
+                request_id,
+                error.kind(),
+                "outbound frame exceeds the raw-worker protocol bound",
+            );
+        }
+    };
+    let frame = match zero_abi::decode_response_frame(&staged, zero_abi::DEFAULT_MAX_FRAME_BYTES) {
+        Ok(frame) => frame,
+        Err(_) => {
+            return encode_fallback(
+                request_id,
+                "internal_contract",
+                "worker produced an invalid response frame",
+            );
+        }
+    };
+    if zero_abi::validate_response_frame(&frame).is_err() {
+        return encode_fallback(
+            request_id,
+            "internal_contract",
+            "worker produced an invalid response frame",
+        );
+    }
+    match zero_abi::encode_frame(&frame, zero_abi::DEFAULT_MAX_FRAME_BYTES) {
+        Ok(bytes) => bytes,
+        Err(error) => encode_fallback(
+            request_id,
+            error.kind(),
+            "outbound frame exceeds the raw-worker protocol bound",
+        ),
+    }
 }
 
 fn local_capability() -> Value {
@@ -462,7 +524,7 @@ fn route_frame(session: &mut RawWorkerV2Session, line: &[u8]) -> RoutedFrame {
     if kind == "cancel" {
         let cancelled = session.cancel_call(request["request_id"].as_str().unwrap_or_default());
         return RoutedFrame::Respond(encode(
-            json!({"kind":"cancel_ack","request_id":request["request_id"],"cancelled":cancelled,"process_kill_supported":cfg!(unix)}),
+            json!({"kind":"cancel_ack","request_id":request["request_id"],"cancelled":cancelled}),
         ));
     }
     let binding = session.binding.as_ref().expect("binding checked above");
@@ -861,6 +923,45 @@ mod tests {
     }
 
     #[test]
+    fn response_encoding_uses_the_shared_strict_codec() {
+        let shutdown = encode(json!({"kind":"shutdown_ack"}));
+        assert_eq!(shutdown, b"{\"kind\":\"shutdown_ack\"}\n");
+        assert!(matches!(
+            zero_abi::decode_response_frame(&shutdown, zero_abi::DEFAULT_MAX_FRAME_BYTES),
+            Ok(zero_abi::WorkerResponseFrame::ShutdownAck)
+        ));
+
+        let mutant = encode(json!({"kind":"shutdown_ack","extra":true}));
+        let decoded = zero_abi::decode_response_frame(&mutant, zero_abi::DEFAULT_MAX_FRAME_BYTES)
+            .expect("fallback uses shared codec");
+        assert!(matches!(
+            decoded,
+            zero_abi::WorkerResponseFrame::Error { ref error, .. }
+                if error.kind == "internal_contract"
+        ));
+    }
+
+    #[test]
+    fn oversized_internal_request_id_cannot_panic_the_typed_fallback() {
+        let oversized = "x".repeat(zero_abi::DEFAULT_MAX_FRAME_BYTES);
+        let bytes = encode(json!({
+            "kind":"error",
+            "request_id":oversized,
+            "error":{"kind":"internal","message":"boom","retryable":false}
+        }));
+        let decoded = zero_abi::decode_response_frame(&bytes, zero_abi::DEFAULT_MAX_FRAME_BYTES)
+            .expect("uncorrelated fixed fallback uses shared codec");
+        assert!(matches!(
+            decoded,
+            zero_abi::WorkerResponseFrame::Error {
+                request_id: None,
+                ref error,
+                ..
+            } if error.kind == "frame_too_large"
+        ));
+    }
+
+    #[test]
     fn golden_handshake_reports_binding_limits_and_metadata_capabilities() {
         let mut session = RawWorkerV2Session::default();
         let rev = revision();
@@ -1200,9 +1301,9 @@ mod tests {
         let cap = local_capability();
         let rev = revision();
         for (field, bad) in [
-            ("expected_registry_digest", json!("deadbeef")),
-            ("expected_engine", json!("not-tokenzero")),
-            ("expected_contract_digest", json!("deadbeef")),
+            ("expected_registry_digest", json!("d".repeat(64))),
+            ("expected_engine", json!("fszero")),
+            ("expected_contract_digest", json!("d".repeat(64))),
         ] {
             let mut session = RawWorkerV2Session::default();
             let mut frame = handshake(&rev);
@@ -1267,7 +1368,7 @@ mod tests {
         );
         assert_eq!(ack["kind"], "cancel_ack");
         assert_eq!(ack["cancelled"], true);
-        assert_eq!(ack["process_kill_supported"], cfg!(unix));
+        assert!(ack.get("process_kill_supported").is_none());
         let value = worker.join().expect("worker joins after cancel");
         assert_eq!(value["error"]["kind"], "cancelled");
         assert_eq!(value["error"]["retryable"], false);

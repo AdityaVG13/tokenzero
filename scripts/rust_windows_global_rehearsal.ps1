@@ -114,7 +114,7 @@ try {
   $script:TokenZeroExe = [System.IO.Path]::GetFullPath($TokenZeroExe)
 
   if (!(Test-Path -LiteralPath $script:TokenZeroExe) -and !$SkipBuild) {
-    cargo build --release -p tokenzero --locked
+    cargo build --release -p tokenzero-cli --bin tokenzero --no-default-features --features surface-mcp --locked
     if ($LASTEXITCODE -ne 0) {
       throw "cargo build failed with exit code $LASTEXITCODE"
     }

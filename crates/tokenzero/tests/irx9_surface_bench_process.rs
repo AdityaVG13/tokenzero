@@ -33,34 +33,61 @@ fn repo_root() -> PathBuf {
         .to_path_buf()
 }
 
+fn build_target() -> PathBuf {
+    std::env::var_os("CARGO_TARGET_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| repo_root().join("target"))
+        .join("irx9-surface-mcp-bin")
+}
+
+fn executable_name(name: &str) -> String {
+    format!("{name}{}", std::env::consts::EXE_SUFFIX)
+}
+
 fn bin(name: &str) -> PathBuf {
-    repo_root().join("target/irx9-surface-mcp-bin").join(name)
+    build_target().join("debug").join(executable_name(name))
 }
 
 fn ensure_mcp_bins() {
     static READY: OnceLock<()> = OnceLock::new();
     READY.get_or_init(|| {
         let root = repo_root();
-        fs::create_dir_all(root.join("target/irx9-surface-mcp-bin")).unwrap();
-        for b in ["tokenzero", "tokenzero-mcp"] {
-            let st = Command::new("cargo")
-                .args([
-                    "build",
-                    "-p",
-                    "tokenzero",
-                    "--bin",
-                    b,
-                    "--jobs",
-                    "2",
-                    "--features",
-                    "surface-mcp",
-                ])
-                .current_dir(&root)
-                .status()
-                .unwrap();
-            assert!(st.success());
-            fs::copy(root.join("target/debug").join(b), bin(b)).unwrap();
-        }
+        let target = build_target();
+        let cli = Command::new("cargo")
+            .args([
+                "build",
+                "-p",
+                "tokenzero-cli",
+                "--bin",
+                "tokenzero",
+                "--jobs",
+                "2",
+                "--no-default-features",
+                "--features",
+                "surface-mcp",
+            ])
+            .env("CARGO_TARGET_DIR", &target)
+            .current_dir(&root)
+            .status()
+            .unwrap();
+        assert!(cli.success());
+
+        let worker = Command::new("cargo")
+            .args([
+                "build",
+                "-p",
+                "tokenzero-worker",
+                "--bin",
+                "tokenzero-codemode",
+                "--jobs",
+                "2",
+                "--no-default-features",
+            ])
+            .env("CARGO_TARGET_DIR", &target)
+            .current_dir(&root)
+            .status()
+            .unwrap();
+        assert!(worker.success());
     });
 }
 
@@ -140,7 +167,7 @@ fn measure_raw_worker(root: &Path, samples: usize) -> Value {
     for i in 0..samples {
         req_bytes.push(req.len() as u64);
         let t0 = Instant::now();
-        let mut cmd = Command::new(bin("tokenzero-mcp"));
+        let mut cmd = Command::new(bin("tokenzero-codemode"));
         cmd.args([
             "raw-worker",
             "--root",

@@ -44,7 +44,7 @@ jobs:
           TAG="${{ inputs.tag }}"
           TAG="${TAG#v}"
           VER="$(cargo metadata --no-deps --format-version 1 \
-                 | python3 -c 'import json,sys; data=json.load(sys.stdin); print(next(pkg["version"] for pkg in data["packages"] if pkg["name"] == "tokenzero"))')"
+                 | python3 -c 'import json,sys; data=json.load(sys.stdin); print(next(pkg["version"] for pkg in data["packages"] if pkg["name"] == "tokenzero-cli"))')"
           echo "input_tag=$TAG workspace_version=$VER"
           if [ "$TAG" != "$VER" ]; then
             echo "::error::tag v$TAG does not match workspace version $VER"; exit 1
@@ -130,39 +130,33 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
-      # Both surfaces, built separately. Surfaces are mutually exclusive, so a
-      # single build can only ever produce one of them: plain
-      # `cargo build -p tokenzero` takes default = ["surface-mcp"] and silently
-      # ships tokenzero-mcp alone, leaving tokenzero-codemode out of every
-      # release. --no-default-features is required on both; enabling both
-      # surface features in one build is a hard compile error.
-      - name: Build release binaries (both surfaces)
+      # Build the host-free CLI and the canonical planner-free raw worker as
+      # separate package roles. Legacy engine-local hosts are never compiled
+      # into the backend artifact.
+      - name: Build release binaries
         shell: bash
         run: |
           set -euo pipefail
-          cargo build -p tokenzero --locked --release --target "${{ matrix.target }}"
-          cargo build -p tokenzero --locked --release --target "${{ matrix.target }}" \
-            --bin tokenzero-mcp --no-default-features --features surface-mcp
-          cargo build -p tokenzero --locked --release --target "${{ matrix.target }}" \
-            --bin tokenzero-codemode --no-default-features --features surface-codemode
+          cargo build -p tokenzero-cli --locked --release --target "${{ matrix.target }}" \
+            --bin tokenzero --no-default-features
+          cargo build -p tokenzero-worker --locked --release --target "${{ matrix.target }}" \
+            --bin tokenzero-codemode --no-default-features
 
       # package-audit inspects bytes and need not execute the cross target. Build
       # one host-native auditor so every matrix row can gate its exact archive.
       - name: Build native package auditor
         shell: bash
-        run: cargo build -p tokenzero --locked --release --bin tokenzero
+        run: cargo build -p tokenzero-cli --locked --release --bin tokenzero --no-default-features
 
-      # Fail the release rather than publish a surface-incomplete archive.
-      - name: Verify both surface artifacts exist
+      # Fail the release rather than publish an archive without its backend.
+      - name: Verify canonical worker artifact exists
         shell: bash
         run: |
           set -euo pipefail
           dir="target/${{ matrix.target }}/release"
-          for artifact in tokenzero-mcp tokenzero-codemode; do
-            path="$dir/$artifact${{ runner.os == 'Windows' && '.exe' || '' }}"
-            test -f "$path" || { echo "missing release artifact: $path" >&2; exit 1; }
-            echo "ok: $path"
-          done
+          path="$dir/tokenzero-codemode${{ runner.os == 'Windows' && '.exe' || '' }}"
+          test -f "$path" || { echo "missing release artifact: $path" >&2; exit 1; }
+          echo "ok: $path"
       - name: Package Unix artifact
         if: ${{ runner.os != 'Windows' }}
         shell: bash
@@ -172,8 +166,8 @@ jobs:
           mkdir -p "dist/$name"
           rel="target/${{ matrix.target }}/release"
           cp "$rel/${{ matrix.binary }}" "dist/$name/"
-          # Ship both surface artifacts; the user installs one of them.
-          cp "$rel/tokenzero-mcp" "$rel/tokenzero-codemode" "dist/$name/"
+          # Ship the canonical backend beside the CLI artifact.
+          cp "$rel/tokenzero-codemode" "dist/$name/"
           cp README.md LICENSE "dist/$name/"
           # Build a deterministic USTAR archive without host owner/xattr/PAX
           # metadata. The exact bytes produced here are audited below and then
@@ -213,8 +207,8 @@ jobs:
           New-Item -ItemType Directory -Force -Path "dist\$name" | Out-Null
           $rel = "target\${{ matrix.target }}\release"
           Copy-Item -LiteralPath "$rel\${{ matrix.binary }}" -Destination "dist\$name\"
-          # Ship both surface artifacts; the user installs one of them.
-          Copy-Item -LiteralPath "$rel\tokenzero-mcp.exe", "$rel\tokenzero-codemode.exe" -Destination "dist\$name\"
+          # Ship the canonical backend beside the CLI artifact.
+          Copy-Item -LiteralPath "$rel\tokenzero-codemode.exe" -Destination "dist\$name\"
           Copy-Item -LiteralPath README.md, LICENSE -Destination "dist\$name\"
           Compress-Archive -Path "dist\$name" -DestinationPath "dist\$name.zip" -Force
           $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath "dist\$name.zip").Hash.ToLowerInvariant()

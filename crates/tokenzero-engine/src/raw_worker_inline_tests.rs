@@ -177,6 +177,47 @@ fn parse_raw_worker_argv_rejects_missing_option_values() {
 }
 
 #[test]
+fn parse_raw_worker_argv_rejects_unknown_duplicate_empty_and_incompatible_arguments() {
+    for tail in [
+        vec!["--evil"],
+        vec!["--handshake", "handshake"],
+        vec!["--root", "one", "--root=two"],
+        vec!["--cache-path="],
+        vec!["--once", ""],
+        vec!["--handshake", "--once", "{}"],
+    ] {
+        let args = std::iter::once("tokenzero-codemode".to_string())
+            .chain(std::iter::once("raw-worker".to_string()))
+            .chain(tail.into_iter().map(str::to_string))
+            .collect::<Vec<_>>();
+        assert!(
+            parse_raw_worker_argv(&args).is_err(),
+            "mutant accepted: {args:?}"
+        );
+    }
+}
+
+#[test]
+fn parse_raw_worker_argv_accepts_canonical_probe_and_serve_forms() {
+    for tail in [
+        vec!["--handshake"],
+        vec!["--root", "/tmp/tokenzero-root"],
+        vec!["--root=/tmp/tokenzero-root", "--cache-path=/tmp/cache"],
+    ] {
+        let args = std::iter::once("tokenzero-codemode".to_string())
+            .chain(std::iter::once("raw-worker".to_string()))
+            .chain(tail.into_iter().map(str::to_string))
+            .collect::<Vec<_>>();
+        assert!(
+            parse_raw_worker_argv(&args)
+                .expect("canonical form parses")
+                .is_some(),
+            "canonical form missed: {args:?}"
+        );
+    }
+}
+
+#[test]
 fn no_sandbox_modules_in_raw_worker_source() {
     let src = include_str!("raw_worker.rs");
     let production: String = src

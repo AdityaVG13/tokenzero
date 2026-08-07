@@ -1,7 +1,7 @@
 //! Packaged raw-worker v2 conformance gate.
 //!
-//! Drives the shipped `tokenzero` binary over v2 NDJSON stdio
-//! (`tokenzero raw-worker --root DIR` with ZEROSTACK_RAW_WORKER_PROTOCOL=v2).
+//! Drives the shipped `tokenzero-codemode` raw worker over v2 NDJSON stdio
+//! (`tokenzero-codemode raw-worker --root DIR` with ZEROSTACK_RAW_WORKER_PROTOCOL=v2).
 //! `TOKENZERO_RAW_WORKER_BIN` can select an exact installed release artifact.
 //! through the shared suite families: golden-frame fixture replay,
 //! cancellation, crash/restart, ref ownership, parser fuzz, capability
@@ -17,6 +17,7 @@ use std::fs;
 use std::io::{BufRead, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, ExitStatus, Stdio};
+use std::sync::OnceLock;
 use std::sync::mpsc::{Receiver, channel};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -59,9 +60,39 @@ fn unix_ms() -> u64 {
 }
 
 fn packaged_worker_bin() -> PathBuf {
-    std::env::var_os("TOKENZERO_RAW_WORKER_BIN")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| assert_cmd::cargo::cargo_bin("tokenzero"))
+    static BIN: OnceLock<PathBuf> = OnceLock::new();
+    BIN.get_or_init(|| {
+        if let Some(path) = std::env::var_os("TOKENZERO_RAW_WORKER_BIN") {
+            return PathBuf::from(path);
+        }
+        let target = std::env::var_os("CARGO_TARGET_DIR")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| repo_root().join("target"))
+            .join("raw-worker-v2-packaged");
+        let output = Command::new("cargo")
+            .args([
+                "build",
+                "-p",
+                "tokenzero-worker",
+                "--bin",
+                "tokenzero-codemode",
+                "--no-default-features",
+            ])
+            .env("CARGO_TARGET_DIR", &target)
+            .current_dir(repo_root())
+            .output()
+            .expect("canonical worker build starts");
+        assert!(
+            output.status.success(),
+            "canonical worker build failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        target.join("debug").join(format!(
+            "tokenzero-codemode{}",
+            std::env::consts::EXE_SUFFIX
+        ))
+    })
+    .clone()
 }
 
 /// Strip ambient agent env so the worker under test is hermetic.
@@ -492,9 +523,10 @@ fn cancel_control_frame_stops_live_shell_work_over_stdio() {
     let ack = cancel_ack.expect("cancel_ack frame");
     assert_eq!(ack["request_id"], "req-cancel");
     assert_eq!(ack["cancelled"], true, "{ack}");
-    if cfg!(unix) {
-        assert_eq!(ack["process_kill_supported"], true, "{ack}");
-    }
+    assert!(
+        ack.get("process_kill_supported").is_none(),
+        "cancel_ack must match the shared ABI exactly: {ack}"
+    );
     let response = call_response.expect("call response frame");
     assert_eq!(response["request_id"], "req-cancel");
     assert_eq!(response["error"]["kind"], "cancelled", "{response}");
@@ -881,7 +913,7 @@ fn parser_fuzz_never_hangs_or_emits_untyped_frames() {
         assert!(
             matches!(
                 kind,
-                "invalid_frame" | "frame_too_large" | "handshake_required"
+                "invalid_frame" | "frame_too_large" | "contract_mismatch" | "handshake_required"
             ),
             "frame {index}: unexpected error kind {kind}: {response}"
         );
@@ -1020,27 +1052,27 @@ fn protocol_invariant_mutations_fail_closed() {
     // Handshake binding invariants: protocol version, non-empty root, engine,
     // contract digest, and registry digest each fail closed.
     let base = handshake_request(&root, "s-mut", &cap, None);
-    let mut mutations: Vec<(&str, Value)> = Vec::new();
+    let mut mutations: Vec<(&str, Value, &str)> = Vec::new();
     let mut m = base.clone();
     m["request"]["protocol_version"] = json!("zerostack.raw_worker.v1");
-    mutations.push(("protocol_version", m));
+    mutations.push(("protocol_version", m, "contract_mismatch"));
     let mut m = base.clone();
     m["request"]["root"] = json!("");
-    mutations.push(("empty_root", m));
+    mutations.push(("empty_root", m, "contract_mismatch"));
     let mut m = base.clone();
     m["request"]["expected_engine"] = json!("fszero");
-    mutations.push(("engine", m));
+    mutations.push(("engine", m, "binding_mismatch"));
     let mut m = base.clone();
-    m["request"]["expected_contract_digest"] = json!("deadbeef");
-    mutations.push(("contract_digest", m));
+    m["request"]["expected_contract_digest"] = json!("d".repeat(64));
+    mutations.push(("contract_digest", m, "binding_mismatch"));
     let mut m = base.clone();
-    m["request"]["expected_registry_digest"] = json!("deadbeef");
-    mutations.push(("registry_digest", m));
-    for (label, frame) in mutations {
+    m["request"]["expected_registry_digest"] = json!("d".repeat(64));
+    mutations.push(("registry_digest", m, "binding_mismatch"));
+    for (label, frame, expected_kind) in mutations {
         worker.send(&frame);
         let response = worker.recv("handshake mutation");
         assert_eq!(
-            response["error"]["kind"], "binding_mismatch",
+            response["error"]["kind"], expected_kind,
             "{label} must fail closed: {response}"
         );
         assert_eq!(response["error"]["retryable"], false, "{label}: {response}");
@@ -1079,13 +1111,10 @@ fn protocol_invariant_mutations_fail_closed() {
         trace.clone(),
     ));
     let response = worker.recv("trace id mutation");
-    assert_eq!(
-        response["error"]["kind"], "trace_binding_mismatch",
-        "{response}"
-    );
+    assert_eq!(response["error"]["kind"], "contract_mismatch", "{response}");
 
     trace["request_id"] = json!("req-trace-contract");
-    trace["contract_digest"] = json!("deadbeef");
+    trace["contract_digest"] = json!("d".repeat(64));
     worker.send(&call_frame(
         "req-trace-contract",
         "mem",

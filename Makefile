@@ -1,6 +1,9 @@
 SHELL := /bin/bash
 
-.PHONY: test readme-command-audit host-path-audit rust-test rust-verify rust-verify-report rust-release-build rust-codemode-build rust-proof package-check release-check irx9-gate perf-regression-gate cli-smoke doctor mcp-smoke mcp-soak shell-matrix install-smoke package-audit scripts-test perf-persist-gate linux-docker-verify linux-perf-budget
+.PHONY: test readme-command-audit host-path-audit rust-test rust-verify rust-verify-report rust-release-build rust-codemode-build mcp-compat-build rust-proof package-check release-check irx9-gate perf-regression-gate cli-smoke doctor mcp-smoke mcp-soak shell-matrix install-smoke package-audit scripts-test perf-persist-gate linux-docker-verify linux-perf-budget
+
+MCP_COMPAT_TARGET := $(if $(CARGO_TARGET_DIR),$(CARGO_TARGET_DIR)/mcp-compat,target/mcp-compat)
+MCP_COMPAT_BIN := $(MCP_COMPAT_TARGET)/debug/tokenzero$(if $(filter Windows_NT,$(OS)),.exe,)
 
 test: readme-command-audit host-path-audit scripts-test rust-test
 
@@ -36,16 +39,19 @@ rust-verify:
 rust-verify-report:
 	@scripts/rust_verify.sh --robot --output-json results/current/rust_verify.json
 
-# CodeMode is a separate binary behind mutually-exclusive surface features:
-# a bare "cargo build --release" never produces it. This is THE command.
+# Canonical planner-free raw worker. Legacy CodeMode stays opt-in and is not
+# part of the backend artifact.
 rust-codemode-build:
-	@cargo build --release -p tokenzero --bin tokenzero-codemode --no-default-features --features surface-codemode
+	@cargo build --release -p tokenzero-worker --bin tokenzero-codemode --no-default-features
 	@test -x target/release/tokenzero-codemode || { echo "irx9: missing target/release/tokenzero-codemode"; exit 1; }
 	@if [ "$$(uname -s)" = "Darwin" ]; then 		file target/release/tokenzero-codemode | grep -q "$$(uname -m)" 		|| { echo "irx9: tokenzero-codemode is not native: $$(file target/release/tokenzero-codemode)"; exit 1; }; 	fi
 
 rust-release-build:
-	@cargo build --release -p tokenzero
+	@cargo build --release -p tokenzero-cli --bin tokenzero --no-default-features
 	@$(MAKE) --no-print-directory rust-codemode-build
+
+mcp-compat-build:
+	@cargo build -p tokenzero-cli --bin tokenzero --no-default-features --features surface-mcp --target-dir "$(MCP_COMPAT_TARGET)"
 
 rust-proof: rust-verify rust-release-build mcp-smoke mcp-soak shell-matrix install-smoke package-audit
 
@@ -82,11 +88,11 @@ cli-smoke:
 doctor:
 	@target/debug/tokenzero doctor --json
 
-mcp-smoke:
-	@target/debug/tokenzero mcp-smoke --output-md results/current/rust_mcp_smoke.md --output-json results/current/rust_mcp_smoke.json --json
+mcp-smoke: mcp-compat-build
+	@"$(MCP_COMPAT_BIN)" mcp-smoke --output-md results/current/rust_mcp_smoke.md --output-json results/current/rust_mcp_smoke.json --json
 
-mcp-soak:
-	@target/debug/tokenzero mcp-soak --output-md results/current/rust_mcp_soak.md --output-json results/current/rust_mcp_soak.json --json
+mcp-soak: mcp-compat-build
+	@"$(MCP_COMPAT_BIN)" mcp-soak --output-md results/current/rust_mcp_soak.md --output-json results/current/rust_mcp_soak.json --json
 
 shell-matrix:
 	@target/debug/tokenzero shell-matrix --output-md results/current/rust_shell_matrix_local.md --output-json results/current/rust_shell_matrix_local.json --json

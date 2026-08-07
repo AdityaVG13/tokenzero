@@ -236,7 +236,7 @@ try {
       id = "clone_rust_checkout"; command = "git clone --branch $Branch --single-branch $SourceUrl '$CurrentCheckout'"; cwd = $HomeRoot; skipped = $false
     },
     [ordered]@{
-      id = "build_final_release_binary"; command = "cargo build --release -p tokenzero --locked"; cwd = $CurrentCheckout; skipped = $false
+      id = "build_final_release_binary"; command = "cargo build --release -p tokenzero-cli --bin tokenzero --no-default-features --features surface-mcp --locked"; cwd = $CurrentCheckout; skipped = $false
     },
     [ordered]@{
       id = "preview_global_install"; command = "target\release\tokenzero.exe install --global --plan --mcp --shell --cli --root '$HomeRoot' --json"; cwd = $CurrentCheckout; skipped = $false
@@ -309,7 +309,7 @@ try {
     -Name "build final release binary" `
     -WorkingDirectory $CurrentCheckout `
     -FileName "cargo" `
-    -Arguments @("build", "--release", "-p", "tokenzero", "--locked")
+    -Arguments @("build", "--release", "-p", "tokenzero-cli", "--bin", "tokenzero", "--no-default-features", "--features", "surface-mcp", "--locked")
 
   $completed += Invoke-Checked `
     -Name "preview global install" `

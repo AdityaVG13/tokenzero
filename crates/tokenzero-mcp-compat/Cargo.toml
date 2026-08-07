@@ -40,6 +40,6 @@ tokenzero-engine = { path = "../tokenzero-engine", version = "1.0.2" }
 fastmcp-rust = { workspace = true, optional = true }
 
 [dev-dependencies]
-tokenzero-codemode = { path = "../tokenzero-codemode" }
+tokenzero-codemode = { package = "tokenzero-worker", path = "../tokenzero-codemode", features = ["surface-codemode"] }
 assert_cmd.workspace = true
 proptest.workspace = true

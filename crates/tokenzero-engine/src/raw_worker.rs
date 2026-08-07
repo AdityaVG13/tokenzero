@@ -2,11 +2,11 @@
 //!
 //! Trusted local composition path: invokes the typed domain dispatcher once
 //! per frame. Does **not** open FastMCP catalogs, parse JavaScript, plan,
-//! compact again, or rewrite envelopes. Not a third user-facing package —
-//! internal mode of the selected artifact for hub/OMP composition.
+//! compact again, or rewrite envelopes. It is the planner-free backend for
+//! ZeroStack composition, not a user-facing host.
 //!
 //! Production entry: [`run_raw_worker_serve`] / [`run_raw_worker_once`] for
-//! shipped surface binaries (`tokenzero-mcp raw-worker`, etc.).
+//! canonical `tokenzero-codemode` worker binary.
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -530,43 +530,99 @@ pub fn parse_raw_worker_argv(args: &[String]) -> Result<Option<RawWorkerServeOpt
     {
         return Ok(None);
     }
+
+    fn value<'a>(option: &str, value: Option<&'a String>) -> Result<&'a str, String> {
+        let value = value
+            .map(String::as_str)
+            .filter(|value| !value.is_empty() && !value.starts_with("--"))
+            .ok_or_else(|| format!("{option} requires a value and it must be non-empty"))?;
+        Ok(value)
+    }
+
     let rest = &args[2..];
     let mut opts = RawWorkerServeOptions::default();
+    let mut seen_handshake = false;
+    let mut seen_once = false;
+    let mut seen_root = false;
+    let mut seen_cache_path = false;
     let mut i = 0;
     while i < rest.len() {
-        match rest[i].as_str() {
-            "--handshake" | "handshake" => opts.handshake_only = true,
+        let argument = rest[i].as_str();
+        match argument {
+            "--handshake" | "handshake" => {
+                if seen_handshake {
+                    return Err("duplicate raw-worker handshake mode".into());
+                }
+                seen_handshake = true;
+                opts.handshake_only = true;
+            }
             "--once" => {
-                opts.once_json = Some(
-                    rest.get(i + 1)
-                        .ok_or_else(|| "--once requires a value".to_string())?
-                        .clone(),
-                );
+                if seen_once {
+                    return Err("duplicate raw-worker --once option".into());
+                }
+                seen_once = true;
+                opts.once_json = Some(value("--once", rest.get(i + 1))?.to_string());
                 i += 1;
             }
             "--root" => {
-                opts.root = PathBuf::from(
-                    rest.get(i + 1)
-                        .ok_or_else(|| "--root requires a value".to_string())?,
-                );
+                if seen_root {
+                    return Err("duplicate raw-worker --root option".into());
+                }
+                seen_root = true;
+                opts.root = PathBuf::from(value("--root", rest.get(i + 1))?);
                 i += 1;
             }
             "--cache-path" => {
-                opts.cache_path =
-                    Some(PathBuf::from(rest.get(i + 1).ok_or_else(|| {
-                        "--cache-path requires a value".to_string()
-                    })?));
+                if seen_cache_path {
+                    return Err("duplicate raw-worker --cache-path option".into());
+                }
+                seen_cache_path = true;
+                opts.cache_path = Some(PathBuf::from(value("--cache-path", rest.get(i + 1))?));
                 i += 1;
             }
-            s if s.starts_with("--once=") => {
-                opts.once_json = Some(s["--once=".len()..].to_string());
+            argument if argument.starts_with("--once=") => {
+                if seen_once {
+                    return Err("duplicate raw-worker --once option".into());
+                }
+                seen_once = true;
+                opts.once_json = Some(
+                    argument
+                        .strip_prefix("--once=")
+                        .filter(|value| !value.is_empty())
+                        .ok_or_else(|| "--once requires a non-empty value".to_string())?
+                        .to_string(),
+                );
             }
-            s if s.starts_with("--root=") => {
-                opts.root = PathBuf::from(&s["--root=".len()..]);
+            argument if argument.starts_with("--root=") => {
+                if seen_root {
+                    return Err("duplicate raw-worker --root option".into());
+                }
+                seen_root = true;
+                opts.root = PathBuf::from(
+                    argument
+                        .strip_prefix("--root=")
+                        .filter(|value| !value.is_empty())
+                        .ok_or_else(|| "--root requires a non-empty value".to_string())?,
+                );
             }
-            _ => {}
+            argument if argument.starts_with("--cache-path=") => {
+                if seen_cache_path {
+                    return Err("duplicate raw-worker --cache-path option".into());
+                }
+                seen_cache_path = true;
+                opts.cache_path = Some(PathBuf::from(
+                    argument
+                        .strip_prefix("--cache-path=")
+                        .filter(|value| !value.is_empty())
+                        .ok_or_else(|| "--cache-path requires a non-empty value".to_string())?,
+                ));
+            }
+            _ => return Err(format!("unknown raw-worker argument: {argument}")),
         }
         i += 1;
+    }
+    if seen_handshake && seen_once {
+        return Err("raw-worker --handshake and --once are incompatible".into());
     }
     Ok(Some(opts))
 }

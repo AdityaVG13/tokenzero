@@ -2612,6 +2612,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "shell-words"
+version = "1.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "dc6fe69c597f9c37bfeeeeeb33da3530379845f10be461a66d16d03eca2ded77"
+
+[[package]]
 name = "shlex"
 version = "2.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2932,7 +2938,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1f3ccbac311fea05f86f61904b462b55fb3df8837a366dfc601a0161d0532f20"
 
 [[package]]
-name = "tokenzero"
+name = "tokenzero-cli"
 version = "1.4.0"
 dependencies = [
  "anyhow",
@@ -2944,32 +2950,15 @@ dependencies = [
  "serde_json",
  "sha2 0.11.0",
  "tempfile",
- "tokenzero-codemode",
  "tokenzero-core",
+ "tokenzero-engine",
  "tokenzero-filters",
  "tokenzero-install",
  "tokenzero-mcp-compat",
  "tokenzero-pulse",
  "tokenzero-recovery",
  "tokenzero-runtime",
-]
-
-[[package]]
-name = "tokenzero-codemode"
-version = "1.4.0"
-dependencies = [
- "fs4",
- "rquickjs",
- "serde",
- "serde_json",
- "sha2 0.11.0",
- "tempfile",
- "tokenzero-core",
- "tokenzero-engine",
- "tokenzero-filters",
- "tokenzero-pulse",
- "tokenzero-recovery",
- "zerostack-machine-permit",
+ "tokenzero-worker",
 ]
 
 [[package]]
@@ -3053,13 +3042,13 @@ dependencies = [
  "similar",
  "tempfile",
  "thiserror",
- "tokenzero-codemode",
  "tokenzero-core",
  "tokenzero-engine",
  "tokenzero-filters",
  "tokenzero-pulse",
  "tokenzero-recovery",
  "tokenzero-runtime",
+ "tokenzero-worker",
  "zerostack-machine-permit",
 ]
 
@@ -3108,6 +3097,37 @@ dependencies = [
  "thiserror",
  "tokenzero-core",
  "wait-timeout",
+]
+
+[[package]]
+name = "tokenzero-test-support"
+version = "1.4.0"
+dependencies = [
+ "zero-abi",
+]
+
+[[package]]
+name = "tokenzero-worker"
+version = "1.4.0"
+dependencies = [
+ "base64",
+ "fs4",
+ "proptest",
+ "rquickjs",
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
+ "shell-words",
+ "tempfile",
+ "thiserror",
+ "tokenzero-core",
+ "tokenzero-engine",
+ "tokenzero-filters",
+ "tokenzero-pulse",
+ "tokenzero-recovery",
+ "tokenzero-runtime",
+ "zero-abi",
+ "zerostack-machine-permit",
 ]
 
 [[package]]

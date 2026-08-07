@@ -1,8 +1,4 @@
-//! Static evidence for tokenzero-irx9.3 process/artifact mutual exclusion.
-//!
-//! These tests read source/Cargo.toml/install.sh only — they do not invoke
-//! cargo, rustc, surface servers, or the package installer.
-
+use std::fs;
 use std::path::PathBuf;
 
 fn repo_root() -> PathBuf {
@@ -14,333 +10,88 @@ fn repo_root() -> PathBuf {
         .to_path_buf()
 }
 
-fn read(rel: &str) -> String {
-    std::fs::read_to_string(repo_root().join(rel)).unwrap_or_else(|e| panic!("read {rel}: {e}"))
+fn read(path: &str) -> String {
+    fs::read_to_string(repo_root().join(path)).unwrap()
 }
 
-/// Defaults must not enable both surfaces (dual-surface default removed).
 #[test]
-fn cargo_defaults_are_single_surface() {
-    let mcp = read("crates/tokenzero-mcp/Cargo.toml");
+fn workspace_has_the_three_canonical_packages() {
+    let root = read("Cargo.toml");
+    assert!(root.contains("\"crates/tokenzero\""));
+    assert!(root.contains("\"crates/tokenzero-codemode\""));
+    assert!(root.contains("\"crates/tokenzero-test-support\""));
+
     let cli = read("crates/tokenzero/Cargo.toml");
+    assert!(cli.contains("name = \"tokenzero-cli\""));
+    assert!(cli.contains("autobins = false"));
+    assert!(cli.contains("default = []"));
+    assert!(cli.contains("name = \"tokenzero\""));
 
-    // Extract the [features] default = ... line (first occurrence after [features]).
-    for (label, toml) in [("tokenzero-mcp", mcp.as_str()), ("tokenzero", cli.as_str())] {
-        let features = toml
-            .split("[features]")
-            .nth(1)
-            .unwrap_or_else(|| panic!("{label}: missing [features]"));
-        let default_line = features
-            .lines()
-            .find(|l| l.trim_start().starts_with("default"))
-            .unwrap_or_else(|| panic!("{label}: missing default ="));
-        assert!(
-            default_line.contains("surface-mcp"),
-            "{label}: default must select surface-mcp: {default_line}"
-        );
-        assert!(
-            !default_line.contains("surface-codemode"),
-            "{label}: default must NOT enable surface-codemode (dual default banned): {default_line}"
-        );
-        // Hard exclusion of the dual-list form from edbc891.
-        assert!(
-            !default_line.contains("surface-mcp\", \"surface-codemode")
-                && !default_line.contains("surface-mcp\", \"surface-codemode"),
-            "{label}: dual default list forbidden: {default_line}"
-        );
-    }
+    let worker = read("crates/tokenzero-codemode/Cargo.toml");
+    assert!(worker.contains("name = \"tokenzero-worker\""));
+    assert!(worker.contains("autobins = false"));
+    assert!(worker.contains("default = []"));
+    assert!(worker.contains("name = \"tokenzero-codemode\""));
+    assert!(worker.contains("zero-abi.workspace = true"));
+    assert!(!worker.contains("tokenzero-install"));
+
+    let support = read("crates/tokenzero-test-support/Cargo.toml");
+    assert!(support.contains("name = \"tokenzero-test-support\""));
+    assert!(support.contains("zero-abi.workspace = true"));
 }
 
-/// Dual feature enablement is a compile_error in all three packaging crates.
 #[test]
-fn compile_error_guards_dual_features_in_source() {
-    for path in [
-        "crates/tokenzero-mcp/src/lib.rs",
-        "crates/tokenzero/src/main.rs",
-        "crates/tokenzero-install/src/lib.rs",
-    ] {
-        let src = read(path);
-        assert!(
-            src.contains("compile_error!"),
-            "{path}: missing compile_error! for dual surface features"
-        );
-        assert!(
-            src.contains("surface-mcp") && src.contains("surface-codemode"),
-            "{path}: compile_error must name both surface features"
-        );
-        assert!(
-            src.contains("mutually exclusive") || src.contains("mutual exclusion"),
-            "{path}: compile_error must document mutual exclusion"
-        );
-    }
-}
+fn canonical_cli_has_no_raw_worker_entrypoint_or_default_adapter() {
+    let cargo = read("crates/tokenzero/Cargo.toml");
+    assert!(cargo.contains("tokenzero-mcp-compat = {"));
+    assert!(cargo.contains("optional = true"));
+    assert_eq!(cargo.matches("[[bin]]").count(), 1);
 
-/// Peer surface deps are optional and feature-gated (static Cargo.toml proof).
-#[test]
-fn peer_surface_dependencies_are_optional() {
-    let mcp = read("crates/tokenzero-mcp/Cargo.toml");
-    assert!(
-        mcp.contains("fastmcp-rust = { workspace = true, optional = true }")
-            || mcp.contains("optional = true") && mcp.contains("fastmcp-rust"),
-        "fastmcp-rust must be optional"
-    );
-    assert!(
-        mcp.contains("rquickjs = { workspace = true, optional = true }")
-            || (mcp.contains("rquickjs") && mcp.contains("optional = true")),
-        "rquickjs must be optional"
-    );
-    assert!(
-        mcp.contains("surface-mcp = [\"dep:fastmcp-rust\"]"),
-        "surface-mcp must pull only fastmcp-rust"
-    );
-    assert!(
-        mcp.contains("surface-codemode = [\"dep:rquickjs\"]"),
-        "surface-codemode must pull only rquickjs"
-    );
-}
-
-/// Installer lifecycle owner never starts a stdio server to write state.
-#[test]
-fn install_sh_is_installer_native_no_server_state_writes() {
-    let sh = read("packaging/install.sh");
-    assert!(
-        sh.contains("Never invoke the surface binary")
-            || sh.contains("never starts a stdio server")
-            || sh.contains("Installer writes state/client-config itself"),
-        "install.sh must document installer-native state writes"
-    );
-    assert!(
-        sh.contains("write_install_state") || sh.contains("install-state.json"),
-        "install.sh must write install-state itself"
-    );
-    assert!(
-        sh.contains("client-config.json"),
-        "install.sh must write client-config itself"
-    );
-    assert!(
-        sh.contains("atomic_write") || sh.contains(".tmp."),
-        "install.sh must use atomic writes"
-    );
-    // State write path must not shell out to surface `install` for lifecycle ownership.
-    // (Surface bins may implement install for convenience; shell installer is owner.)
-    let install_body = sh
-        .split("if [[ \"$ACTION\" == \"uninstall\" ]]")
-        .nth(1)
-        .unwrap_or(&sh);
-    // After option parsing, the install path builds/copies then write_install_state —
-    // never: `"$SRC" install` or `"$BIN_DIR/$ARTIFACT" install` for state creation.
-    for forbidden in [
-        "\"$SRC\" install",
-        "\"$BIN_DIR/$ARTIFACT\" install",
-        "$ARTIFACT install --",
-        "tokenzero-mcp install",
-        "tokenzero-codemode install",
-    ] {
-        assert!(
-            !install_body.contains(forbidden),
-            "install.sh must not invoke surface install for state: found {forbidden:?}"
-        );
-    }
-    // Uninstall is installer-native (rm state files), not surface server.
-    assert!(
-        sh.contains("Installer-native uninstall")
-            || sh.contains("never invoke surface server")
-            || sh.contains("rm -f \"$PREFIX/install-state.json\""),
-        "uninstall must be installer-native"
-    );
-    // Peer replacement on surface switch.
-    assert!(
-        sh.contains("replacing peer artifact") || sh.contains("PEER="),
-        "install.sh must remove peer artifact on replace"
-    );
-    // Rollback snapshot of prior state before replace.
-    assert!(
-        sh.contains("ROLLBACK_STATE") || sh.contains("restoring prior"),
-        "install.sh must snapshot/restore prior state on failed install"
-    );
-    // Dual fail closed.
-    assert!(
-        sh.contains("fail closed") && sh.contains("TOKENZERO_ENABLE_MCP"),
-        "install.sh must fail closed on dual env selection"
-    );
-    // Platform simulation for e2e without real dual-OS.
-    assert!(
-        sh.contains("TOKENZERO_INSTALL_PLATFORM"),
-        "install.sh must support platform simulation"
-    );
-}
-
-/// Packaging helpers document process mutual exclusion and reject dual compile.
-#[test]
-fn packaging_rs_rejects_dual_compiled_surfaces() {
-    let src = read("crates/tokenzero-install/src/packaging.rs");
-    assert!(
-        src.contains("reject_dual_compiled_surfaces"),
-        "missing reject_dual_compiled_surfaces"
-    );
-    assert!(
-        src.contains("compile_time_surfaces"),
-        "missing compile_time_surfaces"
-    );
-    // No dual-surface "dev fallback" that injects both surfaces when features empty.
-    assert!(
-        !src.contains("Dev fallback: both allowed")
-            && !src.contains("both surfaces are package options"),
-        "must not reintroduce dual-surface compile_time fallback"
-    );
-    assert!(
-        src.contains("install_surface") && src.contains("uninstall_surface"),
-        "lifecycle owner API required"
-    );
-    assert!(src.contains("atomic_write"), "state writes must be atomic");
-}
-
-/// Runtime exclusivity chokepoint on mcp-server path.
-#[test]
-fn main_enforces_resolve_startup_surface() {
     let main = read("crates/tokenzero/src/main.rs");
-    assert!(
-        main.contains("enforce_surface_exclusivity"),
-        "mcp-server must call exclusivity gate"
-    );
-    assert!(
-        main.contains("resolve_startup_surface") || main.contains("reject_dual_compiled_surfaces"),
-        "must resolve single surface / reject dual compile at runtime"
-    );
-    assert!(
-        main.contains("TOKENZERO_ALLOW_DUAL"),
-        "ALLOW_DUAL mentioned for hub sentinel only"
-    );
-    assert!(
-        main.contains("never dual catalogs") || main.contains("hub sentinel only"),
-        "ALLOW_DUAL must not authorize dual catalogs"
-    );
+    assert!(!main.contains("run_raw_worker_cli"));
+    assert!(!main.contains("raw-worker"));
 }
 
-/// Surface bins handle packaging subcommands before server start.
 #[test]
-fn surface_bins_handle_install_before_server() {
-    for path in [
-        "crates/tokenzero/src/bin/tokenzero_mcp.rs",
-        "crates/tokenzero/src/bin/tokenzero_codemode.rs",
-    ] {
-        let src = read(path);
-        // Match server *call sites*, not imports (`use ... run_fastmcp_stdio`).
-        let install_pos = src.find("if args.iter().any(|a| a == \"install\")");
-        let server_pos = src
-            .find("run_fastmcp_stdio(config)")
-            .or_else(|| src.find("let code = run_stdio(config)"))
-            .or_else(|| src.find("run_stdio(config)"));
-        assert!(install_pos.is_some(), "{path}: missing install branch");
+fn raw_v2_wire_authority_is_only_the_pinned_zero_abi() {
+    let root = read("Cargo.toml");
+    assert!(root.contains("rev = \"3eca1c6299ec5a683d283ddad0aae62ece2a3abc\""));
+    let protocol = read("crates/tokenzero-engine/src/raw_worker_v2_protocol.rs");
+    assert!(protocol.contains("pub use zero_abi::raw_worker::*;"));
+    for forbidden in ["struct ", "enum ", "serde_json", "MAX_FRAME_BYTES:"] {
         assert!(
-            server_pos.is_some(),
-            "{path}: missing server call site (run_fastmcp_stdio/run_stdio)"
-        );
-        assert!(
-            install_pos.unwrap() < server_pos.unwrap(),
-            "{path}: install must be handled before server start"
-        );
-        let after_install = &src[install_pos.unwrap()..];
-        let exit_before_server = after_install
-            .find("process::exit(0)")
-            .or_else(|| after_install.find("process::exit("));
-        let server_rel = server_pos.unwrap() - install_pos.unwrap();
-        assert!(
-            exit_before_server.is_some() && exit_before_server.unwrap() < server_rel,
-            "{path}: install path must process::exit before server call"
-        );
-        assert!(
-            src.contains("install_surface") && src.contains("uninstall_surface"),
-            "{path}: must use packaging install_surface (no stdio state write)"
+            !protocol.contains(forbidden),
+            "local wire authority: {forbidden}"
         );
     }
 }
 
-/// Selection matrix docs and docs/install.md stay aligned.
 #[test]
-fn selection_matrix_documented() {
-    let docs = read("docs/install.md");
-    assert!(docs.contains("native CodeMode client") || docs.contains("Native CodeMode"));
-    assert!(docs.contains("tokenzero-mcp"));
-    assert!(docs.contains("tokenzero-codemode"));
+fn central_build_consumers_select_cli_and_worker_separately() {
+    let release = read(".github/workflows/release.yml");
+    let release = release.split_whitespace().collect::<Vec<_>>().join(" ");
+    assert!(release.contains("-p tokenzero-cli"));
+    assert!(release.contains("--bin tokenzero --no-default-features"));
+    assert!(release.contains("-p tokenzero-worker"));
+    assert!(release.contains("--bin tokenzero-codemode --no-default-features"));
+    let ci = read(".github/workflows/ci.yml");
+    assert!(ci.contains("-p tokenzero-worker --bin tokenzero-codemode --no-default-features"));
+    let makefile = read("Makefile");
     assert!(
-        docs.contains("compile error") || docs.contains("compile_error"),
-        "docs must state dual features are a compile error"
-    );
-    assert!(
-        docs.contains("never") && docs.contains("stdio server"),
-        "docs must state installer never starts stdio for state"
+        makefile.contains("-p tokenzero-worker --bin tokenzero-codemode --no-default-features")
     );
 }
 
-/// The public compat contract must cover every canonical tool and lifecycle
-/// obligation. Deriving names from the catalog makes a new tool fail this gate
-/// until its migration row is documented.
 #[test]
-fn compat_support_and_migration_contract_is_complete() {
-    let catalog = read("crates/tokenzero-mcp-compat/src/catalog.rs");
-    let docs = read("docs/mcp-compat.md");
-    let mut canonical_tools = catalog
-        .lines()
-        .filter_map(|line| {
-            let (_, rest) = line.split_once("=> { name: \"")?;
-            let (name, _) = rest.split_once('"')?;
-            Some(name)
-        })
-        .collect::<Vec<_>>();
-    canonical_tools.sort_unstable();
-    canonical_tools.dedup();
-
-    assert_eq!(
-        canonical_tools.len(),
-        20,
-        "unexpected canonical catalog size; review the migration contract"
+fn installer_is_selector_probe_uninstall_only_until_central_discovery() {
+    let installer = read("packaging/install.sh");
+    assert!(installer.contains("zerostack-uf1u"));
+    assert!(
+        installer
+            .contains("cargo build --release -p $PACKAGE --bin $ARTIFACT --no-default-features")
     );
-    for tool in canonical_tools {
-        assert!(
-            docs.contains(&format!("`{tool}`")),
-            "compat migration contract is missing {tool}"
-        );
-    }
-
-    let alias_block = catalog
-        .split_once("pub(crate) const TOOL_ALIASES")
-        .and_then(|(_, rest)| rest.split_once("];"))
-        .map(|(block, _)| block)
-        .expect("TOOL_ALIASES block");
-    for alias in alias_block.lines().filter_map(|line| {
-        line.trim()
-            .strip_prefix("(\"")?
-            .split_once("\",")
-            .map(|(alias, _)| alias)
-    }) {
-        assert!(
-            docs.contains(&format!("`{alias}`")),
-            "compat migration contract is missing alias {alias}"
-        );
-    }
-
-    for marker in [
-        "2026-08-07",
-        "2026-11-05",
-        "2027-02-03",
-        "feature-frozen",
-        "security or privacy fixes",
-        "correctness fixes",
-        "migration-blocker fixes",
-        "stdout remains JSON-RPC only",
-        "initialize",
-        "notifications/initialized",
-        "tools/list",
-        "tools/call",
-        "resources/read",
-        "server/discover",
-        "./packaging/install.sh --surface codemode",
-        "./packaging/install.sh --surface mcp",
-        "tokenzero install --rollback latest",
-        "./packaging/install.sh --uninstall",
-        "github.com/AdityaVG13/tokenzero/issues",
-    ] {
-        assert!(docs.contains(marker), "compat contract is missing {marker}");
-    }
+    assert!(installer.contains("legacy MCP artifact retired"));
+    assert!(!installer.contains("write_install_state"));
+    assert!(!installer.contains("client-config args"));
+    assert!(!installer.contains("ln -sf"));
 }

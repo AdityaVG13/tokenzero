@@ -1,24 +1,6 @@
 #!/usr/bin/env bash
-# TokenZero package installer (tokenzero-irx9.3) — macOS / Linux.
-#
-# Installs exactly one surface artifact: tokenzero-mcp OR tokenzero-codemode.
-# Replaces any prior registration. Never registers both catalogs.
-#
-# CRITICAL: after candidate verification, the installed surface artifact writes
-# state + client-config through its installer-native serde serializer. The shell
-# owns the release transaction and never starts the artifact's stdio server.
-#
-# Usage:
-#   ./packaging/install.sh --surface mcp|codemode [--prefix DIR] [--bin-dir DIR]
-#   ./packaging/install.sh --uninstall [--prefix DIR]
-#   ./packaging/install.sh --sbom --surface mcp|codemode
-#   ./packaging/install.sh --surface mcp --skip-build
-#
-# Selection matrix:
-#   native CodeMode client  -> install tokenzero-mcp
-#   legacy MCP-only client  -> install tokenzero-codemode
-#
-# Platform simulation for e2e: TOKENZERO_INSTALL_PLATFORM=macos|linux|windows
+# Canonical TokenZero worker selector/probe. Direct installation remains blocked
+# until ZeroStack central worker discovery adoption (zerostack-uf1u).
 
 set -euo pipefail
 
@@ -26,19 +8,18 @@ SURFACE=""
 PREFIX="${TOKENZERO_INSTALL_PREFIX:-${HOME}/.tokenzero-install}"
 BIN_DIR="${TOKENZERO_BIN_DIR:-${HOME}/.local/bin}"
 ACTION="install"
-SKIP_BUILD=0
+DRY_RUN=0
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+TARGET_DIR="${CARGO_TARGET_DIR:-$ROOT/target}"
 
 usage() {
   cat <<EOF
-usage: $0 --surface mcp|codemode [--prefix DIR] [--bin-dir DIR] [--skip-build]
-       $0 --uninstall [--prefix DIR]
-       $0 --sbom --surface mcp|codemode
+usage: $0 --surface codemode --dry-run
+       $0 --sbom --surface codemode [--bin-dir DIR]
+       $0 --uninstall [--prefix DIR] [--bin-dir DIR]
 
-Artifacts: tokenzero-mcp | tokenzero-codemode | tokenzero (compat shim symlink)
-Never install both surfaces. Dual client registration is unsupported.
-Verified artifact writes state/client-config through serde; install never starts server stdio.
-Selection: native CodeMode client -> tokenzero-mcp; otherwise -> tokenzero-codemode.
+Canonical backend: tokenzero-codemode from package tokenzero-worker.
+Legacy MCP is retired. Direct install waits for ZeroStack central discovery.
 EOF
 }
 
@@ -52,9 +33,9 @@ while [[ $# -gt 0 ]]; do
     --bin-dir=*) BIN_DIR="${1#*=}"; shift ;;
     --uninstall) ACTION="uninstall"; shift ;;
     --sbom) ACTION="sbom"; shift ;;
-    --skip-build) SKIP_BUILD=1; shift ;;
+    --dry-run) DRY_RUN=1; shift ;;
     -h|--help) usage; exit 0 ;;
-    *) echo "unknown arg: $1" >&2; usage; exit 2 ;;
+    *) echo "unknown arg: $1" >&2; usage >&2; exit 2 ;;
   esac
 done
 
@@ -73,317 +54,102 @@ os_name() {
   esac
 }
 
-artifact_for_surface() {
-  case "$1" in
-    mcp) echo tokenzero-mcp ;;
-    codemode) echo tokenzero-codemode ;;
-    *) echo "bad surface: $1" >&2; exit 2 ;;
-  esac
-}
-
-feature_for_surface() {
-  case "$1" in
-    mcp) echo surface-mcp ;;
-    codemode) echo surface-codemode ;;
-  esac
-}
-
-write_install_state() {
-  local surface="$1" binary="$3" platform="$5"
-  TOKENZERO_INSTALL_PLATFORM="$platform" \
-    "$binary" install \
-      --surface "$surface" \
-      --prefix "$PREFIX" \
-      --binary "$binary" \
-      >/dev/null
-}
-
-read_digest_from_sbom() {
-  local bin="$1"
-  if [[ ! -x "$bin" ]]; then
-    echo "unknown"
-    return
-  fi
-  if command -v python3 >/dev/null 2>&1; then
-    python3 - "$bin" <<'PY' 2>/dev/null || echo "unknown"
-import json, subprocess, sys
-bin_path = sys.argv[1]
-try:
-    p = subprocess.run([bin_path, "sbom"], capture_output=True, text=True, timeout=15, check=False)
-except Exception:
-    print("unknown")
-    raise SystemExit(0)
-text = (p.stdout or "") + "\n" + (p.stderr or "")
-for line in text.splitlines():
-    line = line.strip()
-    if line.startswith("{"):
-        try:
-            doc = json.loads(line)
-            print(doc.get("semantic_contract_digest") or "unknown")
-            raise SystemExit(0)
-        except json.JSONDecodeError:
-            pass
-try:
-    doc = json.loads(p.stdout or "")
-    print(doc.get("semantic_contract_digest") or "unknown")
-except Exception:
-    print("unknown")
-PY
-  else
-    local output digest
-    output="$("$bin" sbom 2>/dev/null || true)"
-    digest="$(
-      printf '%s\n' "$output" \
-        | grep -Eo '"semantic_contract_digest"[[:space:]]*:[[:space:]]*"[0-9a-f]{64}"' \
-        | head -n 1 \
-        | grep -Eo '[0-9a-f]{64}' \
-        || true
-    )"
-    echo "${digest:-unknown}"
-  fi
-}
-
 json_field() {
   local file="$1" field="$2"
-  if [[ ! -f "$file" ]]; then
+  if [[ ! -f "$file" ]] || ! command -v python3 >/dev/null 2>&1; then
     echo ""
     return
   fi
-  if command -v python3 >/dev/null 2>&1; then
-    python3 - "$file" "$field" <<'PY' 2>/dev/null || true
+  python3 - "$file" "$field" <<'PY' 2>/dev/null || true
 import json, sys
 path, field = sys.argv[1], sys.argv[2]
 try:
-    with open(path) as f:
-        doc = json.load(f)
-    v = doc.get(field, "")
-    if isinstance(v, str):
-        print(v)
-    else:
-        print(v if v is not None else "")
+    with open(path) as handle:
+        value = json.load(handle).get(field, "")
+    print(value if isinstance(value, str) else "")
 except Exception:
     pass
 PY
-  fi
 }
 
 if [[ "$ACTION" == "uninstall" ]]; then
-  # Installer-native uninstall — never invoke surface server binaries.
-  prev_surface="$(json_field "$PREFIX/install-state.json" surface)"
-  prev_artifact="$(json_field "$PREFIX/install-state.json" artifact)"
-  prev_digest="$(json_field "$PREFIX/install-state.json" semantic_contract_digest)"
-  rm -f "$PREFIX/install-state.json" "$PREFIX/client-config.json" "$PREFIX/shim-target"
-  rm -f "$BIN_DIR/tokenzero-mcp" "$BIN_DIR/tokenzero-codemode" "$BIN_DIR/tokenzero"
-  if [[ -n "${prev_artifact:-}" ]]; then
-    echo "uninstall: ok uninstalled=true artifact=${prev_artifact} surface=${prev_surface:-?} semantic_contract_digest=${prev_digest:-?} prefix=$PREFIX platform=$(os_name)"
-  else
+  state="$PREFIX/install-state.json"
+  if [[ ! -f "$state" ]]; then
     echo "uninstall: ok uninstalled=false reason=no_install_state prefix=$PREFIX platform=$(os_name)"
+    exit 0
   fi
+
+  prev_surface="$(json_field "$state" surface)"
+  prev_artifact="$(json_field "$state" artifact)"
+  prev_binary="$(json_field "$state" binary_path)"
+  prev_digest="$(json_field "$state" semantic_contract_digest)"
+  case "$prev_artifact" in
+    tokenzero-mcp|tokenzero-codemode) ;;
+    *)
+      echo "uninstall: refused unrecognized install-state artifact; state preserved" >&2
+      exit 2
+      ;;
+  esac
+  expected_binary="$BIN_DIR/$prev_artifact"
+  if [[ "$prev_binary" != "$expected_binary" ]]; then
+    echo "uninstall: refused install-state binary_path mismatch; state preserved" >&2
+    exit 2
+  fi
+
+  rm -f "$expected_binary"
+  shim="$BIN_DIR/tokenzero"
+  if [[ -L "$shim" && "$(readlink "$shim")" == "$expected_binary" ]]; then
+    rm -f "$shim"
+  fi
+  rm -f "$state" "$PREFIX/client-config.json" "$PREFIX/shim-target"
+  echo "uninstall: ok uninstalled=true artifact=$prev_artifact surface=${prev_surface:-?} semantic_contract_digest=${prev_digest:-?} prefix=$PREFIX platform=$(os_name)"
   exit 0
 fi
 
 if [[ -z "$SURFACE" ]]; then
-  echo "require --surface mcp|codemode" >&2
-  usage
+  echo "require --surface codemode" >&2
+  usage >&2
   exit 2
 fi
-
 case "$SURFACE" in
-  mcp|codemode) ;;
-  both|all|mcp+codemode|codemode+mcp)
-    echo "tokenzero: dual package surface rejected (fail closed): install requests both surfaces" >&2
+  codemode) ;;
+  mcp)
+    echo "tokenzero: legacy MCP artifact retired; use the ZeroStack aggregate host adapter" >&2
     exit 2
     ;;
-  *) echo "surface must be mcp or codemode (not both)" >&2; exit 2 ;;
+  both|all|mcp+codemode|codemode+mcp)
+    echo "tokenzero: dual package surface rejected (fail closed)" >&2
+    exit 2
+    ;;
+  *) echo "surface must be codemode" >&2; exit 2 ;;
 esac
-
 if [[ -n "${TOKENZERO_ENABLE_MCP:-}" && -n "${TOKENZERO_ENABLE_CODEMODE:-}" ]]; then
-  echo "tokenzero: dual package surface rejected (fail closed): both TOKENZERO_ENABLE_MCP and TOKENZERO_ENABLE_CODEMODE are set" >&2
+  echo "tokenzero: dual package surface rejected (fail closed): both surface envs are set" >&2
   exit 2
 fi
 
-ARTIFACT="$(artifact_for_surface "$SURFACE")"
-FEATURE="$(feature_for_surface "$SURFACE")"
-PLATFORM="$(os_name)"
+ARTIFACT="tokenzero-codemode"
+PACKAGE="tokenzero-worker"
+if [[ "$DRY_RUN" -eq 1 ]]; then
+  if [[ "$ACTION" != "install" ]]; then
+    echo "--dry-run cannot be combined with --sbom or --uninstall" >&2
+    exit 2
+  fi
+  echo "cargo build --release -p $PACKAGE --bin $ARTIFACT --no-default-features"
+  exit 0
+fi
 
 if [[ "$ACTION" == "sbom" ]]; then
-  CANDIDATES=("$BIN_DIR/$ARTIFACT" "$ROOT/target/release/$ARTIFACT" "$ROOT/target/debug/$ARTIFACT")
-  for c in "${CANDIDATES[@]}"; do
-    if [[ -x "$c" ]]; then
-      "$c" sbom
+  for candidate in "$BIN_DIR/$ARTIFACT" "$TARGET_DIR/release/$ARTIFACT" "$TARGET_DIR/debug/$ARTIFACT"; do
+    if [[ -x "$candidate" ]]; then
+      "$candidate" sbom
       exit 0
     fi
   done
-  echo "sbom: binary $ARTIFACT not found; build first" >&2
+  echo "sbom: canonical worker $ARTIFACT not found; run --dry-run for its build selector" >&2
   exit 1
 fi
 
-echo "install: surface=$SURFACE artifact=$ARTIFACT platform=$PLATFORM prefix=$PREFIX"
-
-if [[ "$SKIP_BUILD" -eq 0 ]]; then
-  echo "install: building $ARTIFACT (feature $FEATURE)"
-  (
-    cd "$ROOT"
-    cargo build --release \
-      -p tokenzero \
-      --bin "$ARTIFACT" \
-      --no-default-features \
-      --features "${FEATURE}"
-  )
-  SRC="$ROOT/target/release/$ARTIFACT"
-else
-  # Prefer explicitly provided artifact, else the newer of release/debug.
-  if [[ -n "${TOKENZERO_INSTALL_SRC:-}" && -x "${TOKENZERO_INSTALL_SRC}" ]]; then
-    SRC="${TOKENZERO_INSTALL_SRC}"
-  else
-    REL="$ROOT/target/release/$ARTIFACT"
-    DBG="$ROOT/target/debug/$ARTIFACT"
-    if [[ -x "$REL" && -x "$DBG" ]]; then
-      if [[ "$DBG" -nt "$REL" ]]; then
-        SRC="$DBG"
-      else
-        SRC="$REL"
-      fi
-    elif [[ -x "$REL" ]]; then
-      SRC="$REL"
-    elif [[ -x "$DBG" ]]; then
-      SRC="$DBG"
-    else
-      echo "install: --skip-build but no prebuilt $ARTIFACT under target/" >&2
-      exit 1
-    fi
-  fi
-  echo "install: using prebuilt $SRC"
-fi
-
-if [[ ! -x "$SRC" ]]; then
-  echo "install: FAIL source binary not executable: $SRC" >&2
-  exit 1
-fi
-
-mkdir -p "$PREFIX" "$BIN_DIR"
-PEER="$([[ "$SURFACE" == mcp ]] && echo tokenzero-codemode || echo tokenzero-mcp)"
-CANDIDATE="$(mktemp "$BIN_DIR/.${ARTIFACT}.candidate.XXXXXX")"
-ROLLBACK_DIR=""
-ROLLBACK_ACTIVE=0
-
-snapshot_path() {
-  local source="$1" key="$2"
-  if [[ -e "$source" || -L "$source" ]]; then
-    cp -pP "$source" "$ROLLBACK_DIR/$key"
-    : >"$ROLLBACK_DIR/$key.present"
-  fi
-}
-
-restore_snapshot() {
-  local destination="$1" key="$2"
-  rm -f "$destination" || return 1
-  if [[ -f "$ROLLBACK_DIR/$key.present" ]]; then
-    cp -pP "$ROLLBACK_DIR/$key" "$destination" || return 1
-  fi
-}
-
-cleanup_transaction() {
-  local status=$? rollback_failed=0
-  trap - EXIT
-  if [[ "$ROLLBACK_ACTIVE" -eq 1 ]]; then
-    echo "install: failure after replacement; restoring exact prior binaries and state" >&2
-    restore_snapshot "$BIN_DIR/$ARTIFACT" artifact || rollback_failed=1
-    restore_snapshot "$BIN_DIR/$PEER" peer || rollback_failed=1
-    restore_snapshot "$BIN_DIR/tokenzero" compat-shim || rollback_failed=1
-    restore_snapshot "$PREFIX/install-state.json" install-state || rollback_failed=1
-    restore_snapshot "$PREFIX/client-config.json" client-config || rollback_failed=1
-    restore_snapshot "$PREFIX/shim-target" shim-target || rollback_failed=1
-    if [[ "$rollback_failed" -ne 0 ]]; then
-      echo "install: FAIL rollback incomplete; inspect $ROLLBACK_DIR" >&2
-      exit 1
-    fi
-  fi
-  rm -f "$CANDIDATE" 2>/dev/null || true
-  if [[ -n "$ROLLBACK_DIR" ]]; then
-    rm -rf "$ROLLBACK_DIR" 2>/dev/null || true
-  fi
-  exit "$status"
-}
-trap cleanup_transaction EXIT
-
-# Copy and verify one private candidate before touching any installed surface.
-install -m 755 "$SRC" "$CANDIDATE"
-DIGEST="$(read_digest_from_sbom "$CANDIDATE")"
-if [[ ! "$DIGEST" =~ ^[0-9a-f]{64}$ ]]; then
-  echo "install: FAIL candidate SBOM digest is absent or invalid: $DIGEST" >&2
-  exit 1
-fi
-
-# Snapshot exact prior bytes, modes, and symlink targets before replacement.
-ROLLBACK_DIR="$(mktemp -d "$PREFIX/.install-rollback.XXXXXX")"
-snapshot_path "$BIN_DIR/$ARTIFACT" artifact
-snapshot_path "$BIN_DIR/$PEER" peer
-snapshot_path "$BIN_DIR/tokenzero" compat-shim
-snapshot_path "$PREFIX/install-state.json" install-state
-snapshot_path "$PREFIX/client-config.json" client-config
-snapshot_path "$PREFIX/shim-target" shim-target
-ROLLBACK_ACTIVE=1
-
-# Move the verified candidate itself into place, then verify it again before
-# removing the peer. This does not re-read the mutable source path.
-mv -f "$CANDIDATE" "$BIN_DIR/$ARTIFACT"
-INSTALLED_DIGEST="$(read_digest_from_sbom "$BIN_DIR/$ARTIFACT")"
-if [[ "$INSTALLED_DIGEST" != "$DIGEST" ]]; then
-  echo "install: FAIL installed binary digest mismatch: candidate=$DIGEST installed=$INSTALLED_DIGEST" >&2
-  exit 1
-fi
-
-write_install_state "$SURFACE" "$ARTIFACT" "$BIN_DIR/$ARTIFACT" "$DIGEST" "$PLATFORM"
-
-if [[ ! -f "$PREFIX/install-state.json" || ! -f "$PREFIX/client-config.json" ]]; then
-  echo "install: FAIL state/config not written" >&2
-  exit 1
-fi
-
-# Parse and cross-check the Rust-generated pair before removing the peer when
-# Python is available. Without Python, the same serde_json serializer wrote it.
-if command -v python3 >/dev/null 2>&1; then
-  if ! python3 - \
-    "$PREFIX/client-config.json" \
-    "$PREFIX/install-state.json" \
-    "$SURFACE" "$DIGEST" "$PLATFORM" "$BIN_DIR/$ARTIFACT" <<'PY'
-import json, sys
-client_path, state_path, surface, digest, platform, binary = sys.argv[1:]
-with open(client_path) as f:
-    client = json.load(f)
-with open(state_path) as f:
-    state = json.load(f)
-args = client.get("args") or []
-assert client.get("surface") == surface, client
-assert client.get("command") == binary, client
-assert client.get("semantic_contract_digest") == digest, client
-assert args == [f"--mode={surface}"], args
-assert not any("mcp" in arg and "codemode" in arg for arg in args)
-assert state.get("surface") == surface, state
-assert state.get("binary_path") == binary, state
-assert state.get("semantic_contract_digest") == digest, state
-assert state.get("platform") == platform, state
-print("ok")
-PY
-  then
-    echo "install: FAIL client/state JSON malformed or inconsistent" >&2
-    exit 1
-  fi
-fi
-
-# Remove the peer only after the Rust serializer has written and validated one
-# single-surface state/config pair.
-if [[ -e "$BIN_DIR/$PEER" || -L "$BIN_DIR/$PEER" ]]; then
-  echo "install: replacing peer artifact $PEER (mutual exclusion)"
-  rm -f "$BIN_DIR/$PEER"
-fi
-# Compatibility shim: selected symlink only; never a dual-surface binary.
-ln -sfn "$BIN_DIR/$ARTIFACT" "$BIN_DIR/tokenzero"
-
-ROLLBACK_ACTIVE=0
-trap - EXIT
-rm -rf "$ROLLBACK_DIR"
-echo "install: ok surface=$SURFACE artifact=$ARTIFACT prefix=$PREFIX bin=$BIN_DIR/$ARTIFACT shim=$BIN_DIR/tokenzero platform=$PLATFORM semantic_contract_digest=$DIGEST"
-echo "client_config: $PREFIX/client-config.json"
-echo "selection: native CodeMode client -> tokenzero-mcp; otherwise -> tokenzero-codemode"
+echo "tokenzero: direct worker installation is blocked until ZeroStack central discovery adoption (zerostack-uf1u)" >&2
+echo "tokenzero: use --dry-run to print the canonical build selector" >&2
+exit 2
