@@ -3756,7 +3756,7 @@ dependencies = [
 [[package]]
 name = "zero-abi"
 version = "0.1.0"
-source = "git+https://github.com/AdityaVG13/zerostack?rev=4a85daff7d00bdf1053388a7e8151d9e63bff2e5#4a85daff7d00bdf1053388a7e8151d9e63bff2e5"
+source = "git+https://github.com/AdityaVG13/zerostack?rev=3eca1c6299ec5a683d283ddad0aae62ece2a3abc#3eca1c6299ec5a683d283ddad0aae62ece2a3abc"
 dependencies = [
  "serde",
  "serde_json",
@@ -3766,7 +3766,7 @@ dependencies = [
 [[package]]
 name = "zero-cert"
 version = "0.1.0"
-source = "git+https://github.com/AdityaVG13/zerostack?rev=4a85daff7d00bdf1053388a7e8151d9e63bff2e5#4a85daff7d00bdf1053388a7e8151d9e63bff2e5"
+source = "git+https://github.com/AdityaVG13/zerostack?rev=3eca1c6299ec5a683d283ddad0aae62ece2a3abc#3eca1c6299ec5a683d283ddad0aae62ece2a3abc"
 dependencies = [
  "serde",
  "serde_json",
@@ -3777,7 +3777,7 @@ dependencies = [
 [[package]]
 name = "zero-gate"
 version = "0.1.0"
-source = "git+https://github.com/AdityaVG13/zerostack?rev=4a85daff7d00bdf1053388a7e8151d9e63bff2e5#4a85daff7d00bdf1053388a7e8151d9e63bff2e5"
+source = "git+https://github.com/AdityaVG13/zerostack?rev=3eca1c6299ec5a683d283ddad0aae62ece2a3abc#3eca1c6299ec5a683d283ddad0aae62ece2a3abc"
 dependencies = [
  "serde",
  "serde_json",
@@ -3791,7 +3791,7 @@ dependencies = [
 [[package]]
 name = "zero-gauge"
 version = "0.1.0"
-source = "git+https://github.com/AdityaVG13/zerostack?rev=4a85daff7d00bdf1053388a7e8151d9e63bff2e5#4a85daff7d00bdf1053388a7e8151d9e63bff2e5"
+source = "git+https://github.com/AdityaVG13/zerostack?rev=3eca1c6299ec5a683d283ddad0aae62ece2a3abc#3eca1c6299ec5a683d283ddad0aae62ece2a3abc"
 dependencies = [
  "serde",
  "serde_json",
@@ -3800,7 +3800,7 @@ dependencies = [
 [[package]]
 name = "zero-ledger"
 version = "0.1.0"
-source = "git+https://github.com/AdityaVG13/zerostack?rev=4a85daff7d00bdf1053388a7e8151d9e63bff2e5#4a85daff7d00bdf1053388a7e8151d9e63bff2e5"
+source = "git+https://github.com/AdityaVG13/zerostack?rev=3eca1c6299ec5a683d283ddad0aae62ece2a3abc#3eca1c6299ec5a683d283ddad0aae62ece2a3abc"
 dependencies = [
  "serde",
  "serde_json",
@@ -3810,7 +3810,7 @@ dependencies = [
 [[package]]
 name = "zero-ref"
 version = "0.1.0"
-source = "git+https://github.com/AdityaVG13/zerostack?rev=4a85daff7d00bdf1053388a7e8151d9e63bff2e5#4a85daff7d00bdf1053388a7e8151d9e63bff2e5"
+source = "git+https://github.com/AdityaVG13/zerostack?rev=3eca1c6299ec5a683d283ddad0aae62ece2a3abc#3eca1c6299ec5a683d283ddad0aae62ece2a3abc"
 dependencies = [
  "serde",
  "sha2 0.11.0",
@@ -3819,7 +3819,7 @@ dependencies = [
 [[package]]
 name = "zero-store"
 version = "0.1.0"
-source = "git+https://github.com/AdityaVG13/zerostack?rev=4a85daff7d00bdf1053388a7e8151d9e63bff2e5#4a85daff7d00bdf1053388a7e8151d9e63bff2e5"
+source = "git+https://github.com/AdityaVG13/zerostack?rev=3eca1c6299ec5a683d283ddad0aae62ece2a3abc#3eca1c6299ec5a683d283ddad0aae62ece2a3abc"
 dependencies = [
  "serde",
  "serde_json",
@@ -3871,7 +3871,7 @@ dependencies = [
 [[package]]
 name = "zerostack-machine-permit"
 version = "0.1.0"
-source = "git+https://github.com/AdityaVG13/zerostack?rev=4a85daff7d00bdf1053388a7e8151d9e63bff2e5#4a85daff7d00bdf1053388a7e8151d9e63bff2e5"
+source = "git+https://github.com/AdityaVG13/zerostack?rev=3eca1c6299ec5a683d283ddad0aae62ece2a3abc#3eca1c6299ec5a683d283ddad0aae62ece2a3abc"
 dependencies = [
  "libc",
  "windows-sys",

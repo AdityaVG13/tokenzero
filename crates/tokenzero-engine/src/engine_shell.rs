@@ -1,7 +1,7 @@
 use super::*;
 use std::fs::OpenOptions;
-use std::io::{Read, Write};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::io::{Read, Seek, SeekFrom, Write};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar};
 use std::thread;
 use std::time::Instant;
@@ -63,6 +63,8 @@ struct BackgroundJobState {
     exit_code: Option<i32>,
     version: u64,
     completed_at: Option<Instant>,
+    terminate_requested: bool,
+    log_error: Option<String>,
 }
 
 const MAX_BACKGROUND_JOBS: usize = 256;
@@ -70,6 +72,24 @@ const MAX_JOB_TAIL_BYTES: usize = 64 * 1024;
 const DEFAULT_JOB_TAIL_BYTES: usize = 8 * 1024;
 const COMPLETED_JOB_TTL: Duration = Duration::from_secs(15 * 60);
 const UNCHANGED_NEXT_POLL_MS: u64 = 20_000;
+
+fn decode_job_tail(bytes: &[u8]) -> (String, bool, usize) {
+    let consumed = if std::str::from_utf8(bytes).is_ok() {
+        bytes.len()
+    } else {
+        // Lossy UTF-8 can expand one invalid input byte to the three-byte
+        // replacement character. Cap the raw prefix so the shared typed tail
+        // remains within its 64 KiB serialized bound and leaves a cursor for
+        // the next poll instead of stranding binary output.
+        bytes.len().min(MAX_JOB_TAIL_BYTES / 3)
+    };
+    let selected = &bytes[..consumed];
+    (
+        String::from_utf8_lossy(selected).into_owned(),
+        std::str::from_utf8(selected).is_ok(),
+        consumed,
+    )
+}
 
 fn shell_argv(command: &str) -> Vec<String> {
     if contains_platform_shell_syntax(command, tokenzero_runtime::current_platform()) {
@@ -116,13 +136,23 @@ fn shell_execution_argv(
     }
 }
 
+#[cfg(test)]
+#[derive(Debug)]
+struct PollInterleave {
+    length_observed: std::sync::Barrier,
+    publication_done: std::sync::Barrier,
+}
+
 #[derive(Debug)]
 struct BackgroundJob {
     id: String,
     sequence: u64,
     log: PathBuf,
+    log_file: Arc<Mutex<fs::File>>,
     state: Mutex<BackgroundJobState>,
     changed: Condvar,
+    #[cfg(test)]
+    poll_interleave: Option<Arc<PollInterleave>>,
 }
 
 fn background_job_is_complete(job: &BackgroundJob) -> bool {
@@ -138,6 +168,7 @@ fn background_job_is_expired(job: &BackgroundJob, now: Instant) -> bool {
 #[derive(Debug, Default)]
 pub(crate) struct BackgroundJobRegistry {
     next_id: AtomicU64,
+    terminating: AtomicBool,
     jobs: Mutex<BTreeMap<String, Arc<BackgroundJob>>>,
 }
 
@@ -149,6 +180,57 @@ fn background_jobs() -> &'static BackgroundJobRegistry {
 
 fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(|poison| poison.into_inner())
+}
+
+fn job_log_len(job: &BackgroundJob) -> Result<usize, String> {
+    let file = lock(&job.log_file);
+    let metadata = file
+        .metadata()
+        .map_err(|error| format!("read background log metadata: {error}"))?;
+    if !metadata.is_file() {
+        return Err("background log handle is not a regular file".to_string());
+    }
+    usize::try_from(metadata.len())
+        .map_err(|_| "background log length exceeds this platform".to_string())
+}
+
+fn read_job_window(
+    job: &BackgroundJob,
+    since: usize,
+    tail_bytes: usize,
+) -> Result<(Vec<u8>, usize, usize), String> {
+    let mut file = lock(&job.log_file);
+    let before = file
+        .metadata()
+        .map_err(|error| format!("read background log metadata: {error}"))?;
+    if !before.is_file() {
+        return Err("background log handle is not a regular file".to_string());
+    }
+    let log_bytes = usize::try_from(before.len())
+        .map_err(|_| "background log length exceeds this platform".to_string())?;
+    let start = since.min(log_bytes);
+    let requested = tail_bytes.clamp(1, MAX_JOB_TAIL_BYTES);
+    let read_limit = requested.min(log_bytes.saturating_sub(start));
+    file.seek(SeekFrom::Start(start as u64))
+        .map_err(|error| format!("seek background log: {error}"))?;
+    let mut bytes = Vec::with_capacity(read_limit);
+    (&mut *file)
+        .take(read_limit as u64)
+        .read_to_end(&mut bytes)
+        .map_err(|error| format!("read background log: {error}"))?;
+    if bytes.len() != read_limit {
+        return Err(format!(
+            "background log returned a short read: expected {read_limit} bytes, got {}",
+            bytes.len()
+        ));
+    }
+    let after = file
+        .metadata()
+        .map_err(|error| format!("re-read background log metadata: {error}"))?;
+    if after.len() != before.len() || !after.is_file() {
+        return Err("background log changed during its bounded poll read".to_string());
+    }
+    Ok((bytes, start, log_bytes))
 }
 
 fn store_shell_payload(
@@ -396,20 +478,25 @@ impl BackgroundJobRegistry {
         timeout: Duration,
         log_dir: PathBuf,
     ) -> Result<Value, String> {
+        if self.terminating.load(Ordering::SeqCst) {
+            return Err("background jobs are unavailable during session teardown".to_string());
+        }
         fs::create_dir_all(&log_dir).map_err(|err| format!("create background log dir: {err}"))?;
         let sequence = self.next_id.fetch_add(1, Ordering::Relaxed);
         let id = format!("tzjob-{}-{sequence}", std::process::id());
         let log = log_dir.join(format!("{id}.log"));
-        fs::write(&log, []).map_err(|err| format!("create background log: {err}"))?;
         let live_log = OpenOptions::new()
+            .read(true)
             .append(true)
+            .create_new(true)
             .open(&log)
-            .map_err(|err| format!("open background log: {err}"))?;
+            .map_err(|err| format!("create background log: {err}"))?;
         let live_log = Arc::new(Mutex::new(live_log));
         let job = Arc::new(BackgroundJob {
             id: id.clone(),
             sequence,
             log: log.clone(),
+            log_file: Arc::clone(&live_log),
             state: Mutex::new(BackgroundJobState {
                 status: "running",
                 pid: None,
@@ -417,12 +504,27 @@ impl BackgroundJobRegistry {
                 exit_code: None,
                 version: 0,
                 completed_at: None,
+                terminate_requested: false,
+                log_error: None,
             }),
             changed: Condvar::new(),
+            #[cfg(test)]
+            poll_interleave: None,
         });
         if let Err(error) = self.insert_bounded(Arc::clone(&job)) {
+            drop(job);
+            drop(live_log);
             let _ = fs::remove_file(&log);
             return Err(error);
+        }
+        // Close the check/insert race with raw session teardown. Once the
+        // registry enters terminating state, no detached child may be spawned.
+        if self.terminating.load(Ordering::SeqCst) {
+            lock(&self.jobs).remove(&id);
+            drop(job);
+            drop(live_log);
+            let _ = fs::remove_file(&log);
+            return Err("background jobs are unavailable during session teardown".to_string());
         }
         crate::shell_hooks::reserve_background_job(&id);
         let worker_id = id.clone();
@@ -449,18 +551,33 @@ impl BackgroundJobRegistry {
                             let mut current = lock(&observed.state);
                             current.pid = pid;
                             current.pgid = pgid;
+                            let terminate_requested = current.terminate_requested;
                             drop(current);
                             crate::shell_hooks::note_background_child(&observed.id, pid, pgid);
+                            if terminate_requested {
+                                if let Some(group) = pgid {
+                                    terminate_background_groups(&[group]);
+                                }
+                            }
                         }
                     },
                     move |_, chunk| {
-                        let mut log = lock(&stream_log);
-                        let _ = log.write_all(chunk);
-                        let _ = log.flush();
-                        drop(log);
+                        let write_error = {
+                            let mut log = lock(&stream_log);
+                            log.write_all(chunk).and_then(|()| log.flush()).err()
+                        };
                         let mut current = lock(&stream_job.state);
+                        let failed_group = write_error.as_ref().and_then(|error| {
+                            current
+                                .log_error
+                                .get_or_insert_with(|| format!("write background log: {error}"));
+                            current.pgid
+                        });
                         current.version = current.version.saturating_add(1);
                         drop(current);
+                        if let Some(group) = failed_group {
+                            terminate_background_groups(&[group]);
+                        }
                         stream_job.changed.notify_all();
                     },
                 );
@@ -472,12 +589,16 @@ impl BackgroundJobRegistry {
                         "failed",
                     ),
                 };
-                if let Some(text) = failure_text {
+                let completion_log_error = failure_text.and_then(|text| {
                     let mut log = lock(&completion_log);
-                    let _ = writeln!(log, "{text}");
-                    let _ = log.flush();
-                }
+                    writeln!(log, "{text}").and_then(|()| log.flush()).err()
+                });
                 let mut current = lock(&job.state);
+                if let Some(error) = completion_log_error {
+                    current
+                        .log_error
+                        .get_or_insert_with(|| format!("write background failure log: {error}"));
+                }
                 current.status = status;
                 current.exit_code = exit_code;
                 current.completed_at = Some(Instant::now());
@@ -508,12 +629,23 @@ impl BackgroundJobRegistry {
                 .cloned()
                 .ok_or_else(|| format!("unknown background job: {id}"))?
         };
-        let available_before_wait = fs::metadata(&job.log)
-            .map(|metadata| metadata.len() as usize)
-            .unwrap_or(0);
+        // Snapshot state before the log length. If a writer publishes between
+        // the length read and the second state lock, its version change makes
+        // the bytes immediately observable instead of losing the wake-up.
+        let snapshot_version = lock(&job.state).version;
+        let available_before_wait = job_log_len(&job)?;
+        #[cfg(test)]
+        if let Some(interleave) = &job.poll_interleave {
+            interleave.length_observed.wait();
+            interleave.publication_done.wait();
+        }
         let mut state = lock(&job.state);
         let observed_version = state.version;
-        if state.status == "running" && !wait.is_zero() && since >= available_before_wait {
+        if state.status == "running"
+            && state.version == snapshot_version
+            && !wait.is_zero()
+            && since >= available_before_wait
+        {
             let deadline = Instant::now() + wait.min(Duration::from_secs(30));
             while state.status == "running" && state.version == observed_version {
                 let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
@@ -533,13 +665,14 @@ impl BackgroundJobRegistry {
         let pid = state.pid;
         let exit_code = state.exit_code;
         let version = state.version;
+        let log_error = state.log_error.clone();
         drop(state);
+        if let Some(error) = log_error {
+            return Err(error);
+        }
 
-        let log_bytes = fs::read(&job.log).unwrap_or_default();
-        let start = since.min(log_bytes.len());
-        let limit = tail_bytes.clamp(1, MAX_JOB_TAIL_BYTES);
-        let end = start.saturating_add(limit).min(log_bytes.len());
-        let changed = end > start || status != "running";
+        let (window, start, log_bytes) = read_job_window(&job, since, tail_bytes)?;
+        let changed = !window.is_empty() || status != "running";
         if !changed {
             return Ok(json!({
                 "status": status,
@@ -551,22 +684,24 @@ impl BackgroundJobRegistry {
             }));
         }
 
-        let tail = String::from_utf8_lossy(&log_bytes[start..end]).into_owned();
+        let (tail, tail_utf8_lossless, consumed) = decode_job_tail(&window);
+        let end = start.saturating_add(consumed);
         let mut response = json!({
             "status": status,
             "pid": pid,
             "exitCode": exit_code,
             "tail": tail,
+            "tailUtf8Lossless": tail_utf8_lossless,
             "tailBytes": end.saturating_sub(start),
             "log": job.log.display().to_string(),
-            "logBytes": log_bytes.len(),
+            "logBytes": log_bytes,
             "cursor": end,
             "version": version,
             "changed": true,
             "unchanged": false,
         });
         if status == "running" {
-            response["nextPollMs"] = json!(if end < log_bytes.len() {
+            response["nextPollMs"] = json!(if end < log_bytes {
                 0
             } else {
                 UNCHANGED_NEXT_POLL_MS
@@ -576,15 +711,36 @@ impl BackgroundJobRegistry {
     }
 
     fn terminate_all(&self) {
-        let jobs = lock(&self.jobs);
-        for job in jobs.values() {
-            let state = lock(&job.state);
-            if state.status == "running" {
-                if let Some(pgid) = state.pgid {
-                    terminate_background_group(pgid);
-                }
-            }
-        }
+        self.terminating.store(true, Ordering::SeqCst);
+        let groups = {
+            let jobs = lock(&self.jobs);
+            jobs.values()
+                .filter_map(|job| {
+                    let mut state = lock(&job.state);
+                    if state.status != "running" {
+                        return None;
+                    }
+                    state.terminate_requested = true;
+                    state.pgid
+                })
+                .collect::<Vec<_>>()
+        };
+        terminate_background_groups(&groups);
+    }
+}
+
+/// Explicit raw-worker teardown hook. Static registries do not run `Drop` at
+/// process exit, so session shutdown must invoke this before leaving serve.
+pub(crate) fn terminate_all_background_jobs() {
+    if let Some(registry) = BACKGROUND_JOBS.get() {
+        registry.terminate_all();
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn reset_background_job_termination_for_tests() {
+    if let Some(registry) = BACKGROUND_JOBS.get() {
+        registry.terminating.store(false, Ordering::SeqCst);
     }
 }
 
@@ -595,22 +751,34 @@ impl Drop for BackgroundJobRegistry {
 }
 
 #[cfg(unix)]
-fn terminate_background_group(pgid: u32) {
-    if pgid == 0 {
-        return;
+fn terminate_background_groups(groups: &[u32]) {
+    let targets = groups
+        .iter()
+        .copied()
+        .filter(|group| *group != 0)
+        .map(|group| format!("-{group}"))
+        .collect::<Vec<_>>();
+    for target in &targets {
+        let _ = std::process::Command::new("kill")
+            .args(["-TERM", "--", target])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status();
     }
-    let target = format!("-{pgid}");
-    let _ = std::process::Command::new("kill")
-        .args(["-TERM", "--", &target])
-        .status();
-    thread::sleep(Duration::from_millis(50));
-    let _ = std::process::Command::new("kill")
-        .args(["-KILL", "--", &target])
-        .status();
+    if !targets.is_empty() {
+        thread::sleep(Duration::from_millis(50));
+    }
+    for target in &targets {
+        let _ = std::process::Command::new("kill")
+            .args(["-KILL", "--", target])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status();
+    }
 }
 
 #[cfg(not(unix))]
-fn terminate_background_group(_: u32) {}
+fn terminate_background_groups(_: &[u32]) {}
 
 impl TokenZeroEngine {
     /// Resolve shell cwd: explicit wins; otherwise default to `call_root` (plan/server
@@ -1052,6 +1220,125 @@ impl TokenZeroEngine {
     }
 }
 
+#[cfg(test)]
+mod job_tail_tests {
+    use super::*;
+
+    fn job_with_handle(log: PathBuf, file: fs::File) -> BackgroundJob {
+        BackgroundJob {
+            id: "job-read-test".to_string(),
+            sequence: 0,
+            log,
+            log_file: Arc::new(Mutex::new(file)),
+            state: Mutex::new(BackgroundJobState {
+                status: "running",
+                pid: None,
+                pgid: None,
+                exit_code: None,
+                version: 0,
+                completed_at: None,
+                terminate_requested: false,
+                log_error: None,
+            }),
+            changed: Condvar::new(),
+            poll_interleave: None,
+        }
+    }
+
+    #[test]
+    fn retained_log_handle_reads_only_the_requested_window() {
+        let mut file = tempfile::tempfile().unwrap();
+        let bytes = vec![b'x'; MAX_JOB_TAIL_BYTES * 4];
+        file.write_all(&bytes).unwrap();
+        file.flush().unwrap();
+        let job = job_with_handle(PathBuf::from("retained.log"), file);
+
+        let (window, start, log_bytes) = read_job_window(&job, 0, MAX_JOB_TAIL_BYTES).unwrap();
+        assert_eq!(start, 0);
+        assert_eq!(window.len(), MAX_JOB_TAIL_BYTES);
+        assert_eq!(log_bytes, bytes.len());
+    }
+
+    #[test]
+    fn a_chunk_published_between_length_and_relock_does_not_lose_its_wake() {
+        let file = tempfile::tempfile().unwrap();
+        let hook = Arc::new(PollInterleave {
+            length_observed: std::sync::Barrier::new(2),
+            publication_done: std::sync::Barrier::new(2),
+        });
+        let mut observed = job_with_handle(PathBuf::from("interleaved.log"), file);
+        observed.poll_interleave = Some(Arc::clone(&hook));
+        let observed = Arc::new(observed);
+        let registry = BackgroundJobRegistry::default();
+        registry.insert_bounded(Arc::clone(&observed)).unwrap();
+
+        let writer_job = Arc::clone(&observed);
+        let writer = thread::spawn(move || {
+            hook.length_observed.wait();
+            {
+                let mut log = lock(&writer_job.log_file);
+                log.write_all(b"ready").unwrap();
+                log.flush().unwrap();
+            }
+            let mut state = lock(&writer_job.state);
+            state.version = state.version.saturating_add(1);
+            drop(state);
+            writer_job.changed.notify_all();
+            hook.publication_done.wait();
+        });
+
+        let started = Instant::now();
+        let result = registry
+            .poll(&observed.id, Duration::from_secs(2), 0, 16)
+            .unwrap();
+        writer.join().unwrap();
+        assert!(started.elapsed() < Duration::from_millis(500));
+        assert_eq!(result["tail"], "ready");
+        assert_eq!(result["cursor"], 5);
+        assert_eq!(result["changed"], true);
+    }
+
+    #[test]
+    fn retained_log_read_failure_is_loud() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("write-only.log");
+        fs::write(&path, b"unreadable through this handle").unwrap();
+        let file = OpenOptions::new().write(true).open(&path).unwrap();
+        let job = job_with_handle(path, file);
+
+        let error = read_job_window(&job, 0, 16).unwrap_err();
+        assert!(error.contains("read background log"), "{error}");
+    }
+
+    #[test]
+    fn invalid_three_byte_tail_is_not_lossless_when_replacement_length_matches() {
+        let truncated_four_byte_scalar = [0xf0, 0x90, 0x80];
+        let (tail, lossless, consumed) = decode_job_tail(&truncated_four_byte_scalar);
+
+        assert_eq!(consumed, truncated_four_byte_scalar.len());
+        assert_eq!(tail.len(), truncated_four_byte_scalar.len());
+        assert_eq!(tail, "�");
+        assert!(
+            !lossless,
+            "serialized length is not UTF-8 validity evidence"
+        );
+    }
+
+    #[test]
+    fn binary_tail_stays_typed_bounded_and_advances_by_consumed_raw_bytes() {
+        let binary = vec![0xff; MAX_JOB_TAIL_BYTES];
+        let (tail, lossless, consumed) = decode_job_tail(&binary);
+
+        assert!(!lossless);
+        assert!(tail.len() <= MAX_JOB_TAIL_BYTES);
+        assert_eq!(consumed, MAX_JOB_TAIL_BYTES / 3);
+        assert!(consumed > 0 && consumed < binary.len());
+
+        let (_, _, next_consumed) = decode_job_tail(&binary[consumed..]);
+        assert!(next_consumed > 0, "the next cursor must keep progressing");
+    }
+}
+
 #[cfg(all(test, unix))]
 mod background_tests {
     use super::*;
@@ -1207,6 +1494,7 @@ mod accumulator_bounds {
             id: format!("job-{sequence}"),
             sequence,
             log: PathBuf::from(format!("job-{sequence}.log")),
+            log_file: Arc::new(Mutex::new(tempfile::tempfile().unwrap())),
             state: Mutex::new(BackgroundJobState {
                 status,
                 pid: None,
@@ -1214,9 +1502,31 @@ mod accumulator_bounds {
                 exit_code: None,
                 version: u64::from(status != "running"),
                 completed_at: (status != "running").then(Instant::now),
+                terminate_requested: false,
+                log_error: None,
             }),
             changed: Condvar::new(),
+            poll_interleave: None,
         })
+    }
+
+    #[test]
+    fn terminating_registry_rejects_late_background_launches() {
+        let registry = BackgroundJobRegistry::default();
+        registry.terminate_all();
+        let error = registry
+            .start(
+                vec!["never-spawn".to_string()],
+                None,
+                BTreeMap::new(),
+                Duration::from_secs(1),
+                PathBuf::from("unused"),
+            )
+            .unwrap_err();
+        assert_eq!(
+            error,
+            "background jobs are unavailable during session teardown"
+        );
     }
 
     #[test]

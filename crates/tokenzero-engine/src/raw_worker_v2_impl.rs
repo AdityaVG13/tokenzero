@@ -611,8 +611,16 @@ fn dispatch_call(engine: &TokenZeroEngine, ctx: &CallCtx, cancel: &Arc<CancelSta
                     );
                 }
             }
-            let v1 = json!({"id":ctx.id.clone(),"op":ctx.op.clone(),"args":args,"peer_contract_digest":ctx.contract.clone()});
-            execute_raw_worker_json(engine, &v1)
+            match crate::domain::execute_raw_worker_value(engine, &ctx.op, &args) {
+                Some(Ok(value)) => json!({"ok":true,"result":value}),
+                Some(Err(error)) => json!({"ok":false,"error":{
+                    "kind":error.kind,"message":error.message,"retryable":false
+                }}),
+                None => {
+                    let v1 = json!({"id":ctx.id.clone(),"op":ctx.op.clone(),"args":args,"peer_contract_digest":ctx.contract.clone()});
+                    execute_raw_worker_json(engine, &v1)
+                }
+            }
         },
     );
     if cancel.flag.load(Ordering::SeqCst) {
@@ -650,7 +658,11 @@ fn dispatch_call(engine: &TokenZeroEngine, ctx: &CallCtx, cancel: &Arc<CancelSta
         None
     };
     let mut owned_refs = Vec::new();
-    refs(&value, &mut owned_refs);
+    // Job tails are arbitrary shell bytes. A line beginning with `tz://` is
+    // content, not a minted ref, so job results never contribute ownership.
+    if ctx.op != zero_abi::TOKEN_JOB_OPERATION_V1 {
+        refs(&value, &mut owned_refs);
+    }
     let mut frame = json!({"kind":"result","request_id":ctx.id.clone(),"result":{"value":value,"metadata":{
         "effect":effect_class(ctx.op.as_str()),
         "approval":{"state":"not_required"},"revert":{"supported":false},
@@ -674,6 +686,17 @@ fn write_response(writer: &Mutex<std::io::Stdout>, response: &[u8]) -> std::io::
         .map_err(|_| std::io::Error::new(std::io::ErrorKind::Other, "writer poisoned"))?;
     out.write_all(response)?;
     out.flush()
+}
+
+fn terminate_raw_worker_v2_session(session: &Mutex<RawWorkerV2Session>) {
+    {
+        let mut guard = session.lock().unwrap_or_else(|poison| poison.into_inner());
+        guard.cancel_all();
+    }
+    // The job registry is process-global and therefore has no reliable static
+    // destructor. Mark every live job for termination before serve can exit;
+    // a child published after this scan observes the mark and is killed too.
+    crate::engine_shell::terminate_all_background_jobs();
 }
 
 /// Serve loop: the read loop handles control frames immediately (handshake,
@@ -756,10 +779,7 @@ pub fn run_raw_worker_v2_serve(opts: &RawWorkerServeOptions) -> i32 {
             Err(_) => break 2,
         }
     };
-    {
-        let mut guard = session.lock().unwrap_or_else(|p| p.into_inner());
-        guard.cancel_all();
-    }
+    terminate_raw_worker_v2_session(&session);
     drop(tx);
     // Raw-worker entrypoints immediately pass this code to `process::exit`.
     // Joining here would let disconnected work retain the dedicated process
@@ -1307,6 +1327,154 @@ mod tests {
             text.contains("\"timeout\":true") || text.contains("timed_out"),
             "shell run must report timeout enforcement: {text}"
         );
+    }
+
+    #[test]
+    fn background_shell_and_job_use_the_shared_typed_private_path_free_boundary() {
+        let _dispatch_guard = DISPATCH_TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let mut session = RawWorkerV2Session::default();
+        let rev = revision();
+        let cap = local_capability();
+        send(&mut session, handshake(&rev));
+        let trace = |request_id: &str| {
+            json!({
+                "runtime_id":"rt",
+                "cell_id":"cell",
+                "request_id":request_id,
+                "trace_id":request_id,
+                "worker_revision":rev,
+                "contract_digest":cap["semantic_contract_digest"],
+            })
+        };
+        let command = if cfg!(windows) {
+            "powershell -NoProfile -Command \"[Console]::Out.Write('tz://not-a-ref')\""
+        } else {
+            "printf 'tz://not-a-ref'"
+        };
+        let launched = send(
+            &mut session,
+            json!({"kind":"call","request":{
+                "request_id":"req-job-launch",
+                "op":"shell",
+                "args":{"command":command,"background":true,"timeout_ms":2_000},
+                "trace":trace("req-job-launch")
+            }}),
+        );
+        assert_eq!(launched["kind"], "result", "{launched}");
+        let launch = &launched["result"]["value"];
+        assert_eq!(launch["cursor"], 0);
+        assert_eq!(launch["version"], 0);
+        assert!(
+            launch.get("log").is_none(),
+            "private log path leaked: {launch}"
+        );
+        assert_eq!(launch.as_object().unwrap().len(), 3, "{launch}");
+        let id = launch["job"].as_str().unwrap().to_string();
+
+        let polled = send(
+            &mut session,
+            json!({"kind":"call","request":{
+                "request_id":"req-job-poll",
+                "op":zero_abi::TOKEN_JOB_OPERATION_V1,
+                "args":{"id":id,"waitMs":30_000,"since":0,"tailBytes":64},
+                "trace":trace("req-job-poll")
+            }}),
+        );
+        assert_eq!(polled["kind"], "result", "{polled}");
+        let value = polled["result"]["value"].clone();
+        assert!(
+            value.get("log").is_none(),
+            "private log path leaked: {value}"
+        );
+        let typed: zero_abi::TokenJobPollResultV1 = serde_json::from_value(value.clone()).unwrap();
+        typed.validate().unwrap();
+        assert!(typed.tail.contains("tz://not-a-ref"), "{value}");
+        assert_eq!(polled["result"]["metadata"]["ownership"]["refs"], json!([]));
+
+        let unknown = send(
+            &mut session,
+            json!({"kind":"call","request":{
+                "request_id":"req-job-unknown",
+                "op":zero_abi::TOKEN_JOB_OPERATION_V1,
+                "args":{"id":id,"privateLog":"/private/session/job.log"},
+                "trace":trace("req-job-unknown")
+            }}),
+        );
+        assert_eq!(unknown["kind"], "error", "{unknown}");
+        assert_eq!(unknown["error"]["kind"], "validation");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn raw_session_shutdown_terminates_a_background_process_group() {
+        struct ResetBackgroundTermination;
+        impl Drop for ResetBackgroundTermination {
+            fn drop(&mut self) {
+                crate::engine_shell::reset_background_job_termination_for_tests();
+            }
+        }
+
+        let _dispatch_guard = DISPATCH_TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        crate::engine_shell::reset_background_job_termination_for_tests();
+        let _reset = ResetBackgroundTermination;
+        let mut session = RawWorkerV2Session::default();
+        let rev = revision();
+        let cap = local_capability();
+        send(&mut session, handshake(&rev));
+        let trace = json!({
+            "runtime_id":"rt","cell_id":"cell","request_id":"req-long-job",
+            "trace_id":"req-long-job","worker_revision":rev,
+            "contract_digest":cap["semantic_contract_digest"],
+        });
+        let launched = send(
+            &mut session,
+            json!({"kind":"call","request":{
+                "request_id":"req-long-job","op":"shell",
+                "args":{"command":"sleep 30","background":true,"timeout_ms":60_000},
+                "trace":trace
+            }}),
+        );
+        assert_eq!(launched["kind"], "result", "{launched}");
+        let id = launched["result"]["value"]["job"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let probe_engine = engine();
+        let pid = (0..100)
+            .find_map(|_| {
+                let pid = probe_engine
+                    .shell_job_wait(&id, std::time::Duration::ZERO, 0, 1)
+                    .unwrap()["pid"]
+                    .as_u64();
+                if pid.is_none() {
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                }
+                pid
+            })
+            .expect("background child did not publish its pid");
+
+        let shutdown = send(
+            &mut session,
+            json!({"kind":"shutdown","request":{"reason":"test"}}),
+        );
+        assert_eq!(shutdown["kind"], "shutdown_ack");
+        let session = Mutex::new(session);
+        terminate_raw_worker_v2_session(&session);
+        let gone = (0..20).any(|_| {
+            let status = std::process::Command::new("kill")
+                .args(["-0", "--", &pid.to_string()])
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status()
+                .unwrap();
+            if status.success() {
+                std::thread::sleep(std::time::Duration::from_millis(50));
+                false
+            } else {
+                true
+            }
+        });
+        assert!(gone, "background child {pid} survived raw session shutdown");
     }
 
     #[test]

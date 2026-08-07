@@ -9,6 +9,7 @@ use crate::{
     EditHunk, ServeOptions, TokenZeroEngine, annotate_write_failure, shell_timeout_from_millis,
     shell_timeout_from_secs,
 };
+use serde::Deserialize;
 use serde_json::{Value, json};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -19,6 +20,9 @@ use tokenzero_core::{
 };
 use tokenzero_filters::{discover, rewrite_command};
 use tokenzero_runtime::{ExecutionMode, plan_command_for_platform};
+use zero_abi::{
+    TOKEN_JOB_OPERATION_V1, TokenJobPollRequestV1, TokenJobPollResultV1, TokenJobStatusV1,
+};
 
 /// Domain-kernel dispatch errors (no JSON-RPC / MCP framing).
 #[derive(Debug, Clone)]
@@ -41,6 +45,301 @@ impl DomainDispatchError {
                 format!("{name} is transport-control only; not a domain engine op")
             }
         }
+    }
+}
+
+/// Raw-worker-only dispatch error. This stays below the aggregate boundary and
+/// never changes the public CLI, MCP, or standalone CodeMode result shapes.
+#[derive(Debug, Clone)]
+pub(crate) struct RawWorkerDomainError {
+    pub kind: &'static str,
+    pub message: String,
+}
+
+impl RawWorkerDomainError {
+    fn validation(message: impl Into<String>) -> Self {
+        Self {
+            kind: "validation",
+            message: message.into(),
+        }
+    }
+
+    fn runtime(message: impl Into<String>) -> Self {
+        Self {
+            kind: "runtime",
+            message: message.into(),
+        }
+    }
+
+    fn invalid_result(message: impl Into<String>) -> Self {
+        Self {
+            kind: "invalid_result",
+            message: message.into(),
+        }
+    }
+}
+
+/// Execute the two raw-worker-only job seams without promoting either into a
+/// registry domain operation. Aggregate CodeMode remains the public binding;
+/// this worker only launches a background shell and polls its typed job value.
+pub(crate) fn execute_raw_worker_value(
+    engine: &TokenZeroEngine,
+    op_name: &str,
+    args: &Value,
+) -> Option<Result<Value, RawWorkerDomainError>> {
+    if op_name == TOKEN_JOB_OPERATION_V1 {
+        return Some(execute_raw_worker_job(engine, args));
+    }
+    if matches!(op_name, "shell" | "tz_shell" | "zero.shell") {
+        return match args.get("background") {
+            Some(Value::Bool(true)) => Some(execute_raw_worker_background_shell(engine, args)),
+            Some(Value::Bool(false)) | None => None,
+            Some(_) => Some(Err(RawWorkerDomainError::validation(
+                "shell background must be a boolean",
+            ))),
+        };
+    }
+    None
+}
+
+fn execute_raw_worker_background_shell(
+    engine: &TokenZeroEngine,
+    args: &Value,
+) -> Result<Value, RawWorkerDomainError> {
+    let (command, argv) = arg_command(args).map_err(RawWorkerDomainError::validation)?;
+    if argv.is_some() {
+        return Err(RawWorkerDomainError::validation(
+            "background shell requires command and does not accept argv",
+        ));
+    }
+    let launched = engine
+        .shell_background(
+            &command,
+            arg_str(args, "cwd").map(Path::new),
+            arg_shell_timeout(args),
+        )
+        .map_err(RawWorkerDomainError::runtime)?;
+    let object = launched.as_object().ok_or_else(|| {
+        RawWorkerDomainError::invalid_result("background launch was not an object")
+    })?;
+    let id = object
+        .get("job")
+        .and_then(Value::as_str)
+        .ok_or_else(|| RawWorkerDomainError::invalid_result("background launch omitted job"))?;
+    TokenJobPollRequestV1::new(id)
+        .and_then(|request| request.validate().map(|()| request))
+        .map_err(|error| {
+            RawWorkerDomainError::invalid_result(format!("invalid background job id: {error}"))
+        })?;
+    let cursor = required_u64(object, "cursor")?;
+    let version = required_u64(object, "version")?;
+    if cursor != 0 || version != 0 {
+        return Err(RawWorkerDomainError::invalid_result(
+            "background launch cursor and version must start at zero",
+        ));
+    }
+    // `launched` also contains the private on-disk log path. Raw-worker v2
+    // intentionally emits only the stable session handle and initial cursors.
+    Ok(json!({"job": id, "cursor": cursor, "version": version}))
+}
+
+fn execute_raw_worker_job(
+    engine: &TokenZeroEngine,
+    args: &Value,
+) -> Result<Value, RawWorkerDomainError> {
+    let request: TokenJobPollRequestV1 = serde_json::from_value(args.clone()).map_err(|error| {
+        RawWorkerDomainError::validation(format!("invalid job arguments: {error}"))
+    })?;
+    request.validate().map_err(|error| {
+        RawWorkerDomainError::validation(format!("invalid job arguments: {error}"))
+    })?;
+    let since = usize::try_from(request.since)
+        .map_err(|_| RawWorkerDomainError::validation("job since exceeds this platform"))?;
+    let tail_bytes = usize::try_from(request.tail_bytes)
+        .map_err(|_| RawWorkerDomainError::validation("job tailBytes exceeds this platform"))?;
+    let internal = engine
+        .shell_job_wait(
+            &request.id,
+            Duration::from_millis(request.wait_ms),
+            since,
+            tail_bytes,
+        )
+        .map_err(|message| {
+            if message.starts_with("unknown background job:") {
+                RawWorkerDomainError {
+                    kind: "not_found",
+                    message,
+                }
+            } else {
+                RawWorkerDomainError::runtime(message)
+            }
+        })?;
+    typed_job_result(&request.id, &internal)
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct InternalJobPoll {
+    status: TokenJobStatusV1,
+    pid: Option<u32>,
+    exit_code: Option<i32>,
+    tail: Option<String>,
+    tail_utf8_lossless: Option<bool>,
+    tail_bytes: Option<u64>,
+    log: Option<String>,
+    log_bytes: Option<u64>,
+    cursor: u64,
+    version: u64,
+    changed: Option<bool>,
+    unchanged: Option<bool>,
+    next_poll_ms: Option<u64>,
+}
+
+fn typed_job_result(id: &str, internal: &Value) -> Result<Value, RawWorkerDomainError> {
+    let wire: InternalJobPoll = serde_json::from_value(internal.clone()).map_err(|error| {
+        RawWorkerDomainError::invalid_result(format!("invalid internal job result: {error}"))
+    })?;
+    let InternalJobPoll {
+        status,
+        pid,
+        exit_code,
+        tail,
+        tail_utf8_lossless,
+        tail_bytes,
+        log: _private_log,
+        log_bytes,
+        cursor,
+        version,
+        changed,
+        unchanged,
+        next_poll_ms,
+    } = wire;
+    let unchanged = unchanged.unwrap_or(false);
+    let changed = match changed {
+        Some(value) => value,
+        None if unchanged => false,
+        None => {
+            return Err(RawWorkerDomainError::invalid_result(
+                "job poll result omitted changed/unchanged state",
+            ));
+        }
+    };
+    if changed == unchanged {
+        return Err(RawWorkerDomainError::invalid_result(
+            "job poll changed and unchanged fields contradict",
+        ));
+    }
+    let (tail, tail_utf8_lossless, tail_bytes, log_bytes) = if changed {
+        (
+            tail.ok_or_else(|| RawWorkerDomainError::invalid_result("job poll omitted tail"))?,
+            tail_utf8_lossless.ok_or_else(|| {
+                RawWorkerDomainError::invalid_result("job poll omitted tailUtf8Lossless")
+            })?,
+            tail_bytes.ok_or_else(|| {
+                RawWorkerDomainError::invalid_result("job poll omitted tailBytes")
+            })?,
+            log_bytes
+                .ok_or_else(|| RawWorkerDomainError::invalid_result("job poll omitted logBytes"))?,
+        )
+    } else {
+        (String::new(), true, 0, cursor)
+    };
+    let result = TokenJobPollResultV1::new(
+        id,
+        status,
+        pid,
+        exit_code,
+        tail,
+        tail_utf8_lossless,
+        tail_bytes,
+        log_bytes,
+        cursor,
+        version,
+        changed,
+        next_poll_ms,
+    )
+    .map_err(|error| {
+        RawWorkerDomainError::invalid_result(format!("invalid typed job result: {error}"))
+    })?;
+    result.validate().map_err(|error| {
+        RawWorkerDomainError::invalid_result(format!("invalid typed job result: {error}"))
+    })?;
+    serde_json::to_value(result)
+        .map_err(|error| RawWorkerDomainError::invalid_result(error.to_string()))
+}
+
+fn required_u64(
+    object: &serde_json::Map<String, Value>,
+    field: &str,
+) -> Result<u64, RawWorkerDomainError> {
+    object.get(field).and_then(Value::as_u64).ok_or_else(|| {
+        RawWorkerDomainError::invalid_result(format!("job poll result omitted unsigned {field}"))
+    })
+}
+
+#[cfg(test)]
+mod raw_job_value_tests {
+    use super::*;
+
+    fn internal_result() -> Value {
+        json!({
+            "status": "running",
+            "pid": 42,
+            "exitCode": null,
+            "tail": "ok\n",
+            "tailUtf8Lossless": true,
+            "tailBytes": 3,
+            "log": "/private/session/job.log",
+            "logBytes": 3,
+            "cursor": 3,
+            "version": 2,
+            "changed": true,
+            "unchanged": false,
+            "nextPollMs": 20_000,
+        })
+    }
+
+    #[test]
+    fn shared_job_contract_digest_is_canonical_in_the_tokenzero_graph() {
+        assert_eq!(
+            zero_abi::token_job_contract_digest_v1(),
+            "d9b15de5be5a4c5a2d80ffd409eb04fc796b16b377a67254016fc4f285b7a597"
+        );
+    }
+
+    #[test]
+    fn typed_job_result_strips_private_log_and_rejects_unknown_output() {
+        let value = typed_job_result("tzjob-7", &internal_result()).unwrap();
+        assert!(value.get("log").is_none());
+        let typed: TokenJobPollResultV1 = serde_json::from_value(value).unwrap();
+        typed.validate().unwrap();
+
+        let mut mutant = internal_result();
+        mutant["privateLog"] = json!("/private/session/job.log");
+        let error = typed_job_result("tzjob-7", &mutant).unwrap_err();
+        assert_eq!(error.kind, "invalid_result");
+        assert!(error.message.contains("unknown field"), "{}", error.message);
+    }
+
+    #[test]
+    fn unchanged_poll_becomes_a_successful_typed_empty_delta() {
+        let value = typed_job_result(
+            "tzjob-7",
+            &json!({
+                "status":"running",
+                "pid":42,
+                "unchanged":true,
+                "cursor":9,
+                "version":2,
+                "nextPollMs":20_000,
+            }),
+        )
+        .unwrap();
+        assert_eq!(value["changed"], false);
+        assert_eq!(value["tail"], "");
+        assert_eq!(value["tailUtf8Lossless"], true);
+        assert_eq!(value["tailBytes"], 0);
+        assert_eq!(value["logBytes"], 9);
     }
 }
 
