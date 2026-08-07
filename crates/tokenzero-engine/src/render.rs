@@ -105,8 +105,8 @@ pub fn push_payload_refs(
 }
 
 impl TokenZeroEngine {
-    /// Rewrite full-hash blob refs in a tool response to session-visible
-    /// `tz://s/<16hex>` aliases and persist the short→full alias table.
+    /// Rewrite full-hash blob refs in a tool response to durable ordinal
+    /// aliases and persist the ordinal-to-full mapping before emission.
     pub fn apply_session_visible_ref_aliases(&self, response: &mut ToolResponse) {
         let full_refs = response
             .refs
@@ -157,10 +157,20 @@ impl TokenZeroEngine {
         if store.persist_pending().is_err() {
             return;
         }
+        // Rewrite the complete response, not only refs/visible/telemetry.
+        // `detail_ref`, safety, channels, diagnostics, and future string fields
+        // must never retain a duplicate full ref after the public refs changed.
+        let Ok(mut encoded) = serde_json::to_string(response) else {
+            return;
+        };
+        for (full_ref, alias) in &aliases {
+            encoded = encoded.replace(full_ref, alias);
+        }
+        let Ok(rewritten) = serde_json::from_str::<ToolResponse>(&encoded) else {
+            return;
+        };
+        *response = rewritten;
         if let Some(visible) = response.visible.as_mut() {
-            for (full_ref, alias) in &aliases {
-                visible.text = visible.text.replace(full_ref, alias);
-            }
             // Same prefilter as the no-refs branch above: only pay for the
             // path/symbol scan when the text can actually contain an atom.
             if crate::text_aliases::has_alias_candidates(&visible.text)
@@ -171,23 +181,6 @@ impl TokenZeroEngine {
                     )
             {
                 visible.text = rewritten;
-            }
-        }
-        for record in &mut response.refs {
-            if let Some((_, alias)) = aliases
-                .iter()
-                .find(|(full_ref, _)| full_ref == &record.ref_id)
-            {
-                record.ref_id = alias.clone();
-            }
-        }
-        if let Some(telemetry) = response.telemetry.as_mut() {
-            let mut encoded = telemetry.to_string();
-            for (full_ref, alias) in &aliases {
-                encoded = encoded.replace(full_ref, alias);
-            }
-            if let Ok(rewritten) = serde_json::from_str(&encoded) {
-                *telemetry = rewritten;
             }
         }
         if let Some(accounting) = response.accounting.as_mut() {
@@ -907,11 +900,15 @@ pub fn preview(text: &str) -> String {
 mod preview_tests {
     use std::sync::Mutex;
 
-    use tokenzero_core::Mode;
+    use tempfile::tempdir;
+    use tokenzero_core::{
+        Accounting, ChannelSeparation, ContentType, Mode, RefRecord, ToolResponse,
+    };
     use tokenzero_recovery::{ExpansionResult, RecoveryStore};
 
     use super::{
-        LocalPayloadPolicy, RecoveryStoreLease, expansion_response, local_payload_policy, preview,
+        EngineConfig, LocalPayloadPolicy, RecoveryStoreLease, TokenZeroEngine, expansion_response,
+        local_payload_policy, preview,
     };
 
     #[test]
@@ -1045,6 +1042,62 @@ b
     }
 
     #[test]
+    fn session_alias_rewrites_every_ref_field_and_survives_restart() {
+        let dir = tempdir().unwrap();
+        let cache = dir.path().join("recovery.json");
+        let mut config = EngineConfig::for_root(dir.path());
+        config.cache_path = cache.clone();
+        let engine = TokenZeroEngine::new(config);
+        let full_ref = engine
+            .recovery_store()
+            .store_blob("exact payload", ContentType::Unknown)
+            .unwrap();
+        let mut response = ToolResponse::ok(
+            "read",
+            Mode::Auto,
+            format!("visible {full_ref}"),
+            vec![RefRecord {
+                kind: "blob".into(),
+                ref_id: full_ref.clone(),
+                bytes: 13,
+                live: true,
+            }],
+            Accounting {
+                raw_tokens: 3,
+                visible_tokens: 3,
+                recovery_tokens: 0,
+                billed_tokens: 3,
+                cached_tokens: 0,
+                exact_ref_tokens: None,
+            },
+        );
+        response.telemetry = Some(serde_json::json!({"ref": full_ref}));
+        response.safety = Some(serde_json::json!({"anchor": full_ref}));
+        response.channels = Some(ChannelSeparation {
+            action: "read".into(),
+            status_line: format!("ref={full_ref}"),
+            user_message: Some(format!("expand {full_ref}")),
+        });
+
+        engine.apply_session_visible_ref_aliases(&mut response);
+        let alias = response.refs[0].ref_id.clone();
+        assert!(alias.starts_with("tz://o/"), "{alias}");
+        assert_eq!(response.detail_ref.as_deref(), Some(alias.as_str()));
+        assert!(
+            !serde_json::to_string(&response)
+                .unwrap()
+                .contains(&full_ref),
+            "every response field must use the same alias: {response:?}"
+        );
+        drop(engine);
+
+        let mut restarted = RecoveryStore::new(Some(cache));
+        let expanded = restarted.expand(&alias, Some("raw"), None, None, None, None);
+        assert!(expanded.found, "{}", expanded.reason);
+        assert_eq!(expanded.content, "exact payload");
+    }
+
+    #[test]
     fn multiline_preview_is_bounded_and_reports_omitted_lines() {
         let text = (1..=9)
             .map(|line| format!("line {line}: {}", "x".repeat(80)))
@@ -1077,19 +1130,30 @@ pub fn captured_stream_text(text: &str, capture: &StreamCapture, stream_name: &s
     value
 }
 
-/// 0ok7: opt-in slim CLI envelope. Off by default; the full envelope stays
-/// byte-identical until the coordinated schema bump (tokenzero-jfet/1cwf).
+/// Compatibility opt-out for the default slim CLI ToolResponse envelope.
+/// `0`/`off`/`false`/`no` selects the full forensic envelope.
 pub const SLIM_ENVELOPE_ENV: &str = "TOKENZERO_SLIM_ENVELOPE";
 
+static FULL_CLI_ENVELOPE_REQUESTED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// Select the full forensic envelope for this CLI process (`--json=full`).
+pub fn request_full_cli_envelope() {
+    FULL_CLI_ENVELOPE_REQUESTED.store(true, std::sync::atomic::Ordering::Relaxed);
+}
+
 pub fn slim_envelope_enabled() -> bool {
+    if FULL_CLI_ENVELOPE_REQUESTED.load(std::sync::atomic::Ordering::Relaxed) {
+        return false;
+    }
     std::env::var(SLIM_ENVELOPE_ENV)
         .map(|raw| {
-            matches!(
+            !matches!(
                 raw.trim().to_ascii_lowercase().as_str(),
-                "1" | "on" | "true" | "yes"
+                "0" | "off" | "false" | "no"
             )
         })
-        .unwrap_or(false)
+        .unwrap_or(true)
 }
 
 pub fn cli_json(response: &ToolResponse) -> String {
@@ -1101,12 +1165,15 @@ pub fn cli_json(response: &ToolResponse) -> String {
     })
 }
 
-/// Slim projection: keeps status truth, the one-token ack, the payload, and
-/// every durable ref (as bare strings); drops advisory blocks (schema_version,
-/// mode, content_type, accounting, telemetry) recoverable by unsetting the
-/// env. Deterministic: same op under the same gate => same bytes.
+/// Slim projection: keeps the stable minimum envelope, payload, and every
+/// durable ref as a bare string. `--json=full` restores advisory accounting,
+/// telemetry, mode, and content-type blocks. Deterministic for the same input.
 fn slim_cli_json(response: &ToolResponse) -> String {
     let mut doc = serde_json::Map::new();
+    doc.insert(
+        "schema_version".into(),
+        serde_json::json!(response.schema_version),
+    );
     doc.insert("status".into(), serde_json::json!(response.status));
     doc.insert("tool".into(), serde_json::json!(response.tool));
     if let Some(ack) = &response.ack {
@@ -1156,14 +1223,24 @@ fn slim_cli_json(response: &ToolResponse) -> String {
     if let Some(safety) = &response.safety {
         doc.insert("safety".into(), safety.clone());
     }
+    if let Some(recovery) = &response.recovery {
+        doc.insert(
+            "recovery".into(),
+            serde_json::to_value(recovery).unwrap_or(serde_json::Value::Null),
+        );
+    }
     if let Some(channels) = &response.channels {
         doc.insert(
             "channels".into(),
             serde_json::to_value(channels).unwrap_or(serde_json::Value::Null),
         );
     }
-    serde_json::to_string(&serde_json::Value::Object(doc))
-        .unwrap_or_else(|_| format!("{{\"status\":\"error\",\"tool\":\"{}\"}}", response.tool))
+    serde_json::to_string(&serde_json::Value::Object(doc)).unwrap_or_else(|_| {
+        format!(
+            "{{\"schema_version\":\"{CLI_SCHEMA_VERSION}\",\"status\":\"error\",\"tool\":\"{}\"}}",
+            response.tool
+        )
+    })
 }
 
 pub fn render_text(response: &ToolResponse) -> String {

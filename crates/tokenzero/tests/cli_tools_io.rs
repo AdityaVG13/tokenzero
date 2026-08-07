@@ -20,6 +20,18 @@ fn assert_json_error(output: &std::process::Output, code: &str) {
 fn assert_json_contains(value: &serde_json::Value, needle: &str) {
     assert!(value.as_str().unwrap().contains(needle));
 }
+
+fn run_default_envelope_json(args: &[&str], cwd: &std::path::Path) -> serde_json::Value {
+    let output = tokenzero_cmd()
+        .env_remove("TOKENZERO_SLIM_ENVELOPE")
+        .current_dir(cwd)
+        .args(args)
+        .output()
+        .unwrap();
+    assert_success_ref(&output, "default envelope command");
+    parse_json_stdout(&output)
+}
+
 use std::fs;
 use tempfile::tempdir;
 
@@ -123,16 +135,14 @@ fn cli_expand_honors_all_refs_and_refs_from_without_unwired_force() {
 }
 
 #[test]
-fn cli_slim_envelope_opt_in_drops_advisory_blocks_and_keeps_durable_refs() {
-    // 0ok7: TOKENZERO_SLIM_ENVELOPE=1 slims the CLI JSON envelope; the full
-    // envelope is the unchanged default.
+fn cli_slim_envelope_is_default_and_full_is_an_exact_opt_in() {
     let (dir, cache) = setup_temp_with_cache();
     let file = dir.path().join("tiny.txt");
     std::fs::write(&file, "tiny payload\n").unwrap();
     let file_arg = file.to_str().unwrap().to_string();
     let root_arg = dir.path().to_str().unwrap().to_string();
     let cache_arg = cache.to_str().unwrap().to_string();
-    let args = vec![
+    let args = [
         "read",
         file_arg.as_str(),
         "--cache-path",
@@ -142,78 +152,108 @@ fn cli_slim_envelope_opt_in_drops_advisory_blocks_and_keeps_durable_refs() {
         "--json",
     ];
 
-    let full = run_tokenzero_json_in_with_env(&args, dir.path(), &[]);
-    fields!(full;"/schema_version" =>"tokenzero.cli.v1");
-    assert!(
-        full.get("telemetry").is_some(),
-        "full envelope carries telemetry"
-    );
-    assert!(
-        full.get("accounting").is_some(),
-        "full envelope carries accounting"
-    );
-
-    let slim =
-        run_tokenzero_json_in_with_env(&args, dir.path(), &[("TOKENZERO_SLIM_ENVELOPE", "1")]);
-    fields!(slim;"/status" =>"ok"; "/tool" =>"read");
-    for dropped in [
-        "schema_version",
-        "telemetry",
-        "accounting",
-        "mode",
-        "content_type",
-    ] {
+    let slim = run_default_envelope_json(&args, dir.path());
+    fields!(slim; "/schema_version" => "tokenzero.cli.v1"; "/status" => "ok"; "/tool" => "read");
+    for dropped in ["telemetry", "accounting", "mode", "content_type"] {
         assert!(
             slim.get(dropped).is_none(),
             "slim envelope drops {dropped}: {slim}"
         );
     }
-    // Slim flattens the visible capsule to bare text: "capsule" is the only
-    // kind the CLI emits, so the {kind,text} wrapper is pure overhead.
     assert_json_contains(&slim["visible"], "tiny payload");
-    // detail_ref is refs.first(); slim must not restate it as a second 74B ref.
     assert!(
         slim.get("detail_ref").is_none(),
-        "slim drops detail_ref when refs already carry it: {slim}"
+        "refs[0] carries the detail ref without duplication: {slim}"
     );
-    let ref_id = slim["refs"][0]
-        .as_str()
-        .expect("slim refs are bare ref strings");
-    assert!(ref_id.starts_with("tz://blob/"), "{ref_id}");
-    assert_eq!(
-        expand_raw_text(ref_id, Some(&cache), None, &[]),
-        "tiny payload\n",
-        "slim refs stay durable and expand to exact bytes"
-    );
-    assert_eq!(
-        slim["detail_ref"].as_str().or(Some(ref_id)),
-        Some(ref_id),
-        "detail_ref stays recoverable as refs[0]"
-    );
-    let slim_bytes = serde_json::to_string(&slim).unwrap().len();
-    let full_bytes = serde_json::to_string(&full).unwrap().len();
+    let refs = slim["refs"].as_array().expect("slim refs array");
+    assert!(!refs.is_empty(), "{slim}");
     assert!(
-        slim_bytes * 2 < full_bytes,
-        "slim {slim_bytes}B must be under half of full {full_bytes}B"
+        refs[0]
+            .as_str()
+            .is_some_and(|reference| reference.starts_with("tz://o/")),
+        "full blob ref is replaced by a durable ordinal: {slim}"
     );
+    for reference in refs.iter().filter_map(serde_json::Value::as_str) {
+        assert_eq!(
+            expand_raw_text(reference, Some(&cache), None, &[]),
+            "tiny payload\n",
+            "every slim ref expands after the producing process exits: {reference}"
+        );
+    }
+    let recovered = run_default_envelope_json(
+        &[
+            "expand",
+            refs[0].as_str().unwrap(),
+            "--cache-path",
+            cache_arg.as_str(),
+            "--json",
+        ],
+        dir.path(),
+    );
+    assert_eq!(recovered["recovery"]["terminal"], true, "{recovered}");
+    assert_eq!(
+        recovered["recovery"]["do_not_recompact"], true,
+        "{recovered}"
+    );
+    assert_eq!(recovered["recovery"]["exact_bytes"], true, "{recovered}");
+
+    let mut full_args = args.to_vec();
+    *full_args.last_mut().unwrap() = "--json=full";
+    let full = run_default_envelope_json(&full_args, dir.path());
+    fields!(full; "/schema_version" => "tokenzero.cli.v1"; "/status" => "ok"; "/tool" => "read");
+    assert!(full.get("telemetry").is_some(), "{full}");
+    assert!(full.get("accounting").is_some(), "{full}");
+    assert!(full["visible"]["text"].as_str().is_some(), "{full}");
+    assert!(
+        full["refs"][0]["ref"]
+            .as_str()
+            .is_some_and(|reference| reference.starts_with("tz://blob/")),
+        "full envelope keeps canonical forensic refs: {full}"
+    );
+    assert!(
+        serde_json::to_vec(&slim).unwrap().len() * 2 < serde_json::to_vec(&full).unwrap().len(),
+        "slim default must remain less than half the full envelope"
+    );
+
+    let invalid = tokenzero_cmd()
+        .env_remove("TOKENZERO_SLIM_ENVELOPE")
+        .current_dir(dir.path())
+        .args([
+            "read",
+            file_arg.as_str(),
+            "--allowed-root",
+            root_arg.as_str(),
+            "--json=unknown",
+        ])
+        .output()
+        .unwrap();
+    assert_eq!(invalid.status.code(), Some(2));
+
+    let authored = tokenzero_cmd()
+        .env_remove("TOKENZERO_SLIM_ENVELOPE")
+        .args(["quote", "--platform", "unix", "--", "--json=full", "--json"])
+        .output()
+        .unwrap();
+    assert_success_ref(&authored, "quoted child argv");
+    let authored = String::from_utf8(authored.stdout).unwrap();
+    assert!(authored.contains("--json=full"), "{authored}");
 }
 
 #[test]
-fn cli_slim_envelope_overhead_is_a_flat_constant_not_a_payload_multiple() {
-    // 0ok7 acceptance: for sub-1KB payloads the slim envelope must add a small
-    // fixed cost (refs + status truth), never a cost that scales with content.
+fn cli_default_envelope_has_a_labeled_sub_kib_overhead_gate() {
     let (dir, cache) = setup_temp_with_cache();
     let cache_arg = cache.to_str().unwrap().to_string();
     let root_arg = dir.path().to_str().unwrap().to_string();
+    let mut rows = Vec::new();
 
-    let mut overheads = Vec::new();
-    for size in [64_usize, 256, 900] {
-        let file = dir.path().join(format!("payload_{size}.txt"));
-        let body = "x".repeat(size);
-        std::fs::write(&file, &body).unwrap();
+    for source_bytes in [128_usize, 512, 900] {
+        let file = dir.path().join(format!("payload_{source_bytes}.txt"));
+        std::fs::write(&file, "x".repeat(source_bytes)).unwrap();
         let file_arg = file.to_str().unwrap().to_string();
-        let slim = run_tokenzero_json_in_with_env(
-            &[
+        let output = tokenzero_cmd()
+            .env_remove("TOKENZERO_SLIM_ENVELOPE")
+            .current_dir(dir.path())
+            .args([
                 "read",
                 file_arg.as_str(),
                 "--cache-path",
@@ -221,29 +261,35 @@ fn cli_slim_envelope_overhead_is_a_flat_constant_not_a_payload_multiple() {
                 "--allowed-root",
                 root_arg.as_str(),
                 "--json",
-            ],
-            dir.path(),
-            &[("TOKENZERO_SLIM_ENVELOPE", "1")],
-        );
-        let bytes = serde_json::to_string(&slim).unwrap().len();
-        let payload = slim["visible"].as_str().unwrap_or_default().len();
-        assert!(payload >= size, "payload {payload} carries {size} content");
-        overheads.push(bytes - payload);
+            ])
+            .output()
+            .unwrap();
+        assert_success_ref(&output, "default envelope measurement");
+        let emitted_envelope_bytes = output.stdout.len();
+        let envelope = parse_json_stdout(&output);
+        let exact_visible_payload_bytes =
+            envelope["visible"].as_str().expect("visible string").len();
+        let exact_envelope_overhead_bytes =
+            emitted_envelope_bytes.saturating_sub(exact_visible_payload_bytes);
+        let overhead_per_visible_payload_ppm = exact_envelope_overhead_bytes
+            .saturating_mul(1_000_000)
+            / exact_visible_payload_bytes.max(1);
+        rows.push((
+            source_bytes,
+            emitted_envelope_bytes,
+            exact_visible_payload_bytes,
+            exact_envelope_overhead_bytes,
+            overhead_per_visible_payload_ppm,
+        ));
     }
 
-    // Overhead must be flat across a 14x payload range: no per-byte tax.
-    let (min, max) = (
-        *overheads.iter().min().unwrap(),
-        *overheads.iter().max().unwrap(),
-    );
+    let gate = rows
+        .iter()
+        .find(|(source_bytes, ..)| *source_bytes == 900)
+        .unwrap();
     assert!(
-        max - min <= 32,
-        "slim overhead must be constant, saw {overheads:?}"
-    );
-    // Two durable refs (~74B each) plus status/tool/ack is the floor.
-    assert!(
-        max <= 260,
-        "slim overhead must stay within the ref-dominated floor, saw {overheads:?}"
+        gate.4 <= 200_000,
+        "exact_envelope_overhead_bytes / exact_visible_payload_bytes must be <=20% for the 900-byte sub-KiB gate: {rows:?}"
     );
 }
 

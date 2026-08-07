@@ -959,6 +959,7 @@ fn cli_run_recovers_common_wrong_json_and_timeout_invocations() {
     for args in cases {
         let output = Command::cargo_bin("tokenzero")
             .unwrap()
+            .env("TOKENZERO_SLIM_ENVELOPE", "0")
             .args(*args)
             .output()
             .unwrap();
@@ -1016,6 +1017,22 @@ fn cli_run_preserves_trailing_child_json_without_delimiter() {
     assert!(
         stdout.contains("combined_ref: tz://blob/"),
         "exact combined recovery ref expected; got {stdout}"
+    );
+
+    let full_child = Command::cargo_bin("tokenzero")
+        .unwrap()
+        .args(["run", "printf", "%s\n", "--json=full"])
+        .output()
+        .unwrap();
+    assert!(full_child.status.success());
+    let full_child_stdout = String::from_utf8_lossy(&full_child.stdout);
+    assert!(
+        full_child_stdout.contains("stdout:\n--json=full\n"),
+        "child must receive the exact trailing argument: {full_child_stdout}"
+    );
+    assert!(
+        serde_json::from_slice::<Value>(&full_child.stdout).is_err(),
+        "trailing --json=full must not select the parent forensic envelope"
     );
 }
 
@@ -1344,12 +1361,11 @@ fn cli_flag_typo_distance_one_offers_corrected_command() {
 
 #[test]
 fn cli_run_json_child_exit_default_mirrors_child_failure() {
-    // nt0i (1cwf flip): --json run mirrors the child exit code by default so
-    // harnesses gating on process exit observe failure; envelope content is
-    // unchanged (status/telemetry stay truthful).
+    // nt0i (1cwf flip): JSON run mirrors the child exit code by default. This
+    // test requests the full forensic envelope because it inspects telemetry.
     let default = Command::cargo_bin("tokenzero")
         .unwrap()
-        .args(["run", "--json", "sh", "-c", "printf boom; exit 7"])
+        .args(["run", "--json=full", "sh", "-c", "printf boom; exit 7"])
         .output()
         .unwrap();
     assert_eq!(default.status.code(), Some(7), "default mirrors child exit");
@@ -1361,7 +1377,7 @@ fn cli_run_json_child_exit_default_mirrors_child_failure() {
     let legacy = Command::cargo_bin("tokenzero")
         .unwrap()
         .env("TOKENZERO_RUN_CHILD_EXIT", "0")
-        .args(["run", "--json", "sh", "-c", "printf boom; exit 7"])
+        .args(["run", "--json=full", "sh", "-c", "printf boom; exit 7"])
         .output()
         .unwrap();
     assert!(
@@ -1377,7 +1393,7 @@ fn cli_run_json_child_exit_default_mirrors_child_failure() {
 fn cli_run_parent_json_keeps_inline_payload_unwrapped() {
     let output = Command::cargo_bin("tokenzero")
         .unwrap()
-        .args(["run", "--json", "printf", "%s\n", "--json"])
+        .args(["run", "--json=full", "printf", "%s\n", "--json"])
         .output()
         .unwrap();
     assert!(output.status.success());

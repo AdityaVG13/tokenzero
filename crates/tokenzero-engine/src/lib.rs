@@ -81,7 +81,10 @@ pub use raw_worker::{
     parse_raw_worker_argv, raw_worker_print_handshake, response_from_outcome, run_raw_worker_once,
     run_raw_worker_serve,
 };
-pub use render::{cli_json, exact_ref_token_count, prune_dead_refs, render_text};
+pub use render::{
+    cli_json, exact_ref_token_count, prune_dead_refs, render_text, request_full_cli_envelope,
+    slim_envelope_enabled,
+};
 pub use surface_handshake::{
     CompressionOwner, HandshakeSurface, PlannerOwner, RAW_WORKER_PROTOCOL_VERSION,
     SURFACE_CAPABILITY_SCHEMA, SurfaceCapability, SurfaceLimits, build_surface_capability,

@@ -346,6 +346,34 @@ fn mcp_envelope_is_text_only_by_default() {
         !text.contains("edit: tz_edit"),
         "shell responses must not carry the read edit hint: {text}"
     );
+    let read_ref = read_text
+        .lines()
+        .find_map(|line| line.strip_prefix("refs: "))
+        .and_then(|tail| tail.split_whitespace().next())
+        .expect("read footer ref");
+    let expanded: Value = serde_json::from_str(
+        &handle_jsonrpc(
+            &engine,
+            &serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": 3,
+                "method": "tools/call",
+                "params": {"name": "tz_expand", "arguments": {"ref": read_ref, "raw": true}}
+            })
+            .to_string(),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let expanded_text = expanded["result"]["content"][0]["text"]
+        .as_str()
+        .expect("expand text");
+    assert!(
+        expanded_text.starts_with("alpha\nbeta\n"),
+        "{expanded_text}"
+    );
+    assert_eq!(expanded["result"]["recovery"]["exact_bytes"], true);
+    assert_eq!(expanded["result"]["recovery"]["do_not_recompact"], true);
 
     // The opt-in compact envelope still prunes payload duplicates and
     // forensic telemetry.
@@ -366,6 +394,17 @@ fn mcp_envelope_is_text_only_by_default() {
     assert!(
         cli.get("visible").is_none(),
         "capsule text must not be duplicated in the envelope: {cli}"
+    );
+    assert!(
+        cli.get("detail_ref").is_none(),
+        "detail_ref equal to a carried ref must not be duplicated: {cli}"
+    );
+    let mut distinct = shell.clone();
+    distinct.detail_ref = Some("tz://file/distinct-recovery-anchor".into());
+    let distinct_cli = tools::compact_cli_envelope(&distinct);
+    assert_eq!(
+        distinct_cli["detail_ref"], "tz://file/distinct-recovery-anchor",
+        "a nonidentical detail ref must be retained"
     );
     for pruned in ["argv", "stdout_preview", "stderr_preview", "stdout_capture"] {
         assert!(

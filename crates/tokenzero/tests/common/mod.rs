@@ -201,6 +201,10 @@ pub fn tokenzero_cmd() -> Command {
     cmd.env_remove("TOKENZERO_SHARED_STORE");
     cmd.env_remove("ZEROSTACK_SHARED_STORE");
     cmd.env_remove("ZEROSTACK_STORE_ROOT");
+    // Most integration fixtures pin the legacy forensic JSON schema. Product
+    // default is slim; those fixtures opt into full compatibility explicitly.
+    // Focused default-envelope tests remove this override.
+    cmd.env("TOKENZERO_SLIM_ENVELOPE", "0");
     cmd
 }
 

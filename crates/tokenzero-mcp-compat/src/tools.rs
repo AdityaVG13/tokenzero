@@ -1104,6 +1104,21 @@ pub(crate) fn compact_cli_envelope(response: &ToolResponse) -> Value {
         // The capsule text already ships as content[0].text; repeating it
         // here doubles the cost of every call.
         object.remove("visible");
+        let detail_is_in_refs = object
+            .get("detail_ref")
+            .and_then(Value::as_str)
+            .is_some_and(|detail| {
+                object
+                    .get("refs")
+                    .and_then(Value::as_array)
+                    .is_some_and(|refs| {
+                        refs.iter()
+                            .any(|record| record.get("ref").and_then(Value::as_str) == Some(detail))
+                    })
+            });
+        if detail_is_in_refs {
+            object.remove("detail_ref");
+        }
         if let Some(telemetry) = object.get_mut("telemetry").and_then(Value::as_object_mut) {
             for field in PRUNED_TELEMETRY_FIELDS {
                 telemetry.remove(*field);

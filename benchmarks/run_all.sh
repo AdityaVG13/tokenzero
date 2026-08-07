@@ -82,6 +82,10 @@ PY
     printf '_Benchmark failed to run; see suite log._\n'; log 'FAILED: Boot cost'
   fi
 
+  run_section 'Default CLI JSON envelope overhead' \
+    'Command: `python3 benchmarks/envelope-overhead.py --json-out results/current/tokenzero_envelope_overhead.json`. Exact emitted JSON bytes include the line terminator; numerator and denominator are labeled in the artifact.' \
+    env TOKENZERO_BIN="$BIN" python3 "$ROOT/benchmarks/envelope-overhead.py" --json-out "$ROOT/results/current/tokenzero_envelope_overhead.json"
+
   run_section 'CLI cold read (process + first read/expand latency)' \
     'Command: `benchmarks/cli-cold-read.sh`. Cold = recovery cache removed per cell; warm = cache retained.' \
     bash "$ROOT/benchmarks/cli-cold-read.sh"

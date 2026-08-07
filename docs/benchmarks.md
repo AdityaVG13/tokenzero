@@ -20,6 +20,21 @@ real run of the command shown; re-run the suite yourself to reproduce.
 - runs/cell: RUNS=5 WARMUP=1 (override via env)
 
 
+## Default CLI JSON envelope overhead
+
+Command: `python3 benchmarks/envelope-overhead.py --json-out results/current/tokenzero_envelope_overhead.json`. Exact emitted JSON bytes include the line terminator. The numerator and denominator are labeled in the artifact. This row was regenerated on 2026-08-07 with the current canonical CLI built through RCH; debug/release profiles emit the same serialized bytes.
+
+| source payload bytes | emitted envelope bytes | exact visible payload bytes | exact overhead bytes | overhead / visible payload | refs exact |
+|---:|---:|---:|---:|---:|:---:|
+| 128 | 269 | 128 | 141 | 110.16% | yes |
+| 512 | 653 | 512 | 141 | 27.54% | yes |
+| 900 | 1041 | 900 | 141 | 15.67% | yes |
+
+The 128- and 512-byte context rows exceed 20%. They are reported, not hidden. The declared acceptance gate is the single 900-byte sub-KiB fixture; this result makes no all-sub-KiB claim.
+
+Gate fixture: 900 source bytes. Numerator is exact envelope overhead bytes; denominator is exact visible payload bytes. Observed 15.67% against the 20.00% limit: **PASS**.
+`--json=full` emitted 1882 bytes and preserved the forensic schema. Claim-audit full artifact schema preserved: yes.
+
 ## Boot cost (envelope tokens at startup)
 
 Command: `python3 benchmarks/boot-cost.py`. Envelope component attribution, candidate vs locked baseline (`benchmarks/boot-cost/baseline.json`).

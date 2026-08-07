@@ -20,7 +20,7 @@ use tokenzero_engine::codemode_wire::{CodeModeOptions, CodeModeResult, CodeModeS
 use tokenzero_engine::mcp_idle_timeout_from_secs;
 use tokenzero_engine::{
     EditHunk, EngineConfig, TokenZeroEngine, cli_json, default_shell_timeout, render_text,
-    shell_timeout_from_secs,
+    request_full_cli_envelope, shell_timeout_from_secs, slim_envelope_enabled,
 };
 use tokenzero_install as install;
 
@@ -185,6 +185,7 @@ fn main() -> Result<()> {
     }
 
     let normalized_argv = normalize_agent_invocation_args(argv);
+    let normalized_argv = normalize_json_envelope_args(normalized_argv);
     let cli = match Cli::try_parse_from(&normalized_argv) {
         Ok(cli) => cli,
         Err(err) => {
@@ -577,6 +578,22 @@ fn normalize_agent_invocation_args(mut argv: Vec<OsString>) -> Vec<OsString> {
     }
 }
 
+fn normalize_json_envelope_args(mut argv: Vec<OsString>) -> Vec<OsString> {
+    // Keep clap's boolean `--json` on every existing subcommand while adding
+    // the exact compatibility spelling from the envelope contract. Stop at
+    // `--`: child argv and authored source bytes must never be rewritten.
+    for argument in argv.iter_mut().skip(1) {
+        if argument == "--" {
+            break;
+        }
+        if argument == "--json=full" {
+            request_full_cli_envelope();
+            *argument = OsString::from("--json");
+        }
+    }
+    argv
+}
+
 fn normalize_install_invocation_args(argv: Vec<OsString>) -> Vec<OsString> {
     if argv.len() < 3 {
         return argv;
@@ -708,16 +725,31 @@ struct EmitResponse {
     json: bool,
 }
 
-fn tools_emit(responses: Vec<ToolResponse>, json: bool, tool: &str) -> Result<EmitResponse> {
+fn tools_emit(
+    engine: &TokenZeroEngine,
+    mut responses: Vec<ToolResponse>,
+    json: bool,
+    tool: &str,
+) -> Result<EmitResponse> {
     let root = tokenzero_work_root(None);
     for response in &responses {
         record_tool_pulse(response, root.clone(), tool)?;
     }
+    if json && slim_envelope_enabled() {
+        for response in &mut responses {
+            engine.apply_session_visible_ref_aliases(response);
+        }
+    }
     Ok(EmitResponse { responses, json })
 }
 
-fn tool_emit(response: ToolResponse, json: bool, tool: &str) -> Result<EmitResponse> {
-    tools_emit(vec![response], json, tool)
+fn tool_emit(
+    engine: &TokenZeroEngine,
+    response: ToolResponse,
+    json: bool,
+    tool: &str,
+) -> Result<EmitResponse> {
+    tools_emit(engine, vec![response], json, tool)
 }
 
 fn with_safe_alternative(mut response: ToolResponse, command: &str) -> ToolResponse {
@@ -778,7 +810,7 @@ fn handle_find(args: FindArgs) -> Result<EmitResponse> {
             "max_visible_tokens": args.max_visible_tokens,
         }),
     );
-    tool_emit(response, args.tool.json, "find")
+    tool_emit(&engine, response, args.tool.json, "find")
 }
 
 fn handle_recall(args: RecallArgs) -> Result<EmitResponse> {
@@ -793,7 +825,7 @@ fn handle_recall(args: RecallArgs) -> Result<EmitResponse> {
             "max_visible_tokens": args.max_visible_tokens,
         }),
     );
-    tool_emit(response, args.tool.json, "recall")
+    tool_emit(&engine, response, args.tool.json, "recall")
 }
 
 fn handle_fetch(args: FetchArgs) -> Result<EmitResponse> {
@@ -808,7 +840,7 @@ fn handle_fetch(args: FetchArgs) -> Result<EmitResponse> {
         payload["ttl_seconds"] = json!(ttl);
     }
     let response = dispatch_cli_tool(&engine, "tz_fetch", payload);
-    tool_emit(response, args.tool.json, "fetch")
+    tool_emit(&engine, response, args.tool.json, "fetch")
 }
 
 fn handle_grep(args: FindArgs) -> Result<EmitResponse> {
@@ -825,7 +857,7 @@ fn handle_grep(args: FindArgs) -> Result<EmitResponse> {
             "max_visible_tokens": args.max_visible_tokens,
         }),
     );
-    tool_emit(response, args.tool.json, "grep")
+    tool_emit(&engine, response, args.tool.json, "grep")
 }
 
 fn handle_glob(args: GlobArgs) -> Result<EmitResponse> {
@@ -843,7 +875,7 @@ fn handle_glob(args: GlobArgs) -> Result<EmitResponse> {
             "max_visible_tokens": args.max_visible_tokens,
         }),
     );
-    tool_emit(response, args.tool.json, "glob")
+    tool_emit(&engine, response, args.tool.json, "glob")
 }
 
 fn handle_tree(args: TreeArgs) -> Result<EmitResponse> {
@@ -861,7 +893,7 @@ fn handle_tree(args: TreeArgs) -> Result<EmitResponse> {
             "max_visible_tokens": args.max_visible_tokens,
         }),
     );
-    tool_emit(response, args.tool.json, "tree")
+    tool_emit(&engine, response, args.tool.json, "tree")
 }
 
 fn handle_edit(args: EditArgs) -> Result<EmitResponse> {
@@ -909,7 +941,7 @@ fn handle_edit(args: EditArgs) -> Result<EmitResponse> {
         ),
         "tokenzero edit <path> --edits-json '<json>' --dry-run --json",
     );
-    tool_emit(response, args.tool.json, "edit")
+    tool_emit(&engine, response, args.tool.json, "edit")
 }
 
 fn handle_ingest(args: IngestArgs) -> Result<EmitResponse> {
@@ -936,7 +968,7 @@ fn handle_ingest(args: IngestArgs) -> Result<EmitResponse> {
             "content_type": kind.to_string(),
         }),
     );
-    tool_emit(response, args.tool.json, "ingest")
+    tool_emit(&engine, response, args.tool.json, "ingest")
 }
 
 fn handle_read(args: ReadArgs) -> Result<EmitResponse> {
@@ -983,7 +1015,7 @@ fn handle_read(args: ReadArgs) -> Result<EmitResponse> {
         payload["end_line"] = json!(e);
     }
     let response = dispatch_cli_tool(&engine, "tz_read", payload);
-    tool_emit(response, args.tool.json, "read")
+    tool_emit(&engine, response, args.tool.json, "read")
 }
 
 fn handle_run(args: RunArgs) -> Result<EmitResponse> {
@@ -1035,7 +1067,7 @@ fn handle_run(args: RunArgs) -> Result<EmitResponse> {
         payload["env"] = json!(env);
     }
     let response = dispatch_cli_tool(&engine, "tz_shell", payload);
-    tool_emit(response, args.tool.json, "shell")
+    tool_emit(&engine, response, args.tool.json, "shell")
 }
 
 fn display_command_for_platform(argv: &[String], cwd: Option<&Path>, platform: &str) -> String {
@@ -1101,7 +1133,7 @@ fn handle_expand(args: ExpandArgs) -> Result<EmitResponse> {
             dispatch_cli_tool(&engine, "tz_expand", payload)
         })
         .collect();
-    tools_emit(responses, args.json, "expand")
+    tools_emit(&engine, responses, args.json, "expand")
 }
 
 fn emit_rewrite(args: RewriteArgs) -> Result<()> {

@@ -43,7 +43,7 @@ macro_rules! artifact_args {
     name = "tokenzero",
     version,
     about = "Rust TokenZero RACC runtime",
-    after_help = "Agent surfaces:\n  tokenzero capabilities --json   Print the machine-readable CLI contract\n  tokenzero robot-docs guide      Print a paste-ready guide for agents\n  tokenzero run --json -- <cmd>   Run commands with status-truth telemetry\n  tokenzero --robot-triage        One-shot health + findings + next command (doctor)"
+    after_help = "Agent surfaces:\n  tokenzero capabilities --json   Print the machine-readable CLI contract\n  tokenzero robot-docs guide      Print a paste-ready guide for agents\n  tokenzero run --json -- <cmd>   Run commands with status-truth telemetry\n  tokenzero read <path> --json=full  Restore the full forensic ToolResponse envelope\n  tokenzero --robot-triage        One-shot health + findings + next command (doctor)"
 )]
 pub(crate) struct Cli {
     #[command(subcommand)]
