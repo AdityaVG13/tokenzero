@@ -1,4 +1,5 @@
 use super::*;
+use std::io::Write;
 
 impl TokenZeroEngine {
     pub fn mem(&self) -> ToolResponse {
@@ -150,14 +151,26 @@ impl TokenZeroEngine {
             },
             "manifest_path": manifest_path.display().to_string()
         });
-        if let Some(parent) = manifest_path.parent() {
-            let _ = fs::create_dir_all(parent);
+        let visible = match serde_json::to_string_pretty(&manifest) {
+            Ok(visible) => visible,
+            Err(err) => {
+                return failure_response(
+                    "cache-pack",
+                    "manifest_serialize_failed",
+                    err.to_string(),
+                    Some("report this TokenZero serialization defect"),
+                );
+            }
+        };
+        let manifest_body = format!("{visible}\n");
+        if let Err(err) = write_cache_pack_manifest(&manifest_path, manifest_body.as_bytes()) {
+            return failure_response(
+                "cache-pack",
+                "manifest_write_failed",
+                format!("could not publish {}: {err}", manifest_path.display()),
+                Some("fix cache-pack directory permissions and retry"),
+            );
         }
-        let _ = fs::write(
-            &manifest_path,
-            serde_json::to_string_pretty(&manifest).unwrap_or_default() + "\n",
-        );
-        let visible = serde_json::to_string_pretty(&manifest).unwrap_or_default();
         let refs = vec![
             ref_record("stable_prefix", stable_stored.blob_ref, stable_text.len()),
             ref_record(
@@ -212,5 +225,56 @@ impl TokenZeroEngine {
             let root = comparable_path(root);
             abs.starts_with(root)
         })
+    }
+}
+
+fn write_cache_pack_manifest(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    fs::create_dir_all(parent)?;
+    let mut temp = tempfile::NamedTempFile::new_in(parent)?;
+    temp.write_all(bytes)?;
+    temp.as_file().sync_all()?;
+    temp.persist(path).map_err(|err| err.error)?;
+    #[cfg(unix)]
+    fs::File::open(parent)?.sync_all()?;
+    Ok(())
+}
+
+#[cfg(test)]
+mod cache_pack_manifest_tests {
+    use super::*;
+
+    #[test]
+    fn cache_pack_manifest_replaces_atomically_without_temp_residue() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("cache-packs/agent.json");
+
+        write_cache_pack_manifest(&path, b"first\n").unwrap();
+        write_cache_pack_manifest(&path, b"second\n").unwrap();
+
+        assert_eq!(fs::read(&path).unwrap(), b"second\n");
+        let siblings = fs::read_dir(path.parent().unwrap())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect::<Vec<_>>();
+        assert_eq!(siblings, [std::ffi::OsString::from("agent.json")]);
+    }
+
+    #[test]
+    fn cache_pack_reports_manifest_publication_failure() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("cache-packs"), b"not a directory").unwrap();
+        let mut config = EngineConfig::for_root(dir.path());
+        config.cache_path = dir.path().join("recovery-cache.json");
+        let response = TokenZeroEngine::new(config).cache_pack("agent");
+
+        assert_eq!(response.status, "error");
+        assert_eq!(
+            response.error.as_ref().map(|error| error.code.as_str()),
+            Some("manifest_write_failed")
+        );
     }
 }
