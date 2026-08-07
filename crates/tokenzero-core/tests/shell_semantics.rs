@@ -86,6 +86,20 @@ expected_false_pipeline_segments_do_not_trigger_masking_warnings {
     macro_rules! hard { ($($command:expr => ($stdout:expr, $stderr:expr, $code:expr, $segment:expr);)*) => { $(let rendered = failure($command, $stdout, $stderr, $code); masking(&rendered, $command, $segment); assert_eq!(rendered.command_status.pipeline_rerun_command.is_some(), !cfg!(windows), "{}: {:?}", $command, rendered);)* }; }
     hard! { "cmp -s missing-a missing-b | cat" => ("", "cmp: missing-a: No such file or directory\n", 0, "cmp -s missing-a missing-b"); "diff --definitely-not-a-tokenzero-option | cat" => ("", "diff: unrecognized option `--definitely-not-a-tokenzero-option'\nusage: diff [options] file1 file2\n", 0, "diff --definitely-not-a-tokenzero-option"); "cargo test missing_filter | cat" => ("", "error: test failed\n", 0, "cargo test missing_filter"); "test -f missing-file | false" => ("", "", 1, "false"); "cmp left.txt right.txt | false" => ("left.txt right.txt differ: byte 1, line 1\n", "", 1, "false"); "false | test -f missing-file" => ("", "", 1, "false"); }
 }
+handled_command_lookup_does_not_poison_later_help_output {
+    let command = "command -v herdr || true; herdr --help 2>&1 | sed -n '1,180p'";
+    let stdout = "/opt/homebrew/bin/herdr\nUsage: herdr [options]\n";
+    let rendered = success(command, stdout, 0);
+    no_masking(&rendered, command);
+
+    let command = "command --definitely-invalid herdr || true; herdr --help 2>&1 | sed -n '1,180p'";
+    let rendered = failure(command, "", "command: --definitely-invalid: invalid option\n", 0);
+    masking(&rendered, command, "command --definitely-invalid herdr");
+
+    let command = "command -v -x herdr || true; herdr --help 2>&1 | sed -n '1,180p'";
+    let rendered = failure(command, "Usage: command [-pVv] command [arg ...]\n", "", 0);
+    masking(&rendered, command, "command -v -x herdr");
+}
 compound_command_status_evidence_is_preserved {
     let command = "cargo clippy --workspace --all-targets -- -D warnings && cargo fmt --all -- --check && git diff --check"; let rendered = failure(command, "", "error: this `if` statement can be collapsed\n", 101); assert_eq!(rendered.command_status.failed_segment.as_deref(), Some("cargo clippy --workspace --all-targets -- -D warnings"), "{rendered:?}");
     let command = "cd /tmp/tokenzero && grep -rn \"failed_segment\" crates/tokenzero-core/src/shell_parse.rs | head"; let rendered = success(command, "crates/tokenzero-core/src/shell_parse.rs:93:    if looks_masked_failure_evidence(stdout, stderr, Some(segment)) {\n", 0); no_masking(&rendered, command);

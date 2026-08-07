@@ -304,6 +304,11 @@ pub(crate) fn is_expected_false_segment(command: &str, stdout: &str, stderr: &st
     match first.as_str() {
         "test" | "[" | "[[" => stdout.trim().is_empty(),
         command if is_search_command(command) => stdout.trim().is_empty(),
+        "command" => {
+            words.get(1).is_some_and(|word| word == "-v")
+                && words.len() >= 3
+                && words[2..].iter().all(|word| !word.starts_with('-'))
+        }
         "cmp" | "diff" => true,
         "git" => {
             let Some(subcommand_index) = git_subcommand_index(&words) else {

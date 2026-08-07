@@ -35,6 +35,9 @@ pub(crate) fn failed_segment(cmd: &str, out: &str, err: &str, code: Option<i32>)
     }
     code.is_some_and(|c| c != 0)
         .then(|| {
+            if let Some(s) = empty_pipeline_search_failure_segment(cmd, out, err, code) {
+                return Some(s);
+            }
             if let Some(s) = evidence_named_segment(&segments, out, err) {
                 return Some(s);
             }
@@ -97,6 +100,42 @@ fn is_cd_failure_segment(segment: &str, exit_code: Option<i32>, failure_output: 
 fn is_command_not_found_segment(segment: &str, not_found_actors: &[String]) -> bool {
     !not_found_actors.is_empty()
         && segment_command_name(segment).is_some_and(|name| not_found_actors.contains(&name))
+}
+
+fn empty_pipeline_search_failure_segment(
+    command: &str,
+    stdout: &str,
+    stderr: &str,
+    exit_code: Option<i32>,
+) -> Option<String> {
+    let features = shell_operator_features(command);
+    if exit_code != Some(1)
+        || !stdout.trim().is_empty()
+        || !stderr.trim().is_empty()
+        || !features.contains(&"pipeline")
+        || features
+            .iter()
+            .any(|feature| matches!(*feature, "and-list" | "or-list"))
+    {
+        return None;
+    }
+    split_shell_segments(command)
+        .into_iter()
+        .rev()
+        .find(|segment| {
+            let words = split_shell_words(&shell_analysis_command(segment));
+            let is_search = words
+                .first()
+                .map(|word| shell_command_basename(word))
+                .is_some_and(|name| is_search_command(&name));
+            let suppresses_output = words.iter().skip(1).any(|word| {
+                matches!(word.as_str(), "--quiet" | "--silent")
+                    || word
+                        .strip_prefix('-')
+                        .is_some_and(|flags| flags.contains('q') || flags.contains('s'))
+            });
+            is_search && !suppresses_output
+        })
 }
 
 /// The segment whose own command name prefixes an error line, e.g. `tail: cannot

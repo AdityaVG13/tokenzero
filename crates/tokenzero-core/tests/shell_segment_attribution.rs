@@ -181,6 +181,33 @@ fn pipefail_attribution_names_the_failing_stage() {
 }
 
 #[test]
+fn empty_pipefail_search_names_the_search_segment() {
+    assert_attribution(
+        "git diff -- src/core/raw_worker_v2.rs src/core/fs_ops.rs src/core/dispatcher.rs | grep -n -E 'timing|settle|telemetry|WorkerResult|WorkerError|details|duration|elapsed|stage' | head -260",
+        "",
+        "",
+        1,
+        Some(
+            "grep -n -E 'timing|settle|telemetry|WorkerResult|WorkerError|details|duration|elapsed|stage'",
+        ),
+    );
+    assert_attribution(
+        "printf x | rg alpha | grep beta | head -1",
+        "",
+        "",
+        1,
+        Some("grep beta"),
+    );
+    assert_attribution(
+        "printf x | grep -q x | sh -c 'exit 1'",
+        "",
+        "",
+        1,
+        Some("sh -c 'exit 1'"),
+    );
+}
+
+#[test]
 fn successful_compounds_report_no_failed_segment() {
     assert_attribution(
         "git diff --stat && npm install && cargo test",
