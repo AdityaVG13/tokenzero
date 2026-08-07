@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
-use std::fs::{self, OpenOptions};
+use std::fs;
 use std::io::{
     BufRead, BufReader, BufWriter, Error as IoError, ErrorKind, Result as IoResult, Write,
 };
@@ -32,6 +32,7 @@ const EVENT_SQL_COLUMNS: &str = "schema_version, event, timestamp_unix, tool, mo
 const PULSE_SOURCE_OF_TRUTH: &str = "jsonl";
 const PULSE_SYNC_SCHEMA_VERSION: &str = "pulse-sync-v1";
 const PULSE_SYNC_LOCK_TIMEOUT: Duration = Duration::from_secs(5);
+const PULSE_EVENT_LOCK_TIMEOUT: Duration = Duration::from_secs(30);
 
 fn default_tokenizer_id() -> String {
     "estimator:tokenzero-core".to_string()
@@ -70,12 +71,19 @@ pulse_structs! {
         failure bool;
         exact_ref_count usize;
         latency_ms u128;
+        /// `tool_call` stores the first 64 bits (16 hex characters) of its
+        /// source hint's SHA-256 here. Direct construction/deserialization is
+        /// not validated, so callers must never place raw payloads in this
+        /// correlatable field.
         source_hash Option<String>;
-        /// Serving session id for expand-time attribution.
+        /// Serving session id for expand-time attribution. Stored verbatim in
+        /// the local ledger when supplied; it is not anonymized.
         #[serde(default, skip_serializing_if = "Option::is_none")] session_id Option<String>;
-        /// Call id within the session (e.g. JSON-RPC id).
+        /// Call id within the session (e.g. JSON-RPC id). Stored verbatim in the
+        /// local ledger when supplied; it is not anonymized.
         #[serde(default, skip_serializing_if = "Option::is_none")] call_id Option<String>;
-        /// Serve/expand tz:// refs — RACC join key.
+        /// Serve/expand tz:// refs — RACC join keys. Stored verbatim in the local
+        /// ledger when supplied and potentially correlatable with local payloads.
         #[serde(default, skip_serializing_if = "Vec::is_empty")] ref_ids Vec<String>;
     }
     #[derive(Default)]
@@ -208,16 +216,118 @@ fn with_pulse_lock<T>(
     action()
 }
 
+fn verify_open_regular_file(path: &Path, file: &fs::File, label: &str) -> IoResult<()> {
+    if file.metadata()?.is_file() && fs::symlink_metadata(path)?.file_type().is_file() {
+        Ok(())
+    } else {
+        Err(IoError::new(
+            ErrorKind::InvalidData,
+            format!("{label} path must be a regular file"),
+        ))
+    }
+}
+
+#[derive(Clone, Copy)]
+enum PulseFileOpenMode {
+    Append,
+    ReadWrite,
+}
+
+#[cfg(unix)]
+fn open_nofollow(path: &Path, mode: PulseFileOpenMode) -> IoResult<(fs::File, bool)> {
+    use rustix::fs::{CWD, Mode, OFlags, openat};
+
+    let access = match mode {
+        PulseFileOpenMode::Append => OFlags::WRONLY | OFlags::APPEND,
+        PulseFileOpenMode::ReadWrite => OFlags::RDWR,
+    };
+    let base = access | OFlags::CLOEXEC | OFlags::NOFOLLOW | OFlags::NONBLOCK;
+    let permissions = Mode::from_bits_truncate(0o666);
+    let open = |flags| {
+        openat(CWD, path, flags, permissions)
+            .map(fs::File::from)
+            .map_err(IoError::from)
+    };
+    match open(base | OFlags::CREATE | OFlags::EXCL) {
+        Ok(file) => Ok((file, true)),
+        Err(error) if error.kind() == ErrorKind::AlreadyExists => {
+            open(base).map(|file| (file, false))
+        }
+        Err(error) => Err(error),
+    }
+}
+
+#[cfg(windows)]
+fn open_nofollow(path: &Path, mode: PulseFileOpenMode) -> IoResult<(fs::File, bool)> {
+    use std::os::windows::fs::OpenOptionsExt;
+
+    // Prevent CreateFileW from traversing a reparse point. The opened handle
+    // and path are both validated as regular files before any mutation.
+    const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+    let open = |create_new: bool| {
+        let mut options = fs::OpenOptions::new();
+        options
+            .create_new(create_new)
+            .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT);
+        match mode {
+            PulseFileOpenMode::Append => {
+                options.append(true);
+            }
+            PulseFileOpenMode::ReadWrite => {
+                options.read(true).write(true);
+            }
+        }
+        options.open(path)
+    };
+    match open(true) {
+        Ok(file) => Ok((file, true)),
+        Err(error) if error.kind() == ErrorKind::AlreadyExists => {
+            open(false).map(|file| (file, false))
+        }
+        Err(error) => Err(error),
+    }
+}
+
+#[cfg(not(any(unix, windows)))]
+fn open_nofollow(path: &Path, mode: PulseFileOpenMode) -> IoResult<(fs::File, bool)> {
+    let open = |create_new: bool| {
+        let mut options = fs::OpenOptions::new();
+        options.create_new(create_new);
+        match mode {
+            PulseFileOpenMode::Append => {
+                options.append(true);
+            }
+            PulseFileOpenMode::ReadWrite => {
+                options.read(true).write(true);
+            }
+        }
+        options.open(path)
+    };
+    match open(true) {
+        Ok(file) => Ok((file, true)),
+        Err(error) if error.kind() == ErrorKind::AlreadyExists => {
+            open(false).map(|file| (file, false))
+        }
+        Err(error) => Err(error),
+    }
+}
+
 pub fn record_event(path: &Path, event: &PulseEvent) -> IoResult<()> {
-    // Hot path: one O_APPEND write of a single JSONL line. Avoids a cross-process
-    // lock+open/close on every MCP tools/call (lock is still used for sync/export).
-    // Small line writes under PIPE_BUF are typically atomic on local filesystems.
-    ensure_parent(path)?;
+    // Serialize before taking the cross-process lock so formatting work never
+    // lengthens the critical section. The lock then orders event appends with
+    // sync/import/export and protects the complete append + durability barrier.
     let mut line = serde_json::to_vec(event).into_io()?;
     line.push(b'\n');
-    let mut file = OpenOptions::new().append(true).create(true).open(path)?;
-    file.write_all(&line)?;
-    Ok(())
+    with_pulse_lock(path, PULSE_EVENT_LOCK_TIMEOUT, || {
+        let (mut file, created) = open_nofollow(path, PulseFileOpenMode::Append)?;
+        verify_open_regular_file(path, &file, "Pulse ledger")?;
+        file.write_all(&line)?;
+        file.sync_data()?;
+        if created {
+            sync_parent(path)?;
+        }
+        Ok(())
+    })
 }
 
 pub fn sync_jsonl_to_sqlite(path: &Path) -> IoResult<PulseSyncStatus> {
@@ -782,12 +892,8 @@ impl Drop for PulseLock {
 fn acquire_pulse_lock(path: &Path) -> IoResult<PulseLock> {
     let lock_path = lock_path_for_ledger(path);
     ensure_parent(&lock_path)?;
-    let mut file = OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create(true)
-        .truncate(false)
-        .open(&lock_path)?;
+    let (mut file, _created) = open_nofollow(&lock_path, PulseFileOpenMode::ReadWrite)?;
+    verify_open_regular_file(&lock_path, &file, "Pulse lock")?;
     match FileExt::try_lock(&file) {
         Ok(()) => {}
         Err(TryLockError::Error(err)) if err.kind() != ErrorKind::WouldBlock => return Err(err),

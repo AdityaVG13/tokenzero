@@ -45,6 +45,12 @@ Project-local mirror events can be enabled at:
 
 The default event schema records token counts, refs, latency, cache hits, recovery cost, and health flags. It does not record raw code, raw shell output, secrets, or daemon artifacts.
 
+### Identity fields and correlatability
+
+Pulse is local, but its event ledger is not anonymous. `PulseEvent::tool_call` leaves `session_id`, `call_id`, and `ref_ids` absent by default. A caller that uses attribution stores all three verbatim in JSONL and the SQLite cache. Session and call ids can contain caller-controlled identifiers. `tz://` refs are stable local join keys and can correlate events with recoverable payloads in the corresponding local store. Review or redact these fields before sharing a Pulse ledger or snapshot.
+
+`PulseEvent::tool_call` stores the first 64 bits of the `source_hint` SHA-256 as 16 lowercase hex characters in `source_hash`, never the hint bytes. This truncated correlation digest is not anonymization or a unique identity: low-entropy paths or identifiers can be guessed and rehashed, and collisions are possible. Direct public struct construction or deserialization can also supply any `source_hash` string, so callers must never place raw source, output, secrets, or other payloads in that field. No Pulse path uploads these values, and `tokenzero pulse stats --json` exposes only bounded aggregates, but export files contain the original local event rows.
+
 ### Local Pulse versus shareable telemetry
 
 Pulse is local observability; it is not the default-off shareable usage-telemetry permission. Existing Pulse JSONL/SQLite, ToolMetrics, and response-ledger accounting continue locally regardless of `TOKENZERO_TELEMETRY`. Shareable usage telemetry is off by default and, when explicitly enabled, records only `{execution_path, raw_tokens, spent_tokens}` for MCP and CodeMode into `usage-telemetry.jsonl`. Inspect with `tokenzero session-ledger inspect --json`; `--telemetry` opts in, `--no-telemetry` opts out with precedence, and `TOKENZERO_TELEMETRY` accepts only `1/on/true/yes` case-insensitively. Inspection always reports `exporter=none`: no exporter or upload path exists.
@@ -160,7 +166,7 @@ Pulse recording is best-effort. If the event ledger is locked, corrupt, missing,
 - SQLite uses WAL mode, `synchronous=NORMAL`, `fullfsync=ON`, `wal_autocheckpoint=1000`, and `foreign_keys=ON`.
 - Multi-step SQLite rebuilds run in one transaction.
 - Hot indexes cover `tool + timestamp` and `event + timestamp`; `doctor` verifies index usage with `EXPLAIN QUERY PLAN`.
-- Append-only JSONL event writes fsync the file before returning. This favors durability over maximum write throughput for Pulse telemetry.
+- Append-only JSONL event writes use no-follow/nonblocking opens on Unix and reparse-point opens on Windows, then validate both the ledger and shared lock handles as regular files before mutation. They fsync the ledger before returning. This favors durability over maximum write throughput for Pulse telemetry.
 - Full JSONL exports and sidecar writes use temp files, fsync, atomic persist, and parent directory fsync where supported.
 
 ### Failure Handling

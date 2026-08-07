@@ -171,6 +171,40 @@ fn records_without_raw_payload() {
 /// (e.g. forgetting to include recovery_tokens in the denominator, or
 /// computing `visible_savings - recovery_tokens` instead of `savings_ratio`).
 #[test]
+fn identity_fields_are_local_and_stored_verbatim_when_supplied() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("events.jsonl");
+    let source_hint = "low-entropy/project/path";
+    let event = PulseEvent::tool_call("read", "hybrid", 100, 20, 0, 1, 3, Some(source_hint))
+        .with_attribution(
+            Some("session-user-visible".to_string()),
+            Some("call-42".to_string()),
+            vec!["tz://blob/abc123".to_string()],
+        );
+
+    record_event(&path, &event).unwrap();
+    let recorded: PulseEvent =
+        serde_json::from_str(fs::read_to_string(&path).unwrap().trim()).unwrap();
+    assert_eq!(recorded.session_id.as_deref(), Some("session-user-visible"));
+    assert_eq!(recorded.call_id.as_deref(), Some("call-42"));
+    assert_eq!(recorded.ref_ids, ["tz://blob/abc123"]);
+    assert_eq!(
+        recorded.source_hash.as_deref(),
+        Some(hash_hint(source_hint).as_str())
+    );
+    assert_eq!(recorded.source_hash.as_deref().unwrap().len(), 16);
+    assert!(
+        recorded
+            .source_hash
+            .as_deref()
+            .unwrap()
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    );
+    assert_ne!(recorded.source_hash.as_deref(), Some(source_hint));
+}
+
+#[test]
 fn aggregates_recovery_adjusted_savings() {
     let events = vec![
         PulseEvent::tool_call("read", "hybrid", 100, 20, 10, 1, 1, None),
@@ -702,6 +736,94 @@ fn import_rejects_snapshot_with_stale_or_mismatched_marker() {
             &before_bytes,
         );
     }
+}
+
+#[test]
+fn nofollow_open_reports_creation_from_exclusive_open() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("events.jsonl");
+    let (first, first_created) = open_nofollow(&path, PulseFileOpenMode::Append).unwrap();
+    assert!(first_created);
+    verify_open_regular_file(&path, &first, "Pulse ledger").unwrap();
+    drop(first);
+
+    let (second, second_created) = open_nofollow(&path, PulseFileOpenMode::Append).unwrap();
+    assert!(!second_created);
+    verify_open_regular_file(&path, &second, "Pulse ledger").unwrap();
+}
+
+#[test]
+fn record_event_rejects_non_regular_ledger_path() {
+    let dir = tempdir().unwrap();
+    let directory_path = dir.path().join("ledger-directory");
+    fs::create_dir(&directory_path).unwrap();
+    assert!(record_event(&directory_path, &test_event("read")).is_err());
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::symlink;
+
+        let target = dir.path().join("missing-target");
+        let link = dir.path().join("ledger-link");
+        symlink(&target, &link).unwrap();
+        assert!(
+            open_nofollow(&link, PulseFileOpenMode::Append).is_err(),
+            "the OS open itself must refuse to follow a ledger symlink"
+        );
+        assert!(record_event(&link, &test_event("read")).is_err());
+        assert!(
+            !target.exists(),
+            "a dangling ledger symlink must not be followed"
+        );
+
+        let lock_case = dir.path().join("lock-case");
+        fs::create_dir(&lock_case).unwrap();
+        let ledger = lock_case.join("locked-ledger.jsonl");
+        let lock_target = lock_case.join("lock-target");
+        fs::write(&lock_target, b"must remain unchanged").unwrap();
+        symlink(&lock_target, lock_path_for_ledger(&ledger)).unwrap();
+        assert!(record_event(&ledger, &test_event("read")).is_err());
+        assert_eq!(fs::read(&lock_target).unwrap(), b"must remain unchanged");
+        assert!(!ledger.exists());
+    }
+}
+
+#[test]
+fn record_event_waits_for_lock_and_appends_after_release() {
+    use std::sync::mpsc::{self, RecvTimeoutError};
+
+    let dir = tempdir().unwrap();
+    let ledger = dir.path().join("events.jsonl");
+    let lock = acquire_pulse_lock(&ledger).unwrap();
+    let ledger_for_record = ledger.clone();
+    let (started_tx, started_rx) = mpsc::channel();
+    let (done_tx, done_rx) = mpsc::channel();
+    let handle = std::thread::spawn(move || {
+        started_tx.send(()).unwrap();
+        let result = record_event(&ledger_for_record, &test_event("after-lock"));
+        done_tx.send(result).unwrap();
+    });
+
+    started_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+    assert!(matches!(
+        done_rx.recv_timeout(Duration::from_millis(50)),
+        Err(RecvTimeoutError::Timeout)
+    ));
+    assert_eq!(
+        fs::symlink_metadata(&ledger).unwrap_err().kind(),
+        ErrorKind::NotFound,
+        "record_event must not open the ledger before it owns the Pulse lock"
+    );
+
+    drop(lock);
+    done_rx
+        .recv_timeout(Duration::from_secs(5))
+        .unwrap()
+        .unwrap();
+    handle.join().unwrap();
+    let scan = scan_jsonl(&ledger, |_| Ok(())).unwrap();
+    assert_eq!(scan.event_count, 1);
+    assert_eq!(scan.skipped_lines, 0);
 }
 
 #[test]

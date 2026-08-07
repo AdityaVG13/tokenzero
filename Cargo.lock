@@ -3070,6 +3070,7 @@ dependencies = [
  "fs4",
  "proptest",
  "rusqlite",
+ "rustix",
  "serde",
  "serde_json",
  "sha2 0.11.0",
