@@ -98,26 +98,39 @@ fn with_legacy_migration<R>(
     f(&mut migration)
 }
 
-fn emit_migration_report(json: String, text: String, failed: bool, as_json: bool) -> Result<()> {
+fn emit_migration_report(
+    json: String,
+    mut text: String,
+    failed: bool,
+    as_json: bool,
+    safe_alternative: &str,
+) -> Result<()> {
+    if failed && !as_json {
+        text.push_str(&format!("\nSafe alternative: {safe_alternative}\n"));
+    }
     if as_json {
         println!("{json}");
     } else {
         println!("{text}");
     }
     if failed {
+        if as_json {
+            eprintln!("Safe alternative: {safe_alternative}");
+        }
         std::process::exit(1);
     }
     Ok(())
 }
 
 macro_rules! cache_migrate {
-    ($root:expr, $cache:expr, $json:expr, $body:expr) => {{
+    ($root:expr, $cache:expr, $json:expr, $safe:expr, $body:expr) => {{
         let report = with_legacy_migration($root, $cache, $body);
         emit_migration_report(
             report.to_json(),
             report.to_text(),
             report.is_failure(),
             $json,
+            $safe,
         )
     }};
 }
@@ -698,6 +711,18 @@ fn tool_emit(response: ToolResponse, json: bool, tool: &str) -> Result<EmitRespo
     tools_emit(vec![response], json, tool)
 }
 
+fn with_safe_alternative(mut response: ToolResponse, command: &str) -> ToolResponse {
+    if let Some(error) = response.error.as_mut() {
+        let safe = format!("Safe alternative: {command}");
+        error.repair = Some(match error.repair.take() {
+            Some(existing) if existing.contains(command) => existing,
+            Some(existing) => format!("{existing} {safe}"),
+            None => safe,
+        });
+    }
+    response
+}
+
 /// Route a CLI domain op through the shared engine dispatcher exactly once.
 fn dispatch_cli_tool(engine: &TokenZeroEngine, op: &str, args: serde_json::Value) -> ToolResponse {
     let outcome = tokenzero_mcp_compat::dispatch_cli(engine, op, &args);
@@ -838,11 +863,15 @@ fn handle_edit(args: EditArgs) -> Result<EmitResponse> {
     } else {
         args.edits_json
             .clone()
-            .ok_or_else(|| anyhow::anyhow!("edit requires --edits-json <json> or --stdin"))?
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "edit requires --edits-json <json> or --stdin; safe alternative: tokenzero edit <path> --edits-json '<json>' --dry-run --json"
+                )
+            })?
     };
     let hunks: Vec<EditHunk> = serde_json::from_str(&edits_text).map_err(|err| {
         anyhow::anyhow!(
-            "invalid edits JSON ({err}); expected [{{\"find\": \"...\", \"replace\": \"...\", \"replace_all\": false}}]"
+            "invalid edits JSON ({err}); expected [{{\"find\": \"...\", \"replace\": \"...\", \"replace_all\": false}}]; safe alternative: tokenzero edit <path> --edits-json '<json>' --dry-run --json"
         )
     })?;
     let (engine, mode) = tool_engine_mode(&args.tool)?;
@@ -856,17 +885,20 @@ fn handle_edit(args: EditArgs) -> Result<EmitResponse> {
             })
         })
         .collect();
-    let response = dispatch_cli_tool(
-        &engine,
-        "tz_edit",
-        json!({
-            "path": args.path.display().to_string(),
-            "edits": edits_json,
-            "create": args.create,
-            "dry_run": args.dry_run,
-            "mode": mode_json(mode),
-            "max_visible_tokens": args.max_visible_tokens,
-        }),
+    let response = with_safe_alternative(
+        dispatch_cli_tool(
+            &engine,
+            "tz_edit",
+            json!({
+                "path": args.path.display().to_string(),
+                "edits": edits_json,
+                "create": args.create,
+                "dry_run": args.dry_run,
+                "mode": mode_json(mode),
+                "max_visible_tokens": args.max_visible_tokens,
+            }),
+        ),
+        "tokenzero edit <path> --edits-json '<json>' --dry-run --json",
     );
     tool_emit(response, args.tool.json, "edit")
 }
@@ -1423,26 +1455,40 @@ fn handle_cache(args: CacheArgs) -> Result<()> {
             let cache = resolve_recovery_cache_path(&root, args.cache_path);
             let dry_run = !args.apply;
             let mut store = tokenzero_recovery::RecoveryStore::new(Some(cache.clone()));
-            let mut report = store.prune_stale(dry_run)?;
+            let mut report = store.prune_stale(dry_run).with_context(
+                || "cache prune failed; safe alternative: tokenzero cache prune --json",
+            )?;
             report["maintenance"] = tokenzero_mcp_compat::cache_maintenance(&cache, dry_run);
             emit_value(report, args.json)?;
         }
-        CacheCommand::MigrateRefs(args) => {
-            cache_migrate!(args.root, args.cache_path, args.json, |m| m
-                .run(!args.apply))?
-        }
-        CacheCommand::MigrateVerify(args) => {
-            cache_migrate!(args.root, args.cache_path, args.json, |m| m.verify())?
-        }
-        CacheCommand::MigrateRollback(args) => {
-            cache_migrate!(args.root, args.cache_path, args.json, |m| m
-                .rollback(args.apply))?
-        }
-        CacheCommand::MigrateCleanup(args) => {
-            cache_migrate!(args.root, args.cache_path, args.json, |m| {
-                m.cleanup(args.apply, args.confirm_cleanup)
-            })?
-        }
+        CacheCommand::MigrateRefs(args) => cache_migrate!(
+            args.root,
+            args.cache_path,
+            args.json,
+            "tokenzero cache migrate-refs --json",
+            |m| m.run(!args.apply)
+        )?,
+        CacheCommand::MigrateVerify(args) => cache_migrate!(
+            args.root,
+            args.cache_path,
+            args.json,
+            "tokenzero cache migrate-refs --json",
+            |m| m.verify()
+        )?,
+        CacheCommand::MigrateRollback(args) => cache_migrate!(
+            args.root,
+            args.cache_path,
+            args.json,
+            "tokenzero cache migrate-rollback --json",
+            |m| m.rollback(args.apply)
+        )?,
+        CacheCommand::MigrateCleanup(args) => cache_migrate!(
+            args.root,
+            args.cache_path,
+            args.json,
+            "tokenzero cache migrate-verify --json",
+            |m| m.cleanup(args.apply, args.confirm_cleanup)
+        )?,
     }
     Ok(())
 }
@@ -1478,10 +1524,11 @@ fn install_apply_or_plan(
     as_json: bool,
 ) -> Result<()> {
     if apply {
-        emit_value(
-            install::apply_for_agents(root, global, capabilities, agents, surface)?,
-            as_json,
-        )
+        let applied = install::apply_for_agents(root, global, capabilities, agents, surface)
+            .with_context(
+                || "install apply failed; safe alternative: tokenzero install --plan --json",
+            )?;
+        emit_value(applied, as_json)
     } else {
         emit_value(
             install::plan_for_agents(root, global, capabilities, agents, surface),
@@ -1496,7 +1543,10 @@ fn handle_install(args: InstallArgs) -> Result<()> {
     let surface = parse_mcp_surface(&args.surface)?;
     let root = install_root(args.root.clone(), args.global);
     if let Some(id) = args.rollback {
-        emit_value(install::rollback(&root, &id)?, args.json)
+        let rollback = install::rollback(&root, &id).with_context(
+            || "install rollback failed; safe alternative: tokenzero doctor --json",
+        )?;
+        emit_value(rollback, args.json)
     } else {
         install_apply_or_plan(
             &root,
@@ -1645,10 +1695,11 @@ fn handle_clients_doctor(args: ClientStatusArgs) -> Result<()> {
 }
 
 fn handle_clients_rollback(args: ClientsRollbackArgs) -> Result<()> {
-    emit_value(
-        install::rollback(&install_root(args.root.clone(), true), &args.id)?,
-        args.json,
-    )
+    let rollback = install::rollback(&install_root(args.root.clone(), true), &args.id)
+        .with_context(
+            || "clients rollback failed; safe alternative: tokenzero clients doctor --json",
+        )?;
+    emit_value(rollback, args.json)
 }
 
 fn handle_capabilities(args: CapabilitiesArgs) -> Result<()> {

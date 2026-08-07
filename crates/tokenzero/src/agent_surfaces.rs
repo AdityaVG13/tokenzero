@@ -635,14 +635,44 @@ pub fn capabilities_json() -> serde_json::Value {
         },
         "dangerous_operations": [
             {
+                "command": "edit",
+                "safe_default": "tokenzero edit <path> --edits-json '<json>' --dry-run --json",
+                "mutation_gate": "omit --dry-run only after reviewing the diff"
+            },
+            {
                 "command": "install",
                 "safe_default": "tokenzero install --plan --json",
                 "mutation_gate": "--apply"
             },
             {
+                "command": "install rollback",
+                "safe_default": "tokenzero doctor --json",
+                "mutation_gate": "--rollback <id>"
+            },
+            {
                 "command": "cache prune",
                 "safe_default": "tokenzero cache prune --json",
                 "mutation_gate": "--apply"
+            },
+            {
+                "command": "cache migrate-refs",
+                "safe_default": "tokenzero cache migrate-refs --json",
+                "mutation_gate": "--apply"
+            },
+            {
+                "command": "cache migrate-rollback",
+                "safe_default": "tokenzero cache migrate-rollback --json",
+                "mutation_gate": "--apply"
+            },
+            {
+                "command": "cache migrate-cleanup",
+                "safe_default": "tokenzero cache migrate-verify --json",
+                "mutation_gate": "--apply --confirm-cleanup"
+            },
+            {
+                "command": "clients rollback",
+                "safe_default": "tokenzero clients doctor --json",
+                "mutation_gate": "clients rollback <id>"
             }
         ],
         "agent_next_steps": [

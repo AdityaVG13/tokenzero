@@ -96,6 +96,49 @@ fn cli_capabilities_json_exposes_agent_contract() {
     );
     assert_eq!(json["feature_flags"]["robot_docs_guide"], true);
     assert_eq!(json["feature_flags"]["intent_inference_aliases"], true);
+    let dangerous = json["dangerous_operations"]
+        .as_array()
+        .expect("dangerous operation registry");
+    for (command, safe_default, mutation_gate) in [
+        (
+            "edit",
+            "tokenzero edit <path> --edits-json '<json>' --dry-run --json",
+            "omit --dry-run only after reviewing the diff",
+        ),
+        ("install", "tokenzero install --plan --json", "--apply"),
+        (
+            "install rollback",
+            "tokenzero doctor --json",
+            "--rollback <id>",
+        ),
+        (
+            "cache migrate-refs",
+            "tokenzero cache migrate-refs --json",
+            "--apply",
+        ),
+        (
+            "cache migrate-rollback",
+            "tokenzero cache migrate-rollback --json",
+            "--apply",
+        ),
+        (
+            "cache migrate-cleanup",
+            "tokenzero cache migrate-verify --json",
+            "--apply --confirm-cleanup",
+        ),
+        (
+            "clients rollback",
+            "tokenzero clients doctor --json",
+            "clients rollback <id>",
+        ),
+    ] {
+        let row = dangerous
+            .iter()
+            .find(|row| row["command"] == command)
+            .unwrap_or_else(|| panic!("missing dangerous operation {command}"));
+        assert_eq!(row["safe_default"], safe_default);
+        assert_eq!(row["mutation_gate"], mutation_gate);
+    }
     assert_eq!(
         json["commands_by_name"]["run"]["primary_invocation"],
         "tokenzero run --json -- <command>"
@@ -392,6 +435,135 @@ fn cli_install_smoke_defaults_to_plan_and_gates_apply() {
     assert_eq!(applied["artifact_write_requested"], false);
     assert_eq!(applied["global_writes"], false);
     assert!(!work.path().join("results").exists());
+}
+
+#[test]
+fn cli_mutator_errors_name_safe_alternatives() {
+    let work = tempdir().unwrap();
+
+    let edit = tokenzero_cmd()
+        .current_dir(work.path())
+        .args([
+            "edit",
+            "missing.txt",
+            "--edits-json",
+            r#"[{"find":"x","replace":"y"}]"#,
+            "--json",
+        ])
+        .output()
+        .unwrap();
+    assert_eq!(edit.status.code(), Some(1));
+    let edit: Value = serde_json::from_slice(&edit.stdout).unwrap();
+    assert!(
+        edit["error"]["repair"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("tokenzero edit <path> --edits-json '<json>' --dry-run --json"),
+        "{edit}"
+    );
+
+    let missing_root = work.path().join("missing-client-root");
+    let clients = tokenzero_cmd()
+        .args([
+            "clients",
+            "rollback",
+            "missing-id",
+            "--root",
+            missing_root.to_str().unwrap(),
+            "--json",
+        ])
+        .output()
+        .unwrap();
+    assert_eq!(clients.status.code(), Some(1));
+    let clients_stderr = String::from_utf8_lossy(&clients.stderr);
+    assert!(
+        clients_stderr.contains("tokenzero clients doctor --json"),
+        "{clients_stderr}"
+    );
+
+    let cache_root = work.path().join("cache-root");
+    std::fs::create_dir_all(&cache_root).unwrap();
+    let migrate = tokenzero_cmd()
+        .args([
+            "cache",
+            "migrate-refs",
+            "--root",
+            cache_root.to_str().unwrap(),
+            "--json",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        migrate.status.success(),
+        "{}",
+        String::from_utf8_lossy(&migrate.stderr)
+    );
+    assert!(migrate.stderr.is_empty());
+    let migrate_json: Value = serde_json::from_slice(&migrate.stdout).unwrap();
+    assert!(
+        migrate_json.get("safe_alternative").is_none(),
+        "{migrate_json}"
+    );
+
+    let cleanup = tokenzero_cmd()
+        .args([
+            "cache",
+            "migrate-cleanup",
+            "--root",
+            cache_root.to_str().unwrap(),
+            "--json",
+        ])
+        .output()
+        .unwrap();
+    assert_eq!(cleanup.status.code(), Some(1));
+    let cleanup_json: Value = serde_json::from_slice(&cleanup.stdout).unwrap();
+    assert!(
+        cleanup_json.get("safe_alternative").is_none(),
+        "{cleanup_json}"
+    );
+    let cleanup_stderr = String::from_utf8_lossy(&cleanup.stderr);
+    assert!(
+        cleanup_stderr.contains("tokenzero cache migrate-verify --json"),
+        "{cleanup_stderr}"
+    );
+
+    let blocked_root = work.path().join("not-a-directory");
+    std::fs::write(&blocked_root, "block").unwrap();
+    let install = tokenzero_cmd()
+        .args([
+            "install",
+            "--root",
+            blocked_root.to_str().unwrap(),
+            "--apply",
+            "--mcp",
+            "--json",
+        ])
+        .output()
+        .unwrap();
+    assert_eq!(install.status.code(), Some(1));
+    let install_stderr = String::from_utf8_lossy(&install.stderr);
+    assert!(
+        install_stderr.contains("tokenzero install --plan --json"),
+        "{install_stderr}"
+    );
+
+    let rollback = tokenzero_cmd()
+        .args([
+            "install",
+            "--root",
+            missing_root.to_str().unwrap(),
+            "--rollback",
+            "missing-id",
+            "--json",
+        ])
+        .output()
+        .unwrap();
+    assert_eq!(rollback.status.code(), Some(1));
+    let rollback_stderr = String::from_utf8_lossy(&rollback.stderr);
+    assert!(
+        rollback_stderr.contains("tokenzero doctor --json"),
+        "{rollback_stderr}"
+    );
 }
 
 #[test]
