@@ -902,7 +902,6 @@ enum ShellViewCase {
 struct ShellRenderContext<'a> {
     policy: &'a PolicyDecision,
     status: &'a CommandStatus,
-    combined: &'a str,
     combined_tokens: usize,
     max_tokens: usize,
 }
@@ -935,26 +934,30 @@ pub fn render_shell(input: ShellRenderInput<'_>) -> ShellRender {
         shell_raw_tokens(input.command, input.exit_code, input.stdout, input.stderr);
     let (mut minimal_envelope, mut success_compacted) = (false, false);
     let max_t = input.max_visible_tokens;
-    let cp = should_compact_tiny_shell(&input, &policy, &status);
-    let cd = should_compact_short_failure_shell(&input, &policy, &status, &combined);
-    let ci = should_compact_repo_inventory_shell(&input, &policy, &status);
-    let case = if cp {
-        ShellViewCase::CompactTiny
-    } else if cd {
-        ShellViewCase::CompactDiagnostic
-    } else if ci {
-        ShellViewCase::CompactInventory
-    } else {
-        ShellViewCase::PolicyBased
+    let case = match policy.policy.as_str() {
+        "passthrough" if should_compact_tiny_shell(&input, &policy, &status) => {
+            ShellViewCase::CompactTiny
+        }
+        "diagnostic"
+            if should_compact_short_failure_shell(&input, &policy, &status, &combined) =>
+        {
+            ShellViewCase::CompactDiagnostic
+        }
+        "structured" if should_compact_repo_inventory_shell(&input, &policy, &status) => {
+            ShellViewCase::CompactInventory
+        }
+        _ => ShellViewCase::PolicyBased,
     };
+    let cp = case == ShellViewCase::CompactTiny;
+    let cd = case == ShellViewCase::CompactDiagnostic;
+    let ci = case == ShellViewCase::CompactInventory;
     let context = ShellRenderContext {
         policy: &policy,
         status: &status,
-        combined: &combined,
         combined_tokens,
         max_tokens: max_t,
     };
-    let body = build_shell_body(case, &input, &context, &mut success_compacted);
+    let body = build_shell_body(case, &input, combined, &context, &mut success_compacted);
     let visible = finalize_shell_visible(
         case,
         &input,
@@ -977,13 +980,13 @@ pub fn render_shell(input: ShellRenderInput<'_>) -> ShellRender {
 fn build_shell_body(
     case: ShellViewCase,
     input: &ShellRenderInput<'_>,
+    combined: String,
     context: &ShellRenderContext<'_>,
     success_compacted: &mut bool,
 ) -> String {
     let ShellRenderContext {
         policy,
         status,
-        combined,
         combined_tokens,
         max_tokens,
     } = context;
@@ -996,7 +999,7 @@ fn build_shell_body(
         ShellViewCase::CompactInventory => compact_repo_inventory_view(input.command, input.stdout),
         ShellViewCase::PolicyBased => {
             let mut body = if matches!(policy.policy.as_str(), "exact" | "passthrough") {
-                combined.to_string()
+                combined
             } else {
                 match policy.policy.as_str() {
                     "diagnostic"
@@ -1009,9 +1012,9 @@ fn build_shell_body(
                     "structured" => {
                         structured_shell_view(input.command, input.stdout, input.stderr)
                     }
-                    "dedupe" => dedupe_lines_impl(combined, 6, true),
-                    "diff-aware" => diff_summary(combined, 160),
-                    _ => summarize_lines(combined, 18, 12, ""),
+                    "dedupe" => dedupe_lines_impl(&combined, 6, true),
+                    "diff-aware" => diff_summary(&combined, 160),
+                    _ => summarize_lines(&combined, 18, 12, ""),
                 }
             };
             if should_compact_success_noise(input, status) && policy.policy != "exact" {

@@ -81,8 +81,7 @@ impl SessionPersistence {
                 }
             }
             if !unresolved.is_empty() {
-                let store =
-                    tokenzero_recovery::RecoveryStore::new(Some(self.cache_path.clone()));
+                let store = tokenzero_recovery::RecoveryStore::new(Some(self.cache_path.clone()));
                 for entry in unresolved {
                     let blob = entry.record.blob_ref.as_str();
                     let available = match ref_available.get(blob).copied() {
