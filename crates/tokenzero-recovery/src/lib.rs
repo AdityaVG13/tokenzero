@@ -1602,18 +1602,22 @@ impl RecoveryStore {
     }
 
     /// Store an alias without persisting. Caller must call `persist_pending()`.
+    ///
+    /// A conflicting target never replaces the first mapping. The alias is
+    /// marked ambiguous so later expansion fails loudly instead.
     pub fn store_alias_deferred(&mut self, alias: &str, target_ref: &str) {
         self.skip_empty_persist = false;
-        if self
-            .state
-            .aliases
-            .get(alias)
-            .is_none_or(|current| current != target_ref)
-        {
-            self.state
-                .transparency
-                .append(format!("alias-cas\0{alias}\0{target_ref}").as_bytes());
+        match self.state.aliases.get(alias) {
+            Some(current) if current == target_ref => return,
+            Some(_) => {
+                self.state.ambiguous_aliases.insert(alias.to_string());
+                return;
+            }
+            None => {}
         }
+        self.state
+            .transparency
+            .append(format!("alias-cas\0{alias}\0{target_ref}").as_bytes());
         self.state
             .aliases
             .insert(alias.to_string(), target_ref.to_string());
@@ -1818,6 +1822,9 @@ impl RecoveryStore {
             return miss!(reason);
         }
         let ordinal_bare = split_ref_fragment(&lookup_ref).0;
+        if self.state.ambiguous_aliases.contains(ordinal_bare) {
+            return miss!("ambiguous-alias");
+        }
         let requested_alias = self.state.aliases.contains_key(ordinal_bare);
         if let Some((generation, _)) = parse_session_ordinal_bare(ordinal_bare) {
             if generation != self.state.ordinal_generation {
@@ -1961,7 +1968,8 @@ impl RecoveryStore {
         if !self.config.legacy_compat {
             return Some("legacy-ref-disabled");
         }
-        if self.state.ambiguous_aliases.contains(lookup_ref) {
+        let bare = split_ref_fragment(lookup_ref).0;
+        if self.state.ambiguous_aliases.contains(bare) {
             return Some("legacy-ambiguous");
         }
         self.legacy_read_count += 1;
@@ -2378,7 +2386,7 @@ impl RecoveryStore {
         let ref_id = format!("tz://blob/{full_hash}");
         self.track_ref_class(&ref_id, content_type);
         if legacy_ref != ref_id {
-            self.state.aliases.insert(legacy_ref, ref_id.clone());
+            self.store_alias_deferred(&legacy_ref, &ref_id);
         }
         if let Some(value) = value {
             self.state.blobs.insert(ref_id.clone(), value);
@@ -4196,7 +4204,17 @@ fn merge_states(
     let session: HashSet<&str> = session_refs.iter().map(String::as_str).collect();
     let mut merged = existing;
     recovery_maps!(merge & session, merged, current);
-    merged.aliases.extend(current.aliases);
+    for (alias, target) in current.aliases {
+        if merged
+            .aliases
+            .get(&alias)
+            .is_some_and(|existing| existing != &target)
+        {
+            merged.ambiguous_aliases.insert(alias);
+        } else {
+            merged.aliases.insert(alias, target);
+        }
+    }
     if current.ordinal_generation > merged.ordinal_generation {
         merged.ordinal_generation = current.ordinal_generation;
         merged.next_ordinal = current.next_ordinal;

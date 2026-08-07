@@ -50,6 +50,19 @@ fn put_expand_round_trip_byte_exact_via_shared_cas() {
 }
 
 #[test]
+fn put_expand_round_trip_preserves_non_utf8_bytes() {
+    let mut store = TokenZeroStore::in_memory();
+    let bytes = [0x00, 0xff, 0x80, 0x41, 0xfe];
+    let ref_id = store.put(&bytes, None).unwrap();
+
+    assert_eq!(store.expand(&ref_id).unwrap(), bytes);
+    assert_eq!(
+        store.expand(&format!("{ref_id}#B1-4")).unwrap(),
+        bytes[1..4]
+    );
+}
+
+#[test]
 fn isolated_roots_do_not_share_cas() {
     let a = tempdir().unwrap();
     let b = tempdir().unwrap();

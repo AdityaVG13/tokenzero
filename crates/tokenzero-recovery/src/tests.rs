@@ -160,6 +160,27 @@ fn session_visible_alias_expands_after_store_restart() {
 }
 
 #[test]
+fn session_visible_alias_preserves_byte_fragment() {
+    let text = "abcdef";
+    let mut store = RecoveryStore::new(None);
+    let stored = store
+        .store_payload(text, ContentType::Code, None, None, None)
+        .unwrap();
+    let alias = store.ensure_session_visible_alias(&stored.blob_ref);
+
+    let expanded = store.expand(
+        &format!("{alias}#B1-4"),
+        Some("raw"),
+        None,
+        None,
+        None,
+        None,
+    );
+    assert!(expanded.found, "{}", expanded.reason);
+    assert_eq!(expanded.content, "bcd");
+}
+
+#[test]
 fn ambiguous_alias_persists_when_pending_changes_flush() {
     let dir = tempdir().unwrap();
     let cache = dir.path().join("cache.json");
@@ -171,6 +192,70 @@ fn ambiguous_alias_persists_when_pending_changes_flush() {
 
     let restarted = RecoveryStore::new(Some(cache));
     assert!(restarted.is_alias_ambiguous("tz://blob/ambiguous"));
+}
+
+#[test]
+fn short_alias_collision_preserves_first_target_and_fails_loudly() {
+    let dir = tempdir().unwrap();
+    let cache = dir.path().join("cache.json");
+    let alias = "tz://blob/b0123456789abcdef";
+    let first = format!("tz://blob/{}", "a".repeat(64));
+    let second = format!("tz://blob/{}", "b".repeat(64));
+    {
+        let mut store = RecoveryStore::new(Some(cache.clone()));
+        store.store_alias_deferred(alias, &first);
+        store.store_alias_deferred(alias, &second);
+        assert_eq!(store.alias_target(alias).as_deref(), Some(first.as_str()));
+        assert!(store.is_alias_ambiguous(alias));
+        store.persist_pending().unwrap();
+    }
+
+    let mut restarted = RecoveryStore::new(Some(cache));
+    assert_eq!(
+        restarted.alias_target(alias).as_deref(),
+        Some(first.as_str())
+    );
+    assert!(restarted.is_alias_ambiguous(alias));
+    let expanded = restarted.expand(
+        &format!("{alias}#B0-1"),
+        Some("raw"),
+        None,
+        None,
+        None,
+        None,
+    );
+    assert!(!expanded.found);
+    assert_eq!(expanded.reason, "legacy-ambiguous");
+
+    let session_alias = "tz://s/0123456789abcdef";
+    restarted.store_alias_deferred(session_alias, &first);
+    restarted.store_alias_deferred(session_alias, &second);
+    let expanded = restarted.expand(session_alias, Some("raw"), None, None, None, None);
+    assert!(!expanded.found);
+    assert_eq!(expanded.reason, "ambiguous-alias");
+}
+
+#[test]
+fn concurrent_short_alias_collision_marks_ambiguous_without_overwrite() {
+    let dir = tempdir().unwrap();
+    let cache = dir.path().join("cache.json");
+    let alias = "tz://blob/b0123456789abcdef";
+    let first_target = format!("tz://blob/{}", "a".repeat(64));
+    let second_target = format!("tz://blob/{}", "b".repeat(64));
+    let mut first = RecoveryStore::new(Some(cache.clone()));
+    let mut second = RecoveryStore::new(Some(cache.clone()));
+
+    first.store_alias_deferred(alias, &first_target);
+    second.store_alias_deferred(alias, &second_target);
+    first.persist_pending().unwrap();
+    second.persist_pending().unwrap();
+
+    let restarted = RecoveryStore::new(Some(cache));
+    assert_eq!(
+        restarted.alias_target(alias).as_deref(),
+        Some(first_target.as_str())
+    );
+    assert!(restarted.is_alias_ambiguous(alias));
 }
 
 #[test]
