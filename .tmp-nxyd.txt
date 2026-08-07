@@ -1,4 +1,0 @@
-Exec workers spend ~99% of dispatch in write() syscalls during a read op
-open
-
-Sampled a live codemode server (M5 Max, 2026-07-27): transient exec thread dispatch_values -> dispatch_operation -> execute_domain_op -> engine_read read_with_options_inner with leaf write() in 1027/1030 samples. A read path dominated by write syscalls implies per-op journal/ledger/CAS write amplification (possibly fsync per op). Investigate engine_read + ledger run_flush_scheduler + codemode journal (journal.rs:1032 has its own 60ms sleep loop) for: per-op fsync, double writes (cache + journal + ledger), and small-append syscalls. Fix via batching/group-commit or deferred flush. Acceptance: strace/sample shows <10%% of read-op wall in write syscalls; ledger durability guarantees documented and preserved.

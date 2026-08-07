@@ -245,8 +245,7 @@ if (Test-Path -LiteralPath $largeFile) {
 # 3. Re-read same file via the MCP server: session seen-set dedup
 #    CLI invocations are stateless against the cache file, so dedup is an
 #    MCP-server feature (it tracks a per-session seen-set in memory). We
-#    replicate scripts/benchmark_tokens.sh and JSON-RPC against `mcp-server`
-#    twice within the same stdio session.
+#    issue two JSON-RPC reads within the same stdio session.
 if (Test-Path -LiteralPath $largeFile) {
     Write-Host "[3/7] re-read     : $largeFile (MCP session dedup)"
 

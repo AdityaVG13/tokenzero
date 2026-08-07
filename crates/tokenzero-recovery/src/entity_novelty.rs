@@ -1,6 +1,6 @@
 //! Shared entity novelty (`zerostack.entity-novelty.v1`).
 //!
-//! Freeze owner: `schemas/entity-novelty/v1/`. GraphZero owns `EntityId` minting;
+//! Contract owner: ZeroStack. GraphZero owns `EntityId` minting;
 //! this module only stores/loads 64-hex digests and always displays them as
 //! `gz://entity/<id>`. There is no `tz://entity/` namespace.
 

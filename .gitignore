@@ -136,9 +136,6 @@ NDH6SA~M
 
 # Public helper scripts allowlist
 /scripts/*
-!/scripts/bench_persist_gate.sh
-!/scripts/bench_s4_whole_gate.sh
-!/scripts/benchmark_tokens.sh
 !/scripts/check_embedded_tests.py
 !/scripts/check_module_boundaries.py
 !/scripts/perf_corpus.py
@@ -196,16 +193,16 @@ NDH6SA~M
 
 # local ubs multi-pass artifacts
 ubs_audit/
-xtask/target/
+
+# Retired local-only scaffolding
+/agent_ergonomics_audit/
+/schemas/
+/xtask/
+/.h.txt
 
 # agent session artifacts (local-only, never commit)
 .pi-subagents/
 .radc-pack/
-agent_ergonomics_audit/*
-# fud9 (R-005): regression probes are tracked contracts, not session artifacts.
-!/agent_ergonomics_audit/audit/
-agent_ergonomics_audit/audit/*
-!/agent_ergonomics_audit/audit/regression_tests/
 .agent-tmp-*
 .tmp-*
 _tmp_*

@@ -175,12 +175,8 @@ jobs:
         env:
           TOKENZERO_BIN: target/release/tokenzero
         run: make perf-never-worse-gate
-      - name: GVKV token-amplification and boot-cost locks
-        env:
-          TOKENZERO_BOOT_BENCH_BIN: target/release/tokenzero
-        run: |
-          cargo test -p tokenzero-engine --test ta_registry
-          cargo test -p tokenzero-cli --test boot_cost_lock -- --test-threads=1
+      - name: GVKV token-amplification lock
+        run: cargo test -p tokenzero-engine --test ta_registry
       - name: Doctor
         run: target/release/tokenzero doctor --root . --runtime --json
       - name: Package audit

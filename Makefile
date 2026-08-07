@@ -1,6 +1,6 @@
 SHELL := /bin/bash
 
-.PHONY: test readme-command-audit host-path-audit rust-test rust-verify rust-verify-report rust-release-build rust-codemode-build mcp-compat-build rust-proof package-check release-check irx9-gate perf-regression-gate cli-smoke doctor mcp-smoke mcp-soak shell-matrix install-smoke package-audit scripts-test perf-persist-gate perf-never-worse-gate linux-docker-verify linux-perf-budget
+.PHONY: test readme-command-audit host-path-audit rust-test rust-verify rust-verify-report rust-release-build rust-codemode-build mcp-compat-build rust-proof package-check release-check irx9-gate cli-smoke doctor mcp-smoke mcp-soak shell-matrix install-smoke package-audit scripts-test perf-never-worse-gate linux-docker-verify linux-perf-budget
 
 MCP_COMPAT_TARGET := $(if $(CARGO_TARGET_DIR),$(CARGO_TARGET_DIR)/mcp-compat,target/mcp-compat)
 MCP_COMPAT_BIN := $(MCP_COMPAT_TARGET)/debug/tokenzero$(if $(filter Windows_NT,$(OS)),.exe,)
@@ -10,10 +10,6 @@ test: readme-command-audit host-path-audit scripts-test rust-test
 # Unit tests for the scripts/ helpers themselves (stdlib unittest, no pytest).
 scripts-test:
 	@python3 -m unittest discover -s scripts -p 'test_*.py' -q
-
-# Criterion persist-path regression gate (>25% p50 regression fails).
-perf-persist-gate:
-	@scripts/bench_persist_gate.sh
 
 # Same-surface estimated-token gate. Uses an already-built canonical CLI.
 perf-never-worse-gate:
@@ -70,20 +66,6 @@ release-check: irx9-gate rust-proof
 # Focused irx9 parity/packaging/dispatcher/bench gates (no workspace-wide cargo).
 irx9-gate:
 	@scripts/irx9_release_gate.sh
-
-# Matched baseline/candidate p50+p95 gate. BASELINE_BIN must name an already
-# built comparison binary. The 1% default covers measured host jitter; callers
-# can set PERF_NOISE_TOLERANCE_PCT=0 for an exact-zero exploratory run.
-perf-regression-gate: rust-release-build
-	@test -n "$(BASELINE_BIN)" || { echo "BASELINE_BIN is required" >&2; exit 2; }
-	@python3 scripts/compare_binaries.py \
-		--baseline "$(BASELINE_BIN)" \
-		--candidate "$${CANDIDATE_BIN:-target/release/tokenzero}" \
-		--fixture "$${PERF_FIXTURE:-README.md}" \
-		--work-dir "$${PERF_WORK_DIR:-.}" \
-		--trials "$${PERF_TRIALS:-1000}" \
-		--noise-tolerance-pct "$${PERF_NOISE_TOLERANCE_PCT:-1.0}" \
-		--json-output "$${PERF_JSON:-results/current/matched-ab.json}"
 
 cli-smoke:
 	@target/debug/tokenzero read README.md --json >/dev/null

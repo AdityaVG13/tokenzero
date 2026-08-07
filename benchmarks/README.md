@@ -14,7 +14,8 @@ commit, machine, and tool versions, and regenerates `docs/benchmarks.md`.
 `RUNS` and `WARMUP` env vars control repetitions (default 5/1).
 
 A `tokenzero` binary is resolved from `$TOKENZERO_BIN`, then PATH, then
-`target/release/tokenzero`. Build one first with `cargo build --release -p tokenzero`.
+`target/release/tokenzero`. Build one first with
+`cargo build --release -p tokenzero-cli --bin tokenzero --no-default-features`.
 
 ## What each file is
 
@@ -24,11 +25,11 @@ A `tokenzero` binary is resolved from `$TOKENZERO_BIN`, then PATH, then
 | `cli-cold-read.sh` | Cold vs warm latency for process start, store open, first read, first expand (p50/p90/p99). |
 | `competitor-bakeoff.sh` | TokenZero vs raw CLI and installed competitors (rtk, lean-ctx, headroom, ztk, context-mode) on identical tasks. Uninstalled tools are marked, never fabricated. |
 | `million-line-nav.sh` | Navigation tasks on a generated million-line synthetic repo; visible tokens vs raw bytes. |
-| `code-exec-vs-mcp-bakeoff.sh` | CodeMode plans vs MCP schema loading on identical tasks (our own architectural claim). |
-| `boot-cost.py` | Boot-envelope token attribution against the locked baseline; `--rebaseline` refreshes it. |
-| `boot-cost/baseline.json` | Locked boot-cost baseline. Consumed by `crates/tokenzero/tests/boot_cost_lock.rs` in CI. |
+| `never_worse_gate.py` | Validates same-surface candidate and raw receipts without weakening failed rows. |
+| `test_harness_refs.py` | Regression tests for strict durable-ref and glob-trie parsing. |
+| `test_never_worse_gate.py` | Regression tests for never-worse receipt validation. |
 | `harness.py` | Shared measurement library for the shell runners (binary resolution, timing cells, token counting). |
-| `bench_common.py` | Shared helpers imported by `crates/tokenzero-mcp/benches/*.py` and `scripts/compare_binaries.py`. |
+| `bench_common.py` | Shared helpers for the retained harness and `tokenzero-mcp-compat` benchmark scripts. |
 | `__init__.py` | Lets runners use `python3 -m benchmarks.harness`. |
 
 ## Honesty requirements (keep these when editing)

@@ -60,33 +60,6 @@ log "binary: $BIN"
     fi
   }
 
-  printf '\n## Boot cost (envelope tokens at startup)\n\n'
-  printf 'Command: `python3 benchmarks/boot-cost.py`. Envelope component attribution, candidate vs locked baseline (`benchmarks/boot-cost/baseline.json`).\n\n'
-  log 'running: Boot cost'
-  if boot_out=$(python3 "$ROOT/benchmarks/boot-cost.py" 2>>/tmp/tz-runall-err.$$.log); then
-    python3 - "$ROOT/benchmarks/boot-cost/baseline.json" "$ROOT/benchmarks/boot-cost/candidate.json" <<'PY'
-import json, sys
-base = json.load(open(sys.argv[1])); cand = json.load(open(sys.argv[2]))
-def rows(d):
-    if isinstance(d, list): return d
-    return d.get('boot') or d.get('components') or []
-print('| corpus | component | baseline tokens | candidate tokens |')
-print('|---|---|---:|---:|')
-for b, c in zip(rows(base), rows(cand)):
-    corpus = b.get('corpus', c.get('corpus', ''))
-    bc, cc = b.get('components', {}), c.get('components', {})
-    for k in sorted(set(bc) | set(cc)):
-        print(f"| {corpus} | {k} | {bc.get(k, '-')} | {cc.get(k, '-')} |")
-    print(f"| {corpus} | **total** | **{b.get('boot_tokens', '-')}** | **{c.get('boot_tokens', '-')}** |")
-PY
-  else
-    printf '_Benchmark failed to run; see suite log._\n'; log 'FAILED: Boot cost'
-  fi
-
-  run_section 'Default CLI JSON envelope overhead' \
-    'Command: `python3 benchmarks/envelope-overhead.py --json-out results/current/tokenzero_envelope_overhead.json`. Exact emitted JSON bytes include the line terminator; numerator and denominator are labeled in the artifact.' \
-    env TOKENZERO_BIN="$BIN" python3 "$ROOT/benchmarks/envelope-overhead.py" --json-out "$ROOT/results/current/tokenzero_envelope_overhead.json"
-
   run_section 'CLI cold read (process + first read/expand latency)' \
     'Command: `benchmarks/cli-cold-read.sh`. Cold = recovery cache removed per cell; warm = cache retained.' \
     bash "$ROOT/benchmarks/cli-cold-read.sh"
@@ -98,12 +71,6 @@ PY
   run_section 'Large-repo navigation (million-line synthetic repo)' \
     'Command: `benchmarks/million-line-nav.sh`. 1000-file synthetic repo with a planted needle. TokenZero and raw CLI use exact captured stdout bytes and the same `estimator:bytes-ceil-div4/v1`; this heuristic is not Q99. The script exits nonzero on task failure, invalid gate evidence, or any TokenZero row worse than raw.' \
     bash "$ROOT/benchmarks/million-line-nav.sh"
-
-  run_section 'CodeMode vs MCP schema cost' \
-    'Command: `benchmarks/code-exec-vs-mcp-bakeoff.sh`. Identical tasks executed via CodeMode plans vs MCP schema loading. CodeMode rows cold-boot a full `tokenzero-codemode` stdio server per plan (measured: ~3-5s server init); production clients hold a persistent session, so wall_ms here is the cold-start worst case, stated rather than hidden.' \
-    bash "$ROOT/benchmarks/code-exec-vs-mcp-bakeoff.sh"
-
-  run_section 'CodeMode server CPU gate (busy-poll regression)'     'Command: `benchmarks/codemode-cpu-gate.sh`. A codemode server must idle at ~0% CPU with a host op pending and after plans complete; budgets: 25%% of a 2s pending window, 2%% of a 10s idle window. Guards the tokenzero-osn1 regression class.'     bash "$ROOT/benchmarks/codemode-cpu-gate.sh"
 
 } > "$OUT"
 

@@ -76,60 +76,18 @@ and read the `accounting` block:
 Hot paths are measured, not asserted: `cargo bench` pins token counting, capsule
 framing, and shell rendering at microsecond scale on the workspace's criterion suite.
 
-#### End-to-end benchmark
+#### Benchmarks
 
-Six reproducible workloads on this repository, measured with one pinned
-release binary. Both sides use TokenZero's own accounting, and every hidden
-byte remains recoverable through an exact `tz://` ref. The current snapshot,
-methodology, provenance, and per-cell spread live in `docs/benchmarks.md`, regenerated end-to-end by one command, `benchmarks/run_all.sh`:
+`benchmarks/run_all.sh` runs the retained CLI cold-read, competitor, and
+million-line navigation benchmarks with one pinned release binary. It writes
+exact commands, provenance, failures, byte counts, and explicitly labeled
+non-Q99 estimates to [`docs/benchmarks.md`](docs/benchmarks.md).
 
-Large synthetic fixtures are generated on demand from `tests/perf-corpus-manifest.json`; they are never source or release artifacts. Use `uv run python scripts/perf_corpus.py generate`, then `verify`, and finish with `clean --all`. Remote runs use the same disposable path: `rch exec -- uv run python scripts/perf_corpus.py generate`.
-
-| Workload | Raw tokens | TokenZero | Savings |
-| :-- | --: | --: | --: |
-| Large source read | 1,744 | 45 | **97.0%** |
-| Re-read the same file (seen-set dedup) | 1,744 | 45 | **97.0%** |
-| Repo-wide grep (`fn ` across `crates/`) | 90,541 | 487 | **99.0%** |
-| `cargo test` (`tokenzero-filters`) | 292 | 80 | **72.0%** |
-| Directory listing (find vs tree, depth 3) | 37,530 | 541 | **98.0%** |
-| Re-find stored content (`recall` vs re-running grep) | 90,541 | 46 | **99.0%** |
-| **Total** | **222,392** | **1,244** | **99.0%** |
-
-Treat the **99.0%** total as a fixed-suite point estimate for these six
-workloads only — not a workload-population or release claim. One checked-in
-snapshot gives no population confidence interval. Public/release-facing
-publication of this headline remains gated by `tokenzero claim-audit`
-(`public_claims_approved` / `release_publication_allowed`).
-
-#### Suite snapshot (as of version v1.4.0)
-
-Regenerated 2026-07-27 on an Apple M5 Max (RUNS=5, WARMUP=1, tokenzero 1.4.0)
-by `benchmarks/run_all.sh`; full tables, spread, and provenance in
-`docs/benchmarks.md`.
-
-Cold-start latency (hyperfine p50): process start 4 ms, store open 107 ms,
-first read 116 ms, first expand 342 ms. Startup tax (cold first read minus
-process start): 112 ms.
-
-Token cost vs raw CLI, same corpus and identical task:
-
-| Task | raw CLI (est tokens) | TokenZero | Savings |
-| :-- | --: | --: | :-- |
-| Read 500 lines | 5,817 | 24 | **99.6%** |
-| Grep + read | 370 | 242 | **34.6%** |
-| Tree + glob + read | 10,492 | 555 | **94.7%** |
-| Edit + verify | 5 | 195 | raw CLI cheaper (tiny edit; capsule overhead stated, not hidden) |
-| Multi-step navigation | 27,831 | 443 | **98.4%** |
-
-Million-line synthetic repo (1,000 files, planted needle): all 5 navigation
-tasks complete in 1,349 visible tokens against a 32,000-token budget (4.2%
-utilization), with byte-exact recovery verified on every task.
-
-CodeMode vs MCP schema: identical tasks executed as CodeMode plans pass all
-quality checks while paying zero per-call tool-schema tokens; the equivalent
-MCP-schema rows pay 52-199 input tokens per call before any work happens.
-CodeMode rows cold-boot a stdio server per plan (2.5-5.7 s wall), the stated
-worst case.
+Large synthetic fixtures are generated on demand from
+`tests/perf-corpus-manifest.json`; they are never source or release artifacts.
+Use `uv run python scripts/perf_corpus.py generate`, then `verify`, and finish
+with `clean --all`. Remote runs use the same disposable path:
+`rch exec -- uv run python scripts/perf_corpus.py generate`.
 
 Path-only outputs like `glob` pass through nearly unchanged: there is nothing
 to hide, and a capsule never costs more than raw.
@@ -418,36 +376,6 @@ final result and its refs enter context. Three properties fall out of that:
    are paid once.
 3. **Refs pipe between steps.** `$c.ref` from step one is a valid input to
    step two, server-side, with no model in the loop.
-
-#### Plan composition benchmark
-
-Three legs, same workloads, same tokenizer. **Raw** is what an agent without
-ZeroStack consumes: the actual subprocess and file bytes. **Per-op** is
-TokenZero's own MCP tools, already RACC-compressed. **CodeMode** is the v2
-plan wire.
-
-| Workload | Raw | Per-op | CodeMode | vs raw | vs per-op |
-| :-- | --: | --: | --: | --: | --: |
-| File + search + transform | 1,985 | 145 | 93 | **95.3%** | 35.9% |
-| Shell multi-step (3 commands) | 85 | 139 | 209 | **-145.9%** | -50.4% |
-| Pipe composition (read + compact) | 537 | 126 | 103 | **80.8%** | 18.3% |
-| Mixed exploration (tree + glob + read) | 1,315 | 273 | 310 | **76.4%** | -13.6% |
-| Diff review (multi-file) | 20,139 | 3,131 | 107 | **99.5%** | 96.6% |
-| Multi-file exploration (300 hits) | 3,332 | 344 | 114 | **96.6%** | 66.9% |
-| Log summarize (100 commits to verdict) | 929 | 218 | 21 | **97.7%** | 90.4% |
-| **Total** | **28,322** | **4,376** | **957** | **96.6%** | **78.1%** |
-
-Two honest notes. On toy chains with tiny raw output, CodeMode can cost more
-visible tokens than raw: small shell outputs arrive inline by design, because
-hiding 200 tokens behind a ref costs an agent several round-trips to recover
-them. And two toy workloads read cheaper through per-op tools than through a
-plan. CodeMode earns its keep on real work: diff review, wide exploration,
-log summarization. The scale workloads run against a byte-stable synthetic
-corpus, so two consecutive runs produce identical token counts.
-
-Reproducible: `scripts/benchmark_composition.sh` or
-`cargo test -p tokenzero-mcp -- codemode::bench_tests::run_composition_benchmark`.
-Artifact: `demo/composition_benchmark.json`.
 
 Run a plan locally without any harness:
 
