@@ -56,6 +56,7 @@ impl TokenZeroEngine {
                             true,
                             age,
                             recovery_tokens,
+                            None,
                             &index_path,
                         );
                     }
@@ -82,7 +83,7 @@ impl TokenZeroEngine {
         const MAX_FETCH_REDIRECTS: usize = 5;
         let mut current_url = url.to_string();
         let mut redirect_hops = 0usize;
-        let body = loop {
+        let (body, http_code) = loop {
             let target = match validate_fetch_target(
                 &current_url,
                 &self.config.fetch_allow_hosts,
@@ -143,23 +144,66 @@ impl TokenZeroEngine {
                     Some("check the URL and network access"),
                 );
             }
-            let (body, http_code, redirect_url) = split_fetch_meta(&result.stdout);
-            match (http_code, redirect_url) {
-                (Some(code), Some(next)) if (300..400).contains(&code) => {
-                    redirect_hops += 1;
-                    if redirect_hops > MAX_FETCH_REDIRECTS {
-                        return failure_response(
-                            "fetch",
-                            "too_many_redirects",
-                            format!("more than {MAX_FETCH_REDIRECTS} redirects from {url}"),
-                            None,
-                        );
-                    }
-                    current_url = next;
-                }
-                _ => break body,
+            if result.stdout_capture.truncated || result.stderr_capture.truncated {
+                return fetch_transport_failure(
+                    url,
+                    "fetch_capture_truncated",
+                    format!(
+                        "curl capture was truncated (stdout {}/{}, stderr {}/{})",
+                        result.stdout_capture.captured_bytes,
+                        result.stdout_capture.bytes_seen,
+                        result.stderr_capture.captured_bytes,
+                        result.stderr_capture.bytes_seen,
+                    ),
+                    Some("increase TOKENZERO_SHELL_CAPTURE_BYTES or fetch a smaller resource"),
+                    None,
+                );
             }
+            let (body, http_code, redirect_url) = split_fetch_meta(&result.stdout);
+            let Some(code) = http_code else {
+                return fetch_transport_failure(
+                    url,
+                    "fetch_metadata_missing",
+                    "curl output did not contain the required HTTP status metadata",
+                    Some("use a curl-compatible TOKENZERO_CURL_PATH that honors -w"),
+                    None,
+                );
+            };
+            if (300..400).contains(&code) {
+                let Some(next) = redirect_url else {
+                    return fetch_transport_failure(
+                        url,
+                        "fetch_redirect_missing_location",
+                        format!("HTTP {code} did not supply a redirect target"),
+                        Some("check the URL or server redirect response"),
+                        Some(code),
+                    );
+                };
+                redirect_hops += 1;
+                if redirect_hops > MAX_FETCH_REDIRECTS {
+                    return fetch_transport_failure(
+                        url,
+                        "too_many_redirects",
+                        format!("more than {MAX_FETCH_REDIRECTS} redirects from {url}"),
+                        None,
+                        Some(code),
+                    );
+                }
+                current_url = next;
+                continue;
+            }
+            if (200..300).contains(&code) {
+                break (body, code);
+            }
+            return fetch_transport_failure(
+                url,
+                "fetch_http_status",
+                format!("HTTP {code} response was not cacheable as successful content"),
+                Some("check the URL and server response"),
+                Some(code),
+            );
         };
+
         self.fetch_response(
             url,
             &body,
@@ -168,6 +212,7 @@ impl TokenZeroEngine {
             false,
             0,
             0,
+            Some(http_code),
             &index_path,
         )
     }
@@ -185,6 +230,7 @@ impl TokenZeroEngine {
         cache_hit: bool,
         age_seconds: u64,
         recovery_tokens: usize,
+        http_code: Option<u16>,
         index_path: &Path,
     ) -> ToolResponse {
         let mut store = self.recovery_store();
@@ -224,6 +270,7 @@ impl TokenZeroEngine {
         response.telemetry = Some(json!({
             "url": url,
             "cache_hit": cache_hit,
+            "http_code": http_code,
             "age_seconds": age_seconds,
             "bytes": body.len(),
             "transport_status": if storage_error.is_some() { "degraded" } else { "ok" },
@@ -244,4 +291,21 @@ impl TokenZeroEngine {
         }
         response
     }
+}
+
+fn fetch_transport_failure(
+    url: &str,
+    code: &str,
+    message: impl Into<String>,
+    repair: Option<&str>,
+    http_code: Option<u16>,
+) -> ToolResponse {
+    let mut response = failure_response("fetch", code, message, repair);
+    response.telemetry = Some(json!({
+        "url": url,
+        "cache_hit": false,
+        "http_code": http_code,
+        "transport_status": "error",
+    }));
+    response
 }

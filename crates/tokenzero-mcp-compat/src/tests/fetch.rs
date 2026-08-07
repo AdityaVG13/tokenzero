@@ -64,7 +64,7 @@ fn fetch_caches_within_ttl_and_refetches_when_fresh() {
     fs::write(
         &fake_curl,
         format!(
-            "#!/bin/sh\necho invoked >> {}\nprintf 'fetched body line\\n'\n",
+            "#!/bin/sh\necho invoked >> {}\nprintf 'fetched body line\\n\\n__TOKENZERO_FETCH_META__ 200 '\n",
             marker.display()
         ),
     )
@@ -88,12 +88,14 @@ fn fetch_caches_within_ttl_and_refetches_when_fresh() {
     );
     assert!(first.refs.iter().any(|row| row.kind == "blob"));
     assert_eq!(first.telemetry.as_ref().unwrap()["cache_hit"], false);
+    assert_eq!(first.telemetry.as_ref().unwrap()["http_code"], 200);
 
     // Within the TTL the network is never touched: same body, no second
     // curl invocation.
     let second = engine.fetch("https://example.com/doc", None, false, Mode::Auto, 4000);
     assert_eq!(second.status, "ok");
     assert_eq!(second.telemetry.as_ref().unwrap()["cache_hit"], true);
+    assert!(second.telemetry.as_ref().unwrap()["http_code"].is_null());
     assert!(
         second
             .visible
@@ -108,6 +110,7 @@ fn fetch_caches_within_ttl_and_refetches_when_fresh() {
     // fresh=true bypasses the TTL.
     let third = engine.fetch("https://example.com/doc", None, true, Mode::Auto, 4000);
     assert_eq!(third.telemetry.as_ref().unwrap()["cache_hit"], false);
+    assert_eq!(third.telemetry.as_ref().unwrap()["http_code"], 200);
     assert_eq!(fs::read_to_string(&marker).unwrap().lines().count(), 2);
 }
 
@@ -122,7 +125,7 @@ fn fetch_cache_hits_still_obey_current_deny_policy() {
     fs::write(
         &fake_curl,
         format!(
-            "#!/bin/sh\necho invoked >> {}\nprintf 'cached sensitive body\\n'\n",
+            "#!/bin/sh\necho invoked >> {}\nprintf 'cached sensitive body\\n\\n__TOKENZERO_FETCH_META__ 200 '\n",
             marker.display()
         ),
     )
@@ -152,6 +155,84 @@ fn fetch_cache_hits_still_obey_current_deny_policy() {
         1,
         "denied cached fetch must not re-enter curl"
     );
+}
+
+#[cfg(unix)]
+#[test]
+fn fetch_refuses_unverified_bodies_without_populating_the_ttl_cache() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let root = tempdir().unwrap();
+    let cases = [
+        (
+            "missing-meta",
+            "printf 'unverified body'",
+            4096,
+            "fetch_metadata_missing",
+            None,
+        ),
+        (
+            "http-404",
+            "printf 'not found\\n\\n__TOKENZERO_FETCH_META__ 404 '",
+            4096,
+            "fetch_http_status",
+            Some(404),
+        ),
+        (
+            "truncated",
+            "printf '%0200d\\n\\n__TOKENZERO_FETCH_META__ 200 ' 0",
+            64,
+            "fetch_capture_truncated",
+            None,
+        ),
+    ];
+
+    for (name, payload, capture_bytes, expected_error, expected_http_code) in cases {
+        let dir = root.path().join(name);
+        fs::create_dir_all(&dir).unwrap();
+        let fake_curl = dir.join("fake-curl");
+        let marker = dir.join("invocations.log");
+        fs::write(
+            &fake_curl,
+            format!(
+                "#!/bin/sh\necho invoked >> {}\n{}\n",
+                marker.display(),
+                payload
+            ),
+        )
+        .unwrap();
+        fs::set_permissions(&fake_curl, fs::Permissions::from_mode(0o755)).unwrap();
+        let mut config = EngineConfig::for_root(&dir);
+        config.curl_path_override = Some(fake_curl);
+        config.fetch_enabled = true;
+        config.fetch_allow_hosts = vec!["example.com".to_string()];
+        config.shell_capture_bytes = capture_bytes;
+        config.shell_spill_bytes = capture_bytes;
+        let engine = TokenZeroEngine::new(config);
+        let url = format!("https://example.com/{name}");
+
+        for _ in 0..2 {
+            let response = engine.fetch(&url, None, false, Mode::Auto, 4000);
+            assert_eq!(
+                response.error.as_ref().unwrap().code,
+                expected_error,
+                "{name}"
+            );
+            assert!(response.visible.is_none(), "{name}: {response:?}");
+            let telemetry = response.telemetry.as_ref().unwrap();
+            assert_eq!(telemetry["cache_hit"], false, "{name}");
+            assert_eq!(
+                telemetry["http_code"],
+                expected_http_code.map_or(Value::Null, |code| json!(code)),
+                "{name}: {telemetry}"
+            );
+        }
+        assert_eq!(
+            fs::read_to_string(&marker).unwrap().lines().count(),
+            2,
+            "{name} must call curl again because the first body was not indexed"
+        );
+    }
 }
 
 #[test]
