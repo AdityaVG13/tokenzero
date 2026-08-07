@@ -2,6 +2,7 @@ use assert_cmd::prelude::*;
 use serde_json::Value;
 use std::process::Command;
 use tempfile::tempdir;
+use tokenzero_core::operation_abi::all_operations;
 
 mod common;
 use common::*;
@@ -89,6 +90,62 @@ fn cli_capabilities_json_exposes_agent_contract() {
         json["output_schemas"]["capabilities"]["schema_version"],
         "tokenzero.capabilities.v1"
     );
+    let required_keys = json["output_schemas"]["capabilities"]["required_keys"]
+        .as_array()
+        .expect("capabilities required keys");
+    assert!(required_keys.iter().any(|key| key == "mcp_tools"));
+    assert!(required_keys.iter().any(|key| key == "surface_parity"));
+
+    let mcp_tools = json["mcp_tools"].as_array().expect("MCP tool map");
+    let expected_names = all_operations()
+        .iter()
+        .filter(|operation| operation.exposure.fastmcp_tool || operation.exposure.codemode_mcp_tool)
+        .map(|operation| operation.name)
+        .collect::<Vec<_>>();
+    let observed_names = mcp_tools
+        .iter()
+        .map(|row| row["mcp_tool"].as_str().expect("MCP tool name"))
+        .collect::<Vec<_>>();
+    assert_eq!(observed_names, expected_names);
+    for row in mcp_tools {
+        assert_eq!(row["behavioral_parity"], "not_claimed");
+        assert_eq!(
+            row["schema_relationship"],
+            "operation_abi_args_surface_specific_envelopes"
+        );
+        let surfaces = row["mcp_surfaces"].as_array().expect("MCP surfaces");
+        let expected_available = (cfg!(feature = "surface-mcp")
+            && surfaces.iter().any(|surface| surface == "classic"))
+            || (cfg!(feature = "surface-codemode")
+                && surfaces.iter().any(|surface| surface == "codemode"));
+        assert_eq!(
+            row["available_in_this_build"], expected_available,
+            "{} availability",
+            row["mcp_tool"]
+        );
+    }
+    let read = mcp_tools
+        .iter()
+        .find(|row| row["mcp_tool"] == "tz_read")
+        .expect("tz_read row");
+    assert_eq!(read["cli_verb"], "read");
+    assert_eq!(read["codemode_binding"], "zero.read");
+    let execute_code = mcp_tools
+        .iter()
+        .find(|row| row["mcp_tool"] == "tz_execute_code")
+        .expect("tz_execute_code row");
+    assert_eq!(execute_code["cli_verb"], "codemode");
+    assert_eq!(
+        execute_code["route_relationship"],
+        "composition_route_not_one_to_one"
+    );
+    let report_issue = mcp_tools
+        .iter()
+        .find(|row| row["mcp_tool"] == "tz_report_tool_issue")
+        .expect("tz_report_tool_issue row");
+    assert!(report_issue["cli_verb"].is_null());
+    assert_eq!(report_issue["route_relationship"], "mcp_only");
+    assert_eq!(json["surface_parity"]["behavioral_parity"], "not_claimed");
     assert!(
         json["output_schemas"]["run"]["status_fields"]
             .as_array()
@@ -246,6 +303,11 @@ fn cli_robot_docs_guide_is_paste_ready_for_agents() {
     assert!(stdout.contains("tokenzero run --json -- <command>"));
     assert!(stdout.contains("Stdout is data. Stderr is diagnostics."));
     assert!(stdout.contains("telemetry.command_success"));
+    assert!(stdout.contains("## MCP vs CLI vs CodeMode"));
+    assert!(stdout.contains("inspect `mcp_tools` for the canonical map"));
+    assert!(stdout.contains(
+        "does not claim identical names, arguments, envelopes, availability, or behavior"
+    ));
     assert!(
         stdout.lines().count() >= 10,
         "robot docs guide should be substantial"
@@ -655,6 +717,24 @@ fn cli_mcp_tool_name_suggests_cli_verb_not_nearest_string() {
         "{stderr}"
     );
     assert!(!stderr.contains("'tree'"), "{stderr}");
+
+    for (tool, verb) in [
+        ("tz_mem", "mem"),
+        ("tz_discover", "discover"),
+        ("tz_execute_code", "codemode"),
+    ] {
+        let output = Command::cargo_bin("tokenzero")
+            .unwrap()
+            .arg(tool)
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(2));
+        let stderr = String::from_utf8(output.stderr).unwrap();
+        assert!(
+            stderr.contains(&format!("the CLI verb is '{verb}'")),
+            "{tool}: {stderr}"
+        );
+    }
 
     // Non-MCP typos keep clap's generic suggestion path.
     let output = Command::cargo_bin("tokenzero")

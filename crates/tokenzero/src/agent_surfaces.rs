@@ -1,6 +1,7 @@
 use serde::Serialize;
-use serde_json::json;
+use serde_json::{Value, json};
 use std::collections::BTreeMap;
+use tokenzero_core::operation_abi::all_operations;
 
 #[derive(Debug, Clone, Copy, Serialize)]
 pub struct CommandSurface {
@@ -419,6 +420,68 @@ fn commands_by_name() -> BTreeMap<&'static str, CommandSurface> {
         .collect()
 }
 
+/// Map an MCP tool spelling to the canonical CLI route agents should use.
+/// A `codemode` result is a composition route, not a one-to-one CLI verb.
+pub(crate) fn mcp_name_to_cli_verb(name: &str) -> Option<&'static str> {
+    Some(match name {
+        "tz_read" => "read",
+        "tz_find" => "find",
+        "tz_grep" => "grep",
+        "tz_glob" => "glob",
+        "tz_tree" => "tree",
+        "tz_edit" => "edit",
+        "tz_recall" => "recall",
+        "tz_fetch" => "fetch",
+        "tz_shell" => "run",
+        "tz_ingest" => "ingest",
+        "tz_expand" => "expand",
+        "tz_batch" | "tz_execute_code" | "tz_codemode_search" | "tz_codemode_describe" => {
+            "codemode"
+        }
+        "tz_mem" => "mem",
+        "tz_discover" => "discover",
+        "tz_rewrite" => "rewrite",
+        "tz_cache_pack" => "cache-pack",
+        _ => return None,
+    })
+}
+
+fn mcp_tool_rows() -> Vec<Value> {
+    all_operations()
+        .iter()
+        .filter(|operation| operation.exposure.fastmcp_tool || operation.exposure.codemode_mcp_tool)
+        .map(|operation| {
+            let mut mcp_surfaces = Vec::new();
+            if operation.exposure.fastmcp_tool {
+                mcp_surfaces.push("classic");
+            }
+            if operation.exposure.codemode_mcp_tool {
+                mcp_surfaces.push("codemode");
+            }
+            let cli_verb = mcp_name_to_cli_verb(operation.name);
+            let route_relationship = match cli_verb {
+                Some("codemode") => "composition_route_not_one_to_one",
+                Some(_) => "shared_operation_surface_specific_contract",
+                None => "mcp_only",
+            };
+            let available_in_this_build = (operation.exposure.fastmcp_tool
+                && cfg!(feature = "surface-mcp"))
+                || (operation.exposure.codemode_mcp_tool && CODEMODE_COMPILED);
+            json!({
+                "mcp_tool": operation.name,
+                "mcp_surfaces": mcp_surfaces,
+                "available_in_this_build": available_in_this_build,
+                "cli_verb": cli_verb,
+                "codemode_binding": operation.exposure.codemode_binding,
+                "aliases": operation.aliases,
+                "route_relationship": route_relationship,
+                "schema_relationship": "operation_abi_args_surface_specific_envelopes",
+                "behavioral_parity": "not_claimed",
+            })
+        })
+        .collect()
+}
+
 pub fn capabilities_json() -> serde_json::Value {
     json!({
         "schema_version": "tokenzero.capabilities.v1",
@@ -443,6 +506,24 @@ pub fn capabilities_json() -> serde_json::Value {
         },
         "commands": COMMANDS,
         "commands_by_name": commands_by_name(),
+        "mcp_tools": mcp_tool_rows(),
+        "surface_parity": {
+            "inventory_source": "canonical operation ABI all_operations()",
+            "table": "mcp_tools",
+            "behavioral_parity": "not_claimed",
+            "schema_relationship": "operation_abi_args_surface_specific_envelopes",
+            "availability_rule": "available_in_this_build is true only when at least one listed MCP surface is compiled",
+            "name_contract": {
+                "mcp": "tz_* tool names",
+                "cli": "bare verbs selected by cli_verb",
+                "codemode": "dotted bindings selected by codemode_binding"
+            },
+            "route_relationships": {
+                "shared_operation_surface_specific_contract": "the operation ABI owns MCP and CodeMode argument schemas; CLI spelling, envelopes, and availability remain surface-specific",
+                "composition_route_not_one_to_one": "CLI codemode is the recommended composition route, not a one-to-one verb equivalent",
+                "mcp_only": "no CLI verb is claimed"
+            }
+        },
         "experimental_commands": EXPERIMENTAL_COMMANDS,
         "output_schemas": {
             "capabilities": {
@@ -456,6 +537,8 @@ pub fn capabilities_json() -> serde_json::Value {
                     "feature_flags",
                     "commands",
                     "commands_by_name",
+                    "mcp_tools",
+                    "surface_parity",
                     "exit_codes",
                     "env_vars"
                 ]
@@ -631,6 +714,12 @@ Stdout is data. Stderr is diagnostics. JSON commands include `schema_version` or
 ## Safe Mutation Defaults
 
 `tokenzero install` defaults to a plan. Use `tokenzero install --plan --json` before any `--apply`. `tokenzero cache prune --json` is a dry run unless `--apply` is supplied.
+
+## MCP vs CLI vs CodeMode
+
+MCP uses `tz_*` tool names, the CLI uses bare verbs, and CodeMode uses dotted bindings such as `zero.read`. Run `tokenzero capabilities --json` and inspect `mcp_tools` for the canonical map. Each row states its MCP surface, build availability, CLI route, CodeMode binding, and surface-specific schema relationship.
+
+The shared operation inventory does not claim identical names, arguments, envelopes, availability, or behavior across surfaces. A `cli_verb` of `codemode` is a composition route, not a one-to-one equivalent. A missing `cli_verb` means no CLI route is claimed.
 
 ## CodeMode (plan-based execution on the same engine)
 

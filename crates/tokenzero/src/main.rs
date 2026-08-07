@@ -43,7 +43,7 @@ feature surface-mcp or surface-codemode — never both. The tokenzero CLI is a s
 shim or single-surface build; install tokenzero-mcp or tokenzero-codemode for servers."
 );
 
-use agent_surfaces::{capabilities_json, robot_docs_guide};
+use agent_surfaces::{capabilities_json, mcp_name_to_cli_verb, robot_docs_guide};
 use artifact_contracts::{json_artifact_path, release_candidate_id};
 use cli_args::*;
 use competitor_adapters::{
@@ -319,30 +319,6 @@ fn main() -> Result<()> {
     }
     });
     Ok(())
-}
-
-/// bara (R-016): MCP tz_* tool name -> CLI verb. Consulted when clap rejects
-/// an unknown subcommand so the tip names the real CLI verb.
-fn mcp_name_to_cli_verb(name: &str) -> Option<&'static str> {
-    Some(match name {
-        "tz_read" => "read",
-        "tz_find" => "find",
-        "tz_grep" => "grep",
-        "tz_glob" => "glob",
-        "tz_tree" => "tree",
-        "tz_edit" => "edit",
-        "tz_recall" => "recall",
-        "tz_fetch" => "fetch",
-        "tz_shell" => "run",
-        "tz_ingest" => "ingest",
-        "tz_expand" => "expand",
-        "tz_batch" => "codemode",
-        "tz_mem" => "cache",
-        "tz_discover" => "capabilities",
-        "tz_rewrite" => "rewrite",
-        "tz_cache_pack" => "cache-pack",
-        _ => return None,
-    })
 }
 
 /// bdki (R-002): build an error message for an unknown long flag. Returns
