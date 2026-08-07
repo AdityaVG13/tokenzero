@@ -11,6 +11,7 @@
 //! [`dispatch_operation`] exactly once per domain op.
 
 pub mod binary_resolve;
+pub mod cache_crossover;
 pub mod cache_maintenance;
 pub mod cache_meter;
 mod cache_pack;
@@ -39,9 +40,9 @@ mod fetch_cache;
 mod fetch_guard;
 pub mod ledger;
 pub mod metrics;
+pub mod paths;
 /// Profiling-only measurement hooks (`TOKENZERO_PERF_PROFILE`). Not a product surface.
 pub mod perf_profile;
-pub mod paths;
 pub mod raw_worker;
 mod recall;
 pub mod render;
@@ -62,6 +63,11 @@ pub use binary_resolve::{
     BinaryResolution, ResolveError, ResolvedBinary, TOKENZERO_BIN_ENV, TOKENZERO_CURL_PATH_ENV,
     TOKENZERO_RG_PATH_ENV, engine_binaries_json, resolve_all_engine_binaries, resolve_curl_binary,
     resolve_rg_binary, resolve_tokenzero_binary,
+};
+pub use cache_crossover::{
+    CACHE_CROSSOVER_SCHEMA_V1, CacheContentClass, CacheCrossoverAction, CacheCrossoverError,
+    CacheCrossoverInput, CacheCrossoverReason, CacheCrossoverReceipt, TOKEN_COST_PPM_SCALE,
+    decide_cache_crossover,
 };
 pub use cache_maintenance::{
     cache_maintenance, cache_maintenance_coalesced, session_pack, shell_spill_dir,
