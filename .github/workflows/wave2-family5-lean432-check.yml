@@ -1,0 +1,26 @@
+name: Wave2 Family5 Lean 4.32 Check
+
+on:
+  push:
+    branches:
+      - proof/wave2-family5-lean432-check
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  lean-core:
+    runs-on: ubuntu-latest
+    container:
+      image: leanprover/lean4:v4.32.0
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - name: Report exact Lean version
+        run: lean --version
+      - name: Compile Wave 2 Family 5 proofs
+        shell: bash
+        run: |
+          set -euo pipefail
+          lean verification/wave2_family5/Wave2Family5.lean
+          printf 'LEAN_COMPILE_EXIT=0\n'
