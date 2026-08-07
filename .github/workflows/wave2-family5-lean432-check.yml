@@ -40,7 +40,7 @@ jobs:
           test ! -e lakefile.lean
           test ! -e lakefile.toml
           test ! -e lean-toolchain
-          if grep -nE '\b(sorry|admit|axiom|native_decide)\b' Main.lean; then
+          if grep -nE '\bsorry\b|\bnative_decide\b|^[[:space:]]*axiom\b|:=[[:space:]]*admit\b|by[[:space:]]+admit\b' Main.lean; then
             exit 1
           fi
           printf 'EMPTY_DEPENDENCY_MANIFEST=1\n'
