@@ -1163,6 +1163,79 @@ b
     }
 
     #[test]
+    fn text_render_elides_only_redundant_warm_search_refs() {
+        let blob_ref = "tz://blob/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let mut response = ToolResponse::ok(
+            "grep",
+            Mode::Auto,
+            format!("# grep needle — 2 matches; full results: expand {blob_ref}"),
+            vec![
+                RefRecord {
+                    kind: "blob".into(),
+                    ref_id: blob_ref.into(),
+                    bytes: 42,
+                    live: true,
+                },
+                RefRecord {
+                    kind: "search".into(),
+                    ref_id: "tz://search/h1111111111111111".into(),
+                    bytes: 0,
+                    live: true,
+                },
+                RefRecord {
+                    kind: "search".into(),
+                    ref_id: "tz://search/h2222222222222222".into(),
+                    bytes: 0,
+                    live: true,
+                },
+            ],
+            Accounting {
+                raw_tokens: 20,
+                visible_tokens: 10,
+                recovery_tokens: 0,
+                billed_tokens: 10,
+                cached_tokens: 0,
+                exact_ref_tokens: None,
+            },
+        );
+        response.telemetry = Some(serde_json::json!({
+            "output_strategy": "seen_set_dedup",
+            "transport_status": "ok",
+            "exact_refs_available": true,
+            "degraded": false,
+            "storage_error": null,
+            "truncated_by_visit": false,
+            "matches": 2
+        }));
+
+        let compact = render_text(&response);
+        assert!(!compact.contains("search_ref:"), "{compact}");
+        assert!(compact.contains(blob_ref), "{compact}");
+
+        let mut cold = response.clone();
+        cold.telemetry.as_mut().unwrap()["output_strategy"] = serde_json::json!("full");
+        assert!(render_text(&cold).contains("search_ref:"));
+
+        let mut dead = response.clone();
+        dead.refs[1].live = false;
+        assert!(render_text(&dead).contains("search_ref:"));
+
+        let mut warned = response.clone();
+        warned.safety = Some(serde_json::json!({"warning": "review"}));
+        assert!(render_text(&warned).contains("search_ref:"));
+
+        let mut mixed = response;
+        mixed.refs.push(RefRecord {
+            kind: "blob".into(),
+            ref_id: "tz://blob/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+                .into(),
+            bytes: 1,
+            live: true,
+        });
+        assert!(render_text(&mixed).contains("search_ref:"));
+    }
+
+    #[test]
     fn text_render_quiets_only_verified_exact_edit_success() {
         let mut response = ToolResponse::ok(
             "edit",
@@ -1446,6 +1519,76 @@ fn inline_exact_small_read(response: &ToolResponse, complete_source: bool) -> Op
     (visible.text.len() == blob.bytes).then(|| visible.text.clone())
 }
 
+fn redundant_warm_search_refs(response: &ToolResponse) -> bool {
+    if response.status != "ok"
+        || response.tool != "grep"
+        || response.diagnostic.is_some()
+        || response.safety.is_some()
+        || response.recovery.is_some()
+        || response.channels.is_some()
+    {
+        return false;
+    }
+    let Some(telemetry) = response
+        .telemetry
+        .as_ref()
+        .and_then(serde_json::Value::as_object)
+    else {
+        return false;
+    };
+    if telemetry
+        .get("output_strategy")
+        .and_then(serde_json::Value::as_str)
+        != Some("seen_set_dedup")
+        || telemetry
+            .get("transport_status")
+            .and_then(serde_json::Value::as_str)
+            != Some("ok")
+        || telemetry
+            .get("exact_refs_available")
+            .and_then(serde_json::Value::as_bool)
+            != Some(true)
+        || telemetry
+            .get("degraded")
+            .and_then(serde_json::Value::as_bool)
+            != Some(false)
+        || telemetry.get("warning").is_some()
+        || !telemetry
+            .get("storage_error")
+            .is_none_or(serde_json::Value::is_null)
+        || telemetry
+            .get("truncated_by_visit")
+            .and_then(serde_json::Value::as_bool)
+            != Some(false)
+    {
+        return false;
+    }
+    let search_refs = response
+        .refs
+        .iter()
+        .filter(|record| record.kind == "search")
+        .collect::<Vec<_>>();
+    if search_refs.is_empty()
+        || search_refs.iter().any(|record| !record.live)
+        || telemetry.get("matches").and_then(serde_json::Value::as_u64)
+            != Some(search_refs.len() as u64)
+    {
+        return false;
+    }
+    let mut blobs = response
+        .refs
+        .iter()
+        .filter(|record| record.kind == "blob" && record.live && record.bytes > 0);
+    let Some(blob) = blobs.next() else {
+        return false;
+    };
+    blobs.next().is_none()
+        && response
+            .visible
+            .as_ref()
+            .is_some_and(|visible| visible.text.contains(&blob.ref_id))
+}
+
 pub fn render_text(response: &ToolResponse) -> String {
     render_text_inner(response, false)
 }
@@ -1466,6 +1609,7 @@ fn render_text_inner(response: &ToolResponse, complete_source: bool) -> String {
     if let Some(inline) = inline_exact_small_read(response, complete_source) {
         return inline;
     }
+    let omit_search_refs = redundant_warm_search_refs(response);
     let mut out = String::new();
     if let Some(visible) = &response.visible {
         out.push_str(visible.text.trim_end());
@@ -1473,6 +1617,9 @@ fn render_text_inner(response: &ToolResponse, complete_source: bool) -> String {
     }
     if !is_compact_shell_response(response) {
         for record in &response.refs {
+            if omit_search_refs && record.kind == "search" {
+                continue;
+            }
             // Full shell capsules already anchor their refs in the header;
             // appending those again doubles every ref line. Only refs the
             // visible text does not carry (e.g. capture_ref) are added.

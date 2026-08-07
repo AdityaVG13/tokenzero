@@ -614,6 +614,87 @@ fn cli_read_paths_from_rejects_list_file_outside_allowed_root_without_reflecting
 }
 
 #[test]
+fn cli_warm_grep_elides_only_redundant_search_refs() {
+    let (dir, cache) = setup_temp_with_cache();
+    let file = dir.path().join("matches.txt");
+    fs::write(
+        &file,
+        "needle one
+middle
+needle two
+needle three
+",
+    )
+    .unwrap();
+    let file_arg = file.to_str().unwrap();
+    let cache_arg = cache.to_str().unwrap();
+    let root_arg = dir.path().to_str().unwrap();
+
+    let cold = assert_success(
+        tokenzero_cmd()
+            .current_dir(dir.path())
+            .args([
+                "grep",
+                "needle",
+                file_arg,
+                "--cache-path",
+                cache_arg,
+                "--allowed-root",
+                root_arg,
+                "--json=full",
+            ])
+            .output()
+            .unwrap(),
+        "cold full grep",
+    );
+    let cold = parse_json_stdout(&cold);
+    assert_eq!(
+        cold["refs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|record| record["kind"] == "search")
+            .count(),
+        3,
+        "cold JSON keeps every per-hit ref: {cold}"
+    );
+    let full_results_ref = first_ref_with_kind(&cold, "blob");
+
+    let warm = assert_success(
+        tokenzero_cmd()
+            .current_dir(dir.path())
+            .args([
+                "grep",
+                "needle",
+                file_arg,
+                "--cache-path",
+                cache_arg,
+                "--allowed-root",
+                root_arg,
+            ])
+            .output()
+            .unwrap(),
+        "warm text grep",
+    );
+    let warm = String::from_utf8(warm.stdout).unwrap();
+    assert!(warm.contains(&full_results_ref), "{warm}");
+    assert!(!warm.contains("search_ref:"), "{warm}");
+
+    let expanded = expand_raw_text(&full_results_ref, Some(&cache), None, &[]);
+    assert_eq!(
+        expanded,
+        format!(
+            "{}:1:needle one
+{}:3:needle two
+{}:4:needle three",
+            file.display(),
+            file.display(),
+            file.display()
+        )
+    );
+}
+
+#[test]
 fn cli_grep_and_glob_are_exact_first_surfaces() {
     let (dir, cache) = setup_temp_with_cache();
     std::fs::create_dir_all(dir.path().join("src")).unwrap();
