@@ -10,6 +10,15 @@ fn digest_is_stable_and_nonempty() {
 }
 
 #[test]
+fn install_platform_override_accepts_only_supported_literals() {
+    assert_eq!(parse_install_platform("macos").unwrap(), "macos");
+    assert_eq!(parse_install_platform("linux").unwrap(), "linux");
+    assert_eq!(parse_install_platform("windows").unwrap(), "windows");
+    let err = parse_install_platform("freebsd").unwrap_err();
+    assert!(err.contains("macos, linux, windows"), "{err}");
+}
+
+#[test]
 fn selection_matrix() {
     assert_eq!(
         PackageSurface::recommended_for_client(true),

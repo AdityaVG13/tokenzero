@@ -393,7 +393,19 @@ fn prepare_write(
     } else if binary_write {
         None
     } else {
-        fs::read_to_string(&path).ok()
+        match fs::read(&path) {
+            Ok(bytes) => Some(String::from_utf8(bytes).map_err(|err| {
+                Error::new(
+                    ErrorKind::InvalidData,
+                    format!(
+                        "refusing to replace non-UTF-8 text file {}: {err}",
+                        path.display()
+                    ),
+                )
+            })?),
+            Err(err) if err.kind() == ErrorKind::NotFound => None,
+            Err(err) => return Err(err),
+        }
     };
     let content = if path_write {
         windows_path_with_tokenzero_bin(root, previous.as_deref()).into_bytes()
@@ -864,5 +876,57 @@ mod rollback_drift_tests {
             serde_json::from_slice(&fs::read(&config).expect("reread")).expect("final json");
         assert_eq!(final_value, json!({"user_before": true}));
         assert!(final_value.get("mcpServers").is_none());
+    }
+
+    #[test]
+    fn instructions_merge_preserves_and_rolls_back_existing_agents_bytes() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let agents = root.path().join("AGENTS.md");
+        let original = b"# Existing project law\r\nKeep `quotes`, \\slashes, and this final byte";
+        fs::write(&agents, original).expect("seed AGENTS.md");
+
+        let applied = apply(root.path(), false, &["instructions".to_string()]).expect("apply");
+        let installed = fs::read(&agents).expect("read installed instructions");
+        assert!(
+            installed.starts_with(original),
+            "existing bytes must remain a prefix"
+        );
+        let installed_text = String::from_utf8(installed).expect("UTF-8 instructions");
+        assert_eq!(
+            installed_text
+                .matches("<!-- tokenzero:rust-core:start -->")
+                .count(),
+            1
+        );
+        assert_eq!(
+            installed_text
+                .matches("<!-- tokenzero:rust-core:end -->")
+                .count(),
+            1
+        );
+
+        let result = rollback(root.path(), &applied.rollback.id).expect("rollback");
+        assert_eq!(result["status"], "ok");
+        assert_eq!(
+            fs::read(&agents).expect("read restored AGENTS.md"),
+            original
+        );
+    }
+
+    #[test]
+    fn instructions_refuse_non_utf8_agents_without_mutation() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let agents = root.path().join("AGENTS.md");
+        let original = [b'#', b' ', 0xff, b'\n'];
+        fs::write(&agents, original).expect("seed non-UTF-8 AGENTS.md");
+
+        let err = apply(root.path(), false, &["instructions".to_string()])
+            .expect_err("non-UTF-8 project law must fail closed");
+        assert_eq!(err.kind(), ErrorKind::InvalidData);
+        assert!(err.to_string().contains("refusing to replace non-UTF-8"));
+        assert_eq!(
+            fs::read(&agents).expect("read untouched AGENTS.md"),
+            original
+        );
     }
 }

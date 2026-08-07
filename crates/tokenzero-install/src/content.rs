@@ -18,7 +18,7 @@ pub(crate) fn content_for(
             merge_toml_mcp(previous, root, Path::new(&row.path), row.global, surface)
         }
         "mcp" => merge_json_mcp(previous, root, row.global, surface),
-        "instructions" => Ok(instructions_content(surface)),
+        "instructions" => merge_instructions(previous, surface),
         "shell" => Ok(shell_launcher_content(root, row.global)),
         "cli" => Ok(cli_launcher_content(root, row.global)),
         "cli-shim" => Ok(windows_posix_cli_shim_content()),
@@ -263,9 +263,61 @@ pub(crate) fn merge_toml_mcp(
     Ok(merged)
 }
 
+const INSTRUCTIONS_START: &str = "<!-- tokenzero:rust-core:start -->";
+const INSTRUCTIONS_END: &str = "<!-- tokenzero:rust-core:end -->";
+
+/// Upsert only TokenZero's managed instruction block. Every byte outside the
+/// reserved markers remains unchanged, so existing project law is never
+/// replaced by generated installer content.
+pub(crate) fn merge_instructions(
+    previous: &str,
+    surface: McpToolSurface,
+) -> std::io::Result<String> {
+    let starts = previous
+        .match_indices(INSTRUCTIONS_START)
+        .collect::<Vec<_>>();
+    let ends = previous.match_indices(INSTRUCTIONS_END).collect::<Vec<_>>();
+    let managed = instructions_content(surface);
+
+    match (starts.as_slice(), ends.as_slice()) {
+        ([], []) => {
+            let mut merged = previous.to_string();
+            if !merged.is_empty() {
+                if !merged.ends_with('\n') {
+                    merged.push('\n');
+                }
+                if !merged.ends_with("\n\n") {
+                    merged.push('\n');
+                }
+            }
+            merged.push_str(&managed);
+            Ok(merged)
+        }
+        ([(start, _)], [(end, _)]) if *end > *start => {
+            let after = *end + INSTRUCTIONS_END.len();
+            let managed_without_boundary = managed.strip_suffix('\n').ok_or_else(|| {
+                Error::new(
+                    ErrorKind::InvalidData,
+                    "TokenZero managed instructions must end with LF",
+                )
+            })?;
+            Ok(format!(
+                "{}{}{}",
+                &previous[..*start],
+                managed_without_boundary,
+                &previous[after..]
+            ))
+        }
+        _ => Err(Error::new(
+            ErrorKind::InvalidData,
+            "AGENTS.md has malformed or duplicate TokenZero instruction markers",
+        )),
+    }
+}
+
 fn instructions_content(_surface: McpToolSurface) -> String {
     let body = "Use `tokenzero read/find/tree/run/expand` or MCP aliases. Rust Core runs as a standalone binary for normal use.";
-    format!("<!-- tokenzero:rust-core:start -->\n{body}\n<!-- tokenzero:rust-core:end -->\n")
+    format!("{INSTRUCTIONS_START}\n{body}\n{INSTRUCTIONS_END}\n")
 }
 
 pub(crate) fn mcp_server_json(root: &Path, global: bool, mcp_surface: McpToolSurface) -> Value {
@@ -398,4 +450,43 @@ pub(crate) fn toml_string_array(values: &[String]) -> String {
 
 pub(crate) fn toml_string(value: &str) -> String {
     serde_json::to_string(value).unwrap_or_else(|_| "\"\"".to_string())
+}
+
+#[cfg(test)]
+mod instruction_merge_tests {
+    use super::*;
+
+    #[test]
+    fn managed_block_upsert_is_idempotent_and_preserves_surrounding_bytes() {
+        let previous = "# Law\r\nbefore\n<!-- tokenzero:rust-core:start -->\nold\n<!-- tokenzero:rust-core:end -->\r\nafter\r\n";
+        let merged = merge_instructions(previous, McpToolSurface::Classic).expect("merge");
+        assert!(merged.starts_with("# Law\r\nbefore\n"));
+        assert!(merged.ends_with("after\r\n"));
+        assert!(merged.contains("<!-- tokenzero:rust-core:end -->\r\nafter\r\n"));
+        assert!(!merged.contains("\nold\n"));
+        assert_eq!(merged.matches(INSTRUCTIONS_START).count(), 1);
+        assert_eq!(merged.matches(INSTRUCTIONS_END).count(), 1);
+        assert_eq!(
+            merge_instructions(&merged, McpToolSurface::Classic).expect("repeat merge"),
+            merged
+        );
+    }
+
+    #[test]
+    fn managed_block_at_eof_preserves_the_missing_final_newline() {
+        let previous =
+            "law\n<!-- tokenzero:rust-core:start -->\nold\n<!-- tokenzero:rust-core:end -->";
+        let merged = merge_instructions(previous, McpToolSurface::Classic).expect("merge");
+        assert!(merged.ends_with(INSTRUCTIONS_END));
+        assert!(!merged.ends_with('\n'));
+    }
+
+    #[test]
+    fn malformed_managed_markers_fail_without_a_replacement() {
+        let previous = "project law\n<!-- tokenzero:rust-core:start -->\nunterminated\n";
+        let err = merge_instructions(previous, McpToolSurface::Classic)
+            .expect_err("malformed markers must fail closed");
+        assert_eq!(err.kind(), ErrorKind::InvalidData);
+        assert!(err.to_string().contains("malformed or duplicate"));
+    }
 }

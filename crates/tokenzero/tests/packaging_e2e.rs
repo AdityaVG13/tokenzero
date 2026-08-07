@@ -23,6 +23,22 @@ fn install_sh() -> PathBuf {
     repo_root().join("packaging/install.sh")
 }
 
+fn cargo_surface_binary(surface: &str) -> PathBuf {
+    let (override_name, cargo_binary) = match surface {
+        "codemode" => (
+            "TOKENZERO_TEST_CODEMODE_BIN",
+            env!("CARGO_BIN_EXE_tokenzero-codemode"),
+        ),
+        _ => (
+            "TOKENZERO_TEST_MCP_BIN",
+            env!("CARGO_BIN_EXE_tokenzero-mcp"),
+        ),
+    };
+    std::env::var_os(override_name)
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(cargo_binary))
+}
+
 fn ensure_bins() {
     let root = repo_root();
     for (bin, feature) in [
@@ -67,6 +83,7 @@ fn run_install(
         .arg(bin_dir)
         .arg("--skip-build")
         .env("TOKENZERO_INSTALL_PLATFORM", platform)
+        .env("TOKENZERO_INSTALL_SRC", cargo_surface_binary(surface))
         .env_remove("TOKENZERO_TELEMETRY")
         .env("HOME", prefix)
         .current_dir(repo_root())
@@ -131,7 +148,20 @@ fn seed_prior_codemode_install(prefix: &Path, bin_dir: &Path) -> PriorInstall {
     let config = prefix.join("client-config.json");
     let shim_target = prefix.join("shim-target");
     let peer_bytes = b"#!/bin/sh\nprintf 'prior-peer\\n'\n".to_vec();
-    let state_bytes = b"{\"surface\":\"codemode\",\"sentinel\":\"prior-state\"}\n".to_vec();
+    let mut state_bytes = serde_json::to_vec_pretty(&serde_json::json!({
+        "surface": "codemode",
+        "artifact": "tokenzero-codemode",
+        "binary_path": peer.display().to_string(),
+        "prefix": prefix.display().to_string(),
+        "semantic_contract_digest": "0".repeat(64),
+        "package_version": "prior",
+        "installed_at_unix": 1,
+        "platform": "linux",
+        "client_config": prefix.join("client-config.json").display().to_string(),
+        "sentinel": "prior-state",
+    }))
+    .unwrap();
+    state_bytes.push(b'\n');
     let config_bytes = b"{\"surface\":\"codemode\",\"args\":[\"--mode=codemode\"],\"sentinel\":\"prior-config\"}\n".to_vec();
     let shim_target_bytes = b"codemode\n".to_vec();
     let peer_mode = 0o751;
@@ -261,16 +291,7 @@ fn post_replace_failure_restores_binary_peer_json_modes_and_symlink() {
         &prior_selected,
         prior_selected_mode,
     );
-    let candidate = tmp.path().join("valid-tokenzero-mcp");
-    let digest = "a".repeat(64);
-    write_mode(
-        &candidate,
-        format!(
-            "#!/bin/sh\nif [ \"${{1:-}}\" = sbom ]; then\n  printf '%s\\n' '{{\"semantic_contract_digest\":\"{digest}\"}}'\nfi\n"
-        )
-        .as_bytes(),
-        0o755,
-    );
+    let candidate = cargo_surface_binary("mcp");
 
     let real_python_output = Command::new("sh")
         .args(["-c", "command -v python3"])
@@ -314,7 +335,10 @@ fn post_replace_failure_restores_binary_peer_json_modes_and_symlink() {
 
     assert!(!output.status.success(), "{output:?}");
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(stderr.contains("client-config dual/malformed"), "{stderr}");
+    assert!(
+        stderr.contains("client/state JSON malformed or inconsistent"),
+        "{stderr}"
+    );
     assert!(stderr.contains("restoring exact prior"), "{stderr}");
     assert_eq!(fs::read_to_string(&count_file).unwrap().trim(), "3");
     assert_prior_install_restored(
@@ -322,6 +346,72 @@ fn post_replace_failure_restores_binary_peer_json_modes_and_symlink() {
         &bin_dir,
         &prior,
         Some((&prior_selected, prior_selected_mode)),
+    );
+}
+
+#[test]
+fn invalid_platform_override_fails_before_state_mutation() {
+    let tmp = tempfile::tempdir().unwrap();
+    let prefix = tmp.path().join("prefix");
+    let binary = cargo_surface_binary("mcp");
+    let output = Command::new(&binary)
+        .args(["install", "--surface", "mcp", "--prefix"])
+        .arg(&prefix)
+        .arg("--binary")
+        .arg(&binary)
+        .env("TOKENZERO_INSTALL_PLATFORM", "freebsd")
+        .output()
+        .unwrap();
+
+    assert!(!output.status.success(), "{output:?}");
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("macos, linux, windows"),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(!prefix.join("client-config.json").exists());
+    assert!(!prefix.join("install-state.json").exists());
+    assert!(!prefix.join("shim-target").exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn installer_serializes_adversarial_paths_as_structured_json() {
+    let tmp = tempfile::tempdir().unwrap();
+    let prefix = tmp.path().join("prefix-\"quote\\slash\nline");
+    let bin_dir = tmp.path().join("bin-\"quote\\slash\nline");
+    let candidate = cargo_surface_binary("mcp");
+
+    let output = Command::new("bash")
+        .arg(install_sh())
+        .args(["--surface", "mcp", "--skip-build"])
+        .arg("--prefix")
+        .arg(&prefix)
+        .arg("--bin-dir")
+        .arg(&bin_dir)
+        .env("TOKENZERO_INSTALL_SRC", &candidate)
+        .env("TOKENZERO_INSTALL_PLATFORM", "linux")
+        .env("HOME", &prefix)
+        .current_dir(repo_root())
+        .output()
+        .unwrap();
+
+    assert!(output.status.success(), "{output:?}");
+    let client_raw = fs::read_to_string(prefix.join("client-config.json")).unwrap();
+    let state_raw = fs::read_to_string(prefix.join("install-state.json")).unwrap();
+    let client: serde_json::Value = serde_json::from_str(&client_raw).unwrap();
+    let state: serde_json::Value = serde_json::from_str(&state_raw).unwrap();
+    let installed = bin_dir.join("tokenzero-mcp").display().to_string();
+    assert_eq!(client["command"], installed);
+    let digest = client["semantic_contract_digest"].as_str().unwrap();
+    assert_eq!(digest.len(), 64);
+    assert!(digest.chars().all(|ch| ch.is_ascii_hexdigit()));
+    assert_eq!(state["semantic_contract_digest"], digest);
+    assert_eq!(state["binary_path"], installed);
+    assert_eq!(state["prefix"], prefix.display().to_string());
+    assert_eq!(
+        state["client_config"],
+        prefix.join("client-config.json").display().to_string()
     );
 }
 

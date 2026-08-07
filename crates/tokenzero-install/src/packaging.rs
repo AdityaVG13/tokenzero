@@ -175,6 +175,15 @@ pub struct InstallState {
 
 impl InstallState {
     pub fn for_surface(surface: PackageSurface, prefix: &Path, binary_path: &Path) -> Self {
+        Self::for_surface_on_platform(surface, prefix, binary_path, current_platform())
+    }
+
+    fn for_surface_on_platform(
+        surface: PackageSurface,
+        prefix: &Path,
+        binary_path: &Path,
+        platform: &str,
+    ) -> Self {
         Self {
             surface,
             artifact: surface.artifact_name().to_string(),
@@ -183,7 +192,7 @@ impl InstallState {
             semantic_contract_digest: semantic_contract_digest(),
             package_version: env!("CARGO_PKG_VERSION").to_string(),
             installed_at_unix: now_unix(),
-            platform: current_platform().to_string(),
+            platform: platform.to_string(),
             client_config: prefix.join(CLIENT_CONFIG_FILE).display().to_string(),
         }
     }
@@ -205,6 +214,27 @@ pub fn current_platform() -> &'static str {
         "windows"
     } else {
         "other"
+    }
+}
+
+fn parse_install_platform(value: &str) -> Result<&'static str, String> {
+    match value {
+        "macos" => Ok("macos"),
+        "linux" => Ok("linux"),
+        "windows" => Ok("windows"),
+        _ => Err(format!(
+            "TOKENZERO_INSTALL_PLATFORM must be one of: macos, linux, windows (got {value:?})"
+        )),
+    }
+}
+
+fn selected_install_platform() -> Result<&'static str, String> {
+    match env::var("TOKENZERO_INSTALL_PLATFORM") {
+        Ok(value) => parse_install_platform(&value),
+        Err(env::VarError::NotPresent) => Ok(current_platform()),
+        Err(env::VarError::NotUnicode(_)) => {
+            Err("TOKENZERO_INSTALL_PLATFORM must be valid UTF-8".to_string())
+        }
     }
 }
 
@@ -303,6 +333,7 @@ pub fn install_surface(
     binary_path: &Path,
 ) -> Result<InstallState, String> {
     reject_dual_env_selection()?;
+    let platform = selected_install_platform()?;
 
     let prev = load_install_state(prefix)?;
     if let Some(prev) = &prev {
@@ -313,7 +344,7 @@ pub fn install_surface(
 
     let config = client_config_for(surface, binary_path);
     write_client_config(prefix, &config)?;
-    let state = InstallState::for_surface(surface, prefix, binary_path);
+    let state = InstallState::for_surface_on_platform(surface, prefix, binary_path, platform);
     write_install_state(prefix, &state)?;
 
     let shim_path = prefix.join("shim-target");

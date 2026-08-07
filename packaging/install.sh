@@ -4,11 +4,9 @@
 # Installs exactly one surface artifact: tokenzero-mcp OR tokenzero-codemode.
 # Replaces any prior registration. Never registers both catalogs.
 #
-# CRITICAL: install state + client-config are written by THIS SCRIPT only
-# (installer-native atomic path). Never invoke the surface binary for
-# `install` during packaging lifecycle ownership — surface bins implement
-# non-hanging install as a convenience, but the shell installer is the
-# canonical release path and never starts a stdio server.
+# CRITICAL: after candidate verification, the installed surface artifact writes
+# state + client-config through its installer-native serde serializer. The shell
+# owns the release transaction and never starts the artifact's stdio server.
 #
 # Usage:
 #   ./packaging/install.sh --surface mcp|codemode [--prefix DIR] [--bin-dir DIR]
@@ -20,7 +18,7 @@
 #   native CodeMode client  -> install tokenzero-mcp
 #   legacy MCP-only client  -> install tokenzero-codemode
 #
-# Platform simulation for e2e: TOKENZERO_INSTALL_PLATFORM=macos|linux
+# Platform simulation for e2e: TOKENZERO_INSTALL_PLATFORM=macos|linux|windows
 
 set -euo pipefail
 
@@ -30,7 +28,6 @@ BIN_DIR="${TOKENZERO_BIN_DIR:-${HOME}/.local/bin}"
 ACTION="install"
 SKIP_BUILD=0
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-VERSION="1.4.0"
 
 usage() {
   cat <<EOF
@@ -40,7 +37,7 @@ usage: $0 --surface mcp|codemode [--prefix DIR] [--bin-dir DIR] [--skip-build]
 
 Artifacts: tokenzero-mcp | tokenzero-codemode | tokenzero (compat shim symlink)
 Never install both surfaces. Dual client registration is unsupported.
-Installer writes state/client-config itself (never hangs on server stdio).
+Verified artifact writes state/client-config through serde; install never starts server stdio.
 Selection: native CodeMode client -> tokenzero-mcp; otherwise -> tokenzero-codemode.
 EOF
 }
@@ -64,7 +61,7 @@ done
 os_name() {
   if [[ -n "${TOKENZERO_INSTALL_PLATFORM:-}" ]]; then
     case "${TOKENZERO_INSTALL_PLATFORM}" in
-      macos|linux|windows|other) echo "${TOKENZERO_INSTALL_PLATFORM}" ;;
+      macos|linux|windows) echo "${TOKENZERO_INSTALL_PLATFORM}" ;;
       *) echo "invalid TOKENZERO_INSTALL_PLATFORM=${TOKENZERO_INSTALL_PLATFORM}" >&2; exit 2 ;;
     esac
     return
@@ -91,46 +88,14 @@ feature_for_surface() {
   esac
 }
 
-atomic_write() {
-  local path="$1"
-  local dir tmp
-  dir="$(dirname "$path")"
-  mkdir -p "$dir"
-  tmp="${path}.tmp.$$"
-  cat >"$tmp"
-  mv -f "$tmp" "$path"
-}
-
 write_install_state() {
-  local surface="$1" artifact="$2" binary="$3" digest="$4" platform="$5"
-  local now
-  now="$(date +%s)"
-  atomic_write "$PREFIX/client-config.json" <<EOF
-{
-  "name": "TokenZero (${surface})",
-  "surface": "${surface}",
-  "command": "${binary}",
-  "args": ["--mode=${surface}"],
-  "semantic_contract_digest": "${digest}",
-  "package_version": "${VERSION}"
-}
-EOF
-  atomic_write "$PREFIX/install-state.json" <<EOF
-{
-  "surface": "${surface}",
-  "artifact": "${artifact}",
-  "binary_path": "${binary}",
-  "prefix": "${PREFIX}",
-  "semantic_contract_digest": "${digest}",
-  "package_version": "${VERSION}",
-  "installed_at_unix": ${now},
-  "platform": "${platform}",
-  "client_config": "${PREFIX}/client-config.json"
-}
-EOF
-  atomic_write "$PREFIX/shim-target" <<EOF
-${surface}
-EOF
+  local surface="$1" binary="$3" platform="$5"
+  TOKENZERO_INSTALL_PLATFORM="$platform" \
+    "$binary" install \
+      --surface "$surface" \
+      --prefix "$PREFIX" \
+      --binary "$binary" \
+      >/dev/null
 }
 
 read_digest_from_sbom() {
@@ -369,12 +334,6 @@ if [[ "$INSTALLED_DIGEST" != "$DIGEST" ]]; then
   exit 1
 fi
 
-if [[ -e "$BIN_DIR/$PEER" || -L "$BIN_DIR/$PEER" ]]; then
-  echo "install: replacing peer artifact $PEER (mutual exclusion)"
-  rm -f "$BIN_DIR/$PEER"
-fi
-# Compatibility shim: selected symlink only; never a dual-surface binary.
-ln -sfn "$BIN_DIR/$ARTIFACT" "$BIN_DIR/tokenzero"
 write_install_state "$SURFACE" "$ARTIFACT" "$BIN_DIR/$ARTIFACT" "$DIGEST" "$PLATFORM"
 
 if [[ ! -f "$PREFIX/install-state.json" || ! -f "$PREFIX/client-config.json" ]]; then
@@ -382,24 +341,45 @@ if [[ ! -f "$PREFIX/install-state.json" || ! -f "$PREFIX/client-config.json" ]];
   exit 1
 fi
 
-# Single-surface client config check (structured via python when available).
+# Parse and cross-check the Rust-generated pair before removing the peer when
+# Python is available. Without Python, the same serde_json serializer wrote it.
 if command -v python3 >/dev/null 2>&1; then
-  if ! python3 - "$PREFIX/client-config.json" "$SURFACE" <<'PY'
+  if ! python3 - \
+    "$PREFIX/client-config.json" \
+    "$PREFIX/install-state.json" \
+    "$SURFACE" "$DIGEST" "$PLATFORM" "$BIN_DIR/$ARTIFACT" <<'PY'
 import json, sys
-path, want = sys.argv[1], sys.argv[2]
-with open(path) as f:
-    doc = json.load(f)
-assert doc.get("surface") == want, doc
-args = doc.get("args") or []
-assert args == [f"--mode={want}"], args
-assert not any("mcp" in a and "codemode" in a for a in args)
+client_path, state_path, surface, digest, platform, binary = sys.argv[1:]
+with open(client_path) as f:
+    client = json.load(f)
+with open(state_path) as f:
+    state = json.load(f)
+args = client.get("args") or []
+assert client.get("surface") == surface, client
+assert client.get("command") == binary, client
+assert client.get("semantic_contract_digest") == digest, client
+assert args == [f"--mode={surface}"], args
+assert not any("mcp" in arg and "codemode" in arg for arg in args)
+assert state.get("surface") == surface, state
+assert state.get("binary_path") == binary, state
+assert state.get("semantic_contract_digest") == digest, state
+assert state.get("platform") == platform, state
 print("ok")
 PY
   then
-    echo "install: FAIL client-config dual/malformed surface" >&2
+    echo "install: FAIL client/state JSON malformed or inconsistent" >&2
     exit 1
   fi
 fi
+
+# Remove the peer only after the Rust serializer has written and validated one
+# single-surface state/config pair.
+if [[ -e "$BIN_DIR/$PEER" || -L "$BIN_DIR/$PEER" ]]; then
+  echo "install: replacing peer artifact $PEER (mutual exclusion)"
+  rm -f "$BIN_DIR/$PEER"
+fi
+# Compatibility shim: selected symlink only; never a dual-surface binary.
+ln -sfn "$BIN_DIR/$ARTIFACT" "$BIN_DIR/tokenzero"
 
 ROLLBACK_ACTIVE=0
 trap - EXIT
