@@ -7,6 +7,45 @@ use std::thread;
 use std::time::Instant;
 use tokenzero_runtime::{run_command_with_policy_observer, run_command_with_policy_observers};
 
+#[cfg(test)]
+mod rewrite_execution_tests {
+    use super::*;
+
+    #[test]
+    fn applied_cat_rewrite_builds_the_executed_argv() {
+        let command = "cat src/lib.rs";
+        let rewrite = rewrite_for_shell(command, "on", false, false);
+
+        assert!(rewrite.applied);
+        assert_eq!(rewrite.rewritten_command, "tokenzero read src/lib.rs");
+        assert_eq!(
+            shell_execution_argv(command, None, &rewrite),
+            ["tokenzero", "read", "src/lib.rs"]
+        );
+    }
+
+    #[test]
+    fn explicit_argv_is_authoritative_and_rewrite_is_truthfully_skipped() {
+        let command = "cat display-only.txt";
+        let rewrite = rewrite_for_shell(command, "on", false, true);
+        let explicit = vec![
+            "printf".to_string(),
+            "%s".to_string(),
+            "literal".to_string(),
+        ];
+
+        assert!(!rewrite.applied);
+        assert_eq!(
+            rewrite.reason,
+            "explicit argv is authoritative; command rewrite skipped"
+        );
+        assert_eq!(
+            shell_execution_argv(command, Some(explicit.clone()), &rewrite),
+            explicit
+        );
+    }
+}
+
 #[derive(Debug)]
 struct BackgroundJobState {
     status: &'static str,
@@ -28,6 +67,35 @@ fn shell_argv(command: &str) -> Vec<String> {
         vec![command.to_string()]
     } else {
         split_command_string(command)
+    }
+}
+
+fn rewrite_for_shell(
+    command: &str,
+    rewrite_mode: &str,
+    no_rewrite: bool,
+    explicit_argv: bool,
+) -> tokenzero_filters::RewriteResult {
+    let rewrite_requested = !no_rewrite && rewrite_mode != "off";
+    let mut result = rewrite_command(command, rewrite_mode, rewrite_requested && !explicit_argv);
+    if explicit_argv && rewrite_requested {
+        result.reason = "explicit argv is authoritative; command rewrite skipped".to_string();
+    }
+    result
+}
+
+fn shell_execution_argv(
+    command: &str,
+    argv: Option<Vec<String>>,
+    rewrite: &tokenzero_filters::RewriteResult,
+) -> Vec<String> {
+    match argv {
+        Some(argv) => argv,
+        None => shell_argv(if rewrite.applied {
+            &rewrite.rewritten_command
+        } else {
+            command
+        }),
     }
 }
 
@@ -409,6 +477,11 @@ impl TokenZeroEngine {
         if let Some(obj) = launched.as_object_mut() {
             obj.insert("cwd".to_string(), json!(resolved_cwd.display().to_string()));
             obj.insert("cwd_source".to_string(), json!(cwd_source));
+            obj.insert("rewrite_applied".to_string(), json!(false));
+            obj.insert(
+                "rewrite_skip_reason".to_string(),
+                json!("background shell API does not accept a rewrite policy"),
+            );
         }
         Ok(launched)
     }
@@ -453,15 +526,8 @@ impl TokenZeroEngine {
         };
         let cwd = resolved_cwd.as_path();
         let rewrite_mode = rewrite.unwrap_or("off");
-        let rewrite_result =
-            rewrite_command(command, rewrite_mode, !no_rewrite && rewrite_mode != "off");
-        let run_argv = argv.unwrap_or_else(|| {
-            if contains_platform_shell_syntax(command, tokenzero_runtime::current_platform()) {
-                vec![command.to_string()]
-            } else {
-                split_command_string(command)
-            }
-        });
+        let rewrite_result = rewrite_for_shell(command, rewrite_mode, no_rewrite, argv.is_some());
+        let run_argv = shell_execution_argv(command, argv, &rewrite_result);
         let env_summary = env
             .as_ref()
             .map(|values| values.keys().cloned().collect::<Vec<_>>())
