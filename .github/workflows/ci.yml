@@ -171,6 +171,10 @@ jobs:
         run: |
           cargo build --release -p tokenzero-cli --bin tokenzero --no-default-features
           cargo build --release -p tokenzero-worker --bin tokenzero-codemode --no-default-features
+      - name: Never-worse estimated-token benchmark gate
+        env:
+          TOKENZERO_BIN: target/release/tokenzero
+        run: make perf-never-worse-gate
       - name: GVKV token-amplification and boot-cost locks
         env:
           TOKENZERO_BOOT_BENCH_BIN: target/release/tokenzero

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Shared, stdlib-only benchmark measurement helpers."""
 from __future__ import annotations
-import argparse, hashlib, json; import os, platform, random, shutil, string; import subprocess, sys, tempfile, time; from contextlib import contextmanager
+import argparse, hashlib, json; import os, platform, random, re, shutil, string; import subprocess, sys, tempfile, time; from contextlib import contextmanager
 from datetime import datetime, timezone; from pathlib import Path; GUARD = Path('/tmp/zerostack-heavy-process.guard'); RECOVERY_CACHE = Path.home() / '.tokenzero' / 'recovery-cache.json'
 REPO = Path(__file__).resolve().parents[1]
 try:
@@ -235,17 +235,49 @@ def accounting_tokens(payload, key='raw_tokens'):
     bags = (data.get('accounting', {}), data.get('telemetry', {}), data.get('value', {}))
     return next((int(bag[key]) for bag in bags if isinstance(bag, dict) and key in bag), 0)
 
+_DURABLE_PRIMARY_REF = re.compile(
+    r"^tz://(?:blob/[0-9a-f]{64}|o/[1-9][0-9]*/[1-9][0-9]*)$"
+)
+
+
+def _durable_primary_ref(value):
+    return value if isinstance(value, str) and _DURABLE_PRIMARY_REF.fullmatch(value) else ''
+
+
 def first_blob_ref(data):
     data = _json(data)
     if not isinstance(data, dict):
         return ''
-    found = next((str(item.get('ref', '')) for item in data.get('refs', []) if item.get('kind') == 'blob'), '')
-    if not found:
-        found = str(data.get('detail_ref') or data.get('ref') or '')
-    return found
+    refs = data.get('refs')
+    if refs:
+        if not isinstance(refs, list):
+            return ''
+        if all(isinstance(item, str) for item in refs):
+            return _durable_primary_ref(refs[0])
+        if all(isinstance(item, dict) for item in refs):
+            found = next(
+                (
+                    _durable_primary_ref(item.get('ref'))
+                    for item in refs
+                    if item.get('kind') == 'blob'
+                ),
+                '',
+            )
+            return found
+        return ''
+    return _durable_primary_ref(data.get('detail_ref') or data.get('ref'))
 
 def glob_root_and_first(data):
-    data = _json(data); text = str(data.get('visible', {}).get('text', '')) if isinstance(data, dict) else ''
+    data = _json(data)
+    if not isinstance(data, dict):
+        return ('', '')
+    visible = data.get('visible')
+    if isinstance(visible, str):
+        text = visible
+    elif isinstance(visible, dict) and isinstance(visible.get('text'), str):
+        text = visible['text']
+    else:
+        return ('', '')
     root = next((line.split(':', 1)[1].strip() for line in text.splitlines() if line.startswith('# root:')), '')
     rel = next((line.strip() for line in text.splitlines() if line.strip() and (not line.strip().startswith('#'))), '')
     return (root, rel)

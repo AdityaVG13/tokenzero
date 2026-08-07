@@ -1,6 +1,6 @@
 SHELL := /bin/bash
 
-.PHONY: test readme-command-audit host-path-audit rust-test rust-verify rust-verify-report rust-release-build rust-codemode-build mcp-compat-build rust-proof package-check release-check irx9-gate perf-regression-gate cli-smoke doctor mcp-smoke mcp-soak shell-matrix install-smoke package-audit scripts-test perf-persist-gate linux-docker-verify linux-perf-budget
+.PHONY: test readme-command-audit host-path-audit rust-test rust-verify rust-verify-report rust-release-build rust-codemode-build mcp-compat-build rust-proof package-check release-check irx9-gate perf-regression-gate cli-smoke doctor mcp-smoke mcp-soak shell-matrix install-smoke package-audit scripts-test perf-persist-gate perf-never-worse-gate linux-docker-verify linux-perf-budget
 
 MCP_COMPAT_TARGET := $(if $(CARGO_TARGET_DIR),$(CARGO_TARGET_DIR)/mcp-compat,target/mcp-compat)
 MCP_COMPAT_BIN := $(MCP_COMPAT_TARGET)/debug/tokenzero$(if $(filter Windows_NT,$(OS)),.exe,)
@@ -14,6 +14,12 @@ scripts-test:
 # Criterion persist-path regression gate (>25% p50 regression fails).
 perf-persist-gate:
 	@scripts/bench_persist_gate.sh
+
+# Same-surface estimated-token gate. Uses an already-built canonical CLI.
+perf-never-worse-gate:
+	@test -x "$${TOKENZERO_BIN:-target/release/tokenzero}" || { echo "TOKENZERO_BIN must name an existing release binary" >&2; exit 2; }
+	@TOKENZERO_BIN="$${TOKENZERO_BIN:-target/release/tokenzero}" benchmarks/competitor-bakeoff.sh
+	@TOKENZERO_BIN="$${TOKENZERO_BIN:-target/release/tokenzero}" benchmarks/million-line-nav.sh
 
 # Dockerized Linux verification for macOS/Windows contributors.
 linux-docker-verify:

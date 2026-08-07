@@ -53,7 +53,8 @@ log "binary: $BIN"
     if out=$("$@" 2>>/tmp/tz-runall-err.$$.log); then
       printf '%s\n' "$out"
     else
-      printf '_Benchmark failed to run; stderr was captured in the suite log.\n'
+      [[ -n "$out" ]] && printf '%s\n\n' "$out"
+      printf '_Benchmark exited nonzero; partial stdout is retained above and stderr was captured in the suite log.\n'
       printf 'Failure is reported rather than omitted (honesty policy)._\n'
       log "FAILED: $title"
     fi
@@ -91,11 +92,11 @@ PY
     bash "$ROOT/benchmarks/cli-cold-read.sh"
 
   run_section 'Token savings vs alternatives (competitor bake-off)' \
-    'Command: `benchmarks/competitor-bakeoff.sh`. Same corpus, same task, same measurement point per row. Tools that are not installed are marked, never measured warm-vs-cold.' \
+    'Command: `benchmarks/competitor-bakeoff.sh`. Same corpus and captured-stdout surface per task. Every TokenZero/raw pair uses `estimator:bytes-ceil-div4/v1`; this heuristic is not Q99. The grep row is explicitly warm/dedup after one untimed isolated-cache primer. The suite exits nonzero on any never-worse violation.' \
     bash "$ROOT/benchmarks/competitor-bakeoff.sh"
 
   run_section 'Large-repo navigation (million-line synthetic repo)' \
-    'Command: `benchmarks/million-line-nav.sh`. 1000-file synthetic repo with a planted needle; TokenZero vs raw CLI on identical tasks.' \
+    'Command: `benchmarks/million-line-nav.sh`. 1000-file synthetic repo with a planted needle. TokenZero and raw CLI use exact captured stdout bytes and the same `estimator:bytes-ceil-div4/v1`; this heuristic is not Q99. The script exits nonzero on task failure, invalid gate evidence, or any TokenZero row worse than raw.' \
     bash "$ROOT/benchmarks/million-line-nav.sh"
 
   run_section 'CodeMode vs MCP schema cost' \

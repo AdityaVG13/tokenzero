@@ -3,10 +3,11 @@
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"; cd "$ROOT"; H=(python3 "$ROOT/benchmarks/harness.py")
 BIN="$("${H[@]}" resolve_bin)" || { echo "ERROR: tokenzero binary not found. Set TOKENZERO_BIN=/path/to/tokenzero" >&2; exit 1; }; RUNS="${RUNS:-5}"; WARMUP="${WARMUP:-1}"; README="$ROOT/README.md"; CRATES="$ROOT/crates"; PATTERN="pub fn"
-WORK_DIR="$(mktemp -d /tmp/tz-bakeoff.XXXXXX)"; SAMPLE="$WORK_DIR/sample_500.txt"; EDIT_FILE="$WORK_DIR/edit_sample.txt"; GREP_CACHE="$WORK_DIR/grep-cache.json"
+WORK_DIR="$(mktemp -d /tmp/tz-bakeoff.XXXXXX)"; SAMPLE="$WORK_DIR/sample_500.txt"; EDIT_FILE="$WORK_DIR/edit_sample.txt"; GREP_CACHE="$WORK_DIR/grep-cache.json"; NEVER_WORSE_RECEIPT="$WORK_DIR/never-worse.tsv"
 trap 'rm -rf "$WORK_DIR"' EXIT
 log() { printf '[bakeoff] %s\n' "$*" >&2; }; measure() { "${H[@]}" measure_median "$1" "$2" --runs "$RUNS" --warmup "$WARMUP" --prepare "$3"; }
 emit() { printf '| `%s` | `%s` | %s | %s | %s | %s |\n' "$1" "$2" "$3" "$4" "$5" "$6"; }
+declare -A TOKENZERO_BYTES TOKENZERO_UNITS RAW_BYTES RAW_UNITS
 row() {
   local task="$1" tool="$2" cmd="$3" prepare="$4" metrics m b e
   if [[ "$tool" != tokenzero && "$tool" != raw-cli ]] && ! command -v "$tool" >/dev/null 2>&1; then
@@ -17,10 +18,10 @@ row() {
     return 1
   fi
   read -r m b e <<<"$metrics"
-  if [[ "$task" == grep_read && "$tool" == tokenzero ]]; then
-    GREP_TOKENZERO_BYTES="$b"; GREP_TOKENZERO_TOKENS="$e"
-  elif [[ "$task" == grep_read && "$tool" == raw-cli ]]; then
-    GREP_RAW_BYTES="$b"; GREP_RAW_TOKENS="$e"
+  if [[ "$tool" == tokenzero ]]; then
+    TOKENZERO_BYTES["$task"]="$b"; TOKENZERO_UNITS["$task"]="$e"
+  elif [[ "$tool" == raw-cli ]]; then
+    RAW_BYTES["$task"]="$b"; RAW_UNITS["$task"]="$e"
   fi
   if [[ "$b" == 0 ]]; then
     emit "$task" "$tool" "$m" "$b" "$e" "ran but produced no output (arg mismatch with installed version)"
@@ -64,19 +65,28 @@ files_str=""; for file in "${hits[@]}"; do files_str="$files_str $(printf '%q' "
 [[ -n "$files_str" ]] || files_str="$(printf '%q' "$first_rs")"
 log 'priming isolated warm/dedup grep cache outside timing'
 TOKENZERO_CACHE_PATH="$GREP_CACHE" "$BIN" grep 'TokenZero' "$README" >/dev/null
+printf 'schema_version\tnever-worse/v1\nsuite\tcompetitor-bakeoff\nsurface_id\tcaptured-stdout-bytes/v1\nunit_id\testimator:bytes-ceil-div4/v1\ntask\tcandidate_bytes\traw_bytes\tcandidate_units\traw_units\n' > "$NEVER_WORSE_RECEIPT"
 printf '| task | tool | wall_ms | output_bytes | est_tokens | note |\n|---|---|---:|---:|---:|---|\n'
 tools=(tokenzero raw-cli rtk lean-ctx headroom ztk context-mode)
 for task in read_500 grep_read tree_glob_read edit_verify multi_step; do
   for tool in "${tools[@]}"; do row "$task" "$tool" "$(command_for "$task" "$tool")" "$(prepare_for "$task")"; done
 done
-if [[ -z "${GREP_TOKENZERO_TOKENS:-}" || -z "${GREP_RAW_TOKENS:-}" || "$GREP_RAW_TOKENS" -le 0 ]]; then
-  log 'FAILED: missing estimated-token grep comparison'
-  exit 1
-fi
-estimated_saved_tokens=$((GREP_RAW_TOKENS - GREP_TOKENZERO_TOKENS))
-estimated_savings_ppm=$((estimated_saved_tokens * 1000000 / GREP_RAW_TOKENS))
+for task in read_500 grep_read tree_glob_read edit_verify multi_step; do
+  if [[ -z "${TOKENZERO_UNITS[$task]:-}" || -z "${RAW_UNITS[$task]:-}" ]]; then
+    log "FAILED: missing never-worse row for $task"
+    exit 1
+  fi
+  printf '%s\t%s\t%s\t%s\t%s\n' "$task" \
+    "${TOKENZERO_BYTES[$task]}" "${RAW_BYTES[$task]}" \
+    "${TOKENZERO_UNITS[$task]}" "${RAW_UNITS[$task]}" >> "$NEVER_WORSE_RECEIPT"
+done
+printf '\n'
+python3 "$ROOT/benchmarks/never_worse_gate.py" "$NEVER_WORSE_RECEIPT"
+estimated_saved_tokens=$((RAW_UNITS[grep_read] - TOKENZERO_UNITS[grep_read]))
+estimated_savings_ppm=$((estimated_saved_tokens * 1000000 / RAW_UNITS[grep_read]))
 printf '\nEstimated-token comparison (estimator:bytes-ceil-div4/v1; not Q99): candidate=%s bytes/%s estimated tokens; raw-cli baseline=%s bytes/%s estimated tokens; estimated numerator saved=%s tokens; heuristic savings=%s ppm; target >=850000 ppm: %s.\n' \
-  "$GREP_TOKENZERO_BYTES" "$GREP_TOKENZERO_TOKENS" "$GREP_RAW_BYTES" "$GREP_RAW_TOKENS" \
+  "${TOKENZERO_BYTES[grep_read]}" "${TOKENZERO_UNITS[grep_read]}" \
+  "${RAW_BYTES[grep_read]}" "${RAW_UNITS[grep_read]}" \
   "$estimated_saved_tokens" "$estimated_savings_ppm" \
   "$([[ "$estimated_savings_ppm" -ge 850000 ]] && printf PASS || printf FAIL)"
 if [[ "$estimated_savings_ppm" -lt 850000 ]]; then

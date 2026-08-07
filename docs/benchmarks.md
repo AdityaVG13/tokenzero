@@ -56,81 +56,92 @@ Command: `benchmarks/cli-cold-read.sh`. Cold = recovery cache removed per cell; 
 
 ## Token savings vs alternatives (competitor bake-off)
 
-Command: `benchmarks/competitor-bakeoff.sh`. Same corpus, same task, same measurement point per row. Tools that are not installed are marked. The TokenZero `grep_read` row is explicitly warm/dedup: each suite invocation creates a fresh isolated cache and runs one successful primer outside timing and output accounting. Its live full-results blob expands byte-exactly to every returned match line; only redundant per-hit text footers are elided. `estimator:bytes-ceil-div4/v1` maps the exact captured stdout byte counts to `ceil(bytes/4)` heuristic estimates. It is not provider-locked and is not a Q99 receipt. The heuristic raw-CLI baseline is 419 estimated tokens; the candidate is 53, for 366 estimated tokens saved and 873508 ppm against the >=850000 ppm target. Provider-locked Q99-Input certification remains tracked by `tokenzero-5wfr`. For `edit_verify`, `harness.py --prepare` restores the exact 16-byte fixture before every warmup, measured sample, and captured-byte probe; preparation stays outside timing and output accounting. The corrected valid pre-change baseline was 349 bytes / 88 estimated tokens; the old 779 / 195 row exercised an outside-root failure and is not used. Current output is 16 bytes / 4 estimated tokens.
+Command: `benchmarks/competitor-bakeoff.sh`. Same corpus, same task, same measurement point per row. Tools that are not installed are marked. The TokenZero `grep_read` row is explicitly warm/dedup: each suite invocation creates a fresh isolated cache and runs one successful primer outside timing and output accounting. Its live full-results blob expands byte-exactly to every returned match line; only redundant per-hit text footers are elided. `estimator:bytes-ceil-div4/v1` maps the exact captured stdout byte counts to `ceil(bytes/4)` heuristic estimates. It is not provider-locked and is not a Q99 receipt. The heuristic raw-CLI baseline is 419 estimated tokens; the candidate is 53, for 366 estimated tokens saved and 873508 ppm against the >=850000 ppm target. Provider-locked Q99-Input certification remains tracked by `tokenzero-5wfr`. The same-unit never-worse gate passes all five competitor tasks; this is an estimator-labeled engineering gate, not Q99 evidence. For `edit_verify`, `harness.py --prepare` restores the exact 16-byte fixture before every warmup, measured sample, and captured-byte probe; preparation stays outside timing and output accounting. The corrected valid pre-change baseline was 349 bytes / 88 estimated tokens; the old 779 / 195 row exercised an outside-root failure and is not used. Current output is 16 bytes / 4 estimated tokens.
 
 | task | tool | wall_ms | output_bytes | est_tokens | note |
 |---|---|---:|---:|---:|---|
-| `read_500` | `tokenzero` | 57 | 95 | 24 |  |
-| `read_500` | `raw-cli` | 4 | 23267 | 5817 |  |
+| `read_500` | `tokenzero` | 19 | 95 | 24 |  |
+| `read_500` | `raw-cli` | 3 | 23342 | 5836 |  |
 | `read_500` | `rtk` | - | - | - | not installed |
 | `read_500` | `lean-ctx` | - | - | - | not installed |
 | `read_500` | `headroom` | - | - | - | not installed |
-| `read_500` | `ztk` | 6 | 0 | 0 | ran but produced no output (arg mismatch with installed version) |
+| `read_500` | `ztk` | 5 | 0 | 0 | ran but produced no output (arg mismatch with installed version) |
 | `read_500` | `context-mode` | - | - | - | not installed |
-| `grep_read` | `tokenzero` | 9 | 210 | 53 | warm/dedup; `estimator:bytes-ceil-div4/v1` |
-| `grep_read` | `raw-cli` | 3 | 1676 | 419 | `estimator:bytes-ceil-div4/v1` baseline |
+| `grep_read` | `tokenzero` | 9 | 210 | 53 | warm/dedup; estimator:bytes-ceil-div4/v1 candidate |
+| `grep_read` | `raw-cli` | 3 | 1676 | 419 | estimator:bytes-ceil-div4/v1 raw baseline |
 | `grep_read` | `rtk` | - | - | - | not installed |
 | `grep_read` | `lean-ctx` | - | - | - | not installed |
 | `grep_read` | `headroom` | - | - | - | not installed |
-| `grep_read` | `ztk` | 6 | 0 | 0 | ran but produced no output (arg mismatch with installed version) |
+| `grep_read` | `ztk` | 5 | 0 | 0 | ran but produced no output (arg mismatch with installed version) |
 | `grep_read` | `context-mode` | - | - | - | not installed |
-| `tree_glob_read` | `tokenzero` | 212 | 2218 | 555 |  |
-| `tree_glob_read` | `raw-cli` | 65 | 41966 | 10492 |  |
+| `tree_glob_read` | `tokenzero` | 144 | 2352 | 588 |  |
+| `tree_glob_read` | `raw-cli` | 46 | 47700 | 11925 |  |
 | `tree_glob_read` | `rtk` | - | - | - | not installed |
 | `tree_glob_read` | `lean-ctx` | - | - | - | not installed |
 | `tree_glob_read` | `headroom` | - | - | - | not installed |
-| `tree_glob_read` | `ztk` | 14 | 0 | 0 | ran but produced no output (arg mismatch with installed version) |
+| `tree_glob_read` | `ztk` | 9 | 0 | 0 | ran but produced no output (arg mismatch with installed version) |
 | `tree_glob_read` | `context-mode` | - | - | - | not installed |
-| `edit_verify` | `tokenzero` | 170 | 16 | 4 |  |
+| `edit_verify` | `tokenzero` | 109 | 16 | 4 |  |
 | `edit_verify` | `raw-cli` | 7 | 16 | 4 |  |
 | `edit_verify` | `rtk` | - | - | - | not installed |
 | `edit_verify` | `lean-ctx` | - | - | - | not installed |
 | `edit_verify` | `headroom` | - | - | - | not installed |
-| `edit_verify` | `ztk` | 9 | 0 | 0 | ran but produced no output (arg mismatch with installed version) |
+| `edit_verify` | `ztk` | 7 | 0 | 0 | ran but produced no output (arg mismatch with installed version) |
 | `edit_verify` | `context-mode` | - | - | - | not installed |
-| `multi_step` | `tokenzero` | 407 | 1769 | 443 |  |
-| `multi_step` | `raw-cli` | 22 | 111324 | 27831 |  |
+| `multi_step` | `tokenzero` | 202 | 1011 | 253 |  |
+| `multi_step` | `raw-cli` | 19 | 102543 | 25636 |  |
 | `multi_step` | `rtk` | - | - | - | not installed |
 | `multi_step` | `lean-ctx` | - | - | - | not installed |
 | `multi_step` | `headroom` | - | - | - | not installed |
-| `multi_step` | `ztk` | 14 | 0 | 0 | ran but produced no output (arg mismatch with installed version) |
+| `multi_step` | `ztk` | 11 | 0 | 0 | ran but produced no output (arg mismatch with installed version) |
 | `multi_step` | `context-mode` | - | - | - | not installed |
+
+## Never-worse estimated-token budget assertion
+
+Suite: `competitor-bakeoff`. Surface: `captured-stdout-bytes/v1`. Unit: `estimator:bytes-ceil-div4/v1`. This is a heuristic estimate, not Q99.
+
+| task | TokenZero bytes | raw-cli bytes | TokenZero est_tokens | raw-cli est_tokens | delta | result |
+|---|---:|---:|---:|---:|---:|---|
+| `read_500` | 95 | 23342 | 24 | 5836 | 5812 | **PASS** |
+| `grep_read` | 210 | 1676 | 53 | 419 | 366 | **PASS** |
+| `tree_glob_read` | 2352 | 47700 | 588 | 11925 | 11337 | **PASS** |
+| `edit_verify` | 16 | 16 | 4 | 4 | 0 | **PASS** |
+| `multi_step` | 1011 | 102543 | 253 | 25636 | 25383 | **PASS** |
+
+> **Result: PASS** -- every TokenZero row must be <= its same-task raw-cli baseline in `estimator:bytes-ceil-div4/v1` units.
+
+Estimated-token comparison (estimator:bytes-ceil-div4/v1; not Q99): candidate=210 bytes/53 estimated tokens; raw-cli baseline=1676 bytes/419 estimated tokens; estimated numerator saved=366 tokens; heuristic savings=873508 ppm; target >=850000 ppm: PASS.
 
 ## Large-repo navigation (million-line synthetic repo)
 
-Command: `benchmarks/million-line-nav.sh`. 1000-file synthetic repo with a planted needle; TokenZero vs raw CLI on identical tasks.
+Command: `benchmarks/million-line-nav.sh`. The 1000-file synthetic repository uses exact captured stdout bytes on both TokenZero and raw surfaces with `estimator:bytes-ceil-div4/v1`; this heuristic is not Q99. Task errors and malformed receipts fail before authorization. The current run exits nonzero because three TokenZero rows are worse than raw; the gate retains the failure instead of publishing a false pass.
 
-done
-| # | Task | Tool | visible_tokens | raw_tokens | wall_ms | output_bytes | notes |
-|---|------|------|---:|---:|---:|---:|------|
-| A | `read_50_lines` | `tokenzero` | 250 | 250 | 168 | — |  |
-| A | `read_50_lines` | `raw-cli` | — | — | 60 | 2500 | head -n 50 |
-| B | `grep_expand` | `tokenzero` | 276 | 370 | 1235 | — | find+expand |
-| B | `grep_expand` | `raw-cli` | — | — | 305 | 2420 | grep -rn | head -20 |
-| C | `tree_glob_read` | `tokenzero` | 265 | 640 | 963 | — | tree+glob+read |
-| C | `tree_glob_read` | `raw-cli` | — | — | 76 | 3634 | find+find+head |
-| D | `grep_expand_edit_verify` | `tokenzero` | 71 | 152 | 1454 | — | 4-step |
-| D | `grep_expand_edit_verify` | `raw-cli` | — | — | 71 | 258 | grep+sed+sed |
-| E | `recall` | `tokenzero` | 487 | 487 | 118 | — | cache search |
-| E | `recall` | `raw-cli` | — | — | 290 | 1210 | grep -rn | head -10 |
+| # | Task | Tool | est_tokens | wall_ms | output_bytes | notes |
+|---|------|------|---:|---:|---:|------|
+| A | `read_50_lines` | `tokenzero` | 82 | 340 | 326 |  |
+| A | `read_50_lines` | `raw-cli` | 625 | 43 | 2500 | head -n 50 |
+| B | `grep_expand` | `tokenzero` | 1466 | 240 | 5862 | find+expand |
+| B | `grep_expand` | `raw-cli` | 605 | 224 | 2420 | grep -rn | first 20 |
+| C | `tree_glob_read` | `tokenzero` | 473 | 340 | 1891 | tree+glob+read |
+| C | `tree_glob_read` | `raw-cli` | 909 | 58 | 3634 | find+find+head |
+| D | `grep_expand_edit_verify` | `tokenzero` | 345 | 504 | 1378 | 4-step |
+| D | `grep_expand_edit_verify` | `raw-cli` | 65 | 48 | 258 | grep+sed+sed |
+| E | `recall` | `tokenzero` | 456 | 71 | 1823 | cache search |
+| E | `recall` | `raw-cli` | 303 | 228 | 1210 | grep -rn | first 10 |
 
-## Budget assertion
+## Never-worse estimated-token budget assertion
 
-| Metric | Value |
-|--------|-------|
-| Total visible_tokens (all 5 tasks) | 1349 |
-| Context budget | 32000 |
-| Remaining headroom | 30651 |
-| Utilization | 4.2% |
+Suite: `million-line-nav`. Surface: `captured-stdout-bytes/v1`. Unit: `estimator:bytes-ceil-div4/v1`. This is a heuristic estimate, not Q99.
 
-> **Result: PASS** — all 5 navigation tasks fit within the 32k context budget.
+| task | TokenZero bytes | raw-cli bytes | TokenZero est_tokens | raw-cli est_tokens | delta | result |
+|---|---:|---:|---:|---:|---:|---|
+| `read_50_lines` | 326 | 2500 | 82 | 625 | 543 | **PASS** |
+| `grep_expand` | 5862 | 2420 | 1466 | 605 | -861 | **FAIL** |
+| `tree_glob_read` | 1891 | 3634 | 473 | 909 | 436 | **PASS** |
+| `grep_expand_edit_verify` | 1378 | 258 | 345 | 65 | -280 | **FAIL** |
+| `recall` | 1823 | 1210 | 456 | 303 | -153 | **FAIL** |
 
-## Quality criteria
-
-- **Byte-exact recovery**: every `expand` call recovers the exact bytes of the original content (verified by ref checksums).
-- **All tasks succeed**: each navigation task completes without error (exit code 0).
-- **No content loss**: compact capsules hide raw content behind refs, but nothing is discarded — every byte is recoverable.
-- **Edit integrity**: the multi-step edit produces a valid file with the replacement applied (verified by read-back).
+> **Result: FAIL** -- every TokenZero row must be <= its same-task raw-cli baseline in `estimator:bytes-ceil-div4/v1` units.
 
 ## CodeMode vs MCP schema cost
 
