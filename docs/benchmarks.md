@@ -145,3 +145,37 @@ Command: `benchmarks/code-exec-vs-mcp-bakeoff.sh`. Identical tasks executed via 
 | `shell_expand` | `CodeMode` | 39 | 5 | 2 | 5686 | PASS |
 
 _Legend: quality = PASS/FAIL for executed approaches; `simulated` = MCP schema load only (no task execution)._
+
+## Three-mode output frontier (full file vs diff vs ZEP/1)
+
+Command:
+
+```sh
+python3 benchmarks/three_mode_output.py \
+  --lbi <locked-lbi.json> \
+  --tasks <locked-tasks.json> \
+  --trials <raw-trials.jsonl> \
+  --out <report.json>
+```
+
+This harness has no committed performance result. It validates raw trials from a
+provider run and makes no fixture-only product, speed, savings, or release claim.
+See `benchmarks/three-mode-output/README.md` for the schemas.
+
+Before trials, the Z7 locked benchmark identity pins the model, decoder,
+tokenizer, snapshots, tasks, tool/effect interfaces, verifier, hardware, setup,
+index, fallback, timeout, resources, accounting, pricing, seeds, exclusions,
+and statistical rule. Every task runs all three output modes under both `cold`
+and `retained` cache states with the same seeds.
+
+The report retains every primary, repair, failed, and fallback raw output. It
+publishes explicit trial/success/failure/fallback denominators, provider usage,
+repair-round output, exact artifact and action sizes, fresh backend work,
+integer micro-USD cost, and verifier receipts. Each scalar is labeled `exact`,
+`estimated`, `billed`, or `absent`; absent usage is never coerced to zero.
+
+`eta_action_ppm` is the active fresh-work ratio from
+`fresh-work-vector-v1`. `action_to_artifact_ppm` is the separate output-frontier
+ratio. A verdict is only `supported_on_locked_suite`,
+`falsified_on_locked_suite`, or `insufficient_locked_scales`. None is a release
+claim.
