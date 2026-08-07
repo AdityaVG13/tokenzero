@@ -61,22 +61,142 @@ pub(crate) fn windows_path_with_tokenzero_bin(_: &Path, previous: Option<&str>) 
     previous.unwrap_or_default().to_string()
 }
 
+#[cfg(any(windows, test))]
+const USER_ENVIRONMENT_QUERY_HEADER: &str = "HKEY_CURRENT_USER\\Environment";
+
+#[cfg(any(windows, test))]
+fn parse_windows_environment_path(stdout: &[u8]) -> std::io::Result<Option<String>> {
+    let text = std::str::from_utf8(stdout).map_err(|error| {
+        Error::new(
+            ErrorKind::InvalidData,
+            format!("reg query output is not valid UTF-8: {error}"),
+        )
+    })?;
+    if !text.ends_with('\n') {
+        return Err(Error::new(
+            ErrorKind::InvalidData,
+            "reg query output is truncated before its final line ending",
+        ));
+    }
+    let mut saw_header = false;
+    let mut path = None;
+    for line in text.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        if !saw_header {
+            if line.starts_with(char::is_whitespace)
+                || !trimmed.eq_ignore_ascii_case(USER_ENVIRONMENT_QUERY_HEADER)
+            {
+                return Err(Error::new(
+                    ErrorKind::InvalidData,
+                    "reg query output is missing the expected HKCU Environment header",
+                ));
+            }
+            saw_header = true;
+            continue;
+        }
+        if trimmed.eq_ignore_ascii_case(USER_ENVIRONMENT_QUERY_HEADER) {
+            return Err(Error::new(
+                ErrorKind::InvalidData,
+                "reg query returned a duplicate HKCU Environment header",
+            ));
+        }
+        if !line.starts_with(char::is_whitespace) {
+            return Err(Error::new(
+                ErrorKind::InvalidData,
+                "reg query returned an unrecognized non-indented row",
+            ));
+        }
+
+        let mut cursor = 0usize;
+        let mut kind_span = None;
+        for token in trimmed.split_whitespace() {
+            let relative = trimmed[cursor..].find(token).ok_or_else(|| {
+                Error::new(
+                    ErrorKind::InvalidData,
+                    "reg query row token boundaries are malformed",
+                )
+            })?;
+            let start = cursor + relative;
+            let end = start + token.len();
+            if token.starts_with("REG_") {
+                kind_span = Some((start, end));
+                break;
+            }
+            cursor = end;
+        }
+        let (kind_start, kind_end) = kind_span.ok_or_else(|| {
+            Error::new(
+                ErrorKind::InvalidData,
+                "reg query row is missing a registry value type",
+            )
+        })?;
+        let name = trimmed[..kind_start].trim_end();
+        let kind = &trimmed[kind_start..kind_end];
+        if name.is_empty()
+            || kind.len() == "REG_".len()
+            || !kind
+                .bytes()
+                .all(|byte| byte.is_ascii_uppercase() || byte.is_ascii_digit() || byte == b'_')
+        {
+            return Err(Error::new(
+                ErrorKind::InvalidData,
+                "reg query row has an invalid value name or type",
+            ));
+        }
+        if !name.eq_ignore_ascii_case("Path") {
+            continue;
+        }
+        if path.is_some() {
+            return Err(Error::new(
+                ErrorKind::InvalidData,
+                "reg query returned duplicate user Path values",
+            ));
+        }
+        if !matches!(kind, "REG_EXPAND_SZ" | "REG_SZ") {
+            return Err(Error::new(
+                ErrorKind::InvalidData,
+                format!("reg query returned unsupported user Path type {kind:?}"),
+            ));
+        }
+        path = Some(trimmed[kind_end..].trim_start().to_string());
+    }
+    if !saw_header {
+        return Err(Error::new(
+            ErrorKind::InvalidData,
+            "reg query output is empty; user Path absence was not established",
+        ));
+    }
+    Ok(path)
+}
+
 #[cfg(windows)]
 pub(crate) fn windows_user_path() -> std::io::Result<Option<String>> {
+    // Query the whole key: a successful command with no Path row means the
+    // value is genuinely absent. Any command/access failure stays distinct and
+    // must abort before a replacement value can be computed.
     let output = Command::new("reg")
-        .args(["query", USER_ENVIRONMENT, "/v", "Path"])
+        .args(["query", USER_ENVIRONMENT])
         .output()?;
     if !output.status.success() {
-        return Ok(None);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let detail = stderr.trim().chars().take(512).collect::<String>();
+        return Err(Error::other(format!(
+            "reg query HKCU\\Environment failed with status {}; refusing to modify user Path{}{}",
+            output.status,
+            if detail.is_empty() { "" } else { ": " },
+            detail,
+        )));
     }
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    Ok(stdout.lines().map(str::trim_start).find_map(|line| {
-        let rest = line.strip_prefix("Path")?.trim_start();
-        ["REG_EXPAND_SZ", "REG_SZ"].into_iter().find_map(|kind| {
-            rest.strip_prefix(kind)
-                .map(|value| value.trim_start().to_owned())
-        })
-    }))
+    if output.stderr.iter().any(|byte| !byte.is_ascii_whitespace()) {
+        return Err(Error::new(
+            ErrorKind::InvalidData,
+            "reg query succeeded with unexpected stderr; refusing to modify user Path",
+        ));
+    }
+    parse_windows_environment_path(&output.stdout)
 }
 
 #[cfg(not(windows))]
@@ -128,6 +248,85 @@ pub(crate) fn delete_windows_user_path() -> std::io::Result<()> {
 #[cfg(not(windows))]
 pub(crate) fn delete_windows_user_path() -> std::io::Result<()> {
     Ok(())
+}
+
+#[cfg(test)]
+mod parse_tests {
+    use super::*;
+
+    #[test]
+    fn full_environment_query_distinguishes_absent_path() {
+        for output in [
+            b"HKEY_CURRENT_USER\\Environment\r\n".as_slice(),
+            b"HKEY_CURRENT_USER\\Environment\r\n    TEMP    REG_EXPAND_SZ    %USERPROFILE%\\Temp\r\n    Some Value    REG_DWORD    0x1\r\n"
+                .as_slice(),
+        ] {
+            assert_eq!(parse_windows_environment_path(output).unwrap(), None);
+        }
+    }
+
+    #[test]
+    fn full_environment_query_parses_supported_path_types_without_losing_spaces() {
+        for (kind, value) in [
+            (
+                "REG_EXPAND_SZ",
+                "C:\\Program Files\\Tool;%USERPROFILE%\\bin",
+            ),
+            ("REG_SZ", "C:\\Program Files\\Literal"),
+        ] {
+            let output =
+                format!("HKEY_CURRENT_USER\\Environment\r\n    Path    {kind}    {value}\r\n");
+            assert_eq!(
+                parse_windows_environment_path(output.as_bytes())
+                    .unwrap()
+                    .as_deref(),
+                Some(value)
+            );
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn native_query_matches_the_fail_closed_parser() {
+        let direct = Command::new("reg")
+            .args(["query", USER_ENVIRONMENT])
+            .output()
+            .unwrap();
+        let observed = windows_user_path();
+        if direct.status.success() {
+            assert_eq!(
+                observed.unwrap(),
+                parse_windows_environment_path(&direct.stdout).unwrap()
+            );
+        } else {
+            assert!(
+                observed.is_err(),
+                "a native reg query failure must not become an absent user Path"
+            );
+        }
+    }
+
+    #[test]
+    fn malformed_or_ambiguous_output_fails_closed() {
+        for output in [
+            b"garbage\r\n".as_slice(),
+            b"HKEY_CURRENT_USER\\Environmen\r\n".as_slice(),
+            b"HKEY_CURRENT_USER\\Environment".as_slice(),
+            b"HKEY_CURRENT_USER\\Environment\r\nnot-indented\r\n".as_slice(),
+            b"HKEY_CURRENT_USER\\Environment\r\n    TEMP\r\n".as_slice(),
+            b"HKEY_CURRENT_USER\\Environment\r\n    Path    REG_MULTI_SZ    C:\\bad\r\n"
+                .as_slice(),
+            b"HKEY_CURRENT_USER\\Environment\r\n    Path    REG_SZ    C:\\one\r\n    Path    REG_SZ    C:\\two\r\n"
+                .as_slice(),
+            b"HKEY_CURRENT_USER\\Environment\r\n    Path\r\n".as_slice(),
+            &[0xff][..],
+        ] {
+            assert!(
+                parse_windows_environment_path(output).is_err(),
+                "malformed registry output must not become an absent Path: {output:?}"
+            );
+        }
+    }
 }
 
 #[cfg(all(test, not(windows)))]

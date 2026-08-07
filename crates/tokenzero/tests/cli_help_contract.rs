@@ -488,6 +488,14 @@ fn cli_install_smoke_defaults_to_plan_and_gates_apply() {
     assert!(planned["rollback"].is_null());
     assert_eq!(planned["artifact_write_requested"], false);
     assert_eq!(planned["global_writes"], false);
+    assert_eq!(planned["status"], "ok");
+    assert_eq!(planned["ok"], true);
+    assert_eq!(planned["checks"]["plan_observed"], true);
+    assert_eq!(planned["checks"]["planned_writes_local"], true);
+    assert_eq!(planned["checks"]["planned_root_unchanged"], true);
+    assert_eq!(planned["checks"]["transition_observed"], true);
+    assert!(planned["checks"]["apply_observed"].is_null());
+    assert!(planned["checks"]["applied_targets_observed"].is_null());
     assert!(
         !work.path().join("results").exists(),
         "default install-smoke must not write an artifact tree"
@@ -511,6 +519,18 @@ fn cli_install_smoke_defaults_to_plan_and_gates_apply() {
     assert!(!applied["rollback"].is_null());
     assert_eq!(applied["artifact_write_requested"], false);
     assert_eq!(applied["global_writes"], false);
+    assert_eq!(applied["status"], "ok");
+    assert_eq!(applied["ok"], true);
+    assert_eq!(applied["checks"]["plan_observed"], true);
+    assert_eq!(applied["checks"]["apply_observed"], true);
+    assert_eq!(applied["checks"]["applied_targets_observed"], true);
+    assert_eq!(applied["checks"]["rollback_observed"], true);
+    assert_eq!(
+        applied["checks"]["restoration_scope"],
+        "planned_target_bytes_and_presence"
+    );
+    assert_eq!(applied["checks"]["exact_restoration_observed"], true);
+    assert_eq!(applied["checks"]["transition_observed"], true);
     assert!(!work.path().join("results").exists());
 }
 

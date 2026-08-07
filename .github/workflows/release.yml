@@ -146,6 +146,12 @@ jobs:
           cargo build -p tokenzero --locked --release --target "${{ matrix.target }}" \
             --bin tokenzero-codemode --no-default-features --features surface-codemode
 
+      # package-audit inspects bytes and need not execute the cross target. Build
+      # one host-native auditor so every matrix row can gate its exact archive.
+      - name: Build native package auditor
+        shell: bash
+        run: cargo build -p tokenzero --locked --release --bin tokenzero
+
       # Fail the release rather than publish a surface-incomplete archive.
       - name: Verify both surface artifacts exist
         shell: bash
@@ -169,7 +175,35 @@ jobs:
           # Ship both surface artifacts; the user installs one of them.
           cp "$rel/tokenzero-mcp" "$rel/tokenzero-codemode" "dist/$name/"
           cp README.md LICENSE "dist/$name/"
-          tar -C dist -czf "dist/$name.tar.gz" "$name"
+          # Build a deterministic USTAR archive without host owner/xattr/PAX
+          # metadata. The exact bytes produced here are audited below and then
+          # uploaded without repacking.
+          python3 - "$name" <<'PY'
+          import gzip
+          import pathlib
+          import sys
+          import tarfile
+
+          name = sys.argv[1]
+          dist = pathlib.Path("dist")
+          source = dist / name
+          archive = dist / f"{name}.tar.gz"
+          with archive.open("wb") as raw:
+              with gzip.GzipFile(filename="", mode="wb", fileobj=raw, mtime=0) as compressed:
+                  with tarfile.open(fileobj=compressed, mode="w", format=tarfile.USTAR_FORMAT) as bundle:
+                      for path in [source, *sorted(source.rglob("*"))]:
+                          info = bundle.gettarinfo(str(path), arcname=str(path.relative_to(dist)))
+                          info.uid = 0
+                          info.gid = 0
+                          info.uname = "root"
+                          info.gname = "root"
+                          info.mtime = 0
+                          if path.is_file():
+                              with path.open("rb") as payload:
+                                  bundle.addfile(info, payload)
+                          else:
+                              bundle.addfile(info)
+          PY
           shasum -a 256 "dist/$name.tar.gz" > "dist/$name.tar.gz.sha256"
       - name: Package Windows artifact
         if: ${{ runner.os == 'Windows' }}
@@ -185,6 +219,39 @@ jobs:
           Compress-Archive -Path "dist\$name" -DestinationPath "dist\$name.zip" -Force
           $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath "dist\$name.zip").Hash.ToLowerInvariant()
           "$hash  $name.zip" | Set-Content -NoNewline -Encoding utf8 -Path "dist\$name.zip.sha256"
+
+      - name: Audit exact Unix release archive and checksum
+        if: ${{ runner.os != 'Windows' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          archives=(dist/*.tar.gz)
+          test "${#archives[@]}" -eq 1 || { echo "expected one packaged archive" >&2; exit 1; }
+          archive="${archives[0]}"
+          checksum="$archive.sha256"
+          expected="$(awk '{print tolower($1)}' "$checksum")"
+          actual="$(shasum -a 256 "$archive" | awk '{print tolower($1)}')"
+          test "$actual" = "$expected" || { echo "release checksum mismatch" >&2; exit 1; }
+          report="$(target/release/tokenzero package-audit --dist "$archive" --json)"
+          printf '%s\n' "$report"
+          printf '%s' "$report" | python3 -c             'import json,sys; doc=json.load(sys.stdin); assert doc.get("ok") is True, doc'
+
+      - name: Audit exact Windows release archive and checksum
+        if: ${{ runner.os == 'Windows' }}
+        shell: pwsh
+        run: |
+          $archives = @(Get-ChildItem -LiteralPath dist -Filter *.zip -File)
+          if ($archives.Count -ne 1) { throw "expected one packaged archive" }
+          $archive = $archives[0].FullName
+          $checksum = "$archive.sha256"
+          $expected = ((Get-Content -Raw -LiteralPath $checksum) -split '\s+')[0].ToLowerInvariant()
+          $actual = (Get-FileHash -Algorithm SHA256 -LiteralPath $archive).Hash.ToLowerInvariant()
+          if ($actual -ne $expected) { throw "release checksum mismatch" }
+          $report = (& target\release\tokenzero.exe package-audit --dist $archive --json | Out-String)
+          $report
+          $document = $report | ConvertFrom-Json
+          if ($document.ok -ne $true) { throw "package-audit rejected exact release archive" }
+
       - uses: actions/upload-artifact@v4
         with:
           name: tokenzero-${{ inputs.tag }}-${{ matrix.target }}

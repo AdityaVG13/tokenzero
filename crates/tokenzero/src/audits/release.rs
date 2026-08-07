@@ -373,35 +373,120 @@ pub(crate) fn run_ws_skeleton(output_json: PathBuf, output_md: Option<PathBuf>) 
     finish!(output_json, output_md, report, "WS-001 walking skeleton")
 }
 
+fn filesystem_entry_is_absent(path: &Path) -> bool {
+    matches!(
+        fs::symlink_metadata(path),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound
+    )
+}
+
 pub(crate) fn run_install_smoke(output_json: Option<PathBuf>, apply: bool) -> Result<Json> {
     let temp = tempdir()?;
     let root = temp.path();
-    fs::write(root.join("AGENTS.md"), "original\n")?;
+    let agents = root.join("AGENTS.md");
+    let original_agents = b"original\n";
+    fs::write(&agents, original_agents)?;
     let plan = install::plan(root, false, &[]);
-    let (applied, rollback) = if apply {
-        (
-            Some(install::apply(root, false, &[])?),
-            Some(install::rollback(root, "latest")?),
-        )
+
+    let planned_paths = plan
+        .writes
+        .iter()
+        .map(|write| PathBuf::from(&write.path))
+        .collect::<Vec<_>>();
+    let planned_writes_local = planned_paths.iter().all(|path| path.starts_with(root));
+    let global_writes = plan.global_writes_allowed || plan.writes.iter().any(|write| write.global);
+    let planned_root_unchanged = fs::read(&agents).ok().as_deref() == Some(original_agents)
+        && planned_paths
+            .iter()
+            .filter(|path| **path != agents)
+            .all(|path| filesystem_entry_is_absent(path));
+    let plan_observed = plan.status == "planned"
+        && plan.dry_run
+        && !plan.writes.is_empty()
+        && !global_writes
+        && planned_writes_local
+        && planned_root_unchanged;
+
+    let (applied, applied_targets_observed, rollback) = if apply {
+        let result = install::apply(root, false, &[])?;
+        let targets_observed = result.verification.len() == planned_paths.len()
+            && planned_paths.iter().all(|path| {
+                result
+                    .verification
+                    .iter()
+                    .filter(|row| Path::new(&row.path) == path)
+                    .count()
+                    == 1
+            })
+            && result.verification.iter().all(|row| {
+                let Ok(bytes) = fs::read(&row.path) else {
+                    return false;
+                };
+                let Ok(text) = std::str::from_utf8(&bytes) else {
+                    return false;
+                };
+                row.verified
+                    && row.byte_count == bytes.len()
+                    && row.observed_sha256 == tokenzero_core::sha256_hex(text)
+            });
+        let rollback = install::rollback(root, "latest")?;
+        (Some(result), Some(targets_observed), Some(rollback))
     } else {
-        (None, None)
+        (None, None, None)
     };
+
+    let apply_observed = applied.as_ref().is_some_and(|result| {
+        result.status == "ok"
+            && !result.dry_run
+            && !result.written.is_empty()
+            && applied_targets_observed == Some(true)
+    });
+    let rollback_observed = rollback
+        .as_ref()
+        .is_some_and(|result| result["status"] == "ok");
+    let exact_restoration_observed = fs::read(&agents).ok().as_deref() == Some(original_agents)
+        && planned_paths
+            .iter()
+            .filter(|path| **path != agents)
+            .all(|path| filesystem_entry_is_absent(path));
+    let transition_observed = if apply {
+        apply_observed && rollback_observed && exact_restoration_observed
+    } else {
+        applied.is_none() && rollback.is_none() && planned_root_unchanged
+    };
+    let ok = plan_observed && transition_observed;
     let artifact_write_requested = output_json.is_some();
     let report = object!({
         "schema_version": "tokenzero.install_smoke.v1",
-        "status": "ok",
-        "ok": true,
+        "status": if ok { "ok" } else { "blocked" },
+        "ok": ok,
         "mode": if apply { "apply_and_rollback" } else { "plan" },
         "apply_requested": apply,
         "scope": "disposable_temporary_root",
         "plan": plan,
         "applied": applied,
         "rollback": rollback,
+        "checks": {
+            "plan_observed": plan_observed,
+            "planned_writes_local": planned_writes_local,
+            "planned_root_unchanged": planned_root_unchanged,
+            "apply_observed": if apply { Some(apply_observed) } else { None },
+            "applied_targets_observed": applied_targets_observed,
+            "rollback_observed": if apply { Some(rollback_observed) } else { None },
+            "restoration_scope": "planned_target_bytes_and_presence",
+            "exact_restoration_observed": if apply { Some(exact_restoration_observed) } else { None },
+            "transition_observed": transition_observed,
+        },
         "artifact_write_requested": artifact_write_requested,
-        "global_writes": false,
+        "global_writes": global_writes,
     });
     if let Some(o) = output_json {
         write_artifacts(&o, None, &report, "Rust install smoke")?;
+    }
+    if !ok {
+        return Err(anyhow::anyhow!(
+            "install smoke observations did not prove the requested plan/apply/rollback transition"
+        ));
     }
     Ok(report)
 }
@@ -444,6 +529,26 @@ pub(crate) fn write_artifacts(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn filesystem_entry_absence_distinguishes_missing_from_existing() {
+        let temp = tempdir().unwrap();
+        let path = temp.path().join("entry");
+        assert!(filesystem_entry_is_absent(&path));
+        fs::write(&path, b"present").unwrap();
+        assert!(!filesystem_entry_is_absent(&path));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn filesystem_entry_absence_rejects_dangling_symlink() {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempdir().unwrap();
+        let path = temp.path().join("dangling");
+        symlink(temp.path().join("missing-target"), &path).unwrap();
+        assert!(!filesystem_entry_is_absent(&path));
+    }
 
     #[test]
     fn failure_diagnosis_requires_failed_command_telemetry() {
