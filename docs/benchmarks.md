@@ -9,7 +9,7 @@ real run of the command shown; re-run the suite yourself to reproduce.
 - commit: 687bda1
 - machine: Darwin 25.5.0 arm64
 - chip: Apple M5 Max
-- tokenzero: `/Users/aditya/AI/TokenZero/target/release/tokenzero` (tokenzero 1.4.0)
+- tokenzero: `${TOKENZERO_ROOT}/target/release/tokenzero` (tokenzero 1.4.0)
 - tokenzero-codemode: `target/release/tokenzero-codemode` (built from this commit)
 - rtk: not installed (rows report `not installed`, never fabricated)
 - lean-ctx: not installed (rows report `not installed`, never fabricated)

@@ -43,7 +43,7 @@ ALLOWLIST_FILES: dict[str, str] = {
 }
 
 # Line-scoped allowlist: host-path lines are OK only when they match a doc pattern.
-# Real username paths (e.g. /Users/aditya/...) must not match these.
+# Real username paths (e.g. ${HOME}/...) must not match these.
 ALLOWLIST_LINE_RES: dict[str, list[re.Pattern[str]]] = {
     "AGENTS.md": [
         # Privacy check recipe listing scan strings (not a personal path).
@@ -64,7 +64,7 @@ ALLOWLIST_LINE_RES: dict[str, list[re.Pattern[str]]] = {
         re.compile(r'C:\\Users\\x\\proj'),
     ],
     "docs/benchmarks.md": [
-        re.compile(r'/Users/aditya/AI/TokenZero/target/release/tokenzero'),
+        re.compile(r'${TOKENZERO_ROOT}/target/release/tokenzero'),
     ],
     "docs/install.md": [
         re.compile(r'/Users/you/AI/tokenzero/target/release/tokenzero'),

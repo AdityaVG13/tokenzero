@@ -158,24 +158,7 @@ NDH6SA~M
 !/scripts/test_windows_migrate_restore.py
 .code-upgrade/
 
-# --- Beads runtime (track issues.jsonl; ignore everything else local) ---
 .bv/
-.beads/*.db
-.beads/*.db-*
-.beads/dolt*
-.beads/beads.base.jsonl
-.beads/.*.lock
-.beads/backup/
-.beads/embeddeddolt/
-.beads/.br_history/
-.beads/.fszero/
-.beads/.auto-import-issues.jsonl
-.beads/.local_version
-.beads/interactions.jsonl
-.beads/metadata.json
-.beads/config.yaml
-.beads/.gitignore
-.beads/*.bak*
 
 # --- Local agent / tool workspaces ---
 .cargo/
@@ -213,3 +196,7 @@ _tmp_*
 /beads_compliance_audit/
 /fuzz/artifacts/
 /fuzz/corpus/
+
+# --- Beads (local only; never publish tracker state) ---
+.beads/
+.bv/
