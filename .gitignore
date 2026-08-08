@@ -200,3 +200,6 @@ _tmp_*
 # --- Beads (local only; never publish tracker state) ---
 .beads/
 .bv/
+!/scripts/check_no_host_paths.py
+!/scripts/irx9_release_gate.sh
+!/scripts/scrub_beads_export.py
