@@ -978,6 +978,59 @@ fn advertised_capabilities_and_limits_are_behaviorally_true() {
     drop(bound);
 }
 
+/// 9lwo: the advertised `max_output_bytes` limit is enforced, not decorative.
+/// A call whose serialized `result.value` exceeds the cap is rejected with a
+/// typed, correlated error naming the limit and sizes; no oversized result
+/// leaks, and the worker stays live for subsequent calls.
+#[test]
+fn oversized_result_value_is_rejected_and_no_oversized_result_leaks() {
+    let dir = tempdir().unwrap();
+    let big = "x".repeat(70_000);
+    fs::write(dir.path().join("big.txt"), &big).unwrap();
+    let cap = probe_surface_capability();
+    let mut bound = spawn_bound(dir.path(), "s-oversize", &cap);
+
+    let trace = trace_for("req-oversize", &bound.revision, &bound.contract);
+    bound.worker.send(&call_frame(
+        "req-oversize",
+        "read",
+        json!({
+            "path": dir.path().join("big.txt").display().to_string(),
+            "raw": true,
+            "max_visible_tokens": 1_000_000
+        }),
+        None,
+        trace,
+    ));
+    let response = bound.worker.recv("oversized call");
+    assert_eq!(response["kind"], "error", "{response}");
+    assert_eq!(response["request_id"], "req-oversize", "{response}");
+    assert_eq!(response["error"]["kind"], "output_too_large", "{response}");
+    assert_eq!(response["error"]["retryable"], false, "{response}");
+    let details = &response["error"]["details"];
+    assert_eq!(details["limit_name"], "max_output_bytes", "{details}");
+    assert_eq!(details["limit_bytes"], 65_536u64, "{details}");
+    assert!(
+        details["actual_bytes"].as_u64().unwrap() > 65_536,
+        "oversized value must measure above the cap: {details}"
+    );
+    assert_eq!(
+        details["frame_limit_bytes"],
+        MAX_FRAME_BYTES as u64,
+        "{details}"
+    );
+    assert!(
+        response.get("result").is_none(),
+        "no oversized result may leak: {response}"
+    );
+
+    // The rejection is not terminal: a normal call still succeeds.
+    let trace = trace_for("req-after", &bound.revision, &bound.contract);
+    bound.worker.send(&call_frame("req-after", "mem", json!({}), None, trace));
+    let ok = bound.worker.recv("post-rejection call");
+    assert_eq!(ok["kind"], "result", "{ok}");
+}
+
 /// Deadline suite: expired deadlines fail closed before dispatch with typed
 /// trace; live deadlines reach dispatched shell work.
 #[test]

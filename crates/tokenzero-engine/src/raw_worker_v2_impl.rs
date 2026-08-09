@@ -6,6 +6,12 @@ use std::sync::{Arc, Mutex};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use tokenzero_core::{Accounting, TokenizerFamily, active_tokenizer_metadata};
 
+/// Advertised and enforced raw-worker v2 output cap (9lwo): the serialized
+/// `result.value` of any call must fit within this many bytes. One constant
+/// drives both the handshake advertisement and the dispatch-time enforcement
+/// so the two cannot drift.
+pub(crate) const MAX_OUTPUT_BYTES: usize = 65_536;
+
 #[derive(Debug, Default)]
 pub struct RawWorkerV2Session {
     binding: Option<Binding>,
@@ -497,7 +503,7 @@ fn route_frame(session: &mut RawWorkerV2Session, line: &[u8]) -> RoutedFrame {
                 "semantic_contract_version":cap["semantic_contract_version"],"semantic_contract_digest":contract,
                 "operation_registry_digest":registry,"ref_scheme":"tz://"},
             "capabilities":{"cancellation":true,"deadlines":true,"approvals":false,"revert":false,"snapshots":false},
-            "limits":{"max_frame_bytes":1048576,"max_output_bytes":65536,"max_in_flight":1,"default_deadline_ms":DEFAULT_DEADLINE_MS},
+            "limits":{"max_frame_bytes":1048576,"max_output_bytes":MAX_OUTPUT_BYTES,"max_in_flight":1,"default_deadline_ms":DEFAULT_DEADLINE_MS},
             "protocol_digest":raw_worker_v2_protocol::raw_worker_protocol_digest_hex()
         }})));
     }
@@ -707,6 +713,27 @@ fn dispatch_call(engine: &TokenZeroEngine, ctx: &CallCtx, cancel: &Arc<CancelSta
         },"trace":ctx.trace.clone()});
     }
     let value = response.get("result").cloned().unwrap_or(Value::Null);
+    // 9lwo: advertised limits must be effective. Measure the serialized
+    // result.value bytes (not framing/metadata); an oversized value becomes a
+    // typed, correlated error naming the limit and the actual/cap sizes --
+    // never a truncated result, and the error frame stays far below
+    // max_frame_bytes because the payload is not included.
+    let output_bytes = serde_json::to_vec(&value).map_or(0, |bytes| bytes.len());
+    if output_bytes > MAX_OUTPUT_BYTES {
+        return json!({"kind":"error","request_id":ctx.id.clone(),"error":{
+            "kind":"output_too_large",
+            "message":format!(
+                "operation result is {output_bytes} bytes; the advertised max_output_bytes limit is {MAX_OUTPUT_BYTES}"
+            ),
+            "retryable":false,
+            "details":{
+                "limit_name":"max_output_bytes",
+                "limit_bytes":MAX_OUTPUT_BYTES,
+                "actual_bytes":output_bytes,
+                "frame_limit_bytes":zero_abi::DEFAULT_MAX_FRAME_BYTES
+            }
+        },"trace":ctx.trace.clone()});
+    }
     let worker_token_accounting = if ctx.worker_token_accounting_requested {
         match worker_token_accounting(&value) {
             Ok(accounting) => Some(accounting),
@@ -1584,5 +1611,82 @@ mod tests {
         assert_eq!(effect_class("shell"), "irreversible");
         assert_eq!(effect_class("compact"), "irreversible");
         assert_eq!(effect_class("ingest"), "irreversible");
+    }
+
+    #[test]
+    fn oversized_result_value_is_rejected_with_typed_output_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let big = "x".repeat(70_000);
+        std::fs::write(dir.path().join("big.txt"), &big).unwrap();
+        let mut opts = RawWorkerServeOptions::default();
+        opts.root = dir.path().to_path_buf();
+        opts.cache_path = Some(dir.path().join("recovery-cache.json"));
+        let engine = engine_from_options(&opts);
+        let root = dir.path().display().to_string();
+        let mut session = RawWorkerV2Session::for_binding(&root, "s-oversize");
+        let cap = local_capability();
+        let ack: Value = serde_json::from_slice(&execute_raw_worker_v2_frame(
+            &engine,
+            &mut session,
+            &serde_json::to_vec(&json!({"kind":"handshake","request":{
+                "protocol_version":raw_worker_v2_protocol::RAW_WORKER_PROTOCOL_VERSION,
+                "root":root,
+                "session_id":"s-oversize",
+                "expected_engine":"tokenzero",
+                "expected_contract_digest":cap["semantic_contract_digest"],
+                "expected_registry_digest":cap["operation_registry_digest"]
+            }})).unwrap(),
+        ))
+        .unwrap();
+        assert_eq!(ack["kind"], "handshake_ack", "{ack}");
+        assert_eq!(
+            ack["ack"]["limits"]["max_output_bytes"],
+            MAX_OUTPUT_BYTES as u64,
+            "handshake must advertise the enforced constant"
+        );
+        let revision = ack["ack"]["binding"]["worker_revision"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let contract = ack["ack"]["binding"]["semantic_contract_digest"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let response: Value = serde_json::from_slice(&execute_raw_worker_v2_frame(
+            &engine,
+            &mut session,
+            &serde_json::to_vec(&json!({"kind":"call","request":{
+                "request_id":"req-oversize","op":"read",
+                "args":{
+                    "path":dir.path().join("big.txt").display().to_string(),
+                    "raw":true,
+                    "max_visible_tokens":1_000_000
+                },
+                "trace":{
+                    "runtime_id":"rt","cell_id":"cell","request_id":"req-oversize",
+                    "trace_id":"trace-oversize","worker_revision":revision,"contract_digest":contract
+                }
+            }})).unwrap(),
+        ))
+        .unwrap();
+        assert_eq!(response["kind"], "error", "{response}");
+        assert_eq!(response["request_id"], "req-oversize", "{response}");
+        assert_eq!(response["error"]["kind"], "output_too_large", "{response}");
+        let details = &response["error"]["details"];
+        assert_eq!(details["limit_name"], "max_output_bytes", "{details}");
+        assert_eq!(details["limit_bytes"], 65_536u64, "{details}");
+        assert!(
+            details["actual_bytes"].as_u64().unwrap() > 65_536,
+            "oversized value must measure above the cap: {details}"
+        );
+        assert_eq!(
+            details["frame_limit_bytes"],
+            zero_abi::DEFAULT_MAX_FRAME_BYTES as u64,
+            "{details}"
+        );
+        assert!(
+            response.get("result").is_none(),
+            "no oversized result may leak: {response}"
+        );
     }
 }
