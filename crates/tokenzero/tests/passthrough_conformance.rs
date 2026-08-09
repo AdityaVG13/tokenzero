@@ -5,6 +5,8 @@ use std::{
     path::Path,
     process::{Command, Output, Stdio},
 };
+#[cfg(unix)]
+use std::{fs, os::unix::fs::PermissionsExt};
 use tempfile::{TempDir, tempdir};
 fn hook_output(payload: &str, mode: Option<&str>, envs: &[(&str, &str)]) -> Output {
     let mut command = Command::cargo_bin("tokenzero").unwrap();
@@ -182,4 +184,95 @@ fn passthrough_conformance_contract_matrix() {
         (case.run)();
         eprintln!("case={}", case.id);
     }
+}
+
+/// tokenzero-3h4n guard: the exact nested login-shell npm/node probe must
+/// survive the production hook rewrite byte-for-byte and produce the same
+/// output as native `zsh -lic` execution. Any quoting collapse, argv
+/// re-split, or login-env bypass breaks the stdout parity below.
+#[cfg(unix)]
+#[test]
+fn nested_zsh_login_probe_preserves_authored_quoting_and_output() {
+    let probe = "zsh -lic 'printf \"npm-path: \"; command -v npm; printf \"npm-type: \"; type -a npm; printf \"npm-version: \"; npm --version; printf \"node-version: \"; node --version'";
+    let rewritten = rewritten_command(probe);
+    // The hook re-encodes quoting for the outer `run -- sh -c '...'` layer
+    // (standard `'"'"'` single-quote embedding), so the authored payload must
+    // survive semantically: interpreter flags and every probe segment must
+    // still be present, never split into separate argv words. Exact bytes are
+    // verified below by executing the rewritten command.
+    for fragment in [
+        "zsh -lic",
+        "npm-path: ",
+        "command -v npm",
+        "npm-type: ",
+        "type -a npm",
+        "npm-version: ",
+        "node-version: ",
+    ] {
+        assert!(
+            rewritten.contains(fragment),
+            "probe fragment {fragment:?} was lost in the rewrite\noriginal:  {probe}\nrewritten: {rewritten}"
+        );
+    }
+    let dir = tempdir().unwrap();
+    let bin = dir.path().join("bin");
+    fs::create_dir(&bin).unwrap();
+    let write_executable = |name: &str, body: &str| {
+        let path = bin.join(name);
+        fs::write(&path, body).unwrap();
+        let mut permissions = fs::metadata(&path).unwrap().permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(path, permissions).unwrap();
+    };
+    // The production boundary owns authored argv, not zsh itself. Use a
+    // deterministic zsh-shaped fixture so this regression also runs on Spark
+    // images without zsh. The fixture rejects any altered `-lic` argv, then
+    // runs the exact authored command through bash for `type -a` semantics.
+    write_executable(
+        "zsh",
+        "#!/bin/sh\n[ \"$1\" = -lic ] || { printf 'bad zsh argv: <%s>\\n' \"$1\" >&2; exit 64; }\nshift\nexec /bin/bash -c \"$1\"\n",
+    );
+    write_executable("npm", "#!/bin/sh\nprintf 'fixture-npm\\n'\n");
+    write_executable("node", "#!/bin/sh\nprintf 'fixture-node\\n'\n");
+    let run_probe = |command: &str| {
+        Command::new("sh")
+            .args(["-c", command])
+            .current_dir(dir.path())
+            .env_clear()
+            .env("HOME", dir.path())
+            .env("PATH", format!("{}:/bin:/usr/bin", bin.display()))
+            .env("NO_COLOR", "1")
+            .env("TERM", "dumb")
+            .env("TOKENZERO_CACHE_PATH", dir.path().join("recovery-cache.json"))
+            .env("TOKENZERO_REF_INDEX", "0")
+            .output()
+            .unwrap()
+    };
+    let native = run_probe(probe);
+    let wrapped = run_probe(&rewritten);
+    assert_eq!(
+        native.status.code(),
+        wrapped.status.code(),
+        "exit-code parity broken for {probe:?}\nrewritten: {rewritten}\nwrapped stdout:\n{}\nwrapped stderr:\n{}",
+        String::from_utf8_lossy(&wrapped.stdout),
+        String::from_utf8_lossy(&wrapped.stderr)
+    );
+    let native_stdout = String::from_utf8_lossy(&native.stdout).to_string();
+    // Every probe segment must run (login PATH resolves npm/node); a missing
+    // executable or a collapsed segment fails on its own label.
+    for label in [
+        "npm-path:",
+        "npm-type:",
+        "npm-version:",
+        "node-version:",
+    ] {
+        assert!(
+            native_stdout.contains(label),
+            "probe segment {label:?} produced no output; login environment not exercised:\n{native_stdout}\nnative stderr:\n{}\nnative exit: {:?}",
+            String::from_utf8_lossy(&native.stderr),
+            native.status.code()
+        );
+    }
+    // Exact stdout bytes survive the wrapper (inline or via combined ref).
+    assert_bytes_recoverable(&native_stdout, &wrapped, dir.path());
 }

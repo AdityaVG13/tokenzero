@@ -265,6 +265,7 @@ fn shell_c_wrappers_detect_masked_inner_pipeline_failures() {
         "sh -c 'false | true'",
         "bash -lc 'false | true'",
         "zsh -euc 'false | true'",
+        "zsh -lic 'false | true'",
         "bash --login -o pipefail -c 'false | true'",
     ] {
         let status = classify_command_status(command, "", "", Some(0), false);
