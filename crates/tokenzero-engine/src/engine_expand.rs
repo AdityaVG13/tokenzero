@@ -614,22 +614,18 @@ impl TokenZeroEngine {
         let mut lines = Vec::with_capacity(outcome.hits.len() + 1);
         if !outcome.hits.is_empty() {
             lines.push(format!(
-                "# recall {} — {} hits across {} stored payloads{}",
+                "# recall {}: {} hits in {} payloads{}",
                 zero_hit_label(query),
                 outcome.hits.len(),
                 outcome.payloads_searched,
-                if outcome.truncated {
-                    " (hit limit reached)"
-                } else {
-                    ""
-                }
+                if outcome.truncated { " (limit)" } else { "" }
             ));
         }
+        let rendered_hits = recall::render_hits(&outcome.hits);
+        if !rendered_hits.is_empty() {
+            lines.push(rendered_hits);
+        }
         for hit in &outcome.hits {
-            lines.push(format!(
-                "{} {}:{}: {}",
-                hit.ref_id, hit.label, hit.line, hit.text
-            ));
             if listed.insert(hit.ref_id.as_str()) {
                 refs.push(ref_record("recall", hit.ref_id.clone(), 0));
             }

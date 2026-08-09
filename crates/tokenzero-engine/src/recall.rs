@@ -34,6 +34,157 @@ pub(crate) struct RecallOutcome {
 
 const MAX_HIT_LINE_CHARS: usize = 160;
 
+/// Render each payload ref once. Validated flat-search hit groups also factor
+/// their shared directory prefix under one `# root:` header, and when every
+/// hit shares one non-empty suffix, that suffix is factored under `# suffix:`.
+/// The projection remains lossless: the group selector preserves every
+/// stored-payload line, and root + relative row (+ suffix when emitted)
+/// recovers the matched text exactly.
+pub(crate) fn render_hits(hits: &[RecallHit]) -> String {
+    let mut groups = Vec::new();
+    let mut start = 0;
+    while start < hits.len() {
+        let first = &hits[start];
+        let mut end = start + 1;
+        while end < hits.len() && hits[end].ref_id == first.ref_id && hits[end].label == first.label
+        {
+            end += 1;
+        }
+        let group = &hits[start..end];
+        let flat = group
+            .iter()
+            .map(|hit| format!("{} {}:{}: {}", hit.ref_id, hit.label, hit.line, hit.text))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let compact = compact_group(group);
+        let compact_is_cheaper = compact.len() < flat.len()
+            && tokenzero_core::count_tokens(&compact) < tokenzero_core::count_tokens(&flat);
+        groups.push(if compact_is_cheaper { compact } else { flat });
+        start = end;
+    }
+    groups.join("\n")
+}
+
+fn compact_group(hits: &[RecallHit]) -> String {
+    let first = &hits[0];
+    let mut lines = vec![format!(
+        "{} {}{}",
+        first.ref_id,
+        first.label,
+        line_selector(hits)
+    )];
+    let Some(paths) = hits
+        .iter()
+        .map(|hit| flat_search_path(&hit.text))
+        .collect::<Option<Vec<_>>>()
+    else {
+        lines.extend(hits.iter().map(|hit| format!("{}: {}", hit.line, hit.text)));
+        return lines.join("\n");
+    };
+    // When every absolute-path hit shares one non-empty suffix (line/column
+    // plus matched row), factor it under `# suffix:` so the projection stays
+    // lossless with root + relative path + suffix reconstructing the hit.
+    let shared_suffix = {
+        let first_suffix = &hits[0].text[paths[0].len()..];
+        if first_suffix.is_empty() {
+            None
+        } else {
+            hits.iter()
+                .zip(&paths)
+                .all(|(hit, path)| &hit.text[path.len()..] == first_suffix)
+                .then_some(first_suffix)
+        }
+    };
+    if let (Some(suffix), Some(root)) = (
+        shared_suffix,
+        common_directory_prefix(paths.clone().into_iter()),
+    ) {
+        lines.push(format!("# root: {root}"));
+        lines.push(format!("# suffix: {suffix}"));
+        lines.extend(
+            paths
+                .iter()
+                .map(|path| path.strip_prefix(root).unwrap_or(path).to_string()),
+        );
+        return lines.join("\n");
+    }
+    if let Some(root) = common_directory_prefix(paths.into_iter()) {
+        lines.push(format!("# root: {root}"));
+        lines.extend(
+            hits.iter()
+                .map(|hit| hit.text.strip_prefix(root).unwrap_or(&hit.text).to_string()),
+        );
+    } else {
+        lines.extend(hits.iter().map(|hit| format!("{}: {}", hit.line, hit.text)));
+    }
+    lines.join("\n")
+}
+
+fn line_selector(hits: &[RecallHit]) -> String {
+    let start = hits[0].line;
+    if hits
+        .iter()
+        .enumerate()
+        .all(|(offset, hit)| hit.line == start.saturating_add(offset))
+    {
+        if hits.len() == 1 {
+            format!("#L{start}")
+        } else {
+            format!("#L{start}-{}", hits[hits.len() - 1].line)
+        }
+    } else {
+        format!(
+            "#L{}",
+            hits.iter()
+                .map(|hit| hit.line.to_string())
+                .collect::<Vec<_>>()
+                .join(",")
+        )
+    }
+}
+
+fn flat_search_path(text: &str) -> Option<&str> {
+    for (separator, _) in text.match_indices(':') {
+        let suffix = &text[separator + 1..];
+        let digits = suffix.bytes().take_while(u8::is_ascii_digit).count();
+        if digits == 0 || suffix.as_bytes().get(digits) != Some(&b':') {
+            continue;
+        }
+        let path = &text[..separator];
+        let bytes = path.as_bytes();
+        let absolute = path.starts_with('/')
+            || path.starts_with("\\\\")
+            || (bytes.len() >= 3
+                && bytes[0].is_ascii_alphabetic()
+                && bytes[1] == b':'
+                && matches!(bytes[2], b'/' | b'\\'));
+        if absolute {
+            return Some(path);
+        }
+    }
+    None
+}
+
+fn common_directory_prefix<'a>(values: impl Iterator<Item = &'a str>) -> Option<&'a str> {
+    let values = values.collect::<Vec<_>>();
+    let first = *values.first()?;
+    if values.len() < 2 {
+        return None;
+    }
+    let shared_len = values.iter().skip(1).fold(first.len(), |limit, value| {
+        let equal_bytes = first
+            .chars()
+            .zip(value.chars())
+            .take_while(|(left, right)| left == right)
+            .map(|(ch, _)| ch.len_utf8())
+            .sum::<usize>();
+        limit.min(equal_bytes)
+    });
+    let prefix = &first[..shared_len];
+    let separator = prefix.rfind(['/', '\\'])? + 1;
+    (separator > 1).then_some(&first[..separator])
+}
+
 /// Recall parses the whole cache file per query — a linear scan bounded by
 /// the store's own eviction ceiling (8 MB by default). This guard mirrors
 /// the recovery crate's `max_load_bytes` so a foreign or corrupted file at
@@ -212,4 +363,139 @@ fn text_fingerprint(text: &str) -> u64 {
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     text.hash(&mut hasher);
     hasher.finish()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn hit(line: usize, text: &str) -> RecallHit {
+        RecallHit {
+            ref_id: "tz://blob/abc".to_string(),
+            label: "unknown".to_string(),
+            line,
+            text: text.to_string(),
+        }
+    }
+
+    #[test]
+    fn grouped_search_recall_factors_repeated_ref_and_root_losslessly() {
+        let hits = vec![
+            hit(1, "/tmp/repo/src/a.rs:10:alpha"),
+            hit(2, "/tmp/repo/src/b.rs:20:beta"),
+            hit(3, "/tmp/repo/tests/c.rs:30:gamma"),
+        ];
+        let rendered = render_hits(&hits);
+        assert_eq!(rendered.matches("tz://blob/abc").count(), 1, "{rendered}");
+        let mut lines = rendered.lines();
+        assert_eq!(lines.next(), Some("tz://blob/abc unknown#L1-3"));
+        assert_eq!(lines.next(), Some("# root: /tmp/repo/"));
+        let recovered = lines
+            .map(|line| format!("/tmp/repo/{line}"))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            recovered,
+            hits.iter().map(|hit| hit.text.clone()).collect::<Vec<_>>()
+        );
+        let flat = hits
+            .iter()
+            .map(|hit| format!("{} {}:{}: {}", hit.ref_id, hit.label, hit.line, hit.text))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(rendered.len() < flat.len());
+        assert!(tokenzero_core::count_tokens(&rendered) < tokenzero_core::count_tokens(&flat));
+    }
+
+    #[test]
+    fn windows_drive_root_keeps_the_separator() {
+        let hits = vec![hit(4, r"C:\a.rs:10:alpha"), hit(9, r"C:\b.rs:20:beta")];
+        let rendered = render_hits(&hits);
+        let mut lines = rendered.lines();
+        assert_eq!(lines.next(), Some("tz://blob/abc unknown#L4,9"));
+        assert_eq!(lines.next(), Some(r"# root: C:\"));
+        assert_eq!(lines.next(), Some("a.rs:10:alpha"));
+        assert_eq!(lines.next(), Some("b.rs:20:beta"));
+    }
+
+    #[test]
+    fn shared_prose_separator_is_not_mislabeled_as_a_path_root() {
+        let hits = vec![
+            hit(2, "docs/routing explains alpha"),
+            hit(5, "docs/routing explains beta"),
+        ];
+        let rendered = render_hits(&hits);
+        assert!(!rendered.contains("# root:"), "{rendered}");
+        assert!(rendered.contains("#L2,5"), "{rendered}");
+        assert!(
+            rendered.contains("2: docs/routing explains alpha"),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains("5: docs/routing explains beta"),
+            "{rendered}"
+        );
+    }
+
+    #[test]
+    fn single_recall_hit_keeps_flat_shape_when_grouping_is_not_cheaper() {
+        let hits = vec![hit(7, "/tmp/repo/src/a.rs:10:alpha")];
+        assert_eq!(
+            render_hits(&hits),
+            "tz://blob/abc unknown:7: /tmp/repo/src/a.rs:10:alpha"
+        );
+    }
+
+    #[test]
+    fn repeated_suffix_is_factored_and_reconstructs_exactly() {
+        let hits = vec![
+            hit(
+                1,
+                "/tmp/repo/mod_0000/file_0000_000.rs:500:// line 0499 pub fn BENCH_NEEDLE_FN(x: usize) -> bool { true }",
+            ),
+            hit(
+                2,
+                "/tmp/repo/mod_0002/file_0002_000.rs:500:// line 0499 pub fn BENCH_NEEDLE_FN(x: usize) -> bool { true }",
+            ),
+        ];
+        let rendered = render_hits(&hits);
+        let mut lines = rendered.lines();
+        assert_eq!(lines.next(), Some("tz://blob/abc unknown#L1-2"));
+        assert_eq!(lines.next(), Some("# root: /tmp/repo/"));
+        assert_eq!(
+            lines.next(),
+            Some("# suffix: :500:// line 0499 pub fn BENCH_NEEDLE_FN(x: usize) -> bool { true }")
+        );
+        assert_eq!(lines.next(), Some("mod_0000/file_0000_000.rs"));
+        assert_eq!(lines.next(), Some("mod_0002/file_0002_000.rs"));
+        assert!(lines.next().is_none(), "{rendered}");
+        let mut rows = rendered
+            .lines()
+            .skip_while(|line| !line.starts_with("mod_"));
+        let root = "/tmp/repo/";
+        let suffix = ":500:// line 0499 pub fn BENCH_NEEDLE_FN(x: usize) -> bool { true }";
+        for hit in &hits {
+            let row = rows.next().expect("row for hit");
+            assert_eq!(format!("{root}{row}{suffix}"), hit.text);
+        }
+        let flat = hits
+            .iter()
+            .map(|hit| format!("{} {}:{}: {}", hit.ref_id, hit.label, hit.line, hit.text))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(rendered.len() < flat.len());
+        assert!(tokenzero_core::count_tokens(&rendered) < tokenzero_core::count_tokens(&flat));
+    }
+
+    #[test]
+    fn unequal_suffixes_keep_root_only_projection() {
+        let hits = vec![
+            hit(1, "/tmp/repo/src/a.rs:10:alpha"),
+            hit(2, "/tmp/repo/src/b.rs:20:beta"),
+        ];
+        let rendered = render_hits(&hits);
+        assert!(!rendered.contains("# suffix:"), "{rendered}");
+        assert!(rendered.contains("# root: /tmp/repo/src/"), "{rendered}");
+        assert!(rendered.contains("a.rs:10:alpha"), "{rendered}");
+        assert!(rendered.contains("b.rs:20:beta"), "{rendered}");
+    }
 }
