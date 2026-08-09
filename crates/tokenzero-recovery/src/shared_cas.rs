@@ -1,12 +1,11 @@
 //! Canonical shared CAS for ZeroRef v1 blobs at
 //! `<root>/blobs/sha256/<first-two-hex>/<full-hash>` (`tz`/`fz`/`gz` full-hash refs).
 
-use fs4::FileExt;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File, OpenOptions};
-use std::io::{self, Read, Write};
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -31,12 +30,14 @@ pub enum SharedCasError {
 
 #[derive(Debug, Clone)]
 pub struct SharedCas {
-    root: PathBuf,
+    inner: zero_store::SharedCas,
 }
 
 impl SharedCas {
     pub fn new(root: PathBuf) -> Self {
-        Self { root }
+        Self {
+            inner: zero_store::SharedCas::open(root),
+        }
     }
 
     pub fn resolve_cache_root(cache_path: &Path) -> Option<PathBuf> {
@@ -74,68 +75,31 @@ impl SharedCas {
     }
 
     pub fn root(&self) -> &Path {
-        &self.root
+        self.inner.root()
     }
 
     pub fn publish(&self, bytes: &[u8]) -> Result<String, SharedCasError> {
-        // Held shared across hash -> dest check -> rename so a concurrent sweep
-        // cannot unlink this object between the moment we observe/create it and
-        // the moment the caller can reference it (zerostack-rhd). Publishers do
-        // not exclude each other; only an active sweep does.
-        let _coord = GcCoordLock::acquire_shared(&self.root)?;
-        self.publish_locked(bytes)
+        let coord = GcCoordLock::acquire_shared(self.root())?;
+        self.publish_locked(bytes, coord.store_lock())
     }
 
     /// Publish assuming the caller already holds the shared GC coordination
-    /// lock. Split out so publication and lease protection can happen under one
-    /// lock acquisition rather than two.
-    fn publish_locked(&self, bytes: &[u8]) -> Result<String, SharedCasError> {
-        let full_hash = content_sha256_hex(bytes);
-        let path = self.object_path(&full_hash);
-        if path.exists() {
-            return Self::verify_existing(&path, bytes, &full_hash);
-        }
-        let parent = path
-            .parent()
-            .expect("object path always has a parent directory");
-        fs::create_dir_all(parent)?;
-        let tmp_path = parent.join(format!(".tmp-{}-{}.blob", full_hash, unique_suffix()));
-        {
-            let mut tmp = OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .open(&tmp_path)?;
-            tmp.write_all(bytes)?;
-            tmp.flush()?;
-            tmp.sync_all()?;
-        }
-        if let Err(err) = fs::rename(&tmp_path, &path) {
-            let _ = fs::remove_file(&tmp_path);
-            return if path.exists() {
-                Self::verify_existing(&path, bytes, &full_hash)
-            } else {
-                Err(err.into())
-            };
-        }
-        #[cfg(unix)]
-        if let Ok(parent_dir) = File::open(parent) {
-            let _ = parent_dir.sync_all();
-        }
-        Ok(full_hash)
+    /// lock. The hub CAS performs the complete hash/check/temp-write/rename
+    /// protocol while this exact lock is held, so a sweep cannot collect the
+    /// object between publication and the caller's reference.
+    fn publish_locked(
+        &self,
+        bytes: &[u8],
+        lock: &zero_store::StoreLock,
+    ) -> Result<String, SharedCasError> {
+        self.inner
+            .put_in_lock(bytes, zero_store::CAS_MAX_OBJECT_BYTES, lock)
+            .map(|outcome| outcome.hash)
+            .map_err(map_cas_error)
     }
 
     /// Publish `bytes` and, before releasing the shared GC coordination lock,
     /// write a lease covering the resulting hash.
-    ///
-    /// `publish` alone only protects an object while the shared lock is held.
-    /// A caller that publishes an object now and commits a root referencing it
-    /// later is unprotected in between, which is the exact window the
-    /// publish/GC race exploits (zerostack-rhd, tokenzero-8tdg). The lease
-    /// records that gap as liveness so a sweep in that window retains the
-    /// object instead of collecting it.
-    ///
-    /// Publication and protection are joined here rather than left to two calls
-    /// so there is no ordering in which the object exists unprotected.
     pub fn publish_leased(
         &self,
         bytes: &[u8],
@@ -143,8 +107,8 @@ impl SharedCas {
         operation_id: &str,
         lease_seconds: u64,
     ) -> Result<String, SharedCasError> {
-        let _coord = GcCoordLock::acquire_shared(&self.root)?;
-        let full_hash = self.publish_locked(bytes)?;
+        let coord = GcCoordLock::acquire_shared(self.root())?;
+        let full_hash = self.publish_locked(bytes, coord.store_lock())?;
         let now = SystemTime::now();
         let lease = LeaseRecord {
             schema_version: GC_SCHEMA_VERSION.to_string(),
@@ -152,9 +116,6 @@ impl SharedCas {
             engine: GC_ENGINE_TOKENZERO.to_string(),
             project_id: project_id.to_string(),
             operation_id: operation_id.to_string(),
-            // read_lease_record enforces epoch >= 1; a 0 here is silently
-            // rejected at read time and degrades the sweep to "uncertain"
-            // instead of protecting anything.
             epoch: 1,
             owner: LeaseOwner {
                 pid: std::process::id() as u64,
@@ -167,7 +128,7 @@ impl SharedCas {
             grace_seconds: GC_MIN_GRACE_SECONDS,
             blob_hashes: vec![full_hash.clone()],
         };
-        publish_lease_record_locked(&self.root, &lease)
+        publish_lease_record_locked(self.root(), &lease)
             .map_err(|err| SharedCasError::Gc(err.to_string()))?;
         Ok(full_hash)
     }
@@ -179,9 +140,9 @@ impl SharedCas {
         project_id: &str,
         operation_id: &str,
     ) -> Result<(), SharedCasError> {
-        let _coord = GcCoordLock::acquire_shared(&self.root)?;
+        let _coord = GcCoordLock::acquire_shared(self.root())?;
         let path = gc_join(
-            &self.root,
+            self.root(),
             &[
                 "leases",
                 GC_ENGINE_TOKENZERO,
@@ -198,21 +159,13 @@ impl SharedCas {
 
     pub fn resolve(&self, full_hash: &str) -> Result<Vec<u8>, SharedCasError> {
         self.validate_hash(full_hash)?;
-        let (meta, bytes) = match read_regular_file(&self.object_path(full_hash)) {
-            Ok(v) => v,
-            Err(SharedCasError::Io(err)) if err.kind() == io::ErrorKind::NotFound => {
-                return Err(SharedCasError::NotFound);
-            }
-            Err(err) => return Err(err),
-        };
-        if bytes.len() as u64 != meta.len() || content_sha256_hex(&bytes) != full_hash {
-            return Err(SharedCasError::Corruption);
-        }
-        Ok(bytes)
+        self.inner
+            .get_verified(full_hash)
+            .map_err(map_cas_error)
     }
 
     pub fn contains(&self, full_hash: &str) -> bool {
-        self.validate_hash(full_hash).is_ok() && self.object_path(full_hash).is_file()
+        self.validate_hash(full_hash).is_ok() && self.inner.contains(full_hash)
     }
 
     /// Whether the GC sweep would treat `full_hash` as pinned.
@@ -225,73 +178,26 @@ impl SharedCas {
             return false;
         }
         let mut state = MarkState::default();
-        load_all_pins(&self.root, &mut state, SystemTime::now()).is_err()
+        load_all_pins(self.root(), &mut state, SystemTime::now()).is_err()
             || state.uncertain
             || state.live.contains_key(full_hash)
     }
 
     pub fn list_objects(&self) -> Result<Vec<String>, SharedCasError> {
-        let mut objects = Vec::new();
-        let base = self.root.join("blobs").join("sha256");
-        if !fs::symlink_metadata(&base)
-            .map(|m| m.is_dir() && !m.file_type().is_symlink())
-            .unwrap_or(false)
-        {
-            return Ok(objects);
-        }
-        for prefix_entry in fs::read_dir(&base)? {
-            let prefix_entry = prefix_entry?;
-            if !fs::symlink_metadata(prefix_entry.path())
-                .map(|m| m.is_dir() && !m.file_type().is_symlink())
-                .unwrap_or(false)
-            {
-                continue;
-            }
-            for entry in fs::read_dir(prefix_entry.path())? {
-                let entry = entry?;
-                let Ok(ft) = entry.file_type() else { continue };
-                if ft.is_symlink() || !ft.is_file() {
-                    continue;
-                }
-                let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
-                    continue;
-                };
-                if name.starts_with('.') || self.validate_hash(&name).is_err() {
-                    continue;
-                }
-                if self.path_is_contained_object(&entry.path(), &name) {
-                    objects.push(name);
-                }
-            }
-        }
-        Ok(objects)
+        self.inner.list_objects().map_err(map_cas_error)
     }
 
-    /// Unlink an object. Requires the caller to prove it holds the exclusive
-    /// coordinator lock, so a sweeper cannot forget it (zerostack-rhd). The
-    /// token is otherwise unused.
+    /// Unlink an object. The hub requires the exclusive StoreLock and checks
+    /// that it belongs to this CAS root before mutating the object tree.
     pub fn remove_object(
         &self,
         full_hash: &str,
-        _coord: &GcCoordLock,
+        coord: &GcCoordLock,
     ) -> Result<(), SharedCasError> {
         self.validate_hash(full_hash)?;
-        let path = self.object_path(full_hash);
-        if !self.object_path_chain_is_safe(full_hash) {
-            return Err(SharedCasError::Policy);
-        }
-        match fs::symlink_metadata(&path) {
-            Ok(meta) if meta.file_type().is_symlink() || !meta.file_type().is_file() => {
-                return Err(SharedCasError::Policy);
-            }
-            Ok(_) => {}
-            Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(()),
-            Err(err) => return Err(err.into()),
-        }
-        match fs::remove_file(&path) {
-            Ok(()) => Ok(()),
-            Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(()),
-            Err(err) => Err(err.into()),
+        match self.inner.remove_object(full_hash, coord.store_lock()) {
+            Ok(()) | Err(zero_store::CasError::NotFound) => Ok(()),
+            Err(error) => Err(map_cas_error(error)),
         }
     }
 
@@ -303,61 +209,30 @@ impl SharedCas {
                 "provided bytes hash to {expected_hash}, expected {full_hash}"
             )));
         }
-        let path = self.object_path(full_hash);
-        if path.is_file() {
-            match self.resolve(full_hash) {
-                Ok(_) => return Ok(false),
-                Err(SharedCasError::Corruption) => fs::remove_file(&path)?,
-                Err(err) => return Err(err),
+
+        match self.inner.get_verified(full_hash) {
+            Ok(_) => return Ok(false),
+            Err(zero_store::CasError::NotFound) => {}
+            Err(zero_store::CasError::DigestMismatch { .. }) => {
+                // The hub deliberately never overwrites a corrupt immutable
+                // object. Remove it under the exclusive guard, then republish
+                // under a fresh shared guard using the hub's atomic put path.
+                let coord = GcCoordLock::acquire(self.root())
+                    .map_err(|error| SharedCasError::Gc(error.to_string()))?;
+                self.inner
+                    .remove_object(full_hash, coord.store_lock())
+                    .map_err(map_cas_error)?;
             }
+            Err(error) => return Err(map_cas_error(error)),
         }
-        self.publish(bytes)?;
+
+        let coord = GcCoordLock::acquire_shared(self.root())?;
+        self.publish_locked(bytes, coord.store_lock())?;
         Ok(true)
     }
 
     fn object_path(&self, full_hash: &str) -> PathBuf {
-        self.root
-            .join("blobs")
-            .join("sha256")
-            .join(&full_hash[..2])
-            .join(full_hash)
-    }
-
-    fn path_is_contained_object(&self, path: &Path, full_hash: &str) -> bool {
-        path == self.object_path(full_hash)
-            && self.object_path_chain_is_safe(full_hash)
-            && fs::symlink_metadata(path)
-                .is_ok_and(|m| !m.file_type().is_symlink() && m.file_type().is_file())
-    }
-
-    fn object_path_chain_is_safe(&self, full_hash: &str) -> bool {
-        if self.validate_hash(full_hash).is_err() {
-            return false;
-        }
-        let expected = self.object_path(full_hash);
-        let Ok(relative) = expected.strip_prefix(&self.root) else {
-            return false;
-        };
-        let mut cur = self.root.clone();
-        let check = |path: &Path| -> Option<bool> {
-            match fs::symlink_metadata(path) {
-                Ok(meta) => Some(meta.file_type().is_symlink()),
-                Err(err) if err.kind() == io::ErrorKind::NotFound => None,
-                Err(_) => Some(true),
-            }
-        };
-        if check(&cur) != Some(false) {
-            return false;
-        }
-        for component in relative.components() {
-            cur.push(component);
-            match check(&cur) {
-                Some(true) => return false,
-                Some(false) => {}
-                None => return true,
-            }
-        }
-        true
+        self.inner.object_path(full_hash)
     }
 
     fn validate_hash(&self, full_hash: &str) -> Result<(), SharedCasError> {
@@ -365,31 +240,19 @@ impl SharedCas {
             .then_some(())
             .ok_or_else(|| SharedCasError::InvalidHash(full_hash.into()))
     }
-
-    fn verify_existing(
-        path: &Path,
-        expected_bytes: &[u8],
-        expected_hash: &str,
-    ) -> Result<String, SharedCasError> {
-        let (meta, actual) = read_regular_file(path)?;
-        if meta.len() != expected_bytes.len() as u64
-            || actual != expected_bytes
-            || content_sha256_hex(&actual) != expected_hash
-        {
-            return Err(SharedCasError::Corruption);
-        }
-        Ok(expected_hash.into())
-    }
 }
 
-fn read_regular_file(path: &Path) -> Result<(std::fs::Metadata, Vec<u8>), SharedCasError> {
-    let meta = fs::metadata(path)?;
-    if !meta.is_file() {
-        return Err(SharedCasError::Policy);
+fn map_cas_error(error: zero_store::CasError) -> SharedCasError {
+    match error {
+        zero_store::CasError::NotFound => SharedCasError::NotFound,
+        zero_store::CasError::Io(message) => {
+            SharedCasError::Io(io::Error::other(message))
+        }
+        zero_store::CasError::DigestMismatch { .. } => SharedCasError::Corruption,
+        zero_store::CasError::PolicyDenied(_) | zero_store::CasError::Malformed(_) => {
+            SharedCasError::Policy
+        }
     }
-    let mut bytes = Vec::with_capacity(meta.len() as usize);
-    File::open(path)?.read_to_end(&mut bytes)?;
-    Ok((meta, bytes))
 }
 
 pub const GC_SCHEMA_VERSION: &str = "zerostack.cas-gc.v1";
@@ -1196,52 +1059,32 @@ fn read_sweep_progress(path: &Path) -> Result<SweepProgress, GcError> {
     Ok(progress)
 }
 
-/// Advisory lock at `<store_root>/gc/coordinator.lock` shared by publishers and
-/// the sweeper (zerostack-rhd).
+/// Compatibility handle for the canonical `<store_root>/gc/coordinator.lock`.
 ///
-/// Publishers take it shared across hash -> dest check -> rename, so concurrent
-/// publishes still proceed in parallel. The sweeper takes it exclusive across
-/// mark -> report -> recheck -> unlink, which is what makes "no live reference"
-/// stay true through the unlink instead of going stale between the recheck and
-/// the `remove_file`. There is exactly one lock, so there is no lock order to
-/// get wrong, and the kernel drops it if a holder dies.
+/// The lock file and lock protocol are hub-owned. Keeping this TokenZero type
+/// preserves the existing GC API while allowing CAS publication and sweep
+/// removal to pass the same typed `StoreLock` into `zero_store`.
 pub struct GcCoordLock {
-    file: File,
+    lock: zero_store::StoreLock,
 }
 
 impl GcCoordLock {
-    fn open_lock_file(store_root: &Path) -> Result<File, io::Error> {
-        let path = store_root.join("gc").join("coordinator.lock");
-        fs::create_dir_all(path.parent().unwrap_or(store_root))?;
-        // Never truncate: truncation races with a concurrent holder's open and
-        // the file's contents are irrelevant, only its identity as a lock.
-        OpenOptions::new()
-            .create(true)
-            .truncate(false)
-            .read(true)
-            .write(true)
-            .open(&path)
-    }
-
-    /// Exclusive: blocks publishers and other sweepers. Used by the sweep and by
-    /// the protection-record publishers.
+    /// Exclusive: blocks publishers and other sweepers. Used by the sweep and
+    /// by protection-record publishers.
     fn acquire(store_root: &Path) -> Result<Self, GcError> {
-        let file = Self::open_lock_file(store_root).map_err(GcError::Io)?;
-        FileExt::lock(&file).map_err(GcError::Io)?;
-        Ok(Self { file })
+        zero_store::StoreLock::sweep(store_root, zero_store::LOCK_DEADLINE)
+            .map(|lock| Self { lock })
+            .map_err(GcError::Io)
     }
 
     /// Shared: excluded by an in-progress sweep, but not by other publishers.
     fn acquire_shared(store_root: &Path) -> Result<Self, io::Error> {
-        let file = Self::open_lock_file(store_root)?;
-        FileExt::lock_shared(&file)?;
-        Ok(Self { file })
+        zero_store::StoreLock::publish(store_root, zero_store::LOCK_DEADLINE)
+            .map(|lock| Self { lock })
     }
-}
 
-impl Drop for GcCoordLock {
-    fn drop(&mut self) {
-        let _ = FileExt::unlock(&self.file);
+    fn store_lock(&self) -> &zero_store::StoreLock {
+        &self.lock
     }
 }
 
