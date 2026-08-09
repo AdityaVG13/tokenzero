@@ -6,12 +6,16 @@
 //! mistakenly routed a CLI verb at a surface binary got a silent empty success that
 //! masked the real failure instead of a diagnosable error.
 
+#[cfg(any(feature = "surface-codemode", feature = "surface-mcp"))]
 use assert_cmd::prelude::*;
+#[cfg(any(feature = "surface-codemode", feature = "surface-mcp"))]
 use std::process::Command;
 
 /// Verbs that belong to the `tokenzero` CLI, not to a stdio surface binary.
+#[cfg(any(feature = "surface-codemode", feature = "surface-mcp"))]
 const CLI_ONLY_VERBS: &[&str] = &["expand", "ingest", "capabilities", "run", "robot-docs"];
 
+#[cfg(any(feature = "surface-codemode", feature = "surface-mcp"))]
 fn assert_rejects_unknown_verb(bin: &str, verb: &str) {
     let output = Command::cargo_bin(bin)
         .unwrap()
