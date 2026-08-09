@@ -3912,9 +3912,12 @@ fn exec_shell(engine: &TokenZeroEngine, work_root: &Path, args: &[Value]) -> OpR
                 }
             }
             if telem.get("stdout_ref").is_some() && value.get("stdout_ref").is_none() {
-                if let Some(combined) = value.get("combined_ref").cloned() {
-                    value["stdout_ref"] = combined;
-                }
+                // yv2b: small-output shells persist only the combined witness,
+                // so the value lacks a stdout_ref record. Append the pure
+                // stdout ref from the engine telemetry (canonical, durable)
+                // instead of aliasing the combined stream, which would mix
+                // stderr bytes into stdout recovery.
+                value["stdout_ref"] = telem["stdout_ref"].clone();
             }
         }
     }))

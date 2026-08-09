@@ -1064,6 +1064,58 @@ fn shell_defaults_to_plan_root_for_relative_paths() {
         .or_else(|| value.get("text").and_then(serde_json::Value::as_str));
     assert_eq!(text, Some("plan-root-cwd-ok\n"));
 }
+
+#[cfg(unix)]
+#[test]
+fn small_shell_result_stdout_ref_is_pure_stdout_not_combined() {
+    // yv2b: small-output shells persist only the combined witness, so the
+    // host previously appended stdout_ref = combined_ref; a command with both
+    // streams then expanded stdout_ref to stdout+stderr mixed bytes. The
+    // catalog contract keeps stdout_ref as the complete pure stdout stream
+    // (the engine diagnostic: "expand stdout_ref or stderr_ref for the
+    // complete stream"), while the top-level owner ref stays the combined
+    // blob.
+    let work = tempfile::tempdir().unwrap();
+    let result = execute_codemode_with_options(
+        r#"
+        const r = await zero.token.shell("printf 'out-only\n'; printf 'err-only\n' >&2");
+        const out = await zero.token.expand(r.stdout_ref);
+        const both = await zero.token.expand(r.combined_ref);
+        return { out: out.text, both: both.text, owner: r.ref, combined: r.combined_ref, stdout: r.stdout_ref };
+        "#,
+        CodeModeOptions {
+            root: Some(work.path().to_path_buf()),
+            ..Default::default()
+        },
+    );
+    assert_eq!(
+        result.status,
+        CodeModeStatus::Completed,
+        "{:?}",
+        result.error
+    );
+    let value = result.value.as_ref().unwrap();
+    assert_eq!(value["out"].as_str(), Some("out-only\n"), "{value}");
+    assert!(value["stdout"].as_str().is_some(), "{value}");
+    assert!(
+        value["both"].as_str().unwrap().contains("out-only\n"),
+        "{value}"
+    );
+    assert!(
+        value["both"].as_str().unwrap().contains("err-only\n"),
+        "{value}"
+    );
+    assert_eq!(
+        value["owner"].as_str(),
+        value["combined"].as_str(),
+        "top-level owner stays the combined witness: {value}"
+    );
+    assert_ne!(
+        value["stdout"].as_str(),
+        value["combined"].as_str(),
+        "stdout_ref must not alias the combined stream: {value}"
+    );
+}
 #[cfg(unix)]
 #[test]
 fn background_job_long_poll_returns_live_delta_then_terminal_delta() {
