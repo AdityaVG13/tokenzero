@@ -90,11 +90,15 @@ fn enclosing_symbol(lines: &[String], line_no: usize) -> Option<String> {
 }
 
 /// FSZero snap-to-file hit rendering (FSZero docs/design/target-ref-grammar.md):
-/// every match becomes one `HIT <path>#L<start>-L<end> kind=<kind>
-/// sym=<sym>` header plus an inlined `| <line-no>: <text>` window covering
-/// the matched line and TARGET_CONTEXT_LINES on each side, so agents snap to
-/// file:line without a second discovery call. Each file is read once for all
-/// of its hits; unreadable files fall back to the matched line only.
+/// every distinct target window becomes one `HIT <path>#L<start>-L<end>
+/// kind=<kind> sym=<sym>` header plus an inlined `| <line-no>: <text>` window
+/// covering the matched line and TARGET_CONTEXT_LINES on each side, so agents
+/// snap to file:line without a second discovery call. Byte-identical windows
+/// within one file are emitted once (5irj): adjacent matches whose context
+/// windows overlap or clamp to the same range render one HIT record while
+/// every matching line stays visible. Distinct windows and distinct enclosing
+/// symbols remain distinct. Each file is read once for all of its hits;
+/// unreadable files fall back to the matched line only.
 pub(crate) fn hit_search_output(matches: &[SearchMatch], kind: &str) -> String {
     let mut out = String::new();
     let mut idx = 0;
@@ -107,6 +111,13 @@ pub(crate) fn hit_search_output(matches: &[SearchMatch], kind: &str) -> String {
         let file_lines: Option<Vec<String>> = std::fs::read_to_string(&m.path)
             .ok()
             .map(|content| content.lines().map(str::to_string).collect());
+        // 5irj: stable per-file dedupe key (start, stop, kind, sym,
+        // fallback_text). kind is uniform for the whole call, so comparing it
+        // is a no-op, but it keeps the key explicit and future-proof if a
+        // mixed-kind call ever lands. fallback_text is None for readable files
+        // and Some(hit.text) for unreadable ones, so same path/line/kind/sym
+        // records whose emitted `| line: text` differs stay distinct.
+        let mut emitted: Vec<(usize, usize, &str, String, Option<String>)> = Vec::new();
         for hit in &matches[idx..end] {
             let line = hit.line.max(1);
             let (start, stop) = match &file_lines {
@@ -116,6 +127,10 @@ pub(crate) fn hit_search_output(matches: &[SearchMatch], kind: &str) -> String {
                 ),
                 _ => (line, line),
             };
+            let fallback_text: Option<String> = match &file_lines {
+                Some(lines) if !lines.is_empty() => None,
+                _ => Some(hit.text.clone()),
+            };
             // 631q: carry the inferred enclosing symbol when the file is
             // readable; unreadable/binary files keep (file-scope).
             let sym = match &file_lines {
@@ -124,6 +139,19 @@ pub(crate) fn hit_search_output(matches: &[SearchMatch], kind: &str) -> String {
                 }
                 _ => "(file-scope)".to_string(),
             };
+            if emitted
+                .iter()
+                .any(|(e_start, e_stop, e_kind, e_sym, e_fallback)| {
+                    *e_start == start
+                        && *e_stop == stop
+                        && *e_kind == kind
+                        && *e_sym == sym
+                        && *e_fallback == fallback_text
+                })
+            {
+                continue;
+            }
+            emitted.push((start, stop, kind, sym.clone(), fallback_text));
             out.push_str(&format!(
                 "HIT {}#L{}-L{} kind={} sym={}\n",
                 hit.path, start, stop, kind, sym
@@ -1018,5 +1046,80 @@ mod tests {
             rendered,
             "HIT /base/gone.txt#L7-L7 kind=regex sym=(file-scope)\n| 7: hit text"
         );
+    }
+
+    #[test]
+    fn adjacent_matches_sharing_a_context_window_emit_one_hit_record() {
+        // 5irj: the original two-match find fixture (alpha at L1 and alphabet
+        // at L3 in a 3-line file) clamps both TARGET_CONTEXT_LINES=2 windows
+        // to L1-L3. The byte-identical windows must collapse to exactly one
+        // HIT header while every matching line stays visible.
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("tiny.txt");
+        std::fs::write(&file, "alpha\nbeta\nalphabet\n").unwrap();
+        let path = file.display().to_string();
+        let root = dir.path().display().to_string();
+        let matches = vec![
+            SearchMatch {
+                base: root.clone(),
+                path: path.clone(),
+                rel: "tiny.txt".to_string(),
+                line: 1,
+                text: "alpha".to_string(),
+            },
+            SearchMatch {
+                base: root,
+                path: path.clone(),
+                rel: "tiny.txt".to_string(),
+                line: 3,
+                text: "alphabet".to_string(),
+            },
+        ];
+        let rendered = hit_search_output(&matches, "literal");
+        assert_eq!(rendered.matches("HIT ").count(), 1, "{rendered}");
+        assert_eq!(
+            rendered,
+            format!(
+                "HIT {path}#L1-L3 kind=literal sym=(file-scope)\n| 1: alpha\n| 2: beta\n| 3: alphabet"
+            )
+        );
+    }
+
+    #[test]
+    fn distinct_windows_and_symbols_stay_distinct() {
+        // 5irj: dedupe must only collapse byte-identical (start, stop, kind,
+        // sym) windows. Hits with different windows or different enclosing
+        // symbols keep their own HIT records.
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("wide.rs");
+        std::fs::write(
+            &file,
+            "fn a() {}\nfirst hit here\nfn b() {}\nsecond hit here\nfn c() {}\n",
+        )
+        .unwrap();
+        let path = file.display().to_string();
+        let root = dir.path().display().to_string();
+        let matches = vec![
+            SearchMatch {
+                base: root.clone(),
+                path: path.clone(),
+                rel: "wide.rs".to_string(),
+                line: 2,
+                text: "first hit here".to_string(),
+            },
+            SearchMatch {
+                base: root,
+                path: path.clone(),
+                rel: "wide.rs".to_string(),
+                line: 4,
+                text: "second hit here".to_string(),
+            },
+        ];
+        let rendered = hit_search_output(&matches, "literal");
+        assert_eq!(rendered.matches("HIT ").count(), 2, "{rendered}");
+        assert!(rendered.contains("sym=fn a() {}"), "{rendered}");
+        assert!(rendered.contains("sym=fn b() {}"), "{rendered}");
+        assert!(rendered.contains("| 2: first hit here"), "{rendered}");
+        assert!(rendered.contains("| 4: second hit here"), "{rendered}");
     }
 }

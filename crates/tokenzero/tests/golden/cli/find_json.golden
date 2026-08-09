@@ -1,11 +1,11 @@
 {
   "accounting": {
-    "billed_tokens": 14,
+    "billed_tokens": 30,
     "cached_tokens": 0,
     "exact_ref_tokens": 28,
     "raw_tokens": 14,
     "recovery_tokens": 0,
-    "visible_tokens": 14
+    "visible_tokens": 30
   },
   "ack": "0",
   "content_type": "search_result",
@@ -53,9 +53,9 @@
     ],
     "search_backend": "internal",
     "session_delta": {
-      "delta_bytes": 40,
+      "delta_bytes": 85,
       "from_hwm": "[DYNAMIC_HWM]",
-      "full_bytes": 40,
+      "full_bytes": 85,
       "saved_bytes": 0,
       "to_hwm": "[DYNAMIC_HWM]"
     },
@@ -69,6 +69,6 @@
   "tool": "find",
   "visible": {
     "kind": "capsule",
-    "text": "sample.txt:1:alpha\nsample.txt:3:alphabet"
+    "text": "HIT sample.txt#L1-L3 kind=literal sym=(file-scope)\n| 1: alpha\n| 2: beta\n| 3: alphabet"
   }
 }

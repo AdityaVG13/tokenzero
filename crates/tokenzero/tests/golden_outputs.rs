@@ -56,6 +56,10 @@ fn run_primary_golden(id: &str, kind: &str, dir: &tempfile::TempDir, cache: &Pat
             );
         }
         "find" => {
+            // 5irj: two adjacent matches (alpha@L1, alphabet@L3) whose
+            // TARGET_CONTEXT_LINES windows clamp to the same L1-L3 range;
+            // hit_search_output dedupes the byte-identical window to one HIT
+            // record, and this golden pins that collapsed output.
             std::fs::write(&file, "alpha\nbeta\nalphabet\n").unwrap();
             let output = assert_success(
                 tokenzero_cmd()
