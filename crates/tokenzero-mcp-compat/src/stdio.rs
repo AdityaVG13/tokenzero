@@ -156,6 +156,7 @@ fn run_stdio_core<W: Write + Send + 'static>(
                     break 'server false;
                 }
                 if !recoverable {
+                    exit_code = 1;
                     break 'server true;
                 }
             }
@@ -682,6 +683,51 @@ mod lifecycle_tests {
         let (event_tx, event_rx) = mpsc::channel();
         event_tx.send(StdioEvent::Eof).unwrap();
 
+        let outcome = run_stdio_core(config, event_tx, event_rx, Vec::<u8>::new());
+        assert_eq!(
+            outcome,
+            StdioLoopOutcome {
+                exit_code: 0,
+                stdin_stopped: true,
+            }
+        );
+    }
+
+    #[test]
+    fn unrecoverable_parse_error_exits_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = EngineConfig::for_root(dir.path());
+        let (event_tx, event_rx) = mpsc::channel();
+        event_tx
+            .send(StdioEvent::ParseError {
+                framed: true,
+                error: "Content-Length: 5".to_string(),
+                recoverable: false,
+            })
+            .unwrap();
+        let outcome = run_stdio_core(config, event_tx, event_rx, Vec::<u8>::new());
+        assert_eq!(
+            outcome,
+            StdioLoopOutcome {
+                exit_code: 1,
+                stdin_stopped: true,
+            }
+        );
+    }
+
+    #[test]
+    fn recoverable_parse_error_continues_until_eof() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = EngineConfig::for_root(dir.path());
+        let (event_tx, event_rx) = mpsc::channel();
+        event_tx
+            .send(StdioEvent::ParseError {
+                framed: false,
+                error: "bad json".to_string(),
+                recoverable: true,
+            })
+            .unwrap();
+        event_tx.send(StdioEvent::Eof).unwrap();
         let outcome = run_stdio_core(config, event_tx, event_rx, Vec::<u8>::new());
         assert_eq!(
             outcome,

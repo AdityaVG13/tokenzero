@@ -247,7 +247,7 @@ pub(crate) fn run_supervisor_loop<W: Write>(
                     break SupervisorLoopOutcome::forced(0);
                 }
                 if !recoverable {
-                    break SupervisorLoopOutcome::client(0);
+                    break SupervisorLoopOutcome::client(1);
                 }
             }
             SupervisorEvent::FromClient(StdioEvent::Eof) => {
@@ -641,6 +641,51 @@ mod lifecycle_tests {
             })
         ));
         assert_eq!(pumps.join(), Ok(()));
+    }
+
+    #[test]
+    fn unrecoverable_framed_parse_error_terminates_with_exit_one() {
+        let (event_tx, event_rx) = mpsc::channel();
+        event_tx
+            .send(SupervisorEvent::FromClient(StdioEvent::ParseError {
+                framed: true,
+                error: "bad frame".to_string(),
+                recoverable: false,
+            }))
+            .unwrap();
+        let spawn = || {
+            Ok(ChildHandles {
+                stdin: Box::new(std::io::sink()),
+                stdout: Box::new(Cursor::new(Vec::<u8>::new())),
+                terminate: Box::new(|| {}),
+            })
+        };
+        let outcome = run_supervisor_loop(spawn, event_tx, event_rx, Vec::<u8>::new());
+        assert_eq!(outcome, SupervisorLoopOutcome::client(1));
+    }
+
+    #[test]
+    fn recoverable_parse_error_continues_not_terminates() {
+        let (event_tx, event_rx) = mpsc::channel();
+        event_tx
+            .send(SupervisorEvent::FromClient(StdioEvent::ParseError {
+                framed: false,
+                error: "{bad json".to_string(),
+                recoverable: true,
+            }))
+            .unwrap();
+        event_tx
+            .send(SupervisorEvent::FromClient(StdioEvent::Eof))
+            .unwrap();
+        let spawn = || {
+            Ok(ChildHandles {
+                stdin: Box::new(std::io::sink()),
+                stdout: Box::new(Cursor::new(Vec::<u8>::new())),
+                terminate: Box::new(|| {}),
+            })
+        };
+        let outcome = run_supervisor_loop(spawn, event_tx, event_rx, Vec::<u8>::new());
+        assert_eq!(outcome, SupervisorLoopOutcome::client(0));
     }
 
     #[test]
