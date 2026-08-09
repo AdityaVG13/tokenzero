@@ -92,7 +92,7 @@ pub(crate) enum SessionLedgerCommand {
     Stats,
     #[command(about = "Export ledger as JSON (includes visible/raw token-turns and DPMT)")]
     Export,
-    #[command(about = "Print the stable schema for the session ledger (session-ledger-v2)")]
+    #[command(about = "Print the stable schema for the session ledger (session-ledger-v3)")]
     Schema,
     #[command(
         about = "Inspect default-off usage telemetry records ({execution_path, raw_tokens, spent_tokens}); sends nothing"
