@@ -7,6 +7,11 @@ use crate::shell_parse::{
 };
 
 pub fn shell_family(command: &str, stdout: &str, stderr: &str) -> String {
+    let combined = format!("{stdout}\n{stderr}");
+    shell_family_with_combined(command, stdout, &combined)
+}
+
+pub(crate) fn shell_family_with_combined(command: &str, stdout: &str, combined: &str) -> String {
     let analysis = shell_analysis_command(command);
     let words = split_shell_words(&analysis);
     let first = words
@@ -20,7 +25,6 @@ pub fn shell_family(command: &str, stdout: &str, stderr: &str) -> String {
         .or_else(|| words.get(1))
         .map(String::as_str)
         .unwrap_or_default();
-    let combined = format!("{stdout}\n{stderr}");
     let family = if is_repo_inventory_command(command) || is_repo_inventory_command(&analysis) {
         "repo-inventory"
     } else if first == "diff"
@@ -49,7 +53,7 @@ pub fn shell_family(command: &str, stdout: &str, stderr: &str) -> String {
         "test"
     } else if ["eslint", "tsc", "ruff", "mypy", "clippy"].contains(&first.as_str()) {
         "lint"
-    } else if ["docker", "kubectl"].contains(&first.as_str()) || looks_status_table(&combined) {
+    } else if ["docker", "kubectl"].contains(&first.as_str()) || looks_status_table(combined) {
         "status"
     } else if serde_json::from_str::<serde_json::Value>(stdout.trim()).is_ok()
         || combined.contains("<testsuite")
@@ -58,7 +62,7 @@ pub fn shell_family(command: &str, stdout: &str, stderr: &str) -> String {
             .any(|line| line.starts_with("ok ") || line.starts_with("not ok "))
     {
         "structured"
-    } else if looks_diagnostic(&combined) {
+    } else if looks_diagnostic(combined) {
         "diagnostic"
     } else {
         "generic"

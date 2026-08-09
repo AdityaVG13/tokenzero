@@ -2,6 +2,7 @@
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use std::borrow::Cow;
 use std::fmt;
 use std::path::Path;
 
@@ -920,32 +921,36 @@ pub fn shell_raw_tokens(
     ))
 }
 
+fn shell_raw_tokens_with_combined(command: &str, combined: &str) -> usize {
+    count_tokens(&shell_policy::shell_raw_accounting_output_with_payload(
+        command, combined,
+    ))
+}
+
 pub fn render_shell(input: ShellRenderInput<'_>) -> ShellRender {
+    let combined = shell_policy::shell_stream_output(input.exit_code, input.stdout, input.stderr);
     let status = shell_input_status(&input);
-    let policy = decide_shell_policy(
+    let policy = shell_policy::decide_shell_policy_with_combined(
         input.command,
         input.stdout,
         input.stderr,
         input.exit_code,
         input.mode,
+        &combined,
     );
-    let combined = shell_policy::shell_stream_output(input.exit_code, input.stdout, input.stderr);
     let combined_line_count = combined.lines().count();
-    let combined_tokens =
-        shell_raw_tokens(input.command, input.exit_code, input.stdout, input.stderr);
+    let combined_tokens = shell_raw_tokens_with_combined(input.command, &combined);
     let (mut minimal_envelope, mut success_compacted) = (false, false);
     let max_t = input.max_visible_tokens;
     let cp = should_compact_tiny_shell(&input, &policy, &status);
-    let cd = should_compact_short_failure_shell(&input, &policy, &status, &combined);
-    let ci = should_compact_repo_inventory_shell(&input, &policy, &status);
-    let case = if cp {
-        ShellViewCase::CompactTiny
-    } else if cd {
-        ShellViewCase::CompactDiagnostic
-    } else if ci {
-        ShellViewCase::CompactInventory
+    let (case, cd, ci) = if cp {
+        (ShellViewCase::CompactTiny, false, false)
+    } else if should_compact_short_failure_shell(&input, &policy, &status, &combined) {
+        (ShellViewCase::CompactDiagnostic, true, false)
+    } else if should_compact_repo_inventory_shell(&input, &policy, &status) {
+        (ShellViewCase::CompactInventory, false, true)
     } else {
-        ShellViewCase::PolicyBased
+        (ShellViewCase::PolicyBased, false, false)
     };
     let context = ShellRenderContext {
         policy: &policy,
@@ -959,7 +964,7 @@ pub fn render_shell(input: ShellRenderInput<'_>) -> ShellRender {
         case,
         &input,
         &context,
-        &body,
+        body.as_ref(),
         success_compacted,
         &mut minimal_envelope,
     );
@@ -974,12 +979,12 @@ pub fn render_shell(input: ShellRenderInput<'_>) -> ShellRender {
     }
 }
 
-fn build_shell_body(
+fn build_shell_body<'a>(
     case: ShellViewCase,
     input: &ShellRenderInput<'_>,
-    context: &ShellRenderContext<'_>,
+    context: &'a ShellRenderContext<'a>,
     success_compacted: &mut bool,
-) -> String {
+) -> Cow<'a, str> {
     let ShellRenderContext {
         policy,
         status,
@@ -989,16 +994,18 @@ fn build_shell_body(
     } = context;
     let (combined_tokens, max_tokens) = (*combined_tokens, *max_tokens);
     match case {
-        ShellViewCase::CompactTiny => compact_shell_view(input.stdout),
+        ShellViewCase::CompactTiny => Cow::Owned(compact_shell_view(input.stdout)),
         ShellViewCase::CompactDiagnostic => {
-            compact_diagnostic_shell_view(input.stdout, input.stderr)
+            Cow::Owned(compact_diagnostic_shell_view(input.stdout, input.stderr))
         }
-        ShellViewCase::CompactInventory => compact_repo_inventory_view(input.command, input.stdout),
+        ShellViewCase::CompactInventory => {
+            Cow::Owned(compact_repo_inventory_view(input.command, input.stdout))
+        }
         ShellViewCase::PolicyBased => {
             let mut body = if matches!(policy.policy.as_str(), "exact" | "passthrough") {
-                combined.to_string()
+                Cow::Borrowed(*combined)
             } else {
-                match policy.policy.as_str() {
+                Cow::Owned(match policy.policy.as_str() {
                     "diagnostic"
                         if input.exit_code == Some(0)
                             && status.pipeline_masking_warning.is_some() =>
@@ -1012,16 +1019,16 @@ fn build_shell_body(
                     "dedupe" => dedupe_lines_impl(combined, 6, true),
                     "diff-aware" => diff_summary(combined, 160),
                     _ => summarize_lines(combined, 18, 12, ""),
-                }
+                })
             };
             if should_compact_success_noise(input, status) && policy.policy != "exact" {
-                let mut best_tokens = count_tokens(&body);
+                let mut best_tokens = count_tokens(body.as_ref());
                 if let Some(view) = success_noise_view(input.command, input.stdout, input.stderr) {
                     let view_tokens = count_tokens(&view);
                     if view_tokens < best_tokens
                         || (policy.policy == "diagnostic" && view_tokens * 2 <= combined_tokens)
                     {
-                        body = view;
+                        body = Cow::Owned(view);
                         best_tokens = view_tokens;
                         *success_compacted = true;
                     }
@@ -1031,16 +1038,19 @@ fn build_shell_body(
                     "dedupe" | "passthrough" | "diagnostic"
                 ) && best_tokens > shell_success_summary_budget(max_tokens)
                 {
-                    let squeezed =
-                        summarize_tokens(&body, shell_success_summary_budget(max_tokens), "");
+                    let squeezed = summarize_tokens(
+                        body.as_ref(),
+                        shell_success_summary_budget(max_tokens),
+                        "",
+                    );
                     if count_tokens(&squeezed) < best_tokens {
-                        body = squeezed;
+                        body = Cow::Owned(squeezed);
                         *success_compacted = true;
                     }
                 }
             }
             if policy.policy != "exact" && policy.policy != "passthrough" {
-                body = mask_visible_secrets(&body);
+                body = Cow::Owned(mask_visible_secrets(body.as_ref()));
             }
             body
         }
@@ -1102,7 +1112,10 @@ fn shell_output_strategy(cp: bool, cd: bool, ci: bool, sc: bool, me: bool) -> &'
 }
 
 fn push_shell_kv(out: &mut String, k: &str, v: &str) {
-    out.push_str(&format!("{k}: {v}\n"));
+    out.push_str(k);
+    out.push_str(": ");
+    out.push_str(v);
+    out.push('\n');
 }
 
 fn push_optional_shell_kv(out: &mut String, k: &str, v: Option<&str>) {

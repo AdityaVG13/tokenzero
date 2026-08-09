@@ -1,7 +1,7 @@
 use crate::render::domain::{
     is_expected_false_exit, is_repo_inventory_command, is_search_no_match,
 };
-use crate::shell_family::shell_family;
+use crate::shell_family::shell_family_with_combined;
 use crate::shell_parse::{
     failed_segment, looks_diagnostic, masking_warning, pipeline_rerun_command, repeated_line_count,
     shell_syntax_summary_for_status,
@@ -86,12 +86,23 @@ pub fn decide_shell_policy(
     exit_code: Option<i32>,
     mode: Mode,
 ) -> PolicyDecision {
-    let family = shell_family(command, stdout, stderr);
+    let combined = format!("{stdout}\n{stderr}");
+    decide_shell_policy_with_combined(command, stdout, stderr, exit_code, mode, &combined)
+}
+
+pub(crate) fn decide_shell_policy_with_combined(
+    command: &str,
+    stdout: &str,
+    stderr: &str,
+    exit_code: Option<i32>,
+    mode: Mode,
+    combined: &str,
+) -> PolicyDecision {
+    let family = shell_family_with_combined(command, stdout, combined);
     let requested = mode.effective_policy();
     if requested != Mode::Auto {
         return policy_decision(family, (requested.as_str(), "explicit user mode"));
     }
-    let combined = format!("{stdout}\n{stderr}");
     let search_no_match = is_search_no_match(command, stdout, stderr, exit_code);
     let expected_false_exit = is_expected_false_exit(command, stdout, stderr, exit_code);
     let status_hazard = failed_segment(command, stdout, stderr, exit_code).is_some()
@@ -99,7 +110,7 @@ pub fn decide_shell_policy(
     let policy = auto_shell_policy(
         command,
         &family,
-        &combined,
+        combined,
         exit_code,
         search_no_match,
         expected_false_exit,
@@ -172,12 +183,16 @@ pub(crate) fn shell_raw_accounting_output(
     stderr: &str,
 ) -> String {
     let payload = shell_stream_output(exit_code, stdout, stderr);
+    shell_raw_accounting_output_with_payload(command, &payload)
+}
+
+pub(crate) fn shell_raw_accounting_output_with_payload(command: &str, payload: &str) -> String {
     let mut raw = String::with_capacity(command.len() + payload.len() + 10);
     raw.push_str("command: ");
     raw.push_str(command);
     if !payload.is_empty() {
         raw.push('\n');
-        raw.push_str(&payload);
+        raw.push_str(payload);
     }
     raw
 }
