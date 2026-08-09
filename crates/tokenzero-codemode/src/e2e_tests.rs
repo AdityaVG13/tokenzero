@@ -1,24 +1,84 @@
-use super::{CodeModeOptions, CodeModeStatus, execute_codemode_with_options};
+use super::{CodeModeOptions, CodeModeResult, CodeModeStatus};
 
-// Serializes tests that mutate TOKENZERO_CHANNEL_SEPARATION (vz89.11).
-static CHANNEL_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+/// dq9v: e2e executions must never resolve ambient TOKENZERO_CACHE_PATH.
+/// rch forwards the developer shell env, which would point the engine at the
+/// shared live store (~/.tokenzero) and fail these tests on any unresolved
+/// plan journal there. This module-local wrapper shadows
+/// super::execute_codemode_with_options and injects a deterministic
+/// test-local cache path whenever the caller did not pin one explicitly.
+/// The file name derives from the test thread name hash plus the process id:
+/// repeated calls within one test share state, while parallel tests or
+/// processes never collide. Explicit cache_path options pass through
+/// untouched (the engine resolution already honors explicit over env).
+fn execute_codemode_with_options(plan: &str, options: CodeModeOptions) -> CodeModeResult {
+    let options = if options.cache_path.is_some() {
+        options
+    } else {
+        CodeModeOptions {
+            cache_path: Some(test_local_cache_path(options.root.as_deref())),
+            ..options
+        }
+    };
+    super::execute_codemode_with_options(plan, options)
+}
 
-fn with_channel_gate<R>(value: Option<&str>, f: impl FnOnce() -> R) -> R {
-    let _guard = CHANNEL_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    // SAFETY: gated by CHANNEL_ENV_LOCK; no other test reads this var.
-    unsafe {
-        match value {
-            Some(v) => std::env::set_var(tokenzero_core::CHANNEL_SEPARATION_ENV, v),
-            None => std::env::remove_var(tokenzero_core::CHANNEL_SEPARATION_ENV),
+/// Stable cache file per test and explicit root. Keep it outside that root so
+/// tree/read assertions cannot observe test-harness state.
+fn test_local_cache_path(root: Option<&std::path::Path>) -> std::path::PathBuf {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    std::thread::current()
+        .name()
+        .unwrap_or("unnamed")
+        .hash(&mut hasher);
+    root.hash(&mut hasher);
+    std::process::id().hash(&mut hasher);
+    let file_name = format!("tokenzero-codemode-e2e-{:016x}.json", hasher.finish());
+    E2E_CACHE_DIR
+        .get_or_init(|| tempfile::tempdir().expect("process-scoped e2e temp dir"))
+        .path()
+        .join(file_name)
+}
+
+/// Process-scoped temp dir for all implicit e2e caches (dq9v).
+static E2E_CACHE_DIR: std::sync::OnceLock<tempfile::TempDir> = std::sync::OnceLock::new();
+
+/// Marker env that tells the isolated child process to execute the channel
+/// gate closure directly instead of recursing into another subprocess.
+const CHANNEL_GATE_CHILD_ENV: &str = "TOKENZERO_E2E_CHANNEL_GATE_CHILD";
+
+/// vz89.11: run the gated body in a child test process so the process-global
+/// TOKENZERO_CHANNEL_SEPARATION env is set/removed via safe Command::env /
+/// env_remove and never mutated in-process (the crate forbids unsafe_code and
+/// edition 2024 marks set_var/remove_var unsafe). The parent re-executes the
+/// current test binary filtered to exactly this test (the libtest thread name
+/// is the unique test path) with the child marker set; the child sees the
+/// marker and runs the closure directly, so there is no recursion. A child
+/// failure fails the parent test, preserving integration coverage.
+fn with_channel_gate(value: Option<&str>, f: impl FnOnce()) {
+    if std::env::var_os(CHANNEL_GATE_CHILD_ENV).is_some() {
+        f();
+        return;
+    }
+    let test_name = std::thread::current()
+        .name()
+        .expect("libtest names test threads with the test path")
+        .to_string();
+    let exe = std::env::current_exe().expect("current test executable");
+    let mut cmd = std::process::Command::new(exe);
+    // The thread name is the registered libtest path, unique across the
+    // binary, so this filter selects exactly this one test in the child.
+    cmd.arg(&test_name).env(CHANNEL_GATE_CHILD_ENV, "1");
+    match value {
+        Some(v) => {
+            cmd.env(tokenzero_core::CHANNEL_SEPARATION_ENV, v);
+        }
+        None => {
+            cmd.env_remove(tokenzero_core::CHANNEL_SEPARATION_ENV);
         }
     }
-    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f));
-    // SAFETY: same lock still held; restores the unset default.
-    unsafe { std::env::remove_var(tokenzero_core::CHANNEL_SEPARATION_ENV) };
-    match result {
-        Ok(value) => value,
-        Err(payload) => std::panic::resume_unwind(payload),
-    }
+    let status = cmd.status().expect("channel gate child process");
+    assert!(status.success(), "channel-gate child failed: {status}");
 }
 
 #[test]
