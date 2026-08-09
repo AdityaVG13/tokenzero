@@ -243,9 +243,19 @@ fn scrub_value(value: &mut Value, temp_root: &Path, refs: &mut RefScrubber) {
 fn scrub_temp_path(text: &str, temp_root: &Path) -> String {
     let temp = normalize_path(&temp_root.to_string_lossy());
     let workspace = normalize_path(&workspace_root().to_string_lossy());
+    // hn67: scrub the release binary path regardless of how the executable was
+    // spawned. On rch workers the build target dir lives behind a symlink
+    // (/Users/... -> /home/...), so the compile-time CARGO_BIN_EXE_tokenzero
+    // literal and the runtime current_exe() can disagree by symlink
+    // resolution. Replace both the literal and its canonical form with the
+    // stable [WORKSPACE]/target placeholder.
     let current_exe = normalize_path(env!("CARGO_BIN_EXE_tokenzero"));
+    let current_exe_canonical = std::fs::canonicalize(env!("CARGO_BIN_EXE_tokenzero"))
+        .map(|p| normalize_path(&p.to_string_lossy()))
+        .unwrap_or_else(|_| current_exe.clone());
     normalize_path(text)
         .replace(&current_exe, "[WORKSPACE]/target/debug/tokenzero")
+        .replace(&current_exe_canonical, "[WORKSPACE]/target/debug/tokenzero")
         .replace(&temp, "[TMP]")
         .replace(&workspace, "[WORKSPACE]")
         .replace("/target/debug/tokenzero.exe", "/target/debug/tokenzero")
