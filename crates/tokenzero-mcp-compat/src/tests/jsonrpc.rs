@@ -323,9 +323,12 @@ fn mcp_envelope_is_text_only_by_default() {
         .unwrap();
     let read_text = read["result"]["content"][0]["text"].as_str().unwrap();
     assert!(read_text.contains("alpha"), "{read_text}");
-    // Visible capsules carry session-scoped short aliases (c9b1ca0); the
-    // full-hash blob ref stays recoverable behind the alias table.
-    assert!(read_text.contains("refs: tz://o/"), "{read_text}");
+    // Visible capsules carry a single recovery ref footer (c9b1ca0). The
+    // ordinal alias rewrite (1glt) is published only when the complete
+    // serialized response is strictly cheaper under the same token gauge;
+    // under the default gauge a full `tz://blob/<64hex>` ref is cheaper than
+    // its ordinal, so the footer keeps the full blob ref.
+    assert!(read_text.contains("refs: tz://blob/"), "{read_text}");
     assert_eq!(
         read_text
             .lines()
@@ -337,7 +340,7 @@ fn mcp_envelope_is_text_only_by_default() {
     let legacy_multi_ref = format!("{read_text} tz://s/aaaaaaaaaaaaaaaa tz://s/bbbbbbbbbbbbbbbb");
     assert!(
         tokenzero_core::count_tokens(read_text) < tokenzero_core::count_tokens(&legacy_multi_ref),
-        "ordinal primary footer must reduce TA against multi-ref corpus"
+        "single primary footer must reduce TA against multi-ref corpus"
     );
     // The edit hint rides the refs footer on read responses only: it steers
     // agents to tz_edit instead of a doomed native-Edit-after-tz_read loop.

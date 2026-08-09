@@ -265,11 +265,15 @@ fn cli_slim_envelope_is_default_and_full_is_an_exact_opt_in() {
     );
     let refs = slim["refs"].as_array().expect("slim refs array");
     assert!(!refs.is_empty(), "{slim}");
+    // 1glt: the ordinal rewrite is published only when the complete serialized
+    // response is strictly cheaper under the same token gauge. Under the
+    // default gauge a full `tz://blob/<64hex>` ref (6 tokens) is cheaper than
+    // its ordinal `tz://o/<gen>/<ord>` (8 tokens), so the full blob ref stays
+    // and remains the exact expandable identity.
+    let first_ref = refs[0].as_str().expect("slim refs[0] string");
     assert!(
-        refs[0]
-            .as_str()
-            .is_some_and(|reference| reference.starts_with("tz://o/")),
-        "full blob ref is replaced by a durable ordinal: {slim}"
+        first_ref.starts_with("tz://blob/"),
+        "full blob ref stays when the ordinal rewrite is not a whole-response win: {slim}"
     );
     for reference in refs.iter().filter_map(serde_json::Value::as_str) {
         assert_eq!(

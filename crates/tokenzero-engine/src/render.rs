@@ -108,6 +108,20 @@ impl TokenZeroEngine {
     /// Rewrite full-hash blob refs in a tool response to durable ordinal
     /// aliases and persist the ordinal-to-full mapping before emission.
     pub fn apply_session_visible_ref_aliases(&self, response: &mut ToolResponse) {
+        self.apply_session_visible_ref_aliases_with_meter(response, count_tokens);
+    }
+
+    /// Same as [`Self::apply_session_visible_ref_aliases`], but the complete
+    /// full-ref rewrite is published only when it is strictly cheaper under
+    /// `meter`; production passes the real rendering gauge (`count_tokens`).
+    /// Tests inject a deterministic meter so the accepted path is reachable
+    /// without depending on the default lexical gauge (1glt). Accounting and
+    /// repeated path/symbol token counts always use the real `count_tokens`.
+    fn apply_session_visible_ref_aliases_with_meter(
+        &self,
+        response: &mut ToolResponse,
+        meter: impl Fn(&str) -> usize,
+    ) {
         let full_refs = response
             .refs
             .iter()
@@ -160,13 +174,22 @@ impl TokenZeroEngine {
         // Rewrite the complete response, not only refs/visible/telemetry.
         // `detail_ref`, safety, channels, diagnostics, and future string fields
         // must never retain a duplicate full ref after the public refs changed.
-        let Ok(mut encoded) = serde_json::to_string(response) else {
+        // Publish the rewrite only when the complete serialized response is
+        // strictly cheaper under the same token gauge used for rendering: BPE
+        // cost is contextual, so an ordinal that is shorter in isolation can
+        // cost more once the surrounding JSON tokens merge (1glt). When the
+        // rewrite is not strictly cheaper the response keeps its byte/field
+        // semantics; the lossless ordinal mapping stays persisted but is not
+        // exposed in any field.
+        let Ok(encoded) = serde_json::to_string(response) else {
             return;
         };
-        for (full_ref, alias) in &aliases {
-            encoded = encoded.replace(full_ref, alias);
-        }
-        let Ok(rewritten) = serde_json::from_str::<ToolResponse>(&encoded) else {
+        let Some(rewritten_encoded) =
+            rewrite_full_refs_if_strictly_cheaper(&encoded, &aliases, meter)
+        else {
+            return;
+        };
+        let Ok(rewritten) = serde_json::from_str::<ToolResponse>(&rewritten_encoded) else {
             return;
         };
         *response = rewritten;
@@ -196,6 +219,23 @@ impl TokenZeroEngine {
             );
         }
     }
+}
+
+/// Rewrite every `full_ref` occurrence in the complete serialized response
+/// only when the rewritten serialization is strictly cheaper under `meter`
+/// than the original. BPE token cost is contextual, so candidate-local or
+/// lexical length comparisons are not a sound proof of a win: the decision
+/// uses the whole serialized form with the same gauge used for rendering.
+fn rewrite_full_refs_if_strictly_cheaper(
+    encoded: &str,
+    aliases: &[(String, String)],
+    meter: impl Fn(&str) -> usize,
+) -> Option<String> {
+    let mut rewritten = encoded.to_owned();
+    for (full_ref, alias) in aliases {
+        rewritten = rewritten.replace(full_ref, alias);
+    }
+    (meter(&rewritten) < meter(encoded)).then_some(rewritten)
 }
 
 pub fn served_record(content: &str, stored: &StoredPayload) -> ServedRecord {
@@ -913,6 +953,7 @@ mod preview_tests {
     use super::{
         EngineConfig, LocalPayloadPolicy, RecoveryStoreLease, TokenZeroEngine, expansion_response,
         local_payload_policy, preview, render_text, render_text_with_complete_read,
+        rewrite_full_refs_if_strictly_cheaper,
     };
 
     #[test]
@@ -1083,7 +1124,13 @@ b
             user_message: Some(format!("expand {full_ref}")),
         });
 
-        engine.apply_session_visible_ref_aliases(&mut response);
+        // The default lexical gauge counts an ordinal (8 tokens) as costlier
+        // than a full blob ref (6 tokens), so the accepted path exercises the
+        // same engine flow with an injected char-count meter (74-char blob
+        // ref vs ~11-char ordinal) through the real persist/all-fields flow.
+        engine.apply_session_visible_ref_aliases_with_meter(&mut response, |text| {
+            text.chars().count()
+        });
         let alias = response.refs[0].ref_id.clone();
         assert!(alias.starts_with("tz://o/"), "{alias}");
         assert_eq!(response.detail_ref.as_deref(), Some(alias.as_str()));
@@ -1093,12 +1140,76 @@ b
                 .contains(&full_ref),
             "every response field must use the same alias: {response:?}"
         );
+        // The gate is whole-serialization, not lexical: equal/larger rewrites
+        // are rejected, strictly smaller ones win (vocabulary-free meter).
+        let meter = |text: &str| text.chars().count();
+        assert_eq!(
+            rewrite_full_refs_if_strictly_cheaper("aa", &[("aa".into(), "bb".into())], meter),
+            None
+        );
+        assert_eq!(
+            rewrite_full_refs_if_strictly_cheaper("aa", &[("aa".into(), "bbbb".into())], meter),
+            None
+        );
+        assert_eq!(
+            rewrite_full_refs_if_strictly_cheaper(
+                "full-aaaa full-aaaa",
+                &[("full-aaaa".into(), "bb".into())],
+                meter
+            ),
+            Some("bb bb".to_owned())
+        );
         drop(engine);
 
         let mut restarted = RecoveryStore::new(Some(cache));
         let expanded = restarted.expand(&alias, Some("raw"), None, None, None, None);
         assert!(expanded.found, "{}", expanded.reason);
         assert_eq!(expanded.content, "exact payload");
+    }
+
+    #[test]
+    fn session_alias_rewrite_is_rejected_when_the_complete_response_is_not_cheaper() {
+        let dir = tempdir().unwrap();
+        let cache = dir.path().join("recovery.json");
+        let mut config = EngineConfig::for_root(dir.path());
+        config.cache_path = cache.clone();
+        let engine = TokenZeroEngine::new(config);
+        let full_ref = engine
+            .recovery_store()
+            .store_blob("exact payload", ContentType::Unknown)
+            .unwrap();
+        let mut response = ToolResponse::ok(
+            "read",
+            Mode::Auto,
+            format!("visible {full_ref}"),
+            vec![RefRecord {
+                kind: "blob".into(),
+                ref_id: full_ref.clone(),
+                bytes: 13,
+                live: true,
+            }],
+            Accounting {
+                raw_tokens: 3,
+                visible_tokens: 3,
+                recovery_tokens: 0,
+                billed_tokens: 3,
+                cached_tokens: 0,
+                exact_ref_tokens: None,
+            },
+        );
+        let before = serde_json::to_string(&response).unwrap();
+        engine.apply_session_visible_ref_aliases(&mut response);
+        let after = serde_json::to_string(&response).unwrap();
+        // Default lexical gauge: `tz://o/<gen>/<ord>` (8 tokens) costs more
+        // than `tz://blob/<64hex>` (6 tokens), so the gated rewrite is
+        // rejected and the response keeps its byte/field semantics; the
+        // persisted alias must not leak into any field.
+        assert_eq!(
+            after, before,
+            "rejected rewrite must leave the response untouched"
+        );
+        assert!(after.contains(&full_ref), "full ref stays the visible identity");
+        assert!(!after.contains("tz://o/"), "no ordinal alias is exposed: {after}");
     }
 
     #[test]
