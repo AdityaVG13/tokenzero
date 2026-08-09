@@ -66,6 +66,12 @@ impl TokenZeroEngine {
         max_visible_tokens: usize,
         options: ServeOptions,
     ) -> ToolResponse {
+        // Bind caller-supplied paths to the configured root so relative
+        // arguments target `call_root`, never the process working directory.
+        let paths: Vec<PathBuf> = paths
+            .iter()
+            .map(|path| self.resolve_call_path(path))
+            .collect();
         // Single-flight the serve so a second pipelined identical read waits
         // for this one to record its serve before it looks up the seen-set
         // (otherwise both miss and both serve full). Keyed per path+range, so

@@ -226,6 +226,19 @@ impl TokenZeroEngine {
             abs.starts_with(root)
         })
     }
+
+    /// Resolve a caller-supplied path against `call_root`: relative paths
+    /// bind to the configured root instead of the process working directory,
+    /// and absolute paths pass through unchanged (`Path::join` semantics).
+    /// Filesystem operations must use the resolved path so the allowlist
+    /// check and the actual I/O agree on the same file.
+    pub(crate) fn resolve_call_path(&self, path: &Path) -> PathBuf {
+        if path.is_absolute() {
+            path.to_path_buf()
+        } else {
+            self.config.call_root.join(path)
+        }
+    }
 }
 
 fn write_cache_pack_manifest(path: &Path, bytes: &[u8]) -> std::io::Result<()> {

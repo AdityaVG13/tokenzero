@@ -14,8 +14,11 @@ impl TokenZeroEngine {
         mode: Mode,
         max_visible_tokens: usize,
     ) -> ToolResponse {
-        if !self.path_allowed(path) {
-            return path_not_allowed("edit", path);
+        // Bind caller-supplied paths to the configured root so relative
+        // arguments target `call_root`, never the process working directory.
+        let path = self.resolve_call_path(path);
+        if !self.path_allowed(&path) {
+            return path_not_allowed("edit", &path);
         }
         if edits.is_empty() {
             return failure_response(
@@ -44,7 +47,7 @@ impl TokenZeroEngine {
             }
             String::new()
         } else {
-            let bytes = match fs::read(path) {
+            let bytes = match fs::read(&path) {
                 Ok(bytes) => bytes,
                 Err(err) => {
                     return failure_response(
@@ -86,15 +89,15 @@ impl TokenZeroEngine {
         // the new content. Persist before writing so undo survives the write.
         let pre_stored = store.store_payload_deferred(
             &old_text,
-            detect_content_type(&old_text, Some(path)),
-            Some(path),
+            detect_content_type(&old_text, Some(&path)),
+            Some(&path),
             None,
             None,
         );
         let post_stored = store.store_payload_deferred(
             &applied.text,
-            detect_content_type(&applied.text, Some(path)),
-            Some(path),
+            detect_content_type(&applied.text, Some(&path)),
+            Some(&path),
             None,
             None,
         );
@@ -122,7 +125,7 @@ impl TokenZeroEngine {
             );
         }
         if !dry_run {
-            if let Err(err) = write_atomic(path, applied.text.as_bytes()) {
+            if let Err(err) = write_atomic(&path, applied.text.as_bytes()) {
                 return failure_response(
                     "edit",
                     "edit_failed",
@@ -143,7 +146,7 @@ impl TokenZeroEngine {
                 self.session_apply(
                     vec![(
                         ServeKey::File {
-                            path: comparable_path(path),
+                            path: comparable_path(&path),
                             start: None,
                             end: None,
                         },

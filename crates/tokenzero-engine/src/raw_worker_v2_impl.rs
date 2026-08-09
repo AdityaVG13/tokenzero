@@ -1071,6 +1071,92 @@ mod tests {
     }
 
     #[test]
+    fn relative_read_and_edit_bind_to_call_root_not_process_cwd() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().to_path_buf();
+        // Process cwd is deliberately NOT the bound root: relative path args
+        // must resolve against EngineConfig.call_root, never the worker's
+        // working directory.
+        let fixture = root.join("fixture.txt");
+        std::fs::write(&fixture, "needle\n").unwrap();
+        let engine = engine_from_options(&RawWorkerServeOptions {
+            root: root.clone(),
+            ..Default::default()
+        });
+        let mut session = RawWorkerV2Session::default();
+        let rev = revision();
+        let cap = local_capability();
+        let frame = |session: &mut RawWorkerV2Session, value: &Value| -> Value {
+            serde_json::from_slice(&execute_raw_worker_v2_frame(
+                &engine,
+                session,
+                &serde_json::to_vec(value).unwrap(),
+            ))
+            .unwrap()
+        };
+        let ack = frame(
+            &mut session,
+            &json!({"kind":"handshake","request":{
+                "protocol_version":"zerostack.raw_worker.v2",
+                "root": root.to_string_lossy(), "session_id":"session-1",
+                "expected_engine":"tokenzero","expected_worker_revision":rev,
+                "expected_contract_digest":cap["semantic_contract_digest"],
+                "expected_registry_digest":cap["operation_registry_digest"]
+            }}),
+        );
+        assert_eq!(ack["kind"], "handshake_ack", "{ack}");
+        let trace = |request_id: &str| {
+            json!({"runtime_id":"rt","cell_id":"cell","request_id":request_id,
+                "trace_id":request_id,"worker_revision":rev,
+                "contract_digest":cap["semantic_contract_digest"]})
+        };
+        // Relative read binds to the bound root, not process cwd.
+        let read = frame(
+            &mut session,
+            &json!({"kind":"call","request":{
+                "request_id":"req-rel-read","op":"read",
+                "args":{"path":"fixture.txt"},"trace":trace("req-rel-read")
+            }}),
+        );
+        assert_eq!(read["kind"], "result", "{read}");
+        let read_value = &read["result"]["value"];
+        assert_eq!(read_value["status"], "ok", "{read}");
+        assert!(
+            read_value["visible"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("needle"),
+            "{read}"
+        );
+        // Relative edit targets the bound root and actually mutates disk.
+        let edit = frame(
+            &mut session,
+            &json!({"kind":"call","request":{
+                "request_id":"req-rel-edit","op":"edit",
+                "args":{"path":"fixture.txt",
+                    "edits":[{"find":"needle","replace":"changed"}]},
+                "trace":trace("req-rel-edit")
+            }}),
+        );
+        assert_eq!(edit["kind"], "result", "{edit}");
+        assert_eq!(
+            std::fs::read_to_string(&fixture).unwrap(),
+            "changed\n",
+            "relative edit must mutate the file inside the bound root"
+        );
+        // Escape remains rejected: `..` must not resolve out of the bound root.
+        let escape = frame(
+            &mut session,
+            &json!({"kind":"call","request":{
+                "request_id":"req-escape","op":"read",
+                "args":{"path":"../fixture.txt"},"trace":trace("req-escape")
+            }}),
+        );
+        assert_eq!(escape["kind"], "error", "{escape}");
+        assert_eq!(escape["error"]["kind"], "policy", "{escape}");
+    }
+
+    #[test]
     fn unrequested_accounting_preserves_the_legacy_response_shape() {
         let mut session = RawWorkerV2Session::default();
         let rev = revision();
