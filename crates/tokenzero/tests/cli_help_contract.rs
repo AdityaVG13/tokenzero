@@ -1256,7 +1256,8 @@ fn cli_help_has_no_empty_subcommand_blurbs() {
     let commands_section = stdout.split("Commands:").nth(1).expect("Commands section");
     let commands_section = commands_section.split("Options:").next().unwrap();
     for line in commands_section.lines() {
-        let line = line.trim_end();
+        let cleaned = strip_ansi(line);
+        let line = cleaned.trim_end();
         if line.len() <= 2 {
             continue;
         }
@@ -1309,6 +1310,113 @@ fn cli_help_has_no_empty_subcommand_blurbs() {
             "experimental_commands missing {eval}"
         );
         assert!(!names.contains(&eval), "{eval} must stay out of commands");
+    }
+}
+
+#[test]
+fn cli_help_primary_verbs_bounded_and_experimental_hidden() {
+    // r0x7 (R-015): top-level help stays <=20 primary verbs. Eval/audit
+    // artifacts and low-level compatibility/server commands are hidden from
+    // help but remain directly invocable. capabilities still lists the normal
+    // thin verbs and quarantines experimental_commands separately.
+    let output = Command::cargo_bin("tokenzero")
+        .unwrap()
+        .arg("--help")
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    let commands_section = stdout.split("Commands:").nth(1).expect("Commands section");
+    let commands_section = commands_section.split("Options:").next().unwrap();
+
+    let mut names: Vec<String> = Vec::new();
+    for line in commands_section.lines() {
+        let cleaned = strip_ansi(line);
+        let line = cleaned.trim_end();
+        if line.len() <= 2 {
+            continue;
+        }
+        if let Some(name) = line.split_whitespace().next() {
+            let name = name.trim_end_matches(',');
+            // clap auto-generates a `help` subcommand; it is not a primary verb.
+            if name == "help" {
+                continue;
+            }
+            if !names.iter().any(|n| n == name) {
+                names.push(name.to_string());
+            }
+        }
+    }
+
+    assert!(
+        names.len() <= 20,
+        "primary help must expose <=20 commands, got {}: {names:?}",
+        names.len()
+    );
+
+    for primary in [
+        "read", "find", "grep", "glob", "tree", "edit", "recall", "fetch", "run",
+        "ingest", "expand", "mem", "discover", "cache", "doctor", "pulse",
+        "install", "capabilities", "robot-docs", "codemode",
+    ] {
+        assert!(
+            names.iter().any(|n| n == primary),
+            "top-level help missing primary verb {primary}: {names:?}"
+        );
+    }
+
+    for hidden in [
+        "harm-eval", "claim-audit", "shell-matrix", "one-shot-eval", "ws-skeleton",
+        "package-audit", "bench", "mcp-server", "mcp-smoke", "init",
+        "client-status", "cache-pack", "session-open", "rewrite", "hook", "reach",
+        "quote", "stats", "session-ledger", "clients",
+    ] {
+        assert!(
+            !names.iter().any(|n| n == hidden),
+            "top-level help must not advertise {hidden}: {names:?}"
+        );
+    }
+
+    // Hidden commands stay directly invocable (help renders their own usage).
+    for (verb, needle) in [
+        ("harm-eval", "harm-eval"),
+        ("install-smoke", "install-smoke"),
+        ("mcp-server", "mcp-server"),
+        ("stats", "stats"),
+    ] {
+        let direct = Command::cargo_bin("tokenzero")
+            .unwrap()
+            .args([verb, "--help"])
+            .output()
+            .unwrap();
+        assert!(
+            direct.status.success(),
+            "hidden command {verb} must stay directly invocable: {}",
+            String::from_utf8_lossy(&direct.stderr)
+        );
+        let direct_stdout = String::from_utf8_lossy(&direct.stdout);
+        assert!(
+            direct_stdout.contains(needle),
+            "{verb} --help must render its own usage containing {needle}"
+        );
+    }
+
+    // capabilities keeps exposing normal thin verbs plus experimental list.
+    let output = Command::cargo_bin("tokenzero")
+        .unwrap()
+        .args(["capabilities", "--json"])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let json: Value = serde_json::from_slice(&output.stdout).unwrap();
+    let names: Vec<&str> = json["commands"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|row| row["name"].as_str())
+        .collect();
+    for thin in ["read", "find", "grep", "stats", "cache", "clients", "mcp-server"] {
+        assert!(names.contains(&thin), "capabilities.commands missing {thin}");
     }
 }
 

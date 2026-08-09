@@ -56,6 +56,32 @@ pub fn assert_no_ansi(bytes: &[u8]) {
     );
 }
 
+/// Remove ANSI CSI/OSC escape sequences from help text so command names parse
+/// cleanly even when clap emits bold/underline styling.
+pub fn strip_ansi(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut chars = text.chars();
+    while let Some(c) = chars.next() {
+        if c != '\x1b' {
+            out.push(c);
+            continue;
+        }
+        if chars.clone().next() == Some('[') {
+            // CSI: ESC [ params final (0x40..=0x7e)
+            chars.next();
+            for n in chars.by_ref() {
+                if ('\x40'..='\x7e').contains(&n) {
+                    break;
+                }
+            }
+        } else {
+            // Short 2-byte escape (e.g. ESC ] or ESC (): consume one more byte.
+            let _ = chars.next();
+        }
+    }
+    out
+}
+
 pub fn setup_temp_with_cache() -> (TempDir, std::path::PathBuf) {
     let dir = tempdir().unwrap();
     let cache = dir.path().join("cache.json");
