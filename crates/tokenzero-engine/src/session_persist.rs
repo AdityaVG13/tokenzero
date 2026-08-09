@@ -453,7 +453,7 @@ impl SessionPersistLock {
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)?;
         }
-        let mut file = OpenOptions::new()
+        let file = OpenOptions::new()
             .read(true)
             .write(true)
             .create(true)

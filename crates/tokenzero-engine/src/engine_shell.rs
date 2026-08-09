@@ -1079,9 +1079,10 @@ impl TokenZeroEngine {
         };
         // The plan root is already part of the zero_execute request. Surface cwd only
         // when the command deliberately runs somewhere else.
-        let visible_text = if resolved_cwd == self.config.call_root {
-            visible_text
-        } else if visible_text.contains("\ncwd: ") || visible_text.starts_with("cwd: ") {
+        let visible_text = if resolved_cwd == self.config.call_root
+            || visible_text.contains("\ncwd: ")
+            || visible_text.starts_with("cwd: ")
+        {
             visible_text
         } else if visible_text.starts_with("# shell") {
             let mut lines = visible_text.lines();

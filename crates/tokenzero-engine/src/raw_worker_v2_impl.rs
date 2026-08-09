@@ -772,7 +772,7 @@ struct CallJob {
 fn write_response(writer: &Mutex<std::io::Stdout>, response: &[u8]) -> std::io::Result<()> {
     let mut out = writer
         .lock()
-        .map_err(|_| std::io::Error::new(std::io::ErrorKind::Other, "writer poisoned"))?;
+        .map_err(|_| std::io::Error::other("writer poisoned"))?;
     out.write_all(response)?;
     out.flush()
 }

@@ -427,7 +427,7 @@ pub fn run_raw_worker_serve(opts: &RawWorkerServeOptions) -> i32 {
     let engine = engine_from_options(opts);
     let stdin = io::stdin();
     let mut stdout = io::stdout();
-    let mut lines = stdin.lock().lines();
+    let lines = stdin.lock().lines();
 
     // Emit ready banner for OMP/router (single line JSON).
     let ready = json!({
@@ -442,7 +442,7 @@ pub fn run_raw_worker_serve(opts: &RawWorkerServeOptions) -> i32 {
     }
     let _ = stdout.flush();
 
-    while let Some(line) = lines.next() {
+    for line in lines {
         let line = match line {
             Ok(l) => l,
             Err(e) => {

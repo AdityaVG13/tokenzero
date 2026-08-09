@@ -117,7 +117,7 @@ fn prune_plan_journals_at(
             journals.push((metadata.modified().unwrap_or(UNIX_EPOCH), path));
         }
     }
-    journals.sort_by(|left, right| right.0.cmp(&left.0));
+    journals.sort_by_key(|(modified, _)| std::cmp::Reverse(*modified));
     let scanned = journals.len();
     let mut removed = 0_usize;
     for (index, (modified, path)) in journals.into_iter().enumerate() {

@@ -269,6 +269,10 @@ pub fn local_payload_policy(
     }
 }
 
+// Public API (module `render` is exported): the eight arguments map 1:1 to
+// distinct capsule/rendering semantics, so a parameter struct would churn the
+// published surface without a lint gain. Targeted allow, not a blanket one.
+#[allow(clippy::too_many_arguments)]
 pub fn recoverable_capsule(
     rendered: &str,
     fallback: &str,

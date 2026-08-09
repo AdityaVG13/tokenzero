@@ -706,6 +706,7 @@ fn enforce_ledger_total_bytes(path: &Path, max_bytes: u64) -> io::Result<()> {
     Ok(())
 }
 
+#[cfg(test)]
 fn append_record(path: &Path, record: &LedgerRecord, max_bytes: u64) -> io::Result<()> {
     let mut line = serde_json::to_vec(record).map_err(io::Error::other)?;
     line.push(b'\n');

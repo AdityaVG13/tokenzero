@@ -182,35 +182,6 @@ pub(crate) fn flat_search_output(matches: &[SearchMatch]) -> String {
         .join("\n")
 }
 
-/// Lossless compact projection of search matches: one `# root:` header per
-/// searched root, matches grouped by file with the path emitted once.
-pub(crate) fn grouped_search_output(matches: &[SearchMatch]) -> String {
-    let mut lines = Vec::new();
-    let mut current_base: Option<&str> = None;
-    let mut idx = 0;
-    while idx < matches.len() {
-        let m = &matches[idx];
-        if current_base != Some(m.base.as_str()) {
-            lines.push(format!("# root: {}", m.base));
-            current_base = Some(m.base.as_str());
-        }
-        let mut end = idx + 1;
-        while end < matches.len() && matches[end].base == m.base && matches[end].rel == m.rel {
-            end += 1;
-        }
-        if end - idx == 1 {
-            lines.push(format!("{}:{}:{}", m.rel, m.line, m.text));
-        } else {
-            lines.push(format!("{}:", m.rel));
-            for file_match in &matches[idx..end] {
-                lines.push(format!("  {}: {}", file_match.line, file_match.text));
-            }
-        }
-        idx = end;
-    }
-    lines.join("\n")
-}
-
 /// Lossless compact projection of glob matches as an indented prefix trie.
 ///
 /// Root and component labels are JSON strings. A trailing `/` marks a

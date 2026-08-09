@@ -84,6 +84,7 @@ fn candidates(text: &str) -> Vec<(&str, Vec<(usize, usize)>)> {
 /// same token gauge used for refs proves that the visible form is smaller.
 /// Each ordinal and its content-addressed short/full forms resolve through the
 /// RecoveryStore alias table to byte-identical payloads.
+#[cfg(test)]
 pub fn alias_repeated_paths_and_symbols(store: &mut RecoveryStore, text: &str) -> String {
     match alias_repeated_paths_and_symbols_if_changed(store, text) {
         Some(rewritten) => rewritten,

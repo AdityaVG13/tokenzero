@@ -87,7 +87,7 @@ pub enum GateRefusal {
     Policy(String),
 }
 
-pub fn tool_class(tool_name: &str) -> ToolClass {
+pub(crate) fn tool_class(tool_name: &str) -> ToolClass {
     let canonical = strip_tool_alias(tool_name);
     match canonical {
         "execute_code" | "codemode_search" | "codemode_describe" | "codemode"

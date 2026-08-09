@@ -58,6 +58,10 @@ jobs:
         run: cargo test --workspace --locked --no-fail-fast
       - name: Rust clippy
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - name: TokenZero-engine strict clippy lane
+        # G2.3 targeted lane: engine lib only; --no-deps keeps unrelated
+        # dependency diagnostics out of the gate.
+        run: cargo clippy -p tokenzero-engine --lib --no-deps --locked -- -D warnings
       - name: Rust shell matrix
         run: cargo run --locked -p tokenzero-cli --bin tokenzero --no-default-features -- shell-matrix --output-json results/current/rust_shell_matrix_${{ matrix.os }}.json --json
       - name: Windows verifier

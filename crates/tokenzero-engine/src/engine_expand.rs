@@ -188,13 +188,17 @@ fn expand_with_reload_on_miss(
     store: &mut RecoveryStore,
     active_cache: &Path,
     ref_id: &str,
-    selector: Option<&str>,
-    start_line: Option<usize>,
-    end_line: Option<usize>,
-    anchor_kind: Option<&str>,
-    symbol: Option<&str>,
+    params: &ExpandParams,
 ) -> ExpansionResult {
-    let result = store.expand(ref_id, selector, start_line, end_line, anchor_kind, symbol);
+    let selector = params.selector.as_deref().or(Some("raw"));
+    let result = store.expand(
+        ref_id,
+        selector,
+        params.start_line,
+        params.end_line,
+        params.anchor_kind.as_deref(),
+        params.symbol.as_deref(),
+    );
     if result.found {
         return result;
     }
@@ -203,8 +207,14 @@ fn expand_with_reload_on_miss(
     refreshed.recovery_count = store.recovery_count;
     refreshed.recovery_tokens = store.recovery_tokens;
     refreshed.legacy_read_count = store.legacy_read_count;
-    let refreshed_result =
-        refreshed.expand(ref_id, selector, start_line, end_line, anchor_kind, symbol);
+    let refreshed_result = refreshed.expand(
+        ref_id,
+        selector,
+        params.start_line,
+        params.end_line,
+        params.anchor_kind.as_deref(),
+        params.symbol.as_deref(),
+    );
     if refreshed_result.found {
         *store = refreshed;
         refreshed_result
@@ -221,16 +231,7 @@ fn resolve_slice(
     let selector = params.selector.as_deref().or(Some("raw"));
     let anchor = params.anchor_kind.as_deref();
     let symbol = params.symbol.as_deref();
-    let result = expand_with_reload_on_miss(
-        store,
-        active_cache,
-        &params.ref_id,
-        selector,
-        params.start_line,
-        params.end_line,
-        anchor,
-        symbol,
-    );
+    let result = expand_with_reload_on_miss(store, active_cache, &params.ref_id, params);
     if result.found {
         return Ok(result);
     }
@@ -372,16 +373,7 @@ impl TokenZeroEngine {
                 );
             }
             let since_result = crate::perf_profile::_profile_expand_resolve(|| {
-                expand_with_reload_on_miss(
-                    &mut store,
-                    &self.config.cache_path,
-                    since_ref,
-                    params.selector.as_deref().or(Some("raw")),
-                    params.start_line,
-                    params.end_line,
-                    params.anchor_kind.as_deref(),
-                    params.symbol.as_deref(),
-                )
+                expand_with_reload_on_miss(&mut store, &self.config.cache_path, since_ref, &params)
             });
             if !since_result.found {
                 let code = match since_result.reason.as_str() {

@@ -101,7 +101,7 @@ pub struct SessionMemory {
 }
 
 impl SessionMemory {
-    pub fn lookup(&self, key: &ServeKey, content_sha256: &str) -> SeenState {
+    pub(crate) fn lookup(&self, key: &ServeKey, content_sha256: &str) -> SeenState {
         let cross_session = self.restored_content_hashes.contains(content_sha256);
         match self.records.get(key) {
             Some(record) if record.content_sha256 == content_sha256 => SeenState::Unchanged {
@@ -125,14 +125,14 @@ impl SessionMemory {
         }
     }
 
-    pub fn record(&mut self, key: ServeKey, mut record: ServedRecord) {
+    pub(crate) fn record(&mut self, key: ServeKey, mut record: ServedRecord) {
         if let Some(existing) = self.records.get(&key) {
             record.serve_count = existing.serve_count + 1;
         }
         self.records.insert(key, record);
     }
 
-    pub fn absorb(&mut self, summary: &SessionSummary) {
+    pub(crate) fn absorb(&mut self, summary: &SessionSummary) {
         self.rollup.dedup_hits += summary.dedup_notes;
         self.rollup.diff_hits += summary.diff_serves;
         self.rollup.visible_tokens_saved += summary.visible_saved;
