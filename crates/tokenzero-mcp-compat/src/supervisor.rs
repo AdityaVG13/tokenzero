@@ -244,7 +244,7 @@ pub(crate) fn run_supervisor_loop<W: Write>(
                 )
                 .to_string();
                 if write_stdio_response(&mut client_out, framed, &response).is_err() {
-                    break SupervisorLoopOutcome::forced(0);
+                    break SupervisorLoopOutcome::forced(1);
                 }
                 if !recoverable {
                     break SupervisorLoopOutcome::client(1);
@@ -272,7 +272,7 @@ pub(crate) fn run_supervisor_loop<W: Write>(
                 )
                 .is_err()
                 {
-                    break SupervisorLoopOutcome::forced(0);
+                    break SupervisorLoopOutcome::forced(1);
                 }
             }
             SupervisorEvent::ChildExited {
@@ -346,7 +346,7 @@ fn drain_child_after_client_eof<W: Write>(
                 if forward_child_response(generation, &text, child.generation, state, client_out)
                     .is_err()
                 {
-                    return 0;
+                    return 1;
                 }
             }
             Ok(SupervisorEvent::ChildExited { generation }) if generation == child.generation => {
@@ -686,6 +686,84 @@ mod lifecycle_tests {
         };
         let outcome = run_supervisor_loop(spawn, event_tx, event_rx, Vec::<u8>::new());
         assert_eq!(outcome, SupervisorLoopOutcome::client(0));
+    }
+
+    struct FailingWriter;
+
+    impl Write for FailingWriter {
+        fn write(&mut self, _buf: &[u8]) -> std::io::Result<usize> {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::BrokenPipe,
+                "client output failed",
+            ))
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn parse_error_client_write_failure_exits_one() {
+        let (event_tx, event_rx) = mpsc::channel();
+        event_tx
+            .send(SupervisorEvent::FromClient(StdioEvent::ParseError {
+                framed: false,
+                error: "bad json".to_string(),
+                recoverable: true,
+            }))
+            .unwrap();
+        let spawn = || {
+            Ok(ChildHandles {
+                stdin: Box::new(std::io::sink()),
+                stdout: Box::new(Cursor::new(Vec::<u8>::new())),
+                terminate: Box::new(|| {}),
+            })
+        };
+        let outcome = run_supervisor_loop(spawn, event_tx, event_rx, FailingWriter);
+        assert_eq!(outcome, SupervisorLoopOutcome::forced(1));
+    }
+
+    #[test]
+    fn child_response_forward_failure_exits_one() {
+        let (event_tx, event_rx) = mpsc::channel();
+        event_tx
+            .send(SupervisorEvent::FromChild {
+                generation: 1,
+                text: r#"{"jsonrpc":"2.0","id":1,"result":{}}"#.to_string(),
+            })
+            .unwrap();
+        let spawn = || {
+            Ok(ChildHandles {
+                stdin: Box::new(std::io::sink()),
+                stdout: Box::new(Cursor::new(Vec::<u8>::new())),
+                terminate: Box::new(|| {}),
+            })
+        };
+        let outcome = run_supervisor_loop(spawn, event_tx, event_rx, FailingWriter);
+        assert_eq!(outcome, SupervisorLoopOutcome::forced(1));
+    }
+
+    #[test]
+    fn drain_child_response_forward_failure_exits_one() {
+        let (event_tx, event_rx) = mpsc::channel();
+        event_tx
+            .send(SupervisorEvent::FromClient(StdioEvent::Eof))
+            .unwrap();
+        event_tx
+            .send(SupervisorEvent::FromChild {
+                generation: 1,
+                text: r#"{"jsonrpc":"2.0","id":1,"result":{}}"#.to_string(),
+            })
+            .unwrap();
+        let spawn = || {
+            Ok(ChildHandles {
+                stdin: Box::new(std::io::sink()),
+                stdout: Box::new(Cursor::new(Vec::<u8>::new())),
+                terminate: Box::new(|| {}),
+            })
+        };
+        let outcome = run_supervisor_loop(spawn, event_tx, event_rx, FailingWriter);
+        assert_eq!(outcome, SupervisorLoopOutcome::client(1));
     }
 
     #[test]
