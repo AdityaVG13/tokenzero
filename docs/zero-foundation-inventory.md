@@ -2,6 +2,35 @@
 
 Evidence snapshot from the tracked trees. This is an inventory only. It does not select an ownership or release model and does not extract code.
 
+## Current TokenZero ownership (live HEAD) — compact move list
+
+Canonical machine-readable per-file ownership truth remains hub-only at `../ZeroStack/tests/data/loc_ownership_v1.json`; no TokenZero-local JSON snapshot is created. That file is blob-bound classification input, not a cached measurement table. Per-file `code_lines` is not stored in the JSON; it is computed live from the bound `HEAD` blob via `tokei` in `../ZeroStack/tests/scripts/check_loc_majority.py`. Compatibility shims are represented canonically as `classification: thin-adapter` together with exact `rule` / `justification` / `hub_target`, not a redundant boolean field.
+
+- TokenZero `HEAD`: `9b4df921fe72259975f08768c90f9fdafad539b8`.
+- Canonical hub `loc_ownership_v1.json` currently binds TokenZero `56d10770b7f0b950708f75716007d6aa3217f776`; hub refresh to `9b4df92` is pending after current engine commits settle.
+- Live current-`HEAD` measurement for the four audited TokenZero crates (`crates/tokenzero-core`, `crates/tokenzero-recovery`, `crates/tokenzero-runtime`, `crates/tokenzero-engine`): **147 files, 54,930 tokei `code` LOC**; of those **120 files / 44,080 LOC are `domain-local`** and **27 files / 10,850 LOC are `shared-candidate`** (classification from `check_loc_majority.py` reviewed rules; LOC from live blob `tokei`).
+
+Grouped move table for those 27 `shared-candidate` files (counts use live `tokei` `code` LOC at `9b4df92`; destination is the pinned hub crate; adapter is the minimal retained TokenZero shim):
+
+| group / rule | files | code LOC | hub destination | minimal retained local adapter |
+|---|---:|---:|---|---|
+| `operation-abi` | 9 | 2,327 | `zero-abi` | thin `tokenzero-core` catalog/digest/registry re-export pinning the TokenZero operation registry to hub `zero-abi` types |
+| `raw-worker` | 4 | 2,397 | `zero-abi` protocol + `zero-codemode` lifecycle | protocol adapter (`raw_worker_v2_protocol`) delegating framing/digests to `zero-abi` and lifecycle adapter routing `raw_worker_v2_impl` through hub `zero-codemode` host |
+| `telemetry` | 3 | 506 | `zero-abi` / `zero-ledger` counters | `usage_telemetry` + `telemetry` shim mapping hub `TelemetrySchema` counters to TokenZero model/accounting semantics (model identity stays local) |
+| `codemode-host` | 4 | 1,272 | `zero-codemode` | `codemode_catalog` / `codemode_wire` + dispatcher test adapter registering TokenZero ops on the hub `zero-codemode` host |
+| `session-discovery` | 1 | 437 | `zero-codemode` | `session_persist` thin Session/store-root adapter |
+| `surface-protocol` | 1 | 223 | `zero-codemode` | `surface_handshake` handshake/capability adapter |
+| `store-cas` | 3 | 2,830 | `zero-store` | `embedded_store` / `segment_store` / `shared_cas` CAS bridge delegating to hub `zero-store` CAS |
+| `zeroref` (tests) | 2 | 858 | `zero-ref` + `ZeroStack/tests` shared suite | shared-conformance test shim consuming hub `zero-ref` vectors via `ZeroStack/tests` |
+
+Reproduction (read-only, no Cargo/rustc, no staging):
+
+```sh
+python3 ../ZeroStack/tests/scripts/check_loc_majority.py --write-inventory --inventory /tmp/tokenzero-spwo-current-inventory.json ../ZeroStack ../FSZero ../GraphZero .
+```
+
+Then, live `tokei` `code` LOC per bound blob is obtained through `collect_sources` from the same script (iterates each repo's `HEAD` blobs, filters `EXCLUDED_SEGMENTS`/generated markers, runs `tokei --output json --files` on the materialized blob set, and joins the result to the inventory's `classification`/`rule`/`hub_target` by `(repo, path)`). No separate TokenZero inventory file is written.
+
 ## Snapshot and authority
 
 | tree | recorded snapshot `HEAD` | tracked Rust files | Tokei code LOC |
