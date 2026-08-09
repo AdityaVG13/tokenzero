@@ -1311,6 +1311,10 @@ fn cli_help_has_no_empty_subcommand_blurbs() {
         );
         assert!(!names.contains(&eval), "{eval} must stay out of commands");
     }
+    // q41g: one machine-readable exclusion policy applies to the full list.
+    let policy = &json["experimental_commands_policy"];
+    assert_eq!(policy["status"], "excluded_with_rationale");
+    assert!(policy["rationale"].as_str().unwrap().contains("CLI-only"));
 }
 
 #[test]

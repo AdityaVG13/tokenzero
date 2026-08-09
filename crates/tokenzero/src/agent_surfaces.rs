@@ -343,6 +343,10 @@ const COMMANDS: &[CommandSurface] = &[
 
 /// 45lv (R-004): eval/audit verbs that exist on the CLI but are not
 /// agent-primary. Listed so capabilities neither hides nor promotes them.
+/// q41g (SURF-H-002): experimental_commands_policy provides one
+/// machine-readable exclusion status and rationale tied to the full list.
+const EXPERIMENTAL_SURFACE_RATIONALE: &str =
+    "CLI-only audit, evaluation, and diagnostic commands are excluded from the agent-primary FeatureUniverse because they are not stable agent-contract routes; invoke them directly as CLI verbs.";
 const EXPERIMENTAL_COMMANDS: &[&str] = &[
     "bench",
     "mcp-smoke",
@@ -635,6 +639,10 @@ pub fn capabilities_json() -> serde_json::Value {
             }
         },
         "experimental_commands": EXPERIMENTAL_COMMANDS,
+        "experimental_commands_policy": {
+            "status": "excluded_with_rationale",
+            "rationale": EXPERIMENTAL_SURFACE_RATIONALE,
+        },
         "output_schemas": output_schemas,
         "exit_codes": EXIT_CODES,
         "env_vars": [
