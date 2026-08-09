@@ -245,7 +245,7 @@ fn raw_read_bypasses_note_but_still_records() {
         4000,
     );
     assert_eq!(raw.status, "ok");
-    assert_eq!(visible_text(&raw), content.trim_end());
+    assert_eq!(visible_text(&raw), content);
     assert!(!visible_text(&raw).contains("unchanged:"));
     // The raw serve still recorded, so the next normal read dedups.
     let third = read_ok(&engine, &file);
