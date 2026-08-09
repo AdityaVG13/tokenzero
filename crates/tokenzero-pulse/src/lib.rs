@@ -33,9 +33,48 @@ const PULSE_SOURCE_OF_TRUTH: &str = "jsonl";
 const PULSE_SYNC_SCHEMA_VERSION: &str = "pulse-sync-v1";
 const PULSE_SYNC_LOCK_TIMEOUT: Duration = Duration::from_secs(5);
 const PULSE_EVENT_LOCK_TIMEOUT: Duration = Duration::from_secs(30);
+const TOKENIZER_COMPONENT_MAX_LEN: usize = 64;
+const TOKENIZER_ID_ERROR: &str =
+    "tokenizer id must name a real tokenizer or use estimator:<name>";
 
+/// Built-in production counts use TokenZero's deliberately labelled lexical
+/// gauge. The core gauges are approximate until an exact tokenizer adapter is
+/// linked; provider adapters may supply an exact `provider/model@<digest>` id.
 fn default_tokenizer_id() -> String {
     "estimator:tokenzero-core".to_string()
+}
+
+fn is_tokenizer_slug(component: &str) -> bool {
+    let bytes = component.as_bytes();
+    !bytes.is_empty()
+        && bytes.len() <= TOKENIZER_COMPONENT_MAX_LEN
+        && bytes.first().is_some_and(u8::is_ascii_alphanumeric)
+        && bytes.last().is_some_and(u8::is_ascii_alphanumeric)
+        && bytes
+            .iter()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
+}
+
+/// Validate the one Pulse tokenizer-id grammar at every trust boundary.
+///
+/// Estimators are explicit slugs. Exact adapters use the canonical identity
+/// emitted by `ExactTokenizerIdentity::ledger_identity`.
+fn valid_tokenizer_id(id: &str) -> bool {
+    if let Some(name) = id.strip_prefix("estimator:") {
+        return is_tokenizer_slug(name);
+    }
+    let Some((provider_and_model, digest)) = id.rsplit_once('@') else {
+        return false;
+    };
+    let Some((provider, model)) = provider_and_model.split_once('/') else {
+        return false;
+    };
+    is_tokenizer_slug(provider)
+        && is_tokenizer_slug(model)
+        && digest.len() == 64
+        && digest
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
 macro_rules! pulse_structs {
@@ -191,14 +230,10 @@ impl PulseEvent {
     }
 
     pub fn with_tokenizer_id(mut self, tokenizer_id: &str) -> Result<Self, &'static str> {
-        let id = tokenizer_id.trim();
-        if id.is_empty()
-            || id.chars().any(char::is_whitespace)
-            || (id.contains("estimat") && !id.starts_with("estimator:"))
-        {
-            return Err("tokenizer id must name a real tokenizer or use estimator:<name>");
+        if !valid_tokenizer_id(tokenizer_id) {
+            return Err(TOKENIZER_ID_ERROR);
         }
-        self.tokenizer_id = id.to_string();
+        self.tokenizer_id = tokenizer_id.to_string();
         Ok(self)
     }
 }
@@ -313,6 +348,9 @@ fn open_nofollow(path: &Path, mode: PulseFileOpenMode) -> IoResult<(fs::File, bo
 }
 
 pub fn record_event(path: &Path, event: &PulseEvent) -> IoResult<()> {
+    if !valid_tokenizer_id(&event.tokenizer_id) {
+        return Err(IoError::new(ErrorKind::InvalidInput, TOKENIZER_ID_ERROR));
+    }
     // Serialize before taking the cross-process lock so formatting work never
     // lengthens the critical section. The lock then orders event appends with
     // sync/import/export and protects the complete append + durability barrier.
@@ -997,7 +1035,7 @@ fn parse_event_line(line: &[u8]) -> Result<Option<PulseEvent>, ()> {
         return Ok(None);
     }
     let event = serde_json::from_slice::<PulseEvent>(trimmed).map_err(|_| ())?;
-    if event.schema_version != PULSE_SCHEMA_VERSION {
+    if event.schema_version != PULSE_SCHEMA_VERSION || !valid_tokenizer_id(&event.tokenizer_id) {
         return Err(());
     }
     Ok(Some(event))
@@ -1309,7 +1347,7 @@ impl SessionLedgerReport {
             },
             "entry": {
                 "session_id": "string — verbatim local Pulse session identifier (MCP session id or 'unknown'); correlatable and not anonymized",
-                "tokenizer_id": "real tokenizer id or estimator:<name>",
+                "tokenizer_id": "estimator:<slug> or provider/model@<64 lowercase hex identity digest>; built-in tool_call counts use the explicitly labelled estimator:tokenzero-core gauge until an exact adapter is linked",
                 "turns": "usize — number of tool calls in this session (decision count proxy)",
                 "raw_tokens": "usize — total raw (uncompressed) tokens across all turns",
                 "visible_tokens": "usize — total visible (compressed) tokens across all turns",

@@ -1007,9 +1007,10 @@ fn session_ledger_debits_m_rec_and_allows_negative_net_savings() {
 fn session_ledger_is_keyed_by_session_and_tokenizer_id() {
     let dir = tempdir().unwrap();
     let path = dir.path().join("events.jsonl");
+    let exact_id = format!("qwen/test-model@{}", "ab".repeat(32));
     let mut real = test_event("read");
     real.session_id = Some("same-session".into());
-    real = real.with_tokenizer_id("qwen3.5").unwrap();
+    real = real.with_tokenizer_id(&exact_id).unwrap();
     let mut estimated = test_event("expand");
     estimated.session_id = Some("same-session".into());
     estimated = estimated
@@ -1028,7 +1029,7 @@ fn session_ledger_is_keyed_by_session_and_tokenizer_id() {
     let real_entry = report
         .sessions
         .iter()
-        .find(|entry| entry.tokenizer_id == "qwen3.5")
+        .find(|entry| entry.tokenizer_id == exact_id)
         .unwrap();
     let estimator_entry = report
         .sessions
@@ -1040,11 +1041,46 @@ fn session_ledger_is_keyed_by_session_and_tokenizer_id() {
         "first event keeps the full two-turn horizon"
     );
     assert_eq!(estimator_entry.visible_token_turns, 20);
-    assert!(
-        PulseEvent::tool_call("read", "raw", 1, 1, 0, 0, 0, None)
-            .with_tokenizer_id("cl100k-estimate")
-            .is_err()
-    );
+    for invalid in [
+        "qwen3.5",
+        "estimator:",
+        "estimator:bad/name",
+        "approx-heuristic",
+        "charcount",
+        "qwen/test-model@AB00000000000000000000000000000000000000000000000000000000000000",
+        "qwen/test-model@ab",
+        "qwen/test/model@0000000000000000000000000000000000000000000000000000000000000000",
+    ] {
+        assert!(
+            PulseEvent::tool_call("read", "raw", 1, 1, 0, 0, 0, None)
+                .with_tokenizer_id(invalid)
+                .is_err(),
+            "accepted invalid tokenizer id: {invalid}"
+        );
+    }
+
+    let mut forged = test_event("forged");
+    forged.tokenizer_id = "charcount".to_string();
+    let forged_path = dir.path().join("forged.jsonl");
+    let error = record_event(&forged_path, &forged).unwrap_err();
+    assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+    assert!(!forged_path.exists());
+
+    let raw_path = dir.path().join("raw-forged.jsonl");
+    let mut raw = serde_json::to_value(test_event("raw")).unwrap();
+    raw["tokenizer_id"] = serde_json::Value::String("approx-heuristic".to_string());
+    fs::write(
+        &raw_path,
+        format!(
+            "{}\n{}\n",
+            serde_json::to_string(&raw).unwrap(),
+            serde_json::to_string(&test_event("valid")).unwrap()
+        ),
+    )
+    .unwrap();
+    let raw_report = report_for_path(&raw_path).unwrap();
+    assert_eq!(raw_report.event_count, 1);
+    assert_eq!(raw_report.skipped_lines, 1);
 }
 
 #[test]
