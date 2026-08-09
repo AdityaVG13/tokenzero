@@ -988,6 +988,96 @@ fn cli_run_recovers_common_wrong_json_and_timeout_invocations() {
 }
 
 #[test]
+fn cli_common_verb_typos_recover_to_canonical_verbs() {
+    // R-011: rn/reed/instal are table-driven top-level verb recoveries that
+    // reach the canonical surface and its typed envelope. Run-family recovery
+    // never rewrites child argv after `--` (CE-P02-01).
+    let dir = tempdir().unwrap();
+    let sample = dir.path().join("sample.txt");
+    std::fs::write(&sample, "TokenZero\n").unwrap();
+    let sample = sample.to_str().unwrap();
+    let allowed_root = dir.path().to_str().unwrap();
+
+    // reed -> read: typed read envelope, status ok, canonical verb recorded.
+    let output = Command::cargo_bin("tokenzero")
+        .unwrap()
+        .env("TOKENZERO_SLIM_ENVELOPE", "0")
+        .args(["reed", sample, "--allowed-root", allowed_root, "--json"])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "reed -> read\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let json: Value = serde_json::from_slice(&output.stdout).unwrap_or_else(|err| {
+        panic!(
+            "reed -> read: {err}\n{}",
+            String::from_utf8_lossy(&output.stdout)
+        )
+    });
+    assert_eq!(json["status"], "ok", "reed -> read");
+    assert!(
+        json["visible"]["text"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("TokenZero"),
+        "typed read envelope must serve the file content: {json}"
+    );
+
+    // instal plan -> install --plan: dry-run plan JSON, no apply.
+    let output = Command::cargo_bin("tokenzero")
+        .unwrap()
+        .current_dir(dir.path())
+        .args([
+            "instal",
+            "plan",
+            "--root",
+            allowed_root,
+            "--mcp",
+            "--agent",
+            "codex",
+            "--json",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "instal plan -> install plan\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let json: Value = serde_json::from_slice(&output.stdout).unwrap_or_else(|err| {
+        panic!(
+            "instal plan: {err}\n{}",
+            String::from_utf8_lossy(&output.stdout)
+        )
+    });
+    assert_eq!(json["status"], "planned", "instal plan");
+    assert_eq!(json["dry_run"], true, "instal plan");
+
+    // rn with `--`: child argv after the delimiter passes through unchanged.
+    let output = Command::cargo_bin("tokenzero")
+        .unwrap()
+        .args(["rn", "--", "printf", "%s\n", "--json"])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "rn -- child\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("stdout:\n--json\n"),
+        "child argv after -- must be untouched; got {stdout}"
+    );
+    assert!(
+        serde_json::from_slice::<Value>(&output.stdout).is_err(),
+        "parent must not promote child --json after the delimiter"
+    );
+}
+
+#[test]
 fn cli_run_preserves_trailing_child_json_without_delimiter() {
     // CE-P02-01: after the first child executable token, --json belongs to the
     // child argv and must not promote the parent envelope.

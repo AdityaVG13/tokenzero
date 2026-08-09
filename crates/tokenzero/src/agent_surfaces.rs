@@ -54,7 +54,7 @@ const fn exit(code: i32, label: &'static str, meaning: &'static str, retryable: 
 const COMMANDS: &[CommandSurface] = &[
     cmd(
         "read",
-        &[],
+        &["reed"],
         "context",
         false,
         true,
@@ -180,7 +180,7 @@ const COMMANDS: &[CommandSurface] = &[
     ),
     cmd(
         "install",
-        &["install plan", "install status"],
+        &["install plan", "install status", "instal"],
         "setup",
         true,
         true,
@@ -807,7 +807,7 @@ tokenzero codemode --json --plan 'await zero.compact("payload")'
 tokenzero codemode 'search:read'
 ```
 
-Recoveries: `capability`, `capabilites`, `robot-help`, `--robot-help`, `rn`, `shell`, `search`, `--jsno`, `--jason`, `--timout`, `cache statuz`, `doctor status`, `doctor statuz`, `pulse stats`, `pulse status`, `install plan`, and `install status` redirect to safe canonical surfaces.
+Recoveries: `capability`, `capabilites`, `robot-help`, `--robot-help`, `rn`, `reed`, `instal`, `shell`, `search`, `--jsno`, `--jason`, `--timout`, `cache statuz`, `doctor status`, `doctor statuz`, `pulse stats`, `pulse status`, `install plan`, and `install status` redirect to safe canonical surfaces.
 
 CodeMode shares `recovery-cache.json` with expand/MCP by default. CodeMode is a separate plan-based execution on the same base tools (not an MCP tool).
 "#

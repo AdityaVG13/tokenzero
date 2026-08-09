@@ -567,10 +567,18 @@ fn normalize_agent_invocation_args(mut argv: Vec<OsString>) -> Vec<OsString> {
         return argv;
     }
     match argv[1].to_str() {
-        Some("rn") => {
+        // R-011: table-driven top-level verb recoveries. After the verb is
+        // canonical, re-enter the normal pipeline so install subcommands still
+        // flow through normalize_install_invocation_args.
+        Some("rn" | "reed" | "instal") => {
             let mut normalized = argv;
-            normalized[1] = OsString::from("run");
-            normalize_run_invocation_args(normalized)
+            normalized[1] = OsString::from(match normalized[1].to_str() {
+                Some("rn") => "run",
+                Some("reed") => "read",
+                Some("instal") => "install",
+                _ => unreachable!("verb rewrite matched above"),
+            });
+            normalize_agent_invocation_args(normalized)
         }
         Some("run" | "shell") => normalize_run_invocation_args(argv),
         Some("install") => normalize_install_invocation_args(argv),
