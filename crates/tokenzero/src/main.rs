@@ -962,7 +962,30 @@ fn handle_ingest(args: IngestArgs) -> Result<EmitResponse> {
     if args.stdin || args.input.is_none() || args.input.as_deref() == Some(Path::new("-")) {
         std::io::stdin().read_to_string(&mut text)?;
     } else if let Some(input) = &args.input {
-        text = fs::read_to_string(input)?;
+        match fs::read_to_string(input) {
+            Ok(loaded) => text = loaded,
+            Err(err) => {
+                // n3fx (R-012): --json must emit a structured JSON error, never
+                // a bare text error, so JSON consumers can parse every path.
+                if args.tool.json {
+                    println!(
+                        "{}",
+                        serde_json::to_string_pretty(&json!({
+                            "schema_version": "tokenzero.cli.v1",
+                            "status": "error",
+                            "tool": "ingest",
+                            "ack": "9",
+                            "error": {
+                                "code": "ingest_read_failed",
+                                "message": format!("could not read {}: {}", input.display(), err),
+                            },
+                        }))?
+                    );
+                    std::process::exit(1);
+                }
+                return Err(err.into());
+            }
+        }
     }
     let kind = content_type_from_kind(&args.kind, &text, args.input.as_deref());
     let source = args

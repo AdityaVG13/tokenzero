@@ -1660,3 +1660,135 @@ fn cli_help_discovers_agent_surfaces() {
     assert!(stdout.contains("robot-docs"));
     assert!(stdout.contains("Agent surfaces:"));
 }
+
+#[test]
+fn cli_json_everywhere_read_side_matrix() {
+    // n3fx (R-012): every read-side command advertised by capabilities must
+    // accept --json and emit parseable JSON (exit 0 success or a structured
+    // JSON error), and its schema must be listed in capabilities.output_schemas.
+    let capabilities = Command::cargo_bin("tokenzero")
+        .unwrap()
+        .args(["capabilities", "--json"])
+        .output()
+        .unwrap();
+    assert!(
+        capabilities.status.success(),
+        "{}",
+        String::from_utf8_lossy(&capabilities.stderr)
+    );
+    let caps: Value = serde_json::from_slice(&capabilities.stdout).unwrap();
+    let output_schemas = caps["output_schemas"]
+        .as_object()
+        .expect("capabilities output_schemas");
+    // Read-side JSON verbs = mutates=false and json=true. hook claude-code is
+    // the only such row without a --json output flag (it is a stdin JSON
+    // adapter whose output is a rewritten command), so the matrix excludes it;
+    // every other advertised row is exercised below.
+    let advertised = caps["commands"]
+        .as_array()
+        .expect("capabilities commands")
+        .iter()
+        .filter(|row| {
+            row["mutates"] == false && row["json"] == true && row["name"] != "hook claude-code"
+        })
+        .map(|row| row["name"].as_str().unwrap())
+        .collect::<Vec<_>>();
+
+    let dir = tempdir().unwrap();
+    let sample = dir.path().join("sample.txt");
+    std::fs::write(&sample, "TokenZero\n").unwrap();
+    let root = dir.path().to_str().unwrap();
+    let sample = sample.to_str().unwrap();
+
+    // (name, output_schema_key, args). schema_key is the capabilities
+    // output_schemas entry; it equals the command name except --robot-triage,
+    // whose schema is documented under doctor_robot_triage.
+    let cases: &[(&str, &str, &[&str])] = &[
+        ("read", "read", &["read", sample, "--allowed-root", root, "--json"]),
+        ("find", "find", &["find", "TokenZero", root, "--allowed-root", root, "--json"]),
+        ("grep", "grep", &["grep", "TokenZero", root, "--allowed-root", root, "--json"]),
+        ("glob", "glob", &["glob", "*.txt", root, "--allowed-root", root, "--json"]),
+        ("tree", "tree", &["tree", root, "--allowed-root", root, "--json"]),
+        ("recall", "recall", &["recall", "zzz-no-match", "--json"]),
+        ("fetch", "fetch", &["fetch", "http://127.0.0.1:1/zzz", "--json"]),
+        ("expand", "expand", &["expand", "tz://o/0/0", "--json"]),
+        ("mem", "mem", &["mem", "--root", root, "--json"]),
+        ("pulse", "pulse", &["pulse", "--root", root, "--json"]),
+        ("doctor", "doctor", &["doctor", "--json"]),
+        ("capabilities", "capabilities", &["capabilities", "--json"]),
+        ("discover", "discover", &["discover", "--json"]),
+        ("stats", "stats", &["stats", "--root", root, "--json"]),
+        ("session-ledger", "session-ledger", &["session-ledger", "--root", root, "--json"]),
+        ("session-open", "session-open", &["session-open", "--root", root, "--json"]),
+        ("cache-pack", "cache-pack", &["cache-pack", "--root", root, "--json"]),
+        ("quote", "quote", &["quote", "--platform", "sh", "--json", "--", "echo", "hi"]),
+        ("rewrite", "rewrite", &["rewrite", "--json", "--", "echo", "hi"]),
+        ("ingest", "ingest", &["ingest", sample, "--json"]),
+        ("run", "run", &["run", "--json", "--", "echo", "hi"]),
+        ("clients", "clients", &["clients", "detect", "--json"]),
+        ("codemode", "codemode", &["codemode", "--json", "--stdin"]),
+        ("--robot-triage", "doctor_robot_triage", &["--robot-triage"]),
+    ];
+
+    // The advertised read-side set and the exercised set must not drift apart.
+    let mut exercised = cases.iter().map(|(name, _, _)| *name).collect::<Vec<_>>();
+    exercised.sort_unstable();
+    let mut advertised = advertised.clone();
+    advertised.sort_unstable();
+    assert_eq!(exercised, advertised, "matrix rows must mirror advertised read-side commands");
+
+    for (name, schema_key, args) in cases {
+        assert!(
+            output_schemas.contains_key(*schema_key),
+            "read-side command {name} is missing from capabilities.output_schemas (key {schema_key})"
+        );
+        let mut child = Command::cargo_bin("tokenzero").unwrap();
+        child
+            .args(*args)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        if *name == "codemode" {
+            // Empty stdin exercises the structured JSON error path.
+            child.stdin(Stdio::piped());
+        }
+        let mut child = child.spawn().unwrap();
+        if let Some(stdin) = child.stdin.take() {
+            let mut stdin = stdin;
+            stdin.write_all(b"").unwrap();
+            stdin.flush().unwrap();
+        }
+        let output = child.wait_with_output().unwrap();
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let parsed: Value = serde_json::from_str(&stdout).unwrap_or_else(|err| {
+            panic!(
+                "{name} --json produced non-JSON stdout: {err}\n{stdout}\nstderr: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        });
+        if !output.status.success() {
+            assert!(
+                parsed.get("error").is_some()
+                    || parsed.get("status") == Some(&Value::String("error".into())),
+                "{name} --json exited {} without a structured JSON error: {stdout}",
+                output.status.code().unwrap_or(-1)
+            );
+        }
+        // n3fx (R-012): when the declared output schema names a version, the
+        // emitted JSON must carry it (schema_version or schema), so metadata
+        // cannot drift from actual output. quote stays shape-only.
+        if let Some(expected) = output_schemas[*schema_key]
+            .get("schema_version")
+            .and_then(Value::as_str)
+        {
+            let actual = parsed
+                .get("schema_version")
+                .or_else(|| parsed.get("schema"))
+                .and_then(Value::as_str);
+            assert_eq!(
+                actual,
+                Some(expected),
+                "{name} stdout schema {actual:?} does not match declared output_schemas[{schema_key}].schema_version {expected:?}: {stdout}"
+            );
+        }
+    }
+}

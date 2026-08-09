@@ -483,6 +483,116 @@ fn mcp_tool_rows() -> Vec<Value> {
 }
 
 pub fn capabilities_json() -> serde_json::Value {
+    // n3fx (R-012): every read-side command advertised by capabilities lists
+    // its output schema here. Tool-backed verbs share the tokenzero.cli.v1
+    // ToolResponse envelope; state/health/plan verbs carry their own version.
+    let cli_tool_schema = json!({
+        "schema_version": "tokenzero.cli.v1",
+        "shape": "tool_response",
+        "status_fields": ["ack", "status", "tool", "schema_version", "error", "telemetry", "refs"]
+    });
+    let mut output_schemas = json!({
+        "capabilities": {
+            "schema_version": "tokenzero.capabilities.v1",
+            "required_keys": [
+                "schema_version",
+                "tool",
+                "version",
+                "contract_version",
+                "features",
+                "feature_flags",
+                "commands",
+                "commands_by_name",
+                "mcp_tools",
+                "surface_parity",
+                "exit_codes",
+                "env_vars"
+            ]
+        },
+        "run": {
+            "schema_version": "tokenzero.cli.v1",
+            "shape": "tool_response",
+            "status_fields": [
+                "status",
+                "tool",
+                "telemetry.command_success",
+                "telemetry.status_label",
+                "telemetry.failed_segment",
+                "refs"
+            ]
+        },
+        "doctor_robot_triage": {
+            "schema_version": "tokenzero.doctor.robot_triage.v1",
+            "invocations": [
+                "tokenzero --robot-triage",
+                "tokenzero robot-triage",
+                "tokenzero doctor --robot-triage"
+            ],
+            "required_keys": [
+                "schema_version",
+                "status",
+                "ok",
+                "health",
+                "summary",
+                "findings",
+                "actions_planned",
+                "recommendations",
+                "recommended_command",
+                "quick_ref",
+                "commands",
+                "mutation_policy"
+            ]
+        },
+        "pulse": {
+            "schema_version": "tokenzero.pulse.v1",
+            "required_keys": ["schema_version", "status", "event_count", "visible_tokens", "recovery_tokens"]
+        },
+        "stats": {
+            "schema_version": "tokenzero.pulse.v1",
+            "required_keys": ["schema_version", "status", "event_count", "cache_hits", "recovery_blobs"]
+        },
+        "doctor": {
+            "schema_version": "tokenzero.doctor.v1",
+            "required_keys": ["schema_version", "status", "ok", "tool", "summary", "findings", "exit_code"]
+        },
+        "session-ledger": {
+            "schema_version": "session-ledger-v3",
+            "required_keys": ["schema_version", "total_sessions", "total_turns", "total_raw_tokens"]
+        },
+        "session-open": {
+            "schema_version": "tokenzero.session-boot.v1",
+            "required_keys": ["schema", "manifest_id", "manifest_path", "delta_path", "delta_ref"]
+        },
+        "clients": {
+            "schema_version": "tokenzero.clients.v1",
+            "required_keys": ["schema_version", "command", "status", "agents", "surfaces"]
+        },
+        "codemode": {
+            "schema_version": "tokenzero.codemode.v1",
+            "required_keys": ["schema_version", "schema", "status", "tool", "ack"]
+        },
+        "quote": {
+            "shape": "quote_result",
+            "required_keys": ["platform", "argv", "command"]
+        }
+    });
+    for tool in [
+        "read",
+        "find",
+        "grep",
+        "glob",
+        "tree",
+        "recall",
+        "fetch",
+        "expand",
+        "mem",
+        "ingest",
+        "discover",
+        "cache-pack",
+        "rewrite",
+    ] {
+        output_schemas[tool] = cli_tool_schema.clone();
+    }
     json!({
         "schema_version": "tokenzero.capabilities.v1",
         "tool": "tokenzero",
@@ -525,58 +635,7 @@ pub fn capabilities_json() -> serde_json::Value {
             }
         },
         "experimental_commands": EXPERIMENTAL_COMMANDS,
-        "output_schemas": {
-            "capabilities": {
-                "schema_version": "tokenzero.capabilities.v1",
-                "required_keys": [
-                    "schema_version",
-                    "tool",
-                    "version",
-                    "contract_version",
-                    "features",
-                    "feature_flags",
-                    "commands",
-                    "commands_by_name",
-                    "mcp_tools",
-                    "surface_parity",
-                    "exit_codes",
-                    "env_vars"
-                ]
-            },
-            "run": {
-                "shape": "tool_response",
-                "status_fields": [
-                    "status",
-                    "tool",
-                    "telemetry.command_success",
-                    "telemetry.status_label",
-                    "telemetry.failed_segment",
-                    "refs"
-                ]
-            },
-            "doctor_robot_triage": {
-                "schema_version": "tokenzero.doctor.robot_triage.v1",
-                "invocations": [
-                    "tokenzero --robot-triage",
-                    "tokenzero robot-triage",
-                    "tokenzero doctor --robot-triage"
-                ],
-                "required_keys": [
-                    "schema_version",
-                    "status",
-                    "ok",
-                    "health",
-                    "summary",
-                    "findings",
-                    "actions_planned",
-                    "recommendations",
-                    "recommended_command",
-                    "quick_ref",
-                    "commands",
-                    "mutation_policy"
-                ]
-            }
-        },
+        "output_schemas": output_schemas,
         "exit_codes": EXIT_CODES,
         "env_vars": [
             {
