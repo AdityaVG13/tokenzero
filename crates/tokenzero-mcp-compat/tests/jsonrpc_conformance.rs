@@ -3,7 +3,7 @@ mod conformance {
     use serde_json::{Value, json};
     use std::fs;
     use tempfile::TempDir;
-    use tokenzero_mcp::{EngineConfig, TokenZeroEngine, handle_jsonrpc};
+    use tokenzero_mcp_compat::{EngineConfig, TokenZeroEngine, handle_jsonrpc};
     type ConformanceSection = (&'static str, fn(&Server));
     struct Server {
         dir: TempDir,
