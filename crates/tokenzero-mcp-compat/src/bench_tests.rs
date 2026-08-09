@@ -31,6 +31,7 @@ struct Fixture {
 #[cfg(feature = "surface-mcp")]
 impl Fixture {
     fn new(tag: &str) -> Self {
+        tokenzero_codemode::install_mcp_bridge();
         let root = std::env::current_dir().unwrap();
         let engine = engine_for_leg(&root, hermetic_cache_path(0, tag, "plan"));
         Self { root, engine }
@@ -46,7 +47,7 @@ impl Fixture {
             &self.engine,
             "execute_code",
             "tz_execute_code",
-            &json!({"plan":plan,"envelope":"v2","ref_first":true}),
+            &json!({"plan":plan,"envelope":"v2","ref_first":true,"limits":{"max_wall_ms":60_000,"hard_max_wall_ms":60_000}}),
         )
         .unwrap();
         fastmcp_content_texts_from_tool_result(&mcp_tool_response(response)).unwrap()
@@ -156,10 +157,11 @@ fn matrix_integrity_sums_exact_and_legs_nonzero() {
 #[cfg(feature = "surface-mcp")]
 #[test]
 fn plan_leg_matches_fastmcp_v2_rendering_byte_for_byte() {
-    let f = Fixture::new("render");
-    let workload = workloads_for_root(&f.root).remove(0);
-    let rendered = f.render(&workload.plan);
-    let measured = f.measure(&workload.plan);
+    let f_render = Fixture::new("render");
+    let workload = workloads_for_root(&f_render.root).remove(0);
+    let rendered = f_render.render(&workload.plan);
+    let f_measure = Fixture::new("render-measure");
+    let measured = f_measure.measure(&workload.plan);
     assert_eq!(measured.visible_tokens, wire_tokens(&rendered));
 }
 
@@ -194,7 +196,7 @@ fn perop_leg_measures_classic_read_text() {
 #[test]
 fn codemode_v2_refs_are_capped_to_returned_value_refs() {
     let f = Fixture::new("refs-cap");
-    let big = (0..300)
+    let big = (0..2000)
         .map(|index| format!("word{index}"))
         .collect::<Vec<_>>()
         .join(" ");
