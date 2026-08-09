@@ -28,6 +28,21 @@ cargo fmt --all -- --check
 target/debug/tokenzero mcp-smoke --json
 ```
 
+### Targeted formatting (dirty worktrees)
+
+Do NOT use `cargo fmt -- path/to/file.rs` as a file allowlist. `cargo fmt`
+ignores trailing paths as a scope filter and may format the entire workspace
+(~60 files). For single-file formatting use the repo-supported helper:
+
+```bash
+scripts/rustfmt_targeted.sh crates/tokenzero-core/src/lib.rs
+scripts/rustfmt_targeted.sh --check crates/tokenzero-core/src/lib.rs
+```
+
+The helper validates explicit `.rs` files inside the repo, rejects zero
+args/directories/non-`.rs`/outside-repo paths, preserves spaces, and runs
+`rustfmt --edition 2024 -- <file>` once per file without invoking cargo-fmt.
+
 ## Workspace
 
 Eight Rust crates:
