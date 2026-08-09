@@ -66,6 +66,7 @@ CLAUDE.md.*
 !/docs/mcp.md
 !/docs/pulse.md
 !/docs/racc.md
+!/docs/radc-non-claims.md
 
 # --- Local execution / handoff records ---
 /RECOVERY_RUNBOOK.md
