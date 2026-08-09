@@ -54,6 +54,7 @@ zero-gate = { git = "https://github.com/AdityaVG13/zerostack", rev = "3eca1c6299
 zero-gauge = { git = "https://github.com/AdityaVG13/zerostack", rev = "3eca1c6299ec5a683d283ddad0aae62ece2a3abc" }
 zero-ledger = { git = "https://github.com/AdityaVG13/zerostack", rev = "3eca1c6299ec5a683d283ddad0aae62ece2a3abc" }
 zero-ref = { git = "https://github.com/AdityaVG13/zerostack", rev = "3eca1c6299ec5a683d283ddad0aae62ece2a3abc" }
+zero-store = { git = "https://github.com/AdityaVG13/zerostack", rev = "3eca1c6299ec5a683d283ddad0aae62ece2a3abc" }
 zerostack-machine-permit = { version = "0.1.0", git = "https://github.com/AdityaVG13/zerostack", rev = "3eca1c6299ec5a683d283ddad0aae62ece2a3abc" }
 
 [profile.release-perf]

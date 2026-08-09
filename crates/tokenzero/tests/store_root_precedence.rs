@@ -208,8 +208,8 @@ fn global_pin_with_tokenzero_shared_store_is_active() {
     let store_root = sr["effective_store_root"].as_str().unwrap();
     assert_eq!(
         store_root,
-        shared.path().to_str().unwrap(),
-        "effective_store_root must equal the ZEROSTACK_STORE_ROOT value"
+        shared.path().canonicalize().unwrap().to_str().unwrap(),
+        "effective_store_root must equal the ZEROSTACK_STORE_ROOT value (hub resolves canonical spellings)"
     );
 }
 
@@ -241,8 +241,8 @@ fn global_pin_with_zerostack_shared_store_is_active() {
     let store_root = sr["effective_store_root"].as_str().unwrap();
     assert_eq!(
         store_root,
-        shared.path().to_str().unwrap(),
-        "effective_store_root must equal the ZEROSTACK_STORE_ROOT value"
+        shared.path().canonicalize().unwrap().to_str().unwrap(),
+        "effective_store_root must equal the ZEROSTACK_STORE_ROOT value (hub resolves canonical spellings)"
     );
 }
 
@@ -368,8 +368,8 @@ fn two_roots_same_basename_no_collision() {
         store_a, store_b,
         "two projects with same basename must not share a store root"
     );
-    assert!(store_a.starts_with(proj_a.to_str().unwrap()));
-    assert!(store_b.starts_with(proj_b.to_str().unwrap()));
+    assert!(store_a.starts_with(proj_a.canonicalize().unwrap().to_str().unwrap()));
+    assert!(store_b.starts_with(proj_b.canonicalize().unwrap().to_str().unwrap()));
 
     let cache_a = sr_a["effective_cache_path"].as_str().unwrap();
     let cache_b = sr_b["effective_cache_path"].as_str().unwrap();
@@ -432,7 +432,102 @@ fn legacy_store_root_env_spelling_with_opt_in() {
     let store_root = sr["effective_store_root"].as_str().unwrap();
     assert_eq!(
         store_root,
-        shared.path().to_str().unwrap(),
-        "ZERO_STACK_STORE_ROOT (legacy spelling) should be honored with opt-in"
+        shared.path().canonicalize().unwrap().to_str().unwrap(),
+        "ZERO_STACK_STORE_ROOT (legacy spelling) should be honored with opt-in (hub resolves canonical spellings)"
+    );
+}
+
+// ──────────────────────────────────────────────────────────────────────────
+// 10. Active external pin is project-namespaced and never a mismatch
+// ──────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn external_active_pin_is_namespaced_without_mismatch() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    let shared = tempdir().unwrap();
+
+    let mut cmd = doctor_json(root);
+    cmd.env("ZEROSTACK_STORE_ROOT", shared.path().to_str().unwrap());
+    cmd.env("TOKENZERO_SHARED_STORE", "1");
+
+    let output = cmd.output().unwrap();
+    assert!(
+        output.status.success(),
+        "doctor failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let json: Value = serde_json::from_slice(&output.stdout).unwrap();
+    let sr = &json["store_resolution"];
+
+    // Exact hub mode and project-namespaced cache path.
+    assert_eq!(sr["store_mode"].as_str().unwrap(), "shared_namespaced");
+    let cache = sr["effective_cache_path"].as_str().unwrap();
+    let key = sr["project_key"].as_str().unwrap();
+    assert_eq!(key.len(), 16);
+    let expected = shared
+        .path()
+        .canonicalize()
+        .unwrap()
+        .join("projects")
+        .join(key)
+        .join("tokenzero")
+        .join("recovery-cache.json");
+    assert_eq!(
+        cache,
+        expected.to_str().unwrap(),
+        "external active pin cache must live under <pin>/projects/<key>/tokenzero"
+    );
+
+    // Properly namespaced active pin is not a project mismatch.
+    assert_eq!(sr["store_project_mismatch"].as_bool().unwrap(), false);
+    assert!(
+        sr["mismatch_summary"].is_null(),
+        "no mismatch summary for a namespaced active pin"
+    );
+    let findings = json["findings"].as_array().unwrap();
+    assert!(
+        !findings
+            .iter()
+            .any(|f| f["id"] == "tz-store-project-mismatch"),
+        "must not emit tz-store-project-mismatch for a namespaced active pin"
+    );
+    assert_eq!(sr["isolation_mode"].as_str().unwrap(), "shared_opt_in");
+}
+
+#[test]
+fn two_roots_under_one_pin_get_distinct_namespaced_caches() {
+    let dir_a = tempdir().unwrap();
+    let dir_b = tempdir().unwrap();
+    let shared = tempdir().unwrap();
+
+    let mut cmd_a = doctor_json(dir_a.path());
+    cmd_a.env("ZEROSTACK_STORE_ROOT", shared.path().to_str().unwrap());
+    cmd_a.env("TOKENZERO_SHARED_STORE", "1");
+    let sr_a = store_resolution(&mut cmd_a);
+
+    let mut cmd_b = doctor_json(dir_b.path());
+    cmd_b.env("ZEROSTACK_STORE_ROOT", shared.path().to_str().unwrap());
+    cmd_b.env("TOKENZERO_SHARED_STORE", "1");
+    let sr_b = store_resolution(&mut cmd_b);
+
+    let cache_a = sr_a["effective_cache_path"].as_str().unwrap();
+    let cache_b = sr_b["effective_cache_path"].as_str().unwrap();
+    assert_ne!(cache_a, cache_b, "two roots must not collide under one pin");
+
+    let projects_root = shared.path().canonicalize().unwrap().join("projects");
+    assert!(
+        Path::new(cache_a).starts_with(&projects_root),
+        "cache A must be under <pin>/projects, got {cache_a}"
+    );
+    assert!(
+        Path::new(cache_b).starts_with(&projects_root),
+        "cache B must be under <pin>/projects, got {cache_b}"
+    );
+    let key_a = sr_a["project_key"].as_str().unwrap();
+    let key_b = sr_b["project_key"].as_str().unwrap();
+    assert_ne!(
+        key_a, key_b,
+        "distinct roots must get distinct project keys"
     );
 }

@@ -336,53 +336,68 @@ fn expand_full_hash_corruption_never_falls_back_to_legacy() {
 }
 
 #[test]
-fn classify_root_mode_uses_path_components_not_substring() {
-    // Exact .zerostack component → unified.
-    let unified_cache = PathBuf::from("/tmp/project/.zerostack/tokenzero/recovery-cache.json");
-    assert_eq!(classify_root_mode(&unified_cache), "unified");
+fn effective_root_mode_derives_from_hub_store_mode() {
+    // Memory-only handle.
+    let mem = TokenZeroStore::in_memory();
+    assert_eq!(mem.effective_root_mode(), "memory");
+    assert_eq!(mem.store_mode(), None);
 
-    // Lookalike .zerostack-old must NOT classify as unified.
-    let old_cache = PathBuf::from("/tmp/project/.zerostack-old/tokenzero/recovery-cache.json");
-    assert_eq!(classify_root_mode(&old_cache), "legacy");
+    // Legacy: no .zerostack marker, no pin. Explicit empty env: never read
+    // live process store env in tests.
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    let legacy = TokenZeroStore::open_with_env(root, StoreEnv::new(None, false));
+    assert_eq!(legacy.effective_root_mode(), "legacy");
+    assert_eq!(legacy.store_mode(), Some("legacy"));
 
-    // Windows-style separators still classify via components.
-    let win = PathBuf::from(r"C:\Users\x\proj\.zerostack\tokenzero\recovery-cache.json");
-    // On Unix this is a single component path string; structural check still
-    // walks components, so a path whose file_name chain ends with
-    // tokenzero under .zerostack is unified when components parse that way.
-    // Build with join to guarantee component structure:
-    let win_joined = PathBuf::from("C:")
-        .join("Users")
-        .join("x")
-        .join("proj")
-        .join(".zerostack")
+    // Local unified .zerostack marker.
+    std::fs::create_dir_all(root.join(".zerostack").join("tokenzero")).unwrap();
+    let unified = TokenZeroStore::open_with_env(root, StoreEnv::new(None, false));
+    assert_eq!(unified.effective_root_mode(), "unified");
+    assert_eq!(unified.store_mode(), Some("local_unified"));
+}
+
+#[test]
+fn external_pin_resolves_namespaced_cache_and_hub_mode() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    let shared = tempdir().unwrap();
+    let env = StoreEnv::new(Some(std::ffi::OsString::from(shared.path())), true);
+
+    let store = TokenZeroStore::try_open_with_env(root, env).unwrap();
+    let cache = store.recovery().persistence_path.as_ref().unwrap();
+    let key = zero_store::project_key(root);
+    // Hub resolution absolutizes/canonicalizes the pin; match that spelling.
+    let expected = shared
+        .path()
+        .canonicalize()
+        .unwrap()
+        .join("projects")
+        .join(&key)
         .join("tokenzero")
         .join("recovery-cache.json");
-    assert_eq!(classify_root_mode(&win_joined), "unified");
-    let _ = win; // silence unused in documentation of the bug class
-
-    // Flat legacy cache.
-    let legacy = PathBuf::from("/tmp/project/.tokenzero/recovery-cache.json");
-    assert_eq!(classify_root_mode(&legacy), "legacy");
+    assert_eq!(cache, &expected);
+    assert_eq!(store.store_mode(), Some("shared_namespaced"));
+    assert_eq!(store.store_project_key(), Some(key.as_str()));
+    assert_eq!(store.effective_root_mode(), "unified");
+    assert_eq!(
+        store.store_root().unwrap(),
+        shared.path().canonicalize().unwrap()
+    );
 }
 
 #[test]
 fn root_report_classifies_zerostack_old_as_legacy() {
     let dir = tempdir().unwrap();
-    // Create a lookalike root that substring matching would misclassify.
-    let lookalike = dir.path().join(".zerostack-old").join("tokenzero");
-    std::fs::create_dir_all(&lookalike).unwrap();
-    let cache = lookalike.join("recovery-cache.json");
-    // Attach via with_shared_cas so we control the cache path through open
-    // of a synthetic recovery store: open() would choose legacy/unified by
-    // .zerostack existence. Instead assert classify_root_mode directly and
-    // via a handle whose persistence path is the lookalike.
-    let cas = SharedCas::new(dir.path().join(".zerostack-old"));
-    let mut store = TokenZeroStore::with_shared_cas(None, cas);
-    // Manually point recovery at the lookalike cache path.
-    store.recovery = RecoveryStore::new(Some(cache));
+    let root = dir.path();
+    // A lookalike marker must never be treated as a unified store; hub
+    // resolution only honors the exact `.zerostack` name.
+    std::fs::create_dir_all(root.join(".zerostack-old").join("tokenzero")).unwrap();
+    let store = TokenZeroStore::open_with_env(root, StoreEnv::new(None, false));
     assert_eq!(store.effective_root_mode(), "legacy");
+    assert_eq!(store.store_mode(), Some("legacy"));
     assert_eq!(store.root_report()["effective_root_mode"], "legacy");
+    assert_eq!(store.root_report()["store_mode"], "legacy");
 }
 
 #[test]

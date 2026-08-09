@@ -6,6 +6,12 @@
 //! TokenZero) holds its own isolated store handle while sharing the same
 //! canonical CAS layout under a single store root.
 //!
+//! Store-root resolution delegates to the hub `zero_store` crate
+//! (tokenzero-mivh): one algorithm, three engines. The handle captures a
+//! `StoreEnv` at construction and derives its cache path, CAS host, store
+//! root, and mode from the hub `ResolvedStore`, so the embedded handle and
+//! the CLI/doctor facade can never select different files for the same root.
+//!
 //! The descriptor and contract produced by an embedded handle are derived
 //! from the same RecoveryStore/SharedCas state used by the standalone CLI
 //! and MCP sessions, so cross-mode behavior cannot drift.
@@ -17,6 +23,8 @@ use std::path::{Path, PathBuf};
 use serde_json::Value;
 use thiserror::Error;
 
+use zero_store::{Engine, ResolvedStore, StoreEnv, StoreMode};
+
 use tokenzero_core::ContentType;
 
 use crate::shared_cas::{SharedCas, SharedCasError};
@@ -25,6 +33,10 @@ use crate::{RecoveryStore, ZeroRefError, ZeroRefFragment, ZeroRefV1Blob, parse_z
 const DESCRIPTOR_SCHEMA_VERSION: &str = "tokenzero.recovery.capability.v1";
 const DESCRIPTOR_VERSION: &str = "1.0.0";
 static CAS_PUBLICATION_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Engine-local opt-in alias passed to the hub store resolver, matching the
+/// engine workspace facade so CLI and embedded handles never drift.
+const ENGINE_OPT_IN_ALIASES: &[&str] = &["TOKENZERO_SHARED_STORE"];
 
 /// Structured errors for the embeddable `TokenZeroStore` handle.
 ///
@@ -119,22 +131,37 @@ pub struct TokenZeroStore {
     /// temporary CAS created by `in_memory()`. Ambient project-local CAS
     /// detection remains usable internally but is not advertised as shared.
     shared_cas_mode: bool,
+    /// Hub-resolved store state for this handle. `None` for memory-only
+    /// handles without a workspace root.
+    resolved: Option<ResolvedStore>,
 }
 
 impl TokenZeroStore {
     /// Open an embedded handle using the same durable-store discovery as the
-    /// CLI session: `<root>/.tokenzero/recovery-cache.json` or
-    /// `<root>/.zerostack/tokenzero/recovery-cache.json`.
+    /// CLI session, delegating to the hub `zero_store` resolver with the
+    /// live process environment:
+    /// `<root>/.zerostack/tokenzero/recovery-cache.json` for a project-local
+    /// store, `<pin>/projects/<project-key>/tokenzero/recovery-cache.json`
+    /// for an opted-in external pin, or `<root>/.tokenzero/recovery-cache.json`
+    /// in legacy mode.
     ///
     /// A shared CAS is attached when the effective path follows the unified
-    /// `.zerostack` layout, or when a legacy `.tokenzero` cache has a sibling
-    /// `blobs/` directory.
+    /// layout (local or pinned); legacy `.tokenzero` caches attach only when
+    /// a sibling `blobs/` directory exists.
     ///
     /// If the durable store cannot be opened, the handle degrades to an
     /// in-memory store with `durable_degraded` set to `true`.
     pub fn open(root: impl AsRef<Path>) -> Self {
         let root_path = root.as_ref().to_path_buf();
-        match Self::try_open(&root_path) {
+        let env = StoreEnv::from_process(ENGINE_OPT_IN_ALIASES);
+        Self::open_with_env(root_path, env)
+    }
+
+    /// Like [`Self::open`] with an explicit hub environment, so tests and
+    /// sibling-engine callers stay deterministic without mutating process env.
+    pub fn open_with_env(root: impl AsRef<Path>, env: StoreEnv) -> Self {
+        let root_path = root.as_ref().to_path_buf();
+        match Self::try_open_with_env(&root_path, env) {
             Ok(s) => s,
             Err(_e) => Self {
                 root: Some(root_path),
@@ -143,29 +170,51 @@ impl TokenZeroStore {
                 durable_degraded: true,
                 cas_temp_dir: None,
                 shared_cas_mode: false,
+                resolved: None,
             },
         }
     }
 
     /// Open the handle, returning `Err` rather than degrading to in-memory.
     pub fn try_open(root: impl AsRef<Path>) -> Result<Self, TokenZeroStoreError> {
+        let env = StoreEnv::from_process(ENGINE_OPT_IN_ALIASES);
+        Self::try_open_with_env(root, env)
+    }
+
+    /// Like [`Self::try_open`] with an explicit hub environment.
+    pub fn try_open_with_env(
+        root: impl AsRef<Path>,
+        env: StoreEnv,
+    ) -> Result<Self, TokenZeroStoreError> {
         let root_path = root.as_ref().to_path_buf();
-        let cache_path = default_recovery_cache_path(&root_path);
-        let parent = cache_path.parent().ok_or_else(|| {
-            TokenZeroStoreError::CacheDir("invalid cache path: no parent directory".to_string())
+        let resolved = ResolvedStore::resolve(&root_path, Engine::TokenZero, &env);
+        let cache_path = resolved
+            .engine_file("recovery-cache.json")
+            .map_err(|error| {
+                TokenZeroStoreError::CacheDir(format!("invalid recovery cache file name: {error}"))
+            })?;
+        // Hub layout creation (unified root + engine dir, symlink / literal
+        // tilde root rejection); report paths stay side-effect-free.
+        zero_store::ensure_layout(&resolved).map_err(|error| {
+            TokenZeroStoreError::CacheDir(format!("cannot prepare store layout: {error}"))
         })?;
-        std::fs::create_dir_all(parent).map_err(|e| {
-            TokenZeroStoreError::CacheDir(format!(
-                "cannot create cache directory {}: {e}",
-                parent.display()
-            ))
-        })?;
-        probe_durable_cache_target(&root_path, &cache_path)?;
+        // Validate the durable target under the resolved containment root: the
+        // CAS host for unified layouts (covers the namespaced
+        // `projects/<key>/tokenzero` chain) and the engine directory itself in
+        // legacy mode.
+        let containment_root = match resolved.mode() {
+            StoreMode::Legacy => resolved.engine_dir().to_path_buf(),
+            _ => resolved.cas_host().to_path_buf(),
+        };
+        probe_durable_cache_target(&containment_root, &cache_path)?;
         let recovery = RecoveryStore::new(Some(cache_path));
-        let shared_cas = recovery
-            .persistence_path
-            .as_deref()
-            .and_then(SharedCas::detect_from_cache_path);
+        let shared_cas = match resolved.mode() {
+            StoreMode::Legacy => recovery
+                .persistence_path
+                .as_deref()
+                .and_then(SharedCas::detect_from_cache_path),
+            _ => Some(SharedCas::new(resolved.cas_host().to_path_buf())),
+        };
         Ok(Self {
             root: Some(root_path),
             recovery,
@@ -173,6 +222,7 @@ impl TokenZeroStore {
             durable_degraded: false,
             cas_temp_dir: None,
             shared_cas_mode: false,
+            resolved: Some(resolved),
         })
     }
 
@@ -191,6 +241,7 @@ impl TokenZeroStore {
             durable_degraded: false,
             cas_temp_dir: Some(temp_dir),
             shared_cas_mode: true,
+            resolved: None,
         }
     }
 
@@ -200,26 +251,64 @@ impl TokenZeroStore {
     /// immutable object tier.
     ///
     /// If `root` is provided, a durable recovery cache is opened at the
-    /// conventional TokenZero path under that root. If directory creation
-    /// fails, the handle is returned with an in-memory recovery store and
-    /// `durable_degraded = true` rather than silently advertising durability.
-    /// If `root` is `None`, the handle is memory-only for recovery metadata.
+    /// conventional TokenZero path resolved by the hub under that root. If
+    /// directory creation fails, the handle is returned with an in-memory
+    /// recovery store and `durable_degraded = true` rather than silently
+    /// advertising durability. If `root` is `None`, the handle is memory-only
+    /// for recovery metadata.
     pub fn with_shared_cas(root: Option<PathBuf>, shared_cas: SharedCas) -> Self {
-        let (recovery, durable_degraded) = match &root {
+        let env = StoreEnv::from_process(ENGINE_OPT_IN_ALIASES);
+        Self::with_shared_cas_and_env(root, shared_cas, env)
+    }
+
+    /// Like [`Self::with_shared_cas`] with an explicit hub environment.
+    pub fn with_shared_cas_and_env(
+        root: Option<PathBuf>,
+        shared_cas: SharedCas,
+        env: StoreEnv,
+    ) -> Self {
+        let (recovery, durable_degraded, resolved) = match &root {
             Some(root_path) => {
-                let cache_path = default_recovery_cache_path(root_path);
-                let usable = cache_path
-                    .parent()
-                    .and_then(|parent| std::fs::create_dir_all(parent).ok())
-                    .and_then(|()| probe_durable_cache_target(root_path, &cache_path).ok())
-                    .is_some();
+                let resolved = ResolvedStore::resolve(root_path, Engine::TokenZero, &env);
+                let cache_path =
+                    match resolved
+                        .engine_file("recovery-cache.json")
+                        .map_err(|error| {
+                            TokenZeroStoreError::CacheDir(format!(
+                                "invalid recovery cache file name: {error}"
+                            ))
+                        }) {
+                        Ok(path) => path,
+                        Err(_) => {
+                            return Self {
+                                root,
+                                recovery: RecoveryStore::new(None),
+                                shared_cas: Some(shared_cas),
+                                durable_degraded: true,
+                                cas_temp_dir: None,
+                                shared_cas_mode: true,
+                                resolved: None,
+                            };
+                        }
+                    };
+                let containment_root = match resolved.mode() {
+                    StoreMode::Legacy => resolved.engine_dir().to_path_buf(),
+                    _ => resolved.cas_host().to_path_buf(),
+                };
+                // Hub layout creation; any failure degrades the handle to
+                // in-memory recovery with `durable_degraded = true`, matching
+                // the pre-existing degraded contract.
+                let usable = match zero_store::ensure_layout(&resolved) {
+                    Ok(()) => probe_durable_cache_target(&containment_root, &cache_path).is_ok(),
+                    Err(_) => false,
+                };
                 if usable {
-                    (RecoveryStore::new(Some(cache_path)), false)
+                    (RecoveryStore::new(Some(cache_path)), false, Some(resolved))
                 } else {
-                    (RecoveryStore::new(None), true)
+                    (RecoveryStore::new(None), true, Some(resolved))
                 }
             }
-            None => (RecoveryStore::new(None), false),
+            None => (RecoveryStore::new(None), false, None),
         };
         Self {
             root,
@@ -228,6 +317,7 @@ impl TokenZeroStore {
             durable_degraded,
             cas_temp_dir: None,
             shared_cas_mode: true,
+            resolved,
         }
     }
 
@@ -247,11 +337,16 @@ impl TokenZeroStore {
         self.shared_cas.as_ref()
     }
 
-    /// Store root for this handle (parent of the recovery cache, or unified
-    /// `.zerostack` root). `None` for memory-only handles.
+    /// Store root for this handle, derived from the hub resolution: the
+    /// unified store root (project-local `.zerostack` or the resolved pin)
+    /// when one resolves, otherwise the legacy engine directory. `None` for
+    /// memory-only handles.
     pub fn store_root(&self) -> Option<PathBuf> {
-        let cache_path = self.recovery.persistence_path.as_deref()?;
-        Some(store_root_for_cache_path(cache_path))
+        let resolved = self.resolved.as_ref()?;
+        Some(match resolved.unified_root() {
+            Some(root) => root.to_path_buf(),
+            None => resolved.engine_dir().to_path_buf(),
+        })
     }
 
     /// Persist a byte payload to the shared CAS and return a durable
@@ -372,23 +467,48 @@ impl TokenZeroStore {
     }
 
     fn durable_usable(&self) -> bool {
-        !self.durable_degraded
-            && self
-                .root
-                .as_deref()
-                .zip(self.recovery.persistence_path.as_deref())
-                .is_some_and(|(root, cache)| probe_durable_cache_target(root, cache).is_ok())
+        if self.durable_degraded {
+            return false;
+        }
+        let Some(cache) = self.recovery.persistence_path.as_deref() else {
+            return false;
+        };
+        let Some(resolved) = self.resolved.as_ref() else {
+            return false;
+        };
+        let containment_root = match resolved.mode() {
+            StoreMode::Legacy => resolved.engine_dir(),
+            _ => resolved.cas_host(),
+        };
+        probe_durable_cache_target(containment_root, cache).is_ok()
     }
 
-    /// Classify the effective store layout portably via path components and
-    /// the shared-CAS structural resolver — never via substring matching on
-    /// display paths (which misclassifies Windows separators and
-    /// `.zerostack-old` lookalikes).
+    /// Classify the effective store layout from the hub `StoreMode`.
+    /// Preserves the historical `unified`/`legacy`/`memory` vocabulary while
+    /// the exact hub mode is available via [`Self::store_mode`].
     pub fn effective_root_mode(&self) -> &'static str {
-        let Some(cache_path) = self.recovery.persistence_path.as_deref() else {
-            return "memory";
-        };
-        classify_root_mode(cache_path)
+        match self.resolved.as_ref().map(|resolved| resolved.mode()) {
+            Some(StoreMode::LocalUnified)
+            | Some(StoreMode::PinnedInsideProject)
+            | Some(StoreMode::SharedNamespaced) => "unified",
+            Some(StoreMode::Legacy) => "legacy",
+            None => "memory",
+        }
+    }
+
+    /// Exact hub store-mode wire label, additive telemetry. `None` for
+    /// memory-only handles.
+    pub fn store_mode(&self) -> Option<&'static str> {
+        self.resolved
+            .as_ref()
+            .map(|resolved| resolved.mode().as_str())
+    }
+
+    /// Hub project key when the store is shared-namespaced; `None` otherwise.
+    pub fn store_project_key(&self) -> Option<&str> {
+        self.resolved
+            .as_ref()
+            .and_then(|resolved| resolved.project_key())
     }
 
     /// ZeroRef v1 capability descriptor for this handle. Static fields come
@@ -459,6 +579,8 @@ impl TokenZeroStore {
             "store_db": store_db,
             "durable_degraded": self.durable_degraded,
             "effective_root_mode": effective_root_mode,
+            "store_mode": self.store_mode(),
+            "store_project_key": self.store_project_key(),
             "store_health": {
                 "durable": self.durable_usable(),
                 "cas_attached": cas_attached,
@@ -498,42 +620,7 @@ impl Drop for TokenZeroStore {
     }
 }
 
-/// Default recovery cache path for a workspace root, matching the CLI/MCP
-/// convention without reading process env after construction.
-///
-/// * Unified layout: `<root>/.zerostack/tokenzero/recovery-cache.json`
-/// * Legacy layout: `<root>/.tokenzero/recovery-cache.json`
-///
-/// The unified layout is chosen only when `.zerostack` already exists; this
-/// mirrors `workspace::default_recovery_cache_path` but keeps the handle
-/// env-independent after construction.
-fn default_recovery_cache_path(root: &Path) -> PathBuf {
-    let unified = root
-        .join(".zerostack")
-        .join("tokenzero")
-        .join("recovery-cache.json");
-    let legacy = root.join(".tokenzero").join("recovery-cache.json");
-    if unified.exists() || root.join(".zerostack").is_dir() {
-        unified
-    } else {
-        legacy
-    }
-}
-
-fn store_root_for_cache_path(cache_path: &Path) -> PathBuf {
-    if let Some(engine_dir) = cache_path.parent() {
-        if engine_dir.file_name().and_then(|n| n.to_str()) == Some("tokenzero") {
-            if let Some(store_root) = engine_dir.parent() {
-                return store_root.to_path_buf();
-            }
-        }
-    }
-    cache_path
-        .parent()
-        .map(Path::to_path_buf)
-        .unwrap_or_else(|| cache_path.to_path_buf())
-}
-
+/// Unique probe filename helper.
 fn unique_probe_name(kind: &str) -> String {
     format!(
         ".{kind}-{}-{}",
@@ -564,7 +651,7 @@ fn reject_symlinks_below(root: &Path, path: &Path) -> Result<(), TokenZeroStoreE
 }
 
 fn probe_durable_cache_target(
-    workspace_root: &Path,
+    containment_root: &Path,
     cache_path: &Path,
 ) -> Result<(), TokenZeroStoreError> {
     if cache_path.file_name().and_then(|name| name.to_str()) != Some("recovery-cache.json") {
@@ -575,18 +662,18 @@ fn probe_durable_cache_target(
     let parent = cache_path.parent().ok_or_else(|| {
         TokenZeroStoreError::CacheDir("invalid cache path: no parent directory".to_string())
     })?;
-    reject_symlinks_below(workspace_root, parent).map_err(|error| {
+    reject_symlinks_below(containment_root, parent).map_err(|error| {
         TokenZeroStoreError::CacheDir(format!("cache parent is noncanonical: {error}"))
     })?;
-    let canonical_root = std::fs::canonicalize(workspace_root).map_err(|error| {
-        TokenZeroStoreError::CacheDir(format!("workspace root is unavailable: {error}"))
+    let canonical_root = std::fs::canonicalize(containment_root).map_err(|error| {
+        TokenZeroStoreError::CacheDir(format!("containment root is unavailable: {error}"))
     })?;
     let canonical_parent = std::fs::canonicalize(parent).map_err(|error| {
         TokenZeroStoreError::CacheDir(format!("cache parent is unavailable: {error}"))
     })?;
     if !canonical_parent.starts_with(&canonical_root) {
         return Err(TokenZeroStoreError::CacheDir(
-            "cache parent escapes canonical workspace root".to_string(),
+            "cache parent escapes canonical containment root".to_string(),
         ));
     }
     match std::fs::symlink_metadata(cache_path) {
@@ -717,35 +804,6 @@ fn classify_publish_error(error: SharedCasError) -> TokenZeroStoreError {
         SharedCasError::Policy => TokenZeroStoreError::PublishConflict,
         other => other.into(),
     }
-}
-
-/// Structural, portable root-mode classification.
-///
-/// Uses path components and [`SharedCas::resolve_cache_root`] rather than
-/// substring matching on display strings, so Windows separators and
-/// lookalike directories like `.zerostack-old` are handled correctly.
-fn classify_root_mode(cache_path: &Path) -> &'static str {
-    // Unified layout: <store-root>/tokenzero/recovery-cache.json where the
-    // store root's final component is exactly ".zerostack".
-    if let Some(store_root) = SharedCas::resolve_cache_root(cache_path) {
-        if path_file_name_eq(&store_root, ".zerostack") {
-            return "unified";
-        }
-        // Engine-namespaced cache under a non-.zerostack root is still the
-        // structural unified CAS layout (e.g. explicit shared store root).
-        // Treat only exact ".zerostack" component as the "unified" mode label
-        // used by telemetry; everything else with engine namespacing that is
-        // not under .zerostack reports as "legacy" unless it is pure flat.
-        //
-        // Historical CLI convention: only the `.zerostack` directory name
-        // marks unified mode. Other engine-namespaced roots stay "legacy".
-        return "legacy";
-    }
-    "legacy"
-}
-
-fn path_file_name_eq(path: &Path, expected: &str) -> bool {
-    path.file_name().and_then(|n| n.to_str()) == Some(expected)
 }
 
 /// Non-reversible path identity for telemetry. Never emits absolute/private

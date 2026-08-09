@@ -10,6 +10,12 @@
 //! - relative shared pins resolve against the workspace root, and equal project
 //!   basenames never share a store accidentally.
 //!
+//! Resolution delegates to the hub `zero_store` crate (tokenzero-mivh): one
+//! algorithm, three engines. TokenZero contributes only its own opt-in alias
+//! and directory names. An opted-in external pin is project-namespaced as
+//! `<pin>/projects/<project-key>/tokenzero`, which replaces the old
+//! collision-prone raw-pin cache path.
+//!
 //! The store_root_precedence integration tests pin every ordering and isolation
 //! case. Resolution intentionally does not require a selected path to exist.
 
@@ -17,11 +23,20 @@ use std::env;
 use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 
+use zero_store::{
+    Engine, ResolvedStore, StoreEnv, StoreMode,
+    store_is_under_project_root as zero_store_store_is_under_project_root,
+};
+
 /// Env vars that opt in to using `ZEROSTACK_STORE_ROOT` as a shared meta store.
 pub const SHARED_STORE_OPT_IN_ENVS: &[&str] = &["TOKENZERO_SHARED_STORE", "ZEROSTACK_SHARED_STORE"];
 
 /// Global pin env names.
 pub const STORE_ROOT_ENVS: &[&str] = &["ZEROSTACK_STORE_ROOT", "ZERO_STACK_STORE_ROOT"];
+
+/// Engine-local opt-in aliases passed to the hub resolver. The hub already
+/// reads `ZEROSTACK_SHARED_STORE`; TokenZero keeps its own alias in addition.
+const ENGINE_OPT_IN_ALIASES: &[&str] = &["TOKENZERO_SHARED_STORE"];
 
 /// Workspace root for TokenZero persistence (CLI, CodeMode, MCP).
 pub fn tokenzero_work_root(explicit_root: Option<PathBuf>) -> PathBuf {
@@ -83,50 +98,38 @@ fn first_env(names: &[&str]) -> Option<OsString> {
 }
 
 /// Pure store-root selection; the frozen precedence is documented at module level.
+///
+/// Delegates to the hub `zero_store::ResolvedStore`. `Legacy` (no `.zerostack`
+/// marker and no honored opt-in pin) yields `None`; every unified mode yields
+/// the unified store root (project-local `.zerostack` or the resolved pin).
 pub fn resolve_store_root_with_env(
     repo_root: &Path,
     store_root_pin: Option<&OsStr>,
     shared_opt_in: bool,
 ) -> Option<PathBuf> {
-    let local = repo_root.join(".zerostack");
-    if local.is_dir() {
-        return Some(local);
+    let env = StoreEnv::new(store_root_pin.map(OsString::from), shared_opt_in);
+    let resolved = ResolvedStore::resolve(repo_root, Engine::TokenZero, &env);
+    match resolved.mode() {
+        StoreMode::Legacy => None,
+        _ => resolved.unified_root().map(Path::to_path_buf),
     }
-    if !shared_opt_in {
-        return None;
-    }
-    let pin = store_root_pin.filter(|v| !v.is_empty())?;
-    let path = PathBuf::from(pin);
-    Some(if path.is_absolute() {
-        path
-    } else {
-        repo_root.join(path)
-    })
 }
 
-fn zerostack_store_or_detect(repo_root: &Path) -> Option<PathBuf> {
-    resolve_store_root_with_env(
-        repo_root,
-        first_env(STORE_ROOT_ENVS).as_deref(),
-        shared_store_opt_in_from_env(),
-    )
-}
-
-fn resolve_default_cache_path(
-    repo_root: &Path,
-    unified_relative: &str,
-    legacy_relative: &str,
-) -> PathBuf {
-    let legacy = repo_root.join(legacy_relative);
-    if let Some(store) = zerostack_store_or_detect(repo_root) {
-        let unified = store.join(unified_relative);
-        if unified.exists() || !legacy.exists() {
-            unified
-        } else {
-            legacy
-        }
-    } else {
-        legacy
+/// Default recovery cache for a root under an explicit hub environment.
+///
+/// Once a unified store resolves (project-local `.zerostack` or an opted-in
+/// pin), the cache is the hub engine file
+/// `<store>/tokenzero/recovery-cache.json` unconditionally, including the
+/// project-namespaced `<pin>/projects/<project-key>/tokenzero` shape for
+/// external pins. This removes the old history-dependent legacy tiebreak that
+/// made two processes pick different files for the same repo.
+pub fn default_recovery_cache_path_with_env(repo_root: &Path, env: &StoreEnv) -> PathBuf {
+    let resolved = ResolvedStore::resolve(repo_root, Engine::TokenZero, env);
+    match resolved.mode() {
+        StoreMode::Legacy => resolved.engine_dir().join("recovery-cache.json"),
+        _ => resolved
+            .engine_file("recovery-cache.json")
+            .unwrap_or_else(|_| resolved.engine_dir().join("recovery-cache.json")),
     }
 }
 
@@ -134,11 +137,7 @@ fn resolve_default_cache_path(
 ///
 /// After wqw.8 this is the single shared store for CLI expand and CodeMode.
 pub fn default_recovery_cache_path(repo_root: &Path) -> PathBuf {
-    resolve_default_cache_path(
-        repo_root,
-        "tokenzero/recovery-cache.json",
-        ".tokenzero/recovery-cache.json",
-    )
+    default_recovery_cache_path_with_env(repo_root, &StoreEnv::from_process(ENGINE_OPT_IN_ALIASES))
 }
 
 /// Honor explicit --cache-path, then TOKENZERO_CACHE_PATH, then the default cache.
@@ -160,11 +159,10 @@ pub fn resolve_recovery_cache_path_with_env(
         .unwrap_or_else(|| default_recovery_cache_path(repo_root))
 }
 
-/// Whether `store` is under `root` (same project).
+/// Whether `store` is under `root` (same project). Delegates to the hub
+/// spelling-stable containment check.
 pub fn store_is_under_project_root(store: &Path, root: &Path) -> bool {
-    let store_cmp = store.canonicalize().unwrap_or_else(|_| store.to_path_buf());
-    let root_cmp = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
-    store_cmp.starts_with(&root_cmp)
+    zero_store_store_is_under_project_root(store, root)
 }
 
 /// Doctor / status snapshot of effective store resolution for a root.
@@ -176,9 +174,20 @@ pub struct StoreResolutionReport {
     pub global_pin_set: bool,
     pub global_pin_value: Option<PathBuf>,
     pub isolation_mode: &'static str,
-    /// True when effective store is not under the project root (shared meta).
+    /// True when the effective store is an un-namespaced external root.
+    /// Hub project namespacing makes this impossible for active pins, so it
+    /// is always false today; the field is retained for the doctor contract.
     pub store_project_mismatch: bool,
     pub mismatch_summary: Option<String>,
+    /// Exact hub store-mode wire label (additive).
+    pub store_mode: Option<&'static str>,
+    /// Hub project key, present only in `shared_namespaced` mode (additive).
+    pub project_key: Option<String>,
+    /// Resolved engine directory, e.g. `<store>/tokenzero` or `.tokenzero`.
+    pub effective_engine_dir: PathBuf,
+    /// Resolved CAS host: the unified store root, or the engine directory in
+    /// legacy mode.
+    pub cas_host: PathBuf,
 }
 
 /// Pure resolution report for tests and doctor.
@@ -194,11 +203,24 @@ pub fn store_resolution_report_with_env(
         .as_ref()
         .filter(|v| !v.is_empty())
         .map(PathBuf::from);
-    let store = resolve_store_root_with_env(repo_root, store_root_pin.as_deref(), shared_opt_in);
+    // One explicit hub environment drives the resolved store, the effective
+    // store root, and the default cache path, so the report can never drift
+    // from the effective store by re-reading live process env (tokenzero-mivh).
+    let env = StoreEnv::new(store_root_pin, shared_opt_in);
+    let resolved = ResolvedStore::resolve(repo_root, Engine::TokenZero, &env);
+    let store = match resolved.mode() {
+        StoreMode::Legacy => None,
+        _ => resolved.unified_root().map(Path::to_path_buf),
+    };
     let had_explicit =
         explicit_cache.is_some() || tokenzero_cache_path.as_ref().is_some_and(|v| !v.is_empty());
-    let effective_cache_path =
-        resolve_recovery_cache_path_with_env(repo_root, explicit_cache, tokenzero_cache_path);
+    let effective_cache_path = explicit_cache
+        .or_else(|| {
+            tokenzero_cache_path
+                .filter(|value| !value.is_empty())
+                .map(PathBuf::from)
+        })
+        .unwrap_or_else(|| default_recovery_cache_path_with_env(repo_root, &env));
     let effective_store_root = store.clone();
     let isolation_mode = if had_explicit {
         "explicit_cache"
@@ -213,20 +235,12 @@ pub fn store_resolution_report_with_env(
         "per_root"
     };
 
-    let store_project_mismatch = match &store {
-        Some(s) if shared_opt_in && global_pin_set => !store_is_under_project_root(s, repo_root),
-        _ => false,
-    };
-    let mismatch_summary = if store_project_mismatch {
-        Some(format!(
-            "effective store {} is outside project root {} (shared store opt-in active; TOKENZERO_SHARED_STORE / ZEROSTACK_SHARED_STORE). Unrelated projects sharing this store will collate recovery caches.",
-            store
-                .as_ref()
-                .map(|p| p.display().to_string())
-                .unwrap_or_default(),
-            repo_root.display()
-        ))
-    } else if global_pin_set && !shared_opt_in {
+    // Hub project namespacing isolates external pins by project key, so an
+    // active shared pin is never a project mismatch and must not surface a
+    // `tz-store-project-mismatch` warning. The ignored-pin info finding is
+    // retained below.
+    let store_project_mismatch = false;
+    let mismatch_summary = if global_pin_set && !shared_opt_in {
         Some(format!(
             "ZEROSTACK_STORE_ROOT is set but ignored for isolation (wqw.2). Default store is under project root {}. Set TOKENZERO_SHARED_STORE=1 (or ZEROSTACK_SHARED_STORE=1) to opt into the shared/meta store.",
             repo_root.display()
@@ -244,6 +258,10 @@ pub fn store_resolution_report_with_env(
         isolation_mode,
         store_project_mismatch,
         mismatch_summary,
+        store_mode: Some(resolved.mode().as_str()),
+        project_key: resolved.project_key().map(str::to_string),
+        effective_engine_dir: resolved.engine_dir().to_path_buf(),
+        cas_host: resolved.cas_host().to_path_buf(),
     }
 }
 
@@ -277,8 +295,85 @@ pub fn store_resolution_json(
         "isolation_mode": r.isolation_mode,
         "store_project_mismatch": r.store_project_mismatch,
         "mismatch_summary": r.mismatch_summary,
-        "algorithm": "1) repo_root/.zerostack if present; 2) else ZEROSTACK_STORE_ROOT only when TOKENZERO_SHARED_STORE/ZEROSTACK_SHARED_STORE opt-in; 3) else legacy repo_root/.tokenzero/. Explicit --cache-path / TOKENZERO_CACHE_PATH always win.",
+        "store_mode": r.store_mode,
+        "project_key": r.project_key,
+        "effective_engine_dir": r.effective_engine_dir.display().to_string(),
+        "cas_host": r.cas_host.display().to_string(),
+        "algorithm": "1) repo_root/.zerostack if present; 2) else ZEROSTACK_STORE_ROOT only when TOKENZERO_SHARED_STORE/ZEROSTACK_SHARED_STORE opt-in; 3) else legacy repo_root/.tokenzero/. Explicit --cache-path / TOKENZERO_CACHE_PATH always win. External opted-in pins are project-namespaced under <pin>/projects/<project-key>.",
         "opt_in_envs": SHARED_STORE_OPT_IN_ENVS,
         "store_root_envs": STORE_ROOT_ENVS,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::ffi::OsString;
+    use tempfile::tempdir;
+
+    fn env_of(pin: Option<&Path>, opt_in: bool) -> StoreEnv {
+        StoreEnv::new(pin.map(OsString::from), opt_in)
+    }
+
+    #[test]
+    fn external_opted_in_pin_is_project_namespaced_in_cache_path() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        let shared = tempdir().unwrap();
+
+        let env = env_of(Some(shared.path()), true);
+        let cache = default_recovery_cache_path_with_env(root, &env);
+
+        let key = zero_store::project_key(root);
+        // Hub resolution absolutizes/canonicalizes; match that spelling.
+        let expected = shared
+            .path()
+            .canonicalize()
+            .unwrap()
+            .join("projects")
+            .join(&key)
+            .join("tokenzero")
+            .join("recovery-cache.json");
+        assert_eq!(cache, expected, "external pin must be project-namespaced");
+
+        // The embedded handle must choose the same path for the same env.
+        let store =
+            tokenzero_recovery::embedded_store::TokenZeroStore::try_open_with_env(root, env)
+                .unwrap();
+        assert_eq!(
+            store.recovery().persistence_path.as_deref().unwrap(),
+            &expected,
+            "embedded and engine facade must agree on the namespaced cache path"
+        );
+        assert_eq!(store.store_mode(), Some("shared_namespaced"));
+    }
+
+    #[test]
+    fn local_zerostack_and_legacy_defaults_stay_compatible() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        let canonical_root = root.canonicalize().unwrap();
+        // Explicit empty env: never read live process store env in tests.
+        let env = StoreEnv::new(None, false);
+
+        // No marker, no pin: legacy per-repo directory.
+        let legacy = default_recovery_cache_path_with_env(root, &env);
+        assert_eq!(
+            legacy,
+            canonical_root
+                .join(".tokenzero")
+                .join("recovery-cache.json")
+        );
+
+        // Project-local .zerostack marker: unified engine file.
+        std::fs::create_dir_all(root.join(".zerostack").join("tokenzero")).unwrap();
+        let unified = default_recovery_cache_path_with_env(root, &env);
+        assert_eq!(
+            unified,
+            canonical_root
+                .join(".zerostack")
+                .join("tokenzero")
+                .join("recovery-cache.json")
+        );
+    }
 }
