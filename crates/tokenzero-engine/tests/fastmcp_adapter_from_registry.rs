@@ -15,7 +15,7 @@ use tokenzero_engine::{
 };
 
 fn mcp_root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../tokenzero-mcp/src")
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../tokenzero-mcp-compat/src")
 }
 
 fn engine_for(root: &std::path::Path) -> TokenZeroEngine {
