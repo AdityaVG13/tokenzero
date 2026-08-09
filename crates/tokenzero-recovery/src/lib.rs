@@ -2632,6 +2632,13 @@ impl RecoveryStore {
         source_fingerprint(&source_path).is_none_or(|actual| actual != *expected)
     }
 
+    /// FIFO eviction contract (docs/racc.md): `state.order` is an insertion
+    /// queue scanned from the front, so the oldest entry is evicted first.
+    /// Re-putting a live ref appends a duplicate entry, but `compact_order`
+    /// and the concurrent-session `merge_states` path retain each ref's FIRST
+    /// occurrence, and reads never touch the order, so neither a re-put nor a
+    /// read refreshes an eviction position. Duplicates are harmless to
+    /// eviction because victims are de-duplicated before removal.
     fn remember_ref(&mut self, ref_id: &str) {
         self.skip_empty_persist = false;
         self.state.order.push(ref_id.to_string());
@@ -2665,6 +2672,9 @@ impl RecoveryStore {
         recovery_maps!(remove self.state, ref_id);
     }
 
+    /// Collapse duplicate order entries to each ref's FIRST occurrence while
+    /// dropping refs no longer in state. First-occurrence retention is the
+    /// FIFO contract: eviction position equals first insertion time.
     fn compact_order(&mut self) {
         let live: HashSet<String> = recovery_maps!(keys self.state).cloned().collect();
         let mut seen = HashSet::new();

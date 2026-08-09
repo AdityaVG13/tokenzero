@@ -1215,6 +1215,69 @@ fn evict_prefix_removes_fifo_victims_once() {
             "tz://unit/d".to_string(),
         ]
     );
+
+    // FIFO contract (docs/racc.md): eviction is oldest-first by first
+    // insertion; re-putting a live ref appends a duplicate order entry that
+    // must not refresh the eviction position, and reads never refresh either.
+    // cap=2 put A,B,A,C must evict A and keep B,C.
+    {
+        let config = RecoveryConfig {
+            max_units: 2,
+            ..RecoveryConfig::default()
+        };
+        let mut store = mem_store(config);
+        let a = store.put_unit("unit payload aaa", ContentType::Unknown, None, None, None);
+        let b = store.put_unit("unit payload bbb", ContentType::Unknown, None, None, None);
+        store.evict();
+        // Re-put A while live: duplicate order entry, first occurrence retained.
+        let a2 = store.put_unit("unit payload aaa", ContentType::Unknown, None, None, None);
+        assert_eq!(a, a2, "re-put must return the same ref");
+        // Read must not refresh the eviction position either.
+        assert!(store.expand(&a, Some("raw"), None, None, None, None).found);
+        let c = store.put_unit("unit payload ccc", ContentType::Unknown, None, None, None);
+        store.evict();
+        assert!(!store.has_ref(&a), "oldest entry (A) must be evicted first");
+        assert!(store.has_ref(&b), "B must survive the A re-put");
+        assert!(store.has_ref(&c), "newest entry must survive");
+        assert_eq!(
+            store.state.order,
+            vec![b, c],
+            "order keeps first occurrences only"
+        );
+    }
+
+    // Concurrent-process merge keeps each ref's FIRST occurrence, so an
+    // interleaved re-put from another session cannot refresh FIFO position.
+    {
+        let config = RecoveryConfig {
+            max_units: 2,
+            ..RecoveryConfig::default()
+        };
+        let mut one = mem_store(config.clone());
+        let a = one.put_unit("unit payload aaa", ContentType::Unknown, None, None, None);
+        let b = one.put_unit("unit payload bbb", ContentType::Unknown, None, None, None);
+        let mut two = mem_store(config.clone());
+        let a2 = two.put_unit("unit payload aaa", ContentType::Unknown, None, None, None);
+        let c = two.put_unit("unit payload ccc", ContentType::Unknown, None, None, None);
+        assert_eq!(a, a2, "interleaved re-put must resolve to the same ref");
+        // Journal-replay merge path: session 2's state merges into session 1's.
+        let merged = merge_states(one.state, two.state, &two.session_refs, &config);
+        assert_eq!(
+            merged.order,
+            vec![a.clone(), b.clone(), c.clone()],
+            "first occurrence must win across sessions"
+        );
+        let mut store = mem_store(config);
+        store.state = merged;
+        store.evict();
+        assert!(
+            !store.has_ref(&a),
+            "oldest (A) evicted despite a later interleaved re-put"
+        );
+        assert!(store.has_ref(&b));
+        assert!(store.has_ref(&c));
+        assert_eq!(store.state.order, vec![b, c]);
+    }
 }
 
 #[test]
