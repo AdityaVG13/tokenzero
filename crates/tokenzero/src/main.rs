@@ -5,7 +5,7 @@ use clap::{CommandFactory, Parser};
 use serde_json::json;
 use std::ffi::OsString;
 use std::fs;
-use std::io::{Read, Write};
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Instant;
@@ -15,7 +15,6 @@ use tokenzero_core::{
     ContentType, Mode, ToolResponse, detect_content_type,
     shell_display_command_from_argv_for_platform,
 };
-use tokenzero_engine::codemode_wire::{CodeModeOptions, CodeModeResult, CodeModeStatus};
 #[cfg(feature = "surface-mcp")]
 use tokenzero_engine::mcp_idle_timeout_from_secs;
 use tokenzero_engine::{
@@ -37,15 +36,6 @@ mod reach;
 mod release_claims;
 mod source_currency;
 mod zerostack_store;
-// Process/artifact mutual exclusion (tokenzero-irx9.3): dual surface features
-// cannot compile into one binary (see also tokenzero-mcp compile_error).
-#[cfg(all(feature = "surface-mcp", feature = "surface-codemode"))]
-compile_error!(
-    "tokenzero surfaces are mutually exclusive (tokenzero-irx9.3): enable exactly one of \
-feature surface-mcp or surface-codemode — never both. The tokenzero CLI is a selected \
-shim or single-surface build; install tokenzero-mcp or tokenzero-codemode for servers."
-);
-
 use agent_surfaces::{capabilities_json, mcp_name_to_cli_verb, robot_docs_guide};
 use artifact_contracts::{json_artifact_path, release_candidate_id};
 use cli_args::*;
@@ -275,7 +265,7 @@ fn main() -> Result<()> {
                 let program = std::env::current_exe().map(OsString::from).unwrap_or_else(|_| OsString::from("tokenzero"));
                 std::process::exit(tokenzero_mcp_compat::run_supervised_stdio(program, supervised_child_args(&args)))
             }
-            codemode_host_niceness();
+            compatibility_server_niceness();
             enforce_surface_exclusivity(&args)?;
             tokenzero_mcp_compat::run_fastmcp_stdio(engine_config_for_mcp(&args)?)
         }
@@ -284,38 +274,6 @@ fn main() -> Result<()> {
             let _ = args;
             anyhow::bail!("MCP compatibility adapter is not compiled; rebuild tokenzero-cli with --features surface-mcp")
         }
-    }
-    CodeMode(args) => {
-        // clc3: install the real JS executor into the engine hook; without
-        // this the shipped codemode artifact served only the stub error.
-        #[cfg(feature = "surface-codemode")]
-        tokenzero_codemode::install_mcp_bridge();
-        let plan = match args.plan_text() {
-            Ok(plan) => plan,
-            Err(err) => {
-                let kind = if err.kind() == std::io::ErrorKind::InvalidInput {
-                    "validation"
-                } else {
-                    "io"
-                };
-                let result = CodeModeResult::error_with_kind(kind, err.to_string(), 0, false);
-                if args.json {
-                    println!("{}", serde_json::to_string(&result)?);
-                } else {
-                    println!("{}", result.to_line());
-                }
-                std::io::stdout().flush()?;
-                std::process::exit(1);
-            }
-        };
-        let options = CodeModeOptions {
-            root: args.root.clone(), allowed_roots: args.allowed_root.clone(), cache_path: args.cache_path.clone(),
-            max_visible_tokens: args.max_visible_tokens, timeout_seconds: args.timeout_seconds, ..Default::default()
-        };
-        let result = tokenzero_engine::codemode_wire::codemode_execute(&plan, &options);
-        let failed = result.status == CodeModeStatus::Error;
-        if args.json { println!("{}", serde_json::to_string(&result)?); } else { println!("{}", result.to_line()); }
-        if failed { std::io::stdout().flush()?; std::process::exit(1); }
     }
     });
     Ok(())
@@ -1899,6 +1857,11 @@ fn engine_config_for_mcp(args: &McpServerArgs) -> Result<EngineConfig> {
         .unwrap_or(&args.mode)
         .parse::<McpToolSurface>()
         .map_err(anyhow::Error::msg)?;
+    if tool_surface != McpToolSurface::Classic {
+        anyhow::bail!(
+            "engine-local CodeMode was removed; tokenzero-mcp serves only classic MCP and ZeroStack owns aggregate plan execution"
+        );
+    }
     let mut config = engine_config(
         &root,
         allowed_roots_for_workspace(&root, &args.allowed_root),
@@ -1917,11 +1880,11 @@ fn mcp_work_root(allowed_roots: &[PathBuf]) -> PathBuf {
     tokenzero_work_root(allowed_roots.first().cloned())
 }
 
-/// Long-lived MCP/CodeMode servers run at reduced scheduling priority so a
-/// busy worker cannot starve interactive sessions (multi-project runaway CPU,
-/// 2026-07-16 incident). `TOKENZERO_NO_RENICE=1` opts out.
+/// The long-lived classic MCP compatibility server runs at reduced scheduling
+/// priority so it cannot starve interactive sessions. `TOKENZERO_NO_RENICE=1`
+/// opts out.
 #[cfg(all(unix, feature = "surface-mcp"))]
-fn codemode_host_niceness() {
+fn compatibility_server_niceness() {
     if std::env::var_os("TOKENZERO_NO_RENICE").is_some() {
         return;
     }
@@ -1931,18 +1894,13 @@ fn codemode_host_niceness() {
 }
 
 #[cfg(all(not(unix), feature = "surface-mcp"))]
-fn codemode_host_niceness() {}
+fn compatibility_server_niceness() {}
 
-/// MCP XOR CodeMode process/artifact mutual exclusion (tokenzero-irx9.3).
+/// Keep classic MCP compatibility registration separate from the aggregate host.
 ///
-/// One running process must never expose both catalogs:
-/// 1. Dual compiled surfaces fail closed (also a compile_error).
-/// 2. Dual argv / env selection fails closed.
-/// 3. Startup surface is resolved to exactly one compiled surface.
-/// 4. Hub sentinel: when CodeMode hub owns the root, refuse per-op MCP.
-///
-/// `TOKENZERO_ALLOW_DUAL=1` only skips the hub sentinel (debug); it never
-/// permits dual catalog compilation or dual `--mode` selection.
+/// Engine-local CodeMode is absent. The remaining runtime guard refuses any
+/// non-classic mode and, when the hub owns a root, refuses a competing classic
+/// MCP registration unless the explicit debug sentinel override is present.
 #[cfg(feature = "surface-mcp")]
 fn enforce_surface_exclusivity(args: &McpServerArgs) -> Result<()> {
     if let Err(err) = install::packaging::reject_dual_compiled_surfaces() {

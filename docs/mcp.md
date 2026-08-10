@@ -438,22 +438,11 @@ Common refs:
 - `tz://file/<id>#Lx-Ly` for file-like ranges.
 - `tz://search/<id>` for stored search hits.
 
-### Surface exclusivity (CodeMode)
+### Classic MCP / aggregate boundary
 
-When the server runs in CodeMode (`TOKENZERO_MCP_TOOL_SURFACE=codemode` /
-`--mode=codemode`), `tools/list` advertises **only** the CodeMode primary
-tools (`tz_execute_code`, `tz_codemode_search`, `tz_codemode_describe`,
-`tz_report_tool_issue`) for the whole session (`tools.listChanged=false`).
-Per-op MCP tools (`tz_expand`, `tz_read`, shell, …) are not listed and
-`tools/call` returns `unknown_tool` — one agent-visible surface, always.
+`tokenzero-mcp` serves the classic per-operation catalog only. Engine-local CodeMode mode was removed; a non-classic mode fails loudly. The ZeroStack aggregate host owns plan registration and dispatches TokenZero dotted bindings through raw-worker v2.
 
-1. Prefer `zero.token.expand` / `zero.token.read` inside `tz_execute_code`.
-2. On expand miss / X0 the engine retries sibling stores and other internal
-   routes before surfacing failure. Agents never switch to `tz_expand`.
-3. Successful expand/read clears the failure streak in surface-health telemetry.
-4. Telemetry: `resource://tokenzero/metrics` → `surface_health`.
-
-CLI `tokenzero expand` / `tokenzero read` remain available outside MCP.
+A live aggregate-host sentinel may refuse a competing classic MCP registration for the same root. CLI `tokenzero expand` / `tokenzero read` remain available outside MCP, and aggregate plans use `zero.token.expand` / `zero.read` through the hub.
 
 ## Shell Contract
 
@@ -475,14 +464,14 @@ visible-byte semantics.
 
 Default shell timeout is 60s (`TOKENZERO_SHELL_TIMEOUT_SECS`,
 `tokenzero mcp-server --shell-timeout-seconds`, or per-call
-`timeout_seconds` / CodeMode `timeout_seconds`). On timeout the runtime
+`timeout_seconds`; aggregate hosts pass the corresponding worker deadline). On timeout the runtime
 sends **SIGTERM then SIGKILL to the whole process group** (Unix
 `process_group(0)`), returns partial captured stdout/stderr, and sets
 `timed_out` / shell timeout status. Test proof of no orphans:
 `timeout_process_group_kill_leaves_no_orphans_and_keeps_partial_stdout`
 in `tokenzero-runtime`.
 
-**Background cancel gap:** CodeMode/router `zero.token.shell({ background: true })`
+**Background cancel gap:** aggregate-router `zero.token.shell({ background: true })`
 async job cancel is tracked separately as bead
 `tokenzero-shell-background-inert-3vv` (background option ignored / unwired
 on some orchestrated paths). Foreground timeout process-group kill is fixed

@@ -343,7 +343,7 @@ impl SurfaceHealth {
             "unlocks": ["expand", "read"],
             "never_unlocks": ["shell", "edit", "write"],
             "agent_visible_recovery_tools": false,
-            "codemode_containment": crate::shell_hooks::containment_snapshot(),
+            "worker_process_observation": crate::shell_hooks::process_observation_snapshot(),
         })
     }
 }

@@ -10,8 +10,6 @@ cd "$ROOT"
 export CARGO_BUILD_JOBS="${CARGO_BUILD_JOBS:-2}"
 JOBS="${CARGO_JOBS:-2}"
 THREADS="${TEST_THREADS:-2}"
-DUAL_ERR="${TMPDIR:-/tmp}/irx9_dual_feature.$$.err"
-
 fail() {
   echo "irx9_release_gate: FAIL: $*" >&2
   exit 1
@@ -38,13 +36,13 @@ run cargo test -p tokenzero-cli --jobs "$JOBS" --test packaging_e2e -- --test-th
 run cargo test -p tokenzero-core --jobs "$JOBS" --lib operation_abi -- --test-threads="$THREADS" \
   || fail "operation ABI contract (surface=core)"
 
-# 3) Dispatcher identity + FastMCP/CodeMode adapter evidence
+# 3) Dispatcher identity + classic FastMCP / aggregate-binding evidence
 run cargo test -p tokenzero-engine --jobs "$JOBS" --test dispatcher -- --test-threads="$THREADS" \
   || fail "dispatcher identity (surface=engine)"
 run cargo test -p tokenzero-engine --jobs "$JOBS" --test fastmcp_adapter_from_registry -- --test-threads="$THREADS" \
   || fail "FastMCP adapter derivation (surface=mcp)"
 run cargo test -p tokenzero-engine --jobs "$JOBS" --test codemode_bindings_dispatcher -- --test-threads="$THREADS" \
-  || fail "CodeMode bindings (surface=codemode)"
+  || fail "aggregate bindings (surface=aggregate)"
 
 # 4) Private worker + handshake
 run cargo test -p tokenzero-engine --jobs "$JOBS" --lib raw_worker:: -- --test-threads="$THREADS" \
@@ -56,7 +54,7 @@ run cargo test -p tokenzero-engine --jobs "$JOBS" --lib surface_handshake:: -- -
 run cargo test -p tokenzero-engine --jobs "$JOBS" --test irx9_conformance_corpus -- --test-threads="$THREADS" \
   || fail "conformance corpus (surface=parity)"
 run cargo test -p tokenzero-cli --jobs "$JOBS" --test irx9_transport_matrix -- --test-threads=1 \
-  || fail "real transport matrix CLI/MCP/CodeMode/raw-worker (surface=transport)"
+  || fail "real transport matrix CLI/classic-MCP/raw-worker (surface=transport)"
 
 # 6) Surface latency: in-process + real process starts kill-test
 run cargo test -p tokenzero-engine --jobs "$JOBS" --test irx9_surface_bench -- --test-threads="$THREADS" \
@@ -64,18 +62,24 @@ run cargo test -p tokenzero-engine --jobs "$JOBS" --test irx9_surface_bench -- -
 run cargo test -p tokenzero-cli --jobs "$JOBS" --test irx9_surface_bench_process -- --test-threads=1 \
   || fail "real process surface bench + kill-test (surface=bench_process)"
 
-# 7) Dual-feature compile refusal (one package, fail closed)
-if cargo check -p tokenzero-install --jobs "$JOBS" --features "surface-mcp,surface-codemode" >"$DUAL_ERR" 2>&1; then
-  rm -f "$DUAL_ERR"
-  fail "dual surface features must not compile (tokenzero-install)"
-else
-  if grep -q "mutually exclusive\|compile_error\|never both" "$DUAL_ERR"; then
-    echo "irx9_release_gate: dual-feature compile_error diagnostic present"
-  else
-    echo "irx9_release_gate: dual-feature path failed closed (compile error present)"
-  fi
-  rm -f "$DUAL_ERR"
+# 7) Gate-C dependency and source boundary guards
+WORKER_TREE="$(cargo tree -p tokenzero-worker --no-default-features -e normal --depth 1)"
+printf '%s\n' "$WORKER_TREE"
+if printf '%s\n' "$WORKER_TREE" | grep -Eiq '(^|── )(rquickjs|fastmcp|zerostack-machine-permit|zero-codemode|tokenzero-mcp)( |$)'; then
+  fail "planner-free worker graph contains a forbidden host dependency"
 fi
+ENGINE_TREE="$(cargo tree -p tokenzero-engine -e normal --depth 2)"
+if printf '%s\n' "$ENGINE_TREE" | grep -Eiq 'zero-gate|machine-permit|rquickjs|fastmcp'; then
+  fail "TokenZero engine graph contains a hub-owned gate/host dependency"
+fi
+if grep -Rq 'surface-codemode' crates/*/Cargo.toml; then
+  fail "retired surface-codemode feature remains in a crate manifest"
+fi
+if find crates/tokenzero-codemode/src -type f ! -name main.rs | grep -q .; then
+  fail "retired engine-local CodeMode source remains beside the raw-worker entrypoint"
+fi
+run cargo test -p tokenzero-cli --jobs "$JOBS" --test gate_c_retirement_contract -- --test-threads=1 \
+  || fail "Gate-C semantic retirement contract"
 
 # 8) Makefile wiring: release-check must depend on irx9-gate
 if ! grep -E '^release-check:.*irx9-gate' Makefile >/dev/null; then

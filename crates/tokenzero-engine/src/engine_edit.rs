@@ -121,7 +121,9 @@ impl TokenZeroEngine {
                     path.display(),
                     storage_error.unwrap_or_else(|| "refs incomplete after pruning".to_string()),
                 ),
-                Some("choose a writable recovery cache file with --cache-path <file>, or free disk space, then retry the edit"),
+                Some(
+                    "choose a writable recovery cache file with --cache-path <file>, or free disk space, then retry the edit",
+                ),
             );
         }
         if !dry_run {

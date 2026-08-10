@@ -1,10 +1,6 @@
 use super::*;
 use std::path::PathBuf;
-use std::sync::Arc;
 use tempfile::tempdir;
-use tokenzero_core::MCP_SCHEMA_VERSION;
-
-use super::support::*;
 
 #[test]
 fn compact_shell_text_render_omits_ref_footer() {

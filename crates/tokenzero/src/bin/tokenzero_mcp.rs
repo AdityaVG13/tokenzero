@@ -1,7 +1,7 @@
 //! Release artifact `tokenzero-mcp`: FastMCP per-op surface only (tokenzero-irx9.3).
 //!
 //! Packaging subcommands (install/uninstall/sbom/doctor/help) always exit without
-//! opening a stdio server. Shared core with `tokenzero-codemode`.
+//! opening a stdio server. Domain execution remains shared with the raw worker.
 
 use std::env;
 use std::path::PathBuf;
@@ -89,8 +89,8 @@ fn main() {
             .any(|w| w[0] == "--mode" && w[1] == "codemode")
     {
         eprintln!(
-            "tokenzero-mcp: artifact is locked to surface 'mcp'; refused --mode=codemode. \
-Install tokenzero-codemode for the CodeMode catalog (mutually exclusive)."
+            "tokenzero-mcp: artifact is locked to classic MCP; refused --mode=codemode. \
+Use the ZeroStack aggregate host for plans; it launches tokenzero-codemode only as a raw worker."
         );
         process::exit(2);
     }

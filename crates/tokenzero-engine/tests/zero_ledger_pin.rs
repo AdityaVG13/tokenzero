@@ -1,6 +1,7 @@
-//! Pin-verification tests for the hub RACC crates (mirror of hub 86qk.9 /
-//! tokenzero-g0vj): zero-ledger + zero-gate must resolve from the pinned
-//! zerostack rev and their core charge path must behave per contract.
+//! Pin-verification tests for the hub ledger contract (mirror of hub 86qk.9).
+//!
+//! TokenZero emits classified charges through zero-ledger. Native durability
+//! promotion and gate ownership remain exclusively in the hub's zero-gate.
 
 use zero_ledger::{
     Digest, FreshWorkVector, LedgerConfig, LedgerError, ResourceGauge, TokenCharge,
@@ -81,13 +82,4 @@ fn zero_ledger_rejects_unclassified_or_double_counted_input() {
         .expect_err("double-counted input must fail");
     assert!(matches!(err, LedgerError::DoubleCountedInput { .. }));
     assert_eq!(gauge.charge_count(), 0);
-}
-
-#[test]
-fn zero_gate_crate_is_linked_at_pinned_rev() {
-    // Touch a real zero-gate type so the pin cannot silently rot into an
-    // unused manifest entry; full gate routing lands with the g0vj cutover.
-    let budget = zero_gate::NextBudget::new_for_doctest(4_096);
-    assert_eq!(budget.budget(), 4_096);
-    assert_eq!(budget.round(), 0);
 }

@@ -3,9 +3,6 @@
 //! Process boundaries (not in-process dispatcher proxies):
 //! - CLI binary (`tokenzero read --json`)
 //! - MCP stdio JSON-RPC (`tools/call`)
-//! - CodeMode **recipe** (`compact:` / `expand:`)
-//! - CodeMode **JSON** plan (`{"steps":[...]}`)
-//! - CodeMode **JavaScript** plan
 //! - Raw-worker framing (`tokenzero-codemode raw-worker --once`)
 //!
 //! Success, failure, mutation, and exact expand recovery are compared with
@@ -68,28 +65,6 @@ fn ensure_bins() {
             .status()
             .unwrap();
         assert!(worker.success(), "build canonical raw worker");
-
-        let cm = codemode_cli();
-        if !cm.is_file() {
-            let st = Command::new("cargo")
-                .args([
-                    "build",
-                    "-p",
-                    "tokenzero-cli",
-                    "--bin",
-                    "tokenzero",
-                    "--jobs",
-                    "2",
-                    "--no-default-features",
-                    "--features",
-                    "surface-codemode",
-                ])
-                .env("CARGO_TARGET_DIR", build_target("codemode"))
-                .current_dir(&root)
-                .status()
-                .unwrap();
-            assert!(st.success(), "build codemode compatibility CLI");
-        }
     });
 }
 
@@ -108,12 +83,6 @@ fn bin(name: &str) -> PathBuf {
     build_target("mcp")
         .join("debug")
         .join(executable_name(name))
-}
-
-fn codemode_cli() -> PathBuf {
-    build_target("codemode")
-        .join("debug")
-        .join(executable_name("tokenzero"))
 }
 
 /// Normalized multi-surface outcome for comparison.
@@ -291,165 +260,6 @@ fn mcp_call(root: &Path, tool: &str, args: Value) -> Norm {
     }
 }
 
-// --- CodeMode (surface-codemode binary) ---
-
-fn codemode_plan(root: &Path, plan: &str, cache_name: &str) -> Norm {
-    let out = Command::new(codemode_cli())
-        .args([
-            "codemode",
-            "--json",
-            "--root",
-            root.to_str().unwrap(),
-            "--cache-path",
-            root.join(cache_name).to_str().unwrap(),
-            "--plan",
-            plan,
-        ])
-        .output()
-        .expect("codemode");
-    let stdout = String::from_utf8_lossy(&out.stdout);
-    let v: Value = serde_json::from_str(stdout.trim()).unwrap_or(json!({}));
-    let status = v["status"].as_str().unwrap_or("");
-    if status == "error" {
-        let kind = v["error"]["kind"]
-            .as_str()
-            .or_else(|| v["error"]["code"].as_str())
-            .unwrap_or("error");
-        let retryable = v["error"]["retryable"].as_bool().unwrap_or(false);
-        return fail(kind, retryable);
-    }
-    // Pull visible text from several envelope shapes.
-    let text = v["value"]["text"]
-        .as_str()
-        .or_else(|| v["value"]["visible"].as_str())
-        .or_else(|| v["value"].as_str())
-        .or_else(|| v["visible"]["text"].as_str())
-        .or_else(|| v["result"]["text"].as_str())
-        .unwrap_or("")
-        .to_string();
-    let mut refs = extract_refs(&v["refs"]);
-    if refs.is_empty() {
-        refs.extend(extract_refs(&v["value"]["refs"]));
-    }
-    if let Some(r) = v["value"]["ref"].as_str() {
-        refs.push(r.to_string());
-    }
-    if refs.is_empty() {
-        refs = collect_tz_refs(&stdout);
-    }
-    Norm {
-        ok: status == "completed" || status == "ok" || out.status.success(),
-        text: text.lines().next().unwrap_or("").trim().to_string(),
-        error_kind: None,
-        retryable: None,
-        refs,
-    }
-}
-
-fn codemode_js_read(root: &Path, rel: &str) -> Norm {
-    let plan = format!(
-        r#"const f = await zero.read({path});
-return {{ text: (f && (f.visible || f.text)) || f, refs: f && f.refs, ref: f && f.ref }};"#,
-        path = serde_json::to_string(rel).unwrap()
-    );
-    codemode_plan(root, &plan, "cm-js-cache.json")
-}
-
-fn codemode_json_read(root: &Path, rel: &str) -> Norm {
-    // JSON plan form uses positional args arrays (not object kwargs).
-    let plan = json!({
-        "steps": [{
-            "id": "r1",
-            "method": "zero.read",
-            "args": [rel]
-        }]
-    })
-    .to_string();
-    codemode_plan(root, &plan, "cm-json-cache.json")
-}
-
-/// Recipe form: compact then expand (recipe DSL, not JS).
-fn codemode_recipe_roundtrip(root: &Path, payload: &str) -> Norm {
-    let compact = format!("compact:{payload}");
-    let n = codemode_plan(root, &compact, "cm-recipe-cache.json");
-    if !n.ok {
-        return n;
-    }
-    // Recipe compact must mint a tz:// ref for expand.
-    let blob = n
-        .refs
-        .iter()
-        .find(|r| r.starts_with("tz://blob/") || r.starts_with("tz://"))
-        .cloned()
-        .or_else(|| {
-            // Fall back: scan full envelope via another compact that returns in value.ref
-            None
-        });
-    // Re-run compact and extract ref from raw stdout if needed.
-    let out = Command::new(codemode_cli())
-        .args([
-            "codemode",
-            "--json",
-            "--root",
-            root.to_str().unwrap(),
-            "--cache-path",
-            root.join("cm-recipe-cache.json").to_str().unwrap(),
-            "--plan",
-            &compact,
-        ])
-        .output()
-        .unwrap();
-    let stdout = String::from_utf8_lossy(&out.stdout);
-    let v: Value = serde_json::from_str(stdout.trim()).unwrap();
-    let ref_id = blob
-        .or_else(|| v["value"]["ref"].as_str().map(str::to_string))
-        .or_else(|| {
-            collect_tz_refs(&stdout)
-                .into_iter()
-                .find(|r| r.starts_with("tz://blob/"))
-        });
-    let Some(ref_id) = ref_id else {
-        return fail("missing_recipe_ref", false);
-    };
-    let expand = format!("expand:{ref_id}");
-    let exp = codemode_plan(root, &expand, "cm-recipe-cache.json");
-    if !exp.ok {
-        return exp;
-    }
-    // Prefer expand visible text; else use compact success marker with payload echo.
-    let text = if exp.text.contains(payload) {
-        exp.text
-    } else {
-        // Expand may put bytes in value differently
-        let out = Command::new(codemode_cli())
-            .args([
-                "codemode",
-                "--json",
-                "--root",
-                root.to_str().unwrap(),
-                "--cache-path",
-                root.join("cm-recipe-cache.json").to_str().unwrap(),
-                "--plan",
-                &expand,
-            ])
-            .output()
-            .unwrap();
-        let s = String::from_utf8_lossy(&out.stdout);
-        if s.contains(payload) {
-            payload.to_string()
-        } else {
-            exp.text
-        }
-    };
-    Norm {
-        ok: true,
-        text,
-        error_kind: None,
-        retryable: None,
-        refs: vec![ref_id],
-    }
-}
-
 // --- Raw worker ---
 
 fn raw_once(root: &Path, req: &Value, cache: &str) -> Norm {
@@ -537,7 +347,7 @@ fn assert_path_failure(name: &str, n: &Norm) {
 }
 
 #[test]
-fn real_transports_agree_on_read_all_codemode_forms() {
+fn real_transports_agree_on_read() {
     ensure_bins();
     let dir = tempdir().unwrap();
     let root = dir.path();
@@ -547,9 +357,6 @@ fn real_transports_agree_on_read_all_codemode_forms() {
 
     let cli = cli_read(root, &note);
     let mcp = mcp_call(root, "tz_read", json!({"path": note.display().to_string()}));
-    let js = codemode_js_read(root, "note.txt");
-    let json_plan = codemode_json_read(root, "note.txt");
-    let recipe = codemode_recipe_roundtrip(root, seed);
     let rw = raw_once(
         root,
         &json!({"op":"tz_read","args":{"path": note.display().to_string()}}),
@@ -558,20 +365,6 @@ fn real_transports_agree_on_read_all_codemode_forms() {
 
     assert_success_seed("cli", &cli, seed);
     assert_success_seed("mcp", &mcp, seed);
-    // JSON/JS may return structured value; require success + seed somewhere in refs or text.
-    for (name, n) in [("codemode_js", &js), ("codemode_json", &json_plan)] {
-        assert!(n.ok, "{name} must succeed: {n:?}");
-        let blob = format!("{:?}", n);
-        assert!(
-            blob.contains(seed) || !n.refs.is_empty() || !n.text.is_empty(),
-            "{name} must return seed or refs: {n:?}"
-        );
-    }
-    assert!(recipe.ok, "codemode_recipe must succeed: {recipe:?}");
-    assert!(
-        recipe.text.contains(seed) || recipe.refs.iter().any(|r| r.starts_with("tz://")),
-        "recipe must recover seed or mint ref: {recipe:?}"
-    );
     assert_success_seed("raw_worker", &rw, seed);
     assert!(
         cli.refs.iter().any(|r| r.starts_with("tz://"))
@@ -591,8 +384,6 @@ fn real_transports_agree_on_missing_path_failure() {
 
     let cli = cli_read(root, &missing);
     let mcp = mcp_call(root, "tz_read", json!({"path": missing_s}));
-    let js = codemode_js_read(root, "__no_such__.txt");
-    let json_plan = codemode_json_read(root, "__no_such__.txt");
     let rw = raw_once(
         root,
         &json!({"op":"tz_read","args":{"path": missing_s}}),
@@ -601,8 +392,6 @@ fn real_transports_agree_on_missing_path_failure() {
 
     assert_path_failure("cli", &cli);
     assert_path_failure("mcp", &mcp);
-    assert_path_failure("codemode_js", &js);
-    assert_path_failure("codemode_json", &json_plan);
     assert_path_failure("raw_worker", &rw);
 }
 
@@ -667,7 +456,7 @@ fn real_mutation_and_exact_expand_bytes() {
     }
 }
 
-// --- yevj: expand terminal/raw conformance matrix (CLI, MCP stdio, CodeMode) ---
+// --- yevj: expand terminal/raw conformance matrix (CLI and classic MCP stdio) ---
 
 const YEVJ_SECRET: &str = "ghp_a1B2a1B2a1B2a1B2a1B2a1B2a1B2a1B2a1B2";
 
@@ -763,39 +552,6 @@ fn mcp_read_then_expand(root: &Path, path: &Path, raw: bool, fragment: &str) -> 
     );
     let _ = child.kill();
     resp
-}
-
-/// Read + expand inside ONE codemode plan: session-visible aliases are
-/// session-scoped, so mint and expand must share the process. The JS binding
-/// unwraps terminal expands to the bare body string (string contract), so
-/// assert on the body itself; the typed receipt is asserted at the adapter
-/// layer (mcp-compat in-process) and on the dispatch value (codemode exec).
-fn codemode_read_then_expand(root: &Path, path: &Path, raw: bool) -> Value {
-    let plan = format!(
-        r#"const f = await zero.read({path});
-const refId = f.ref || (f.refs && f.refs[0]);
-const r = await zero.token.expand(refId, {{raw: {raw}}});
-const body = String(r);
-return {{ masked: body.includes('[tz-masked:github-pat]'), exact: body.includes({secret}) }};"#,
-        path = serde_json::to_string(&path.display().to_string()).unwrap(),
-        raw = raw,
-        secret = serde_json::to_string(YEVJ_SECRET).unwrap()
-    );
-    let out = Command::new(codemode_cli())
-        .args([
-            "codemode",
-            "--json",
-            "--root",
-            root.to_str().unwrap(),
-            "--cache-path",
-            root.join("cm-yevj-cache.json").to_str().unwrap(),
-            "--plan",
-            &plan,
-        ])
-        .output()
-        .expect("codemode");
-    serde_json::from_str(String::from_utf8_lossy(&out.stdout).trim())
-        .unwrap_or_else(|_| panic!("codemode must emit JSON: {out:?}"))
 }
 
 fn mint_blob_cli(root: &Path, path: &Path) -> String {
@@ -931,25 +687,5 @@ fn expand_terminal_raw_secret_contract_matrix() {
         resp["result"]["isError"].as_bool(),
         Some(true),
         "MCP invalid fragment must be isError: {resp}"
-    );
-
-    // --- CodeMode (Pi) leg ---
-    let v = codemode_read_then_expand(root, &path, false);
-    assert_eq!(
-        v["value"]["masked"].as_bool(),
-        Some(true),
-        "CodeMode default expand must mask: {v}"
-    );
-    assert_eq!(
-        v["value"]["exact"].as_bool(),
-        Some(false),
-        "CodeMode masked body leaked: {v}"
-    );
-
-    let v = codemode_read_then_expand(root, &path, true);
-    assert_eq!(
-        v["value"]["exact"].as_bool(),
-        Some(true),
-        "CodeMode raw expand must return exact bytes: {v}"
     );
 }

@@ -2,11 +2,7 @@
 
 Status: compatibility policy, not a release announcement. Contract date: **2026-08-07**.
 
-`tokenzero-mcp-compat` is the separately named Rust compatibility package. Its
-installable per-operation artifact is `tokenzero-mcp`; the independent CodeMode
-artifact is `tokenzero-codemode`. A process and an installation select one
-surface only. This contract freezes the compatibility surface and explains how
-to move existing MCP clients to CodeMode.
+`tokenzero-mcp-compat` is the separately named Rust compatibility package for classic per-operation MCP. The retained `tokenzero-codemode` artifact is now a planner-free raw worker launched by ZeroStack, not a competing plan catalog. This contract freezes the classic compatibility surface and explains how to move clients to the ZeroStack aggregate host.
 
 ## Release-N support window
 
@@ -36,7 +32,7 @@ The compatibility catalog is feature-frozen at release N. It receives only:
 4. build or packaging fixes needed to preserve the published compatibility
    contract.
 
-New operations, convenience features, and parity work belong on CodeMode. A
+New operations, convenience features, and composition work belong in aggregate bindings and ZeroStack. A
 performance change is in scope only when it is required for one of the supported
 fix classes. Compatibility support does not promise feature parity.
 
@@ -51,15 +47,10 @@ issue. Do not put secrets or payload bytes in either report.
 
 ## Operation-complete migration
 
-On CodeMode, put dependent calls in one `tz_execute_code` recipe instead of
-making many per-operation MCP round trips. Bare aliases such as `read` follow
-the same row as their canonical `tz_*` target.
+On the ZeroStack aggregate host, put dependent calls in one plan instead of making many classic MCP round trips. Bare aliases such as `read` follow the same compatibility row as their canonical `tz_*` target.
 
 | Compatibility operation | Alias | CodeMode path | Migration note |
 |---|---|---|---|
-| `tz_execute_code` | none | `tz_execute_code` | Primary CodeMode entry; retained. |
-| `tz_codemode_search` | none | `tz_codemode_search` | Progressive method search; retained. |
-| `tz_codemode_describe` | none | `tz_codemode_describe` | Describe a method or `capabilities`; retained. |
 | `tz_read` | `read` | `zero.read` | Returns bounded text and exact refs. |
 | `tz_find` | `find` | `zero.find` | Literal content search. |
 | `tz_grep` | `grep` | `zero.grep` | Regex behavior still depends on the selected backend. |
@@ -86,46 +77,10 @@ recipe and run `tokenzero expand <ref> --raw` against the exact ref.
 
 ### Protocol-method migration
 
-| MCP method | CodeMode behavior |
-|---|---|
-| `initialize` | Unchanged MCP handshake; the selected surface is fixed for the session. |
-| `notifications/initialized` | Unchanged notification. |
-| `tools/list` | Lists only the CodeMode primary tools; `tools.listChanged` remains false. |
-| `tools/call` | Call a listed primary tool, normally `tz_execute_code`. |
-| `resources/read` | Still reads the advertised bounded resources, including the CodeMode catalog. |
-| `server/discover` | Still reports surface-specific versions, capabilities, and identity. |
+Classic MCP keeps its existing `initialize`, `notifications/initialized`, `tools/list`, `tools/call`, `resources/read`, and `server/discover` behavior. Aggregate plan protocol and registration are owned by ZeroStack; TokenZero supplies operation schemas, dotted bindings, and raw-worker v2 dispatch.
 
 ## Switch, rollback, and uninstall
 
-Install one surface at a time. Installing the peer replaces the prior binary and
-client registration atomically.
+Classic MCP clients keep the explicit compatibility registration. To migrate, remove that client registration and enable the ZeroStack aggregate host, which discovers and launches `tokenzero-codemode` as a raw worker. Do not launch the raw worker as an MCP or local plan server.
 
-```bash
-# Switch a macOS/Linux installation to CodeMode.
-./packaging/install.sh --surface codemode
-
-# Roll back the surface selection to compatibility.
-./packaging/install.sh --surface mcp
-
-# Inspect the selected surface and contract digest.
-tokenzero doctor
-
-# Restore the latest integration manifest if a client-config write must roll back.
-tokenzero install --rollback latest
-
-# Remove the selected surface and its managed registration.
-./packaging/install.sh --uninstall --prefix ~/.tokenzero-install
-```
-
-A packaged surface binary provides the same lifecycle without a source checkout:
-
-```bash
-tokenzero-codemode install --surface codemode --prefix DIR
-tokenzero-mcp install --surface mcp --prefix DIR
-tokenzero-mcp uninstall --prefix DIR
-```
-
-Before switching, save the output of `tokenzero doctor --json`. After switching,
-run it again and verify that exactly one surface and one peer-excluded SBOM are
-reported. If verification fails, switch back to the previous surface; do not
-start both servers in one process.
+Save `tokenzero doctor --json` before changing client configuration. Integration writes remain rollback-capable with `tokenzero install --rollback latest`. Worker discovery and installation are owned centrally by ZeroStack; `packaging/install.sh --surface raw-worker --dry-run` prints the canonical build selector without performing a direct install.

@@ -1,15 +1,12 @@
-//! Canonical CodeMode wire types, limits, operation classification, and the
-//! surface-neutral executor hook.
+//! Aggregate binding wire types, limits, and operation classification.
 //!
-//! These types define the zero.* wire contract shared by the CodeMode runtime
-//! (tokenzero-codemode) and the MCP compatibility adapter
-//! (tokenzero-mcp-compat). They live in the engine so both surfaces serialize
-//! one source of truth (tokenzero-slim-public-repo-4uql.8.2).
+//! These compatibility types preserve the zero.* envelope consumed by the
+//! ZeroStack aggregate host. TokenZero owns domain metadata and serialization,
+//! but no longer embeds a planner or an execution hook.
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::path::PathBuf;
-use std::sync::OnceLock;
 use tokenzero_core::{AckClass, render_ack};
 
 pub const CODEMODE_LIMITS_SCHEMA: &str = "tokenzero.codemode.limits.v1";
@@ -17,11 +14,9 @@ pub const DEFAULT_MAX_LOGICAL_OPS: usize = 1000;
 pub const DEFAULT_MAX_PHYSICAL_OPS: usize = 256;
 pub const HARD_MAX_WALL_MS: u64 = 5000;
 
-/// Deployment override for the server-level hard wall ceiling, clamped to
-/// [1s, 300s]. Five seconds serializes real work behind machine-permit waits
-/// on busy multi-session machines (2026-07-16 incident); hubs set
-/// `TOKENZERO_CODEMODE_HARD_MAX_WALL_MS` to trade latency for headroom while
-/// per-call limits still clamp to this ceiling.
+/// Compatibility override for the aggregate binding wall ceiling, clamped to
+/// [1s, 300s]. Hubs set `TOKENZERO_CODEMODE_HARD_MAX_WALL_MS` to trade latency
+/// for headroom while per-call limits still clamp to this ceiling.
 pub fn hard_max_wall_ms() -> u64 {
     static VALUE: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
     *VALUE.get_or_init(|| {
@@ -666,36 +661,5 @@ mod structured_error_tests {
             result.to_line(),
             "codemode:error 9 ops=0 unknown surface: framework; hint: choose a supported surface; valid_surfaces: authoring, constructors, ops"
         );
-    }
-}
-
-// ─── Canonical executor hook ───────────────────────────────────────────────
-//
-// The MCP compatibility adapter (tokenzero-mcp-compat) serves the zero.execute
-// wire tools through this single hook. tokenzero-codemode installs the real
-// JS-backed executor via install_mcp_bridge(); without it, execution fails
-// closed with the same unavailable payload the old exec_stub produced.
-
-pub type CodemodeExecuteHook = fn(&str, &CodeModeOptions) -> CodeModeResult;
-
-static CODEMODE_EXECUTE_HOOK: OnceLock<CodemodeExecuteHook> = OnceLock::new();
-
-pub fn register_codemode_execute_hook(
-    hook: CodemodeExecuteHook,
-) -> Result<(), CodemodeExecuteHook> {
-    CODEMODE_EXECUTE_HOOK.set(hook)
-}
-
-pub fn codemode_execute(plan: &str, options: &CodeModeOptions) -> CodeModeResult {
-    match CODEMODE_EXECUTE_HOOK.get() {
-        Some(hook) => hook(plan, options),
-        None => CodeModeResult::error_with_kind(
-            "unavailable",
-            "CodeMode JavaScript sandbox was not compiled into this artifact \
-(missing feature surface-codemode / rquickjs). Install tokenzero-codemode, or \
-use the CodeMode catalog surface package. tokenzero-mcp never embeds the JS runtime.",
-            0,
-            false,
-        ),
     }
 }

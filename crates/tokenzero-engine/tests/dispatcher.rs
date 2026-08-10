@@ -119,31 +119,26 @@ fn engine_crate_does_not_depend_on_surface_layers() {
 }
 
 #[test]
-fn no_fastmcp_codemode_cross_adapter_calls() {
-    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../tokenzero-mcp-compat/src");
-    let fastmcp = fs::read_to_string(root.join("fastmcp_mode.rs")).unwrap();
+fn compatibility_carrier_and_raw_worker_do_not_embed_a_planner() {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let fastmcp =
+        fs::read_to_string(root.join("../tokenzero-mcp-compat/src/fastmcp_mode.rs")).unwrap();
     assert!(
-        !fastmcp.contains("crate::codemode") && !fastmcp.contains("execute_codemode"),
-        "FastMCP must not call CodeMode modules"
+        !fastmcp.contains("execute_codemode") && !fastmcp.contains("rquickjs"),
+        "classic FastMCP carrier must not execute plans"
     );
     assert!(
         fastmcp.contains("call_tool_fastmcp") || fastmcp.contains("dispatch_mcp_tool"),
-        "FastMCP should use shared tool/dispatch path"
+        "classic FastMCP should use the shared tool/dispatch path"
     );
 
-    let connector = fs::read_to_string(
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../tokenzero-codemode/src/exec.rs"),
-    )
-    .unwrap();
-    assert!(
-        !connector.contains("crate::fastmcp_mode") && !connector.contains("run_fastmcp"),
-        "CodeMode must not call FastMCP"
-    );
-    assert!(
-        connector.contains("dispatch_codemode_method")
-            || connector.contains("crate::dispatcher::dispatch"),
-        "CodeMode domain path should use the typed dispatcher"
-    );
+    let worker = fs::read_to_string(root.join("../tokenzero-codemode/src/main.rs")).unwrap();
+    for forbidden in ["rquickjs", "fastmcp", "tokenzero_mcp", "zero_codemode"] {
+        assert!(
+            !worker.contains(forbidden),
+            "planner-free raw worker contains forbidden host marker {forbidden}"
+        );
+    }
 }
 
 #[test]

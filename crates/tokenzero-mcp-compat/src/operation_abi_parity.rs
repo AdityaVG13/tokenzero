@@ -51,36 +51,6 @@ mod tests {
         method_paths().into_iter().collect()
     }
 
-    /// Parse the primary CodeMode executor match without deriving it from the
-    /// ABI or METHOD_CATALOG. Each returned group is one real match arm; the
-    /// first name is canonical and the remainder are compatibility aliases.
-    fn live_executor_method_groups() -> Vec<Vec<&'static str>> {
-        const SOURCE: &str = include_str!("../../tokenzero-codemode/src/exec.rs");
-        let dispatch = SOURCE
-            .split_once("fn dispatch_values(")
-            .expect("dispatch_values source")
-            .1;
-        let arms = dispatch
-            .split_once("    match method {")
-            .expect("method match")
-            .1
-            .split_once("        _ => Err(operation_error")
-            .expect("unknown-method arm")
-            .0;
-        arms.lines()
-            .filter(|line| line.starts_with("        \"") && line.contains("=>"))
-            .map(|line| {
-                line.split_once("=>")
-                    .expect("dispatch arm")
-                    .0
-                    .split('\"')
-                    .skip(1)
-                    .step_by(2)
-                    .collect::<Vec<_>>()
-            })
-            .collect()
-    }
-
     /// Wire tools/list boundary (classic surface, aliases off).
     fn live_classic_tools_list() -> Vec<crate::catalog::ToolSpec> {
         tool_specs_for_filter(None, false, McpToolSurface::Classic)
@@ -244,69 +214,6 @@ mod tests {
                 "CodeMode describe output drift for {path}: {:?}",
                 schema_diff(output, &op.results.schema)
             );
-        }
-    }
-
-    #[test]
-    fn every_executor_arm_maps_to_the_catalog_and_operation_abi() {
-        let catalog_ops: BTreeSet<_> = live_codemode_paths()
-            .into_iter()
-            .map(|path| {
-                resolve_operation(path)
-                    .unwrap_or_else(|| panic!("catalog path {path} missing ABI"))
-                    .name
-            })
-            .collect();
-        let groups = live_executor_method_groups();
-        assert!(
-            !groups.is_empty(),
-            "executor inventory parser found no arms"
-        );
-        let mut executor_ops = BTreeSet::new();
-        for group in groups {
-            let primary = group.first().expect("executor arm name");
-            let op = resolve_operation(primary)
-                .unwrap_or_else(|| panic!("executor primary {primary} missing ABI"));
-            executor_ops.insert(op.name);
-            for alias in group.iter().skip(1).filter(|name| name.contains('.')) {
-                let alias_op = resolve_operation(alias)
-                    .unwrap_or_else(|| panic!("qualified executor alias {alias} missing ABI"));
-                assert_eq!(
-                    alias_op.name, op.name,
-                    "executor alias {alias} does not resolve to primary {primary}"
-                );
-            }
-        }
-        assert_eq!(
-            executor_ops, catalog_ops,
-            "CodeMode executor and METHOD_CATALOG operation inventories drifted"
-        );
-    }
-
-    #[test]
-    fn executor_only_recipe_controls_are_explicitly_outside_the_engine_abi() {
-        // These four JS-host controls move recipe source inside one CodeMode
-        // session. They are not engine operations, MCP tools, or raw-worker
-        // methods, so they stay outside the operation ABI and discovery catalog.
-        const RECIPE_CONTROLS: &[&str] = &[
-            "codemode.recipeRegister",
-            "codemode.recipeList",
-            "codemode.recipeDescribe",
-            "codemode.recipeRun",
-        ];
-        const SOURCE: &str = include_str!("../../tokenzero-codemode/src/exec.rs");
-        let dispatch = SOURCE
-            .split_once("fn dispatch_values(")
-            .expect("dispatch_values source")
-            .1
-            .split_once("fn journal_execution_arg")
-            .expect("dispatch_values end")
-            .0;
-        let catalog = live_codemode_paths();
-        for control in RECIPE_CONTROLS {
-            assert!(dispatch.contains(&format!("\"{control}\"")));
-            assert!(!catalog.contains(control));
-            assert!(resolve_operation(control).is_none());
         }
     }
 

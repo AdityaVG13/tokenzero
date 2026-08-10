@@ -1,16 +1,9 @@
-//! Mutually exclusive package surfaces for TokenZero (tokenzero-irx9.3).
+//! Package identities for classic MCP compatibility and the planner-free raw worker.
 //!
-//! Product rule: users install **one** of `tokenzero-mcp` or `tokenzero-codemode`
-//! from the same revision and shared core. The installer writes one client
-//! registration and replaces any prior surface. Dual catalog / dual mode
-//! startup fails closed.
-//!
-//! Selection matrix:
-//! - Native CodeMode clients install FastMCP (`tokenzero-mcp`).
-//! - Legacy MCP-only clients install CodeMode (`tokenzero-codemode`).
-//!
-//! The `tokenzero` name is a compatibility shim / selected symlink only —
-//! never a dual-surface binary.
+//! `tokenzero-mcp` is an explicit classic MCP compatibility artifact. The
+//! `tokenzero-codemode` artifact name is retained for rollout compatibility, but
+//! its package semantic is `raw-worker`: ZeroStack owns discovery, registration,
+//! planning, and composition. No TokenZero process embeds both catalogs.
 
 use serde::{Deserialize, Serialize};
 use std::env;
@@ -22,7 +15,7 @@ use tokenzero_core::operation_abi::{SEMANTIC_CONTRACT_VERSION, contract_digest_h
 
 /// Package artifact names (release binaries / packages).
 pub const ARTIFACT_MCP: &str = "tokenzero-mcp";
-pub const ARTIFACT_CODEMODE: &str = "tokenzero-codemode";
+pub const ARTIFACT_RAW_WORKER: &str = "tokenzero-codemode";
 /// Compatibility shim name — never exposes both surfaces itself.
 pub const ARTIFACT_SHIM: &str = "tokenzero";
 
@@ -36,42 +29,43 @@ pub const CLIENT_CONFIG_FILE: &str = "client-config.json";
 #[serde(rename_all = "lowercase")]
 pub enum PackageSurface {
     Mcp,
-    Codemode,
+    #[serde(rename = "raw-worker", alias = "codemode")]
+    RawWorker,
 }
 
 impl PackageSurface {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Mcp => "mcp",
-            Self::Codemode => "codemode",
+            Self::RawWorker => "raw-worker",
         }
     }
 
     pub fn artifact_name(self) -> &'static str {
         match self {
             Self::Mcp => ARTIFACT_MCP,
-            Self::Codemode => ARTIFACT_CODEMODE,
+            Self::RawWorker => ARTIFACT_RAW_WORKER,
         }
     }
 
     pub fn parse(s: &str) -> Result<Self, String> {
         match s.trim().to_ascii_lowercase().as_str() {
             "mcp" | "fastmcp" | "per-op" | "per_op" | ARTIFACT_MCP => Ok(Self::Mcp),
-            "codemode" | "code-mode" | "code_mode" | ARTIFACT_CODEMODE => Ok(Self::Codemode),
+            "raw-worker" | "raw_worker" | "worker" | "codemode" | "code-mode" | "code_mode"
+            | ARTIFACT_RAW_WORKER => Ok(Self::RawWorker),
             other => Err(format!(
-                "unknown package surface {other:?}; require 'mcp' or 'codemode' (artifacts {ARTIFACT_MCP} / {ARTIFACT_CODEMODE})"
+                "unknown package surface {other:?}; require 'mcp' or 'raw-worker' (artifacts {ARTIFACT_MCP} / {ARTIFACT_RAW_WORKER})"
             )),
         }
     }
 
-    /// Selection matrix for client install docs.
-    /// - Native CodeMode clients install FastMCP (`tokenzero-mcp`).
-    /// - Legacy MCP-only clients install CodeMode (`tokenzero-codemode`).
-    pub fn recommended_for_client(native_codemode_client: bool) -> Self {
-        if native_codemode_client {
-            Self::Mcp
+    /// Aggregate hosts use the raw worker; classic MCP-only clients use the
+    /// compatibility server.
+    pub fn recommended_for_client(aggregate_host: bool) -> Self {
+        if aggregate_host {
+            Self::RawWorker
         } else {
-            Self::Codemode
+            Self::Mcp
         }
     }
 }
@@ -82,32 +76,24 @@ impl std::fmt::Display for PackageSurface {
     }
 }
 
-/// Compile-time surfaces enabled in this binary (feature matrix).
+/// Compile-time compatibility surfaces enabled in this binary.
 ///
-/// Empty when the pure install helpers are built without surface markers.
-/// A process that serves a catalog must have exactly one surface feature;
-/// both features are a hard compile error (tokenzero-irx9.3).
+/// The raw worker is a separate bin-only package and never appears here.
 pub fn compile_time_surfaces() -> Vec<PackageSurface> {
     // `mut` is used when a surface feature pushes; empty without markers.
     #[allow(unused_mut)]
     let mut out = Vec::new();
     #[cfg(feature = "surface-mcp")]
     out.push(PackageSurface::Mcp);
-    #[cfg(feature = "surface-codemode")]
-    out.push(PackageSurface::Codemode);
     out
 }
 
-/// Fail closed if this build compiled more than one package surface.
-///
-/// With mutual-exclusion `compile_error!` this is belt-and-suspenders for any
-/// residual dual-feature path; dual catalog startup must never succeed.
+/// Fail closed if a future build accidentally compiles multiple catalog surfaces.
 pub fn reject_dual_compiled_surfaces() -> Result<(), String> {
     let surfaces = compile_time_surfaces();
     if surfaces.len() > 1 {
         return Err(dual_surface_diagnostic(
-            "binary was compiled with both surface-mcp and surface-codemode; \
-one process must never contain both catalogs",
+            "binary compiled multiple catalog surfaces; one process must never contain both catalogs",
         ));
     }
     Ok(())
@@ -124,8 +110,8 @@ pub fn baked_package_surface() -> Option<PackageSurface> {
             if stem == ARTIFACT_MCP || stem.starts_with("tokenzero-mcp") {
                 return Some(PackageSurface::Mcp);
             }
-            if stem == ARTIFACT_CODEMODE || stem.starts_with("tokenzero-codemode") {
-                return Some(PackageSurface::Codemode);
+            if stem == ARTIFACT_RAW_WORKER || stem.starts_with("tokenzero-codemode") {
+                return Some(PackageSurface::RawWorker);
             }
         }
     }
@@ -152,9 +138,9 @@ pub fn package_identity(surface: PackageSurface) -> serde_json::Value {
         "semantic_contract_version": SEMANTIC_CONTRACT_VERSION,
         "semantic_contract_digest": semantic_contract_digest(),
         "selection_matrix": {
-            "native_codemode_client": ARTIFACT_MCP,
-            "legacy_mcp_client": ARTIFACT_CODEMODE,
-            "rule": "native CodeMode client -> install tokenzero-mcp; otherwise -> install tokenzero-codemode"
+            "aggregate_host": ARTIFACT_RAW_WORKER,
+            "classic_mcp_client": ARTIFACT_MCP,
+            "rule": "ZeroStack aggregate host -> planner-free raw worker; classic MCP client -> tokenzero-mcp"
         }
     })
 }
@@ -288,9 +274,9 @@ pub fn client_config_for(surface: PackageSurface, binary_path: &Path) -> ClientC
             binary_path.display().to_string(),
             vec!["--mode=mcp".to_string()],
         ),
-        PackageSurface::Codemode => (
+        PackageSurface::RawWorker => (
             binary_path.display().to_string(),
-            vec!["--mode=codemode".to_string()],
+            vec!["raw-worker".to_string()],
         ),
     };
     ClientConfig {
@@ -390,9 +376,9 @@ pub fn reject_dual_env_selection() -> Result<(), String> {
 pub fn dual_surface_diagnostic(detail: &str) -> String {
     format!(
         "tokenzero: dual package surface rejected (fail closed): {detail}. \
-Install exactly one artifact ({ARTIFACT_MCP} or {ARTIFACT_CODEMODE}); \
-native CodeMode clients install {ARTIFACT_MCP}; legacy MCP clients install {ARTIFACT_CODEMODE}. \
-Do not register both catalogs in one client session."
+Keep {ARTIFACT_MCP} in classic compatibility mode; ZeroStack launches \
+{ARTIFACT_RAW_WORKER} only as a planner-free raw worker. Do not register both \
+catalogs in one client process."
     )
 }
 
@@ -447,7 +433,10 @@ pub fn modes_from_args(args: &[String]) -> Result<Option<PackageSurface>, String
         return Ok(Some(PackageSurface::Mcp));
     }
     if codemode {
-        return Ok(Some(PackageSurface::Codemode));
+        return Err(
+            "tokenzero: engine-local CodeMode mode was removed; launch plans through the ZeroStack aggregate host and keep tokenzero-mcp in classic mode"
+                .to_string(),
+        );
     }
     Ok(None)
 }
@@ -471,7 +460,7 @@ const STDIO_SURFACE_ALLOWED_FLAG_PREFIXES: &[&str] = &[
 /// branch into the stdio server, which then read EOF from a non-tty stdin and exited
 /// 0 with no output. Valid and invalid refs were indistinguishable, so the silent
 /// empty success masked whatever the caller actually got wrong. Surface binaries only
-/// speak MCP/CodeMode over stdio; CLI verbs belong to the `tokenzero` binary.
+/// speak classic MCP or raw-worker v2 over stdio; CLI verbs belong to `tokenzero`.
 pub fn reject_non_stdio_args(artifact: &str, args: &[String]) -> Result<(), String> {
     // args[0] is the executable path.
     for arg in args.iter().skip(1) {
@@ -552,7 +541,7 @@ Reinstall the matching package or use the {} compatibility shim after selecting 
     }
     Err(dual_surface_diagnostic(
         "no package surface selected and no single surface is baked into this binary; \
-install tokenzero-mcp or tokenzero-codemode, or pass --mode=mcp|codemode with a matching feature build",
+install tokenzero-mcp for classic MCP; the ZeroStack aggregate host launches tokenzero-codemode as a raw worker",
     ))
 }
 
@@ -631,8 +620,8 @@ pub fn sbom_document(surface: PackageSurface) -> serde_json::Value {
                 ],
                 "platform": current_platform(),
                 "mutually_exclusive_with": match surface {
-                    PackageSurface::Mcp => ARTIFACT_CODEMODE,
-                    PackageSurface::Codemode => ARTIFACT_MCP,
+                    PackageSurface::Mcp => ARTIFACT_RAW_WORKER,
+                    PackageSurface::RawWorker => ARTIFACT_MCP,
                 }
             }),
         );

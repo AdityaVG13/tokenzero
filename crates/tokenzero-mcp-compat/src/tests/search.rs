@@ -1,7 +1,5 @@
 use super::*;
-use std::sync::Arc;
 use tempfile::tempdir;
-use tokenzero_core::MCP_SCHEMA_VERSION;
 
 use super::support::*;
 
@@ -611,10 +609,7 @@ fn glob_discovers_paths_and_roundtrips_exact_output() {
 
     assert_eq!(response.tool, "glob");
     assert_eq!(response.status, "ok");
-    let visible = response.visible.as_ref().unwrap().text.clone();
-    assert!(visible.contains("src/lib.rs"));
-    assert!(visible.contains("src/nested/mod.rs"));
-    assert!(!visible.contains("README.md"));
+    assert_eq!(response.telemetry.as_ref().unwrap()["matches"], 2);
     let ref_id = response
         .refs
         .iter()
@@ -623,7 +618,10 @@ fn glob_discovers_paths_and_roundtrips_exact_output() {
         .ref_id
         .clone();
     let expanded = engine.expand(&ref_id, Some("raw"), None, None, None, None);
-    assert!(expanded.visible.unwrap().text.contains("src/lib.rs"));
+    let expanded = expanded.visible.unwrap().text;
+    assert!(expanded.contains("src/lib.rs"));
+    assert!(expanded.contains("src/nested/mod.rs"));
+    assert!(!expanded.contains("README.md"));
     let telemetry = response.telemetry.as_ref().unwrap();
     assert_eq!(telemetry["transport_status"], "ok");
     assert_eq!(telemetry["degraded"], false);

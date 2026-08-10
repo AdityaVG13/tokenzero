@@ -74,7 +74,7 @@ mod tests {
     }
 
     #[test]
-    fn canonical_worker_manifest_keeps_hosts_out_of_default_features() {
+    fn canonical_worker_manifest_has_no_host_dependencies() {
         let manifest = std::fs::read_to_string(
             std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
                 .join("../tokenzero-codemode/Cargo.toml"),
@@ -85,17 +85,20 @@ mod tests {
             .and_then(|(_, features)| features.lines().find(|line| line.starts_with("default")))
             .expect("worker default feature declaration");
         assert_eq!(default.trim(), "default = []");
-        let quickjs = manifest
-            .lines()
-            .find(|line| line.starts_with("rquickjs ="))
-            .expect("rquickjs dependency declaration");
-        assert!(quickjs.contains("optional = true"), "rquickjs: {quickjs}");
-        assert!(
-            !manifest
-                .lines()
-                .any(|line| line.starts_with("tokenzero-mcp-compat =")),
-            "canonical worker package must not depend on the MCP adapter"
-        );
+        for forbidden in [
+            "[lib]",
+            "surface-codemode",
+            "rquickjs",
+            "fastmcp",
+            "machine-permit",
+            "tokenzero-mcp-compat",
+            "zero-codemode",
+        ] {
+            assert!(
+                !manifest.contains(forbidden),
+                "canonical worker manifest contains {forbidden}"
+            );
+        }
 
         let main = std::fs::read_to_string(
             std::path::Path::new(env!("CARGO_MANIFEST_DIR"))

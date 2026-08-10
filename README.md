@@ -255,7 +255,7 @@ Paste this into your AI agent and it will set TokenZero up end to end:
 Set up TokenZero from https://github.com/AdityaVG13/tokenzero for me:
 1. Clone it and run `cargo build --release` (rust-toolchain.toml pins the toolchain).
 2. Register `target/release/tokenzero mcp-server --mode=mcp` as a stdio MCP server named "TokenZero" in my agent config.
-3. If my harness supports ZeroStack CodeMode plan execution, register `target/release/tokenzero mcp-server --mode=codemode` INSTEAD and never both.
+3. For multi-engine or multi-step plans, enable the ZeroStack aggregate host; it launches `tokenzero-codemode` only as a planner-free raw worker.
 4. Verify: call `tokenzero read README.md --json` against this repo and report the response envelope plus token savings.
 ```
 
@@ -346,62 +346,24 @@ the `2026-07-28` release candidate. Malformed JSON and cancelled or failed calls
 structured errors **without terminating the server**; a crash-transparent supervisor
 restarts a faulted worker mid-session.
 
-Launch flags are unchanged:
-
-- `tokenzero mcp-server --mode=mcp` (default): the per-operation tools.
-- `tokenzero mcp-server --mode=codemode`: the single executor tool.
-
-Per-tool documentation lives at `resource://tokenzero/tools`.
+`tokenzero mcp-server --mode=mcp` launches the explicit classic compatibility catalog. Engine-local CodeMode mode was retired and fails loudly. Per-tool documentation lives at `resource://tokenzero/tools`.
 
 <h3 id="codemode"><img src=".github/assets/h-codemode.svg" alt="CodeMode" width="100%"></h3>
 
-The tables above shrink what each operation **returns**. CodeMode shrinks how
-many operations you **pay for**. The two multiply.
+TokenZero publishes dotted aggregate bindings and a planner-free raw-worker v2 artifact. ZeroStack owns plan parsing, scheduling, transaction policy, permits, and multi-engine composition. The aggregate host dispatches TokenZero operations through `tokenzero-codemode`; despite its retained rollout name, that binary contains no local planner or MCP server.
 
-CodeMode is built into TokenZero itself. It needs nothing but this repo:
-`tokenzero mcp-server --mode=codemode` turns the same 18 operations into a
-single executor tool, `tz_execute_code`. (FSZero and GraphZero each ship the
-same mode for their own surfaces, and the optional ZeroStack hub unifies all
-three; none of that is required to use CodeMode here.)
-
-In MCP mode, a five-step task costs five round-trips, and every intermediate
-result lands in the model's context whether the model needs it or not. In
-CodeMode the agent submits a short plan; the server runs every step; only the
-final result and its refs enter context. Three properties fall out of that:
-
-1. **Intermediates are free.** A `read` that only feeds a `compact` never
-   surfaces. The model never spends tokens on data it was going to transform
-   anyway.
-2. **One round-trip per task, not per step.** Latency and tool-call overhead
-   are paid once.
-3. **Refs pipe between steps.** `$c.ref` from step one is a valid input to
-   step two, server-side, with no model in the loop.
-
-Run a plan locally without any harness:
-
-```bash
-tokenzero codemode --json --root . --plan '{"steps":[{"id":"c","method":"zero.token.compact","args":["payload"]},{"id":"e","method":"zero.token.expand","args":["$c.ref"]}],"return":{"text":"$e.text","ref":"$c.ref"}}'
-```
+TokenZero remains authoritative for tokenizer identity, roots, typed domain dispatch, exact refs, effects, output caps, and telemetry. See [`docs/codemode.md`](docs/codemode.md) for the ownership boundary and binding catalog.
 
 <h3 id="choosing-a-mode"><img src=".github/assets/h-choosing.svg" alt="Choosing a mode" width="100%"></h3>
 
-TokenZero offers two MCP surfaces built on the same operation set and the same
-recovery store. Pick one per harness. Running both doubles the tool surface
-and re-inflates what plans compress.
+Choose classic MCP for direct per-operation compatibility. Choose the ZeroStack aggregate host for plans and multi-engine composition.
 
-| | MCP mode | CodeMode |
+| | Classic MCP compatibility | ZeroStack aggregate |
 | :-- | :-- | :-- |
-| **Surface** | 18 per-operation tools (`tz_read`, `tz_find`, ...) | 1 executor tool (`tz_execute_code`) |
-| **Pattern** | Standard MCP: one tool call per operation | Plans: N operations in one call |
-| **Round-trips** | One per operation | One per plan |
-| **Best for** | Any MCP harness (Claude, Codex, Cursor, ...) | Any harness whose agent can write a short plan |
-| **Launch** | `--mode=mcp` (the default) | `--mode=codemode` |
-
-<div align="center">
-
-**If you don't know which you want, you want MCP mode.**
-
-</div>
+| **Surface** | Per-operation `tz_*` tools | Dotted `zero.*` bindings across engines |
+| **Pattern** | One MCP call per operation | Plans composed by the hub |
+| **TokenZero process** | `tokenzero mcp-server --mode=mcp` | Planner-free `tokenzero-codemode raw-worker` |
+| **Owner** | TokenZero compatibility package | ZeroStack |
 
 <h3 id="zerostack"><img src=".github/assets/h-zerostack.svg" alt="ZeroStack" width="100%"></h3>
 

@@ -1,8 +1,7 @@
-//! Transport-neutral process-tracking hooks for the domain shell engine.
+//! Transport-neutral process-observation hooks for the domain shell engine.
 //!
-//! CodeMode containment (and any other surface that needs process bookkeeping)
-//! installs implementations at process start. The domain engine never imports
-//! FastMCP, MCP JSON-RPC, or CodeMode sandbox modules directly.
+//! Raw-worker lifecycle code installs process observation at process start.
+//! The domain engine never imports planners or transport adapters directly.
 
 use std::sync::RwLock;
 
@@ -18,7 +17,7 @@ struct Hooks {
     reserve_background_job: ReserveBackgroundFn,
     note_background_child: NoteBackgroundChildFn,
     finish_background_job: FinishBackgroundFn,
-    containment_snapshot: SnapshotFn,
+    process_observation_snapshot: SnapshotFn,
 }
 
 fn noop_note_child(_pid: Option<u32>, _pgid: Option<u32>, _state: &'static str) {}
@@ -35,7 +34,7 @@ fn default_hooks() -> Hooks {
         reserve_background_job: noop_reserve,
         note_background_child: noop_note_background,
         finish_background_job: noop_finish,
-        containment_snapshot: empty_snapshot,
+        process_observation_snapshot: empty_snapshot,
     }
 }
 
@@ -44,18 +43,18 @@ static HOOKS: RwLock<Hooks> = RwLock::new(Hooks {
     reserve_background_job: noop_reserve,
     note_background_child: noop_note_background,
     finish_background_job: noop_finish,
-    containment_snapshot: empty_snapshot,
+    process_observation_snapshot: empty_snapshot,
 });
 
-/// Install process-tracking hooks (typically from CodeMode containment init).
-pub fn install(hooks: ShellHooks) {
+/// Install transport-neutral worker process-observation hooks.
+pub fn install(hooks: ProcessHooks) {
     if let Ok(mut guard) = HOOKS.write() {
         *guard = Hooks {
             note_child: hooks.note_child,
             reserve_background_job: hooks.reserve_background_job,
             note_background_child: hooks.note_background_child,
             finish_background_job: hooks.finish_background_job,
-            containment_snapshot: hooks.containment_snapshot,
+            process_observation_snapshot: hooks.process_observation_snapshot,
         };
     }
 }
@@ -68,28 +67,28 @@ pub fn reset() {
     }
 }
 
-impl ShellHooks {
-    /// Hooks that only track the foreground child process (raw-worker v2
-    /// cancellation); every other slot stays a no-op.
+impl ProcessHooks {
+    /// Hooks that only track the foreground child process for raw-worker v2
+    /// cancellation; every other slot stays a no-op.
     pub fn with_note_child(note_child: NoteChildFn) -> Self {
         Self {
             note_child,
             reserve_background_job: noop_reserve,
             note_background_child: noop_note_background,
             finish_background_job: noop_finish,
-            containment_snapshot: empty_snapshot,
+            process_observation_snapshot: empty_snapshot,
         }
     }
 }
 
-/// Domain-facing hook bundle.
+/// Domain-facing worker process-observation bundle.
 #[derive(Clone, Copy)]
-pub struct ShellHooks {
+pub struct ProcessHooks {
     pub note_child: NoteChildFn,
     pub reserve_background_job: ReserveBackgroundFn,
     pub note_background_child: NoteBackgroundChildFn,
     pub finish_background_job: FinishBackgroundFn,
-    pub containment_snapshot: SnapshotFn,
+    pub process_observation_snapshot: SnapshotFn,
 }
 
 fn current() -> Hooks {
@@ -112,6 +111,6 @@ pub fn finish_background_job(id: &str) {
     (current().finish_background_job)(id);
 }
 
-pub fn containment_snapshot() -> serde_json::Value {
-    (current().containment_snapshot)()
+pub fn process_observation_snapshot() -> serde_json::Value {
+    (current().process_observation_snapshot)()
 }

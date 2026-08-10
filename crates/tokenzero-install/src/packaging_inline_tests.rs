@@ -22,11 +22,11 @@ fn install_platform_override_accepts_only_supported_literals() {
 fn selection_matrix() {
     assert_eq!(
         PackageSurface::recommended_for_client(true),
-        PackageSurface::Mcp
+        PackageSurface::RawWorker
     );
     assert_eq!(
         PackageSurface::recommended_for_client(false),
-        PackageSurface::Codemode
+        PackageSurface::Mcp
     );
 }
 
@@ -56,13 +56,13 @@ fn install_replaces_prior_surface() {
             .unwrap();
     assert_eq!(cfg1.surface, PackageSurface::Mcp);
 
-    let s2 = install_surface(PackageSurface::Codemode, prefix, &bin).unwrap();
-    assert_eq!(s2.surface, PackageSurface::Codemode);
+    let s2 = install_surface(PackageSurface::RawWorker, prefix, &bin).unwrap();
+    assert_eq!(s2.surface, PackageSurface::RawWorker);
     let cfg2: ClientConfig =
         serde_json::from_str(&fs::read_to_string(prefix.join(CLIENT_CONFIG_FILE)).unwrap())
             .unwrap();
-    assert_eq!(cfg2.surface, PackageSurface::Codemode);
-    assert_eq!(cfg2.args, vec!["--mode=codemode".to_string()]);
+    assert_eq!(cfg2.surface, PackageSurface::RawWorker);
+    assert_eq!(cfg2.args, vec!["raw-worker".to_string()]);
 
     let report = uninstall_report(uninstall_surface(prefix).unwrap());
     assert_eq!(report["uninstalled"], true);
@@ -73,7 +73,7 @@ fn install_replaces_prior_surface() {
 fn sbom_names_surface_and_peer_exclusion() {
     let doc = sbom_document(PackageSurface::Mcp);
     assert_eq!(doc["artifact"], ARTIFACT_MCP);
-    assert_eq!(doc["sbom"]["mutually_exclusive_with"], ARTIFACT_CODEMODE);
+    assert_eq!(doc["sbom"]["mutually_exclusive_with"], ARTIFACT_RAW_WORKER);
     assert!(!doc["semantic_contract_digest"].as_str().unwrap().is_empty());
 }
 
@@ -82,7 +82,7 @@ fn parse_surface_names() {
     assert_eq!(PackageSurface::parse("mcp").unwrap(), PackageSurface::Mcp);
     assert_eq!(
         PackageSurface::parse("tokenzero-codemode").unwrap(),
-        PackageSurface::Codemode
+        PackageSurface::RawWorker
     );
     assert!(PackageSurface::parse("both").is_err());
 }
@@ -92,7 +92,7 @@ fn dual_surface_diagnostic_names_artifacts() {
     let msg = dual_surface_diagnostic("test detail");
     assert!(msg.contains("fail closed"), "{msg}");
     assert!(msg.contains(ARTIFACT_MCP), "{msg}");
-    assert!(msg.contains(ARTIFACT_CODEMODE), "{msg}");
+    assert!(msg.contains(ARTIFACT_RAW_WORKER), "{msg}");
 }
 
 #[test]
@@ -116,13 +116,13 @@ fn install_surface_replaces_peer_config_atomically() {
     install_surface(PackageSurface::Mcp, prefix, &bin).unwrap();
     let cfg_mcp = fs::read_to_string(prefix.join(CLIENT_CONFIG_FILE)).unwrap();
     assert!(cfg_mcp.contains("--mode=mcp"));
-    // Replace with codemode — single surface config remains.
-    install_surface(PackageSurface::Codemode, prefix, &bin).unwrap();
+    // Replace with the raw-worker identity; one registration remains.
+    install_surface(PackageSurface::RawWorker, prefix, &bin).unwrap();
     let cfg = fs::read_to_string(prefix.join(CLIENT_CONFIG_FILE)).unwrap();
-    assert!(cfg.contains("--mode=codemode"));
+    assert!(cfg.contains("raw-worker"));
     assert!(!cfg.contains("--mode=mcp"));
     let state = load_install_state(prefix).unwrap().unwrap();
-    assert_eq!(state.surface, PackageSurface::Codemode);
+    assert_eq!(state.surface, PackageSurface::RawWorker);
     // Uninstall clears state + config (rollback endpoint).
     uninstall_surface(prefix).unwrap();
     assert!(load_install_state(prefix).unwrap().is_none());

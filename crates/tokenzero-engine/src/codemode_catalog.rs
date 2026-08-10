@@ -264,25 +264,18 @@ pub fn codemode_method_catalog() -> Value {
             entry
         }).collect::<Vec<_>>(),
         "discovery": {
-            "search_prefix": "search:<query>",
-            "describe_prefix": "describe:<method>",
-            "in_plan": ["codemode.search(query)", "codemode.describe(path)", "codemode.limits()"]
+            "owner": "zerostack",
+            "search_binding": "codemode.search",
+            "describe_binding": "codemode.describe"
         },
         "limits": CodeModeLimits::default().as_json(),
-        "execution_forms": ["recipe", "json", "sandboxed_javascript"],
-        "execution_refs": [
-            "codemode/execution/{id}",
-            "codemode/execution/{id}/code",
-            "codemode/execution/{id}/steps",
-            "codemode/execution/{id}/telemetry",
-            "codemode/execution/{id}/result",
-            "codemode/execution/{id}/error"
-        ],
+        "aggregate_execution_owner": "zerostack",
+        "local_execution": false,
+        "worker_transport": "raw-worker-v2",
         "next_actions": [
-            "Run `tokenzero codemode 'search:read'` to rank methods by keyword.",
-            "Run `tokenzero codemode 'describe:zero.read'` for full signatures.",
-            "Compose multi-step workflows with const bindings and return.",
-            "Same tools/engine as MCP tz_* surface; CodeMode composes them in one plan for fewer round-trips."
+            "Use the ZeroStack aggregate catalog search to rank bindings by keyword.",
+            "Describe a dotted binding such as zero.read before composing it.",
+            "Execute multi-step plans only through the aggregate host."
         ]
     })
 }

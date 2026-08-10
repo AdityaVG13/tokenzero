@@ -923,14 +923,6 @@ fn lowercase_hex(bytes: &[u8]) -> String {
     encoded
 }
 
-fn capture_reader<R: Read>(
-    reader: R,
-    stream_name: &str,
-    policy: RunOutputPolicy,
-) -> std::io::Result<CapturedStream> {
-    capture_reader_with_observer(reader, stream_name, policy, |_| {})
-}
-
 fn capture_reader_with_observer<R: Read, F: FnMut(&[u8])>(
     mut reader: R,
     stream_name: &str,

@@ -18,7 +18,6 @@ fn cli_bare_invocation_prints_useful_help() {
         String::from_utf8_lossy(&output.stderr)
     );
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("Usage: tokenzero [COMMAND]"));
     assert!(stdout.contains("tokenzero capabilities --json"));
     assert!(stdout.contains("tokenzero robot-docs guide"));
     assert!(stdout.contains("tokenzero run --json -- <cmd>"));
@@ -157,19 +156,13 @@ fn cli_capabilities_json_exposes_agent_contract() {
             .any(|feature| feature == "non_tty_output_discipline")
     );
     assert_eq!(json["feature_flags"]["capabilities_json"], true);
-    // o574 (R-019): the flag must reflect compile-time availability, not a
-    // hardcoded true. The test binary and the CLI under test share features.
-    assert_eq!(
-        json["feature_flags"]["codemode_surface"],
-        cfg!(feature = "surface-codemode")
-    );
-    assert_eq!(
-        json["features"]
+    assert!(json["feature_flags"].get("codemode_surface").is_none());
+    assert!(
+        !json["features"]
             .as_array()
             .unwrap()
             .iter()
-            .any(|feature| feature == "codemode_surface"),
-        cfg!(feature = "surface-codemode")
+            .any(|feature| feature == "codemode_surface")
     );
     assert_eq!(json["feature_flags"]["robot_docs_guide"], true);
     assert_eq!(json["feature_flags"]["intent_inference_aliases"], true);
@@ -252,10 +245,8 @@ fn cli_capabilities_json_exposes_agent_contract() {
             "operation_abi_args_surface_specific_envelopes"
         );
         let surfaces = row["mcp_surfaces"].as_array().expect("MCP surfaces");
-        let expected_available = (cfg!(feature = "surface-mcp")
-            && surfaces.iter().any(|surface| surface == "classic"))
-            || (cfg!(feature = "surface-codemode")
-                && surfaces.iter().any(|surface| surface == "codemode"));
+        let expected_available =
+            cfg!(feature = "surface-mcp") && surfaces.iter().any(|surface| surface == "classic");
         assert_eq!(
             row["available_in_this_build"], expected_available,
             "{} availability",
@@ -272,17 +263,14 @@ fn cli_capabilities_json_exposes_agent_contract() {
         .iter()
         .find(|row| row["mcp_tool"] == "tz_execute_code")
         .expect("tz_execute_code row");
-    assert_eq!(execute_code["cli_verb"], "codemode");
-    assert_eq!(
-        execute_code["route_relationship"],
-        "composition_route_not_one_to_one"
-    );
+    assert!(execute_code["cli_verb"].is_null());
+    assert_eq!(execute_code["route_relationship"], "aggregate_control_only");
     let report_issue = mcp_tools
         .iter()
         .find(|row| row["mcp_tool"] == "tz_report_tool_issue")
         .expect("tz_report_tool_issue row");
     assert!(report_issue["cli_verb"].is_null());
-    assert_eq!(report_issue["route_relationship"], "mcp_only");
+    assert_eq!(report_issue["route_relationship"], "aggregate_control_only");
     assert_eq!(json["surface_parity"]["behavioral_parity"], "not_claimed");
     assert!(
         json["output_schemas"]["run"]["status_fields"]
@@ -336,22 +324,18 @@ fn cli_capabilities_json_exposes_agent_contract() {
                 .iter()
                 .any(|alias| alias == "robot-docs commands")
     }));
-    assert!(json["commands"].as_array().unwrap().iter().any(|row| {
-        row["name"] == "codemode"
-            && row["json"] == true
-            && row["primary_invocation"]
-                == "tokenzero codemode --json --budget <n> --stdin <<'EOF' … EOF"
-    }));
-    assert_eq!(json["codemode"]["schema"], "tokenzero.codemode.v1");
-    assert_eq!(json["codemode"]["tier"], "B");
-    assert_eq!(json["codemode"]["transport"], "shell_trampoline");
-    assert_eq!(
-        json["codemode"]["budget_flag"],
-        "--budget / --max-visible-tokens"
-    );
     assert!(
-        json["codemode"].get("mcp_tool").is_none(),
-        "codemode must not advertise an mcp_tool"
+        !json["commands"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|row| row["name"] == "codemode")
+    );
+    assert_eq!(json["aggregate_codemode"]["owner"], "zerostack");
+    assert_eq!(json["aggregate_codemode"]["local_execution"], false);
+    assert_eq!(
+        json["aggregate_codemode"]["worker_transport"],
+        "raw-worker-v2"
     );
     assert!(json["commands"].as_array().unwrap().iter().any(|row| {
         row["name"] == "doctor"
@@ -441,11 +425,9 @@ fn cli_robot_docs_guide_is_paste_ready_for_agents() {
     assert!(stdout.contains("tokenzero run --json -- <command>"));
     assert!(stdout.contains("Stdout is data. Stderr is diagnostics."));
     assert!(stdout.contains("telemetry.command_success"));
-    assert!(stdout.contains("## MCP vs CLI vs CodeMode"));
-    assert!(stdout.contains("inspect `mcp_tools` for the canonical map"));
-    assert!(stdout.contains(
-        "does not claim identical names, arguments, envelopes, availability, or behavior"
-    ));
+    assert!(stdout.contains("## MCP, CLI, and Aggregate Bindings"));
+    assert!(stdout.contains("inspect exact classic MCP availability"));
+    assert!(stdout.contains("TokenZero does not execute plans locally."));
     assert!(
         stdout.lines().count() >= 10,
         "robot docs guide should be substantial"
@@ -690,8 +672,7 @@ fn cli_agent_contract_outputs_are_deterministic_and_env_clean() {
         .iter()
         .map(|feature| feature.as_str().unwrap())
         .collect();
-    // o574 (R-019): codemode_surface appears only in codemode builds.
-    let mut expected = vec![
+    let expected = vec![
         "capabilities_json",
         "exact_recovery_refs",
         "intent_inference_aliases",
@@ -701,10 +682,6 @@ fn cli_agent_contract_outputs_are_deterministic_and_env_clean() {
         "robot_docs_guide",
         "status_truth_shell",
     ];
-    if cfg!(feature = "surface-codemode") {
-        expected.push("codemode_surface");
-        expected.sort();
-    }
     assert_eq!(features, expected);
 }
 
@@ -1170,11 +1147,7 @@ fn cli_mcp_tool_name_suggests_cli_verb_not_nearest_string() {
     );
     assert!(!stderr.contains("'tree'"), "{stderr}");
 
-    for (tool, verb) in [
-        ("tz_mem", "mem"),
-        ("tz_discover", "discover"),
-        ("tz_execute_code", "codemode"),
-    ] {
+    for (tool, verb) in [("tz_mem", "mem"), ("tz_discover", "discover")] {
         let output = Command::cargo_bin("tokenzero")
             .unwrap()
             .arg(tool)
@@ -1187,6 +1160,17 @@ fn cli_mcp_tool_name_suggests_cli_verb_not_nearest_string() {
             "{tool}: {stderr}"
         );
     }
+
+    // Aggregate control schemas have no engine-local CLI route.
+    let output = Command::cargo_bin("tokenzero")
+        .unwrap()
+        .arg("tz_execute_code")
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(2));
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(!stderr.contains("the CLI verb is 'codemode'"), "{stderr}");
+    assert!(!stderr.contains("tokenzero codemode"), "{stderr}");
 
     // Non-MCP typos keep clap's generic suggestion path.
     let output = Command::cargo_bin("tokenzero")
@@ -1359,9 +1343,25 @@ fn cli_help_primary_verbs_bounded_and_experimental_hidden() {
     );
 
     for primary in [
-        "read", "find", "grep", "glob", "tree", "edit", "recall", "fetch", "run",
-        "ingest", "expand", "mem", "discover", "cache", "doctor", "pulse",
-        "install", "capabilities", "robot-docs", "codemode",
+        "read",
+        "find",
+        "grep",
+        "glob",
+        "tree",
+        "edit",
+        "recall",
+        "fetch",
+        "run",
+        "ingest",
+        "expand",
+        "mem",
+        "discover",
+        "cache",
+        "doctor",
+        "pulse",
+        "install",
+        "capabilities",
+        "robot-docs",
     ] {
         assert!(
             names.iter().any(|n| n == primary),
@@ -1370,10 +1370,26 @@ fn cli_help_primary_verbs_bounded_and_experimental_hidden() {
     }
 
     for hidden in [
-        "harm-eval", "claim-audit", "shell-matrix", "one-shot-eval", "ws-skeleton",
-        "package-audit", "bench", "mcp-server", "mcp-smoke", "init",
-        "client-status", "cache-pack", "session-open", "rewrite", "hook", "reach",
-        "quote", "stats", "session-ledger", "clients",
+        "harm-eval",
+        "claim-audit",
+        "shell-matrix",
+        "one-shot-eval",
+        "ws-skeleton",
+        "package-audit",
+        "bench",
+        "mcp-server",
+        "mcp-smoke",
+        "init",
+        "client-status",
+        "cache-pack",
+        "session-open",
+        "rewrite",
+        "hook",
+        "reach",
+        "quote",
+        "stats",
+        "session-ledger",
+        "clients",
     ] {
         assert!(
             !names.iter().any(|n| n == hidden),
@@ -1419,8 +1435,19 @@ fn cli_help_primary_verbs_bounded_and_experimental_hidden() {
         .iter()
         .filter_map(|row| row["name"].as_str())
         .collect();
-    for thin in ["read", "find", "grep", "stats", "cache", "clients", "mcp-server"] {
-        assert!(names.contains(&thin), "capabilities.commands missing {thin}");
+    for thin in [
+        "read",
+        "find",
+        "grep",
+        "stats",
+        "cache",
+        "clients",
+        "mcp-server",
+    ] {
+        assert!(
+            names.contains(&thin),
+            "capabilities.commands missing {thin}"
+        );
     }
 }
 
@@ -1708,13 +1735,37 @@ fn cli_json_everywhere_read_side_matrix() {
     // output_schemas entry; it equals the command name except --robot-triage,
     // whose schema is documented under doctor_robot_triage.
     let cases: &[(&str, &str, &[&str])] = &[
-        ("read", "read", &["read", sample, "--allowed-root", root, "--json"]),
-        ("find", "find", &["find", "TokenZero", root, "--allowed-root", root, "--json"]),
-        ("grep", "grep", &["grep", "TokenZero", root, "--allowed-root", root, "--json"]),
-        ("glob", "glob", &["glob", "*.txt", root, "--allowed-root", root, "--json"]),
-        ("tree", "tree", &["tree", root, "--allowed-root", root, "--json"]),
+        (
+            "read",
+            "read",
+            &["read", sample, "--allowed-root", root, "--json"],
+        ),
+        (
+            "find",
+            "find",
+            &["find", "TokenZero", root, "--allowed-root", root, "--json"],
+        ),
+        (
+            "grep",
+            "grep",
+            &["grep", "TokenZero", root, "--allowed-root", root, "--json"],
+        ),
+        (
+            "glob",
+            "glob",
+            &["glob", "*.txt", root, "--allowed-root", root, "--json"],
+        ),
+        (
+            "tree",
+            "tree",
+            &["tree", root, "--allowed-root", root, "--json"],
+        ),
         ("recall", "recall", &["recall", "zzz-no-match", "--json"]),
-        ("fetch", "fetch", &["fetch", "http://127.0.0.1:1/zzz", "--json"]),
+        (
+            "fetch",
+            "fetch",
+            &["fetch", "http://127.0.0.1:1/zzz", "--json"],
+        ),
         ("expand", "expand", &["expand", "tz://o/0/0", "--json"]),
         ("mem", "mem", &["mem", "--root", root, "--json"]),
         ("pulse", "pulse", &["pulse", "--root", root, "--json"]),
@@ -1722,15 +1773,34 @@ fn cli_json_everywhere_read_side_matrix() {
         ("capabilities", "capabilities", &["capabilities", "--json"]),
         ("discover", "discover", &["discover", "--json"]),
         ("stats", "stats", &["stats", "--root", root, "--json"]),
-        ("session-ledger", "session-ledger", &["session-ledger", "--root", root, "--json"]),
-        ("session-open", "session-open", &["session-open", "--root", root, "--json"]),
-        ("cache-pack", "cache-pack", &["cache-pack", "--root", root, "--json"]),
-        ("quote", "quote", &["quote", "--platform", "sh", "--json", "--", "echo", "hi"]),
-        ("rewrite", "rewrite", &["rewrite", "--json", "--", "echo", "hi"]),
+        (
+            "session-ledger",
+            "session-ledger",
+            &["session-ledger", "--root", root, "--json"],
+        ),
+        (
+            "session-open",
+            "session-open",
+            &["session-open", "--root", root, "--json"],
+        ),
+        (
+            "cache-pack",
+            "cache-pack",
+            &["cache-pack", "--root", root, "--json"],
+        ),
+        (
+            "quote",
+            "quote",
+            &["quote", "--platform", "sh", "--json", "--", "echo", "hi"],
+        ),
+        (
+            "rewrite",
+            "rewrite",
+            &["rewrite", "--json", "--", "echo", "hi"],
+        ),
         ("ingest", "ingest", &["ingest", sample, "--json"]),
         ("run", "run", &["run", "--json", "--", "echo", "hi"]),
         ("clients", "clients", &["clients", "detect", "--json"]),
-        ("codemode", "codemode", &["codemode", "--json", "--stdin"]),
         ("--robot-triage", "doctor_robot_triage", &["--robot-triage"]),
     ];
 
@@ -1739,7 +1809,10 @@ fn cli_json_everywhere_read_side_matrix() {
     exercised.sort_unstable();
     let mut advertised = advertised.clone();
     advertised.sort_unstable();
-    assert_eq!(exercised, advertised, "matrix rows must mirror advertised read-side commands");
+    assert_eq!(
+        exercised, advertised,
+        "matrix rows must mirror advertised read-side commands"
+    );
 
     for (name, schema_key, args) in cases {
         assert!(
@@ -1751,10 +1824,6 @@ fn cli_json_everywhere_read_side_matrix() {
             .args(*args)
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
-        if *name == "codemode" {
-            // Empty stdin exercises the structured JSON error path.
-            child.stdin(Stdio::piped());
-        }
         let mut child = child.spawn().unwrap();
         if let Some(stdin) = child.stdin.take() {
             let mut stdin = stdin;

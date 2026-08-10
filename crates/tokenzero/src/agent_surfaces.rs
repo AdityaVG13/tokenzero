@@ -206,15 +206,6 @@ const COMMANDS: &[CommandSurface] = &[
         "Emit the machine-readable CLI contract for agents.",
     ),
     cmd(
-        "codemode",
-        &[],
-        "agent-contract",
-        false,
-        true,
-        "tokenzero codemode --json --budget <n> --stdin <<'EOF' … EOF",
-        "Tier B shell trampoline: one line / heredoc runs a full plan; same tokenzero.codemode.v1 envelope and refs as MCP; --budget caps visible tokens.",
-    ),
-    cmd(
         "ingest",
         &[],
         "context",
@@ -293,7 +284,7 @@ const COMMANDS: &[CommandSurface] = &[
         false,
         false,
         "tokenzero mcp-server --mode mcp",
-        "Run the TokenZero MCP server over stdio (per-op tools or codemode surface).",
+        "Run the explicit classic MCP compatibility server over stdio.",
     ),
     cmd(
         "cache-pack",
@@ -345,8 +336,7 @@ const COMMANDS: &[CommandSurface] = &[
 /// agent-primary. Listed so capabilities neither hides nor promotes them.
 /// q41g (SURF-H-002): experimental_commands_policy provides one
 /// machine-readable exclusion status and rationale tied to the full list.
-const EXPERIMENTAL_SURFACE_RATIONALE: &str =
-    "CLI-only audit, evaluation, and diagnostic commands are excluded from the agent-primary FeatureUniverse because they are not stable agent-contract routes; invoke them directly as CLI verbs.";
+const EXPERIMENTAL_SURFACE_RATIONALE: &str = "CLI-only audit, evaluation, and diagnostic commands are excluded from the agent-primary FeatureUniverse because they are not stable agent-contract routes; invoke them directly as CLI verbs.";
 const EXPERIMENTAL_COMMANDS: &[&str] = &[
     "bench",
     "mcp-smoke",
@@ -392,10 +382,6 @@ const EXIT_CODES: &[ExitCode] = &[
     ),
 ];
 
-/// o574 (R-019): codemode is advertised only when the binary was compiled
-/// with the surface-codemode feature; otherwise the contract would lie.
-pub(crate) const CODEMODE_COMPILED: bool = cfg!(feature = "surface-codemode");
-
 const FEATURES_ALWAYS: &[&str] = &[
     "capabilities_json",
     "exact_recovery_refs",
@@ -409,9 +395,6 @@ const FEATURES_ALWAYS: &[&str] = &[
 
 fn features() -> Vec<&'static str> {
     let mut out = FEATURES_ALWAYS.to_vec();
-    if CODEMODE_COMPILED {
-        out.push("codemode_surface");
-    }
     out.sort();
     out
 }
@@ -424,8 +407,8 @@ fn commands_by_name() -> BTreeMap<&'static str, CommandSurface> {
         .collect()
 }
 
-/// Map an MCP tool spelling to the canonical CLI route agents should use.
-/// A `codemode` result is a composition route, not a one-to-one CLI verb.
+/// Map a classic MCP tool spelling to the canonical local CLI route.
+/// Aggregate CodeMode bindings intentionally have no engine-local CLI route.
 pub(crate) fn mcp_name_to_cli_verb(name: &str) -> Option<&'static str> {
     Some(match name {
         "tz_read" => "read",
@@ -440,7 +423,7 @@ pub(crate) fn mcp_name_to_cli_verb(name: &str) -> Option<&'static str> {
         "tz_ingest" => "ingest",
         "tz_expand" => "expand",
         "tz_batch" | "tz_execute_code" | "tz_codemode_search" | "tz_codemode_describe" => {
-            "codemode"
+            return None;
         }
         "tz_mem" => "mem",
         "tz_discover" => "discover",
@@ -464,13 +447,13 @@ fn mcp_tool_rows() -> Vec<Value> {
             }
             let cli_verb = mcp_name_to_cli_verb(operation.name);
             let route_relationship = match cli_verb {
-                Some("codemode") => "composition_route_not_one_to_one",
                 Some(_) => "shared_operation_surface_specific_contract",
+                None if operation.exposure.codemode_mcp_tool => "aggregate_control_only",
+                None if operation.exposure.codemode_binding.is_some() => "aggregate_binding_only",
                 None => "mcp_only",
             };
-            let available_in_this_build = (operation.exposure.fastmcp_tool
-                && cfg!(feature = "surface-mcp"))
-                || (operation.exposure.codemode_mcp_tool && CODEMODE_COMPILED);
+            let available_in_this_build =
+                operation.exposure.fastmcp_tool && cfg!(feature = "surface-mcp");
             json!({
                 "mcp_tool": operation.name,
                 "mcp_surfaces": mcp_surfaces,
@@ -571,10 +554,6 @@ pub fn capabilities_json() -> serde_json::Value {
             "schema_version": "tokenzero.clients.v1",
             "required_keys": ["schema_version", "command", "status", "agents", "surfaces"]
         },
-        "codemode": {
-            "schema_version": "tokenzero.codemode.v1",
-            "required_keys": ["schema_version", "schema", "status", "tool", "ack"]
-        },
         "quote": {
             "shape": "quote_result",
             "required_keys": ["platform", "argv", "command"]
@@ -615,7 +594,6 @@ pub fn capabilities_json() -> serde_json::Value {
             "pipeline_rerun_guidance": true,
             "intent_inference_aliases": true,
             "capabilities_json": true,
-            "codemode_surface": CODEMODE_COMPILED,
             "robot_docs_guide": true
         },
         "commands": COMMANDS,
@@ -633,8 +611,9 @@ pub fn capabilities_json() -> serde_json::Value {
                 "codemode": "dotted bindings selected by codemode_binding"
             },
             "route_relationships": {
-                "shared_operation_surface_specific_contract": "the operation ABI owns MCP and CodeMode argument schemas; CLI spelling, envelopes, and availability remain surface-specific",
-                "composition_route_not_one_to_one": "CLI codemode is the recommended composition route, not a one-to-one verb equivalent",
+                "shared_operation_surface_specific_contract": "the operation ABI owns classic MCP and aggregate binding argument schemas; CLI spelling, envelopes, and availability remain surface-specific",
+                "aggregate_binding_only": "the dotted binding is consumed by the ZeroStack aggregate host and has no engine-local CLI route",
+                "aggregate_control_only": "the control schema is aggregate-host metadata and is not registered by TokenZero classic MCP",
                 "mcp_only": "no CLI verb is claimed"
             }
         },
@@ -679,26 +658,11 @@ pub fn capabilities_json() -> serde_json::Value {
             "tokenzero install --shims --plan --json",
             "tokenzero hook claude-code"
         ],
-        "codemode": {
-            "schema": "tokenzero.codemode.v1",
-            "cli": "tokenzero codemode --json --budget <n> --stdin <<'EOF' … EOF",
-            "tier": "B",
-            "transport": "shell_trampoline",
-            "discovery": [
-                "tokenzero codemode 'search:read'",
-                "tokenzero codemode 'describe:zero.read'"
-            ],
-            "plan_sources": [
-                "--plan / PLAN positional",
-                "--plan-file <path>",
-                "--stdin or PLAN=-",
-                "non-TTY stdin auto-read (heredoc / pipe)"
-            ],
-            "budget_flag": "--budget / --max-visible-tokens",
-            "cache_default": "recovery-cache.json",
-            "cache_note": "CodeMode shares the default recovery-cache.json with CLI expand/MCP so refs expand without re-running the producer. Pass --cache-path only for an isolated store.",
-            "pattern": "https://developers.cloudflare.com/agents/tools/codemode/",
-            "when_to_use": "Compose multi-step workflows on the same base tools as MCP but faster (fewer round-trips, composition via plans, progressive search:/describe: discovery). Tier B shell trampoline for harnesses without MCP. Not an MCP tool."
+        "aggregate_codemode": {
+            "owner": "zerostack",
+            "local_execution": false,
+            "binding_source": "mcp_tools[].codemode_binding",
+            "worker_transport": "raw-worker-v2"
         },
         "dangerous_operations": [
             {
@@ -752,8 +716,7 @@ pub fn capabilities_json() -> serde_json::Value {
             "`tokenzero doctor status --json`, `tokenzero pulse stats --json`, `tokenzero cache statuz --json`, and `tokenzero install plan --json` recover to safe read-side or plan surfaces.",
             "`tokenzero install status --json` recovers to `tokenzero clients detect --json`.",
             "Use `tokenzero run --json -- <command>` for command telemetry; inspect `command_success`, not only process exit.",
-            "Read resource://tokenzero/codemode for the full CodeMode method catalog.",
-            "CodeMode is a separate plan-based execution layer on the same base tools/engine. Faster for multi-step workflows (fewer round-trips). Tier B trampoline: `tokenzero codemode --json --budget <n> --stdin` (heredoc OK)."
+            "Use the ZeroStack aggregate host for multi-step CodeMode plans; TokenZero exposes dotted aggregate bindings and a planner-free raw-worker v2 artifact."
         ]
     })
 }
@@ -812,45 +775,11 @@ Stdout is data. Stderr is diagnostics. JSON commands include `schema_version` or
 
 `tokenzero install` defaults to a plan. Use `tokenzero install --plan --json` before any `--apply`. `tokenzero cache prune --json` is a dry run unless `--apply` is supplied.
 
-## MCP vs CLI vs CodeMode
+## MCP, CLI, and Aggregate Bindings
 
-MCP uses `tz_*` tool names, the CLI uses bare verbs, and CodeMode uses dotted bindings such as `zero.read`. Run `tokenzero capabilities --json` and inspect `mcp_tools` for the canonical map. Each row states its MCP surface, build availability, CLI route, CodeMode binding, and surface-specific schema relationship.
+Classic MCP uses `tz_*` names and the local CLI uses bare verbs. `codemode_binding` rows are aggregate ZeroStack routes such as `zero.read`; TokenZero does not execute plans locally. The aggregate host composes these bindings and dispatches through the canonical planner-free raw-worker v2 artifact.
 
-The shared operation inventory does not claim identical names, arguments, envelopes, availability, or behavior across surfaces. A `cli_verb` of `codemode` is a composition route, not a one-to-one equivalent. A missing `cli_verb` means no CLI route is claimed.
-
-## CodeMode (plan-based execution on the same engine)
-
-CodeMode dispatches through the **exact same TokenZeroEngine and tool implementations** as the MCP `tz_*` surface. The difference is execution shape: instead of one round-trip per operation, you compose multi-step workflows in a single plan call.
-
-Tier B shell trampoline (any harness with a bash tool): one shell line / stdin heredoc runs a full plan, emits the same `tokenzero.codemode.v1` envelope and `tz://` refs as MCP, and honors `--budget` / `--max-visible-tokens` so output fits harness result caps. Errors are typed (`status=error` + `error.kind`); empty or conflicting plan sources never silently succeed.
-
-```bash
-# Tier B trampoline (stdin heredoc + visible-token budget)
-tokenzero codemode --json --budget 2000 --root . --stdin <<'EOF'
-const f = await zero.read("src/main.rs");
-const hits = await zero.grep("TODO", "src/");
-return { file: f.ref, todos: hits.text };
-EOF
-
-# Multi-step in one call (inline plan)
-tokenzero codemode --json --plan 'const f = await zero.read("src/main.rs"); const hits = await zero.grep("TODO", "src/"); return { file: f.ref, todos: hits.text }'
-
-# Progressive discovery
-tokenzero codemode 'search:read'        # find methods by keyword (includes signatures + examples)
-tokenzero codemode 'describe:zero.read'  # full signature, example, related methods
-```
-
-Plan-level helpers (not in MCP, only available within plans):
-- `zero.pipe(steps)` — sequential composition with auto-threaded `_prev`
-- `zero.pick(obj, keys)` — project specific keys from a result
-- `zero.filter_lines(text, pattern)` — filter output lines in-plan
-- `zero.count_tokens(data)` — introspect token/byte/line count without storing
-- `zero.assert(condition, msg)` — fail-fast guard within a plan
-- `zero.compact_max(data)` — aggressive content-aware compression with recovery
-
-All `zero.*` methods that touch files, shell, or cache dispatch through the same code path as `tz_read`, `tz_find`, `tz_shell`, etc. Refs from one surface work in the other (`tz_expand` accepts refs from CodeMode plans and vice versa).
-
-Cache: CodeMode defaults to the same `recovery-cache.json` as CLI expand/MCP (under `.tokenzero/` or `.zerostack/tokenzero/`). Isolated stores require matching `--cache-path` on both mint and expand.
+Run `tokenzero capabilities --json` to inspect exact classic MCP availability, CLI routes, aggregate bindings, schemas, refs, effects, and output contracts.
 "#
 }
 
@@ -870,13 +799,9 @@ tokenzero doctor --json
 tokenzero doctor status --json
 tokenzero pulse stats --json
 tokenzero install status --json
-tokenzero codemode --json --plan 'await zero.compact("payload")'
-tokenzero codemode 'search:read'
 ```
 
 Recoveries: `capability`, `capabilites`, `robot-help`, `--robot-help`, `rn`, `reed`, `instal`, `shell`, `search`, `--jsno`, `--jason`, `--timout`, `cache statuz`, `doctor status`, `doctor statuz`, `pulse stats`, `pulse status`, `install plan`, and `install status` redirect to safe canonical surfaces.
-
-CodeMode shares `recovery-cache.json` with expand/MCP by default. CodeMode is a separate plan-based execution on the same base tools (not an MCP tool).
 "#
 }
 
@@ -893,10 +818,8 @@ tokenzero run --json -- cargo test -p tokenzero
 tokenzero doctor status --json
 tokenzero pulse stats --json
 tokenzero install status --json
-tokenzero codemode --json --plan 'const t = await zero.read("README.md"); return t'
 ```
 
 For `run`, inspect `telemetry.command_success`, `telemetry.failed_segment`, and `telemetry.pipeline_rerun_command`.
-For CodeMode, inspect the `value` field in the JSON envelope; use `search:` / `describe:` for in-plan discovery.
 "#
 }

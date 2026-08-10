@@ -98,7 +98,7 @@ pub use surface_handshake::{
 };
 
 pub use report_tool::{build_tool_issue_report, is_reportable_tool_name, record_tool_issue};
-pub use shell_hooks::{ShellHooks, install as install_shell_hooks};
+pub use shell_hooks::{ProcessHooks, install as install_process_hooks};
 pub use workspace::{
     SHARED_STORE_OPT_IN_ENVS, STORE_ROOT_ENVS, StoreResolutionReport, allowed_roots_for_workspace,
     default_allowed_roots, default_recovery_cache_path, resolve_recovery_cache_path,

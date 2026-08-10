@@ -802,7 +802,7 @@ pub fn run_raw_worker_v2_serve(opts: &RawWorkerServeOptions) -> i32 {
         opts.root.to_string_lossy().into_owned(),
         session_id,
     )));
-    crate::shell_hooks::install(crate::shell_hooks::ShellHooks::with_note_child(
+    crate::shell_hooks::install(crate::shell_hooks::ProcessHooks::with_note_child(
         v2_note_child,
     ));
     let (tx, rx) = std::sync::mpsc::channel::<CallJob>();
@@ -1451,7 +1451,7 @@ mod tests {
     #[test]
     fn cancel_control_frame_stops_dispatched_shell_work() {
         let _dispatch_guard = DISPATCH_TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
-        crate::shell_hooks::install(crate::shell_hooks::ShellHooks::with_note_child(
+        crate::shell_hooks::install(crate::shell_hooks::ProcessHooks::with_note_child(
             v2_note_child,
         ));
         let mut session = RawWorkerV2Session::default();
@@ -1721,13 +1721,13 @@ mod tests {
                 "expected_engine":"tokenzero",
                 "expected_contract_digest":cap["semantic_contract_digest"],
                 "expected_registry_digest":cap["operation_registry_digest"]
-            }})).unwrap(),
+            }}))
+            .unwrap(),
         ))
         .unwrap();
         assert_eq!(ack["kind"], "handshake_ack", "{ack}");
         assert_eq!(
-            ack["ack"]["limits"]["max_output_bytes"],
-            MAX_OUTPUT_BYTES as u64,
+            ack["ack"]["limits"]["max_output_bytes"], MAX_OUTPUT_BYTES as u64,
             "handshake must advertise the enforced constant"
         );
         let revision = ack["ack"]["binding"]["worker_revision"]

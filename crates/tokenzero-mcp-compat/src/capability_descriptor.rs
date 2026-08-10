@@ -101,9 +101,10 @@ impl CapabilityDescriptor {
             tools,
             zeroref_v1: ZeroRefCapabilities::default(),
             codemode: json!({
-                "schema": "tokenzero.codemode.v1",
-                "cli": "tokenzero codemode --json --plan '<plan>'",
-                "note": "CodeMode is a separate plan-based execution layer on the same base tools/engine (Cloudflare-style, fewer round-trips). Use `tokenzero codemode` or resource://tokenzero/codemode for discovery."
+                "owner": "zerostack",
+                "local_execution": false,
+                "worker_transport": "raw-worker-v2",
+                "note": "Dotted TokenZero bindings are aggregate-host metadata; tokenzero-mcp remains classic compatibility only."
             }),
             resources: resource_specs(),
             next_actions: strings(&[

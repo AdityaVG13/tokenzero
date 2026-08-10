@@ -159,9 +159,9 @@ impl MigrationStatus {
 pub struct SurfaceExposure {
     /// Listed as a classic FastMCP tool (`--mode=mcp`).
     pub fastmcp_tool: bool,
-    /// Listed as a CodeMode MCP control tool (`--mode=codemode`).
+    /// Projected as aggregate-host control metadata, never classic MCP.
     pub codemode_mcp_tool: bool,
-    /// CodeMode binding path (`zero.read`, `codemode.search`, …), if any.
+    /// Aggregate binding path (`zero.read`, `codemode.search`, …), if any.
     pub codemode_binding: Option<&'static str>,
     /// Resource URI (`resource://tokenzero/...`), if this entry is a resource.
     pub resource_uri: Option<&'static str>,

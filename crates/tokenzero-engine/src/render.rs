@@ -1208,8 +1208,14 @@ b
             after, before,
             "rejected rewrite must leave the response untouched"
         );
-        assert!(after.contains(&full_ref), "full ref stays the visible identity");
-        assert!(!after.contains("tz://o/"), "no ordinal alias is exposed: {after}");
+        assert!(
+            after.contains(&full_ref),
+            "full ref stays the visible identity"
+        );
+        assert!(
+            !after.contains("tz://o/"),
+            "no ordinal alias is exposed: {after}"
+        );
     }
 
     #[test]

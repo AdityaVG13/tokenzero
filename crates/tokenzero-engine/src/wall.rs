@@ -1,9 +1,9 @@
 //! Cooperative wall-clock deadlines for long in-process host ops.
 //!
-//! CodeMode checks `hard_max_wall_ms` between QuickJS microtasks and before
-//! scheduling host work, but a single native call (find walk, expand, session
-//! resume) can still burn past the budget. Install an active deadline around
-//! host dispatch and checkpoint every N steps inside hot loops.
+//! The raw-worker checks `hard_max_wall_ms` before dispatch, but a single
+//! native call (find walk, expand, session resume) can still burn past the
+//! budget. Install an active deadline around domain dispatch and checkpoint
+//! every N steps inside hot loops.
 
 use std::cell::{Cell, RefCell};
 use std::sync::{
@@ -30,7 +30,7 @@ impl WallDeadline {
         }
     }
 
-    /// Reconstruct a deadline from elapsed wall ms (CodeMode `started_ms`).
+    /// Reconstruct a deadline from elapsed wall ms in a worker trace.
     pub fn from_elapsed_ms(elapsed_ms: u64, hard_max_wall_ms: u64) -> Self {
         let started = Instant::now()
             .checked_sub(std::time::Duration::from_millis(elapsed_ms))
@@ -41,8 +41,7 @@ impl WallDeadline {
 
 /// Shared helper: structured error when `started` has exceeded `hard_max_wall_ms`.
 ///
-/// Message shape matches CodeMode `wall_clock_limit_error` hard branch so host
-/// aborts and microtask aborts look the same to agents.
+/// The stable message shape keeps host and checkpoint aborts identical.
 pub fn check_wall_deadline(
     started: Instant,
     hard_max_wall_ms: u64,

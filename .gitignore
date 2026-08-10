@@ -59,6 +59,7 @@ CLAUDE.md.*
 /docs/*
 !/docs/benchmarks.md
 !/docs/codemode.md
+!/docs/gate-c-semantic-retirement.md
 !/docs/command-coverage.md
 !/docs/development.md
 !/docs/mcp-compat.md

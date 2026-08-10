@@ -20,7 +20,6 @@ pub const RAW_WORKER_PROTOCOL_VERSION: &str = "tokenzero.raw_worker.v1";
 #[serde(rename_all = "lowercase")]
 pub enum HandshakeSurface {
     Mcp,
-    Codemode,
     /// Internal composition path (hub private worker) — not a user install.
     RawWorker,
 }
@@ -29,7 +28,6 @@ impl HandshakeSurface {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Mcp => "mcp",
-            Self::Codemode => "codemode",
             Self::RawWorker => "raw_worker",
         }
     }
@@ -37,12 +35,11 @@ impl HandshakeSurface {
     pub fn parse(s: &str) -> Result<Self, String> {
         match s.trim().to_ascii_lowercase().as_str() {
             "mcp" | "fastmcp" | "per-op" | "per_op" => Ok(Self::Mcp),
-            "codemode" | "code-mode" | "code_mode" => Ok(Self::Codemode),
             "raw_worker" | "raw-worker" | "private_worker" | "private-worker" => {
                 Ok(Self::RawWorker)
             }
             other => Err(format!(
-                "unknown handshake surface {other:?}; expected mcp, codemode, or raw_worker"
+                "unknown handshake surface {other:?}; expected mcp or raw_worker"
             )),
         }
     }
@@ -54,8 +51,6 @@ impl HandshakeSurface {
 pub enum PlannerOwner {
     /// Outer hub / OMP client plans; this process is a raw executor.
     Client,
-    /// This process owns CodeMode planning (legacy MCP-only clients).
-    ServerCodemode,
     /// No planner — pure per-op FastMCP surface.
     None,
 }
@@ -64,7 +59,6 @@ impl PlannerOwner {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Client => "client",
-            Self::ServerCodemode => "server_codemode",
             Self::None => "none",
         }
     }
@@ -122,10 +116,6 @@ pub fn build_surface_capability(surface: HandshakeSurface) -> SurfaceCapability 
     let digest = contract_digest_hex();
     let (planner, plan_forms) = match surface {
         HandshakeSurface::Mcp => (PlannerOwner::None, vec!["none".into()]),
-        HandshakeSurface::Codemode => (
-            PlannerOwner::ServerCodemode,
-            vec!["recipe".into(), "json".into(), "javascript".into()],
-        ),
         HandshakeSurface::RawWorker => (PlannerOwner::Client, vec!["raw_frame".into()]),
     };
     SurfaceCapability {
@@ -227,7 +217,7 @@ mod tests {
 
     #[test]
     fn digest_mismatch_fails_closed() {
-        let local = build_surface_capability(HandshakeSurface::Codemode);
+        let local = build_surface_capability(HandshakeSurface::RawWorker);
         let err = check_contract_compatibility(&local, Some("deadbeef"), None).unwrap_err();
         assert!(err.contains("digest mismatch"), "{err}");
         assert!(err.contains(&local.semantic_contract_digest), "{err}");

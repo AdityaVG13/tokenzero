@@ -6,60 +6,37 @@ for developers before launch. The public Core runtime target is the Rust
 
 Launch offer: Compress aggressively. Recover exactly. One install.
 
-## Mutually exclusive package surfaces (tokenzero-irx9.3)
+## Runtime artifacts after Gate C
 
-Users install **one** surface from the same revision and shared core — never both:
-
-| Artifact | Surface | Who should install it |
+| Artifact | Role | Owner / consumer |
 |---|---|---|
-| `tokenzero-mcp` | FastMCP per-operation tools | **Native CodeMode clients** (ZeroStack hub, CodeMode-capable harnesses) |
-| `tokenzero-codemode` | CodeMode plan catalog | **Legacy MCP-only clients** |
-| `tokenzero` | Compatibility shim | Symlink to the selected surface binary only — never a dual-catalog binary |
+| `tokenzero-codemode` | Planner-free raw-worker v2 binary from package `tokenzero-worker` | Launched and registered by the ZeroStack aggregate host |
+| `tokenzero-mcp` / `tokenzero mcp-server --mode=mcp` | Explicit classic MCP compatibility | Direct MCP-only clients under the compatibility support policy |
+| `tokenzero` | Token-domain CLI | Developers and direct CLI users |
 
-**Selection matrix:** native CodeMode client → install `tokenzero-mcp`; otherwise → install `tokenzero-codemode`.
+The retained `tokenzero-codemode` filename is rollout compatibility, not a plan catalog. It accepts worker lifecycle/capability commands and never embeds QuickJS, FastMCP, machine permits, or an engine-local planner. Multi-step CodeMode composition belongs to ZeroStack.
 
-**Process mutual exclusion (not release-only naming):** one installed/running process must never contain or expose both catalogs. Dual surface features are a **compile error**. Dual argv/env selection and dual client registration **fail closed** at startup. Default package features enable **exactly one** surface (`surface-mcp`); CodeMode builds use `--no-default-features --features surface-codemode`.
+Classic MCP remains separately supported and must stay in classic mode. Do not pass the retired local mode; use the aggregate host for plans. A live aggregate-host sentinel can refuse a competing classic MCP registration for the same root.
 
-Installing one surface after the other cleanly replaces the prior registration and peer binary. The installer writes `install-state.json` + `client-config.json` atomically itself and **never** starts a stdio server to write state.
-
-### Surface installer (macOS / Linux)
+### Developer builds
 
 ```bash
-# Build + install one surface (writes install-state + client-config atomically;
-# never starts a stdio server to write state).
-./packaging/install.sh --surface mcp          # or: --surface codemode
-./packaging/install.sh --surface mcp --prefix ~/.tokenzero-install --bin-dir ~/.local/bin
+# Canonical planner-free worker
+cargo build --release -p tokenzero-worker --bin tokenzero-codemode --no-default-features
 
-# Identity / SBOM / uninstall
-./packaging/install.sh --sbom --surface mcp
-./packaging/install.sh --uninstall --prefix ~/.tokenzero-install
+# Token-domain CLI
+cargo build --release -p tokenzero-cli --bin tokenzero --no-default-features
 
-# Single-surface cargo builds (peer surface dependency excluded).
-# Always pass --no-default-features: default = ["surface-mcp"], so naming a
-# surface WITHOUT it leaves surface-mcp on too, and enabling both surfaces is a
-# hard compile error (tokenzero-irx9.3). This bites hardest for codemode, where
-# the obvious command fails:
-#   cargo build --release --bin tokenzero-codemode --features surface-codemode
-#     error: tokenzero surfaces are mutually exclusive ... never both.
-# Plain `cargo build --release` also silently builds only tokenzero-mcp.
-cargo build --release -p tokenzero --bin tokenzero-mcp --no-default-features --features surface-mcp
-cargo build --release -p tokenzero --bin tokenzero-codemode --no-default-features --features surface-codemode
+# CLI with explicit classic MCP compatibility
+cargo build --release -p tokenzero-cli --bin tokenzero --no-default-features --features surface-mcp
 
-# Or let the installer pick the flags for you (it uses exactly the above):
-./packaging/install.sh --surface codemode
+# Read-only worker selector / SBOM probe. Direct worker installation stays
+# blocked until ZeroStack central discovery owns it.
+./packaging/install.sh --surface raw-worker --dry-run
+./packaging/install.sh --sbom --surface raw-worker
 ```
 
-Surface binaries also accept non-hanging packaging subcommands:
-
-```bash
-tokenzero-mcp install --surface mcp --prefix DIR
-tokenzero-mcp sbom
-tokenzero-mcp doctor
-tokenzero-mcp uninstall --prefix DIR
-```
-
-Help, doctor, SBOM, and uninstall output identify the selected surface and the
-shared semantic contract digest.
+`tokenzero-codemode sbom`, `--help`, `--version`, `capabilities --json`, and raw-worker v2 commands are non-hanging. ZeroStack owns worker discovery and install state.
 
 ## Package Install
 
@@ -188,12 +165,7 @@ server entry the installer writes is:
 {"mcpServers":{"tokenzero":{"type":"stdio","command":"__TOKENZERO_BIN__","args":["mcp-server","--allowed-root","__REPO__","--cache-path","__CACHE__","--supervise"],"env":{"TOKENZERO_ALLOWED_ROOTS":"__REPO__","TOKENZERO_CACHE_PATH":"__CACHE__","TOKENZERO_DEFAULT_MODE":"auto","TOKENZERO_MCP_TOOL_SURFACE":"__SURFACE__","TOKENZERO_MAX_OUTPUT_BYTES":"2000000","TOKENZERO_SHELL_TIMEOUT":"30","TOKENZERO_CACHE_BLOBS":"512","TOKENZERO_CACHE_UNITS":"8192","TOKENZERO_MCP_IDLE_TIMEOUT_SECS":"0"}}}}
 ```
 
-Substitute `__TOKENZERO_BIN__` (installed binary), `__REPO__` (allowed root),
-`__CACHE__` (cache file path), and `__SURFACE__` (MCP tool surface name). The
-installer writes `type: stdio` with exactly this `args` and `env` shape and
-merge-patches only the `tokenzero` entry. (Formerly shipped as
-demo/tokenzero-mcp.template.json; MCP vs CodeMode surface selection is covered
-by the mutually exclusive package surfaces section above.)
+Substitute `__TOKENZERO_BIN__` (installed binary), `__REPO__` (allowed root), and `__CACHE__` (cache file path); set `__SURFACE__` to `classic`. The installer merge-patches only the `tokenzero` entry. Aggregate CodeMode registration belongs to ZeroStack, not this MCP config.
 
 ## Hooks and Shims
 
@@ -202,7 +174,7 @@ tokenzero install --global --plan --hooks --shims --json
 tokenzero install --global --apply --hooks --shims --json
 ```
 
-Both surfaces ride the same planner as `--mcp`: plan is read-only, apply is
+Hooks and shims use the same install planner as `--mcp`: plan is read-only, apply is
 two-phase (snapshot-first rollback manifest, then atomic writes plus
 verification rows), `tokenzero install --rollback latest` restores, and
 `tokenzero clients detect/doctor --json` reports their installed/mixed/missing

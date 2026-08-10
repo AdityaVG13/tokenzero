@@ -1,42 +1,28 @@
-use fastmcp_rust::McpErrorCode;
-use fastmcp_rust::ResourceHandler;
-use fastmcp_rust::ToolHandler;
-use fastmcp_rust::prelude::*;
 use serde_json::Value;
 use std::sync::{Arc, Mutex};
+
+use tokenzero_core::McpToolSurface;
 use tokenzero_core::count_tokens;
+use tokenzero_core::operation_abi::Mutability;
+use zero_abi::{
+    ALL_DISPATCH_ERROR_CLASSES, ApprovalRequirement, CanonicalOperation, CanonicalRegistry,
+    CanonicalResource, EffectClass, EffectPolicy, EngineIdentity, PermitRequirement,
+    RefOwnership as SharedRefOwnership, RegistryEngine, TelemetrySchema,
+};
+use zero_codemode::{
+    CapabilityDescriptor, DomainAdapterRegistration, FastMcpTransport, McpAliasMetadata,
+    McpCallContext, McpDispatchError, McpDispatchOutput, McpDispatcher, McpErrorPresentation,
+    McpResourceOutput, McpResourceReader, McpTextContent, McpTransportConfig, SurfaceKind,
+    SurfaceRegistration,
+};
 
 use crate::catalog::{TOOL_ALIASES, canonical_tool_specs, resource_specs};
 use crate::resources::build_resource_payload;
 use crate::surface_health::surface_includes;
 use crate::{EngineConfig, TokenZeroEngine, call_tool_fastmcp};
-use tokenzero_core::McpToolSurface;
 
-/// A single engine-backed tool that delegates to the existing dispatch path,
-/// keeping tool-surface parity byte-level.
-struct EngineTool {
-    name: String,
-    description: String,
-    schema: Value,
-    /// Complete domain output schema from the operation ABI (tokenzero-irx9.1).
-    output_schema: Option<Value>,
-    engine: Arc<Mutex<TokenZeroEngine>>,
-}
-
-/// Lock the shared engine, failing closed with a typed error when a prior
-/// panic poisoned the mutex instead of panicking the whole tool/resource
-/// path (RA NS-C01).
-fn lock_engine(
-    engine: &Arc<Mutex<TokenZeroEngine>>,
-) -> McpResult<std::sync::MutexGuard<'_, TokenZeroEngine>> {
-    engine.lock().map_err(|_| {
-        McpError::new(
-            McpErrorCode::Custom(-32000),
-            "engine lock poisoned by a prior panic; failing closed".to_string(),
-        )
-    })
-}
-
+/// Preserve the legacy FastMCP content projection byte-for-byte while the hub
+/// owns registration, cancellation, and stdio transport.
 pub(crate) fn fastmcp_content_texts_from_tool_result(
     result: &Value,
 ) -> Result<Vec<String>, String> {
@@ -47,44 +33,42 @@ pub(crate) fn fastmcp_content_texts_from_tool_result(
     if is_error {
         let err_text = result
             .get("content")
-            .and_then(|c| c.get(0))
-            .and_then(|c| c.get("text"))
+            .and_then(|content| content.get(0))
+            .and_then(|content| content.get("text"))
             .and_then(Value::as_str)
             .unwrap_or("tool error");
-        return Err(err_text.to_string());
+        return Err(err_text.to_owned());
     }
     let primary_text = result
         .get("content")
-        .and_then(|c| c.get(0))
-        .and_then(|c| c.get("text"))
+        .and_then(|content| content.get(0))
+        .and_then(|content| content.get("text"))
         .and_then(Value::as_str)
         .unwrap_or("");
-    if let Some(sc) = result.get("structuredContent") {
-        if let Some(folded) = scalar_folded_codemode_v2(primary_text, sc) {
+    if let Some(structured) = result.get("structuredContent") {
+        if let Some(folded) = scalar_folded_codemode_v2(primary_text, structured) {
             return Ok(vec![folded]);
         }
-        let meta_json = serde_json::to_string(sc).unwrap_or_default();
-        if meta_json != "null" {
-            return Ok(vec![primary_text.to_string(), meta_json]);
+        let metadata = serde_json::to_string(structured).unwrap_or_default();
+        if metadata != "null" {
+            return Ok(vec![primary_text.to_owned(), metadata]);
         }
-        return Ok(vec![primary_text.to_string()]);
+        return Ok(vec![primary_text.to_owned()]);
     }
-    let mut contents = vec![primary_text.to_string()];
+    let mut contents = vec![primary_text.to_owned()];
     if primary_text.starts_with("ok tz") || primary_text.starts_with("err ") {
         return Ok(contents);
     }
-    let mut meta = serde_json::Map::new();
-    if let Some(rt) = result.get("resultType").and_then(Value::as_str) {
-        meta.insert("resultType".into(), Value::String(rt.to_string()));
+    let mut metadata = serde_json::Map::new();
+    if let Some(result_type) = result.get("resultType").and_then(Value::as_str) {
+        metadata.insert("resultType".into(), Value::String(result_type.to_owned()));
     }
-    // yevj: forward the recovery receipt in the metadata content so FastMCP
-    // adapters can honor terminal/do-not-recompact without envelope mode.
-    if let Some(receipt) = result.get("recovery") {
-        meta.insert("recovery".into(), receipt.clone());
+    if let Some(recovery) = result.get("recovery") {
+        metadata.insert("recovery".into(), recovery.clone());
     }
-    let meta_json = serde_json::to_string(&Value::Object(meta)).unwrap_or_default();
-    if meta_json != "{}" {
-        contents.push(meta_json);
+    let metadata = serde_json::to_string(&Value::Object(metadata)).unwrap_or_default();
+    if metadata != "{}" {
+        contents.push(metadata);
     }
     Ok(contents)
 }
@@ -103,93 +87,195 @@ fn scalar_folded_codemode_v2(primary_text: &str, structured: &Value) -> Option<S
         .get("ack")
         .and_then(Value::as_str)
         .unwrap_or(primary_text);
-    // Idempotent: the tools layer may already have folded this scalar into
-    // the ack; folding again rendered doubled values (=true =true).
     if ack.contains(&format!(" ={value_text}")) {
-        return Some(ack.to_string());
+        return Some(ack.to_owned());
     }
     let (prefix, suffix) = ack.rsplit_once(" t:")?;
     Some(format!("{prefix} ={value_text} t:{suffix}"))
 }
 
-impl ToolHandler for EngineTool {
-    fn definition(&self) -> Tool {
-        Tool {
-            name: self.name.clone(),
-            description: Some(self.description.clone()),
-            input_schema: self.schema.clone(),
-            output_schema: self.output_schema.clone(),
-            icon: None,
-            version: None,
-            tags: Vec::new(),
-            annotations: None,
-        }
-    }
+fn canonical_id(operation_name: &str, cluster: &str) -> String {
+    let method = operation_name.strip_prefix("tz_").unwrap_or(operation_name);
+    format!("{cluster}.{method}")
+}
 
-    fn call(&self, ctx: &McpContext, arguments: Value) -> McpResult<Vec<Content>> {
-        ctx.checkpoint()?;
-        let engine = lock_engine(&self.engine)?;
-        match call_tool_fastmcp(&engine, &self.name, &arguments, None) {
-            Ok(result) => {
-                // Dual-content pattern: content[0] = old primary text VERBATIM
-                // (visible-token parity), content[1] = compact metadata for
-                // fields FastMCP cannot carry natively (resultType, refs).
-                // Errors — tool-level isError or dispatch-level — map to
-                // Err(McpError) so fastmcp sets the envelope isError: true.
-                match fastmcp_content_texts_from_tool_result(&result) {
-                    Ok(contents) => Ok(contents.into_iter().map(Content::text).collect()),
-                    Err(message) => Err(McpError::new(McpErrorCode::Custom(-32000), message)),
-                }
-            }
-            Err(err) => {
-                let message = err.message_text();
-                Err(McpError::new(McpErrorCode::Custom(-32000), message))
-            }
-        }
+fn effect_policy(mutability: Mutability) -> EffectPolicy {
+    match mutability {
+        Mutability::ReadOnly => EffectPolicy {
+            effect_class: EffectClass::ReadOnly,
+            permit: PermitRequirement::NotRequired,
+            approval: ApprovalRequirement::NotRequired,
+        },
+        Mutability::WorkspaceMutating => EffectPolicy {
+            effect_class: EffectClass::ReversibleMutation,
+            permit: PermitRequirement::Required,
+            approval: ApprovalRequirement::NotRequired,
+        },
+        Mutability::StoreOnly => EffectPolicy {
+            effect_class: EffectClass::ReversibleMutation,
+            permit: PermitRequirement::Required,
+            approval: ApprovalRequirement::NotRequired,
+        },
     }
 }
 
-/// A single engine-backed resource that delegates to the existing resource-payload
-/// builder, keeping resource-surface parity byte-level.
-struct TokenZeroResource {
-    uri: String,
-    name: String,
-    description: String,
-    mime_type: String,
+fn mcp_aliases_for(target: &str) -> Vec<String> {
+    TOOL_ALIASES
+        .iter()
+        .filter_map(|(alias, canonical)| (*canonical == target).then(|| (*alias).to_owned()))
+        .collect()
+}
+
+fn canonical_operation(
+    operation: &tokenzero_core::operation_abi::Operation,
+    description: &str,
+) -> CanonicalOperation {
+    CanonicalOperation {
+        canonical_id: canonical_id(operation.name, operation.cluster),
+        description: description.to_owned(),
+        aliases: mcp_aliases_for(operation.name),
+        args_schema: operation.args.schema.clone(),
+        output_schema: Some(operation.results.schema.clone()),
+        mcp_tool_name: Some(operation.name.to_owned()),
+        effect_policy: effect_policy(operation.mutability),
+        errors: ALL_DISPATCH_ERROR_CLASSES.to_vec(),
+    }
+}
+
+fn canonical_resource(spec: crate::catalog::ResourceSpec) -> CanonicalResource {
+    CanonicalResource {
+        uri: spec.uri,
+        name: spec.name,
+        description: spec.description,
+        mime_type: Some(spec.mime_type),
+    }
+}
+
+fn surface_registration(engine: &TokenZeroEngine, surface: McpToolSurface) -> SurfaceRegistration {
+    let operations = canonical_tool_specs()
+        .iter()
+        .filter(|seed| surface_includes(surface, seed.name))
+        .map(|seed| {
+            let operation = tokenzero_core::operation_abi::operation_by_name(seed.name)
+                .expect("MCP catalog tool must exist in the operation ABI");
+            canonical_operation(operation, seed.summary)
+        })
+        .collect::<Vec<_>>();
+    let capabilities = operations
+        .iter()
+        .map(|operation| {
+            let (cluster, method) = operation
+                .canonical_id
+                .split_once('.')
+                .expect("namespaced canonical operation id");
+            CapabilityDescriptor::new(cluster, method)
+        })
+        .collect();
+    let resources = resource_specs()
+        .into_iter()
+        .map(canonical_resource)
+        .collect();
+    let registry = CanonicalRegistry {
+        version: zero_abi::CANONICAL_DISPATCH_VERSION.to_owned(),
+        engine: RegistryEngine::TokenZero,
+        operations,
+        resources,
+    };
+    let adapter = DomainAdapterRegistration {
+        engine: EngineIdentity::TokenZero,
+        registry,
+        ref_ownership: SharedRefOwnership {
+            engine: EngineIdentity::TokenZero,
+            session_id: engine.session_id().to_owned(),
+            refs: Vec::new(),
+            snapshot: None,
+        },
+        telemetry_schema: TelemetrySchema::V1,
+        capabilities,
+    };
+    let mut registration = SurfaceRegistration::new(SurfaceKind::Mcp, "TokenZero", adapter);
+    registration.instructions = Some(
+        match surface {
+            McpToolSurface::Classic => fastmcp_instructions(),
+            McpToolSurface::CodeMode => fastmcp_codemode_instructions(),
+        }
+        .to_owned(),
+    );
+    registration
+}
+
+struct EngineDispatcher {
     engine: Arc<Mutex<TokenZeroEngine>>,
 }
 
-impl ResourceHandler for TokenZeroResource {
-    fn definition(&self) -> Resource {
-        Resource {
-            uri: self.uri.clone(),
-            name: self.name.clone(),
-            description: Some(self.description.clone()),
-            mime_type: Some(self.mime_type.clone()),
-            icon: None,
-            version: None,
-            tags: Vec::new(),
-        }
-    }
-
-    fn read(&self, _ctx: &McpContext) -> McpResult<Vec<ResourceContent>> {
-        let engine = lock_engine(&self.engine)?;
-        match build_resource_payload(&engine, &self.uri) {
-            Ok(text) => Ok(vec![ResourceContent {
-                uri: self.uri.clone(),
-                mime_type: Some(self.mime_type.clone()),
-                text: Some(text),
-                blob: None,
-            }]),
-            Err(err) => Err(McpError::new(
-                McpErrorCode::Custom(-32000),
-                err.message_text(),
+impl McpDispatcher for EngineDispatcher {
+    fn dispatch(
+        &self,
+        tool: &str,
+        arguments: Value,
+        context: &McpCallContext,
+    ) -> Result<Value, McpDispatchError> {
+        match self.dispatch_output(tool, arguments, context)? {
+            McpDispatchOutput::Json(value) => Ok(value),
+            McpDispatchOutput::Text(items) => Ok(Value::Array(
+                items
+                    .into_iter()
+                    .map(|item| Value::String(item.text))
+                    .collect(),
             )),
         }
     }
+
+    fn dispatch_output(
+        &self,
+        tool: &str,
+        arguments: Value,
+        _context: &McpCallContext,
+    ) -> Result<McpDispatchOutput, McpDispatchError> {
+        let engine = self.engine.lock().map_err(|_| {
+            McpDispatchError::new("runtime", "TokenZero engine lock poisoned", false).with_op(tool)
+        })?;
+        let result = call_tool_fastmcp(&engine, tool, &arguments, None).map_err(|error| {
+            McpDispatchError::new("runtime", error.message_text(), false).with_op(tool)
+        })?;
+        let texts = crate::fastmcp_mode::fastmcp_content_texts_from_tool_result(&result)
+            .map_err(|message| McpDispatchError::new("runtime", message, false).with_op(tool))?;
+        Ok(McpDispatchOutput::Text(
+            texts.into_iter().map(McpTextContent::new).collect(),
+        ))
+    }
 }
 
-/// One-mode instruction text for FastMCP .instructions().
+struct EngineResourceReader {
+    engine: Arc<Mutex<TokenZeroEngine>>,
+}
+
+impl McpResourceReader for EngineResourceReader {
+    fn read(&self, uri: &str, context: &McpCallContext) -> Result<Value, McpDispatchError> {
+        match self.read_output(uri, context)? {
+            McpResourceOutput::Json(value) => Ok(value),
+            McpResourceOutput::Text(text) | McpResourceOutput::Blob(text) => {
+                Ok(Value::String(text))
+            }
+        }
+    }
+
+    fn read_output(
+        &self,
+        uri: &str,
+        _context: &McpCallContext,
+    ) -> Result<McpResourceOutput, McpDispatchError> {
+        let engine = self.engine.lock().map_err(|_| {
+            McpDispatchError::new("runtime", "TokenZero engine lock poisoned", false).with_op(uri)
+        })?;
+        let payload = build_resource_payload(&engine, uri).map_err(|error| {
+            McpDispatchError::new("runtime", error.message_text(), false).with_op(uri)
+        })?;
+        Ok(McpResourceOutput::Text(payload))
+    }
+}
+
+/// One-mode instruction text preserved from the legacy FastMCP carrier.
 pub fn fastmcp_instructions() -> &'static str {
     "TokenZero MCP surface. Tools: read, find, grep, glob, tree, edit, recall, batch, \
      fetch, shell, ingest, expand, mem, cache_pack, rewrite, discover, plus tz_* aliases. \
@@ -198,108 +284,166 @@ pub fn fastmcp_instructions() -> &'static str {
      Full per-tool docs: resources/read resource://tokenzero/tools."
 }
 
-/// CodeMode-mode instruction text for FastMCP .instructions().
 pub fn fastmcp_codemode_instructions() -> &'static str {
-    "TokenZero CodeMode surface. Tools: tz_execute_code, tz_codemode_search, \
-     tz_codemode_describe, tz_report_tool_issue. Expand/read fallback is \
-     engine-internal — per-op MCP tools (tz_expand, tz_read, shell, …) are not \
-     listed. Write plans against the `zero` surface. Use tz_codemode_describe \
-     name=capabilities for the full contract manifest."
+    "TokenZero aggregate binding metadata is consumed by ZeroStack. This classic \
+     compatibility crate does not register or execute an engine-local CodeMode \
+     surface; the aggregate host dispatches dotted bindings through raw-worker v2."
 }
 
-/// Start the FastMCP stdio server, replacing the hand-rolled loop.
-/// The CodeMode transport is UNTOUCHED — this is TOOL-level FastMCP wiring.
+fn alias_metadata(surface: McpToolSurface) -> Vec<McpAliasMetadata> {
+    TOOL_ALIASES
+        .iter()
+        .filter(|(_, target)| surface_includes(surface, target))
+        .map(|(alias, target)| {
+            let operation = tokenzero_core::operation_abi::operation_by_name(target)
+                .expect("MCP alias target must exist in the operation ABI");
+            McpAliasMetadata {
+                canonical_id: canonical_id(operation.name, operation.cluster),
+                name: (*alias).to_owned(),
+                description: Some(crate::catalog::alias_summary(target)),
+                input_schema: serde_json::json!({"type": "object"}),
+                output_schema: None,
+            }
+        })
+        .collect()
+}
+
+/// Start the hub-owned FastMCP stdio server.
 pub fn run_fastmcp_stdio(config: EngineConfig) -> ! {
     let surface = config.tool_surface;
+    if surface != McpToolSurface::Classic {
+        eprintln!(
+            "tokenzero-mcp: engine-local CodeMode was retired; use the ZeroStack aggregate host"
+        );
+        std::process::exit(2);
+    }
     let engine = Arc::new(Mutex::new(TokenZeroEngine::new(config)));
-
-    let instructions = match surface {
-        McpToolSurface::CodeMode => fastmcp_codemode_instructions(),
-        McpToolSurface::Classic => fastmcp_instructions(),
+    let registration = {
+        let guard = engine.lock().expect("new TokenZeroEngine lock");
+        surface_registration(&guard, surface)
     };
-    let mut builder =
-        Server::new("TokenZero", env!("CARGO_PKG_VERSION")).instructions(instructions);
-
-    for seed in canonical_tool_specs() {
-        // Same policy owner as tools/list / tools/call; CodeMode registers
-        // primary tools only (expand fallback is engine-internal).
-        if !surface_includes(surface, seed.name) {
-            continue;
+    let dispatcher: Arc<dyn McpDispatcher> = Arc::new(EngineDispatcher {
+        engine: Arc::clone(&engine),
+    });
+    let reader: Arc<dyn McpResourceReader> = Arc::new(EngineResourceReader { engine });
+    let aliases = alias_metadata(surface);
+    let transport = match FastMcpTransport::with_resources(
+        registration,
+        dispatcher,
+        reader,
+        McpTransportConfig::default(),
+    )
+    .and_then(|transport| transport.with_server_identity("tokenzero", env!("CARGO_PKG_VERSION")))
+    .map(|transport| transport.with_error_presentation(McpErrorPresentation::PlainMessage))
+    .and_then(|transport| transport.with_alias_metadata(aliases))
+    {
+        Ok(transport) => transport,
+        Err(error) => {
+            eprintln!("tokenzero: invalid ZeroStack surface registration: {error}");
+            std::process::exit(2);
         }
-        let (input_schema, output_schema) =
-            match tokenzero_core::operation_abi::operation_by_name(seed.name) {
-                Some(op) => (op.args.schema.clone(), Some(op.results.schema.clone())),
-                None => (seed.input_schema.clone(), None),
-            };
-        let handler = EngineTool {
-            name: seed.name.to_string(),
-            description: seed.summary.to_string(),
-            schema: input_schema,
-            output_schema,
-            engine: Arc::clone(&engine),
-        };
-        builder = builder.tool(handler);
-    }
-
-    // Register alias tool names (read -> tz_read, etc.) so clients see them in tools/list.
-    // Only include aliases whose target is on the active surface.
-    for &(alias, target) in TOOL_ALIASES {
-        if !surface_includes(surface, target) {
-            continue;
-        }
-        let handler = EngineTool {
-            name: alias.to_string(),
-            description: crate::catalog::alias_summary(target),
-            schema: serde_json::json!({"type": "object"}),
-            output_schema: None,
-            engine: Arc::clone(&engine),
-        };
-        builder = builder.tool(handler);
-    }
-
-    // Register every resource the old hand-rolled surface served.
-    for spec in resource_specs() {
-        let handler = TokenZeroResource {
-            uri: spec.uri.clone(),
-            name: spec.name.clone(),
-            description: spec.description.clone(),
-            mime_type: spec.mime_type.clone(),
-            engine: Arc::clone(&engine),
-        };
-        builder = builder.resource(handler);
-    }
-
-    builder.build().run_stdio()
+    };
+    transport.run_stdio()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tokenzero_core::operation_abi::operation_by_name;
 
     #[test]
-    fn poisoned_engine_lock_fails_closed_instead_of_panicking() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let engine = Arc::new(Mutex::new(TokenZeroEngine::new(EngineConfig::for_root(
-            dir.path(),
-        ))));
-        let poisoned = Arc::clone(&engine);
-        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
-            let _guard = poisoned.lock().expect("test lock");
-            panic!("deliberate poison");
-        }));
-        let err = lock_engine(&engine).expect_err("poisoned lock must be a typed error");
-        assert!(
-            format!("{err:?}").contains("poisoned"),
-            "error must name the poison cause: {err:?}"
+    fn projection_keeps_canonical_metadata_and_exact_mcp_aliases() {
+        let operation = operation_by_name("tz_read").expect("read operation");
+        let seed = canonical_tool_specs()
+            .iter()
+            .find(|seed| seed.name == operation.name)
+            .expect("read catalog seed");
+        let projected = canonical_operation(operation, seed.summary);
+        assert_eq!(projected.mcp_tool_name.as_deref(), Some("tz_read"));
+        assert_eq!(projected.aliases, vec!["read"]);
+        assert_eq!(projected.description, seed.summary);
+        assert_eq!(projected.args_schema, operation.args.schema);
+        assert_eq!(
+            projected.output_schema,
+            Some(operation.results.schema.clone())
         );
     }
 
     #[test]
-    fn healthy_engine_lock_still_serves() {
+    fn projection_keeps_human_resource_names_and_legacy_instructions() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let engine = Arc::new(Mutex::new(TokenZeroEngine::new(EngineConfig::for_root(
-            dir.path(),
-        ))));
-        assert!(lock_engine(&engine).is_ok());
+        let engine = TokenZeroEngine::new(EngineConfig::for_root(dir.path()));
+        let registration = surface_registration(&engine, McpToolSurface::Classic);
+        assert_eq!(
+            registration.instructions.as_deref(),
+            Some(fastmcp_instructions())
+        );
+        registration
+            .validate()
+            .expect("lossless surface registration");
+
+        let projected_resources = registration.adapter.registry.resources;
+        let expected_resources = resource_specs();
+        assert_eq!(projected_resources.len(), expected_resources.len());
+        for (projected, expected) in projected_resources.iter().zip(expected_resources) {
+            assert_eq!(projected.uri, expected.uri);
+            assert_eq!(projected.name, expected.name);
+            assert_eq!(projected.description, expected.description);
+            assert_eq!(
+                projected.mime_type.as_deref(),
+                Some(expected.mime_type.as_str())
+            );
+        }
+    }
+
+    #[test]
+    fn projection_keeps_every_classic_tool_and_alias_catalog_entry_exact() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let engine = TokenZeroEngine::new(EngineConfig::for_root(dir.path()));
+        let registration = surface_registration(&engine, McpToolSurface::Classic);
+        let operations = &registration.adapter.registry.operations;
+        let expected_primary = canonical_tool_specs()
+            .iter()
+            .filter(|seed| surface_includes(McpToolSurface::Classic, seed.name))
+            .collect::<Vec<_>>();
+        assert_eq!(operations.len(), expected_primary.len());
+        for seed in expected_primary {
+            let operation = operation_by_name(seed.name).expect("catalog operation");
+            let projected = operations
+                .iter()
+                .find(|candidate| candidate.mcp_tool_name.as_deref() == Some(seed.name))
+                .expect("projected canonical tool");
+            assert_eq!(projected.description, seed.summary);
+            assert_eq!(projected.args_schema, operation.args.schema);
+            assert_eq!(
+                projected.output_schema,
+                Some(operation.results.schema.clone())
+            );
+            assert_eq!(projected.aliases, mcp_aliases_for(seed.name));
+        }
+
+        let projected_aliases = alias_metadata(McpToolSurface::Classic);
+        let expected_aliases = TOOL_ALIASES
+            .iter()
+            .filter(|(_, target)| surface_includes(McpToolSurface::Classic, target))
+            .collect::<Vec<_>>();
+        assert_eq!(projected_aliases.len(), expected_aliases.len());
+        for ((alias, target), projected) in expected_aliases.into_iter().zip(projected_aliases) {
+            let operation = operation_by_name(target).expect("alias target operation");
+            assert_eq!(
+                projected.canonical_id,
+                canonical_id(operation.name, operation.cluster)
+            );
+            assert_eq!(projected.name, *alias);
+            assert_eq!(
+                projected.description,
+                Some(crate::catalog::alias_summary(target))
+            );
+            assert_eq!(
+                projected.input_schema,
+                serde_json::json!({"type": "object"})
+            );
+            assert_eq!(projected.output_schema, None);
+        }
     }
 }

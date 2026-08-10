@@ -52,7 +52,7 @@ pub fn fastmcp_tool_names() -> Vec<&'static str> {
     names_where(|op| op.exposure.fastmcp_tool)
 }
 
-/// CodeMode MCP control tool names (`--mode=codemode`).
+/// Aggregate-host control schemas retained for ZeroStack registration metadata.
 pub fn codemode_mcp_tool_names() -> Vec<&'static str> {
     names_where(|op| op.exposure.codemode_mcp_tool)
 }

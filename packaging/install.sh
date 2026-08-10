@@ -14,12 +14,12 @@ TARGET_DIR="${CARGO_TARGET_DIR:-$ROOT/target}"
 
 usage() {
   cat <<EOF
-usage: $0 --surface codemode --dry-run
-       $0 --sbom --surface codemode [--bin-dir DIR]
+usage: $0 --surface raw-worker --dry-run
+       $0 --sbom --surface raw-worker [--bin-dir DIR]
        $0 --uninstall [--prefix DIR] [--bin-dir DIR]
 
-Canonical backend: tokenzero-codemode from package tokenzero-worker.
-Legacy MCP is retired. Direct install waits for ZeroStack central discovery.
+Canonical backend: planner-free tokenzero-codemode from package tokenzero-worker.
+Classic MCP remains a separate compatibility package. Direct worker install waits for ZeroStack central discovery.
 EOF
 }
 
@@ -107,21 +107,21 @@ if [[ "$ACTION" == "uninstall" ]]; then
 fi
 
 if [[ -z "$SURFACE" ]]; then
-  echo "require --surface codemode" >&2
+  echo "require --surface raw-worker" >&2
   usage >&2
   exit 2
 fi
 case "$SURFACE" in
-  codemode) ;;
+  raw-worker|raw_worker|worker|codemode) SURFACE="raw-worker" ;;
   mcp)
-    echo "tokenzero: legacy MCP artifact retired; use the ZeroStack aggregate host adapter" >&2
+    echo "tokenzero: this script selects the raw worker only; classic MCP compatibility is built separately with surface-mcp" >&2
     exit 2
     ;;
   both|all|mcp+codemode|codemode+mcp)
     echo "tokenzero: dual package surface rejected (fail closed)" >&2
     exit 2
     ;;
-  *) echo "surface must be codemode" >&2; exit 2 ;;
+  *) echo "surface must be raw-worker" >&2; exit 2 ;;
 esac
 if [[ -n "${TOKENZERO_ENABLE_MCP:-}" && -n "${TOKENZERO_ENABLE_CODEMODE:-}" ]]; then
   echo "tokenzero: dual package surface rejected (fail closed): both surface envs are set" >&2
