@@ -237,7 +237,7 @@ These ranges intentionally do not add overlapping seams together. A migration mu
 
 ## RFC cross-reference
 
-`docs/zero-foundation-rfc.md` is draft/recommendation-only. Its boundary and supply-chain sections name ZeroStack as the hub, prohibit engine-to-engine and direct FSZero/GraphZero dependencies, and require engine consumers to pin a pushed immutable hub revision. Its ownership/release comparison evaluates alternatives but does not select one. This inventory therefore names candidate hub crates and APIs without choosing ownership, release, or extraction order. The current TokenZero manifests pin ZeroStack dependencies to pushed revision `599743c20fc0f783e5c53406f5ffb0baa455dc57`; that dependency pin is separate from older recorded snapshots above.
+`docs/zero-foundation-rfc.md` is draft/recommendation-only. Its boundary and supply-chain sections name ZeroStack as the hub, prohibit engine-to-engine and direct FSZero/GraphZero dependencies, and require engine consumers to pin a pushed immutable hub revision. Its ownership/release comparison evaluates alternatives but does not select one. This inventory therefore names candidate hub crates and APIs without choosing ownership, release, or extraction order. The current TokenZero manifests pin ZeroStack dependencies to pushed revision `fa253840910ab4051635e2de95f04ddf6043a000`; that dependency pin is separate from older recorded snapshots above.
 
 ## Reproduction and path checks
 
