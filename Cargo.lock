@@ -191,7 +191,7 @@ dependencies = [
  "js-sys",
  "libc",
  "memchr",
- "nix 0.31.3",
+ "nix",
  "nkeys",
  "parking_lot",
  "pin-project",
@@ -3734,6 +3734,7 @@ source = "git+https://github.com/AdityaVG13/zerostack?rev=fa253840910ab4051635e2
 dependencies = [
  "libc",
  "windows-sys",
+ "zero-process",
 ]
 
 [[package]]
