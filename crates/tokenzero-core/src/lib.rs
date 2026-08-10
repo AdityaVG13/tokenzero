@@ -1762,6 +1762,7 @@ pub fn ref_record(kind: &str, ref_id: String, bytes: usize) -> RefRecord {
     }
 }
 
+pub mod codemode_plan;
 pub mod decision_view;
 pub mod model_artifacts;
 pub mod operation_abi;
@@ -1784,6 +1785,7 @@ use shell_display::*;
 use shell_parse::*;
 use tokens::*;
 
+pub use codemode_plan::{PlanMethodIssue, validate_plan_methods};
 pub use protocol_atoms::{
     AckClass, PORTABLE_ONE_TOKEN_ATOMS, ProtocolTokenizer, is_verified_one_token_atom,
     portable_one_token_atoms, render_ack,
