@@ -118,7 +118,10 @@ fn skip_template_literal(bytes: &[u8], start: usize) -> Result<usize, PlanMethod
             b'\\' => i += 2,
             b'`' => return Ok(i + 1),
             b'$' if bytes.get(i + 1) == Some(&b'{') => {
-                i += 1; // at '{'
+                // Skip both `${` so the interpolation scan starts at the
+                // content and consumes its own matching `}`; the template then
+                // resumes in literal-text mode.
+                i += 2;
                 scan_code(bytes, &mut i, Some(b'}'))?;
             }
             _ => i += 1,
@@ -147,9 +150,13 @@ fn skip_block_comment(bytes: &[u8], start: usize) -> usize {
     }
 }
 
-/// Read a maximal `ident (. ident)*` member chain starting at an identifier.
-/// Whitespace around dots is allowed (as in JavaScript). Returns the chain
-/// segments and the index just past the last consumed identifier.
+/// Read a maximal member chain starting at an identifier: `ident (. ident)*`
+/// with optional chaining (`?.`) and computed string keys (`["key"]`,
+/// `['key']`) accepted as segments, e.g. `zero?.token["expand"]`. Whitespace
+/// around accessors is allowed (as in JavaScript). A `[` whose contents are
+/// not a quoted literal is left for the main scanner (computed keys cannot be
+/// resolved lexically). Returns the chain segments and the index just past the
+/// last consumed segment.
 fn read_member_chain(bytes: &[u8], start: usize) -> (Vec<&[u8]>, usize) {
     let mut segments = Vec::new();
     let mut i = start;
@@ -163,24 +170,77 @@ fn read_member_chain(bytes: &[u8], start: usize) -> (Vec<&[u8]>, usize) {
         while j < bytes.len() && bytes[j].is_ascii_whitespace() {
             j += 1;
         }
-        if bytes.get(j) != Some(&b'.') {
+        // Accessor: `.`, `?.` (optional chaining), or a computed `[` key.
+        let k = if bytes.get(j) == Some(&b'?') && bytes.get(j + 1) == Some(&b'.') {
+            j + 2
+        } else if bytes.get(j) == Some(&b'.') {
+            j + 1
+        } else if bytes.get(j) == Some(&b'[') {
+            j
+        } else {
             break;
+        };
+        let mut s = k;
+        while s < bytes.len() && bytes[s].is_ascii_whitespace() {
+            s += 1;
         }
-        let mut k = j + 1;
-        while k < bytes.len() && bytes[k].is_ascii_whitespace() {
-            k += 1;
+        if s < bytes.len() && is_ident_start(bytes[s]) {
+            let seg_start = s;
+            while s < bytes.len() && is_ident_continue(bytes[s]) {
+                s += 1;
+            }
+            segments.push(&bytes[seg_start..s]);
+            i = s;
+            continue;
         }
-        if k >= bytes.len() || !is_ident_start(bytes[k]) {
-            break;
+        if let Some((next, key)) = read_bracket_literal_key(bytes, s) {
+            segments.push(key);
+            i = next;
+            continue;
         }
-        let seg_start = k;
-        while k < bytes.len() && is_ident_continue(bytes[k]) {
-            k += 1;
-        }
-        segments.push(&bytes[seg_start..k]);
-        i = k;
+        break;
     }
     (segments, i)
+}
+
+/// If `s` points at a `[` followed by a quoted string key and a closing `]`,
+/// return the index just past `]` and the key contents (raw, escapes intact).
+fn read_bracket_literal_key(bytes: &[u8], s: usize) -> Option<(usize, &[u8])> {
+    if bytes.get(s) != Some(&b'[') {
+        return None;
+    }
+    let mut t = s + 1;
+    while t < bytes.len() && bytes[t].is_ascii_whitespace() {
+        t += 1;
+    }
+    let quote = *bytes.get(t)?;
+    if quote != b'\'' && quote != b'"' {
+        return None;
+    }
+    let content_start = t + 1;
+    let mut u = content_start;
+    while u < bytes.len() && bytes[u] != quote {
+        if bytes[u] == b'\\' {
+            u += 1;
+            if u >= bytes.len() {
+                return None;
+            }
+        }
+        u += 1;
+    }
+    if u >= bytes.len() {
+        return None; // unterminated key string
+    }
+    let key = &bytes[content_start..u];
+    u += 1; // closing quote
+    let mut w = u;
+    while w < bytes.len() && bytes[w].is_ascii_whitespace() {
+        w += 1;
+    }
+    if bytes.get(w) != Some(&b']') {
+        return None;
+    }
+    Some((w + 1, key))
 }
 
 /// Check a connector-rooted member chain. The longest known prefix wins:
@@ -292,6 +352,77 @@ mod tests {
         // ${...} interpolation is real code, not string text.
         let err = validate_plan_methods(r#"const msg = `value: ${zero.nope()}`;"#)
             .expect_err("interpolation must be scanned");
+        assert_eq!(err.method, "zero.nope");
+    }
+
+    #[test]
+    fn template_resumes_text_mode_after_interpolation() {
+        // Regression: the interpolation scanner used to resume in code mode
+        // after `${...}`, so literal template text after an interpolation was
+        // read as real code and falsely flagged.
+        for plan in [
+            r#"const s = `a ${x} zero.nope() b`;"#,
+            r#"const s = `ok ${zero.read("f")} zero.nope() end`;"#,
+            r#"const s = `${x} codemode.notARealMethod(...)`;"#,
+        ] {
+            assert_eq!(validate_plan_methods(plan), Ok(()), "plan: {plan}");
+        }
+    }
+
+    #[test]
+    fn real_code_after_template_still_fails_closed() {
+        // The template ends; the code after it must still be scanned.
+        let plan = "const s = `a ${x} b`;\nawait zero.nope();";
+        let err = validate_plan_methods(plan).expect_err("call after template must fail");
+        assert_eq!(err.method, "zero.nope");
+    }
+
+    #[test]
+    fn nested_template_interpolation_braces_are_balanced() {
+        let plan = r#"const s = `v ${ { a: 1 }.a } ${zero.read("x")} end`;"#;
+        assert_eq!(validate_plan_methods(plan), Ok(()));
+    }
+
+    #[test]
+    fn optional_chaining_references_are_validated() {
+        let err =
+            validate_plan_methods("await zero?.nope();").expect_err("optional call must fail");
+        assert_eq!(err.method, "zero.nope");
+        let err = validate_plan_methods("await zero?.token?.nope();")
+            .expect_err("optional nested call must fail");
+        assert_eq!(err.method, "zero.token.nope");
+        // Known methods through optional chaining still pass.
+        assert_eq!(validate_plan_methods("await zero?.read(\"a\");"), Ok(()));
+        assert_eq!(
+            validate_plan_methods("await zero?.token?.expand(ref);"),
+            Ok(())
+        );
+        // A lone `?` (ternary) or `??` (nullish coalescing) is not an accessor.
+        assert_eq!(validate_plan_methods("const v = zero ? a : b;"), Ok(()));
+        assert_eq!(validate_plan_methods("const v = zero ?? other;"), Ok(()));
+    }
+
+    #[test]
+    fn computed_literal_key_references_are_validated() {
+        for plan in [
+            r#"zero["nope"]();"#,
+            r#"zero['nope']();"#,
+            r#"zero ?.["nope"]();"#,
+        ] {
+            let err = validate_plan_methods(plan).expect_err("computed key call must fail");
+            assert_eq!(err.method, "zero.nope", "plan: {plan}");
+        }
+        // Known methods via computed keys still pass.
+        assert_eq!(validate_plan_methods(r#"zero["read"]("a");"#), Ok(()));
+        assert_eq!(
+            validate_plan_methods(r#"zero["token"]["expand"](ref);"#),
+            Ok(())
+        );
+        assert_eq!(validate_plan_methods(r#"zero ?. ["read"]("a");"#), Ok(()));
+        // Non-literal computed keys cannot be resolved lexically; the key
+        // expression is still scanned as code.
+        assert_eq!(validate_plan_methods("zero[key];"), Ok(()));
+        let err = validate_plan_methods("obj[zero.nope];").expect_err("key expr must fail");
         assert_eq!(err.method, "zero.nope");
     }
 
