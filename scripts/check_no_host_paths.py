@@ -1,124 +1,45 @@
 #!/usr/bin/env python3
-"""Fail if a tracked file gains an absolute host path.
+"""Apply canonical host-path policy to the TokenZero checkout."""
 
-The hub is public, and the other three repos are converging on the same
-gate (zerostack-9g4). Host paths in committed artifacts are cosmetic
-leakage, not a functional defect, but they are noise in a public repo and
-make evidence artifacts needlessly machine-specific.
-
-Allowlist policy (line-scoped for docs):
-
-- Whole-file allowlist ONLY for scripts that *define* the host-path patterns
-  they scan/rewrite (this file and scrub_beads_export.py).
-- AGENTS.md is NOT whole-file allowlisted. Only lines that document the
-  privacy-check recipe (the rg pattern strings themselves) are skipped.
-  A real `/Users/<name>/...` path elsewhere in AGENTS.md fails the gate.
-- CLAUDE.md is not allowlisted at all.
-
-The beads exports are NO LONGER allowlisted. br stamps source_repo_path with
-an absolute path and has no config knob to stop it, so scripts/scrub_beads_export.py
-rewrites it before the export is staged (zerostack-sg3). Blanket-allowlisting
-the file meant the gate could not see a real leak in a bead description either,
-which is the more sensitive content of the two.
-
-Run: python3 scripts/check_no_host_paths.py
-"""
 from __future__ import annotations
 
 import re
-import subprocess
 import sys
 from pathlib import Path
 
-REPO = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from zerostack_testkit_adapter import ENGINE_ROOT, load_hub_script
 
-# Absolute host path shapes. Windows C:\Users\ is covered by the Users
-# pattern after forward-slash normalization in json.
-HOST_PATH = re.compile(r"/Users/[A-Za-z]|/home/[A-Za-z]|C:[\\/]Users[\\/]")
+_hub = load_hub_script("check_no_host_paths.py", "_tokenzero_hub_host_paths")
+REPO = ENGINE_ROOT
+_hub.REPO = REPO
 
-# Whole-file allowlist: only files that define the scan/rewrite patterns.
-ALLOWLIST_FILES: dict[str, str] = {
-    "scripts/check_no_host_paths.py": "defines the host-path pattern it scans for",
-    "scripts/scrub_beads_export.py": "documents the host-path shapes it rewrites",
-}
-
-# Line-scoped allowlist: host-path lines are OK only when they match a doc pattern.
-# Real username paths (e.g. ${HOME}/...) must not match these.
-ALLOWLIST_LINE_RES: dict[str, list[re.Pattern[str]]] = {
-    "AGENTS.md": [
-        # Privacy check recipe listing scan strings (not a personal path).
-        re.compile(r"rg -n ['\"].*/Users/\|/home/\|"),
-        # Prose that names the scan strings without a username segment.
-        re.compile(r"/Users/\|/home/\|BEGIN"),
-        re.compile(r"names /Users/ and /home/ as the strings"),
-    ],
-    # Pre-existing portable fixtures and documentation examples. Keep these
-    # line-scoped so any new host path elsewhere still fails the gate.
-    "crates/tokenzero-install/src/package_audit/tests/tar.rs": [
-        re.compile(r'(?:C:/Users/example|/home/example)/'),
-    ],
-    "crates/tokenzero-recovery/benches/perf_hotspots/baseline-shell.sample.txt": [
-        re.compile(r'/Users/(?:USER|\*)/'),
-    ],
-    "crates/tokenzero-recovery/src/embedded_store_tests.rs": [
-        re.compile(r'C:\\Users\\x\\proj'),
-    ],
-    "docs/benchmarks.md": [
-        re.compile(r'${TOKENZERO_ROOT}/target/release/tokenzero'),
-    ],
-    "docs/install.md": [
-        re.compile(r'/Users/you/AI/tokenzero/target/release/tokenzero'),
-    ],
-}
-
-
-def tracked_files() -> list[str]:
-    out = subprocess.run(
-        ["git", "ls-files"], cwd=REPO, capture_output=True, text=True, check=True
-    )
-    return [line for line in out.stdout.splitlines() if line.strip()]
-
-
-def line_allowlisted(rel: str, line: str) -> bool:
-    patterns = ALLOWLIST_LINE_RES.get(rel)
-    if not patterns:
-        return False
-    return any(p.search(line) for p in patterns)
-
-
-def first_offender(rel: str) -> str | None:
-    """Return first host-path hit for a tracked path, or None if clean."""
-    path = REPO / rel
-    if not path.is_file():
-        return None
-    try:
-        text = path.read_text(encoding="utf-8", errors="replace")
-    except OSError:
-        return None
-    if not HOST_PATH.search(text) or rel in ALLOWLIST_FILES:
-        return None
-    for i, line in enumerate(text.splitlines(), 1):
-        if HOST_PATH.search(line) and not line_allowlisted(rel, line):
-            return f"{rel}:{i}: {line.strip()[:120]}"
-    return None
-
-
-def main() -> int:
-    offenders = [hit for rel in tracked_files() if (hit := first_offender(rel))]
-    if not offenders:
-        count = len(tracked_files())
-        print(f"no host paths in {count} tracked file(s)")
-        return 0
-    print("host paths found in tracked files:", file=sys.stderr)
-    for o in offenders:
-        print(f"  {o}", file=sys.stderr)
-    print(
-        "\nIf a path is legitimate documentation of the scan pattern, add a "
-        "line regex under ALLOWLIST_LINE_RES in scripts/check_no_host_paths.py. "
-        "Do not whole-file allowlist agent docs.",
-        file=sys.stderr,
-    )
-    return 1
+HOST_PATH = _hub.HOST_PATH
+ALLOWLIST_FILES = _hub.ALLOWLIST_FILES
+ALLOWLIST_LINE_RES = _hub.ALLOWLIST_LINE_RES
+ALLOWLIST_LINE_RES.update(
+    {
+        "crates/tokenzero-install/src/package_audit/tests/tar.rs": [
+            re.compile(r"(?:C:/Users/example|/home/example)/"),
+        ],
+        "crates/tokenzero-recovery/benches/perf_hotspots/baseline-shell.sample.txt": [
+            re.compile(r"/Users/(?:USER|\*)/"),
+        ],
+        "crates/tokenzero-recovery/src/embedded_store_tests.rs": [
+            re.compile(r"C:\\Users\\x\\proj"),
+        ],
+        "docs/benchmarks.md": [
+            re.compile(r"${TOKENZERO_ROOT}/target/release/tokenzero"),
+        ],
+        "docs/install.md": [
+            re.compile(r"/Users/you/AI/tokenzero/target/release/tokenzero"),
+        ],
+    }
+)
+tracked_files = _hub.tracked_files
+line_allowlisted = _hub.line_allowlisted
+first_offender = _hub.first_offender
+main = _hub.main
 
 
 if __name__ == "__main__":
