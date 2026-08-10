@@ -203,8 +203,11 @@ fn read_member_chain(bytes: &[u8], start: usize) -> (Vec<&[u8]>, usize) {
     (segments, i)
 }
 
-/// If `s` points at a `[` followed by a quoted string key and a closing `]`,
-/// return the index just past `]` and the key contents (raw, escapes intact).
+/// If `s` points at a `[` followed by a quoted or backtick string key and a
+/// closing `]`, return the index just past `]` and the key contents (raw,
+/// escapes intact). Backtick keys containing an unescaped `${...}` are
+/// dynamic: `None` is returned so the main scanner re-processes the bracket
+/// and its interpolation as real code.
 fn read_bracket_literal_key(bytes: &[u8], s: usize) -> Option<(usize, &[u8])> {
     if bytes.get(s) != Some(&b'[') {
         return None;
@@ -214,7 +217,7 @@ fn read_bracket_literal_key(bytes: &[u8], s: usize) -> Option<(usize, &[u8])> {
         t += 1;
     }
     let quote = *bytes.get(t)?;
-    if quote != b'\'' && quote != b'"' {
+    if quote != b'\'' && quote != b'"' && quote != b'`' {
         return None;
     }
     let content_start = t + 1;
@@ -225,6 +228,10 @@ fn read_bracket_literal_key(bytes: &[u8], s: usize) -> Option<(usize, &[u8])> {
             if u >= bytes.len() {
                 return None;
             }
+        } else if quote == b'`' && bytes[u] == b'$' && bytes.get(u + 1) == Some(&b'{') {
+            // Dynamic template key (`${...}`): unresolvable lexically; leave
+            // it for the main scanner, which scans the interpolation as code.
+            return None;
         }
         u += 1;
     }
@@ -423,6 +430,24 @@ mod tests {
         // expression is still scanned as code.
         assert_eq!(validate_plan_methods("zero[key];"), Ok(()));
         let err = validate_plan_methods("obj[zero.nope];").expect_err("key expr must fail");
+        assert_eq!(err.method, "zero.nope");
+    }
+
+    #[test]
+    fn computed_template_key_references_are_validated() {
+        // Static backtick keys resolve like quoted keys.
+        let err = validate_plan_methods(r#"zero[`nope`]();"#).expect_err("template key must fail");
+        assert_eq!(err.method, "zero.nope");
+        assert_eq!(validate_plan_methods(r#"zero[`read`]("a");"#), Ok(()));
+        assert_eq!(
+            validate_plan_methods(r#"zero[`token`][`expand`](ref);"#),
+            Ok(())
+        );
+        // Dynamic template keys are not resolvable lexically, but their
+        // interpolation is still scanned as real code.
+        assert_eq!(validate_plan_methods(r#"zero[`${key}`]();"#), Ok(()));
+        let err = validate_plan_methods(r#"zero[`${zero.nope()}`]();"#)
+            .expect_err("interpolation inside key must fail");
         assert_eq!(err.method, "zero.nope");
     }
 
