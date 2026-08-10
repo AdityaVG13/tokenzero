@@ -261,10 +261,6 @@ fn main() -> Result<()> {
     McpServer(args) => {
         #[cfg(feature = "surface-mcp")]
         {
-            if args.supervise {
-                let program = std::env::current_exe().map(OsString::from).unwrap_or_else(|_| OsString::from("tokenzero"));
-                std::process::exit(tokenzero_mcp_compat::run_supervised_stdio(program, supervised_child_args(&args)))
-            }
             compatibility_server_niceness();
             enforce_surface_exclusivity(&args)?;
             tokenzero_mcp_compat::run_fastmcp_stdio(engine_config_for_mcp(&args)?)
@@ -1958,39 +1954,6 @@ Install {} for that surface (mutually exclusive — one process, one catalog).",
         }
         Ok(())
     }
-}
-
-/// Rebuilds the mcp-server invocation for the supervised inner child:
-/// same configuration, no --supervise (one supervisor only), and idle exit
-/// pinned off because the supervisor owns the session lifecycle.
-#[cfg(feature = "surface-mcp")]
-fn supervised_child_args(args: &McpServerArgs) -> Vec<OsString> {
-    let mut child_args: Vec<OsString> = vec![
-        "mcp-server".into(),
-        "--mode".into(),
-        args.mode.clone().into(),
-        "--default-mode".into(),
-        args.default_mode.clone().into(),
-        "--idle-timeout-seconds".into(),
-        "0".into(),
-    ];
-    let mut push_opt = |flag: &str, value: OsString| {
-        child_args.push(flag.into());
-        child_args.push(value);
-    };
-    for root in &args.allowed_root {
-        push_opt("--allowed-root", root.clone().into_os_string());
-    }
-    if let Some(cache_path) = &args.cache_path {
-        push_opt("--cache-path", cache_path.clone().into_os_string());
-    }
-    if let Some(seconds) = args.shell_timeout_seconds {
-        push_opt("--shell-timeout-seconds", seconds.to_string().into());
-    }
-    if let Some(surface) = &args.tool_surface {
-        push_opt("--tool-surface", surface.clone().into());
-    }
-    child_args
 }
 
 fn existing_path_is_within_allowed_roots(path: &Path, allowed_roots: &[PathBuf]) -> bool {

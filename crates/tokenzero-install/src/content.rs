@@ -336,7 +336,6 @@ pub(crate) fn mcp_args(root: &Path) -> Vec<String> {
         root.display().to_string(),
         "--cache-path".to_string(),
         cache_path(root).display().to_string(),
-        "--supervise".to_string(),
     ]
 }
 
@@ -488,5 +487,13 @@ mod instruction_merge_tests {
             .expect_err("malformed markers must fail closed");
         assert_eq!(err.kind(), ErrorKind::InvalidData);
         assert!(err.to_string().contains("malformed or duplicate"));
+    }
+
+    #[test]
+    fn generated_mcp_args_use_direct_hub_transport() {
+        let root = Path::new("/tmp/tokenzero-project");
+        let args = mcp_args(root);
+        assert_eq!(args.first().map(String::as_str), Some("mcp-server"));
+        assert!(!args.iter().any(|arg| arg == "--supervise"));
     }
 }

@@ -10,8 +10,6 @@ mod fastmcp_mode;
 mod jsonrpc;
 mod operation_abi_parity;
 mod resources;
-mod stdio;
-mod supervisor;
 mod tools;
 
 #[cfg(test)]
@@ -34,9 +32,6 @@ pub use tokenzero_engine::codemode_wire::{
 
 pub use fastmcp_mode::{fastmcp_codemode_instructions, fastmcp_instructions, run_fastmcp_stdio};
 pub use jsonrpc::handle_jsonrpc;
-pub use stdio::run_stdio;
-pub use supervisor::run_supervised_stdio;
 
-pub(crate) use jsonrpc::{JsonRpcErrorData, handle_jsonrpc_value, jsonrpc_error};
 pub(crate) use resources::read_resource;
 pub(crate) use tools::{call_tool, call_tool_fastmcp};

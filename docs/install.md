@@ -162,7 +162,7 @@ If you wire a client by hand instead of running `tokenzero install`, the
 server entry the installer writes is:
 
 ```json
-{"mcpServers":{"tokenzero":{"type":"stdio","command":"__TOKENZERO_BIN__","args":["mcp-server","--allowed-root","__REPO__","--cache-path","__CACHE__","--supervise"],"env":{"TOKENZERO_ALLOWED_ROOTS":"__REPO__","TOKENZERO_CACHE_PATH":"__CACHE__","TOKENZERO_DEFAULT_MODE":"auto","TOKENZERO_MCP_TOOL_SURFACE":"__SURFACE__","TOKENZERO_MAX_OUTPUT_BYTES":"2000000","TOKENZERO_SHELL_TIMEOUT":"30","TOKENZERO_CACHE_BLOBS":"512","TOKENZERO_CACHE_UNITS":"8192","TOKENZERO_MCP_IDLE_TIMEOUT_SECS":"0"}}}}
+{"mcpServers":{"tokenzero":{"type":"stdio","command":"__TOKENZERO_BIN__","args":["mcp-server","--allowed-root","__REPO__","--cache-path","__CACHE__"],"env":{"TOKENZERO_ALLOWED_ROOTS":"__REPO__","TOKENZERO_CACHE_PATH":"__CACHE__","TOKENZERO_DEFAULT_MODE":"auto","TOKENZERO_MCP_TOOL_SURFACE":"__SURFACE__","TOKENZERO_MAX_OUTPUT_BYTES":"2000000","TOKENZERO_SHELL_TIMEOUT":"30","TOKENZERO_CACHE_BLOBS":"512","TOKENZERO_CACHE_UNITS":"8192","TOKENZERO_MCP_IDLE_TIMEOUT_SECS":"0"}}}}
 ```
 
 Substitute `__TOKENZERO_BIN__` (installed binary), `__REPO__` (allowed root), and `__CACHE__` (cache file path); set `__SURFACE__` to `classic`. The installer merge-patches only the `tokenzero` entry. Aggregate CodeMode registration belongs to ZeroStack, not this MCP config.

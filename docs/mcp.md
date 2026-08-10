@@ -71,11 +71,6 @@ The server is built to stay connected for the full life of an agent session:
 - **Liveness under load.** `tools/call` requests run on a worker pool, so
   `ping`, `initialize`, and list requests are answered immediately even while
   long shell commands are running.
-- **Crash-transparent supervision.** `tokenzero mcp-server --supervise`
-  (the default in generated client configs) keeps a tiny supervisor on the
-  client-facing pipes. If the inner server ever dies, the supervisor respawns
-  it with backoff, replays the `initialize` handshake, answers in-flight
-  requests with a retryable error, and the client never sees a disconnect.
 
 Generated client configs use strict workspace roots plus read-only agent-context roots for skill/instruction files.
 
@@ -134,9 +129,8 @@ without changing its bytes still dedups, and a changed hash always
 invalidates. The map lives in process memory and dies with the session, by
 design: a sidecar surviving restart would claim "served earlier this
 session" to a fresh session whose context never contained the bytes, and two
-agents sharing one repo would cross-contaminate. Supervisor respawn loses
-the map and degrades to full serves — never wrong, only un-optimized. A
-poisoned session lock fails open the same way.
+agents sharing one repo would cross-contaminate. A poisoned
+session lock fails open the same way.
 
 A re-read or re-search whose payload is byte-identical to one already served
 collapses to a two-line note instead of the full render:
