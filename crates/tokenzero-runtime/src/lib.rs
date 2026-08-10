@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::fs::{self, File};
-use std::io::{Read, Write};
+use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{ChildStdin, Command, Stdio};
 use std::sync::Arc;
@@ -13,15 +13,20 @@ use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use thiserror::Error;
 use tokenzero_core::shell_display_command_from_argv_for_platform;
-use wait_timeout::ChildExt;
+use zero_process::VerifiedChild;
 
-#[cfg(unix)]
-use std::os::unix::process::CommandExt;
-
-#[cfg(windows)]
-use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle, RawHandle};
-#[cfg(windows)]
-use std::os::windows::process::CommandExt;
+/// Zero-process owner-session binding for every TokenZero engine shell child.
+/// Every signal (timeout, IO grace, background teardown, raw-worker cancel)
+/// goes through the hub-owned `VerifiedChild` tree handle under this binding;
+/// no TokenZero code ever signals a numeric pid or process group.
+pub const PROCESS_OWNER_SESSION: &str = "tokenzero-engine";
+/// Worker generation for engine shell children. The engine never respawns a
+/// shell stem, so the binding generation is constant for the process.
+pub const PROCESS_GENERATION: u64 = 0;
+/// Bounded graceful window for shell tree teardown: SIGTERM to the exact
+/// owned group, the full window for graceful exit, then SIGKILL escalation
+/// and a group-gone proof.
+pub const SHELL_TEARDOWN_GRACE: Duration = Duration::from_millis(250);
 
 pub const DEFAULT_SHELL_CAPTURE_BYTES: usize = 4 * 1024 * 1024;
 pub const DEFAULT_SHELL_SPILL_BYTES: usize = 1024 * 1024;
@@ -303,6 +308,42 @@ where
     )
 }
 
+/// Like [`run_command_with_policy_observer`] but additionally hands the exact
+/// hub-owned tree handle to `on_child` at spawn, before any wait. Callers
+/// that must cancel the child later (raw-worker cancel, background job
+/// teardown) retain a `Clone` of the [`VerifiedChild`]; signaling goes
+/// through that handle under [`PROCESS_OWNER_SESSION`]/[`PROCESS_GENERATION`],
+/// never through a numeric pid or process group.
+#[allow(clippy::too_many_arguments)]
+pub fn run_command_with_policy_observer_with_child<F, H>(
+    argv: &[String],
+    cwd: Option<&Path>,
+    env_overrides: Option<&BTreeMap<String, String>>,
+    stdin: Option<&str>,
+    timeout: Duration,
+    explicit_shell: bool,
+    output_policy: RunOutputPolicy,
+    observer: F,
+    on_child: H,
+) -> Result<RunResult, RuntimeError>
+where
+    F: FnMut(Option<u32>, Option<u32>, &'static str),
+    H: FnOnce(&VerifiedChild),
+{
+    run_command_with_policy_observers_with_child(
+        argv,
+        cwd,
+        env_overrides,
+        stdin,
+        timeout,
+        explicit_shell,
+        output_policy,
+        observer,
+        |_, _| {},
+        on_child,
+    )
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn run_command_with_policy_observers<F, G>(
     argv: &[String],
@@ -312,12 +353,44 @@ pub fn run_command_with_policy_observers<F, G>(
     timeout: Duration,
     explicit_shell: bool,
     output_policy: RunOutputPolicy,
-    mut observer: F,
+    observer: F,
     stream_observer: G,
 ) -> Result<RunResult, RuntimeError>
 where
     F: FnMut(Option<u32>, Option<u32>, &'static str),
     G: Fn(&'static str, &[u8]) + Send + Sync + 'static,
+{
+    run_command_with_policy_observers_with_child(
+        argv,
+        cwd,
+        env_overrides,
+        stdin,
+        timeout,
+        explicit_shell,
+        output_policy,
+        observer,
+        stream_observer,
+        |_| {},
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn run_command_with_policy_observers_with_child<F, G, H>(
+    argv: &[String],
+    cwd: Option<&Path>,
+    env_overrides: Option<&BTreeMap<String, String>>,
+    stdin: Option<&str>,
+    timeout: Duration,
+    explicit_shell: bool,
+    output_policy: RunOutputPolicy,
+    mut observer: F,
+    stream_observer: G,
+    on_child: H,
+) -> Result<RunResult, RuntimeError>
+where
+    F: FnMut(Option<u32>, Option<u32>, &'static str),
+    G: Fn(&'static str, &[u8]) + Send + Sync + 'static,
+    H: FnOnce(&VerifiedChild),
 {
     let output_policy = output_policy.normalized();
     let plan = plan_command(argv, cwd, explicit_shell)?;
@@ -366,35 +439,46 @@ where
         Stdio::null()
     });
     command.stdout(Stdio::piped()).stderr(Stdio::piped());
-    configure_process_group(&mut command);
-    let mut child = command.spawn()?;
-    let process_group = ProcessGroup::for_child(&child);
-    let stdout = match required_child_pipe(child.stdout.take(), "stdout") {
+    // Hub-owned tree spawn: Unix isolates the child in its own process group
+    // at exec; Windows assigns it to a kill-on-close job before it runs. The
+    // exact tree handle is the only teardown authority from here on.
+    let (verified, pipes) = VerifiedChild::spawn_tree_with_pipes(
+        command,
+        PROCESS_OWNER_SESSION,
+        PROCESS_GENERATION,
+    )
+    .map_err(RuntimeError::Io)?;
+    let stdout = match required_child_pipe(pipes.stdout, "stdout") {
         Ok(stdout) => stdout,
         Err(error) => {
-            terminate_child_after_setup_error(&mut child, &process_group);
+            terminate_child_after_setup_error(&verified);
             return Err(error);
         }
     };
-    let stderr = match required_child_pipe(child.stderr.take(), "stderr") {
+    let stderr = match required_child_pipe(pipes.stderr, "stderr") {
         Ok(stderr) => stderr,
         Err(error) => {
-            terminate_child_after_setup_error(&mut child, &process_group);
+            terminate_child_after_setup_error(&verified);
             return Err(error);
         }
     };
     let child_stdin = if stdin.is_some() {
-        match required_child_pipe(child.stdin.take(), "stdin") {
+        match required_child_pipe(pipes.stdin, "stdin") {
             Ok(stdin) => Some(stdin),
             Err(error) => {
-                terminate_child_after_setup_error(&mut child, &process_group);
+                terminate_child_after_setup_error(&verified);
                 return Err(error);
             }
         }
     } else {
         None
     };
-    observer(Some(child.id()), process_group.pgid(), "running");
+    on_child(&verified);
+    observer(
+        Some(verified.child_id()),
+        verified_tree_pgid(&verified),
+        "running",
+    );
     let stdout_policy = output_policy.clone();
     let stderr_policy = output_policy.clone();
     let stream_observer = Arc::new(stream_observer);
@@ -413,13 +497,60 @@ where
     // Stdin writes can block; keep them off the wait_timeout path.
     let stdin_writer = spawn_stdin_writer(stdin, child_stdin);
     let mut force_timed_out = false;
-    let status = match child.wait_timeout(timeout)? {
-        Some(status) => status,
-        None => {
+    let mut settlement_error = None;
+    let wait_deadline = deadline_from(Instant::now(), timeout);
+    let status = loop {
+        if let Some(status) = verified.terminal_status() {
+            break Some(status);
+        }
+        let now = Instant::now();
+        if now >= wait_deadline {
             force_timed_out = true;
-            process_group.terminate();
-            let _ = child.kill();
-            child.wait()?
+            if let Err(error) = signal_tree(&verified) {
+                if verified.terminal_status().is_none() {
+                    settlement_error = Some(RuntimeError::Io(error));
+                    break None;
+                }
+            }
+            if let Err(error) = verified.revoke() {
+                if verified.terminal_status().is_none() {
+                    settlement_error = Some(RuntimeError::Io(identity_error_io(error)));
+                    break None;
+                }
+            }
+            match verified.terminal_status() {
+                Some(status) => break Some(status),
+                None => {
+                    settlement_error = Some(RuntimeError::Io(identity_error_io(
+                        zero_process::IdentityError::Missing,
+                    )));
+                    break None;
+                }
+            }
+        }
+        let poll = wait_deadline
+            .saturating_duration_since(now)
+            .min(Duration::from_millis(25));
+        if !verified.wait_for_exit(poll) {
+            continue;
+        }
+        if let Some(status) = verified.terminal_status() {
+            break Some(status);
+        }
+        match verified.wait(
+            PROCESS_OWNER_SESSION,
+            PROCESS_GENERATION,
+            Duration::ZERO,
+            SHELL_TEARDOWN_GRACE,
+        ) {
+            Ok(status) => break Some(status),
+            Err(error) => {
+                if let Some(status) = verified.terminal_status() {
+                    break Some(status);
+                }
+                settlement_error = Some(RuntimeError::Io(identity_error_io(error)));
+                break None;
+            }
         }
     };
     let process_io = collect_process_io(
@@ -429,9 +560,15 @@ where
         force_timed_out,
         start,
         timeout,
-        process_group,
+        &verified,
         !force_timed_out,
     )?;
+    if let Some(error) = settlement_error {
+        return Err(error);
+    }
+    let status = status.ok_or_else(|| {
+        RuntimeError::Io(identity_error_io(zero_process::IdentityError::Missing))
+    })?;
     let timed_out = force_timed_out || process_io.timed_out;
     observer(
         None,
@@ -541,10 +678,43 @@ fn required_child_pipe<T>(pipe: Option<T>, name: &'static str) -> Result<T, Runt
     pipe.ok_or(RuntimeError::MissingPipe(name))
 }
 
-fn terminate_child_after_setup_error(child: &mut std::process::Child, group: &ProcessGroup) {
-    group.terminate();
-    let _ = child.kill();
-    let _ = child.wait();
+fn terminate_child_after_setup_error(verified: &VerifiedChild) {
+    let _ = signal_tree(verified);
+    let _ = verified.revoke();
+}
+
+/// Bounded graceful teardown of the exact owned shell tree. After this
+/// returns, the root is reaped and the group is proven gone.
+fn signal_tree(verified: &VerifiedChild) -> io::Result<zero_process::SignalOutcome> {
+    verified
+        .signal_graceful_for(
+            PROCESS_OWNER_SESSION,
+            PROCESS_GENERATION,
+            SHELL_TEARDOWN_GRACE,
+        )
+        .map_err(identity_error_io)
+}
+
+fn identity_error_io(error: zero_process::IdentityError) -> io::Error {
+    match error {
+        zero_process::IdentityError::Io(error) => error,
+        other => io::Error::other(other.to_string()),
+    }
+}
+
+/// Evidence-only process group id of the spawned tree: on Unix the
+/// hub-owned spawn places the root in its own process group, so the group id
+/// equals the root pid. Observers receive this value for accounting and
+/// evidence; no TokenZero code ever signals it.
+fn verified_tree_pgid(verified: &VerifiedChild) -> Option<u32> {
+    #[cfg(unix)]
+    {
+        Some(verified.child_id())
+    }
+    #[cfg(not(unix))]
+    {
+        None
+    }
 }
 
 fn spawn_stdin_writer(input: Option<&str>, stdin: Option<ChildStdin>) -> Option<IoWorker<()>> {
@@ -562,7 +732,7 @@ fn collect_process_io(
     tolerate_write_error: bool,
     start: Instant,
     timeout: Duration,
-    group: ProcessGroup,
+    verified: &VerifiedChild,
     child_exited: bool,
 ) -> Result<ProcessIo, RuntimeError> {
     let deadline = if child_exited {
@@ -577,9 +747,10 @@ fn collect_process_io(
     let timed_out = incomplete && !child_exited;
     let io_grace_expired = incomplete && child_exited;
     if incomplete {
-        // Unix: process-group kill closes inherited fds. Non-Unix: job terminate
-        // kills the tree so pipe writers release and blocked readers can finish.
-        group.terminate();
+        // Bounded re-signal of the exact owned tree (already swept by the
+        // wait/teardown above, so this is purely defensive): it closes
+        // inherited pipe writers so blocked readers can finish.
+        let _ = signal_tree(verified);
         let cleanup = deadline_from(Instant::now(), PROCESS_IO_SHUTDOWN_GRACE);
         stdin_result = stdin_result.or(poll_stdin(stdin.as_mut(), cleanup)?);
         stdout_result = stdout_result.or(poll_worker(&mut stdout, cleanup)?);
@@ -587,9 +758,9 @@ fn collect_process_io(
     }
     // Never return while leaving live reader JoinHandles detached: if cleanup
     // still left a worker blocked, terminate again and join with a final grace.
-    stdin_result = ensure_worker_joined(stdin.as_mut(), stdin_result, &group)?;
-    stdout_result = ensure_worker_joined(Some(&mut stdout), stdout_result, &group)?;
-    stderr_result = ensure_worker_joined(Some(&mut stderr), stderr_result, &group)?;
+    stdin_result = ensure_worker_joined(stdin.as_mut(), stdin_result, verified)?;
+    stdout_result = ensure_worker_joined(Some(&mut stdout), stdout_result, verified)?;
+    stderr_result = ensure_worker_joined(Some(&mut stderr), stderr_result, verified)?;
     let stdin_result = stdin_result.ok_or_else(|| worker_timeout("shell stdin writer"))?;
     if !tolerate_write_error && !timed_out && !io_grace_expired {
         stdin_result?;
@@ -607,7 +778,7 @@ fn collect_process_io(
 fn ensure_worker_joined<T>(
     worker: Option<&mut IoWorker<T>>,
     result: Option<std::io::Result<T>>,
-    group: &ProcessGroup,
+    verified: &VerifiedChild,
 ) -> Result<Option<std::io::Result<T>>, RuntimeError> {
     if result.is_some() {
         return Ok(result);
@@ -615,7 +786,7 @@ fn ensure_worker_joined<T>(
     let Some(worker) = worker else {
         return Ok(None);
     };
-    group.terminate();
+    let _ = signal_tree(verified);
     let final_grace = deadline_from(Instant::now(), PROCESS_IO_JOIN_GRACE);
     let recovered = poll_worker(worker, final_grace)?;
     if recovered.is_some() {
@@ -692,225 +863,6 @@ fn worker_timeout(name: &str) -> RuntimeError {
         std::io::ErrorKind::TimedOut,
         format!("{name} did not close after process timeout cleanup"),
     ))
-}
-
-struct ProcessGroup {
-    #[cfg(unix)]
-    pgid: Option<u32>,
-    #[cfg(windows)]
-    job: Option<windows_job::Job>,
-    #[cfg(not(any(unix, windows)))]
-    _unused: (),
-}
-
-impl ProcessGroup {
-    fn pgid(&self) -> Option<u32> {
-        #[cfg(unix)]
-        {
-            self.pgid
-        }
-        #[cfg(not(unix))]
-        {
-            None
-        }
-    }
-
-    #[cfg(unix)]
-    fn for_child(child: &std::process::Child) -> Self {
-        Self {
-            pgid: Some(child.id()),
-        }
-    }
-
-    #[cfg(windows)]
-    fn for_child(child: &std::process::Child) -> Self {
-        Self {
-            job: windows_job::Job::attach_child(child),
-        }
-    }
-
-    #[cfg(not(any(unix, windows)))]
-    fn for_child(_: &std::process::Child) -> Self {
-        Self { _unused: () }
-    }
-
-    fn terminate(&self) {
-        #[cfg(unix)]
-        if let Some(pgid) = self.pgid {
-            terminate_unix_process_group(pgid);
-        }
-        #[cfg(windows)]
-        if let Some(job) = self.job.as_ref() {
-            job.terminate();
-        }
-    }
-}
-
-#[cfg(unix)]
-fn configure_process_group(command: &mut Command) {
-    command.process_group(0);
-}
-
-#[cfg(windows)]
-fn configure_process_group(command: &mut Command) {
-    // Allow assigning the child into our job even when the parent already lives
-    // inside a job (common under CI / shells). CREATE_SUSPENDED is not required
-    // when AssignProcessToJobObject succeeds on a running process.
-    const CREATE_BREAKAWAY_FROM_JOB: u32 = 0x0100_0000;
-    command.creation_flags(CREATE_BREAKAWAY_FROM_JOB);
-}
-
-#[cfg(not(any(unix, windows)))]
-fn configure_process_group(_: &mut Command) {}
-
-#[cfg(unix)]
-fn terminate_unix_process_group(pgid: u32) {
-    if pgid == 0 {
-        return;
-    }
-    let target = format!("-{pgid}");
-    for signal in ["-TERM", "-KILL"] {
-        let _ = Command::new("kill")
-            .args([signal, "--", &target])
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status();
-        if signal == "-TERM" {
-            thread::sleep(Duration::from_millis(50));
-        }
-    }
-}
-
-/// Windows job-object containment so terminate() can kill descendants that still
-/// hold inherited stdout/stderr write ends (unblocking our pipe readers).
-#[cfg(windows)]
-#[allow(
-    unsafe_code,
-    reason = "Windows Job Object APIs are not exposed safely in std"
-)]
-mod windows_job {
-    use super::*;
-    use std::ffi::c_void;
-    use std::ptr;
-
-    type HANDLE = *mut c_void;
-    type BOOL = i32;
-    type DWORD = u32;
-
-    const JobObjectExtendedLimitInformation: u32 = 9;
-
-    #[repr(C)]
-    struct JOBOBJECT_BASIC_LIMIT_INFORMATION {
-        per_process_user_time_limit: i64,
-        per_job_user_time_limit: i64,
-        limit_flags: DWORD,
-        minimum_working_set_size: usize,
-        maximum_working_set_size: usize,
-        active_process_limit: DWORD,
-        affinity: usize,
-        priority_class: DWORD,
-        scheduling_class: DWORD,
-    }
-
-    #[repr(C)]
-    struct IO_COUNTERS {
-        read_operation_count: u64,
-        write_operation_count: u64,
-        other_operation_count: u64,
-        read_transfer_count: u64,
-        write_transfer_count: u64,
-        other_transfer_count: u64,
-    }
-
-    #[repr(C)]
-    struct JOBOBJECT_EXTENDED_LIMIT_INFORMATION {
-        basic_limit_information: JOBOBJECT_BASIC_LIMIT_INFORMATION,
-        io_info: IO_COUNTERS,
-        process_memory_limit: usize,
-        job_memory_limit: usize,
-        peak_process_memory_used: usize,
-        peak_job_memory_used: usize,
-    }
-
-    #[link(name = "kernel32")]
-    unsafe extern "system" {
-        fn CreateJobObjectW(attrs: *mut c_void, name: *const u16) -> HANDLE;
-        fn SetInformationJobObject(
-            job: HANDLE,
-            info_class: u32,
-            info: *mut c_void,
-            info_len: DWORD,
-        ) -> BOOL;
-        fn AssignProcessToJobObject(job: HANDLE, process: HANDLE) -> BOOL;
-        fn TerminateJobObject(job: HANDLE, exit_code: DWORD) -> BOOL;
-    }
-
-    pub struct Job {
-        handle: OwnedHandle,
-    }
-
-    impl Job {
-        pub fn attach_child(child: &std::process::Child) -> Option<Self> {
-            unsafe {
-                let raw = CreateJobObjectW(ptr::null_mut(), ptr::null());
-                if raw.is_null() {
-                    return None;
-                }
-                let handle = OwnedHandle::from_raw_handle(raw as RawHandle);
-                let mut info = JOBOBJECT_EXTENDED_LIMIT_INFORMATION {
-                    basic_limit_information: JOBOBJECT_BASIC_LIMIT_INFORMATION {
-                        per_process_user_time_limit: 0,
-                        per_job_user_time_limit: 0,
-                        // No KILL_ON_JOB_CLOSE: successful captures must not reap
-                        // intentional background descendants when the job handle drops.
-                        // terminate() uses TerminateJobObject explicitly on cleanup paths.
-                        limit_flags: 0,
-                        minimum_working_set_size: 0,
-                        maximum_working_set_size: 0,
-                        active_process_limit: 0,
-                        affinity: 0,
-                        priority_class: 0,
-                        scheduling_class: 0,
-                    },
-                    io_info: IO_COUNTERS {
-                        read_operation_count: 0,
-                        write_operation_count: 0,
-                        other_operation_count: 0,
-                        read_transfer_count: 0,
-                        write_transfer_count: 0,
-                        other_transfer_count: 0,
-                    },
-                    process_memory_limit: 0,
-                    job_memory_limit: 0,
-                    peak_process_memory_used: 0,
-                    peak_job_memory_used: 0,
-                };
-                if SetInformationJobObject(
-                    handle.as_raw_handle() as HANDLE,
-                    JobObjectExtendedLimitInformation,
-                    &mut info as *mut _ as *mut c_void,
-                    std::mem::size_of_val(&info) as DWORD,
-                ) == 0
-                {
-                    return None;
-                }
-                if AssignProcessToJobObject(
-                    handle.as_raw_handle() as HANDLE,
-                    child.as_raw_handle() as HANDLE,
-                ) == 0
-                {
-                    return None;
-                }
-                Some(Self { handle })
-            }
-        }
-
-        pub fn terminate(&self) {
-            unsafe {
-                let _ = TerminateJobObject(self.handle.as_raw_handle() as HANDLE, 1);
-            }
-        }
-    }
 }
 
 fn lowercase_hex(bytes: &[u8]) -> String {

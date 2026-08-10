@@ -2850,6 +2850,7 @@ dependencies = [
  "tokenzero-runtime",
  "zero-abi",
  "zero-ledger",
+ "zero-process",
  "zero-store",
 ]
 
@@ -2947,7 +2948,7 @@ dependencies = [
  "tempfile",
  "thiserror",
  "tokenzero-core",
- "wait-timeout",
+ "zero-process",
 ]
 
 [[package]]

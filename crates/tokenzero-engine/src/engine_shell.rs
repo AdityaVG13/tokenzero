@@ -1,11 +1,17 @@
 use super::*;
+use std::cell::RefCell;
 use std::fs::OpenOptions;
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar};
 use std::thread;
 use std::time::Instant;
-use tokenzero_runtime::{run_command_with_policy_observer, run_command_with_policy_observers};
+use tokenzero_runtime::{
+    PROCESS_GENERATION, PROCESS_OWNER_SESSION, SHELL_TEARDOWN_GRACE,
+    run_command_with_policy_observer, run_command_with_policy_observer_with_child,
+    run_command_with_policy_observers_with_child,
+};
+use zero_process::VerifiedChild;
 
 #[cfg(test)]
 mod rewrite_execution_tests {
@@ -53,13 +59,64 @@ mod rewrite_execution_tests {
         assert!(!rewrite.safe);
         assert!(rewrite.reason.contains("unsafe destructive mutation"));
     }
+
+    #[test]
+    fn dispatch_child_bridge_is_thread_local_and_scope_cleared() {
+        let barrier = Arc::new(std::sync::Barrier::new(2));
+        let ids = Arc::new(Mutex::new(Vec::new()));
+        let threads = (0..2)
+            .map(|_| {
+                let barrier = Arc::clone(&barrier);
+                let ids = Arc::clone(&ids);
+                std::thread::spawn(move || {
+                    let child = std::process::Command::new(std::env::current_exe().unwrap())
+                        .arg("--list")
+                        .stdin(std::process::Stdio::null())
+                        .stdout(std::process::Stdio::null())
+                        .stderr(std::process::Stdio::null())
+                        .spawn()
+                        .unwrap();
+                    let verified = VerifiedChild::capture(
+                        child,
+                        PROCESS_OWNER_SESSION,
+                        PROCESS_GENERATION,
+                    );
+                    let child_id = verified.child_id();
+                    let scope = dispatch_child_scope();
+                    publish_dispatch_child(&verified);
+                    barrier.wait();
+                    assert_eq!(dispatch_child().map(|child| child.child_id()), Some(child_id));
+                    ids.lock().unwrap().push(child_id);
+                    barrier.wait();
+                    drop(scope);
+                    assert!(dispatch_child().is_none());
+                    let status = verified
+                        .wait(
+                            PROCESS_OWNER_SESSION,
+                            PROCESS_GENERATION,
+                            Duration::from_secs(5),
+                            SHELL_TEARDOWN_GRACE,
+                        )
+                        .unwrap();
+                    assert!(status.success());
+                })
+            })
+            .collect::<Vec<_>>();
+        for thread in threads {
+            thread.join().unwrap();
+        }
+        let ids = ids.lock().unwrap();
+        assert_eq!(ids.len(), 2);
+        assert_ne!(ids[0], ids[1]);
+    }
 }
 
-#[derive(Debug)]
 struct BackgroundJobState {
     status: &'static str,
+    /// Evidence-only root pid for the job JSON surface; never signaled.
     pid: Option<u32>,
-    pgid: Option<u32>,
+    /// Hub-owned exact tree handle; the only teardown authority for this job.
+    child: Option<VerifiedChild>,
     exit_code: Option<i32>,
     version: u64,
     completed_at: Option<Instant>,
@@ -143,7 +200,6 @@ struct PollInterleave {
     publication_done: std::sync::Barrier,
 }
 
-#[derive(Debug)]
 struct BackgroundJob {
     id: String,
     sequence: u64,
@@ -165,7 +221,7 @@ fn background_job_is_expired(job: &BackgroundJob, now: Instant) -> bool {
         .is_some_and(|completed| now.saturating_duration_since(completed) >= COMPLETED_JOB_TTL)
 }
 
-#[derive(Debug, Default)]
+#[derive(Default)]
 pub(crate) struct BackgroundJobRegistry {
     next_id: AtomicU64,
     terminating: AtomicBool,
@@ -176,6 +232,41 @@ static BACKGROUND_JOBS: OnceLock<BackgroundJobRegistry> = OnceLock::new();
 
 fn background_jobs() -> &'static BackgroundJobRegistry {
     BACKGROUND_JOBS.get_or_init(BackgroundJobRegistry::default)
+}
+
+// One in-flight foreground dispatch child (shell or rg) on this execution
+// thread. Publication and the evidence callback run on the same thread; the
+// callback copies the exact handle into the request-local cancel state before
+// cancellation can run on the serve thread. Thread-local storage prevents
+// unrelated concurrent engine calls from replacing this short-lived bridge.
+thread_local! {
+    static DISPATCH_CHILD: RefCell<Option<VerifiedChild>> = const { RefCell::new(None) };
+}
+
+pub(crate) struct DispatchChildScope;
+
+impl Drop for DispatchChildScope {
+    fn drop(&mut self) {
+        clear_dispatch_child();
+    }
+}
+pub(crate) fn dispatch_child_scope() -> DispatchChildScope {
+    DispatchChildScope
+}
+
+/// Publish the exact tree handle of the current foreground dispatch child.
+pub(crate) fn publish_dispatch_child(child: &VerifiedChild) {
+    DISPATCH_CHILD.with(|slot| slot.replace(Some(child.clone())));
+}
+
+/// Clone of the current foreground dispatch child handle, if any.
+pub(crate) fn dispatch_child() -> Option<VerifiedChild> {
+    DISPATCH_CHILD.with(|slot| slot.borrow().clone())
+}
+
+/// Clear the published handle once the foreground dispatch call completed.
+pub(crate) fn clear_dispatch_child() {
+    DISPATCH_CHILD.with(|slot| slot.replace(None));
 }
 
 fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
@@ -500,7 +591,7 @@ impl BackgroundJobRegistry {
             state: Mutex::new(BackgroundJobState {
                 status: "running",
                 pid: None,
-                pgid: None,
+                child: None,
                 exit_code: None,
                 version: 0,
                 completed_at: None,
@@ -532,10 +623,11 @@ impl BackgroundJobRegistry {
             .name(format!("tokenzero-{id}"))
             .spawn(move || {
                 let observed = Arc::clone(&job);
+                let observed_handle = Arc::clone(&job);
                 let stream_job = Arc::clone(&job);
                 let stream_log = Arc::clone(&live_log);
                 let completion_log = Arc::clone(&live_log);
-                let result = run_command_with_policy_observers(
+                let result = run_command_with_policy_observers_with_child(
                     &argv,
                     cwd.as_deref(),
                     Some(&env),
@@ -546,19 +638,12 @@ impl BackgroundJobRegistry {
                         spill_dir: Some(log_dir),
                         ..RunOutputPolicy::default()
                     },
-                    move |pid, pgid, state| {
+                    move |pid, _pgid, state| {
                         if state == "running" {
                             let mut current = lock(&observed.state);
                             current.pid = pid;
-                            current.pgid = pgid;
-                            let terminate_requested = current.terminate_requested;
                             drop(current);
-                            crate::shell_hooks::note_background_child(&observed.id, pid, pgid);
-                            if terminate_requested {
-                                if let Some(group) = pgid {
-                                    terminate_background_groups(&[group]);
-                                }
-                            }
+                            crate::shell_hooks::note_background_child(&observed.id, pid, None);
                         }
                     },
                     move |_, chunk| {
@@ -567,18 +652,27 @@ impl BackgroundJobRegistry {
                             log.write_all(chunk).and_then(|()| log.flush()).err()
                         };
                         let mut current = lock(&stream_job.state);
-                        let failed_group = write_error.as_ref().and_then(|error| {
+                        let failed_child = write_error.as_ref().and_then(|error| {
                             current
                                 .log_error
                                 .get_or_insert_with(|| format!("write background log: {error}"));
-                            current.pgid
+                            current.child.clone()
                         });
                         current.version = current.version.saturating_add(1);
                         drop(current);
-                        if let Some(group) = failed_group {
-                            terminate_background_groups(&[group]);
+                        if let Some(child) = failed_child {
+                            terminate_background_child(&child);
                         }
                         stream_job.changed.notify_all();
+                    },
+                    move |child| {
+                        let mut current = lock(&observed_handle.state);
+                        current.child = Some(child.clone());
+                        let terminate_requested = current.terminate_requested;
+                        drop(current);
+                        if terminate_requested {
+                            terminate_background_child(child);
+                        }
                     },
                 );
                 let (failure_text, exit_code, status) = match result {
@@ -712,7 +806,7 @@ impl BackgroundJobRegistry {
 
     fn terminate_all(&self) {
         self.terminating.store(true, Ordering::SeqCst);
-        let groups = {
+        let children = {
             let jobs = lock(&self.jobs);
             jobs.values()
                 .filter_map(|job| {
@@ -721,11 +815,13 @@ impl BackgroundJobRegistry {
                         return None;
                     }
                     state.terminate_requested = true;
-                    state.pgid
+                    state.child.clone()
                 })
                 .collect::<Vec<_>>()
         };
-        terminate_background_groups(&groups);
+        for child in &children {
+            terminate_background_child(child);
+        }
     }
 }
 
@@ -750,35 +846,19 @@ impl Drop for BackgroundJobRegistry {
     }
 }
 
-#[cfg(unix)]
-fn terminate_background_groups(groups: &[u32]) {
-    let targets = groups
-        .iter()
-        .copied()
-        .filter(|group| *group != 0)
-        .map(|group| format!("-{group}"))
-        .collect::<Vec<_>>();
-    for target in &targets {
-        let _ = std::process::Command::new("kill")
-            .args(["-TERM", "--", target])
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .status();
-    }
-    if !targets.is_empty() {
-        thread::sleep(Duration::from_millis(50));
-    }
-    for target in &targets {
-        let _ = std::process::Command::new("kill")
-            .args(["-KILL", "--", target])
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .status();
-    }
+/// Bounded graceful teardown of one background job's exact owned tree:
+/// SIGTERM, the bounded grace window, then SIGKILL escalation and a
+/// group-gone proof, all through the hub-owned `VerifiedChild` handle.
+/// Errors are best-effort (the run thread may already have settled the same
+/// tree on its timeout path).
+fn terminate_background_child(child: &VerifiedChild) {
+    let _ = child.signal_graceful_for(
+        PROCESS_OWNER_SESSION,
+        PROCESS_GENERATION,
+        SHELL_TEARDOWN_GRACE,
+    );
+    let _ = child.revoke();
 }
-
-#[cfg(not(unix))]
-fn terminate_background_groups(_: &[u32]) {}
 
 impl TokenZeroEngine {
     /// Resolve shell cwd: explicit wins; otherwise default to `call_root` (plan/server
@@ -888,7 +968,8 @@ impl TokenZeroEngine {
             .entry("TOKENZERO_INNER".to_string())
             .or_insert_with(|| "1".to_string());
         let output_policy = self.shell_output_policy();
-        let result = match run_command_with_policy_observer(
+        let _dispatch_child_scope = dispatch_child_scope();
+        let result = match run_command_with_policy_observer_with_child(
             &run_argv,
             Some(cwd),
             Some(&child_env),
@@ -897,9 +978,11 @@ impl TokenZeroEngine {
             false,
             output_policy,
             crate::shell_hooks::note_child,
+            publish_dispatch_child,
         ) {
             Ok(result) => result,
             Err(err) => {
+                clear_dispatch_child();
                 crate::shell_hooks::note_child(None, None, "spawn_failed");
                 return ToolResponse::error(
                     "shell",
@@ -909,6 +992,7 @@ impl TokenZeroEngine {
                 );
             }
         };
+        clear_dispatch_child();
         let stdout_display = captured_stream_text(&result.stdout, &result.stdout_capture, "stdout");
         let stderr_display = captured_stream_text(&result.stderr, &result.stderr_capture, "stderr");
         let streams_truncated = result.stdout_capture.truncated || result.stderr_capture.truncated;
@@ -1234,7 +1318,7 @@ mod job_tail_tests {
             state: Mutex::new(BackgroundJobState {
                 status: "running",
                 pid: None,
-                pgid: None,
+                child: None,
                 exit_code: None,
                 version: 0,
                 completed_at: None,
@@ -1499,7 +1583,7 @@ mod accumulator_bounds {
             state: Mutex::new(BackgroundJobState {
                 status,
                 pid: None,
-                pgid: None,
+                child: None,
                 exit_code: None,
                 version: u64::from(status != "running"),
                 completed_at: (status != "running").then(Instant::now),

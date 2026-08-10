@@ -51,6 +51,7 @@ zero-abi = { git = "https://github.com/AdityaVG13/zerostack", rev = "fa253840910
 zero-gauge = { git = "https://github.com/AdityaVG13/zerostack", rev = "fa253840910ab4051635e2de95f04ddf6043a000" }
 zero-ledger = { git = "https://github.com/AdityaVG13/zerostack", rev = "fa253840910ab4051635e2de95f04ddf6043a000" }
 zero-ref = { git = "https://github.com/AdityaVG13/zerostack", rev = "fa253840910ab4051635e2de95f04ddf6043a000" }
+zero-process = { git = "https://github.com/AdityaVG13/zerostack", rev = "fa253840910ab4051635e2de95f04ddf6043a000" }
 zero-store = { git = "https://github.com/AdityaVG13/zerostack", rev = "fa253840910ab4051635e2de95f04ddf6043a000" }
 zero-codemode = { git = "https://github.com/AdityaVG13/zerostack", rev = "fa253840910ab4051635e2de95f04ddf6043a000", features = ["fastmcp"] }
 

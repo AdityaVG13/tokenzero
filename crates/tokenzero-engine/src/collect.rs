@@ -463,6 +463,21 @@ pub fn find_rg_in_path() -> Option<PathBuf> {
         .map(|resolved| resolved.path)
 }
 
+/// Poll interval for the unbounded rg exit wait.
+const RG_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(250);
+/// Bounded final wait for the tree sweep after the root exited.
+const RG_FINAL_WAIT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
+fn spawn_rg_output_reader(
+    mut reader: impl std::io::Read + Send + 'static,
+) -> std::thread::JoinHandle<std::io::Result<Vec<u8>>> {
+    std::thread::spawn(move || {
+        let mut bytes = Vec::new();
+        reader.read_to_end(&mut bytes)?;
+        Ok(bytes)
+    })
+}
+
 /// Run ripgrep per root and map its `path:line:text` output onto the same
 /// `SearchMatch` rows the internal scanner produces. `find` keeps substring
 /// semantics via `--fixed-strings`; `grep` passes the pattern as a regex.
@@ -509,20 +524,89 @@ pub(crate) fn rg_search(
         if tool == "find" {
             command.arg("--fixed-strings");
         }
-        let child = command
+        command
             .arg("--")
             .arg(query)
             .arg(root)
             .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
-            .spawn()
-            .map_err(|err| RgFailure::Unavailable(format!("rg spawn failed: {err}")))?;
+            .stderr(std::process::Stdio::piped());
+        // Hub-owned spawn: rg runs single-threaded with no subprocess tree of
+        // its own, but cancellation still signals through the exact owned
+        // handle under the TokenZero engine binding — never a numeric pid.
+        let _dispatch_child_scope = crate::engine_shell::dispatch_child_scope();
+        let (verified, pipes) = zero_process::VerifiedChild::spawn_tree_with_pipes(
+            command,
+            tokenzero_runtime::PROCESS_OWNER_SESSION,
+            tokenzero_runtime::PROCESS_GENERATION,
+        )
+        .map_err(|err| RgFailure::Unavailable(format!("rg spawn failed: {err}")))?;
+        crate::engine_shell::publish_dispatch_child(&verified);
         // Register the child so raw-worker v2 cancellation can stop a long
-        // search; rg runs single-threaded with no subprocess tree of its own.
-        crate::shell_hooks::note_child(Some(child.id()), None, "running");
-        let output = child
-            .wait_with_output()
-            .map_err(|err| RgFailure::Unavailable(format!("rg wait failed: {err}")))?;
+        // search (pid is observation evidence only).
+        crate::shell_hooks::note_child(Some(verified.child_id()), None, "running");
+        let stdout_reader = spawn_rg_output_reader(
+            pipes
+                .stdout
+                .expect("rg stdout pipe configured above"),
+        );
+        let stderr_reader = spawn_rg_output_reader(
+            pipes
+                .stderr
+                .expect("rg stderr pipe configured above"),
+        );
+        // Mirror wait_with_output: unbounded run, bounded teardown. Cancel and
+        // session death signal the owned handle, so the wait ends inside the
+        // declared bound.
+        loop {
+            if verified.wait_for_exit(RG_POLL_INTERVAL) {
+                break;
+            }
+        }
+        let status = if let Some(status) = verified.terminal_status() {
+            Ok(status)
+        } else {
+            verified
+                .wait(
+                    tokenzero_runtime::PROCESS_OWNER_SESSION,
+                    tokenzero_runtime::PROCESS_GENERATION,
+                    RG_FINAL_WAIT_TIMEOUT,
+                    tokenzero_runtime::SHELL_TEARDOWN_GRACE,
+                )
+                .map_err(|error| {
+                    RgFailure::Unavailable(format!("rg teardown failed: {error}"))
+                })
+        };
+        if status.is_err() {
+            let _ = verified.signal_graceful_for(
+                tokenzero_runtime::PROCESS_OWNER_SESSION,
+                tokenzero_runtime::PROCESS_GENERATION,
+                tokenzero_runtime::SHELL_TEARDOWN_GRACE,
+            );
+            let _ = verified.revoke();
+        }
+        // Join both readers before surfacing either reader or teardown error.
+        // This prevents one failed join from detaching the other pipe reader.
+        let stdout = stdout_reader
+            .join()
+            .map_err(|_| RgFailure::Unavailable("rg stdout reader panicked".to_string()))
+            .and_then(|result| {
+                result.map_err(|err| RgFailure::Unavailable(format!("rg stdout read failed: {err}")))
+            });
+        let stderr = stderr_reader
+            .join()
+            .map_err(|_| RgFailure::Unavailable("rg stderr reader panicked".to_string()))
+            .and_then(|result| {
+                result.map_err(|err| RgFailure::Unavailable(format!("rg stderr read failed: {err}")))
+            });
+        crate::engine_shell::clear_dispatch_child();
+        let status = status?;
+        let stdout = stdout?;
+        let stderr = stderr?;
+        let output = std::process::Output {
+            status,
+            stdout,
+            stderr,
+        };
         match output.status.code() {
             Some(0) => {}
             // Exit code 1 is rg's "searched fine, found nothing".

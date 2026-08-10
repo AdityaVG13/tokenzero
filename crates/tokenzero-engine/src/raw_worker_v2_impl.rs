@@ -5,6 +5,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use tokenzero_core::{Accounting, TokenizerFamily, active_tokenizer_metadata};
+use zero_process::VerifiedChild;
 
 /// Advertised and enforced raw-worker v2 output cap (9lwo): the serialized
 /// `result.value` of any call must fit within this many bytes. One constant
@@ -12,7 +13,7 @@ use tokenzero_core::{Accounting, TokenizerFamily, active_tokenizer_metadata};
 /// so the two cannot drift.
 pub(crate) const MAX_OUTPUT_BYTES: usize = 65_536;
 
-#[derive(Debug, Default)]
+#[derive(Default)]
 pub struct RawWorkerV2Session {
     binding: Option<Binding>,
     shutdown: bool,
@@ -42,50 +43,35 @@ impl RawWorkerV2Session {
 }
 
 /// Cancellation state for one in-flight v2 call. The cancel control frame
-/// sets `flag` and kills the recorded child; the worker thread observes the
-/// flag after dispatch returns.
-#[derive(Debug, Default)]
+/// sets `flag` and signals the exact hub-owned tree handle; the worker
+/// thread observes the flag after dispatch returns.
+#[derive(Default)]
 struct CancelState {
     flag: Arc<AtomicBool>,
-    process: Mutex<ChildProcess>,
-}
-
-#[derive(Debug, Default, Clone, Copy)]
-struct ChildProcess {
-    pid: Option<u32>,
-    pgid: Option<u32>,
+    child: Mutex<Option<VerifiedChild>>,
 }
 
 /// The cancel state of the call currently executing on the serve worker
 /// thread (at most one: `max_in_flight` is 1).
 static ACTIVE_CANCEL: Mutex<Option<Arc<CancelState>>> = Mutex::new(None);
 
-#[cfg(unix)]
-fn kill_process_tree(pid: Option<u32>, pgid: Option<u32>) {
-    // `--` before the target is load-bearing: without it a negative process
-    // group id is misparsed as a signal/option and the kill silently no-ops.
-    if let Some(group) = pgid {
-        let _ = std::process::Command::new("kill")
-            .args(["-KILL", "--", &format!("-{group}")])
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .status();
-    } else if let Some(pid) = pid {
-        let _ = std::process::Command::new("kill")
-            .args(["-KILL", "--", &pid.to_string()])
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .status();
-    }
+/// Bounded teardown of the exact owned tree under the TokenZero engine
+/// binding. Numeric pid/pgid values are never signaled; the hub-owned handle
+/// is the only authority.
+fn cancel_child(child: &VerifiedChild) {
+    let _ = child.signal_graceful_for(
+        tokenzero_runtime::PROCESS_OWNER_SESSION,
+        tokenzero_runtime::PROCESS_GENERATION,
+        tokenzero_runtime::SHELL_TEARDOWN_GRACE,
+    );
+    let _ = child.revoke();
 }
 
-#[cfg(not(unix))]
-fn kill_process_tree(_pid: Option<u32>, _pgid: Option<u32>) {}
-
-/// shell_hooks entry: record the dispatched child under the active cancel
-/// state; when cancellation already landed, kill immediately (spawn/cancel
-/// race is decided in favor of the cancel).
-fn v2_note_child(pid: Option<u32>, pgid: Option<u32>, _state: &'static str) {
+/// shell_hooks evidence entry for the dispatched child. The pid/pgid values
+/// are observation evidence only; when cancellation already landed, the
+/// exact published tree handle is signaled (spawn/cancel race is decided in
+/// favor of the cancel).
+fn v2_note_child(_pid: Option<u32>, _pgid: Option<u32>, state: &'static str) {
     let Some(cancel) = ACTIVE_CANCEL
         .lock()
         .ok()
@@ -93,18 +79,16 @@ fn v2_note_child(pid: Option<u32>, pgid: Option<u32>, _state: &'static str) {
     else {
         return;
     };
-    {
-        let mut process = cancel.process.lock().unwrap_or_else(|p| p.into_inner());
-        if pid.is_some() {
-            process.pid = pid;
-        }
-        if pgid.is_some() {
-            process.pgid = pgid;
-        }
+    if state != "running" {
+        return;
     }
-    if cancel.flag.load(Ordering::SeqCst) {
-        let process = *cancel.process.lock().unwrap_or_else(|p| p.into_inner());
-        kill_process_tree(process.pid, process.pgid);
+    // The runtime publishes the exact handle before this evidence call, so
+    // the cancel registry retains the owned tree instead of a numeric pid.
+    if let Some(child) = crate::engine_shell::dispatch_child() {
+        *cancel.child.lock().unwrap_or_else(|p| p.into_inner()) = Some(child.clone());
+        if cancel.flag.load(Ordering::SeqCst) {
+            cancel_child(&child);
+        }
     }
 }
 
@@ -263,15 +247,21 @@ impl RawWorkerV2Session {
         self.cancel_registry.remove(id);
     }
 
-    /// Cancel an in-flight call: set the flag, then kill the recorded child
-    /// process (group) so shell and search work stop inside the declared
-    /// bound. Returns false for unknown or already-finished request ids.
+    /// Cancel an in-flight call: set the flag, then signal the exact owned
+    /// tree handle so shell and search work stop inside the declared bound.
+    /// Returns false for unknown or already-finished request ids.
     fn cancel_call(&mut self, id: &str) -> bool {
         match self.cancel_registry.remove(id) {
             Some(cancel) => {
                 cancel.flag.store(true, Ordering::SeqCst);
-                let process = *cancel.process.lock().unwrap_or_else(|p| p.into_inner());
-                kill_process_tree(process.pid, process.pgid);
+                if let Some(child) = cancel
+                    .child
+                    .lock()
+                    .unwrap_or_else(|p| p.into_inner())
+                    .clone()
+                {
+                    cancel_child(&child);
+                }
                 true
             }
             None => false,
@@ -280,12 +270,18 @@ impl RawWorkerV2Session {
 
     /// Cancel every active or queued call before the session dispatch thread
     /// is joined. A child spawned after this point observes the flag in
-    /// `v2_note_child` and is killed immediately.
+    /// `v2_note_child` and is signaled immediately through its exact handle.
     fn cancel_all(&mut self) {
         for (_, cancel) in self.cancel_registry.drain() {
             cancel.flag.store(true, Ordering::SeqCst);
-            let process = *cancel.process.lock().unwrap_or_else(|p| p.into_inner());
-            kill_process_tree(process.pid, process.pgid);
+            if let Some(child) = cancel
+                .child
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .clone()
+            {
+                cancel_child(&child);
+            }
         }
     }
 }
@@ -640,14 +636,13 @@ fn run_call_registered(engine: &TokenZeroEngine, ctx: CallCtx, cancel: Arc<Cance
 }
 
 fn verified_cancelled_shell_partial_result(ctx: &CallCtx, response: &Value) -> Option<Value> {
-    if !is_shell_op(&ctx.op) || response["ok"].as_bool() != Some(true) {
+    if !is_shell_op(&ctx.op) {
         return None;
     }
     let result = response.get("result")?;
     let tool_response = result.get("tool_response")?;
     let refs = tool_response.get("refs")?.as_array()?;
     let verified = !refs.is_empty()
-        && tool_response["status"].as_str() == Some("ok")
         && tool_response["safety"]["refs_cover_full_output"].as_bool() == Some(true)
         && tool_response["telemetry"]["refs_cover_full_output"].as_bool() == Some(true);
     verified.then(|| result.clone())
@@ -1448,7 +1443,18 @@ mod tests {
     /// ACTIVE_CANCEL slot so parallel test threads cannot clobber it.
     static DISPATCH_TEST_LOCK: Mutex<()> = Mutex::new(());
 
+    #[cfg(unix)]
+    fn process_is_live(pid: &str) -> bool {
+        std::process::Command::new("kill")
+            .args(["-0", pid])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .is_ok_and(|status| status.success())
+    }
+
     #[test]
+    #[cfg(unix)]
     fn cancel_control_frame_stops_dispatched_shell_work() {
         let _dispatch_guard = DISPATCH_TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         crate::shell_hooks::install(crate::shell_hooks::ProcessHooks::with_note_child(
@@ -1461,9 +1467,10 @@ mod tests {
         let trace = json!({"runtime_id":"rt","cell_id":"cell","request_id":"req-cancel","trace_id":"trace",
             "worker_revision":rev,"contract_digest":cap["semantic_contract_digest"]});
         let frame = json!({"kind":"call","request":{"request_id":"req-cancel","op":"shell",
-            "args":{"command":"printf partial-before-cancel; sleep 30"},"trace":trace}});
+            "args":{"command":"sleep 30 & child=$!; printf 'pid:%s\\npartial-before-cancel' \"$child\"; wait \"$child\""},"trace":trace}});
         let ctx = validate_call(session.binding.as_ref().unwrap(), &frame).unwrap();
         let cancel = session.register_cancel(&ctx.id);
+        let observed_cancel = Arc::clone(&cancel);
         let (ready_tx, ready_rx) = std::sync::mpsc::channel::<()>();
         let worker = std::thread::spawn(move || {
             let engine = engine();
@@ -1475,12 +1482,25 @@ mod tests {
         ready_rx.recv().expect("worker ready");
         let started = std::time::Instant::now();
         std::thread::sleep(std::time::Duration::from_millis(400));
+        assert!(
+            observed_cancel
+                .child
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner())
+                .is_some(),
+            "dispatch must publish the exact child before cancellation"
+        );
         let ack = send(
             &mut session,
             json!({"kind":"cancel","request":{"request_id":"req-cancel"}}),
         );
         assert_eq!(ack["kind"], "cancel_ack");
         assert_eq!(ack["cancelled"], true);
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(5),
+            "cancel acknowledgement exceeded bound: {:?}",
+            started.elapsed()
+        );
         assert!(ack.get("process_kill_supported").is_none());
         let value = worker.join().expect("worker joins after cancel");
         assert_eq!(value["error"]["kind"], "cancelled");
@@ -1488,7 +1508,8 @@ mod tests {
         let details = &value["error"]["details"];
         assert_eq!(
             details["artifact_scope"],
-            "full_observed_stdout_stderr_streams"
+            "full_observed_stdout_stderr_streams",
+            "{value}"
         );
         assert_eq!(details["temporal_interleaving_claimed"], false);
         let partial = &details["partial_result"]["tool_response"];
@@ -1496,7 +1517,22 @@ mod tests {
         assert_eq!(partial["telemetry"]["refs_cover_full_output"], true);
         let stdout_ref = partial["telemetry"]["stdout_ref"].as_str().unwrap();
         let expanded = engine().expand(stdout_ref, Some("raw"), None, None, None, None);
-        assert_eq!(expanded.visible.unwrap().text, "partial-before-cancel");
+        let output = expanded.visible.unwrap().text;
+        let mut lines = output.lines();
+        let child_pid = lines
+            .next()
+            .and_then(|line| line.strip_prefix("pid:"))
+            .expect("cancelled shell records descendant pid");
+        assert_eq!(lines.next(), Some("partial-before-cancel"));
+        let descendant_gone = (0..20).any(|_| {
+            if !process_is_live(child_pid) {
+                true
+            } else {
+                std::thread::sleep(std::time::Duration::from_millis(50));
+                false
+            }
+        });
+        assert!(descendant_gone, "cancel must reap the background descendant");
         assert!(
             started.elapsed() < std::time::Duration::from_secs(20),
             "cancelled call must not run to completion"
