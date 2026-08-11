@@ -48,15 +48,15 @@ impl DomainDispatchError {
     }
 }
 
-/// Raw-worker-only dispatch error. This stays below the aggregate boundary and
-/// never changes the public CLI, MCP, or standalone CodeMode result shapes.
+/// Embedded-only dispatch error. This stays below every public CLI/MCP result
+/// shape and contains no transport framing.
 #[derive(Debug, Clone)]
-pub(crate) struct RawWorkerDomainError {
+pub struct EmbeddedDispatchError {
     pub kind: &'static str,
     pub message: String,
 }
 
-impl RawWorkerDomainError {
+impl EmbeddedDispatchError {
     fn validation(message: impl Into<String>) -> Self {
         Self {
             kind: "validation",
@@ -79,14 +79,14 @@ impl RawWorkerDomainError {
     }
 }
 
-/// Execute the two raw-worker-only job seams without promoting either into a
-/// registry domain operation. Aggregate CodeMode remains the public binding;
-/// this worker only launches a background shell and polls its typed job value.
-pub(crate) fn execute_raw_worker_value(
+/// Execute the two embedded job seams without promoting either into a registry
+/// domain operation. Both raw-worker v2 and the in-process ZeroStack adapter
+/// call this domain-owned function; it contains no transport framing.
+pub fn execute_embedded_value(
     engine: &TokenZeroEngine,
     op_name: &str,
     args: &Value,
-) -> Option<Result<Value, RawWorkerDomainError>> {
+) -> Option<Result<Value, EmbeddedDispatchError>> {
     if op_name == TOKEN_JOB_OPERATION_V1 {
         return Some(execute_raw_worker_job(engine, args));
     }
@@ -94,7 +94,7 @@ pub(crate) fn execute_raw_worker_value(
         return match args.get("background") {
             Some(Value::Bool(true)) => Some(execute_raw_worker_background_shell(engine, args)),
             Some(Value::Bool(false)) | None => None,
-            Some(_) => Some(Err(RawWorkerDomainError::validation(
+            Some(_) => Some(Err(EmbeddedDispatchError::validation(
                 "shell background must be a boolean",
             ))),
         };
@@ -105,10 +105,10 @@ pub(crate) fn execute_raw_worker_value(
 fn execute_raw_worker_background_shell(
     engine: &TokenZeroEngine,
     args: &Value,
-) -> Result<Value, RawWorkerDomainError> {
-    let (command, argv) = arg_command(args).map_err(RawWorkerDomainError::validation)?;
+) -> Result<Value, EmbeddedDispatchError> {
+    let (command, argv) = arg_command(args).map_err(EmbeddedDispatchError::validation)?;
     if argv.is_some() {
-        return Err(RawWorkerDomainError::validation(
+        return Err(EmbeddedDispatchError::validation(
             "background shell requires command and does not accept argv",
         ));
     }
@@ -118,23 +118,23 @@ fn execute_raw_worker_background_shell(
             arg_str(args, "cwd").map(Path::new),
             arg_shell_timeout(args),
         )
-        .map_err(RawWorkerDomainError::runtime)?;
+        .map_err(EmbeddedDispatchError::runtime)?;
     let object = launched.as_object().ok_or_else(|| {
-        RawWorkerDomainError::invalid_result("background launch was not an object")
+        EmbeddedDispatchError::invalid_result("background launch was not an object")
     })?;
     let id = object
         .get("job")
         .and_then(Value::as_str)
-        .ok_or_else(|| RawWorkerDomainError::invalid_result("background launch omitted job"))?;
+        .ok_or_else(|| EmbeddedDispatchError::invalid_result("background launch omitted job"))?;
     TokenJobPollRequestV1::new(id)
         .and_then(|request| request.validate().map(|()| request))
         .map_err(|error| {
-            RawWorkerDomainError::invalid_result(format!("invalid background job id: {error}"))
+            EmbeddedDispatchError::invalid_result(format!("invalid background job id: {error}"))
         })?;
     let cursor = required_u64(object, "cursor")?;
     let version = required_u64(object, "version")?;
     if cursor != 0 || version != 0 {
-        return Err(RawWorkerDomainError::invalid_result(
+        return Err(EmbeddedDispatchError::invalid_result(
             "background launch cursor and version must start at zero",
         ));
     }
@@ -146,17 +146,17 @@ fn execute_raw_worker_background_shell(
 fn execute_raw_worker_job(
     engine: &TokenZeroEngine,
     args: &Value,
-) -> Result<Value, RawWorkerDomainError> {
+) -> Result<Value, EmbeddedDispatchError> {
     let request: TokenJobPollRequestV1 = serde_json::from_value(args.clone()).map_err(|error| {
-        RawWorkerDomainError::validation(format!("invalid job arguments: {error}"))
+        EmbeddedDispatchError::validation(format!("invalid job arguments: {error}"))
     })?;
     request.validate().map_err(|error| {
-        RawWorkerDomainError::validation(format!("invalid job arguments: {error}"))
+        EmbeddedDispatchError::validation(format!("invalid job arguments: {error}"))
     })?;
     let since = usize::try_from(request.since)
-        .map_err(|_| RawWorkerDomainError::validation("job since exceeds this platform"))?;
+        .map_err(|_| EmbeddedDispatchError::validation("job since exceeds this platform"))?;
     let tail_bytes = usize::try_from(request.tail_bytes)
-        .map_err(|_| RawWorkerDomainError::validation("job tailBytes exceeds this platform"))?;
+        .map_err(|_| EmbeddedDispatchError::validation("job tailBytes exceeds this platform"))?;
     let internal = engine
         .shell_job_wait(
             &request.id,
@@ -166,12 +166,12 @@ fn execute_raw_worker_job(
         )
         .map_err(|message| {
             if message.starts_with("unknown background job:") {
-                RawWorkerDomainError {
+                EmbeddedDispatchError {
                     kind: "not_found",
                     message,
                 }
             } else {
-                RawWorkerDomainError::runtime(message)
+                EmbeddedDispatchError::runtime(message)
             }
         })?;
     typed_job_result(&request.id, &internal)
@@ -195,9 +195,9 @@ struct InternalJobPoll {
     next_poll_ms: Option<u64>,
 }
 
-fn typed_job_result(id: &str, internal: &Value) -> Result<Value, RawWorkerDomainError> {
+fn typed_job_result(id: &str, internal: &Value) -> Result<Value, EmbeddedDispatchError> {
     let wire: InternalJobPoll = serde_json::from_value(internal.clone()).map_err(|error| {
-        RawWorkerDomainError::invalid_result(format!("invalid internal job result: {error}"))
+        EmbeddedDispatchError::invalid_result(format!("invalid internal job result: {error}"))
     })?;
     let InternalJobPoll {
         status,
@@ -219,27 +219,28 @@ fn typed_job_result(id: &str, internal: &Value) -> Result<Value, RawWorkerDomain
         Some(value) => value,
         None if unchanged => false,
         None => {
-            return Err(RawWorkerDomainError::invalid_result(
+            return Err(EmbeddedDispatchError::invalid_result(
                 "job poll result omitted changed/unchanged state",
             ));
         }
     };
     if changed == unchanged {
-        return Err(RawWorkerDomainError::invalid_result(
+        return Err(EmbeddedDispatchError::invalid_result(
             "job poll changed and unchanged fields contradict",
         ));
     }
     let (tail, tail_utf8_lossless, tail_bytes, log_bytes) = if changed {
         (
-            tail.ok_or_else(|| RawWorkerDomainError::invalid_result("job poll omitted tail"))?,
+            tail.ok_or_else(|| EmbeddedDispatchError::invalid_result("job poll omitted tail"))?,
             tail_utf8_lossless.ok_or_else(|| {
-                RawWorkerDomainError::invalid_result("job poll omitted tailUtf8Lossless")
+                EmbeddedDispatchError::invalid_result("job poll omitted tailUtf8Lossless")
             })?,
             tail_bytes.ok_or_else(|| {
-                RawWorkerDomainError::invalid_result("job poll omitted tailBytes")
+                EmbeddedDispatchError::invalid_result("job poll omitted tailBytes")
             })?,
-            log_bytes
-                .ok_or_else(|| RawWorkerDomainError::invalid_result("job poll omitted logBytes"))?,
+            log_bytes.ok_or_else(|| {
+                EmbeddedDispatchError::invalid_result("job poll omitted logBytes")
+            })?,
         )
     } else {
         (String::new(), true, 0, cursor)
@@ -259,21 +260,21 @@ fn typed_job_result(id: &str, internal: &Value) -> Result<Value, RawWorkerDomain
         next_poll_ms,
     )
     .map_err(|error| {
-        RawWorkerDomainError::invalid_result(format!("invalid typed job result: {error}"))
+        EmbeddedDispatchError::invalid_result(format!("invalid typed job result: {error}"))
     })?;
     result.validate().map_err(|error| {
-        RawWorkerDomainError::invalid_result(format!("invalid typed job result: {error}"))
+        EmbeddedDispatchError::invalid_result(format!("invalid typed job result: {error}"))
     })?;
     serde_json::to_value(result)
-        .map_err(|error| RawWorkerDomainError::invalid_result(error.to_string()))
+        .map_err(|error| EmbeddedDispatchError::invalid_result(error.to_string()))
 }
 
 fn required_u64(
     object: &serde_json::Map<String, Value>,
     field: &str,
-) -> Result<u64, RawWorkerDomainError> {
+) -> Result<u64, EmbeddedDispatchError> {
     object.get(field).and_then(Value::as_u64).ok_or_else(|| {
-        RawWorkerDomainError::invalid_result(format!("job poll result omitted unsigned {field}"))
+        EmbeddedDispatchError::invalid_result(format!("job poll result omitted unsigned {field}"))
     })
 }
 

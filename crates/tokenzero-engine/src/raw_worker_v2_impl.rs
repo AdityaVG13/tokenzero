@@ -674,7 +674,7 @@ fn dispatch_call(engine: &TokenZeroEngine, ctx: &CallCtx, cancel: &Arc<CancelSta
                     );
                 }
             }
-            match crate::domain::execute_raw_worker_value(engine, &ctx.op, &args) {
+            match crate::domain::execute_embedded_value(engine, &ctx.op, &args) {
                 Some(Ok(value)) => json!({"ok":true,"result":value}),
                 Some(Err(error)) => json!({"ok":false,"error":{
                     "kind":error.kind,"message":error.message,"retryable":false
@@ -1507,8 +1507,7 @@ mod tests {
         assert_eq!(value["error"]["retryable"], false);
         let details = &value["error"]["details"];
         assert_eq!(
-            details["artifact_scope"],
-            "full_observed_stdout_stderr_streams",
+            details["artifact_scope"], "full_observed_stdout_stderr_streams",
             "{value}"
         );
         assert_eq!(details["temporal_interleaving_claimed"], false);
@@ -1532,7 +1531,10 @@ mod tests {
                 false
             }
         });
-        assert!(descendant_gone, "cancel must reap the background descendant");
+        assert!(
+            descendant_gone,
+            "cancel must reap the background descendant"
+        );
         assert!(
             started.elapsed() < std::time::Duration::from_secs(20),
             "cancelled call must not run to completion"

@@ -39,6 +39,8 @@ pub enum RuntimeError {
     MissingPipe(&'static str),
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
+    #[error("command cancelled")]
+    Cancelled,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -383,7 +385,7 @@ pub fn run_command_with_policy_observers_with_child<F, G, H>(
     timeout: Duration,
     explicit_shell: bool,
     output_policy: RunOutputPolicy,
-    mut observer: F,
+    observer: F,
     stream_observer: G,
     on_child: H,
 ) -> Result<RunResult, RuntimeError>
@@ -391,6 +393,41 @@ where
     F: FnMut(Option<u32>, Option<u32>, &'static str),
     G: Fn(&'static str, &[u8]) + Send + Sync + 'static,
     H: FnOnce(&VerifiedChild),
+{
+    run_command_with_policy_observers_with_child_and_cancel(
+        argv,
+        cwd,
+        env_overrides,
+        stdin,
+        timeout,
+        explicit_shell,
+        output_policy,
+        observer,
+        stream_observer,
+        on_child,
+        || false,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn run_command_with_policy_observers_with_child_and_cancel<F, G, H, C>(
+    argv: &[String],
+    cwd: Option<&Path>,
+    env_overrides: Option<&BTreeMap<String, String>>,
+    stdin: Option<&str>,
+    timeout: Duration,
+    explicit_shell: bool,
+    output_policy: RunOutputPolicy,
+    mut observer: F,
+    stream_observer: G,
+    on_child: H,
+    is_cancelled: C,
+) -> Result<RunResult, RuntimeError>
+where
+    F: FnMut(Option<u32>, Option<u32>, &'static str),
+    G: Fn(&'static str, &[u8]) + Send + Sync + 'static,
+    H: FnOnce(&VerifiedChild),
+    C: Fn() -> bool,
 {
     let output_policy = output_policy.normalized();
     let plan = plan_command(argv, cwd, explicit_shell)?;
@@ -442,12 +479,9 @@ where
     // Hub-owned tree spawn: Unix isolates the child in its own process group
     // at exec; Windows assigns it to a kill-on-close job before it runs. The
     // exact tree handle is the only teardown authority from here on.
-    let (verified, pipes) = VerifiedChild::spawn_tree_with_pipes(
-        command,
-        PROCESS_OWNER_SESSION,
-        PROCESS_GENERATION,
-    )
-    .map_err(RuntimeError::Io)?;
+    let (verified, pipes) =
+        VerifiedChild::spawn_tree_with_pipes(command, PROCESS_OWNER_SESSION, PROCESS_GENERATION)
+            .map_err(RuntimeError::Io)?;
     let stdout = match required_child_pipe(pipes.stdout, "stdout") {
         Ok(stdout) => stdout,
         Err(error) => {
@@ -497,33 +531,30 @@ where
     // Stdin writes can block; keep them off the wait_timeout path.
     let stdin_writer = spawn_stdin_writer(stdin, child_stdin);
     let mut force_timed_out = false;
+    let mut force_cancelled = false;
     let mut settlement_error = None;
     let wait_deadline = deadline_from(Instant::now(), timeout);
     let status = loop {
         if let Some(status) = verified.terminal_status() {
             break Some(status);
         }
+        if is_cancelled() {
+            force_cancelled = true;
+            match terminate_verified_child(&verified) {
+                Ok(status) => break Some(status),
+                Err(error) => {
+                    settlement_error = Some(error);
+                    break None;
+                }
+            }
+        }
         let now = Instant::now();
         if now >= wait_deadline {
             force_timed_out = true;
-            if let Err(error) = signal_tree(&verified) {
-                if verified.terminal_status().is_none() {
-                    settlement_error = Some(RuntimeError::Io(error));
-                    break None;
-                }
-            }
-            if let Err(error) = verified.revoke() {
-                if verified.terminal_status().is_none() {
-                    settlement_error = Some(RuntimeError::Io(identity_error_io(error)));
-                    break None;
-                }
-            }
-            match verified.terminal_status() {
-                Some(status) => break Some(status),
-                None => {
-                    settlement_error = Some(RuntimeError::Io(identity_error_io(
-                        zero_process::IdentityError::Missing,
-                    )));
+            match terminate_verified_child(&verified) {
+                Ok(status) => break Some(status),
+                Err(error) => {
+                    settlement_error = Some(error);
                     break None;
                 }
             }
@@ -557,18 +588,21 @@ where
         stdin_writer,
         stdout_reader,
         stderr_reader,
-        force_timed_out,
+        force_timed_out || force_cancelled,
         start,
         timeout,
         &verified,
-        !force_timed_out,
+        !(force_timed_out || force_cancelled),
     )?;
     if let Some(error) = settlement_error {
         return Err(error);
     }
-    let status = status.ok_or_else(|| {
-        RuntimeError::Io(identity_error_io(zero_process::IdentityError::Missing))
-    })?;
+    if force_cancelled {
+        observer(None, None, "cancelled_killed");
+        return Err(RuntimeError::Cancelled);
+    }
+    let status = status
+        .ok_or_else(|| RuntimeError::Io(identity_error_io(zero_process::IdentityError::Missing)))?;
     let timed_out = force_timed_out || process_io.timed_out;
     observer(
         None,
@@ -602,6 +636,24 @@ where
         io_grace_expired: process_io.io_grace_expired,
         duration_ms: start.elapsed().as_millis(),
     })
+}
+
+fn terminate_verified_child(
+    verified: &VerifiedChild,
+) -> Result<std::process::ExitStatus, RuntimeError> {
+    if let Err(error) = signal_tree(verified)
+        && verified.terminal_status().is_none()
+    {
+        return Err(RuntimeError::Io(error));
+    }
+    if let Err(error) = verified.revoke()
+        && verified.terminal_status().is_none()
+    {
+        return Err(RuntimeError::Io(identity_error_io(error)));
+    }
+    verified
+        .terminal_status()
+        .ok_or_else(|| RuntimeError::Io(identity_error_io(zero_process::IdentityError::Missing)))
 }
 
 fn allocator_pressure_relief_after_large_capture(
@@ -1233,6 +1285,7 @@ pub fn env_map(pairs: &[String]) -> Result<BTreeMap<String, String>, RuntimeErro
 #[cfg(test)]
 mod stdio_error_tests {
     use super::*;
+    use std::sync::atomic::{AtomicBool, Ordering};
 
     #[test]
     fn missing_spawn_pipe_is_a_typed_runtime_error() {
@@ -1291,6 +1344,43 @@ mod stdio_error_tests {
         assert_eq!(
             result.stdout_capture.full_stream_sha256.as_deref(),
             Some(lowercase_hex(&Sha256::digest([0xff])).as_str())
+        );
+    }
+    #[cfg(unix)]
+    #[test]
+    fn request_cancellation_terminates_the_owned_shell_tree() {
+        let argv = vec![
+            "/bin/sh".to_string(),
+            "-c".to_string(),
+            "sleep 60".to_string(),
+        ];
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let trigger = Arc::clone(&cancelled);
+        let trigger_thread = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(50));
+            trigger.store(true, Ordering::Release);
+        });
+        let started = Instant::now();
+        let error = run_command_with_policy_observers_with_child_and_cancel(
+            &argv,
+            None,
+            None,
+            None,
+            Duration::from_secs(30),
+            false,
+            RunOutputPolicy::default(),
+            |_, _, _| {},
+            |_, _| {},
+            |_| {},
+            || cancelled.load(Ordering::Acquire),
+        )
+        .expect_err("cancelled command must not complete successfully");
+        trigger_thread.join().unwrap();
+        assert!(matches!(error, RuntimeError::Cancelled));
+        assert!(
+            started.elapsed() < Duration::from_secs(3),
+            "cancellation took {:?}",
+            started.elapsed()
         );
     }
 }

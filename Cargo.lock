@@ -2410,7 +2410,6 @@ version = "1.0.151"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c841b55ecdae098c80dcae9cf767f6f8a0c2cdb3416bbef72181df4d0fe73f14"
 dependencies = [
- "indexmap",
  "itoa",
  "memchr",
  "serde",
@@ -2603,12 +2602,6 @@ dependencies = [
  "libc",
  "winapi",
 ]
-
-[[package]]
-name = "streaming-iterator"
-version = "0.1.9"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2b2231b7c3057d5e4ad0156fb3dc807d900806020c5ffa3ee6ff2c8c76fb8520"
 
 [[package]]
 name = "strip-ansi-escapes"
@@ -2900,7 +2893,7 @@ dependencies = [
  "tokenzero-recovery",
  "tokenzero-runtime",
  "zero-abi",
- "zero-codemode",
+ "zero-mcp",
 ]
 
 [[package]]
@@ -3061,36 +3054,6 @@ dependencies = [
  "tracing-core",
  "tracing-log",
 ]
-
-[[package]]
-name = "tree-sitter"
-version = "0.26.12"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "83c567a8e18ae93f20982c90370b16fd24023aeaf52f6052b96957ab253a0fec"
-dependencies = [
- "cc",
- "regex",
- "regex-syntax",
- "serde_json",
- "streaming-iterator",
- "tree-sitter-language",
-]
-
-[[package]]
-name = "tree-sitter-javascript"
-version = "0.25.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "68204f2abc0627a90bdf06e605f5c470aa26fdcb2081ea553a04bdad756693f5"
-dependencies = [
- "cc",
- "tree-sitter-language",
-]
-
-[[package]]
-name = "tree-sitter-language"
-version = "0.1.7"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "009994f150cc0cd50ff54917d5bc8bffe8cad10ca10d81c34da2ec421ae61782"
 
 [[package]]
 name = "typenum"
@@ -3614,28 +3577,10 @@ dependencies = [
 [[package]]
 name = "zero-abi"
 version = "0.1.0"
-source = "git+https://github.com/AdityaVG13/zerostack?rev=fa253840910ab4051635e2de95f04ddf6043a000#fa253840910ab4051635e2de95f04ddf6043a000"
 dependencies = [
  "serde",
  "serde_json",
  "sha2 0.11.0",
-]
-
-[[package]]
-name = "zero-codemode"
-version = "0.1.0"
-source = "git+https://github.com/AdityaVG13/zerostack?rev=fa253840910ab4051635e2de95f04ddf6043a000#fa253840910ab4051635e2de95f04ddf6043a000"
-dependencies = [
- "fastmcp-rust",
- "serde",
- "serde_json",
- "sha2 0.11.0",
- "tree-sitter",
- "tree-sitter-javascript",
- "zero-abi",
- "zero-process",
- "zero-store",
- "zerostack-machine-permit",
 ]
 
 [[package]]
@@ -3652,6 +3597,16 @@ name = "zero-ledger"
 version = "0.1.0"
 source = "git+https://github.com/AdityaVG13/zerostack?rev=fa253840910ab4051635e2de95f04ddf6043a000#fa253840910ab4051635e2de95f04ddf6043a000"
 dependencies = [
+ "serde",
+ "serde_json",
+ "zero-abi",
+]
+
+[[package]]
+name = "zero-mcp"
+version = "0.1.0"
+dependencies = [
+ "fastmcp-rust",
  "serde",
  "serde_json",
  "zero-abi",
@@ -3726,16 +3681,6 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.117",
-]
-
-[[package]]
-name = "zerostack-machine-permit"
-version = "0.1.0"
-source = "git+https://github.com/AdityaVG13/zerostack?rev=fa253840910ab4051635e2de95f04ddf6043a000#fa253840910ab4051635e2de95f04ddf6043a000"
-dependencies = [
- "libc",
- "windows-sys",
- "zero-process",
 ]
 
 [[package]]

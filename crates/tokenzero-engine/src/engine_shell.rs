@@ -8,8 +8,8 @@ use std::thread;
 use std::time::Instant;
 use tokenzero_runtime::{
     PROCESS_GENERATION, PROCESS_OWNER_SESSION, SHELL_TEARDOWN_GRACE,
-    run_command_with_policy_observer, run_command_with_policy_observer_with_child,
-    run_command_with_policy_observers_with_child,
+    run_command_with_policy_observer, run_command_with_policy_observers_with_child,
+    run_command_with_policy_observers_with_child_and_cancel,
 };
 use zero_process::VerifiedChild;
 
@@ -76,16 +76,16 @@ mod rewrite_execution_tests {
                         .stderr(std::process::Stdio::null())
                         .spawn()
                         .unwrap();
-                    let verified = VerifiedChild::capture(
-                        child,
-                        PROCESS_OWNER_SESSION,
-                        PROCESS_GENERATION,
-                    );
+                    let verified =
+                        VerifiedChild::capture(child, PROCESS_OWNER_SESSION, PROCESS_GENERATION);
                     let child_id = verified.child_id();
                     let scope = dispatch_child_scope();
                     publish_dispatch_child(&verified);
                     barrier.wait();
-                    assert_eq!(dispatch_child().map(|child| child.child_id()), Some(child_id));
+                    assert_eq!(
+                        dispatch_child().map(|child| child.child_id()),
+                        Some(child_id)
+                    );
                     ids.lock().unwrap().push(child_id);
                     barrier.wait();
                     drop(scope);
@@ -969,7 +969,7 @@ impl TokenZeroEngine {
             .or_insert_with(|| "1".to_string());
         let output_policy = self.shell_output_policy();
         let _dispatch_child_scope = dispatch_child_scope();
-        let result = match run_command_with_policy_observer_with_child(
+        let result = match run_command_with_policy_observers_with_child_and_cancel(
             &run_argv,
             Some(cwd),
             Some(&child_env),
@@ -978,7 +978,9 @@ impl TokenZeroEngine {
             false,
             output_policy,
             crate::shell_hooks::note_child,
+            |_, _| {},
             publish_dispatch_child,
+            crate::wall::active_host_cancelled,
         ) {
             Ok(result) => result,
             Err(err) => {

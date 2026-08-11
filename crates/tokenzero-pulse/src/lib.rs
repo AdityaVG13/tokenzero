@@ -34,8 +34,7 @@ const PULSE_SYNC_SCHEMA_VERSION: &str = "pulse-sync-v1";
 const PULSE_SYNC_LOCK_TIMEOUT: Duration = Duration::from_secs(5);
 const PULSE_EVENT_LOCK_TIMEOUT: Duration = Duration::from_secs(30);
 const TOKENIZER_COMPONENT_MAX_LEN: usize = 64;
-const TOKENIZER_ID_ERROR: &str =
-    "tokenizer id must name a real tokenizer or use estimator:<name>";
+const TOKENIZER_ID_ERROR: &str = "tokenizer id must name a real tokenizer or use estimator:<name>";
 
 /// Built-in production counts use TokenZero's deliberately labelled lexical
 /// gauge. The core gauges are approximate until an exact tokenizer adapter is

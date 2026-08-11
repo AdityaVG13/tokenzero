@@ -53,7 +53,14 @@ zero-ledger = { git = "https://github.com/AdityaVG13/zerostack", rev = "fa253840
 zero-ref = { git = "https://github.com/AdityaVG13/zerostack", rev = "fa253840910ab4051635e2de95f04ddf6043a000" }
 zero-process = { git = "https://github.com/AdityaVG13/zerostack", rev = "fa253840910ab4051635e2de95f04ddf6043a000" }
 zero-store = { git = "https://github.com/AdityaVG13/zerostack", rev = "fa253840910ab4051635e2de95f04ddf6043a000" }
-zero-codemode = { git = "https://github.com/AdityaVG13/zerostack", rev = "fa253840910ab4051635e2de95f04ddf6043a000", features = ["fastmcp"] }
+# Hub-owned MCP transport authority (replaces the retired zero-codemode fastmcp carrier).
+zero-mcp = { path = "../ZeroStack/crates/zero-mcp", features = ["fastmcp"] }
+
+# Local-checkout override for zero-abi, which zero-mcp pulls in as a path dep.
+# Keeps the git pin above as the declared source while unifying the graph on
+# the local ZeroStack checkout until the next hub publication.
+[patch."https://github.com/AdityaVG13/zerostack"]
+zero-abi = { path = "../ZeroStack/crates/zero-abi" }
 
 [profile.release-perf]
 inherits = "release"

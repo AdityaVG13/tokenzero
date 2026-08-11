@@ -159,9 +159,7 @@ impl SharedCas {
 
     pub fn resolve(&self, full_hash: &str) -> Result<Vec<u8>, SharedCasError> {
         self.validate_hash(full_hash)?;
-        self.inner
-            .get_verified(full_hash)
-            .map_err(map_cas_error)
+        self.inner.get_verified(full_hash).map_err(map_cas_error)
     }
 
     pub fn contains(&self, full_hash: &str) -> bool {
@@ -245,9 +243,7 @@ impl SharedCas {
 fn map_cas_error(error: zero_store::CasError) -> SharedCasError {
     match error {
         zero_store::CasError::NotFound => SharedCasError::NotFound,
-        zero_store::CasError::Io(message) => {
-            SharedCasError::Io(io::Error::other(message))
-        }
+        zero_store::CasError::Io(message) => SharedCasError::Io(io::Error::other(message)),
         zero_store::CasError::DigestMismatch { .. } => SharedCasError::Corruption,
         zero_store::CasError::PolicyDenied(_) | zero_store::CasError::Malformed(_) => {
             SharedCasError::Policy

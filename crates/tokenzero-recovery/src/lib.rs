@@ -94,7 +94,6 @@ const REF_INDEX_DISABLE_ENV: &str = "TOKENZERO_REF_INDEX";
 const REF_INDEX_PATH_ENV: &str = "TOKENZERO_REF_INDEX_PATH";
 const JOURNAL_MAX_SEALED_SEGMENTS: usize = 4;
 
-
 /// Profiling-only leaf spans for expand (TOKENZERO_PERF_PROFILE). No product effect when off.
 fn expand_leaf_span<R>(span: &'static str, f: impl FnOnce() -> R) -> R {
     static ENABLED: AtomicU8 = AtomicU8::new(0);
@@ -1040,7 +1039,10 @@ fn cache_identities(path: &Path) -> (Option<DiskIdentity>, Option<DiskIdentity>)
 enum RefResolve {
     Found(String),
     /// Content bytes already integrity-checked against lowercase hex `sha256`.
-    FoundVerified { content: String, sha256: String },
+    FoundVerified {
+        content: String,
+        sha256: String,
+    },
     NotFound,
     Stale,
     DecodeFailed,
@@ -1684,8 +1686,9 @@ impl RecoveryStore {
     pub(crate) fn resolve_blob_content(&self, ref_id: &str) -> Option<String> {
         self.state.blobs.get(ref_id).and_then(|value| {
             match resolve_blob_value(self.persistence_path.as_deref(), ref_id, value) {
-                RefResolve::Found(content)
-                | RefResolve::FoundVerified { content, .. } => Some(content),
+                RefResolve::Found(content) | RefResolve::FoundVerified { content, .. } => {
+                    Some(content)
+                }
                 RefResolve::NotFound | RefResolve::Stale | RefResolve::DecodeFailed => None,
             }
         })
@@ -1843,7 +1846,9 @@ impl RecoveryStore {
                 {
                     Ok(content) => Some(content),
                     Err(None) => return miss!("shared-cas-non-utf8"),
-                    Err(Some(SharedCasError::NotFound)) if requested_ref.starts_with("tz://") => None,
+                    Err(Some(SharedCasError::NotFound)) if requested_ref.starts_with("tz://") => {
+                        None
+                    }
                     Err(Some(SharedCasError::NotFound)) => {
                         if let Some(result) = self.expand_in_sibling_engine_store(
                             &requested_ref,
@@ -1996,8 +2001,9 @@ impl RecoveryStore {
         index_store_path: Option<&Path>,
     ) -> ExpansionResult {
         // Single lexical pass: recovery_tokens and ExpansionResult.tokens share one count.
-        let tokens =
-            expand_leaf_span("expand.leaf.expand_ok_count_tokens", || count_tokens(&content));
+        let tokens = expand_leaf_span("expand.leaf.expand_ok_count_tokens", || {
+            count_tokens(&content)
+        });
         self.note_expand_with_tokens(ref_id, tokens, index_store_path);
         ExpansionResult::ok_with_tokens(requested_ref, selector, content, tokens)
     }
@@ -3505,7 +3511,11 @@ fn resolve_blob_from_ref_index(
             .and_then(|state| state.blobs.get(ref_id).cloned())
             .map(|value| resolve_blob_value(Some(&store_path), ref_id, &value));
         match resolved {
-            Some(result @ (RefResolve::Found(_) | RefResolve::FoundVerified { .. } | RefResolve::DecodeFailed)) => {
+            Some(
+                result @ (RefResolve::Found(_)
+                | RefResolve::FoundVerified { .. }
+                | RefResolve::DecodeFailed),
+            ) => {
                 prune_ref_index_stale_entries(ref_id, &stale);
                 return (result, Some(store_path));
             }
@@ -3902,11 +3912,7 @@ fn stored_source_path(stored: &StoredFile) -> Option<PathBuf> {
 }
 
 fn resolve_found_if(ok: bool, text: String, fail: RefResolve) -> RefResolve {
-    if ok {
-        RefResolve::Found(text)
-    } else {
-        fail
-    }
+    if ok { RefResolve::Found(text) } else { fail }
 }
 
 fn resolve_found_verified(ok: bool, text: String, sha256: String, fail: RefResolve) -> RefResolve {

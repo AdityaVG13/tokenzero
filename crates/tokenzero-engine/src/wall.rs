@@ -99,9 +99,9 @@ pub fn with_host_wall_deadline<R>(deadline: WallDeadline, f: impl FnOnce() -> R)
     with_host_controls(deadline, None, f)
 }
 
-/// Run raw-worker host work with both its wall deadline and session cancel
+/// Run embedded host work with both its wall deadline and request cancellation
 /// flag installed for the same cooperative checkpoints.
-pub(crate) fn with_host_wall_deadline_and_cancel<R>(
+pub fn with_host_wall_deadline_and_cancel<R>(
     deadline: WallDeadline,
     cancel: Arc<AtomicBool>,
     f: impl FnOnce() -> R,
@@ -109,14 +109,17 @@ pub(crate) fn with_host_wall_deadline_and_cancel<R>(
     with_host_controls(deadline, Some(cancel), f)
 }
 
-/// Check the thread-local host-op deadline or cancellation flag, if installed.
-pub fn check_active_wall_deadline() -> Option<(String, &'static str)> {
-    let cancelled = ACTIVE_HOST_CANCEL.with(|slot| {
+pub(crate) fn active_host_cancelled() -> bool {
+    ACTIVE_HOST_CANCEL.with(|slot| {
         slot.borrow()
             .as_ref()
             .is_some_and(|flag| flag.load(Ordering::SeqCst))
-    });
-    if cancelled {
+    })
+}
+
+/// Check the thread-local host-op deadline or cancellation flag, if installed.
+pub fn check_active_wall_deadline() -> Option<(String, &'static str)> {
+    if active_host_cancelled() {
         return Some(("runtime: operation cancelled".into(), "operation cancelled"));
     }
     ACTIVE_HOST_WALL.with(|slot| {

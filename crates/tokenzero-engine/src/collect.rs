@@ -544,16 +544,10 @@ pub(crate) fn rg_search(
         // Register the child so raw-worker v2 cancellation can stop a long
         // search (pid is observation evidence only).
         crate::shell_hooks::note_child(Some(verified.child_id()), None, "running");
-        let stdout_reader = spawn_rg_output_reader(
-            pipes
-                .stdout
-                .expect("rg stdout pipe configured above"),
-        );
-        let stderr_reader = spawn_rg_output_reader(
-            pipes
-                .stderr
-                .expect("rg stderr pipe configured above"),
-        );
+        let stdout_reader =
+            spawn_rg_output_reader(pipes.stdout.expect("rg stdout pipe configured above"));
+        let stderr_reader =
+            spawn_rg_output_reader(pipes.stderr.expect("rg stderr pipe configured above"));
         // Mirror wait_with_output: unbounded run, bounded teardown. Cancel and
         // session death signal the owned handle, so the wait ends inside the
         // declared bound.
@@ -572,9 +566,7 @@ pub(crate) fn rg_search(
                     RG_FINAL_WAIT_TIMEOUT,
                     tokenzero_runtime::SHELL_TEARDOWN_GRACE,
                 )
-                .map_err(|error| {
-                    RgFailure::Unavailable(format!("rg teardown failed: {error}"))
-                })
+                .map_err(|error| RgFailure::Unavailable(format!("rg teardown failed: {error}")))
         };
         if status.is_err() {
             let _ = verified.signal_graceful_for(
@@ -590,13 +582,15 @@ pub(crate) fn rg_search(
             .join()
             .map_err(|_| RgFailure::Unavailable("rg stdout reader panicked".to_string()))
             .and_then(|result| {
-                result.map_err(|err| RgFailure::Unavailable(format!("rg stdout read failed: {err}")))
+                result
+                    .map_err(|err| RgFailure::Unavailable(format!("rg stdout read failed: {err}")))
             });
         let stderr = stderr_reader
             .join()
             .map_err(|_| RgFailure::Unavailable("rg stderr reader panicked".to_string()))
             .and_then(|result| {
-                result.map_err(|err| RgFailure::Unavailable(format!("rg stderr read failed: {err}")))
+                result
+                    .map_err(|err| RgFailure::Unavailable(format!("rg stderr read failed: {err}")))
             });
         crate::engine_shell::clear_dispatch_child();
         let status = status?;

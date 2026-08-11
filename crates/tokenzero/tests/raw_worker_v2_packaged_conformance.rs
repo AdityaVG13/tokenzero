@@ -1015,8 +1015,7 @@ fn oversized_result_value_is_rejected_and_no_oversized_result_leaks() {
         "oversized value must measure above the cap: {details}"
     );
     assert_eq!(
-        details["frame_limit_bytes"],
-        MAX_FRAME_BYTES as u64,
+        details["frame_limit_bytes"], MAX_FRAME_BYTES as u64,
         "{details}"
     );
     assert!(
@@ -1026,7 +1025,9 @@ fn oversized_result_value_is_rejected_and_no_oversized_result_leaks() {
 
     // The rejection is not terminal: a normal call still succeeds.
     let trace = trace_for("req-after", &bound.revision, &bound.contract);
-    bound.worker.send(&call_frame("req-after", "mem", json!({}), None, trace));
+    bound
+        .worker
+        .send(&call_frame("req-after", "mem", json!({}), None, trace));
     let ok = bound.worker.recv("post-rejection call");
     assert_eq!(ok["kind"], "result", "{ok}");
 }

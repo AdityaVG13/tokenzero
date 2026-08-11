@@ -9,7 +9,7 @@ use zero_abi::{
     CanonicalResource, EffectClass, EffectPolicy, EngineIdentity, PermitRequirement,
     RefOwnership as SharedRefOwnership, RegistryEngine, TelemetrySchema,
 };
-use zero_codemode::{
+use zero_mcp::{
     CapabilityDescriptor, DomainAdapterRegistration, FastMcpTransport, McpAliasMetadata,
     McpCallContext, McpDispatchError, McpDispatchOutput, McpDispatcher, McpErrorPresentation,
     McpResourceOutput, McpResourceReader, McpTextContent, McpTransportConfig, SurfaceKind,

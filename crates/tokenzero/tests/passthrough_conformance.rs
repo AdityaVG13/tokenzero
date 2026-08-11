@@ -1,12 +1,12 @@
 use assert_cmd::prelude::*;
 use serde_json::{Value, json};
+#[cfg(unix)]
+use std::{fs, os::unix::fs::PermissionsExt};
 use std::{
     io::Write,
     path::Path,
     process::{Command, Output, Stdio},
 };
-#[cfg(unix)]
-use std::{fs, os::unix::fs::PermissionsExt};
 use tempfile::{TempDir, tempdir};
 fn hook_output(payload: &str, mode: Option<&str>, envs: &[(&str, &str)]) -> Output {
     let mut command = Command::cargo_bin("tokenzero").unwrap();
@@ -243,7 +243,10 @@ fn nested_zsh_login_probe_preserves_authored_quoting_and_output() {
             .env("PATH", format!("{}:/bin:/usr/bin", bin.display()))
             .env("NO_COLOR", "1")
             .env("TERM", "dumb")
-            .env("TOKENZERO_CACHE_PATH", dir.path().join("recovery-cache.json"))
+            .env(
+                "TOKENZERO_CACHE_PATH",
+                dir.path().join("recovery-cache.json"),
+            )
             .env("TOKENZERO_REF_INDEX", "0")
             .output()
             .unwrap()
@@ -260,12 +263,7 @@ fn nested_zsh_login_probe_preserves_authored_quoting_and_output() {
     let native_stdout = String::from_utf8_lossy(&native.stdout).to_string();
     // Every probe segment must run (login PATH resolves npm/node); a missing
     // executable or a collapsed segment fails on its own label.
-    for label in [
-        "npm-path:",
-        "npm-type:",
-        "npm-version:",
-        "node-version:",
-    ] {
+    for label in ["npm-path:", "npm-type:", "npm-version:", "node-version:"] {
         assert!(
             native_stdout.contains(label),
             "probe segment {label:?} produced no output; login environment not exercised:\n{native_stdout}\nnative stderr:\n{}\nnative exit: {:?}",
