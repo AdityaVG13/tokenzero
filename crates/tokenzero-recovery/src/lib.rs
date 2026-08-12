@@ -46,9 +46,12 @@ pub use entity_novelty::{
 
 pub mod action_cache;
 pub mod cachezero;
+pub mod memory_verbs;
 pub mod store_hygiene;
 pub mod store_schema;
 pub mod working_set;
+
+pub use memory_verbs::{MemoryVerb, MemoryVerbEffect, MemoryVerbRequest, describe_memory_verb};
 
 pub use action_cache::{
     ACTIONCACHE_GC_GRACE_SECS, ACTIONCACHE_REL_DIR, ActionCacheEntry, ActionCacheError,

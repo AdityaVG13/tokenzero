@@ -54,6 +54,26 @@ That is different from claiming every visible capsule is semantically complete. 
 
 ## Promotion Rule
 
+## Memory verbs (actions v2)
+
+TokenZero owns the token-side working-set interface. The hub owns policy.
+These six verbs are the named surface a trained policy can drive later
+without changing the deterministic substrate (`WorkingSet`).
+
+| Verb | Substrate target | Meaning |
+| --- | --- | --- |
+| `store` | `working_set.admit` | Persist bytes and admit a span |
+| `commit_session` | `recovery_store.persist` | Flush session recovery records |
+| `update_capsule` | `working_set.rewrite_render` | Replace a resident capsule |
+| `forget_visible` | `working_set.evict` | Drop visible text, keep the exact ref |
+| `promote_anchor` | `working_set.touch` | Mark a span hot |
+| `link_refs` | `working_set.evicted_refs` | Record that one ref recovers another |
+
+Types: `tokenzero_recovery::memory_verbs`. `describe_memory_verb` is
+describe-only (`applied: false`). Do not put policy in this crate.
+
+## Promotion Rule
+
 A compression profile is not promoted by visible savings alone.
 
 It needs:
