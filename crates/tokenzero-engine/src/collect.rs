@@ -384,6 +384,40 @@ pub(crate) fn apply_truncated_hint(response: &mut ToolResponse, mode: Mode) {
     }
 }
 
+/// Remaining visible-token budget plus an explicit exhausted flag so agents
+/// can tell a complete miss from a scan that stopped on max_files/visit/wall.
+pub(crate) fn attach_budget_signal(
+    response: &mut ToolResponse,
+    max_visible_tokens: usize,
+    exhausted: bool,
+) {
+    let used = response
+        .accounting
+        .as_ref()
+        .map(|accounting| accounting.visible_tokens)
+        .unwrap_or(0);
+    if exhausted {
+        response.remaining_budget_tokens = Some(0);
+        response.budget_exhausted = Some(true);
+    } else {
+        response.remaining_budget_tokens = Some(max_visible_tokens.saturating_sub(used) as u64);
+        response.budget_exhausted = Some(false);
+    }
+}
+
+/// Zero-hit + truncated is not "not found". Name the reason so a harness can
+/// retry with a larger budget instead of accepting an empty answer.
+pub(crate) fn mark_budget_exhausted_miss(response: &mut ToolResponse) {
+    if response.diagnostic.is_some() {
+        return;
+    }
+    response.diagnostic = Some(tokenzero_core::Diagnostic {
+        code: "budget_exhausted".into(),
+        message: "scan stopped on a budget before a complete miss could be proven".into(),
+        repair: Some("raise max_files, narrow the path, or retry with a larger budget".into()),
+    });
+}
+
 /// Empty search-family results otherwise render as a bare `refs:` footer with
 /// no signal that the call succeeded and found nothing. Replace the empty
 /// visible text with a one-line zero-hit note and account for its cost.
@@ -976,6 +1010,52 @@ mod tests {
             literal.visible.as_ref().unwrap().text,
             "# grep no_such_token — 0 matches"
         );
+    }
+
+    #[test]
+    fn tzn67z_budget_exhausted_is_distinct_from_not_found() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a.rs"), "needle-one\n").unwrap();
+        std::fs::write(dir.path().join("b.rs"), "needle-two\n").unwrap();
+        let engine = crate::TokenZeroEngine::new(crate::EngineConfig::for_root(dir.path()));
+        let roots = [dir.path().to_path_buf()];
+
+        let miss = engine.find("no-such-token-n67z", &roots, Mode::Auto, 20, 4000);
+        assert_eq!(miss.budget_exhausted, Some(false), "{miss:?}");
+        assert!(
+            miss.remaining_budget_tokens.is_some_and(|left| left > 0),
+            "{miss:?}"
+        );
+        assert_ne!(
+            miss.diagnostic.as_ref().map(|d| d.code.as_str()),
+            Some("budget_exhausted")
+        );
+        assert!(
+            miss.visible
+                .as_ref()
+                .is_some_and(|v| v.text.contains("0 matches")),
+            "{miss:?}"
+        );
+
+        let exhausted = engine.find("no-such-token-n67z", &roots, Mode::Auto, 0, 4000);
+        assert_eq!(exhausted.budget_exhausted, Some(true), "{exhausted:?}");
+        assert_eq!(exhausted.remaining_budget_tokens, Some(0), "{exhausted:?}");
+        assert_eq!(
+            exhausted.diagnostic.as_ref().map(|d| d.code.as_str()),
+            Some("budget_exhausted"),
+            "{exhausted:?}"
+        );
+        assert!(
+            exhausted
+                .visible
+                .as_ref()
+                .is_some_and(|v| v.text.contains("scan truncated")),
+            "{exhausted:?}"
+        );
+
+        let capped = engine.find("needle", &roots, Mode::Auto, 1, 4000);
+        assert_eq!(capped.budget_exhausted, Some(true), "{capped:?}");
+        assert_eq!(capped.remaining_budget_tokens, Some(0), "{capped:?}");
     }
 
     fn decode_grouped_paths(rendered: &str) -> Vec<PathBuf> {

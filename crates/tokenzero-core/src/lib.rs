@@ -261,6 +261,14 @@ pub struct ToolResponse {
     /// Tokens that a hit would have avoided showing. Zero on forced-miss.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub saved_tokens_estimate: Option<u64>,
+    /// Leftover visible-token budget after this result. Distinct from
+    /// accounting so agents can adapt near exhaustion without parsing notes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remaining_budget_tokens: Option<u64>,
+    /// True when a scan or render stopped on a budget. A zero-hit with this
+    /// set is not a proven miss -- retry with a larger budget.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub budget_exhausted: Option<bool>,
 }
 
 /// Terminal-recovery marker for adapter compaction pipelines (yevj).

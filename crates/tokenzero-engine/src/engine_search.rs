@@ -293,8 +293,15 @@ impl TokenZeroEngine {
                     truncated,
                 ),
             );
+            attach_budget_signal(&mut response, max_visible_tokens, truncated);
+            if truncated {
+                mark_budget_exhausted_miss(&mut response);
+            }
         } else if stats.truncated_by_results || stats.truncated_by_visit {
             apply_truncated_hint(&mut response, mode);
+            attach_budget_signal(&mut response, max_visible_tokens, true);
+        } else {
+            attach_budget_signal(&mut response, max_visible_tokens, false);
         }
         response
     }
@@ -380,6 +387,13 @@ impl TokenZeroEngine {
                     truncated,
                 ),
             );
+            attach_budget_signal(&mut response, max_visible_tokens, truncated);
+            if truncated {
+                mark_budget_exhausted_miss(&mut response);
+            }
+        } else {
+            let exhausted = max_files > 0 && rows.len() >= max_files;
+            attach_budget_signal(&mut response, max_visible_tokens, exhausted);
         }
         response
     }
@@ -437,6 +451,13 @@ impl TokenZeroEngine {
                 mode,
                 with_guidance(format!("# tree — 0 entries{suffix}"), "tree", "", truncated),
             );
+            attach_budget_signal(&mut response, max_visible_tokens, truncated);
+            if truncated {
+                mark_budget_exhausted_miss(&mut response);
+            }
+        } else {
+            let exhausted = max_files > 0 && entries.len() >= max_files;
+            attach_budget_signal(&mut response, max_visible_tokens, exhausted);
         }
         response
     }

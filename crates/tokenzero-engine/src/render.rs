@@ -1583,6 +1583,15 @@ fn slim_cli_json(response: &ToolResponse) -> String {
     if let Some(saved) = response.saved_tokens_estimate {
         doc.insert("saved_tokens_estimate".into(), serde_json::json!(saved));
     }
+    if let Some(remaining) = response.remaining_budget_tokens {
+        doc.insert(
+            "remaining_budget_tokens".into(),
+            serde_json::json!(remaining),
+        );
+    }
+    if let Some(exhausted) = response.budget_exhausted {
+        doc.insert("budget_exhausted".into(), serde_json::json!(exhausted));
+    }
     serde_json::to_string(&serde_json::Value::Object(doc)).unwrap_or_else(|_| {
         format!(
             "{{\"schema_version\":\"{CLI_SCHEMA_VERSION}\",\"status\":\"error\",\"tool\":\"{}\"}}",

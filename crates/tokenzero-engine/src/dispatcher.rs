@@ -121,6 +121,8 @@ pub fn tool_response_to_domain(response: &ToolResponse) -> DomainResult {
             "content_type": response.content_type,
             "cache_status": response.cache_status,
             "saved_tokens_estimate": response.saved_tokens_estimate,
+            "remaining_budget_tokens": response.remaining_budget_tokens,
+            "budget_exhausted": response.budget_exhausted,
         })
     } else {
         json!({
