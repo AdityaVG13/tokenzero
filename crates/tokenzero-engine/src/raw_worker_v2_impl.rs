@@ -4,7 +4,7 @@ use std::io::{BufRead, Write};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
-use tokenzero_core::{Accounting, TokenizerFamily, active_tokenizer_metadata};
+use tokenzero_core::Accounting;
 use zero_process::VerifiedChild;
 
 /// Advertised and enforced raw-worker v2 output cap (9lwo): the serialized
@@ -307,39 +307,93 @@ fn effect_class(op: &str) -> &'static str {
     }
 }
 
-fn worker_tokenizer_id() -> &'static str {
-    match active_tokenizer_metadata().map(|metadata| metadata.family) {
-        Some(TokenizerFamily::Cl100k) => "estimator:tokenzero-cl100k-average-v1",
-        Some(TokenizerFamily::O200k) => "estimator:tokenzero-o200k-average-v1",
-        Some(TokenizerFamily::SentencePiece) => "estimator:tokenzero-sentencepiece-average-v1",
-        None => "estimator:tokenzero-lexical-v1",
-    }
-}
-
 fn checked_u64_count(field: &str, value: usize) -> Result<u64, String> {
     u64::try_from(value).map_err(|_| format!("{field} exceeds the raw-worker accounting range"))
 }
 
+fn encoded_len(field: &str, value: &Value) -> Result<u64, String> {
+    serde_json::to_vec(value)
+        .map_err(|error| format!("cannot encode {field} for token accounting: {error}"))
+        .and_then(|bytes| checked_u64_count(field, bytes.len()))
+}
+
+fn declared_recovery_bytes(value: &Value, allow_missing: bool) -> Result<u64, String> {
+    let Some(refs) = value.get("refs") else {
+        return if allow_missing {
+            Ok(0)
+        } else {
+            Err("successful domain result omitted refs".to_string())
+        };
+    };
+    let refs = refs
+        .as_array()
+        .ok_or_else(|| "successful domain result refs must be an array".to_string())?;
+    refs.iter().try_fold(0_u64, |total, record| {
+        let bytes = record
+            .get("bytes")
+            .and_then(Value::as_u64)
+            .ok_or_else(|| "domain ref omitted a valid bytes count".to_string())?;
+        total
+            .checked_add(bytes)
+            .ok_or_else(|| "declared recovery bytes overflowed".to_string())
+    })
+}
+
 fn worker_token_accounting(
+    op: &str,
+    args: &Value,
     value: &Value,
 ) -> Result<raw_worker_v2_protocol::WorkerTokenAccountingV1, String> {
-    let accounting_value = value
+    let is_job = op == zero_abi::TOKEN_JOB_OPERATION_V1;
+    let accounting = value
         .get("accounting")
-        .ok_or_else(|| "successful domain result omitted accounting".to_string())?;
-    let accounting: Accounting = serde_json::from_value(accounting_value.clone())
-        .map_err(|error| format!("invalid domain accounting: {error}"))?;
+        .map(|accounting| {
+            serde_json::from_value::<Accounting>(accounting.clone())
+                .map_err(|error| format!("invalid domain accounting: {error}"))
+        })
+        .transpose()?;
+    if accounting.is_none() && !is_job {
+        return Err("successful domain result omitted accounting".to_string());
+    }
+    if accounting
+        .as_ref()
+        .is_some_and(|accounting| accounting.cached_tokens > accounting.billed_tokens)
+    {
+        return Err("worker token accounting cached_tokens exceeds billed_tokens".to_string());
+    }
+    // UTF-8/JSON bytes are a tokenizer-independent upper bound: every token
+    // consumes at least one source byte. Count the complete request args and
+    // returned domain JSON, plus exact declared payload bytes behind refs.
+    // This is intentionally conservative until a vocabulary-backed tokenizer
+    // is linked; it must never be mislabeled as an estimate or exact count.
+    let input_bytes = encoded_len("request args", args)?;
+    let output_bytes = encoded_len("domain result", value)?;
+    let recovery_bytes = declared_recovery_bytes(value, is_job)?;
+    let raw_tokens = input_bytes
+        .checked_add(output_bytes)
+        .and_then(|value| value.checked_add(recovery_bytes))
+        .ok_or_else(|| "raw token upper bound overflowed".to_string())?;
+    let domain_billed = accounting
+        .as_ref()
+        .map(|accounting| checked_u64_count("billed_tokens", accounting.billed_tokens))
+        .transpose()?
+        .unwrap_or(output_bytes);
+    let cached_tokens = accounting
+        .as_ref()
+        .map(|accounting| checked_u64_count("cached_tokens", accounting.cached_tokens))
+        .transpose()?
+        .unwrap_or(0);
     let worker = raw_worker_v2_protocol::WorkerTokenAccountingV1 {
-        tokenizer_id: worker_tokenizer_id().to_string(),
-        count_kind: raw_worker_v2_protocol::WorkerTokenCountKind::Estimate,
-        raw_tokens: checked_u64_count("raw_tokens", accounting.raw_tokens)?,
-        visible_tokens: checked_u64_count("visible_tokens", accounting.visible_tokens)?,
-        recovery_tokens: checked_u64_count("recovery_tokens", accounting.recovery_tokens)?,
-        billed_tokens: checked_u64_count("billed_tokens", accounting.billed_tokens)?,
-        cached_tokens: checked_u64_count("cached_tokens", accounting.cached_tokens)?,
-        exact_ref_tokens: accounting
-            .exact_ref_tokens
-            .map(|tokens| checked_u64_count("exact_ref_tokens", tokens))
-            .transpose()?,
+        tokenizer_id: "conservative:utf8-json-bytes-v1".to_string(),
+        count_kind: raw_worker_v2_protocol::WorkerTokenCountKind::ConservativeUpperBound,
+        raw_tokens,
+        visible_tokens: output_bytes,
+        recovery_tokens: recovery_bytes,
+        billed_tokens: domain_billed.max(output_bytes),
+        cached_tokens,
+        // A ref's exact vocabulary count is unknown on this path. Preserve
+        // that fact rather than forwarding the domain estimator as exact.
+        exact_ref_tokens: None,
     };
     zero_abi::validate_worker_token_accounting_v1(&worker)
         .map_err(|error| format!("invalid worker token accounting: {error}"))?;
@@ -730,7 +784,7 @@ fn dispatch_call(engine: &TokenZeroEngine, ctx: &CallCtx, cancel: &Arc<CancelSta
         },"trace":ctx.trace.clone()});
     }
     let worker_token_accounting = if ctx.worker_token_accounting_requested {
-        match worker_token_accounting(&value) {
+        match worker_token_accounting(&ctx.op, &ctx.args, &value) {
             Ok(accounting) => Some(accounting),
             Err(message) => {
                 return json!({"kind":"error","request_id":ctx.id.clone(),"error":{
@@ -1022,34 +1076,23 @@ mod tests {
         zero_abi::validate_worker_token_accounting_v1(&accounting).unwrap();
         assert_eq!(
             accounting.count_kind,
-            raw_worker_v2_protocol::WorkerTokenCountKind::Estimate
+            raw_worker_v2_protocol::WorkerTokenCountKind::ConservativeUpperBound
         );
-        assert!(accounting.tokenizer_id.starts_with("estimator:"));
+        assert_eq!(accounting.tokenizer_id, "conservative:utf8-json-bytes-v1");
         let timeline: raw_worker_v2_protocol::EngineStageTimelineV1 =
             serde_json::from_value(response["engine_timeline"].clone()).unwrap();
         zero_abi::validate_engine_stage_timeline_v1(&timeline).unwrap();
         assert_eq!(timeline.spans[0].stage, "tokenzero.raw_worker_call");
         let domain = &response["result"]["value"]["accounting"];
-        assert_eq!(
-            accounting.raw_tokens,
-            domain["raw_tokens"].as_u64().unwrap()
-        );
-        assert_eq!(
-            accounting.visible_tokens,
-            domain["visible_tokens"].as_u64().unwrap()
-        );
-        assert_eq!(
-            accounting.recovery_tokens,
-            domain["recovery_tokens"].as_u64().unwrap()
-        );
-        assert_eq!(
-            accounting.billed_tokens,
-            domain["billed_tokens"].as_u64().unwrap()
-        );
+        assert!(accounting.raw_tokens >= accounting.visible_tokens);
+        assert!(accounting.visible_tokens >= domain["visible_tokens"].as_u64().unwrap());
+        assert!(accounting.recovery_tokens >= domain["recovery_tokens"].as_u64().unwrap());
+        assert!(accounting.billed_tokens >= accounting.visible_tokens);
         assert_eq!(
             accounting.cached_tokens,
             domain["cached_tokens"].as_u64().unwrap()
         );
+        assert_eq!(accounting.exact_ref_tokens, None);
         let encoded = serde_json::to_vec(&response).unwrap();
         let decoded = zero_abi::decode_response_frame(
             &encoded,
@@ -1206,20 +1249,57 @@ mod tests {
 
     #[test]
     fn missing_or_inconsistent_domain_accounting_fails_loudly() {
-        assert!(worker_token_accounting(&json!({})).is_err());
-        let error = worker_token_accounting(&json!({"accounting":{
-            "raw_tokens":10,
-            "visible_tokens":5,
-            "recovery_tokens":0,
-            "billed_tokens":1,
-            "cached_tokens":2,
-            "exact_ref_tokens":0
-        }}))
+        assert!(worker_token_accounting("read", &json!({}), &json!({})).is_err());
+        let error = worker_token_accounting(
+            "read",
+            &json!({}),
+            &json!({"refs":[],"accounting":{
+                "raw_tokens":10,
+                "visible_tokens":5,
+                "recovery_tokens":0,
+                "billed_tokens":1,
+                "cached_tokens":2,
+                "exact_ref_tokens":0
+            }}),
+        )
         .unwrap_err();
         assert!(
             error.contains("cached_tokens exceeds billed_tokens"),
             "{error}"
         );
+
+        let unicode = json!({
+            "visible":{"kind":"capsule","text":"é🙂"},
+            "refs":[{"kind":"blob","ref":"tz://blob/example","bytes":9,"live":true}],
+            "accounting":{
+                "raw_tokens":1,
+                "visible_tokens":1,
+                "recovery_tokens":1,
+                "billed_tokens":1,
+                "cached_tokens":0
+            }
+        });
+        let upper = worker_token_accounting("read", &json!({"input":"é🙂"}), &unicode).unwrap();
+        assert_eq!(
+            upper.count_kind,
+            raw_worker_v2_protocol::WorkerTokenCountKind::ConservativeUpperBound
+        );
+        assert!(upper.raw_tokens >= upper.visible_tokens + 9);
+        assert_eq!(upper.recovery_tokens, 9);
+        assert_eq!(upper.exact_ref_tokens, None);
+
+        let job = worker_token_accounting(
+            zero_abi::TOKEN_JOB_OPERATION_V1,
+            &json!({"id":"job-1"}),
+            &json!({"id":"job-1","status":"exited"}),
+        )
+        .unwrap();
+        assert_eq!(
+            job.count_kind,
+            raw_worker_v2_protocol::WorkerTokenCountKind::ConservativeUpperBound
+        );
+        assert_eq!(job.cached_tokens, 0);
+        assert_eq!(job.recovery_tokens, 0);
     }
 
     #[test]
