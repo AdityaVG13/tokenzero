@@ -926,7 +926,7 @@ mod tests {
             DigestV1::from_bytes([2; 32]),
             &tokenizer,
             vec![anchor.clone()],
-            &[page.clone()],
+            std::slice::from_ref(&page),
             &stable_capsule_map,
             &empty_tail,
         )
