@@ -44,7 +44,15 @@ pub use entity_novelty::{
     read_entity_novelty, scope_digest, write_entity_novelty,
 };
 
+pub mod store_schema;
 pub mod working_set;
+
+pub use store_schema::{
+    SHADOW_JSONL_RING_CAP, STORE_SCHEMA_MAJOR, STORE_SCHEMA_MINOR, STORE_SCHEMA_NAME, SchemaAdmit,
+    SchemaSkewError, StoreSchemaStamp, StoreSchemaVersion, admit_store_schema,
+    admit_store_schema_against, append_shadow_jsonl, recover_actioncache_segment,
+    write_actioncache_segment,
+};
 
 pub use session_aliases::{
     SESSION_ALIAS_HEX_LEN, canonical_full_blob_ref, is_full_hash_blob_bare, is_session_alias_bare,
