@@ -41,12 +41,11 @@ fn contract_digest_is_deterministic() {
 
 #[test]
 fn contract_digest_matches_frozen_operation_abi() {
-    // Re-pinned 2026-08-07 after F-004 registered the existing
-    // zero.token.job CodeMode operation and fully-qualified executor aliases.
-    // The digest change is the receipt for that semantic ABI expansion.
+    // Re-pinned 2026-08-12 after adopting ZeroStack CanonicalRegistry v2 for
+    // order-independent dispatch validation and set-like field normalization.
     assert_eq!(
         contract_digest_hex(),
-        "8b8c1f36bfa746aed33706edbf395830e65dc44b12ee975ff6a14d44db07e1bd"
+        "a242622d6a3825403151fd784c6fadf85248d40150df6a550cdcb6374ba24edb"
     );
 }
 
@@ -250,4 +249,46 @@ fn report_tool_issue_appears_on_both_surfaces() {
     let op = operation_by_name("tz_report_tool_issue").expect("report tool");
     assert!(op.exposure.fastmcp_tool);
     assert!(op.exposure.codemode_mcp_tool);
+}
+
+#[test]
+fn semantic_manifest_ignores_registry_declaration_order() {
+    let expected = contract_manifest();
+    let mut reversed = all_operations().to_vec();
+    reversed.reverse();
+    assert_eq!(
+        super::digest::contract_manifest_for(&reversed).expect("reversed registry validates"),
+        expected
+    );
+}
+
+#[test]
+fn semantic_manifest_rejects_duplicate_set_members() {
+    const DUPLICATE_CAPABILITIES: &[&str] = &["read", "read"];
+    let mut operations = all_operations().to_vec();
+    operations[0].capabilities = DUPLICATE_CAPABILITIES;
+    let error = super::digest::contract_manifest_for(&operations)
+        .expect_err("duplicate capabilities must fail closed");
+    assert!(
+        error.contains("capabilities contains duplicates"),
+        "{error}"
+    );
+
+    let mut operations = all_operations().to_vec();
+    operations[0].arg_aliases = json!({"path": ["file", "file"]});
+    let error = super::digest::contract_manifest_for(&operations)
+        .expect_err("duplicate argument aliases must fail closed");
+    assert!(
+        error.contains("arg_aliases.path contains duplicates"),
+        "{error}"
+    );
+}
+
+#[test]
+fn semantic_manifest_uses_hub_registry_collision_validation() {
+    let mut operations = all_operations().to_vec();
+    operations[1].name = operations[0].name;
+    let error = super::digest::contract_manifest_for(&operations)
+        .expect_err("duplicate canonical operation names must fail closed");
+    assert!(error.contains("collides"), "{error}");
 }
