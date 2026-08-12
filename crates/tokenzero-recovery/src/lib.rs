@@ -15,7 +15,7 @@ use std::sync::{
     atomic::{AtomicU8, AtomicU64, Ordering},
 };
 use std::thread;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime};
 use thiserror::Error;
 use tokenzero_core::{ContentType, count_tokens, error_block, id_for, sha256_hex, symbol_block};
 
@@ -46,6 +46,7 @@ pub use entity_novelty::{
 
 pub mod action_cache;
 pub mod cachezero;
+pub mod store_hygiene;
 pub mod store_schema;
 pub mod working_set;
 
@@ -72,6 +73,10 @@ pub use session_aliases::{
     is_session_ordinal_bare, parse_session_ordinal_bare, rewrite_full_hash_blob_refs_in_text,
     rewrite_full_hash_blob_refs_in_value, session_alias_hex_keyed, session_ordinal_ref,
     session_visible_blob_alias, session_visible_blob_alias_keyed, split_ref_fragment,
+};
+pub use store_hygiene::{
+    BlobSidecarPruneReport, RecoveryBlobPruneReport, STALE_TMP_MAX_AGE, TmpSweepReport,
+    prune_blob_sidecars, prune_recovery_blobs, recovery_blob_status, sweep_stale_tmp_files,
 };
 
 #[cfg(test)]
@@ -938,7 +943,7 @@ fn next_ordinal_generation(path: &Path) -> Result<u64, RecoveryError> {
 }
 
 impl RecoveryState {
-    fn empty(config: &RecoveryConfig) -> Self {
+    pub(crate) fn empty(config: &RecoveryConfig) -> Self {
         Self {
             version: 1,
             max_blobs: config.max_blobs,
@@ -976,7 +981,7 @@ impl RecoveryState {
 pub struct RecoveryStore {
     pub config: RecoveryConfig,
     pub persistence_path: Option<PathBuf>,
-    state: RecoveryState,
+    pub(crate) state: RecoveryState,
     session_refs: Vec<String>,
     /// Transient mapping from ref id to the content class inferred at store time.
     /// Used only to seed ref-index entries with a class before the state is persisted;
@@ -3421,6 +3426,20 @@ fn write_ref_index_entries<'a>(
     fs::rename(&tmp, shard).map_err(RecoveryError::from)
 }
 
+pub(crate) fn ref_index_blob_lru(ref_id: &str) -> (u64, u128) {
+    ref_index_blob_entries(ref_id)
+        .map(|(_, entries)| {
+            entries.into_iter().fold((0_u64, 0_u128), |acc, item| {
+                (
+                    acc.0
+                        .max(item.expansion_count.max(u64::from(item.expanded))),
+                    acc.1.max(item.last_expanded_ts.unwrap_or(0)),
+                )
+            })
+        })
+        .unwrap_or_default()
+}
+
 fn ref_index_blob_entries(ref_id: &str) -> Option<(PathBuf, Vec<RefIndexEntry>)> {
     let root = ref_index_root()?;
     let mut by_store = BTreeMap::<String, RefIndexEntry>::new();
@@ -3695,7 +3714,7 @@ pub fn export_class_stats() -> serde_json::Value {
     })
 }
 
-fn load_state(
+pub(crate) fn load_state(
     path: &Path,
     config: &RecoveryConfig,
 ) -> Result<Option<RecoveryState>, RecoveryError> {
@@ -3723,7 +3742,7 @@ const BLOB_EXTERNALIZE_MIN_BYTES: usize = 64 * 1024;
 const STREAM_READ_BUFFER_BYTES: usize = 64 * 1024;
 const BLOB_MARKER_PREFIX: &str = "\u{0}tzx:v1:";
 
-fn blob_sidecar_dir(cache_path: &Path) -> PathBuf {
+pub(crate) fn blob_sidecar_dir(cache_path: &Path) -> PathBuf {
     append_file_name_suffix(cache_path, ".blobs")
 }
 
@@ -3800,7 +3819,7 @@ fn externalize_blob_value(cache_path: &Path, text: &str, hash: &str) -> Option<S
     Some(format!("{BLOB_MARKER_PREFIX}{hash}:{}:", text.len()))
 }
 
-fn parse_blob_marker(value: &str) -> Option<(&str, usize)> {
+pub(crate) fn parse_blob_marker(value: &str) -> Option<(&str, usize)> {
     let rest = value.strip_prefix(BLOB_MARKER_PREFIX)?;
     let (hash, rest) = rest.split_at_checked(64)?;
     if !hash.bytes().all(|b| b.is_ascii_hexdigit()) {
@@ -4534,7 +4553,7 @@ fn hex_value(byte: u8) -> Option<u8> {
     }
 }
 
-fn recovery_lock_path(path: &Path) -> PathBuf {
+pub(crate) fn recovery_lock_path(path: &Path) -> PathBuf {
     append_file_name_suffix(path, ".lock")
 }
 
@@ -4551,74 +4570,6 @@ fn recovery_tmp_path(path: &Path) -> PathBuf {
     parent.join(tmp_name)
 }
 
-/// Age after which an abandoned atomic-write temp file is reclaimable. A
-/// live persist holds its temp file for milliseconds; an hour-old one belongs
-/// to a process that died mid-write.
-pub const STALE_TMP_MAX_AGE: Duration = Duration::from_secs(60 * 60);
-
-/// Outcome of a stale temp-file sweep. With `dry_run`, `removed*` counts what
-/// would be reclaimed without unlinking anything.
-#[derive(Debug, Clone, Default, Serialize)]
-pub struct TmpSweepReport {
-    pub dry_run: bool,
-    pub scanned: usize,
-    pub removed: usize,
-    pub removed_bytes: u64,
-    pub failed: usize,
-}
-
-/// Remove matching recovery temp files older than `max_age`.
-/// Dry runs report candidates; per-file failures are counted and fail open.
-pub fn sweep_stale_tmp_files(
-    cache_path: &Path,
-    max_age: Duration,
-    dry_run: bool,
-) -> TmpSweepReport {
-    let mut report = TmpSweepReport {
-        dry_run,
-        ..TmpSweepReport::default()
-    };
-    let Some((parent, cache_name)) = cache_path
-        .parent()
-        .zip(cache_path.file_name().and_then(|name| name.to_str()))
-    else {
-        return report;
-    };
-    let Ok(entries) = fs::read_dir(parent) else {
-        return report;
-    };
-    let now = SystemTime::now();
-    for entry in entries.flatten() {
-        let path = entry.path();
-        let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
-            continue;
-        };
-        if !name.ends_with(".tmp") || !name.contains(cache_name) {
-            continue;
-        }
-        let Ok(meta) = entry.metadata() else { continue };
-        if !meta.is_file() {
-            continue;
-        }
-        report.scanned += 1;
-        let expired = meta
-            .modified()
-            .ok()
-            .and_then(|modified| now.duration_since(modified).ok())
-            .is_some_and(|age| age > max_age);
-        if !expired {
-            continue;
-        }
-        if dry_run || fs::remove_file(path).is_ok() {
-            report.removed += 1;
-            report.removed_bytes += meta.len();
-        } else {
-            report.failed += 1;
-        }
-    }
-    report
-}
-
 fn append_file_name_suffix(path: &Path, suffix: &str) -> PathBuf {
     let parent = path.parent().unwrap_or_else(|| Path::new("."));
     let mut file_name = path
@@ -4629,12 +4580,12 @@ fn append_file_name_suffix(path: &Path, suffix: &str) -> PathBuf {
     parent.join(file_name)
 }
 
-struct PersistLock {
+pub(crate) struct PersistLock {
     file: fs::File,
 }
 
 impl PersistLock {
-    fn acquire(path: PathBuf) -> Result<Self, RecoveryError> {
+    pub(crate) fn acquire(path: PathBuf) -> Result<Self, RecoveryError> {
         Self::acquire_with_retries(path, LOCK_RETRIES)
     }
 
@@ -4783,229 +4734,4 @@ mod select_content_tests {
             "two\nthree\nfour\n"
         );
     }
-}
-
-/// Result of enforcing the legacy recovery sidecar byte budget.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct BlobSidecarPruneReport {
-    pub bytes_before: u64,
-    pub bytes_after: u64,
-    pub removed_files: usize,
-    pub retained_referenced: usize,
-}
-
-/// Remove oldest unreferenced legacy blob sidecars until the budget is met.
-/// Sidecars referenced by the authoritative snapshot or journal are retained.
-pub fn prune_blob_sidecars(
-    cache_path: &Path,
-    max_bytes: u64,
-    dry_run: bool,
-) -> Result<BlobSidecarPruneReport, RecoveryError> {
-    let _lock = PersistLock::acquire(recovery_lock_path(cache_path))?;
-    let config = RecoveryConfig::default();
-    let state = load_state(cache_path, &config)?.unwrap_or_else(|| RecoveryState::empty(&config));
-    let referenced: HashSet<String> = state
-        .blobs
-        .values()
-        .filter_map(|entry| match entry {
-            BlobEntry::Inline(value) => parse_blob_marker(value).map(|(hash, _)| hash.to_string()),
-            BlobEntry::FileRef { .. } => None,
-        })
-        .collect();
-    let directory = blob_sidecar_dir(cache_path);
-    let mut files = Vec::new();
-    let mut bytes_before = 0_u64;
-    let mut retained_referenced = 0_usize;
-    match fs::read_dir(&directory) {
-        Ok(entries) => {
-            for entry in entries {
-                let entry = entry?;
-                let metadata = entry.metadata()?;
-                if !metadata.is_file() {
-                    continue;
-                }
-                let path = entry.path();
-                let Some(hash) = path.file_stem().and_then(|value| value.to_str()) else {
-                    continue;
-                };
-                let len = metadata.len();
-                bytes_before = bytes_before.saturating_add(len);
-                if referenced.contains(hash) {
-                    retained_referenced += 1;
-                } else {
-                    files.push((metadata.modified().unwrap_or(UNIX_EPOCH), path, len));
-                }
-            }
-        }
-        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-        Err(error) => return Err(error.into()),
-    }
-    files.sort_by_key(|(modified, _, _)| *modified);
-    let mut bytes_after = bytes_before;
-    let mut removed_files = 0_usize;
-    for (_, path, len) in files {
-        if bytes_after <= max_bytes {
-            break;
-        }
-        if !dry_run {
-            match fs::remove_file(&path) {
-                Ok(()) => {}
-                Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-                Err(error) => return Err(error.into()),
-            }
-        }
-        bytes_after = bytes_after.saturating_sub(len);
-        removed_files += 1;
-    }
-    Ok(BlobSidecarPruneReport {
-        bytes_before,
-        bytes_after,
-        removed_files,
-        retained_referenced,
-    })
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct RecoveryBlobPruneReport {
-    pub bytes_before: u64,
-    pub bytes_after: u64,
-    pub freed_bytes: u64,
-    pub removed_files: usize,
-    pub removed_referenced: usize,
-    pub expired_files: usize,
-    pub max_bytes: u64,
-    pub max_age_seconds: u64,
-    pub dry_run: bool,
-}
-
-/// Enforce byte and age bounds over the complete recovery sidecar store.
-/// Never-expanded blobs are selected before expanded blobs; expanded blobs use
-/// their durable ref-index last-expand timestamp as the LRU key.
-pub fn prune_recovery_blobs(
-    cache_path: &Path,
-    max_bytes: u64,
-    max_age: Duration,
-    dry_run: bool,
-) -> Result<RecoveryBlobPruneReport, RecoveryError> {
-    let directory = blob_sidecar_dir(cache_path);
-    let mut store = RecoveryStore::new(Some(cache_path.to_path_buf()));
-    let mut files = Vec::new();
-    let mut bytes_before = 0_u64;
-    let now = SystemTime::now();
-    match fs::read_dir(&directory) {
-        Ok(entries) => {
-            for entry in entries {
-                let entry = entry?;
-                let metadata = entry.metadata()?;
-                if !metadata.is_file() {
-                    continue;
-                }
-                let path = entry.path();
-                let Some(hash) = path.file_stem().and_then(|value| value.to_str()) else {
-                    continue;
-                };
-                let ref_id = format!("tz://blob/{hash}");
-                let len = metadata.len();
-                bytes_before = bytes_before.saturating_add(len);
-                let modified = metadata.modified().unwrap_or(UNIX_EPOCH);
-                let expired = now.duration_since(modified).unwrap_or_default() >= max_age;
-                let (expansion_count, last_expanded) = ref_index_blob_entries(&ref_id)
-                    .map(|(_, entries)| {
-                        entries.into_iter().fold((0_u64, 0_u128), |acc, item| {
-                            (
-                                acc.0
-                                    .max(item.expansion_count.max(u64::from(item.expanded))),
-                                acc.1.max(item.last_expanded_ts.unwrap_or(0)),
-                            )
-                        })
-                    })
-                    .unwrap_or_default();
-                let referenced = store.state.blobs.contains_key(&ref_id);
-                files.push((
-                    !expired,
-                    expansion_count > 0,
-                    last_expanded,
-                    modified,
-                    path,
-                    ref_id,
-                    len,
-                    referenced,
-                ));
-            }
-        }
-        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-        Err(error) => return Err(error.into()),
-    }
-    files.sort_by(|left, right| {
-        left.0
-            .cmp(&right.0)
-            .then(left.1.cmp(&right.1))
-            .then(left.2.cmp(&right.2))
-            .then(left.3.cmp(&right.3))
-            .then(left.5.cmp(&right.5))
-    });
-    let mut bytes_after = bytes_before;
-    let mut victims = Vec::new();
-    let mut expired_files = 0_usize;
-    for (not_expired, _, _, _, path, ref_id, len, referenced) in files {
-        if not_expired && bytes_after <= max_bytes {
-            continue;
-        }
-        if !not_expired {
-            expired_files += 1;
-        }
-        bytes_after = bytes_after.saturating_sub(len);
-        victims.push((path, ref_id, len, referenced));
-    }
-    let removed_referenced = victims.iter().filter(|item| item.3).count();
-    if !dry_run {
-        for (_, ref_id, _, referenced) in &victims {
-            if *referenced {
-                let aliases: Vec<_> = store
-                    .state
-                    .aliases
-                    .iter()
-                    .filter(|(_, target)| *target == ref_id)
-                    .map(|(alias, _)| alias.clone())
-                    .collect();
-                for alias in aliases {
-                    store.remove_alias(&alias);
-                }
-                store.remove_blob(ref_id);
-            }
-        }
-        store.persist_pending()?;
-        for (path, _, _, _) in &victims {
-            match fs::remove_file(path) {
-                Ok(()) => {}
-                Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-                Err(error) => return Err(error.into()),
-            }
-        }
-    }
-    Ok(RecoveryBlobPruneReport {
-        bytes_before,
-        bytes_after,
-        freed_bytes: bytes_before.saturating_sub(bytes_after),
-        removed_files: victims.len(),
-        removed_referenced,
-        expired_files,
-        max_bytes,
-        max_age_seconds: max_age.as_secs(),
-        dry_run,
-    })
-}
-
-pub fn recovery_blob_status(cache_path: &Path) -> serde_json::Value {
-    let bytes = fs::read_dir(blob_sidecar_dir(cache_path))
-        .ok()
-        .into_iter()
-        .flatten()
-        .flatten()
-        .filter_map(|entry| entry.metadata().ok())
-        .filter(|metadata| metadata.is_file())
-        .fold(0_u64, |total, metadata| {
-            total.saturating_add(metadata.len())
-        });
-    serde_json::json!({"bytes": bytes, "freed_bytes": 0, "path": blob_sidecar_dir(cache_path)})
 }
