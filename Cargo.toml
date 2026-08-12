@@ -53,6 +53,7 @@ zero-ledger = { git = "https://github.com/AdityaVG13/zerostack", rev = "8188fb08
 zero-ref = { git = "https://github.com/AdityaVG13/zerostack", rev = "8188fb08698a5ed29bff6b339657bdd1933de3cc" }
 zero-process = { git = "https://github.com/AdityaVG13/zerostack", rev = "8188fb08698a5ed29bff6b339657bdd1933de3cc" }
 zero-store = { git = "https://github.com/AdityaVG13/zerostack", rev = "8188fb08698a5ed29bff6b339657bdd1933de3cc" }
+zero-testkit = { git = "https://github.com/AdityaVG13/zerostack", rev = "b0978d037613d107fb060152500110cbaceb13e8", default-features = false }
 # Hub-owned MCP transport authority (replaces the retired zero-codemode fastmcp carrier).
 zero-mcp = { git = "https://github.com/AdityaVG13/zerostack", rev = "8188fb08698a5ed29bff6b339657bdd1933de3cc", features = ["fastmcp"] }
 

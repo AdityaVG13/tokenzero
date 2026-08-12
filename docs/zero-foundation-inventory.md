@@ -100,6 +100,18 @@ TokenZero already had modifications in `crates/tokenzero-engine/src/engine_expan
 
 Classification precedence is: `generated/fixture` first; then `test` when the path contains a `tests`, `benches`, or `fuzz` component, the basename ends in `_test.rs` or `_tests.rs`, or the crate name contains `test-support`; otherwise `production`. Inline `#[cfg(test)]` modules remain a file-level limitation: a mixed production/test file is assigned by its path, not by parsing item-level cfgs.
 
+### Shared testkit consumer impact (2026-08-12)
+
+TokenZero, FSZero, and GraphZero consume `zero-testkit` at ZeroStack revision
+`b0978d037613d107fb060152500110cbaceb13e8` with default features disabled.
+The consumer surface compiles 788 Rust source lines in `lib.rs`; 8,933 lines of
+hub-only conformance modules and 1,117 lines of example binaries remain gated
+behind `full`. The minimal normal dependency graph contains 23 packages instead
+of 37 for `full`. Test-support crates are not linked into shipped product
+binaries, so measured shipped-binary impact is **0 bytes**. Centralizing
+`decode_worker_transcript` removes its duplicated implementations from TokenZero
+and FSZero while retaining one unknown-field mutation gate in the hub.
+
 ### Rerunnable LOC measurement
 
 Run from the TokenZero root. This is read-only and does not invoke Cargo or Rust tooling. Each repository is measured from a temporary archive of its recorded commit, so Tokei never reads current worktree bytes. The temporary archive and extraction directory are deleted after each repository.

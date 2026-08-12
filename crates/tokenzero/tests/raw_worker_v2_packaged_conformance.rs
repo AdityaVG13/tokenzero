@@ -22,6 +22,7 @@ use std::sync::mpsc::{Receiver, channel};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tempfile::tempdir;
+use tokenzero_test_support::decode_worker_transcript;
 
 const PROTOCOL_VERSION: &str = "zerostack.raw_worker.v2";
 const PROTOCOL_DIGEST: &str = "e2daca4d95cbd2780f2e10b30b823e9398747bfe15e38ca0810f634a387aeace";
@@ -187,6 +188,8 @@ impl Worker {
             .lines
             .recv_timeout(Duration::from_secs(60))
             .unwrap_or_else(|e| panic!("{what}: no worker frame within 60s ({e})"));
+        decode_worker_transcript(line.as_bytes())
+            .unwrap_or_else(|e| panic!("{what}: worker violated shared response codec ({e})"));
         serde_json::from_str(&line)
             .unwrap_or_else(|e| panic!("{what}: worker emitted non-JSON line ({e}): {line:?}"))
     }

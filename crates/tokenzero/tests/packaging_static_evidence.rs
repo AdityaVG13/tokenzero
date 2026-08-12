@@ -20,6 +20,8 @@ fn workspace_has_the_three_canonical_packages() {
     assert!(root.contains("\"crates/tokenzero\""));
     assert!(root.contains("\"crates/tokenzero-codemode\""));
     assert!(root.contains("\"crates/tokenzero-test-support\""));
+    assert!(root.contains("zero-testkit = {"));
+    assert!(root.contains("default-features = false"));
 
     let cli = read("crates/tokenzero/Cargo.toml");
     assert!(cli.contains("name = \"tokenzero-cli\""));
@@ -37,7 +39,7 @@ fn workspace_has_the_three_canonical_packages() {
 
     let support = read("crates/tokenzero-test-support/Cargo.toml");
     assert!(support.contains("name = \"tokenzero-test-support\""));
-    assert!(support.contains("zero-abi.workspace = true"));
+    assert!(support.contains("zero-testkit = { workspace = true, default-features = false }"));
 }
 
 #[test]

@@ -1,33 +1,11 @@
-//! Engine-owned fixtures for public TokenZero worker conformance.
+//! TokenZero-specific tests plus the shared ZeroStack test contract.
 
-use zero_abi::{DEFAULT_MAX_FRAME_BYTES, FrameCodecError, WorkerResponseFrame};
-
-/// Decode every non-empty NDJSON response through the shared hub codec.
-pub fn decode_worker_transcript(bytes: &[u8]) -> Result<Vec<WorkerResponseFrame>, FrameCodecError> {
-    bytes
-        .split(|byte| *byte == b'\n')
-        .filter(|line| !line.is_empty())
-        .map(|line| zero_abi::decode_response_frame(line, DEFAULT_MAX_FRAME_BYTES))
-        .collect()
-}
+pub use zero_testkit;
+pub use zero_testkit::decode_worker_transcript;
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn transcript_decoder_uses_strict_shared_shutdown_codec() {
-        let canonical = b"{\"kind\":\"shutdown_ack\"}\n";
-        assert!(matches!(
-            decode_worker_transcript(canonical).as_deref(),
-            Ok([WorkerResponseFrame::ShutdownAck])
-        ));
-        let mutant = b"{\"kind\":\"shutdown_ack\",\"extra\":true}\n";
-        assert_eq!(
-            decode_worker_transcript(mutant).unwrap_err().kind(),
-            "invalid_frame"
-        );
-    }
 
     #[test]
     fn installer_prints_only_the_canonical_backend_selector() {
@@ -51,11 +29,8 @@ mod tests {
             .expect("legacy selector starts");
         assert_eq!(legacy.status.code(), Some(2));
         let stderr = String::from_utf8(legacy.stderr).expect("UTF-8 diagnostic");
-        assert!(stderr.contains("legacy MCP artifact retired"), "{stderr}");
-        assert!(
-            stderr.contains("ZeroStack aggregate host adapter"),
-            "{stderr}"
-        );
+        assert!(stderr.contains("classic MCP compatibility"), "{stderr}");
+        assert!(stderr.contains("surface-mcp"), "{stderr}");
 
         let blocked_root = std::env::temp_dir().join(format!(
             "tokenzero-worker-install-blocked-{}",
@@ -92,7 +67,7 @@ mod tests {
             "fastmcp",
             "machine-permit",
             "tokenzero-mcp-compat",
-            "zero-codemode",
+            "zero-codemode =",
         ] {
             assert!(
                 !manifest.contains(forbidden),

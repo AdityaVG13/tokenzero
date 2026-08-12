@@ -6,4 +6,4 @@ license.workspace = true
 publish = false
 
 [dependencies]
-zero-abi.workspace = true
+zero-testkit = { workspace = true, default-features = false }
