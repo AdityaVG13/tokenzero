@@ -37,3 +37,12 @@ citation for every row below.
   sides; no conflation of formal gauge with production measurement.
 - The claim audit (`tokenzero claim-audit`) gates release-facing statements;
   this page is the reference the audit and promotion output point to.
+
+## Progress-ledger exclusion
+
+TokenZero does not commit mutable `docs/progress/` certification ledgers. They
+duplicate the Beads backlog and can outlive the receipts that justified a
+claim. Beads record unfinished or blocked work. ZeroStack receipt-generated
+claim policy records promoted evidence. This page records stable product
+non-claims. A release claim without those canonical records remains excluded;
+an ad hoc progress narrative cannot promote it.
