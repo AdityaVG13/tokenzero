@@ -689,13 +689,13 @@ impl<'a> LegacyMigration<'a> {
         // with the same short ref).
         let mut short_to_hashes: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
         for short_ref in &legacy_refs {
-            if !self.store.is_ambiguous(short_ref) {
-                if let BlobContentResult::Ok(bytes) = self.store.resolve_blob_bytes(short_ref) {
-                    short_to_hashes
-                        .entry(short_ref.clone())
-                        .or_default()
-                        .insert(full_sha256_hex(&bytes));
-                }
+            if !self.store.is_ambiguous(short_ref)
+                && let BlobContentResult::Ok(bytes) = self.store.resolve_blob_bytes(short_ref)
+            {
+                short_to_hashes
+                    .entry(short_ref.clone())
+                    .or_default()
+                    .insert(full_sha256_hex(&bytes));
             }
         }
 
@@ -858,17 +858,17 @@ impl<'a> LegacyMigration<'a> {
             }
         };
         let item = MigrationCandidate::new(content);
-        if let Some(short_hex) = short_id_hex(short_ref) {
-            if &item.full_hash[..16] != short_hex {
-                item.fail(
+        if let Some(short_hex) = short_id_hex(short_ref)
+            && &item.full_hash[..16] != short_hex
+        {
+            item.fail(
                     report, short_ref, "ambiguous-short-id",
                     format!(
                         "{short_ref}: ambiguous short ID — short prefix {short_hex} does not match full hash prefix {}",
                         &item.full_hash[..16],
                     ),
                 );
-                return;
-            }
+            return;
         }
 
         if let Some(existing) = manifest.entries.get(short_ref) {
@@ -1171,10 +1171,10 @@ impl<'a> LegacyMigration<'a> {
                 // Don't delete manifest if persist failed
                 return report;
             }
-            if let Some(path) = &self.manifest_path {
-                if path.exists() {
-                    let _ = fs::remove_file(path);
-                }
+            if let Some(path) = &self.manifest_path
+                && path.exists()
+            {
+                let _ = fs::remove_file(path);
             }
         }
 
@@ -1252,12 +1252,13 @@ impl<'a> LegacyMigration<'a> {
         }
 
         // Treat persist failure as failure. Never delete CAS.
-        if apply && report.migrated > 0 {
-            if let Err(_err) = self.store.persist_pending() {
-                report.failed += report.migrated;
-                report.migrated = 0;
-                report.record_error("store-persist", "persist failed: cleanup incomplete", None);
-            }
+        if apply
+            && report.migrated > 0
+            && let Err(_err) = self.store.persist_pending()
+        {
+            report.failed += report.migrated;
+            report.migrated = 0;
+            report.record_error("store-persist", "persist failed: cleanup incomplete", None);
         }
 
         report

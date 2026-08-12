@@ -361,13 +361,13 @@ impl TokenZeroStore {
         bytes: &[u8],
         max_object_bytes: Option<u64>,
     ) -> Result<String, TokenZeroStoreError> {
-        if let Some(limit) = max_object_bytes {
-            if bytes.len() as u64 > limit {
-                return Err(TokenZeroStoreError::PayloadTooLarge {
-                    size: bytes.len() as u64,
-                    limit,
-                });
-            }
+        if let Some(limit) = max_object_bytes
+            && bytes.len() as u64 > limit
+        {
+            return Err(TokenZeroStoreError::PayloadTooLarge {
+                size: bytes.len() as u64,
+                limit,
+            });
         }
         let cas = self
             .shared_cas

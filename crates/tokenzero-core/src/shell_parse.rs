@@ -41,10 +41,10 @@ pub(crate) fn failed_segment(cmd: &str, out: &str, err: &str, code: Option<i32>)
             if let Some(s) = evidence_named_segment(&segments, out, err) {
                 return Some(s);
             }
-            if looks_diagnostic(&combined) {
-                if let Some(s) = diagnostic_attributed_segment(&segments, out, err) {
-                    return Some(s);
-                }
+            if looks_diagnostic(&combined)
+                && let Some(s) = diagnostic_attributed_segment(&segments, out, err)
+            {
+                return Some(s);
             }
             segments.last().cloned().filter(|v| !v.is_empty())
         })

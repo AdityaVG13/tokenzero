@@ -133,7 +133,7 @@ pub fn check_active_wall_deadline_every(
     step: usize,
     every_n: usize,
 ) -> Option<(String, &'static str)> {
-    if every_n == 0 || step % every_n == 0 {
+    if every_n == 0 || step.is_multiple_of(every_n) {
         check_active_wall_deadline()
     } else {
         None

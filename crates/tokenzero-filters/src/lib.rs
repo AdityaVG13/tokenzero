@@ -304,12 +304,11 @@ fn unsafe_reason_for_commands(commands: &[ShellCommand]) -> Option<String> {
                 return Some(reason);
             }
         }
-        if is_shell_interpreter(&node.words) {
-            if let Some(payload) = shell_command_payload(&node.words) {
-                if let (Some(reason), _) = analyze_shell(payload) {
-                    return Some(reason);
-                }
-            }
+        if is_shell_interpreter(&node.words)
+            && let Some(payload) = shell_command_payload(&node.words)
+            && let (Some(reason), _) = analyze_shell(payload)
+        {
+            return Some(reason);
         }
     }
     None

@@ -244,10 +244,10 @@ pub fn resolve_tokenzero_binary() -> BinaryResolution {
         return Ok(ok);
     }
     // Fallback: current process executable (running binary is a valid discovery).
-    if let Ok(exe) = env::current_exe() {
-        if exe.is_file() {
-            return Ok(ResolvedBinary::new("tokenzero", exe, "current_exe"));
-        }
+    if let Ok(exe) = env::current_exe()
+        && exe.is_file()
+    {
+        return Ok(ResolvedBinary::new("tokenzero", exe, "current_exe"));
     }
     Err(ResolveError::new(
         "tokenzero",

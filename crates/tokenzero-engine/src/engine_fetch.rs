@@ -40,26 +40,24 @@ impl TokenZeroEngine {
         ) {
             return ToolResponse::error("fetch", blocked.code, blocked.message, blocked.repair);
         }
-        if !fresh {
-            if let Some(entry) = load_fetch_index(&index_path).entries.get(url) {
-                let age = epoch_secs().saturating_sub(entry.fetched_at_secs);
-                if age <= ttl_secs {
-                    let mut store = self.recovery_store();
-                    let cached = store.expand(&entry.blob_ref, Some("raw"), None, None, None, None);
-                    if cached.found {
-                        let recovery_tokens = store.recovery_tokens;
-                        return self.fetch_response(
-                            url,
-                            &cached.content,
-                            mode,
-                            max_visible_tokens,
-                            true,
-                            age,
-                            recovery_tokens,
-                            None,
-                            &index_path,
-                        );
-                    }
+        if !fresh && let Some(entry) = load_fetch_index(&index_path).entries.get(url) {
+            let age = epoch_secs().saturating_sub(entry.fetched_at_secs);
+            if age <= ttl_secs {
+                let mut store = self.recovery_store();
+                let cached = store.expand(&entry.blob_ref, Some("raw"), None, None, None, None);
+                if cached.found {
+                    let recovery_tokens = store.recovery_tokens;
+                    return self.fetch_response(
+                        url,
+                        &cached.content,
+                        mode,
+                        max_visible_tokens,
+                        true,
+                        age,
+                        recovery_tokens,
+                        None,
+                        &index_path,
+                    );
                 }
             }
         }

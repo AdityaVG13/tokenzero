@@ -14,19 +14,19 @@ pub fn resolve_operation(name: &str) -> Option<&'static Operation> {
     } else {
         Some(format!("tz_{name}"))
     };
-    if let Some(prefixed) = with_prefix.as_deref() {
-        if let Some(op) = operation_by_name(prefixed) {
-            return Some(op);
-        }
+    if let Some(prefixed) = with_prefix.as_deref()
+        && let Some(op) = operation_by_name(prefixed)
+    {
+        return Some(op);
     }
     for op in all_operations() {
         if op.aliases.contains(&name) {
             return Some(op);
         }
-        if let Some(binding) = op.exposure.codemode_binding {
-            if binding == name {
-                return Some(op);
-            }
+        if let Some(binding) = op.exposure.codemode_binding
+            && binding == name
+        {
+            return Some(op);
         }
         // zero.expand is alias of zero.token.expand
         if name == "zero.expand" && op.name == "tz_expand" {

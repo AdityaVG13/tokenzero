@@ -23,17 +23,18 @@ use thiserror::Error;
 // Canonical hub GC surface (schema, records, sweep, repair, validation).
 pub use zero_store::gc_project_id as project_id;
 pub use zero_store::{
+    BeforeUnlinkHook, DEFAULT_GC_REPORT_LIMIT, DryRunReport, GC_MAX_BLOB_HASHES,
+    GC_MAX_EVIDENCE_ITEMS, GC_MAX_OWNER_HOST_BYTES, GC_MAX_PRODUCER_ID_BYTES,
+    GC_MAX_PRODUCER_NAMESPACES, GC_MAX_RECORD_BYTES, GC_MAX_REPORT_OBJECTS, GC_MIN_GRACE_SECONDS,
+    GC_RECORD_TYPE_DRY_RUN, GC_RECORD_TYPE_LEASE, GC_RECORD_TYPE_PIN, GC_RECORD_TYPE_REACHABILITY,
+    GC_RECORD_TYPE_REPAIR, GC_RECORD_TYPE_SWEEP_PROGRESS, GC_REFS_FORMAT, GC_SCHEMA_VERSION,
+    GC_SCHEMA_VERSION_V1, GcCandidate, GcConfig, GcError, GcRunReceipt, GcRunState, GcVerdict,
+    LeaseOwner, LeaseRecord, PinRecord, ReachabilitySnapshot, RepairReceipt,
     current_reachability_snapshot, gc_contract_digest_hex, gc_contract_manifest,
     gc_repair_receipt_digest_hex, gc_report_digest_hex, publish_lease_record, publish_pin_record,
     publish_reachability_snapshot, refs_from_verified_bytes, remove_lease_record,
     remove_pin_record, repair_object, repair_object_receipted, run_gc, validate_dry_run_report,
-    validate_repair_receipt, BeforeUnlinkHook, DryRunReport, GcCandidate, GcConfig, GcError,
-    GcRunReceipt, GcRunState, GcVerdict, LeaseOwner, LeaseRecord, PinRecord, ReachabilitySnapshot,
-    RepairReceipt, DEFAULT_GC_REPORT_LIMIT, GC_MAX_BLOB_HASHES, GC_MAX_EVIDENCE_ITEMS,
-    GC_MAX_OWNER_HOST_BYTES, GC_MAX_PRODUCER_ID_BYTES, GC_MAX_PRODUCER_NAMESPACES,
-    GC_MAX_RECORD_BYTES, GC_MAX_REPORT_OBJECTS, GC_MIN_GRACE_SECONDS, GC_RECORD_TYPE_DRY_RUN,
-    GC_RECORD_TYPE_LEASE, GC_RECORD_TYPE_PIN, GC_RECORD_TYPE_REACHABILITY, GC_RECORD_TYPE_REPAIR,
-    GC_RECORD_TYPE_SWEEP_PROGRESS, GC_REFS_FORMAT, GC_SCHEMA_VERSION, GC_SCHEMA_VERSION_V1,
+    validate_repair_receipt,
 };
 
 /// TokenZero producer namespace for hub GC records.

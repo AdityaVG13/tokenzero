@@ -827,10 +827,10 @@ fn capsule_prefix(label: Option<&str>, max_visible_tokens: usize, raw_tokens: us
 }
 
 fn compact_label(label: &str) -> String {
-    if label.contains(['\\', '/']) {
-        if let Some(name) = Path::new(label).file_name().and_then(|name| name.to_str()) {
-            return format!(".../{name}");
-        }
+    if label.contains(['\\', '/'])
+        && let Some(name) = Path::new(label).file_name().and_then(|name| name.to_str())
+    {
+        return format!(".../{name}");
     }
     let mut chars = label.chars();
     let head: String = chars.by_ref().take(48).collect();

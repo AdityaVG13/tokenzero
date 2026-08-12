@@ -346,15 +346,15 @@ pub(crate) fn parse_fragment_spec(fragment: &str) -> Result<FragmentSpec, Fragme
     let kind = kind_byte as char;
     // Shared-contract legacy byte alias `B<start>+<len>`: the strict zero-ref
     // grammar accepts it, so every expand surface must too (bytes only).
-    if kind == 'B' {
-        if let Some((start, len)) = fragment[1..].split_once('+') {
-            let start = start
-                .parse::<usize>()
-                .map_err(|_| FragmentError::Malformed)?;
-            let len = len.parse::<usize>().map_err(|_| FragmentError::Malformed)?;
-            let end = start.checked_add(len).ok_or(FragmentError::Malformed)?;
-            return Ok(FragmentSpec::Byte { start, end });
-        }
+    if kind == 'B'
+        && let Some((start, len)) = fragment[1..].split_once('+')
+    {
+        let start = start
+            .parse::<usize>()
+            .map_err(|_| FragmentError::Malformed)?;
+        let len = len.parse::<usize>().map_err(|_| FragmentError::Malformed)?;
+        let end = start.checked_add(len).ok_or(FragmentError::Malformed)?;
+        return Ok(FragmentSpec::Byte { start, end });
     }
     let map_err = |reversed| {
         if reversed {
@@ -451,10 +451,10 @@ pub fn parse_zeroref_v1_blob(
     let fragment = fragment
         .map(|frag| parse_portable_or_lenient_fragment(ref_id, frag))
         .transpose()?;
-    if let (Some(ZeroRefFragment::Byte { end, .. }), Some(len)) = (&fragment, byte_length) {
-        if *end > len {
-            return Err(ZeroRefError::Malformed);
-        }
+    if let (Some(ZeroRefFragment::Byte { end, .. }), Some(len)) = (&fragment, byte_length)
+        && *end > len
+    {
+        return Err(ZeroRefError::Malformed);
     }
     Ok(ZeroRefV1Blob {
         scheme: scheme.to_string(),
@@ -1457,10 +1457,10 @@ impl RecoveryStore {
         for hash in &hashes {
             let ref_id = format!("tz://blob/{hash}");
             // Only publish inline blobs (not externalized sidecar markers).
-            if let Some(BlobEntry::Inline(text)) = self.state.blobs.get(&ref_id) {
-                if !text.starts_with(BLOB_MARKER_PREFIX) {
-                    let _ = cas.publish(text.as_bytes());
-                }
+            if let Some(BlobEntry::Inline(text)) = self.state.blobs.get(&ref_id)
+                && !text.starts_with(BLOB_MARKER_PREFIX)
+            {
+                let _ = cas.publish(text.as_bytes());
             }
         }
         Ok(())
@@ -1491,10 +1491,10 @@ impl RecoveryStore {
         let mut entries = Vec::new();
         for hash in &hashes {
             let ref_id = format!("tz://blob/{hash}");
-            if let Some(BlobEntry::Inline(text)) = self.state.blobs.get(&ref_id) {
-                if !text.starts_with(BLOB_MARKER_PREFIX) {
-                    entries.push(text.clone());
-                }
+            if let Some(BlobEntry::Inline(text)) = self.state.blobs.get(&ref_id)
+                && !text.starts_with(BLOB_MARKER_PREFIX)
+            {
+                entries.push(text.clone());
             }
         }
         if !entries.is_empty() {
@@ -2090,10 +2090,10 @@ impl RecoveryStore {
             return ref_id.to_string();
         };
         let (short_bare, _) = split_ref_fragment(&short);
-        if let Some(full_bare) = canonical_full_blob_ref(split_ref_fragment(ref_id).0) {
-            if self.alias_target(short_bare).as_deref() != Some(full_bare.as_str()) {
-                self.store_alias_deferred(short_bare, &full_bare);
-            }
+        if let Some(full_bare) = canonical_full_blob_ref(split_ref_fragment(ref_id).0)
+            && self.alias_target(short_bare).as_deref() != Some(full_bare.as_str())
+        {
+            self.store_alias_deferred(short_bare, &full_bare);
         }
         short
     }
@@ -2230,14 +2230,12 @@ impl RecoveryStore {
         let Some(parsed) = parse_ref(&lookup) else {
             return false;
         };
-        if parsed.kind == "blob" {
-            if let Some(cas) = &self.shared_cas {
-                if let Some(hash) = ref_index_id_part(parsed.bare) {
-                    if cas.contains(hash) {
-                        return true;
-                    }
-                }
-            }
+        if parsed.kind == "blob"
+            && let Some(cas) = &self.shared_cas
+            && let Some(hash) = ref_index_id_part(parsed.bare)
+            && cas.contains(hash)
+        {
+            return true;
         }
         let Some(path) = &self.persistence_path else {
             return self.has_ref_local(ref_id);
@@ -3095,10 +3093,10 @@ pub fn set_ref_index_disabled_override(disabled: bool) {
 }
 
 fn ref_index_root() -> Option<PathBuf> {
-    if let Some(flag) = REF_INDEX_DISABLED_OVERRIDE.get() {
-        if flag.load(std::sync::atomic::Ordering::SeqCst) {
-            return None;
-        }
+    if let Some(flag) = REF_INDEX_DISABLED_OVERRIDE.get()
+        && flag.load(std::sync::atomic::Ordering::SeqCst)
+    {
+        return None;
     }
     if let Some(path) = REF_INDEX_ROOT_OVERRIDE.with(|root| root.borrow().clone()) {
         return Some(path);
@@ -3442,10 +3440,10 @@ fn blob_reachable_in_ref_index(
     if entries.is_empty() {
         return false;
     }
-    if let Some(hash) = ref_index_id_part(ref_id) {
-        if SharedCas::new(root).contains(hash) {
-            return true;
-        }
+    if let Some(hash) = ref_index_id_part(ref_id)
+        && SharedCas::new(root).contains(hash)
+    {
+        return true;
     }
     // One load_state per unique sibling store path for this lookup. Without
     // memoization, duplicate ref-index rows re-parse the same journal.
@@ -3476,23 +3474,23 @@ fn resolve_blob_from_ref_index(
         .iter()
         .map(|entry| PathBuf::from(&entry.store_path))
         .find(|path| path.is_file());
-    if !entries.is_empty() {
-        if let Some(hash) = ref_index_id_part(ref_id) {
-            match shared_cas_utf8(&SharedCas::new(root), hash) {
-                Ok(content) => {
-                    return (
-                        RefResolve::FoundVerified {
-                            content,
-                            sha256: hash.to_string(),
-                        },
-                        indexed_store_path,
-                    );
-                }
-                Err(None) | Err(Some(SharedCasError::Corruption)) => {
-                    return (RefResolve::DecodeFailed, indexed_store_path);
-                }
-                Err(_) => {}
+    if !entries.is_empty()
+        && let Some(hash) = ref_index_id_part(ref_id)
+    {
+        match shared_cas_utf8(&SharedCas::new(root), hash) {
+            Ok(content) => {
+                return (
+                    RefResolve::FoundVerified {
+                        content,
+                        sha256: hash.to_string(),
+                    },
+                    indexed_store_path,
+                );
             }
+            Err(None) | Err(Some(SharedCasError::Corruption)) => {
+                return (RefResolve::DecodeFailed, indexed_store_path);
+            }
+            Err(_) => {}
         }
     }
     let mut stale = HashSet::new();
@@ -3736,10 +3734,10 @@ pub fn blob_ref_proven_on_disk(cache_path: &Path, ref_id: &str) -> bool {
         }
     }
     // Unified / sibling SharedCas object store.
-    if let Some(cas) = SharedCas::detect_from_cache_path(cache_path) {
-        if cas.contains(hash) {
-            return true;
-        }
+    if let Some(cas) = SharedCas::detect_from_cache_path(cache_path)
+        && cas.contains(hash)
+    {
+        return true;
     }
     false
 }
@@ -3873,11 +3871,11 @@ fn read_utf8_line_range_hashed(
             }
             if byte == b'\n' {
                 newline_count += 1;
-                if line == end_line {
-                    if let Some(from) = selected_from.take() {
-                        hasher.update(&chunk[from..=index]);
-                        selected.extend_from_slice(&chunk[from..=index]);
-                    }
+                if line == end_line
+                    && let Some(from) = selected_from.take()
+                {
+                    hasher.update(&chunk[from..=index]);
+                    selected.extend_from_slice(&chunk[from..=index]);
                 }
                 line += 1;
             }

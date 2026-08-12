@@ -262,10 +262,10 @@ fn rebase_paths(mut args: Value, root: &Path) -> Value {
                 _ => {}
             }
         }
-        if let Some(Value::String(cwd)) = obj.get("cwd").cloned() {
-            if !Path::new(&cwd).is_absolute() {
-                obj.insert("cwd".into(), json!(root.join(cwd).display().to_string()));
-            }
+        if let Some(Value::String(cwd)) = obj.get("cwd").cloned()
+            && !Path::new(&cwd).is_absolute()
+        {
+            obj.insert("cwd".into(), json!(root.join(cwd).display().to_string()));
         }
     }
     args
@@ -403,9 +403,8 @@ fn every_registry_domain_op_is_kernel_dispatchable() {
         let args = rebase_paths(args, root.path());
         let outcome = dispatch_raw_worker(&engine, op.name, &args);
         if let Some(err) = &outcome.domain_error {
-            assert_ne!(
-                err.message.contains("transport-control only"),
-                true,
+            assert!(
+                !err.message.contains("transport-control only"),
                 "domain op {} rejected as transport-only: {}",
                 op.name,
                 err.message

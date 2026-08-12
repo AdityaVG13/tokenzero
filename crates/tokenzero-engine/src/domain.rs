@@ -432,10 +432,10 @@ pub fn execute_domain_op(
                 arg_mode(args),
                 arg_u64_or(args, "max_visible_tokens", 4000),
             );
-            if response.status == "error" {
-                if let Some(error) = response.error.as_mut() {
-                    error.message = annotate_write_failure(&error.message, false);
-                }
+            if response.status == "error"
+                && let Some(error) = response.error.as_mut()
+            {
+                error.message = annotate_write_failure(&error.message, false);
             }
             response
         }
@@ -1069,13 +1069,13 @@ fn arg_path_list(args: &Value, key: &str) -> Result<Vec<PathBuf>, String> {
     let value = args.get(key).ok_or_else(|| format!("missing {key}"))?;
     if let Some(path) = value.as_str() {
         // Stub-schema clients may send a list as its JSON-encoded string.
-        if path.trim_start().starts_with('[') {
-            if let Ok(paths) = serde_json::from_str::<Vec<String>>(path) {
-                if paths.is_empty() {
-                    return Err(format!("invalid {key}; expected non-empty array"));
-                }
-                return Ok(paths.into_iter().map(PathBuf::from).collect());
+        if path.trim_start().starts_with('[')
+            && let Ok(paths) = serde_json::from_str::<Vec<String>>(path)
+        {
+            if paths.is_empty() {
+                return Err(format!("invalid {key}; expected non-empty array"));
             }
+            return Ok(paths.into_iter().map(PathBuf::from).collect());
         }
         return Ok(vec![PathBuf::from(path)]);
     }

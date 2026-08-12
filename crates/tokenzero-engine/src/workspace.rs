@@ -84,10 +84,10 @@ fn env_truthy(value: &OsStr) -> bool {
 /// Whether the process has opted into a shared/meta `ZEROSTACK_STORE_ROOT`.
 pub fn shared_store_opt_in_from_env() -> bool {
     for name in SHARED_STORE_OPT_IN_ENVS {
-        if let Some(v) = env::var_os(name) {
-            if env_truthy(&v) {
-                return true;
-            }
+        if let Some(v) = env::var_os(name)
+            && env_truthy(&v)
+        {
+            return true;
         }
     }
     false

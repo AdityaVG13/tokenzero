@@ -141,10 +141,10 @@ fn worker_error_frame(
 
 fn encode_fallback(request_id: Option<String>, kind: &str, message: &str) -> Vec<u8> {
     let correlated = worker_error_frame(request_id, kind, message);
-    if zero_abi::validate_response_frame(&correlated).is_ok() {
-        if let Ok(bytes) = zero_abi::encode_frame(&correlated, zero_abi::DEFAULT_MAX_FRAME_BYTES) {
-            return bytes;
-        }
+    if zero_abi::validate_response_frame(&correlated).is_ok()
+        && let Ok(bytes) = zero_abi::encode_frame(&correlated, zero_abi::DEFAULT_MAX_FRAME_BYTES)
+    {
+        return bytes;
     }
     let fixed = worker_error_frame(None, kind, message);
     zero_abi::validate_response_frame(&fixed).expect("fixed worker error frame is valid");
@@ -719,16 +719,16 @@ fn dispatch_call(engine: &TokenZeroEngine, ctx: &CallCtx, cancel: &Arc<CancelSta
         Arc::clone(&cancel.flag),
         || {
             let mut args = ctx.args.clone();
-            if is_shell_op(&ctx.op) {
-                if let Value::Object(ref mut map) = args {
-                    let requested = ["timeout_ms", "timeoutMs", "shell_timeout_ms"]
-                        .iter()
-                        .find_map(|key| map.get(*key).and_then(Value::as_u64));
-                    map.insert(
-                        "timeout_ms".to_string(),
-                        json!(requested.map_or(remaining, |r| r.min(remaining))),
-                    );
-                }
+            if is_shell_op(&ctx.op)
+                && let Value::Object(ref mut map) = args
+            {
+                let requested = ["timeout_ms", "timeoutMs", "shell_timeout_ms"]
+                    .iter()
+                    .find_map(|key| map.get(*key).and_then(Value::as_u64));
+                map.insert(
+                    "timeout_ms".to_string(),
+                    json!(requested.map_or(remaining, |r| r.min(remaining))),
+                );
             }
             match crate::domain::execute_embedded_value(engine, &ctx.op, &args) {
                 Some(Ok(value)) => json!({"ok":true,"result":value}),
@@ -1408,7 +1408,7 @@ mod tests {
             "request": {"request_id": "req-oversized", "op": "token.read"}
         }))
         .unwrap();
-        frame.extend(std::iter::repeat(b' ').take(1_048_600));
+        frame.extend(std::iter::repeat_n(b' ', 1_048_600));
         let response: Value = serde_json::from_slice(&execute_raw_worker_v2_frame(
             &engine(),
             &mut session,
@@ -1837,9 +1837,11 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let big = "x".repeat(70_000);
         std::fs::write(dir.path().join("big.txt"), &big).unwrap();
-        let mut opts = RawWorkerServeOptions::default();
-        opts.root = dir.path().to_path_buf();
-        opts.cache_path = Some(dir.path().join("recovery-cache.json"));
+        let opts = RawWorkerServeOptions {
+            root: dir.path().to_path_buf(),
+            cache_path: Some(dir.path().join("recovery-cache.json")),
+            ..RawWorkerServeOptions::default()
+        };
         let engine = engine_from_options(&opts);
         let root = dir.path().display().to_string();
         let mut session = RawWorkerV2Session::for_binding(&root, "s-oversize");

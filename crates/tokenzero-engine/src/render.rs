@@ -698,12 +698,11 @@ pub fn render_edit_region(
     let first_changed_line = region_first_line + prefix;
     let file_lines: Vec<&str> = text.split('\n').collect();
     let mut section = format!("{label} line {}", first_changed_line + 1);
-    if first_changed_line > 0 {
-        if let Some(context) = file_lines.get(first_changed_line - 1) {
-            if !context.is_empty() {
-                section.push_str(&format!("\n {context}"));
-            }
-        }
+    if first_changed_line > 0
+        && let Some(context) = file_lines.get(first_changed_line - 1)
+        && !context.is_empty()
+    {
+        section.push_str(&format!("\n {context}"));
     }
     for line in removed {
         section.push_str(&format!("\n-{line}"));
@@ -711,10 +710,10 @@ pub fn render_edit_region(
     for line in added {
         section.push_str(&format!("\n+{line}"));
     }
-    if let Some(context) = file_lines.get(first_changed_line + removed.len()) {
-        if !context.is_empty() {
-            section.push_str(&format!("\n {context}"));
-        }
+    if let Some(context) = file_lines.get(first_changed_line + removed.len())
+        && !context.is_empty()
+    {
+        section.push_str(&format!("\n {context}"));
     }
     if removed.is_empty() && added.is_empty() {
         // The replacement only moved a line boundary (e.g. dropped a trailing
@@ -941,6 +940,7 @@ pub fn preview(text: &str) -> String {
 }
 
 #[cfg(test)]
+#[allow(clippy::items_after_test_module)]
 mod preview_tests {
     use std::sync::Mutex;
 
@@ -1501,10 +1501,7 @@ fn slim_cli_json(response: &ToolResponse) -> String {
         // exact restart-safe recovery, so repeating the file selector in the
         // slim envelope adds no recovery capability. Keep both in the full
         // forensic envelope and whenever the visible payload is incomplete.
-        let visible_bytes = response
-            .visible
-            .as_ref()
-            .map(|visible| visible.text.len());
+        let visible_bytes = response.visible.as_ref().map(|visible| visible.text.len());
         let redundant_complete_file_ref = response.tool == "read"
             && response.status == "ok"
             && response.refs.len() == 2
@@ -1514,18 +1511,11 @@ fn slim_cli_json(response: &ToolResponse) -> String {
                 let exact_or_one_terminal_newline = |record_bytes: usize| {
                     record_bytes == bytes || record_bytes == bytes.saturating_add(1)
                 };
-                response
-                    .refs
-                    .iter()
-                    .any(|record| {
-                        record.kind == "blob" && exact_or_one_terminal_newline(record.bytes)
-                    })
-                    && response
-                        .refs
-                        .iter()
-                        .any(|record| {
-                            record.kind == "file" && exact_or_one_terminal_newline(record.bytes)
-                        })
+                response.refs.iter().any(|record| {
+                    record.kind == "blob" && exact_or_one_terminal_newline(record.bytes)
+                }) && response.refs.iter().any(|record| {
+                    record.kind == "file" && exact_or_one_terminal_newline(record.bytes)
+                })
             });
         doc.insert(
             "refs".into(),
@@ -1542,14 +1532,13 @@ fn slim_cli_json(response: &ToolResponse) -> String {
     // detail_ref is defined as refs.first() (tokenzero-core ToolResponse::new),
     // so restating it costs a full 74B ref for zero information. Emit it only
     // when it is not already recoverable from the refs array.
-    if let Some(detail_ref) = &response.detail_ref {
-        if !response
+    if let Some(detail_ref) = &response.detail_ref
+        && !response
             .refs
             .iter()
             .any(|record| record.ref_id == *detail_ref)
-        {
-            doc.insert("detail_ref".into(), serde_json::json!(detail_ref));
-        }
+    {
+        doc.insert("detail_ref".into(), serde_json::json!(detail_ref));
     }
     if let Some(error) = &response.error {
         doc.insert(

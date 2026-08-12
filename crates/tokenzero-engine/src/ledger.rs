@@ -410,11 +410,9 @@ impl LedgerIo {
             state.write_buf.extend_from_slice(&line);
         }
         drop(state);
-        if starts_flush_window {
-            if let Err(error) = wake_flush_scheduler() {
-                self.flush()?;
-                return Err(error);
-            }
+        if starts_flush_window && let Err(error) = wake_flush_scheduler() {
+            self.flush()?;
+            return Err(error);
         }
         Ok(())
     }
@@ -1229,6 +1227,7 @@ mod ledger_tests {
         assert_eq!(records[0].schema, LEDGER_SCHEMA);
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn task_record(
         task_id: &str,
         visible: u64,

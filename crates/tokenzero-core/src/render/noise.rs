@@ -171,10 +171,10 @@ pub(crate) fn success_noise_families(command: &str) -> Vec<SuccessFamily> {
             }
             _ => None,
         };
-        if let Some(family) = family {
-            if !families.contains(&family) {
-                families.push(family);
-            }
+        if let Some(family) = family
+            && !families.contains(&family)
+        {
+            families.push(family);
         }
     }
     families

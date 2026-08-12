@@ -154,21 +154,21 @@ pub fn check_contract_compatibility(
     peer_digest: Option<&str>,
     peer_version: Option<&str>,
 ) -> Result<(), String> {
-    if let Some(peer_v) = peer_version {
-        if peer_v != local.semantic_contract_version {
-            return Err(format!(
-                "semantic contract version mismatch: local={} peer={peer_v} digest_local={}",
-                local.semantic_contract_version, local.semantic_contract_digest
-            ));
-        }
+    if let Some(peer_v) = peer_version
+        && peer_v != local.semantic_contract_version
+    {
+        return Err(format!(
+            "semantic contract version mismatch: local={} peer={peer_v} digest_local={}",
+            local.semantic_contract_version, local.semantic_contract_digest
+        ));
     }
-    if let Some(peer_d) = peer_digest {
-        if peer_d != local.semantic_contract_digest {
-            return Err(format!(
-                "semantic contract digest mismatch: local={} peer={peer_d} version={}",
-                local.semantic_contract_digest, local.semantic_contract_version
-            ));
-        }
+    if let Some(peer_d) = peer_digest
+        && peer_d != local.semantic_contract_digest
+    {
+        return Err(format!(
+            "semantic contract digest mismatch: local={} peer={peer_d} version={}",
+            local.semantic_contract_digest, local.semantic_contract_version
+        ));
     }
     Ok(())
 }

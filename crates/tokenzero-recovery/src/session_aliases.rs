@@ -116,10 +116,11 @@ pub fn is_full_hash_blob_bare(bare: &str) -> bool {
 
 fn full_hash_blob_parts(bare: &str) -> Option<&str> {
     for prefix in ["tz://blob/", "fz://blob/", "gz://blob/"] {
-        if let Some(hash) = bare.strip_prefix(prefix) {
-            if hash.len() == 64 && is_lower_hex(hash) {
-                return Some(hash);
-            }
+        if let Some(hash) = bare.strip_prefix(prefix)
+            && hash.len() == 64
+            && is_lower_hex(hash)
+        {
+            return Some(hash);
         }
     }
     None
@@ -205,13 +206,12 @@ fn match_full_hash_blob_at(text: &str, start: usize) -> Option<(usize, String)> 
         }
         let mut consumed = prefix.len() + 64;
         let mut frag: Option<&str> = None;
-        if let Some(tail) = after.get(64..) {
-            if let Some(stripped) = tail.strip_prefix('#') {
-                if let Some(frag_len) = fragment_len(stripped) {
-                    frag = Some(&tail[..=frag_len]);
-                    consumed += 1 + frag_len;
-                }
-            }
+        if let Some(tail) = after.get(64..)
+            && let Some(stripped) = tail.strip_prefix('#')
+            && let Some(frag_len) = fragment_len(stripped)
+        {
+            frag = Some(&tail[..=frag_len]);
+            consumed += 1 + frag_len;
         }
         let short = format!("{SESSION_ALIAS_PREFIX}{}", &hash[..SESSION_ALIAS_HEX_LEN]);
         let replacement = match frag {

@@ -1,8 +1,8 @@
+use crate::RecoveryStore;
 use crate::segment_store::{SegmentMigrationPhase, SegmentStore};
 use crate::shared_cas::{
-    gc_contract_digest_hex, publish_pin_record, PinRecord, SharedCas, GC_ENGINE_TOKENZERO,
+    GC_ENGINE_TOKENZERO, PinRecord, SharedCas, gc_contract_digest_hex, publish_pin_record,
 };
-use crate::RecoveryStore;
 use std::io::Write;
 use tempfile::tempdir;
 use tokenzero_core::ContentType;

@@ -168,26 +168,26 @@ pub fn response_from_outcome(
         );
     }
     // Explicit ToolResponse status check (belt-and-suspenders).
-    if let Some(resp) = &outcome.tool_response {
-        if resp.status != "ok" {
-            let code = resp
-                .error
-                .as_ref()
-                .map(|e| e.code.as_str())
-                .unwrap_or("runtime");
-            let message = resp
-                .error
-                .as_ref()
-                .map(|e| e.message.clone())
-                .unwrap_or_else(|| format!("{} failed with status {}", op, resp.status));
-            let domain = outcome.tool_domain_error();
-            let retryable = domain.as_ref().map(|d| d.retryable).unwrap_or(false);
-            let kind = domain
-                .as_ref()
-                .map(|d| d.kind.as_str().to_string())
-                .unwrap_or_else(|| code.to_string());
-            return fail_response(op, capability, &kind, message, retryable, 1);
-        }
+    if let Some(resp) = &outcome.tool_response
+        && resp.status != "ok"
+    {
+        let code = resp
+            .error
+            .as_ref()
+            .map(|e| e.code.as_str())
+            .unwrap_or("runtime");
+        let message = resp
+            .error
+            .as_ref()
+            .map(|e| e.message.clone())
+            .unwrap_or_else(|| format!("{} failed with status {}", op, resp.status));
+        let domain = outcome.tool_domain_error();
+        let retryable = domain.as_ref().map(|d| d.retryable).unwrap_or(false);
+        let kind = domain
+            .as_ref()
+            .map(|d| d.kind.as_str().to_string())
+            .unwrap_or_else(|| code.to_string());
+        return fail_response(op, capability, &kind, message, retryable, 1);
     }
     success_response(op, capability, outcome)
 }
@@ -281,12 +281,11 @@ fn success_response(
         map.insert("refs".into(), json!(outcome.result.refs));
         map.insert("op".into(), json!(outcome.op));
     }
-    if let Some(resp) = &outcome.tool_response {
-        if let Ok(v) = serde_json::to_value(resp) {
-            if let Value::Object(ref mut map) = result {
-                map.insert("tool_response".into(), v);
-            }
-        }
+    if let Some(resp) = &outcome.tool_response
+        && let Ok(v) = serde_json::to_value(resp)
+        && let Value::Object(ref mut map) = result
+    {
+        map.insert("tool_response".into(), v);
     }
     RawWorkerResponse {
         ok: true,
