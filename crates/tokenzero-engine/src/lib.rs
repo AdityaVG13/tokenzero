@@ -10,6 +10,7 @@
 //! sandbox. Transport adapters (`tokenzero-mcp`, CLI) depend inward and call
 //! [`dispatch_operation`] exactly once per domain op.
 
+pub mod action_cache_key;
 pub mod binary_resolve;
 pub mod cache_crossover;
 pub mod cache_maintenance;
@@ -60,6 +61,10 @@ pub mod warmkeeper;
 pub mod workspace;
 pub mod write_ladder;
 
+pub use action_cache_key::{
+    ACTIONCACHE_KEY_SCHEMA, ActionCacheKeyInput, ConsistencyClass, action_cache_envelope,
+    action_cache_key,
+};
 pub use binary_resolve::{
     BinaryResolution, ResolveError, ResolvedBinary, TOKENZERO_BIN_ENV, TOKENZERO_CURL_PATH_ENV,
     TOKENZERO_RG_PATH_ENV, engine_binaries_json, resolve_all_engine_binaries, resolve_curl_binary,
