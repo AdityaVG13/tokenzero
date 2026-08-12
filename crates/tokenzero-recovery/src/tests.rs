@@ -495,7 +495,8 @@ with exact bytes
         assert_eq!(entries.len(), 2);
         assert!(matches!(
             resolve_blob_from_ref_index(&first.blob_ref, &RecoveryConfig::default()),
-            (RefResolve::Found(content), _) if content == payload
+            (RefResolve::FoundVerified { content, sha256 }, _)
+                if content == payload && sha256 == hash
         ));
     });
 }
