@@ -193,7 +193,8 @@ pub fn plan_command_for_platform(
         || (argv.len() == 1 && contains_platform_shell_syntax(&argv[0], platform))
         || argv_has_shell_operator_tokens(argv)
         || powershell
-        || (windows && first.is_some_and(|v| is_windows_shell_builtin(v)));
+        || (windows && first.is_some_and(|v| is_windows_shell_builtin(v)))
+        || (!windows && first.is_some_and(|v| is_posix_shell_builtin(v)));
     if !needs_shell {
         return Ok(make(ExecutionMode::Argv, argv.to_vec(), None, None, true));
     }
@@ -222,6 +223,41 @@ pub fn plan_command_for_platform(
         Some(arg.into()),
         false,
     ))
+}
+
+fn is_posix_shell_builtin(program: &str) -> bool {
+    matches!(
+        program,
+        "." | "alias"
+            | "bg"
+            | "break"
+            | "cd"
+            | "command"
+            | "continue"
+            | "eval"
+            | "exec"
+            | "exit"
+            | "export"
+            | "fg"
+            | "getopts"
+            | "hash"
+            | "jobs"
+            | "read"
+            | "readonly"
+            | "return"
+            | "set"
+            | "shift"
+            | "source"
+            | "times"
+            | "trap"
+            | "type"
+            | "typeset"
+            | "ulimit"
+            | "umask"
+            | "unalias"
+            | "unset"
+            | "wait"
+    )
 }
 
 fn shell_command_string_from_argv(argv: &[String], shell_platform: &str) -> String {
@@ -1295,6 +1331,19 @@ mod stdio_error_tests {
             error.to_string(),
             "spawned command stdout pipe is unavailable"
         );
+    }
+
+    #[test]
+    fn standalone_posix_builtins_are_planned_through_the_shell() {
+        for argv in [
+            vec!["exit".to_string(), "7".to_string()],
+            vec!["cd".to_string(), "..".to_string()],
+            vec!["export".to_string(), "A=1".to_string()],
+        ] {
+            let plan = plan_command_for_platform(&argv, None, false, "posix").unwrap();
+            assert_eq!(plan.execution_mode, ExecutionMode::Shell);
+            assert_eq!(plan.argv[0], "/bin/bash");
+        }
     }
 
     #[cfg(unix)]
