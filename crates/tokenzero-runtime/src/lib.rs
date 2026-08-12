@@ -1319,6 +1319,9 @@ pub fn env_map(pairs: &[String]) -> Result<BTreeMap<String, String>, RuntimeErro
 }
 
 #[cfg(test)]
+mod tests;
+
+#[cfg(test)]
 mod stdio_error_tests {
     use super::*;
     use std::sync::atomic::{AtomicBool, Ordering};
