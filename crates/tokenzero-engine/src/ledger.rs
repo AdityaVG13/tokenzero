@@ -36,7 +36,7 @@ use std::io::{self, BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Condvar, LazyLock, Mutex, Weak};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
-use tokenzero_core::ToolResponse;
+use tokenzero_core::{Accounting, ToolResponse};
 
 pub const LEDGER_SCHEMA: &str = "tokenzero.ledger.v1";
 pub const LEDGER_SCHEMA_V2: &str = "tokenzero.ledger.v2";
@@ -146,6 +146,9 @@ pub struct LedgerRecord {
     /// tokenzero.ledger.v1 lines readable with the honest zero/unknown state.
     #[serde(default)]
     pub recovery_costs: RecoveryCosts,
+    /// Hub zero-ledger charge fragment for this response (tokenzero-g0vj).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub racc_charge: Option<Value>,
 }
 
 #[derive(Debug)]
@@ -159,6 +162,7 @@ pub(crate) struct LedgerWriter {
     path: PathBuf,
     max_bytes: u64,
     io: Mutex<LedgerMode>,
+    racc: Mutex<crate::racc_gauge::SessionRaccGauge>,
 }
 
 #[derive(Debug)]
@@ -256,6 +260,7 @@ impl LedgerWriter {
                 open_file: None,
                 accepted_record: false,
             }),
+            racc: Mutex::new(crate::racc_gauge::SessionRaccGauge::with_lexical_identity()),
         }
     }
 
@@ -288,6 +293,18 @@ impl LedgerWriter {
                 .and_then(|value| value.pointer(pointer))
                 .and_then(Value::as_bool)
         };
+        let racc_charge = accounting.and_then(|accounting| {
+            let expand_ref = response
+                .refs
+                .iter()
+                .find(|record| record.kind == "blob" || record.kind == "file")
+                .map(|record| record.ref_id.as_str());
+            let Ok(mut gauge) = self.racc.lock() else {
+                return None;
+            };
+            let fragment = gauge.charge_response(tool, accounting, expand_ref).ok()?;
+            serde_json::to_value(fragment).ok()
+        });
         let recovery_costs = RecoveryCosts {
             visible_tokens,
             expand_tokens: get("/expand/visible_tokens"),
@@ -325,6 +342,7 @@ impl LedgerWriter {
             cumulative_session_cost_tokens: *cumulative,
             optimization_tags: self.optimization_tags.clone(),
             recovery_costs,
+            racc_charge,
         };
         let _ = self.append_record(&record);
     }
@@ -1351,6 +1369,34 @@ mod ledger_tests {
         assert!(open_file.is_some());
         drop(mode);
         assert_eq!(read_records(&ledger_path).unwrap(), vec![test_record()]);
+    }
+
+    #[test]
+    fn tzg0vj_record_response_charges_zero_ledger() {
+        let directory = tempdir().unwrap();
+        let cache_path = directory.path().join("cache.json");
+        let ledger_path = ledger_path_for_cache(&cache_path);
+        let writer = test_writer(&cache_path);
+        let mut response = ToolResponse::default();
+        response.accounting = Some(Accounting {
+            raw_tokens: 200,
+            visible_tokens: 50,
+            recovery_tokens: 0,
+            billed_tokens: 50,
+            ..Accounting::default()
+        });
+        writer.record_response("read", &response);
+        writer.flush();
+        let records = read_records(&ledger_path).unwrap();
+        assert_eq!(records.len(), 1);
+        let charge = records[0]
+            .racc_charge
+            .as_ref()
+            .expect("live charge fragment");
+        assert_eq!(charge["schema"], "tokenzero.racc_charge.v1");
+        assert_eq!(charge["billed_tokens"], 50);
+        assert_eq!(charge["recovery_tokens"], 0);
+        assert_eq!(charge["charge_count"], 1);
     }
 
     #[test]

@@ -43,6 +43,7 @@ pub mod metrics;
 pub mod paths;
 /// Profiling-only measurement hooks (`TOKENZERO_PERF_PROFILE`). Not a product surface.
 pub mod perf_profile;
+pub mod racc_gauge;
 pub mod raw_worker;
 mod recall;
 pub mod render;
@@ -84,6 +85,10 @@ pub use domain::{
     execute_embedded_value,
 };
 pub use fetch_cache::{load_fetch_index, record_fetch};
+pub use racc_gauge::{
+    ChargeReceiptFragment, CompressionRoute, SessionRaccGauge, charge_from_accounting,
+    classify_compression, lexical_tokenizer_identity, seal_with_labeled_evidence,
+};
 pub use raw_worker::{
     RawWorkerError, RawWorkerRequest, RawWorkerResponse, RawWorkerServeOptions,
     execute_raw_worker_frame, execute_raw_worker_json, maybe_run_raw_worker_from_args,
