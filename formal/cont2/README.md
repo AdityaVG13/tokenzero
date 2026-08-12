@@ -29,6 +29,9 @@ That command:
 3. Compiles and re-runs the independent C++ exact checker and requires the
    same PASS lines.
 
+The default run also re-executes one Q4 subset-tree DP cell and checks the
+frozen W4 split count `21457825` against [`formal/w4/SPLIT_COUNT.txt`](../w4/SPLIT_COUNT.txt).
+
 `python3 scripts/radc-check --grid` additionally compiles `sol_m_demand_grid.cpp`
 and compares the denominator-20 grid against `Q4_GRID20_FULL_DP.out`. That step
 is supporting EC, not the product gate.

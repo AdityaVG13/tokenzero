@@ -17,7 +17,10 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
 CONT2 = REPO / "formal" / "cont2"
+W4 = REPO / "formal" / "w4"
 PIN_NAME = "26_SOLPRO_CONT2_SHA256.txt"
+W4_SPLIT_COUNT = 21_457_825
+W4_RECORD = W4 / "SPLIT_COUNT.txt"
 
 REQUIRED_PY_LINES = (
     "PASS exact C_16(r): [0, 16, 18, 21, 24, 28, 32, 36, 40, 45, 50, 53, 56, 60, 62, 64]",
@@ -164,6 +167,39 @@ def run_cxx_checker(work: Path) -> None:
     print("PASS C++ exact certificates")
 
 
+def parse_splits(stdout: str) -> int:
+    # format: "... leaves 1 splits 21457825"
+    parts = stdout.split()
+    try:
+        return int(parts[parts.index("splits") + 1])
+    except (ValueError, IndexError):
+        die(f"could not parse splits from: {stdout!r}")
+    raise AssertionError("unreachable")
+
+
+def run_w4_split_count(work: Path) -> None:
+    binary = work / "sol_m_demand_grid"
+    compile_cxx(CONT2 / "sol_m_demand_grid.cpp", binary)
+    # One representative Q4 cell; split count is independent of m/weights
+    # for this n=4 subset-tree DP (frozen W4 figure).
+    proc = subprocess.run(
+        [str(binary), "4", "10", "11", "40", "1", "4", "4", "4", "8"],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if proc.returncode != 0:
+        sys.stderr.write(proc.stderr)
+        die(f"W4 grid checker exited {proc.returncode}")
+    got = parse_splits(proc.stdout)
+    if got != W4_SPLIT_COUNT:
+        die(f"W4 split count {got} != frozen {W4_SPLIT_COUNT}")
+    recorded = W4_RECORD.read_text(encoding="utf-8").strip()
+    if recorded != str(W4_SPLIT_COUNT):
+        die(f"{W4_RECORD} drifted: {recorded!r}")
+    print(f"PASS W4 split count: {got}")
+
+
 def run_grid(work: Path) -> None:
     binary = work / "sol_m_demand_grid"
     compile_cxx(CONT2 / "sol_m_demand_grid.cpp", binary)
@@ -215,6 +251,7 @@ def main(argv: list[str] | None = None) -> int:
     with tempfile.TemporaryDirectory(prefix="radc-cont2-") as tmp:
         work = Path(tmp)
         run_cxx_checker(work)
+        run_w4_split_count(work)
         if args.grid:
             run_grid(work)
     print("PASS all continuation-2 checks")

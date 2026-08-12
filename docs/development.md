@@ -34,6 +34,7 @@ target/debug/tokenzero mcp-smoke --json
 ### Optional formal Cont-2 regression
 
 `formal/cont2/` vendors the frozen RADC Wave-5 Continuation 2 checkers.
+`formal/w4/` records the W4 subset-tree DP split count (21,457,825).
 This is a formal regression only: it does not gate product release and must
 not be read as a runtime tool-count limit. Reproduce with:
 
