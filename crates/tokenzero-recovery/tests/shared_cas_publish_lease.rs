@@ -128,3 +128,52 @@ fn expired_lease_still_protects_through_the_grace_floor() {
         "grace window must outlive the lease itself"
     );
 }
+
+#[test]
+fn tzmb70_lease_seconds_are_clamped_off_system_time_overflow() {
+    use tokenzero_recovery::shared_cas::{
+        GC_MIN_GRACE_SECONDS, MAX_GC_GRACE_SECONDS, MAX_LEASE_SECONDS, clamp_grace_seconds,
+        clamp_lease_seconds,
+    };
+    assert_eq!(clamp_lease_seconds(0), GC_MIN_GRACE_SECONDS);
+    assert_eq!(clamp_lease_seconds(u64::MAX), MAX_LEASE_SECONDS);
+    assert_eq!(clamp_lease_seconds(300), 300);
+    assert_eq!(clamp_grace_seconds(u64::MAX), MAX_GC_GRACE_SECONDS);
+    assert_eq!(clamp_grace_seconds(1), GC_MIN_GRACE_SECONDS);
+}
+
+#[test]
+fn tzmb70_stale_lease_record_is_unlinked_after_grace() {
+    use tokenzero_recovery::shared_cas::{
+        GC_MIN_GRACE_SECONDS, GC_RECORD_TYPE_LEASE, GC_SCHEMA_VERSION, LeaseOwner, LeaseRecord,
+        gc_contract_digest_hex, prune_stale_lease_records,
+    };
+
+    let store = tempfile::tempdir().unwrap();
+    let hash = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+    let dir = store.path().join("gc/leases/tokenzero").join(hash);
+    std::fs::create_dir_all(&dir).unwrap();
+    let lease = LeaseRecord {
+        schema_version: GC_SCHEMA_VERSION.into(),
+        record_type: GC_RECORD_TYPE_LEASE.into(),
+        engine: "tokenzero".into(),
+        project_id: hash.into(),
+        store_contract_digest: Some(gc_contract_digest_hex()),
+        operation_id: "stale-op".into(),
+        epoch: 1,
+        owner: LeaseOwner {
+            pid: 1,
+            host: "test".into(),
+        },
+        started_at: "2020-01-01T00:00:00Z".into(),
+        expires_at: "2020-01-01T00:05:00Z".into(),
+        grace_seconds: GC_MIN_GRACE_SECONDS,
+        blob_hashes: vec![hash.into()],
+    };
+    let path = dir.join("stale-op.json");
+    std::fs::write(&path, serde_json::to_vec(&lease).unwrap()).unwrap();
+
+    let removed = prune_stale_lease_records(store.path(), SystemTime::now(), GC_MIN_GRACE_SECONDS);
+    assert_eq!(removed, 1);
+    assert!(!path.exists(), "expired lease past grace must be unlinked");
+}

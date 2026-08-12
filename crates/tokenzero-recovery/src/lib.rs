@@ -1111,7 +1111,7 @@ impl RefResolve {
 /// Deliberately narrow: only "the operation itself is unavailable here" codes
 /// are absorbed. ENOSPC, EIO and friends still fail loudly, because those mean
 /// the write really is in doubt.
-fn tolerate_unsupported_sync(result: io::Result<()>) -> io::Result<()> {
+pub(crate) fn tolerate_unsupported_sync(result: io::Result<()>) -> io::Result<()> {
     match result {
         Err(err) if sync_unsupported(&err) => Ok(()),
         other => other,
@@ -3811,10 +3811,17 @@ fn externalize_blob_value(cache_path: &Path, text: &str, hash: &str) -> Option<S
             let _ = fs::remove_file(&tmp);
             return None;
         }
+        if let Ok(file) = fs::File::open(&tmp)
+            && tolerate_unsupported_sync(file.sync_all()).is_err()
+        {
+            let _ = fs::remove_file(&tmp);
+            return None;
+        }
         if fs::rename(&tmp, &path).is_err() {
             let _ = fs::remove_file(&tmp);
             return None;
         }
+        let _ = tolerate_unsupported_sync(fs::File::open(&dir).and_then(|file| file.sync_all()));
     }
     Some(format!("{BLOB_MARKER_PREFIX}{hash}:{}:", text.len()))
 }

@@ -39,7 +39,75 @@ pub use zero_store::{
 
 /// TokenZero producer namespace for hub GC records.
 pub const GC_ENGINE_TOKENZERO: &str = "tokenzero";
+/// Upper bound so `now + lease` cannot overflow SystemTime (tokenzero-mb70).
+pub const MAX_LEASE_SECONDS: u64 = 30 * 24 * 60 * 60;
+/// Upper bound for sweep grace; `u64::MAX` would make `checked_add` fail and
+/// keep every expired lease inside grace forever.
+pub const MAX_GC_GRACE_SECONDS: u64 = 7 * 24 * 60 * 60;
 const GC_ENGINES: &[&str] = &["tokenzero", "fszero", "graphzero"];
+
+/// Floor at the hub grace minimum, cap so expiry arithmetic cannot overflow.
+pub fn clamp_lease_seconds(lease_seconds: u64) -> u64 {
+    lease_seconds.clamp(GC_MIN_GRACE_SECONDS, MAX_LEASE_SECONDS)
+}
+
+/// Same clamp for sweep `grace_seconds`.
+pub fn clamp_grace_seconds(grace_seconds: u64) -> u64 {
+    grace_seconds.clamp(GC_MIN_GRACE_SECONDS, MAX_GC_GRACE_SECONDS)
+}
+
+/// Unlink lease records whose expiry plus grace is already in the past.
+/// Leaves unreadable or non-canonical stamps in place (fail closed).
+pub fn prune_stale_lease_records(store_root: &Path, now: SystemTime, grace_seconds: u64) -> u64 {
+    let grace = clamp_grace_seconds(grace_seconds);
+    let Some(cutoff) = now.checked_sub(std::time::Duration::from_secs(grace)) else {
+        return 0;
+    };
+    let cutoff_stamp = format_system_time(cutoff);
+    let leases_root = store_root.join("gc").join("leases");
+    prune_expired_records(&leases_root, &cutoff_stamp)
+}
+
+fn prune_expired_records(root: &Path, cutoff_stamp: &str) -> u64 {
+    let Ok(producers) = fs::read_dir(root) else {
+        return 0;
+    };
+    let mut removed = 0_u64;
+    for producer in producers.flatten() {
+        if !producer.file_type().is_ok_and(|kind| kind.is_dir()) {
+            continue;
+        }
+        let Ok(projects) = fs::read_dir(producer.path()) else {
+            continue;
+        };
+        for project in projects.flatten() {
+            if !project.file_type().is_ok_and(|kind| kind.is_dir()) {
+                continue;
+            }
+            let Ok(entries) = fs::read_dir(project.path()) else {
+                continue;
+            };
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.extension().and_then(|ext| ext.to_str()) != Some("json") {
+                    continue;
+                }
+                let Ok(text) = fs::read_to_string(&path) else {
+                    continue;
+                };
+                let Ok(lease) = serde_json::from_str::<LeaseRecord>(&text) else {
+                    continue;
+                };
+                if canonical_utc_expired(&lease.expires_at, cutoff_stamp)
+                    && fs::remove_file(&path).is_ok()
+                {
+                    removed = removed.saturating_add(1);
+                }
+            }
+        }
+    }
+    removed
+}
 
 #[derive(Debug, Error)]
 pub enum SharedCasError {
@@ -138,6 +206,9 @@ impl SharedCas {
     /// Publish `bytes` and its protecting lease in one hub-owned atomic
     /// transaction (`SharedCas::put_leased` under the exclusive coordinator
     /// lock). The object cannot become sweep-visible without the live lease.
+    ///
+    /// `lease_seconds` is clamped to `[GC_MIN_GRACE_SECONDS, MAX_LEASE_SECONDS]`
+    /// so `now + lease` cannot overflow SystemTime (tokenzero-mb70).
     pub fn publish_leased(
         &self,
         bytes: &[u8],
@@ -157,7 +228,7 @@ impl SharedCas {
                 operation_id,
                 1,
                 owner,
-                lease_seconds,
+                clamp_lease_seconds(lease_seconds),
             )
             .map(|outcome| outcome.hash)
             .map_err(map_gc_error)

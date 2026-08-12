@@ -169,11 +169,12 @@ fn gc_maintenance(cache_path: &Path, dry_run: bool) -> Value {
     let shared_cas = if let Some(root) =
         tokenzero_recovery::shared_cas::SharedCas::resolve_cache_root(cache_path)
     {
-        let grace_seconds = env_u64(
+        let grace_seconds = tokenzero_recovery::shared_cas::clamp_grace_seconds(env_u64(
             "TOKENZERO_GC_GRACE_SECONDS",
             tokenzero_recovery::shared_cas::GC_MIN_GRACE_SECONDS,
-        )
-        .max(tokenzero_recovery::shared_cas::GC_MIN_GRACE_SECONDS);
+        ));
+        let _ =
+            tokenzero_recovery::shared_cas::prune_stale_lease_records(&root, now, grace_seconds);
         let config = tokenzero_recovery::shared_cas::GcConfig {
             run_id: format!("startup-{}-{now_ms}", std::process::id()),
             grace_seconds,
