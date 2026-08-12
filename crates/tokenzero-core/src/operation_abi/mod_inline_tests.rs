@@ -49,38 +49,25 @@ fn contract_digest_matches_frozen_operation_abi() {
     );
 }
 
-/// tokenzero-irx9.9: memoized digest must stay byte-stable and stay hot.
-/// Kill-test: if memoization were removed, 200 calls recompute the full
-/// manifest hash; with OnceLock the second batch must not be slower than
-/// ~10x the first single call wall (loose CI-safe bound) and must return
-/// identical hex.
+/// tokenzero-irx9.9: memoized digest must stay byte-stable and initialize once.
+/// The initialization counter is deterministic under Miri and kills removal
+/// of the `OnceLock` without relying on wall-clock performance.
 #[test]
 fn contract_digest_memoization_before_after_and_kill() {
-    use std::time::Instant;
-    // Warm / first call (may compute).
-    let t0 = Instant::now();
+    // Warm the process-wide value. Another test may have initialized it first.
     let first = contract_digest_hex();
-    let first_ns = t0.elapsed().as_nanos() as u64;
+    let initialized = digest::contract_digest_hex_initializations();
+    assert_eq!(initialized, 1, "digest hex must initialize exactly once");
 
-    // After: 200 cached hits.
-    let t1 = Instant::now();
     for _ in 0..200 {
         let last = contract_digest_hex();
         assert_eq!(last, first, "memoized digest must not drift");
     }
-    let batch_ns = t1.elapsed().as_nanos() as u64;
-    let per_hit = batch_ns / 200;
-
-    // Kill-test for removed work: cached per-hit must be far cheaper than
-    // a full recompute budget. On CI noise we only require that 200 hits
-    // finish in under 50ms total (memoized) — uncached SHA of large
-    // manifest 200x would typically exceed that on this machine class.
-    assert!(
-        batch_ns < 50_000_000,
-        "memoized digest batch too slow ({batch_ns} ns); OnceLock may be broken"
+    assert_eq!(
+        digest::contract_digest_hex_initializations(),
+        initialized,
+        "cached calls must not reinitialize the digest"
     );
-    // first_ns may be 0 on coarse clocks; only log via assert soft bound.
-    let _ = (first_ns, per_hit);
     assert_eq!(contract_digest(), contract_digest());
 }
 
