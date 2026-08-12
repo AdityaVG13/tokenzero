@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use tokenzero_core::operation_abi::{Mutability, operation_by_name};
 use tokenzero_core::{ProtocolTokenizer, is_verified_one_token_atom, portable_one_token_atoms};
 
-const FUZZ_LOCK_SHA256: &str = "ae9a0a8cab41b0c6e097298465279ccde3bf6c3563c3137a3c572abd6ff550fa";
+const FUZZ_LOCK_SHA256: &str = "025017fc2bfb2447a981ffd26cb2e3d1c0543196fe1566c1ef81058c4146a744";
 
 fn workspace_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
