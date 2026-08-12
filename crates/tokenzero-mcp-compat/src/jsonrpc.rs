@@ -4,6 +4,7 @@ use serde_json::Value;
 use tokenzero_core::{MCP_SCHEMA_VERSION, McpToolSurface};
 
 use crate::catalog::{tool_cluster_names, tool_specs_for_filter_with_health};
+use crate::job_progress::{self, JobEvent};
 use crate::{
     InitializeState, TokenZeroEngine, call_tool, read_resource, resource_specs, tool_specs,
 };
@@ -263,7 +264,8 @@ fn handle_jsonrpc_request(engine: &TokenZeroEngine, parsed: Value) -> Option<Val
                 DEFAULT_PROTOCOL_VERSION
             };
             set_lifecycle_negotiated(engine);
-            wire_json!({ "protocolVersion": protocol_version, "capabilities": { "logging": {}, "tools": {"listChanged": false}, "resources": {"listChanged": false}, "prompts": {"listChanged": false} }, "serverInfo": {"name": "tokenzero", "version": env!("CARGO_PKG_VERSION")}, "instructions": mcp_initialize_instructions(engine.config.tool_surface), "_meta": { "tokenzero/protocolNegotiation": { "requestedProtocolVersion": requested, "negotiatedProtocolVersion": protocol_version, "supportedProtocolVersions": SUPPORTED_PROTOCOL_VERSIONS, "fallback": !requested_is_supported } } })
+            remember_initialize_client(engine, object);
+            wire_json!({ "protocolVersion": protocol_version, "capabilities": { "logging": {}, "experimental": { "progress": true }, "tools": {"listChanged": false}, "resources": {"listChanged": false}, "prompts": {"listChanged": false} }, "serverInfo": {"name": "tokenzero", "version": env!("CARGO_PKG_VERSION")}, "instructions": mcp_initialize_instructions(engine.config.tool_surface), "_meta": { "tokenzero/protocolNegotiation": { "requestedProtocolVersion": requested, "negotiatedProtocolVersion": protocol_version, "supportedProtocolVersions": SUPPORTED_PROTOCOL_VERSIONS, "fallback": !requested_is_supported } } })
         }
         RpcMethod::Ping => wire_json!({}),
         RpcMethod::Initialized => {
@@ -301,6 +303,7 @@ fn handle_jsonrpc_request(engine: &TokenZeroEngine, parsed: Value) -> Option<Val
         RpcMethod::SetLoggingLevel => {
             let params = rpc_try!(required_object_params(object, &id, "logging/setLevel"));
             rpc_try!(logging_level(params, &id));
+            job_progress::remember_logging_enabled(engine.session_id());
             wire_json!({})
         }
         RpcMethod::ListTools => {
@@ -328,10 +331,19 @@ fn handle_jsonrpc_request(engine: &TokenZeroEngine, parsed: Value) -> Option<Val
                 Value::Null => None,
                 other => Some(other.to_string()),
             };
-            rpc_try!(
+            if let Some(token) =
+                job_progress::progress_token_from_params(&Value::Object(params.clone()))
+            {
+                job_progress::remember_progress_token(engine.session_id(), Some(token));
+            }
+            let result = rpc_try!(
                 call_tool(engine, name, &args, call_id)
                     .map_err(|error| jsonrpc_invalid_params_error(id.clone(), error))
-            )
+            );
+            if let Some(job_id) = job_progress::job_id_from_tool_result(&result) {
+                job_progress::observe(engine.session_id(), JobEvent::Started { job_id });
+            }
+            result
         }
     };
     Some(wire_json!({"jsonrpc": "2.0", "id": id, "result": result}))
@@ -505,6 +517,22 @@ fn required_string_param<'a>(
 ) -> RpcResult<&'a str> {
     required_string_field(params, id, method, param, param)
 }
+fn remember_initialize_client(engine: &TokenZeroEngine, object: &Object) {
+    let Some(params) = object.get("params").and_then(Value::as_object) else {
+        return;
+    };
+    let name = params
+        .get("clientInfo")
+        .and_then(|info| info.get("name"))
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    let caps = params
+        .get("capabilities")
+        .cloned()
+        .unwrap_or_else(|| wire_json!({}));
+    job_progress::remember_client(engine.session_id(), name, &caps);
+}
+
 fn initialize_protocol_version<'a>(object: &'a Object, id: &Value) -> RpcResult<&'a str> {
     let method = "initialize";
     let params = required_object_params(object, id, method)?;

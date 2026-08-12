@@ -7,6 +7,7 @@
 mod capability_descriptor;
 mod catalog;
 mod fastmcp_mode;
+mod job_progress;
 mod jsonrpc;
 mod operation_abi_parity;
 mod resources;
