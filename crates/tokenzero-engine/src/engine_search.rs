@@ -281,16 +281,20 @@ impl TokenZeroEngine {
             merge_telemetry(&mut response, extra);
         }
         if matches.is_empty() {
-            let suffix = if stats.truncated_by_results || stats.truncated_by_visit {
-                " (scan truncated)"
-            } else {
-                ""
-            };
+            let truncated = stats.truncated_by_results || stats.truncated_by_visit;
+            let suffix = if truncated { " (scan truncated)" } else { "" };
             apply_zero_hit_note(
                 &mut response,
                 mode,
-                format!("# {tool} {} — 0 matches{suffix}", zero_hit_label(query)),
+                with_guidance(
+                    format!("# {tool} {} — 0 matches{suffix}", zero_hit_label(query)),
+                    tool,
+                    query,
+                    truncated,
+                ),
             );
+        } else if stats.truncated_by_results || stats.truncated_by_visit {
+            apply_truncated_hint(&mut response, mode);
         }
         response
     }
@@ -364,15 +368,17 @@ impl TokenZeroEngine {
         if rows.is_empty() {
             // max_files == 0 stops collect_glob before it scans anything, so
             // an unqualified "0 matches" would be a false affirmative.
-            let suffix = if max_files == 0 {
-                " (scan truncated)"
-            } else {
-                ""
-            };
+            let truncated = max_files == 0;
+            let suffix = if truncated { " (scan truncated)" } else { "" };
             apply_zero_hit_note(
                 &mut response,
                 mode,
-                format!("# glob {} — 0 matches{suffix}", zero_hit_label(pattern)),
+                with_guidance(
+                    format!("# glob {} — 0 matches{suffix}", zero_hit_label(pattern)),
+                    "glob",
+                    pattern,
+                    truncated,
+                ),
             );
         }
         response
@@ -424,12 +430,13 @@ impl TokenZeroEngine {
             // depth == 0 or max_files == 0 stops collect_tree before it scans
             // anything, so an unqualified "0 entries" would be a false
             // affirmative on a populated root.
-            let suffix = if max_files == 0 || depth == 0 {
-                " (scan truncated)"
-            } else {
-                ""
-            };
-            apply_zero_hit_note(&mut response, mode, format!("# tree — 0 entries{suffix}"));
+            let truncated = max_files == 0 || depth == 0;
+            let suffix = if truncated { " (scan truncated)" } else { "" };
+            apply_zero_hit_note(
+                &mut response,
+                mode,
+                with_guidance(format!("# tree — 0 entries{suffix}"), "tree", "", truncated),
+            );
         }
         response
     }

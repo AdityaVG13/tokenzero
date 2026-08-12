@@ -319,6 +319,71 @@ pub(crate) fn zero_hit_label(query: &str) -> String {
     }
 }
 
+/// Conservative regex-shape check for guidance only. Does not change
+/// grep/find semantics (tokenzero-j456). Avoids treating `fn alpha()` as regex.
+pub(crate) fn looks_like_regex(pattern: &str) -> bool {
+    pattern.contains('[')
+        || pattern.contains(']')
+        || pattern.contains('|')
+        || pattern.contains('^')
+        || pattern.contains('$')
+        || pattern.contains("(?")
+        || pattern.contains(".*")
+        || pattern.contains(".+")
+        || pattern.contains("\\d")
+        || pattern.contains("\\w")
+        || pattern.contains("\\s")
+        || pattern.contains("\\b")
+        || has_regex_repeat(pattern)
+}
+
+fn has_regex_repeat(pattern: &str) -> bool {
+    pattern
+        .as_bytes()
+        .windows(2)
+        .any(|pair| pair[0] == b'{' && pair[1].is_ascii_digit())
+}
+
+/// One extra agent-facing line after a zero-hit or truncated note.
+pub(crate) fn guidance_hint(tool: &str, query: &str, truncated: bool) -> Option<&'static str> {
+    if truncated {
+        return Some("results truncated; narrow the path or raise max_files");
+    }
+    match tool {
+        "grep" if looks_like_regex(query) => Some("no regex match; try find for a literal"),
+        "find" if looks_like_regex(query) => Some("find is literal; use grep for regex"),
+        "glob" => Some("no matching paths; try a broader glob or a different root"),
+        "tree" => Some("empty tree; check the root, depth, or hidden-file filter"),
+        _ => None,
+    }
+}
+
+pub(crate) fn with_guidance(note: String, tool: &str, query: &str, truncated: bool) -> String {
+    match guidance_hint(tool, query, truncated) {
+        Some(hint) => format!("{note}\n# {hint}"),
+        None => note,
+    }
+}
+
+/// Append a truncated-scan hint to a non-empty result envelope.
+pub(crate) fn apply_truncated_hint(response: &mut ToolResponse, mode: Mode) {
+    if matches!(mode, Mode::Passthrough) {
+        return;
+    }
+    let Some(visible) = response.visible.as_mut() else {
+        return;
+    };
+    if visible.text.contains("results truncated; narrow the path") {
+        return;
+    }
+    visible
+        .text
+        .push_str("\n# results truncated; narrow the path or raise max_files");
+    if let Some(accounting) = response.accounting.as_mut() {
+        accounting.visible_tokens = count_tokens(&visible.text);
+    }
+}
+
 /// Empty search-family results otherwise render as a bare `refs:` footer with
 /// no signal that the call succeeded and found nothing. Replace the empty
 /// visible text with a one-line zero-hit note and account for its cost.
@@ -846,6 +911,72 @@ pub(crate) fn should_skip(path: &Path, include_hidden: bool) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tzgaou_guidance_hints_regex_literal_and_truncation() {
+        assert!(looks_like_regex("alpha[0-9]+"));
+        assert!(looks_like_regex("^foo$"));
+        assert!(!looks_like_regex("fn alpha()"));
+        assert!(!looks_like_regex("fn alpha() {"));
+        assert!(looks_like_regex("x{2,4}"));
+        assert!(!looks_like_regex("no_such_token"));
+        assert_eq!(
+            guidance_hint("grep", "alpha[0-9]+", false),
+            Some("no regex match; try find for a literal")
+        );
+        assert_eq!(
+            guidance_hint("find", "alpha[0-9]+", false),
+            Some("find is literal; use grep for regex")
+        );
+        assert_eq!(guidance_hint("grep", "no_such_token", false), None);
+        assert_eq!(
+            guidance_hint("glob", "**/*.zig", true),
+            Some("results truncated; narrow the path or raise max_files")
+        );
+        let note = with_guidance(
+            "# grep alpha[0-9]+ — 0 matches".into(),
+            "grep",
+            "alpha[0-9]+",
+            false,
+        );
+        assert!(note.starts_with("# grep alpha[0-9]+ — 0 matches"));
+        assert!(note.contains("try find for a literal"));
+
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("lib.rs"), "fn alpha() {}\n").unwrap();
+        let engine = crate::TokenZeroEngine::new(crate::EngineConfig::for_root(dir.path()));
+        let grep = engine.grep(
+            "alpha[0-9]+",
+            &[dir.path().to_path_buf()],
+            Mode::Auto,
+            20,
+            4000,
+        );
+        let text = grep.visible.as_ref().unwrap().text.as_str();
+        assert!(text.contains("0 matches"), "{text}");
+        assert!(text.contains("try find for a literal"), "{text}");
+        let find = engine.find(
+            "alpha[0-9]+",
+            &[dir.path().to_path_buf()],
+            Mode::Auto,
+            20,
+            4000,
+        );
+        let text = find.visible.as_ref().unwrap().text.as_str();
+        assert!(text.contains("0 matches"), "{text}");
+        assert!(text.contains("use grep for regex"), "{text}");
+        let literal = engine.grep(
+            "no_such_token",
+            &[dir.path().to_path_buf()],
+            Mode::Auto,
+            20,
+            4000,
+        );
+        assert_eq!(
+            literal.visible.as_ref().unwrap().text,
+            "# grep no_such_token — 0 matches"
+        );
+    }
 
     fn decode_grouped_paths(rendered: &str) -> Vec<PathBuf> {
         let mut root: Option<PathBuf> = None;
