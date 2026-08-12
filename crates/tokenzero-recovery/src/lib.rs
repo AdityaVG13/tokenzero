@@ -705,6 +705,10 @@ pub(crate) struct RecoveryState {
     pub shell_outcomes: BTreeMap<String, ShellOutcome>,
     #[serde(default)]
     pub shell_outcome_seq: u64,
+    /// Generation for `shell_outcome_seq`. Incremented on checked overflow so
+    /// a rebased seq cannot look older than pre-rollover entries.
+    #[serde(default)]
+    pub shell_outcome_epoch: u64,
     /// Short refs whose 16-hex prefix maps to multiple distinct full hashes.
     #[serde(default)]
     pub ambiguous_aliases: BTreeSet<String>,
@@ -726,6 +730,8 @@ pub(crate) struct ShellOutcome {
     pub exit_code: Option<i32>,
     pub seen: u32,
     pub seq: u64,
+    #[serde(default)]
+    pub epoch: u64,
 }
 
 /// Repeat verdict for the command just recorded.
@@ -929,6 +935,7 @@ impl RecoveryState {
             order: Vec::new(),
             shell_outcomes: BTreeMap::new(),
             shell_outcome_seq: 0,
+            shell_outcome_epoch: 0,
             ambiguous_aliases: BTreeSet::new(),
             transparency: crate::transparency::MmrLog::default(),
             alias_key: None,
@@ -2328,8 +2335,7 @@ impl RecoveryStore {
         self.skip_empty_persist = false;
         let key = id_for('s', &format!("{}\u{0}{command}", scope.unwrap_or("")));
         let combined_sha = sha256_hex(combined);
-        let seq = self.state.shell_outcome_seq.wrapping_add(1);
-        self.state.shell_outcome_seq = seq;
+        let (epoch, seq) = next_shell_outcome_clock(&mut self.state);
         let (unchanged, seen) = match self.state.shell_outcomes.get(&key) {
             Some(prev) if prev.combined_sha == combined_sha && prev.exit_code == exit_code => {
                 (true, prev.seen.saturating_add(1))
@@ -2343,6 +2349,7 @@ impl RecoveryStore {
                 exit_code,
                 seen,
                 seq,
+                epoch,
             },
         );
         trim_shell_outcomes(&mut self.state.shell_outcomes);
@@ -2690,20 +2697,20 @@ impl RecoveryStore {
     fn approx_bytes(&self) -> usize {
         // Externalized blob markers account at their original payload size so
         // eviction pressure reflects real content, not marker bytes.
-        self.state.blobs.values().map(blob_value_len).sum::<usize>()
-            + self
-                .state
-                .files
-                .values()
-                .map(|v| v.text.len() + v.path.as_deref().unwrap_or_default().len())
-                .sum::<usize>()
-            + self
-                .state
-                .units
-                .values()
-                .chain(self.state.search_hits.values())
-                .map(|v| v.text.len())
-                .sum::<usize>()
+        // Saturate: overflow is over budget, never under (tokenzero-gbsh).
+        saturating_usize_sum(self.state.blobs.values().map(blob_value_len))
+            .saturating_add(saturating_usize_sum(self.state.files.values().map(|v| {
+                v.text
+                    .len()
+                    .saturating_add(v.path.as_deref().unwrap_or_default().len())
+            })))
+            .saturating_add(saturating_usize_sum(
+                self.state
+                    .units
+                    .values()
+                    .chain(self.state.search_hits.values())
+                    .map(|v| v.text.len()),
+            ))
     }
 
     fn persist(&mut self) -> Result<(), RecoveryError> {
@@ -4048,6 +4055,7 @@ fn session_delta(
     delta.aliases = state.aliases.clone();
     delta.shell_outcomes = state.shell_outcomes.clone();
     delta.shell_outcome_seq = state.shell_outcome_seq;
+    delta.shell_outcome_epoch = state.shell_outcome_epoch;
     delta.ambiguous_aliases = state.ambiguous_aliases.clone();
     delta.transparency = state.transparency.clone();
     // The alias derivation key aliases share semantics with the alias table:
@@ -4207,11 +4215,64 @@ fn merge_map_entries<T>(
     }
 }
 
+fn saturating_usize_sum<I: IntoIterator<Item = usize>>(iter: I) -> usize {
+    iter.into_iter().fold(0usize, usize::saturating_add)
+}
+
+fn shell_outcome_rank(outcome: &ShellOutcome) -> (u64, u64) {
+    (outcome.epoch, outcome.seq)
+}
+
+fn rebase_shell_outcomes_dense(state: &mut RecoveryState) {
+    let mut keys: Vec<(u64, u64, String)> = state
+        .shell_outcomes
+        .iter()
+        .map(|(key, outcome)| (outcome.epoch, outcome.seq, key.clone()))
+        .collect();
+    keys.sort_unstable();
+    for (index, (_, _, key)) in keys.iter().enumerate() {
+        if let Some(outcome) = state.shell_outcomes.get_mut(key) {
+            outcome.epoch = state.shell_outcome_epoch;
+            outcome.seq = (index as u64).saturating_add(1);
+        }
+    }
+    state.shell_outcome_seq = keys.len() as u64;
+}
+
+fn next_shell_outcome_clock(state: &mut RecoveryState) -> (u64, u64) {
+    if let Some(seq) = state.shell_outcome_seq.checked_add(1) {
+        state.shell_outcome_seq = seq;
+        return (state.shell_outcome_epoch, seq);
+    }
+    if let Some(epoch) = state.shell_outcome_epoch.checked_add(1) {
+        state.shell_outcome_epoch = epoch;
+        state.shell_outcome_seq = 1;
+        return (epoch, 1);
+    }
+    rebase_shell_outcomes_dense(state);
+    if let Some(seq) = state.shell_outcome_seq.checked_add(1) {
+        state.shell_outcome_seq = seq;
+        return (state.shell_outcome_epoch, seq);
+    }
+    let seq = (state.shell_outcomes.len() as u64).saturating_add(1);
+    state.shell_outcome_seq = seq;
+    (state.shell_outcome_epoch, seq)
+}
+
+fn merge_shell_outcome_clock(merged: &mut RecoveryState, current: &RecoveryState) {
+    if current.shell_outcome_epoch > merged.shell_outcome_epoch {
+        merged.shell_outcome_epoch = current.shell_outcome_epoch;
+        merged.shell_outcome_seq = current.shell_outcome_seq;
+    } else if current.shell_outcome_epoch == merged.shell_outcome_epoch {
+        merged.shell_outcome_seq = merged.shell_outcome_seq.max(current.shell_outcome_seq);
+    }
+}
+
 fn trim_shell_outcomes(outcomes: &mut BTreeMap<String, ShellOutcome>) {
     while outcomes.len() > MAX_SHELL_OUTCOMES {
         let Some(victim) = outcomes
             .iter()
-            .min_by_key(|(_, outcome)| outcome.seq)
+            .min_by_key(|(_, outcome)| shell_outcome_rank(outcome))
             .map(|(key, _)| key.clone())
         else {
             break;
@@ -4228,6 +4289,7 @@ fn merge_states(
 ) -> RecoveryState {
     let session: HashSet<&str> = session_refs.iter().map(String::as_str).collect();
     let mut merged = existing;
+    merge_shell_outcome_clock(&mut merged, &current);
     recovery_maps!(merge & session, merged, current);
     for (alias, target) in current.aliases {
         if merged
@@ -4249,8 +4311,14 @@ fn merge_states(
     merged.order.extend(session_refs.iter().cloned());
     let mut seen = HashSet::new();
     merged.order.retain(|ref_id| seen.insert(ref_id.clone()));
-    merged.shell_outcome_seq = merged.shell_outcome_seq.max(current.shell_outcome_seq);
-    merged.shell_outcomes.extend(current.shell_outcomes);
+    for (key, incoming) in current.shell_outcomes {
+        match merged.shell_outcomes.get(&key) {
+            Some(existing) if shell_outcome_rank(existing) > shell_outcome_rank(&incoming) => {}
+            _ => {
+                merged.shell_outcomes.insert(key, incoming);
+            }
+        }
+    }
     trim_shell_outcomes(&mut merged.shell_outcomes);
     merged.ambiguous_aliases.extend(current.ambiguous_aliases);
     merged.transparency.merge_concurrent(&current.transparency);

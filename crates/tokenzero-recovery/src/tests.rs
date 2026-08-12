@@ -1014,6 +1014,122 @@ fn shell_outcomes_survive_persistence_roundtrip() {
     assert_eq!(repeat.seen, 2);
 }
 
+#[test]
+fn tzgbsh_approx_bytes_saturates_instead_of_wrapping_under() {
+    let mut store = RecoveryStore::new(None);
+    let claimed = usize::MAX;
+    let marker = format!("{BLOB_MARKER_PREFIX}{:0>64}:{claimed}:", 0);
+    store
+        .state
+        .blobs
+        .insert("tz://blob/huge".into(), BlobEntry::Inline(marker));
+    store.state.files.insert(
+        "tz://file/extra".into(),
+        StoredFile {
+            ref_id: "tz://file/extra".into(),
+            path: Some("x".into()),
+            path_identity: None,
+            source_backed: false,
+            text: "y".into(),
+            content_type: "text".into(),
+            source_fingerprint: None,
+            source_start_line: None,
+            source_end_line: None,
+        },
+    );
+
+    let bytes = store.approx_bytes();
+    assert_eq!(
+        bytes,
+        usize::MAX,
+        "overflow must count as over budget, never wrap under"
+    );
+    assert!(bytes > store.config.max_bytes);
+}
+
+fn seed_capped_shell_outcomes(store: &mut RecoveryStore, epoch: u64, last_seq: u64) {
+    store.state.shell_outcome_epoch = epoch;
+    store.state.shell_outcome_seq = last_seq;
+    store.state.shell_outcomes.clear();
+    let first_seq = last_seq.saturating_sub(MAX_SHELL_OUTCOMES as u64 - 1);
+    for idx in 0..MAX_SHELL_OUTCOMES {
+        store.state.shell_outcomes.insert(
+            format!("old-{idx}"),
+            ShellOutcome {
+                combined_sha: format!("sha-{idx}"),
+                exit_code: Some(0),
+                seen: 1,
+                seq: first_seq.saturating_add(idx as u64),
+                epoch,
+            },
+        );
+    }
+}
+
+#[test]
+fn tzgbsh_shell_seq_rollover_does_not_evict_newest() {
+    let mut store = RecoveryStore::new(None);
+    seed_capped_shell_outcomes(&mut store, 0, u64::MAX);
+
+    let first = store.record_shell_outcome_deferred(None, "brand-new", "out", Some(0));
+    assert!(!first.unchanged);
+    assert_eq!(store.state.shell_outcome_epoch, 1);
+    assert_eq!(store.state.shell_outcome_seq, 1);
+
+    let again = store.record_shell_outcome_deferred(None, "brand-new", "out", Some(0));
+    assert!(
+        again.unchanged,
+        "newest entry must survive seq rollover; wrapping to 0 evicted it first"
+    );
+    assert_eq!(again.seen, 2);
+}
+
+#[test]
+fn tzgbsh_merge_rebased_seq_does_not_treat_new_as_old() {
+    let config = RecoveryConfig::default();
+    let mut existing = RecoveryState::empty(&config);
+    existing.shell_outcome_epoch = 0;
+    existing.shell_outcome_seq = u64::MAX;
+    let first_seq = u64::MAX.saturating_sub(MAX_SHELL_OUTCOMES as u64 - 1);
+    for idx in 0..MAX_SHELL_OUTCOMES {
+        existing.shell_outcomes.insert(
+            format!("old-{idx}"),
+            ShellOutcome {
+                combined_sha: format!("sha-{idx}"),
+                exit_code: Some(0),
+                seen: 1,
+                seq: first_seq.saturating_add(idx as u64),
+                epoch: 0,
+            },
+        );
+    }
+
+    let mut current = RecoveryState::empty(&config);
+    current.shell_outcome_epoch = 1;
+    current.shell_outcome_seq = 1;
+    current.shell_outcomes.insert(
+        "new-key".into(),
+        ShellOutcome {
+            combined_sha: "new".into(),
+            exit_code: Some(0),
+            seen: 1,
+            seq: 1,
+            epoch: 1,
+        },
+    );
+
+    let merged = merge_states(existing, current, &[], &config);
+    assert_eq!(merged.shell_outcome_epoch, 1);
+    assert!(
+        merged.shell_outcomes.contains_key("new-key"),
+        "rebased newest must not lose to pre-rollover max seq"
+    );
+    assert!(
+        !merged.shell_outcomes.contains_key("old-0"),
+        "oldest pre-rollover entry should be the eviction victim"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Concurrency / multi-writer
 // ---------------------------------------------------------------------------
