@@ -1,10 +1,35 @@
 use std::fs;
 use tempfile::tempdir;
 use tokenzero_recovery::shared_cas::{
-    gc_contract_digest_hex, PinRecord, SharedCas, SharedCasError, GC_SCHEMA_VERSION,
+    GC_SCHEMA_VERSION, PinRecord, SharedCas, SharedCasError, gc_contract_digest_hex,
 };
+use tokenzero_recovery::{ActionCacheEntry, ActionCacheIndex};
 
 const HASH: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+
+#[test]
+fn tzgvxc_actioncache_live_ref_is_a_gc_root() {
+    let root = tempdir().unwrap();
+    let index = ActionCacheIndex::open(root.path());
+    index
+        .put(ActionCacheEntry {
+            key: HASH.to_string(),
+            artifact_ref: format!("tz://blob/{HASH}"),
+            fszero_bookmark: None,
+            dep_closure_ref: None,
+            class: "must_block_revalidate".into(),
+            verified: true,
+            world_id: None,
+            tombstone: false,
+            tombstoned_at_unix: None,
+        })
+        .unwrap();
+    let cas = SharedCas::new(root.path().to_path_buf());
+    assert!(
+        cas.is_pinned(HASH),
+        "live ActionCache artifact must be a GC root"
+    );
+}
 
 #[test]
 fn missing_pin_namespace_is_not_pinned() {

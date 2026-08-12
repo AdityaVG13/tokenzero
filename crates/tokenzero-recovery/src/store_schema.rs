@@ -162,8 +162,9 @@ pub fn recover_actioncache_segment(dest: &Path) -> io::Result<Option<PathBuf>> {
     let tmp = tmp_path(dest);
     let commit = commit_path(dest);
     if dest.exists() {
-        let _ = fs::remove_file(&tmp);
-        let _ = fs::remove_file(&commit);
+        // dest is the committed file. Do not unlink tmp/commit: a concurrent
+        // put writes those sidecars before rename, and deleting them makes
+        // rename fail with NotFound.
         return Ok(Some(dest.to_path_buf()));
     }
     if tmp.exists() && commit.exists() {

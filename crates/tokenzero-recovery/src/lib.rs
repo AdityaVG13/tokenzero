@@ -48,7 +48,11 @@ pub mod action_cache;
 pub mod store_schema;
 pub mod working_set;
 
-pub use action_cache::{ACTIONCACHE_REL_DIR, ActionCacheEntry, ActionCacheError, ActionCacheIndex};
+pub use action_cache::{
+    ACTIONCACHE_GC_GRACE_SECS, ACTIONCACHE_REL_DIR, ActionCacheEntry, ActionCacheError,
+    ActionCacheIndex, BlobEvictionPlan, ServedArtifact, action_cache_protects_hash,
+    artifact_full_hash,
+};
 pub use store_schema::{
     SHADOW_JSONL_RING_CAP, STORE_SCHEMA_MAJOR, STORE_SCHEMA_MINOR, STORE_SCHEMA_NAME, SchemaAdmit,
     SchemaSkewError, StoreSchemaStamp, StoreSchemaVersion, admit_store_schema,

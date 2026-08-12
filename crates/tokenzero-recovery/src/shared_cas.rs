@@ -197,7 +197,9 @@ impl SharedCas {
         let now = format_system_time(SystemTime::now());
         let pins_root = self.root().join("gc").join("pins");
         match fs::symlink_metadata(&pins_root) {
-            Err(error) if error.kind() == io::ErrorKind::NotFound => return false,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                return crate::action_cache::action_cache_protects_hash(self.root(), full_hash);
+            }
             Ok(metadata) if metadata.file_type().is_dir() => {}
             Ok(_) | Err(_) => return true,
         }
@@ -246,7 +248,7 @@ impl SharedCas {
                 }
             }
         }
-        false
+        crate::action_cache::action_cache_protects_hash(self.root(), full_hash)
     }
 
     pub fn list_objects(&self) -> Result<Vec<String>, SharedCasError> {
