@@ -264,7 +264,11 @@ fn cli_slim_envelope_is_default_and_full_is_an_exact_opt_in() {
         "refs[0] carries the detail ref without duplication: {slim}"
     );
     let refs = slim["refs"].as_array().expect("slim refs array");
-    assert!(!refs.is_empty(), "{slim}");
+    assert_eq!(
+        refs.len(),
+        1,
+        "complete inline reads omit the redundant live file selector: {slim}"
+    );
     // 1glt: the ordinal rewrite is published only when the complete serialized
     // response is strictly cheaper under the same token gauge. Under the
     // default gauge a full `tz://blob/<64hex>` ref (6 tokens) is cheaper than

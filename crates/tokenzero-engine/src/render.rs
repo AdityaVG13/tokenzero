@@ -1496,12 +1496,44 @@ fn slim_cli_json(response: &ToolResponse) -> String {
         doc.insert("visible".into(), serde_json::json!(visible.text));
     }
     if !response.refs.is_empty() {
+        // A complete single-file read carries both an immutable blob ref and a
+        // live file selector for the same bytes. The blob already provides
+        // exact restart-safe recovery, so repeating the file selector in the
+        // slim envelope adds no recovery capability. Keep both in the full
+        // forensic envelope and whenever the visible payload is incomplete.
+        let visible_bytes = response
+            .visible
+            .as_ref()
+            .map(|visible| visible.text.len());
+        let redundant_complete_file_ref = response.tool == "read"
+            && response.status == "ok"
+            && response.refs.len() == 2
+            && visible_bytes.is_some_and(|bytes| {
+                // Text rendering may remove one terminal newline. The blob
+                // remains the exact byte source in either representation.
+                let exact_or_one_terminal_newline = |record_bytes: usize| {
+                    record_bytes == bytes || record_bytes == bytes.saturating_add(1)
+                };
+                response
+                    .refs
+                    .iter()
+                    .any(|record| {
+                        record.kind == "blob" && exact_or_one_terminal_newline(record.bytes)
+                    })
+                    && response
+                        .refs
+                        .iter()
+                        .any(|record| {
+                            record.kind == "file" && exact_or_one_terminal_newline(record.bytes)
+                        })
+            });
         doc.insert(
             "refs".into(),
             serde_json::json!(
                 response
                     .refs
                     .iter()
+                    .filter(|record| !(redundant_complete_file_ref && record.kind == "file"))
                     .map(|record| record.ref_id.as_str())
                     .collect::<Vec<_>>()
             ),
