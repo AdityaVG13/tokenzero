@@ -240,6 +240,52 @@ fn differential_registry_domain_ops_raw_mcp_cli() {
     }
 }
 
+#[test]
+fn batch_error_taxonomy_matches_cli_and_mcp() {
+    let root = tempfile::tempdir().unwrap();
+    let cli_engine = engine_for(root.path());
+    let mcp_engine = engine_for(root.path());
+
+    let assert_parity =
+        |args: &Value, expected_kind: DomainErrorKind, expected_code: Option<&str>| {
+            let cli = dispatch_cli(&cli_engine, "tz_batch", args);
+            let mcp = dispatch_mcp_tool(&mcp_engine, "tz_batch", args).expect("mcp dispatch");
+            assert_eq!(
+                cli.tool_domain_error().map(|error| error.kind),
+                Some(expected_kind),
+                "cli taxonomy for {args}"
+            );
+            assert_eq!(
+                mcp.tool_domain_error().map(|error| error.kind),
+                Some(expected_kind),
+                "mcp taxonomy for {args}"
+            );
+            assert_eq!(
+                cli.tool_response
+                    .as_ref()
+                    .and_then(|response| response.error.as_ref())
+                    .map(|error| error.code.as_str()),
+                expected_code,
+                "cli code for {args}"
+            );
+            assert_eq!(
+                mcp.tool_response
+                    .as_ref()
+                    .and_then(|response| response.error.as_ref())
+                    .map(|error| error.code.as_str()),
+                expected_code,
+                "mcp code for {args}"
+            );
+        };
+
+    assert_parity(&json!({"ops": []}), DomainErrorKind::Validation, None);
+    assert_parity(
+        &json!({"ops": [{"tool": "tz_batch", "args": {"ops": []}}]}),
+        DomainErrorKind::Runtime,
+        Some("batch_operation_failed"),
+    );
+}
+
 fn rebase_paths(mut args: Value, root: &Path) -> Value {
     if let Some(obj) = args.as_object_mut() {
         if let Some(path) = obj.get("path").cloned() {
