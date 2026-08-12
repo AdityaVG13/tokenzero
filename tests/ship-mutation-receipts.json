@@ -1,0 +1,103 @@
+{
+  "schema_version": "tokenzero.ship-mutation-receipts.v1",
+  "registry_sha256": "a60da01679fe694f49d2e00d0622fa685f1ccf29a81431b33e633d93a5f6555a",
+  "baseline_command": "python3 ./scripts/run_ship_suite.py",
+  "cases": [
+    {
+      "mutation_id": "M01-capabilities-schema",
+      "test": "ship_help_and_capabilities_are_machine_usable",
+      "baseline_passed": true,
+      "build_command": "cargo build --locked -p tokenzero-cli --bin tokenzero --no-default-features",
+      "test_command": "python3 ./scripts/run_ship_suite.py --target ship --exact ship_help_and_capabilities_are_machine_usable --skip-build",
+      "mutant_exit_code": 1
+    },
+    {
+      "mutation_id": "M02-capabilities-nondeterminism",
+      "test": "ship_capabilities_are_deterministic_and_env_clean",
+      "baseline_passed": true,
+      "build_command": "cargo build --locked -p tokenzero-cli --bin tokenzero --no-default-features",
+      "test_command": "python3 ./scripts/run_ship_suite.py --target ship --exact ship_capabilities_are_deterministic_and_env_clean --skip-build",
+      "mutant_exit_code": 1
+    },
+    {
+      "mutation_id": "M03-expand-raw-selector",
+      "test": "ship_read_expand_round_trips_exact_bytes",
+      "baseline_passed": true,
+      "build_command": "cargo build --locked -p tokenzero-cli --bin tokenzero --no-default-features",
+      "test_command": "python3 ./scripts/run_ship_suite.py --target ship --exact ship_read_expand_round_trips_exact_bytes --skip-build",
+      "mutant_exit_code": 1
+    },
+    {
+      "mutation_id": "M04-find-dispatch",
+      "test": "ship_find_returns_bounded_visible_evidence_and_refs",
+      "baseline_passed": true,
+      "build_command": "cargo build --locked -p tokenzero-cli --bin tokenzero --no-default-features",
+      "test_command": "python3 ./scripts/run_ship_suite.py --target ship --exact ship_find_returns_bounded_visible_evidence_and_refs --skip-build",
+      "mutant_exit_code": 1
+    },
+    {
+      "mutation_id": "M05-run-dispatch",
+      "test": "ship_run_preserves_child_stdout_and_failure_status",
+      "baseline_passed": true,
+      "build_command": "cargo build --locked -p tokenzero-cli --bin tokenzero --no-default-features",
+      "test_command": "python3 ./scripts/run_ship_suite.py --target ship --exact ship_run_preserves_child_stdout_and_failure_status --skip-build",
+      "mutant_exit_code": 1
+    },
+    {
+      "mutation_id": "M06-posix-builtin-routing",
+      "test": "ship_run_executes_standalone_posix_builtins_through_shell",
+      "baseline_passed": true,
+      "build_command": "cargo build --locked -p tokenzero-cli --bin tokenzero --no-default-features",
+      "test_command": "python3 ./scripts/run_ship_suite.py --target ship --exact ship_run_executes_standalone_posix_builtins_through_shell --skip-build",
+      "mutant_exit_code": 1
+    },
+    {
+      "mutation_id": "M07-doctor-store-resolution",
+      "test": "ship_doctor_reports_isolated_store_resolution",
+      "baseline_passed": true,
+      "build_command": "cargo build --locked -p tokenzero-cli --bin tokenzero --no-default-features",
+      "test_command": "python3 ./scripts/run_ship_suite.py --target ship --exact ship_doctor_reports_isolated_store_resolution --skip-build",
+      "mutant_exit_code": 1
+    },
+    {
+      "mutation_id": "M08-hook-permission",
+      "test": "ship_hook_rewrites_actionable_input_and_fails_open_otherwise",
+      "baseline_passed": true,
+      "build_command": "cargo build --locked -p tokenzero-cli --bin tokenzero --no-default-features",
+      "test_command": "python3 ./scripts/run_ship_suite.py --target ship --exact ship_hook_rewrites_actionable_input_and_fails_open_otherwise --skip-build",
+      "mutant_exit_code": 1
+    },
+    {
+      "mutation_id": "M09-path-confinement",
+      "test": "ship_absolute_path_rejection_does_not_leak_bytes",
+      "baseline_passed": true,
+      "build_command": "cargo build --locked -p tokenzero-cli --bin tokenzero --no-default-features",
+      "test_command": "python3 ./scripts/run_ship_suite.py --target ship --exact ship_absolute_path_rejection_does_not_leak_bytes --skip-build",
+      "mutant_exit_code": 1
+    },
+    {
+      "mutation_id": "M10-installer-selector",
+      "test": "ship_installer_dry_run_is_canonical_and_non_mutating",
+      "baseline_passed": true,
+      "build_command": null,
+      "test_command": "python3 ./scripts/run_ship_suite.py --target ship --exact ship_installer_dry_run_is_canonical_and_non_mutating --skip-build",
+      "mutant_exit_code": 1
+    },
+    {
+      "mutation_id": "M11-uninstall-ownership",
+      "test": "ship_uninstall_preserves_unowned_cli",
+      "baseline_passed": true,
+      "build_command": null,
+      "test_command": "python3 ./scripts/run_ship_suite.py --target ship --exact ship_uninstall_preserves_unowned_cli --skip-build",
+      "mutant_exit_code": 1
+    },
+    {
+      "mutation_id": "M12-worker-planner-owner",
+      "test": "ship_worker_probe_is_planner_free_and_contract_bound",
+      "baseline_passed": true,
+      "build_command": "cargo build --locked -p tokenzero-worker --bin tokenzero-codemode --no-default-features",
+      "test_command": "python3 ./scripts/run_ship_suite.py --target ship-worker --exact ship_worker_probe_is_planner_free_and_contract_bound --skip-build",
+      "mutant_exit_code": 1
+    }
+  ]
+}

@@ -63,8 +63,10 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - name: Build (locked)
         run: cargo build --workspace --locked --release
-      - name: Test (locked)
-        run: cargo test --workspace --locked
+      - name: Bounded ship proof (locked)
+        run: |
+          python3 scripts/check_ship_suite.py
+          python3 scripts/run_ship_suite.py
       - name: Clippy (deny warnings)
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - name: Package dry run

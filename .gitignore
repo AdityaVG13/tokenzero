@@ -57,6 +57,8 @@ CLAUDE.md.*
 
 # --- Public docs allowlist ---
 /docs/*
+!/docs/ship-suite.md
+!/docs/test-classification-v1.jsonl
 !/docs/benchmarks.md
 !/docs/codemode.md
 !/docs/gate-c-semantic-retirement.md
@@ -151,6 +153,10 @@ NDH6SA~M
 
 # --- Public helper scripts allowlist ---
 /scripts/*
+!/scripts/check_ship_suite.py
+!/scripts/classify_tests.py
+!/scripts/run_ship_suite.py
+!/scripts/verify_ship_mutations.py
 !/scripts/check_embedded_tests.py
 !/scripts/check_module_boundaries.py
 !/scripts/perf_corpus.py

@@ -12,8 +12,8 @@ use tokenzero_core::operation_abi::{SEMANTIC_CONTRACT_VERSION, contract_digest_h
 /// Shared family capability schema name (identical field names across engines).
 pub const SURFACE_CAPABILITY_SCHEMA: &str = "zerostack.surface.v1";
 
-/// Private raw worker protocol version advertised in the handshake.
-pub const RAW_WORKER_PROTOCOL_VERSION: &str = "tokenzero.raw_worker.v1";
+/// Canonical private raw-worker protocol advertised in the handshake.
+pub const RAW_WORKER_PROTOCOL_VERSION: &str = zero_abi::RAW_WORKER_PROTOCOL_VERSION;
 
 /// Selected package / process surface for this binary.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

@@ -33,7 +33,6 @@ clap.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 tempfile.workspace = true
-tokenzero-test-support = { path = "../tokenzero-test-support" }
 tokenzero-core = { path = "../tokenzero-core", version = "1.0.2" }
 tokenzero-filters = { path = "../tokenzero-filters", version = "1.0.2" }
 tokenzero-engine = { path = "../tokenzero-engine", version = "1.0.2" }
@@ -49,3 +48,4 @@ predicates.workspace = true
 proptest.workspace = true
 sha2.workspace = true
 tempfile.workspace = true
+tokenzero-test-support = { path = "../tokenzero-test-support" }

@@ -12,6 +12,7 @@ members = [
     "crates/tokenzero",
     "crates/tokenzero-install",
     "crates/tokenzero-pulse",
+    "tests",
 ]
 exclude = ["fuzz"]
 
