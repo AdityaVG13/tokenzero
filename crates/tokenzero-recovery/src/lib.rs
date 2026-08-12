@@ -46,11 +46,13 @@ pub use entity_novelty::{
 
 pub mod action_cache;
 pub mod cachezero;
+pub mod frecency;
 pub mod memory_verbs;
 pub mod store_hygiene;
 pub mod store_schema;
 pub mod working_set;
 
+pub use frecency::{HALF_LIFE_SECS, burst_compress, coldest, decay, score, score_from_order};
 pub use memory_verbs::{MemoryVerb, MemoryVerbEffect, MemoryVerbRequest, describe_memory_verb};
 
 pub use action_cache::{
@@ -2690,14 +2692,13 @@ impl RecoveryStore {
     fn evict(&mut self) {
         recovery_maps!(evict self);
         while self.approx_bytes() > self.config.max_bytes {
-            // CAS reachability must not pin a local eviction victim.
-            let Some(victim) = self
-                .state
-                .order
-                .iter()
-                .find(|ref_id| self.local_entry_present(ref_id))
-                .cloned()
-            else {
+            // Byte pressure evicts the coldest live ref (frecency over
+            // `order`). Per-kind prefix caps above stay FIFO. Reads still
+            // do not append to `order`.
+            let Some(victim) = crate::frecency::coldest(&self.state.order, |ref_id| {
+                self.local_entry_present(ref_id)
+            })
+            .map(str::to_string) else {
                 break;
             };
             self.drop_ref(&victim);
@@ -2707,6 +2708,22 @@ impl RecoveryStore {
 
     fn local_entry_present(&self, ref_id: &str) -> bool {
         state_entry_present(&self.state, ref_id)
+    }
+
+    /// Frecency of one recovery ref from the existing `order` log.
+    pub fn frecency_of(&self, ref_id: &str) -> f64 {
+        crate::frecency::score_from_order(&self.state.order, ref_id)
+    }
+
+    /// Hottest live file-ref whose stored path matches `path`.
+    pub fn frecency_for_path(&self, path: &Path) -> f64 {
+        let want = path.to_string_lossy();
+        self.state
+            .files
+            .values()
+            .filter(|file| file.path.as_deref() == Some(want.as_ref()))
+            .map(|file| self.frecency_of(&file.ref_id))
+            .fold(0.0, f64::max)
     }
 
     fn drop_ref(&mut self, ref_id: &str) {

@@ -236,10 +236,6 @@ pub(crate) fn recall_search(cache_path: &Path, query: &str, max_hits: usize) -> 
             if !line.to_lowercase().contains(&needle) {
                 continue;
             }
-            if outcome.hits.len() >= max_hits {
-                outcome.truncated = true;
-                return outcome;
-            }
             outcome.hits.push(RecallHit {
                 ref_id: ref_id.to_string(),
                 label: label.clone(),
@@ -247,6 +243,29 @@ pub(crate) fn recall_search(cache_path: &Path, query: &str, max_hits: usize) -> 
                 text: clamp_line(line),
             });
         }
+    }
+    let order: Vec<String> = snapshot
+        .get("order")
+        .and_then(Value::as_array)
+        .map(|rows| {
+            rows.iter()
+                .filter_map(Value::as_str)
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default();
+    if !order.is_empty() {
+        outcome.hits.sort_by(|left, right| {
+            tokenzero_recovery::score_from_order(&order, &left.ref_id)
+                .total_cmp(&tokenzero_recovery::score_from_order(&order, &right.ref_id))
+                .reverse()
+                .then(left.ref_id.cmp(&right.ref_id))
+                .then(left.line.cmp(&right.line))
+        });
+    }
+    if outcome.hits.len() > max_hits {
+        outcome.hits.truncate(max_hits);
+        outcome.truncated = true;
     }
     outcome
 }

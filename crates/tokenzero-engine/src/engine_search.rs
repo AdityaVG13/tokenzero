@@ -130,6 +130,17 @@ impl TokenZeroEngine {
                 .unwrap_or_else(|| "runtime: hard_max_wall_ms exceeded".to_string());
             return failure_response(tool, "hard_max_wall_ms", message, None);
         }
+        {
+            let store = self.recovery_store();
+            matches.sort_by(|left, right| {
+                store
+                    .frecency_for_path(Path::new(&left.path))
+                    .total_cmp(&store.frecency_for_path(Path::new(&right.path)))
+                    .reverse()
+                    .then(left.path.cmp(&right.path))
+                    .then(left.line.cmp(&right.line))
+            });
+        }
         // Canonical recoverable payload keeps the grep-compatible flat format
         // for byte-stable replay. The visible rendering uses the FSZero
         // snap-to-file hit grammar (FSZero docs/design/target-ref-grammar.md):
