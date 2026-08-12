@@ -55,7 +55,9 @@ tokenzero doctor --json
 `tokenzero install` and `tokenzero install --plan` are read-only. They detect integration capabilities, classify risk, and print the plan without writing files.
 
 Crates.io, npm, and Homebrew publication are separate gated channels and are
-not required for the GitHub Release download path.
+not required for the GitHub Release download path. Canonical package names,
+the no-placeholder decision, and the read-only registry snapshot are recorded
+in [package-names.md](package-names.md).
 
 ## Multi-machine / portable binaries (wqw.3)
 
