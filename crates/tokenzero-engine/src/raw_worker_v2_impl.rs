@@ -345,6 +345,8 @@ fn worker_token_accounting(
     value: &Value,
 ) -> Result<raw_worker_v2_protocol::WorkerTokenAccountingV1, String> {
     let is_job = op == zero_abi::TOKEN_JOB_OPERATION_V1;
+    let is_background_shell = is_shell_op(op) && args["background"] == true;
+    let accounting_optional = is_job || is_background_shell;
     let accounting = value
         .get("accounting")
         .map(|accounting| {
@@ -352,7 +354,7 @@ fn worker_token_accounting(
                 .map_err(|error| format!("invalid domain accounting: {error}"))
         })
         .transpose()?;
-    if accounting.is_none() && !is_job {
+    if accounting.is_none() && !accounting_optional {
         return Err("successful domain result omitted accounting".to_string());
     }
     if accounting
@@ -368,7 +370,7 @@ fn worker_token_accounting(
     // is linked; it must never be mislabeled as an estimate or exact count.
     let input_bytes = encoded_len("request args", args)?;
     let output_bytes = encoded_len("domain result", value)?;
-    let recovery_bytes = declared_recovery_bytes(value, is_job)?;
+    let recovery_bytes = declared_recovery_bytes(value, accounting_optional)?;
     let raw_tokens = input_bytes
         .checked_add(output_bytes)
         .and_then(|value| value.checked_add(recovery_bytes))
@@ -1300,6 +1302,19 @@ mod tests {
         );
         assert_eq!(job.cached_tokens, 0);
         assert_eq!(job.recovery_tokens, 0);
+
+        let launch = worker_token_accounting(
+            "shell",
+            &json!({"command":"printf ok","background":true}),
+            &json!({"job":"job-1","cursor":0,"version":0}),
+        )
+        .unwrap();
+        assert_eq!(
+            launch.count_kind,
+            raw_worker_v2_protocol::WorkerTokenCountKind::ConservativeUpperBound
+        );
+        assert_eq!(launch.cached_tokens, 0);
+        assert_eq!(launch.recovery_tokens, 0);
     }
 
     #[test]
