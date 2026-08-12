@@ -1415,6 +1415,59 @@ fn evict_prefix_falls_back_to_key_order_without_order_entries() {
     assert!(order.is_empty());
 }
 
+#[test]
+fn tgzc0_byte_pressure_evicts_cold_singleton_not_reput_hot() {
+    let config = RecoveryConfig {
+        max_bytes: 50,
+        max_units: 32,
+        max_blobs: 32,
+        max_files: 32,
+        max_search_hits: 32,
+        ..RecoveryConfig::default()
+    };
+    let mut store = mem_store(config);
+    let cold = store.put_unit(
+        "unit payload COLD-XXXX",
+        ContentType::Unknown,
+        None,
+        None,
+        None,
+    );
+    let hot = store.put_unit(
+        "unit payload HOT-YYYYY",
+        ContentType::Unknown,
+        None,
+        None,
+        None,
+    );
+    let again = store.put_unit(
+        "unit payload HOT-YYYYY",
+        ContentType::Unknown,
+        None,
+        None,
+        None,
+    );
+    assert_eq!(hot, again);
+    let extra = store.put_unit(
+        "unit payload EXTRA-ZZZ",
+        ContentType::Unknown,
+        None,
+        None,
+        None,
+    );
+    store.evict();
+    assert!(
+        store.has_ref(&hot),
+        "re-put hot ref must be retained under byte pressure"
+    );
+    assert!(store.has_ref(&extra), "newest singleton should survive");
+    assert!(
+        !store.has_ref(&cold),
+        "cold singleton must be the byte-pressure victim: order={:?}",
+        store.state.order
+    );
+}
+
 /// Covers: blob eviction bounds, file_ref survival after blob eviction,
 /// and deferred-store eviction timing. Kills mutations that:
 ///  - skip eviction in store_payload_deferred
