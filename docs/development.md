@@ -31,6 +31,20 @@ cargo fmt --all -- --check
 target/debug/tokenzero mcp-smoke --json
 ```
 
+### Optional formal Cont-2 regression
+
+`formal/cont2/` vendors the frozen RADC Wave-5 Continuation 2 checkers.
+This is a formal regression only: it does not gate product release and must
+not be read as a runtime tool-count limit. Reproduce with:
+
+```bash
+python3 scripts/radc-check
+```
+
+The optional GitHub Actions workflow `.github/workflows/radc-check.yml` is
+`workflow_dispatch` only. See [formal/cont2/README.md](../formal/cont2/README.md)
+and [docs/radc-non-claims.md](radc-non-claims.md).
+
 ### Targeted formatting (dirty worktrees)
 
 Do NOT use `cargo fmt -- path/to/file.rs` as a file allowlist. `cargo fmt`

@@ -1,0 +1,225 @@
+#!/usr/bin/env python3
+"""Reproduce the vendored RADC Cont-2 formal certificates.
+
+Formal regression only. Never a product-release gate.
+Tracked substitute for `xtask radc-check` because `/xtask/` is gitignored.
+"""
+
+from __future__ import annotations
+
+import argparse
+import hashlib
+import shutil
+import subprocess
+import sys
+import tempfile
+from pathlib import Path
+
+REPO = Path(__file__).resolve().parent.parent
+CONT2 = REPO / "formal" / "cont2"
+PIN_NAME = "26_SOLPRO_CONT2_SHA256.txt"
+
+REQUIRED_PY_LINES = (
+    "PASS exact C_16(r): [0, 16, 18, 21, 24, 28, 32, 36, 40, 45, 50, 53, 56, 60, 62, 64]",
+    "PASS p10: 6560848/9765625",
+    "down m=17: 71088276063/30517578125",
+    "down m=18: 277615146191/762939453125",
+    "cap m=17: 475055717444931/200000000000000",
+    "cap m=18: 20074685943080277/50000000000000000",
+    "PASS universal no-message obstruction begins at m=19",
+)
+
+REQUIRED_CXX_LINES = (
+    "PASS independent C++ exact certificate",
+    "C_16(r): 0 16 18 21 24 28 32 36 40 45 50 53 56 60 62 64",
+    "p10 6560848/9765625",
+    "down17 71088276063/30517578125",
+    "down18 277615146191/762939453125",
+    "cap17 475055717444931/200000000000000",
+    "cap18 20074685943080277/50000000000000000",
+    "m>=19 obstruction at m=19: -3/2",
+)
+
+GRID_WEIGHTS = (
+    (4, 4, 4, 8),
+    (4, 4, 5, 7),
+    (4, 4, 6, 6),
+    (4, 5, 5, 6),
+    (5, 5, 5, 5),
+)
+
+
+def die(msg: str, code: int = 1) -> None:
+    print(f"radc-check: {msg}", file=sys.stderr)
+    raise SystemExit(code)
+
+
+def sha256_file(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def verify_pins() -> None:
+    pin_path = CONT2 / PIN_NAME
+    if not pin_path.is_file():
+        die(f"missing pin file {pin_path}")
+    missing: list[str] = []
+    mismatches: list[str] = []
+    for raw in pin_path.read_text(encoding="utf-8").splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        digest, name = line.split()
+        path = CONT2 / name
+        if not path.is_file():
+            missing.append(name)
+            continue
+        got = sha256_file(path)
+        if got != digest:
+            mismatches.append(f"{name}: got {got} want {digest}")
+    if missing or mismatches:
+        for name in missing:
+            print(f"PIN MISSING {name}", file=sys.stderr)
+        for row in mismatches:
+            print(f"PIN MISMATCH {row}", file=sys.stderr)
+        die("SHA256 pin verification failed")
+    print(f"PASS pins: {PIN_NAME}")
+
+
+def require_lines(label: str, text: str, required: tuple[str, ...]) -> None:
+    missing = [line for line in required if line not in text]
+    if missing:
+        for line in missing:
+            print(f"MISSING {label}: {line}", file=sys.stderr)
+        die(f"{label} did not reproduce frozen PASS lines")
+
+
+def run_python_checker() -> None:
+    script = CONT2 / "W5_FULL_PREFIX_CHECKS.py"
+    frozen = CONT2 / "W5_FULL_PREFIX_CHECKS.out"
+    proc = subprocess.run(
+        [sys.executable, str(script)],
+        check=False,
+        capture_output=True,
+        text=True,
+        cwd=CONT2,
+    )
+    if proc.returncode != 0:
+        sys.stderr.write(proc.stderr)
+        die(f"python checker exited {proc.returncode}")
+    out = proc.stdout
+    require_lines("python", out, REQUIRED_PY_LINES)
+    expected = frozen.read_text(encoding="utf-8")
+    if out != expected:
+        die("python checker output drifted from W5_FULL_PREFIX_CHECKS.out")
+    print("PASS python exact certificates")
+
+
+def find_cxx() -> str:
+    for name in ("c++", "g++", "clang++"):
+        found = shutil.which(name)
+        if found:
+            return found
+    die("no C++ compiler (c++/g++/clang++) on PATH")
+    raise AssertionError("unreachable")
+
+
+def compile_cxx(src: Path, dest: Path) -> None:
+    cxx = find_cxx()
+    cmd = [
+        cxx,
+        "-std=c++20",
+        "-O2",
+        "-Wall",
+        "-Wextra",
+        "-pedantic",
+        str(src),
+        "-o",
+        str(dest),
+    ]
+    proc = subprocess.run(cmd, check=False, capture_output=True, text=True)
+    if proc.returncode != 0:
+        sys.stderr.write(proc.stdout)
+        sys.stderr.write(proc.stderr)
+        die(f"compile failed: {src.name}")
+
+
+def run_cxx_checker(work: Path) -> None:
+    binary = work / "w5_full_prefix_check"
+    compile_cxx(CONT2 / "w5_full_prefix_check.cpp", binary)
+    proc = subprocess.run(
+        [str(binary)],
+        check=False,
+        capture_output=True,
+        text=True,
+        cwd=work,
+    )
+    if proc.returncode != 0:
+        sys.stderr.write(proc.stderr)
+        die(f"C++ checker exited {proc.returncode}")
+    out = proc.stdout
+    require_lines("c++", out, REQUIRED_CXX_LINES)
+    expected = (CONT2 / "w5_full_prefix_check.out").read_text(encoding="utf-8")
+    if out != expected:
+        die("C++ checker output drifted from w5_full_prefix_check.out")
+    print("PASS C++ exact certificates")
+
+
+def run_grid(work: Path) -> None:
+    binary = work / "sol_m_demand_grid"
+    compile_cxx(CONT2 / "sol_m_demand_grid.cpp", binary)
+    lines: list[str] = []
+    for weights in GRID_WEIGHTS:
+        lines.append("weights " + " ".join(str(w) for w in weights) + "\n")
+        for m in range(10, 19):
+            cmd = [
+                str(binary),
+                "4",
+                str(m),
+                str(m + 1),
+                "40",
+                "1",
+                *[str(w) for w in weights],
+            ]
+            proc = subprocess.run(cmd, check=False, capture_output=True, text=True)
+            if proc.returncode != 0:
+                sys.stderr.write(proc.stderr)
+                die(f"grid checker exited {proc.returncode} for m={m} weights={weights}")
+            lines.append(f"m {m} {proc.stdout}")
+            if not proc.stdout.endswith("\n"):
+                lines.append("\n")
+    got = "".join(lines)
+    expected = (CONT2 / "Q4_GRID20_FULL_DP.out").read_text(encoding="utf-8")
+    if got != expected:
+        die("grid output drifted from Q4_GRID20_FULL_DP.out")
+    print("PASS Q4 denominator-20 grid")
+
+
+def parse_args(argv: list[str]) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Reproduce vendored RADC Cont-2 formal certificates."
+    )
+    parser.add_argument(
+        "--grid",
+        action="store_true",
+        help="also reproduce Q4_GRID20_FULL_DP.out (supporting EC, slower)",
+    )
+    return parser.parse_args(argv)
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = parse_args(sys.argv[1:] if argv is None else argv)
+    if not CONT2.is_dir():
+        die(f"missing {CONT2}")
+    verify_pins()
+    run_python_checker()
+    with tempfile.TemporaryDirectory(prefix="radc-cont2-") as tmp:
+        work = Path(tmp)
+        run_cxx_checker(work)
+        if args.grid:
+            run_grid(work)
+    print("PASS all continuation-2 checks")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

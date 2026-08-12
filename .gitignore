@@ -217,3 +217,4 @@ _tmp_*
 !/scripts/irx9_release_gate.sh
 !/scripts/rustfmt_targeted.sh
 !/scripts/scrub_beads_export.py
+!/scripts/radc-check

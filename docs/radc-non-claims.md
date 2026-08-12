@@ -38,6 +38,11 @@ citation for every row below.
 - The claim audit (`tokenzero claim-audit`) gates release-facing statements;
   this page is the reference the audit and promotion output point to.
 
+The optional Cont-2 checker pack in [`formal/cont2/`](../formal/cont2/README.md)
+is formal regression only. `python3 scripts/radc-check` reproduces the frozen
+PASS lines; it is not a product CI gate and does not authorize a production
+claim.
+
 ## Progress-ledger exclusion
 
 TokenZero does not commit mutable `docs/progress/` certification ledgers. They
