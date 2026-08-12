@@ -175,12 +175,10 @@ fn changed_file_serves_diff_when_cheaper() {
     assert!(telemetry["diff"]["hunks"].as_u64().unwrap() >= 1);
     assert!(telemetry["diff"]["plus"].as_u64().unwrap() >= 1);
     assert!(telemetry["diff"]["minus"].as_u64().unwrap() >= 1);
-    assert!(
-        telemetry["diff"]["base_ref"]
-            .as_str()
-            .unwrap()
-            .starts_with("tz://blob/")
-    );
+    assert!(telemetry["diff"]["base_ref"]
+        .as_str()
+        .unwrap()
+        .starts_with("tz://blob/"));
 }
 
 #[test]
@@ -264,6 +262,38 @@ fn range_keyed_reads_dedup_separately() {
     // The original range still notes.
     let again = range_read(1, 5);
     assert!(visible_text(&again).starts_with("unchanged:"));
+}
+
+#[test]
+fn tz5x51_near_identical_change_shows_inline_not_elided() {
+    // tokenzero-5x51: a re-read of a slightly edited file must show the
+    // change inline (diff or fresh render). A fuzzy "similar but not
+    // identical" collapse that hides the new bytes fails incremental edits.
+    let dir = tempdir().unwrap();
+    let file = dir.path().join("sample.rs");
+    fs::write(&file, dedup_fixture_content()).unwrap();
+    let engine = TokenZeroEngine::new(EngineConfig::for_root(dir.path()));
+
+    read_ok(&engine, &file);
+    let changed = dedup_fixture_content().replace(
+        "line 20: session redundancy fixture content wide enough to out-cost a note",
+        "line 20: session redundancy fixture content wide enough to out-cost a note!",
+    );
+    fs::write(&file, &changed).unwrap();
+    let second = read_ok(&engine, &file);
+    let text = visible_text(&second);
+    assert!(
+        !text.starts_with("unchanged:"),
+        "changed-but-similar must not collapse to an unchanged note: {text}"
+    );
+    assert!(
+        !text.contains("similar but NOT identical") && !text.contains("deduped=true"),
+        "fuzzy-elision notice must not hide the new bytes: {text}"
+    );
+    assert!(
+        text.contains("out-cost a note!") || text.contains("+line 20:"),
+        "change must be visible inline without tz_expand: {text}"
+    );
 }
 
 #[test]
