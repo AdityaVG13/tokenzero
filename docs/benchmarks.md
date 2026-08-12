@@ -19,6 +19,27 @@ real run of the command shown; re-run the suite yourself to reproduce.
 - hyperfine: hyperfine 1.20.0
 - runs/cell: RUNS=5 WARMUP=1 (override via env)
 
+## zero-store GC offload gate (`tokenzero-5emy`)
+
+Command: `python3 crates/tokenzero-recovery/benches/perf_hotspots.py --label
+<baseline|candidate> --replicates 5`, followed by its `--compare` mode. The
+migrated `zero-ref`/`zero-store` seam moves from hub
+pin `fa25384` to pushed pin `8188fb0`. Both use the same debug profile, Mac,
+deterministic corpus, and public 256 KiB raw-expand boundary. The baseline's
+pre-existing local `zero-abi` patch points at `b01762f`; the candidate removes
+that patch and pins `zero-abi`/`zero-mcp` to pushed `8188fb0`. Budget: no
+wall-time, peak-RSS, or binary-size regression above 5%.
+
+| Metric | Worst candidate delta | Result |
+|---|---:|---|
+| Median workload wall time | +3.23% | **PASS** |
+| Median workload peak RSS | +2.01% | **PASS** |
+| Debug binary size | +1.25% | **PASS** |
+
+Five complete runs per side were compared by median; no run was discarded.
+Raw samples are in
+`crates/tokenzero-recovery/benches/perf_hotspots/{baseline,candidate,comparison}.json`.
+
 
 ## CLI cold read (process + first read/expand latency)
 

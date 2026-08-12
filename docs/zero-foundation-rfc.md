@@ -3,8 +3,8 @@
 Bead: `tokenzero-9s32.1` (parent epic `tokenzero-9s32`: zero-foundation shared crates for the
 three engines, static-link, ship-separate).
 
-Status: **DRAFT -- RECOMMENDATION ONLY. No decision is made by this document.**
-Implementation is gated on explicit owner approval of one model (see Decision checklist).
+Status: **APPROVED: Model A** by Aditya on 2026-08-12 (recorded by bead tokenzero-5emy).
+Model A is the operating dependency model for ZeroStack foundation crates consumed by TokenZero.
 This RFC writes no code: no extraction, no crate creation, no engine edits, no bead
 state changes.
 
@@ -99,9 +99,9 @@ foundation crates. No hybrid is evaluated here.
   missing upstream rev/digest labels produce unlabeled divergence that violates the
   no-unlabeled-% honesty rule.
 
-## Recommendation (not a decision)
+## Decision
 
-**Recommend Model A.** It is the only model consistent with the current hub-authority law
+**Model A is approved.** It is the only model consistent with the current hub-authority law
 ("depend only on hub contract crates", "pin hub by pushed origin/main rev") and with the
 epic's static-link/ship-separate framing: foundation crates static-link into each engine
 binary from the hub, while each engine ships separately against its own immutable pin.
@@ -109,27 +109,11 @@ Model B reverses the dependency direction the law exists to enforce. Model C tra
 provenance and single-ownership for offline convenience that the pinned-git + `Cargo.lock`
 model already provides.
 
-**This document does not decide.** The owner must approve a model (checklist below)
-before extraction implementation starts. Evidence-only beads `tokenzero-9s32.2`
-(inventory) and `tokenzero-9s32.3` (acceptance gates) can refine the decision record
-without selecting or implementing a model.
-
-## Decision checklist (owner)
-
-1. Approve Model A, B, or C explicitly (default recommendation: A).
-2. Accept the hub as sole owner of foundation crates (A), engine-to-engine ownership
-   (B), or per-engine snapshot ownership plus a named sync operator (C)?
-3. Accept engine-to-hub-only dependency direction as permanent (A), allow peer imports
-   (B), or replace dependency edges with provenance-locked snapshots (C)?
-4. Is a crates.io release of infrastructure-only foundation crates in scope? If yes,
-   after which stability milestone, and is the git rev kept canonical (A)?
-5. Are vendored copies acceptable under the no-unlabeled-% provenance rule, and who
-   operates the sync automation and its per-engine gate (C)?
-6. MSRV/toolchain policy for foundation crates: nightly per engine, or declared stable
-   MSRV at crates.io release (A)?
-7. Confirm the rollback boundary below is acceptable for the chosen model.
-8. Record the decision in this file (status -> APPROVED:<model> / REJECTED) with the
-   owner's name and date.
+Decision record (Aditya, 2026-08-12): ZeroStack is the sole foundation owner;
+dependency direction stays engine-to-hub; vendored copies and engine-owned shared
+crates are rejected. Engines consume pushed git revisions independently. A crates.io
+release remains deferred until a stability milestone and must declare MSRV, semver,
+and the canonical git revision. The Model A rollback boundary below is accepted.
 
 ## Rollback boundary
 

@@ -18,6 +18,7 @@ import os
 import platform
 import re
 import shutil
+import statistics
 import subprocess
 import sys
 import tempfile
@@ -30,7 +31,14 @@ EVIDENCE = Path(__file__).with_suffix("").with_name("perf_hotspots")
 GUARD = Path("/tmp/zerostack-heavy-process.guard")
 TIME_RE = re.compile(r"^\s*([0-9.]+) real\s+([0-9.]+) user\s+([0-9.]+) sys\s*$", re.MULTILINE)
 RSS_RE = re.compile(r"^\s*(\d+)\s+maximum resident set size\s*$", re.MULTILINE)
-SIZES = {"large_read_bytes": 2 * 1024 * 1024, "shell_bytes": 5 * 1024 * 1024, "payload_bytes": 3 * 1024 * 1024}
+SIZES = {
+    "large_read_bytes": 2 * 1024 * 1024,
+    "shell_bytes": 5 * 1024 * 1024,
+    # `expand --raw` is intentionally capped at 256 KiB. Keep this CAS
+    # round-trip workload at that public boundary instead of relying on the
+    # retired uncapped CLI behavior.
+    "payload_bytes": 256 * 1024,
+}
 COUNTS = {"warm_reads": 20, "recovery_persists": 50}
 BUDGETS = {"large_shell_capture": {"wall_seconds": 3.0, "cpu_seconds": 3.0, "max_rss_bytes": 96 * 1024 * 1024}}
 
@@ -112,6 +120,101 @@ def aggregate(samples: list[dict[str, float | int]]) -> dict[str, object]:
     }
 
 
+def aggregate_replicates(label: str, runs: list[dict[str, object]]) -> dict[str, object]:
+    result = {key: value for key, value in runs[0].items() if key != "workloads"}
+    result.update(
+        schema="tokenzero.perf-hotspots.aggregate.v2",
+        label=label,
+        replicate_count=len(runs),
+    )
+    workloads = {}
+    first_workloads = runs[0]["workloads"]
+    assert isinstance(first_workloads, dict)
+    for name, first in first_workloads.items():
+        assert isinstance(first, dict)
+        workload = {
+            key: value
+            for key, value in first.items()
+            if key not in {"wall_seconds", "cpu_seconds", "max_rss_bytes", "per_sample"}
+        }
+        for metric in ("wall_seconds", "cpu_seconds", "max_rss_bytes"):
+            values = [run["workloads"][name][metric] for run in runs]
+            workload[metric] = statistics.median(values)
+            workload[f"{metric}_replicates"] = values
+        workload["raw_runs"] = [run["workloads"][name] for run in runs]
+        workloads[name] = workload
+    result["workloads"] = workloads
+    return result
+
+
+def compare(
+    baseline_size: int,
+    candidate_size: int,
+    baseline_revision: str,
+    candidate_revision: str,
+    baseline_zero_abi_source: str,
+    candidate_zero_abi_source: str,
+) -> Path:
+    baseline = json.loads((EVIDENCE / "baseline.json").read_text())
+    candidate = json.loads((EVIDENCE / "candidate.json").read_text())
+    replicate_count = baseline.get("replicate_count")
+    if replicate_count != candidate.get("replicate_count"):
+        raise SystemExit("baseline and candidate replicate counts differ")
+    rows = {}
+    for name, baseline_workload in baseline["workloads"].items():
+        rows[name] = {}
+        for metric in ("wall_seconds", "cpu_seconds", "max_rss_bytes"):
+            before = baseline_workload[metric]
+            after = candidate["workloads"][name][metric]
+            rows[name][metric] = {
+                "baseline": before,
+                "candidate": after,
+                "absolute_delta": after - before,
+                "percent_delta": None if before == 0 else round((after - before) / before * 100, 2),
+            }
+    size_delta = round((candidate_size - baseline_size) / baseline_size * 100, 2)
+    max_wall = max(row["wall_seconds"]["percent_delta"] for row in rows.values())
+    max_rss = max(row["max_rss_bytes"]["percent_delta"] for row in rows.values())
+    result = {
+        "schema": "tokenzero.perf-comparison.v2",
+        "baseline": "baseline.json",
+        "candidate": "candidate.json",
+        "methodology_note": f"{replicate_count} complete baseline and {replicate_count} complete candidate runs; medians are compared. No run was discarded.",
+        "identical_conditions": {
+            "os": baseline["environment"]["os"],
+            "cpu": baseline["environment"]["cpu"],
+            "commands": baseline["commands"],
+            "sizes": baseline["environment"]["sizes"],
+            "counts": baseline["environment"]["counts"],
+            "replicate_count": replicate_count,
+            "baseline_hub_rev": baseline_revision,
+            "candidate_hub_rev": candidate_revision,
+            "baseline_zero_abi_source": baseline_zero_abi_source,
+            "candidate_zero_abi_source": candidate_zero_abi_source,
+        },
+        "budget": {
+            "max_regression_percent": 5.0,
+            "metrics": ["median_wall_seconds", "median_max_rss_bytes", "binary_size_bytes"],
+        },
+        "rows": rows,
+        "binary_size_bytes": {
+            "baseline": baseline_size,
+            "candidate": candidate_size,
+            "absolute_delta": candidate_size - baseline_size,
+            "percent_delta": size_delta,
+        },
+        "summary": {
+            "max_wall_regression_percent": max_wall,
+            "max_rss_regression_percent": max_rss,
+            "binary_size_regression_percent": size_delta,
+        },
+        "verdict": "PASS" if max(max_wall, max_rss, size_delta) <= 5.0 else "FAIL",
+    }
+    destination = EVIDENCE / "comparison.json"
+    destination.write_text(json.dumps(result, sort_keys=True, separators=(",", ":")) + "\n")
+    return destination
+
+
 def deterministic_text(size: int, seed: str) -> str:
     line = f"{seed}:0123456789abcdef: TokenZero deterministic performance corpus\n"
     return (line * (size // len(line) + 1))[:size]
@@ -159,7 +262,12 @@ def run(label: str) -> Path:
             payload_cache = tmp / "payload.json"
             ingest, stdout = timed([str(BIN), "ingest", str(payload), "--allowed-root", allowed, "--cache-path", str(payload_cache), "--json"], capture_stdout=True)
             ingest_json = json.loads(stdout)
-            blob_ref = next(item["ref"] for item in ingest_json["refs"] if item["kind"] == "blob")
+            refs = ingest_json["refs"]
+            blob_ref = next(
+                item if isinstance(item, str) else item["ref"]
+                for item in refs
+                if (item if isinstance(item, str) else item.get("ref", "")).startswith("tz://blob/")
+            )
             expand, _ = timed([str(BIN), "expand", blob_ref, "--cache-path", str(payload_cache), "--raw"])
 
             persist_cache = tmp / "persist.json"
@@ -177,7 +285,7 @@ def run(label: str) -> Path:
                 "commands": {
                     "cold_warm_read": "tokenzero read <2MiB file>; 1 cold + 20 warm processes",
                     "large_shell_capture": "tokenzero run -- python3 -c <5MiB deterministic stdout>",
-                    "ingest_expand": "tokenzero ingest <3MiB file>; tokenzero expand <blob-ref> --raw",
+                    "ingest_expand": "tokenzero ingest <256KiB file>; tokenzero expand <blob-ref> --raw",
                     "repeated_recovery_persist": "50 tokenzero ingest calls with distinct 512-byte files and one cache",
                 },
                 "workloads": {
@@ -248,15 +356,61 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     group = parser.add_mutually_exclusive_group(required=True)
     group.add_argument("--label", choices=("baseline", "candidate"))
+    group.add_argument("--compare", action="store_true")
     group.add_argument("--check-budget", action="store_true")
     group.add_argument("--sample-shell", action="store_true")
+    parser.add_argument("--replicates", type=int, default=1)
+    parser.add_argument("--baseline-size", type=int)
+    parser.add_argument("--candidate-size", type=int)
+    parser.add_argument("--baseline-revision")
+    parser.add_argument("--candidate-revision")
+    parser.add_argument("--baseline-zero-abi-source")
+    parser.add_argument("--candidate-zero-abi-source")
     args = parser.parse_args()
     if args.check_budget:
         check_budget()
     elif args.sample_shell:
         sample_shell_hotspot()
+    elif args.compare:
+        required = {
+            "baseline-size": args.baseline_size,
+            "candidate-size": args.candidate_size,
+            "baseline-revision": args.baseline_revision,
+            "candidate-revision": args.candidate_revision,
+            "baseline-zero-abi-source": args.baseline_zero_abi_source,
+            "candidate-zero-abi-source": args.candidate_zero_abi_source,
+        }
+        missing = [name for name, value in required.items() if value is None]
+        if missing:
+            parser.error(f"--compare requires: {', '.join(missing)}")
+        print(
+            compare(
+                args.baseline_size,
+                args.candidate_size,
+                args.baseline_revision,
+                args.candidate_revision,
+                args.baseline_zero_abi_source,
+                args.candidate_zero_abi_source,
+            ).relative_to(REPO)
+        )
     else:
-        print(run(args.label).relative_to(REPO))
+        if args.replicates < 1:
+            parser.error("--replicates must be >= 1")
+        runs = []
+        destination = None
+        for _ in range(args.replicates):
+            destination = run(args.label)
+            runs.append(json.loads(destination.read_text()))
+        if args.replicates > 1:
+            destination.write_text(
+                json.dumps(
+                    aggregate_replicates(args.label, runs),
+                    sort_keys=True,
+                    separators=(",", ":"),
+                )
+                + "\n"
+            )
+        print(destination.relative_to(REPO))
     return 0
 
 

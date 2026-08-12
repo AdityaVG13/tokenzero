@@ -1,8 +1,8 @@
-use crate::RecoveryStore;
 use crate::segment_store::{SegmentMigrationPhase, SegmentStore};
 use crate::shared_cas::{
-    GC_ENGINE_TOKENZERO, GC_SCHEMA_VERSION, PinRecord, SharedCas, publish_pin_record,
+    gc_contract_digest_hex, publish_pin_record, PinRecord, SharedCas, GC_ENGINE_TOKENZERO,
 };
+use crate::RecoveryStore;
 use std::io::Write;
 use tempfile::tempdir;
 use tokenzero_core::ContentType;
@@ -84,10 +84,11 @@ fn ttl_pin_and_rollback() {
     let pin_path = publish_pin_record(
         d.path(),
         &PinRecord {
-            schema_version: GC_SCHEMA_VERSION.into(),
+            schema_version: crate::shared_cas::GC_SCHEMA_VERSION.into(),
             record_type: "pin".into(),
             engine: GC_ENGINE_TOKENZERO.into(),
             project_id: hash.clone(),
+            store_contract_digest: Some(gc_contract_digest_hex()),
             pin_id: "test-pin".into(),
             created_at: "2026-07-15T00:00:00Z".into(),
             expires_at: None,

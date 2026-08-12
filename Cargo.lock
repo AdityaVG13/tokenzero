@@ -3577,6 +3577,7 @@ dependencies = [
 [[package]]
 name = "zero-abi"
 version = "0.1.0"
+source = "git+https://github.com/AdityaVG13/zerostack?rev=8188fb08698a5ed29bff6b339657bdd1933de3cc#8188fb08698a5ed29bff6b339657bdd1933de3cc"
 dependencies = [
  "serde",
  "serde_json",
@@ -3586,7 +3587,7 @@ dependencies = [
 [[package]]
 name = "zero-gauge"
 version = "0.1.0"
-source = "git+https://github.com/AdityaVG13/zerostack?rev=fa253840910ab4051635e2de95f04ddf6043a000#fa253840910ab4051635e2de95f04ddf6043a000"
+source = "git+https://github.com/AdityaVG13/zerostack?rev=8188fb08698a5ed29bff6b339657bdd1933de3cc#8188fb08698a5ed29bff6b339657bdd1933de3cc"
 dependencies = [
  "serde",
  "serde_json",
@@ -3595,7 +3596,7 @@ dependencies = [
 [[package]]
 name = "zero-ledger"
 version = "0.1.0"
-source = "git+https://github.com/AdityaVG13/zerostack?rev=fa253840910ab4051635e2de95f04ddf6043a000#fa253840910ab4051635e2de95f04ddf6043a000"
+source = "git+https://github.com/AdityaVG13/zerostack?rev=8188fb08698a5ed29bff6b339657bdd1933de3cc#8188fb08698a5ed29bff6b339657bdd1933de3cc"
 dependencies = [
  "serde",
  "serde_json",
@@ -3605,6 +3606,7 @@ dependencies = [
 [[package]]
 name = "zero-mcp"
 version = "0.1.0"
+source = "git+https://github.com/AdityaVG13/zerostack?rev=8188fb08698a5ed29bff6b339657bdd1933de3cc#8188fb08698a5ed29bff6b339657bdd1933de3cc"
 dependencies = [
  "fastmcp-rust",
  "serde",
@@ -3615,7 +3617,7 @@ dependencies = [
 [[package]]
 name = "zero-process"
 version = "0.1.0"
-source = "git+https://github.com/AdityaVG13/zerostack?rev=fa253840910ab4051635e2de95f04ddf6043a000#fa253840910ab4051635e2de95f04ddf6043a000"
+source = "git+https://github.com/AdityaVG13/zerostack?rev=8188fb08698a5ed29bff6b339657bdd1933de3cc#8188fb08698a5ed29bff6b339657bdd1933de3cc"
 dependencies = [
  "libc",
  "windows-sys",
@@ -3624,7 +3626,7 @@ dependencies = [
 [[package]]
 name = "zero-ref"
 version = "0.1.0"
-source = "git+https://github.com/AdityaVG13/zerostack?rev=fa253840910ab4051635e2de95f04ddf6043a000#fa253840910ab4051635e2de95f04ddf6043a000"
+source = "git+https://github.com/AdityaVG13/zerostack?rev=8188fb08698a5ed29bff6b339657bdd1933de3cc#8188fb08698a5ed29bff6b339657bdd1933de3cc"
 dependencies = [
  "serde",
  "sha2 0.11.0",
@@ -3633,7 +3635,7 @@ dependencies = [
 [[package]]
 name = "zero-store"
 version = "0.1.0"
-source = "git+https://github.com/AdityaVG13/zerostack?rev=fa253840910ab4051635e2de95f04ddf6043a000#fa253840910ab4051635e2de95f04ddf6043a000"
+source = "git+https://github.com/AdityaVG13/zerostack?rev=8188fb08698a5ed29bff6b339657bdd1933de3cc#8188fb08698a5ed29bff6b339657bdd1933de3cc"
 dependencies = [
  "serde",
  "serde_json",

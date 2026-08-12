@@ -47,20 +47,14 @@ tempfile = "3.27.0"
 thiserror = "2.0.19"
 toml = "1.1.4"
 wait-timeout = "0.2.1"
-zero-abi = { git = "https://github.com/AdityaVG13/zerostack", rev = "fa253840910ab4051635e2de95f04ddf6043a000" }
-zero-gauge = { git = "https://github.com/AdityaVG13/zerostack", rev = "fa253840910ab4051635e2de95f04ddf6043a000" }
-zero-ledger = { git = "https://github.com/AdityaVG13/zerostack", rev = "fa253840910ab4051635e2de95f04ddf6043a000" }
-zero-ref = { git = "https://github.com/AdityaVG13/zerostack", rev = "fa253840910ab4051635e2de95f04ddf6043a000" }
-zero-process = { git = "https://github.com/AdityaVG13/zerostack", rev = "fa253840910ab4051635e2de95f04ddf6043a000" }
-zero-store = { git = "https://github.com/AdityaVG13/zerostack", rev = "fa253840910ab4051635e2de95f04ddf6043a000" }
+zero-abi = { git = "https://github.com/AdityaVG13/zerostack", rev = "8188fb08698a5ed29bff6b339657bdd1933de3cc" }
+zero-gauge = { git = "https://github.com/AdityaVG13/zerostack", rev = "8188fb08698a5ed29bff6b339657bdd1933de3cc" }
+zero-ledger = { git = "https://github.com/AdityaVG13/zerostack", rev = "8188fb08698a5ed29bff6b339657bdd1933de3cc" }
+zero-ref = { git = "https://github.com/AdityaVG13/zerostack", rev = "8188fb08698a5ed29bff6b339657bdd1933de3cc" }
+zero-process = { git = "https://github.com/AdityaVG13/zerostack", rev = "8188fb08698a5ed29bff6b339657bdd1933de3cc" }
+zero-store = { git = "https://github.com/AdityaVG13/zerostack", rev = "8188fb08698a5ed29bff6b339657bdd1933de3cc" }
 # Hub-owned MCP transport authority (replaces the retired zero-codemode fastmcp carrier).
-zero-mcp = { path = "../ZeroStack/crates/zero-mcp", features = ["fastmcp"] }
-
-# Local-checkout override for zero-abi, which zero-mcp pulls in as a path dep.
-# Keeps the git pin above as the declared source while unifying the graph on
-# the local ZeroStack checkout until the next hub publication.
-[patch."https://github.com/AdityaVG13/zerostack"]
-zero-abi = { path = "../ZeroStack/crates/zero-abi" }
+zero-mcp = { git = "https://github.com/AdityaVG13/zerostack", rev = "8188fb08698a5ed29bff6b339657bdd1933de3cc", features = ["fastmcp"] }
 
 [profile.release-perf]
 inherits = "release"
