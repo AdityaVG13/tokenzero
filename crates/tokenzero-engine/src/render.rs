@@ -1577,6 +1577,12 @@ fn slim_cli_json(response: &ToolResponse) -> String {
             serde_json::to_value(channels).unwrap_or(serde_json::Value::Null),
         );
     }
+    if let Some(cache_status) = &response.cache_status {
+        doc.insert("cache_status".into(), serde_json::json!(cache_status));
+    }
+    if let Some(saved) = response.saved_tokens_estimate {
+        doc.insert("saved_tokens_estimate".into(), serde_json::json!(saved));
+    }
     serde_json::to_string(&serde_json::Value::Object(doc)).unwrap_or_else(|_| {
         format!(
             "{{\"schema_version\":\"{CLI_SCHEMA_VERSION}\",\"status\":\"error\",\"tool\":\"{}\"}}",

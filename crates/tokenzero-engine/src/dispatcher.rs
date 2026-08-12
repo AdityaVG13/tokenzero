@@ -119,6 +119,8 @@ pub fn tool_response_to_domain(response: &ToolResponse) -> DomainResult {
             "accounting": response.accounting,
             "mode": response.mode,
             "content_type": response.content_type,
+            "cache_status": response.cache_status,
+            "saved_tokens_estimate": response.saved_tokens_estimate,
         })
     } else {
         json!({
@@ -226,7 +228,8 @@ pub fn dispatch_operation(
     let overhead_ns = wall_ns.saturating_sub(kernel_ns).max(pre_kernel);
 
     match kernel {
-        Ok(response) => {
+        Ok(mut response) => {
+            crate::cachezero::observe_action_cache(engine, resolved, args, wall_ns, &mut response);
             record_profile(surface, overhead_ns, wall_ns, kernel_ns);
             let ok = response.status == "ok";
             crate::perf_profile::sample_collected(

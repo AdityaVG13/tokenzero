@@ -16,6 +16,7 @@ pub mod cache_crossover;
 pub mod cache_maintenance;
 pub mod cache_meter;
 mod cache_pack;
+pub mod cachezero;
 pub mod codemode_catalog;
 pub mod codemode_wire;
 mod collect;

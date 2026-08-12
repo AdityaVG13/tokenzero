@@ -255,6 +255,12 @@ pub struct ToolResponse {
     /// visible body of a response carrying this receipt.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub recovery: Option<RecoveryReceipt>,
+    /// CacheZero would-be outcome. Never implies the body was served from cache.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_status: Option<String>,
+    /// Tokens that a hit would have avoided showing. Zero on forced-miss.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub saved_tokens_estimate: Option<u64>,
 }
 
 /// Terminal-recovery marker for adapter compaction pipelines (yevj).

@@ -1295,10 +1295,14 @@ fn doctor_exit_code(value: &serde_json::Value) -> i32 {
     }
 }
 
-fn handle_stats(args: CommonArgs) -> Result<serde_json::Value> {
+fn handle_stats(args: StatsArgs) -> Result<serde_json::Value> {
     let root = tokenzero_work_root(args.root);
+    let cache = resolve_recovery_cache_path(&root, args.cache_path);
+    if args.cachezero {
+        let store = tokenzero_recovery::store_root_from_cache_path(&cache);
+        return Ok(tokenzero_recovery::cachezero_stats_json(&store));
+    }
     let mut report = serde_json::to_value(report_for_path(&default_ledger_path(&root))?)?;
-    let cache = resolve_recovery_cache_path(&root, None);
     report["recovery_blobs"] = tokenzero_recovery::recovery_blob_status(&cache);
     Ok(report)
 }

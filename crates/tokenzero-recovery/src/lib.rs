@@ -45,6 +45,7 @@ pub use entity_novelty::{
 };
 
 pub mod action_cache;
+pub mod cachezero;
 pub mod store_schema;
 pub mod working_set;
 
@@ -52,6 +53,12 @@ pub use action_cache::{
     ACTIONCACHE_GC_GRACE_SECS, ACTIONCACHE_REL_DIR, ActionCacheEntry, ActionCacheError,
     ActionCacheIndex, BlobEvictionPlan, ServedArtifact, action_cache_protects_hash,
     artifact_full_hash,
+};
+pub use cachezero::{
+    CACHEZERO_ENV, CACHEZERO_GRADUATION_PCT, CACHEZERO_MODE_ENV, CACHEZERO_REL_DIR,
+    CACHEZERO_SHADOW_FILE, CACHEZERO_STATS_SCHEMA, CacheStatus, CachezeroMode, CachezeroStats,
+    ShadowDecision, aggregate_cachezero, cachezero_stats_json, classify_would_be_status,
+    live_entry_for_key, record_shadow_decision, shadow_jsonl_path, store_root_from_cache_path,
 };
 pub use store_schema::{
     SHADOW_JSONL_RING_CAP, STORE_SCHEMA_MAJOR, STORE_SCHEMA_MINOR, STORE_SCHEMA_NAME, SchemaAdmit,

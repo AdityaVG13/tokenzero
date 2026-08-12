@@ -351,6 +351,10 @@ impl ActionCacheIndex {
     fn serve_path(&self, key: &str) -> PathBuf {
         self.root.join(".serves").join(key)
     }
+
+    pub fn has_in_flight_serve(&self, key: &str) -> bool {
+        validate_key(key).is_ok() && self.serve_path(key).exists()
+    }
 }
 
 fn admit_loaded_stamp(segment: &ActionCacheSegment) -> Result<(), ActionCacheError> {

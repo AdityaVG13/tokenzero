@@ -238,8 +238,8 @@ const COMMANDS: &[CommandSurface] = &[
         "state",
         false,
         true,
-        "tokenzero stats --json",
-        "Print local TokenZero usage statistics.",
+        "tokenzero stats --json --cachezero",
+        "Print local TokenZero usage statistics, or CacheZero shadow graduation with --cachezero.",
     ),
     cmd(
         "session-ledger",
