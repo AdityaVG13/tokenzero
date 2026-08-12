@@ -149,10 +149,67 @@ fn decode_job_tail(bytes: &[u8]) -> (String, bool, usize) {
 }
 
 fn shell_argv(command: &str) -> Vec<String> {
-    if contains_platform_shell_syntax(command, tokenzero_runtime::current_platform()) {
+    if contains_platform_shell_syntax(command, tokenzero_runtime::current_platform())
+        || requires_shell_builtin(command)
+    {
         vec![command.to_string()]
     } else {
         split_command_string(command)
+    }
+}
+
+fn requires_shell_builtin(command: &str) -> bool {
+    let words = split_command_string(command);
+    let Some(program) = words.first().map(String::as_str) else {
+        return false;
+    };
+    matches!(
+        program,
+        "." | "alias"
+            | "bg"
+            | "break"
+            | "cd"
+            | "command"
+            | "continue"
+            | "eval"
+            | "exec"
+            | "exit"
+            | "export"
+            | "fg"
+            | "getopts"
+            | "hash"
+            | "jobs"
+            | "read"
+            | "readonly"
+            | "return"
+            | "set"
+            | "shift"
+            | "source"
+            | "times"
+            | "trap"
+            | "type"
+            | "typeset"
+            | "ulimit"
+            | "umask"
+            | "unalias"
+            | "unset"
+            | "wait"
+    )
+}
+
+#[cfg(test)]
+mod shell_argv_tests {
+    use super::*;
+
+    #[test]
+    fn standalone_shell_builtins_use_the_shell_path() {
+        for command in ["exit 7", "cd ..", "export A=1", "unset A"] {
+            assert_eq!(shell_argv(command), vec![command.to_string()]);
+        }
+        assert_eq!(
+            shell_argv("printf ok"),
+            vec!["printf".to_string(), "ok".to_string()]
+        );
     }
 }
 
