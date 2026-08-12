@@ -1,10 +1,11 @@
 use std::panic::{AssertUnwindSafe, catch_unwind};
+use std::time::{Duration, Instant};
 
 use serde_json::Value;
 use tokenzero_core::{MCP_SCHEMA_VERSION, McpToolSurface};
 
 use crate::catalog::{tool_cluster_names, tool_specs_for_filter_with_health};
-use crate::job_progress::{self, JobEvent};
+use crate::job_progress;
 use crate::{
     InitializeState, TokenZeroEngine, call_tool, read_resource, resource_specs, tool_specs,
 };
@@ -93,7 +94,41 @@ pub fn handle_jsonrpc(engine: &TokenZeroEngine, line: &str) -> Option<String> {
             );
         }
     };
-    handle_jsonrpc_value(engine, parsed).map(|value| value.to_string())
+    handle_jsonrpc_value(engine, parsed).map(|value| encode_session_frames(engine, value))
+}
+
+fn encode_session_frames(engine: &TokenZeroEngine, response: Value) -> String {
+    let notes = job_progress::take_notifications(engine.session_id());
+    if notes.is_empty() {
+        return response.to_string();
+    }
+    let mut out = String::new();
+    for note in notes {
+        out.push_str(&note.to_string());
+        out.push('\n');
+    }
+    out.push_str(&response.to_string());
+    out
+}
+
+fn follow_job_lifecycle(engine: &TokenZeroEngine, job_id: &str) {
+    let session = engine.session_id();
+    let deadline = Instant::now() + Duration::from_millis(2_000);
+    loop {
+        match engine.shell_job_wait(job_id, Duration::from_millis(100), 0, 256) {
+            Ok(poll) => {
+                job_progress::observe_job_poll(session, job_id, &poll);
+                let status = poll
+                    .get("status")
+                    .and_then(Value::as_str)
+                    .unwrap_or("running");
+                if status != "running" || Instant::now() >= deadline {
+                    break;
+                }
+            }
+            Err(_) => break,
+        }
+    }
 }
 
 pub(crate) fn handle_jsonrpc_value(engine: &TokenZeroEngine, parsed: Value) -> Option<Value> {
@@ -340,8 +375,8 @@ fn handle_jsonrpc_request(engine: &TokenZeroEngine, parsed: Value) -> Option<Val
                 call_tool(engine, name, &args, call_id)
                     .map_err(|error| jsonrpc_invalid_params_error(id.clone(), error))
             );
-            if let Some(job_id) = job_progress::job_id_from_tool_result(&result) {
-                job_progress::observe(engine.session_id(), JobEvent::Started { job_id });
+            if let Some(job_id) = job_progress::observe_job_launch(engine.session_id(), &result) {
+                follow_job_lifecycle(engine, &job_id);
             }
             result
         }

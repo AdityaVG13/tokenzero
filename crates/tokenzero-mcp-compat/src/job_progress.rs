@@ -34,7 +34,6 @@ pub enum NotifyMode {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-#[allow(dead_code)] // Progress/Completed are observed from tests and later wiring.
 pub enum JobEvent {
     Started { job_id: String },
     Progress { job_id: String, cursor: u64 },
@@ -222,7 +221,6 @@ pub fn observe(session_id: &str, event: JobEvent) {
     }
 }
 
-#[cfg_attr(not(test), allow(dead_code))]
 pub fn take_notifications(session_id: &str) -> Vec<Value> {
     lock_sessions()
         .get_mut(session_id)
@@ -247,6 +245,73 @@ pub fn job_id_from_tool_result(result: &Value) -> Option<String> {
         .or_else(|| result.get("job"))
         .and_then(Value::as_str)
         .map(str::to_string)
+}
+
+fn job_status(value: &Value) -> Option<&str> {
+    value
+        .get("status")
+        .or_else(|| value.pointer("/structuredContent/status"))
+        .and_then(Value::as_str)
+}
+
+fn job_cursor(value: &Value) -> Option<u64> {
+    value
+        .get("cursor")
+        .or_else(|| value.pointer("/structuredContent/cursor"))
+        .and_then(Value::as_u64)
+}
+
+fn is_terminal_status(status: &str) -> bool {
+    matches!(status, "exited" | "failed")
+}
+
+/// Observe a job launch handle from `tools/call`.
+pub fn observe_job_launch(session_id: &str, result: &Value) -> Option<String> {
+    let job_id = job_id_from_tool_result(result)?;
+    observe(
+        session_id,
+        JobEvent::Started {
+            job_id: job_id.clone(),
+        },
+    );
+    if let Some(status) = job_status(result)
+        && is_terminal_status(status)
+    {
+        observe(
+            session_id,
+            JobEvent::Completed {
+                job_id: job_id.clone(),
+                status: status.to_string(),
+            },
+        );
+    }
+    Some(job_id)
+}
+
+/// Observe Progress/Completed from a real `shell_job_wait` poll body.
+pub fn observe_job_poll(session_id: &str, job_id: &str, poll: &Value) {
+    if let Some(cursor) = job_cursor(poll)
+        && cursor > 0
+    {
+        observe(
+            session_id,
+            JobEvent::Progress {
+                job_id: job_id.to_string(),
+                cursor,
+            },
+        );
+    }
+    if let Some(status) = job_status(poll)
+        && is_terminal_status(status)
+    {
+        observe(
+            session_id,
+            JobEvent::Completed {
+                job_id: job_id.to_string(),
+                status: status.to_string(),
+            },
+        );
+    }
 }
 
 #[cfg(test)]
@@ -405,6 +470,56 @@ mod tests {
         assert!(
             take_notifications(session).is_empty(),
             "OpenCode without a progress token keeps zero.token.job polling"
+        );
+    }
+
+    #[test]
+    fn tz1c5y_tools_call_emits_progress_frame_from_handle_jsonrpc() {
+        let dir = tempfile::tempdir().unwrap();
+        let engine = crate::TokenZeroEngine::new(crate::EngineConfig::for_root(dir.path()));
+        engine.mark_lifecycle_ready_for_tests();
+        let command = if cfg!(windows) {
+            "echo tz1c5y-live"
+        } else {
+            "printf tz1c5y-live"
+        };
+        let request = json!({
+            "jsonrpc": "2.0",
+            "id": 7,
+            "method": "tools/call",
+            "params": {
+                "name": "tz_shell",
+                "arguments": { "command": command, "background": true },
+                "_meta": { "progressToken": "pt-live" }
+            }
+        });
+        let raw = crate::handle_jsonrpc(&engine, &request.to_string())
+            .expect("tools/call must return a JSON-RPC exchange");
+        let frames: Vec<Value> = raw
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap_or_else(|err| panic!("{err}: {line}")))
+            .collect();
+        let progress: Vec<&Value> = frames
+            .iter()
+            .filter(|frame| frame["method"] == "notifications/progress")
+            .collect();
+        assert!(
+            !progress.is_empty(),
+            "handle_jsonrpc must emit a notifications/progress frame: {raw}"
+        );
+        assert!(
+            frames
+                .iter()
+                .any(|frame| frame["id"] == 7 && frame.get("result").is_some()),
+            "tools/call result must still leave handle_jsonrpc: {raw}"
+        );
+        assert!(
+            progress.iter().any(|frame| {
+                frame["params"]["message"]
+                    .as_str()
+                    .is_some_and(|text| text.contains("exited") || text.contains("failed"))
+            }),
+            "real job lifecycle must emit a terminal progress frame: {raw}"
         );
     }
 }

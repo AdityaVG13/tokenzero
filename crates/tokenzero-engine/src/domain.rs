@@ -440,19 +440,31 @@ pub fn execute_domain_op(
             response
         }
         "shell" => {
-            let (command, argv) = arg_command(args).map_err(map_args)?;
-            let env = arg_env_map(args);
-            engine.shell(
-                &command,
-                argv,
-                arg_str(args, "cwd").map(Path::new),
-                arg_mode(args),
-                arg_str(args, "rewrite"),
-                arg_bool(args, "no_rewrite"),
-                env,
-                arg_str(args, "stdin"),
-                arg_shell_timeout(args),
-            )
+            if args.get("background") == Some(&Value::Bool(true)) {
+                match execute_raw_worker_background_shell(engine, args) {
+                    Ok(launched) => job_launch_response(launched),
+                    Err(err) => {
+                        return Err(DomainDispatchError::InvalidArgs {
+                            op: canonical.to_string(),
+                            message: err.message,
+                        });
+                    }
+                }
+            } else {
+                let (command, argv) = arg_command(args).map_err(map_args)?;
+                let env = arg_env_map(args);
+                engine.shell(
+                    &command,
+                    argv,
+                    arg_str(args, "cwd").map(Path::new),
+                    arg_mode(args),
+                    arg_str(args, "rewrite"),
+                    arg_bool(args, "no_rewrite"),
+                    env,
+                    arg_str(args, "stdin"),
+                    arg_shell_timeout(args),
+                )
+            }
         }
         "ingest" => {
             let text = arg_string_any(args, &["text", "input"]).map_err(map_args)?;
@@ -893,6 +905,27 @@ fn inline_response(tool: &str, mode: Mode, text: String, raw_tokens: usize) -> T
             exact_ref_tokens: Some(0),
         },
     )
+}
+
+fn job_launch_response(launched: Value) -> ToolResponse {
+    let job = launched
+        .get("job")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let cursor = launched.get("cursor").cloned().unwrap_or(json!(0));
+    let version = launched.get("version").cloned().unwrap_or(json!(0));
+    let mut response = pretty_json_response("shell", Mode::Structured, &launched, None);
+    response.telemetry = Some(json!({
+        "job": job,
+        "cursor": cursor,
+        "version": version,
+        "structuredContent": {
+            "job": job,
+            "cursor": cursor,
+            "version": version
+        }
+    }));
+    response
 }
 
 fn pretty_json_response(
