@@ -44,9 +44,11 @@ pub use entity_novelty::{
     read_entity_novelty, scope_digest, write_entity_novelty,
 };
 
+pub mod action_cache;
 pub mod store_schema;
 pub mod working_set;
 
+pub use action_cache::{ACTIONCACHE_REL_DIR, ActionCacheEntry, ActionCacheError, ActionCacheIndex};
 pub use store_schema::{
     SHADOW_JSONL_RING_CAP, STORE_SCHEMA_MAJOR, STORE_SCHEMA_MINOR, STORE_SCHEMA_NAME, SchemaAdmit,
     SchemaSkewError, StoreSchemaStamp, StoreSchemaVersion, admit_store_schema,
