@@ -4,6 +4,9 @@ Build, test, and verify the TokenZero Rust Core from source. Most users should
 prefer a prebuilt binary from the [latest Release](https://github.com/AdityaVG13/tokenzero/releases);
 this page is for contributors and from-source builds.
 
+TokenZero requires Rust 1.98 nightly or newer. `rust-toolchain.toml` pins
+`nightly-2026-05-31` so local and CI builds use the verified minimum toolchain.
+
 ## Build
 
 ```bash
