@@ -387,6 +387,20 @@ fn external_pin_resolves_namespaced_cache_and_hub_mode() {
 }
 
 #[test]
+fn literal_tilde_store_pin_is_rejected_without_creating_repo_tilde() {
+    let dir = tempdir().unwrap();
+    let env = StoreEnv::new(Some(std::ffi::OsString::from("~/unsafe-store")), true);
+
+    let error = match TokenZeroStore::try_open_with_env(dir.path(), env) {
+        Ok(_) => panic!("literal tilde pin must fail closed"),
+        Err(error) => error,
+    };
+    assert!(matches!(error, TokenZeroStoreError::CacheDir(_)));
+    assert!(error.to_string().contains("literal '~'"), "{error}");
+    assert!(!dir.path().join("~").exists());
+}
+
+#[test]
 fn root_report_classifies_zerostack_old_as_legacy() {
     let dir = tempdir().unwrap();
     let root = dir.path();
