@@ -2,7 +2,7 @@ use super::*;
 use crate::shared_cas::SharedCas;
 use proptest::prelude::*;
 use std::collections::BTreeMap;
-use std::panic::{AssertUnwindSafe, catch_unwind, resume_unwind};
+use std::panic::{catch_unwind, resume_unwind, AssertUnwindSafe};
 use std::sync::{LazyLock, Mutex};
 use tempfile::tempdir;
 
@@ -3042,6 +3042,51 @@ fn windowed_expand_visible_tokens_much_less_than_full() {
 }
 
 #[test]
+fn tz73yc_windowed_expand_debits_only_the_window() {
+    let (mut store, _cache, _dir) = temp_store();
+    let payload = multi_line_fixture(200);
+    let stored = store
+        .store_payload(&payload, ContentType::Unknown, None, None, None)
+        .unwrap();
+    store.recovery_tokens = 0;
+    let window = store.expand(
+        &stored.blob_ref,
+        Some("raw"),
+        Some(120),
+        Some(169),
+        None,
+        None,
+    );
+    assert!(window.found);
+    assert_eq!(
+        store.recovery_tokens, window.tokens,
+        "bounded expand must debit the window, not the full payload"
+    );
+    assert!(store.recovery_tokens < count_tokens(&payload) / 2);
+}
+
+#[test]
+fn tz73yc_recovery_tokens_are_per_store_not_thread_local() {
+    let (mut first, _, _dir_a) = temp_store();
+    let (mut second, _, _dir_b) = temp_store();
+    let stored = first
+        .store_payload("recover me\n", ContentType::Unknown, None, None, None)
+        .unwrap();
+    first.recovery_tokens = 0;
+    second.recovery_tokens = 0;
+    assert!(
+        first
+            .expand(&stored.blob_ref, Some("raw"), None, None, None, None)
+            .found
+    );
+    assert!(first.recovery_tokens > 0);
+    assert_eq!(
+        second.recovery_tokens, 0,
+        "expand debit must stay on the store that expanded, not a thread_local"
+    );
+}
+
+#[test]
 fn classify_ref_maps_kind_and_content_type() {
     assert_eq!(
         classify_ref("tz://file/abc", Some(ContentType::Unknown)),
@@ -3431,18 +3476,14 @@ fn transparency_log_survives_restart_with_valid_proofs() {
 
     let restarted = RecoveryStore::new(Some(cache));
     assert_eq!(restarted.transparency_root(), new_root);
-    assert!(
-        restarted
-            .transparency_inclusion_proof(0)
-            .unwrap()
-            .verify(&new_root)
-    );
-    assert!(
-        restarted
-            .transparency_consistency_proof(old_size)
-            .unwrap()
-            .verify(&old_root, &new_root)
-    );
+    assert!(restarted
+        .transparency_inclusion_proof(0)
+        .unwrap()
+        .verify(&new_root));
+    assert!(restarted
+        .transparency_consistency_proof(old_size)
+        .unwrap()
+        .verify(&old_root, &new_root));
 }
 
 #[test]

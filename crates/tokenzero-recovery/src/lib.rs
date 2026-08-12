@@ -976,6 +976,8 @@ pub struct RecoveryStore {
     /// directory already exists.
     shared_cas: Option<SharedCas>,
     pub recovery_count: usize,
+    /// Expand debit for this store instance. Not thread-local: a moved
+    /// expand still charges the store that performed it (tokenzero-73yc).
     pub recovery_tokens: usize,
     /// Count of legacy short-ref lookups resolved via alias this session.
     pub legacy_read_count: usize,

@@ -186,6 +186,12 @@ impl Accounting {
     pub fn visible_savings_ratio(&self) -> f64 {
         savings_ratio(self.raw_tokens, self.visible_tokens)
     }
+    /// M_rec used-tokens are `visible + recovery` (saturating).
+    ///
+    /// Exact-expand payloads that also appear in `visible_tokens` are counted
+    /// in both on purpose: the hub zero-ledger receipt treats that overlap as
+    /// conservative (understates savings). `used` is "shown or recovered",
+    /// not a partition of disjoint masses (tokenzero-73yc).
     pub fn recovery_adjusted_savings_ratio(&self) -> f64 {
         savings_ratio(
             self.raw_tokens,
@@ -1850,6 +1856,25 @@ mod tests {
             ..Accounting::default()
         };
         assert_eq!(both_max.recovery_adjusted_savings_ratio(), 0.0);
+    }
+
+    #[test]
+    fn tz73yc_m_rec_counts_visible_recovery_overlap() {
+        // Exact-expand bytes that were also shown count in both masses.
+        let overlap = Accounting {
+            raw_tokens: 200,
+            visible_tokens: 50,
+            recovery_tokens: 50,
+            ..Accounting::default()
+        };
+        assert!(
+            (overlap.recovery_adjusted_savings_ratio() - 0.50).abs() < f64::EPSILON,
+            "used = visible+recovery = 100, savings = 0.50"
+        );
+        assert!(
+            (overlap.visible_savings_ratio() - 0.75).abs() < f64::EPSILON,
+            "visible-only savings stay 0.75; M_rec is the more conservative figure"
+        );
     }
 }
 
