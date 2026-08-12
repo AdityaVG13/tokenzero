@@ -128,19 +128,15 @@ fn shell_render_exposes_status_truth_and_refs() {
         Some("command_failed"),
         Some(Some("false")),
     );
-    assert!(
-        rendered
-            .command_status
-            .pipeline_masking_warning
-            .as_deref()
-            .unwrap()
-            .contains("mask")
-    );
-    assert!(
-        rendered
-            .visible
-            .contains("combined_ref: tz://blob/combined")
-    );
+    assert!(rendered
+        .command_status
+        .pipeline_masking_warning
+        .as_deref()
+        .unwrap()
+        .contains("mask"));
+    assert!(rendered
+        .visible
+        .contains("combined_ref: tz://blob/combined"));
 }
 
 #[test]
@@ -193,11 +189,9 @@ fn rg_pcre2_search_output_gets_search_summary() {
     assert_eq!(rendered.command_status.status_label, "command_success");
     assert!(rendered.visible.contains("search_summary"));
     assert!(rendered.visible.contains("matches_seen: 1"));
-    assert!(
-        rendered
-            .visible
-            .contains("crates/tokenzero-core/src/lib.rs:42:error: tokenzero")
-    );
+    assert!(rendered
+        .visible
+        .contains("crates/tokenzero-core/src/lib.rs:42:error: tokenzero"));
 }
 
 #[test]
@@ -252,11 +246,9 @@ fn shell_wrapped_rg_search_keeps_search_family_and_summary() {
     assert_eq!(rendered.command_status.status_label, "command_success");
     assert!(rendered.visible.contains("search_summary"));
     assert!(rendered.visible.contains("matches_seen: 1"));
-    assert!(
-        rendered
-            .visible
-            .contains("crates/tokenzero-core/src/lib.rs:42:error: tokenzero")
-    );
+    assert!(rendered
+        .visible
+        .contains("crates/tokenzero-core/src/lib.rs:42:error: tokenzero"));
 }
 
 #[test]
@@ -270,8 +262,12 @@ fn shell_c_wrappers_detect_masked_inner_pipeline_failures() {
     ] {
         let status = classify_command_status(command, "", "", Some(0), false);
         assert!(
-            !status.command_success,
-            "{command}: expected masked pipeline failure, got {status:?}"
+            status.command_success,
+            "{command}: exit 0 must agree with command_success, got {status:?}"
+        );
+        assert_eq!(
+            status.status_label, "pipeline_masked",
+            "{command}: expected pipeline_masked, got {status:?}"
         );
         assert_eq!(status.failed_segment.as_deref(), Some("false"), "{command}");
         assert_eq!(status.shell_syntax_summary, "pipeline", "{command}");
@@ -295,6 +291,27 @@ fn shell_c_wrappers_detect_masked_inner_pipeline_failures() {
             "{command}"
         );
     }
+}
+
+#[test]
+fn tz3ry6_help_piped_to_head_is_not_command_failed() {
+    let stdout = "Usage: am file_reservations [options]\n  --help  Show this help\n";
+    let status = classify_command_status(
+        "am file_reservations --help 2>&1 | head -40",
+        stdout,
+        "",
+        Some(0),
+        false,
+    );
+    assert!(
+        status.command_success,
+        "exit 0 must agree with command_success: {status:?}"
+    );
+    assert_ne!(
+        status.status_label, "command_failed",
+        "head closing a help pipe is not command_failed: {status:?}"
+    );
+    assert_eq!(status.exit_code, Some(0));
 }
 
 #[test]
@@ -406,11 +423,9 @@ fn short_failing_shell_uses_compact_diagnostic_view_below_raw_tokens() {
     assert!(rendered.visible.contains("failed_segment: exit 7"));
     assert!(rendered.visible.contains("pipeline_masking_warning"));
     assert!(rendered.visible.contains("stderr_ref: tz://blob/stderr"));
-    assert!(
-        rendered
-            .visible
-            .contains("combined_ref: tz://blob/combined")
-    );
+    assert!(rendered
+        .visible
+        .contains("combined_ref: tz://blob/combined"));
     assert!(rendered.visible.contains("boom"), "{}", rendered.visible);
     assert!(!rendered.visible.contains("FullyQualifiedErrorId"));
     assert!(
@@ -444,11 +459,9 @@ fn masked_zero_exit_preserves_final_stdout_and_exit_marker() {
     assert!(rendered.visible.contains("# final stdout:"));
     assert!(rendered.visible.contains("REPRO_STDOUT={hello: 2}"));
     assert!(rendered.visible.contains("EXIT=0"));
-    assert!(
-        rendered
-            .visible
-            .contains("combined_ref: tz://blob/combined")
-    );
+    assert!(rendered
+        .visible
+        .contains("combined_ref: tz://blob/combined"));
 }
 
 #[test]
@@ -479,11 +492,9 @@ fn short_mixed_failure_prioritizes_error_anchor_below_raw_tokens() {
     assert_eq!(rendered.output_strategy, "compact_diagnostic_shell");
     assert!(rendered.visible.contains("status: command_failed"));
     assert!(rendered.visible.contains("error: fail"));
-    assert!(
-        rendered
-            .visible
-            .contains("combined_ref: tz://blob/combined")
-    );
+    assert!(rendered
+        .visible
+        .contains("combined_ref: tz://blob/combined"));
     assert!(
         !rendered.visible.contains("warning: note"),
         "{}",
@@ -698,11 +709,9 @@ fn short_repo_inventory_shell_view_stays_below_raw_tokens_with_ref() {
     assert!(rendered.visible.contains("repo_inventory"));
     assert!(rendered.visible.contains("files_seen: 2"));
     assert!(rendered.visible.contains("sample.txt"));
-    assert!(
-        rendered
-            .visible
-            .contains("combined_ref: tz://blob/combined")
-    );
+    assert!(rendered
+        .visible
+        .contains("combined_ref: tz://blob/combined"));
     assert!(
         visible_tokens < raw_tokens,
         "visible_tokens={visible_tokens} raw_tokens={raw_tokens}\n{}",

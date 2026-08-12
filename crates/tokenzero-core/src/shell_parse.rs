@@ -297,8 +297,8 @@ pub(crate) fn masking_warning(
             .iter()
             .any(|s| is_explicit_false_segment(s))
             || looks_masked_failure_evidence(out, err, first_nonempty_shell_segment(cmd).as_deref())
-            // A masked failure reported as command_success:false with exit_code:0 must
-            // always carry the warning explaining why the two disagree.
+            // Exit 0 plus a failed_segment is pipeline_masked: keep the warning
+            // so callers can inspect refs or rerun with pipefail.
             || failed_segment(cmd, out, err, code).is_some()
     } else {
         let comb = format!("{out}\n{err}").to_ascii_lowercase();
@@ -358,7 +358,7 @@ fn line_has_structured_masked_failure_evidence(line: &str) -> bool {
         || low.starts_with("fatal:")
         || contains_any(
             &low,
-            "panic|traceback|command not found|no such file or directory|permission denied|assertion failed|unrecognized option|invalid option|usage:",
+            "panic|traceback|command not found|no such file or directory|permission denied|assertion failed|unrecognized option|invalid option",
         )
 }
 

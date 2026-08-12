@@ -1,8 +1,8 @@
 //! Conformance for compound shell failure attribution: `failed_segment` must
-//! name the segment that produced the controlling nonzero status, and
-//! `command_success`/`exit_code` must never disagree without an explanation.
+//! name the segment that produced the controlling nonzero status. Exit 0
+//! agrees with `command_success`; advisory masking uses `pipeline_masked`.
 
-use tokenzero_core::{CommandStatus, Mode, ShellRenderInput, render_shell};
+use tokenzero_core::{render_shell, CommandStatus, Mode, ShellRenderInput};
 
 fn status(command: &str, stdout: &str, stderr: &str, code: i32) -> CommandStatus {
     let status = render_shell(ShellRenderInput {
@@ -19,26 +19,38 @@ fn status(command: &str, stdout: &str, stderr: &str, code: i32) -> CommandStatus
     })
     .command_status;
     assert_eq!(status.exit_code, Some(code), "{command}: {status:?}");
-    // exit_code and command_success must stay mutually consistent: a zero exit is
-    // only a failure when a named segment and a masking warning explain why.
-    if code == 0 && !status.command_success {
+    if code == 0 {
         assert!(
-            status.failed_segment.is_some() && status.pipeline_masking_warning.is_some(),
-            "{command}: exit 0 failure needs a segment and a masking warning: {status:?}"
+            status.command_success,
+            "{command}: exit 0 must agree with command_success: {status:?}"
+        );
+        if status.failed_segment.is_some() {
+            assert_eq!(
+                status.status_label, "pipeline_masked",
+                "{command}: {status:?}"
+            );
+            assert!(
+                status.pipeline_masking_warning.is_some(),
+                "{command}: pipeline_masked needs a warning: {status:?}"
+            );
+        } else {
+            assert_eq!(
+                status.status_label, "command_success",
+                "{command}: {status:?}"
+            );
+        }
+    } else if status.command_success {
+        assert_eq!(
+            status.status_label, "command_success",
+            "{command}: {status:?}"
+        );
+        assert!(status.failed_segment.is_none(), "{command}: {status:?}");
+    } else {
+        assert_eq!(
+            status.status_label, "command_failed",
+            "{command}: {status:?}"
         );
     }
-    if status.command_success {
-        assert!(status.failed_segment.is_none(), "{command}: {status:?}");
-    }
-    assert_eq!(
-        status.status_label,
-        if status.command_success {
-            "command_success"
-        } else {
-            "command_failed"
-        },
-        "{command}: {status:?}"
-    );
     status
 }
 
@@ -55,11 +67,15 @@ fn assert_attribution(
         expected_segment,
         "{command}: {status:?}"
     );
-    assert_eq!(
-        status.command_success,
-        expected_segment.is_none(),
-        "{command}: {status:?}"
-    );
+    if code == 0 {
+        assert!(status.command_success, "{command}: {status:?}");
+    } else {
+        assert_eq!(
+            status.command_success,
+            expected_segment.is_none(),
+            "{command}: {status:?}"
+        );
+    }
 }
 
 const TEST_FAILURE: &str = "error: test failed, to rerun pass --lib\n";

@@ -13,18 +13,24 @@ pub(crate) fn command_succeeded(
     search_no_match: bool,
     expected_false_exit: bool,
     timed_out: bool,
-    failed_segment: Option<&str>,
+    _failed_segment: Option<&str>,
 ) -> bool {
-    !timed_out
-        && !(failed_segment.is_some() && exit_code == Some(0))
-        && (exit_code == Some(0) || search_no_match || expected_false_exit)
+    // Status agrees with the process exit code (tokenzero-3ry6). A
+    // failed_segment on exit 0 is advisory masking, not command_failed.
+    !timed_out && (exit_code == Some(0) || search_no_match || expected_false_exit)
 }
 
-fn command_status_label(exit_code: Option<i32>, timed_out: bool, success: bool) -> &'static str {
-    match (timed_out, success, exit_code) {
-        (true, _, _) => "command_timeout",
-        (_, true, _) => "command_success",
-        (_, _, None) => "command_unknown",
+fn command_status_label(
+    exit_code: Option<i32>,
+    timed_out: bool,
+    success: bool,
+    pipeline_masked: bool,
+) -> &'static str {
+    match (timed_out, pipeline_masked, success, exit_code) {
+        (true, _, _, _) => "command_timeout",
+        (_, true, _, _) => "pipeline_masked",
+        (_, _, true, _) => "command_success",
+        (_, _, _, None) => "command_unknown",
         _ => "command_failed",
     }
 }
@@ -137,13 +143,15 @@ pub fn classify_command_status(
         timed_out,
         failed_segment.as_deref(),
     );
+    let pipeline_masked = !timed_out && exit_code == Some(0) && failed_segment.is_some();
     CommandStatus {
         transport_status: "ok".to_string(),
         command_success,
         exit_code,
         pipeline_rerun_command: pipeline_rerun_command(command, pipeline_masking_warning.as_ref()),
         shell_syntax_summary: shell_syntax_summary_for_status(command, stdout, stderr, exit_code),
-        status_label: command_status_label(exit_code, timed_out, command_success).to_string(),
+        status_label: command_status_label(exit_code, timed_out, command_success, pipeline_masked)
+            .to_string(),
         failed_segment,
         pipeline_masking_warning,
     }
