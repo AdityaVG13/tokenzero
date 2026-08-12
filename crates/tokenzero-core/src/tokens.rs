@@ -316,9 +316,12 @@ fn pack_to_token_boundary_for_model_with_char_limit<'a>(
     if text_chars <= budget_chars && text_chars <= max_chars {
         return text;
     }
-    let capped_tokens = max_chars.saturating_mul(1_000) / metadata.chars_per_token_milli;
-    let boundary_tokens = max_tokens.min(capped_tokens);
-    let boundary_chars = boundary_tokens.saturating_mul(metadata.chars_per_token_milli) / 1_000;
+    // Direct char boundary: min(max_chars, floor(max_tokens * chars_per_token_milli / 1_000)).
+    // Converting max_chars to whole tokens and back (double floor) was lossy:
+    // with chars_per_token_milli=3_500, max_tokens=1, max_chars=2 it returned
+    // empty though a 2-char prefix fits both caps (tokenzero-7tse, omega-math-1).
+    let boundary_chars =
+        max_chars.min(max_tokens.saturating_mul(metadata.chars_per_token_milli) / 1_000);
     char_prefix(text, boundary_chars)
 }
 

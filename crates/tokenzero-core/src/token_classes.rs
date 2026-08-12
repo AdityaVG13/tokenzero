@@ -150,26 +150,28 @@ impl<C: TokenClass> fmt::Display for Tok<C> {
 impl<C: TokenClass> Add for Tok<C> {
     type Output = Self;
     fn add(self, rhs: Self) -> Self {
-        Self::new(self.count + rhs.count)
+        // Saturate so debug panic and release wrap cannot diverge.
+        // Callers that need explicit overflow failure use `checked_add`.
+        self.saturating_add(rhs)
     }
 }
 
 impl<C: TokenClass> AddAssign for Tok<C> {
     fn add_assign(&mut self, rhs: Self) {
-        self.count += rhs.count;
+        *self = self.saturating_add(rhs);
     }
 }
 
 impl<C: TokenClass> Sub for Tok<C> {
     type Output = Self;
     fn sub(self, rhs: Self) -> Self {
-        Self::new(self.count - rhs.count)
+        self.saturating_sub(rhs)
     }
 }
 
 impl<C: TokenClass> SubAssign for Tok<C> {
     fn sub_assign(&mut self, rhs: Self) {
-        self.count -= rhs.count;
+        *self = self.saturating_sub(rhs);
     }
 }
 
@@ -215,6 +217,28 @@ mod token_class_tests {
         assert_eq!(max.checked_add(Tok::new(1)), None);
         assert_eq!(max.saturating_add(Tok::new(1)), max);
         assert_eq!(Tok::<BilledIn>::ZERO.saturating_sub(Tok::new(9)).get(), 0);
+    }
+
+    #[test]
+    fn tz7tse_operators_saturate_at_integer_boundaries() {
+        let max = Tok::<Visible>::new(u64::MAX);
+        let one = Tok::<Visible>::new(1);
+        assert_eq!((max + one).get(), u64::MAX);
+        let mut acc = max;
+        acc += one;
+        assert_eq!(acc.get(), u64::MAX);
+        assert_eq!((Tok::<Visible>::ZERO - one).get(), 0);
+        let mut zero = Tok::<Visible>::ZERO;
+        zero -= one;
+        assert_eq!(zero.get(), 0);
+
+        let parts = [max, one];
+        let total: Tok<Visible> = parts.into_iter().sum();
+        assert_eq!(total.get(), u64::MAX);
+        let borrowed: Tok<Visible> = parts.iter().sum();
+        assert_eq!(borrowed.get(), u64::MAX);
+
+        assert_eq!(max.checked_add(one), None);
     }
 
     #[test]

@@ -32,6 +32,42 @@ fn token_boundary_packing_keeps_refs_atomic_and_drops_partial_preview_token() {
 }
 
 #[test]
+fn tz7tse_char_cap_packing_is_maximal_on_sentencepiece_width() {
+    // SentencePiece width is 3.5 chars/token. Flooring max_chars through
+    // whole tokens used to empty a prefix that still fits both caps.
+    let text = "abcdefgh";
+    let packed = pack_to_token_boundary_for_model_with_char_limit(text, 1, 2, Some("llama"));
+    assert_eq!(packed, "ab");
+    assert!(packed.chars().count() <= 2);
+
+    // Small grid: (max_tokens, max_chars, model) -> expected prefix.
+    // Token budget in chars is floor(max_tokens * milli / 1000).
+    let cases: &[(&str, usize, usize, &str)] = &[
+        ("llama", 1, 1, "a"),
+        ("llama", 1, 2, "ab"),
+        ("llama", 1, 3, "abc"),
+        ("llama", 1, 4, "abc"),     // token budget is 3 chars at 3.5-width
+        ("llama", 2, 2, "ab"),      // char cap binds
+        ("llama", 2, 8, "abcdefg"), // token budget is 7 chars
+        ("mistral", 1, 2, "ab"),
+        ("gpt-4o", 1, 2, "ab"),
+        ("gpt-4o", 1, 4, "abcd"),
+    ];
+    for &(model, max_tokens, max_chars, expected) in cases {
+        let got = pack_to_token_boundary_for_model_with_char_limit(
+            text,
+            max_tokens,
+            max_chars,
+            Some(model),
+        );
+        assert_eq!(
+            got, expected,
+            "model={model} max_tokens={max_tokens} max_chars={max_chars}"
+        );
+    }
+}
+
+#[test]
 fn visible_budget_prefix_retains_every_fitting_line() {
     // Counterexample from math-review P01-001: the visible budget must keep
     // every line that fits alongside the omission marker.
