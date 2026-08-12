@@ -15,10 +15,10 @@ model-facing surface) says:
 
 - Engines never import each other. The hub composes them.
 - Depend only on hub contract crates. Never import FSZero/GraphZero.
-- Pin hub by pushed `origin/main` rev (immutable git pin). TokenZero today pins
-  `zero-abi`, `zero-gate`, `zero-gauge`, `zero-ledger`, `zero-ref`, and
-  `zerostack-machine-permit` to one pushed rev of `AdityaVG13/zerostack`
-  (rev `3eca1c6` per `Cargo.toml`).
+- Pin hub by pushed `origin/main` rev (immutable git pin). TokenZero currently
+  pins `zero-abi`, `zero-gauge`, `zero-ledger`, `zero-mcp`, `zero-process`,
+  `zero-ref`, and `zero-store` to pushed rev `8188fb0` of
+  `AdityaVG13/zerostack`.
 - Hub defects found here become hub beads, never drive-by hub edits from engine checkouts.
 - Benchmarks/telemetry: no unlabeled %; receipts generate claims; Q99 labeled.
 - Per-repo `Cargo.toml` + `Cargo.lock` are the reproducibility anchors; TokenZero keeps

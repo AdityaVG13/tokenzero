@@ -4,8 +4,8 @@ use sha2::{Digest, Sha256};
 use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};
-use tokenzero_core::operation_abi::{Mutability, operation_by_name};
-use tokenzero_core::{ProtocolTokenizer, is_verified_one_token_atom, portable_one_token_atoms};
+use tokenzero_core::operation_abi::{operation_by_name, Mutability};
+use tokenzero_core::{is_verified_one_token_atom, portable_one_token_atoms, ProtocolTokenizer};
 
 const FUZZ_LOCK_SHA256: &str = "025017fc2bfb2447a981ffd26cb2e3d1c0543196fe1566c1ef81058c4146a744";
 
@@ -102,6 +102,7 @@ fn local_manifests_have_no_retired_host_or_gate_dependencies() {
         "rquickjs",
         "fastmcp-rust",
         "zerostack-machine-permit",
+        "zero-machine-permit",
         "zero-gate =",
     ] {
         assert!(

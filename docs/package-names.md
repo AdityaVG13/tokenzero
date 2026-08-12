@@ -20,7 +20,7 @@ Canonical naming is fixed now so code and docs do not drift:
 | npm | `@<engine>/cli` | `@tokenzero/cli` |
 | npm worker surface | `@<engine>/codemode` | `@tokenzero/codemode`; `@fszero/codemode`; `@graphzero/codemode` |
 | npm fallback | `<engine>-<component>` | `tokenzero-codemode`; `fszero-codemode`; `graphzero-codemode` only if scoped publication is unavailable |
-| Foundation crates | `zero-<component>` | Hub-owned; finalized by `tokenzero-kxze` before publication |
+| Foundation crates | `zero-<component>` | Hub-owned; `zero-machine-permit` is the final former-prefix outlier normalized by `tokenzero-kxze` |
 
 Peer-family targets follow the same rule: `fszero-*`, `graphzero-*`,
 `@fszero/cli`, and `@graphzero/cli`. This record does not publish or claim

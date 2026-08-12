@@ -65,7 +65,7 @@ run cargo test -p tokenzero-cli --jobs "$JOBS" --test irx9_surface_bench_process
 # 7) Gate-C dependency and source boundary guards
 WORKER_TREE="$(cargo tree -p tokenzero-worker --no-default-features -e normal --depth 1)"
 printf '%s\n' "$WORKER_TREE"
-if printf '%s\n' "$WORKER_TREE" | grep -Eiq '(^|── )(rquickjs|fastmcp|zerostack-machine-permit|zero-codemode|tokenzero-mcp)( |$)'; then
+if printf '%s\n' "$WORKER_TREE" | grep -Eiq '(^|── )(rquickjs|fastmcp|zerostack-machine-permit|zero-machine-permit|zero-codemode|tokenzero-mcp)( |$)'; then
   fail "planner-free worker graph contains a forbidden host dependency"
 fi
 ENGINE_TREE="$(cargo tree -p tokenzero-engine -e normal --depth 2)"
