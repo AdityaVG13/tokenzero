@@ -825,9 +825,19 @@ pub enum PendingSubstitution {
 /// are the freshly minted ones for this serve, so the note alone recovers
 /// the exact bytes even if the client compacted the earlier payload away.
 /// Callers must only emit it after those refs persisted.
-pub fn unchanged_read_note(path: &Path, text: &str, stored: &StoredPayload) -> String {
+pub fn unchanged_read_note(
+    path: &Path,
+    text: &str,
+    stored: &StoredPayload,
+    cross_session: bool,
+) -> String {
+    let when = if cross_session {
+        "served in a prior session; bytes match disk"
+    } else {
+        "served earlier this session"
+    };
     format!(
-        "unchanged: {} (served earlier this session)\n# {} — {} lines, {} tokens; full bytes: expand {}",
+        "unchanged: {} ({when})\n# {} — {} lines, {} tokens; full bytes: expand {}",
         stored.file_ref,
         path.display(),
         text.lines().count(),

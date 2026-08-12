@@ -622,3 +622,68 @@ fn persisted_memory_is_user_scoped_and_reports_cross_session_savings() {
     assert!(user_a.path().join("session-memory.json").is_file());
     assert!(user_b.path().join("session-memory.json").is_file());
 }
+
+#[test]
+fn tzoquc_resume_after_disk_change_shows_new_bytes() {
+    let project = tempdir().unwrap();
+    let user = tempdir().unwrap();
+    let file = project.path().join("protocol.rs");
+    fs::write(&file, dedup_fixture_content()).unwrap();
+    let config = EngineConfig::for_root(project.path());
+
+    crate::session_persist::with_session_root(user.path(), || {
+        let first_session = TokenZeroEngine::new(config.clone());
+        read_ok(&first_session, &file);
+    });
+
+    let changed = dedup_fixture_content().replace(
+        "line 20: session redundancy fixture content wide enough to out-cost a note",
+        "line 20: delegated to zero_abi::raw_worker_protocol_manifest()",
+    );
+    fs::write(&file, &changed).unwrap();
+
+    crate::session_persist::with_session_root(user.path(), || {
+        let resumed = TokenZeroEngine::new(config.clone());
+        let response = read_ok(&resumed, &file);
+        let text = visible_text(&response);
+        assert!(
+            !text.starts_with("unchanged:"),
+            "changed disk after resume must not collapse to a prior-session note: {text}"
+        );
+        assert!(
+            text.contains("zero_abi::raw_worker_protocol_manifest()") || text.contains("+line 20:"),
+            "new bytes or a diff must be inline: {text}"
+        );
+        assert_ne!(
+            response
+                .telemetry
+                .as_ref()
+                .and_then(|t| t.get("stale"))
+                .and_then(|v| v.as_bool()),
+            Some(true),
+            "matching store/disk hashes should not flag stale: {response:?}"
+        );
+    });
+}
+
+#[test]
+fn tzoquc_cross_session_note_does_not_claim_this_session() {
+    let project = tempdir().unwrap();
+    let user = tempdir().unwrap();
+    let file = project.path().join("conversation.rs");
+    fs::write(&file, dedup_fixture_content()).unwrap();
+    let config = EngineConfig::for_root(project.path());
+
+    crate::session_persist::with_session_root(user.path(), || {
+        read_ok(&TokenZeroEngine::new(config.clone()), &file);
+    });
+    crate::session_persist::with_session_root(user.path(), || {
+        let text = visible_text(&read_ok(&TokenZeroEngine::new(config.clone()), &file));
+        assert!(text.starts_with("unchanged:"), "{text}");
+        assert!(
+            text.contains("prior session; bytes match disk"),
+            "inherited persist must not say this session: {text}"
+        );
+        assert!(!text.contains("earlier this session"), "{text}");
+    });
+}

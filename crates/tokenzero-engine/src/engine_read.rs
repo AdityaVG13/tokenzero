@@ -109,6 +109,7 @@ impl TokenZeroEngine {
         // call's refs persist: a note replaces content with refs, which is
         // only safe when the refs are actually recoverable.
         let mut substitutions: Vec<PendingSubstitution> = Vec::new();
+        let mut stale_store_hit = false;
         for path in paths.iter().take(max_files) {
             if !self.path_allowed(path) {
                 return path_not_allowed("read", path);
@@ -219,23 +220,30 @@ impl TokenZeroEngine {
                     start: source_start,
                     end: source_end,
                 };
+                let disk_sha = sha256_hex(&text);
                 let content_sha256 = stored
                     .blob_ref
                     .strip_prefix("tz://blob/")
                     .filter(|digest| digest.len() == 64)
                     .map(str::to_owned)
-                    .unwrap_or_else(|| sha256_hex(&text));
+                    .unwrap_or_else(|| disk_sha.clone());
+                // Store hash must match the bytes just read from disk.
+                // A drifted pin (tokenzero-oquc) must never collapse to
+                // "unchanged" or an expand of superseded refs.
+                let stale_store = content_sha256 != disk_sha;
+                stale_store_hit |= stale_store;
                 // raw keeps the verbatim-slice contract, passthrough keeps
                 // its verbatim-payload contract, and fresh is the per-call
                 // opt-out; all three bypass the replacement render but still
                 // record the serve below so later calls can dedup.
-                let bypass = raw || matches!(mode, Mode::Passthrough) || options.fresh;
+                let bypass =
+                    raw || matches!(mode, Mode::Passthrough) || options.fresh || stale_store;
                 match self.session_lookup(&key, &content_sha256) {
                     SeenState::Unchanged {
                         serve_count,
                         cross_session,
                     } if !bypass => {
-                        let note = unchanged_read_note(path, &text, &stored);
+                        let note = unchanged_read_note(path, &text, &stored, cross_session);
                         let note_tokens = count_tokens(&note);
                         // ROI guard: a note that costs as much as the full
                         // render is never emitted.
@@ -372,6 +380,15 @@ impl TokenZeroEngine {
         // dedup/diff serve in the same response.
         if let Some(extra) = summary.telemetry() {
             merge_telemetry(&mut response, extra);
+        }
+        if stale_store_hit {
+            merge_telemetry(
+                &mut response,
+                json!({
+                    "stale": true,
+                    "stale_reason": "store_hash_mismatch_disk"
+                }),
+            );
         }
         // Raw reads keep the verbatim slice contract even when it is empty;
         // raw=true does not imply Mode::Passthrough, so guard it explicitly.
