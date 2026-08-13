@@ -64,6 +64,7 @@ CLAUDE.md.*
 !/docs/gate-c-semantic-retirement.md
 !/docs/command-coverage.md
 !/docs/development.md
+!/docs/repo-shape.md
 !/docs/mcp-compat.md
 !/docs/install.md
 !/docs/package-names.md
