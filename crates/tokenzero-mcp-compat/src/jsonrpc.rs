@@ -80,6 +80,14 @@ impl RpcMethod {
 const JSONRPC_METHODS: &[&str] = RpcMethod::NAMES;
 
 pub fn handle_jsonrpc(engine: &TokenZeroEngine, line: &str) -> Option<String> {
+    handle_jsonrpc_dispatching(engine, line, handle_jsonrpc_request)
+}
+
+pub(crate) fn handle_jsonrpc_dispatching(
+    engine: &TokenZeroEngine,
+    line: &str,
+    dispatch: impl FnMut(&TokenZeroEngine, Value) -> Option<Value>,
+) -> Option<String> {
     let parsed: Value = match serde_json::from_str(line) {
         Ok(value) => value,
         Err(err) => {
@@ -94,7 +102,8 @@ pub fn handle_jsonrpc(engine: &TokenZeroEngine, line: &str) -> Option<String> {
             );
         }
     };
-    handle_jsonrpc_value(engine, parsed).map(|value| encode_session_frames(engine, value))
+    handle_jsonrpc_value_with(engine, parsed, dispatch)
+        .map(|value| encode_session_frames(engine, value))
 }
 
 fn encode_session_frames(engine: &TokenZeroEngine, response: Value) -> String {
@@ -131,14 +140,22 @@ fn follow_job_lifecycle(engine: &TokenZeroEngine, job_id: &str) {
     }
 }
 
-pub(crate) fn handle_jsonrpc_value(engine: &TokenZeroEngine, parsed: Value) -> Option<Value> {
+fn handle_jsonrpc_value_with(
+    engine: &TokenZeroEngine,
+    parsed: Value,
+    mut dispatch: impl FnMut(&TokenZeroEngine, Value) -> Option<Value>,
+) -> Option<Value> {
     match parsed {
-        Value::Array(batch) => handle_jsonrpc_batch(engine, batch),
-        value => handle_jsonrpc_request(engine, value),
+        Value::Array(batch) => handle_jsonrpc_batch_with(engine, batch, &mut dispatch),
+        value => dispatch(engine, value),
     }
 }
 
-fn handle_jsonrpc_batch(engine: &TokenZeroEngine, batch: Vec<Value>) -> Option<Value> {
+fn handle_jsonrpc_batch_with(
+    engine: &TokenZeroEngine,
+    batch: Vec<Value>,
+    dispatch: &mut impl FnMut(&TokenZeroEngine, Value) -> Option<Value>,
+) -> Option<Value> {
     if batch.is_empty() {
         return Some(jsonrpc_error(
             Value::Null,
@@ -155,7 +172,7 @@ fn handle_jsonrpc_batch(engine: &TokenZeroEngine, batch: Vec<Value>) -> Option<V
     // response identities (JSON-RPC batch correlation).
     let responses = batch
         .into_iter()
-        .filter_map(|item| handle_jsonrpc_batch_item(engine, item))
+        .filter_map(|item| handle_jsonrpc_batch_item_with(engine, item, dispatch))
         .collect::<Vec<_>>();
     if responses.is_empty() {
         return None;
@@ -163,9 +180,13 @@ fn handle_jsonrpc_batch(engine: &TokenZeroEngine, batch: Vec<Value>) -> Option<V
     Some(Value::Array(responses))
 }
 
-fn handle_jsonrpc_batch_item(engine: &TokenZeroEngine, item: Value) -> Option<Value> {
+fn handle_jsonrpc_batch_item_with(
+    engine: &TokenZeroEngine,
+    item: Value,
+    dispatch: &mut impl FnMut(&TokenZeroEngine, Value) -> Option<Value>,
+) -> Option<Value> {
     let panic_id = batch_item_response_id(&item);
-    match catch_unwind(AssertUnwindSafe(|| handle_jsonrpc_request(engine, item))) {
+    match catch_unwind(AssertUnwindSafe(|| dispatch(engine, item))) {
         Ok(response) => response,
         Err(panic) => Some(jsonrpc_error(
             panic_id,
@@ -261,7 +282,7 @@ fn validate_request(parsed: &Value) -> Result<ValidatedRequest<'_>, Value> {
     Ok((object, method, object.get("id").cloned()))
 }
 
-fn handle_jsonrpc_request(engine: &TokenZeroEngine, parsed: Value) -> Option<Value> {
+pub(crate) fn handle_jsonrpc_request(engine: &TokenZeroEngine, parsed: Value) -> Option<Value> {
     let (object, method, id) = rpc_try!(validate_request(&parsed));
     // Lifecycle: notifications/initialized advances InitializeState even when
     // the notification has no id (response-suppressed).
@@ -271,10 +292,6 @@ fn handle_jsonrpc_request(engine: &TokenZeroEngine, parsed: Value) -> Option<Val
         return Some(wire_json!({"jsonrpc": "2.0", "id": id, "result": {}}));
     }
     let id = id?;
-    #[cfg(test)]
-    if method == "tokenzero/internal/test-panic" {
-        panic!("test-induced tool panic");
-    }
     let method = match RpcMethod::parse(method) {
         Some(method) => method,
         None => {

@@ -17,7 +17,6 @@ fn job(sequence: u64, status: &'static str) -> Arc<BackgroundJob> {
             log_error: None,
         }),
         changed: Condvar::new(),
-        poll_interleave: None,
     })
 }
 

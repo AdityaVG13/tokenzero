@@ -17,8 +17,6 @@ use zero_process::VerifiedChild;
 #[path = "../../../tests/engine/inline/engine_shell__test_hooks.rs"]
 mod test_hooks;
 #[cfg(test)]
-use test_hooks::PollInterleave;
-#[cfg(test)]
 pub(crate) use test_hooks::reset_background_job_termination_for_tests;
 
 #[cfg(test)]
@@ -114,8 +112,6 @@ struct BackgroundJob {
     log_file: Arc<Mutex<fs::File>>,
     state: Mutex<BackgroundJobState>,
     changed: Condvar,
-    #[cfg(test)]
-    poll_interleave: Option<Arc<PollInterleave>>,
 }
 
 fn background_job_is_complete(job: &BackgroundJob) -> bool {
@@ -458,8 +454,6 @@ impl BackgroundJobRegistry {
                 log_error: None,
             }),
             changed: Condvar::new(),
-            #[cfg(test)]
-            poll_interleave: None,
         });
         if let Err(error) = self.insert_bounded(Arc::clone(&job)) {
             drop(job);
@@ -588,10 +582,7 @@ impl BackgroundJobRegistry {
         let snapshot_version = lock(&job.state).version;
         let available_before_wait = job_log_len(&job)?;
         #[cfg(test)]
-        if let Some(interleave) = &job.poll_interleave {
-            interleave.length_observed.wait();
-            interleave.publication_done.wait();
-        }
+        test_hooks::wait_poll_interleave();
         let mut state = lock(&job.state);
         let observed_version = state.version;
         if state.status == "running"

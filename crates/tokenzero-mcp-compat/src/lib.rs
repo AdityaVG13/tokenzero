@@ -34,6 +34,7 @@ pub use tokenzero_engine::codemode_wire::{
 
 pub use fastmcp_mode::{fastmcp_codemode_instructions, fastmcp_instructions, run_fastmcp_stdio};
 pub use jsonrpc::handle_jsonrpc;
+pub(crate) use jsonrpc::{handle_jsonrpc_dispatching, handle_jsonrpc_request};
 
 pub(crate) use resources::read_resource;
 pub(crate) use tools::{call_tool, call_tool_fastmcp};

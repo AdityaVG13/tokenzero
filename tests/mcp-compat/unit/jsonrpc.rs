@@ -761,6 +761,15 @@ fn tool_metrics_resource_is_served() {
     );
 }
 
+fn handle_jsonrpc_with_induced_panic(engine: &TokenZeroEngine, line: &str) -> Option<String> {
+    handle_jsonrpc_dispatching(engine, line, |engine, item| {
+        if item.get("method").and_then(Value::as_str) == Some("tokenzero/internal/test-panic") {
+            panic!("test-induced tool panic");
+        }
+        handle_jsonrpc_request(engine, item)
+    })
+}
+
 #[test]
 fn batch_panic_isolates_sibling_responses() {
     let (_dir, engine) = test_engine();
@@ -778,7 +787,7 @@ fn batch_panic_isolates_sibling_responses() {
             "params": {}
         }
     ]);
-    let response = handle_jsonrpc(&engine, &batch.to_string()).unwrap();
+    let response = handle_jsonrpc_with_induced_panic(&engine, &batch.to_string()).unwrap();
     let parsed = response_json(&response);
     let responses = parsed
         .as_array()
@@ -830,7 +839,7 @@ fn batch_panic_preserves_notification_suppression() {
             "params": {}
         }
     ]);
-    let response = handle_jsonrpc(&engine, &batch.to_string()).unwrap();
+    let response = handle_jsonrpc_with_induced_panic(&engine, &batch.to_string()).unwrap();
     let parsed = response_json(&response);
     let responses = parsed
         .as_array()

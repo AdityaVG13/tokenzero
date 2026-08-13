@@ -89,7 +89,7 @@ pub use store_hygiene::{
 #[path = "../../../tests/recovery/inline/lib__test_hooks.rs"]
 mod test_hooks;
 #[cfg(test)]
-use test_hooks::*;
+use test_hooks::set_ref_index_test_override;
 
 #[cfg(test)]
 #[path = "../../../tests/recovery/unit/store.rs"]
@@ -107,7 +107,6 @@ const REF_INDEX_READ_MAX_BYTES: usize = (REF_INDEX_MAX_BYTES as usize) * 16;
 const REF_INDEX_SHARD_PREFIX_LEN: usize = 3;
 const REF_INDEX_LEGACY_SHARD_PREFIX_LEN: usize = 2;
 const REF_INDEX_DISABLE_ENV: &str = "TOKENZERO_REF_INDEX";
-#[cfg(not(test))]
 const REF_INDEX_PATH_ENV: &str = "TOKENZERO_REF_INDEX_PATH";
 const JOURNAL_MAX_SEALED_SEGMENTS: usize = 4;
 
@@ -1417,21 +1416,32 @@ impl RecoveryStore {
     /// Publish all deferred mutations as one recovery entry and make that
     /// publication durable before returning to a caller that will acknowledge it.
     pub fn persist_pending_durable(&mut self) -> Result<(), RecoveryError> {
-        #[cfg(test)]
-        fail_durable_commit_at(DurableCommitFailPoint::BeforePersist)?;
         self.persist()?;
+        self.sync_durable_publication()
+    }
+
+    fn sync_durable_publication(&self) -> Result<(), RecoveryError> {
         let Some(path) = self.persistence_path.as_deref() else {
             return Ok(());
         };
         let journal = journal_path(path);
-        let published = if journal.exists() { &journal } else { path };
-        #[cfg(test)]
-        fail_durable_commit_at(DurableCommitFailPoint::BeforeFileSync)?;
+        let published = if journal.exists() {
+            journal.as_path()
+        } else {
+            path
+        };
+        Self::sync_published_file(published)?;
+        Self::sync_published_directory(path)
+    }
+
+    fn sync_published_file(published: &Path) -> Result<(), RecoveryError> {
         if published.exists() {
             tolerate_unsupported_sync(fs::File::open(published)?.sync_all())?;
         }
-        #[cfg(test)]
-        fail_durable_commit_at(DurableCommitFailPoint::BeforeDirectorySync)?;
+        Ok(())
+    }
+
+    fn sync_published_directory(path: &Path) -> Result<(), RecoveryError> {
         #[cfg(unix)]
         {
             let parent = path
@@ -1440,6 +1450,8 @@ impl RecoveryStore {
                 .unwrap_or_else(|| Path::new("."));
             tolerate_unsupported_sync(fs::File::open(parent)?.sync_all())?;
         }
+        #[cfg(not(unix))]
+        let _ = path;
         Ok(())
     }
 
@@ -3083,10 +3095,34 @@ fn clamp_line_window(
     )))
 }
 
-fn ref_index_enabled() -> bool {
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[allow(dead_code)]
+pub(crate) enum RefIndexOverride {
+    /// Use env/`HOME` (production default).
+    Ambient,
+    /// Keep the enabled-bit from env, but never open `HOME`/env roots.
+    Isolated,
+    /// Force the index off on this thread.
+    Disabled,
+    Path(PathBuf),
+}
+
+const fn default_ref_index_override() -> RefIndexOverride {
     #[cfg(test)]
-    if let Some((enabled, _)) = ref_index_test_override() {
-        return enabled;
+    {
+        RefIndexOverride::Isolated
+    }
+    #[cfg(not(test))]
+    {
+        RefIndexOverride::Ambient
+    }
+}
+
+fn ref_index_enabled() -> bool {
+    match REF_INDEX_OVERRIDE.with(|slot| slot.borrow().clone()) {
+        RefIndexOverride::Disabled => return false,
+        RefIndexOverride::Path(_) => return true,
+        RefIndexOverride::Ambient | RefIndexOverride::Isolated => {}
     }
     env::var(REF_INDEX_DISABLE_ENV)
         .map(|value| value.trim() != "0")
@@ -3096,15 +3132,22 @@ fn ref_index_enabled() -> bool {
 use std::sync::OnceLock;
 
 /// Test-only hook: override the ref index root directory on the current thread.
-/// Call with `Some(path)` to redirect, `None` to clear.
+/// Call with `Some(path)` to redirect, `None` to restore the compile-time default.
 #[doc(hidden)]
 pub fn set_ref_index_root_override(path: Option<PathBuf>) {
-    REF_INDEX_ROOT_OVERRIDE.with(|root| root.replace(path));
+    let _ = replace_ref_index_override(match path {
+        Some(path) => RefIndexOverride::Path(path),
+        None => default_ref_index_override(),
+    });
+}
+
+pub(crate) fn replace_ref_index_override(value: RefIndexOverride) -> RefIndexOverride {
+    REF_INDEX_OVERRIDE.with(|slot| std::mem::replace(&mut *slot.borrow_mut(), value))
 }
 
 std::thread_local! {
-    static REF_INDEX_ROOT_OVERRIDE: std::cell::RefCell<Option<PathBuf>> =
-        const { std::cell::RefCell::new(None) };
+    static REF_INDEX_OVERRIDE: std::cell::RefCell<RefIndexOverride> =
+        const { std::cell::RefCell::new(default_ref_index_override()) };
 }
 static REF_INDEX_DISABLED_OVERRIDE: OnceLock<std::sync::atomic::AtomicBool> = OnceLock::new();
 
@@ -3123,27 +3166,20 @@ fn ref_index_root() -> Option<PathBuf> {
     {
         return None;
     }
-    if let Some(path) = REF_INDEX_ROOT_OVERRIDE.with(|root| root.borrow().clone()) {
-        return Some(path);
+    match REF_INDEX_OVERRIDE.with(|slot| slot.borrow().clone()) {
+        RefIndexOverride::Disabled | RefIndexOverride::Isolated => return None,
+        RefIndexOverride::Path(path) => return Some(path),
+        RefIndexOverride::Ambient => {}
     }
-    #[cfg(test)]
-    if let Some((enabled, path)) = ref_index_test_override() {
-        return enabled.then_some(path);
+    if !ref_index_enabled() {
+        return None;
     }
-    #[cfg(test)]
-    return None;
-    #[cfg(not(test))]
-    {
-        if !ref_index_enabled() {
-            return None;
-        }
-        if let Some(path) = env::var_os(REF_INDEX_PATH_ENV).filter(|value| !value.is_empty()) {
-            return Some(PathBuf::from(path));
-        }
-        env::var_os("HOME")
-            .filter(|value| !value.is_empty())
-            .map(|home| PathBuf::from(home).join(".tokenzero").join("ref-index"))
+    if let Some(path) = env::var_os(REF_INDEX_PATH_ENV).filter(|value| !value.is_empty()) {
+        return Some(PathBuf::from(path));
     }
+    env::var_os("HOME")
+        .filter(|value| !value.is_empty())
+        .map(|home| PathBuf::from(home).join(".tokenzero").join("ref-index"))
 }
 
 fn create_ref_index_dir(path: &Path) -> std::io::Result<()> {

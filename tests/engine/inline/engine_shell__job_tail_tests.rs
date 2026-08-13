@@ -1,3 +1,4 @@
+use super::test_hooks::{PollInterleave, set_poll_interleave};
 use super::*;
 
 fn job_with_handle(log: PathBuf, file: fs::File) -> BackgroundJob {
@@ -17,7 +18,6 @@ fn job_with_handle(log: PathBuf, file: fs::File) -> BackgroundJob {
             log_error: None,
         }),
         changed: Condvar::new(),
-        poll_interleave: None,
     }
 }
 
@@ -42,9 +42,8 @@ fn a_chunk_published_between_length_and_relock_does_not_lose_its_wake() {
         length_observed: std::sync::Barrier::new(2),
         publication_done: std::sync::Barrier::new(2),
     });
-    let mut observed = job_with_handle(PathBuf::from("interleaved.log"), file);
-    observed.poll_interleave = Some(Arc::clone(&hook));
-    let observed = Arc::new(observed);
+    let observed = Arc::new(job_with_handle(PathBuf::from("interleaved.log"), file));
+    let previous = set_poll_interleave(Some(Arc::clone(&hook)));
     let registry = BackgroundJobRegistry::default();
     registry.insert_bounded(Arc::clone(&observed)).unwrap();
 
@@ -68,6 +67,7 @@ fn a_chunk_published_between_length_and_relock_does_not_lose_its_wake() {
         .poll(&observed.id, Duration::from_secs(2), 0, 16)
         .unwrap();
     writer.join().unwrap();
+    let _ = set_poll_interleave(previous);
     assert!(started.elapsed() < Duration::from_millis(500));
     assert_eq!(result["tail"], "ready");
     assert_eq!(result["cursor"], 5);

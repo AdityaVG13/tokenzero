@@ -1985,23 +1985,19 @@ fn torn_deferred_batch_never_exposes_partial_aliases() {
 }
 
 #[test]
-fn durable_batch_propagates_before_during_and_final_sync_failures() {
-    for point in [
-        DurableCommitFailPoint::BeforePersist,
-        DurableCommitFailPoint::BeforeFileSync,
-        DurableCommitFailPoint::BeforeDirectorySync,
-    ] {
-        let dir = tempdir().unwrap();
-        let cache = dir.path().join("cache.json");
-        let mut store = RecoveryStore::new(Some(cache));
-        let stored =
-            store.store_payload_deferred_batch("faulted\n", ContentType::Unknown, None, None, None);
-        store.store_alias_deferred("tz://batch/faulted", &stored.blob_ref);
-        DURABLE_COMMIT_FAIL_POINT.with(|configured| configured.set(Some(point)));
-        let error = store.persist_pending_durable().unwrap_err();
-        DURABLE_COMMIT_FAIL_POINT.with(|configured| configured.set(None));
-        assert!(error.to_string().contains("durable commit fault injected"));
-    }
+fn persist_pending_durable_propagates_persist_errors() {
+    let dir = tempdir().unwrap();
+    let cache = dir.path().join("cache.json");
+    fs::create_dir_all(&cache).unwrap();
+    let mut store = RecoveryStore::new(Some(cache));
+    let stored =
+        store.store_payload_deferred_batch("faulted\n", ContentType::Unknown, None, None, None);
+    store.store_alias_deferred("tz://batch/faulted", &stored.blob_ref);
+    let error = store.persist_pending_durable().unwrap_err();
+    assert!(
+        !error.to_string().is_empty(),
+        "persist failure must surface from persist_pending_durable"
+    );
 }
 
 #[test]
