@@ -10,6 +10,7 @@ readme.workspace = true
 keywords.workspace = true
 categories.workspace = true
 rust-version.workspace = true
+autotests = false
 
 [dependencies]
 fs4.workspace = true
@@ -34,3 +35,56 @@ zero-store.workspace = true
 [dev-dependencies]
 proptest.workspace = true
 tempfile.workspace = true
+
+# Relocated standalone tests live under the workspace tests/ tree.
+[[test]]
+name = "engine_cache_crossover"
+path = "../../tests/engine/cache_crossover.rs"
+
+[[test]]
+name = "engine_cache_meter"
+path = "../../tests/engine/cache_meter.rs"
+
+[[test]]
+name = "engine_cache_slo"
+path = "../../tests/engine/cache_slo.rs"
+
+[[test]]
+name = "engine_codemode_bindings_dispatcher"
+path = "../../tests/engine/codemode_bindings_dispatcher.rs"
+
+[[test]]
+name = "engine_dispatcher"
+path = "../../tests/engine/dispatcher.rs"
+
+[[test]]
+name = "engine_eviction_scheduler"
+path = "../../tests/engine/eviction_scheduler.rs"
+
+[[test]]
+name = "engine_fastmcp_adapter_from_registry"
+path = "../../tests/engine/fastmcp_adapter_from_registry.rs"
+
+[[test]]
+name = "engine_irx9_conformance_corpus"
+path = "../../tests/engine/irx9_conformance_corpus.rs"
+
+[[test]]
+name = "engine_irx9_surface_bench"
+path = "../../tests/engine/irx9_surface_bench.rs"
+
+[[test]]
+name = "engine_progressive_disclosure"
+path = "../../tests/engine/progressive_disclosure.rs"
+
+[[test]]
+name = "engine_ta_registry"
+path = "../../tests/engine/ta_registry.rs"
+
+[[test]]
+name = "engine_warmkeeper"
+path = "../../tests/engine/warmkeeper.rs"
+
+[[test]]
+name = "engine_zero_ledger_pin"
+path = "../../tests/engine/zero_ledger_pin.rs"

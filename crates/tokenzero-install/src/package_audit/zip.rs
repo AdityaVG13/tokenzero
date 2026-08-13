@@ -492,7 +492,7 @@ pub(crate) fn find_zip_eocd_for_audit(bytes: &[u8]) -> Result<usize, String> {
         )),
     }
 }
-pub(crate) fn zip_eocd_candidates(bytes: &[u8]) -> Vec<usize> {
+pub fn zip_eocd_candidates(bytes: &[u8]) -> Vec<usize> {
     let mut candidates = Vec::new();
     if bytes.len() < 22 {
         return candidates;
@@ -616,25 +616,25 @@ pub(crate) fn zip_flag_names(flags: u16) -> Vec<&'static str> {
     names
 }
 #[derive(Clone)]
-pub(crate) enum ZipPayloadError {
+pub enum ZipPayloadError {
     TooLarge,
     UnsupportedCompression(u16),
     CrcMismatch { expected: u32, actual: u32 },
     SizeMismatch { expected: usize, actual: usize },
     Malformed(String),
 }
-pub(crate) struct ZipLocalHeader {
-    pub(crate) name: String,
-    pub(crate) unicode_name: Option<String>,
-    pub(crate) name_is_utf8: bool,
-    pub(crate) extra: Vec<u8>,
-    pub(crate) zip64_needed: bool,
-    pub(crate) data_start: usize,
-    pub(crate) flags: u16,
-    pub(crate) compression_method: u16,
-    pub(crate) crc32: u32,
-    pub(crate) compressed_size: usize,
-    pub(crate) uncompressed_size: usize,
+pub struct ZipLocalHeader {
+    pub name: String,
+    pub unicode_name: Option<String>,
+    pub name_is_utf8: bool,
+    pub extra: Vec<u8>,
+    pub zip64_needed: bool,
+    pub data_start: usize,
+    pub flags: u16,
+    pub compression_method: u16,
+    pub crc32: u32,
+    pub compressed_size: usize,
+    pub uncompressed_size: usize,
 }
 pub(crate) struct ZipLocalRecordRange {
     pub(crate) member: String,
@@ -674,7 +674,7 @@ pub(crate) fn push_zip_unclaimed_local_bytes(
 ) {
     issues.push(serde_json::json!({ "code": "zip_unclaimed_local_bytes", "path": artifact, "start": start, "end": end, "byte_count": end - start, "detail": "zip archive contains bytes outside declared local entry records before the central directory; package-audit fails closed" }));
 }
-pub(crate) fn zip_local_header(
+pub fn zip_local_header(
     bytes: &[u8],
     local_header_offset: usize,
 ) -> Result<ZipLocalHeader, ZipPayloadError> {
@@ -984,7 +984,7 @@ pub(crate) fn parse_zip_unicode_path_extra(
     }
     Ok(name.to_string())
 }
-pub(crate) fn zip_crc32(bytes: &[u8]) -> u32 {
+pub fn zip_crc32(bytes: &[u8]) -> u32 {
     let mut crc = 0xffff_ffffu32;
     for byte in bytes {
         crc ^= *byte as u32;
@@ -1146,7 +1146,7 @@ pub(crate) fn zip_descriptor_range(
     }
     bytes.get(offset..end)
 }
-pub(crate) fn zip_payload_error_detail(error: ZipPayloadError) -> String {
+pub fn zip_payload_error_detail(error: ZipPayloadError) -> String {
     match error {
         ZipPayloadError::TooLarge => {
             "zip payload expands beyond the package-audit payload limit".to_string()
@@ -1178,10 +1178,10 @@ pub(crate) fn zip_array_at<const N: usize>(bytes: &[u8], offset: usize) -> Resul
     field.copy_from_slice(data);
     Ok(field)
 }
-pub(crate) fn zip_u16_at(bytes: &[u8], offset: usize) -> Result<u16, String> {
+pub fn zip_u16_at(bytes: &[u8], offset: usize) -> Result<u16, String> {
     Ok(u16::from_le_bytes(zip_array_at(bytes, offset)?))
 }
-pub(crate) fn zip_u32_at(bytes: &[u8], offset: usize) -> Result<u32, String> {
+pub fn zip_u32_at(bytes: &[u8], offset: usize) -> Result<u32, String> {
     Ok(u32::from_le_bytes(zip_array_at(bytes, offset)?))
 }
 pub(crate) fn zip_u64_at(bytes: &[u8], offset: usize) -> Result<u64, String> {

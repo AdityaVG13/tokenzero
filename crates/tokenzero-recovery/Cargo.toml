@@ -10,6 +10,7 @@ readme.workspace = true
 keywords.workspace = true
 categories.workspace = true
 rust-version.workspace = true
+autotests = false
 
 [dependencies]
 fs4.workspace = true
@@ -39,3 +40,60 @@ harness = false
 [[bench]]
 name = "cow_fork"
 harness = false
+
+# Relocated standalone tests live under the workspace tests/ tree.
+[[test]]
+name = "recovery_cow_fork"
+path = "../../tests/recovery/cow_fork.rs"
+
+[[test]]
+name = "recovery_dual_store_fragment_proptest"
+path = "../../tests/recovery/dual_store_fragment_proptest.rs"
+
+[[test]]
+name = "recovery_network_volume_commit"
+path = "../../tests/recovery/network_volume_commit.rs"
+
+[[test]]
+name = "recovery_opaque_alias"
+path = "../../tests/recovery/opaque_alias.rs"
+
+[[test]]
+name = "recovery_probe_b0"
+path = "../../tests/recovery/probe_b0.rs"
+
+[[test]]
+name = "recovery_session_ordinals"
+path = "../../tests/recovery/session_ordinals.rs"
+
+[[test]]
+name = "recovery_shared_cas_gc_hygiene"
+path = "../../tests/recovery/shared_cas_gc_hygiene.rs"
+
+[[test]]
+name = "recovery_shared_cas_gc_publish_race"
+path = "../../tests/recovery/shared_cas_gc_publish_race.rs"
+
+[[test]]
+name = "recovery_shared_cas_pin_query"
+path = "../../tests/recovery/shared_cas_pin_query.rs"
+
+[[test]]
+name = "recovery_shared_cas_publish_lease"
+path = "../../tests/recovery/shared_cas_publish_lease.rs"
+
+[[test]]
+name = "recovery_tz_evict_adapters"
+path = "../../tests/recovery/tz_evict_adapters.rs"
+
+[[test]]
+name = "recovery_working_set_dedup"
+path = "../../tests/recovery/working_set_dedup.rs"
+
+[[test]]
+name = "recovery_zeroref_conformance_matrix"
+path = "../../tests/recovery/zeroref_conformance_matrix.rs"
+
+[[test]]
+name = "recovery_zeroref_lifecycle_smokes"
+path = "../../tests/recovery/zeroref_lifecycle_smokes.rs"

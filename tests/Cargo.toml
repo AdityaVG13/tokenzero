@@ -11,8 +11,8 @@ tempfile.workspace = true
 
 [[test]]
 name = "ship"
-path = "ship.rs"
+path = "ship/ship.rs"
 
 [[test]]
 name = "ship-worker"
-path = "worker.rs"
+path = "ship/worker.rs"

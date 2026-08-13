@@ -10,6 +10,7 @@ readme.workspace = true
 keywords.workspace = true
 categories.workspace = true
 rust-version.workspace = true
+autotests = false
 
 [dependencies]
 fs4.workspace = true
@@ -23,3 +24,10 @@ tokenzero-core = { path = "../tokenzero-core", version = "1.0.2" }
 
 [dev-dependencies]
 proptest.workspace = true
+rusqlite.workspace = true
+tempfile.workspace = true
+
+# Relocated standalone tests live under the workspace tests/ tree.
+[[test]]
+name = "pulse_unit"
+path = "../../tests/pulse/unit.rs"

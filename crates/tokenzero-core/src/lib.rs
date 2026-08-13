@@ -1413,7 +1413,7 @@ fn line_information_density(line: &str) -> bool {
 }
 
 /// Shell-only dedupe also collapses digit-varying runs while preserving critical lines.
-fn dedupe_lines_impl(text: &str, context: usize, structural: bool) -> String {
+pub fn dedupe_lines_impl(text: &str, context: usize, structural: bool) -> String {
     let lines: Vec<&str> = text.lines().collect();
     if lines.is_empty() {
         return String::new();
@@ -1813,13 +1813,16 @@ pub use protocol_atoms::{
 };
 pub use render::domain::{
     diagnostic_shell_view, diagnostic_shell_view_with_tail, is_repo_inventory_command,
-    repo_inventory_view, structured_shell_view,
+    is_search_shell_command, repo_inventory_view, structured_shell_view,
 };
 pub use shell_display::{
     shell_display_command_from_argv, shell_display_command_from_argv_for_platform,
 };
 pub use shell_family::shell_family;
-pub use shell_policy::{classify_command_status, decide_shell_policy, shell_combined_output};
+pub use shell_policy::{
+    classify_command_status, decide_shell_policy, shell_combined_output,
+    shell_raw_accounting_output,
+};
 pub use shell_quote::{
     argv_has_shell_operator_tokens, contains_platform_shell_syntax, contains_shell_syntax,
     host_shell_platform, is_shell_operator_token, is_windows_shell_builtin, is_windows_shell_host,
@@ -1827,10 +1830,11 @@ pub use shell_quote::{
     split_command_string, split_command_string_for_platform,
 };
 pub use tokens::{
-    TokenizerFamily, TokenizerMetadata, active_model_id, active_tokenizer_metadata, count_tokens,
-    count_tokens_for_model, enforce_token_budget, enforce_token_budget_with_ref,
-    pack_to_token_boundary, pack_to_token_boundary_for_model,
-    pack_to_token_boundary_with_char_limit, savings_ratio, sha256_hex, tokenizer_metadata,
+    TokenizerFamily, TokenizerMetadata, VISIBLE_BUDGET_LOSSY_DECLARATION, active_model_id,
+    active_tokenizer_metadata, count_tokens, count_tokens_for_model, enforce_token_budget,
+    enforce_token_budget_with_ref, pack_to_token_boundary, pack_to_token_boundary_for_model,
+    pack_to_token_boundary_for_model_with_char_limit, pack_to_token_boundary_with_char_limit,
+    prefix_end_for_kept_lines, savings_ratio, sha256_hex, tokenizer_metadata,
 };
 
 #[cfg(test)]
@@ -1891,10 +1895,6 @@ mod tests {
         );
     }
 }
-
-#[cfg(test)]
-#[path = "tests/mod.rs"]
-mod semantic_tests;
 
 #[cfg(test)]
 mod channel_mode_tests {

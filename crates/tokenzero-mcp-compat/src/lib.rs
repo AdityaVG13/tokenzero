@@ -14,6 +14,7 @@ mod resources;
 mod tools;
 
 #[cfg(test)]
+#[path = "../../../tests/mcp-compat/unit/mod.rs"]
 mod tests;
 
 // Re-export the domain engine (types, dispatcher, modules) for CLI + adapters.

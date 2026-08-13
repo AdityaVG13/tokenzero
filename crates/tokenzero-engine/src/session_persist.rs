@@ -483,5 +483,5 @@ impl Drop for SessionPersistLock {
 }
 
 #[cfg(test)]
-#[path = "session_persist_tests.rs"]
+#[path = "../../../tests/engine/unit/session_persist_tests.rs"]
 mod tests;

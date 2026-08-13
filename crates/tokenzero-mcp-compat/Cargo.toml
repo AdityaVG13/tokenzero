@@ -10,6 +10,7 @@ readme.workspace = true
 keywords.workspace = true
 categories.workspace = true
 rust-version.workspace = true
+autotests = false
 
 # Classic MCP compatibility uses the hub-owned FastMCP transport. Aggregate
 # CodeMode execution remains in ZeroStack and is not embedded in this crate.
@@ -39,3 +40,9 @@ zero-mcp = { workspace = true, features = ["fastmcp"] }
 [dev-dependencies]
 assert_cmd.workspace = true
 proptest.workspace = true
+tempfile.workspace = true
+
+# Relocated standalone tests live under the workspace tests/ tree.
+[[test]]
+name = "mcp_jsonrpc_conformance"
+path = "../../tests/mcp-compat/jsonrpc_conformance.rs"

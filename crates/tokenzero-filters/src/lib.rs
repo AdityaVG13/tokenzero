@@ -289,7 +289,7 @@ fn inject_quiet_flag(command: &str, parts: &[String]) -> Option<String> {
         .map(|(_, _, flag)| format!("{command} {flag}"))
 }
 
-fn analyze_shell(command: &str) -> (Option<String>, bool) {
+pub fn analyze_shell(command: &str) -> (Option<String>, bool) {
     let (commands, compound) = parse_shell_commands(command);
     (unsafe_reason_for_commands(&commands), compound)
 }
@@ -315,9 +315,9 @@ fn unsafe_reason_for_commands(commands: &[ShellCommand]) -> Option<String> {
 }
 
 #[derive(Debug, Default, PartialEq, Eq)]
-struct ShellCommand {
-    words: Vec<String>,
-    nested_commands: Vec<String>,
+pub struct ShellCommand {
+    pub words: Vec<String>,
+    pub nested_commands: Vec<String>,
 }
 
 /// Parse executable positions and report operators that make a command compound.
@@ -383,7 +383,7 @@ fn parse_shell_commands(command: &str) -> (Vec<ShellCommand>, bool) {
     (commands, compound)
 }
 
-fn push_nested(
+pub fn push_nested(
     commands: &mut Vec<ShellCommand>,
     chars: &[char],
     start: usize,
@@ -401,7 +401,7 @@ fn push_nested(
     next
 }
 
-fn flush_shell_word(commands: &mut Vec<ShellCommand>, word: &mut String) {
+pub fn flush_shell_word(commands: &mut Vec<ShellCommand>, word: &mut String) {
     if !word.is_empty() {
         let word = std::mem::take(word);
         if let Some(command) = commands.last_mut() {
@@ -635,7 +635,7 @@ fn unsafe_reason_for_words(parts: &[String]) -> Option<String> {
     Some(reason.to_string())
 }
 
-fn split_words(command: &str) -> Vec<String> {
+pub fn split_words(command: &str) -> Vec<String> {
     let mut words = Vec::new();
     let mut cur = String::new();
     let mut quote: Option<char> = None;
@@ -774,6 +774,3 @@ mod bypass_regression_tests {
         );
     }
 }
-
-#[cfg(test)]
-mod tests;

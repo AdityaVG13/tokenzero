@@ -184,7 +184,7 @@ pub fn shell_combined_output(
     shell_stream_output(exit_code, stdout, stderr)
 }
 
-pub(crate) fn shell_raw_accounting_output(
+pub fn shell_raw_accounting_output(
     command: &str,
     exit_code: Option<i32>,
     stdout: &str,

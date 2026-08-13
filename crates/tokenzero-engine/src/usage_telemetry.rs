@@ -405,5 +405,5 @@ pub fn record_operation_amplification(
 }
 
 #[cfg(test)]
-#[path = "usage_telemetry_inline_tests.rs"]
+#[path = "../../../tests/engine/unit/usage_telemetry_inline_tests.rs"]
 mod tests;

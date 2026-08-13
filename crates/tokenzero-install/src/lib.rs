@@ -4,13 +4,25 @@
 mod package_audit;
 pub mod packaging;
 pub use package_audit::package_audit;
+pub use package_audit::{
+    ArchivePayloadError, MAX_TOP_LEVEL_ARCHIVE_BYTES, MAX_ZIP_TOTAL_UNCOMPRESSED_BYTES,
+    ZIP64_EOCD_LOCATOR_SIGNATURE, ZIP64_EOCD_RECORD_SIGNATURE, ZIP64_EXTENDED_INFORMATION_EXTRA,
+    ZIP_DATA_DESCRIPTOR_SIGNATURE, ZIP_FLAG_DATA_DESCRIPTOR, ZIP_FLAG_ENCRYPTED,
+    deflate_decompress_bytes,
+};
+pub use package_audit::zip::{
+    zip_crc32, zip_eocd_candidates, zip_local_header, zip_payload_error_detail, zip_u16_at,
+    zip_u32_at,
+};
 pub use packaging::{
-    ARTIFACT_MCP, ARTIFACT_RAW_WORKER, ARTIFACT_SHIM, ClientConfig, InstallState, PackageSurface,
+    ARTIFACT_MCP, ARTIFACT_RAW_WORKER, ARTIFACT_SHIM, CLIENT_CONFIG_FILE, ClientConfig,
+    InstallState, PackageSurface,
     assert_packaged_surface_features, assert_surface_compiled, baked_package_surface,
     client_config_for, compile_time_surfaces, current_platform, default_install_prefix,
     dual_surface_diagnostic, install_surface, load_install_state, modes_from_args,
     package_identity, reject_dual_compiled_surfaces, reject_dual_env_selection,
-    resolve_startup_surface, sbom_document, semantic_contract_digest, surface_compiled_in,
+    parse_install_platform, resolve_startup_surface, sbom_document, semantic_contract_digest,
+    surface_compiled_in,
     uninstall_report, uninstall_surface, write_client_config,
 };
 

@@ -203,7 +203,7 @@ pub fn current_platform() -> &'static str {
     }
 }
 
-fn parse_install_platform(value: &str) -> Result<&'static str, String> {
+pub fn parse_install_platform(value: &str) -> Result<&'static str, String> {
     match value {
         "macos" => Ok("macos"),
         "linux" => Ok("linux"),
@@ -646,7 +646,3 @@ pub fn uninstall_report(prev: Option<InstallState>) -> serde_json::Value {
         }),
     }
 }
-
-#[cfg(test)]
-#[path = "packaging_inline_tests.rs"]
-mod tests;

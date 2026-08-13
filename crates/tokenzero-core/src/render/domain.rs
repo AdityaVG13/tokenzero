@@ -202,7 +202,7 @@ pub fn structured_shell_view(command: &str, stdout: &str, stderr: &str) -> Strin
 /// line filter. `search_shell_view` labels all stdout lines as matches, so a
 /// mixed command like `grep X; ls Y` must never take the search view: the
 /// ls output would be presented as grep matches.
-pub(crate) fn is_search_shell_command(command: &str) -> bool {
+pub fn is_search_shell_command(command: &str) -> bool {
     let segments = split_shell_segments(command);
     let mut any_search = false;
     for segment in &segments {

@@ -29,8 +29,8 @@ impl<T, E: Into<Box<dyn std::error::Error + Send + Sync>>> IntoIo<T> for Result<
 }
 
 const EVENT_SQL_COLUMNS: &str = "schema_version, event, timestamp_unix, tool, mode, raw_tokens, visible_tokens, recovery_tokens, task_lossless, cache_hit, retry_count, failure, exact_ref_count, latency_ms, source_hash, session_id, call_id, ref_ids, tokenizer_id";
-const PULSE_SOURCE_OF_TRUTH: &str = "jsonl";
-const PULSE_SYNC_SCHEMA_VERSION: &str = "pulse-sync-v1";
+pub const PULSE_SOURCE_OF_TRUTH: &str = "jsonl";
+pub const PULSE_SYNC_SCHEMA_VERSION: &str = "pulse-sync-v1";
 const PULSE_SYNC_LOCK_TIMEOUT: Duration = Duration::from_secs(5);
 const PULSE_EVENT_LOCK_TIMEOUT: Duration = Duration::from_secs(30);
 const TOKENIZER_COMPONENT_MAX_LEN: usize = 64;
@@ -250,7 +250,7 @@ fn with_pulse_lock<T>(
     action()
 }
 
-fn verify_open_regular_file(path: &Path, file: &fs::File, label: &str) -> IoResult<()> {
+pub fn verify_open_regular_file(path: &Path, file: &fs::File, label: &str) -> IoResult<()> {
     if file.metadata()?.is_file() && fs::symlink_metadata(path)?.file_type().is_file() {
         Ok(())
     } else {
@@ -262,13 +262,13 @@ fn verify_open_regular_file(path: &Path, file: &fs::File, label: &str) -> IoResu
 }
 
 #[derive(Clone, Copy)]
-enum PulseFileOpenMode {
+pub enum PulseFileOpenMode {
     Append,
     ReadWrite,
 }
 
 #[cfg(unix)]
-fn open_nofollow(path: &Path, mode: PulseFileOpenMode) -> IoResult<(fs::File, bool)> {
+pub fn open_nofollow(path: &Path, mode: PulseFileOpenMode) -> IoResult<(fs::File, bool)> {
     use rustix::fs::{CWD, Mode, OFlags, openat};
 
     let access = match mode {
@@ -292,7 +292,7 @@ fn open_nofollow(path: &Path, mode: PulseFileOpenMode) -> IoResult<(fs::File, bo
 }
 
 #[cfg(windows)]
-fn open_nofollow(path: &Path, mode: PulseFileOpenMode) -> IoResult<(fs::File, bool)> {
+pub fn open_nofollow(path: &Path, mode: PulseFileOpenMode) -> IoResult<(fs::File, bool)> {
     use std::os::windows::fs::OpenOptionsExt;
 
     // Prevent CreateFileW from traversing a reparse point. The opened handle
@@ -323,7 +323,7 @@ fn open_nofollow(path: &Path, mode: PulseFileOpenMode) -> IoResult<(fs::File, bo
 }
 
 #[cfg(not(any(unix, windows)))]
-fn open_nofollow(path: &Path, mode: PulseFileOpenMode) -> IoResult<(fs::File, bool)> {
+pub fn open_nofollow(path: &Path, mode: PulseFileOpenMode) -> IoResult<(fs::File, bool)> {
     let open = |create_new: bool| {
         let mut options = fs::OpenOptions::new();
         options.create_new(create_new);
@@ -541,7 +541,7 @@ fn sqlite_cache_can_rebuild(err: &IoError) -> bool {
         .any(|needle| err.to_string().contains(needle))
 }
 
-fn remove_sqlite_cache_files(path: &Path) -> IoResult<()> {
+pub fn remove_sqlite_cache_files(path: &Path) -> IoResult<()> {
     for suffix in ["", "-wal", "-shm"] {
         match fs::remove_file(sqlite_sidecar_path(path, suffix)) {
             Err(err) if err.kind() == ErrorKind::NotFound => {}
@@ -567,7 +567,7 @@ fn ref_ids_from_column(column: Option<String>) -> Vec<String> {
         .unwrap_or_default()
 }
 
-fn sqlite_sidecar_path(path: &Path, suffix: &str) -> PathBuf {
+pub fn sqlite_sidecar_path(path: &Path, suffix: &str) -> PathBuf {
     let mut target = path.as_os_str().to_os_string();
     target.push(suffix);
     PathBuf::from(target)
@@ -601,10 +601,10 @@ fn init_sqlite(conn: &Connection) -> IoResult<()> {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct JsonlScan {
-    event_count: usize,
-    skipped_lines: usize,
-    ledger_sha256: String,
+pub struct JsonlScan {
+    pub event_count: usize,
+    pub skipped_lines: usize,
+    pub ledger_sha256: String,
 }
 
 fn write_sqlite_events_from_jsonl(conn: &mut Connection, path: &Path) -> IoResult<JsonlScan> {
@@ -695,12 +695,12 @@ fn hot_index_is_used(conn: &Connection) -> IoResult<bool> {
     Ok(false)
 }
 
-fn write_sidecar_meta(path: &Path, meta: &PulseSyncMeta) -> IoResult<()> {
+pub fn write_sidecar_meta(path: &Path, meta: &PulseSyncMeta) -> IoResult<()> {
     let bytes = serde_json::to_vec_pretty(meta).into_io()?;
     atomic_write(path, &bytes)
 }
 
-fn read_sidecar_meta(path: &Path) -> IoResult<PulseSyncMeta> {
+pub fn read_sidecar_meta(path: &Path) -> IoResult<PulseSyncMeta> {
     let bytes = fs::read(path)?;
     serde_json::from_slice(&bytes).into_io()
 }
@@ -881,7 +881,7 @@ fn atomic_export_sqlite_jsonl(sqlite_path: &Path, output: &Path) -> IoResult<()>
     })
 }
 
-fn atomic_import_valid_jsonl(
+pub fn atomic_import_valid_jsonl(
     input: &Path,
     output: &Path,
     expected_scan: &JsonlScan,
@@ -916,7 +916,7 @@ fn sync_parent(path: &Path) -> IoResult<()> {
     })
 }
 
-struct PulseLock {
+pub struct PulseLock {
     file: fs::File,
 }
 
@@ -926,7 +926,7 @@ impl Drop for PulseLock {
     }
 }
 
-fn acquire_pulse_lock(path: &Path) -> IoResult<PulseLock> {
+pub fn acquire_pulse_lock(path: &Path) -> IoResult<PulseLock> {
     let lock_path = lock_path_for_ledger(path);
     ensure_parent(&lock_path)?;
     let (mut file, _created) = open_nofollow(&lock_path, PulseFileOpenMode::ReadWrite)?;
@@ -1011,7 +1011,7 @@ fn scan_reader<R: BufRead>(
     })
 }
 
-fn scan_jsonl<F>(path: &Path, mut on_event: F) -> IoResult<JsonlScan>
+pub fn scan_jsonl<F>(path: &Path, mut on_event: F) -> IoResult<JsonlScan>
 where
     F: FnMut(&PulseEvent) -> IoResult<()>,
 {
@@ -1028,7 +1028,7 @@ where
     }
 }
 
-fn parse_event_line(line: &[u8]) -> Result<Option<PulseEvent>, ()> {
+pub fn parse_event_line(line: &[u8]) -> Result<Option<PulseEvent>, ()> {
     let trimmed = line.trim_ascii();
     if trimmed.is_empty() {
         return Ok(None);
@@ -1070,7 +1070,7 @@ pub fn report_for_path(path: &Path) -> IoResult<PulseReport> {
     Ok(report)
 }
 
-fn hex_sha256(bytes: &[u8]) -> String {
+pub fn hex_sha256(bytes: &[u8]) -> String {
     let mut hasher = Sha256::new();
     hasher.update(bytes);
     hex_encode(hasher.finalize())
@@ -1083,7 +1083,7 @@ fn hex_encode(bytes: impl AsRef<[u8]>) -> String {
 macro_rules! simple_fns {
     ($($name:ident($arg:ident: $arg_ty:ty) -> $out:ty $body:block)*) => {
         $(
-            fn $name($arg: $arg_ty) -> $out $body
+            pub fn $name($arg: $arg_ty) -> $out $body
         )*
     };
 }
@@ -1127,7 +1127,7 @@ simple_fns! {
     }
 }
 
-fn hash_hint(value: &str) -> String {
+pub fn hash_hint(value: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(value.as_bytes());
     hex_encode(&hasher.finalize()[..8])
@@ -1458,6 +1458,3 @@ impl SessionLedgerReport {
         out
     }
 }
-
-#[cfg(test)]
-mod tests;

@@ -931,5 +931,5 @@ fn temp_cas_dir() -> PathBuf {
 }
 
 #[cfg(test)]
-#[path = "embedded_store_tests.rs"]
+#[path = "../../../tests/recovery/unit/embedded_store.rs"]
 mod tests;

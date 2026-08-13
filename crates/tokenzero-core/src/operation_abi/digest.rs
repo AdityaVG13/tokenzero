@@ -188,7 +188,7 @@ fn semantic_operation_manifest(operation: &Operation) -> Result<Value, String> {
     }))
 }
 
-pub(super) fn contract_manifest_for(operations: &[Operation]) -> Result<Value, String> {
+pub fn contract_manifest_for(operations: &[Operation]) -> Result<Value, String> {
     let registry = hub_registry(operations);
     let canonical = registry
         .canonical_manifest()
@@ -249,18 +249,16 @@ pub fn contract_digest() -> [u8; 32] {
 pub fn contract_digest_hex() -> String {
     static HEX: std::sync::OnceLock<String> = std::sync::OnceLock::new();
     HEX.get_or_init(|| {
-        #[cfg(test)]
         CONTRACT_DIGEST_HEX_INITIALIZATIONS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         zero_abi::contract_digest_hex(&contract_manifest())
     })
     .clone()
 }
 
-#[cfg(test)]
 static CONTRACT_DIGEST_HEX_INITIALIZATIONS: std::sync::atomic::AtomicUsize =
     std::sync::atomic::AtomicUsize::new(0);
 
-#[cfg(test)]
-pub(super) fn contract_digest_hex_initializations() -> usize {
+#[doc(hidden)]
+pub fn contract_digest_hex_initializations() -> usize {
     CONTRACT_DIGEST_HEX_INITIALIZATIONS.load(std::sync::atomic::Ordering::Relaxed)
 }

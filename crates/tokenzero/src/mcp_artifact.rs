@@ -153,7 +153,7 @@ fn mcp_stdout_has_successful_initialize(stdout: &str, id: usize) -> bool {
     response(stdout, id).any(|p| {
         p.get("error").is_none()
             && p["result"]["protocolVersion"] == "2024-11-05"
-            && p["result"]["serverInfo"]["name"] == "TokenZero"
+            && p["result"]["serverInfo"]["name"] == "tokenzero"
     })
 }
 fn mcp_stdout_has_resource_uri(stdout: &str, id: usize, uri: &str) -> bool {

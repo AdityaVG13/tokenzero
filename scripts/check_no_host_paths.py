@@ -19,7 +19,7 @@ ALLOWLIST_FILES = _hub.ALLOWLIST_FILES
 ALLOWLIST_LINE_RES = _hub.ALLOWLIST_LINE_RES
 ALLOWLIST_LINE_RES.update(
     {
-        "crates/tokenzero-install/src/package_audit/tests/tar.rs": [
+        "tests/install/unit/package_audit/tar.rs": [
             re.compile(r"(?:C:/Users/example|/home/example)/"),
         ],
         "crates/tokenzero-recovery/benches/perf_hotspots/baseline-shell.sample.txt": [

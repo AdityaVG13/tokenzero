@@ -10,6 +10,7 @@ readme.workspace = true
 keywords.workspace = true
 categories.workspace = true
 rust-version.workspace = true
+autotests = false
 autobins = false
 
 # Classic MCP remains an explicit compatibility feature. Aggregate CodeMode
@@ -49,3 +50,60 @@ proptest.workspace = true
 sha2.workspace = true
 tempfile.workspace = true
 tokenzero-test-support = { path = "../tokenzero-test-support" }
+
+# Relocated standalone tests live under the workspace tests/ tree.
+[[test]]
+name = "cli_help_contract"
+path = "../../tests/cli/cli_help_contract.rs"
+
+[[test]]
+name = "cli_tools_io"
+path = "../../tests/cli/cli_tools_io.rs"
+
+[[test]]
+name = "gate_c_retirement_contract"
+path = "../../tests/cli/gate_c_retirement_contract.rs"
+
+[[test]]
+name = "golden_outputs"
+path = "../../tests/cli/golden_outputs.rs"
+
+[[test]]
+name = "irx9_surface_bench_process"
+path = "../../tests/cli/irx9_surface_bench_process.rs"
+
+[[test]]
+name = "irx9_transport_matrix"
+path = "../../tests/cli/irx9_transport_matrix.rs"
+
+[[test]]
+name = "mcp_transport"
+path = "../../tests/cli/mcp_transport.rs"
+
+[[test]]
+name = "packaging_e2e"
+path = "../../tests/cli/packaging_e2e.rs"
+
+[[test]]
+name = "packaging_lifecycle"
+path = "../../tests/cli/packaging_lifecycle.rs"
+
+[[test]]
+name = "packaging_static_evidence"
+path = "../../tests/cli/packaging_static_evidence.rs"
+
+[[test]]
+name = "passthrough_conformance"
+path = "../../tests/cli/passthrough_conformance.rs"
+
+[[test]]
+name = "raw_worker_v2_packaged_conformance"
+path = "../../tests/cli/raw_worker_v2_packaged_conformance.rs"
+
+[[test]]
+name = "store_root_precedence"
+path = "../../tests/cli/store_root_precedence.rs"
+
+[[test]]
+name = "surface_arg_rejection"
+path = "../../tests/cli/surface_arg_rejection.rs"

@@ -4,18 +4,18 @@ use std::path::{Path, PathBuf};
 use std::{borrow::Cow, collections::HashSet, fs};
 const MAX_ARCHIVE_MEMBERS: usize = 4096;
 const MAX_NESTED_ARCHIVE_DEPTH: usize = 3;
-const MAX_TOP_LEVEL_ARCHIVE_BYTES: u64 = 256 * 1024 * 1024;
+pub const MAX_TOP_LEVEL_ARCHIVE_BYTES: u64 = 256 * 1024 * 1024;
 const MAX_NESTED_ARCHIVE_BYTES: usize = 32 * 1024 * 1024;
 const MAX_GZIP_DECOMPRESSED_BYTES: usize = 256 * 1024 * 1024;
-const MAX_ZIP_TOTAL_UNCOMPRESSED_BYTES: usize = 256 * 1024 * 1024;
-const ZIP_FLAG_ENCRYPTED: u16 = 0x0001;
-const ZIP_FLAG_DATA_DESCRIPTOR: u16 = 0x0008;
+pub const MAX_ZIP_TOTAL_UNCOMPRESSED_BYTES: usize = 256 * 1024 * 1024;
+pub const ZIP_FLAG_ENCRYPTED: u16 = 0x0001;
+pub const ZIP_FLAG_DATA_DESCRIPTOR: u16 = 0x0008;
 const ZIP_FLAG_STRONG_ENCRYPTION: u16 = 0x0040;
 const ZIP_FLAG_MASKED_LOCAL_HEADER_VALUES: u16 = 0x2000;
-const ZIP_DATA_DESCRIPTOR_SIGNATURE: u32 = 0x0807_4b50;
-const ZIP64_EOCD_RECORD_SIGNATURE: u32 = 0x0606_4b50;
-const ZIP64_EOCD_LOCATOR_SIGNATURE: u32 = 0x0706_4b50;
-const ZIP64_EXTENDED_INFORMATION_EXTRA: u16 = 0x0001;
+pub const ZIP_DATA_DESCRIPTOR_SIGNATURE: u32 = 0x0807_4b50;
+pub const ZIP64_EOCD_RECORD_SIGNATURE: u32 = 0x0606_4b50;
+pub const ZIP64_EOCD_LOCATOR_SIGNATURE: u32 = 0x0706_4b50;
+pub const ZIP64_EXTENDED_INFORMATION_EXTRA: u16 = 0x0001;
 type Issues = Vec<serde_json::Value>;
 pub fn package_audit(root: &Path, artifacts: &[PathBuf]) -> serde_json::Value {
     let defaults = [
@@ -275,7 +275,7 @@ fn is_supported_archive_name(name: &str) -> bool {
         .iter()
         .any(|suffix| name.to_ascii_lowercase().ends_with(suffix))
 }
-enum ArchivePayloadError {
+pub enum ArchivePayloadError {
     TooLarge,
     Malformed(String),
 }
@@ -306,7 +306,7 @@ impl ZipPayloadBudget {
 fn gzip_decompress_bytes(bytes: &[u8]) -> Result<Vec<u8>, ArchivePayloadError> {
     read_bounded_decoder(MultiGzDecoder::new(bytes), MAX_GZIP_DECOMPRESSED_BYTES)
 }
-fn deflate_decompress_bytes(bytes: &[u8]) -> Result<Vec<u8>, ArchivePayloadError> {
+pub fn deflate_decompress_bytes(bytes: &[u8]) -> Result<Vec<u8>, ArchivePayloadError> {
     read_bounded_decoder(DeflateDecoder::new(bytes), MAX_NESTED_ARCHIVE_BYTES)
 }
 fn read_bounded_decoder<R: Read>(decoder: R, max: usize) -> Result<Vec<u8>, ArchivePayloadError> {
@@ -321,10 +321,7 @@ fn read_bounded_decoder<R: Read>(decoder: R, max: usize) -> Result<Vec<u8>, Arch
 }
 mod paths;
 mod tar;
-mod zip;
+pub mod zip;
 use paths::*;
 use tar::*;
 use zip::*;
-
-#[cfg(test)]
-mod tests;

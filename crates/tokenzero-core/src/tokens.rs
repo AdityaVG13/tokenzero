@@ -299,7 +299,7 @@ pub fn pack_to_token_boundary_for_model<'a>(
     pack_to_token_boundary_for_model_with_char_limit(text, max_tokens, usize::MAX, model_id)
 }
 
-fn pack_to_token_boundary_for_model_with_char_limit<'a>(
+pub fn pack_to_token_boundary_for_model_with_char_limit<'a>(
     text: &'a str,
     max_tokens: usize,
     max_chars: usize,
@@ -439,8 +439,7 @@ pub fn savings_ratio(raw_tokens: usize, used_tokens: usize) -> f64 {
     (1.0 - (used_tokens as f64 / raw_tokens as f64)).max(0.0)
 }
 
-#[cfg(test)]
-fn prefix_end_for_kept_lines(text: &str, kept_lines: usize) -> usize {
+pub fn prefix_end_for_kept_lines(text: &str, kept_lines: usize) -> usize {
     if kept_lines == 0 {
         return 0;
     }
@@ -449,10 +448,6 @@ fn prefix_end_for_kept_lines(text: &str, kept_lines: usize) -> usize {
         .nth(kept_lines - 1)
         .map_or(text.len(), |(index, _)| index)
 }
-
-#[cfg(test)]
-#[path = "tokens_inline_tests.rs"]
-mod tokenizer_tests;
 
 #[cfg(test)]
 mod inline_elision_tests {

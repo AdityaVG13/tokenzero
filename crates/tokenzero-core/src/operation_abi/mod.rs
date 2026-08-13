@@ -9,7 +9,7 @@
 //! Dispatch wiring is tokenzero-irx9.2; this module defines the contract only.
 
 mod catalog;
-mod digest;
+pub mod digest;
 mod registry;
 mod schema;
 mod schemas;
@@ -40,7 +40,3 @@ pub use types::{
     SEMANTIC_CONTRACT_VERSION, SurfaceExposure,
 };
 pub use vectors::{GoldenVector, golden_vectors};
-
-#[cfg(test)]
-#[path = "mod_inline_tests.rs"]
-mod tests;

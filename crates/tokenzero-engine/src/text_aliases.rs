@@ -195,7 +195,7 @@ mod tests {
 
     #[test]
     fn path_heavy_fixture_reduces_ta_and_all_forms_expand_identical_bytes() {
-        let corpus = include_str!("../tests/fixtures/path_heavy_aliases.txt");
+        let corpus = include_str!("../../../tests/engine/fixtures/path_heavy_aliases.txt");
         let expected = [
             "/workspace/crates/tokenzero-engine/src/engine_expand.rs",
             "tokenzero_engine::engine_expand::recovery_orchestration::PathHeavyExpandCoordinator",
@@ -289,7 +289,7 @@ mod prefilter_soundness {
     /// reasoning about `classify`.
     #[test]
     fn prefilter_never_rejects_text_the_scan_would_accept() {
-        let corpus = include_str!("../tests/fixtures/path_heavy_aliases.txt");
+        let corpus = include_str!("../../../tests/engine/fixtures/path_heavy_aliases.txt");
         let mut cases: Vec<String> = vec![
             String::new(),
             "plain prose with no atoms at all".into(),
@@ -321,7 +321,7 @@ mod prefilter_soundness {
     /// answer of has_alias_candidates for any of these inputs.
     #[test]
     fn prefilter_does_not_change_the_answer() {
-        let corpus = include_str!("../tests/fixtures/path_heavy_aliases.txt");
+        let corpus = include_str!("../../../tests/engine/fixtures/path_heavy_aliases.txt");
         let floor = ordinal_token_floor();
         for text in [
             "",

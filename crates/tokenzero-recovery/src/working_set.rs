@@ -8,7 +8,7 @@ use std::time::Instant;
 use tokenzero_core::{ContentType, count_tokens};
 
 #[cfg(test)]
-#[path = "working_set_tests.rs"]
+#[path = "../../../tests/recovery/unit/working_set.rs"]
 mod tests;
 
 pub const DEFAULT_WORKING_SET_TOKENS: usize = 8192;

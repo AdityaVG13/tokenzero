@@ -26,7 +26,7 @@ def main() -> int:
         if count > ceiling:
             violations.append(f'{rel}: {count} lines exceeds the {ceiling}-line facade ceiling; extract a module instead')
     deep = re.compile('|'.join((f"{crate}::(?:{'|'.join(mods)})::" for crate, mods in INTERNAL_MODULES.items())))
-    for path in sorted(ROOT.glob('crates/*/src/**/*.rs')) + sorted(ROOT.glob('crates/*/tests/**/*.rs')) + sorted(ROOT.glob('crates/*/benches/**/*.rs')):
+    for path in sorted(ROOT.glob('crates/*/src/**/*.rs')) + sorted(ROOT.glob('crates/*/benches/**/*.rs')) + sorted(ROOT.glob('tests/**/*.rs')):
         text = path.read_text()
         for i, line in enumerate(text.splitlines(), 1):
             m = deep.search(line)

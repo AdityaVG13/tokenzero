@@ -10,6 +10,7 @@ readme.workspace = true
 keywords.workspace = true
 categories.workspace = true
 rust-version.workspace = true
+autotests = false
 
 # Classic MCP remains an explicit compatibility package marker. The canonical
 # raw worker is a separate planner-free artifact, not a selectable surface.
@@ -27,4 +28,18 @@ toml.workspace = true
 tokenzero-core = { path = "../tokenzero-core", version = "1.0.2" }
 
 [dev-dependencies]
+serde_json.workspace = true
 tempfile.workspace = true
+
+# Relocated standalone tests live under the workspace tests/ tree.
+[[test]]
+name = "install_surfaces"
+path = "../../tests/install/install_surfaces.rs"
+
+[[test]]
+name = "install_unit_packaging"
+path = "../../tests/install/unit/packaging.rs"
+
+[[test]]
+name = "install_unit_package_audit"
+path = "../../tests/install/unit/package_audit/mod.rs"

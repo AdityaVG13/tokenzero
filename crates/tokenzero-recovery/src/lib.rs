@@ -34,6 +34,7 @@ pub mod migration;
 pub mod prefix_stability;
 pub mod segment_store;
 #[cfg(test)]
+#[path = "../../../tests/recovery/unit/segment_store.rs"]
 mod segment_store_tests;
 pub mod session_aliases;
 pub mod shared_cas;
@@ -85,6 +86,7 @@ pub use store_hygiene::{
 };
 
 #[cfg(test)]
+#[path = "../../../tests/recovery/unit/store.rs"]
 mod tests;
 
 #[cfg(test)]

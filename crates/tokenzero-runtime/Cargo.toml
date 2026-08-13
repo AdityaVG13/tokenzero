@@ -10,6 +10,7 @@ readme.workspace = true
 keywords.workspace = true
 categories.workspace = true
 rust-version.workspace = true
+autotests = false
 
 [dependencies]
 sha2.workspace = true
@@ -22,3 +23,8 @@ zero-process.workspace = true
 [dev-dependencies]
 proptest.workspace = true
 tempfile.workspace = true
+
+# Relocated standalone tests live under the workspace tests/ tree.
+[[test]]
+name = "runtime_unit"
+path = "../../tests/runtime/unit.rs"
