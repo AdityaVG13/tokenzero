@@ -21,6 +21,9 @@ use tokenzero_core::{ContentType, count_tokens, error_block, id_for, sha256_hex,
 
 use crate::shared_cas::{SharedCas, SharedCasError};
 use crate::telemetry::CrossEngineTelemetry;
+use zero_store::{
+    AppendOutcome, FileIdentity, SessionWal, SessionWalConfig, SessionWalError, SyncPolicy,
+};
 
 pub mod telemetry;
 
@@ -108,7 +111,7 @@ const REF_INDEX_SHARD_PREFIX_LEN: usize = 3;
 const REF_INDEX_LEGACY_SHARD_PREFIX_LEN: usize = 2;
 const REF_INDEX_DISABLE_ENV: &str = "TOKENZERO_REF_INDEX";
 const REF_INDEX_PATH_ENV: &str = "TOKENZERO_REF_INDEX_PATH";
-const JOURNAL_MAX_SEALED_SEGMENTS: usize = 4;
+
 
 /// Profiling-only leaf spans for expand (TOKENZERO_PERF_PROFILE). No product effect when off.
 fn expand_leaf_span<R>(span: &'static str, f: impl FnOnce() -> R) -> R {
@@ -278,6 +281,15 @@ pub enum RecoveryError {
     Io(#[from] std::io::Error),
     #[error("json error: {0}")]
     Json(#[from] serde_json::Error),
+}
+
+impl From<SessionWalError> for RecoveryError {
+    fn from(err: SessionWalError) -> Self {
+        match err {
+            SessionWalError::Io(err) => Self::Io(err),
+            other => Self::Io(io::Error::new(io::ErrorKind::InvalidData, other)),
+        }
+    }
 }
 
 macro_rules! labeled_errors {
@@ -965,12 +977,11 @@ pub struct RecoveryStore {
     /// while still holding the persist lock. `None` until the first persist;
     /// also reset to `None` whenever a write fails, so the next persist must
     /// take the full reload+merge path.
-    disk_identity: Option<DiskIdentity>,
-    /// Identity of the journal sibling at our last write (`None` = we left no
-    /// journal). Checked together with `disk_identity`: a foreign append to
-    /// the journal must force the reload+merge path just like a foreign
-    /// snapshot rewrite.
-    journal_identity: Option<DiskIdentity>,
+    disk_identity: Option<FileIdentity>,
+    /// Identity of the session WAL sibling at our last write (`None` = we left
+    /// no WAL). Checked together with `disk_identity`: a foreign append to the
+    /// WAL must force the reload+merge path just like a foreign snapshot rewrite.
+    journal_identity: Option<FileIdentity>,
     /// Canonical immutable store shared with FSZero/GraphZero. Attached only
     /// for unified `<store-root>/tokenzero/...` cache paths whose `blobs/`
     /// directory already exists.
@@ -1001,47 +1012,27 @@ pub struct RecoveryStore {
     pending_cas_hashes: BTreeSet<String>,
 }
 
-// Snapshot identity used to detect foreign atomic replacements.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct DiskIdentity {
-    len: u64,
-    modified: SystemTime,
-    #[cfg(unix)]
-    dev: u64,
-    #[cfg(unix)]
-    ino: u64,
-}
-
-impl DiskIdentity {
-    fn capture(path: &Path) -> Option<Self> {
-        let meta = fs::metadata(path).ok()?;
-        if !meta.is_file() {
-            return None;
-        }
-        let modified = meta.modified().ok()?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::MetadataExt;
-            Some(Self {
-                len: meta.len(),
-                modified,
-                dev: meta.dev(),
-                ino: meta.ino(),
-            })
-        }
-        #[cfg(not(unix))]
-        Some(Self {
-            len: meta.len(),
-            modified,
-        })
+fn cache_identities(path: &Path) -> (Option<FileIdentity>, Option<FileIdentity>) {
+    match SessionWal::new(path, SessionWalConfig::default()) {
+        Ok(wal) => (wal.snapshot_identity(), wal.wal_identity()),
+        Err(_) => (FileIdentity::capture(path), None),
     }
 }
 
-fn cache_identities(path: &Path) -> (Option<DiskIdentity>, Option<DiskIdentity>) {
-    (
-        DiskIdentity::capture(path),
-        DiskIdentity::capture(&journal_path(path)),
-    )
+fn recovery_session_wal(path: &Path, config: &RecoveryConfig) -> Result<SessionWal, RecoveryError> {
+    Ok(SessionWal::new(
+        path,
+        SessionWalConfig {
+            max_replay_bytes: config.max_load_bytes as u64,
+            ..SessionWalConfig::default()
+        },
+    )?)
+}
+
+fn snapshot_bytes(state: &RecoveryState) -> Result<Vec<u8>, RecoveryError> {
+    let mut bytes = serde_json::to_vec(state)?;
+    bytes.push(b'\n');
+    Ok(bytes)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1409,26 +1400,33 @@ impl RecoveryStore {
     /// Publish all deferred mutations as one recovery entry and make that
     /// publication durable before returning to a caller that will acknowledge it.
     ///
-    /// Hub `DurableJournalV2` is a digest 2PC for a single published root, not
-    /// this store's merge/session-delta WAL (64 KiB record cap, fail-closed,
-    /// no foreign-writer merge). Durable commit therefore rewrites the
-    /// snapshot through hub `atomic_write_file` (temp + fsync + replace).
-    /// On mounts that cannot fsync, fall back to the existing tolerate path.
+    /// Hub `SessionWal::publish_snapshot` owns the snapshot rewrite + WAL
+    /// retirement. `SyncPolicy::Required` is tried first; mounts that cannot
+    /// fsync fall back to `TolerateUnsupported`.
     pub fn persist_pending_durable(&mut self) -> Result<(), RecoveryError> {
         self.persist()?;
         let Some(path) = self.persistence_path.clone() else {
             return Ok(());
         };
-        let mut bytes = serde_json::to_vec(&self.state)?;
-        bytes.push(b'\n');
-        match zero_store::atomic_write_file(&path, &bytes) {
+        let bytes = snapshot_bytes(&self.state)?;
+        let mut cfg = SessionWalConfig {
+            max_replay_bytes: self.config.max_load_bytes as u64,
+            publish_sync: SyncPolicy::Required,
+            ..SessionWalConfig::default()
+        };
+        match SessionWal::new(&path, cfg)?.publish_snapshot(&bytes) {
             Ok(()) => {
-                remove_journal_segments(&path);
                 self.journal_identity = None;
-                self.disk_identity = DiskIdentity::capture(&path);
+                self.disk_identity = FileIdentity::capture(&path);
                 Ok(())
             }
-            Err(err) if sync_unsupported(&err) => self.sync_durable_publication(),
+            Err(SessionWalError::Io(err)) if sync_unsupported(&err) => {
+                cfg.publish_sync = SyncPolicy::TolerateUnsupported;
+                SessionWal::new(&path, cfg)?.publish_snapshot(&bytes)?;
+                self.journal_identity = None;
+                self.disk_identity = FileIdentity::capture(&path);
+                self.sync_durable_publication()
+            }
             Err(err) => Err(err.into()),
         }
     }
@@ -1437,11 +1435,12 @@ impl RecoveryStore {
         let Some(path) = self.persistence_path.as_deref() else {
             return Ok(());
         };
-        let journal = journal_path(path);
-        let published = if journal.exists() {
-            journal.as_path()
-        } else {
-            path
+        let wal = recovery_session_wal(path, &self.config)
+            .ok()
+            .map(|wal| wal.wal_path());
+        let published = match wal.as_deref() {
+            Some(wal) if wal.exists() => wal,
+            _ => path,
         };
         Self::sync_published_file(published)?;
         Self::sync_published_directory(path)
@@ -2781,12 +2780,9 @@ impl RecoveryStore {
             fs::create_dir_all(parent)?;
         }
         let _lock = PersistLock::acquire(recovery_lock_path(&path))?;
-        let snap_unchanged = self
-            .disk_identity
-            .is_some_and(|identity| DiskIdentity::capture(&path) == Some(identity));
-        let journal_unchanged =
-            self.journal_identity == DiskIdentity::capture(&journal_path(&path));
-        let unchanged_since_last_write = snap_unchanged && journal_unchanged;
+        let wal = recovery_session_wal(&path, &self.config)?;
+        let unchanged_since_last_write = self.disk_identity.is_some()
+            && !wal.foreign_write_since(self.disk_identity, self.journal_identity);
         if !unchanged_since_last_write {
             let existing = match load_state(&path, &self.config)? {
                 Some(existing) => {
@@ -2845,16 +2841,22 @@ impl RecoveryStore {
             deleted_blob_refs: self.pending_blob_deletions.iter().cloned().collect(),
             deleted_aliases: self.pending_alias_deletions.iter().cloned().collect(),
         };
-        let segment_limit =
-            journal_compact_threshold(self.disk_identity.map_or(0, |identity| identity.len));
-        match append_journal(path, &entry, segment_limit) {
-            Ok(JournalAppend::Appended) => {
-                self.journal_identity = DiskIdentity::capture(&journal_path(path));
+        let Ok(record) = serde_json::to_vec(&entry) else {
+            self.session_refs = entry.refs;
+            return false;
+        };
+        let Ok(wal) = recovery_session_wal(path, &self.config) else {
+            self.session_refs = entry.refs;
+            return false;
+        };
+        match wal.append(&record) {
+            Ok(AppendOutcome::Appended) => {
+                self.journal_identity = wal.wal_identity();
                 append_blob_refs_to_ref_index(path, &entry.refs, Some(&self.ref_classes));
                 self.clear_pending_deletions();
                 true
             }
-            Ok(JournalAppend::NeedsCompaction) | Err(_) => {
+            Ok(AppendOutcome::NeedsCompaction) | Err(_) => {
                 self.session_refs = entry.refs;
                 false
             }
@@ -2863,10 +2865,10 @@ impl RecoveryStore {
 
     fn publish_snapshot(&mut self, path: &Path) -> Result<(), RecoveryError> {
         self.disk_identity = None;
-        atomic_write_json(path, &self.state)?;
-        remove_journal_segments(path);
+        let wal = recovery_session_wal(path, &self.config)?;
+        wal.publish_snapshot(&snapshot_bytes(&self.state)?)?;
         self.journal_identity = None;
-        self.disk_identity = DiskIdentity::capture(path);
+        self.disk_identity = wal.snapshot_identity();
         append_blob_refs_to_ref_index(path, &self.session_refs, Some(&self.ref_classes));
         self.session_refs.clear();
         self.clear_pending_deletions();
@@ -3661,7 +3663,7 @@ pub(crate) fn load_state(
         return Ok(None);
     };
     state.configure(config);
-    Ok(Some(apply_journal(state, path, config)))
+    Ok(Some(apply_session_wal(state, path, config)))
 }
 
 // Large blobs use verified content-addressed sidecars.
@@ -3961,12 +3963,7 @@ fn resolve_blob_value(cache_path: Option<&Path>, ref_id: &str, value: &BlobEntry
     }
 }
 
-// Active journal sibling path.
-fn journal_path(path: &Path) -> PathBuf {
-    append_file_name_suffix(path, ".journal")
-}
-
-// Persisted session delta.
+// Persisted session delta. Framing is hub SessionWal; payload stays engine-owned.
 #[derive(Debug, Serialize, Deserialize)]
 struct JournalEntry {
     refs: Vec<String>,
@@ -4044,113 +4041,35 @@ fn copy_map_entry<T: Clone>(
     }
 }
 
-// Bound journal segments relative to the snapshot.
-fn journal_compact_threshold(snapshot_len: u64) -> u64 {
-    snapshot_len.max(64 * 1024)
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum JournalAppend {
-    Appended,
-    NeedsCompaction,
-}
-
-fn journal_segment_path(path: &Path, generation: usize) -> PathBuf {
-    let mut os: OsString = journal_path(path).into_os_string();
-    os.push(format!(".{generation}"));
-    PathBuf::from(os)
-}
-
-fn remove_journal_segments(path: &Path) {
-    let _ = fs::remove_file(journal_path(path));
-    for generation in 1..=JOURNAL_MAX_SEALED_SEGMENTS {
-        let _ = fs::remove_file(journal_segment_path(path, generation));
-    }
-}
-
-fn append_journal(
-    snapshot_path: &Path,
-    entry: &JournalEntry,
-    segment_limit: u64,
-) -> Result<JournalAppend, RecoveryError> {
-    let mut line = serde_json::to_string(entry)?;
-    line.push('\n');
-    let line_len = line.len() as u64;
-    if line_len > segment_limit {
-        return Ok(JournalAppend::NeedsCompaction);
-    }
-
-    let active = journal_path(snapshot_path);
-    let active_len = fs::metadata(&active).map(|meta| meta.len()).unwrap_or(0);
-    if active_len > 0 && active_len.saturating_add(line_len) > segment_limit {
-        if journal_segment_path(snapshot_path, JOURNAL_MAX_SEALED_SEGMENTS).exists() {
-            return Ok(JournalAppend::NeedsCompaction);
-        }
-        for generation in (1..JOURNAL_MAX_SEALED_SEGMENTS).rev() {
-            let from = journal_segment_path(snapshot_path, generation);
-            if from.exists() {
-                fs::rename(from, journal_segment_path(snapshot_path, generation + 1))?;
-            }
-        }
-        fs::rename(&active, journal_segment_path(snapshot_path, 1))?;
-    }
-
-    let mut file = OpenOptions::new().create(true).append(true).open(active)?;
-    file.write_all(line.as_bytes())?;
-    Ok(JournalAppend::Appended)
-}
-
-/// Fail-open capped journal segment read: `None` stops replay; empty means missing segment.
-/// Fail-open capped journal segment read: `None` stops replay; `Some(None)` skips a missing segment.
-fn read_capped_journal_text(path: &Path, remaining: &mut u64) -> Option<Option<String>> {
-    let file = match fs::File::open(path) {
-        Ok(file) => file,
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Some(None),
-        Err(_) => return None,
+// Replay complete SessionWal records; a bad payload fails open to recovered state.
+fn apply_session_wal(
+    mut state: RecoveryState,
+    path: &Path,
+    config: &RecoveryConfig,
+) -> RecoveryState {
+    let Ok(wal) = recovery_session_wal(path, config) else {
+        return state;
     };
-    let Ok(meta) = file.metadata() else {
-        return None;
+    let Ok(replay) = wal.replay() else {
+        return state;
     };
-    if !meta.is_file() || meta.len() > *remaining {
-        return None;
-    }
-    *remaining -= meta.len();
-    match read_limited_utf8(file, meta.len() as usize) {
-        Ok(Some(text)) => Some(Some(text)),
-        _ => None,
-    }
-}
-
-// Replay complete journal entries; any bad tail fails open to recovered state.
-fn apply_journal(mut state: RecoveryState, path: &Path, config: &RecoveryConfig) -> RecoveryState {
-    let journals = (1..=JOURNAL_MAX_SEALED_SEGMENTS)
-        .rev()
-        .map(|generation| journal_segment_path(path, generation))
-        .chain(std::iter::once(journal_path(path)));
-    let mut remaining = config.max_load_bytes as u64;
-    for journal in journals {
-        let Some(maybe_text) = read_capped_journal_text(&journal, &mut remaining) else {
+    for record in replay.records {
+        let Ok(entry) = serde_json::from_slice::<JournalEntry>(&record) else {
             return state;
         };
-        let Some(text) = maybe_text else { continue };
-        for line in text.lines().map(str::trim).filter(|line| !line.is_empty()) {
-            let Ok(entry) = serde_json::from_str::<JournalEntry>(line) else {
-                return state;
-            };
-            let JournalEntry {
-                refs,
-                state: delta,
-                deleted_blob_refs,
-                deleted_aliases,
-            } = entry;
-            let accumulated = std::mem::replace(&mut state, RecoveryState::empty(config));
-            state = merge_states(accumulated, delta, &refs, config);
-            apply_deletions(
-                &mut state,
-                deleted_blob_refs.iter().map(String::as_str),
-                deleted_aliases.iter().map(String::as_str),
-            );
-        }
+        let JournalEntry {
+            refs,
+            state: delta,
+            deleted_blob_refs,
+            deleted_aliases,
+        } = entry;
+        let accumulated = std::mem::replace(&mut state, RecoveryState::empty(config));
+        state = merge_states(accumulated, delta, &refs, config);
+        apply_deletions(
+            &mut state,
+            deleted_blob_refs.iter().map(String::as_str),
+            deleted_aliases.iter().map(String::as_str),
+        );
     }
     state
 }

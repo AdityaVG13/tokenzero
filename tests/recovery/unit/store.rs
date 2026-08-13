@@ -2,9 +2,28 @@ use super::*;
 use crate::shared_cas::SharedCas;
 use proptest::prelude::*;
 use std::collections::BTreeMap;
+use std::fs::{self, OpenOptions};
+use std::io::Write;
 use std::panic::{AssertUnwindSafe, catch_unwind, resume_unwind};
+use std::path::{Path, PathBuf};
 use std::sync::{LazyLock, Mutex};
+use std::time::{Duration, SystemTime};
 use tempfile::tempdir;
+use zero_store::{AppendOutcome, FileIdentity, SessionWal, SessionWalConfig};
+
+fn session_wal_for(path: &Path) -> SessionWal {
+    SessionWal::new(path, SessionWalConfig::default()).expect("cache path names a file")
+}
+
+fn wal_path(path: &Path) -> PathBuf {
+    session_wal_for(path).wal_path()
+}
+
+fn sealed_wal_path(path: &Path, generation: usize) -> PathBuf {
+    let mut os = wal_path(path).into_os_string();
+    os.push(format!(".{generation}"));
+    PathBuf::from(os)
+}
 
 // ---------------------------------------------------------------------------
 // Shared helpers (used in ≥3 tests each)
@@ -1182,7 +1201,7 @@ fn single_writer_repeat_persists_skip_reload_and_stay_byte_exact() {
             .unwrap();
         expected.push((stored.blob_ref, text));
         let identity = store.disk_identity.expect("identity captured after write");
-        assert_eq!(DiskIdentity::capture(&cache), Some(identity));
+        assert_eq!(FileIdentity::capture(&cache), Some(identity));
     }
 
     let mut restarted = RecoveryStore::new(Some(cache));
@@ -1761,18 +1780,15 @@ fn rotated_journal_fixture() -> (tempfile::TempDir, PathBuf, StoredPayload, Stor
     };
     let (first, first_entry) = make_entry("sealed\n");
     let (second, second_entry) = make_entry("active\n");
-    let first_len = serde_json::to_vec(&first_entry).unwrap().len() as u64 + 1;
-    let second_len = serde_json::to_vec(&second_entry).unwrap().len() as u64 + 1;
-    let segment_limit = first_len.max(second_len);
+    let first_bytes = serde_json::to_vec(&first_entry).unwrap();
+    let second_bytes = serde_json::to_vec(&second_entry).unwrap();
+    let framed = |payload: usize| payload as u64 + 8;
+    let mut cfg = SessionWalConfig::default();
+    cfg.segment_limit = framed(first_bytes.len()).max(framed(second_bytes.len()));
+    let wal = SessionWal::new(&cache, cfg).unwrap();
 
-    assert_eq!(
-        append_journal(&cache, &first_entry, segment_limit).unwrap(),
-        JournalAppend::Appended
-    );
-    assert_eq!(
-        append_journal(&cache, &second_entry, segment_limit).unwrap(),
-        JournalAppend::Appended
-    );
+    assert_eq!(wal.append(&first_bytes).unwrap(), AppendOutcome::Appended);
+    assert_eq!(wal.append(&second_bytes).unwrap(), AppendOutcome::Appended);
     (dir, cache, first, second)
 }
 
@@ -1780,15 +1796,15 @@ fn rotated_journal_fixture() -> (tempfile::TempDir, PathBuf, StoredPayload, Stor
 fn journal_rotates_when_active_segment_reaches_limit() {
     let (_dir, cache, _first, _second) = rotated_journal_fixture();
     assert!(
-        journal_segment_path(&cache, 1).exists(),
+        sealed_wal_path(&cache, 1).exists(),
         "full active segment must be sealed"
     );
     assert!(
-        journal_path(&cache).exists(),
+        wal_path(&cache).exists(),
         "rotation must leave a writable active segment"
     );
     assert!(
-        !journal_segment_path(&cache, 2).exists(),
+        !sealed_wal_path(&cache, 2).exists(),
         "one rotation must create exactly one sealed segment"
     );
 }
@@ -1809,7 +1825,7 @@ fn journal_torn_tail_in_newest_segment_preserves_all_complete_segments() {
     let (_dir, cache, sealed, active) = rotated_journal_fixture();
     let mut file = OpenOptions::new()
         .append(true)
-        .open(journal_path(&cache))
+        .open(wal_path(&cache))
         .unwrap();
     file.write_all(b"{\"refs\":[\"tz://blob/torn").unwrap();
     drop(file);
@@ -1849,7 +1865,7 @@ fn second_process_persist_appends_journal_without_snapshot_rewrite() {
         snapshot_before,
         "snapshot must be untouched by a journaled persist"
     );
-    assert!(journal_path(&cache).exists(), "journal sibling must exist");
+    assert!(wal_path(&cache).exists(), "session WAL sibling must exist");
 
     let mut restarted = RecoveryStore::new(Some(cache));
     for (stored, text) in [(&first, "alpha\n"), (&second, "beta\n")] {
@@ -1906,7 +1922,7 @@ fn corrupt_journal_tail_keeps_complete_entries() {
             .store_payload("good\n", ContentType::Unknown, None, None, None)
             .unwrap()
     };
-    let journal = journal_path(&cache);
+    let journal = wal_path(&cache);
     let mut bytes = fs::read(&journal).unwrap();
     bytes.extend_from_slice(b"{\"refs\":[\"tz://blob/torn");
     fs::write(&journal, bytes).unwrap();
@@ -1938,7 +1954,7 @@ fn torn_deferred_batch_never_exposes_partial_aliases() {
         stored.blob_ref
     };
 
-    let journal = journal_path(&cache);
+    let journal = wal_path(&cache);
     let torn = format!("{{\"refs\":[],\"state\":{{\"aliases\":{{\"tz://batch/torn\":\"{target}\"");
     fs::write(&journal, torn).unwrap();
 
@@ -1979,8 +1995,8 @@ fn persist_pending_durable_rewrites_snapshot_via_hub_atomic_write() {
         stored
     };
     assert!(
-        !journal_path(&cache).exists(),
-        "hub atomic snapshot must retire the session journal"
+        !wal_path(&cache).exists(),
+        "hub SessionWal publish must retire the session WAL"
     );
     let temps: Vec<_> = fs::read_dir(dir.path())
         .unwrap()
@@ -2015,8 +2031,8 @@ fn oversized_journal_compacts_into_fresh_snapshot() {
             .unwrap()
     };
     assert!(
-        !journal_path(&cache).exists(),
-        "journal must be removed after compaction"
+        !wal_path(&cache).exists(),
+        "WAL must be removed after compaction"
     );
     let mut restarted = RecoveryStore::new(Some(cache));
     for (stored, text) in [(&small, "tiny\n"), (&big, big_text.as_str())] {
@@ -3489,9 +3505,9 @@ fn repeated_payload_reuses_refs_without_persistent_mutation() {
         .unwrap();
     assert_eq!(first.unit_refs.len(), 64);
     assert_eq!(first.unit_refs[0], first.unit_refs[4]);
-    let snapshot_identity = DiskIdentity::capture(&cache);
-    let journal_identity = DiskIdentity::capture(&journal_path(&cache));
-    let index_identity = DiskIdentity::capture(&index);
+    let snapshot_identity = FileIdentity::capture(&cache);
+    let journal_identity = FileIdentity::capture(&wal_path(&cache));
+    let index_identity = FileIdentity::capture(&index);
 
     let second = store
         .store_payload(
@@ -3507,12 +3523,9 @@ fn repeated_payload_reuses_refs_without_persistent_mutation() {
         serde_json::to_vec(&first).unwrap(),
         serde_json::to_vec(&second).unwrap()
     );
-    assert_eq!(DiskIdentity::capture(&cache), snapshot_identity);
-    assert_eq!(
-        DiskIdentity::capture(&journal_path(&cache)),
-        journal_identity
-    );
-    assert_eq!(DiskIdentity::capture(&index), index_identity);
+    assert_eq!(FileIdentity::capture(&cache), snapshot_identity);
+    assert_eq!(FileIdentity::capture(&wal_path(&cache)), journal_identity);
+    assert_eq!(FileIdentity::capture(&index), index_identity);
     assert!(store.session_refs.is_empty());
     set_ref_index_test_override(previous_override);
 }
