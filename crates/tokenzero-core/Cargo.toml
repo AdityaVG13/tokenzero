@@ -23,7 +23,7 @@ zero-ref.workspace = true
 
 [dev-dependencies]
 ah-ah-ah = "0.1"
-criterion = "0.5"
+criterion = "0.8"
 proptest.workspace = true
 tiktoken-rs = "0.12"
 

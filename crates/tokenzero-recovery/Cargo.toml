@@ -27,7 +27,7 @@ tokenzero-core = { path = "../tokenzero-core", version = "1.0.2" }
 [dev-dependencies]
 proptest.workspace = true
 tempfile.workspace = true
-criterion = "0.5"
+criterion = "0.8"
 
 [[bench]]
 name = "hotpaths"
