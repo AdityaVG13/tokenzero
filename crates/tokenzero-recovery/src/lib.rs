@@ -1408,9 +1408,29 @@ impl RecoveryStore {
 
     /// Publish all deferred mutations as one recovery entry and make that
     /// publication durable before returning to a caller that will acknowledge it.
+    ///
+    /// Hub `DurableJournalV2` is a digest 2PC for a single published root, not
+    /// this store's merge/session-delta WAL (64 KiB record cap, fail-closed,
+    /// no foreign-writer merge). Durable commit therefore rewrites the
+    /// snapshot through hub `atomic_write_file` (temp + fsync + replace).
+    /// On mounts that cannot fsync, fall back to the existing tolerate path.
     pub fn persist_pending_durable(&mut self) -> Result<(), RecoveryError> {
         self.persist()?;
-        self.sync_durable_publication()
+        let Some(path) = self.persistence_path.clone() else {
+            return Ok(());
+        };
+        let mut bytes = serde_json::to_vec(&self.state)?;
+        bytes.push(b'\n');
+        match zero_store::atomic_write_file(&path, &bytes) {
+            Ok(()) => {
+                remove_journal_segments(&path);
+                self.journal_identity = None;
+                self.disk_identity = DiskIdentity::capture(&path);
+                Ok(())
+            }
+            Err(err) if sync_unsupported(&err) => self.sync_durable_publication(),
+            Err(err) => Err(err.into()),
+        }
     }
 
     fn sync_durable_publication(&self) -> Result<(), RecoveryError> {
@@ -4373,7 +4393,7 @@ fn atomic_write_json(path: &Path, state: &RecoveryState) -> Result<(), RecoveryE
         let tmp = recovery_tmp_path(path);
         match write_json_to_tmp(&tmp, state) {
             Ok(()) => {
-                if let Err(err) = fs::rename(&tmp, path) {
+                if let Err(err) = zero_store::replace_file(&tmp, path) {
                     let _ = fs::remove_file(&tmp);
                     return Err(err.into());
                 }

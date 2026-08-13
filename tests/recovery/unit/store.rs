@@ -1967,6 +1967,37 @@ fn persist_pending_durable_propagates_persist_errors() {
 }
 
 #[test]
+fn persist_pending_durable_rewrites_snapshot_via_hub_atomic_write() {
+    let dir = tempdir().unwrap();
+    let cache = dir.path().join("cache.json");
+    let stored = {
+        let mut store = RecoveryStore::new(Some(cache.clone()));
+        let stored = store
+            .store_payload("durable-root\n", ContentType::Unknown, None, None, None)
+            .unwrap();
+        store.persist_pending_durable().unwrap();
+        stored
+    };
+    assert!(
+        !journal_path(&cache).exists(),
+        "hub atomic snapshot must retire the session journal"
+    );
+    let temps: Vec<_> = fs::read_dir(dir.path())
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .filter(|name| name.contains(".tmp"))
+        .collect();
+    assert!(temps.is_empty(), "hub temp must not survive: {temps:?}");
+    let text = fs::read_to_string(&cache).unwrap();
+    assert!(serde_json::from_str::<RecoveryState>(&text).is_ok());
+    let mut restarted = RecoveryStore::new(Some(cache));
+    let expanded = restarted.expand(&stored.blob_ref, Some("raw"), None, None, None, None);
+    assert!(expanded.found, "{}", expanded.reason);
+    assert_eq!(expanded.content, "durable-root\n");
+}
+
+#[test]
 fn oversized_journal_compacts_into_fresh_snapshot() {
     let dir = tempdir().unwrap();
     let cache = dir.path().join("cache.json");
