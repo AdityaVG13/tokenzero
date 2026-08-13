@@ -207,14 +207,11 @@ impl TokenZeroStore {
             _ => resolved.cas_host().to_path_buf(),
         };
         probe_durable_cache_target(&containment_root, &cache_path)?;
-        let recovery = RecoveryStore::new(Some(cache_path));
-        let shared_cas = match resolved.mode() {
-            StoreMode::Legacy => recovery
-                .persistence_path
-                .as_deref()
-                .and_then(SharedCas::detect_from_cache_path),
-            _ => Some(SharedCas::new(resolved.cas_host().to_path_buf())),
-        };
+        let recovery = RecoveryStore::new(Some(cache_path.clone()));
+        let shared_cas = Some(match resolved.mode() {
+            StoreMode::Legacy => SharedCas::attach_for_cache_path(&cache_path),
+            _ => SharedCas::new(resolved.cas_host().to_path_buf()),
+        });
         Ok(Self {
             root: Some(root_path),
             recovery,

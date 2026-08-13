@@ -1132,7 +1132,7 @@ impl RecoveryStore {
         let state = loaded.unwrap_or_else(|| RecoveryState::empty(&config));
         let shared_cas = persistence_path
             .as_deref()
-            .and_then(SharedCas::detect_from_cache_path);
+            .map(SharedCas::attach_for_cache_path);
         Self {
             config,
             persistence_path,
@@ -1894,21 +1894,22 @@ impl RecoveryStore {
                 {
                     Ok(content) => Some(content),
                     Err(None) => return miss!("shared-cas-non-utf8"),
-                    Err(Some(SharedCasError::NotFound)) if requested_ref.starts_with("tz://") => {
-                        None
-                    }
                     Err(Some(SharedCasError::NotFound)) => {
-                        if let Some(result) = self.expand_in_sibling_engine_store(
-                            &requested_ref,
-                            selector,
-                            start_line,
-                            end_line,
-                            anchor_kind,
-                            symbol,
-                        ) {
+                        if !requested_ref.starts_with("tz://")
+                            && let Some(result) = self.expand_in_sibling_engine_store(
+                                &requested_ref,
+                                selector,
+                                start_line,
+                                end_line,
+                                anchor_kind,
+                                symbol,
+                            )
+                        {
                             return result;
                         }
-                        return miss!("shared-cas-missing");
+                        // Same-store fz/gz aliases and unpublished inline
+                        // bodies still live in the recovery snapshot.
+                        None
                     }
                     Err(Some(err)) => return miss!(shared_cas_error_reason(err)),
                 }
@@ -1958,6 +1959,13 @@ impl RecoveryStore {
                 Ok(content) => content,
                 Err(reason) if requested_alias && reason.starts_with("ref-not-found") => {
                     return miss!("dangling-ref");
+                }
+                Err(reason)
+                    if self.shared_cas.is_some()
+                        && !requested_ref.starts_with("tz://")
+                        && reason.starts_with("ref-not-found") =>
+                {
+                    return miss!("shared-cas-missing");
                 }
                 Err(reason) => return miss!(reason),
             }
@@ -2469,23 +2477,10 @@ impl RecoveryStore {
         // when CAS returns NotFound. CAS publication happens post-commit in
         // `publish_pending_cas`.
         //
-        // When a hub SharedCas is attached, never write the private
-        // `<cache>.blobs/` tree. That sidecar skipped `publish_pending_cas`
-        // (markers are not published), so large blobs never reached zero-store.
-        // Isolated stores without CAS still externalize ≥64 KiB to a sidecar.
-        let value = {
-            let text = if self.shared_cas.is_some() {
-                text.to_string()
-            } else {
-                self.persistence_path
-                    .as_deref()
-                    .and_then(|cache| externalize_blob_value(cache, text, &full_hash))
-                    .unwrap_or_else(|| text.to_string())
-            };
-            Some(BlobEntry::Inline(text))
-        };
-        // Track for post-commit CAS publication. Only full-hash blobs are
-        // CAS-eligible; the legacy short ref is not a CAS key.
+        // Durable stores always attach a local hub CAS. Keep the body inline
+        // until `publish_pending_cas` (zerostack-5u7). Never write the private
+        // `<cache>.blobs/` tree; leftover sidecars stay read-only.
+        let value = Some(BlobEntry::Inline(text.to_string()));
         if self.shared_cas.is_some() {
             self.pending_cas_hashes.insert(full_hash.clone());
         }
@@ -3721,41 +3716,6 @@ pub fn blob_ref_proven_on_disk(cache_path: &Path, ref_id: &str) -> bool {
         return true;
     }
     false
-}
-
-fn externalize_blob_value(cache_path: &Path, text: &str, hash: &str) -> Option<String> {
-    if text.len() < BLOB_EXTERNALIZE_MIN_BYTES {
-        return None;
-    }
-    let dir = blob_sidecar_dir(cache_path);
-    fs::create_dir_all(&dir).ok()?;
-    let path = dir.join(format!("{hash}.txt"));
-    // Content-addressed: an existing file already holds these exact bytes.
-    if !path.exists() {
-        // Atomic publish (RA-14203): write a unique temp sibling, then rename,
-        // so concurrent readers never observe a torn blob.
-        let tmp = dir.join(format!(
-            ".{hash}.{}.{}.tmp",
-            std::process::id(),
-            TMP_COUNTER.fetch_add(1, Ordering::Relaxed)
-        ));
-        if fs::write(&tmp, text).is_err() {
-            let _ = fs::remove_file(&tmp);
-            return None;
-        }
-        if let Ok(file) = fs::File::open(&tmp)
-            && tolerate_unsupported_sync(file.sync_all()).is_err()
-        {
-            let _ = fs::remove_file(&tmp);
-            return None;
-        }
-        if fs::rename(&tmp, &path).is_err() {
-            let _ = fs::remove_file(&tmp);
-            return None;
-        }
-        let _ = tolerate_unsupported_sync(fs::File::open(&dir).and_then(|file| file.sync_all()));
-    }
-    Some(blob_cas_marker(hash, text.len()))
 }
 
 fn blob_cas_marker(hash: &str, len: usize) -> String {

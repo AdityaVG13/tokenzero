@@ -2030,31 +2030,52 @@ fn oversized_journal_compacts_into_fresh_snapshot() {
 // Big blob / sidecar
 // ---------------------------------------------------------------------------
 
+fn seed_legacy_sidecar(cache: &Path, text: &str) -> (String, String) {
+    let hash = sha256_hex(text);
+    let dir = blob_sidecar_dir(cache);
+    fs::create_dir_all(&dir).unwrap();
+    fs::write(dir.join(format!("{hash}.txt")), text).unwrap();
+    let marker = format!("{BLOB_MARKER_PREFIX}{hash}:{}:", text.len());
+    (hash, marker)
+}
+
 #[test]
-fn big_blob_externalizes_to_sidecar_and_roundtrips() {
+fn isolated_cache_attaches_local_cas_and_skips_sidecar() {
     let (mut store, cache, _dir) = temp_store();
+    assert!(
+        store.shared_cas.is_some(),
+        "isolated cache.json must still attach a local hub CAS"
+    );
     let big = "x".repeat(200 * 1024);
     let stored = store
         .store_payload(&big, ContentType::Unknown, None, None, None)
         .unwrap();
-    let sidecar = blob_sidecar_dir(&cache);
-    assert!(sidecar.is_dir(), "sidecar dir must exist");
     assert!(
-        fs::read_dir(&sidecar).unwrap().count() >= 1,
-        "sidecar must hold the payload"
+        !blob_sidecar_dir(&cache).exists(),
+        "new writes must not create <cache>.blobs/"
     );
     let snapshot: serde_json::Value =
         serde_json::from_str(&fs::read_to_string(&cache).unwrap()).unwrap();
     let blob_value = snapshot["blobs"][&stored.blob_ref].as_str().unwrap();
+    assert_eq!(blob_value, big, "crash authority stays the inline snapshot");
+
+    store.publish_pending_cas().unwrap();
+    let hash = stored
+        .blob_ref
+        .rsplit('/')
+        .next()
+        .expect("tz://blob/<hash>");
     assert!(
-        blob_value.starts_with('\u{0}'),
-        "blob value must be an externalized marker"
+        store
+            .shared_cas
+            .as_ref()
+            .is_some_and(|cas| cas.contains(hash)),
+        "isolated store must publish large blobs to local hub CAS"
     );
-    assert!(blob_value.len() < 128, "marker must be tiny");
     drop(store);
     let mut restarted = RecoveryStore::new(Some(cache));
     let expanded = restarted.expand(&stored.blob_ref, Some("raw"), None, None, None, None);
-    assert!(expanded.found);
+    assert!(expanded.found, "{}", expanded.reason);
     assert_eq!(expanded.content, big);
 }
 
@@ -2116,65 +2137,22 @@ fn attached_cas_skips_sidecar_and_publishes_large_blobs() {
 }
 
 #[test]
-fn blob_sidecar_publish_is_atomic_and_litter_free() {
-    let (mut store, cache, _dir) = temp_store();
-    let big = "z".repeat(200 * 1024);
-    let stored = store
-        .store_payload(&big, ContentType::Unknown, None, None, None)
-        .unwrap();
-    let sidecar = blob_sidecar_dir(&cache);
-    let names: Vec<String> = fs::read_dir(&sidecar)
-        .unwrap()
-        .filter_map(|e| e.ok())
-        .map(|e| e.file_name().to_string_lossy().into_owned())
-        .collect();
-    assert!(
-        names.iter().all(|n| !n.ends_with(".tmp")),
-        "temp publish files must not survive: {names:?}"
-    );
-    drop(store);
-    let mut restarted = RecoveryStore::new(Some(cache));
-    let expanded = restarted.expand(&stored.blob_ref, Some("raw"), None, None, None, None);
-    assert!(expanded.found);
-    assert_eq!(expanded.content, big);
-}
-
-#[test]
-fn concurrent_duplicate_blob_publish_never_serves_torn_bytes() {
-    // RA-14203 regression: concurrent publishers of the same content hash must
-    // leave exactly one complete sidecar; every reader sees the full payload.
+fn leftover_sidecar_still_expands() {
     let dir = tempdir().unwrap();
     let cache = dir.path().join("cache.json");
-    let big = std::sync::Arc::new("q".repeat(200 * 1024));
-    let hash = sha256_hex(&big);
-    let mut handles = Vec::new();
-    for _ in 0..8 {
-        let cache = cache.clone();
-        let big = std::sync::Arc::clone(&big);
-        let hash = hash.clone();
-        handles.push(std::thread::spawn(move || {
-            let sidecar = blob_sidecar_dir(&cache).join(format!("{hash}.txt"));
-            for _ in 0..25 {
-                let marker = externalize_blob_value(&cache, &big, &hash);
-                assert!(marker.is_some(), "publish must succeed");
-                if let Ok(bytes) = fs::read(&sidecar) {
-                    // Not-yet-published is fine mid-storm; torn is not.
-                    assert_eq!(bytes.len(), big.len(), "reader must never see a torn blob");
-                }
-            }
-        }));
-    }
-    for handle in handles {
-        handle.join().expect("publisher thread");
-    }
-    let final_bytes = fs::read(blob_sidecar_dir(&cache).join(format!("{hash}.txt"))).unwrap();
-    assert_eq!(final_bytes.len(), big.len());
-    let litter = fs::read_dir(blob_sidecar_dir(&cache))
-        .unwrap()
-        .filter_map(|e| e.ok())
-        .filter(|e| e.file_name().to_string_lossy().ends_with(".tmp"))
-        .count();
-    assert_eq!(litter, 0, "no temp files survive the storm");
+    let big = "z".repeat(200 * 1024);
+    let (hash, marker) = seed_legacy_sidecar(&cache, &big);
+    let blob_ref = format!("tz://blob/{hash}");
+    let mut store = RecoveryStore::new(Some(cache));
+    store
+        .state
+        .blobs
+        .insert(blob_ref.clone(), BlobEntry::Inline(marker));
+    store.session_refs.push(blob_ref.clone());
+    store.persist_pending().unwrap();
+    let expanded = store.expand(&blob_ref, Some("raw"), None, None, None, None);
+    assert!(expanded.found, "{}", expanded.reason);
+    assert_eq!(expanded.content, big);
 }
 
 #[test]
@@ -2182,17 +2160,21 @@ fn corrupt_blob_sidecar_is_a_miss_not_bad_bytes() {
     let dir = tempdir().unwrap();
     let cache = dir.path().join("cache.json");
     let big = "y".repeat(200 * 1024);
-    let stored = {
-        let mut store = RecoveryStore::new(Some(cache.clone()));
-        store
-            .store_payload(&big, ContentType::Unknown, None, None, None)
-            .unwrap()
-    };
-    for entry in fs::read_dir(blob_sidecar_dir(&cache)).unwrap() {
-        fs::write(entry.unwrap().path(), "tampered").unwrap();
-    }
-    let mut restarted = RecoveryStore::new(Some(cache));
-    let expanded = restarted.expand(&stored.blob_ref, Some("raw"), None, None, None, None);
+    let (hash, marker) = seed_legacy_sidecar(&cache, &big);
+    fs::write(
+        blob_sidecar_dir(&cache).join(format!("{hash}.txt")),
+        "tampered",
+    )
+    .unwrap();
+    let blob_ref = format!("tz://blob/{hash}");
+    let mut store = RecoveryStore::new(Some(cache));
+    store
+        .state
+        .blobs
+        .insert(blob_ref.clone(), BlobEntry::Inline(marker));
+    store.session_refs.push(blob_ref.clone());
+    store.persist_pending().unwrap();
+    let expanded = store.expand(&blob_ref, Some("raw"), None, None, None, None);
     assert!(
         !expanded.found || expanded.content != big,
         "tampered sidecar must never serve as the original"
@@ -2230,40 +2212,33 @@ fn streaming_corrupt_sidecar_is_rejected_as_decode_failure() {
     let dir = tempdir().unwrap();
     let cache = dir.path().join("cache.json");
     let payload = "verified".repeat(BLOB_EXTERNALIZE_MIN_BYTES / 4);
-    let stored = {
-        let mut store = RecoveryStore::new(Some(cache.clone()));
-        store
-            .store_payload(&payload, ContentType::Unknown, None, None, None)
-            .unwrap()
-    };
-    let sidecar = fs::read_dir(blob_sidecar_dir(&cache))
-        .unwrap()
-        .next()
-        .unwrap()
-        .unwrap()
-        .path();
-    fs::write(sidecar, "tampered").unwrap();
-
-    let expanded = RecoveryStore::new(Some(cache)).expand(
-        &stored.blob_ref,
-        Some("raw"),
-        None,
-        None,
-        None,
-        None,
-    );
+    let (hash, marker) = seed_legacy_sidecar(&cache, &payload);
+    fs::write(
+        blob_sidecar_dir(&cache).join(format!("{hash}.txt")),
+        "tampered",
+    )
+    .unwrap();
+    let blob_ref = format!("tz://blob/{hash}");
+    let mut store = RecoveryStore::new(Some(cache));
+    store
+        .state
+        .blobs
+        .insert(blob_ref.clone(), BlobEntry::Inline(marker));
+    store.session_refs.push(blob_ref.clone());
+    store.persist_pending().unwrap();
+    let expanded = store.expand(&blob_ref, Some("raw"), None, None, None, None);
     assert!(!expanded.found);
     assert_eq!(expanded.reason, "decode-failed");
     assert!(expanded.content.is_empty());
 }
 
 #[test]
-fn streaming_externalization_threshold_keeps_small_payload_inline() {
+fn streaming_externalization_threshold_keeps_payloads_inline_until_cas() {
     let dir = tempdir().unwrap();
     let cache = dir.path().join("cache.json");
     let small = "s".repeat(BLOB_EXTERNALIZE_MIN_BYTES - 1);
     let at_threshold = "b".repeat(BLOB_EXTERNALIZE_MIN_BYTES);
-    let mut store = RecoveryStore::new(Some(cache));
+    let mut store = RecoveryStore::new(Some(cache.clone()));
     let small_ref = store
         .store_payload(&small, ContentType::Unknown, None, None, None)
         .unwrap()
@@ -2277,10 +2252,15 @@ fn streaming_externalization_threshold_keeps_small_payload_inline() {
         store.state.blobs.get(&small_ref),
         Some(&BlobEntry::Inline(small))
     );
-    let Some(BlobEntry::Inline(marker)) = store.state.blobs.get(&big_ref) else {
-        panic!("threshold payload must use an inline sidecar marker");
-    };
-    assert!(marker.starts_with(BLOB_MARKER_PREFIX));
+    assert_eq!(
+        store.state.blobs.get(&big_ref),
+        Some(&BlobEntry::Inline(at_threshold)),
+        "large blobs stay inline until publish_pending_cas"
+    );
+    assert!(
+        !blob_sidecar_dir(&cache).exists(),
+        "threshold must not create a private sidecar"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -2948,7 +2928,7 @@ fn same_store_scheme_alias_foreign_full_hash_absent_returns_missing() {
     let foreign_ref = "fz://blob/abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789";
     let expanded = store.expand(foreign_ref, Some("raw"), None, None, None, None);
     assert!(!expanded.found);
-    assert_eq!(expanded.reason, "ref-not-found");
+    assert_eq!(expanded.reason, "shared-cas-missing");
     assert_eq!(
         expanded.ref_id, foreign_ref,
         "foreign ref must be preserved in full (no truncation)"
@@ -3545,17 +3525,26 @@ fn recovery_blob_prune_prefers_never_expanded_blobs() {
     with_ref_index_env(&index, true, || {
         let expanded_text = format!("expanded:{}", "x".repeat(70_000));
         let cold_text = format!("cold:{}", "y".repeat(70_000));
+        let (expanded_hash, expanded_marker) = seed_legacy_sidecar(&cache, &expanded_text);
+        let (cold_hash, cold_marker) = seed_legacy_sidecar(&cache, &cold_text);
+        let expanded_ref = format!("tz://blob/{expanded_hash}");
+        let cold_ref = format!("tz://blob/{cold_hash}");
         let mut store = RecoveryStore::new(Some(cache.clone()));
-        store.shared_cas = None;
-        let expanded = store
-            .store_payload(&expanded_text, ContentType::Unknown, None, None, None)
-            .unwrap();
-        let cold = store
-            .store_payload(&cold_text, ContentType::Unknown, None, None, None)
-            .unwrap();
+        store
+            .state
+            .blobs
+            .insert(expanded_ref.clone(), BlobEntry::Inline(expanded_marker));
+        store
+            .state
+            .blobs
+            .insert(cold_ref.clone(), BlobEntry::Inline(cold_marker));
+        store
+            .session_refs
+            .extend([expanded_ref.clone(), cold_ref.clone()]);
+        store.persist_pending().unwrap();
         assert!(
             store
-                .expand(&expanded.blob_ref, None, None, None, None, None)
+                .expand(&expanded_ref, None, None, None, None, None)
                 .found
         );
         store.persist_pending().unwrap();
@@ -3564,8 +3553,8 @@ fn recovery_blob_prune_prefers_never_expanded_blobs() {
         assert_eq!(report.removed_files, 1);
         assert!(report.freed_bytes >= 70_000);
         let restarted = RecoveryStore::new(Some(cache.clone()));
-        assert!(restarted.has_ref_local(&expanded.blob_ref));
-        assert!(!restarted.has_ref_local(&cold.blob_ref));
+        assert!(restarted.has_ref_local(&expanded_ref));
+        assert!(!restarted.has_ref_local(&cold_ref));
     });
 }
 

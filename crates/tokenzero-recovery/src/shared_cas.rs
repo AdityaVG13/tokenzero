@@ -189,6 +189,14 @@ impl SharedCas {
         (is_unified || root.join("blobs").is_dir()).then(|| Self::new(root))
     }
 
+    /// Attach the existing unified/sibling CAS, or create a local hub CAS at
+    /// the cache root. Isolated stores use this so they never grow a second
+    /// `<cache>.blobs/` tree.
+    pub fn attach_for_cache_path(cache_path: &Path) -> Self {
+        Self::detect_from_cache_path(cache_path)
+            .unwrap_or_else(|| Self::new(Self::attach_root_for_cache_path(cache_path)))
+    }
+
     pub fn root(&self) -> &Path {
         self.inner.root()
     }
