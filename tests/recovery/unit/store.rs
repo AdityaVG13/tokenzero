@@ -2062,6 +2062,51 @@ fn big_blob_externalizes_to_sidecar_and_roundtrips() {
 }
 
 #[test]
+fn attached_cas_skips_sidecar_and_publishes_large_blobs() {
+    let dir = tempdir().unwrap();
+    let cache = dir.path().join("tokenzero").join("recovery-cache.json");
+    fs::create_dir_all(cache.parent().unwrap()).unwrap();
+    let mut store = RecoveryStore::new(Some(cache.clone()));
+    assert!(
+        store.shared_cas.is_some(),
+        "cache under tokenzero/ must attach hub SharedCas"
+    );
+
+    let big = "x".repeat(200 * 1024);
+    let stored = store
+        .store_payload(&big, ContentType::Unknown, None, None, None)
+        .unwrap();
+    assert!(
+        !blob_sidecar_dir(&cache).exists(),
+        "hub CAS attached: private .blobs/ tree must not be created"
+    );
+    let snapshot: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&cache).unwrap()).unwrap();
+    let blob_value = snapshot["blobs"][&stored.blob_ref].as_str().unwrap();
+    assert_eq!(blob_value, big, "crash authority stays the inline snapshot");
+
+    store.publish_pending_cas().unwrap();
+    let hash = stored
+        .blob_ref
+        .rsplit('/')
+        .next()
+        .expect("tz://blob/<hash>");
+    assert!(
+        store
+            .shared_cas
+            .as_ref()
+            .is_some_and(|cas| cas.contains(hash)),
+        "large inline must reach zero-store after publish_pending_cas"
+    );
+
+    drop(store);
+    let mut restarted = RecoveryStore::new(Some(cache));
+    let expanded = restarted.expand(&stored.blob_ref, Some("raw"), None, None, None, None);
+    assert!(expanded.found, "{}", expanded.reason);
+    assert_eq!(expanded.content, big);
+}
+
+#[test]
 fn blob_sidecar_publish_is_atomic_and_litter_free() {
     let (mut store, cache, _dir) = temp_store();
     let big = "z".repeat(200 * 1024);

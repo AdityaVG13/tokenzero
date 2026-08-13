@@ -1458,13 +1458,10 @@ impl RecoveryStore {
     /// Best-effort CAS publication of inline blobs after the recovery root is
     /// durably committed (zerostack-5u7 / tokenzero-cas-fsync-ovn).
     ///
-    /// `put_blob` now stores every blob inline in the recovery state instead of
-    /// publishing to CAS during staging. This method publishes the blobs stored
-    /// since the last call to CAS. CAS becomes a cross-session dedup
-    /// acceleration layer: if CAS is empty or missing an object, the expand
-    /// path falls back to the inline body in the recovery state (line ~1583:
-    /// `NotFound` for `tz://` refs returns `None`, which falls through to
-    /// `resolve_ref_with_index`).
+    /// `put_blob` keeps bodies inline (and, with a hub SharedCas attached,
+    /// never writes `<cache>.blobs/`). This method publishes those inlines
+    /// to zero-store after commit. CAS is a cross-session dedup layer: if it
+    /// is empty or missing an object, expand falls back to the inline body.
     ///
     /// Failures are silently ignored because correctness does not depend on CAS
     /// being populated — the durable recovery root is the authoritative copy.
@@ -2444,15 +2441,22 @@ impl RecoveryStore {
         // Per-object CAS fsync barriers dominated CodeMode latency (~24ms of
         // 38ms per plan). The recovery root's durable commit already makes
         // inline bodies crash-safe, and the expand path falls back to inline
-        // when CAS returns NotFound (line ~1583). CAS publication now happens
-        // post-commit in `publish_pending_cas`, making CAS an acceleration
-        // layer for cross-session dedup rather than a per-object critical path.
+        // when CAS returns NotFound. CAS publication happens post-commit in
+        // `publish_pending_cas`.
+        //
+        // When a hub SharedCas is attached, never write the private
+        // `<cache>.blobs/` tree. That sidecar skipped `publish_pending_cas`
+        // (markers are not published), so large blobs never reached zero-store.
+        // Isolated stores without CAS still externalize ≥64 KiB to a sidecar.
         let value = {
-            let text = self
-                .persistence_path
-                .as_deref()
-                .and_then(|cache| externalize_blob_value(cache, text, &full_hash))
-                .unwrap_or_else(|| text.to_string());
+            let text = if self.shared_cas.is_some() {
+                text.to_string()
+            } else {
+                self.persistence_path
+                    .as_deref()
+                    .and_then(|cache| externalize_blob_value(cache, text, &full_hash))
+                    .unwrap_or_else(|| text.to_string())
+            };
             Some(BlobEntry::Inline(text))
         };
         // Track for post-commit CAS publication. Only full-hash blobs are
