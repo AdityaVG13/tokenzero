@@ -39,13 +39,13 @@ proptest = "1.11.0"
 regex = "1.13.1"
 rustix = { version = "1.1.4", default-features = false, features = ["fs"] }
 serde = { version = "1.0.229", features = ["derive"] }
-serde_json = "1.0.150"
+serde_json = "1.0.151"
 sha2 = "0.11.0"
 similar = { version = "3.1.2", default-features = false, features = ["text"] }
-rusqlite = { version = "0.40.1", features = ["bundled"] }
+rusqlite = { version = "0.40.2", features = ["bundled"] }
 fs4 = "1.1.0"
 tempfile = "3.27.0"
-thiserror = "2.0.19"
+thiserror = "2.0.20"
 toml = "1.1.4"
 wait-timeout = "0.2.1"
 zero-abi = { git = "https://github.com/AdityaVG13/zerostack", rev = "bd721f7fc4866b24dec0c552da3d96bd8d816fbc" }
