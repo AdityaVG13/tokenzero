@@ -334,53 +334,56 @@ fn inspect_artifact(
                 .extension()
                 .and_then(|value| value.to_str())
                 .is_some_and(|value| value.eq_ignore_ascii_case("json"));
-    if parse_json {
-        match serde_json::from_slice::<Json>(&bytes) {
-            Ok(artifact) => {
-                result.schema_version = artifact["schema_version"].clone();
-                if result.schema_version.is_null() {
-                    result.reasons.push("schema_version missing".to_string());
-                } else if let Some(expected) = expected_schema {
-                    let matches = result.schema_version.as_str() == Some(expected);
-                    result.schema_matches = json!(matches);
-                    if !matches {
-                        result.reasons.push("schema_version mismatch".to_string());
-                    }
-                } else {
-                    result.schema_matches = Json::Null;
-                }
-                if capture_release_candidate {
-                    result.release_candidate_id = artifact["release_candidate_id"].clone();
-                }
-                if let Some(expected) = expected_release_candidate {
-                    if result.release_candidate_id.is_null() {
-                        result.release_candidate_matches = json!(false);
-                        result
-                            .reasons
-                            .push("release_candidate_id missing".to_string());
-                    } else {
-                        let matches = result.release_candidate_id.as_str() == Some(expected);
-                        result.release_candidate_matches = json!(matches);
-                        if !matches {
-                            result
-                                .reasons
-                                .push("release_candidate_id mismatch".to_string());
-                        }
-                    }
-                }
+    if !parse_json {
+        result.valid = result.reasons.is_empty();
+        return result;
+    }
+    let artifact = match serde_json::from_slice::<Json>(&bytes) {
+        Ok(artifact) => artifact,
+        Err(_) => {
+            result.reasons.push(if contextual_errors {
+                format!("parse {}", path.display())
+            } else {
+                "artifact JSON unreadable".to_string()
+            });
+            if expected_schema.is_some() {
+                result.schema_matches = json!(false);
             }
-            Err(_) => {
-                result.reasons.push(if contextual_errors {
-                    format!("parse {}", path.display())
-                } else {
-                    "artifact JSON unreadable".to_string()
-                });
-                if expected_schema.is_some() {
-                    result.schema_matches = json!(false);
-                }
-                if expected_release_candidate.is_some() {
-                    result.release_candidate_matches = json!(false);
-                }
+            if expected_release_candidate.is_some() {
+                result.release_candidate_matches = json!(false);
+            }
+            result.valid = result.reasons.is_empty();
+            return result;
+        }
+    };
+    result.schema_version = artifact["schema_version"].clone();
+    if result.schema_version.is_null() {
+        result.reasons.push("schema_version missing".to_string());
+    } else if let Some(expected) = expected_schema {
+        let matches = result.schema_version.as_str() == Some(expected);
+        result.schema_matches = json!(matches);
+        if !matches {
+            result.reasons.push("schema_version mismatch".to_string());
+        }
+    } else {
+        result.schema_matches = Json::Null;
+    }
+    if capture_release_candidate {
+        result.release_candidate_id = artifact["release_candidate_id"].clone();
+    }
+    if let Some(expected) = expected_release_candidate {
+        if result.release_candidate_id.is_null() {
+            result.release_candidate_matches = json!(false);
+            result
+                .reasons
+                .push("release_candidate_id missing".to_string());
+        } else {
+            let matches = result.release_candidate_id.as_str() == Some(expected);
+            result.release_candidate_matches = json!(matches);
+            if !matches {
+                result
+                    .reasons
+                    .push("release_candidate_id mismatch".to_string());
             }
         }
     }
@@ -603,3 +606,7 @@ pub(crate) fn handoff_artifact(id: &str, path: &str, purpose: &str) -> Json {
 #[cfg(test)]
 #[path = "../../../tests/cli/inline/artifact_contracts__handoff_integrity_rejects_schema_bound_non_json_payload_without_json_extension.rs"]
 mod handoff_integrity_rejects_schema_bound_non_json_payload_without_json_extension;
+
+#[cfg(test)]
+#[path = "../../../tests/cli/inline/artifact_contracts__inspect_artifact_guards.rs"]
+mod inspect_artifact_guards;

@@ -1189,9 +1189,9 @@ impl<'a> LegacyMigration<'a> {
         let dry_run = !apply;
         let mut report = MigrationReport::new("cleanup", dry_run);
 
-        if dry_run && !confirmed {
-            // Dry-run + no confirm: plan only, no checks beyond manifest load.
-        } else if apply && !confirmed {
+        // Dry-run (`!apply`) does not require --confirm-cleanup. Apply without
+        // confirm still refuses before verify / manifest load.
+        if apply && !confirmed {
             report.record_error(
                 "cleanup-confirmation-required",
                 "cleanup requires --confirm-cleanup flag",
@@ -1213,16 +1213,16 @@ impl<'a> LegacyMigration<'a> {
             return report;
         }
 
-        let manifest = match self.manifest_path.as_ref() {
-            Some(p) => match MigrationManifest::load(p) {
-                Ok(mf) => mf,
-                Err(_) => {
-                    report.record_error("manifest-corrupt", "manifest is corrupt", None);
-                    return report;
-                }
-            },
-            None => {
-                report.record_error("manifest-missing", "no manifest path configured", None);
+        // Do not reuse `load_manifest`: cleanup maps every load Err (including
+        // missing/newer-version) to `manifest-corrupt` when a path is set.
+        let Some(path) = self.manifest_path.as_ref() else {
+            report.record_error("manifest-missing", "no manifest path configured", None);
+            return report;
+        };
+        let manifest = match MigrationManifest::load(path) {
+            Ok(mf) => mf,
+            Err(_) => {
+                report.record_error("manifest-corrupt", "manifest is corrupt", None);
                 return report;
             }
         };
@@ -1325,3 +1325,7 @@ impl MigrationStore for RecoveryStoreAdapter<'_> {
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+#[path = "../../../tests/recovery/inline/migration__cleanup_guards.rs"]
+mod cleanup_guards;

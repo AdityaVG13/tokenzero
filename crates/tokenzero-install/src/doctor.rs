@@ -365,16 +365,8 @@ pub fn doctor_undo(root: &Path, run_id: &str) -> serde_json::Value {
                 "created path is not a directory",
             );
         }
-        match fs::read_dir(&target) {
-            Ok(mut entries) => {
-                if entries.next().is_some() {
-                    return doctor_undo_failed(
-                        &resolved_run_id,
-                        &action.path,
-                        "created directory is no longer empty; refusing to move later user data",
-                    );
-                }
-            }
+        let mut entries = match fs::read_dir(&target) {
+            Ok(entries) => entries,
             Err(err) => {
                 return doctor_undo_failed(
                     &resolved_run_id,
@@ -382,6 +374,13 @@ pub fn doctor_undo(root: &Path, run_id: &str) -> serde_json::Value {
                     &format!("could not inspect directory: {err}"),
                 );
             }
+        };
+        if entries.next().is_some() {
+            return doctor_undo_failed(
+                &resolved_run_id,
+                &action.path,
+                "created directory is no longer empty; refusing to move later user data",
+            );
         }
         let quarantine = run_dir.join("quarantine").join(&action.path);
         if let Some(parent) = quarantine.parent() {

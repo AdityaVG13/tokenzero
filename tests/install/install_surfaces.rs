@@ -5,8 +5,8 @@
 use std::fs;
 
 use tokenzero_install::{
-    InstallWrite, detect_present_agents, doctor, doctor_exit_codes, doctor_ls,
-    inspect_client_surface,
+    InstallWrite, detect_present_agents, doctor, doctor_exit_codes, doctor_fix, doctor_ls,
+    doctor_undo, inspect_client_surface,
 };
 
 // ---------- doctor ----------
@@ -74,6 +74,69 @@ fn doctor_exit_codes_envelope_is_nonempty() {
     assert!(text.contains("\"code\":0") || text.contains("0"), "{text}");
     assert!(text.contains("usage_error"), "{text}");
     assert!(text.contains("blocked"), "{text}");
+}
+
+#[test]
+fn doctor_undo_latest_missing_is_failed() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("tz");
+    fs::create_dir_all(&root).unwrap();
+    let report = doctor_undo(&root, "latest");
+    assert_eq!(report["status"], "failed");
+    assert_eq!(report["exit_code"], 3);
+    assert!(
+        report["error"]
+            .as_str()
+            .unwrap_or("")
+            .contains("could not resolve latest run"),
+        "{report}"
+    );
+}
+
+#[test]
+fn doctor_undo_missing_actions_is_failed() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("tz");
+    fs::create_dir_all(&root).unwrap();
+    let report = doctor_undo(&root, "no-such-run");
+    assert_eq!(report["status"], "failed");
+    assert_eq!(report["exit_code"], 3);
+    assert!(
+        report["error"]
+            .as_str()
+            .unwrap_or("")
+            .contains("could not read actions.jsonl"),
+        "{report}"
+    );
+}
+
+#[test]
+fn doctor_undo_restores_empty_cache_parent_and_refuses_nonempty() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("tz");
+    fs::create_dir_all(&root).unwrap();
+
+    let fix = doctor_fix(&root, None, false);
+    assert_eq!(fix["status"], "ok", "{fix}");
+    let run_id = fix["run_id"].as_str().expect("run_id").to_string();
+    assert!(root.join(".tokenzero").is_dir());
+
+    let undo = doctor_undo(&root, &run_id);
+    assert_eq!(undo["status"], "ok", "{undo}");
+    assert!(!root.join(".tokenzero").exists());
+
+    let fix2 = doctor_fix(&root, None, false);
+    assert_eq!(fix2["status"], "ok", "{fix2}");
+    let run_id2 = fix2["run_id"].as_str().expect("run_id").to_string();
+    fs::write(root.join(".tokenzero").join("keep.txt"), b"x").unwrap();
+    let undo2 = doctor_undo(&root, &run_id2);
+    assert_eq!(undo2["status"], "failed", "{undo2}");
+    assert_eq!(undo2["exit_code"], 3);
+    assert_eq!(
+        undo2["reason"],
+        "created directory is no longer empty; refusing to move later user data"
+    );
+    assert!(root.join(".tokenzero").join("keep.txt").exists());
 }
 
 // ---------- inspect ----------
