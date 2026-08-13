@@ -12,6 +12,8 @@ Contributions should stay inside the public product surface:
 
 Do not submit secrets, machine-local state, generated caches, unpublished planning notes, model checkpoints, or personal filesystem paths.
 
+Research attic (`formal/`, `Pareto/`, `beads_compliance_audit/`, `ubs_audit/`) is not the public product surface. `formal/` stays in the git tree for optional Cont-2 checkers; `git archive` and GitHub source tarballs omit it (`export-ignore`). The other attic trees are gitignored and local-only.
+
 ## Development
 
 Use Cargo for public runtime work.

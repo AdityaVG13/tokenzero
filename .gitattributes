@@ -16,3 +16,11 @@
 *.pdf binary
 *.zip binary
 *.docx binary
+
+# Research attic: stay in git for local checkers, omit from git archive
+# / GitHub source tarballs. Not product surface. See CONTRIBUTING.md.
+/formal/** export-ignore
+/Pareto/** export-ignore
+/beads_compliance_audit/** export-ignore
+/ubs_audit/** export-ignore
+/agent_ergonomics_audit/** export-ignore

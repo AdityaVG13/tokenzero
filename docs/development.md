@@ -36,7 +36,9 @@ target/debug/tokenzero mcp-smoke --json
 `formal/cont2/` vendors the frozen RADC Wave-5 Continuation 2 checkers.
 `formal/w4/` records the W4 subset-tree DP split count (21,457,825).
 This is a formal regression only: it does not gate product release and must
-not be read as a runtime tool-count limit. Reproduce with:
+not be read as a runtime tool-count limit. The `formal/` tree is
+`export-ignore` (omitted from `git archive` / source tarballs; still present
+in a git clone). Reproduce with:
 
 ```bash
 python3 scripts/radc-check
