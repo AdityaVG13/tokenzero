@@ -1,5 +1,20 @@
 use super::*;
 
+/// Accumulators filled by one successful path read.
+struct ReadPathAcc<'a> {
+    visible_parts: &'a mut Vec<String>,
+    raw_visible_parts: &'a mut Vec<String>,
+    refs: &'a mut Vec<tokenzero_core::RefRecord>,
+    raw_tokens: &'a mut usize,
+    visible_tokens: &'a mut usize,
+    content_types: &'a mut Vec<ContentType>,
+    bytes_read: &'a mut usize,
+    working_set_anchor: &'a mut Option<tokenzero_recovery::working_set::SpanAnchor>,
+    pending: &'a mut Vec<(ServeKey, ServedRecord)>,
+    substitutions: &'a mut Vec<PendingSubstitution>,
+    stale_store_hit: &'a mut bool,
+}
+
 impl TokenZeroEngine {
     #[allow(clippy::too_many_arguments)]
     pub fn read(
@@ -110,187 +125,35 @@ impl TokenZeroEngine {
         // only safe when the refs are actually recoverable.
         let mut substitutions: Vec<PendingSubstitution> = Vec::new();
         let mut stale_store_hit = false;
+        let path_count = paths.len();
         for path in paths.iter().take(max_files) {
-            if !self.path_allowed(path) {
-                return path_not_allowed("read", path);
+            let mut acc = ReadPathAcc {
+                visible_parts: &mut visible_parts,
+                raw_visible_parts: &mut raw_visible_parts,
+                refs: &mut refs,
+                raw_tokens: &mut raw_tokens,
+                visible_tokens: &mut visible_tokens,
+                content_types: &mut content_types,
+                bytes_read: &mut bytes_read,
+                working_set_anchor: &mut working_set_anchor,
+                pending: &mut pending,
+                substitutions: &mut substitutions,
+                stale_store_hit: &mut stale_store_hit,
+            };
+            if let Err(response) = self.read_one_path(
+                path,
+                path_count,
+                mode,
+                start_line,
+                end_line,
+                raw,
+                max_visible_tokens,
+                &options,
+                &mut store,
+                &mut acc,
+            ) {
+                return response;
             }
-            let source_start = start_line;
-            let source_end = end_line;
-            let text_result = if let Some(start) = start_line {
-                read_line_range_from_file(path, start, end_line.unwrap_or(start))
-            } else {
-                fs::read_to_string(path)
-            };
-            let mut text = match text_result {
-                Ok(text) => text,
-                Err(err) => {
-                    // "could not read X (read_failed)" with no cause stranded
-                    // live sessions guessing between missing file, directory,
-                    // and permissions. Name the reason and the obvious next op.
-                    let hint = if path.is_dir() {
-                        " (path is a directory - use tree)"
-                    } else if !path.exists() {
-                        " (no such file)"
-                    } else {
-                        ""
-                    };
-                    return ToolResponse::error(
-                        "read",
-                        "read_failed",
-                        format!("could not read {}: {err}{hint}", path.display()),
-                        None,
-                    );
-                }
-            };
-            bytes_read += text.len();
-            let line_count = text.lines().count();
-            if paths.len() == 1 {
-                let anchor_start = source_start.unwrap_or(1);
-                let anchor_end = source_end
-                    .unwrap_or_else(|| anchor_start.saturating_add(line_count.saturating_sub(1)));
-                working_set_anchor = Some(tokenzero_recovery::working_set::SpanAnchor {
-                    path: path.clone(),
-                    symbol: None,
-                    start_line: anchor_start,
-                    end_line: anchor_end,
-                });
-            }
-            let ctype = detect_content_type(&text, Some(path));
-            content_types.push(ctype);
-            let stored = if paths.len() == 1
-                && source_start.is_none()
-                && source_end.is_none()
-                && text.len() >= 64 * 1024
-            {
-                store.store_source_backed_payload_deferred_batch(&text, ctype, path)
-            } else {
-                store.store_payload_deferred_batch(
-                    &text,
-                    ctype,
-                    Some(path),
-                    source_start,
-                    source_end,
-                )
-            };
-            refs.push(ref_record("blob", stored.blob_ref.clone(), text.len()));
-            refs.push(ref_record("file", stored.file_ref.clone(), text.len()));
-            let capsule_result = if raw {
-                Ok(tokenzero_core::Capsule {
-                    text: text.clone(),
-                    raw_tokens: stored.raw_tokens,
-                    visible_tokens: stored.raw_tokens,
-                    omitted_lines: 0,
-                    mode,
-                    protected_anchors: Vec::new(),
-                    exact_refs: Vec::new(),
-                    lossy_spans: Vec::new(),
-                    lossy_policy_id: None,
-                })
-            } else {
-                let capsule_mode = match local_payload_policy(
-                    text.len(),
-                    self.config.capsule_exact_ref_threshold_bytes,
-                    mode,
-                    true,
-                ) {
-                    LocalPayloadPolicy::Inline => mode,
-                    LocalPayloadPolicy::ExactRef => Mode::Exact,
-                };
-                tokenzero_core::make_capsule_with_recovery_ref(
-                    &text,
-                    stored.raw_tokens,
-                    capsule_mode,
-                    max_visible_tokens,
-                    Some(&path.display().to_string()),
-                    Some(&stored.file_ref),
-                )
-            };
-            let capsule = match capsule_result {
-                Ok(capsule) => capsule,
-                Err(error) => return capsule_error_response("read", error),
-            };
-            let part_text = capsule.text;
-            let part_tokens = capsule.visible_tokens;
-            // Session redundancy layer (docs/codemode.md §5). Zero-payload
-            // notes are cheap and stay untouched: empty payloads skip the
-            // layer entirely (notes are never deduped).
-            if self.config.session_dedup && !text.is_empty() {
-                let key = ServeKey::File {
-                    path: comparable_path(path),
-                    start: source_start,
-                    end: source_end,
-                };
-                let disk_sha = sha256_hex(&text);
-                let content_sha256 = stored
-                    .blob_ref
-                    .strip_prefix("tz://blob/")
-                    .filter(|digest| digest.len() == 64)
-                    .map(str::to_owned)
-                    .unwrap_or_else(|| disk_sha.clone());
-                // Store hash must match the bytes just read from disk.
-                // A drifted pin (tokenzero-oquc) must never collapse to
-                // "unchanged" or an expand of superseded refs.
-                let stale_store = content_sha256 != disk_sha;
-                stale_store_hit |= stale_store;
-                // raw keeps the verbatim-slice contract, passthrough keeps
-                // its verbatim-payload contract, and fresh is the per-call
-                // opt-out; all three bypass the replacement render but still
-                // record the serve below so later calls can dedup.
-                let bypass =
-                    raw || matches!(mode, Mode::Passthrough) || options.fresh || stale_store;
-                match self.session_lookup(&key, &content_sha256) {
-                    SeenState::Unchanged {
-                        serve_count,
-                        cross_session,
-                    } if !bypass => {
-                        let note = unchanged_read_note(path, &text, &stored, cross_session);
-                        let note_tokens = count_tokens(&note);
-                        // ROI guard: a note that costs as much as the full
-                        // render is never emitted.
-                        if note_tokens < part_tokens {
-                            substitutions.push(PendingSubstitution::Dedup {
-                                idx: visible_parts.len(),
-                                note,
-                                note_tokens,
-                                full_tokens: part_tokens,
-                                serve_count: serve_count + 1,
-                                cross_session,
-                            });
-                        }
-                    }
-                    SeenState::Changed { previous } if !bypass && self.config.diff_reads => {
-                        if let Some((diff_text, diff_tokens, telemetry)) = diff_since_served(
-                            &mut store,
-                            path,
-                            &text,
-                            &previous,
-                            &stored,
-                            part_tokens,
-                        ) {
-                            substitutions.push(PendingSubstitution::Diff {
-                                idx: visible_parts.len(),
-                                text: diff_text,
-                                diff_tokens,
-                                full_tokens: part_tokens,
-                                telemetry,
-                            });
-                        }
-                    }
-                    _ => {}
-                }
-                pending.push((
-                    key,
-                    served_record_with_metadata(content_sha256, text.len(), line_count, &stored),
-                ));
-            }
-            raw_tokens += capsule.raw_tokens;
-            visible_tokens += part_tokens;
-            if !raw {
-                let trimmed_len = text.trim_end().len();
-                text.truncate(trimmed_len);
-                raw_visible_parts.push(text);
-            }
-            visible_parts.push(part_text);
         }
         let persisted = persist_refs(&mut store, &mut refs);
         if let Some(error) = persisted.error {
@@ -404,6 +267,195 @@ impl TokenZeroEngine {
             apply_zero_hit_note(&mut response, mode, format!("# read {label} — 0 bytes"));
         }
         response
+    }
+
+    /// One allowed path: load, store, capsule, session substitution. Stale-hash
+    /// and working-set admit stay visible to the parent via the accumulator.
+    #[allow(clippy::too_many_arguments)]
+    fn read_one_path(
+        &self,
+        path: &Path,
+        path_count: usize,
+        mode: Mode,
+        start_line: Option<usize>,
+        end_line: Option<usize>,
+        raw: bool,
+        max_visible_tokens: usize,
+        options: &ServeOptions,
+        store: &mut RecoveryStore,
+        acc: &mut ReadPathAcc<'_>,
+    ) -> Result<(), ToolResponse> {
+        if !self.path_allowed(path) {
+            return Err(path_not_allowed("read", path));
+        }
+        let source_start = start_line;
+        let source_end = end_line;
+        let text_result = if let Some(start) = start_line {
+            read_line_range_from_file(path, start, end_line.unwrap_or(start))
+        } else {
+            fs::read_to_string(path)
+        };
+        let mut text = match text_result {
+            Ok(text) => text,
+            Err(err) => {
+                // "could not read X (read_failed)" with no cause stranded
+                // live sessions guessing between missing file, directory,
+                // and permissions. Name the reason and the obvious next op.
+                let hint = if path.is_dir() {
+                    " (path is a directory - use tree)"
+                } else if !path.exists() {
+                    " (no such file)"
+                } else {
+                    ""
+                };
+                return Err(ToolResponse::error(
+                    "read",
+                    "read_failed",
+                    format!("could not read {}: {err}{hint}", path.display()),
+                    None,
+                ));
+            }
+        };
+        *acc.bytes_read += text.len();
+        let line_count = text.lines().count();
+        if path_count == 1 {
+            let anchor_start = source_start.unwrap_or(1);
+            let anchor_end = source_end
+                .unwrap_or_else(|| anchor_start.saturating_add(line_count.saturating_sub(1)));
+            *acc.working_set_anchor = Some(tokenzero_recovery::working_set::SpanAnchor {
+                path: path.to_path_buf(),
+                symbol: None,
+                start_line: anchor_start,
+                end_line: anchor_end,
+            });
+        }
+        let ctype = detect_content_type(&text, Some(path));
+        acc.content_types.push(ctype);
+        let stored = if path_count == 1
+            && source_start.is_none()
+            && source_end.is_none()
+            && text.len() >= 64 * 1024
+        {
+            store.store_source_backed_payload_deferred_batch(&text, ctype, path)
+        } else {
+            store.store_payload_deferred_batch(&text, ctype, Some(path), source_start, source_end)
+        };
+        acc.refs
+            .push(ref_record("blob", stored.blob_ref.clone(), text.len()));
+        acc.refs
+            .push(ref_record("file", stored.file_ref.clone(), text.len()));
+        let capsule_result = if raw {
+            Ok(tokenzero_core::Capsule {
+                text: text.clone(),
+                raw_tokens: stored.raw_tokens,
+                visible_tokens: stored.raw_tokens,
+                omitted_lines: 0,
+                mode,
+                protected_anchors: Vec::new(),
+                exact_refs: Vec::new(),
+                lossy_spans: Vec::new(),
+                lossy_policy_id: None,
+            })
+        } else {
+            let capsule_mode = match local_payload_policy(
+                text.len(),
+                self.config.capsule_exact_ref_threshold_bytes,
+                mode,
+                true,
+            ) {
+                LocalPayloadPolicy::Inline => mode,
+                LocalPayloadPolicy::ExactRef => Mode::Exact,
+            };
+            tokenzero_core::make_capsule_with_recovery_ref(
+                &text,
+                stored.raw_tokens,
+                capsule_mode,
+                max_visible_tokens,
+                Some(&path.display().to_string()),
+                Some(&stored.file_ref),
+            )
+        };
+        let capsule = match capsule_result {
+            Ok(capsule) => capsule,
+            Err(error) => return Err(capsule_error_response("read", error)),
+        };
+        let part_text = capsule.text;
+        let part_tokens = capsule.visible_tokens;
+        // Session redundancy layer (docs/codemode.md §5). Zero-payload
+        // notes are cheap and stay untouched: empty payloads skip the
+        // layer entirely (notes are never deduped).
+        if self.config.session_dedup && !text.is_empty() {
+            let key = ServeKey::File {
+                path: comparable_path(path),
+                start: source_start,
+                end: source_end,
+            };
+            let disk_sha = sha256_hex(&text);
+            let content_sha256 = stored
+                .blob_ref
+                .strip_prefix("tz://blob/")
+                .filter(|digest| digest.len() == 64)
+                .map(str::to_owned)
+                .unwrap_or_else(|| disk_sha.clone());
+            // Store hash must match the bytes just read from disk.
+            // A drifted pin (tokenzero-oquc) must never collapse to
+            // "unchanged" or an expand of superseded refs.
+            let stale_store = content_sha256 != disk_sha;
+            *acc.stale_store_hit |= stale_store;
+            // raw keeps the verbatim-slice contract, passthrough keeps
+            // its verbatim-payload contract, and fresh is the per-call
+            // opt-out; all three bypass the replacement render but still
+            // record the serve below so later calls can dedup.
+            let bypass = raw || matches!(mode, Mode::Passthrough) || options.fresh || stale_store;
+            match self.session_lookup(&key, &content_sha256) {
+                SeenState::Unchanged {
+                    serve_count,
+                    cross_session,
+                } if !bypass => {
+                    let note = unchanged_read_note(path, &text, &stored, cross_session);
+                    let note_tokens = count_tokens(&note);
+                    // ROI guard: a note that costs as much as the full
+                    // render is never emitted.
+                    if note_tokens < part_tokens {
+                        acc.substitutions.push(PendingSubstitution::Dedup {
+                            idx: acc.visible_parts.len(),
+                            note,
+                            note_tokens,
+                            full_tokens: part_tokens,
+                            serve_count: serve_count + 1,
+                            cross_session,
+                        });
+                    }
+                }
+                SeenState::Changed { previous } if !bypass && self.config.diff_reads => {
+                    if let Some((diff_text, diff_tokens, telemetry)) =
+                        diff_since_served(store, path, &text, &previous, &stored, part_tokens)
+                    {
+                        acc.substitutions.push(PendingSubstitution::Diff {
+                            idx: acc.visible_parts.len(),
+                            text: diff_text,
+                            diff_tokens,
+                            full_tokens: part_tokens,
+                            telemetry,
+                        });
+                    }
+                }
+                _ => {}
+            }
+            acc.pending.push((
+                key,
+                served_record_with_metadata(content_sha256, text.len(), line_count, &stored),
+            ));
+        }
+        *acc.raw_tokens += capsule.raw_tokens;
+        *acc.visible_tokens += part_tokens;
+        if !raw {
+            let trimmed_len = text.trim_end().len();
+            text.truncate(trimmed_len);
+            acc.raw_visible_parts.push(text);
+        }
+        acc.visible_parts.push(part_text);
+        Ok(())
     }
 }
 

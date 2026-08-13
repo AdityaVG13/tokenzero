@@ -128,6 +128,57 @@ fn expand_masks_pem_private_key_block() {
 }
 
 #[test]
+fn expand_since_unchanged_ack_and_diff_render() {
+    let dir = tempfile::tempdir().unwrap();
+    let (engine, mut store) = engine_with_store(&dir);
+    let base = "since-extract-alpha\nbeta\n";
+    let changed = "since-extract-alpha\nBETA\n";
+    let since_ref = store_blob(&mut store, base);
+    let target_ref = store_blob(&mut store, changed);
+
+    let unchanged = engine.expand_with_params(ExpandParams {
+        ref_id: since_ref.clone(),
+        since: Some(since_ref.clone()),
+        ..Default::default()
+    });
+    assert!(unchanged.error.is_none(), "{:?}", unchanged.error);
+    let text = &unchanged.visible.as_ref().unwrap().text;
+    assert!(text.contains("unchanged since"), "{text}");
+    let receipt = unchanged.recovery.as_ref().expect("terminal receipt");
+    assert!(receipt.terminal && receipt.do_not_recompact);
+    assert!(!receipt.exact_bytes);
+
+    let diffed = engine.expand_with_params(ExpandParams {
+        ref_id: target_ref,
+        since: Some(since_ref),
+        ..Default::default()
+    });
+    assert!(diffed.error.is_none(), "{:?}", diffed.error);
+    let text = &diffed.visible.as_ref().unwrap().text;
+    assert!(text.contains("diff since"), "{text}");
+    assert!(text.contains("-beta") || text.contains("+BETA"), "{text}");
+}
+
+#[test]
+fn expand_since_rejects_non_expandable_since_ref() {
+    let dir = tempfile::tempdir().unwrap();
+    let (engine, mut store) = engine_with_store(&dir);
+    let blob = store_blob(&mut store, "payload");
+    let response = engine.expand_with_params(ExpandParams {
+        ref_id: blob,
+        since: Some("not-a-ref".into()),
+        ..Default::default()
+    });
+    let error = response.error.expect("invalid since ref must fail");
+    assert_eq!(error.code, "invalid_ref");
+    assert!(
+        error.message.contains("since must start with"),
+        "{}",
+        error.message
+    );
+}
+
+#[test]
 fn masking_ignores_prose_and_short_lookalikes() {
     let (out, count) = mask_expansion_secrets("ask- politely, sk-short, ghp_abc, AKIA123 done");
     assert_eq!(count, 0, "{out}");

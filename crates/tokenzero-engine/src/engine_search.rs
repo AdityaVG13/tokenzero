@@ -1,6 +1,131 @@
 use super::*;
 
+struct SearchBackendRun {
+    matches: Vec<SearchMatch>,
+    stats: SearchStats,
+    backend: &'static str,
+    fallback_reason: Option<String>,
+}
+
+/// Empty-scan note grammar shared by search/glob/tree: suffix, guidance,
+/// budget signal, and exhausted-miss diagnostic. Non-empty truncated hints
+/// stay at the call site -- only search applies them.
+fn apply_empty_discovery_notes(
+    response: &mut ToolResponse,
+    mode: Mode,
+    max_visible_tokens: usize,
+    tool: &str,
+    query: &str,
+    headline: String,
+    truncated: bool,
+) {
+    let suffix = if truncated { " (scan truncated)" } else { "" };
+    apply_zero_hit_note(
+        response,
+        mode,
+        with_guidance(format!("{headline}{suffix}"), tool, query, truncated),
+    );
+    attach_budget_signal(response, max_visible_tokens, truncated);
+    if truncated {
+        mark_budget_exhausted_miss(response);
+    }
+}
+
 impl TokenZeroEngine {
+    /// Select rg vs internal and run the scan. Eligibility-vs-hit stays here:
+    /// explicit rg+grep is an error; Auto falls back; find stays in-process.
+    fn run_search_backend(
+        &self,
+        tool: &str,
+        query: &str,
+        roots: &[PathBuf],
+        max_files: usize,
+        max_visited_files: usize,
+    ) -> Result<SearchBackendRun, ToolResponse> {
+        let run_internal = |stats: &mut SearchStats, matches: &mut Vec<SearchMatch>| {
+            for root in roots {
+                collect_search(
+                    root,
+                    root,
+                    query,
+                    max_files,
+                    max_visited_files,
+                    MAX_WALK_DEPTH,
+                    stats,
+                    matches,
+                );
+                if stats.truncated_by_results || stats.truncated_by_visit || stats.truncated_by_wall
+                {
+                    break;
+                }
+            }
+        };
+        let mut matches: Vec<SearchMatch> = Vec::new();
+        let mut stats = SearchStats::default();
+        let mut backend = "internal";
+        let mut fallback_reason: Option<String> = None;
+        let explicit_rg = matches!(self.config.search_backend, SearchBackend::Rg);
+        let backend_unavailable = |reason: &str| {
+            failure_response(
+                tool,
+                "backend_unavailable",
+                format!("TOKENZERO_SEARCH_BACKEND=rg but ripgrep is unusable: {reason}"),
+                Some(
+                    "install ripgrep, set TOKENZERO_RG_PATH, or use auto/internal \
+                  (internal matches literal substrings, not regex)",
+                ),
+            )
+        };
+        let rg = match self.config.search_backend {
+            SearchBackend::Internal => None,
+            SearchBackend::Auto if tool == "find" => {
+                fallback_reason = Some("in_process_find_literal".to_owned());
+                None
+            }
+            SearchBackend::Rg | SearchBackend::Auto => {
+                let resolved = self.rg_binary();
+                if resolved.is_none() {
+                    if explicit_rg && tool == "grep" {
+                        return Err(backend_unavailable("rg_not_found"));
+                    }
+                    fallback_reason = Some("rg_not_found".to_string());
+                }
+                resolved
+            }
+        };
+        match rg {
+            Some(rg_path) => match rg_search(rg_path, tool, query, roots, max_files) {
+                Ok((rg_matches, rg_stats)) => {
+                    matches = rg_matches;
+                    stats = rg_stats;
+                    backend = "rg";
+                }
+                Err(RgFailure::InvalidPattern(message)) => {
+                    return Err(failure_response(
+                        tool,
+                        "invalid_pattern",
+                        message,
+                        Some("fix the regex, or use tz_find for literal substring search"),
+                    ));
+                }
+                Err(RgFailure::Unavailable(reason)) => {
+                    if explicit_rg && tool == "grep" {
+                        return Err(backend_unavailable(&reason));
+                    }
+                    fallback_reason = Some(reason);
+                    run_internal(&mut stats, &mut matches);
+                }
+            },
+            None => run_internal(&mut stats, &mut matches),
+        }
+        Ok(SearchBackendRun {
+            matches,
+            stats,
+            backend,
+            fallback_reason,
+        })
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn search(
         &self,
@@ -33,28 +158,6 @@ impl TokenZeroEngine {
             self.begin_serve_flight(Vec::new())
         };
         let max_visited_files = max_search_visited_files(max_files);
-        let run_internal = |stats: &mut SearchStats, matches: &mut Vec<SearchMatch>| {
-            for root in roots {
-                collect_search(
-                    root,
-                    root,
-                    query,
-                    max_files,
-                    max_visited_files,
-                    MAX_WALK_DEPTH,
-                    stats,
-                    matches,
-                );
-                if stats.truncated_by_results || stats.truncated_by_visit || stats.truncated_by_wall
-                {
-                    break;
-                }
-            }
-        };
-        let mut matches: Vec<SearchMatch> = Vec::new();
-        let mut stats = SearchStats::default();
-        let mut backend = "internal";
-        let mut fallback_reason: Option<String> = None;
         // With the EXPLICIT rg backend, grep's pattern is a regex by
         // contract; silently degrading to the internal substring scanner
         // would change result semantics, so unavailability is an error for
@@ -67,63 +170,15 @@ impl TokenZeroEngine {
         // rg_search must wait for the full child before sorting. Explicit
         // TOKENZERO_SEARCH_BACKEND=rg still forces the subprocess path.
         // Auto+grep still prefers rg for true regex semantics.
-        let explicit_rg = matches!(self.config.search_backend, SearchBackend::Rg);
-        let backend_unavailable = |reason: &str| {
-            failure_response(
-                tool,
-                "backend_unavailable",
-                format!("TOKENZERO_SEARCH_BACKEND=rg but ripgrep is unusable: {reason}"),
-                Some(
-                    "install ripgrep, set TOKENZERO_RG_PATH, or use auto/internal \
-                  (internal matches literal substrings, not regex)",
-                ),
-            )
+        let SearchBackendRun {
+            mut matches,
+            stats,
+            backend,
+            fallback_reason,
+        } = match self.run_search_backend(tool, query, roots, max_files, max_visited_files) {
+            Ok(run) => run,
+            Err(response) => return response,
         };
-        let rg = match self.config.search_backend {
-            SearchBackend::Internal => None,
-            SearchBackend::Auto if tool == "find" => {
-                fallback_reason = Some("in_process_find_literal".to_owned());
-                None
-            }
-            SearchBackend::Rg | SearchBackend::Auto => {
-                let resolved = self.rg_binary();
-                if resolved.is_none() {
-                    if explicit_rg && tool == "grep" {
-                        return backend_unavailable("rg_not_found");
-                    }
-                    fallback_reason = Some("rg_not_found".to_string());
-                }
-                resolved
-            }
-        };
-        match rg {
-            Some(rg_path) => match rg_search(rg_path, tool, query, roots, max_files) {
-                Ok((rg_matches, rg_stats)) => {
-                    matches = rg_matches;
-                    stats = rg_stats;
-                    backend = "rg";
-                }
-                // Only the rg backend treats grep patterns as regex; surface
-                // its parse error instead of silently degrading to substring
-                // semantics that would return different results.
-                Err(RgFailure::InvalidPattern(message)) => {
-                    return failure_response(
-                        tool,
-                        "invalid_pattern",
-                        message,
-                        Some("fix the regex, or use tz_find for literal substring search"),
-                    );
-                }
-                Err(RgFailure::Unavailable(reason)) => {
-                    if explicit_rg && tool == "grep" {
-                        return backend_unavailable(&reason);
-                    }
-                    fallback_reason = Some(reason);
-                    run_internal(&mut stats, &mut matches);
-                }
-            },
-            None => run_internal(&mut stats, &mut matches),
-        }
         if stats.truncated_by_wall {
             let message = crate::wall::check_active_wall_deadline()
                 .map(|(message, _)| message)
@@ -292,22 +347,15 @@ impl TokenZeroEngine {
             merge_telemetry(&mut response, extra);
         }
         if matches.is_empty() {
-            let truncated = stats.truncated_by_results || stats.truncated_by_visit;
-            let suffix = if truncated { " (scan truncated)" } else { "" };
-            apply_zero_hit_note(
+            apply_empty_discovery_notes(
                 &mut response,
                 mode,
-                with_guidance(
-                    format!("# {tool} {} — 0 matches{suffix}", zero_hit_label(query)),
-                    tool,
-                    query,
-                    truncated,
-                ),
+                max_visible_tokens,
+                tool,
+                query,
+                format!("# {tool} {} — 0 matches", zero_hit_label(query)),
+                stats.truncated_by_results || stats.truncated_by_visit,
             );
-            attach_budget_signal(&mut response, max_visible_tokens, truncated);
-            if truncated {
-                mark_budget_exhausted_miss(&mut response);
-            }
         } else if stats.truncated_by_results || stats.truncated_by_visit {
             apply_truncated_hint(&mut response, mode);
             attach_budget_signal(&mut response, max_visible_tokens, true);
@@ -386,22 +434,15 @@ impl TokenZeroEngine {
         if rows.is_empty() {
             // max_files == 0 stops collect_glob before it scans anything, so
             // an unqualified "0 matches" would be a false affirmative.
-            let truncated = max_files == 0;
-            let suffix = if truncated { " (scan truncated)" } else { "" };
-            apply_zero_hit_note(
+            apply_empty_discovery_notes(
                 &mut response,
                 mode,
-                with_guidance(
-                    format!("# glob {} — 0 matches{suffix}", zero_hit_label(pattern)),
-                    "glob",
-                    pattern,
-                    truncated,
-                ),
+                max_visible_tokens,
+                "glob",
+                pattern,
+                format!("# glob {} — 0 matches", zero_hit_label(pattern)),
+                max_files == 0,
             );
-            attach_budget_signal(&mut response, max_visible_tokens, truncated);
-            if truncated {
-                mark_budget_exhausted_miss(&mut response);
-            }
         } else {
             let exhausted = max_files > 0 && rows.len() >= max_files;
             attach_budget_signal(&mut response, max_visible_tokens, exhausted);
@@ -455,17 +496,15 @@ impl TokenZeroEngine {
             // depth == 0 or max_files == 0 stops collect_tree before it scans
             // anything, so an unqualified "0 entries" would be a false
             // affirmative on a populated root.
-            let truncated = max_files == 0 || depth == 0;
-            let suffix = if truncated { " (scan truncated)" } else { "" };
-            apply_zero_hit_note(
+            apply_empty_discovery_notes(
                 &mut response,
                 mode,
-                with_guidance(format!("# tree — 0 entries{suffix}"), "tree", "", truncated),
+                max_visible_tokens,
+                "tree",
+                "",
+                "# tree — 0 entries".to_string(),
+                max_files == 0 || depth == 0,
             );
-            attach_budget_signal(&mut response, max_visible_tokens, truncated);
-            if truncated {
-                mark_budget_exhausted_miss(&mut response);
-            }
         } else {
             let exhausted = max_files > 0 && entries.len() >= max_files;
             attach_budget_signal(&mut response, max_visible_tokens, exhausted);

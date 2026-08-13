@@ -75,13 +75,36 @@ impl TokenZeroEngine {
                 }
             },
         };
-        // Redirects are followed manually so every hop's target is validated
-        // (and pinned) like the entry URL — a redirect to an internal address
-        // is the classic SSRF bypass.
+        let (body, http_code) = match self.follow_validated_redirects(url, &curl) {
+            Ok(pair) => pair,
+            Err(response) => return response,
+        };
+
+        self.fetch_response(
+            url,
+            &body,
+            mode,
+            max_visible_tokens,
+            false,
+            0,
+            0,
+            Some(http_code),
+            &index_path,
+        )
+    }
+
+    /// Follow redirects hop-by-hop so every target is validated (and pinned)
+    /// like the entry URL — a redirect to an internal address is the classic
+    /// SSRF bypass.
+    fn follow_validated_redirects(
+        &self,
+        url: &str,
+        curl: &Path,
+    ) -> Result<(String, u16), ToolResponse> {
         const MAX_FETCH_REDIRECTS: usize = 5;
         let mut current_url = url.to_string();
         let mut redirect_hops = 0usize;
-        let (body, http_code) = loop {
+        loop {
             let target = match validate_fetch_target(
                 &current_url,
                 &self.config.fetch_allow_hosts,
@@ -89,12 +112,12 @@ impl TokenZeroEngine {
             ) {
                 Ok(target) => target,
                 Err(blocked) => {
-                    return ToolResponse::error(
+                    return Err(ToolResponse::error(
                         "fetch",
                         blocked.code,
                         blocked.message,
                         blocked.repair,
-                    );
+                    ));
                 }
             };
             let mut argv: Vec<String> = vec![
@@ -125,25 +148,25 @@ impl TokenZeroEngine {
             ) {
                 Ok(result) => result,
                 Err(err) => {
-                    return failure_response(
+                    return Err(failure_response(
                         "fetch",
                         "fetch_failed",
                         format!("could not run curl: {err}"),
                         Some("install curl or set TOKENZERO_CURL_PATH"),
-                    );
+                    ));
                 }
             };
             if !result.ok || result.exit_code != Some(0) {
                 let stderr: String = result.stderr.trim().chars().take(300).collect();
-                return failure_response(
+                return Err(failure_response(
                     "fetch",
                     "fetch_failed",
                     format!("curl exited with {:?}: {stderr}", result.exit_code),
                     Some("check the URL and network access"),
-                );
+                ));
             }
             if result.stdout_capture.truncated || result.stderr_capture.truncated {
-                return fetch_transport_failure(
+                return Err(fetch_transport_failure(
                     url,
                     "fetch_capture_truncated",
                     format!(
@@ -155,64 +178,52 @@ impl TokenZeroEngine {
                     ),
                     Some("increase TOKENZERO_SHELL_CAPTURE_BYTES or fetch a smaller resource"),
                     None,
-                );
+                ));
             }
             let (body, http_code, redirect_url) = split_fetch_meta(&result.stdout);
             let Some(code) = http_code else {
-                return fetch_transport_failure(
+                return Err(fetch_transport_failure(
                     url,
                     "fetch_metadata_missing",
                     "curl output did not contain the required HTTP status metadata",
                     Some("use a curl-compatible TOKENZERO_CURL_PATH that honors -w"),
                     None,
-                );
+                ));
             };
             if (300..400).contains(&code) {
                 let Some(next) = redirect_url else {
-                    return fetch_transport_failure(
+                    return Err(fetch_transport_failure(
                         url,
                         "fetch_redirect_missing_location",
                         format!("HTTP {code} did not supply a redirect target"),
                         Some("check the URL or server redirect response"),
                         Some(code),
-                    );
+                    ));
                 };
                 redirect_hops += 1;
                 if redirect_hops > MAX_FETCH_REDIRECTS {
-                    return fetch_transport_failure(
+                    return Err(fetch_transport_failure(
                         url,
                         "too_many_redirects",
                         format!("more than {MAX_FETCH_REDIRECTS} redirects from {url}"),
                         None,
                         Some(code),
-                    );
+                    ));
                 }
                 current_url = next;
                 continue;
             }
             if (200..300).contains(&code) {
-                break (body, code);
+                return Ok((body, code));
             }
-            return fetch_transport_failure(
+            return Err(fetch_transport_failure(
                 url,
                 "fetch_http_status",
                 format!("HTTP {code} response was not cacheable as successful content"),
                 Some("check the URL and server response"),
                 Some(code),
-            );
-        };
-
-        self.fetch_response(
-            url,
-            &body,
-            mode,
-            max_visible_tokens,
-            false,
-            0,
-            0,
-            Some(http_code),
-            &index_path,
-        )
+            ));
+        }
     }
 
     /// Shared fetch render: store the body (content-addressed refs are
@@ -290,6 +301,10 @@ impl TokenZeroEngine {
         response
     }
 }
+
+#[cfg(test)]
+#[path = "../../../tests/engine/inline/engine_fetch__tests.rs"]
+mod fetch_tests;
 
 fn fetch_transport_failure(
     url: &str,

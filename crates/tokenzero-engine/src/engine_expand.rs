@@ -364,85 +364,14 @@ impl TokenZeroEngine {
         let mut pending: Vec<(ServeKey, ServedRecord)> = Vec::new();
 
         if let Some(since_ref) = params.since.as_deref().filter(|_| !params.fresh) {
-            if !is_expandable_ref(since_ref) {
-                return failure_response(
-                    "expand",
-                    "invalid_ref",
-                    format!("since must start with tz://, fz://, or gz://, got: {since_ref}"),
-                    None,
-                );
-            }
-            let since_result = crate::perf_profile::_profile_expand_resolve(|| {
-                expand_with_reload_on_miss(&mut store, &self.config.cache_path, since_ref, &params)
-            });
-            if !since_result.found {
-                let code = match since_result.reason.as_str() {
-                    "stale-ref" => "ref_stale",
-                    "dangling-ref" => "dangling_ref",
-                    "invalid-ref" => "invalid_ref",
-                    _ => "expand_failed",
-                };
-                return failure_response(
-                    "expand",
-                    code,
-                    format!("since ref is not recoverable: {since_ref}"),
-                    None,
-                );
-            }
-            let target = match crate::perf_profile::_profile_expand_resolve(|| {
-                resolve_slice(&mut store, &params, &self.config.cache_path)
-            }) {
-                Ok(target) => target,
-                Err(response) => return *response,
-            };
-            self.rehydrate_working_set_expand(&mut store, &params);
-            let (text, diff) = if since_result.content == target.content {
-                (unchanged_since_expand_ack(since_ref), None)
-            } else if let Some(render) = diff::unified_diff(&since_result.content, &target.content)
-            {
-                (
-                    expand_since_diff_text(since_ref, &params.ref_id, &render.text),
-                    Some(DiffTelemetry {
-                        hunks: render.hunks,
-                        plus: render.plus,
-                        minus: render.minus,
-                        base_ref: since_ref.to_string(),
-                    }),
-                )
-            } else {
-                (unchanged_since_expand_ack(since_ref), None)
-            };
-            let tokens = count_tokens(&text);
-            if let Some(telemetry) = diff {
-                summary.note_diff(telemetry, 0);
-            }
-            if self.config.session_dedup {
-                pending.push(self.pending_expand_record(key, &params, &target.content, &mut store));
-            }
-            let mut response = success_response(
-                "expand",
-                Mode::Exact,
-                text,
-                Vec::new(),
-                (
-                    tokens,
-                    tokens,
-                    store.recovery_tokens,
-                    Some(count_tokens(&params.ref_id)),
-                ),
+            return self.expand_since_diff(
+                &params,
+                since_ref,
+                key,
+                &mut store,
+                &mut summary,
+                &mut pending,
             );
-            // since= diffs are terminal recovery output too: adapters must
-            // not re-compact the diff body.
-            response.recovery = Some(tokenzero_core::RecoveryReceipt {
-                terminal: true,
-                do_not_recompact: true,
-                exact_bytes: false, // diff render, not verbatim bytes
-            });
-            response.telemetry = summary.telemetry();
-            crate::perf_profile::_profile_expand_session_apply(|| {
-                self.session_apply(pending, &summary);
-            });
-            return response;
         }
 
         let target = match crate::perf_profile::_profile_expand_resolve(|| {
@@ -528,6 +457,97 @@ impl TokenZeroEngine {
         }
         crate::perf_profile::_profile_expand_session_apply(|| {
             self.session_apply(pending, &summary);
+        });
+        response
+    }
+
+    /// `since=` expand: invalid/miss/diff/unchanged. Exact-bytes + secret-mask
+    /// stay on the parent path.
+    fn expand_since_diff(
+        &self,
+        params: &ExpandParams,
+        since_ref: &str,
+        key: ServeKey,
+        store: &mut RecoveryStore,
+        summary: &mut SessionSummary,
+        pending: &mut Vec<(ServeKey, ServedRecord)>,
+    ) -> ToolResponse {
+        if !is_expandable_ref(since_ref) {
+            return failure_response(
+                "expand",
+                "invalid_ref",
+                format!("since must start with tz://, fz://, or gz://, got: {since_ref}"),
+                None,
+            );
+        }
+        let since_result = crate::perf_profile::_profile_expand_resolve(|| {
+            expand_with_reload_on_miss(store, &self.config.cache_path, since_ref, params)
+        });
+        if !since_result.found {
+            let code = match since_result.reason.as_str() {
+                "stale-ref" => "ref_stale",
+                "dangling-ref" => "dangling_ref",
+                "invalid-ref" => "invalid_ref",
+                _ => "expand_failed",
+            };
+            return failure_response(
+                "expand",
+                code,
+                format!("since ref is not recoverable: {since_ref}"),
+                None,
+            );
+        }
+        let target = match crate::perf_profile::_profile_expand_resolve(|| {
+            resolve_slice(store, params, &self.config.cache_path)
+        }) {
+            Ok(target) => target,
+            Err(response) => return *response,
+        };
+        self.rehydrate_working_set_expand(store, params);
+        let (text, diff) = if since_result.content == target.content {
+            (unchanged_since_expand_ack(since_ref), None)
+        } else if let Some(render) = diff::unified_diff(&since_result.content, &target.content) {
+            (
+                expand_since_diff_text(since_ref, &params.ref_id, &render.text),
+                Some(DiffTelemetry {
+                    hunks: render.hunks,
+                    plus: render.plus,
+                    minus: render.minus,
+                    base_ref: since_ref.to_string(),
+                }),
+            )
+        } else {
+            (unchanged_since_expand_ack(since_ref), None)
+        };
+        let tokens = count_tokens(&text);
+        if let Some(telemetry) = diff {
+            summary.note_diff(telemetry, 0);
+        }
+        if self.config.session_dedup {
+            pending.push(self.pending_expand_record(key, params, &target.content, store));
+        }
+        let mut response = success_response(
+            "expand",
+            Mode::Exact,
+            text,
+            Vec::new(),
+            (
+                tokens,
+                tokens,
+                store.recovery_tokens,
+                Some(count_tokens(&params.ref_id)),
+            ),
+        );
+        // since= diffs are terminal recovery output too: adapters must
+        // not re-compact the diff body.
+        response.recovery = Some(tokenzero_core::RecoveryReceipt {
+            terminal: true,
+            do_not_recompact: true,
+            exact_bytes: false, // diff render, not verbatim bytes
+        });
+        response.telemetry = summary.telemetry();
+        crate::perf_profile::_profile_expand_session_apply(|| {
+            self.session_apply(std::mem::take(pending), summary);
         });
         response
     }
