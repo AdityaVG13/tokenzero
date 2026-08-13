@@ -279,70 +279,8 @@ fn required_u64(
 }
 
 #[cfg(test)]
-mod raw_job_value_tests {
-    use super::*;
-
-    fn internal_result() -> Value {
-        json!({
-            "status": "running",
-            "pid": 42,
-            "exitCode": null,
-            "tail": "ok\n",
-            "tailUtf8Lossless": true,
-            "tailBytes": 3,
-            "log": "/private/session/job.log",
-            "logBytes": 3,
-            "cursor": 3,
-            "version": 2,
-            "changed": true,
-            "unchanged": false,
-            "nextPollMs": 20_000,
-        })
-    }
-
-    #[test]
-    fn shared_job_contract_digest_is_canonical_in_the_tokenzero_graph() {
-        assert_eq!(
-            zero_abi::token_job_contract_digest_v1(),
-            "d9b15de5be5a4c5a2d80ffd409eb04fc796b16b377a67254016fc4f285b7a597"
-        );
-    }
-
-    #[test]
-    fn typed_job_result_strips_private_log_and_rejects_unknown_output() {
-        let value = typed_job_result("tzjob-7", &internal_result()).unwrap();
-        assert!(value.get("log").is_none());
-        let typed: TokenJobPollResultV1 = serde_json::from_value(value).unwrap();
-        typed.validate().unwrap();
-
-        let mut mutant = internal_result();
-        mutant["privateLog"] = json!("/private/session/job.log");
-        let error = typed_job_result("tzjob-7", &mutant).unwrap_err();
-        assert_eq!(error.kind, "invalid_result");
-        assert!(error.message.contains("unknown field"), "{}", error.message);
-    }
-
-    #[test]
-    fn unchanged_poll_becomes_a_successful_typed_empty_delta() {
-        let value = typed_job_result(
-            "tzjob-7",
-            &json!({
-                "status":"running",
-                "pid":42,
-                "unchanged":true,
-                "cursor":9,
-                "version":2,
-                "nextPollMs":20_000,
-            }),
-        )
-        .unwrap();
-        assert_eq!(value["changed"], false);
-        assert_eq!(value["tail"], "");
-        assert_eq!(value["tailUtf8Lossless"], true);
-        assert_eq!(value["tailBytes"], 0);
-        assert_eq!(value["logBytes"], 9);
-    }
-}
+#[path = "../../../tests/engine/inline/domain__raw_job_value_tests.rs"]
+mod raw_job_value_tests;
 
 /// Execute one canonical domain operation without transport framing.
 pub fn execute_domain_op(
@@ -573,73 +511,8 @@ fn attach_channels_gated(
 }
 
 #[cfg(test)]
-mod channel_tests {
-    use super::*;
-
-    #[test]
-    fn channels_gate_off_leaves_response_byte_identical() {
-        let response = ToolResponse::default();
-        let before = serde_json::to_string(&response).unwrap();
-        let after =
-            attach_channels_gated(response, "read", &json!({"path": ["src/main.rs"]}), false);
-        assert!(after.channels.is_none());
-        assert_eq!(serde_json::to_string(&after).unwrap(), before);
-    }
-
-    #[test]
-    fn channels_gate_on_attaches_action_status_and_null_user_message() {
-        let response = attach_channels_gated(
-            ToolResponse::default(),
-            "read",
-            &json!({"path": ["src/main.rs"]}),
-            true,
-        );
-        let channels = response.channels.as_ref().expect("channels attached");
-        assert_eq!(channels.action, "read");
-        assert_eq!(channels.status_line, "Reading src/main.rs");
-        assert_eq!(channels.user_message, None);
-        let serialized = serde_json::to_value(&response).unwrap();
-        let user_message = serialized
-            .get("channels")
-            .and_then(|c| c.get("user_message"));
-        assert!(
-            user_message.is_some(),
-            "nullable user_message key must serialize, not be skipped"
-        );
-        assert_eq!(user_message, Some(&Value::Null));
-    }
-
-    #[test]
-    fn status_lines_are_deterministic_per_op() {
-        let shell = attach_channels_gated(
-            ToolResponse::default(),
-            "shell",
-            &json!({"command": "cargo test -p foo"}),
-            true,
-        );
-        assert_eq!(
-            shell.channels.unwrap().status_line,
-            "Running cargo test -p foo"
-        );
-        let expand = attach_channels_gated(
-            ToolResponse::default(),
-            "expand",
-            &json!({"ref": "tz://blob/ab12"}),
-            true,
-        );
-        assert_eq!(
-            expand.channels.unwrap().status_line,
-            "Expanding tz://blob/ab12"
-        );
-        let glob = attach_channels_gated(
-            ToolResponse::default(),
-            "glob",
-            &json!({"pattern": "**/*.rs"}),
-            true,
-        );
-        assert_eq!(glob.channels.unwrap().status_line, "Globbing **/*.rs");
-    }
-}
+#[path = "../../../tests/engine/inline/domain__channel_tests.rs"]
+mod channel_tests;
 
 /// Deterministic harness-renderable status line derived from the operation
 /// and its arguments; no model prose involved (vz89.11).
@@ -832,62 +705,8 @@ pub fn batch_response(engine: &TokenZeroEngine, args: &Value) -> Result<ToolResp
 }
 
 #[cfg(test)]
-mod batch_truth_tests {
-    use super::*;
-    use crate::EngineConfig;
-
-    #[test]
-    fn direct_domain_batch_is_error_when_any_or_all_sub_operations_fail() {
-        let dir = tempfile::tempdir().unwrap();
-        let engine = TokenZeroEngine::new(EngineConfig::for_root(dir.path()));
-        let mixed = batch_response(
-            &engine,
-            &json!({
-                "ops": [
-                    {"tool": "ingest", "args": {"text": "batch-retained"}},
-                    {"tool": "batch", "args": {"ops": []}}
-                ]
-            }),
-        )
-        .unwrap();
-        assert_eq!(mixed.status, "error");
-        assert_eq!(mixed.error.as_ref().unwrap().code, "batch_operation_failed");
-        assert!(mixed.visible.as_ref().unwrap().text.contains("## 1 ingest"));
-        assert!(mixed.accounting.is_some());
-        assert!(
-            !mixed.refs.is_empty(),
-            "successful sub-op refs must survive"
-        );
-        let telemetry = mixed.telemetry.as_ref().unwrap();
-        assert_eq!(telemetry["ops"], 2);
-        assert_eq!(telemetry["succeeded_ops"], 1);
-        assert_eq!(telemetry["failed_ops"], 1);
-        assert_eq!(telemetry["per_op"][1]["code"], "nested_batch");
-
-        let success = batch_response(
-            &engine,
-            &json!({"ops": [{"tool": "ingest", "args": {"text": "success"}}]}),
-        )
-        .unwrap();
-        assert_eq!(success.status, "ok");
-        assert_eq!(success.telemetry.as_ref().unwrap()["succeeded_ops"], 1);
-        assert_eq!(success.telemetry.as_ref().unwrap()["failed_ops"], 0);
-
-        let all_failed = batch_response(
-            &engine,
-            &json!({
-                "ops": [
-                    {"tool": "batch", "args": {"ops": []}},
-                    {"tool": "not_a_tool", "args": {}}
-                ]
-            }),
-        )
-        .unwrap();
-        assert_eq!(all_failed.status, "error");
-        assert_eq!(all_failed.telemetry.as_ref().unwrap()["failed_ops"], 2);
-        assert_eq!(all_failed.telemetry.as_ref().unwrap()["succeeded_ops"], 0);
-    }
-}
+#[path = "../../../tests/engine/inline/domain__batch_truth_tests.rs"]
+mod batch_truth_tests;
 
 fn inline_response(tool: &str, mode: Mode, text: String, raw_tokens: usize) -> ToolResponse {
     let visible_tokens = count_tokens(&text);

@@ -810,14 +810,5 @@ pub(crate) fn is_abnormal_json(value: &serde_json::Value) -> bool {
 }
 
 #[cfg(test)]
-mod regression_tests {
-    use super::failed_segment;
-
-    #[test]
-    fn later_and_chain_failure_is_attributed_to_its_segment() {
-        assert_eq!(
-            failed_segment("cd . && false", "", "", Some(1)).as_deref(),
-            Some("false")
-        );
-    }
-}
+#[path = "../../../tests/core/inline/shell_parse__regression_tests.rs"]
+mod regression_tests;
