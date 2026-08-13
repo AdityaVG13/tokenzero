@@ -1,7 +1,10 @@
 use std::sync::Mutex;
 
 use tempfile::tempdir;
-use tokenzero_core::{Accounting, ChannelSeparation, ContentType, Mode, RefRecord, ToolResponse};
+use tokenzero_core::{
+    Accounting, ChannelSeparation, ContentType, Diagnostic, Mode, RecoveryReceipt, RefRecord,
+    ToolResponse,
+};
 use tokenzero_recovery::{ExpansionResult, RecoveryStore};
 
 use super::{
@@ -333,6 +336,30 @@ fn text_render_elides_only_exact_small_complete_read_footers() {
     let mut lossy = response("alpha\nBETA\ngamma".into(), 16);
     lossy.telemetry = Some(serde_json::json!({"output_strategy": "seen_set_dedup"}));
     assert!(render_text_with_complete_read(&lossy).contains(blob_ref));
+
+    let mut diagnosed = response("alpha\nBETA\ngamma".into(), 16);
+    diagnosed.diagnostic = Some(Diagnostic {
+        code: "note".into(),
+        message: "review".into(),
+        repair: None,
+    });
+    assert!(render_text_with_complete_read(&diagnosed).contains(blob_ref));
+
+    let mut recovered = response("alpha\nBETA\ngamma".into(), 16);
+    recovered.recovery = Some(RecoveryReceipt {
+        terminal: true,
+        do_not_recompact: true,
+        exact_bytes: true,
+    });
+    assert!(render_text_with_complete_read(&recovered).contains(blob_ref));
+
+    let mut channeled = response("alpha\nBETA\ngamma".into(), 16);
+    channeled.channels = Some(ChannelSeparation {
+        action: "read".into(),
+        status_line: "ok".into(),
+        user_message: None,
+    });
+    assert!(render_text_with_complete_read(&channeled).contains(blob_ref));
 }
 
 #[test]
@@ -397,7 +424,7 @@ fn text_render_elides_only_redundant_warm_search_refs() {
     warned.safety = Some(serde_json::json!({"warning": "review"}));
     assert!(render_text(&warned).contains("search_ref:"));
 
-    let mut mixed = response;
+    let mut mixed = response.clone();
     mixed.refs.push(RefRecord {
         kind: "blob".into(),
         ref_id: "tz://blob/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into(),
@@ -405,6 +432,38 @@ fn text_render_elides_only_redundant_warm_search_refs() {
         live: true,
     });
     assert!(render_text(&mixed).contains("search_ref:"));
+
+    let mut diagnosed = response.clone();
+    diagnosed.diagnostic = Some(Diagnostic {
+        code: "note".into(),
+        message: "review".into(),
+        repair: None,
+    });
+    assert!(render_text(&diagnosed).contains("search_ref:"));
+
+    let mut recovered = response.clone();
+    recovered.recovery = Some(RecoveryReceipt {
+        terminal: true,
+        do_not_recompact: true,
+        exact_bytes: true,
+    });
+    assert!(render_text(&recovered).contains("search_ref:"));
+
+    let mut channeled = response.clone();
+    channeled.channels = Some(ChannelSeparation {
+        action: "grep".into(),
+        status_line: "ok".into(),
+        user_message: None,
+    });
+    assert!(render_text(&channeled).contains("search_ref:"));
+
+    let mut truncated = response.clone();
+    truncated.telemetry.as_mut().unwrap()["truncated_by_visit"] = serde_json::json!(true);
+    assert!(render_text(&truncated).contains("search_ref:"));
+
+    let mut count_mismatch = response;
+    count_mismatch.telemetry.as_mut().unwrap()["matches"] = serde_json::json!(1);
+    assert!(render_text(&count_mismatch).contains("search_ref:"));
 }
 
 #[test]
@@ -454,9 +513,41 @@ fn text_render_quiets_only_verified_exact_edit_success() {
     warned.safety = Some(serde_json::json!({"warning": "review"}));
     assert!(render_text(&warned).contains("undo_ref:"));
 
-    let mut dead_ref = response;
+    let mut dead_ref = response.clone();
     dead_ref.refs[1].live = false;
     assert!(render_text(&dead_ref).contains("undo_ref:"));
+
+    let mut diagnosed = response.clone();
+    diagnosed.diagnostic = Some(Diagnostic {
+        code: "note".into(),
+        message: "review".into(),
+        repair: None,
+    });
+    assert!(render_text(&diagnosed).contains("undo_ref:"));
+
+    let mut recovered = response.clone();
+    recovered.recovery = Some(RecoveryReceipt {
+        terminal: true,
+        do_not_recompact: true,
+        exact_bytes: true,
+    });
+    assert!(render_text(&recovered).contains("undo_ref:"));
+
+    let mut channeled = response.clone();
+    channeled.channels = Some(ChannelSeparation {
+        action: "edit".into(),
+        status_line: "ok".into(),
+        user_message: None,
+    });
+    assert!(render_text(&channeled).contains("undo_ref:"));
+
+    let mut dry_run = response.clone();
+    dry_run.telemetry.as_mut().unwrap()["dry_run"] = serde_json::json!(true);
+    assert!(render_text(&dry_run).contains("undo_ref:"));
+
+    let mut missing_telemetry = response;
+    missing_telemetry.telemetry = None;
+    assert!(render_text(&missing_telemetry).contains("undo_ref:"));
 }
 
 #[test]

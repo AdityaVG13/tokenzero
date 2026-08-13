@@ -1123,61 +1123,60 @@ fn slim_cli_json(response: &ToolResponse) -> String {
 
 const INLINE_EXACT_READ_MAX_BYTES: usize = 256;
 
+/// `ok` for `tool` with no diagnostic / safety / recovery / channels.
+fn clean_ok_envelope(response: &ToolResponse, tool: &str) -> bool {
+    response.status == "ok"
+        && response.tool == tool
+        && response.diagnostic.is_none()
+        && response.safety.is_none()
+        && response.recovery.is_none()
+        && response.channels.is_none()
+}
+
 fn quiet_verified_edit(response: &ToolResponse) -> bool {
-    if response.status != "ok"
-        || response.tool != "edit"
+    if !clean_ok_envelope(response, "edit")
         || response.ack.is_some()
         || response
             .visible
             .as_ref()
             .is_none_or(|visible| !visible.text.is_empty())
-        || response.diagnostic.is_some()
-        || response.safety.is_some()
-        || response.recovery.is_some()
-        || response.channels.is_some()
         || response.refs.is_empty()
         || response.refs.iter().any(|record| !record.live)
         || !response.refs.iter().any(|record| record.kind == "undo")
     {
         return false;
     }
-    let Some(telemetry) = response
+    response
         .telemetry
         .as_ref()
         .and_then(serde_json::Value::as_object)
-    else {
-        return false;
-    };
-    telemetry
-        .get("transport_status")
-        .and_then(serde_json::Value::as_str)
-        == Some("ok")
-        && telemetry
-            .get("exact_refs_available")
-            .and_then(serde_json::Value::as_bool)
-            == Some(true)
-        && telemetry
-            .get("dry_run")
-            .and_then(serde_json::Value::as_bool)
-            == Some(false)
-        && telemetry
-            .get("degraded")
-            .and_then(serde_json::Value::as_bool)
-            == Some(false)
-        && telemetry.get("warning").is_none()
-        && telemetry
-            .get("storage_error")
-            .is_none_or(serde_json::Value::is_null)
+        .is_some_and(|telemetry| {
+            telemetry
+                .get("transport_status")
+                .and_then(serde_json::Value::as_str)
+                == Some("ok")
+                && telemetry
+                    .get("exact_refs_available")
+                    .and_then(serde_json::Value::as_bool)
+                    == Some(true)
+                && telemetry
+                    .get("dry_run")
+                    .and_then(serde_json::Value::as_bool)
+                    == Some(false)
+                && telemetry
+                    .get("degraded")
+                    .and_then(serde_json::Value::as_bool)
+                    == Some(false)
+                && telemetry.get("warning").is_none()
+                && telemetry
+                    .get("storage_error")
+                    .is_none_or(serde_json::Value::is_null)
+        })
 }
 
 fn inline_exact_small_read(response: &ToolResponse, complete_source: bool) -> Option<String> {
     if !complete_source
-        || response.status != "ok"
-        || response.tool != "read"
-        || response.diagnostic.is_some()
-        || response.safety.is_some()
-        || response.recovery.is_some()
-        || response.channels.is_some()
+        || !clean_ok_envelope(response, "read")
         || response
             .telemetry
             .as_ref()
@@ -1187,70 +1186,58 @@ fn inline_exact_small_read(response: &ToolResponse, complete_source: bool) -> Op
     {
         return None;
     }
-    let visible = response.visible.as_ref()?;
-    if visible.text.len() > INLINE_EXACT_READ_MAX_BYTES
-        || visible
-            .text
-            .chars()
-            .any(|ch| ch.is_control() && !matches!(ch, '\n' | '\r' | '\t'))
-    {
-        return None;
-    }
+    let visible = response.visible.as_ref().filter(|visible| {
+        visible.text.len() <= INLINE_EXACT_READ_MAX_BYTES
+            && !visible
+                .text
+                .chars()
+                .any(|ch| ch.is_control() && !matches!(ch, '\n' | '\r' | '\t'))
+    })?;
     let mut blob_refs = response
         .refs
         .iter()
         .filter(|record| record.kind == "blob" && record.live);
-    let blob = blob_refs.next()?;
-    if blob_refs.next().is_some() {
-        return None;
-    }
+    let blob = blob_refs.next().filter(|_| blob_refs.next().is_none())?;
     (visible.text.len() == blob.bytes).then(|| visible.text.clone())
 }
 
 fn redundant_warm_search_refs(response: &ToolResponse) -> bool {
-    if response.status != "ok"
-        || response.tool != "grep"
-        || response.diagnostic.is_some()
-        || response.safety.is_some()
-        || response.recovery.is_some()
-        || response.channels.is_some()
-    {
+    if !clean_ok_envelope(response, "grep") {
         return false;
     }
     let Some(telemetry) = response
         .telemetry
         .as_ref()
         .and_then(serde_json::Value::as_object)
+        .filter(|telemetry| {
+            telemetry
+                .get("output_strategy")
+                .and_then(serde_json::Value::as_str)
+                == Some("seen_set_dedup")
+                && telemetry
+                    .get("transport_status")
+                    .and_then(serde_json::Value::as_str)
+                    == Some("ok")
+                && telemetry
+                    .get("exact_refs_available")
+                    .and_then(serde_json::Value::as_bool)
+                    == Some(true)
+                && telemetry
+                    .get("degraded")
+                    .and_then(serde_json::Value::as_bool)
+                    == Some(false)
+                && telemetry.get("warning").is_none()
+                && telemetry
+                    .get("storage_error")
+                    .is_none_or(serde_json::Value::is_null)
+                && telemetry
+                    .get("truncated_by_visit")
+                    .and_then(serde_json::Value::as_bool)
+                    == Some(false)
+        })
     else {
         return false;
     };
-    if telemetry
-        .get("output_strategy")
-        .and_then(serde_json::Value::as_str)
-        != Some("seen_set_dedup")
-        || telemetry
-            .get("transport_status")
-            .and_then(serde_json::Value::as_str)
-            != Some("ok")
-        || telemetry
-            .get("exact_refs_available")
-            .and_then(serde_json::Value::as_bool)
-            != Some(true)
-        || telemetry
-            .get("degraded")
-            .and_then(serde_json::Value::as_bool)
-            != Some(false)
-        || telemetry.get("warning").is_some()
-        || !telemetry
-            .get("storage_error")
-            .is_none_or(serde_json::Value::is_null)
-        || telemetry
-            .get("truncated_by_visit")
-            .and_then(serde_json::Value::as_bool)
-            != Some(false)
-    {
-        return false;
-    }
     let search_refs = response
         .refs
         .iter()
@@ -1267,14 +1254,13 @@ fn redundant_warm_search_refs(response: &ToolResponse) -> bool {
         .refs
         .iter()
         .filter(|record| record.kind == "blob" && record.live && record.bytes > 0);
-    let Some(blob) = blobs.next() else {
-        return false;
-    };
-    blobs.next().is_none()
-        && response
-            .visible
-            .as_ref()
-            .is_some_and(|visible| visible.text.contains(&blob.ref_id))
+    blobs.next().is_some_and(|blob| {
+        blobs.next().is_none()
+            && response
+                .visible
+                .as_ref()
+                .is_some_and(|visible| visible.text.contains(&blob.ref_id))
+    })
 }
 
 pub fn render_text(response: &ToolResponse) -> String {
