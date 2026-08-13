@@ -411,7 +411,7 @@ fn inline_blob_survives_source_deletion() {
 }
 
 #[test]
-fn ref_index_expands_blob_across_cache_roots() {
+fn ref_index_does_not_expand_blob_from_another_cache_root() {
     let index_dir = tempdir().unwrap();
     with_ref_index_env(index_dir.path(), true, || {
         let dir_a = tempdir().unwrap();
@@ -428,77 +428,55 @@ fn ref_index_expands_blob_across_cache_roots() {
 
         let mut other_root = RecoveryStore::new(Some(cache_b));
         let expanded = other_root.expand(&stored.blob_ref, Some("raw"), None, None, None, None);
-        assert!(expanded.found);
-        assert_eq!(expanded.content, text);
+        assert!(!expanded.found, "{}", expanded.reason);
+        assert!(
+            expanded.reason.contains("shared CAS"),
+            "{}",
+            expanded.reason
+        );
     });
 }
 
 #[test]
-fn ref_index_pay_once_reuses_one_user_cas_object_across_sessions() {
-    let index_dir = tempdir().unwrap();
-    with_ref_index_env(index_dir.path(), true, || {
-        let dir_a = tempdir().unwrap();
-        let dir_b = tempdir().unwrap();
-        let cache_a = dir_a.path().join("cache.json");
-        let cache_b = dir_b.path().join("cache.json");
-        let payload = "pay once across sessions
+fn hub_cas_pay_once_reuses_one_object_across_sessions() {
+    let dir = tempdir().unwrap();
+    let cache_a = dir.path().join("tokenzero").join("session-a.json");
+    let cache_b = dir.path().join("tokenzero").join("session-b.json");
+    fs::create_dir_all(cache_a.parent().unwrap()).unwrap();
+    let payload = "pay once across sessions
 with exact bytes
 ";
 
-        let first = {
-            let mut store = RecoveryStore::new(Some(cache_a.clone()));
-            let stored = store
-                .store_payload(payload, ContentType::Unknown, None, None, None)
-                .unwrap();
-            // Deferred CAS: publish_pending_cas must be called on the same
-            // store instance that tracked the blob via put_blob.
-            store.publish_pending_cas().unwrap();
-            stored
-        };
-        let second = {
-            let mut store = RecoveryStore::new(Some(cache_b.clone()));
-            store
-                .store_payload(payload, ContentType::Unknown, None, None, None)
-                .unwrap()
-        };
+    let first = {
+        let mut store = RecoveryStore::new(Some(cache_a.clone()));
+        assert!(store.shared_cas.is_some());
+        let stored = store
+            .store_payload(payload, ContentType::Unknown, None, None, None)
+            .unwrap();
+        store.publish_pending_cas().unwrap();
+        stored
+    };
+    let second = {
+        let mut store = RecoveryStore::new(Some(cache_b.clone()));
+        assert!(store.shared_cas.is_some());
+        let stored = store
+            .store_payload(payload, ContentType::Unknown, None, None, None)
+            .unwrap();
+        store.publish_pending_cas().unwrap();
+        stored
+    };
 
-        assert_eq!(first.blob_ref, second.blob_ref);
-        let hash = ref_index_id_part(&first.blob_ref).unwrap();
-        let cas = SharedCas::new(index_dir.path().to_path_buf());
-        // CAS is populated by publish_pending_cas above.
-        assert!(
-            cas.contains(hash),
-            "CAS must be populated after publish_pending_cas"
-        );
-        let object_dir = index_dir
-            .path()
-            .join("blobs")
-            .join("sha256")
-            .join(&hash[..2]);
-        assert_eq!(fs::read_dir(object_dir).unwrap().count(), 1);
+    assert_eq!(first.blob_ref, second.blob_ref);
+    let hash = ref_index_id_part(&first.blob_ref).unwrap();
+    let cas = SharedCas::detect_from_cache_path(&cache_a).expect("unified CAS");
+    assert!(cas.contains(hash), "hub CAS must hold the payload once");
+    let object_dir = dir.path().join("blobs").join("sha256").join(&hash[..2]);
+    assert_eq!(fs::read_dir(object_dir).unwrap().count(), 1);
 
-        // Deferred CAS: inline bodies are now always stored in the recovery
-        // state (they are the authoritative durable copy). The old assertion
-        // that blobs.len() == 0 is no longer valid.
-        for cache in [&cache_a, &cache_b] {
-            let snapshot: serde_json::Value =
-                serde_json::from_str(&fs::read_to_string(cache).unwrap()).unwrap();
-            assert!(
-                snapshot["blobs"].as_object().unwrap().len() > 0,
-                "inline body must be present in recovery state for deferred CAS"
-            );
-        }
-
-        let shard = ref_index_shard_path(index_dir.path(), &first.blob_ref);
-        let entries =
-            ref_index_entries_for_ref(&fs::read_to_string(shard).unwrap(), &first.blob_ref);
-        assert_eq!(entries.len(), 2);
-        assert!(matches!(
-            resolve_blob_from_ref_index(&first.blob_ref, &RecoveryConfig::default()),
-            (RefResolve::FoundVerified { content, sha256 }, _)
-                if content == payload && sha256 == hash
-        ));
-    });
+    let mut other = RecoveryStore::new(Some(cache_b));
+    let expanded = other.expand(&first.blob_ref, Some("raw"), None, None, None, None);
+    assert!(expanded.found, "{}", expanded.reason);
+    assert_eq!(expanded.content, payload);
 }
 
 #[test]
@@ -587,7 +565,11 @@ fn ref_index_disabled_preserves_local_only_miss() {
         let mut other = RecoveryStore::new(Some(dir_b.path().join("cache.json")));
         let expanded = other.expand(&stored.blob_ref, Some("raw"), None, None, None, None);
         assert!(!expanded.found);
-        assert!(expanded.reason.contains("per-user ref-index disabled"));
+        assert!(
+            expanded.reason.contains("shared CAS"),
+            "{}",
+            expanded.reason
+        );
     });
 }
 
@@ -605,7 +587,6 @@ fn stale_ref_index_entry_is_pruned_and_reports_tiers() {
                 .unwrap()
         };
         fs::remove_file(&cache_a).unwrap();
-        // Remove the SharedCas blob so expansion can only reach the ref index.
         let _ = fs::remove_dir_all(index_dir.path().join("blobs"));
 
         let mut other = RecoveryStore::new(Some(dir_b.path().join("cache.json")));
@@ -613,11 +594,7 @@ fn stale_ref_index_entry_is_pruned_and_reports_tiers() {
         assert!(!expanded.found);
         assert!(expanded.reason.contains("explicit/env cache"));
         assert!(expanded.reason.contains("current-root store"));
-        assert!(expanded.reason.contains("per-user ref-index"));
-
-        let shard = ref_index_shard_path(index_dir.path(), &stored.blob_ref);
-        let text = fs::read_to_string(shard).unwrap_or_default();
-        assert!(!text.contains(&stored.blob_ref));
+        assert!(expanded.reason.contains("shared CAS"));
     });
 }
 
@@ -835,27 +812,16 @@ fn legacy_ref_index_generation_remains_expandable() {
         let other_dir = tempdir().unwrap();
         let mut other = RecoveryStore::new(Some(other_dir.path().join("other-cache.json")));
         let expanded = other.expand(&stored.blob_ref, Some("raw"), None, None, None, None);
-        assert!(expanded.found, "{}", expanded.reason);
-        assert_eq!(expanded.content, "legacy generation payload\n");
-        let first = ref_index_text(&current)
-            .and_then(|text| newest_ref_index_entries(&text, None).remove(&stored.blob_ref))
-            .unwrap();
-        assert_eq!(first.expansion_count, 8);
-        assert_eq!(
-            first.store_path,
-            source_cache.canonicalize().unwrap().to_string_lossy()
+        assert!(!expanded.found, "{}", expanded.reason);
+        assert!(
+            expanded.reason.contains("shared CAS"),
+            "{}",
+            expanded.reason
         );
-        assert!(first.metadata_migrated);
-        assert!(first.last_expanded_ts.is_some_and(|ts| ts > 1));
-        assert_eq!(fs::read(&legacy).unwrap(), legacy_before);
-
-        let expanded = other.expand(&stored.blob_ref, Some("raw"), None, None, None, None);
-        assert!(expanded.found, "{}", expanded.reason);
-        let second = ref_index_text(&current)
-            .and_then(|text| newest_ref_index_entries(&text, None).remove(&stored.blob_ref))
-            .unwrap();
-        assert_eq!(second.expansion_count, 9);
-        assert!(second.metadata_migrated);
+        assert!(
+            !current.exists(),
+            "a miss must not migrate legacy shards into a body store"
+        );
         assert_eq!(fs::read(&legacy).unwrap(), legacy_before);
     });
 }
@@ -2680,7 +2646,12 @@ fn multibyte_byte_fragment_boundaries_error_from_ref_index() {
             .unwrap();
         let mut other_root =
             RecoveryStore::new(Some(target_dir.path().join("recovery-cache.json")));
-        assert_multibyte_byte_fragment_boundaries(&mut other_root, &stored.blob_ref, "ref-index");
+        let expanded = other_root.expand(&stored.blob_ref, Some("raw"), None, None, None, None);
+        assert!(
+            !expanded.found,
+            "ref-index is not a blob store: {}",
+            expanded.reason
+        );
     });
 }
 

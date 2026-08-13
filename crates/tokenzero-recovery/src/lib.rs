@@ -4,7 +4,7 @@ use fs4::{FileExt, TryLockError};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::env;
 use std::ffi::OsString;
 use std::fs::{self, OpenOptions};
@@ -1132,14 +1132,7 @@ impl RecoveryStore {
         let state = loaded.unwrap_or_else(|| RecoveryState::empty(&config));
         let shared_cas = persistence_path
             .as_deref()
-            .and_then(SharedCas::detect_from_cache_path)
-            .or_else(|| {
-                persistence_path
-                    .is_some()
-                    .then(ref_index_root)
-                    .flatten()
-                    .map(SharedCas::new)
-            });
+            .and_then(SharedCas::detect_from_cache_path);
         Self {
             config,
             persistence_path,
@@ -2253,7 +2246,7 @@ impl RecoveryStore {
     /// Durability check for internal reuse of a ref as a diff/ack base: the
     /// ref must be reachable from PERSISTED state (shared CAS or a fresh read
     /// of the store file), not merely from this process's in-memory state.
-    /// An external prune (cache file and/or ref-index removed) invalidates
+    /// An external prune (cache file and/or CAS object removed) invalidates
     /// memory-only blobs so served output never references a base the agent
     /// cannot expand later (bxqo.1 / F-021). Without a persistence path the
     /// in-memory state is the whole truth (tests, embedded handles).
@@ -2288,10 +2281,6 @@ impl RecoveryStore {
                 .as_ref()
                 .and_then(|cas| ref_index_id_part(bare).map(|hash| cas.contains(hash)))
                 .unwrap_or(false)
-            // Skip reloading this store via ref-index: `self.state` was already
-            // loaded (and journal-applied) in `new`. Reloading the same multi-MB
-            // cache+journal per has_ref pegs CPU on large session resumes.
-            || blob_reachable_in_ref_index(bare, &self.config, self.persistence_path.as_deref())
     }
 
     pub fn export_status(&self) -> serde_json::Value {
@@ -2654,12 +2643,7 @@ impl RecoveryStore {
     }
 
     fn resolve_ref_with_index(&self, kind: &str, bare: &str) -> (RefResolve, Option<PathBuf>) {
-        match self.resolve_ref(kind, bare) {
-            RefResolve::NotFound if kind == "blob" => {
-                resolve_blob_from_ref_index(bare, &self.config)
-            }
-            other => (other, None),
-        }
+        (self.resolve_ref(kind, bare), None)
     }
 
     fn file_ref_is_stale(&self, bare: &str) -> bool {
@@ -3020,11 +3004,8 @@ fn select_content<'a>(
     content
 }
 fn ref_not_found_reason(kind: &str) -> String {
-    if kind == "blob" && ref_index_enabled() {
-        "ref-not-found; tiers tried: explicit/env cache, current-root store, per-user ref-index"
-            .to_string()
-    } else if kind == "blob" {
-        "ref-not-found; tiers tried: explicit/env cache, current-root store (per-user ref-index disabled)".to_string()
+    if kind == "blob" {
+        "ref-not-found; tiers tried: explicit/env cache, current-root store, shared CAS".to_string()
     } else {
         "ref-not-found; tiers tried: explicit/env cache, current-root store".to_string()
     }
@@ -3171,8 +3152,8 @@ std::thread_local! {
 }
 static REF_INDEX_DISABLED_OVERRIDE: OnceLock<std::sync::atomic::AtomicBool> = OnceLock::new();
 
-/// Test-only hook: disable the per-user ref-index/shared-CAS fallback entirely
-/// so stores exercise the local snapshot path regardless of ambient state.
+/// Test-only hook: disable the per-user ref-index (stats/pointer log) so
+/// stores do not write HOME shards regardless of ambient state.
 #[doc(hidden)]
 pub fn set_ref_index_disabled_override(disabled: bool) {
     REF_INDEX_DISABLED_OVERRIDE
@@ -3385,23 +3366,6 @@ fn compact_ref_index_shard(shard: &Path) -> Result<(), RecoveryError> {
     write_ref_index_entries(shard, newest_ref_index_entries(&text, None).values())
 }
 
-fn prune_ref_index_stale_entries(ref_id: &str, stale: &HashSet<String>) {
-    if stale.is_empty() {
-        return;
-    }
-    let Some(root) = ref_index_root() else { return };
-    let Some((shard, _lock)) = locked_ref_index_shard(&root, ref_id) else {
-        return;
-    };
-    let Some(text) = ref_index_text(&shard) else {
-        return;
-    };
-    let entries: Vec<_> = parsed_ref_index_entries(&text)
-        .filter(|entry| entry.ref_id != ref_id || !stale.contains(&entry.store_path))
-        .collect();
-    let _ = write_ref_index_entries(&shard, &entries);
-}
-
 fn newest_ref_index_store_path(shard: &Path, ref_id: &str) -> Option<String> {
     parsed_ref_index_entries(&ref_index_text(shard)?)
         .filter(|entry| entry.ref_id == ref_id)
@@ -3522,104 +3486,6 @@ fn ref_index_blob_entries(ref_id: &str) -> Option<(PathBuf, Vec<RefIndexEntry>)>
     let mut entries: Vec<_> = by_store.into_values().collect();
     entries.sort_by_key(|entry| std::cmp::Reverse(entry.ts));
     Some((root, entries))
-}
-
-fn blob_reachable_in_ref_index(
-    ref_id: &str,
-    config: &RecoveryConfig,
-    skip_store: Option<&Path>,
-) -> bool {
-    let Some((root, entries)) = ref_index_blob_entries(ref_id) else {
-        return false;
-    };
-    if entries.is_empty() {
-        return false;
-    }
-    if let Some(hash) = ref_index_id_part(ref_id)
-        && SharedCas::new(root).contains(hash)
-    {
-        return true;
-    }
-    // One load_state per unique sibling store path for this lookup. Without
-    // memoization, duplicate ref-index rows re-parse the same journal.
-    let mut loaded: HashMap<PathBuf, bool> = HashMap::new();
-    entries.iter().any(|entry| {
-        let store_path = PathBuf::from(&entry.store_path);
-        if skip_store.is_some_and(|skip| skip == store_path.as_path()) {
-            return false;
-        }
-        *loaded.entry(store_path.clone()).or_insert_with(|| {
-            store_path.is_file()
-                && load_state(&store_path, config)
-                    .ok()
-                    .flatten()
-                    .is_some_and(|state| state.blobs.contains_key(ref_id))
-        })
-    })
-}
-
-fn resolve_blob_from_ref_index(
-    ref_id: &str,
-    config: &RecoveryConfig,
-) -> (RefResolve, Option<PathBuf>) {
-    let Some((root, entries)) = ref_index_blob_entries(ref_id) else {
-        return (RefResolve::NotFound, None);
-    };
-    let indexed_store_path = entries
-        .iter()
-        .map(|entry| PathBuf::from(&entry.store_path))
-        .find(|path| path.is_file());
-    if !entries.is_empty()
-        && let Some(hash) = ref_index_id_part(ref_id)
-    {
-        match shared_cas_utf8(&SharedCas::new(root), hash) {
-            Ok(content) => {
-                return (
-                    RefResolve::FoundVerified {
-                        content,
-                        sha256: hash.to_string(),
-                    },
-                    indexed_store_path,
-                );
-            }
-            Err(None) | Err(Some(SharedCasError::Corruption)) => {
-                return (RefResolve::DecodeFailed, indexed_store_path);
-            }
-            Err(_) => {}
-        }
-    }
-    let mut stale = HashSet::new();
-    let mut loaded: HashMap<PathBuf, Option<RecoveryState>> = HashMap::new();
-    for entry in entries {
-        let store_path = PathBuf::from(&entry.store_path);
-        if !store_path.is_file() {
-            stale.insert(entry.store_path);
-            continue;
-        }
-        let state = loaded
-            .entry(store_path.clone())
-            .or_insert_with(|| load_state(&store_path, config).ok().flatten());
-        let resolved = state
-            .as_ref()
-            .and_then(|state| state.blobs.get(ref_id).cloned())
-            .map(|value| resolve_blob_value(Some(&store_path), ref_id, &value));
-        match resolved {
-            Some(
-                result @ (RefResolve::Found(_)
-                | RefResolve::FoundVerified { .. }
-                | RefResolve::DecodeFailed),
-            ) => {
-                prune_ref_index_stale_entries(ref_id, &stale);
-                return (result, Some(store_path));
-            }
-            Some(RefResolve::Stale) => return (RefResolve::Stale, Some(store_path)),
-            Some(RefResolve::NotFound) | None => {
-                stale.insert(entry.store_path);
-            }
-        }
-    }
-    prune_ref_index_stale_entries(ref_id, &stale);
-    (RefResolve::NotFound, None)
 }
 
 fn record_ref_index_expanded(store_path: &Path, ref_id: &str, fallback: ContentClass) {

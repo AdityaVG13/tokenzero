@@ -625,11 +625,7 @@ fn cli_expand_not_found_names_all_lookup_tiers() {
     let json = parse_json_stdout(&output);
     fields!(json;"/error/code" =>"ref_not_found");
     let message = json["error"]["message"].as_str().unwrap();
-    for needle in [
-        "explicit/env cache",
-        "current-root store",
-        "per-user ref-index",
-    ] {
+    for needle in ["explicit/env cache", "current-root store", "shared CAS"] {
         assert!(message.contains(needle), "{message}");
     }
 }
