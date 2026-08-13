@@ -1,6 +1,10 @@
 use super::*;
 use tempfile::tempdir;
 
+fn guard_observation_counts(view: &ContextView) -> (usize, usize) {
+    view.prefix_guard.borrow().observation_counts()
+}
+
 fn payload(turn: u64) -> String {
     format!("turn-{turn} ") + &"payload ".repeat(48)
 }
@@ -95,10 +99,10 @@ fn production_projection_runs_through_prefix_guard() {
 
     let projection = view.reproject_at_cache_breakpoint(None);
     assert!(projection.rendered.contains("real renderer evidence"));
-    assert_eq!(view.guard_observation_counts(), (1, 1));
+    assert_eq!(guard_observation_counts(&view), (1, 1));
     let replay = view.project(None);
     assert_eq!(projection.rendered, replay.rendered);
-    assert_eq!(view.guard_observation_counts(), (2, 1));
+    assert_eq!(guard_observation_counts(&view), (2, 1));
 }
 
 #[test]

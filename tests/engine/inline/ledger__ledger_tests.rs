@@ -24,6 +24,47 @@ fn buffered_io(writer: &LedgerWriter) -> Arc<LedgerIo> {
     Arc::clone(io)
 }
 
+fn append_record(path: &Path, record: &LedgerRecord, max_bytes: u64) -> io::Result<()> {
+    let mut line = serde_json::to_vec(record).map_err(io::Error::other)?;
+    line.push(b'\n');
+    let line_bytes = u64::try_from(line.len()).unwrap_or(u64::MAX);
+    if line_bytes > max_bytes {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "ledger record exceeds rotation limit",
+        ));
+    }
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let observed_len = fs::metadata(path)
+        .map(|metadata| metadata.len())
+        .unwrap_or(0);
+    if observed_len > 0 && observed_len.saturating_add(line_bytes) > max_bytes {
+        let lock_path = PathBuf::from(format!("{}.rotation.lock", path.display()));
+        let rotation_lock = OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(lock_path)?;
+        FileExt::lock(&rotation_lock)?;
+        let locked_len = fs::metadata(path)
+            .map(|metadata| metadata.len())
+            .unwrap_or(0);
+        if locked_len == observed_len
+            && locked_len > 0
+            && locked_len.saturating_add(line_bytes) > max_bytes
+        {
+            rotate_ledger(path, max_bytes)?;
+        }
+        let _ = FileExt::unlock(&rotation_lock);
+    }
+    let mut file = OpenOptions::new().create(true).append(true).open(path)?;
+    file.write_all(&line)?;
+    enforce_ledger_total_bytes(path, max_bytes)
+}
+
 #[test]
 fn missing_open_ledger_file_is_a_typed_io_error() {
     let mut open_file = None;

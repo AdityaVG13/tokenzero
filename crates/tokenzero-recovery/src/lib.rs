@@ -86,30 +86,14 @@ pub use store_hygiene::{
 };
 
 #[cfg(test)]
+#[path = "../../../tests/recovery/inline/lib__test_hooks.rs"]
+mod test_hooks;
+#[cfg(test)]
+use test_hooks::*;
+
+#[cfg(test)]
 #[path = "../../../tests/recovery/unit/store.rs"]
 mod tests;
-
-#[cfg(test)]
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum DurableCommitFailPoint {
-    BeforePersist,
-    BeforeFileSync,
-    BeforeDirectorySync,
-}
-
-#[cfg(test)]
-thread_local! {
-    static DURABLE_COMMIT_FAIL_POINT: std::cell::Cell<Option<DurableCommitFailPoint>> =
-        const { std::cell::Cell::new(None) };
-}
-
-#[cfg(test)]
-fn fail_durable_commit_at(point: DurableCommitFailPoint) -> Result<(), RecoveryError> {
-    if DURABLE_COMMIT_FAIL_POINT.with(|configured| configured.get() == Some(point)) {
-        return Err(io::Error::other("durable commit fault injected").into());
-    }
-    Ok(())
-}
 
 const LOCK_RETRIES: usize = 240;
 const MAX_SHELL_OUTCOMES: usize = 256;
@@ -855,22 +839,6 @@ struct RefIndexEntry {
 
 fn is_zero_u64(value: &u64) -> bool {
     *value == 0
-}
-
-#[cfg(test)]
-thread_local! {
-    static REF_INDEX_TEST_OVERRIDE: std::cell::RefCell<Option<(bool, PathBuf)>> =
-        const { std::cell::RefCell::new(None) };
-}
-
-#[cfg(test)]
-fn set_ref_index_test_override(value: Option<(bool, PathBuf)>) -> Option<(bool, PathBuf)> {
-    REF_INDEX_TEST_OVERRIDE.with(|slot| std::mem::replace(&mut *slot.borrow_mut(), value))
-}
-
-#[cfg(test)]
-fn ref_index_test_override() -> Option<(bool, PathBuf)> {
-    REF_INDEX_TEST_OVERRIDE.with(|slot| slot.borrow().clone())
 }
 
 const fn initial_ordinal_generation() -> u64 {

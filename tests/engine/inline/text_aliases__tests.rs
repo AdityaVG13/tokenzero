@@ -3,6 +3,13 @@ use tokenzero_recovery::RecoveryStore;
 
 use super::*;
 
+fn alias_repeated_paths_and_symbols(store: &mut RecoveryStore, text: &str) -> String {
+    match alias_repeated_paths_and_symbols_if_changed(store, text) {
+        Some(rewritten) => rewritten,
+        None => text.to_string(),
+    }
+}
+
 #[test]
 fn path_heavy_fixture_reduces_ta_and_all_forms_expand_identical_bytes() {
     let corpus = include_str!("../../../tests/engine/fixtures/path_heavy_aliases.txt");

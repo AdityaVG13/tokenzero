@@ -254,11 +254,6 @@ impl ContextView {
             cache_breakpoint,
         }
     }
-
-    #[cfg(test)]
-    fn guard_observation_counts(&self) -> (usize, usize) {
-        self.prefix_guard.borrow().observation_counts()
-    }
 }
 
 fn render_record(record: &ContextRecord) -> String {

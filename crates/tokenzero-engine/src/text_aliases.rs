@@ -80,18 +80,6 @@ fn candidates(text: &str) -> Vec<(&str, Vec<(usize, usize)>)> {
     repeated
 }
 
-/// Replace repeated path and symbol atoms with dense session ordinals when the
-/// same token gauge used for refs proves that the visible form is smaller.
-/// Each ordinal and its content-addressed short/full forms resolve through the
-/// RecoveryStore alias table to byte-identical payloads.
-#[cfg(test)]
-pub fn alias_repeated_paths_and_symbols(store: &mut RecoveryStore, text: &str) -> String {
-    match alias_repeated_paths_and_symbols_if_changed(store, text) {
-        Some(rewritten) => rewritten,
-        None => text.to_string(),
-    }
-}
-
 /// True when `text` contains at least one repeated path/symbol atom worth
 /// aliasing. This is a pure scan: it opens no store and mints no ordinal, so
 /// callers can skip the whole aliasing pipeline on the common no-candidate
