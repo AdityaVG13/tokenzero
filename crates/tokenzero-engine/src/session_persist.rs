@@ -422,21 +422,11 @@ fn ensure_private_dir(path: &Path) -> std::io::Result<()> {
 }
 
 fn atomic_write_json(path: &Path, body: &str) -> std::io::Result<()> {
-    let tmp = path.with_extension(format!("tmp-{}", std::process::id()));
-    let mut options = OpenOptions::new();
-    options.write(true).create(true).truncate(true);
+    zero_store::atomic_write_file(path, body.as_bytes())?;
     #[cfg(unix)]
     {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.mode(0o600);
-    }
-    let mut tmp_file = options.open(&tmp)?;
-    tmp_file.write_all(body.as_bytes())?;
-    tmp_file.flush()?;
-    drop(tmp_file);
-    if let Err(err) = fs::rename(&tmp, path) {
-        let _ = fs::remove_file(&tmp);
-        return Err(err);
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(path, fs::Permissions::from_mode(0o600))?;
     }
     Ok(())
 }

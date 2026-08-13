@@ -19,8 +19,8 @@ rustix.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
-tempfile.workspace = true
 tokenzero-core = { path = "../tokenzero-core", version = "1.0.2" }
+zero-store.workspace = true
 
 [dev-dependencies]
 proptest.workspace = true

@@ -7,12 +7,9 @@ use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
 use std::fs;
-use std::io::{
-    BufRead, BufReader, BufWriter, Error as IoError, ErrorKind, Result as IoResult, Write,
-};
+use std::io::{BufRead, BufReader, Error as IoError, ErrorKind, Result as IoResult, Write};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
-use tempfile::NamedTempFile;
 use tokenzero_core::{PULSE_SCHEMA_VERSION, savings_ratio};
 
 mod eprocess;
@@ -815,29 +812,13 @@ fn meta_matches_scan(meta: &PulseSyncMeta, scan: &JsonlScan) -> bool {
         && meta.skipped_lines == scan.skipped_lines
 }
 
-fn atomic_write_with<T>(
-    path: &Path,
-    write: impl FnOnce(&mut BufWriter<fs::File>) -> IoResult<T>,
-) -> IoResult<T> {
-    let file = NamedTempFile::new_in(path.parent().unwrap_or_else(|| Path::new(".")))?;
-    let mut writer = BufWriter::new(file.reopen()?);
-    let result = write(&mut writer)?;
-    writer.flush()?;
-    writer.get_ref().sync_all()?;
-    drop(writer);
-    file.persist(path)
-        .map_err(|err| IoError::new(err.error.kind(), err.error))?;
-    sync_parent(path)?;
-    Ok(result)
-}
-
 fn ensure_parent(path: &Path) -> IoResult<()> {
     path.parent().map_or(Ok(()), fs::create_dir_all)
 }
 
 fn atomic_write(path: &Path, bytes: &[u8]) -> IoResult<()> {
     ensure_parent(path)?;
-    atomic_write_with(path, |writer| writer.write_all(bytes))
+    zero_store::atomic_write_file(path, bytes)
 }
 
 fn pulse_event_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<PulseEvent> {
@@ -872,13 +853,12 @@ fn atomic_export_sqlite_jsonl(sqlite_path: &Path, output: &Path) -> IoResult<()>
             "SELECT {EVENT_SQL_COLUMNS} FROM events ORDER BY line_no ASC"
         ))
         .into_io()?;
-    atomic_write_with(output, |writer| {
-        for row in stmt.query_map([], pulse_event_from_row).into_io()? {
-            serde_json::to_writer(&mut *writer, &row.into_io()?).into_io()?;
-            writer.write_all(b"\n")?;
-        }
-        Ok(())
-    })
+    let mut buf = Vec::new();
+    for row in stmt.query_map([], pulse_event_from_row).into_io()? {
+        serde_json::to_writer(&mut buf, &row.into_io()?).into_io()?;
+        buf.extend_from_slice(b"\n");
+    }
+    zero_store::atomic_write_file(output, &buf)
 }
 
 pub fn atomic_import_valid_jsonl(
@@ -887,24 +867,24 @@ pub fn atomic_import_valid_jsonl(
     expected_scan: &JsonlScan,
 ) -> IoResult<()> {
     ensure_parent(output)?;
-    atomic_write_with(output, |writer| {
-        let copied_scan = scan_reader(
-            BufReader::new(fs::File::open(input)?),
-            |line, _, corrupt| {
-                if corrupt {
-                    reject!(InvalidData, "import source contains corrupt JSONL line(s)");
-                }
-                writer.write_all(line)
-            },
-        )?;
-        if &copied_scan != expected_scan {
-            reject!(
-                InvalidInput,
-                "import source changed while it was being copied"
-            );
-        }
-        Ok(())
-    })
+    let mut buf = Vec::new();
+    let copied_scan = scan_reader(
+        BufReader::new(fs::File::open(input)?),
+        |line, _, corrupt| {
+            if corrupt {
+                reject!(InvalidData, "import source contains corrupt JSONL line(s)");
+            }
+            buf.extend_from_slice(line);
+            Ok(())
+        },
+    )?;
+    if &copied_scan != expected_scan {
+        reject!(
+            InvalidInput,
+            "import source changed while it was being copied"
+        );
+    }
+    zero_store::atomic_write_file(output, &buf)
 }
 
 fn sync_parent(path: &Path) -> IoResult<()> {
@@ -1456,5 +1436,29 @@ impl SessionLedgerReport {
             out.push('\n');
         }
         out
+    }
+}
+
+#[cfg(test)]
+mod hub_atomic_write {
+    use super::*;
+
+    #[test]
+    fn write_sidecar_meta_round_trips_through_hub_atomic_write() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("pulse-sync.json");
+        let meta = PulseSyncMeta {
+            schema_version: PULSE_SYNC_SCHEMA_VERSION.to_string(),
+            source_of_truth: PULSE_SOURCE_OF_TRUTH.to_string(),
+            ledger_sha256: "abc".to_string(),
+            event_count: 2,
+            skipped_lines: 0,
+            updated_unix: 1,
+        };
+        write_sidecar_meta(&path, &meta).expect("hub atomic write");
+        let got = read_sidecar_meta(&path).expect("read back");
+        assert_eq!(got.ledger_sha256, "abc");
+        assert_eq!(got.event_count, 2);
+        assert!(path.is_file());
     }
 }

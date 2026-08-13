@@ -7,7 +7,6 @@ use sha2::{Digest, Sha256};
 use std::fs;
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
 use tokenzero_core::count_tokens;
 
 const MANIFEST_VERSION: u32 = 1;
@@ -270,17 +269,7 @@ fn short_digest(bytes: &[u8]) -> String {
 }
 
 fn atomic_write_json<T: Serialize>(path: &Path, value: &T) -> std::io::Result<()> {
-    let parent = path.parent().unwrap_or_else(|| Path::new("."));
-    fs::create_dir_all(parent)?;
-    let nonce = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos();
-    let tmp = path.with_extension(format!("tmp-{}-{nonce}", std::process::id()));
     let body = serde_json::to_vec_pretty(value)
         .map_err(|e| std::io::Error::new(ErrorKind::InvalidData, e))?;
-    fs::write(&tmp, body)?;
-    fs::rename(&tmp, path).inspect_err(|_| {
-        let _ = fs::remove_file(&tmp);
-    })
+    zero_store::atomic_write_file(path, &body)
 }

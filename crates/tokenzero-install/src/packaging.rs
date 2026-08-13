@@ -298,16 +298,7 @@ pub fn write_client_config(prefix: &Path, config: &ClientConfig) -> Result<PathB
 }
 
 fn atomic_write(path: &Path, bytes: &[u8]) -> io::Result<()> {
-    let tmp = path.with_extension(format!(
-        "tmp.{}",
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|d| d.as_nanos())
-            .unwrap_or(0)
-    ));
-    fs::write(&tmp, bytes)?;
-    fs::rename(&tmp, path)?;
-    Ok(())
+    zero_store::atomic_write_file(path, bytes)
 }
 
 /// Install one surface. Replaces prior surface cleanly (binary selection + client config).

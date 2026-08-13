@@ -29,7 +29,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
 use std::fs;
-use std::io::{Error, ErrorKind, Write};
+use std::io::{Error, ErrorKind};
 use std::path::{Path, PathBuf};
 #[cfg(windows)]
 use std::process::Command;
@@ -745,33 +745,15 @@ fn restrict_tokenzero_dir(path: &Path) {
     }
 }
 
-/// Write `content` to `path` atomically: stage it in a sibling temp file in the
-/// same directory, fsync, then rename over the target. A crash or disk-full
-/// leaves the original file intact (or absent) - never a truncated/partial
-/// config. Mirrors the recovery crate's atomic_write_json; the temp is removed
-/// if the rename fails so no `.tmp` debris is left behind.
+/// Write `content` to `path` atomically via hub `atomic_write_file`.
+/// Restrict `.tokenzero` parent mode first; the hub owns temp+fsync+rename.
 fn atomic_write(path: &Path, content: &[u8]) -> std::io::Result<()> {
     let parent = path.parent().filter(|p| !p.as_os_str().is_empty());
     if let Some(parent) = parent {
         fs::create_dir_all(parent)?;
         restrict_tokenzero_dir(parent);
     }
-    let dir = parent.unwrap_or_else(|| Path::new("."));
-    let name = path
-        .file_name()
-        .and_then(|v| v.to_str())
-        .unwrap_or("tokenzero");
-    let tmp = dir.join(format!(".{}.{}.tmp", name, std::process::id()));
-    let mut file = fs::OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(true)
-        .open(&tmp)?;
-    file.write_all(content)?;
-    file.sync_all()?;
-    fs::rename(&tmp, path).inspect_err(|_| {
-        let _ = fs::remove_file(&tmp);
-    })
+    zero_store::atomic_write_file(path, content)
 }
 
 fn latest_manifest(root: &Path) -> Option<PathBuf> {

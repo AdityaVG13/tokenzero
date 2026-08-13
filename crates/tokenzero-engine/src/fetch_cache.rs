@@ -1,6 +1,5 @@
 use std::collections::BTreeMap;
 use std::fs::{self, OpenOptions};
-use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
@@ -77,35 +76,9 @@ pub fn record_fetch(path: &Path, url: &str, blob_ref: &str, bytes: usize) {
     let _ = atomic_write_fetch_index(path, &index);
 }
 
-/// Process-wide counter so concurrent same-PID writers never collide on a
-/// temp-file name (a shared name would let them interleave bytes).
-static FETCH_TMP_COUNTER: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
-
 fn atomic_write_fetch_index(path: &Path, index: &FetchIndex) -> std::io::Result<()> {
-    let parent = path.parent().unwrap_or_else(|| Path::new("."));
-    let nonce = FETCH_TMP_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let tmp = parent.join(format!(
-        ".fetch-cache.json.{}.{nonce}.tmp",
-        std::process::id()
-    ));
     let serialized = serde_json::to_string(index).map_err(std::io::Error::other)?;
-    {
-        let mut options = OpenOptions::new();
-        options.write(true).create_new(true);
-        let mut file = options.open(&tmp)?;
-        if let Err(err) = file
-            .write_all(serialized.as_bytes())
-            .and_then(|()| file.sync_data())
-        {
-            let _ = fs::remove_file(&tmp);
-            return Err(err);
-        }
-    }
-    if let Err(err) = fs::rename(&tmp, path) {
-        let _ = fs::remove_file(&tmp);
-        return Err(err);
-    }
-    Ok(())
+    zero_store::atomic_write_file(path, serialized.as_bytes())
 }
 
 /// RAII exclusive lock over a sibling lock file for the fetch index.
