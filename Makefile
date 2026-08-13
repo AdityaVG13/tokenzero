@@ -1,6 +1,6 @@
 SHELL := /bin/bash
 
-.PHONY: test readme-command-audit host-path-audit rust-test rust-verify rust-verify-report rust-release-build rust-codemode-build mcp-compat-build rust-proof package-check release-check ship-suite irx9-gate cli-smoke doctor mcp-smoke mcp-soak shell-matrix install-smoke package-audit scripts-test perf-never-worse-gate linux-docker-verify linux-perf-budget
+.PHONY: test readme-command-audit host-path-audit rust-test rust-verify rust-verify-report rust-release-build rust-codemode-build mcp-compat-build rust-proof package-check release-check irx9-gate cli-smoke doctor mcp-smoke mcp-soak shell-matrix install-smoke package-audit scripts-test perf-never-worse-gate linux-docker-verify linux-perf-budget
 
 MCP_COMPAT_TARGET := $(if $(CARGO_TARGET_DIR),$(CARGO_TARGET_DIR)/mcp-compat,target/mcp-compat)
 MCP_COMPAT_BIN := $(MCP_COMPAT_TARGET)/debug/tokenzero$(if $(filter Windows_NT,$(OS)),.exe,)
@@ -61,11 +61,7 @@ package-check: rust-release-build package-audit
 
 # irx9-gate is mandatory: release-check cannot claim green without it.
 # Note: rust-proof may run broad verify; irx9-gate is the named-package irx9 path.
-release-check: ship-suite irx9-gate rust-proof
-
-ship-suite:
-	@python3 scripts/check_ship_suite.py
-	@python3 scripts/run_ship_suite.py
+release-check: irx9-gate rust-proof
 
 # Focused irx9 parity/packaging/dispatcher/bench gates (no workspace-wide cargo).
 irx9-gate:

@@ -401,8 +401,6 @@ agent-executable install runbook, and the combined benchmark suite.
 | [docs/command-coverage.md](docs/command-coverage.md) | Command surface coverage |
 | [docs/pulse.md](docs/pulse.md) | Telemetry, sync strategy, and recovery runbook |
 | [docs/racc.md](docs/racc.md) | RACC contract and savings accounting |
-| [docs/radc-non-claims.md](docs/radc-non-claims.md) | Explicit non-claims: what TokenZero does not claim |
-| [formal/cont2/README.md](formal/cont2/README.md) | Optional Cont-2 formal regression (`python3 scripts/radc-check`); not a product gate |
 | [docs/benchmarks.md](docs/benchmarks.md) | Reproducible savings and microbenchmarks |
 | [docs/development.md](docs/development.md) | Build from source, targeted verification, and workspace layout |
 

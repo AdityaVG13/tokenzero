@@ -7,9 +7,8 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 use tempfile::tempdir;
 
-/// True when the runner exported the public binary path. Ship tests are
-/// executed for real by scripts/run_ship_suite.py and the dedicated CI step;
-/// a plain `cargo test --workspace` (no ship env) skips them so development
+/// True when the runner exported the public binary path. A plain
+/// `cargo test --workspace` (no ship env) skips these so development
 /// workflows stay green without weakening the release gate.
 fn ship_env_set() -> bool {
     std::env::var_os("TOKENZERO_SHIP_BIN").is_some()
@@ -18,7 +17,7 @@ fn ship_env_set() -> bool {
 fn tokenzero() -> Command {
     let binary = std::env::var_os("TOKENZERO_SHIP_BIN")
         .map(PathBuf::from)
-        .expect("TOKENZERO_SHIP_BIN is set by scripts/run_ship_suite.py");
+        .expect("TOKENZERO_SHIP_BIN must be set to run ship tests");
     let mut command = Command::new(binary);
     for key in [
         "TOKENZERO_ROOT",

@@ -1,7 +1,0 @@
-# Local reproductions from RUN_ALL.sh / scripts/radc-check --keep
-w5_full_prefix_check
-w5_full_prefix_check.reproduced
-sol_m_demand_grid
-sol_m_demand_grid.reproduced
-*.reproduced
-*.reproduced.out

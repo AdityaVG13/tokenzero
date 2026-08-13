@@ -19,11 +19,10 @@ Release:
 tokenzero --version
 ```
 
-The canonical npm name is `@tokenzero/cli`. The `@tokenzero` scope and package
-are not reserved by this repository record. Registry publication requires an
-authenticated scope check and explicit operator approval; see
-[`docs/package-names.md`](https://github.com/AdityaVG13/tokenzero/blob/main/docs/package-names.md). The unrelated unscoped
-`tokenzero` package is not an installation source for this project.
+The canonical npm name is `@tokenzero/cli`. The unrelated unscoped
+`tokenzero` package is not an installation source for this project. Registry
+publication requires an authenticated scope check and explicit operator
+approval.
 
 On Windows, the wrapper can launch `tokenzero.exe`, `tokenzero.cmd`, or
 `tokenzero.bat` from `PATH`. It avoids npm shim recursion and uses

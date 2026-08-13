@@ -29,8 +29,8 @@ TokenZero today: `tokenzero-core`, `tokenzero-recovery` (authority), `tokenzero-
 
 ## What not to copy
 
-- `Pareto/`, `formal/`, `beads_compliance_audit/`, `ubs_audit/` (research attic; `formal/` is `export-ignore`)
-- Audit dump trees, RADC wave zips, agent-session caches
+- Research dumps (`Pareto/`, audit trees, RADC wave zips, agent-session caches)
+- Planning RFCs, test-classification ledgers, ship-suite runners
 
 ## Deliberate exceptions
 

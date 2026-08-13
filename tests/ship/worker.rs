@@ -18,7 +18,7 @@ fn ship_worker_probe_is_planner_free_and_contract_bound() {
     }
     let binary = std::env::var_os("TOKENZERO_SHIP_WORKER_BIN")
         .map(PathBuf::from)
-        .expect("TOKENZERO_SHIP_WORKER_BIN is set by scripts/run_ship_suite.py");
+        .expect("TOKENZERO_SHIP_WORKER_BIN must be set to run ship-worker tests");
     let output = Command::new(binary)
         .args(["raw-worker", "--handshake"])
         .env("NO_COLOR", "1")

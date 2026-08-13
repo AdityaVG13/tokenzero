@@ -45,5 +45,3 @@ Only full-hash ZeroRef v1 blob refs are portable across compatible shared stores
 ## Compatibility
 
 Clients that require direct MCP calls use `tokenzero-mcp` in classic mode. That package preserves its published tools, aliases, resources, schemas, output behavior, and support policy in [mcp-compat.md](mcp-compat.md). It does not register an engine-local CodeMode surface.
-
-See [gate-c-semantic-retirement.md](gate-c-semantic-retirement.md) for the exact staged deletion and preservation proof.
