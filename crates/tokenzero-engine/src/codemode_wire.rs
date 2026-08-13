@@ -591,34 +591,74 @@ fn structured_error_message(message: &str) -> String {
     rendered
 }
 
+struct ErrorKindRule {
+    kind: &'static str,
+    any_starts_with: &'static [&'static str],
+    any_contains: &'static [&'static str],
+    all_contains: &'static [&'static str],
+}
+
+// First match wins. Policy sits above sandbox so "denied" does not steal those rows.
+const ERROR_KIND_RULES: &[ErrorKindRule] = &[
+    ErrorKindRule {
+        kind: "policy",
+        any_starts_with: &[],
+        any_contains: &["mutating binding denied", "mutation", "edit denied"],
+        all_contains: &[],
+    },
+    ErrorKindRule {
+        kind: "sandbox",
+        any_starts_with: &["sandbox:"],
+        any_contains: &["denied", "quickjs"],
+        all_contains: &[],
+    },
+    ErrorKindRule {
+        kind: "validation",
+        any_starts_with: &[],
+        any_contains: &[
+            "parse error",
+            "invalid json",
+            "empty plan",
+            "missing method",
+            "requires a steps array",
+        ],
+        all_contains: &["missing", "argument"],
+    },
+    ErrorKindRule {
+        kind: "substrate",
+        any_starts_with: &[],
+        any_contains: &[
+            "outside allowed roots",
+            "not found",
+            "no such",
+            "missing target",
+            "missing_target",
+        ],
+        all_contains: &[],
+    },
+];
+
 fn classify_error_kind(message: &str) -> &'static str {
     let lower = message.to_ascii_lowercase();
-    if lower.contains("mutating binding denied")
-        || lower.contains("mutation")
-        || lower.contains("edit denied")
-    {
-        "policy"
-    } else if lower.starts_with("sandbox:") || lower.contains("denied") || lower.contains("quickjs")
-    {
-        "sandbox"
-    } else if lower.contains("parse error")
-        || lower.contains("invalid json")
-        || lower.contains("empty plan")
-        || lower.contains("missing method")
-        || lower.contains("requires a steps array")
-        || lower.contains("missing") && lower.contains("argument")
-    {
-        "validation"
-    } else if lower.contains("outside allowed roots")
-        || lower.contains("not found")
-        || lower.contains("no such")
-        || lower.contains("missing target")
-        || lower.contains("missing_target")
-    {
-        "substrate"
-    } else {
-        "runtime"
+    for rule in ERROR_KIND_RULES {
+        if rule
+            .any_starts_with
+            .iter()
+            .any(|prefix| lower.starts_with(prefix))
+            || rule
+                .any_contains
+                .iter()
+                .any(|needle| lower.contains(needle))
+            || (!rule.all_contains.is_empty()
+                && rule
+                    .all_contains
+                    .iter()
+                    .all(|needle| lower.contains(needle)))
+        {
+            return rule.kind;
+        }
     }
+    "runtime"
 }
 
 #[cfg(test)]

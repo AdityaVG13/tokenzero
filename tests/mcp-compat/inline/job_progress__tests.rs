@@ -68,6 +68,32 @@ fn tz1c5y_client_families_and_capability_paths() {
 }
 
 #[test]
+fn classify_client_maps_contains_prefix_and_unknown() {
+    for (name, family) in [
+        ("Amp", ClientFamily::Amp),
+        ("amp", ClientFamily::Amp),
+        ("amp-cli", ClientFamily::Amp),
+        ("amp desktop", ClientFamily::Amp),
+        ("pi", ClientFamily::Pi),
+        ("pi-agent", ClientFamily::Pi),
+        ("pi local", ClientFamily::Pi),
+        ("claude-code", ClientFamily::ClaudeCode),
+        ("Claude", ClientFamily::ClaudeCode),
+        ("Codex", ClientFamily::Codex),
+        ("grok-code", ClientFamily::Grok),
+        ("OpenCode", ClientFamily::OpenCode),
+        ("opencode-claude", ClientFamily::OpenCode),
+        ("claude-codex", ClientFamily::ClaudeCode),
+        ("ampersand", ClientFamily::Other),
+        ("pineapple", ClientFamily::Other),
+        ("", ClientFamily::Other),
+        ("unknown-client", ClientFamily::Other),
+    ] {
+        assert_eq!(classify_client(name), family, "{name}");
+    }
+}
+
+#[test]
 fn tz1c5y_exactly_one_terminal_and_no_raw_log_flood() {
     for family in [
         ClientFamily::Amp,

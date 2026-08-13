@@ -37,3 +37,43 @@ fn structured_json_error_keeps_punctuation_and_lists() {
         "codemode:error 9 ops=0 unknown surface: framework; hint: choose a supported surface; valid_surfaces: authoring, constructors, ops"
     );
 }
+
+#[test]
+fn classify_error_kind_maps_needles_overlaps_and_unknowns() {
+    let cases = [
+        ("mutating binding denied", "policy"),
+        ("MUTATION refused", "policy"),
+        ("edit denied", "policy"),
+        ("sandbox: timeout", "sandbox"),
+        ("SANDBOX: uppercase prefix", "sandbox"),
+        ("access denied", "sandbox"),
+        ("quickjs boom", "sandbox"),
+        ("parse error at 1", "validation"),
+        ("invalid json", "validation"),
+        ("empty plan", "validation"),
+        ("missing method", "validation"),
+        ("requires a steps array", "validation"),
+        ("missing required argument", "validation"),
+        ("outside allowed roots", "substrate"),
+        ("file not found", "substrate"),
+        ("no such file", "substrate"),
+        ("missing target", "substrate"),
+        ("missing_target", "substrate"),
+        ("something else", "runtime"),
+        ("", "runtime"),
+        ("missing", "runtime"),
+        ("argument", "runtime"),
+        ("mutating binding denied by sandbox", "policy"),
+        ("policy denied", "sandbox"),
+        ("not a plan", "runtime"),
+    ];
+    for (message, kind) in cases {
+        assert_eq!(classify_error_kind(message), kind, "{message}");
+        let result = CodeModeResult::error(message, 0);
+        assert_eq!(
+            result.error.as_ref().map(|error| error.kind.as_str()),
+            Some(kind),
+            "envelope {message}"
+        );
+    }
+}

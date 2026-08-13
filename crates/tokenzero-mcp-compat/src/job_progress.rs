@@ -56,23 +56,31 @@ fn lock_sessions() -> std::sync::MutexGuard<'static, HashMap<String, Session>> {
     SESSIONS.lock().unwrap_or_else(|poison| poison.into_inner())
 }
 
+const CLIENT_CONTAINS: &[(&str, ClientFamily)] = &[
+    ("opencode", ClientFamily::OpenCode),
+    ("claude", ClientFamily::ClaudeCode),
+    ("codex", ClientFamily::Codex),
+    ("grok", ClientFamily::Grok),
+];
+
+const CLIENT_PREFIX: &[(&str, &str, &str, ClientFamily)] = &[
+    ("amp", "amp-", "amp ", ClientFamily::Amp),
+    ("pi", "pi-", "pi ", ClientFamily::Pi),
+];
+
 pub fn classify_client(name: &str) -> ClientFamily {
     let lower = name.to_ascii_lowercase();
-    if lower.contains("opencode") {
-        ClientFamily::OpenCode
-    } else if lower.contains("claude") {
-        ClientFamily::ClaudeCode
-    } else if lower.contains("codex") {
-        ClientFamily::Codex
-    } else if lower.contains("grok") {
-        ClientFamily::Grok
-    } else if lower == "amp" || lower.starts_with("amp-") || lower.starts_with("amp ") {
-        ClientFamily::Amp
-    } else if lower == "pi" || lower.starts_with("pi-") || lower.starts_with("pi ") {
-        ClientFamily::Pi
-    } else {
-        ClientFamily::Other
+    for &(needle, family) in CLIENT_CONTAINS {
+        if lower.contains(needle) {
+            return family;
+        }
     }
+    for &(exact, dash, space, family) in CLIENT_PREFIX {
+        if lower == exact || lower.starts_with(dash) || lower.starts_with(space) {
+            return family;
+        }
+    }
+    ClientFamily::Other
 }
 
 pub fn notify_mode(
