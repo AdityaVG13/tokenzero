@@ -48,15 +48,15 @@ tempfile = "3.27.0"
 thiserror = "2.0.19"
 toml = "1.1.4"
 wait-timeout = "0.2.1"
-zero-abi = { git = "https://github.com/AdityaVG13/zerostack", rev = "8188fb08698a5ed29bff6b339657bdd1933de3cc" }
-zero-gauge = { git = "https://github.com/AdityaVG13/zerostack", rev = "8188fb08698a5ed29bff6b339657bdd1933de3cc" }
-zero-ledger = { git = "https://github.com/AdityaVG13/zerostack", rev = "8188fb08698a5ed29bff6b339657bdd1933de3cc" }
-zero-ref = { git = "https://github.com/AdityaVG13/zerostack", rev = "8188fb08698a5ed29bff6b339657bdd1933de3cc" }
-zero-process = { git = "https://github.com/AdityaVG13/zerostack", rev = "8188fb08698a5ed29bff6b339657bdd1933de3cc" }
-zero-store = { git = "https://github.com/AdityaVG13/zerostack", rev = "8188fb08698a5ed29bff6b339657bdd1933de3cc" }
-zero-testkit = { git = "https://github.com/AdityaVG13/zerostack", rev = "b0978d037613d107fb060152500110cbaceb13e8", default-features = false }
+zero-abi = { git = "https://github.com/AdityaVG13/zerostack", rev = "bd721f7fc4866b24dec0c552da3d96bd8d816fbc" }
+zero-gauge = { git = "https://github.com/AdityaVG13/zerostack", rev = "bd721f7fc4866b24dec0c552da3d96bd8d816fbc" }
+zero-ledger = { git = "https://github.com/AdityaVG13/zerostack", rev = "bd721f7fc4866b24dec0c552da3d96bd8d816fbc" }
+zero-ref = { git = "https://github.com/AdityaVG13/zerostack", rev = "bd721f7fc4866b24dec0c552da3d96bd8d816fbc" }
+zero-process = { git = "https://github.com/AdityaVG13/zerostack", rev = "bd721f7fc4866b24dec0c552da3d96bd8d816fbc" }
+zero-store = { git = "https://github.com/AdityaVG13/zerostack", rev = "bd721f7fc4866b24dec0c552da3d96bd8d816fbc" }
+zero-testkit = { git = "https://github.com/AdityaVG13/zerostack", rev = "bd721f7fc4866b24dec0c552da3d96bd8d816fbc", default-features = false }
 # Hub-owned MCP transport authority (replaces the retired zero-codemode fastmcp carrier).
-zero-mcp = { git = "https://github.com/AdityaVG13/zerostack", rev = "8188fb08698a5ed29bff6b339657bdd1933de3cc", features = ["fastmcp"] }
+zero-mcp = { git = "https://github.com/AdityaVG13/zerostack", rev = "bd721f7fc4866b24dec0c552da3d96bd8d816fbc", features = ["fastmcp"] }
 
 [profile.release-perf]
 inherits = "release"

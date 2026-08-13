@@ -11,7 +11,7 @@
 //! Everything else -- GC record schemas, validation, mark/sweep, dry-run
 //! reports, sweep progress, repair receipts, report pruning, contract
 //! digests -- is delegated to the canonical `zero_store` implementation at the
-//! pinned hub rev `8188fb08698a5ed29bff6b339657bdd1933de3cc`.
+//! pinned hub rev `bd721f7fc4866b24dec0c552da3d96bd8d816fbc`.
 
 use std::fs;
 use std::io;

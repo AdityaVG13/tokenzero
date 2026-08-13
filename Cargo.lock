@@ -2817,7 +2817,7 @@ dependencies = [
  "serde_json",
  "sha2 0.11.0",
  "tiktoken-rs",
- "zero-abi 0.1.0 (git+https://github.com/AdityaVG13/zerostack?rev=8188fb08698a5ed29bff6b339657bdd1933de3cc)",
+ "zero-abi",
  "zero-gauge",
  "zero-ledger",
  "zero-ref",
@@ -2842,7 +2842,7 @@ dependencies = [
  "tokenzero-pulse",
  "tokenzero-recovery",
  "tokenzero-runtime",
- "zero-abi 0.1.0 (git+https://github.com/AdityaVG13/zerostack?rev=8188fb08698a5ed29bff6b339657bdd1933de3cc)",
+ "zero-abi",
  "zero-ledger",
  "zero-process",
  "zero-store",
@@ -2893,7 +2893,7 @@ dependencies = [
  "tokenzero-pulse",
  "tokenzero-recovery",
  "tokenzero-runtime",
- "zero-abi 0.1.0 (git+https://github.com/AdityaVG13/zerostack?rev=8188fb08698a5ed29bff6b339657bdd1933de3cc)",
+ "zero-abi",
  "zero-mcp",
 ]
 
@@ -2965,7 +2965,7 @@ name = "tokenzero-worker"
 version = "1.4.0"
 dependencies = [
  "tokenzero-engine",
- "zero-abi 0.1.0 (git+https://github.com/AdityaVG13/zerostack?rev=8188fb08698a5ed29bff6b339657bdd1933de3cc)",
+ "zero-abi",
 ]
 
 [[package]]
@@ -3586,17 +3586,7 @@ dependencies = [
 [[package]]
 name = "zero-abi"
 version = "0.1.0"
-source = "git+https://github.com/AdityaVG13/zerostack?rev=8188fb08698a5ed29bff6b339657bdd1933de3cc#8188fb08698a5ed29bff6b339657bdd1933de3cc"
-dependencies = [
- "serde",
- "serde_json",
- "sha2 0.11.0",
-]
-
-[[package]]
-name = "zero-abi"
-version = "0.1.0"
-source = "git+https://github.com/AdityaVG13/zerostack?rev=b0978d037613d107fb060152500110cbaceb13e8#b0978d037613d107fb060152500110cbaceb13e8"
+source = "git+https://github.com/AdityaVG13/zerostack?rev=bd721f7fc4866b24dec0c552da3d96bd8d816fbc#bd721f7fc4866b24dec0c552da3d96bd8d816fbc"
 dependencies = [
  "serde",
  "serde_json",
@@ -3606,7 +3596,7 @@ dependencies = [
 [[package]]
 name = "zero-gauge"
 version = "0.1.0"
-source = "git+https://github.com/AdityaVG13/zerostack?rev=8188fb08698a5ed29bff6b339657bdd1933de3cc#8188fb08698a5ed29bff6b339657bdd1933de3cc"
+source = "git+https://github.com/AdityaVG13/zerostack?rev=bd721f7fc4866b24dec0c552da3d96bd8d816fbc#bd721f7fc4866b24dec0c552da3d96bd8d816fbc"
 dependencies = [
  "serde",
  "serde_json",
@@ -3615,28 +3605,28 @@ dependencies = [
 [[package]]
 name = "zero-ledger"
 version = "0.1.0"
-source = "git+https://github.com/AdityaVG13/zerostack?rev=8188fb08698a5ed29bff6b339657bdd1933de3cc#8188fb08698a5ed29bff6b339657bdd1933de3cc"
+source = "git+https://github.com/AdityaVG13/zerostack?rev=bd721f7fc4866b24dec0c552da3d96bd8d816fbc#bd721f7fc4866b24dec0c552da3d96bd8d816fbc"
 dependencies = [
  "serde",
  "serde_json",
- "zero-abi 0.1.0 (git+https://github.com/AdityaVG13/zerostack?rev=8188fb08698a5ed29bff6b339657bdd1933de3cc)",
+ "zero-abi",
 ]
 
 [[package]]
 name = "zero-mcp"
 version = "0.1.0"
-source = "git+https://github.com/AdityaVG13/zerostack?rev=8188fb08698a5ed29bff6b339657bdd1933de3cc#8188fb08698a5ed29bff6b339657bdd1933de3cc"
+source = "git+https://github.com/AdityaVG13/zerostack?rev=bd721f7fc4866b24dec0c552da3d96bd8d816fbc#bd721f7fc4866b24dec0c552da3d96bd8d816fbc"
 dependencies = [
  "fastmcp-rust",
  "serde",
  "serde_json",
- "zero-abi 0.1.0 (git+https://github.com/AdityaVG13/zerostack?rev=8188fb08698a5ed29bff6b339657bdd1933de3cc)",
+ "zero-abi",
 ]
 
 [[package]]
 name = "zero-process"
 version = "0.1.0"
-source = "git+https://github.com/AdityaVG13/zerostack?rev=8188fb08698a5ed29bff6b339657bdd1933de3cc#8188fb08698a5ed29bff6b339657bdd1933de3cc"
+source = "git+https://github.com/AdityaVG13/zerostack?rev=bd721f7fc4866b24dec0c552da3d96bd8d816fbc#bd721f7fc4866b24dec0c552da3d96bd8d816fbc"
 dependencies = [
  "libc",
  "windows-sys",
@@ -3645,7 +3635,7 @@ dependencies = [
 [[package]]
 name = "zero-ref"
 version = "0.1.0"
-source = "git+https://github.com/AdityaVG13/zerostack?rev=8188fb08698a5ed29bff6b339657bdd1933de3cc#8188fb08698a5ed29bff6b339657bdd1933de3cc"
+source = "git+https://github.com/AdityaVG13/zerostack?rev=bd721f7fc4866b24dec0c552da3d96bd8d816fbc#bd721f7fc4866b24dec0c552da3d96bd8d816fbc"
 dependencies = [
  "serde",
  "sha2 0.11.0",
@@ -3654,23 +3644,23 @@ dependencies = [
 [[package]]
 name = "zero-store"
 version = "0.1.0"
-source = "git+https://github.com/AdityaVG13/zerostack?rev=8188fb08698a5ed29bff6b339657bdd1933de3cc#8188fb08698a5ed29bff6b339657bdd1933de3cc"
+source = "git+https://github.com/AdityaVG13/zerostack?rev=bd721f7fc4866b24dec0c552da3d96bd8d816fbc#bd721f7fc4866b24dec0c552da3d96bd8d816fbc"
 dependencies = [
  "serde",
  "serde_json",
  "sha2 0.11.0",
  "thiserror",
- "zero-abi 0.1.0 (git+https://github.com/AdityaVG13/zerostack?rev=8188fb08698a5ed29bff6b339657bdd1933de3cc)",
+ "zero-abi",
  "zero-ref",
 ]
 
 [[package]]
 name = "zero-testkit"
 version = "0.1.0"
-source = "git+https://github.com/AdityaVG13/zerostack?rev=b0978d037613d107fb060152500110cbaceb13e8#b0978d037613d107fb060152500110cbaceb13e8"
+source = "git+https://github.com/AdityaVG13/zerostack?rev=bd721f7fc4866b24dec0c552da3d96bd8d816fbc#bd721f7fc4866b24dec0c552da3d96bd8d816fbc"
 dependencies = [
  "serde",
- "zero-abi 0.1.0 (git+https://github.com/AdityaVG13/zerostack?rev=b0978d037613d107fb060152500110cbaceb13e8)",
+ "zero-abi",
 ]
 
 [[package]]

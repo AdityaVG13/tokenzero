@@ -59,7 +59,7 @@ fn canonical_cli_has_no_raw_worker_entrypoint_or_default_adapter() {
 #[test]
 fn raw_v2_wire_authority_is_only_the_pinned_zero_abi() {
     let root = read("Cargo.toml");
-    assert!(root.contains("rev = \"8188fb08698a5ed29bff6b339657bdd1933de3cc\""));
+    assert!(root.contains("rev = \"bd721f7fc4866b24dec0c552da3d96bd8d816fbc\""));
     let protocol = read("crates/tokenzero-engine/src/raw_worker_v2_protocol.rs");
     assert!(protocol.contains("pub use zero_abi::raw_worker::*;"));
     for forbidden in ["struct ", "enum ", "serde_json", "MAX_FRAME_BYTES:"] {
