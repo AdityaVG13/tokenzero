@@ -2098,6 +2098,18 @@ fn attached_cas_skips_sidecar_and_publishes_large_blobs() {
             .is_some_and(|cas| cas.contains(hash)),
         "large inline must reach zero-store after publish_pending_cas"
     );
+    let snapshot: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&cache).unwrap()).unwrap();
+    let blob_value = snapshot["blobs"][&stored.blob_ref].as_str().unwrap();
+    assert!(
+        blob_value.starts_with('\u{0}'),
+        "successful CAS publish must shrink the snapshot to a marker"
+    );
+    assert!(blob_value.len() < 128, "marker must be tiny: {blob_value}");
+    assert!(
+        !blob_sidecar_dir(&cache).exists(),
+        "shrink must not create a private sidecar"
+    );
 
     drop(store);
     let mut restarted = RecoveryStore::new(Some(cache));

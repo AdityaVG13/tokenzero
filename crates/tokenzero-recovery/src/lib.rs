@@ -1455,16 +1455,13 @@ impl RecoveryStore {
         Ok(())
     }
 
-    /// Best-effort CAS publication of inline blobs after the recovery root is
+    /// Publish pending inline blobs to hub CAS after the recovery root is
     /// durably committed (zerostack-5u7 / tokenzero-cas-fsync-ovn).
     ///
-    /// `put_blob` keeps bodies inline (and, with a hub SharedCas attached,
-    /// never writes `<cache>.blobs/`). This method publishes those inlines
-    /// to zero-store after commit. CAS is a cross-session dedup layer: if it
-    /// is empty or missing an object, expand falls back to the inline body.
-    ///
-    /// Failures are silently ignored because correctness does not depend on CAS
-    /// being populated — the durable recovery root is the authoritative copy.
+    /// `put_blob` keeps bodies inline until this call. Each successful publish
+    /// replaces the inline body with a `\0tzx:v1:` marker and persists so the
+    /// snapshot no longer carries megabytes. A failed publish leaves that
+    /// blob inline (crash authority) and is reported.
     pub fn publish_pending_cas(&mut self) -> Result<(), RecoveryError> {
         let Some(cas) = self.shared_cas.clone() else {
             self.pending_cas_hashes.clear();
@@ -1473,30 +1470,49 @@ impl RecoveryStore {
         let hashes: Vec<String> = std::mem::take(&mut self.pending_cas_hashes)
             .into_iter()
             .collect();
-        for hash in &hashes {
+        let mut failed = 0usize;
+        let mut shrunk = false;
+        for hash in hashes {
             let ref_id = format!("tz://blob/{hash}");
-            // Only publish inline blobs (not externalized sidecar markers).
-            if let Some(BlobEntry::Inline(text)) = self.state.blobs.get(&ref_id)
-                && !text.starts_with(BLOB_MARKER_PREFIX)
-            {
-                let _ = cas.publish(text.as_bytes());
-            }
+            let published_len = match self.state.blobs.get(&ref_id) {
+                Some(BlobEntry::Inline(text)) if !text.starts_with(BLOB_MARKER_PREFIX) => {
+                    match cas.publish(text.as_bytes()) {
+                        Ok(_) => Some(text.len()),
+                        Err(_) => {
+                            failed = failed.saturating_add(1);
+                            None
+                        }
+                    }
+                }
+                _ => None,
+            };
+            let Some(len) = published_len else {
+                continue;
+            };
+            self.state
+                .blobs
+                .insert(ref_id, BlobEntry::Inline(blob_cas_marker(&hash, len)));
+            shrunk = true;
+        }
+        if shrunk && let Some(path) = self.persistence_path.clone() {
+            // persist() can journal-append an empty session delta and leave
+            // the snapshot carrying the old inline bodies. Rewrite the root.
+            let _lock = PersistLock::acquire(recovery_lock_path(&path))?;
+            self.publish_snapshot(&path)?;
+        }
+        if failed > 0 {
+            return Err(io::Error::other(format!(
+                "publish_pending_cas failed for {failed} blob(s)"
+            ))
+            .into());
         }
         Ok(())
     }
 
     /// Non-blocking variant of [`publish_pending_cas`]: extracts the pending
-    /// blob texts and spawns a background thread to publish them to CAS.
-    ///
-    /// The fsync barriers in `SharedCas::publish` (typically 2 per unique blob,
-    /// ~4ms each on macOS F_FULLFSYNC) are moved completely off the response
-    /// critical path. Correctness is unaffected: the durable recovery root is
-    /// the authoritative copy, and the expand path falls back to inline when
-    /// CAS returns `NotFound`.
-    ///
-    /// If the process crashes before the thread finishes, some CAS objects may
-    /// not be published. Cross-session consumers fall back to inline bodies or
-    /// ref-index resolution. This is the same failure mode as a CAS cache miss.
+    /// blob texts and publishes them on a background thread. Does not shrink
+    /// the snapshot (the store is not `Send`); only the sync path replaces
+    /// published inlines with markers.
     pub fn publish_pending_cas_background(&mut self) {
         let Some(cas) = self.shared_cas.clone() else {
             self.pending_cas_hashes.clear();
@@ -3853,7 +3869,11 @@ fn externalize_blob_value(cache_path: &Path, text: &str, hash: &str) -> Option<S
         }
         let _ = tolerate_unsupported_sync(fs::File::open(&dir).and_then(|file| file.sync_all()));
     }
-    Some(format!("{BLOB_MARKER_PREFIX}{hash}:{}:", text.len()))
+    Some(blob_cas_marker(hash, text.len()))
+}
+
+fn blob_cas_marker(hash: &str, len: usize) -> String {
+    format!("{BLOB_MARKER_PREFIX}{hash}:{len}:")
 }
 
 pub(crate) fn parse_blob_marker(value: &str) -> Option<(&str, usize)> {
@@ -4049,6 +4069,26 @@ fn resolve_blob_value(cache_path: Option<&Path>, ref_id: &str, value: &BlobEntry
             let Some((hash, expected_len)) = parse_blob_marker(value) else {
                 return RefResolve::Found(value.clone());
             };
+            if let Some(cache_path) = cache_path
+                && let Some(cas) = SharedCas::detect_from_cache_path(cache_path)
+            {
+                match shared_cas_utf8(&cas, hash) {
+                    Ok(text) if text.len() == expected_len => {
+                        return resolve_found_verified(
+                            true,
+                            text,
+                            hash.to_string(),
+                            RefResolve::DecodeFailed,
+                        );
+                    }
+                    Ok(_) | Err(Some(SharedCasError::Corruption)) => {
+                        return RefResolve::DecodeFailed;
+                    }
+                    Err(None) => return RefResolve::DecodeFailed,
+                    Err(Some(SharedCasError::NotFound)) => {}
+                    Err(Some(_)) => return RefResolve::DecodeFailed,
+                }
+            }
             let Some(cache_path) = cache_path else {
                 return RefResolve::DecodeFailed;
             };
