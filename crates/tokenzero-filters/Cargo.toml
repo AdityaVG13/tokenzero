@@ -16,7 +16,6 @@ autotests = false
 regex.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-tokenzero-core = { path = "../tokenzero-core", version = "1.0.2" }
 
 # Relocated standalone tests live under the workspace tests/ tree.
 [[test]]

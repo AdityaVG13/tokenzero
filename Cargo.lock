@@ -2804,7 +2804,6 @@ dependencies = [
  "tempfile",
  "tokenzero-core",
  "tokenzero-engine",
- "tokenzero-filters",
  "tokenzero-install",
  "tokenzero-mcp-compat",
  "tokenzero-pulse",
@@ -2862,7 +2861,6 @@ dependencies = [
  "regex",
  "serde",
  "serde_json",
- "tokenzero-core",
 ]
 
 [[package]]
@@ -2897,10 +2895,8 @@ dependencies = [
  "thiserror",
  "tokenzero-core",
  "tokenzero-engine",
- "tokenzero-filters",
  "tokenzero-pulse",
  "tokenzero-recovery",
- "tokenzero-runtime",
  "zero-abi",
  "zero-mcp",
 ]
