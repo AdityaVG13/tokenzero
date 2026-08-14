@@ -2047,7 +2047,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b570b25f7617e43d59005d0990ccb79e950a423952cea19671b7a876da390adf"
 dependencies = [
  "anyhow",
- "itertools 0.14.0",
+ "itertools 0.13.0",
  "proc-macro2",
  "quote",
  "syn 2.0.117",
@@ -2675,7 +2675,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
 dependencies = [
  "fastrand",
- "getrandom 0.4.2",
+ "getrandom 0.3.4",
  "once_cell",
  "rustix",
  "windows-sys",
@@ -3590,7 +3590,7 @@ dependencies = [
 [[package]]
 name = "zero-abi"
 version = "0.1.0"
-source = "git+https://github.com/AdityaVG13/zerostack?rev=bd721f7fc4866b24dec0c552da3d96bd8d816fbc#bd721f7fc4866b24dec0c552da3d96bd8d816fbc"
+source = "git+https://github.com/AdityaVG13/zerostack?rev=be8867ee99a14fc78a75db220358096bf3874c76#be8867ee99a14fc78a75db220358096bf3874c76"
 dependencies = [
  "serde",
  "serde_json",
@@ -3600,7 +3600,7 @@ dependencies = [
 [[package]]
 name = "zero-gauge"
 version = "0.1.0"
-source = "git+https://github.com/AdityaVG13/zerostack?rev=bd721f7fc4866b24dec0c552da3d96bd8d816fbc#bd721f7fc4866b24dec0c552da3d96bd8d816fbc"
+source = "git+https://github.com/AdityaVG13/zerostack?rev=be8867ee99a14fc78a75db220358096bf3874c76#be8867ee99a14fc78a75db220358096bf3874c76"
 dependencies = [
  "serde",
  "serde_json",
@@ -3609,7 +3609,7 @@ dependencies = [
 [[package]]
 name = "zero-ledger"
 version = "0.1.0"
-source = "git+https://github.com/AdityaVG13/zerostack?rev=bd721f7fc4866b24dec0c552da3d96bd8d816fbc#bd721f7fc4866b24dec0c552da3d96bd8d816fbc"
+source = "git+https://github.com/AdityaVG13/zerostack?rev=be8867ee99a14fc78a75db220358096bf3874c76#be8867ee99a14fc78a75db220358096bf3874c76"
 dependencies = [
  "serde",
  "serde_json",
@@ -3619,7 +3619,7 @@ dependencies = [
 [[package]]
 name = "zero-mcp"
 version = "0.1.0"
-source = "git+https://github.com/AdityaVG13/zerostack?rev=bd721f7fc4866b24dec0c552da3d96bd8d816fbc#bd721f7fc4866b24dec0c552da3d96bd8d816fbc"
+source = "git+https://github.com/AdityaVG13/zerostack?rev=be8867ee99a14fc78a75db220358096bf3874c76#be8867ee99a14fc78a75db220358096bf3874c76"
 dependencies = [
  "fastmcp-rust",
  "serde",
@@ -3630,7 +3630,7 @@ dependencies = [
 [[package]]
 name = "zero-process"
 version = "0.1.0"
-source = "git+https://github.com/AdityaVG13/zerostack?rev=bd721f7fc4866b24dec0c552da3d96bd8d816fbc#bd721f7fc4866b24dec0c552da3d96bd8d816fbc"
+source = "git+https://github.com/AdityaVG13/zerostack?rev=be8867ee99a14fc78a75db220358096bf3874c76#be8867ee99a14fc78a75db220358096bf3874c76"
 dependencies = [
  "libc",
  "windows-sys",
@@ -3639,7 +3639,7 @@ dependencies = [
 [[package]]
 name = "zero-ref"
 version = "0.1.0"
-source = "git+https://github.com/AdityaVG13/zerostack?rev=bd721f7fc4866b24dec0c552da3d96bd8d816fbc#bd721f7fc4866b24dec0c552da3d96bd8d816fbc"
+source = "git+https://github.com/AdityaVG13/zerostack?rev=be8867ee99a14fc78a75db220358096bf3874c76#be8867ee99a14fc78a75db220358096bf3874c76"
 dependencies = [
  "serde",
  "sha2 0.11.0",
@@ -3648,7 +3648,7 @@ dependencies = [
 [[package]]
 name = "zero-store"
 version = "0.1.0"
-source = "git+https://github.com/AdityaVG13/zerostack?rev=bd721f7fc4866b24dec0c552da3d96bd8d816fbc#bd721f7fc4866b24dec0c552da3d96bd8d816fbc"
+source = "git+https://github.com/AdityaVG13/zerostack?rev=be8867ee99a14fc78a75db220358096bf3874c76#be8867ee99a14fc78a75db220358096bf3874c76"
 dependencies = [
  "serde",
  "serde_json",
@@ -3661,7 +3661,7 @@ dependencies = [
 [[package]]
 name = "zero-testkit"
 version = "0.1.0"
-source = "git+https://github.com/AdityaVG13/zerostack?rev=bd721f7fc4866b24dec0c552da3d96bd8d816fbc#bd721f7fc4866b24dec0c552da3d96bd8d816fbc"
+source = "git+https://github.com/AdityaVG13/zerostack?rev=be8867ee99a14fc78a75db220358096bf3874c76#be8867ee99a14fc78a75db220358096bf3874c76"
 dependencies = [
  "serde",
  "zero-abi",
