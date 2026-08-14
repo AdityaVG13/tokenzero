@@ -76,60 +76,100 @@ fn optional_observed_u64(value: &Value, key: &'static str) -> Result<(u64, bool)
     }
 }
 
+#[derive(Clone, Copy)]
+enum CacheReadField {
+    Flat(&'static str),
+    Nested {
+        object: &'static str,
+        field: &'static str,
+        error_name: &'static str,
+    },
+}
+
+struct ProviderUsageLayout {
+    usage_key: &'static str,
+    input_key: &'static str,
+    output_key: &'static str,
+    cache_read: CacheReadField,
+    cache_creation_key: Option<&'static str>,
+    subtract_cached_from_input: bool,
+}
+
+impl CacheProvider {
+    fn usage_layout(self) -> ProviderUsageLayout {
+        match self {
+            Self::Anthropic => ProviderUsageLayout {
+                usage_key: "usage",
+                input_key: "input_tokens",
+                output_key: "output_tokens",
+                cache_read: CacheReadField::Flat("cache_read_input_tokens"),
+                cache_creation_key: Some("cache_creation_input_tokens"),
+                subtract_cached_from_input: false,
+            },
+            Self::OpenAi => ProviderUsageLayout {
+                usage_key: "usage",
+                input_key: "prompt_tokens",
+                output_key: "completion_tokens",
+                cache_read: CacheReadField::Nested {
+                    object: "prompt_tokens_details",
+                    field: "cached_tokens",
+                    error_name: "prompt_tokens_details.cached_tokens",
+                },
+                cache_creation_key: None,
+                subtract_cached_from_input: true,
+            },
+            Self::Gemini => ProviderUsageLayout {
+                usage_key: "usageMetadata",
+                input_key: "promptTokenCount",
+                output_key: "candidatesTokenCount",
+                cache_read: CacheReadField::Flat("cachedContentTokenCount"),
+                cache_creation_key: None,
+                subtract_cached_from_input: true,
+            },
+        }
+    }
+}
+
+fn read_cache_tokens(usage: &Value, field: CacheReadField) -> Result<(u64, bool), CacheMeterError> {
+    match field {
+        CacheReadField::Flat(key) => optional_observed_u64(usage, key),
+        CacheReadField::Nested {
+            object,
+            field,
+            error_name,
+        } => match usage.get(object).and_then(|details| details.get(field)) {
+            Some(value) => value
+                .as_u64()
+                .map(|tokens| (tokens, true))
+                .ok_or(CacheMeterError::InvalidField(error_name)),
+            None => Ok((0, false)),
+        },
+    }
+}
+
 pub fn parse_provider_usage(
     provider: CacheProvider,
     value: &Value,
 ) -> Result<ProviderUsage, CacheMeterError> {
-    match provider {
-        CacheProvider::Anthropic => {
-            let usage = object_at(value, "usage");
-            let (cache_read_input_tokens, cache_read_input_tokens_reported) =
-                optional_observed_u64(usage, "cache_read_input_tokens")?;
-            Ok(ProviderUsage {
-                input_tokens: required_u64(usage, "input_tokens")?,
-                output_tokens: optional_u64(usage, "output_tokens")?,
-                cache_read_input_tokens,
-                cache_read_input_tokens_reported,
-                cache_creation_input_tokens: optional_u64(usage, "cache_creation_input_tokens")?,
-            })
-        }
-        CacheProvider::OpenAi => {
-            let usage = object_at(value, "usage");
-            let prompt = required_u64(usage, "prompt_tokens")?;
-            let cached_field = usage
-                .get("prompt_tokens_details")
-                .and_then(|details| details.get("cached_tokens"));
-            let (cached, cache_read_input_tokens_reported) = match cached_field {
-                Some(field) => (
-                    field.as_u64().ok_or(CacheMeterError::InvalidField(
-                        "prompt_tokens_details.cached_tokens",
-                    ))?,
-                    true,
-                ),
-                None => (0, false),
-            };
-            Ok(ProviderUsage {
-                input_tokens: prompt.saturating_sub(cached),
-                output_tokens: optional_u64(usage, "completion_tokens")?,
-                cache_read_input_tokens: cached,
-                cache_read_input_tokens_reported,
-                cache_creation_input_tokens: 0,
-            })
-        }
-        CacheProvider::Gemini => {
-            let usage = object_at(value, "usageMetadata");
-            let prompt = required_u64(usage, "promptTokenCount")?;
-            let (cached, cache_read_input_tokens_reported) =
-                optional_observed_u64(usage, "cachedContentTokenCount")?;
-            Ok(ProviderUsage {
-                input_tokens: prompt.saturating_sub(cached),
-                output_tokens: optional_u64(usage, "candidatesTokenCount")?,
-                cache_read_input_tokens: cached,
-                cache_read_input_tokens_reported,
-                cache_creation_input_tokens: 0,
-            })
-        }
-    }
+    let layout = provider.usage_layout();
+    let usage = object_at(value, layout.usage_key);
+    let (cache_read_input_tokens, cache_read_input_tokens_reported) =
+        read_cache_tokens(usage, layout.cache_read)?;
+    let raw_input = required_u64(usage, layout.input_key)?;
+    Ok(ProviderUsage {
+        input_tokens: if layout.subtract_cached_from_input {
+            raw_input.saturating_sub(cache_read_input_tokens)
+        } else {
+            raw_input
+        },
+        output_tokens: optional_u64(usage, layout.output_key)?,
+        cache_read_input_tokens,
+        cache_read_input_tokens_reported,
+        cache_creation_input_tokens: match layout.cache_creation_key {
+            Some(key) => optional_u64(usage, key)?,
+            None => 0,
+        },
+    })
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]

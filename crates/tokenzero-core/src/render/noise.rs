@@ -180,6 +180,135 @@ pub(crate) fn success_noise_families(command: &str) -> Vec<SuccessFamily> {
     families
 }
 
+#[derive(Default)]
+struct NoiseTally {
+    compiled: usize,
+    fresh: usize,
+    downloaded: usize,
+    bookkeeping: usize,
+    tests_ok: usize,
+    pytest_passed: usize,
+    git_progress: usize,
+    finished_in: Option<String>,
+    summary_lines: Vec<String>,
+    last_progress: std::collections::BTreeMap<String, String>,
+}
+
+impl NoiseTally {
+    fn collapsed(&self) -> usize {
+        self.compiled
+            + self.fresh
+            + self.downloaded
+            + self.bookkeeping
+            + self.tests_ok
+            + self.pytest_passed
+            + self.git_progress
+    }
+}
+
+impl SuccessFamily {
+    fn tool_label(self) -> &'static str {
+        match self {
+            Self::Cargo => "cargo",
+            Self::Pytest => "pytest",
+            Self::NpmInstall => "npm",
+            Self::GitTransfer => "git",
+        }
+    }
+
+    /// Pass markers win over `looks_critical_line` so names like
+    /// `warning_handling_works` still collapse.
+    fn absorb_pass(self, tally: &mut NoiseTally, trimmed: &str) -> bool {
+        match self {
+            Self::Cargo if is_cargo_test_ok_line(trimmed) => {
+                tally.tests_ok += 1;
+                true
+            }
+            Self::Pytest if is_pytest_pass_marker(trimmed) => {
+                tally.pytest_passed += 1;
+                true
+            }
+            _ => false,
+        }
+    }
+
+    fn absorb(self, tally: &mut NoiseTally, trimmed: &str, line: &str) -> bool {
+        match self {
+            Self::Cargo => {
+                if let Some(rest) = trimmed.strip_prefix("Finished ") {
+                    tally.finished_in = rest.rsplit_once(" in ").map(|(_, t)| t.to_string());
+                    true
+                } else if starts_with_any(trimmed, "Compiling |Checking |Documenting ") {
+                    tally.compiled += 1;
+                    true
+                } else if trimmed.starts_with("Fresh ") {
+                    tally.fresh += 1;
+                    true
+                } else if starts_with_any(trimmed, "Downloaded |Downloading ") {
+                    tally.downloaded += 1;
+                    true
+                } else if starts_with_any(
+                    trimmed,
+                    "Updating |Locking |Adding |Removing |Installing |Blocking |Building |Running |Doc-tests ",
+                ) || trimmed.starts_with("running ") && trimmed.ends_with("tests")
+                    || trimmed == "running 1 test"
+                {
+                    tally.bookkeeping += 1;
+                    true
+                } else if trimmed.starts_with("test result:") {
+                    tally.summary_lines.push(line.to_string());
+                    true
+                } else {
+                    false
+                }
+            }
+            Self::Pytest => {
+                if is_pytest_summary_line(trimmed) {
+                    tally.summary_lines.push(
+                        trimmed
+                            .trim_matches(|c: char| c == '=' || c == ' ')
+                            .to_string(),
+                    );
+                    true
+                } else if is_pytest_noise_line(trimmed) {
+                    if trimmed.ends_with("PASSED")
+                        || trimmed.contains(" PASSED ")
+                        || trimmed.contains("::")
+                    {
+                        tally.pytest_passed += 1;
+                    } else {
+                        tally.bookkeeping += 1;
+                    }
+                    true
+                } else {
+                    false
+                }
+            }
+            Self::NpmInstall => {
+                if is_npm_summary_line(trimmed) {
+                    tally.summary_lines.push(trimmed.to_string());
+                    true
+                } else if is_npm_noise_line(trimmed) {
+                    tally.bookkeeping += 1;
+                    true
+                } else {
+                    false
+                }
+            }
+            Self::GitTransfer => {
+                let Some(prefix) = git_progress_prefix(trimmed) else {
+                    return false;
+                };
+                tally.git_progress += 1;
+                tally
+                    .last_progress
+                    .insert(prefix.to_string(), line.to_string());
+                true
+            }
+        }
+    }
+}
+
 /// Render a dense success view for known-noisy toolchains: progress and
 /// bookkeeping lines collapse into counts while every critical line (and its
 /// indented continuation block) is kept verbatim. Returns `None` when the
@@ -189,21 +318,11 @@ pub(crate) fn success_noise_view(command: &str, stdout: &str, stderr: &str) -> O
     if families.is_empty() {
         return None;
     }
-    let mut compiled = 0usize;
-    let mut fresh = 0usize;
-    let mut downloaded = 0usize;
-    let mut bookkeeping = 0usize;
-    let mut tests_ok = 0usize;
-    let mut pytest_passed = 0usize;
-    let mut git_progress = 0usize;
-    let mut finished_in: Option<String> = None;
-    let mut summary_lines: Vec<String> = Vec::new();
+    let mut tally = NoiseTally::default();
     let mut kept_lines: Vec<String> = Vec::new();
     let mut other_lines = 0usize;
     let mut kept_other = 0usize;
     let mut in_critical_block = false;
-    let mut last_progress: std::collections::BTreeMap<String, String> =
-        std::collections::BTreeMap::new();
 
     for raw_line in stdout.lines().chain(stderr.lines()) {
         let line = raw_line.rsplit('\r').next().unwrap_or(raw_line);
@@ -212,16 +331,11 @@ pub(crate) fn success_noise_view(command: &str, stdout: &str, stderr: &str) -> O
             in_critical_block = false;
             continue;
         }
-        let pass_marker = families.iter().find_map(|family| match family {
-            SuccessFamily::Cargo if is_cargo_test_ok_line(trimmed) => Some(SuccessFamily::Cargo),
-            SuccessFamily::Pytest if is_pytest_pass_marker(trimmed) => Some(SuccessFamily::Pytest),
-            _ => None,
-        });
-        if let Some(marker_family) = pass_marker {
-            match marker_family {
-                SuccessFamily::Cargo => tests_ok += 1,
-                _ => pytest_passed += 1,
-            }
+        if families
+            .iter()
+            .copied()
+            .any(|family| family.absorb_pass(&mut tally, trimmed))
+        {
             in_critical_block = false;
             continue;
         }
@@ -230,80 +344,11 @@ pub(crate) fn success_noise_view(command: &str, stdout: &str, stderr: &str) -> O
             kept_lines.push(line.to_string());
             continue;
         }
-        let mut classified = false;
-        for family in &families {
-            match family {
-                SuccessFamily::Cargo => {
-                    if let Some(rest) = trimmed.strip_prefix("Finished ") {
-                        finished_in = rest.rsplit_once(" in ").map(|(_, t)| t.to_string());
-                        classified = true;
-                    } else if starts_with_any(trimmed, "Compiling |Checking |Documenting ") {
-                        compiled += 1;
-                        classified = true;
-                    } else if trimmed.starts_with("Fresh ") {
-                        fresh += 1;
-                        classified = true;
-                    } else if starts_with_any(trimmed, "Downloaded |Downloading ") {
-                        downloaded += 1;
-                        classified = true;
-                    } else if starts_with_any(
-                        trimmed,
-                        "Updating |Locking |Adding |Removing |Installing |Blocking |Building |Running |Doc-tests ",
-                    ) || trimmed.starts_with("running ") && trimmed.ends_with("tests")
-                        || trimmed == "running 1 test"
-                    {
-                        bookkeeping += 1;
-                        classified = true;
-                    } else if is_cargo_test_ok_line(trimmed) {
-                        tests_ok += 1;
-                        classified = true;
-                    } else if trimmed.starts_with("test result:") {
-                        summary_lines.push(line.to_string());
-                        classified = true;
-                    }
-                }
-                SuccessFamily::Pytest => {
-                    if is_pytest_summary_line(trimmed) {
-                        summary_lines.push(
-                            trimmed
-                                .trim_matches(|c: char| c == '=' || c == ' ')
-                                .to_string(),
-                        );
-                        classified = true;
-                    } else if is_pytest_noise_line(trimmed) {
-                        if trimmed.ends_with("PASSED")
-                            || trimmed.contains(" PASSED ")
-                            || trimmed.contains("::")
-                        {
-                            pytest_passed += 1;
-                        } else {
-                            bookkeeping += 1;
-                        }
-                        classified = true;
-                    }
-                }
-                SuccessFamily::NpmInstall => {
-                    if is_npm_summary_line(trimmed) {
-                        summary_lines.push(trimmed.to_string());
-                        classified = true;
-                    } else if is_npm_noise_line(trimmed) {
-                        bookkeeping += 1;
-                        classified = true;
-                    }
-                }
-                SuccessFamily::GitTransfer => {
-                    if let Some(prefix) = git_progress_prefix(trimmed) {
-                        git_progress += 1;
-                        last_progress.insert(prefix.to_string(), line.to_string());
-                        classified = true;
-                    }
-                }
-            }
-            if classified {
-                break;
-            }
-        }
-        if classified {
+        if families
+            .iter()
+            .copied()
+            .any(|family| family.absorb(&mut tally, trimmed, line))
+        {
             in_critical_block = false;
             continue;
         }
@@ -319,36 +364,31 @@ pub(crate) fn success_noise_view(command: &str, stdout: &str, stderr: &str) -> O
         }
     }
 
-    let collapsed =
-        compiled + fresh + downloaded + bookkeeping + tests_ok + pytest_passed + git_progress;
-    if collapsed == 0 && summary_lines.is_empty() && finished_in.is_none() {
+    if tally.collapsed() == 0 && tally.summary_lines.is_empty() && tally.finished_in.is_none() {
         return None;
     }
 
     let header_parts: Vec<_> = [
-        (compiled, "compiled"),
-        (fresh, "fresh"),
-        (downloaded, "downloaded"),
-        (tests_ok, "tests ok"),
-        (pytest_passed, "passed"),
-        (git_progress, "progress lines"),
-        (bookkeeping, "bookkeeping"),
+        (tally.compiled, "compiled"),
+        (tally.fresh, "fresh"),
+        (tally.downloaded, "downloaded"),
+        (tally.tests_ok, "tests ok"),
+        (tally.pytest_passed, "passed"),
+        (tally.git_progress, "progress lines"),
+        (tally.bookkeeping, "bookkeeping"),
     ]
     .into_iter()
     .filter(|(count, _)| *count > 0)
     .map(|(count, label)| format!("{count} {label}"))
     .collect();
-    let tool = match families.first() {
-        Some(SuccessFamily::Cargo) => "cargo",
-        Some(SuccessFamily::Pytest) => "pytest",
-        Some(SuccessFamily::NpmInstall) => "npm",
-        Some(SuccessFamily::GitTransfer) => "git",
-        None => "tool",
-    };
+    let tool = families
+        .first()
+        .map(|family| family.tool_label())
+        .unwrap_or("tool");
     let mut out = String::new();
     out.push_str(tool);
     out.push_str(" ok");
-    if let Some(time) = finished_in.as_deref() {
+    if let Some(time) = tally.finished_in.as_deref() {
         out.push_str(" in ");
         out.push_str(time);
     }
@@ -357,9 +397,10 @@ pub(crate) fn success_noise_view(command: &str, stdout: &str, stderr: &str) -> O
         out.push_str(&header_parts.join(", "));
     }
     out.push_str(" [collapsed]");
-    for line in summary_lines
+    for line in tally
+        .summary_lines
         .iter()
-        .chain(last_progress.values())
+        .chain(tally.last_progress.values())
         .chain(&kept_lines)
     {
         out.push('\n');
