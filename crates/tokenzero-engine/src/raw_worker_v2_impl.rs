@@ -386,6 +386,7 @@ fn worker_token_accounting(
         .transpose()?
         .unwrap_or(0);
     let worker = raw_worker_v2_protocol::WorkerTokenAccountingV1 {
+        tokenizer_version_digest: None,
         tokenizer_id: "conservative:utf8-json-bytes-v1".to_string(),
         count_kind: raw_worker_v2_protocol::WorkerTokenCountKind::ConservativeUpperBound,
         raw_tokens,
