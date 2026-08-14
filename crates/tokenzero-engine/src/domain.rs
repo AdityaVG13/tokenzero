@@ -13,7 +13,9 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
-use tokenzero_core::operation_abi::resolve_operation;
+use tokenzero_core::operation_abi::{
+    MigrationStatus, Operation, all_operations, resolve_operation,
+};
 use tokenzero_core::{
     Accounting, ChannelSeparation, ContentType, Mode, ToolResponse, count_tokens,
     detect_content_type, shell_display_command_from_argv_for_platform,
@@ -282,6 +284,45 @@ fn required_u64(
 #[path = "../../../tests/engine/inline/domain__raw_job_value_tests.rs"]
 mod raw_job_value_tests;
 
+/// Registry-metadata classification: domain ops are Canonical/LegacyAlias and
+/// not Resource. Adapter-owned control/composition ops are CodemodeControl or
+/// Resource. No hard-coded name mask.
+///
+/// Lives in the domain kernel so `dispatcher` can depend inward without a
+/// `domain` ↔ `dispatcher` module cycle.
+pub fn operation_is_domain(op: &Operation) -> bool {
+    match op.migration {
+        MigrationStatus::Canonical | MigrationStatus::LegacyAlias => {
+            op.exposure.resource_uri.is_none()
+        }
+        MigrationStatus::CodemodeControl | MigrationStatus::Resource => false,
+    }
+}
+
+/// Whether `op_name` (canonical or alias) is a domain engine operation.
+pub fn is_domain_operation(op_name: &str) -> bool {
+    resolve_operation(op_name)
+        .map(operation_is_domain)
+        .unwrap_or(false)
+}
+
+/// Canonical domain ops exposed on FastMCP (for exhaustive tests).
+pub fn domain_fastmcp_ops() -> Vec<&'static str> {
+    all_operations()
+        .iter()
+        .filter(|op| op.exposure.fastmcp_tool && operation_is_domain(op))
+        .map(|op| op.name)
+        .collect()
+}
+
+/// Every registry domain operation (exhaustive, metadata-driven).
+pub fn all_domain_operations() -> Vec<&'static Operation> {
+    all_operations()
+        .iter()
+        .filter(|op| operation_is_domain(op))
+        .collect()
+}
+
 /// Execute one canonical domain operation without transport framing.
 pub fn execute_domain_op(
     engine: &TokenZeroEngine,
@@ -290,7 +331,7 @@ pub fn execute_domain_op(
 ) -> Result<ToolResponse, DomainDispatchError> {
     let op = resolve_operation(op_name)
         .ok_or_else(|| DomainDispatchError::UnknownTool(op_name.to_string()))?;
-    if !crate::dispatcher::operation_is_domain(op) {
+    if !operation_is_domain(op) {
         return Err(DomainDispatchError::TransportOnly(op.name.to_string()));
     }
     let canonical = op.name;

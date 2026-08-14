@@ -81,14 +81,14 @@ pub use cache_maintenance::{
 };
 pub use collect::{find_rg_in_path, parse_rg_line};
 pub use dispatcher::{
-    DispatchOutcome, DispatchProfile, DispatchSurface, all_domain_operations, dispatch_cli,
-    dispatch_codemode_method, dispatch_count, dispatch_mcp_tool, dispatch_operation,
-    dispatch_raw_worker, domain_fastmcp_ops, is_domain_operation, last_dispatch_profile,
-    operation_is_domain, tool_response_to_domain,
+    DispatchOutcome, DispatchProfile, DispatchSurface, dispatch_cli, dispatch_codemode_method,
+    dispatch_count, dispatch_mcp_tool, dispatch_operation, dispatch_raw_worker,
+    last_dispatch_profile, tool_response_to_domain,
 };
 pub use domain::{
-    DomainDispatchError, EmbeddedDispatchError, batch_response, execute_domain_op,
-    execute_embedded_value,
+    DomainDispatchError, EmbeddedDispatchError, all_domain_operations, batch_response,
+    domain_fastmcp_ops, execute_domain_op, execute_embedded_value, is_domain_operation,
+    operation_is_domain,
 };
 pub use fetch_cache::{load_fetch_index, record_fetch};
 pub use racc_gauge::{
@@ -164,8 +164,7 @@ pub const DEFAULT_MCP_IDLE_TIMEOUT_SECS: u64 = 0;
 pub const MAX_MCP_IDLE_TIMEOUT_SECS: u64 = 24 * 60 * 60;
 /// Portable one-token response when requested bytes are already prompt-resident.
 /// Surfaces compare against this instead of depending on `tokenzero-recovery`.
-pub const ALREADY_RESIDENT_ATOM: &str =
-    tokenzero_recovery::working_set::ALREADY_RESIDENT_ATOM;
+pub const ALREADY_RESIDENT_ATOM: &str = tokenzero_recovery::working_set::ALREADY_RESIDENT_ATOM;
 
 /// True when `text` is the already-resident working-set atom (trim-insensitive).
 pub fn is_already_resident_text(text: &str) -> bool {

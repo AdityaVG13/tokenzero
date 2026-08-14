@@ -6,14 +6,13 @@
 //! CodeMode sandbox modules.
 
 use crate::TokenZeroEngine;
-use crate::domain::{self, DomainDispatchError};
+use crate::domain::{self, DomainDispatchError, operation_is_domain};
 use serde_json::{Value, json};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 use tokenzero_core::ToolResponse;
 use tokenzero_core::operation_abi::{
-    DomainError, DomainErrorKind, DomainResult, MigrationStatus, Operation, all_operations,
-    resolve_operation,
+    DomainError, DomainErrorKind, DomainResult, resolve_operation,
 };
 
 /// Which adapter invoked the shared domain dispatcher.
@@ -173,42 +172,6 @@ fn domain_dispatch_error_to_domain(err: DomainDispatchError) -> DomainError {
         )
         .with_op(name),
     }
-}
-
-/// Registry-metadata classification: domain ops are Canonical/LegacyAlias and
-/// not Resource. Adapter-owned control/composition ops are CodemodeControl or
-/// Resource. No hard-coded name mask.
-pub fn operation_is_domain(op: &Operation) -> bool {
-    match op.migration {
-        MigrationStatus::Canonical | MigrationStatus::LegacyAlias => {
-            op.exposure.resource_uri.is_none()
-        }
-        MigrationStatus::CodemodeControl | MigrationStatus::Resource => false,
-    }
-}
-
-/// Whether `op_name` (canonical or alias) is a domain engine operation.
-pub fn is_domain_operation(op_name: &str) -> bool {
-    resolve_operation(op_name)
-        .map(operation_is_domain)
-        .unwrap_or(false)
-}
-
-/// Canonical domain ops exposed on FastMCP (for exhaustive tests).
-pub fn domain_fastmcp_ops() -> Vec<&'static str> {
-    all_operations()
-        .iter()
-        .filter(|op| op.exposure.fastmcp_tool && operation_is_domain(op))
-        .map(|op| op.name)
-        .collect()
-}
-
-/// Every registry domain operation (exhaustive, metadata-driven).
-pub fn all_domain_operations() -> Vec<&'static Operation> {
-    all_operations()
-        .iter()
-        .filter(|op| operation_is_domain(op))
-        .collect()
 }
 
 pub fn dispatch_operation(

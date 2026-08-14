@@ -415,7 +415,7 @@ fn registry_domain_ops_are_metadata_driven_not_masked() {
     // Every Canonical/LegacyAlias non-resource op must be classified domain;
     // every CodemodeControl/Resource must not. No hard-coded name denylist.
     use tokenzero_core::operation_abi::{MigrationStatus, all_operations};
-    // operation_is_domain is on engine dispatcher re-export
+    // operation_is_domain is on the engine crate-root re-export (owned by domain)
     use tokenzero_engine::operation_is_domain as eng_is_domain;
     for op in all_operations() {
         let expected = matches!(
