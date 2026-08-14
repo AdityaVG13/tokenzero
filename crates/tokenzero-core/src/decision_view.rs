@@ -1,9 +1,14 @@
 //! Deterministic Decision View rendering and stable-prefix geometry.
 //!
-//! ZeroStack selects and orders the semantic components. TokenZero only
-//! validates their identities, renders the supplied order deterministically,
-//! and records exact byte/token geometry. Prefix byte identity is not a claim
-//! of provider eligibility, retention, routing, or cache hit.
+//! ZeroStack selects the semantic components. TokenZero validates their
+//! identities, renders the supplied order deterministically, and records
+//! exact byte/token geometry. Rendering is order-invariant for commutative
+//! runs: within a maximal run of same-class sections marked commutative,
+//! order is survival-score descending (tie-break by kind then payload), so
+//! any caller permutation of such a run renders byte-identical bytes.
+//! Noncommutative (semantic-order) sections keep the caller's exact order.
+//! Prefix byte identity is not a claim of provider eligibility, retention,
+//! routing, or cache hit.
 
 use crate::model_artifacts::{
     ExactTokenMap, ExactTokenizerAdapter, ExactTokenizerIdentity, ModelArtifactError, ModelCapsule,
@@ -20,7 +25,7 @@ pub const MAX_DECISION_VIEW_BYTES: usize = 16 * 1_048_576;
 pub const MAX_DECISION_VIEW_RECOVERY_REFS: usize = 4_096;
 pub const MAX_DECISION_VIEW_METADATA_ITEMS: usize = 1_024;
 const MAX_MARKER_FIELD_BYTES: usize = 16_384;
-const RENDERER_CONTRACT: &[u8] = b"tokenzero.decision-view.renderer.v2; framing=section-kind+decimal-byte-length+lf+payload+lf; order=caller-preserved; stable=system-tool,project-capsule,task-family-capsule,typed-effect-schema; volatile=locus-evidence,working-tree-delta,user-task,uncertainty-coverage,recovery-routes; metadata=candidate-choices,supported-decisions,completeness-grade,baseline-escape";
+const RENDERER_CONTRACT: &[u8] = b"tokenzero.decision-view.renderer.v3; framing=section-kind+decimal-byte-length+lf+payload+lf; order=commutative-score-descending-run-sorted,else-caller-preserved; commutative=survival-score-bps-u32-max-10000-within-maximal-runs-of-same-stability-class; tie=kind+payload; noncommutative=verbatim-caller-order; stable=system-tool,project-capsule,task-family-capsule,typed-effect-schema; volatile=locus-evidence,working-tree-delta,user-task,uncertainty-coverage,recovery-routes; metadata=candidate-choices,supported-decisions,completeness-grade,baseline-escape";
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum DecisionViewError {
@@ -41,6 +46,7 @@ pub enum DecisionViewError {
     EmptyChoiceId,
     ChoiceFieldTooLong,
     TooManyMetadataItems { actual: usize, limit: usize },
+    SurvivalScoreOutOfRange { actual: u32, limit: u32 },
     PrefixNotTokenAligned { byte_offset: u64 },
 }
 
@@ -171,6 +177,11 @@ impl DecisionUncertaintyMarker {
 }
 
 /// One caller-selected section. Constructors preserve anchors and bindings.
+///
+/// A section is commutative when a survival score is set (basis points,
+/// `0..=10_000`); such sections participate in score-descending ordering
+/// within their maximal same-class run. Sections without a score are
+/// noncommutative and keep the caller's exact position and order.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct DecisionViewSection {
     kind: DecisionViewSectionKind,
@@ -179,7 +190,11 @@ pub struct DecisionViewSection {
     tool_schema_digest: Option<DigestV1>,
     source_root_digest: Option<DigestV1>,
     model_profile_digest: Option<DigestV1>,
+    survival_score_bps: Option<u32>,
 }
+
+/// Upper bound for survival scores, expressed in basis points (10_000 = 100%).
+pub const MAX_SURVIVAL_SCORE_BPS: u32 = 10_000;
 
 impl DecisionViewSection {
     pub fn stable_system_tool_contract(map: &ExactTokenMap) -> Result<Self, DecisionViewError> {
@@ -232,6 +247,7 @@ impl DecisionViewSection {
             tool_schema_digest: None,
             source_root_digest: None,
             model_profile_digest: None,
+            survival_score_bps: None,
         })
     }
 
@@ -258,6 +274,7 @@ impl DecisionViewSection {
             tool_schema_digest: None,
             source_root_digest: None,
             model_profile_digest: None,
+            survival_score_bps: None,
         })
     }
 
@@ -272,6 +289,7 @@ impl DecisionViewSection {
             tool_schema_digest: None,
             source_root_digest: None,
             model_profile_digest: None,
+            survival_score_bps: None,
         })
     }
 
@@ -281,6 +299,28 @@ impl DecisionViewSection {
 
     pub fn payload(&self) -> &[u8] {
         &self.payload
+    }
+
+    /// Survival score in basis points, when the section is commutative.
+    /// `None` means the section is noncommutative (semantic order, kept
+    /// verbatim at the caller's position).
+    pub const fn survival_score_bps(&self) -> Option<u32> {
+        self.survival_score_bps
+    }
+
+    /// Mark this section commutative with a measured survival score in basis
+    /// points (basis points, `0..=10_000`, e.g. derived from
+    /// `prefix_stability_ratio` history). The score participates in the view
+    /// digest even when it does not change the rendered order.
+    pub fn with_survival_score_bps(mut self, score: u32) -> Result<Self, DecisionViewError> {
+        if score > MAX_SURVIVAL_SCORE_BPS {
+            return Err(DecisionViewError::SurvivalScoreOutOfRange {
+                actual: score,
+                limit: MAX_SURVIVAL_SCORE_BPS,
+            });
+        }
+        self.survival_score_bps = Some(score);
+        Ok(self)
     }
 
     fn from_map(
@@ -302,6 +342,7 @@ impl DecisionViewSection {
                 .then_some(map.source_digest()),
             source_root_digest: None,
             model_profile_digest: None,
+            survival_score_bps: None,
         })
     }
 
@@ -335,6 +376,7 @@ impl DecisionViewSection {
             tool_schema_digest: None,
             source_root_digest: Some(capsule.source_root_digest()),
             model_profile_digest: Some(capsule.model_profile_digest()),
+            survival_score_bps: None,
         })
     }
 }
@@ -638,7 +680,8 @@ pub struct DecisionView {
 }
 
 impl DecisionView {
-    /// Render the supplied sections without selecting, sorting, or dropping any.
+    /// Render the supplied sections, preserving caller order verbatim for
+    /// noncommutative sections and score-descending within commutative runs.
     pub fn render<T: ExactTokenizerAdapter + ?Sized>(
         tokenizer: &T,
         identity: DecisionViewIdentity,
@@ -655,6 +698,14 @@ impl DecisionView {
     /// Render with V6 decision metadata (candidate choices, supported
     /// decisions, completeness grade, baseline escape). The metadata is
     /// digest-covered but never rendered into the view framing bytes.
+    ///
+    /// Ordering (renderer contract v3): the stable-first invariant is
+    /// validated on the caller's order first. Then each maximal run of
+    /// same-class sections marked commutative (survival score set) is
+    /// sorted score-descending with an order-independent tie-break (kind,
+    /// then payload), so any permutation of a commutative run renders
+    /// byte-identical output. Noncommutative sections keep the caller's
+    /// exact positions, and stable sections always precede volatile ones.
     pub fn render_with_metadata<T: ExactTokenizerAdapter + ?Sized>(
         tokenizer: &T,
         identity: DecisionViewIdentity,
@@ -673,10 +724,9 @@ impl DecisionView {
             });
         }
 
+        // Stable-first guard runs on the caller's order, before any
+        // commutative reordering, so the reported index matches the input.
         let mut saw_volatile = false;
-        let mut rendered = b"TOKENZERO-DECISION-VIEW-V1\n".to_vec();
-        let mut stable_boundary = rendered.len();
-        let mut section_kinds = Vec::with_capacity(sections.len());
         for (index, section) in sections.iter().enumerate() {
             if section.kind.is_stable() {
                 if saw_volatile {
@@ -685,6 +735,15 @@ impl DecisionView {
             } else {
                 saw_volatile = true;
             }
+        }
+
+        let mut ordered = sections;
+        sort_commutative_runs(&mut ordered);
+
+        let mut rendered = b"TOKENZERO-DECISION-VIEW-V1\n".to_vec();
+        let mut stable_boundary = rendered.len();
+        let mut section_kinds = Vec::with_capacity(ordered.len());
+        for section in ordered.iter() {
             if section
                 .tokenizer_identity_digest
                 .is_some_and(|digest| digest != identity.tokenizer_identity_digest)
@@ -754,7 +813,7 @@ impl DecisionView {
         let view_digest = decision_view_digest(
             stable_prefix.digest(),
             exact_token_map_digest,
-            &section_kinds,
+            &ordered,
             total_tokens,
             volatile_tokens,
             &rendered,
@@ -964,7 +1023,7 @@ fn stable_prefix_geometry_digest(
 fn decision_view_digest(
     prefix_geometry: DigestV1,
     token_map: DigestV1,
-    section_kinds: &[DecisionViewSectionKind],
+    sections: &[DecisionViewSection],
     total_tokens: u64,
     volatile_tokens: u64,
     rendered: &[u8],
@@ -974,18 +1033,56 @@ fn decision_view_digest(
     canonical.extend_from_slice(prefix_geometry.as_bytes());
     canonical.extend_from_slice(token_map.as_bytes());
     canonical.extend_from_slice(
-        &u64::try_from(section_kinds.len())
+        &u64::try_from(sections.len())
             .map_err(|_| DecisionViewError::LengthOverflow)?
             .to_be_bytes(),
     );
-    for kind in section_kinds {
-        put_binary(&mut canonical, kind.as_str().as_bytes())?;
+    for section in sections {
+        put_binary(&mut canonical, section.kind.as_str().as_bytes())?;
+        // Survival score participates in the digest even when it does not
+        // change the rendered order (flag + u32 basis points).
+        canonical.push(u8::from(section.survival_score_bps.is_some()));
+        canonical.extend_from_slice(&section.survival_score_bps.unwrap_or(0).to_be_bytes());
     }
     canonical.extend_from_slice(&total_tokens.to_be_bytes());
     canonical.extend_from_slice(&volatile_tokens.to_be_bytes());
     put_binary(&mut canonical, rendered)?;
     canonical.extend_from_slice(metadata.as_bytes());
     Ok(digest(&canonical))
+}
+
+/// Score-descending sort of each maximal run of same-class commutative
+/// sections, in place. Noncommutative sections keep the caller's exact
+/// position; stable and volatile sections never share a run, so the
+/// stable-first invariant survives reordering. Tie-break by kind then
+/// payload -- both order-independent -- so the result is a canonical
+/// function of the section multiset: any caller permutation of a
+/// commutative run renders byte-identical output.
+fn sort_commutative_runs(sections: &mut [DecisionViewSection]) {
+    let mut index = 0;
+    while index < sections.len() {
+        if sections[index].survival_score_bps.is_none() {
+            index += 1;
+            continue;
+        }
+        let is_stable = sections[index].kind.is_stable();
+        let mut end = index + 1;
+        while end < sections.len()
+            && sections[end].survival_score_bps.is_some()
+            && sections[end].kind.is_stable() == is_stable
+        {
+            end += 1;
+        }
+        sections[index..end].sort_by(|left, right| {
+            right
+                .survival_score_bps
+                .unwrap_or(0)
+                .cmp(&left.survival_score_bps.unwrap_or(0))
+                .then_with(|| left.kind.as_str().cmp(right.kind.as_str()))
+                .then_with(|| left.payload.cmp(&right.payload))
+        });
+        index = end;
+    }
 }
 
 fn put_binary(out: &mut Vec<u8>, value: &[u8]) -> Result<(), DecisionViewError> {
