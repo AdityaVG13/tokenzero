@@ -703,6 +703,62 @@ fn terminate_background_child(child: &VerifiedChild) {
     let _ = child.revoke();
 }
 
+/// Inline vs small-ref vs render-visible choice. Policy predicates live here
+/// once; callers consume the named flags instead of cloning the &&-chains.
+struct ShellVisibleChoice {
+    inline: bool,
+    small: bool,
+    visible_text: String,
+}
+
+impl ShellVisibleChoice {
+    fn choose(
+        refs_complete: bool,
+        streams_truncated: bool,
+        command_success: bool,
+        shell_inline_budget: usize,
+        raw_tokens: usize,
+        output: &str,
+        combined_ref: &str,
+        render_visible: &str,
+    ) -> Self {
+        let fits_default_inline_extent =
+            output.len() <= DEFAULT_SHELL_INLINE_BUDGET.saturating_mul(4);
+        let fits_configured_inline_extent = output.len() <= shell_inline_budget.saturating_mul(4);
+        let inline = refs_complete
+            && !streams_truncated
+            && command_success
+            && shell_inline_budget > 0
+            && raw_tokens <= shell_inline_budget
+            && fits_configured_inline_extent;
+        let small = refs_complete
+            && !streams_truncated
+            && command_success
+            && raw_tokens <= DEFAULT_SHELL_INLINE_BUDGET
+            && fits_default_inline_extent;
+        let visible_text = if inline {
+            output.trim_end().to_string()
+        } else if refs_complete
+            && shell_inline_budget == 0
+            && !streams_truncated
+            && raw_tokens <= DEFAULT_SHELL_INLINE_BUDGET
+            && fits_default_inline_extent
+            && command_success
+        {
+            format!("# shell ok\ncombined_ref: {combined_ref}")
+        } else if refs_complete {
+            render_visible.to_string()
+        } else {
+            output.trim_end().to_string()
+        };
+        Self {
+            inline,
+            small,
+            visible_text,
+        }
+    }
+}
+
 impl TokenZeroEngine {
     /// Resolve shell cwd: explicit wins; otherwise default to `call_root` (plan/server
     /// root), never silent process-cwd inheritance without an echoed path.
@@ -971,37 +1027,17 @@ impl TokenZeroEngine {
         let raw_tokens = shell_raw_tokens(command, result.exit_code, &stdout_full, &stderr_full);
         // Tokenizers can encode long repeated runs as a single token. Keep the
         // token accounting exact, but bound inline transport by bytes as well.
-        let fits_default_inline_extent =
-            output.len() <= DEFAULT_SHELL_INLINE_BUDGET.saturating_mul(4);
-        let fits_configured_inline_extent =
-            output.len() <= self.config.shell_inline_budget.saturating_mul(4);
-        let inline_shell_output = refs_complete
-            && !streams_truncated
-            && render.command_status.command_success
-            && self.config.shell_inline_budget > 0
-            && raw_tokens <= self.config.shell_inline_budget
-            && fits_configured_inline_extent;
-        let small_shell_output = refs_complete
-            && !streams_truncated
-            && render.command_status.command_success
-            && raw_tokens <= DEFAULT_SHELL_INLINE_BUDGET
-            && fits_default_inline_extent;
-        let visible_text = if inline_shell_output {
-            output.trim_end().to_string()
-        } else if refs_complete
-            && self.config.shell_inline_budget == 0
-            && !streams_truncated
-            && raw_tokens <= DEFAULT_SHELL_INLINE_BUDGET
-            && fits_default_inline_extent
-            && render.command_status.command_success
-        {
-            format!("# shell ok\ncombined_ref: {}", combined_stored.blob_ref)
-        } else if refs_complete {
-            render.visible.clone()
-        } else {
-            output.trim_end().to_string()
-        };
-        let response_refs = if small_shell_output {
+        let choice = ShellVisibleChoice::choose(
+            refs_complete,
+            streams_truncated,
+            render.command_status.command_success,
+            self.config.shell_inline_budget,
+            raw_tokens,
+            &output,
+            &combined_stored.blob_ref,
+            &render.visible,
+        );
+        let response_refs = if choice.small {
             vec![shell_ref("combined", &combined_stored, full_output.len())]
         } else {
             refs
@@ -1009,12 +1045,12 @@ impl TokenZeroEngine {
         // The plan root is already part of the zero_execute request. Surface cwd only
         // when the command deliberately runs somewhere else.
         let visible_text = if resolved_cwd == self.config.call_root
-            || visible_text.contains("\ncwd: ")
-            || visible_text.starts_with("cwd: ")
+            || choice.visible_text.contains("\ncwd: ")
+            || choice.visible_text.starts_with("cwd: ")
         {
-            visible_text
-        } else if visible_text.starts_with("# shell") {
-            let mut lines = visible_text.lines();
+            choice.visible_text
+        } else if choice.visible_text.starts_with("# shell") {
+            let mut lines = choice.visible_text.lines();
             let first = lines.next().unwrap_or("# shell");
             let rest: Vec<&str> = lines.collect();
             if rest.is_empty() {
@@ -1023,7 +1059,7 @@ impl TokenZeroEngine {
                 format!("{first}\ncwd: {effective_cwd}\n{}", rest.join("\n"))
             }
         } else {
-            format!("cwd: {effective_cwd}\n{visible_text}")
+            format!("cwd: {effective_cwd}\n{}", choice.visible_text)
         };
         // Presentation masking never changes bytes persisted above. Explicit
         // exact/passthrough modes remain deliberate escapes; auto and all
@@ -1043,12 +1079,12 @@ impl TokenZeroEngine {
         let stderr_vis = stderr_stored.blob_ref.clone();
         let combined_vis = combined_stored.blob_ref.clone();
         let capture_vis = capture_stored.blob_ref.clone();
-        let visible_tokens = if inline_shell_output || refs_complete {
+        let visible_tokens = if choice.inline || refs_complete {
             count_tokens(&visible_text)
         } else {
             raw_tokens
         };
-        let output_strategy = if inline_shell_output {
+        let output_strategy = if choice.inline {
             "inline_shell".to_string()
         } else {
             capture["parser_metadata"]["output_strategy"]
@@ -1071,7 +1107,7 @@ impl TokenZeroEngine {
                 recovery_tokens: store.recovery_tokens,
                 billed_tokens: visible_tokens,
                 cached_tokens: 0,
-                exact_ref_tokens: Some(if small_shell_output {
+                exact_ref_tokens: Some(if choice.small {
                     count_tokens(&combined_vis)
                 } else {
                     let mut total = count_tokens(&combined_vis) + count_tokens(&capture_vis);
@@ -1149,6 +1185,10 @@ impl TokenZeroEngine {
         response
     }
 }
+
+#[cfg(test)]
+#[path = "../../../tests/engine/inline/engine_shell__visible_choice_tests.rs"]
+mod visible_choice_tests;
 
 #[cfg(test)]
 #[path = "../../../tests/engine/inline/engine_shell__job_tail_tests.rs"]

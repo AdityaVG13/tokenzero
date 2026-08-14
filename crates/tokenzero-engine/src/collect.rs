@@ -99,6 +99,63 @@ fn enclosing_symbol(lines: &[String], line_no: usize) -> Option<String> {
 /// every matching line stays visible. Distinct windows and distinct enclosing
 /// symbols remain distinct. Each file is read once for all of its hits;
 /// unreadable files fall back to the matched line only.
+/// Emit one hit's context window, or skip if this (start, stop, kind, sym,
+/// fallback_text) key was already written for the file.
+fn emit_hit_window<'a>(
+    out: &mut String,
+    emitted: &mut Vec<(usize, usize, &'a str, String, Option<String>)>,
+    file_lines: &Option<Vec<String>>,
+    hit: &SearchMatch,
+    kind: &'a str,
+) {
+    let line = hit.line.max(1);
+    let (start, stop) = match file_lines {
+        Some(lines) if !lines.is_empty() => (
+            line.saturating_sub(TARGET_CONTEXT_LINES).max(1),
+            (line + TARGET_CONTEXT_LINES).min(lines.len()),
+        ),
+        _ => (line, line),
+    };
+    let fallback_text: Option<String> = match file_lines {
+        Some(lines) if !lines.is_empty() => None,
+        _ => Some(hit.text.clone()),
+    };
+    // 631q: carry the inferred enclosing symbol when the file is
+    // readable; unreadable/binary files keep (file-scope).
+    let sym = match file_lines {
+        Some(lines) if !lines.is_empty() => {
+            enclosing_symbol(lines, line).unwrap_or_else(|| "(file-scope)".to_string())
+        }
+        _ => "(file-scope)".to_string(),
+    };
+    if emitted
+        .iter()
+        .any(|(e_start, e_stop, e_kind, e_sym, e_fallback)| {
+            *e_start == start
+                && *e_stop == stop
+                && *e_kind == kind
+                && *e_sym == sym
+                && *e_fallback == fallback_text
+        })
+    {
+        return;
+    }
+    emitted.push((start, stop, kind, sym.clone(), fallback_text));
+    out.push_str(&format!(
+        "HIT {}#L{}-L{} kind={} sym={}\n",
+        hit.path, start, stop, kind, sym
+    ));
+    match file_lines {
+        Some(lines) if !lines.is_empty() => {
+            for no in start..=stop {
+                let text = lines.get(no - 1).map(String::as_str).unwrap_or("");
+                out.push_str(&format!("| {}: {}\n", no, text));
+            }
+        }
+        _ => out.push_str(&format!("| {}: {}\n", line, hit.text)),
+    }
+}
+
 pub(crate) fn hit_search_output(matches: &[SearchMatch], kind: &str) -> String {
     let mut out = String::new();
     let mut idx = 0;
@@ -119,52 +176,7 @@ pub(crate) fn hit_search_output(matches: &[SearchMatch], kind: &str) -> String {
         // records whose emitted `| line: text` differs stay distinct.
         let mut emitted: Vec<(usize, usize, &str, String, Option<String>)> = Vec::new();
         for hit in &matches[idx..end] {
-            let line = hit.line.max(1);
-            let (start, stop) = match &file_lines {
-                Some(lines) if !lines.is_empty() => (
-                    line.saturating_sub(TARGET_CONTEXT_LINES).max(1),
-                    (line + TARGET_CONTEXT_LINES).min(lines.len()),
-                ),
-                _ => (line, line),
-            };
-            let fallback_text: Option<String> = match &file_lines {
-                Some(lines) if !lines.is_empty() => None,
-                _ => Some(hit.text.clone()),
-            };
-            // 631q: carry the inferred enclosing symbol when the file is
-            // readable; unreadable/binary files keep (file-scope).
-            let sym = match &file_lines {
-                Some(lines) if !lines.is_empty() => {
-                    enclosing_symbol(lines, line).unwrap_or_else(|| "(file-scope)".to_string())
-                }
-                _ => "(file-scope)".to_string(),
-            };
-            if emitted
-                .iter()
-                .any(|(e_start, e_stop, e_kind, e_sym, e_fallback)| {
-                    *e_start == start
-                        && *e_stop == stop
-                        && *e_kind == kind
-                        && *e_sym == sym
-                        && *e_fallback == fallback_text
-                })
-            {
-                continue;
-            }
-            emitted.push((start, stop, kind, sym.clone(), fallback_text));
-            out.push_str(&format!(
-                "HIT {}#L{}-L{} kind={} sym={}\n",
-                hit.path, start, stop, kind, sym
-            ));
-            match &file_lines {
-                Some(lines) if !lines.is_empty() => {
-                    for no in start..=stop {
-                        let text = lines.get(no - 1).map(String::as_str).unwrap_or("");
-                        out.push_str(&format!("| {}: {}\n", no, text));
-                    }
-                }
-                _ => out.push_str(&format!("| {}: {}\n", line, hit.text)),
-            }
+            emit_hit_window(&mut out, &mut emitted, &file_lines, hit, kind);
         }
         idx = end;
     }
