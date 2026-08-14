@@ -18,8 +18,9 @@ use zero_ref::ZeroRefV1;
 pub const MAX_DECISION_VIEW_SECTIONS: usize = 1_024;
 pub const MAX_DECISION_VIEW_BYTES: usize = 16 * 1_048_576;
 pub const MAX_DECISION_VIEW_RECOVERY_REFS: usize = 4_096;
+pub const MAX_DECISION_VIEW_METADATA_ITEMS: usize = 1_024;
 const MAX_MARKER_FIELD_BYTES: usize = 16_384;
-const RENDERER_CONTRACT: &[u8] = b"tokenzero.decision-view.renderer.v1; framing=section-kind+decimal-byte-length+lf+payload+lf; order=caller-preserved; stable=system-tool,project-capsule,task-family-capsule,typed-effect-schema; volatile=locus-evidence,working-tree-delta,user-task,uncertainty-coverage,recovery-routes";
+const RENDERER_CONTRACT: &[u8] = b"tokenzero.decision-view.renderer.v2; framing=section-kind+decimal-byte-length+lf+payload+lf; order=caller-preserved; stable=system-tool,project-capsule,task-family-capsule,typed-effect-schema; volatile=locus-evidence,working-tree-delta,user-task,uncertainty-coverage,recovery-routes; metadata=candidate-choices,supported-decisions,completeness-grade,baseline-escape";
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum DecisionViewError {
@@ -37,6 +38,9 @@ pub enum DecisionViewError {
     NoncanonicalRecoveryRef(String),
     EmptyMarkerCode,
     MarkerFieldTooLong,
+    EmptyChoiceId,
+    ChoiceFieldTooLong,
+    TooManyMetadataItems { actual: usize, limit: usize },
     PrefixNotTokenAligned { byte_offset: u64 },
 }
 
@@ -463,6 +467,161 @@ impl StablePrefixGeometry {
     }
 }
 
+/// One typed, caller-offered alternative. The hub envelope carries choices as
+/// untyped `Vec<Value>`; here the shape is a concrete struct so the view
+/// digest covers stable canonical bytes instead of free-form JSON.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct CandidateChoice {
+    id: String,
+    description: String,
+}
+
+impl CandidateChoice {
+    pub fn new(
+        id: impl Into<String>,
+        description: impl Into<String>,
+    ) -> Result<Self, DecisionViewError> {
+        let id = id.into();
+        let description = description.into();
+        if id.is_empty() {
+            return Err(DecisionViewError::EmptyChoiceId);
+        }
+        if id.len() > MAX_MARKER_FIELD_BYTES || description.len() > MAX_MARKER_FIELD_BYTES {
+            return Err(DecisionViewError::ChoiceFieldTooLong);
+        }
+        Ok(Self { id, description })
+    }
+
+    pub fn id(&self) -> &str {
+        &self.id
+    }
+
+    pub fn description(&self) -> &str {
+        &self.description
+    }
+}
+
+/// Declared completeness of the decision evidence, strongest first.
+/// Serde serialization matches the hub `decision_view_v6.schema.json` enum
+/// (`Proved`/`BoundedComplete`/`Observed`/`Unknown`) exactly.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+pub enum CompletenessGrade {
+    Proved,
+    BoundedComplete,
+    Observed,
+    Unknown,
+}
+
+impl CompletenessGrade {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Proved => "Proved",
+            Self::BoundedComplete => "BoundedComplete",
+            Self::Observed => "Observed",
+            Self::Unknown => "Unknown",
+        }
+    }
+
+    /// Join two independently declared grades, keeping the weaker (more
+    /// honest) claim. `Unknown` is terminal: it is never upgraded, regardless
+    /// of the other grade.
+    pub const fn join(self, other: Self) -> Self {
+        match (self, other) {
+            (Self::Unknown, _) | (_, Self::Unknown) => Self::Unknown,
+            (Self::Observed, _) | (_, Self::Observed) => Self::Observed,
+            (Self::BoundedComplete, _) | (_, Self::BoundedComplete) => Self::BoundedComplete,
+            _ => Self::Proved,
+        }
+    }
+}
+
+impl Default for CompletenessGrade {
+    fn default() -> Self {
+        Self::Unknown
+    }
+}
+
+/// V6 decision metadata. Digest-covered at render time and serde-defaulted so
+/// old-shaped JSON still deserializes (Unknown grade, empty vectors, no
+/// baseline escape). Field names and enum values follow
+/// `racc/v6/schemas/decision_view_v6.schema.json`.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct DecisionViewMetadata {
+    #[serde(default)]
+    candidate_choices: Vec<CandidateChoice>,
+    #[serde(default)]
+    supported_decisions: Vec<String>,
+    #[serde(default)]
+    completeness_grade: CompletenessGrade,
+    #[serde(default)]
+    baseline_escape: bool,
+}
+
+impl DecisionViewMetadata {
+    pub fn new(
+        candidate_choices: Vec<CandidateChoice>,
+        supported_decisions: Vec<String>,
+        completeness_grade: CompletenessGrade,
+        baseline_escape: bool,
+    ) -> Result<Self, DecisionViewError> {
+        if candidate_choices.len() > MAX_DECISION_VIEW_METADATA_ITEMS
+            || supported_decisions.len() > MAX_DECISION_VIEW_METADATA_ITEMS
+        {
+            let actual = candidate_choices.len().max(supported_decisions.len());
+            return Err(DecisionViewError::TooManyMetadataItems {
+                actual,
+                limit: MAX_DECISION_VIEW_METADATA_ITEMS,
+            });
+        }
+        Ok(Self {
+            candidate_choices,
+            supported_decisions,
+            completeness_grade,
+            baseline_escape,
+        })
+    }
+
+    pub fn candidate_choices(&self) -> &[CandidateChoice] {
+        &self.candidate_choices
+    }
+
+    pub fn supported_decisions(&self) -> &[String] {
+        &self.supported_decisions
+    }
+
+    pub const fn completeness_grade(&self) -> CompletenessGrade {
+        self.completeness_grade
+    }
+
+    pub const fn baseline_escape(&self) -> bool {
+        self.baseline_escape
+    }
+
+    fn canonical_digest(&self) -> Result<DigestV1, DecisionViewError> {
+        let mut canonical = b"TOKENZERO-DECISION-VIEW-METADATA-V1".to_vec();
+        put_choices(&mut canonical, &self.candidate_choices)?;
+        put_strings(
+            &mut canonical,
+            "supported_decisions",
+            &self.supported_decisions,
+        )?;
+        append_bounded(&mut canonical, self.completeness_grade.as_str().as_bytes())?;
+        canonical.push(u8::from(self.baseline_escape));
+        Ok(digest(&canonical))
+    }
+}
+
+impl Default for DecisionViewMetadata {
+    fn default() -> Self {
+        Self {
+            candidate_choices: Vec::new(),
+            supported_decisions: Vec::new(),
+            completeness_grade: CompletenessGrade::Unknown,
+            baseline_escape: false,
+        }
+    }
+}
+
 /// Deterministic rendering of one ordered, caller-selected Decision View.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct DecisionView {
@@ -474,6 +633,7 @@ pub struct DecisionView {
     volatile_bytes: u64,
     volatile_tokens: u64,
     stable_prefix: StablePrefixGeometry,
+    metadata: DecisionViewMetadata,
     digest: DigestV1,
 }
 
@@ -483,6 +643,23 @@ impl DecisionView {
         tokenizer: &T,
         identity: DecisionViewIdentity,
         sections: Vec<DecisionViewSection>,
+    ) -> Result<Self, DecisionViewError> {
+        Self::render_with_metadata(
+            tokenizer,
+            identity,
+            sections,
+            DecisionViewMetadata::default(),
+        )
+    }
+
+    /// Render with V6 decision metadata (candidate choices, supported
+    /// decisions, completeness grade, baseline escape). The metadata is
+    /// digest-covered but never rendered into the view framing bytes.
+    pub fn render_with_metadata<T: ExactTokenizerAdapter + ?Sized>(
+        tokenizer: &T,
+        identity: DecisionViewIdentity,
+        sections: Vec<DecisionViewSection>,
+        metadata: DecisionViewMetadata,
     ) -> Result<Self, DecisionViewError> {
         if sections.len() > MAX_DECISION_VIEW_SECTIONS {
             return Err(DecisionViewError::TooManySections {
@@ -573,6 +750,7 @@ impl DecisionView {
             breakpoint_after_tokens,
         )?;
         let exact_token_map_digest = token_map.digest();
+        let metadata_digest = metadata.canonical_digest()?;
         let view_digest = decision_view_digest(
             stable_prefix.digest(),
             exact_token_map_digest,
@@ -580,6 +758,7 @@ impl DecisionView {
             total_tokens,
             volatile_tokens,
             &rendered,
+            metadata_digest,
         )?;
         Ok(Self {
             identity,
@@ -590,6 +769,7 @@ impl DecisionView {
             volatile_bytes,
             volatile_tokens,
             stable_prefix,
+            metadata,
             digest: view_digest,
         })
     }
@@ -624,6 +804,10 @@ impl DecisionView {
 
     pub fn stable_prefix(&self) -> &StablePrefixGeometry {
         &self.stable_prefix
+    }
+
+    pub fn metadata(&self) -> &DecisionViewMetadata {
+        &self.metadata
     }
 
     pub const fn digest(&self) -> DigestV1 {
@@ -784,6 +968,7 @@ fn decision_view_digest(
     total_tokens: u64,
     volatile_tokens: u64,
     rendered: &[u8],
+    metadata: DigestV1,
 ) -> Result<DigestV1, DecisionViewError> {
     let mut canonical = b"TOKENZERO-DECISION-VIEW-IDENTITY-V1".to_vec();
     canonical.extend_from_slice(prefix_geometry.as_bytes());
@@ -799,6 +984,7 @@ fn decision_view_digest(
     canonical.extend_from_slice(&total_tokens.to_be_bytes());
     canonical.extend_from_slice(&volatile_tokens.to_be_bytes());
     put_binary(&mut canonical, rendered)?;
+    canonical.extend_from_slice(metadata.as_bytes());
     Ok(digest(&canonical))
 }
 
@@ -809,6 +995,32 @@ fn put_binary(out: &mut Vec<u8>, value: &[u8]) -> Result<(), DecisionViewError> 
             .to_be_bytes(),
     );
     out.extend_from_slice(value);
+    Ok(())
+}
+
+fn put_choices(out: &mut Vec<u8>, choices: &[CandidateChoice]) -> Result<(), DecisionViewError> {
+    let count = u64::try_from(choices.len()).map_err(|_| DecisionViewError::LengthOverflow)?;
+    append_bounded(
+        out,
+        format!(
+            "candidate_choices {count}
+"
+        )
+        .as_bytes(),
+    )?;
+    for choice in choices {
+        put_record(out, "choice_id", choice.id.as_bytes())?;
+        put_record(out, "choice_description", choice.description.as_bytes())?;
+    }
+    Ok(())
+}
+
+fn put_strings(out: &mut Vec<u8>, label: &str, values: &[String]) -> Result<(), DecisionViewError> {
+    let count = u64::try_from(values.len()).map_err(|_| DecisionViewError::LengthOverflow)?;
+    append_bounded(out, format!("{label} {count}\n").as_bytes())?;
+    for value in values {
+        put_record(out, "item", value.as_bytes())?;
+    }
     Ok(())
 }
 

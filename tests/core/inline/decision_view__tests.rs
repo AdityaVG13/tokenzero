@@ -310,3 +310,98 @@ fn renderer_contract_digest_is_stable_and_nonzero() {
     assert_eq!(digest, decision_view_renderer_contract_digest());
     let _ = TokenPiece::new(1, b"used-by-public-adapter".to_vec());
 }
+
+#[test]
+fn v6_metadata_round_trips_is_digest_covered_and_unknown_never_upgrades() {
+    let tokenizer = tokenizer_identity();
+    let adapter = ByteTokenizer {
+        identity: tokenizer.clone(),
+    };
+    let sections = vec![
+        DecisionViewSection::stable_system_tool_contract(&byte_map(&tokenizer, b"stable"))
+            .unwrap(),
+        DecisionViewSection::volatile_user_task(&byte_map(&tokenizer, b"task")).unwrap(),
+    ];
+    let choice_a = CandidateChoice::new("retry", "retry the last operation").unwrap();
+    let choice_b = CandidateChoice::new("abort", "abort the operation").unwrap();
+    let metadata_a = DecisionViewMetadata::new(
+        vec![choice_a],
+        vec!["decision:retry".to_string(), "decision:abort".to_string()],
+        CompletenessGrade::BoundedComplete,
+        true,
+    )
+    .unwrap();
+    let metadata_b = DecisionViewMetadata::new(
+        vec![choice_b],
+        vec!["decision:abort".to_string()],
+        CompletenessGrade::BoundedComplete,
+        true,
+    )
+    .unwrap();
+    let view_a = DecisionView::render_with_metadata(
+        &adapter,
+        identity(&tokenizer),
+        sections.clone(),
+        metadata_a.clone(),
+    )
+    .unwrap();
+    let view_b = DecisionView::render_with_metadata(
+        &adapter,
+        identity(&tokenizer),
+        sections,
+        metadata_b,
+    )
+    .unwrap();
+
+    // Metadata is digest-covered: changing candidate_choices changes the view
+    // digest while leaving the rendered framing bytes untouched (and the
+    // stable-prefix geometry unchanged -- metadata is view-level, not prefix).
+    assert_ne!(view_a.digest(), view_b.digest());
+    assert_eq!(view_a.rendered(), view_b.rendered());
+    assert_eq!(view_a.stable_prefix().digest(), view_b.stable_prefix().digest());
+
+    // All new fields round-trip through serde, and old-shaped JSON still
+    // deserializes with serde defaults.
+    let json = serde_json::to_string(&metadata_a).unwrap();
+    assert_eq!(
+        serde_json::from_str::<DecisionViewMetadata>(&json).unwrap(),
+        metadata_a
+    );
+    assert_eq!(
+        serde_json::from_str::<DecisionViewMetadata>("{}").unwrap(),
+        DecisionViewMetadata::default()
+    );
+    assert_eq!(
+        serde_json::from_str::<CompletenessGrade>("\"BoundedComplete\"").unwrap(),
+        CompletenessGrade::BoundedComplete
+    );
+    let view_json = serde_json::to_string(&view_a).unwrap();
+    assert!(view_json.contains("\"candidate_choices\""));
+    assert!(view_json.contains("\"supported_decisions\""));
+    assert!(view_json.contains("\"completeness_grade\":\"BoundedComplete\""));
+    assert!(view_json.contains("\"baseline_escape\":true"));
+
+    // Unknown is terminal: it can never be constructed as upgraded.
+    assert_eq!(metadata_a.completeness_grade(), CompletenessGrade::BoundedComplete);
+    assert!(metadata_a.baseline_escape());
+    assert_eq!(metadata_a.candidate_choices().len(), 1);
+    assert_eq!(metadata_a.supported_decisions().len(), 2);
+    assert_eq!(
+        CompletenessGrade::Unknown.join(CompletenessGrade::Proved),
+        CompletenessGrade::Unknown
+    );
+    assert_eq!(
+        CompletenessGrade::Proved.join(CompletenessGrade::Unknown),
+        CompletenessGrade::Unknown
+    );
+    assert_eq!(
+        CompletenessGrade::BoundedComplete.join(CompletenessGrade::Observed),
+        CompletenessGrade::Observed
+    );
+    assert_eq!(CompletenessGrade::default(), CompletenessGrade::Unknown);
+    assert_eq!(DecisionViewMetadata::default().completeness_grade(), CompletenessGrade::Unknown);
+    assert!(matches!(
+        CandidateChoice::new("", "empty id"),
+        Err(DecisionViewError::EmptyChoiceId)
+    ));
+}
