@@ -3,9 +3,7 @@ use std::fs;
 use tempfile::tempdir;
 
 use super::*;
-use tokenzero_core::model_artifacts::{
-    AppendOnlyCapsuleSlots, ModelArtifactError, ModelCapsule,
-};
+use tokenzero_core::model_artifacts::{AppendOnlyCapsuleSlots, ModelArtifactError, ModelCapsule};
 
 fn stored_for(text: &str) -> StoredPayload {
     let digest = sha256_hex(text);
@@ -66,9 +64,7 @@ fn engine_read_forms_capsule_with_matching_receipt_and_rejects_rewrites() {
         receipt.payload_root,
         ModelCapsule::payload_digest(plain.text.as_bytes())
     );
-    assert!(receipt.verify_payload(ModelCapsule::payload_digest(
-        formed.render().as_slice()
-    )));
+    assert!(receipt.verify_payload(ModelCapsule::payload_digest(formed.render().as_slice())));
     assert_eq!(formed.render(), plain.text.as_bytes());
     assert_eq!(
         formed.causal_key().as_str(),

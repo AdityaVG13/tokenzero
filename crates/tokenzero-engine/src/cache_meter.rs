@@ -146,7 +146,10 @@ impl CacheProvider {
 
 /// Presence-sensitive time-to-first-token in milliseconds. A present field
 /// is recorded verbatim; an absent field is recorded as `None`, never as 0.
-fn read_response_ttft_ms(value: &Value, keys: &[&'static str]) -> Result<Option<u64>, CacheMeterError> {
+fn read_response_ttft_ms(
+    value: &Value,
+    keys: &[&'static str],
+) -> Result<Option<u64>, CacheMeterError> {
     for &key in keys {
         if let Some(field) = value.get(key) {
             return field
@@ -159,7 +162,10 @@ fn read_response_ttft_ms(value: &Value, keys: &[&'static str]) -> Result<Option<
 }
 
 /// Presence-sensitive model identity from the provider response root.
-fn read_response_model(value: &Value, key: &'static str) -> Result<Option<String>, CacheMeterError> {
+fn read_response_model(
+    value: &Value,
+    key: &'static str,
+) -> Result<Option<String>, CacheMeterError> {
     match value.get(key) {
         Some(field) => field
             .as_str()

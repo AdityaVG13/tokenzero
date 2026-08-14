@@ -256,7 +256,10 @@ fn ttft_route_model_and_cache_key_round_trip_and_absence_stays_absent() {
         Some("claude-3-7-sonnet-20250219")
     );
     assert_eq!(observed.route.as_deref(), Some("messages"));
-    assert_eq!(observed.cache_key.as_deref(), Some("anthropic-cache:req-7f3a"));
+    assert_eq!(
+        observed.cache_key.as_deref(),
+        Some("anthropic-cache:req-7f3a")
+    );
     let round_trip: CacheObservation =
         serde_json::from_value(serde_json::to_value(observed).unwrap()).unwrap();
     assert_eq!(&round_trip, observed);

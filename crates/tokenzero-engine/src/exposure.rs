@@ -40,7 +40,9 @@ pub struct DynamicEnvelopeExclusion {
 impl DynamicEnvelopeExclusion {
     /// Strictest posture: no segment may differ between histories.
     pub fn none() -> Self {
-        Self { message_indexes: Vec::new() }
+        Self {
+            message_indexes: Vec::new(),
+        }
     }
 
     /// Declare the given 0-based message indexes as dynamic envelope
@@ -62,7 +64,10 @@ impl DynamicEnvelopeExclusion {
 pub enum ProviderHistoryRewrite {
     /// The successive history is shorter than the earlier one: earlier
     /// content was dropped instead of extended.
-    Truncated { previous_len: usize, next_len: usize },
+    Truncated {
+        previous_len: usize,
+        next_len: usize,
+    },
     /// A non-excluded earlier message changed at `index`; `lcp` is the
     /// message-sequence LCP with the previous history.
     RewroteMessage {
@@ -191,7 +196,9 @@ impl SessionExposureLedger {
         &mut self,
         history: Vec<String>,
     ) -> Result<usize, ProviderHistoryRewrite> {
-        let lcp = self.history_policy.check(&self.provider_history, &history)?;
+        let lcp = self
+            .history_policy
+            .check(&self.provider_history, &history)?;
         self.provider_history = history;
         Ok(lcp)
     }

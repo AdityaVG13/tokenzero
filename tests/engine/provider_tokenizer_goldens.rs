@@ -17,9 +17,7 @@
 //!   re-reviewed.
 
 use serde::Deserialize;
-use tokenzero_core::{
-    TokenizerFamily, count_tokens_for_model, tokenizer_metadata,
-};
+use tokenzero_core::{TokenizerFamily, count_tokens_for_model, tokenizer_metadata};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -74,8 +72,16 @@ fn fixture_schema_is_tokenizer_goldens_v1() {
 #[test]
 fn every_entry_has_a_source_and_unverified_entries_carry_no_count() {
     for entry in &fixture().entries {
-        assert!(!entry.source.is_empty(), "entry {} needs a source", entry.id);
-        assert!(!entry.provider.is_empty(), "entry {} needs a provider", entry.id);
+        assert!(
+            !entry.source.is_empty(),
+            "entry {} needs a source",
+            entry.id
+        );
+        assert!(
+            !entry.provider.is_empty(),
+            "entry {} needs a provider",
+            entry.id
+        );
         assert!(
             !entry.tokenizer_identity.is_empty(),
             "entry {} needs a tokenizer identity",
@@ -112,7 +118,9 @@ fn verified_entries_match_count_tokens_for_model() {
             continue;
         }
         let got = count_tokens_for_model(&entry.prompt_text, Some(&entry.model_id));
-        let expected: u64 = entry.expected_count.expect("verified entry must carry a count");
+        let expected: u64 = entry
+            .expected_count
+            .expect("verified entry must carry a count");
         assert_eq!(
             u64::try_from(got).expect("token counts fit u64"),
             expected,
@@ -129,7 +137,9 @@ fn verified_exact_entries_are_provable_without_a_vocabulary() {
         if entry.unverified || entry.count_class != CountClass::Exact {
             continue;
         }
-        let expected = entry.expected_count.expect("verified entry must carry a count");
+        let expected = entry
+            .expected_count
+            .expect("verified entry must carry a count");
         // The only exact counts asserted today are the empty string (0
         // tokens for every deterministic tokenizer) and single-byte inputs
         // (one base-vocabulary token in byte-level BPE). Anything else would

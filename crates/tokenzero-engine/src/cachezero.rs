@@ -68,8 +68,12 @@ pub fn observe_with_mode(
     // would-have-hit (nor full savings) for a blob that is no longer resident
     // (ZS-CACHE-013). The write-through below restores L3 on identical bytes.
     let entry_for_classification = entry.as_ref().filter(|item| !item.l3_cold);
-    let status =
-        classify_would_be_status(entry_for_classification, &result_digest, in_flight, blast_intersect);
+    let status = classify_would_be_status(
+        entry_for_classification,
+        &result_digest,
+        in_flight,
+        blast_intersect,
+    );
     let result_tokens = response
         .accounting
         .as_ref()

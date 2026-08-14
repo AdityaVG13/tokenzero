@@ -23,7 +23,10 @@ fn legacy_token_mass_without_stamp_defaults_to_unstamped_legacy_marker() {
         legacy.count_method_version.is_legacy_unstamped(),
         "legacy data must deserialize to the explicit unstamped-legacy marker"
     );
-    assert_eq!(legacy.count_method_version.tokenizer_family, UNSTAMPED_LEGACY);
+    assert_eq!(
+        legacy.count_method_version.tokenizer_family,
+        UNSTAMPED_LEGACY
+    );
     // The marker must never collide with a real counting identity.
     assert_ne!(UNSTAMPED_LEGACY, "none");
     assert_ne!(UNSTAMPED_LEGACY, "cl100k");

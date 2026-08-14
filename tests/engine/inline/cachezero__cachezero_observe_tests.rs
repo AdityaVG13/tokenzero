@@ -1,13 +1,11 @@
 use super::*;
 use crate::TokenZeroEngine;
-use crate::config::EngineConfig;
 use crate::action_cache_key::{ActionCacheKeyInput, ConsistencyClass, action_cache_key};
+use crate::config::EngineConfig;
 use serde_json::json;
 use tempfile::tempdir;
 use tokenzero_core::{Accounting, Mode, ToolResponse};
-use tokenzero_recovery::{
-    EvictionSlackGuard, aggregate_cachezero, store_root_from_cache_path,
-};
+use tokenzero_recovery::{EvictionSlackGuard, aggregate_cachezero, store_root_from_cache_path};
 
 fn engine_at(dir: &std::path::Path) -> TokenZeroEngine {
     let cache = dir.join("tokenzero").join("recovery-cache.json");

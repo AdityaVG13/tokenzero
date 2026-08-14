@@ -60,7 +60,11 @@ fn provider_history_is_append_only_with_dynamic_envelope_exclusion() {
 
     // h2 extends h1: every earlier message unchanged, new messages appended,
     // so the LCP of the successive histories is the earlier history itself.
-    assert_eq!(policy.check(&h1, &h2), Ok(2), "extension keeps LCP == earlier history");
+    assert_eq!(
+        policy.check(&h1, &h2),
+        Ok(2),
+        "extension keeps LCP == earlier history"
+    );
 
     // h3 mutates a non-excluded earlier message -> fail loud.
     let h3 = vec![
@@ -82,7 +86,10 @@ fn provider_history_is_append_only_with_dynamic_envelope_exclusion() {
     // Dropping earlier content (truncation) also fails loud.
     assert_eq!(
         policy.check(&h2, &h1),
-        Err(ProviderHistoryRewrite::Truncated { previous_len: 4, next_len: 2 })
+        Err(ProviderHistoryRewrite::Truncated {
+            previous_len: 4,
+            next_len: 2
+        })
     );
 
     // A dynamic-envelope-excluded segment difference passes: the headers
@@ -99,7 +106,11 @@ fn provider_history_is_append_only_with_dynamic_envelope_exclusion() {
     // keeps the previous history on violation (fail loud, no partial state).
     let mut ledger = SessionExposureLedger::default();
     ledger.set_history_policy(policy);
-    assert_eq!(ledger.record_provider_history(h1), Ok(0), "first history is accepted");
+    assert_eq!(
+        ledger.record_provider_history(h1),
+        Ok(0),
+        "first history is accepted"
+    );
     assert_eq!(
         ledger.record_provider_history(h3),
         Err(ProviderHistoryRewrite::RewroteMessage {
