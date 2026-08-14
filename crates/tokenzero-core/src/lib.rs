@@ -1497,12 +1497,12 @@ fn should_compact_short_failure_shell(
     status: &CommandStatus,
     combined: &str,
 ) -> bool {
+    // Exit 0 && !timeout is already command_success (tokenzero-3ry6).
     input.mode.effective_policy() == Mode::Auto
         && policy.policy == "diagnostic"
         && !status.command_success
         && input.exit_code.is_some()
         && !input.timed_out
-        && !(input.exit_code == Some(0) && status.pipeline_masking_warning.is_some())
         && input.combined_ref.is_some()
         && (!input.stdout.trim().is_empty() || !input.stderr.trim().is_empty())
         && !has_visible_secret_marker(combined)
