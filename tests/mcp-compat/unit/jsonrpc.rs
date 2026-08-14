@@ -667,8 +667,8 @@ fn mcp_tool_calls_are_pulse_accounted_with_attribution() {
     });
     handle_jsonrpc(&engine, &string_id_request.to_string()).unwrap();
 
-    let ledger = tokenzero_pulse::default_ledger_path(dir.path());
-    let lines: Vec<tokenzero_pulse::PulseEvent> = fs::read_to_string(&ledger)
+    let ledger = dir.path().join(".tokenzero/pulse/events.jsonl");
+    let lines: Vec<serde_json::Value> = fs::read_to_string(&ledger)
         .unwrap()
         .lines()
         .map(|line| serde_json::from_str(line).unwrap())
@@ -676,13 +676,21 @@ fn mcp_tool_calls_are_pulse_accounted_with_attribution() {
     assert_eq!(lines.len(), 3, "one event per tools/call");
 
     let read_event = &lines[0];
-    assert_eq!(read_event.tool, "read");
-    assert_eq!(read_event.session_id.as_deref(), Some(engine.session_id()));
-    assert_eq!(read_event.call_id.as_deref(), Some("7"));
+    assert_eq!(read_event["tool"], "read");
+    assert_eq!(read_event["session_id"].as_str(), Some(engine.session_id()));
+    assert_eq!(read_event["call_id"].as_str(), Some("7"));
     // Pulse forensics keep full-hash refs for durable attribution; the
     // visible capsule advertises the session short alias of the same blob.
-    let matches_visible_ref = |full: &String| {
-        full == &ref_id
+    let event_ref_ids = |event: &serde_json::Value| -> Vec<String> {
+        event["ref_ids"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|value| value.as_str().map(str::to_string))
+            .collect()
+    };
+    let matches_visible_ref = |full: &str| {
+        full == ref_id
             || full.strip_prefix("tz://blob/").is_some_and(|hash| {
                 ref_id
                     .strip_prefix("tz://s/")
@@ -690,35 +698,35 @@ fn mcp_tool_calls_are_pulse_accounted_with_attribution() {
                     || ref_id.starts_with("tz://o/")
             })
     };
+    let read_refs = event_ref_ids(read_event);
     assert!(
-        read_event.ref_ids.iter().any(matches_visible_ref),
-        "read event refs {:?} must cover visible ref {ref_id}",
-        read_event.ref_ids
+        read_refs.iter().any(|full| matches_visible_ref(full)),
+        "read event refs {read_refs:?} must cover visible ref {ref_id}"
     );
-    assert!(read_event.raw_tokens > 0);
+    assert!(read_event["raw_tokens"].as_u64().unwrap_or(0) > 0);
 
     let expand_event = &lines[1];
-    assert_eq!(expand_event.tool, "expand");
-    assert_eq!(expand_event.call_id.as_deref(), Some("\"call-8\""));
+    assert_eq!(expand_event["tool"], "expand");
+    assert_eq!(expand_event["call_id"].as_str(), Some("\"call-8\""));
     assert_eq!(
-        expand_event.session_id.as_deref(),
+        expand_event["session_id"].as_str(),
         Some(engine.session_id())
     );
+    let expand_refs = event_ref_ids(expand_event);
     assert!(
-        expand_event.ref_ids.iter().any(matches_visible_ref),
-        "expand event refs {:?} must carry the expanded ref {ref_id} for attribution",
-        expand_event.ref_ids
+        expand_refs.iter().any(|full| matches_visible_ref(full)),
+        "expand event refs {expand_refs:?} must carry the expanded ref {ref_id} for attribution"
     );
 
     let string_id_event = &lines[2];
-    assert_eq!(string_id_event.tool, "read");
-    assert_eq!(string_id_event.call_id.as_deref(), Some("\"7\""));
+    assert_eq!(string_id_event["tool"], "read");
+    assert_eq!(string_id_event["call_id"].as_str(), Some("\"7\""));
     assert_ne!(
-        read_event.call_id, string_id_event.call_id,
+        read_event["call_id"], string_id_event["call_id"],
         "numeric JSON-RPC id 7 and string id \"7\" must not collide"
     );
     assert!(
-        expand_event.recovery_tokens > 0,
+        expand_event["recovery_tokens"].as_u64().unwrap_or(0) > 0,
         "recovery tokens must be charged on the MCP surface"
     );
 }

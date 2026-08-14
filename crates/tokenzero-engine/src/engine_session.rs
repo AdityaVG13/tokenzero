@@ -201,6 +201,42 @@ impl TokenZeroEngine {
         }
     }
 
+    /// Best-effort Pulse write for a served tool call. Surfaces must not
+    /// depend on tokenzero-pulse; session_id attribution lives here.
+    pub fn record_tool_pulse(
+        &self,
+        tool: &str,
+        response: &ToolResponse,
+        call_id: Option<String>,
+        extra_ref_ids: Vec<String>,
+    ) {
+        let (Some(root), Some(accounting)) = (
+            self.config.allowed_roots.first(),
+            response.accounting.as_ref(),
+        ) else {
+            return;
+        };
+        let mut ref_ids: Vec<String> = response
+            .refs
+            .iter()
+            .map(|record| record.ref_id.clone())
+            .collect();
+        ref_ids.extend(extra_ref_ids);
+        let mut event = tokenzero_pulse::PulseEvent::tool_call(
+            tool,
+            response.mode.as_deref().unwrap_or("hybrid"),
+            accounting.raw_tokens,
+            accounting.visible_tokens,
+            accounting.recovery_tokens,
+            response.refs.len(),
+            0,
+            None,
+        )
+        .with_attribution(Some(self.session_id().to_string()), call_id, ref_ids);
+        event.failure = response.error.is_some();
+        let _ = tokenzero_pulse::record_event(&tokenzero_pulse::default_ledger_path(root), &event);
+    }
+
     /// Snapshot served by `resource://tokenzero/metrics`.
     pub fn tool_metrics_snapshot(&self) -> Value {
         let mut snap = self.metrics.snapshot();

@@ -2895,7 +2895,6 @@ dependencies = [
  "thiserror",
  "tokenzero-core",
  "tokenzero-engine",
- "tokenzero-pulse",
  "tokenzero-recovery",
  "zero-abi",
  "zero-mcp",

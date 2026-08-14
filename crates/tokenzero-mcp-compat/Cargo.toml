@@ -29,7 +29,6 @@ similar.workspace = true
 thiserror.workspace = true
 tempfile.workspace = true
 tokenzero-core = { path = "../tokenzero-core", version = "1.0.2" }
-tokenzero-pulse = { path = "../tokenzero-pulse", version = "1.0.2" }
 tokenzero-recovery = { path = "../tokenzero-recovery", version = "1.0.2" }
 tokenzero-engine = { path = "../tokenzero-engine", version = "1.0.2" }
 zero-abi.workspace = true

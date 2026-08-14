@@ -67,12 +67,9 @@ fn dispatch_gated_tool(
     Ok(mcp_tool_response(response))
 }
 
-/// Pulse-account every MCP `tools/call`, including `tz_expand`. Without this
-/// the MCP surface — the main integration surface — wrote no Pulse events,
-/// so expand-time recovery was never charged back to the original serve and
-/// "savings after recovery" did not hold for agent-routed usage. Session,
-/// call, and ref ids make that attribution joinable. Best-effort: accounting
-/// must never fail the call.
+/// Pulse-account every MCP `tools/call`, including `tz_expand`. Engine owns
+/// the Pulse write (session_id attribution). Expand still forwards the
+/// request ref so recovery can join the original serve. Best-effort.
 fn record_mcp_pulse(
     engine: &TokenZeroEngine,
     canonical: &str,
@@ -80,35 +77,15 @@ fn record_mcp_pulse(
     response: &ToolResponse,
     call_id: Option<String>,
 ) {
-    let (Some(root), Some(accounting)) = (
-        engine.config.allowed_roots.first(),
-        response.accounting.as_ref(),
-    ) else {
-        return;
+    let extra_ref_ids = if canonical == "expand" {
+        args.get("ref")
+            .and_then(Value::as_str)
+            .map(|id| vec![id.to_string()])
+            .unwrap_or_default()
+    } else {
+        Vec::new()
     };
-    let mut ref_ids: Vec<String> = response
-        .refs
-        .iter()
-        .map(|record| record.ref_id.clone())
-        .collect();
-    if canonical == "expand"
-        && let Some(ref_id) = args.get("ref").and_then(Value::as_str)
-    {
-        ref_ids.push(ref_id.to_string());
-    }
-    let mut event = tokenzero_pulse::PulseEvent::tool_call(
-        canonical,
-        response.mode.as_deref().unwrap_or("hybrid"),
-        accounting.raw_tokens,
-        accounting.visible_tokens,
-        accounting.recovery_tokens,
-        response.refs.len(),
-        0,
-        None,
-    )
-    .with_attribution(Some(engine.session_id().to_string()), call_id, ref_ids);
-    event.failure = response.error.is_some();
-    let _ = tokenzero_pulse::record_event(&tokenzero_pulse::default_ledger_path(root), &event);
+    engine.record_tool_pulse(canonical, response, call_id, extra_ref_ids);
 }
 
 fn record_opt_in_mcp_usage(engine: &TokenZeroEngine, response: &ToolResponse) {
