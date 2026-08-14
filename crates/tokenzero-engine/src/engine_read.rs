@@ -125,6 +125,9 @@ impl TokenZeroEngine {
         // only safe when the refs are actually recoverable.
         let mut substitutions: Vec<PendingSubstitution> = Vec::new();
         let mut stale_store_hit = false;
+        // Append-never-rewrite slots for capsules formed by this call
+        // (ZS-VIEW-002): the same causal key may only ever hold one payload.
+        let mut capsule_slots = tokenzero_core::model_artifacts::AppendOnlyCapsuleSlots::new();
         let path_count = paths.len();
         for path in paths.iter().take(max_files) {
             let mut acc = ReadPathAcc {
@@ -150,6 +153,7 @@ impl TokenZeroEngine {
                 max_visible_tokens,
                 &options,
                 &mut store,
+                &mut capsule_slots,
                 &mut acc,
             ) {
                 return response;
@@ -283,6 +287,7 @@ impl TokenZeroEngine {
         max_visible_tokens: usize,
         options: &ServeOptions,
         store: &mut RecoveryStore,
+        capsule_slots: &mut tokenzero_core::model_artifacts::AppendOnlyCapsuleSlots,
         acc: &mut ReadPathAcc<'_>,
     ) -> Result<(), ToolResponse> {
         if !self.path_allowed(path) {
@@ -381,6 +386,35 @@ impl TokenZeroEngine {
         };
         let part_text = capsule.text;
         let part_tokens = capsule.visible_tokens;
+        // Production formation (ZS-VIEW-002): form the real ModelCapsule
+        // artifact with its formation receipt. The plain Capsule above stays
+        // authoritative for the visible render; the formed capsule is the
+        // production artifact binding constructor, contract root, dependency
+        // roots (blob/file store refs), payload root, and epoch, exposed to
+        // the caller as a content-addressed ref. Formation failures that do
+        // not violate the append-never-rewrite policy degrade to no capsule
+        // ref (e.g. passthrough payloads beyond the capsule render bound), so
+        // reads never fail because an optional artifact could not be formed.
+        // A same-key different-bytes re-formation fails loud: that is the
+        // append-never-rewrite violation.
+        if let Ok(formed) = Self::form_read_model_capsule(
+            path,
+            source_start,
+            source_end,
+            line_count,
+            &stored,
+            &part_text,
+            part_tokens,
+        ) {
+            if let Err(error) = capsule_slots.record(&formed) {
+                return Err(capsule_error_response("read", error.to_string()));
+            }
+            acc.refs.push(ref_record(
+                "capsule",
+                format!("tz://capsule/{}", formed.digest().to_hex()),
+                part_text.len(),
+            ));
+        }
         // Session redundancy layer (docs/codemode.md §5). Zero-payload
         // notes are cheap and stay untouched: empty payloads skip the
         // layer entirely (notes are never deduped).
@@ -457,8 +491,78 @@ impl TokenZeroEngine {
         acc.visible_parts.push(part_text);
         Ok(())
     }
+
+    /// Form the production ModelCapsule artifact for one read path
+    /// (ZS-VIEW-002). The causal key is the path+range slot, so a changed
+    /// payload under the same key is a rewrite, never a silent replacement.
+    /// The engine links no provider tokenizer yet (ZS-VIEW-008): profile and
+    /// tokenizer identities are the canonical absent markers, map digests are
+    /// byte-identity digests, and token counts are the visible-token counts.
+    /// The receipt binds constructor, key contract root, store refs, and
+    /// payload root; `from_formed` refuses a receipt that does not bind the
+    /// actual payload.
+    pub fn form_read_model_capsule(
+        path: &Path,
+        source_start: Option<usize>,
+        source_end: Option<usize>,
+        line_count: usize,
+        stored: &StoredPayload,
+        payload: &str,
+        payload_tokens: usize,
+    ) -> Result<tokenzero_core::model_artifacts::ModelCapsule, tokenzero_core::model_artifacts::ModelArtifactError> {
+        use tokenzero_core::model_artifacts::{
+            CapsuleCausalKey, ModelArtifactError, ModelCapsule, ModelCapsuleFormationReceipt,
+        };
+        let blob_hex = stored
+            .blob_ref
+            .strip_prefix("tz://blob/")
+            .filter(|digest| digest.len() == 64)
+            .ok_or_else(|| ModelArtifactError::InvalidBlobRef(stored.blob_ref.clone()))?;
+        let source_root = zero_abi::DigestV1::from_hex(blob_hex)
+            .map_err(|_| ModelArtifactError::InvalidBlobRef(stored.blob_ref.clone()))?;
+        let causal_key = CapsuleCausalKey::new(format!(
+            "{}:{}..{}",
+            path.display(),
+            source_start.unwrap_or(1),
+            source_end.unwrap_or(line_count),
+        ))?;
+        let contract_root = causal_key.contract_root()?;
+        let payload_root = ModelCapsule::payload_digest(payload.as_bytes());
+        // Evidence refs must be portable ZeroRefs (blob kind); the store's
+        // engine-owned file ref is carried in the receipt dependency roots.
+        let blob_ref = stored.blob_ref.clone();
+        let file_ref = stored.file_ref.clone();
+        let receipt = ModelCapsuleFormationReceipt::new(
+            "tokenzero-engine.read-one-path.v1",
+            contract_root,
+            vec![file_ref.clone(), blob_ref.clone()],
+            payload_root,
+            0,
+        )?;
+        let payload_tokens = u64::try_from(payload_tokens)
+            .map_err(|_| ModelArtifactError::LengthOverflow)?;
+        ModelCapsule::from_formed(
+            causal_key,
+            receipt,
+            source_root,
+            ModelCapsule::absent_model_profile_digest(),
+            ModelCapsule::absent_tokenizer_digest(),
+            vec![blob_ref],
+            Vec::new(),
+            payload.as_bytes(),
+            payload_root,
+            payload_tokens,
+            &[],
+            ModelCapsule::payload_digest(&[]),
+            0,
+        )
+    }
 }
 
 #[cfg(test)]
 #[path = "../../../tests/engine/inline/engine_read__capsule_policy_tests.rs"]
 mod capsule_policy_tests;
+
+#[cfg(test)]
+#[path = "../../../tests/engine/inline/engine_read__formation_receipt_tests.rs"]
+mod formation_receipt_tests;

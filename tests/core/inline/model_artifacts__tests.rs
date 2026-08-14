@@ -195,4 +195,167 @@ fn capsule_digest_is_canonical_and_provider_locked() {
         ),
         Err(ModelArtifactError::TokenizerIdentityMismatch)
     );
+
+    // The core constructor forms a content-addressed causal key and a
+    // receipt binding the payload: identical inputs, identical receipts.
+    let receipt = one.formation_receipt();
+    assert_eq!(receipt.constructor_identity, "tokenzero-core.model-capsule.v1");
+    assert_eq!(receipt.epoch, 0);
+    assert_eq!(
+        receipt.payload_root,
+        ModelCapsule::payload_digest(b"sys:ask")
+    );
+    assert!(receipt.verify_payload(ModelCapsule::payload_digest(one.render().as_slice())));
+    assert_eq!(one.causal_key(), reordered.causal_key());
+    assert_eq!(one.causal_key().as_str(), format!("tz://blob/{}", one.source_root_digest().to_hex()));
+}
+
+#[test]
+fn formation_receipt_is_canonical_and_rejects_relabeled_payloads() {
+    let payload = DigestV1::from_bytes([1; 32]);
+    let other_payload = DigestV1::from_bytes([2; 32]);
+    let contract = DigestV1::from_bytes([3; 32]);
+    let receipt = ModelCapsuleFormationReceipt::new(
+        "fixture.constructor.v1",
+        contract,
+        vec!["tz://blob/dep-a".into(), "tz://blob/dep-b".into()],
+        payload,
+        7,
+    )
+    .unwrap();
+
+    // Exact payload verifies; a relabeled payload fails the binding.
+    assert!(receipt.verify_payload(payload));
+    assert!(!receipt.verify_payload(other_payload));
+
+    // The receipt is digest-canonical: any field change moves the root.
+    let root = receipt.receipt_digest().unwrap();
+    let mut tampered = receipt.clone();
+    tampered.epoch = 99;
+    assert_ne!(tampered.receipt_digest().unwrap(), root);
+    let mut tampered_root = receipt.clone();
+    tampered_root.contract_root = other_payload;
+    assert_ne!(tampered_root.receipt_digest().unwrap(), root);
+
+    // Unsupported versions and empty fields fail loud.
+    let mut bad_version = receipt.clone();
+    bad_version.receipt_version = 99;
+    assert!(matches!(
+        bad_version.receipt_digest(),
+        Err(ModelArtifactError::UnsupportedReceiptVersion { actual: 99 })
+    ));
+    assert!(matches!(
+        ModelCapsuleFormationReceipt::new("", contract, Vec::new(), payload, 0),
+        Err(ModelArtifactError::EmptyConstructorIdentity)
+    ));
+    assert!(matches!(
+        ModelCapsuleFormationReceipt::new("c", contract, vec!["".into()], payload, 0),
+        Err(ModelArtifactError::EmptyDependencyRoot)
+    ));
+    assert!(matches!(
+        CapsuleCausalKey::new(""),
+        Err(ModelArtifactError::EmptyCausalKey)
+    ));
+
+    // Serde round-trip preserves the receipt and rejects unknown fields.
+    let encoded = serde_json::to_value(&receipt).unwrap();
+    assert_eq!(
+        serde_json::from_value::<ModelCapsuleFormationReceipt>(encoded.clone()).unwrap(),
+        receipt
+    );
+    let mut tampered_json = encoded;
+    tampered_json["epoch"] = serde_json::json!(8);
+    assert_ne!(
+        serde_json::from_value::<ModelCapsuleFormationReceipt>(tampered_json).unwrap(),
+        receipt
+    );
+}
+
+#[test]
+fn formed_capsule_receipt_must_bind_payload_and_slots_reject_rewrites() {
+    let key = CapsuleCausalKey::new("fixture:1..2").unwrap();
+    let other_key = CapsuleCausalKey::new("fixture:3..4").unwrap();
+    let blob_a = format!("tz://blob/{}", content_hash_hex(b"alpha"));
+    let blob_b = format!("tz://blob/{}", content_hash_hex(b"beta"));
+    let source_root = DigestV1::from_bytes([8; 32]);
+
+    let form = |key: &CapsuleCausalKey, payload: &[u8], dep: String| {
+        let contract_root = key.contract_root().unwrap();
+        let payload_root = ModelCapsule::payload_digest(payload);
+        let receipt = ModelCapsuleFormationReceipt::new(
+            "fixture.formed.v1",
+            contract_root,
+            vec![dep.clone()],
+            payload_root,
+            0,
+        )
+        .unwrap();
+        ModelCapsule::from_formed(
+            key.clone(),
+            receipt,
+            source_root,
+            ModelCapsule::absent_model_profile_digest(),
+            ModelCapsule::absent_tokenizer_digest(),
+            vec![dep],
+            Vec::new(),
+            payload,
+            payload_root,
+            u64::try_from(payload.len()).unwrap(),
+            &[],
+            ModelCapsule::payload_digest(&[]),
+            0,
+        )
+        .unwrap()
+    };
+
+    let alpha = form(&key, b"alpha", blob_a.clone());
+    assert!(alpha
+        .formation_receipt()
+        .verify_payload(ModelCapsule::payload_digest(alpha.render().as_slice())));
+
+    // A relabeled payload (receipt binds beta, capsule carries alpha) fails
+    // loud at formation: append-never-rewrite starts at construction.
+    let contract_root = key.contract_root().unwrap();
+    let beta_root = ModelCapsule::payload_digest(b"beta");
+    let relabeled_receipt = ModelCapsuleFormationReceipt::new(
+        "fixture.formed.v1",
+        contract_root,
+        vec![blob_a.clone()],
+        beta_root,
+        0,
+    )
+    .unwrap();
+    assert!(matches!(
+        ModelCapsule::from_formed(
+            key.clone(),
+            relabeled_receipt,
+            source_root,
+            ModelCapsule::absent_model_profile_digest(),
+            ModelCapsule::absent_tokenizer_digest(),
+            vec![blob_a.clone()],
+            Vec::new(),
+            b"alpha",
+            ModelCapsule::payload_digest(b"alpha"),
+            5,
+            &[],
+            ModelCapsule::payload_digest(&[]),
+            0,
+        ),
+        Err(ModelArtifactError::CapsuleReceiptPayloadMismatch { .. })
+    ));
+
+    // Append-never-rewrite: same key + different bytes fails loud; identical
+    // re-record is idempotent; a different key is a fresh slot.
+    let mut slots = AppendOnlyCapsuleSlots::new();
+    slots.record(&alpha).unwrap();
+    slots.record(&alpha).unwrap();
+    let beta = form(&key, b"beta", blob_b.clone());
+    assert!(matches!(
+        slots.record(&beta),
+        Err(ModelArtifactError::CapsuleCausalKeyRewrite { key }) if key == "fixture:1..2"
+    ));
+    let other = form(&other_key, b"gamma", blob_a.clone());
+    slots.record(&other).unwrap();
+    assert_eq!(slots.len(), 2);
+    assert!(!slots.is_empty());
 }

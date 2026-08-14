@@ -91,6 +91,20 @@ pub enum ModelArtifactError {
     },
     InvalidEvidenceRef(String),
     NoncanonicalEvidenceRef(String),
+    EmptyConstructorIdentity,
+    EmptyDependencyRoot,
+    EmptyCausalKey,
+    InvalidBlobRef(String),
+    CapsuleReceiptPayloadMismatch {
+        expected: String,
+        actual: String,
+    },
+    CapsuleCausalKeyRewrite {
+        key: String,
+    },
+    UnsupportedReceiptVersion {
+        actual: u16,
+    },
 }
 
 impl fmt::Display for ModelArtifactError {
@@ -515,6 +529,152 @@ impl TokenPage {
     }
 }
 
+/// First formation-receipt version (mirrors hub `PayloadFormationReceiptV1`
+/// versioning; the hub remains the authority for the receipt grammar).
+pub const MODEL_CAPSULE_RECEIPT_VERSION_V1: u16 = 1;
+
+/// Logical slot a model capsule was formed for. Two capsules with the same
+/// causal key and different payload digests are a rewrite, never a silent
+/// replacement (append-never-rewrite, ZS-VIEW-002 acceptance).
+#[derive(Clone, Debug, Eq, Hash, PartialEq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct CapsuleCausalKey(String);
+
+impl CapsuleCausalKey {
+    /// Build a key from a non-empty logical anchor (path+range identity for
+    /// engine-formed capsules; content address for core-formed capsules).
+    pub fn new(anchor: impl Into<String>) -> Result<Self, ModelArtifactError> {
+        let anchor = anchor.into();
+        if anchor.is_empty() {
+            return Err(ModelArtifactError::EmptyCausalKey);
+        }
+        Ok(Self(anchor))
+    }
+
+    /// Content-addressed slot: identical bytes always map to the same key.
+    pub fn from_source_root(source_root: DigestV1) -> Self {
+        Self(format!("tz://blob/{}", source_root.to_hex()))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    /// Contract root binding this key: any key change produces a different
+    /// root, so a receipt can never be relabeled across slots.
+    pub fn contract_root(&self) -> Result<DigestV1, ModelArtifactError> {
+        let mut bytes = b"TOKENZERO-CAPSULE-CONTRACT-V1".to_vec();
+        put_string(&mut bytes, &self.0)?;
+        Ok(digest(&bytes))
+    }
+}
+
+/// Formation receipt binding a model capsule to its constructor, contract
+/// root, dependency roots, payload root, and epoch. Local mirror of the hub
+/// `PayloadFormationReceiptV1` vocabulary; the hub remains the grammar
+/// authority (ZS-VIEW-002: "hub only for receipt grammar").
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ModelCapsuleFormationReceipt {
+    pub receipt_version: u16,
+    pub constructor_identity: String,
+    pub contract_root: DigestV1,
+    pub dependency_roots: Vec<String>,
+    pub payload_root: DigestV1,
+    pub epoch: u64,
+}
+
+impl ModelCapsuleFormationReceipt {
+    pub fn new(
+        constructor_identity: impl Into<String>,
+        contract_root: DigestV1,
+        dependency_roots: Vec<String>,
+        payload_root: DigestV1,
+        epoch: u64,
+    ) -> Result<Self, ModelArtifactError> {
+        let constructor_identity = constructor_identity.into();
+        if constructor_identity.is_empty() {
+            return Err(ModelArtifactError::EmptyConstructorIdentity);
+        }
+        if dependency_roots.iter().any(|root| root.is_empty()) {
+            return Err(ModelArtifactError::EmptyDependencyRoot);
+        }
+        Ok(Self {
+            receipt_version: MODEL_CAPSULE_RECEIPT_VERSION_V1,
+            constructor_identity,
+            contract_root,
+            dependency_roots,
+            payload_root,
+            epoch,
+        })
+    }
+
+    pub fn validate(&self) -> Result<(), ModelArtifactError> {
+        if self.receipt_version != MODEL_CAPSULE_RECEIPT_VERSION_V1 {
+            return Err(ModelArtifactError::UnsupportedReceiptVersion {
+                actual: self.receipt_version,
+            });
+        }
+        if self.constructor_identity.is_empty() {
+            return Err(ModelArtifactError::EmptyConstructorIdentity);
+        }
+        if self.dependency_roots.iter().any(|root| root.is_empty()) {
+            return Err(ModelArtifactError::EmptyDependencyRoot);
+        }
+        Ok(())
+    }
+
+    /// Verify a payload against this receipt: the payload root must match
+    /// exactly. A relabeled payload under this receipt's key fails.
+    pub fn verify_payload(&self, payload_root: DigestV1) -> bool {
+        self.payload_root == payload_root
+    }
+
+    /// Canonical digest of this receipt (domain-separated, length-prefixed).
+    pub fn receipt_digest(&self) -> Result<DigestV1, ModelArtifactError> {
+        self.validate()?;
+        formation_receipt_digest(self)
+    }
+}
+
+/// Append-only policy for formed capsules (append-never-rewrite). Recording
+/// a capsule under a causal key already holding a different payload digest
+/// fails loud instead of silently replacing the earlier formation. Recording
+/// the identical capsule twice is idempotent.
+#[derive(Clone, Debug, Default)]
+pub struct AppendOnlyCapsuleSlots {
+    formed: Vec<(CapsuleCausalKey, DigestV1)>,
+}
+
+impl AppendOnlyCapsuleSlots {
+    pub fn new() -> Self {
+        Self { formed: Vec::new() }
+    }
+
+    pub fn record(&mut self, capsule: &ModelCapsule) -> Result<(), ModelArtifactError> {
+        let key = capsule.causal_key();
+        let digest = capsule.digest();
+        if let Some((_, previous)) = self.formed.iter().find(|(existing, _)| existing == key) {
+            if *previous != digest {
+                return Err(ModelArtifactError::CapsuleCausalKeyRewrite {
+                    key: key.as_str().to_string(),
+                });
+            }
+            return Ok(());
+        }
+        self.formed.push((key.clone(), digest));
+        Ok(())
+    }
+
+    pub fn len(&self) -> usize {
+        self.formed.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.formed.is_empty()
+    }
+}
+
 /// Canonical model-facing capsule: exact prefix/tail bytes plus evidence and pages.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct ModelCapsule {
@@ -527,6 +687,8 @@ pub struct ModelCapsule {
     dynamic_tail: Vec<u8>,
     stable_prefix_tokens: u64,
     dynamic_tail_tokens: u64,
+    causal_key: CapsuleCausalKey,
+    formation_receipt: ModelCapsuleFormationReceipt,
     digest: DigestV1,
 }
 
@@ -596,6 +758,33 @@ impl ModelCapsule {
                 limit: MAX_CAPSULE_RENDER_BYTES,
             });
         }
+        // Formation binding (ZS-VIEW-002): this core constructor forms a
+        // content-addressed slot and a receipt binding constructor identity,
+        // contract root (model profile + tokenizer + source), dependency
+        // roots (evidence refs and exact-map digests), payload root, and
+        // epoch. Epoch 0 is truthful here: each slot has exactly one
+        // formation, and any re-formation under the same key is rejected by
+        // the append-never-rewrite policy.
+        let causal_key = CapsuleCausalKey::from_source_root(source_root_digest);
+        let mut dependency_roots: Vec<String> = evidence_refs.clone();
+        dependency_roots.extend(
+            token_page_digests
+                .iter()
+                .map(|page| format!("tz://capsule-page/{}", page.to_hex())),
+        );
+        dependency_roots.push(stable_prefix_map_digest.to_hex());
+        dependency_roots.push(dynamic_tail_map_digest.to_hex());
+        let receipt = ModelCapsuleFormationReceipt::new(
+            "tokenzero-core.model-capsule.v1",
+            capsule_contract_root(
+                source_root_digest,
+                model_profile_digest,
+                tokenizer.digest(),
+            )?,
+            dependency_roots,
+            render_payload_digest(&stable_prefix, &dynamic_tail)?,
+            0,
+        )?;
         let capsule_digest = model_capsule_digest(
             source_root_digest,
             model_profile_digest,
@@ -608,6 +797,8 @@ impl ModelCapsule {
             &dynamic_tail,
             stable_prefix_tokens,
             dynamic_tail_tokens,
+            &causal_key,
+            &receipt,
         )?;
         Ok(Self {
             source_root_digest,
@@ -619,8 +810,134 @@ impl ModelCapsule {
             dynamic_tail,
             stable_prefix_tokens,
             dynamic_tail_tokens,
+            causal_key,
+            formation_receipt: receipt,
             digest: capsule_digest,
         })
+    }
+
+    /// Form a capsule in a production context without an exact tokenizer
+    /// adapter. The caller supplies the payload bytes and their digest
+    /// bindings (map digests and token counts); the canonical capsule digest
+    /// and the receipt binding are still computed and verified here. The
+    /// receipt must bind the actual payload: a relabeled payload under a
+    /// different receipt fails loud with [`ModelArtifactError::CapsuleReceiptPayloadMismatch`].
+    ///
+    /// Provenance note (ZS-VIEW-008): production engines do not link a
+    /// provider tokenizer yet, so the supplied map digests are byte-identity
+    /// digests and the token counts are approximate. The exact-tokenizer
+    /// binding arrives with provider-tokenizer wiring; this formation path
+    /// never claims one.
+    #[allow(clippy::too_many_arguments)]
+    pub fn from_formed(
+        causal_key: CapsuleCausalKey,
+        receipt: ModelCapsuleFormationReceipt,
+        source_root_digest: DigestV1,
+        model_profile_digest: DigestV1,
+        tokenizer_identity_digest: DigestV1,
+        mut evidence_refs: Vec<String>,
+        mut token_page_digests: Vec<DigestV1>,
+        stable_prefix: &[u8],
+        stable_prefix_map_digest: DigestV1,
+        stable_prefix_tokens: u64,
+        dynamic_tail: &[u8],
+        dynamic_tail_map_digest: DigestV1,
+        dynamic_tail_tokens: u64,
+    ) -> Result<Self, ModelArtifactError> {
+        if evidence_refs.len() > MAX_CAPSULE_EVIDENCE_REFS {
+            return Err(ModelArtifactError::CapsuleEvidenceLimit {
+                actual: evidence_refs.len(),
+                limit: MAX_CAPSULE_EVIDENCE_REFS,
+            });
+        }
+        for reference in &evidence_refs {
+            let parsed = ZeroRefV1::parse(reference)
+                .map_err(|error| ModelArtifactError::InvalidEvidenceRef(error.to_string()))?;
+            if parsed.to_string() != *reference {
+                return Err(ModelArtifactError::NoncanonicalEvidenceRef(
+                    reference.clone(),
+                ));
+            }
+        }
+        evidence_refs.sort();
+        evidence_refs.dedup();
+
+        if token_page_digests.len() > MAX_CAPSULE_TOKEN_PAGES {
+            return Err(ModelArtifactError::CapsulePageLimit {
+                actual: token_page_digests.len(),
+                limit: MAX_CAPSULE_TOKEN_PAGES,
+            });
+        }
+        token_page_digests.sort();
+        token_page_digests.dedup();
+
+        let render_bytes = stable_prefix
+            .len()
+            .checked_add(dynamic_tail.len())
+            .ok_or(ModelArtifactError::LengthOverflow)?;
+        if render_bytes > MAX_CAPSULE_RENDER_BYTES {
+            return Err(ModelArtifactError::CapsuleRenderByteLimit {
+                actual: render_bytes,
+                limit: MAX_CAPSULE_RENDER_BYTES,
+            });
+        }
+        // Append-never-rewrite starts here: the receipt must bind the exact
+        // render payload this capsule carries, or the formation fails loud.
+        let payload_root = render_payload_digest(stable_prefix, dynamic_tail)?;
+        if !receipt.verify_payload(payload_root) {
+            return Err(ModelArtifactError::CapsuleReceiptPayloadMismatch {
+                expected: receipt.payload_root.to_hex(),
+                actual: payload_root.to_hex(),
+            });
+        }
+        let capsule_digest = model_capsule_digest(
+            source_root_digest,
+            model_profile_digest,
+            tokenizer_identity_digest,
+            &evidence_refs,
+            &token_page_digests,
+            stable_prefix_map_digest,
+            dynamic_tail_map_digest,
+            stable_prefix,
+            dynamic_tail,
+            stable_prefix_tokens,
+            dynamic_tail_tokens,
+            &causal_key,
+            &receipt,
+        )?;
+        Ok(Self {
+            source_root_digest,
+            model_profile_digest,
+            tokenizer_identity_digest,
+            evidence_refs,
+            token_page_digests,
+            stable_prefix: stable_prefix.to_vec(),
+            dynamic_tail: dynamic_tail.to_vec(),
+            stable_prefix_tokens,
+            dynamic_tail_tokens,
+            causal_key,
+            formation_receipt: receipt,
+            digest: capsule_digest,
+        })
+    }
+
+    /// Digest of a capsule payload byte stream (also the engine-path
+    /// byte-identity map digest).
+    pub fn payload_digest(bytes: &[u8]) -> DigestV1 {
+        digest(bytes)
+    }
+
+    /// Canonical "no model profile bound" marker for formations outside a
+    /// provider-model context (engine read path).
+    pub fn absent_model_profile_digest() -> DigestV1 {
+        digest(b"TOKENZERO-ABSENT-MODEL-PROFILE-V1")
+    }
+
+    /// Canonical "no exact tokenizer bound" marker. Exact-tokenizer binding
+    /// arrives with provider-tokenizer wiring (ZS-VIEW-008); formations using
+    /// this marker never claim an exact map.
+    pub fn absent_tokenizer_digest() -> DigestV1 {
+        digest(b"TOKENZERO-ABSENT-TOKENIZER-V1")
     }
 
     pub const fn source_root_digest(&self) -> DigestV1 {
@@ -672,6 +989,17 @@ impl ModelCapsule {
 
     pub const fn digest(&self) -> DigestV1 {
         self.digest
+    }
+
+    /// Logical slot this capsule was formed for (append-never-rewrite key).
+    pub const fn causal_key(&self) -> &CapsuleCausalKey {
+        &self.causal_key
+    }
+
+    /// Formation receipt binding constructor, contract root, dependency
+    /// roots, payload root, and epoch.
+    pub const fn formation_receipt(&self) -> &ModelCapsuleFormationReceipt {
+        &self.formation_receipt
     }
 }
 
@@ -777,6 +1105,8 @@ fn model_capsule_digest(
     dynamic_tail: &[u8],
     stable_prefix_tokens: u64,
     dynamic_tail_tokens: u64,
+    causal_key: &CapsuleCausalKey,
+    receipt: &ModelCapsuleFormationReceipt,
 ) -> Result<DigestV1, ModelArtifactError> {
     let mut bytes = b"TOKENZERO-MODEL-CAPSULE-V1".to_vec();
     bytes.extend_from_slice(source_root.as_bytes());
@@ -804,6 +1134,56 @@ fn model_capsule_digest(
     put_bytes(&mut bytes, dynamic_tail)?;
     bytes.extend_from_slice(&stable_prefix_tokens.to_be_bytes());
     bytes.extend_from_slice(&dynamic_tail_tokens.to_be_bytes());
+    // Causal key + formation receipt participate in the capsule digest: any
+    // slot relabeling or receipt tampering changes the artifact identity.
+    put_string(&mut bytes, causal_key.as_str())?;
+    bytes.extend_from_slice(formation_receipt_digest(receipt)?.as_bytes());
+    Ok(digest(&bytes))
+}
+
+/// Canonical digest of the full render payload (stable prefix + dynamic tail).
+fn render_payload_digest(
+    prefix: &[u8],
+    tail: &[u8],
+) -> Result<DigestV1, ModelArtifactError> {
+    let mut payload = Vec::with_capacity(prefix.len() + tail.len());
+    payload.extend_from_slice(prefix);
+    payload.extend_from_slice(tail);
+    Ok(digest(&payload))
+}
+
+/// Contract root binding source, model profile, and tokenizer identity for
+/// core-formed capsule receipts.
+fn capsule_contract_root(
+    source_root: DigestV1,
+    model_profile: DigestV1,
+    tokenizer: DigestV1,
+) -> Result<DigestV1, ModelArtifactError> {
+    let mut bytes = b"TOKENZERO-MODEL-CAPSULE-CONTRACT-V1".to_vec();
+    bytes.extend_from_slice(source_root.as_bytes());
+    bytes.extend_from_slice(model_profile.as_bytes());
+    bytes.extend_from_slice(tokenizer.as_bytes());
+    Ok(digest(&bytes))
+}
+
+/// Canonical domain-separated, length-prefixed digest of a formation receipt.
+fn formation_receipt_digest(
+    receipt: &ModelCapsuleFormationReceipt,
+) -> Result<DigestV1, ModelArtifactError> {
+    let mut bytes = b"TOKENZERO-MODEL-CAPSULE-FORMATION-RECEIPT-V1".to_vec();
+    bytes.extend_from_slice(&receipt.receipt_version.to_be_bytes());
+    put_string(&mut bytes, &receipt.constructor_identity)?;
+    bytes.extend_from_slice(receipt.contract_root.as_bytes());
+    bytes.extend_from_slice(
+        &u64::try_from(receipt.dependency_roots.len())
+            .map_err(|_| ModelArtifactError::LengthOverflow)?
+            .to_be_bytes(),
+    );
+    for root in &receipt.dependency_roots {
+        put_string(&mut bytes, root)?;
+    }
+    bytes.extend_from_slice(receipt.payload_root.as_bytes());
+    bytes.extend_from_slice(&receipt.epoch.to_be_bytes());
     Ok(digest(&bytes))
 }
 
