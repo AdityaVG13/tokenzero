@@ -162,6 +162,16 @@ pub const MAX_SHELL_TIMEOUT_SECS: u64 = 3600;
 /// away; idle exit remains available as an explicit opt-in.
 pub const DEFAULT_MCP_IDLE_TIMEOUT_SECS: u64 = 0;
 pub const MAX_MCP_IDLE_TIMEOUT_SECS: u64 = 24 * 60 * 60;
+/// Portable one-token response when requested bytes are already prompt-resident.
+/// Surfaces compare against this instead of depending on `tokenzero-recovery`.
+pub const ALREADY_RESIDENT_ATOM: &str =
+    tokenzero_recovery::working_set::ALREADY_RESIDENT_ATOM;
+
+/// True when `text` is the already-resident working-set atom (trim-insensitive).
+pub fn is_already_resident_text(text: &str) -> bool {
+    text.trim() == ALREADY_RESIDENT_ATOM
+}
+
 const SEARCH_VISIT_MULTIPLIER: usize = 500;
 const MIN_SEARCH_VISITED_FILES: usize = 1_000;
 const MAX_SEARCH_VISITED_FILES: usize = 50_000;

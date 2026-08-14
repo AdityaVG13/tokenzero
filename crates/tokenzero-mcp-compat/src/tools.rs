@@ -337,7 +337,7 @@ pub(crate) fn mcp_tool_response(response: ToolResponse) -> Value {
 /// blob/file refs plus visible line numbers).
 fn refs_footer(response: &ToolResponse, text: &str) -> Option<String> {
     if response.refs.is_empty()
-        || text.trim() == tokenzero_recovery::working_set::ALREADY_RESIDENT_ATOM
+        || tokenzero_engine::is_already_resident_text(text)
         || response
             .refs
             .iter()

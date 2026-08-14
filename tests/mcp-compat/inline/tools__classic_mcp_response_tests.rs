@@ -22,11 +22,9 @@ fn opt_in_mcp_usage_writes_only_the_closed_usage_record() {
         .collect::<Vec<_>>();
     fields.sort();
     assert_eq!(fields, ["execution_path", "raw_tokens", "spent_tokens"]);
-    assert!(
-        !engine
-            .config
-            .cache_path
-            .with_file_name("token-amplification.jsonl")
-            .exists()
-    );
+    assert!(!engine
+        .config
+        .cache_path
+        .with_file_name("token-amplification.jsonl")
+        .exists());
 }
