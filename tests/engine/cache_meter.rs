@@ -206,6 +206,7 @@ fn provider_eligibility_and_reported_results_remain_independent() {
             &serde_json::json!({"usage":{"input_tokens":50,"cache_read_input_tokens":50}}),
             pricing(),
             None,
+            None,
         )
         .unwrap();
     assert_eq!(
@@ -225,6 +226,59 @@ fn provider_eligibility_and_reported_results_remain_independent() {
     assert_eq!(report.prefix_eligibility_rate, Some(0.0));
     assert_eq!(report.provider_reported_hit_requests, 1);
     assert_eq!(report.provider_reported_hit_rate, Some(1.0));
+}
+
+#[test]
+fn ttft_route_model_and_cache_key_round_trip_and_absence_stays_absent() {
+    let mut meter = CacheMeter::default();
+    let observed = meter
+        .observe_with_eligibility(
+            CacheProvider::Anthropic,
+            "stable prefix",
+            ProviderCacheEligibility::ineligible(
+                "anthropic-cache-policy-v1",
+                "telemetry test does not evaluate eligibility",
+            )
+            .unwrap(),
+            &serde_json::json!({
+                "model": "claude-3-7-sonnet-20250219",
+                "ttft": 412,
+                "usage": {"input_tokens": 100, "cache_read_input_tokens": 100}
+            }),
+            pricing(),
+            None,
+            Some("anthropic-cache:req-7f3a"),
+        )
+        .unwrap();
+    assert_eq!(observed.ttft_ms, Some(412));
+    assert_eq!(
+        observed.model.as_deref(),
+        Some("claude-3-7-sonnet-20250219")
+    );
+    assert_eq!(observed.route.as_deref(), Some("messages"));
+    assert_eq!(observed.cache_key.as_deref(), Some("anthropic-cache:req-7f3a"));
+    let round_trip: CacheObservation =
+        serde_json::from_value(serde_json::to_value(observed).unwrap()).unwrap();
+    assert_eq!(&round_trip, observed);
+
+    // Absence is recorded as absent: never defaulted to zero or a name.
+    let missing = meter
+        .observe(
+            CacheProvider::OpenAi,
+            "stable prefix",
+            &serde_json::json!({"usage":{"prompt_tokens":50}}),
+            pricing(),
+            None,
+        )
+        .unwrap();
+    assert_eq!(missing.ttft_ms, None);
+    assert_eq!(missing.model, None);
+    assert_eq!(missing.cache_key, None);
+    assert_eq!(missing.route.as_deref(), Some("chat.completions"));
+    let serialized = serde_json::to_value(missing).unwrap();
+    assert!(serialized.get("ttft_ms").is_none());
+    assert!(serialized.get("model").is_none());
+    assert!(serialized.get("cache_key").is_none());
 }
 
 #[test]
