@@ -45,6 +45,7 @@ pub mod metrics;
 pub mod paths;
 /// Profiling-only measurement hooks (`TOKENZERO_PERF_PROFILE`). Not a product surface.
 pub mod perf_profile;
+pub mod prefix_probe;
 pub mod racc_gauge;
 pub mod raw_worker;
 mod recall;
@@ -183,6 +184,12 @@ pub const DIFF_READS_ENV: &str = "TOKENZERO_MCP_DIFF_READS";
 const DIFF_MAX_BYTES: usize = 2 * 1024 * 1024;
 const DIFF_MAX_LINES: usize = 50_000;
 
+pub use ledger::{
+    CountMethodVersion, UNSTAMPED_LEGACY, current_count_method_version,
+};
+pub use prefix_probe::{
+    ArmTrial, HistoryChunk, ProbeArm, ProbeFixture, ProbeReport, QualitySlot, replay_prefix_probe,
+};
 pub use cache_meter::{
     ANTHROPIC_CACHE_DIAGNOSIS_BETA, AnthropicCacheDiagnosisRequest, CacheMeter, CacheMeterError,
     CacheObservation, CachePricing, CacheProvider, CacheSessionReport, CacheSloConfig,

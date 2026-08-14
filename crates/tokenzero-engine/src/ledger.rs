@@ -36,7 +36,7 @@ use std::io::{self, BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Condvar, LazyLock, Mutex, Weak};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
-use tokenzero_core::{Accounting, ToolResponse};
+use tokenzero_core::{Accounting, ToolResponse, active_tokenizer_metadata};
 
 pub const LEDGER_SCHEMA: &str = "tokenzero.ledger.v1";
 pub const LEDGER_SCHEMA_V2: &str = "tokenzero.ledger.v2";
@@ -117,6 +117,70 @@ impl RecoveryCosts {
     }
 }
 
+/// Explicit marker for counts recorded before method stamps existed. The
+/// serde default is this marker, never a plausible tokenizer identity, so
+/// legacy lines can never be mistaken for counts produced by a known method.
+pub const UNSTAMPED_LEGACY: &str = "unstamped-legacy";
+
+/// Method-version stamp carried by every recorded count.
+///
+/// Honest by construction: the `Default` value is the explicit
+/// `unstamped-legacy` marker (with unknown method and zero version), so
+/// legacy ledger lines deserialize to a marker that is clearly not a real
+/// tokenizer identity.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CountMethodVersion {
+    /// Tokenizer family that produced the count ("cl100k", "o200k",
+    /// "sentencepiece") or "none" for the lexical fallback, or the
+    /// `unstamped-legacy` marker for legacy lines.
+    pub tokenizer_family: String,
+    /// Counting method: "average-char-width-estimate", "lexical-split",
+    /// or "unknown" for the legacy marker.
+    pub method: String,
+    /// Version string of the method, e.g. "tokenzero.approximate-count.v1".
+    pub version: String,
+}
+
+impl Default for CountMethodVersion {
+    fn default() -> Self {
+        Self {
+            tokenizer_family: UNSTAMPED_LEGACY.to_string(),
+            method: "unknown".to_string(),
+            version: "0".to_string(),
+        }
+    }
+}
+
+impl CountMethodVersion {
+    /// True only for legacy lines deserialized without a stamp. Real stamps
+    /// produced by [`current_count_method_version`] never return true.
+    pub fn is_legacy_unstamped(&self) -> bool {
+        self.tokenizer_family == UNSTAMPED_LEGACY
+    }
+}
+
+/// The counting-method stamp for counts recorded right now.
+///
+/// Never lies: approximate families are stamped approximate (with their real
+/// family name and the disclosed average-width method), and counts recorded
+/// with no active model are stamped with the lexical-counter identity. The
+/// `unstamped-legacy` marker is only ever produced by serde defaults for
+/// legacy lines.
+pub fn current_count_method_version() -> CountMethodVersion {
+    match tokenzero_core::active_tokenizer_metadata() {
+        Some(metadata) => CountMethodVersion {
+            tokenizer_family: metadata.family.name().to_string(),
+            method: "average-char-width-estimate".to_string(),
+            version: "tokenzero.approximate-count.v1".to_string(),
+        },
+        None => CountMethodVersion {
+            tokenizer_family: "none".to_string(),
+            method: "lexical-split".to_string(),
+            version: "tokenzero.lexical-count.v1".to_string(),
+        },
+    }
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TokenMass {
     pub visible_tokens: u64,
@@ -124,6 +188,10 @@ pub struct TokenMass {
     /// Existing dedup/diff token savings only; never a prevented-read estimate.
     pub prevented_tokens: u64,
     pub saved_bytes: u64,
+    /// Method-version stamp for every recorded count. Legacy lines without a
+    /// stamp deserialize to the explicit `unstamped-legacy` marker.
+    #[serde(default)]
+    pub count_method_version: CountMethodVersion,
 }
 
 /// One served response in the versioned tokenzero.ledger JSONL schema
@@ -335,6 +403,7 @@ impl LedgerWriter {
                 prevented_tokens: get("/dedup/visible_tokens_saved")
                     .saturating_add(get("/diff/visible_tokens_saved")),
                 saved_bytes: get("/session_delta/saved_bytes"),
+                count_method_version: current_count_method_version(),
             },
             eviction_amortization: telemetry
                 .and_then(|value| value.pointer("/working_set_eviction/amortized"))
@@ -1061,3 +1130,7 @@ fn now_ms() -> u64 {
 #[cfg(test)]
 #[path = "../../../tests/engine/inline/ledger__ledger_tests.rs"]
 mod ledger_tests;
+
+#[cfg(test)]
+#[path = "../../../tests/engine/inline/ledger__count_stamp_tests.rs"]
+mod count_stamp_tests;

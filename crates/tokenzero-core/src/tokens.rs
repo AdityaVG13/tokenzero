@@ -179,6 +179,19 @@ pub enum TokenizerFamily {
     SentencePiece,
 }
 
+impl TokenizerFamily {
+    /// Stable lowercase family name, used in count-method stamps so ledger
+    /// records name the exact counting family without depending on Debug
+    /// formatting.
+    pub fn name(self) -> &'static str {
+        match self {
+            TokenizerFamily::Cl100k => "cl100k",
+            TokenizerFamily::O200k => "o200k",
+            TokenizerFamily::SentencePiece => "sentencepiece",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TokenizerMetadata {
     pub family: TokenizerFamily,

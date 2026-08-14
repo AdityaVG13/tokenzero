@@ -74,12 +74,20 @@ name = "engine_irx9_surface_bench"
 path = "../../tests/engine/irx9_surface_bench.rs"
 
 [[test]]
+name = "engine_prefix_probe"
+path = "../../tests/engine/prefix_probe.rs"
+
+[[test]]
 name = "engine_progressive_disclosure"
 path = "../../tests/engine/progressive_disclosure.rs"
 
 [[test]]
 name = "engine_ta_registry"
 path = "../../tests/engine/ta_registry.rs"
+
+[[test]]
+name = "engine_tokenizer_goldens"
+path = "../../tests/engine/provider_tokenizer_goldens.rs"
 
 [[test]]
 name = "engine_warmkeeper"
