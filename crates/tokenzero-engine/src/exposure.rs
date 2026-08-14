@@ -28,10 +28,108 @@ pub struct ExposureRow {
     pub reexpansions: u64,
 }
 
+/// Declared dynamic-envelope segments of a provider-visible history:
+/// 0-based message indexes (e.g. per-request headers or system tail) that
+/// are allowed to differ between successive histories. Everything outside
+/// this declaration is append-only frozen content.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct DynamicEnvelopeExclusion {
+    pub message_indexes: Vec<usize>,
+}
+
+impl DynamicEnvelopeExclusion {
+    /// Strictest posture: no segment may differ between histories.
+    pub fn none() -> Self {
+        Self { message_indexes: Vec::new() }
+    }
+
+    /// Declare the given 0-based message indexes as dynamic envelope
+    /// segments (allowed to differ).
+    pub fn message_indexes(message_indexes: Vec<usize>) -> Self {
+        Self { message_indexes }
+    }
+
+    fn contains(&self, index: usize) -> bool {
+        self.message_indexes.contains(&index)
+    }
+}
+
+/// Fail-loud violation: a successive provider-visible history rewrote
+/// earlier content outside the declared dynamic-envelope exclusion
+/// (ZS-VIEW-005). Providers cache against the earlier history; rewriting
+/// earlier messages would silently invalidate prefix caching.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ProviderHistoryRewrite {
+    /// The successive history is shorter than the earlier one: earlier
+    /// content was dropped instead of extended.
+    Truncated { previous_len: usize, next_len: usize },
+    /// A non-excluded earlier message changed at `index`; `lcp` is the
+    /// message-sequence LCP with the previous history.
+    RewroteMessage {
+        index: usize,
+        lcp: usize,
+        previous: String,
+        rewritten: String,
+    },
+}
+
+/// Append-only provider-visible message-history policy (ZS-VIEW-005;
+/// transcript-policy surface is hub ZS-CONTRACT-003).
+///
+/// Successive histories sent to the provider must extend the previous one:
+/// the longest common prefix of two consecutive histories is the earlier
+/// history itself (every earlier message unchanged, in order, and nothing
+/// dropped). Only segments declared dynamic via [DynamicEnvelopeExclusion]
+/// (e.g. per-request headers, system tail) may differ.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct AppendOnlyHistoryPolicy {
+    dynamic_envelope: DynamicEnvelopeExclusion,
+}
+
+impl AppendOnlyHistoryPolicy {
+    /// Build a policy with the given dynamic-envelope declaration.
+    pub fn new(dynamic_envelope: DynamicEnvelopeExclusion) -> Self {
+        Self { dynamic_envelope }
+    }
+
+    /// Enforce append-only extension of `previous` by `next`. Returns the
+    /// message-sequence LCP length on success; returns a fail-loud
+    /// [ProviderHistoryRewrite] when `next` drops or rewrites earlier
+    /// content outside the declared dynamic-envelope exclusion.
+    pub fn check(
+        &self,
+        previous: &[String],
+        next: &[String],
+    ) -> Result<usize, ProviderHistoryRewrite> {
+        if next.len() < previous.len() {
+            return Err(ProviderHistoryRewrite::Truncated {
+                previous_len: previous.len(),
+                next_len: next.len(),
+            });
+        }
+        let lcp = crate::engine_common::common_prefix_len(previous, next);
+        for index in lcp..previous.len() {
+            if !self.dynamic_envelope.contains(index) && previous[index] != next[index] {
+                return Err(ProviderHistoryRewrite::RewroteMessage {
+                    index,
+                    lcp,
+                    previous: previous[index].clone(),
+                    rewritten: next[index].clone(),
+                });
+            }
+        }
+        Ok(lcp)
+    }
+}
+
 #[derive(Debug, Default)]
 pub struct SessionExposureLedger {
     rows: HashMap<(String, Option<String>), ExposureRow>,
     turn: u64,
+    /// Last provider-visible message history accepted for this session.
+    provider_history: Vec<String>,
+    /// Append-only policy over successive provider-visible histories.
+    history_policy: AppendOnlyHistoryPolicy,
 }
 
 impl SessionExposureLedger {
@@ -76,6 +174,26 @@ impl SessionExposureLedger {
         let row = self.rows.get_mut(&key)?;
         row.reexpansions = row.reexpansions.saturating_add(1);
         Some(row.reexpansions)
+    }
+
+    /// Declare the append-only policy for provider-visible histories (e.g.
+    /// to allow dynamic envelope segments) before recording histories.
+    pub fn set_history_policy(&mut self, policy: AppendOnlyHistoryPolicy) {
+        self.history_policy = policy;
+    }
+
+    /// Record the provider-visible message history for this turn, enforcing
+    /// append-only extension of the previously recorded history (ZS-VIEW-005).
+    /// On success returns the message-sequence LCP with the previous history
+    /// and stores `history`; on violation the ledger keeps the previous
+    /// history unchanged (fail loud, no partial state).
+    pub fn record_provider_history(
+        &mut self,
+        history: Vec<String>,
+    ) -> Result<usize, ProviderHistoryRewrite> {
+        let lcp = self.history_policy.check(&self.provider_history, &history)?;
+        self.provider_history = history;
+        Ok(lcp)
     }
 
     pub fn len(&self) -> usize {

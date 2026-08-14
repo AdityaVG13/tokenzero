@@ -93,6 +93,11 @@ struct ProviderUsageLayout {
     cache_read: CacheReadField,
     cache_creation_key: Option<&'static str>,
     subtract_cached_from_input: bool,
+    route: &'static str,
+    model_key: Option<&'static str>,
+    /// Response-root candidate keys carrying time-to-first-token in
+    /// milliseconds; first present key wins, absence stays absent.
+    ttft_keys: &'static [&'static str],
 }
 
 impl CacheProvider {
@@ -105,6 +110,9 @@ impl CacheProvider {
                 cache_read: CacheReadField::Flat("cache_read_input_tokens"),
                 cache_creation_key: Some("cache_creation_input_tokens"),
                 subtract_cached_from_input: false,
+                route: "messages",
+                model_key: Some("model"),
+                ttft_keys: &["ttft", "time_to_first_token"],
             },
             Self::OpenAi => ProviderUsageLayout {
                 usage_key: "usage",
@@ -117,6 +125,9 @@ impl CacheProvider {
                 },
                 cache_creation_key: None,
                 subtract_cached_from_input: true,
+                route: "chat.completions",
+                model_key: Some("model"),
+                ttft_keys: &["response_time", "ttft", "time_to_first_token"],
             },
             Self::Gemini => ProviderUsageLayout {
                 usage_key: "usageMetadata",
@@ -125,8 +136,36 @@ impl CacheProvider {
                 cache_read: CacheReadField::Flat("cachedContentTokenCount"),
                 cache_creation_key: None,
                 subtract_cached_from_input: true,
+                route: "generateContent",
+                model_key: Some("modelVersion"),
+                ttft_keys: &["ttft", "time_to_first_token"],
             },
         }
+    }
+}
+
+/// Presence-sensitive time-to-first-token in milliseconds. A present field
+/// is recorded verbatim; an absent field is recorded as `None`, never as 0.
+fn read_response_ttft_ms(value: &Value, keys: &[&'static str]) -> Result<Option<u64>, CacheMeterError> {
+    for &key in keys {
+        if let Some(field) = value.get(key) {
+            return field
+                .as_u64()
+                .map(Some)
+                .ok_or(CacheMeterError::InvalidField(key));
+        }
+    }
+    Ok(None)
+}
+
+/// Presence-sensitive model identity from the provider response root.
+fn read_response_model(value: &Value, key: &'static str) -> Result<Option<String>, CacheMeterError> {
+    match value.get(key) {
+        Some(field) => field
+            .as_str()
+            .map(|model| Some(model.to_owned()))
+            .ok_or(CacheMeterError::InvalidField(key)),
+        None => Ok(None),
     }
 }
 
@@ -249,6 +288,19 @@ fn provider_cache_telemetry(
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CacheObservation {
     pub provider: CacheProvider,
+    /// Provider API route used for the request (e.g. `messages`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub route: Option<String>,
+    /// Model identity reported by the provider response, when present.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    /// Presence-sensitive time to first token in milliseconds. Absence is
+    /// recorded as `None`; it is never defaulted to 0.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ttft_ms: Option<u64>,
+    /// Per-observation cache key supplied by the caller, when known.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cache_key: Option<String>,
     pub request_tokens: u64,
     pub stable_prefix_tokens: u64,
     pub churn_depth_tokens: u64,
@@ -345,10 +397,12 @@ impl CacheMeter {
             usage_value,
             pricing,
             diagnosis,
+            None,
         )
     }
 
     /// Observe one request with an explicit provider-policy evaluation.
+    /// `cache_key` is the caller-known per-observation cache key, if any.
     pub fn observe_with_eligibility(
         &mut self,
         provider: CacheProvider,
@@ -357,15 +411,26 @@ impl CacheMeter {
         usage_value: &Value,
         pricing: CachePricing,
         diagnosis: Option<&Value>,
+        cache_key: Option<&str>,
     ) -> Result<&CacheObservation, CacheMeterError> {
         let usage = parse_provider_usage(provider, usage_value)?;
         let provider_telemetry = provider_cache_telemetry(usage, diagnosis)?;
+        let layout = provider.usage_layout();
+        let ttft_ms = read_response_ttft_ms(usage_value, layout.ttft_keys)?;
+        let model = match layout.model_key {
+            Some(key) => read_response_model(usage_value, key)?,
+            None => None,
+        };
         let request_tokens = count_tokens(request) as u64;
         let stable_prefix_tokens = self.previous_request.as_deref().map_or(0, |previous| {
             count_tokens(common_prefix(previous, request)) as u64
         });
         self.observations.push(CacheObservation {
             provider,
+            route: Some(layout.route.to_owned()),
+            model,
+            ttft_ms,
+            cache_key: cache_key.map(str::to_owned),
             request_tokens,
             stable_prefix_tokens,
             churn_depth_tokens: stable_prefix_tokens,

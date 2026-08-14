@@ -34,6 +34,13 @@ pub(super) fn joined_bytes(parts: &[String]) -> usize {
     parts.iter().map(String::len).sum::<usize>() + parts.len().saturating_sub(1) * 2
 }
 
+/// Number of leading equal elements of two slices (longest-common-prefix
+/// length). Shared by cache_meter (consecutive request texts) and exposure
+/// (successive provider-visible message histories).
+pub(super) fn common_prefix_len<T: PartialEq>(left: &[T], right: &[T]) -> usize {
+    left.iter().zip(right).take_while(|(a, b)| a == b).count()
+}
+
 #[cfg(test)]
 #[path = "../../../tests/engine/inline/engine_common__tests.rs"]
 mod tests;
