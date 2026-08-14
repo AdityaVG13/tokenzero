@@ -13,6 +13,8 @@ fn entry(digest: &str, class: &str, bookmark: Option<&str>) -> ActionCacheEntry 
         world_id: None,
         tombstone: false,
         tombstoned_at_unix: None,
+        l3_cold: false,
+        cold_since_unix: None,
     }
 }
 

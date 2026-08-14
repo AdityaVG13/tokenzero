@@ -52,7 +52,11 @@ pub fn observe_with_mode(
         consistency_class: Some(consistency),
     });
     let index = ActionCacheIndex::open(&store_root);
-    let entry = index.get(&key).ok().flatten();
+    // Tenancy scope (ZS-CACHE-015): every write-through is attributed to the
+    // engine's session world, and resolution is world-filtered so an entry
+    // written under one world never resolves under another.
+    let world_id = Some(engine.session_id.clone());
+    let entry = index.resolve(&key, world_id.as_deref()).ok().flatten();
     let result_digest = result_digest(response);
     let in_flight = index.has_in_flight_serve(&key);
     // Without an FSZero journal we cannot prove a bookmark is still live.
@@ -60,8 +64,12 @@ pub fn observe_with_mode(
     let blast_intersect = entry
         .as_ref()
         .is_some_and(|item| item.fszero_bookmark.is_some());
+    // L2-valid / L3-cold entries must refetch before use: never claim a
+    // would-have-hit (nor full savings) for a blob that is no longer resident
+    // (ZS-CACHE-013). The write-through below restores L3 on identical bytes.
+    let entry_for_classification = entry.as_ref().filter(|item| !item.l3_cold);
     let status =
-        classify_would_be_status(entry.as_ref(), &result_digest, in_flight, blast_intersect);
+        classify_would_be_status(entry_for_classification, &result_digest, in_flight, blast_intersect);
     let result_tokens = response
         .accounting
         .as_ref()
@@ -96,9 +104,11 @@ pub fn observe_with_mode(
         dep_closure_ref: None,
         class: consistency.as_str().to_string(),
         verified: response.status == "ok",
-        world_id: None,
+        world_id: world_id.clone(),
         tombstone: false,
         tombstoned_at_unix: None,
+        l3_cold: false,
+        cold_since_unix: None,
     });
 }
 

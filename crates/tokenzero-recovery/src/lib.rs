@@ -61,8 +61,8 @@ pub use memory_verbs::{MemoryVerb, MemoryVerbEffect, MemoryVerbRequest, describe
 
 pub use action_cache::{
     ACTIONCACHE_GC_GRACE_SECS, ACTIONCACHE_REL_DIR, ActionCacheEntry, ActionCacheError,
-    ActionCacheIndex, BlobEvictionPlan, ServedArtifact, action_cache_protects_hash,
-    artifact_full_hash,
+    ActionCacheIndex, BlobEvictionPlan, EvictionSlackGuard, ServedArtifact,
+    action_cache_protects_hash, artifact_full_hash,
 };
 pub use cachezero::{
     CACHEZERO_ENV, CACHEZERO_GRADUATION_PCT, CACHEZERO_MODE_ENV, CACHEZERO_REL_DIR,

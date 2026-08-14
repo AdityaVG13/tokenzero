@@ -22,6 +22,8 @@ fn tzgvxc_actioncache_live_ref_is_a_gc_root() {
             world_id: None,
             tombstone: false,
             tombstoned_at_unix: None,
+            l3_cold: false,
+            cold_since_unix: None,
         })
         .unwrap();
     let cas = SharedCas::new(root.path().to_path_buf());
