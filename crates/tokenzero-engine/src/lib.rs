@@ -11,6 +11,7 @@
 //! [`dispatch_operation`] exactly once per domain op.
 
 pub mod action_cache_key;
+pub mod admission;
 pub mod binary_resolve;
 pub mod cache_crossover;
 pub mod cache_maintenance;
@@ -40,6 +41,7 @@ pub mod expand_params;
 pub mod exposure;
 mod fetch_cache;
 mod fetch_guard;
+pub mod frontier;
 pub mod ledger;
 pub mod metrics;
 pub mod paths;
@@ -67,6 +69,10 @@ pub use action_cache_key::{
     ACTIONCACHE_KEY_SCHEMA, ActionCacheKeyInput, ConsistencyClass, action_cache_envelope,
     action_cache_key,
 };
+pub use admission::{
+    ADMISSION_BYTES_PER_TOKEN, ADMISSION_SCHEMA_V1, AdmissionDecision, AdmissionEstimator,
+    AdmissionPolicy, AdmissionReason,
+};
 pub use binary_resolve::{
     BinaryResolution, ResolveError, ResolvedBinary, TOKENZERO_BIN_ENV, TOKENZERO_CURL_PATH_ENV,
     TOKENZERO_RG_PATH_ENV, engine_binaries_json, resolve_all_engine_binaries, resolve_curl_binary,
@@ -74,8 +80,8 @@ pub use binary_resolve::{
 };
 pub use cache_crossover::{
     CACHE_CROSSOVER_SCHEMA_V1, CacheContentClass, CacheCrossoverAction, CacheCrossoverError,
-    CacheCrossoverInput, CacheCrossoverReason, CacheCrossoverReceipt, TOKEN_COST_PPM_SCALE,
-    decide_cache_crossover,
+    CacheCrossoverInput, CacheCrossoverReason, CacheCrossoverReceipt, EmissionCrossoverConfig,
+    TOKEN_COST_PPM_SCALE, decide_cache_crossover,
 };
 pub use cache_maintenance::{
     cache_maintenance, cache_maintenance_coalesced, session_pack, shell_spill_dir,
@@ -184,12 +190,6 @@ pub const DIFF_READS_ENV: &str = "TOKENZERO_MCP_DIFF_READS";
 const DIFF_MAX_BYTES: usize = 2 * 1024 * 1024;
 const DIFF_MAX_LINES: usize = 50_000;
 
-pub use ledger::{
-    CountMethodVersion, UNSTAMPED_LEGACY, current_count_method_version,
-};
-pub use prefix_probe::{
-    ArmTrial, HistoryChunk, ProbeArm, ProbeFixture, ProbeReport, QualitySlot, replay_prefix_probe,
-};
 pub use cache_meter::{
     ANTHROPIC_CACHE_DIAGNOSIS_BETA, AnthropicCacheDiagnosisRequest, CacheMeter, CacheMeterError,
     CacheObservation, CachePricing, CacheProvider, CacheSessionReport, CacheSloConfig,
@@ -211,6 +211,14 @@ pub use eviction_scheduler::{
     OPENAI_MAX_RETENTION_SECONDS, PrefixTier, provider_breakpoints, schedule_evictions,
     simulate_eviction_replay, ttl_from_gaps,
 };
+pub use frontier::{
+    FRONTIER_OPTIMIZER_NAME, FRONTIER_PLAN_SCHEMA_V1, FrontierBudgets, FrontierPlan,
+    FrontierPlanObject, plan_frontier_resident_set,
+};
+pub use ledger::{CountMethodVersion, UNSTAMPED_LEGACY, current_count_method_version};
+pub use prefix_probe::{
+    ArmTrial, HistoryChunk, ProbeArm, ProbeFixture, ProbeReport, QualitySlot, replay_prefix_probe,
+};
 pub use usage_telemetry::{
     AmplificationRecord, DirectionTokens, ExecutionPath, OperationClass, TA_REGISTRY,
     TaClassReport, TaCostLockViolation, TelemetryInspection, UsageRecord, enforce_ta_cost_locks,
@@ -219,8 +227,9 @@ pub use usage_telemetry::{
     usage_telemetry_path_for_cache,
 };
 pub use warmkeeper::{
-    WarmDecision, WarmDecisionKind, WarmLane, WarmLaneTier, WarmReplayLane, WarmSimulationReport,
-    ZeroOutputTouch, schedule_rewarms, simulate_warmkeeper,
+    HotPlacement, PrefetchTarget, WarmDecision, WarmDecisionKind, WarmLane, WarmLaneTier,
+    WarmReplayLane, WarmSimulationReport, ZeroOutputTouch, schedule_rewarms,
+    select_prefetch_targets, simulate_warmkeeper,
 };
 
 /// One find/replace hunk for [`TokenZeroEngine::edit`]. `find` must match the

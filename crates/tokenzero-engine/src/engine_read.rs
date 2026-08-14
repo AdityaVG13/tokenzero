@@ -5,6 +5,12 @@ struct ReadPathAcc<'a> {
     visible_parts: &'a mut Vec<String>,
     raw_visible_parts: &'a mut Vec<String>,
     refs: &'a mut Vec<tokenzero_core::RefRecord>,
+    /// Formation-receipt refs (ZS-VIEW-002). Kept out of the prune gate:
+    /// `tz://capsule/` refs are digest receipts, not expand targets, so
+    /// `RecoveryStore::has_ref` cannot verify them and they must not decide
+    /// `refs_complete` (V6-T3 defect: every formed read degraded to a raw
+    /// full-text serve because the capsule ref flipped the prune verdict).
+    capsule_refs: &'a mut Vec<tokenzero_core::RefRecord>,
     raw_tokens: &'a mut usize,
     visible_tokens: &'a mut usize,
     content_types: &'a mut Vec<ContentType>,
@@ -110,6 +116,7 @@ impl TokenZeroEngine {
         let mut visible_parts = Vec::new();
         let mut raw_visible_parts = Vec::new();
         let mut refs = Vec::new();
+        let mut capsule_refs = Vec::new();
         let mut raw_tokens = 0usize;
         let mut visible_tokens = 0usize;
         let mut storage_errors = Vec::new();
@@ -134,6 +141,7 @@ impl TokenZeroEngine {
                 visible_parts: &mut visible_parts,
                 raw_visible_parts: &mut raw_visible_parts,
                 refs: &mut refs,
+                capsule_refs: &mut capsule_refs,
                 raw_tokens: &mut raw_tokens,
                 visible_tokens: &mut visible_tokens,
                 content_types: &mut content_types,
@@ -168,6 +176,10 @@ impl TokenZeroEngine {
             visible_parts = raw_visible_parts;
             visible_tokens = raw_tokens;
         }
+        // Formation receipts are advertised after the prune gate: they are
+        // digest receipts, not recoverable refs, so they must not affect
+        // `refs_complete` (see ReadPathAcc::capsule_refs).
+        refs.extend(capsule_refs);
         let full_bytes = joined_bytes(&visible_parts);
         // Dedup/diff notes advertise refs in place of content: apply them
         // only when persistence succeeded AND every ref survived eviction.
@@ -362,11 +374,14 @@ impl TokenZeroEngine {
                 lossy_policy_id: None,
             })
         } else {
-            let capsule_mode = match local_payload_policy(
+            // Capsule admission (ZS-VIEW-006): the default policy keeps the
+            // legacy fixed byte threshold byte-for-byte; the HorizonCost
+            // policy routes the same payload through the estimator. The
+            // blob/file refs recorded above provide the ref handling cost.
+            let capsule_mode = match self.read_payload_admission(
                 text.len(),
-                self.config.capsule_exact_ref_threshold_bytes,
                 mode,
-                true,
+                exact_ref_token_count(&acc.refs),
             ) {
                 LocalPayloadPolicy::Inline => mode,
                 LocalPayloadPolicy::ExactRef => Mode::Exact,
@@ -409,7 +424,7 @@ impl TokenZeroEngine {
             if let Err(error) = capsule_slots.record(&formed) {
                 return Err(capsule_error_response("read", error.to_string()));
             }
-            acc.refs.push(ref_record(
+            acc.capsule_refs.push(ref_record(
                 "capsule",
                 format!("tz://capsule/{}", formed.digest().to_hex()),
                 part_text.len(),
@@ -509,7 +524,10 @@ impl TokenZeroEngine {
         stored: &StoredPayload,
         payload: &str,
         payload_tokens: usize,
-    ) -> Result<tokenzero_core::model_artifacts::ModelCapsule, tokenzero_core::model_artifacts::ModelArtifactError> {
+    ) -> Result<
+        tokenzero_core::model_artifacts::ModelCapsule,
+        tokenzero_core::model_artifacts::ModelArtifactError,
+    > {
         use tokenzero_core::model_artifacts::{
             CapsuleCausalKey, ModelArtifactError, ModelCapsule, ModelCapsuleFormationReceipt,
         };
@@ -539,8 +557,8 @@ impl TokenZeroEngine {
             payload_root,
             0,
         )?;
-        let payload_tokens = u64::try_from(payload_tokens)
-            .map_err(|_| ModelArtifactError::LengthOverflow)?;
+        let payload_tokens =
+            u64::try_from(payload_tokens).map_err(|_| ModelArtifactError::LengthOverflow)?;
         ModelCapsule::from_formed(
             causal_key,
             receipt,
@@ -556,6 +574,39 @@ impl TokenZeroEngine {
             ModelCapsule::payload_digest(&[]),
             0,
         )
+    }
+}
+
+impl TokenZeroEngine {
+    /// Capsule admission for one read payload (ZS-VIEW-006). The default
+    /// `ByteThreshold` policy is the legacy fixed-threshold rule, unchanged;
+    /// `HorizonCost` consults the estimator with replay-default expansion
+    /// probability and horizon (per-call predictions are the estimator
+    /// contract, fed here once replay wiring lands).
+    fn read_payload_admission(
+        &self,
+        payload_bytes: usize,
+        mode: Mode,
+        handling_cost_tokens: usize,
+    ) -> LocalPayloadPolicy {
+        let result = match self.config.admission_policy {
+            AdmissionPolicy::ByteThreshold => local_payload_policy(
+                payload_bytes,
+                self.config.capsule_exact_ref_threshold_bytes,
+                mode,
+                true,
+            ),
+            AdmissionPolicy::HorizonCost => local_payload_policy_estimated(
+                payload_bytes,
+                mode,
+                true,
+                &self.config.admission_estimator,
+                None,
+                None,
+                handling_cost_tokens as u64,
+            ),
+        };
+        result
     }
 }
 

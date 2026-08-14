@@ -87,3 +87,53 @@ fn replay_corpus_ev_gate_beats_no_warm_and_always_warm() {
     );
     assert_eq!(first.decisions[2].kind, WarmDecisionKind::CompatibilityOnly);
 }
+
+/// Prefetch hook (ZS-CACHE-008): high-demand lanes become prefetch targets,
+/// the top quota gets Hot placement, and mismatched demand/lane lengths fail
+/// loud.
+#[test]
+fn prefetch_selects_high_demand_lanes_and_hot_places_top_quota() {
+    let lane = |model: &str, prefix_tokens: u64| WarmLane {
+        provider: CacheProvider::Anthropic,
+        model: model.into(),
+        tier: WarmLaneTier::PaidFrontier,
+        ttl_seconds: 86_400,
+        prefix_tokens,
+        expected_reads_per_ttl: 1.0,
+        pricing: pricing(),
+        last_touch_at_seconds: None,
+    };
+    let lanes = vec![
+        lane("hot-closure", 200_000),
+        lane("warm-closure", 100_000),
+        lane("cold-closure", 50_000),
+    ];
+    let demand = vec![600, 350, 50];
+    let targets = tokenzero_engine::select_prefetch_targets(&lanes, &demand, 100, 1);
+    assert_eq!(targets.len(), 2);
+    assert_eq!(targets[0].model, "hot-closure");
+    assert_eq!(targets[0].placement, tokenzero_engine::HotPlacement::Hot);
+    assert_eq!(targets[0].prefix_tokens, 200_000);
+    assert_eq!(targets[1].model, "warm-closure");
+    assert_eq!(
+        targets[1].placement,
+        tokenzero_engine::HotPlacement::Standard
+    );
+    assert_eq!(targets[1].demand_milli, 350);
+}
+
+#[test]
+#[should_panic(expected = "prefetch demand scores must cover every lane")]
+fn prefetch_mismatched_scores_fail_loud() {
+    let lane = tokenzero_engine::WarmLane {
+        provider: CacheProvider::Anthropic,
+        model: "m".into(),
+        tier: WarmLaneTier::PaidFrontier,
+        ttl_seconds: 86_400,
+        prefix_tokens: 1_000,
+        expected_reads_per_ttl: 1.0,
+        pricing: pricing(),
+        last_touch_at_seconds: None,
+    };
+    let _ = tokenzero_engine::select_prefetch_targets(&[lane], &[], 100, 1);
+}

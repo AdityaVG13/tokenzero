@@ -18,6 +18,9 @@ fn input(provider: CacheProvider) -> CacheCrossoverInput {
         common_overhead_tokens: 375,
         cached_read_multiplier_ppm: 100_000,
         min_cacheable_tokens: 1_000,
+        suffix_size_tokens: 0,
+        compaction_cost_tokens: 0,
+        remaining_reuse_horizon: 1,
     }
 }
 
@@ -153,6 +156,9 @@ fn repository_corpus_measurement_validates_the_compression_side() {
         common_overhead_tokens: 211,
         cached_read_multiplier_ppm: 100_000,
         min_cacheable_tokens: floor,
+        suffix_size_tokens: 0,
+        compaction_cost_tokens: 0,
+        remaining_reuse_horizon: 1,
     };
     let receipt = decide_cache_crossover(&candidate).unwrap();
     assert_eq!(receipt.action, CacheCrossoverAction::Compress);
@@ -163,6 +169,156 @@ fn repository_corpus_measurement_validates_the_compression_side() {
     let wire = serde_json::to_value(&receipt).unwrap();
     assert_eq!(wire["schema"], CACHE_CROSSOVER_SCHEMA_V1);
     assert_eq!(wire["policy_id"], candidate.policy_id);
+}
+
+/// The three V6-T6 inputs at their defaults must reproduce the legacy
+/// single-read receipts exactly: projected costs equal the single-read
+/// totals and the action is unchanged.
+#[test]
+fn horizon_defaults_reproduce_legacy_single_read_receipts() {
+    let candidate = input(CacheProvider::Anthropic);
+    let receipt = decide_cache_crossover(&candidate).unwrap();
+    assert_eq!(receipt.remaining_reuse_horizon, 1);
+    assert_eq!(receipt.suffix_size_tokens, 0);
+    assert_eq!(receipt.compaction_cost_tokens, 0);
+    assert_eq!(
+        receipt.inline_projected_token_cost_ppm,
+        receipt.inline_total_token_cost_ppm
+    );
+    assert_eq!(
+        receipt.compressed_projected_token_cost_ppm,
+        receipt.compressed_total_token_cost_ppm
+    );
+    assert_eq!(
+        receipt.cached_projected_token_cost_ppm,
+        receipt.cached_total_token_cost_ppm
+    );
+    // Legacy outcome for this input: 10000 tokens at d=0.1 beats 1000
+    // compressed.
+    assert_eq!(receipt.action, CacheCrossoverAction::CacheStable);
+}
+
+/// A mutable suffix is paid at full cost on every read and shrinks the
+/// cacheable prefix below the floor: the crossover must stop claiming cache
+/// eligibility and fall back to compress-vs-inline.
+#[test]
+fn suffix_shrinks_cacheable_prefix_and_flips_eligibility() {
+    let mut candidate = input(CacheProvider::Anthropic);
+    candidate.suffix_size_tokens = 9_900; // only 100 tokens cacheable
+    candidate.compressed_tokens = 10_000; // no compression win either
+    let receipt = decide_cache_crossover(&candidate).unwrap();
+    assert!(!receipt.cache_eligible);
+    assert_eq!(receipt.action, CacheCrossoverAction::KeepInline);
+    assert_eq!(receipt.reason, CacheCrossoverReason::BelowCacheableFloor);
+    // Single-read cached total pays the suffix at full cost.
+    assert_eq!(
+        receipt.cached_total_token_cost_ppm,
+        375 * u128::from(TOKEN_COST_PPM_SCALE)
+            + 9_900 * u128::from(TOKEN_COST_PPM_SCALE)
+            + 100 * u128::from(100_000_u64)
+    );
+}
+
+/// The one-time compaction cost amortizes over the reuse horizon: a rewrite
+/// that is not worth it for a single read becomes the cheapest candidate
+/// when the compact stable form is re-read many times.
+#[test]
+fn compaction_cost_amortizes_over_reuse_horizon() {
+    let mut candidate = input(CacheProvider::Anthropic);
+    // d = 0.5 cached read; compact per-read slightly cheaper than cached
+    // read, but the rewrite itself costs more than the single-read saving.
+    candidate.cached_read_multiplier_ppm = 500_000;
+    candidate.original_tokens = 10_000;
+    candidate.compressed_tokens = 4_900;
+    candidate.compaction_cost_tokens = 300;
+    candidate.suffix_size_tokens = 0;
+
+    candidate.remaining_reuse_horizon = 1;
+    let single = decide_cache_crossover(&candidate).unwrap();
+    // Single read: cache (0.5 * 10000 = 5000) beats compress (300 + 4900).
+    assert_eq!(single.action, CacheCrossoverAction::CacheStable);
+
+    candidate.remaining_reuse_horizon = 10;
+    let horizon = decide_cache_crossover(&candidate).unwrap();
+    // Ten reads: the rewrite amortizes and the cheaper per-read compact
+    // form (4900) beats ten cached reads (10 * 5000).
+    assert_eq!(horizon.action, CacheCrossoverAction::Compress);
+    assert_eq!(
+        horizon.reason,
+        CacheCrossoverReason::CompressionStrictlyBeatsCache
+    );
+    assert_eq!(
+        horizon.compressed_projected_token_cost_ppm,
+        375 * u128::from(TOKEN_COST_PPM_SCALE)
+            + 300 * u128::from(TOKEN_COST_PPM_SCALE)
+            + 10 * 4_900 * u128::from(TOKEN_COST_PPM_SCALE)
+    );
+}
+
+/// Replay experiment: run the crossover over the measured token counts in
+/// `token-amplification-replay.json` with realistic cache economics and
+/// assert every case decides sanely (either cache-eligible or honestly
+/// below the floor, always settling on a cache or compress action).
+#[test]
+fn replay_fixture_drives_crossover_experiment() {
+    let value: serde_json::Value =
+        serde_json::from_str(include_str!("fixtures/token-amplification-replay.json")).unwrap();
+    let cases = value["cases"].as_array().expect("replay cases");
+    assert!(!cases.is_empty());
+    for case in cases {
+        let input = &case["input"];
+        let output = &case["output"];
+        let original = output["billed"].as_u64().unwrap_or(0);
+        // The amplified body is the stable artifact; a plausible compact
+        // rewrite keeps the pointer/decision atoms and drops novel bytes.
+        let compressed = input["billed"].as_u64().unwrap_or(0).saturating_add(1);
+        assert!(compressed < original, "replay compact form must be cheaper");
+        let receipt = decide_cache_crossover(&CacheCrossoverInput {
+            provider: CacheProvider::Anthropic,
+            policy_id: "replay:token-amplification/v1".to_owned(),
+            token_unit_id: "estimator:tokenzero-count-tokens/v1".to_owned(),
+            content_class: CacheContentClass::Stable,
+            original_tokens: original,
+            compressed_tokens: compressed,
+            compression_admission_id: Some("replay:fixture-admitted/v1".to_owned()),
+            common_overhead_tokens: 16,
+            cached_read_multiplier_ppm: 100_000,
+            min_cacheable_tokens: 10,
+            suffix_size_tokens: 0,
+            compaction_cost_tokens: 0,
+            remaining_reuse_horizon: 1,
+        })
+        .unwrap();
+        assert!(
+            matches!(
+                receipt.action,
+                CacheCrossoverAction::CacheStable | CacheCrossoverAction::Compress
+            ),
+            "replay case must settle on a cache or compress action: {receipt:?}"
+        );
+        assert!(
+            receipt.cache_eligible || receipt.reason == CacheCrossoverReason::BelowCacheableFloor,
+            "replay case must be either cache-eligible or honestly below the floor"
+        );
+    }
+}
+
+/// New validation arms fail closed: a suffix larger than the content and a
+/// zero reuse horizon are errors, never silent clamps.
+#[test]
+fn invalid_suffix_and_horizon_fail_closed() {
+    let mut candidate = input(CacheProvider::Gemini);
+    candidate.suffix_size_tokens = candidate.original_tokens + 1;
+    assert_eq!(
+        decide_cache_crossover(&candidate).unwrap_err(),
+        CacheCrossoverError::InvalidSuffixSize
+    );
+    candidate.suffix_size_tokens = 0;
+    candidate.remaining_reuse_horizon = 0;
+    assert_eq!(
+        decide_cache_crossover(&candidate).unwrap_err(),
+        CacheCrossoverError::InvalidReuseHorizon
+    );
 }
 
 #[test]

@@ -113,6 +113,69 @@ pub fn schedule_rewarms(now_seconds: u64, lanes: &[WarmLane]) -> Vec<WarmDecisio
     decisions
 }
 
+/// Hot placement tier for a prefetched closure (ZS-CACHE-008). PROPOSES a
+/// prefetch target; warm touches remain under `schedule_rewarms` authority
+/// and serve graduation stays shadow-gated in `tokenzero-recovery`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HotPlacement {
+    Standard,
+    Hot,
+}
+
+/// One prefetch proposal: a closure worth warming before its first read
+/// because its demand share is high (and, once hazard prediction lands, its
+/// invalidation hazard is low).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PrefetchTarget {
+    pub provider: CacheProvider,
+    pub model: String,
+    pub prefix_tokens: u64,
+    pub placement: HotPlacement,
+    /// Demand share of the window in per-mille (1000 = whole window).
+    pub demand_milli: u64,
+}
+
+/// Select prefetch candidates from warm lanes (ZS-CACHE-008 hook). Lanes
+/// whose demand share crosses `threshold_milli` become prefetch targets;
+/// the top `hot_quota` of the selected set (density-ordered, stable) get
+/// Hot placement. Mismatched lane/demand lengths fail loud.
+pub fn select_prefetch_targets(
+    lanes: &[WarmLane],
+    demand_milli: &[u64],
+    threshold_milli: u64,
+    hot_quota: usize,
+) -> Vec<PrefetchTarget> {
+    assert_eq!(
+        lanes.len(),
+        demand_milli.len(),
+        "prefetch demand scores must cover every lane"
+    );
+    let mut selected = lanes
+        .iter()
+        .zip(demand_milli.iter())
+        .filter(|(_, demand)| **demand >= threshold_milli)
+        .map(|(lane, demand)| PrefetchTarget {
+            provider: lane.provider,
+            model: lane.model.clone(),
+            prefix_tokens: lane.prefix_tokens,
+            placement: HotPlacement::Standard,
+            demand_milli: *demand,
+        })
+        .collect::<Vec<_>>();
+    selected.sort_by(|left, right| {
+        right
+            .demand_milli
+            .cmp(&left.demand_milli)
+            .then_with(|| left.model.cmp(&right.model))
+    });
+    for target in selected.iter_mut().take(hot_quota) {
+        target.placement = HotPlacement::Hot;
+    }
+    selected
+}
+
 fn tier_rank(tier: WarmLaneTier) -> u8 {
     match tier {
         WarmLaneTier::PaidFrontier => 0,

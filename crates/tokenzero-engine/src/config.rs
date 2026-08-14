@@ -1,5 +1,7 @@
 //! Engine configuration, env toggles, and serve-flight guard.
 
+use crate::admission::{AdmissionEstimator, AdmissionPolicy};
+use crate::cache_crossover::EmissionCrossoverConfig;
 use crate::session::ServeKey;
 use crate::{
     DEFAULT_MCP_IDLE_TIMEOUT_SECS, DEFAULT_SHELL_TIMEOUT_SECS, DIFF_READS_ENV,
@@ -38,6 +40,15 @@ pub struct EngineConfig {
     pub max_visible_tokens: usize,
     /// Local payloads larger than this default to an exact ref in Auto mode.
     pub capsule_exact_ref_threshold_bytes: usize,
+    /// Capsule admission policy (ZS-VIEW-006). Default `ByteThreshold`
+    /// reproduces the legacy fixed-threshold rule exactly.
+    pub admission_policy: AdmissionPolicy,
+    /// Horizon-cost estimator parameters; consulted only when
+    /// `admission_policy == HorizonCost`.
+    pub admission_estimator: AdmissionEstimator,
+    /// Emission-path cache crossover knobs (ZS-CACHE-006). Defaults
+    /// reproduce the historical `pick_cheaper` emission exactly.
+    pub emission_crossover: EmissionCrossoverConfig,
     pub mode: Mode,
     pub shell_timeout: Duration,
     pub shell_capture_bytes: usize,
@@ -84,6 +95,12 @@ impl EngineConfig {
             cache_path: root.join(".tokenzero/recovery-cache.json"),
             max_visible_tokens: 4000,
             capsule_exact_ref_threshold_bytes: capsule_exact_ref_threshold_from_env(),
+            admission_policy: AdmissionPolicy::ByteThreshold,
+            admission_estimator: AdmissionEstimator {
+                exact_ref_threshold_bytes: capsule_exact_ref_threshold_from_env(),
+                ..AdmissionEstimator::default()
+            },
+            emission_crossover: EmissionCrossoverConfig::default(),
             mode: Mode::Auto,
             shell_timeout: default_shell_timeout(),
             shell_capture_bytes: output_policy.per_stream_capture_bytes,

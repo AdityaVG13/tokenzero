@@ -58,6 +58,49 @@ pub struct CacheCrossoverInput {
     pub cached_read_multiplier_ppm: u64,
     /// Provider floor in the same token units as `original_tokens`.
     pub min_cacheable_tokens: u64,
+    /// Tokens in the mutable suffix that cannot be cached; paid at full cost
+    /// on every read. 0 reproduces the legacy model.
+    #[serde(default)]
+    pub suffix_size_tokens: u64,
+    /// One-time token cost of performing the compaction/rewrite; amortized
+    /// over `remaining_reuse_horizon` reads. 0 reproduces the legacy model.
+    #[serde(default)]
+    pub compaction_cost_tokens: u64,
+    /// Expected total reads over the cache TTL, including this one. 1 = this
+    /// read only (legacy single-read model); higher horizons amortize the
+    /// one-time rewrite cost and re-evaluate the cached form per read.
+    #[serde(default = "one")]
+    pub remaining_reuse_horizon: u64,
+}
+
+const fn one() -> u64 {
+    1
+}
+
+/// Engine-side knobs for the emission-path crossover call site
+/// (ZS-CACHE-006). Defaults (d = 1.0, horizon = 1, floor 1000 tokens)
+/// reproduce the historical `pick_cheaper` emission byte-for-byte: the
+/// cached read costs exactly the inline read, so the decision reduces to
+/// the plain token-count comparison between the flat and compact forms.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EmissionCrossoverConfig {
+    /// Cached-read cost d in token-cost ppm. `TOKEN_COST_PPM_SCALE` means
+    /// d = 1.0 (legacy-neutral).
+    pub cached_read_multiplier_ppm: u64,
+    /// Expected total reads over the TTL, including this one.
+    pub remaining_reuse_horizon: u64,
+    /// Provider floor in tokens; flat forms below it are never cached.
+    pub min_cacheable_tokens: u64,
+}
+
+impl Default for EmissionCrossoverConfig {
+    fn default() -> Self {
+        Self {
+            cached_read_multiplier_ppm: TOKEN_COST_PPM_SCALE,
+            remaining_reuse_horizon: 1,
+            min_cacheable_tokens: 1_000,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -77,12 +120,24 @@ pub struct CacheCrossoverReceipt {
     pub action: CacheCrossoverAction,
     pub reason: CacheCrossoverReason,
     pub cache_eligible: bool,
+    pub suffix_size_tokens: u64,
+    pub compaction_cost_tokens: u64,
+    pub remaining_reuse_horizon: u64,
     /// Complete H + original cost, scaled by `TOKEN_COST_PPM_SCALE`.
     pub inline_total_token_cost_ppm: u128,
-    /// Complete H + compressed cost, scaled by `TOKEN_COST_PPM_SCALE`.
+    /// Complete H + (compaction + compressed) cost, scaled by
+    /// `TOKEN_COST_PPM_SCALE`.
     pub compressed_total_token_cost_ppm: u128,
-    /// Complete H + d*stable cost. Hypothetical when cache is ineligible.
+    /// Complete H + suffix + d*prefix cost. Hypothetical when cache is
+    /// ineligible.
     pub cached_total_token_cost_ppm: u128,
+    /// Horizon-weighted inline cost: H + h*original.
+    pub inline_projected_token_cost_ppm: u128,
+    /// Horizon-weighted compress cost: H + compaction + h*compressed.
+    pub compressed_projected_token_cost_ppm: u128,
+    /// Horizon-weighted cache cost:
+    /// H + h*(suffix + d*(original - suffix)).
+    pub cached_projected_token_cost_ppm: u128,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
@@ -99,6 +154,10 @@ pub enum CacheCrossoverError {
     InvalidCachedReadMultiplier,
     #[error("cache crossover requires a nonzero cacheability floor")]
     InvalidCacheableFloor,
+    #[error("suffix_size_tokens must not exceed original_tokens")]
+    InvalidSuffixSize,
+    #[error("remaining_reuse_horizon must be at least 1")]
+    InvalidReuseHorizon,
 }
 
 pub fn decide_cache_crossover(
@@ -107,14 +166,32 @@ pub fn decide_cache_crossover(
     validate_input(input)?;
 
     let overhead = u128::from(input.common_overhead_tokens) * u128::from(TOKEN_COST_PPM_SCALE);
-    let inline_total =
-        overhead + u128::from(input.original_tokens) * u128::from(TOKEN_COST_PPM_SCALE);
-    let compressed_total =
-        overhead + u128::from(input.compressed_tokens) * u128::from(TOKEN_COST_PPM_SCALE);
-    let cached_total =
-        overhead + u128::from(input.original_tokens) * u128::from(input.cached_read_multiplier_ppm);
+    let scale = u128::from(TOKEN_COST_PPM_SCALE);
+    let horizon = u128::from(input.remaining_reuse_horizon);
+    let suffix = u128::from(input.suffix_size_tokens);
+    let compaction = u128::from(input.compaction_cost_tokens);
+    let original = u128::from(input.original_tokens);
+    let compressed = u128::from(input.compressed_tokens);
+    let multiplier = u128::from(input.cached_read_multiplier_ppm);
+    let cacheable_prefix = original - suffix;
+
+    // Single-read totals: the legacy model when the new inputs are at their
+    // defaults (suffix = 0, compaction = 0, horizon = 1).
+    let inline_total = overhead + original * scale;
+    let compressed_total = overhead + (compaction + compressed) * scale;
+    let cached_total = overhead + suffix * scale + cacheable_prefix * multiplier;
+
+    // Horizon-weighted projections. The one-time compaction cost is paid
+    // once and amortized over the remaining reuse horizon; every read pays
+    // the mutable suffix at full cost and the cached prefix at the
+    // multiplier. With horizon = 1 each projection equals its single-read
+    // total, so the legacy decision is reproduced exactly.
+    let inline_projected = overhead + horizon * original * scale;
+    let compressed_projected = overhead + compaction * scale + horizon * compressed * scale;
+    let cached_projected = overhead + horizon * (suffix * scale + cacheable_prefix * multiplier);
+
     let cache_eligible = input.content_class == CacheContentClass::Stable
-        && input.original_tokens >= input.min_cacheable_tokens;
+        && cacheable_prefix >= u128::from(input.min_cacheable_tokens);
 
     let compression_admitted = input.compression_admission_id.is_some();
     let (action, reason) = match input.content_class {
@@ -127,14 +204,14 @@ pub fn decide_cache_crossover(
             CacheCrossoverReason::CompressionNotAdmitted,
         ),
         CacheContentClass::Churn => (
-            smaller_inline_action(inline_total, compressed_total),
+            smaller_inline_action(inline_projected, compressed_projected),
             CacheCrossoverReason::ChurnIsNotCacheable,
         ),
         CacheContentClass::Stable if !cache_eligible => (
-            smaller_inline_action(inline_total, compressed_total),
+            smaller_inline_action(inline_projected, compressed_projected),
             CacheCrossoverReason::BelowCacheableFloor,
         ),
-        CacheContentClass::Stable if compressed_total < cached_total => (
+        CacheContentClass::Stable if compressed_projected < cached_projected => (
             CacheCrossoverAction::Compress,
             CacheCrossoverReason::CompressionStrictlyBeatsCache,
         ),
@@ -159,9 +236,15 @@ pub fn decide_cache_crossover(
         action,
         reason,
         cache_eligible,
+        suffix_size_tokens: input.suffix_size_tokens,
+        compaction_cost_tokens: input.compaction_cost_tokens,
+        remaining_reuse_horizon: input.remaining_reuse_horizon,
         inline_total_token_cost_ppm: inline_total,
         compressed_total_token_cost_ppm: compressed_total,
         cached_total_token_cost_ppm: cached_total,
+        inline_projected_token_cost_ppm: inline_projected,
+        compressed_projected_token_cost_ppm: compressed_projected,
+        cached_projected_token_cost_ppm: cached_projected,
     })
 }
 
@@ -195,6 +278,12 @@ fn validate_input(input: &CacheCrossoverInput) -> Result<(), CacheCrossoverError
     }
     if input.min_cacheable_tokens == 0 {
         return Err(CacheCrossoverError::InvalidCacheableFloor);
+    }
+    if input.suffix_size_tokens > input.original_tokens {
+        return Err(CacheCrossoverError::InvalidSuffixSize);
+    }
+    if input.remaining_reuse_horizon == 0 {
+        return Err(CacheCrossoverError::InvalidReuseHorizon);
     }
     Ok(())
 }

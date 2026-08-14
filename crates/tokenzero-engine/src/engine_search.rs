@@ -1,5 +1,11 @@
 use super::*;
 
+/// Emission-path crossover labels (ZS-CACHE-006): the policy names the
+/// deterministic grouped rewrite of search/tree result bodies.
+const EMISSION_CROSSOVER_POLICY_ID: &str = "tokenzero-engine.emission.search-output/v1";
+const EMISSION_CROSSOVER_TOKEN_UNIT_ID: &str = "estimator:tokenzero-count-tokens/v1";
+const EMISSION_GROUPED_ADMISSION_ID: &str = "tokenzero-engine.grouped-path-output.v1";
+
 struct SearchBackendRun {
     matches: Vec<SearchMatch>,
     stats: SearchStats,
@@ -406,7 +412,16 @@ impl TokenZeroEngine {
         let rows = paths.iter().map(|p| display_path(p)).collect::<Vec<_>>();
         let output = rows.join("\n");
         let compact = grouped_path_output(&paths, roots);
-        let (visible_source, grouped) = pick_cheaper(&output, &compact);
+        // Emission-path cache crossover (ZS-CACHE-006): the flat listing is
+        // the stable cacheable artifact, the grouped listing the compact
+        // rewrite. Defaults reproduce the historical pick_cheaper choice
+        // exactly; configured cache economics can prefer the cached stable
+        // form over per-call compaction.
+        let crossover = self.decide_emission_crossover(&output, &compact);
+        let (visible_source, grouped) = match crossover.action {
+            CacheCrossoverAction::Compress => (&compact, true),
+            _ => (&output, false),
+        };
         let mut response = self.search_result_response(
             "glob",
             pattern,
@@ -425,6 +440,8 @@ impl TokenZeroEngine {
             "matches": rows.len(),
             "include_hidden": include_hidden,
             "output_strategy": if grouped { "grouped_by_root" } else { "exact_first_glob" },
+            "crossover_action": json!(crossover.action),
+            "crossover_reason": json!(crossover.reason),
             "transport_status": if degraded { "degraded" } else { "ok" },
             "degraded": degraded,
             "storage_error": prior.get("storage_error").cloned().unwrap_or(Value::Null),
@@ -482,7 +499,13 @@ impl TokenZeroEngine {
             .collect::<Vec<_>>()
             .join("\n");
         let compact = grouped_tree_output(&entries, &spans, roots.len() > 1);
-        let (visible_source, _) = pick_cheaper(&output, &compact);
+        // Same emission-path crossover as glob: the flat tree is the stable
+        // cacheable artifact, the grouped tree the compact rewrite.
+        let crossover = self.decide_emission_crossover(&output, &compact);
+        let visible_source = match crossover.action {
+            CacheCrossoverAction::Compress => compact.as_str(),
+            _ => output.as_str(),
+        };
         let mut response = self.ingest_with_tool(
             "tree",
             &output,
@@ -510,6 +533,64 @@ impl TokenZeroEngine {
             attach_budget_signal(&mut response, max_visible_tokens, exhausted);
         }
         response
+    }
+
+    /// Emission-path cache crossover for search/tree result bodies
+    /// (ZS-CACHE-006). The flat form is the stable cacheable artifact; the
+    /// grouped form is the compact rewrite -- a deterministic transform of
+    /// the same content, so quality admission is by construction (named by
+    /// the constant admission id). Default `EmissionCrossoverConfig` values
+    /// (d = 1.0, horizon = 1) reproduce the historical `pick_cheaper`
+    /// emission byte-for-byte; configured cache economics change the choice
+    /// deliberately. Empty bodies stay inline (KeepInline), matching the
+    /// historical pick_cheaper for zero-result listings.
+    fn decide_emission_crossover(&self, flat: &str, compact: &str) -> CacheCrossoverReceipt {
+        let cfg = self.config.emission_crossover;
+        let flat_tokens = count_tokens(flat) as u64;
+        let compact_tokens = count_tokens(compact) as u64;
+        if flat_tokens == 0 {
+            return CacheCrossoverReceipt {
+                schema: CACHE_CROSSOVER_SCHEMA_V1,
+                provider: CacheProvider::Anthropic,
+                policy_id: EMISSION_CROSSOVER_POLICY_ID.to_owned(),
+                token_unit_id: EMISSION_CROSSOVER_TOKEN_UNIT_ID.to_owned(),
+                content_class: CacheContentClass::Stable,
+                original_tokens: 0,
+                compressed_tokens: compact_tokens,
+                compression_admission_id: None,
+                common_overhead_tokens: 0,
+                cached_read_multiplier_ppm: cfg.cached_read_multiplier_ppm,
+                min_cacheable_tokens: cfg.min_cacheable_tokens,
+                action: CacheCrossoverAction::KeepInline,
+                reason: CacheCrossoverReason::BelowCacheableFloor,
+                cache_eligible: false,
+                suffix_size_tokens: 0,
+                compaction_cost_tokens: 0,
+                remaining_reuse_horizon: cfg.remaining_reuse_horizon,
+                inline_total_token_cost_ppm: 0,
+                compressed_total_token_cost_ppm: 0,
+                cached_total_token_cost_ppm: 0,
+                inline_projected_token_cost_ppm: 0,
+                compressed_projected_token_cost_ppm: 0,
+                cached_projected_token_cost_ppm: 0,
+            };
+        }
+        decide_cache_crossover(&CacheCrossoverInput {
+            provider: CacheProvider::Anthropic,
+            policy_id: EMISSION_CROSSOVER_POLICY_ID.to_owned(),
+            token_unit_id: EMISSION_CROSSOVER_TOKEN_UNIT_ID.to_owned(),
+            content_class: CacheContentClass::Stable,
+            original_tokens: flat_tokens,
+            compressed_tokens: compact_tokens,
+            compression_admission_id: Some(EMISSION_GROUPED_ADMISSION_ID.to_owned()),
+            common_overhead_tokens: 0,
+            cached_read_multiplier_ppm: cfg.cached_read_multiplier_ppm,
+            min_cacheable_tokens: cfg.min_cacheable_tokens,
+            suffix_size_tokens: 0,
+            compaction_cost_tokens: 0,
+            remaining_reuse_horizon: cfg.remaining_reuse_horizon,
+        })
+        .expect("emission crossover inputs are validated constants")
     }
 
     pub(crate) fn search_result_response(
@@ -574,3 +655,7 @@ impl TokenZeroEngine {
         response
     }
 }
+
+#[cfg(test)]
+#[path = "../../../tests/engine/inline/engine_search__crossover_tests.rs"]
+mod crossover_tests;

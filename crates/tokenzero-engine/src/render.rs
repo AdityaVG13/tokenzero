@@ -309,6 +309,36 @@ pub fn local_payload_policy(
     }
 }
 
+/// Auto-mode admission via the horizon-cost estimator (ZS-VIEW-006).
+/// Explicit modes and missing exact refs always stay inline; the estimator
+/// decides only Auto-mode payloads. The `ByteThreshold` policy never reaches
+/// this function -- it routes through `local_payload_policy` so the legacy
+/// rule stays byte-identical on the default path.
+pub fn local_payload_policy_estimated(
+    payload_bytes: usize,
+    mode: Mode,
+    exact_ref_available: bool,
+    estimator: &crate::admission::AdmissionEstimator,
+    expansion_probability_milli: Option<u32>,
+    horizon: Option<u64>,
+    handling_cost_tokens: u64,
+) -> LocalPayloadPolicy {
+    if mode != Mode::Auto || !exact_ref_available {
+        return LocalPayloadPolicy::Inline;
+    }
+    let decision = estimator.decide_horizon_cost(
+        payload_bytes,
+        expansion_probability_milli,
+        horizon,
+        handling_cost_tokens,
+    );
+    if decision.admit_exact_ref {
+        LocalPayloadPolicy::ExactRef
+    } else {
+        LocalPayloadPolicy::Inline
+    }
+}
+
 // Public API (module `render` is exported): the eight arguments map 1:1 to
 // distinct capsule/rendering semantics, so a parameter struct would churn the
 // published surface without a lint gain. Targeted allow, not a blanket one.
