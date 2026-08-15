@@ -359,16 +359,6 @@ impl LedgerWriter {
         let visible_tokens = accounting
             .map(|accounting| u64::try_from(accounting.visible_tokens).unwrap_or(u64::MAX))
             .unwrap_or(0);
-        let Ok(mut cumulative) = self.cumulative_visible_tokens.lock() else {
-            return;
-        };
-        *cumulative = cumulative.saturating_add(visible_tokens);
-        let cumulative_session_cost_tokens = *cumulative;
-        // SAFETY: `cumulative_visible_tokens` is an in-memory counter, not the
-        // persist gate (`io` / `LedgerIo.state`). Copy the snapshot and drop
-        // before `append_record` so a hung create_dir/write_all cannot stall
-        // other `record_response` threads on the counter.
-        drop(cumulative);
         let get_bool = |pointer: &str| {
             telemetry
                 .and_then(|value| value.pointer(pointer))
@@ -421,12 +411,14 @@ impl LedgerWriter {
             eviction_amortization: telemetry
                 .and_then(|value| value.pointer("/working_set_eviction/amortized"))
                 .cloned(),
-            cumulative_session_cost_tokens,
+            // Stamped under `io` in `append_stamped_record` so JSONL order
+            // matches increment order. Placeholder is never written.
+            cumulative_session_cost_tokens: 0,
             optimization_tags: self.optimization_tags.clone(),
             recovery_costs,
             racc_charge,
         };
-        let _ = self.append_record(&record);
+        let _ = self.append_stamped_record(record);
     }
 
     fn append_record(&self, record: &LedgerRecord) -> io::Result<()> {
@@ -434,28 +426,70 @@ impl LedgerWriter {
         line.push(b'\n');
         #[cfg(test)]
         ledger_tests::pause_during_append();
+        self.write_serialized_line(line)
+    }
+
+    fn append_stamped_record(&self, mut record: LedgerRecord) -> io::Result<()> {
+        #[cfg(test)]
+        ledger_tests::pause_during_append();
         let mut mode = self
             .io
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        if let LedgerMode::Buffered(io) = &*mode {
-            return io.append(line);
+        {
+            let Ok(mut cumulative) = self.cumulative_visible_tokens.lock() else {
+                return Ok(());
+            };
+            *cumulative = cumulative.saturating_add(record.token_mass.visible_tokens);
+            record.cumulative_session_cost_tokens = *cumulative;
+            // SAFETY: `cumulative_visible_tokens` is an in-memory counter, not
+            // the persist gate. Stamp under `io` so increment order matches
+            // durable JSONL order (running total is prefix-sum of this file),
+            // then drop before create_dir/write_all. Lock order is
+            // io → cumulative only; there is no remaining cumulative → io path.
+        }
+        let mut line = serde_json::to_vec(&record).map_err(io::Error::other)?;
+        line.push(b'\n');
+        let pending = self.write_line_locked(&mut mode, line)?;
+        drop(mode);
+        Self::register_pending_flush(pending)
+    }
+
+    fn write_serialized_line(&self, line: Vec<u8>) -> io::Result<()> {
+        let mut mode = self
+            .io
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let pending = self.write_line_locked(&mut mode, line)?;
+        drop(mode);
+        Self::register_pending_flush(pending)
+    }
+
+    fn write_line_locked(
+        &self,
+        mode: &mut LedgerMode,
+        line: Vec<u8>,
+    ) -> io::Result<Option<Arc<LedgerIo>>> {
+        if let LedgerMode::Buffered(io) = mode {
+            io.append(line)?;
+            return Ok(None);
         }
         let LedgerMode::Direct {
             open_file,
             accepted_record,
-        } = &mut *mode
+        } = mode
         else {
             unreachable!()
         };
         if !*accepted_record {
             *accepted_record = true;
             if write_bytes_locked(&self.path, self.max_bytes, open_file, &line).is_ok() {
-                return Ok(());
+                return Ok(None);
             }
             // A failed first write is retained and retried on the bounded timer.
         } else if line.len() >= LEDGER_FLUSH_BYTES {
-            return write_bytes_locked(&self.path, self.max_bytes, open_file, &line);
+            write_bytes_locked(&self.path, self.max_bytes, open_file, &line)?;
+            return Ok(None);
         }
         let io = Arc::new(LedgerIo {
             path: self.path.clone(),
@@ -467,7 +501,13 @@ impl LedgerWriter {
             }),
         });
         *mode = LedgerMode::Buffered(Arc::clone(&io));
-        drop(mode);
+        Ok(Some(io))
+    }
+
+    fn register_pending_flush(pending: Option<Arc<LedgerIo>>) -> io::Result<()> {
+        let Some(io) = pending else {
+            return Ok(());
+        };
         match register_flush_target(&io) {
             Ok(()) => Ok(()),
             Err(error) => {

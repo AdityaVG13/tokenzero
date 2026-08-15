@@ -128,6 +128,10 @@ impl SessionPersistence {
         // SAFETY: `last_persisted` is a skip-cache, not the persist gate
         // (`SessionPersistLock` flock). Copy-out so the in-process mutex is
         // not live across `last_complete_journal_line` journal I/O.
+        // The flock is held across snapshot, journal compare, write, and
+        // skip-cache update, so concurrent persist cannot interleave. A stale
+        // skip-cache (None) only causes an extra identical-line compare/write,
+        // never a skipped newer delta.
         if last.as_deref() == Some(delta_body.as_str())
             && last_complete_journal_line(&self.path).as_deref() == Some(delta_body.as_str())
         {

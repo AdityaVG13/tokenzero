@@ -596,14 +596,59 @@ fn record_response_drops_cumulative_before_append_io() {
     let serving = Arc::clone(&writer);
     let worker = thread::spawn(move || serving.record_response("read", &response));
     pause.entered.wait();
-    let cumulative_free = writer
-        .cumulative_visible_tokens
-        .try_lock()
-        .is_ok();
+    let cumulative_free = writer.cumulative_visible_tokens.try_lock().is_ok();
     pause.release.wait();
     worker.join().unwrap();
     assert!(
         cumulative_free,
         "cumulative_visible_tokens must not stay held across append_record I/O"
     );
+}
+
+fn accounting_response(visible_tokens: usize) -> ToolResponse {
+    let mut response = ToolResponse::default();
+    response.accounting = Some(Accounting {
+        raw_tokens: visible_tokens.saturating_mul(2),
+        visible_tokens,
+        recovery_tokens: 0,
+        billed_tokens: visible_tokens,
+        ..Accounting::default()
+    });
+    response
+}
+
+#[test]
+fn concurrent_record_response_keeps_cumulative_prefix_sum() {
+    let directory = tempdir().unwrap();
+    let cache_path = directory.path().join("cache.json");
+    let ledger_path = ledger_path_for_cache(&cache_path);
+    let writer = Arc::new(test_writer(&cache_path));
+    let pause = Arc::new(AppendPause {
+        entered: Barrier::new(2),
+        release: Barrier::new(2),
+    });
+    *APPEND_PAUSE.lock().unwrap() = Some(Arc::clone(&pause));
+
+    let serving = Arc::clone(&writer);
+    let worker = thread::spawn(move || serving.record_response("read", &accounting_response(50)));
+    pause.entered.wait();
+    // T1 is paused before the persist gate (`io`). T2 finishes a full
+    // record_response in that window. Durable lines must still satisfy
+    // prefix-sum(cumulative) regardless of which thread wins `io`.
+    writer.record_response("read", &accounting_response(70));
+    pause.release.wait();
+    worker.join().unwrap();
+    writer.flush();
+
+    let records = read_records(&ledger_path).unwrap();
+    assert_eq!(records.len(), 2);
+    let mut prefix = 0_u64;
+    for record in &records {
+        prefix = prefix.saturating_add(record.token_mass.visible_tokens);
+        assert_eq!(
+            record.cumulative_session_cost_tokens, prefix,
+            "JSONL running total must equal prefix-sum of visible_tokens in file order"
+        );
+    }
+    assert_eq!(prefix, 120);
 }
