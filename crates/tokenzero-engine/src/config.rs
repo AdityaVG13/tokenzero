@@ -84,6 +84,10 @@ pub struct EngineConfig {
     /// When enabled, only `{execution_path, raw_tokens, spent_tokens}` may be recorded.
     /// There is no exporter/upload path (`exporter=none`).
     pub telemetry_enabled: Option<bool>,
+    /// RATC retry/fail weights. ADVISORY until E5 measurement fills real values.
+    pub ratc: RatcWeights,
+    /// Corridor handle/selector/CAS estimates (h, q, c). ADVISORY until E5.
+    pub corridor: CorridorEstimates,
 }
 
 impl EngineConfig {
@@ -117,6 +121,10 @@ impl EngineConfig {
             fetch_deny_hosts: env_host_list(FETCH_DENY_ENV),
             tool_surface: mcp_tool_surface_from_env(),
             telemetry_enabled: None,
+            ratc: ratc_weights_from_env()
+                .unwrap_or_else(|err| panic!("TOKENZERO_RATC: {err}")),
+            corridor: corridor_estimates_from_env()
+                .unwrap_or_else(|err| panic!("TOKENZERO_CORRIDOR: {err}")),
         }
     }
 }
@@ -136,6 +144,112 @@ pub const SHELL_INLINE_BUDGET_ENV: &str = "TOKENZERO_SHELL_INLINE_BUDGET";
 pub const DEFAULT_SHELL_INLINE_BUDGET: usize = 2000;
 pub const CAPSULE_EXACT_REF_THRESHOLD_ENV: &str = "TOKENZERO_CAPSULE_EXACT_REF_THRESHOLD_BYTES";
 pub const DEFAULT_CAPSULE_EXACT_REF_THRESHOLD_BYTES: usize = 40 * 1024;
+pub const RATC_ENV: &str = "TOKENZERO_RATC";
+pub const CORRIDOR_ENV: &str = "TOKENZERO_CORRIDOR";
+/// RATC/corridor numbers are placeholders until E5 measures them.
+pub const RATC_STATUS_ADVISORY: &str = "advisory_until_e5";
+
+/// Retry/failure weights for `ratc = visible + expand + rho_fail*retries + lambda_fail*fails`.
+/// Defaults stay 0 so an unmeasured penalty is never fabricated.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct RatcWeights {
+    pub rho_fail: f64,
+    pub lambda_fail: f64,
+}
+
+impl Default for RatcWeights {
+    fn default() -> Self {
+        Self {
+            rho_fail: 0.0,
+            lambda_fail: 0.0,
+        }
+    }
+}
+
+/// Corridor estimates in tokens: handle (h), selector serialization (q), CAS round-trip (c).
+/// Defaults match the E5 (40, 20) note; `c` stays 0 until measured.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct CorridorEstimates {
+    pub h: f64,
+    pub q: f64,
+    pub c: f64,
+}
+
+impl Default for CorridorEstimates {
+    fn default() -> Self {
+        Self {
+            h: 40.0,
+            q: 20.0,
+            c: 0.0,
+        }
+    }
+}
+
+fn json_object_with_allowed_keys(
+    raw: &str,
+    allowed: &[&str],
+) -> Result<serde_json::Map<String, serde_json::Value>, String> {
+    let value: serde_json::Value =
+        serde_json::from_str(raw).map_err(|err| format!("invalid json: {err}"))?;
+    let object = value
+        .as_object()
+        .ok_or_else(|| "expected a JSON object".to_string())?;
+    for key in object.keys() {
+        if !allowed.iter().any(|allowed| *allowed == key) {
+            return Err(format!("unknown key '{key}'"));
+        }
+    }
+    Ok(object.clone())
+}
+
+fn json_f64(
+    object: &serde_json::Map<String, serde_json::Value>,
+    key: &str,
+) -> Result<Option<f64>, String> {
+    let Some(value) = object.get(key) else {
+        return Ok(None);
+    };
+    value
+        .as_f64()
+        .or_else(|| value.as_u64().map(|n| n as f64))
+        .or_else(|| value.as_i64().map(|n| n as f64))
+        .map(Some)
+        .ok_or_else(|| format!("{key} must be a number"))
+}
+
+/// Parse `{"rho_fail":..,"lambda_fail":..}`. Unknown keys fail loud.
+pub fn parse_ratc_weights(raw: &str) -> Result<RatcWeights, String> {
+    let object = json_object_with_allowed_keys(raw, &["rho_fail", "lambda_fail"])?;
+    Ok(RatcWeights {
+        rho_fail: json_f64(&object, "rho_fail")?.unwrap_or(0.0),
+        lambda_fail: json_f64(&object, "lambda_fail")?.unwrap_or(0.0),
+    })
+}
+
+/// Parse `{"h":..,"q":..,"c":..}`. Unknown keys fail loud.
+pub fn parse_corridor_estimates(raw: &str) -> Result<CorridorEstimates, String> {
+    let object = json_object_with_allowed_keys(raw, &["h", "q", "c"])?;
+    let defaults = CorridorEstimates::default();
+    Ok(CorridorEstimates {
+        h: json_f64(&object, "h")?.unwrap_or(defaults.h),
+        q: json_f64(&object, "q")?.unwrap_or(defaults.q),
+        c: json_f64(&object, "c")?.unwrap_or(defaults.c),
+    })
+}
+
+pub fn ratc_weights_from_env() -> Result<RatcWeights, String> {
+    match std::env::var(RATC_ENV) {
+        Ok(raw) if !raw.trim().is_empty() => parse_ratc_weights(&raw),
+        _ => Ok(RatcWeights::default()),
+    }
+}
+
+pub fn corridor_estimates_from_env() -> Result<CorridorEstimates, String> {
+    match std::env::var(CORRIDOR_ENV) {
+        Ok(raw) if !raw.trim().is_empty() => parse_corridor_estimates(&raw),
+        _ => Ok(CorridorEstimates::default()),
+    }
+}
 
 fn matches_env_value(value: &str, accepted: &[&str]) -> bool {
     accepted

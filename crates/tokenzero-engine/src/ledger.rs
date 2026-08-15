@@ -70,9 +70,9 @@ pub struct RecoveryCosts {
     pub expand_count: u64,
     pub retry_count: u64,
     pub fail_count: u64,
-    /// Weight per retry in the RATC identity (DEFAULT_RHO_FAIL until E3.3 config).
+    /// Weight per retry in the RATC identity (from EngineConfig.ratc; ADVISORY until E5).
     pub rho_fail: f64,
-    /// Weight per failure in the RATC identity (DEFAULT_LAMBDA_FAIL until E3.3 config).
+    /// Weight per failure in the RATC identity (from EngineConfig.ratc; ADVISORY until E5).
     pub lambda_fail: f64,
     /// Per-task outcome; null = unknown (E1.2 per-task grouping out of scope).
     pub task_success: Option<bool>,
@@ -231,6 +231,8 @@ pub(crate) struct LedgerWriter {
     max_bytes: u64,
     io: Mutex<LedgerMode>,
     racc: Mutex<crate::racc_gauge::SessionRaccGauge>,
+    rho_fail: f64,
+    lambda_fail: f64,
 }
 
 #[derive(Debug)]
@@ -292,6 +294,7 @@ impl LedgerWriter {
         session_id: String,
         repo: String,
         optimization_tags: Vec<String>,
+        ratc: crate::config::RatcWeights,
     ) -> Self {
         Self::with_max_bytes(
             cache_path,
@@ -299,6 +302,7 @@ impl LedgerWriter {
             repo,
             optimization_tags,
             DEFAULT_MAX_LEDGER_BYTES,
+            ratc,
         )
     }
 
@@ -308,6 +312,7 @@ impl LedgerWriter {
         repo: String,
         optimization_tags: Vec<String>,
         max_bytes: u64,
+        ratc: crate::config::RatcWeights,
     ) -> Self {
         Self {
             session_id,
@@ -329,6 +334,8 @@ impl LedgerWriter {
                 accepted_record: false,
             }),
             racc: Mutex::new(crate::racc_gauge::SessionRaccGauge::with_lexical_identity()),
+            rho_fail: ratc.rho_fail,
+            lambda_fail: ratc.lambda_fail,
         }
     }
 
@@ -379,8 +386,8 @@ impl LedgerWriter {
             expand_count: get("/expand/count"),
             retry_count: get("/expand/retry_count"),
             fail_count: get("/expand/fail_count"),
-            rho_fail: DEFAULT_RHO_FAIL,
-            lambda_fail: DEFAULT_LAMBDA_FAIL,
+            rho_fail: self.rho_fail,
+            lambda_fail: self.lambda_fail,
             task_success: get_bool("/task/success"),
             anchor_recall_ok: get_bool("/task/anchor_recall_ok"),
             dangling_ref_count: get("/expand/dangling_ref_count"),

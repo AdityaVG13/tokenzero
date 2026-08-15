@@ -9,6 +9,7 @@ fn test_writer(cache_path: &Path) -> LedgerWriter {
         "/workspace/repo".to_owned(),
         vec!["session_dedup:on".to_owned()],
         DEFAULT_MAX_LEDGER_BYTES,
+        crate::config::RatcWeights::default(),
     )
 }
 

@@ -92,6 +92,7 @@ fn recorded_ledger_records_carry_a_non_legacy_stamp() {
         "/workspace/repo".to_owned(),
         vec![],
         DEFAULT_MAX_LEDGER_BYTES,
+        crate::config::RatcWeights::default(),
     );
     let mut response = ToolResponse::default();
     response.accounting = Some(Accounting {

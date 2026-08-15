@@ -41,12 +41,14 @@ impl TokenZeroEngine {
                     if config.diff_reads { "on" } else { "off" }
                 ),
                 format!("tool_surface:{}", config.tool_surface),
+                format!("ratc:{}", crate::config::RATC_STATUS_ADVISORY),
             ];
             crate::ledger::LedgerWriter::new(
                 &config.cache_path,
                 session_id.clone(),
                 repo,
                 optimization_tags,
+                config.ratc,
             )
         });
         let session_persist =

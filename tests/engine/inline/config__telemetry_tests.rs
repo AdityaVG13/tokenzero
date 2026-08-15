@@ -93,3 +93,21 @@ fn millis_timeout_defaults_when_absent() {
         Duration::from_secs(DEFAULT_SHELL_TIMEOUT_SECS)
     );
 }
+
+#[test]
+fn ratc_and_corridor_parse_known_keys_and_reject_unknown() {
+    let ratc = parse_ratc_weights(r#"{"rho_fail":2.5,"lambda_fail":10}"#).unwrap();
+    assert_eq!(ratc.rho_fail, 2.5);
+    assert_eq!(ratc.lambda_fail, 10.0);
+    let corridor = parse_corridor_estimates(r#"{"h":40,"q":20}"#).unwrap();
+    assert_eq!(corridor.h, 40.0);
+    assert_eq!(corridor.q, 20.0);
+    assert_eq!(corridor.c, 0.0);
+    let unknown = parse_ratc_weights(r#"{"rho_fail":1,"surprise":true}"#).unwrap_err();
+    assert!(unknown.contains("unknown key"), "{unknown}");
+    let unknown_corridor = parse_corridor_estimates(r#"{"h":1,"z":2}"#).unwrap_err();
+    assert!(
+        unknown_corridor.contains("unknown key"),
+        "{unknown_corridor}"
+    );
+}
