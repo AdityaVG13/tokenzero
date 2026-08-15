@@ -20,6 +20,9 @@ pub struct RawWorkerV2Session {
     expected_root: Option<String>,
     expected_session_id: Option<String>,
     cancel_registry: std::collections::HashMap<String, Arc<CancelState>>,
+    /// Exact tree handles copied out of `cancel_registry` so the serve loop
+    /// can drop the session mutex before `cancel_child` (subprocess teardown).
+    pending_teardown: Vec<VerifiedChild>,
 }
 
 #[derive(Debug)]
@@ -38,6 +41,7 @@ impl RawWorkerV2Session {
             expected_root: Some(root.into()),
             expected_session_id: Some(session_id.into()),
             cancel_registry: std::collections::HashMap::new(),
+            pending_teardown: Vec::new(),
         }
     }
 }
@@ -59,12 +63,20 @@ static ACTIVE_CANCEL: Mutex<Option<Arc<CancelState>>> = Mutex::new(None);
 /// binding. Numeric pid/pgid values are never signaled; the hub-owned handle
 /// is the only authority.
 fn cancel_child(child: &VerifiedChild) {
+    #[cfg(test)]
+    tests::pause_during_child_teardown();
     let _ = child.signal_graceful_for(
         tokenzero_runtime::PROCESS_OWNER_SESSION,
         tokenzero_runtime::PROCESS_GENERATION,
         tokenzero_runtime::SHELL_TEARDOWN_GRACE,
     );
     let _ = child.revoke();
+}
+
+fn run_pending_teardown(children: Vec<VerifiedChild>) {
+    for child in &children {
+        cancel_child(child);
+    }
 }
 
 /// shell_hooks evidence entry for the dispatched child. The pid/pgid values
@@ -247,9 +259,10 @@ impl RawWorkerV2Session {
         self.cancel_registry.remove(id);
     }
 
-    /// Cancel an in-flight call: set the flag, then signal the exact owned
-    /// tree handle so shell and search work stop inside the declared bound.
-    /// Returns false for unknown or already-finished request ids.
+    /// Cancel an in-flight call: set the flag, then queue the exact owned
+    /// tree handle so the caller can drop the session mutex before
+    /// `cancel_child` (subprocess teardown). Returns false for unknown or
+    /// already-finished request ids.
     fn cancel_call(&mut self, id: &str) -> bool {
         match self.cancel_registry.remove(id) {
             Some(cancel) => {
@@ -260,7 +273,7 @@ impl RawWorkerV2Session {
                     .unwrap_or_else(|p| p.into_inner())
                     .clone()
                 {
-                    cancel_child(&child);
+                    self.pending_teardown.push(child);
                 }
                 true
             }
@@ -280,9 +293,13 @@ impl RawWorkerV2Session {
                 .unwrap_or_else(|p| p.into_inner())
                 .clone()
             {
-                cancel_child(&child);
+                self.pending_teardown.push(child);
             }
         }
+    }
+
+    fn take_pending_teardown(&mut self) -> Vec<VerifiedChild> {
+        std::mem::take(&mut self.pending_teardown)
     }
 }
 
@@ -451,7 +468,13 @@ pub fn execute_raw_worker_v2_frame(
     line: &[u8],
 ) -> Vec<u8> {
     match route_frame(session, line) {
-        RoutedFrame::Respond(bytes) => bytes,
+        RoutedFrame::Respond(bytes) => {
+            // SAFETY: `session` here is `&mut` (no mutex). Still run teardown
+            // after routing so the Mutex serve-loop path and this path share
+            // one cancel protocol: queue under the session, signal after.
+            run_pending_teardown(session.take_pending_teardown());
+            bytes
+        }
         RoutedFrame::Dispatch(ctx) => {
             let id = ctx.id.clone();
             let cancel = session.register_cancel(&ctx.id);
@@ -830,10 +853,16 @@ fn write_response(writer: &Mutex<std::io::Stdout>, response: &[u8]) -> std::io::
 }
 
 fn terminate_raw_worker_v2_session(session: &Mutex<RawWorkerV2Session>) {
-    {
+    let teardown = {
         let mut guard = session.lock().unwrap_or_else(|poison| poison.into_inner());
         guard.cancel_all();
-    }
+        guard.take_pending_teardown()
+    };
+    // SAFETY: `session` is the cancel-registry occupancy lock, not a persist
+    // gate. `cancel_child` waits on subprocess teardown. Sibling of
+    // `BackgroundJobRegistry::terminate_all`: copy handles out, drop, then
+    // signal so `finish_call` cannot stall on SIGTERM/grace.
+    run_pending_teardown(teardown);
     // The job registry is process-global and therefore has no reliable static
     // destructor. Mark every live job for termination before serve can exit;
     // a child published after this scan observes the mark and is killed too.
@@ -900,7 +929,12 @@ pub fn run_raw_worker_v2_serve(opts: &RawWorkerServeOptions) -> i32 {
                 match route_frame(&mut guard, &line) {
                     RoutedFrame::Respond(response) => {
                         let shutdown = guard.shutdown;
+                        let teardown = guard.take_pending_teardown();
                         drop(guard);
+                        // SAFETY: drop the session mutex before `cancel_child`.
+                        // T1 (stdin) previously held `session` across SIGTERM
+                        // grace; T2 (worker) blocked on `finish_call`.
+                        run_pending_teardown(teardown);
                         if write_response(&writer, &response).is_err() {
                             break 2;
                         }

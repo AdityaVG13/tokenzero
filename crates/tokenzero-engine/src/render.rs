@@ -50,10 +50,21 @@ impl TokenZeroEngine {
     pub(crate) fn recovery_store(&self) -> RecoveryStoreLease<'_> {
         match &self.recovery_store {
             Some(slot) => {
-                let store = slot
-                    .lock()
-                    .unwrap_or_else(|poisoned| poisoned.into_inner())
-                    .take()
+                let taken = {
+                    let mut available =
+                        slot.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+                    available.take()
+                };
+                // SAFETY: `recovery_store` is a checkout occupancy lock, not
+                // the persist gate. `RecoveryStore::new(Some(path))` reads
+                // snapshot+journal. The previous `lock().take().unwrap_or_else(new)`
+                // kept the guard alive for the whole statement, so a miss-path
+                // load stalled lease Drop (put-back) and other checkouts.
+                // Sibling of session cold-load-off-mutex: copy the occupancy
+                // result out, drop, then construct.
+                #[cfg(test)]
+                preview_tests::pause_during_cold_store();
+                let store = taken
                     .unwrap_or_else(|| RecoveryStore::new(Some(self.config.cache_path.clone())));
                 RecoveryStoreLease::Shared { store, slot }
             }

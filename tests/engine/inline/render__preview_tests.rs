@@ -1,5 +1,6 @@
 use std::path::PathBuf;
-use std::sync::Mutex;
+use std::sync::{Arc, Barrier, Mutex};
+use std::thread;
 
 use tempfile::tempdir;
 use tokenzero_core::{
@@ -13,6 +14,56 @@ use super::{
     local_payload_policy, path_not_allowed, preview, render_text, render_text_with_complete_read,
     rewrite_full_refs_if_strictly_cheaper,
 };
+
+struct ColdStorePause {
+    entered: Barrier,
+    release: Barrier,
+}
+
+static COLD_STORE_PAUSE: Mutex<Option<Arc<ColdStorePause>>> = Mutex::new(None);
+
+pub(super) fn pause_during_cold_store() {
+    let pause = COLD_STORE_PAUSE
+        .lock()
+        .ok()
+        .and_then(|mut slot| slot.take());
+    if let Some(pause) = pause {
+        pause.entered.wait();
+        pause.release.wait();
+    }
+}
+
+#[test]
+fn recovery_store_drops_slot_before_cold_construct() {
+    let dir = tempdir().unwrap();
+    let mut config = EngineConfig::for_root(dir.path());
+    config.cache_path = dir.path().join("recovery.json");
+    let engine = Arc::new(TokenZeroEngine::new(config));
+    let _busy = engine.recovery_store();
+    let pause = Arc::new(ColdStorePause {
+        entered: Barrier::new(2),
+        release: Barrier::new(2),
+    });
+    *COLD_STORE_PAUSE.lock().unwrap() = Some(Arc::clone(&pause));
+
+    let worker_engine = Arc::clone(&engine);
+    let worker = thread::spawn(move || {
+        let _lease = worker_engine.recovery_store();
+    });
+    pause.entered.wait();
+    let slot_free = engine
+        .recovery_store
+        .as_ref()
+        .expect("long-lived engine owns a store slot")
+        .try_lock()
+        .is_ok();
+    pause.release.wait();
+    worker.join().unwrap();
+    assert!(
+        slot_free,
+        "recovery_store occupancy mutex must not stay held across RecoveryStore::new I/O"
+    );
+}
 
 #[test]
 fn shared_recovery_store_lease_returns_its_store_without_optional_state() {

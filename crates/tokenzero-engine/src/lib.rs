@@ -270,6 +270,9 @@ pub struct TokenZeroEngine {
     /// Reusable RecoveryStore slot for long-lived MCP/CodeMode engines.
     /// A request checks the store out instead of holding this mutex while it
     /// performs filesystem work, so unrelated concurrent requests do not serialize.
+    /// SAFETY: occupancy only. `recovery_store()` drops this mutex before
+    /// `RecoveryStore::new(Some(path))` snapshot/journal I/O (sibling of
+    /// session cold-load-off-mutex). Persist lives inside RecoveryStore.
     recovery_store: Option<Mutex<Option<tokenzero_recovery::RecoveryStore>>>,
     /// Single-flight gate: ServeKeys currently being served, with a condvar
     /// to wake waiters. Two pipelined identical reads on the 4-worker pool

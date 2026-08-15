@@ -1,4 +1,5 @@
 use super::*;
+use std::sync::Barrier;
 
 fn engine() -> TokenZeroEngine {
     engine_from_options(&RawWorkerServeOptions::default())
@@ -21,6 +22,24 @@ fn send(session: &mut RawWorkerV2Session, frame: Value) -> Value {
         &serde_json::to_vec(&frame).unwrap(),
     ))
     .unwrap()
+}
+
+struct ChildTeardownPause {
+    entered: Barrier,
+    release: Barrier,
+}
+
+static CHILD_TEARDOWN_PAUSE: Mutex<Option<Arc<ChildTeardownPause>>> = Mutex::new(None);
+
+pub(super) fn pause_during_child_teardown() {
+    let pause = CHILD_TEARDOWN_PAUSE
+        .lock()
+        .ok()
+        .and_then(|mut slot| slot.take());
+    if let Some(pause) = pause {
+        pause.entered.wait();
+        pause.release.wait();
+    }
 }
 
 #[test]
@@ -838,6 +857,42 @@ fn raw_session_shutdown_terminates_a_background_process_group() {
         }
     });
     assert!(gone, "background child {pid} survived raw session shutdown");
+}
+
+#[test]
+#[cfg(unix)]
+fn terminate_drops_session_before_child_teardown() {
+    let child = std::process::Command::new("sleep")
+        .arg("30")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+    let verified = VerifiedChild::capture(
+        child,
+        tokenzero_runtime::PROCESS_OWNER_SESSION,
+        tokenzero_runtime::PROCESS_GENERATION,
+    );
+    let mut inner = RawWorkerV2Session::default();
+    let cancel = inner.register_cancel("req-teardown");
+    *cancel.child.lock().unwrap_or_else(|p| p.into_inner()) = Some(verified);
+    let session = Arc::new(Mutex::new(inner));
+    let pause = Arc::new(ChildTeardownPause {
+        entered: Barrier::new(2),
+        release: Barrier::new(2),
+    });
+    *CHILD_TEARDOWN_PAUSE.lock().unwrap() = Some(Arc::clone(&pause));
+    let serving = Arc::clone(&session);
+    let worker = std::thread::spawn(move || terminate_raw_worker_v2_session(&serving));
+    pause.entered.wait();
+    let session_free = session.try_lock().is_ok();
+    pause.release.wait();
+    worker.join().unwrap();
+    assert!(
+        session_free,
+        "session mutex must not stay held across cancel_child subprocess teardown"
+    );
 }
 
 #[test]
