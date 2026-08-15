@@ -559,7 +559,7 @@ impl TokenZeroEngine {
         )?;
         let payload_tokens =
             u64::try_from(payload_tokens).map_err(|_| ModelArtifactError::LengthOverflow)?;
-        ModelCapsule::from_formed(
+        let formed = ModelCapsule::from_formed(
             causal_key,
             receipt,
             source_root,
@@ -573,7 +573,9 @@ impl TokenZeroEngine {
             &[],
             ModelCapsule::payload_digest(&[]),
             0,
-        )
+        )?;
+        crate::perf_profile::note_hot_path_capsule();
+        Ok(formed)
     }
 }
 

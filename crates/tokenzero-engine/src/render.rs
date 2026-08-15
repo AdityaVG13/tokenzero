@@ -354,14 +354,16 @@ pub fn recoverable_capsule(
     refs_complete: bool,
 ) -> Result<tokenzero_core::Capsule, String> {
     if refs_complete {
-        tokenzero_core::make_capsule_with_recovery_ref(
+        let capsule = tokenzero_core::make_capsule_with_recovery_ref(
             rendered,
             raw_tokens,
             mode,
             max_visible_tokens,
             Some(label),
             recovery_ref,
-        )
+        )?;
+        crate::perf_profile::note_hot_path_capsule();
+        Ok(capsule)
     } else {
         Ok(tokenzero_core::Capsule {
             text: fallback.trim_end().to_string(),

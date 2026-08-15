@@ -15,7 +15,7 @@
 //! when the flag is on, so release baselines stay free of extra frames.
 
 use std::io::{self, Write};
-use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
 use std::time::Instant;
 
 /// Env flag: set to `1` / `true` / `yes` / `on` to enable structured profile events.
@@ -24,6 +24,46 @@ pub const PERF_PROFILE_ENV: &str = "TOKENZERO_PERF_PROFILE";
 // 0 = unset, 1 = off, 2 = on
 static ENABLED: AtomicU8 = AtomicU8::new(0);
 static RUN_START_EMITTED: AtomicBool = AtomicBool::new(false);
+static HOT_EXPAND: AtomicU64 = AtomicU64::new(0);
+static HOT_READ: AtomicU64 = AtomicU64::new(0);
+static HOT_CAPSULE: AtomicU64 = AtomicU64::new(0);
+
+/// Process-wide enter counts for expand/read/capsule hot paths (PERF-H-001/004).
+/// Cheap atomics; independent of `TOKENZERO_PERF_PROFILE` stderr spans.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct HotPathProfileSnapshot {
+    pub expand: u64,
+    pub read: u64,
+    pub capsule: u64,
+}
+
+pub fn hot_path_snapshot() -> HotPathProfileSnapshot {
+    HotPathProfileSnapshot {
+        expand: HOT_EXPAND.load(Ordering::Relaxed),
+        read: HOT_READ.load(Ordering::Relaxed),
+        capsule: HOT_CAPSULE.load(Ordering::Relaxed),
+    }
+}
+
+pub fn note_hot_path_expand() {
+    HOT_EXPAND.fetch_add(1, Ordering::Relaxed);
+}
+
+pub fn note_hot_path_read() {
+    HOT_READ.fetch_add(1, Ordering::Relaxed);
+}
+
+pub fn note_hot_path_capsule() {
+    HOT_CAPSULE.fetch_add(1, Ordering::Relaxed);
+}
+
+pub fn note_dispatch_hot_path(op: &str) {
+    match op {
+        "tz_expand" | "expand" => note_hot_path_expand(),
+        "tz_read" | "read" => note_hot_path_read(),
+        _ => {}
+    }
+}
 
 #[inline]
 fn parse_enabled(raw: &str) -> bool {

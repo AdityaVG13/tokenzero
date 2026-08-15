@@ -185,6 +185,8 @@ pub fn dispatch_operation(
         .map(|op| op.name)
         .unwrap_or(op_name);
 
+    crate::perf_profile::note_dispatch_hot_path(resolved);
+
     let pre_kernel = wall_start.elapsed().as_nanos() as u64;
     let kernel_start = Instant::now();
     let kernel = domain::execute_domain_op(engine, resolved, args);
